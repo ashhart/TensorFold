@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tensorfold-runtime"
+version = "0.1.0"
+description = "TensorFold Runtime: exact-first low-memory serving for MoE models."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "TensorFold" }]
+license = "MIT"
+dependencies = [
+  "numpy>=1.24",
+  "safetensors>=0.4",
+]
+keywords = ["llm", "moe", "mlx", "safetensors", "mmap", "inference", "runtime"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/ashhart/TensorFold"
+Source = "https://github.com/ashhart/TensorFold"
+Issues = "https://github.com/ashhart/TensorFold/issues"
+
+[project.scripts]
+smarttensor = "smarttensor.cli:main"
+tensorfold = "tensorfold.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

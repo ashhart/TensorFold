@@ -1,0 +1,22 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include update.sh
+recursive-include docs *.md
+recursive-include examples *.py
+recursive-include src/smarttensor *.py
+recursive-include src/tensorfold *.py
+include tools/check_public_scrub.py
+include tools/smoke_tensorfold_release.py
+
+exclude findings.md
+exclude HANDOVER.md
+prune logs
+prune docs/superpowers
+prune tests/SmartTensor-*
+prune tests/smarttensor-gptoss-packs
+global-exclude __pycache__/*
+global-exclude *.py[cod]
+global-exclude .DS_Store
+global-exclude *.safetensors
+global-exclude *.stmanifest.json
