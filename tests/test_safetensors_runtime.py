@@ -6,6 +6,7 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+from types import ModuleType
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -63,6 +64,14 @@ from smarttensor.server import (
     streaming_visible_text,
     strip_trailing_stops,
 )
+
+
+def fake_mlx_lm_modules() -> dict[str, ModuleType]:
+    mlx_lm = ModuleType("mlx_lm")
+    utils = ModuleType("mlx_lm.utils")
+    utils.load_tokenizer = mock.Mock(return_value=object())  # type: ignore[attr-defined]
+    mlx_lm.utils = utils  # type: ignore[attr-defined]
+    return {"mlx_lm": mlx_lm, "mlx_lm.utils": utils}
 
 
 class SmartTensorRuntimeTests(unittest.TestCase):
@@ -391,10 +400,10 @@ class SmartTensorRuntimeTests(unittest.TestCase):
             close=mock.Mock(),
         )
 
-        with mock.patch("smarttensor.adapters.mlx.MlxModelSession", return_value=fake_session), mock.patch(
-            "mlx_lm.utils.load_tokenizer",
-            return_value=object(),
-        ):
+        with mock.patch(
+            "smarttensor.adapters.mlx.MlxModelSession",
+            return_value=fake_session,
+        ), mock.patch.dict(sys.modules, fake_mlx_lm_modules()):
             runner = DeepSeekV3StreamingForwardRunner(
                 "/tmp/glm",
                 resident_budget_bytes=2_240,
@@ -465,10 +474,10 @@ class SmartTensorRuntimeTests(unittest.TestCase):
             close=mock.Mock(),
         )
 
-        with mock.patch("smarttensor.adapters.mlx.MlxModelSession", return_value=fake_session), mock.patch(
-            "mlx_lm.utils.load_tokenizer",
-            return_value=object(),
-        ):
+        with mock.patch(
+            "smarttensor.adapters.mlx.MlxModelSession",
+            return_value=fake_session,
+        ), mock.patch.dict(sys.modules, fake_mlx_lm_modules()):
             DeepSeekV3StreamingForwardRunner(
                 "/tmp/glm",
                 resident_budget_bytes=2_240,
