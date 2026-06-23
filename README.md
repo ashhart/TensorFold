@@ -110,20 +110,23 @@ Expectations: decode runs at streamed-hosting speed (~3 tok/s on the 35B at the 
 
 ## Benchmarks
 
-### Nemotron Ultra on M3 Ultra
+### Verified Internal Benchmark Artifacts
 
-TensorFold has exercised `Nemotron-3-Ultra-550B-A55B-4bit` on an M3 Ultra
-Studio-class machine. The honest, citable current figures are:
+These are internal benchmark artifacts from TensorFold development runs. They
+are included to make the current performance envelope visible; each row states
+the scope and exactness mode so the number is not accidentally over-claimed.
 
-| Mode | Hardware | tok/s | Exactness | Status |
+| Model/profile | Hardware | Speed | Memory | Scope |
 | --- | --- | ---: | --- | --- |
-| Weight-page cache | M3 Ultra, 256GB unified memory | ~2.0 | bit-exact | fresh generation |
-| Deferred fixed hot-set + cold buddy substitution | M3 Ultra, 256GB unified memory | ~16.5-16.7 | near-exact | fresh generation, coherent held-out prompts |
-| Speculative block-verify ceiling | M3 Ultra, 256GB unified memory | ~22.8 | verifier exact, oracle draft tape | experimental ceiling, not a fresh real-drafter benchmark |
+| Qwen3.6-35B-A3B MLX 4-bit, guarded hard-quarter profile | 24GB Mac mini | 22.122 tok/s | 2.568GB RSS, 1.060GB resident weight peak | Exact guarded generation, 56 generated tokens |
+| Nemotron-3-Ultra-550B-A55B MLX 4-bit, deferred fixed hot-set + cold buddy substitution | M3 Ultra, 256GB unified memory | ~16.5-16.7 tok/s | fixed hot-set path, target peak below 190GB RSS | Fresh near-exact generation, coherent held-out prompts |
+| Nemotron-3-Ultra-550B-A55B MLX 4-bit, speculative block-verify ceiling | M3 Ultra, 256GB unified memory | ~22.8 tok/s | fixed hot-set path, target peak below 190GB RSS | Verifier path ceiling with oracle draft tape; not a fresh real-drafter benchmark |
 
-The ~22 tok/s result is useful because it shows the verifier path can run there
-on M3 Ultra hardware. It should not be quoted as a general Nemotron throughput
-claim until a non-oracle drafter reproduces it on held-out prompts.
+The Nemotron Ultra ~22 tok/s result is useful because it shows the verifier path
+can run there on M3 Ultra hardware. It should not be quoted as a general
+Nemotron throughput claim until a non-oracle drafter reproduces it on held-out
+prompts. The honest citable fast Nemotron row today is the fresh near-exact
+~16.5-16.7 tok/s path.
 
 Discover cached Hugging Face models:
 
