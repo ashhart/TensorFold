@@ -173,6 +173,28 @@ class SmartTensorRuntimeTests(unittest.TestCase):
             finally:
                 session.close()
 
+    def test_mlx_model_session_loader_module_exports_constructor_dependencies(self) -> None:
+        """Split MLX loader module must carry the helpers used at runner startup.
+
+        Public ``tensorfold serve`` constructs Qwen/GPT-OSS/DeepSeek runners via
+        ``MlxModelSession``. In the split package, that class lives in
+        ``smarttensor.adapters.mlx.loader`` and calls these helpers by module
+        global name during construction; if the globals are not imported, users
+        hit a startup ``NameError`` before any request can be served.
+        """
+
+        from smarttensor.adapters.mlx import loader as mlx_loader
+        from smarttensor.adapters.mlx import utils as mlx_utils
+
+        self.assertIs(mlx_loader.load_mlx_config, mlx_utils.load_mlx_config)
+        self.assertIs(
+            mlx_loader.build_mlx_model_shell, mlx_utils.build_mlx_model_shell
+        )
+        self.assertIs(
+            mlx_loader.select_retained_layers_for_budget,
+            mlx_utils.select_retained_layers_for_budget,
+        )
+
     def test_retained_layer_budget_selects_prefix_that_fits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = write_toy_safetensors(Path(directory) / "toy.safetensors")

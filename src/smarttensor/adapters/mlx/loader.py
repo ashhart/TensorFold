@@ -17,10 +17,13 @@ from smarttensor.weight_pager import PagedWeightCache, WeightPageKey, row_page_s
 
 from .records import MlxStreamEvent, MlxTensorBatch
 from .utils import (
+    build_mlx_model_shell,
     load_native_mlx_array,
     load_native_mlx_array_first_dim_indices,
+    load_mlx_config,
     numpy_dtype,
     placeholder_for_record,
+    select_retained_layers_for_budget,
 )
 
 class MlxSelectiveLoader:
