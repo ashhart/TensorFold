@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import mmap
+import os
 from pathlib import Path
 import struct
 import time
@@ -19,6 +20,12 @@ from typing import Any, Iterator
 from smarttensor.errors import InvalidSafeTensorError, TensorNotFoundError
 
 HEADER_LENGTH_BYTES = 8
+
+# macOS ``pread(2)`` fails with errno 22 (EINVAL) on a single call requesting
+# >= 2 GiB. Chunk each request well under that bound; 1 GiB is comfortably safe
+# and still a single syscall for every real expert-row run. Module-level so tests
+# can shrink it to force the multi-chunk assembly path.
+_PREAD_CHUNK_BYTES = 1 << 30  # 1 GiB
 
 DTYPE_SIZES: dict[str, float] = {
     "BOOL": 1,
@@ -209,6 +216,48 @@ class SafeTensorFile:
             view=memoryview(self._mmap)[start:end],
         )
 
+    def pread_range(self, start: int, end: int) -> bytes:
+        """Read ``[start, end)`` absolute file bytes via ``os.pread`` (no mmap).
+
+        Unlike :meth:`tensor`, this does NOT touch the persistent mmap, so it
+        leaves no file-backed page-cache residency behind -- the bytes land in a
+        transient buffer the caller is free to drop. On macOS ``MADV_DONTNEED``
+        is a no-op, so reading through pread is the only way to avoid holding the
+        working set twice (mmap file-cache + the owned copy).
+
+        Reads loop to absorb partial reads and chunk each ``pread`` below 2 GiB
+        (macOS ``pread`` fails with EINVAL on >= 2 GiB single calls). The result
+        is byte-identical to ``bytes(self.tensor(name).view)`` for the matching
+        absolute offsets.
+        """
+        if self._file is None:
+            raise InvalidSafeTensorError(f"{self.path} is closed")
+        start = int(start)
+        end = int(end)
+        if start < 0 or end < start or end > self.file_size:
+            raise InvalidSafeTensorError(
+                f"{self.path} pread range [{start}, {end}) out of bounds "
+                f"(file_size={self.file_size})"
+            )
+        total = end - start
+        if total == 0:
+            return b""
+        fileno = self._file.fileno()
+        out = bytearray(total)
+        view = memoryview(out)
+        position = 0
+        while position < total:
+            want = min(_PREAD_CHUNK_BYTES, total - position)
+            chunk = os.pread(fileno, want, start + position)
+            if not chunk:
+                raise InvalidSafeTensorError(
+                    f"{self.path} short pread at offset {start + position}: "
+                    f"expected {total - position} more bytes, got EOF"
+                )
+            view[position : position + len(chunk)] = chunk
+            position += len(chunk)
+        return bytes(out)
+
     def prefetch(self, names: list[str] | None = None, page_size: int = 4096) -> dict[str, float]:
         """Touch pages for selected tensors and return touch durations by tensor.
 
@@ -238,6 +287,39 @@ class SafeTensorFile:
             if checksum < 0:
                 raise AssertionError("unreachable")
         return timings
+
+    def drop_tensor_cache(self, name: str) -> bool:
+        """Ask the OS to evict resident mmap pages for one tensor."""
+
+        if name not in self.tensors:
+            raise TensorNotFoundError(name)
+        metadata = self.tensors[name]
+        return self.drop_cache_range(*metadata.absolute_offsets)
+
+    def drop_cache_range(self, start: int, end: int) -> bool:
+        """Best-effort MADV_DONTNEED for a byte range in this mmap."""
+
+        if self._mmap is None:
+            raise InvalidSafeTensorError(f"{self.path} is closed")
+        if end <= start:
+            return True
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        aligned_start = max((int(start) // page_size) * page_size, 0)
+        aligned_end = min(
+            ((int(end) + page_size - 1) // page_size) * page_size,
+            self.file_size,
+        )
+        if aligned_end <= aligned_start:
+            return True
+        try:
+            self._mmap.madvise(
+                mmap.MADV_DONTNEED,
+                aligned_start,
+                aligned_end - aligned_start,
+            )
+            return True
+        except (AttributeError, OSError, ValueError):
+            return False
 
     def close(self) -> None:
         if self._mmap is not None:

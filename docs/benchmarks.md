@@ -23,31 +23,10 @@ Start with one or two generated tokens before scaling a profile:
 
 ```bash
 tensorfold serve /path/to/model \
+  --pack-dir /path/to/packs \
   --resident-budget 2GiB \
-  --loader-backend native \
   --max-tokens-default 2
 ```
-
-## Verified Internal Qwen 35B Artifact
-
-The current internal high-water artifact for `Qwen3.6-35B-A3B` on a 24 GB Mac
-mini records:
-
-| Metric | Value |
-| --- | --- |
-| Speed | 22.122 tok/s |
-| Generated tokens | 56 |
-| Process RSS after run | 2.568 GB |
-| Resident weight peak | 1.060 GB |
-| Timing scope | Generated-token timing window, not end-to-end cold launch |
-| Warmup tokens | 0 |
-| Exactness | Exact guarded commits, no replay tape, no fallback blocks |
-| Pack read state | drop-cache-after-read reads |
-
-This internal artifact is not bundled in the public alpha, so cite it as a
-verified internal result rather than a public reproducibility claim. A public
-claim needs the sanitized artifact, exact command, prompt, environment, and a
-fresh quiet-machine reproduction.
 
 ## Reporting Template
 
@@ -71,7 +50,7 @@ benchmarks.
 
 ## Release Canaries
 
-`tensorfold canary qwen-frontier` is reserved for future frontier benchmark
-tooling and fails closed in this public runtime release. Do not use it for
-published claims until the canary implementation is packaged and covered by the
-release smoke.
+`tensorfold canary qwen-frontier` is source-checkout release tooling. It wraps
+the heldout route-atlas pipeline used to evaluate hard-memory Qwen profiles.
+Installable releases return a clear source-checkout-required error for this
+command until the full canary pipeline is packaged.

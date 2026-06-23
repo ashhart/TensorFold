@@ -18,6 +18,24 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from smarttensor.adapters.mlx import (
+    DeepSeekV3StreamingForwardRunner,
+    GptOssStreamingForwardRunner,
+    NemotronHStreamingForwardRunner,
+    Qwen35MoeStreamingForwardRunner,
+)
+
+# Model-type -> runner dispatch table. Hoisted to module scope so it is
+# importable and testable (tests/test_nemotron_serve_dispatch.py); run_server
+# resolves the runner via RUNNERS.get(model_type).
+RUNNERS = {
+    "deepseek_v3": DeepSeekV3StreamingForwardRunner,
+    "glm_moe_dsa": DeepSeekV3StreamingForwardRunner,
+    "qwen3_5_moe": Qwen35MoeStreamingForwardRunner,
+    "gpt_oss": GptOssStreamingForwardRunner,
+    "nemotron_h": NemotronHStreamingForwardRunner,
+}
+
 
 def longest_reusable_prefix(cached: list[int], requested: list[int]) -> int:
     """Return how many cached tokens can seed the new request.
@@ -223,6 +241,9 @@ class SmartTensorChat:
             return cache
         except Exception:
             return None
+
+    def _checkpoint_cache_enabled(self) -> bool:
+        return getattr(self.runner, "model_type", None) != "glm_moe_dsa"
 
     # Cap on the persistent session corpus the prompt-lookup drafter mines
     # across requests. Keeps the most recent ~24k tokens of prior prompts and
@@ -462,7 +483,10 @@ class SmartTensorChat:
             started = time.perf_counter()
             cache = None
             reused = 0
-            if self.checkpoint is not None:
+            checkpoint_enabled = self._checkpoint_cache_enabled()
+            if not checkpoint_enabled:
+                self.checkpoint = None
+            if checkpoint_enabled and self.checkpoint is not None:
                 checkpoint_len = longest_reusable_prefix(self.checkpoint["tokens"], prompt_ids)
                 if checkpoint_len:
                     cache = self._restore_cache(self.checkpoint["states"])
@@ -471,7 +495,7 @@ class SmartTensorChat:
                 cache = self.runner._make_cache()
                 reused = 0
 
-            if canonical and len(history_ids) > reused:
+            if checkpoint_enabled and canonical and len(history_ids) > reused:
                 # Advance the cache to the end of rendered history and
                 # checkpoint there: that prefix re-renders identically on the
                 # next turn, unlike generation-prompt suffixes and sampled text.
@@ -790,27 +814,24 @@ def make_handler(app: SmartTensorChat) -> type[BaseHTTPRequestHandler]:
 
 
 def run_server(args: Any) -> int:
+    from smarttensor.adapters import mlx as mlx_adapters
     from smarttensor.adapters.mlx import (
-        DeepSeekV3StreamingForwardRunner,
-        GptOssStreamingForwardRunner,
-        Qwen35MoeStreamingForwardRunner,
         load_mlx_config,
         select_exactness_mode,
     )
     from smarttensor.planner import parse_bytes
 
-    runners = {
-        "deepseek_v3": DeepSeekV3StreamingForwardRunner,
-        "qwen3_5_moe": Qwen35MoeStreamingForwardRunner,
-        "gpt_oss": GptOssStreamingForwardRunner,
-    }
     config = load_mlx_config(args.model_dir)
     model_type = config.get("model_type")
-    runner_class = runners.get(model_type)
+    runner_class = RUNNERS.get(model_type)
     if runner_class is None:
         raise ValueError(
-            f"serve currently supports {sorted(runners)} only, got {model_type!r}"
+            f"serve currently supports {sorted(RUNNERS)} only, got {model_type!r}"
         )
+    # Re-resolve by name against the live adapter module so test doubles that
+    # patch smarttensor.adapters.mlx.<Runner> take effect (RUNNERS itself binds
+    # the default classes at import time for dispatch/introspection).
+    runner_class = getattr(mlx_adapters, runner_class.__name__, runner_class)
 
     # Resolve the exactness contract to concrete levers. exact-strict on
     # GPT-OSS overrides the sliding cache to temporal (bitwise exact); on Qwen
@@ -842,6 +863,8 @@ def run_server(args: Any) -> int:
             runner_kwargs["expert_hot_set"] = args.expert_hot_set
             runner_kwargs["sliding_cache"] = sliding_cache
             runner_kwargs["native_layers"] = getattr(args, "native_layers", 0)
+            runner_kwargs["pack_dir"] = getattr(args, "pack_dir", None)
+            runner_kwargs["pack_read_workers"] = getattr(args, "pack_read_workers", 1)
             runner_kwargs["weight_page_budget_bytes"] = (
                 parse_bytes(args.weight_page_budget) if getattr(args, "weight_page_budget", None) else None
             )
@@ -859,7 +882,9 @@ def run_server(args: Any) -> int:
                 )
             if getattr(args, "expert_slot_capacity", None) is not None:
                 raise ValueError("--expert-slot-capacity currently applies to DeepSeek only")
-        elif model_type == "deepseek_v3":
+        elif model_type in {"deepseek_v3", "glm_moe_dsa"}:
+            runner_kwargs["pack_dir"] = getattr(args, "pack_dir", None)
+            runner_kwargs["pack_read_workers"] = getattr(args, "pack_read_workers", 1)
             runner_kwargs["weight_page_budget_bytes"] = (
                 parse_bytes(args.weight_page_budget) if getattr(args, "weight_page_budget", None) else None
             )
@@ -867,7 +892,10 @@ def run_server(args: Any) -> int:
             runner_kwargs["weight_page_rows"] = getattr(args, "weight_page_rows", 1)
             runner_kwargs["expert_prefetch"] = getattr(args, "expert_prefetch", "off")
             runner_kwargs["expert_prefetch_cap"] = getattr(args, "expert_prefetch_cap", 32)
-            runner_kwargs["expert_compute_mode"] = getattr(args, "expert_compute_mode", "table")
+            expert_compute_mode = getattr(args, "expert_compute_mode", "table")
+            if model_type == "glm_moe_dsa" and expert_compute_mode == "table":
+                expert_compute_mode = "direct_qmm"
+            runner_kwargs["expert_compute_mode"] = expert_compute_mode
             runner_kwargs["expert_slot_capacity"] = getattr(args, "expert_slot_capacity", None)
             if getattr(args, "native_layers", 0):
                 raise ValueError("--native-layers currently applies to GPT-OSS only")
@@ -877,18 +905,27 @@ def run_server(args: Any) -> int:
                 raise ValueError("--sliding-cache currently applies to GPT-OSS only")
             if getattr(args, "decode_scheduler", "auto") != "auto":
                 raise ValueError("--decode-scheduler currently applies to GPT-OSS only")
+        elif model_type == "nemotron_h":
+            runner_kwargs["page_experts"] = getattr(args, "page_experts", True)
+            runner_kwargs["weight_page_budget_bytes"] = (
+                parse_bytes(args.weight_page_budget) if getattr(args, "weight_page_budget", None) else None
+            )
+            runner_kwargs["weight_page_policy"] = getattr(args, "weight_page_policy", "auto")
+            runner_kwargs["weight_page_rows"] = getattr(args, "weight_page_rows", 1)
         elif getattr(args, "native_layers", 0):
             raise ValueError("--native-layers currently applies to GPT-OSS only")
         elif getattr(args, "weight_page_budget", None):
-            raise ValueError("--weight-page-budget currently applies to GPT-OSS/DeepSeek only")
+            raise ValueError("--weight-page-budget currently applies to GPT-OSS/DeepSeek/GLM only")
+        elif getattr(args, "pack_dir", None):
+            raise ValueError("--pack-dir currently applies to GPT-OSS/DeepSeek/GLM only")
         elif getattr(args, "weight_page_policy", "auto") not in {"auto", "lru"}:
             raise ValueError("--weight-page-policy currently applies to GPT-OSS/DeepSeek only")
         elif getattr(args, "weight_page_rows", 1) != 1:
-            raise ValueError("--weight-page-rows currently applies to GPT-OSS/DeepSeek only")
+            raise ValueError("--weight-page-rows currently applies to GPT-OSS/DeepSeek/GLM only")
         elif model_type != "gpt_oss" and getattr(args, "expert_prefetch", "off") != "off":
             raise ValueError("--expert-prefetch currently applies to DeepSeek only")
         elif model_type != "gpt_oss" and getattr(args, "expert_compute_mode", "table") != "table":
-            raise ValueError("--expert-compute-mode currently applies to GPT-OSS/DeepSeek only")
+            raise ValueError("--expert-compute-mode currently applies to GPT-OSS/DeepSeek/GLM only")
         elif getattr(args, "expert_slot_capacity", None) is not None:
             raise ValueError("--expert-slot-capacity currently applies to DeepSeek only")
         elif args.expert_hot_set:

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 from pathlib import Path
 import platform
 import sys
 import tempfile
 
-from smarttensor import __version__ as smarttensor_version
+from smarttensor import __version__ as runtime_version
 from smarttensor.manifest import SmartTensorManifest
 from smarttensor.planner import format_bytes
 
@@ -41,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
             "execution into a bounded memory budget."
         ),
     )
-    parser.add_argument("--version", action="version", version=f"TensorFold Runtime {smarttensor_version}")
+    parser.add_argument("--version", action="version", version=f"TensorFold Runtime {runtime_version}")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     doctor = subcommands.add_parser("doctor", help="Check the local runtime without loading a model.")
@@ -63,6 +64,20 @@ def build_parser() -> argparse.ArgumentParser:
     _add_delegate_parser(subcommands, "manifest", "Write a TensorFold manifest JSON file.")
     _add_delegate_parser(subcommands, "pack", "Build contiguous expert packs for supported MoE models.")
     _add_delegate_parser(subcommands, "serve", "Serve an OpenAI-compatible endpoint with low-resident hosting.")
+
+    frontier = subcommands.add_parser(
+        "frontier-profile",
+        help="Profile a large MoE checkpoint without loading model tensors.",
+    )
+    frontier.add_argument("model_dir", type=Path)
+    frontier.add_argument(
+        "--budget",
+        action="append",
+        default=[],
+        help="Resident expert-arena budget to size, e.g. 64GiB. Can be repeated.",
+    )
+    frontier.add_argument("--json", action="store_true", help="Print profile JSON.")
+    frontier.set_defaults(func=cmd_frontier_profile)
 
     bench = subcommands.add_parser("bench", help="Show benchmark guidance for the current TensorFold build.")
     bench.set_defaults(func=cmd_bench)
@@ -88,7 +103,7 @@ def _add_delegate_parser(
 def cmd_doctor(args: argparse.Namespace) -> int:
     print("TensorFold Runtime doctor")
     print(f"python: {platform.python_version()} ({sys.executable})")
-    print(f"smarttensor: {smarttensor_version}")
+    print(f"runtime: {runtime_version}")
     print("mlx: " + _mlx_status())
 
     if args.model_dir is not None:
@@ -172,14 +187,36 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_frontier_profile(args: argparse.Namespace) -> int:
+    from tensorfold.frontier_profile import profile_frontier_model
+
+    profile = profile_frontier_model(args.model_dir, budgets=args.budget)
+    if args.json:
+        import json
+
+        print(json.dumps(profile.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(profile.to_human())
+    return 0
+
+
 def cmd_canary(args: argparse.Namespace) -> int:
     if args.target == "qwen-frontier":
-        print(
-            "tensorfold: qwen-frontier canary is not bundled in this public runtime release. "
-            "Use doctor, selftest, inspect, pack, and serve for supported workflows.",
-            file=sys.stderr,
-        )
-        return 2
+        try:
+            module = importlib.import_module("tools.run_qwen_frontier_canary_pipeline")
+        except ModuleNotFoundError as exc:
+            missing_name = exc.name or str(exc)
+            if missing_name not in {"tools", "tools.run_qwen_frontier_canary_pipeline"}:
+                raise
+            print(
+                "tensorfold: qwen-frontier canary requires a TensorFold source checkout "
+                "with tools/run_qwen_frontier_canary_pipeline.py. Installable releases "
+                "still support doctor, inspect, pack, and serve.",
+                file=sys.stderr,
+            )
+            return 2
+        canary_main = module.main
+        return canary_main(args.args)
     raise AssertionError(f"unhandled canary target: {args.target}")
 
 

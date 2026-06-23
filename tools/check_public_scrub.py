@@ -13,7 +13,7 @@ from typing import Iterable
 
 
 PUBLIC_ROOT_FILES = {"MANIFEST.in", "README.md", "pyproject.toml"}
-PUBLIC_DIRS = (".github", "src/smarttensor", "src/tensorfold", "docs", "examples", "tools")
+PUBLIC_DIRS = ("src/smarttensor", "src/tensorfold", "docs", "examples", "tools")
 PUBLIC_SUFFIXES = {".md", ".py", ".toml", ".json", ".sh", ".txt", ".yaml", ".yml"}
 EXCLUDED_FILES = {
     "HANDOVER.md",

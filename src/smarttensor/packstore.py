@@ -45,6 +45,7 @@ loader would for the requested ids.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import json
 import mmap
@@ -53,6 +54,7 @@ import struct
 from typing import Any, Iterable
 
 from smarttensor.errors import InvalidSafeTensorError, TensorNotFoundError
+from smarttensor.manifest import infer_layer_index
 from smarttensor.safetensors import DTYPE_SIZES, SafeTensorFile
 
 HEADER_LENGTH_BYTES = 8
@@ -358,14 +360,35 @@ class ExpertPackWriter:
 class ExpertPackReader:
     """Read expert records back from a pack via basic mmap slices."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        access_mode: str = "mmap",
+        max_workers: int = 1,
+    ) -> None:
+        if max_workers < 1:
+            raise ValueError("max_workers must be positive")
+        if access_mode not in {
+            "mmap",
+            "pread",
+            "pread_bytearray_threaded",
+            "pread_region_slab_owned",
+        }:
+            raise ValueError(
+                "access_mode must be 'mmap', 'pread', 'pread_bytearray_threaded', "
+                "or 'pread_region_slab_owned'"
+            )
         self.path = Path(path)
+        self.access_mode = access_mode
+        self.max_workers = int(max_workers)
         self._file = None
         self._mmap: mmap.mmap | None = None
         self.page_size = PAGE_SIZE
         self.source: str | None = None
         self.records: dict[str, PackTensorRecord] = {}
         self.telemetry = PackTelemetry()
+        self._pread_executor: ThreadPoolExecutor | None = None
         self._open()
 
     def _open(self) -> None:
@@ -492,7 +515,273 @@ class ExpertPackReader:
         )
         return result
 
+    def load_expert_union_mlx(
+        self,
+        names: Iterable[str],
+        expert_ids: Iterable[int],
+        *,
+        layer: int | None = None,
+    ) -> dict[str, Any]:
+        """Extract expert rows directly as MLX arrays.
+
+        ``load_expert_union`` returns NumPy arrays backed by a compact Python
+        ``bytes`` payload so callers can keep them after the pack reader is
+        closed. Runtime callers immediately copy those arrays into MLX, so the
+        single-contiguous-span case can skip the intermediate ``bytes`` object
+        and expose the pack mmap as a short-lived NumPy view while MLX copies
+        it. Multi-run or padded multi-expert requests still compact useful
+        bytes first.
+        """
+
+        if self._mmap is None:
+            raise InvalidSafeTensorError(f"{self.path} is closed")
+        names = list(dict.fromkeys(names))
+        ids = sorted({int(value) for value in expert_ids})
+        if ids and self.access_mode == "pread_region_slab_owned":
+            return self._load_expert_union_mlx_pread_region_slab(
+                names,
+                ids,
+                layer=layer,
+            )
+        if ids and self.access_mode in {"pread", "pread_bytearray_threaded"}:
+            return self._load_expert_union_mlx_pread_bytearray_threaded(
+                names,
+                ids,
+                layer=layer,
+            )
+        runs = _contiguous_runs(ids)
+
+        import mlx.core as mx
+        import numpy as np
+
+        mmap_view = memoryview(self._mmap)
+        result: dict[str, Any] = {}
+        call_read = 0
+        call_useful = 0
+        call_ranges = 0
+
+        try:
+            for name in names:
+                if name not in self.records:
+                    raise TensorNotFoundError(name)
+                record = self.records[name]
+                np_dtype = _numpy_dtype(record.dtype)
+                rest_shape = tuple(record.shape[1:])
+                payload: bytes | memoryview
+
+                if len(runs) == 1:
+                    start_id, stop_id = runs[0]
+                    if start_id < 0 or stop_id > record.expert_count:
+                        raise IndexError(
+                            f"expert range [{start_id},{stop_id}) out of bounds for {name}"
+                        )
+                    run_len = stop_id - start_id
+                    span_start = record.expert_offset(start_id)
+                    span_stop = span_start + run_len * record.expert_stride
+                    call_ranges += 1
+                    call_read += span_stop - span_start
+                    call_useful += run_len * record.expert_nbytes
+                    if run_len == 1:
+                        payload = mmap_view[
+                            span_start : span_start + record.expert_nbytes
+                        ]
+                    elif record.expert_stride == record.expert_nbytes:
+                        payload = mmap_view[span_start:span_stop]
+                    else:
+                        chunks = []
+                        span = mmap_view[span_start:span_stop]
+                        for k in range(run_len):
+                            off = k * record.expert_stride
+                            chunks.append(bytes(span[off : off + record.expert_nbytes]))
+                        payload = b"".join(chunks)
+                else:
+                    chunks: list[bytes] = []
+                    for start_id, stop_id in runs:
+                        if start_id < 0 or stop_id > record.expert_count:
+                            raise IndexError(
+                                f"expert range [{start_id},{stop_id}) out of bounds for {name}"
+                            )
+                        run_len = stop_id - start_id
+                        span_start = record.expert_offset(start_id)
+                        span_stop = span_start + run_len * record.expert_stride
+                        span = mmap_view[span_start:span_stop]
+                        call_ranges += 1
+                        call_read += span_stop - span_start
+                        for k in range(run_len):
+                            off = k * record.expert_stride
+                            chunks.append(bytes(span[off : off + record.expert_nbytes]))
+                            call_useful += record.expert_nbytes
+                    payload = b"".join(chunks)
+
+                np_array = np.frombuffer(payload, dtype=np_dtype).reshape(
+                    (len(ids),) + rest_shape
+                )
+                mlx_array = mx.array(np_array)
+                if record.dtype == "BF16":
+                    mlx_array = mlx_array.view(mx.bfloat16)
+                result[name] = mlx_array
+                del np_array
+                del payload
+        finally:
+            mmap_view.release()
+
+        self.telemetry.record_call(
+            layer=layer,
+            expert_ids=tuple(ids),
+            ranges=call_ranges,
+            read_bytes=call_read,
+            useful_bytes=call_useful,
+        )
+        return result
+
+    def _load_expert_union_mlx_pread_region_slab(
+        self,
+        names: list[str],
+        ids: list[int],
+        *,
+        layer: int | None,
+    ) -> dict[str, Any]:
+        """Read useful expert bytes straight into extension-owned MLX arrays.
+
+        Packs are page padded, so scattered expert selections must be described
+        as one useful-byte region per expert. Reading the padded run would save
+        some region bookkeeping but would put alignment bytes inside the tensor
+        payload, which is wrong.
+        """
+
+        from smarttensor.mlx_adopt import (
+            mlx_dtype_name,
+            pread_many_regions_as_slab_owned_arrays_region_threaded,
+        )
+
+        specs, call_ranges, call_useful = self._mlx_pread_specs(
+            names,
+            ids,
+            mlx_dtype_name,
+        )
+
+        result = pread_many_regions_as_slab_owned_arrays_region_threaded(
+            str(self.path),
+            specs,
+            max_workers=self.max_workers,
+        )
+        self.telemetry.record_call(
+            layer=layer,
+            expert_ids=tuple(ids),
+            ranges=call_ranges,
+            read_bytes=call_useful,
+            useful_bytes=call_useful,
+        )
+        return result
+
+    def _load_expert_union_mlx_pread_bytearray_threaded(
+        self,
+        names: list[str],
+        ids: list[int],
+        *,
+        layer: int | None,
+    ) -> dict[str, Any]:
+        """Read useful expert byte regions with concurrent ``pread`` calls."""
+
+        import os
+
+        import mlx.core as mx
+        import numpy as np
+
+        specs, call_ranges, call_useful = self._mlx_pread_specs(
+            names,
+            ids,
+            lambda dtype: dtype,
+        )
+        fd = self._file.fileno()
+        tasks: list[tuple[int, int, int, int]] = []
+        for spec_index, (_, regions, _, _) in enumerate(specs):
+            for region_index, (offset, length) in enumerate(regions):
+                tasks.append((spec_index, region_index, offset, length))
+
+        payloads: list[list[bytes | None]] = [
+            [None for _ in regions] for _, regions, _, _ in specs
+        ]
+        if len(tasks) <= 1 or self.max_workers <= 1:
+            for spec_index, region_index, offset, length in tasks:
+                payloads[spec_index][region_index] = os.pread(fd, length, offset)
+        else:
+            executor = self._get_pread_executor()
+            future_map = {
+                executor.submit(os.pread, fd, length, offset): (
+                    spec_index,
+                    region_index,
+                )
+                for spec_index, region_index, offset, length in tasks
+            }
+            for future, (spec_index, region_index) in future_map.items():
+                payloads[spec_index][region_index] = future.result()
+
+        result: dict[str, Any] = {}
+        for spec_index, (name, _, shape, dtype) in enumerate(specs):
+            payload = b"".join(
+                bytes(part) for part in payloads[spec_index] if part is not None
+            )
+            record = self.records[name]
+            np_array = np.frombuffer(payload, dtype=_numpy_dtype(dtype)).reshape(shape)
+            mlx_array = mx.array(np_array)
+            if record.dtype == "BF16":
+                mlx_array = mlx_array.view(mx.bfloat16)
+            result[name] = mlx_array
+
+        self.telemetry.record_call(
+            layer=layer,
+            expert_ids=tuple(ids),
+            ranges=call_ranges,
+            read_bytes=call_useful,
+            useful_bytes=call_useful,
+        )
+        return result
+
+    def _get_pread_executor(self) -> ThreadPoolExecutor:
+        if self._pread_executor is None:
+            self._pread_executor = ThreadPoolExecutor(
+                max_workers=self.max_workers,
+                thread_name_prefix=f"tf-pack-{self.path.stem[:24]}",
+            )
+        return self._pread_executor
+
+    def _mlx_pread_specs(
+        self,
+        names: list[str],
+        ids: list[int],
+        dtype_name: Any,
+    ) -> tuple[list[tuple[str, list[tuple[int, int]], list[int], str]], int, int]:
+        specs: list[tuple[str, list[tuple[int, int]], list[int], str]] = []
+        call_ranges = 0
+        call_useful = 0
+        for name in names:
+            if name not in self.records:
+                raise TensorNotFoundError(name)
+            record = self.records[name]
+            regions: list[tuple[int, int]] = []
+            for expert_id in ids:
+                if expert_id < 0 or expert_id >= record.expert_count:
+                    raise IndexError(
+                        f"expert {expert_id} out of bounds for {name}"
+                    )
+                regions.append((record.expert_offset(expert_id), record.expert_nbytes))
+            call_ranges += len(regions)
+            call_useful += len(regions) * record.expert_nbytes
+            specs.append(
+                (
+                    name,
+                    regions,
+                    [len(ids), *record.shape[1:]],
+                    str(dtype_name(record.dtype)),
+                )
+            )
+        return specs, call_ranges, call_useful
+
     def close(self) -> None:
+        if self._pread_executor is not None:
+            self._pread_executor.shutdown(wait=True)
+            self._pread_executor = None
         if self._mmap is not None:
             self._mmap.close()
             self._mmap = None
@@ -507,12 +796,19 @@ class ExpertPackReader:
         self.close()
 
 
-def build_model_packs(model_dir: str | Path, out_dir: str | Path) -> dict[str, str]:
+def build_model_packs(
+    model_dir: str | Path,
+    out_dir: str | Path,
+    *,
+    layers: set[int] | None = None,
+) -> dict[str, str]:
     """Write one expert pack per shard of a model.
 
     Returns {shard_path: pack_path}. Shards with no expert-axis tensors (e.g.
     an embeddings-only shard) are skipped. Each pack header records its source
     shard, so the reader can be matched back to the shard it serves.
+    ``layers`` optionally restricts the packed expert tensors to specific
+    transformer layer ids.
     """
 
     model_dir = Path(model_dir)
@@ -526,6 +822,12 @@ def build_model_packs(model_dir: str | Path, out_dir: str | Path) -> dict[str, s
     for shard in shards:
         with SafeTensorFile(shard) as safe_file:
             names = ExpertPackWriter.expert_tensor_names(safe_file)
+            if layers is not None:
+                names = [
+                    name
+                    for name in names
+                    if infer_layer_index(name) in layers
+                ]
             if not names:
                 continue
             pack_path = out_dir / (shard.stem + ".pack")
@@ -534,13 +836,22 @@ def build_model_packs(model_dir: str | Path, out_dir: str | Path) -> dict[str, s
     return mapping
 
 
-def open_model_packs(out_dir: str | Path) -> dict[str, "ExpertPackReader"]:
+def open_model_packs(
+    out_dir: str | Path,
+    *,
+    access_mode: str = "mmap",
+    max_workers: int = 1,
+) -> dict[str, "ExpertPackReader"]:
     """Open every pack in ``out_dir``, keyed by the source shard it serves."""
 
     out_dir = Path(out_dir)
     readers: dict[str, ExpertPackReader] = {}
     for pack_path in sorted(out_dir.glob("*.pack")):
-        reader = ExpertPackReader(pack_path)
+        reader = ExpertPackReader(
+            pack_path,
+            access_mode=access_mode,
+            max_workers=max_workers,
+        )
         if reader.source is None:
             reader.close()
             raise InvalidSafeTensorError(f"{pack_path} has no source shard recorded")

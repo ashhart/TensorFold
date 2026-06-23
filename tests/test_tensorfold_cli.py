@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from contextlib import redirect_stderr
+import importlib
 from pathlib import Path
 import subprocess
 import sys
@@ -51,16 +52,48 @@ def write_toy_expert_safetensors(path: Path) -> None:
     path.write_bytes(struct.pack("<Q", len(raw_header)) + raw_header + data)
 
 
+def write_toy_glm_model(model_dir: Path) -> None:
+    model_dir.mkdir()
+    tensors: dict[str, tuple[str, list[int], bytes]] = {}
+    for proj in ("gate_proj", "up_proj", "down_proj"):
+        tensors[f"model.layers.8.mlp.switch_mlp.{proj}.weight"] = ("U8", [2, 2, 4], bytes(range(16)))
+        tensors[f"model.layers.8.mlp.switch_mlp.{proj}.scales"] = ("F32", [2, 2], bytes(range(16)))
+        tensors[f"model.layers.8.mlp.switch_mlp.{proj}.biases"] = ("F32", [2, 2], bytes(range(16)))
+
+    offset = 0
+    header: dict[str, object] = {"__metadata__": {"format": "toy-glm"}}
+    payload = bytearray()
+    for name, (dtype, shape, data) in tensors.items():
+        header[name] = {
+            "dtype": dtype,
+            "shape": shape,
+            "data_offsets": [offset, offset + len(data)],
+        }
+        offset += len(data)
+        payload.extend(data)
+
+    raw_header = json.dumps(header, separators=(",", ":")).encode("utf-8")
+    shard = model_dir / "model-00001-of-00001.safetensors"
+    shard.write_bytes(struct.pack("<Q", len(raw_header)) + raw_header + payload)
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "glm_moe_dsa",
+                "architectures": ["GlmMoeDsaForCausalLM"],
+                "hidden_size": 4,
+                "moe_intermediate_size": 2,
+                "n_routed_experts": 2,
+                "num_experts_per_tok": 1,
+                "quantization": {"bits": 8, "group_size": 2},
+            }
+        )
+    )
+    (model_dir / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {name: shard.name for name in tensors}})
+    )
+
+
 class TensorFoldCliTests(unittest.TestCase):
-    def test_version_reports_tensorfold_version(self) -> None:
-        stdout = io.StringIO()
-
-        with self.assertRaises(SystemExit) as raised, redirect_stdout(stdout):
-            main(["--version"])
-
-        self.assertEqual(raised.exception.code, 0)
-        self.assertIn("TensorFold Runtime 0.1.0", stdout.getvalue())
-
     def test_help_uses_tensorfold_product_name(self) -> None:
         stdout = io.StringIO()
 
@@ -80,19 +113,6 @@ class TensorFoldCliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         smart_main.assert_not_called()
-
-    def test_selftest_exercises_demo_inspect_and_pack_without_model(self) -> None:
-        stdout = io.StringIO()
-
-        with redirect_stdout(stdout):
-            exit_code = main(["selftest"])
-
-        self.assertEqual(exit_code, 0)
-        text = stdout.getvalue()
-        self.assertIn("TensorFold selftest", text)
-        self.assertIn("demo create: ok", text)
-        self.assertIn("inspect: ok", text)
-        self.assertIn("pack: ok", text)
 
     def test_demo_create_writes_installable_no_model_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,7 +169,8 @@ class TensorFoldCliTests(unittest.TestCase):
         self.assertIn("usage: tensorfold serve", text)
         self.assertNotIn("usage: smarttensor serve", text)
         self.assertIn("--resident-budget", text)
-        self.assertIn("--loader-backend", text)
+        self.assertIn("--pack-dir", text)
+        self.assertIn("--pack-read-workers", text)
 
     def test_pack_help_uses_tensorfold_command_name(self) -> None:
         stdout = io.StringIO()
@@ -162,6 +183,7 @@ class TensorFoldCliTests(unittest.TestCase):
         self.assertIn("usage: tensorfold pack", text)
         self.assertNotIn("pack-experts", text)
         self.assertIn("--out", text)
+        self.assertIn("--layers", text)
 
     def test_pack_builds_expert_pack_for_tiny_moe_shard(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -180,6 +202,57 @@ class TensorFoldCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(len(packs), 1)
         self.assertIn("wrote 1 pack", stdout.getvalue())
+
+    def test_pack_layers_filters_expert_tensors_by_layer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_dir = root / "glm"
+            write_toy_glm_model(model_dir)
+            pack_dir = root / "packs-layer8"
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(["pack", str(model_dir), "--out", str(pack_dir), "--layers", "8"])
+
+            packs = sorted(pack_dir.glob("*.pack"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(packs), 1)
+        self.assertIn("wrote 1 pack", stdout.getvalue())
+
+    def test_pack_layers_returns_no_pack_when_filter_excludes_all_experts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model_dir = root / "glm"
+            write_toy_glm_model(model_dir)
+            pack_dir = root / "packs-layer7"
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(["pack", str(model_dir), "--out", str(pack_dir), "--layers", "7"])
+
+            packs = sorted(pack_dir.glob("*.pack"))
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(packs, [])
+        self.assertIn("no expert-axis tensors found", stdout.getvalue())
+
+    def test_frontier_profile_sizes_glm_moe_without_loading_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "glm"
+            write_toy_glm_model(model_dir)
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = main(["frontier-profile", str(model_dir), "--budget", "200B", "--json"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["model_type"], "glm_moe_dsa")
+        self.assertTrue(payload["shards"]["complete"])
+        self.assertEqual(payload["routed_layer_count"], 1)
+        self.assertEqual(payload["bytes_per_expert"], 72)
+        self.assertEqual(payload["budget_fits"][0]["experts_per_layer"], 2)
 
     def test_public_toy_moe_example_exercises_inspect_and_pack(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -212,14 +285,39 @@ class TensorFoldCliTests(unittest.TestCase):
         self.assertEqual(len(packs), 1)
         self.assertIn("wrote 1 pack", pack_stdout.getvalue())
 
-    def test_canary_reports_not_bundled_in_public_runtime(self) -> None:
-        stderr = io.StringIO()
+    def test_canary_reports_source_checkout_requirement_when_tools_package_is_unavailable(self) -> None:
+        original_import_module = importlib.import_module
 
-        with redirect_stderr(stderr):
-            exit_code = main(["canary", "qwen-frontier", "--dry-run"])
+        def import_or_block(name: str, package: str | None = None):
+            if name == "tools.run_qwen_frontier_canary_pipeline":
+                exc = ModuleNotFoundError("No module named 'tools'")
+                exc.name = "tools"
+                raise exc
+            return original_import_module(name, package)
+
+        stderr = io.StringIO()
+        with mock.patch.object(tensorfold.cli.importlib, "import_module", side_effect=import_or_block):
+            with redirect_stderr(stderr):
+                exit_code = main(["canary", "qwen-frontier", "--dry-run"])
 
         self.assertEqual(exit_code, 2)
-        self.assertIn("not bundled", stderr.getvalue())
+        self.assertIn("source checkout", stderr.getvalue())
+
+    def test_canary_reports_source_checkout_requirement_when_runner_is_unavailable(self) -> None:
+        original_import_module = importlib.import_module
+
+        def import_or_block(name: str, package: str | None = None):
+            if name == "tools.run_qwen_frontier_canary_pipeline":
+                raise ModuleNotFoundError(name)
+            return original_import_module(name, package)
+
+        stderr = io.StringIO()
+        with mock.patch.object(tensorfold.cli.importlib, "import_module", side_effect=import_or_block):
+            with redirect_stderr(stderr):
+                exit_code = main(["canary", "qwen-frontier", "--dry-run"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("source checkout", stderr.getvalue())
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from smarttensor.safetensors import SafeTensorFile
 
 LAYER_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:^|\.)model\.layers\.(\d+)(?:\.|$)"),
+    re.compile(r"(?:^|\.)backbone\.layers\.(\d+)(?:\.|$)"),
     re.compile(r"(?:^|\.)transformer\.h\.(\d+)(?:\.|$)"),
     re.compile(r"(?:^|\.)gpt_neox\.layers\.(\d+)(?:\.|$)"),
     re.compile(r"^layers\.(\d+)(?:\.|$)"),

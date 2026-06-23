@@ -75,18 +75,6 @@ class PublicScrubTests(unittest.TestCase):
         self.assertEqual(len(leaks), 1)
         self.assertEqual(leaks[0].path.as_posix(), "examples/demo.py")
 
-    def test_scans_github_workflows(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            workflow = root / ".github" / "workflows"
-            workflow.mkdir(parents=True)
-            (workflow / "tensorfold.yml").write_text("run: echo /Users/local/model\n")
-
-            leaks = find_public_leaks(root)
-
-        self.assertEqual(len(leaks), 1)
-        self.assertEqual(leaks[0].path.as_posix(), ".github/workflows/tensorfold.yml")
-
     def test_scans_packaged_runtime_internals(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

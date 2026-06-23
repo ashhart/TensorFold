@@ -37,53 +37,48 @@ def build_parser(
     parser = argparse.ArgumentParser(prog=prog)
     subcommands = parser.add_subparsers(dest="command", required=True)
 
-    inspect = subcommands.add_parser(_command_name("inspect", command_aliases), help="Inspect safetensors shards.")
+    inspect = subcommands.add_parser("inspect", help="Inspect safetensors shards.")
     inspect.add_argument("paths", nargs="+", type=Path)
     inspect.add_argument("--json", action="store_true", help="Print full manifest JSON.")
     inspect.set_defaults(func=cmd_inspect)
 
-    manifest = subcommands.add_parser(
-        _command_name("manifest", command_aliases),
-        help="Write a SmartTensor manifest JSON file.",
-    )
+    manifest = subcommands.add_parser("manifest", help="Write a SmartTensor manifest JSON file.")
     manifest.add_argument("paths", nargs="+", type=Path)
     manifest.add_argument("-o", "--output", required=True, type=Path)
     manifest.set_defaults(func=cmd_manifest)
 
-    tensor = subcommands.add_parser(_command_name("tensor", command_aliases), help="Read bytes from one tensor lazily.")
+    tensor = subcommands.add_parser("tensor", help="Read bytes from one tensor lazily.")
     tensor.add_argument("path", type=Path)
     tensor.add_argument("name")
     tensor.add_argument("--bytes", type=int, default=64, dest="byte_count")
     tensor.set_defaults(func=cmd_tensor)
 
-    plan = subcommands.add_parser(
-        _command_name("plan", command_aliases),
-        help="Build a memory-budget layer streaming plan.",
-    )
+    plan = subcommands.add_parser("plan", help="Build a memory-budget layer streaming plan.")
     plan.add_argument("paths", nargs="+", type=Path)
     plan.add_argument("--budget", required=True, help="Memory budget, e.g. 8GiB or 1200MB.")
     plan.add_argument("--prefetch-window", type=int, default=1)
     plan.add_argument("--json", action="store_true", help="Print plan JSON.")
     plan.set_defaults(func=cmd_plan)
 
-    prefetch = subcommands.add_parser(
-        _command_name("prefetch-layer", command_aliases),
-        help="Touch all tensor pages for one layer.",
-    )
+    prefetch = subcommands.add_parser("prefetch-layer", help="Touch all tensor pages for one layer.")
     prefetch.add_argument("path", type=Path)
     prefetch.add_argument("layer", type=int)
     prefetch.set_defaults(func=cmd_prefetch_layer)
 
     pack = subcommands.add_parser(
-        _command_name("pack-experts", command_aliases),
+        command_aliases.get("pack-experts", "pack-experts"),
         help="Build contiguous per-shard expert packs for a model (one .pack per shard with expert tensors).",
     )
     pack.add_argument("model_dir", type=Path)
     pack.add_argument("-o", "--out", required=True, type=Path, help="Output directory for the .pack files.")
+    pack.add_argument(
+        "--layers",
+        help="Optional comma-separated layer ids/ranges to pack, e.g. 3,8-12.",
+    )
     pack.set_defaults(func=cmd_pack_experts)
 
     serve = subcommands.add_parser(
-        _command_name("serve", command_aliases),
+        "serve",
         help="Serve an OpenAI-compatible chat endpoint with streamed low-resident hosting.",
     )
     serve.add_argument("model_dir", type=Path)
@@ -106,6 +101,20 @@ def build_parser(
         type=float,
         default=10.0,
         help="Milliseconds to wait for compatible requests before dispatching a batch.",
+    )
+    serve.add_argument(
+        "--pack-read-workers",
+        type=int,
+        default=1,
+        help=(
+            "Maximum worker threads for concurrent expert pack reads. "
+            "Values above 1 are experimental and model/storage dependent."
+        ),
+    )
+    serve.add_argument(
+        "--pack-dir",
+        type=Path,
+        help="Directory created by `tensorfold pack` for contiguous expert-pack reads.",
     )
     serve.add_argument(
         "--expert-hot-set",
@@ -189,6 +198,15 @@ def build_parser(
         help="GPT-OSS only: cache backend for sliding-attention layers.",
     )
     serve.add_argument(
+        "--page-experts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "NemotronH only: page MoE expert weights on demand instead of "
+            "holding them resident (default on; use --no-page-experts to disable)."
+        ),
+    )
+    serve.add_argument(
         "--exact-mode",
         choices=["target-verified", "exact-strict"],
         default="target-verified",
@@ -257,10 +275,6 @@ def build_parser(
     return parser
 
 
-def _command_name(command: str, aliases: dict[str, str]) -> str:
-    return aliases.get(command, command)
-
-
 def cmd_inspect(args: argparse.Namespace) -> int:
     manifest = SmartTensorManifest.from_safetensors(args.paths)
     if args.json:
@@ -327,7 +341,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
 def cmd_pack_experts(args: argparse.Namespace) -> int:
     from smarttensor.packstore import build_model_packs
 
-    mapping = build_model_packs(args.model_dir, args.out)
+    layers = parse_layer_filter(args.layers) if getattr(args, "layers", None) else None
+    mapping = build_model_packs(args.model_dir, args.out, layers=layers)
     if not mapping:
         print(f"no expert-axis tensors found in {args.model_dir}")
         return 1
@@ -338,6 +353,31 @@ def cmd_pack_experts(args: argparse.Namespace) -> int:
         print(f"{Path(shard).name} -> {pack} ({size / 1e9:.2f} GB)")
     print(f"wrote {len(mapping)} pack(s), {total / 1e9:.2f} GB total, to {args.out}")
     return 0
+
+
+def parse_layer_filter(raw: str) -> set[int]:
+    layers: set[int] = set()
+    for part in raw.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if "-" in item:
+            start_raw, stop_raw = item.split("-", 1)
+            start = int(start_raw)
+            stop = int(stop_raw)
+            if start < 0 or stop < 0:
+                raise ValueError("--layers values must be non-negative")
+            if stop < start:
+                raise ValueError("--layers ranges must be ascending")
+            layers.update(range(start, stop + 1))
+        else:
+            value = int(item)
+            if value < 0:
+                raise ValueError("--layers values must be non-negative")
+            layers.add(value)
+    if not layers:
+        raise ValueError("--layers must include at least one layer id")
+    return layers
 
 
 def print_summary(manifest: SmartTensorManifest) -> None:

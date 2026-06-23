@@ -32,7 +32,6 @@ Source = "https://github.com/ashhart/TensorFold"
 Issues = "https://github.com/ashhart/TensorFold/issues"
 
 [project.scripts]
-smarttensor = "smarttensor.cli:main"
 tensorfold = "tensorfold.cli:main"
 
 [tool.setuptools.packages.find]

@@ -6,13 +6,17 @@ from pathlib import Path
 import struct
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import numpy as np
 
 from smarttensor.adapters.mlx import (
     AdaptiveDraftGate,
     CacheTransaction,
+    DeepSeekExpertSlotArena,
+    DeepSeekExpertSlotArenaStats,
     DeepSeekV3StreamingForwardRunner,
     ExactnessModeSettings,
     ExternalProcessDrafter,
@@ -30,11 +34,13 @@ from smarttensor.adapters.mlx import (
     expert_merge_plan,
     prompt_lookup_draft,
     remap_expert_indices,
+    remap_expert_indices_to_slots_with_mask,
     qwen_layer_base_bytes,
     qwen_selected_expert_bytes,
     reserve_weight_page_budget_for_base_retention,
     resolve_weight_page_policy,
     select_exactness_mode,
+    select_qwen_base_layers_for_budget,
     select_retained_layers_for_budget,
     selected_expert_counts,
     selected_expert_ids,
@@ -53,6 +59,7 @@ from smarttensor.server import (
     longest_reusable_prefix,
     parse_harmony_output,
     pass_economics,
+    run_server,
     streaming_visible_text,
     strip_trailing_stops,
 )
@@ -173,28 +180,6 @@ class SmartTensorRuntimeTests(unittest.TestCase):
             finally:
                 session.close()
 
-    def test_mlx_model_session_loader_module_exports_constructor_dependencies(self) -> None:
-        """Split MLX loader module must carry the helpers used at runner startup.
-
-        Public ``tensorfold serve`` constructs Qwen/GPT-OSS/DeepSeek runners via
-        ``MlxModelSession``. In the split package, that class lives in
-        ``smarttensor.adapters.mlx.loader`` and calls these helpers by module
-        global name during construction; if the globals are not imported, users
-        hit a startup ``NameError`` before any request can be served.
-        """
-
-        from smarttensor.adapters.mlx import loader as mlx_loader
-        from smarttensor.adapters.mlx import utils as mlx_utils
-
-        self.assertIs(mlx_loader.load_mlx_config, mlx_utils.load_mlx_config)
-        self.assertIs(
-            mlx_loader.build_mlx_model_shell, mlx_utils.build_mlx_model_shell
-        )
-        self.assertIs(
-            mlx_loader.select_retained_layers_for_budget,
-            mlx_utils.select_retained_layers_for_budget,
-        )
-
     def test_retained_layer_budget_selects_prefix_that_fits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = write_toy_safetensors(Path(directory) / "toy.safetensors")
@@ -301,6 +286,128 @@ class SmartTensorRuntimeTests(unittest.TestCase):
             480,
         )
 
+    def test_moe_base_layer_planner_retains_base_layers_only_when_budget_allows(self) -> None:
+        def record(name: str, nbytes: int, shape: tuple[int, ...]) -> TensorRecord:
+            return TensorRecord(
+                name=name,
+                file="glm.safetensors",
+                dtype="U32",
+                shape=shape,
+                data_offsets=(0, nbytes),
+                absolute_offsets=(0, nbytes),
+                nbytes=nbytes,
+                layer=infer_layer_index(name),
+            )
+
+        tensors: dict[str, TensorRecord] = {}
+        for layer in range(2):
+            tensors[f"model.layers.{layer}.input_layernorm.weight"] = record(
+                f"model.layers.{layer}.input_layernorm.weight",
+                1_000,
+                (250,),
+            )
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                tensors[f"model.layers.{layer}.mlp.switch_mlp.{projection}.weight"] = record(
+                    f"model.layers.{layer}.mlp.switch_mlp.{projection}.weight",
+                    2_560,
+                    (256, 10),
+                )
+        manifest = SmartTensorManifest(
+            format="safetensors",
+            files=("glm.safetensors",),
+            tensors=tensors,
+            layers=build_layers(tensors),
+        )
+
+        self.assertEqual(
+            select_qwen_base_layers_for_budget(
+                manifest,
+                2_239,
+                top_k=8,
+                expert_marker=".mlp.switch_mlp.",
+            ),
+            set(),
+        )
+        self.assertEqual(
+            select_qwen_base_layers_for_budget(
+                manifest,
+                2_240,
+                top_k=8,
+                expert_marker=".mlp.switch_mlp.",
+            ),
+            {0, 1},
+        )
+        self.assertEqual(
+            select_qwen_base_layers_for_budget(
+                manifest,
+                reserve_weight_page_budget_for_base_retention(2_240, 1),
+                top_k=8,
+                expert_marker=".mlp.switch_mlp.",
+            ),
+            set(),
+        )
+
+    def test_glm_runner_respects_reserved_weight_page_budget_before_base_retention(self) -> None:
+        def record(name: str, nbytes: int, shape: tuple[int, ...]) -> TensorRecord:
+            return TensorRecord(
+                name=name,
+                file="glm.safetensors",
+                dtype="U32",
+                shape=shape,
+                data_offsets=(0, nbytes),
+                absolute_offsets=(0, nbytes),
+                nbytes=nbytes,
+                layer=infer_layer_index(name),
+            )
+
+        tensors: dict[str, TensorRecord] = {}
+        for layer in range(2):
+            tensors[f"model.layers.{layer}.input_layernorm.weight"] = record(
+                f"model.layers.{layer}.input_layernorm.weight",
+                1_000,
+                (250,),
+            )
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                tensors[f"model.layers.{layer}.mlp.switch_mlp.{projection}.weight"] = record(
+                    f"model.layers.{layer}.mlp.switch_mlp.{projection}.weight",
+                    2_560,
+                    (256, 10),
+                )
+        manifest = SmartTensorManifest(
+            format="safetensors",
+            files=("glm.safetensors",),
+            tensors=tensors,
+            layers=build_layers(tensors),
+        )
+        fake_loader = SimpleNamespace(
+            manifest=manifest,
+            drop_mmap_cache_after_read=False,
+            attach_weight_page_cache=mock.Mock(),
+        )
+        fake_session = SimpleNamespace(
+            config={"model_type": "glm_moe_dsa", "num_experts_per_tok": 8},
+            loader=fake_loader,
+            model_dir=Path("/tmp/glm"),
+            close=mock.Mock(),
+        )
+
+        with mock.patch("smarttensor.adapters.mlx.MlxModelSession", return_value=fake_session), mock.patch(
+            "mlx_lm.utils.load_tokenizer",
+            return_value=object(),
+        ):
+            runner = DeepSeekV3StreamingForwardRunner(
+                "/tmp/glm",
+                resident_budget_bytes=2_240,
+                weight_page_budget_bytes=1,
+            )
+
+        self.assertEqual(runner.base_retain_layers, set())
+        fake_loader.attach_weight_page_cache.assert_called_once_with(
+            1,
+            eviction_policy="frequency",
+            rows_per_page=1,
+        )
+
     def test_deepseek_runner_exposes_weight_page_cache_knobs(self) -> None:
         signature = inspect.signature(DeepSeekV3StreamingForwardRunner)
 
@@ -309,9 +416,66 @@ class SmartTensorRuntimeTests(unittest.TestCase):
         self.assertIn("weight_page_rows", signature.parameters)
         self.assertIn("expert_prefetch", signature.parameters)
         self.assertIn("expert_prefetch_cap", signature.parameters)
+        self.assertIn("pack_dir", signature.parameters)
+        self.assertIn("pack_read_workers", signature.parameters)
+        self.assertIn("drop_mmap_cache_after_read", signature.parameters)
         self.assertIn("trace", signature.parameters)
         self.assertIs(signature.parameters["clear_on_evict"].default, False)
+        self.assertIsNone(signature.parameters["drop_mmap_cache_after_read"].default)
         self.assertIs(signature.parameters["trace"].default, False)
+
+    def test_deepseek_runner_can_keep_glm_mmap_cache_for_high_memory_tier(self) -> None:
+        def record(name: str, nbytes: int, shape: tuple[int, ...]) -> TensorRecord:
+            return TensorRecord(
+                name=name,
+                file="glm.safetensors",
+                dtype="F32",
+                shape=shape,
+                data_offsets=(0, nbytes),
+                absolute_offsets=(0, nbytes),
+                nbytes=nbytes,
+                layer=infer_layer_index(name),
+            )
+
+        tensors = {
+            "model.layers.0.input_layernorm.weight": record(
+                "model.layers.0.input_layernorm.weight",
+                1_000,
+                (250,),
+            ),
+            "model.layers.0.mlp.switch_mlp.gate_proj.weight": record(
+                "model.layers.0.mlp.switch_mlp.gate_proj.weight",
+                2_560,
+                (256, 10),
+            ),
+        }
+        fake_loader = SimpleNamespace(
+            manifest=SmartTensorManifest(
+                format="safetensors",
+                files=("glm.safetensors",),
+                tensors=tensors,
+                layers=build_layers(tensors),
+            ),
+            drop_mmap_cache_after_read=False,
+        )
+        fake_session = SimpleNamespace(
+            config={"model_type": "glm_moe_dsa", "num_experts_per_tok": 8},
+            loader=fake_loader,
+            model_dir=Path("/tmp/glm"),
+            close=mock.Mock(),
+        )
+
+        with mock.patch("smarttensor.adapters.mlx.MlxModelSession", return_value=fake_session), mock.patch(
+            "mlx_lm.utils.load_tokenizer",
+            return_value=object(),
+        ):
+            DeepSeekV3StreamingForwardRunner(
+                "/tmp/glm",
+                resident_budget_bytes=2_240,
+                drop_mmap_cache_after_read=False,
+            )
+
+        self.assertFalse(fake_loader.drop_mmap_cache_after_read)
 
     def test_weight_page_policy_auto_prefers_frequency_for_deepseek_budget(self) -> None:
         self.assertEqual(
@@ -329,6 +493,14 @@ class SmartTensorRuntimeTests(unittest.TestCase):
                 has_weight_page_budget=True,
             ),
             "lru",
+        )
+        self.assertEqual(
+            resolve_weight_page_policy(
+                "glm_moe_dsa",
+                "auto",
+                has_weight_page_budget=True,
+            ),
+            "frequency",
         )
         self.assertEqual(
             resolve_weight_page_policy(
@@ -351,6 +523,86 @@ class SmartTensorRuntimeTests(unittest.TestCase):
         self.assertEqual(
             reserve_weight_page_budget_for_base_retention(2 * 1024, 4 * 1024),
             0,
+        )
+
+    def test_glm_prefill_chunks_one_token_at_a_time(self) -> None:
+        class FakeRunner:
+            model_type = "glm_moe_dsa"
+
+            def __init__(self) -> None:
+                self.calls: list[list[list[int]]] = []
+
+            def _stream_forward_tokens(self, token_rows, **_kwargs):
+                self.calls.append([list(row) for row in token_rows])
+
+        runner = FakeRunner()
+        DeepSeekV3StreamingForwardRunner._prefill_cache_tokens(
+            runner,
+            [[10, 11, 12], [20, 21, 22]],
+            cache=[],
+            events=[],
+            manage_embedding=True,
+        )
+
+        self.assertEqual(
+            runner.calls,
+            [
+                [[10], [20]],
+                [[11], [21]],
+                [[12], [22]],
+            ],
+        )
+
+    def test_non_glm_prefill_keeps_whole_prompt_chunk(self) -> None:
+        class FakeRunner:
+            model_type = "deepseek_v3"
+
+            def __init__(self) -> None:
+                self.calls: list[list[list[int]]] = []
+
+            def _stream_forward_tokens(self, token_rows, **_kwargs):
+                self.calls.append([list(row) for row in token_rows])
+
+        runner = FakeRunner()
+        DeepSeekV3StreamingForwardRunner._prefill_cache_tokens(
+            runner,
+            [[10, 11, 12]],
+            cache=[],
+            events=[],
+            manage_embedding=True,
+        )
+
+        self.assertEqual(runner.calls, [[[10, 11, 12]]])
+
+    def test_glm_detach_array_preserves_bfloat16_bits(self) -> None:
+        import mlx.core as mx
+
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        runner.model_type = "glm_moe_dsa"
+        original = mx.array([[1, 2]], dtype=mx.bfloat16)
+        mx.eval(original)
+
+        detached = DeepSeekV3StreamingForwardRunner._maybe_detach_glm_array(
+            runner,
+            original,
+        )
+
+        self.assertIsNot(detached, original)
+        np.testing.assert_array_equal(
+            np.array(detached.view(mx.uint16)),
+            np.array(original.view(mx.uint16)),
+        )
+
+    def test_non_glm_detach_array_is_noop(self) -> None:
+        import mlx.core as mx
+
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        runner.model_type = "deepseek_v3"
+        original = mx.array([[1, 2]], dtype=mx.float32)
+
+        self.assertIs(
+            DeepSeekV3StreamingForwardRunner._maybe_detach_glm_array(runner, original),
+            original,
         )
 
     def test_weight_page_rows_requires_positive_budgeted_cache(self) -> None:
@@ -380,6 +632,25 @@ class SmartTensorRuntimeTests(unittest.TestCase):
 
 
 class ExpertPrefetchPlanningTests(unittest.TestCase):
+    def test_glm_global_hotset_allocates_rows_by_count_across_layers(self) -> None:
+        from benchmarks.glm_planned_hotset_probe import _route_hotsets_global
+
+        records = {
+            "routes": [
+                {"layer": 0, "experts": [1, 1, 2]},
+                {"layer": 1, "experts": [7]},
+                {"layer": 1, "experts": [7, 8]},
+                {"layer": 2, "experts": [9, 9, 9]},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "routes.json"
+            path.write_text(json.dumps(records))
+
+            hotsets = _route_hotsets_global(path, 3)
+
+        self.assertEqual(hotsets, {2: [9], 0: [1], 1: [7]})
+
     def test_decode_scheduler_auto_falls_back_when_overlap_is_unsafe(self) -> None:
         class FakeRunner:
             decode_scheduler = "auto"
@@ -652,6 +923,397 @@ class ExpertPrefetchPlanningTests(unittest.TestCase):
         self.assertEqual(runner._expert_history, {})
         self.assertEqual(runner._prefetch_stats, ExpertPrefetchStats())
         self.assertEqual(runner.session.external_resident_bytes, 17)
+
+    def test_slot_arena_reuses_larger_prewarmed_capacity(self) -> None:
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        runner.expert_slot_capacity = 8
+        runner.expert_prefetch = "off"
+        runner.resident_budget_bytes = 128 * 1024 * 1024 * 1024
+        runner._expert_slot_clock = 0
+        runner._expert_slot_stats = DeepSeekExpertSlotArenaStats()
+        runner._expert_slot_arena_bytes = 123
+        arena = DeepSeekExpertSlotArena(
+            layer_index=3,
+            capacity=16,
+            arrays={"w": object()},
+            slot_to_expert=[0, 1, 2, *([None] * 13)],
+            expert_to_slot={0: 0, 1: 1, 2: 2},
+            nbytes=123,
+            last_used=0,
+        )
+        runner._expert_slot_arenas = {3: arena}
+
+        got = DeepSeekV3StreamingForwardRunner._ensure_deepseek_slot_arena(
+            runner,
+            3,
+            [0, 2],
+        )
+
+        self.assertIsNotNone(got)
+        got_arena, info = got
+        self.assertIs(got_arena, arena)
+        self.assertEqual(info["action"], "slot-arena-hit")
+        self.assertEqual(runner._expert_slot_arenas[3].capacity, 16)
+
+    def test_static_slot_arena_miss_falls_back_without_update(self) -> None:
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        runner.expert_slot_capacity = 8
+        runner.expert_slot_update_missing = False
+        runner.expert_prefetch = "off"
+        runner.resident_budget_bytes = 128 * 1024 * 1024 * 1024
+        runner._expert_slot_clock = 0
+        runner._expert_slot_stats = DeepSeekExpertSlotArenaStats()
+        runner._expert_slot_arena_bytes = 123
+        arena = DeepSeekExpertSlotArena(
+            layer_index=3,
+            capacity=8,
+            arrays={"w": object()},
+            slot_to_expert=[0, 1, 2, *([None] * 5)],
+            expert_to_slot={0: 0, 1: 1, 2: 2},
+            nbytes=123,
+            last_used=0,
+        )
+        runner._expert_slot_arenas = {3: arena}
+
+        def fail_update(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("static planned arena must not update on miss")
+
+        runner._update_deepseek_slot_arena = fail_update
+
+        got = DeepSeekV3StreamingForwardRunner._ensure_deepseek_slot_arena(
+            runner,
+            3,
+            [0, 7],
+        )
+
+        self.assertIsNone(got)
+        self.assertEqual(arena.expert_to_slot, {0: 0, 1: 1, 2: 2})
+        self.assertEqual(runner._expert_slot_stats.hit_rows, 1)
+        self.assertEqual(runner._expert_slot_stats.missing_rows, 1)
+        self.assertEqual(runner._expert_slot_stats.arena_misses, 1)
+
+    def test_reset_stream_state_can_preserve_prewarmed_slot_arenas(self) -> None:
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        arena = DeepSeekExpertSlotArena(
+            layer_index=3,
+            capacity=8,
+            arrays={"w": object()},
+            slot_to_expert=[0, *([None] * 7)],
+            expert_to_slot={0: 0},
+            nbytes=123,
+            last_used=0,
+        )
+        runner._expert_slot_arenas = {3: arena}
+        runner._expert_slot_arena_bytes = 123
+        runner._expert_slot_stats = DeepSeekExpertSlotArenaStats(arena_creates=1)
+        runner._expert_cache_bytes = 9
+        runner._expert_history = {3: [0]}
+        runner._prefetch_stats = ExpertPrefetchStats(attempted_layers=1)
+        runner._pending_expert_prefetch = None
+        runner._pending_expert_prefetch_bytes = 0
+        runner._pending_layer_base_prefetch = None
+        runner._pending_layer_base_prefetch_bytes = 0
+        runner.preserve_slot_arenas_on_reset = True
+        runner._drain_deepseek_expert_prefetch = lambda: None
+        runner._drain_deepseek_layer_base_prefetch = lambda: None
+        runner._set_deepseek_external_resident_bytes = lambda *args, **kwargs: None
+
+        DeepSeekV3StreamingForwardRunner._reset_stream_state(runner)
+
+        self.assertIs(runner._expert_slot_arenas[3], arena)
+        self.assertEqual(runner._expert_slot_arena_bytes, 123)
+        self.assertEqual(runner._expert_slot_stats, DeepSeekExpertSlotArenaStats())
+        self.assertEqual(runner._expert_cache_bytes, 0)
+        self.assertEqual(runner._expert_history, {})
+
+    def test_remap_expert_indices_to_slots_with_mask_marks_resident_rows(self) -> None:
+        import mlx.core as mx
+
+        indices = mx.array([[[7, 3, 9, 7]]])
+
+        local, mask = remap_expert_indices_to_slots_with_mask(
+            indices,
+            {7: 2, 9: 5},
+        )
+
+        np.testing.assert_array_equal(np.array(local), [[[2, 0, 5, 2]]])
+        np.testing.assert_array_equal(np.array(mask), [[[1.0, 0.0, 1.0, 1.0]]])
+
+    def test_mixed_split_masks_partition_every_route_exactly_once(self) -> None:
+        # Exactness invariant for slot_arena_mixed_direct_qmm: the resident-arena pass
+        # and the missing-load pass must cover each routed position EXACTLY once, so the
+        # split-weighted sum (hit_y + missing_y) equals the full MoE output bit-for-bit.
+        import mlx.core as mx
+
+        indices = mx.array([[[7, 3, 9, 7]]])      # token's selected experts
+        scores = mx.array([[[0.4, 0.1, 0.3, 0.2]]])
+        resident = {7: 2, 9: 5}                    # experts resident in the frozen arena
+        missing = [e for e in (7, 3, 9, 7) if e not in resident]  # -> [3]
+        missing_to_slot = {expert: slot for slot, expert in enumerate(dict.fromkeys(missing))}
+
+        hit_local, hit_mask = remap_expert_indices_to_slots_with_mask(indices, resident)
+        miss_local, miss_mask = remap_expert_indices_to_slots_with_mask(indices, missing_to_slot)
+
+        hm = np.array(hit_mask)
+        mm = np.array(miss_mask)
+        # 1) every position contributes to exactly one pass (partition of unity)
+        np.testing.assert_array_equal(hm + mm, np.ones_like(hm))
+        # 2) the masked routes point at valid dense slots for their own pass
+        np.testing.assert_array_equal(np.array(hit_local), [[[2, 0, 5, 2]]])
+        np.testing.assert_array_equal(np.array(miss_local), [[[0, 0, 0, 0]]])
+        np.testing.assert_array_equal(mm, [[[0.0, 1.0, 0.0, 0.0]]])
+        # 3) scores split exactly -> recombination is lossless (the exactness guarantee)
+        s = np.array(scores)
+        np.testing.assert_allclose(s * hm + s * mm, s)
+
+    def test_compact_slot_arena_table_preserves_selected_expert_order(self) -> None:
+        import mlx.core as mx
+
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        arena = DeepSeekExpertSlotArena(
+            layer_index=3,
+            capacity=6,
+            arrays={
+                "w": mx.array(
+                    [
+                        [0, 0],
+                        [0, 0],
+                        [70, 71],
+                        [0, 0],
+                        [0, 0],
+                        [90, 91],
+                    ]
+                )
+            },
+            slot_to_expert=[None, None, 7, None, None, 9],
+            expert_to_slot={7: 2, 9: 5},
+            nbytes=48,
+            last_used=0,
+        )
+        missing_arrays = {"w": mx.array([[30, 31]])}
+        compact = DeepSeekV3StreamingForwardRunner._compact_slot_arena_arrays(
+            runner,
+            arena,
+            [7, 3, 9, 7],
+            [3],
+            missing_arrays,
+        )
+
+        np.testing.assert_array_equal(
+            np.array(compact["w"]),
+            [[70, 71], [30, 31], [90, 91], [70, 71]],
+        )
+
+    def test_compact_slot_arena_take_plan_keeps_work_to_selected_rows(self) -> None:
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        arena = DeepSeekExpertSlotArena(
+            layer_index=3,
+            capacity=6,
+            arrays={"w": object()},
+            slot_to_expert=[None, None, 7, None, None, 9],
+            expert_to_slot={7: 2, 9: 5},
+            nbytes=48,
+            last_used=0,
+        )
+
+        plan = DeepSeekV3StreamingForwardRunner._compact_slot_arena_take_plan(
+            runner,
+            arena,
+            [7, 3, 9, 7],
+            [3],
+        )
+
+        self.assertEqual(plan["hit_indices"], [2, 0, 5, 2])
+        self.assertEqual(plan["missing_indices"], [0, 0, 0, 0])
+        self.assertEqual(plan["hit_mask"], [True, False, True, True])
+
+    def test_slot_arena_telemetry_reports_compact_timing_buckets(self) -> None:
+        stats = DeepSeekExpertSlotArenaStats(
+            compact_calls=2,
+            compact_assemble_seconds=1.25,
+            compact_qmm_graph_seconds=0.5,
+            compact_total_seconds=2.0,
+        )
+
+        data = stats.to_dict(resident_bytes=10, arena_count=1, capacity=8)
+
+        self.assertEqual(data["compact_calls"], 2)
+        self.assertEqual(data["compact_assemble_seconds"], 1.25)
+        self.assertEqual(data["compact_qmm_graph_seconds"], 0.5)
+        self.assertEqual(data["compact_total_seconds"], 2.0)
+
+    def test_compact_slot_arena_forward_records_timing_buckets(self) -> None:
+        import mlx.core as mx
+
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        runner.session = SimpleNamespace(resident_bytes=0)
+        runner._expert_slot_stats = DeepSeekExpertSlotArenaStats()
+        runner._expert_slot_arena_bytes = 48
+        runner._expert_slot_clock = 0
+        runner._set_deepseek_external_resident_bytes = lambda *_args, **_kwargs: None
+        arena = DeepSeekExpertSlotArena(
+            layer_index=3,
+            capacity=6,
+            arrays={
+                "w": mx.array(
+                    [
+                        [0, 0],
+                        [0, 0],
+                        [70, 71],
+                        [0, 0],
+                        [0, 0],
+                        [90, 91],
+                    ]
+                )
+            },
+            slot_to_expert=[None, None, 7, None, None, 9],
+            expert_to_slot={7: 2, 9: 5},
+            nbytes=48,
+            last_used=0,
+        )
+        runner._expert_slot_arenas = {3: arena}
+
+        class Batch:
+            arrays = {"w": mx.array([[30, 31]])}
+            nbytes = 16
+            transient_page_bytes = 0
+
+        runner._load_deepseek_slice_batch = lambda *_args, **_kwargs: Batch()
+
+        def fake_qmm(
+            _mlp: object,
+            _layer_index: int,
+            _x: object,
+            _local_indices: object,
+            _scores: object,
+            compact_arrays: dict[str, object],
+        ) -> str:
+            np.testing.assert_array_equal(
+                np.array(compact_arrays["w"]),
+                [[70, 71], [30, 31], [90, 91]],
+            )
+            return "expert-y"
+
+        runner._deepseek_routed_qmm_from_arrays = fake_qmm
+        events: list[dict[str, object]] = []
+
+        got = DeepSeekV3StreamingForwardRunner._deepseek_moe_forward_slot_arena_compact_direct_qmm(
+            runner,
+            3,
+            object(),
+            object(),
+            mx.array([[[7, 3, 9, 7]]]),
+            [7, 3, 9],
+            mx.array([[[0.4, 0.1, 0.3, 0.2]]]),
+            events=events,
+            pass_kind="decode",
+            token_step=0,
+        )
+
+        self.assertEqual(got, "expert-y")
+        self.assertEqual(runner._expert_slot_stats.compact_calls, 1)
+        self.assertGreaterEqual(runner._expert_slot_stats.compact_partition_seconds, 0.0)
+        self.assertGreaterEqual(runner._expert_slot_stats.compact_assemble_seconds, 0.0)
+        self.assertGreaterEqual(runner._expert_slot_stats.compact_qmm_graph_seconds, 0.0)
+        self.assertIn("partition_seconds", events[0])
+        self.assertIn("compact_assemble_seconds", events[0])
+        self.assertIn("qmm_graph_seconds", events[0])
+
+    def test_hotcold_route_metadata_maps_hot_and_missing_rows(self) -> None:
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        arena = DeepSeekExpertSlotArena(
+            layer_index=3,
+            capacity=6,
+            arrays={"w": object()},
+            slot_to_expert=[None, None, 7, None, None, 9],
+            expert_to_slot={7: 2, 9: 5},
+            nbytes=48,
+            last_used=0,
+        )
+
+        route_source, local_indices = (
+            DeepSeekV3StreamingForwardRunner._deepseek_hotcold_route_metadata(
+                runner,
+                [7, 3, 9, 7],
+                arena,
+                [3],
+            )
+        )
+
+        self.assertEqual(route_source, [0, 1, 0, 0])
+        self.assertEqual(local_indices, [2, 0, 5, 2])
+
+    def test_deepseek_defer_eval_requires_retained_full_arena_hit(self) -> None:
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        runner.expert_compute_mode = "slot_arena_compact_defer_eval"
+        runner.base_retain_layers = {3}
+        runner._last_deepseek_slot_arena_full_hit = {3: True}
+
+        self.assertTrue(runner._deepseek_should_defer_layer_eval(3))
+
+        runner._last_deepseek_slot_arena_full_hit = {3: False}
+        self.assertFalse(runner._deepseek_should_defer_layer_eval(3))
+
+        runner._last_deepseek_slot_arena_full_hit = {4: True}
+        self.assertFalse(runner._deepseek_should_defer_layer_eval(4))
+
+        runner.expert_compute_mode = "slot_arena_compact_direct_qmm"
+        runner._last_deepseek_slot_arena_full_hit = {3: True}
+        self.assertFalse(runner._deepseek_should_defer_layer_eval(3))
+
+    def test_static_direct_fullhit_uses_arena_without_compacting(self) -> None:
+        import mlx.core as mx
+
+        runner = object.__new__(DeepSeekV3StreamingForwardRunner)
+        runner.session = SimpleNamespace(resident_bytes=0)
+        runner._expert_slot_stats = DeepSeekExpertSlotArenaStats()
+        runner._expert_slot_arena_bytes = 48
+        runner._expert_slot_clock = 0
+        runner._set_deepseek_external_resident_bytes = lambda *_args, **_kwargs: None
+        arena = DeepSeekExpertSlotArena(
+            layer_index=3,
+            capacity=6,
+            arrays={"w": object()},
+            slot_to_expert=[None, None, 7, None, None, 9],
+            expert_to_slot={7: 2, 9: 5},
+            nbytes=48,
+            last_used=0,
+        )
+        runner._expert_slot_arenas = {3: arena}
+        runner._compact_slot_arena_arrays = unittest.mock.Mock()
+
+        def fake_qmm(
+            _mlp: object,
+            _layer_index: int,
+            _x: object,
+            local_indices: object,
+            _scores: object,
+            arrays: dict[str, object],
+        ) -> str:
+            np.testing.assert_array_equal(np.asarray(local_indices), [[[2, 5, 2, 5]]])
+            self.assertIs(arrays, arena.arrays)
+            return "direct-arena-y"
+
+        runner._deepseek_routed_qmm_from_arrays = fake_qmm
+        events: list[dict[str, object]] = []
+
+        got = DeepSeekV3StreamingForwardRunner._deepseek_moe_forward_slot_arena_static_direct_defer(
+            runner,
+            3,
+            object(),
+            object(),
+            mx.array([[[7, 9, 7, 9]]]),
+            [7, 9],
+            mx.array([[[0.4, 0.1, 0.3, 0.2]]]),
+            events=events,
+            pass_kind="decode",
+            token_step=0,
+        )
+
+        self.assertEqual(got, "direct-arena-y")
+        runner._compact_slot_arena_arrays.assert_not_called()
+        self.assertTrue(runner._last_deepseek_slot_arena_full_hit[3])
+        self.assertEqual(runner._expert_slot_stats.arena_hits, 1)
 
     def test_deepseek_previous_table_prefetch_full_hit_assigns_predicted_table(self) -> None:
         class FakeFuture:
@@ -1608,6 +2270,97 @@ for line in sys.stdin:
         self.assertEqual(longest_reusable_prefix([1, 9], [1, 2, 3]), 0)
         self.assertEqual(longest_reusable_prefix([1, 2, 3, 4], [1, 2]), 0)
 
+    def test_glm_disables_persistent_chat_checkpoint(self) -> None:
+        from smarttensor.server import SmartTensorChat
+
+        app = object.__new__(SmartTensorChat)
+        app.runner = SimpleNamespace(model_type="glm_moe_dsa")
+        self.assertFalse(SmartTensorChat._checkpoint_cache_enabled(app))
+
+        app.runner = SimpleNamespace(model_type="deepseek_v3")
+        self.assertTrue(SmartTensorChat._checkpoint_cache_enabled(app))
+
+    def test_glm_server_defaults_to_direct_qmm(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeRunner:
+            def __init__(self, model_dir, **kwargs) -> None:
+                captured["model_dir"] = model_dir
+                captured["kwargs"] = kwargs
+                self.base_retain_layers = set()
+                self.tokenizer = object()
+                self.model_type = "glm_moe_dsa"
+
+            def close(self) -> None:
+                captured["closed"] = True
+
+        class FakeServer:
+            def __init__(self, address, handler) -> None:
+                captured["address"] = address
+                captured["handler"] = handler
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt
+
+            def server_close(self) -> None:
+                captured["server_closed"] = True
+
+        args = SimpleNamespace(
+            model_dir=Path("/tmp/glm"),
+            served_name=None,
+            host="127.0.0.1",
+            port=0,
+            retain_layers=None,
+            resident_budget="160GiB",
+            loader_backend="native",
+            pin_policy="phase",
+            expert_hot_set="",
+            sliding_cache="rotating",
+            native_layers=0,
+            pack_dir=Path("/tmp/packs"),
+            pack_read_workers=8,
+            weight_page_budget=None,
+            weight_page_policy="auto",
+            weight_page_rows=1,
+            decode_scheduler="auto",
+            expert_compute_mode="table",
+            expert_prefetch="off",
+            expert_prefetch_cap=32,
+            expert_slot_capacity=None,
+            draft="off",
+            draft_model=None,
+            draft_command=None,
+            max_draft=8,
+            speculative_scheduler="linear",
+            max_branches=16,
+            draft_margin=0.5,
+            reasoning_effort="low",
+            max_batch_size=1,
+            batch_wait_ms=0,
+            exact_mode="target-verified",
+            max_tokens_default=8,
+            enable_thinking=False,
+        )
+
+        with mock.patch(
+            "smarttensor.adapters.mlx.load_mlx_config",
+            return_value={"model_type": "glm_moe_dsa"},
+        ), mock.patch(
+            "smarttensor.adapters.mlx.DeepSeekV3StreamingForwardRunner",
+            FakeRunner,
+        ), mock.patch(
+            "smarttensor.server.ThreadingHTTPServer",
+            FakeServer,
+        ):
+            self.assertEqual(run_server(args), 0)
+
+        kwargs = captured["kwargs"]
+        self.assertEqual(kwargs["expert_compute_mode"], "direct_qmm")
+        self.assertEqual(kwargs["pack_read_workers"], 8)
+        self.assertEqual(kwargs["pack_dir"], Path("/tmp/packs"))
+        self.assertTrue(captured["closed"])
+        self.assertTrue(captured["server_closed"])
+
     def test_strip_trailing_stops_removes_only_trailing_stop_tokens(self) -> None:
         self.assertEqual(strip_trailing_stops([5, 6, 7, 0, 0], {0}), [5, 6, 7])
         self.assertEqual(strip_trailing_stops([0, 5, 0, 6], {0}), [0, 5, 0, 6])
@@ -1661,6 +2414,21 @@ for line in sys.stdin:
 
             full = np.frombuffer(bytes(range(16, 32)), dtype="<f4").reshape(2, 2)
             np.testing.assert_array_equal(np.array(batch.arrays[name]), full[[1, 0]])
+
+    def test_loader_can_drop_mmap_cache_after_first_dim_slice_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_toy_safetensors(Path(directory) / "toy.safetensors")
+            loader = MlxSelectiveLoader.from_model_dir(path.parent)
+            loader.drop_mmap_cache_after_read = True
+            name = "model.layers.0.self_attn.q_proj.weight"
+
+            with mock.patch.object(SafeTensorFile, "drop_tensor_cache") as drop_cache:
+                try:
+                    loader.load_first_dim_slices((name,), [1])
+                finally:
+                    loader.close()
+
+            drop_cache.assert_called_once_with(name)
 
     def test_first_dim_slices_preserve_duplicate_requested_rows(self) -> None:
         import mlx.core as mx
@@ -2178,6 +2946,205 @@ class ExpertPackStoreTests(unittest.TestCase):
                     for name in names:
                         expected = truth[name][sorted(ids)]
                         self.assertEqual(union[name].tobytes(), expected.tobytes())
+
+    def test_pack_direct_mlx_arrays_survive_reader_close(self) -> None:
+        try:
+            import mlx.core as mx
+        except ModuleNotFoundError:
+            self.skipTest("MLX is not installed")
+
+        from smarttensor.packstore import ExpertPackReader, ExpertPackWriter
+
+        with tempfile.TemporaryDirectory() as directory:
+            src = write_expert_safetensors(Path(directory) / "src.safetensors")
+            with SafeTensorFile(src) as safe_file:
+                names = ExpertPackWriter.expert_tensor_names(safe_file)
+                pack_path = Path(directory) / "experts.pack"
+                ExpertPackWriter.write(safe_file, pack_path, names)
+                truth = {}
+                for name in names:
+                    meta = safe_file.tensors[name]
+                    with safe_file.tensor(name) as slice_obj:
+                        truth[name] = np.frombuffer(
+                            slice_obj.copy(), dtype=_np_dtype(meta.dtype)
+                        ).reshape(meta.shape)
+
+            reader = ExpertPackReader(pack_path)
+            got = reader.load_expert_union_mlx(names, [2], layer=0)
+            reader.close()
+            mx.eval(list(got.values()))
+
+            for name in names:
+                expected = truth[name][[2]]
+                arr = got[name]
+                if arr.dtype == mx.bfloat16:
+                    arr = arr.view(mx.uint16)
+                self.assertEqual(np.array(arr).tobytes(), expected.tobytes(), msg=name)
+
+    def test_loader_uses_pack_direct_mlx_arrays_when_pack_is_attached(self) -> None:
+        try:
+            import mlx.core as mx
+        except ModuleNotFoundError:
+            self.skipTest("MLX is not installed")
+
+        from smarttensor.packstore import ExpertPackWriter, build_model_packs
+
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory) / "model"
+            model_dir.mkdir()
+            src = write_expert_safetensors(model_dir / "src.safetensors")
+            pack_dir = Path(directory) / "packs"
+            build_model_packs(model_dir, pack_dir)
+            with SafeTensorFile(src) as safe_file:
+                names = ExpertPackWriter.expert_tensor_names(safe_file)
+                truth = {}
+                for name in names:
+                    meta = safe_file.tensors[name]
+                    with safe_file.tensor(name) as slice_obj:
+                        truth[name] = np.frombuffer(
+                            slice_obj.copy(), dtype=_np_dtype(meta.dtype)
+                        ).reshape(meta.shape)
+
+            loader = MlxSelectiveLoader.from_model_dir(model_dir)
+            try:
+                attached = loader.attach_pack_dir(pack_dir)
+                loaded = loader.load_first_dim_slices(names, [2])
+                reader = next(iter(loader._pack_readers.values()))
+                summary = reader.telemetry.to_dict()
+            finally:
+                loader.close()
+
+            self.assertEqual(attached, 1)
+            self.assertEqual(summary["union_calls"], 1)
+            for name in names:
+                expected = truth[name][[2]]
+                arr = loaded.arrays[name]
+                if arr.dtype == mx.bfloat16:
+                    arr = arr.view(mx.uint16)
+                self.assertEqual(np.array(arr).tobytes(), expected.tobytes(), msg=name)
+
+    def test_loader_pack_workers_use_threaded_pread_useful_pack_regions(self) -> None:
+        try:
+            import mlx.core as mx
+        except ModuleNotFoundError:
+            self.skipTest("MLX is not installed")
+
+        import os
+        from smarttensor.packstore import ExpertPackWriter, build_model_packs
+
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory) / "model"
+            model_dir.mkdir()
+            src = write_expert_safetensors(model_dir / "src.safetensors")
+            pack_dir = Path(directory) / "packs"
+            build_model_packs(model_dir, pack_dir)
+            with SafeTensorFile(src) as safe_file:
+                names = ExpertPackWriter.expert_tensor_names(safe_file)
+                truth = {}
+                for name in names:
+                    meta = safe_file.tensors[name]
+                    with safe_file.tensor(name) as slice_obj:
+                        truth[name] = np.frombuffer(
+                            slice_obj.copy(), dtype=_np_dtype(meta.dtype)
+                        ).reshape(meta.shape)
+
+            calls = []
+            original_pread = os.pread
+
+            def fake_pread(fd, length, offset):
+                calls.append((offset, length))
+                return original_pread(fd, length, offset)
+
+            loader = MlxSelectiveLoader.from_model_dir(model_dir)
+            try:
+                loader.attach_pack_dir(pack_dir, pack_read_workers=8)
+                reader = next(iter(loader._pack_readers.values()))
+                loaded = None
+                self.assertEqual(reader.access_mode, "pread_bytearray_threaded")
+                self.assertEqual(reader.max_workers, 8)
+                with mock.patch("os.pread", side_effect=fake_pread):
+                    loaded = loader.load_first_dim_slices(names, [0, 2, 4])
+                summary = reader.telemetry.to_dict()
+            finally:
+                loader.close()
+
+            self.assertIsNotNone(loaded)
+            expected_regions = []
+            for name in names:
+                reader_record = reader.records[name]
+                expected_regions.extend(
+                    [
+                        (reader_record.expert_offset(0), reader_record.expert_nbytes),
+                        (reader_record.expert_offset(2), reader_record.expert_nbytes),
+                        (reader_record.expert_offset(4), reader_record.expert_nbytes),
+                    ]
+                )
+                expected = truth[name][[0, 2, 4]]
+                arr = loaded.arrays[name]
+                if arr.dtype == mx.bfloat16:
+                    arr = arr.view(mx.uint16)
+                self.assertEqual(np.array(arr).tobytes(), expected.tobytes(), msg=name)
+
+            self.assertEqual(sorted(calls), sorted(expected_regions))
+            self.assertEqual(summary["union_calls"], 1)
+            self.assertEqual(summary["ranges_total"], len(names) * 3)
+            self.assertEqual(summary["read_bytes"], summary["useful_bytes"])
+
+    def test_pack_threaded_pread_reuses_executor_until_reader_close(self) -> None:
+        try:
+            import mlx.core as mx  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("MLX is not installed")
+
+        from smarttensor.packstore import ExpertPackReader, ExpertPackWriter
+
+        class InlineFuture:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self):
+                return self.value
+
+        class FakeExecutor:
+            instances = []
+
+            def __init__(self, *, max_workers, thread_name_prefix):
+                self.max_workers = max_workers
+                self.thread_name_prefix = thread_name_prefix
+                self.submit_calls = []
+                self.shutdown_calls = []
+                FakeExecutor.instances.append(self)
+
+            def submit(self, fn, *args):
+                self.submit_calls.append((fn, args))
+                return InlineFuture(fn(*args))
+
+            def shutdown(self, *, wait):
+                self.shutdown_calls.append(wait)
+
+        with tempfile.TemporaryDirectory() as directory:
+            src = write_expert_safetensors(Path(directory) / "src.safetensors")
+            with SafeTensorFile(src) as safe_file:
+                names = ExpertPackWriter.expert_tensor_names(safe_file)
+                pack_path = Path(directory) / "experts.pack"
+                ExpertPackWriter.write(safe_file, pack_path, names)
+
+            with mock.patch("smarttensor.packstore.ThreadPoolExecutor", FakeExecutor):
+                reader = ExpertPackReader(
+                    pack_path,
+                    access_mode="pread_bytearray_threaded",
+                    max_workers=8,
+                )
+                try:
+                    reader.load_expert_union_mlx(names, [0, 2])
+                    reader.load_expert_union_mlx(names, [1, 3])
+                    self.assertEqual(len(FakeExecutor.instances), 1)
+                    self.assertEqual(FakeExecutor.instances[0].max_workers, 8)
+                    self.assertGreater(len(FakeExecutor.instances[0].submit_calls), 0)
+                finally:
+                    reader.close()
+
+            self.assertEqual(FakeExecutor.instances[0].shutdown_calls, [True])
 
 
 def _np_dtype(dtype: str) -> np.dtype:

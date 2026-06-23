@@ -25,8 +25,8 @@ For tight profiles, use:
 ```bash
 tensorfold serve /path/to/model \
   --resident-budget 2GiB \
-  --loader-backend native \
-  --pin-policy phase
+  --close-shard-handles \
+  --mlx-cache-limit 0
 ```
 
 ## Comparing Runs
