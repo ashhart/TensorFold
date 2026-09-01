@@ -23,6 +23,7 @@ from tensorfold.server.http import served_model_ids
 from tensorfold.server import metrics
 from tensorfold.server.scheduler import ChatJob, Scheduler
 from tensorfold.server.stopping import StopPolicy
+from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 from tensorfold.server.text import (
     IncrementalText,
     _LockedTokenizer,
@@ -93,12 +94,14 @@ class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
         fit_context: bool = False,
         decode_share: float = 0.25,
         grow_checkpoints: bool = False,
+        vision_max_images: int | None = None,
     ) -> None:
         # three candidate entries per conversation (history boundary, stable prefix, reply end)
         if checkpoint_slots is None:
             checkpoint_slots = max(3 * int(lanes), 8)
         self._model = model
         self.vision = getattr(model, "vision", None)
+        self.image_limits = DEFAULT_LIMITS if vision_max_images is None else ImageLimits(max_images=vision_max_images)
         self.served_name = served_name
         self.model_ids = served_model_ids(served_name, model_aliases)
         self.max_batch_size = int(lanes)

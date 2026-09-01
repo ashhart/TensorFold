@@ -288,6 +288,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     app = app_class(engine, model_dir, served, default_thinking=bool(args.thinking), sampling=sampling,
                     max_tokens=int(args.max_tokens), context_window=context if context is not None else args.context,
                     reasoning_effort=args.reasoning_effort, thinking_budget=int(args.thinking_budget),
+                    vision_max_images=getattr(args, "vision_max_images", None),
                     aliases=list(args.alias))
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
@@ -482,6 +483,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         snapshot_dir=snapshot_dir, model_id=model_id, model_dir=model_dir,
         decode_share=0.25 if args.decode_share is None else float(args.decode_share),
         grow_checkpoints=args.prompt_cache_gib is None,
+        vision_max_images=getattr(args, "vision_max_images", None),
     )
     if app.context_fitted:
         print(f"[tensorfold] context window {app.context_window:,} tokens: the most one request can use in the "
