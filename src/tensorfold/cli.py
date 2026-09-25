@@ -1,11 +1,12 @@
 """The ``tensorfold`` command.
 
-    tensorfold serve MODEL_DIR [--port 8080] [--context 32768] [--temperature 0.7] ...
+    tensorfold pull Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP
+    tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP [--port 8080] [--context 65536] [--temperature 0.7] ...
     tensorfold models
-    tensorfold info MODEL_DIR
+    tensorfold info MODEL
 
-``serve`` loads the model with its family's kernels and serves an OpenAI-compatible API at
-``http://HOST:PORT/v1`` (``/v1/models``, ``/v1/chat/completions``, ``/v1/completions``).
+A model is a Hugging Face repo id (downloaded into the Hugging Face cache on first use) or a local directory.
+``serve`` loads it with its family's kernels and serves an OpenAI-compatible API at ``http://HOST:PORT/v1``.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from typing import Any
 
 from tensorfold import __version__
 
+COMMANDS = ("serve", "pull", "models", "info")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -32,11 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve = commands.add_parser("serve", help="serve a model at an OpenAI-compatible endpoint",
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    serve.add_argument("model", type=Path, help="model directory (config.json, weights, tokenizer)")
+    serve.add_argument("model", help="a Hugging Face repo id (downloaded on first use) or a model directory")
     endpoint = serve.add_argument_group("endpoint")
     endpoint.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0: every interface)")
     endpoint.add_argument("--port", type=int, default=8080)
-    endpoint.add_argument("--name", default="", help="model id clients ask for (default: the directory's name)")
+    endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
@@ -58,60 +61,114 @@ def build_parser() -> argparse.ArgumentParser:
     speed = serve.add_argument_group("drafting and caches")
     speed.add_argument("--no-drafts", action="store_true",
                        help="one token a round: the serial reference (same output, slower)")
-    speed.add_argument("--drafter", default="",
-                       help="a DFlash2 draft model (Hugging Face id in the local cache, or a directory); Qwen3.8 dense")
+    speed.add_argument("--drafter", default="auto",
+                       help="a draft model (repo id or directory); auto: the family's draft model when it has been "
+                            "pulled; none: no draft model")
     speed.add_argument("--drafter-bits", type=int, default=4, help="quantize the draft model's linears (0: bf16)")
     speed.add_argument("--mtp-drafts", type=int, default=None,
                        help="most MTP drafts a round (Qwen3.8 Flash Next; default 3, 0: none)")
-    speed.add_argument("--mtp-head", default="", help="a converted MTP head file (Nemotron; 0: none)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
-    speed.add_argument("--prompt-cache-gib", type=float, default=16.0,
-                       help="memory for cached conversation prefixes (0: off)")
+    speed.add_argument("--prompt-cache-gib", type=float, default=None,
+                       help="memory for cached conversation prefixes (0: off; default: an eighth of RAM, at most 16)")
     speed.add_argument("--snapshot-dir", default=str(Path.home() / ".cache" / "tensorfold" / "prefix-snapshots"),
                        help="where system-block and conversation snapshots are kept ('none': in memory only)")
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
     serve.set_defaults(func=cmd_serve)
 
-    models = commands.add_parser("models", help="list the model families this build supports")
+    pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
+    pull.add_argument("repos", nargs="+", help="repo ids, e.g. Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP")
+    pull.set_defaults(func=cmd_pull)
+
+    models = commands.add_parser("models", help="list the model families and the checkpoints they are tested with")
     models.set_defaults(func=cmd_models)
 
-    info = commands.add_parser("info", help="show which family serves a model directory (loads no weights)")
-    info.add_argument("model", type=Path)
+    info = commands.add_parser("info", help="show which family serves a model (reads its config.json only)")
+    info.add_argument("model", help="a Hugging Face repo id or a model directory")
     info.set_defaults(func=cmd_info)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # ``tensorfold MODEL_DIR ...`` is ``tensorfold serve MODEL_DIR ...``
-    if argv and not argv[0].startswith("-") and argv[0] not in ("serve", "models", "info") and Path(argv[0]).is_dir():
-        argv = ["serve", *argv]
+    # ``tensorfold MODEL ...`` is ``tensorfold serve MODEL ...``
+    if argv and not argv[0].startswith("-") and argv[0] not in COMMANDS:
+        from tensorfold import hub
+
+        if Path(argv[0]).expanduser().is_dir() or hub.is_repo_id(argv[0]):
+            argv = ["serve", *argv]
     args = build_parser().parse_args(argv)
-    return int(args.func(args) or 0)
+    try:
+        return int(args.func(args) or 0)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"tensorfold: {exc}", file=sys.stderr)
+        return 1
+
+
+def _config_dir(model: str) -> Path:
+    """A directory holding the model's config.json: the model directory, its cached snapshot, or (for a repo id not
+    downloaded yet) a snapshot with config.json alone, so the family and its checks run before any weight moves."""
+
+    from tensorfold import hub
+
+    path = Path(model).expanduser()
+    if path.is_dir():
+        return path
+    if not hub.is_repo_id(model):
+        raise FileNotFoundError(f"{model} is neither a directory nor a Hugging Face repo id (owner/name)")
+    found = hub.cached(model)
+    if found is not None and (found / "config.json").is_file():
+        return found
+    from huggingface_hub import hf_hub_download
+
+    return Path(hf_hub_download(model, "config.json")).parent
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    from tensorfold import families, hub
+
+    for repo in args.repos:
+        if not hub.is_repo_id(repo):
+            raise ValueError(f"{repo} is not a Hugging Face repo id (owner/name)")
+        config = _config_dir(repo)
+        try:
+            family = families.detect(config)
+        except ValueError:
+            family = None          # a draft model, for example
+        if family is not None:
+            check = getattr(family.package, "check", None)
+            if check is not None:
+                check(config)
+        path = hub.pull(repo)
+        what = f"{family.title} ({family.model_type})" if family is not None else "no model family (a draft model?)"
+        print(f"{repo}: {hub.size_of(path) / 1e9:.1f} GB in {path} [{what}]")
+    return 0
 
 
 def cmd_models(args: argparse.Namespace) -> int:
     from tensorfold import families
 
     for kind, family in sorted(families.families().items()):
+        package = family.package
         engine = "lane engine" if family.lanes else "serial engine"
-        print(f"{kind:14s} {family.title} ({engine}, {family.module})")
+        print(f"{family.title} ({kind}, {engine})")
+        for repo in getattr(package, "MODELS", ()):
+            print(f"  model    {repo}")
+        drafter = getattr(package, "DRAFTER", "")
+        if drafter:
+            print(f"  drafter  {drafter}")
     return 0
 
 
 def cmd_info(args: argparse.Namespace) -> int:
     from tensorfold import families
 
-    config = families.read_config(args.model)
+    directory = _config_dir(args.model)
+    config = families.read_config(directory)
     text = config.get("text_config", config)
-    try:
-        family = families.detect(args.model)
-    except ValueError as exc:
-        print(exc, file=sys.stderr)
-        return 1
-    quant = config.get("quantization") or text.get("quantization") or {}
+    family = families.detect(directory)
+    bits, group = families.quantization(config)
     print(f"model_type   {family.model_type}")
     print(f"family       {family.title} ({family.module})")
     print(f"engine       {'lane engine' if family.lanes else 'serial engine'}")
@@ -119,11 +176,14 @@ def cmd_info(args: argparse.Namespace) -> int:
                 "vocab_size", "max_position_embeddings"):
         if key in text:
             print(f"{key:12s} {text[key]}" if len(key) <= 12 else f"{key} {text[key]}")
-    if quant:
-        print(f"quantization {quant.get('bits')}-bit, groups of {quant.get('group_size')}")
-    generation = _generation_config(args.model)
+    if bits is not None:
+        print(f"quantization {bits}-bit, groups of {group}")
+    generation = _generation_config(directory)
     if generation:
         print(f"sampling     {generation}")
+    check = getattr(family.package, "check", None)
+    if check is not None:
+        check(directory)
     return 0
 
 
@@ -133,16 +193,36 @@ def _generation_config(model_dir: Path) -> dict[str, Any]:
     return {k: config[k] for k in ("temperature", "top_k", "top_p") if k in config}
 
 
+def _drafter(family: Any, choice: str) -> str:
+    """The draft model directory for ``--drafter`` (auto: the family's draft model if it has been pulled)."""
+
+    from tensorfold import hub
+
+    if choice in ("", "none"):
+        return ""
+    if choice != "auto":
+        return str(hub.resolve(choice))
+    repo = getattr(family.package, "DRAFTER", "")
+    if not repo:
+        return ""
+    found = hub.cached(repo)
+    if found is None:
+        print(f"[tensorfold] no draft model: `tensorfold pull {repo}` once to draft with it", flush=True)
+        return ""
+    return str(found)
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from http.server import ThreadingHTTPServer
 
-    from tensorfold import families
+    from tensorfold import families, hub
 
-    model_dir = Path(args.model).expanduser()
-    if not (model_dir / "config.json").is_file():
-        print(f"{model_dir} has no config.json", file=sys.stderr)
-        return 1
-    family = families.detect(model_dir)
+    config_dir = _config_dir(args.model)
+    family = families.detect(config_dir)
+    check = getattr(family.package, "check", None)
+    if check is not None:
+        check(config_dir)                        # refuse an unsupported checkpoint before downloading its weights
+    model_dir = hub.resolve(args.model)
     for key, value in getattr(family.package, "MLX_ENV", {}).items():
         os.environ.setdefault(key, value)       # before MLX starts: it reads them once
 
@@ -156,11 +236,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # chunk, grow a server by tens of GB without a cap
     mx.set_cache_limit(int(float(args.mlx_cache_gib) * 1024**3))
     started = time.perf_counter()
-    options: dict[str, Any] = {"lane_kernels": args.lane_kernels, "drafter": args.drafter,
-                               "drafter_bits": args.drafter_bits, "mtp_head": args.mtp_head}
+    drafter = "" if args.no_drafts else _drafter(family, args.drafter)
+    options: dict[str, Any] = {"lane_kernels": args.lane_kernels, "drafter": drafter,
+                               "drafter_bits": args.drafter_bits}
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
-    print(f"[tensorfold] loading {model_dir.name}: {family.title} ({family.model_type})", flush=True)
+    served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
+    print(f"[tensorfold] loading {served}: {family.title} ({family.model_type})", flush=True)
     model, tokenizer = family.package.load(model_dir, **options)
 
     from tensorfold.engine.family_engine import SerialEngine
@@ -178,8 +260,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # a snapshot's bits depend on the MLX version and the kernels that computed it: never mix them
     model_id = (f"{model_dir.resolve()}|mlx={mx.__version__}|kernels={families.kernel_version(family, model)}"
                 f"|tensorfold={__version__}")
-    budget = int(float(args.prompt_cache_gib) * 1024**3)
-    served = args.name or model_dir.name
+    gib = args.prompt_cache_gib
+    if gib is None:
+        ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        gib = min(16.0, ram / 8 / 1024**3)
+    budget = int(float(gib) * 1024**3)
     app = ChatApp(
         model,
         tokenizer,

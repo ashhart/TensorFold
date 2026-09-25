@@ -16,6 +16,9 @@ def load(model_dir, **options):   # -> (model, tokenizer); ignore options you do
     ...
 
 # optional
+MODELS = ("owner/checkpoint",)                 # Hugging Face checkpoints it is tested with (`tensorfold models`)
+DRAFTER = "owner/draft-model"                  # a draft model `serve` uses once it has been pulled
+def check(model_dir): ...                      # raise for a checkpoint the kernels cannot read, before any download
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200"}   # set before MLX starts, unless the environment sets them
 def engine_settings(model): ...                # keyword arguments for the engine, e.g. {"max_rows": 16}
 def kernel_version(model): ...                 # a name for the kernels (prefix snapshots are keyed by it)
@@ -23,7 +26,10 @@ def setup(app, model, **options): ...          # extras on the server app, e.g. 
 ```
 
 Without `kernel_version`, snapshots are keyed by a hash of the package's source files, so editing a kernel
-never reuses a snapshot computed by the old one.
+never reuses a snapshot computed by the old one. `check` reads only `config.json`: `tensorfold serve` and
+`tensorfold pull` fetch that file first, so a checkpoint your kernels cannot read (another bit width, a missing
+draft head) is refused before its weights download. Publish the checkpoint you test with on Hugging Face and
+list it in `MODELS`, so people pull exactly what your kernels expect.
 
 ## The model object (serial engine)
 

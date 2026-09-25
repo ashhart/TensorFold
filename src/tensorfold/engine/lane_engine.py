@@ -458,7 +458,7 @@ class LaneEngine:
     # Rows a draft window may use without strong evidence (see ``_drafts_for``).
     cheap_window = 4
     # Hard cap on a window's rows so verification stays bit-identical to serial
-    # decoding (0 = no cap). Set by the server with ``--exact-window``.
+    # decoding (0 = no cap). Set by a family (``families.qwen3_5.LANE_SETTINGS``).
     exact_window = 0
     # Layers per slice of the forward handed to the GPU while the next slice is built
     # (0 = build the whole graph, then evaluate). Same graph, same bits.
@@ -722,9 +722,9 @@ class LaneEngine:
 
     @staticmethod
     def _route_hidden(stream: Any) -> None:
-        """Point the forward's hidden-state feed at this stream's own proposer (the relay drafter's ``sink``), or
-        at nothing. One global feed let a second request's proposer take it from a stream still decoding: that
-        stream's relay drafted nothing for the rest of its request (2026-09-24)."""
+        """Point the forward's hidden-state feed at this stream's own proposer (one that drafts from the target's
+        hidden states exposes a ``sink``), or at nothing. One global feed let a second request's proposer take it
+        from a stream still decoding, whose proposer then drafted nothing for the rest of its request."""
         from tensorfold.kernels import lane_tree
 
         lane_tree.HIDDEN_SINK = getattr(getattr(stream, "proposer", None), "sink", None)

@@ -22,6 +22,8 @@ from typing import Any
 MODEL_TYPES = ("qwen3_5",)
 TITLE = "Qwen3.8 dense"
 LANES = True
+MODELS = ("Vontra/Qwen3.8-27B-MLX-4bit",)
+DRAFTER = "z-lab/Qwen3.8-27B-DFlash2"
 
 # the lane engine's switches with lane kernels (measured on an M5 Max: see docs/recipes/qwen3.8-27b.md): trees of
 # up to 15 drafted nodes, chains of up to 31 (copies, tool-call structure), prompts through the lane decoder in
@@ -72,11 +74,17 @@ def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
 def load(model_dir: Path, *, lane_kernels: str = "auto", **_: Any) -> tuple[Any, Any]:
     """The model with lane kernels installed when ``lane_kernels`` is "on", or "auto" on a GPU with tensor units."""
 
+    from tensorfold.families import quantization, read_config
+
     model, tokenizer = load_lane_model(Path(model_dir))
-    use = lane_kernels == "on" or (lane_kernels == "auto" and tensor_units())
+    fits = quantization(read_config(model_dir)) == (4, 64)
+    use = fits and (lane_kernels == "on" or (lane_kernels == "auto" and tensor_units()))
     model._tensorfold_lanes = bool(use)
     if use:
         install_lane_kernels(model)
+    elif not fits:
+        print(f"[tensorfold] lane kernels need 4-bit weights in groups of 64 ({MODELS[0]}): MLX's kernels verify "
+              f"drafted rows at width", flush=True)
     else:
         print("[tensorfold] lane kernels off: MLX's kernels verify drafted rows at width", flush=True)
     return model, tokenizer
@@ -141,7 +149,7 @@ def kernel_version(model: Any) -> str:
 
 
 def setup(app: Any, model: Any, *, drafter: str = "", drafter_bits: int = 4, **_: Any) -> None:
-    """A DFlash2 draft model (a Hugging Face id in the local cache, or a directory) for the app's requests."""
+    """A DFlash2 draft model (a directory) for the app's requests."""
 
     if not drafter:
         return

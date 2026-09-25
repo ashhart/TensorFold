@@ -284,7 +284,7 @@ def _conv_windows(parents: Sequence[int], n_keep: int) -> mx.array:
     return mx.array(windows, dtype=mx.int32)
 
 
-# When a list, every tree_forward appends its rows' post-norm hidden [1, W, D] (``relay_drafter`` reads them).
+# When a list, every tree_forward appends its rows' post-norm hidden [1, W, D] (a proposer that drafts from them reads them).
 HIDDEN_SINK: list | None = None
 
 
@@ -334,7 +334,7 @@ def tree_forward(core: Any, head: Any, tokens: Sequence[int], parents: Sequence[
     hidden, x = lane_glue.norm_xs(hidden, pending, core.norm.weight, core.norm.eps)
     if tapped is not None:
         tapped[0][tapped[1]] = hidden
-    if HIDDEN_SINK is not None:                       # the relay drafter reads every row's post-norm hidden
+    if HIDDEN_SINK is not None:                       # a hidden-state proposer reads every row's post-norm hidden
         HIDDEN_SINK.append(x)
         if len(HIDDEN_SINK) > 1024:
             del HIDDEN_SINK[0]

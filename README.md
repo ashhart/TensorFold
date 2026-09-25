@@ -1,14 +1,74 @@
 # TensorFold
 
-TensorFold serves a local LLM on Apple Silicon at an OpenAI-compatible endpoint, fast and exact. Point it at a
-model directory, choose the context window and sampling, and it loads the model with Metal kernels written for
-that model family:
+TensorFold serves a local LLM on Apple Silicon at an OpenAI-compatible endpoint, fast and exact. Name a model
+on Hugging Face, choose the context window and sampling, and TensorFold downloads it, loads it with Metal
+kernels written for that model family, and serves `/v1/chat/completions`.
 
 ```bash
-tensorfold serve ~/models/Qwen3.8-Flash-Next-MLX-4bit-MTP --context 65536 --port 8080
+pip install git+https://github.com/ashhart/TensorFold.git
+tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --context 65536
 ```
 
-Any OpenAI client can then use `http://127.0.0.1:8080/v1`, including coding agents, SDKs and `curl`.
+Any OpenAI client can then use `http://127.0.0.1:8080/v1`, including coding agents, SDKs and `curl`:
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "messages": [{"role": "user", "content": "Hi"}]}'
+```
+
+TensorFold needs a Mac with Apple Silicon and Python 3.11 or newer.
+
+## Models
+
+Each model family has its own package of kernels, picked from the checkpoint's `config.json`. These are the
+checkpoints TensorFold is built and tested with, all on Hugging Face:
+
+| Model | Pull | Size | Mac |
+| --- | --- | --- | --- |
+| Nemotron 3.5 Lightning 30B-A3B | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 17.8 GB | 32 GB or more |
+| Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` and its draft model `z-lab/Qwen3.8-27B-DFlash2` | 16.1 GB + 3.8 GB | 32 GB or more; an M5-generation GPU for the fast kernels |
+| Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 113 GB | 192 GB or more |
+
+```bash
+tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit
+```
+
+`serve` downloads a model it doesn't have yet; `pull` downloads ahead of time. Models go into the Hugging Face
+cache (`~/.cache/huggingface`), and a local model directory works too. `tensorfold models` lists the families
+and their checkpoints.
+
+What each checkpoint needs:
+
+- Qwen3.8 Flash Next drafts with the MTP head stored in its checkpoint, and its kernels read 4-bit weights in
+  groups of 32. Use the `-MLX-4bit-MTP` conversion. TensorFold refuses other bit widths before downloading
+  anything, and a conversion without the MTP head runs without drafts.
+- Qwen3.8-27B drafts with the DFlash2 draft model once it has been pulled; `serve` picks it up automatically.
+  Its lane kernels need 4-bit weights in groups of 64 and Metal 4 tensor units (M5-generation GPUs). Elsewhere
+  it runs on MLX's own kernels: every token is still the model's own sample, but drafted rows are checked at
+  width rather than bit-identical to one-row decoding.
+- Nemotron 3.5 Lightning drafts from the context (copies of earlier text) and needs nothing extra.
+
+Want another model? [The recipe book](docs/recipes/README.md) describes what we did for each family and how
+to add yours.
+
+## Speed
+
+Decode speeds we measured through the server. They depend on content: copies of earlier text (file edits)
+and predictable output (code, tool calls) draft well, fresh prose less so.
+
+| Model | Machine | Workload | tok/s |
+| --- | --- | --- | --- |
+| Nemotron 3.5 Lightning, 4-bit | M5 Max, 128 GB | short answer with thinking | 188-206 (mlx_lm: 138) |
+| | | about 20k-token context | 175 |
+| | | about 60k-token context | 162 |
+| Qwen3.8-27B, 4-bit, DFlash2 drafter | M5 Max, 128 GB | short answer with thinking | 120-124 (27 without drafts) |
+| | | code | 189 (26 without drafts) |
+| Qwen3.8 Flash Next, 4-bit | M3 Ultra, 256 GB | short answer with thinking | 88-92 (79 without drafts) |
+| | | code | 110 (80 without drafts) |
+| | | file edit | 170-176 |
+| | | 18k-token context | 77-84 |
+| | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 91-99 |
 
 ## Exact means byte-identical
 
@@ -32,67 +92,19 @@ it. One limit: for Flash Next and Nemotron the prompt's cache can differ in its 
 prefix was already cached, so a reply can too ([details](docs/recipes/README.md#a-known-limit)). Drafted and
 serial decoding from the same cache always agree.
 
-## Models
-
-TensorFold picks a family package from the checkpoint's `config.json` `model_type`. Each family keeps its own
-forward pass, kernels and drafting.
-
-| Family | `model_type` | Drafting | Tested on |
-| --- | --- | --- | --- |
-| Qwen3.8 Flash Next | `qwen4_exp` | the checkpoint's MTP head (up to 3 drafts a round) and copies from the context | M3 Ultra, MLX 0.32.0 |
-| Nemotron 3.5 Lightning (30B-A3B) | `nemotron_h` | copies from the context, GPU-side sampling one step ahead | M5 Max, MLX 0.31.2 |
-| Qwen3.8 dense (27B) | `qwen3_5` | DFlash2 draft trees, copies, tool-call structure | M5 Max, MLX 0.31.2 |
-
-Decode speeds we measured through the server. They depend on content: copies of earlier text (file edits)
-and predictable output (code, tool calls) draft well, fresh prose less so.
-
-| Model | Machine | Workload | tok/s |
-| --- | --- | --- | --- |
-| Qwen3.8 Flash Next, 4-bit | M3 Ultra, 256 GB | short answer with thinking | 88-92 (79 without drafts) |
-| | | code | 110 (80 without drafts) |
-| | | file edit | 170-176 |
-| | | 18k-token context | 77-84 |
-| | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 91-99 |
-| Nemotron 3.5 Lightning, 4-bit | M5 Max, 128 GB | short answer with thinking | 188-206 (mlx_lm: 138) |
-| | | about 20k-token context | 175 |
-| | | about 60k-token context | 162 |
-| Qwen3.8-27B, 4-bit, DFlash2 drafter | M5 Max, 128 GB | short answer with thinking | 120-124 (27 without drafts) |
-| | | code | 189 (26 without drafts) |
-
-The Qwen3.8 dense lane kernels use the Metal 4 tensor units of M5-generation GPUs. On older GPUs TensorFold runs
-that family on MLX's own kernels: every token is still the model's sample, but drafted rows are checked at width
-rather than bit-identical to one-row decoding.
-
-Want another model? [The recipe book](docs/recipes/README.md) describes what we did for each family and how
-to add yours.
-
-## Install
-
-TensorFold needs macOS on Apple Silicon and Python 3.11 or newer.
-
-```bash
-git clone https://github.com/ashhart/TensorFold.git
-cd TensorFold
-pip install -e .
-```
-
-A model is an MLX checkpoint directory: `config.json`, safetensors weights and the tokenizer files, as mlx-lm
-writes them. TensorFold does not download weights. For Qwen3.8-27B with drafts, fetch the draft model into the
-Hugging Face cache once: `huggingface-cli download z-lab/Qwen3.8-27B-DFlash2`. Qwen3.8 Flash Next drafts with the
-MTP head stored in its checkpoint, so use a conversion that keeps the `mtp.*` weights.
-
 ## Serve
 
 ```bash
-tensorfold serve MODEL_DIR [options]
-tensorfold models            # the families this build supports
-tensorfold info MODEL_DIR    # which family serves a directory (reads config.json only)
+tensorfold serve MODEL [options]    # MODEL: a Hugging Face repo id or a model directory
+tensorfold pull REPO [REPO ...]      # download models or draft models
+tensorfold models                   # families and the checkpoints they are tested with
+tensorfold info MODEL               # which family serves a model (reads its config.json only)
 ```
 
 | Option | Default | What it does |
 | --- | --- | --- |
 | `--host`, `--port` | `127.0.0.1`, `8080` | where to listen (`--host 0.0.0.0` for other machines) |
-| `--name`, `--alias` | directory name | the model id clients send |
+| `--name`, `--alias` | the model's name | the model id clients send |
 | `--context N` | no limit | prompt plus reply tokens a request may use; longer prompts get HTTP 400 |
 | `--max-tokens N` | 4096 | reply length when a request does not set `max_tokens` |
 | `--temperature`, `--top-p`, `--top-k` | the model's `generation_config.json` | sampling defaults; `--temperature 0` is greedy |
@@ -100,9 +112,9 @@ tensorfold info MODEL_DIR    # which family serves a directory (reads config.jso
 | `--reasoning-effort` | `medium` | for chat templates that take one (Qwen3.8) |
 | `--thinking-budget N` | no limit | most thinking tokens before the server closes the think block |
 | `--no-drafts` | off | one token a round: the serial reference |
-| `--drafter ID_OR_DIR` | none | DFlash2 draft model (Qwen3.8 dense) |
+| `--drafter` | `auto` | the family's draft model once pulled; a repo id or directory; or `none` |
 | `--mtp-drafts N` | 3 | most MTP drafts a round (Qwen3.8 Flash Next) |
-| `--prompt-cache-gib` | 16 | memory for cached conversation prefixes |
+| `--prompt-cache-gib` | an eighth of RAM, at most 16 | memory for cached conversation prefixes |
 | `--snapshot-dir` | `~/.cache/tensorfold/prefix-snapshots` | system blocks and conversations kept across restarts |
 
 Requests can override the sampling fields, the thinking switch and the budget. See [the API notes](docs/api.md)
@@ -120,6 +132,7 @@ at shutdown and read back on demand.
 ```
 src/tensorfold/
   cli.py                 the tensorfold command
+  hub.py                 models by Hugging Face repo id
   server/                OpenAI HTTP layer (http.py) and the request queue, caches and streaming (app.py)
   engine/                the serial engine, the lane engine, exact sampling, prompt caches
   kernels/               lane matmul and attention (tensor units) and the Qwen3.8 dense GDN helpers
@@ -128,9 +141,11 @@ src/tensorfold/
 docs/recipes/            what we did per family, and how to add one
 ```
 
-## Tests
+## Development
 
 ```bash
+git clone https://github.com/ashhart/TensorFold.git
+cd TensorFold
 pip install -e ".[test]"
 pytest
 ```
@@ -139,4 +154,5 @@ The kernel tests of the lane engine need an M5-generation GPU and are skipped el
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+MIT. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md). Each model keeps its own license;
+see its Hugging Face page.

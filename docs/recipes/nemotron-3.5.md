@@ -84,9 +84,11 @@ The pieces (`families/nemotron_h/kernels.py`):
 ## Next
 
 - MTP drafting. The BF16 release carries an MTP layer (an attention block and a 128-expert MoE block) that the
-  MLX conversion drops; `families/nemotron_h/mtp.py` converts it (`convert`) and the engine can draft with it
-  (`TF_MTP_ROUNDS=1`). In-engine it measured 217 tok/s on prose and 216-228 on code; it is not on by default
-  in the server yet. Chaining several MTP drafts with acceptance-driven depth, as Flash Next does, is untried.
+  MLX conversion drops. `convert` in `families/nemotron_h/mtp.py` quantizes it from the release's last shard
+  into one 4-bit file, and with `TF_MTP_ROUNDS=1` the engine loads it (from
+  `~/.cache/tensorfold/mtp/nemotron-3.5-lightning/mtp-4bit.safetensors`, or the path in `TF_NEMOTRON_MTP`) and
+  drafts with it. In-engine it measured 217 tok/s on prose and 216-228 on code; it is not on by default in the
+  server yet. Chaining several MTP drafts with acceptance-driven depth, as Flash Next does, is untried.
 - Tests for the fused kernels (row independence at real dims) and for the GPU sampler against its numpy
   reference (`gpu_sampling.reference`).
 - At long context the cost is attention.

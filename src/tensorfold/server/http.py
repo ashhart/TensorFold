@@ -3,7 +3,7 @@
 
 ``make_handler(app)`` wraps any app with ``chat(messages, max_tokens=, temperature=, on_delta=, tools=,
 sampling=)``, ``served_name``, ``model_ids``, ``tokenizer`` / ``tokenizer_lock`` and ``exact_mode``
-(``server.lane_server.LaneChatApp`` is the one TensorFold serves).
+(``server.app.ChatApp`` is the one TensorFold serves).
 """
 
 from __future__ import annotations
@@ -565,8 +565,6 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     extras["speculative"] = reply["speculative"]
                 if reply.get("pass_economics"):
                     extras["pass_economics"] = reply["pass_economics"]
-                if reply.get("multiplex"):
-                    extras["multiplex"] = reply["multiplex"]
                 return extras
 
             def attach_tool_calls(reply: dict[str, Any]) -> dict[str, Any]:

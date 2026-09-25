@@ -284,7 +284,7 @@ class LaneGDNCache:
         self.left_padding = None
         self._pending: tuple[mx.array, mx.array, mx.array] | None = None
 
-    # -- the cache protocol the model and the burst loop read -------------------
+    # -- the cache protocol the model reads ---------------------------------------
     @property
     def lanes(self) -> int:
         return int(self.conv.shape[0])

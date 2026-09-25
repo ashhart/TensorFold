@@ -132,8 +132,8 @@ class NemotronH:
 
 
 def load(model_dir: Path, *, mtp_head: str = "") -> tuple[Any, Any]:
-    """The model, with its converted MTP head when ``mtp_head`` (or TF_NEMOTRON_MTP) names one, or when
-    ``mtp.DEFAULT_DIR/mtp-4bit.safetensors`` exists; "0" decodes without it."""
+    """The model. Its MTP head (converted from the BF16 release with ``mtp.convert``) is loaded only for MTP rounds
+    (TF_MTP_ROUNDS=1): ``mtp_head`` or TF_NEMOTRON_MTP names the file, default ``mtp.DEFAULT_DIR/mtp-4bit.safetensors``."""
 
     import os
 
@@ -141,7 +141,9 @@ def load(model_dir: Path, *, mtp_head: str = "") -> tuple[Any, Any]:
 
     from tensorfold.families.nemotron_h.mtp import DEFAULT_DIR
 
-    choice = mtp_head or os.environ.get("TF_NEMOTRON_MTP", "")
-    mtp_path = None if choice == "0" else Path(choice).expanduser() if choice else DEFAULT_DIR / "mtp-4bit.safetensors"
+    mtp_path = None
+    if os.environ.get("TF_MTP_ROUNDS", "0") == "1":
+        choice = mtp_head or os.environ.get("TF_NEMOTRON_MTP", "")
+        mtp_path = None if choice == "0" else Path(choice).expanduser() if choice else DEFAULT_DIR / "mtp-4bit.safetensors"
     loaded = mlx_load(str(model_dir))
     return NemotronH(loaded[0], mtp_path=mtp_path), loaded[1]

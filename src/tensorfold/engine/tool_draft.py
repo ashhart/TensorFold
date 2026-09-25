@@ -205,7 +205,7 @@ class ToolCallProposer:
     # lane-engine hooks for a fallback that reads hidden states (DFlash2)
     @property
     def sink(self) -> Any:
-        """The fallback's hidden-state feed (the relay drafter's), which the engine routes each forward to."""
+        """The fallback's hidden-state feed (a proposer that drafts from hidden states), routed each forward."""
         return getattr(self.fallback, "sink", None)
 
     def on_prefill(self, prompt_len: int) -> None:

@@ -13,9 +13,34 @@ from typing import Any
 MODEL_TYPES = ("qwen4_exp",)
 TITLE = "Qwen3.8 Flash Next"
 LANES = False
+# 4-bit weights in groups of 32 (what the fused kernels read), with the checkpoint's MTP head kept
+MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP",)
+
+
+def has_mtp(model_dir: Path) -> bool:
+    """Whether the checkpoint kept the MTP head's weights (``mtp.*``)."""
+
+    import json
+
+    index = Path(model_dir) / "model.safetensors.index.json"
+    if not index.is_file():
+        return False
+    return any(".mtp." in name or name.startswith("mtp.") for name in json.loads(index.read_text())["weight_map"])
+
+
+def check(model_dir: Path) -> None:
+    from tensorfold.families import quantization, read_config
+
+    bits, group = quantization(read_config(model_dir))
+    if (bits, group) != (4, 32):
+        raise ValueError(f"TensorFold's Flash Next kernels read 4-bit weights in groups of 32; this checkpoint has "
+                         f"{bits}-bit weights in groups of {group}. Use {MODELS[0]}.")
+    if not has_mtp(model_dir):
+        print(f"[tensorfold] this checkpoint has no MTP head: decoding without MTP drafts ({MODELS[0]} has one)",
+              flush=True)
 
 
 def load(model_dir: Path, *, mtp_drafts: int | None = None, **_: Any) -> tuple[Any, Any]:
     from tensorfold.families.qwen4_exp.runtime import load as load_runtime
 
-    return load_runtime(Path(model_dir), drafts=mtp_drafts)
+    return load_runtime(Path(model_dir), drafts=mtp_drafts if has_mtp(Path(model_dir)) else 0)

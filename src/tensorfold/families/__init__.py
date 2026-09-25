@@ -11,6 +11,9 @@ it:
 
 and optionally:
 
+    MODELS = ("owner/checkpoint",)                # Hugging Face checkpoints the family is tested with
+    DRAFTER = "owner/draft-model"                 # a draft model it can use (``tensorfold pull`` it once)
+    def check(model_dir) -> None                  # refuse an unsupported checkpoint before any weight is read
     MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200"}   # set before MLX starts (unless already set)
     def engine_settings(model) -> dict             # keyword arguments for the engine (e.g. max_rows)
     def kernel_version(model) -> str               # names the kernels in prefix-snapshot keys
@@ -71,6 +74,16 @@ def families() -> dict[str, Family]:
 
 def read_config(model_dir: str | Path) -> dict[str, Any]:
     return json.loads((Path(model_dir) / "config.json").read_text())
+
+
+def quantization(config: dict[str, Any]) -> tuple[int | None, int | None]:
+    """(bits, group size) of a checkpoint's quantized weights, (None, None) when it has none."""
+
+    for source in (config, config.get("text_config") or {}):
+        found = source.get("quantization") or source.get("quantization_config")
+        if isinstance(found, dict) and "bits" in found:
+            return int(found["bits"]), int(found.get("group_size", 64))
+    return None, None
 
 
 def model_type(model_dir: str | Path) -> str:
