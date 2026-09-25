@@ -48,7 +48,7 @@ The pieces, in the order they paid:
    to the GPU every 4 layers took the forward from 46.6 to 38.7 ms at one row, same graph and bits.
 3. The DFlash2 block drafter: 5 layers, trained on blocks of 8, reading the target's hidden states at layers
    5, 19, 33, 47 and 61. At 4 bits a block costs about 7.5 ms against 12.5 at 8 bits, same acceptance.
-4. Lane attention (`kernels/lane_attention.py`): decode attention for 1-128 queries with fixed arithmetic. At
+4. Lane attention (`kernels/qwen/dense/v1/lane_attention.py`): decode attention for 1-128 queries with fixed arithmetic. At
    20k keys an 8-row window cost 0.42 ms a layer against 1.36 for MLX run query by query.
 5. Draft trees: best-first over the drafter's candidate lattice, 4 children a node, up to 15 nodes, the scores
    carrying the target's own Gumbel noise, all verified in one forward. Offline tokens a pass: code 4.35 to

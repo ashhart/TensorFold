@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -119,12 +121,28 @@ def test_models_lists_the_tested_checkpoints(capsys):
     for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",
                  "Vontra/Qwen3.8-27B-MLX-4bit", "z-lab/Qwen3.8-27B-DFlash2"):
         assert repo in out
+    for folder in ("qwen/dense/v1", "qwen/flash_next/v1", "nemotron/lightning/v1"):
+        assert f"kernels  {folder}" in out
+
+
+def test_every_family_names_an_importable_kernel_version():
+    for family in families.families().values():
+        package = family.package
+        kernels = importlib.import_module(package.KERNEL_PACKAGE)
+        assert kernels.VERSION == package.KERNEL_VERSION == "v1"
+        if family.lanes:
+            model = SimpleNamespace(_tensorfold_lanes=True)
+            assert families.kernel_version(family, model).startswith("qwen-dense-v1-")
+        else:
+            assert families.kernel_version(family, None).startswith(f"{family.model_type}-v1-")
 
 
 def test_info_reads_a_local_config(tmp_path, capsys):
     folder = write_checkpoint(tmp_path / "flash", 4, 32, mtp=True)
     assert main(["info", str(folder)]) == 0
-    assert "Qwen3.8 Flash Next" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Qwen3.8 Flash Next" in out
+    assert "kernels      qwen/flash_next/v1" in out
     assert main(["info", str(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))]) == 1
 
 

@@ -15,6 +15,8 @@ TITLE = "Qwen3.8 Flash Next"
 LANES = False
 # 4-bit weights in groups of 32 (what the fused kernels read), with the checkpoint's MTP head kept
 MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP",)
+KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
+KERNEL_VERSION = "v1"
 
 
 def has_mtp(model_dir: Path) -> bool:

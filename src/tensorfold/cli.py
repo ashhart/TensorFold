@@ -153,6 +153,9 @@ def cmd_models(args: argparse.Namespace) -> int:
         package = family.package
         engine = "lane engine" if family.lanes else "serial engine"
         print(f"{family.title} ({kind}, {engine})")
+        kernel_package = getattr(package, "KERNEL_PACKAGE", "")
+        if kernel_package:
+            print(f"  kernels  {kernel_package.removeprefix('tensorfold.kernels.').replace('.', '/')}")
         for repo in getattr(package, "MODELS", ()):
             print(f"  model    {repo}")
         drafter = getattr(package, "DRAFTER", "")
@@ -172,6 +175,9 @@ def cmd_info(args: argparse.Namespace) -> int:
     print(f"model_type   {family.model_type}")
     print(f"family       {family.title} ({family.module})")
     print(f"engine       {'lane engine' if family.lanes else 'serial engine'}")
+    kernel_package = getattr(family.package, "KERNEL_PACKAGE", "")
+    if kernel_package:
+        print(f"kernels      {kernel_package.removeprefix('tensorfold.kernels.').replace('.', '/')}")
     for key in ("num_hidden_layers", "hidden_size", "num_experts", "num_experts_per_tok", "n_routed_experts",
                 "vocab_size", "max_position_embeddings"):
         if key in text:

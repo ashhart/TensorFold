@@ -1,8 +1,9 @@
 # Qwen3.8 Flash Next (`qwen4_exp`)
 
 Measured on an M3 Ultra with 256 GB and MLX 0.32.0, with a 4-bit conversion that keeps the MTP weights.
-Package: `src/tensorfold/families/qwen4_exp/` (`model.py` reference forward, `kernels.py` and `decode.py` fused
-decode, `mtp.py` draft head, `runtime.py` what the engine serves).
+Package: `src/tensorfold/families/qwen4_exp/` (`model.py` reference forward, `decode.py` fused decode,
+`mtp.py` draft head, `runtime.py` what the engine serves). Fused kernel version `v1` lives in
+`src/tensorfold/kernels/qwen/flash_next/v1/kernels.py`.
 
 ## What decides the speed
 

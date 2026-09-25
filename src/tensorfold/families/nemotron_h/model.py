@@ -29,7 +29,7 @@ class NemotronH:
         if fused:
             import os
 
-            from tensorfold.families.nemotron_h.kernels import FusedDecode
+            from tensorfold.kernels.nemotron.lightning.v1.kernels import FusedDecode
 
             # TF_NEMOTRON_FOLD_SHARED=1: the shared expert as two extra slots of the routed gather (fewer
             # kernels a token, ~1% faster for one row); 0 (default): its own dense branch, read once however

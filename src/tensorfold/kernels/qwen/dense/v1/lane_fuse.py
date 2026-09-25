@@ -97,7 +97,7 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
 
     import mlx.nn as nn
 
-    from tensorfold.kernels import lane_qmm
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
     members = tuple(getattr(parent, name, None) for name in GROUPS[kind])
     no = _Unfusable(members)
@@ -185,7 +185,7 @@ def _project(parent: Any, kind: str, x: mx.array) -> mx.array | None:
 
     if not enabled or kind not in kinds:
         return None
-    from tensorfold.kernels import lane_qmm
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
     if not lane_qmm.enabled or x.dtype != mx.bfloat16:
         return None
@@ -267,7 +267,7 @@ def _replace_once(source: str, old: str, new: str) -> str:
 
 
 def _variant_sources() -> dict[str, tuple[str, list[str], list[str]]]:
-    from tensorfold.kernels import lane_glue
+    from tensorfold.kernels.qwen.dense.v1 import lane_glue
 
     pre = _replace_once(lane_glue._GDN_PRE, "float(Ain[w * NV + hv])", "float(Ain[w * ZS + AO + hv])")
     pre = _replace_once(pre, "float(Bin[w * NV + hv])", "float(Bin[w * ZS + BO + hv])")
@@ -342,7 +342,7 @@ def gdn_pre(qkv: mx.array, conv_state: mx.array, conv_weight: mx.array, windows:
 def gdn_post(y: mx.array, zba: mx.array, weight: mx.array, eps: float) -> mx.array:
     """``lane_glue.gdn_post`` with z read in place from ``gdn_in``'s [z | b | a] rows."""
 
-    from tensorfold.kernels import lane_glue
+    from tensorfold.kernels.qwen.dense.v1 import lane_glue
 
     _, W, nv, dv = (int(s) for s in y.shape)
     zs = int(zba.shape[-1])
@@ -358,7 +358,7 @@ def gdn_post(y: mx.array, zba: mx.array, weight: mx.array, eps: float) -> mx.arr
 def mlp_act(gu: mx.array) -> mx.array:
     """``lane_glue.mlp_act`` on ``mlp_gate_up``'s [gate | up] rows: SiLU(gate) * up, (..., N)."""
 
-    from tensorfold.kernels import lane_glue
+    from tensorfold.kernels.qwen.dense.v1 import lane_glue
 
     N2 = int(gu.shape[-1])
     N = N2 // 2
@@ -375,7 +375,7 @@ def mlp_act(gu: mx.array) -> mx.array:
 def warm(model: Any, *, rows: tuple[int, ...] = (1, 17, 33)) -> int:
     """Compile the stacked shapes' lane matmul variants (per row tile) and the consumer kernels."""
 
-    from tensorfold.kernels import lane_qmm
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
     seen: set[tuple[int, int, int, bool]] = set()
     outs: list[mx.array] = []

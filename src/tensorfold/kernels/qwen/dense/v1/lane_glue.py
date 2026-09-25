@@ -226,7 +226,7 @@ def _eps(eps: float) -> mx.array:
 def remember(x: mx.array, xs: mx.array) -> mx.array:
     """Hand ``xs`` to the lane matmul as ``x``'s group sums (its XSUM kernel then does not run)."""
 
-    from tensorfold.kernels import lane_qmm
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
     lane_qmm._xs_cache[id(x)] = (x, xs)
     while len(lane_qmm._xs_cache) > 4:

@@ -26,7 +26,7 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 
-from tensorfold.families.qwen4_exp import kernels as K
+from tensorfold.kernels.qwen.flash_next.v1 import kernels as K
 
 
 def _stacked(linears: list[Any]) -> tuple[nn.QuantizedLinear, list[int]]:

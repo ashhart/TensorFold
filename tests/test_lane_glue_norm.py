@@ -5,7 +5,7 @@ import pytest
 
 mx = pytest.importorskip("mlx.core")
 
-from tensorfold.kernels import lane_glue, lane_qmm
+from tensorfold.kernels.qwen.dense.v1 import lane_glue, lane_qmm  # noqa: E402
 
 
 def _inputs(rows: int, seed: int, scale: float = 1.0):

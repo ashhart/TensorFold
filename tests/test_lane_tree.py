@@ -4,7 +4,7 @@ import pytest
 
 mx = pytest.importorskip("mlx.core")
 
-from tensorfold.kernels import lane_tree  # noqa: E402
+from tensorfold.kernels.qwen.dense.v1 import lane_tree  # noqa: E402
 
 
 def _same(a, b):
@@ -53,7 +53,7 @@ def test_gated_delta_tree_matches_serial_steps():
 
 @pytest.mark.parametrize("P", [3, 250, 255, 256, 500, 700, 1020, 2047, 2048, 20000])
 def test_tree_attention_matches_serial_paths(P):
-    from tensorfold.kernels import lane_attention
+    from tensorfold.kernels.qwen.dense.v1 import lane_attention
 
     mx.random.seed(P)
     H, HKV, D = 24, 4, 256
@@ -80,7 +80,7 @@ def test_tree_attention_matches_serial_paths(P):
 
 
 def test_chain_through_tree_kernel_equals_chain_kernel():
-    from tensorfold.kernels import lane_attention
+    from tensorfold.kernels.qwen.dense.v1 import lane_attention
 
     mx.random.seed(9)
     H, HKV, D, W, P = 24, 4, 256, 8, 1000
@@ -123,7 +123,7 @@ def test_long_chain_recurrence_equals_serial_steps(W):
 
 
 def test_64_row_chain_attention_equals_single_queries():
-    from tensorfold.kernels import lane_attention
+    from tensorfold.kernels.qwen.dense.v1 import lane_attention
 
     mx.random.seed(64)
     H, HKV, D, W, P = 24, 4, 256, 64, 1000          # the window crosses a chunk boundary
@@ -138,7 +138,7 @@ def test_64_row_chain_attention_equals_single_queries():
 
 
 def test_128_row_chain_attention_equals_single_queries():
-    from tensorfold.kernels import lane_attention
+    from tensorfold.kernels.qwen.dense.v1 import lane_attention
 
     mx.random.seed(128)
     H, HKV, D, W, P = 24, 4, 256, 128, 3000

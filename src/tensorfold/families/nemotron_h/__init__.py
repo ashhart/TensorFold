@@ -15,6 +15,10 @@ MODEL_TYPES = ("nemotron_h",)
 TITLE = "Nemotron 3.5 Lightning"
 LANES = False
 MODELS = ("Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",)
+KERNEL_PACKAGE = "tensorfold.kernels.nemotron.lightning.v1"
+KERNEL_VERSION = "v1"
+# The long-context path also calls Qwen dense's lane attention kernel.
+KERNEL_DEPENDENCIES = ("tensorfold.kernels.qwen.dense.v1.lane_attention",)
 # MLX command buffers: up to 200 ops a buffer (MLX's default commits more often on this model's many small
 # kernels); set by the CLI before MLX starts, unless the environment already sets them
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}

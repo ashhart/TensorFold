@@ -54,7 +54,7 @@ def _dflash_attend(attn: Any, x: Any, x_ctx: Any, rope: Any, cache: Any, masks: 
 
     from mlx_lm.models.base import create_causal_mask
 
-    from tensorfold.kernels import lane_fuse
+    from tensorfold.kernels.qwen.dense.v1 import lane_fuse
 
     B, L, _ = x.shape
     S = x_ctx.shape[1]
@@ -320,7 +320,7 @@ class DFlashDrafter:
         sub = self._sub_head()
         if sub is None:
             return self.model.compute_logits(hidden), None
-        from tensorfold.kernels import lane_qmm
+        from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
         weight, sbt, ids, nt = sub
         logits = lane_qmm.lane_matmul(hidden, weight, sbt, tiled=True, nt=nt) * self.model.config.output_multiplier

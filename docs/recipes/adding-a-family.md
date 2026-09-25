@@ -18,6 +18,8 @@ def load(model_dir, **options):   # -> (model, tokenizer); ignore options you do
 # optional
 MODELS = ("owner/checkpoint",)                 # Hugging Face checkpoints it is tested with (`tensorfold models`)
 DRAFTER = "owner/draft-model"                  # a draft model `serve` uses once it has been pulled
+KERNEL_PACKAGE = "tensorfold.kernels.mymodel.v1"  # active versioned kernel folder
+KERNEL_VERSION = "v1"                          # shown by `tensorfold models` and used in snapshot keys
 def check(model_dir): ...                      # raise for a checkpoint the kernels cannot read, before any download
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200"}   # set before MLX starts, unless the environment sets them
 def engine_settings(model): ...                # keyword arguments for the engine, e.g. {"max_rows": 16}
@@ -25,10 +27,11 @@ def kernel_version(model): ...                 # a name for the kernels (prefix 
 def setup(app, model, **options): ...          # extras on the server app, e.g. a draft model
 ```
 
-Without `kernel_version`, snapshots are keyed by a hash of the package's source files, so editing a kernel
-never reuses a snapshot computed by the old one. `check` reads only `config.json`: `tensorfold serve` and
-`tensorfold pull` fetch that file first, so a checkpoint your kernels cannot read (another bit width, a missing
-draft head) is refused before its weights download. Publish the checkpoint you test with on Hugging Face and
+Without `kernel_version`, snapshots are keyed by a hash of the family and `KERNEL_PACKAGE` source files, so
+editing a kernel never reuses a snapshot computed by the old one. Add `KERNEL_DEPENDENCIES` for any kernel
+modules another family's package supplies. `check` should reject unsupported settings from `config.json` before
+the weights download; the CLI calls it again after a full download so it can inspect the weight index too.
+Publish the checkpoint you test with on Hugging Face and
 list it in `MODELS`, so people pull exactly what your kernels expect.
 
 ## The model object (serial engine)
@@ -72,7 +75,7 @@ Things that break row invariance:
 
 - MLX's quantized matmul picks a different kernel by row count, and some of them sum in a different order. On
   an M3 Ultra with MLX 0.32.0, 2 to 4 rows did not match one row (on an M5 Max with MLX 0.31.2 they did).
-  `families/qwen4_exp/kernels.py` has a matvec (`qmv_rows`) that gives every row MLX's one-row bits: a
+  `kernels/qwen/flash_next/v1/kernels.py` has a matvec (`qmv_rows`) that gives every row MLX's one-row bits: a
   simdgroup per row, weights read once for all rows.
 - Reductions whose split depends on the row count (a threadgroup per k rows, a split-K chosen by shape).
 - Attention kernels chosen by query count, and masks that differ between one-row and multi-row calls. Give

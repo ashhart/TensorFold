@@ -469,7 +469,7 @@ def lane_tree_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: f
     holding the window run per node with the node's keys gathered into their slots.
     """
 
-    from tensorfold.kernels.lane_tree import MAX_DEPTH, tree_paths
+    from tensorfold.kernels.qwen.dense.v1.lane_tree import MAX_DEPTH, tree_paths
 
     _, H, W, D = (int(s) for s in queries.shape)
     HKV, L = int(keys.shape[1]), int(keys.shape[2])

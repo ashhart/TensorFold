@@ -195,8 +195,8 @@ def _attention(attn: Any, x: mx.array, cache: Any, parents: Sequence[int], posit
                record: list[Any]) -> mx.array:
     """Qwen3-Next attention for tree rows (mlx_lm's call, per-row RoPE, tree-exact attention)."""
 
-    from tensorfold.kernels import lane_fuse
-    from tensorfold.kernels.lane_attention import lane_tree_sdpa
+    from tensorfold.kernels.qwen.dense.v1 import lane_fuse
+    from tensorfold.kernels.qwen.dense.v1.lane_attention import lane_tree_sdpa
 
     B, L, _ = x.shape
     H, nkv = attn.num_attention_heads, attn.num_key_value_heads
@@ -239,7 +239,7 @@ def _gdn(gdn: Any, x: mx.array, cache: Any, parents: Sequence[int], windows: mx.
     run as one kernel (``lane_glue.gdn_pre``), the gated norm as another.
     """
 
-    from tensorfold.kernels import lane_fuse, lane_glue
+    from tensorfold.kernels.qwen.dense.v1 import lane_fuse, lane_glue
 
     B, S, _ = x.shape
     qkv = gdn.in_proj_qkv(x)
@@ -299,7 +299,7 @@ def tree_forward(core: Any, head: Any, tokens: Sequence[int], parents: Sequence[
     Each residual add runs inside the next norm's kernel (``lane_glue.norm_xs``).
     """
 
-    from tensorfold.kernels import lane_fuse, lane_glue
+    from tensorfold.kernels.qwen.dense.v1 import lane_fuse, lane_glue
 
     positions = _positions(parents, start)
     hidden = core.embed_tokens(mx.array([list(tokens)], dtype=mx.uint32))

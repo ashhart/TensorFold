@@ -24,6 +24,8 @@ TITLE = "Qwen3.8 dense"
 LANES = True
 MODELS = ("Vontra/Qwen3.8-27B-MLX-4bit",)
 DRAFTER = "z-lab/Qwen3.8-27B-DFlash2"
+KERNEL_PACKAGE = "tensorfold.kernels.qwen.dense.v1"
+KERNEL_VERSION = "v1"
 
 # the lane engine's switches with lane kernels (measured on an M5 Max: see docs/recipes/qwen3.8-27b.md): trees of
 # up to 15 drafted nodes, chains of up to 31 (copies, tool-call structure), prompts through the lane decoder in
@@ -95,7 +97,7 @@ def install_lane_kernels(model: Any) -> None:
     first requests) and set the lane engine's tree and prefill switches."""
 
     from tensorfold.engine.lane_engine import LaneEngine
-    from tensorfold.kernels import exact_attention, lane_attention, lane_fuse, lane_qmm
+    from tensorfold.kernels.qwen.dense.v1 import exact_attention, lane_attention, lane_fuse, lane_qmm
 
     LaneEngine.exact_window = LANE_SETTINGS["exact_window"]
     LaneEngine.cheap_window = LANE_SETTINGS["cheap_window"]
@@ -137,7 +139,7 @@ def kernel_version(model: Any) -> str:
 
     if not getattr(model, "_tensorfold_lanes", False):
         return "mlx"
-    from tensorfold.kernels import lane_attention, lane_fuse, lane_glue, lane_qmm, lane_tree
+    from tensorfold.kernels.qwen.dense.v1 import lane_attention, lane_fuse, lane_glue, lane_qmm, lane_tree
 
     sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, lane_qmm._XSUM, lane_attention._PARTIAL, lane_attention._TAIL,
                lane_attention._TREE_MERGE, lane_attention._MERGE, lane_glue._NORM_XS, lane_glue._GDN_PRE,
@@ -145,7 +147,10 @@ def kernel_version(model: Any) -> str:
                repr((lane_attention.CHUNK, lane_attention.TILE))]
     if lane_fuse.enabled:
         sources += [text for _, text in sorted(lane_fuse.sources().items())]
-    return "lanes-" + hashlib.sha256("\n".join(sources).encode()).hexdigest()[:12]
+    folder = Path(lane_qmm.__file__).parent
+    sources.extend(path.read_text() for path in sorted(folder.glob("*.py")))
+    sources.extend(path.read_text() for path in sorted(Path(__file__).parent.glob("*.py")))
+    return f"qwen-dense-{KERNEL_VERSION}-" + hashlib.sha256("\n".join(sources).encode()).hexdigest()[:12]
 
 
 def setup(app: Any, model: Any, *, drafter: str = "", drafter_bits: int = 4, **_: Any) -> None:
@@ -159,7 +164,7 @@ def setup(app: Any, model: Any, *, drafter: str = "", drafter_bits: int = 4, **_
 
     loaded = DFlashDrafter(model, drafter, bits=int(drafter_bits))
     if getattr(model, "_tensorfold_lanes", False):
-        from tensorfold.kernels import lane_qmm
+        from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
         lane_qmm.install(loaded.model, rows=lane_qmm.MAX_ROWS, tile=os.environ.get("TF_LANE_TILE", "1") != "0",
                          wide=True)    # the drafter's matmuls through the same kernels

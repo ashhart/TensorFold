@@ -7,9 +7,9 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
-from tensorfold.kernels import lane_fuse, lane_glue, lane_qmm
+from tensorfold.kernels.qwen.dense.v1 import lane_fuse, lane_glue, lane_qmm  # noqa: E402
 
-from tensorfold.kernels import lane_tree  # noqa: E402
+from tensorfold.kernels.qwen.dense.v1 import lane_tree  # noqa: E402
 
 K = 5120
 ROWS = (1, 7, 16, 17, 32, 64, 128)

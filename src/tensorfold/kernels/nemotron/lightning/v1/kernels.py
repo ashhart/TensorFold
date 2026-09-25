@@ -632,7 +632,7 @@ class FusedDecode:
             # the 16 query heads of a KV head are one 16-row tile of the tensor-unit kernel: each key read once.
             # M5 Max, 6 dependent calls: 60k keys 0.323 -> 0.194 ms a call, 32k 0.191 -> 0.120, 12k 0.154 ->
             # 0.123, but 4k 0.194 -> 0.280 and 1k 0.091 -> 0.250 (its extra launches): from 10k keys on
-            from tensorfold.kernels.lane_attention import lane_sdpa
+            from tensorfold.kernels.qwen.dense.v1.lane_attention import lane_sdpa
 
             return lane_sdpa(q, keys, values, scale)
         # (a block-per-threadgroup kernel sharing each key block across the 16 heads of a KV head was correct

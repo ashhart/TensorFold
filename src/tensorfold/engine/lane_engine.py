@@ -725,7 +725,7 @@ class LaneEngine:
         """Point the forward's hidden-state feed at this stream's own proposer (one that drafts from the target's
         hidden states exposes a ``sink``), or at nothing. One global feed let a second request's proposer take it
         from a stream still decoding, whose proposer then drafted nothing for the rest of its request."""
-        from tensorfold.kernels import lane_tree
+        from tensorfold.kernels.qwen.dense.v1 import lane_tree
 
         lane_tree.HIDDEN_SINK = getattr(getattr(stream, "proposer", None), "sink", None)
 
@@ -765,7 +765,7 @@ class LaneEngine:
 
         import mlx.core as mx
 
-        from tensorfold.kernels import lane_tree
+        from tensorfold.kernels.qwen.dense.v1 import lane_tree
 
         _, core, head = self._resolve_stack()
         width = max(1, int(self.lane_prefill))
@@ -1293,7 +1293,7 @@ class LaneEngine:
     ) -> dict[str, list[int]]:
         """One stream's round, rolled back to exactly its kept prefix (``precise_single``)."""
 
-        from tensorfold.kernels import gdn_capture
+        from tensorfold.kernels.qwen.dense.v1 import gdn_capture
 
         if self.tree_nodes > 0 and len(stream.pending) == 1:
             # every round, drafted or not, through the tree forward: one decoder, one arithmetic
@@ -1404,7 +1404,7 @@ class LaneEngine:
 
         import mlx.core as mx
 
-        from tensorfold.kernels import lane_tree
+        from tensorfold.kernels.qwen.dense.v1 import lane_tree
 
         draft_started = time.perf_counter()
         nodes = max(int(self.tree_nodes), int(self.chain_nodes))
@@ -1430,7 +1430,7 @@ class LaneEngine:
         start = int(stream.cache_len)
         _, core, head = self._resolve_stack()
         if _KERNEL_AB:
-            from tensorfold.kernels import lane_qmm
+            from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
             lane_qmm.AB_FLAG[0] = (stream.rounds // _KERNEL_AB) % 2 == 1
         forward_started = time.perf_counter()
@@ -1473,7 +1473,7 @@ class LaneEngine:
             with open(_ROUND_LOG, "a") as handle:
                 ab = ""
                 if _KERNEL_AB:
-                    from tensorfold.kernels import lane_qmm
+                    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
                     ab = f" {int(lane_qmm.AB_FLAG[0])}"
                 handle.write(f"{start} {len(window)} {accepted} {'chain' if chain else 'tree'} {forward_ms:.1f} {draft_ms:.1f}{ab}\n")

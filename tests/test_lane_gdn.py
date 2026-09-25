@@ -8,7 +8,7 @@ mx = pytest.importorskip("mlx.core")
 
 from mlx_lm.models.gated_delta import gated_delta_ops  # noqa: E402
 
-from tensorfold.kernels.lane_gdn import LaneGDNCache  # noqa: E402
+from tensorfold.kernels.qwen.dense.v1.lane_gdn import LaneGDNCache  # noqa: E402
 
 
 def _reference(s0, qs, ks, vs, log_gs, betas):

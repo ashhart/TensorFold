@@ -137,9 +137,11 @@ src/tensorfold/
   hub.py                 models by Hugging Face repo id
   server/                OpenAI HTTP layer (http.py) and the request queue, caches and streaming (app.py)
   engine/                the serial engine, the lane engine, exact sampling, prompt caches
-  kernels/               lane matmul and attention (tensor units) and the Qwen3.8 dense GDN helpers
+  kernels/qwen/dense/v1/        Qwen3.8 dense lane kernels
+  kernels/qwen/flash_next/v1/   Qwen3.8 Flash Next fused kernels
+  kernels/nemotron/lightning/v1/  Nemotron 3.5 Lightning fused kernels
   drafters/              the DFlash2 drafter
-  families/<name>/       one package per model family: forward pass, kernels, draft heads
+  families/<name>/       one package per model family: forward pass and draft heads
 docs/recipes/            what we did per family, and how to add one
 ```
 

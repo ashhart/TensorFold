@@ -7,7 +7,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
-from tensorfold.kernels import lane_qmm  # noqa: E402
+from tensorfold.kernels.qwen.dense.v1 import lane_qmm  # noqa: E402
 from tensorfold.drafters.dflash_drafter import DFlashDrafter  # noqa: E402
 
 

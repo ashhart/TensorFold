@@ -105,14 +105,22 @@ def load(model_dir: str | Path, **options: Any) -> tuple[Any, Any]:
 
 
 def kernel_version(family: Family, model: Any) -> str:
-    """The family's own name for the kernels a model runs, else a hash of the family package's sources: a prefix
-    snapshot computed by other kernels has other bits, so snapshots are keyed by it."""
+    """Fingerprint the active family and versioned kernels for safe prefix-snapshot reuse."""
 
     hook = getattr(family.package, "kernel_version", None)
     if hook is not None:
         return str(hook(model))
-    folder = Path(str(family.package.__file__)).parent
     digest = hashlib.sha256()
-    for path in sorted(folder.rglob("*.py")):
-        digest.update(path.read_bytes())
-    return digest.hexdigest()[:12]
+    modules = (family.module, getattr(family.package, "KERNEL_PACKAGE", ""),
+               *getattr(family.package, "KERNEL_DEPENDENCIES", ()))
+    for module_name in filter(None, modules):
+        digest.update(module_name.encode())
+        module = importlib.import_module(module_name)
+        source = Path(str(module.__file__))
+        paths = sorted(source.parent.rglob("*.py")) if source.name == "__init__.py" else [source]
+        for path in paths:
+            digest.update(path.relative_to(source.parent).as_posix().encode())
+            digest.update(path.read_bytes())
+    version = getattr(family.package, "KERNEL_VERSION", "")
+    prefix = f"{family.model_type}-{version}-" if version else ""
+    return prefix + digest.hexdigest()[:12]

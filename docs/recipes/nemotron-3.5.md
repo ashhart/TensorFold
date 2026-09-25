@@ -28,7 +28,7 @@ Through the server with exact sampling (T 1.0, top-p 0.95), thinking on, tok/s:
 | plus tensor-unit attention (head dim 128) from 10k keys | 200-203 | 175 | 138 |
 | plus alternating KV buffers | 200-206 | 175 | 162 |
 
-The pieces (`families/nemotron_h/kernels.py`):
+The pieces (`kernels/nemotron/lightning/v1/kernels.py`):
 
 - Fused kernels between MLX's matmuls: the residual add (with the MoE combine) plus the next block's RMSNorm;
   sigmoid routing with the correction bias to the top 6; the whole Mamba step (conv window, conv, SiLU, dt,
@@ -46,7 +46,7 @@ The pieces (`families/nemotron_h/kernels.py`):
 - The GPU sampler tries candidate windows of 20, 10 and 5 logit units below the row maximum and takes the
   widest one that holds the nucleus in at most 1,024 tokens, else a radix select. Both give the same
   candidates.
-- Tensor-unit attention for head dim 128 (`kernels/lane_attention.py`): the 16 query heads of one KV head form
+- Tensor-unit attention for head dim 128 (`kernels/qwen/dense/v1/lane_attention.py`, shared with Qwen): the 16 query heads of one KV head form
   one 16-row tile, so each key is read once. At 60k keys 0.323 to 0.194 ms a call, at 32k 0.191 to 0.120, but
   slower below about 10k keys because of its extra launches, hence the switch at 10k. It needs M5 tensor
   units and is gated by GPU generation.

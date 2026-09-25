@@ -4,7 +4,7 @@ import pytest
 
 mx = pytest.importorskip("mlx.core")
 
-from tensorfold.kernels import lane_qmm  # noqa: E402
+from tensorfold.kernels.qwen.dense.v1 import lane_qmm  # noqa: E402
 
 
 def _needs_tensor_units():
