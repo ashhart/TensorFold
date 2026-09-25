@@ -43,8 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
-    generation.add_argument("--context", type=int, default=0,
-                            help="context window: prompt plus reply tokens a request may use (0: no limit)")
+    generation.add_argument("--context", type=int, default=None,
+                            help="context window: prompt plus reply tokens (default: model config; 0: no limit)")
     generation.add_argument("--max-tokens", type=int, default=4096,
                             help="reply tokens when a request does not say")
     generation.add_argument("--temperature", type=float, default=None,
@@ -141,8 +141,13 @@ def cmd_pull(args: argparse.Namespace) -> int:
             if check is not None:
                 check(config)
         path = hub.pull(repo)
+        required_files = getattr(family.package, "REQUIRED_FILES", {}).get(repo, ()) if family is not None else ()
+        if required_files and not hub._cached_weights_complete(path, required_files=required_files):
+            raise FileNotFoundError(f"{repo} is missing required files: {', '.join(required_files)}")
         what = f"{family.title} ({family.model_type})" if family is not None else "no model family (a draft model?)"
         print(f"{repo}: {hub.size_of(path) / 1e9:.1f} GB in {path} [{what}]")
+        if required_files:
+            print(f"[tensorfold] required model files ready: {', '.join(required_files)}")
     return 0
 
 
@@ -196,7 +201,21 @@ def cmd_info(args: argparse.Namespace) -> int:
 def _generation_config(model_dir: Path) -> dict[str, Any]:
     path = Path(model_dir) / "generation_config.json"
     config = json.loads(path.read_text()) if path.exists() else {}
-    return {k: config[k] for k in ("temperature", "top_k", "top_p") if k in config}
+    sampling = {k: config[k] for k in ("temperature", "top_k", "top_p") if k in config}
+    if config.get("do_sample") is False:
+        sampling["temperature"] = 0.0
+    elif config.get("do_sample") is True and "temperature" not in sampling:
+        sampling["temperature"] = 1.0
+    return sampling
+
+
+def _model_context(model_dir: Path) -> int:
+    from tensorfold.families import read_config
+
+    config = read_config(model_dir)
+    text = config.get("text_config") or config
+    limit = text.get("max_position_embeddings") or config.get("max_position_embeddings")
+    return int(limit) if isinstance(limit, int) and limit > 0 else 0
 
 
 def _drafter(family: Any, choice: str) -> str:
@@ -225,11 +244,19 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     config_dir = _config_dir(args.model)
     family = families.detect(config_dir)
+    required_files = getattr(family.package, "REQUIRED_FILES", {}).get(args.model, ())
+    native_context = _model_context(config_dir)
+    context = native_context if args.context is None else int(args.context)
+    if context < 0:
+        raise ValueError("--context must be 0 or a positive token count")
+    if native_context and context > native_context:
+        raise ValueError(f"--context {context} exceeds this model's {native_context}-token window")
     check = getattr(family.package, "check", None)
     if check is not None:
         check(config_dir)                        # refuse an unsupported checkpoint before downloading its weights
-    needs_full_snapshot = hub.is_repo_id(args.model) and not hub._cached_weights_complete(config_dir)
-    model_dir = hub.resolve(args.model)
+    needs_full_snapshot = hub.is_repo_id(args.model) and not hub._cached_weights_complete(
+        config_dir, required_files=required_files)
+    model_dir = hub.resolve(args.model, required_files=required_files)
     if needs_full_snapshot and check is not None:
         check(model_dir)                         # checks that need the complete index, such as an MTP head
     for key, value in getattr(family.package, "MLX_ENV", {}).items():
@@ -253,6 +280,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type})", flush=True)
     model, tokenizer = family.package.load(model_dir, **options)
+    if required_files:
+        print(f"[tensorfold] Nemotron MTP head: "
+              f"{'active' if not args.no_drafts and getattr(model, 'mtp', None) is not None else 'inactive'}",
+              flush=True)
 
     from tensorfold.engine.family_engine import SerialEngine
     from tensorfold.engine.lane_engine import LaneEngine
@@ -284,7 +315,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         max_rows=int(engine_kwargs.get("max_rows", 16)),
         max_draft=int(engine_kwargs.get("max_draft", 32)),
         default_max_tokens=int(args.max_tokens),
-        context_window=int(args.context),
+        context_window=context,
         enable_thinking=bool(args.thinking),
         reasoning_effort=args.reasoning_effort,
         thinking_budget=int(args.thinking_budget),
@@ -304,7 +335,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         f"{k} {v}" for k, v in sampling.items())
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 "
           f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
-          f"context: {args.context or 'unlimited'}; loaded in {time.perf_counter() - started:.1f}s)", flush=True)
+          f"context: {context or 'unlimited'}; loaded in {time.perf_counter() - started:.1f}s)", flush=True)
 
     def _terminate(signum: int, frame: Any) -> None:
         raise KeyboardInterrupt      # the cleanup below runs (a plain SIGTERM would skip it)

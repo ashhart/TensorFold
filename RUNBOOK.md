@@ -8,12 +8,13 @@ Nemotron's name refers to the model, not to a CUDA device.
 
 ```bash
 uname -m
-python3 --version
+python3.11 --version
 ```
 
-Continue when the architecture is `arm64` and Python is 3.11 or newer. Check available RAM and disk space
-before downloading a checkpoint. Ask which model to use if the person has not picked one; download only that
-model and its optional drafter.
+Continue when the architecture is `arm64` and Python 3.11 is available. If Python 3.11 is missing and you
+use Homebrew, run `brew install python@3.11`. Check available RAM and disk space before downloading a
+checkpoint. Ask which model to use if the person has not picked one; download only that model and its
+optional drafter.
 
 | Model | Hugging Face repo | Download | Mac memory |
 | --- | --- | --- | --- |
@@ -33,7 +34,7 @@ If the repository is not already on the Mac, clone it first. Then install into a
 ```bash
 git clone https://github.com/ashhart/TensorFold.git
 cd TensorFold
-python3 -m venv .venv
+python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 tensorfold --version
@@ -55,6 +56,10 @@ Nemotron 3.5 Lightning:
 tensorfold pull Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
+This repo includes `mtp-4bit.safetensors`, the converted Nemotron MTP draft head. `pull` checks that it
+arrived and prints `required model files ready: mtp-4bit.safetensors`. A later `serve` also finishes an
+older cache that has the model weights but lacks the head.
+
 Qwen3.8-27B, with its optional DFlash2 drafter for faster decoding:
 
 ```bash
@@ -75,12 +80,17 @@ the detected family and kernel package; `info` fetches only `config.json` and do
 Substitute the repo you pulled for `REPO_ID`:
 
 ```bash
-tensorfold serve REPO_ID --context 8192
+tensorfold serve REPO_ID
 ```
 
 Wait for TensorFold to print that it is serving at `http://127.0.0.1:8080/v1`. Leave that terminal running.
-The default address accepts connections from this Mac. `--context` caps prompt plus reply tokens; raise it
-only if the model and available memory allow it. Stop the server with Ctrl-C.
+The default address accepts connections from this Mac. TensorFold takes the context limit from the model's
+`config.json` and temperature, top-p and top-k from `generation_config.json`. The tested checkpoints each
+advertise a 262,144-token context, but a long request needs enough memory to hold its cache. Use a smaller
+cap such as `--context 8192` when appropriate; `--temperature`, `--top-p`, `--top-k` and `--max-tokens` can
+set server defaults, and a request can override the sampling values and reply length. For Nemotron, check
+that startup prints `Nemotron MTP head: active`; `inactive` means the head is present but drafting did not
+activate because of flags or this MLX/GPU. Stop the server with Ctrl-C.
 
 ## 5. Check the endpoint
 

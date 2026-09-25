@@ -15,6 +15,7 @@ MODEL_TYPES = ("nemotron_h",)
 TITLE = "Nemotron 3.5 Lightning"
 LANES = False
 MODELS = ("Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",)
+REQUIRED_FILES = {MODELS[0]: ("mtp-4bit.safetensors",)}
 KERNEL_PACKAGE = "tensorfold.kernels.nemotron.lightning.v1"
 KERNEL_VERSION = "v1"
 # The long-context path also calls Qwen dense's lane attention kernel.

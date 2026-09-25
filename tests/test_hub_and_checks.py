@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from tensorfold import families, hub
-from tensorfold.cli import _drafter, main
+from tensorfold.cli import _drafter, _generation_config, _model_context, build_parser, main
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
@@ -84,6 +84,69 @@ def test_resolve_finishes_missing_shards_but_uses_complete_cache_offline(tmp_pat
     assert pulled == ["owner/model"]
     assert hub.resolve("owner/model", cache_dir=tmp_path).resolve() == snapshot.resolve()
     assert pulled == ["owner/model"]
+
+
+def test_resolve_finishes_a_missing_required_mtp_head(tmp_path, monkeypatch):
+    snapshot = fake_repo(tmp_path, "owner/model", {
+        "config.json": "{}", "model.safetensors": "weights",
+    })
+    pulled = []
+
+    def finish(repo_id, *, cache_dir=None):
+        pulled.append(repo_id)
+        (snapshot / "mtp-4bit.safetensors").write_bytes(b"head")
+        return snapshot
+
+    monkeypatch.setattr(hub, "pull", finish)
+    required = ("mtp-4bit.safetensors",)
+    assert not hub._cached_weights_complete(snapshot, required_files=required)
+    assert hub.resolve("owner/model", cache_dir=tmp_path, required_files=required) == snapshot
+    assert pulled == ["owner/model"]
+    assert hub.resolve("owner/model", cache_dir=tmp_path, required_files=required) == snapshot
+    assert pulled == ["owner/model"]
+
+
+def test_resolve_refuses_a_download_that_still_lacks_required_mtp(tmp_path, monkeypatch):
+    snapshot = fake_repo(tmp_path, "owner/model", {"config.json": "{}", "model.safetensors": "weights"})
+    monkeypatch.setattr(hub, "pull", lambda repo_id, *, cache_dir=None: snapshot)
+    with pytest.raises(FileNotFoundError, match="mtp-4bit.safetensors"):
+        hub.resolve("owner/model", cache_dir=tmp_path, required_files=("mtp-4bit.safetensors",))
+
+
+def test_nemotron_pull_checks_its_mtp_head(tmp_path, monkeypatch, capsys):
+    repo = "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
+    snapshot = fake_repo(tmp_path, repo, {
+        "config.json": '{"model_type": "nemotron_h"}', "model.safetensors": "weights",
+    })
+    monkeypatch.setattr(hub, "cached", lambda repo_id: snapshot)
+    monkeypatch.setattr(hub, "pull", lambda repo_id: snapshot)
+    assert main(["pull", repo]) == 1
+    assert "missing required files: mtp-4bit.safetensors" in capsys.readouterr().err
+    (snapshot / "mtp-4bit.safetensors").write_bytes(b"head")
+    assert main(["pull", repo]) == 0
+    assert "required model files ready: mtp-4bit.safetensors" in capsys.readouterr().out
+
+
+def test_native_context_and_sampling_defaults(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({
+        "model_type": "nemotron_h", "text_config": {"max_position_embeddings": 262144}}))
+    (tmp_path / "generation_config.json").write_text(json.dumps({
+        "do_sample": True, "temperature": 1.0, "top_p": 0.95, "top_k": 20}))
+    assert build_parser().parse_args(["serve", str(tmp_path)]).context is None
+    assert _model_context(tmp_path) == 262144
+    assert _generation_config(tmp_path) == {"temperature": 1.0, "top_k": 20, "top_p": 0.95}
+    (tmp_path / "generation_config.json").write_text('{"do_sample": false, "temperature": 1.0}')
+    assert _generation_config(tmp_path)["temperature"] == 0.0
+
+
+def test_context_override_cannot_exceed_model_window(tmp_path, monkeypatch, capsys):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({
+        "model_type": "nemotron_h", "max_position_embeddings": 4096}))
+    monkeypatch.setattr(hub, "resolve", lambda *a, **kw: pytest.fail("should reject before loading weights"))
+    assert main(["serve", str(model), "--context", "4097"]) == 1
+    assert "exceeds this model's 4096-token window" in capsys.readouterr().err
 
 
 def test_quantization_is_read_from_the_config():

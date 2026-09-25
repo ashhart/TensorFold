@@ -19,7 +19,8 @@ curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/jso
   -d '{"model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "messages": [{"role": "user", "content": "Hi"}]}'
 ```
 
-TensorFold needs a Mac with Apple Silicon and Python 3.11 or newer.
+TensorFold needs a Mac with Apple Silicon and Python 3.11. The install pins MLX to its tested 0.31 release
+so the exact kernels and Nemotron MTP drafts stay active.
 
 ## Models
 
@@ -31,6 +32,9 @@ checkpoints TensorFold is built and tested with, all on Hugging Face:
 | Nemotron 3.5 Lightning 30B-A3B | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 18.6 GB | 32 GB or more |
 | Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` and its draft model `z-lab/Qwen3.8-27B-DFlash2` | 16.1 GB + 3.8 GB | 32 GB or more; an M5-generation GPU for the fast kernels |
 | Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 113 GB | 192 GB or more |
+
+The three main checkpoints come from the `Vontra` Hugging Face namespace; Qwen3.8-27B's optional DFlash2
+drafter comes from `z-lab`.
 
 ```bash
 tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
@@ -52,6 +56,7 @@ What each checkpoint needs:
   width rather than bit-identical to one-row decoding.
 - Nemotron 3.5 Lightning drafts with its MTP head, which the checkpoint above ships as `mtp-4bit.safetensors`
   (converted from NVIDIA's BF16 release; the standard MLX conversion drops it), and from the context.
+  `pull` checks for the head, and `serve` completes an older cache that lacks it before loading.
 
 Want another model? [The recipe book](docs/recipes/README.md) describes what we did for each family and how
 to add yours.
@@ -110,7 +115,7 @@ tensorfold info MODEL               # which family serves a model (reads its con
 | --- | --- | --- |
 | `--host`, `--port` | `127.0.0.1`, `8080` | where to listen (`--host 0.0.0.0` for other machines) |
 | `--name`, `--alias` | the model's name | the model id clients send |
-| `--context N` | no limit | prompt plus reply tokens a request may use; longer prompts get HTTP 400 |
+| `--context N` | the model's `max_position_embeddings` | prompt plus reply tokens a request may use; longer prompts get HTTP 400; `0` removes TensorFold's cap |
 | `--max-tokens N` | 4096 | reply length when a request does not set `max_tokens` |
 | `--temperature`, `--top-p`, `--top-k` | the model's `generation_config.json` | sampling defaults; `--temperature 0` is greedy |
 | `--thinking` / `--no-thinking` | on | open a think block when the chat template supports one |
@@ -124,6 +129,11 @@ tensorfold info MODEL               # which family serves a model (reads its con
 
 Requests can override the sampling fields, the thinking switch and the budget. See [the API notes](docs/api.md)
 for the fields TensorFold reads and what it returns.
+
+By default, `serve` reads temperature, top-p and top-k from the checkpoint's `generation_config.json`; a
+checkpoint with `do_sample: false` decodes greedily. CLI sampling flags override those values, and each
+request can override them again. The context default comes from the checkpoint's `config.json`; large
+windows still need enough memory for the actual prompt and reply.
 
 ## Prompt caching
 
