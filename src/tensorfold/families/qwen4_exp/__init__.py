@@ -35,7 +35,10 @@ def check(model_dir: Path) -> None:
     if (bits, group) != (4, 32):
         raise ValueError(f"TensorFold's Flash Next kernels read 4-bit weights in groups of 32; this checkpoint has "
                          f"{bits}-bit weights in groups of {group}. Use {MODELS[0]}.")
-    if not has_mtp(model_dir):
+    # The CLI may have downloaded only config.json for its preflight check. Do not report a missing head until
+    # the checkpoint's weights or index are present.
+    if ((Path(model_dir) / "model.safetensors.index.json").is_file()
+            or any(Path(model_dir).glob("model*.safetensors"))) and not has_mtp(model_dir):
         print(f"[tensorfold] this checkpoint has no MTP head: decoding without MTP drafts ({MODELS[0]} has one)",
               flush=True)
 

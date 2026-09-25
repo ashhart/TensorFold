@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from tensorfold import families, hub
-from tensorfold.cli import main
+from tensorfold.cli import _drafter, main
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
@@ -47,6 +47,41 @@ def test_a_cache_without_refs_still_resolves(tmp_path):
     snapshot = fake_repo(tmp_path, "owner/model", {"config.json": "{}"})
     (tmp_path / "models--owner--model" / "refs" / "main").unlink()
     assert hub.cached("owner/model", cache_dir=tmp_path) == snapshot
+
+
+def test_resolve_finishes_a_config_only_cached_model(tmp_path, monkeypatch):
+    snapshot = fake_repo(tmp_path, "owner/model", {"config.json": "{}"})
+    pulled = []
+
+    def finish(repo_id, *, cache_dir=None):
+        pulled.append(repo_id)
+        (snapshot / "model.safetensors").write_bytes(b"weights")
+        return snapshot
+
+    monkeypatch.setattr(hub, "pull", finish)
+    assert hub.resolve("owner/model", cache_dir=tmp_path).resolve() == snapshot.resolve()
+    assert pulled == ["owner/model"]
+
+
+def test_resolve_finishes_missing_shards_but_uses_complete_cache_offline(tmp_path, monkeypatch):
+    snapshot = fake_repo(tmp_path, "owner/model", {
+        "config.json": "{}",
+        "model.safetensors.index.json": json.dumps({"weight_map": {
+            "a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}),
+    })
+    (snapshot / "model-00001-of-00002.safetensors").write_bytes(b"first shard")
+    pulled = []
+
+    def finish(repo_id, *, cache_dir=None):
+        pulled.append(repo_id)
+        (snapshot / "model-00002-of-00002.safetensors").write_bytes(b"second shard")
+        return snapshot
+
+    monkeypatch.setattr(hub, "pull", finish)
+    assert hub.resolve("owner/model", cache_dir=tmp_path).resolve() == snapshot.resolve()
+    assert pulled == ["owner/model"]
+    assert hub.resolve("owner/model", cache_dir=tmp_path).resolve() == snapshot.resolve()
+    assert pulled == ["owner/model"]
 
 
 def test_quantization_is_read_from_the_config():
@@ -91,3 +126,43 @@ def test_info_reads_a_local_config(tmp_path, capsys):
     assert main(["info", str(folder)]) == 0
     assert "Qwen3.8 Flash Next" in capsys.readouterr().out
     assert main(["info", str(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))]) == 1
+
+
+def test_serve_finishes_a_config_only_cache_before_loading(tmp_path, monkeypatch, capfd):
+    from tensorfold.families import qwen4_exp
+
+    snapshot = write_checkpoint(tmp_path / "flash", 4, 32, mtp=True)
+    index = snapshot / "model.safetensors.index.json"
+    index_contents = index.read_text()
+    index.unlink()                 # `info` downloaded only config.json, before a full `serve` download
+    pulled = []
+
+    def finish(repo_id, *, cache_dir=None):
+        pulled.append(repo_id)
+        index.write_text(index_contents)
+        (snapshot / "model.safetensors").write_bytes(b"weights")
+        return snapshot
+
+    class LoadReached(Exception):
+        pass
+
+    def load(model_dir, **options):
+        assert (model_dir / "model.safetensors").is_file()
+        raise LoadReached
+
+    monkeypatch.setattr(hub, "cached", lambda repo_id, *, cache_dir=None: snapshot)
+    monkeypatch.setattr(hub, "pull", finish)
+    monkeypatch.setattr(qwen4_exp, "load", load)
+    with pytest.raises(LoadReached):
+        main(["serve", "owner/model", "--snapshot-dir", "none"])
+    assert pulled == ["owner/model"]
+    assert "no MTP head" not in capfd.readouterr().out
+
+
+def test_auto_drafter_waits_for_a_complete_cached_model(tmp_path, monkeypatch):
+    snapshot = fake_repo(tmp_path, "owner/draft", {"config.json": "{}"})
+    monkeypatch.setattr(hub, "cached", lambda repo_id: snapshot)
+    family = families.families()["qwen3_5"]
+    assert _drafter(family, "auto") == ""
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    assert Path(_drafter(family, "auto")).resolve() == snapshot.resolve()

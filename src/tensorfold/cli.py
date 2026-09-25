@@ -206,7 +206,7 @@ def _drafter(family: Any, choice: str) -> str:
     if not repo:
         return ""
     found = hub.cached(repo)
-    if found is None:
+    if found is None or not hub._cached_weights_complete(found):
         print(f"[tensorfold] no draft model: `tensorfold pull {repo}` once to draft with it", flush=True)
         return ""
     return str(found)
@@ -222,7 +222,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     check = getattr(family.package, "check", None)
     if check is not None:
         check(config_dir)                        # refuse an unsupported checkpoint before downloading its weights
+    needs_full_snapshot = hub.is_repo_id(args.model) and not hub._cached_weights_complete(config_dir)
     model_dir = hub.resolve(args.model)
+    if needs_full_snapshot and check is not None:
+        check(model_dir)                         # checks that need the complete index, such as an MTP head
     for key, value in getattr(family.package, "MLX_ENV", {}).items():
         os.environ.setdefault(key, value)       # before MLX starts: it reads them once
 
