@@ -5,7 +5,7 @@ One package per model family. TensorFold picks the package whose `MODEL_TYPES` h
 
 | Package | Model | Engine | Tested checkpoint |
 | --- | --- | --- | --- |
-| `nemotron_h/` | Nemotron 3.5 Lightning | serial engine, one step ahead on the GPU | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` |
+| `nemotron_h/` | Nemotron 3.5 Lightning | serial engine, one step ahead on the GPU, MTP drafts | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` (MTP head included) |
 | `qwen3_5/` | Qwen3.8 dense (27B) | lane engine, DFlash2 draft trees | `Vontra/Qwen3.8-27B-MLX-4bit` with `z-lab/Qwen3.8-27B-DFlash2` |
 | `qwen4_exp/` | Qwen3.8 Flash Next | serial engine, MTP drafts | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` |
 

@@ -65,12 +65,13 @@ class SerialEngine:
         # Copy windows: when the stream's proposer finds the context continuing an earlier span, the engine lets
         # the queued step land and verifies the copied tokens in windows of up to 1 + max_copy rows (exact when
         # a multi-row forward gives each row one-row bits, which the model checks at load), then goes back to
-        # pipelined steps. TF_MTP_ROUNDS=1: every round a two-row window with the MTP head's draft instead.
+        # pipelined steps. With an MTP head (TF_MTP_ROUNDS=0 turns it off): every round a two-row window with the
+        # head's draft instead.
         import os
 
         self.windows = self.pipelined and bool(getattr(model, "multi_row_exact", False))
         self.drafting = (self.windows and getattr(model, "mtp", None) is not None
-                         and os.environ.get("TF_MTP_ROUNDS", "0") == "1")
+                         and os.environ.get("TF_MTP_ROUNDS", "1") != "0")
         # a model decoded synchronously (host tokens) that drafts with its own head (model.draft): every round
         # verifies the pending token and its drafts in one forward and keeps them up to the first mismatch
         self.sync_drafts = (not self.pipelined and bool(getattr(model, "multi_row_exact", False))
@@ -425,8 +426,11 @@ class SerialEngine:
         t0 = time.perf_counter()
         position = stream.cache_len
         mtp_draft = self._draft.pop(stream.stream_id, None)
-        copied = self._proposal(stream, self.enter_match)
-        if copied:
+        forced, stream.force = list(stream.force), []
+        copied = [] if forced else self._proposal(stream, self.enter_match)
+        if forced:                      # the thinking budget's close: read, committed as it is
+            inputs = mx.array([stream.pending[-1], *forced], dtype=mx.uint32)
+        elif copied:
             inputs = mx.array([stream.pending[-1], *copied], dtype=mx.uint32)
         elif mtp_draft is not None:
             inputs = mx.concatenate([mx.array([stream.pending[-1]], dtype=mx.uint32), mtp_draft.astype(mx.uint32)])
@@ -439,26 +443,36 @@ class SerialEngine:
         t1 = time.perf_counter()
         sampled = [int(t) for t in tokens.tolist()]
         t2 = time.perf_counter()
-        proposed = copied if copied else ([int(mtp_draft.item())] if rows > 1 and mtp_draft is not None else [])
         keep = 1
-        for i, draft in enumerate(proposed):
-            if sampled[i] != draft:
-                break
-            keep += 1
-        if proposed:
-            self.drafted += len(proposed)
-            self.accepted += keep - 1
-            stream.drafted += len(proposed)
-            stream.accepted += keep - 1
-            if copied and stream.proposer is not None:
-                stream.proposer.observe(len(copied), keep - 1)
+        if forced:
+            keep = rows
+            sampled = [*forced, sampled[-1]]
+        else:
+            proposed = copied if copied else ([int(mtp_draft.item())] if rows > 1 and mtp_draft is not None else [])
+            for i, draft in enumerate(proposed):
+                if sampled[i] != draft:
+                    break
+                keep += 1
+            if proposed:
+                self.drafted += len(proposed)
+                self.accepted += keep - 1
+                stream.drafted += len(proposed)
+                stream.accepted += keep - 1
+                if copied and stream.proposer is not None:
+                    stream.proposer.observe(len(copied), keep - 1)
+        cut = stream.think_cut(sampled[:keep])
+        if cut is not None:
+            keep = cut + 1
+            sampled = [*sampled[:cut], stream.start_close()]
         if keep < rows:
             self.model.keep_rows(cache, rows, keep)
         stream.cache_len += keep
         got = stream.commit(sampled[:keep])
         stream.pending = [sampled[keep - 1]]
         if not stream.finished:
-            logits = self.model.draft_logits(hidden[:, :keep], tokens[:keep], cache, last_only=True)
+            # the head reads the kept rows with the tokens that follow them (a forced close included)
+            nxt = mx.array(sampled[:keep], dtype=mx.uint32)
+            logits = self.model.draft_logits(hidden[:, :keep], nxt, cache, last_only=True)
             draft = gpu_sample(logits[0], stream.sampling, [position + 1 + keep])
             mx.async_eval(draft)
             self._draft[stream.stream_id] = draft

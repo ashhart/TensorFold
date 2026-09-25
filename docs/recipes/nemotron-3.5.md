@@ -55,6 +55,15 @@ The pieces (`families/nemotron_h/kernels.py`):
   now alternate between two buffers. Long-context decode went from 138 to 162 tok/s.
 - Quality: teacher-forced over 300 tokens against mlx_lm, top-1 agreement 0.967 and NLL 2.3523 against 2.3540.
   mlx_lm's own prefill and decode paths agree 0.953 with each other.
+- MTP rounds. The BF16 release carries an MTP layer (an attention block and a 128-expert MoE block) that the
+  MLX conversion drops. `convert` in `families/nemotron_h/mtp.py` quantizes it from the release's last shard
+  into one 4-bit file, which the tested checkpoint ships as `mtp-4bit.safetensors`. With it, every step
+  verifies the pending token and the head's draft in one 2-row forward (or a copied continuation of up to 7
+  tokens), and the head then reads the kept rows and drafts again, queued on the GPU. In-engine on a quiet M5
+  Max: 217 tok/s on prose, 216-228 on code, 312 on an edit. Through the server, a back-to-back A/B while
+  other GPU work ran: +6-7% on prose and +9-18% on code with the head than without; edits, which copies
+  already carry, were mixed. Drafted replies are byte-identical to `"draft": false` replies. `--mtp-drafts 0`
+  (or `TF_MTP_ROUNDS=0`) turns it off.
 
 ## Tried and rejected
 
@@ -83,12 +92,8 @@ The pieces (`families/nemotron_h/kernels.py`):
 
 ## Next
 
-- MTP drafting. The BF16 release carries an MTP layer (an attention block and a 128-expert MoE block) that the
-  MLX conversion drops. `convert` in `families/nemotron_h/mtp.py` quantizes it from the release's last shard
-  into one 4-bit file, and with `TF_MTP_ROUNDS=1` the engine loads it (from
-  `~/.cache/tensorfold/mtp/nemotron-3.5-lightning/mtp-4bit.safetensors`, or the path in `TF_NEMOTRON_MTP`) and
-  drafts with it. In-engine it measured 217 tok/s on prose and 216-228 on code; it is not on by default in the
-  server yet. Chaining several MTP drafts with acceptance-driven depth, as Flash Next does, is untried.
+- More than one MTP draft a round, with acceptance-driven depth as Flash Next does: untried here.
+- A quiet-machine server measurement of MTP rounds against copies only.
 - Tests for the fused kernels (row independence at real dims) and for the GPU sampler against its numpy
   reference (`gpu_sampling.reference`).
 - At long context the cost is attention.

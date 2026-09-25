@@ -199,3 +199,36 @@ def test_lane_engine_forces_the_close_at_the_budget(pattern, budget):
     while engine.active_count:
         engine.step()
     assert stream.emitted == lane_expected(prompt, 40, budget, close)
+
+
+# -- MTP rounds on the pipelined engine: the head's draft verified with every step ---------------------------
+class PipelinedMTPChain(PipelinedChain):
+    def __init__(self, wrong_every: int = 0) -> None:
+        super().__init__()
+        self.mtp = object()
+        self.wrong_every = wrong_every
+
+    def draft_logits(self, hidden, next_tokens, cache, last_only=False):
+        tokens = [int(t) for t in np.array(next_tokens).reshape(-1)]
+        tokens = tokens[-1:] if last_only else tokens
+        logits = np.zeros((1, len(tokens), V), dtype=np.float32)
+        for i, t in enumerate(tokens):
+            self.calls += 1
+            guess = after(t)
+            if self.wrong_every and self.calls % self.wrong_every == 0:
+                guess = (guess + 1) % V
+            logits[0, i, guess] = 10.0
+        return mx.array(logits)
+
+
+@pytest.mark.parametrize("every,wrong", [(0, 0), (0, 2), (3, 3)])
+@pytest.mark.parametrize("budget", [2, 9, 13])
+def test_mtp_rounds_force_the_close_at_the_budget(every, wrong, budget):
+    engine = SerialEngine(PipelinedMTPChain(wrong_every=wrong))
+    assert engine.drafting
+    stream = LaneStream(stream_id="m", prompt_ids=[3, 14, 15], max_new_tokens=30, think_budget=budget,
+                        think_close=(NL, END, NLNL), think_end=END, think_open=True, proposer=CopyAhead(every))
+    engine.add_stream(stream)
+    while engine.active_count:
+        engine.step()
+    assert stream.emitted == expected(budget)

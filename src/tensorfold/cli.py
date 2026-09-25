@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
                             "pulled; none: no draft model")
     speed.add_argument("--drafter-bits", type=int, default=4, help="quantize the draft model's linears (0: bf16)")
     speed.add_argument("--mtp-drafts", type=int, default=None,
-                       help="most MTP drafts a round (Qwen3.8 Flash Next; default 3, 0: none)")
+                       help="most MTP drafts a round (Qwen3.8 Flash Next, default 3); 0: no MTP drafts (any family)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,

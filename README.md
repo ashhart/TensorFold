@@ -25,7 +25,7 @@ checkpoints TensorFold is built and tested with, all on Hugging Face:
 
 | Model | Pull | Size | Mac |
 | --- | --- | --- | --- |
-| Nemotron 3.5 Lightning 30B-A3B | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 17.8 GB | 32 GB or more |
+| Nemotron 3.5 Lightning 30B-A3B | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 18.6 GB | 32 GB or more |
 | Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` and its draft model `z-lab/Qwen3.8-27B-DFlash2` | 16.1 GB + 3.8 GB | 32 GB or more; an M5-generation GPU for the fast kernels |
 | Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 113 GB | 192 GB or more |
 
@@ -47,7 +47,8 @@ What each checkpoint needs:
   Its lane kernels need 4-bit weights in groups of 64 and Metal 4 tensor units (M5-generation GPUs). Elsewhere
   it runs on MLX's own kernels: every token is still the model's own sample, but drafted rows are checked at
   width rather than bit-identical to one-row decoding.
-- Nemotron 3.5 Lightning drafts from the context (copies of earlier text) and needs nothing extra.
+- Nemotron 3.5 Lightning drafts with its MTP head, which the checkpoint above ships as `mtp-4bit.safetensors`
+  (converted from NVIDIA's BF16 release; the standard MLX conversion drops it), and from the context.
 
 Want another model? [The recipe book](docs/recipes/README.md) describes what we did for each family and how
 to add yours.
@@ -55,7 +56,8 @@ to add yours.
 ## Speed
 
 Decode speeds we measured through the server. They depend on content: copies of earlier text (file edits)
-and predictable output (code, tool calls) draft well, fresh prose less so.
+and predictable output (code, tool calls) draft well, fresh prose less so. The Nemotron rows predate its MTP
+drafts, which are now on by default; in-engine they reached 217 tok/s on prose and 228 on code.
 
 | Model | Machine | Workload | tok/s |
 | --- | --- | --- | --- |
@@ -113,7 +115,7 @@ tensorfold info MODEL               # which family serves a model (reads its con
 | `--thinking-budget N` | no limit | most thinking tokens before the server closes the think block |
 | `--no-drafts` | off | one token a round: the serial reference |
 | `--drafter` | `auto` | the family's draft model once pulled; a repo id or directory; or `none` |
-| `--mtp-drafts N` | 3 | most MTP drafts a round (Qwen3.8 Flash Next) |
+| `--mtp-drafts N` | 3 | most MTP drafts a round (Qwen3.8 Flash Next); 0 turns MTP drafts off (both MTP families) |
 | `--prompt-cache-gib` | an eighth of RAM, at most 16 | memory for cached conversation prefixes |
 | `--snapshot-dir` | `~/.cache/tensorfold/prefix-snapshots` | system blocks and conversations kept across restarts |
 

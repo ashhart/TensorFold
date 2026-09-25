@@ -131,19 +131,34 @@ class NemotronH:
         return self.head(self.hidden(inputs, cache))
 
 
-def load(model_dir: Path, *, mtp_head: str = "") -> tuple[Any, Any]:
-    """The model. Its MTP head (converted from the BF16 release with ``mtp.convert``) is loaded only for MTP rounds
-    (TF_MTP_ROUNDS=1): ``mtp_head`` or TF_NEMOTRON_MTP names the file, default ``mtp.DEFAULT_DIR/mtp-4bit.safetensors``."""
+MTP_FILE = "mtp-4bit.safetensors"
+
+
+def find_mtp_head(model_dir: Path, choice: str = "") -> Path | None:
+    """The converted MTP head: ``choice`` (or TF_NEMOTRON_MTP; "0": none), else ``mtp-4bit.safetensors`` beside the
+    weights (the TensorFold-tested checkpoint ships it), else the one ``mtp.convert`` writes by default."""
 
     import os
 
-    from mlx_lm import load as mlx_load
-
     from tensorfold.families.nemotron_h.mtp import DEFAULT_DIR
 
-    mtp_path = None
-    if os.environ.get("TF_MTP_ROUNDS", "0") == "1":
-        choice = mtp_head or os.environ.get("TF_NEMOTRON_MTP", "")
-        mtp_path = None if choice == "0" else Path(choice).expanduser() if choice else DEFAULT_DIR / "mtp-4bit.safetensors"
+    choice = choice or os.environ.get("TF_NEMOTRON_MTP", "")
+    if choice == "0" or os.environ.get("TF_MTP_ROUNDS", "1") == "0":
+        return None
+    if choice:
+        return Path(choice).expanduser()
+    for candidate in (Path(model_dir) / MTP_FILE, DEFAULT_DIR / MTP_FILE):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def load(model_dir: Path, *, mtp_head: str = "", mtp_drafts: int | None = None) -> tuple[Any, Any]:
+    """The model, with its MTP head when one is found (``find_mtp_head``) and ``mtp_drafts`` is not 0: the engine
+    then verifies the head's draft with every step (MTP rounds)."""
+
+    from mlx_lm import load as mlx_load
+
+    mtp_path = None if mtp_drafts == 0 else find_mtp_head(Path(model_dir), mtp_head)
     loaded = mlx_load(str(model_dir))
     return NemotronH(loaded[0], mtp_path=mtp_path), loaded[1]
