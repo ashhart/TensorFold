@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tensorfold"
+version = "0.2.0"
+description = "Fast, exact LLM decoding on Apple Silicon (MLX) behind an OpenAI-compatible endpoint"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "TensorFold contributors" }]
+keywords = ["llm", "mlx", "apple-silicon", "inference", "speculative-decoding", "openai"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# mlx-lm is pinned below its next minor: TensorFold builds on its model classes and caches
+dependencies = ["mlx>=0.31.2", "mlx-lm>=0.31.3,<0.32", "numpy>=1.26"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+tensorfold = "tensorfold.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"tensorfold.drafters.vendor.z_lab_dflash" = ["README.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+
+[tool.ruff]
+line-length = 120
