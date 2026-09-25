@@ -8,11 +8,11 @@ Nemotron's name refers to the model, not to a CUDA device.
 
 ```bash
 uname -m
-python3.11 --version
+python3 --version
 ```
 
-Continue when the architecture is `arm64` and Python 3.11 is available. If Python 3.11 is missing and you
-use Homebrew, run `brew install python@3.11`. Check available RAM and disk space before downloading a
+Continue when the architecture is `arm64` and Python is 3.11 or newer. If it is older and you use Homebrew,
+run `brew install python`. Check available RAM and disk space before downloading a
 checkpoint. Ask which model to use if the person has not picked one; download only that model and its
 optional drafter.
 
@@ -34,7 +34,7 @@ If the repository is not already on the Mac, clone it first. Then install into a
 ```bash
 git clone https://github.com/ashhart/TensorFold.git
 cd TensorFold
-python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
 tensorfold --version

@@ -19,8 +19,11 @@ curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/jso
   -d '{"model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "messages": [{"role": "user", "content": "Hi"}]}'
 ```
 
-TensorFold needs a Mac with Apple Silicon and Python 3.11. The install pins MLX to its tested 0.31 release
-so the exact kernels and Nemotron MTP drafts stay active.
+TensorFold needs a Mac with Apple Silicon and Python 3.11 or newer. It is tested with MLX 0.31.2 on an M5 Max
+and MLX 0.32.0 on an M3 Ultra. Flash Next and Nemotron check at load that drafted rows reproduce one-row decoding
+on your MLX and GPU, and draft only when they do. On an M5, MLX 0.32.2 fails that check for Nemotron, which
+then runs without drafts (same output, slower); `pip install mlx==0.31.2` brings them back. The Qwen3.8-27B lane
+kernels do their own arithmetic, so their exactness does not depend on the MLX version.
 
 ## Models
 

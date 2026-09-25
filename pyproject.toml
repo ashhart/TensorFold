@@ -7,7 +7,7 @@ name = "tensorfold"
 version = "0.2.0"
 description = "Fast, exact LLM decoding on Apple Silicon (MLX) behind an OpenAI-compatible endpoint"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "TensorFold contributors" }]
 keywords = ["llm", "mlx", "apple-silicon", "inference", "speculative-decoding", "openai"]
@@ -19,8 +19,10 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-# TensorFold's exact kernels are qualified on MLX 0.31; mlx-lm builds on its model classes and caches.
-dependencies = ["mlx>=0.31.2,<0.32", "mlx-lm>=0.31.3,<0.32", "numpy>=1.26", "huggingface-hub>=0.24"]
+# Flash Next and Nemotron check at load that a multi-row forward reproduces one-row steps on the installed MLX
+# and GPU, and decode without drafts when it does not; the Qwen3.8 dense lane kernels do their own arithmetic.
+# mlx-lm stays below its next minor: TensorFold builds on its model classes and caches.
+dependencies = ["mlx>=0.31.2", "mlx-lm>=0.31.3,<0.32", "numpy>=1.26", "huggingface-hub>=0.24"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

@@ -420,6 +420,26 @@ def apply_round_precise(
     return landed, keep
 
 
+
+def sanitize_tree(tokens: Sequence[int], parents: Sequence[int], budget: int) -> tuple[list[int], list[int]]:
+    """Truncate a proposal to ``budget`` nodes and drop any node whose parent is missing or comes after it.
+
+    Proposers emit parents before children, so this normally just truncates; a malformed proposal loses the
+    orphaned subtrees instead of raising inside the round.
+    """
+
+    kept: dict[int, int] = {}
+    out_t: list[int] = []
+    out_p: list[int] = []
+    for i, (t, q) in enumerate(zip(list(tokens)[:budget], list(parents)[:budget])):
+        q = int(q)
+        if q >= 0 and q not in kept:
+            continue
+        kept[i] = len(out_t)
+        out_t.append(int(t))
+        out_p.append(-1 if q < 0 else kept[q])
+    return out_t, out_p
+
 # --------------------------------------------------------------------------
 # the engine (MLX only inside methods, like the rest of the package)
 # --------------------------------------------------------------------------
@@ -1423,7 +1443,7 @@ class LaneEngine:
 
                     print(f"[lanes] proposer failed (round drafted nothing): {type(exc).__name__}: {exc}", flush=True)
                     traceback.print_exc()
-            tokens, parents = [int(t) for t in tokens][:budget], [int(q) for q in parents][:budget]
+            tokens, parents = sanitize_tree(tokens, parents, budget)
         draft_ms = (time.perf_counter() - draft_started) * 1e3
         window = [int(stream.pending[0]), *tokens]
         rows_parents = [-1] + [0 if q < 0 else q + 1 for q in parents]

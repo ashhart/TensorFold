@@ -550,3 +550,12 @@ def test_shadow_stats_score_the_targets_samples_past_a_rejection() -> None:
     stream.context += [102, 205, 7]           # 12 = the bonus, 13 matches its shadow, 14 does not
     engine._shadow_stats(stream, [-1], [0], [0], 14, [0])
     assert engine.shadow_stats == {1: [1, 1], 2: [0, 1]}
+
+
+def test_sanitize_tree_truncates_and_drops_orphans() -> None:
+    from tensorfold.engine.lane_engine import sanitize_tree
+
+    assert sanitize_tree([9, 8, 7], [-1, 0, 1], budget=2) == ([9, 8], [-1, 0])
+    tokens, parents = sanitize_tree([9, 8, 7, 6], [-1, 2, 0, 1], budget=4)   # node 1's parent comes after it
+    assert tokens == [9, 7] and parents == [-1, 0]                            # node 3 followed node 1 out
+    assert sanitize_tree([9, 8, 7], [1, 0, 5], budget=3) == ([], [])         # nothing valid survives
