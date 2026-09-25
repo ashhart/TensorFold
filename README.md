@@ -4,6 +4,9 @@ TensorFold serves a local LLM on Apple Silicon at an OpenAI-compatible endpoint,
 on Hugging Face, choose the context window and sampling, and TensorFold downloads it, loads it with Metal
 kernels written for that model family, and serves `/v1/chat/completions`.
 
+Setting this up with an AI agent? Give it the [AI agent runbook](RUNBOOK.md) for the install, model download,
+server startup and a request that checks the result.
+
 ```bash
 pip install git+https://github.com/ashhart/TensorFold.git
 tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --context 65536
