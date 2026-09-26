@@ -2,6 +2,10 @@
 
 # TensorFold
 
+<p align="center">
+  <img src="assets/tensorfold-logo.png" alt="TensorFold folded tensor mesh logo" width="280">
+</p>
+
 TensorFold serves a local LLM on Apple Silicon at an OpenAI-compatible endpoint, fast and exact. Name a model
 on Hugging Face, choose the context window and sampling, and TensorFold downloads it, loads it with Metal
 kernels written for that model family, and serves `/v1/chat/completions`.
