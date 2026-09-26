@@ -1,14 +1,18 @@
-"""GLM-5.3-Flash (model_type ``glm5_next``) on two NVIDIA GPUs: a CUDA engine only, tensor parallel over two
-DGX Sparks.
+"""GLM-5.3-Flash (model_type ``glm5_next``): an MLX engine on one Apple Silicon Mac, and a CUDA engine tensor
+parallel over two DGX Sparks.
 
 45 decoder layers over a hidden size of 4,096: 34 of Kimi delta attention and 11 of DeepSeek sparse attention
 (MLA with an indexer), 288 routed experts (top 8) plus a shared expert, four residual streams mixed by
-hyper-connections, a 154,880-token vocabulary and an MTP layer. The 4-bit checkpoint is 182 GB, so each Spark
-holds half of every layer (``cuda/``). Drafts come from the checkpoint's MTP head and, when it has been pulled on
-both machines, from the DFlash2 draft model.
+hyper-connections, a 154,880-token vocabulary and an MTP layer. The 4-bit checkpoint is 182 GB.
 
-There is no MLX engine for this family (no ``load``), so ``tensorfold serve`` refuses the MLX backend for it.
-Recipe and measurements: docs/recipes/glm-5.3-flash.md.
+On a Mac (``load``): ``model`` is TensorFold's forward pass for the checkpoint, with a decode path whose rows each
+get one-row bits; ``tensorfold.kernels.glm.flash.v1`` holds its Metal kernels; ``mtp`` is the checkpoint's MTP
+layer; ``runtime`` is what the serial engine serves (exact MTP drafting when the load-time row check passes). It
+needs a Mac with 256 GB or more.
+
+On NVIDIA GPUs (``cuda_engine``): each Spark holds half of every layer (``cuda/``). Drafts come from the
+checkpoint's MTP head and, when it has been pulled on both machines, from the DFlash2 draft model.
+Recipe and measurements for both: docs/recipes/glm-5.3-flash.md.
 """
 
 from __future__ import annotations
@@ -18,21 +22,75 @@ from typing import Any
 
 MODEL_TYPES = ("glm5_next",)
 TITLE = "GLM-5.3-Flash"
+LANES = False
+# 4-bit weights in groups of 64 (what the Metal and CUDA kernels read), with the checkpoint's MTP layer kept
 MODELS = ("Vontra/GLM-5.3-Flash-MLX-4bit-MTP",)
-DRAFTER = "incoai/GLM-5.3-Flash-DFlash2"
+DRAFTER = "incoai/GLM-5.3-Flash-DFlash2"   # the CUDA engine's optional draft model; the Mac engine drafts with MTP
+KERNEL_PACKAGE = "tensorfold.kernels.glm.flash.v1"
+KERNEL_VERSION = "v1"
+# MLX command buffers: GLM's decode step is about 1,200 kernels a token (set before MLX starts, as for Flash Next)
+MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}
 
 
 def check(model_dir: str | Path) -> None:
-    """The engine reads MLX affine 4-bit weights in groups of 64 and runs on two GPUs."""
+    """Both engines read MLX affine 4-bit weights in groups of 64."""
+
+    import sys
 
     from tensorfold.families import quantization, read_config
 
     bits, group = quantization(read_config(model_dir))
     if (bits, group) != (4, 64):
-        raise ValueError(f"GLM-5.3-Flash's CUDA engine reads 4-bit weights in groups of 64 ({MODELS[0]}), "
+        raise ValueError(f"TensorFold's GLM-5.3-Flash kernels read 4-bit weights in groups of 64 ({MODELS[0]}), "
                          f"this checkpoint has {bits}-bit, groups of {group}")
+    if sys.platform == "darwin":
+        from tensorfold.families.glm5_next.mtp import has_mtp
+
+        if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
+            print(f"[tensorfold] this checkpoint has no MTP layer: decoding without MTP drafts ({MODELS[0]} has "
+                  f"one)", flush=True)
+        return
     print("[tensorfold] GLM-5.3-Flash runs on two NVIDIA GPUs with 128 GB each (two DGX Sparks): pull it on both "
           "and serve with --tp 2 on both (docs/recipes/glm-5.3-flash.md)", flush=True)
+
+
+def load(model_dir: Path, *, mtp_drafts: int | None = None, **_: Any) -> tuple[Any, Any]:
+    """The MLX engine. ``mtp_drafts``: the most MTP drafts a round (default 1; 0: none). With more than 1 the
+    depth follows each draft position's measured acceptance (``runtime.GLMFlash.depth_for``)."""
+
+    import mlx.core as mx
+
+    from tensorfold.families.glm5_next.runtime import load as load_runtime
+
+    # about 170 GB of weights on a 256 GB Mac: keep them wired, or macOS can page them out between steps
+    if mx.metal.is_available():
+        info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+        limit = int(info.get("max_recommended_working_set_size", 0))
+        if limit:
+            mx.set_wired_limit(limit)
+    return load_runtime(Path(model_dir), drafts=mtp_drafts)
+
+
+def kernel_version(model: Any) -> str:
+    """Names the kernels that computed a prefix snapshot: the MLX engine's and the kernel package's sources, the
+    MLX version (MLX's own kernels compute the prefill) and the switches that change the decode path's arithmetic."""
+
+    import hashlib
+    import importlib
+
+    import mlx.core as mx
+
+    from tensorfold.families.glm5_next import model as glm
+
+    digest = hashlib.sha256()
+    for module in (__name__, KERNEL_PACKAGE):
+        folder = Path(str(importlib.import_module(module).__file__)).parent
+        for path in sorted(folder.glob("*.py")):       # this folder only: the CUDA engine (cuda/) is not on this path
+            digest.update(path.relative_to(folder).as_posix().encode())
+            digest.update(path.read_bytes())
+    digest.update(mx.__version__.encode())
+    digest.update(f"fused_kda={glm.FUSED_KDA} sparse={glm.SPARSE_KERNEL} fused={sorted(glm.FUSED)}".encode())
+    return f"{MODEL_TYPES[0]}-{KERNEL_VERSION}-" + digest.hexdigest()[:12]
 
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",

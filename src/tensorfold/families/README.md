@@ -5,7 +5,7 @@ One package per model family. TensorFold picks the package whose `MODEL_TYPES` h
 
 | Package | Model | Engine | Kernels | Tested checkpoint |
 | --- | --- | --- | --- | --- |
-| `glm5_next/` | GLM-5.3-Flash | CUDA only, two GPUs: MTP and DFlash2 drafts, CUDA graphs | `glm5_next/cuda/` | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` with `incoai/GLM-5.3-Flash-DFlash2` |
+| `glm5_next/` | GLM-5.3-Flash | serial engine, MTP drafts (KDA state replayed on rollback); on CUDA two GPUs: MTP and DFlash2 drafts, CUDA graphs | `glm/flash/v1`; `glm5_next/cuda/` | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` with `incoai/GLM-5.3-Flash-DFlash2` |
 | `nemotron_h/` | Nemotron 3.5 Lightning | serial engine, one step ahead on the GPU, MTP drafts | `nemotron/lightning/v1` | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` (MTP head included) |
 | `qwen3_5/` | Qwen3.8 dense (27B) | lane engine, DFlash2 draft trees; on CUDA the same trees, one or two GPUs | `qwen/dense/v1`; `qwen3_5/cuda/` | `Vontra/Qwen3.8-27B-MLX-4bit` with `z-lab/Qwen3.8-27B-DFlash2` |
 | `qwen4_exp/` | Qwen3.8 Flash Next | serial engine, MTP drafts; on CUDA MTP chains in CUDA graphs, one or two GPUs | `qwen/flash_next/v1`; `qwen4_exp/cuda/` | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` |
