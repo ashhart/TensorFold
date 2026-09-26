@@ -279,15 +279,27 @@ _EXPERT_DOWN = r"""
   const float sa = load16(x + lane * 16, xa);
   const bool second = int(lane) < NC - 32;
   const float sb = second ? load16(x + (32 + lane) * 16, xb) : 0.0f;
+  // the 8 rows' loads before the first simd_sum, so their reads are in flight together
+  float acc[8];
+  #pragma unroll
   for (int row = 0; row < 8; row++) {
     const size_t at = e * D + d0 + row;
     const device uint8_t* w = (const device uint8_t*)DW + at * KB;
-    float acc = qdot16(w + lane * 8, xa, float(DSC[at * KG + lane / (GS / 16)]), float(DBI[at * KG + lane / (GS / 16)]), sa);
-    if (second)
-      acc += qdot16(w + (32 + lane) * 8, xb, float(DSC[at * KG + (32 + lane) / (GS / 16)]),
-                    float(DBI[at * KG + (32 + lane) / (GS / 16)]), sb);
-    acc = simd_sum(acc);
-    if (lane == 0) ys[k][row] = float(bfloat(acc));
+    acc[row] = qdot16(w + lane * 8, xa, float(DSC[at * KG + lane / (GS / 16)]), float(DBI[at * KG + lane / (GS / 16)]), sa);
+  }
+  if (second) {
+    #pragma unroll
+    for (int row = 0; row < 8; row++) {
+      const size_t at = e * D + d0 + row;
+      const device uint8_t* w = (const device uint8_t*)DW + at * KB;
+      acc[row] += qdot16(w + (32 + lane) * 8, xb, float(DSC[at * KG + (32 + lane) / (GS / 16)]),
+                         float(DBI[at * KG + (32 + lane) / (GS / 16)]), sb);
+    }
+  }
+  #pragma unroll
+  for (int row = 0; row < 8; row++) {
+    const float s = simd_sum(acc[row]);
+    if (lane == 0) ys[k][row] = float(bfloat(s));
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (k == 0 && lane < 8) {
