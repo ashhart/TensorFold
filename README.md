@@ -83,11 +83,11 @@ drafts, which are now on by default; in-engine they reached 217 tok/s on prose a
 | | | about 60k-token context | 162 |
 | Qwen3.8-27B, 4-bit, DFlash2 drafter | M5 Max, 128 GB | short answer with thinking | 120-124 (27 without drafts) |
 | | | code | 189 (26 without drafts) |
-| Qwen3.8 Flash Next, 4-bit | M3 Ultra, 256 GB | short answer with thinking | 88-92 (79 without drafts) |
-| | | code | 110 (80 without drafts) |
-| | | file edit | 170-176 |
-| | | 18k-token context | 77-84 |
-| | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 91-99 |
+| Qwen3.8 Flash Next, 4-bit | M3 Ultra, 256 GB | short answer with thinking | 105-107 (79 without drafts) |
+| | | code | 112 (80 without drafts) |
+| | | file edit | 190 |
+| | | 18k-token context | 98.5 |
+| | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 103-115 |
 
 ## Exact means byte-identical
 

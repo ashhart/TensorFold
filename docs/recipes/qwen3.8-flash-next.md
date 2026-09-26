@@ -33,11 +33,11 @@ Through the server with exact sampling (T 1.0, top-k 20, top-p 0.95), thinking o
 
 | Request | tok/s |
 | --- | --- |
-| short answer | 88-92 (79 serial) |
-| code | 110 (80 serial) |
-| file edit (a rename in a 5k-character file) | 170-176 |
-| 18k-token context | 77-84 |
-| 23k-token agent prompt, 512 thinking tokens, then a long tool call | 91-99 |
+| short answer | 105-107 (79 serial) |
+| code | 112 (80 serial) |
+| file edit (a rename in a 5k-character file) | 190 |
+| 18k-token context | 98.5 |
+| 23k-token agent prompt, 512 thinking tokens, then a long tool call | 103-115 |
 
 The pieces:
 
@@ -56,11 +56,11 @@ The pieces:
   scores every block for all rows, another picks each row's top 512 by radix select, and one attention kernel
   serves every row. Forward time in ms at 1/2/4/8 rows:
 
-  | Context | Reference selection, MLX attention per row | Kernels |
-  | --- | --- | --- |
-  | 2k | 12.6 / 17.1 / 26.5 / 43.2 | 12.4 / 16.6 / 25.9 / 42.0 |
-  | 18k | 15.0 / 18.4 / 29.3 / 48.3 | 13.1 / 17.3 / 27.3 / 44.5 |
-  | 50k | 16.1 / 18.8 / 31.1 / 49.2 | 13.4 / 17.9 / 28.8 / 45.3 |
+  | Context | Reference selection, MLX attention per row | Kernels | Kernels, without the overheads below |
+  | --- | --- | --- | --- |
+  | 2k | 12.6 / 17.1 / 26.5 / 43.2 | 12.4 / 16.6 / 25.9 / 42.0 | 11.0 / 14.5 / 21.7 / 36.7 |
+  | 18k | 15.0 / 18.4 / 29.3 / 48.3 | 13.1 / 17.3 / 27.3 / 44.5 | 11.6 / 15.1 / 22.9 / 38.7 |
+  | 50k | 16.1 / 18.8 / 31.1 / 49.2 | 13.4 / 17.9 / 28.8 / 45.3 | 11.8 / 15.5 / 23.9 / 39.7 |
 
 - MTP drafting: each round verifies the pending token and up to 3 MTP drafts in one forward and keeps them up
   to the first mismatch; the MTP head then absorbs the kept rows and chains the next drafts. The depth follows
@@ -69,6 +69,45 @@ The pieces:
   only at high acceptance. On the agent prompt above, a cap of 3 ran 91.1 tok/s against 86.8 with 1.
 - Copy windows: when the context holds the text being written (file edits), a round verifies up to 7 copied
   tokens, and the MTP head only absorbs that round's rows instead of chaining drafts nobody will use.
+
+### Removing overheads (+15-17%, byte-exact, the same NLL)
+
+Each change was measured in one process through the serial engine on fixed prompts and seeds (thinking budget
+512), with the output compared between variants. tok/s:
+
+| Change | prose | code | agent prompt | file edit |
+| --- | --- | --- | --- | --- |
+| before | 92.4 | 100.2 | 96.6 | 119.5 |
+| MLX command-buffer limits raised, each layer submitted as it is built | 95.6 | 103.4 | 99.7 | |
+| expert gate/up hands its routing to expert down | 98.6 | 105.4 | 101.0 | |
+| per-slot expert kernels at every window width | 99.6 | 107.6 | 103.6 | 128.5 |
+| the MTP head's first draft for every verify row queued behind the verify | 100.4 | 109.5 | 105.8 | 129.0 |
+| `a[0]` indexing, per-layer `arange` and `zeros` removed | 101.6 | 110.6 | 108.0 | 130.1 |
+| the n-gram embedding in one lookup kernel | 105.9 | 113.8 | 111.2 | 133.6 |
+| expert down without its in-kernel combine | 106.9 | 115.7 | 113.3 | 137.1 |
+
+- MLX ends a command buffer once the bytes bound in it pass `MLX_MAX_MB_PER_BUFFER`. Every expert kernel binds
+  the 420 MB expert stacks, so with the default each one ended a command buffer: an empty kernel binding them
+  cost 28 us a launch against 12 with the limit raised. The family now sets `MLX_ENV` as Nemotron does, and the
+  fused decode submits each layer with `mx.async_eval` (every 4 layers lost about 1%).
+- Routing: every simdgroup of the down kernel (3,520 a call) repeated the top-10 selection over 512 logits
+  before reading a weight. Gate/up already selects each slot's expert, so it now writes the picks and the
+  renormalised weights for down to read: same bits, 0.5 ms a one-row step.
+- With the routing handed on, the per-slot kernels beat the grouped ones at every width the fused path takes
+  (8-row copy windows included), so no window is grouped. The down kernel writes each slot's output and the next
+  hyper-connection norm combines them (the grouped path's write-back, the same arithmetic), so no threadgroup
+  waits for its slowest expert.
+- `a[0]` on an MLX array is a gather that copies: the DeltaNet state (3.1 MB a layer) was copied every step
+  through `cache.ssm[0]`. `a.reshape(a.shape[1:])` is a view. `mx.export_to_dot` on a forward lists every
+  primitive; that is how the stray gathers, fills and aranges were found.
+- MLX's quantized embedding is three gathers and a dequantize per lookup, and the n-gram embedding looked up up
+  to 16 shards a row: about 70 small operations. Its 128 shards are now 8 concatenated groups (the shards keep
+  views into them, so memory does not grow), read by one kernel that matches `mx.dequantize` bit for bit. The
+  token embedding and its tiling into the four streams are one kernel too.
+- The MTP head absorbs every verify row and draws each row's first draft in the same GPU pass as the verify,
+  before any token is read; the rows past the kept ones are then dropped from its cache. One host round trip
+  less a round. Its input projections go through MLX's matmul, whose bits depend on the row count on this GPU,
+  so a draft can differ from the old path's by rounding: acceptance moved by under 1%, and the output did not.
 
 ## Tried and rejected
 
@@ -83,6 +122,14 @@ The pieces:
 - Entering copy windows on short matches: in fresh code, coincidental matches (indentation, "self.") failed 56
   of 70 copied tokens and cost 5%, so entry needs 8 matching tokens.
 - MLX's quantized matmul for multi-row windows on this GPU and MLX version, and bf16 router logits (see below).
+- Hyper-connection kernels with the rows of a window in one threadgroup and the weights read once, with the
+  rows looped and with a single set of barriers: both slower than rows in parallel threadgroups.
+- Expert down tiles of 4 or 16 model dims (8 is best at 1 and 2 rows), both rows of a 2-row window in one
+  threadgroup, split-K expert gate/up, and the up projection with 16 dims a threadgroup: slower or level.
+- Drafts drawn with temperature 0.8, 0.9 or 1.1, top-p 1.0 or top-k 40 (the target's rule is unchanged): within
+  0.5%. Deeper draft-depth policies: 0.5-2% slower.
+- fp32 8x8 simdgroup matrices: 25.8 TF/s against 23.7 for scalar FMA on the M3 Ultra, so padding one row to 8
+  costs 8x the arithmetic. They do not make verify rows cheap on this GPU.
 
 ## Exactness
 
@@ -114,9 +161,11 @@ The pieces:
 
 ## Next
 
-- Expert kernels that dequantize a weight tile once and multiply it for every row of the window with
-  simdgroup matrices, the same kernel serving one row. The expert kernels cost about 15 us per extra row per
-  layer whatever the number of distinct experts, so they are bound by the dequantize-and-multiply work each row
-  repeats. That is the 2.4 ms of the roughly 5 ms each extra verify row costs at 18k; the rest is the
-  hyper-connection projections (1.3 ms), attention and the other projections.
+- A forward is about 680 dependent dispatches. A trivial dependent dispatch costs 3.2 us in raw Metal, and MLX
+  adds about 3 us of GPU time (and 12-18 us of host time) to each one when the GPU is the limit: about 2 ms a
+  forward. Encoding the whole fused forward in one custom primitive would remove it.
+- An extra verify row costs about 3.5 ms at 2k context: the expert down projection about 1.3 ms, gate/up 0.9
+  (most of the two is the new experts' weight reads, about 1.1 ms), the hyper-connection projections about 1.0.
+  With rows near 2 ms, three drafts a round pay: about 3.2 tokens a round at 86% acceptance, which puts agent
+  turns near 150 tok/s.
 - n-gram ids computed on the GPU, so decode can run one step ahead as Nemotron does.
