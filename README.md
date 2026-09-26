@@ -178,10 +178,6 @@ pytest
 
 The kernel tests of the lane engine need an M5-generation GPU and are skipped elsewhere.
 
-## Brand assets
-
-The [benchmark hero](assets/tensorfold-hero-speeds.png) is a 3:1 image for X headers and this README. Its figures are the short-answer server results in the [speed table](#speed), measured on the machines named in the image. The [clean hero](assets/tensorfold-hero.png) and [transparent mesh logo](assets/tensorfold-logo.png) are also available.
-
 ## License
 
 MIT. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md). Each model keeps its own license;
