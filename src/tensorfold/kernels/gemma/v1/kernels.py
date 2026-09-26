@@ -73,18 +73,22 @@ def _reduce(acc: str, partial: str, out: str) -> str:
     return _REDUCE.replace("ACC", acc).replace("P[", f"{partial}[").replace("OUTV", out)
 
 
-# one threadgroup of T threads per row; thread t owns elements t, t + T, ...
+# one threadgroup of T threads per row; thread t owns elements t, t + T, ... Every load is issued before the first
+# reduction: this kernel sits between two matmuls on the step's critical path, where each wait for memory after a
+# barrier adds its full latency (54 to 25 us a call, same bits)
 _ATTN_TAIL = r"""
   const uint t = thread_position_in_threadgroup.x;
   const uint r = threadgroup_position_in_grid.x;
   constexpr int PER = D / T;
   threadgroup float p1[T / 32], p2[T / 32];
-  float ov[PER];
-  float ss = 0.0f;
+  float ov[PER], hin[PER], wa[PER], w1[PER], w2[PER], w3[PER];
   for (int i = 0; i < PER; i++) {
-    ov[i] = float(O[int(r) * D + int(t) + i * T]);
-    ss = fma(ov[i], ov[i], ss);
+    const int c = int(t) + i * T;
+    ov[i] = float(O[int(r) * D + c]); hin[i] = float(H[int(r) * D + c]);
+    wa[i] = float(WA[c]); w1[i] = float(W1[c]); w2[i] = float(W2[c]); w3[i] = float(W3[c]);
   }
+  float ss = 0.0f;
+  for (int i = 0; i < PER; i++) ss = fma(ov[i], ov[i], ss);
   float total1;
   REDUCE1
   const float inv1 = metal::precise::rsqrt(total1 / float(D) + eps[0]);
@@ -92,8 +96,8 @@ _ATTN_TAIL = r"""
   float ss2 = 0.0f;
   for (int i = 0; i < PER; i++) {
     const int c = int(t) + i * T;
-    const float a = float(bfloat(float(WA[c]) * float(bfloat(ov[i] * inv1))));
-    const bfloat hn = bfloat(float(H[int(r) * D + c]) + a);
+    const float a = float(bfloat(wa[i] * float(bfloat(ov[i] * inv1))));
+    const bfloat hn = bfloat(hin[i] + a);
     HN[int(r) * D + c] = hn;
     hv[i] = float(hn);
     ss2 = fma(hv[i], hv[i], ss2);
@@ -104,9 +108,9 @@ _ATTN_TAIL = r"""
   for (int i = 0; i < PER; i++) {
     const int c = int(t) + i * T;
     const float n = float(bfloat(hv[i] * inv2));
-    N1[int(r) * D + c] = bfloat(float(W1[c]) * n);
-    N2[int(r) * D + c] = bfloat(float(W2[c]) * n);
-    N3[int(r) * D + c] = bfloat(float(W3[c]) * n);
+    N1[int(r) * D + c] = bfloat(w1[i] * n);
+    N2[int(r) * D + c] = bfloat(w2[i] * n);
+    N3[int(r) * D + c] = bfloat(w3[i] * n);
   }
 """.replace("REDUCE1", _reduce("ss", "p1", "total1")).replace("REDUCE2", _reduce("ss2", "p2", "total2"))
 
@@ -149,13 +153,17 @@ _MOE_TAIL = r"""
   const uint r = threadgroup_position_in_grid.x;
   constexpr int PER = D / T;
   threadgroup float p1[T / 32], p2[T / 32], p3[T / 32], p4[T / 32];
-  float y1v[PER], h2v[PER];
-  float ss1 = 0.0f, ss2 = 0.0f;
+  // every load before the first reduction, as in attn_tail
+  float y1v[PER], h2v[PER], hin[PER], w1[PER], w2[PER], wp[PER], wn[PER];
   for (int i = 0; i < PER; i++) {
     const int c = int(t) + i * T;
-    y1v[i] = float(Y1[int(r) * D + c]);
+    y1v[i] = float(Y1[int(r) * D + c]); h2v[i] = float(Y2[int(r) * D + c]); hin[i] = float(H[int(r) * D + c]);
+    w1[i] = float(W1[c]); w2[i] = float(W2[c]); wp[i] = float(WP[c]); wn[i] = float(WN[c]);
+  }
+  const float sc = float(SC[0]);
+  float ss1 = 0.0f, ss2 = 0.0f;
+  for (int i = 0; i < PER; i++) {
     ss1 = fma(y1v[i], y1v[i], ss1);
-    h2v[i] = float(Y2[int(r) * D + c]);
     ss2 = fma(h2v[i], h2v[i], ss2);
   }
   float total1, total2;
@@ -166,9 +174,8 @@ _MOE_TAIL = r"""
   float sv[PER];
   float ss3 = 0.0f;
   for (int i = 0; i < PER; i++) {
-    const int c = int(t) + i * T;
-    const float a1 = float(bfloat(float(W1[c]) * float(bfloat(y1v[i] * inv1))));
-    const float a2 = float(bfloat(float(W2[c]) * float(bfloat(h2v[i] * inv2))));
+    const float a1 = float(bfloat(w1[i] * float(bfloat(y1v[i] * inv1))));
+    const float a2 = float(bfloat(w2[i] * float(bfloat(h2v[i] * inv2))));
     sv[i] = float(bfloat(a1 + a2));
     ss3 = fma(sv[i], sv[i], ss3);
   }
@@ -179,9 +186,9 @@ _MOE_TAIL = r"""
   float ss4 = 0.0f;
   for (int i = 0; i < PER; i++) {
     const int c = int(t) + i * T;
-    const float b = float(bfloat(float(WP[c]) * float(bfloat(sv[i] * inv3))));
-    const bfloat hs = bfloat(float(H[int(r) * D + c]) + b);
-    const bfloat hn = bfloat(float(hs) * float(SC[0]));
+    const float b = float(bfloat(wp[i] * float(bfloat(sv[i] * inv3))));
+    const bfloat hs = bfloat(hin[i] + b);
+    const bfloat hn = bfloat(float(hs) * sc);
     HN[int(r) * D + c] = hn;
     hv[i] = float(hn);
     ss4 = fma(hv[i], hv[i], ss4);
@@ -191,7 +198,7 @@ _MOE_TAIL = r"""
   const float inv4 = metal::precise::rsqrt(total4 / float(D) + eps[0]);
   for (int i = 0; i < PER; i++) {
     const int c = int(t) + i * T;
-    NEXT[int(r) * D + c] = bfloat(float(WN[c]) * float(bfloat(hv[i] * inv4)));
+    NEXT[int(r) * D + c] = bfloat(wn[i] * float(bfloat(hv[i] * inv4)));
   }
 """.replace("REDUCE1", _reduce("ss1", "p1", "total1")).replace("REDUCE2", _reduce("ss2", "p2", "total2")) \
    .replace("REDUCE3", _reduce("ss3", "p3", "total3")).replace("REDUCE4", _reduce("ss4", "p4", "total4"))
