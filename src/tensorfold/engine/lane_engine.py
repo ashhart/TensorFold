@@ -190,6 +190,7 @@ class LaneStream:
     rounds: int = 0
     drafted: int = 0
     accepted: int = 0
+    idle_rounds: int = 0        # rounds in a row that offered no DFlash2 drafts (``LaneEngine._paying_drafts``)
     full_rounds: int = 0
     partial_rounds: int = 0
     refeed_tokens: int = 0
@@ -501,6 +502,12 @@ class LaneEngine:
     # (``gdn_capture``) instead of restoring the whole window and re-feeding it, and
     # report the kept rows to the proposer (DFlash2 reads their hidden states).
     precise_single = False
+    # Verify-window costs in ms by width, measured at load on a Mac without tensor units (a window row there costs
+    # about a third of a one-row step): each round then offers the number of DFlash2 drafts with the most expected
+    # tokens a millisecond at the stream's recent acceptance (``_paying_drafts``). None: the budgets above.
+    window_costs: dict[int, float] | None = None
+    # rounds without DFlash2 drafts before one offers a draft again, keeping the acceptance estimate current
+    probe_every = 8
 
     PAD_TOKEN = 0
 
@@ -1095,6 +1102,8 @@ class LaneEngine:
         budget = min(self.max_draft, stream.draft_room - 1)
         if budget <= 0:
             return []
+        if self.window_costs is not None and hasattr(stream.proposer, "model_cap"):
+            stream.proposer.model_cap = self._paying_drafts(stream, budget)
         try:
             proposal = stream.proposer.propose(stream.context, budget)
         except Exception:  # noqa: BLE001 - a proposer must never break a stream
@@ -1111,6 +1120,34 @@ class LaneEngine:
             # of up to 9 rows the bits of a 1-row call, not from 10 rows (2026-09-23).
             budget = min(budget, max(0, self.exact_window - len(stream.pending)))
         return [int(t) for t in proposal][:budget]
+
+    def _paying_drafts(self, stream: LaneStream, budget: int) -> int:
+        """The number of DFlash2 drafts (0 to ``budget``) with the most expected committed tokens a millisecond,
+        from ``window_costs``, the drafter's time a block and the stream's recent acceptance; after
+        ``probe_every`` rounds of none, one."""
+
+        costs = self.window_costs or {}
+        proposer = stream.proposer
+        p = proposer.continue_rate()
+        draft = proposer.draft_ms / proposer.proposals if proposer.proposals else costs[1] / 6
+        best, best_rate = 0, 1.0 / costs[1]
+        expected = run = 1.0
+        for drafts in range(1, budget + 1):
+            if drafts + 1 not in costs:
+                break
+            run *= p
+            expected += run
+            rate = expected / (costs[drafts + 1] + draft)
+            if rate > best_rate:
+                best, best_rate = drafts, rate
+        if best:
+            stream.idle_rounds = 0
+            return best
+        stream.idle_rounds += 1
+        if stream.idle_rounds >= self.probe_every:
+            stream.idle_rounds = 0
+            return 1
+        return 0
 
     def _snapshot_recurrent(self, cache: list[Any]) -> list[list[Any] | None]:
         import mlx.core as mx

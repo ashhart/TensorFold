@@ -371,6 +371,10 @@ class DFlashProposer:
         self.ready = False
         self.copy = copy
         self.last_confident = False
+        # most DFlash2 drafts the next proposal may hold (None: max_draft; 0: no drafter forward, copies only)
+        self.model_cap: int | None = None
+        # DFlash2 drafts accepted lately and chains cut short lately (decayed each drafted round)
+        self.hits = self.misses = 0.0
         self.proposals = 0
         self.proposed_tokens = 0
         self.accepted_tokens = 0
@@ -436,9 +440,10 @@ class DFlashProposer:
                 self._last_was_copy = True
                 self.copy_rounds += 1
                 return drafts
-        if not self.ready or self.context is None:
+        cap = int(max_draft) if self.model_cap is None else min(int(max_draft), int(self.model_cap))
+        if not self.ready or self.context is None or cap <= 0:
             return []
-        block = min(self.drafter.block_size, int(max_draft) + 1)
+        block = min(self.drafter.block_size, cap + 1)
         if block < 2:
             return []
         started = time.perf_counter()
@@ -852,6 +857,15 @@ class DFlashProposer:
                 observe(proposed, accepted)
             return
         self.accepted_tokens += int(accepted)
+        if proposed > 0:
+            self.hits = self.hits * 0.9 + accepted
+            self.misses = self.misses * 0.9 + (1.0 if accepted < proposed else 0.0)
+
+    def continue_rate(self) -> float:
+        """How often a DFlash2 draft has lately been accepted when the drafts before it were (from a prior of 3 in
+        5): the chance of each further draft under a geometric model."""
+
+        return (self.hits + 3.0) / (self.hits + self.misses + 5.0)
 
     def telemetry(self) -> dict[str, Any]:
         out = {"dflash_proposals": self.proposals, "dflash_proposed": self.proposed_tokens,

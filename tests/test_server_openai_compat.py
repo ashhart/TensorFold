@@ -23,9 +23,11 @@ class FakeApp:
         *,
         fail_stream: bool = False,
         content: str = "Hello",
+        reasoning: str = "",
     ) -> None:
         self.fail_stream = fail_stream
         self.content = content
+        self.reasoning = reasoning
         self.tokenizer = FakeTokenizer()
         self.tokenizer_lock = threading.Lock()
         self.messages: list[dict[str, Any]] | None = None
@@ -45,6 +47,8 @@ class FakeApp:
         if on_delta is not None:
             if self.fail_stream:
                 raise RuntimeError("boom")
+            if self.reasoning:
+                on_delta({"reasoning_content": self.reasoning})
             on_delta("Hel")
             on_delta("lo")
         return {
@@ -118,6 +122,27 @@ def test_legacy_completions_stream_finishes_with_finish_reason() -> None:
     assert '"text": "Hel"' in body
     assert '"finish_reason": "stop"' in body
     assert "data: [DONE]" in body
+
+
+def test_legacy_completions_stream_sends_text_as_strings_without_reasoning() -> None:
+    app = FakeApp(reasoning="thinking it over")
+    server = serve_fake(app)
+    try:
+        status, body = post_json(
+            server,
+            "/v1/completions",
+            {"model": "fake-model", "prompt": "Hi", "stream": True, "max_tokens": 8},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    chunks = [json.loads(line[5:]) for line in body.splitlines()
+              if line.startswith("data:") and line != "data: [DONE]"]
+    texts = [choice["text"] for chunk in chunks for choice in chunk.get("choices", [])]
+    assert texts and all(isinstance(text, str) for text in texts)
+    assert "".join(texts) == "Hello" and "thinking it over" not in body
 
 
 def test_chat_completions_stream_starts_with_assistant_role() -> None:

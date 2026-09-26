@@ -102,6 +102,41 @@ The pieces, in the order they paid:
   a round, and no scorer picked the right candidate more than about 75% of the time past depth 1.
 - Parallel lanes without a drafter (Jacobi decoding): 1.07 tokens a pass.
 
+## Macs without tensor units (M1 to M4)
+
+The lane kernels need the M5's tensor units. Before 0.3.3 other Macs served the 27B at serial speed: the
+rounds that keep DFlash2 following the kept rows were switched on only with the lane kernels, so the drafter
+stopped after its first round. Since 0.3.3 every Mac drafts:
+
+- Verify windows of 2 to 8 rows go through `kernels/qwen/dense/v1/row_qmv.py`, MLX's one-row matvec loop run
+  once per row with each weight word read once for all the rows. A row's bits don't depend on the row count,
+  and they equal MLX's own one-row call, so serial decoding stays on MLX's kernel. MLX 0.32's own multi-row
+  matmul sums a row differently when 2 or more rows ride together, so it can't verify drafts exactly.
+- Windows attend query by query (`kernels/qwen/dense/v1/exact_attention.py`), and a partly accepted window is
+  rolled back to exactly its kept rows, so DFlash2 reads the kept rows' hidden states.
+- At load the engine checks which window widths reproduce one-row decoding on this Mac and times each width.
+  Each round then drafts the number of tokens with the most expected tokens a millisecond at the request's
+  recent acceptance, none when drafting doesn't pay, with one draft every 8 idle rounds to keep the estimate
+  current.
+
+Measured on an M3 Ultra (MLX 0.32.0) through the server, 64-token replies, median of seeds 1234-1238, thinking
+off (tools/bench_openai.py):
+
+| | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
+| --- | ---: | ---: | ---: | ---: |
+| Serial (`--no-drafts`) | 38.2 | 38.2 | 39.3 | 39.3 |
+| DFlash2, per-round draft count | 63.9 | 47.0 | 64.4 | 51.6 |
+| Speedup | 1.67x | 1.23x | 1.64x | 1.31x |
+
+Window costs there, whole model: 1 row 26.7 ms, 2 rows 34.8, 4 rows 53.7, 8 rows 101.9. Every drafted reply
+equaled the same request with `"draft": false` (9 of 9), and replies resumed from different cached amounts
+were identical. On an M5 Max with the lane kernels forced off (`--lane-kernels off`, MLX 0.31.2) the same path
+gave 49.1 / 39.6 / 48.9 / 40.5 against about 31 tok/s serial. With the lane kernels on, the M5 Max numbers
+are unchanged (168.4 / 69.3 / 154.7 / 73.5 against 0.3.2's 169.2 / 70.2 / 156.4 / 74.2 in the same session).
+
+Each extra window row costs about a third of a one-row step here, which caps the gain; a row-exact matmul on
+the simdgroup matrix units that every Apple GPU has is the next step.
+
 ## Exactness
 
 - Lane matmul arithmetic: for each 64-input group the tensor op multiplies the bf16 rows by the raw 4-bit

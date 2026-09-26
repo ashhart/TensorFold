@@ -7,8 +7,11 @@ up to 31 for copies and tool calls) and prompts are prefilled through the same k
 prompt has the bits decoding would give it. Drafts come from the context (copies of earlier spans, the known
 structure of tool calls) and, with ``drafter``, from a DFlash2 draft model (``drafters.dflash_drafter``).
 
-Without tensor units MLX's own kernels run: a drafted row is then checked against the model's sample for that
-row in the verify pass (every token is still the model's own choice), but not bit-identical to one-row decoding.
+Without tensor units (the M1 to M4 generations) MLX's own kernels run, except that verify windows of 2 to 8 rows
+go through TensorFold's row-exact matvec (``kernels.row_qmv``: MLX's one-row loop run for each row) and attend
+query by query (``kernels.exact_attention``), so a drafted window reproduces one-row decoding there too. At load
+the engine checks which window widths do on this Mac and times them, then drafts DFlash2 chains of the width
+that pays (``install_mlx_lanes``). Where no width reproduces one-row decoding it serves without drafts.
 """
 
 from __future__ import annotations
@@ -73,6 +76,83 @@ def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
         TextModel.sanitize = original  # type: ignore[method-assign]
 
 
+def _window_check(model: Any, widths: range) -> tuple[int, dict[int, float]]:
+    """The widest verify window (among ``widths``) whose every narrower window reproduces one-row steps bit for
+    bit on this Mac, and each width's forward time in ms (fastest of 3)."""
+
+    import time
+
+    import mlx.core as mx
+
+    prompt = list(range(1000, 1032))
+
+    def prefill() -> list[Any]:
+        cache = model.make_cache()
+        mx.eval(model(mx.array([prompt]), cache=cache))
+        return cache
+
+    cache = prefill()
+    tokens, token = [], int(mx.argmax(model(mx.array([prompt[-1:]]), cache=model.make_cache())[0, -1]).item())
+    for _ in range(max(widths)):
+        tokens.append(token)
+        logits = model(mx.array([[token]]), cache=cache)
+        mx.eval(logits)
+        token = int(mx.argmax(logits[0, -1]).item())
+    cache = prefill()
+    serial = []
+    for t in tokens:
+        logits = model(mx.array([[t]]), cache=cache)
+        mx.eval(logits)
+        serial.append(logits[0, -1])
+    exact = 1
+    for width in widths:
+        logits = model(mx.array([tokens[:width]]), cache=prefill())
+        mx.eval(logits)
+        if not all(bool(mx.array_equal(logits[0, i], serial[i]).item()) for i in range(width)):
+            break
+        exact = width
+    costs: dict[int, float] = {}
+    for width in [1, *range(2, exact + 1)]:
+        best = float("inf")
+        for _ in range(3):
+            cache = prefill()
+            started = time.perf_counter()
+            mx.eval(model(mx.array([tokens[:width]]), cache=cache))
+            best = min(best, (time.perf_counter() - started) * 1e3)
+        costs[width] = best
+    return exact, costs
+
+
+def install_mlx_lanes(model: Any) -> tuple[int, int]:
+    """Drafted rounds on MLX's kernels (no tensor units): the row-exact matvec for 2-8-row windows, attention
+    query by query, one stream's rounds rolled back to exactly their kept rows (so DFlash2 follows them), windows
+    as wide as this Mac reproduces one-row decoding, and each round's DFlash2 drafts as many as pay at the
+    stream's acceptance (``LaneEngine.window_costs``). Returns (exact width, exact width); (1, 1) when no window
+    reproduces one-row decoding, and then nothing is drafted."""
+
+    from tensorfold.engine.lane_engine import LaneEngine
+    from tensorfold.kernels.qwen.dense.v1 import exact_attention, row_qmv
+
+    if row_qmv.install(model) == 0:
+        return 1, 1
+    row_qmv.mlx_one_row = row_qmv.matches_mlx(model)
+    exact_attention.install()
+    exact, costs = _window_check(model, range(2, row_qmv.MAX_ROWS + 1))
+    if exact < 2:
+        exact_attention.GROUP_QUERIES = False
+        exact, costs = _window_check(model, range(2, row_qmv.MAX_ROWS + 1))
+    if exact < 2:
+        return 1, 1
+    LaneEngine.precise_single = True
+    LaneEngine.exact_window = exact
+    LaneEngine.cheap_window = exact
+    LaneEngine.window_costs = costs
+    timing = ", ".join(f"{w} rows {ms:.1f} ms" for w, ms in sorted(costs.items()))
+    print(f"[tensorfold] no tensor units: drafted windows of up to {exact} rows reproduce one-row decoding here "
+          f"({timing}); each round drafts as many as pay at the request's acceptance", flush=True)
+    return exact, exact
+
+
 def load(model_dir: Path, *, lane_kernels: str = "auto", **_: Any) -> tuple[Any, Any]:
     """The model with lane kernels installed when ``lane_kernels`` is "on", or "auto" on a GPU with tensor units."""
 
@@ -82,13 +162,19 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", **_: Any) -> tuple[Any,
     fits = quantization(read_config(model_dir)) == (4, 64)
     use = fits and (lane_kernels == "on" or (lane_kernels == "auto" and tensor_units()))
     model._tensorfold_lanes = bool(use)
+    model._tensorfold_mlx_lanes = (1, 1)
     if use:
         install_lane_kernels(model)
-    elif not fits:
-        print(f"[tensorfold] lane kernels need 4-bit weights in groups of 64 ({MODELS[0]}): MLX's kernels verify "
-              f"drafted rows at width", flush=True)
+        return model, tokenizer
+    if not fits:
+        print(f"[tensorfold] lane kernels need 4-bit weights in groups of 64 ({MODELS[0]}): MLX's kernels run",
+              flush=True)
     else:
-        print("[tensorfold] lane kernels off: MLX's kernels verify drafted rows at width", flush=True)
+        print("[tensorfold] lane kernels off (they need an M5-generation GPU): MLX's kernels run", flush=True)
+    model._tensorfold_mlx_lanes = install_mlx_lanes(model)
+    if model._tensorfold_mlx_lanes[0] < 2:
+        print("[tensorfold] no verify window reproduces one-row decoding with this MLX on this GPU: serving without "
+              "drafts (same output, slower)", flush=True)
     return model, tokenizer
 
 
@@ -128,7 +214,8 @@ def engine_settings(model: Any) -> dict[str, Any]:
     offers a round)."""
 
     if not getattr(model, "_tensorfold_lanes", False):
-        return {}
+        exact = getattr(model, "_tensorfold_mlx_lanes", (1, 1))[0]
+        return {"max_rows": exact, "max_draft": exact - 1} if exact >= 2 else {}
     return {"max_rows": LANE_SETTINGS["max_rows"], "max_draft": LANE_SETTINGS["max_draft"]}
 
 
@@ -138,6 +225,11 @@ def kernel_version(model: Any) -> str:
     import hashlib
 
     if not getattr(model, "_tensorfold_lanes", False):
+        if getattr(model, "_tensorfold_mlx_lanes", (1, 1))[0] >= 2:
+            from tensorfold.kernels.qwen.dense.v1 import row_qmv
+
+            source = Path(row_qmv.__file__).read_text()
+            return "mlx-row-qmv-" + hashlib.sha256(source.encode()).hexdigest()[:12]
         return "mlx"
     from tensorfold.kernels.qwen.dense.v1 import lane_attention, lane_fuse, lane_glue, lane_qmm, lane_tree
 
@@ -157,6 +249,10 @@ def setup(app: Any, model: Any, *, drafter: str = "", drafter_bits: int = 4, **_
     """A DFlash2 draft model (a directory) for the app's requests."""
 
     if not drafter:
+        return
+    if not getattr(model, "_tensorfold_lanes", False) and getattr(model, "_tensorfold_mlx_lanes", (1, 1))[0] < 2:
+        print(f"[tensorfold] drafter {drafter} not loaded: drafted windows would not reproduce one-row decoding "
+              f"here", flush=True)
         return
     import mlx.core as mx
 

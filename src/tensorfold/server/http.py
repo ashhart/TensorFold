@@ -644,7 +644,11 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
 
-                    def on_delta(delta: str) -> None:
+                    def on_delta(delta: str | dict[str, Any]) -> None:
+                        # a text completion's "text" is a string and carries the reply's content only, as its
+                        # non-streamed reply does: reasoning deltas (a think block the template opened) are not sent
+                        if is_text_completion and not isinstance(delta, str):
+                            return
                         emit(stream_chunk(delta))
 
                     try:

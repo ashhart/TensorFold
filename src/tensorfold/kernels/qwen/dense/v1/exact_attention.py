@@ -23,6 +23,9 @@ from typing import Any
 import mlx.core as mx
 
 EXACT_MAX_QUERIES = 16
+# Share one causal call among consecutive queries where MLX 0.31.2 provably gives each its one-query bits (below);
+# False: one call per query, exact whatever MLX's dispatch (a Mac whose MLX groups queries differently)
+GROUP_QUERIES = True
 _STOCK: Any = None
 
 # MLX 0.31.2 runs its vector kernel for up to 8 queries while queries x (query heads per
@@ -51,7 +54,7 @@ def exact_sdpa(queries: mx.array, keys: mx.array, values: mx.array, cache: Any, 
     L = int(keys.shape[2])
     heads, kv_heads = int(queries.shape[1]), int(keys.shape[1])
     group = 1
-    if not isinstance(mask, mx.array) and heads % kv_heads == 0:
+    if GROUP_QUERIES and not isinstance(mask, mx.array) and heads % kv_heads == 0:
         group = max(1, min(8, 32 // (heads // kv_heads)))
     outs = []
     t = 0
