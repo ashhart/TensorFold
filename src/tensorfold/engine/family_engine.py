@@ -79,6 +79,8 @@ class SerialEngine:
         self._mode: dict[str, str] = {}          # stream id -> "pipe" | "drain" | "verify"
         self._last_rows = 1                       # rows of the last synchronous round
         self._accept_rate: dict[str, float] = {}   # stream id -> recent share of drafts accepted (sync drafts)
+        self._pos_rate: dict[str, list[float]] = {}  # stream id -> per draft position, recent acceptance given
+        #                                                the drafts before it landed (models with depth_for)
         self._draft: dict[str, Any] = {}          # stream id -> drafted token for position cache_len + 1 (GPU array)
         self.drafted = 0
         self.accepted = 0
@@ -564,11 +566,22 @@ class SerialEngine:
         verified row costs about a third of a one-row forward, so a deeper chain pays only while most of its
         drafts land (Flash Next on an M3 Ultra: ~87% for code, ~73% for prose, 2026-09-25)."""
 
+        most = int(getattr(self.model, "drafts", 1))
+        depth_for = getattr(self.model, "depth_for", None)
+        if callable(depth_for):
+            # the model picks the depth from, for each draft position j, the chance that draft j lands given that
+            # drafts 0 .. j-1 landed (a running average over ~8 rounds that checked position j): a chained draft
+            # lands less often than the first. Checked this round: the accepted drafts plus the first rejected one.
+            rates = self._pos_rate.setdefault(stream.stream_id, [])
+            for j in range(min(len(drafts), keep)):
+                while len(rates) <= j:
+                    rates.append(rates[-1] * 0.8 if rates else 0.8)
+                rates[j] = 0.875 * rates[j] + 0.125 * (1.0 if j < keep - 1 else 0.0)
+            return max(1, min(most, int(depth_for(list(rates) or [0.8]))))   # unmeasured positions: the model's prior
         rate = self._accept_rate.get(stream.stream_id, 0.8)
         if drafts:
             rate = 0.875 * rate + 0.125 * ((keep - 1) / len(drafts))
         self._accept_rate[stream.stream_id] = rate
-        most = int(getattr(self.model, "drafts", 1))
         return max(1, min(most, 1 if rate < 0.8 else 2 if rate < 0.9 else 3))
 
     def summary(self) -> dict[str, Any]:

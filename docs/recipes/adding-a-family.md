@@ -56,6 +56,7 @@ unchanged. The rest is speed:
 | `gpu_sampling = True` | draw tokens with `gpu_sampling` in synchronous rounds too (saves a large host-side top-k) |
 | `mtp`, `draft(...)`, `drafts`, `last_streams`, `absorb_draft_context(...)` | a draft head. Each round verifies the pending token and up to `drafts` drafts, then asks `draft` for the next ones from the kept rows. See `families/qwen4_exp/runtime.py`. |
 | `adopt_cache(cache)` | convert a cache read from a snapshot into the model's own cache classes |
+| `depth_for(rates)` | pick the next round's draft count from each draft position's recent acceptance (`rates[j]`: the chance draft j lands given the ones before it did); without it the engine uses its shared rule. See `families/glm5_next/runtime.py`. |
 
 Copy windows come for free once `multi_row_exact` and `keep_rows` exist. When the context already holds the
 text being written (file edits, repeated code, tool arguments) and at least 8 tokens before the cursor match
