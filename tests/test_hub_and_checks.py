@@ -191,6 +191,8 @@ def test_models_lists_the_tested_checkpoints(capsys):
 def test_every_family_names_an_importable_kernel_version():
     for family in families.families().values():
         package = family.package
+        if not hasattr(package, "load"):
+            continue                     # a CUDA-only family (its kernels live in its cuda/ package)
         kernels = importlib.import_module(package.KERNEL_PACKAGE)
         assert kernels.VERSION == package.KERNEL_VERSION == "v1"
         if family.lanes:

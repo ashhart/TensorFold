@@ -174,3 +174,20 @@ def setup(app: Any, model: Any, *, drafter: str = "", drafter_bits: int = 4, **_
         mx.eval(*(a for a in loaded.candidate_logits(hidden) if a is not None))
     app.dflash = loaded
     print(f"[tensorfold] drafter {loaded.path} block={loaded.block_size} bits={drafter_bits or 16}", flush=True)
+
+
+def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
+                master_port: int = 29551, no_drafts: bool = False, **options: Any):
+    """The CUDA engine (``tensorfold serve`` on an NVIDIA GPU), set up as the recipe measured on DGX Spark.
+
+    DFlash2 draft trees are verified in windows of 12 rows (the same drafts accepted as at 16 rows, for less
+    time a round). On two GPUs (``tp=2``) the model is tensor parallel with fp32 partials summed in rank
+    order, the head is split by vocabulary, and both ranks draft with half the draft model each, so both
+    machines need it. ``no_drafts``: one token a round, the serial reference.
+    """
+
+    from .cuda.engine import Qwen27Engine
+
+    draft = Path(drafter) if drafter and not no_drafts else None
+    return Qwen27Engine(Path(model_dir), draft, max_rows=12, tp=tp, rank=rank, master=master, port=master_port,
+                        split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts)

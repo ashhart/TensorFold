@@ -3,7 +3,8 @@
 Measured on an M3 Ultra with 256 GB and MLX 0.32.0, with a 4-bit conversion that keeps the MTP weights.
 Package: `src/tensorfold/families/qwen4_exp/` (`model.py` reference forward, `decode.py` fused decode,
 `mtp.py` draft head, `runtime.py` what the engine serves). Fused kernel version `v1` lives in
-`src/tensorfold/kernels/qwen/flash_next/v1/kernels.py`.
+`src/tensorfold/kernels/qwen/flash_next/v1/kernels.py`. The same checkpoint on NVIDIA GPUs (one or two DGX Sparks) is
+at the end: [DGX Spark (CUDA)](#dgx-spark-cuda).
 
 ## What decides the speed
 
@@ -169,3 +170,175 @@ Each change was measured in one process through the serial engine on fixed promp
   With rows near 2 ms, three drafts a round pay: about 3.2 tokens a round at 86% acceptance, which puts agent
   turns near 150 tok/s.
 - n-gram ids computed on the GPU, so decode can run one step ahead as Nemotron does.
+
+## DGX Spark (CUDA)
+
+The CUDA engine (`src/tensorfold/families/qwen4_exp/cuda/`) reads the same
+`Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` checkpoint, unchanged, and drafts with its MTP head. Measured on DGX
+Spark (GB10, 128 GB unified memory) in NVIDIA's `pytorch:26.07-py3` container (PyTorch 2.13, Triton 3.7.1,
+NCCL 2.30.7), one Spark and two Sparks linked by their 200 Gb/s ports.
+
+```bash
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --host 0.0.0.0 --port 8080
+# two Sparks, the same command on each (rank 1 first); rank 0 serves HTTP
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.168.100.1
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0 --port 8080
+```
+
+A round verifies the pending token and up to 6 MTP drafts, and a chain stops before any draft the head gives
+less than 30%. `--mtp-drafts N` sets the most drafts a round, and `--no-drafts` decodes one token a round, the
+serial reference; a request with `"draft": false` does the same for itself. The caches hold 8,192 tokens of
+prompt and reply. The server keeps the state after the last request's prompt and after its reply, and a prompt
+that extends either resumes from it (a second chat turn, a longer completion). With two Sparks both need the
+checkpoint, and the ranks refuse to start when they were given different settings.
+
+The first start builds the DeltaNet kernel with the container's `nvcc` and compiles the Triton kernels. Every
+start then reads the hashed n-gram tables into the page cache and captures a CUDA graph for each decode window
+size: about 80 s to ready on two Sparks and 90 s on one. One Spark holds 80.4 GB of weights on the GPU, and
+each of two Sparks 40.7 GB. The 32 GB of n-gram tables stay in the checkpoint files, memory-mapped, and a
+token reads 16 rows of 100 bytes from them. They have to stay in the page cache, or every token waits about
+8 ms on the disk, so a single Spark has little memory to spare.
+
+### Against vLLM with MTP
+
+Decode tokens per second after the first token, one stream, 64-token replies, median of 5 seeds (1234 to
+1238), through the same OpenAI client (`tools/bench_openai.py`) for both engines. TensorFold ran as released:
+the package installed with pip into a fresh `pytorch:26.07-py3` container and started with `tensorfold serve`. Code prompt: "Write a short
+Python function that computes the Fibonacci sequence and explain it." as a raw completion (14 tokens). Chat
+prompt: "Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example."
+through the chat template with thinking off (31 tokens). Sampled means temperature 1, top-k 20, top-p 0.95.
+
+| | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
+| --- | ---: | ---: | ---: | ---: |
+| vLLM, MTP=3, one Spark | 42.4 | 33.2 | 40.9 | 37.6 |
+| TensorFold, one Spark | 68.3 | 58.5 | 73.1 | 60.2 |
+| ratio | 1.61x | 1.76x | 1.79x | 1.60x |
+| vLLM, MTP=3, two Sparks (TP2, expert parallel) | 46.4 | 41.4 | 55.2 | 50.7 |
+| TensorFold, two Sparks | 103.8 | 84.0 | 96.2 | 100.2 |
+| ratio | 2.24x | 2.03x | 1.74x | 1.98x |
+
+Greedy cells decode one text, so their five timings agree within about 2%. Sampled cells decode a different text per
+seed: two-Spark code ranged from 92 to 112 tok/s over the five seeds, which is why the table uses medians. The
+engine before packaging measured 69.9, 58.9, 73.7 and 60.4 on one Spark and 105.5, 85.5, 96.7 and 99.7 on two,
+with a draft vocabulary built from our development tree; the package's own list is within 2.2% of that in every
+cell.
+
+vLLM ran Qwen3.8 Flash Next NVFP4 checkpoints in the `vllm/vllm-openai:qwen38-flash-next` build (vLLM
+0.1.dev20073+g8e685d198), with `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'` and
+chunked prefill:
+
+- One Spark: `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` at revision `7c4f1bc1` (105.9 GB), with
+  `--max-model-len 65536 --max-num-seqs 4 --max-num-batched-tokens 2048 --gpu-memory-utilization 0.714`.
+- Two Sparks: `RadixArk/Qwen3.8-Flash-Next-NVFP4` with `--tensor-parallel-size 2 --enable-expert-parallel
+  --nnodes 2 --max-model-len 262144 --max-num-seqs 8 --max-num-batched-tokens 8192
+  --gpu-memory-utilization 0.835` and a bf16 KV cache. Its NCCL needs the link's adapter whose RoCE v2 IPv4
+  GID sits at the index the configuration names; check `show_gids` on both machines.
+
+Both used the same client settings as ours: `ignore_eos`, one warm-up request, then the five seeds. The page
+cache was dropped on both machines before the two-Spark vLLM start.
+
+### Exactness
+
+Drafted output is byte-identical to serial decoding on the same engine, token for token. It is the Mac
+engine's contract with CUDA's own bits: every kernel on the verify path gives a row the same bits whether it
+runs alone or as one row of a window, and sampling is the keyed rule of `engine/exact_sampling.py`, so a draft
+is kept exactly when it is the token serial decoding samples there.
+
+- Matmuls: each output is the same chain of tensor-core steps over the same 32-input groups in the same
+  order at any row count. The K split is a constant of the weight's shape.
+- Experts: a row and expert pair gets the same arithmetic whatever other rows share the expert. The combine
+  adds a row's ten slots in slot order, then the shared expert.
+- DeltaNet: a window's rows run in order inside one kernel from the committed state. Keeping a prefix replays
+  those rows with the same update routine, compiled without FMA contraction.
+- Attention: fixed 512-key chunks by absolute position; past 2,048 keys, a row's sparse key list depends only
+  on its own indexer scores (the 512 best blocks, lower block id on ties).
+- Two Sparks: each rank's fp32 partials are all-gathered and summed rank 0 first, then rounded once, so both
+  ranks hold the same activations and draw each token from the same gathered candidates. Their tokens differ
+  from one Spark's by rounding, and each is exact against its own serial decoding.
+- CUDA graphs replay the eager kernels with the same arguments: eager and graph decoding give the same tokens.
+
+What was checked:
+
+| Check | Result |
+| --- | --- |
+| During development, every drafted run of the engine's benchmark against serial decoding, both prompts, sampled and greedy, one and two Sparks | the same token-ID SHA-256 in every run |
+| The released server: each of 3 prompts with 2 seeds and greedy, 96 tokens, drafted against `"draft": false`, one and two Sparks | 9 of 9 equal on each |
+| The released server: a reply resumed from the kept state (after a finished reply, and after a prompt) against the same request served cold, one and two Sparks | equal |
+| Windows of 2, 3, 4 and 8 rows keeping 1, half or all rows, then continuing, at a short context and at 2,200 tokens (sparse rows) | bit-identical to serial steps in logits, streams and the next step |
+| Teacher-forced over 150 tokens against a plain fp32 PyTorch forward | NLL 1.7539 against 1.7641; top-1 agreement 96.1% (99.2% at 2,200 tokens) |
+| `tests/cuda/test_flashnext_*.py`, small random models with the real head sizes | 61 tests: row invariance of every kernel, windows against serial steps, graphs against eager, drafted against serial greedy and sampled, prefixes resumed against fresh prefills, two ranks as threads with the real loader slicing, the server engine on one and two ranks |
+
+### The recipe
+
+- The 4-bit matmul for groups of 32 in Triton, one program per column tile and K slice, tensor-core dots of
+  the bf16 rows with the integer-valued weights. The loader regroups the words once so a program's group is
+  one contiguous block. Launch settings are tuned per weight shape.
+- Experts grouped by expert: one program per distinct expert and column tile, so a window reads each selected
+  expert once. The shared expert rides in the same table as expert 512, the eleventh slot of every row.
+- The hyper-connection read-out in three kernels for decode windows: the norm inside the down projection, the
+  mix inside the up projection.
+- A CUDA graph for every decode window size and for every MTP step size. Host work before a forward (token ids,
+  the n-gram rows) goes into static pinned buffers, so a step is one graph launch.
+- The MTP head drafts over 79,591 token ids (`cuda/draft_vocab.txt`): every id below 65,536 (the tokenizer's
+  earliest merges), the added tokens, every id in CPython 3.14's standard library and in this repository, and
+  every id that occurs at least 10 times in the Python sources and documentation of about 210 open-source
+  packages from PyPI (337 million characters). A draft step reads a third of the full head. A token outside the
+  list can never be a draft, which costs speed, never correctness. A list with every id below 98,304 instead
+  (98,755 ids) was 7.7% and 8.6% slower on sampled code, one and two Sparks, and 1-2% slower in the other cells.
+- The chain stops before a draft under 30%: a rejected draft costs a verify row, 3 to 4 ms on one Spark.
+- Two Sparks: DeltaNet and attention split by heads, every expert split by its 640-wide intermediate (each rank
+  reads half of each selected expert, so the load is even for any routing), the head split by vocabulary, and
+  hyper-connections, router, embeddings, n-gram tables and the MTP input layers replicated. Two reductions a
+  layer, after the branch's output projection and after the MoE. NCCL's all-gathers run on the current CUDA
+  stream, inside the graphs.
+
+What paid, in order:
+
+| Step | Effect |
+| --- | --- |
+| Loading with large sequential reads instead of memory-map page faults | 391 to 64 s |
+| n-gram tables read into the page cache at start | the forward's page faults cost 8 ms a token; serial 27.7 ms a token, 36.1 tok/s |
+| CUDA graphs and launch settings per weight shape | one-row forward 26.4 ms; serial 38.1 tok/s; 5 drafts a round 71.8 code / 69.8 chat sampled |
+| The draft head over part of the vocabulary (71,475 ids then; the shipped list has 79,591) instead of all 248,320 | a draft step 2.3 to 1.1 ms; 5 drafts a round 76.9 / 77.1 sampled |
+| Chains that stop under 30%, the rule chosen by replaying recorded draft chains offline | greedy code 66.2 to 72.4-73.3 (the replay predicted 72.2) |
+| Two Sparks, tensor parallel | one-row forward 20.1 ms; serial 50.5 tok/s |
+
+### Tried and rejected on CUDA
+
+- The 4-bit operand built as bf16 bits `0x4300 | q` (exactly 128 + q) instead of an integer-to-float
+  conversion: no gain beyond run-to-run noise, at 1 row or at 5 to 8 rows.
+- Depth that follows the last round (one deeper after a fully kept round, two past the kept run after a miss):
+  no better than a fixed depth when replayed on recorded chains.
+- Stopping when the chain's product of probabilities falls under a threshold instead of each draft's: no
+  better on either Spark count.
+- Two Sparks: sampling candidates gathered inside each step's graph and the n-gram rows read with one gather
+  per checkpoint file gave 0-3%. A CUDA profile of whole drafted runs finds the GPU busy 94% of the time, so
+  host work was not the limit.
+- Two Sparks: `NCCL_PROTO` set to `LL`, `LL128` or `Simple`, 1, 2 or 4 channels, and forced GPUDirect RDMA
+  (the platform reports no support) moved decode by 2% or less. `NCCL_GRAPH_MIXING_SUPPORT=0` gained 0-4% for
+  three runs, then both ranks hung.
+
+### Where the time goes
+
+On one Spark a one-row forward takes 26.4 ms in its graph, against 21.3 ms to stream its 4.25 GB of weights at
+200 GB/s. The big matmuls stream at 200-222 GB/s and the expert kernels at 194-207, but the 96 hyper-connection
+matrices, 2 MB each, stay at 104-148 GB/s. Each extra verify row adds 3 to 4 ms, because each row brings about
+five new experts a layer across 48 layers. A draft step is 1.1 ms with a 71,475-id head. A greedy code round at up to 6 drafts takes
+54 ms: 45.8 ms verifying about 7 rows, 7.5 ms drafting, under 1 ms on the host.
+
+On two Sparks a one-row forward takes 20.1 ms and a 7-row window 34.0 ms. Each rank reads 2.4 GB a token instead
+of 4.25, but the forward makes 97 rank-ordered all-gathers of 25 to 77 us each, 2.5 to 5 ms a forward. At 7 rows
+the expert kernels take half the forward. A greedy code round at up to 6 drafts takes 38.4 ms.
+
+Greedy code on two Sparks is the weakest cell: a greedy draft must match an exact argmax, while a sampled
+draft shares its position's Gumbel noise with the target and agrees whenever the two distributions are close.
+The next steps are fewer bytes per verify row and cheaper hyper-connection kernels, which are latency-bound.
+
+### Limits
+
+- One stream: requests decode one at a time.
+- Prefill runs 64-row chunks through the decode kernels, not tuned for long prompts. Prefix reuse keeps two
+  states, the last prompt's and the last reply's, and the caches hold one sequence: a prompt that extends
+  neither starts over.
+- The context capacity is fixed at start.
+- With two Sparks a request decodes to its end even when its client stops reading, so the ranks stay in step.

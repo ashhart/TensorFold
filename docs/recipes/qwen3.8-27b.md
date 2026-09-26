@@ -2,7 +2,8 @@
 
 Measured on an M5 Max with 128 GB, MLX 0.31.2 and mlx-lm 0.31.3, with the 4-bit checkpoint. Package:
 `src/tensorfold/families/qwen3_5/`, engine `engine/lane_engine.py`, kernels in `src/tensorfold/kernels/`,
-drafter in `src/tensorfold/drafters/`.
+drafter in `src/tensorfold/drafters/`. The same checkpoint and drafter on NVIDIA GPUs (one or two DGX Sparks)
+are at the end: [DGX Spark (CUDA)](#dgx-spark-cuda).
 
 ## What decides the speed
 
@@ -129,3 +130,84 @@ The pieces, in the order they paid:
   gated at 6.5 tokens a round offline.
 - Cheaper rounds: hide drafting behind verification (6-9 ms a round), attention toward its tensor-op ceiling
   (the biggest win at 40-70k context), matmuls toward 90% of bandwidth.
+
+## DGX Spark (CUDA)
+
+The CUDA engine (`src/tensorfold/families/qwen3_5/cuda/`, kernels listed in its README) reads the same
+`Vontra/Qwen3.8-27B-MLX-4bit` checkpoint and drafts with the same `z-lab/Qwen3.8-27B-DFlash2`. Measured on
+DGX Spark (GB10, 128 GB unified memory, about 240 GB/s measured read) in NVIDIA's `pytorch:26.07-py3` container, one
+Spark and two Sparks linked by their 200 Gb/s ports.
+
+```bash
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --host 0.0.0.0 --port 8080
+# two Sparks, the same command on each (rank 1 first); rank 0 serves HTTP
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.168.100.1
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0 --port 8080
+```
+
+Pull both checkpoints first on every Spark (`tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit
+z-lab/Qwen3.8-27B-DFlash2`): with two Sparks both ranks draft, each with half the draft model. The ranks check
+at start that they were given the same settings.
+
+### Against vLLM with MTP
+
+Decode tokens per second after the first token, one stream, 64-token replies, median of 5 seeds (1234 to
+1238), through the same OpenAI client (`tools/bench_openai.py`) for both engines, with this release installed by pip and started by `tensorfold serve`. Code prompt: "Write a short
+Python function that computes the Fibonacci sequence and explain it." as a raw completion. Chat prompt:
+"Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example." through
+the chat template with thinking off. Sampled means temperature 1, top-k 20, top-p 0.95.
+
+| | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
+| --- | ---: | ---: | ---: | ---: |
+| vLLM, MTP=3, one Spark | 17.7 | 15.0 | 17.7 | 17.0 |
+| TensorFold, one Spark | **49.6** | **45.8** | **49.2** | **45.9** |
+| ratio | 2.80x | 3.05x | 2.78x | 2.70x |
+| vLLM, MTP=3, two Sparks (TP2) | 33.1 | 30.4 | 31.6 | 30.5 |
+| TensorFold, two Sparks | **82.4** | **58.9** | **76.2** | **71.1** |
+| ratio | 2.49x | 1.94x | 2.41x | 2.33x |
+
+vLLM ran NVIDIA's NVFP4 ModelOpt quantization of the same model (NVFP4 weights, FP8 DeltaNet projections and
+KV cache, 22.1 GiB) with `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+--max-model-len 32768 --max-num-seqs 16 --enable-prefix-caching --enable-chunked-prefill
+--attention-backend TRITON_ATTN`, and across two Sparks `--tensor-parallel-size 2 --nnodes 2`. Without drafts
+it decodes 10.5 tok/s on one Spark; with its own DFlash2 support at 7 drafts, 28.3 and 22.9. vLLM's drafted
+output is not byte-identical to its serial output. Ours is: every run compares the drafted token ids with
+serial decoding on the same engine by SHA-256.
+
+Serial decoding runs 13.1 tok/s on one Spark and 22.5 on two. Single seeds vary a lot for both engines (ours
+on two Sparks, code: 70.0 to 135.6 tok/s over the five seeds), which is why the table uses medians.
+
+### What paid on CUDA
+
+| Step | Effect |
+| --- | --- |
+| A row-invariant 4-bit lane matmul in Triton: per 64-input group a tensor-core dot, then scale and bias, groups in order, the K split fixed by the weight's shape | exact windows of 1 to 128 rows; the arithmetic of the Metal lane matmul with CUDA's own bits |
+| The 4-bit words regrouped once at load into contiguous blocks per program and group, scales group-major (same bits) | weights stream at 200-220 GB/s instead of 107-130; one-row forward 123 to 75 ms |
+| DFlash2's projections at 4 bits through the same matmul, the context's keys and values cached per layer | drafting 19.5 to 9.6 ms a round, same acceptance |
+| DFlash2 on fused kernels (stacked q/k/v, Triton dynamic convolution and norm plus rotary, one mask and rotary table a round): 918 to 288 kernels | drafting 9.4 to 7.4 ms a round |
+| Commits write the accepted rows in place; one launch replays every DeltaNet layer's accepted path | no cache copies at long context; 3.6 to 2.3 ms a round on two Sparks before the one-launch replay |
+| Two Sparks: tensor parallel with fp32 partial sums gathered and added in rank order, the head split by vocabulary, the drafter split over both ranks | two-Spark code 89.2 to 95.3, chat 69.8 to 75.3 tok/s on the engine bench |
+| 12-row windows | the same drafts accepted as at 16 rows on these prompts, about 3 ms less a round |
+
+### Tried and rejected on CUDA
+
+- Per-shape matmul settings picked from isolated sweeps: 3-8% faster alone, 1.5-2 ms slower per forward in
+  the whole model.
+- `NCCL_PROTO=LL` for the 128 all-gathers of a two-Spark forward: 16-row forwards went from 52.6 to 82.0 ms.
+- Stacking the DeltaNet gate projections into one matmul: no gain at 16 rows.
+- Wider trees: 32-64 rows accept about one more token a round but add 30-40 ms of verification, so 12 rows
+  stays fastest (49.2 tok/s against 44.7 at 32 rows and 43.7 at 64 in a 256-token sweep).
+- Longer DFlash2 blocks (26 or 32 positions, the checkpoint was trained on 8): fewer accepted tokens than
+  block 16 at the same width, 5.8 against 6.2 a round at 32 rows.
+- More of the target's sampling noise in the tree scores (weight 1.0 instead of 0.7): fewer tokens a round.
+
+### Where the time goes
+
+On one Spark a 12-row round takes about 95 ms: 83 ms verifying (the weights stream near the read limit), 8 ms
+drafting, under 1 ms committing. On two Sparks it takes about 60 ms: 52 ms verifying (each rank's 4-bit
+matmuls about 42 ms at about 175 GB/s on half-size shards; the 128 all-gathers and the small kernels the
+rest), 6 ms drafting, 2 ms committing. Half of the 12-row rounds end because every draft on the accepted branch was right
+and the tree had nothing deeper, and at two thirds of the misses the right token was among the drafter's
+16 candidates for that position: a tree that spends its rows on depth before siblings is the next thing to
+try.
+

@@ -28,7 +28,7 @@ COMMANDS = ("serve", "pull", "models", "info")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tensorfold",
-        description="Fast, exact LLM decoding on Apple Silicon behind an OpenAI-compatible endpoint.",
+        description="Fast, exact LLM decoding on Apple Silicon and NVIDIA GPUs behind an OpenAI-compatible endpoint.",
     )
     parser.add_argument("--version", action="version", version=f"tensorfold {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -66,7 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "pulled; none: no draft model")
     speed.add_argument("--drafter-bits", type=int, default=4, help="quantize the draft model's linears (0: bf16)")
     speed.add_argument("--mtp-drafts", type=int, default=None,
-                       help="most MTP drafts a round (Qwen3.8 Flash Next, default 3); 0: no MTP drafts (any family)")
+                       help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 30%% "
+                            "confidence); 0: no MTP drafts (any family)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
@@ -75,6 +76,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help="where system-block and conversation snapshots are kept ('none': in memory only)")
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
+
+    cuda = serve.add_argument_group("NVIDIA GPUs (DGX Spark)")
+    cuda.add_argument("--backend", choices=("auto", "mlx", "cuda"), default="auto",
+                      help="auto: MLX on macOS, CUDA elsewhere")
+    cuda.add_argument("--tp", type=int, choices=(1, 2), default=1,
+                      help="GPUs (one per machine) the model is split over; run the same command on each")
+    cuda.add_argument("--rank", type=int, choices=(0, 1), default=0,
+                      help="with --tp 2: this machine's rank; rank 0 serves HTTP, rank 1 follows it")
+    cuda.add_argument("--master", default="", help="with --tp 2: rank 0's address on the link between the machines")
+    cuda.add_argument("--master-port", type=int, default=29551, help="with --tp 2: rank 0's rendezvous port")
     serve.set_defaults(func=cmd_serve)
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
@@ -156,8 +167,7 @@ def cmd_models(args: argparse.Namespace) -> int:
 
     for kind, family in sorted(families.families().items()):
         package = family.package
-        engine = "lane engine" if family.lanes else "serial engine"
-        print(f"{family.title} ({kind}, {engine})")
+        print(f"{family.title} ({kind}; {_engines(family)})")
         kernel_package = getattr(package, "KERNEL_PACKAGE", "")
         if kernel_package:
             print(f"  kernels  {kernel_package.removeprefix('tensorfold.kernels.').replace('.', '/')}")
@@ -167,6 +177,17 @@ def cmd_models(args: argparse.Namespace) -> int:
         if drafter:
             print(f"  drafter  {drafter}")
     return 0
+
+
+def _engines(family: Any) -> str:
+    """Which backends serve a family: MLX (its lane or serial engine) and CUDA."""
+
+    found = []
+    if hasattr(family.package, "load"):
+        found.append(f"MLX {'lane engine' if family.lanes else 'serial engine'}")
+    if hasattr(family.package, "cuda_engine"):
+        found.append("CUDA engine")
+    return ", ".join(found) or "no engine"
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -179,7 +200,7 @@ def cmd_info(args: argparse.Namespace) -> int:
     bits, group = families.quantization(config)
     print(f"model_type   {family.model_type}")
     print(f"family       {family.title} ({family.module})")
-    print(f"engine       {'lane engine' if family.lanes else 'serial engine'}")
+    print(f"engine       {_engines(family)}")
     kernel_package = getattr(family.package, "KERNEL_PACKAGE", "")
     if kernel_package:
         print(f"kernels      {kernel_package.removeprefix('tensorfold.kernels.').replace('.', '/')}")
@@ -237,6 +258,60 @@ def _drafter(family: Any, choice: str) -> str:
     return str(found)
 
 
+def _backend(choice: str, family: Any) -> str:
+    """mlx or cuda: auto picks MLX on macOS and CUDA elsewhere; a family serves only the backends it has."""
+
+    backend = choice if choice != "auto" else ("mlx" if sys.platform == "darwin" else "cuda")
+    if backend == "cuda" and not hasattr(family.package, "cuda_engine"):
+        raise ValueError(f"{family.title} has no CUDA engine yet: serve it on Apple Silicon")
+    if backend == "mlx" and not hasattr(family.package, "load"):
+        raise ValueError(f"{family.title} runs on NVIDIA GPUs only (see docs/recipes)")
+    return backend
+
+
+def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path) -> int:
+    """Serve with the family's CUDA engine (``cuda_engine``) behind ``tensorfold.cuda.server``."""
+
+    from tensorfold import hub
+
+    if args.tp == 2 and not args.master:
+        raise ValueError("--tp 2 needs --master: rank 0's address on the link between the two machines")
+    if args.tp == 1 and args.rank != 0:
+        raise ValueError("--rank 1 needs --tp 2")
+    started = time.perf_counter()
+    drafter = "" if args.no_drafts else _drafter(family, args.drafter)
+    options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
+                               "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
+    if args.mtp_drafts is not None:
+        options["mtp_drafts"] = int(args.mtp_drafts)
+    if args.context is not None:
+        options["context"] = int(args.context)
+    served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
+    where = f", rank {args.rank} of 2" if args.tp == 2 else ""
+    print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
+    engine = family.package.cuda_engine(model_dir, **options)
+    if args.tp == 2 and args.rank == 1:
+        print(f"[tensorfold] rank 1 ready in {time.perf_counter() - started:.1f}s, following rank 0", flush=True)
+        engine.follow()
+        return 0
+    from tensorfold.cuda.server import App, serve
+
+    sampling = _generation_config(model_dir)
+    for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k)):
+        if value is not None:
+            sampling[key] = value
+    app_class = getattr(family.package, "CUDA_APP", None) or App
+    app = app_class(engine, model_dir, served, default_thinking=bool(args.thinking), sampling=sampling,
+                    max_tokens=int(args.max_tokens))
+    shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
+        f"{k} {v}" for k, v in sampling.items())
+    print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 on CUDA{where} "
+          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
+          f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
+    serve(app, args.host, int(args.port))
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from http.server import ThreadingHTTPServer
 
@@ -259,6 +334,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     model_dir = hub.resolve(args.model, required_files=required_files)
     if needs_full_snapshot and check is not None:
         check(model_dir)                         # checks that need the complete index, such as an MTP head
+    if _backend(args.backend, family) == "cuda":
+        return _serve_cuda(args, family, model_dir)
     for key, value in getattr(family.package, "MLX_ENV", {}).items():
         os.environ.setdefault(key, value)       # before MLX starts: it reads them once
 

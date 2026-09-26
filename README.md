@@ -6,9 +6,10 @@
   <img src="assets/tensorfold-logo.png" alt="TensorFold folded tensor mesh logo" width="280">
 </p>
 
-TensorFold serves a local LLM on Apple Silicon at an OpenAI-compatible endpoint, fast and exact. Name a model
-on Hugging Face, choose the context window and sampling, and TensorFold downloads it, loads it with Metal
-kernels written for that model family, and serves `/v1/chat/completions`.
+TensorFold serves a local LLM on Apple Silicon or NVIDIA GPUs at an OpenAI-compatible endpoint, fast and exact.
+Name a model on Hugging Face, choose the context window and sampling, and TensorFold downloads it, loads it with
+Metal or CUDA kernels written for that model family, and serves `/v1/chat/completions`. On DGX Spark it decodes
+1.6 to 3x faster than vLLM with MTP drafts, one Spark or two ([DGX Spark](#dgx-spark-and-other-nvidia-gpus)).
 
 Setting this up with an AI agent? Give it the [AI agent runbook](RUNBOOK.md) for the install, model download,
 server startup and a request that checks the result.
@@ -89,6 +90,54 @@ drafts, which are now on by default; in-engine they reached 217 tok/s on prose a
 | | | 18k-token context | 98.5 |
 | | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 103-115 |
 
+## DGX Spark and other NVIDIA GPUs
+
+![TensorFold CUDA Engine: exact decoding on DGX Spark, on Mac with Metal and on NVIDIA GPUs with CUDA](assets/tensorfold-cuda-banner.png)
+
+On Linux with an NVIDIA GPU, `tensorfold serve` runs the family's CUDA engine (PyTorch, Triton and CUDA
+kernels in `src/tensorfold/families/<name>/cuda/`). It reads the same MLX 4-bit checkpoints from Hugging Face.
+Run it inside NVIDIA's PyTorch container, which has the CUDA toolkit, PyTorch and Triton the kernels build
+with:
+
+```bash
+docker run -it --gpus all --ipc=host --network host -v ~/.cache/huggingface:/root/.cache/huggingface \
+  nvcr.io/nvidia/pytorch:26.07-py3
+pip install git+https://github.com/ashhart/TensorFold.git
+tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --host 0.0.0.0
+```
+
+Two Sparks split a model between them over their direct link. Run the same command on each, rank 1 first, with
+the address rank 0 has on that link. Rank 0 serves HTTP. The container also needs the network devices:
+
+```bash
+docker run -it --gpus all --ipc=host --network host --device /dev/infiniband --ulimit memlock=-1 \
+  --cap-add IPC_LOCK -v ~/.cache/huggingface:/root/.cache/huggingface nvcr.io/nvidia/pytorch:26.07-py3
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.168.100.1   # on the second Spark
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0
+```
+
+Set `NCCL_SOCKET_IFNAME` and `NCCL_IB_HCA` to the link's interface and adapters if NCCL does not find them
+([the runbook](RUNBOOK.md#dgx-spark) has the steps).
+
+Measured on DGX Spark against vLLM with MTP=3 through the same OpenAI client: decode tok/s, one stream,
+64-token replies, median of seeds 1234-1238, code and chat prompts, sampled (T 1, top-k 20, top-p 0.95) and
+greedy. Each TensorFold number is byte-identical to its own serial decoding.
+
+| Model | Sparks | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Qwen3.8-27B + DFlash2 | 1 | 49.6 vs 17.7 (2.8x) | 45.8 vs 15.0 (3.1x) | 49.2 vs 17.7 (2.8x) | 45.9 vs 17.0 (2.7x) |
+| Qwen3.8-27B + DFlash2 | 2 | 82.4 vs 33.1 (2.5x) | 58.9 vs 30.4 (1.9x) | 76.2 vs 31.6 (2.4x) | 71.1 vs 30.5 (2.3x) |
+| Qwen3.8 Flash Next | 1 | 68.3 vs 42.4 (1.6x) | 58.5 vs 33.2 (1.8x) | 73.1 vs 40.9 (1.8x) | 60.2 vs 37.6 (1.6x) |
+| Qwen3.8 Flash Next | 2 | 103.8 vs 46.4 (2.2x) | 84.0 vs 41.4 (2.0x) | 96.2 vs 55.2 (1.7x) | 100.2 vs 50.7 (2.0x) |
+| GLM-5.3-Flash | 2 | 49.4 vs 24.5 (2.0x) | 43.3 vs 24.3 (1.8x) | 66.3 vs 32.2 (2.1x) | 45.2 vs 24.7 (1.8x) |
+
+GLM-5.3-Flash needs two Sparks. For each greedy request it measures its MTP head against a DFlash2 draft model
+and keeps whichever commits more tokens per millisecond ([its recipe](docs/recipes/glm-5.3-flash.md)). That draft
+model, `incoai/GLM-5.3-Flash-DFlash2`, is licensed for non-commercial use only (CC BY-NC-ND 4.0); without it GLM
+drafts with its MTP head alone. What we did on
+CUDA, and how to bring up another model, is in [the CUDA recipe book](docs/recipes/cuda.md).
+
 ## Exact means byte-identical
 
 Speculative decoding usually trades determinism for speed: drafted tokens are accepted by a random test, so the
@@ -130,9 +179,11 @@ tensorfold info MODEL               # which family serves a model (reads its con
 | `--thinking` / `--no-thinking` | on | open a think block when the chat template supports one |
 | `--reasoning-effort` | `medium` | for chat templates that take one (Qwen3.8) |
 | `--thinking-budget N` | no limit | most thinking tokens before the server closes the think block |
+| `--backend` | `auto` | `mlx` on macOS, `cuda` elsewhere |
+| `--tp 2 --rank R --master HOST` | one GPU | split the model over two machines, one GPU each (CUDA; see [DGX Spark](#dgx-spark-and-other-nvidia-gpus)) |
 | `--no-drafts` | off | one token a round: the serial reference |
 | `--drafter` | `auto` | the family's draft model once pulled; a repo id or directory; or `none` |
-| `--mtp-drafts N` | 3 | most MTP drafts a round (Qwen3.8 Flash Next); 0 turns MTP drafts off (both MTP families) |
+| `--mtp-drafts N` | 3 (6 on CUDA) | most MTP drafts a round (Qwen3.8 Flash Next; on CUDA the chain also stops under 30% confidence); 0 turns MTP drafts off |
 | `--prompt-cache-gib` | an eighth of RAM, at most 16 | memory for cached conversation prefixes |
 | `--snapshot-dir` | `~/.cache/tensorfold/prefix-snapshots` | system blocks and conversations kept across restarts |
 
@@ -164,7 +215,10 @@ src/tensorfold/
   kernels/nemotron/lightning/v1/  Nemotron 3.5 Lightning fused kernels
   drafters/              the DFlash2 drafter
   families/<name>/       one package per model family: forward pass and draft heads
-docs/recipes/            what we did per family, and how to add one
+  families/<name>/cuda/  the family's CUDA engine and kernels (NVIDIA GPUs)
+  cuda/server.py         the OpenAI HTTP layer for the CUDA engines
+docs/recipes/            what we did per family, and how to add one (Mac and CUDA)
+tools/bench_openai.py    the single-stream client every speed above was measured with
 ```
 
 ## Development
@@ -176,7 +230,9 @@ pip install -e ".[test]"
 pytest
 ```
 
-The kernel tests of the lane engine need an M5-generation GPU and are skipped elsewhere.
+The kernel tests of the lane engine need an M5-generation GPU and are skipped elsewhere. The CUDA engines'
+tests in `tests/cuda/` run where PyTorch sees an NVIDIA GPU (inside NVIDIA's container: `pip install pytest`
+first) and are skipped elsewhere.
 
 ## License
 
