@@ -7,6 +7,9 @@ engine only feeds tokens forward and copies whole caches at prompt checkpoints, 
 ``TF_GEMMA4_PIPELINE=1``: the decode step takes its token as an unread GPU array (``gpu_tokens``), so the serial
 engine queues the next step before reading the token, and full-attention layers alternate their decode writes
 between two buffers (``AlternatingKVCache``). Same forward, same greedy tokens; off by default.
+
+One-token steps of the MoE checkpoints run ``kernels/gemma/v1``'s ``FusedDecode`` (same caches, its own sum
+orders, mlx_lm's forward to bf16 rounding); ``TF_GEMMA4_FUSED=0`` keeps mlx_lm's forward for every step.
 """
 
 from __future__ import annotations
@@ -33,6 +36,15 @@ class Gemma4:
         self.args = self.text.args
         self.softcap = self.text.final_logit_softcapping
         self.gpu_tokens = os.environ.get("TF_GEMMA4_PIPELINE", "0") != "0"
+        # one-token steps through the fused kernels; prompts through mlx_lm's forward (same caches)
+        self.fused = None
+        if os.environ.get("TF_GEMMA4_FUSED", "1") != "0":
+            from tensorfold.kernels.gemma.v1.kernels import FusedDecode
+
+            try:
+                self.fused = FusedDecode(self.text)
+            except ValueError as exc:             # a checkpoint the kernels do not cover: mlx_lm's forward
+                print(f"[gemma4] {exc}: decoding with mlx_lm's forward", flush=True)
 
     @property
     def layers(self) -> list[Any]:
@@ -63,6 +75,8 @@ class Gemma4:
         return cache
 
     def hidden(self, inputs: Any, cache: list[Any] | None = None) -> Any:
+        if self.fused is not None and cache is not None and inputs.shape[-1] == 1:
+            return self.fused(inputs, cache)
         return self.backbone(inputs, cache=cache)
 
     def head(self, hidden: Any) -> Any:
