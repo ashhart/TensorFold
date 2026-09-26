@@ -17,6 +17,10 @@ LANES = False
 MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP",)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
 KERNEL_VERSION = "v1"
+# MLX command buffers: MLX ends a buffer once the bytes bound in it pass MLX_MAX_MB_PER_BUFFER, and every expert
+# kernel binds the 420 MB expert stacks, so with the default each of them ended one (an empty kernel binding them
+# cost 28 us a launch against 12). Set by the CLI before MLX starts, unless the environment already sets them.
+MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}
 
 
 def has_mtp(model_dir: Path) -> bool:

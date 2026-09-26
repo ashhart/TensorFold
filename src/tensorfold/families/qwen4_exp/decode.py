@@ -53,6 +53,13 @@ def _stacked(linears: list[Any]) -> tuple[nn.QuantizedLinear, list[int]]:
     return stacked, cuts[:-1]
 
 
+def first(a: mx.array) -> mx.array:
+    """a[0] for an array whose leading axis has length 1, as a view: MLX's a[0] is a gather, which copies (the
+    DeltaNet state is 3.1 MB a layer)."""
+
+    return a.reshape(a.shape[1:])
+
+
 def project(x: mx.array, linear: Any) -> mx.array:
     """x [..., R, K] through a 4-bit linear: MLX's quantized matmul for one row, ``kernels.qmv_rows`` (MLX's
     one-row bits for every row, a simdgroup a row, weight reads shared) for more; MLX's own matmul sums a row
@@ -122,18 +129,26 @@ class FusedDecode:
             entry["moe"] = (moe, router_rows)
             self.layers.append(entry)
         self.mixer = _HC(model.model.hyper_connection_mixer, inject=False)
+        # the PLE layer's n-gram tables as 8 concatenated groups: one lookup kernel instead of ~70 small ops
+        self.ple_tables = None
+        for layer in model.layers:
+            if "ple" in layer:
+                self.ple_tables = K.PleTables(layer.ple.ple_embedding)
         # the last call's recurrent states after each of its rows, by layer (for keeping a prefix of a window)
         self.row_states: dict[int, tuple[mx.array, mx.array]] = {}
-        self.eval_every = 4
+        self._pos: tuple[Any, Any] = (None, None)
+        # hand the GPU each layer as soon as it is built (every 4 layers: prose 94.9 vs 95.6 tok/s, M3 Ultra,
+        # 2026-09-26, with MLX_MAX_MB_PER_BUFFER raised so large expert tensors do not end a command buffer early)
+        self.eval_every = 1
 
     # -- blocks ------------------------------------------------------------------
     def _gdn(self, index: int, x: mx.array, cache: Any) -> mx.array:
         proj, conv_w, g = self.layers[index]["gdn"]
         cfg = self.cfg
         rows = x.shape[0]
-        conv_state = cache.conv[0] if cache.conv is not None else mx.zeros(
+        conv_state = first(cache.conv) if cache.conv is not None else mx.zeros(
             (cfg.linear_conv_kernel_dim - 1, conv_w.shape[0]), dtype=x.dtype)
-        ssm_state = cache.ssm[0] if cache.ssm is not None else None
+        ssm_state = first(cache.ssm) if cache.ssm is not None else None
         out, conv_rows, ssm_rows = K.gdn_step(project(x, proj), conv_state, ssm_state, conv_w, g.A_log, g.dt_bias,
                                               g.norm.weight, self.eps, nk=cfg.linear_num_key_heads,
                                               nv=cfg.linear_num_value_heads, dk=cfg.linear_key_head_dim,
@@ -143,6 +158,14 @@ class FusedDecode:
         self.row_states[index] = (conv_rows, ssm_rows)
         return project(out, g.out_proj)
 
+    def _positions(self, past: int, rows: int) -> mx.array:
+        """The rows' positions [R] int32, made once per forward (every attention layer is at the same offset)."""
+
+        key = (past, rows)
+        if self._pos[0] != key:
+            self._pos = (key, mx.arange(past, past + rows, dtype=mx.int32))
+        return self._pos[1]
+
     def _attention(self, index: int, x: mx.array, cache: Any) -> mx.array:
         proj, q_scale, k_scale, iq_scale, pool_scale, a = self.layers[index]["attn"]
         cfg = self.cfg
@@ -151,7 +174,7 @@ class FusedDecode:
         index_heads, index_dims = cfg.indexer_n_heads, cfg.indexer_head_dim
         past = cache.offset
         p = project(x, proj)
-        positions = mx.arange(past, past + rows, dtype=mx.int32)
+        positions = self._positions(past, rows)
         q, k, iq = K.attn_prep(p, positions, q_scale, k_scale, iq_scale, self.eps, q_heads=heads,
                                kv_heads=kv_heads, head_dim=dims, index_heads=index_heads, index_dim=index_dims,
                                rotary_dim=cfg.rotary_dim, base=cfg.rope_theta)
@@ -178,15 +201,17 @@ class FusedDecode:
         cfg = self.cfg
         done = 0 if cache.pooled is None else int(cache.pooled.shape[1])
         if complete[-1] > done:
-            fresh = K.index_pool(raw[0], done, complete[-1], pool_scale, self.eps, rotary_dim=cfg.rotary_dim,
+            fresh = K.index_pool(first(raw), done, complete[-1], pool_scale, self.eps, rotary_dim=cfg.rotary_dim,
                                  base=cfg.rope_theta)[None]
             cache.pooled = fresh if cache.pooled is None else mx.concatenate([cache.pooled, fresh], axis=1)
-        return K.index_select(iq, cache.pooled[0], complete, ends, top=top)
+        return K.index_select(iq, first(cache.pooled), complete, ends, top=top)
 
     # windows of at least this many rows read each distinct expert once (expert_group + grouped_*): 8 consecutive
     # tokens pick ~40 distinct experts a layer of 80 (2026-09-25); fewer rows keep the per-slot kernels, which have
-    # no grouping kernel to wait on. Both give a row the same bits.
-    group_rows = 3
+    # no grouping kernel to wait on. Both give a row the same bits. Since expert_gateup hands its routing to
+    # expert_down, the per-slot kernels win at every window the fused path takes (M3 Ultra, 2026-09-26: code
+    # 105.4 -> 107.6 tok/s at 3-4 rows, file edits 125.9 -> 128.5 with 8-row copy windows), so none is grouped.
+    group_rows = 17
 
     def _moe(self, index: int, x: mx.array) -> tuple[str, tuple[mx.array, ...]]:
         """Routed experts + the shared expert: the write-back ("plain": the branch [R, D]; "grouped": the slots'
@@ -198,8 +223,12 @@ class FusedDecode:
         sw, se = moe.switch_mlp, moe.shared_expert
         k, experts = cfg.num_experts_per_tok, cfg.num_experts
         if x.shape[0] < self.group_rows:
-            act = K.expert_gateup(x, logits, k, experts, sw.gate_proj, sw.up_proj, shared=(se.gate_proj, se.up_proj))
-            return "plain", (K.expert_down(act, logits, k, experts, sw.down_proj, shared=se.down_proj),)
+            act, picks, weights = K.expert_gateup(x, logits, k, experts, sw.gate_proj, sw.up_proj,
+                                                  shared=(se.gate_proj, se.up_proj))
+            # each (row, slot) its own simdgroups, combined by the next hc_norm (expert_down's arithmetic): no
+            # threadgroup waits on its slowest expert (M3 Ultra, 2026-09-26: 23.7 -> 22.5 us a call at 1 row,
+            # 41.4 -> 38.0 at 2)
+            return "grouped", (K.expert_down_y(act, picks, sw.down_proj, se.down_proj), weights, logits)
         group = K.expert_group(logits, k, experts)
         act = K.grouped_gateup(x, group, sw.gate_proj, sw.up_proj, (se.gate_proj, se.up_proj))
         return "grouped", (K.grouped_down(act, group, sw.down_proj, se.down_proj), group[1], logits)
@@ -208,8 +237,8 @@ class FusedDecode:
     def __call__(self, tokens: np.ndarray, cache: list[Any]) -> mx.array:
         """Mixed hidden states [1, R, D] after the last layer for R consecutive tokens (batch 1, host ids)."""
 
-        h = self.model.model.embed_tokens(mx.array(tokens.reshape(-1).astype(np.int32)))     # [R, D]
-        return self.run(mx.tile(h, (1, self.streams)), tokens, cache)
+        h = K.embed_rows(tokens.reshape(-1), self.model.model.embed_tokens, tile=self.streams)   # [R, S*D]
+        return self.run(h, tokens, cache)
 
     def run(self, h: mx.array, tokens: np.ndarray | None, cache: list[Any]) -> mx.array:
         """The layers and the final mixer from residual streams h [R, S*D]: mixed hidden states [1, R, D]."""
@@ -252,7 +281,7 @@ class FusedDecode:
             history = np.full((1, emb_mod.context), emb_mod.eos, dtype=np.int64)
         ids = emb_mod.ids(history, tokens)
         cache.history = np.concatenate([history, tokens.astype(np.int64)], axis=1)[:, -emb_mod.context:]
-        emb = emb_mod(ids)[0]                                                  # [R, E]
+        emb = K.ple_lookup(ids[0], self.ple_tables)                           # [R, E]
         shape = (rows, ple.streams, ple.dims)
         keys = ple.norm_key(project(emb, ple.key_proj)).reshape(shape)
         values = project(emb, ple.value_proj)
@@ -265,7 +294,7 @@ class FusedDecode:
         conv_in = mx.concatenate([tail, normed], axis=1)
         cache.ple_conv = conv_in[:, -ple.tail:]
         cache.ple_rollback = (history, tokens.astype(np.int64), conv_in)
-        return gated + nn.silu(ple.conv1d(conv_in))[0]
+        return gated + first(nn.silu(ple.conv1d(conv_in)))
 
     def _write_back(self, h: mx.array, pending: tuple[str, tuple[mx.array, ...], mx.array | None]) -> mx.array:
         kind, branch, inject = pending

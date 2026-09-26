@@ -531,7 +531,9 @@ _EXPERT_GATEUP = r"""
   // Threadgroup (b, p): 2 simdgroups, rows 8 b + 4 g .. + 3 of slot p (p = r * SLOTS + k; slot k < TOPK is the
   // row's k-th expert by router logit, each simdgroup finding it itself), gate and up,
   // over K in steps of 512 (MLX's qmv_fast loop); then bf16(SiLU(bf16(gate)) * bf16(up)).
-  // A slot past TOPK (SHARED = 1) is the shared expert, from its own matrices.
+  // A slot past TOPK (SHARED = 1) is the shared expert, from its own matrices. Threadgroup (0, p)'s first
+  // simdgroup also writes the slot's expert to PICK and, for the last routed slot (whose selection rounds give the
+  // top-k logits), the weights exp(l_k - l_0) / their sum (fp32, bf16-rounded) to WTS: expert_down reads them.
   const uint lane = thread_index_in_simdgroup;
   const uint g = simdgroup_index_in_threadgroup;
   const int p = int(threadgroup_position_in_grid.z);
@@ -540,6 +542,15 @@ _EXPERT_GATEUP = r"""
   const bool shared = slot == TOPK;
   float picked[TOPK];
   const size_t e = shared ? 0 : size_t(simd_topk<NE>(LOGITS + r * NL, slot, lane, picked));
+  if (!shared && threadgroup_position_in_grid.y == 0 && g == 0 && lane == 0) {
+    PICK[r * TOPK + slot] = uint32_t(e);
+    if (slot == TOPK - 1) {
+      float total = 0.0f;
+      float ex[TOPK];
+      for (int kk = 0; kk < TOPK; kk++) { ex[kk] = metal::exp(picked[kk] - picked[0]); total += ex[kk]; }
+      for (int kk = 0; kk < TOPK; kk++) WTS[r * TOPK + kk] = float(bfloat(ex[kk] / total));
+    }
+  }
   const int row0 = int(threadgroup_position_in_grid.y) * (SG * RPS) + int(g) * RPS;
   constexpr int KB = K / 2;                         // bytes a row
   constexpr int KG = K / 32;                        // groups a row
@@ -574,8 +585,8 @@ _EXPERT_GATEUP = r"""
 """
 
 _EXPERT_DOWN = r"""
-  // Threadgroup (b, r): TOPK + SHARED simdgroups, simdgroup k takes slot k (the last: the shared expert) for model
-  // dims 8 b .. 8 b + 7: lane l reads 16-input chunks l and (l < NC - 32) 32 + l of each row (qmv's inner loop);
+  // Threadgroup (b, r): TOPK + SHARED simdgroups, simdgroup k takes slot k (the last: the shared expert; the
+  // routed slots' experts and weights from expert_gateup's PICK and WTS) for model dims 8 b .. 8 b + 7: lane l reads 16-input chunks l and (l < NC - 32) 32 + l of each row (qmv's inner loop);
   // y = bf16(sum). routed = bf16(sum_k y_k w_k) (fp32, slots in order), shared = bf16(y_s * bf16(sigmoid(logit))),
   // out = bf16(routed + shared).
   const uint lane = thread_index_in_simdgroup;
@@ -589,19 +600,9 @@ _EXPERT_DOWN = r"""
   threadgroup float ys[SLOTS][8];
   threadgroup float wts[TOPK];
   const bool shared = k == TOPK;
-  float picked[TOPK];
-  const size_t e = shared ? 0 : size_t(simd_topk<NE>(LOGITS + r * NL, k, lane, picked));
-  if (k == 0) {
-    // weights: softmax over the experts renormalized to the top k = exp(l_k - l_0) / their sum (fp32); the
-    // selection is a simdgroup operation, so the whole simdgroup runs it
-    simd_topk<NE>(LOGITS + r * NL, TOPK - 1, lane, picked);
-    if (lane == 0) {
-      float total = 0.0f;
-      float ex[TOPK];
-      for (int kk = 0; kk < TOPK; kk++) { ex[kk] = metal::exp(picked[kk] - picked[0]); total += ex[kk]; }
-      for (int kk = 0; kk < TOPK; kk++) wts[kk] = float(bfloat(ex[kk] / total));
-    }
-  }
+  // the routing expert_gateup found: slot k's expert, and the renormalized top-k weights
+  const size_t e = shared ? 0 : size_t(PICK[r * TOPK + k]);
+  if (k == 0 && int(lane) < TOPK) wts[lane] = WTS[r * TOPK + lane];
   const device uint32_t* DWp = shared ? SDW : DW;
   const device bfloat* DSp = shared ? SDS : DS;
   const device bfloat* DBp = shared ? SDB : DB;
@@ -626,6 +627,42 @@ _EXPERT_DOWN = r"""
     float out = float(bfloat(routed));
     if (SHARED) out = float(bfloat(out + float(bfloat(ys[TOPK][lane] * bsig(float(bfloat(LOGITS[r * NL + NL - 1])))))));
     ROUTED[r * D + d0 + int(lane)] = bfloat(out);
+  }
+"""
+
+_EXPERT_DOWN_Y = r"""
+  // Threadgroup (b, z): SG simdgroups, each one (row, slot) pair (z SG + g in row-major order; slot TOPK: the shared
+  // expert; routed slots' experts from expert_gateup's PICK) for model dims 8 b .. 8 b + 7: lane l reads 16-input
+  // chunks l and (l < NC - 32) 32 + l of the activation; Y[row][slot][d] = bf16(sum), expert_down's sums. The
+  // combine (weights, shared gate) is the next hc_norm's "grouped" write-back, expert_down's arithmetic.
+  const uint lane = thread_index_in_simdgroup;
+  const int R = rows[0];
+  const int pair = int(threadgroup_position_in_grid.z) * SG + int(simdgroup_index_in_threadgroup);
+  constexpr int SLOTS = TOPK + 1;
+  if (pair >= R * SLOTS) return;
+  const int r = pair / SLOTS, k = pair % SLOTS;
+  const int d0 = int(threadgroup_position_in_grid.y) * 8;
+  constexpr int KB = NI / 2;
+  constexpr int KG = NI / 32;
+  constexpr int NC = NI / 16;
+  const bool shared = k == TOPK;
+  const size_t e = shared ? 0 : size_t(PICK[r * TOPK + k]);
+  const device uint32_t* DWp = shared ? SDW : DW;
+  const device bfloat* DSp = shared ? SDS : DS;
+  const device bfloat* DBp = shared ? SDB : DB;
+  const device bfloat* x = ACT + (r * SLOTS + k) * NI;
+  float xa[16], xb[16];
+  const float sa = load16(x + lane * 16, xa);
+  const bool second = int(lane) < NC - 32;
+  const float sb = second ? load16(x + (32 + lane) * 16, xb) : 0.0f;
+  for (int row = 0; row < 8; row++) {
+    const size_t at = e * D + d0 + row;
+    const device uint8_t* w = (const device uint8_t*)DWp + at * KB;
+    float acc = qdot16(w + lane * 8, xa, float(DSp[at * KG + lane / 2]), float(DBp[at * KG + lane / 2]), sa);
+    if (second)
+      acc += qdot16(w + (32 + lane) * 8, xb, float(DSp[at * KG + (32 + lane) / 2]), float(DBp[at * KG + (32 + lane) / 2]), sb);
+    acc = simd_sum(acc);
+    if (lane == 0) Y[(r * SLOTS + k) * D + d0 + row] = bfloat(acc);
   }
 """
 
@@ -1031,6 +1068,67 @@ _ATTN_MERGE = r"""
   OUT[(size_t(r) * H + h) * D + d] = bfloat(acc / total);
 """
 
+_PLE_LOOKUP = r"""
+  // Thread (d, h, r): dim d of head h of row r. Row id IDS[r][h] lies in one of 8 table groups (row starts GSTART);
+  // its 4-bit value q, scale and bias give bf16(bf16(scale * q) + bias) (mx.dequantize on bf16 scales).
+  const int d = int(thread_position_in_grid.x);
+  const int h = int(thread_position_in_grid.y);
+  const int r = int(thread_position_in_grid.z);
+  const uint id = IDS[r * H + h];
+  int g = 0;
+  for (int j = 1; j < 8; j++) g += id >= GSTART[j] ? 1 : 0;
+  const size_t row = size_t(id - GSTART[g]);
+  const device uint32_t* W; const device bfloat* SC; const device bfloat* BI;
+  switch (g) {
+    case 0: W = W0; SC = S0; BI = B0; break;
+    case 1: W = W1; SC = S1; BI = B1; break;
+    case 2: W = W2; SC = S2; BI = B2; break;
+    case 3: W = W3; SC = S3; BI = B3; break;
+    case 4: W = W4; SC = S4; BI = B4; break;
+    case 5: W = W5; SC = S5; BI = B5; break;
+    case 6: W = W6; SC = S6; BI = B6; break;
+    default: W = W7; SC = S7; BI = B7; break;
+  }
+  const uint word = W[row * (DIMS / 8) + d / 8];
+  const bfloat q = bfloat(float((word >> (4 * (d % 8))) & 0xFu));
+  const bfloat sc = SC[row * (DIMS / 32) + d / 32], bi = BI[row * (DIMS / 32) + d / 32];
+  OUT[(r * H + h) * DIMS + d] = sc * q + bi;
+"""
+
+_EMBED_ROWS = r"""
+  // Thread (d, r): dim d of token row r (quantized embedding, mx.dequantize's bf16(bf16(scale * q) + bias)),
+  // written to each of the TILE copies of the row (the residual streams start as copies of the embedding).
+  const int d = int(thread_position_in_grid.x);
+  const int r = int(thread_position_in_grid.y);
+  const size_t row = size_t(IDS[r]);
+  const uint word = W[row * (DIMS / 8) + d / 8];
+  const bfloat q = bfloat(float((word >> (4 * (d % 8))) & 0xFu));
+  const bfloat v = SC[row * (DIMS / 32) + d / 32] * q + BI[row * (DIMS / 32) + d / 32];
+  for (int t = 0; t < TILE; t++) OUT[(r * TILE + t) * DIMS + d] = v;
+"""
+
+_RMS_ROWS = r"""
+  // One threadgroup of 1024 threads per row (per group of G features when G < W): bf16((x * rinv) * scale), the
+  // sum of squares in fp32 (each thread's features in order, then the simdgroups in order).
+  const uint t = thread_position_in_threadgroup.x;
+  const uint lane = thread_index_in_simdgroup;
+  const uint sg = simdgroup_index_in_threadgroup;
+  const int r = int(threadgroup_position_in_grid.y);
+  const int grp = int(threadgroup_position_in_grid.x);
+  const size_t base = size_t(r) * W + size_t(grp) * G;
+  threadgroup float part[32];
+  float ss = 0.0f;
+  for (int i = int(t); i < G; i += 1024) { const float v = float(X[base + i]); ss = fma(v, v, ss); }
+  ss = simd_sum(ss);
+  if (lane == 0) part[sg] = ss;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float total = 0.0f;
+  for (int k = 0; k < 32; k++) total += part[k];
+  const float rinv = metal::rsqrt(total / float(G) + eps[0]);
+  for (int i = int(t); i < G; i += 1024)
+    OUT[base + i] = bfloat((float(X[base + i]) * rinv) * SCALE[(grp * G + i) % SW]);
+"""
+
 _kernels: dict[str, Any] = {}
 
 
@@ -1261,7 +1359,8 @@ def expert_gateup(x: mx.array, logits: mx.array, top_k: int, experts: int, gate:
                   shared: tuple[Any, Any] | None = None, *, rows_per_simdgroup: int = 4, simdgroups: int = 2
                   ) -> mx.array:
     """SiLU(gate_e x) * up_e x for each row's top-k experts by router logit (fp32 [R, NL], the first ``experts``
-    are experts), + the shared expert as a last slot: x [R, K] -> [R, k (+1), N] bf16."""
+    are experts), + the shared expert as a last slot: x [R, K] -> ([R, k (+1), N] bf16, the routing for
+    expert_down: picks [R, k] uint32, weights [R, k] fp32)."""
 
     rows, dims = x.shape
     width = int(gate.weight.shape[1])
@@ -1270,21 +1369,22 @@ def expert_gateup(x: mx.array, logits: mx.array, top_k: int, experts: int, gate:
     extra = 1 if shared is not None else 0
     sg, su = shared if shared is not None else (gate, up)
     kernel = _kernel("q4_expert_gateup", _EXPERT_GATEUP,
-                     ["X", "LOGITS", "GW", "GS", "GB", "UW", "US", "UB", "SGW", "SGS", "SGB", "SUW", "SUS", "SUB"], ["ACT"])
-    return kernel(inputs=[x, logits, gate.weight, gate.scales, gate.biases, up.weight, up.scales, up.biases,
-                          sg.weight, sg.scales, sg.biases, su.weight, su.scales, su.biases],
-                  template=[("K", dims), ("N", width), ("TOPK", top_k), ("SHARED", extra), ("NE", experts),
-                            ("NL", int(logits.shape[-1])), ("RPS", rows_per_simdgroup), ("SG", simdgroups)],
-                  grid=(32 * simdgroups, width // (rows_per_simdgroup * simdgroups), rows * (top_k + extra)),
-                  threadgroup=(32 * simdgroups, 1, 1),
-                  output_shapes=[(rows, top_k + extra, width)], output_dtypes=[mx.bfloat16])[0]
+                     ["X", "LOGITS", "GW", "GS", "GB", "UW", "US", "UB", "SGW", "SGS", "SGB", "SUW", "SUS", "SUB"],
+                     ["ACT", "PICK", "WTS"])
+    return tuple(kernel(inputs=[x, logits, gate.weight, gate.scales, gate.biases, up.weight, up.scales, up.biases,
+                                sg.weight, sg.scales, sg.biases, su.weight, su.scales, su.biases],
+                        template=[("K", dims), ("N", width), ("TOPK", top_k), ("SHARED", extra), ("NE", experts),
+                                  ("NL", int(logits.shape[-1])), ("RPS", rows_per_simdgroup), ("SG", simdgroups)],
+                        grid=(32 * simdgroups, width // (rows_per_simdgroup * simdgroups), rows * (top_k + extra)),
+                        threadgroup=(32 * simdgroups, 1, 1),
+                        output_shapes=[(rows, top_k + extra, width), (rows, top_k), (rows, top_k)],
+                        output_dtypes=[mx.bfloat16, mx.uint32, mx.float32]))
 
 
-def expert_down(act: mx.array, logits: mx.array, top_k: int, experts: int, down: Any, shared: Any | None = None
-                ) -> mx.array:
-    """sum_k w_k * bf16(down_e act_k) over each row's top-k experts by router logit (weights: softmax over the
-    experts renormalized to the top k), + bf16(shared * sigmoid(the last logit)) when act has a shared slot:
-    act [R, k (+1), NI] -> [R, D] bf16."""
+def expert_down(act: mx.array, picks: mx.array, weights: mx.array, logits: mx.array, top_k: int, experts: int,
+                down: Any, shared: Any | None = None) -> mx.array:
+    """sum_k w_k * bf16(down_e act_k) over each row's top-k experts (picks and weights from expert_gateup),
+    + bf16(shared * sigmoid(the last logit)) when act has a shared slot: act [R, k (+1), NI] -> [R, D] bf16."""
 
     rows, slots, width = act.shape
     extra = slots - top_k
@@ -1292,13 +1392,31 @@ def expert_down(act: mx.array, logits: mx.array, top_k: int, experts: int, down:
     if width % 16 or width // 16 > 64 or dims % 8:
         raise ValueError("expert_down: needs NI % 16 == 0, NI <= 1024 and D % 8 == 0")
     sd = shared if shared is not None else down
-    kernel = _kernel("q4_expert_down", _EXPERT_DOWN, ["ACT", "LOGITS", "DW", "DS", "DB", "SDW", "SDS", "SDB"],
-                     ["ROUTED"])
-    return kernel(inputs=[act, logits, down.weight, down.scales, down.biases, sd.weight, sd.scales, sd.biases],
+    kernel = _kernel("q4_expert_down", _EXPERT_DOWN,
+                     ["ACT", "PICK", "WTS", "LOGITS", "DW", "DS", "DB", "SDW", "SDS", "SDB"], ["ROUTED"])
+    return kernel(inputs=[act, picks, weights, logits, down.weight, down.scales, down.biases, sd.weight, sd.scales,
+                          sd.biases],
                   template=[("NI", width), ("D", dims), ("TOPK", top_k), ("SHARED", extra), ("NE", experts),
                             ("NL", int(logits.shape[-1]))],
                   grid=(32 * slots, dims // 8, rows), threadgroup=(32 * slots, 1, 1),
                   output_shapes=[(rows, dims)], output_dtypes=[mx.bfloat16])[0]
+
+def expert_down_y(act: mx.array, picks: mx.array, down: Any, shared: Any, *, simdgroups: int = 2) -> mx.array:
+    """bf16(down_e act) for every (row, slot) (slot k < k_top: the row's k-th expert from ``picks``; the last: the
+    shared expert): act [R, k + 1, NI] -> [R, k + 1, D]; combined by hc_norm's "grouped" write-back."""
+
+    rows, slots, width = act.shape
+    top_k = int(picks.shape[-1])
+    dims = int(down.weight.shape[1])
+    kernel = _kernel("q4_expert_down_y", _EXPERT_DOWN_Y,
+                     ["ACT", "PICK", "DW", "DS", "DB", "SDW", "SDS", "SDB", "rows"], ["Y"])
+    return kernel(inputs=[act, picks, down.weight, down.scales, down.biases, shared.weight, shared.scales,
+                          shared.biases, _rows(rows)],
+                  template=[("NI", width), ("D", dims), ("TOPK", top_k), ("SG", simdgroups)],
+                  grid=(32 * simdgroups, dims // 8, -(-rows * slots // simdgroups)),
+                  threadgroup=(32 * simdgroups, 1, 1),
+                  output_shapes=[(rows, slots, dims)], output_dtypes=[mx.bfloat16])[0]
+
 
 def qmv(x: mx.array, weights: Any, *, rows_per_simdgroup: int = 4, simdgroups: int = 2) -> mx.array:
     """x [R, K] @ W.T for a 4-bit group-32 matrix (a quantized linear or QWeights) -> [R, N] bf16, R <= 8;
@@ -1443,7 +1561,9 @@ def attention_rows(q: mx.array, keys: mx.array, values: mx.array, counts: list[i
     rows, heads, dims = q.shape
     kv_heads = int(keys.shape[1])
     if ids is None:
-        ids = mx.zeros((rows, 1), dtype=mx.int32)
+        ids = _consts.get(("no ids", rows))
+        if ids is None:
+            ids = _consts[("no ids", rows)] = mx.zeros((rows, 1), dtype=mx.int32)
     scale_arr = _consts.get(("scale", scale))
     if scale_arr is None:
         scale_arr = _consts[("scale", scale)] = mx.array([scale], dtype=mx.float32)
@@ -1458,3 +1578,78 @@ def attention_rows(q: mx.array, keys: mx.array, values: mx.array, counts: list[i
     return merge(inputs=[po, pm], template=[("H", heads), ("D", dims), ("P", parts)],
                  grid=(dims, heads, rows), threadgroup=(dims, 1, 1),
                  output_shapes=[(rows, heads, dims)], output_dtypes=[mx.bfloat16])[0]
+
+
+class PleTables:
+    """An n-gram embedding's shards as 8 concatenated groups (the shards keep views into them), for ple_lookup."""
+
+    groups = 8
+
+    def __init__(self, emb: Any) -> None:
+        shards = emb.shards
+        per = -(-len(shards) // self.groups)
+        self.weights, self.scales, self.biases, starts = [], [], [], [0]
+        for g in range(self.groups):
+            part = shards[g * per:(g + 1) * per]
+            w = mx.concatenate([sh.weight for sh in part])
+            sc = mx.concatenate([sh.scales for sh in part])
+            bi = mx.concatenate([sh.biases for sh in part])
+            mx.eval(w, sc, bi)
+            at = 0
+            for sh in part:
+                n = int(sh.weight.shape[0])
+                sh.weight, sh.scales, sh.biases = w[at:at + n], sc[at:at + n], bi[at:at + n]
+                mx.eval(sh.weight, sh.scales, sh.biases)
+                at += n
+            self.weights.append(w)
+            self.scales.append(sc)
+            self.biases.append(bi)
+            starts.append(starts[-1] + at)
+            mx.clear_cache()
+        self.starts = mx.array(starts[:-1], dtype=mx.uint32)
+        self.dims = int(emb.dims)
+        mx.eval(self.starts)
+
+
+def ple_lookup(ids: Any, tables: PleTables) -> mx.array:
+    """Dequantized rows [R, H * DIMS] bf16 for global n-gram row ids [R, H] (the shards' concatenated order)."""
+
+    import numpy as np
+
+    ids = np.asarray(ids).reshape(-1, np.asarray(ids).shape[-1])
+    rows, heads = ids.shape
+    names = ["IDS", "GSTART"] + [f"{k}{g}" for g in range(8) for k in ("W", "S", "B")]
+    kernel = _kernel("q4_ple_lookup", _PLE_LOOKUP, names, ["OUT"])
+    arrays = [mx.array(ids.astype(np.uint32)), tables.starts]
+    for g in range(8):
+        arrays += [tables.weights[g], tables.scales[g], tables.biases[g]]
+    return kernel(inputs=arrays, template=[("H", heads), ("DIMS", tables.dims)],
+                  grid=(tables.dims, heads, rows), threadgroup=(tables.dims, 1, 1),
+                  output_shapes=[(rows, heads * tables.dims)], output_dtypes=[mx.bfloat16])[0]
+
+
+def embed_rows(ids: Any, embedding: Any, *, tile: int = 1) -> mx.array:
+    """Token rows of a 4-bit quantized embedding (mx.dequantize's bits), each written ``tile`` times: ids [R] ->
+    [R, tile * DIMS] bf16."""
+
+    import numpy as np
+
+    if not isinstance(ids, mx.array):
+        ids = mx.array(np.asarray(ids, dtype=np.uint32).reshape(-1))
+    rows = int(ids.size)
+    dims = int(embedding.weight.shape[1]) * 8
+    kernel = _kernel("q4_embed_rows", _EMBED_ROWS, ["IDS", "W", "SC", "BI"], ["OUT"])
+    return kernel(inputs=[ids.reshape(-1).astype(mx.uint32), embedding.weight, embedding.scales, embedding.biases],
+                  template=[("DIMS", dims), ("TILE", tile)], grid=(dims, rows, 1), threadgroup=(min(dims, 256), 1, 1),
+                  output_shapes=[(rows, tile * dims)], output_dtypes=[mx.bfloat16])[0]
+
+
+def rms_norm_rows(x: mx.array, scale: mx.array, eps: mx.array, *, group: int | None = None) -> mx.array:
+    """CenteredRMSNorm's (1 + w) RMSNorm over each row (or each run of ``group`` features) of x [R, W] -> bf16."""
+
+    rows, width = x.shape
+    g = int(group or width)
+    kernel = _kernel("q4_rms_rows", _RMS_ROWS, ["X", "SCALE", "eps"], ["OUT"])
+    return kernel(inputs=[x, scale, eps], template=[("W", width), ("G", g), ("SW", int(scale.shape[-1]))],
+                  grid=(1024 * (width // g), rows, 1), threadgroup=(1024, 1, 1),
+                  output_shapes=[(rows, width)], output_dtypes=[mx.bfloat16])[0]

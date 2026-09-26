@@ -63,6 +63,9 @@ class FlashNext:
                                     model=SimpleNamespace(hyper_connection_mixer=head.hyper_connection_mixer,
                                                           embed_tokens=model.model.embed_tokens))
             self.mtp_fused = FusedDecode(shell)
+            self._mtp_scales = [1.0 + head.pre_fc_norm_embedding.weight.astype(mx.float32),
+                                1.0 + head.pre_fc_norm_hidden.weight.astype(mx.float32)]
+            mx.eval(*self._mtp_scales)
 
     # -- the serial engine's model interface ----------------------------------------
     @property
@@ -120,20 +123,32 @@ class FlashNext:
 
         return replace(self.args, num_hidden_layers=1, layer_types=["sparse_attention"], ple_layer_ids=[])
 
-    def _mtp_step(self, tokens: list[int], streams: mx.array, mtp_cache: MTPCache) -> tuple[mx.array, mx.array]:
+    def _mtp_step(self, tokens: Any, streams: mx.array, mtp_cache: MTPCache) -> tuple[mx.array, mx.array]:
         """The MTP head on rows (next tokens, residual streams [n, S*D]): (mixed [1, n, D], its streams [n, S*D]).
         Prompt-long inputs take the reference modules; decode rows the fused kernels."""
 
         head = self.mtp
-        emb = self.model.model.embed_tokens(mx.array(tokens, dtype=mx.int32))              # [n, D]
         rows, wide = streams.shape
         dims = wide // head.streams
+        if rows <= self.fused_rows:
+            # the prologue in a few kernels (was ~20 MLX ops a draft step): embedding rows, the two (1 + w) norms,
+            # the two projections through ``project``
+            from tensorfold.kernels.qwen.flash_next.v1 import kernels as K
+            from tensorfold.families.qwen4_exp.decode import project
+
+            eps = self.mtp_fused.eps
+            emb = K.embed_rows(tokens, self.model.model.embed_tokens)                      # [n, D]
+            e = project(K.rms_norm_rows(emb, self._mtp_scales[0], eps), head.fc_embedding)
+            normed = K.rms_norm_rows(streams, self._mtp_scales[1], eps).reshape(rows * head.streams, dims)
+            hs = project(normed, head.fc_hidden) if rows * head.streams <= 32 else head.fc_hidden(normed)
+            x = (e[:, None, :] + hs.reshape(rows, head.streams, dims)).reshape(rows, wide)
+            mixed = self.mtp_fused.run(x, None, [mtp_cache])
+            return mixed, self.mtp_fused.last_streams
+        ids = tokens.astype(mx.int32) if isinstance(tokens, mx.array) else mx.array(tokens, dtype=mx.int32)
+        emb = self.model.model.embed_tokens(ids)                                            # [n, D]
         e = head.fc_embedding(head.pre_fc_norm_embedding(emb))
         hs = head.fc_hidden(head.pre_fc_norm_hidden(streams).reshape(rows, head.streams, dims))
         x = (e[:, None, :] + hs).reshape(rows, wide)
-        if rows <= self.fused_rows:
-            mixed = self.mtp_fused.run(x, None, [mtp_cache])
-            return mixed, self.mtp_fused.last_streams
         x = head.layers[0](x[None], None, mtp_cache)
         return head.hyper_connection_mixer(x), x[0]
 
@@ -154,12 +169,58 @@ class FlashNext:
         drafts: list[int] = []
         count = self.drafts if count is None else int(count)
         for j in range(count):
-            d = _sample(self.model.head(mixed)[0], position + j, sampling)
+            d = _sample(self.model.head(mixed), position + j, sampling)
             drafts.append(d)
             if j + 1 < count:
                 mixed, out = self._mtp_step([d], out, mtp_cache)
                 mtp_cache.drafted += 1
         return drafts
+
+    def speculate(self, cache: list[Any], tokens: mx.array, position: int, sampling: Any) -> mx.array:
+        """Before a verify round's tokens are read: the MTP head absorbs every row of the last hidden() call (its
+        streams; ``tokens`` [R], the round's sampled tokens still on the GPU, as their next tokens) and draws each
+        row's first draft, for positions ``position`` + 2 + r (``position``: the first row's). One read then
+        returns both; ``settle`` keeps the kept rows' part. Rows go through the MTP head exactly as ``draft``
+        would take the kept ones (the fused kernels give a row the same bits at any row count), so the drafts
+        and the MTP cache are the same, a host round trip earlier. Returns the drafts [R] (lazy)."""
+
+        from tensorfold.engine.gpu_sampling import sample as gpu_sample
+
+        mtp_cache = cache[-1]
+        if mtp_cache.drafted:
+            mtp_cache.trim(mtp_cache.drafted, self.args.indexer_compress_ratio)
+            mtp_cache.drafted = 0
+        rows = int(self._streams.shape[0])
+        mixed, out = self._mtp_step(tokens, self._streams, mtp_cache)
+        self._spec = (out, rows)
+        logits = self.head(mixed)
+        return gpu_sample(logits.reshape(logits.shape[1:]), sampling, [position + 2 + r for r in range(rows)])
+
+    def settle(self, cache: list[Any], keep: int, first: int, position: int, sampling: Any, count: int) -> list[int]:
+        """After ``speculate``: forget the MTP entries of the rows past ``keep``, then the drafts for positions
+        ``position``, ``position`` + 1, ...: the kept row's first draft ``first`` and ``count`` - 1 chained ones."""
+
+        mtp_cache = cache[-1]
+        out, rows = self._spec
+        self._spec = None
+        if rows > keep:
+            mtp_cache.trim(rows - keep, self.args.indexer_compress_ratio)
+        if count <= 0:
+            return []
+        drafts = [int(first)]
+        streams = out[keep - 1:keep]
+        for j in range(1, count):
+            mixed, streams = self._mtp_step([drafts[-1]], streams, mtp_cache)
+            mtp_cache.drafted += 1
+            drafts.append(_sample(self.model.head(mixed), position + j, sampling))
+        return drafts
+
+    def unspeculate(self, cache: list[Any]) -> None:
+        """Undo ``speculate`` entirely (the round's rows are absorbed another way)."""
+
+        if getattr(self, "_spec", None) is not None:
+            cache[-1].trim(self._spec[1], self.args.indexer_compress_ratio)
+            self._spec = None
 
     # -- load-time check ------------------------------------------------------------------
     def rows_match_serial(self) -> bool:
@@ -185,7 +246,7 @@ def _sample(logits: mx.array, position: int, sampling: Any) -> int:
         return int(mx.argmax(logits.reshape(-1)).item())
     from tensorfold.engine.gpu_sampling import sample as gpu_sample
 
-    return int(gpu_sample(logits.reshape(1, -1), sampling, [position])[0].item())
+    return int(gpu_sample(logits.reshape(1, -1), sampling, [position]).item())
 
 
 def load(model_dir: Path, *, drafts: int | None = None) -> tuple[FlashNext, Any]:
