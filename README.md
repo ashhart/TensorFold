@@ -1,4 +1,4 @@
-![TensorFold name inside a lit emerald glass lattice](assets/tensorfold-hero.png)
+![TensorFold name beside a pink and blue folded tensor mesh](assets/tensorfold-hero.png)
 
 # TensorFold
 
@@ -174,9 +174,9 @@ pytest
 
 The kernel tests of the lane engine need an M5-generation GPU and are skipped elsewhere.
 
-## Brand asset
+## Brand assets
 
-The [wide lattice hero](assets/tensorfold-hero.png) is a 3:1 image for X headers and this README.
+The [wide hero](assets/tensorfold-hero.png) is a 3:1 image for X headers and this README. The [transparent mesh logo](assets/tensorfold-logo.png) uses the same folded lattice design.
 
 ## License
 
