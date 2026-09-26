@@ -42,9 +42,10 @@ checkpoints TensorFold is built and tested with, all on Hugging Face:
 | Nemotron 3.5 Lightning 30B-A3B | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 18.6 GB | 32 GB or more |
 | Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` and its draft model `z-lab/Qwen3.8-27B-DFlash2` | 16.1 GB + 3.8 GB | 32 GB or more; an M5-generation GPU for the fast kernels |
 | Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 113 GB | 192 GB or more |
+| Gemma 4 26B-A4B | `mlx-community/gemma-4-26b-a4b-it-4bit` | 15.4 GB | 32 GB or more |
 
 The three main checkpoints come from the `Vontra` Hugging Face namespace; Qwen3.8-27B's optional DFlash2
-drafter comes from `z-lab`.
+drafter comes from `z-lab`; Gemma 4 is the standard `mlx-community` conversion.
 
 ```bash
 tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
@@ -67,6 +68,9 @@ What each checkpoint needs:
 - Nemotron 3.5 Lightning drafts with its MTP head, which the checkpoint above ships as `mtp-4bit.safetensors`
   (converted from NVIDIA's BF16 release; the standard MLX conversion drops it), and from the context.
   `pull` checks for the head, and `serve` completes an older cache that lacks it before loading.
+- Gemma 4 26B-A4B decodes one token a round (no drafts), through fused kernels that read 4-bit weights in
+  groups of 32, 64 or 128; other checkpoints fall back to mlx_lm's forward. `TF_GEMMA4_PIPELINE=1` decodes
+  one step ahead.
 
 Want another model? [The recipe book](docs/recipes/README.md) describes what we did for each family and how
 to add yours.
@@ -89,6 +93,7 @@ drafts, which are now on by default; in-engine they reached 217 tok/s on prose a
 | | | file edit | 190 |
 | | | 18k-token context | 98.5 |
 | | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 103-115 |
+| Gemma 4 26B-A4B, 4-bit | M4 Pro, 64 GB | short answer, greedy, one step ahead | 76 (mlx_lm forward: 70) |
 
 ## DGX Spark and other NVIDIA GPUs
 
@@ -213,6 +218,7 @@ src/tensorfold/
   kernels/qwen/dense/v1/        Qwen3.8 dense lane kernels
   kernels/qwen/flash_next/v1/   Qwen3.8 Flash Next fused kernels
   kernels/nemotron/lightning/v1/  Nemotron 3.5 Lightning fused kernels
+  kernels/gemma/v1/               Gemma 4 26B-A4B fused decode kernels
   drafters/              the DFlash2 drafter
   families/<name>/       one package per model family: forward pass and draft heads
   families/<name>/cuda/  the family's CUDA engine and kernels (NVIDIA GPUs)

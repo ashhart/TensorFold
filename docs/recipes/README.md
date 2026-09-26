@@ -9,6 +9,8 @@ away, and what we would try next:
 - [Nemotron 3.5 Lightning](nemotron-3.5.md): Mamba-2 and MoE, decoded one step ahead, on an M5 Max.
 - [Qwen3.8-27B dense](qwen3.8-27b.md): DeltaNet and full attention with a DFlash2 draft model and tensor-unit
   kernels, on an M5 Max.
+- [Gemma 4 26B-A4B](gemma-4.md): sliding and full attention with a dense MLP beside a 128-expert MoE, fused
+  one-row decode, on an M4 Pro.
 - [Adding a family](adding-a-family.md): the package interface, the checks and the tests.
 
 On NVIDIA GPUs (DGX Spark), the same contract with CUDA kernels:
