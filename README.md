@@ -1,4 +1,4 @@
-![TensorFold name beside a pink and blue folded tensor mesh](assets/tensorfold-hero.png)
+![TensorFold mesh and measured decode speeds for Qwen3.8 27B, Nemotron 3.5, and Qwen3.8 Flash Next](assets/tensorfold-hero-speeds.png)
 
 # TensorFold
 
@@ -180,7 +180,7 @@ The kernel tests of the lane engine need an M5-generation GPU and are skipped el
 
 ## Brand assets
 
-The [wide hero](assets/tensorfold-hero.png) is a 3:1 image for X headers and this README. The [transparent mesh logo](assets/tensorfold-logo.png) uses the same folded lattice design.
+The [benchmark hero](assets/tensorfold-hero-speeds.png) is a 3:1 image for X headers and this README. Its figures are the short-answer server results in the [speed table](#speed), measured on the machines named in the image. The [clean hero](assets/tensorfold-hero.png) and [transparent mesh logo](assets/tensorfold-logo.png) are also available.
 
 ## License
 
