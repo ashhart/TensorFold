@@ -500,7 +500,22 @@ class SerialEngine:
         rows = len(inputs)
         self._last_rows = rows
         hidden = self.model.hidden(mx.array([inputs], dtype=mx.uint32), cache)
-        sampled = self._draw(stream, self.model.head(hidden)[0], [position + 1 + r for r in range(rows)])
+        logits = self.model.head(hidden)
+        logits = logits.reshape(logits.shape[1:])       # [R, V] as a view (MLX's [0] is a gather that copies)
+        positions = [position + 1 + r for r in range(rows)]
+        # the MTP head's first draft for every row, queued behind the verify before anything is read (the rows
+        # past the kept ones are dropped afterwards); forced rows take the plain path
+        speculate = (stream.drafts and not forced and getattr(self.model, "gpu_sampling", False)
+                     and callable(getattr(self.model, "speculate", None)))
+        firsts: list[int] = []
+        if speculate:
+            from tensorfold.engine.gpu_sampling import sample as gpu_sample
+
+            tokens = gpu_sample(logits, stream.sampling, positions)
+            both = mx.concatenate([tokens, self.model.speculate(cache, tokens, position, stream.sampling)]).tolist()
+            sampled, firsts = [int(t) for t in both[:rows]], [int(t) for t in both[rows:]]
+        else:
+            sampled = self._draw(stream, logits, positions)
         keep = 1
         if forced:
             keep = rows
@@ -521,6 +536,9 @@ class SerialEngine:
             keep = cut + 1
             sampled = [*sampled[:cut], stream.start_close()]
             drafts = []                          # no acceptance sample this round
+            if speculate:
+                self.model.unspeculate(cache)    # the last kept row's next token is the forced one
+                speculate = False
         if keep < rows:
             self.model.keep_rows(cache, rows, keep)
         streams = self.model.last_streams[:keep]
@@ -531,8 +549,14 @@ class SerialEngine:
             depth = self._depth(stream, [] if forced else drafts, keep)
             if stream.force or self._proposal(stream, self.enter_match):
                 depth = 0          # the next round reads forced tokens or a copied continuation: absorb only
-            self._draft[stream.stream_id] = self.model.draft(cache, streams, sampled[:keep], stream.cache_len + 1,
-                                                             stream.sampling, depth)
+            if speculate:
+                self._draft[stream.stream_id] = self.model.settle(cache, keep, firsts[keep - 1],
+                                                                  stream.cache_len + 1, stream.sampling, depth)
+            else:
+                self._draft[stream.stream_id] = self.model.draft(cache, streams, sampled[:keep],
+                                                                 stream.cache_len + 1, stream.sampling, depth)
+        elif speculate:
+            self.model.settle(cache, keep, firsts[keep - 1], stream.cache_len + 1, stream.sampling, 0)
         return got
 
     def _depth(self, stream: LaneStream, drafts: list[int], keep: int) -> int:
