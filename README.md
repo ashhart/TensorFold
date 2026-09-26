@@ -1,3 +1,5 @@
+![TensorFold name inside a lit emerald glass lattice](assets/tensorfold-hero.png)
+
 # TensorFold
 
 TensorFold serves a local LLM on Apple Silicon at an OpenAI-compatible endpoint, fast and exact. Name a model
@@ -171,6 +173,10 @@ pytest
 ```
 
 The kernel tests of the lane engine need an M5-generation GPU and are skipped elsewhere.
+
+## Brand asset
+
+The [wide lattice hero](assets/tensorfold-hero.png) is a 3:1 image for X headers and this README.
 
 ## License
 
