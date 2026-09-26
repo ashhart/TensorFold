@@ -2,7 +2,8 @@
 
 Use this when someone asks you to set up TensorFold and serve a model on their Mac. Run these commands in a
 terminal on the Mac that will host the model. TensorFold uses MLX and Metal on Apple Silicon; the NVIDIA in
-Nemotron's name refers to the model, not to a CUDA device.
+Nemotron's name refers to the model, not to a CUDA device. For a DGX Spark or another NVIDIA GPU, follow
+[DGX Spark](#dgx-spark) instead.
 
 ## 1. Check the Mac and choose one model
 
@@ -122,3 +123,58 @@ Point an OpenAI-compatible client at `http://127.0.0.1:8080/v1` and use that sam
 - `info` works but `serve` still downloads: this is expected because `info` only needs the model config.
 - The checkpoint is rejected: compare its quantization and draft head with the [model notes](README.md#models).
 - A client cannot connect: keep `serve` running, check `/health`, and confirm its base URL and model ID.
+
+## DGX Spark
+
+TensorFold's CUDA engine serves Qwen3.8-27B (one or two Sparks), Qwen3.8 Flash Next (one or two Sparks) and
+GLM-5.3-Flash (two Sparks). Nemotron 3.5 Lightning has no CUDA engine yet.
+
+1. Check the GPU and start NVIDIA's PyTorch container, with the Hugging Face cache mounted so downloads
+   survive the container:
+
+   ```bash
+   nvidia-smi
+   docker run -it --gpus all --ipc=host --network host -v ~/.cache/huggingface:/root/.cache/huggingface \
+     nvcr.io/nvidia/pytorch:26.07-py3
+   ```
+
+2. Inside the container, install, pull and serve:
+
+   ```bash
+   pip install git+https://github.com/ashhart/TensorFold.git
+   tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --host 0.0.0.0 --port 8080
+   ```
+
+   The first start compiles the kernels (a minute or two); later starts reuse them while the container lives.
+   Check the endpoint as in step 5 above, with the model ID from `/v1/models`.
+
+3. Two Sparks. Connect them with a cable between their 200 Gb/s ports and give each port an address. Start
+   the container on both with the network devices added:
+
+   ```bash
+   docker run -it --gpus all --ipc=host --network host --device /dev/infiniband --ulimit memlock=-1 \
+     --cap-add IPC_LOCK -v ~/.cache/huggingface:/root/.cache/huggingface nvcr.io/nvidia/pytorch:26.07-py3
+   ```
+
+   Install and pull on both (both ranks need the model and its draft model). Find the link's interface and
+   adapters with `ibdev2netdev` and set them in both containers when NCCL does not pick them itself:
+
+   ```bash
+   export NCCL_SOCKET_IFNAME=enp1s0f1np1 NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1   # examples: use your names
+   ```
+
+   Then start rank 1 on the second Spark and rank 0 on the first, both with rank 0's address on the link:
+
+   ```bash
+   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.168.100.1
+   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0
+   ```
+
+   Rank 0 serves HTTP once both have loaded. The ranks refuse to start when they were given different settings
+   (for example the draft model present on one Spark only).
+
+If a two-Spark start hangs at the rendezvous, check that each Spark can reach the other's address on the link
+and that the port (`--master-port`, default 29551) is open. GLM-5.3-Flash has its own setup steps in
+[its recipe](docs/recipes/glm-5.3-flash.md).
+
