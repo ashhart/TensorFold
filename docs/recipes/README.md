@@ -11,6 +11,12 @@ away, and what we would try next:
   kernels, on an M5 Max.
 - [Adding a family](adding-a-family.md): the package interface, the checks and the tests.
 
+On NVIDIA GPUs (DGX Spark), the same contract with CUDA kernels:
+
+- [The CUDA recipe book](cuda.md): the method, the numbers against vLLM, and the traps.
+- [Adding a CUDA family](adding-a-cuda-family.md): the engine interface, the exactness tests, measuring.
+- [GLM-5.3-Flash](glm-5.3-flash.md): two Sparks, CUDA only.
+
 ## The contract
 
 A multi-row step verifies several consecutive positions in one forward. It is exact when every row gets the

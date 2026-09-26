@@ -1,3 +1,3 @@
-"""TensorFold: fast, exact LLM decoding on Apple Silicon behind an OpenAI-compatible endpoint."""
+"""TensorFold: fast, exact LLM decoding on Apple Silicon and NVIDIA GPUs behind an OpenAI-compatible endpoint."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

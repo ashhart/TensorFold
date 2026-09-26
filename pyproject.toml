@@ -4,25 +4,37 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorfold"
-version = "0.2.0"
-description = "Fast, exact LLM decoding on Apple Silicon (MLX) behind an OpenAI-compatible endpoint"
+version = "0.3.0"
+description = "Fast, exact LLM decoding on Apple Silicon (MLX) and NVIDIA GPUs (CUDA) behind an OpenAI-compatible endpoint"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "TensorFold contributors" }]
-keywords = ["llm", "mlx", "apple-silicon", "inference", "speculative-decoding", "openai"]
+keywords = ["llm", "mlx", "apple-silicon", "cuda", "dgx-spark", "inference", "speculative-decoding", "openai"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Environment :: GPU :: NVIDIA CUDA",
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 # Flash Next and Nemotron check at load that a multi-row forward reproduces one-row steps on the installed MLX
 # and GPU, and decode without drafts when it does not; the Qwen3.8 dense lane kernels do their own arithmetic.
 # mlx-lm stays below its next minor: TensorFold builds on its model classes and caches.
-dependencies = ["mlx>=0.31.2", "mlx-lm>=0.31.3,<0.32", "numpy>=1.26", "huggingface-hub>=0.24"]
+# On Linux the CUDA engines take torch and triton from NVIDIA's PyTorch container (see RUNBOOK.md), so pip leaves
+# them alone; their kernels' .cu sources build on first use with the container's nvcc.
+dependencies = [
+  "mlx>=0.31.2; sys_platform == 'darwin'",
+  "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin'",
+  "numpy>=1.26",
+  "huggingface-hub>=0.24",
+  "tokenizers>=0.20; sys_platform != 'darwin'",
+  "safetensors>=0.4; sys_platform != 'darwin'",
+  "jinja2>=3.1; sys_platform != 'darwin'",
+]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
@@ -30,11 +42,17 @@ test = ["pytest>=8"]
 [project.scripts]
 tensorfold = "tensorfold.cli:main"
 
+[tool.setuptools]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 "tensorfold.drafters.vendor.z_lab_dflash" = ["README.md"]
+"tensorfold.families.qwen3_5.cuda" = ["*.cu", "*.cpp"]
+"tensorfold.families.qwen4_exp.cuda" = ["*.cu", "*.cpp", "*.txt"]
+"tensorfold.families.glm5_next.cuda" = ["*.cu", "*.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
