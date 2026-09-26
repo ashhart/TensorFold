@@ -222,7 +222,97 @@ def _loose_tool_arguments(payload: dict[str, Any], explicit: Any) -> Any:
     }
 
 
-def _parse_tool_call_payload(block: str) -> tuple[str, dict[str, Any]] | None:
+# GLM-4.5 and later (GLM-5.3-Flash): <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value>...</tool_call>. The
+# chat template writes string arguments raw and every other value as JSON, so a value is converted by the type its
+# parameter declares, as oMLX does it (``omlx/api/tool_calling.py``, ``_coerce_param_value``, without its repair of
+# near-valid JSON): a client gets the same arguments from TensorFold as from oMLX.
+_GLM_ARG_KEY_RE = re.compile(r"<arg_key>(.*?)</arg_key>", re.DOTALL)
+_GLM_ARG_VALUE_RE = re.compile(r"<arg_value>(.*?)</arg_value>", re.DOTALL)
+_GLM_STRING_TYPES = {"string", "str", "text", "varchar", "char", "enum"}
+_GLM_BOOL_TYPES = {"boolean", "bool", "binary"}
+_GLM_INT_PREFIXES = ("int", "uint", "long", "short", "unsigned")
+
+
+def tool_parameter_properties(tools: list[dict[str, Any]] | None, name: str) -> dict[str, Any]:
+    """The declared JSON-schema properties of tool ``name`` ({} when it declares none)."""
+
+    for tool in tools or ():
+        if tool_spec_name(tool) != name:
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        parameters = function.get("parameters")
+        if isinstance(parameters, dict) and isinstance(parameters.get("properties"), dict):
+            return parameters["properties"]
+        return {}
+    return {}
+
+
+def coerce_glm_value(text: str, schema: Any) -> Any:
+    """A GLM ``<arg_value>`` by its parameter's declared type."""
+
+    import ast
+
+    kind = schema.get("type") if isinstance(schema, dict) else None
+    if not isinstance(kind, str):
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            return text
+    if text.strip().lower() == "null":
+        return None
+    kind = kind.strip().lower()
+    stripped = text.strip()
+    if kind in _GLM_STRING_TYPES:
+        if len(stripped) >= 2 and stripped[0] == stripped[-1] == '"':
+            try:
+                decoded = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError, RecursionError):
+                decoded = None
+            if isinstance(decoded, str):
+                return decoded
+        return text
+    if kind in _GLM_BOOL_TYPES and stripped.lower() in ("true", "false"):
+        return stripped.lower() == "true"
+    if kind.startswith(_GLM_INT_PREFIXES):
+        try:
+            return int(stripped)
+        except ValueError:
+            pass
+    elif kind.startswith(("num", "float")):
+        try:
+            number = float(stripped)
+            return int(number) if number == int(number) else number
+        except (ValueError, OverflowError):
+            pass
+    try:
+        return json.loads(text, strict=False)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        pass
+    try:
+        literal = ast.literal_eval(text)
+        if isinstance(literal, (dict, list, tuple)):
+            return list(literal) if isinstance(literal, tuple) else literal
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        pass
+    return text
+
+
+def _parse_glm_payload(block: str, tools: list[dict[str, Any]] | None) -> tuple[str, dict[str, Any]] | None:
+    keys = _GLM_ARG_KEY_RE.findall(block)
+    if not keys:
+        name = block.strip()
+        # a call with no arguments is just the name
+        return (name, {}) if name and re.fullmatch(r"[A-Za-z_][\w.\-]*", name) else None
+    values = _GLM_ARG_VALUE_RE.findall(block)
+    name = block.split("<arg_key>", 1)[0].strip()
+    if not name:
+        raise ValueError("tool_call is missing a function name")
+    properties = tool_parameter_properties(tools, name)
+    return name, {k: coerce_glm_value(v, properties.get(k)) for k, v in zip(keys, values)}
+
+
+def _parse_tool_call_payload(block: str,
+                             tools: list[dict[str, Any]] | None = None) -> tuple[str, dict[str, Any]] | None:
     try:
         payload = json.loads(block)
     except json.JSONDecodeError:
@@ -261,6 +351,8 @@ def _parse_tool_call_payload(block: str) -> tuple[str, dict[str, Any]] | None:
 
     match = _TOOL_FUNCTION_BLOCK_RE.match(block)
     if match is None:
+        if payload is None and not block.lstrip().startswith(("{", "[", "<")):
+            return _parse_glm_payload(block, tools)
         return None
     name = match.group(1).strip()
     arguments: dict[str, Any] = {}
@@ -344,7 +436,7 @@ def parse_tool_calls_from_content(
     for index, (start, end, block) in enumerate(envelopes):
         residue_parts.append(text[cursor:start])
         cursor = end
-        parsed = _parse_tool_call_payload(block)
+        parsed = _parse_tool_call_payload(block, tools)
         if parsed is None:
             raise ValueError("unsupported tool_call payload format")
         raw_name, arguments = parsed

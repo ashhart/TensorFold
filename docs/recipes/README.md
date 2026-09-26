@@ -1,6 +1,6 @@
 # The recipe book
 
-This is how we made three model families decode fast and byte-exact on Apple Silicon, and how to do the same
+This is how we made four model families decode fast and byte-exact on Apple Silicon, and how to do the same
 for yours. The per-family pages record what worked with the numbers we measured, what we tried and threw
 away, and what we would try next:
 
@@ -9,13 +9,15 @@ away, and what we would try next:
 - [Nemotron 3.5 Lightning](nemotron-3.5.md): Mamba-2 and MoE, decoded one step ahead, on an M5 Max.
 - [Qwen3.8-27B dense](qwen3.8-27b.md): DeltaNet and full attention with a DFlash2 draft model and tensor-unit
   kernels, on an M5 Max.
+- [GLM-5.3-Flash](glm-5.3-flash.md#apple-silicon-mlx): Kimi delta attention, sparse MLA and 288-expert MoE with
+  an MTP head, on an M3 Ultra.
 - [Adding a family](adding-a-family.md): the package interface, the checks and the tests.
 
 On NVIDIA GPUs (DGX Spark), the same contract with CUDA kernels:
 
 - [The CUDA recipe book](cuda.md): the method, the numbers against vLLM, and the traps.
 - [Adding a CUDA family](adding-a-cuda-family.md): the engine interface, the exactness tests, measuring.
-- [GLM-5.3-Flash](glm-5.3-flash.md): two Sparks, CUDA only.
+- [GLM-5.3-Flash](glm-5.3-flash.md): two Sparks (and one Mac, at the end).
 
 ## The contract
 

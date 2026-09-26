@@ -22,6 +22,7 @@ optional drafter.
 | Nemotron 3.5 Lightning | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 18.6 GB | 32 GB or more |
 | Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` | 16.1 GB; optional drafter 3.8 GB | 32 GB or more |
 | Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 113 GB | 192 GB or more |
+| GLM-5.3-Flash | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | 182 GB | 256 GB or more, with MLX 0.32.2 or later |
 
 These are the checkpoints this CLI is built and tested with. Qwen3.8-27B's fast lane kernels require an
 M5-generation GPU; on older Apple Silicon Macs it uses MLX kernels instead. Allow extra disk space for the
@@ -71,6 +72,13 @@ Qwen3.8 Flash Next:
 
 ```bash
 tensorfold pull Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP
+```
+
+GLM-5.3-Flash (on a 256 GB Mac, MLX 0.32.0 slows decoding down after a few requests; install 0.32.2 or later):
+
+```bash
+python -m pip install "mlx>=0.32.2"
+tensorfold pull Vontra/GLM-5.3-Flash-MLX-4bit-MTP
 ```
 
 For Qwen3.8-27B without the drafter, pull only its main repo. You can run `tensorfold info REPO_ID` to check
@@ -127,7 +135,7 @@ Point an OpenAI-compatible client at `http://127.0.0.1:8080/v1` and use that sam
 ## DGX Spark
 
 TensorFold's CUDA engine serves Qwen3.8-27B (one or two Sparks), Qwen3.8 Flash Next (one or two Sparks) and
-GLM-5.3-Flash (two Sparks). Nemotron 3.5 Lightning has no CUDA engine yet.
+GLM-5.3-Flash (two Sparks; on a Mac it needs one with 256 GB). Nemotron 3.5 Lightning has no CUDA engine yet.
 
 1. Check the GPU and start NVIDIA's PyTorch container, with the Hugging Face cache mounted so downloads
    survive the container:

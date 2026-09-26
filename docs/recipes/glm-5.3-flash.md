@@ -1,7 +1,10 @@
-# GLM-5.3-Flash (`glm5_next`) on two DGX Sparks
+# GLM-5.3-Flash (`glm5_next`)
 
-GLM-5.3-Flash runs on TensorFold's CUDA engine only, tensor parallel over two DGX Sparks: the 4-bit checkpoint
-is 182 GB and one Spark has 128 GB. Measured on two Sparks (GB10, 128 GB unified memory each) linked by their
+GLM-5.3-Flash runs on two DGX Sparks through TensorFold's CUDA engine, tensor parallel: the 4-bit checkpoint is
+182 GB and one Spark has 128 GB. On a Mac with 256 GB or more it runs on the MLX engine, on one machine:
+[Apple Silicon (MLX)](#apple-silicon-mlx), at the end.
+
+The sections before that one were measured on two Sparks (GB10, 128 GB unified memory each) linked by their
 200 Gb/s ports, in NVIDIA's `pytorch:26.07-py3` container. Package: `src/tensorfold/families/glm5_next/`
 (`cuda/` holds the engine). Checkpoint: `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` (MLX affine 4-bit, groups of 64,
 with the MTP layer). Draft model: `incoai/GLM-5.3-Flash-DFlash2`.
@@ -263,3 +266,172 @@ verify row costs 6 to 10 ms, almost all of it the experts that row adds, so acce
 head's first draft is right 70 to 96% of the time and its third 10 to 36%. About half of an MTP draft step is
 the 154,880-row head. The next things to try: picking drafts on the GPU without a host round trip per
 step, a smaller head for drafts only, and verify trees with a second candidate at the first position.
+
+## Apple Silicon (MLX)
+
+The same checkpoint on one Mac, through the serial engine with MTP drafts. Package:
+`src/tensorfold/families/glm5_next/` (`model.py` forward pass, `mtp.py` draft head, `runtime.py` what the engine
+serves); Metal kernels `v1` in `src/tensorfold/kernels/glm/flash/v1/`. Measured on two M3 Ultra Mac Studios, one
+with 512 GB (MLX 0.32.0) and one with 256 GB (MLX 0.32.2). Contributed by Chad Hurley, following this recipe book.
+
+```bash
+pip install "mlx>=0.32.2"          # on a 256 GB Mac, see the traps below
+tensorfold pull Vontra/GLM-5.3-Flash-MLX-4bit-MTP
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP                    # one MTP draft a round
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --mtp-drafts 4     # up to 4, depth from measured acceptance
+```
+
+The process holds about 170 GB and keeps its weights wired. Loading took 29 to 39 s from a warm file cache. The
+DFlash2 draft model is used by the CUDA engine only; on a Mac GLM drafts with its MTP head, and `serve` may print
+that the draft model is not pulled, which does not matter here.
+
+### What decides the speed
+
+The architecture is above (What decides the speed). On a Mac, one row reads about 9 GB of 4-bit weights a token:
+experts about 5.3 GB (8 routed and the shared one, 42 layers), KDA about 2.6 GB, sparse attention about 0.7 GB,
+the head and the rest the remainder.
+MLX's own one-row 4-bit matvec reaches about 630 GB/s on these shapes on an M3 Ultra, so the floor is about 14.5 ms
+a token. Before fusion the step took about 36 ms with about 3,600 kernels a token: the gap was kernel count, as the
+recipe book's method predicts.
+
+What is specific to this family:
+
+- KDA keeps a recurrent state (64 heads of 128 x 128, fp32) and a width-4 conv window, so a rejected draft cannot
+  just be trimmed. The decode call keeps its entry state and inputs, and `keep_rows` replays the kept prefix
+  through the same kernel. The state after a partial keep is bit-identical to stepping one row at a time, so
+  drafting is not limited to one draft.
+- The checkpoint is affine 4-bit in groups of 64. Flash Next's kernels read groups of 32, so `qmv_rows` and the
+  expert kernels were re-indexed for 64.
+- MLA's `kv_b_proj` stays as stored (quantized along the 512 latent) and is applied per head: keys absorbed into
+  the query, values after attention. Nothing is quantized a second time. After layer 44 the hidden state is 0.76%
+  (relative L2) from a float32 forward of the same stored weights; re-quantizing `kv_b` per head along the other
+  axis measured 2.98%.
+- The MTP layer is `layers.45` (DeepSeek-V3 style): `eh_proj` over the next token's embedding and the backbone's
+  hidden state (streams collapsed, before the final norm), then a plain MLA + MoE block without hyper-connections.
+  Its drafts chain from its own output.
+
+### What paid
+
+Step times are the full model at 4,096 keys, medians of 18 steps, settings alternated in one process.
+
+| Step | Effect |
+| --- | --- |
+| A forward written from the checkpoint layout, checked sublayer by sublayer against mlx-vlm's `glm5_next` (as oMLX vendors it) on the real weights | the reference; its prefill path is op for op mlx-vlm's |
+| `qmv_rows` for groups of 64 (strategy B), and one-launch row kernels for the router, the routed experts (each distinct expert read once a window), the hyper-connection mix, the indexer gate and KDA's small `f_b` / `g_b` (MLX's `qmv_quad`) | exact windows; 8 layers at 8 rows 30.3 to 20.0 ms, at 16 rows 57.3 to 34.7 ms |
+| KDA's whole decode step in one kernel a layer (ported from mlx-vlm #2105), the rows of a window in order inside the launch, `f_b` / `g_b` folded in | about 35 dispatches a KDA layer to 3; 45-layer estimate 37.0 to 33.7 ms |
+| Sparse attention reading the chosen latent keys from the cache by index (ported from mlx-vlm #2245), the capacity a runtime stride | no gathered key copy, no recompile as the cache grows |
+| The MoE block in five kernels (router reading the stored bf16 once, route + group, gate/up + SwiGLU, down, combine), a hyper-connection boundary in three, MLA's projections that read the same input stacked; all strategy B | 35.7 to 27.1 ms, logits unchanged |
+| `mx.async_eval` every 2 layers (`TF_GLM5_EVAL_EVERY`) | 27.2 to 22.7 ms |
+| The shared expert in kernels of its own that read only x, so it runs beside the latency-bound router | 1 / 2 / 4 rows 22.7 / 29.8 / 45.9 to 22.4 / 29.1 / 44.2 ms |
+| The draft depth from each draft position's own acceptance and the measured verify cost of each depth (`depth_for`) | the second chained draft lands 0.60 to 0.69 against 0.81 to 0.87 for the first, so the policy stays at one draft unless chained drafts land well |
+
+Kernels a token went from 3,578 to 1,197 (graph nodes 6,925 to 1,750). Everything in the table but the two ports is
+strategy B and left serial decoding's logits bit-identical. The two ports are strategy C: they set the decode
+path's arithmetic, checked against float32 (Exactness, below).
+
+### Speed
+
+Through the server, one request at a time, decode tok/s from the first to the last streamed token, T 1.0 and top-p
+0.95. The same kinds of request as the Flash Next table: a short answer with thinking (25-token prompt), code (45),
+a file edit (a rename in a 5k-character file, a 1,922-token reply), an 18k-token context, and a 23k-token agent
+prompt with 6 tools ending in a long tool call. M3 Ultra, 512 GB, MLX 0.32.0. Every drafted reply is byte-identical
+to the same request with `"draft": false`.
+
+| Request | serial | 1 draft | `--mtp-drafts 4` |
+| --- | ---: | ---: | ---: |
+| short answer | 46.9 | 60.6 | 62.4 |
+| code | 47.1 | 64.3 | 63.6 |
+| file edit | 43.1 | 94.1 | 93.6 |
+| 18k-token context | 42.2 | 47.9 | 48.0 |
+| 23k-token agent prompt | 42.1 | 53.7 | 53.4 |
+
+For reference, oMLX 0.7.0.dev2 with its DFlash2 drafter, which served this model on the same Mac before, ran the
+same prompts at 46.2, 58.8, 82.4, 31.3 and 45.1 tok/s. On the 256 GB Studio (MLX 0.32.2, one draft), another set of
+short, code, thinking, 18k and 23k-agent prompts ran at 62.0, 63.1, 60.1, 47.7 and 48.4 tok/s.
+
+Fixed depths, the same prompts (tok/s):
+
+| Request | 1 | 2 | 3 | 4 |
+| --- | ---: | ---: | ---: | ---: |
+| short answer | 59.4 | 58.6 | 52.1 | 41.7 |
+| code | 63.5 | 57.1 | 48.4 | 38.9 |
+| file edit | 90.8 | 91.3 | 90.3 | 89.8 |
+| 18k-token context | 47.6 | 41.0 | 33.2 | 27.0 |
+| 23k-token agent prompt | 52.8 | 47.7 | 41.1 | 33.5 |
+
+A round of 1 to 4 drafts took 31.8, 40.5, 49.9 and 62.7 ms: each extra verify row costs 8 to 10 ms, most of it the
+experts it adds. File edits draft from copy windows, where depth hardly matters.
+
+### Where the time goes
+
+Stubbing one part at a time out of the 22.3 ms one-row step: routed and shared experts 9.9 ms (about 540 GB/s), KDA
+4.9 ms, sparse attention 3.5 ms (about 2.4 ms of it the indexer's small ops), hyper-connection boundaries 2.25 ms
+(90 of them, launch latency), head 0.6 ms, dense MLP 0.3 ms; with all of them stubbed, 1.8 ms remains.
+
+### Tried and rejected
+
+- Draft depth past 1 on prose and code: slower on every workload but file edits (table above). The second draft
+  chained from the MTP head's own output lands too rarely.
+- The four norms after MLA's stacked projection in one kernel: 468.6 against 477.2 us for the layer, no gain. MLX
+  already ran them concurrently, and one kernel serialized them.
+- A hyper-connection boundary in two kernels instead of three: one row 3.46 to 3.22 ms on 4 layers, but 2 rows 3.70
+  to 4.36 ms. It made verify windows slower.
+- Same-bits variants of MLX's 4-bit matvec for the big projections: about 545 GB/s against MLX's 630.
+- A multi-query sparse-attention kernel as a new serial reference (strategy C): exact across rows, but the step did
+  not move (19.90 against 19.81 ms, 8 layers at 8 rows), so changing serial's bits was not worth it.
+- More or fewer output rows a simdgroup in `qmv_rows` and the expert kernels: 4 was best.
+
+### Traps we hit
+
+- MLX 0.32.0 on a 256 GB M3 Ultra: decode fell from 38 to about 8 tok/s within three requests. The GPU sat idle at 4
+  to 6 W while the weights dropped out of wired memory. MLX 0.32.2 fixed it (57 to 58 tok/s, steady). The 512 GB
+  Studio never showed it. Use MLX 0.32.2 or later; the load-time row check passes on both versions.
+- A missing threadgroup barrier after folding `f_b` / `g_b` into the KDA kernel broke row exactness only at the
+  real 128-wide heads, not on the small test model. The real-weight tests caught it.
+- Stacking MLA's projections on the prefill path changed MLX's batched tiling and so the prefilled cache. The
+  prefill keeps the separate matrices; only the decode path stacks them. A golden-logits check caught it.
+- A knife-edge prompt: a weekday question where a float32 forward of the stored weights answers "Friday" by 1.2
+  logits and a bf16 engine can answer "Monday" through rounding. Check such differences against float32 before
+  treating them as regressions.
+
+### Exactness
+
+- Full model, M3 Ultra: drafted replies equal to `"draft": false` replies, 5 of 5 prompts, content, reasoning, tool
+  calls and token counts, in two separate runs.
+- Full model at 4,096 keys: the fused kernels' logits bit-identical to the kernels before them at 1, 2 and 4 rows;
+  on the real first 8 layers, 16 serial steps and an 8-row window identical with them on and off.
+- Real first 8 layers past 4,096 keys (sparse attention active): windows of 2, 3, 4, 8 and 16 rows equal to one-row
+  steps. Real first 6 layers: the load-time check passes at 2, 3, 4 and 8 rows.
+- Every kernel against the call the one-row path makes, `mx.array_equal`, at GLM's shapes or on its real layers:
+  the MoE block at 1 to 16 rows with tied router scores, the hyper-connection boundary at 4 streams of 4,096, the
+  router, the experts, `qmv_rows`, `qmv_quad` and the unquantized row matmuls.
+- Against float32: over 600 teacher-forced tokens the decode path's top-1 agreed 98.17% of the time with a float32
+  forward of the same stored weights.
+- The load-time check (`runtime.rows_match_serial`) turns drafting off when a multi-row forward does not reproduce
+  one-row steps on the machine it runs on.
+
+`tests/test_glm5_*.py` and `tests/test_glm_tool_calls.py` run on a small synthetic checkpoint (CPU and Metal). With
+`TF_GLM5_MODEL` pointing at the checkpoint, two more tests run on its real first layers.
+
+### Limits
+
+- Prompts are prefilled through MLX's own kernels (the prefill path), the same known limit as Flash Next and
+  Nemotron: a reply can depend on what was cached. Drafted and serial decoding from the same cache agree.
+- Prefill: about 290 to 370 tok/s cold at 17k to 23k tokens, 4 to 18% slower than oMLX cold on the same Macs. A
+  7k-token tail after a 39k-token cached prefix ran at about 162 tok/s; that path has not been tuned.
+- The system block is saved as a snapshot: a new session with a 22.7k-token system and tools block started in 0.8 s
+  after a restart, against 66 s cold.
+- GLM tool calls (`<tool_call>NAME<arg_key>...</arg_key><arg_value>...</arg_value></tool_call>`) come back as
+  OpenAI `tool_calls`, values converted by each parameter's declared type. In a streamed reply they arrive at the
+  end.
+- Measured on M3 Ultra only, one request at a time. M5 is untested.
+
+### Next
+
+- The indexer's glue in one scoring kernel and a radix select, as Flash Next does: about 1.5 to 2 ms a token, but
+  it changes the block choice's bits and needs a float32 fidelity check first.
+- The hyper-connection write-back folded into the MoE combine (exact, about 0.4 ms), and grouped verify experts.
+- A better chained draft. The CUDA engine found the MTP head agrees more often when it reads the final-normed
+  hidden row; this engine still feeds it the streams' mean before the norm, as oMLX's GLM runtime does. Worth
+  trying here.
+- A faster long-context prefill, through the decode kernels in chunks.
