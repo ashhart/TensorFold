@@ -49,6 +49,29 @@ def test_split_equals_mlx_lm_forward():
     assert bool(mx.array_equal(reference, split).item())
 
 
+def test_forward_runs_on_another_thread():
+    """The server loads the model on the main thread and decodes on its engine thread."""
+
+    import threading
+
+    if not mx.metal.is_available():
+        pytest.skip("the failure needs a GPU stream (CPU streams are shared across threads)")
+    mx.set_default_device(mx.gpu)                  # the _cpu fixture restores the device afterwards
+    model = tiny()
+    errors: list[BaseException] = []
+
+    def work():
+        try:
+            mx.eval(model(mx.array([prompt_of(6)], dtype=mx.uint32), model.make_cache()))
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    worker = threading.Thread(target=work)
+    worker.start()
+    worker.join()
+    assert not errors, errors
+
+
 @pytest.mark.parametrize("length", [5, 20])      # 20 > sliding_window: the rotating caches wrap
 def test_whole_prompt_matches_token_by_token(length):
     model = tiny()

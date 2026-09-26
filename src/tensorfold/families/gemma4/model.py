@@ -21,6 +21,12 @@ class Gemma4:
     embedding as a linear plus the final logit soft-cap, as in mlx_lm's ``gemma4_text.Model.__call__``."""
 
     def __init__(self, model: Any) -> None:
+        import mlx.core as mx
+
+        # private arrays (the full-attention layers' ProportionalRoPE ``_freqs``) are not parameters, so mlx_lm's
+        # load leaves them lazy on this thread's stream; the engine thread would fail with "There is no
+        # Stream(gpu, N) in current thread". Materialize them here.
+        mx.eval([v for _, module in model.named_modules() for v in module.values() if isinstance(v, mx.array)])
         self.model = model
         self.text = getattr(model, "language_model", model)      # gemma4.Model wraps gemma4_text.Model
         self.backbone = self.text.model
