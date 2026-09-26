@@ -93,7 +93,7 @@ drafts, which are now on by default; in-engine they reached 217 tok/s on prose a
 | | | file edit | 190 |
 | | | 18k-token context | 98.5 |
 | | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 103-115 |
-| Gemma 4 26B-A4B, 4-bit | M4 Pro, 64 GB | short answer, greedy, one step ahead | 76 (mlx_lm forward: 70) |
+| Gemma 4 26B-A4B, 4-bit | M4 Pro, 64 GB | short answer, greedy, one step ahead | 80-81 (mlx_lm forward: 70) |
 
 ## DGX Spark and other NVIDIA GPUs
 

@@ -26,16 +26,21 @@ one step ahead as the server's pipelined engine runs it):
 | fused glue only (norms, residuals, routing, stacked q/k/v and dense gate/up) | about 14.0 | |
 | plus the expert kernels | 12.65 (79.1 tok/s) | 12.34 (81.0 tok/s) |
 | plus the expert down loads issued before the reductions | 12.7 | 12.3-12.5 (80-81 tok/s) |
+| plus every load of `attn_tail` and `moe_tail` issued before their first reduction | | 11.7-11.9 (84-85 tok/s) |
 
 Through the server (`TF_GEMMA4_PIPELINE=1`, `tools/bench_openai.py`, 512 tokens, 5 reps, back to back on the
 same machine), median tok/s:
 
-| Prompt | Temperature | mlx_lm forward (`TF_GEMMA4_FUSED=0`) | fused |
-| --- | --- | --- | --- |
-| fibonacci-raw | 0 | 70.0 | 76.3 |
-| gpu-chat-no-think | 0 | 70.0 | 76.2 |
-| fibonacci-raw | 1.0 | 61.8 | 77.5 |
-| gpu-chat-no-think | 1.0 | 69.3 | 75.2 |
+| Prompt | Temperature | mlx_lm forward (`TF_GEMMA4_FUSED=0`) | fused, first cut | fused, tails fixed |
+| --- | --- | --- | --- | --- |
+| fibonacci-raw | 0 | 70.0 | 76.3 | 81.3 |
+| gpu-chat-no-think | 0 | 70.0 | 76.2 | 80.2 |
+| fibonacci-raw | 1.0 | 61.8 | 77.5 | |
+| gpu-chat-no-think | 1.0 | 69.3 | 75.2 | |
+
+The server runs about 0.6 ms a token slower than a short in-process loop: back-to-back requests keep the GPU
+hot (12.05 ms rested against 12.64 ms after a 2,500-token run, same short context), and the step grows with
+context (12.6 to 14.3 ms over 2,500 tokens, the sliding-window caches filling to 1,024 keys).
 
 The pieces (`kernels/gemma/v1/kernels.py`), per layer:
 
@@ -71,8 +76,25 @@ best of five:
 | expert down + sum | 1.37 | 268 | 196 |
 | head (in the step, with soft-cap and sampling input) | 2.0 | 415 | |
 
-Weight reads are about 10 of the 12.4 ms step; attention, RoPE and cache writes together cost 0.4 to 1.0 ms.
 The most this machine read in our runs was 254 GB/s (the head), so the practical floor is about 8.5 ms.
+
+Those rates are for independent calls, which overlap. The step is a dependent chain of about 10 kernels a
+layer, so what counts is each kernel's latency in that chain. Removing parts from the real step (medians of
+three interleaved rounds, 11.86 ms whole): the head is 1.74 ms, RoPE, the cache update and attention together
+0.2 ms, so the 30 layers take about 10.1 ms for 1.74 GB, 173 GB/s. Each matmul reads only 7 to 27 MB a layer,
+and its ramp-up and drain sit on the critical path. Dependent-chain latency per call, 30 layers of weights:
+
+| Op | us a call |
+| --- | --- |
+| trivial elementwise kernel | 9 |
+| q/k/v matmul + `qkv_norm` | 93 |
+| o_proj | 50 |
+| `attn_tail` (before / after issuing loads first) | 54 / 25 |
+| router matmul + `route` | 41 to 62 |
+| `expert_gateup` | 107 |
+| `expert_down` | 80 |
+| `moe_tail` (before / after) | 39 / 27 |
+| dense MLP (off the critical path, beside routing and experts) | 86 |
 
 ## Tried and rejected
 
@@ -81,8 +103,16 @@ The most this machine read in our runs was 254 GB/s (the head), so the practical
   before the reductions, and they change the sum order.
 - `expert_gateup` launch shapes (1 to 8 simdgroups, 1 to 8 rows each) and an unrolled K loop: within noise.
 - Handing the graph to the GPU every 0, 4, 15 or 30 layers instead of 8: within noise.
-- Folding RoPE into `qkv_norm`: RoPE, the cache update and attention together measured under 1 ms, so not
-  attempted.
+- Folding RoPE into `qkv_norm`: removing RoPE from the step saves 0.07 ms, so not attempted.
+- The dense MLP as three more expert slots (its width 2,112 is three expert widths; Nemotron folds its shared
+  expert the same way): two launches instead of five, correct to bf16, but 12.39 to 12.56 ms. The dense MLP
+  used to run beside routing; merged, it waits for the router.
+- The 8-bit router matvec and the top-8 selection in one threadgroup: same experts and bit-identical weights
+  in 600 of 600 checks, 62 to 46 us in a dependent chain, but 11.69 to 12.13 ms in the step. MLX's matvec
+  spreads over the GPU beside the dense MLP; one threadgroup does not.
+- `qkv_norm` with its norm weights loaded before the reduction: no change (many threadgroups hide the latency).
+- `MLX_MAX_OPS_PER_BUFFER=200` and `MLX_MAX_MB_PER_BUFFER=100000` (Nemotron's and Flash Next's settings):
+  within noise.
 
 ## Exactness
 
@@ -115,13 +145,18 @@ The most this machine read in our runs was 254 GB/s (the head), so the practical
   flat to rank kernels. Score the model's own answers.
 - Timing a kernel by calling it repeatedly on one layer's weights reads them from cache: 402 GB/s on a 273
   GB/s machine. Chain through all layers.
-- Single timing runs of the step drifted up to 7% between runs (12.3 to 13.2 ms). Decide with interleaved A/B runs in one process
-  and identical output hashes.
+- Single timing runs of the step drifted up to 7% between runs (12.3 to 13.2 ms). Decide with interleaved A/B
+  runs in one process and identical output hashes.
+- A kernel's latency in an isolated dependent chain did not predict the step twice: the merged dense MLP and
+  the one-threadgroup router both won alone and lost in the step, where they gave up overlap with other work.
 - The server rebuilds saved system blocks after a kernel change. A request that arrives during that rebuild
   waits (11.8 s behind a 25k-token block here), which looks like a slow first token.
 
 ## Next
 
+- The layers read 1.74 GB at 173 GB/s against about 245 possible, 2.9 ms a token. The loss is latency in the
+  per-layer chain, so it needs fewer dependent kernels a layer (one kernel per matmul and its tail, or a
+  persistent kernel over the layer), not faster matvecs.
 - `expert_gateup` from about 215 toward 240 GB/s is worth about 0.3 ms a token.
 - A multi-row fused step with a load-time row check would allow copy windows (drafting).
 - Prefill through the fused step would remove the cache dependence of prompt bits.
