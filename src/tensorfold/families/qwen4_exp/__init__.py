@@ -56,6 +56,9 @@ def load(model_dir: Path, *, mtp_drafts: int | None = None, **_: Any) -> tuple[A
     return load_runtime(Path(model_dir), drafts=mtp_drafts if has_mtp(Path(model_dir)) else 0)
 
 
+# the CUDA engine's kernels read MLX affine weights of this (bits, group size)
+CUDA_QUANTIZATION = (4, 32)
+
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
                 context: int | None = None, **options: Any):

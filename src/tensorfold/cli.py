@@ -148,6 +148,12 @@ def cmd_pull(args: argparse.Namespace) -> int:
         except ValueError:
             family = None          # a draft model, for example
         if family is not None:
+            settings = families.read_config(config)
+            readable = [b for b in families.backends_of(family)
+                        if families.quant_method(settings) in families.readable_quants(family, b)]
+            if not readable:
+                families.require_readable(family, settings, families.backends_of(family)[0])
+            _note_untested(family, repo)
             check = getattr(family.package, "check", None)
             if check is not None:
                 check(config)
@@ -197,7 +203,6 @@ def cmd_info(args: argparse.Namespace) -> int:
     config = families.read_config(directory)
     text = config.get("text_config", config)
     family = families.detect(directory)
-    bits, group = families.quantization(config)
     print(f"model_type   {family.model_type}")
     print(f"family       {family.title} ({family.module})")
     print(f"engine       {_engines(family)}")
@@ -208,8 +213,13 @@ def cmd_info(args: argparse.Namespace) -> int:
                 "vocab_size", "max_position_embeddings"):
         if key in text:
             print(f"{key:12s} {text[key]}" if len(key) <= 12 else f"{key} {text[key]}")
-    if bits is not None:
-        print(f"quantization {bits}-bit, groups of {group}")
+    print(f"quantization {families.describe_quantization(config)}")
+    readers = [b for b in families.backends_of(family)
+               if families.quant_method(config) in families.readable_quants(family, b)]
+    if readers:
+        print(f"runs on      {', '.join('NVIDIA GPUs (CUDA)' if b == 'cuda' else 'Apple Silicon (MLX)' for b in readers)}")
+    else:
+        print(f"runs on      not yet: no {family.title} engine reads these weights. {families.OWN_MODEL_HELP}")
     generation = _generation_config(directory)
     if generation:
         print(f"sampling     {generation}")
@@ -256,6 +266,19 @@ def _drafter(family: Any, choice: str) -> str:
         print(f"[tensorfold] no draft model: `tensorfold pull {repo}` once to draft with it", flush=True)
         return ""
     return str(found)
+
+
+def _note_untested(family: Any, model: str) -> None:
+    """A Hugging Face checkpoint that is not one the family is tested with runs if its format matches, with a
+    note saying so and where to go to bring up a model properly."""
+
+    from tensorfold import families, hub
+
+    tested = tuple(getattr(family.package, "MODELS", ())) + tuple(filter(None, [getattr(family.package, "DRAFTER", "")]))
+    if hub.is_repo_id(model) and model not in tested:
+        print(f"[tensorfold] note: {model} is not a checkpoint TensorFold is tested with ({', '.join(tested) or 'none'}). "
+              f"It runs when its format matches what the {family.title} kernels read: replies stay exact to serial "
+              f"decoding, speed and quality are unmeasured. {families.OWN_MODEL_HELP}", flush=True)
 
 
 def _backend(choice: str, family: Any) -> str:
@@ -319,6 +342,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     config_dir = _config_dir(args.model)
     family = families.detect(config_dir)
+    backend = _backend(args.backend, family)
+    families.require_readable(family, families.read_config(config_dir), backend)
+    _note_untested(family, args.model)
     required_files = getattr(family.package, "REQUIRED_FILES", {}).get(args.model, ())
     native_context = _model_context(config_dir)
     context = native_context if args.context is None else int(args.context)
@@ -334,7 +360,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     model_dir = hub.resolve(args.model, required_files=required_files)
     if needs_full_snapshot and check is not None:
         check(model_dir)                         # checks that need the complete index, such as an MTP head
-    if _backend(args.backend, family) == "cuda":
+    if backend == "cuda":
         return _serve_cuda(args, family, model_dir)
     for key, value in getattr(family.package, "MLX_ENV", {}).items():
         os.environ.setdefault(key, value)       # before MLX starts: it reads them once

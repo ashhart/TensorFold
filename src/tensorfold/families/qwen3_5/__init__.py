@@ -176,6 +176,9 @@ def setup(app: Any, model: Any, *, drafter: str = "", drafter_bits: int = 4, **_
     print(f"[tensorfold] drafter {loaded.path} block={loaded.block_size} bits={drafter_bits or 16}", flush=True)
 
 
+# the CUDA engine's kernels read MLX affine weights of this (bits, group size)
+CUDA_QUANTIZATION = (4, 64)
+
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, **options: Any):
     """The CUDA engine (``tensorfold serve`` on an NVIDIA GPU), set up as the recipe measured on DGX Spark.

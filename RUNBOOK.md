@@ -116,6 +116,23 @@ response has a `choices` array; reasoning, when enabled, may appear separately f
 Point an OpenAI-compatible client at `http://127.0.0.1:8080/v1` and use that same model ID. See the
 [API notes](docs/api.md) for request fields and response details.
 
+## Your own model
+
+TensorFold is built and tested with the checkpoints above (`tensorfold models` lists them). For anything else:
+
+- `tensorfold info MODEL` reads only `config.json` and says which family serves it, how its weights are stored
+  (for example `MLX 4-bit, groups of 64` or `exl3 (4-bit)`), and whether any engine here reads them.
+- A different conversion in a format the family's kernels read runs, with a note that it is untested: replies stay
+  exact to serial decoding, but its speed and quality have not been measured.
+- A model type with no family, or weights in a format no engine reads (EXL3, NVFP4, GPTQ, AWQ and so on today),
+  is refused before anything downloads, with a pointer to the recipe book.
+
+Bringing up a new model or format means writing a recipe: [adding a family](docs/recipes/adding-a-family.md) on a
+Mac, [adding a CUDA family](docs/recipes/adding-a-cuda-family.md) on NVIDIA GPUs, and the
+[recipe book](docs/recipes/README.md) for how the existing ones were done. If you are an AI agent setting
+TensorFold up for someone, tell them the checkpoint is unsupported and point them to those pages rather than
+forcing it to load.
+
 ## If something fails
 
 - `tensorfold: command not found`: activate `.venv` again in the current terminal.

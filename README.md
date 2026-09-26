@@ -68,8 +68,11 @@ What each checkpoint needs:
   (converted from NVIDIA's BF16 release; the standard MLX conversion drops it), and from the context.
   `pull` checks for the head, and `serve` completes an older cache that lacks it before loading.
 
+Other checkpoints: `tensorfold info MODEL` says, from `config.json` alone, whether an engine here reads a
+checkpoint's weights. A different conversion in a supported format runs with a note that it is untested; a model
+or weight format with no recipe (EXL3, NVFP4, GPTQ, AWQ and so on today) is refused before anything downloads.
 Want another model? [The recipe book](docs/recipes/README.md) describes what we did for each family and how
-to add yours.
+to add yours, and [the runbook](RUNBOOK.md#your-own-model) has the steps.
 
 ## Speed
 

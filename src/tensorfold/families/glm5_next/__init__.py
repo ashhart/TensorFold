@@ -35,6 +35,9 @@ def check(model_dir: str | Path) -> None:
           "and serve with --tp 2 on both (docs/recipes/glm-5.3-flash.md)", flush=True)
 
 
+# the CUDA engine's kernels read MLX affine weights of this (bits, group size)
+CUDA_QUANTIZATION = (4, 64)
+
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None, **options: Any):
     """The CUDA engine, set up as the recipe measured on two DGX Sparks.
