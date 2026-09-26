@@ -42,6 +42,9 @@ test = ["pytest>=8"]
 [project.scripts]
 tensorfold = "tensorfold.cli:main"
 
+[tool.setuptools]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
