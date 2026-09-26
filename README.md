@@ -70,7 +70,8 @@ What each checkpoint needs:
 
 Other checkpoints: `tensorfold info MODEL` says, from `config.json` alone, whether an engine here reads a
 checkpoint's weights. A different conversion in a supported format runs with a note that it is untested; a model
-or weight format with no recipe (EXL3, NVFP4, GPTQ, AWQ and so on today) is refused before anything downloads.
+or weight format with no recipe (NVFP4, GPTQ, AWQ and so on today) is refused before anything downloads. EXL3 is
+read for GLM-5.3-Flash only, as an experiment (below).
 Want another model? [The recipe book](docs/recipes/README.md) describes what we did for each family and how
 to add yours, and [the runbook](RUNBOOK.md#your-own-model) has the steps.
 
@@ -134,11 +135,16 @@ greedy. Each TensorFold number is byte-identical to its own serial decoding.
 | Qwen3.8 Flash Next | 1 | 68.3 vs 42.4 (1.6x) | 58.5 vs 33.2 (1.8x) | 73.1 vs 40.9 (1.8x) | 60.2 vs 37.6 (1.6x) |
 | Qwen3.8 Flash Next | 2 | 103.8 vs 46.4 (2.2x) | 84.0 vs 41.4 (2.0x) | 96.2 vs 55.2 (1.7x) | 100.2 vs 50.7 (2.0x) |
 | GLM-5.3-Flash | 2 | 49.4 vs 24.5 (2.0x) | 43.3 vs 24.3 (1.8x) | 66.3 vs 32.2 (2.1x) | 45.2 vs 24.7 (1.8x) |
+| GLM-5.3-Flash, Mia-AiLab's EXL3 weights (experimental) | 2 | 36.4 vs 24.5 (1.5x) | 29.7 vs 24.3 (1.2x) | 43.8 vs 32.2 (1.4x) | 32.9 vs 24.7 (1.3x) |
 
 GLM-5.3-Flash needs two Sparks. For each greedy request it measures its MTP head against a DFlash2 draft model
 and keeps whichever commits more tokens per millisecond ([its recipe](docs/recipes/glm-5.3-flash.md)). That draft
 model, `incoai/GLM-5.3-Flash-DFlash2`, is licensed for non-commercial use only (CC BY-NC-ND 4.0); without it GLM
-drafts with its MTP head alone. What we did on
+drafts with its MTP head alone. vLLM's GLM numbers come from Mia-AiLab's recipe, which serves the EXL3 checkpoint
+`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`. TensorFold now reads that checkpoint too, as an experiment; the table's
+last row compares both engines on those same weights. It is slower than the MLX checkpoint because only its
+routed experts are 4-bit, so each Spark reads 10.7 GB a token against 5.0
+([its recipe](docs/recipes/glm-5.3-flash.md#mia-ailabs-exl3-checkpoint-experimental)). What we did on
 CUDA, and how to bring up another model, is in [the CUDA recipe book](docs/recipes/cuda.md).
 
 ## Exact means byte-identical
@@ -170,7 +176,13 @@ tensorfold serve MODEL [options]    # MODEL: a Hugging Face repo id or a model d
 tensorfold pull REPO [REPO ...]      # download models or draft models
 tensorfold models                   # families and the checkpoints they are tested with
 tensorfold info MODEL               # which family serves a model (reads its config.json only)
+tensorfold update                   # install the newest release from GitHub (--check: only say if there is one)
 ```
+
+As it starts, `serve` asks GitHub whether a newer release exists (one request to api.github.com a day, with nothing
+about you or your models in it) and prints a line if there is one; the server starts either way. `tensorfold
+update` installs it with the same Python's pip and leaves MLX and PyTorch as they are unless the release needs
+other versions. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` switches the check off.
 
 | Option | Default | What it does |
 | --- | --- | --- |
@@ -187,6 +199,7 @@ tensorfold info MODEL               # which family serves a model (reads its con
 | `--no-drafts` | off | one token a round: the serial reference |
 | `--drafter` | `auto` | the family's draft model once pulled; a repo id or directory; or `none` |
 | `--mtp-drafts N` | 3 (6 on CUDA) | most MTP drafts a round (Qwen3.8 Flash Next; on CUDA the chain also stops under 30% confidence); 0 turns MTP drafts off |
+| `--no-update-check` | off | don't ask GitHub for a newer release at start |
 | `--prompt-cache-gib` | an eighth of RAM, at most 16 | memory for cached conversation prefixes |
 | `--snapshot-dir` | `~/.cache/tensorfold/prefix-snapshots` | system blocks and conversations kept across restarts |
 

@@ -226,10 +226,95 @@ def _reduce(PART, OUT, total, SK: tl.constexpr, BLOCK: tl.constexpr, F32: tl.con
         tl.store(OUT + offs, acc.to(tl.bfloat16), mask=ok)
 
 
-def matmul(x: torch.Tensor, q: Q4, xs: torch.Tensor | None = None, *, out: torch.Tensor | None = None,
-           f32: bool = False, part: torch.Tensor | None = None) -> torch.Tensor:
-    """x (M, K) bf16 (rows may be strided) @ q.T -> (M, N) bf16, or unrounded fp32 sums with ``f32``."""
+@dataclass
+class B16:
+    """A BF16 matrix [n, k] as the checkpoint stores it (EXL3 checkpoints keep every non-expert weight in BF16)."""
 
+    weight: torch.Tensor      # [n, k] bf16, contiguous
+    n: int
+    k: int
+
+    def nbytes(self) -> int:
+        return self.weight.numel() * self.weight.element_size()
+
+
+def make_b16(weight: torch.Tensor) -> B16:
+    w = weight.to(torch.bfloat16).contiguous()
+    return B16(w, int(w.shape[0]), int(w.shape[1]))
+
+
+def quantize4(w: torch.Tensor, chunk: int = 8192) -> Q4:
+    """bf16 (N, K) -> MLX-style affine 4-bit in groups of 64 along K (q = round((w - min) / scale)), tiled: for
+    weights that only draft (the DFlash2 drafter, a copy of a BF16 head for draft steps), never for verifying."""
+
+    n, k = w.shape
+    words = torch.empty((n, k // 8), dtype=torch.int32, device=w.device)
+    scales = torch.empty((n, k // 64), dtype=torch.bfloat16, device=w.device)
+    biases = torch.empty_like(scales)
+    for r in range(0, n, chunk):
+        g = w[r:r + chunk].float().view(-1, k // 64, 64)
+        lo, hi = g.amin(-1), g.amax(-1)
+        scale = ((hi - lo) / 15).clamp_min(1e-8).to(torch.bfloat16)
+        bias = lo.to(torch.bfloat16)
+        q = torch.round((g - bias.float()[..., None]) / scale.float()[..., None]).clamp(0, 15).to(torch.int32)
+        q = q.view(-1, k // 8, 8)
+        part = torch.zeros(q.shape[:2], dtype=torch.int32, device=w.device)
+        for j in range(8):
+            part |= q[..., j] << (4 * j)
+        words[r:r + chunk], scales[r:r + chunk], biases[r:r + chunk] = part, scale, bias
+    return make_q4(words, scales.contiguous(), biases.contiguous())
+
+
+def stack_b16(parts: list[torch.Tensor]) -> B16:
+    """Rows of several BF16 matrices with the same K, stacked in order."""
+
+    return make_b16(torch.cat([p.to(torch.bfloat16) for p in parts]))
+
+
+# BF16 matmuls: columns and K per step; the K slices come from ``split_k`` as for Q4 (fixed by the shape)
+B16_BN, B16_BK = 64, 64
+
+
+@triton.jit
+def _bmm(X, W, OUT, PART, M, x_stride, N: tl.constexpr, K: tl.constexpr, SK: tl.constexpr, BM: tl.constexpr,
+         BLOCK_N: tl.constexpr, BK: tl.constexpr, F32: tl.constexpr):
+    """x[BM rows] @ W[BLOCK_N rows].T over this program's K slice, K in order, fp32 sums (tensor cores, bf16
+    inputs): a row's sums never depend on the other rows."""
+
+    PER: tl.constexpr = K // SK
+    pid_n = tl.program_id(1)
+    pid_s = tl.program_id(2)
+    rm = tl.program_id(0) * BM + tl.arange(0, BM)
+    rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rk = tl.arange(0, BK)
+    m_ok = rm < M
+    n_ok = rn < N
+    acc = tl.zeros((BM, BLOCK_N), dtype=tl.float32)
+    for k0 in range(pid_s * PER, pid_s * PER + PER, BK):
+        x = tl.load(X + rm[:, None] * x_stride + (k0 + rk)[None, :], mask=m_ok[:, None], other=0.0)
+        w = tl.load(W + rn[:, None].to(tl.int64) * K + (k0 + rk)[None, :], mask=n_ok[:, None], other=0.0)
+        acc = acc + tl.dot(x, tl.trans(w))
+    out_mask = m_ok[:, None] & n_ok[None, :]
+    if SK == 1:
+        if F32:
+            tl.store(OUT + rm[:, None] * N + rn[None, :], acc, mask=out_mask)
+        else:
+            tl.store(OUT + rm[:, None] * N + rn[None, :], acc.to(tl.bfloat16), mask=out_mask)
+    else:
+        tl.store(PART + (pid_s * M + rm[:, None]) * N + rn[None, :], acc, mask=out_mask)
+
+
+# (warps, stages) for the BF16 matmul by row bucket: no choice changes bits
+B16_CONFIG = {16: (4, 3), 32: (4, 3), 64: (4, 2), 128: (8, 2)}
+
+
+def matmul(x: torch.Tensor, q: Q4 | B16, xs: torch.Tensor | None = None, *, out: torch.Tensor | None = None,
+           f32: bool = False, part: torch.Tensor | None = None) -> torch.Tensor:
+    """x (M, K) bf16 (rows may be strided) @ q.T -> (M, N) bf16, or unrounded fp32 sums with ``f32``. ``q``: a
+    4-bit matrix, or a BF16 one (``xs`` is then unused)."""
+
+    if isinstance(q, B16):
+        return _matmul_b16(x, q, out=out, f32=f32, part=part)
     m, k = x.shape
     if k != q.k or x.stride(1) != 1 or x.dtype != torch.bfloat16:
         raise ValueError(f"matmul: x {tuple(x.shape)} {x.dtype} does not match K={q.k}")
@@ -251,6 +336,42 @@ def matmul(x: torch.Tensor, q: Q4, xs: torch.Tensor | None = None, *, out: torch
     grid = (triton.cdiv(m, bm), triton.cdiv(q.n, BN), sk)
     _qmm[grid](x, xs, q.weight, q.scales, q.biases, out, part if sk > 1 else out, m, x.stride(0),
                N=q.n, K=k, SK=sk, BM=bm, BLOCK_N=BN, GPI=gpi, F32=f32, num_warps=warps, num_stages=stages)
+    if sk > 1:
+        total = m * q.n
+        _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, F32=f32, num_warps=4)
+    return out
+
+
+def b16_split_k(n: int, k: int) -> int:
+    """K slices of a BF16 matmul: like ``split_k``, fixed by the shape, in units of B16_BK."""
+
+    tiles = -(-n // B16_BN)
+    steps = k // B16_BK
+    sk = 1
+    while sk < 8 and tiles * sk < SPLIT_TARGET and steps % (sk * 2) == 0 and steps // (sk * 2) >= 4:
+        sk *= 2
+    return sk
+
+
+def _matmul_b16(x: torch.Tensor, q: B16, *, out: torch.Tensor | None, f32: bool,
+                part: torch.Tensor | None) -> torch.Tensor:
+    m, k = x.shape
+    if k != q.k or x.stride(1) != 1 or x.dtype != torch.bfloat16 or k % B16_BK:
+        raise ValueError(f"matmul: x {tuple(x.shape)} {x.dtype} does not match K={q.k}")
+    bm = bucket(m)
+    warps, stages = B16_CONFIG[bm]
+    sk = b16_split_k(q.n, q.k)
+    if out is None:
+        out = torch.empty((m, q.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
+    elif out.shape != (m, q.n) or not out.is_contiguous():
+        raise ValueError(f"matmul: out {tuple(out.shape)} must be a contiguous ({m}, {q.n})")
+    if sk > 1:
+        need = sk * m * q.n
+        if part is None or part.numel() < need:
+            part = torch.empty((need,), dtype=torch.float32, device=x.device)
+    grid = (triton.cdiv(m, bm), triton.cdiv(q.n, B16_BN), sk)
+    _bmm[grid](x, q.weight, out, part if sk > 1 else out, m, x.stride(0), N=q.n, K=k, SK=sk, BM=bm,
+               BLOCK_N=B16_BN, BK=B16_BK, F32=f32, num_warps=warps, num_stages=stages)
     if sk > 1:
         total = m * q.n
         _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, F32=f32, num_warps=4)

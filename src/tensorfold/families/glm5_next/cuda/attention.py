@@ -12,6 +12,8 @@ bound for a captured graph) never changes a result.
 
 from __future__ import annotations
 
+import math
+
 import torch
 import triton
 import triton.language as tl
@@ -133,4 +135,7 @@ def kv_write(kn: torch.Tensor, vn: torch.Tensor, k_cache: torch.Tensor, v_cache:
 
     R = kn.shape[0]
     W = kn.shape[1] * kn.shape[2]
-    _kv_write[(R, W // 1024)](kn, vn, k_cache, v_cache, pos, W=W, BLOCK=1024, num_warps=4)
+    if vn.shape[1] * vn.shape[2] != W:
+        raise ValueError("kv_write: key and value rows must have the same width")
+    block = math.gcd(1024, W)            # 1024 for the model; narrower rows (tests) get every column written
+    _kv_write[(R, W // block)](kn, vn, k_cache, v_cache, pos, W=W, BLOCK=block, num_warps=4)

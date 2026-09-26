@@ -116,6 +116,19 @@ response has a `choices` array; reasoning, when enabled, may appear separately f
 Point an OpenAI-compatible client at `http://127.0.0.1:8080/v1` and use that same model ID. See the
 [API notes](docs/api.md) for request fields and response details.
 
+## Updating
+
+`tensorfold serve` prints a line when a newer release is out. To install it:
+
+```bash
+tensorfold update            # or: tensorfold update --check, to only look
+```
+
+Restart the server afterwards. On a DGX Spark, a container started with `docker run --rm` loses anything
+installed in it when it stops, so either run `pip install git+https://github.com/ashhart/TensorFold.git` again
+in each new container, or keep a named container (`docker run --name tensorfold ...`, then `docker start -ai
+tensorfold`) and run `tensorfold update` inside it.
+
 ## Your own model
 
 TensorFold is built and tested with the checkpoints above (`tensorfold models` lists them). For anything else:
@@ -124,8 +137,8 @@ TensorFold is built and tested with the checkpoints above (`tensorfold models` l
   (for example `MLX 4-bit, groups of 64` or `exl3 (4-bit)`), and whether any engine here reads them.
 - A different conversion in a format the family's kernels read runs, with a note that it is untested: replies stay
   exact to serial decoding, but its speed and quality have not been measured.
-- A model type with no family, or weights in a format no engine reads (EXL3, NVFP4, GPTQ, AWQ and so on today),
-  is refused before anything downloads, with a pointer to the recipe book.
+- A model type with no family, or weights in a format no engine reads (NVFP4, GPTQ, AWQ and so on today, and EXL3
+  for anything but GLM-5.3-Flash), is refused before anything downloads, with a pointer to the recipe book.
 
 Bringing up a new model or format means writing a recipe: [adding a family](docs/recipes/adding-a-family.md) on a
 Mac, [adding a CUDA family](docs/recipes/adding-a-cuda-family.md) on NVIDIA GPUs, and the
@@ -144,7 +157,8 @@ forcing it to load.
 ## DGX Spark
 
 TensorFold's CUDA engine serves Qwen3.8-27B (one or two Sparks), Qwen3.8 Flash Next (one or two Sparks) and
-GLM-5.3-Flash (two Sparks). Nemotron 3.5 Lightning has no CUDA engine yet.
+GLM-5.3-Flash (two Sparks; Mia-AiLab's EXL3 checkpoint of it as an experiment). Nemotron 3.5 Lightning has no
+CUDA engine yet.
 
 1. Check the GPU and start NVIDIA's PyTorch container, with the Hugging Face cache mounted so downloads
    survive the container:

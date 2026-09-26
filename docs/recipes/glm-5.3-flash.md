@@ -4,7 +4,8 @@ GLM-5.3-Flash runs on TensorFold's CUDA engine only, tensor parallel over two DG
 is 182 GB and one Spark has 128 GB. Measured on two Sparks (GB10, 128 GB unified memory each) linked by their
 200 Gb/s ports, in NVIDIA's `pytorch:26.07-py3` container. Package: `src/tensorfold/families/glm5_next/`
 (`cuda/` holds the engine). Checkpoint: `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` (MLX affine 4-bit, groups of 64,
-with the MTP layer). Draft model: `incoai/GLM-5.3-Flash-DFlash2`.
+with the MTP layer). Draft model: `incoai/GLM-5.3-Flash-DFlash2`. Mia-AiLab's EXL3 checkpoint also runs, as an
+experiment ([below](#mia-ailabs-exl3-checkpoint-experimental)).
 
 ## Run it
 
@@ -141,6 +142,67 @@ Slow runs pulled down two greedy-chat medians here: `c3:0.35` lost three of its 
 reached 44.4 to 44.8) and `fc5:0.3` two (42.5 to 42.7). The default is the best or within 1.5% of it in three
 columns. On sampled chat `c3:0.35` beat it by 4% in this session and trailed it in two earlier ones (41.1 and 42.3
 against 43.2), because its seed 1237 run swung between 39.6 and 45.2 from session to session.
+
+## Mia-AiLab's EXL3 checkpoint (experimental)
+
+`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` is the checkpoint vLLM serves in the baseline above. Its routed experts
+are stored in ExLlamaV3's EXL3 format (a 4-bit trellis with the "mcg" codebook). Every other weight is BF16: the
+attention, the shared expert, the dense layers and the head. It is 164 GB on disk against the MLX checkpoint's
+182 GB, but a token reads more of it: about 10.7 GB on each Spark against 5.0, because every token reads all the
+BF16 weights and only 8 of the 288 experts. Reading it is experimental. It passes the same exactness checks as the
+MLX checkpoint, but it has had one validation session, and speed work on it has only started.
+
+Pull it on both Sparks and start it the same way:
+
+```bash
+tensorfold pull Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
+tensorfold serve Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw --tp 2 --rank 1 --master 192.168.100.1
+tensorfold serve Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0 --port 8080
+```
+
+Each rank holds 88.6 GB. Through this package, with an empty kernel cache, both ranks were ready 297 s after
+starting. With the DFlash2 draft model pulled on both Sparks, the default policy (`auto`) drafts with DFlash2
+(`fc5:0.3`) for every request, because on these weights that policy was the best or tied in all four cells.
+Without the draft model, `auto` works as it does on the MLX checkpoint.
+
+Measured as in the table above, against vLLM serving the same checkpoint through Mia-AiLab's recipe. TensorFold ran
+from this package, installed with pip in NVIDIA's container on both Sparks, on 26 September (20:01 to 20:02 UTC):
+
+| | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
+| --- | ---: | ---: | ---: | ---: |
+| vLLM, MTP=3 | 24.5 | 24.3 | 32.2 | 24.7 |
+| TensorFold, EXL3 checkpoint, `auto` | 36.4 | 29.7 | 43.8 | 32.9 |
+| TensorFold / vLLM MTP=3 | 1.48x | 1.22x | 1.36x | 1.33x |
+
+What it took:
+
+- `cuda/exl3.py` defines the format and a reference decoder. It matched ExLlamaV3's own dequantization bit for
+  bit on 12 of 12 expert matrices from the checkpoint.
+- `cuda/exl3.cu` decodes each 16x16 tile of the trellis straight into tensor-core fragments and runs the
+  Hadamard rotations around it as warp butterflies in fp32. A layer's routed experts read at 208 to 220 GB/s
+  at 1 to 8 rows; ExLlamaV3's own kernel reads the same experts at 127 to 158 GB/s on GB10. Each row's result
+  is bit-identical at any window width.
+- The other weights run through a row-invariant BF16 matmul.
+- Draft steps use a 4-bit copy of the BF16 head, while verification keeps the BF16 head, so replies do not
+  change. An MTP draft went from 4.3 to 2.4 ms and a DFlash2 block from 5.2 to 3.3 ms.
+
+Exactness on the full model across both Sparks:
+
+- In the engine, 20 of 20 drafted replies equal to serial decoding: `auto`, `a:0.6:0.85`, `c3:0.35`, `fc5:0.3` and
+  `2`, on both prompts, greedy and seed 1234.
+- Through this package's server: 12 of 12 replies of the default policy equal to serial decoding by token-id
+  SHA-256 (both benchmark prompts, greedy and seeds 1234 to 1238); 9 of 9 drafted replies equal to the same
+  requests sent with `"draft": false`; prompts resumed from a kept reply or prompt equal to fresh prefills.
+- `tests/cuda/test_glm_exl3.py` checks the codebook and tile order, the decoder bit by bit, that each layer's
+  two-rank split adds up to the whole, and that the BF16 matmul and the expert kernel keep every row independent
+  of the others and match their references. `tests/cuda/test_glm_engine.py` runs a synthetic EXL3 checkpoint
+  through the engine: drafted replies equal serial ones, and resumed prompts equal fresh prefills.
+
+A verify window takes about 57 ms at 1 row and 91 ms at 8, against 29 and 69 ms on the MLX checkpoint; the BF16
+weights are most of the difference. The next steps are storing the BF16 weights losslessly in fewer bits, tuning
+the BF16 matmul, and a drafter that gets more tokens right a round. Not checked on this checkpoint: contexts past
+2,051 tokens. Other EXL3 checkpoints are refused: the engine reads 4-bit mcg-codebook routed experts with BF16
+elsewhere, and nothing else.
 
 ## Slow runs on GB10
 

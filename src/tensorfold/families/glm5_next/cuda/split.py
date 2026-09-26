@@ -51,15 +51,27 @@ REP = (
     r"\.self_attn\.indexer\.", r"\.self_attn\.(q_a_proj|kv_a_proj_with_mqa)\.", r"\.self_attn\.(f_a|g_a)_proj\.",
     r"\.self_attn\.o_norm\.weight$", r"\.(eh_proj)\.", r"\.(enorm|hnorm)\.weight$", r"\.shared_head\.norm\.weight$",
 )
-DTYPE_BYTES = {"U32": 4, "I32": 4, "F32": 4, "BF16": 2, "F16": 2, "U8": 1, "I8": 1, "I64": 8, "F64": 8}
+DTYPE_BYTES = {"U32": 4, "I32": 4, "F32": 4, "BF16": 2, "F16": 2, "I16": 2, "U16": 2, "U8": 1, "I8": 1, "I64": 8,
+               "F64": 8}
 # the files a rank folder needs besides its weights (the tokenizer, chat template and configs)
 SMALL = ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
          "processor_config.json", "model.safetensors.index.json")
 
 
+# EXL3 experts (``exl3.py``): trellis [K/16, N/16, 64], suh [K], svh [N], mcg. gate/up split by outputs (tile
+# columns, svh), down by inputs (tile rows, suh); the rest of each is replicated.
+EXL3_EXPERT = re.compile(r"\.mlp\.experts\.\d+\.(gate|up|down)_proj\.(trellis|suh|svh|mcg)$")
+EXL3_RULES = {("gate", "trellis"): "dim1", ("gate", "suh"): "rep", ("gate", "svh"): "row",
+              ("down", "trellis"): "row", ("down", "suh"): "row", ("down", "svh"): "rep"}
+
+
 def rule(name: str) -> str:
     if name.startswith("model.visual."):
         return "drop"
+    m = EXL3_EXPERT.search(name)
+    if m:
+        proj, part = m.groups()
+        return "rep" if part == "mcg" else EXL3_RULES[("gate" if proj == "up" else proj, part)]
     hits = [kind for kind, pats in (("row", ROW), ("col", COL), ("rep", REP)) if any(re.search(p, name) for p in pats)]
     if len(hits) != 1:
         raise ValueError(f"{name}: split rule is ambiguous or missing ({hits})")
@@ -92,6 +104,14 @@ def split_bytes(raw: np.ndarray, shape: list[int], itemsize: int, kind: str, ran
         half = shape[1] // 2
         part = np.ascontiguousarray(view[:, rank * half * itemsize:(rank + 1) * half * itemsize])
         return part.reshape(-1), [shape[0], half]
+    if kind == "dim1":                                   # the second axis of a 2-D or higher tensor
+        if len(shape) < 2 or shape[1] % 2:
+            raise ValueError(f"split of the second axis needs an even second dim, got {shape}")
+        inner = int(np.prod(shape[2:])) * itemsize
+        view = raw.reshape(shape[0], shape[1] * inner)
+        half = shape[1] // 2
+        part = np.ascontiguousarray(view[:, rank * half * inner:(rank + 1) * half * inner])
+        return part.reshape(-1), [shape[0], half] + list(shape[2:])
     raise ValueError(kind)
 
 
@@ -149,8 +169,8 @@ class RankReader:
         itemsize = DTYPE_BYTES[info["dtype"]]
         data, shape = split_bytes(self.maps[file][base + a:base + b], info["shape"], itemsize, kind, self.rank)
         dtype = {"U32": torch.uint32, "I32": torch.int32, "F32": torch.float32, "BF16": torch.bfloat16,
-                 "F16": torch.float16, "U8": torch.uint8, "I8": torch.int8, "I64": torch.int64,
-                 "F64": torch.float64}[info["dtype"]]
+                 "F16": torch.float16, "I16": torch.int16, "U16": torch.uint16, "U8": torch.uint8,
+                 "I8": torch.int8, "I64": torch.int64, "F64": torch.float64}[info["dtype"]]
         return torch.from_numpy(np.array(data, copy=True)).view(dtype).reshape(shape)
 
 
@@ -180,7 +200,7 @@ def split_file(src: str | Path, out: str | Path, rank: int) -> dict:
     metadata = header.pop("__metadata__", None)
     mm = np.memmap(src, dtype=np.uint8, mode="r")
     stem = os.path.basename(str(src)).replace(".safetensors", "")
-    summary = {"rep": 0, "row": 0, "col": 0, "drop": 0}
+    summary = {"rep": 0, "row": 0, "col": 0, "dim1": 0, "drop": 0}
     part = []
     for name in sorted(header, key=lambda k: header[k]["data_offsets"][0]):
         info = header[name]

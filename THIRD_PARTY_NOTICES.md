@@ -45,6 +45,10 @@ kernels are written for TensorFold. What they follow:
   Apache-2.0), with its own kernels; no code from it is included. The hidden states GLM's DFlash2 reads and
   its thinking-off chat rendering were checked against Mia-AiLab's GLM-5.3-Flash DGX Spark recipe; no code from
   that recipe is included either.
+- GLM-5.3-Flash's EXL3 support (`families/glm5_next/cuda/exl3.py`, `exl3.cu`, `exl3_mm.py`) reads the EXL3
+  format of [ExLlamaV3](https://github.com/turboderp-org/exllamav3) (MIT License, Copyright (c) 2025 Turboderp,
+  text below): its trellis layout, its "mcg" codebook and its tensor-core fragment order. The decoder and kernels
+  are written for TensorFold and checked bit for bit against ExLlamaV3's dequantization.
 
 ## Vendored code
 

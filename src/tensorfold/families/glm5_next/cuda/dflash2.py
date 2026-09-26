@@ -154,19 +154,9 @@ def _dconv(x: torch.Tensor, dyn: torch.Tensor, base: torch.Tensor, branch: int, 
 
 
 def _quantize4(w: torch.Tensor) -> qmm.Q4:
-    """bf16 (N, K) -> MLX-style affine 4-bit in groups of 64 along K (q = round((w - min) / scale)), tiled."""
+    """bf16 (N, K) -> MLX-style affine 4-bit in groups of 64 along K, tiled (``qmm.quantize4``)."""
 
-    n, k = w.shape
-    g = w.float().view(n, k // 64, 64)
-    lo, hi = g.amin(-1), g.amax(-1)
-    scale = ((hi - lo) / 15).clamp_min(1e-8).to(torch.bfloat16)
-    bias = lo.to(torch.bfloat16)
-    q = torch.round((g - bias.float()[..., None]) / scale.float()[..., None]).clamp(0, 15).to(torch.int32)
-    q = q.view(n, k // 8, 8)
-    words = torch.zeros((n, k // 8), dtype=torch.int32, device=w.device)
-    for j in range(8):
-        words |= q[..., j] << (4 * j)
-    return qmm.make_q4(words, scale.contiguous(), bias.contiguous())
+    return qmm.quantize4(w)
 
 
 def _mm(x: torch.Tensor, w: qmm.Q4, xs: torch.Tensor | None = None, *, f32: bool = False) -> torch.Tensor:
@@ -395,7 +385,7 @@ class Drafter:
         for i in range(len(self.layers)):
             x = self._layer(i, x, cos, sin, idx)
         h, hs = self._norm(x[1:], self.norm)
-        logits = _mm(h, self.w.head, hs)
+        logits = _mm(h, self.w.draft_head if self.w.draft_head is not None else self.w.head, hs)
         vals, local = torch.topk(logits.float(), self.top_k, dim=-1)
         gids = (local + self.w.vocab_offset).to(torch.int32)
         packed = torch.cat([vals, gids.view(torch.float32)], dim=1).contiguous()

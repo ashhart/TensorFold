@@ -3,9 +3,10 @@ DGX Sparks.
 
 45 decoder layers over a hidden size of 4,096: 34 of Kimi delta attention and 11 of DeepSeek sparse attention
 (MLA with an indexer), 288 routed experts (top 8) plus a shared expert, four residual streams mixed by
-hyper-connections, a 154,880-token vocabulary and an MTP layer. The 4-bit checkpoint is 182 GB, so each Spark
-holds half of every layer (``cuda/``). Drafts come from the checkpoint's MTP head and, when it has been pulled on
-both machines, from the DFlash2 draft model.
+hyper-connections, a 154,880-token vocabulary and an MTP layer. The MLX 4-bit checkpoint is 182 GB and Mia's
+EXL3 one (routed experts in ExLlamaV3's 4-bit trellis format, the rest in BF16, ``cuda/exl3.py``) 164 GB, so each
+Spark holds half of every layer (``cuda/``). Drafts come from the checkpoint's MTP head and, when it has been
+pulled on both machines, from the DFlash2 draft model.
 
 There is no MLX engine for this family (no ``load``), so ``tensorfold serve`` refuses the MLX backend for it.
 Recipe and measurements: docs/recipes/glm-5.3-flash.md.
@@ -18,25 +19,41 @@ from typing import Any
 
 MODEL_TYPES = ("glm5_next",)
 TITLE = "GLM-5.3-Flash"
-MODELS = ("Vontra/GLM-5.3-Flash-MLX-4bit-MTP",)
+MODELS = ("Vontra/GLM-5.3-Flash-MLX-4bit-MTP", "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw")
 DRAFTER = "incoai/GLM-5.3-Flash-DFlash2"
+# the storage formats the CUDA engine reads: MLX affine 4-bit, and EXL3 routed experts with BF16 elsewhere
+QUANT_METHODS = {"cuda": ("mlx", "exl3")}
+# the EXL3 variant the kernels read (4-bit trellis, the "mcg" codebook, routed experts only)
+EXL3_VARIANT = {"bits": 4, "codebook": "mcg", "scope": "glm53_routed_experts_only"}
 
 
 def check(model_dir: str | Path) -> None:
-    """The engine reads MLX affine 4-bit weights in groups of 64 and runs on two GPUs."""
+    """The engine reads MLX affine 4-bit weights in groups of 64, or Mia's EXL3 layout (4-bit mcg trellis routed
+    experts, BF16 elsewhere), and runs on two GPUs."""
 
-    from tensorfold.families import quantization, read_config
+    from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quant_method, quantization, read_config
 
-    bits, group = quantization(read_config(model_dir))
-    if (bits, group) != (4, 64):
-        raise ValueError(f"GLM-5.3-Flash's CUDA engine reads 4-bit weights in groups of 64 ({MODELS[0]}), "
-                         f"this checkpoint has {bits}-bit, groups of {group}")
+    config = read_config(model_dir)
+    method = quant_method(config)
+    if method == "exl3":
+        found = config.get("quantization_config") or config.get("quantization") or {}
+        got = {k: found.get(k) for k in EXL3_VARIANT}
+        if {k: (int(v) if k == "bits" and v is not None else v) for k, v in got.items()} != EXL3_VARIANT:
+            raise ValueError(f"GLM-5.3-Flash's CUDA engine reads EXL3 checkpoints with 4-bit mcg-codebook routed "
+                             f"experts and BF16 elsewhere ({MODELS[1]}); this one has "
+                             + ", ".join(f"{k} {v}" for k, v in got.items()) + f". {OWN_MODEL_HELP}")
+        print("[tensorfold] EXL3 support is experimental: replies are exact, but the MLX checkpoint "
+              f"({MODELS[0]}) is tested more and runs faster (docs/recipes/glm-5.3-flash.md)", flush=True)
+    elif quantization(config) != (4, 64):
+        raise ValueError(f"GLM-5.3-Flash's CUDA engine reads MLX 4-bit weights in groups of 64 ({MODELS[0]}) or "
+                         f"EXL3 ({MODELS[1]}); this checkpoint has {describe_quantization(config)}. {OWN_MODEL_HELP}")
     print("[tensorfold] GLM-5.3-Flash runs on two NVIDIA GPUs with 128 GB each (two DGX Sparks): pull it on both "
           "and serve with --tp 2 on both (docs/recipes/glm-5.3-flash.md)", flush=True)
 
 
-# the CUDA engine's kernels read MLX affine weights of this (bits, group size)
+# the CUDA engine's kernels read MLX affine weights of this (bits, group size); EXL3 checkpoints are checked above
 CUDA_QUANTIZATION = (4, 64)
+
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None, **options: Any):

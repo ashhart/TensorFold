@@ -22,7 +22,7 @@ from typing import Any
 
 from tensorfold import __version__
 
-COMMANDS = ("serve", "pull", "models", "info")
+COMMANDS = ("serve", "pull", "models", "info", "update")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -77,6 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
 
+    speed.add_argument("--no-update-check", action="store_true",
+                       help="don't ask GitHub whether a newer release exists (also TENSORFOLD_NO_UPDATE_CHECK=1)")
+
     cuda = serve.add_argument_group("NVIDIA GPUs (DGX Spark)")
     cuda.add_argument("--backend", choices=("auto", "mlx", "cuda"), default="auto",
                       help="auto: MLX on macOS, CUDA elsewhere")
@@ -94,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     models = commands.add_parser("models", help="list the model families and the checkpoints they are tested with")
     models.set_defaults(func=cmd_models)
+
+    update = commands.add_parser("update", help="install the newest TensorFold release from GitHub")
+    update.add_argument("--check", action="store_true", help="only say whether a newer release exists")
+    update.add_argument("--force", action="store_true", help="reinstall the newest release even when it is current")
+    update.set_defaults(func=cmd_update)
 
     info = commands.add_parser("info", help="show which family serves a model (reads its config.json only)")
     info.add_argument("model", help="a Hugging Face repo id or a model directory")
@@ -166,6 +174,12 @@ def cmd_pull(args: argparse.Namespace) -> int:
         if required_files:
             print(f"[tensorfold] required model files ready: {', '.join(required_files)}")
     return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    from tensorfold import update
+
+    return update.update(check_only=bool(args.check), force=bool(args.force))
 
 
 def cmd_models(args: argparse.Namespace) -> int:
@@ -340,6 +354,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     from tensorfold import families, hub
 
+    if not args.no_update_check:
+        from tensorfold import update
+
+        update.check_in_background()
     config_dir = _config_dir(args.model)
     family = families.detect(config_dir)
     backend = _backend(args.backend, family)

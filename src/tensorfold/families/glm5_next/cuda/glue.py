@@ -15,6 +15,8 @@ Manifold-constrained hyper-connections (4 residual streams of D, kept in bf16):
 
 from __future__ import annotations
 
+import math
+
 import torch
 import triton
 import triton.language as tl
@@ -41,9 +43,27 @@ def _embed(IDS, W, S, B, OUT, D: tl.constexpr, COPIES: tl.constexpr):
         tl.store(OUT + row * (COPIES * D) + c * D + d, v)
 
 
-def embed(ids: torch.Tensor, table: tuple, dims: int, copies: int, out: torch.Tensor) -> torch.Tensor:
-    w, s, b = table
+@triton.jit
+def _embed_b16(IDS, W, OUT, D: tl.constexpr, COPIES: tl.constexpr):
+    """Row r, group g: 64 values of token IDS[r]'s BF16 row, into COPIES streams."""
+
+    row = tl.program_id(0)
+    g = tl.program_id(1)
+    tok = tl.load(IDS + row).to(tl.int64)
+    d = g * 64 + tl.arange(0, 64)
+    v = tl.load(W + tok * D + d)
+    for c in tl.static_range(COPIES):
+        tl.store(OUT + row * (COPIES * D) + c * D + d, v)
+
+
+def embed(ids: torch.Tensor, table, dims: int, copies: int, out: torch.Tensor) -> torch.Tensor:
+    """Token rows of the embedding: a 4-bit (words, scales, biases) table or a BF16 [V, D] tensor."""
+
     rows = ids.shape[0]
+    if isinstance(table, torch.Tensor):
+        _embed_b16[(rows, dims // 64)](ids, table, out, D=dims, COPIES=copies, num_warps=1)
+        return out
+    w, s, b = table
     _embed[(rows, dims // 64)](ids, w, s, b, out, D=dims, COPIES=copies, num_warps=1)
     return out
 
@@ -267,7 +287,10 @@ def _swiglu(GU, OUT, XS, LIMIT, W: tl.constexpr, BLOCK: tl.constexpr):
 
 def swiglu(gu: torch.Tensor, out: torch.Tensor, xs: torch.Tensor, limit: float) -> None:
     rows, w = out.shape
-    _swiglu[(rows, w // 512)](gu, out, xs, float(limit), W=w, BLOCK=512, num_warps=4)
+    block = math.gcd(512, w)             # 512 for every width of the model; narrower widths (tests) get all columns
+    if block < 64:
+        raise ValueError(f"swiglu: width {w} is not a multiple of 64")
+    _swiglu[(rows, w // block)](gu, out, xs, float(limit), W=w, BLOCK=block, num_warps=4)
 
 
 @triton.jit

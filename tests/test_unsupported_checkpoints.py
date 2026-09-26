@@ -53,6 +53,19 @@ def test_a_family_can_declare_more_formats():
     families.require_readable(family, EXL3, "cuda")
 
 
+def test_glm_reads_mias_exl3_checkpoint_as_an_experiment(tmp_path, capsys):
+    from tensorfold.families import glm5_next
+
+    (tmp_path / "config.json").write_text(json.dumps(EXL3))
+    glm5_next.check(tmp_path)
+    assert "experimental" in capsys.readouterr().out
+    for key, value in (("bits", 3), ("codebook", "3inst"), ("scope", "all_linear")):
+        other = {**EXL3, "quantization_config": {**EXL3["quantization_config"], key: value}}
+        (tmp_path / "config.json").write_text(json.dumps(other))
+        with pytest.raises(ValueError, match="recipe book"):
+            glm5_next.check(tmp_path)
+
+
 def test_unknown_model_types_point_to_the_recipe_book(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "brand_new_arch"}))
     with pytest.raises(ValueError) as refused:
@@ -62,11 +75,13 @@ def test_unknown_model_types_point_to_the_recipe_book(tmp_path):
 
 
 def test_serve_refuses_an_unreadable_checkpoint_before_downloading(tmp_path, capsys, monkeypatch):
-    (tmp_path / "config.json").write_text(json.dumps(EXL3))
+    # an NVFP4 (ModelOpt) Qwen3.8 dense checkpoint: no engine of that family reads it
+    (tmp_path / "config.json").write_text(json.dumps(NVFP4))
     monkeypatch.setattr(cli.sys, "platform", "linux")
-    assert cli.main(["serve", str(tmp_path), "--tp", "2", "--rank", "0", "--master", "10.1.1.1"]) == 1
+    monkeypatch.setenv("TENSORFOLD_NO_UPDATE_CHECK", "1")
+    assert cli.main(["serve", str(tmp_path)]) == 1
     err = capsys.readouterr().err
-    assert "exl3" in err and "recipe book" in err
+    assert "modelopt" in err and "recipe book" in err
 
 
 def test_untested_hugging_face_checkpoints_get_a_note(capsys):

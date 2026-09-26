@@ -91,6 +91,16 @@ class Buffers:
         self.eaxs = torch.empty((rows, slots, ml // 64), dtype=f32, device=dev)
         self.ey = torch.empty((rows, slots, D), dtype=f32, device=dev)
         self._groups: dict[int, qmm.Group] = {}
+        self.exl3 = None
+        if c.quant == "exl3":            # EXL3 routed experts, and the shared expert as a BF16 MLP
+            from .exl3_mm import Scratch
+
+            sl = c.shared_width // w.world
+            self.exl3 = Scratch(rows, slots, D, ml, dev)
+            self.sgu = torch.empty((rows, 2 * sl), dtype=bf, device=dev)
+            self.sact = torch.empty((rows, sl), dtype=bf, device=dev)
+            self.sxs = torch.empty((rows, sl // 64), dtype=f32, device=dev)
+            self.sy = torch.empty((rows, D), dtype=f32, device=dev)
         # rank partials
         self.part = torch.empty((rows, D), dtype=f32, device=dev)
         self.gath = torch.empty((w.world * rows * D,), dtype=f32, device=dev)
@@ -297,6 +307,18 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> torch.Tensor:
     glue.router(b.normed[:R], m.router, b.mlog[:R])
     glue.select(b.mlog[:R], m.bias, b.pick[:R], b.wts[:R], grp.ids, grp.count, grp.members, c.top_k, c.experts,
                 c.routed_scale, c.norm_topk)
+    if m.shared is not None:
+        # EXL3: the routed slots through the trellis kernels, the shared expert (last slot) through BF16 matmuls
+        from . import exl3_mm
+
+        exl3_mm.routed(b.normed[:R], b.pick, grp, m.experts, b.exl3, b.ey.view(-1, c.hidden), R, c.limit)
+        s = m.shared
+        qmm.matmul(b.normed[:R], s.gu, b.xs[:R], out=b.sgu[:R], part=b.sk)
+        glue.swiglu(b.sgu[:R], b.sact[:R], b.sxs[:R], c.limit)
+        qmm.matmul(b.sact[:R], s.down, b.sxs[:R], out=b.sy[:R], f32=True, part=b.sk)
+        b.ey[:R, c.top_k].copy_(b.sy[:R])
+        glue.combine(b.ey[:R], b.wts[:R], b.part[:R])
+        return gather(w, b, R)
     qmm.moe_gateup(b.normed[:R], b.xs[:R], m.experts, grp, b.eact, b.eaxs, c.limit)
     qmm.moe_down(b.eact, b.eaxs, m.experts, grp, b.ey)
     glue.combine(b.ey[:R], b.wts[:R], b.part[:R])

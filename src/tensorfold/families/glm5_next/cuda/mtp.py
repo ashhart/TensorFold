@@ -64,7 +64,8 @@ def mtp_compute(w: Weights, st: State, b: Buffers, n: int, *, last_only: bool = 
     lo = n - 1 if last_only else 0
     k = n - lo
     glue.rmsnorm(b.mx[lo:n], m.norm, c.eps, b.fnormed[:k], b.fxs[:k])
-    return qmm.matmul(b.fnormed[:k], w.head, b.fxs[:k], out=b.logits[:k, :w.head.n], part=b.sk)
+    head = w.draft_head if w.draft_head is not None else w.head        # the head's logits only draft
+    return qmm.matmul(b.fnormed[:k], head, b.fxs[:k], out=b.logits[:k, :w.head.n], part=b.sk)
 
 
 @torch.no_grad()

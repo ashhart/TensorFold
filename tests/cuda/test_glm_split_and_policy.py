@@ -170,3 +170,28 @@ def test_requests_past_the_context_get_a_400_before_streaming(tmp_path):
     chat = {"messages": [{"role": "user", "content": eight}], "max_tokens": 2}     # <|user|>, 8 words, the tail
     assert app.check(chat) is None
     assert "--context 13" in app.check({**chat, "max_tokens": 3})
+
+
+def test_check_accepts_mlx_4bit_and_mias_exl3_only(tmp_path):
+    from tensorfold.families import glm5_next
+
+    assert glm5_next.QUANT_METHODS == {"cuda": ("mlx", "exl3")}
+    cases = {
+        "mlx4": ({"quantization": {"bits": 4, "group_size": 64}}, True),
+        "mlx8": ({"quantization": {"bits": 8, "group_size": 64}}, False),
+        "exl3": ({"quantization_config": {"quant_method": "exl3", "bits": 4, "codebook": "mcg",
+                                          "scope": "glm53_routed_experts_only"}}, True),
+        "exl3-3bit": ({"quantization_config": {"quant_method": "exl3", "bits": 3, "codebook": "mcg",
+                                               "scope": "glm53_routed_experts_only"}}, False),
+        "exl3-all": ({"quantization_config": {"quant_method": "exl3", "bits": 4, "codebook": "3inst",
+                                              "scope": "all"}}, False),
+    }
+    for name, (quant, ok) in cases.items():
+        d = tmp_path / name
+        d.mkdir()
+        (d / "config.json").write_text(json.dumps({"model_type": "glm5_next", **quant}))
+        if ok:
+            glm5_next.check(d)
+        else:
+            with pytest.raises(ValueError, match="recipe book"):
+                glm5_next.check(d)

@@ -22,6 +22,8 @@ A request's draft policy is a spec (the engine's default, or the request's throu
                   (``decode.DrafterChoice``: 2 rounds of each first, then a 3% margin to switch and one round of
                   the other every 8). Sampled requests: MTP drafts, 1 to 3 from the running acceptance
                   (a:0.6:0.85), where DFlash2's sampled chains measured slower. MTP only without the draft model.
+                  On an EXL3 checkpoint with the draft model, every request drafts with DFlash2 (fc5:0.3), which
+                  measured best or tied in all four cells there.
     auto:E:EVERY:MARGIN
                   the same choice with E rounds of each first, a probe every EVERY rounds and a MARGIN to switch,
                   for sampled requests too (MTP a:0.6:0.85 against DFlash2 there)
@@ -38,6 +40,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 DEFAULT_POLICY = "auto"
+EXL3_AUTO = "fc5:0.3"                 # what auto runs on an EXL3 checkpoint with the draft model
 GRAPH_ROWS = (1, 2, 3, 4, 5, 6)       # verify windows captured as CUDA graphs
 MAX_ROWS = 8                          # the widest verify window (a pending token and up to 7 drafts)
 DENSE_CAPACITY = 2560                 # cache slots while DSA attention stays dense (contexts up to 2,051 tokens)
@@ -265,6 +268,13 @@ class GlmEngine:
         self.comm.all_gather(buf, allv)
         return [int(v) for v in allv[:count].tolist()]
 
+    def _effective(self, code: list[int]) -> list[int]:
+        """The code a request runs: plain ``auto`` is ``EXL3_AUTO`` on an EXL3 checkpoint with the draft model."""
+
+        if code[0] == 4 and self.drafter is not None and self.w.cfg.quant == "exl3":
+            return encode_policy(EXL3_AUTO)
+        return code
+
     def _drafters(self, code: list[int]) -> tuple[bool, bool, bool]:
         """(auto, MTP drafts, DFlash2 drafts) for a policy code."""
 
@@ -357,7 +367,7 @@ class GlmEngine:
             spec = "0"
         else:
             spec = getattr(self.request, "policy", None) or self.policy
-        code = encode_policy(spec)
+        code = self._effective(encode_policy(spec))
         stop_eos = bool(getattr(self.request, "stop_eos", True))
         hit = self._resume(list(prompt), code) if draft else None
         seed = (sampling.seed if sampling else 0) & 0xFFFFFFFFFFFFFFFF
