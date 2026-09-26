@@ -65,7 +65,8 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     head, 1 to 3 drafts a round from the running acceptance. A request can ask for another policy
     (``cuda/app.py``, specs in ``cuda/engine.py``). A prompt that extends the last request's prompt or reply
     resumes from its kept state.
-    ``mtp_drafts``: a fixed number of MTP drafts a round instead (0: serial). ``no_drafts``: serial decoding only.
+    ``mtp_drafts``: a fixed number of MTP drafts a round instead; 0 drafts with DFlash2 alone (``fc5:0.3``) when the
+    draft model is there, else it is the serial reference like ``no_drafts`` (serial decoding only).
     ``options["context"]``: prompt plus reply tokens; up to 2,051 (the default) attention stays dense, as measured;
     longer contexts run DSA's sparse top-k past 2,051 tokens without CUDA graphs.
     """
@@ -75,9 +76,14 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                          "with --tp 2 --rank R --master ADDRESS on both (rank 1 first)")
     if not master:
         raise ValueError("--tp 2 needs --master: rank 0's address on the link between the two machines")
-    from .cuda.engine import DEFAULT_POLICY, GlmEngine
+    from .cuda.engine import DEFAULT_POLICY, DFLASH_POLICY, GlmEngine
 
-    policy = DEFAULT_POLICY if mtp_drafts is None else str(int(mtp_drafts))
+    if mtp_drafts is None:
+        policy = DEFAULT_POLICY
+    elif int(mtp_drafts) == 0 and drafter and not no_drafts:
+        policy = DFLASH_POLICY          # no MTP drafts: every round still verifies DFlash2's drafts
+    else:
+        policy = str(int(mtp_drafts))
     return GlmEngine(Path(model_dir), rank=int(rank), master=master, port=int(master_port), policy=policy,
                      drafter=Path(drafter) if drafter and not no_drafts else None,
                      context=int(options.get("context") or 0), serial_only=bool(no_drafts))

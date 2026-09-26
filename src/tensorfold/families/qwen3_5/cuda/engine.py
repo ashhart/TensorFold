@@ -127,7 +127,7 @@ class Qwen27Engine:
         if draft:
             self._remember(list(prompt) + result.tokens[:-1], result.state, drafter.snapshot() if drafter else None)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
-                "cached": hit[1].pos if hit else 0, "drafts": draft}
+                "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0)}
 
     # two ranks: rank 0 sends each request's header and prompt to rank 1, both run the same calls
     def _generate_tp(self, prompt, max_tokens, sampling, on_tokens, hit, t0, draft):
@@ -156,7 +156,7 @@ class Qwen27Engine:
         if draft:
             self._remember(list(prompt) + result.tokens[:-1], result.state, drafter.snapshot() if drafter else None)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds, "cached": cached,
-                "drafts": draft}
+                "drafts": draft, "min_rows": min(result.widths, default=0)}
 
     def follow(self) -> None:
         """Rank 1: mirror every request rank 0 serves, forever."""

@@ -7,11 +7,12 @@ up to 31 for copies and tool calls) and prompts are prefilled through the same k
 prompt has the bits decoding would give it. Drafts come from the context (copies of earlier spans, the known
 structure of tool calls) and, with ``drafter``, from a DFlash2 draft model (``drafters.dflash_drafter``).
 
-Without tensor units (the M1 to M4 generations) MLX's own kernels run, except that verify windows of 2 to 8 rows
-go through TensorFold's row-exact matvec (``kernels.row_qmv``: MLX's one-row loop run for each row) and attend
-query by query (``kernels.exact_attention``), so a drafted window reproduces one-row decoding there too. At load
-the engine checks which window widths do on this Mac and times them, then drafts DFlash2 chains of the width
-that pays (``install_mlx_lanes``). Where no width reproduces one-row decoding it serves without drafts.
+Without tensor units (the M1 to M4 generations) every round and every prompt goes through the lane decoder
+``kernels.row_forward``: TensorFold's row-exact matvec (``kernels.row_qmv``: MLX's one-row loop run for each row)
+with stacked projections, the lane glue kernels, the recurrence walked per row, and attention query by query
+(``kernels.exact_attention``), so a drafted window reproduces one-row steps there too. At load the engine checks
+which window widths do on this Mac and times them, then drafts DFlash2 chains of the width that pays
+(``install_mlx_lanes``). Where no width reproduces one-row steps it serves without drafts.
 """
 
 from __future__ import annotations
@@ -123,33 +124,113 @@ def _window_check(model: Any, widths: range) -> tuple[int, dict[int, float]]:
     return exact, costs
 
 
-def install_mlx_lanes(model: Any) -> tuple[int, int]:
-    """Drafted rounds on MLX's kernels (no tensor units): the row-exact matvec for 2-8-row windows, attention
-    query by query, one stream's rounds rolled back to exactly their kept rows (so DFlash2 follows them), windows
-    as wide as this Mac reproduces one-row decoding, and each round's DFlash2 drafts as many as pay at the
-    stream's acceptance (``LaneEngine.window_costs``). Returns (exact width, exact width); (1, 1) when no window
-    reproduces one-row decoding, and then nothing is drafted."""
+def _row_forward_check(model: Any, widths: range) -> tuple[int, dict[int, float]]:
+    """Through the lane decoder without tensor units (``row_forward``): the widest verify window (among
+    ``widths``) whose every narrower window gives each row the logits of one-row steps bit for bit, and each
+    width's forward time in ms (fastest of 3)."""
+
+    import time
+
+    import mlx.core as mx
 
     from tensorfold.engine.lane_engine import LaneEngine
-    from tensorfold.kernels.qwen.dense.v1 import exact_attention, row_qmv
+    from tensorfold.kernels.qwen.dense.v1 import row_forward
 
-    if row_qmv.install(model) == 0:
+    language_model = getattr(model, "language_model", model)
+    core, head = language_model.model, language_model.lm_head
+    most = row_forward.BACKEND.max_rows
+
+    def run(tokens: list[int], cache: list[Any], start: int) -> mx.array:
+        parents = [-1] + list(range(len(tokens) - 1))
+        logits, record = row_forward.forward(core, head, tokens, parents, cache, start)
+        row_forward.commit(cache, record, list(range(len(tokens))), len(tokens), start)
+        return logits
+
+    prompt = list(range(1000, 1032))
+    base = model.make_cache()
+    for begin in range(0, len(prompt), most):
+        run(prompt[begin:begin + most], base, begin)
+    mx.eval([a for c in base for a in (c.state if isinstance(c.state, (list, tuple)) else [c.state]) if a is not None])
+    start = len(prompt)
+    serial, tokens, token = [], [], 1500
+    cache = LaneEngine.copy_single_cache(base)
+    for i in range(max(widths)):
+        tokens.append(token)
+        logits = run([token], cache, start + i)
+        mx.eval(logits)
+        serial.append(logits[0, -1])
+        token = int(mx.argmax(logits[0, -1]).item())
+    exact = 1
+    for width in widths:
+        logits = run(tokens[:width], LaneEngine.copy_single_cache(base), start)
+        mx.eval(logits)
+        if not all(bool(mx.array_equal(logits[0, i], serial[i]).item()) for i in range(width)):
+            break
+        exact = width
+    costs: dict[int, float] = {}
+    for width in [1, *range(2, exact + 1)]:
+        best = float("inf")
+        for _ in range(3):
+            cache = LaneEngine.copy_single_cache(base)
+            mx.eval([a for c in cache for a in (c.state if isinstance(c.state, (list, tuple)) else [c.state])
+                     if a is not None])
+            began = time.perf_counter()
+            mx.eval(run(tokens[:width], cache, start))
+            best = min(best, (time.perf_counter() - began) * 1e3)
+        costs[width] = best
+    return exact, costs
+
+
+def install_mlx_lanes(model: Any) -> tuple[int, int]:
+    """Drafted rounds without tensor units: every round (one row included) and every prompt through the lane
+    decoder ``row_forward`` (the row-exact matvec, the lane glue, the recurrence walked per row, attention query by
+    query), windows as wide as reproduce one-row steps here, and each round's DFlash2 chain as long as pays at the
+    stream's acceptance (``LaneEngine.window_costs``). Returns (exact width, exact width); (1, 1) when no window
+    reproduces one-row steps, and then nothing is drafted."""
+
+    from tensorfold.engine.lane_engine import LaneEngine
+    from tensorfold.kernels.qwen.dense.v1 import exact_attention, row_forward, row_qmv
+
+    if row_qmv.install(model) == 0:          # MLX's own forward (shared rounds of several streams) at 2-8 rows
         return 1, 1
     row_qmv.mlx_one_row = row_qmv.matches_mlx(model)
     exact_attention.install()
-    exact, costs = _window_check(model, range(2, row_qmv.MAX_ROWS + 1))
+    backend = row_forward.choose_backend()
+    if not row_forward.fits(model, backend):
+        return 1, 1
+    stacked = row_forward.install(model, backend)
+    exact, costs = _row_forward_check(model, range(2, backend.max_rows + 1))
     if exact < 2:
         exact_attention.GROUP_QUERIES = False
-        exact, costs = _window_check(model, range(2, row_qmv.MAX_ROWS + 1))
+        exact, costs = _row_forward_check(model, range(2, backend.max_rows + 1))
     if exact < 2:
         return 1, 1
     LaneEngine.precise_single = True
+    LaneEngine.lane_forward = row_forward.forward
+    LaneEngine.lane_commit = row_forward.commit
+    # draft trees where the decoder's attention takes them (``row_attention``); chains otherwise
+    LaneEngine.tree_drafts = bool(row_forward.ROW_ATTENTION)
+    LaneEngine.tree_nodes = exact - 1            # every round through the lane decoder (``_step_tree``)
+    LaneEngine.chain_nodes = exact - 1
+    from tensorfold.drafters.dflash_drafter import DFlashProposer
+
+    DFlashProposer.tree_nodes = exact - 1
     LaneEngine.exact_window = exact
     LaneEngine.cheap_window = exact
     LaneEngine.window_costs = costs
+    # Prompts, so that a resumed conversation's state has the bits a fresh prefill gives it (TF_ROW_PREFILL):
+    #   "aligned"  (default) MLX's prefill in chunks on a 2,048-token grid, checkpoints only on the grid, decoded
+    #              replies prefilled again next turn: exact resumes at MLX's prompt speed (a 20k-token prompt in
+    #              ~50 s on an M3 Ultra, against ~220 s through the lane decoder)
+    #   "1"        through the lane decoder in chains of ``exact`` rows (decoded replies are resumed as they are)
+    #   "0"        MLX's prefill anywhere (0.3.3: a resumed reply can differ from a fresh one)
+    mode = os.environ.get("TF_ROW_PREFILL", "aligned")
+    LaneEngine.lane_prefill = exact if mode not in ("0", "aligned") else 0
+    LaneEngine.prefill_align = LaneEngine.prefill_step if mode == "aligned" else 0
     timing = ", ".join(f"{w} rows {ms:.1f} ms" for w, ms in sorted(costs.items()))
-    print(f"[tensorfold] no tensor units: drafted windows of up to {exact} rows reproduce one-row decoding here "
-          f"({timing}); each round drafts as many as pay at the request's acceptance", flush=True)
+    print(f"[tensorfold] no tensor units: the lane decoder with the {backend.name} matmul ({stacked}); drafted "
+          f"windows of up to {exact} rows reproduce one-row steps here ({timing}); each round drafts as many as pay "
+          f"at the request's acceptance", flush=True)
     return exact, exact
 
 
@@ -226,10 +307,21 @@ def kernel_version(model: Any) -> str:
 
     if not getattr(model, "_tensorfold_lanes", False):
         if getattr(model, "_tensorfold_mlx_lanes", (1, 1))[0] >= 2:
-            from tensorfold.kernels.qwen.dense.v1 import row_qmv
+            from tensorfold.kernels.qwen.dense.v1 import lane_tree, row_forward, row_qmv
 
-            source = Path(row_qmv.__file__).read_text()
-            return "mlx-row-qmv-" + hashlib.sha256(source.encode()).hexdigest()[:12]
+            backend = row_forward.BACKEND.name if row_forward.BACKEND is not None else "none"
+            from tensorfold.kernels.qwen.dense.v1 import row_attention
+
+            parts = [backend, lane_tree._REPLAY_SOURCE, *[text for _, text in sorted(row_forward.sources().items())],
+                     f"row_attention={row_forward.ROW_ATTENTION}",
+                     *([text for _, text in sorted(row_attention.sources().items())] if row_forward.ROW_ATTENTION else [])]
+            folder = Path(row_qmv.__file__).parent
+            parts.extend(path.read_text() for path in sorted(folder.glob("*.py")))
+            from tensorfold.engine.lane_engine import LaneEngine
+
+            # a snapshot's bits also depend on how its prompt was prefilled
+            parts.append(f"prefill={LaneEngine.lane_prefill}/{LaneEngine.prefill_align}/{LaneEngine.prefill_step}")
+            return "row-forward-" + hashlib.sha256("\n".join(parts).encode()).hexdigest()[:12]
         return "mlx"
     from tensorfold.kernels.qwen.dense.v1 import lane_attention, lane_fuse, lane_glue, lane_qmm, lane_tree
 
@@ -282,11 +374,16 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     DFlash2 draft trees are verified in windows of 12 rows (the same drafts accepted as at 16 rows, for less
     time a round). On two GPUs (``tp=2``) the model is tensor parallel with fp32 partials summed in rank
     order, the head is split by vocabulary, and both ranks draft with half the draft model each, so both
-    machines need it. ``no_drafts``: one token a round, the serial reference.
+    machines need it. ``no_drafts``: one token a round, the serial reference. Without the draft model every
+    round but a copied one would decode one token, so drafting needs ``drafter``.
     """
 
     from .cuda.engine import Qwen27Engine
 
+    if not drafter and not no_drafts:
+        raise ValueError(f"{TITLE}'s CUDA engine drafts with {DRAFTER}, which is not here: without it every round "
+                         f"would decode one token. Run `tensorfold pull {DRAFTER}` once (on both machines for "
+                         "--tp 2), or pass --no-drafts for the serial reference")
     draft = Path(drafter) if drafter and not no_drafts else None
     return Qwen27Engine(Path(model_dir), draft, max_rows=12, tp=tp, rank=rank, master=master, port=master_port,
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts)

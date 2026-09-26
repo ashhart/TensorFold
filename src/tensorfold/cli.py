@@ -406,12 +406,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
               f"{'active' if not args.no_drafts and getattr(model, 'mtp', None) is not None else 'inactive'}",
               flush=True)
 
-    from tensorfold.engine.family_engine import SerialEngine
     from tensorfold.engine.lane_engine import LaneEngine
     from tensorfold.server.app import ChatApp
     from tensorfold.server.http import make_handler
 
-    engine_factory = LaneEngine if family.lanes else SerialEngine
+    engine_factory = LaneEngine            # every family decodes through lanes
     engine_kwargs = dict(getattr(family.package, "engine_settings", lambda m: {})(model))
     sampling = _generation_config(model_dir)
     for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k)):

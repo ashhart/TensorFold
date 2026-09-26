@@ -23,7 +23,8 @@ A request's draft policy is a spec (the engine's default, or the request's throu
                   the other every 8). Sampled requests: MTP drafts, 1 to 3 from the running acceptance
                   (a:0.6:0.85), where DFlash2's sampled chains measured slower. MTP only without the draft model.
                   On an EXL3 checkpoint with the draft model, every request drafts with DFlash2 (fc5:0.3), which
-                  measured best or tied in all four cells there.
+                  measured best or tied in all four cells there. A checkpoint without the MTP head drafts with
+                  DFlash2 only (MTP specs run as their DFlash2 versions) and needs the draft model.
     auto:E:EVERY:MARGIN
                   the same choice with E rounds of each first, a probe every EVERY rounds and a MARGIN to switch,
                   for sampled requests too (MTP a:0.6:0.85 against DFlash2 there)
@@ -40,7 +41,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 DEFAULT_POLICY = "auto"
-EXL3_AUTO = "fc5:0.3"                 # what auto runs on an EXL3 checkpoint with the draft model
+DFLASH_POLICY = "fc5:0.3"             # DFlash2 drafts every round: up to 5 while their probability product holds 0.3
+EXL3_AUTO = DFLASH_POLICY             # what auto runs on an EXL3 checkpoint with the draft model
 GRAPH_ROWS = (1, 2, 3, 4, 5, 6)       # verify windows captured as CUDA graphs
 MAX_ROWS = 8                          # the widest verify window (a pending token and up to 7 drafts)
 DENSE_CAPACITY = 2560                 # cache slots while DSA attention stays dense (contexts up to 2,051 tokens)
@@ -145,6 +147,10 @@ class GlmEngine:
         w = load(model_dir, rank=rank)
         w.comm = self.comm
         self.comm.barrier()
+        if w.mtp is None and drafter is None and not serial_only:
+            raise ValueError("this checkpoint has no MTP head and no DFlash2 draft model was given, so every round "
+                             "would decode one token: pull the draft model on both machines (--drafter), or pass "
+                             "--no-drafts to both for the serial reference")
         self.w = w
         self.drafter = None
         if drafter is not None:
@@ -199,9 +205,10 @@ class GlmEngine:
             st.mtp_drafted = 0
 
         pieces: dict[str, tuple] = {f"v{r}": (lambda w=tokens(r): e.forward(w), None) for r in range(1, MAX_ROWS + 1)}
-        pieces["m1"] = (lambda: draft(e, hidden[:1], one, st.pos + 1, 1, None), rewind)
-        pieces["m3"] = (lambda: draft(e, hidden[:1], one, st.pos + 1, 3, None), rewind)
-        pieces["m6"] = (lambda: draft(e, hidden[:6], six, st.pos + 1, 1, None), rewind)
+        if self.w.mtp is not None:
+            pieces["m1"] = (lambda: draft(e, hidden[:1], one, st.pos + 1, 1, None), rewind)
+            pieces["m3"] = (lambda: draft(e, hidden[:1], one, st.pos + 1, 3, None), rewind)
+            pieces["m6"] = (lambda: draft(e, hidden[:6], six, st.pos + 1, 1, None), rewind)
         if self.drafter is not None:
             d = self.drafter
             taps = e.tap_rows(8).clone()
@@ -242,9 +249,9 @@ class GlmEngine:
                                   for j in range(i + 1, len(rows)))
         base = statistics.median(y - slope * r for r, y in zip(rows, ys))
         verify = [both["v1"]] + [base + slope * r for r in rows]
-        mtp = both["m1"]
-        return {"verify": verify, "mtp": mtp, "mtp_step": max((both["m3"] - mtp) / 2, 0.0),
-                "mtp_row": max((both["m6"] - mtp) / 5, 0.0), "block": both.get("block", 0.0),
+        mtp = both.get("m1", 0.0)
+        return {"verify": verify, "mtp": mtp, "mtp_step": max((both.get("m3", 0.0) - mtp) / 2, 0.0),
+                "mtp_row": max((both.get("m6", 0.0) - mtp) / 5, 0.0), "block": both.get("block", 0.0),
                 "taps_row": max(both.get("taps8", 0.0) / 8, 0.0), "timed": {k: round(v, 2) for k, v in both.items()}}
 
     def _gather_ints(self, values: list[int]) -> list[list[int]]:
@@ -269,10 +276,13 @@ class GlmEngine:
         return [int(v) for v in allv[:count].tolist()]
 
     def _effective(self, code: list[int]) -> list[int]:
-        """The code a request runs: plain ``auto`` is ``EXL3_AUTO`` on an EXL3 checkpoint with the draft model."""
+        """The code a request runs: plain ``auto`` is ``EXL3_AUTO`` on an EXL3 checkpoint with the draft model; on a
+        checkpoint without the MTP head, ``auto`` is ``DFLASH_POLICY`` and an MTP spec runs as its DFlash2 version."""
 
         if code[0] == 4 and self.drafter is not None and self.w.cfg.quant == "exl3":
             return encode_policy(EXL3_AUTO)
+        if self.w.mtp is None and code[0] in (1, 2, 3, 4, 5):
+            return encode_policy(DFLASH_POLICY) if code[0] in (4, 5) else [code[0] + 10] + code[1:]
         return code
 
     def _drafters(self, code: list[int]) -> tuple[bool, bool, bool]:
@@ -347,7 +357,7 @@ class GlmEngine:
             self._remember(take_snapshot(self.e, committed, pending, mtp=use_mtp, drafter=drafter))
         elif policy is None:
             self.cache = [c for c in self.cache if len(c.ids) <= len(prompt)]   # the reply's rows are not kept
-        stats.update(decode_s=res.seconds, rounds=res.rounds,
+        stats.update(decode_s=res.seconds, rounds=res.rounds, min_rows=1 + min(res.depths, default=0),
                      tokens_per_round=round((len(res.tokens) - 1) / max(res.rounds, 1), 3),
                      sha256=hashlib.sha256(json.dumps(res.tokens).encode()).hexdigest()[:16])
         if res.arms:

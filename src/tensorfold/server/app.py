@@ -1,8 +1,8 @@
 """The chat app behind TensorFold's OpenAI endpoint: one model, requests queued onto one engine thread.
 
-A request is rendered with the model's chat template, queued, and decoded by the family's engine
-(``engine.family_engine.SerialEngine``, or ``engine.lane_engine.LaneEngine`` for families with lane
-kernels). Tokens stream back as they are committed: reasoning (inside the prompt's open think block) as
+A request is rendered with the model's chat template, queued, and decoded by the lane engine
+(``engine.lane_engine.LaneEngine``; model families with their own forward take its family rounds,
+``engine.lane_family``). Tokens stream back as they are committed: reasoning (inside the prompt's open think block) as
 ``reasoning_content``, tool calls as OpenAI tool_call deltas while they are written, the rest as content.
 
 Prompts are cached: after a request, the conversation's prefix caches are kept (``CheckpointStore``), so a
@@ -830,13 +830,10 @@ class ChatApp:
         # ``exact_sampling.Sampling`` fields used when a request names none (None: greedy)
         self.default_sampling = dict(default_sampling) if default_sampling else None
         self.max_snapshots = int(max_snapshots)
-        from tensorfold.engine.family_engine import SerialEngine
-
         factory = engine_factory or LaneEngine
-        serial = isinstance(factory, type) and issubclass(factory, SerialEngine)
         self.exact_mode = {
             "mode": "exact",
-            "engine": "serial" if serial else "lanes",
+            "engine": "lanes",
             "note": "every token is the model's own sample at its position; drafts only change speed",
         }
         self.stop_ids = eos_ids_of(tokenizer)
@@ -1159,6 +1156,10 @@ class ChatApp:
                 "time_to_first_token": (first_token_at - received_at) if first_token_at else None,
                 "sampling": "exact" if spec is not None else "greedy",
                 "drafts": bool(job.drafts),
+                # the reply's token ids, hashed: drafted and ``"draft": false`` replies must match
+                "token_sha": _token_sha(collected),
+                # the narrowest verify window of the reply's rounds (drafted replies: 2 or more)
+                "min_rows": int(getattr(job.stream, "min_rows", 0) or 0),
             },
         }
         if stream is not None:
@@ -1238,6 +1239,7 @@ class ChatApp:
         n = len(stats)
         return (f"ms/round={sum(r.total_ms for r in stats) / n:.1f} "
                 f"forward={sum(r.forward_ms for r in stats) / n:.1f} "
+                f"draft={sum(r.draft_ms for r in stats) / n:.1f} post={sum(r.post_ms for r in stats) / n:.1f} "
                 f"rows={sum(r.width for r in stats) / n:.1f} ")
 
     def close(self) -> None:

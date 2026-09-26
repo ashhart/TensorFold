@@ -1,4 +1,5 @@
-"""Qwen3.8 Flash Next family on a tiny random config (CPU): consistency, hashing, serial engine."""
+"""Qwen3.8 Flash Next family on a tiny random config (CPU): consistency, hashing, the lane engine's family
+rounds."""
 
 from __future__ import annotations
 
@@ -143,15 +144,17 @@ def test_ngram_ids_match_the_reference_formula_at_full_vocab():
     assert np.array_equal(emb.ids(history, tokens), _reference_ngram_ids(emb, history, tokens))
 
 
-def test_serial_engine_resumes_from_a_checkpoint_bit_identically():
-    from tensorfold.engine.family_engine import SerialEngine
-    from tensorfold.engine.lane_engine import LaneStream
+def test_lane_engine_resumes_from_a_checkpoint_bit_identically():
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
 
-    model = tiny()
+    model = FlashNext(tiny(), None, drafts=0)         # no fused kernels on the CPU: one token a round
+    assert model.lane_family and model.exact_width == 1
     prompt = [int(t) for t in np.random.default_rng(3).integers(6, 97, size=18)]
 
     def run(checkpoints_at=()):
-        engine = SerialEngine(model, retain_finished_caches=True)
+        engine = LaneEngine(model, retain_finished_caches=True)
+        assert engine.family
         stream = LaneStream(stream_id="s", prompt_ids=list(prompt), max_new_tokens=12)
         engine.add_stream(stream, checkpoints_at=checkpoints_at)
         while engine.active_count:
@@ -164,12 +167,12 @@ def test_serial_engine_resumes_from_a_checkpoint_bit_identically():
     assert tokens == whole.context[:-1]
     # the reply's cache continues the conversation exactly like a fresh prefill of the same tokens
     follow = [*tokens, whole.emitted[-1], 7, 8]
-    resumed = SerialEngine(model)
+    resumed = LaneEngine(model)
     a = LaneStream(stream_id="a", prompt_ids=follow, max_new_tokens=4)
-    resumed.add_stream(a, cache=SerialEngine.copy_single_cache(cache), cached_tokens=len(tokens))
+    resumed.add_stream(a, cache=LaneEngine.copy_single_cache(cache), cached_tokens=len(tokens))
     while resumed.active_count:
         resumed.step()
-    fresh = SerialEngine(model)
+    fresh = LaneEngine(model)
     b = LaneStream(stream_id="b", prompt_ids=follow, max_new_tokens=4)
     fresh.add_stream(b)
     while fresh.active_count:

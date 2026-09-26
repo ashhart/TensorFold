@@ -6,7 +6,7 @@ it:
 
     MODEL_TYPES = ("nemotron_h",)          # config.json model_type values it takes
     TITLE = "Nemotron 3.5 Lightning"
-    LANES = False                          # True: engine.lane_engine.LaneEngine; False: engine.family_engine.SerialEngine
+    LANES = True                           # every family decodes through engine.lane_engine.LaneEngine
     def load(model_dir, **options) -> (model, tokenizer)
 
 and optionally:
@@ -22,7 +22,7 @@ and optionally:
 ``options`` are the CLI's family options (``lane_kernels``, ``drafter``, ``mtp_drafts``, ``mtp_head``, ...); a
 family takes the ones it knows. A new family is a new package here; nothing else registers it. ``detect`` reads
 config.json only, so the CLI knows what it is loading before it touches MLX or any weights. What the engines
-call on a model is described in ``engine/family_engine.py`` and ``docs/recipes/adding-a-family.md``.
+call on a model is described in ``engine/lane_family.py`` and ``docs/recipes/adding-a-family.md``.
 """
 
 from __future__ import annotations

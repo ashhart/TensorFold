@@ -5,8 +5,8 @@ ties by token id) of this engine's logits at its position, so a drafted round ke
 equals what serial decoding samples there. A round verifies the pending token and up to ``depth`` MTP drafts
 as one chain window, keeps rows up to the first mismatch (``forward.commit``), then the MTP head absorbs the
 kept positions and chains the next drafts (drafts are sampled with the same keyed sampler at their positions).
-A chain ends before a draft the head gives less than ``confidence``: a rejected draft costs a verify row, and
-drafts change speed only, never the output.
+Every round verifies at least the pending token and one draft; a chain ends before a later draft the head gives
+less than ``confidence`` (a rejected draft costs a verify row). Drafts change speed only, never the output.
 """
 
 from __future__ import annotations
@@ -246,19 +246,26 @@ def absorb(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int]) -> torc
 def draft(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int], position: int, count: int,
           sampling: Sampling | None, confidence: float = 0.0) -> list[int]:
     """Absorb the kept positions, then chain up to ``count`` drafts for positions position, position + 1, ...
-    With ``confidence`` > 0 the chain ends before a draft whose probability under the head is below it."""
+    With ``confidence`` > 0 the first draft is always kept, so every round verifies at least two rows; the chain
+    ends before a later draft whose probability under the head is below it, and right after a first draft that
+    was below it (replayed on recorded chains: sampled rounds keep a low-confidence first draft often enough,
+    because draft and target share the position's noise, while a second low draft rarely pays its row)."""
 
     st = e.st
     logits = absorb(e, streams, next_tokens)
     drafts: list[int] = []
     for j in range(count):
+        low = False
         if confidence > 0:
             d, p = e.sample_draft(logits, position + j, sampling)
-            if p < confidence:
+            low = p < confidence
+            if low and j > 0:
                 break
         else:
             d = e.sample(logits[:1], [position + j], sampling, draft=True)[0]
         drafts.append(d)
+        if low:
+            break
         if j + 1 < count:
             prev = e.mbuf.streams[len(next_tokens) - 1:len(next_tokens)] if j == 0 else e.mbuf.streams[:1]
             logits = e.mtp_forward([d], prev)
@@ -320,6 +327,7 @@ class DecodeResult:
     accepted: int = 0
     keeps: list[int] = field(default_factory=list)      # tokens each round kept
     committed: list[int] = field(default_factory=list)  # the tokens now in the caches (all but the pending one)
+    widths: list[int] = field(default_factory=list)     # rows each round verified
 
     @property
     def tokens_per_second(self) -> float:
@@ -344,7 +352,7 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
         if on_tokens is not None and on_tokens([tok]):
             break
     torch.cuda.synchronize()
-    return DecodeResult(out, time.perf_counter() - start, len(out) - 1, committed=out[:-1])
+    return DecodeResult(out, time.perf_counter() - start, len(out) - 1, committed=out[:-1], widths=[1] * (len(out) - 1))
 
 
 @torch.no_grad()
@@ -358,6 +366,7 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     out = [pending]
     rounds = drafted = accepted = 0
     keeps: list[int] = []
+    widths: list[int] = []
     pos0 = st.pos
     unabsorbed = None                                  # the last round's kept rows, not yet in the MTP cache
     torch.cuda.synchronize()
@@ -379,6 +388,7 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         drafted += len(drafts)
         accepted += keep - 1
         keeps.append(keep)
+        widths.append(R)
         new = sampled[:keep][:max(0, count - len(out))]
         out.extend(sampled[:keep])
         if on_tokens is not None and new and on_tokens(new):
@@ -395,4 +405,4 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     if unabsorbed is not None:              # the MTP cache takes the last kept rows: it then covers the sequence
         absorb(e, b.streams[:unabsorbed[0]], unabsorbed[1])
     committed = out[:st.pos - pos0]
-    return DecodeResult(out[:count], seconds, rounds, drafted, accepted, keeps, committed)
+    return DecodeResult(out[:count], seconds, rounds, drafted, accepted, keeps, committed, widths)

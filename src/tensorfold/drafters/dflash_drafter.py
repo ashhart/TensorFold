@@ -319,7 +319,19 @@ class DFlashDrafter:
 
         sub = self._sub_head()
         if sub is None:
-            return self.model.compute_logits(hidden), None
+            plain = self._plain_sub_head()
+            if plain is None:
+                return self.model.compute_logits(hidden), None
+            # MLX's own kernel over the draft vocabulary's rows (views of the head): the drafter's logits need no
+            # row-exact matmul, and a quarter of the head is read
+            parts, ids, group_size, bits = plain
+            logits = mx.concatenate([mx.quantized_matmul(hidden, w, sc, b, transpose=True, group_size=group_size,
+                                                         bits=bits) for w, sc, b in parts], axis=-1)
+            logits = logits * self.model.config.output_multiplier
+            cap = self.model.config.final_logit_softcapping
+            if cap is not None and cap > 0:
+                logits = mx.tanh(logits / cap) * cap
+            return logits, ids
         from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
         weight, sbt, ids, nt = sub
@@ -328,6 +340,25 @@ class DFlashDrafter:
         if cap is not None and cap > 0:
             logits = mx.tanh(logits / cap) * cap
         return logits, ids
+
+    def _plain_sub_head(self) -> tuple[list[tuple[mx.array, mx.array, mx.array]], mx.array, int, int] | None:
+        """``draft_vocab``'s rows of a head in MLX's layout (views: no copy), built once."""
+
+        if getattr(self, "_plain_sub", False) is False:
+            self._plain_sub = None
+            import mlx.nn as nn
+
+            head = self.model.lm_head
+            if os.environ.get("TF_DRAFT_VOCAB", "") != "full" and isinstance(head, nn.QuantizedLinear) \
+                    and "bias" not in head and not getattr(head, "_lane_tiled", False):
+                n = int(head["weight"].shape[0])
+                spans = [(a, min(b, n)) for a, b in self.draft_vocab if a < n]
+                if sum(b - a for a, b in spans) < n:
+                    parts = [(head["weight"][a:b], head["scales"][a:b], head["biases"][a:b]) for a, b in spans]
+                    ids = mx.concatenate([mx.arange(a, b, dtype=mx.int32) for a, b in spans])
+                    mx.eval(ids)
+                    self._plain_sub = (parts, ids, int(head.group_size), int(head.bits))
+        return self._plain_sub
 
     def _sub_head(self) -> tuple[mx.array, mx.array, mx.array, int] | None:
         """``draft_vocab``'s rows of the lane-tiled head (whole 32-row tiles), built once."""
@@ -448,7 +479,12 @@ class DFlashProposer:
             return []
         started = time.perf_counter()
         inputs = mx.array([[int(context[-1])] + [self.drafter.mask_id] * (block - 1)])
-        if self.sampling is None:
+        if self.drafter._sub_head() is None and self.drafter._plain_sub_head() is not None:
+            # without the lane head: the draft vocabulary's rows through MLX's kernel and a radix top-k, not the
+            # whole head (through the row-exact matvec) and an argpartition over the whole vocabulary
+            hidden = self.drafter.model.hidden_states(inputs, self.context, self.cache, 1)
+            tokens = self._chain_on_draft_vocab(hidden, inputs[:, 0], len(context))
+        elif self.sampling is None:
             tokens, _, _ = self.drafter.model.propose(inputs, self.context, self.cache, 0.0, logits_start=1)
         else:
             model = self.drafter.model
@@ -465,6 +501,48 @@ class DFlashProposer:
         self.proposed_tokens += len(out)
         self.last_confident = True
         return out
+
+    def _chain_on_draft_vocab(self, hidden: mx.array, anchor: mx.array, first_position: int) -> mx.array:
+        """DFlash2's candidate path over the draft vocabulary: each position's top-k candidates (radix select),
+        scored by unary logit plus the pairwise term with the previous pick; greedy, or under exact sampling the
+        argmax of score / T + the target's position-keyed Gumbel noise (``_coupled``). [1, positions] token ids."""
+
+        import numpy as np
+
+        from tensorfold.engine.exact_sampling import uniform
+        from tensorfold.engine.topk import topk_rows
+
+        selector = self.drafter.model.candidate_selector
+        logits, vocab_ids = self.drafter.candidate_logits(hidden)
+        cols, unary = topk_rows(logits[0], int(selector.top_k))
+        candidates = (mx.take(vocab_ids, cols) if vocab_ids is not None else cols)[None]    # [1, P, k] token ids
+        unary = unary.astype(mx.float32)[None]
+        projected = selector.hidden_projection(hidden)
+        noise_mx = None
+        temperature = 1.0
+        if self.sampling is not None:
+            ids = np.array(candidates[0]).astype(np.int64)
+            noise = np.stack([-np.log(-np.log(uniform(self.sampling.seed, first_position + j, ids[j])))
+                              for j in range(ids.shape[0])]).astype(np.float32)
+            noise_mx = mx.array(noise)[None]
+            temperature = max(float(self.sampling.temperature), 1e-6)
+        predecessor = anchor
+        path = []
+        for position in range(int(hidden.shape[1])):
+            edges = mx.sum(
+                selector.predecessor_codebook(predecessor)[:, None]
+                * projected[:, position, None]
+                * selector.successor_codebook(candidates[:, position]),
+                axis=-1,
+            )
+            if noise_mx is None:
+                scores = unary[:, position] + edges.astype(mx.float32)
+            else:
+                scores = (unary[:, position] + edges.astype(mx.float32)) / temperature + noise_mx[:, position]
+            chosen = mx.argmax(scores, axis=-1)
+            predecessor = mx.take_along_axis(candidates[:, position], chosen[:, None], axis=-1)[:, 0]
+            path.append(predecessor)
+        return mx.stack(path, axis=1)
 
     def _coupled(self, hidden: mx.array, logits: mx.array, anchor: mx.array, first_position: int) -> mx.array:
         """DFlash2's candidate path, each step the argmax of score / T + the target's Gumbel noise."""
@@ -592,6 +670,9 @@ class DFlashProposer:
             if drafts and backed:
                 copy_branch = drafts[:tree_cap - 1]                  # too short to fill the window
         max_nodes = tree_cap - len(copy_branch)
+        cap = getattr(self, "model_cap", None)    # the engine's paying draft count bounds the drafter's nodes
+        if cap is not None:
+            max_nodes = min(max_nodes, int(cap))
         block = min(int(self.tree_block), int(max_nodes) + 1)
         if not self.ready or self.context is None or block < 2:
             why = "not_ready" if not self.ready else "no_context" if self.context is None else "no_room"

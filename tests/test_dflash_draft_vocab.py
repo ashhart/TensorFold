@@ -48,8 +48,14 @@ def test_draft_vocab_keeps_the_full_heads_logits():
         lane_qmm.uninstall()
 
 
-def test_draft_vocab_off_without_the_lane_head():
+def test_draft_vocab_without_the_lane_head_reads_views_of_the_head():
+    """Without the lane head (Macs without tensor units) the draft vocabulary's rows are views of MLX's head."""
+
     drafter, _ = _drafter_with_head(4096, 512)                # not installed: the head is not tiled
     hidden = (mx.random.normal((1, 4, 512)) * 0.5).astype(mx.bfloat16)
+    full = drafter.model.compute_logits(hidden)
     logits, ids = drafter.candidate_logits(hidden)
-    assert ids is None and logits.shape == (1, 4, 4096)
+    assert ids is not None and ids.tolist() == list(range(1024)) + list(range(3968, 4096))
+    kept = mx.take(full, ids, axis=-1).astype(mx.float32)
+    assert logits.shape == kept.shape
+    assert float(mx.max(mx.abs(logits.astype(mx.float32) - kept)).item()) <= 0.02 * float(mx.max(mx.abs(kept)).item())

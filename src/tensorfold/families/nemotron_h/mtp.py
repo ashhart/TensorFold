@@ -21,6 +21,7 @@ from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx_lm.models.cache import KVCache
 
 DEFAULT_DIR = Path.home() / ".cache" / "tensorfold" / "mtp" / "nemotron-3.5-lightning"
 
@@ -49,15 +50,20 @@ class _MoEBlock(nn.Module):
         self.final_layernorm = nn.RMSNorm(d, eps=args.layer_norm_epsilon)
 
 
+class MTPCache(KVCache):
+    """The head's KV cache. ``drafted``: how many of its last entries are chained drafts, which the next absorb
+    trims first (the count travels with the cache through copies and snapshots)."""
+
+    drafted = 0
+
+
 class NemotronMTP(nn.Module):
     def __init__(self, args: Any) -> None:
         super().__init__()
         self.layers = [_AttentionBlock(args), _MoEBlock(args)]
 
     def make_cache(self) -> Any:
-        from mlx_lm.models.cache import KVCache
-
-        return KVCache()
+        return MTPCache()
 
     def __call__(self, hidden: mx.array, next_embeddings: mx.array, cache: Any, *,
                  tail: int | None = None) -> mx.array | None:

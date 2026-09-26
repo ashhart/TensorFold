@@ -11,10 +11,11 @@ Name a model on Hugging Face, choose the context window and sampling, and Tensor
 Metal or CUDA kernels written for that model family, and serves `/v1/chat/completions`. On DGX Spark it decodes
 1.6 to 3x faster than vLLM with MTP drafts, one Spark or two ([DGX Spark](#dgx-spark-and-other-nvidia-gpus)).
 
-**All Apple Silicon chips now support lane batching (0.3.3).** Qwen3.8-27B verifies its drafted tokens together
-in one forward on every M1 to M5 GPU, and its output stays byte-identical to serial decoding: through the lane
-kernels on M5, and through a new row-exact matvec on M1 to M4 (1.2 to 1.7x serial speed on an M3 Ultra,
-[details](docs/recipes/qwen3.8-27b.md#macs-without-tensor-units-m1-to-m4)).
+**All Apple Silicon chips now support lane batching.** Qwen3.8-27B verifies its drafted tokens together in one
+forward on every M1 to M5 GPU, and its output stays byte-identical to serial decoding: through the lane kernels
+on M5, and on M1 to M4 through TensorFold's own row-exact lane decoder and simdgroup matmul (0.3.4: 1.9 to 4x
+serial speed on an M3 Ultra, [details](docs/recipes/qwen3.8-27b.md#macs-without-tensor-units-m1-to-m4)).
+Nemotron and Flash Next run on the same lane engine.
 
 Setting this up with an AI agent? Give it the [AI agent runbook](RUNBOOK.md) for the install, model download,
 server startup and a request that checks the result.
@@ -94,13 +95,18 @@ drafts, which are now on by default; in-engine they reached 217 tok/s on prose a
 | | | about 60k-token context | 162 |
 | Qwen3.8-27B, 4-bit, DFlash2 drafter | M5 Max, 128 GB | short answer with thinking | 120-124 (27 without drafts) |
 | | | code | 189 (26 without drafts) |
-| | M3 Ultra, 256 GB | code, 64 tokens | 64 (38-39 without drafts) |
-| | | chat, 64 tokens | 47-52 (38-39 without drafts) |
+| | M3 Ultra, 256 GB | code, 64 tokens | 141-158 (38-39 without drafts) |
+| | | chat, 64 tokens | 74 (38-39 without drafts) |
 | Qwen3.8 Flash Next, 4-bit | M3 Ultra, 256 GB | short answer with thinking | 105-107 (79 without drafts) |
 | | | code | 112 (80 without drafts) |
 | | | file edit | 190 |
 | | | 18k-token context | 98.5 |
 | | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 103-115 |
+
+In 0.3.4, bench_openai's cells (64-token replies, thinking off, median of seeds; code sampled / chat sampled /
+code greedy / chat greedy) gave Nemotron on the M5 Max 288 / 223 / 292 / 243 tok/s, against 173 / 173 / 179 / 176
+for mlx_lm's own server through the same client. The 138 in the table above was TensorFold's older server
+running mlx_lm's model, not mlx_lm itself.
 
 ## DGX Spark and other NVIDIA GPUs
 

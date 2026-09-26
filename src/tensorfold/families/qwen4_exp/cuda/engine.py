@@ -1,8 +1,8 @@
 """The Qwen3.8 Flash Next CUDA engine behind ``tensorfold.cuda.server``: one GPU, or two ranks over NCCL.
 
-One request decodes at a time, MTP-drafted: a round verifies the pending token and up to ``depth`` drafts,
-and a chain ends before a draft the MTP head gives less than ``confidence``. Drafted output is byte-identical
-to serial decoding on the same engine and ranks.
+One request decodes at a time, MTP-drafted: a round verifies the pending token and 1 to ``depth`` drafts (a
+chain ends before a later draft the MTP head gives less than ``confidence``), so every round is a window of two
+rows or more. Drafted output is byte-identical to serial decoding on the same engine and ranks.
 
 Prefix reuse: the engine keeps the state after the last request's prompt and after its reply, and a prompt
 that extends either resumes from it. The caches hold one sequence, so the kept states are prefixes of it; a
@@ -61,8 +61,8 @@ class FlashNextEngine:
                  draft_vocab=draft_vocab if self.depth > 0 else None)
         w.comm = self.comm
         if self.depth > 0 and w.mtp is None:
-            print("[tensorfold] this checkpoint has no MTP head: decoding without drafts", flush=True)
-            self.depth = 0
+            raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
+                             "that has it, or --no-drafts for the serial reference (one token a round)")
         self.w = w
         self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs)
         started = time.perf_counter()
@@ -76,8 +76,8 @@ class FlashNextEngine:
         self.served = 0
         self.cache: list[tuple[list[int], dict]] = []    # (committed ids, what resuming from them needs)
         self.serial = None                                # the serial requests' engine, made on first use
-        rule = (f"up to {self.depth} MTP drafts a round, a chain stops before a draft under {self.confidence:.0%}"
-                if self.depth else "no drafts")
+        rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
+                f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {self.max_len}-token context; n-gram tables read in "
               f"{read_s:.1f}s; {captured} decode graphs captured", flush=True)
 
@@ -216,7 +216,7 @@ class FlashNextEngine:
         if self.depth > 0:
             res = mtp_decode(self.e, first, max_tokens, sampling, depth=self.depth, confidence=self.confidence,
                              stop_eos=True, on_tokens=on_tokens)
-            stats.update(drafted=res.drafted, accepted=res.accepted)
+            stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=True, on_tokens=on_tokens)
         if res.committed:          # the reply's state: every committed position is in the MTP cache

@@ -38,9 +38,10 @@ CONFIG = {
 }
 
 
-def _checkpoint(path, exl3: bool = False) -> None:
+def _checkpoint(path, exl3: bool = False, mtp: bool = True) -> None:
     """The synthetic model as an MLX 4-bit checkpoint, or with ``exl3`` as an EXL3 one: routed experts as trellis
-    tiles with their scales, every other weight BF16 (the layout of Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw)."""
+    tiles with their scales, every other weight BF16 (the layout of Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw).
+    ``mtp=False`` leaves out the MTP layer (the last tensors written, so the others keep their values)."""
 
     rng = np.random.default_rng(3)
     tensors: list[tuple[str, str, list[int], np.ndarray]] = []
@@ -129,18 +130,21 @@ def _checkpoint(path, exl3: bool = False) -> None:
     q4(L + "layers.0.mlp.down_proj", D, 256)
     dsa(L + "layers.1.")
     moe(L + "layers.1.")
-    m = L + "layers.2."
-    bf16(m + "enorm.weight", [D], 0.05, 1.0)
-    bf16(m + "hnorm.weight", [D], 0.05, 1.0)
-    q4(m + "eh_proj", D, 2 * D)
-    bf16(m + "shared_head.norm.weight", [D], 0.05, 1.0)
-    bf16(m + "input_layernorm.weight", [D], 0.05, 1.0)
-    bf16(m + "post_attention_layernorm.weight", [D], 0.05, 1.0)
-    dsa(m)
-    moe(m)
+    if mtp:
+        m = L + "layers.2."
+        bf16(m + "enorm.weight", [D], 0.05, 1.0)
+        bf16(m + "hnorm.weight", [D], 0.05, 1.0)
+        q4(m + "eh_proj", D, 2 * D)
+        bf16(m + "shared_head.norm.weight", [D], 0.05, 1.0)
+        bf16(m + "input_layernorm.weight", [D], 0.05, 1.0)
+        bf16(m + "post_attention_layernorm.weight", [D], 0.05, 1.0)
+        dsa(m)
+        moe(m)
     path.mkdir(parents=True, exist_ok=True)
     split.write(str(path / "model-00001-of-00001.safetensors"), tensors, {"format": "mlx"})
     config = json.loads(json.dumps(CONFIG))
+    if not mtp:
+        config["text_config"]["num_nextn_predict_layers"] = 0
     if exl3:
         del config["quantization"]
         config["quantization_config"] = {"quant_method": "exl3", "bits": 4, "codebook": "mcg", "head_bits": 16}
@@ -255,7 +259,7 @@ def test_drafted_replies_equal_serial(engine, sampling):
     for policy in (None, "auto", "1", "2", "3", "c3:0.35", "a:0.6:0.85"):
         drafted, stats = _generate(engine, prompt, sampling, policy=policy)
         assert drafted == serial, policy
-        assert stats["rounds"] >= 1
+        assert stats["rounds"] >= 1 and stats["min_rows"] >= 2, (policy, stats)     # every round a window
 
 
 @pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
@@ -346,3 +350,36 @@ def test_exl3_checkpoint_resumes(engine_x):
     _generate(engine_x, unrelated, sampling)
     cold, stats = _generate(engine_x, after, sampling)
     assert stats["cached"] == 0 and warm == cold
+
+
+@pytest.fixture(scope="module")
+def engine_n(tmp_path_factory):
+    """A checkpoint without the MTP head, with the drafter: every policy drafts with DFlash2."""
+
+    from tensorfold.families.glm5_next.cuda.engine import GlmEngine
+
+    path = tmp_path_factory.mktemp("glm_n")
+    _checkpoint(path / "model", mtp=False)
+    _drafter(path / "dflash2")
+    with pytest.raises(ValueError, match="no MTP head"):
+        GlmEngine(path / "model", rank=0, master="", port=0, comm=_TwoCopies())
+    return GlmEngine(path / "model", rank=0, master="", port=0, drafter=path / "dflash2", comm=_TwoCopies())
+
+
+@pytest.mark.parametrize("sampling", [Sampling(77, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
+def test_no_mtp_head_drafts_with_dflash2(engine_n, sampling):
+    """Without the MTP head the default and every MTP spec run as DFlash2 drafts: still windows, still serial's
+    tokens, never one token a round."""
+
+    from tensorfold.families.glm5_next.cuda.engine import DFLASH_POLICY, encode_policy
+
+    assert engine_n.w.mtp is None
+    assert engine_n._effective(encode_policy("auto")) == encode_policy(DFLASH_POLICY)
+    assert engine_n._effective(encode_policy("2")) == encode_policy("f2")
+    assert engine_n._effective(encode_policy("0")) == encode_policy("0")
+    prompt = list(np.random.default_rng(13).integers(0, 1000, size=39))
+    serial, _ = _generate(engine_n, prompt, sampling, draft=False, tokens=32)
+    for policy in (None, "auto", "2", "c3:0.35", "a:0.6:0.85", "f3"):
+        drafted, stats = _generate(engine_n, prompt, sampling, policy=policy, tokens=32)
+        assert drafted == serial, policy
+        assert stats["min_rows"] >= 2 and "m" not in stats.get("drafters", ""), (policy, stats)

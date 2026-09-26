@@ -270,6 +270,8 @@ def test_tp_mtp_drafts_give_serial_tokens_on_both_ranks(models, sampling):
             out[name] = got.tokens
             out[name + "_accepted"] = got.accepted
             out[name + "_drafted"] = got.drafted
+            out[name + "_rounds"] = got.rounds
+            out[name + "_min_rows"] = min(got.widths)
         return out
 
     for group in (ranks, drafts):
@@ -278,7 +280,9 @@ def test_tp_mtp_drafts_give_serial_tokens_on_both_ranks(models, sampling):
         assert a == b
         for name in ("d1", "d3", "d5", "d5c", "d6c30", "d7c90"):
             assert a[name] == a["serial"], (name, group is drafts)
-        assert a["d5c_drafted"] <= a["d5_drafted"] and a["d7c90_drafted"] == 0
+            assert a[name + "_min_rows"] >= 2, name                  # every round verifies a draft
+        # at 90% the random head's first draft is always under the cut: it is verified alone
+        assert a["d5c_drafted"] <= a["d5_drafted"] and a["d7c90_drafted"] == a["d7c90_rounds"]
 
 
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=77, top_k=20, top_p=0.95)])

@@ -145,7 +145,8 @@ def test_a_draft_vocabulary_changes_speed_only(sampling):
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=5, top_k=20, top_p=0.95)])
 @pytest.mark.parametrize("vocab", [False, True])
 def test_confidence_stopped_chains_give_serial_tokens(sampling, vocab):
-    """Chains that end before a low-probability draft (the head's softmax at temperature 1) change speed only."""
+    """Chains that end before a low-probability draft (the head's softmax at temperature 1) change speed only, and
+    every round still verifies the pending token and at least one draft: no round decodes one token."""
 
     w = _model()
     if vocab:
@@ -157,13 +158,14 @@ def test_confidence_stopped_chains_give_serial_tokens(sampling, vocab):
     e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, graphs=True)
     first = prefill(e, prompt, sampling)
     ref = serial_decode(e, first, 24, sampling).tokens
-    drafted = {}
+    drafted, rounds = {}, {}
     for conf in (0.0, 0.0005, 0.002, 0.9):
         prefill(e, prompt, sampling)
         got = mtp_decode(e, first, 24, sampling, depth=5, confidence=conf)
         assert got.tokens == ref, conf
-        drafted[conf] = got.drafted
-    assert drafted[0.9] == 0 and drafted[0.0] > 0
+        assert min(got.widths) >= 2 and len(got.widths) == got.rounds, (conf, got.widths)
+        drafted[conf], rounds[conf] = got.drafted, got.rounds
+    assert drafted[0.9] == rounds[0.9] and drafted[0.0] > drafted[0.9]      # at 0.9: the first draft alone
 
 
 def test_server_engine_streams_serial_tokens(tmp_path):
@@ -227,8 +229,8 @@ def test_the_family_hook_serves_the_recipe(tmp_path, sampling):
     first = prefill(eng.e, prompt, sampling)
     ref = serial_decode(eng.e, first, 30, sampling, stop_eos=True).tokens
     got: list[int] = []
-    eng.generate(prompt, 30, sampling, lambda new: got.extend(new))
-    assert got == ref
+    stats = eng.generate(prompt, 30, sampling, lambda new: got.extend(new))
+    assert got == ref and stats["min_rows"] >= 2
     serial = cuda_engine(tmp_path, no_drafts=True, context=1024)
     assert (serial.depth, serial.max_len) == (0, 1024) and serial.w.mtp is None
     plain: list[int] = []

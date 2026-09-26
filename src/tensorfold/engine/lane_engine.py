@@ -21,6 +21,9 @@ The protocol is mlx_lm's own batch-cache protocol:
 Every committed token is the model's own sample for its row. With the lane kernels (``kernels.lane_qmm``,
 ``kernels.lane_attention``; GPUs with tensor units) a row of any window gets the bits a one-row step gives it,
 so drafted output is byte-identical to one-token-a-round decoding.
+
+Model families with their own forward and caches (``lane_family``: Nemotron-H, Flash Next) take the family
+rounds of ``engine.lane_family`` instead of the batch-cache protocol above.
 """
 
 from __future__ import annotations
@@ -29,6 +32,8 @@ from dataclasses import dataclass, field
 import os
 import time
 from typing import Any, Callable, Sequence
+
+from tensorfold.engine.lane_family import FamilyRounds
 
 
 # --------------------------------------------------------------------------
@@ -191,6 +196,7 @@ class LaneStream:
     drafted: int = 0
     accepted: int = 0
     idle_rounds: int = 0        # rounds in a row that offered no DFlash2 drafts (``LaneEngine._paying_drafts``)
+    min_rows: int = 0           # the narrowest verify window of the stream's rounds so far (0: none yet)
     full_rounds: int = 0
     partial_rounds: int = 0
     refeed_tokens: int = 0
@@ -473,7 +479,7 @@ _PROFILE = os.environ.get("TF_ROUND_PROFILE", "") == "1"   # diagnostic syncs: c
 _SHADOW = os.environ.get("TF_SHADOW_STATS", "") == "1"
 
 
-class LaneEngine:
+class LaneEngine(FamilyRounds):
     """Drive N exact streams through shared wide verify rounds."""
 
     # Rows a draft window may use without strong evidence (see ``_drafts_for``).
@@ -508,6 +514,18 @@ class LaneEngine:
     window_costs: dict[int, float] | None = None
     # rounds without DFlash2 drafts before one offers a draft again, keeping the acceptance estimate current
     probe_every = 8
+    # The decoder of tree rounds and lane prefill: ``lane_tree.tree_forward`` (None) or a family's own with the
+    # same contract (``kernels.row_forward.forward`` on GPUs without tensor units)
+    lane_forward: Callable[..., Any] | None = None
+    # Its commit (None: ``lane_tree.commit_tree``), for a decoder whose record differs
+    lane_commit: Callable[..., Any] | None = None
+    # Draft trees in tree rounds (False: chains only, for a decoder without a tree attention)
+    tree_drafts = True
+    # Exact resumes without the lane decoder's prefill (``lane_prefill`` 0): prompts are prefilled in chunks on a
+    # grid of this many tokens from position 0, checkpoints are taken only on the grid and decoded states are not
+    # kept, so a prompt resumed from a checkpoint is prefilled in exactly the chunks a fresh prefill uses and gets
+    # its bits (0: chunks and checkpoints anywhere, decoded states kept)
+    prefill_align = 0
 
     PAD_TOKEN = 0
 
@@ -554,6 +572,10 @@ class LaneEngine:
         self.round_stats: list[RoundStats] = []
         self._stack: tuple[Any, Any, Callable[[Any], Any]] | None = None
         self._pending_join: list[tuple[LaneStream, list[Any]]] = []
+        # a model family with its own forward and caches (``engine.lane_family``)
+        self.family = bool(getattr(model, "lane_family", False))
+        if self.family:
+            self._family_setup()
 
     # -- model plumbing --------------------------------------------------
     def _resolve_stack(self) -> tuple[Any, Any, Callable[[Any], Any]]:
@@ -669,6 +691,9 @@ class LaneEngine:
 
         import mlx.core as mx
 
+        if self.family:
+            return self._family_prefill(stream, cache=cache, cached_tokens=cached_tokens,
+                                        checkpoints_at=checkpoints_at)
         if not stream.prompt_ids:
             raise ValueError(f"{stream.stream_id}: empty prompt")
         work: list[Any]
@@ -680,6 +705,13 @@ class LaneEngine:
         start = int(cached_tokens)
         if not 0 <= start < len(stream.prompt_ids):
             raise ValueError(f"{stream.stream_id}: cached_tokens must leave a suffix to prefill")
+        align = self._align()
+        boundaries = sorted({int(b) for b in checkpoints_at})
+        if align:
+            if start % align:
+                # a state off the grid cannot resume exactly: the whole prompt again
+                work, start, cached_tokens = self.model.make_cache(), 0, 0
+            boundaries = sorted({(b // align) * align for b in boundaries})
         stream.history_checkpoints = []
         self._route_hidden(stream)
         # DFlash taps of every prefill segment, not just the last: a checkpoint boundary splits the
@@ -687,7 +719,7 @@ class LaneEngine:
         # agent session: the 5-token assistant header, not the user's message; 2026-09-23)
         taps_store = getattr(self.model, "_hidden_states", None)
         carried: list[Any] | None = None
-        for boundary in sorted({int(b) for b in checkpoints_at}):
+        for boundary in boundaries:
             if not start < boundary < len(stream.prompt_ids):
                 continue
             head = stream.prompt_ids[start:boundary]
@@ -737,7 +769,8 @@ class LaneEngine:
         only its own short suffix. The caller owns the returned cache.
         """
 
-
+        if self.family:
+            return self._family_prefill_prefix(prompt_ids, cache=cache, cached_tokens=cached_tokens)
         if not prompt_ids:
             raise ValueError("empty prefix")
         work: list[Any] = self.model.make_cache() if cache is None else cache
@@ -771,7 +804,7 @@ class LaneEngine:
             return self._lane_prefill_tokens(tokens, cache)
         _, core, head = self._resolve_stack()
         logits = None
-        step = max(1, int(self.prefill_step))
+        step = self._align() or max(1, int(self.prefill_step))
         for begin in range(0, len(tokens), step):
             chunk = [int(t) for t in tokens[begin:begin + step]]
             hidden = core(mx.array([chunk], dtype=mx.uint32), cache=cache)
@@ -792,8 +825,6 @@ class LaneEngine:
 
         import mlx.core as mx
 
-        from tensorfold.kernels.qwen.dense.v1 import lane_tree
-
         _, core, head = self._resolve_stack()
         width = max(1, int(self.lane_prefill))
         kv = next((item for item in cache if hasattr(item, "keys")), None)
@@ -808,12 +839,12 @@ class LaneEngine:
             last = begin + width >= len(tokens)
             self._reserve_keys(cache, end)           # once the first chunk has made the buffers
             t0 = time.perf_counter()
-            logits, record = lane_tree.tree_forward(core, head, chunk, [-1] + list(range(n - 1)), cache, start,
-                                                    pipeline_layers=self.pipeline_layers, last_only=True)
+            logits, record = self._tree_forward()(core, head, chunk, [-1] + list(range(n - 1)), cache, start,
+                                                  pipeline_layers=self.pipeline_layers, last_only=True)
             if _PROFILE:
                 mx.eval(*self._cache_arrays(cache), logits, *[a for entry in record for a in entry[1:] if isinstance(a, mx.array)])
                 t1 = time.perf_counter()
-            lane_tree.commit_tree(cache, record, list(range(n)), n, start)
+            self._tree_commit()(cache, record, list(range(n)), n, start)
             if _PROFILE:
                 mx.eval(*self._cache_arrays(cache))
                 t2 = time.perf_counter()
@@ -839,6 +870,48 @@ class LaneEngine:
         mx.clear_cache()
         return logits
 
+    def _align(self) -> int:
+        """The prefill grid (``prefill_align``) when prompts go through MLX's prefill, else 0."""
+
+        return int(self.prefill_align) if self.prefill_align and not self.lane_prefill else 0
+
+    def _keeps_decoded(self, stream: LaneStream) -> bool:
+        """Whether a finished stream's decoded state is kept for the next turn (never on a prefill grid: its rows
+        were decoded, not prefilled)."""
+
+        return self.retain_finished_caches and stream.retain and not self._align()
+
+    def _tree_forward(self) -> Callable[..., Any]:
+        forward = type(self).lane_forward            # a plain function (read off the class: not bound)
+        if forward is not None:
+            return forward
+        from tensorfold.kernels.qwen.dense.v1 import lane_tree
+
+        return lane_tree.tree_forward
+
+    def _tree_commit(self) -> Callable[..., Any]:
+        commit = type(self).lane_commit
+        if commit is not None:
+            return commit
+        from tensorfold.kernels.qwen.dense.v1 import lane_tree
+
+        return lane_tree.commit_tree
+
+    @staticmethod
+    def _chain_proposal(proposer: Any) -> Callable[[Sequence[int], int], tuple[list[int], list[int]]] | None:
+        """A proposer's chain (``propose``) as a tree proposal: (tokens, parents) with each token's parent the one
+        before it."""
+
+        propose = getattr(proposer, "propose", None)
+        if not callable(propose):
+            return None
+
+        def chain(context: Sequence[int], most: int) -> tuple[list[int], list[int]]:
+            tokens = [int(t) for t in propose(context, most)][:most]
+            return tokens, list(range(-1, len(tokens) - 1))
+
+        return chain
+
     def _reserve_keys(self, cache: list[Any], length: int) -> None:
         """Grow each attention cache once to hold ``length`` positions (it grew 256 at a time, copying)."""
 
@@ -863,6 +936,8 @@ class LaneEngine:
     def active_count(self) -> int:
         """Streams holding or about to hold a row."""
 
+        if self.family:
+            return sum(1 for s, _ in self._live if not s.finished)
         return sum(1 for s in self._active if not s.finished) + len(self._pending_join)
 
     def _shed_finished(self, *, force: bool = False) -> None:
@@ -899,6 +974,9 @@ class LaneEngine:
     def reset(self) -> None:
         """Drop every row after a failed round; streams keep their state."""
 
+        if self.family:
+            self._family_reset()
+            return
         self._batch = None
         self._active = []
         self._pending_join = []
@@ -913,6 +991,9 @@ class LaneEngine:
     ) -> None:
         """Prefill and queue a stream; it joins the batch at the next round."""
 
+        if self.family:
+            self._family_add_stream(stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at)
+            return
         cache = self.prefill(
             stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at
         )
@@ -933,6 +1014,8 @@ class LaneEngine:
 
         from tensorfold.engine.shared_prefix import fork_shared, install_shared_attention
 
+        if self.family:
+            return self.copy_single_cache(prefix_cache)
         if not getattr(self, "_shared_attention_installed", False):
             install_shared_attention(self.model)
             self._shared_attention_installed = True
@@ -947,6 +1030,9 @@ class LaneEngine:
         back-to-back prefills. The engine owns ``cache`` afterwards.
         """
 
+        if self.family:
+            self.add_stream(stream, cache=cache, cached_tokens=cached_tokens)
+            return
         cut = int(cached_tokens)
         if not 0 < cut < len(stream.prompt_ids):
             raise ValueError(f"{stream.stream_id}: cached_tokens must leave a suffix to absorb")
@@ -1102,8 +1188,13 @@ class LaneEngine:
         budget = min(self.max_draft, stream.draft_room - 1)
         if budget <= 0:
             return []
-        if self.window_costs is not None and hasattr(stream.proposer, "model_cap"):
-            stream.proposer.model_cap = self._paying_drafts(stream, budget)
+        if self.window_costs is not None:
+            # a tool-call proposer drafts through its fallback (DFlash2): that is the proposer to size. Before this,
+            # a request with tools never got a count here and drafted its whole budget every round.
+            drafter = stream.proposer if hasattr(stream.proposer, "model_cap") else getattr(stream.proposer,
+                                                                                           "fallback", None)
+            if drafter is not None and hasattr(drafter, "model_cap"):
+                drafter.model_cap = self._paying_drafts(stream, budget, drafter)
         try:
             proposal = stream.proposer.propose(stream.context, budget)
         except Exception:  # noqa: BLE001 - a proposer must never break a stream
@@ -1121,13 +1212,13 @@ class LaneEngine:
             budget = min(budget, max(0, self.exact_window - len(stream.pending)))
         return [int(t) for t in proposal][:budget]
 
-    def _paying_drafts(self, stream: LaneStream, budget: int) -> int:
+    def _paying_drafts(self, stream: LaneStream, budget: int, proposer: Any = None) -> int:
         """The number of DFlash2 drafts (0 to ``budget``) with the most expected committed tokens a millisecond,
         from ``window_costs``, the drafter's time a block and the stream's recent acceptance; after
-        ``probe_every`` rounds of none, one."""
+        ``probe_every`` rounds of none, one. ``proposer``: the DFlash2 proposer (default: the stream's)."""
 
         costs = self.window_costs or {}
-        proposer = stream.proposer
+        proposer = stream.proposer if proposer is None else proposer
         p = proposer.continue_rate()
         draft = proposer.draft_ms / proposer.proposals if proposer.proposals else costs[1] / 6
         best, best_rate = 0, 1.0 / costs[1]
@@ -1209,6 +1300,8 @@ class LaneEngine:
     def step(self) -> dict[str, list[int]]:
         """One shared verify round. Returns newly committed tokens per stream."""
 
+        if self.family:
+            return self._family_step()
         started = time.perf_counter()
         joined = self._absorb_joins()
         self._shed_finished()
@@ -1307,7 +1400,7 @@ class LaneEngine:
 
         if self.retain_finished_caches:
             for i, stream in enumerate(active):
-                if stream.finished and not idle[i] and stream.retain:  # finished this round
+                if stream.finished and not idle[i] and self._keeps_decoded(stream):  # finished this round
                     absorbed = stream.context[: stream.cache_len]
                     self.finished_caches[stream.stream_id] = (
                         absorbed,
@@ -1391,7 +1484,7 @@ class LaneEngine:
         landed[stream.stream_id] = tokens
         if stream.finished:
             stream.finished_at = time.perf_counter()
-            if self.retain_finished_caches and stream.retain:
+            if self._keeps_decoded(stream):
                 self.finished_caches[stream.stream_id] = (
                     stream.context[: stream.cache_len],
                     self._extract_row(cache, 0),
@@ -1468,7 +1561,11 @@ class LaneEngine:
         budget = min(nodes, stream.draft_room - 1, (int(self.exact_window) - 1) if self.exact_window else nodes)
         tokens: list[int] = []
         parents: list[int] = []
+        if budget > 0 and self.window_costs is not None and hasattr(stream.proposer, "model_cap"):
+            stream.proposer.model_cap = self._paying_drafts(stream, budget)
         propose_tree = getattr(stream.proposer, "propose_tree", None)
+        if not self.tree_drafts:
+            propose_tree = self._chain_proposal(stream.proposer)
         if budget > 0 and callable(propose_tree):
             try:
                 tokens, parents = propose_tree(stream.context, budget)
@@ -1495,8 +1592,8 @@ class LaneEngine:
         # forward's first layer goes to the GPU alone: 57.08 -> 56.47 ms a round, 700 rounds each, interleaved
         # in one process (2026-09-24)
         self._route_hidden(stream)
-        logits, record = lane_tree.tree_forward(core, head, window, rows_parents, cache, start,
-                                                pipeline_layers=self.pipeline_layers)
+        logits, record = self._tree_forward()(core, head, window, rows_parents, cache, start,
+                                              pipeline_layers=self.pipeline_layers)
         lane_tree.HIDDEN_SINK = None
         top = None
         if stream.sampling is not None:
@@ -1550,7 +1647,7 @@ class LaneEngine:
             stream.partial_rounds += 1
         post_ms = (time.perf_counter() - post_started) * 1e3
         rollback_started = time.perf_counter()
-        lane_tree.commit_tree(cache, record, kept, len(window), start)
+        self._tree_commit()(cache, record, kept, len(window), start)
         # left lazy: the next forward (or a finished row's extraction) evaluates the commit. Handing it to
         # the GPU at once measured no faster (58.4 against 57.7 ms a round, 400 rounds each, 2026-09-24):
         # its GPU time is ~0.5 ms, less than the extra host sync costs
@@ -1567,7 +1664,7 @@ class LaneEngine:
         landed_map[stream.stream_id] = landed
         if stream.finished:
             stream.finished_at = time.perf_counter()
-            if self.retain_finished_caches and stream.retain:
+            if self._keeps_decoded(stream):
                 self.finished_caches[stream.stream_id] = (
                     stream.context[: stream.cache_len],
                     self._extract_row(cache, 0),
@@ -1606,6 +1703,8 @@ class LaneEngine:
 
     # -- reporting ------------------------------------------------------------
     def summary(self) -> dict[str, Any]:
+        if self.family:
+            return self._family_summary()
         rounds = self.round_stats
         total_rows = sum(r.rows for r in rounds)
         total_committed = sum(r.committed for r in rounds)

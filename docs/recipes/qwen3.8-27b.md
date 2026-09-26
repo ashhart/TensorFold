@@ -125,10 +125,20 @@ off (tools/bench_openai.py):
 | | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
 | --- | ---: | ---: | ---: | ---: |
 | Serial (`--no-drafts`) | 38.2 | 38.2 | 39.3 | 39.3 |
-| DFlash2, per-round draft count | 63.9 | 47.0 | 64.4 | 51.6 |
-| Speedup | 1.67x | 1.23x | 1.64x | 1.31x |
+| 0.3.3: DFlash2, per-round draft count, row-exact matvec | 63.9 | 47.0 | 64.4 | 51.6 |
+| 0.3.4: the lane decoder and the simdgroup matmul (3 seeds) | 141.3 | 73.9 | 158.4 | 74.2 |
+| Speedup, 0.3.4 | 3.70x | 1.93x | 4.03x | 1.89x |
 
-Window costs there, whole model: 1 row 26.7 ms, 2 rows 34.8, 4 rows 53.7, 8 rows 101.9. Every drafted reply
+In 0.3.4 the verify window runs through `kernels/qwen/dense/v1/row_forward.py`, the lane decoder without tensor
+units: the lane glue, stacked projections and the lane recurrence, with every matmul through
+`kernels/qwen/dense/v1/simd_qmm.py`. That kernel dequantizes each 8x8 weight tile once and multiplies up to 16
+rows with the simdgroup matrix units every Apple GPU has, so a row's bits never depend on how many rows ride
+with it. Serial decoding, windows and prompts all go through it. Window costs on the M3 Ultra: 1 row 25.0 ms,
+2 to 8 rows about 32 ms, 9 to 16 rows about 53 ms. Prompts resume only from a 2,048-token grid
+(`TF_ROW_PREFILL=aligned`, the default), so a resumed conversation equals a fresh one at MLX's prompt speed.
+`TF_ROW_MATMUL=row_qmv` restores 0.3.3's matvec.
+
+In 0.3.3, window costs there were 1 row 26.7 ms, 2 rows 34.8, 4 rows 53.7, 8 rows 101.9. Every drafted reply
 equaled the same request with `"draft": false` (9 of 9), and replies resumed from different cached amounts
 were identical. On an M5 Max with the lane kernels forced off (`--lane-kernels off`, MLX 0.31.2) the same path
 gave 49.1 / 39.6 / 48.9 / 40.5 against about 31 tok/s serial. With the lane kernels on, the M5 Max numbers

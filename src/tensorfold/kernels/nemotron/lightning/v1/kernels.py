@@ -487,6 +487,9 @@ class FusedDecode:
             elif layer.block_type == "E" and fold_shared:
                 self.experts[i] = _fold_shared(layer.mixer)
         self.shared_slots = 2 if fold_shared else 0
+        # the routed experts: None runs MLX's switch_mlp gather; else fn(table, x, experts) -> [R, K, D] bf16
+        # (``rows.experts``, row-exact by construction, on GPUs without tensor units)
+        self.experts_fn: Any = None
 
     def __call__(self, inputs: mx.array, cache: list[Any]) -> mx.array:
         """Hidden states after the final norm, [1, R, D], for R consecutive tokens (batch 1)."""
@@ -649,6 +652,8 @@ class FusedDecode:
         experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling,
                                  shared_slots=self.shared_slots)
         table = self.experts.get(index)
+        fn = self.experts_fn
         if table is None:
-            return mixer.switch_mlp(x, experts), weights, mixer.shared_experts(x)
-        return table(x, experts), weights, None                                 # [R, K + 2, D], shared inside
+            routed = mixer.switch_mlp(x, experts) if fn is None else fn(mixer.switch_mlp, x, experts)
+            return routed, weights, mixer.shared_experts(x)
+        return (table(x, experts) if fn is None else fn(table, x, experts)), weights, None   # shared inside

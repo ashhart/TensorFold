@@ -265,7 +265,14 @@ _SOURCE = r"""
   }
 """
 
+# A draft head that scores a subset of the vocabulary (column c is token IDS[c], ids ascending): the noise is keyed by
+# the token id, not the column, so a draft still shares the target's noise at its position; the draw is the id.
+_SOURCE_IDS = (_SOURCE.replace("tf_uniform(seed, position, ci[t])", "tf_uniform(seed, position, IDS[ci[t]])")
+               .replace("TOK[row] = ci[bj];", "TOK[row] = IDS[ci[bj]];"))
+assert _SOURCE_IDS.count("IDS[") == 2
+
 _kernel: Any = None
+_kernel_ids: Any = None
 
 
 def _get_kernel() -> Any:
@@ -278,12 +285,26 @@ def _get_kernel() -> Any:
     return _kernel
 
 
-def sample(logits: mx.array, sampling: Any, positions: Sequence[int] | mx.array) -> mx.array:
-    """Tokens [R] (uint32, lazy) for logits [R, V] at absolute ``positions``; greedy when ``sampling`` is None."""
+def _get_kernel_ids() -> Any:
+    global _kernel_ids
+    if _kernel_ids is None:
+        digest = hashlib.sha256((_HEADER + _SOURCE_IDS).encode()).hexdigest()[:16]
+        _kernel_ids = mx.fast.metal_kernel(
+            name=f"tf_gpu_sample_ids_{digest}", input_names=["L", "seeds", "positions", "cfg", "kcap", "IDS"],
+            output_names=["TOK"], source=_SOURCE_IDS, header=_HEADER)
+    return _kernel_ids
+
+
+def sample(logits: mx.array, sampling: Any, positions: Sequence[int] | mx.array, ids: mx.array | None = None
+           ) -> mx.array:
+    """Tokens [R] (uint32, lazy) for logits [R, V] at absolute ``positions``; greedy when ``sampling`` is None.
+    ``ids`` [V] (uint32, ascending): the logits' columns are those token ids (a draft head over part of the
+    vocabulary); the noise is keyed by id and the result is an id."""
 
     logits = logits.reshape(-1, logits.shape[-1])
     if sampling is None:
-        return mx.argmax(logits, axis=-1).astype(mx.uint32)
+        picked = mx.argmax(logits, axis=-1).astype(mx.uint32)
+        return picked if ids is None else ids[picked]
     rows, vocab = logits.shape
     seed = int(sampling.seed) & 0xFFFFFFFFFFFFFFFF
     seeds = mx.array([seed & 0xFFFFFFFF, seed >> 32] * rows, dtype=mx.uint32)
@@ -292,6 +313,12 @@ def sample(logits: mx.array, sampling: Any, positions: Sequence[int] | mx.array)
     assert isinstance(positions, mx.array)
     cfg = mx.array([1.0 / max(float(sampling.temperature), 1e-6), float(sampling.top_p), NEAR], dtype=mx.float32)
     kcap = mx.array([int(sampling.top_k or 0)], dtype=mx.uint32)
+    if ids is not None:
+        return _get_kernel_ids()(
+            inputs=[logits, seeds, positions.astype(mx.uint32), cfg, kcap, ids],
+            template=[("V", vocab), ("C", CANDIDATES)],
+            grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
+            output_shapes=[(rows,)], output_dtypes=[mx.uint32])[0]
     return _get_kernel()(
         inputs=[logits, seeds, positions.astype(mx.uint32), cfg, kcap],
         template=[("V", vocab), ("C", CANDIDATES)],

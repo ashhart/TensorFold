@@ -1,9 +1,9 @@
 """Nemotron-H (model_type ``nemotron_h``), e.g. Nemotron 3.5 Lightning 30B-A3B.
 
-``model``: mlx_lm's blocks with the backbone and head apart, decoded through ``kernels`` (TensorFold's fused
-decode, one step ahead on the GPU) with copy windows verified exactly; ``mtp``: the MTP head (converted from the
-BF16 release with ``mtp.convert``; the tested checkpoint ships it as ``mtp-4bit.safetensors``), whose draft each
-step verifies when it is present.
+``model``: mlx_lm's blocks with the backbone and head apart, decoded by the lane engine's family rounds
+(``engine.lane_family``) through ``kernels`` (TensorFold's fused decode); ``mtp``: the MTP head (converted from
+the BF16 release with ``mtp.convert``; the tested checkpoint ships it as ``mtp-4bit.safetensors``), whose chained
+drafts every round verifies, as many as pay at the measured window costs.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 
 MODEL_TYPES = ("nemotron_h",)
 TITLE = "Nemotron 3.5 Lightning"
-LANES = False
+LANES = True
 MODELS = ("Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",)
 REQUIRED_FILES = {MODELS[0]: ("mtp-4bit.safetensors",)}
 KERNEL_PACKAGE = "tensorfold.kernels.nemotron.lightning.v1"
@@ -29,3 +29,10 @@ def load(model_dir: Path, *, mtp_head: str = "", mtp_drafts: int | None = None, 
     from tensorfold.families.nemotron_h.model import load as load_model
 
     return load_model(Path(model_dir), mtp_head=mtp_head, mtp_drafts=mtp_drafts)
+
+
+def engine_settings(model: Any) -> dict[str, Any]:
+    """Rows a round verifies at most: the widest window checked exact at load."""
+
+    width = int(getattr(model, "exact_width", 1) or 1)
+    return {"max_rows": width, "max_draft": max(0, width - 1)}

@@ -1,11 +1,11 @@
-"""Flash Next as the serial engine serves it: the fused decode plus the checkpoint's MTP head.
+"""Flash Next as the lane engine serves it: the fused decode plus the checkpoint's MTP head.
 
-``FlashNext`` wraps the model (``model.py``) with what ``family_engine.SerialEngine``
-drafts with:
+``FlashNext`` wraps the model (``model.py``) with what the lane engine's family rounds
+(``engine.lane_family``) drive:
 
-- ``multi_row_exact``: a forward of 2-4 consecutive rows gives each row a
-  one-row forward's bits (checked at load on this MLX and GPU), so drafted rows
-  are verified exactly;
+- ``exact_width``: the widest window (up to 16 rows) whose every row gets a one-row
+  forward's bits, checked at load on this MLX and GPU, and ``window_costs``, each
+  exact width's forward time; drafted rows are verified exactly;
 - ``keep_rows``: roll every cache back to a prefix of a verified window;
 - the MTP head: its cache absorbs each kept position (main-model streams and the
   sampled next token), then it chains ``drafts`` drafts from the last one. Drafts
@@ -37,6 +37,7 @@ class FlashNext:
     """Flash Next with the backbone and head apart, the fused decode, and MTP drafting."""
 
     fused_rows = 16
+    lane_family = True
     # tokens drawn by gpu_sampling (the exact keyed rule in one kernel): the host sampler's argpartition of
     # 248k logits and readback cost ~2 ms a draw on the M3 Ultra, twice a drafted round (2026-09-25)
     gpu_sampling = True
@@ -48,7 +49,8 @@ class FlashNext:
         self.layer_count = len(model.layers)
         self.mtp = None
         self.drafts = int(drafts)
-        self.multi_row_exact = self.fused is not None and self.rows_match_serial()
+        self.exact_width, self.window_costs = self.check_windows() if self.fused is not None else (1, {})
+        self.multi_row_exact = self.exact_width >= 2
         if self.fused is not None and not self.multi_row_exact:
             print("[flash-next] a multi-row forward does not reproduce serial steps on this MLX/GPU: no drafts",
                   flush=True)
@@ -66,6 +68,40 @@ class FlashNext:
             self._mtp_scales = [1.0 + head.pre_fc_norm_embedding.weight.astype(mx.float32),
                                 1.0 + head.pre_fc_norm_hidden.weight.astype(mx.float32)]
             mx.eval(*self._mtp_scales)
+            import os
+
+            # the head scores a fixed list of 79,591 ids (TF_FLASH_DRAFT_VOCAB=0: the whole vocabulary), and a
+            # round's chained drafts stay on the GPU until the next round reads them (TF_FLASH_QUEUED=0: each read)
+            self._draft_ids = self._draft_head = None
+            if os.environ.get("TF_FLASH_DRAFT_VOCAB", "1") != "0":
+                from tensorfold.families.qwen4_exp.draft_head import cut_head, draft_ids
+
+                ids = draft_ids()
+                self._draft_ids = mx.array(ids)
+                self._draft_head = cut_head(model.lm_head, ids)
+            self.queued_chains = os.environ.get("TF_FLASH_QUEUED", "1") != "0"
+            self.mtp_step_ms = self._time_mtp_step()
+
+    queued_chains = False
+
+    mtp_step_ms = 0.0
+
+    def _time_mtp_step(self) -> float:
+        """One chained draft step as ``settle`` takes it (the head's layer, the vocabulary head, a draw read back),
+        ms, fastest of 6: the engine's depth rule adds it per draft before measured rounds replace the estimate."""
+
+        import time
+
+        cache = MTPCache()
+        mixed, out = self._mtp_step([3001], self.fused.last_streams[-1:], cache)
+        mx.eval(mixed, out)
+        best = float("inf")
+        for i in range(6):
+            started = time.perf_counter()
+            mixed, out = self._mtp_step([3002 + i], out, cache)
+            self._draft_draw(mixed, None, [100 + i]).item()
+            best = min(best, (time.perf_counter() - started) * 1e3)
+        return round(best, 3)
 
     # -- the serial engine's model interface ----------------------------------------
     @property
@@ -85,12 +121,33 @@ class FlashNext:
             cache.append(MTPCache())
         return cache
 
+    # Prompts through the decode kernels, ``fused_rows`` rows at a time: each prompt row then gets a one-row step's
+    # bits whatever the chunking, so a prompt resumed from any cached prefix (a checkpoint, a finished reply's
+    # cache) gives what the same prompt fed fresh gives. MLX's prefill kernels sum a row differently by chunk: a
+    # second chat turn resumed from the first differed from the same turn fed fresh (thinking on, M3 Ultra,
+    # 2026-09-26). False: MLX's prefill (faster, not exact across chunkings).
+    exact_prefill = True
+
     def hidden(self, inputs: Any, cache: list[Any]) -> mx.array:
         tokens = np.asarray(inputs, dtype=np.int64)
         if tokens.ndim == 1:
             tokens = tokens[None]
+        rows = tokens.shape[1]
+        if self.fused is not None and rows > self.fused_rows and self.exact_prefill and tokens.shape[0] == 1:
+            layers = cache[: self.layer_count]
+            outs, streams = [], []
+            for begin in range(0, rows, self.fused_rows):
+                outs.append(self.fused(tokens[:, begin:begin + self.fused_rows], layers))
+                streams.append(self.fused.last_streams)
+                # one window in flight behind the one being built: the host builds a window in a few ms and the
+                # GPU runs it in ~60, and every window's per-row DeltaNet states (1.8 GB) stay alive until it runs
+                mx.async_eval(outs[-1], streams[-1])
+                if len(outs) > 1:
+                    mx.eval(outs[-2])
+            self._streams = mx.concatenate(streams)
+            return mx.concatenate(outs, axis=1)
         out = self.model.hidden(tokens, cache[: self.layer_count])
-        fused = self.fused is not None and tokens.shape[1] <= self.fused_rows
+        fused = self.fused is not None and rows <= self.fused_rows
         self._streams = self.fused.last_streams if fused else self.model.__dict__["last_streams"]
         return out
 
@@ -152,6 +209,24 @@ class FlashNext:
         x = head.layers[0](x[None], None, mtp_cache)
         return head.hyper_connection_mixer(x), x[0]
 
+    def _draft_draw(self, mixed: mx.array, sampling: Any, positions: Any) -> mx.array:
+        """Drafts (uint32 [n], lazy) from the head's mixed hidden states [1, n, D]: the target's keyed rule over the
+        listed ids when the head is cut, else over the whole vocabulary."""
+
+        from tensorfold.families.qwen4_exp.decode import project
+
+        x = mixed.reshape(-1, mixed.shape[-1])
+        if self._draft_head is not None:
+            from tensorfold.families.qwen4_exp.draft_head import sample as draft_sample
+
+            return draft_sample(project(x, self._draft_head), self._draft_ids, sampling, positions)
+        from tensorfold.engine.gpu_sampling import sample as gpu_sample
+
+        return gpu_sample(self.head(x[None]).reshape(x.shape[0], -1), sampling, positions)
+
+    _draft_head: Any = None
+    _draft_ids: Any = None
+
     def _absorb(self, streams: mx.array, tokens: list[int], mtp_cache: MTPCache) -> tuple[mx.array, mx.array]:
         if mtp_cache.drafted:
             mtp_cache.trim(mtp_cache.drafted, self.args.indexer_compress_ratio)
@@ -169,32 +244,35 @@ class FlashNext:
         drafts: list[int] = []
         count = self.drafts if count is None else int(count)
         for j in range(count):
-            d = _sample(self.model.head(mixed), position + j, sampling)
+            d = int(self._draft_draw(mixed, sampling, [position + j]).item())
             drafts.append(d)
             if j + 1 < count:
                 mixed, out = self._mtp_step([d], out, mtp_cache)
                 mtp_cache.drafted += 1
         return drafts
 
-    def speculate(self, cache: list[Any], tokens: mx.array, position: int, sampling: Any) -> mx.array:
-        """Before a verify round's tokens are read: the MTP head absorbs every row of the last hidden() call (its
-        streams; ``tokens`` [R], the round's sampled tokens still on the GPU, as their next tokens) and draws each
-        row's first draft, for positions ``position`` + 2 + r (``position``: the first row's). One read then
-        returns both; ``settle`` keeps the kept rows' part. Rows go through the MTP head exactly as ``draft``
-        would take the kept ones (the fused kernels give a row the same bits at any row count), so the drafts
-        and the MTP cache are the same, a host round trip earlier. Returns the drafts [R] (lazy)."""
-
-        from tensorfold.engine.gpu_sampling import sample as gpu_sample
+    def speculate(self, cache: list[Any], tokens: mx.array, position: int, sampling: Any, start: int = 0,
+                  last_only: bool = False) -> mx.array:
+        """Before a verify round's tokens are read: the MTP head absorbs rows ``start`` .. of the last hidden()
+        call (their streams; ``tokens`` [n], the tokens that follow them, still on the GPU) and draws each row's
+        first draft, for positions ``position`` + 2 + i (``position``: row ``start``'s). One read then returns
+        both; ``settle`` keeps the kept rows' part. Rows go through the MTP head exactly as ``draft`` would take
+        the kept ones (the fused kernels give a row the same bits at any row count), so the drafts and the MTP
+        cache are the same, a host round trip earlier. Returns the drafts [n] (lazy)."""
 
         mtp_cache = cache[-1]
         if mtp_cache.drafted:
             mtp_cache.trim(mtp_cache.drafted, self.args.indexer_compress_ratio)
             mtp_cache.drafted = 0
-        rows = int(self._streams.shape[0])
-        mixed, out = self._mtp_step(tokens, self._streams, mtp_cache)
+        tokens = tokens.reshape(-1)
+        rows = int(tokens.shape[0])
+        total = int(self._streams.shape[0])
+        start = start + total if start < 0 else start
+        mixed, out = self._mtp_step(tokens, self._streams[start:start + rows], mtp_cache)
         self._spec = (out, rows)
-        logits = self.head(mixed)
-        return gpu_sample(logits.reshape(logits.shape[1:]), sampling, [position + 2 + r for r in range(rows)])
+        if last_only:                      # the last row's draft only (every row still enters the head's cache)
+            return self._draft_draw(mixed[:, -1:], sampling, [position + 1 + rows])
+        return self._draft_draw(mixed, sampling, [position + 2 + r for r in range(rows)])
 
     def settle(self, cache: list[Any], keep: int, first: int, position: int, sampling: Any, count: int) -> list[int]:
         """After ``speculate``: forget the MTP entries of the rows past ``keep``, then the drafts for positions
@@ -207,12 +285,25 @@ class FlashNext:
             mtp_cache.trim(rows - keep, self.args.indexer_compress_ratio)
         if count <= 0:
             return []
-        drafts = [int(first)]
         streams = out[keep - 1:keep]
+        if not self.queued_chains:
+            drafts = [int(first)]
+            for j in range(1, count):
+                mixed, streams = self._mtp_step([drafts[-1]], streams, mtp_cache)
+                mtp_cache.drafted += 1
+                drafts.append(int(self._draft_draw(mixed, sampling, [position + j]).item()))
+            return drafts
+        if count == 1:
+            return [int(first)]
+        # each chained draft is drawn on the GPU and fed to the next step as an array: no read until the next
+        # round's inputs are built
+        chain = [mx.array([int(first)], dtype=mx.uint32)]
         for j in range(1, count):
-            mixed, streams = self._mtp_step([drafts[-1]], streams, mtp_cache)
+            mixed, streams = self._mtp_step(chain[-1], streams, mtp_cache)
             mtp_cache.drafted += 1
-            drafts.append(_sample(self.model.head(mixed), position + j, sampling))
+            chain.append(self._draft_draw(mixed, sampling, [position + j]))
+        drafts = mx.concatenate(chain)
+        mx.async_eval(drafts)
         return drafts
 
     def unspeculate(self, cache: list[Any]) -> None:
@@ -223,30 +314,43 @@ class FlashNext:
             self._spec = None
 
     # -- load-time check ------------------------------------------------------------------
-    def rows_match_serial(self) -> bool:
-        """Drafted rounds are exact only if a forward of 2-4 rows gives each row a one-row forward's bits."""
+    def check_windows(self, widest: int | None = None) -> tuple[int, dict[int, float]]:
+        """The widest window (up to ``fused_rows``) whose every narrower window gives each row a one-row forward's
+        logits bit for bit, from a 48-token prompt; and every exact width's forward time in ms (fastest of 3)."""
+
+        import time
 
         from tensorfold.engine.lane_engine import LaneEngine
 
+        copy = LaneEngine.copy_single_cache
+        widest = int(widest or self.fused_rows)
         prompt = np.array([[(37 * i + 11) % 50_000 + 1000 for i in range(48)]], dtype=np.int64)
+        window = [3001 + 17 * r for r in range(widest)]
         base = self.model.make_cache()
         mx.eval(self.model.hidden(prompt, base))
-        for width in (2, 3, 4):
-            one, many = LaneEngine.copy_single_cache(base), LaneEngine.copy_single_cache(base)
-            rows = [np.array([[3001 + 17 * r]], dtype=np.int64) for r in range(width)]
-            serial = mx.concatenate([self.head(self.model.hidden(t, one)) for t in rows], axis=1)
-            window = self.head(self.model.hidden(np.concatenate(rows, axis=1), many))
-            if not bool(mx.array_equal(serial, window).item()):
-                return False
-        return True
-
-
-def _sample(logits: mx.array, position: int, sampling: Any) -> int:
-    if sampling is None:
-        return int(mx.argmax(logits.reshape(-1)).item())
-    from tensorfold.engine.gpu_sampling import sample as gpu_sample
-
-    return int(gpu_sample(logits.reshape(1, -1), sampling, [position]).item())
+        one = copy(base)
+        serial = []
+        for token in window:
+            logits = self.head(self.model.hidden(np.array([[token]], dtype=np.int64), one))
+            mx.eval(logits)
+            serial.append(logits[0, -1])
+        exact = 1
+        for width in range(2, widest + 1):
+            logits = self.head(self.model.hidden(np.array([window[:width]], dtype=np.int64), copy(base)))
+            mx.eval(logits)
+            if not all(bool(mx.array_equal(logits[0, i], serial[i]).item()) for i in range(width)):
+                break
+            exact = width
+        costs: dict[int, float] = {}
+        for width in range(1, exact + 1):
+            best = float("inf")
+            for _ in range(3):
+                cache = copy(base)
+                started = time.perf_counter()
+                mx.eval(self.head(self.model.hidden(np.array([window[:width]], dtype=np.int64), cache)))
+                best = min(best, (time.perf_counter() - started) * 1e3)
+            costs[width] = round(best, 3)
+        return exact, costs
 
 
 def load(model_dir: Path, *, drafts: int | None = None) -> tuple[FlashNext, Any]:

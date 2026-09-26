@@ -55,3 +55,43 @@ def test_dflash_proposer_tracks_recent_acceptance():
     for _ in range(40):
         proposer.observe(4, 0)
     assert proposer.continue_rate() < 0.3
+
+
+def test_tool_requests_get_a_draft_count_through_the_fallback():
+    """A request with tools drafts through ToolCallProposer's DFlash2 fallback: the per-round count applies to it
+    (before 26 Sep it never got one on Macs without tensor units and drafted its whole budget every round)."""
+
+    from tensorfold.engine.tool_draft import ToolCallProposer
+
+    costs = {1: 27.0, 2: 35.0, 3: 43.0, 4: 54.0, 5: 64.0, 6: 77.0, 7: 89.0, 8: 102.0}   # M3 Ultra, 26 Sep
+    engine = LaneEngine.__new__(LaneEngine)
+    engine.window_costs = costs
+    engine.max_draft, engine.pending_cap, engine.cheap_window, engine.exact_window = 7, 32, 8, 8
+    engine.probe_every = 8
+    seen = []
+
+    class Fallback:
+        model_cap = None
+        last_confident = True
+        draft_ms, proposals = 40.0, 10
+
+        def __init__(self, rate):
+            self.rate = rate
+
+        def continue_rate(self):
+            return self.rate
+
+        def propose(self, context, budget):
+            seen.append(self.model_cap)
+            return [11, 12, 13, 14, 15, 16, 17][: self.model_cap if self.model_cap is not None else budget]
+
+    tokenizer = SimpleNamespace(decode=lambda ids: "Some prose, no call yet.", encode=lambda text, **_: [1])
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {
+        "type": "object", "properties": {"city": {"type": "string"}}}}}]
+    for rate, want in ((0.9, 4), (0.2, 0)):
+        fallback = Fallback(rate)
+        proposer = ToolCallProposer(tokenizer, tools, 3, fallback=fallback)
+        stream = SimpleNamespace(proposer=proposer, pending=[5], draft_room=100, idle_rounds=0,
+                                 context=[1, 2, 3, 4, 5])
+        drafts = LaneEngine._drafts_for(engine, stream)
+        assert fallback.model_cap == want and seen[-1] == want and len(drafts) == want
