@@ -1,4 +1,10 @@
+![TensorFold name beside a pink and blue folded tensor mesh](assets/tensorfold-hero.png)
+
 # TensorFold
+
+<p align="center">
+  <img src="assets/tensorfold-logo.png" alt="TensorFold folded tensor mesh logo" width="280">
+</p>
 
 TensorFold serves a local LLM on Apple Silicon at an OpenAI-compatible endpoint, fast and exact. Name a model
 on Hugging Face, choose the context window and sampling, and TensorFold downloads it, loads it with Metal
@@ -171,6 +177,10 @@ pytest
 ```
 
 The kernel tests of the lane engine need an M5-generation GPU and are skipped elsewhere.
+
+## Brand assets
+
+The [wide hero](assets/tensorfold-hero.png) is a 3:1 image for X headers and this README. The [transparent mesh logo](assets/tensorfold-logo.png) uses the same folded lattice design.
 
 ## License
 
