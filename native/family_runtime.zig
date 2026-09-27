@@ -27,9 +27,14 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var early_mtp = true;
     var check_mtp_state = false;
     var adaptive_drafts = true;
+    var gpu_handoff = true;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         const key = args[i];
+        if (std.mem.eql(u8, key, "--no-gpu-handoff")) {
+            gpu_handoff = false;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--fixed-drafts")) {
             adaptive_drafts = false;
             continue;
@@ -184,6 +189,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     defer history.deinit(a);
     var accepted: usize = 0;
     var rounds: usize = 0;
+    var handoff_rounds: usize = 0;
     var depth_counts: [16]usize = @splat(0);
     var proposal_hash = std.crypto.hash.sha2.Sha256.init(.{});
     const Pipeline = @import("mtp_pipeline.zig").Pipeline(M);
@@ -205,6 +211,10 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         var window: [16]i32 = undefined;
         window[0] = pending;
         var n: usize = 1;
+        var proposal_scope = mx.Scope{};
+        defer proposal_scope.deinit();
+        var gpu_chain: ?mx.Array = null;
+        const handoff = gpu_handoff and queued_drafts and settings.metal and @hasDecl(M, "forwardArray");
         if (m.mtp) {
             history.clearRetainingCapacity();
             try history.appendSlice(a, tokens.items);
@@ -217,19 +227,17 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
                 @memcpy(window[1..][0..budget], copy.tokens[0..budget]);
                 n += budget;
             } else if (early) {
-                var scope = mx.Scope{};
-                defer scope.deinit();
-                const chain = try pipeline.propose(&m, &scope, budget, m.position, settings, queued_drafts);
-                try mx.eval(chain);
-                for (mx.c.mlx_array_data_uint32(chain)[0..budget]) |id| {
-                    window[n] = @intCast(id);
-                    n += 1;
-                    if (M.eos(@intCast(id))) break;
+                const chain = try pipeline.propose(&m, &proposal_scope, budget, m.position, settings, queued_drafts);
+                if (handoff) {
+                    gpu_chain = chain;
+                    n += budget;
+                } else {
+                    try mx.eval(chain);
+                    n += try @import("acceptance.zig").copyChain(window[n..], mx.c.mlx_array_data_uint32(chain)[0..budget], M.eos);
                 }
                 neural_proposed = n - 1;
             } else {
-                var scope = mx.Scope{};
-                defer scope.deinit();
+                const scope = &proposal_scope;
                 var dc = try head_cache.clone();
                 defer dc.deinit();
                 var dh = last;
@@ -238,23 +246,22 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
                     var token = try scope.ints(&.{pending});
                     for (0..budget) |j| {
                         proposal = j;
-                        dh = try m.draftStepArray(&scope, dh, token, &dc, true);
-                        token = try @import("gpu_sampling.zig").sample(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 1}, settings, draft_ids);
+                        dh = try m.draftStepArray(scope, dh, token, &dc, true);
+                        token = try @import("gpu_sampling.zig").sample(&m.kernels, scope, try m.draftHead(scope, dh), &.{m.position + @as(i32, @intCast(j)) + 1}, settings, draft_ids);
                         proposed[j] = token;
                     }
-                    // One host synchronization for the entire dependent proposal chain.
-                    // Discard proposals after its first EOS before target verification.
                     const chain = try scope.cat(proposed[0..budget], 0);
-                    try mx.eval(chain);
-                    for (mx.c.mlx_array_data_uint32(chain)[0..budget]) |id| {
-                        window[n] = @intCast(id);
-                        n += 1;
-                        if (M.eos(@intCast(id))) break;
+                    if (handoff) {
+                        gpu_chain = chain;
+                        n += budget;
+                    } else {
+                        try mx.eval(chain);
+                        n += try @import("acceptance.zig").copyChain(window[n..], mx.c.mlx_array_data_uint32(chain)[0..budget], M.eos);
                     }
                 } else for (0..budget) |j| {
                     proposal = j;
-                    dh = try m.draftStep(&scope, dh, window[j], &dc);
-                    const ids = try sampling.rowsMapped(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 1}, settings, draft_ids);
+                    dh = try m.draftStep(scope, dh, window[j], &dc);
+                    const ids = try sampling.rowsMapped(&m.kernels, scope, try m.draftHead(scope, dh), &.{m.position + @as(i32, @intCast(j)) + 1}, settings, draft_ids);
                     defer mx.allocator.free(ids);
                     window[n] = ids[0];
                     n += 1;
@@ -264,30 +271,56 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             }
         }
         stage = "target verification";
-        const width = [_]u8{@intCast(n)};
-        proposal_hash.update(&width);
-        proposal_hash.update(std.mem.sliceAsBytes(window[0..n]));
-        var p = try m.forwardQueued(window[0..n]);
+        var p = if (@hasDecl(M, "forwardArray")) blk: {
+            if (gpu_chain) |chain| {
+                const first = try proposal_scope.cast(try proposal_scope.ints(&.{pending}), mx.c.MLX_UINT32);
+                break :blk try m.forwardArray(try proposal_scope.cat(&.{ first, chain }, 0));
+            }
+            break :blk try m.forwardQueued(window[0..n]);
+        } else try m.forwardQueued(window[0..n]);
         defer p.deinit();
         var positions: [16]i32 = undefined;
         for (0..n) |j| positions[j] = m.position + @as(i32, @intCast(j)) + 1;
         var speculation: ?Pipeline.Speculation = null;
         defer if (speculation) |*spec| spec.deinit();
-        const ids = if (early) blk: {
+        const ids = if (early or gpu_chain != null) blk: {
             const target = try @import("gpu_sampling.zig").sample(&m.kernels, &p.scope, p.logits, positions[0..n], settings, null);
-            speculation = try pipeline.speculate(&m, &p.scope, p.hidden, target, m.position, settings);
-            // Submit the target draw and all first MTP drafts together, then make
-            // one host read. Rejected MTP rows are trimmed after acceptance.
-            const values = try p.scope.cat(&.{ target, speculation.?.firsts }, 0);
+            var draws: [3]mx.Array = undefined;
+            draws[0] = target;
+            var draw_count: usize = 1;
+            if (early) {
+                speculation = try pipeline.speculate(&m, &p.scope, p.hidden, target, m.position, settings);
+                draws[draw_count] = speculation.?.firsts;
+                draw_count += 1;
+            }
+            if (gpu_chain) |chain| {
+                draws[draw_count] = chain;
+                draw_count += 1;
+            }
+            // Target, next drafts and incoming proposals share one host read.
+            const values = try p.scope.cat(draws[0..draw_count], 0);
             try mx.eval(values);
             const out_ids = try mx.allocator.alloc(i32, n);
+            errdefer mx.allocator.free(out_ids);
             for (out_ids, 0..) |*id, j| id.* = @intCast(mx.c.mlx_array_data_uint32(values)[j]);
+            if (gpu_chain != null) {
+                const physical_rows = n;
+                const start = physical_rows * (1 + @as(usize, @intFromBool(early)));
+                // The GPU can evaluate beyond a proposed EOS. Acceptance and cache
+                // commit see only its logical prefix, exactly as in host handoff.
+                n = 1 + try @import("acceptance.zig").copyChain(window[1..], mx.c.mlx_array_data_uint32(values)[start..][0 .. physical_rows - 1], M.eos);
+                neural_proposed = n - 1;
+                handoff_rounds += 1;
+            }
             break :blk out_ids;
         } else try sampling.rows(&m.kernels, &p.scope, p.logits, positions[0..n], settings);
         defer mx.allocator.free(ids);
+        const width = [_]u8{@intCast(n)};
+        proposal_hash.update(&width);
+        proposal_hash.update(std.mem.sliceAsBytes(window[0..n]));
         var parents: [16]i32 = undefined;
         for (0..n) |j| parents[j] = @as(i32, @intCast(j)) - 1;
-        const result = try @import("acceptance.zig").select(window[0..n], parents[0..n], ids, max_tokens - generated.items.len, M.eos);
+        const result = try @import("acceptance.zig").select(window[0..n], parents[0..n], ids[0..n], max_tokens - generated.items.len, M.eos);
         const keep = result.kept;
         try generated.appendSlice(a, result.tokens[0..result.count]);
         accepted += result.accepted;
@@ -341,6 +374,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             .draft_vocab_size = if (draft_ids) |ids| mx.c.mlx_array_size(ids) else @as(usize, M.vocab),
             .queued_drafts = m.mtp and queued_drafts and settings.metal,
             .early_mtp = early,
+            .gpu_handoff_rounds = handoff_rounds,
             .adaptive_drafts = adaptive_drafts and m.mtp,
             .draft_depth_counts = depth_counts,
             .calibration_seconds = calibration_seconds,

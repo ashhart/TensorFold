@@ -59,6 +59,7 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--full-draft-vocab` | Nemotron/Flash Next: score the full draft head instead of the original reduced ID list |
 | `--no-queued-drafts` | Nemotron/Flash Next: read each Metal draft token on the host instead of queuing the chain |
 | `--no-early-mtp` | Build MTP context after target verification instead of speculating before its host read |
+| `--no-gpu-handoff` | Nemotron: read the queued draft IDs before building target verification |
 | `--no-copy` | Disable context-copy proposals to exercise the neural draft head |
 | `--metal-simd` | Force the non-tensor Metal path for coverage on M5 |
 | `--metal-sampling` | Use the original fp32 Metal sampler instead of CPU f64 sampling |
@@ -145,8 +146,11 @@ IDs (the original 79,591-ID list padded to eight rows). The executable embeds th
 original lists at build time and selects the quantized head rows during loading.
 Mapped sampling keys noise by the original token ID. The target still verifies every
 proposal against the full vocabulary. `--full-draft-vocab` restores the full draft head.
-With `--metal-sampling`, dependent MTP proposals stay on the GPU until one read at the
-end of the chain; `--no-queued-drafts` restores per-token reads. CPU sampling uses host
+With `--metal-sampling`, dependent MTP proposals stay on the GPU for the whole chain;
+`--no-queued-drafts` restores per-token reads. Nemotron feeds that array directly into
+target verification and reads proposals together with target draws; `--no-gpu-handoff`
+restores the earlier synchronization. Flash reads the chain before its bounded PLE
+file lookups. Reports count actual GPU handoffs in `gpu_handoff_rounds`. CPU sampling uses host
 reads. With Metal sampling, target samples also feed a batched MTP pass before the
 host reads verification results. The accepted MTP cache prefix and its last draw are
 reused for the next chain; `--no-early-mtp` disables this overlap. MTP depth adapts using

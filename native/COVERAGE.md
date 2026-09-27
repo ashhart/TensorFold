@@ -4,6 +4,37 @@ This fork ports the inference hosts to Zig and embeds the original author's Meta
 kernels. MLX-C supplies arrays, scheduling, safetensors, and general operations.
 This matrix distinguishes exercised behavior from physical-device validation.
 
+## Nemotron GPU handoff milestone
+
+Nemotron can embed the queued draft array directly in target verification, then read
+incoming proposals, target samples and early MTP draws together. The host override
+remains available as `--no-gpu-handoff`. Flash retains its host read for bounded PLE
+file lookups; this milestone does not claim GPU handoff for Flash.
+
+- **48 serial/MTP comparisons** and **36 exact scheduling comparisons** pass with the
+  reduced head, tensor/forced-SIMD, greedy/Metal sampling, depths 1/3/15 and early/late
+  speculation. Every target ID, proposal hash and acceptance/round count matches.
+- The final decoder also passes **22 serial/MTP comparisons** and **16 scheduling
+  comparisons** at maximum depth with full/reduced heads on both backends, including
+  two adaptive runs. These overlap the focused matrix and are recorded separately.
+- **192 short accepted-prefix/cache/continuation checks** pass with lazy GPU token
+  inputs, including both EOS IDs inside the window. The host serial path supplies
+  the reference for every retained prefix. Another **256 reset cycles** show no active
+  MLX memory growth on either backend.
+- Another **64 long cache/continuation comparisons** pass at 9,999/10,007 tokens on
+  tensor and forced SIMD, including every retained prefix across the attention switch.
+- Host checks cover both EOS IDs at all fifteen proposal positions and verify that
+  even an invalid unreachable suffix never reaches acceptance. GPU inputs reject
+  null handles, noninteger dtype, invalid rank and empty/oversized windows.
+  All **18 safety-enabled host tests** pass.
+- Flash's shared-driver regression passes **7 serial/MTP comparisons** and **4 exact
+  scheduling comparisons** at maximum depth fifteen: full/reduced heads, early/late,
+  queued/host, and one adaptive run. Every 32-token completion matches serial.
+
+Focused reproduction: `.venv/bin/python tools/native_mtp_runtime.py
+zig-out/bin/tensorfold --handoff-only --output build/native-checks/gpu-handoff` and
+`.zig-toolchain/zig build test-cache-stress -Doptimize=safe -Dcache-family=1`.
+
 ## Early speculation and adaptive-depth milestone
 
 - Metal sampling now queues batched MTP work behind target verification before its

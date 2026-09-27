@@ -87,10 +87,20 @@ pub const Model = struct {
     }
     pub fn forwardQueued(m: *Model, tokens: []const i32) !Pass {
         if (tokens.len == 0 or tokens.len > 16) return error.InvalidLaneWidth;
+        var s = mx.Scope{};
+        defer s.deinit();
+        return m.forwardArray(try s.ints(tokens));
+    }
+    /// Internal GPU-token entry point; IDs come from the validated prompt or sampler.
+    pub fn forwardArray(m: *Model, tokens: A) !Pass {
+        if (tokens.ctx == null) return error.InvalidToken;
+        if (mx.c.mlx_array_ndim(tokens) != 1 or mx.dim(tokens, 0) < 1 or mx.dim(tokens, 0) > 16) return error.InvalidLaneWidth;
+        const dtype = mx.c.mlx_array_dtype(tokens);
+        if (dtype != mx.c.MLX_INT32 and dtype != mx.c.MLX_UINT32) return error.InvalidToken;
         var p = Pass{};
         errdefer p.deinit();
         const s = &p.scope;
-        var h = try m.weights.embed(s, "backbone.embeddings", tokens);
+        var h = try m.weights.embedArray(s, "backbone.embeddings", tokens);
         var x = try m.norm(s, h, "backbone.layers.0.norm");
         var buf: [256]u8 = undefined;
         var nb: [256]u8 = undefined;

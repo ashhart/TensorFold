@@ -10,6 +10,17 @@ pub const Result = struct {
     pending: i32 = 0,
     stop: bool = false,
 };
+/// Convert a queued chain to its logical prefix. Evaluated GPU rows after the
+/// first proposed EOS must never enter acceptance, hashing or cache commits.
+pub fn copyChain(destination: []i32, proposals: []const u32, comptime is_eos: fn (i32) bool) !usize {
+    if (proposals.len > destination.len) return error.InvalidVerification;
+    for (proposals, 0..) |token, i| {
+        if (token > std.math.maxInt(i32)) return error.InvalidToken;
+        destination[i] = @intCast(token);
+        if (is_eos(destination[i])) return i + 1;
+    }
+    return proposals.len;
+}
 pub fn select(tokens: []const i32, parents: []const i32, samples: []const i32, remaining: usize, comptime is_eos: fn (i32) bool) !Result {
     if (tokens.len == 0 or tokens.len > 32 or samples.len != tokens.len or parents.len != tokens.len or remaining == 0) return error.InvalidVerification;
     _ = try @import("lanes.zig").Tree.init(parents);
@@ -39,6 +50,41 @@ pub fn select(tokens: []const i32, parents: []const i32, samples: []const i32, r
 }
 fn eos(id: i32) bool {
     return id == 2 or id == 11;
+}
+test "GPU chain suffix after EOS cannot affect logical acceptance" {
+    var window: [16]i32 = undefined;
+    window[0] = 100;
+    var proposals: [15]u32 = undefined;
+    var parents: [16]i32 = undefined;
+    var samples: [16]i32 = undefined;
+    for (0..16) |i| parents[i] = @as(i32, @intCast(i)) - 1;
+    for ([_]u32{ 2, 11 }) |stop| for (0..15) |at| {
+        for (&proposals, 0..) |*token, i| token.* = @intCast(101 + i);
+        proposals[at] = stop;
+        // An invalid unreachable suffix is deliberately ignored.
+        if (at + 1 < proposals.len) proposals[at + 1] = std.math.maxInt(u32);
+        const n = 1 + try copyChain(window[1..], &proposals, eos);
+        try std.testing.expectEqual(at + 2, n);
+        for (0..n - 1) |i| samples[i] = window[i + 1];
+        samples[n - 1] = 999;
+        const result = try select(window[0..n], parents[0..n], samples[0..n], 32, eos);
+        try std.testing.expectEqual(at + 1, result.count);
+        try std.testing.expectEqual(n, result.kept);
+        try std.testing.expectEqual(stop, result.tokens[result.count - 1]);
+        try std.testing.expect(result.stop);
+        const bounded = try select(window[0..n], parents[0..n], samples[0..n], 1, eos);
+        try std.testing.expectEqual(@as(usize, 1), bounded.count);
+        try std.testing.expectEqual(@as(usize, 2), bounded.kept);
+        try std.testing.expect(bounded.stop);
+        samples[0] = 999;
+        const rejected = try select(window[0..n], parents[0..n], samples[0..n], 32, eos);
+        try std.testing.expectEqual(@as(usize, 1), rejected.kept);
+        try std.testing.expectEqual(@as(i32, 999), rejected.pending);
+        try std.testing.expect(!rejected.stop);
+    };
+    try std.testing.expectError(error.InvalidToken, copyChain(window[1..], &.{std.math.maxInt(u32)}, eos));
+    try std.testing.expectError(error.InvalidVerification, copyChain(window[1..2], &.{ 101, 102 }, eos));
+    try std.testing.expectEqual(@as(usize, 0), try copyChain(window[1..], &.{}, eos));
 }
 test "all acceptance lengths and output budgets including maximum chain" {
     var tokens: [32]i32 = undefined;

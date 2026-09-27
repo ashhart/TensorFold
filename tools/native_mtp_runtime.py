@@ -22,7 +22,12 @@ def main():
     parser.add_argument("--model-root", type=Path, default=Path("build/models"))
     parser.add_argument("--output", type=Path, default=Path("build/native-checks/mtp-runtime"))
     parser.add_argument("--family", choices=MODELS)
+    parser.add_argument("--sampler", choices=("greedy", "metal", "cpu"))
+    parser.add_argument("--budget", type=int, choices=(1, 3, 15))
+    parser.add_argument("--handoff-only", action="store_true", help="Nemotron GPU/host handoff pairs, both backends and Metal sampling modes")
     args = parser.parse_args()
+    if args.handoff_only and (args.family == "flash" or args.sampler == "cpu"):
+        parser.error("--handoff-only requires Nemotron with Metal or greedy sampling")
     args.output.mkdir(parents=True, exist_ok=True)
     checked, schedule_pairs = 0, 0
 
@@ -38,8 +43,14 @@ def main():
     for family, (model, full_size, cut_size) in MODELS.items():
         if args.family and family != args.family:
             continue
+        if args.handoff_only and family != "nemotron":
+            continue
         for backend in (["tensor", "simd"] if family == "nemotron" else ["tensor"]):
             for sampler in ("greedy", "metal", "cpu"):
+                if args.sampler and sampler != args.sampler:
+                    continue
+                if args.handoff_only and sampler == "cpu":
+                    continue
                 count = 17 if sampler == "greedy" else 32
                 prefix = f"{family}-{backend}-{sampler}"
                 common = ["run", str(args.model_root / model), "--no-copy",
@@ -54,26 +65,36 @@ def main():
                 serial = run(prefix + "-serial", common, ["--no-drafts"])
                 assert len(serial["tokens"]) == count, (prefix, "early EOS prevents the requested coverage")
                 for budget in (1, 3, 15):
+                    if args.budget and budget != args.budget:
+                        continue
                     for reduced in (False, True):
+                        if args.handoff_only and not reduced:
+                            continue
                         vocabulary = "cut" if reduced else "full"
                         options = ["--mtp-drafts", str(budget), "--fixed-drafts"]
                         if not reduced:
                             options.append("--full-draft-vocab")
                         plain = None
-                        modes = [(False, False)]
+                        modes = [(False, False, False)]
                         if sampler != "cpu":
-                            modes += [(True, False), (True, True)]
+                            modes += [(True, False, False), (True, True, False)]
                             if budget == 3:
-                                modes.append((False, True))
-                        for queued, early in modes:
-                            label = f"{prefix}-{budget}-{vocabulary}-{'queued' if queued else 'host'}-{'early' if early else 'late'}"
+                                modes.append((False, True, False))
+                            if family == "nemotron":
+                                modes += [(True, False, True), (True, True, True)]
+                        if args.handoff_only:
+                            modes = [(True, False, False), (True, True, False), (True, False, True), (True, True, True)]
+                        for queued, early, handoff in modes:
+                            label = f"{prefix}-{budget}-{vocabulary}-{'queued' if queued else 'host'}-{'early' if early else 'late'}-{'gpu' if handoff else 'host'}-handoff"
                             result = run(label, common, options + ([] if queued else ["--no-queued-drafts"])
-                                         + ([] if early else ["--no-early-mtp"]))
+                                         + ([] if early else ["--no-early-mtp"])
+                                         + ([] if handoff else ["--no-gpu-handoff"]))
                             assert result["prompt_tokens"] == serial["prompt_tokens"], label
                             assert result["tokens"] == serial["tokens"], label
                             assert result["draft_vocab_size"] == (cut_size if reduced else full_size), label
                             assert result["queued_drafts"] == queued, label
                             assert result["early_mtp"] == early, label
+                            assert result["gpu_handoff_rounds"] == (result["rounds"] if handoff else 0), label
                             assert result["adaptive_drafts"] is False, label
                             assert result["context_copy"] is False, label
                             checked += 1
@@ -85,7 +106,9 @@ def main():
                                 plain = result
                             print(f"PASS {label}: {len(result['tokens'])} target IDs"
                                   + (" and exact proposal stream" if queued or early else ""), flush=True)
-                for budget in ([3, 15] if sampler == "metal" else [3]):
+                for budget in ([] if args.handoff_only else [3, 15] if sampler == "metal" else [3]):
+                    if args.budget and budget != args.budget:
+                        continue
                     label = f"{prefix}-{budget}-adaptive"
                     result = run(label, common, ["--mtp-drafts", str(budget)])
                     assert result["tokens"] == serial["tokens"], label

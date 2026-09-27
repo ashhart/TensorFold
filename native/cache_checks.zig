@@ -79,6 +79,15 @@ pub fn checkLong(comptime M: type, m: *M) !void {
     return checkPrefixes(M, m, if (M == flash.Model) &.{ 2044, 2051, 2063 } else &.{ 9999, 10007 }, false);
 }
 fn checkPrefixes(comptime M: type, m: *M, prefixes: []const usize, short: bool) !void {
+    if (@hasDecl(M, "forwardArray")) {
+        var scope = mx.Scope{};
+        defer scope.deinit();
+        try std.testing.expectError(error.InvalidToken, m.forwardArray(mx.empty));
+        try std.testing.expectError(error.InvalidToken, m.forwardArray(try scope.scalar(42)));
+        try std.testing.expectError(error.InvalidLaneWidth, m.forwardArray(try scope.zeros(&.{ 1, 1 }, mx.i32t)));
+        try std.testing.expectError(error.InvalidLaneWidth, m.forwardArray(try scope.zeros(&.{0}, mx.i32t)));
+        try std.testing.expectError(error.InvalidLaneWidth, m.forwardArray(try scope.zeros(&.{17}, mx.i32t)));
+    }
     var rng = std.Random.DefaultPrng.init(0x4341434845);
     const random = rng.random();
     var tokens: [128]i32 = undefined;
@@ -101,7 +110,15 @@ fn checkPrefixes(comptime M: type, m: *M, prefixes: []const usize, short: bool) 
         }
         tokens[4] = if (M == nemotron.Model) 2 else 248044;
         tokens[11] = if (M == nemotron.Model) 11 else 248046;
-        var batch = try forward(M, m, tokens[0..width], parents[0..width]);
+        var input_scope = mx.Scope{};
+        defer input_scope.deinit();
+        var batch = if (@hasDecl(M, "forwardArray")) blk: {
+            // Keep the IDs on the GPU, including rows beyond both EOS IDs. The
+            // serial host-token path below checks every possible retained prefix.
+            const ids = try input_scope.cast(try input_scope.ints(tokens[0..width]), mx.c.MLX_UINT32);
+            const zero = try input_scope.cast(try input_scope.ints(&.{0}), mx.c.MLX_UINT32);
+            break :blk try m.forwardArray(try input_scope.binary(mx.c.mlx_add, ids, zero));
+        } else try forward(M, m, tokens[0..width], parents[0..width]);
         defer batch.deinit();
         if (M == dense.Model) {
             try std.testing.expectError(error.EmptyCommit, m.commit(&batch, &.{}));

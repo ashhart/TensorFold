@@ -26,7 +26,8 @@ Completion requires execution evidence, not just source export or a passing smok
 - [x] Early MTP speculation/accepted-state reuse and adaptive draft depth, with independent
   original-policy fixtures and real-model batch/serial cache checks.
 - [ ] Finish pipelined serial decode, GPU proposal handoff and attention buffer reuse.
-  Preserve the bounded PLE memory strategy when evaluating Flash paths.
+  Nemotron GPU proposal handoff is implemented and checked; preserve the bounded PLE
+  memory strategy when evaluating Flash paths.
 - [ ] Final matched end-to-end benchmarks against the original Python engines: same
   checkpoints, prompts, seeds, sampling and token counts, serial and drafting, repeated
   runs, cold process/load/prefill/decode/total breakdown and token parity. Document any
@@ -200,3 +201,22 @@ New milestone evidence and any discovered failures will be recorded below.
   and context copies disabled.
 - GPU proposal handoff, pipelined serial decode and attention buffer reuse remain,
   followed by original-engine benchmarks and the README comparison table.
+
+## Nemotron GPU handoff milestone
+
+- Queued Metal proposals now feed target embedding without a host token read. Incoming
+  proposals, target draws and early MTP draws share one read. A host override remains.
+- All 48 focused serial/MTP comparisons and 36 exact scheduling comparisons pass:
+  tensor/SIMD, greedy/Metal sampling, reduced head, depths 1/3/15, early/late speculation.
+- All 192 short lazy-GPU-input accepted-prefix/cache/continuation comparisons pass,
+  including windows containing both EOS IDs. Another 256 reset cycles show no active
+  MLX memory growth. Logical EOS truncation has explicit host coverage at every position.
+- All 64 long GPU-input cache/continuation comparisons pass on tensor/SIMD at
+  9,999/10,007 tokens. All eighteen safety-enabled host tests pass.
+- Flash's maximum-depth shared-driver regression passes seven serial/MTP and four
+  exact scheduling comparisons, including full/reduced heads and adaptive depth.
+- The final Nemotron maximum-depth matrix passes another 22 serial/MTP and sixteen
+  scheduling comparisons with full/reduced heads on both backends, including adaptive
+  runs. This partially overlaps the focused matrix; counts are separate execution runs.
+- Flash GPU handoff, serial pipelining and buffer reuse remain, followed by final
+  original-engine performance comparisons and the README table.
