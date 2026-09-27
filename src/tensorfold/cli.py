@@ -61,6 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     speed.add_argument("--mtp-drafts", type=int, default=None,
                        help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 30%% "
                             "confidence); 0: no MTP drafts (any family)")
+    speed.add_argument("--mtp-confidence", type=float, default=None,
+                       help="on CUDA, stop an MTP chain before a later draft under this probability "
+                            "(Flash Next default 0.30)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
@@ -335,6 +338,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         options["mtp_drafts"] = int(args.mtp_drafts)
     if args.ple_on_ssd:
         options["ple_on_ssd"] = True
+    if getattr(args, "mtp_confidence", None) is not None:
+        options["mtp_confidence"] = float(args.mtp_confidence)
     options["context"] = context if context is not None else args.context
     options["context_explicit"] = args.context is not None
     streams = 1 if str(args.parallel).strip().lower() == "auto" else _parallel(args.parallel)
