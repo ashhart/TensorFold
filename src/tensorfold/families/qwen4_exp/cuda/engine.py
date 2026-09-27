@@ -117,7 +117,7 @@ class FlashNextEngine:
                  f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
         how = ("read from SSD at each lookup" if ple_on_ssd else
                f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s")
-        kv = "" if self.kv_dtype == "bf16" else f"; int8 KV cache (fp16 scale per 32 values)"
+        kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
               "decode graphs captured", flush=True)
 
@@ -126,7 +126,7 @@ class FlashNextEngine:
 
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
-                             len(ids) if ids is not None else -1, total, int(self.kv_dtype == "int8")],
+                             len(ids) if ids is not None else -1, total, {"bf16": 0, "int8": 8, "int4": 4}[self.kv_dtype]],
                             dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)

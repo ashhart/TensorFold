@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .kvcache import dequant_group, h32
+from .kvcache import dequant_group_4, dequant_group_8, h32
 
 CHUNK = 512
 TILE = 64
@@ -29,7 +29,7 @@ def _tile(q, k, v, m, l, o, valid, scale: tl.constexpr):
 @triton.jit
 def _chunks(Q, KC, VC, KSC, VSC, POS0, PO, PM, PL, IDS, NKR, SPR,
             H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, G: tl.constexpr, CH: tl.constexpr,
-            NCH: tl.constexpr, SCALE: tl.constexpr, IDW: tl.constexpr, QSA: tl.constexpr, KVQ: tl.constexpr):
+            NCH: tl.constexpr, SCALE: tl.constexpr, IDW: tl.constexpr, QSA: tl.constexpr, BITS: tl.constexpr):
     r = tl.program_id(0)
     hk = tl.program_id(1)
     c = tl.program_id(2)
@@ -54,17 +54,28 @@ def _chunks(Q, KC, VC, KSC, VSC, POS0, PO, PM, PL, IDS, NKR, SPR,
                 if sparse:
                     ki = tl.load(IDS + r * IDW + ki, mask=valid, other=0)
             off = (ki[:, None].to(tl.int64) * HK + hk) * D + d[None, :]
-            if KVQ:
-                # int8 codes + one fp16 scale per 32 values: dequantize the tile before the dot (the keys are
-                # stored rotated; the query is rotated by the write path, so no rotation is undone here)
+            if BITS:
+                # codes + one fp16 scale per 32 values: dequantize the tile before the dot (the keys are
+                # stored rotated; the query is rotated by the write path, so no rotation is undone here).
+                # 4-bit codes are two per byte, so the tile is D/2 wide.
                 gs = tl.arange(0, D // 32)
                 sgc = (ki[:, None].to(tl.int64) * HK + hk) * (D // 32) + gs[None, :]
-                kc = tl.load(KC + off, mask=valid[:, None], other=0)
                 sc = tl.load(KSC + sgc, mask=valid[:, None], other=0.0)
-                kk = dequant_group(tl.reshape(kc, (64, D)), sc, M=64, W=D)
-                vc = tl.load(VC + off, mask=valid[:, None], other=0)
                 sv = tl.load(VSC + sgc, mask=valid[:, None], other=0.0)
-                vv = dequant_group(tl.reshape(vc, (64, D)), sv, M=64, W=D)
+                if BITS == 4:
+                    db = tl.arange(0, D // 2)
+                    offb = (ki[:, None].to(tl.int64) * HK + hk) * (D // 2) + db[None, :]
+                    kc = tl.load(KC + offb, mask=valid[:, None], other=0)
+                    vc = tl.load(VC + offb, mask=valid[:, None], other=0)
+                else:
+                    kc = tl.load(KC + off, mask=valid[:, None], other=0)
+                    vc = tl.load(VC + off, mask=valid[:, None], other=0)
+                if BITS == 4:
+                    kk = dequant_group_4(kc, sc, M=64, W=D)
+                    vv = dequant_group_4(vc, sv, M=64, W=D)
+                else:
+                    kk = dequant_group_8(kc, sc, M=64, W=D)
+                    vv = dequant_group_8(vc, sv, M=64, W=D)
             else:
                 kk = tl.load(KC + off, mask=valid[:, None], other=0.0)
                 vv = tl.load(VC + off, mask=valid[:, None], other=0.0)
@@ -77,7 +88,7 @@ def _chunks(Q, KC, VC, KSC, VSC, POS0, PO, PM, PL, IDS, NKR, SPR,
 
 @triton.jit
 def _merge(PO, PM, PL, POS0, OUT, NKR, SPR, H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, G: tl.constexpr,
-           CH: tl.constexpr, NCH: tl.constexpr, QSA: tl.constexpr, KVQ: tl.constexpr):
+           CH: tl.constexpr, NCH: tl.constexpr, QSA: tl.constexpr, BITS: tl.constexpr):
     r = tl.program_id(0)
     hk = tl.program_id(1)
     n = tl.load(POS0) + r + 1
@@ -102,7 +113,7 @@ def _merge(PO, PM, PL, POS0, OUT, NKR, SPR, H: tl.constexpr, HK: tl.constexpr, D
         l = l * a + cl * b
         m = next_m
     result = o / l[:, None]
-    if KVQ:
+    if BITS:
         # the values are stored rotated: o = p . (H v) = H (p . v), so one rotation a row puts the merged
         # output back, whatever windows and chunks it came from
         result = tl.reshape(h32(tl.reshape(result, (16 * D // 32, 32)), M=16 * D // 32), (16, D))
@@ -132,20 +143,27 @@ class AttnScratch:
 def attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, pos0: torch.Tensor, scratch: AttnScratch,
               rows: int, scale: float, out: torch.Tensor | None = None, *,
               context: int | None = None, ks: torch.Tensor | None = None, vs: torch.Tensor | None = None,
-              kvq: bool = False) -> torch.Tensor:
+              kvq: bool = False, bits: int = 0) -> torch.Tensor:
     """q [R, H, D] against caches holding [0, P0 + R) -> [R, H, D] bf16; sparse rows read ``scratch.ids``.
 
-    With ``kvq`` the caches hold int8 codes and one fp16 scale per 32 values (``ks``/``vs``), and both ``q``
+    ``bits`` 8 or 4: the caches hold codes and one fp16 scale per 32 values (``ks``/``vs``), and both ``q``
     and the returned output are in the caches' H32 rotation: ``q`` was rotated by ``glue.attn_prep``, and the
-    output is rotated back in ``_merge``, so the caller sees the same arithmetic either way."""
+    output is rotated back in ``_merge``, so the caller sees the same arithmetic either way. ``kvq=True``
+    is the 8-bit path."""
 
-    if kvq and (ks is None or vs is None):
-        raise ValueError("an int8 KV cache needs its scale tensors")
+    if bits == 0 and kvq:
+        bits = 8
+    if bits and (ks is None or vs is None):
+        raise ValueError("a quantized KV cache needs its scale tensors")
     if ks is None:
         ks = vs = kc
     _, h, d = q.shape
     hk = kc.shape[1]
     g = h // hk
+    if g > 16:
+        raise ValueError(
+            f"this attention kernel tiles 16 query heads per KV head (G={g} does not fit); "
+            "a G under 16 is masked off after the rotation, not rotated differently")
     nch = scratch.nch
     keys = nch * CHUNK if context is None else context
     if scratch.qsa:
@@ -154,9 +172,9 @@ def attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, pos0: torch.T
     out = scratch.out if out is None else out
     _chunks[(rows, hk, chunks)](q, kc, vc, ks, vs, pos0, scratch.po, scratch.pm, scratch.pl, scratch.ids, scratch.nk,
                              scratch.sparse, H=h, HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, SCALE=scale,
-                             IDW=scratch.idw, QSA=scratch.qsa, KVQ=kvq, num_warps=4, num_stages=1)
+                             IDW=scratch.idw, QSA=scratch.qsa, BITS=bits, num_warps=4, num_stages=1)
     _merge[(rows, hk)](scratch.po, scratch.pm, scratch.pl, pos0, out, scratch.nk, scratch.sparse, H=h,
-                       HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, QSA=scratch.qsa, KVQ=kvq, num_warps=4)
+                       HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, QSA=scratch.qsa, BITS=bits, num_warps=4)
     return out
 
 

@@ -165,11 +165,11 @@ def attn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: in
     scale = c.head_dim ** -0.5
     for st, a0, a1 in segs:
         cache, ikc, pooled, pos, host_pos = _caches(layer, st, mtp)
+        bits = 0 if not cache.quantized else cache.bits
         keys = context if context is not None else host_pos + a1 - a0
         glue.attn_prep(b.pa[a0:a1], pos, a.q_scale, a.k_scale, a.iq_scale, w.inv_freq, b.q[a0:], cache.k, cache.v,
                        b.iq[a0:], ikc, c.eps, q_heads=c.heads, kv_heads=c.kv_heads, head_dim=c.head_dim,
-                       index_heads=c.index_heads, index_dim=c.index_dim, ks=cache.ks, vs=cache.vs,
-                       kvq=cache.quantized)
+                       index_heads=c.index_heads, index_dim=c.index_dim, ks=cache.ks, vs=cache.vs, bits=bits)
         if b.prefill:
             if b.attn.qsa:
                 attn_mod.qsa_pool(ikc, pooled, pos, a.ik_scale, w.inv_freq, c.eps, b.attn, a1 - a0)
@@ -180,14 +180,13 @@ def attn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: in
                 if b.attn.qsa:
                     attn_mod.qsa_rows(b.iq[r0:r0 + n], pooled, b.pos_blk, b.attn, n, context=ends)
                 attn_mod.attention(b.q[r0:r0 + n], cache.k, cache.v, b.pos_blk, b.attn, n, scale,
-                                   out=b.attn_o[r0:r0 + n], context=ends, ks=cache.ks, vs=cache.vs,
-                                   kvq=cache.quantized)
+                                   out=b.attn_o[r0:r0 + n], context=ends, ks=cache.ks, vs=cache.vs, bits=bits)
             continue
         if b.attn.qsa:
             attn_mod.qsa_select(b.iq[a0:a1], ikc, pooled, pos, a.ik_scale, w.inv_freq, c.eps, b.attn, a1 - a0,
                                 context=keys)
         o = attn_mod.attention(b.q[a0:a1], cache.k, cache.v, pos, b.attn, a1 - a0, scale, context=keys,
-                               ks=cache.ks, vs=cache.vs, kvq=cache.quantized)
+                               ks=cache.ks, vs=cache.vs, bits=bits)
         if len(segs) > 1:                       # the scratch output is the next stream's too
             b.attn_o[a0:a1].copy_(o[:a1 - a0])
     o = b.attn_o if b.prefill or len(segs) > 1 else o
