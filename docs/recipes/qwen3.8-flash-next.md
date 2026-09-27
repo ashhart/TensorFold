@@ -273,6 +273,36 @@ Expected output SHA-256:
 
 Check this hash before adopting a rebuild; a different stdlib distribution can change the corpus.
 The current list replaces the older list whose PyPI corpus was not reproducible.
+### The NVFP4 checkpoint (ModelOpt FP4, experts-only)
+
+The CUDA engine reads an NVFP4 checkpoint (`quant_method: "modelopt"`, `quant_algo: "NVFP4"`, group 16)
+natively — `tensorfold serve` on the same command line, no conversion. What the format changes:
+
+- **Only the routed experts are FP4.** The checkpoint's `exclude_modules` keeps every other linear BF16:
+  the hyper-connections, DeltaNet, attention, the indexer, the router, the shared expert, the PLE's
+  key/value, the embeddings, `lm_head` and the MTP head's projections. `weights.py` routes on
+  `cfg.quant == "modelopt"`: `moe_nvfp4` for the experts, a `b16` face for the rest.
+- **The n-gram tables are bitwise passthroughs of the MLX files** (same names, same 4-bit layout): the
+  `HostTable` reads them as-is; the PLE's shards need no loader.
+- **The FP4 format** (`cuda/nvfp4.py`): packed E2M1 nibbles ([N, K/2] uint8), fp8-e4m3 block scales
+  ([N, K/16]) and a per-tensor scale; the dequantized weight is `E2M1(code) * (fp32(e4m3) * 2**-7 *
+  scale_2)` per 16-value block. The stored grid keeps the format's math off torch's fp8 casts (whose bf16
+  path yields zeros): the E2M1 codes ride as bf16 bit patterns (uint16), the kernel widens them the same
+  way the reference does, one fp32 rounding per block product, blocks in order, K slices summed in slice
+  order — row-invariant, the same contract as the 4-bit kernels.
+- **The MoE** (`cuda/nvfp4_moe.py`): gate and up rows joined per expert into one stacked grid (expert e
+  owns rows `e*2NI`, gate first), the shared expert rides the same kernels as identity-scaled FP4 tables.
+  The BF16 non-experts go through a Triton BF16 matmul (`cuda/bf16.py`) with the same split-K-by-shape
+  rule, so graph capture and drafted windows keep bits.
+- **Checked on the real checkpoint** (`tests/cuda/test_flashnext_nvfp4.py`,
+  `test_flashnext_nvfp4_kernels.py`): the stacked gate/up/down grids dequantize row-for-row to the
+  per-expert reference on layer 11's real expert weights, the shared expert's tables are exact, and the
+  b16 and fp4 kernels are row-invariant (1-row window vs a wide window, split-K included).
+- Size: 186.4 GB against the source's 360.0 (0.518). The BF16 `lm_head` and embeddings mean the FP4
+  checkpoint loads its non-experts as BF16 — 2 bytes a weight, not 0.5; on one Spark the head's slice is
+  the largest single tensor on the GPU.
+
+### The recipe
 
 ## Measurements
 
