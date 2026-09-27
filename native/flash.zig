@@ -195,7 +195,7 @@ pub const Model = struct {
         record.b = values;
         record.raw = raw;
         record.offset = end;
-        record.pooled = cache.pooled;
+        record.pooled = if (cache.pooled.ctx != null) try s.own(try mx.retain(cache.pooled)) else mx.empty;
         var ids = try s.zeros(&.{ r, 1 }, mx.i32t);
         var counts: [16]i32 = undefined;
         var sparse: [16]i32 = undefined;

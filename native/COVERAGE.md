@@ -46,12 +46,54 @@ bash scripts/fetch-zig.sh
 .venv/bin/python tools/export_native_kernels.py --check
 .zig-toolchain/zig build test-metal -Doptimize=safe -Dmetal-tensors=true
 .zig-toolchain/zig build test-models -Doptimize=safe
+.zig-toolchain/zig build test-cache-stress -Doptimize=safe
+.zig-toolchain/zig build test-drafts -Doptimize=safe
 ```
 
 The suite needs the MLX prefix described in README and Python development dependencies
 in `.venv`. Omit `-Dmetal-tensors=true` on GPUs without tensor units. Model paths default
 to `build/models`; override with `-Dmodel-root=/absolute/path`. All fixtures and weights
 stay in ignored `build/` directories. `test-models` deliberately serializes model loads.
+The cache and draft suites also serialize their model loads; run these targets separately,
+since simultaneous suites compete for unified memory and GPU execution time.
+Use `-Dcache-family=0|1|2` or `-Ddraft-family=0|1|2` to select Qwen, Nemotron or Flash.
+
+## Expanded acceptance and cache checks
+
+The shared acceptance policy is used by both DFlash trees and MTP chains. Host tests
+cover all 32 chain acceptance lengths against 33 output budgets, accepted/rejected/bonus
+EOS, and 1,000 deterministic random trees. The ten host tests pass with safety checks,
+including four supported config fixtures and 129 invalid recipe mutations.
+
+`test-cache-stress` has passed on all five model/backend combinations below. Each
+accepted prefix is compared with serial execution: logits, every cache array and its
+metadata, and the next token's logits after restoring the original cache. It also drops
+entire speculative passes, tests invalid commits, inserts EOS IDs into the PLE history,
+and repeatedly restores snapshots and resets the model.
+
+| Model/backend | Accepted-prefix checks | Prefix lengths | Post-warmup reset cycles | Active MLX memory, baseline = maximum |
+| --- | ---: | --- | ---: | ---: |
+| Qwen tensor | 384 | 0, 1, 15, 16, 17, 63, 64, 127, 128, 511, 512, 513 | 128 | 15,133,588,480 bytes |
+| Qwen forced SIMD | 384 | Same | 128 | 16,734,960,640 bytes |
+| Nemotron tensor | 96 | 0, 1, 15, 16, 17, 33 | 128 | 18,816,686,464 bytes |
+| Nemotron forced SIMD | 96 | Same | 128 | 17,778,989,440 bytes |
+| Flash | 96 | Same | 128 | 111,025,160,216 bytes |
+
+Qwen additionally checks every path in randomized trees with 2, 7, 15, 16, 17, 31 and
+32 rows, on each backend. Its chain windows reach the 128-row prefill limit; family
+windows reach 16 rows. Memory figures measure MLX active allocations after synchronization,
+not process RSS or peak unified-memory use.
+
+These tests exposed a borrowed recurrent-state handle in Qwen's saved verification pass:
+restoring the live cache could invalidate the handle needed for a later partial commit.
+The pass now retains its replay base. Flash's saved pooled-key handle received the same
+lifetime fix. Dense commit also validates position and ancestor paths before changing
+the cache, and releases temporary replay arrays at the end of each commit.
+
+`test-drafts` compares serial and drafted completions with greedy, CPU sampling and Metal
+sampling, including a two-token output budget. MTP budgets are 1, 3 and 15. The comparison
+requires actual decode rounds so an immediate EOS cannot masquerade as draft coverage.
+Completion evidence for this larger matrix is tracked in [WORK_PLAN.md](WORK_PLAN.md).
 
 ## Limits
 

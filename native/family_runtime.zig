@@ -16,10 +16,15 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var report: ?[]const u8 = null;
     var dump: ?[]const u8 = null;
     var exact = false;
+    var cache_stress = false;
     var warm = false;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         const key = args[i];
+        if (std.mem.eql(u8, key, "--check-cache-stress")) {
+            cache_stress = true;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--metal-sampling")) {
             settings.metal = true;
             continue;
@@ -52,8 +57,9 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     try settings.validate();
     try mx.init();
     defer mx.shutdown();
-    var m = try M.init(io, args[2], drafts > 0 and !exact);
+    var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress);
     defer m.deinit();
+    if (cache_stress) return @import("cache_checks.zig").check(M, &m);
     if (exact) {
         try check(M, &m);
         return;
@@ -124,6 +130,9 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var rounds: usize = 0;
     if (max_tokens > 0) try generated.append(a, @intCast(pending));
     while (generated.items.len < max_tokens and !M.eos(pending)) {
+        var stage: []const u8 = "draft proposals";
+        var proposal: usize = 0;
+        errdefer std.debug.print("Decode failed at round {d}, position {d}, stage {s}, proposal {d}\n", .{ rounds, m.position, stage, proposal });
         var window: [16]i32 = undefined;
         window[0] = pending;
         var n: usize = 1;
@@ -143,6 +152,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
                 defer dc.deinit();
                 var dh = last;
                 for (0..budget) |j| {
+                    proposal = j;
                     dh = try m.draftStep(&scope, dh, window[j], &dc);
                     const ids = try sampling.rows(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 2}, settings);
                     defer mx.allocator.free(ids);
@@ -152,35 +162,30 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
                 }
             }
         }
+        stage = "target verification";
         var p = try m.forward(window[0..n]);
         defer p.deinit();
         var positions: [16]i32 = undefined;
         for (0..n) |j| positions[j] = m.position + @as(i32, @intCast(j)) + 1;
         const ids = try sampling.rows(&m.kernels, &p.scope, p.logits, positions[0..n], settings);
         defer mx.allocator.free(ids);
-        var keep: usize = 1;
-        var stop = false;
-        while (keep < n and ids[keep - 1] == window[keep]) {
-            try generated.append(a, @intCast(window[keep]));
-            accepted += 1;
-            keep += 1;
-            if (M.eos(window[keep - 1]) or generated.items.len == max_tokens) {
-                stop = true;
-                break;
-            }
-        }
-        if (!stop) {
-            pending = ids[keep - 1];
-            try generated.append(a, @intCast(pending));
-        }
+        var parents: [16]i32 = undefined;
+        for (0..n) |j| parents[j] = @as(i32, @intCast(j)) - 1;
+        const result = try @import("acceptance.zig").select(window[0..n], parents[0..n], ids, max_tokens - generated.items.len, M.eos);
+        const keep = result.kept;
+        try generated.appendSlice(a, result.tokens[0..result.count]);
+        accepted += result.accepted;
+        pending = result.pending;
+        stage = "draft cache commit";
         if (m.mtp) for (0..keep) |j| {
             _ = try m.draftStep(&p.scope, last, window[j], &head_cache);
             try mx.replace(&last, try p.scope.slice(p.hidden, 0, @intCast(j), @intCast(j + 1)));
         };
         if (!m.mtp) try mx.replace(&last, try p.scope.slice(p.hidden, 0, @intCast(keep - 1), @intCast(keep)));
+        stage = "target cache commit";
         try m.commit(&p, keep);
         rounds += 1;
-        if (stop) break;
+        if (result.stop) break;
     }
     const seconds = @as(f64, @floatFromInt(timer.read())) / 1e9;
     const text = try tok.decode(a, generated.items, false);

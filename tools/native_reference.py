@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--output", default="build/native-checks/reference.npy")
     parser.add_argument("--compare", nargs=2)
     parser.add_argument("--compare-reports", nargs="+")
+    parser.add_argument("--require-rounds", action="store_true", help="Reject trivial EOS-before-decode parity runs")
     parser.add_argument("--generate", type=int, default=0)
     parser.add_argument("--prompt", default="Write a short Python function that computes the Fibonacci sequence.")
     parser.add_argument("--seed", type=int, default=1234)
@@ -26,6 +27,9 @@ def main():
     args = parser.parse_args()
     if args.compare_reports:
         reports = [json.loads(Path(p).read_text()) for p in args.compare_reports]
+        if args.require_rounds:
+            for report in reports:
+                assert report["rounds"] > 0 and len(report["tokens"]) > 1, "No decode rounds exercised"
         for report in reports[1:]:
             assert report["prompt_tokens"] == reports[0]["prompt_tokens"], "Tokenizer mismatch"
             assert report["tokens"] == reports[0]["tokens"], "Output token mismatch"

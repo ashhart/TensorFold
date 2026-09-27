@@ -46,5 +46,19 @@ pub fn equal(s: *mx.Scope, a: mx.Array, b: mx.Array) !void {
     const y = try s.contiguous(try s.cast(b, mx.f32t));
     try mx.evalMany(&.{ x, y }, false);
     const n = mx.c.mlx_array_size(x);
-    if (!std.mem.eql(u8, std.mem.sliceAsBytes(mx.c.mlx_array_data_float32(x)[0..n]), std.mem.sliceAsBytes(mx.c.mlx_array_data_float32(y)[0..n]))) return error.FixtureMismatch;
+    const av = mx.c.mlx_array_data_float32(x)[0..n];
+    const bv = mx.c.mlx_array_data_float32(y)[0..n];
+    if (!std.mem.eql(u8, std.mem.sliceAsBytes(av), std.mem.sliceAsBytes(bv))) {
+        var differences: usize = 0;
+        var maximum: f32 = 0;
+        for (av, bv, 0..) |a_value, b_value, i| {
+            if (@as(u32, @bitCast(a_value)) != @as(u32, @bitCast(b_value))) {
+                if (differences == 0) std.debug.print("First mismatch at {d}: {d} vs {d}\n", .{ i, a_value, b_value });
+                differences += 1;
+                maximum = @max(maximum, @abs(a_value - b_value));
+            }
+        }
+        std.debug.print("Mismatch: {d}/{d} values, max abs diff {d}, shape {any}\n", .{ differences, n, maximum, mx.shape(a) });
+        return error.FixtureMismatch;
+    }
 }

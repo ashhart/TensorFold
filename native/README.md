@@ -64,6 +64,7 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--report FILE` | Write prompt/output IDs, decoded text, timing, and token hash as JSON |
 | `--dump-logits FILE.npy` | Save float32 logits from the final prompt block |
 | `--check-exact` | Run the family's GPU verification/partial-commit parity check and exit |
+| `--check-cache-stress` | Check every accepted prefix, cache snapshots, rejection, reset and memory cycles |
 
 Text goes to stdout when decoding finishes; diagnostics go to stderr. Report parent
 directories must already exist. Dense Qwen prefills in 128-token chunks; Nemotron and
@@ -108,6 +109,7 @@ path; attention layers gather only its K/V rows.
 | `sampling.zig` | Deterministic greedy/top-k/top-p selection |
 | `main.zig` | Native completion CLI and decoding loop |
 | `verification.zig` | Branch/partial-commit/continuation/cache parity check |
+| `acceptance.zig`, `cache_checks.zig` | Shared tree/chain acceptance and full-checkpoint cache property tests |
 | `vendor/` | MIT tokenizer and I/O helpers from mlx-serve; preserved license |
 
 The HTTP service, chat-template rendering, vision, and disk prefix caches are not part
@@ -197,6 +199,8 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test -Doptimize=safe
 .zig-toolchain/zig build test-metal -Doptimize=safe -Dmetal-tensors=true
 .zig-toolchain/zig build test-models -Doptimize=safe
+.zig-toolchain/zig build test-cache-stress -Doptimize=safe
+.zig-toolchain/zig build test-drafts -Doptimize=safe
 ```
 
 `test-metal` generates independent oracles through the original Python implementation

@@ -25,6 +25,9 @@ pub const Pass = struct {
     logits: A = mx.empty,
     records: [64]Record = @splat(.{}),
     taps: [5]A = @splat(mx.empty),
+    parents: [128]i32 = undefined,
+    count: usize = 0,
+    start: i32 = 0,
     pub fn deinit(p: *Pass) void {
         p.scope.deinit();
     }
@@ -62,7 +65,8 @@ pub const Model = struct {
         if (tokens.len != parents.len) return error.InvalidTree;
         const tree = try lanes.Tree.init(parents);
         const w: i32 = @intCast(tokens.len);
-        var p = Pass{};
+        var p = Pass{ .count = tokens.len, .start = m.position };
+        @memcpy(p.parents[0..parents.len], parents);
         errdefer p.deinit();
         const s = &p.scope;
         const kernels = &m.kernels;
@@ -122,14 +126,22 @@ pub const Model = struct {
         const vals = try m.kernels.run(s, src.lane_glue_gdn_pre, &.{ qkv, cs, cw, try s.ints(t.windows[0 .. t.parents.len * 4]), a, b, try m.weight(i, "linear_attn.A_log"), try m.weight(i, "linear_attn.dt_bias") }, &.{ ti("NK", 16), ti("NV", 48), ti("DK", 128), ti("DV", 128), ti("TAPS", 4) }, .{ 32, 80, w }, .{ 32, 1, 1 }, &.{ .{ .shape = &.{ 1, w, 16, 128 } }, .{ .shape = &.{ 1, w, 16, 128 } }, .{ .shape = &.{ 1, w, 48, 128 } }, .{ .shape = &.{ 1, w, 48 }, .dtype = mx.f32t }, .{ .shape = &.{ 1, w, 48 } } });
         const y = (try m.kernels.run(s, src.lane_tree_tree, &.{ vals[0], vals[1], vals[2], vals[3], vals[4], st, try s.ints(t.parents), try s.ints(&.{w}) }, &.{ mx.td("InT", mx.bf16), ti("Dk", 128), ti("Dv", 128), ti("Hk", 16), ti("Hv", 48), ti("MAXW", if (t.chain) 1 else if (w <= 16) 16 else 32), mx.tb("CHAIN", t.chain) }, .{ 32, 128, 48 }, .{ 32, 4, 1 }, &.{.{ .shape = &.{ 1, w, 48, 128 } }}))[0];
         @memcpy(rec.values[0..5], vals[0..5]);
-        rec.values[5] = st;
+        // A pass must own its replay base even if the caller restores/replaces the
+        // live cache before committing a different accepted path from this pass.
+        rec.values[5] = try s.own(try mx.retain(st));
         rec.values[6] = try s.cat(&.{ cs, qkv }, 1);
         const post = try m.kernels.run(s, src.lane_glue_gdn_post, &.{ y, z, try m.weight(i, "linear_attn.norm.weight"), try s.scalar(1e-6), try s.ints(&.{ w, mp }) }, &.{ ti("NV", 48), ti("DV", 128) }, .{ 32, 48, mp }, .{ 32, 1, 1 }, &.{ .{ .shape = &.{ 1, w, 6144 } }, .{ .shape = &.{ 96, mp }, .dtype = mx.f32t } });
         return m.project(s, i, "linear_attn.out_proj", .{ .x = post[0], .sums = post[1] });
     }
     pub fn commit(m: *Model, p: *Pass, rows: []const i32) !void {
         if (rows.len == 0) return error.EmptyCommit;
-        const s = &p.scope;
+        if (m.position != p.start or rows.len > p.count or rows[0] != 0) return error.InvalidCommit;
+        for (rows, 0..) |row, i| {
+            if (row < 0 or row >= p.count or p.parents[@intCast(row)] != (if (i == 0) @as(i32, -1) else rows[i - 1])) return error.InvalidCommit;
+        }
+        var commit_scope = mx.Scope{};
+        defer commit_scope.deinit();
+        const s = &commit_scope;
         const ids = try s.ints(rows);
         const count = try s.ints(&.{@intCast(rows.len)});
         // Build all new caches first; a failed kernel cannot half-commit a stream.

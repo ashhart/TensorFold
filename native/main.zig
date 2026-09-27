@@ -6,6 +6,9 @@ const Stopwatch = @import("vendor/io_util.zig").Stopwatch;
 const Draft = @import("drafter.zig").Drafter;
 const sampling = @import("sampling.zig");
 const lanes = @import("lanes.zig");
+fn eos(id: i32) bool {
+    return id == 248044 or id == 248046;
+}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -37,10 +40,15 @@ pub fn main(init: std.process.Init) !void {
     var settings = sampling.Sampling{};
     var explicit_seed = false;
     var exact = false;
+    var cache_stress = false;
     var warmup = false;
     var report: ?[]const u8 = null;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--check-cache-stress")) {
+            cache_stress = true;
+            continue;
+        }
         if (std.mem.eql(u8, args[i], "--metal-sampling")) {
             settings.metal = true;
             continue;
@@ -74,6 +82,7 @@ pub fn main(init: std.process.Init) !void {
     var timer = Stopwatch.init(io);
     var m = try model.Model.init(io, args[2]);
     defer m.deinit();
+    if (cache_stress) return @import("cache_checks.zig").check(model.Model, &m);
     if (exact) {
         try @import("verification.zig").check(&m);
         return;
@@ -186,39 +195,15 @@ pub fn main(init: std.process.Init) !void {
         forward_ns += stage.read();
         stage.reset();
         defer mx.allocator.free(ids);
-        var path: [32]i32 = undefined;
-        path[0] = 0;
-        var kept: usize = 1;
-        var row: usize = 0;
-        var stop = false;
-        while (true) {
-            const want = ids[row];
-            var child: ?usize = null;
-            for (1..n) |j| if (parents[j] == row and window[j] == want) {
-                child = j;
-                break;
-            };
-            if (child) |j| {
-                try generated.append(allocator, @intCast(want));
-                path[kept] = @intCast(j);
-                kept += 1;
-                accepted += 1;
-                row = j;
-                if (want == 248044 or want == 248046 or generated.items.len >= max_tokens) {
-                    stop = true;
-                    break;
-                }
-            } else {
-                pending = want;
-                try generated.append(allocator, @intCast(pending));
-                break;
-            }
-        }
-        try m.commit(&p, path[0..kept]);
-        if (draft) |*d| try d.absorb(&m, &p, path[0..kept]);
+        const result = try @import("acceptance.zig").select(window[0..n], parents[0..n], ids, max_tokens - generated.items.len, eos);
+        try generated.appendSlice(allocator, result.tokens[0..result.count]);
+        accepted += result.accepted;
+        pending = result.pending;
+        try m.commit(&p, result.path[0..result.kept]);
+        if (draft) |*d| try d.absorb(&m, &p, result.path[0..result.kept]);
         commit_ns += stage.read();
         rounds += 1;
-        if (stop) break;
+        if (result.stop) break;
     }
     const seconds = @as(f64, @floatFromInt(timer.read())) / 1e9;
     const text = try tok.decode(allocator, generated.items, false);
@@ -248,4 +233,5 @@ test {
     _ = @import("config.zig");
     _ = @import("copy.zig");
     _ = @import("ngram.zig");
+    _ = @import("acceptance.zig");
 }
