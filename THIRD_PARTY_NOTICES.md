@@ -26,6 +26,12 @@ licensed under the Apache License, Version 2.0; the license text is in
 [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt). The same helpers are in mlx-vlm's
 `models/qwen4_exp/language.py` (MIT License, Copyright (c) 2025 Prince Canuma).
 
+## GLM-5.3-Flash on Apple Silicon
+
+- The GLM tool-call argument conversion in `src/tensorfold/server/http.py` (`coerce_glm_value`) is adapted from
+  oMLX's `_coerce_param_value` (`omlx/api/tool_calling.py`, Apache License, Version 2.0, text in
+  [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt)), without its repair of near-valid JSON.
+
 ## CUDA engines
 
 On Linux the CUDA engines use [PyTorch](https://github.com/pytorch/pytorch) (BSD-3-Clause) and
