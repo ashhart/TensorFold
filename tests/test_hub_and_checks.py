@@ -194,6 +194,10 @@ def test_every_family_names_an_importable_kernel_version():
         package = family.package
         if not hasattr(package, "load"):
             continue                     # a CUDA-only family (its kernels live in its cuda/ package)
+        if not getattr(package, "KERNEL_PACKAGE", ""):
+            # a family on mlx_lm's forward (gemma4): snapshots keyed by a hash of the family's source alone
+            assert len(families.kernel_version(family, None)) == 12
+            continue
         kernels = importlib.import_module(package.KERNEL_PACKAGE)
         assert kernels.VERSION == package.KERNEL_VERSION == "v1"
         assert family.lanes                 # every family decodes through the lane engine
