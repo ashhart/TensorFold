@@ -147,6 +147,9 @@ class MLA:
                                               iw if one else iw[span], cache, start))
             elif decode:
                 outs += [self._decode_row(q[at + r], iq[at + r], iw[at + r], cache, start + r) for r in range(n)]
+            elif C.PREFILL_MODE == "absorbed":
+                outs.append(self._prefill_absorbed(q if one else q[span], iq if one else iq[span],
+                                                   iw if one else iw[span], cache, start))
             else:
                 outs.append(self._prefill(q if one else q[span], iq if one else iq[span], iw if one else iw[span],
                                           cache, start))
@@ -260,6 +263,57 @@ class MLA:
         else:
             out = self._attend(ql, iq, iw, cache, position)
         return self.unabsorb(out[0]).reshape(1, -1)                      # [1, H v]
+
+    def _prefill_absorbed(self, q: mx.array, iq: mx.array, iw: mx.array, cache: MLACache, start: int,
+                          chunk: int = 512) -> mx.array:
+        """Prefill attention the way the decode path attends (``_attend``): queries absorbed into the latent space,
+        each query over ITS keys — the indexer's best ``index_topk`` keys plus its unfinished tail past
+        ``index_topk`` keys, all of them before — gathered from the latent cache, values un-absorbed after."""
+
+        cfg = self.cfg
+        rows = int(q.shape[0])
+        kp = cfg.index_kpool
+        width = cfg.index_topk + (kp - 1 if cfg.index_tail else 0)
+        rank = int(cache.keys.shape[1])
+        ql_all = self.absorb(q.transpose(1, 0, 2))                       # [H, rows, rank]
+        outs = []
+        for c0 in range(0, rows, chunk):
+            c1 = min(c0 + chunk, rows)
+            c = c1 - c0
+            pos = mx.arange(start + c0, start + c1)                     # query positions
+            last = start + c1                                           # keys this chunk may read: [0, last)
+            blocks = last // kp
+            dense = pos + 1 <= cfg.index_topk                           # queries that read all their keys
+            if last > cfg.index_topk:
+                scores = self.index_scores(iq[c0:c1], iw[c0:c1], cache.pool[:blocks])      # [c, P]
+                valid = (mx.arange(blocks)[None] * kp + kp - 1) <= pos[:, None]
+                scores = mx.where(valid, scores, mx.array(-1e30, scores.dtype))
+                top = min(cfg.index_topk // kp, blocks)
+                pick = mx.argpartition(-scores, kth=top - 1, axis=-1)[..., :top]         # [c, top]
+                picked_valid = mx.take_along_axis(valid, pick, axis=-1)
+                ids = (pick[:, :, None] * kp + mx.arange(kp)[None, None]).reshape(c, -1)  # [c, top kp]
+                ids = mx.where(mx.repeat(picked_valid, kp, axis=1), ids, -1)
+                if cfg.index_tail:
+                    tail_start = pos + 1 - (pos + 1) % kp
+                    tail = tail_start[:, None] + mx.arange(kp - 1)[None]                  # [c, kp - 1]
+                    ids = mx.concatenate([ids, mx.where(tail <= pos[:, None], tail, -1)], axis=1)
+                if int(ids.shape[1]) < width:
+                    ids = mx.concatenate([ids, mx.full((c, width - int(ids.shape[1])), -1, dtype=ids.dtype)], axis=1)
+                every = mx.arange(width)[None]
+                ids = mx.where(dense[:, None], mx.where(every <= pos[:, None], every, -1), ids)
+            else:
+                every = mx.arange(min(width, last))[None]
+                ids = mx.where(every <= pos[:, None], every, -1)
+            valid_sel = ids >= 0
+            w = int(ids.shape[1])
+            keys = mx.take(cache.keys[:last], mx.where(valid_sel, ids, 0).reshape(-1), axis=0).reshape(c, w, rank)
+            ql = ql_all[:, c0:c1].transpose(1, 0, 2)                      # [c, H, rank]
+            s = mx.matmul(ql, keys.transpose(0, 2, 1)).astype(mx.float32) * self.scale   # [c, H, w]
+            s = mx.where(valid_sel[:, None, :], s, mx.array(-1e30, mx.float32))
+            p = mx.softmax(s, axis=-1)
+            outs.append(mx.matmul(p.astype(keys.dtype), keys))              # [c, H, rank]
+        att = mx.concatenate(outs) if len(outs) > 1 else outs[0]             # [rows, H, rank]
+        return self.unabsorb(att.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(rows, -1)
 
     def _prefill(self, q: mx.array, iq: mx.array, iw: mx.array, cache: MLACache, start: int,
                  chunk: int = PREFILL_QUERIES) -> mx.array:

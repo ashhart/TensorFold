@@ -21,6 +21,22 @@ FUSED = frozenset(FUSED_KERNELS)
 EVAL_EVERY = 2
 
 
+# How a sparse-attention layer attends during prefill (rows > DECODE_ROWS). TF_GLM5_PREFILL: "absorbed" — each
+# query over its own selected keys on the latent cache, the decode path's arithmetic, flat cost per token — or
+# "reference": k/v un-absorbed for every key of the prefix on every chunk with the selection as a dense mask
+# (quadratic over a prompt). Prefill only: decode rows are untouched either way.
+def _prefill_mode() -> str:
+    import os
+
+    value = os.environ.get("TF_GLM5_PREFILL", "reference").strip().lower()
+    if value not in ("absorbed", "reference"):
+        raise ValueError(f"TF_GLM5_PREFILL: unknown {value!r} (known: absorbed, reference)")
+    return value
+
+
+PREFILL_MODE = _prefill_mode()
+
+
 # the MLX affine formats the loader reads (the fused kernels take 4-bit groups of 64; others take MLX's one-row calls)
 BITS = (2, 3, 4, 5, 6, 8)
 GROUPS = (32, 64, 128)
