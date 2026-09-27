@@ -43,6 +43,7 @@ from tensorfold.kernels.glm.flash.v1 import fused as F
 from tensorfold.kernels.glm.flash.v1 import kda as KDA_K
 from tensorfold.kernels.glm.flash.v1 import kernels as K
 from tensorfold.kernels.glm.flash.v1 import sparse_attention as SA
+from tensorfold.families.glm5_next import layouts
 
 MODEL_TYPE = "glm5_next"
 DECODE_ROWS = 16
@@ -221,30 +222,110 @@ class Q:
                                    bits=self.bits)
 
     @classmethod
-    def stack(cls, parts: list["Q"]) -> "Q":
-        """Projections that read the same input as one matrix (rows concatenated)."""
+    def stack(cls, parts: list["Q"]) -> "Q | QSplit":
+        """Projections that read the same input as one matrix (rows concatenated). Parts quantized differently
+        (a mixed-bit checkpoint) cannot share one packed matrix: they stay separate calls (``QSplit``)."""
 
+        if len({(p.bits, p.group) for p in parts}) > 1:
+            return QSplit(parts)
         return cls(mx.concatenate([p.weight for p in parts]), mx.concatenate([p.scales for p in parts]),
                    mx.concatenate([p.biases for p in parts]))
 
 
-def _rows(q: Q, lo: int, hi: int) -> Q:
+class QSplit:
+    """Projections of one input kept as separate quantized linears (their bits differ), applied in order and
+    concatenated: the same outputs the stacked matrix would give, part by part."""
+
+    bits = None
+    group = None
+
+    def __init__(self, parts: list[Q]) -> None:
+        self.parts = list(parts)
+        self.cuts: list[int] = []
+        at = 0
+        for p in self.parts:
+            at += p.outs
+            self.cuts.append(at)
+
+    @property
+    def outs(self) -> int:
+        return self.cuts[-1]
+
+    def arrays(self) -> list[mx.array]:
+        return [a for p in self.parts for a in p.arrays()]
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.concatenate([p(x) for p in self.parts], axis=-1)
+
+    def part(self, lo: int, hi: int) -> Q:
+        """The part whose output rows are exactly lo .. hi - 1."""
+
+        start = 0
+        for p, end in zip(self.parts, self.cuts):
+            if (start, end) == (lo, hi):
+                return p
+            start = end
+        raise ValueError(f"QSplit: rows {lo}:{hi} are not one part (cuts {self.cuts})")
+
+
+class Dense:
+    """An unquantized linear (bf16 [out, in]) behind the ``Q`` interface: ``project`` runs it row by row on the
+    decode path (each row its one-row matmul), MLX's matmul otherwise."""
+
+    bits = None
+    group = None
+
+    def __init__(self, weight: mx.array) -> None:
+        self.weight = weight
+
+    @property
+    def outs(self) -> int:
+        return int(self.weight.shape[0])
+
+    @property
+    def ins(self) -> int:
+        return int(self.weight.shape[1])
+
+    def arrays(self) -> list[mx.array]:
+        return [self.weight]
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.matmul(x, self.weight.T)
+
+
+def _rows(q: Q | QSplit, lo: int, hi: int) -> Q:
     """Output rows lo .. hi - 1 of a quantized linear (views of its arrays)."""
 
+    if isinstance(q, QSplit):
+        return q.part(lo, hi)
     return Q(q.weight[lo:hi], q.scales[lo:hi], q.biases[lo:hi])
 
 
-def project(x: mx.array, q: Q, *, rows_exact: bool) -> mx.array:
+def project(x: mx.array, q: Any, *, rows_exact: bool) -> mx.array:
     """x [R, K] through a quantized linear. One row: MLX's quantized matmul. Several rows on the decode path: the
-    rows share the weight reads through ``kernels.qmv_rows`` (MLX's one-row bits) where the weights fit it, else
-    one MLX call per row."""
+    rows share the weight reads through ``kernels.qmv_rows`` (MLX's one-row bits) where the weights fit it
+    (4-bit, groups of 64), else one MLX call per row (any other bits, ``QSplit`` parts, ``Dense``)."""
 
     rows = int(x.shape[0])
     if rows == 1 or not rows_exact:
         return q(x)
-    if K.metal() and K.qmv_rows_fits(q, rows):
+    if isinstance(q, QSplit):
+        return mx.concatenate([project(x, p, rows_exact=True) for p in q.parts], axis=-1)
+    if isinstance(q, Q) and K.metal() and K.qmv_rows_fits(q, rows):
         return K.qmv_rows(x, q)
     return mx.concatenate([q(x[r:r + 1]) for r in range(rows)])
+
+
+def bf16_if_exact(a: mx.array) -> mx.array:
+    """A stored fp32 tensor as bf16 when that loses nothing (the mlx-lm conversion keeps the hyper-connection mix
+    and the router in fp32; their values are the bf16 originals, so the packed bf16 kernels can take them)."""
+
+    if a.dtype != mx.float32:
+        return a
+    b = a.astype(mx.bfloat16)
+    if bool(mx.array_equal(b.astype(mx.float32), a).item()):
+        return b
+    return a
 
 
 def per_row(fn: Any, x: mx.array, rows_exact: bool) -> mx.array:
@@ -550,7 +631,10 @@ class KDA:
             self.cuts.append(at)
         self.in_proj = Q.stack(parts)
         self.f_b, self.g_b, self.o_proj = w["f_b_proj"], w["g_b_proj"], w["o_proj"]
-        taps = [w[f"{c}_conv1d"] for c in "qkv"]                       # [C, 1, T] (torch) or [C, T, 1]
+        if "conv1d" in w:                                                # one fused conv over q | k | v (mlxlm layout)
+            taps = [w["conv1d"]]                                         # [3 C, T, 1]
+        else:
+            taps = [w[f"{c}_conv1d"] for c in "qkv"]                     # [C, 1, T] (torch) or [C, T, 1]
         conv = mx.concatenate([t.reshape(t.shape[0], -1) for t in taps])  # [3 width, T]
         self.taps = int(conv.shape[1])
         self.conv_w = mx.contiguous(conv.T.astype(mx.float32))          # [T, 3 width]
@@ -632,15 +716,22 @@ class MLA:
         self.scale = self.nope ** -0.5
         self.q_a, self.q_b, self.kv_a, self.o_proj = w["q_a_proj"], w["q_b_proj"], w["kv_a_proj_with_mqa"], w["o_proj"]
         self.q_norm, self.kv_norm = w["q_a_layernorm"], w["kv_a_layernorm"]
-        kvb: Q = w["kv_b_proj"]                                          # [H (nope + v), rank]
-        per = self.nope + self.vdim
+        if "kv_b_proj" in w:
+            kvb: Q = w["kv_b_proj"]                                      # [H (nope + v), rank]
+            per = self.nope + self.vdim
 
-        def heads(a: mx.array, lo: int, hi: int) -> mx.array:
-            return mx.contiguous(a.reshape(self.heads, per, -1)[:, lo:hi])
+            def heads(a: mx.array, lo: int, hi: int) -> mx.array:
+                return mx.contiguous(a.reshape(self.heads, per, -1)[:, lo:hi])
 
-        self.wk = Q(heads(kvb.weight, 0, self.nope), heads(kvb.scales, 0, self.nope), heads(kvb.biases, 0, self.nope))
-        self.wv = Q(heads(kvb.weight, self.nope, per), heads(kvb.scales, self.nope, per),
-                    heads(kvb.biases, self.nope, per))
+            # keys [H, nope, rank] quantized along rank: absorb = q @ wk (transpose False), keys = lat @ wk^T
+            self.wk = Q(heads(kvb.weight, 0, self.nope), heads(kvb.scales, 0, self.nope), heads(kvb.biases, 0, self.nope))
+            self.wv = Q(heads(kvb.weight, self.nope, per), heads(kvb.scales, self.nope, per), heads(kvb.biases, self.nope, per))
+            self.wk_t = False
+        else:
+            # the mlxlm layout's absorbed pair: embed_q [H, rank, nope] quantized along nope (kv_b's key half
+            # transposed), unembed_out [H, v, rank] as kv_b's value half; absorb = q @ embed_q^T (transpose True)
+            self.wk, self.wv = w["embed_q"], w["unembed_out"]
+            self.wk_t = True
         # indexer
         self.iq, self.ik_proj, self.iw = w["indexer.wq_b"], w["indexer.wk"], w["indexer.weights_proj"]
         self.ik_norm_w, self.ik_norm_b = w["indexer.k_norm.weight"], w["indexer.k_norm.bias"]
@@ -665,7 +756,7 @@ class MLA:
         """q_nope [H, n, nope] -> latent queries [H, n, rank]."""
 
         wk = self.wk
-        return mx.quantized_matmul(q, wk.weight, wk.scales, wk.biases, transpose=False, group_size=wk.group,
+        return mx.quantized_matmul(q, wk.weight, wk.scales, wk.biases, transpose=self.wk_t, group_size=wk.group,
                                    bits=wk.bits)
 
     def unabsorb(self, out: mx.array) -> mx.array:
@@ -679,8 +770,8 @@ class MLA:
         """Per-head keys and values [H, n, 256] of latent keys [n, rank] (prefill)."""
 
         wk, wv = self.wk, self.wv
-        k = mx.quantized_matmul(lat[None], wk.weight, wk.scales, wk.biases, transpose=True, group_size=wk.group,
-                                bits=wk.bits)
+        k = mx.quantized_matmul(lat[None], wk.weight, wk.scales, wk.biases, transpose=not self.wk_t,
+                                group_size=wk.group, bits=wk.bits)
         v = mx.quantized_matmul(lat[None], wv.weight, wv.scales, wv.biases, transpose=True, group_size=wv.group,
                                 bits=wv.bits)
         return k, v
@@ -737,7 +828,7 @@ class MLA:
         if decode and row_kernel("mla_proj", rows, decode):
             # the latent maps with the rows as a batch (each keeps its one-row bits), attention row by row
             ql = mx.quantized_matmul(q[:, :, None, :], self.wk.weight, self.wk.scales, self.wk.biases,
-                                     transpose=False, group_size=self.wk.group, bits=self.wk.bits)   # [R, H, 1, rank]
+                                     transpose=self.wk_t, group_size=self.wk.group, bits=self.wk.bits)   # [R, H, 1, rank]
             sparse = [r for r in range(rows) if SPARSE_KERNEL and start + r + 1 > cfg.index_topk]
             if row_kernel("indexer", rows, decode):
                 sels = self._choices(iq, iw, cache, start, skip=sparse)
@@ -992,18 +1083,24 @@ _FP32 = ("A_log", "dt_bias", "mlp.gate.weight", "e_score_correction_bias", "_fn"
 
 class Weights:
     """The checkpoint's language-model tensors by name (``layers.N....``, ``lm_head``, ``embed_tokens``, ``norm``),
-    read shard by shard as they are asked for."""
+    read shard by shard as they are asked for. Names of either on-disk layout (``layouts``) resolve to the same
+    short names; ``mtp_layer`` is the index the MTP layer takes (``num_hidden_layers``)."""
 
-    def __init__(self, model_dir: Path) -> None:
+    def __init__(self, model_dir: Path, mtp_layer: int | None = None) -> None:
         index = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
         self.dir = model_dir
+        self.mtp_layer = mtp_layer
+        self.layout = layouts.detect(index)
         self.where: dict[str, str] = {}
         for name, shard in index.items():
-            short = _short(name)
+            short = self._short(name)
             if short is not None:
                 self.where[short] = shard
         self._shard: tuple[str, dict[str, mx.array]] | None = None
         self._cache: dict[str, dict[str, mx.array]] = {}
+
+    def _short(self, name: str) -> str | None:
+        return layouts.canonical(name, self.mtp_layer)
 
     def has(self, name: str) -> bool:
         return name in self.where
@@ -1015,7 +1112,7 @@ class Weights:
             raw = mx.load(str(self.dir / shard))
             loaded = {}
             for full, value in raw.items():
-                short = _short(full)
+                short = self._short(full)
                 if short is not None:
                     loaded[short] = value
             self._cache = {shard: loaded}          # one shard at a time: arrays already taken stay alive
@@ -1024,21 +1121,22 @@ class Weights:
     def q(self, prefix: str) -> Q:
         return Q(self.get(f"{prefix}.weight"), self.get(f"{prefix}.scales"), self.get(f"{prefix}.biases"))
 
+    def linear(self, prefix: str) -> Q | Dense:
+        """A linear as stored: quantized (``Q``) when it has scales, else the bf16 matrix (``Dense``)."""
+
+        if self.has(f"{prefix}.scales"):
+            return self.q(prefix)
+        return Dense(self.get(f"{prefix}.weight"))
+
 
 def _short(name: str) -> str | None:
-    if name.startswith("model.language_model."):
-        return name[len("model.language_model."):]
-    if name.startswith("language_model.model."):
-        return name[len("language_model.model."):]
-    if name.startswith("lm_head.") or name.startswith("language_model.lm_head."):
-        return name[name.index("lm_head."):]
-    return None
+    return layouts.canonical(name)
 
 
 def _materialize(*arrays: Any) -> None:
     flat: list[mx.array] = []
     for a in arrays:
-        if isinstance(a, Q):
+        if isinstance(a, (Q, QSplit, Dense)):
             flat += a.arrays()
         elif isinstance(a, mx.array):
             flat.append(a)
@@ -1049,8 +1147,10 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer
     p = f"layers.{i}"
     attn_prefix = f"{p}.self_attn"
     if w.has(f"{attn_prefix}.q_a_proj.weight"):
-        names = ["q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj", "indexer.wq_b", "indexer.wk",
+        names = ["q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "o_proj", "indexer.wq_b", "indexer.wk",
                  "indexer.weights_proj"]
+        # kv_b_proj as stored (vontra), or the absorbed pair the mlxlm layout keeps instead
+        names += ["kv_b_proj"] if w.has(f"{attn_prefix}.kv_b_proj.weight") else ["embed_q", "unembed_out"]
         aw: dict[str, Any] = {n: w.q(f"{attn_prefix}.{n}") for n in names}
         for n in ("q_a_layernorm", "kv_a_layernorm"):
             aw[n] = w.get(f"{attn_prefix}.{n}.weight")
@@ -1064,8 +1164,12 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer
     else:
         names = ["q_proj", "k_proj", "v_proj", "f_a_proj", "f_b_proj", "g_a_proj", "g_b_proj", "b_proj", "o_proj"]
         aw = {n: w.q(f"{attn_prefix}.{n}") for n in names}
-        for n in ("q_conv1d", "k_conv1d", "v_conv1d", "o_norm"):
-            aw[n] = w.get(f"{attn_prefix}.{n}.weight")
+        aw["o_norm"] = w.get(f"{attn_prefix}.o_norm.weight")
+        if w.has(f"{attn_prefix}.conv1d.weight"):                        # mlxlm: one conv over q | k | v
+            aw["conv1d"] = w.get(f"{attn_prefix}.conv1d.weight")
+        else:
+            for n in ("q_conv1d", "k_conv1d", "v_conv1d"):
+                aw[n] = w.get(f"{attn_prefix}.{n}.weight")
         aw["A_log"] = w.get(f"{attn_prefix}.A_log")
         aw["dt_bias"] = w.get(f"{attn_prefix}.dt_bias")
         attn = KDA(aw, cfg)
@@ -1086,7 +1190,8 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer
                   mx.stack([x.biases for x in parts]))
             _materialize(q)
             stacked.append(q)
-        mlp: Any = MoE(w.get(f"{m}.gate.weight"), w.get(f"{m}.gate.e_score_correction_bias"), *stacked, shared, cfg)
+        mlp: Any = MoE(bf16_if_exact(w.get(f"{m}.gate.weight")), w.get(f"{m}.gate.e_score_correction_bias"), *stacked,
+                       shared, cfg)
         _materialize(mlp.router, mlp.bias, mlp.scale_arr, mlp.limit_arr, mlp.router_packed,
                      *(mlp.shared.gate_up, mlp.shared.down) if shared else ())
     else:
@@ -1096,8 +1201,8 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer
     post_norm = w.get(f"{p}.post_attention_layernorm.weight")
     attn_hc = ffn_hc = None
     if not plain:
-        attn_hc = HC(w.get(f"{p}.hc_attn_fn"), w.get(f"{p}.hc_attn_base"), w.get(f"{p}.hc_attn_scale"), cfg)
-        ffn_hc = HC(w.get(f"{p}.hc_ffn_fn"), w.get(f"{p}.hc_ffn_base"), w.get(f"{p}.hc_ffn_scale"), cfg)
+        attn_hc = HC(bf16_if_exact(w.get(f"{p}.hc_attn_fn")), w.get(f"{p}.hc_attn_base"), w.get(f"{p}.hc_attn_scale"), cfg)
+        ffn_hc = HC(bf16_if_exact(w.get(f"{p}.hc_ffn_fn")), w.get(f"{p}.hc_ffn_base"), w.get(f"{p}.hc_ffn_scale"), cfg)
         _materialize(attn_hc.fn, attn_hc.base, attn_hc.scale, ffn_hc.fn, ffn_hc.base, ffn_hc.scale,
                      attn_hc.fn_packed, ffn_hc.fn_packed)
     _materialize(in_norm, post_norm)
@@ -1111,7 +1216,7 @@ def load_backbone(model_dir: Path, *, layers: int | None = None) -> GLM5:
     model_dir = Path(model_dir)
     config = json.loads((model_dir / "config.json").read_text())
     cfg = Config.from_dict(config)
-    w = Weights(model_dir)
+    w = Weights(model_dir, mtp_layer=cfg.num_hidden_layers)
     count = cfg.num_hidden_layers if layers is None else min(int(layers), cfg.num_hidden_layers)
     layers = [load_layer(w, i, cfg) for i in range(count)]
     embed = w.q("embed_tokens")
@@ -1131,4 +1236,5 @@ def load(model_dir: Path) -> tuple[GLM5, Any]:
     return model, tokenizer
 
 
-__all__ = ["Config", "GLM5", "KDACache", "MLACache", "Q", "load", "load_backbone", "load_layer", "project"]
+__all__ = ["Config", "Dense", "GLM5", "KDACache", "MLACache", "Q", "QSplit", "load", "load_backbone", "load_layer",
+           "project"]

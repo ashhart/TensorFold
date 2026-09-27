@@ -63,6 +63,15 @@ def check(model_dir: str | Path) -> None:
         raise ValueError(f"GLM-5.3-Flash's kernels read MLX 4-bit weights in groups of 64 ({MODELS[0]}) or, on "
                          f"CUDA, EXL3 ({MODELS[1]}); this checkpoint has {describe_quantization(config)}. "
                          f"{OWN_MODEL_HELP}")
+    # per-tensor overrides (mlx-lm's mixed-bit conversions, e.g. Vontra/GLM-5.3-Flash-MLX-oQ4-MTP and grant-ai's
+    # abliterated conversion): the loader reads them; 8-, 6- and 5-bit tensors take their own row kernels
+    # (kernels.qmv_rows / expert_qmv at MLX's one-row bits for that width), the shared expert stays in the fused MoE
+    found = config.get("quantization") or config.get("text_config", {}).get("quantization") or {}
+    base = quantization(config)[0]
+    overrides = [k for k, v in found.items() if isinstance(v, dict) and int(v.get("bits", base)) != base]
+    if method != "exl3" and overrides:
+        print(f"[tensorfold] {len(overrides)} tensors are not 4-bit (per-tensor quantization overrides): they run "
+              f"through the 8/6/5-bit row kernels; drafting stays exact", flush=True)
     if sys.platform == "darwin":
         from tensorfold.families.glm5_next.mtp import has_mtp
 

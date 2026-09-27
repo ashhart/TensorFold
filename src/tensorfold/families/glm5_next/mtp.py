@@ -22,7 +22,7 @@ from tensorfold.families.glm5_next.model import GLM5, MLACache, Q, load_layer, p
 
 
 class GLMMTP:
-    def __init__(self, layer: Any, eh_proj: Q, enorm: mx.array, hnorm: mx.array, norm: mx.array, eps: float) -> None:
+    def __init__(self, layer: Any, eh_proj: Any, enorm: mx.array, hnorm: mx.array, norm: mx.array, eps: float) -> None:
         self.layer = layer
         self.eh_proj = eh_proj
         self.enorm, self.hnorm, self.norm = enorm, hnorm, norm
@@ -57,12 +57,14 @@ def has_mtp(model_dir: Any) -> bool:
     index = Path(model_dir) / "model.safetensors.index.json"
     if not index.is_file():
         return False
-    names = json.loads(index.read_text())["weight_map"]
-    return any(name.endswith(f"layers.{n}.eh_proj.weight") for name in names)
+    from tensorfold.families.glm5_next.layouts import mtp_layer_names
+
+    return mtp_layer_names(json.loads(index.read_text())["weight_map"], n)
 
 
 def load(model: GLM5) -> GLMMTP:
-    """The head from the checkpoint the model was loaded from (4-bit like the backbone, its router fp32)."""
+    """The head from the checkpoint the model was loaded from (quantized like the backbone, its router fp32; the
+    mlxlm layout keeps ``eh_proj`` unquantized in bf16, read as ``Dense``)."""
 
     from tensorfold.families.glm5_next.model import _materialize
 
@@ -70,7 +72,7 @@ def load(model: GLM5) -> GLMMTP:
     cfg = model.args
     i = cfg.num_hidden_layers
     layer = load_layer(w, i, cfg, plain=True)
-    head = GLMMTP(layer, w.q(f"layers.{i}.eh_proj"), w.get(f"layers.{i}.enorm.weight"),
+    head = GLMMTP(layer, w.linear(f"layers.{i}.eh_proj"), w.get(f"layers.{i}.enorm.weight"),
                   w.get(f"layers.{i}.hnorm.weight"), w.get(f"layers.{i}.shared_head.norm.weight"), cfg.rms_norm_eps)
     _materialize(head.eh_proj, head.enorm, head.hnorm, head.norm)
     return head
