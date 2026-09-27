@@ -84,6 +84,41 @@ def test_cuda_admission_metadata_does_not_enlarge_the_engine_cache(tmp_path, mon
     assert "context: 8185" in capsys.readouterr().out
 
 
+def test_serve_parses_the_kv_cache_flag():
+    plain = cli.build_parser().parse_args(["serve", "owner/model"])
+    assert plain.kv_dtype == "bf16"                        # the cache stays bf16 unless it is asked for
+    assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "int8"]).kv_dtype == "int8"
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "fp8"])
+
+
+@pytest.mark.torch
+def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatch):
+    """``CUDA_KV_DTYPES`` is the gate: a family that does not list a dtype is refused before anything loads, and
+    a family that does gets it through its engine."""
+
+    import json
+
+    from tensorfold.families import glm5_next, qwen3_5, qwen4_exp
+    from tensorfold.families.qwen4_exp.cuda import engine as fn_engine
+
+    made = []
+    monkeypatch.setattr(fn_engine, "FlashNextEngine", lambda *a, **k: made.append(k) or SimpleNamespace(**k))
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"mtp.fc.weight": "x"}}))
+
+    assert qwen4_exp.CUDA_KV_DTYPES == ("bf16", "int8")
+    assert qwen4_exp.cuda_engine(tmp_path, kv_dtype="int8").kv_dtype == "int8"
+    assert made[-1]["kv_dtype"] == "int8"
+    with pytest.raises(ValueError, match="kv-dtype"):
+        qwen4_exp.cuda_engine(tmp_path, kv_dtype="fp8")
+    for module in (qwen3_5, glm5_next):
+        args = argparse.Namespace(tp=1, rank=0, master="", master_port=29551, no_drafts=True, drafter="none",
+                                  mtp_drafts=None, name="", model=str(tmp_path), kv_dtype="int8")
+        with pytest.raises(ValueError, match="KV cache, not --kv-dtype int8"):
+            cli._serve_cuda(args, SimpleNamespace(title=module.TITLE, package=module), tmp_path)
+    assert not made[1:]
+
+
 @pytest.mark.torch
 def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatch):
     """Everything on the lanes: a CUDA engine whose drafter is missing refuses to start rather than decode one token
