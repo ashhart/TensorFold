@@ -324,11 +324,20 @@ class GatedDeltaNet(nn.Module):
         self.out_proj = nn.Linear(self.value_dim, d, bias=False)
 
     def __call__(self, x: mx.array, cache: LinearCache) -> mx.array:
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
         batch, length, _ = x.shape
-        qkv = self.in_proj_qkv(x)
-        z = self.in_proj_z(x).reshape(batch, length, self.nv, self.dv)
-        b = self.in_proj_b(x)
-        a = self.in_proj_a(x)
+        stacked = self.__dict__.get("stacked")          # the fused decode's stacked in_proj_* rows, when attached
+        if stacked is not None and prefill_mm.active(batch * length):
+            qkv, z, b, a = mx.split(prefill_mm.linear(stacked, x),
+                                    [self.conv_dim, self.conv_dim + self.value_dim, self.conv_dim + self.value_dim + self.nv],
+                                    axis=-1)
+            z = z.reshape(batch, length, self.nv, self.dv)
+        else:
+            qkv = self.in_proj_qkv(x)
+            z = self.in_proj_z(x).reshape(batch, length, self.nv, self.dv)
+            b = self.in_proj_b(x)
+            a = self.in_proj_a(x)
         tail = cache.conv if cache.conv is not None else mx.zeros((batch, self.kernel - 1, self.conv_dim), x.dtype)
         conv_in = mx.concatenate([tail, qkv], axis=1)
         cache.conv = conv_in[:, -(self.kernel - 1):]
@@ -343,7 +352,7 @@ class GatedDeltaNet(nn.Module):
         out, cache.ssm = gated_delta_update(q, k, v, a, b, self.A_log, self.dt_bias, cache.ssm)
         cache.offset += length
         out = self.norm(out, z)
-        return self.out_proj(out.reshape(batch, length, -1))
+        return prefill_mm.linear(self.out_proj, out.reshape(batch, length, -1))
 
 
 # -- sparse attention ----------------------------------------------------------
@@ -363,8 +372,10 @@ class Indexer(nn.Module):
         self.k_layernorm = CenteredRMSNorm(self.dims, cfg.rms_norm_eps)
 
     def project(self, x: mx.array) -> tuple[mx.array, mx.array]:
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
         batch, length, _ = x.shape
-        qk = self.index_qk_proj(x).reshape(batch, length, self.heads + 1, self.dims)
+        qk = prefill_mm.linear(self.index_qk_proj, x).reshape(batch, length, self.heads + 1, self.dims)
         return qk[:, :, : self.heads], qk[:, :, self.heads]
 
     def _pool(self, raw: mx.array, start: int, stop: int) -> mx.array:
@@ -453,18 +464,25 @@ class SparseAttention(nn.Module):
         self.indexer = Indexer(cfg)
 
     def __call__(self, x: mx.array, cache: AttentionCache) -> mx.array:
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
         batch, length, _ = x.shape
         past = cache.offset
-        q = self.q_proj(x).reshape(batch, length, self.heads, 2 * self.dims)
+        linear = prefill_mm.linear                      # layer(x), or MLX's kernel with a tuned tile for prefill
+        q = linear(self.q_proj, x).reshape(batch, length, self.heads, 2 * self.dims)
         queries, gate = q[..., : self.dims], q[..., self.dims:]
         gate = gate.reshape(batch, length, self.heads * self.dims)
         queries = self.q_norm(queries).transpose(0, 2, 1, 3)
-        keys = self.k_norm(self.k_proj(x).reshape(batch, length, self.kv_heads, self.dims)).transpose(0, 2, 1, 3)
-        values = self.v_proj(x).reshape(batch, length, self.kv_heads, self.dims).transpose(0, 2, 1, 3)
+        keys = self.k_norm(linear(self.k_proj, x).reshape(batch, length, self.kv_heads, self.dims)).transpose(0, 2, 1, 3)
+        values = linear(self.v_proj, x).reshape(batch, length, self.kv_heads, self.dims).transpose(0, 2, 1, 3)
         queries = mx.fast.rope(queries, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
         keys = mx.fast.rope(keys, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
         index_query, index_key = self.indexer.project(x)
         keys, values, raw = cache.update(keys, values, index_key)
+        if batch == 1 and length > 1 and prefill_mm.fast_prefill():
+            out = self._sparse_rows(queries, index_query, raw, cache, past, length)
+            if out is not None:
+                return linear(self.o_proj, out * mx.sigmoid(gate))
         ix = self.indexer
         if self.__dict__.get("kernel_select") and batch == 1 and (past + length) // ix.ratio > ix.top_blocks:
             out = self._selected(queries, index_query, raw, cache, past)
@@ -486,7 +504,42 @@ class SparseAttention(nn.Module):
             outs.append(part)
         out = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
         out = out.transpose(0, 2, 1, 3).reshape(batch, length, -1)
-        return self.o_proj(out * mx.sigmoid(gate))
+        return linear(self.o_proj, out * mx.sigmoid(gate))
+
+    def _sparse_rows(self, queries: mx.array, index_query: mx.array, raw: mx.array, cache: AttentionCache,
+                     past: int, length: int) -> mx.array | None:
+        """A chunk's attention once its last row is past ``top`` complete blocks, reading only what each row may
+        read: a row past the budget its best ``top`` blocks and its tail (kernels.index_select, the fused decode's
+        selection), a row under it all its keys. Indexer.select computes the same choice as a boolean mask over
+        every key, and masked dense attention reads every key: its cost per row grows with the context. [1, L, H*D],
+        or None while no row is past the budget (the causal path is as cheap)."""
+
+        from tensorfold.kernels.qwen.flash_next.v1 import attention as K
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill as P
+
+        ind = self.indexer
+        blocks = (past + length) // ind.ratio
+        top = ind.top_blocks
+        if blocks <= top:
+            return None
+        done = 0 if cache.pooled is None else cache.pooled.shape[1]
+        if blocks > done:
+            fresh = ind._pool(raw, done, blocks)
+            cache.pooled = fresh if cache.pooled is None else mx.concatenate([cache.pooled, fresh], axis=1)
+        pooled = cache.pooled[0, :blocks]
+        # the indexer's queries, normed and rotated as Indexer.select does: [L, HI, DI]
+        iq = ind.q_layernorm(index_query).transpose(0, 2, 1, 3)
+        iq = mx.fast.rope(iq, ind.rotary_dim, traditional=False, base=ind.base, scale=1.0, offset=past)[0]
+        iq = iq.transpose(1, 0, 2)
+        ends = [past + r + 1 for r in range(length)]
+        complete = [e // ind.ratio for e in ends]
+        sparse = [c > top for c in complete]
+        ids = K.index_select(iq, pooled, complete, ends, top=top) if any(sparse) else None
+        counts = [ind.ratio * top + e - ind.ratio * c if sp else e for e, c, sp in zip(ends, complete, sparse)]
+        q = queries[0].transpose(1, 0, 2)
+        attend = P.attention_rows_gqa if P.gqa_supported(self.heads, self.kv_heads, self.dims) else K.attention_rows
+        out = attend(q, cache.keys, cache.values, counts, ids, sparse, self.scale, parts=4)
+        return out.reshape(1, length, -1)
 
     # partial outputs a row's key list is cut into by the selected-keys kernel (prompt chunks have rows enough to
     # fill the GPU)
@@ -541,6 +594,10 @@ class SparseMoE(nn.Module):
         return experts, weights / weights.sum(axis=-1, keepdims=True)
 
     def __call__(self, x: mx.array) -> mx.array:
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
+        if prefill_mm.moe_applies(self, x):
+            return prefill_mm.moe(self, x)
         experts, weights = self.route(x)
         routed = (self.switch_mlp(x, experts) * weights[..., None]).sum(axis=-2)
         shared = self.shared_expert(x) * mx.sigmoid(self.shared_expert_gate(x))
@@ -638,6 +695,14 @@ class NGramEmbedding(nn.Module):
         return np.concatenate(blocks, axis=-1)[:, -tokens.shape[1]:]
 
     def __call__(self, ids: np.ndarray) -> mx.array:
+        tables = self.__dict__.get("fused_tables")      # FusedDecode's PleTables, when attached
+        if tables is not None:
+            # one lookup kernel instead of one per shard (~70 small ops a prefill chunk); kernels.ple_lookup matches
+            # mx.dequantize bit for bit, so the rows are the same
+            from tensorfold.kernels.qwen.flash_next.v1 import embed as K
+
+            rows = K.ple_lookup(ids.reshape(-1, ids.shape[-1]), tables)
+            return rows.reshape(*ids.shape[:-1], self.heads * self.dims)
         if self.host is not None:
             words, scales, biases = self.host.gather(ids)
             rows = mx.dequantize(mx.array(words), mx.array(scales).view(mx.bfloat16),
@@ -770,6 +835,12 @@ class Qwen4Exp(nn.Module):
         fused = self.__dict__.get("fused")
         if fused is not None and tokens.shape[0] == 1 and tokens.shape[1] <= self.fused_rows:
             return fused(tokens, cache)
+        if fused is not None and tokens.shape[0] == 1:
+            from tensorfold.kernels.qwen.flash_next.v1 import prefill_hc, prefill_mm
+
+            if prefill_mm.fast_prefill():
+                # a prefill chunk with fused hyper-connections (the fused decode's arithmetic, MLX's matmuls)
+                return prefill_hc.hidden(self, tokens, cache)
         h = self.model.embed_tokens(mx.array(tokens.astype(np.int32)))
         h = mx.tile(h, (1, 1, self.args.hc_count))
         queued = None

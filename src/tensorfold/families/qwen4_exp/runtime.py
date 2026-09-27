@@ -121,10 +121,20 @@ class FlashNext:
             cache.append(MTPCache())
         return cache
 
+    @property
+    def prefill_key(self) -> str:
+        """Which forward prefills prompt chunks, for prefix-snapshot keys (the two round differently): the prefill
+        path (``kernels.qwen.flash_next.v1.prefill*``, on the GPU unless TF_FLASH_PREFILL=0) or MLX's."""
+
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
+        return "flash-prefill=" + ("fast" if self.fused is not None and prefill_mm.fast_prefill() else "mlx")
+
     def hidden(self, inputs: Any, cache: list[Any]) -> mx.array:
         """Mixed hidden states [1, R, D]: up to ``fused_rows`` rows through the fused decode kernels, a longer
-        prompt chunk through MLX's forward, whose bits depend on the chunk; the engine's aligned prefill gives a
-        resumed prompt the chunks of the same prompt fed fresh."""
+        prompt chunk through the prefill path (``Qwen4Exp.hidden``; MLX's forward with TF_FLASH_PREFILL=0), whose
+        bits depend on the chunk; the engine's aligned prefill gives a resumed prompt the chunks of the same prompt
+        fed fresh."""
 
         tokens = np.asarray(inputs, dtype=np.int64)
         if tokens.ndim == 1:

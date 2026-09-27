@@ -196,7 +196,9 @@ def kernel_version(family: Family, model: Any) -> str:
     hook = getattr(family.package, "kernel_version", None)
     if hook is not None:
         return str(hook(model))
-    return kernel_source_version(family)
+    source = kernel_source_version(family)
+    prefill_key = getattr(model, "prefill_key", None)              # how prompts are prefilled changes the bits too
+    return f"{source}|{prefill_key}" if prefill_key else source
 
 
 def kernel_source_version(family: Family) -> str:
