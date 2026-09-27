@@ -48,8 +48,9 @@ checkpoints TensorFold is built and tested with, all on Hugging Face:
 | Nemotron 3.5 Lightning 30B-A3B | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 18.6 GB | 32 GB or more |
 | Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` and its draft model `z-lab/Qwen3.8-27B-DFlash2` | 16.1 GB + 3.8 GB | 32 GB or more; an M5-generation GPU for the fast kernels |
 | Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 113 GB | 192 GB or more |
+| GLM-5.3-Flash | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | 182 GB | 256 GB or more |
 
-The three main checkpoints come from the `Vontra` Hugging Face namespace; Qwen3.8-27B's optional DFlash2
+The main checkpoints come from the `Vontra` Hugging Face namespace; Qwen3.8-27B's optional DFlash2
 drafter comes from `z-lab`.
 
 ```bash
@@ -71,6 +72,9 @@ What each checkpoint needs:
   M4 GPUs, drafted windows of up to 8 rows go through TensorFold's row-exact matvec instead, so drafted output
   is still byte-identical to serial decoding. Each round drafts as many tokens as pay at the request's
   acceptance.
+- GLM-5.3-Flash drafts with the MTP layer stored in its checkpoint, and its kernels read 4-bit weights in groups
+  of 64. It needs MLX 0.32.2 or later on a 256 GB Mac: with 0.32.0, decoding there slowed to a few tokens a
+  second after a few requests ([its recipe](docs/recipes/glm-5.3-flash.md#apple-silicon-mlx)).
 - Nemotron 3.5 Lightning drafts with its MTP head, which the checkpoint above ships as `mtp-4bit.safetensors`
   (converted from NVIDIA's BF16 release; the standard MLX conversion drops it), and from the context.
   `pull` checks for the head, and `serve` completes an older cache that lacks it before loading.
@@ -102,6 +106,11 @@ drafts, which are now on by default; in-engine they reached 217 tok/s on prose a
 | | | file edit | 190 |
 | | | 18k-token context | 98.5 |
 | | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 103-115 |
+| GLM-5.3-Flash, 4-bit, up to 4 MTP drafts | M3 Ultra, 512 GB | short answer with thinking | 62.4 (46.9 without drafts) |
+| | | code | 63.6 (47.1 without drafts) |
+| | | file edit | 93.6 |
+| | | 18k-token context | 48.0 |
+| | | 23k-token agent prompt with tools, then a long tool call | 53.4 |
 
 In 0.3.4, bench_openai's cells (64-token replies, thinking off, median of seeds; code sampled / chat sampled /
 code greedy / chat greedy) gave Nemotron on the M5 Max 288 / 223 / 292 / 243 tok/s, against 173 / 173 / 179 / 176
@@ -151,7 +160,7 @@ greedy. Each TensorFold number is byte-identical to its own serial decoding.
 | GLM-5.3-Flash | 2 | 49.4 vs 24.5 (2.0x) | 43.3 vs 24.3 (1.8x) | 66.3 vs 32.2 (2.1x) | 45.2 vs 24.7 (1.8x) |
 | GLM-5.3-Flash, Mia-AiLab's EXL3 weights (experimental) | 2 | 36.4 vs 24.5 (1.5x) | 29.7 vs 24.3 (1.2x) | 43.8 vs 32.2 (1.4x) | 32.9 vs 24.7 (1.3x) |
 
-GLM-5.3-Flash needs two Sparks. For each greedy request it measures its MTP head against a DFlash2 draft model
+On NVIDIA GPUs GLM-5.3-Flash needs two Sparks. For each greedy request it measures its MTP head against a DFlash2 draft model
 and keeps whichever commits more tokens per millisecond ([its recipe](docs/recipes/glm-5.3-flash.md)). That draft
 model, `incoai/GLM-5.3-Flash-DFlash2`, is licensed for non-commercial use only (CC BY-NC-ND 4.0); without it GLM
 drafts with its MTP head alone. vLLM's GLM numbers come from Mia-AiLab's recipe, which serves the EXL3 checkpoint
@@ -179,8 +188,8 @@ drafted decoding writes the same bytes as serial decoding. Drafts change speed o
 send the same request with `"draft": false`, which decodes one token a round, and compare.
 
 The default seed is a hash of the prompt, so the same conversation gets the same reply. Pass `"seed"` to vary
-it. One limit: for Flash Next and Nemotron the prompt's cache can differ in its last bits depending on which
-prefix was already cached, so a reply can too ([details](docs/recipes/README.md#a-known-limit)). Drafted and
+it. One limit: for Flash Next, Nemotron and GLM-5.3-Flash on a Mac the prompt's cache can differ in its last bits
+depending on which prefix was already cached, so a reply can too ([details](docs/recipes/README.md#a-known-limit)). Drafted and
 serial decoding from the same cache always agree.
 
 ## Serve
@@ -212,7 +221,7 @@ other versions. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` switches t
 | `--tp 2 --rank R --master HOST` | one GPU | split the model over two machines, one GPU each (CUDA; see [DGX Spark](#dgx-spark-and-other-nvidia-gpus)) |
 | `--no-drafts` | off | one token a round: the serial reference |
 | `--drafter` | `auto` | the family's draft model once pulled; a repo id or directory; or `none` |
-| `--mtp-drafts N` | 3 (6 on CUDA) | most MTP drafts a round (Qwen3.8 Flash Next; on CUDA the chain also stops under 30% confidence); 0 turns MTP drafts off |
+| `--mtp-drafts N` | 3 (6 on CUDA) | most MTP drafts a round (Qwen3.8 Flash Next and, on a Mac, GLM-5.3-Flash, which pick each round's depth up to N from measured acceptance and window costs; on CUDA the chain also stops under 30% confidence); 0 turns MTP drafts off |
 | `--no-update-check` | off | don't ask GitHub for a newer release at start |
 | `--prompt-cache-gib` | an eighth of RAM, at most 16 | memory for cached conversation prefixes |
 | `--snapshot-dir` | `~/.cache/tensorfold/prefix-snapshots` | system blocks and conversations kept across restarts |
@@ -244,6 +253,7 @@ src/tensorfold/
   kernels/qwen/dense/v1/        Qwen3.8 dense lane kernels
   kernels/qwen/flash_next/v1/   Qwen3.8 Flash Next fused kernels
   kernels/nemotron/lightning/v1/  Nemotron 3.5 Lightning fused kernels
+  kernels/glm/flash/v1/         GLM-5.3-Flash decode kernels (Metal)
   drafters/              the DFlash2 drafter
   families/<name>/       one package per model family: forward pass and draft heads
   families/<name>/cuda/  the family's CUDA engine and kernels (NVIDIA GPUs)
