@@ -368,3 +368,69 @@ def test_streams_with_trees_equal_each_alone(tiny, monkeypatch):
             for u, v in zip(ia.state, ib.state):
                 if u is not None:
                     assert _same(u, v)
+
+
+def test_one_kernel_signature_for_every_window(monkeypatch):
+    """The row decoder's kernels keep one Metal signature through chains, a row_attention tree and row_streams."""
+
+    from tests.kernel_signatures import changed, recording
+
+    from tensorfold.kernels.qwen.dense.v1 import row_attention, row_streams, simd_qmm
+
+    caches = [row_glue._kernels, row_streams._kernels, lane_tree._kernels, simd_qmm._kernels, simd_qmm._plans,
+              row_attention._kernels]
+    saved = [dict(c) for c in caches]
+    saved_backend = row_matmul.BACKEND
+    try:
+        with recording() as seen:
+            for c in caches:
+                c.clear()                                      # made again, inside the recorder
+            backend = row_matmul.simd_qmm_backend()
+            exact_attention.install()
+            model = _tiny_model(seed=31)
+            row_matmul.install(model, backend)
+            core, head = model.model, model.lm_head
+            mx.random.seed(12)
+            tokens = [int(t) for t in mx.random.randint(0, 512, (200,)).tolist()]
+            cache = model.make_cache()
+            _run(model, tokens[:20], cache, 0)                 # a chain past WINDOW_ROWS: the tree kernel's recurrence
+            start = 20
+            for n, keep in ((7, 3), (2, 2), (1, 1), (row_matmul.WINDOW_ROWS, row_matmul.WINDOW_ROWS), (1, 1), (12, 9)):
+                logits = _run(model, tokens[start:start + n], cache, start, keep=keep)
+                assert bool(mx.all(mx.isfinite(logits)).item())
+                start += keep
+            monkeypatch.setattr(row_forward, "ROW_ATTENTION", True)
+            parents = [-1, 0, 0, 1, 2, 2, 4, 3]
+            logits, record = row_forward.forward(core, head, tokens[start:start + 8], parents, cache, start)
+            row_forward.commit(cache, record, [0, 2, 4, 6], len(parents), start)
+            mx.eval(logits, *[a for c in cache for a in c.state if a is not None])
+            assert bool(mx.all(mx.isfinite(logits)).item())
+            monkeypatch.setattr(row_forward, "ROW_ATTENTION", False)
+            streams = [_prefill(model, tokens[100 + 20 * s:100 + 20 * s + 9 + 4 * s]) for s in range(3)]
+            starts = [9 + 4 * s for s in range(3)]
+            at = 160
+            for widths in ((5, 1), (1, 3, 9), (2, 2, 2), (1, 1)):
+                ids = list(range(len(widths)))
+                windows = []
+                for w in widths:
+                    windows.append(tokens[at:at + w])
+                    at += w
+                chains = [list(range(-1, w - 1)) for w in widths]
+                logits, records, _ = row_forward.multi_forward(core, head, windows, chains, [streams[s] for s in ids],
+                                                               [starts[s] for s in ids])
+                for s, record, w in zip(ids, records, widths):
+                    keep = max(1, w // 2)
+                    row_forward.commit(streams[s], record, list(range(keep)), w, starts[s])
+                    starts[s] += keep
+                mx.eval(logits, *[a for s in ids for c in streams[s] for a in c.state if a is not None])
+                assert bool(mx.all(mx.isfinite(logits)).item())
+    finally:
+        for c, old in zip(caches, saved):
+            c.clear()
+            c.update(old)
+        row_matmul.BACKEND = saved_backend
+    names = {name.rsplit("_", 1)[0] for name, _ in seen}
+    expect = {"row_forward_tree", "row_forward_chain", "row_forward_gdn_pre", "gated_delta_replay",
+              "row_attention_partial", "row_attention_merge", "row_streams_pre2", "row_streams_tree3"}
+    assert expect <= names, names
+    assert not changed(seen), "kernels called with more than one signature: " + changed(seen)

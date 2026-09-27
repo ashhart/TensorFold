@@ -9,7 +9,9 @@ nn = pytest.importorskip("mlx.nn")
 
 from tensorfold.kernels.qwen.dense.v1 import lane_fuse, lane_glue, lane_qmm  # noqa: E402
 
-from tensorfold.kernels.qwen.dense.v1 import lane_tree, stream_gdn  # noqa: E402
+from tensorfold.kernels.qwen.dense.v1 import (  # noqa: E402
+    lane_attention, lane_multi, lane_tree, stream_attention, stream_gdn)
+from tests.kernel_signatures import changed, recording  # noqa: E402
 
 K = 5120
 ROWS = (1, 7, 16, 17, 32, 64, 128)
@@ -324,3 +326,97 @@ def test_streams_conv_window_in_one_launch_equals_one_stream_calls():
         for name, t, a in zip(("q", "k", "v", "g", "beta"), together, alone):
             assert _same(t[:, first:first + W], a), f"stream {s} {name} differs from its own call"
         first += W
+
+
+def _chain(n):
+    return [-1] + list(range(n - 1))
+
+
+@pytest.mark.parametrize("fused", [False, True])
+def test_kernel_signatures_do_not_change_between_calls(fused):
+    """One Metal signature per lane kernel, from install and warm-ups through one-stream and 1-9-stream rounds."""
+
+    _needs_tensor_units()
+    model = _tiny_model()
+    core, head = model.model, model.lm_head
+    mx.random.seed(8)
+    tokens = [int(t) for t in mx.random.randint(0, 512, (600,)).tolist()]
+    tree_parents = [-1, 0, 1, 2, 0, 4, 5, 1, 7, 3, 9, 10, 2, 12, 13, 14]
+    one = ((40, _chain(40), list(range(40))), (16, tree_parents, [0, 1, 2, 3, 9, 10, 11]),
+           (20, _chain(20), list(range(20))), (1, [-1], [0]), (3, _chain(3), [0, 1, 2]), (1, [-1], [0]))
+    # shared rounds: (stream, rows' parents, kept path) per stream taking part
+    shared = ([(0, tree_parents, [0, 4, 5, 6]), (1, _chain(5), [0, 1]), (2, [-1], [0])],
+              [(0, [-1], [0]), (2, _chain(3), [0, 1, 2])],
+              [(1, _chain(8), list(range(8)))],
+              [(s, [-1] if s % 3 else _chain(2), [0]) for s in range(9)],
+              [(0, _chain(2), [0, 1]), (1, [-1], [0]), (2, [-1, 0, 0, 1], [0, 2]), (8, _chain(13), list(range(4)))])
+    caches = [lane_qmm._kernels, lane_attention._kernels, lane_glue._kernels, lane_tree._kernels, lane_fuse._variants,
+              stream_attention._kernels, stream_gdn._commit_kernels, stream_gdn._kernel_cache]
+    saved_kernels = [c.copy() for c in caches]
+    saved = lane_fuse.enabled
+    at = 0
+
+    def take(n):
+        nonlocal at
+        at += n
+        return tokens[at - n:at]
+
+    try:
+        with recording() as seen:
+            for c in caches:
+                c.clear()                             # made again, inside the recorder
+            lane_qmm.install(model, rows=lane_qmm.MAX_ROWS, wide=True)
+            lane_qmm.warm(model)
+            lane_attention.warm(max_queries=lane_attention.MAX_QUERIES)
+            lane_fuse.enabled = fused
+            if fused:
+                lane_fuse.build(model)
+                lane_fuse.warm(model)
+            cache = model.make_cache()
+            start = 0
+            for n, parents, keep in one:
+                logits, record = lane_tree.tree_forward(core, head, take(n), parents, cache, start, pipeline_layers=2)
+                lane_tree.commit_tree(cache, record, keep, n, start)
+                start += len(keep)
+                mx.eval(logits, [a for c in cache for a in c.state if a is not None])
+                assert bool(mx.all(mx.isfinite(logits)).item())
+            streams = [model.make_cache() for _ in range(9)]
+            starts = [0] * 9
+            prompts = [9 + 7 * s for s in range(9)]
+            for group in ((0, 1, 2, 3), (4, 5), (6, 7), (8,)):      # prompts of 9 to 65 rows, up to 128 a forward
+                windows = [take(prompts[s]) for s in group]
+                chains = [_chain(len(w)) for w in windows]
+                logits, records, _ = lane_multi.multi_tree_forward(core, head, windows, chains,
+                                                                   [streams[s] for s in group], [0] * len(group))
+                lane_multi.commit_streams([streams[s] for s in group], records, [list(range(len(w))) for w in windows],
+                                          [len(w) for w in windows], [0] * len(group))
+                for s in group:
+                    starts[s] = prompts[s]
+                mx.eval(logits)
+            for plan in shared:
+                ids = [s for s, _, _ in plan]
+                windows = [take(len(p)) for _, p, _ in plan]
+                logits, records, _ = lane_multi.multi_tree_forward(core, head, windows, [p for _, p, _ in plan],
+                                                                   [streams[s] for s in ids], [starts[s] for s in ids])
+                lane_multi.commit_streams([streams[s] for s in ids], records, [k for _, _, k in plan],
+                                          [len(w) for w in windows], [starts[s] for s in ids])
+                for s, _, keep in plan:
+                    starts[s] += len(keep)
+                mx.eval(logits, [a for s in ids for c in streams[s] for a in c.state if a is not None])
+                assert bool(mx.all(mx.isfinite(logits)).item())
+    finally:
+        lane_fuse.enabled = saved
+        lane_qmm.uninstall()
+        lane_fuse.clear(model)
+        for c, old in zip(caches, saved_kernels):
+            c.clear()
+            if isinstance(c, list):
+                c.extend(old)
+            else:
+                c.update(old)
+    names = {name.rsplit("_", 1)[0] for name, _ in seen}
+    expect = {"stream_attention_partial", "stream_attention_tail", "stream_attention_merge", "stream_gdn_tree",
+              "stream_gdn_replay", "stream_gdn_tails", "stream_gdn_pre" if fused else "lane_glue_gdn_pre",
+              "lane_attention_partial_direct", "lane_attention_merge"}
+    assert expect <= names, names
+    assert not changed(seen), "kernels called with more than one signature: " + changed(seen)

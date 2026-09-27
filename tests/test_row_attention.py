@@ -44,3 +44,30 @@ def test_chains_match_mlx_attention():
     ref = mx.fast.scaled_dot_product_attention(q, kb, vb, scale=0.0625, mask="causal")
     diff = mx.abs(ours.astype(mx.float32) - ref.astype(mx.float32)).max().item()
     assert diff < 2e-2, diff
+
+
+def test_one_kernel_signature_for_every_window():
+    """row_sdpa's kernels keep one Metal signature for windows of 1 to 15 rows, chains and a tree."""
+
+    from tests.kernel_signatures import changed, recording
+
+    H, HKV, D, P = 24, 4, 256, 70
+    windows = ([-1], [-1, 0], [-1, 0, 1], list(range(-1, 7)), list(range(-1, 8)), [-1, 0, 0, 1, 2, 3, 3, 6],
+               list(range(-1, 14)), [-1])
+    saved = dict(row_attention._kernels)
+    try:
+        with recording() as seen:
+            row_attention._kernels.clear()                     # made again, inside the recorder
+            for i, parents in enumerate(windows):
+                W = len(parents)
+                mx.random.seed(i)
+                kb = (mx.random.normal((1, HKV, P + W, D)) * 0.6).astype(mx.bfloat16)
+                vb = (mx.random.normal((1, HKV, P + W, D)) * 0.6).astype(mx.bfloat16)
+                q = (mx.random.normal((1, H, W, D)) * 0.6).astype(mx.bfloat16)
+                out = row_attention.row_sdpa(q, kb, vb, 0.0625, P, parents)
+                assert bool(mx.all(mx.isfinite(out)).item())
+    finally:
+        row_attention._kernels.clear()
+        row_attention._kernels.update(saved)
+    assert {name.rsplit("_", 1)[0] for name, _ in seen} == {"row_attention_partial", "row_attention_merge"}
+    assert not changed(seen), "kernels called with more than one signature: " + changed(seen)
