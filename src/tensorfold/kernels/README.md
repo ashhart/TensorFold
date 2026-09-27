@@ -2,6 +2,7 @@
 
 | Model family | Active kernel package | Version |
 | --- | --- | --- |
+| GLM-5.3-Flash | `glm/flash/v1/` | `v1` |
 | Qwen3.8 dense | `qwen/dense/v1/` | `v1` |
 | Qwen3.8 Flash Next | `qwen/flash_next/v1/` | `v1` |
 | NVIDIA Nemotron 3.5 Lightning | `nemotron/lightning/v1/` | `v1` |

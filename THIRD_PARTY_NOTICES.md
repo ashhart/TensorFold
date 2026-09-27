@@ -28,6 +28,35 @@ licensed under the Apache License, Version 2.0; the license text is in
 
 ## GLM-5.3-Flash on Apple Silicon
 
+The MLX engine of `glm5_next` (`src/tensorfold/families/glm5_next/model.py`, `mtp.py`, `runtime.py`) and its Metal
+kernels (`src/tensorfold/kernels/glm/flash/v1/`) are written for TensorFold. What they follow or port:
+
+- `families/glm5_next/model.py` follows, op for op on its prefill path, the GLM-5.3-Flash (`glm5_next`)
+  implementation added to [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) by PR #2030 (by Lazarus-931; MIT License,
+  Copyright (c) 2025 Prince Canuma), as vendored by [oMLX](https://github.com/jundot/omlx) (Apache-2.0). Nothing is
+  imported from either at runtime.
+- `kernels/glm/flash/v1/kda.py` is ported from mlx-vlm PR #2105 ("glm5_next: fuse the KDA decode chain into one
+  Metal kernel", by avlp12; `mlx_vlm/models/glm5_next/fused_kda.py`; closed without merging, MIT License,
+  Copyright (c) 2025 Prince Canuma): the whole KDA decode step in one Metal kernel. TensorFold runs a window of
+  rows in order inside the launch, folds the 4-bit `f_b` / `g_b` projections in with MLX's one-row `qmv_quad`
+  arithmetic, and keeps its own rounding points. Its precision rules (precise exp, uncontracted sums of squares)
+  are also used in `fused.py`.
+- `kernels/glm/flash/v1/sparse_attention.py` is mlx-vlm's `indexed_sparse_attention` kernel
+  (`mlx_vlm/models/sparse_attention.py`) as extended by mlx-vlm PR #2245 ("Fix GLM-5.3 cached decode batch
+  invariance", by raullenchai; closed without merging, MIT License, Copyright (c) 2025 Prince Canuma), adapted to
+  TensorFold's single latent cache.
+- mlx-vlm PR #2107 (the sparse indexer's incremental decode and a stale-pool fix, by avlp12) needed no code:
+  TensorFold's cache already pools once per completed block. Its stale-pool case is pinned by
+  `tests/test_glm5_ported_kernels.py`.
+- The hyper-connection kernel `_HC_SPLIT` in `kernels/glm/flash/v1/kernels.py`, and the sinkhorn and collapse in
+  `fused.py`, repeat the `hc_sinkhorn_collapse` kernel of mlx-vlm's `mlx_vlm/models/deepseek_v4/hyper_connection.py`
+  (MIT License, Copyright (c) 2026 Apple Inc.), with its output type set to the input's.
+- The 4-bit matvec `_QMV_ROWS` in `kernels.py` is Flash Next's `qmv_rows` with MLX's group-64 scale indexing, and
+  the expert kernels (`_EXPERT_GROUP`, `_EXPERT_QMV`) follow Flash Next's `expert_group` / `grouped_gateup`. The
+  row kernels in `kernels.py` and `fused.py` repeat the arithmetic and partitions of MLX 0.32's own kernels (MIT
+  License, Copyright © 2023 Apple Inc.): `qmv_fast`, `qmv_quad` and `gather_qmv_fast` (`quantized.h`), `GEMVKernel`
+  and `GEMVTKernel` (`gemv.h`) and the `rms_norm` kernels, one row per grid slice with the tiling MLX picks for one
+  row, so each row keeps MLX's one-row bits.
 - The GLM tool-call argument conversion in `src/tensorfold/server/http.py` (`coerce_glm_value`) is adapted from
   oMLX's `_coerce_param_value` (`omlx/api/tool_calling.py`, Apache License, Version 2.0, text in
   [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt)), without its repair of near-valid JSON.
