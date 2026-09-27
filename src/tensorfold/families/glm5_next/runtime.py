@@ -46,8 +46,10 @@ class GLMFlash:
     # ``hidden`` takes an unread GPU token: one-token rounds (the serial reference, a checkpoint without the head)
     # run one step ahead
     gpu_tokens = True
-    # ``speculate`` right behind the verify, before the round's tokens are read
-    speculate_early = True
+    # TF_GLM_SPEC_EARLY=1: ``speculate`` right behind the verify on every row, before the round's tokens are read (a
+    # host round trip less, the head on every verify row); 0: after the read, on the kept row only (the head's work
+    # overlaps the host building the next round). Measured on the M3 Ultra, 2026-09-26: see the recipe.
+    speculate_early = os.environ.get("TF_GLM_SPEC_EARLY", "1") == "1"
 
     def __init__(self, model: GLM5, head: Any | None = None, *, drafts: int = 1, check: bool = True) -> None:
         self.model = model

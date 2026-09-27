@@ -444,7 +444,9 @@ on the GPU, one-step-ahead rounds for `"draft": false`, the engine's own depth r
   The rounds are GPU-bound. `TF_GLM5_EVAL_EVERY` 1 / 2 / 4 and `--mtp-drafts` 1 / 3 all land within 2 tok/s of each
   other; `TF_GLM_MTP_NORMED=1` (the head reads the final-normed hidden row, as the CUDA engine found useful)
   moved first-draft acceptance from 61-76% to 66-78% on four prompts and speed by +0.5 tok/s, inside the noise, so
-  it stays off by default.
+  it stays off by default. `TF_GLM_SPEC_EARLY=0` (the head reads the kept row after the round's read, as the old
+  serial engine did, instead of every verify row before it) was 1 to 2 tok/s slower at both depth caps: the head
+  on every row before the read costs less than the round trip it saves, so early speculation stays.
 - Where an extra verify row goes (real first 8 layers, 1 to 8 rows): the MoE block 0.48 to 1.56 ms a layer (the
   distinct experts a window adds: 12.6 MB each), KDA 0.44 to 0.88 (rows run in order inside the kernel), MLA
   attention 0.49 to 1.12, hyper-connections flat.
