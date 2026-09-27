@@ -129,10 +129,13 @@ All three are in use, and which one fits depends on your MLX version and GPU.
 - A laptop slows every kernel 20 to 40% after a long prefill or a few minutes of decoding, and runs about 3x
   slower on battery. A benchmark running while the server warms its snapshots gets half the bandwidth.
 
-## A known limit
+## Resumed prompts
 
-For Flash Next and Nemotron, prompts are prefilled through the reference path in 2,048-token chunks, while a
-short suffix after a cache hit (16 tokens or fewer) goes through the fused decode kernels. Their last bits can
-differ, so the same request can get a different reply depending on what was cached. Drafted and serial
-decoding from the same cache state stay byte-identical. The 27B has no such dependence: it prefills through
-the lane kernels, which give every prompt row the bits serial decoding gives it.
+A prompt's last bits depend on how it was prefilled: the fused decode kernels, a model's prefill kernels and
+MLX's chunked kernels round differently, and chunked kernels round a row differently by chunk. So every family
+prefills prompts in chunks on a fixed 2,048-token grid from position 0, keeps prompt caches only at grid points,
+and prefills a reply again from the last grid point at the next turn: a request resumed from the cache is fed
+exactly the chunks the same request sent fresh is, and gets the same reply (Flash Next on an M3 Ultra: 3 of 3
+two-turn conversations byte-identical; prefilled anywhere instead, 3 of 3 differed). Qwen3.8-27B can instead
+prefill through its row-exact lane decoder (`TF_ROW_PREFILL=1`) or anywhere (`0`). Drafted and serial decoding
+from the same cache state stay byte-identical.

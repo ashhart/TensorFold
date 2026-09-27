@@ -179,9 +179,9 @@ drafted decoding writes the same bytes as serial decoding. Drafts change speed o
 send the same request with `"draft": false`, which decodes one token a round, and compare.
 
 The default seed is a hash of the prompt, so the same conversation gets the same reply. Pass `"seed"` to vary
-it. One limit: for Flash Next and Nemotron the prompt's cache can differ in its last bits depending on which
-prefix was already cached, so a reply can too ([details](docs/recipes/README.md#a-known-limit)). Drafted and
-serial decoding from the same cache always agree.
+it. A conversation resumed from the server's cache gets the reply the same conversation sent fresh gets
+([details](docs/recipes/README.md#resumed-prompts)). Drafted and serial decoding from the same cache always
+agree.
 
 ## Serve
 

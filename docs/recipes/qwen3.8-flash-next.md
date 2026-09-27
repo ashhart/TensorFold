@@ -110,6 +110,63 @@ Each change was measured in one process through the serial engine on fixed promp
   less a round. Its input projections go through MLX's matmul, whose bits depend on the row count on this GPU,
   so a draft can differ from the old path's by rounding: acceptance moved by under 1%, and the output did not.
 
+### Prefill (1.4-2.5x faster cold, 1.6-3.1x faster follow-ups, still exact)
+
+Prompt chunks of more than 16 rows go through a prefill path of their own (`TF_FLASH_PREFILL=0`: MLX's forward),
+on the engine's 2,048-token grid like every prompt. Through the server (`--context 153600 --prompt-cache-gib
+24`, M3 Ultra, MLX 0.32.2, 2026-09-27), cold time to first token, then a follow-up turn of about 440 new tokens
+on the cached prefix (it prefills again from the last grid point: 1.8k-2.2k tokens here):
+
+| Prompt | MLX's forward: cold | Follow-up | Prefill path: cold | Follow-up |
+| --- | --- | --- | --- | --- |
+| 30k | 43.9 s (684 tok/s) | 3.08 s | 31.7 s (948) | 1.95 s |
+| 100k | 215.1 s (465) | 7.97 s | 105.8 s (945) | 3.17 s |
+| 145k | 386.7 s (375) | 10.39 s | 157.3 s (922) | 3.32 s |
+
+In one process (real text, 2,048-token chunks, the engine's evaluation of each chunk): MLX's forward 827 / 700 /
+497 tok/s at 8k / 32k / 100k, peaking at 110-113 GiB; the prefill path 1,001 / 945 tok/s at 32k / 100k, peaking at
+113 / 115 GiB (slices of 2 layers queued as MLX's forward queues 1; as one graph a chunk, 1,007 / 957 at 130 / 133
+GiB).
+
+A resumed conversation matches a fresh one: three conversations (9k, 30k and 61k tokens of code, thinking on,
+seeded sampling, 900-token replies), turn 2 resumed from turn 1's cache and the same turn 2 sent to a restarted
+server with nothing cached, 3 of 3 byte-identical (prefilled anywhere instead of on the grid, 3 of 3 differed).
+
+With the prefill path, a passphrase was found at 50% of a 100k prompt and at 20% and 80% of 145k ones; a tool
+call on a 25k-token coding prompt had valid JSON arguments and an `old_string` found once; a 5k-character file
+came back byte for byte after 31k and 61k tokens of other code; drafted replies equalled `"draft": false` at 40k,
+greedy and seeded. Decode does not change (without drafts, prose / code: 89.0 / 88.7 tok/s before, 89.1 /
+88.8 after).
+
+- Sparse attention in chunks (`SparseAttention._sparse_rows`). MLX's forward turns the indexer's choice into a
+  boolean mask over every key and runs MLX's masked attention, so a chunk reads every key and its cost grows
+  with the context. A chunk past the budget now uses the decode's selection kernels (fp32 block scores, radix
+  top 512) and reads only each row's blocks and tail. Its attention kernel (`prefill.attention_rows_gqa`) runs
+  one threadgroup per KV head, row and quarter of the row's keys: the 12 query heads of a KV head read each
+  16-key tile once from threadgroup memory (16-byte loads, two lanes a key), and the quarters merge in order as
+  in the decode's kernel. Rows under the budget read all their keys, as before.
+- Hyper-connections through the fused decode's kernels (`prefill_hc.py`): the norm applies the previous block's
+  write-back, then the normed input, MLX's matmul down, the activation, MLX's matmul up and the mix, in place of
+  the chain of small MLX operations (about 140 ms of a 4,096-token chunk's 600). The n-gram rows come from the
+  decode's lookup tables (same bits). A 4,096-token chunk at 32k: 4,196 to 3,620 ms.
+- MLX's own 4-bit kernels with tiles for prefill shapes (`prefill_mm.py`), compiled at runtime from the headers
+  the MLX wheel ships: `qmm_t_impl` with 64 x 64 tiles for outputs of 8,192 or more and 64 x 32 below, instead
+  of 32 x 32 (same kernel, same order of sums, same bits; DeltaNet's in-projection at 4,096 rows 14.98 to 14.34
+  ms), and `affine_gather_qmm_rhs` for the sorted experts with its alignment as template arguments instead of
+  function constants (2-7%). Where MLX would split K it keeps MLX's matmul. On the M5 generation, whose tensor
+  units MLX's matmuls use, this module leaves every matmul to MLX; elsewhere its kernels first reproduce MLX's
+  bits on small products once a process, else MLX's run.
+- DeltaNet's four in-projections through the fused decode's stacked matrix, one matmul (1,067 to 1,024 ms a
+  4,096-token chunk). MoE rows sorted by expert, and the weighted sum reads the sorted outputs by position
+  instead of unsorting them (1,314 to 1,263 ms).
+- Slices of 2 layers handed to the GPU, one queued behind the one being built (`prefill_hc.QUEUE_LAYERS`): MLX
+  allocates an op's buffers when it is queued, so the peak stays near the weights and caches (113-115 GiB) for
+  1-2% of speed; the same graph and bits however it is sliced.
+
+Where a 4,096-token chunk at 32k went before the last three changes, each module timed alone on inputs captured
+from a real chunk: MoE 31% (routed experts about 1.25 s), DeltaNet 25% (projections about 1.0 s of 1.07), sparse
+attention 22%, hyper-connections 14% (projections 0.46 of 0.60 s), PLE 1%. About 70% of prefill is 4-bit matmul.
+
 ## Tried and rejected
 
 - Folding the hyper-connection norm into the split down projection: every threadgroup redid the norm, GPU 12.0
@@ -132,6 +189,13 @@ Each change was measured in one process through the serial engine on fixed promp
 - fp32 8x8 simdgroup matrices: 25.8 TF/s against 23.7 for scalar FMA on the M3 Ultra, so padding one row to 8
   costs 8x the arithmetic. They do not make verify rows cheap on this GPU.
 
+- Prefill: stacking attention's q, k, v and indexer projections as DeltaNet's are (its split views were copied:
+  972 to 1,033 ms a chunk); bigger tiles for the sorted expert matmul (32 x 32 and 32 x 64: 5-40% slower than
+  MLX's 16 x 32); a first grouped-query attention kernel reading threadgroup memory a scalar at a time (slower
+  than the per-head kernel, 2,256 to 2,450 ms a 2,048-token chunk); 8,192-token chunks (out of memory at 32k).
+  Timing a part by removing it misleads in prefill: blanking the PLE changed the MoE's routing and "attributed"
+  295-377 ms to a module that takes 30-47 ms alone.
+
 ## Exactness
 
 - Numerics follow the checkpoint's training framework (PyTorch with the FLA kernels): fp32 math, one bf16
@@ -151,11 +215,29 @@ Each change was measured in one process through the serial engine on fixed promp
   parts run in parallel and merge in order, so a row's result does not depend on the other rows.
 - Block selection: fp32 scores (the sum over index heads of relu(q . pooled block) over sqrt(d)), radix select
   of the top 512 with the lowest block id among ties, keys in position order, then the tail.
-- Prefill: a prompt chunk over 16 rows runs MLX's forward, a shorter one the fused decode kernels. A chunk's bits
-  depend on its length, so the engine cuts prompts on a fixed 2,048-token grid and keeps checkpoints only on it,
-  and a reply is prefilled again from the last grid point: a resumed conversation matches the same prompt fed
-  fresh at MLX's prefill speed. A chunk queues at most two layers ahead of the GPU, so peak memory stays near
-  the weights and caches at any context length.
+- Prefill: a prompt chunk over 16 rows runs the prefill path (MLX's forward with `TF_FLASH_PREFILL=0`), a
+  shorter one the fused decode kernels. A chunk's bits depend on its length, so the engine cuts prompts on a
+  fixed 2,048-token grid and keeps checkpoints only on it, and a reply is prefilled again from the last grid
+  point: a resumed conversation matches the same prompt fed fresh. On MLX's forward a chunk queues at most two
+  layers ahead of the GPU, so peak memory stays near the weights and caches at any context length. Prefix
+  snapshots name the forward that prefilled them (`FlashNext.prefill_key`).
+- The prefill path rounds differently from MLX's forward (attention sums a row's keys in another order, the
+  hyper-connections use the fused decode's arithmetic), so the check is quality against MLX's forward's own
+  rounding noise (its 1,024-token chunks instead of 2,048): mean NLL and top-1 accuracy of the next 1,024 tokens
+  of real text after the prompt:
+
+  | Context | MLX's forward | Its 1,024-token chunks (noise) | Prefill path |
+  | --- | --- | --- | --- |
+  | 8k | 1.8653 / 53.6% | 1.8660 / 54.6% | 1.8713 / 54.3% |
+  | 32k | 0.7838 / 78.2% | 0.7839 / 78.0% | 0.7817 / 78.5% |
+  | 100k | 0.5513 / 86.1% | 0.5499 / 86.1% | 0.5453 / 85.8% |
+
+  The last row's argmax matched at every context; 48 greedy tokens from the cache followed MLX's forward's for 5,
+  10 and 23 tokens, its own 1,024-token chunks' for 5, 10 and 22.
+
+  Selection ties (blocks whose score is exactly 0 after the ReLU) go to the lower block, as in decode; MLX's
+  argpartition takes either. `tests/test_qwen4_exp_prefill.py` (GPU) checks each piece against MLX or the
+  reference and a 4-layer model end to end against fp32.
 - Rollback: DeltaNet conv and recurrent states are kept for every row of the last call; the n-gram history and
   the PLE conv tail are restored; attention caches are trimmed, including pooled blocks no longer complete.
 - At load, windows of 2, 3 and 4 rows are compared with one-row steps from a 48-token prompt, logits exactly;
@@ -175,6 +257,10 @@ Each change was measured in one process through the serial engine on fixed promp
   With rows near 2 ms, three drafts a round pay: about 3.2 tokens a round at 86% acceptance, which puts agent
   turns near 150 tok/s.
 - n-gram ids computed on the GPU, so decode can run one step ahead as Nemotron does.
+- Prefill: a 4,096-token grid for this family (on 0.3.4, 4,096-token chunks gave 1,040-1,073 tok/s cold and
+  2.4-2.6 s follow-ups at 100k-145k, against 922-948 and 3.2-3.3 on this 2,048 grid); `index_select` for a
+  chunk's rows grows with the context; the grouped-query attention kernel's 28.7 KB of threadgroup memory
+  probably allows one threadgroup a core.
 
 ## DGX Spark (CUDA)
 

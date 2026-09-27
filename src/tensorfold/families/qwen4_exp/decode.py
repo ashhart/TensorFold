@@ -109,6 +109,7 @@ class FusedDecode:
             if layer.is_linear:
                 g = layer.linear_attn
                 proj, _ = _stacked([g.in_proj_qkv, g.in_proj_z, g.in_proj_b, g.in_proj_a])
+                g.__dict__["stacked"] = proj            # prefill chunks project through it too (GatedDeltaNet)
                 conv_w = mx.contiguous(g.conv1d.weight[:, :, 0])
                 mx.eval(conv_w)
                 entry["gdn"] = (proj, conv_w, g)
@@ -134,6 +135,8 @@ class FusedDecode:
         for layer in model.layers:
             if "ple" in layer:
                 self.ple_tables = K.PleTables(layer.ple.ple_embedding)
+                # prefill chunks look their rows up through the same tables (NGramEmbedding.__call__)
+                layer.ple.ple_embedding.__dict__["fused_tables"] = self.ple_tables
         # the last call's recurrent states after each of its rows, by layer (for keeping a prefix of a window)
         self.row_states: dict[int, tuple[mx.array, mx.array]] = {}
         self._pos: tuple[Any, Any] = (None, None)

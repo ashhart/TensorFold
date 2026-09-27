@@ -207,6 +207,10 @@ def kernel_version(family: Family, model: Any) -> str:
         for path in paths:
             digest.update(path.relative_to(source.parent).as_posix().encode())
             digest.update(path.read_bytes())
+    # how the model prefills prompts (a mode, a chunk) changes a snapshot's bits too
+    prefill_key = getattr(model, "prefill_key", None)
+    if prefill_key:
+        digest.update(str(prefill_key).encode())
     version = getattr(family.package, "KERNEL_VERSION", "")
     prefix = f"{family.model_type}-{version}-" if version else ""
     return prefix + digest.hexdigest()[:12]
