@@ -210,6 +210,7 @@ other versions. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` switches t
 | `--thinking-budget N` | no limit | most thinking tokens before the server closes the think block |
 | `--backend` | `auto` | `mlx` on macOS, `cuda` elsewhere |
 | `--tp 2 --rank R --master HOST` | one GPU | split the model over two machines, one GPU each (CUDA; see [DGX Spark](#dgx-spark-and-other-nvidia-gpus)) |
+| `--lanes N` | 1 | requests decoded together in one round; the rest queue. Extra lanes share one round's decode between callers, so each waits less for its first token (see [Concurrency](#concurrency)) |
 | `--no-drafts` | off | one token a round: the serial reference |
 | `--drafter` | `auto` | the family's draft model once pulled; a repo id or directory; or `none` |
 | `--mtp-drafts N` | 3 (6 on CUDA) | most MTP drafts a round (Qwen3.8 Flash Next; on CUDA the chain also stops under 30% confidence); 0 turns MTP drafts off |
@@ -224,6 +225,27 @@ By default, `serve` reads temperature, top-p and top-k from the checkpoint's `ge
 checkpoint with `do_sample: false` decodes greedily. CLI sampling flags override those values, and each
 request can override them again. The context default comes from the checkpoint's `config.json`; large
 windows still need enough memory for the actual prompt and reply.
+
+## Concurrency
+
+`--lanes N` lets N requests decode in the same round. Measured on an M3 Ultra (Mac Studio, 256 GB, MLX 0.32.2,
+`Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP`, 0.3.4) with `tools/bench_concurrency.py`: N callers at once, temperature 0,
+160 new tokens each, distinct prompts, every concurrent answer compared byte for byte with the same prompt answered
+alone.
+
+| lanes | callers | aggregate tok/s | per-stream tok/s (median) | TTFT s (median / worst) | identical |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 102.5 | 113.7 | 0.16 | 1/1 |
+| 1 | 8 | 98.6 | 105.6 | 5.48 / 11.44 | 8/8 |
+| 4 | 8 | 98.7 | 25.9 | 3.25 / 7.58 | 8/8 |
+| 8 | 8 | 102.2 | 13.7 | 0.32 / 0.94 | 8/8 |
+
+On an M3 Ultra the extra lanes buy fairness, not throughput: aggregate stays at ~100 tok/s at every lane count (rows a
+round never grew past ~2.4–2.8), but eight callers get a first token in 0.3 s instead of 5.5 s, and the last one waits
+0.9 s instead of 11.4 s, with 24 of 24 answers identical to their serial ones. On an M5 Max the author measured
+Nemotron's aggregate rising from 265 to 377 tok/s from 1 to 8 callers (the lane kernels' wide pass), so on tensor-unit
+GPUs lanes add throughput as well. The GLM-5.3-Flash family behaves the same way on the M3 Ultra (aggregate pinned at
+~55 tok/s, 15 of 15 identical). The default stays 1.
 
 ## Prompt caching
 

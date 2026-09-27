@@ -70,6 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "confidence); 0: no MTP drafts (any family)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
+    speed.add_argument("--lanes", type=int, default=1,
+                       help="requests decoded together in one round (1: one at a time, the rest queue); more lanes "
+                            "share one round's decode between callers, so each waits less for its first token")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
                        help="memory for cached conversation prefixes (0: off; default: an eighth of RAM, at most 16)")
     speed.add_argument("--snapshot-dir", default=str(Path.home() / ".cache" / "tensorfold" / "prefix-snapshots"),
@@ -432,7 +435,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         served_name=served,
         model_aliases=list(args.alias),
         engine_factory=engine_factory,
-        lanes=1,
+        lanes=max(1, int(args.lanes)),
         max_rows=int(engine_kwargs.get("max_rows", 16)),
         max_draft=int(engine_kwargs.get("max_draft", 32)),
         default_max_tokens=int(args.max_tokens),
