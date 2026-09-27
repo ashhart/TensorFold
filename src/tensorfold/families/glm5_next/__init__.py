@@ -50,9 +50,7 @@ def check(model_dir: str | Path) -> None:
     config = read_config(model_dir)
     method = quant_method(config)
     if method == "exl3":
-        if sys.platform == "darwin":
-            raise ValueError(f"GLM-5.3-Flash's Mac engine reads MLX 4-bit weights in groups of 64 ({MODELS[0]}); "
-                             f"the EXL3 checkpoint ({MODELS[1]}) is for the CUDA engine. {OWN_MODEL_HELP}")
+        # the CUDA engine's layout; the Mac engine refuses it before this through QUANT_METHODS (require_readable)
         found = config.get("quantization_config") or config.get("quantization") or {}
         got = {k: found.get(k) for k in EXL3_VARIANT}
         if {k: (int(v) if k == "bits" and v is not None else v) for k, v in got.items()} != EXL3_VARIANT:
@@ -68,7 +66,8 @@ def check(model_dir: str | Path) -> None:
     if sys.platform == "darwin":
         from tensorfold.families.glm5_next.mtp import has_mtp
 
-        if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
+        if (method != "exl3" and (Path(model_dir) / "model.safetensors.index.json").is_file()
+                and not has_mtp(model_dir)):
             print(f"[tensorfold] this checkpoint has no MTP layer: decoding without MTP drafts ({MODELS[0]} has "
                   f"one)", flush=True)
         return
