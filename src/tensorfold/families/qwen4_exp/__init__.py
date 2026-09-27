@@ -12,6 +12,7 @@ LANES = True
 MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3")
 QUANT_METHODS = {"cuda": ("mlx", "exl3")}      # the CUDA engine reads MLX affine 4-bit and EXL3 packs
 EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
+MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4")
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
 KERNEL_VERSION = "v1"
 # The CLI sets these before MLX starts, respecting environment overrides, to keep expert bindings from ending each command buffer.
@@ -37,6 +38,17 @@ def check(model_dir: Path) -> None:
         # an EXL3 pack (the CUDA engine, any codebook and per-tensor width): only the MTP head to report
         if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
             print("[tensorfold] this EXL3 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
+    from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quant_method, quantization, read_config
+
+    if quant_method(config) == "modelopt":
+        # the CUDA engine's NVFP4 route (the Swift checkpoint): the FP4 group the kernels read
+        found = config.get("quantization") or config.get("quantization_config") or {}
+        groups = found.get("config_groups") or {}
+        group = int(((groups.get("group_0") or {}).get("weights") or {}).get("group_size", 16))
+        if str(found.get("quant_algo") or "NVFP4").upper() != "NVFP4" or group != 16:
+            raise ValueError(f"TensorFold's Flash Next kernels read NVFP4 (ModelOpt FP4) weights in blocks of 16 "
+                             f"({MODELS[-1]}); this checkpoint has " + describe_quantization(config) + f". "
+                             f"{OWN_MODEL_HELP}")
         return
     bits, group = quantization(config)
     if (bits, group) != (4, 32):
