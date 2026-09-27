@@ -128,3 +128,55 @@ def test_hyper_connection_scalar_rows_equal_the_mma_path(inject, monkeypatch):
         assert mx.array_equal(scalar[0], mma[0]).item(), rows
         if inject:
             assert mx.array_equal(scalar[1][:rows], mma[1][:rows]).item(), rows
+
+
+def test_per_row_projections_do_not_depend_on_the_row_count():
+    """rows.qmv_rows and rows.hc_project: every row of a call equals that row's one-row call, bit for bit."""
+
+    from tensorfold.kernels.qwen.flash_next.v1 import rows
+
+    S, D, LOW = 4, 2560, 320
+    rng = np.random.default_rng(51)
+    lin = _qweights(rng, 1024, 2560)
+    x = mx.array((0.5 * rng.normal(size=(40, 2560))).astype(np.float32)).astype(mx.bfloat16)
+    full = rows.qmv_rows(x, lin)
+    mx.eval(full)
+    for r in (0, 7, 31, 32, 39):
+        mx.clear_cache()
+        assert mx.array_equal(rows.qmv_rows(x[r:r + 1], lin), full[r:r + 1]).item(), r
+    down, up = _qweights(rng, LOW + S, S * D), _qweights(rng, S * D, LOW)
+    scale = mx.array((1.0 + 0.1 * rng.normal(size=(S * D,))).astype(np.float32))
+    eps = mx.array([1e-6], dtype=mx.float32)
+    h = mx.array((0.3 * rng.normal(size=(9, S * D))).astype(np.float32)).astype(mx.bfloat16)
+    hn, ssp = hc.hc_norm(h, streams=S)
+    mixed, gates = rows.hc_project(hn, ssp, down, up, scale, eps=eps, streams=S, low=LOW)
+    mx.eval(mixed, gates)
+    for r in range(9):
+        mx.clear_cache()
+        one = rows.hc_project(hn[r:r + 1], ssp[r:r + 1], down, up, scale, eps=eps, streams=S, low=LOW)
+        assert mx.array_equal(one[0], mixed[r:r + 1]).item(), r
+        assert mx.array_equal(one[1][:1], gates[r:r + 1]).item(), r
+
+
+@pytest.mark.parametrize("has_state", [True, False])
+def test_gdn_pipelined_rows_equal_the_row_by_row_kernel(has_state, monkeypatch):
+    """The three-phase GDN step gives the row-by-row kernel's outputs and states bit for bit."""
+
+    rng = np.random.default_rng(41 + has_state)
+    conv_w = mx.array(rng.normal(size=(C, TAPS)).astype(np.float32)).astype(mx.bfloat16)
+    a_log = mx.array(rng.normal(size=(NV,)).astype(np.float32)).astype(mx.bfloat16)
+    dt = mx.array(rng.normal(size=(NV,)).astype(np.float32)).astype(mx.bfloat16)
+    norm = mx.array(rng.normal(size=(DV,)).astype(np.float32)).astype(mx.bfloat16)
+    eps = mx.array([1e-6], dtype=mx.float32)
+    kw = dict(nk=NK, nv=NV, dk=DK, dv=DV)
+    for rows in (1, 2, 3, 4):
+        p, c, s = _gdn_inputs(rng, rows)
+        s = s if has_state else None
+        monkeypatch.setattr(gdn, "PIPE_ROWS", 0)
+        ref = gdn.gdn_step(p, c, s, conv_w, a_log, dt, norm, eps, **kw)
+        mx.eval(ref)
+        mx.clear_cache()
+        monkeypatch.setattr(gdn, "PIPE_ROWS", 4)
+        got = gdn.gdn_step(p, c, s, conv_w, a_log, dt, norm, eps, **kw)
+        for k in range(3):
+            assert bool(mx.array_equal(got[k][:rows], ref[k][:rows]).item()), (rows, k)

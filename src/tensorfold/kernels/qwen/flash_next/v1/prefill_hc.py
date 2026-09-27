@@ -1,4 +1,4 @@
-"""Flash Next's prefill forward with fused hyper-connections (many rows a call)."""
+"""A prompt chunk's forward: the reference blocks with hyper-connections in the fused decode's arithmetic."""
 
 from __future__ import annotations
 
@@ -20,8 +20,7 @@ _HC_NORMED = r"""
 """
 
 _HC_ACT = r"""
-  // Thread (c, r): output c of the down + inject projection (bf16) -> / S -> SiLU for c < LOW, else the inject gate
-  // 2 sigmoid (kernels.hc_project's prologue).
+  // Thread (c, r): output c of the down + inject rows, / S, then SiLU (c < LOW) or the gate 2 sigmoid (hc_project's).
   const int c = int(thread_position_in_grid.x);
   const int r = int(thread_position_in_grid.y);
   const float v4 = float(bfloat(float(DN[size_t(r) * ND + c]) / float(S)));
@@ -53,8 +52,7 @@ def _qmm(x: mx.array, w: Any) -> mx.array:
 
 def hyper_connection(hc: Any, h: mx.array, pending: tuple[mx.array, mx.array] | None, *, streams: int,
                      eps: mx.array) -> tuple[mx.array, mx.array, mx.array | None]:
-    """h [R, S*D] (before the previous block's write-back ``pending`` = (branch [R, D], inject gates [R, S]), or
-    None) -> (h after the write-back, the block input [R, D], this block's inject gates [R, S] or None)."""
+    """h [R, S*D] and the pending (branch, inject gates) or None -> (h written back, block input, inject gates)."""
 
     rows, wide = h.shape
     dims = wide // streams
@@ -81,13 +79,11 @@ def hyper_connection(hc: Any, h: mx.array, pending: tuple[mx.array, mx.array] | 
     return h_new, mixed, (inj if nd > low else None)
 
 
-QUEUE_LAYERS = 2
+QUEUE_LAYERS = 2                    # layers a slice; MLX holds a queued slice's buffers, so this bounds memory
 
 
 def hidden(model: Any, tokens: np.ndarray, cache: list[Any]) -> mx.array:
-    """Qwen4Exp.hidden for a prefill chunk (batch 1): the reference blocks (DeltaNet, sparse attention, MoE, PLE) with
-    fused hyper-connections; each block's write-back is applied by the next hyper-connection's norm. Same graph and
-    bits however it is sliced (``QUEUE_LAYERS``)."""
+    """Qwen4Exp.hidden for a prompt chunk (batch 1); the same graph and bits however it is sliced."""
 
     fused = model.__dict__["fused"]
     streams = model.args.hc_count

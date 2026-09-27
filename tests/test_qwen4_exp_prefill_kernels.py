@@ -43,11 +43,12 @@ def _copy(cache: q4.AttentionCache) -> q4.AttentionCache:
     return out
 
 
-def test_selected_keys_match_the_reference_attention():
+def test_selected_keys_match_the_reference_attention(monkeypatch):
     """One attention layer, chunk after chunk of the same inputs: the kernel path and the reference give each row
     the same keys and outputs within rounding (dense rows, rows past the budget, and chunks mixing both)."""
 
     attn = next(layer.self_attn for layer in gpu_tiny().layers if not layer.is_linear)
+    monkeypatch.setattr(q4.prefill, "DENSE_KEYS", 0)       # the kernels from the first chunk past the budget
     rng = np.random.default_rng(13)
     cache = q4.AttentionCache()
     for chunk in range(6):
@@ -63,10 +64,14 @@ def test_selected_keys_match_the_reference_attention():
         mx.eval(*cache.state)
 
 
-def test_resumed_prompt_equals_fresh_through_the_kernels():
+@pytest.mark.parametrize("dense_keys", [0, 20])
+def test_resumed_prompt_equals_fresh_through_the_kernels(monkeypatch, dense_keys):
+    """Resumed equals fresh with the dense-or-kernels switch inside the prompt (DENSE_KEYS 20) and without."""
+
     from tensorfold.engine.lane_engine import LaneEngine, LaneStream
     from tensorfold.families.qwen4_exp.runtime import FlashNext
 
+    monkeypatch.setattr(q4.prefill, "DENSE_KEYS", dense_keys)
     model = gpu_tiny(1)
     q4.select_by_kernels(model.layers)
     flash = FlashNext(model, None, drafts=0)

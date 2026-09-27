@@ -1,28 +1,20 @@
-"""Prefill kernels for Flash Next's sparse attention layers (many rows a call).
-
-``attention_rows_gqa``: kernels.attention_rows' job (each row's query heads over the row's own key list: its
-selected blocks and tail, or all its keys) for prefill chunks. attention_rows gives each query head its own
-threadgroup, so the 12 query heads that share a KV head read the same keys and values 12 times, and every key
-costs a 32-lane reduction. Here a threadgroup takes one (row, KV head, part of the key list) with a simdgroup per
-query head: tiles of TK keys and values are loaded into threadgroup memory once for all 12 heads, a key's score is
-summed by two lanes (half the dims each), and the online softmax is updated once per tile. Partial outputs have
-attention_rows' layout, merged by its merge kernel. Same attention; the summation order differs from
-attention_rows (prefill's bits already differ from the fused decode's).
-"""
+"""Sparse attention for prompt chunks: the decode's block selection, then grouped-query attention."""
 
 from __future__ import annotations
+
+from typing import Any
 
 import mlx.core as mx
 
 from tensorfold.kernels.qwen.flash_next.v1 import attention, base
+from tensorfold.kernels.qwen.flash_next.v1.base import consts, ints
+
+DENSE_KEYS = 4096                             # up to this many keys MLX's dense attention is cheaper for a chunk
+PARTS = 4                                     # parts a row's key list is cut into (a chunk's rows fill the GPU)
+TK = 16                                       # keys a tile
 
 _ATTN_GQA_PARTS = r"""
-  // Threadgroup (kvh, r, part): query heads kvh * G .. kvh * G + G - 1 of row r (simdgroup g: head kvh * G + g)
-  // over entries [part n / P, (part + 1) n / P) of the row's key list (SPARSE[r]: ids IDS[r]; else keys 0 .. n - 1).
-  // Per tile of TK entries: keys and values copied into threadgroup memory in 16-byte vectors; key k of the tile
-  // scored by lanes 2k (dims 0 .. D/2) and 2k + 1 (dims D/2 .. D) with 4-wide loads; fp32 online softmax per head;
-  // a lane holds output dims 8 lane .. 8 lane + 7 (D = 256). Writes the part's (max, sum) and unnormalized output as
-  // attention_rows does.
+  // Threadgroup (kvh, r, part): KV head kvh's G query heads (a simdgroup each) over one part of row r's key list.
   constexpr int G = H / KVH;
   constexpr int PER = D / 32;                 // 8 output dims a lane
   constexpr int HALF = D / 2;
@@ -54,7 +46,7 @@ _ATTN_GQA_PARTS = r"""
   float o[PER];
   for (int i = 0; i < PER; i++) o[i] = 0.0f;
   float m = -INFINITY, l = 0.0f;
-  const int kt = int(lane) / 2, hf = int(lane) & 1;   // key of the tile, which half of its dims
+  const int kt = int(lane) / 2, hf = int(lane) & 1;   // lanes 2k and 2k + 1 score the tile's key k, half each
   for (int base = lo; base < hi; base += TK) {
     const int cnt = metal::min(TK, hi - base);
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -97,18 +89,16 @@ _ATTN_GQA_PARTS = r"""
   if (lane == 0) { PM[at * 2] = m; PM[at * 2 + 1] = l; }
 """
 
-TK = 16
-
 
 def gqa_supported(heads: int, kv_heads: int, dims: int) -> bool:
-    """attention_rows_gqa's layouts: 256-dim heads, a KV head's query heads in one threadgroup (at most 32)."""
+    """Its layouts: 256-dim heads, a KV head's query heads in one threadgroup (at most 32)."""
 
     return dims == 256 and kv_heads > 0 and heads % kv_heads == 0 and heads // kv_heads <= 32
 
 
 def attention_rows_gqa(q: mx.array, keys: mx.array, values: mx.array, counts: list[int], ids: mx.array | None,
                        sparse: list[bool], scale: float, *, parts: int = 4) -> mx.array:
-    """kernels.attention_rows(q, keys, values, counts, ids, sparse, scale) for many rows: [R, H, D] bf16."""
+    """attention.attention_rows' result for many rows, [R, H, D] bf16; its sums run in another order."""
 
     rows, heads, dims = q.shape
     kv_heads = int(keys.shape[1])
@@ -116,12 +106,13 @@ def attention_rows_gqa(q: mx.array, keys: mx.array, values: mx.array, counts: li
     if not gqa_supported(heads, kv_heads, dims):
         raise ValueError("attention_rows_gqa: unsupported head layout")
     if ids is None:
-        ids = mx.zeros((rows, 1), dtype=mx.int32)
+        ids = mx.zeros((max(rows, 8), 1), dtype=mx.int32)
+    scale_arr = consts.get(("scale", scale))
+    if scale_arr is None:
+        scale_arr = consts[("scale", scale)] = mx.array([scale], dtype=mx.float32)
     first = base.kernel("q4_attn_gqa_parts", _ATTN_GQA_PARTS, ["Q", "Kc", "Vc", "IDS", "NK", "SPARSE", "SCALE"],
-                      ["PO", "PM"])
-    po, pm = first(inputs=[q, keys, values, ids, mx.array([int(c) for c in counts], dtype=mx.int32),
-                           mx.array([int(bool(x)) for x in sparse], dtype=mx.int32),
-                           mx.array([scale], dtype=mx.float32)],
+                        ["PO", "PM"])
+    po, pm = first(inputs=[q, keys, values, ids, ints(counts), ints([int(bool(x)) for x in sparse]), scale_arr],
                    template=[("H", heads), ("KVH", kv_heads), ("D", dims), ("P", parts), ("TK", TK)],
                    grid=(32 * group * kv_heads, rows, parts), threadgroup=(32 * group, 1, 1),
                    output_shapes=[(rows, heads, parts, dims), (rows, heads, parts, 2)],
@@ -130,3 +121,24 @@ def attention_rows_gqa(q: mx.array, keys: mx.array, values: mx.array, counts: li
     return merge(inputs=[po, pm], template=[("H", heads), ("D", dims), ("P", parts)],
                  grid=(dims, heads, rows), threadgroup=(dims, 1, 1),
                  output_shapes=[(rows, heads, dims)], output_dtypes=[mx.bfloat16])[0]
+
+
+def through_kernels(attn: Any, keys: int) -> bool:
+    """Whether a prompt chunk ending at ``keys`` attends here: a choice by its place alone, so resumes match."""
+
+    return keys > DENSE_KEYS and keys // attn.indexer.ratio > attn.indexer.top_blocks
+
+
+def selected(attn: Any, queries: mx.array, index_query: mx.array, raw: mx.array, cache: Any, past: int) -> mx.array:
+    """A chunk's attention [1, L, H * D]: rows past the budget read their selected blocks and tail."""
+
+    ix = attn.indexer
+    length = queries.shape[2]
+    ends = list(range(past + 1, past + length + 1))
+    complete = [e // ix.ratio for e in ends]
+    ids = attention.select_blocks(ix.block_scores(index_query, raw, cache, past), complete, ends, top=ix.top_blocks)
+    sparse = [c > ix.top_blocks for c in complete]
+    counts = [ix.ratio * (ix.top_blocks - c) + e if s else e for e, c, s in zip(ends, complete, sparse)]
+    attend = attention_rows_gqa if gqa_supported(attn.heads, attn.kv_heads, attn.dims) else attention.attention_rows
+    out = attend(queries[0].transpose(1, 0, 2), cache.keys, cache.values, counts, ids, sparse, attn.scale, parts=PARTS)
+    return out.reshape(1, length, -1)

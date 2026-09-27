@@ -1,4 +1,4 @@
-"""Matmuls for Flash Next prefill chunks (64+ rows): MLX's own 4-bit kernels with tiles that suit these shapes."""
+"""Prompt-chunk matmuls (64+ rows): MLX's own 4-bit kernels with other tiles, so MLX's bits."""
 
 from __future__ import annotations
 
@@ -79,19 +79,6 @@ _GATHER_BODY = """
       Xs, Ws, X, W, S, B, IDX, Y, MM[0], NN[0], KK[0],
       threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
 """
-_WSUM = """
-  // Thread (d, r): sum_j bf16(y[route r*k+j] * w[r][j]) in j order (fp32), from the expert-sorted outputs Y via POS
-  // (a route's row in Y); the shared expert is added by the caller.
-  const int d = int(thread_position_in_grid.x);
-  const int r = int(thread_position_in_grid.y);
-  float acc = 0.0f;
-  for (int j = 0; j < TOPK; j++) {
-    const int route = r * TOPK + j;
-    const float p = float(bfloat16_t(float(Y[size_t(POS[route]) * D + d]) * float(WT[route])));
-    acc += p;
-  }
-  OUT[size_t(r) * D + d] = bfloat16_t(acc);
-"""
 _kernels: dict[str, Any] = {}
 
 
@@ -136,9 +123,17 @@ def _tensor_units() -> bool:
 _tiles: list[bool] = []
 
 
+def prefill_identity() -> str:
+    """What decides the prefill matmuls' bits here, for snapshot keys (reading it builds no kernel)."""
+
+    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+    architecture = str(info.get("architecture", "unknown"))
+    state = "pending" if not _tiles else ("custom" if _tiles[0] else "native")
+    return f"architecture={architecture};matmul={state}"             # the source itself is in kernel_version
+
+
 def tiles() -> bool:
-    """Whether ``qmm`` and ``gather_sorted`` serve prefill here: not on GPUs with tensor units, and only once both
-    have given MLX's bits on small products in this process (decided on first use, then fixed)."""
+    """Whether the tiles serve here: no tensor units, and they gave MLX's bits once this process (then fixed)."""
 
     if not _tiles:
         ok = False
@@ -183,8 +178,7 @@ def _self_check() -> bool:
 
 
 def _mlx_splits_k(m: int, n: int, k: int) -> bool:
-    """Whether mx.quantized_matmul runs this product split-K (quantized.cpp, qmm_splitk: fewer than ~512 32 x 32
-    threadgroups). Its sums then run in another order, so ``qmm`` (which gives MLX's qmm bits) steps aside there."""
+    """Whether MLX runs this product split-K (under ~512 32 x 32 tiles): other sums, so ``qmm`` steps aside."""
 
     split = max(1, 512 // (-(-n // 32) * -(-m // 32)))
     split = min(split, k // 32)
@@ -202,8 +196,7 @@ def _q4(layer: Any) -> bool:
 
 
 def qmm(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array) -> mx.array:
-    """x [M, K] bf16 @ dequantized w [N, K / 8] (4-bit, groups of 32).T -> [M, N] bf16 through MLX's kernel with a
-    tuned tile; mx.quantized_matmul's bits unless MLX would split K (``matmul`` picks between them)."""
+    """x [M, K] @ w.T (4-bit, groups of 32) -> [M, N] bf16 on MLX's qmm kernel with a 64-row tile: its bits."""
 
     m, k = x.shape
     n = int(w.shape[0])
@@ -225,8 +218,7 @@ def matmul(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array) -> mx.a
 
 
 def linear(layer: Any, x: mx.array) -> mx.array:
-    """``layer(x)`` for x [..., K]: a 4-bit, group-32 QuantizedLinear on 64+ bf16 rows through ``qmm`` (the same
-    bits), anything else through the layer itself."""
+    """``layer(x)``: a 4-bit group-32 QuantizedLinear on 64+ bf16 rows through ``qmm`` (the same bits), else MLX."""
 
     rows, n, k = x.size // x.shape[-1], int(layer.weight.shape[0]), int(x.shape[-1])
     if (not isinstance(layer, nn.QuantizedLinear) or not _q4(layer) or x.dtype != mx.bfloat16 or n < 32
@@ -254,10 +246,24 @@ def gather_sorted(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, 
 def _experts(x: mx.array, layer: Any, idx: mx.array) -> mx.array:
     """A QuantizedSwitchLinear on rows sorted by expert: ``gather_sorted``, or MLX's sorted gather_qmm."""
 
-    if tiles():
+    # MLX's sorted gather_qmm runs QMV below 4 routes an expert, and QMV sums in another order: keep its dispatch
+    if x.shape[0] // int(layer.weight.shape[0]) >= 4 and tiles():
         return gather_sorted(x, layer.weight, layer.scales, layer.biases, idx)
     return mx.gather_qmm(x[:, None], layer.weight, layer.scales, layer.biases, rhs_indices=idx, transpose=True,
                          group_size=32, bits=4, sorted_indices=True)[:, 0]
+
+
+def deltanet_in(g: Any, x: mx.array) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    """GatedDeltaNet's input projections (qkv, z [B, L, NV, DV], b, a): one stacked matmul for a prefill chunk."""
+
+    batch, length, _ = x.shape
+    stacked = g.__dict__.get("stacked")                                 # the fused decode's stacked rows
+    if stacked is not None and active(batch * length):
+        cuts = [g.conv_dim, g.conv_dim + g.value_dim, g.conv_dim + g.value_dim + g.nv]
+        qkv, z, b, a = mx.split(linear(stacked, x), cuts, axis=-1)
+    else:
+        qkv, z, b, a = g.in_proj_qkv(x), g.in_proj_z(x), g.in_proj_b(x), g.in_proj_a(x)
+    return qkv, z.reshape(batch, length, g.nv, g.dv), b, a
 
 
 def moe_applies(module: Any, x: mx.array) -> bool:
@@ -269,9 +275,7 @@ def moe_applies(module: Any, x: mx.array) -> bool:
 
 
 def moe(module: Any, x: mx.array) -> mx.array:
-    """model.SparseMoE on x [1, L, D] for a prefill chunk (see ``moe_applies``): the reference routing, the three
-    expert matmuls on rows sorted by expert (``_experts``), a weighted sum over the sorted outputs, the shared
-    expert."""
+    """model.SparseMoE on a prompt chunk x [1, L, D]: the reference's routing, sums and shared expert, MLX's bits."""
 
     batch, length, dims = x.shape
     k = module.top_k
@@ -286,10 +290,9 @@ def moe(module: Any, x: mx.array) -> mx.array:
     u = _experts(xs, sw.up_proj, idx)
     act = sw.activation(u, g)                                           # SwitchGLU: activation(x_up, x_gate)
     y = _experts(act, sw.down_proj, idx)
-    wsum = _k("tf_prefill_moe_wsum", _WSUM, ["Y", "POS", "WT"], ["OUT"])
-    routed = wsum(inputs=[y, pos, weights.reshape(-1)], template=[("TOPK", k), ("D", dims)],
-                  grid=(dims, length, 1), threadgroup=(256, 1, 1), output_shapes=[(length, dims)],
-                  output_dtypes=[x.dtype])[0]
+    # the reference's unsort, bf16 product and MLX's sum: a sequential fp32 sum of the products changes bits
+    routed = (y[pos].reshape(batch, length, k, dims) * weights[..., None]).sum(axis=-2)
+    routed = routed.reshape(length, dims)
     se = module.shared_expert
     xf = x.reshape(length, dims)
     shared = linear(se.down_proj, nn.silu(linear(se.gate_proj, xf)) * linear(se.up_proj, xf))

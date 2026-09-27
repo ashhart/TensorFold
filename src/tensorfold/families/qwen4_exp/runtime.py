@@ -123,22 +123,34 @@ class FlashNext:
 
     @property
     def prefill_key(self) -> str:
-        """Which forward prefills prompt chunks, for prefix-snapshot keys (the two round differently): the prefill
-        path (``kernels.qwen.flash_next.v1.prefill*``, on the GPU unless TF_FLASH_PREFILL=0) or MLX's."""
+        """How prompt chunks are prefilled (path, matmul route, GPU), for snapshot keys: each rounds differently."""
 
         from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
 
-        return "flash-prefill=" + ("fast" if self.fused is not None and prefill_mm.fast_prefill() else "mlx")
+        fast = self.fused is not None and prefill_mm.fast_prefill()
+        key = "flash-prefill=" + ("fast;" + prefill_mm.prefill_identity() if fast else "mlx")
+        resolved = self.__dict__.get("_resolved_prefill_identity")
+        if resolved is not None and key != resolved:
+            raise RuntimeError("Flash Next's prefill arithmetic changed after the snapshot key was fixed: reload")
+        return key
+
+    def resolve_prefill_identity(self) -> None:
+        """Fix the actual matmul route before snapshot keying; its required self-check belongs to startup."""
+
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
+        if self.fused is not None and prefill_mm.fast_prefill():
+            prefill_mm.tiles()
+        self._resolved_prefill_identity = self.prefill_key
 
     def hidden(self, inputs: Any, cache: list[Any]) -> mx.array:
-        """Mixed hidden states [1, R, D]: up to ``fused_rows`` rows through the fused decode kernels, a longer
-        prompt chunk through the prefill path (``Qwen4Exp.hidden``; MLX's forward with TF_FLASH_PREFILL=0), whose
-        bits depend on the chunk; the engine's aligned prefill gives a resumed prompt the chunks of the same prompt
-        fed fresh."""
+        """Mixed hidden states [1, R, D]: the fused kernels up to ``fused_rows`` rows, else a prompt chunk's path."""
 
         tokens = np.asarray(inputs, dtype=np.int64)
         if tokens.ndim == 1:
             tokens = tokens[None]
+        if tokens.shape[1] > self.fused_rows and "_resolved_prefill_identity" in self.__dict__:
+            self.prefill_key  # refuse a changed prefill mode before reading or updating a keyed cache
         out = self.model.hidden(tokens, cache[: self.layer_count])
         fused = self.fused is not None and tokens.shape[0] == 1 and tokens.shape[1] <= self.fused_rows
         self._streams = self.fused.last_streams if fused else self.model.__dict__["last_streams"]

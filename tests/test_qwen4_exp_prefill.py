@@ -1,8 +1,4 @@
-"""Qwen3.8 Flash Next's fast prefill path (GPU): each piece against MLX or the reference forward on small layers.
-
-The kernels read 4-bit, group-32 weights; the modules here are small but have the shapes the kernels need (256-dim
-heads, hidden sizes that are multiples of 256). TF_FLASH_PREFILL=0 gives the reference forward to compare with.
-"""
+"""Flash Next's prefill path on small 4-bit layers with the kernels' shapes (GPU), against MLX or the reference."""
 
 from __future__ import annotations
 
@@ -60,11 +56,9 @@ def rel(a, b) -> float:
     return float((mx.sqrt(mx.sum((a - b) ** 2)) / mx.sqrt(mx.sum(b * b))).item())
 
 
-# -- MLX's kernels with other tiles: same bits -------------------------------------------------------------------
 @pytest.mark.parametrize(("m", "n", "k"), [(512, 640, 512), (512, 8192, 512), (96, 64, 512), (4096, 324, 1024)])
 def test_matmul_is_mlx_bit_for_bit(m, n, k):
-    """The tuned tile where MLX runs qmm (64 x 64 for wide outputs, else 64 x 32), MLX itself where it splits K
-    ((96, 64, 512))."""
+    """The tuned tile where MLX runs qmm, MLX itself where it splits K ((96, 64, 512))."""
 
     from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
 
@@ -75,7 +69,7 @@ def test_matmul_is_mlx_bit_for_bit(m, n, k):
     b = (mx.random.normal((n, k // 32)) * 0.02).astype(mx.bfloat16)
     ref = mx.quantized_matmul(x, w, s, b, transpose=True, group_size=32, bits=4)
     assert bool(mx.array_equal(prefill_mm.matmul(x, w, s, b), ref).item())
-    if not prefill_mm._mlx_splits_k(m, n, k):
+    if not prefill_mm._mlx_splits_k(m, n, k) and not prefill_mm._tensor_units():
         assert bool(mx.array_equal(prefill_mm.qmm(x, w, s, b), ref).item())
 
 
@@ -91,17 +85,20 @@ def test_linear_falls_back_off_the_fast_path(monkeypatch):
     assert bool(mx.array_equal(prefill_mm.linear(layer, big), layer(big)).item())
 
 
-def test_tiles_pass_their_self_check_on_this_gpu():
+def test_tiles_serve_only_where_they_give_mlx_bits():
+    """Tensor-unit GPUs keep MLX's matmuls; elsewhere the tiles pass their check against MLX."""
+
     from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
 
-    assert prefill_mm._self_check()
-    assert prefill_mm.tiles() == (not prefill_mm._tensor_units())
+    if prefill_mm._tensor_units():
+        assert not prefill_mm.tiles()
+    else:
+        assert prefill_mm._self_check() and prefill_mm.tiles()
 
 
 @pytest.mark.parametrize("why", ["tensor units", "check fails", "kernel does not build"])
 def test_mlx_matmuls_serve_when_the_tiles_step_aside(monkeypatch, why):
-    """On an M5 (tensor units), or when the kernels built from this MLX's headers do not reproduce its bits or do
-    not build, every matmul is MLX's own and the MoE still matches the reference."""
+    """With tensor units, a failed check or a kernel that does not build, every matmul is MLX's."""
 
     from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
 
@@ -124,12 +121,14 @@ def test_mlx_matmuls_serve_when_the_tiles_step_aside(monkeypatch, why):
     x = (mx.random.normal((1, 128, 256)) * 0.5).astype(mx.bfloat16)
     fast = moe(x)
     monkeypatch.setenv("TF_FLASH_PREFILL", "0")
-    assert rel(fast, moe(x)) < 1e-2
+    assert bool(mx.array_equal(fast, moe(x)).item())
 
 
 def test_gather_sorted_is_mlx_bit_for_bit():
     from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
 
+    if prefill_mm._tensor_units():
+        pytest.skip("MLX's sorted expert matmul uses the tensor units here: the tiles do not serve")
     mx.random.seed(1)
     experts, k, n, m = 16, 512, 64, 400
     idx = mx.array(np.sort(np.random.default_rng(2).integers(0, experts, size=m)).astype(np.uint32))
@@ -142,19 +141,20 @@ def test_gather_sorted_is_mlx_bit_for_bit():
     assert bool(mx.array_equal(prefill_mm.gather_sorted(x, w, s, b, idx), ref).item())
 
 
-# -- modules against the reference forward --------------------------------------------------------------------
-def test_moe_matches_the_reference(monkeypatch):
+@pytest.mark.parametrize(("experts", "rows"), [(16, 128), (128, 64)])
+def test_moe_is_the_reference_bit_for_bit(monkeypatch, experts, rows):
+    """4+ routes an expert take MLX's sorted QMM, fewer its QMV, as MLX dispatches; the sum is the reference's."""
+
     from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
 
     mx.random.seed(3)
-    moe = q4bits(q4.SparseMoE(config()), keep=("gate",))                # the router stays bf16, as in the checkpoint
-    x = (mx.random.normal((1, 128, 256)) * 0.5).astype(mx.bfloat16)
+    moe = q4bits(q4.SparseMoE(config(num_experts=experts)), keep=("gate",))  # the router stays bf16
+    x = (mx.random.normal((1, rows, 256)) * 0.5).astype(mx.bfloat16)
     assert prefill_mm.moe_applies(moe, x)
     fast = moe(x)
     monkeypatch.setenv("TF_FLASH_PREFILL", "0")
     assert not prefill_mm.moe_applies(moe, x)
-    ref = moe(x)
-    assert rel(fast, ref) < 1e-2, rel(fast, ref)
+    assert bool(mx.array_equal(fast, moe(x)).item())
 
 
 def test_fused_hyper_connection_matches_the_reference():
@@ -194,8 +194,7 @@ def _selection_mask(ids, counts, sparse, keys):
 
 
 def _assert_top_blocks(ids, scores, complete, top):
-    """Each sparse row's selected blocks (the first key of each, index_select's layout) are a top-``top`` of its
-    complete blocks' scores [L, blocks] (ties either way)."""
+    """Each sparse row's blocks (every 4th key id) are a top-``top`` of its complete blocks' scores; ties either way."""
 
     ids = np.array(ids)
     for r, c in enumerate(complete):
@@ -218,34 +217,32 @@ def _reference_block_scores(indexer, query, pooled, past):
 
 
 @pytest.mark.parametrize("gqa", [True, False])
-def test_sparse_prefill_attention_matches_masked_attention(monkeypatch, gqa):
-    """Past the indexer's budget (4 blocks here) a row reads only its selected blocks and tail. The reference applies
-    its selection as a mask over every key: each row's selected blocks must be a top-k of the reference's scores, and
-    with the same selection the outputs agree. The selections themselves differ only on ties: with 2 indexer heads many blocks score exactly 0 after the ReLU, index_select takes the
-    lower block and argpartition either (``test_index_selection_is_a_top_k_of_the_reference_scores``). Two chunks: the
-    second extends a cache whose pooled blocks the first made."""
+def test_prompt_attention_reads_a_top_k_of_blocks_and_matches_masked_attention(monkeypatch, gqa):
+    """Rows past the budget read a top-k of the reference's blocks and, so selected, match its masked attention."""
 
     from tensorfold.kernels.qwen.flash_next.v1 import attention as K
     from tensorfold.kernels.qwen.flash_next.v1 import prefill as P
 
     mx.random.seed(5)
     attn = q4bits(q4.SparseAttention(config()))
-    if not gqa:                                                         # the decode kernel attention_rows instead
+    attn.__dict__["kernel_select"] = True
+    monkeypatch.setattr(P, "DENSE_KEYS", 0)
+    if not gqa:
         monkeypatch.setattr(P, "gqa_supported", lambda *a: False)
     chunks = [(mx.random.normal((1, n, 256)) * 0.5).astype(mx.bfloat16) for n in (80, 72)]
     selected = []
-    original = K.index_select
+    original = K.select_blocks
 
-    def recording(q, pooled, complete, ends, *, top):
-        ids = original(q, pooled, complete, ends, top=top)
+    def recording(scores, complete, ends, *, top):
+        ids = original(scores, complete, ends, top=top)
         selected.append((ids, complete, ends, top))
         return ids
 
-    monkeypatch.setattr(K, "index_select", recording)
+    monkeypatch.setattr(K, "select_blocks", recording)
     cache = q4.AttentionCache()
     fast = [attn(x, cache) for x in chunks]
     mx.eval(fast)
-    assert len(selected) == 2                                           # both chunks went through the sparse path
+    assert len(selected) == 2                                           # both chunks went through the kernels
 
     def same_selection(query, raw, cache, past):
         ids, complete, ends, top = selected.pop(0)
@@ -256,7 +253,7 @@ def test_sparse_prefill_attention_matches_masked_attention(monkeypatch, gqa):
         counts = [ratio * top + e - ratio * c if sp else e for e, c, sp in zip(ends, complete, sparse)]
         return _selection_mask(ids, counts, sparse, past + len(ends))
 
-    monkeypatch.setenv("TF_FLASH_PREFILL", "0")
+    attn.__dict__.pop("kernel_select")
     monkeypatch.setattr(attn.indexer, "select", same_selection)
     cache = q4.AttentionCache()
     ref = [attn(x, cache) for x in chunks]
@@ -264,9 +261,28 @@ def test_sparse_prefill_attention_matches_masked_attention(monkeypatch, gqa):
         assert rel(got, want) < 1e-2, rel(got, want)
 
 
+def test_chunks_up_to_dense_keys_attend_densely(monkeypatch):
+    """A chunk ending by DENSE_KEYS keys attends densely, a later one through the kernels: by its place alone."""
+
+    from tensorfold.kernels.qwen.flash_next.v1 import attention as K
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill as P
+
+    mx.random.seed(6)
+    attn = q4bits(q4.SparseAttention(config()))
+    attn.__dict__["kernel_select"] = True
+    monkeypatch.setattr(P, "DENSE_KEYS", 144)
+    calls = []
+    original = K.select_blocks
+    monkeypatch.setattr(K, "select_blocks", lambda *a, **k: calls.append(1) or original(*a, **k))
+    cache = q4.AttentionCache()
+    for n, kernels in ((80, False), (64, False), (72, True)):          # chunks ending at 80, 144 and 216 keys
+        before = len(calls)
+        mx.eval(attn((mx.random.normal((1, n, 256)) * 0.5).astype(mx.bfloat16), cache))
+        assert (len(calls) > before) == kernels, cache.offset
+
+
 def test_index_selection_is_a_top_k_of_the_reference_scores():
-    """index_select's blocks for each row are a top-``top`` of the reference's fp32 block scores (ties may go either
-    way: it takes the lower block, argpartition any)."""
+    """index_select picks a top-``top`` of the reference's fp32 block scores for each row (ties either way)."""
 
     from tensorfold.kernels.qwen.flash_next.v1 import attention as K
 
@@ -312,18 +328,15 @@ def test_ngram_lookup_through_the_fused_tables_is_bit_identical():
     emb = q4bits(q4.NGramEmbedding(config(), 0))
     tables = K.PleTables(emb)
     tokens = np.random.default_rng(8).integers(6, 97, size=(1, 200))
-    tokens[0, 50] = 5
+    tokens[0, 50] = 5                                                   # an EOS: the n-grams restart after it
     ids = emb.ids(np.full((1, emb.context), emb.eos, dtype=np.int64), tokens)
     ref = emb(ids)
     emb.__dict__["fused_tables"] = tables
     assert bool(mx.array_equal(emb(ids), ref).item())
 
 
-# -- the whole model: the fast prefill against the reference forward, then decode on its cache ------------------
 def tiny_model(seed: int = 0) -> q4.Qwen4Exp:
-    """Four layers (3 DeltaNet + 1 sparse attention, PLE on layer 1), 512 wide with 32 experts (the fused decode's
-    expert kernels need K % 512 == 0 and a multiple of 32 experts), quantized as the checkpoint is (all but the router), with the fused decode attached as
-    loading attaches it."""
+    """Four layers (3 DeltaNet, 1 attention, PLE on the first), 512 wide, 32 experts, 4-bit but the router."""
 
     from mlx.utils import tree_flatten
 
@@ -336,19 +349,15 @@ def tiny_model(seed: int = 0) -> q4.Qwen4Exp:
                         for name, v in tree_flatten(model.parameters())])
     q4bits(model, keep=("mlp.gate",))
     model.__dict__["fused"] = FusedDecode(model)
+    q4.select_by_kernels(model.layers)                                  # as load() attaches them
     return model
 
 
 def test_whole_model_prefill_is_as_exact_as_the_reference(monkeypatch):
-    """Two chunks (the second past the indexer's budget of 64 keys, extending the first's caches), then four decode
-    steps on the caches each prefill left, against the same weights run in fp32. A random 4-layer MoE amplifies
-    bf16 rounding (routing flips), so the fast path and the bf16 reference each land ~15% from fp32 here; the fast
-    path must land as close as the reference (seeds 0-5: 0.99-1.09x its error, top-1 within 0.02). The decode steps
-    run the reference forward: the fused decode's kernels are built for the checkpoint's shapes (48 value heads, 512
-    experts, ...) and are not this test's subject."""
+    """Two chunks, then four decode steps: the prefill path lands as close to fp32 as the bf16 reference does."""
 
     tokens = np.random.default_rng(11).integers(6, 97, size=(1, 404))
-    tokens[0, 100] = 5
+    tokens[0, 100] = 5                                                  # an EOS: the n-grams restart after it
 
     def run(model, fused=None):
         cache = model.make_cache()
@@ -359,6 +368,7 @@ def test_whole_model_prefill_is_as_exact_as_the_reference(monkeypatch):
         logits += [model(tokens[:, t:t + 1], cache) for t in range(400, 404)]
         return np.array(mx.concatenate(logits, axis=1)[0].astype(mx.float32))
 
+    monkeypatch.setattr(q4.prefill, "DENSE_KEYS", 200)                  # the second chunk through the kernels
     model = tiny_model()
     fused = model.__dict__["fused"]
     fast = run(model, fused)
@@ -369,6 +379,8 @@ def test_whole_model_prefill_is_as_exact_as_the_reference(monkeypatch):
     for layer in exact.layers:
         if "ple" in layer:
             del layer.ple.ple_embedding.__dict__["fused_tables"]
+        if not layer.is_linear:
+            del layer.self_attn.__dict__["kernel_select"]              # the kernels read bf16
     exact.set_dtype(mx.float32)
     truth = run(exact)
 
@@ -380,7 +392,6 @@ def test_whole_model_prefill_is_as_exact_as_the_reference(monkeypatch):
     assert fast_err < 1.2 * ref_err and fast_top > ref_top - 0.04, (fast_err, ref_err, fast_top, ref_top)
 
 
-# -- prefix-snapshot keys name the prefill path ------------------------------------------------------------------
 def test_snapshot_keys_name_the_prefill_path(monkeypatch):
     from types import SimpleNamespace
 
@@ -400,3 +411,21 @@ def test_snapshot_keys_name_the_prefill_path(monkeypatch):
     keys = {families.kernel_version(family, SimpleNamespace(prefill_key=k)) for k in (fast, reference)}
     keys.add(families.kernel_version(family, object()))                # a model without one: the kernels alone
     assert len(keys) == 3 and all(k.startswith("qwen4_exp-v1-") for k in keys)
+
+
+def test_prefill_identity_is_fixed_before_snapshot_keys(monkeypatch):
+    """The key names the matmul route; once resolved, a changed prefill mode is refused, not keyed as before."""
+
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
+    runtime = FlashNext.__new__(FlashNext)
+    runtime.fused = object()
+    monkeypatch.setattr(prefill_mm, "_tiles", [])
+    assert "matmul=pending" in runtime.prefill_key
+    runtime.resolve_prefill_identity()
+    key = runtime.prefill_key
+    assert "matmul=pending" not in key and ("matmul=custom" in key) == prefill_mm.tiles()
+    monkeypatch.setenv("TF_FLASH_PREFILL", "0")
+    with pytest.raises(RuntimeError):
+        runtime.prefill_key

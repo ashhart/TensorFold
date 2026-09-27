@@ -464,6 +464,9 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     snapshot_dir = None if str(args.snapshot_dir).lower() == "none" else Path(args.snapshot_dir).expanduser()
     from importlib.metadata import version
 
+    resolve_prefill = getattr(model, "resolve_prefill_identity", None)
+    if resolve_prefill is not None:
+        resolve_prefill()  # the prefill mode's self-check runs at startup, before any snapshot key
     # Both libraries and the active prompt kernels determine a snapshot's bits.
     prefill = f"grid{LaneEngine.prefill_align}"
     model_id = (f"{model_dir.resolve()}|mlx={mx.__version__}|mlx_lm={version('mlx-lm')}"

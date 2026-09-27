@@ -29,7 +29,7 @@ import numpy as np
 
 from tensorfold.families.qwen3_5 import tensor_units
 from tensorfold.kernels.qwen.dense.v1 import lane_qmm, simd_qmm
-from tensorfold.kernels.qwen.flash_next.v1 import attention, base, embed, experts, gdn, hc
+from tensorfold.kernels.qwen.flash_next.v1 import attention, base, embed, experts, gdn, hc, rows
 
 
 def _stacked(linears: list[Any]) -> tuple[nn.QuantizedLinear, list[int]]:
@@ -64,8 +64,8 @@ def first(a: mx.array) -> mx.array:
 
 
 _checked: set[tuple[int, int, int]] = set()
-# "lane": lane_qmm (tensor units); "simd": simd_qmm. TF_FLASH_DENSE picks one for an A/B.
-DENSE = os.environ.get("TF_FLASH_DENSE") or ("lane" if tensor_units() else "simd")
+# "lane": lane_qmm (tensor units); "rows": per-row kernels (0.3.4.1's); "simd": simd_qmm. TF_FLASH_DENSE picks one.
+DENSE = os.environ.get("TF_FLASH_DENSE") or ("lane" if tensor_units() else "rows")
 _lane: dict[int, tuple[mx.array, mx.array, mx.array, int]] = {}   # id(linear) -> weight, tiled copy, scales, tile
 
 
@@ -95,15 +95,14 @@ def _lane_project(x: mx.array, linear: Any) -> mx.array:
 
 
 def project(x: mx.array, linear: Any) -> mx.array:
-    """x [..., R, K] through a 4-bit linear with ``simd_qmm`` (``lane_qmm`` on GPUs with tensor units): a row's
-    bits do not depend on R. A weight shape is checked on first use: where this GPU's one-row kernel differs
-    from its window kernel, one-row calls take the window kernel. A float linear (the tests' tiny models) is
-    MLX's."""
+    """x [..., R, K] through a 4-bit linear, a row's bits independent of R: per-row kernels before M5, lane_qmm on M5."""
 
     if not isinstance(linear, nn.QuantizedLinear):
         return linear(x)
     if DENSE == "lane":
         return _lane_project(x, linear)
+    if DENSE == "rows":
+        return linear(x) if x.size // x.shape[-1] == 1 else rows.qmv_rows(x, linear)
     weight = linear.weight
     shape = (int(weight.shape[0]), int(weight.shape[1]) * 8, int(linear.group_size))
     if shape not in _checked:
@@ -113,6 +112,12 @@ def project(x: mx.array, linear: Any) -> mx.array:
             simd_qmm.mma_one_row.add(shape)
         _checked.add(shape)
     return simd_qmm.qmm(x, weight, linear.scales, linear.biases, linear.group_size)
+
+
+def hc_project(*args: Any, **kwargs: Any) -> tuple[mx.array, mx.array]:
+    """hc.hc_project, or with DENSE "rows" its per-row form (each row in its own threadgroups)."""
+
+    return (rows.hc_project if DENSE == "rows" else hc.hc_project)(*args, **kwargs)
 
 
 class _HC:
@@ -293,11 +298,11 @@ class FusedDecode:
             ahc = entry["attn_hc"]
             kind, branch, inject = pending
             hn, ssp = hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)
-            mixed, inj = hc.hc_project(hn, ssp, ahc.down, ahc.up, ahc.scale, eps=self.eps, streams=self.streams, low=ahc.low)
+            mixed, inj = hc_project(hn, ssp, ahc.down, ahc.up, ahc.scale, eps=self.eps, streams=self.streams, low=ahc.low)
             out = self._gdn(i, mixed, c) if layer.is_linear else self._attention(i, mixed, c)
             mhc = entry["mlp_hc"]
             hm, ssp = hc.hc_norm(hn, streams=self.streams, write_back="plain", branch=(out,), inject=inj)
-            mixed, inj2 = hc.hc_project(hm, ssp, mhc.down, mhc.up, mhc.scale, eps=self.eps, streams=self.streams, low=mhc.low)
+            mixed, inj2 = hc_project(hm, ssp, mhc.down, mhc.up, mhc.scale, eps=self.eps, streams=self.streams, low=mhc.low)
             h = hm
             kind, branch = self._moe(i, mixed)
             pending = (kind, branch, inj2)
@@ -307,7 +312,7 @@ class FusedDecode:
         mix = self.mixer
         hn, ssp = hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)
         self.last_streams = hn                                    # [R, S*D] before the final mixer (the MTP reads it)
-        return hc.hc_project(hn, ssp, mix.down, mix.up, mix.scale, eps=self.eps, streams=self.streams, low=mix.low)[0][None]
+        return hc_project(hn, ssp, mix.down, mix.up, mix.scale, eps=self.eps, streams=self.streams, low=mix.low)[0][None]
 
     def _ple(self, ple: Any, h: mx.array, tokens: np.ndarray, cache: Any) -> mx.array:
         """model.PLELayer on rows h [R, S*D], its projections through ``project`` (row-invariant)."""
@@ -368,11 +373,11 @@ class FusedDecode:
             ahc = entry["attn_hc"]
             kind, branch, inject = pending
             hn, ssp = hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)
-            mixed, inj = hc.hc_project(hn, ssp, ahc.down, ahc.up, ahc.scale, eps=self.eps, streams=self.streams, low=ahc.low)
+            mixed, inj = hc_project(hn, ssp, ahc.down, ahc.up, ahc.scale, eps=self.eps, streams=self.streams, low=ahc.low)
             out = self._gdn_multi(i, mixed, cs, spans) if layer.is_linear else self._attention_multi(i, mixed, cs, spans)
             mhc = entry["mlp_hc"]
             hm, ssp = hc.hc_norm(hn, streams=self.streams, write_back="plain", branch=(out,), inject=inj)
-            mixed, inj2 = hc.hc_project(hm, ssp, mhc.down, mhc.up, mhc.scale, eps=self.eps, streams=self.streams, low=mhc.low)
+            mixed, inj2 = hc_project(hm, ssp, mhc.down, mhc.up, mhc.scale, eps=self.eps, streams=self.streams, low=mhc.low)
             h = hm
             kind, branch = self._moe(i, mixed)
             pending = (kind, branch, inj2)
@@ -382,7 +387,7 @@ class FusedDecode:
         mix = self.mixer
         hn, ssp = hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)
         self.last_streams = hn
-        return hc.hc_project(hn, ssp, mix.down, mix.up, mix.scale, eps=self.eps, streams=self.streams, low=mix.low)[0][None]
+        return hc_project(hn, ssp, mix.down, mix.up, mix.scale, eps=self.eps, streams=self.streams, low=mix.low)[0][None]
 
     def _gdn_multi(self, index: int, x: mx.array, caches: list[Any], spans: list[tuple[int, int]]) -> mx.array:
         proj, conv_w, g = self.layers[index]["gdn"]

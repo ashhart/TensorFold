@@ -49,3 +49,12 @@ def test_flash_key_still_tracks_kernel_sources(monkeypatch):
     before = families.kernel_version(family, None)
     monkeypatch.setattr(qwen4_exp, "KERNEL_VERSION", "test-revision")
     assert families.kernel_version(family, None) != before
+
+
+def test_flash_key_carries_the_prefill_key():
+    family = families.families()["qwen4_exp"]
+    model = SimpleNamespace(layers=[SimpleNamespace(self_attn=SimpleNamespace(kernel_select=True))],
+                            prefill_key="flash-prefill=fast;architecture=x;matmul=custom")
+    fast = families.kernel_version(family, model)
+    model.prefill_key = "flash-prefill=mlx"
+    assert families.kernel_version(family, model) != fast and "prompt_attention=1" in fast

@@ -114,10 +114,114 @@ _GDN_STEP = r"""
 """
 
 
+_GDN_PIPE = r"""
+  // gdn_step's arithmetic a row in three phases: every row's conv, norms and gates; the state updates; the outputs
+  const uint t = thread_position_in_threadgroup.x;
+  const uint lane = thread_index_in_simdgroup;
+  const uint sg = simdgroup_index_in_threadgroup;
+  const int hv = int(threadgroup_position_in_grid.x);
+  const int hk = hv / (NV / NK);
+  const int R = rows[0];
+  constexpr int C = 2 * NK * DK + NV * DV;
+  constexpr int PW = C + NV * DV + 2 * NV;
+  constexpr int RPS = DV / 32;                              // state rows a simdgroup
+  threadgroup float qs[PIPE][DK], ks[PIPE][DK], vs[PIPE][DV], ys[PIPE][DV];
+  threadgroup float red[PIPE];
+  threadgroup float gates[PIPE][2];
+  int c = -1;
+  if (int(t) < DK) c = hk * DK + int(t);
+  else if (int(t) < 2 * DK) c = NK * DK + hk * DK + int(t) - DK;
+  else if (int(t) < 2 * DK + DV) c = 2 * NK * DK + hv * DV + int(t) - 2 * DK;
+  const bool writes_qk = (hv % (NV / NK)) == 0;
+  for (int r = 0; r < R; r++) {
+    if (c >= 0) {
+      float conv = 0.0f;
+      for (int tap = 0; tap < TAPS; tap++) {
+        const int at = r + tap;
+        const float xv = at < TAPS - 1 ? float(CS[at * C + c]) : float(P[(at - (TAPS - 1)) * PW + c]);
+        conv = fma(float(CW[c * TAPS + tap]), xv, conv);
+      }
+      const float act = bsilu(conv);
+      if (int(t) < DK) qs[r][t] = act;
+      else if (int(t) < 2 * DK) ks[r][int(t) - DK] = act;
+      else vs[r][int(t) - 2 * DK] = act;
+      if (c < 2 * NK * DK ? writes_qk : true) {
+        for (int j = 0; j < TAPS - 1; j++) {
+          const int at = r + 1 + j;
+          CSO[(r * (TAPS - 1) + j) * C + c] = at < TAPS - 1 ? CS[at * C + c] : P[(at - (TAPS - 1)) * PW + c];
+        }
+      }
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (int(sg) < 2 * R) {
+    const int r = int(sg) / 2;
+    const bool isq = int(sg) % 2 == 0;
+    threadgroup float* x = isq ? qs[r] : ks[r];
+    float ss = 0.0f;
+    for (int i = 0; i < DK / 32; i++) {
+      const float v = x[lane * (DK / 32) + i];
+      ss = fma(v, v, ss);
+    }
+    ss = simd_sum(ss);
+    const float inv = metal::rsqrt(ss + 1e-6f) * (isq ? metal::rsqrt(float(DK)) : 1.0f);
+    for (int i = 0; i < DK / 32; i++) x[lane * (DK / 32) + i] *= inv;
+  } else if (int(sg) < 3 * R && lane == 0) {
+    const int r = int(sg) - 2 * R;
+    const float b = float(P[r * PW + C + NV * DV + hv]);
+    const float a = float(P[r * PW + C + NV * DV + NV + hv]);
+    gates[r][0] = metal::exp(-metal::exp(float(ALOG[hv])) * fsoftplus(a + float(DT[hv])));
+    gates[r][1] = bsig(b);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float state[RPS][4];
+  for (int j = 0; j < RPS; j++)
+    for (int i = 0; i < 4; i++)
+      state[j][i] = HAS_STATE ? SIN[(size_t(hv) * DV + sg * RPS + j) * DK + lane * 4 + i] : 0.0f;
+  for (int r = 0; r < R; r++) {
+    const float g = gates[r][0], beta = gates[r][1];
+    float kk[4], qq[4];
+    for (int i = 0; i < 4; i++) { kk[i] = ks[r][lane * 4 + i]; qq[i] = qs[r][lane * 4 + i]; }
+    for (int j = 0; j < RPS; j++) {
+      const int dv = int(sg) * RPS + j;
+      float kv = 0.0f;
+      for (int i = 0; i < 4; i++) {
+        state[j][i] = state[j][i] * g;
+        kv += state[j][i] * kk[i];
+      }
+      kv = simd_sum(kv);
+      const float delta = (vs[r][dv] - kv) * beta;
+      float out = 0.0f;
+      for (int i = 0; i < 4; i++) {
+        state[j][i] = state[j][i] + kk[i] * delta;
+        out += state[j][i] * qq[i];
+      }
+      out = simd_sum(out);
+      if (lane == 0) ys[r][dv] = float(bfloat(out));
+      for (int i = 0; i < 4; i++) SO[((size_t(r) * NV + hv) * DV + dv) * DK + lane * 4 + i] = state[j][i];
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (int(sg) < R) {
+    float ss = 0.0f;
+    for (int i = 0; i < DV / 32; i++) { const float v = ys[sg][lane * (DV / 32) + i]; ss = fma(v, v, ss); }
+    ss = simd_sum(ss);
+    if (lane == 0) red[sg] = metal::rsqrt(ss / float(DV) + eps[0]);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (int(t) < DV) {
+    for (int r = 0; r < R; r++) {
+      const float y = float(bfloat(float(NW[t]) * float(bfloat(ys[r][t] * red[r]))));
+      const float z = float(P[r * PW + C + hv * DV + int(t)]);
+      OUT[r * NV * DV + hv * DV + int(t)] = bfloat(y * fsig(z));
+    }
+  }
+"""
+
+PIPE_ROWS = 4   # calls of up to this many rows take _GDN_PIPE (same bits, fewer barriers)
+
 def held(rows: int) -> int:
-    """Rows the per-row state buffers are allocated with: a multiple of 8, so a round of a different row count
-    reuses a cached buffer (MLX reuses one only of about the same size) instead of allocating 3 MB a row afresh.
-    Rows past ``rows`` are never written or read."""
+    """Round state-buffer capacity to a multiple of eight for cache reuse, leaving rows past the requested count untouched."""
 
     return -(-rows // 8) * 8
 
@@ -125,8 +229,7 @@ def held(rows: int) -> int:
 def gdn_step(projected: mx.array, conv_state: mx.array, ssm_state: mx.array | None, conv_weight: mx.array,
              a_log: mx.array, dt_bias: mx.array, norm_weight: mx.array, eps: mx.array, *, nk: int, nv: int,
              dk: int, dv: int) -> tuple[mx.array, mx.array, mx.array]:
-    """One Gated DeltaNet layer after its projection over R consecutive rows: (out [R, NV*DV] bf16, the conv and
-    recurrent states after each row). ``ssm_state`` None starts from zeros."""
+    """Process consecutive projected rows into bf16 output and per-row conv/recurrent states, starting from zeros if ssm_state is None."""
 
     rows = int(projected.shape[0])
     channels = 2 * nk * dk + nv * dv
@@ -137,11 +240,13 @@ def gdn_step(projected: mx.array, conv_state: mx.array, ssm_state: mx.array | No
     state = ssm_state if has_state else consts.get(("no state", nv, dv, dk))
     if state is None:                             # full size, so the input stays ``device`` (kernels.inputs)
         state = consts[("no state", nv, dv, dk)] = mx.zeros((nv, dv, dk), dtype=mx.float32)
-    run = kernel("q4_gdn_step", _GDN_STEP,
+    pipe = rows <= PIPE_ROWS
+    run = kernel("q4_gdn_pipe" if pipe else "q4_gdn_step", _GDN_PIPE if pipe else _GDN_STEP,
                      ["P", "CS", "SIN", "CW", "ALOG", "DT", "NW", "eps", "rows"], ["OUT", "CSO", "SO"])
     out, conv_rows, ssm_rows = run(
         inputs=[projected, conv_state, state, conv_weight, a_log, dt_bias, norm_weight, eps, count(rows)],
-        template=[("NK", nk), ("NV", nv), ("DK", dk), ("DV", dv), ("TAPS", taps), ("HAS_STATE", int(has_state))],
+        template=[("NK", nk), ("NV", nv), ("DK", dk), ("DV", dv), ("TAPS", taps), ("HAS_STATE", int(has_state))]
+        + ([("PIPE", PIPE_ROWS)] if pipe else []),
         grid=(nv * 1024, 1, 1), threadgroup=(1024, 1, 1),
         output_shapes=[(rows, nv * dv), (held(rows), taps - 1, channels), (held(rows), nv, dv, dk)],
         output_dtypes=[mx.bfloat16, conv_state.dtype, mx.float32])
@@ -185,8 +290,7 @@ def gdn_step_multi(projected: mx.array, conv_states: Sequence[mx.array], ssm_sta
                    rows: Sequence[int], conv_weight: mx.array, a_log: mx.array, dt_bias: mx.array,
                    norm_weight: mx.array, eps: mx.array, *, nk: int, nv: int, dk: int, dv: int
                    ) -> tuple[mx.array, mx.array, mx.array]:
-    """``gdn_step`` over several streams' rows (stream b's rows[b] rows in order), each scanned from its own
-    conv and recurrent state."""
+    """Scan each stream's rows in order from its own conv and recurrent state."""
 
     streams = len(rows)
     if not 1 <= streams <= MAX_STREAMS or len(conv_states) != streams or len(ssm_states) != streams:

@@ -68,7 +68,8 @@ def kernel_version(model: Any) -> str:
     modes = [str(int(bool(getattr(layer.self_attn, "kernel_select", False))))
              for layer in getattr(model, "layers", ()) if hasattr(layer, "self_attn")]
     source = kernel_source_version(families()["qwen4_exp"])
-    return f"{source}|prompt_attention={','.join(modes)}"
+    prefill = getattr(model, "prefill_key", None)                     # the prefill path, matmul route and GPU
+    return f"{source}|prompt_attention={','.join(modes)}" + (f"|{prefill}" if prefill else "")
 
 
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
