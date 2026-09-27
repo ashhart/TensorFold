@@ -13,7 +13,7 @@ import torch
 
 from ..host_table import HostTable, read_header as _header
 from ..ssd_table import SSDTable
-from .bf16 import b16_from_rows, quantize4, stack_b16
+from .bf16 import b16_from_rows, quantize4, stack_b16, make_b16
 from .ngram import NGram
 from tensorfold.cuda import experts as grouped
 
@@ -212,7 +212,7 @@ class MTPW:
 @dataclass
 class Weights:
     cfg: Config
-    embed: tuple[torch.Tensor, torch.Tensor, torch.Tensor]     # MLX layout (row lookup)
+    embed: Any                      # the MLX 4-bit trilogue (words, scales, biases) or a B16 (NVFP4)
     layers: list[LayerW]
     mixer: HC
     head: Q4
@@ -612,7 +612,8 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
     if cfg.quant not in ("mlx", "modelopt"):
         raise ValueError(f"Flash Next's CUDA engine reads MLX 4-bit (groups of 32) or NVFP4 (experts-only) "
                          f"checkpoints, not {cfg.quant}")
-    embed = b16("model.embed_tokens") if cfg.quant == "modelopt" else triple("model.embed_tokens")
+    embed = (make_b16(raw("model.embed_tokens.weight")) if cfg.quant == "modelopt"
+             else triple("model.embed_tokens"))
     loaded = []
     for i in chosen:
         loaded.append(layer(i, f"model.layers.{i}", cfg.layer_types[i], True))
