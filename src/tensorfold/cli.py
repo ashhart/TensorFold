@@ -68,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     speed.add_argument("--mtp-drafts", type=int, default=None,
                        help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 30%% "
                             "confidence); 0: no MTP drafts (any family)")
+    speed.add_argument("--mtp-confidence", type=float, default=None,
+                       help="on CUDA, stop an MTP chain before a later draft under this probability "
+                            "(Flash Next default 0.30)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
@@ -331,6 +334,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path) -> int:
         options["kv_dtype"] = kv_dtype
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
+    if getattr(args, "mtp_confidence", None) is not None:
+        options["mtp_confidence"] = float(args.mtp_confidence)
     if args.context is not None:
         options["context"] = int(args.context)
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)

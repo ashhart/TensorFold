@@ -70,7 +70,8 @@ CUDA_KV_DTYPES = ("bf16", "int8", "int4")
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
-                context: int | None = None, kv_dtype: str = "bf16", **options: Any):
+                mtp_confidence: float | None = None, context: int | None = None, kv_dtype: str = "bf16",
+                **options: Any):
     """The CUDA engine (``tensorfold serve`` on an NVIDIA GPU), set up as the recipe measured on DGX Spark.
 
     A round verifies the pending token and 1 to 6 MTP drafts: the first draft always, then a chain ends before a
@@ -85,7 +86,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
 
     if drafter:
         raise ValueError(f"{TITLE} drafts with its own MTP head on CUDA: a separate draft model does not apply")
-    from .cuda import CONTEXT, DEPTH
+    from .cuda import CONFIDENCE, CONTEXT, DEPTH
     from .cuda.engine import FlashNextEngine
     from .cuda.kvcache import check as check_kv
 
@@ -95,5 +96,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
         raise ValueError(f"this checkpoint has no MTP head, which {TITLE}'s CUDA engine drafts with ({MODELS[0]} "
                          "has one): without it every round would decode one token. Serve a checkpoint with the "
                          "head, or pass --no-drafts for the serial reference")
-    return FlashNextEngine(Path(model_dir), depth=depth, max_len=int(context) if context else CONTEXT, tp=int(tp),
+    confidence = CONFIDENCE if mtp_confidence is None else float(mtp_confidence)
+    return FlashNextEngine(Path(model_dir), depth=depth, confidence=confidence,
+                           max_len=int(context) if context else CONTEXT, tp=int(tp),
                            rank=int(rank), master=master, port=int(master_port), kv_dtype=kv_dtype)
