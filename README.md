@@ -1,3 +1,5 @@
+> **Experimental fork:** This repository is a fork of [ashhart/TensorFold](https://github.com/ashhart/TensorFold), exploring native Zig inference on macOS based on the original author's work. The original TensorFold implementation and Metal kernels are credited to the upstream author; the native Zig port is an experiment developed in this fork.
+
 # TensorFold
 
 TensorFold serves language models on Apple Silicon and NVIDIA GPUs through an OpenAI-compatible API.

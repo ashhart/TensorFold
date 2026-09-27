@@ -11,8 +11,11 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-sampling")) return @import("sampling_checks.zig").check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-sparse")) return @import("flash.zig").Model.checkAttention(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-attention")) return @import("attention_checks.zig").check(io, args[2]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
-        std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--max-tokens N] [--drafter DIR] [--temperature T] [--seed N] [--top-k N] [--top-p P] [--tokens ID,ID,...] [--warmup] [--report PATH] [--dump-logits PATH] [--check-exact]\n", .{});
+        std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--metal-simd] [--metal-sampling]\n  [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--report PATH] [--dump-logits PATH] [--check-exact]\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n", .{});
         return;
     }
     {
@@ -38,6 +41,10 @@ pub fn main(init: std.process.Init) !void {
     var report: ?[]const u8 = null;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--metal-sampling")) {
+            settings.metal = true;
+            continue;
+        }
         if (std.mem.eql(u8, args[i], "--metal-simd")) {
             mx.force_simd = true;
             continue;
@@ -125,7 +132,7 @@ pub fn main(init: std.process.Init) !void {
         defer p.deinit();
         var positions: [128]i32 = undefined;
         for (0..n) |j| positions[j] = m.position + @as(i32, @intCast(j)) + 1;
-        const ids = try sampling.rows(&p.scope, p.logits, positions[0..n], settings);
+        const ids = try sampling.rows(&m.kernels, &p.scope, p.logits, positions[0..n], settings);
         defer mx.allocator.free(ids);
         pending = ids[n - 1];
         if (dump) |path| {
@@ -175,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
         defer p.deinit();
         var positions: [32]i32 = undefined;
         for (0..n) |j| positions[j] = m.position + tree.depths[j] + 1;
-        const ids = try sampling.rows(&p.scope, p.logits, positions[0..n], settings);
+        const ids = try sampling.rows(&m.kernels, &p.scope, p.logits, positions[0..n], settings);
         forward_ns += stage.read();
         stage.reset();
         defer mx.allocator.free(ids);
@@ -227,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Stage totals: draft {d:.3}s, target+sample {d:.3}s, commit+absorb {d:.3}s\n", .{ @as(f64, @floatFromInt(draft_ns)) / 1e9, @as(f64, @floatFromInt(forward_ns)) / 1e9, @as(f64, @floatFromInt(commit_ns)) / 1e9 });
     std.debug.print("Generated {d} tokens in {d:.3}s ({d:.2} tok/s), {d} rounds, {d} accepted drafts\nIDs: {any}\n", .{ generated.items.len, seconds, @as(f64, @floatFromInt(generated.items.len)) / seconds, rounds, accepted, generated.items });
     if (report) |path| {
-        const content = try std.json.Stringify.valueAlloc(allocator, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        const content = try std.json.Stringify.valueAlloc(allocator, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
         defer allocator.free(content);
         const f = try std.Io.Dir.cwd().createFile(io, path, .{});
         defer f.close(io);

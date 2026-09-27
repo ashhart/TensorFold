@@ -154,15 +154,18 @@ pub const Drafter = struct {
             try mx.evalMany(&.{h}, true);
         }
         const hidden = try s.rms(try s.slice(h, 1, 1, @intCast(n)), try d.weights.get("norm.weight"));
-        const logits = try s.cast(try d.head.apply(k, &s, .{ .x = hidden }), mx.f32t);
+        const logits = try d.head.apply(k, &s, .{ .x = hidden });
+        const ranked = try @import("gpu_sampling.zig").topk(k, &s, logits, 16);
         const projection = try s.cast(try (try d.weights.linear("candidate_selector.hidden_projection")).apply(k, &s, .{ .x = hidden }), mx.f32t);
-        try mx.evalMany(&.{ logits, projection }, false);
-        const values = mx.c.mlx_array_data_float32(logits);
+        try mx.evalMany(&.{ ranked[0], ranked[1], projection }, false);
+        const indices = mx.c.mlx_array_data_int32(ranked[0]);
+        const values = mx.c.mlx_array_data_float32(ranked[1]);
         var candidates: [15][16]sampling.Candidate = undefined;
         for (0..n - 1) |row| {
-            const top = try sampling.top(mx.allocator, values[row * 98592 ..][0..98592], 16);
-            defer mx.allocator.free(top);
-            for (top, 0..) |v, j| candidates[row][j] = .{ .id = if (v.id < 98304) v.id else v.id - 98304 + 248032, .value = v.value };
+            for (0..16) |j| {
+                const id = indices[row * 16 + j];
+                candidates[row][j] = .{ .id = if (id < 98304) id else id - 98304 + 248032, .value = values[row * 16 + j] };
+            }
         }
         return d.search(candidates[0 .. n - 1], mx.c.mlx_array_data_float32(projection)[0 .. (n - 1) * 256], anchor, @min(budget, 15), settings);
     }

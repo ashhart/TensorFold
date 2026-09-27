@@ -56,6 +56,7 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--mtp-drafts N` | Nemotron/Flash Next: chained MTP budget, default 3, maximum 15 |
 | `--no-drafts` | Nemotron/Flash Next: disable MTP and decode serially |
 | `--metal-simd` | Force the non-tensor Metal path for coverage on M5 |
+| `--metal-sampling` | Use the original fp32 Metal sampler instead of CPU f64 sampling |
 | `--temperature T` | Default 1; zero selects greedy decoding |
 | `--top-k N`, `--top-p P` | Defaults 20 and 0.95; top-k zero considers the full vocabulary |
 | `--seed N` | Override the default SHA-256-derived prompt seed |
@@ -113,9 +114,12 @@ The HTTP service, chat-template rendering, vision, and disk prefix caches are no
 of this native port. Attention cache
 commit currently concatenates the prefix, so long-context performance needs separate
 measurement. This is the native inference backend and completion CLI, not a replacement
-for every `tensorfold serve` feature. The native sampler currently uses CPU f64
-position-keyed sampling; the separate Python GPU sampling and radix top-k utilities
-have not yet been ported. Nemotron long-context attention currently uses MLX SDPA.
+for every `tensorfold serve` feature. Sampling defaults to CPU f64 position-keyed
+sampling. `--metal-sampling` selects the original fp32 GPU algorithm (24-bit hash
+uniforms and a 1,024-candidate cap); its output need not equal the f64 algorithm.
+Draft verification uses the selected sampler consistently. DFlash2 candidate ranking
+uses the original BF16 Metal radix top-k kernel. Nemotron uses tensor attention from
+10,000 visible keys on M5 and MLX SDPA otherwise.
 
 ## Additional model families
 
@@ -177,11 +181,31 @@ sampling and a story prompt with seed 5678, temperature 0.7, top-k 12, and top-p
 The GPU cache check and greedy DFlash2 run also passed in a ReleaseSafe build.
 
 Nemotron's four-token pass matched all **524,288 logits** from Python exactly; its
-32-token sampled MTP completion matched Python serial, and window/partial-commit
-continuation checks passed. Flash Next's one-token full pass matched all **248,320
-logits** exactly. Its 16-token MTP run completed; full draft/serial and long-context
-sparse-selection comparisons are still pending. Dense Qwen's forced SIMD tree/cache
-check passed on M5. Embedded kernels alone are not counted as execution coverage.
+32-token sampled MTP completion matched Python serial. Both tensor and forced SIMD
+window/partial-commit checks passed, including all 52 layer caches. Flash Next's
+one-token full pass matched all **248,320 logits** exactly. Its 16-token MTP output
+matched Python serial, and verified rows, rollback continuation and all 48 layer
+caches matched native serial. Dense Qwen's forced SIMD tree/cache check passed on M5.
+Embedded kernels alone are not counted as execution coverage.
+The forced SIMD DFlash2 path also produced the same 128 sampled tokens as SIMD serial
+with Metal sampling enabled. Nemotron's GPU-sampled MTP output matched the original
+Python GPU sampler and serial engine for the 32-token check.
+
+The build exposes reproducible coverage targets:
+
+```sh
+.zig-toolchain/zig build test -Doptimize=safe
+.zig-toolchain/zig build test-metal -Doptimize=safe -Dmetal-tensors=true
+.zig-toolchain/zig build test-models -Doptimize=safe
+```
+
+`test-metal` generates independent oracles through the original Python implementation
+and runs native comparisons: 44 sampling/top-k cases, three sparse-attention threshold
+cases with every row and rollback continuation checked, and six tensor-attention
+cases including 128-wide heads and 10K-token strided caches. Omit `-Dmetal-tensors=true`
+on M1–M4. `test-models` loads the downloaded models sequentially and checks every
+family's caches; it also forces the dense Qwen and Nemotron SIMD paths. It requires
+the large checkpoints and enough unified memory. See [COVERAGE.md](COVERAGE.md).
 
 `tools/native_reference.py --generate 128 --output FILE.json` creates the Python
 completion report for the default prompt and seed 1234. Use native `--seed 1234 --report`

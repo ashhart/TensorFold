@@ -15,6 +15,7 @@ pub fn seedFor(tokens: []const i32) u64 {
     return std.mem.readInt(u64, digest[0..8], .little) & 0x7fffffffffffffff;
 }
 pub const Sampling = struct {
+    metal: bool = false,
     seed: u64 = 0,
     temperature: f64 = 1,
     top_k: usize = 20,
@@ -86,9 +87,15 @@ pub fn top(allocator: std.mem.Allocator, values: []const f32, n: usize) ![]Candi
     }
     return result;
 }
-pub fn rows(s: *mx.Scope, logits: mx.Array, positions: []const i32, settings: Sampling) ![]i32 {
+pub fn rows(k: *mx.Kernels, s: *mx.Scope, logits: mx.Array, positions: []const i32, settings: Sampling) ![]i32 {
     const out = try mx.allocator.alloc(i32, positions.len);
     errdefer mx.allocator.free(out);
+    if (settings.metal) {
+        const ids = try @import("gpu_sampling.zig").sample(k, s, logits, positions, settings, null);
+        try mx.eval(ids);
+        for (out, 0..) |*v, i| v.* = @intCast(mx.c.mlx_array_data_uint32(ids)[i]);
+        return out;
+    }
     if (settings.temperature == 0) {
         const ids = try s.argmax(logits);
         try mx.eval(ids);

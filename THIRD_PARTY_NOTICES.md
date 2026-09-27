@@ -87,6 +87,12 @@ Flash Next's optional int8 and int4 KV caches (`families/qwen4_exp/cuda/kvcache.
   MLX and MLX-C (MIT, Copyright Apple Inc.) through their public C API.
 - `native/metal/` contains generated copies of TensorFold's existing Metal
   kernels, including the mlx-lm-derived DeltaNet arithmetic described above.
+- `native/ngram.zig` translates the Flash Next n-gram helpers described in
+  "Code adapted from transformers and mlx-vlm" above; the Apache-2.0 attribution
+  and license apply to this translation as well.
+- `native/nemotron.zig` and `native/flash.zig` port the upstream TensorFold
+  model hosts, following the mlx-lm and Qwen model definitions described above.
+  The generated Metal kernels remain the original TensorFold author's work.
 
 `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified `dflash/model_mlx.py` from
 [z-lab/dflash](https://github.com/z-lab/dflash), MIT License, Copyright © 2026 Z Lab.

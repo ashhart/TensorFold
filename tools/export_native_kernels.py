@@ -13,6 +13,7 @@ from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_glue, lane_tree, lan
 from tensorfold.kernels.qwen.dense.v1 import row_attention, simd_qmm
 from tensorfold.kernels.nemotron.lightning.v1 import kernels as nemotron, rows as nemotron_rows
 from tensorfold.kernels.qwen.flash_next.v1 import kernels as flash
+from tensorfold.engine import gpu_sampling, topk
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "native" / "metal"
@@ -53,11 +54,17 @@ def main():
             f'.header = @embedFile("metal/{key}.h"), .contiguous = {contiguous} }};'
         )
     try:
+        gpu_sampling._kernel = None
+        gpu_sampling._kernel_ids = None
+        topk._kernels.clear()
+        export("gpu_sample", gpu_sampling._get_kernel())
+        export("gpu_sample_ids", gpu_sampling._get_kernel_ids())
+        export("radix_topk", topk._kernel())
         for module, names in [
             (lane_qmm, ["xsum", "main", "main_tiled"]),
             (lane_glue, ["norm", "norm_nores", "gdn_pre", "gdn_post", "mlp_act"]),
             (lane_tree, ["tree", "replay"]),
-            (lane_attention, ["tail", "tree_merge", "partial", "partial_direct"]),
+            (lane_attention, ["tail", "tree_merge", "partial", "partial_direct", "partial_128", "partial_direct_128", "merge"]),
             (row_attention, ["partial", "merge"]),
         ]:
             module._kernels.clear()

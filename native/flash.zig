@@ -26,6 +26,17 @@ pub const Cache = struct {
         }
         return out;
     }
+    // Returned handles belong to the supplied scope, as do forward-pass records.
+    pub fn attentionPrefix(c: Cache, s: *mx.Scope, end: i32) !Cache {
+        if (end < 0 or end > c.offset) return error.InvalidCommit;
+        return .{
+            .a = try s.slice(c.a, 2, 0, end),
+            .b = try s.slice(c.b, 2, 0, end),
+            .raw = try s.slice(c.raw, 0, 0, end),
+            .pooled = if (c.pooled.ctx != null) try s.slice(c.pooled, 0, 0, @min(@divTrunc(end, 4), mx.dim(c.pooled, 0))) else mx.empty,
+            .offset = end,
+        };
+    }
 };
 pub const Pass = struct {
     scope: mx.Scope = .{},
@@ -323,10 +334,7 @@ pub const Model = struct {
                 next[i].a = try mx.retain(try p.scope.reshape(try p.scope.slice(rec.a, 0, n - 1, n), &.{ 3, 10240 }));
                 next[i].b = try mx.retain(try p.scope.reshape(try p.scope.slice(rec.b, 0, n - 1, n), &.{ 48, 128, 128 }));
             } else {
-                next[i].a = try mx.retain(try p.scope.slice(rec.a, 2, 0, end));
-                next[i].b = try mx.retain(try p.scope.slice(rec.b, 2, 0, end));
-                next[i].raw = try mx.retain(try p.scope.slice(rec.raw, 0, 0, end));
-                if (rec.pooled.ctx != null) next[i].pooled = try mx.retain(try p.scope.slice(rec.pooled, 0, 0, @min(@divTrunc(end, 4), mx.dim(rec.pooled, 0))));
+                next[i] = try (try rec.attentionPrefix(&p.scope, end)).clone();
             }
             if (i == 1) {
                 next[i].ple = try mx.retain(try p.scope.slice(rec.ple, 0, n, n + 9));
@@ -357,5 +365,48 @@ pub const Model = struct {
         // MTP residual streams are fed to the next chained step; its own final mixer
         // supplies the prediction, while target hidden states use the trunk mixer.
         return out;
+    }
+    pub fn checkAttention(io: std.Io, dir: []const u8) !void {
+        try mx.init();
+        defer mx.shutdown();
+        var m = Model{ .centered = false };
+        defer m.deinit();
+        var path: [4096]u8 = undefined;
+        try m.weights.loadFile(try std.fmt.bufPrint(&path, "{s}/arrays.safetensors", .{dir}), "", "");
+        const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/cases.json", .{dir}));
+        defer mx.allocator.free(bytes);
+        const Case = struct { key: []const u8, past: i32, pooled: i32 };
+        const cases = try std.json.parseFromSlice([]const Case, mx.allocator, bytes, .{});
+        defer cases.deinit();
+        const equal = @import("sampling_checks.zig").equal;
+        for (cases.value) |case| {
+            var s = mx.Scope{};
+            defer s.deinit();
+            const x = try m.weights.field(case.key, "x");
+            var cache = Cache{ .offset = case.past, .a = try m.weights.field(case.key, "a"), .b = try m.weights.field(case.key, "b"), .raw = try m.weights.field(case.key, "raw"), .pooled = if (case.pooled > 0) try m.weights.field(case.key, "pooled") else mx.empty };
+            var batch = Cache{};
+            const base = "model.layers.3.self_attn";
+            const out = try m.attention(&s, base, x, cache, &batch);
+            try equal(&s, out, try m.weights.field(case.key, "expected"));
+            try equal(&s, batch.pooled, try m.weights.field(case.key, "pooled_expected"));
+            for (0..8) |row| {
+                const j: i32 = @intCast(row);
+                const input = try s.slice(x, 0, j, j + 1);
+                var next = Cache{};
+                const serial = try m.attention(&s, base, input, cache, &next);
+                try equal(&s, serial, try s.slice(out, 0, j, j + 1));
+                if (row > 0) {
+                    const rollback = try batch.attentionPrefix(&s, case.past + j);
+                    var continued = Cache{};
+                    try equal(&s, serial, try m.attention(&s, base, input, rollback, &continued));
+                    try equal(&s, next.a, continued.a);
+                    try equal(&s, next.b, continued.b);
+                    try equal(&s, next.raw, continued.raw);
+                    if (next.pooled.ctx != null) try equal(&s, next.pooled, continued.pooled);
+                }
+                cache = next;
+            }
+        }
+        std.debug.print("PASS: {d} Flash sparse-boundary fixtures, all 8 rows, pooling and rollback continuations match exactly.\n", .{cases.value.len});
     }
 };

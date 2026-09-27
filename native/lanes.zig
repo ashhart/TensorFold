@@ -138,6 +138,28 @@ pub fn attention(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *con
     return (try k.run(s, src.lane_attention_tree_merge, &.{ a[0], a[1], a[2], b[0], b[1], b[2], dims }, &.{ ti("G", g), ti("D", d), ti("CK", 512) }, .{ hkv * 32, r, 1 }, .{ 32, 1, 1 }, &.{.{ .shape = &.{ 1, h, w, d } }}))[0];
 }
 
+/// Causal attention for the last query rows, including Nemotron's 128-wide heads.
+pub fn sdpa(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, scale: f32) !A {
+    const h = mx.dim(q, 1);
+    const w = mx.dim(q, 2);
+    const d = mx.dim(q, 3);
+    const hkv = mx.dim(keys, 1);
+    const len = mx.dim(keys, 2);
+    if ((d != 128 and d != 256) or w < 1 or w > 128 or w > len or @mod(h, hkv) != 0) return error.InvalidAttentionShape;
+    const g = @divExact(h, hkv);
+    const r = g * w;
+    const rp = @divTrunc(r + 15, 16) * 16;
+    const sga = @divExact(rp, 16);
+    const sg = @min(sga, 16);
+    var qp = try s.reshape(try s.transpose(try s.reshape(q, &.{ hkv, g, w, d }), &.{ 0, 2, 1, 3 }), &.{ hkv, r, d });
+    if (rp != r) qp = try s.cat(&.{ qp, try s.zeros(&.{ hkv, rp - r, d }, mx.bf16) }, 1);
+    qp = try s.contiguous(qp);
+    const nch = @divTrunc(len + 511, 512);
+    const dims = try s.ints(&.{ len, nch, w, 1, sga });
+    const part = try k.run(s, if (d == 128) src.lane_attention_partial_direct_128 else src.lane_attention_partial_direct, &.{ qp, keys, values, try s.scalar(scale), dims }, &.{ ti("G", g), ti("D", d), ti("SG", sg), ti("CK", 512), ti("TK", 64) }, .{ hkv * 32 * sg, nch, @divTrunc(sga + sg - 1, sg) }, .{ 32 * sg, 1, 1 }, &.{ .{ .shape = &.{hkv * nch * rp * d}, .dtype = mx.f32t }, .{ .shape = &.{hkv * nch * rp}, .dtype = mx.f32t }, .{ .shape = &.{hkv * nch * rp}, .dtype = mx.f32t } });
+    return (try k.run(s, src.lane_attention_merge, &.{ part[0], part[1], part[2], dims }, &.{ ti("G", g), ti("D", d) }, .{ hkv * 32, r, 1 }, .{ 32, 1, 1 }, &.{.{ .shape = &.{ 1, h, w, d } }}))[0];
+}
+
 fn rowAttention(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *const Tree) !A {
     const w: i32 = @intCast(t.parents.len);
     const h = mx.dim(q, 1);

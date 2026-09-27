@@ -11,11 +11,14 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--tokens", default="1,2,3,4")
+    p.add_argument("--tokens", help="Explicit prompt IDs, including for generation")
     p.add_argument("--generate", type=int, default=0)
     p.add_argument("--prompt", default="Write a short Python function that computes the Fibonacci sequence.")
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--temperature", type=float, default=1)
+    p.add_argument("--top-k", type=int, default=20)
+    p.add_argument("--top-p", type=float, default=.95)
+    p.add_argument("--metal-sampling", action="store_true")
     p.add_argument("--simd", action="store_true")
     args = p.parse_args()
     import mlx.core as mx
@@ -55,7 +58,8 @@ def main():
         forward = lambda ids: model(mx.array([ids], dtype=mx.int32), cache)
     else:
         raise ValueError(kind)
-    tokens = tokenizer.encode(args.prompt, add_special_tokens=False) if args.generate else [int(x) for x in args.tokens.split(",")]
+    tokens = ([int(x) for x in args.tokens.split(",")] if args.tokens else
+              tokenizer.encode(args.prompt, add_special_tokens=False) if args.generate else [1, 2, 3, 4])
     # Native and oracle prefill on the same fixed 16-token grid.
     for start in range(0, len(tokens), 16):
         logits = forward(tokens[start:start + 16])
@@ -65,12 +69,16 @@ def main():
         np.save(args.output, np.asarray(logits.astype(mx.float32)).reshape(-1, logits.shape[-1]))
         print(f"Saved {args.output}: {logits.shape}")
         return
-    settings = Sampling(args.seed, temperature=args.temperature)
+    settings = Sampling(args.seed, temperature=args.temperature, top_k=args.top_k, top_p=args.top_p)
     pos = len(tokens)
     result = []
     eos = (2, 11) if kind == "nemotron_h" else (248044, 248046)
     while len(result) < args.generate:
-        token = sample_rows(logits.reshape(-1, logits.shape[-1])[-1:], [pos], settings)[0] if args.temperature else int(mx.argmax(logits.reshape(-1, logits.shape[-1])[-1]).item())
+        if args.metal_sampling:
+            from tensorfold.engine.gpu_sampling import sample
+            token = int(sample(logits.reshape(-1, logits.shape[-1])[-1:], settings if args.temperature else None, [pos]).item())
+        else:
+            token = sample_rows(logits.reshape(-1, logits.shape[-1])[-1:], [pos], settings)[0] if args.temperature else int(mx.argmax(logits.reshape(-1, logits.shape[-1])[-1]).item())
         result.append(token)
         if token in eos:
             break

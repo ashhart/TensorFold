@@ -143,6 +143,10 @@ pub const Model = struct {
         const start = mx.dim(keys, 2) - r;
         for (0..@intCast(r)) |i| {
             const j: i32 = @intCast(i);
+            if (mx.tensor_units and start + j + 1 >= 10000) {
+                rows[i] = try @import("lanes.zig").sdpa(&m.kernels, s, try s.slice(q, 2, j, j + 1), try s.slice(keys, 2, 0, start + j + 1), try s.slice(values, 2, 0, start + j + 1), 0.08838834764831845);
+                continue;
+            }
             var out = mx.c.mlx_array_new();
             const rc = mx.c.mlx_fast_scaled_dot_product_attention(&out, try s.slice(q, 2, j, j + 1), try s.slice(keys, 2, 0, start + j + 1), try s.slice(values, 2, 0, start + j + 1), 0.08838834764831845, "", mx.empty, mx.empty, false, mx.stream);
             rows[i] = try s.result(rc, out);
