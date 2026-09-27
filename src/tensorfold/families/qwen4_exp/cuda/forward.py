@@ -122,9 +122,9 @@ class _MoECfg:
 class State:
     """Committed caches of one sequence (and of the MTP head's attention layer).
 
-    ``kv_dtype``: "bf16" (the default) or "int8", the keys and values of every attention layer stored as
-    int8 codes with one fp16 scale per 32 values (``kvcache.KVCache``). The indexer keys and pooled block
-    keys of the sparse path stay bf16 either way."""
+    ``kv_dtype``: "bf16" (the default), "int8" or "int4". Quantized keys and values are codes with one
+    fp16 scale per 32 values (``kvcache.KVCache``). The indexer keys and pooled block keys of the sparse
+    path stay bf16 either way."""
 
     def __init__(self, w: Weights, capacity: int, max_rows: int, kv_dtype: str = "bf16") -> None:
         c = w.cfg
@@ -327,13 +327,14 @@ def attn_block(layer: LayerW, w: Weights, cache, ikc, pooled, pos_dev: torch.Ten
     c = w.cfg
     a = layer.attn
     _mm(b.mixed[:R], a.proj, b.xs_mixed[:R], b.pa[:R], b)
+    bits = 0 if not cache.quantized else cache.bits
     glue.attn_prep(b.pa[:R], pos_dev, a.q_scale, a.k_scale, a.iq_scale, w.inv_freq, b.q, cache.k, cache.v, b.iq,
                    ikc, c.eps, q_heads=c.heads, kv_heads=c.kv_heads, head_dim=c.head_dim,
-                   index_heads=c.index_heads, index_dim=c.index_dim, ks=cache.ks, vs=cache.vs, kvq=cache.quantized)
+                   index_heads=c.index_heads, index_dim=c.index_dim, ks=cache.ks, vs=cache.vs, bits=bits)
     if b.attn.qsa:
         attn_mod.qsa_select(b.iq[:R], ikc, pooled, pos_dev, a.ik_scale, w.inv_freq, c.eps, b.attn, R)
     o = attn_mod.attention(b.q[:R], cache.k, cache.v, pos_dev, b.attn, R, c.head_dim ** -0.5, ks=cache.ks,
-                           vs=cache.vs, kvq=cache.quantized)
+                           vs=cache.vs, bits=bits)
     glue.attn_gate(o[:R], b.pa[:R], b.gated[:R], b.xs_gated[:R], q_heads=c.heads, head_dim=c.head_dim)
     return _out_proj(w, b, b.gated[:R], a.o, b.xs_gated[:R], R)
 

@@ -82,7 +82,7 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
-        kv = "" if self.kv_dtype == "bf16" else f"; int8 KV cache (fp16 scale per 32 values)"
+        kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {self.max_len}-token context{kv}; n-gram tables read in "
               f"{read_s:.1f}s; {captured} decode graphs captured", flush=True)
 
@@ -92,7 +92,7 @@ class FlashNextEngine:
 
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
-                             len(ids) if ids is not None else -1, total, int(self.kv_dtype == "int8")],
+                             len(ids) if ids is not None else -1, total, {"bf16": 0, "int8": 8, "int4": 4}[self.kv_dtype]],
                             dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)

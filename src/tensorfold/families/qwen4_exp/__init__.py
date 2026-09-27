@@ -66,7 +66,7 @@ def engine_settings(model: Any) -> dict[str, Any]:
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
 CUDA_QUANTIZATION = (4, 32)
 # the KV cache dtypes the CUDA engine can allocate (``--kv-dtype``): int8 is the quantized cache
-CUDA_KV_DTYPES = ("bf16", "int8")
+CUDA_KV_DTYPES = ("bf16", "int8", "int4")
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
@@ -79,8 +79,8 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     machine) the model is tensor parallel: heads, expert width and vocabulary split, fp32 partials summed in rank
     order. Start rank 1 first; rank 0 serves HTTP. ``no_drafts`` or ``mtp_drafts=0``: one token a round, the
     serial reference. A checkpoint without the MTP head serves only that reference, so it needs ``no_drafts``.
-    ``kv_dtype``: "bf16" (the default) or "int8", the attention caches quantized to 8 bits with one fp16 scale
-    per 32 values (1.88x smaller; see docs/recipes/qwen3.8-flash-next.md and docs/recipes/cuda.md).
+    ``kv_dtype``: "bf16" (the default), "int8" or "int4". Quantized attention caches store one fp16 scale
+    per 32 values (see docs/recipes/qwen3.8-flash-next.md).
     """
 
     if drafter:
