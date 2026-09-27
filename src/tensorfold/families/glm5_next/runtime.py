@@ -17,6 +17,7 @@ Drafts change speed only: every emitted token is the target's own sample.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -118,12 +119,19 @@ class GLMFlash:
         tokens = tokens.reshape(-1).astype(mx.uint32)
         self._absorb(self._raw[: int(tokens.shape[0])], tokens, cache[-1])
 
+    # TF_GLM_MTP_NORMED=1: the head reads the backbone's final-normed hidden row instead of the streams' mean before
+    # the norm (the CUDA engine found the head agrees more often that way; oMLX feeds the mean). Drafts only: every
+    # emitted token is still the target's sample, so either setting is exact.
+    mtp_normed = os.environ.get("TF_GLM_MTP_NORMED", "0") == "1"
+
     def _absorb(self, raw: mx.array, tokens: mx.array, mtp_cache: MTPCache) -> mx.array:
         """Rows (raw hidden [n, D], the tokens that follow them [n]) into the head; its output rows [n, D]."""
 
         if mtp_cache.drafted:
             mtp_cache.trim(mtp_cache.drafted)
             mtp_cache.drafted = 0
+        if self.mtp_normed:
+            raw = mx.fast.rms_norm(raw, self.model.norm, self.args.rms_norm_eps)
         return self.mtp(self.model, raw, tokens, mtp_cache, int(tokens.shape[0]) <= self.fused_rows)
 
     def _draft_draw(self, out: mx.array, sampling: Any, positions: Any) -> mx.array:

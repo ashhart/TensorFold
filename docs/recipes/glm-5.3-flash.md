@@ -331,16 +331,18 @@ step, a smaller head for drafts only, and verify trees with a second candidate a
 
 ## Apple Silicon (MLX)
 
-The same checkpoint on one Mac, through the serial engine with MTP drafts. Package:
-`src/tensorfold/families/glm5_next/` (`model.py` forward pass, `mtp.py` draft head, `runtime.py` what the engine
-serves); Metal kernels `v1` in `src/tensorfold/kernels/glm/flash/v1/`. Measured on two M3 Ultra Mac Studios, one
+The same checkpoint on one Mac, through the lane engine's family rounds (`engine/lane_family.py`, as Flash Next)
+with MTP drafts. Package: `src/tensorfold/families/glm5_next/` (`model.py` forward pass, `mtp.py` draft head,
+`runtime.py` what the engine drives: `hidden` / `head` / `keep_rows`, `speculate` / `settle` for the head, the
+load-time window check); Metal kernels `v1` in `src/tensorfold/kernels/glm/flash/v1/`. Measured on two M3 Ultra Mac Studios, one
 with 512 GB (MLX 0.32.0) and one with 256 GB (MLX 0.32.2). Contributed by Chad Hurley, following this recipe book.
 
 ```bash
 pip install "mlx>=0.32.2"          # on a 256 GB Mac, see the traps below
 tensorfold pull Vontra/GLM-5.3-Flash-MLX-4bit-MTP
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP                    # one MTP draft a round
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --mtp-drafts 4     # up to 4, depth from measured acceptance
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP                    # up to 3 MTP drafts a round, the depth
+                                                                      # from measured acceptance and window costs
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --mtp-drafts 1     # one draft a round
 ```
 
 The process holds about 170 GB and keeps its weights wired. Loading took 29 to 39 s from a warm file cache. The
@@ -385,7 +387,7 @@ Step times are the full model at 4,096 keys, medians of 18 steps, settings alter
 | The MoE block in five kernels (router reading the stored bf16 once, route + group, gate/up + SwiGLU, down, combine), a hyper-connection boundary in three, MLA's projections that read the same input stacked; all strategy B | 35.7 to 27.1 ms, logits unchanged |
 | `mx.async_eval` every 2 layers (`TF_GLM5_EVAL_EVERY`) | 27.2 to 22.7 ms |
 | The shared expert in kernels of its own that read only x, so it runs beside the latency-bound router | 1 / 2 / 4 rows 22.7 / 29.8 / 45.9 to 22.4 / 29.1 / 44.2 ms |
-| The draft depth from each draft position's own acceptance and the measured verify cost of each depth (`depth_for`) | the second chained draft lands 0.60 to 0.69 against 0.81 to 0.87 for the first, so the policy stays at one draft unless chained drafts land well |
+| The draft depth from each draft position's own acceptance and the measured verify cost of each depth (the lane engine's rule since 0.3.4, `window_costs` measured at load; `depth_for` before it) | the second chained draft lands 0.60 to 0.69 against 0.81 to 0.87 for the first, so the policy stays at one draft unless chained drafts land well |
 
 Kernels a token went from 3,578 to 1,197 (graph nodes 6,925 to 1,750). Everything in the table but the two ports is
 strategy B and left serial decoding's logits bit-identical. The two ports are strategy C: they set the decode
