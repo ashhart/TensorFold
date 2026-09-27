@@ -76,7 +76,7 @@ pub fn check(comptime M: type, m: *M) !void {
     return checkPrefixes(M, m, if (M == dense.Model) &.{ 0, 1, 15, 16, 17, 63, 64, 127, 128, 511, 512, 513 } else &.{ 0, 1, 15, 16, 17, 33 }, true);
 }
 pub fn checkLong(comptime M: type, m: *M) !void {
-    return checkPrefixes(M, m, if (M == flash.Model) &.{ 2051, 2063 } else &.{ 9999, 10007 }, false);
+    return checkPrefixes(M, m, if (M == flash.Model) &.{ 2044, 2051, 2063 } else &.{ 9999, 10007 }, false);
 }
 fn checkPrefixes(comptime M: type, m: *M, prefixes: []const usize, short: bool) !void {
     var rng = std.Random.DefaultPrng.init(0x4341434845);

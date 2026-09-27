@@ -23,9 +23,10 @@ Completion requires execution evidence, not just source export or a passing smok
 - [x] Audit original runtime optimizations (reduced draft vocabulary, queued MTP,
   stacked SIMD projections), documenting production choices and any remaining behavior
   that needs a native implementation or an independent execution check.
-- [ ] Close the additional scheduler gaps identified by the audit: early MTP speculation
-  and accepted-state reuse, adaptive draft depth, pipelined serial decode and attention
-  buffer reuse. Preserve the bounded PLE memory strategy when evaluating Flash paths.
+- [x] Early MTP speculation/accepted-state reuse and adaptive draft depth, with independent
+  original-policy fixtures and real-model batch/serial cache checks.
+- [ ] Finish pipelined serial decode, GPU proposal handoff and attention buffer reuse.
+  Preserve the bounded PLE memory strategy when evaluating Flash paths.
 - [ ] Final matched end-to-end benchmarks against the original Python engines: same
   checkpoints, prompts, seeds, sampling and token counts, serial and drafting, repeated
   runs, cold process/load/prefill/decode/total breakdown and token parity. Document any
@@ -172,3 +173,30 @@ New milestone evidence and any discovered failures will be recorded below.
   complete kernel execution coverage. Early speculation/state reuse, adaptive depth,
   serial pipelining and attention-buffer reuse still need native work or an explicitly
   justified memory constraint. Final benchmarks and the README comparison remain open.
+
+## Early speculation and adaptive-depth milestone
+
+- Native target samples feed batched MTP before the host reads verification results;
+  only the accepted prefix and its last state/draw survive for the next chain. The
+  original adaptive-depth policy uses native window/step calibration and measured
+  acceptance/cost updates. Both late and fixed-depth diagnostic paths remain available.
+- All 150 real-model serial/MTP comparisons pass, including 84 exact early/late and
+  queued/host proposal-stream comparisons. Twelve adaptive runs preserve serial output.
+  All 414 real-checkpoint MTP accepted-prefix/cache/continuation checks pass through 10K.
+- Original Python policy methods supply 12,288 passing depth decisions and 360 passing
+  sampling-position/retained-row fixtures. Corrected draft noise from P+2 to P+1 for
+  the first proposal after pending token P. Target verification had protected final
+  output, but the wrong key could lower draft acceptance.
+- Fixed Flash sparse rollback retaining pooled keys below the pooling threshold. Its
+  MTP hidden projection now splits 64 stream rows into row-exact calls. The original
+  Python MTP matmul choices differ; RUNTIME_AUDIT.md records those configurations.
+- All 121 shared CPU/Metal fixtures, seventeen host tests and 566 allocation-failure
+  points pass; retained MLX memory is zero after ownership/error tests.
+- Flash's full-target long-cache suite now includes the 2,044-token crossing window.
+  All 48 accepted-prefix/cache/continuation comparisons pass at 2,044/2,051/2,063 tokens.
+- Full-target Python parity passes again after integration: Nemotron at 10,007 tokens
+  (917,504 final-block logits) and Flash at 2,051 (744,960 logits). Every logit and all
+  sixteen continuation IDs match in serial and early-MTP modes, with fifteen drafts
+  and context copies disabled.
+- GPU proposal handoff, pipelined serial decode and attention buffer reuse remain,
+  followed by original-engine benchmarks and the README comparison table.

@@ -1,6 +1,6 @@
 """Verify full/cut draft vocabularies and queued/unqueued MTP with real checkpoints.
 
-Target IDs must match serial in every mode. Queuing must also preserve the complete
+Target IDs must match serial in every mode. Queuing and early speculation must preserve the complete
 proposal stream and acceptance counts, so target rejection cannot conceal an error.
 Runs one full model process at a time. This is correctness coverage, not a benchmark.
 """
@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--family", choices=MODELS)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    checked, queued_pairs = 0, 0
+    checked, schedule_pairs = 0, 0
 
     def run(label, common, options):
         report = args.output / (label + ".json")
@@ -56,28 +56,45 @@ def main():
                 for budget in (1, 3, 15):
                     for reduced in (False, True):
                         vocabulary = "cut" if reduced else "full"
-                        options = ["--mtp-drafts", str(budget)]
+                        options = ["--mtp-drafts", str(budget), "--fixed-drafts"]
                         if not reduced:
                             options.append("--full-draft-vocab")
                         plain = None
-                        for queued in ([False, True] if sampler != "cpu" else [False]):
-                            label = f"{prefix}-{budget}-{vocabulary}-{'queued' if queued else 'host'}"
-                            result = run(label, common, options + ([] if queued else ["--no-queued-drafts"]))
+                        modes = [(False, False)]
+                        if sampler != "cpu":
+                            modes += [(True, False), (True, True)]
+                            if budget == 3:
+                                modes.append((False, True))
+                        for queued, early in modes:
+                            label = f"{prefix}-{budget}-{vocabulary}-{'queued' if queued else 'host'}-{'early' if early else 'late'}"
+                            result = run(label, common, options + ([] if queued else ["--no-queued-drafts"])
+                                         + ([] if early else ["--no-early-mtp"]))
                             assert result["prompt_tokens"] == serial["prompt_tokens"], label
                             assert result["tokens"] == serial["tokens"], label
                             assert result["draft_vocab_size"] == (cut_size if reduced else full_size), label
                             assert result["queued_drafts"] == queued, label
+                            assert result["early_mtp"] == early, label
+                            assert result["adaptive_drafts"] is False, label
                             assert result["context_copy"] is False, label
                             checked += 1
-                            if queued:
+                            if plain is not None:
                                 for field in ("proposal_sha256", "accepted_drafts", "rounds"):
                                     assert result[field] == plain[field], (label, field)
-                                queued_pairs += 1
+                                schedule_pairs += 1
                             else:
                                 plain = result
                             print(f"PASS {label}: {len(result['tokens'])} target IDs"
-                                  + (" and exact proposal stream" if queued else ""), flush=True)
-    print(f"PASS: {checked} serial/MTP comparisons; {queued_pairs} queued proposal comparisons", flush=True)
+                                  + (" and exact proposal stream" if queued or early else ""), flush=True)
+                for budget in ([3, 15] if sampler == "metal" else [3]):
+                    label = f"{prefix}-{budget}-adaptive"
+                    result = run(label, common, ["--mtp-drafts", str(budget)])
+                    assert result["tokens"] == serial["tokens"], label
+                    assert result["adaptive_drafts"] is True and result["calibration_seconds"] > 0, label
+                    counts = result["draft_depth_counts"]
+                    assert sum(counts[1:budget + 1]) == result["rounds"] and not any(counts[budget + 1:]), label
+                    checked += 1
+                    print(f"PASS {label}: target IDs exact; measured draft depths {counts}", flush=True)
+    print(f"PASS: {checked} serial/MTP comparisons; {schedule_pairs} exact scheduling comparisons", flush=True)
 
 
 if __name__ == "__main__":

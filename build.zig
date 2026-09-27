@@ -61,6 +61,16 @@ pub fn build(b: *std.Build) void {
     vocab_checks.addArgs(&.{ "check-draft-vocab", "build/native-checks/draft-vocab" });
     vocab_checks.step.dependOn(&vocab_fixture.step);
     b.step("test-draft-vocab", "Compare every original draft ID and quantized head row against Python").dependOn(&vocab_checks.step);
+    const depth_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_depth_fixtures.py", "build/native-checks/draft-depth.json" });
+    const depth_checks = b.addRunArtifact(exe);
+    depth_checks.addArgs(&.{ "check-draft-depth", "build/native-checks/draft-depth.json" });
+    depth_checks.step.dependOn(&depth_fixture.step);
+    b.step("test-draft-depth", "Compare native adaptive depth decisions with original Python policy").dependOn(&depth_checks.step);
+    const position_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_mtp_position_fixtures.py", "build/native-checks/mtp-positions" });
+    const position_checks = b.addRunArtifact(exe);
+    position_checks.addArgs(&.{ "check-mtp-positions", "build/native-checks/mtp-positions" });
+    position_checks.step.dependOn(&position_fixture.step);
+    b.step("test-mtp-positions", "Compare sampling positions and retained rows with original Python MTP scheduling").dependOn(&position_checks.step);
     for ([_][]const u8{ "sampling", "sparse", "attention", "ple_norm" }) |kind| {
         if (std.mem.eql(u8, kind, "attention") and !tensor_tests) continue;
         const dir = b.fmt("build/native-checks/{s}", .{kind});
@@ -79,6 +89,19 @@ pub fn build(b: *std.Build) void {
     const mtp_family = b.option([]const u8, "mtp-family", "Restrict MTP runtime checks to nemotron or flash");
     if (mtp_family) |family| mtp_runtime.addArgs(&.{ "--family", family });
     b.step("test-mtp-runtime", "Compare full/cut vocabulary and queued/host MTP proposal streams and target output").dependOn(&mtp_runtime.step);
+    var state_previous: ?*std.Build.Step = null;
+    for ([_][]const u8{ "nemotron", "flash" }, [_][]const u8{ "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP" }, 0..) |family, name, index| {
+        if (mtp_family != null and !std.mem.eql(u8, family, mtp_family.?)) continue;
+        for (0..if (index == 0) @as(usize, 2) else 1) |backend| {
+            const check = b.addRunArtifact(exe);
+            check.addArgs(&.{ "run", b.fmt("{s}/{s}", .{ model_root, name }), "--check-mtp-state" });
+            if (backend == 1) check.addArg("--metal-simd");
+            if (state_previous) |step| check.step.dependOn(step);
+            state_previous = &check.step;
+        }
+    }
+    const state_tests = b.step("test-mtp-state", "Compare batched MTP, every prefix and continuation through 10K context");
+    if (state_previous) |step| state_tests.dependOn(step);
     const simd_dir = b.addSystemCommand(&.{ "mkdir", "-p", "build/native-checks/simd-reference" });
     const simd_model = b.fmt("{s}/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", .{model_root});
     const simd_options = &.{ "--prompt", "Write a short Python function that computes the Fibonacci sequence.", "--seed", "5678", "--temperature", "0", "--top-k", "12", "--top-p", "0.8" };
@@ -146,6 +169,7 @@ pub fn build(b: *std.Build) void {
                     const draft_run = b.addRunArtifact(exe);
                     draft_run.addArgs(common);
                     if (family == 0) draft_run.addArgs(&.{ "--drafter", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}) }) else draft_run.addArgs(&.{ "--mtp-drafts", budget });
+                    if (family != 0) draft_run.addArg("--fixed-drafts");
                     if (backend == 1) draft_run.addArg("--metal-simd");
                     if (scenario == 1) draft_run.addArg("--metal-sampling");
                     draft_run.addArgs(&.{ "--report", report });
@@ -226,6 +250,7 @@ pub fn build(b: *std.Build) void {
                     if (drafts == 1) check.addArg("--no-copy");
                     if (family == 0 and drafts == 1) check.addArgs(&.{ "--drafter", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}) });
                     if (family > 0) check.addArgs(if (drafts == 0) &.{"--no-drafts"} else &.{ "--mtp-drafts", "15" });
+                    if (family > 0 and drafts == 1) check.addArg("--fixed-drafts");
                     check.step.dependOn(long_prior);
                     const logits = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare", b.fmt("{s}-python.npy", .{base}), b.fmt("{s}-{s}.npy", .{ base, suffix }) });
                     logits.step.dependOn(&check.step);

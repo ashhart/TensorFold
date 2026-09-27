@@ -80,6 +80,12 @@ pub const Model = struct {
         return m.lin(s, try std.fmt.bufPrint(&buf, "{s}.{s}", .{ base, suffix }), x);
     }
     pub fn forward(m: *Model, tokens: []const i32) !Pass {
+        var p = try m.forwardQueued(tokens);
+        errdefer p.deinit();
+        try mx.eval(p.logits);
+        return p;
+    }
+    pub fn forwardQueued(m: *Model, tokens: []const i32) !Pass {
         if (tokens.len == 0 or tokens.len > 16) return error.InvalidLaneWidth;
         var p = Pass{};
         errdefer p.deinit();
@@ -111,7 +117,6 @@ pub const Model = struct {
         }
         p.hidden = x;
         p.logits = try m.lin(s, "lm_head", x);
-        try mx.eval(p.logits);
         return p;
     }
     fn addNorm(m: *Model, s: *mx.Scope, h: A, delta: A, nw: A) ![5]A {
@@ -194,6 +199,8 @@ pub const Model = struct {
         return m.draftStepArray(s, hidden, try s.ints(&.{token}), cache, false);
     }
     pub fn draftStepArray(m: *Model, s: *mx.Scope, hidden: A, token: A, cache: *Cache, queued: bool) !A {
+        const rows = mx.dim(hidden, 0);
+        if (rows < 1 or rows > 16 or mx.c.mlx_array_size(token) != @as(usize, @intCast(rows))) return error.InvalidDraftRows;
         const e = try m.norm(s, try m.weights.embedArray(s, "backbone.embeddings", token), "mtp.layers.0.enorm");
         const h = try m.norm(s, hidden, "mtp.layers.0.hnorm");
         var x = try m.lin(s, "mtp.layers.0.eh_proj", try s.cat(&.{ e, h }, -1));
@@ -206,6 +213,12 @@ pub const Model = struct {
         try mx.replace(&cache.b, record.b);
         return out[1];
     }
+    pub fn draftPrefix(s: *mx.Scope, cache: Cache, rows: usize, keep: usize) !Cache {
+        if (rows == 0 or keep > rows or rows > @as(usize, @intCast(mx.dim(cache.a, 2)))) return error.InvalidCommit;
+        const end = mx.dim(cache.a, 2) - @as(i32, @intCast(rows - keep));
+        if (end == 0) return .{};
+        return (Cache{ .a = try s.slice(cache.a, 2, 0, end), .b = try s.slice(cache.b, 2, 0, end) }).clone();
+    }
     pub fn head(m: *Model, s: *mx.Scope, h: A) !A {
         return m.lin(s, "lm_head", h);
     }
@@ -213,4 +226,5 @@ pub const Model = struct {
         return m.lin(s, if (m.weights.has("draft_ids")) "draft_lm_head" else "lm_head", h);
     }
     pub const draft_vocabulary = @import("draft_vocab.zig").data.nemotron;
+    pub const draft_prior = &@import("draft_depth.zig").nemotron_prior;
 };

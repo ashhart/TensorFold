@@ -24,9 +24,24 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var copy_enabled = true;
     var reduced_vocab = true;
     var queued_drafts = true;
+    var early_mtp = true;
+    var check_mtp_state = false;
+    var adaptive_drafts = true;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         const key = args[i];
+        if (std.mem.eql(u8, key, "--fixed-drafts")) {
+            adaptive_drafts = false;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--check-mtp-state")) {
+            check_mtp_state = true;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--no-early-mtp")) {
+            early_mtp = false;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--full-draft-vocab")) {
             reduced_vocab = false;
             continue;
@@ -76,6 +91,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         i += 1;
     }
     if (drafts > 15) return error.InvalidDraftBudget;
+    if (check_mtp_state and drafts == 0) return error.InvalidDraftBudget;
     try settings.validate();
     try mx.init();
     defer mx.shutdown();
@@ -94,6 +110,14 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     }
     if (m.mtp and reduced_vocab) try @import("draft_vocab.zig").install(&m.weights, M.draft_vocabulary, M.vocab, 8);
     const draft_ids = m.weights.arrays.get("draft_ids");
+    if (check_mtp_state) return @import("mtp_checks.zig").check(M, &m);
+    var depth = try @import("draft_depth.zig").Adaptive.init(drafts, M.draft_prior);
+    var calibration_seconds: f64 = 0;
+    if (adaptive_drafts and m.mtp) {
+        const calibration_timer = Stopwatch.init(io);
+        try @import("mtp_calibration.zig").measure(M, &m, io, &depth, settings);
+        calibration_seconds = @as(f64, @floatFromInt(calibration_timer.read())) / 1e9;
+    }
     if (warm) {
         var p = try m.forward(&.{42});
         defer p.deinit();
@@ -160,9 +184,21 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     defer history.deinit(a);
     var accepted: usize = 0;
     var rounds: usize = 0;
+    var depth_counts: [16]usize = @splat(0);
     var proposal_hash = std.crypto.hash.sha2.Sha256.init(.{});
+    const Pipeline = @import("mtp_pipeline.zig").Pipeline(M);
+    var pipeline = Pipeline{};
+    defer pipeline.deinit();
+    const early = early_mtp and m.mtp and settings.metal;
+    if (early and max_tokens > 1 and !M.eos(pending)) {
+        var s = mx.Scope{};
+        defer s.deinit();
+        pipeline = try Pipeline.prepare(&m, &s, head_cache, last, pending, m.position, settings);
+    }
     if (max_tokens > 0) try generated.append(a, @intCast(pending));
     while (generated.items.len < max_tokens and !M.eos(pending)) {
+        const round_timer = Stopwatch.init(io);
+        var neural_proposed: usize = 0;
         var stage: []const u8 = "draft proposals";
         var proposal: usize = 0;
         errdefer std.debug.print("Decode failed at round {d}, position {d}, stage {s}, proposal {d}\n", .{ rounds, m.position, stage, proposal });
@@ -173,11 +209,24 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             history.clearRetainingCapacity();
             try history.appendSlice(a, tokens.items);
             for (generated.items) |id| try history.append(a, @intCast(id));
-            const budget = @min(drafts, max_tokens - generated.items.len);
+            const remaining = max_tokens - generated.items.len;
+            // Python chooses the initial depth before committing the first token.
+            const budget = if (adaptive_drafts) depth.choose(remaining + @intFromBool(rounds == 0)) else @min(drafts, remaining);
             const copy = @import("copy.zig").propose(history.items, budget);
             if (copy_enabled and copy.len == budget and budget > 0) {
                 @memcpy(window[1..][0..budget], copy.tokens[0..budget]);
                 n += budget;
+            } else if (early) {
+                var scope = mx.Scope{};
+                defer scope.deinit();
+                const chain = try pipeline.propose(&m, &scope, budget, m.position, settings, queued_drafts);
+                try mx.eval(chain);
+                for (mx.c.mlx_array_data_uint32(chain)[0..budget]) |id| {
+                    window[n] = @intCast(id);
+                    n += 1;
+                    if (M.eos(@intCast(id))) break;
+                }
+                neural_proposed = n - 1;
             } else {
                 var scope = mx.Scope{};
                 defer scope.deinit();
@@ -190,7 +239,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
                     for (0..budget) |j| {
                         proposal = j;
                         dh = try m.draftStepArray(&scope, dh, token, &dc, true);
-                        token = try @import("gpu_sampling.zig").sample(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 2}, settings, draft_ids);
+                        token = try @import("gpu_sampling.zig").sample(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 1}, settings, draft_ids);
                         proposed[j] = token;
                     }
                     // One host synchronization for the entire dependent proposal chain.
@@ -205,23 +254,36 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
                 } else for (0..budget) |j| {
                     proposal = j;
                     dh = try m.draftStep(&scope, dh, window[j], &dc);
-                    const ids = try sampling.rowsMapped(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 2}, settings, draft_ids);
+                    const ids = try sampling.rowsMapped(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 1}, settings, draft_ids);
                     defer mx.allocator.free(ids);
                     window[n] = ids[0];
                     n += 1;
                     if (M.eos(ids[0])) break;
                 }
+                neural_proposed = n - 1;
             }
         }
         stage = "target verification";
         const width = [_]u8{@intCast(n)};
         proposal_hash.update(&width);
         proposal_hash.update(std.mem.sliceAsBytes(window[0..n]));
-        var p = try m.forward(window[0..n]);
+        var p = try m.forwardQueued(window[0..n]);
         defer p.deinit();
         var positions: [16]i32 = undefined;
         for (0..n) |j| positions[j] = m.position + @as(i32, @intCast(j)) + 1;
-        const ids = try sampling.rows(&m.kernels, &p.scope, p.logits, positions[0..n], settings);
+        var speculation: ?Pipeline.Speculation = null;
+        defer if (speculation) |*spec| spec.deinit();
+        const ids = if (early) blk: {
+            const target = try @import("gpu_sampling.zig").sample(&m.kernels, &p.scope, p.logits, positions[0..n], settings, null);
+            speculation = try pipeline.speculate(&m, &p.scope, p.hidden, target, m.position, settings);
+            // Submit the target draw and all first MTP drafts together, then make
+            // one host read. Rejected MTP rows are trimmed after acceptance.
+            const values = try p.scope.cat(&.{ target, speculation.?.firsts }, 0);
+            try mx.eval(values);
+            const out_ids = try mx.allocator.alloc(i32, n);
+            for (out_ids, 0..) |*id, j| id.* = @intCast(mx.c.mlx_array_data_uint32(values)[j]);
+            break :blk out_ids;
+        } else try sampling.rows(&m.kernels, &p.scope, p.logits, positions[0..n], settings);
         defer mx.allocator.free(ids);
         var parents: [16]i32 = undefined;
         for (0..n) |j| parents[j] = @as(i32, @intCast(j)) - 1;
@@ -231,13 +293,20 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         accepted += result.accepted;
         pending = result.pending;
         stage = "draft cache commit";
-        if (m.mtp) for (0..keep) |j| {
+        if (early) {
+            if (!result.stop) try pipeline.settle(&p.scope, speculation.?, keep);
+            try mx.replace(&last, try p.scope.slice(p.hidden, 0, @intCast(keep - 1), @intCast(keep)));
+        } else if (m.mtp) for (0..keep) |j| {
             _ = try m.draftStep(&p.scope, last, window[j], &head_cache);
             try mx.replace(&last, try p.scope.slice(p.hidden, 0, @intCast(j), @intCast(j + 1)));
         };
         if (!m.mtp) try mx.replace(&last, try p.scope.slice(p.hidden, 0, @intCast(keep - 1), @intCast(keep)));
         stage = "target cache commit";
         try m.commit(&p, keep);
+        if (neural_proposed > 0) {
+            depth_counts[neural_proposed] += 1;
+            if (adaptive_drafts) try depth.observe(neural_proposed, result.accepted, @as(f64, @floatFromInt(round_timer.read())) / 1e6);
+        }
         rounds += 1;
         if (result.stop) break;
     }
@@ -259,7 +328,31 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         var active: usize = 0;
         try mx.check(mx.c.mlx_get_peak_memory(&peak));
         try mx.check(mx.c.mlx_get_active_memory(&active));
-        const bytes = try std.json.Stringify.valueAlloc(a, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .draft_vocab_size = if (draft_ids) |ids| mx.c.mlx_array_size(ids) else @as(usize, M.vocab), .queued_drafts = m.mtp and queued_drafts and settings.metal, .proposal_sha256 = std.fmt.bytesToHex(proposal_digest, .lower), .prefill_seconds = prefill, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        const bytes = try std.json.Stringify.valueAlloc(a, .{
+            .prompt_tokens = tokens.items,
+            .tokens = generated.items,
+            .text = text,
+            .seed = settings.seed,
+            .temperature = settings.temperature,
+            .top_k = settings.top_k,
+            .top_p = settings.top_p,
+            .metal_sampling = settings.metal,
+            .context_copy = copy_enabled,
+            .draft_vocab_size = if (draft_ids) |ids| mx.c.mlx_array_size(ids) else @as(usize, M.vocab),
+            .queued_drafts = m.mtp and queued_drafts and settings.metal,
+            .early_mtp = early,
+            .adaptive_drafts = adaptive_drafts and m.mtp,
+            .draft_depth_counts = depth_counts,
+            .calibration_seconds = calibration_seconds,
+            .proposal_sha256 = std.fmt.bytesToHex(proposal_digest, .lower),
+            .prefill_seconds = prefill,
+            .decode_seconds = seconds,
+            .rounds = rounds,
+            .accepted_drafts = accepted,
+            .peak_mlx_bytes = peak,
+            .active_mlx_bytes = active,
+            .token_sha256 = std.fmt.bytesToHex(digest, .lower),
+        }, .{});
         defer a.free(bytes);
         const f = try std.Io.Dir.cwd().createFile(io, file, .{});
         defer f.close(io);

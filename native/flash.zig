@@ -33,7 +33,9 @@ pub const Cache = struct {
             .a = try s.slice(c.a, 2, 0, end),
             .b = try s.slice(c.b, 2, 0, end),
             .raw = try s.slice(c.raw, 0, 0, end),
-            .pooled = if (c.pooled.ctx != null) try s.slice(c.pooled, 0, 0, @min(@divTrunc(end, 4), mx.dim(c.pooled, 0))) else mx.empty,
+            // A rejected window may have crossed the sparse threshold. Below it,
+            // serial decoding has no pooled cache, including on full rollback.
+            .pooled = if (@divTrunc(end, 4) > 512 and c.pooled.ctx != null) try s.slice(c.pooled, 0, 0, @min(@divTrunc(end, 4), mx.dim(c.pooled, 0))) else mx.empty,
             .offset = end,
         };
     }
@@ -314,6 +316,12 @@ pub const Model = struct {
         return out[0];
     }
     pub fn forward(m: *Model, tokens: []const i32) !Pass {
+        var p = try m.forwardQueued(tokens);
+        errdefer p.deinit();
+        try mx.eval(p.logits);
+        return p;
+    }
+    pub fn forwardQueued(m: *Model, tokens: []const i32) !Pass {
         if (tokens.len == 0 or tokens.len > 16) return error.InvalidLaneWidth;
         var p = Pass{ .count = tokens.len };
         errdefer p.deinit();
@@ -331,7 +339,6 @@ pub const Model = struct {
         }
         p.hidden = h;
         p.logits = try m.head(s, h);
-        try mx.eval(p.logits);
         return p;
     }
     pub fn head(m: *Model, s: *mx.Scope, h: A) !A {
@@ -348,6 +355,7 @@ pub const Model = struct {
         return m.weights.linear(&m.kernels, s, if (m.weights.has("draft_ids")) "draft_lm_head" else "lm_head", mixed[0], true);
     }
     pub const draft_vocabulary = @import("draft_vocab.zig").data.flash;
+    pub const draft_prior = &@import("draft_depth.zig").flash_prior;
     pub fn commit(m: *Model, p: *Pass, keep: usize) !void {
         if (keep == 0 or keep > p.count) return error.InvalidCommit;
         const n: i32 = @intCast(keep);
@@ -381,10 +389,22 @@ pub const Model = struct {
         return m.draftStepArray(s, hidden, try s.ints(&.{token}), cache, false);
     }
     pub fn draftStepArray(m: *Model, s: *mx.Scope, hidden: A, token: A, cache: *Cache, queued: bool) !A {
+        const rows = mx.dim(hidden, 0);
+        if (rows < 1 or rows > 16 or mx.c.mlx_array_size(token) != @as(usize, @intCast(rows))) return error.InvalidDraftRows;
         const e = try m.lin(s, "mtp", "fc_embedding", try m.centeredNorm(s, try m.weights.embedArray(s, "model.embed_tokens", token), "mtp.pre_fc_norm_embedding", 2560));
         const hn = try m.centeredNorm(s, hidden, "mtp.pre_fc_norm_hidden", 10240);
-        const hs = try m.lin(s, "mtp", "fc_hidden", try s.reshape(hn, &.{ 4, 2560 }));
-        const h = try s.reshape(try s.binary(mx.c.mlx_add, hs, e), &.{ 1, 10240 });
+        const streams = try s.reshape(hn, &.{ rows * 4, 2560 });
+        // Four residual streams per token; keep every projection on the row-exact
+        // <=16-row kernel even when a speculative window has sixteen tokens.
+        var parts: [4]A = undefined;
+        var count: usize = 0;
+        var begin: i32 = 0;
+        while (begin < rows * 4) : (begin += 16) {
+            parts[count] = try m.lin(s, "mtp", "fc_hidden", try s.slice(streams, 0, begin, @min(begin + 16, rows * 4)));
+            count += 1;
+        }
+        const hs = try s.reshape(try s.cat(parts[0..count], 0), &.{ rows, 4, 2560 });
+        const h = try s.reshape(try s.binary(mx.c.mlx_add, hs, try s.reshape(e, &.{ rows, 1, 2560 })), &.{ rows, 10240 });
         var rec = Cache{};
         const out = try m.layer(s, "mtp.layers.0", h, cache.*, &rec, false);
         if (!queued) try mx.eval(out);
@@ -395,6 +415,12 @@ pub const Model = struct {
         // MTP residual streams are fed to the next chained step; its own final mixer
         // supplies the prediction, while target hidden states use the trunk mixer.
         return out;
+    }
+    pub fn draftPrefix(s: *mx.Scope, cache: Cache, rows: usize, keep: usize) !Cache {
+        if (rows == 0 or keep > rows or rows > @as(usize, @intCast(cache.offset))) return error.InvalidCommit;
+        const end = cache.offset - @as(i32, @intCast(rows - keep));
+        if (end == 0) return .{};
+        return (try cache.attentionPrefix(s, end)).clone();
     }
     pub fn checkAttention(io: std.Io, dir: []const u8) !void {
         try mx.init();

@@ -3,7 +3,30 @@ const std = @import("std");
 const mx = @import("mlx.zig");
 const cp = @import("checkpoint.zig");
 const sources = @import("kernel_sources.zig");
-const Kind = enum { scope, store, dense_weights, indexed, unindexed, draft_vocab, kernels };
+const Kind = enum { scope, store, dense_weights, indexed, unindexed, draft_vocab, mtp_pipeline, kernels };
+
+// A tiny real-MLX model isolates scheduler ownership from full checkpoint loading.
+// Numerical model equivalence is checked separately by test-mtp-state.
+const PipelineFixture = struct {
+    pub const DraftCache = @import("model.zig").Cache;
+    weights: cp.Store,
+    kernels: mx.Kernels,
+    pub fn draftStepArray(m: *@This(), s: *mx.Scope, hidden: mx.Array, tokens: mx.Array, cache: *DraftCache, queued: bool) !mx.Array {
+        const out = try s.binary(mx.c.mlx_add, hidden, try m.weights.embedArray(s, "projection", tokens));
+        const keys = if (cache.a.ctx != null) try s.cat(&.{ cache.a, out }, 0) else out;
+        if (!queued) try mx.eval(keys);
+        try mx.replace(&cache.a, keys);
+        try mx.replace(&cache.b, keys);
+        return out;
+    }
+    pub fn draftHead(m: *@This(), s: *mx.Scope, hidden: mx.Array) !mx.Array {
+        return m.weights.linear(&m.kernels, s, "projection", hidden, true);
+    }
+    pub fn draftPrefix(s: *mx.Scope, cache: DraftCache, rows: usize, keep: usize) !DraftCache {
+        const end = mx.dim(cache.a, 0) - @as(i32, @intCast(rows - keep));
+        return (DraftCache{ .a = try s.slice(cache.a, 0, 0, end), .b = try s.slice(cache.b, 0, 0, end) }).clone();
+    }
+};
 
 fn exercise(a: std.mem.Allocator, kind: Kind, io: std.Io, dir: []const u8) !void {
     const previous = mx.allocator;
@@ -30,6 +53,27 @@ fn exercise(a: std.mem.Allocator, kind: Kind, io: std.Io, dir: []const u8) !void
             try std.testing.expectEqual(@as(i32, 8), mx.dim(try store.get("weight0"), 0));
         },
         .dense_weights => try @import("weights.zig").Weights.checkOwnedInsertions(),
+        .mtp_pipeline => {
+            var m = PipelineFixture{ .weights = cp.Store.init(64), .kernels = mx.Kernels.init() };
+            defer m.weights.deinit();
+            defer m.kernels.deinit();
+            var path: [4096]u8 = undefined;
+            try m.weights.load(io, try std.fmt.bufPrint(&path, "{s}/indexed", .{dir}), "");
+            const settings = @import("sampling.zig").Sampling{ .metal = true, .seed = 1234, .temperature = 0.7 };
+            const P = @import("mtp_pipeline.zig").Pipeline(PipelineFixture);
+            var pipeline = try P.prepare(&m, &s, .{}, try s.zeros(&.{ 1, 64 }, mx.bf16), 7, 0, settings);
+            defer pipeline.deinit();
+            try std.testing.expectError(error.InvalidDraftBudget, pipeline.propose(&m, &s, 0, 0, settings, true));
+            try std.testing.expectError(error.InvalidDraftBudget, pipeline.propose(&m, &s, 16, 0, settings, true));
+            try mx.eval(try pipeline.propose(&m, &s, 15, 0, settings, true));
+            var spec = try pipeline.speculate(&m, &s, try s.zeros(&.{ 3, 64 }, mx.bf16), try s.ints(&.{ 1, 2, 3 }), 0, settings);
+            defer spec.deinit();
+            try mx.eval(spec.firsts);
+            try std.testing.expectError(error.InvalidCommit, pipeline.settle(&s, spec, 0));
+            try std.testing.expectError(error.InvalidCommit, pipeline.settle(&s, spec, 4));
+            try pipeline.settle(&s, spec, 2);
+            try mx.eval(try pipeline.propose(&m, &s, 3, 2, settings, false));
+        },
         .draft_vocab => {
             var store = cp.Store.init(64);
             defer store.deinit();

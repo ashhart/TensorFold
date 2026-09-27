@@ -53,10 +53,12 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--tokens ID,ID,...` | Exact prompt token IDs, overriding text |
 | `--max-tokens N` | Maximum output tokens, default 32; stops at model EOS |
 | `--drafter DIR` | Enable DFlash2 and context-copy proposals; omit for serial decoding |
-| `--mtp-drafts N` | Nemotron/Flash Next: chained MTP budget, default 3, maximum 15 |
+| `--mtp-drafts N` | Nemotron/Flash Next: maximum adaptive MTP depth, default 3, maximum 15 |
+| `--fixed-drafts` | Use the configured MTP depth each round instead of measured cost/acceptance adaptation |
 | `--no-drafts` | Nemotron/Flash Next: disable MTP and decode serially |
 | `--full-draft-vocab` | Nemotron/Flash Next: score the full draft head instead of the original reduced ID list |
 | `--no-queued-drafts` | Nemotron/Flash Next: read each Metal draft token on the host instead of queuing the chain |
+| `--no-early-mtp` | Build MTP context after target verification instead of speculating before its host read |
 | `--no-copy` | Disable context-copy proposals to exercise the neural draft head |
 | `--metal-simd` | Force the non-tensor Metal path for coverage on M5 |
 | `--metal-sampling` | Use the original fp32 Metal sampler instead of CPU f64 sampling |
@@ -69,6 +71,7 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--check-exact` | Run the family's GPU verification/partial-commit parity check and exit |
 | `--check-cache-stress` | Check every accepted prefix, cache snapshots, rejection, reset and memory cycles |
 | `--check-long-cache` | Repeat cache/rollback checks after random 10K-token or sparse-attention prefixes |
+| `--check-mtp-state` | Nemotron/Flash: compare batched MTP with serial, all retained prefixes and continuations through 10K |
 | `--trace-dir DIR` | Flash: save the final prefill block's layer intermediates in an existing directory |
 | `--trace-gdn N` | With `--trace-dir`: trace recurrent layer N's input/output across all prefill blocks |
 
@@ -114,6 +117,8 @@ path; attention layers gather only its K/V rows.
 | `flash.zig`, `ngram.zig` | Hyper-connections, GDN, sparse attention, MoE, PLE and MTP |
 | `family_runtime.zig` | Chained verification and completion for Nemotron/Flash Next |
 | `draft_vocab.zig` | Original reduced draft ID lists, packed head row selection, and ID mapping |
+| `mtp_pipeline.zig` | Early MTP speculation, retained-state reuse and queued chains |
+| `draft_depth.zig`, `mtp_calibration.zig` | Original adaptive depth policy and native window/step cost measurements |
 | `drafter.zig`, `copy.zig` | DFlash2 and context-copy proposals |
 | `sampling.zig` | Deterministic greedy/top-k/top-p selection |
 | `main.zig` | Native completion CLI and decoding loop |
@@ -142,7 +147,13 @@ Mapped sampling keys noise by the original token ID. The target still verifies e
 proposal against the full vocabulary. `--full-draft-vocab` restores the full draft head.
 With `--metal-sampling`, dependent MTP proposals stay on the GPU until one read at the
 end of the chain; `--no-queued-drafts` restores per-token reads. CPU sampling uses host
-reads. The [runtime audit](RUNTIME_AUDIT.md) records remaining scheduling differences.
+reads. With Metal sampling, target samples also feed a batched MTP pass before the
+host reads verification results. The accepted MTP cache prefix and its last draw are
+reused for the next chain; `--no-early-mtp` disables this overlap. MTP depth adapts using
+the original per-depth acceptance/cost policy. Startup measures native target widths
+and a head step; `--fixed-drafts` skips calibration and fixes the depth for diagnostics.
+Calibration time is recorded separately in JSON. The [runtime audit](RUNTIME_AUDIT.md)
+records remaining scheduling and arithmetic differences.
 
 All four required checkpoints are downloaded under ignored `build/models/` in this
 checkout, including Nemotron's `mtp-4bit.safetensors` and all 22 Flash Next shards:
@@ -221,6 +232,9 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test-variants -Doptimize=safe
 .zig-toolchain/zig build test-allocation-failures -Doptimize=safe
 .zig-toolchain/zig build test-draft-vocab -Doptimize=safe
+.zig-toolchain/zig build test-draft-depth -Doptimize=safe
+.zig-toolchain/zig build test-mtp-positions -Doptimize=safe
+.zig-toolchain/zig build test-mtp-state -Doptimize=safe
 .zig-toolchain/zig build test-mtp-runtime
 .zig-toolchain/zig build test-nemotron-simd-reference -Doptimize=safe
 .zig-toolchain/zig build test-models -Doptimize=safe
@@ -249,7 +263,7 @@ boundaries. All outputs match bit for bit. Diagnostic coverage does not make eac
 variant a selectable production mode; [COVERAGE.md](COVERAGE.md) records that distinction.
 The full [86-kernel inventory](KERNEL_INVENTORY.md) lists integration sites and fixture counts.
 
-`test-allocation-failures` injects 425 failures into native ownership operations with
+`test-allocation-failures` injects 566 failures into native ownership operations with
 real MLX handles and small checkpoint files. Every allocation is released, with zero
 retained MLX active memory. It also tests API error recovery; MLX's internal allocator
 and the driver are outside this injection boundary.
@@ -257,8 +271,18 @@ and the driver are outside this injection boundary.
 `test-draft-vocab` compares every selected packed head row and mapped ID with original
 Python row selection. `test-mtp-runtime` compares serial output against full/cut head
 and queued/host proposal modes at budgets 1/3/15, with greedy, Metal and CPU sampling.
-Queued/host comparisons also check the SHA-256 of every proposal window, round counts
-and accepted drafts. Select one family with `-Dmtp-family=nemotron` or `flash`.
+Queued/host and early/late comparisons also check the SHA-256 of every proposal window,
+round counts and accepted drafts. Adaptive runs independently compare against serial.
+Select one family with `-Dmtp-family=nemotron` or `flash`.
+
+`test-draft-depth` checks 12,288 choices and acceptance updates against the original
+Python policy, including missing costs, zero/maximum budgets and periodic probes.
+`test-mtp-positions` checks 360 proposal/retained-row fixtures through Python's actual
+`speculate` and `settle` methods with an identity MTP block. It detects the former
+one-position-ahead draft noise. Model arithmetic is separate: `test-mtp-state` passes
+414 real-checkpoint MTP prefix/cache/continuation comparisons across three backends,
+including sparse pooling and 10K attention transitions. Flash windows with 64 residual
+stream rows split into row-exact projections instead of falling back to MLX matmul.
 
 `test-checkpoint-files` runs without a GPU and exercises positional reads, truncation,
 oversized or invalid headers, missing files and allocation failures. The loader validates

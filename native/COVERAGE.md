@@ -4,7 +4,42 @@ This fork ports the inference hosts to Zig and embeds the original author's Meta
 kernels. MLX-C supplies arrays, scheduling, safetensors, and general operations.
 This matrix distinguishes exercised behavior from physical-device validation.
 
-## Latest runtime milestone
+## Early speculation and adaptive-depth milestone
+
+- Metal sampling now queues batched MTP work behind target verification before its
+  host read. The accepted MTP prefix, hidden state and first draft are reused in the
+  next round. Late speculation and fixed-depth switches retain diagnostic baselines.
+- All **150 serial/MTP comparisons** pass, including **84 exact scheduling comparisons**
+  of proposal hashes, round counts and accepted drafts across early/late and queued/host
+  modes. Twelve adaptive runs also match serial output, using measured native costs.
+- All **414 MTP prefix/cache/continuation checks** pass with real checkpoints: Nemotron
+  tensor/SIMD and Flash, widths 1/3/16, at 0/31/2,044/2,051/9,999/10,007 cached positions.
+  Each checks every batched hidden/logit row and every retained prefix, including zero.
+  Fixed real target states isolate the MTP computation; these are not full-target 10K
+  generation runs. The separate target long-context checks cover that integration.
+- **12,288 adaptive-depth choices/acceptance updates** match the original Python policy.
+  **360 scheduling fixtures** call Python's actual `speculate`/`settle` methods with an
+  identity head to isolate sampling positions and retained-row selection.
+- These checks exposed two bugs: MTP draft noise was keyed one position too far ahead,
+  and Flash retained a speculative pooled cache after rolling back below the sparse
+  threshold. Both are fixed. Flash's 64-stream-row MTP projection stays row-exact by
+  splitting it into <=16-row calls.
+- Full-target Flash rollback also passes all **48 accepted-prefix comparisons** at
+  2,044/2,051/2,063 tokens, including the newly added window that crosses the sparse
+  threshold and retains rows below it. Every cache array and continuation is exact.
+- After early-MTP integration, full-target Python comparisons pass again at 10,007
+  Nemotron tokens and 2,051 Flash tokens: respectively **917,504** and **744,960**
+  final-block logits, plus all sixteen continuation IDs in serial and early-MTP modes,
+  match exactly. Context copies are disabled and the MTP budget is fifteen.
+- All **566 host allocation failures** pass, including scheduler prepare/propose/
+  speculate/settle cleanup and invalid-budget/commit recovery. MLX active memory returns
+  to zero. All **121 shared CPU/Metal fixtures** and **17 safety-enabled host tests** pass.
+
+The [runtime audit](RUNTIME_AUDIT.md) still lists GPU proposal handoff, serial pipelining,
+attention buffer reuse, and arithmetic configuration differences. Final engine benchmarks
+and the root README comparison remain pending.
+
+## Reduced-vocabulary and queued-MTP milestone
 
 - Native MTP now uses the original reduced vocabulary by default: 32,768 Nemotron IDs
   and 79,592 padded Flash IDs. `test-draft-vocab` independently verifies every mapped
