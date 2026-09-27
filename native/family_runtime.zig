@@ -28,9 +28,19 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var check_mtp_state = false;
     var adaptive_drafts = true;
     var gpu_handoff = true;
+    var serial_pipeline = true;
+    var check_serial = false;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         const key = args[i];
+        if (std.mem.eql(u8, key, "--check-serial-state")) {
+            check_serial = true;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--no-serial-pipeline")) {
+            serial_pipeline = false;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--no-gpu-handoff")) {
             gpu_handoff = false;
             continue;
@@ -100,12 +110,16 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     try settings.validate();
     try mx.init();
     defer mx.shutdown();
-    var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress and !long_cache);
+    var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress and !long_cache and !check_serial);
     defer m.deinit();
     if (trace_dir != null and !@hasField(M, "trace_dir")) return error.UnsupportedTrace;
     if (trace_gdn) |layer_index| {
         if (trace_dir == null or layer_index >= 48 or layer_index % 4 == 3) return error.InvalidTraceLayer;
         if (@hasField(M, "trace_gdn")) m.trace_gdn = layer_index else return error.UnsupportedTrace;
+    }
+    if (check_serial) {
+        if (@hasDecl(M, "SerialPass")) return @import("cache_checks.zig").checkSerial(M, &m, long_cache);
+        return error.UnsupportedSerialPipeline;
     }
     if (long_cache) return @import("cache_checks.zig").checkLong(M, &m);
     if (cache_stress) return @import("cache_checks.zig").check(M, &m);
@@ -202,7 +216,16 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         pipeline = try Pipeline.prepare(&m, &s, head_cache, last, pending, m.position, settings);
     }
     if (max_tokens > 0) try generated.append(a, @intCast(pending));
-    while (generated.items.len < max_tokens and !M.eos(pending)) {
+    const use_serial_pipeline = serial_pipeline and settings.metal and !m.mtp and @hasDecl(M, "SerialPass");
+    var queued_serial_steps: usize = 0;
+    if (@hasDecl(M, "SerialPass")) {
+        if (use_serial_pipeline) {
+            const result = try @import("serial_pipeline.zig").generate(M, &m, a, &generated, max_tokens, settings, M.eos, &proposal_hash);
+            rounds = result.rounds;
+            queued_serial_steps = result.queued_ahead;
+        }
+    }
+    while (!use_serial_pipeline and generated.items.len < max_tokens and !M.eos(pending)) {
         const round_timer = Stopwatch.init(io);
         var neural_proposed: usize = 0;
         var stage: []const u8 = "draft proposals";
@@ -375,6 +398,8 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             .queued_drafts = m.mtp and queued_drafts and settings.metal,
             .early_mtp = early,
             .gpu_handoff_rounds = handoff_rounds,
+            .serial_pipeline = use_serial_pipeline,
+            .queued_serial_steps = queued_serial_steps,
             .adaptive_drafts = adaptive_drafts and m.mtp,
             .draft_depth_counts = depth_counts,
             .calibration_seconds = calibration_seconds,

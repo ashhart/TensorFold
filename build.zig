@@ -83,6 +83,30 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const serial_fixture = b.addRunArtifact(exe);
+    serial_fixture.addArg("check-serial-pipeline");
+    const serial_tests = b.step("test-serial-pipeline", "GPU serial pipeline EOS/budget ownership and real-model token/cache parity");
+    const serial_family = b.option(usize, "serial-family", "Restrict serial pipeline tests to 0=Qwen or 1=Nemotron");
+    if (serial_family != null and serial_family.? > 1) @panic("serial-family must be 0 or 1");
+    const serial_long = b.option(bool, "serial-long", "Run serial pipeline comparisons across the 10K attention threshold") orelse false;
+    var serial_previous: *std.Build.Step = &serial_fixture.step;
+    for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit" }, 0..) |name, family| {
+        if (serial_family != null and serial_family.? != family) continue;
+        for (0..2) |backend| {
+            const check = b.addRunArtifact(exe);
+            check.addArgs(&.{ "run", b.fmt("{s}/{s}", .{ model_root, name }), "--check-serial-state" });
+            if (backend == 1) check.addArg("--metal-simd");
+            if (serial_long) check.addArg("--check-long-cache");
+            check.step.dependOn(serial_previous);
+            serial_previous = &check.step;
+        }
+    }
+    serial_tests.dependOn(serial_previous);
+    const serial_runtime = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_serial_runtime.py" });
+    serial_runtime.addArtifactArg(exe);
+    serial_runtime.addArgs(&.{ "--model-root", model_root });
+    if (serial_family) |family| serial_runtime.addArgs(&.{ "--family", if (family == 0) "qwen" else "nemotron" });
+    b.step("test-serial-runtime", "Compare synchronous/pipelined CLI completions and output-budget boundaries").dependOn(&serial_runtime.step);
     const mtp_runtime = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_mtp_runtime.py" });
     mtp_runtime.addArtifactArg(exe);
     mtp_runtime.addArgs(&.{ "--model-root", model_root });

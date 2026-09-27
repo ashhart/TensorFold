@@ -4,6 +4,35 @@ This fork ports the inference hosts to Zig and embeds the original author's Meta
 kernels. MLX-C supplies arrays, scheduling, safetensors, and general operations.
 This matrix distinguishes exercised behavior from physical-device validation.
 
+## Serial pipeline milestone
+
+Qwen and Nemotron now queue the next serial Metal forward before reading the current
+token. The final cache replay is evaluated before returning; a queued EOS suffix is
+discarded without committing its state. The synchronous override remains available.
+Flash still needs host token IDs for its bounded PLE file reads.
+
+- **35 synthetic GPU scheduling cases** pass with initial/immediate/later EOS,
+  budgets 0/1/2/3/8/17/32, exact queued-before-read counts and committed cache contents.
+  Retained active MLX memory is zero after cleanup.
+- **48 short full-model token/cache/continuation comparisons** pass: Qwen/Nemotron,
+  tensor/forced-SIMD, prefixes 0/31, greedy/Metal sampling and budgets 1/2/17.
+  All **256 pipeline/reset cycles** show no active MLX memory growth.
+- All **48 long-context token/cache/continuation comparisons** also pass on the same
+  four model/backend combinations at 9,999/10,007 tokens, across the attention switch.
+- All **32 synchronous/pipelined CLI comparisons** pass: both models/backends,
+  greedy/Metal sampling and 0/1/2/32-token limits. Output IDs, rounds, queued-step
+  counters and Nemotron's serial proposal hashes match exactly.
+- All **864 injected host-allocation failures** pass, including serial pipeline EOS
+  cleanup and output-list growth during a 65-token run. Both allocator growth modes
+  and both backends release every host allocation and return active MLX memory to zero.
+  All **18 safety-enabled host tests** pass. Qwen's two sampled DFlash2 comparisons
+  and Nemotron's six MTP comparisons (depths 1/3/15) also match the new serial baseline
+  on tensor/SIMD after the shared forward/commit refactor.
+
+Reproduce with `test-serial-pipeline`; add `-Dserial-long=true` for 9,999/10,007-token
+contexts or `-Dserial-family=0|1` to select Qwen/Nemotron. `test-serial-runtime` checks
+the actual CLI and counters against `--no-serial-pipeline` at output-budget boundaries.
+
 ## Nemotron GPU handoff milestone
 
 Nemotron can embed the queued draft array directly in target verification, then read

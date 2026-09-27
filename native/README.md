@@ -60,6 +60,7 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--no-queued-drafts` | Nemotron/Flash Next: read each Metal draft token on the host instead of queuing the chain |
 | `--no-early-mtp` | Build MTP context after target verification instead of speculating before its host read |
 | `--no-gpu-handoff` | Nemotron: read the queued draft IDs before building target verification |
+| `--no-serial-pipeline` | Qwen/Nemotron: disable queuing the next serial Metal step before reading the current token |
 | `--no-copy` | Disable context-copy proposals to exercise the neural draft head |
 | `--metal-simd` | Force the non-tensor Metal path for coverage on M5 |
 | `--metal-sampling` | Use the original fp32 Metal sampler instead of CPU f64 sampling |
@@ -73,6 +74,7 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--check-cache-stress` | Check every accepted prefix, cache snapshots, rejection, reset and memory cycles |
 | `--check-long-cache` | Repeat cache/rollback checks after random 10K-token or sparse-attention prefixes |
 | `--check-mtp-state` | Nemotron/Flash: compare batched MTP with serial, all retained prefixes and continuations through 10K |
+| `--check-serial-state` | Qwen/Nemotron: compare pipelined/synchronous tokens, every cache and continuation; add `--check-long-cache` for 10K contexts |
 | `--trace-dir DIR` | Flash: save the final prefill block's layer intermediates in an existing directory |
 | `--trace-gdn N` | With `--trace-dir`: trace recurrent layer N's input/output across all prefill blocks |
 
@@ -119,6 +121,7 @@ path; attention layers gather only its K/V rows.
 | `family_runtime.zig` | Chained verification and completion for Nemotron/Flash Next |
 | `draft_vocab.zig` | Original reduced draft ID lists, packed head row selection, and ID mapping |
 | `mtp_pipeline.zig` | Early MTP speculation, retained-state reuse and queued chains |
+| `serial_pipeline.zig` | Queues the next serial step, defers cache evaluation and drains terminal work |
 | `draft_depth.zig`, `mtp_calibration.zig` | Original adaptive depth policy and native window/step cost measurements |
 | `drafter.zig`, `copy.zig` | DFlash2 and context-copy proposals |
 | `sampling.zig` | Deterministic greedy/top-k/top-p selection |
@@ -140,6 +143,15 @@ uses the original BF16 Metal radix top-k kernel. Nemotron uses tensor attention 
 10,000 visible keys on M5 and MLX SDPA otherwise.
 
 ## Additional model families
+
+Qwen and Nemotron use pipelined serial decoding when Metal sampling is selected and
+neural drafting is disabled. The next target forward accepts the current GPU draw
+before the host reads it. Cache commits construct replacement graphs without a host
+wait; a final drain evaluates any remaining recurrent replay. A queued step beyond
+EOS is discarded without committing its cache. `--no-serial-pipeline` retains the
+synchronous reference. Reports include `serial_pipeline` and `queued_serial_steps`.
+Flash's bounded PLE file reads still require host token IDs, so its serial path does
+not yet use this pipeline.
 
 MTP defaults to the original reduced vocabulary: 32,768 Nemotron IDs and 79,592 Flash
 IDs (the original 79,591-ID list padded to eight rows). The executable embeds the
@@ -240,6 +252,9 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test-mtp-positions -Doptimize=safe
 .zig-toolchain/zig build test-mtp-state -Doptimize=safe
 .zig-toolchain/zig build test-mtp-runtime
+.zig-toolchain/zig build test-serial-pipeline -Doptimize=safe
+.zig-toolchain/zig build test-serial-pipeline -Doptimize=safe -Dserial-long=true
+.zig-toolchain/zig build test-serial-runtime -Doptimize=safe
 .zig-toolchain/zig build test-nemotron-simd-reference -Doptimize=safe
 .zig-toolchain/zig build test-models -Doptimize=safe
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
@@ -267,7 +282,7 @@ boundaries. All outputs match bit for bit. Diagnostic coverage does not make eac
 variant a selectable production mode; [COVERAGE.md](COVERAGE.md) records that distinction.
 The full [86-kernel inventory](KERNEL_INVENTORY.md) lists integration sites and fixture counts.
 
-`test-allocation-failures` injects 566 failures into native ownership operations with
+`test-allocation-failures` injects 864 failures into native ownership operations with
 real MLX handles and small checkpoint files. Every allocation is released, with zero
 retained MLX active memory. It also tests API error recovery; MLX's internal allocator
 and the driver are outside this injection boundary.

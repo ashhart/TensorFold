@@ -16,6 +16,7 @@ pub const Pass = struct {
     }
 };
 pub const Model = struct {
+    pub const SerialPass = Pass;
     pub const DraftCache = Cache;
     weights: cp.Store,
     kernels: mx.Kernels,
@@ -129,6 +130,10 @@ pub const Model = struct {
         p.logits = try m.lin(s, "lm_head", x);
         return p;
     }
+    pub fn forwardSerialArray(m: *Model, tokens: A) !Pass {
+        if (tokens.ctx == null or mx.c.mlx_array_size(tokens) != 1) return error.InvalidToken;
+        return m.forwardArray(tokens);
+    }
     fn addNorm(m: *Model, s: *mx.Scope, h: A, delta: A, nw: A) ![5]A {
         const r = mx.dim(h, 0);
         return m.kernels.run(s, src.nemotron_add_norm_plain, &.{ h, delta, nw, try s.scalar(1e-5) }, &.{ ti("D", 2688), ti("T", 896) }, .{ 896 * r, 1, 1 }, .{ 896, 1, 1 }, &.{ .{ .shape = &.{ r, 2688 } }, .{ .shape = &.{ r, 2688 } } });
@@ -185,6 +190,13 @@ pub const Model = struct {
         return m.kernels.run(s, src.nemotron_add_norm_moe, &.{ h, routed, route[1], shared, nw, try s.scalar(1e-5) }, &.{ ti("D", 2688), ti("T", 896), ti("E", 6) }, .{ 896 * r, 1, 1 }, .{ 896, 1, 1 }, &.{ .{ .shape = &.{ r, 2688 } }, .{ .shape = &.{ r, 2688 } } });
     }
     pub fn commit(m: *Model, p: *Pass, keep: usize) !void {
+        return m.commitImpl(p, keep, true);
+    }
+    pub fn commitSerialQueued(m: *Model, p: *Pass) !void {
+        if (mx.dim(p.hidden, 0) != 1) return error.InvalidCommit;
+        return m.commitImpl(p, 1, false);
+    }
+    fn commitImpl(m: *Model, p: *Pass, keep: usize, evaluate: bool) !void {
         if (keep == 0 or keep > @as(usize, @intCast(mx.dim(p.hidden, 0)))) return error.InvalidCommit;
         var next: [52]Cache = @splat(.{});
         errdefer for (&next) |*c| c.deinit();
@@ -199,7 +211,7 @@ pub const Model = struct {
                 next[i].a = try mx.retain(try p.scope.slice(rec.a, 2, 0, m.position + n));
                 next[i].b = try mx.retain(try p.scope.slice(rec.b, 2, 0, m.position + n));
             }
-            if (kind != 'E') try mx.evalMany(&.{ next[i].a, next[i].b }, false);
+            if (kind != 'E' and evaluate) try mx.evalMany(&.{ next[i].a, next[i].b }, false);
         }
         for (&m.cache) |*c| c.deinit();
         m.cache = next;

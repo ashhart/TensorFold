@@ -72,6 +72,80 @@ fn prefill(comptime M: type, m: *M, count: usize, random: std.Random) !void {
         offset += n;
     }
 }
+fn neverEos(_: i32) bool {
+    return false;
+}
+pub fn checkSerial(comptime M: type, m: *M, long: bool) !void {
+    const a = mx.allocator;
+    var rng = std.Random.DefaultPrng.init(0x50495045);
+    const prefixes: []const usize = if (long) &.{ 9999, 10007 } else &.{ 0, 31 };
+    var checks: usize = 0;
+    for (prefixes) |prefix| {
+        m.reset();
+        try prefill(M, m, prefix, rng.random());
+        var base = try Snapshot(M).capture(m);
+        defer base.deinit();
+        for ([_]f64{ 0, 0.7 }) |temperature| for ([_]usize{ 1, 2, 17 }) |limit| {
+            var scope = mx.Scope{};
+            defer scope.deinit();
+            const settings = @import("sampling.zig").Sampling{ .metal = true, .seed = 5678, .temperature = temperature, .top_k = 12, .top_p = 0.8 };
+            try base.restore(m);
+            var expected: std.ArrayList(u32) = .empty;
+            defer expected.deinit(a);
+            try expected.append(a, 42);
+            while (expected.items.len < limit) {
+                var p = try forward(M, m, &.{@intCast(expected.items[expected.items.len - 1])}, &.{-1});
+                defer p.deinit();
+                const ids = try @import("sampling.zig").rows(&m.kernels, &p.scope, p.logits, &.{m.position + 1}, settings);
+                defer a.free(ids);
+                try expected.append(a, @intCast(ids[0]));
+                try commit(M, m, &p, &.{0});
+            }
+            var cache = try Snapshot(M).capture(m);
+            defer cache.deinit();
+            var reference = try forward(M, m, &.{97}, &.{-1});
+            defer reference.deinit();
+            try base.restore(m);
+            var actual: std.ArrayList(u32) = .empty;
+            defer actual.deinit(a);
+            try actual.append(a, 42);
+            const result = try @import("serial_pipeline.zig").generate(M, m, a, &actual, limit, settings, neverEos, null);
+            try std.testing.expectEqualSlices(u32, expected.items, actual.items);
+            try std.testing.expectEqual(limit - 1, result.rounds);
+            try std.testing.expectEqual(limit -| 2, result.queued_ahead);
+            try cache.compare(m, &scope);
+            var continued = try forward(M, m, &.{97}, &.{-1});
+            defer continued.deinit();
+            try equal(&scope, reference.logits, continued.logits);
+            checks += 1;
+        };
+        std.debug.print("PASS: serial pipeline prefix {d}, greedy/sampled, budgets 1/2/17; every token, cache and continuation exact\n", .{prefix});
+    }
+    m.reset();
+    if (!long) {
+        var baseline: usize = 0;
+        var maximum: usize = 0;
+        for (0..72) |cycle| {
+            {
+                var generated: std.ArrayList(u32) = .empty;
+                defer generated.deinit(a);
+                try generated.append(a, 42);
+                _ = try @import("serial_pipeline.zig").generate(M, m, a, &generated, 5, .{ .metal = true, .temperature = 0 }, neverEos, null);
+            }
+            m.reset();
+            try mx.check(mx.c.mlx_synchronize(mx.stream));
+            var active: usize = 0;
+            try mx.check(mx.c.mlx_get_active_memory(&active));
+            if (cycle == 7) baseline = active;
+            if (cycle >= 8) {
+                maximum = @max(maximum, active);
+                if (active > baseline + 8 * 1024 * 1024) return error.ActiveMemoryGrowth;
+            }
+        }
+        std.debug.print("PASS: 64 serial pipeline/reset cycles; active MLX memory baseline={d}, max={d}\n", .{ baseline, maximum });
+    }
+    std.debug.print("PASS: {d} full-model serial pipeline/cache/continuation comparisons\n", .{checks});
+}
 pub fn check(comptime M: type, m: *M) !void {
     return checkPrefixes(M, m, if (M == dense.Model) &.{ 0, 1, 15, 16, 17, 63, 64, 127, 128, 511, 512, 513 } else &.{ 0, 1, 15, 16, 17, 33 }, true);
 }

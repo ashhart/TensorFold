@@ -26,8 +26,8 @@ Completion requires execution evidence, not just source export or a passing smok
 - [x] Early MTP speculation/accepted-state reuse and adaptive draft depth, with independent
   original-policy fixtures and real-model batch/serial cache checks.
 - [ ] Finish pipelined serial decode, GPU proposal handoff and attention buffer reuse.
-  Nemotron GPU proposal handoff is implemented and checked; preserve the bounded PLE
-  memory strategy when evaluating Flash paths.
+  Nemotron GPU proposal handoff and Qwen/Nemotron serial pipelining are implemented.
+  Preserve the bounded PLE memory strategy when evaluating Flash paths.
 - [ ] Final matched end-to-end benchmarks against the original Python engines: same
   checkpoints, prompts, seeds, sampling and token counts, serial and drafting, repeated
   runs, cold process/load/prefill/decode/total breakdown and token parity. Document any
@@ -220,3 +220,25 @@ New milestone evidence and any discovered failures will be recorded below.
   runs. This partially overlaps the focused matrix; counts are separate execution runs.
 - Flash GPU handoff, serial pipelining and buffer reuse remain, followed by final
   original-engine performance comparisons and the README table.
+
+## Serial pipeline milestone
+
+- Qwen and Nemotron accept the next serial token as a GPU array and publish deferred
+  cache graphs before its host read. The final recurrent replay is drained; a queued
+  EOS suffix is evaluated and discarded without changing the committed cache.
+- All 35 synthetic GPU scheduling cases pass: initial/immediate/later EOS, budgets
+  0/1/2/3/8/17/32, exact queued-before-read counts, committed cache and zero retained
+  active MLX memory. Real-model comparisons check arithmetic separately.
+- All 48 short full-model token/cache/continuation comparisons pass on Qwen/Nemotron
+  tensor/forced-SIMD at prefixes 0/31, greedy/Metal sampling and budgets 1/2/17. All
+  256 measured pipeline/reset cycles show no active MLX memory growth.
+- All 48 corresponding long-context comparisons pass at 9,999/10,007 tokens on all
+  four model/backend combinations, including cache contents and continuation logits.
+- All 32 paired CLI comparisons pass with greedy/Metal sampling, both backends and
+  output limits 0/1/2/32, including counters and Nemotron's serial proposal hashes.
+- All 864 injected host-allocation failures pass, including EOS cleanup and output
+  list growth during a 65-token pipeline. Retained active MLX memory is zero. All
+  eighteen host tests and both sampled Qwen serial/DFlash2 regressions pass.
+- Nemotron's six sampled MTP regressions (depths 1/3/15 on tensor/SIMD) also match the
+  new serial pipeline baseline. Flash GPU handoff/pipelining, attention buffer reuse
+  and final original-engine benchmarks remain open.

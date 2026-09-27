@@ -187,9 +187,11 @@ pub const Weights = struct {
         try w.releaseLinearSources();
     }
     pub fn embed(w: *const Weights, s: *mx.Scope, tokens: []const i32) !mx.Array {
-        const ids = try s.ints(tokens);
+        return w.embedArray(s, try s.ints(tokens));
+    }
+    pub fn embedArray(w: *const Weights, s: *mx.Scope, ids: mx.Array) !mx.Array {
         const out = try s.dequant(try s.take(try w.get("model.embed_tokens.weight"), ids, 0), try s.take(try w.get("model.embed_tokens.scales"), ids, 0), try s.take(try w.get("model.embed_tokens.biases"), ids, 0));
-        return s.reshape(out, &.{ 1, @intCast(tokens.len), 5120 });
+        return s.reshape(out, &.{ 1, @intCast(mx.c.mlx_array_size(ids)), 5120 });
     }
     /// Exercise the owning insertion helpers under the allocation diagnostic.
     pub fn checkOwnedInsertions() !void {

@@ -33,6 +33,7 @@ pub const Pass = struct {
     }
 };
 pub const Model = struct {
+    pub const SerialPass = Pass;
     weights: Weights,
     kernels: mx.Kernels,
     cache: [64]Cache = @splat(.{}),
@@ -63,18 +64,31 @@ pub const Model = struct {
     }
     pub fn forward(m: *Model, tokens: []const i32, parents: []const i32) !Pass {
         if (tokens.len != parents.len) return error.InvalidTree;
+        var s = mx.Scope{};
+        defer s.deinit();
+        var p = try m.forwardTokens(try s.ints(tokens), parents);
+        errdefer p.deinit();
+        try mx.eval(p.logits);
+        return p;
+    }
+    pub fn forwardSerialArray(m: *Model, tokens: A) !Pass {
+        if (tokens.ctx == null or mx.c.mlx_array_size(tokens) != 1) return error.InvalidToken;
+        return m.forwardTokens(tokens, &.{-1});
+    }
+    fn forwardTokens(m: *Model, tokens: A, parents: []const i32) !Pass {
+        if (mx.c.mlx_array_ndim(tokens) != 1 or mx.c.mlx_array_size(tokens) != parents.len) return error.InvalidTree;
+        if (mx.dtype(tokens) != mx.i32t and mx.dtype(tokens) != mx.c.MLX_UINT32) return error.InvalidToken;
         const tree = try lanes.Tree.init(parents);
-        const w: i32 = @intCast(tokens.len);
-        var p = Pass{ .count = tokens.len, .start = m.position };
+        var p = Pass{ .count = parents.len, .start = m.position };
         @memcpy(p.parents[0..parents.len], parents);
         errdefer p.deinit();
         const s = &p.scope;
         const kernels = &m.kernels;
-        var h = try m.weights.embed(s, tokens);
+        var h = try m.weights.embedArray(s, tokens);
         var pending: ?A = null;
         var positions: [128]i32 = undefined;
-        for (0..tokens.len) |i| positions[i] = m.position + tree.depths[i];
-        const pos = try s.ints(positions[0..tokens.len]);
+        for (0..parents.len) |i| positions[i] = m.position + tree.depths[i];
+        const pos = try s.ints(positions[0..parents.len]);
         for (0..64) |i| {
             const inorm = try lanes.norm(kernels, s, h, pending, try m.weight(i, "input_layernorm.weight"));
             h = inorm.h;
@@ -91,8 +105,6 @@ pub const Model = struct {
         }
         const normed = try lanes.norm(kernels, s, h, pending, try m.weights.get("model.norm.weight"));
         p.logits = try (try m.weights.linear("lm_head")).apply(kernels, s, normed.x);
-        try mx.eval(p.logits);
-        _ = w;
         return p;
     }
     fn attn(m: *Model, s: *mx.Scope, i: usize, x: lanes.Act, t: *const lanes.Tree, pos: A, rec: *Record) !A {
@@ -134,6 +146,13 @@ pub const Model = struct {
         return m.project(s, i, "linear_attn.out_proj", .{ .x = post[0], .sums = post[1] });
     }
     pub fn commit(m: *Model, p: *Pass, rows: []const i32) !void {
+        return m.commitImpl(p, rows, true);
+    }
+    pub fn commitSerialQueued(m: *Model, p: *Pass) !void {
+        if (p.count != 1) return error.InvalidCommit;
+        return m.commitImpl(p, &.{0}, false);
+    }
+    fn commitImpl(m: *Model, p: *Pass, rows: []const i32, evaluate: bool) !void {
         if (rows.len == 0) return error.EmptyCommit;
         if (m.position != p.start or rows.len > p.count or rows[0] != 0) return error.InvalidCommit;
         for (rows, 0..) |row, i| {
@@ -144,7 +163,9 @@ pub const Model = struct {
         const s = &commit_scope;
         const ids = try s.ints(rows);
         const count = try s.ints(&.{@intCast(rows.len)});
-        // Build all new caches first; a failed kernel cannot half-commit a stream.
+        // Construct all replacement handles before publishing the new cache.
+        // Serial pipelining evaluates the graphs with the next draw; regular
+        // commits also wait for GPU execution before publishing.
         var next: [64]Cache = @splat(.{});
         errdefer for (&next) |*c| c.deinit();
         for (&p.records, 0..) |*rec, i| {
@@ -174,7 +195,7 @@ pub const Model = struct {
             arrays[2 * i] = c.a;
             arrays[2 * i + 1] = c.b;
         }
-        try mx.evalMany(&arrays, false);
+        if (evaluate) try mx.evalMany(&arrays, false);
         for (&m.cache) |*c| c.deinit();
         m.cache = next;
         m.position += @intCast(rows.len);
