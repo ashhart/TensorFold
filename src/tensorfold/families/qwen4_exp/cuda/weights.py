@@ -194,6 +194,7 @@ class Weights:
     comm: Any = None          # tensor parallel: a ``comm.NCCL`` (None on one GPU)
     draft_head: Q4 | None = None   # the MTP drafts' head over a token subset (None: the full head)
     draft_ids: torch.Tensor | None = None   # the subset's token ids (this rank's share), in draft-head row order
+    x3: Any = None            # an EXL3 checkpoint's shared scratch (``exl3.Scratch``); None for the MLX checkpoint
 
     @property
     def device(self) -> torch.device:
@@ -335,7 +336,11 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
     import time
     from dataclasses import replace
 
+    from . import exl3
+
     model_dir = Path(model_dir)
+    if exl3.is_exl3(model_dir):                       # an EXL3 pack: its own loader, the same dataclasses
+        return exl3.load(model_dir, device, mtp=mtp, tp=tp, draft_vocab=draft_vocab)
     full = Config.read(model_dir)
     rank, world = tp if tp is not None else (0, 1)
     cfg = full if world == 1 else replace(full, heads=full.heads // world, kv_heads=full.kv_heads // world,

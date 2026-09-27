@@ -91,13 +91,19 @@ class MoEBuffers:
                              device=device)
 
 
-def select(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int) -> None:
-    """Each row's experts and weights (rows in parallel), then the (row, slot) pairs grouped by expert."""
+def select_rows(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int) -> None:
+    """Each row's experts and weights, rows in parallel (buf.pick, buf.wts); EXL3 experts group themselves in their kernel."""
 
     rows = logits.shape[0]
     _topk_rows[(rows,)](logits, buf.pick, buf.wts, NE=experts, NL=logits.shape[1], TOPK=top_k, SLOTS=top_k + 1,
                         BLOCK=triton.next_power_of_2(experts + 1), SLOTP=triton.next_power_of_2(top_k + 1), num_warps=4)
-    grouped.route(buf.pick[:rows], buf.plan)
+
+
+def select(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int) -> None:
+    """Each row's experts and weights (rows in parallel), then the (row, slot) pairs grouped by expert."""
+
+    select_rows(logits, buf, top_k, experts)
+    grouped.route(buf.pick[:logits.shape[0]], buf.plan)
 
 
 def moe(x: torch.Tensor, router_rows: torch.Tensor, ex: grouped.Experts, buf: MoEBuffers, top_k: int,
