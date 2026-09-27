@@ -7,6 +7,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from tensorfold.kernels.glm.flash.v1 import kernels as K  # noqa: E402
+from tensorfold.kernels.glm.flash.v1 import widths as W  # noqa: E402
 from tensorfold.families.glm5_next import config, linear, mla, mlp, weights  # noqa: E402
 
 
@@ -237,3 +238,143 @@ def test_real_weights_long_context_windows_are_exact(gpu):
         many = LaneEngine.copy_single_cache(base)
         window = model.head(model.hidden(mx.array([tokens[:width]]), many))
         assert _same(window, serial[:, :width]), width
+
+
+def _qbits(n: int, k: int, bits: int, seed: int, scale: float = 0.05) -> linear.Q:
+    mx.random.seed(seed)
+    return linear.Q(*mx.quantize((scale * mx.random.normal((n, k))).astype(mx.bfloat16), group_size=64, bits=bits),
+                    bits=bits, group=64)
+
+
+@pytest.mark.parametrize("bits", [8, 6, 5])
+@pytest.mark.parametrize("shape", [(1024, 4096), (4096, 1536), (512, 2048), (32, 4096), (8, 512)])
+def test_qmv_rows_other_bits_give_mlx_one_row_bits(gpu, bits, shape):
+    """8 / 6 / 5-bit, group-64 weights at the abliterated checkpoint's shape classes (K a multiple of 512, N of 8):
+    every row of a 2-32-row window gets the bits MLX's one-row quantized matmul (qmv_fast at that width) gives it."""
+
+    n, k = shape
+    q = _qbits(n, k, bits, seed=bits + n)
+    assert W.fast_shape(q, n) and K.qmv_rows_fits(q, 2)
+    x = mx.random.normal((32, k)).astype(mx.bfloat16)
+    one = mx.concatenate([q(x[r:r + 1]) for r in range(32)])
+    for rows in (2, 3, 4, 5, 8, 16, 32):
+        assert _same(K.qmv_rows(x[:rows], q), one[:rows]), (bits, shape, rows)
+
+
+def test_fast_shape_is_mlx_s_qmv_fast_rule():
+    assert not W.fast_shape(_qbits(64, 4096, 4, 1), 64)          # 4-bit has its own kernel
+    assert W.fast_shape(_qbits(64, 256, 8, 1), 64) and not W.fast_shape(_qbits(64, 384, 8, 1), 64)   # K % 256
+    assert W.fast_shape(_qbits(64, 512, 5, 1), 64) and not W.fast_shape(_qbits(64, 256, 5, 1), 64)   # K % 512
+    assert not W.fast_shape(_qbits(60, 4096, 8, 1), 60)          # N % 8
+    assert not W.fast_shape(_qbits(64, 128, 8, 1), 64)           # qmv_quad territory
+    assert not K.qmv_rows_fits(_qbits(60, 4096, 8, 1), 2)
+    assert K.qmv_quad_rows_fits(_qbits(64, 128, 8, 1), 2) and not K.qmv_quad_rows_fits(_qbits(64, 128, 5, 1), 2)
+
+
+@pytest.mark.parametrize("shape", [(8192, 128), (200, 128), (256, 64)])
+def test_qmv_quad_rows_8bit_gives_mlx_one_row_bits(gpu, shape):
+    n, k = shape
+    q = _qbits(n, k, 8, seed=10)
+    x = mx.random.normal((16, k)).astype(mx.bfloat16)
+    one = mx.concatenate([q(x[r:r + 1]) for r in range(16)])
+    for rows in range(2, 17):
+        assert _same(K.qmv_quad_rows(x[:rows], q), one[:rows]), rows
+
+
+def _experts_bits(e: int, n: int, k: int, bits: int, seed: int) -> linear.Q:
+    mx.random.seed(seed)
+    w = (0.02 * mx.random.normal((e, n, k))).astype(mx.bfloat16)
+    return linear.Q(*mx.quantize(w, group_size=64, bits=bits), bits=bits, group=64)
+
+
+def _one_row_bits(x: mx.array, idx: mx.array, q: linear.Q) -> mx.array:
+    return mx.gather_qmm(x[None], q.weight, q.scales, q.biases, rhs_indices=idx, transpose=True, group_size=64,
+                         bits=q.bits).squeeze(-2)
+
+
+@pytest.mark.parametrize("bits", [8, 6, 5])
+def test_expert_qmv_other_bits_gives_each_pick_its_one_row_bits(gpu, bits):
+    n, k, experts, top = 512, 1024, 24, 4
+    w = _experts_bits(experts, n, k, bits, seed=bits)
+    assert K.expert_qmv_fits(w, 2)
+    for rows in (2, 3, 5, 8, 16):
+        idx = _picks(rows, top, experts, seed=rows)
+        group = K.expert_group(idx, experts)
+        x = mx.random.normal((rows, k)).astype(mx.bfloat16)
+        shared = K.expert_qmv(x, idx, group, w, per_pick=False)
+        want = mx.concatenate([_one_row_bits(x[r:r + 1][:, None, :], idx[r:r + 1], w) for r in range(rows)])
+        assert _same(shared, want), (bits, rows)
+        act = mx.random.normal((rows, top, k)).astype(mx.bfloat16)
+        own = K.expert_qmv(act, idx, group, w, per_pick=True)
+        want = mx.concatenate([_one_row_bits(act[r][:, None, :], idx[r:r + 1], w) for r in range(rows)])
+        assert _same(own, want), (bits, rows)
+
+
+def _requant(q: linear.Q, bits: int) -> linear.Q:
+    w = mx.dequantize(q.weight, q.scales, q.biases, group_size=64, bits=q.bits)
+    return linear.Q(*mx.quantize(w, group_size=64, bits=bits), bits=bits, group=64)
+
+
+def test_moe_window_with_8bit_shared_expert_is_row_by_row(gpu, monkeypatch):
+    """The fused MoE (SPLIT_SHARED) with the shared expert at 8 bits, as the abliterated checkpoint stores it: a
+    window gives every row the bits the row-by-row block (MLX's one-row calls) gives it."""
+
+    from tensorfold.kernels.glm.flash.v1 import moe as F
+
+    moe = _moe()
+    moe.shared = mlp.DenseMLP(_requant(_rows_part(moe.shared.gate_up, 0), 8), _requant(_rows_part(moe.shared.gate_up, 1), 8),
+                              _requant(moe.shared.down, 8), 10.0)
+    assert moe.shared.gate_up.bits == 8 and moe.shared.down.bits == 8
+    moe.fused_ok = F.moe_fits(moe)
+    assert moe.fused_ok and F.SPLIT_SHARED
+    monkeypatch.setattr(config, "ENABLED", frozenset())
+    monkeypatch.setattr(config, "FUSED", frozenset())
+    x = (0.5 * mx.random.normal((16, 512))).astype(mx.bfloat16)
+    one = mx.concatenate([moe(x[r:r + 1], True) for r in range(16)])
+    for rows in (2, 3, 4, 8, 16):
+        assert _same(F.moe_rows(moe, x[:rows]), one[:rows]), rows
+
+
+def _rows_part(gate_up: linear.Q, half: int) -> linear.Q:
+    n = gate_up.outs // 2
+    return linear._rows(gate_up, half * n, (half + 1) * n)
+
+
+def test_kda_rows_with_8bit_f_b_g_b_is_row_by_row(gpu, tmp_path, monkeypatch):
+    """kda.py's fused step with f_b / g_b at 8 bits (28 of the abliterated checkpoint's 34 KDA layers): the kernel's
+    rows equal kda_rows_ops (one row at a time, MLX's one-row qmv_quad for the 8-bit maps)."""
+
+    from glm5_fakes import write_checkpoint
+    from tensorfold.kernels.glm.flash.v1 import kda as KDA_K
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        path = write_checkpoint(tmp_path / "glm5")
+    finally:
+        mx.set_default_device(previous)
+    model = weights.load_backbone(path)
+    kda = model.layers[0].attn
+    kda.f_b, kda.g_b = _requant(kda.f_b, 8), _requant(kda.g_b, 8)
+    assert not KDA_K.fits(kda)                       # opt-in (TF_GLM5_KDA_BITS8): it moves the serial reference
+    monkeypatch.setenv("TF_GLM5_KDA_BITS8", "1")
+    assert KDA_K.fits(kda)
+    for rows in (1, 2, 3, 5, 8, 16):
+        mx.random.seed(rows)
+        proj = (0.5 * mx.random.normal((rows, kda.in_proj.outs))).astype(mx.bfloat16)
+        conv = (0.5 * mx.random.normal((kda.taps - 1, 3 * kda.width))).astype(mx.bfloat16)
+        state = (0.1 * mx.random.normal((1, kda.heads, kda.dim, kda.dim))).astype(mx.float32)
+        y, st, cs = KDA_K.kda_rows(kda, proj, conv, state)
+        # the window equals the same kernel one row at a time (row invariance: what drafting needs)
+        ys, s1, c1 = [], state, conv
+        for r in range(rows):
+            yr, s1, c1 = KDA_K.kda_rows(kda, mx.contiguous(proj[r:r + 1]), c1, s1)
+            ys.append(yr)
+        assert _same(y, mx.concatenate(ys)) and _same(st, s1) and _same(cs, c1), rows
+        # and against the ops path: y equal; the fp32 state may differ in its last bits (reported, not asserted,
+        # the same as the 4-bit kernel: this kernel is the reference where it runs)
+        y2, st2, cs2 = KDA_K.kda_rows_ops(kda, proj, conv, state)
+        assert _same(y, y2) and _same(cs, cs2), rows
+        if not _same(st, st2):
+            d = mx.abs(st - st2).max().item()
+            print(f"rows {rows}: 8-bit kda_rows state vs ops max |diff| {d:.3g}")

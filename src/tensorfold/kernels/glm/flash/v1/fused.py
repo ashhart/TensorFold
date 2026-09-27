@@ -8,11 +8,12 @@ from typing import Any
 import mlx.core as mx
 
 from tensorfold.kernels.glm.flash.v1 import kernels as K
+from tensorfold.kernels.glm.flash.v1 import widths as W
 
 MAX_ROWS = 16
 SQ_FMA = 0
 
-_HEADER = K._HEADER + r"""
+_HEADER = K._HEADER + W._HEADER_B + r"""
 template <typename U>
 inline U sigmoid_precise(U x) {
   U e = static_cast<U>(metal::precise::exp(metal::abs(x)));

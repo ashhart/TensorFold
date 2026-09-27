@@ -52,6 +52,14 @@ def check(model_dir: str | Path) -> None:
         if bad:
             raise ValueError(f"GLM-5.3-Flash's Mac engine reads MLX affine weights of 2 to 8 bits in groups of 32, 64 or "
                              f"128; this checkpoint stores {len(bad)} module(s) otherwise, {bad[0]} first. {OWN_MODEL_HELP}")
+        # per-tensor overrides (mlx-lm's mixed-bit conversions, e.g. grant-ai's abliterated conversion): the loader
+        # reads them; 8-, 6- and 5-bit tensors take their own row kernels (kernels.qmv_rows / expert_qmv at MLX's
+        # one-row bits for that width), the shared expert stays in the fused MoE
+        base = quantization(config)[0]
+        overrides = [k for k, v in quant_formats(config)[1].items() if v is not None and v[0] != base]
+        if overrides:
+            print(f"[tensorfold] {len(overrides)} tensors are not 4-bit (per-tensor quantization overrides): they run "
+                  f"through the 8/6/5-bit row kernels; drafting stays exact", flush=True)
         if (method != "exl3" and (Path(model_dir) / "model.safetensors.index.json").is_file()
                 and not has_mtp(model_dir)):
             print(f"[tensorfold] this checkpoint has no MTP layer: decoding without MTP drafts ({MODELS[0]} has "

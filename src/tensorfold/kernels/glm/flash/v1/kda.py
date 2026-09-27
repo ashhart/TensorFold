@@ -9,6 +9,74 @@ import mlx.core as mx
 
 # MLX's sigmoid, transcribed (#2105): instantiated on the type the eager op used, with the precise exp.
 _HEADER = r"""
+// f_b / g_b (128 -> H*D) for one head's D outputs: MLX's one-row qmv_quad arithmetic at the weights' width (a quad of
+// lanes per output, PER inputs a lane, quad_sum by the caller). 4-bit: nibbles pre-scaled, bf16-chained input sums,
+// the 16-bit qdot (as it was). 8-bit (the mixed-bit abliterated checkpoint; stream J): float sums in order, a byte
+// per weight (qmv_quad_impl<T, 64, 8> of MLX 0.32.2's quantized.h).
+template <int BITS, int PER>
+inline float quad_dot(device const bfloat* x, device const uint8_t* wb, float s, float bb);
+template <>
+inline float quad_dot<4, 32>(device const bfloat* x, device const uint8_t* wb, float s, float bb) {
+  constexpr int PER = 32;
+  float xt[PER];
+  float sum = 0.0f;
+  for (int i = 0; i < PER; i += 4) {
+    const bfloat a = x[i], b = x[i + 1], c = x[i + 2], e = x[i + 3];
+    sum += float(bfloat(float(bfloat(float(bfloat(float(a) + float(b))) + float(c))) + float(e)));
+    xt[i] = float(a); xt[i + 1] = float(b) / 16.0f; xt[i + 2] = float(c) / 256.0f; xt[i + 3] = float(e) / 4096.0f;
+  }
+  device const uint16_t* ws = (device const uint16_t*)wb;
+  float accum = 0.0f;
+  for (int i = 0; i < PER / 4; i++)
+    accum += xt[4 * i] * float(ws[i] & 0x000f) + xt[4 * i + 1] * float(ws[i] & 0x00f0) +
+             xt[4 * i + 2] * float(ws[i] & 0x0f00) + xt[4 * i + 3] * float(ws[i] & 0xf000);
+  float result = 0.0f;
+  result += s * accum + sum * bb;
+  return result;
+}
+template <>
+inline float quad_dot<4, 16>(device const bfloat* x, device const uint8_t* wb, float s, float bb) {
+  constexpr int PER = 16;
+  float xt[PER];
+  float sum = 0.0f;
+  for (int i = 0; i < PER; i += 4) {
+    const bfloat a = x[i], b = x[i + 1], c = x[i + 2], e = x[i + 3];
+    sum += float(bfloat(float(bfloat(float(bfloat(float(a) + float(b))) + float(c))) + float(e)));
+    xt[i] = float(a); xt[i + 1] = float(b) / 16.0f; xt[i + 2] = float(c) / 256.0f; xt[i + 3] = float(e) / 4096.0f;
+  }
+  device const uint16_t* ws = (device const uint16_t*)wb;
+  float accum = 0.0f;
+  for (int i = 0; i < PER / 4; i++)
+    accum += xt[4 * i] * float(ws[i] & 0x000f) + xt[4 * i + 1] * float(ws[i] & 0x00f0) +
+             xt[4 * i + 2] * float(ws[i] & 0x0f00) + xt[4 * i + 3] * float(ws[i] & 0xf000);
+  float result = 0.0f;
+  result += s * accum + sum * bb;
+  return result;
+}
+template <>
+inline float quad_dot<8, 32>(device const bfloat* x, device const uint8_t* wb, float s, float bb) {
+  constexpr int PER = 32;
+  float xt[PER];
+  float sum = 0.0f;
+  for (int i = 0; i < PER; i++) { sum += float(x[i]); xt[i] = float(x[i]); }
+  float accum = 0.0f;
+  for (int i = 0; i < PER; i++) accum += xt[i] * wb[i];
+  float result = 0.0f;
+  result += s * accum + sum * bb;
+  return result;
+}
+template <>
+inline float quad_dot<8, 16>(device const bfloat* x, device const uint8_t* wb, float s, float bb) {
+  constexpr int PER = 16;
+  float xt[PER];
+  float sum = 0.0f;
+  for (int i = 0; i < PER; i++) { sum += float(x[i]); xt[i] = float(x[i]); }
+  float accum = 0.0f;
+  for (int i = 0; i < PER; i++) accum += xt[i] * wb[i];
+  float result = 0.0f;
+  result += s * accum + sum * bb;
+  return result;
+}
 template <typename U>
 inline U mlx_sigmoid_precise(U x) {
   U e = static_cast<U>(metal::precise::exp(metal::abs(x)));
@@ -63,35 +131,30 @@ _SOURCE = r"""
 
   for (int r = 0; r < R; ++r) {
     device const bfloat* prow = P + (size_t)r * PS;
-    // ---- f_b / g_b (128 -> H*D, 4-bit groups of 64): MLX's one-row qmv_quad, as kernels.qmv_quad_rows
+    // ---- f_b / g_b (128 -> H*D, FB- / GB-bit, groups of 64) for this head's D outputs each: MLX's one-row qmv_quad
+    // (a quad of lanes per output, 32 inputs a lane, quad_sum), as kernels.qmv_quad_rows does.
     {
       constexpr int PER = D / 4;
-      constexpr int KB = D / 2;
       constexpr int KG = D / 64;
+      constexpr int FKB = D * FB / 8;                 // bytes a weight row
+      constexpr int GKB = D * GB / 8;
       const uint q_id = tid / 4u, qlid = tid % 4u;
       for (uint t = q_id; t < 2u * (uint)D; t += (uint)(NT / 4)) {
         const uint proj = t / (uint)D;
         const uint d = t - proj * (uint)D;
         const uint row = h * (uint)D + d;
         device const bfloat* x = prow + (proj == 0u ? FA : GA) + qlid * (uint)PER;
-        float xt[PER];
-        float sum = 0.0f;
-        for (int i = 0; i < PER; i += 4) {
-          const bfloat a = x[i], b = x[i + 1], c = x[i + 2], e = x[i + 3];
-          sum += float(bfloat(float(bfloat(float(bfloat(float(a) + float(b))) + float(c))) + float(e)));
-          xt[i] = float(a); xt[i + 1] = float(b) / 16.0f; xt[i + 2] = float(c) / 256.0f; xt[i + 3] = float(e) / 4096.0f;
-        }
-        device const uint8_t* wb = (device const uint8_t*)(proj == 0u ? FBW : GBW) + (size_t)row * KB + qlid * (PER / 2);
-        device const uint16_t* ws = (device const uint16_t*)wb;
         const uint gi = row * (uint)KG + qlid / (uint)(64 / PER);
         const float s = float(proj == 0u ? FBS[gi] : GBS[gi]);
         const float bb = float(proj == 0u ? FBB[gi] : GBB[gi]);
-        float accum = 0.0f;
-        for (int i = 0; i < PER / 4; i++)
-          accum += xt[4 * i] * float(ws[i] & 0x000f) + xt[4 * i + 1] * float(ws[i] & 0x00f0) +
-                   xt[4 * i + 2] * float(ws[i] & 0x0f00) + xt[4 * i + 3] * float(ws[i] & 0xf000);
-        float result = 0.0f;
-        result += s * accum + sum * bb;
+        float result;
+        if (proj == 0u) {
+          device const uint8_t* wb = (device const uint8_t*)FBW + (size_t)row * FKB + qlid * (PER * FB / 8);
+          result = quad_dot<FB, PER>(x, wb, s, bb);
+        } else {
+          device const uint8_t* wb = (device const uint8_t*)GBW + (size_t)row * GKB + qlid * (PER * GB / 8);
+          result = quad_dot<GB, PER>(x, wb, s, bb);
+        }
         const float v = quad_sum(result);
         if (qlid == 0u) {
           if (proj == 0u) sa[d] = float(bfloat(v));
@@ -240,10 +303,17 @@ def _kernel() -> Any:
 
 
 def fits(kda: Any) -> bool:
-    """The kernel's shapes: head dim 64 or 128, 4-bit group-64 f_b / g_b, the stacked in-projection's tail order."""
+    """The kernel's shapes: head dim 128 (64 for the test checkpoint), 4- or 8-bit group-64 f_b / g_b with head-dim
+    inputs (MLX's qmv_quad widths), a stacked in-projection whose tail is f_a | g_a | b."""
+
+    import os
 
     fb, gb = kda.f_b, kda.g_b
-    return (kda.dim in (64, 128) and all(q.bits == 4 and q.group == 64 and q.ins == kda.dim for q in (fb, gb))
+    # 8-bit f_b / g_b (the abliterated checkpoint): the kernel can take them (stream J, 9/27), but on that checkpoint
+    # the layers run the ops path today, and this kernel is the ops path's function, not its bits (recurrent state /
+    # conv window differ in the last bits) — folding them moves the serial reference, so it is opt-in.
+    widths = (4, 8) if os.environ.get("TF_GLM5_KDA_BITS8", "0").strip().lower() in ("1", "true", "yes", "on") else (4,)
+    return (kda.dim in (64, 128) and all(q.bits in widths and q.group == 64 and q.ins == kda.dim for q in (fb, gb))
             and kda.cuts[2] == 3 * kda.width and kda.cuts[3] - kda.cuts[2] == kda.dim
             and kda.cuts[4] - kda.cuts[3] == kda.dim and kda.in_proj.outs - kda.cuts[4] == kda.heads)
 
@@ -259,7 +329,7 @@ def kda_rows(kda: Any, proj: mx.array, conv: mx.array, state: mx.array) -> tuple
     y, st, cs = _kernel()(
         inputs=[proj, conv, kda.conv_w, fb.weight, fb.scales, fb.biases, gb.weight, gb.scales, gb.biases,
                 kda.A_flat, kda.dt_bias_flat, state, kda.o_norm, kda.lb_array, kda.eps_array],
-        template=[("H", h), ("D", d), ("TAPS", kda.taps), ("TY", TY)],
+        template=[("H", h), ("D", d), ("TAPS", kda.taps), ("TY", TY), ("FB", fb.bits), ("GB", gb.bits)],
         grid=(32, TY, h), threadgroup=(32, TY, 1),
         output_shapes=[(rows, h * d), tuple(state.shape), tuple(conv.shape)],
         output_dtypes=[mx.bfloat16, mx.float32, mx.bfloat16])

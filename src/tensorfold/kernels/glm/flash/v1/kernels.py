@@ -7,6 +7,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels.glm.flash.v1 import widths as W
+
 # MLX's one-row 4-bit matvec a simdgroup lane (as Flash Next's qmv_rows, bit for bit), 16 inputs a 512 block
 _HEADER = r"""
 inline float load16(const device bfloat* x, thread float* xt) {
@@ -360,18 +362,28 @@ def _kernel(name: str, source: str, inputs: list[str], outputs: list[str], heade
 
 def qmv_rows_fits(weights: Any, rows: int) -> bool:
     k = int(weights.scales.shape[-1]) * int(weights.group)
-    return (weights.bits == 4 and weights.group == 64 and k % 512 == 0 and int(weights.weight.shape[0]) % 4 == 0
-            and 1 < rows <= 32)
+    if weights.bits == 4:
+        return (weights.group == 64 and k % 512 == 0 and int(weights.weight.shape[0]) % 4 == 0 and 1 < rows <= 32)
+    return W.fast_shape(weights, int(weights.weight.shape[0])) and 1 < rows <= 32
 
 
 def qmv_rows(x: mx.array, weights: Any, *, rows_per_simdgroup: int = 4) -> mx.array:
-    """x [R, K] (bf16) through 4-bit, group-64 weights: each row MLX's one-row bits, weight reads shared."""
+    """x [R, K] (bf16) through 4-bit (or 5 / 6 / 8-bit, ``fast_shape``), group-64 weights: each row MLX's one-row
+    bits, weight reads shared."""
 
     rows, dims = x.shape
     n = int(weights.weight.shape[0])
-    kernel = _kernel("qmv_rows64", _QMV_ROWS, ["X", "W", "S", "B"], ["OUT"], _HEADER)
+    if weights.bits == 4:
+        kernel = _kernel("qmv_rows64", _QMV_ROWS, ["X", "W", "S", "B"], ["OUT"], _HEADER)
+        return kernel(inputs=[mx.contiguous(x), weights.weight, weights.scales, weights.biases],
+                      template=[("K", dims), ("N", n), ("RPS", rows_per_simdgroup)],
+                      grid=(32 * rows, n // rows_per_simdgroup, 1), threadgroup=(32 * rows, 1, 1),
+                      output_shapes=[(rows, n)], output_dtypes=[mx.bfloat16])[0]
+    v, lb = W.QFAST[weights.bits]
+    kernel = _kernel("qmv_rows_b", W._QMV_ROWS_B, ["X", "W", "S", "B"], ["OUT"], W._HEADER_B)
     return kernel(inputs=[mx.contiguous(x), weights.weight, weights.scales, weights.biases],
-                  template=[("K", dims), ("N", n), ("RPS", rows_per_simdgroup)],
+                  template=[("K", dims), ("N", n), ("RPS", rows_per_simdgroup), ("BITS", weights.bits), ("V", v),
+                            ("LB", lb)],
                   grid=(32 * rows, n // rows_per_simdgroup, 1), threadgroup=(32 * rows, 1, 1),
                   output_shapes=[(rows, n)], output_dtypes=[mx.bfloat16])[0]
 
@@ -381,17 +393,21 @@ MAX_ROWS = 16
 
 def qmv_quad_rows_fits(weights: Any, rows: int) -> bool:
     k = int(weights.scales.shape[-1]) * int(weights.group)
-    return weights.bits == 4 and weights.group == 64 and k in (64, 128) and 1 < rows <= MAX_ROWS
+    return weights.bits in (4, 8) and weights.group == 64 and k in (64, 128) and 1 < rows <= MAX_ROWS
 
 
 def qmv_quad_rows(x: mx.array, weights: Any) -> mx.array:
-    """x [R, K] (K 64 or 128) through 4-bit group-64 weights with MLX's one-row qmv_quad bits; no Metal: row by row."""
+    """x [R, K] (bf16, K 64 or 128) through 4-bit or 8-bit, group-64 weights: each row the bits of MLX's one-row
+    quantized matmul (qmv_quad). Without Metal: one MLX call a row."""
 
     rows, dims = x.shape
     if not metal():
         return mx.concatenate([weights(x[r:r + 1]) for r in range(rows)])
     n = int(weights.weight.shape[0])
-    kernel = _kernel("qmv_quad_rows64", _QMV_QUAD_ROWS, ["X", "W", "S", "B"], ["OUT"])
+    if weights.bits == 8:
+        kernel = _kernel("qmv_quad_rows8", W._QMV_QUAD_ROWS_8, ["X", "W", "S", "B"], ["OUT"], W._HEADER_B)
+    else:
+        kernel = _kernel("qmv_quad_rows64", _QMV_QUAD_ROWS, ["X", "W", "S", "B"], ["OUT"])
     return kernel(inputs=[mx.contiguous(x.astype(mx.bfloat16)), weights.weight, weights.scales, weights.biases],
                   template=[("K", dims), ("N", n)],
                   grid=(32 * rows, -(-n // 64), 1), threadgroup=(32, 1, 1),
@@ -415,8 +431,10 @@ def expert_group(idx: mx.array, experts: int) -> tuple[mx.array, mx.array, mx.ar
 
 def expert_qmv_fits(weights: Any, rows: int) -> bool:
     k = int(weights.scales.shape[-1]) * int(weights.group)
-    return (weights.bits == 4 and weights.group == 64 and k % 512 == 0 and int(weights.weight.shape[-2]) % 4 == 0
-            and 1 < rows <= MAX_ROWS)
+    if weights.bits == 4:
+        return (weights.group == 64 and k % 512 == 0 and int(weights.weight.shape[-2]) % 4 == 0
+                and 1 < rows <= MAX_ROWS)
+    return W.fast_shape(weights, int(weights.weight.shape[-2])) and 1 < rows <= MAX_ROWS
 
 
 def _gather_one_row(x: mx.array, ids: mx.array, weights: Any) -> mx.array:
@@ -440,11 +458,17 @@ def expert_qmv(x: mx.array, idx: mx.array, group: tuple[mx.array, mx.array, mx.a
         return mx.concatenate(parts)
     uids, umem, ucount = group
     picks = rows * top
-    kernel = _kernel("expert_qmv64", _EXPERT_QMV, ["X", "W", "S", "B", "UIDS", "UMEM", "UCOUNT"], ["OUT"], _HEADER)
+    template = [("K", dims), ("N", n), ("RPS", rows_per_simdgroup), ("TOPK", top), ("MAXR", MAX_ROWS),
+                ("PER_PICK", int(per_pick))]
+    if weights.bits == 4:
+        kernel = _kernel("expert_qmv64", _EXPERT_QMV, ["X", "W", "S", "B", "UIDS", "UMEM", "UCOUNT"], ["OUT"], _HEADER)
+    else:
+        v, lb = W.QFAST[weights.bits]
+        template += [("BITS", weights.bits), ("V", v), ("LB", lb)]
+        kernel = _kernel("expert_qmv_b", W._EXPERT_QMV_B, ["X", "W", "S", "B", "UIDS", "UMEM", "UCOUNT"], ["OUT"],
+                         W._HEADER_B)
     out = kernel(inputs=[mx.contiguous(x.reshape(-1, dims)), weights.weight, weights.scales, weights.biases, uids,
-                         umem, ucount],
-                 template=[("K", dims), ("N", n), ("RPS", rows_per_simdgroup), ("TOPK", top), ("MAXR", MAX_ROWS),
-                           ("PER_PICK", int(per_pick))],
+                         umem, ucount], template=template,
                  grid=(32 * rows, n // rows_per_simdgroup, picks), threadgroup=(32 * rows, 1, 1),
                  output_shapes=[(picks, n)], output_dtypes=[mx.bfloat16])[0]
     return out.reshape(rows, top, n)

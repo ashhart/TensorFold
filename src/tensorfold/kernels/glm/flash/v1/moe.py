@@ -7,6 +7,7 @@ from typing import Any
 import mlx.core as mx
 
 from tensorfold.kernels.glm.flash.v1 import kernels as K
+from tensorfold.kernels.glm.flash.v1 import widths as W
 from tensorfold.kernels.glm.flash.v1.fused import MAX_ROWS, _kernel
 
 ROUTER_TG = 1024
@@ -188,6 +189,50 @@ _MOE_GATEUP = r"""
   // Simdgroup m: gate and up for pick m of expert u (MAXU: the shared expert) by the one-row loop, then SwiGLU
   const uint lane = thread_index_in_simdgroup;
   const int m = int(simdgroup_index_in_threadgroup);
+  if (PART == 1 && SB != 4) {
+    // the shared expert alone at SB bits (the mixed-bit checkpoint's 8-bit shared experts; stream J): its input
+    // row r = m through MLX's one-row qmv_fast loop for that width (SV inputs, SLB weight bytes a lane a block),
+    // then the same SwiGLU tail. ACT [R][1][N].
+    constexpr int SBLK = 32 * SV;
+    constexpr int SKB = K * SB / 8;
+    constexpr int KG1 = K / 64;
+    constexpr int SDIV = 64 / SV;
+    constexpr int SSTEP = SBLK / 64;
+    constexpr int WSTEP = 32 * SLB;
+    const int R = int(X_shape[0]);
+    if (m >= R) return;
+    const int r = m;
+    const int row0 = int(threadgroup_position_in_grid.y) * RPS;
+    const device uint8_t* gw = (const device uint8_t*)SGU + size_t(row0) * SKB + lane * SLB;
+    const device uint8_t* uw = (const device uint8_t*)SGU + size_t(N + row0) * SKB + lane * SLB;
+    const device bfloat* gs = SGUS + size_t(row0) * KG1 + lane / SDIV;
+    const device bfloat* gb = SGUB + size_t(row0) * KG1 + lane / SDIV;
+    const device bfloat* us = SGUS + size_t(N + row0) * KG1 + lane / SDIV;
+    const device bfloat* ub = SGUB + size_t(N + row0) * KG1 + lane / SDIV;
+    const device bfloat* x = X + size_t(r) * K + lane * SV;
+    float ag[RPS], au[RPS];
+    for (int j = 0; j < RPS; j++) { ag[j] = 0.0f; au[j] = 0.0f; }
+    for (int k0 = 0; k0 < K; k0 += SBLK) {
+      float xt[SV];
+      const float sum = loadv<SB, SV>(x, xt);
+      for (int j = 0; j < RPS; j++) {
+        ag[j] += qdotv<SB, SV>(gw + j * SKB, xt, float(gs[j * KG1]), float(gb[j * KG1]), sum);
+        au[j] += qdotv<SB, SV>(uw + j * SKB, xt, float(us[j * KG1]), float(ub[j * KG1]), sum);
+      }
+      gw += WSTEP; uw += WSTEP; gs += SSTEP; gb += SSTEP; us += SSTEP; ub += SSTEP; x += SBLK;
+    }
+    for (int j = 0; j < RPS; j++) {
+      const float gv = simd_sum(ag[j]), uv = simd_sum(au[j]);
+      if (lane == 0) {
+        const float lim = float(bfloat(LIM[0]));
+        const bfloat gt = bfloat(metal::min(float(bfloat(gv)), lim));
+        const bfloat up = bfloat(metal::min(metal::max(float(bfloat(uv)), -lim), lim));
+        const bfloat sl = gt * sigmoid_fast(gt);
+        ACT[size_t(r) * N + row0 + j] = sl * up;
+      }
+    }
+    return;
+  }
   // PART 0: routed and shared; 1: the shared expert alone; 2: the routed experts alone (the same arithmetic)
   const int u = PART == 1 ? MAXU : int(threadgroup_position_in_grid.z);
   const int R = int(X_shape[0]);
@@ -239,6 +284,36 @@ _MOE_DOWN = r"""
   // Simdgroup m: down rows for pick m of expert u (MAXU: the shared expert) by the one-row qmv_fast loop
   const uint lane = thread_index_in_simdgroup;
   const int m = int(simdgroup_index_in_threadgroup);
+  if (PART == 1 && SB != 4) {
+    // the shared expert's down projection alone at SB bits (stream J): row r = m, MLX's one-row qmv_fast loop
+    constexpr int SBLK = 32 * SV;
+    constexpr int SKB = K * SB / 8;
+    constexpr int KG1 = K / 64;
+    constexpr int SDIV = 64 / SV;
+    constexpr int SSTEP = SBLK / 64;
+    constexpr int WSTEP = 32 * SLB;
+    const int R1 = int(ACT_shape[0]);
+    if (m >= R1) return;
+    const int r = m;
+    const int row0 = int(threadgroup_position_in_grid.y) * RPS;
+    const device uint8_t* w = (const device uint8_t*)SDW + size_t(row0) * SKB + lane * SLB;
+    const device bfloat* sc = SDS + size_t(row0) * KG1 + lane / SDIV;
+    const device bfloat* bi = SDB + size_t(row0) * KG1 + lane / SDIV;
+    const device bfloat* x = ACT + size_t(r) * K + lane * SV;
+    float acc[RPS];
+    for (int j = 0; j < RPS; j++) acc[j] = 0.0f;
+    for (int k0 = 0; k0 < K; k0 += SBLK) {
+      float xt[SV];
+      const float sum = loadv<SB, SV>(x, xt);
+      for (int j = 0; j < RPS; j++) acc[j] += qdotv<SB, SV>(w + j * SKB, xt, float(sc[j * KG1]), float(bi[j * KG1]), sum);
+      w += WSTEP; sc += SSTEP; bi += SSTEP; x += SBLK;
+    }
+    for (int j = 0; j < RPS; j++) {
+      const float v = simd_sum(acc[j]);
+      if (lane == 0) Y[size_t(r) * N + row0 + j] = bfloat(v);
+    }
+    return;
+  }
   const int u = PART == 1 ? MAXU : int(threadgroup_position_in_grid.z);
   const int R = int(ACT_shape[0]);
   constexpr int SLOTS = PART == 0 ? TOPK + 1 : (PART == 1 ? 1 : TOPK);
@@ -296,12 +371,21 @@ _MOE_COMBINE = r"""
 
 
 def moe_fits(moe: Any) -> bool:
-    """4-bit group-64 experts whose input dims are whole 512-value blocks, a shared expert, top-k <= 32."""
+    """4-bit group-64 routed experts whose input dims are whole 512-value blocks, a shared expert (4-bit, or with
+    SPLIT_SHARED any width MLX runs through qmv_fast: 5 / 6 / 8-bit), top-k <= 32."""
 
-    qs = [moe.gate, moe.up, moe.down] + ([moe.shared.gate_up, moe.shared.down] if moe.shared is not None else [])
-    return (moe.shared is not None and moe.shared.width == moe.gate.outs and moe.cfg.norm_topk_prob
+    if moe.shared is None:
+        return False
+    routed = [moe.gate, moe.up, moe.down]
+    shared = [moe.shared.gate_up, moe.shared.down]
+    if not all(getattr(q, "bits", None) is not None for q in shared):           # a QSplit stack: not one matrix
+        return False
+    shared_ok = (all(q.bits == 4 and q.group == 64 and q.ins % 512 == 0 and q.outs % 4 == 0 for q in shared)
+                 or (SPLIT_SHARED and all(W.fast_shape(q, q.outs) for q in shared)))
+    return (moe.shared.width == moe.gate.outs and moe.cfg.norm_topk_prob
             and moe.cfg.num_experts_per_tok <= 32 and moe.cfg.n_routed_experts <= 1024
-            and all(q.bits == 4 and q.group == 64 and q.ins % 512 == 0 and q.outs % 4 == 0 for q in qs))
+            and all(q.bits == 4 and q.group == 64 and q.ins % 512 == 0 and q.outs % 4 == 0 for q in routed)
+            and shared_ok)
 
 
 def moe_rows(moe: Any, x: mx.array, *, rps: int = 4) -> mx.array:
@@ -319,12 +403,15 @@ def moe_rows(moe: Any, x: mx.array, *, rps: int = 4) -> mx.array:
     down = _kernel("moe_down", _MOE_DOWN, ["ACT", "DW", "DS", "DB", "SDW", "SDS", "SDB", "UIDS", "UMEM", "UCOUNT"],
                    ["Y"])
 
+    gu_bits, dn_bits = sh.gate_up.bits, sh.down.bits
+    (gu_v, gu_lb), (dn_v, dn_lb) = W.QFAST_ALL[gu_bits], W.QFAST_ALL[dn_bits]
+
     def gu(part: int, slots: int, zs: int, uids: mx.array, umem: mx.array, ucount: mx.array) -> mx.array:
         return gateup(inputs=[x, moe.gate.weight, moe.gate.scales, moe.gate.biases, moe.up.weight, moe.up.scales,
                               moe.up.biases, sh.gate_up.weight, sh.gate_up.scales, sh.gate_up.biases, uids, umem,
                               ucount, moe.limit_arr],
                       template=[("K", dims), ("N", inter), ("RPS", rps), ("TOPK", top), ("MAXR", MAX_ROWS),
-                                ("MAXU", maxu), ("PART", part)],
+                                ("MAXU", maxu), ("PART", part), ("SB", gu_bits), ("SV", gu_v), ("SLB", gu_lb)],
                       grid=(32 * rows, inter // rps, zs), threadgroup=(32 * rows, 1, 1),
                       output_shapes=[(rows, slots, inter)], output_dtypes=[mx.bfloat16])[0]
 
@@ -333,7 +420,7 @@ def moe_rows(moe: Any, x: mx.array, *, rps: int = 4) -> mx.array:
         return down(inputs=[act, moe.down.weight, moe.down.scales, moe.down.biases, sh.down.weight, sh.down.scales,
                             sh.down.biases, uids, umem, ucount],
                     template=[("K", inter), ("N", dims), ("RPS", rps), ("TOPK", top), ("MAXR", MAX_ROWS),
-                              ("MAXU", maxu), ("PART", part)],
+                              ("MAXU", maxu), ("PART", part), ("SB", dn_bits), ("SV", dn_v), ("SLB", dn_lb)],
                     grid=(32 * rows, dims // rps, zs), threadgroup=(32 * rows, 1, 1),
                     output_shapes=[(rows, slots, dims)], output_dtypes=[mx.bfloat16])[0]
 
