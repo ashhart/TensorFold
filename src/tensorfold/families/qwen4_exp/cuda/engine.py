@@ -34,10 +34,12 @@ class FlashNextEngine:
 
     def __init__(self, model_dir: Path, *, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  draft_vocab: str | int | None = "default", max_len: int = CONTEXT, tp: int = 1, rank: int = 0,
-                 master: str = "", port: int = 29551, prefetch: bool = True, graphs: bool = True) -> None:
+                 master: str = "", port: int = 29551, prefetch: bool = True, graphs: bool = True,
+                 kv_dtype: str = "bf16") -> None:
         import torch
 
         from .decode import Engine
+        from .kvcache import check as check_kv
         from .weights import draft_token_ids, load
 
         if tp not in (1, 2) or rank not in range(tp):
@@ -47,6 +49,7 @@ class FlashNextEngine:
         torch.cuda.set_device(0)
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
         self.max_len = int(max_len)
+        self.kv_dtype = check_kv(kv_dtype)
         self.comm = None
         ids = draft_token_ids(draft_vocab) if self.depth > 0 else None
         if tp == 2:
@@ -64,7 +67,8 @@ class FlashNextEngine:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
                              "that has it, or --no-drafts for the serial reference (one token a round)")
         self.w = w
-        self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs)
+        self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
+                        kv_dtype=self.kv_dtype)
         started = time.perf_counter()
         if prefetch:                                  # the n-gram tables' pages, read now rather than by requests
             for layer in w.layers:
@@ -78,22 +82,24 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
-        print(f"[tensorfold] Flash Next on CUDA: {rule}; {self.max_len}-token context; n-gram tables read in "
+        kv = "" if self.kv_dtype == "bf16" else f"; int8 KV cache (fp16 scale per 32 values)"
+        print(f"[tensorfold] Flash Next on CUDA: {rule}; {self.max_len}-token context{kv}; n-gram tables read in "
               f"{read_s:.1f}s; {captured} decode graphs captured", flush=True)
 
     def _same_settings(self, torch, ids) -> None:
-        """Both ranks must decode with the same rule, context and draft vocabulary, or they would fall out of
-        step: refuse to start otherwise."""
+        """Both ranks must decode with the same rule, context, draft vocabulary and KV cache, or they would fall
+        out of step: refuse to start otherwise."""
 
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
-                             len(ids) if ids is not None else -1, total], dtype=torch.int64, device="cuda")
+                             len(ids) if ids is not None else -1, total, int(self.kv_dtype == "int8")],
+                            dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
         both = both.view(2, -1).cpu()
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
-                               f"draft vocabulary): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
+                               f"draft vocabulary, KV cache): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
 
     # -- two ranks: rank 0 hands each request to rank 1 ------------------------------------------------------
     def _key(self, n: int) -> str:

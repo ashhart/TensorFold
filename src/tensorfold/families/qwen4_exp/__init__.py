@@ -65,10 +65,12 @@ def engine_settings(model: Any) -> dict[str, Any]:
 
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
 CUDA_QUANTIZATION = (4, 32)
+# the KV cache dtypes the CUDA engine can allocate (``--kv-dtype``): int8 is the quantized cache
+CUDA_KV_DTYPES = ("bf16", "int8")
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
-                context: int | None = None, **options: Any):
+                context: int | None = None, kv_dtype: str = "bf16", **options: Any):
     """The CUDA engine (``tensorfold serve`` on an NVIDIA GPU), set up as the recipe measured on DGX Spark.
 
     A round verifies the pending token and 1 to 6 MTP drafts: the first draft always, then a chain ends before a
@@ -77,17 +79,21 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     machine) the model is tensor parallel: heads, expert width and vocabulary split, fp32 partials summed in rank
     order. Start rank 1 first; rank 0 serves HTTP. ``no_drafts`` or ``mtp_drafts=0``: one token a round, the
     serial reference. A checkpoint without the MTP head serves only that reference, so it needs ``no_drafts``.
+    ``kv_dtype``: "bf16" (the default) or "int8", the attention caches quantized to 8 bits with one fp16 scale
+    per 32 values (1.88x smaller; see docs/recipes/qwen3.8-flash-next.md and docs/recipes/cuda.md).
     """
 
     if drafter:
         raise ValueError(f"{TITLE} drafts with its own MTP head on CUDA: a separate draft model does not apply")
     from .cuda import CONTEXT, DEPTH
     from .cuda.engine import FlashNextEngine
+    from .cuda.kvcache import check as check_kv
 
+    check_kv(kv_dtype)                       # refuse an unknown cache before any weight is read
     depth = 0 if no_drafts else DEPTH if mtp_drafts is None else int(mtp_drafts)
     if depth and not has_mtp(Path(model_dir)):
         raise ValueError(f"this checkpoint has no MTP head, which {TITLE}'s CUDA engine drafts with ({MODELS[0]} "
                          "has one): without it every round would decode one token. Serve a checkpoint with the "
                          "head, or pass --no-drafts for the serial reference")
     return FlashNextEngine(Path(model_dir), depth=depth, max_len=int(context) if context else CONTEXT, tp=int(tp),
-                           rank=int(rank), master=master, port=int(master_port))
+                           rank=int(rank), master=master, port=int(master_port), kv_dtype=kv_dtype)

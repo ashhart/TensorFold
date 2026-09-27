@@ -27,7 +27,7 @@ import triton.language as tl
 
 from . import attention as attn_mod
 from . import gdn as gdn_mod
-from . import glue, moe as moe_mod, qmm
+from . import glue, kvcache, moe as moe_mod, qmm
 from .weights import HC, LayerW, Weights
 
 
@@ -120,11 +120,16 @@ class _MoECfg:
 
 # -- committed state -----------------------------------------------------------------------------------
 class State:
-    """Committed caches of one sequence (and of the MTP head's attention layer)."""
+    """Committed caches of one sequence (and of the MTP head's attention layer).
 
-    def __init__(self, w: Weights, capacity: int, max_rows: int) -> None:
+    ``kv_dtype``: "bf16" (the default) or "int8", the keys and values of every attention layer stored as
+    int8 codes with one fp16 scale per 32 values (``kvcache.KVCache``). The indexer keys and pooled block
+    keys of the sparse path stay bf16 either way."""
+
+    def __init__(self, w: Weights, capacity: int, max_rows: int, kv_dtype: str = "bf16") -> None:
         c = w.cfg
         dev = w.device
+        self.kv_dtype = kvcache.check(kv_dtype)
         self.capacity = capacity
         self.pos = 0
         self.pos_dev = torch.zeros((1,), dtype=torch.int32, device=dev)
@@ -138,8 +143,7 @@ class State:
         self.cur = [0] * n
         self.proj = torch.zeros((n, max_rows, gdn_mod.widths(c.nk, c.nv)[1]), dtype=torch.bfloat16, device=dev)
         self.scratch = [gdn_mod.GDNScratch(max_rows, dev, c.nk, c.nv) for _ in range(n)]
-        self.kc = [torch.zeros((capacity, c.kv_heads, c.head_dim), dtype=torch.bfloat16, device=dev) for _ in att]
-        self.vc = [torch.zeros_like(x) for x in self.kc]
+        self.kc = [kvcache.KVCache(capacity, c.kv_heads, c.head_dim, dev, self.kv_dtype) for _ in att]
         self.ikc = [torch.zeros((capacity, c.index_dim), dtype=torch.bfloat16, device=dev) for _ in att]
         nb = -(-capacity // c.index_ratio)
         self.pooled = [torch.zeros((nb, c.index_dim), dtype=torch.bfloat16, device=dev) for _ in att]
@@ -152,8 +156,7 @@ class State:
         self.mtp_drafted = 0
         self.mtp_pos = torch.zeros((1,), dtype=torch.int32, device=dev)
         if w.mtp is not None:
-            self.mtp_kc = torch.zeros((capacity, c.kv_heads, c.head_dim), dtype=torch.bfloat16, device=dev)
-            self.mtp_vc = torch.zeros_like(self.mtp_kc)
+            self.mtp_kc = kvcache.KVCache(capacity, c.kv_heads, c.head_dim, dev, self.kv_dtype)
             self.mtp_ikc = torch.zeros((capacity, c.index_dim), dtype=torch.bfloat16, device=dev)
             self.mtp_pooled = torch.zeros((-(-capacity // c.index_ratio), c.index_dim), dtype=torch.bfloat16,
                                           device=dev)
@@ -185,6 +188,10 @@ class State:
             if isinstance(value, torch.Tensor):
                 setattr(other, name, value.clone())
             elif isinstance(value, list) and value and isinstance(value[0], torch.Tensor):
+                setattr(other, name, [v.clone() for v in value])
+            elif isinstance(value, kvcache.KVCache):
+                setattr(other, name, value.clone())
+            elif isinstance(value, list) and value and isinstance(value[0], kvcache.KVCache):
                 setattr(other, name, [v.clone() for v in value])
         other.cur = list(self.cur)
         other.scratch = [copy.copy(sc) for sc in self.scratch]
@@ -315,17 +322,18 @@ def _out_proj(w: Weights, b: Buffers, x: torch.Tensor, q: qmm.Q4, xs: torch.Tens
     return 3, _gather(w, b, b.part_branch, b.g_branch, R)
 
 
-def attn_block(layer: LayerW, w: Weights, kc, vc, ikc, pooled, pos_dev: torch.Tensor, b: Buffers, R: int,
+def attn_block(layer: LayerW, w: Weights, cache, ikc, pooled, pos_dev: torch.Tensor, b: Buffers, R: int,
                context: int):
     c = w.cfg
     a = layer.attn
     _mm(b.mixed[:R], a.proj, b.xs_mixed[:R], b.pa[:R], b)
-    glue.attn_prep(b.pa[:R], pos_dev, a.q_scale, a.k_scale, a.iq_scale, w.inv_freq, b.q, kc, vc, b.iq, ikc,
-                   c.eps, q_heads=c.heads, kv_heads=c.kv_heads, head_dim=c.head_dim, index_heads=c.index_heads,
-                   index_dim=c.index_dim)
+    glue.attn_prep(b.pa[:R], pos_dev, a.q_scale, a.k_scale, a.iq_scale, w.inv_freq, b.q, cache.k, cache.v, b.iq,
+                   ikc, c.eps, q_heads=c.heads, kv_heads=c.kv_heads, head_dim=c.head_dim,
+                   index_heads=c.index_heads, index_dim=c.index_dim, ks=cache.ks, vs=cache.vs, kvq=cache.quantized)
     if b.attn.qsa:
         attn_mod.qsa_select(b.iq[:R], ikc, pooled, pos_dev, a.ik_scale, w.inv_freq, c.eps, b.attn, R)
-    o = attn_mod.attention(b.q[:R], kc, vc, pos_dev, b.attn, R, c.head_dim ** -0.5)
+    o = attn_mod.attention(b.q[:R], cache.k, cache.v, pos_dev, b.attn, R, c.head_dim ** -0.5, ks=cache.ks,
+                           vs=cache.vs, kvq=cache.quantized)
     glue.attn_gate(o[:R], b.pa[:R], b.gated[:R], b.xs_gated[:R], q_heads=c.heads, head_dim=c.head_dim)
     return _out_proj(w, b, b.gated[:R], a.o, b.xs_gated[:R], R)
 
@@ -428,12 +436,10 @@ def layer_forward(layer: LayerW, w: Weights, st: State, b: Buffers, R: int, pend
     if layer.linear:
         mode, branch = gdn_block(layer, w, st, b, R)
     elif mtp:
-        mode, branch = attn_block(layer, w, st.mtp_kc, st.mtp_vc, st.mtp_ikc, st.mtp_pooled, st.mtp_pos, b, R,
-                                  context)
+        mode, branch = attn_block(layer, w, st.mtp_kc, st.mtp_ikc, st.mtp_pooled, st.mtp_pos, b, R, context)
     else:
         ai = st.att_index[layer.index]
-        mode, branch = attn_block(layer, w, st.kc[ai], st.vc[ai], st.ikc[ai], st.pooled[ai], st.pos_dev, b, R,
-                                  context)
+        mode, branch = attn_block(layer, w, st.kc[ai], st.ikc[ai], st.pooled[ai], st.pos_dev, b, R, context)
     hc_block(layer.mlp_hc, b, R, c.eps, c.streams, c.low, mode, b.inj_a[:R], b.inj_m, h, branch=branch)
     moe_mode, a, wts = moe_block(layer, w, b, R)
     return (moe_mode, a, wts, b.inj_m)
