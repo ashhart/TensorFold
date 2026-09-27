@@ -78,7 +78,7 @@ def _lane_project(x: mx.array, linear: Any) -> mx.array:
     if hit is None or hit[0] is not weight:
         n = int(weight.shape[0])
         nt = 64 if n % 64 == 0 else 32 if n % 32 == 0 else 0
-        tiled = lane_qmm.tile_weight(weight, nt, linear.group_size) if nt else weight
+        tiled = lane_qmm.tile_weight(weight, nt, linear.group_size, bits=linear.bits) if nt else weight
         sbt = lane_qmm.pack_scales(linear.scales, linear.biases)
         mx.eval(tiled, sbt)
         hit = _lane[id(linear)] = (weight, tiled, sbt, nt)

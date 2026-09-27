@@ -11,11 +11,11 @@ from tensorfold.kernels.qwen.dense.v1 import lane_qmm  # noqa: E402
 from tensorfold.drafters.dflash_drafter import DFlashDrafter  # noqa: E402
 
 
-def _drafter_with_head(n: int, k: int):
+def _drafter_with_head(n: int, k: int, bits: int = 4):
     mx.random.seed(9)
     holder = nn.Sequential(nn.Linear(k, n, bias=False))
     holder.set_dtype(mx.bfloat16)
-    nn.quantize(holder, group_size=64, bits=4)
+    nn.quantize(holder, group_size=64, bits=bits)
     mx.eval(holder.parameters())
     head = holder.layers[0]
     config = types.SimpleNamespace(output_multiplier=1.0, final_logit_softcapping=None)
@@ -27,9 +27,10 @@ def _drafter_with_head(n: int, k: int):
     return drafter, holder
 
 
-def test_draft_vocab_keeps_the_full_heads_logits():
+@pytest.mark.parametrize("bits", [4, 3, 2])          # the drafter uses the target's head: 3-bit on a 3-bit target
+def test_draft_vocab_keeps_the_full_heads_logits(bits):
     try:
-        drafter, holder = _drafter_with_head(4096, 512)
+        drafter, holder = _drafter_with_head(4096, 512, bits)
         lane_qmm.install(holder, rows=lane_qmm.MAX_ROWS)
         hidden = (mx.random.normal((1, 16, 512)) * 0.5).astype(mx.bfloat16)
         full = drafter.model.compute_logits(hidden)

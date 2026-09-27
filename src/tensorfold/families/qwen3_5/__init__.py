@@ -91,17 +91,29 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     """The family model: the lane kernels when ``lane_kernels`` is "on", or "auto" on a GPU with tensor units, else
     the lane decoder without them. Checkpoints the lane decoders cannot read are refused."""
 
-    from tensorfold.families import quantization, read_config
+    from tensorfold.families import describe_quantization, quantization, read_config
     from tensorfold.families.qwen3_5.family import Qwen35Family
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
-    found = quantization(read_config(model_dir))
-    if found != (4, 64):
-        raise SystemExit(f"[tensorfold] {TITLE} decodes through lane kernels that read 4-bit weights in groups of 64 "
-                         f"({MODELS[0]}); this checkpoint is {found}")
-    model, tokenizer = load_lane_model(Path(model_dir))
     lanes = lane_kernels == "on" or (lane_kernels == "auto" and tensor_units())
+    config = read_config(model_dir)
+    bits, group = quantization(config)
+    widths = "/".join(str(b) for b in lane_qmm.BITS)
+    if not (group == 64 and (lane_qmm.readable(bits, group) if lanes else bits == 4)):
+        others = "/".join(str(b) for b in lane_qmm.BITS if b != 4)
+        reads = (f"{widths}-bit weights in groups of 64" if lanes else
+                 f"4-bit weights in groups of 64 without tensor units ({others}-bit need an M5-generation GPU)")
+        raise SystemExit(f"[tensorfold] {TITLE} decodes through lane kernels that read {reads}; this checkpoint has "
+                         f"{describe_quantization(config)}. Use {MODELS[0]}")
+    model, tokenizer = load_lane_model(Path(model_dir))
     model._tensorfold_lanes = bool(lanes)
     if lanes:
+        missed = lane_qmm.uncovered(model)
+        if missed:
+            kinds = ", ".join(f"{n} {kind}" for kind, n in sorted(missed.items()))
+            raise SystemExit(f"[tensorfold] {TITLE}: the lane kernels do not take this checkpoint's {kinds} "
+                             f"projections (MLX's kernels would give drafted rows other bits than one-row steps). Use "
+                             f"{MODELS[0]}, or a conversion whose projections are all {widths}-bit in groups of 64")
         install_lane_kernels(model)
     elif not install_row_decoder(model):
         raise SystemExit(f"[tensorfold] {TITLE}: the lane decoder without tensor units does not take these weights")
@@ -190,7 +202,7 @@ def kernel_version(model: Any) -> str:
     from tensorfold.kernels.qwen.dense.v1 import (lane_attention, lane_fuse, lane_glue, lane_qmm, stream_attention,
                                                   stream_gdn)
 
-    sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, lane_qmm._XSUM, lane_attention._PARTIAL,
+    sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, lane_qmm._MAIN_LOWBIT, lane_qmm._XSUM, lane_attention._PARTIAL,
                *stream_attention.sources().values(), lane_attention._MERGE, lane_glue._NORM_XS, lane_glue._GDN_PRE,
                lane_glue._GDN_POST, lane_glue._MLP_ACT, *stream_gdn.sources().values(),
                repr((lane_attention.CHUNK, lane_attention.TILE))]

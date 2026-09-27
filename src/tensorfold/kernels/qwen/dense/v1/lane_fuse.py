@@ -1,31 +1,4 @@
-"""One lane matmul per group of projections that read the same rows, bit-identical to separate calls.
-
-A lane matmul column's bits depend only on K and the K-slice count ``sk`` (``lane_qmm.lane_matmul``):
-weights stacked into one call with ``sk`` set to their common ``split_k`` come out exactly as from
-their own calls. The lane decoder (``lane_tree.tree_forward``) stacks, per layer (Qwen3.8-27B):
-
-    recurrent  [in_proj_z; in_proj_b; in_proj_a]   6144 + 48 + 48 rows     sk 8
-    attention  [k_proj; v_proj]                    1024 + 1024 rows        sk 8
-    MLP        [gate_proj; up_proj]                17408 + 17408 rows      sk 2 (the stack alone would get 1)
-
-in_proj_qkv and q_proj (sk 4) have no partner with the same split.
-
-No weight is stored twice. In ``lane_qmm.tile_weight``'s layout column tile t is rows [32t, 32t + 32),
-so the stack of tiled weights is the tiled stack: a group's weights are concatenated once and each
-tiled module's ``weight`` becomes a row slice (a view) of the stack, which frees the old arrays.
-in_proj_b and in_proj_a (48 rows, not whole tiles) keep their MLX-layout arrays; the stack holds a
-tiled copy of [b; a] (96 rows, 3 tiles, 0.25 MB a layer). The stack's interleaved scales are a new
-array, 1/8 of its weight bytes (~0.83 GB for Qwen3.8-27B, 0.71 GB of it the MLPs'): the modules keep
-their own for their separate calls (batched rounds still run mlx_lm's layers).
-
-A column slice of a multi-row output is not row-contiguous, and MLX copies such an input before a
-custom kernel (a launch per slice, more than the fusion saves). So the stacked outputs go to variants
-of ``lane_glue``'s kernels that read them in place: each variant is lane_glue's source text with only
-the operand's index expression replaced, the arithmetic untouched (bits tested equal).
-
-``enabled`` switches the fused path; ``build(model)`` stacks every group up front (call it after
-``lane_qmm.install(model)``); otherwise a layer's groups are built on first use (``auto_build``).
-"""
+"""Stack projections with equal K splits to preserve separate-call bits, share tiled weights as views, and consume strided outputs in place without changing arithmetic."""
 
 from __future__ import annotations
 
@@ -34,7 +7,7 @@ from typing import Any
 
 import mlx.core as mx
 
-enabled = False         # the lane decoder uses the stacked groups (off until proven)
+enabled = False         # the lane decoder uses the stacked groups
 auto_build = True       # a layer's groups are stacked on first use when build() has not run
 kinds = {"zba", "kv", "gu"}     # the groups used (a subset switches the others back to separate calls)
 separate_rows: dict[str, range] = {"gu": range(17, 33)}
@@ -50,7 +23,7 @@ _SMALL_TAIL = 8 * 1024 * 1024    # an untiled tail is tiled into the stack as a 
 
 
 class _Group:
-    """A stacked projection: ``weight`` (sum N, K/8) and ``sbt`` (K/64, sum N, 2) for one lane matmul."""
+    """A stacked projection: ``weight`` (sum N, K*bits/32) and ``sbt`` (K/64, sum N, 2) for one lane matmul."""
 
     __slots__ = ("weight", "sbt", "tiled", "sk", "k", "sizes", "added", "members", "held", "sbts", "nt")
 
@@ -102,13 +75,16 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
         return no
     for m in members:
         w = m["weight"]
-        if (m.bits != 4 or m.group_size != 64 or getattr(m, "mode", "affine") != "affine" or "bias" in m
-                or w.dtype != mx.uint32 or w.ndim != 2 or m["scales"].dtype != mx.bfloat16):
+        if not lane_qmm.takes(m) or m.group_size != 64 or "bias" in m or w.dtype != mx.uint32 or w.ndim != 2:
             return no
-    k8 = int(members[0]["weight"].shape[1])
-    k = 8 * k8
+    bits = members[0].bits
+    if any(m.bits != bits for m in members):     # one kernel a stack: members of mixed widths stay separate calls
+        return no
+    kw = int(members[0]["weight"].shape[1])
+    k = kw * 32 // bits
     sizes = tuple(int(m["weight"].shape[0]) for m in members)
-    if k % 64 or any(int(m["weight"].shape[1]) != k8 for m in members) or any(n % 4 for n in sizes):
+    if (k % 64 or k * bits != kw * 32 or any(int(m["weight"].shape[1]) != kw for m in members)
+            or any(n % 4 for n in sizes)):
         return no
     splits = {lane_qmm.split_k(n, k) for n in sizes}
     if len(splits) != 1:                  # a column's bits depend on its split: only equal splits stack
@@ -128,7 +104,7 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
         if any(tiled[j:]) or tail % lane_qmm.NT or sum(m["weight"].nbytes for m in members[j:]) > _SMALL_TAIL:
             return no
         parts = [m["weight"] for m in members[:j]]
-        parts.append(lane_qmm.tile_weight(mx.concatenate([m["weight"] for m in members[j:]], axis=0)))
+        parts.append(lane_qmm.tile_weight(mx.concatenate([m["weight"] for m in members[j:]], axis=0), bits=bits))
         viewed = members[:j]
         stacked_tiled = True
         copied = parts[-1].nbytes
@@ -175,10 +151,7 @@ def _group(parent: Any, kind: str, *, build: bool | None = None) -> _Group | Non
 
 
 def _project(parent: Any, kind: str, x: mx.array) -> mx.array | None:
-    """The group's stacked projection of ``x`` (..., sum N), or None: the members' own calls then.
-
-    Taken only where each member would itself run the lane matmul (``lane_qmm._call``).
-    """
+    """Return the stacked projection (..., sum N) only when every member would use lane matmul, otherwise None."""
 
     if not enabled or kind not in kinds:
         return None
@@ -227,10 +200,7 @@ def build(model: Any) -> dict[str, int]:
 
 
 def clear(model: Any) -> None:
-    """Drop every stack: the modules keep their views (each holds the whole stack's buffer until replaced).
-
-    After ``lane_qmm.uninstall()`` the members hold new arrays and this frees the stacks.
-    """
+    """Drop stacks; module views retain their buffers until uninstall replaces the arrays."""
 
     for _, module in model.named_modules():
         if _ATTR in module.__dict__:
@@ -347,13 +317,14 @@ def warm(model: Any, *, rows: tuple[int, ...] = (1, 17, 33)) -> int:
 
     from tensorfold.kernels.qwen.dense.v1 import lane_qmm, stream_gdn
 
-    seen: set[tuple[int, int, int, bool]] = set()
+    seen: set[tuple[int, ...]] = set()
     outs: list[mx.array] = []
     for _, module in model.named_modules():
         for kind, group in module.__dict__.get(_ATTR, {}).items():
             if not isinstance(group, _Group):
                 continue
-            key = (int(group.weight.shape[0]), group.k, group.sk, group.tiled, group.nt)
+            key = (int(group.weight.shape[0]), group.k, lane_qmm.weight_bits(group.weight, group.k), group.sk,
+                   group.tiled, group.nt)
             if key in seen:
                 continue
             seen.add(key)

@@ -28,8 +28,12 @@ def _needs_tensor_units():
         pytest.skip(f"tensor-unit kernels unavailable: {str(exc).splitlines()[0][:80]}")
 
 
-def _same(a, b):
+def _same(a, b, *, finite=True):
+    """The same bits, and (``finite``) no inf or NaN: a lost dispatch can leave the same NaN on both sides."""
+
     if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    if finite and mx.issubdtype(a.dtype, mx.floating) and not bool(mx.all(mx.isfinite(a)).item()):
         return False
     if a.dtype == mx.float32:
         return bool(mx.all(a.view(mx.uint32) == b.view(mx.uint32)).item())
@@ -38,10 +42,10 @@ def _same(a, b):
     return bool(mx.all(a.view(mx.uint16) == b.view(mx.uint16)).item())
 
 
-def _quantized(n, k, seed):
+def _quantized(n, k, seed, bits=4):
     mx.random.seed(seed)
     w = (mx.random.normal((n, k)) * 0.02).astype(mx.bfloat16)
-    return mx.quantize(w, group_size=64, bits=4)          # bf16 scales and biases, as the checkpoint has
+    return mx.quantize(w, group_size=64, bits=bits)       # bf16 scales and biases, as the checkpoint has
 
 
 def test_split_k_of_the_groups():
@@ -53,21 +57,23 @@ def test_split_k_of_the_groups():
         assert len({lane_qmm.split_k(n, K) for n in sizes}) == 1
 
 
+@pytest.mark.parametrize("bits", [4, 3, 2])
 @pytest.mark.parametrize("kind", sorted(GROUP_SIZES))
 @pytest.mark.parametrize("tile", [True, False])
-def test_stacked_matmul_bits(kind, tile):
+def test_stacked_matmul_bits(kind, tile, bits):
     """The stack's columns equal each member's own call, in the layout install() leaves it."""
 
     _needs_tensor_units()
     sizes = GROUP_SIZES[kind]
-    qs = [_quantized(n, K, 100 + i) for i, n in enumerate(sizes)]
+    qs = [_quantized(n, K, 100 + i, bits) for i, n in enumerate(sizes)]
     sbts = [lane_qmm.pack_scales(s, b) for _, s, b in qs]
     tiled = [tile and n % lane_qmm.NT == 0 for n in sizes]
-    ws = [lane_qmm.tile_weight(q) if t else q for (q, _, _), t in zip(qs, tiled)]
+    ws = [lane_qmm.tile_weight(q, bits=bits) if t else q for (q, _, _), t in zip(qs, tiled)]
     if all(tiled) or not any(tiled):
         stack = mx.concatenate(ws, axis=0)
     else:                                   # z tiled, [b; a] (96 rows, 3 tiles) tiled into the stack
-        stack = mx.concatenate([ws[0], lane_qmm.tile_weight(mx.concatenate([q for q, _, _ in qs[1:]], axis=0))])
+        tail = mx.concatenate([q for q, _, _ in qs[1:]], axis=0)
+        stack = mx.concatenate([ws[0], lane_qmm.tile_weight(tail, bits=bits)])
     sbt = mx.concatenate(sbts, axis=1)
     sk = lane_qmm.split_k(sizes[0], K)
     mx.random.seed(1)
@@ -107,7 +113,7 @@ def test_mlp_act_reads_the_stack_in_place(W):
     ours = lane_fuse.mlp_act(gu)
     ours_xs = _xs_of(ours)
     mx.eval(ref, ref_xs, ours, ours_xs)
-    assert _same(ours, ref) and _same(ours_xs, ref_xs)
+    assert _same(ours, ref, finite=False) and _same(ours_xs, ref_xs, finite=False)   # inf and NaN gates, bit for bit
 
 
 @pytest.mark.parametrize("W", [1, 7, 16, 17, 32])
@@ -152,7 +158,7 @@ class _Holder(nn.Module):
             setattr(self, name, nn.Linear(K, n, bias=False))
 
 
-def _real_groups():
+def _real_groups(bits=4):
     root = nn.Module()
     root.linear_attn = _Holder([("in_proj_z", 6144), ("in_proj_b", 48), ("in_proj_a", 48)])
     root.self_attn = _Holder([("k_proj", 1024), ("v_proj", 1024)])
@@ -161,14 +167,15 @@ def _real_groups():
         if isinstance(module, nn.Linear):
             mx.random.seed(300 + i)
             module.weight = (mx.random.normal(module.weight.shape) * 0.02).astype(mx.bfloat16)
-    nn.quantize(root, group_size=64, bits=4)
+    nn.quantize(root, group_size=64, bits=bits)
     mx.eval(root.parameters())
     return root
 
 
-def test_build_keeps_the_weights_and_adds_only_the_scales():
+@pytest.mark.parametrize("bits", [4, 3, 2])
+def test_build_keeps_the_weights_and_adds_only_the_scales(bits):
     _needs_tensor_units()
-    root = _real_groups()
+    root = _real_groups(bits)
     members = {kind: [getattr(parent, n) for n in lane_fuse.GROUPS[kind]]
                for kind, parent in (("zba", root.linear_attn), ("kv", root.self_attn), ("gu", root.mlp))}
     originals = {id(m): m["weight"] for ms in members.values() for m in ms}          # MLX's layout
@@ -189,13 +196,14 @@ def test_build_keeps_the_weights_and_adds_only_the_scales():
         added = lane_fuse.stats(root)["added_bytes"]
         # the stacks' scales and the tiled [b; a] copy, nothing more: the old weight arrays were freed
         expect = sum(sum(lane_qmm.pack_scales(m["scales"], m["biases"]).nbytes for m in ms) for ms in members.values())
-        expect += 96 * (K // 8) * 4
+        expect += 96 * (K * bits // 32) * 4
         assert added == expect
-        assert abs(grown - expect) < 1024**2 and grown < 0.2 * weight_bytes, (grown, expect, weight_bytes)
+        # scales are 1/(2 * bits) of the weights' bytes (1/8 at 4 bits): a second copy of the weights would add them all
+        assert abs(grown - expect) < 1024**2 and grown < 1.6 / (2 * bits) * weight_bytes, (grown, expect, weight_bytes)
         for ms in members.values():
             for m in ms:
                 w = m["weight"]
-                seen = lane_qmm.untile_weight(w) if getattr(m, "_lane_tiled", False) else w
+                seen = lane_qmm.untile_weight(w, bits=bits) if getattr(m, "_lane_tiled", False) else w
                 assert _same(seen, originals[id(m)]), "a member's weight changed"
         # each member's own call (on its view of the stack) keeps its bits, and the stack gives them too
         lane_fuse.enabled = True
@@ -224,7 +232,38 @@ def test_build_keeps_the_weights_and_adds_only_the_scales():
     lane_fuse.clear(root)
 
 
-def _tiny_model():
+def test_groups_of_mixed_widths_stay_separate():
+    """A mixed 3/4-bit checkpoint (gate 3-bit, up 4-bit): no stack, each member keeps its own lane call."""
+
+    _needs_tensor_units()
+    root = nn.Module()
+    root.mlp = _Holder([("gate_proj", 1024), ("up_proj", 1024)])
+    for i, (_, module) in enumerate(root.mlp.named_modules()):
+        if isinstance(module, nn.Linear):
+            mx.random.seed(400 + i)
+            module.weight = (mx.random.normal(module.weight.shape) * 0.02).astype(mx.bfloat16)
+    nn.quantize(root.mlp, group_size=64, bits=3, class_predicate=lambda p, m: p == "gate_proj")
+    nn.quantize(root.mlp, group_size=64, bits=4, class_predicate=lambda p, m: p == "up_proj")
+    mx.eval(root.parameters())
+    assert (root.mlp.gate_proj.bits, root.mlp.up_proj.bits) == (3, 4)
+    x = (mx.random.normal((1, 16, K)) * 0.5).astype(mx.bfloat16)
+    saved = lane_fuse.enabled
+    try:
+        lane_qmm.install(root, rows=lane_qmm.MAX_ROWS)
+        alone = [m(x) for m in (root.mlp.gate_proj, root.mlp.up_proj)]
+        mx.eval(alone)
+        assert lane_fuse.build(root) == {"zba": 0, "kv": 0, "gu": 0}
+        lane_fuse.enabled = True
+        assert lane_fuse.mlp_gate_up(root.mlp, x) is None
+        for m, y in zip((root.mlp.gate_proj, root.mlp.up_proj), alone):
+            assert _same(m(x), y)
+    finally:
+        lane_fuse.enabled = saved
+        lane_qmm.uninstall()
+        lane_fuse.clear(root)
+
+
+def _tiny_model(bits=4):
     from mlx_lm.models.qwen3_5 import TextModel, TextModelArgs
 
     # Qwen3.8's head shapes and MLP width on a 1024-wide residual: the gate/up stack alone would
@@ -237,16 +276,21 @@ def _tiny_model():
     mx.random.seed(21)
     model = TextModel(args)
     model.set_dtype(mx.bfloat16)
-    nn.quantize(model, group_size=64, bits=4)
+    nn.quantize(model, group_size=64, bits=bits)
     mx.eval(model.parameters())
     return model
 
 
-def test_tree_forward_fused_equals_unfused():
+@pytest.mark.parametrize("bits", [4, 3, 2])
+def test_tree_forward_fused_equals_unfused(bits):
     """Whole lane-decoder rounds: prompt chain, draft tree, commit, chain, one row; every bit the same."""
 
     _needs_tensor_units()
-    model = _tiny_model()
+    _check_fused_rounds(bits, pipeline_layers=2)
+
+
+def _check_fused_rounds(bits, *, pipeline_layers):
+    model = _tiny_model(bits)
     core, head = model.model, model.lm_head
     mx.random.seed(5)
     prompt = [int(t) for t in mx.random.randint(0, 512, (40,)).tolist()]      # gate/up stacked (> 32 rows)
@@ -262,7 +306,8 @@ def test_tree_forward_fused_equals_unfused():
 
         def step(tokens, rows_parents, keep):
             nonlocal start
-            logits, record = lane_tree.tree_forward(core, head, tokens, rows_parents, cache, start, pipeline_layers=2)
+            logits, record = lane_tree.tree_forward(core, head, tokens, rows_parents, cache, start,
+                                                    pipeline_layers=pipeline_layers)
             outs.append(logits)
             for entry in record:
                 outs.extend(a for a in entry[1:] if isinstance(a, mx.array))
@@ -296,6 +341,59 @@ def test_tree_forward_fused_equals_unfused():
     for i, (p, f, a) in enumerate(zip(plain, fused, after)):
         assert _same(f, p), f"output {i} changed with the stacked projections"
         assert _same(a, p), f"output {i} changed after the stacks were built"
+
+
+@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("fused", [False, True])
+def test_chain_rows_equal_one_row_steps(bits, fused):
+    """A 16-row chain's logits equal 16 one-row steps bit for bit, through the production install and stacks."""
+
+    _needs_tensor_units()
+    model = _tiny_model(bits)
+    core, head = model.model, model.lm_head
+    mx.random.seed(6)
+    prompt = [int(t) for t in mx.random.randint(0, 512, (40,)).tolist()]
+    chain = [int(t) for t in mx.random.randint(0, 512, (16,)).tolist()]
+
+    def run(serial):
+        cache = model.make_cache()
+        start = 0
+
+        def step(tokens):
+            nonlocal start
+            parents = [-1] + list(range(len(tokens) - 1))
+            logits, record = lane_tree.tree_forward(core, head, tokens, parents, cache, start, pipeline_layers=2)
+            lane_tree.commit_tree(cache, record, list(range(len(tokens))), len(tokens), start)
+            start += len(tokens)
+            mx.eval(logits)
+            return logits
+
+        step(prompt)
+        return mx.concatenate([step([t]) for t in chain], axis=1) if serial else step(chain)
+
+    saved = lane_fuse.enabled
+    try:
+        lane_qmm.install(model, rows=lane_qmm.MAX_ROWS, wide=True)
+        assert lane_qmm.warm(model) > 0
+        lane_fuse.enabled = fused
+        if fused:
+            assert lane_fuse.build(model) == {"zba": 3, "kv": 1, "gu": 4}
+            assert lane_fuse.warm(model) > 0
+        window, steps = run(serial=False), run(serial=True)
+    finally:
+        lane_fuse.enabled = saved
+        lane_qmm.uninstall()
+        lane_fuse.clear(model)
+    for i in range(len(chain)):
+        assert _same(window[:, i], steps[:, i]), f"chain row {i} differs from its one-row step"
+
+
+def test_models_of_other_widths_in_one_process():
+    """Rounds for a 4-bit, a 3-bit and a 4-bit model in one process, unpipelined: kernels compile mid-evaluation."""
+
+    _needs_tensor_units()
+    for bits in (4, 3, 4):
+        _check_fused_rounds(bits, pipeline_layers=0)
 
 
 def test_streams_conv_window_in_one_launch_equals_one_stream_calls():
@@ -332,12 +430,13 @@ def _chain(n):
     return [-1] + list(range(n - 1))
 
 
+@pytest.mark.parametrize("bits", [4, 3, 2])
 @pytest.mark.parametrize("fused", [False, True])
-def test_kernel_signatures_do_not_change_between_calls(fused):
+def test_kernel_signatures_do_not_change_between_calls(bits, fused):
     """One Metal signature per lane kernel, from install and warm-ups through one-stream and 1-9-stream rounds."""
 
     _needs_tensor_units()
-    model = _tiny_model()
+    model = _tiny_model(bits)
     core, head = model.model, model.lm_head
     mx.random.seed(8)
     tokens = [int(t) for t in mx.random.randint(0, 512, (600,)).tolist()]

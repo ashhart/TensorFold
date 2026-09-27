@@ -225,7 +225,7 @@ class NemotronH:
             # the lane kernel regrouped the head's weight in place: its rows are not token rows any more
             from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
-            weight = lane_qmm.untile_weight(weight, getattr(full, "_lane_nt", lane_qmm.NT))
+            weight = lane_qmm.untile_weight(weight, full._lane_nt, full.group_size, bits=full.bits)
         rows = mx.array(ids, dtype=mx.int32)
         head = nn.QuantizedLinear(int(weight.shape[1]) * 32 // full.bits, len(ids), bias=False,
                                   group_size=full.group_size, bits=full.bits)
