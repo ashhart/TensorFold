@@ -88,6 +88,7 @@ def test_serve_parses_the_kv_cache_flag():
     plain = cli.build_parser().parse_args(["serve", "owner/model"])
     assert plain.kv_dtype == "bf16"                        # the cache stays bf16 unless it is asked for
     assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "int8"]).kv_dtype == "int8"
+    assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "int4"]).kv_dtype == "int4"
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "fp8"])
 
@@ -106,7 +107,7 @@ def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatc
     monkeypatch.setattr(fn_engine, "FlashNextEngine", lambda *a, **k: made.append(k) or SimpleNamespace(**k))
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"mtp.fc.weight": "x"}}))
 
-    assert qwen4_exp.CUDA_KV_DTYPES == ("bf16", "int8")
+    assert qwen4_exp.CUDA_KV_DTYPES == ("bf16", "int8", "int4")
     assert qwen4_exp.cuda_engine(tmp_path, kv_dtype="int8").kv_dtype == "int8"
     assert made[-1]["kv_dtype"] == "int8"
     with pytest.raises(ValueError, match="kv-dtype"):
