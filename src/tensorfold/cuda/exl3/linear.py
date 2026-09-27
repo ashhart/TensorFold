@@ -6,9 +6,11 @@ row-invariant, no cuBLAS.
 
 Two kernels compute the layer. ``rot_in`` rotates the input once: xh = fp16((x * suh) @ H / sqrt(128)), rounded to
 fp16 as ExLlamaV3 does. ``linear`` gives each program 128 output columns (one Hadamard block) and a fixed slice of
-K; its warps read their k tiles with per-lane cached loads, decode them into tensor-core fragments
-(``decode.cuh``), multiply in fp32 and add their sums in warp order, and the program (or, with K split over several
-programs, the last of them to finish) rotates the outputs, scales by svh and adds the bias. The splits and warps
+K; its warps read their k tiles from the read-only cache (one coalesced run a warp at 1 and 2 bits, each lane taking
+its two words by shuffle) with the next k step in flight while the current one decodes (up to 6 bits), decode them
+into tensor-core fragments (``decode.cuh``), multiply in fp32 and add their sums in warp order, and the program (or,
+with K split over several programs, the last of them to finish) rotates the outputs, scales by svh and adds the
+bias. The splits and warps
 depend only on (K, N) (``plan``), so a row's bits never depend on the other rows.
 
 At load the tiles are copied, not changed, into column strips: all k tiles of a 128-column block in k order
