@@ -296,6 +296,12 @@ def load(model_dir: Path, *, drafts: int | None = None, check: bool = True) -> t
     model, tokenizer = glm.load(Path(model_dir))
     drafts = int(os.environ.get("TF_GLM_MTP", "3")) if drafts is None else int(drafts)
     head = mtp_module.load(model) if drafts > 0 and mtp_module.has_mtp(model_dir) else None
+    if head is not None:
+        # one draft step here, on the loading thread: every tensor of the head is read and every kernel built
+        # before a request thread (which has no CPU stream for a lazy load) touches it
+        warm = mtp_module.MLACache()
+        raw = mx.zeros((1, int(model.args.hidden_size)), dtype=mx.bfloat16)
+        mx.eval(head.logits(model, head(model, raw, mx.array([0], dtype=mx.uint32), warm, True)))
     model.weights = None                                                 # the checkpoint's shard index is done
     runtime = GLMFlash(model, head, drafts=drafts, check=check)
     print(f"[glm5] exact window {runtime.exact_width} rows, forward ms by width {runtime.window_costs}, "

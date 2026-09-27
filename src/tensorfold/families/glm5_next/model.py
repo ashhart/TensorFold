@@ -1183,7 +1183,9 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer
         stacked = []
         for proj in ("gate_proj", "up_proj", "down_proj"):
             if w.has(f"{m}.switch_mlp.{proj}.weight"):
-                stacked.append(w.q(f"{m}.switch_mlp.{proj}"))
+                q = w.q(f"{m}.switch_mlp.{proj}")
+                _materialize(q)             # read now: a lazy load first touched in a server thread has no CPU stream
+                stacked.append(q)
                 continue
             parts = [w.q(f"{m}.experts.{e}.{proj}") for e in range(cfg.n_routed_experts)]
             q = Q(mx.stack([x.weight for x in parts]), mx.stack([x.scales for x in parts]),
