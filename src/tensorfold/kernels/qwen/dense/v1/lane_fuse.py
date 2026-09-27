@@ -10,12 +10,16 @@ their own calls. The lane decoder (``lane_tree.tree_forward``) stacks, per layer
 
 in_proj_qkv and q_proj (sk 4) have no partner with the same split.
 
+A stack's members share one bit width (4, 3 or 2: one kernel per call); a group of mixed widths, as mixed
+checkpoints have, keeps its members' separate calls.
+
 No weight is stored twice. In ``lane_qmm.tile_weight``'s layout column tile t is rows [32t, 32t + 32),
 so the stack of tiled weights is the tiled stack: a group's weights are concatenated once and each
 tiled module's ``weight`` becomes a row slice (a view) of the stack, which frees the old arrays.
 in_proj_b and in_proj_a (48 rows, not whole tiles) keep their MLX-layout arrays; the stack holds a
-tiled copy of [b; a] (96 rows, 3 tiles, 0.25 MB a layer). The stack's interleaved scales are a new
-array, 1/8 of its weight bytes (~0.83 GB for Qwen3.8-27B, 0.71 GB of it the MLPs'): the modules keep
+tiled copy of [b; a] (96 rows, 3 tiles, 0.25 MB a layer; 0.18 MB at 3 bits). The stack's interleaved scales
+are a new array, 1/8 of its weight bytes at 4 bits and 1/6 at 3 (~0.83 GB for Qwen3.8-27B, 0.71 GB of it the
+MLPs'; the same bytes at any width, one (s, b) pair per 64 weights): the modules keep
 their own for their separate calls (batched rounds still run mlx_lm's layers).
 
 A column slice of a multi-row output is not row-contiguous, and MLX copies such an input before a
@@ -53,7 +57,7 @@ _SMALL_TAIL = 8 * 1024 * 1024    # an untiled tail is tiled into the stack as a 
 
 
 class _Group:
-    """A stacked projection: ``weight`` (sum N, K/8) and ``sbt`` (K/64, sum N, 2) for one lane matmul."""
+    """A stacked projection: ``weight`` (sum N, K*bits/32) and ``sbt`` (K/64, sum N, 2) for one lane matmul."""
 
     __slots__ = ("weight", "sbt", "tiled", "sk", "k", "sizes", "added", "members", "held", "sbts", "nt")
 
@@ -105,13 +109,16 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
         return no
     for m in members:
         w = m["weight"]
-        if (m.bits != 4 or m.group_size != 64 or getattr(m, "mode", "affine") != "affine" or "bias" in m
-                or w.dtype != mx.uint32 or w.ndim != 2 or m["scales"].dtype != mx.bfloat16):
+        if not lane_qmm.takes(m) or "bias" in m or w.dtype != mx.uint32 or w.ndim != 2:
             return no
-    k8 = int(members[0]["weight"].shape[1])
-    k = 8 * k8
+    bits = members[0].bits
+    if any(m.bits != bits for m in members):  # one kernel per stack: members of mixed widths stay separate calls
+        return no
+    kw = int(members[0]["weight"].shape[1])
+    k = kw * 32 // bits
     sizes = tuple(int(m["weight"].shape[0]) for m in members)
-    if k % 64 or any(int(m["weight"].shape[1]) != k8 for m in members) or any(n % 4 for n in sizes):
+    if (k % 64 or k * bits != kw * 32 or any(int(m["weight"].shape[1]) != kw for m in members)
+            or any(n % 4 for n in sizes)):
         return no
     splits = {lane_qmm.split_k(n, k) for n in sizes}
     if len(splits) != 1:                  # a column's bits depend on its split: only equal splits stack
@@ -131,7 +138,7 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
         if any(tiled[j:]) or tail % lane_qmm.NT or sum(m["weight"].nbytes for m in members[j:]) > _SMALL_TAIL:
             return no
         parts = [m["weight"] for m in members[:j]]
-        parts.append(lane_qmm.tile_weight(mx.concatenate([m["weight"] for m in members[j:]], axis=0)))
+        parts.append(lane_qmm.tile_weight(mx.concatenate([m["weight"] for m in members[j:]], axis=0), bits=bits))
         viewed = members[:j]
         stacked_tiled = True
         copied = parts[-1].nbytes
@@ -377,13 +384,14 @@ def warm(model: Any, *, rows: tuple[int, ...] = (1, 17, 33)) -> int:
 
     from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree
 
-    seen: set[tuple[int, int, int, bool]] = set()
+    seen: set[tuple[int, int, int, int, bool, int]] = set()
     outs: list[mx.array] = []
     for _, module in model.named_modules():
         for kind, group in module.__dict__.get(_ATTR, {}).items():
             if not isinstance(group, _Group):
                 continue
-            key = (int(group.weight.shape[0]), group.k, group.sk, group.tiled, group.nt)
+            key = (int(group.weight.shape[0]), group.k, lane_qmm.weight_bits(group.weight, group.k), group.sk,
+                   group.tiled, group.nt)
             if key in seen:
                 continue
             seen.add(key)

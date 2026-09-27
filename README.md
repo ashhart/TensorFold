@@ -67,10 +67,11 @@ What each checkpoint needs:
   groups of 32. Use the `-MLX-4bit-MTP` conversion. TensorFold refuses other bit widths before downloading
   anything, and a conversion without the MTP head runs without drafts.
 - Qwen3.8-27B drafts with the DFlash2 draft model once it has been pulled; `serve` picks it up automatically.
-  Its lane kernels need 4-bit weights in groups of 64 and Metal 4 tensor units (M5-generation GPUs). On M1 to
-  M4 GPUs, drafted windows of up to 8 rows go through TensorFold's row-exact matvec instead, so drafted output
-  is still byte-identical to serial decoding. Each round drafts as many tokens as pay at the request's
-  acceptance.
+  Its lane kernels need 4-, 3- or 2-bit weights in groups of 64 and Metal 4 tensor units (M5-generation GPUs);
+  for conversions smaller than 4-bit see [3-bit weights](docs/recipes/qwen3.8-27b.md#3-bit-weights). On M1 to
+  M4 GPUs, a 4-bit checkpoint's drafted windows (up to 16 rows) go through TensorFold's row-exact lane decoder
+  instead, so drafted output is still byte-identical to serial decoding; 3- and 2-bit checkpoints serve without
+  drafts there. Each round drafts as many tokens as pay at the request's acceptance.
 - Nemotron 3.5 Lightning drafts with its MTP head, which the checkpoint above ships as `mtp-4bit.safetensors`
   (converted from NVIDIA's BF16 release; the standard MLX conversion drops it), and from the context.
   `pull` checks for the head, and `serve` completes an older cache that lacks it before loading.

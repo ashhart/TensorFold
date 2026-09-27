@@ -5,6 +5,8 @@ attention (``kernels.lane_qmm``, ``kernels.lane_attention``, ``kernels.lane_fuse
 32 rows gives every row the bits of a one-row step and drafts are verified as trees (up to 15 nodes, chains of
 up to 31 for copies and tool calls). Drafts come from the context (copies of earlier spans, the known structure
 of tool calls) and, with ``drafter``, from a DFlash2 draft model (``drafters.dflash_drafter``).
+The lane kernels take 4-, 3- and 2-bit weights in groups of 64 (the checkpoint's top-level quantization decides;
+layers of other widths run MLX's kernels and are named at load); see docs/recipes/qwen3.8-27b.md, "3-bit weights".
 
 On every chip prompts go through MLX's prefill in chunks on a 2,048-token grid from position 0, and prefixes
 resume only from grid points (``TF_ROW_PREFILL``, ``set_prefill``), so a resumed prompt gets a fresh prefill's
@@ -15,7 +17,8 @@ Without tensor units (the M1 to M4 generations) every round and every prompt goe
 with stacked projections, the lane glue kernels, the recurrence walked per row, and attention query by query
 (``kernels.exact_attention``), so a drafted window reproduces one-row steps there too. At load the engine checks
 which window widths do on this Mac and times them, then drafts DFlash2 chains of the width that pays
-(``install_mlx_lanes``). Where no width reproduces one-row steps it serves without drafts.
+(``install_mlx_lanes``). Where no width reproduces one-row steps it serves without drafts. This decoder reads
+4-bit weights only: a 3- or 2-bit checkpoint serves without drafts there.
 """
 
 from __future__ import annotations
@@ -249,20 +252,34 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", **_: Any) -> tuple[Any,
     """The model with lane kernels installed when ``lane_kernels`` is "on", or "auto" on a GPU with tensor units."""
 
     from tensorfold.families import quantization, read_config
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
     model, tokenizer = load_lane_model(Path(model_dir))
-    fits = quantization(read_config(model_dir)) == (4, 64)
+    quant = quantization(read_config(model_dir))
+    fits = quant in {(bits, 64) for bits in lane_qmm.BITS}
     use = fits and (lane_kernels == "on" or (lane_kernels == "auto" and tensor_units()))
     model._tensorfold_lanes = bool(use)
     model._tensorfold_mlx_lanes = (1, 1)
     if use:
         install_lane_kernels(model)
+        missed = lane_qmm.uncovered(model)
+        if missed:
+            kinds = ", ".join(f"{n} {kind}" for kind, n in sorted(missed.items()))
+            print(f"[tensorfold] lane kernels do not take {kinds} projections: MLX's kernels run them, so drafted "
+                  f"rows are checked at width (still the model's own samples), not bit-identical to one-row "
+                  f"decoding", flush=True)
         return model, tokenizer
     if not fits:
-        print(f"[tensorfold] lane kernels need 4-bit weights in groups of 64 ({MODELS[0]}): MLX's kernels run",
-              flush=True)
+        print(f"[tensorfold] lane kernels need 4-, 3- or 2-bit weights in groups of 64 ({MODELS[0]}): MLX's kernels "
+              f"run", flush=True)
     else:
-        print("[tensorfold] lane kernels off (they need an M5-generation GPU): MLX's kernels run", flush=True)
+        why = "--lane-kernels off" if lane_kernels == "off" else "they need an M5-generation GPU"
+        print(f"[tensorfold] lane kernels off ({why}): MLX's kernels run", flush=True)
+    if fits and quant[0] != 4:
+        # the row-exact decoder (install_mlx_lanes) reads 4-bit weights only: it would take no layer here
+        print("[tensorfold] drafts without the lane kernels need 4-bit weights: serving without drafts (same output, "
+              "slower)", flush=True)
+        return model, tokenizer
     model._tensorfold_mlx_lanes = install_mlx_lanes(model)
     if model._tensorfold_mlx_lanes[0] < 2:
         print("[tensorfold] no verify window reproduces one-row decoding with this MLX on this GPU: serving without "
@@ -336,10 +353,10 @@ def kernel_version(model: Any) -> str:
         return "mlx"
     from tensorfold.kernels.qwen.dense.v1 import lane_attention, lane_fuse, lane_glue, lane_qmm, lane_tree
 
-    sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, lane_qmm._XSUM, lane_attention._PARTIAL, lane_attention._TAIL,
-               lane_attention._TREE_MERGE, lane_attention._MERGE, lane_glue._NORM_XS, lane_glue._GDN_PRE,
-               lane_glue._GDN_POST, lane_glue._MLP_ACT, lane_tree._TREE_SOURCE, lane_tree._REPLAY_SOURCE,
-               repr((lane_attention.CHUNK, lane_attention.TILE))]
+    sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, lane_qmm._MAIN_LOWBIT, lane_qmm._XSUM, lane_attention._PARTIAL,
+               lane_attention._TAIL, lane_attention._TREE_MERGE, lane_attention._MERGE, lane_glue._NORM_XS,
+               lane_glue._GDN_PRE, lane_glue._GDN_POST, lane_glue._MLP_ACT, lane_tree._TREE_SOURCE,
+               lane_tree._REPLAY_SOURCE, repr((lane_attention.CHUNK, lane_attention.TILE))]
     if lane_fuse.enabled:
         sources += [text for _, text in sorted(lane_fuse.sources().items())]
     folder = Path(lane_qmm.__file__).parent

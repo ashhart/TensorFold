@@ -150,10 +150,10 @@ the simdgroup matrix units that every Apple GPU has is the next step.
 ## Exactness
 
 - Lane matmul arithmetic: for each 64-input group the tensor op multiplies the bf16 rows by the raw 4-bit
-  weights into fp32; each output adds scale times that product plus bias times the fp32 sum of the group's
-  inputs, groups in order. K splits into a fixed number of slices chosen from the weight shape alone. A
-  column's bits depend only on K and the slice count, so projections that share an input stack into one call
-  (`kernels/lane_fuse.py`).
+  weights (3- and 2-bit ones widened to 4-bit first: [3-bit weights](#3-bit-weights)) into fp32; each output
+  adds scale times that product plus bias times the fp32 sum of the group's inputs, groups in order. K splits
+  into a fixed number of slices chosen from the weight shape alone. A column's bits depend only on K and the
+  slice count, so projections that share an input stack into one call (`kernels/lane_fuse.py`).
 - Lane attention arithmetic is fixed by absolute key position: 512-key chunks, 64-key tiles, 16-row tiles of
   query-head rows, fp32 online softmax, chunks merged in order.
 - Rollback to exactly the kept prefix: attention layers are trimmed, and each DeltaNet layer re-runs its
@@ -168,6 +168,73 @@ the simdgroup matrix units that every Apple GPU has is the next step.
   operand types, and assuming the wrong one looked exactly like "half-precision P breaks row independence". The
   chat template's highest reasoning effort writes into the system prompt, so no system-block snapshot matched;
   medium writes nothing.
+
+## 3-bit weights
+
+The 4-bit checkpoint with the lane kernels and the DFlash2 drafter uses about 19.4 GiB (steady `phys_footprint`,
+21.0 GiB peak) at a 16k context with the prompt cache and MLX's buffer cache off: more than a 24 GB Mac can spare.
+The lane matmul therefore also takes 3- and 2-bit weights (MLX affine, groups of 64). The tensor op reads 4-bit
+operands but not 3- or 2-bit ones, so each simdgroup first widens its 32 columns' 64-input group from MLX's packing
+to nibbles in threadgroup memory, then runs the 4-bit kernel's op and per-group arithmetic (`lane_qmm._MAIN_LOWBIT`).
+The widening is exact, and as at 4 bits a row's bits depend on the weight's shape, never on the row count: drafted
+replies equal `"draft": false` replies byte for byte (5 prompts at T 0 and T 1 on each checkpoint below).
+
+Before this (0.3.4), a whole 3-bit checkpoint got neither the lane kernels nor the row decoder, so the drafter was
+not loaded and it decoded one token a round. A mixed one with a 4-bit top level kept lanes for its 4-bit layers,
+ran MLX's kernels for its 3- and 2-bit ones, and checked its drafted rows at width.
+
+Server speed on an M5 Max (tok/s, 512-token replies, thinking off, one server at a time, launches interleaved with
+0.3.4). Each figure is the median over 3 launches (4-bit: 4) of each launch's median. Tokens and ms a round are the
+code-T0 cell's. Memory is the median launch's steady / peak `phys_footprint`:
+
+| Checkpoint (size) | Code T1 | Code T0 | Prose T1 | Prose T0 | Tokens / round | ms / round | GiB |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Vontra 4-bit (16.1 GB) | 139.4 (139.5) | 143.2 (145.1) | 74.8 (75.5) | 72.2 (72.7) | 7.53 | 54.2 | 19.4 / 21.0 |
+| AtomicChat 3.70 bpw DWQ, 3/4-bit (13.4 GB) | 113.2 (49.7) | 123.3 (64.2) | 69.6 (31.0) | 69.9 (31.5) | 7.21 | 60.4 | 16.9 / 18.5 |
+| rapid-mlx mixed 3.5 bpw, 2/3/4-bit (14.8 GB) | 125.9 (72.6) | 120.3 (77.1) | 79.0 (46.4) | 65.2 (38.4) | 6.83 | 58.7 | 17.4 / 19.0 |
+| AtomicChat 3.50 bpw DWQ, 3-bit (12.7 GB) | 106.7 (30.7) | 103.5 (30.5) | 67.4 (27.4) | 63.8 (26.5) | 6.48 | 64.4 | 16.2 / 17.8 |
+
+In parentheses: 0.3.4 on the same checkpoint (on the mixed checkpoints, its 3- and 2-bit layers ran MLX's
+arithmetic, so its replies and tokens a round differ; the gain is in ms a round). A 3-bit round costs more than a
+4-bit one (64 against 54 ms) although it reads less. The 3- and 2-bit kernel widens each group in threadgroup
+memory (at the same 32-column tiles 3-bit is 9-34% slower than 4-bit), and it tiles 32 columns wide where 4-bit
+tiles 64 (4-bit at 32 columns costs 1-24% more). One 17408x5120 projection, lane kernel against MLX's, in ms:
+
+| Rows | 1 | 4 | 16 | 33 |
+| --- | --- | --- | --- | --- |
+| 4-bit | 0.088 / 0.059 | 0.090 / 0.141 | 0.103 / 0.311 | 0.228 / 0.301 |
+| 4-bit, 32-column tiles | 0.090 | 0.099 | 0.113 | 0.281 |
+| 3-bit | 0.121 / 0.051 | 0.124 / 0.177 | 0.123 / 0.304 | 0.330 / 0.295 |
+| 2-bit | 0.104 / 0.044 | 0.107 / 0.149 | 0.107 / 0.293 | 0.324 / 0.281 |
+
+Accuracy of these conversions (mlx-lm's own kernels), scored like llama.cpp's `llama-perplexity`: the first 20,480
+tokens of WikiText-2 raw test in 20 chunks of 1,024, the second half of each scored (10,220 tokens), against the 8-bit
+MLX conversion lukaskremla/Qwen3.8-27B-8bit-MLX-TextOnly:
+
+| Checkpoint | KLD | Same top token | PPL |
+| --- | --- | --- | --- |
+| Vontra 4-bit | 0.045 | 90.4% | 5.85 |
+| rapid-mlx mixed 3.5 bpw | 0.122 | 84.1% | 6.28 |
+| AtomicChat 3.70 bpw DWQ | 0.133 | 85.5% | 6.30 |
+| AtomicChat 3.50 bpw DWQ | 0.168 | 82.3% | 6.51 |
+| uniform 3-bit (lukaskremla) | 0.191 | 81.6% | 6.68 |
+
+On the same tokens against the same reference (converted to llama.cpp's `--kl-divergence-base` format), Unsloth's
+dynamic GGUF quants in llama.cpp lose much less at about the same size: UD-Q3_K_XL 0.024 (93.5%), UD-IQ3_XXS
+0.051 (90.5%), UD-Q2_K_XL 0.085 (88.0%), at 13.1, 10.9 and 9.8 GB. A uniform 2-bit MLX conversion loses too much
+(KLD about 1.5, from an earlier scoring pass); the 2-bit path is there for mixed conversions like rapid-mlx's.
+
+Limits:
+- Layers of other widths or group sizes, and unquantized ones, run MLX's kernels; the server names them at load
+  (not a tied embedding head), and drafted rows through them are checked at width rather than bit-identical.
+- The lanes keep a second, interleaved copy of each layer's scales and biases: 1/8 of 4-bit weight bytes, 1/6 of
+  3-bit, 1/4 of 2-bit.
+- A stack of projections (`lane_fuse`) needs one width; groups of mixed widths keep separate calls.
+- 3- and 2-bit weights tile 32 columns wide only; the tree sizes and fused row ranges are 4-bit's.
+- M5-generation GPUs only: on M1 to M4 the lane decoder (above) reads 4-bit weights only, so 3- and 2-bit
+  checkpoints serve there without drafts. A 24 GB Mac gains from them only with an M5-generation GPU.
+- Not yet measured on a 24 GB Mac or an M5 Pro. There the GPU's wired-memory limit (`sysctl iogpu.wired_limit_mb`)
+  decides what fits, and 16.2 / 17.8 GiB may exceed its default.
 
 ## Next
 
