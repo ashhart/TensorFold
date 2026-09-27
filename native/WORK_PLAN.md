@@ -28,9 +28,9 @@ Completion requires execution evidence, not just source export or a passing smok
 - [x] Qwen/Nemotron serial pipelining, Nemotron GPU proposal handoff, and alternating
   attention buffers across all three targets and both MTP heads. Independent
   concatenation, short/long rollback, draft and pipeline regressions pass.
-- [ ] Flash GPU proposal handoff and serial pipelining. Preserve the bounded PLE
-  default; evaluate an optional resident packed-table path with GPU hash/history
-  computation and measure its actual loading peak before declaring it feasible.
+- [x] Flash GPU proposal handoff and serial pipelining. Preserve the bounded PLE
+  default; qualify optional resident packed tables, GPU hash/history, loading peak,
+  sparse-threshold rollback and terminal discard on this Mac.
 - [ ] Final matched end-to-end benchmarks against the original Python engines: same
   checkpoints, prompts, seeds, sampling and token counts, serial and drafting, repeated
   runs, cold process/load/prefill/decode/total breakdown and token parity. Document any
@@ -272,3 +272,34 @@ New milestone evidence and any discovered failures will be recorded below.
   86-kernel inventory check pass. Native docs describe the new reproduction targets.
 - Remaining work: Flash GPU scheduling while retaining bounded PLE as the default,
   then matched original-engine benchmarks, raw results and the root README table.
+
+## Resident Flash GPU scheduling milestone
+
+- Optional resident packed PLE uses the original eight-group lookup kernel. Signed
+  GPU n-gram hashing and two-token history remove the token read before target
+  embedding. Flash now supports serial pipelining and MTP GPU handoff in this mode;
+  the default remains bounded positional PLE reads.
+- All 34 serial/MTP and 26 scheduling comparisons pass: Metal sampling, depths
+  1/3/15, full/reduced heads, queued/host proposals, early/late and GPU/host handoff.
+  Adaptive depths 3/15 and resident versus bounded serial output also pass.
+- All 51 resident/bounded state comparisons pass at 2,044/2,051/2,063 tokens with
+  the final memory policy: prefill caches, verification logits, all retained
+  prefixes, both EOS IDs and continuation logits are exact.
+- The final policy measures materialized weights before setting the MLX wired
+  budget. Wiring the entire recommended working set passed short decoding but
+  failed a long-context test; it was rejected. Safetensors loading is lazy, so
+  measuring before materialization also produced an unusably small budget.
+- Short Flash serial pipelining passes 16 token/cache/continuation comparisons,
+  including forced terminal discard, plus 64 reset cycles with flat active memory.
+- All 24 long serial-pipeline comparisons and eight CLI budget pairs pass. The
+  final loader/hash check passes 384 windows, 640 shard rows and 14,976 donated
+  writes; peak MLX allocation is only 944,140 bytes above the 32 GB packed table.
+- All 956 injected host allocation failures pass with zero retained MLX bytes.
+  Bounded Flash passes 96 rollback comparisons and 128 flat-memory reset cycles.
+- Qwen/Nemotron pipeline regressions pass all 48 comparisons on tensor/SIMD and
+  256 reset cycles with flat active memory.
+- Resident CPU sampling matches bounded serial and both full/reduced maximum-depth
+  MTP runs. Safe host checks, optimized build, formatting and all 86 kernel source
+  and inventory checks pass. This milestone is ready for the remote branch.
+- Remaining work: original-engine benchmarks, raw measurements, final comparison
+  table directly after the root README fork notice, and the final remote push.

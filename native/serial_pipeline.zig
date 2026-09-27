@@ -60,13 +60,15 @@ pub fn generate(comptime M: type, m: *M, a: std.mem.Allocator, generated: *std.A
     }
     // A final recurrent replay may have no subsequent forward depending on it.
     // Include its execution in decode time and leave a fully evaluated cache.
-    var arrays: [128]mx.Array = undefined;
+    var arrays: [@typeInfo(@TypeOf(m.cache)).array.len * 6]mx.Array = undefined;
     var count: usize = 0;
-    for (m.cache) |cache| inline for (.{ "a", "b" }) |field| {
-        const value = @field(cache, field);
-        if (value.ctx != null) {
-            arrays[count] = value;
-            count += 1;
+    for (m.cache) |cache| inline for (.{ "a", "b", "raw", "pooled", "ple", "token_history" }) |field| {
+        if (@hasField(@TypeOf(cache), field)) {
+            const value = @field(cache, field);
+            if (value.ctx != null) {
+                arrays[count] = value;
+                count += 1;
+            }
         }
     };
     if (count > 0) try mx.evalMany(arrays[0..count], false);

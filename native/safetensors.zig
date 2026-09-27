@@ -127,10 +127,16 @@ pub const File = struct {
         f.allocator.free(f.path);
     }
     pub fn readRow(f: *const File, tensor: Tensor, row: usize, buffer: []u8) !void {
+        return f.readRows(tensor, row, 1, buffer);
+    }
+    pub fn readRows(f: *const File, tensor: Tensor, row: usize, count: usize, buffer: []u8) !void {
         const width = try tensor.rowBytes();
-        if (row >= tensor.dims[0] or buffer.len != width) return error.InvalidTensorRow;
+        const total: usize = @intCast(tensor.dims[0]);
+        if (row >= total or count == 0 or count > total - row) return error.InvalidTensorRow;
+        const bytes = std.math.mul(usize, count, width) catch return error.InvalidTensorRow;
+        if (buffer.len != bytes) return error.InvalidTensorRow;
         const offset = f.data_offset + tensor.offset + @as(u64, @intCast(row)) * width;
-        if (try f.file.readPositionalAll(f.io, buffer, offset) != width) return error.TruncatedSafetensors;
+        if (try f.file.readPositionalAll(f.io, buffer, offset) != bytes) return error.TruncatedSafetensors;
     }
 };
 pub fn shardName(name: []const u8) !void {
@@ -173,11 +179,19 @@ pub fn checkFiles(io: std.Io, dir: []const u8) !void {
         try std.testing.expectEqualSlices(u8, payload[8..16], &row);
         try std.testing.expectError(error.InvalidTensorRow, file.readRow(tensor, 2, &row));
         try std.testing.expectError(error.InvalidTensorRow, file.readRow(tensor, 0, row[0..7]));
+        var block: [16]u8 = undefined;
+        try file.readRows(tensor, 0, 2, &block);
+        try std.testing.expectEqualSlices(u8, payload[0..16], &block);
+        try std.testing.expectError(error.InvalidTensorRow, file.readRows(tensor, 0, 0, &block));
+        try std.testing.expectError(error.InvalidTensorRow, file.readRows(tensor, 1, 2, &block));
+        try std.testing.expectError(error.InvalidTensorRow, file.readRows(tensor, 0, std.math.maxInt(usize), &block));
+        try std.testing.expectError(error.InvalidTensorRow, file.readRows(tensor, 0, 2, block[0..15]));
         // Revalidate the actual read even if a file is truncated after its header was checked.
         const writer = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
         defer writer.close(io);
         try writer.setLength(io, file.data_offset + 9);
         try std.testing.expectError(error.TruncatedSafetensors, file.readRow(tensor, 1, &row));
+        try std.testing.expectError(error.TruncatedSafetensors, file.readRows(tensor, 0, 2, &block));
     }
     try std.testing.expectError(error.InvalidTensorOffsets, File.open(a, io, path));
     try fixture(io, path, 100 * 1024 * 1024 + 1, "{}", "");

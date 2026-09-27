@@ -48,7 +48,11 @@ fn Snapshot(comptime M: type) type {
                     }
                 }
                 if (@hasField(@TypeOf(actual), "offset")) {
-                    if (actual.offset != expected.offset or !std.mem.eql(i32, &actual.history, &expected.history)) return error.CacheMetadataMismatch;
+                    if (actual.offset != expected.offset) return error.CacheMetadataMismatch;
+                    // Resident PLE keeps these same two token IDs on the GPU.
+                    const ah = if (actual.token_history.ctx != null) actual.token_history else try scope.ints(&actual.history);
+                    const eh = if (expected.token_history.ctx != null) expected.token_history else try scope.ints(&expected.history);
+                    try equal(scope, ah, eh);
                 }
             }
         }
@@ -75,6 +79,81 @@ fn prefill(comptime M: type, m: *M, count: usize, random: std.Random) !void {
 fn neverEos(_: i32) bool {
     return false;
 }
+// Single-threaded diagnostic: treat a known first draw as the terminal marker.
+// This forces a real Flash pass to be queued and discarded, independent of how
+// likely the checkpoint is to emit its ordinary EOS IDs in a short fixture.
+var terminal_marker: i32 = -1;
+fn terminalEos(token: i32) bool {
+    return token == terminal_marker;
+}
+fn gpuTokens(comptime M: type, m: *const M) bool {
+    return if (@hasDecl(M, "gpuTokensEnabled")) m.gpuTokensEnabled() else true;
+}
+pub fn checkResident(m: *flash.Model, long: bool) !void {
+    if (!m.gpuTokensEnabled()) return error.RequiresResidentPLE;
+    const original = m.resident_ple;
+    defer m.resident_ple = original;
+    const prefixes: []const usize = if (long) &.{ 2044, 2051, 2063 } else &.{ 0, 31 };
+    var rng = std.Random.DefaultPrng.init(0x504c455354415445);
+    const ids = [_]i32{ 42, 97, 100, 103, 248044, 109, 112, 115, 118, 121, 124, 248046, 130, 133, 136, 139 };
+    var checks: usize = 0;
+    for (prefixes) |prefix| {
+        var stage: []const u8 = "bounded prefill";
+        var retained: usize = 0;
+        errdefer {
+            var peak: usize = 0;
+            _ = mx.c.mlx_get_peak_memory(&peak);
+            std.debug.print("Resident comparison failed: prefix {d}, position {d}, keep {d}, stage {s}, peak MLX bytes {d}\n", .{ prefix, m.position, retained, stage, peak });
+        }
+        const random_state = rng;
+        m.reset();
+        m.resident_ple = false;
+        try prefill(flash.Model, m, prefix, rng.random());
+        var bounded = try Snapshot(flash.Model).capture(m);
+        defer bounded.deinit();
+        var expected = try m.forward(&ids);
+        defer expected.deinit();
+        m.reset();
+        m.resident_ple = true;
+        rng = random_state;
+        stage = "resident prefill";
+        try prefill(flash.Model, m, prefix, rng.random());
+        var resident = try Snapshot(flash.Model).capture(m);
+        defer resident.deinit();
+        var s = mx.Scope{};
+        defer s.deinit();
+        try bounded.compare(m, &s);
+        stage = "resident verification";
+        var actual = try m.forwardArray(try s.cast(try s.ints(&ids), mx.c.MLX_UINT32));
+        defer actual.deinit();
+        try equal(&s, expected.logits, actual.logits);
+        for (0..17) |keep| {
+            retained = keep;
+            stage = "bounded continuation";
+            var step = mx.Scope{};
+            defer step.deinit();
+            m.resident_ple = false;
+            try bounded.restore(m);
+            if (keep > 0) try m.commit(&expected, keep);
+            var cache = try Snapshot(flash.Model).capture(m);
+            defer cache.deinit();
+            var reference = try m.forward(&.{97});
+            defer reference.deinit();
+            m.resident_ple = true;
+            stage = "resident continuation";
+            try resident.restore(m);
+            if (keep > 0) try m.commit(&actual, keep);
+            try cache.compare(m, &step);
+            var continued = try m.forwardArray(try step.ints(&.{97}));
+            defer continued.deinit();
+            try equal(&step, reference.logits, continued.logits);
+            checks += 1;
+        }
+        std.debug.print("PASS: resident/bounded Flash at {d} past: prefill cache, all logits, all 17 retained prefixes, EOS history and continuation exact\n", .{prefix});
+    }
+    m.reset();
+    std.debug.print("PASS: {d} full-model resident/bounded PLE state comparisons\n", .{checks});
+}
 pub fn checkBufferReuse(comptime M: type, m: *M) !void {
     const kv = @import("kv_buffer.zig");
     if (!kv.enabled) return error.BuffersDisabled;
@@ -85,12 +164,16 @@ pub fn checkBufferReuse(comptime M: type, m: *M) !void {
     try prefill(M, m, 33, rng.random());
     kv.attempted = 0;
     kv.reused = 0;
+    const pipeline = @hasDecl(M, "SerialPass") and gpuTokens(M, m);
     if (@hasDecl(M, "SerialPass")) {
-        var generated: std.ArrayList(u32) = .empty;
-        defer generated.deinit(mx.allocator);
-        try generated.append(mx.allocator, 42);
-        _ = try @import("serial_pipeline.zig").generate(M, m, mx.allocator, &generated, 33, .{ .metal = true, .temperature = 0 }, neverEos, null);
-    } else {
+        if (pipeline) {
+            var generated: std.ArrayList(u32) = .empty;
+            defer generated.deinit(mx.allocator);
+            try generated.append(mx.allocator, 42);
+            _ = try @import("serial_pipeline.zig").generate(M, m, mx.allocator, &generated, 33, .{ .metal = true, .temperature = 0 }, neverEos, null);
+        }
+    }
+    if (!pipeline) {
         for (0..32) |_| {
             var p = try forward(M, m, &.{42}, &.{-1});
             defer p.deinit();
@@ -101,7 +184,7 @@ pub fn checkBufferReuse(comptime M: type, m: *M) !void {
         std.debug.print("Buffer donation: {d}/{d} exact allocations reused\n", .{ kv.reused, kv.attempted });
         return error.BufferWasNotReused;
     }
-    std.debug.print("PASS: {d}/{d} real-model attention writes reused their exact donor allocations ({s})\n", .{ kv.reused, kv.attempted, if (@hasDecl(M, "SerialPass")) "pipelined" else "synchronous" });
+    std.debug.print("PASS: {d}/{d} real-model attention writes reused their exact donor allocations ({s})\n", .{ kv.reused, kv.attempted, if (pipeline) "pipelined" else "synchronous" });
     m.reset();
 }
 pub fn checkBuffered(comptime M: type, m: *M, long: bool) !void {
@@ -141,7 +224,7 @@ pub fn checkBuffered(comptime M: type, m: *M, long: bool) !void {
 pub fn checkSerial(comptime M: type, m: *M, long: bool) !void {
     const a = mx.allocator;
     var rng = std.Random.DefaultPrng.init(0x50495045);
-    const prefixes: []const usize = if (long) &.{ 9999, 10007 } else &.{ 0, 31 };
+    const prefixes: []const usize = if (long) (if (M == flash.Model) &.{ 2044, 2051, 2063 } else &.{ 9999, 10007 }) else &.{ 0, 31 };
     var checks: usize = 0;
     for (prefixes) |prefix| {
         m.reset();
@@ -155,6 +238,8 @@ pub fn checkSerial(comptime M: type, m: *M, long: bool) !void {
             try base.restore(m);
             var expected: std.ArrayList(u32) = .empty;
             defer expected.deinit(a);
+            var first_cache: ?Snapshot(M) = null;
+            defer if (first_cache) |*cache| cache.deinit();
             try expected.append(a, 42);
             while (expected.items.len < limit) {
                 var p = try forward(M, m, &.{@intCast(expected.items[expected.items.len - 1])}, &.{-1});
@@ -163,6 +248,7 @@ pub fn checkSerial(comptime M: type, m: *M, long: bool) !void {
                 defer a.free(ids);
                 try expected.append(a, @intCast(ids[0]));
                 try commit(M, m, &p, &.{0});
+                if (M == flash.Model and limit == 17 and expected.items.len == 2) first_cache = try Snapshot(M).capture(m);
             }
             var cache = try Snapshot(M).capture(m);
             defer cache.deinit();
@@ -181,6 +267,25 @@ pub fn checkSerial(comptime M: type, m: *M, long: bool) !void {
             defer continued.deinit();
             try equal(&scope, reference.logits, continued.logits);
             checks += 1;
+            if (M == flash.Model and limit == 17) {
+                terminal_marker = @intCast(expected.items[1]);
+                try std.testing.expect(terminal_marker != 42);
+                try first_cache.?.restore(m);
+                var terminal_reference = try forward(M, m, &.{97}, &.{-1});
+                defer terminal_reference.deinit();
+                try base.restore(m);
+                actual.clearRetainingCapacity();
+                try actual.append(a, 42);
+                const terminal = try @import("serial_pipeline.zig").generate(M, m, a, &actual, limit, settings, terminalEos, null);
+                try std.testing.expectEqualSlices(u32, expected.items[0..2], actual.items);
+                try std.testing.expectEqual(@as(usize, 1), terminal.rounds);
+                try std.testing.expectEqual(@as(usize, 1), terminal.queued_ahead);
+                try first_cache.?.compare(m, &scope);
+                var terminal_next = try forward(M, m, &.{97}, &.{-1});
+                defer terminal_next.deinit();
+                try equal(&scope, terminal_reference.logits, terminal_next.logits);
+                checks += 1;
+            }
         };
         std.debug.print("PASS: serial pipeline prefix {d}, greedy/sampled, budgets 1/2/17; every token, cache and continuation exact\n", .{prefix});
     }
@@ -224,6 +329,7 @@ fn checkPrefixes(comptime M: type, m: *M, prefixes: []const usize, short: bool) 
         try std.testing.expectError(error.InvalidLaneWidth, m.forwardArray(try scope.zeros(&.{ 1, 1 }, mx.i32t)));
         try std.testing.expectError(error.InvalidLaneWidth, m.forwardArray(try scope.zeros(&.{0}, mx.i32t)));
         try std.testing.expectError(error.InvalidLaneWidth, m.forwardArray(try scope.zeros(&.{17}, mx.i32t)));
+        if (!gpuTokens(M, m)) try std.testing.expectError(error.RequiresResidentPLE, m.forwardArray(try scope.ints(&.{42})));
     }
     var rng = std.Random.DefaultPrng.init(0x4341434845);
     const random = rng.random();
@@ -250,6 +356,7 @@ fn checkPrefixes(comptime M: type, m: *M, prefixes: []const usize, short: bool) 
         var input_scope = mx.Scope{};
         defer input_scope.deinit();
         var batch = if (@hasDecl(M, "forwardArray")) blk: {
+            if (!gpuTokens(M, m)) break :blk try forward(M, m, tokens[0..width], parents[0..width]);
             // Keep the IDs on the GPU, including rows beyond both EOS IDs. The
             // serial host-token path below checks every possible retained prefix.
             const ids = try input_scope.cast(try input_scope.ints(tokens[0..width]), mx.c.MLX_UINT32);

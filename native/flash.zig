@@ -12,6 +12,7 @@ pub const Cache = struct {
     raw: A = mx.empty,
     pooled: A = mx.empty,
     ple: A = mx.empty,
+    token_history: A = mx.empty,
     offset: i32 = 0,
     history: [2]i32 = .{ 248044, 248044 },
     keys: kv.Buffer = .{},
@@ -21,7 +22,7 @@ pub const Cache = struct {
     value_write: kv.Write = .{},
     index_write: kv.Write = .{},
     pub fn deinit(c: *Cache) void {
-        inline for (.{ "a", "b", "raw", "pooled", "ple" }) |f| mx.free(@field(c, f));
+        inline for (.{ "a", "b", "raw", "pooled", "ple", "token_history" }) |f| mx.free(@field(c, f));
         c.keys.deinit();
         c.values.deinit();
         c.index_keys.deinit();
@@ -30,7 +31,7 @@ pub const Cache = struct {
     pub fn clone(c: Cache) !Cache {
         var out = Cache{ .offset = c.offset, .history = c.history };
         errdefer out.deinit();
-        inline for (.{ "a", "b", "raw", "pooled", "ple" }) |f| {
+        inline for (.{ "a", "b", "raw", "pooled", "ple", "token_history" }) |f| {
             const v = @field(c, f);
             @field(out, f) = if (v.ctx != null) try mx.retain(v) else mx.empty;
         }
@@ -63,6 +64,7 @@ pub const Pass = struct {
     records: [48]Cache = @splat(.{}),
     tokens: [16]i32 = undefined,
     count: usize = 0,
+    start: i32 = 0,
     pub fn deinit(p: *Pass) void {
         p.scope.deinit();
     }
@@ -79,10 +81,61 @@ pub const Model = struct {
     trace_gdn: ?usize = null,
     ngram: @import("ngram.zig").NGram = undefined,
     ple_tables: ?@import("ple_tables.zig").Tables = null,
+    resident_ple: bool = false,
+    wired_before: ?usize = null,
+    resident_wired_bytes: usize = 0,
     pub const DraftCache = Cache;
+    pub const SerialPass = Pass;
     pub const vocab = 248320;
     pub fn eos(id: i32) bool {
         return id == 248044 or id == 248046;
+    }
+    pub fn gpuTokensEnabled(m: *const Model) bool {
+        return m.resident_ple;
+    }
+    pub fn makeResidentPLE(m: *Model, wire: bool) !void {
+        if (m.position != 0) return error.NonemptyCache;
+        const device = mx.c.mlx_device_new_type(mx.c.MLX_GPU, 0);
+        defer _ = mx.c.mlx_device_free(device);
+        var info = mx.c.mlx_device_info_new();
+        defer _ = mx.c.mlx_device_info_free(info);
+        try mx.check(mx.c.mlx_device_info_get(&info, device));
+        var recommended: usize = 0;
+        try mx.check(mx.c.mlx_device_info_get_size(&recommended, info, "max_recommended_working_set_size"));
+        if (wire and m.wired_before == null) {
+            var previous: usize = 0;
+            // Safetensors payloads are lazy. Materialize weights before measuring
+            // their budget; counting active arrays immediately after init only
+            // sees the small normalization/constants validation tensors.
+            const arrays = try mx.allocator.alloc(A, m.weights.arrays.count());
+            defer mx.allocator.free(arrays);
+            var values = m.weights.arrays.iterator();
+            var index: usize = 0;
+            while (values.next()) |entry| {
+                // These lazy shard handles are metadata for schema validation;
+                // resident PLE is assembled separately from bounded file reads.
+                if (std.mem.startsWith(u8, entry.key_ptr.*, "model.layers.1.ple.ple_embedding.ngram_embedding.")) continue;
+                if (!m.mtp and std.mem.startsWith(u8, entry.key_ptr.*, "mtp.")) continue;
+                arrays[index] = entry.value_ptr.*;
+                index += 1;
+            }
+            try mx.evalMany(arrays[0..index], false);
+            try mx.check(mx.c.mlx_synchronize(mx.stream));
+            try mx.check(mx.c.mlx_clear_cache());
+            var weights_bytes: usize = 0;
+            try mx.check(mx.c.mlx_get_active_memory(&weights_bytes));
+            // Pin the existing model weights, before allocating the sparse PLE
+            // tables. Leave room for verification states and pageable PLE rows.
+            // Wiring the full recommendation can exhaust Metal memory at long
+            // contexts even though the same short decode succeeds.
+            const budget = @min(weights_bytes, recommended);
+            try mx.check(mx.c.mlx_set_wired_limit(&previous, budget));
+            m.wired_before = previous;
+            m.resident_wired_bytes = budget;
+        }
+        try m.ple_tables.?.makeResident();
+        m.resident_ple = true;
+        std.debug.print("Resident Flash wired budget: {d} bytes; Metal recommended working set: {d}\n", .{ m.resident_wired_bytes, recommended });
     }
     pub fn init(io: std.Io, dir: []const u8, drafts: bool) !Model {
         var m = Model{ .weights = cp.Store.init(32), .kernels = mx.Kernels.init() };
@@ -135,6 +188,11 @@ pub const Model = struct {
         if (m.ple_tables) |*tables| tables.deinit();
         m.weights.deinit();
         m.kernels.deinit();
+        if (m.wired_before) |previous| {
+            _ = mx.c.mlx_synchronize(mx.stream);
+            var ignored: usize = 0;
+            _ = mx.c.mlx_set_wired_limit(&ignored, previous);
+        }
     }
     fn lin(m: *Model, s: *mx.Scope, base: []const u8, suffix: []const u8, x: A) !A {
         var buf: [256]u8 = undefined;
@@ -309,6 +367,18 @@ pub const Model = struct {
         }
         const r: i32 = @intCast(tokens.len);
         const emb = try s.reshape(try m.ple_tables.?.gather(s, ids[0 .. tokens.len * 16]), &.{ r, 2560 });
+        record.history = hist;
+        return m.pleEmbedding(s, h, emb, r, cache, record);
+    }
+    fn pleArray(m: *Model, s: *mx.Scope, h: A, tokens: A, cache: Cache, record: *Cache) !A {
+        const previous = if (cache.token_history.ctx != null) cache.token_history else try s.ints(&.{ 248044, 248044 });
+        const joined = try s.cat(&.{ previous, try s.cast(tokens, mx.i32t) }, 0);
+        record.token_history = joined;
+        const ids = try m.ngram.idsArray(s, joined);
+        const emb = try m.ple_tables.?.resident.?.gather(&m.kernels, s, ids);
+        return m.pleEmbedding(s, h, emb, mx.dim(tokens, 0), cache, record);
+    }
+    fn pleEmbedding(m: *Model, s: *mx.Scope, h: A, emb: A, r: i32, cache: Cache, record: *Cache) !A {
         const base = "model.layers.1.ple";
         const keys = try s.reshape(try m.pleNorm(s, try m.lin(s, base, "key_proj", emb), base ++ ".norm_key"), &.{ r, 4, 2560 });
         const values = try s.reshape(try m.lin(s, base, "value_proj", emb), &.{ r, 1, 2560 });
@@ -322,7 +392,6 @@ pub const Model = struct {
         const tail = if (cache.ple.ctx != null) cache.ple else try s.zeros(&.{ 9, 10240 }, mx.bf16);
         const conv_in = try s.cat(&.{ tail, normed }, 0);
         record.ple = conv_in;
-        record.history = hist;
         var conv = mx.c.mlx_array_new();
         const cr = mx.c.mlx_conv1d(&conv, try s.reshape(conv_in, &.{ 1, r + 9, 10240 }), try m.f(base, "conv1d.weight"), 1, 0, 3, 10240, mx.stream);
         const cv = try s.reshape(try s.result(cr, conv), &.{ r, 10240 });
@@ -359,16 +428,31 @@ pub const Model = struct {
     }
     pub fn forwardQueued(m: *Model, tokens: []const i32) !Pass {
         if (tokens.len == 0 or tokens.len > 16) return error.InvalidLaneWidth;
-        var p = Pass{ .count = tokens.len };
+        var s = mx.Scope{};
+        defer s.deinit();
+        return m.forwardImpl(try s.ints(tokens), tokens);
+    }
+    pub fn forwardArray(m: *Model, tokens: A) !Pass {
+        if (tokens.ctx == null or (mx.dtype(tokens) != mx.i32t and mx.dtype(tokens) != mx.c.MLX_UINT32)) return error.InvalidToken;
+        if (mx.shape(tokens).len != 1 or mx.dim(tokens, 0) < 1 or mx.dim(tokens, 0) > 16) return error.InvalidLaneWidth;
+        if (!m.gpuTokensEnabled()) return error.RequiresResidentPLE;
+        return m.forwardImpl(tokens, null);
+    }
+    pub fn forwardSerialArray(m: *Model, tokens: A) !Pass {
+        if (tokens.ctx == null or mx.c.mlx_array_size(tokens) != 1) return error.InvalidToken;
+        return m.forwardArray(tokens);
+    }
+    fn forwardImpl(m: *Model, tokens: A, host: ?[]const i32) !Pass {
+        var p = Pass{ .count = @intCast(mx.dim(tokens, 0)), .start = m.position };
         errdefer p.deinit();
-        @memcpy(p.tokens[0..tokens.len], tokens);
+        if (host) |ids| @memcpy(p.tokens[0..ids.len], ids);
         const s = &p.scope;
-        const e = try m.weights.embed(s, "model.embed_tokens", tokens);
+        const e = try m.weights.embedArray(s, "model.embed_tokens", tokens);
         var h = try s.cat(&.{ e, e, e, e }, -1);
         var buf: [256]u8 = undefined;
         for (0..48) |i| {
             m.trace_layer = i;
-            if (i == 1) h = try m.ple(s, h, tokens, m.cache[i], &p.records[i]);
+            if (i == 1) h = if (m.gpuTokensEnabled()) try m.pleArray(s, h, tokens, m.cache[i], &p.records[i]) else try m.ple(s, h, host.?, m.cache[i], &p.records[i]);
             try m.trace(s, "input", h);
             h = try m.layer(s, try std.fmt.bufPrint(&buf, "model.layers.{d}", .{i}), h, &m.cache[i], &p.records[i], i % 4 != 3);
             try mx.evalMany(&.{h}, true);
@@ -393,7 +477,14 @@ pub const Model = struct {
     pub const draft_vocabulary = @import("draft_vocab.zig").data.flash;
     pub const draft_prior = &@import("draft_depth.zig").flash_prior;
     pub fn commit(m: *Model, p: *Pass, keep: usize) !void {
-        if (keep == 0 or keep > p.count) return error.InvalidCommit;
+        return m.commitImpl(p, keep, true);
+    }
+    pub fn commitSerialQueued(m: *Model, p: *Pass) !void {
+        if (p.count != 1) return error.InvalidCommit;
+        return m.commitImpl(p, 1, false);
+    }
+    fn commitImpl(m: *Model, p: *Pass, keep: usize, evaluate: bool) !void {
+        if (keep == 0 or keep > p.count or m.position != p.start) return error.InvalidCommit;
         const n: i32 = @intCast(keep);
         const end = m.position + n;
         var next: [48]Cache = @splat(.{});
@@ -412,12 +503,16 @@ pub const Model = struct {
             }
             if (i == 1) {
                 next[i].ple = try mx.retain(try p.scope.slice(rec.ple, 0, n, n + 9));
-                next[i].history = m.cache[i].history;
-                for (p.tokens[0..keep]) |token| next[i].history = .{ next[i].history[1], token };
+                if (m.gpuTokensEnabled()) {
+                    next[i].token_history = try mx.retain(try p.scope.slice(rec.token_history, 0, n, n + 2));
+                } else {
+                    next[i].history = m.cache[i].history;
+                    for (p.tokens[0..keep]) |token| next[i].history = .{ next[i].history[1], token };
+                }
             }
-            inline for (.{ "a", "b", "raw", "pooled", "ple" }) |field| {
+            inline for (.{ "a", "b", "raw", "pooled", "ple", "token_history" }) |field| {
                 const v = @field(next[i], field);
-                if (v.ctx != null) try mx.eval(v);
+                if (evaluate and v.ctx != null) try mx.eval(v);
             }
         }
         for (&m.cache) |*c| c.deinit();

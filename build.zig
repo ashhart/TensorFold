@@ -83,6 +83,22 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const ngram_checks = b.addRunArtifact(exe);
+    ngram_checks.addArg("check-ngram-gpu");
+    b.step("test-ngram-gpu", "Compare GPU n-gram IDs with exact CPU integer hashing").dependOn(&ngram_checks.step);
+    const resident_checks = b.addRunArtifact(exe);
+    resident_checks.addArgs(&.{ "check-ple-resident", b.fmt("{s}/Qwen3.8-Flash-Next-MLX-4bit-MTP", .{model_root}) });
+    resident_checks.step.dependOn(&ngram_checks.step);
+    b.step("test-ple-resident", "Validate all resident PLE groups and bounded loading-memory overhead").dependOn(&resident_checks.step);
+    const ple_long = b.option(bool, "ple-long", "Compare resident/bounded PLE at sparse attention thresholds") orelse false;
+    const ple_state = b.addRunArtifact(exe);
+    ple_state.addArgs(&.{ "run", b.fmt("{s}/Qwen3.8-Flash-Next-MLX-4bit-MTP", .{model_root}), "--check-ple-state" });
+    if (ple_long) ple_state.addArg("--check-long-cache");
+    b.step("test-ple-state", "Compare full Flash resident/bounded logits, every retained cache prefix and EOS history").dependOn(&ple_state.step);
+    const resident_runtime = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_mtp_runtime.py" });
+    resident_runtime.addArtifactArg(exe);
+    resident_runtime.addArgs(&.{ "--model-root", model_root, "--family", "flash", "--resident-ple", "--sampler", "metal", "--output", "build/native-checks/resident-mtp" });
+    b.step("test-ple-runtime", "Compare bounded/resident Flash serial and GPU/host MTP handoff schedules").dependOn(&resident_runtime.step);
     const buffer_fixture = b.addRunArtifact(exe);
     buffer_fixture.addArg("check-kv-buffer");
     const buffer_tests = b.step("test-kv-buffers", "Check buffer donation, independent concatenation parity and snapshot ownership");
@@ -113,15 +129,16 @@ pub fn build(b: *std.Build) void {
     const serial_fixture = b.addRunArtifact(exe);
     serial_fixture.addArg("check-serial-pipeline");
     const serial_tests = b.step("test-serial-pipeline", "GPU serial pipeline EOS/budget ownership and real-model token/cache parity");
-    const serial_family = b.option(usize, "serial-family", "Restrict serial pipeline tests to 0=Qwen or 1=Nemotron");
-    if (serial_family != null and serial_family.? > 1) @panic("serial-family must be 0 or 1");
-    const serial_long = b.option(bool, "serial-long", "Run serial pipeline comparisons across the 10K attention threshold") orelse false;
+    const serial_family = b.option(usize, "serial-family", "Restrict serial pipeline tests to 0=Qwen, 1=Nemotron or 2=resident Flash");
+    if (serial_family != null and serial_family.? > 2) @panic("serial-family must be 0, 1 or 2");
+    const serial_long = b.option(bool, "serial-long", "Run serial pipeline comparisons across 10K or Flash sparse attention thresholds") orelse false;
     var serial_previous: *std.Build.Step = &serial_fixture.step;
-    for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit" }, 0..) |name, family| {
+    for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP" }, 0..) |name, family| {
         if (serial_family != null and serial_family.? != family) continue;
-        for (0..2) |backend| {
+        for (0..if (family == 2) @as(usize, 1) else 2) |backend| {
             const check = b.addRunArtifact(exe);
             check.addArgs(&.{ "run", b.fmt("{s}/{s}", .{ model_root, name }), "--check-serial-state" });
+            if (family == 2) check.addArg("--resident-ple");
             if (backend == 1) check.addArg("--metal-simd");
             if (serial_long) check.addArg("--check-long-cache");
             check.step.dependOn(serial_previous);
@@ -132,7 +149,7 @@ pub fn build(b: *std.Build) void {
     const serial_runtime = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_serial_runtime.py" });
     serial_runtime.addArtifactArg(exe);
     serial_runtime.addArgs(&.{ "--model-root", model_root });
-    if (serial_family) |family| serial_runtime.addArgs(&.{ "--family", if (family == 0) "qwen" else "nemotron" });
+    if (serial_family) |family| serial_runtime.addArgs(&.{ "--family", ([_][]const u8{ "qwen", "nemotron", "flash" })[family] });
     b.step("test-serial-runtime", "Compare synchronous/pipelined CLI completions and output-budget boundaries").dependOn(&serial_runtime.step);
     const mtp_runtime = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_mtp_runtime.py" });
     mtp_runtime.addArtifactArg(exe);

@@ -29,12 +29,31 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var adaptive_drafts = true;
     var gpu_handoff = true;
     var serial_pipeline = true;
+    var resident_ple = false;
+    var ple_wiring = true;
+    var check_ple_state = false;
     var check_serial = false;
     var check_buffers = false;
     var check_reuse = false;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         const key = args[i];
+        if (std.mem.eql(u8, key, "--no-ple-wiring")) {
+            if (!@hasDecl(M, "makeResidentPLE")) return error.UnsupportedResidentPLE;
+            ple_wiring = false;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--check-ple-state")) {
+            if (!@hasDecl(M, "makeResidentPLE")) return error.UnsupportedResidentPLE;
+            resident_ple = true;
+            check_ple_state = true;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--resident-ple")) {
+            if (!@hasDecl(M, "makeResidentPLE")) return error.UnsupportedResidentPLE;
+            resident_ple = true;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--check-kv-buffers")) {
             check_buffers = true;
             continue;
@@ -124,8 +143,15 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     try settings.validate();
     try mx.init();
     defer mx.shutdown();
-    var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress and !long_cache and !check_serial and !check_buffers and !check_reuse);
+    var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress and !long_cache and !check_serial and !check_buffers and !check_reuse and !check_ple_state);
     defer m.deinit();
+    if (@hasDecl(M, "makeResidentPLE")) {
+        if (resident_ple) try m.makeResidentPLE(ple_wiring);
+    }
+    const gpu_tokens = if (@hasDecl(M, "gpuTokensEnabled")) m.gpuTokensEnabled() else @hasDecl(M, "forwardArray");
+    if (@hasDecl(M, "makeResidentPLE")) {
+        if (check_ple_state) return @import("cache_checks.zig").checkResident(&m, long_cache);
+    }
     if (check_reuse) return @import("cache_checks.zig").checkBufferReuse(M, &m);
     if (check_buffers) return @import("cache_checks.zig").checkBuffered(M, &m, long_cache);
     if (trace_dir != null and !@hasField(M, "trace_dir")) return error.UnsupportedTrace;
@@ -134,6 +160,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         if (@hasField(M, "trace_gdn")) m.trace_gdn = layer_index else return error.UnsupportedTrace;
     }
     if (check_serial) {
+        if (!gpu_tokens) return error.UnsupportedSerialPipeline;
         if (@hasDecl(M, "SerialPass")) return @import("cache_checks.zig").checkSerial(M, &m, long_cache);
         return error.UnsupportedSerialPipeline;
     }
@@ -232,7 +259,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         pipeline = try Pipeline.prepare(&m, &s, head_cache, last, pending, m.position, settings);
     }
     if (max_tokens > 0) try generated.append(a, @intCast(pending));
-    const use_serial_pipeline = serial_pipeline and settings.metal and !m.mtp and @hasDecl(M, "SerialPass");
+    const use_serial_pipeline = serial_pipeline and settings.metal and !m.mtp and @hasDecl(M, "SerialPass") and gpu_tokens;
     var queued_serial_steps: usize = 0;
     if (@hasDecl(M, "SerialPass")) {
         if (use_serial_pipeline) {
@@ -253,7 +280,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         var proposal_scope = mx.Scope{};
         defer proposal_scope.deinit();
         var gpu_chain: ?mx.Array = null;
-        const handoff = gpu_handoff and queued_drafts and settings.metal and @hasDecl(M, "forwardArray");
+        const handoff = gpu_handoff and queued_drafts and settings.metal and @hasDecl(M, "forwardArray") and gpu_tokens;
         if (m.mtp) {
             history.clearRetainingCapacity();
             try history.appendSlice(a, tokens.items);
@@ -416,6 +443,8 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             .gpu_handoff_rounds = handoff_rounds,
             .serial_pipeline = use_serial_pipeline,
             .kv_buffers = @import("kv_buffer.zig").enabled,
+            .resident_ple = resident_ple,
+            .resident_wired_bytes = if (@hasField(M, "resident_wired_bytes")) m.resident_wired_bytes else @as(usize, 0),
             .queued_serial_steps = queued_serial_steps,
             .adaptive_drafts = adaptive_drafts and m.mtp,
             .draft_depth_counts = depth_counts,

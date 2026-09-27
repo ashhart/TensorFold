@@ -59,8 +59,10 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--full-draft-vocab` | Nemotron/Flash Next: score the full draft head instead of the original reduced ID list |
 | `--no-queued-drafts` | Nemotron/Flash Next: read each Metal draft token on the host instead of queuing the chain |
 | `--no-early-mtp` | Build MTP context after target verification instead of speculating before its host read |
-| `--no-gpu-handoff` | Nemotron: read the queued draft IDs before building target verification |
-| `--no-serial-pipeline` | Qwen/Nemotron: disable queuing the next serial Metal step before reading the current token |
+| `--no-gpu-handoff` | Nemotron/resident Flash: read the queued draft IDs before building target verification |
+| `--no-serial-pipeline` | Disable queuing the next serial Metal step before reading the current token |
+| `--resident-ple` | Flash: load the packed PLE tables and compute token history/hash on the GPU, enabling serial pipelining and MTP GPU handoff |
+| `--no-ple-wiring` | Resident Flash: leave the existing MLX wired-memory budget unchanged |
 | `--no-copy` | Disable context-copy proposals to exercise the neural draft head |
 | `--metal-simd` | Force the non-tensor Metal path for coverage on M5 |
 | `--metal-sampling` | Use the original fp32 Metal sampler instead of CPU f64 sampling |
@@ -74,7 +76,8 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--check-cache-stress` | Check every accepted prefix, cache snapshots, rejection, reset and memory cycles |
 | `--check-long-cache` | Repeat cache/rollback checks after random 10K-token or sparse-attention prefixes |
 | `--check-mtp-state` | Nemotron/Flash: compare batched MTP with serial, all retained prefixes and continuations through 10K |
-| `--check-serial-state` | Qwen/Nemotron: compare pipelined/synchronous tokens, every cache and continuation; add `--check-long-cache` for 10K contexts |
+| `--check-serial-state` | Qwen/Nemotron/resident Flash: compare pipelined/synchronous tokens, every cache and continuation; add `--check-long-cache` for attention thresholds |
+| `--check-ple-state` | Flash: compare resident/bounded PLE logits, all retained prefixes, history and continuation; add `--check-long-cache` for sparse thresholds |
 | `--trace-dir DIR` | Flash: save the final prefill block's layer intermediates in an existing directory |
 | `--trace-gdn N` | With `--trace-dir`: trace recurrent layer N's input/output across all prefill blocks |
 
@@ -114,7 +117,7 @@ path; attention layers gather only its K/V rows.
 | `lanes.zig`, `metal/` | Exact quantized projections, normalization, tree metadata and attention |
 | `model.zig` | Complete target forward, caches, accepted-path commit |
 | `checkpoint.zig` | Shared safetensors reader and affine quantized projections |
-| `safetensors.zig`, `ple_tables.zig` | Validated checkpoint headers and bounded positional PLE row reads |
+| `safetensors.zig`, `ple_tables.zig`, `ple_resident.zig` | Validated checkpoint headers, bounded positional PLE reads and optional resident packed tables |
 | `schema.zig`, `schemas/` | Required tensor names, shapes and dtypes for all four fixed checkpoint recipes |
 | `nemotron.zig` | Mamba, NoPE attention, routed/shared experts, MTP and rollback |
 | `flash.zig`, `ngram.zig` | Hyper-connections, GDN, sparse attention, MoE, PLE and MTP |
@@ -132,9 +135,8 @@ path; attention layers gather only its K/V rows.
 | `vendor/` | MIT tokenizer and I/O helpers from mlx-serve; preserved license |
 
 The HTTP service, chat-template rendering, vision, and disk prefix caches are not part
-of this native port. Attention cache
-commit currently concatenates the prefix, so long-context performance needs separate
-measurement. This is the native inference backend and completion CLI, not a replacement
+of this native port. Attention caches use alternating capacity buffers; long-context
+performance still needs separate measurement. This is the native inference backend and completion CLI, not a replacement
 for every `tensorfold serve` feature. Sampling defaults to CPU f64 position-keyed
 sampling. `--metal-sampling` selects the original fp32 GPU algorithm (24-bit hash
 uniforms and a 1,024-candidate cap); its output need not equal the f64 algorithm.
@@ -150,8 +152,8 @@ before the host reads it. Cache commits construct replacement graphs without a h
 wait; a final drain evaluates any remaining recurrent replay. A queued step beyond
 EOS is discarded without committing its cache. `--no-serial-pipeline` retains the
 synchronous reference. Reports include `serial_pipeline` and `queued_serial_steps`.
-Flash's bounded PLE file reads still require host token IDs, so its serial path does
-not yet use this pipeline.
+Flash enables the same pipeline with `--resident-ple`. Its default bounded PLE file
+reads require host token IDs and retain the synchronous path.
 
 MTP defaults to the original reduced vocabulary: 32,768 Nemotron IDs and 79,592 Flash
 IDs (the original 79,591-ID list padded to eight rows). The executable embeds the
@@ -161,8 +163,8 @@ proposal against the full vocabulary. `--full-draft-vocab` restores the full dra
 With `--metal-sampling`, dependent MTP proposals stay on the GPU for the whole chain;
 `--no-queued-drafts` restores per-token reads. Nemotron feeds that array directly into
 target verification and reads proposals together with target draws; `--no-gpu-handoff`
-restores the earlier synchronization. Flash reads the chain before its bounded PLE
-file lookups. Reports count actual GPU handoffs in `gpu_handoff_rounds`. CPU sampling uses host
+restores the earlier synchronization. Resident Flash uses the same GPU handoff;
+bounded Flash reads the chain before its PLE file lookups. Reports count actual GPU handoffs in `gpu_handoff_rounds`. CPU sampling uses host
 reads. With Metal sampling, target samples also feed a batched MTP pass before the
 host reads verification results. The accepted MTP cache prefix and its last draw are
 reused for the next chain; `--no-early-mtp` disables this overlap. MTP depth adapts using
@@ -192,6 +194,23 @@ the selected packed rows from disk, then dequantizes those rows through MLX; it 
 loading the complete 32 GB table. Active MLX allocations settled at 79.02 GB in the
 cache stress check on this 128 GiB Mac. Long-context qualification and final performance
 comparisons remain separate checks. The upstream recommended capacity is 192 GB or more.
+
+`--resident-ple` instead builds the original eight packed PLE groups using bounded
+file reads and donated slice updates. It adds 32,000,153,600 bytes of packed tables.
+The GPU computes n-gram IDs with signed 64-bit arithmetic and keeps the last two
+token IDs in the committed cache, including EOS resets and partial acceptance.
+Resident loading checks that every destination allocation is reused rather than
+silently creating another table-sized copy.
+
+Before creating these tables, the runtime materializes the needed model weights and
+sets the process's MLX wired-memory budget to their measured size, capped by Metal's
+recommended working set. It restores the previous budget at shutdown. This uses the
+ordinary MLX API and requires no system settings or administrator access. The budget
+does not cover the full table in addition to the weights. `--no-ple-wiring` leaves
+the budget unchanged for diagnostics.
+Reports include `resident_ple` and `resident_wired_bytes`. Wiring the entire Metal
+recommendation passed short decoding but failed a long-context test on this Mac;
+that policy is not used.
 
 ## Validation
 
@@ -267,6 +286,9 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test-long-context -Doptimize=safe
 .zig-toolchain/zig build test-long-cache -Doptimize=safe
 .zig-toolchain/zig build test-ple -Doptimize=safe
+.zig-toolchain/zig build test-ple-resident -Doptimize=safe
+.zig-toolchain/zig build test-ple-state -Doptimize=safe -Dple-long=true
+.zig-toolchain/zig build test-ple-runtime -Doptimize=safe
 ```
 
 `test-metal` generates independent oracles through the original Python implementation
@@ -285,7 +307,7 @@ boundaries. All outputs match bit for bit. Diagnostic coverage does not make eac
 variant a selectable production mode; [COVERAGE.md](COVERAGE.md) records that distinction.
 The full [86-kernel inventory](KERNEL_INVENTORY.md) lists integration sites and fixture counts.
 
-`test-allocation-failures` injects 904 failures into native ownership operations with
+`test-allocation-failures` injects 956 failures into native ownership operations with
 real MLX handles and small checkpoint files. Every allocation is released, with zero
 retained MLX active memory. It also tests API error recovery; MLX's internal allocator
 and the driver are outside this injection boundary.
@@ -326,6 +348,14 @@ oversized or invalid headers, missing files and allocation failures. The loader 
 header geometry and byte offsets before passing any checkpoint to MLX. `test-ple`
 compares five rows at the beginning, middle and end of every PLE shard against an
 independent MLX load/dequantization, freeing each oracle shard before proceeding.
+
+`test-ple-resident` checks 384 exact integer GPU hash windows and 640 resident lookup
+rows across all 128 shards. Loading must donate all 14,976 updates and stay within
+32 MiB of the packed table size; the measured overhead is 944,140 bytes. Cleanup
+retains zero active MLX bytes. `test-ple-state -Dple-long=true` compares bounded and
+resident full-model caches, logits and every retained prefix across sparse thresholds.
+`test-ple-runtime` compares actual resident/bounded serial output and all Metal MTP
+handoff schedules. Use `-Dserial-family=2` for resident Flash's serial tests.
 
 `test-model-schemas` checks all 6,105 required tensors using headers only. The same
 metadata contracts run in production before model transformations or kernel dispatch.

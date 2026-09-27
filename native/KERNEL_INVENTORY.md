@@ -95,4 +95,4 @@ rather than this optional-variant replay suite. Diagnostic entries are not produ
 | `q4_hc_norm_grouped` | `flash.zig` | 0 |
 | `q4_router_float` | `flash.zig` | 6 |
 | `q4_router_bfloat` | Diagnostic only | 6 |
-| `q4_ple_lookup` | Diagnostic only | 6 |
+| `q4_ple_lookup` | `ple_resident.zig` | 6 |

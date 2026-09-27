@@ -24,10 +24,13 @@ def main():
     parser.add_argument("--family", choices=MODELS)
     parser.add_argument("--sampler", choices=("greedy", "metal", "cpu"))
     parser.add_argument("--budget", type=int, choices=(1, 3, 15))
-    parser.add_argument("--handoff-only", action="store_true", help="Nemotron GPU/host handoff pairs, both backends and Metal sampling modes")
+    parser.add_argument("--resident-ple", action="store_true", help="Flash resident PLE and GPU handoff; also compare bounded serial output")
+    parser.add_argument("--handoff-only", action="store_true", help="GPU/host handoff pairs for Nemotron or resident Flash")
     args = parser.parse_args()
-    if args.handoff_only and (args.family == "flash" or args.sampler == "cpu"):
-        parser.error("--handoff-only requires Nemotron with Metal or greedy sampling")
+    if args.resident_ple and args.family != "flash":
+        parser.error("--resident-ple requires --family flash")
+    if args.handoff_only and ((args.family == "flash" and not args.resident_ple) or args.sampler == "cpu"):
+        parser.error("--handoff-only requires Nemotron or resident Flash with Metal or greedy sampling")
     args.output.mkdir(parents=True, exist_ok=True)
     checked, schedule_pairs = 0, 0
 
@@ -43,7 +46,7 @@ def main():
     for family, (model, full_size, cut_size) in MODELS.items():
         if args.family and family != args.family:
             continue
-        if args.handoff_only and family != "nemotron":
+        if args.handoff_only and family != "nemotron" and not args.resident_ple:
             continue
         for backend in (["tensor", "simd"] if family == "nemotron" else ["tensor"]):
             for sampler in ("greedy", "metal", "cpu"):
@@ -62,7 +65,15 @@ def main():
                     common.append("--metal-simd")
                 if sampler != "cpu":
                     common.append("--metal-sampling")
+                bounded = None
+                if args.resident_ple:
+                    bounded = run(prefix + "-bounded-serial", common, ["--no-drafts"])
+                    common.append("--resident-ple")
                 serial = run(prefix + "-serial", common, ["--no-drafts"])
+                if bounded is not None:
+                    assert serial["tokens"] == bounded["tokens"], (prefix, "resident/bounded serial")
+                    assert serial["serial_pipeline"] is (sampler != "cpu"), prefix
+                    print(f"PASS {prefix}: resident serial matches bounded PLE (pipeline={serial['serial_pipeline']})", flush=True)
                 assert len(serial["tokens"]) == count, (prefix, "early EOS prevents the requested coverage")
                 for budget in (1, 3, 15):
                     if args.budget and budget != args.budget:
@@ -80,7 +91,7 @@ def main():
                             modes += [(True, False, False), (True, True, False)]
                             if budget == 3:
                                 modes.append((False, True, False))
-                            if family == "nemotron":
+                            if family == "nemotron" or args.resident_ple:
                                 modes += [(True, False, True), (True, True, True)]
                         if args.handoff_only:
                             modes = [(True, False, False), (True, True, False), (True, False, True), (True, True, True)]

@@ -12,6 +12,7 @@ import subprocess
 MODELS = {
     "qwen": "Qwen3.8-27B-MLX-4bit",
     "nemotron": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",
+    "flash": "Qwen3.8-Flash-Next-MLX-4bit-MTP",
 }
 
 
@@ -27,15 +28,17 @@ def main():
     for family, name in MODELS.items():
         if args.family and family != args.family:
             continue
-        for backend in ("tensor", "simd"):
+        for backend in (["tensor"] if family == "flash" else ["tensor", "simd"]):
             for temperature in (0, 0.7):
                 for limit in (0, 1, 2, 32):
                     common = [str(args.binary.resolve()), "run", str(args.model_root / name),
                               "--prompt", "Write a short Python function that computes the Fibonacci sequence.",
                               "--metal-sampling", "--temperature", str(temperature), "--seed", "5678",
                               "--top-k", "12", "--top-p", "0.8", "--max-tokens", str(limit)]
-                    if family == "nemotron":
+                    if family != "qwen":
                         common.append("--no-drafts")
+                    if family == "flash":
+                        common.append("--resident-ple")
                     if backend == "simd":
                         common.append("--metal-simd")
                     reference = None
@@ -56,7 +59,7 @@ def main():
                         else:
                             for field in ("prompt_tokens", "tokens", "token_sha256", "accepted_drafts", "rounds"):
                                 assert result[field] == reference[field], (label, field)
-                            if family == "nemotron":
+                            if family != "qwen":
                                 assert result["proposal_sha256"] == reference["proposal_sha256"], label
                             checked += 1
                             print(f"PASS {label}: {limit} IDs, rounds and queued-step counts exact", flush=True)

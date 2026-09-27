@@ -4,12 +4,18 @@ const mx = @import("mlx.zig");
 const safe = @import("safetensors.zig");
 const Ref = struct { file: usize, tensor: safe.Tensor };
 pub const Tables = struct {
+    resident: ?@import("ple_resident.zig").Resident = null,
     files: std.ArrayList(safe.File) = .empty,
     rows: [128][3]Ref = undefined,
     starts: [129]i64 = undefined,
     pub fn deinit(t: *Tables) void {
+        if (t.resident) |*r| r.deinit();
         for (t.files.items) |*file| file.deinit();
         t.files.deinit(mx.allocator);
+    }
+    pub fn makeResident(t: *Tables) !void {
+        if (t.resident != null) return;
+        t.resident = try @import("ple_resident.zig").Resident.init(t);
     }
     pub fn init(io: std.Io, dir: []const u8) !Tables {
         var t = Tables{};
@@ -112,6 +118,38 @@ pub const Tables = struct {
             try @import("sampling_checks.zig").equal(&scope, try oracle.embed(&scope, key, &rows), try tables.gather(&scope, &ids));
         }
         std.debug.print("PASS: 640 PLE rows (first, last, adjacent and middle) across all 128 shards exactly match independent MLX reads/dequantization\n", .{});
+    }
+    pub fn checkResident(io: std.Io, dir: []const u8) !void {
+        try mx.init();
+        defer mx.shutdown();
+        {
+            var tables = try Tables.init(io, dir);
+            defer tables.deinit();
+            try tables.makeResident();
+            var kernels = mx.Kernels.init();
+            defer kernels.deinit();
+            for (0..128) |shard| {
+                var s = mx.Scope{};
+                defer s.deinit();
+                const end = tables.starts[shard + 1] - tables.starts[shard];
+                const rows = [_]i64{ 0, 1, @divTrunc(end, 2), end - 2, end - 1 };
+                var ids: [5 * 16]i64 = undefined;
+                for (&ids, 0..) |*id, i| id.* = tables.starts[shard] + rows[@divTrunc(i, 16)];
+                const input = try s.cast(try s.data(&ids, &.{ 5, 16 }, mx.c.MLX_INT64), mx.c.MLX_UINT32);
+                const actual = try tables.resident.?.gather(&kernels, &s, input);
+                const expected = try s.reshape(try tables.gather(&s, &ids), &.{ 5, 2560 });
+                try @import("sampling_checks.zig").equal(&s, actual, expected);
+            }
+            var peak: usize = 0;
+            try mx.check(mx.c.mlx_get_peak_memory(&peak));
+            const packed_bytes: usize = @intCast(tables.starts[128] * 100);
+            if (peak > packed_bytes + 32 * 1024 * 1024) return error.ResidentLoadingPeakExceeded;
+            std.debug.print("PASS: resident/bounded PLE at 640 shard boundary/interior rows; peak MLX bytes {d}, packed bytes {d}\n", .{ peak, packed_bytes });
+        }
+        try mx.check(mx.c.mlx_synchronize(mx.stream));
+        var active: usize = 0;
+        try mx.check(mx.c.mlx_get_active_memory(&active));
+        try std.testing.expectEqual(@as(usize, 0), active);
     }
 };
 test "PLE shard lookup handles every edge and rejects out-of-table IDs" {

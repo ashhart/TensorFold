@@ -20,6 +20,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-mtp-positions")) return @import("mtp_position_checks.zig").check(io, args[2]);
     if (args.len == 2 and std.mem.eql(u8, args[1], "check-serial-pipeline")) return @import("serial_pipeline_checks.zig").check();
     if (args.len == 2 and std.mem.eql(u8, args[1], "check-kv-buffer")) return @import("kv_buffer_checks.zig").check();
+    if (args.len == 2 and std.mem.eql(u8, args[1], "check-ngram-gpu")) return @import("ngram.zig").checkGpu();
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-ple-resident")) return @import("ple_tables.zig").Tables.checkResident(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-sparse")) return @import("flash.zig").Model.checkAttention(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-attention")) return @import("attention_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-checkpoint-files")) return @import("safetensors.zig").checkFiles(io, args[2]);
@@ -30,6 +32,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-model-schema")) return @import("schema.zig").checkCheckpoint(std.meta.stringToEnum(@import("schema.zig").Kind, args[2]) orelse return error.UnsupportedModel, io, args[3]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
         std.debug.print("Nemotron/Flash MTP options: --full-draft-vocab, --no-queued-drafts, --no-early-mtp, --no-gpu-handoff, --fixed-drafts, --check-mtp-state\n", .{});
+        std.debug.print("Flash resident PLE: --resident-ple [--no-ple-wiring], --check-ple-state [--check-long-cache]\nDiagnostics: tensorfold check-ngram-gpu; tensorfold check-ple-resident MODEL_DIR\n", .{});
         std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--no-copy] [--metal-simd] [--metal-sampling]\n  [--no-serial-pipeline] [--check-serial-state] [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--no-kv-buffers] [--check-kv-buffers] [--check-kv-reuse]\n  [--report PATH] [--dump-logits PATH] [--check-exact] [--check-cache-stress] [--check-long-cache]\n  [--trace-dir EXISTING_DIR (Flash only)]\n  tensorfold check-kv-buffer\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n  tensorfold check-model-schema qwen|dflash|nemotron|flash MODEL_DIR\n", .{});
         return;
     }

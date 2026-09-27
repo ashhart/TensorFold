@@ -4,6 +4,56 @@ This fork ports the inference hosts to Zig and embeds the original author's Meta
 kernels. MLX-C supplies arrays, scheduling, safetensors, and general operations.
 This matrix distinguishes exercised behavior from physical-device validation.
 
+## Resident Flash PLE and GPU scheduling
+
+Flash's bounded positional PLE reads remain the default. `--resident-ple` loads the
+original eight packed groups and keeps n-gram hashes and the two-token history on the
+GPU. This enables serial pipelining and queued MTP handoff without a token read before
+the target forward. The existing original `q4_ple_lookup` kernel is used unchanged.
+
+- **34 serial/MTP comparisons** and **26 exact scheduling comparisons** pass with
+  Metal sampling, depths 1/3/15, full/reduced vocabulary, queued/host proposals,
+  early/late speculation and GPU/host handoff, including two adaptive-depth runs that match
+  serial output. Proposal hashes, accepted drafts and round counts match between
+  scheduling modes. Resident serial output matches bounded PLE output.
+  CPU sampling separately matches bounded serial and full/reduced depth-15 MTP.
+- **51 full-model resident/bounded state comparisons** pass at prefixes
+  2,044/2,051/2,063 under the final wired-memory policy. Independently prefilled
+  caches, every verification logit, all retained lengths 0..16, both EOS IDs in
+  history, and continuation logits match exactly. The earlier short comparison
+  also passed 34 cases at prefixes 0/31 with wiring disabled.
+- **16 short full-model serial-pipeline comparisons** pass, including forced
+  terminal draws that queue and discard a real Flash pass. Every token, cache
+  array, convolution/history state and continuation matches synchronous decoding.
+  All **64 pipeline/reset cycles** retain flat active MLX memory: 111,023,049,784 bytes.
+- Another **24 long serial-pipeline comparisons** pass at 2,044/2,051/2,063 tokens,
+  including forced terminal discard. **Eight CLI pairs** pass with greedy/Metal
+  sampling and limits 0/1/2/32, including exact rounds and queued-step counts.
+- **384 GPU hash windows** match the CPU integer oracle exactly, including signed
+  overflow, every EOS location, both EOS IDs and vocabulary endpoints. No float
+  conversion is used to compare the IDs.
+- The final loader passes **14,976 exact allocation donations** and **640 shard
+  boundary/interior row comparisons**. Peak MLX memory is **32,001,097,740 bytes**,
+  just 944,140 bytes above the packed tables. Cleanup leaves zero active MLX bytes.
+- All **956 injected host allocation failures** pass with zero retained MLX memory,
+  including 52 new resident-loader failure points across tensor/SIMD and resizing
+  modes. Positional multi-row reads reject zero/overflow/out-of-range lengths,
+  wrong buffers and truncation. Bounded Flash passes **96 rollback comparisons**
+  and **128 reset cycles** again, with flat active memory at 79,022,555,160 bytes.
+- Qwen/Nemotron tensor and forced-SIMD regressions pass another **48 full-model
+  pipeline comparisons** and **256 reset cycles** after the shared final-drain
+  change. Memory stays flat on all four model/backend combinations.
+
+Resident tables add 32,000,153,600 packed bytes. Loading uses bounded positional
+reads and synchronously drained, donated updates instead of holding every source
+shard and a second full concatenation. The optional MLX wired budget is the size of
+materialized model weights, capped by Metal's recommended working set; the previous
+process budget is restored at shutdown. Wiring the entire recommendation passed
+short decoding but failed long-context evaluation, so that policy was rejected.
+
+These are correctness and memory checks, not end-to-end performance measurements.
+Final engine benchmarks and physical M1–M4 qualification remain separate claims.
+
 ## Alternating attention buffers
 
 Qwen, Nemotron and Flash use alternating KV capacity buffers; Flash also buffers
