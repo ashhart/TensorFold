@@ -54,6 +54,7 @@ where = ["src"]
 "tensorfold.families.qwen4_exp.cuda" = ["*.cu", "*.cpp", "*.txt"]
 "tensorfold.families.nemotron_h" = ["*.txt"]
 "tensorfold.families.glm5_next.cuda" = ["*.cu", "*.cpp"]
+"tensorfold.cuda.exl3" = ["*.cu", "*.cuh", "*.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

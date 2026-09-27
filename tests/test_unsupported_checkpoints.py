@@ -53,6 +53,24 @@ def test_a_family_can_declare_more_formats():
     families.require_readable(family, EXL3, "cuda")
 
 
+def test_a_family_can_read_every_exl3_codebook_and_width():
+    family = _family(cuda_engine=lambda *a, **k: None, QUANT_METHODS={"cuda": ("mlx", "exl3")}, EXL3_VARIANT="any")
+    families.require_readable(family, EXL3, "cuda")
+    for config in ({"model_type": "mimo", "quantization_config": {"quant_method": "exl3", "codebook": "mul1",
+                                                                 "bits": 2.5078, "head_bits": 6}},
+                   {"model_type": "mimo", "quantization_config": {"quant_method": "exl3", "codebook": "3inst",
+                                                                 "bits": 2.5}},
+                   {"model_type": "mimo", "quantization_config": {"quant_method": "exl3", "bits": 4.15}}):
+        families.require_readable(family, config, "cuda")
+    for config in ({"model_type": "mimo", "quantization_config": {"quant_method": "exl3", "codebook": "mcg2"}},
+                   {"model_type": "mimo", "quantization_config": {"quant_method": "exl3", "head_bits": 9}}):
+        with pytest.raises(ValueError) as refused:
+            families.require_readable(family, config, "cuda")
+        assert "does not read" in str(refused.value) and "owner/tested" in str(refused.value)
+    with pytest.raises(ValueError):                            # EXL3 is not something the Mac engine reads
+        families.require_readable(family, EXL3, "mlx")
+
+
 def test_glm_reads_mias_exl3_checkpoint_as_an_experiment(tmp_path, capsys):
     from tensorfold.families import glm5_next
 
