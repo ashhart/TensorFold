@@ -1,0 +1,86 @@
+"""Python numerical oracle for native Nemotron/Flash Next; never launches native code."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+import numpy as np
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("model", type=Path)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--tokens", default="1,2,3,4")
+    p.add_argument("--generate", type=int, default=0)
+    p.add_argument("--prompt", default="Write a short Python function that computes the Fibonacci sequence.")
+    p.add_argument("--seed", type=int, default=1234)
+    p.add_argument("--temperature", type=float, default=1)
+    p.add_argument("--simd", action="store_true")
+    args = p.parse_args()
+    import mlx.core as mx
+    import mlx.nn as nn
+    from tensorfold.engine.exact_sampling import Sampling, sample_rows
+    kind = json.loads((args.model / "config.json").read_text())["model_type"]
+    if kind == "nemotron_h":
+        from mlx_lm import load
+        from tensorfold.kernels.nemotron.lightning.v1 import kernels, rows
+        from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+        model, tokenizer = load(str(args.model))
+        fused = kernels.FusedDecode(model, fold_shared=False)
+        fused.compiled = False
+        fused.experts_fn = rows.experts
+        holder = nn.Module()
+        holder.model = model
+        holder.stacked = [x for x, _ in fused.qkv.values()]
+        if args.simd:
+            for _, module in holder.named_modules():
+                if isinstance(module, nn.QuantizedLinear):
+                    module.__class__ = rows.RowLinear
+        else:
+            lane_qmm.install(holder, rows=128, tile=True, wide=True)
+        cache = model.make_cache()
+        forward = lambda ids: model.lm_head(fused(mx.array([ids], dtype=mx.uint32), cache))
+    elif kind == "qwen4_exp":
+        from tensorfold.families.qwen4_exp.model import load
+        from tensorfold.families.qwen4_exp.decode import FusedDecode
+        from tensorfold.kernels.qwen.flash_next.v1 import kernels as flash_kernels
+        # Keep the 32 GB PLE tables sharded. The reference embedding performs the
+        # same lookup/dequantization without materializing a second concatenated copy.
+        flash_kernels.PleTables = lambda embedding: embedding
+        flash_kernels.ple_lookup = lambda ids, tables: tables(ids)
+        model, tokenizer = load(args.model, lazy=True)
+        model.__dict__["fused"] = FusedDecode(model)
+        cache = model.make_cache()
+        forward = lambda ids: model(mx.array([ids], dtype=mx.int32), cache)
+    else:
+        raise ValueError(kind)
+    tokens = tokenizer.encode(args.prompt, add_special_tokens=False) if args.generate else [int(x) for x in args.tokens.split(",")]
+    # Native and oracle prefill on the same fixed 16-token grid.
+    for start in range(0, len(tokens), 16):
+        logits = forward(tokens[start:start + 16])
+        mx.eval(logits)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if not args.generate:
+        np.save(args.output, np.asarray(logits.astype(mx.float32)).reshape(-1, logits.shape[-1]))
+        print(f"Saved {args.output}: {logits.shape}")
+        return
+    settings = Sampling(args.seed, temperature=args.temperature)
+    pos = len(tokens)
+    result = []
+    eos = (2, 11) if kind == "nemotron_h" else (248044, 248046)
+    while len(result) < args.generate:
+        token = sample_rows(logits.reshape(-1, logits.shape[-1])[-1:], [pos], settings)[0] if args.temperature else int(mx.argmax(logits.reshape(-1, logits.shape[-1])[-1]).item())
+        result.append(token)
+        if token in eos:
+            break
+        logits = forward([token])
+        mx.eval(logits)
+        pos += 1
+    digest = hashlib.sha256(np.asarray(result, dtype="<u4").tobytes()).hexdigest()
+    args.output.write_text(json.dumps(dict(prompt_tokens=tokens, tokens=result, token_sha256=digest)))
+    print(f"Saved {args.output}: {len(result)} tokens, {digest}")
+
+
+if __name__ == "__main__":
+    main()

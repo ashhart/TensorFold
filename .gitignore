@@ -11,3 +11,5 @@ venv/
 .DS_Store
 *.swp
 *.log
+.zig-cache/
+zig-out/

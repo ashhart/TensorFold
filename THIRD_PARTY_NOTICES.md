@@ -78,6 +78,16 @@ Flash Next's optional int8 and int4 KV caches (`families/qwen4_exp/cuda/kvcache.
 
 ## Vendored code and weights
 
+- `native/vendor/tokenizer.zig` and `native/vendor/io_util.zig` are from
+  [mlx-serve](https://github.com/ddalcu/mlx-serve), revision
+  `4e00f2af7a64fd846d31cfaa90247586cf853ca2`, MIT License, Copyright (c) 2026
+  David Dalcu. Its license is preserved in `native/vendor/LICENSE`.
+- `native/drafter.zig` ports the DFlash2 architecture from the vendored Z Lab
+  implementation below (MIT, Copyright (c) 2026 Z Lab). The native engine uses
+  MLX and MLX-C (MIT, Copyright Apple Inc.) through their public C API.
+- `native/metal/` contains generated copies of TensorFold's existing Metal
+  kernels, including the mlx-lm-derived DeltaNet arithmetic described above.
+
 `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified `dflash/model_mlx.py` from
 [z-lab/dflash](https://github.com/z-lab/dflash), MIT License, Copyright © 2026 Z Lab.
 

@@ -1,0 +1,361 @@
+//! Qwen3.8 Flash Next: four residual streams, GDN, sparse attention, MoE, PLE, MTP.
+const std = @import("std");
+const mx = @import("mlx.zig");
+const cp = @import("checkpoint.zig");
+const src = @import("kernel_sources.zig");
+const A = mx.Array;
+const ti = mx.ti;
+pub const Cache = struct {
+    a: A = mx.empty,
+    b: A = mx.empty,
+    raw: A = mx.empty,
+    pooled: A = mx.empty,
+    ple: A = mx.empty,
+    offset: i32 = 0,
+    history: [2]i32 = .{ 248044, 248044 },
+    pub fn deinit(c: *Cache) void {
+        inline for (.{ "a", "b", "raw", "pooled", "ple" }) |f| mx.free(@field(c, f));
+        c.* = .{};
+    }
+    pub fn clone(c: Cache) !Cache {
+        var out = Cache{ .offset = c.offset, .history = c.history };
+        errdefer out.deinit();
+        inline for (.{ "a", "b", "raw", "pooled", "ple" }) |f| {
+            const v = @field(c, f);
+            @field(out, f) = if (v.ctx != null) try mx.retain(v) else mx.empty;
+        }
+        return out;
+    }
+};
+pub const Pass = struct {
+    scope: mx.Scope = .{},
+    logits: A = mx.empty,
+    hidden: A = mx.empty,
+    records: [48]Cache = [_]Cache{.{}} ** 48,
+    tokens: [16]i32 = undefined,
+    count: usize = 0,
+    pub fn deinit(p: *Pass) void {
+        p.scope.deinit();
+    }
+};
+pub const Model = struct {
+    weights: cp.Store = cp.Store.init(32),
+    kernels: mx.Kernels = mx.Kernels.init(),
+    cache: [48]Cache = [_]Cache{.{}} ** 48,
+    position: i32 = 0,
+    mtp: bool = false,
+    centered: bool = true,
+    ngram: @import("ngram.zig").NGram = undefined,
+    shard_starts: [129]i64 = undefined,
+    pub const DraftCache = Cache;
+    pub const vocab = 248320;
+    pub fn eos(id: i32) bool {
+        return id == 248044 or id == 248046;
+    }
+    pub fn init(io: std.Io, dir: []const u8, drafts: bool) !Model {
+        var m = Model{};
+        errdefer m.deinit();
+        var buf: [4096]u8 = undefined;
+        const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&buf, "{s}/config.json", .{dir}));
+        defer mx.allocator.free(bytes);
+        const cfg = try std.json.parseFromSlice(std.json.Value, mx.allocator, bytes, .{});
+        defer cfg.deinit();
+        try @import("config.zig").flash(cfg.value);
+        try m.weights.load(io, dir, "language_model.");
+        m.mtp = drafts;
+        if (drafts and !m.weights.has("mtp.fc_hidden.weight")) return error.MissingDraftHead;
+        // Match the Python loader's storage-convention check on all 48 HC anchors.
+        var means: [48]f64 = undefined;
+        var above: usize = 0;
+        for (0..48) |i| {
+            var s = mx.Scope{};
+            defer s.deinit();
+            const key = try std.fmt.bufPrint(&buf, "model.layers.{d}.attn_hyper_connection.hc_norm.weight", .{i});
+            const array = try s.cast(try m.weights.get(key), mx.f32t);
+            try mx.eval(array);
+            const vals = mx.c.mlx_array_data_float32(array)[0..mx.c.mlx_array_size(array)];
+            var sum: f64 = 0;
+            for (vals) |v| sum += v;
+            means[i] = sum / @as(f64, @floatFromInt(vals.len));
+            if (means[i] > 0.5) above += 1;
+        }
+        std.mem.sort(f64, &means, {}, std.sort.asc(f64));
+        const median = (means[23] + means[24]) / 2;
+        if (above >= 44 and median >= 0.75 and median <= 1.5) m.centered = false else if (!(above <= 4 and median >= -0.5 and median <= 0.25)) return error.UnknownNormConvention;
+        m.ngram = @import("ngram.zig").NGram.init();
+        inline for (.{ .{ "layer_multipliers", "multipliers" }, .{ "ngram_heads_vocab_sizes", "sizes" }, .{ "ngram_heads_offsets", "offsets" } }) |entry| {
+            const key = try std.fmt.bufPrint(&buf, "model.layers.1.ple.ple_embedding.{s}", .{entry[0]});
+            const value = try m.weights.get(key);
+            try mx.eval(value);
+            const expected = &@field(m.ngram, entry[1]);
+            if (mx.dtype(value) != mx.c.MLX_INT64 or mx.c.mlx_array_size(value) != expected.len or !std.mem.eql(i64, mx.c.mlx_array_data_int64(value)[0..expected.len], expected)) return error.NGramConstantsMismatch;
+        }
+        m.shard_starts[0] = 0;
+        for (0..128) |i| {
+            const key = try std.fmt.bufPrint(&buf, "model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}.weight", .{i});
+            m.shard_starts[i + 1] = m.shard_starts[i] + mx.dim(try m.weights.get(key), 0);
+        }
+        return m;
+    }
+    pub fn reset(m: *Model) void {
+        for (&m.cache) |*c| c.deinit();
+        m.position = 0;
+    }
+    pub fn deinit(m: *Model) void {
+        m.reset();
+        m.weights.deinit();
+        m.kernels.deinit();
+    }
+    fn lin(m: *Model, s: *mx.Scope, base: []const u8, suffix: []const u8, x: A) !A {
+        var buf: [256]u8 = undefined;
+        return m.weights.linear(&m.kernels, s, try std.fmt.bufPrint(&buf, "{s}.{s}", .{ base, suffix }), x, true);
+    }
+    fn f(m: *Model, base: []const u8, suffix: []const u8) !A {
+        return m.weights.field(base, suffix);
+    }
+    fn scale(m: *Model, s: *mx.Scope, base: []const u8, suffix: []const u8) !A {
+        var buf: [256]u8 = undefined;
+        const key = try std.fmt.bufPrint(&buf, "{s}.{s}.native_scale", .{ base, suffix });
+        if (m.weights.arrays.get(key)) |v| return v;
+        var value = try s.cast(try m.f(base, suffix), mx.f32t);
+        if (m.centered) value = try s.binary(mx.c.mlx_add, value, try s.scalar(1));
+        try mx.eval(value);
+        try m.weights.put(key, value);
+        return m.weights.get(key);
+    }
+    fn centeredNorm(m: *Model, s: *mx.Scope, x: A, name: []const u8, group: i32) !A {
+        const width = mx.dim(x, -1);
+        const rows: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(width)));
+        const sc = try m.scale(s, name, "weight");
+        return (try m.kernels.run(s, src.q4_rms_rows, &.{ try s.reshape(x, &.{ rows, width }), sc, try s.scalar(1e-6) }, &.{ ti("W", width), ti("G", group), ti("SW", mx.dim(sc, -1)) }, .{ 1024 * @divExact(width, group), rows, 1 }, .{ 1024, 1, 1 }, &.{.{ .shape = &.{ rows, width } }}))[0];
+    }
+    fn hcNorm(m: *Model, s: *mx.Scope, h: A, branch: ?A, inject: A) ![5]A {
+        const r = mx.dim(h, 0);
+        return if (branch) |b| m.kernels.run(s, src.q4_hc_norm_plain, &.{ h, inject, b }, &.{ ti("S", 4), ti("D", 2560) }, .{ 2560, r, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 10240 } }, .{ .shape = &.{ r, 10, 4 }, .dtype = mx.f32t } }) else m.kernels.run(s, src.q4_hc_norm_none, &.{h}, &.{ ti("S", 4), ti("D", 2560) }, .{ 2560, r, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 10240 } }, .{ .shape = &.{ r, 10, 4 }, .dtype = mx.f32t } });
+    }
+    fn hcProject(m: *Model, s: *mx.Scope, base: []const u8, h: A, ssp: A, inject: bool) ![5]A {
+        var buf: [256]u8 = undefined;
+        const stacked = try std.fmt.bufPrint(&buf, "{s}.native_down", .{base});
+        if (!m.weights.has(stacked)) {
+            const down = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_down", .{base}));
+            const inj = if (inject) try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.block_inject_weight", .{base})) else down;
+            inline for (.{ "weight", "scales", "biases" }, 0..) |field, j| {
+                const value = if (inject) try s.cat(&.{ down[j], inj[j] }, 0) else down[j];
+                try mx.eval(value);
+                try m.weights.put(try std.fmt.bufPrint(&buf, "{s}.native_down.{s}", .{ base, field }), value);
+            }
+            try m.weights.put(try std.fmt.bufPrint(&buf, "{s}.native_down", .{base}), down[0]);
+        }
+        const down = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.native_down", .{base}));
+        const up = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_up", .{base}));
+        const sc = try m.scale(s, base, "hc_norm.weight");
+        const r = mx.dim(h, 0);
+        const nd = if (inject) @as(i32, 324) else 320;
+        const part = (try m.kernels.run(s, src.q4_hc_down_split, &.{ h, ssp, sc, down[0], down[1], down[2], try s.scalar(1e-6), try s.ints(&.{r}) }, &.{ ti("S", 4), ti("D", 2560), ti("ND", nd) }, .{ @divTrunc(nd + 7, 8) * 256, 10, r }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ 10, r, nd }, .dtype = mx.f32t }}))[0];
+        return m.kernels.run(s, src.q4_hc_up2, &.{ h, ssp, part, up[0], up[1], up[2], sc, try s.scalar(1e-6), try s.ints(&.{r}) }, &.{ ti("S", 4), ti("D", 2560), ti("LOW", 320), ti("ND", nd), ti("KS", 10) }, .{ 320 * 320, r, 1 }, .{ 320, 1, 1 }, &.{ .{ .shape = &.{ r, 2560 } }, .{ .shape = &.{ r, 4 } } });
+    }
+    fn gdn(m: *Model, s: *mx.Scope, base: []const u8, x: A, cache: Cache, record: *Cache) !A {
+        const r = mx.dim(x, 0);
+        const p = try s.cat(&.{ try m.lin(s, base, "in_proj_qkv", x), try m.lin(s, base, "in_proj_z", x), try m.lin(s, base, "in_proj_b", x), try m.lin(s, base, "in_proj_a", x) }, -1);
+        const cs = if (cache.a.ctx != null) cache.a else try s.zeros(&.{ 3, 10240 }, mx.bf16);
+        const state = if (cache.b.ctx != null) cache.b else try s.zeros(&.{1}, mx.f32t);
+        const out = try m.kernels.run(s, src.q4_gdn_step, &.{ p, cs, state, try s.reshape(try m.f(base, "conv1d.weight"), &.{ 10240, 4 }), try m.f(base, "A_log"), try m.f(base, "dt_bias"), try m.f(base, "norm.weight"), try s.scalar(1e-6), try s.ints(&.{r}) }, &.{ ti("NK", 16), ti("NV", 48), ti("DK", 128), ti("DV", 128), ti("TAPS", 4), ti("HAS_STATE", @intFromBool(cache.b.ctx != null)) }, .{ 48 * 1024, 1, 1 }, .{ 1024, 1, 1 }, &.{ .{ .shape = &.{ r, 6144 } }, .{ .shape = &.{ r, 3, 10240 } }, .{ .shape = &.{ r, 48, 128, 128 }, .dtype = mx.f32t } });
+        record.a = out[1];
+        record.b = out[2];
+        return m.lin(s, base, "out_proj", out[0]);
+    }
+    fn attention(m: *Model, s: *mx.Scope, base: []const u8, x: A, cache: Cache, record: *Cache) !A {
+        const r = mx.dim(x, 0);
+        const start = cache.offset;
+        const end = start + r;
+        const p = try s.cat(&.{ try m.lin(s, base, "q_proj", x), try m.lin(s, base, "k_proj", x), try m.lin(s, base, "v_proj", x), try m.lin(s, base, "indexer.index_qk_proj", x) }, -1);
+        var pos: [16]i32 = undefined;
+        for (0..@intCast(r)) |j| pos[j] = start + @as(i32, @intCast(j));
+        const prep = try m.kernels.run(s, src.q4_attn_prep, &.{ p, try s.ints(pos[0..@intCast(r)]), try m.scale(s, base, "q_norm.weight"), try m.scale(s, base, "k_norm.weight"), try m.scale(s, base, "indexer.q_layernorm.weight"), try s.scalar(1e-6), try s.scalar(@log2(@as(f32, 10000000))) }, &.{ ti("NQ", 24), ti("NKV", 2), ti("HD", 256), ti("RD", 64), ti("PW", 13952), ti("NI", 4), ti("IHD", 128) }, .{ 256, 30, r }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 24, 256 } }, .{ .shape = &.{ r, 2, 256 } }, .{ .shape = &.{ r, 4, 128 } } });
+        var keys = try s.transpose(try s.reshape(prep[1], &.{ 1, r, 2, 256 }), &.{ 0, 2, 1, 3 });
+        var values = try s.transpose(try s.reshape(try s.slice(p, 1, 12800, 13312), &.{ 1, r, 2, 256 }), &.{ 0, 2, 1, 3 });
+        var raw = try s.slice(p, 1, 13824, 13952);
+        if (cache.a.ctx != null) {
+            keys = try s.cat(&.{ cache.a, keys }, 2);
+            values = try s.cat(&.{ cache.b, values }, 2);
+            raw = try s.cat(&.{ cache.raw, raw }, 0);
+        }
+        record.a = keys;
+        record.b = values;
+        record.raw = raw;
+        record.offset = end;
+        record.pooled = cache.pooled;
+        var ids = try s.zeros(&.{ r, 1 }, mx.i32t);
+        var counts: [16]i32 = undefined;
+        var sparse: [16]i32 = undefined;
+        var complete: [16]i32 = undefined;
+        var ends: [16]i32 = undefined;
+        for (0..@intCast(r)) |j| {
+            ends[j] = start + @as(i32, @intCast(j)) + 1;
+            complete[j] = @divTrunc(ends[j], 4);
+            sparse[j] = @intFromBool(complete[j] > 512);
+            counts[j] = if (sparse[j] != 0) 2048 + @mod(ends[j], 4) else ends[j];
+        }
+        if (@divTrunc(end, 4) > 512) {
+            const done = if (cache.pooled.ctx != null) mx.dim(cache.pooled, 0) else 0;
+            const blocks = @divTrunc(end, 4);
+            var pooled = cache.pooled;
+            if (blocks > done) {
+                const fresh = (try m.kernels.run(s, src.q4_idx_pool, &.{ raw, try s.ints(&.{done}), try m.scale(s, base, "indexer.k_layernorm.weight"), try s.scalar(1e-6), try s.scalar(@log2(@as(f32, 10000000))) }, &.{ ti("DI", 128), ti("RD", 64) }, .{ 128, blocks - done, 1 }, .{ 128, 1, 1 }, &.{.{ .shape = &.{ blocks - done, 128 } }}))[0];
+                pooled = if (done > 0) try s.cat(&.{ pooled, fresh }, 0) else fresh;
+            }
+            record.pooled = pooled;
+            const ca = try s.ints(complete[0..@intCast(r)]);
+            const scores = (try m.kernels.run(s, src.q4_idx_scores, &.{ prep[2], pooled, ca }, &.{ ti("HI", 4), ti("DI", 128), ti("TOP", 512) }, .{ @divTrunc(blocks + 7, 8) * 256, r, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, blocks }, .dtype = mx.f32t }}))[0];
+            ids = (try m.kernels.run(s, src.q4_idx_select, &.{ scores, ca, try s.ints(ends[0..@intCast(r)]) }, &.{ ti("TOP", 512), ti("KW", 2051) }, .{ 1024 * r, 1, 1 }, .{ 1024, 1, 1 }, &.{.{ .shape = &.{ r, 2051 }, .dtype = mx.i32t }}))[0];
+        }
+        const partial = try m.kernels.run(s, src.q4_attn_parts, &.{ prep[0], keys, values, ids, try s.ints(counts[0..@intCast(r)]), try s.ints(sparse[0..@intCast(r)]), try s.scalar(0.0625) }, &.{ ti("H", 24), ti("KVH", 2), ti("D", 256), ti("P", 16) }, .{ 256 * 24, r, 16 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 24, 16, 256 }, .dtype = mx.f32t }, .{ .shape = &.{ r, 24, 16, 2 }, .dtype = mx.f32t } });
+        const att = (try m.kernels.run(s, src.q4_attn_merge, &.{ partial[0], partial[1] }, &.{ ti("H", 24), ti("D", 256), ti("P", 16) }, .{ 256, 24, r }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, 24, 256 } }}))[0];
+        const gated = (try m.kernels.run(s, src.q4_attn_gate, &.{ att, p }, &.{ ti("NQ", 24), ti("HD", 256), ti("PW", 13952) }, .{ r * 6144, 1, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, 6144 } }}))[0];
+        return m.lin(s, base, "o_proj", gated);
+    }
+    fn moe(m: *Model, s: *mx.Scope, base: []const u8, h: A, x: A, inject: A) ![5]A {
+        const r = mx.dim(x, 0);
+        var buf: [256]u8 = undefined;
+        const router_key = try std.fmt.bufPrint(&buf, "{s}.native_router", .{base});
+        if (!m.weights.has(router_key)) {
+            var nb: [256]u8 = undefined;
+            const sg = try m.weights.dequant(s, try std.fmt.bufPrint(&nb, "{s}.shared_expert_gate", .{base}));
+            const router = try s.cat(&.{ try m.f(base, "gate.weight"), sg }, 0);
+            try mx.eval(router);
+            try m.weights.put(router_key, router);
+        }
+        const logits = (try m.kernels.run(s, src.q4_router_float, &.{ x, try m.weights.get(router_key), try s.ints(&.{r}) }, &.{ ti("D", 2560), ti("NE", 513), ti("T", 256), ti("MAXR", 16) }, .{ @divTrunc(513 + 7, 8) * 256, 1, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, 513 }, .dtype = mx.f32t }}))[0];
+        const gate = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.gate_proj", .{base}));
+        const up = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.up_proj", .{base}));
+        const sg = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.shared_expert.gate_proj", .{base}));
+        const su = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.shared_expert.up_proj", .{base}));
+        const act = try m.kernels.run(s, src.q4_expert_gateup, &.{ x, logits, gate[0], gate[1], gate[2], up[0], up[1], up[2], sg[0], sg[1], sg[2], su[0], su[1], su[2] }, &.{ ti("K", 2560), ti("N", 640), ti("TOPK", 10), ti("SHARED", 1), ti("NE", 512), ti("NL", 513), ti("RPS", 4), ti("SG", 2) }, .{ 64, 80, r * 11 }, .{ 64, 1, 1 }, &.{ .{ .shape = &.{ r, 11, 640 } }, .{ .shape = &.{ r, 10 }, .dtype = mx.c.MLX_UINT32 }, .{ .shape = &.{ r, 10 }, .dtype = mx.f32t } });
+        const down = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.down_proj", .{base}));
+        const sd = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.shared_expert.down_proj", .{base}));
+        const y = (try m.kernels.run(s, src.q4_expert_down_y, &.{ act[0], act[1], down[0], down[1], down[2], sd[0], sd[1], sd[2], try s.ints(&.{r}) }, &.{ ti("NI", 640), ti("D", 2560), ti("TOPK", 10), ti("SG", 2) }, .{ 64, 320, @divTrunc(r * 11 + 1, 2) }, .{ 64, 1, 1 }, &.{.{ .shape = &.{ r, 11, 2560 } }}))[0];
+        return m.kernels.run(s, src.q4_hc_norm_grouped, &.{ h, inject, y, act[2], logits }, &.{ ti("S", 4), ti("D", 2560), ti("TOPK", 10), ti("NL", 513) }, .{ 2560, r, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 10240 } }, .{ .shape = &.{ r, 10, 4 }, .dtype = mx.f32t } });
+    }
+    fn ple(m: *Model, s: *mx.Scope, h: A, tokens: []const i32, cache: Cache, record: *Cache) !A {
+        var hist = cache.history;
+        var parts: [16 * 16]A = undefined;
+        var buf: [256]u8 = undefined;
+        for (tokens, 0..) |token, row| {
+            const ids = m.ngram.ids(hist, token);
+            hist = .{ hist[1], token };
+            for (ids, 0..) |id, head_| {
+                var shard: usize = 0;
+                while (shard + 1 < 128 and id >= m.shard_starts[shard + 1]) shard += 1;
+                const name = try std.fmt.bufPrint(&buf, "model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}", .{shard});
+                parts[row * 16 + head_] = try m.weights.embed(s, name, &.{@intCast(id - m.shard_starts[shard])});
+            }
+        }
+        const r: i32 = @intCast(tokens.len);
+        const emb = try s.reshape(try s.cat(parts[0 .. tokens.len * 16], 0), &.{ r, 2560 });
+        const base = "model.layers.1.ple";
+        const keys = try s.reshape(try m.centeredNorm(s, try m.lin(s, base, "key_proj", emb), base ++ ".norm_key", 2560), &.{ r, 4, 2560 });
+        const values = try s.reshape(try m.lin(s, base, "value_proj", emb), &.{ r, 1, 2560 });
+        const queries = try s.reshape(try m.centeredNorm(s, h, base ++ ".norm_query", 2560), &.{ r, 4, 2560 });
+        var sum = mx.c.mlx_array_new();
+        const rc = mx.c.mlx_sum_axis(&sum, try s.binary(mx.c.mlx_multiply, keys, queries), -1, true, mx.stream);
+        var gate = try s.binary(mx.c.mlx_divide, try s.result(rc, sum), try s.cast(try s.scalar(@sqrt(@as(f32, 2560))), mx.bf16));
+        gate = try s.binary(mx.c.mlx_multiply, try s.unary(mx.c.mlx_sign, gate), try s.unary(mx.c.mlx_sqrt, try s.binary(mx.c.mlx_maximum, try s.unary(mx.c.mlx_abs, gate), try s.cast(try s.scalar(1e-6), mx.bf16))));
+        const gated = try s.reshape(try s.binary(mx.c.mlx_multiply, try s.unary(mx.c.mlx_sigmoid, gate), values), &.{ r, 10240 });
+        const normed = try m.centeredNorm(s, gated, base ++ ".norm_conv", 2560);
+        const tail = if (cache.ple.ctx != null) cache.ple else try s.zeros(&.{ 9, 10240 }, mx.bf16);
+        const conv_in = try s.cat(&.{ tail, normed }, 0);
+        record.ple = conv_in;
+        record.history = hist;
+        var conv = mx.c.mlx_array_new();
+        const cr = mx.c.mlx_conv1d(&conv, try s.reshape(conv_in, &.{ 1, r + 9, 10240 }), try m.f(base, "conv1d.weight"), 1, 0, 3, 10240, mx.stream);
+        const cv = try s.reshape(try s.result(cr, conv), &.{ r, 10240 });
+        return s.binary(mx.c.mlx_add, h, try s.binary(mx.c.mlx_add, gated, try s.binary(mx.c.mlx_multiply, cv, try s.unary(mx.c.mlx_sigmoid, cv))));
+    }
+    fn layer(m: *Model, s: *mx.Scope, base: []const u8, h: A, cache: Cache, record: *Cache, linear: bool) !A {
+        var buf: [256]u8 = undefined;
+        const hn = try m.hcNorm(s, h, null, mx.empty);
+        const mix = try m.hcProject(s, try std.fmt.bufPrint(&buf, "{s}.attn_hyper_connection", .{base}), hn[0], hn[1], true);
+        const branch = if (linear) try m.gdn(s, try std.fmt.bufPrint(&buf, "{s}.linear_attn", .{base}), mix[0], cache, record) else try m.attention(s, try std.fmt.bufPrint(&buf, "{s}.self_attn", .{base}), mix[0], cache, record);
+        const post = try m.hcNorm(s, hn[0], branch, mix[1]);
+        const mm = try m.hcProject(s, try std.fmt.bufPrint(&buf, "{s}.mlp_hyper_connection", .{base}), post[0], post[1], true);
+        const out = try m.moe(s, try std.fmt.bufPrint(&buf, "{s}.mlp", .{base}), post[0], mm[0], mm[1]);
+        return out[0];
+    }
+    pub fn forward(m: *Model, tokens: []const i32) !Pass {
+        if (tokens.len == 0 or tokens.len > 16) return error.InvalidLaneWidth;
+        var p = Pass{ .count = tokens.len };
+        errdefer p.deinit();
+        @memcpy(p.tokens[0..tokens.len], tokens);
+        const s = &p.scope;
+        const e = try m.weights.embed(s, "model.embed_tokens", tokens);
+        var h = try s.cat(&.{ e, e, e, e }, -1);
+        var buf: [256]u8 = undefined;
+        for (0..48) |i| {
+            if (i == 1) h = try m.ple(s, h, tokens, m.cache[i], &p.records[i]);
+            h = try m.layer(s, try std.fmt.bufPrint(&buf, "model.layers.{d}", .{i}), h, m.cache[i], &p.records[i], i % 4 != 3);
+            try mx.evalMany(&.{h}, true);
+        }
+        p.hidden = h;
+        p.logits = try m.head(s, h);
+        try mx.eval(p.logits);
+        return p;
+    }
+    pub fn head(m: *Model, s: *mx.Scope, h: A) !A {
+        const hn = try m.hcNorm(s, h, null, mx.empty);
+        const mixed = try m.hcProject(s, "model.hyper_connection_mixer", hn[0], hn[1], false);
+        return m.weights.linear(&m.kernels, s, "lm_head", mixed[0], true);
+    }
+    pub fn draftHead(m: *Model, s: *mx.Scope, h: A) !A {
+        const hn = try m.hcNorm(s, h, null, mx.empty);
+        const mixed = try m.hcProject(s, "mtp.hyper_connection_mixer", hn[0], hn[1], false);
+        return m.weights.linear(&m.kernels, s, "lm_head", mixed[0], true);
+    }
+    pub fn commit(m: *Model, p: *Pass, keep: usize) !void {
+        if (keep == 0 or keep > p.count) return error.InvalidCommit;
+        const n: i32 = @intCast(keep);
+        const end = m.position + n;
+        var next = [_]Cache{.{}} ** 48;
+        errdefer for (&next) |*c| c.deinit();
+        for (0..48) |i| {
+            const rec = p.records[i];
+            next[i].offset = end;
+            if (i % 4 != 3) {
+                next[i].a = try mx.retain(try p.scope.reshape(try p.scope.slice(rec.a, 0, n - 1, n), &.{ 3, 10240 }));
+                next[i].b = try mx.retain(try p.scope.reshape(try p.scope.slice(rec.b, 0, n - 1, n), &.{ 48, 128, 128 }));
+            } else {
+                next[i].a = try mx.retain(try p.scope.slice(rec.a, 2, 0, end));
+                next[i].b = try mx.retain(try p.scope.slice(rec.b, 2, 0, end));
+                next[i].raw = try mx.retain(try p.scope.slice(rec.raw, 0, 0, end));
+                if (rec.pooled.ctx != null) next[i].pooled = try mx.retain(try p.scope.slice(rec.pooled, 0, 0, @min(@divTrunc(end, 4), mx.dim(rec.pooled, 0))));
+            }
+            if (i == 1) {
+                next[i].ple = try mx.retain(try p.scope.slice(rec.ple, 0, n, n + 9));
+                next[i].history = m.cache[i].history;
+                for (p.tokens[0..keep]) |token| next[i].history = .{ next[i].history[1], token };
+            }
+            inline for (.{ "a", "b", "raw", "pooled", "ple" }) |field| {
+                const v = @field(next[i], field);
+                if (v.ctx != null) try mx.eval(v);
+            }
+        }
+        for (&m.cache) |*c| c.deinit();
+        m.cache = next;
+        m.position = end;
+    }
+    pub fn draftStep(m: *Model, s: *mx.Scope, hidden: A, token: i32, cache: *Cache) !A {
+        const e = try m.lin(s, "mtp", "fc_embedding", try m.centeredNorm(s, try m.weights.embed(s, "model.embed_tokens", &.{token}), "mtp.pre_fc_norm_embedding", 2560));
+        const hn = try m.centeredNorm(s, hidden, "mtp.pre_fc_norm_hidden", 10240);
+        const hs = try m.lin(s, "mtp", "fc_hidden", try s.reshape(hn, &.{ 4, 2560 }));
+        const h = try s.reshape(try s.binary(mx.c.mlx_add, hs, e), &.{ 1, 10240 });
+        var rec = Cache{};
+        const out = try m.layer(s, "mtp.layers.0", h, cache.*, &rec, false);
+        try mx.eval(out);
+        var next = try rec.clone();
+        errdefer next.deinit();
+        cache.deinit();
+        cache.* = next;
+        // MTP residual streams are fed to the next chained step; its own final mixer
+        // supplies the prediction, while target hidden states use the trunk mixer.
+        return out;
+    }
+};

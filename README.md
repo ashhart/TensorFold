@@ -3,6 +3,10 @@
 TensorFold serves language models on Apple Silicon and NVIDIA GPUs through an OpenAI-compatible API.
 Each model family supplies its own kernels and draft verification.
 
+**Native Zig on Mac:** [the native Qwen3.8-27B engine](native/README.md) runs the M5 Metal lane
+backend and DFlash2 through MLX-C, with no Python runtime. It includes a completion CLI and exactness
+checks; the HTTP server and other model families below remain in the Python application.
+
 ```bash
 python -m pip install git+https://github.com/ashhart/TensorFold.git
 tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
