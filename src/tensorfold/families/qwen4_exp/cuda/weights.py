@@ -627,6 +627,10 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         head_raw = triple("lm_head")
         head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))
         del head_raw
+    # the draft head rides 4-bit on an NVFP4 checkpoint (drafts change speed, never the bits): the bf16
+    # lm_head requantized once at load — a draft step reads ~0.3 GB of it, the bf16 head ~1.2 GB. Its
+    # rows stay in token-id order (quantize4 keeps rows), so its column j scores token j; with a draft
+    # vocabulary the sampler maps the subset's ids as on the MLX path.
     draft_head, draft_ids = None, None
     ids = draft_token_ids(draft_vocab)
     if ids is not None:
@@ -634,9 +638,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         ids = torch.from_numpy(ids).to(device)
         draft_ids = ids
         if cfg.quant == "modelopt":
-            # the draft head rides 4-bit (drafts change speed, never the bits): the bf16 lm_head's rows,
-            # requantized once at load — the bf16 head costs 1.27 GB a draft step, the 4-bit copy 0.32
-            draft_head = quantize4(raw("lm_head.weight").to(torch.bfloat16).index_select(0, ids))
+            draft_head = quantize4(raw("lm_head.weight").to(torch.bfloat16))
         else:
             draft_head = make_q4(*_rows_at(triple("lm_head"), ids))
     inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (
