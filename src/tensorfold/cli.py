@@ -93,6 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="with --tp 2: this machine's rank; rank 0 serves HTTP, rank 1 follows it")
     cuda.add_argument("--master", default="", help="with --tp 2: rank 0's address on the link between the machines")
     cuda.add_argument("--master-port", type=int, default=29551, help="with --tp 2: rank 0's rendezvous port")
+    cuda.add_argument("--kv-dtype", choices=("bf16", "int8"), default="bf16",
+                      help="KV cache: bf16 (the default), or int8 = keys and values quantized to 8 bits with "
+                           "one fp16 scale per 32 values (1.88x smaller; changes the output, families vary)")
     serve.set_defaults(func=cmd_serve)
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
@@ -321,6 +324,13 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
+    kv_dtype = getattr(args, "kv_dtype", "bf16")
+    if kv_dtype != "bf16":
+        supported = getattr(family.package, "CUDA_KV_DTYPES", ("bf16",))
+        if kv_dtype not in supported:
+            raise ValueError(f"{family.title} on CUDA serves a {' or '.join(supported)} KV cache, "
+                             f"not --kv-dtype {kv_dtype}")
+        options["kv_dtype"] = kv_dtype
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
     if args.ple_on_ssd:
@@ -391,6 +401,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.ple_on_ssd and not hasattr(family.package, "ple_bytes"):
         raise ValueError(f"--ple-on-ssd: {family.title} has no n-gram (PLE) tables to read from SSD")
     backend = _backend(args.backend, family)
+    if getattr(args, "kv_dtype", "bf16") != "bf16" and backend != "cuda":
+        raise ValueError(f"--kv-dtype {args.kv_dtype} is a CUDA engine option: the MLX path caches keys and "
+                         "values as bf16")
     families.require_readable(family, families.read_config(config_dir), backend)
     _note_untested(family, args.model)
     required_files = getattr(family.package, "REQUIRED_FILES", {}).get(args.model, ())

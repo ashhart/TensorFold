@@ -9,6 +9,7 @@ from tensorfold.cuda import moe as moe_mod
 
 from . import attention as attn_mod
 from . import gdn as gdn_mod
+from . import kvcache
 from .weights import Weights
 
 
@@ -117,11 +118,12 @@ class _MoECfg:
 
 # -- committed state -----------------------------------------------------------------------------------
 class State:
-    """Committed caches of one sequence (and of the MTP head's attention layer)."""
+    """Committed caches of one sequence (and of the MTP head's attention layer); keys and values bf16, int8 or int4, indexer keys bf16."""
 
-    def __init__(self, w: Weights, capacity: int, max_rows: int) -> None:
+    def __init__(self, w: Weights, capacity: int, max_rows: int, kv_dtype: str = "bf16") -> None:
         c = w.cfg
         dev = w.device
+        self.kv_dtype = kvcache.check(kv_dtype)
         self.capacity = capacity
         self.pos = 0
         self.pos_dev = torch.zeros((1,), dtype=torch.int32, device=dev)
@@ -134,8 +136,7 @@ class State:
         self.rec = torch.zeros((2, n, c.nv, c.dv, c.dk), dtype=torch.float32, device=dev)
         self.cur = [0] * n
         self.scratch = [gdn_mod.GDNScratch(max_rows, dev, c.nk, c.nv) for _ in range(n)]
-        self.kc = [torch.zeros((capacity, c.kv_heads, c.head_dim), dtype=torch.bfloat16, device=dev) for _ in att]
-        self.vc = [torch.zeros_like(x) for x in self.kc]
+        self.kc = [kvcache.KVCache(capacity, c.kv_heads, c.head_dim, dev, self.kv_dtype) for _ in att]
         self.ikc = [torch.zeros((capacity, c.index_dim), dtype=torch.bfloat16, device=dev) for _ in att]
         nb = -(-capacity // c.index_ratio)
         self.pooled = [torch.zeros((nb, c.index_dim), dtype=torch.bfloat16, device=dev) for _ in att]
@@ -148,8 +149,7 @@ class State:
         self.mtp_drafted = 0
         self.mtp_pos = torch.zeros((1,), dtype=torch.int32, device=dev)
         if w.mtp is not None:
-            self.mtp_kc = torch.zeros((capacity, c.kv_heads, c.head_dim), dtype=torch.bfloat16, device=dev)
-            self.mtp_vc = torch.zeros_like(self.mtp_kc)
+            self.mtp_kc = kvcache.KVCache(capacity, c.kv_heads, c.head_dim, dev, self.kv_dtype)
             self.mtp_ikc = torch.zeros((capacity, c.index_dim), dtype=torch.bfloat16, device=dev)
             self.mtp_pooled = torch.zeros((-(-capacity // c.index_ratio), c.index_dim), dtype=torch.bfloat16,
                                           device=dev)
@@ -181,6 +181,10 @@ class State:
             if isinstance(value, torch.Tensor):
                 setattr(other, name, value.clone())
             elif isinstance(value, list) and value and isinstance(value[0], torch.Tensor):
+                setattr(other, name, [v.clone() for v in value])
+            elif isinstance(value, kvcache.KVCache):
+                setattr(other, name, value.clone())
+            elif isinstance(value, list) and value and isinstance(value[0], kvcache.KVCache):
                 setattr(other, name, [v.clone() for v in value])
         other.cur = list(self.cur)
         other.scratch = [copy.copy(sc) for sc in self.scratch]

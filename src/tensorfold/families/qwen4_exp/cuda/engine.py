@@ -20,7 +20,8 @@ class FlashNextEngine:
     def __init__(self, model_dir: Path, *, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  draft_vocab: str | int | None = "default", max_len: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
-                 prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False) -> None:
+                 prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False,
+                 kv_dtype: str = "bf16") -> None:
         import torch
 
         from .exl3_pack import admission, extra_files, is_exl3
@@ -33,6 +34,7 @@ class FlashNextEngine:
             raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram tables; an EXL3 pack maps its own table "
                              "from its file, so drop --ple-on-ssd")
         from .decode import Engine
+        from .kvcache import check as check_kv
         from .weights import draft_token_ids, load
         from tensorfold.cuda.capacity import admit, gather_ints
         from tensorfold.cuda.geometry import gdn_geometry, indexed_stream_geometry, indexed_weights
@@ -46,6 +48,7 @@ class FlashNextEngine:
             raise ValueError(f"MTP drafts a round: 0 to {MAX_DEPTH}, not {depth}")
         torch.cuda.set_device(0)
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
+        self.kv_dtype = check_kv(kv_dtype)
         self.comm = None
         ids = draft_token_ids(draft_vocab) if self.depth > 0 else None
         if tp == 2:
@@ -88,7 +91,8 @@ class FlashNextEngine:
                                       confidence=self.confidence, keep=KEEP)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
-            self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs)
+            self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
+                            kv_dtype=self.kv_dtype)
         started = time.perf_counter()
         locked = False
         if prefetch and not ple_on_ssd:               # the n-gram tables' pages, read now rather than by requests
@@ -113,21 +117,23 @@ class FlashNextEngine:
                  f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
         how = ("read from SSD at each lookup" if ple_on_ssd else
                f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s")
-        print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}; n-gram tables {how}; {captured} "
+        kv = "" if self.kv_dtype == "bf16" else f"; int8 KV cache (fp16 scale per 32 values)"
+        print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
               "decode graphs captured", flush=True)
 
     def _same_settings(self, torch, ids) -> None:
-        """Both ranks must decode with the same rule, context and draft vocabulary, or they would fall out of step: refuse to start otherwise."""
+        """Both ranks must decode with the same rule, context, draft vocabulary and KV cache, or they would fall out of step: refuse to start otherwise."""
 
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
-                             len(ids) if ids is not None else -1, total], dtype=torch.int64, device="cuda")
+                             len(ids) if ids is not None else -1, total, int(self.kv_dtype == "int8")],
+                            dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
         both = both.view(2, -1).cpu()
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
-                               f"draft vocabulary): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
+                               f"draft vocabulary, KV cache): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
 
     def _key(self, n: int) -> str:
         return f"tensorfold/flashnext/request/{n}"

@@ -115,11 +115,18 @@ def kernel_version(model: Any) -> str:
 
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
 CUDA_QUANTIZATION = (4, 32)
+# the KV cache dtypes the CUDA engine can allocate (``--kv-dtype``): int8 is the quantized cache
+CUDA_KV_DTYPES = ("bf16", "int8")
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
-                context: int | None = None, ple_on_ssd: bool = False, **options: Any):
-    """The CUDA engine: MTP chains verified exactly on one GPU or two (``tp=2``; start rank 1 first)."""
+                context: int | None = None, ple_on_ssd: bool = False, kv_dtype: str = "bf16",
+                **options: Any):
+    """The CUDA engine: MTP chains verified exactly on one GPU or two (``tp=2``; start rank 1 first).
+
+    ``kv_dtype``: "bf16" (the default) or "int8", the attention caches quantized to 8 bits with one fp16 scale
+    per 32 values (1.88x smaller; see docs/recipes/qwen3.8-flash-next.md and docs/recipes/cuda.md).
+    """
 
     from tensorfold.cuda.exl3.format import is_exl3
 
@@ -130,7 +137,9 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
         raise ValueError(f"{TITLE} drafts with its own MTP head on CUDA: a separate draft model does not apply")
     from .cuda import DEPTH
     from .cuda.engine import FlashNextEngine
+    from .cuda.kvcache import check as check_kv
 
+    check_kv(kv_dtype)                       # refuse an unknown cache before any weight is read
     depth = 0 if no_drafts else DEPTH if mtp_drafts is None else int(mtp_drafts)
     if depth and not has_mtp(Path(model_dir)):
         raise ValueError(f"this checkpoint has no MTP head, which {TITLE}'s CUDA engine drafts with ({MODELS[0]} "
@@ -139,4 +148,4 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     return FlashNextEngine(Path(model_dir), depth=depth, max_len=context,
                            context_explicit=options.get("context_explicit"), tp=int(tp), rank=int(rank),
                            master=master, port=int(master_port), streams=max(1, int(options.get("parallel") or 1)),
-                           ple_on_ssd=ple_on_ssd)
+                           ple_on_ssd=ple_on_ssd, kv_dtype=kv_dtype)

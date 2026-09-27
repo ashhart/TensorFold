@@ -112,14 +112,15 @@ class Engine:
     """Weights, one sequence's state, buffers for decode windows (main model and MTP head) and for prompt chunks."""
 
     def __init__(self, w: Weights, *, capacity: int = 4096, max_rows: int = 8, prefill_rows: int = PREFILL_ROWS,
-                 graphs: bool = False) -> None:
+                 graphs: bool = False, kv_dtype: str = "bf16") -> None:
         self.w = w
         self.capacity = capacity
         self.rows, self.prefill_rows = max_rows, prefill_rows
+        self.kv_dtype = kv_dtype
         self.buf = Buffers(w, max_rows, capacity)
         self.mbuf = Buffers(w, max_rows, capacity) if w.mtp is not None else None
         self.pbuf = Buffers(w, prefill_rows, capacity, prefill=True)
-        self.st = State(w, capacity, max_rows)
+        self.st = State(w, capacity, max_rows, kv_dtype)
         self.graphs = None
         if graphs:
             from .graphs import Graphs
@@ -135,7 +136,7 @@ class Engine:
         other = object.__new__(Engine)
         other.w, other.capacity, other.rows, other.prefill_rows = self.w, self.capacity, self.rows, self.prefill_rows
         other.buf, other.mbuf, other.pbuf, other.graphs = self.buf, None, self.pbuf, None
-        other.st = State(self.w, self.capacity, self.rows)
+        other.st = State(self.w, self.capacity, self.rows, self.st.kv_dtype)
         return other
 
     def forward(self, tokens: Sequence[int]) -> torch.Tensor:
