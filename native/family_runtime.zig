@@ -30,9 +30,23 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var gpu_handoff = true;
     var serial_pipeline = true;
     var check_serial = false;
+    var check_buffers = false;
+    var check_reuse = false;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         const key = args[i];
+        if (std.mem.eql(u8, key, "--check-kv-buffers")) {
+            check_buffers = true;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--check-kv-reuse")) {
+            check_reuse = true;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--no-kv-buffers")) {
+            @import("kv_buffer.zig").enabled = false;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--check-serial-state")) {
             check_serial = true;
             continue;
@@ -110,8 +124,10 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     try settings.validate();
     try mx.init();
     defer mx.shutdown();
-    var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress and !long_cache and !check_serial);
+    var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress and !long_cache and !check_serial and !check_buffers and !check_reuse);
     defer m.deinit();
+    if (check_reuse) return @import("cache_checks.zig").checkBufferReuse(M, &m);
+    if (check_buffers) return @import("cache_checks.zig").checkBuffered(M, &m, long_cache);
     if (trace_dir != null and !@hasField(M, "trace_dir")) return error.UnsupportedTrace;
     if (trace_gdn) |layer_index| {
         if (trace_dir == null or layer_index >= 48 or layer_index % 4 == 3) return error.InvalidTraceLayer;
@@ -399,6 +415,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             .early_mtp = early,
             .gpu_handoff_rounds = handoff_rounds,
             .serial_pipeline = use_serial_pipeline,
+            .kv_buffers = @import("kv_buffer.zig").enabled,
             .queued_serial_steps = queued_serial_steps,
             .adaptive_drafts = adaptive_drafts and m.mtp,
             .draft_depth_counts = depth_counts,

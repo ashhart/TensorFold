@@ -109,13 +109,17 @@ pub const Tree = struct {
 };
 
 pub fn attention(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *const Tree) !A {
-    if (!mx.tensor_units) return rowAttention(k, s, q, keys, values, t);
+    return attentionCapacity(k, s, q, keys, values, t, mx.dim(keys, 2));
+}
+pub fn attentionCapacity(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *const Tree, used: i32) !A {
+    if (used > mx.dim(keys, 2) or used < t.parents.len) return error.InvalidAttentionShape;
+    if (!mx.tensor_units) return rowAttention(k, s, q, keys, values, t, used);
     const w: i32 = @intCast(t.parents.len);
     const h = mx.dim(q, 1);
     const d = mx.dim(q, 3);
     const hkv = mx.dim(keys, 1);
     const g = @divExact(h, hkv);
-    const len = mx.dim(keys, 2);
+    const len = used;
     const p = len - w;
     const pt = @divTrunc(p, 64) * 64;
     const ca = @divTrunc(pt + 511, 512);
@@ -160,14 +164,14 @@ pub fn sdpa(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, scale: f32) 
     return (try k.run(s, src.lane_attention_merge, &.{ part[0], part[1], part[2], dims }, &.{ ti("G", g), ti("D", d) }, .{ hkv * 32, r, 1 }, .{ 32, 1, 1 }, &.{.{ .shape = &.{ 1, h, w, d } }}))[0];
 }
 
-fn rowAttention(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *const Tree) !A {
+fn rowAttention(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *const Tree, used: i32) !A {
     const w: i32 = @intCast(t.parents.len);
     const h = mx.dim(q, 1);
     const d = mx.dim(q, 3);
     const hkv = mx.dim(keys, 1);
     const g = @divExact(h, hkv);
     const cap = mx.dim(keys, 2);
-    const start = cap - w;
+    const start = used - w;
     const maxd = t.max_depth + 1;
     const nch = @divTrunc(start + maxd + 127, 128);
     var paths: [128 * 128]i32 = undefined;

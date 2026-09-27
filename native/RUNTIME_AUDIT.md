@@ -4,6 +4,34 @@ Kernel coverage and production scheduling are separate claims. The embedded cata
 executes all 86 original Metal kernels; this does not imply that every Python scheduling
 mode is integrated into the native completion driver.
 
+## Buffer ownership
+
+Alternating buffers are implemented for all three targets and both MTP heads.
+The isolated donation check now drains the stream before asserting address reuse:
+MLX's Metal `eval.cpp` retains input Data in command-buffer completion callbacks,
+while `array::is_donatable` requires sole ownership. Host-readable outputs alone
+do not establish callback cleanup. Without the drain this test failed intermittently.
+Production inference has no added drain and may legitimately copy a busy buffer.
+
+All 508 drained writes reuse their exact allocations. Another 256 generated
+histories compare against independent concatenation while retaining snapshots;
+partial commits, growth and rollback to empty caches pass. Real-model observations
+reuse 992/992 Qwen and 384/384 Nemotron buffers on each backend, plus 1,152/1,152
+Flash buffers. These observed counts are not a guarantee of donation on every run.
+All 15 independent buffered/unbuffered prefill-cache and verification-logit
+comparisons pass at 0/31/2,044 tokens, across five model/backend combinations.
+Another 11 long-context comparisons pass: Qwen/Nemotron tensor and SIMD at
+9,999/10,007 tokens, and Flash at 2,044/2,051/2,063 tokens.
+All 904 injected host allocation failures pass with zero retained MLX memory.
+
+All 1,056 short accepted-prefix checks, 23 buffered/concatenated CLI pairs and
+414 MTP state checks pass. Serial pipelining passes 48 real-model comparisons and
+35 synthetic EOS/budget cases. The 640 cache and 256 pipeline reset cycles retain
+flat active MLX memory. All 400 long-context accepted-prefix/cache/continuation checks
+also pass, including the 128-row Qwen window and Flash's sparse threshold rollback.
+
+## Committed runtime status
+
 | Original behavior | Native status | Evidence / remaining work |
 | --- | --- | --- |
 | Reduced MTP vocabulary | Default for both families; full-head override | All 32,768 Nemotron and 79,592 padded Flash IDs and packed head rows match original Python selection. Both samplers map columns back to original IDs. |
@@ -13,7 +41,7 @@ mode is integrated into the native completion driver.
 | MTP sampling positions | Corrected to the original convention | The first draft after a pending token at position P uses P+1; early speculation from target row P uses P+2. All 360 fixtures from original speculate/settle pass. The former native chain used P+2 too early, reducing acceptance without changing target output. |
 | Pipelined serial decode | Default for Qwen/Nemotron with Metal sampling and no neural drafts; synchronous override | The next target step is submitted before reading the current token. Deferred cache graphs are drained before returning; queued EOS suffixes stay uncommitted. All 96 full-model token/cache/continuation comparisons through 10K, 32 CLI pairs and 35 terminal GPU fixtures pass. Flash still needs host token IDs for its bounded PLE reads. |
 | GPU proposal handoff to the next target pass | Default for queued Nemotron Metal MTP; host override | Nemotron feeds the lazy proposal array directly into target verification and reads all draws together. All 48 focused completion comparisons and 36 scheduling comparisons pass on tensor/SIMD. Flash's bounded PLE reader still needs host token IDs for positional file reads; preserve its memory benefit when evaluating this path. |
-| Alternating/preallocated attention cache writes | Remaining optimization work | Original family runtimes adopt alternating KV buffers. Native concatenation and accepted-prefix slicing have exact cache/rollback coverage but different allocation and copying costs. |
+| Alternating/preallocated attention cache writes | Default for all three targets and both MTP heads; concatenation override | Buffers grow in 2,048-row blocks and protect snapshots through MLX ownership. Flash also buffers raw index keys. Qwen branched commits compact accepted paths. Full-capacity inputs avoid hidden contiguous-prefix copies in Qwen/Flash attention. `test-kv-buffers` and `test-kv-runtime` compare against the old concatenation path. |
 | Stacked SIMD Qwen projections | Diagnostic coverage; native production uses original unstacked weights | Shape-dependent SIMD reduction splits make these different rounding configurations. Both kernel variants execute; the native unstacked configuration matches its original Python oracle at short and 10K context. Do not label it byte-identical to the stacked Python serving configuration. |
 | MTP projection arithmetic | Native uses row-exact projections | Original Nemotron MTP deliberately uses plain MLX matmuls; Flash switches its hidden projection to MLX above 32 stream rows. Native keeps row-exact kernels, splitting Flash's 64-stream-row windows. This preserves native proposal parity across batching; do not claim bit-identical proposal logits to those Python matmul configurations. Every emitted token is still checked by the target. |
 | Flash PLE resident tables | Native uses bounded positional packed-row reads | All 128 shard boundaries and long-context integration checked. This is an intentional memory strategy allowing the 113 GB checkpoint to run on this 128 GiB Mac. |

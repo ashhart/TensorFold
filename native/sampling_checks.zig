@@ -50,6 +50,7 @@ pub fn equal(s: *mx.Scope, a: mx.Array, b: mx.Array) !void {
     const y = try s.contiguous(try s.cast(b, mx.f32t));
     try mx.evalMany(&.{ x, y }, false);
     const n = mx.c.mlx_array_size(x);
+    if (n == 0) return;
     const av = mx.c.mlx_array_data_float32(x)[0..n];
     const bv = mx.c.mlx_array_data_float32(y)[0..n];
     if (!std.mem.eql(u8, std.mem.sliceAsBytes(av), std.mem.sliceAsBytes(bv))) {

@@ -5,6 +5,7 @@ const cp = @import("checkpoint.zig");
 const src = @import("kernel_sources.zig");
 const A = mx.Array;
 const ti = mx.ti;
+const kv = @import("kv_buffer.zig");
 pub const Cache = struct {
     a: A = mx.empty,
     b: A = mx.empty,
@@ -13,8 +14,17 @@ pub const Cache = struct {
     ple: A = mx.empty,
     offset: i32 = 0,
     history: [2]i32 = .{ 248044, 248044 },
+    keys: kv.Buffer = .{},
+    values: kv.Buffer = .{},
+    index_keys: kv.Buffer = .{},
+    key_write: kv.Write = .{},
+    value_write: kv.Write = .{},
+    index_write: kv.Write = .{},
     pub fn deinit(c: *Cache) void {
         inline for (.{ "a", "b", "raw", "pooled", "ple" }) |f| mx.free(@field(c, f));
+        c.keys.deinit();
+        c.values.deinit();
+        c.index_keys.deinit();
         c.* = .{};
     }
     pub fn clone(c: Cache) !Cache {
@@ -24,6 +34,9 @@ pub const Cache = struct {
             const v = @field(c, f);
             @field(out, f) = if (v.ctx != null) try mx.retain(v) else mx.empty;
         }
+        out.keys = try c.keys.clone();
+        out.values = try c.values.clone();
+        out.index_keys = try c.index_keys.clone();
         return out;
     }
     // Returned handles belong to the supplied scope, as do forward-pass records.
@@ -37,6 +50,9 @@ pub const Cache = struct {
             // serial decoding has no pooled cache, including on full rollback.
             .pooled = if (@divTrunc(end, 4) > 512 and c.pooled.ctx != null) try s.slice(c.pooled, 0, 0, @min(@divTrunc(end, 4), mx.dim(c.pooled, 0))) else mx.empty,
             .offset = end,
+            .keys = try c.keys.prefix(s, end),
+            .values = try c.values.prefix(s, end),
+            .index_keys = try c.index_keys.prefix(s, end),
         };
     }
 };
@@ -201,7 +217,7 @@ pub const Model = struct {
         record.b = out[2];
         return m.lin(s, base, "out_proj", out[0]);
     }
-    fn attention(m: *Model, s: *mx.Scope, base: []const u8, x: A, cache: Cache, record: *Cache) !A {
+    fn attention(m: *Model, s: *mx.Scope, base: []const u8, x: A, cache: *Cache, record: *Cache) !A {
         const r = mx.dim(x, 0);
         const start = cache.offset;
         const end = start + r;
@@ -212,7 +228,14 @@ pub const Model = struct {
         var keys = try s.transpose(try s.reshape(prep[1], &.{ 1, r, 2, 256 }), &.{ 0, 2, 1, 3 });
         var values = try s.transpose(try s.reshape(try s.slice(p, 1, 12800, 13312), &.{ 1, r, 2, 256 }), &.{ 0, 2, 1, 3 });
         var raw = try s.slice(p, 1, 13824, 13952);
-        if (cache.a.ctx != null) {
+        if (kv.enabled) {
+            record.key_write = try cache.keys.append(s, cache.a, keys, 2);
+            record.value_write = try cache.values.append(s, cache.b, values, 2);
+            record.index_write = try cache.index_keys.append(s, cache.raw, raw, 0);
+            keys = record.key_write.view;
+            values = record.value_write.view;
+            raw = record.index_write.view;
+        } else if (cache.a.ctx != null) {
             keys = try s.cat(&.{ cache.a, keys }, 2);
             values = try s.cat(&.{ cache.b, values }, 2);
             raw = try s.cat(&.{ cache.raw, raw }, 0);
@@ -246,7 +269,11 @@ pub const Model = struct {
             const scores = (try m.kernels.run(s, src.q4_idx_scores, &.{ prep[2], pooled, ca }, &.{ ti("HI", 4), ti("DI", 128), ti("TOP", 512) }, .{ @divTrunc(blocks + 7, 8) * 256, r, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, blocks }, .dtype = mx.f32t }}))[0];
             ids = (try m.kernels.run(s, src.q4_idx_select, &.{ scores, ca, try s.ints(ends[0..@intCast(r)]) }, &.{ ti("TOP", 512), ti("KW", 2051) }, .{ 1024 * r, 1, 1 }, .{ 1024, 1, 1 }, &.{.{ .shape = &.{ r, 2051 }, .dtype = mx.i32t }}))[0];
         }
-        const partial = try m.kernels.run(s, src.q4_attn_parts, &.{ prep[0], keys, values, ids, try s.ints(counts[0..@intCast(r)]), try s.ints(sparse[0..@intCast(r)]), try s.scalar(0.0625) }, &.{ ti("H", 24), ti("KVH", 2), ti("D", 256), ti("P", 16) }, .{ 256 * 24, r, 16 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 24, 16, 256 }, .dtype = mx.f32t }, .{ .shape = &.{ r, 24, 16, 2 }, .dtype = mx.f32t } });
+        // The shader has separate physical-capacity and logical-key-count inputs.
+        // Passing full storage avoids its contiguous adapter copying a prefix view.
+        const kc = if (kv.enabled) record.key_write.capacity else keys;
+        const vc = if (kv.enabled) record.value_write.capacity else values;
+        const partial = try m.kernels.run(s, src.q4_attn_parts, &.{ prep[0], kc, vc, ids, try s.ints(counts[0..@intCast(r)]), try s.ints(sparse[0..@intCast(r)]), try s.scalar(0.0625) }, &.{ ti("H", 24), ti("KVH", 2), ti("D", 256), ti("P", 16) }, .{ 256 * 24, r, 16 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 24, 16, 256 }, .dtype = mx.f32t }, .{ .shape = &.{ r, 24, 16, 2 }, .dtype = mx.f32t } });
         const att = (try m.kernels.run(s, src.q4_attn_merge, &.{ partial[0], partial[1] }, &.{ ti("H", 24), ti("D", 256), ti("P", 16) }, .{ 256, 24, r }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, 24, 256 } }}))[0];
         const gated = (try m.kernels.run(s, src.q4_attn_gate, &.{ att, p }, &.{ ti("NQ", 24), ti("HD", 256), ti("PW", 13952) }, .{ r * 6144, 1, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, 6144 } }}))[0];
         return m.lin(s, base, "o_proj", gated);
@@ -301,12 +328,12 @@ pub const Model = struct {
         const cv = try s.reshape(try s.result(cr, conv), &.{ r, 10240 });
         return s.binary(mx.c.mlx_add, h, try s.binary(mx.c.mlx_add, gated, try s.binary(mx.c.mlx_multiply, cv, try s.unary(mx.c.mlx_sigmoid, cv))));
     }
-    fn layer(m: *Model, s: *mx.Scope, base: []const u8, h: A, cache: Cache, record: *Cache, linear: bool) !A {
+    fn layer(m: *Model, s: *mx.Scope, base: []const u8, h: A, cache: *Cache, record: *Cache, linear: bool) !A {
         var buf: [256]u8 = undefined;
         const hn = try m.hcNorm(s, h, null, mx.empty);
         const mix = try m.hcProject(s, try std.fmt.bufPrint(&buf, "{s}.attn_hyper_connection", .{base}), hn[0], hn[1], true);
         try m.trace(s, "mixed", mix[0]);
-        const branch = if (linear) try m.gdn(s, try std.fmt.bufPrint(&buf, "{s}.linear_attn", .{base}), mix[0], cache, record) else try m.attention(s, try std.fmt.bufPrint(&buf, "{s}.self_attn", .{base}), mix[0], cache, record);
+        const branch = if (linear) try m.gdn(s, try std.fmt.bufPrint(&buf, "{s}.linear_attn", .{base}), mix[0], cache.*, record) else try m.attention(s, try std.fmt.bufPrint(&buf, "{s}.self_attn", .{base}), mix[0], cache, record);
         try m.trace(s, "branch", branch);
         const post = try m.hcNorm(s, hn[0], branch, mix[1]);
         const mm = try m.hcProject(s, try std.fmt.bufPrint(&buf, "{s}.mlp_hyper_connection", .{base}), post[0], post[1], true);
@@ -319,7 +346,16 @@ pub const Model = struct {
         var p = try m.forwardQueued(tokens);
         errdefer p.deinit();
         try mx.eval(p.logits);
+        try observeBuffers(&p);
         return p;
+    }
+    pub fn observeBuffers(p: *Pass) !void {
+        if (!kv.track_reuse) return;
+        for (p.records) |rec| {
+            try kv.observe(rec.key_write);
+            try kv.observe(rec.value_write);
+            try kv.observe(rec.index_write);
+        }
     }
     pub fn forwardQueued(m: *Model, tokens: []const i32) !Pass {
         if (tokens.len == 0 or tokens.len > 16) return error.InvalidLaneWidth;
@@ -334,7 +370,7 @@ pub const Model = struct {
             m.trace_layer = i;
             if (i == 1) h = try m.ple(s, h, tokens, m.cache[i], &p.records[i]);
             try m.trace(s, "input", h);
-            h = try m.layer(s, try std.fmt.bufPrint(&buf, "model.layers.{d}", .{i}), h, m.cache[i], &p.records[i], i % 4 != 3);
+            h = try m.layer(s, try std.fmt.bufPrint(&buf, "model.layers.{d}", .{i}), h, &m.cache[i], &p.records[i], i % 4 != 3);
             try mx.evalMany(&.{h}, true);
         }
         p.hidden = h;
@@ -370,6 +406,9 @@ pub const Model = struct {
                 next[i].b = try mx.retain(try p.scope.reshape(try p.scope.slice(rec.b, 0, n - 1, n), &.{ 48, 128, 128 }));
             } else {
                 next[i] = try (try rec.attentionPrefix(&p.scope, end)).clone();
+                next[i].keys = try m.cache[i].keys.finish(&p.scope, rec.key_write, n);
+                next[i].values = try m.cache[i].values.finish(&p.scope, rec.value_write, n);
+                next[i].index_keys = try m.cache[i].index_keys.finish(&p.scope, rec.index_write, n);
             }
             if (i == 1) {
                 next[i].ple = try mx.retain(try p.scope.slice(rec.ple, 0, n, n + 9));
@@ -406,10 +445,13 @@ pub const Model = struct {
         const hs = try s.reshape(try s.cat(parts[0..count], 0), &.{ rows, 4, 2560 });
         const h = try s.reshape(try s.binary(mx.c.mlx_add, hs, try s.reshape(e, &.{ rows, 1, 2560 })), &.{ rows, 10240 });
         var rec = Cache{};
-        const out = try m.layer(s, "mtp.layers.0", h, cache.*, &rec, false);
+        const out = try m.layer(s, "mtp.layers.0", h, cache, &rec, false);
         if (!queued) try mx.eval(out);
         var next = try rec.clone();
         errdefer next.deinit();
+        next.keys = try cache.keys.finish(s, rec.key_write, rows);
+        next.values = try cache.values.finish(s, rec.value_write, rows);
+        next.index_keys = try cache.index_keys.finish(s, rec.index_write, rows);
         cache.deinit();
         cache.* = next;
         // MTP residual streams are fed to the next chained step; its own final mixer
@@ -442,19 +484,19 @@ pub const Model = struct {
             var cache = Cache{ .offset = case.past, .a = try m.weights.field(case.key, "a"), .b = try m.weights.field(case.key, "b"), .raw = try m.weights.field(case.key, "raw"), .pooled = if (case.pooled > 0) try m.weights.field(case.key, "pooled") else mx.empty };
             var batch = Cache{};
             const base = "model.layers.3.self_attn";
-            const out = try m.attention(&s, base, x, cache, &batch);
+            const out = try m.attention(&s, base, x, &cache, &batch);
             try equal(&s, out, try m.weights.field(case.key, "expected"));
             try equal(&s, batch.pooled, try m.weights.field(case.key, "pooled_expected"));
             for (0..8) |row| {
                 const j: i32 = @intCast(row);
                 const input = try s.slice(x, 0, j, j + 1);
                 var next = Cache{};
-                const serial = try m.attention(&s, base, input, cache, &next);
+                const serial = try m.attention(&s, base, input, &cache, &next);
                 try equal(&s, serial, try s.slice(out, 0, j, j + 1));
                 if (row > 0) {
-                    const rollback = try batch.attentionPrefix(&s, case.past + j);
+                    var rollback = try batch.attentionPrefix(&s, case.past + j);
                     var continued = Cache{};
-                    try equal(&s, serial, try m.attention(&s, base, input, rollback, &continued));
+                    try equal(&s, serial, try m.attention(&s, base, input, &rollback, &continued));
                     try equal(&s, next.a, continued.a);
                     try equal(&s, next.b, continued.b);
                     try equal(&s, next.raw, continued.raw);

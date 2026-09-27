@@ -19,6 +19,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-depth")) return @import("draft_depth.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-mtp-positions")) return @import("mtp_position_checks.zig").check(io, args[2]);
     if (args.len == 2 and std.mem.eql(u8, args[1], "check-serial-pipeline")) return @import("serial_pipeline_checks.zig").check();
+    if (args.len == 2 and std.mem.eql(u8, args[1], "check-kv-buffer")) return @import("kv_buffer_checks.zig").check();
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-sparse")) return @import("flash.zig").Model.checkAttention(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-attention")) return @import("attention_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-checkpoint-files")) return @import("safetensors.zig").checkFiles(io, args[2]);
@@ -29,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-model-schema")) return @import("schema.zig").checkCheckpoint(std.meta.stringToEnum(@import("schema.zig").Kind, args[2]) orelse return error.UnsupportedModel, io, args[3]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
         std.debug.print("Nemotron/Flash MTP options: --full-draft-vocab, --no-queued-drafts, --no-early-mtp, --no-gpu-handoff, --fixed-drafts, --check-mtp-state\n", .{});
-        std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--no-copy] [--metal-simd] [--metal-sampling]\n  [--no-serial-pipeline] [--check-serial-state] [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--report PATH] [--dump-logits PATH] [--check-exact] [--check-cache-stress] [--check-long-cache]\n  [--trace-dir EXISTING_DIR (Flash only)]\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n  tensorfold check-model-schema qwen|dflash|nemotron|flash MODEL_DIR\n", .{});
+        std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--no-copy] [--metal-simd] [--metal-sampling]\n  [--no-serial-pipeline] [--check-serial-state] [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--no-kv-buffers] [--check-kv-buffers] [--check-kv-reuse]\n  [--report PATH] [--dump-logits PATH] [--check-exact] [--check-cache-stress] [--check-long-cache]\n  [--trace-dir EXISTING_DIR (Flash only)]\n  tensorfold check-kv-buffer\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n  tensorfold check-model-schema qwen|dflash|nemotron|flash MODEL_DIR\n", .{});
         return;
     }
     {
@@ -57,9 +58,23 @@ pub fn main(init: std.process.Init) !void {
     var copy_enabled = true;
     var serial_pipeline = true;
     var check_serial = false;
+    var check_buffers = false;
+    var check_reuse = false;
     var report: ?[]const u8 = null;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--check-kv-buffers")) {
+            check_buffers = true;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "--check-kv-reuse")) {
+            check_reuse = true;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "--no-kv-buffers")) {
+            @import("kv_buffer.zig").enabled = false;
+            continue;
+        }
         if (std.mem.eql(u8, args[i], "--check-serial-state")) {
             check_serial = true;
             continue;
@@ -113,6 +128,8 @@ pub fn main(init: std.process.Init) !void {
     var timer = Stopwatch.init(io);
     var m = try model.Model.init(io, args[2]);
     defer m.deinit();
+    if (check_reuse) return @import("cache_checks.zig").checkBufferReuse(model.Model, &m);
+    if (check_buffers) return @import("cache_checks.zig").checkBuffered(model.Model, &m, long_cache);
     if (check_serial) return @import("cache_checks.zig").checkSerial(model.Model, &m, long_cache);
     if (long_cache) return @import("cache_checks.zig").checkLong(model.Model, &m);
     if (cache_stress) return @import("cache_checks.zig").check(model.Model, &m);
@@ -266,7 +283,7 @@ pub fn main(init: std.process.Init) !void {
         var active: usize = 0;
         try mx.check(mx.c.mlx_get_peak_memory(&peak));
         try mx.check(mx.c.mlx_get_active_memory(&active));
-        const content = try std.json.Stringify.valueAlloc(allocator, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .serial_pipeline = use_serial_pipeline, .queued_serial_steps = queued_serial_steps, .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        const content = try std.json.Stringify.valueAlloc(allocator, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .serial_pipeline = use_serial_pipeline, .kv_buffers = @import("kv_buffer.zig").enabled, .queued_serial_steps = queued_serial_steps, .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
         defer allocator.free(content);
         const f = try std.Io.Dir.cwd().createFile(io, path, .{});
         defer f.close(io);

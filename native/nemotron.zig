@@ -6,6 +6,7 @@ const src = @import("kernel_sources.zig");
 const A = mx.Array;
 const ti = mx.ti;
 const Cache = @import("model.zig").Cache;
+const kv = @import("kv_buffer.zig");
 pub const Pass = struct {
     scope: mx.Scope = .{},
     logits: A = mx.empty,
@@ -84,7 +85,15 @@ pub const Model = struct {
         var p = try m.forwardQueued(tokens);
         errdefer p.deinit();
         try mx.eval(p.logits);
+        try observeBuffers(&p);
         return p;
+    }
+    pub fn observeBuffers(p: *Pass) !void {
+        if (!kv.track_reuse) return;
+        for (p.records) |rec| {
+            try kv.observe(rec.key_write);
+            try kv.observe(rec.value_write);
+        }
     }
     pub fn forwardQueued(m: *Model, tokens: []const i32) !Pass {
         if (tokens.len == 0 or tokens.len > 16) return error.InvalidLaneWidth;
@@ -115,7 +124,7 @@ pub const Model = struct {
                 h = both[0];
                 x = both[1];
             } else if (kind == '*') {
-                const delta = try m.attention(s, base, x, m.cache[i], &p.records[i]);
+                const delta = try m.attention(s, base, x, &m.cache[i], &p.records[i]);
                 const both = try m.addNorm(s, h, delta, nw);
                 h = both[0];
                 x = both[1];
@@ -149,16 +158,23 @@ pub const Model = struct {
         const normed = (try m.kernels.run(s, src.nemotron_group_norm, &.{ out[0], try m.f(base, "norm.weight"), try s.scalar(1e-5) }, &.{ ti("XD", 4096), ti("GS", 512) }, .{ 1024, r, 1 }, .{ 128, 1, 1 }, &.{.{ .shape = &.{ r, 4096 } }}))[0];
         return m.project(s, base, "out_proj", normed);
     }
-    fn attention(m: *Model, s: *mx.Scope, base: []const u8, x: A, cache: Cache, record: *Cache) !A {
+    fn attention(m: *Model, s: *mx.Scope, base: []const u8, x: A, cache: *Cache, record: *Cache) !A {
         const r = mx.dim(x, 0);
         const q = try s.transpose(try s.reshape(try m.project(s, base, "q_proj", x), &.{ 1, r, 32, 128 }), &.{ 0, 2, 1, 3 });
         var keys = try s.transpose(try s.reshape(try m.project(s, base, "k_proj", x), &.{ 1, r, 2, 128 }), &.{ 0, 2, 1, 3 });
         var values = try s.transpose(try s.reshape(try m.project(s, base, "v_proj", x), &.{ 1, r, 2, 128 }), &.{ 0, 2, 1, 3 });
-        if (cache.a.ctx != null) {
+        var kw = kv.Write{};
+        var vw = kv.Write{};
+        if (kv.enabled) {
+            kw = try cache.keys.append(s, cache.a, keys, 2);
+            vw = try cache.values.append(s, cache.b, values, 2);
+            keys = kw.view;
+            values = vw.view;
+        } else if (cache.a.ctx != null) {
             keys = try s.cat(&.{ cache.a, keys }, 2);
             values = try s.cat(&.{ cache.b, values }, 2);
         }
-        record.* = .{ .a = keys, .b = values };
+        record.* = .{ .a = keys, .b = values, .key_write = kw, .value_write = vw };
         // Each query uses the serial kernel and exactly its own visible key length.
         var rows: [16]A = undefined;
         const start = mx.dim(keys, 2) - r;
@@ -210,6 +226,8 @@ pub const Model = struct {
             if (kind == '*') {
                 next[i].a = try mx.retain(try p.scope.slice(rec.a, 2, 0, m.position + n));
                 next[i].b = try mx.retain(try p.scope.slice(rec.b, 2, 0, m.position + n));
+                next[i].keys = try m.cache[i].keys.finish(&p.scope, rec.key_write, n);
+                next[i].values = try m.cache[i].values.finish(&p.scope, rec.value_write, n);
             }
             if (kind != 'E' and evaluate) try mx.evalMany(&.{ next[i].a, next[i].b }, false);
         }
@@ -227,19 +245,23 @@ pub const Model = struct {
         const h = try m.norm(s, hidden, "mtp.layers.0.hnorm");
         var x = try m.lin(s, "mtp.layers.0.eh_proj", try s.cat(&.{ e, h }, -1));
         var record = Cache{};
-        const delta = try m.attention(s, "mtp.layers.0.mixer", try m.norm(s, x, "mtp.layers.0.norm"), cache.*, &record);
+        const delta = try m.attention(s, "mtp.layers.0.mixer", try m.norm(s, x, "mtp.layers.0.norm"), cache, &record);
         x = try s.binary(mx.c.mlx_add, x, delta);
         const out = try m.moe(s, "mtp.layers.1.mixer", x, try m.norm(s, x, "mtp.layers.1.norm"), try m.weights.get("mtp.layers.1.final_layernorm.weight"));
         if (!queued) try mx.evalMany(&.{ out[1], record.a, record.b }, false);
-        try mx.replace(&cache.a, record.a);
-        try mx.replace(&cache.b, record.b);
+        var next = try record.clone();
+        errdefer next.deinit();
+        next.keys = try cache.keys.finish(s, record.key_write, rows);
+        next.values = try cache.values.finish(s, record.value_write, rows);
+        cache.deinit();
+        cache.* = next;
         return out[1];
     }
     pub fn draftPrefix(s: *mx.Scope, cache: Cache, rows: usize, keep: usize) !Cache {
         if (rows == 0 or keep > rows or rows > @as(usize, @intCast(mx.dim(cache.a, 2)))) return error.InvalidCommit;
         const end = mx.dim(cache.a, 2) - @as(i32, @intCast(rows - keep));
         if (end == 0) return .{};
-        return (Cache{ .a = try s.slice(cache.a, 2, 0, end), .b = try s.slice(cache.b, 2, 0, end) }).clone();
+        return (Cache{ .a = try s.slice(cache.a, 2, 0, end), .b = try s.slice(cache.b, 2, 0, end), .keys = try cache.keys.prefix(s, end), .values = try cache.values.prefix(s, end) }).clone();
     }
     pub fn head(m: *Model, s: *mx.Scope, h: A) !A {
         return m.lin(s, "lm_head", h);

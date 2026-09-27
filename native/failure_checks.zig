@@ -3,7 +3,7 @@ const std = @import("std");
 const mx = @import("mlx.zig");
 const cp = @import("checkpoint.zig");
 const sources = @import("kernel_sources.zig");
-const Kind = enum { scope, store, dense_weights, indexed, unindexed, draft_vocab, mtp_pipeline, serial_pipeline, kernels };
+const Kind = enum { scope, store, dense_weights, indexed, unindexed, draft_vocab, mtp_pipeline, serial_pipeline, kv_buffer, kernels };
 
 // A tiny real-MLX model isolates scheduler ownership from full checkpoint loading.
 // Numerical model equivalence is checked separately by test-mtp-state.
@@ -37,6 +37,7 @@ fn exercise(a: std.mem.Allocator, kind: Kind, io: std.Io, dir: []const u8) !void
     var kernels = mx.Kernels.init();
     defer kernels.deinit();
     switch (kind) {
+        .kv_buffer => try @import("kv_buffer_checks.zig").exercise(),
         .serial_pipeline => {
             try @import("serial_pipeline_checks.zig").exercise(a, 4, 17);
             // Continue beyond the output list's first capacity as well as EOS.

@@ -5,21 +5,33 @@ const src = @import("kernel_sources.zig");
 const A = mx.Array;
 const ti = mx.ti;
 const Weights = @import("weights.zig").Weights;
+const kv = @import("kv_buffer.zig");
 pub const Cache = struct {
     a: A = mx.empty,
     b: A = mx.empty,
+    keys: kv.Buffer = .{},
+    values: kv.Buffer = .{},
+    // Forward records borrow these from their Pass scope; persistent clones omit them.
+    key_write: kv.Write = .{},
+    value_write: kv.Write = .{},
     pub fn clone(c: Cache) !Cache {
-        const a = if (c.a.ctx != null) try mx.retain(c.a) else mx.empty;
-        errdefer mx.free(a);
-        return .{ .a = a, .b = if (c.b.ctx != null) try mx.retain(c.b) else mx.empty };
+        var out = Cache{};
+        errdefer out.deinit();
+        if (c.a.ctx != null) out.a = try mx.retain(c.a);
+        if (c.b.ctx != null) out.b = try mx.retain(c.b);
+        out.keys = try c.keys.clone();
+        out.values = try c.values.clone();
+        return out;
     }
     pub fn deinit(c: *Cache) void {
         mx.free(c.a);
         mx.free(c.b);
+        c.keys.deinit();
+        c.values.deinit();
         c.* = .{};
     }
 };
-pub const Record = struct { values: [8]A = @splat(mx.empty) };
+pub const Record = struct { values: [8]A = @splat(mx.empty), key_write: kv.Write = .{}, value_write: kv.Write = .{} };
 pub const Pass = struct {
     scope: mx.Scope = .{},
     logits: A = mx.empty,
@@ -69,7 +81,15 @@ pub const Model = struct {
         var p = try m.forwardTokens(try s.ints(tokens), parents);
         errdefer p.deinit();
         try mx.eval(p.logits);
+        try observeBuffers(&p);
         return p;
+    }
+    pub fn observeBuffers(p: *Pass) !void {
+        if (!kv.track_reuse) return;
+        for (p.records) |rec| {
+            try kv.observe(rec.key_write);
+            try kv.observe(rec.value_write);
+        }
     }
     pub fn forwardSerialArray(m: *Model, tokens: A) !Pass {
         if (tokens.ctx == null or mx.c.mlx_array_size(tokens) != 1) return error.InvalidToken;
@@ -118,11 +138,16 @@ pub const Model = struct {
         key = try s.transpose(try s.rope(try s.transpose(key, &.{ 1, 2, 0, 3 }), pos, 64), &.{ 2, 1, 0, 3 });
         rec.values[0] = key;
         rec.values[1] = value;
-        if (m.cache[i].a.ctx != null) {
+        if (kv.enabled) {
+            rec.key_write = try m.cache[i].keys.append(s, m.cache[i].a, key, 2);
+            rec.value_write = try m.cache[i].values.append(s, m.cache[i].b, value, 2);
+            key = rec.key_write.capacity;
+            value = rec.value_write.capacity;
+        } else if (m.cache[i].a.ctx != null) {
             key = try s.cat(&.{ m.cache[i].a, key }, 2);
             value = try s.cat(&.{ m.cache[i].b, value }, 2);
         }
-        const out = try s.reshape(try s.transpose(try lanes.attention(&m.kernels, s, q, key, value, t), &.{ 0, 2, 1, 3 }), &.{ 1, w, 6144 });
+        const out = try s.reshape(try s.transpose(try lanes.attentionCapacity(&m.kernels, s, q, key, value, t, m.position + w), &.{ 0, 2, 1, 3 }), &.{ 1, w, 6144 });
         return m.project(s, i, "self_attn.o_proj", .{ .x = try s.binary(mx.c.mlx_multiply, out, try s.unary(mx.c.mlx_sigmoid, gate)) });
     }
     fn gdn(m: *Model, s: *mx.Scope, i: usize, x: lanes.Act, t: *const lanes.Tree, rec: *Record) !A {
@@ -171,9 +196,30 @@ pub const Model = struct {
         for (&p.records, 0..) |*rec, i| {
             const v = rec.values;
             if (i % 4 == 3) {
+                var consecutive = true;
+                for (rows, 0..) |row, j| if (row != j) {
+                    consecutive = false;
+                };
+                if (kv.enabled and consecutive and rec.key_write.capacity.ctx != null) {
+                    const end = m.position + @as(i32, @intCast(rows.len));
+                    next[i].a = try mx.retain(try s.slice(rec.key_write.capacity, 2, 0, end));
+                    next[i].b = try mx.retain(try s.slice(rec.value_write.capacity, 2, 0, end));
+                    next[i].keys = try m.cache[i].keys.finish(s, rec.key_write, @intCast(rows.len));
+                    next[i].values = try m.cache[i].values.finish(s, rec.value_write, @intCast(rows.len));
+                    continue;
+                }
                 var keys = try s.take(v[0], ids, 2);
                 var vals = try s.take(v[1], ids, 2);
-                if (m.cache[i].a.ctx != null) {
+                if (kv.enabled) {
+                    // A branched path needs compaction. Verification reused a spare;
+                    // commit writes the gathered path into a protected replacement.
+                    const kw = try m.cache[i].keys.append(s, m.cache[i].a, keys, 2);
+                    const vw = try m.cache[i].values.append(s, m.cache[i].b, vals, 2);
+                    keys = kw.view;
+                    vals = vw.view;
+                    next[i].keys = try m.cache[i].keys.finish(s, kw, @intCast(rows.len));
+                    next[i].values = try m.cache[i].values.finish(s, vw, @intCast(rows.len));
+                } else if (m.cache[i].a.ctx != null) {
                     keys = try s.cat(&.{ m.cache[i].a, keys }, 2);
                     vals = try s.cat(&.{ m.cache[i].b, vals }, 2);
                 }

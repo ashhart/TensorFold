@@ -4,6 +4,49 @@ This fork ports the inference hosts to Zig and embeds the original author's Meta
 kernels. MLX-C supplies arrays, scheduling, safetensors, and general operations.
 This matrix distinguishes exercised behavior from physical-device validation.
 
+## Alternating attention buffers
+
+Qwen, Nemotron and Flash use alternating KV capacity buffers; Flash also buffers
+raw index keys. Qwen branched paths compact accepted rows before publishing the
+replacement cache. Snapshots retain their allocations and MLX copies when necessary.
+`--no-kv-buffers` keeps the former concatenation path available for comparison.
+
+- **508 isolated writes** reuse the exact donor allocation after draining the Metal
+  stream. **256 generated histories** match independent concatenation with growth,
+  partial commits, snapshot retention and rollback to empty caches; cleanup leaves
+  zero active MLX bytes. The comparison helper now handles zero-length arrays.
+- Real-model observation passes **3,904/3,904 donor reuses**: Qwen 992 and Nemotron
+  384 on each backend, Flash 1,152. Qwen/Nemotron checks run the serial pipeline.
+  Busy buffers may legitimately require copies: MLX retains input Data until Metal
+  completion callbacks release it. This explained the original intermittent strict
+  address test; only the isolated test adds an explicit drain.
+- **26 independently-prefilled comparisons** match every cache array and all
+  verification logits against concatenation. Short contexts are 0/31/2,044 on all
+  five model/backend combinations; long contexts are 9,999/10,007 for Qwen/Nemotron
+  tensor and SIMD, and 2,044/2,051/2,063 for Flash.
+- **1,056 short accepted-prefix checks**, branched Qwen paths and **640 reset cycles**
+  pass again with buffers enabled. Measured active MLX memory remains flat on all
+  five model/backend combinations.
+- **23 actual CLI pairs** match concatenation: serial/synchronous, serial/pipelined,
+  DFlash2, MTP depths 1/3/15 and late depth-15 MTP. Target IDs, proposal hashes where
+  available, accepted drafts, rounds and scheduling counters are exact. Context
+  copies are disabled; MTP depths are fixed to isolate the buffer layout.
+- **414 MTP retained-prefix/cache/continuation checks** pass again through sparse
+  and 10K attention boundaries. All **904 host allocation failures** pass with zero
+  retained active MLX memory, including 40 new buffer failure points.
+- **48 full-model serial pipeline comparisons**, **256 pipeline/reset cycles** and
+  **35 synthetic EOS/budget cases** also pass after buffer integration. Every token,
+  cache array and continuation is exact; active MLX memory remains flat.
+- All **400 long accepted-prefix/cache/continuation checks** pass with buffers:
+  Qwen 144 per backend, Nemotron 32 per backend and Flash 48. These include rejection,
+  EOS history and every retained length in the 128-row Qwen window.
+
+Reproduce with `test-kv-buffers`, `test-kv-buffers -Dkv-long=true`, `test-kv-runtime`,
+`test-cache-stress`, `test-long-cache`, `test-mtp-state`, `test-serial-pipeline` and
+`test-allocation-failures`, using the pinned
+Zig compiler and `-Doptimize=safe`. `-Dkv-family=0|1|2` restricts the new buffer suites.
+Final engine benchmarks remain pending; allocation reuse alone is not a speedup result.
+
 ## Serial pipeline milestone
 
 Qwen and Nemotron now queue the next serial Metal forward before reading the current

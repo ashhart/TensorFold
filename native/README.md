@@ -255,6 +255,9 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test-serial-pipeline -Doptimize=safe
 .zig-toolchain/zig build test-serial-pipeline -Doptimize=safe -Dserial-long=true
 .zig-toolchain/zig build test-serial-runtime -Doptimize=safe
+.zig-toolchain/zig build test-kv-buffers -Doptimize=safe
+.zig-toolchain/zig build test-kv-buffers -Doptimize=safe -Dkv-long=true
+.zig-toolchain/zig build test-kv-runtime -Doptimize=safe
 .zig-toolchain/zig build test-nemotron-simd-reference -Doptimize=safe
 .zig-toolchain/zig build test-models -Doptimize=safe
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
@@ -282,10 +285,25 @@ boundaries. All outputs match bit for bit. Diagnostic coverage does not make eac
 variant a selectable production mode; [COVERAGE.md](COVERAGE.md) records that distinction.
 The full [86-kernel inventory](KERNEL_INVENTORY.md) lists integration sites and fixture counts.
 
-`test-allocation-failures` injects 864 failures into native ownership operations with
+`test-allocation-failures` injects 904 failures into native ownership operations with
 real MLX handles and small checkpoint files. Every allocation is released, with zero
 retained MLX active memory. It also tests API error recovery; MLX's internal allocator
 and the driver are outside this injection boundary.
+
+Attention caches alternate capacity buffers, growing in blocks of 2,048 rows. The
+committed prefix and retained snapshots remain protected by MLX ownership; rejected
+rows are overwritten before reuse. Qwen's branched commits gather the selected path.
+Flash also buffers raw index keys. `--no-kv-buffers` restores concatenation for direct
+comparison; JSON reports include `kv_buffers`.
+
+`test-kv-buffers` compares independently-prefilled caches and all verification logits
+against concatenation, then observes real-model allocation reuse. Add `-Dkv-long=true`
+for attention threshold contexts or `-Dkv-family=0|1|2` for Qwen/Nemotron/Flash. Its
+isolated donation fixture drains Metal completion callbacks before requiring the same
+allocation address; production inference does not add that synchronization. Retained
+or busy buffers can legitimately require a copy. `test-kv-runtime` compares actual
+serial, DFlash2 and fixed-depth MTP CLI output, proposal hashes and schedule counters
+with buffers enabled and disabled.
 
 `test-draft-vocab` compares every selected packed head row and mapped ID with original
 Python row selection. `test-mtp-runtime` compares serial output against full/cut head

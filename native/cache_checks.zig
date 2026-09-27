@@ -75,6 +75,69 @@ fn prefill(comptime M: type, m: *M, count: usize, random: std.Random) !void {
 fn neverEos(_: i32) bool {
     return false;
 }
+pub fn checkBufferReuse(comptime M: type, m: *M) !void {
+    const kv = @import("kv_buffer.zig");
+    if (!kv.enabled) return error.BuffersDisabled;
+    kv.track_reuse = true;
+    defer kv.track_reuse = false;
+    var rng = std.Random.DefaultPrng.init(0x444f4e415445);
+    m.reset();
+    try prefill(M, m, 33, rng.random());
+    kv.attempted = 0;
+    kv.reused = 0;
+    if (@hasDecl(M, "SerialPass")) {
+        var generated: std.ArrayList(u32) = .empty;
+        defer generated.deinit(mx.allocator);
+        try generated.append(mx.allocator, 42);
+        _ = try @import("serial_pipeline.zig").generate(M, m, mx.allocator, &generated, 33, .{ .metal = true, .temperature = 0 }, neverEos, null);
+    } else {
+        for (0..32) |_| {
+            var p = try forward(M, m, &.{42}, &.{-1});
+            defer p.deinit();
+            try commit(M, m, &p, &.{0});
+        }
+    }
+    if (kv.attempted == 0 or kv.reused != kv.attempted) {
+        std.debug.print("Buffer donation: {d}/{d} exact allocations reused\n", .{ kv.reused, kv.attempted });
+        return error.BufferWasNotReused;
+    }
+    std.debug.print("PASS: {d}/{d} real-model attention writes reused their exact donor allocations ({s})\n", .{ kv.reused, kv.attempted, if (@hasDecl(M, "SerialPass")) "pipelined" else "synchronous" });
+    m.reset();
+}
+pub fn checkBuffered(comptime M: type, m: *M, long: bool) !void {
+    const kv = @import("kv_buffer.zig");
+    const original = kv.enabled;
+    defer kv.enabled = original;
+    var rng = std.Random.DefaultPrng.init(0x425546464552);
+    const prefixes: []const usize = if (long) (if (M == flash.Model) &.{ 2044, 2051, 2063 } else &.{ 9999, 10007 }) else &.{ 0, 31, 2044 };
+    var checks: usize = 0;
+    for (prefixes) |prefix| {
+        const state = rng;
+        m.reset();
+        kv.enabled = false;
+        try prefill(M, m, prefix, rng.random());
+        var expected_cache = try Snapshot(M).capture(m);
+        defer expected_cache.deinit();
+        var expected = try forward(M, m, &.{ 42, 97, 100, 103, 106, 109, 112, 115, 118, 121, 124, 127, 130, 133, 136, 139 }, &.{ -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 });
+        defer expected.deinit();
+        // Compare separately-prefilled buffer layouts, not only two schedules
+        // that both use the new buffers and might share a rounding difference.
+        m.reset();
+        kv.enabled = true;
+        rng = state;
+        try prefill(M, m, prefix, rng.random());
+        var scope = mx.Scope{};
+        defer scope.deinit();
+        try expected_cache.compare(m, &scope);
+        var actual = try forward(M, m, &.{ 42, 97, 100, 103, 106, 109, 112, 115, 118, 121, 124, 127, 130, 133, 136, 139 }, &.{ -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 });
+        defer actual.deinit();
+        try equal(&scope, expected.logits, actual.logits);
+        checks += 1;
+        std.debug.print("PASS: buffered/unbuffered prefill caches and every verification logit at prefix {d}\n", .{prefix});
+    }
+    m.reset();
+    std.debug.print("PASS: {d} independently-prefilled buffered/unbuffered model comparisons\n", .{checks});
+}
 pub fn checkSerial(comptime M: type, m: *M, long: bool) !void {
     const a = mx.allocator;
     var rng = std.Random.DefaultPrng.init(0x50495045);

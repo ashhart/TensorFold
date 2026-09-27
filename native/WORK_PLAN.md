@@ -25,9 +25,12 @@ Completion requires execution evidence, not just source export or a passing smok
   that needs a native implementation or an independent execution check.
 - [x] Early MTP speculation/accepted-state reuse and adaptive draft depth, with independent
   original-policy fixtures and real-model batch/serial cache checks.
-- [ ] Finish pipelined serial decode, GPU proposal handoff and attention buffer reuse.
-  Nemotron GPU proposal handoff and Qwen/Nemotron serial pipelining are implemented.
-  Preserve the bounded PLE memory strategy when evaluating Flash paths.
+- [x] Qwen/Nemotron serial pipelining, Nemotron GPU proposal handoff, and alternating
+  attention buffers across all three targets and both MTP heads. Independent
+  concatenation, short/long rollback, draft and pipeline regressions pass.
+- [ ] Flash GPU proposal handoff and serial pipelining. Preserve the bounded PLE
+  default; evaluate an optional resident packed-table path with GPU hash/history
+  computation and measure its actual loading peak before declaring it feasible.
 - [ ] Final matched end-to-end benchmarks against the original Python engines: same
   checkpoints, prompts, seeds, sampling and token counts, serial and drafting, repeated
   runs, cold process/load/prefill/decode/total breakdown and token parity. Document any
@@ -242,3 +245,30 @@ New milestone evidence and any discovered failures will be recorded below.
 - Nemotron's six sampled MTP regressions (depths 1/3/15 on tensor/SIMD) also match the
   new serial pipeline baseline. Flash GPU handoff/pipelining, attention buffer reuse
   and final original-engine benchmarks remain open.
+
+## Alternating attention buffer milestone
+
+- All three targets and both MTP heads use alternating KV capacity buffers. Flash
+  also buffers raw index keys; Qwen compacts accepted branched paths. Full-capacity
+  inputs avoid hidden contiguous-prefix copies in the Qwen/Flash attention kernels.
+  `--no-kv-buffers` preserves the original concatenation path for direct comparison.
+- The original isolated address assertion was intermittent because MLX retains
+  input Data in Metal completion callbacks. The diagnostic now drains the stream
+  before checking donation; production has no added drain. All 508 isolated writes
+  reuse the exact address, and 256 generated histories preserve independent values,
+  growth, partial commits, snapshots and rollback. Cleanup retains zero MLX bytes.
+- All 3,904 observed real-model donor writes reuse storage. All 26 independently
+  prefilled model/cache comparisons match concatenation exactly, through 10K for
+  Qwen/Nemotron on tensor/SIMD and through sparse thresholds for Flash.
+- All 1,056 short and 400 long accepted-prefix/cache/continuation checks pass with
+  buffers, including branched trees and 128-row windows. All 640 cache reset cycles
+  have flat active MLX memory. All 414 MTP state/retained-prefix checks pass again.
+- All 23 buffered/concatenated CLI pairs match target IDs, proposal hashes where
+  available and scheduling counters: serial, DFlash2 and MTP depths 1/3/15, early/late.
+  All 48 short full-model pipeline comparisons, 256 pipeline reset cycles and 35
+  synthetic EOS/budget cases pass again after integration.
+- All 904 injected host allocation failures pass with zero retained active MLX
+  memory. Safety-enabled host tests, optimized/safe builds, formatting and the
+  86-kernel inventory check pass. Native docs describe the new reproduction targets.
+- Remaining work: Flash GPU scheduling while retaining bounded PLE as the default,
+  then matched original-engine benchmarks, raw results and the root README table.

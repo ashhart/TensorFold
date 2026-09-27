@@ -42,6 +42,7 @@ pub fn generate(comptime M: type, m: *M, a: std.mem.Allocator, generated: *std.A
         }
         // Everything above accepts a GPU array; this is the first token read.
         try mx.eval(landed.draw);
+        if (@hasDecl(M, "observeBuffers")) try M.observeBuffers(&landed.pass);
         const token = mx.c.mlx_array_data_uint32(landed.draw)[0];
         try generated.append(a, token);
         if (hash) |h| {

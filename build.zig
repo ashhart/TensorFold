@@ -83,6 +83,33 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const buffer_fixture = b.addRunArtifact(exe);
+    buffer_fixture.addArg("check-kv-buffer");
+    const buffer_tests = b.step("test-kv-buffers", "Check buffer donation, independent concatenation parity and snapshot ownership");
+    const buffer_family = b.option(usize, "kv-family", "Restrict KV checks to 0=Qwen, 1=Nemotron or 2=Flash");
+    if (buffer_family != null and buffer_family.? > 2) @panic("kv-family must be 0, 1 or 2");
+    const buffer_long = b.option(bool, "kv-long", "Compare buffered/unbuffered paths across long-context attention thresholds") orelse false;
+    var buffer_previous: *std.Build.Step = &buffer_fixture.step;
+    for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP" }, 0..) |name, family| {
+        if (buffer_family != null and buffer_family.? != family) continue;
+        for (0..if (family == 2) @as(usize, 1) else 2) |backend| {
+            for ([_][]const u8{ "--check-kv-buffers", "--check-kv-reuse" }) |flag| {
+                if (buffer_long and std.mem.eql(u8, flag, "--check-kv-reuse")) continue;
+                const check = b.addRunArtifact(exe);
+                check.addArgs(&.{ "run", b.fmt("{s}/{s}", .{ model_root, name }), flag });
+                if (backend == 1) check.addArg("--metal-simd");
+                if (buffer_long) check.addArg("--check-long-cache");
+                check.step.dependOn(buffer_previous);
+                buffer_previous = &check.step;
+            }
+        }
+    }
+    buffer_tests.dependOn(buffer_previous);
+    const buffer_runtime = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_kv_runtime.py" });
+    buffer_runtime.addArtifactArg(exe);
+    buffer_runtime.addArgs(&.{ "--model-root", model_root });
+    if (buffer_family) |family| buffer_runtime.addArgs(&.{ "--family", ([_][]const u8{ "qwen", "nemotron", "flash" })[family] });
+    b.step("test-kv-runtime", "Compare buffered and concatenated serial/DFlash2/MTP completions and proposal streams").dependOn(&buffer_runtime.step);
     const serial_fixture = b.addRunArtifact(exe);
     serial_fixture.addArg("check-serial-pipeline");
     const serial_tests = b.step("test-serial-pipeline", "GPU serial pipeline EOS/budget ownership and real-model token/cache parity");
