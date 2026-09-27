@@ -17,8 +17,8 @@ pub const Pass = struct {
 };
 pub const Model = struct {
     pub const DraftCache = Cache;
-    weights: cp.Store = cp.Store.init(64),
-    kernels: mx.Kernels = mx.Kernels.init(),
+    weights: cp.Store,
+    kernels: mx.Kernels,
     cache: [52]Cache = @splat(.{}),
     kinds: [52]u8 = undefined,
     position: i32 = 0,
@@ -28,7 +28,7 @@ pub const Model = struct {
         return id == 2 or id == 11;
     }
     pub fn init(io: std.Io, dir: []const u8, drafts: bool) !Model {
-        var m = Model{};
+        var m = Model{ .weights = cp.Store.init(64), .kernels = mx.Kernels.init() };
         errdefer m.deinit();
         var buf: [4096]u8 = undefined;
         const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&buf, "{s}/config.json", .{dir}));

@@ -47,6 +47,8 @@ bash scripts/fetch-zig.sh
 .venv/bin/python tools/export_native_kernels.py --check
 .zig-toolchain/zig build test-metal -Doptimize=safe -Dmetal-tensors=true
 .zig-toolchain/zig build test-variants -Doptimize=safe
+.zig-toolchain/zig build test-allocation-failures -Doptimize=safe
+.zig-toolchain/zig build test-nemotron-simd-reference -Doptimize=safe
 .zig-toolchain/zig build test-models -Doptimize=safe
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
 .zig-toolchain/zig build test-drafts -Doptimize=safe
@@ -122,8 +124,8 @@ before model transformations and inference kernels: 1,847 Qwen, 81 DFlash2, 763 
 all 6,105 against actual headers and index references. `test-schema-failures` passes
 38 native CLI rejection cases: missing/truncated files, missing tensors/MTP, bad
 dtype/rank/shape, missing or invalid index entries, unsafe paths and wrong shard references.
-The fifteen safety-enabled host tests also pass. Allocation-failure injection inside
-MLX and broader loader allocation cleanup remain open.
+The fifteen safety-enabled host tests also pass. Native ownership-boundary allocation
+failure checks are described below; MLX's internal C++ allocator is not instrumented.
 
 `test-ple` independently loads each shard with MLX and compares its first, adjacent,
 middle, penultimate and final rows against native positional reads: 640 exact rows.
@@ -146,7 +148,7 @@ chat templates, vision, and disk prefix-cache persistence are outside this Metal
 
 ## Full-model Python comparisons at attention thresholds
 
-`test-long-context` has passed 16 native serial/drafted comparisons against the original
+`test-long-context` has passed 20 native serial/drafted comparisons against the original
 Python arithmetic. Every logit in the final prefill block is compared exactly, followed
 by all 16 generated tokens (Metal sampling, seed 5678, temperature .7, top-k 12, top-p .8).
 Context copies are disabled in drafted runs, so DFlash2/MTP heads execute.
@@ -154,6 +156,7 @@ Context copies are disabled in drafted runs, so DFlash2/MTP heads execute.
 | Model/backend | Prompt lengths | Compared logits per final block | Native peak MLX bytes at longer prompt, drafting |
 | --- | --- | --- | ---: |
 | Qwen tensor + DFlash2 | 9,999 / 10,007 | 3,724,800 / 5,711,360 | 28,813,688,832 |
+| Qwen forced SIMD + DFlash2 | 9,999 / 10,007 | 3,724,800 / 5,711,360 | 27,498,844,068 |
 | Nemotron tensor + MTP | 9,999 / 10,007 | 1,966,080 / 917,504 | 21,533,663,066 |
 | Nemotron forced SIMD + MTP | 9,999 / 10,007 | 1,966,080 / 917,504 | 20,460,568,482 |
 | Flash + MTP | 2,051 / 2,063 | 744,960 / 3,724,800 | 84,910,995,412 |
@@ -171,6 +174,12 @@ PLE now follows the original operation order; the strict long tests pass without
 `tools/native_flash_trace.py` and `--trace-dir` compare 242 layer/projection intermediates;
 `--gdn-layer N` / `--trace-gdn N` trace one recurrent block across the entire prefill.
 Use `-Dlong-family=0|1|2` and optionally `-Dlong-tokens=N` to isolate a long-context case.
+Use `-Dlong-backend=0|1` for tensor/SIMD. Qwen's SIMD oracle composes the original
+unstacked lane host, `simd_qmm` projections and `row_attention`, matching native's
+configuration. The original stacked `row_forward` changes shape-dependent reduction
+splits and is numerically different; it is covered separately by variant replay.
+The 17-token short code-prompt Nemotron SIMD completion also matches Python exactly,
+reproducibly checked by `test-nemotron-simd-reference`.
 
 `test-long-cache` also passes all five model/backend combinations: Qwen tensor and
 forced SIMD each check 144 accepted prefixes at 9,999/10,007 tokens (16/128-row
@@ -181,7 +190,7 @@ separate from the short-context reset/memory checks above.
 
 ## Optional implementation variants
 
-`test-variants` passes **1,041 native launches across 44 embedded variants**, with
+`test-variants` passes **1,104 native launches across 54 embedded variants**, with
 every output bit matching Python. It runs upstream assertions before recording
 inputs, templates, launch geometry and expected arrays; Zig replays the launches
 using its embedded catalog, validates source hashes, and never executes fixture source.
@@ -195,6 +204,7 @@ one group-128/width-1,856 combination is skipped because that quantization is un
 | Nemotron | Row projections and both expert projections with original fp32 error-bound assertions; routing ties, selection bias, saturated sigmoid, zero probability, 0/1/2 shared slots; three residual/norm variants |
 | Flash | Quantized row projections, tiled embedding, stacked SwiGLU; top-10 ties/random/dominant routing at 32/512 experts; grouped/ungrouped gate-up and down, shared and unshared outputs, 1/3/16 rows |
 | Expert-down bounds | Independently exact dot products at widths 32/64/128/480/512/544/768/1,024; rejected zero, half-group and oversized widths |
+| Additional attention and PLE | Direct/non-direct attention at D128/D256, 513/10,007 keys and 1/3/8 queries; original eight-group PLE lookup at every group boundary, 1/3/16 rows; fp32/BF16 router outputs at 256/512 threads |
 
 The narrow expert-down cases exposed out-of-bounds reads in all three original down
 kernels: inactive SIMD lanes still loaded 16 inputs and packed weights below width 512.
@@ -214,3 +224,27 @@ post-warmup reset cycles. Active MLX memory remains exactly 79,023,013,912 bytes
 the measured cycles. All 89 shared Metal fixtures and 15 safety-enabled host tests pass.
 All twelve Flash serial/MTP comparisons also pass again: greedy, CPU and Metal sampling,
 two-token output budgets, and MTP budgets 1/3/15.
+
+The complete [86-kernel inventory](KERNEL_INVENTORY.md) distinguishes production
+integration sites and diagnostic replay. `tools/native_kernel_inventory.py --check`
+rejects stale fixtures and kernels without either integration or diagnostic coverage.
+Static integration sites alone do not prove execution: the model/cache/draft and shared
+utility suites above establish that separately.
+
+## Allocation and MLX error recovery
+
+`test-allocation-failures` passes **327 injected host-allocation failures** across
+temporary scopes, weight-map insertion/replacement, owning dense-weight insertion,
+linear preparation, indexed/unindexed checkpoint reads, and kernel dispatch/cache hits.
+Both tensor and SIMD branches run, with in-place resizing enabled and disabled. The
+latter forces allocate/copy growth so failures after a scope's first allocation are
+also tested. Every allocation is freed; synchronized MLX active memory returns to zero.
+
+The diagnostic also rejects null array handles and invalid kernel arity, exercises a
+real MLX reshape error, verifies subsequent operations still succeed, and repeats that
+error/recovery cycle sixteen times without retained memory. Kernel/config construction
+now rejects null handles. Family ownership is initialized explicitly at runtime, and
+the diagnostic substitutes a failing Zig allocator only within its single-threaded scope.
+This checks the native ownership boundary; it does not inject faults into every private
+allocation in MLX, the Metal driver, or the operating system. All five real-model cache
+checks pass again after these ownership changes.

@@ -50,8 +50,8 @@ pub const Pass = struct {
     }
 };
 pub const Model = struct {
-    weights: cp.Store = cp.Store.init(32),
-    kernels: mx.Kernels = mx.Kernels.init(),
+    weights: cp.Store,
+    kernels: mx.Kernels,
     cache: [48]Cache = @splat(.{}),
     position: i32 = 0,
     mtp: bool = false,
@@ -67,7 +67,7 @@ pub const Model = struct {
         return id == 248044 or id == 248046;
     }
     pub fn init(io: std.Io, dir: []const u8, drafts: bool) !Model {
-        var m = Model{};
+        var m = Model{ .weights = cp.Store.init(32), .kernels = mx.Kernels.init() };
         errdefer m.deinit();
         var buf: [4096]u8 = undefined;
         const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&buf, "{s}/config.json", .{dir}));
@@ -395,7 +395,7 @@ pub const Model = struct {
     pub fn checkAttention(io: std.Io, dir: []const u8) !void {
         try mx.init();
         defer mx.shutdown();
-        var m = Model{ .centered = false };
+        var m = Model{ .weights = cp.Store.init(32), .kernels = mx.Kernels.init(), .centered = false };
         defer m.deinit();
         var path: [4096]u8 = undefined;
         try m.weights.loadFile(io, try std.fmt.bufPrint(&path, "{s}/arrays.safetensors", .{dir}), "", "");
@@ -438,7 +438,7 @@ pub const Model = struct {
     pub fn checkPleNorm(io: std.Io, dir: []const u8) !void {
         try mx.init();
         defer mx.shutdown();
-        var m = Model{};
+        var m = Model{ .weights = cp.Store.init(32), .kernels = mx.Kernels.init() };
         defer m.deinit();
         var path: [4096]u8 = undefined;
         try m.weights.loadFile(io, try std.fmt.bufPrint(&path, "{s}/arrays.safetensors", .{dir}), "", "");

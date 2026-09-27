@@ -131,6 +131,9 @@ def main():
             source = flash._HC_NORM.replace("BRANCH", branch).replace("WRITEBACK", writeback)
             export(name, flash._kernel(name, source, names, ["HN", "SSP"]))
         export("q4_router_float", flash._kernel("q4_router_float", flash._ROUTER.replace("OUT_T", "float"), ["X", "GW", "rows"], ["OUT"]))
+        export("q4_router_bfloat", flash._kernel("q4_router_bfloat", flash._ROUTER.replace("OUT_T", "bfloat"), ["X", "GW", "rows"], ["OUT"]))
+        export("q4_ple_lookup", flash._kernel("q4_ple_lookup", flash._PLE_LOOKUP,
+               ["IDS", "GSTART"] + [f"{kind}{g}" for g in range(8) for kind in ("W", "S", "B")], ["OUT"]))
     finally:
         mx.fast.metal_kernel = original
     emit(ROOT / "native" / "kernel_sources.zig",

@@ -207,6 +207,8 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test -Doptimize=safe
 .zig-toolchain/zig build test-metal -Doptimize=safe -Dmetal-tensors=true
 .zig-toolchain/zig build test-variants -Doptimize=safe
+.zig-toolchain/zig build test-allocation-failures -Doptimize=safe
+.zig-toolchain/zig build test-nemotron-simd-reference -Doptimize=safe
 .zig-toolchain/zig build test-models -Doptimize=safe
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
 .zig-toolchain/zig build test-drafts -Doptimize=safe
@@ -227,10 +229,16 @@ family's caches; it also forces the dense Qwen and Nemotron SIMD paths. It requi
 the large checkpoints and enough unified memory. See [COVERAGE.md](COVERAGE.md).
 
 `test-variants` runs upstream kernel assertions and additional boundary fixtures, then
-replays 1,041 captured launches through 44 native embedded variants. It covers optional
+replays 1,104 captured launches through 54 native embedded variants. It covers optional
 fused/row paths, scalar and matrix SIMD, grouped experts, routing ties and quantization
 boundaries. All outputs match bit for bit. Diagnostic coverage does not make each
 variant a selectable production mode; [COVERAGE.md](COVERAGE.md) records that distinction.
+The full [86-kernel inventory](KERNEL_INVENTORY.md) lists integration sites and fixture counts.
+
+`test-allocation-failures` injects 327 failures into native ownership operations with
+real MLX handles and small checkpoint files. Every allocation is released, with zero
+retained MLX active memory. It also tests API error recovery; MLX's internal allocator
+and the driver are outside this injection boundary.
 
 `test-checkpoint-files` runs without a GPU and exercises positional reads, truncation,
 oversized or invalid headers, missing files and allocation failures. The loader validates

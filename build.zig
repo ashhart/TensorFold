@@ -47,6 +47,11 @@ pub fn build(b: *std.Build) void {
     variants.addArgs(&.{ "check-variants", "build/native-checks/variants" });
     variants.step.dependOn(&variants_fixture.step);
     b.step("test-variants", "Run original optional-kernel tests and compare their launches through native embedded Metal").dependOn(&variants.step);
+    const allocation_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_allocation_fixtures.py", "build/native-checks/allocations" });
+    const allocation_checks = b.addRunArtifact(exe);
+    allocation_checks.addArgs(&.{ "check-allocation-failures", "build/native-checks/allocations" });
+    allocation_checks.step.dependOn(&allocation_fixture.step);
+    b.step("test-allocation-failures", "Inject every host allocation failure at MLX ownership boundaries").dependOn(&allocation_checks.step);
     for ([_][]const u8{ "sampling", "sparse", "attention", "ple_norm" }) |kind| {
         if (std.mem.eql(u8, kind, "attention") and !tensor_tests) continue;
         const dir = b.fmt("build/native-checks/{s}", .{kind});
@@ -59,6 +64,19 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const simd_dir = b.addSystemCommand(&.{ "mkdir", "-p", "build/native-checks/simd-reference" });
+    const simd_model = b.fmt("{s}/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", .{model_root});
+    const simd_options = &.{ "--prompt", "Write a short Python function that computes the Fibonacci sequence.", "--seed", "5678", "--temperature", "0", "--top-k", "12", "--top-p", "0.8" };
+    const simd_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", simd_model, "--simd", "--generate", "17", "--output", "build/native-checks/simd-reference/nemotron-python.json" });
+    simd_oracle.addArgs(simd_options);
+    simd_oracle.step.dependOn(&simd_dir.step);
+    const simd_native = b.addRunArtifact(exe);
+    simd_native.addArgs(&.{ "run", simd_model, "--metal-simd", "--no-drafts", "--max-tokens", "17", "--report", "build/native-checks/simd-reference/nemotron-native.json" });
+    simd_native.addArgs(simd_options);
+    simd_native.step.dependOn(&simd_oracle.step);
+    const simd_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-reports", "build/native-checks/simd-reference/nemotron-python.json", "build/native-checks/simd-reference/nemotron-native.json" });
+    simd_compare.step.dependOn(&simd_native.step);
+    b.step("test-nemotron-simd-reference", "Compare the short code-prompt completion with original Python SIMD").dependOn(&simd_compare.step);
     const schema_tests = b.step("test-model-schemas", "Validate all downloaded tensor names/shapes/dtypes and index references without loading payloads");
     const schema_failures = b.addSystemCommand(&.{ ".venv/bin/python", "tools/test_native_schemas.py" });
     schema_failures.addArtifactArg(exe);
@@ -152,6 +170,9 @@ pub fn build(b: *std.Build) void {
     const long_tests = b.step("test-long-context", "Full-model Python/native logits and drafted continuations across attention thresholds");
     const long_family = b.option(usize, "long-family", "Restrict long-context checks to 0=Qwen, 1=Nemotron, 2=Flash");
     const long_size = b.option(usize, "long-tokens", "Override context length for one threshold or diagnostic case");
+    const long_backend = b.option(usize, "long-backend", "Restrict long-context checks to 0=tensor or 1=SIMD");
+    if (long_backend != null and long_backend.? > 1) @panic("long-backend must be 0 or 1");
+    if (long_family == 2 and long_backend == 1) @panic("Flash has one backend; use long-backend=0");
     if (long_family != null and long_family.? > 2) @panic("long-family must be 0, 1 or 2");
     if (long_size != null and (long_size.? == 0 or long_size.? > 262128)) @panic("long-tokens must be 1..262128");
     const long_dir = b.addSystemCommand(&.{ "mkdir", "-p", "build/native-checks/long" });
@@ -167,7 +188,8 @@ pub fn build(b: *std.Build) void {
             // bounded while RoPE/cache lengths still exercise every threshold.
             for (ids, 0..) |*id, j| id.* = b.fmt("{d}", .{1000 + (j % 4) * 37});
             const prompt = std.mem.join(b.allocator, ",", ids) catch @panic("OOM");
-            for (0..if (family == 1) @as(usize, 2) else 1) |backend| {
+            for (0..if (family < 2) @as(usize, 2) else 1) |backend| {
+                if (long_backend != null and long_backend.? != backend) continue;
                 const base = b.fmt("build/native-checks/long/{d}-{d}-{d}", .{ family, backend, length });
                 const dir = b.fmt("{s}/{s}", .{ model_root, name });
                 const common = &.{ "--tokens", prompt, "--seed", "5678", "--temperature", "0.7", "--top-k", "12", "--top-p", "0.8", "--metal-sampling" };

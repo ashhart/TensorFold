@@ -191,4 +191,21 @@ pub const Weights = struct {
         const out = try s.dequant(try s.take(try w.get("model.embed_tokens.weight"), ids, 0), try s.take(try w.get("model.embed_tokens.scales"), ids, 0), try s.take(try w.get("model.embed_tokens.biases"), ids, 0));
         return s.reshape(out, &.{ 1, @intCast(tokens.len), 5120 });
     }
+    /// Exercise the owning insertion helpers under the allocation diagnostic.
+    pub fn checkOwnedInsertions() !void {
+        var w = Weights.init();
+        defer w.deinit();
+        var s = mx.Scope{};
+        defer s.deinit();
+        const value = try s.zeros(&.{ 32, 8 }, mx.c.MLX_UINT32);
+        const scales = try s.zeros(&.{ 32, 1 }, mx.bf16);
+        try w.putArray("projection.weight", try mx.retain(value));
+        try w.putArray("projection.scales", try mx.retain(scales));
+        try w.putArray("projection.biases", try mx.retain(scales));
+        try w.putLinear("projection", try lanes.Linear.init(&s, value, scales, scales));
+        try std.testing.expectError(error.DuplicateWeight, w.putArray("projection.weight", try mx.retain(value)));
+        try std.testing.expectError(error.DuplicateWeight, w.putLinear("projection", try lanes.Linear.init(&s, value, scales, scales)));
+        try w.releaseLinearSources();
+        try std.testing.expectEqual(@as(usize, 0), w.arrays.count());
+    }
 };

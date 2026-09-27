@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--tokens", help="Exact prompt IDs, also honored during generation")
     parser.add_argument("--dump-logits", type=Path, help="Save the final prefill block before generation")
     parser.add_argument("--metal-sampling", action="store_true")
+    parser.add_argument("--simd", action="store_true", help="Use original SIMD projections and row attention, without stacked projections")
     parser.add_argument("--output", default="build/native-checks/reference.npy")
     parser.add_argument("--compare", nargs=2)
     parser.add_argument("--compare-reports", nargs="+")
@@ -52,10 +53,19 @@ def main():
     import mlx.core as mx
     from mlx_lm.models.cache import make_prompt_cache
     from tensorfold.families.qwen3_5 import load_lane_model
-    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree, lane_attention, row_attention, simd_qmm
 
     model, tokenizer = load_lane_model(Path(args.model))
-    lane_qmm.install(model, rows=128, tile=True, wide=True)
+    if args.simd:
+        # Native keeps the individual checkpoint projections. row_forward.install
+        # stacks GDN projections, changing simd_qmm's shape-dependent split sums.
+        # Compose the original unstacked lane host with the original SIMD kernels.
+        simd_qmm.install(model)
+        def attention(q, k, v, scale, parents):
+            return row_attention.row_sdpa(q, k, v, scale, k.shape[2] - len(parents), parents)
+        lane_attention.lane_tree_sdpa = attention
+    else:
+        lane_qmm.install(model, rows=128, tile=True, wide=True)
     core = model.language_model.model
     head = model.language_model.lm_head
     tokens = ([int(x) for x in args.tokens.split(",")] if args.tokens else

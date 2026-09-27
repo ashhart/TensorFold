@@ -13,13 +13,16 @@ Completion requires execution evidence, not just source export or a passing smok
   EOS/token-budget boundaries, repeated reset/cache fork/restore cycles.
 - [x] Full-model Python/native long-context comparisons across sparse and 10K dispatch
   thresholds; memory measurements establish what fits rather than assuming a limit.
-- [ ] Adversarial routing, sampling, PLE hash/history/shard boundaries and quantization
+- [x] Adversarial routing, sampling, PLE hash/history/shard boundaries and quantization
   fixtures, including direct checks of each additional implementation variant.
-- [ ] Loader/config/shape/dtype failure checks, missing/truncated shards and missing MTP
+- [x] Loader/config/shape/dtype failure checks, missing/truncated shards and missing MTP
   heads; allocation failure cleanup and sustained memory-growth checks.
-- [ ] Inventory and native execution coverage for remaining upstream fused projection,
+- [x] Inventory and native execution coverage for remaining upstream fused projection,
   GDN and row-forward optimization variants; distinguish selectable production paths
   and diagnostic variants in the final inventory.
+- [ ] Audit original runtime optimizations (reduced draft vocabulary, queued MTP,
+  stacked SIMD projections), documenting production choices and any remaining behavior
+  that needs a native implementation or an independent execution check.
 - [ ] Final matched end-to-end benchmarks against the original Python engines: same
   checkpoints, prompts, seeds, sampling and token counts, serial and drafting, repeated
   runs, cold process/load/prefill/decode/total breakdown and token parity. Document any
@@ -126,3 +129,25 @@ New milestone evidence and any discovered failures will be recorded below.
   needs diagnostic coverage; production uses the separately verified bounded row reader.
   Audit runtime optimizations such as reduced draft vocabulary and queued MTP proposals
   separately from operation coverage before declaring parity with all Python modes.
+
+## Remaining kernel, SIMD oracle and ownership milestone
+
+- All remaining catalog variants execute: 1,104 launches across 54 variants pass exactly.
+  Added both non-direct attention widths, eight-group PLE lookup at group boundaries,
+  and fp32/BF16 router output specializations. All 86 embedded sources match Python.
+  KERNEL_INVENTORY.md lists every kernel, its native integration sites and diagnostic
+  counts; the generator rejects stale fixtures and uncovered catalog entries.
+- The four Qwen SIMD long comparisons pass at 9,999/10,007 tokens, serial and DFlash2:
+  every final-block logit and all sixteen continuation IDs match. Total long-context
+  comparisons are now twenty. The SIMD oracle uses original unstacked projections and
+  row attention; Python's stacked row_forward is a different rounding configuration,
+  already exercised by variant replay. Short Nemotron SIMD code-prompt parity also
+  passes as a dedicated reproducible target.
+- A new GPU-backed ownership diagnostic passes 327 injected host allocation failures,
+  tensor/SIMD and resize/fallback growth. It covers scopes, both weight stores, linear
+  preparation, actual indexed/unindexed checkpoint files and kernel dispatch. All bytes
+  are released and active MLX memory returns to zero. Null handles, invalid arity and
+  real MLX API errors recover cleanly, including sixteen repeated error cycles.
+  MLX/driver internal allocation sites are not instrumented by this native-boundary test.
+- All fifteen host tests and all five real-model cache checks pass after the ownership
+  changes. Runtime optimization audit and final engine benchmarks remain outstanding.

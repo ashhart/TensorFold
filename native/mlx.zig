@@ -8,7 +8,8 @@ pub const bf16 = c.MLX_BFLOAT16;
 pub const f32t = c.MLX_FLOAT32;
 pub const i32t = c.MLX_INT32;
 pub var stream: c.mlx_stream = .{ .ctx = null };
-pub const allocator = std.heap.c_allocator;
+// Replaced only by the single-threaded allocation diagnostic; production uses libc.
+pub var allocator: std.mem.Allocator = std.heap.c_allocator;
 pub var tensor_units = false;
 pub var force_simd = false;
 
@@ -86,6 +87,7 @@ pub const Scope = struct {
     }
     pub fn own(s: *Scope, a: Array) !Array {
         errdefer free(a);
+        if (a.ctx == null) return error.MlxFailure;
         try s.arrays.append(allocator, a);
         return a;
     }
@@ -232,8 +234,10 @@ pub const Kernels = struct {
             for (spec.inputs) |n| try check(c.mlx_vector_string_append_value(ins, n));
             for (spec.outputs) |n| try check(c.mlx_vector_string_append_value(outs, n));
             entry.value_ptr.* = c.mlx_fast_metal_kernel_new(spec.name, ins, outs, spec.source, spec.header, spec.contiguous, false);
+            if (entry.value_ptr.ctx == null) return error.MlxFailure;
         }
         const cfg = c.mlx_fast_metal_kernel_config_new();
+        if (cfg.ctx == null) return error.MlxFailure;
         defer c.mlx_fast_metal_kernel_config_free(cfg);
         if (init_value) |value| try check(c.mlx_fast_metal_kernel_config_set_init_value(cfg, value));
         try check(c.mlx_fast_metal_kernel_config_set_grid(cfg, grid[0], grid[1], grid[2]));

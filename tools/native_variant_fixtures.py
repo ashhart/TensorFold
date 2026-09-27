@@ -28,7 +28,7 @@ class Capture:
         self.original = mx.fast.metal_kernel
         self.catalog = {}
         for path in sorted(Path("native/metal").glob("*.metal")):
-            if path.stem.startswith(("row_forward_", "row_qmv", "lane_fuse_", "lane_gdn_", "simd_qmm_", "q4_", "nemotron_")):
+            if path.stem.startswith(("row_forward_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
                 self.catalog[(fingerprint(path.read_text(), path.with_suffix(".h").read_text()),
                               path.stem.endswith("_dep"))] = path.stem
 
@@ -122,6 +122,13 @@ def flash_variants(capture):
         assert a.shape == b.shape and bool(mx.array_equal(a, b).item())
 
     matrix = weights((128, 512), 100)
+    gate_weight = mx.random.normal((513, 2560), key=mx.random.key(88)).astype(mx.bfloat16)
+    for rows in (1, 3, 16):
+        for threads in (256, 512):
+            capture.test = f"flash-router-{rows}-{threads}"
+            x = mx.random.normal((rows, 2560), key=mx.random.key(rows)).astype(mx.bfloat16)
+            logits = flash.router(x, gate_weight, threads=threads, dtype=mx.float32)
+            same(flash.router(x, gate_weight, threads=threads, dtype=mx.bfloat16), logits.astype(mx.bfloat16))
     for rows in (1, 3, 8, 16, 32):
         capture.test = f"flash-projection-{rows}"
         x = mx.random.normal((rows, 512), key=mx.random.key(rows)).astype(mx.bfloat16)
@@ -209,6 +216,52 @@ def nemotron_variants(capture):
                     assert bool(mx.array_equal(a, b).item())
 
 
+def attention_and_ple_variants(capture):
+    from tensorfold.kernels.qwen.dense.v1 import lane_attention
+    from tensorfold.kernels.qwen.flash_next.v1 import kernels as flash
+    import numpy as np
+
+    direct = lane_attention.DIRECT_P
+    try:
+        for dims in (128, 256):
+            for length in (513, 10007):
+                for rows in (1, 3, 8):
+                    capture.test = f"attention-partial-{dims}-{length}-{rows}"
+                    q = mx.random.normal((1, 4, rows, dims), key=mx.random.key(rows)).astype(mx.bfloat16)
+                    k = mx.random.normal((1, 2, length, dims), key=mx.random.key(length)).astype(mx.bfloat16)
+                    v = mx.random.normal(k.shape, key=mx.random.key(length + 1)).astype(mx.bfloat16)
+                    lane_attention.DIRECT_P = True
+                    reference = lane_attention.lane_sdpa(q, k, v, dims ** -.5)
+                    lane_attention.DIRECT_P = False
+                    actual = lane_attention.lane_sdpa(q, k, v, dims ** -.5)
+                    assert bool(mx.array_equal(actual, reference).item())
+    finally:
+        lane_attention.DIRECT_P = direct
+    for dims in (64, 128):
+        tables = SimpleNamespace(weights=[], scales=[], biases=[], starts=None, dims=dims)
+        starts = [0]
+        dense = []
+        ids = []
+        for g in range(8):
+            count = 5 + 2 * g
+            w = mx.random.normal((count, dims), key=mx.random.key(g + dims)).astype(mx.bfloat16)
+            q, s, b = mx.quantize(w, group_size=32, bits=4)
+            tables.weights.append(q)
+            tables.scales.append(s)
+            tables.biases.append(b)
+            dense.append(mx.dequantize(q, s, b, group_size=32, bits=4))
+            ids.extend([starts[-1], starts[-1] + 1, starts[-1] + count // 2, starts[-1] + count - 1])
+            starts.append(starts[-1] + count)
+        tables.starts = mx.array(starts[:-1], dtype=mx.uint32)
+        full = mx.concatenate(dense)
+        for rows in (1, 3, 16):
+            capture.test = f"ple-eight-groups-{dims}-{rows}"
+            indices = np.asarray([np.roll(ids, r) for r in range(rows)], dtype=np.uint32)
+            actual = flash.ple_lookup(indices, tables)
+            expected = full[mx.array(indices)].reshape(rows, -1)
+            assert bool(mx.array_equal(actual, expected).item())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
@@ -226,6 +279,7 @@ def main():
         extra_variants(capture)
         flash_variants(capture)
         nemotron_variants(capture)
+        attention_and_ple_variants(capture)
     finally:
         mx.fast.metal_kernel = capture.original
     if not capture.cases:
@@ -241,6 +295,7 @@ def main():
     required.update("q4_" + name for name in (
         "qmv", "qmv_rows", "embed_rows", "swiglu", "route", "expert_gateup", "expert_group",
         "grouped_gateup", "expert_down_y", "grouped_down", "expert_down"))
+    required.update(("q4_ple_lookup", "q4_router_float", "q4_router_bfloat", "lane_attention_partial", "lane_attention_partial_128"))
     if missing := required - counts.keys():
         raise RuntimeError(f"Required native variant coverage missing: {sorted(missing)}")
     print(json.dumps(counts, indent=2), flush=True)
