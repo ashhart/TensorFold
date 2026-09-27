@@ -383,3 +383,26 @@ def test_no_mtp_head_drafts_with_dflash2(engine_n, sampling):
         drafted, stats = _generate(engine_n, prompt, sampling, policy=policy, tokens=32)
         assert drafted == serial, policy
         assert stats["min_rows"] >= 2 and "m" not in stats.get("drafters", ""), (policy, stats)
+
+
+@pytest.fixture(scope="module")
+def engine_long(tmp_path_factory):
+    """The model with a context past the dense limit (2,051 tokens), so rows attend to DSA-selected tokens."""
+
+    from tensorfold.families.glm5_next.cuda.engine import GlmEngine
+
+    path = tmp_path_factory.mktemp("glm_long")
+    _checkpoint(path)
+    return GlmEngine(path, rank=0, master="", port=0, comm=_TwoCopies(), context=2600)
+
+
+@pytest.mark.parametrize("sampling", [Sampling(99, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
+def test_drafted_replies_equal_serial_past_the_dense_limit(engine_long, sampling):
+    """Past 2,051 tokens every row selects its tokens from the indexer's scores; a window's rows must score like
+    serial steps. This model has 2 index heads, which a scoring kernel fixed at 32 heads read past."""
+
+    prompt = list(np.random.default_rng(11).integers(0, 1000, size=2100))
+    serial, _ = _generate(engine_long, prompt, sampling, draft=False, tokens=32)
+    for policy in (None, "2", "c3:0.35"):
+        drafted, _ = _generate(engine_long, prompt, sampling, policy=policy, tokens=32)
+        assert drafted == serial, policy

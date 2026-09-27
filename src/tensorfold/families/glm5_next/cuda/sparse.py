@@ -82,9 +82,11 @@ def index_update(k_raw: torch.Tensor, gate: torch.Tensor, ln_w: torch.Tensor, ln
 
 
 @triton.jit
-def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, H: tl.constexpr, D: tl.constexpr, BP: tl.constexpr):
+def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, wscale, H: tl.constexpr, HP: tl.constexpr,
+            D: tl.constexpr, BP: tl.constexpr):
     """Program (r, pool block): s_p = sum_h w_h relu(scale * qi_h . pool_p) for pools p ending at or before
-    pos + r (-inf after)."""
+    pos + r (-inf after). H index heads, padded to HP >= 16 tile rows for the tensor-core dot; the padding rows
+    load zeros and add nothing."""
 
     r = tl.program_id(0)
     pb = tl.program_id(1)
@@ -92,11 +94,12 @@ def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, H: tl.constexpr, D: tl.
     npool = (P + r + 1) // 4
     p = pb * BP + tl.arange(0, BP)
     d = tl.arange(0, D)
-    hh = tl.arange(0, H)
-    q = tl.load(QI + (r * H + hh[:, None]) * D + d[None, :]).to(tl.bfloat16)           # [H, D]
+    hh = tl.arange(0, HP)
+    hok = hh < H
+    q = tl.load(QI + (r * H + hh[:, None]) * D + d[None, :], mask=hok[:, None], other=0.0).to(tl.bfloat16)  # [HP, D]
     k = tl.load(PK + p[:, None] * D + d[None, :], mask=(p < npool)[:, None], other=0.0).to(tl.bfloat16)  # [BP, D]
-    dots = tl.dot(q, tl.trans(k))                                                     # [H, BP] fp32
-    w = tl.load(W + r * w_stride + hh).to(tl.float32) * (1.0 / 5.656854249492381)     # 32 ** -0.5
+    dots = tl.dot(q, tl.trans(k))                                                     # [HP, BP] fp32
+    w = tl.load(W + r * w_stride + hh, mask=hok, other=0.0).to(tl.float32) * wscale
     s = tl.sum(w[:, None] * tl.maximum(dots * scale, 0.0), axis=0)
     s = tl.where(p < npool, s, float("-inf"))
     tl.store(OUT + r * NP + p, s, mask=p < NP)
@@ -109,8 +112,13 @@ def select_tokens(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: in
     scores = torch.empty((R, np_max), dtype=torch.float32, device=qi.device)
     if qi.stride(0) != qi.shape[1] or wts.stride(1) != 1:
         raise ValueError("select_tokens: index queries must be contiguous rows, weights unit-stride columns")
-    _scores[(R, triton.cdiv(np_max, 64))](qi, wts, wts.stride(0), pk, scores, pos_dev, R, np_max, 128 ** -0.5, H=32,
-                                         D=128, BP=64, num_warps=4)
+    # Heads and width from the tensors (GLM-5.3-Flash: 32 of 128). With 32 and 128 fixed, any other shape read past
+    # a row's index query into its neighbours' rows, so a row's scores depended on the window.
+    H = wts.shape[1]
+    D = qi.shape[1] // H
+    wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # 32 ** -0.5 exactly as before
+    _scores[(R, triton.cdiv(np_max, 64))](qi, wts, wts.stride(0), pk, scores, pos_dev, R, np_max, D ** -0.5, wscale,
+                                         H=H, HP=max(16, triton.next_power_of_2(H)), D=D, BP=64, num_warps=4)
     order = torch.sort(scores, dim=1, descending=True, stable=True).indices[:, :TOPK_POOLS]
     pools = torch.sort(order, dim=1).values                                            # ascending pool index
     width = TOPK_POOLS * POOL + POOL - 1
