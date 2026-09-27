@@ -30,7 +30,11 @@ MAX_ROWS = 16
 SQ_FMA = 0
 ROUTER_TG = 1024
 HC_MIX_U = 8             # iterations of loads the hyper-connection mix issues ahead
-SPLIT_SHARED = 1         # the shared expert in kernels of its own, beside the router (moe_rows)
+
+# The shared expert in kernels of its own, beside the router (moe_rows). Also faster end to end on an M5 Ultra
+# (20.7 against 21.2 ms a 2-row round, kingjamez 2026-09-27), although a lone 1-row MoE layer timed 3% faster
+# combined: split, the shared expert overlaps the router on the GPU. TF_GLM5_SPLIT_SHARED=0 combines them.
+SPLIT_SHARED = int(__import__("os").environ.get("TF_GLM5_SPLIT_SHARED", "1"))
 
 _HEADER = K._HEADER + K._HEADER_B + r"""
 template <typename U>

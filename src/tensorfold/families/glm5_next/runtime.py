@@ -121,10 +121,14 @@ class GLMFlash:
         tokens = tokens.reshape(-1).astype(mx.uint32)
         self._absorb(self._raw[: int(tokens.shape[0])], tokens, cache[-1])
 
-    # TF_GLM_MTP_NORMED=1: the head reads the backbone's final-normed hidden row instead of the streams' mean before
-    # the norm (the CUDA engine found the head agrees more often that way; oMLX feeds the mean). Drafts only: every
-    # emitted token is still the target's sample, so either setting is exact.
-    mtp_normed = os.environ.get("TF_GLM_MTP_NORMED", "0") == "1"
+    # The row the MTP head reads at each position. TF_GLM_MTP_INPUT: "normed" (default) — the backbone's final-normed
+    # hidden row, the row the LM head reads (vLLM's convention; the CUDA recipe: 0.739 against 0.696 next-token
+    # agreement) — or "raw", the streams' mean before the norm (oMLX's runtime). Measured: M5 Ultra 86.9 -> 87.9 tok/s
+    # greedy, first-draft acceptance 78.8 -> 79.8% (kingjamez, 2026-09-27); M3 Ultra 56.7 -> 57.2, 61-76 -> 66-78%
+    # (2026-09-26). Drafts only: every emitted token is still the target's sample, so either setting is exact.
+    # TF_GLM_MTP_NORMED=0/1 is the older name of the same switch.
+    mtp_normed = (os.environ.get("TF_GLM_MTP_INPUT", "normed" if os.environ.get("TF_GLM_MTP_NORMED", "1") == "1"
+                                 else "raw").strip().lower() != "raw")
 
     def _absorb(self, raw: mx.array, tokens: mx.array, mtp_cache: MTPCache) -> mx.array:
         """Rows (raw hidden [n, D], the tokens that follow them [n]) into the head; its output rows [n, D]."""

@@ -117,7 +117,28 @@ def render_prompt_ids(
         rendered = tokenizer.apply_chat_template(messages, **kwargs)
     if isinstance(rendered, str):
         rendered = tokenizer.encode(rendered)
-    return [int(t) for t in rendered]
+    ids = [int(t) for t in rendered]
+    if not enable_thinking and add_generation_prompt:
+        ids = _close_open_think(tokenizer, ids)
+    return ids
+
+
+def _close_open_think(tokenizer: Any, ids: list[int]) -> list[int]:
+    """Thinking off, for templates that ignore ``enable_thinking``: GLM-5.3's always ends the prompt with
+    ``<|assistant|><think>``, so the model reasons anyway and the reply lands in ``content``. Close the block the way
+    that template writes a turn without reasoning (``<think></think>``). Templates that honour the switch never end
+    on a bare ``<think>``, so they are unchanged. (kingjamez, 2026-09-27: 99 reasoning tokens against 20 for the
+    direct answer before this.)"""
+
+    if not ids:
+        return ids
+    try:
+        if tokenizer.decode([ids[-1]]).strip() != "<think>":
+            return ids
+        close = tokenizer.encode("</think>", add_special_tokens=False)
+    except Exception:
+        return ids
+    return ids + [int(t) for t in close] if len(close) == 1 else ids
 
 
 def eos_ids_of(tokenizer: Any) -> frozenset[int]:

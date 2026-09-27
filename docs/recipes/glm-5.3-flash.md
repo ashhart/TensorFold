@@ -442,7 +442,8 @@ on the GPU, one-step-ahead rounds for `"draft": false`, the engine's own depth r
 - `TF_FAMILY_PROFILE=1`: a round of 2.5 rows spends ~36 ms on the GPU and 3 ms building its graph
   (`TF_GLM5_EVAL_EVERY=0` separates the two; with the default 2 the host time shown is command-buffer submission).
   The rounds are GPU-bound. `TF_GLM5_EVAL_EVERY` 1 / 2 / 4 and `--mtp-drafts` 1 / 3 all land within 2 tok/s of each
-  other; `TF_GLM_MTP_NORMED=1` (the head reads the final-normed hidden row, as the CUDA engine found useful)
+  other; `TF_GLM_MTP_INPUT=normed` (the head reads the final-normed hidden row, as the CUDA engine found useful;
+  the default since kingjamez measured the same gain on an M5 Ultra, 86.9 to 87.9 tok/s; `raw` restores the streams' mean)
   moved first-draft acceptance from 61-76% to 66-78% on four prompts and speed by +0.5 tok/s, inside the noise, so
   it stays off by default. `TF_GLM_SPEC_EARLY=0` (the head reads the kept row after the round's read, as the old
   serial engine did, instead of every verify row before it) was 1 to 2 tok/s slower at both depth caps: the head
