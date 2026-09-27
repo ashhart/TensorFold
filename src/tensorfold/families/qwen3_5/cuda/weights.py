@@ -31,6 +31,52 @@ class QLinear:
 
 
 @dataclass
+class Plain:
+    """A weight stored as it was written (no quantization): the embedding table, the GDN in_proj_a/b, norms.
+
+    Read by ``b16.matmul``: one warp per output element, fp32 accumulation over k in a fixed order, so the
+    verify path's rows stay independent (the MLX path's ``qmm_fast`` kernels are for the 4-bit words).
+    """
+
+    weight: torch.Tensor      # (N, K) fp16 or bf16
+    layout: str = "b16"
+
+    @property
+    def n(self) -> int:
+        return int(self.weight.shape[0])
+
+    @property
+    def k(self) -> int:
+        return int(self.weight.shape[1])
+
+    def nbytes(self) -> int:
+        return self.weight.numel() * self.weight.element_size()
+
+
+@dataclass
+class Exl3:
+    """A weight an EXL3 checkpoint stores as a trellis: ExLlamaV3's format, read by the row-invariant linear in
+    ``tensorfold.cuda.exl3`` (``layer`` is an ``Exl3Linear``). K and N come from the layer, never the rows."""
+
+    layer: object             # tensorfold.cuda.exl3.linear.Exl3Linear
+    layout: str = "exl3"
+
+    @property
+    def n(self) -> int:
+        return int(self.layer.n)
+
+    @property
+    def k(self) -> int:
+        return int(self.layer.k)
+
+    def nbytes(self) -> int:
+        return self.layer.nbytes()
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return self.layer(x)
+
+
+@dataclass
 class Config:
     hidden: int
     intermediate: int
@@ -145,8 +191,18 @@ def _tensors(model_dir: Path, device: str) -> dict[str, torch.Tensor]:
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False) -> Weights:
+    """The checkpoint's weights: MLX affine 4-bit as stored, or an EXL3 pack through ``exl3_load``."""
+
     model_dir = Path(model_dir)
     cfg = Config.read(model_dir)
+    from .exl3_load import quant_config
+
+    qc = quant_config(model_dir)
+    if qc is not None and str(qc.get("quant_method", "")).lower() == "exl3":
+        from .exl3_load import load_exl3
+
+        # ``tiled`` is the MLX path's read order (qmm_fast); an EXL3 linear keeps its own strip order
+        return load_exl3(model_dir, device)
     t = _tensors(model_dir, device)
     prefix = "language_model." if any(k.startswith("language_model.") for k in t) else ""
 

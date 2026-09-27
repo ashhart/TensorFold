@@ -11,8 +11,13 @@ from typing import Any
 MODEL_TYPES = ("qwen3_5",)
 TITLE = "Qwen3.8 dense"
 LANES = True
-MODELS = ("Vontra/Qwen3.8-27B-MLX-4bit",)
+MODELS = ("Vontra/Qwen3.8-27B-MLX-4bit", "turboderp/Qwen3.8-27B-exl3")
 DRAFTER = "z-lab/Qwen3.8-27B-DFlash2"
+# the storage formats the CUDA engine reads: MLX affine 4-bit, and EXL3 trellis packs through
+# cuda/exl3 (families/qwen3_5/cuda/exl3_load.py)
+QUANT_METHODS = {"cuda": ("mlx", "exl3")}
+# "any" (tensorfold.families.EXL3_VARIANT_ANY): every codebook and width, as the checkpoint states
+EXL3_VARIANT = "any"
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.dense.v1"
 KERNEL_VERSION = "v1"
 

@@ -19,7 +19,7 @@ from .draft_tree import best_first
 from .glue import embed, swiglu
 from .qmm import group_sums
 from .qmm_fast import matmul, tile, untile
-from .weights import QLinear, Weights
+from .weights import Exl3, Plain, QLinear, Weights
 
 
 @triton.jit
@@ -143,6 +143,33 @@ def quantize4(w: torch.Tensor) -> QLinear:
     return QLinear(words, scale.contiguous(), bias.contiguous())
 
 
+def _exl3_sub_head(layer, spans: tuple[tuple[int, int], ...]):
+    """The target's EXL3 head (an ``Exl3Linear``) over the draft vocabulary, and which of its columns are the spans.
+
+    The head's words are stored in 128-column strips (one Hadamard block each), so the 128-column blocks that hold
+    the spans slice out as they are: same codebook, same bits, same K split, nothing decoded or re-quantized. The
+    drafter's logits are then the target's own logits for those tokens, bit for bit. A span that does not start
+    or end on a block edge brings its whole block, and the returned columns drop the extra ones.
+    """
+
+    from tensorfold.cuda.exl3.linear import Exl3Linear
+
+    if layer.layout != "strips":
+        raise ValueError("the drafter slices an EXL3 head in strip order")
+    device = layer.words.device
+    blocks = sorted({b for a, e in spans for b in range(a // 128, -(-e // 128))})
+    index = torch.tensor(blocks, dtype=torch.int64, device=device)
+    columns = (index[:, None] * 128 + torch.arange(128, device=device)[None, :]).reshape(-1)
+    sub = Exl3Linear(layer.words.index_select(0, index).contiguous(), layer.suh,
+                     layer.svh.index_select(0, columns).contiguous(),
+                     None if layer.bias is None else layer.bias.index_select(0, columns).contiguous(),
+                     layer.bits, layer.codebook, layer.k, len(blocks) * 128, "strips", split=layer.split)
+    keep = torch.zeros(len(columns), dtype=torch.bool, device=device)
+    for a, e in spans:
+        keep |= (columns >= a) & (columns < e)
+    return sub, keep.nonzero()[:, 0].contiguous()
+
+
 class DFlash2:
     """Five-layer DFlash2; context is the last 2,047 committed target taps."""
 
@@ -184,19 +211,27 @@ class DFlash2:
         spans = tuple((a, min(b, vocab)) for a, b in ((0, 98304), (248032, 248320)) if a < vocab)
         self.vocab_spans = spans
         self.head_ids = torch.cat([torch.arange(a, b, device=self.device) for a, b in spans])
-        head = untile(target.head)
-        self.sub_head = QLinear(torch.cat([head.weight[a:b] for a, b in spans]).contiguous(),
-                                torch.cat([head.scales[a:b] for a, b in spans]).contiguous(),
-                                torch.cat([head.biases[a:b] for a, b in spans]).contiguous())
+        # an EXL3 checkpoint's head is a trellis: the drafter reads the target's own head over the draft
+        # vocabulary (``_exl3_sub_head``), and ``head_cols`` picks the span columns out of its 128-column blocks
+        self.head_cols: torch.Tensor | None = None
+        if isinstance(target.head, Exl3):
+            if world != 1:
+                raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
+            self.sub_head, self.head_cols = _exl3_sub_head(target.head.layer, spans)
+        else:
+            head = untile(target.head)
+            self.sub_head = QLinear(torch.cat([head.weight[a:b] for a, b in spans]).contiguous(),
+                                    torch.cat([head.scales[a:b] for a, b in spans]).contiguous(),
+                                    torch.cat([head.biases[a:b] for a, b in spans]).contiguous())
+            del head
         if world == 2:
             half = -(-len(self.head_ids) // 2)
             lo, hi = rank * half, min((rank + 1) * half, len(self.head_ids))
             self.head_ids = self.head_ids[lo:hi].contiguous()
             self.sub_head = QLinear(self.sub_head.weight[lo:hi].contiguous(), self.sub_head.scales[lo:hi].contiguous(),
                                     self.sub_head.biases[lo:hi].contiguous())
-        if target.head.layout == "tiled":
+        if isinstance(target.head, QLinear) and target.head.layout == "tiled":
             self.sub_head = tile(self.sub_head)
-        del head
         # Quantized draft projections can change acceptance but never target output.
         self.q4: dict[str, QLinear] = {}
         # Fused projections, norms, rotary embeddings, and convolutions may round differently and change draft proposals.
@@ -463,7 +498,10 @@ class DFlash2:
         length = min(block or self.block, max_nodes + 1)
         tokens = torch.tensor([t for i in live for t in [pendings[i]] + [self.mask_id] * (length - 1)],
                               dtype=torch.int32, device=self.device)
-        x = embed(tokens, self.target.embed.weight, self.target.embed.scales, self.target.embed.biases, self.hidden)
+        e = self.target.embed
+        # an EXL3 checkpoint keeps the embedding as stored: its rows, as the target's own forward reads them
+        x = (e.weight[tokens.to(torch.int64)].to(torch.bfloat16).contiguous() if isinstance(e, Plain)
+             else embed(tokens, e.weight, e.scales, e.biases, self.hidden))
         if self.fast:
             ctx = [snaps[i] for i in live]
             rot = [self._rotary(snap[3], length) for snap in ctx]
@@ -483,7 +521,10 @@ class DFlash2:
                 hs.append(_norm(y[1:], self.weights["norm.weight"], self.eps))
             h = torch.cat(hs)
         projected = self._lin(h, "candidate_selector.hidden_projection.weight").float()
-        logits = matmul(h, self.sub_head)
+        if self.head_cols is not None:
+            logits = self.sub_head(h.contiguous()).index_select(1, self.head_cols)
+        else:
+            logits = matmul(h, self.sub_head)
         values, local_ids = torch.topk(logits.float(), k=16, dim=-1, sorted=False)
         global_ids = self.head_ids[local_ids]
         if self.world == 2:
