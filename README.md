@@ -213,7 +213,8 @@ other versions. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` switches t
 | `--no-drafts` | off | one token a round: the serial reference |
 | `--drafter` | `auto` | the family's draft model once pulled; a repo id or directory; or `none` |
 | `--mtp-drafts N` | 3 (6 on CUDA) | most MTP drafts a round (Qwen3.8 Flash Next; on CUDA the chain also stops under 30% confidence); 0 turns MTP drafts off |
-| `--kv-dtype` | `bf16` | Flash Next on CUDA: `int8` stores keys and values at 8 bits with one fp16 scale per 32 values. Other families and the MLX path refuse it |
+| `--kv-dtype` | `bf16` | Flash Next on CUDA: `int8` or `int4` stores keys and values with one fp16 scale per 32 values. Other families and the MLX path refuse it |
+| `--mtp-confidence` | engine default | CUDA Flash Next: stop a draft chain before a later draft under this probability (default 0.30) |
 | `--no-update-check` | off | don't ask GitHub for a newer release at start |
 | `--prompt-cache-gib` | an eighth of RAM, at most 16 | memory for cached conversation prefixes |
 | `--snapshot-dir` | `~/.cache/tensorfold/prefix-snapshots` | system blocks and conversations kept across restarts |
