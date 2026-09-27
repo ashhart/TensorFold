@@ -197,6 +197,11 @@ prompt and reply. The server keeps the state after the last request's prompt and
 that extends either resumes from it (a second chat turn, a longer completion). With two Sparks both need the
 checkpoint, and the ranks refuse to start when they were given different settings.
 
+### KV cache
+
+`--kv-dtype bf16` is the default. `--kv-dtype int8` stores each attention layer's keys and values as 8-bit codes with one fp16 scale per 32 values, the same arithmetic as ExLlamaV3's `-cq 8`: the group is rotated by a 32-point Hadamard, the scale is the group's absmax, and the codes sit on the midpoint grid. The query is rotated the same way, so the attention read matches the stored group. Indexer keys and the pooled block keys stay bf16. On this checkpoint that is 30,784 bytes a token in bf16 and 18,304 in int8 (1.68x on the whole cache, 1.88x on the K and V tensors). A 32,768-token pool is 0.94 GiB in bf16 and 0.56 GiB in int8; a 262,144-token pool is 7.52 GiB and 4.47 GiB. The MLX path refuses anything but bf16. The quantized cache is not bit-exact with bf16. Drafted output still matches serial output for the same dtype.
+
+
 The first start builds the DeltaNet kernel with the container's `nvcc` and compiles the Triton kernels. Every
 start then reads the hashed n-gram tables into the page cache and captures a CUDA graph for each decode window
 size: about 80 s to ready on two Sparks and 90 s on one. One Spark holds 80.4 GB of weights on the GPU, and

@@ -50,6 +50,9 @@ kernels are written for TensorFold. What they follow:
   text below): its trellis layout, its "mcg" codebook and its tensor-core fragment order. The decoder and kernels
   are written for TensorFold and checked bit for bit against ExLlamaV3's dequantization.
 
+- Flash Next's optional int8 KV cache (`families/qwen4_exp/cuda/kvcache.py`) follows the cache quantization scheme of [ExLlamaV3](https://github.com/turboderp-org/exllamav3) `-cq 8` (MIT License, Copyright (c) 2025 Turboderp, text below): groups of 32, one fp16 absmax scale per group, the group rotated by a 32-point Hadamard, midpoint-grid codes. TensorFold stores each code as a signed int8 (`q - 128`) rather than ExLlamaV3's packed uint32 words. The quantizer and the attention dequant are written for TensorFold and checked against an independent reference of that arithmetic.
+
+
 ## Vendored code
 
 - `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is
