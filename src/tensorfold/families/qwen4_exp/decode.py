@@ -1,22 +1,4 @@
-"""Flash Next decode steps (1-16 consecutive rows) through ``kernels``.
-
-A layer is: hyper-connection (2 kernels, the previous block's write-back
-folded into the first) -> Gated DeltaNet (projection, ``gdn_step``, out
-projection) or sparse attention (projection, ``attn_prep``, cache write,
-attention, ``attn_gate``, out projection) -> hyper-connection -> MoE (router,
-route, expert gate/up/down, shared expert). The MoE's combine is folded into
-the next hyper-connection's write-back. Projections go through ``simd_qmm``,
-whose rows have the same bits at any row count, one-row calls included; the
-rest are row-invariant kernels, so each row of a multi-row step gets a one-row
-step's bits. On GPUs with tensor units (M5 and later) projections go through
-``lane_qmm`` instead (row-invariant too), each weight tiled once for it.
-
-Past 2,048 keys a row's attention reads only its selected blocks: ``kernels``
-pools each completed block's indexer key once, scores every block for all rows
-in one kernel and selects each row's best 512 in another; one attention kernel
-then reads each row's selected keys and unfinished tail (or, before 2,048 keys,
-all its keys) for all rows at once.
-"""
+"""Flash Next decode kernels give each row the same bits as serial decoding, including across streams."""
 
 from __future__ import annotations
 
@@ -48,8 +30,7 @@ def _stacked(linears: list[Any]) -> tuple[nn.QuantizedLinear, list[int]]:
         n = int(l.weight.shape[0])
         l.weight, l.scales, l.biases = (stacked.weight[at:at + n], stacked.scales[at:at + n],
                                         stacked.biases[at:at + n])
-        # evaluated here (views of the stacked buffer): a lazy op made on this thread would need its stream
-        # in the server's scheduler thread
+        # Evaluate stacked-buffer views on this thread so the scheduler thread needs no lazy-op stream.
         mx.eval(l.weight, l.scales, l.biases)
         at += n
         cuts.append(at)
@@ -57,27 +38,25 @@ def _stacked(linears: list[Any]) -> tuple[nn.QuantizedLinear, list[int]]:
 
 
 def first(a: mx.array) -> mx.array:
-    """a[0] for an array whose leading axis has length 1, as a view: MLX's a[0] is a gather, which copies (the
-    DeltaNet state is 3.1 MB a layer)."""
+    """Return a view of the leading row; MLX's a[0] gathers and copies it."""
 
     return a.reshape(a.shape[1:])
 
 
 _checked: set[tuple[int, int, int]] = set()
-# "lane": lane_qmm (tensor units); "rows": per-row kernels (0.3.4.1's); "simd": simd_qmm. TF_FLASH_DENSE picks one.
+# "lane": lane_qmm; "rows": per-row kernels; "simd": simd_qmm, selected by TF_FLASH_DENSE.
 DENSE = os.environ.get("TF_FLASH_DENSE") or ("lane" if tensor_units() else "rows")
 _lane: dict[int, tuple[mx.array, mx.array, mx.array, int]] = {}   # id(linear) -> weight, tiled copy, scales, tile
 
 
 def _lane_project(x: mx.array, linear: Any) -> mx.array:
-    """``project`` through ``lane_qmm``; a linear's weight is tiled once (64 or 32 columns a tile) and kept beside
-    its original, which the reference forward still reads. Calls past 128 rows go 128 rows at a time."""
+    """Project through lane_qmm with a cached tiled weight, retaining the original for reference forwards."""
 
     weight = linear.weight
     hit = _lane.get(id(linear))
     if hit is None or hit[0] is not weight:
         n = int(weight.shape[0])
-        nt = 64 if n % 64 == 0 else 32 if n % 32 == 0 else 0
+        nt = 64 if (linear.bits == 4 and n % 64 == 0) else 32 if n % 32 == 0 else 0   # other widths: 32 wide
         tiled = lane_qmm.tile_weight(weight, nt, linear.group_size, bits=linear.bits) if nt else weight
         sbt = lane_qmm.pack_scales(linear.scales, linear.biases)
         mx.eval(tiled, sbt)
@@ -92,6 +71,19 @@ def _lane_project(x: mx.array, linear: Any) -> mx.array:
     parts = [lane_qmm.lane_matmul(flat[i:i + lane_qmm.MAX_ROWS], tiled, sbt, **kwargs)
              for i in range(0, rows, lane_qmm.MAX_ROWS)]
     return mx.concatenate(parts).reshape(*x.shape[:-1], -1)
+
+
+def unreadable(*models: Any) -> dict[str, int]:
+    """Quantized linears, by kind, whose width, group or mode the lane matmul does not read (shapes are not checked)."""
+
+    counts: dict[str, int] = {}
+    for model in (x for x in models if x is not None):
+        for _, m in model.named_modules():
+            mode = getattr(m, "mode", "affine")
+            if isinstance(m, nn.QuantizedLinear) and not lane_qmm.readable(m.bits, m.group_size, mode):
+                kind = f"{m.bits}-bit g{m.group_size}" + ("" if mode == "affine" else f" {mode}")
+                counts[kind] = counts.get(kind, 0) + 1
+    return counts
 
 
 def project(x: mx.array, linear: Any) -> mx.array:
@@ -181,18 +173,18 @@ class FusedDecode:
             entry["moe"] = (moe, router_rows)
             self.layers.append(entry)
         self.mixer = _HC(model.model.hyper_connection_mixer, inject=False)
-        # the PLE layer's n-gram tables as 8 concatenated groups: one lookup kernel instead of ~70 small ops
+        # Concatenate the PLE tables for one lookup kernel.
         self.ple_tables = None
         for layer in model.layers:
             if "ple" in layer:
                 self.ple_tables = embed.PleTables(layer.ple.ple_embedding)
                 # prefill chunks look their rows up through the same tables (NGramEmbedding.__call__)
                 layer.ple.ple_embedding.__dict__["fused_tables"] = self.ple_tables
-        # the last call's recurrent states after each of its rows, by layer and then by stream in the call's order
-        # (for keeping a prefix of a window); ``_last_heads``: each stream's first layer cache in that call
+        # Keep per-row recurrent states by layer and stream for prefix rollback, plus each stream's first cache.
         self.row_states: dict[int, list[tuple[mx.array, mx.array, int]]] = {}
         self._last_heads: list[Any] = []
         self._pos: tuple[Any, Any] = (None, None)
+        # Queue each layer as soon as Python finishes building it.
         self.eval_every = 1
 
     # -- blocks ------------------------------------------------------------------
@@ -240,8 +232,7 @@ class FusedDecode:
         ends = [past + r + 1 for r in range(rows)]
         complete = [e // ratio for e in ends]
         ids = self._select(iq, raw, cache, complete, ends, pool_scale, top) if complete[-1] > top else None
-        # every row in one kernel: a row past ``top`` complete blocks reads its selected blocks' keys and its
-        # tail, a shorter row all its keys
+        # Attend to selected blocks and the tail past ``top`` complete blocks, otherwise all keys.
         sparse = [c > top for c in complete]
         counts = [ratio * top + e - ratio * c if sp else e for e, c, sp in zip(ends, complete, sparse)]
         out = attention.attention_rows(q, cache.keys, cache.values, counts, ids, sparse, a.scale)
@@ -261,8 +252,7 @@ class FusedDecode:
         return attention.index_select(iq, first(cache.pooled), complete, ends, top=top)
 
     def _moe(self, index: int, x: mx.array) -> tuple[str, tuple[mx.array, ...]]:
-        """Routed experts + the shared expert, each (row, slot) on its own: the slots' outputs, weights and router
-        logits, combined by the next hc_norm's "grouped" write-back."""
+        """Compute routed and shared experts per row and slot for the next hc_norm's grouped write-back."""
 
         moe, router_rows = self.layers[index]["moe"]
         cfg = self.cfg
@@ -349,10 +339,7 @@ class FusedDecode:
     # -- several streams' rows in one forward --------------------------------------------------------------------
     def run_multi(self, h: mx.array, tokens: list[np.ndarray] | None, caches: list[list[Any]], rows: list[int]
                   ) -> mx.array:
-        """``run`` over several streams' windows concatenated in h [N, S*D]: stream b's rows[b] consecutive rows
-        (host ids tokens[b] [1, rows[b]], layer caches caches[b]). Row-local blocks take every row; the DeltaNet
-        scan, attention, block selection and the n-gram conv read each row's own stream (``kernels ... multi``),
-        so each row gets its single-stream bits. Mixed hidden states [1, N, D]."""
+        """Return mixed states [1, N, D] for stream-ordered windows, with each row reading only its own stream's state."""
 
         if len(rows) == 1:
             return self.run(h, None if tokens is None else tokens[0], caches[0])
@@ -407,8 +394,7 @@ class FusedDecode:
                 [e - s for s, e in group], conv_w, g.A_log, g.dt_bias, g.norm.weight, self.eps,
                 nk=cfg.linear_num_key_heads, nv=nv, dk=dk, dv=dv)
             outs.append(out)
-            # each stream keeps views of its own group's per-row states: never concatenated (a lazy concatenation
-            # of the groups' 50-200 MB would run inside the next forward)
+            # Keep per-stream views of group states to avoid evaluating a lazy concatenation inside the next forward.
             for c, (s, e) in zip(caches[lo:lo + base.MAX_STREAMS], group):
                 c.conv, c.ssm = conv_rows[e - first - 1:e - first], ssm_rows[e - first - 1:e - first]
                 c.offset += e - s
@@ -472,8 +458,7 @@ class FusedDecode:
 
     def _ple_multi(self, ple: Any, h: mx.array, tokens: list[np.ndarray], caches: list[Any],
                    spans: list[tuple[int, int]]) -> mx.array:
-        """``_ple`` for several streams: n-gram ids from each stream's history, the dilated conv over each stream's
-        own tail; the rest row-local."""
+        """Run PLE across streams using each stream's own token history and convolution tail."""
 
         rows = h.shape[0]
         emb_mod = ple.ple_embedding

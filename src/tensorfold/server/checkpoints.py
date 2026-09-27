@@ -1,5 +1,4 @@
-"""Stored prompt prefixes: which points of a prompt to keep for the next turn, the in-memory store, and the
-conversations saved at shutdown."""
+"""Stored prompt prefixes, their in-memory caches, and conversations saved at shutdown."""
 
 from __future__ import annotations
 
@@ -21,19 +20,7 @@ def longest_common_prefix(a: list[int], b: list[int]) -> int:
 def choose_checkpoints(
     history_len: int, cached: int, last_prompt: list[int] | None, prompt: list[int]
 ) -> list[int]:
-    """Where to snapshot this request's prefill for the NEXT turn.
-
-    The rendered history boundary is the natural candidate: the generation
-    prompt's tail does not survive re-rendering, the history does. When the
-    same conversation's previous prompt shares most but not all of that
-    history, the client may be appending a per-turn block (environment,
-    timestamps, tool results) that will not be there next turn, so the
-    stable prefix is a second candidate, as in the single-stream server's
-    clamp. Both are kept: with an empty-think-block template the stable
-    prefix is merely last turn's boundary and falls inside the reused part,
-    while with a per-turn block only the stable prefix will match. Nothing
-    inside the reused part, nothing at or past the prompt's end.
-    """
+    """Keep history and stable-prefix boundaries outside the reused prefix and before the prompt end for differently rendered next turns."""
 
     candidates = {int(history_len)}
     if last_prompt:
@@ -55,12 +42,13 @@ class CheckpointEntry:
 
 def save_conversations(store: "CheckpointStore", directory: Path, model_id: str, *, keep: int = 2,
                        limit_bytes: int = 10 * 1024**3) -> int:
-    """Write the store's most recently used conversation entries to ``directory``; returns how many."""
+    """Save up to ``keep`` conversation snapshots within the byte limit; system blocks use their own directory."""
 
     from tensorfold.engine.prefix_snapshots import save_snapshot
 
     with store._lock:
         entries = [entry for entry in store._entries if not entry.pinned]   # most recently used first
+    # Save longest conversations first, with recency breaking ties, so short background requests cannot displace them.
     entries.sort(key=lambda entry: -len(entry.tokens))
     saved = total = 0
     for entry in entries:
@@ -80,7 +68,7 @@ def save_conversations(store: "CheckpointStore", directory: Path, model_id: str,
 
 
 class CheckpointStore:
-    """LRU of absorbed conversation prefixes with their single-row caches."""
+    """LRU caches require strict-prefix hits because GDN state cannot truncate; pinned system blocks bypass slot limits and outlast conversations."""
 
     def __init__(
         self,
@@ -131,9 +119,7 @@ class CheckpointStore:
 
     def match(self, prompt: list[int], usable: Any = None, *,
               take: bool = False) -> tuple[int, list[Any], list[int]] | None:
-        """Longest strict-prefix hit as (length, cache, previous prompt), of lengths ``usable`` accepts.
-
-        The cache is a copy, or with ``take`` the stored arrays themselves, removed from the store (same bits)."""
+        """Return the longest usable strict-prefix hit with a copied cache, or remove and transfer the stored arrays with ``take``."""
 
         with self._lock:
             best = self._best(prompt, usable)
@@ -149,13 +135,12 @@ class CheckpointStore:
             best.last_prompt = list(prompt)
             return len(best.tokens), self.copier(best.cache), previous
 
-    def longest(self, prompt: list[int]) -> int:
-        """Length of the longest strict-prefix entry (0 if none); not counted as a hit or miss."""
+    def longest(self, prompt: list[int], usable: Any = None) -> int:
+        """Length of the longest strict-prefix entry ``usable`` accepts (0 if none); not counted as a hit or miss."""
 
         with self._lock:
-            return max((len(entry.tokens) for entry in self._entries
-                        if 0 < len(entry.tokens) < len(prompt) and prompt[: len(entry.tokens)] == entry.tokens),
-                       default=0)
+            best = self._best(prompt, usable)
+            return len(best.tokens) if best is not None else 0
 
     def insert(self, tokens: list[int], cache: list[Any], *, last_prompt: list[int],
                pinned: bool = False) -> None:
@@ -177,8 +162,7 @@ class CheckpointStore:
             limit = self.budget_bytes
             if oversize:
                 limit = nbytes + sum(e.nbytes for e in entries[1:] if e.pinned)
-            # the new entry itself is never evicted: least recently used first, conversations
-            # before system blocks
+            # Never evict the new entry; evict least recently used conversations before system blocks.
             while True:
                 over_slots = sum(1 for e in entries if not e.pinned) > self.slots
                 over_budget = (limit is not None and len(entries) > 1

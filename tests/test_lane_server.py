@@ -544,10 +544,11 @@ def test_scheduler_runs_its_stop_hook_in_its_own_thread() -> None:
 
 
 def test_checkpoints_and_shared_prefixes_are_taken_on_the_prefill_grid() -> None:
+    from tensorfold.engine.prefill_plan import PrefillPlan
     from tensorfold.server.scheduler import ChatJob, Scheduler
 
     class GridEngine(FakeEngine):
-        prefill_align = 4
+        prefill_plan = PrefillPlan(4)
 
     store = CheckpointStore(4, copier=lambda c: c)
     scheduler = Scheduler(GridEngine(), lanes=1, eos_ids=frozenset(), checkpoints=store)
@@ -562,11 +563,12 @@ def test_a_saved_block_is_warmed_in_background_jobs_one_grid_chunk_each(tmp_path
     mx = pytest.importorskip("mlx.core")
     from mlx_lm.models.cache import KVCache
 
+    from tensorfold.engine.prefill_plan import PrefillPlan
     from tensorfold.engine.prefix_snapshots import save_snapshot
     from tensorfold.server.scheduler import Scheduler
 
     class GridEngine(FakeEngine):
-        prefill_align = 4
+        prefill_plan = PrefillPlan(4)
 
     kv = KVCache()
     kv.update_and_fetch(mx.ones((1, 2, 10, 4)), mx.ones((1, 2, 10, 4)))
@@ -593,10 +595,11 @@ def test_a_saved_block_is_warmed_in_background_jobs_one_grid_chunk_each(tmp_path
 
 
 def test_a_stored_state_off_the_grid_is_never_matched() -> None:
+    from tensorfold.engine.prefill_plan import PrefillPlan
     from tensorfold.server.scheduler import ChatJob, Scheduler
 
     class GridEngine(FakeEngine):
-        prefill_align = 4
+        prefill_plan = PrefillPlan(4)
 
     store = CheckpointStore(4, copier=lambda c: c)
     engine = GridEngine()

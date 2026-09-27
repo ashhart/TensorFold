@@ -16,6 +16,7 @@ from tensorfold.server.errors import RequestError
 from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
 from tensorfold.server.scheduler import ChatJob, Scheduler
+from tensorfold.server.stopping import StopPolicy
 from tensorfold.server.text import (
     IncrementalText,
     _LockedTokenizer,
@@ -235,18 +236,15 @@ class ChatApp(RequestOptions):
         return shared if shared >= 512 else 0
 
     def _warm_known_blocks(self, snapshot_dir: Path, model_id: str) -> None:
-        """Compute, in the background, the newest system block saved by other kernels (a snapshot's bits depend
-        on the kernels that computed it), so the next session finds it ready after a kernel or MLX change. It goes
-        one prefill grid chunk a job, each a background job resuming from the last, so a request that arrives
-        waits for at most one chunk; the block's last grid point is pinned and saved."""
+        """Compute the newest system block saved by other kernels in the background, a prompt chunk a job."""
 
+        from tensorfold.engine.prefill_plan import block_jobs
         from tensorfold.engine.prefix_snapshots import blocks_to_warm
 
         blocks = blocks_to_warm(snapshot_dir, model_id)[:1]
         if not blocks:
             return
         pad = int(self.tokenizer.encode("\n", add_special_tokens=False)[-1])
-        grid = self.engine.prefill_grid
 
         def warm() -> None:
             try:
@@ -257,12 +255,12 @@ class ChatApp(RequestOptions):
         def warm_blocks() -> None:
             for tokens in blocks:
                 started = time.perf_counter()
-                points = list(range(grid, len(tokens) + 1, grid)) if grid else [len(tokens)]
-                for i, at in enumerate(points):
-                    final = i == len(points) - 1
+                jobs = block_jobs(self.engine.prefill_plan, tokens, pad)
+                for i, (prompt, at) in enumerate(jobs):
+                    final = i == len(jobs) - 1
                     while True:
                         job = ChatJob(
-                            job_id=f"warm-{uuid.uuid4().hex[:8]}", prompt_ids=[*tokens[:at], pad], max_tokens=1,
+                            job_id=f"warm-{uuid.uuid4().hex[:8]}", prompt_ids=prompt, max_tokens=1,
                             temperature=0.0, history_len=at, shared_prefix_lens=(at,) if final else (),
                             drafts=False, background=True)
                         self.scheduler.submit(job)
@@ -270,12 +268,11 @@ class ChatApp(RequestOptions):
                             pass
                         if not job.preempted:
                             break
-                print(f"[tensorfold] warmed system block tokens={points[-1] if points else 0} of {len(tokens)} in "
+                print(f"[tensorfold] warmed system block tokens={jobs[-1][1] if jobs else 0} of {len(tokens)} in "
                       f"{time.perf_counter() - started:.1f}s", flush=True)
 
         print(f"[tensorfold] warming {len(blocks)} saved system block(s) for these kernels in the background: "
-              f"until it ends, a request first waits for one {grid or len(blocks[0])}-token chunk "
-              "(GET /health reports warming)", flush=True)
+              "until it ends, a request first waits for one prompt chunk (GET /health reports warming)", flush=True)
         self.warming = True
         threading.Thread(target=warm, name="warm-blocks", daemon=True).start()
 
@@ -346,6 +343,7 @@ class ChatApp(RequestOptions):
         cancellation = cancellation or Cancellation()
         cancellation.check()
         fields = getattr(_REQUEST, "sampling", None) or {}
+        stops = StopPolicy(fields, self.tokenizer, self.tokenizer_lock, self.stop_ids)
         requested = fields.get("enable_thinking")
         thinking = self.enable_thinking if requested is None else bool(requested)
         if prompt is not None:
@@ -392,6 +390,7 @@ class ChatApp(RequestOptions):
                 sampling=spec,
                 background=background,
                 drafts=drafts,
+                ignore_eos=stops.ignore_eos, stop_check=stops if stops.strings else None,
                 cancellation=cancellation,
             )
             budget = int(fields.get("thinking_budget") or self.thinking_budget) if thinking else 0
@@ -463,11 +462,11 @@ class ChatApp(RequestOptions):
                 continue
             fresh = []
             for token in chunk:
-                if token in self.stop_ids:
+                if token in stops.eos_ids:
                     streaming_done = True
                     break
                 fresh.append(token)
-            text = visible_text.extend(fresh)
+            text = stops.visible(visible_text.extend(fresh), partial=True)
             if len(visible_text.tokens) and visible_text._read < len(visible_text.tokens):
                 continue                    # a character still split across tokens: wait for the rest
             answer = text
@@ -490,14 +489,15 @@ class ChatApp(RequestOptions):
         if job.error is not None:
             raise job.error
 
-        content_tokens = strip_trailing_stops(collected, set(self.stop_ids))
+        content_tokens = strip_trailing_stops(collected, set(stops.eos_ids))
         with self.tokenizer_lock:
-            text = self.tokenizer.decode(content_tokens)
+            text = stops.visible(self.tokenizer.decode(content_tokens))
         if thinking:
             reasoning_text, content = split_thinking(text, finished=True)
             reasoning = reasoning_text.strip() or None
         else:
             content, reasoning = parse_harmony_output(text)
+        stops.flush(on_delta, content, reasoning, streamed, streamed_reasoning, calls_stream is not None)
         stream = job.stream
         seconds = max(0.0, job.finished_at - job.submitted_at)
         decode_seconds = max(0.0, job.finished_at - job.prefilled_at) if job.prefilled_at else 0.0

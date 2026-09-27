@@ -24,9 +24,7 @@ class ChatJob:
     max_tokens: int
     temperature: float
     history_len: int = 0
-    # Extra prefill snapshot points that other conversations can reuse: the end of the system-and-tools block.
-    # An agent client sends the same ~20k-token block with every session; the history boundary alone never
-    # matches a new session because it already contains that session's first message.
+    # Snapshot system-and-tools blocks for reuse across sessions; history boundaries already include session-specific text.
     shared_prefix_lens: tuple[int, ...] = ()
     # the request's proposer (suffix copies, a drafter model, tool-call structure); None: the engine's default
     proposer: Any = None
@@ -38,8 +36,7 @@ class ChatJob:
     think_budget: int = 0
     think_close: tuple[int, ...] = ()
     think_end: int = -1
-    # A client's side request (a session title): admitted after every other waiting job, and stopped
-    # ("preempted") when one arrives; its caller runs it again from the start.
+    # Background jobs yield to foreground arrivals, and callers restart preempted jobs from the beginning.
     background: bool = False
     preempted: bool = False
     submitted_at: float = field(default_factory=time.perf_counter)
@@ -52,6 +49,8 @@ class ChatJob:
     chunks: "queue.Queue[list[int] | None]" = field(default_factory=queue.Queue)
     done: threading.Event = field(default_factory=threading.Event)
     cancellation: Cancellation = field(default_factory=Cancellation)
+    ignore_eos: bool = False
+    stop_check: Callable[[list[int]], bool] | None = None
 
 
 class _JobQueue(queue.PriorityQueue):
@@ -136,11 +135,10 @@ class Scheduler:
         self.cancelled = 0
         self.starts = 0
         self._starting: ChatJob | None = None
-        # run by the scheduler thread as it stops: its caches' arrays live on its own streams, so they
-        # can only be evaluated (and saved) there ("There is no Stream(gpu, 2) in current thread")
+        # Evaluate and save cache arrays on the scheduler thread that owns their streams during shutdown.
         self.on_stop: Callable[[], Any] | None = None
         self.stall_s = 120.0            # no round, start or finish while requests wait: dump stacks
-        self.stall_prefill_s = 900.0    # the same while one prefill runs (70k tokens: ~3 min)
+        self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
 
     # -- lifecycle ------------------------------------------------------------
@@ -151,8 +149,7 @@ class Scheduler:
             self._watchdog.start()
 
     def _watch(self) -> None:
-        """Print the queue and every thread's stack once if requests wait while nothing moves, prompt chunks
-        included (a stall is otherwise invisible). ``kill -USR1 <pid>`` dumps the same stacks on demand."""
+        """Dump every thread stack once when waiting requests stall, including prefill chunks; SIGUSR1 also dumps stacks on demand."""
 
         import faulthandler
         import sys
@@ -319,8 +316,7 @@ class Scheduler:
                 self._retire(job)
 
     def _admit(self) -> None:
-        """Start every waiting job that fits the free lanes before the next round; each prompt is prefilled on its
-        own (a joint prefill would not give a prompt its own prefill's bits)."""
+        """Admit fitting jobs before the next round, prefilling each prompt separately to preserve its individual prefill bits."""
 
         while self.engine.active_count < self.lanes:
             job = self._held
@@ -342,8 +338,7 @@ class Scheduler:
             self._start_job(job)
 
     def _fits(self, job: ChatJob) -> bool:
-        """Whether ``job`` may start now: always when nothing runs (a prompt that can't fit alone is refused), else
-        when both the prompt's memory and ``admission`` project it fits; otherwise it waits for a stream to finish."""
+        """Start alone for prompt admission to validate memory, or beside streams only when prompt memory and admission projections fit."""
 
         if self.engine.active_count == 0:
             return True
@@ -356,17 +351,16 @@ class Scheduler:
                 if j.stream is not None and not j.stream.finished]
         return self.admission.admits(len(job.prompt_ids), len(job.prompt_ids) + int(job.max_tokens), live)
 
-    def _read_disk_block(self, prompt: list[int]) -> None:
-        """Put the longest stored prefix of this prompt in the store, if the store has less. System blocks
-        (pinned) and the conversations saved at the last shutdown (ordinary entries) are both read on demand."""
+    def _read_disk_block(self, prompt: list[int], usable: Any = None) -> None:
+        """Put the longest stored prefix ``usable`` accepts (system blocks, saved conversations) in the store."""
 
         if self.checkpoints is None or (self.disk_blocks is None and self.session_blocks is None):
             return
         try:
-            have = self.checkpoints.longest(prompt)
+            have = self.checkpoints.longest(prompt, usable)
             found: Any = None
             for blocks, pinned in ((self.disk_blocks, True), (self.session_blocks, False)):
-                hit = None if blocks is None else blocks.best(prompt, have if found is None else len(found[1]))
+                hit = None if blocks is None else blocks.best(prompt, have if found is None else len(found[1]), usable)
                 if hit is not None:
                     found = (hit[0], hit[1], blocks, pinned)
             if found is None:
@@ -391,6 +385,7 @@ class Scheduler:
         job.started_at = time.perf_counter()
         self.starts += 1
         self._starting = job
+        shared_at: set[int] = set()
         try:
             job.cancellation.check()
             memory = self.prompt_memory
@@ -401,16 +396,16 @@ class Scheduler:
             cached = 0
             last_prompt: list[int] | None = None
             checkpoints_at: list[int] = []
-            # checkpoints are taken on the engine's prefill grid, so a shared prefix is kept at its grid point
-            shared_at = {self.engine.on_grid(n) for n in job.shared_prefix_lens} - {0}
+            # checkpoints sit at the prompt's chunk starts: a shared prefix is kept at the start at or before its end
+            starts = self.engine.prompt_chunks(job.prompt_ids)
+            shared_at = {starts.floor(n) for n in job.shared_prefix_lens} - {0}
             if self.checkpoints is not None:
-                self._read_disk_block(job.prompt_ids)
-                usable = lambda n: self.engine.on_grid(n) == n
+                usable = lambda n: n in starts
+                self._read_disk_block(job.prompt_ids, usable)
                 entry = self.checkpoints.peek(job.prompt_ids, usable=usable)
                 take = False
                 if memory is not None:
-                    # the prefix this prompt resumes is never evicted to admit it; when a copy would not fit,
-                    # the stored arrays themselves become the working cache
+                    # Keep the resumed prefix through admission; use its stored arrays as the working cache if copying cannot fit.
                     memory.require(current_cache=None if entry is None else entry.cache, keep=entry)
                     take = entry is not None and not memory.fits_now()
                 hit = self.checkpoints.match(job.prompt_ids, usable=usable, take=take)
@@ -419,7 +414,7 @@ class Scheduler:
                     if self.disk_blocks is not None and cached in shared_at:
                         self.disk_blocks.touch(job.prompt_ids[:cached])
                 chosen = choose_checkpoints(job.history_len, cached, last_prompt, job.prompt_ids)
-                checkpoints_at = sorted(at for at in {*(self.engine.on_grid(n) for n in chosen), *shared_at}
+                checkpoints_at = sorted(at for at in {*(starts.floor(n) for n in chosen), *shared_at}
                                         if cached < at < len(job.prompt_ids))
             proposer = job.proposer
             if proposer is None and job.drafts and self.proposer_factory is not None:
@@ -428,7 +423,8 @@ class Scheduler:
                 stream_id=job.job_id,
                 prompt_ids=list(job.prompt_ids),
                 max_new_tokens=int(job.max_tokens),
-                eos_ids=self.eos_ids,
+                eos_ids=frozenset() if job.ignore_eos else self.eos_ids,
+                stop_check=job.stop_check,
                 proposer=proposer if job.drafts else None,
                 drafts=bool(job.drafts),
                 sampling=job.sampling,
@@ -439,16 +435,10 @@ class Scheduler:
             )
             job.stream = stream
             self.engine.add_stream(stream, cache=cache, cached_tokens=cached, checkpoints_at=checkpoints_at)
+            self._keep_checkpoints(job, shared_at)
             job.cancellation.check()
-            if self.checkpoints is not None:
-                for tokens, snapshot in stream.history_checkpoints:
-                    shared = len(tokens) in shared_at
-                    self.checkpoints.insert(tokens, snapshot, last_prompt=job.prompt_ids, pinned=shared)
-                    if self.snapshot_dir is not None and shared:
-                        self._persist(tokens, snapshot)
-            stream.history_checkpoints = []
             job.prefilled_at = time.perf_counter()
-            job.cached_tokens = int(stream.cached_tokens)      # 0 when a stored state off the grid was not used
+            job.cached_tokens = int(stream.cached_tokens)      # 0 when a stored state was not at a chunk start
             if stream.emitted:
                 job.chunks.put(list(stream.emitted))
             if stream.finished:
@@ -456,11 +446,11 @@ class Scheduler:
             else:
                 self._jobs[stream.stream_id] = job
         except RequestCancelled:
+            self._keep_checkpoints(job, shared_at)      # a prefill stopped between chunks: a retry resumes there
             self._discard_job(job)
         except Exception as exc:  # noqa: BLE001 - reported to the waiting request
             job.error = exc.with_traceback(None) if isinstance(exc, RequestError) else exc
-            if job.stream is not None:
-                job.stream.history_checkpoints = []
+            self._keep_checkpoints(job, shared_at)
             print(f"[tensorfold] start failed {job.job_id} cached={job.cached_tokens}: {type(exc).__name__}: {exc}",
                   flush=True)
             self._finish(job)
@@ -468,6 +458,19 @@ class Scheduler:
             self.engine.prefill_guard = None
             if self.prompt_memory is not None:
                 self.prompt_memory.end()
+
+    def _keep_checkpoints(self, job: ChatJob, shared_at: set[int]) -> None:
+        """Store the prefixes the job's prefill kept (system blocks pinned and saved to disk), once."""
+
+        stream = job.stream
+        if stream is None:
+            return
+        kept, stream.history_checkpoints = stream.history_checkpoints, []
+        for tokens, snapshot in kept if self.checkpoints is not None else ():
+            shared = len(tokens) in shared_at
+            self.checkpoints.insert(tokens, snapshot, last_prompt=job.prompt_ids, pinned=shared)
+            if self.snapshot_dir is not None and shared:
+                self._persist(tokens, snapshot)
 
     def _persist(self, tokens: list[int], cache: list[Any]) -> None:
         """Write a system-block snapshot to disk once, so a restart does not lose it."""

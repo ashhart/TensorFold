@@ -17,13 +17,16 @@ def _needs_tensor_units():
         pytest.skip(f"tensor-unit kernels unavailable: {str(exc).splitlines()[0][:80]}")
 
 
+WIDTHS = [4, 3, 2, 5, 6, 8]            # MLX's affine widths
+
+
 def _same(a, b):
     """The same bits, and finite (a lost dispatch can leave the same NaN on both sides)."""
 
     return bool(mx.all(mx.isfinite(a)).item()) and bool(mx.all(a.view(mx.uint16) == b.view(mx.uint16)).item())
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", WIDTHS)
 @pytest.mark.parametrize("n,k", [(17408, 5120), (5120, 17408), (1024, 5120), (48, 5120), (5120, 6144)])
 def test_rows_do_not_depend_on_row_count(n, k, bits):
     _needs_tensor_units()
@@ -42,7 +45,7 @@ def test_rows_do_not_depend_on_row_count(n, k, bits):
     assert _same(alone, full[20:21])
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", WIDTHS)
 @pytest.mark.parametrize("n,k,m,tiled", [(4096, 5120, 8, False), (17408, 5120, 48, True), (5120, 17408, 48, True),
                                          (6144, 5120, 128, False)])
 def test_accuracy_matches_mlx(bits, n, k, m, tiled):
@@ -60,11 +63,11 @@ def test_accuracy_matches_mlx(bits, n, k, m, tiled):
     assert err_ours <= 2.5 * err_theirs + 1e-6
 
 
-@pytest.mark.parametrize("bits", [3, 2])
+@pytest.mark.parametrize("bits", [b for b in WIDTHS if b != 4])
 @pytest.mark.parametrize("n,k,tiled", [(64, 128, False), (64, 128, True), (64, 1024, False), (64, 1024, True),
                                        (64, 5120, False), (64, 5120, True), (48, 5120, False)])
 def test_lowbit_values_are_mlx_packing(n, k, tiled, bits):
-    """One-hot rows read every 3- or 2-bit value back where MLX's dequantize puts it, over one K slice or several."""
+    """One-hot rows read every value back where MLX's dequantize puts it, over one K slice or several."""
 
     _needs_tensor_units()
     mx.random.seed(13)
@@ -80,7 +83,7 @@ def test_lowbit_values_are_mlx_packing(n, k, tiled, bits):
     assert bool(mx.all(y.T == expect).item())
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", WIDTHS)
 def test_repeated_calls_give_the_same_bits(bits):
     """The same call again and again gives the same bits (determinism across calls, tiled and not)."""
 
@@ -101,16 +104,24 @@ def test_repeated_calls_give_the_same_bits(bits):
 def test_other_widths_are_refused():
     x = mx.zeros((1, 128), dtype=mx.bfloat16)
     s = mx.ones((32, 2), dtype=mx.bfloat16)
-    for bits in (5, 6, 8):
+    for bits in (1, 7):                                            # not MLX widths: the shapes say so, refused
         w = mx.zeros((32, 128 * bits // 32), dtype=mx.uint32)
         assert not lane_qmm.supports(w, s, x, bits, 64, "affine")
         with pytest.raises(ValueError):
             lane_qmm.lane_matmul(x, w, lane_qmm.pack_scales(s, s))
+    for bits in (2, 3, 5, 6, 8):                                   # groups of 32 are 4-bit only
+        w = mx.zeros((32, 128 * bits // 32), dtype=mx.uint32)
+        assert not lane_qmm.supports(w, mx.ones((32, 4), dtype=mx.bfloat16), x, bits, 32, "affine")
+        assert not lane_qmm.supports(w, s, x, bits, 64, "mxfp4")
+        with pytest.raises(ValueError):
+            lane_qmm.lane_matmul(x, w, lane_qmm.pack_scales(s, s), group=32)
     w3 = mx.zeros((64, 12), dtype=mx.uint32)
     assert lane_qmm.supports(w3, mx.ones((64, 2), dtype=mx.bfloat16), x, 3, 64, "affine")
     assert not lane_qmm.supports(w3, mx.ones((64, 2), dtype=mx.bfloat16), x, 3, 32, "affine")
     with pytest.raises(ValueError):                                # 3-bit tiles are 32 columns wide
         lane_qmm.lane_matmul(x, w3, lane_qmm.pack_scales(s, s), tiled=True, nt=64)
+    w5 = mx.zeros((64, 20), dtype=mx.uint32)
+    assert lane_qmm.supports(w5, mx.ones((64, 2), dtype=mx.bfloat16), x, 5, 64, "affine")
     w2, s2 = mx.zeros((64, 8), dtype=mx.uint32), mx.ones((64, 2), dtype=mx.bfloat16)
     assert lane_qmm.supports(w2, s2, x, 2, 64, "affine")
 
@@ -122,7 +133,7 @@ def test_split_depends_only_on_shape():
         assert 1 <= sk <= 8 and (k // 64) // sk >= 8
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", WIDTHS)
 @pytest.mark.parametrize("n,k", [(17408, 5120), (5120, 17408), (1024, 5120), (5120, 6144), (4096, 5120)])
 def test_tiled_weights_give_the_same_bits(n, k, bits):
     _needs_tensor_units()
@@ -141,7 +152,7 @@ def test_tiled_weights_give_the_same_bits(n, k, bits):
         assert _same(tiled, full[:m]), f"{m} rows: the row count changed the bits"
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", WIDTHS)
 def test_install_tiles_in_place_and_uninstall_restores(bits):
     _needs_tensor_units()
     import mlx.nn as nn
@@ -168,7 +179,7 @@ def test_install_tiles_in_place_and_uninstall_restores(bits):
     assert bool(mx.all(wide.weight == q).item()) and not getattr(wide, "_lane_tiled", True)
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", WIDTHS)
 def test_install_wide_is_the_plain_kernels_bits(bits):
     """wide=True tiles 4-bit weights 64 wide and other widths 32 wide, with the plain kernel's bits."""
 
@@ -198,28 +209,28 @@ def test_install_wide_is_the_plain_kernels_bits(bits):
 
 
 def test_install_leaves_other_widths_to_mlx_and_reports_them():
-    """A mixed checkpoint: 6-bit and unquantized layers keep MLX's layout and kernels; uncovered() names them."""
+    """3-bit g32 and unquantized layers keep MLX's layout and kernels, and uncovered() names them."""
 
     _needs_tensor_units()
     import mlx.nn as nn
 
     mx.random.seed(23)
-    model = nn.Sequential(*(nn.Linear(256, 128, bias=False) for _ in range(4)))
+    model = nn.Sequential(*(nn.Linear(256, 128, bias=False) for _ in range(5)))
     model.set_dtype(mx.bfloat16)
-    for i, bits in enumerate((4, 3, 6)):
-        nn.quantize(model, group_size=64, bits=bits, class_predicate=lambda path, _m, i=i: path == f"layers.{i}")
+    for i, (bits, group) in enumerate(((4, 64), (3, 64), (6, 64), (3, 32))):
+        nn.quantize(model, group_size=group, bits=bits, class_predicate=lambda path, _m, i=i: path == f"layers.{i}")
     mx.eval(model.parameters())
-    six = model.layers[2]
-    q6 = six.weight
+    g32 = model.layers[3]
+    q32 = g32.weight
     x = (mx.random.normal((8, 256)) * 0.5).astype(mx.bfloat16)
-    want6 = mx.quantized_matmul(x, q6, six.scales, six.biases, transpose=True, group_size=64, bits=6)
-    assert lane_qmm.uncovered(model) == {"6-bit g64": 1, "unquantized": 1}
+    want = mx.quantized_matmul(x, q32, g32.scales, g32.biases, transpose=True, group_size=32, bits=3)
+    assert lane_qmm.uncovered(model) == {"3-bit g32": 1, "unquantized": 1}
     try:
         lane_qmm.install(model, rows=lane_qmm.MAX_ROWS)
-        assert getattr(model.layers[0], "_lane_tiled", False) and getattr(model.layers[1], "_lane_tiled", False)
-        assert getattr(six, "_lane_sbt", None) is None and not getattr(six, "_lane_tiled", False)
-        assert six.weight is q6
-        assert _same(six(x), want6)
+        assert all(getattr(model.layers[i], "_lane_tiled", False) for i in range(3))
+        assert getattr(g32, "_lane_sbt", None) is None and not getattr(g32, "_lane_tiled", False)
+        assert g32.weight is q32
+        assert _same(g32(x), want)
     finally:
         lane_qmm.uninstall()
 

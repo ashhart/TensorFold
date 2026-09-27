@@ -198,16 +198,14 @@ def test_tree_nodes_equal_their_paths(tiny):
 
 
 def test_aligned_prefill_resumes_exactly(tiny, monkeypatch):
-    """The family's prompts take MLX's prefill on the engine's grid: a prompt resumed from a grid checkpoint gets a
-    fresh prefill's bits; a checkpoint asked for off the grid is taken at the grid point below it; a state off the
-    grid is not resumed; decoded states are not kept."""
+    """Resumed at a chunk start a prompt gets a fresh prefill's bits; between starts it is not; decodes are not kept."""
 
     from tensorfold.engine.lane_engine import LaneStream
+    from tensorfold.engine.prefill_plan import PrefillPlan
     from tensorfold.families.qwen3_5.family import Qwen35Family
 
     model, _, _ = tiny
-    monkeypatch.setattr(LaneEngine, "prefill_step", 8)
-    monkeypatch.setattr(LaneEngine, "prefill_align", 8)
+    monkeypatch.setattr(LaneEngine, "prefill_plan", PrefillPlan(8))
     family = Qwen35Family(model, widest=row_matmul.WINDOW_ROWS, rows=True)
     engine = LaneEngine(family, max_rows=family.exact_width, max_draft=family.exact_width - 1,
                         retain_finished_caches=True)

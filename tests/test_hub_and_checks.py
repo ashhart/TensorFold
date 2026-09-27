@@ -116,7 +116,8 @@ def test_resolve_refuses_a_download_that_still_lacks_required_mtp(tmp_path, monk
 def test_nemotron_pull_checks_its_mtp_head(tmp_path, monkeypatch, capsys):
     repo = "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
     snapshot = fake_repo(tmp_path, repo, {
-        "config.json": '{"model_type": "nemotron_h"}', "model.safetensors": "weights",
+        "config.json": '{"model_type": "nemotron_h", "quantization": {"bits": 4, "group_size": 64}}',
+        "model.safetensors": "weights",
     })
     monkeypatch.setattr(hub, "cached", lambda repo_id: snapshot)
     monkeypatch.setattr(hub, "pull", lambda repo_id: snapshot)

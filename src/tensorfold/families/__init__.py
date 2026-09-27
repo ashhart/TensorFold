@@ -1,29 +1,4 @@
-"""Model families TensorFold can load, picked by the checkpoint's ``model_type``.
-
-Each family is a package in this folder (``tensorfold/families/<name>/``) holding everything specific to it:
-its forward pass, its kernels, any draft head. The package's ``__init__`` says what it serves and how to load
-it:
-
-    MODEL_TYPES = ("nemotron_h",)          # config.json model_type values it takes
-    TITLE = "Nemotron 3.5 Lightning"
-    LANES = True                           # every family decodes through engine.lane_engine.LaneEngine
-    def load(model_dir, **options) -> (model, tokenizer)
-
-and optionally:
-
-    MODELS = ("owner/checkpoint",)                # Hugging Face checkpoints the family is tested with
-    DRAFTER = "owner/draft-model"                 # a draft model it can use (``tensorfold pull`` it once)
-    def check(model_dir) -> None                  # refuse an unsupported checkpoint before any weight is read
-    MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200"}   # set before MLX starts (unless already set)
-    def engine_settings(model) -> dict             # keyword arguments for the engine (e.g. max_rows)
-    def kernel_version(model) -> str               # names the kernels in prefix-snapshot keys
-    def setup(app, model, **options) -> None       # extras on the server app (e.g. a draft model)
-
-``options`` are the CLI's family options (``lane_kernels``, ``drafter``, ``mtp_drafts``, ``mtp_head``, ...); a
-family takes the ones it knows. A new family is a new package here; nothing else registers it. ``detect`` reads
-config.json only, so the CLI knows what it is loading before it touches MLX or any weights. What the engines
-call on a model is described in ``engine/lane_family.py`` and ``docs/recipes/adding-a-family.md``.
-"""
+"""Discover family packages by model_type and inspect checkpoint compatibility before loading weights or MLX."""
 
 from __future__ import annotations
 
@@ -94,9 +69,7 @@ def _quantization_block(config: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def quant_method(config: dict[str, Any]) -> str | None:
-    """How a checkpoint stores its weights: ``"mlx"`` for MLX's affine quantization (``bits`` and ``group_size``,
-    no ``quant_method``), ``"mlx-<mode>"`` for MLX's other modes, the config's ``quant_method`` otherwise
-    (``"exl3"``, ``"modelopt"``, ``"gptq"``, ``"awq"``, ``"fp8"``, ...), or None for unquantized weights."""
+    """Return the storage format: mlx for affine quantization, mlx-<mode> for other MLX modes, quant_method otherwise, or None."""
 
     found = _quantization_block(config)
     if found is None:
@@ -119,6 +92,22 @@ def quantization(config: dict[str, Any]) -> tuple[int | None, int | None]:
     return int(found["bits"]), int(found.get("group_size", 64))
 
 
+MLX_MODE_DEFAULTS = {"affine": (64, 4), "mxfp4": (32, 4), "nvfp4": (16, 4), "mxfp8": (32, 8)}   # to_quantized's
+
+
+def layer_quantization(config: dict[str, Any]) -> dict[str, tuple[int, int, str]]:
+    """config.json's per-layer MLX entries: path -> (bits, group size, mode), a missing key at MLX's mode default."""
+
+    found = _quantization_block(config) or {}
+    layers = {}
+    for path, entry in found.items():
+        if isinstance(entry, dict):
+            mode = str(entry.get("mode") or "affine").lower()
+            group, bits = MLX_MODE_DEFAULTS.get(mode, (64, 4))
+            layers[path] = (int(entry.get("bits") or bits), int(entry.get("group_size") or group), mode)
+    return layers
+
+
 def describe_quantization(config: dict[str, Any]) -> str:
     method = quant_method(config)
     if method is None:
@@ -138,9 +127,7 @@ def backends_of(family: Family) -> tuple[str, ...]:
 
 
 def readable_quants(family: Family, backend: str) -> tuple[str | None, ...]:
-    """The storage formats a family's engine reads on ``backend``. By default MLX's affine quantization, plus
-    unquantized weights on a Mac (MLX's own kernels load them); a family lists more in its package as
-    ``QUANT_METHODS = {"cuda": ("mlx", "exl3")}``."""
+    """Return formats supported by the backend, using the family QUANT_METHODS override when present."""
 
     declared = getattr(family.package, "QUANT_METHODS", {}) or {}
     default = (MLX_QUANT, None) if backend == "mlx" else (MLX_QUANT,)
@@ -148,9 +135,7 @@ def readable_quants(family: Family, backend: str) -> tuple[str | None, ...]:
 
 
 def require_readable(family: Family, config: dict[str, Any], backend: str) -> None:
-    """Refuse, before any weight downloads, a checkpoint whose storage format the family's engine on ``backend``
-    does not read, or MLX weights of another bit width or group size than its kernels take
-    (``CUDA_QUANTIZATION = (bits, group)`` for the CUDA engine)."""
+    """Reject unsupported storage formats or MLX quantization dimensions before downloading weights."""
 
     method = quant_method(config)
     where = "NVIDIA GPUs (CUDA)" if backend == "cuda" else "Apple Silicon (MLX)"

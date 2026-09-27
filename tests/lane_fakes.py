@@ -123,10 +123,9 @@ class FakeFamily:
 
 
 class FakeEngine(LaneEngine):
-    """LaneEngine over ``FakeFamily``, without a prefill grid (checkpoints anywhere, decoded states kept); records
-    each prefill's (stream id, cached tokens) and checks a resumed cache holds exactly the prompt's prefix."""
+    """LaneEngine over ``FakeFamily`` without a prefill plan; records each prefill's resume and checks its prefix."""
 
-    prefill_align = 0
+    prefill_plan = None
 
     def __init__(self, model: Any = None, **kwargs: Any) -> None:
         super().__init__(model if model is not None else FakeFamily(), **kwargs)

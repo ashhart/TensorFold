@@ -69,6 +69,7 @@ def test_resumed_prompt_equals_fresh_through_the_kernels(monkeypatch, dense_keys
     """Resumed equals fresh with the dense-or-kernels switch inside the prompt (DENSE_KEYS 20) and without."""
 
     from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.engine.prefill_plan import PrefillPlan
     from tensorfold.families.qwen4_exp.runtime import FlashNext
 
     monkeypatch.setattr(q4.prefill, "DENSE_KEYS", dense_keys)
@@ -79,7 +80,7 @@ def test_resumed_prompt_equals_fresh_through_the_kernels(monkeypatch, dense_keys
 
     def run(ids, **kw):
         engine = LaneEngine(flash)
-        engine.prefill_align = 8
+        engine.prefill_plan = PrefillPlan(8)
         stream = LaneStream(stream_id="x", prompt_ids=list(ids), max_new_tokens=6)
         engine.add_stream(stream, **kw)
         while engine.active_count:

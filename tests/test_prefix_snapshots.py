@@ -40,3 +40,16 @@ def test_keeping_the_newest_counts_one_model_only(tmp_path):
     ps.save_snapshot(tmp_path, "/models/nemotron|mlx=1", [9], [Layer()], keep=1)
     models = sorted(ps.read_metadata(p)["model"] for p in tmp_path.glob("*.safetensors"))
     assert models == ["/models/nemotron|mlx=1", "/models/qwen|mlx=1", "/models/qwen|mlx=1"]
+
+
+def test_a_drafter_slot_is_left_out_of_a_saved_snapshot(tmp_path):
+    from mlx_lm.models.cache import KVCache
+
+    from tensorfold.families.qwen3_5.dflash_head import DraftSlot
+
+    kv = KVCache()
+    kv.update_and_fetch(mx.ones((1, 2, 4, 4)), mx.ones((1, 2, 4, 4)))
+    path = ps.save_snapshot(tmp_path, "model", [1, 2, 3, 4], [kv, DraftSlot(object())])   # its drafter: no array
+    tokens, cache = ps.load_snapshot(path, "model")
+    assert tokens == [1, 2, 3, 4] and [type(item) for item in cache] == [KVCache]
+    assert bool(mx.array_equal(cache[0].state[0], kv.state[0]).item())

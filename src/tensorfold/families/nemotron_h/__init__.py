@@ -25,10 +25,69 @@ KERNEL_DEPENDENCIES = ("tensorfold.kernels.qwen.dense.v1.lane_attention",)
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}
 
 
+GROUPS = (32, 64)          # 4-bit groups every chip's kernels read: lane_qmm on M5, rows' matvecs and experts
+
+
+def refusal(config: dict[str, Any]) -> str | None:
+    """Why the kernels cannot read a checkpoint, from config.json: they read MLX 4-bit weights in GROUPS only."""
+
+    from tensorfold.families import describe_quantization, layer_quantization, quantization
+
+    bits, group = quantization(config)
+    odd = sorted({f"{b}-bit g{g}" + ("" if m == "affine" else f" {m}") for path, (b, g, m)    # embeddings: a lookup
+                  in layer_quantization(config).items()
+                  if not (b == 4 and g in GROUPS and m == "affine") and not path.endswith("embeddings")})
+    if bits == 4 and group in GROUPS and not odd:
+        return None
+    found = describe_quantization(config) + (f", with layers at {', '.join(odd)}" if odd else "")
+    return (f"its kernels read MLX 4-bit weights in groups of 32 or 64 in every projection and expert (the expert "
+            f"kernel reads any other width as 4-bit); this checkpoint has {found}")
+
+
+def check(model_dir: str | Path) -> None:
+    """Refuse from config.json alone, before any weight downloads, a checkpoint the kernels cannot read."""
+
+    from tensorfold.families import read_config
+
+    why = refusal(read_config(model_dir))
+    if why:
+        raise ValueError(f"{TITLE} cannot run this checkpoint: {why}. Use {MODELS[0]}")
+
+
+def unreadable(model: Any) -> dict[str, int]:
+    """An mlx_lm model's quantized linears and expert tables, by kind, other than 4-bit affine in GROUPS (bf16)."""
+
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    tables = [fc for layer in model.layers if getattr(layer, "block_type", "") == "E"
+              for fc in (layer.mixer.switch_mlp.fc1, layer.mixer.switch_mlp.fc2)]
+    linears = [m for _, m in model.named_modules() if isinstance(m, nn.QuantizedLinear)]
+    counts: dict[str, int] = {}
+    for part, found in (("expert tables", tables), ("linears", linears)):
+        for m in found:
+            mode, scales = getattr(m, "mode", "affine"), m["scales"].dtype
+            if m.bits == 4 and m.group_size in GROUPS and mode == "affine" and scales == mx.bfloat16:
+                continue
+            kind = (f"{m.bits}-bit g{m.group_size}" + ("" if mode == "affine" else f" {mode}")
+                    + ("" if scales == mx.bfloat16 else f" {scales} scales") + f" {part}")
+            counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
 def load(model_dir: Path, *, mtp_head: str = "", mtp_drafts: int | None = None, **_: Any) -> tuple[Any, Any]:
+    from tensorfold.families import read_config
     from tensorfold.families.nemotron_h.model import load as load_model
 
-    return load_model(Path(model_dir), mtp_head=mtp_head, mtp_drafts=mtp_drafts)
+    why = refusal(read_config(model_dir))
+    if why:
+        raise SystemExit(f"[tensorfold] {TITLE} cannot run this checkpoint: {why}. Use {MODELS[0]}")
+    model, tokenizer = load_model(Path(model_dir), mtp_head=mtp_head, mtp_drafts=mtp_drafts)
+    missed = unreadable(model.model)          # the loaded modules, in case config.json did not name a width
+    if missed:
+        kinds = ", ".join(f"{n} {kind}" for kind, n in sorted(missed.items()))
+        raise SystemExit(f"[tensorfold] {TITLE}: the kernels do not read this checkpoint's {kinds}. Use {MODELS[0]}")
+    return model, tokenizer
 
 
 def engine_settings(model: Any) -> dict[str, Any]:

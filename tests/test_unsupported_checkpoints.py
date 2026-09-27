@@ -84,6 +84,24 @@ def test_serve_refuses_an_unreadable_checkpoint_before_downloading(tmp_path, cap
     assert "modelopt" in err and "recipe book" in err
 
 
+@pytest.mark.parametrize("config,named", [
+    ({"model_type": "qwen3_5"}, "none (unquantized weights)"),
+    ({"model_type": "qwen3_5", "tie_word_embeddings": True, "quantization": {"bits": 4, "group_size": 64}},
+     "tied embedding"),
+    ({"model_type": "nemotron_h", "quantization": {"bits": 8, "group_size": 64}}, "MLX 8-bit, groups of 64"),
+])
+def test_serve_refuses_what_the_mac_decoders_cannot_read_before_downloading(tmp_path, capsys, monkeypatch, config,
+                                                                            named):
+    from tensorfold import hub
+
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setenv("TENSORFOLD_NO_UPDATE_CHECK", "1")
+    monkeypatch.setattr(hub, "resolve", lambda *a, **kw: pytest.fail("downloaded before refusing"))
+    assert cli.main(["serve", str(tmp_path)]) == 1
+    assert named in capsys.readouterr().err
+
+
 def test_untested_hugging_face_checkpoints_get_a_note(capsys):
     family = _family(DRAFTER="owner/drafter")
     cli._note_untested(family, "someone/other-conversion")

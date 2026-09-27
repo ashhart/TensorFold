@@ -1,5 +1,4 @@
-"""The family rounds' prefill: prompts on the engine's grid, conversation checkpoints on it, the first token and
-the draft head's first drafts."""
+"""The family rounds' prefill: prompt chunks, checkpoints at chunk starts, the first token and first drafts."""
 
 from __future__ import annotations
 
@@ -12,66 +11,69 @@ from tensorfold.engine.family_common import cache_arrays, drop_spares
 class FamilyPrefill:
     """Prefill for ``FamilyRounds``."""
 
-    def _family_feed(self, tokens: Sequence[int], cache: list[Any], following: int | None = None) -> Any:
-        """Absorb ``tokens``; the last position's hidden state [1, 1, D]. The draft head's cache takes every
-        position whose next token is known: the next prompt token, and ``following`` after the last one."""
+    _prefill_at: int | None = None                     # the prompt position the working cache holds whole
+
+    def _family_feed(self, tokens: Sequence[int], cache: list[Any], chunks: Sequence[tuple[int, int]]) -> Any:
+        """Absorb the ``chunks`` ([begin, end) of ``tokens``); the last hidden state [1, 1, D], draft head fed too."""
 
         import mlx.core as mx
 
         last = None
-        # ``tokens`` start on the grid: every chunk is a fresh prefill's chunk
-        step = self._align() or max(1, int(self.prefill_step))
         feed = getattr(self.model, "prefill", None) or self.model.hidden
         self._fed_rows = 0
-        for begin in range(0, len(tokens), step):
-            chunk = [int(t) for t in tokens[begin:begin + step]]
+        for begin, end in chunks:
+            chunk = [int(t) for t in tokens[begin:end]]
             if self.prefill_guard is not None:
                 self.prefill_guard.before_chunk(cache, len(chunk))
+            self._prefill_at = None                    # a chunk in flight: the cache holds no prompt prefix whole
             hidden = feed(mx.array([chunk], dtype=mx.uint32), cache)
             self._fed_rows = len(chunk)
             self.prefill_chunks += 1
             last = hidden[:, -1:, :]
             if getattr(self.model, "mtp", None) is not None:
-                nxt = [int(t) for t in tokens[begin + 1:begin + step + 1]]
-                if len(nxt) < len(chunk) and following is not None:
-                    nxt.append(int(following))
+                nxt = [int(t) for t in tokens[begin + 1:end + 1]]
                 if nxt:
                     self.model.absorb_draft_context(hidden[:, :len(nxt)], mx.array(nxt, dtype=mx.uint32), cache,
                                                     start=0)
             mx.eval(last, *cache_arrays(cache))
+            self._prefill_at = end
             if self.prefill_guard is not None:
                 self.prefill_guard.after_chunk(cache, len(chunk))
         return last
 
-    def _family_start(self, cache: list[Any] | None, cached_tokens: int, length: int) -> tuple[list[Any], int]:
-        """The working cache and the position its prefill starts at: a stored state off the grid is not used
-        (it cannot resume exactly), so the prompt is prefilled from 0."""
+    def _family_start(self, cache: list[Any] | None, cached_tokens: int, chunks: Any) -> tuple[list[Any], int]:
+        """The working cache and where its prefill starts: a stored state only at one of the prompt's chunk starts."""
 
-        align = self._align()
-        if cache is None or (align and int(cached_tokens) % align):
+        if cache is None or int(cached_tokens) not in chunks:
             return self.model.make_cache(), 0
-        start = int(cached_tokens)
-        if not 0 <= start < length:
-            raise ValueError("cached_tokens must leave a suffix to prefill")
         adopt = getattr(self.model, "adopt_cache", None)
-        return (adopt(cache) if adopt is not None else cache), start
+        return (adopt(cache) if adopt is not None else cache), int(cached_tokens)
 
     def _family_prefill(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
                         checkpoints_at: Sequence[int]) -> list[Any]:
-        if not stream.prompt_ids:
+        prompt = stream.prompt_ids
+        if not prompt:
             raise ValueError(f"{stream.stream_id}: empty prompt")
-        work, start = self._family_start(cache, cached_tokens, len(stream.prompt_ids))
-        cached_tokens = start
+        chunks = self.prompt_chunks(prompt)
+        work, start = self._family_start(cache, cached_tokens, chunks)
+        cached_tokens = self._prefill_at = start
         stream.history_checkpoints = []
-        for boundary in sorted({self.on_grid(int(b)) for b in checkpoints_at}):
-            if not start < boundary < len(stream.prompt_ids):
-                continue
-            self._family_feed(stream.prompt_ids[start:boundary], work, following=stream.prompt_ids[boundary])
-            if self.prefill_guard is None or self.prefill_guard.allow_checkpoint(work):
-                stream.history_checkpoints.append((list(stream.prompt_ids[:boundary]),
-                                                   drop_spares(self.copy_single_cache(work))))
-            start = boundary
-        hidden = self._family_feed(stream.prompt_ids[start:], work)
+        try:
+            for boundary in sorted({chunks.floor(int(b)) for b in checkpoints_at}):
+                if not start < boundary < len(prompt):
+                    continue
+                self._family_feed(prompt, work, chunks.between(start, boundary))
+                if self.prefill_guard is None or self.prefill_guard.allow_checkpoint(work):
+                    stream.history_checkpoints.append((list(prompt[:boundary]),
+                                                       drop_spares(self.copy_single_cache(work))))
+                start = boundary
+            hidden = self._family_feed(prompt, work, chunks.between(start, len(prompt)))
+        except BaseException:
+            at = self._prefill_at                      # stopped between chunks: keep the progress, a taken prefix too
+            kept = [len(tokens) for tokens, _ in stream.history_checkpoints]
+            if at is not None and at in chunks and at not in kept:
+                stream.history_checkpoints.append((list(prompt[:at]), drop_spares(self.copy_single_cache(work))))
+            raise
         first = self._family_first(stream, work, hidden, cached_tokens, self._fed_rows - 1)
         self._family_commit_first(stream, int(first.item()) if hasattr(first, "item") else int(first))
         return work
@@ -120,8 +122,9 @@ class FamilyPrefill:
                                cached_tokens: int) -> list[Any]:
         if not prompt_ids:
             raise ValueError("empty prefix")
-        work, start = self._family_start(cache, cached_tokens, len(prompt_ids))
-        self._family_feed(list(prompt_ids[start:]), work)
+        chunks = self.prompt_chunks(prompt_ids)
+        work, start = self._family_start(cache, cached_tokens, chunks)
+        self._family_feed(prompt_ids, work, chunks.between(start, len(prompt_ids)))
         return drop_spares(work)
 
     def _family_add_stream(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,

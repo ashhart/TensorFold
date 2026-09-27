@@ -27,7 +27,7 @@ def test_cancellation_after_evaluated_first_chunk_prevents_next_model_chunk(monk
     engine.model.hidden = canceled_forward
     cache = engine.model.make_cache()
     with pytest.raises(RequestCancelled):
-        engine._family_feed(list(range(12)), cache)
+        engine._family_feed(list(range(12)), cache, engine.prompt_chunks(range(12)).between(0, 12))
     assert calls == [4] and cache[0].rows[0] == [0, 1, 2, 3]
     assert evaluated == [True]
 

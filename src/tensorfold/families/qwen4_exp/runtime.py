@@ -1,19 +1,4 @@
-"""Flash Next as the lane engine serves it: the fused decode plus the checkpoint's MTP head.
-
-``FlashNext`` wraps the model (``model.py``) with what the lane engine's family rounds
-(``engine.lane_family``) drive:
-
-- ``exact_width``: the widest window (up to 16 rows) whose every row gets a one-row
-  forward's bits, checked at load on this MLX and GPU, and ``window_costs``, each
-  exact width's forward time; drafted rows are verified exactly;
-- ``keep_rows``: roll every cache back to a prefix of a verified window;
-- the MTP head: its cache absorbs each kept position (main-model streams and the
-  sampled next token), then it chains ``drafts`` drafts from the last one. Drafts
-  are sampled with the target's keyed sampler at their positions, so a draft is
-  the target's own sample whenever the two distributions agree there.
-
-Drafts change speed only: every emitted token is the target's sample.
-"""
+"""Flash Next fused decoding and MTP drafting, with every emitted token verified against the target's sample."""
 
 from __future__ import annotations
 
@@ -27,8 +12,7 @@ from tensorfold.families.qwen4_exp.model import AttentionCache, select_by_kernel
 
 
 class MTPCache(AttentionCache):
-    """The MTP head's attention cache; ``drafted``: how many of its last entries are chained drafts (trimmed before
-    the next kept rows are absorbed)."""
+    """Track MTP attention entries and chained drafts, trimming drafts before absorbing kept rows."""
 
     drafted = 0
 
@@ -38,6 +22,7 @@ class FlashNext:
 
     fused_rows = 16
     lane_family = True
+    # Draw with gpu_sampling's keyed rule on the GPU.
     gpu_sampling = True
 
     def __init__(self, model: Any, head: Any | None = None, *, drafts: int = 1) -> None:
@@ -70,8 +55,7 @@ class FlashNext:
             mx.eval(*self._mtp_scales)
             import os
 
-            # the head scores a fixed list of 79,591 ids (TF_FLASH_DRAFT_VOCAB=0: the whole vocabulary), and a
-            # round's chained drafts stay on the GPU until the next round reads them (TF_FLASH_QUEUED=0: each read)
+            # TF_FLASH_DRAFT_VOCAB=0 scores the full vocabulary; TF_FLASH_QUEUED=0 reads each chained draft immediately.
             self._draft_ids = self._draft_head = None
             if os.environ.get("TF_FLASH_DRAFT_VOCAB", "1") != "0":
                 from tensorfold.families.qwen4_exp.draft_head import cut_head, draft_ids
@@ -87,8 +71,7 @@ class FlashNext:
     mtp_step_ms = 0.0
 
     def _time_mtp_step(self) -> float:
-        """One chained draft step as ``settle`` takes it (the head's layer, the vocabulary head, a draw read back),
-        ms, fastest of 6: the engine's depth rule adds it per draft before measured rounds replace the estimate."""
+        """Estimate one chained MTP step in milliseconds for the depth rule until measured rounds replace the estimate."""
 
         import time
 
@@ -186,15 +169,13 @@ class FlashNext:
         return replace(self.args, num_hidden_layers=1, layer_types=["sparse_attention"], ple_layer_ids=[])
 
     def _mtp_step(self, tokens: Any, streams: mx.array, mtp_cache: MTPCache) -> tuple[mx.array, mx.array]:
-        """The MTP head on rows (next tokens, residual streams [n, S*D]): (mixed [1, n, D], its streams [n, S*D]).
-        Prompt-long inputs take the reference modules; decode rows the fused kernels."""
+        """Run MTP on next tokens and residual streams, using reference modules for prompts and fused kernels for decode."""
 
         head = self.mtp
         rows, wide = streams.shape
         dims = wide // head.streams
         if rows <= self.fused_rows:
-            # the prologue in a few kernels (was ~20 MLX ops a draft step): embedding rows, the two (1 + w) norms,
-            # the two projections through ``project``
+            # Fuse embedding rows and centred norms, then run both projections through ``project``.
             from tensorfold.kernels.qwen.flash_next.v1 import attention, base, embed, experts, gdn, hc
             from tensorfold.families.qwen4_exp.decode import project
 
@@ -215,8 +196,7 @@ class FlashNext:
         return head.hyper_connection_mixer(x), x[0]
 
     def _draft_draw(self, mixed: mx.array, sampling: Any, positions: Any) -> mx.array:
-        """Drafts (uint32 [n], lazy) from the head's mixed hidden states [1, n, D]: the target's keyed rule over the
-        listed ids when the head is cut, else over the whole vocabulary."""
+        """Draw lazy uint32 drafts [n] with the target's keyed rule over the cut head's ids or the whole vocabulary."""
 
         from tensorfold.families.qwen4_exp.decode import project
 
@@ -241,8 +221,7 @@ class FlashNext:
 
     def draft(self, cache: list[Any], streams: mx.array, tokens: list[int], position: int, sampling: Any,
               count: int | None = None) -> list[int]:
-        """Absorb positions whose residual streams are ``streams`` [n, S*D] and whose next tokens are ``tokens``,
-        then chain ``count`` (default ``drafts``) drafts for positions ``position``, ``position`` + 1, ..."""
+        """Absorb the given residual streams and next tokens, then chain ``count`` drafts starting at ``position``."""
 
         mtp_cache = cache[-1]
         mixed, out = self._absorb(streams, [int(t) for t in tokens], mtp_cache)
@@ -258,12 +237,7 @@ class FlashNext:
 
     def speculate(self, cache: list[Any], tokens: mx.array, position: int, sampling: Any, start: int = 0,
                   last_only: bool = False) -> mx.array:
-        """Before a verify round's tokens are read: the MTP head absorbs rows ``start`` .. of the last hidden()
-        call (their streams; ``tokens`` [n], the tokens that follow them, still on the GPU) and draws each row's
-        first draft, for positions ``position`` + 2 + i (``position``: row ``start``'s). One read then returns
-        both; ``settle`` keeps the kept rows' part. Rows go through the MTP head exactly as ``draft`` would take
-        the kept ones (the fused kernels give a row the same bits at any row count), so the drafts and the MTP
-        cache are the same, a host round trip earlier. Returns the drafts [n] (lazy)."""
+        """Absorb rows and draw lazy first drafts at position + 2 + i before readback; ``settle`` keeps the accepted prefix."""
 
         mtp_cache = cache[-1]
         if mtp_cache.drafted:
@@ -280,8 +254,7 @@ class FlashNext:
         return self._draft_draw(mixed, sampling, [position + 2 + r for r in range(rows)])
 
     def settle(self, cache: list[Any], keep: int, first: int, position: int, sampling: Any, count: int) -> list[int]:
-        """After ``speculate``: forget the MTP entries of the rows past ``keep``, then the drafts for positions
-        ``position``, ``position`` + 1, ...: the kept row's first draft ``first`` and ``count`` - 1 chained ones."""
+        """Trim speculative MTP entries past ``keep``, then return ``first`` followed by chained drafts from ``position``."""
 
         mtp_cache = cache[-1]
         out, rows = self._specs.pop(id(mtp_cache))
@@ -297,8 +270,7 @@ class FlashNext:
                 mtp_cache.drafted += 1
                 drafts.append(int(self._draft_draw(mixed, sampling, [position + j]).item()))
             return drafts
-        # ``first`` may be unread (a late speculation's draft): it stays on the GPU. Each chained draft is drawn on
-        # the GPU and fed to the next step as an array: no read until the next round's inputs are built
+        # Keep ``first`` and chained draws on the GPU until the next round builds its inputs.
         head = (first.reshape(1).astype(mx.uint32) if isinstance(first, mx.array)
                 else mx.array([int(first)], dtype=mx.uint32))
         if count == 1:
@@ -319,33 +291,29 @@ class FlashNext:
         if spec is not None:
             cache[-1].trim(spec[1], self.args.indexer_compress_ratio)
 
+    # Shared rounds preserve each stream's serial bits and obey per-stream and total row limits.
     max_streams = 32
     batch_rows = 64
     rows_per_call = 128
 
     def hidden_rows(self, windows: list[Any], caches: list[list[Any]]) -> mx.array:
-        """The lane engine's multi-stream call: every stream's window (a token list, or an unread GPU array) in one
-        forward, rows laid out stream by stream, stream i's rows advancing only ``caches[i]``: [1, N, D]. Each row
-        gets the bits its stream's own call gives it. Token ids are read to the host first (the n-gram layer
-        hashes them there)."""
+        """Return stream-ordered mixed states [1, N, D], advancing each cache independently and hashing token ids on the host."""
 
         lazy = [w for w in windows if isinstance(w, mx.array)]
         if lazy:
-            mx.eval(*lazy)          # every stream's window in one GPU round trip (one a stream held the GPU back)
+            mx.eval(*lazy)          # Read every stream's window in one GPU round trip.
         host = [[int(t) for t in (w.reshape(-1).tolist() if isinstance(w, mx.array) else w)] for w in windows]
         return self.hidden_multi(host, caches)
 
     def keep_rows_streams(self, caches: list[list[Any]], lengths: Any, keeps: Any) -> None:
-        """After ``hidden_rows``: stream i keeps the first ``keeps[i]`` of its ``lengths[i]`` rows (the head's cache
-        is ``settle``'s)."""
+        """Keep each stream's requested prefix after ``hidden_rows``; ``settle`` manages the head cache."""
 
         for cache, length, keep in zip(caches, lengths, keeps):
             if int(keep) < int(length):
                 self.fused.keep_rows(cache, int(length), int(keep))
 
     def hidden_multi(self, inputs: list[Any], caches: list[list[Any]]) -> mx.array:
-        """Mixed hidden states [1, N, D] of several streams' windows (inputs[b]: host token ids of stream b's
-        window, caches[b]: its cache list), rows in stream order."""
+        """Return mixed states [1, N, D] in stream order from host token windows and their separate caches."""
 
         from tensorfold.kernels.qwen.flash_next.v1 import embed
 
@@ -384,8 +352,7 @@ class FlashNext:
 
     def draft_streams(self, caches: list[list[Any]], follows: list[list[int]], rows: list[list[int]],
                       positions: list[int], samplings: list[Any], depths: list[int]) -> list[Any]:
-        """Every stream's head in one call a depth after ``hidden_rows``: stream i's kept rows are ``rows[i]`` of that
-        call, the k-th followed by ``follows[i][k]``; returns stream i's next ``depths[i]`` drafts from positions[i]."""
+        """Draft each stream to its requested depth after absorbing its kept rows and following tokens from ``hidden_rows``."""
 
         mtp = [c[-1] for c in caches]
         for m in mtp:
@@ -420,8 +387,7 @@ class FlashNext:
 
     # -- load-time check ------------------------------------------------------------------
     def check_windows(self, widest: int | None = None) -> tuple[int, dict[int, float]]:
-        """The widest window (up to ``fused_rows``) whose every narrower window gives each row a one-row forward's
-        logits bit for bit, from a 48-token prompt; and every exact width's forward time in ms (fastest of 3)."""
+        """Check the widest window whose prefixes match serial logits bit for bit, and return each exact width's timing."""
 
         import time
 
@@ -467,8 +433,7 @@ class FlashNext:
     streams_exact = False
 
     def _check_streams(self, base: list[Any], window: list[int]) -> bool:
-        """Three streams at different lengths (3 + 1 + 4 rows) in one ``hidden_multi`` call against each stream's
-        own call, bit for bit, and again after each keeps part of its rows and takes another step."""
+        """Check multi-stream results against separate calls, including another step after retaining partial windows."""
 
         from tensorfold.engine.lane_engine import LaneEngine
 
@@ -509,16 +474,22 @@ class FlashNext:
 
 
 def load(model_dir: Path, *, drafts: int | None = None) -> tuple[FlashNext, Any]:
-    """``drafts`` (default TF_FLASH_MTP, else 3; 0: none): the most drafts a round from the MTP head."""
+    """Load with an MTP draft cap from ``drafts`` or TF_FLASH_MTP, defaulting to 3; zero disables drafts."""
 
     import os
 
+    from tensorfold.families.qwen4_exp import MODELS, decode
     from tensorfold.families.qwen4_exp import model as q4
     from tensorfold.families.qwen4_exp import mtp as mtp_module
 
     model, tokenizer = q4.load(Path(model_dir))
     drafts = int(os.environ.get("TF_FLASH_MTP", "3")) if drafts is None else int(drafts)
     head = mtp_module.load(Path(model_dir), model.args) if drafts > 0 and model.__dict__.get("fused") else None
+    missed = decode.unreadable(model, head) if decode.DENSE == "lane" else {}   # simd_qmm checks a shape on first use
+    if missed:
+        kinds = ", ".join(f"{n} {kind}" for kind, n in sorted(missed.items()))
+        raise SystemExit(f"[tensorfold] Qwen3.8 Flash Next: the lane matmul does not read this checkpoint's {kinds} "
+                         f"linears. Use {MODELS[0]}")
     runtime = FlashNext(model, head, drafts=drafts)
     q4.prefetch_ngrams(model)
     return runtime, tokenizer

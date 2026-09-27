@@ -41,6 +41,27 @@ def test_draft_slot_copies_empty():
     assert clone.proposer is None and clone.anchor == 0 and clone.drafter is slot.drafter and slot.keys is None
 
 
+def test_a_prefill_checkpoint_keeps_the_prompt_taps_the_drafter_has_not_read():
+    import copy
+
+    class Proposer:
+        def __init__(self) -> None:
+            self.cache = [SimpleNamespace(offset=0), SimpleNamespace(offset=0)]
+            self.context, self.ready, self.sampling = None, False, None
+
+    drafter = SimpleNamespace(proposer=lambda copy=None, sampling=None: Proposer(), block_size=16)
+    slot = DraftSlot(drafter)
+    prompt = slot.get(None)
+    prompt.context, prompt.ready = mx.ones((1, 5, 3)), True          # a prefill's taps: rows 95 .. 99
+    for item in prompt.cache:
+        item.offset = 95
+    clone = copy.copy(slot)
+    assert clone.proposer.context is prompt.context and clone.proposer.ready
+    assert [item.offset for item in clone.proposer.cache] == [95, 95] and len(clone.state) == 1
+    slot.kept = [4]                                                  # a round has run: its drafter state is its own
+    assert copy.copy(slot).proposer is None and slot.state == []
+
+
 def test_start_trees_batches_equal_blocks_and_runs_the_rest_alone(monkeypatch):
     calls = []
 

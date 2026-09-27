@@ -1,4 +1,4 @@
-"""Computed system blocks on disk, so a new."""
+"""Store system-prefix caches as tensors and JSON keyed by model and tokens, restoring layer classes by import path."""
 
 from __future__ import annotations
 
@@ -37,7 +37,8 @@ def save_snapshot(directory: Path, model_id: str, tokens: Sequence[int], cache: 
         return None
     arrays: dict[str, mx.array] = {}
     layers: list[dict[str, Any]] = []
-    for index, item in enumerate(cache):
+    # an entry with ``stored = False`` (a stream's drafter state) is left out: the family adds a fresh one on resume
+    for index, item in enumerate(item for item in cache if getattr(item, "stored", True)):
         materialize = getattr(item, "materialize", None)
         if materialize is not None:
             materialize()
@@ -90,7 +91,7 @@ def save_snapshot(directory: Path, model_id: str, tokens: Sequence[int], cache: 
 
 
 def load_snapshots(directory: Path, model_id: str, *, limit: int | None = None, allow: Any = None):
-    """Stored snapshots for ``model_id``, newest first, at most ``limit``, one at a time."""
+    """Yield newest model snapshots one at a time so unread blocks do not occupy memory."""
 
     if not directory.is_dir():
         return
@@ -120,8 +121,7 @@ def load_snapshot(path: Path, model_id: str) -> tuple[list[int], list[Any]] | No
 
     try:
         arrays, meta = mx.load(str(path), return_metadata=True)
-        # mx.load is lazy and bound to this thread's CPU stream; the scheduler
-        # thread that uses the cache has none ("There is no Stream(cpu, 0)").
+        # Evaluate lazy loads here because the scheduler thread has no CPU stream for their arrays.
         mx.eval(list(arrays.values()))
     except Exception:  # noqa: BLE001 - a bad file is skipped, never fatal
         return None
@@ -150,7 +150,7 @@ def load_snapshot(path: Path, model_id: str) -> tuple[list[int], list[Any]] | No
 
 
 class DiskBlocks:
-    """The stored blocks' tokens, so a request can read the one its prompt starts with."""
+    """Index stored prefixes for on-demand loading, refreshing metadata only when files change and touching used blocks for startup priority."""
 
     def __init__(self, directory: Path, model_id: str) -> None:
         self.directory = Path(directory)
@@ -182,11 +182,13 @@ class DiskBlocks:
         self._known = known
         return [(path, tokens) for path, (_, tokens) in known.items() if tokens]
 
-    def best(self, prompt: Sequence[int], longer_than: int) -> tuple[Path, list[int]] | None:
-        """The longest stored block that is a strict prefix of ``prompt`` and longer than ``longer_than``."""
+    def best(self, prompt: Sequence[int], longer_than: int, usable: Any = None) -> tuple[Path, list[int]] | None:
+        """The longest stored strict prefix of ``prompt`` longer than ``longer_than``, of a length ``usable`` takes."""
 
         best: tuple[Path, list[int]] | None = None
         for path, tokens in self.blocks():
+            if usable is not None and not usable(len(tokens)):
+                continue
             if longer_than < len(tokens) < len(prompt) and list(prompt[:len(tokens)]) == tokens:
                 if best is None or len(tokens) > len(best[1]):
                     best = (path, tokens)
@@ -217,7 +219,7 @@ def read_metadata(path: Path) -> dict[str, str]:
 
 
 def blocks_to_warm(directory: Path, model_id: str) -> list[list[int]]:
-    """System blocks saved for the same model under another configuration but not yet under ``model_id``."""
+    """Return longest uncovered token prefixes from other kernel configurations of the same model, newest first; other models' token ids are incompatible."""
 
     if not directory.is_dir():
         return []

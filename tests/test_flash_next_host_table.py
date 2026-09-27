@@ -71,3 +71,49 @@ def test_lane_projection_rows_do_not_depend_on_the_row_count(n):
     assert mx.array_equal(full[:128], untiled)
     for rows in (1, 3, 17, 129):
         assert mx.array_equal(decode._lane_project(x[:rows], linear), full[:rows])
+
+
+def _linear(k, n, bits, group):
+    layer = nn.QuantizedLinear(k, n, bias=False, group_size=group, bits=bits)
+    layer.set_dtype(mx.bfloat16)                               # bf16 scales, as the checkpoints have
+    return layer
+
+
+@pytest.mark.skipif(not tensor_units(), reason="lane_qmm needs tensor units")
+@pytest.mark.parametrize("bits", [8, 5, 3])
+def test_lane_projection_tiles_other_widths_32_wide(bits):
+    """A projection of another width tiles 32 wide even when its rows divide by 64, with the untiled bits."""
+
+    mx.random.seed(bits)
+    linear = _linear(2560, 2560, bits, 64)
+    x = mx.random.normal((40, 2560)).astype(mx.bfloat16)
+    plain = lane_qmm.lane_matmul(x, linear.weight, lane_qmm.pack_scales(linear.scales, linear.biases))
+    assert mx.array_equal(decode._lane_project(x, linear), plain)
+
+
+def test_linears_the_lane_matmul_cannot_read_are_named():
+    model = nn.Module()
+    model.layers = [_linear(256, n, b, g) for n, b, g in ((64, 4, 32), (1, 4, 32), (64, 8, 64), (64, 8, 32))]
+    model.layers += [_linear(256, 64, 4, 32), nn.Linear(256, 64)]
+    model.layers[-2].mode = "mxfp4"
+    head = nn.Module()
+    head.fc = _linear(256, 64, 8, 32)
+    want = {"8-bit g32": 2, "4-bit g32 mxfp4": 1}              # a one-row gate is read; a float linear is MLX's
+    assert decode.unreadable(model, head, None) == want
+
+
+def test_flash_next_refuses_them_before_building(monkeypatch):
+    from tensorfold.families.qwen4_exp import model as q4
+    from tensorfold.families.qwen4_exp import runtime
+
+    fake = nn.Module()
+    fake.layers = [_linear(256, 64, 8, 32)]
+    monkeypatch.setattr(q4, "load", lambda path: (fake, "tokenizer"))
+    monkeypatch.setattr(decode, "DENSE", "lane")
+    monkeypatch.setattr(runtime, "FlashNext", lambda *a, **k: pytest.fail("built before refusing"))
+    with pytest.raises(SystemExit, match="1 8-bit g32 linears"):
+        runtime.load("unused", drafts=0)
+    monkeypatch.setattr(decode, "DENSE", "simd")
+    monkeypatch.setattr(runtime, "FlashNext", lambda *a, **k: "built")
+    monkeypatch.setattr(q4, "prefetch_ngrams", lambda model: None)
+    assert runtime.load("unused", drafts=0) == ("built", "tokenizer")

@@ -28,7 +28,7 @@ def test_prefill_guard_can_refuse_after_one_existing_chunk():
     engine.model.hidden = counted
     engine.prefill_guard = SimpleNamespace(before_chunk=lambda cache, rows: None, after_chunk=refuse)
     with pytest.raises(RequestError, match="too large"):
-        engine._family_feed(list(range(12)), engine.model.make_cache())
+        engine._family_feed(list(range(12)), engine.model.make_cache(), engine.prompt_chunks(range(12)).between(0, 12))
     assert calls == [4]
 
 

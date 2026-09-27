@@ -7,8 +7,7 @@ without (M1 to M4) ``kernels.row_forward`` over the row-exact ``simd_qmm`` matmu
 same decoder, so drafted output equals it. Drafts come from a DFlash2 draft model (trees, or chains where the
 decoder's attention takes no trees) and from copies of the context; concurrent requests share each round.
 
-Prompts go through MLX's prefill in chunks on the engine's 2,048-token grid from position 0, and prefixes resume
-only from grid points, so a resumed prompt gets a fresh prefill's bits.
+Prompts go through MLX's prefill in the engine's chunks and resume only at chunk starts: a fresh prefill's bits.
 """
 
 from __future__ import annotations
@@ -86,34 +85,68 @@ def install_row_decoder(model: Any) -> bool:
     return True
 
 
+def refusal(config: dict[str, Any], lanes: bool) -> str | None:
+    """Why the lane kernels (``lanes``) or the decoder without tensor units cannot read a checkpoint, else None."""
+
+    from tensorfold.families import describe_quantization, layer_quantization, quantization
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+
+    def reads(bits: int | None, group: int | None, mode: str = "affine") -> bool:
+        return group == 64 and (lane_qmm.readable(bits, group, mode) if lanes else (bits, mode) == (4, "affine"))
+
+    others = "/".join(str(b) for b in lane_qmm.BITS if b != 4)
+    takes = (f"{'/'.join(str(b) for b in lane_qmm.BITS)}-bit weights in groups of 64" if lanes else
+             f"4-bit weights in groups of 64 without tensor units ({others}-bit need an M5-generation GPU)")
+    if not reads(*quantization(config)):
+        return f"its lane kernels read {takes}; this checkpoint has {describe_quantization(config)}"
+    # embed_tokens is a lookup, not a matmul: only as a tied head (refused below) would it meet the lanes
+    odd = sorted({f"{b}-bit g{g}" + ("" if m == "affine" else f" {m}") for path, (b, g, m)
+                  in layer_quantization(config).items() if not reads(b, g, m) and not path.endswith("embed_tokens")})
+    if odd:
+        return f"its lane kernels read {takes}; this checkpoint has layers at {', '.join(odd)}"
+    if config.get("tie_word_embeddings") or (config.get("text_config") or {}).get("tie_word_embeddings"):
+        return "its head is the tied embedding, which runs MLX's kernel (drafted rows would get other bits)"
+    return None
+
+
+def check(model_dir: str | Path) -> None:
+    """Refuse from config.json alone, before any weight downloads, a checkpoint this Mac's decoder cannot read."""
+
+    import sys
+
+    if sys.platform != "darwin":                  # the CUDA engine's rule is CUDA_QUANTIZATION (require_readable)
+        return
+    from tensorfold.families import read_config
+
+    why = refusal(read_config(model_dir), tensor_units())     # this family sets no MLX_ENV: MLX may start here
+    if why:
+        raise ValueError(f"{TITLE} cannot run this checkpoint: {why}. Use {MODELS[0]}")
+
+
 def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 4,
          **_: Any) -> tuple[Any, Any]:
     """The family model: the lane kernels when ``lane_kernels`` is "on", or "auto" on a GPU with tensor units, else
     the lane decoder without them. Checkpoints the lane decoders cannot read are refused."""
 
-    from tensorfold.families import describe_quantization, quantization, read_config
+    from tensorfold.families import read_config
     from tensorfold.families.qwen3_5.family import Qwen35Family
     from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
+    if lane_kernels == "on" and not tensor_units():      # the lane kernels' fragment layouts are the M5's
+        raise SystemExit(f"[tensorfold] {TITLE}: --lane-kernels on needs Metal 4 tensor units (an M5-generation GPU), "
+                         f"which this GPU does not have. Use --lane-kernels auto or off")
     lanes = lane_kernels == "on" or (lane_kernels == "auto" and tensor_units())
-    config = read_config(model_dir)
-    bits, group = quantization(config)
-    widths = "/".join(str(b) for b in lane_qmm.BITS)
-    if not (group == 64 and (lane_qmm.readable(bits, group) if lanes else bits == 4)):
-        others = "/".join(str(b) for b in lane_qmm.BITS if b != 4)
-        reads = (f"{widths}-bit weights in groups of 64" if lanes else
-                 f"4-bit weights in groups of 64 without tensor units ({others}-bit need an M5-generation GPU)")
-        raise SystemExit(f"[tensorfold] {TITLE} decodes through lane kernels that read {reads}; this checkpoint has "
-                         f"{describe_quantization(config)}. Use {MODELS[0]}")
+    why = refusal(read_config(model_dir), lanes)
+    if why:
+        raise SystemExit(f"[tensorfold] {TITLE} cannot run this checkpoint: {why}. Use {MODELS[0]}")
     model, tokenizer = load_lane_model(Path(model_dir))
     model._tensorfold_lanes = bool(lanes)
     if lanes:
         missed = lane_qmm.uncovered(model)
         if missed:
             kinds = ", ".join(f"{n} {kind}" for kind, n in sorted(missed.items()))
-            raise SystemExit(f"[tensorfold] {TITLE}: the lane kernels do not take this checkpoint's {kinds} "
-                             f"projections (MLX's kernels would give drafted rows other bits than one-row steps). Use "
-                             f"{MODELS[0]}, or a conversion whose projections are all {widths}-bit in groups of 64")
+            raise SystemExit(f"[tensorfold] {TITLE}: the lane kernels do not take this checkpoint's layers ({kinds}): "
+                             f"MLX's kernels would give drafted rows other bits than one-row steps. Use {MODELS[0]}")
         install_lane_kernels(model)
     elif not install_row_decoder(model):
         raise SystemExit(f"[tensorfold] {TITLE}: the lane decoder without tensor units does not take these weights")
@@ -199,13 +232,13 @@ def kernel_version(model: Any) -> str:
         parts = [row_matmul.BACKEND.name, f"row_attention={row_forward.ROW_ATTENTION}",
                  *(path.read_text() for path in sorted(folder.glob("*.py")))]
         return "row-forward-" + hashlib.sha256("\n".join(parts).encode()).hexdigest()[:12]
-    from tensorfold.kernels.qwen.dense.v1 import (lane_attention, lane_fuse, lane_glue, lane_qmm, stream_attention,
-                                                  stream_gdn)
+    from tensorfold.kernels.qwen.dense.v1 import (lane_attention, lane_fuse, lane_glue, lane_qmm, lane_widen,
+                                                  stream_attention, stream_gdn)
 
-    sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, lane_qmm._MAIN_LOWBIT, lane_qmm._XSUM, lane_attention._PARTIAL,
-               *stream_attention.sources().values(), lane_attention._MERGE, lane_glue._NORM_XS, lane_glue._GDN_PRE,
-               lane_glue._GDN_POST, lane_glue._MLP_ACT, *stream_gdn.sources().values(),
-               repr((lane_attention.CHUNK, lane_attention.TILE))]
+    sources = [lane_qmm._MAIN, lane_qmm._MAIN_TILED, *lane_widen.sources().values(), lane_qmm._XSUM,
+               lane_attention._PARTIAL, *stream_attention.sources().values(), lane_attention._MERGE,
+               lane_glue._NORM_XS, lane_glue._GDN_PRE, lane_glue._GDN_POST, lane_glue._MLP_ACT,
+               *stream_gdn.sources().values(), repr((lane_attention.CHUNK, lane_attention.TILE))]
     if lane_fuse.enabled:
         sources += [text for _, text in sorted(lane_fuse.sources().items())]
     folder = Path(lane_qmm.__file__).parent

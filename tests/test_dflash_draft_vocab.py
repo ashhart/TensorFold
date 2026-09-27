@@ -27,7 +27,7 @@ def _drafter_with_head(n: int, k: int, bits: int = 4):
     return drafter, holder
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])          # the drafter uses the target's head: 3-bit on a 3-bit target
+@pytest.mark.parametrize("bits", [4, 3, 2, 5, 6, 8])    # the drafter uses the target's head: 2-bit on oQ2
 def test_draft_vocab_keeps_the_full_heads_logits(bits):
     try:
         drafter, holder = _drafter_with_head(4096, 512, bits)

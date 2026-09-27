@@ -20,10 +20,10 @@ _numbers = itertools.count(1)
 
 
 class DraftSlot:
-    """A stream's DFlash2 proposer, kept as its cache list's last entry (the engine skips it: ``keys`` is None; a
-    copy starts empty, so a stored prefix carries no drafter context)."""
+    """A stream's DFlash2 proposer, its cache list's last entry; a copy keeps only prompt taps not read yet."""
 
     keys = None
+    stored = False                                       # left out of snapshots on disk; adopt_cache adds a new one
 
     def __init__(self, drafter: Any, chains: bool = False) -> None:
         self.drafter = drafter
@@ -34,12 +34,28 @@ class DraftSlot:
         self.chances: list[float] | None = None          # the last drafts' chances of landing
         self.number = next(_numbers)
 
+    def _unread(self) -> Any:
+        """The proposer while it holds only a prompt's taps (a prefill's state), else None."""
+
+        proposer = self.proposer
+        if self.kept or not getattr(proposer, "ready", False) or getattr(proposer, "context", None) is None:
+            return None
+        return proposer
+
     @property
     def state(self) -> list[Any]:
-        return []
+        unread = self._unread()
+        return [] if unread is None else [unread.context]
 
     def __copy__(self) -> "DraftSlot":
-        return DraftSlot(self.drafter, self.chains)
+        slot = DraftSlot(self.drafter, self.chains)
+        unread = self._unread()
+        if unread is not None:
+            proposer = slot.get(unread.sampling)
+            proposer.context, proposer.ready = unread.context, True
+            for mine, theirs in zip(proposer.cache, unread.cache):
+                mine.offset = theirs.offset
+        return slot
 
     def get(self, sampling: Any) -> Any:
         if self.proposer is None:

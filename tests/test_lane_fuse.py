@@ -57,7 +57,7 @@ def test_split_k_of_the_groups():
         assert len({lane_qmm.split_k(n, K) for n in sizes}) == 1
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", [4, 3, 2, 5, 6, 8])
 @pytest.mark.parametrize("kind", sorted(GROUP_SIZES))
 @pytest.mark.parametrize("tile", [True, False])
 def test_stacked_matmul_bits(kind, tile, bits):
@@ -172,7 +172,7 @@ def _real_groups(bits=4):
     return root
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", [4, 3, 2, 5, 6, 8])
 def test_build_keeps_the_weights_and_adds_only_the_scales(bits):
     _needs_tensor_units()
     root = _real_groups(bits)
@@ -281,7 +281,7 @@ def _tiny_model(bits=4):
     return model
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", [4, 3, 2, 5, 6, 8])
 def test_tree_forward_fused_equals_unfused(bits):
     """Whole lane-decoder rounds: prompt chain, draft tree, commit, chain, one row; every bit the same."""
 
@@ -343,7 +343,7 @@ def _check_fused_rounds(bits, *, pipeline_layers):
         assert _same(a, p), f"output {i} changed after the stacks were built"
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", [4, 3, 2, 5, 6, 8])
 @pytest.mark.parametrize("fused", [False, True])
 def test_chain_rows_equal_one_row_steps(bits, fused):
     """A 16-row chain's logits equal 16 one-row steps bit for bit, through the production install and stacks."""
@@ -389,10 +389,10 @@ def test_chain_rows_equal_one_row_steps(bits, fused):
 
 
 def test_models_of_other_widths_in_one_process():
-    """Rounds for a 4-bit, a 3-bit and a 4-bit model in one process, unpipelined: kernels compile mid-evaluation."""
+    """Rounds for 4-, 3-, 6- and 4-bit models in one process, unpipelined: kernels compile mid-evaluation."""
 
     _needs_tensor_units()
-    for bits in (4, 3, 4):
+    for bits in (4, 3, 6, 4):
         _check_fused_rounds(bits, pipeline_layers=0)
 
 
@@ -430,7 +430,7 @@ def _chain(n):
     return [-1] + list(range(n - 1))
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2])
+@pytest.mark.parametrize("bits", [4, 3, 2, 5, 6, 8])
 @pytest.mark.parametrize("fused", [False, True])
 def test_kernel_signatures_do_not_change_between_calls(bits, fused):
     """One Metal signature per lane kernel, from install and warm-ups through one-stream and 1-9-stream rounds."""

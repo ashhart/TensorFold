@@ -6,12 +6,14 @@ import math
 from typing import Any
 
 from tensorfold.server.errors import RequestError
+from tensorfold.server.stopping import stop_options
 
 
 _INTEGER_FIELDS = {"seed", "top_k", "thinking_budget", "max_tokens", "max_completion_tokens"}
 
 
 def parse_numbers(fields: dict[str, Any]) -> dict[str, Any]:
+    stop_options(fields)
     parsed = dict(fields)
     for name in (*sorted(_INTEGER_FIELDS), "temperature", "top_p"):
         value = fields.get(name)

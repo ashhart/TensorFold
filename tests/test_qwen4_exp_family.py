@@ -146,6 +146,7 @@ def test_ngram_ids_match_the_reference_formula_at_full_vocab():
 
 def test_lane_engine_resumes_from_a_grid_checkpoint_bit_identically():
     from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.engine.prefill_plan import PrefillPlan
     from tensorfold.families.qwen4_exp.runtime import FlashNext
 
     model = FlashNext(tiny(), None, drafts=0)         # no fused kernels on the CPU: one token a round
@@ -154,7 +155,7 @@ def test_lane_engine_resumes_from_a_grid_checkpoint_bit_identically():
 
     def engine_on(grid: int = 4) -> LaneEngine:
         engine = LaneEngine(model, retain_finished_caches=True)
-        engine.prefill_align = grid                   # the 2,048 grid, scaled to the tiny prompt
+        engine.prefill_plan = PrefillPlan(grid)       # the 2,048 grid, scaled to the tiny prompt
         assert engine.family
         return engine
 
@@ -184,6 +185,7 @@ def test_long_context_attention_in_query_parts(monkeypatch):
     last row: the same outputs up to rounding, and a resumed prompt still equals a fresh one bit for bit."""
 
     from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.engine.prefill_plan import PrefillPlan
     from tensorfold.families.qwen4_exp.runtime import FlashNext
 
     model = tiny()
@@ -198,7 +200,7 @@ def test_long_context_attention_in_query_parts(monkeypatch):
 
     def run(ids, **kw):
         engine = LaneEngine(flash)
-        engine.prefill_align = 8
+        engine.prefill_plan = PrefillPlan(8)
         stream = LaneStream(stream_id="x", prompt_ids=list(ids), max_new_tokens=4)
         engine.add_stream(stream, **kw)
         while engine.active_count:

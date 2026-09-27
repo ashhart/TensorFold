@@ -1,10 +1,4 @@
-"""The OpenAI-compatible HTTP layer: ``GET /v1/models``, ``GET /health``, ``POST /v1/chat/completions`` and
-``POST /v1/completions``, with optional server-sent-event streaming, tool calls and reasoning text.
-
-``make_handler(app)`` wraps any app with ``chat(messages, max_tokens=, temperature=, on_delta=, tools=,
-sampling=)``, ``served_name``, ``model_ids``, ``tokenizer`` / ``tokenizer_lock`` and ``exact_mode``
-(``server.app.ChatApp`` is the one TensorFold serves).
-"""
+"""OpenAI-compatible model, health, chat and completion endpoints with streaming, tool calls and reasoning text."""
 
 from __future__ import annotations
 
@@ -76,8 +70,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             self.wfile.write(body)
 
         def _route(self) -> str:
-            # Tolerate query strings, trailing slashes, and clients that join
-            # the base URL differently (with or without the /v1 prefix).
+            # Tolerate query strings, trailing slashes and client URLs with or without the /v1 prefix.
             return self.path.split("?", 1)[0].rstrip("/")
 
         def do_GET(self) -> None:
@@ -171,11 +164,9 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     tools = []
                 max_tokens = body.get("max_tokens") or body.get("max_completion_tokens")
                 temperature = float(body.get("temperature") or 0.0)
-                # the raw fields, for exact sampling (an absent temperature is not temperature 0), "seed", the thinking
-                # budget, "draft": false (the serial reference) and "priority": "background" (yields to every other
-                # request)
+                # Preserve raw sampling and scheduling options; an absent temperature differs from temperature zero.
                 sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "seed", "priority", "draft",
-                                                        "thinking_budget")
+                                                        "thinking_budget", "ignore_eos", "stop")
                                    if k in body}
                 effort = body.get("reasoning_effort")
                 if effort is not None:
@@ -299,8 +290,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         self.wfile.flush()
 
                     def on_delta(delta: str | dict[str, Any]) -> None:
-                        # a text completion's "text" is a string and carries the reply's content only, as its
-                        # non-streamed reply does: reasoning deltas (a think block the template opened) are not sent
+                        # Text completions carry content strings only, excluding reasoning deltas as non-streamed replies do.
                         if is_text_completion and not isinstance(delta, str):
                             return
                         emit(stream_chunk(delta))

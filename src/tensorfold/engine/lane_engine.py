@@ -14,6 +14,7 @@ import time
 from typing import Any, Callable, Sequence
 
 from tensorfold.engine.lane_family import FamilyRounds
+from tensorfold.engine.prefill_plan import PrefillPlan, PromptChunks
 
 
 class SuffixLookupProposer:
@@ -188,6 +189,7 @@ class LaneStream:
     think_end: int = -1
     think_open: bool = False
     force: list[int] = field(default_factory=list)
+    stop_check: Callable[[list[int]], bool] | None = None
 
     @property
     def context(self) -> list[int]:
@@ -241,7 +243,7 @@ class LaneStream:
             landed.append(value)
             if value == self.think_end:
                 self.think_open = False
-            if value in self.eos_ids:
+            if value in self.eos_ids or (self.stop_check is not None and self.stop_check(self.emitted)):
                 self.finished = True
                 self.finish_reason = "stop"
             elif len(self.emitted) >= int(self.max_new_tokens):
@@ -290,15 +292,14 @@ class RoundStats:
 class LaneEngine(FamilyRounds):
     """Exact streams of a family model, verified in shared rounds."""
 
-    # prompt tokens a prefill forward takes: chunks and checkpoints sit on this grid from position 0 and decoded
-    # states are not kept, so a resumed prompt gets a fresh prefill's chunks and bits (0: no grid)
+    # where prompt chunks start (None: anywhere, in ``prefill_step`` chunks, decoded states kept)
+    prefill_plan: Any = PrefillPlan(2048)
     prefill_step = 2048
-    prefill_align = 2048
     # prompt chunks fed so far (every prefill path): the server's stall check counts them as progress
     prefill_chunks = 0
 
     def __init__(self, model: Any, *, max_rows: int = 128, max_draft: int = 32,
-                 retain_finished_caches: bool = False) -> None:
+                 retain_finished_caches: bool = False, prefill_plan: Any = None) -> None:
         if not getattr(model, "lane_family", False):
             raise TypeError(f"{type(model).__name__} is not a lane-engine family (engine.lane_family)")
         if max_rows < 1 or max_draft < 0:
@@ -306,8 +307,10 @@ class LaneEngine(FamilyRounds):
         self.model = model
         self.max_rows = int(max_rows)
         self.max_draft = int(max_draft)
-        # a finished stream's cache is handed to the caller for the next turn (never on a prefill grid)
+        # a finished stream's cache is handed to the caller for the next turn (never under a prefill plan)
         self.retain_finished_caches = bool(retain_finished_caches)
+        if prefill_plan is not None:
+            self.prefill_plan = prefill_plan
         self.finished_caches: dict[str, tuple[list[int], list[Any]]] = {}
         self.streams: list[LaneStream] = []
         self.round_stats: list[RoundStats] = []
@@ -323,26 +326,17 @@ class LaneEngine(FamilyRounds):
 
         return self._family_prefill_prefix(prompt_ids, cache=cache, cached_tokens=cached_tokens)
 
-    def _align(self) -> int:
-        return int(self.prefill_align) if self.prefill_align else 0
+    def prompt_chunks(self, prompt_ids: Sequence[int]) -> PromptChunks:
+        """Where this prompt's prefill chunks start: the positions a stored state resumes it from."""
 
-    @property
-    def prefill_grid(self) -> int:
-        """Tokens between the grid points prompts are prefilled and checkpointed on (0: anywhere)."""
-
-        return self._align()
-
-    def on_grid(self, position: int) -> int:
-        """The checkpoint a prefill takes for ``position``: the grid point at or before it (itself without a grid)."""
-
-        align = self._align()
-        return (int(position) // align) * align if align else int(position)
+        if self.prefill_plan is None:
+            return PromptChunks(None, len(prompt_ids), step=int(self.prefill_step))
+        return self.prefill_plan.chunks(prompt_ids)
 
     def _keeps_decoded(self, stream: LaneStream) -> bool:
-        """Whether a finished stream's decoded state is kept for the next turn (never on a prefill grid: its rows
-        were decoded, not prefilled)."""
+        """Whether a finished stream's decoded state is kept for the next turn (never under a plan: decoded rows)."""
 
-        return self.retain_finished_caches and stream.retain and not self._align()
+        return self.retain_finished_caches and stream.retain and self.prefill_plan is None
 
     @property
     def active_count(self) -> int:

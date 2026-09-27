@@ -12,6 +12,7 @@ A model is a Hugging Face repo id (downloaded into the Hugging Face cache on fir
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 from pathlib import Path
@@ -79,10 +80,6 @@ def build_parser() -> argparse.ArgumentParser:
                        help="requests decoded together, their windows sharing each round's forward: a number, or "
                             "auto (up to 8, each started only while the projected memory fits 70%% of RAM)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
-    speed.add_argument("--prefill-grid", type=_prefill_grid, default=2048,
-                       help="prompt tokens a prefill chunk takes (Mac); a resumed prompt is prefilled again from the "
-                            "last multiple, so smaller means cheaper follow-ups and slower cold prompts "
-                            "(256, 512, 1024 or 2048)")
 
     speed.add_argument("--no-update-check", action="store_true",
                        help="don't ask GitHub whether a newer release exists (also TENSORFOLD_NO_UPDATE_CHECK=1)")
@@ -302,13 +299,6 @@ def _note_untested(family: Any, model: str) -> None:
               f"decoding, speed and quality are unmeasured. {families.OWN_MODEL_HELP}", flush=True)
 
 
-def _prefill_grid(value: str) -> int:
-    grid = int(value)
-    if grid not in (256, 512, 1024, 2048):
-        raise argparse.ArgumentTypeError("--prefill-grid takes 256, 512, 1024 or 2048")
-    return grid
-
-
 def _backend(choice: str, family: Any) -> str:
     """mlx or cuda: auto picks MLX on macOS and CUDA elsewhere; a family serves only the backends it has."""
 
@@ -329,9 +319,6 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         raise ValueError("--tp 2 needs --master: rank 0's address on the link between the two machines")
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2")
-    if args.prefill_grid != 2048:
-        print("[tensorfold] --prefill-grid is for the Mac engine: CUDA prefill resumes a prompt at any position",
-              flush=True)
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
@@ -371,6 +358,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
 # concurrent requests are admitted while this process's projected footprint stays under this share of RAM, less
 # what the rest of the machine holds
 MEMORY_FRACTION = 0.70
+# a resume point begins a prompt chunk when at least this many tokens follow the last chunk start
+MIN_CHUNK = 256
 
 
 def _parallel(value: Any) -> int:
@@ -434,9 +423,8 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     import mlx.core as mx
     from tensorfold import families, hub
     from tensorfold.engine.lane_engine import LaneEngine
+    from tensorfold.engine.prefill_plan import PrefillPlan, message_markers
 
-    # chunks and resumable checkpoints share one grid from position 0, so a resumed prompt keeps a fresh one's bits
-    LaneEngine.prefill_step = LaneEngine.prefill_align = int(args.prefill_grid)
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
     parallel = _parallel(args.parallel)
@@ -447,6 +435,9 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type})", flush=True)
     model, tokenizer = family.package.load(model_dir, **options)
+    # prompt chunks start where replies begin too, so a follow-up resumes where its latest reply began
+    openers, assistant = message_markers(tokenizer)
+    plan = PrefillPlan(LaneEngine.prefill_step, openers, MIN_CHUNK, assistant)
     if required_files:
         print(f"[tensorfold] Nemotron MTP head: "
               f"{'active' if not args.no_drafts and getattr(model, 'mtp', None) is not None else 'inactive'}",
@@ -455,7 +446,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     from tensorfold.server.app import ChatApp
     from tensorfold.server.http import Server, make_handler
 
-    engine_factory = LaneEngine            # every family decodes through lanes
+    engine_factory = functools.partial(LaneEngine, prefill_plan=plan)      # every family decodes through lanes
     engine_kwargs = dict(getattr(family.package, "engine_settings", lambda m: {})(model))
     sampling = _generation_config(model_dir)
     for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k)):
@@ -467,11 +458,10 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     resolve_prefill = getattr(model, "resolve_prefill_identity", None)
     if resolve_prefill is not None:
         resolve_prefill()  # the prefill mode's self-check runs at startup, before any snapshot key
-    # Both libraries and the active prompt kernels determine a snapshot's bits.
-    prefill = f"grid{LaneEngine.prefill_align}"
+    # Both libraries, the active prompt kernels and how prompts are cut determine a snapshot's bits.
     model_id = (f"{model_dir.resolve()}|mlx={mx.__version__}|mlx_lm={version('mlx-lm')}"
                 f"|kernels={families.kernel_version(family, model)}"
-                f"|prefill={prefill}|tensorfold={__version__}")
+                f"|prefill={plan.name}|tensorfold={__version__}")
     gib = args.prompt_cache_gib
     if gib is None:
         ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
