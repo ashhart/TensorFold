@@ -526,7 +526,30 @@ Stubbing one part at a time out of the 22.3 ms one-row step: routed and shared e
 - The indexer's glue in one scoring kernel and a radix select, as Flash Next does: about 1.5 to 2 ms a token, but
   it changes the block choice's bits and needs a float32 fidelity check first.
 - The hyper-connection write-back folded into the MoE combine (exact, about 0.4 ms), and grouped verify experts.
-- A better chained draft. The CUDA engine found the MTP head agrees more often when it reads the final-normed
-  hidden row; this engine still feeds it the streams' mean before the norm, as oMLX's GLM runtime does. Worth
-  trying here.
-- A faster long-context prefill, through the decode kernels in chunks.
+- ~~A better chained draft from the final-normed row~~ — done: `TF_GLM_MTP_INPUT=normed` is the default (M5 Ultra
+  86.9 → 87.9 tok/s and 78.8 → 79.8% first-draft acceptance, kingjamez 2026-09-27; M3 Ultra +0.5 tok/s).
+- ~~A faster long-context prefill~~ — done another way: `TF_GLM5_PREFILL=absorbed` (a separate PR) attends during
+  prefill on the absorbed latent over each query's selected keys, flat with context (336 / 334 / 309 tok/s at 10K /
+  35K / 103K on the 256 GB M3 Ultra against 331 / 260 / 143 for the reference path).
+
+### Mixed-bit checkpoints (mlx-lm / oMLX conversions, 2026-09-27)
+
+Two layouts of the same weights exist on disk. `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` is the one this port was written
+from (uniform 4-bit, groups of 64). mlx-lm's converter (and oMLX's) writes another — `language_model.model.layers.N`,
+one fused `conv1d` over q | k | v, the forget gate under `forget_gate.*`, the MLA pair `embed_q` / `unembed_out`
+already absorbed in place of `kv_b_proj`, the MTP layer under `mtp.0.*` with a bf16 `eh_proj`, a vision tower the text
+model never reads — usually with **per-tensor quantization overrides**: routed experts 4-bit, attention / shared
+experts / `lm_head` 8-bit, 5- and 6-bit in a few layers and the MTP block (554 overrides in the conversions we have
+seen: `Vontra/GLM-5.3-Flash-MLX-oQ4-MTP`'s card lists 554; grant-ai's abliterated conversion has 554). `layouts.py`
+maps the names; the loader reads the fused conv and the absorbed pair where it meets them; a stack whose parts differ
+in bits stays separate parts (`QSplit`), each run at its own width.
+
+The kernels read those widths on the row-exact path: 8-, 6- and 5-bit `qmv_rows` / `expert_qmv` / `qmv_quad_rows`
+transcribed from MLX 0.32.2's one-row `qmv_fast` / `qmv_quad` loops (`fast_shape` is MLX's own rule for which shapes
+take them), and the fused MoE takes an 8-bit shared expert beside 4-bit routed experts. An 8-bit `f_b` / `g_b` inside
+the KDA kernel is written but opt-in (`TF_GLM5_KDA_BITS8=1`): its state differs from the ops path by 1 ulp and would
+move the serial reference, so those two projections run through MLX ops. Measured on grant-ai's abliterated
+checkpoint, 256 GB M3 Ultra: load-time `rows_match_serial` passes on the full model, drafted == `"draft": false`,
+decode 29.8 (oMLX) → 36.8 (loader only, 8-bit tensors one MLX call per row) → **46.3 tok/s** (8-bit row kernels),
+context 1,048,576. Vontra's oQ4 checkpoint itself has not been loaded here yet; its overrides come from
+`config.json` the same way, so it is expected to read as is — a test on it is welcome.
