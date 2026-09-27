@@ -392,6 +392,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # MLX keeps freed buffers up to its memory limit: long contexts, whose attention buffers change size every
     # chunk, grow a server by tens of GB without a cap
     mx.set_cache_limit(int(float(args.mlx_cache_gib) * 1024**3))
+    # MLX leaves its buffers unwired: those only the decode kernels read (Flash Next's stacked projections, router
+    # rows and PLE tables) left GPU residency while a long prompt prefilled through MLX's forward, and the first
+    # decode round waited ~1 s to bring them back (16k-35k prompts, 55-67 tok/s against 83-103 wired, M3 Ultra,
+    # 2026-09-27). Wired up to the recommended working set, as mlx_lm does, they stay resident.
+    mx.set_wired_limit(int(mx.device_info()["max_recommended_working_set_size"]))
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
     options: dict[str, Any] = {"lane_kernels": args.lane_kernels, "drafter": drafter,
