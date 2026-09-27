@@ -122,9 +122,11 @@ def matmul(x: torch.Tensor, b: B16, *, out: torch.Tensor | None = None, f32: boo
     return out
 
 
-def quantize4(w: torch.Tensor, chunk: int = 8192):
+def quantize4(w: torch.Tensor, chunk: int = 8192, out: str = "q4"):
     """bf16 (N, K) -> MLX-style affine 4-bit in groups of 32 along K (q = round((w - min) / scale)), as
-    ``qmm.make_q4`` takes it. For draft-only weights (the MTP drafts' head copy of lm_head)."""
+    ``qmm.make_q4`` takes it (``out == "trilogue"``, the MLX layout for a row lookup) — for weights that
+    only draft (the MTP drafts' head copy of lm_head, the 4-bit side of an NVFP4 checkpoint's head).
+    Drafts change speed, never the bits, so the requantization is free of exactness concerns."""
 
     from . import qmm
 
