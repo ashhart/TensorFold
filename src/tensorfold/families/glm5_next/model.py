@@ -1007,11 +1007,15 @@ class MLA:
                 ids = mx.where(every <= pos[:, None], every, -1)
             valid_sel = ids >= 0
             w = int(ids.shape[1])
-            keys = mx.take(cache.keys[:last], mx.where(valid_sel, ids, 0).reshape(-1), axis=0).reshape(c, 1, w, rank)
-            ql = ql_all[:, c0:c1].transpose(1, 0, 2)[:, :, None, :]        # [c, H, 1, rank]
-            o = mx.fast.scaled_dot_product_attention(ql, keys, keys, scale=self.scale,
-                                                     mask=valid_sel[:, None, None, :])        # [c, H, 1, rank]
-            outs.append(o[:, :, 0, :])
+            keys = mx.take(cache.keys[:last], mx.where(valid_sel, ids, 0).reshape(-1), axis=0).reshape(c, w, rank)
+            ql = ql_all[:, c0:c1].transpose(1, 0, 2)                      # [c, H, rank]
+            # two batched matmuls a sub-chunk (scores in fp32, the softmax over each query's keys): a batch of
+            # single-query attention calls reads the gathered keys once per head instead (1,690 vs 2,074 tok/s
+            # on the 8-layer profile, S1 2026-09-26)
+            s = mx.matmul(ql, keys.transpose(0, 2, 1)).astype(mx.float32) * self.scale   # [c, H, w]
+            s = mx.where(valid_sel[:, None, :], s, mx.array(-1e30, mx.float32))
+            p = mx.softmax(s, axis=-1)
+            outs.append(mx.matmul(p.astype(keys.dtype), keys))              # [c, H, rank]
         att = mx.concatenate(outs) if len(outs) > 1 else outs[0]             # [rows, H, rank]
         return self.unabsorb(att.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(rows, -1)
 
