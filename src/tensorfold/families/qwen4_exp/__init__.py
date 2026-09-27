@@ -113,10 +113,12 @@ def kernel_version(model: Any) -> str:
     return f"{source}|prompt_attention={','.join(modes)}" + (f"|{prefill}" if prefill else "")
 
 
-# the CUDA engine's kernels read MLX affine weights of this (bits, group size)
+# the CUDA engine's kernels read MLX affine weights of this (bits, group size), or an NVFP4 (modelopt)
+# checkpoint: the routed experts in FP4 (the format's own kernels), every other linear BF16
 CUDA_QUANTIZATION = (4, 32)
 # the KV cache dtypes the CUDA engine can allocate (``--kv-dtype``)
 CUDA_KV_DTYPES = ("bf16", "int8", "int4")
+QUANT_METHODS = {"cuda": ("mlx", "modelopt")}
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
