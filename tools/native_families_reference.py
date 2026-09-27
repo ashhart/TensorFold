@@ -12,6 +12,7 @@ def main():
     p.add_argument("model", type=Path)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--tokens", help="Explicit prompt IDs, including for generation")
+    p.add_argument("--dump-logits", type=Path)
     p.add_argument("--generate", type=int, default=0)
     p.add_argument("--prompt", default="Write a short Python function that computes the Fibonacci sequence.")
     p.add_argument("--seed", type=int, default=1234)
@@ -32,6 +33,8 @@ def main():
         model, tokenizer = load(str(args.model))
         fused = kernels.FusedDecode(model, fold_shared=False)
         fused.compiled = False
+        if args.simd:
+            fused.lane_attention = False
         fused.experts_fn = rows.experts
         holder = nn.Module()
         holder.model = model
@@ -47,6 +50,8 @@ def main():
     elif kind == "qwen4_exp":
         from tensorfold.families.qwen4_exp.model import load
         from tensorfold.families.qwen4_exp.decode import FusedDecode
+        from tensorfold.families.qwen4_exp.runtime import FlashNext
+        from types import SimpleNamespace
         from tensorfold.kernels.qwen.flash_next.v1 import kernels as flash_kernels
         # Keep the 32 GB PLE tables sharded. The reference embedding performs the
         # same lookup/dequantization without materializing a second concatenated copy.
@@ -55,7 +60,10 @@ def main():
         model, tokenizer = load(args.model, lazy=True)
         model.__dict__["fused"] = FusedDecode(model)
         cache = model.make_cache()
-        forward = lambda ids: model(mx.array([ids], dtype=mx.int32), cache)
+        # The serving runtime uses a row-invariant vocabulary projection; the raw
+        # model's __call__ uses MLX's batch-dependent quantized matmul instead.
+        runtime = SimpleNamespace(model=model)
+        forward = lambda ids: FlashNext.head(runtime, model.hidden(mx.array([ids], dtype=mx.int32), cache))
     else:
         raise ValueError(kind)
     tokens = ([int(x) for x in args.tokens.split(",")] if args.tokens else
@@ -64,6 +72,11 @@ def main():
     for start in range(0, len(tokens), 16):
         logits = forward(tokens[start:start + 16])
         mx.eval(logits)
+        if start % 512 == 0:
+            print(f"Prefill {start + min(16, len(tokens) - start)}/{len(tokens)}", flush=True)
+    if args.dump_logits:
+        args.dump_logits.parent.mkdir(parents=True, exist_ok=True)
+        np.save(args.dump_logits, np.asarray(logits.astype(mx.float32)).reshape(-1, logits.shape[-1]))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if not args.generate:
         np.save(args.output, np.asarray(logits.astype(mx.float32)).reshape(-1, logits.shape[-1]))
@@ -86,7 +99,8 @@ def main():
         mx.eval(logits)
         pos += 1
     digest = hashlib.sha256(np.asarray(result, dtype="<u4").tobytes()).hexdigest()
-    args.output.write_text(json.dumps(dict(prompt_tokens=tokens, tokens=result, token_sha256=digest)))
+    args.output.write_text(json.dumps(dict(prompt_tokens=tokens, tokens=result, token_sha256=digest,
+                                         peak_mlx_bytes=mx.get_peak_memory(), active_mlx_bytes=mx.get_active_memory())))
     print(f"Saved {args.output}: {len(result)} tokens, {digest}")
 
 

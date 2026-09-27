@@ -73,12 +73,17 @@ fn prefill(comptime M: type, m: *M, count: usize, random: std.Random) !void {
     }
 }
 pub fn check(comptime M: type, m: *M) !void {
+    return checkPrefixes(M, m, if (M == dense.Model) &.{ 0, 1, 15, 16, 17, 63, 64, 127, 128, 511, 512, 513 } else &.{ 0, 1, 15, 16, 17, 33 }, true);
+}
+pub fn checkLong(comptime M: type, m: *M) !void {
+    return checkPrefixes(M, m, if (M == flash.Model) &.{ 2051, 2063 } else &.{ 9999, 10007 }, false);
+}
+fn checkPrefixes(comptime M: type, m: *M, prefixes: []const usize, short: bool) !void {
     var rng = std.Random.DefaultPrng.init(0x4341434845);
     const random = rng.random();
     var tokens: [128]i32 = undefined;
     var parents: [128]i32 = undefined;
     var rows: [128]i32 = undefined;
-    const prefixes: []const usize = if (M == dense.Model) &.{ 0, 1, 15, 16, 17, 63, 64, 127, 128, 511, 512, 513 } else &.{ 0, 1, 15, 16, 17, 33 };
     var checks: usize = 0;
     for (prefixes, 0..) |prefix, cycle| {
         var checked_row: usize = 0;
@@ -146,12 +151,12 @@ pub fn check(comptime M: type, m: *M) !void {
         try before.compare(m, &scope);
         std.debug.print("PASS: cache cycle {d}, prefix {d}, every acceptance length 1..{d}, EOS history, rejection and continuation\n", .{ cycle, prefix, width });
     }
-    if (M == dense.Model) try trees(m, random);
+    if (M == dense.Model and short) try trees(m, random);
     m.reset();
     if (m.position != 0) return error.CacheResetMismatch;
     for (m.cache) |c| if (c.a.ctx != null or c.b.ctx != null) return error.CacheResetMismatch;
     std.debug.print("PASS: {d} accepted-prefix cache/continuation checks across {d} resets\n", .{ checks, prefixes.len });
-    try memory(M, m);
+    if (short) try memory(M, m);
 }
 fn memory(comptime M: type, m: *M) !void {
     var baseline: usize = 0;

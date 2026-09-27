@@ -11,7 +11,7 @@ Completion requires execution evidence, not just source export or a passing smok
   sampling, greedy/sampled settings, small/maximum budgets, tensor/forced-SIMD paths.
 - [x] Randomized tree verification, every accepted prefix, maximum windows, rejection,
   EOS/token-budget boundaries, repeated reset/cache fork/restore cycles.
-- [ ] Full-model Python/native long-context comparisons across sparse and 10K dispatch
+- [x] Full-model Python/native long-context comparisons across sparse and 10K dispatch
   thresholds; memory measurements establish what fits rather than assuming a limit.
 - [ ] Adversarial routing, sampling, PLE hash/history/shard boundaries and quantization
   fixtures, including direct checks of each additional implementation variant.
@@ -72,3 +72,26 @@ New milestone evidence and any discovered failures will be recorded below.
   failure cleanup. All production safetensors loads now run this preflight validation.
 - Remaining loader work: validate every model-specific tensor shape and required tensor,
   exercise missing MTP heads, and broaden allocation-failure cleanup beyond the new reader.
+
+## Long-context and tensor metadata milestone
+
+- Sixteen full-model Python/native comparisons pass: Qwen at 9,999/10,007 tokens,
+  Nemotron at both lengths with tensor and forced SIMD, and Flash at 2,051/2,063 tokens;
+  each checks serial and neural drafting with context copies disabled. Every final-block
+  logit and all 16 continuation tokens match exactly. Memory figures are in COVERAGE.md.
+- Corrected the Flash oracle to call the original serving runtime's row-invariant head.
+  A remaining real mismatch was traced to PLE normalization: native had reused the MTP
+  fused RMS kernel, which changes fp32 reduction rounding. Following PLE's original
+  square/mean operations fixes long-context parity. Layer and per-block trace tools remain
+  available to reproduce and localize future discrepancies.
+- All 6,105 required tensor names/shapes/dtypes are validated against real checkpoints
+  and by production loaders. Thirty-eight CLI metadata rejection cases and fifteen
+  safety-enabled host tests pass. Broader allocation cleanup and MLX failure injection
+  remain open; metadata failures do not establish MLX-internal OOM cleanup coverage.
+- Additional focused PLE normalization fixtures detect the old implementation at 15
+  BF16 elements. Running them also exposed that the header reader rejected MLX's absent
+  metadata represented as null; the parser now accepts that optional representation.
+  All 89 Metal fixtures pass, including all 36 new normalization cases, and all 59
+  embedded kernel sources remain identical to upstream Python.
+- Remaining backend/oracle checks include Qwen long-context Python SIMD parity and the
+  Nemotron short code-prompt SIMD reference. Final performance measurements are pending.

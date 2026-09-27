@@ -56,11 +56,14 @@ pub const Header = struct {
         var it = h.parsed.value.object.iterator();
         while (it.next()) |entry| {
             const v = entry.value_ptr.*;
-            if (v != .object) return error.InvalidSafetensorHeader;
             if (std.mem.eql(u8, entry.key_ptr.*, "__metadata__")) {
+                // MLX serializes an absent optional metadata map as JSON null.
+                if (v == .null) continue;
+                if (v != .object) return error.InvalidSafetensorHeader;
                 for (v.object.values()) |value| if (value != .string) return error.InvalidSafetensorHeader;
                 continue;
             }
+            if (v != .object) return error.InvalidSafetensorHeader;
             const dt = v.object.get("dtype") orelse return error.InvalidSafetensorHeader;
             const dims = v.object.get("shape") orelse return error.InvalidSafetensorHeader;
             const offsets = v.object.get("data_offsets") orelse return error.InvalidSafetensorHeader;
@@ -227,4 +230,7 @@ test "safetensors reject malformed, overlapping, truncated and overflowing tenso
     defer scalar.deinit();
     try std.testing.expectEqual(@as(usize, 0), scalar.tensors.get("x").?.rank);
     try std.testing.expectEqual(@as(u64, 0), scalar.tensors.get("empty").?.len);
+    var mlx_header = try Header.parse(std.testing.allocator, "{\"__metadata__\":null,\"x\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}", 4);
+    defer mlx_header.deinit();
+    try std.testing.expectEqual(@as(usize, 1), mlx_header.tensors.count());
 }

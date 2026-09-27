@@ -16,8 +16,8 @@ This matrix distinguishes exercised behavior from physical-device validation.
 | Nemotron target | Mamba convolution/SSM, grouped norm, NoPE attention, top-6 routing, ReLU² experts, shared experts | 524,288 Python logits exact; verified rows and all 52 caches exact |
 | Nemotron MTP | Embedding/hidden fusion, attention, MoE, cloned draft cache | 32 sampled tokens match Python serial with both CPU and GPU samplers |
 | Nemotron SIMD | Row quantized projections and expert kernels; MLX SDPA | Forced SIMD verified rows, rollback and all 52 caches exact |
-| Nemotron long context | 128-wide tensor attention at 10K visible keys; SDPA otherwise | Kernel fixtures at 9,999 and 10,007 keys, serial/window exact |
-| Flash Next target | Four residual streams, hyper-connections, GDN, sparse attention, top-10 experts/shared gate | 248,320 Python logits exact; verified rows and all 48 caches exact |
+| Nemotron long context | 128-wide tensor attention at 10K visible keys; SDPA otherwise | Full-model Python logits and 16-token serial/MTP continuations exact at 9,999 and 10,007 tokens, both backends |
+| Flash Next target | Four residual streams, hyper-connections, GDN, sparse attention, top-10 experts/shared gate | Full-model Python logits and serial/MTP continuations exact at 2,051 and 2,063 tokens; all 48 caches checked separately |
 | Flash Next PLE | N-gram hashing/EOS reset, positional packed-row reads, gate, dilated convolution | Shipped hash constants checked; all 128 shard boundaries checked against MLX; rollback history/conv cache exact |
 | Flash Next MTP | Embedding and stream fusion, HC attention/MoE, separate output mixer | 16 sampled tokens match Python serial |
 | Flash sparse selection | Pool four keys, select top 512 blocks, include causal tail, merge attention | Prefixes 2,044/2,051/2,063; cold and populated pool, eight rows and rollback at every nonzero row |
@@ -33,8 +33,9 @@ loads/dispatches them through Zig/MLX-C. Tests fail on any bit mismatch.
 | Radix top-k | Vocabularies 31/4,097; k 1/16/31/64; deterministic ties; BF16 conversion of f32 input |
 | Tensor attention | D128/D256; 1/3/8 queries; 513/9,999/10,007 keys; cache views with unused trailing capacity; every batch row equals serial |
 | Sparse attention | Original fused Python attention with deterministic synthetic weights at actual Flash dimensions; pooled keys and projected outputs match; rejected rows do not affect continuation |
+| PLE normalization | 36 cases: 1/3/16 rows, zero/tiny/unit/large inputs, three seeds; exactly matches the original square/mean arithmetic and detects the former fused substitution |
 
-The fixtures use synthetic inputs to reach expensive context branches cheaply.
+All 89 fixtures pass on M5 Max. The fixtures use synthetic inputs to reach expensive context branches cheaply.
 The separate full-checkpoint tests establish model integration. Kernel export checks
 ensure embedded sources remain verbatim; source export alone is not a numerical test.
 
@@ -49,6 +50,9 @@ bash scripts/fetch-zig.sh
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
 .zig-toolchain/zig build test-drafts -Doptimize=safe
 .zig-toolchain/zig build test-checkpoint-files -Doptimize=safe
+.zig-toolchain/zig build test-model-schemas test-schema-failures -Doptimize=safe
+.zig-toolchain/zig build test-long-context -Doptimize=safe
+.zig-toolchain/zig build test-long-cache -Doptimize=safe
 .zig-toolchain/zig build test-ple -Doptimize=safe
 ```
 
@@ -64,7 +68,7 @@ Use `-Dcache-family=0|1|2` or `-Ddraft-family=0|1|2` to select Qwen, Nemotron or
 
 The shared acceptance policy is used by both DFlash trees and MTP chains. Host tests
 cover all 32 chain acceptance lengths against 33 output budgets, accepted/rejected/bonus
-EOS, and 1,000 deterministic random trees. The thirteen host tests pass with safety
+EOS, and 1,000 deterministic random trees. The fifteen host tests pass with safety
 checks, including four supported config fixtures and 129 invalid recipe mutations,
 safetensors parser allocation failures and all 128 PLE shard lookup boundaries.
 
@@ -111,8 +115,14 @@ the dtype/shape of all 384 PLE packed weight/scale/bias tensors and their total 
 bad payload lengths, wrong row buffer sizes, out-of-range rows, and files truncated
 after opening. Parser and file-opening checks inject failure at every Zig allocation.
 The dense loader now cleans up array/linear ownership if map insertion fails.
-These checks do not yet validate every model-specific tensor shape or inject failures
-inside MLX itself; those remain tracked gaps.
+All four fixed checkpoint recipes now validate required tensor names, shapes and dtypes
+before model transformations and inference kernels: 1,847 Qwen, 81 DFlash2, 763 Nemotron
+(including MTP), and 3,414 Flash tensors. `test-model-schemas` independently verifies
+all 6,105 against actual headers and index references. `test-schema-failures` passes
+38 native CLI rejection cases: missing/truncated files, missing tensors/MTP, bad
+dtype/rank/shape, missing or invalid index entries, unsafe paths and wrong shard references.
+The fifteen safety-enabled host tests also pass. Allocation-failure injection inside
+MLX and broader loader allocation cleanup remain open.
 
 `test-ple` independently loads each shard with MLX and compares its first, adjacent,
 middle, penultimate and final rows against native positional reads: 640 exact rows.
@@ -125,10 +135,38 @@ did not recur in the complete Flash draft matrix after this change.
 
 Physical validation is on one M5 Max with 128 GiB, with both normal and forced SIMD
 dispatch. Older Apple GPUs still require execution on those devices before claiming
-hardware qualification. Flash Next's short tests fit through positional PLE reads; long
-full-model context memory and throughput are not established on this machine.
+hardware qualification. Flash Next fits the tested 2,063-token context through positional
+PLE reads; this does not establish its maximum feasible context length on this machine.
 
 This is functional coverage of the three upstream Metal inference recipes. Native
 dispatch selects one implementation of each operation; historical or optional fused
 optimization variants are not all separate native execution modes. CUDA, HTTP serving,
 chat templates, vision, and disk prefix-cache persistence are outside this Metal port.
+
+## Full-model Python comparisons at attention thresholds
+
+`test-long-context` has passed 16 native serial/drafted comparisons against the original
+Python arithmetic. Every logit in the final prefill block is compared exactly, followed
+by all 16 generated tokens (Metal sampling, seed 5678, temperature .7, top-k 12, top-p .8).
+Context copies are disabled in drafted runs, so DFlash2/MTP heads execute.
+
+| Model/backend | Prompt lengths | Compared logits per final block | Native peak MLX bytes at longer prompt, drafting |
+| --- | --- | --- | ---: |
+| Qwen tensor + DFlash2 | 9,999 / 10,007 | 3,724,800 / 5,711,360 | 28,813,688,832 |
+| Nemotron tensor + MTP | 9,999 / 10,007 | 1,966,080 / 917,504 | 21,533,663,066 |
+| Nemotron forced SIMD + MTP | 9,999 / 10,007 | 1,966,080 / 917,504 | 20,460,568,482 |
+| Flash + MTP | 2,051 / 2,063 | 744,960 / 3,724,800 | 84,910,995,412 |
+
+These tests use repeating token IDs to bound the Python PLE oracle's resident shard set.
+Python keeps PLE tables sharded instead of concatenating another 32 GB copy. All original
+normalization, convolution, attention and projection arithmetic is retained. The oracle
+uses the serving runtime's row-invariant vocabulary projection, not the raw model's
+batch-dependent output matmul. These are correctness checks, not final engine benchmarks.
+
+The Flash comparison exposed a real normalization error after token 432: native PLE used
+the MTP RMS kernel, whose fp32 reduction differs from PLE's separate square/mean operations.
+Small BF16 differences entered recurrent state and eventually changed most logits. Native
+PLE now follows the original operation order; the strict long tests pass without tolerance.
+`tools/native_flash_trace.py` and `--trace-dir` compare 242 layer/projection intermediates;
+`--gdn-layer N` / `--trace-gdn N` trace one recurrent block across the entire prefill.
+Use `-Dlong-family=0|1|2` and optionally `-Dlong-tokens=N` to isolate a long-context case.

@@ -94,6 +94,7 @@ pub const Weights = struct {
             }
             try w.putArray(std.mem.span(key), value);
         }
+        try @import("schema.zig").validate(.dflash, &w.arrays, false);
         var it = w.arrays.iterator();
         while (it.next()) |e| {
             const name = e.key_ptr.*;
@@ -168,6 +169,7 @@ pub const Weights = struct {
                 try w.putArray(n[15..], value);
             }
         }
+        try @import("schema.zig").validate(.qwen, &w.arrays, false);
         // MLX-format checkpoints already carry shifted RMS weights and [C,4,1] convs.
         // Refuse raw HF tensors rather than silently applying the wrong normalization.
         if (mx.dim(try w.get("model.layers.0.linear_attn.conv1d.weight"), -1) != 1) return error.UnsanitizedCheckpoint;

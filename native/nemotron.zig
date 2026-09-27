@@ -41,9 +41,10 @@ pub const Model = struct {
         }
         try m.weights.load(io, dir, "");
         if (drafts) {
-            try m.weights.loadFile(io, try std.fmt.bufPrint(&buf, "{s}/mtp-4bit.safetensors", .{dir}), "mtp.", "");
+            m.weights.loadFile(io, try std.fmt.bufPrint(&buf, "{s}/mtp-4bit.safetensors", .{dir}), "mtp.", "") catch |err| return if (err == error.FileNotFound) error.MissingDraftHead else err;
             m.mtp = true;
         }
+        try @import("schema.zig").validate(.nemotron, &m.weights.arrays, drafts);
         // Small constants are prepared once; expert tables remain in their packed format.
         for (m.kinds, 0..) |kind, i| if (kind == 'M') {
             var s = mx.Scope{};

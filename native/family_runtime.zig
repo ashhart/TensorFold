@@ -15,12 +15,24 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var seed_set = false;
     var report: ?[]const u8 = null;
     var dump: ?[]const u8 = null;
+    var trace_dir: ?[]const u8 = null;
+    var trace_gdn: ?usize = null;
     var exact = false;
     var cache_stress = false;
+    var long_cache = false;
     var warm = false;
+    var copy_enabled = true;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         const key = args[i];
+        if (std.mem.eql(u8, key, "--check-long-cache")) {
+            long_cache = true;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--no-copy")) {
+            copy_enabled = false;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--check-cache-stress")) {
             cache_stress = true;
             continue;
@@ -50,15 +62,21 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         if (std.mem.eql(u8, key, "--prompt")) prompt = val else if (std.mem.eql(u8, key, "--tokens")) token_list = val else if (std.mem.eql(u8, key, "--max-tokens")) max_tokens = try std.fmt.parseInt(usize, val, 10) else if (std.mem.eql(u8, key, "--mtp-drafts")) drafts = try std.fmt.parseInt(usize, val, 10) else if (std.mem.eql(u8, key, "--temperature")) settings.temperature = try std.fmt.parseFloat(f64, val) else if (std.mem.eql(u8, key, "--top-k")) settings.top_k = try std.fmt.parseInt(usize, val, 10) else if (std.mem.eql(u8, key, "--top-p")) settings.top_p = try std.fmt.parseFloat(f64, val) else if (std.mem.eql(u8, key, "--seed")) {
             settings.seed = try std.fmt.parseInt(u64, val, 10);
             seed_set = true;
-        } else if (std.mem.eql(u8, key, "--report")) report = val else if (std.mem.eql(u8, key, "--dump-logits")) dump = val else return error.UnknownArgument;
+        } else if (std.mem.eql(u8, key, "--report")) report = val else if (std.mem.eql(u8, key, "--dump-logits")) dump = val else if (std.mem.eql(u8, key, "--trace-dir")) trace_dir = val else if (std.mem.eql(u8, key, "--trace-gdn")) trace_gdn = try std.fmt.parseInt(usize, val, 10) else return error.UnknownArgument;
         i += 1;
     }
     if (drafts > 15) return error.InvalidDraftBudget;
     try settings.validate();
     try mx.init();
     defer mx.shutdown();
-    var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress);
+    var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress and !long_cache);
     defer m.deinit();
+    if (trace_dir != null and !@hasField(M, "trace_dir")) return error.UnsupportedTrace;
+    if (trace_gdn) |layer_index| {
+        if (trace_dir == null or layer_index >= 48 or layer_index % 4 == 3) return error.InvalidTraceLayer;
+        if (@hasField(M, "trace_gdn")) m.trace_gdn = layer_index else return error.UnsupportedTrace;
+    }
+    if (long_cache) return @import("cache_checks.zig").checkLong(M, &m);
     if (cache_stress) return @import("cache_checks.zig").check(M, &m);
     if (exact) {
         try check(M, &m);
@@ -99,7 +117,9 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var off: usize = 0;
     while (off < tokens.items.len) {
         const n = @min(16, tokens.items.len - off);
+        if (@hasField(M, "trace_dir")) m.trace_dir = if (trace_gdn != null or off + n == tokens.items.len) trace_dir else null;
         var p = try m.forward(tokens.items[off..][0..n]);
+        if (@hasField(M, "trace_dir")) m.trace_dir = null;
         defer p.deinit();
         if (m.mtp) for (0..n) |j| {
             if (last.ctx != null) _ = try m.draftStep(&p.scope, last, tokens.items[off + j], &head_cache);
@@ -109,13 +129,13 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         const ids = try sampling.rows(&m.kernels, &p.scope, try p.scope.slice(p.logits, 0, @intCast(n - 1), @intCast(n)), &.{@intCast(off + n)}, settings);
         defer mx.allocator.free(ids);
         pending = ids[0];
-        if (dump) |file| {
+        if (dump) |file| if (off + n == tokens.items.len) {
             const z = try a.dupeSentinel(u8, file, 0);
             defer a.free(z);
             const f = try p.scope.cast(p.logits, mx.f32t);
             try mx.eval(f);
             try mx.check(mx.c.mlx_save(z, f));
-        }
+        };
         try m.commit(&p, n);
         off += n;
     }
@@ -142,7 +162,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             for (generated.items) |id| try history.append(a, @intCast(id));
             const budget = @min(drafts, max_tokens - generated.items.len);
             const copy = @import("copy.zig").propose(history.items, budget);
-            if (copy.len == budget and budget > 0) {
+            if (copy_enabled and copy.len == budget and budget > 0) {
                 @memcpy(window[1..][0..budget], copy.tokens[0..budget]);
                 n += budget;
             } else {
@@ -199,7 +219,11 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(generated.items), &digest, .{});
     std.debug.print("Generated {d} tokens in {d:.3}s ({d:.2} tok/s), {d} rounds, {d} accepted drafts\nSHA-256: {s}\n", .{ generated.items.len, seconds, @as(f64, @floatFromInt(generated.items.len)) / seconds, rounds, accepted, std.fmt.bytesToHex(digest, .lower) });
     if (report) |file| {
-        const bytes = try std.json.Stringify.valueAlloc(a, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .prefill_seconds = prefill, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        var peak: usize = 0;
+        var active: usize = 0;
+        try mx.check(mx.c.mlx_get_peak_memory(&peak));
+        try mx.check(mx.c.mlx_get_active_memory(&active));
+        const bytes = try std.json.Stringify.valueAlloc(a, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .prefill_seconds = prefill, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
         defer a.free(bytes);
         const f = try std.Io.Dir.cwd().createFile(io, file, .{});
         defer f.close(io);

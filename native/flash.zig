@@ -56,6 +56,9 @@ pub const Model = struct {
     position: i32 = 0,
     mtp: bool = false,
     centered: bool = true,
+    trace_dir: ?[]const u8 = null,
+    trace_layer: usize = 0,
+    trace_gdn: ?usize = null,
     ngram: @import("ngram.zig").NGram = undefined,
     ple_tables: ?@import("ple_tables.zig").Tables = null,
     pub const DraftCache = Cache;
@@ -75,6 +78,7 @@ pub const Model = struct {
         try m.weights.load(io, dir, "language_model.");
         m.mtp = drafts;
         if (drafts and !m.weights.has("mtp.fc_hidden.weight")) return error.MissingDraftHead;
+        try @import("schema.zig").validate(.flash, &m.weights.arrays, drafts);
         // Match the Python loader's storage-convention check on all 48 HC anchors.
         var means: [48]f64 = undefined;
         var above: usize = 0;
@@ -118,6 +122,19 @@ pub const Model = struct {
         var buf: [256]u8 = undefined;
         return m.weights.linear(&m.kernels, s, try std.fmt.bufPrint(&buf, "{s}.{s}", .{ base, suffix }), x, true);
     }
+    fn trace(m: *Model, s: *mx.Scope, label: []const u8, value: A) !void {
+        const dir = m.trace_dir orelse return;
+        var buf: [4096]u8 = undefined;
+        const path = if (m.trace_gdn) |layer_index| blk: {
+            if (m.trace_layer != layer_index or (!std.mem.eql(u8, label, "mixed") and !std.mem.eql(u8, label, "branch"))) return;
+            break :blk try std.fmt.bufPrint(&buf, "{s}/{d:0>6}-{d:0>2}-{s}.npy", .{ dir, @as(usize, @intCast(m.position)), m.trace_layer, label });
+        } else try std.fmt.bufPrint(&buf, "{s}/{d:0>2}-{s}.npy", .{ dir, m.trace_layer, label });
+        const zpath = try mx.allocator.dupeSentinel(u8, path, 0);
+        defer mx.allocator.free(zpath);
+        const value_f32 = try s.cast(value, mx.f32t);
+        try mx.eval(value_f32);
+        try mx.check(mx.c.mlx_save(zpath, value_f32));
+    }
     fn f(m: *Model, base: []const u8, suffix: []const u8) !A {
         return m.weights.field(base, suffix);
     }
@@ -136,6 +153,16 @@ pub const Model = struct {
         const rows: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(width)));
         const sc = try m.scale(s, name, "weight");
         return (try m.kernels.run(s, src.q4_rms_rows, &.{ try s.reshape(x, &.{ rows, width }), sc, try s.scalar(1e-6) }, &.{ ti("W", width), ti("G", group), ti("SW", mx.dim(sc, -1)) }, .{ 1024 * @divExact(width, group), rows, 1 }, .{ 1024, 1, 1 }, &.{.{ .shape = &.{ rows, width } }}))[0];
+    }
+    fn pleNorm(m: *Model, s: *mx.Scope, x: A, name: []const u8) !A {
+        // PLE uses the original CenteredRMSNorm's separate square/mean operations.
+        // The fused MTP RMS kernel changes fp32 reduction rounding before BF16 storage.
+        const y = try s.reshape(try s.cast(x, mx.f32t), &.{ mx.dim(x, 0), 4, 2560 });
+        var mean = mx.c.mlx_array_new();
+        const rc = mx.c.mlx_mean_axis(&mean, try s.unary(mx.c.mlx_square, y), -1, true, mx.stream);
+        const rinv = try s.unary(mx.c.mlx_rsqrt, try s.binary(mx.c.mlx_add, try s.result(rc, mean), try s.scalar(1e-6)));
+        const sc = try s.reshape(try m.scale(s, name, "weight"), &.{ 4, 2560 });
+        return s.cast(try s.reshape(try s.binary(mx.c.mlx_multiply, try s.binary(mx.c.mlx_multiply, y, rinv), sc), mx.shape(x)), mx.dtype(x));
     }
     fn hcNorm(m: *Model, s: *mx.Scope, h: A, branch: ?A, inject: A) ![5]A {
         const r = mx.dim(h, 0);
@@ -254,15 +281,15 @@ pub const Model = struct {
         const r: i32 = @intCast(tokens.len);
         const emb = try s.reshape(try m.ple_tables.?.gather(s, ids[0 .. tokens.len * 16]), &.{ r, 2560 });
         const base = "model.layers.1.ple";
-        const keys = try s.reshape(try m.centeredNorm(s, try m.lin(s, base, "key_proj", emb), base ++ ".norm_key", 2560), &.{ r, 4, 2560 });
+        const keys = try s.reshape(try m.pleNorm(s, try m.lin(s, base, "key_proj", emb), base ++ ".norm_key"), &.{ r, 4, 2560 });
         const values = try s.reshape(try m.lin(s, base, "value_proj", emb), &.{ r, 1, 2560 });
-        const queries = try s.reshape(try m.centeredNorm(s, h, base ++ ".norm_query", 2560), &.{ r, 4, 2560 });
+        const queries = try s.reshape(try m.pleNorm(s, h, base ++ ".norm_query"), &.{ r, 4, 2560 });
         var sum = mx.c.mlx_array_new();
         const rc = mx.c.mlx_sum_axis(&sum, try s.binary(mx.c.mlx_multiply, keys, queries), -1, true, mx.stream);
         var gate = try s.binary(mx.c.mlx_divide, try s.result(rc, sum), try s.cast(try s.scalar(@sqrt(@as(f32, 2560))), mx.bf16));
         gate = try s.binary(mx.c.mlx_multiply, try s.unary(mx.c.mlx_sign, gate), try s.unary(mx.c.mlx_sqrt, try s.binary(mx.c.mlx_maximum, try s.unary(mx.c.mlx_abs, gate), try s.cast(try s.scalar(1e-6), mx.bf16))));
         const gated = try s.reshape(try s.binary(mx.c.mlx_multiply, try s.unary(mx.c.mlx_sigmoid, gate), values), &.{ r, 10240 });
-        const normed = try m.centeredNorm(s, gated, base ++ ".norm_conv", 2560);
+        const normed = try m.pleNorm(s, gated, base ++ ".norm_conv");
         const tail = if (cache.ple.ctx != null) cache.ple else try s.zeros(&.{ 9, 10240 }, mx.bf16);
         const conv_in = try s.cat(&.{ tail, normed }, 0);
         record.ple = conv_in;
@@ -276,10 +303,14 @@ pub const Model = struct {
         var buf: [256]u8 = undefined;
         const hn = try m.hcNorm(s, h, null, mx.empty);
         const mix = try m.hcProject(s, try std.fmt.bufPrint(&buf, "{s}.attn_hyper_connection", .{base}), hn[0], hn[1], true);
+        try m.trace(s, "mixed", mix[0]);
         const branch = if (linear) try m.gdn(s, try std.fmt.bufPrint(&buf, "{s}.linear_attn", .{base}), mix[0], cache, record) else try m.attention(s, try std.fmt.bufPrint(&buf, "{s}.self_attn", .{base}), mix[0], cache, record);
+        try m.trace(s, "branch", branch);
         const post = try m.hcNorm(s, hn[0], branch, mix[1]);
         const mm = try m.hcProject(s, try std.fmt.bufPrint(&buf, "{s}.mlp_hyper_connection", .{base}), post[0], post[1], true);
+        try m.trace(s, "moe-input", mm[0]);
         const out = try m.moe(s, try std.fmt.bufPrint(&buf, "{s}.mlp", .{base}), post[0], mm[0], mm[1]);
+        try m.trace(s, "output", out[0]);
         return out[0];
     }
     pub fn forward(m: *Model, tokens: []const i32) !Pass {
@@ -292,7 +323,9 @@ pub const Model = struct {
         var h = try s.cat(&.{ e, e, e, e }, -1);
         var buf: [256]u8 = undefined;
         for (0..48) |i| {
+            m.trace_layer = i;
             if (i == 1) h = try m.ple(s, h, tokens, m.cache[i], &p.records[i]);
+            try m.trace(s, "input", h);
             h = try m.layer(s, try std.fmt.bufPrint(&buf, "model.layers.{d}", .{i}), h, m.cache[i], &p.records[i], i % 4 != 3);
             try mx.evalMany(&.{h}, true);
         }
@@ -304,7 +337,10 @@ pub const Model = struct {
     pub fn head(m: *Model, s: *mx.Scope, h: A) !A {
         const hn = try m.hcNorm(s, h, null, mx.empty);
         const mixed = try m.hcProject(s, "model.hyper_connection_mixer", hn[0], hn[1], false);
-        return m.weights.linear(&m.kernels, s, "lm_head", mixed[0], true);
+        try m.trace(s, "head-mixed", mixed[0]);
+        const logits = try m.weights.linear(&m.kernels, s, "lm_head", mixed[0], true);
+        try m.trace(s, "logits", logits);
+        return logits;
     }
     pub fn draftHead(m: *Model, s: *mx.Scope, h: A) !A {
         const hn = try m.hcNorm(s, h, null, mx.empty);
@@ -398,5 +434,25 @@ pub const Model = struct {
             }
         }
         std.debug.print("PASS: {d} Flash sparse-boundary fixtures, all 8 rows, pooling and rollback continuations match exactly.\n", .{cases.value.len});
+    }
+    pub fn checkPleNorm(io: std.Io, dir: []const u8) !void {
+        try mx.init();
+        defer mx.shutdown();
+        var m = Model{};
+        defer m.deinit();
+        var path: [4096]u8 = undefined;
+        try m.weights.loadFile(io, try std.fmt.bufPrint(&path, "{s}/arrays.safetensors", .{dir}), "", "");
+        const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/cases.json", .{dir}));
+        defer mx.allocator.free(bytes);
+        const cases = try std.json.parseFromSlice([]const []const u8, mx.allocator, bytes, .{});
+        defer cases.deinit();
+        if (cases.value.len == 0) return error.EmptyFixtures;
+        for (cases.value) |key| {
+            var s = mx.Scope{};
+            defer s.deinit();
+            const actual = try m.pleNorm(&s, try m.weights.field(key, "x"), key);
+            try @import("sampling_checks.zig").equal(&s, actual, try m.weights.field(key, "expected"));
+        }
+        std.debug.print("PASS: {d} PLE normalization fixtures match the original square/mean arithmetic exactly\n", .{cases.value.len});
     }
 };

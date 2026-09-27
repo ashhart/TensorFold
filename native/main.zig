@@ -19,8 +19,10 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-attention")) return @import("attention_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-checkpoint-files")) return @import("safetensors.zig").checkFiles(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-ple")) return @import("ple_tables.zig").Tables.check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-ple_norm")) return @import("flash.zig").Model.checkPleNorm(io, args[2]);
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-model-schema")) return @import("schema.zig").checkCheckpoint(std.meta.stringToEnum(@import("schema.zig").Kind, args[2]) orelse return error.UnsupportedModel, io, args[3]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
-        std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--metal-simd] [--metal-sampling]\n  [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--report PATH] [--dump-logits PATH] [--check-exact]\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n", .{});
+        std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--no-copy] [--metal-simd] [--metal-sampling]\n  [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--report PATH] [--dump-logits PATH] [--check-exact] [--check-cache-stress] [--check-long-cache]\n  [--trace-dir EXISTING_DIR (Flash only)]\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n  tensorfold check-model-schema qwen|dflash|nemotron|flash MODEL_DIR\n", .{});
         return;
     }
     {
@@ -43,10 +45,20 @@ pub fn main(init: std.process.Init) !void {
     var explicit_seed = false;
     var exact = false;
     var cache_stress = false;
+    var long_cache = false;
     var warmup = false;
+    var copy_enabled = true;
     var report: ?[]const u8 = null;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--check-long-cache")) {
+            long_cache = true;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "--no-copy")) {
+            copy_enabled = false;
+            continue;
+        }
         if (std.mem.eql(u8, args[i], "--check-cache-stress")) {
             cache_stress = true;
             continue;
@@ -84,6 +96,7 @@ pub fn main(init: std.process.Init) !void {
     var timer = Stopwatch.init(io);
     var m = try model.Model.init(io, args[2]);
     defer m.deinit();
+    if (long_cache) return @import("cache_checks.zig").checkLong(model.Model, &m);
     if (cache_stress) return @import("cache_checks.zig").check(model.Model, &m);
     if (exact) {
         try @import("verification.zig").check(&m);
@@ -146,13 +159,13 @@ pub fn main(init: std.process.Init) !void {
         const ids = try sampling.rows(&m.kernels, &p.scope, p.logits, positions[0..n], settings);
         defer mx.allocator.free(ids);
         pending = ids[n - 1];
-        if (dump) |path| {
+        if (dump) |path| if (off + n == tokens.items.len) {
             const z = try allocator.dupeSentinel(u8, path, 0);
             defer allocator.free(z);
             const f = try p.scope.cast(p.logits, mx.f32t);
             try mx.eval(f);
             try mx.check(mx.c.mlx_save(z, f));
-        }
+        };
         try m.commit(&p, rows[0..n]);
         if (draft) |*d| try d.absorb(&m, &p, rows[0..n]);
         off += n;
@@ -175,7 +188,7 @@ pub fn main(init: std.process.Init) !void {
         var stage = Stopwatch.init(io);
         history.shrinkRetainingCapacity(tokens.items.len);
         for (generated.items) |id| try history.append(allocator, @intCast(id));
-        const copy = if (draft != null) @import("copy.zig").propose(history.items, max_tokens - generated.items.len) else @import("drafter.zig").Proposal{};
+        const copy = if (draft != null and copy_enabled) @import("copy.zig").propose(history.items, max_tokens - generated.items.len) else @import("drafter.zig").Proposal{};
         const proposal = if (copy.len >= @min(15, max_tokens - generated.items.len)) copy else if (draft) |*d| try d.propose(&m, pending, @min(15, max_tokens - generated.items.len), settings) else @import("drafter.zig").Proposal{};
         draft_ns += stage.read();
         stage.reset();
@@ -221,7 +234,11 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Stage totals: draft {d:.3}s, target+sample {d:.3}s, commit+absorb {d:.3}s\n", .{ @as(f64, @floatFromInt(draft_ns)) / 1e9, @as(f64, @floatFromInt(forward_ns)) / 1e9, @as(f64, @floatFromInt(commit_ns)) / 1e9 });
     std.debug.print("Generated {d} tokens in {d:.3}s ({d:.2} tok/s), {d} rounds, {d} accepted drafts\nIDs: {any}\n", .{ generated.items.len, seconds, @as(f64, @floatFromInt(generated.items.len)) / seconds, rounds, accepted, generated.items });
     if (report) |path| {
-        const content = try std.json.Stringify.valueAlloc(allocator, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        var peak: usize = 0;
+        var active: usize = 0;
+        try mx.check(mx.c.mlx_get_peak_memory(&peak));
+        try mx.check(mx.c.mlx_get_active_memory(&active));
+        const content = try std.json.Stringify.valueAlloc(allocator, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
         defer allocator.free(content);
         const f = try std.Io.Dir.cwd().createFile(io, path, .{});
         defer f.close(io);
@@ -238,4 +255,5 @@ test {
     _ = @import("acceptance.zig");
     _ = @import("safetensors.zig");
     _ = @import("ple_tables.zig");
+    _ = @import("schema.zig");
 }

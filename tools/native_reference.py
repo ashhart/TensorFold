@@ -13,7 +13,9 @@ import numpy as np
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="build/models/Qwen3.8-27B-MLX-4bit")
-    parser.add_argument("--tokens", default="1,2,3,4")
+    parser.add_argument("--tokens", help="Exact prompt IDs, also honored during generation")
+    parser.add_argument("--dump-logits", type=Path, help="Save the final prefill block before generation")
+    parser.add_argument("--metal-sampling", action="store_true")
     parser.add_argument("--output", default="build/native-checks/reference.npy")
     parser.add_argument("--compare", nargs=2)
     parser.add_argument("--compare-reports", nargs="+")
@@ -56,31 +58,47 @@ def main():
     lane_qmm.install(model, rows=128, tile=True, wide=True)
     core = model.language_model.model
     head = model.language_model.lm_head
-    tokens = [int(x) for x in args.tokens.split(",")]
+    tokens = ([int(x) for x in args.tokens.split(",")] if args.tokens else
+              tokenizer.encode(args.prompt, add_special_tokens=False) if args.generate else [1, 2, 3, 4])
+    if not tokens:
+        raise ValueError("Empty prompt")
     cache = make_prompt_cache(model)
+    # Same 128-row grid as the native CLI; commit the whole prompt before decoding.
+    for start in range(0, len(tokens), 128):
+        block = tokens[start:start + 128]
+        logits, record = lane_tree.tree_forward(core, head, block, list(range(-1, len(block)-1)), cache, start)
+        mx.eval(logits)
+        lane_tree.commit_tree(cache, record, list(range(len(block))), len(block), start)
+        if start % 1024 == 0:
+            print(f"Prefill {start + len(block)}/{len(tokens)}", flush=True)
+    if args.dump_logits:
+        args.dump_logits.parent.mkdir(parents=True, exist_ok=True)
+        np.save(args.dump_logits, np.array(logits.astype(mx.float32)))
     if args.generate:
         from tensorfold.engine.exact_sampling import Sampling, sample_rows
         settings = Sampling(args.seed, temperature=args.temperature, top_k=args.top_k, top_p=args.top_p)
-        tokens = tokenizer.encode(args.prompt, add_special_tokens=False)
-        logits, record = lane_tree.tree_forward(core, head, tokens, list(range(-1, len(tokens)-1)), cache, 0)
-        lane_tree.commit_tree(cache, record, list(range(len(tokens))), len(tokens), 0)
+        def select(logits, position):
+            last = logits[0, -1:]
+            if args.metal_sampling:
+                from tensorfold.engine.gpu_sampling import sample
+                return int(sample(last, settings if args.temperature else None, [position]).item())
+            return sample_rows(last, [position], settings)[0] if args.temperature else int(mx.argmax(last).item())
         position = len(tokens)
-        pending = sample_rows(logits[0, -1:], [position], settings)[0] if args.temperature else int(mx.argmax(logits[0, -1]).item())
+        pending = select(logits, position)
         generated = [pending]
         while len(generated) < args.generate and pending not in (248044, 248046):
             logits, record = lane_tree.tree_forward(core, head, [pending], [-1], cache, position)
             lane_tree.commit_tree(cache, record, [0], 1, position)
             position += 1
-            pending = sample_rows(logits[0], [position], settings)[0] if args.temperature else int(mx.argmax(logits[0, -1]).item())
+            pending = select(logits, position)
             generated.append(pending)
         out = Path(args.output)
         out.parent.mkdir(parents=True, exist_ok=True)
         sha = hashlib.sha256(np.array(generated, dtype="<u4").tobytes()).hexdigest()
-        out.write_text(json.dumps(dict(prompt_tokens=tokens, tokens=generated, token_sha256=sha)))
+        out.write_text(json.dumps(dict(prompt_tokens=tokens, tokens=generated, token_sha256=sha,
+                                      peak_mlx_bytes=mx.get_peak_memory(), active_mlx_bytes=mx.get_active_memory())))
         print(f"Saved {out}: {len(generated)} tokens, SHA-256 {sha}")
         return
-    logits, _ = lane_tree.tree_forward(core, head, tokens, list(range(-1, len(tokens)-1)), cache, 0)
-    mx.eval(logits)
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     np.save(out, np.array(logits.astype(mx.float32)))

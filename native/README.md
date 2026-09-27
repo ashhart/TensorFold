@@ -55,6 +55,7 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--drafter DIR` | Enable DFlash2 and context-copy proposals; omit for serial decoding |
 | `--mtp-drafts N` | Nemotron/Flash Next: chained MTP budget, default 3, maximum 15 |
 | `--no-drafts` | Nemotron/Flash Next: disable MTP and decode serially |
+| `--no-copy` | Disable context-copy proposals to exercise the neural draft head |
 | `--metal-simd` | Force the non-tensor Metal path for coverage on M5 |
 | `--metal-sampling` | Use the original fp32 Metal sampler instead of CPU f64 sampling |
 | `--temperature T` | Default 1; zero selects greedy decoding |
@@ -65,6 +66,9 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--dump-logits FILE.npy` | Save float32 logits from the final prompt block |
 | `--check-exact` | Run the family's GPU verification/partial-commit parity check and exit |
 | `--check-cache-stress` | Check every accepted prefix, cache snapshots, rejection, reset and memory cycles |
+| `--check-long-cache` | Repeat cache/rollback checks after random 10K-token or sparse-attention prefixes |
+| `--trace-dir DIR` | Flash: save the final prefill block's layer intermediates in an existing directory |
+| `--trace-gdn N` | With `--trace-dir`: trace recurrent layer N's input/output across all prefill blocks |
 
 Text goes to stdout when decoding finishes; diagnostics go to stderr. Report parent
 directories must already exist. Dense Qwen prefills in 128-token chunks; Nemotron and
@@ -103,6 +107,7 @@ path; attention layers gather only its K/V rows.
 | `model.zig` | Complete target forward, caches, accepted-path commit |
 | `checkpoint.zig` | Shared safetensors reader and affine quantized projections |
 | `safetensors.zig`, `ple_tables.zig` | Validated checkpoint headers and bounded positional PLE row reads |
+| `schema.zig`, `schemas/` | Required tensor names, shapes and dtypes for all four fixed checkpoint recipes |
 | `nemotron.zig` | Mamba, NoPE attention, routed/shared experts, MTP and rollback |
 | `flash.zig`, `ngram.zig` | Hyper-connections, GDN, sparse attention, MoE, PLE and MTP |
 | `family_runtime.zig` | Chained verification and completion for Nemotron/Flash Next |
@@ -204,13 +209,17 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
 .zig-toolchain/zig build test-drafts -Doptimize=safe
 .zig-toolchain/zig build test-checkpoint-files -Doptimize=safe
+.zig-toolchain/zig build test-model-schemas test-schema-failures -Doptimize=safe
+.zig-toolchain/zig build test-long-context -Doptimize=safe
+.zig-toolchain/zig build test-long-cache -Doptimize=safe
 .zig-toolchain/zig build test-ple -Doptimize=safe
 ```
 
 `test-metal` generates independent oracles through the original Python implementation
 and runs native comparisons: 44 sampling/top-k cases, three sparse-attention threshold
 cases with every row and rollback continuation checked, and six tensor-attention
-cases including 128-wide heads and 10K-token strided caches. Omit `-Dmetal-tensors=true`
+cases including 128-wide heads and 10K-token strided caches, plus 36 PLE normalization
+cases that detect the former fused-reduction substitution. Omit `-Dmetal-tensors=true`
 on M1–M4. `test-models` loads the downloaded models sequentially and checks every
 family's caches; it also forces the dense Qwen and Nemotron SIMD paths. It requires
 the large checkpoints and enough unified memory. See [COVERAGE.md](COVERAGE.md).
@@ -220,6 +229,15 @@ oversized or invalid headers, missing files and allocation failures. The loader 
 header geometry and byte offsets before passing any checkpoint to MLX. `test-ple`
 compares five rows at the beginning, middle and end of every PLE shard against an
 independent MLX load/dequantization, freeing each oracle shard before proceeding.
+
+`test-model-schemas` checks all 6,105 required tensors using headers only. The same
+metadata contracts run in production before model transformations or kernel dispatch.
+`test-schema-failures` exercises 38 missing-file/tensor/MTP, malformed-index, truncation,
+shape, rank and dtype failures through the native metadata CLI. It creates sparse
+fixtures under `build/native-checks`; original model files are never changed.
+Regenerate schemas with `tools/export_native_schemas.py`; `--check` verifies them.
+The long-context targets test Qwen/Nemotron around 10K tokens and Flash around the
+sparse-attention threshold. See [COVERAGE.md](COVERAGE.md) for current execution results.
 
 `tools/native_reference.py --generate 128 --output FILE.json` creates the Python
 completion report for the default prompt and seed 1234. Use native `--seed 1234 --report`
