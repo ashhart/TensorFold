@@ -18,7 +18,7 @@ from typing import Sequence
 import torch
 
 from . import glue
-from .forward import Buffers, State, _mm, candidates, finish, layer_forward
+from .forward import Buffers, State, _embed, _mm, candidates, finish, layer_forward
 from .weights import Weights
 
 
@@ -42,7 +42,7 @@ def mtp_compute(w: Weights, st: State, b: Buffers, n: int, *, last_only: bool = 
 
     c = w.cfg
     m = w.mtp
-    glue.embed(b.ids[:n], *w.embed, c.hidden, copies=1, out=b.mtp_e[:n])
+    _embed(w, b.ids[:n], 1, b.mtp_e[:n])
     en, xe = glue.rmsnorm(b.mtp_e[:n], m.norm_e, c.eps, out=b.mixed[:n], xs=b.xs_mixed[:n])
     _mm(en, m.fc_e, xe, b.mtp_eo[:n], b)
     hn, xh = glue.rmsnorm(b.mtp_in[:n], m.norm_h, c.eps, out=b.mtp_hn[:n], xs=b.mtp_xh[:n])

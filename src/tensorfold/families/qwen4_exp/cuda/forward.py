@@ -233,7 +233,17 @@ def _gather(w: Weights, b: Buffers, part: torch.Tensor, flat: torch.Tensor, R: i
 
 
 def _mm(x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, out: torch.Tensor, b: Buffers) -> torch.Tensor:
-    return qmm.matmul(x, q, xs, out=out, part=b.part)
+    if isinstance(q, qmm.Q4):
+        return qmm.matmul(x, q, xs, out=out, part=b.part)
+    return q(x, out)          # an EXL3 checkpoint's matrix (``exl3.X3``, ``exl3.F16``, ``exl3.Stack``)
+
+
+def _embed(w: Weights, ids: torch.Tensor, copies: int, out: torch.Tensor) -> torch.Tensor:
+    if len(w.embed) == 1:     # an EXL3 checkpoint's unquantized embedding
+        from .exl3 import embed
+
+        return embed(ids, w.embed[0], w.cfg.hidden, copies, out)
+    return glue.embed(ids, *w.embed, w.cfg.hidden, copies=copies, out=out)
 
 
 def hc_block(hc: HC, b: Buffers, R: int, eps: float, streams: int, low: int, mode: int, inject_prev,
@@ -251,7 +261,7 @@ FUSED_ROWS = 16      # decode windows: the read-out in 3 kernels; wider windows 
 def _readout(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject) -> None:
     """normed streams -> down -> SiLU / inject -> up -> mix: b.mixed [R, D] and its group sums."""
 
-    if R <= FUSED_ROWS:
+    if R <= FUSED_ROWS and isinstance(hc.down, qmm.Q4):
         _readout_fused(hc, b, h, R, eps, streams, low, inject)
     else:
         _readout_plain(hc, b, h, R, eps, streams, low, inject)
@@ -283,7 +293,10 @@ def _down_act(hc: HC, b: Buffers, R: int, streams: int, low: int, inject) -> Non
     With a split K the slice sum is fused into the activation kernel (the same bits as reduce, then act)."""
 
     out = b.dn[:R] if hc.down.n == b.dn.shape[1] else b.dn_mix[:R]
-    got = qmm.matmul(b.normed[:R], hc.down, b.xs_normed[:R], out=out, part=b.part, reduce=False)
+    if isinstance(hc.down, qmm.Q4):
+        got = qmm.matmul(b.normed[:R], hc.down, b.xs_normed[:R], out=out, part=b.part, reduce=False)
+    else:
+        got = hc.down.partials(b.normed[:R])          # EXL3 checkpoint: fp16 weights, fp32 slices [SK, R, N]
     if got.dim() == 3:
         glue.hc_reduce_act(got, b.act[:R], b.xs_act[:R], inject, streams, low)
     else:
@@ -306,6 +319,8 @@ def gdn_block(layer: LayerW, w: Weights, st: State, b: Buffers, R: int) -> None:
 def _out_proj(w: Weights, b: Buffers, x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, R: int):
     """A block's output projection: (1, bf16 branch) on one GPU; (3, gathered fp32 partials) across ranks."""
 
+    if not isinstance(q, qmm.Q4):                     # EXL3 checkpoint (one GPU): the bf16 branch
+        return 1, q(x, b.branch[:R])
     if w.comm is None:
         got = qmm.matmul(x, q, xs, out=b.branch[:R], part=b.part, reduce=False)
         if got.dim() == 3:
@@ -336,9 +351,17 @@ def ple_block(layer: LayerW, w: Weights, st: State, b: Buffers, R: int) -> None:
 
     c = w.cfg
     p = layer.ple
-    glue.ple_embed(R, b.ple_w, b.ple_s, b.ple_b, p.ngram.heads, p.ngram.dims, b.ple_emb[:R], b.xs_ple[:R])
-    _mm(b.ple_emb[:R], p.key, b.xs_ple[:R], b.ple_keys[:R], b)
-    _mm(b.ple_emb[:R], p.value, b.xs_ple[:R], b.ple_vals[:R], b)
+    if w.x3 is not None:                              # EXL3 checkpoint: the rows' codec, fp16 key/value weights
+        from .exl3 import ple_rows
+
+        emb = ple_rows(R, w.x3.ple_dev, p.table.head_bias, p.ngram.heads, p.ngram.dims, p.table.bits,
+                       w.x3.ple_emb[:R])
+        p.key(emb, b.ple_keys[:R])
+        p.value(emb, b.ple_vals[:R])
+    else:
+        glue.ple_embed(R, b.ple_w, b.ple_s, b.ple_b, p.ngram.heads, p.ngram.dims, b.ple_emb[:R], b.xs_ple[:R])
+        _mm(b.ple_emb[:R], p.key, b.xs_ple[:R], b.ple_keys[:R], b)
+        _mm(b.ple_emb[:R], p.value, b.xs_ple[:R], b.ple_vals[:R], b)
     glue.ple_gate(b.ple_keys[:R], b.ple_vals[:R], b.h[:R], p.norm_key, p.norm_query, b.ple_gated[:R],
                   b.ple_pss[:R], c.eps, c.streams)
     glue.ple_conv(b.ple_gated[:R], b.ple_pss[:R], p.norm_conv, st.ple_tail, p.conv, b.h[:R], b.h[:R],
@@ -366,6 +389,14 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> tuple:
     buf = b.moe
     sub = _Sub(buf, R)
     moe_mod.router(b.mixed[:R], m.router, buf.logits[:R])
+    if w.x3 is not None:                              # EXL3 checkpoint: each expert at its own width, one GPU
+        from tensorfold.cuda.exl3.experts import routed
+
+        # the routed kernel groups the window itself (its own scratch), so ``select``'s grouping is skipped:
+        # it is one serial kernel over every (row, slot) and its result was never read on this path
+        moe_mod.select_rows(buf.logits[:R], sub, w.cfg.top_k, w.cfg.experts)
+        y = routed(b.mixed[:R], sub.pick, None, m.experts, w.x3.moe, None, R)
+        return 2, y.view(R, sub.slots, -1), sub.wts
     moe_mod.select(buf.logits[:R], sub, w.cfg.top_k, w.cfg.experts)
     qmm.moe_gateup(b.mixed[:R], b.xs_mixed[:R], m.experts, sub.group, buf.act, buf.axs)
     qmm.moe_down(buf.act, buf.axs, m.experts, sub.group, buf.y)
@@ -487,7 +518,12 @@ def stage(w: Weights, st: State, b: Buffers, tokens: Sequence[int]) -> int:
             p = layer.ple
             ids = p.ngram.ids(st.ple_history, toks)
             st.ple_last = (st.ple_history, toks)
-            stage_ple_rows(p, b, ids)
+            if w.x3 is not None:
+                from .exl3 import stage_ple
+
+                stage_ple(p.table, w.x3, ids)
+            else:
+                stage_ple_rows(p, b, ids)
     b.staged.record()
     return R
 
@@ -496,7 +532,7 @@ def compute(w: Weights, st: State, b: Buffers, R: int, *, logits: bool = True, c
     """The GPU work of a forward on staged rows (capturable: static buffers, device-side positions)."""
 
     c = w.cfg
-    glue.embed(b.ids[:R], *w.embed, c.hidden, copies=c.streams, out=b.h[:R])
+    _embed(w, b.ids[:R], c.streams, b.h[:R])
     pending = None
     ctx = st.pos + R if context is None else context
     for layer in w.layers:

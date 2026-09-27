@@ -15,7 +15,7 @@ MODEL_TYPES = ("qwen4_exp",)
 TITLE = "Qwen3.8 Flash Next"
 LANES = True
 # 4-bit weights in groups of 32 (what the fused kernels read), with the checkpoint's MTP head kept
-MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP",)
+MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3")
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
 KERNEL_VERSION = "v1"
 # MLX command buffers: MLX ends a buffer once the bytes bound in it pass MLX_MAX_MB_PER_BUFFER, and every expert
@@ -36,9 +36,15 @@ def has_mtp(model_dir: Path) -> bool:
 
 
 def check(model_dir: Path) -> None:
-    from tensorfold.families import quantization, read_config
+    from tensorfold.families import EXL3_QUANT, quant_method, quantization, read_config
 
-    bits, group = quantization(read_config(model_dir))
+    config = read_config(model_dir)
+    if quant_method(config) == EXL3_QUANT:
+        # an EXL3 pack (the CUDA engine, any codebook and per-tensor width): only the MTP head to report
+        if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
+            print("[tensorfold] this EXL3 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
+        return
+    bits, group = quantization(config)
     if (bits, group) != (4, 32):
         raise ValueError(f"TensorFold's Flash Next kernels read 4-bit weights in groups of 32; this checkpoint has "
                          f"{bits}-bit weights in groups of {group}. Use {MODELS[0]}.")
@@ -65,6 +71,9 @@ def engine_settings(model: Any) -> dict[str, Any]:
 
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
 CUDA_QUANTIZATION = (4, 32)
+# ...and EXL3 packs (``cuda/exl3.py``): every codebook, a bit width per tensor (mixed-K packs included), one GPU
+QUANT_METHODS = {"cuda": ("mlx", "exl3")}
+EXL3_VARIANT = "any"
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,

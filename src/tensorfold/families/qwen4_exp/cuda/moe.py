@@ -140,15 +140,29 @@ class MoEBuffers:
         self.y = torch.empty((rows, slots, cfg.hidden_size), dtype=torch.float32, device=device)
 
 
-def select(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int) -> None:
-    """Each row's experts and weights (rows in parallel), then the window's distinct experts and members."""
+def select_rows(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int) -> None:
+    """Each row's experts and weights, rows in parallel: buf.pick, buf.wts. The window's grouping (``group``) is
+    separate because an EXL3 checkpoint's experts group themselves inside their own kernel."""
 
     rows = logits.shape[0]
     block = triton.next_power_of_2(experts + 1)
     _topk_rows[(rows,)](logits, buf.pick, buf.wts, NE=experts, NL=logits.shape[1], TOPK=top_k, SLOTS=top_k + 1,
                         BLOCK=block, SLOTP=triton.next_power_of_2(top_k + 1), num_warps=4)
+
+
+def group(buf: MoEBuffers, rows: int, top_k: int, experts: int) -> None:
+    """The window's distinct experts of every row (``select_rows`` first): buf.group."""
+
+    block = triton.next_power_of_2(experts + 1)
     _group[(1,)](buf.pick, buf.group.ids, buf.group.count, buf.group.members, rows, NE=experts, SLOTS=top_k + 1,
                  MAXU=buf.maxu, MAXM=buf.group.members.shape[1], BLOCK=block, num_warps=8)
+
+
+def select(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int) -> None:
+    """Each row's experts and weights (rows in parallel), then the window's distinct experts and members."""
+
+    select_rows(logits, buf, top_k, experts)
+    group(buf, logits.shape[0], top_k, experts)
 
 
 def moe(x: torch.Tensor, xs: torch.Tensor, router_rows: torch.Tensor, ex: Experts, buf: MoEBuffers, cfg,
