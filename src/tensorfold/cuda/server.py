@@ -25,6 +25,8 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorfold.server.http import parse_glm_tool_call_block
+
 _THINK_END = "</think>"
 _CALL_OPEN, _CALL_CLOSE = "<tool_call>", "</tool_call>"
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.IGNORECASE | re.DOTALL)
@@ -105,7 +107,8 @@ def _tool_name(tool: dict[str, Any]) -> str:
 
 
 def parse_tool_calls(text: str, tools: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]] | None]:
-    """Qwen ``<tool_call><function=name><parameter=k>v</parameter></function></tool_call>`` or JSON bodies."""
+    """Qwen ``<tool_call><function=name><parameter=k>v</parameter></function></tool_call>``, GLM
+    ``<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`` or JSON bodies."""
 
     if not tools:
         return text, None
@@ -131,6 +134,10 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]]) -> tuple[str, list[
             if m:
                 name = m.group(1).strip()
                 args = {p.group(1).strip(): p.group(2) for p in _TOOL_PARAMETER_BLOCK_RE.finditer(m.group(2))}
+            else:
+                glm = parse_glm_tool_call_block(block, tools)
+                if glm is not None:
+                    name, args = glm
         if not name or str(name).lower() not in known:
             residue.append(match.group(0))
             continue
