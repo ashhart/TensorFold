@@ -1,8 +1,4 @@
-"""Several streams' recurrent layers without tensor units: one gdn_pre and one recurrence launch for all their rows.
-
-Each row runs ``row_forward``'s one-stream arithmetic on its own stream's conv tail and state (bound as separate
-buffers, ``GROUP`` streams a launch), so a stream's rows keep the bits of its own forward.
-"""
+"""Batch recurrent layers without tensor units, preserving standalone arithmetic through each stream's own conv tail and state."""
 
 from __future__ import annotations
 
@@ -10,6 +6,8 @@ import hashlib
 from typing import Any, Sequence
 
 import mlx.core as mx
+
+from tensorfold.kernels.inputs import ints
 
 GROUP = 8          # streams a launch binds: Metal allows 31 buffers a kernel
 
@@ -95,15 +93,13 @@ def _plan(parents: Sequence[tuple[int, ...]], n_keep: int) -> tuple[mx.array, mx
             flat.extend(rows_parents)
         if len(_plans) > 4096:
             _plans.clear()
-        hit = _plans[key] = tuple(lane_tree.kernel_ints(a) for a in (windows, seg, offs, widths, flat))
+        hit = _plans[key] = tuple(ints(a) for a in (windows, seg, offs, widths, flat))
     return hit
 
 
 def recur(gdn: Any, y: mx.array, caches: Sequence[Any], parents: Sequence[tuple[int, ...]], chain: bool,
           n_keep: int) -> tuple[mx.array, list[tuple[mx.array, ...]]]:
-    """Up to ``GROUP`` streams' rows of the stacked [qkv | z | b | a] projection ``y`` [1, R, zs] (stream after
-    stream) through the conv and the recurrence from each stream's own conv tail and state: the recurrence output
-    [1, R, Hv, Dv] and each stream's (q, k, v, g, beta, state, conv state, y rows, state after, conv tails)."""
+    """Return recurrence output [1, R, Hv, Dv] and per-stream commit data from stacked rows, using each stream's own conv tail and state."""
 
     streams = len(caches)
     nk, nv, dk, dv = gdn.num_k_heads, gdn.num_v_heads, gdn.head_k_dim, gdn.head_v_dim

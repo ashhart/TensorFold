@@ -1,12 +1,4 @@
-"""Tree attention for the windows of up to 8 streams in one launch per kernel; one stream is the same call.
-
-Stream s's window rows sit last in its own KV buffers (logical keys P_s .. P_s + W_s - 1 after the cache's
-update). Row v attends to keys [0, P_s) and its path's window keys at logical positions P_s + depth, with
-``lane_attention``'s arithmetic, fixed by absolute key position: every stream's committed whole tiles in one
-shared-part launch (16-row tiles of one stream's (query, head) rows), every node's remaining keys in one tail
-launch, then one merge. The kernels are lane_attention's sources with only the stream lookups changed, so a row's
-bits depend only on its query, its stream's keys and its path, alone or beside other streams.
-"""
+"""Batch tree attention with lane_attention arithmetic fixed by absolute key position, preserving each stream's standalone bits."""
 
 from __future__ import annotations
 
@@ -15,14 +7,14 @@ from typing import Any, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels.inputs import ints
 from tensorfold.kernels.qwen.dense.v1 import lane_attention as la
-from tensorfold.kernels.qwen.dense.v1.lane_tree import MAX_DEPTH, kernel_ints, tree_paths
+from tensorfold.kernels.qwen.dense.v1.lane_tree import MAX_DEPTH, tree_paths
 
 MAX_STREAMS = 8          # K and V buffers per launch (Metal binds at most 31 buffers)
 MG, MS = 8, 12           # meta: MG global ints, then MS ints per stream
 
-# lane_attention's partial (direct P), tail and tree-merge kernels, each row's arithmetic unchanged; only where a
-# row finds its stream's keys, key counts and first rows differs (every row == its one-stream call, tested)
+# Reuse lane_attention arithmetic, changing only stream key lookups, key counts and first-row offsets.
 _PARTIAL = r"""
   const ushort lane = thread_index_in_simdgroup;
   const ushort sg = simdgroup_index_in_threadgroup;
@@ -325,11 +317,7 @@ def _kernel(name: str) -> Any:
 
 
 class Plan:
-    """One round's layout for up to ``MAX_STREAMS`` streams, shared by every attention layer of the forward.
-
-    ``parents[s]``: each window row's parent row (-1 for the root); ``starts[s]``: the stream's committed keys
-    (its root's position). Rows are stream by stream; per-layer KV buffers come with each call.
-    """
+    """Share per-stream parents, committed-key counts and row offsets across attention layers; KV buffers are supplied per call."""
 
     def __init__(self, parents: Sequence[Sequence[int]], starts: Sequence[int], heads: int, kv_heads: int) -> None:
         if not 1 <= len(parents) <= MAX_STREAMS or len(parents) != len(starts):
@@ -361,9 +349,9 @@ class Plan:
             ca_max, ncb_max = max(ca_max, CA), max(ncb_max, NCB)
         base[:7] = [len(parents), ca_max, tiles, ncb_max, total, 16 * tiles, ca_max]
         self.base, self.rows, self.tiles, self.ca, self.ncb = base, total, tiles, ca_max, ncb_max
-        self.tile_stream = kernel_ints(tile_stream)
+        self.tile_stream = ints(tile_stream)
         self.q_rows = mx.array(rows, dtype=mx.int32)
-        self.nodes = kernel_ints(nodes)
+        self.nodes = ints(nodes)
         self.paths = mx.array(paths, dtype=mx.int32)
         self._meta: dict[tuple[int, ...], mx.array] = {}
         self._spare: mx.array | None = None
@@ -379,7 +367,7 @@ class Plan:
         return self._meta[strides]
 
     def spare(self) -> mx.array:
-        """An unread K/V input for unused stream slots (8+ elements: one kernel source, see ``kernel_ints``)."""
+        """An unread K/V input for unused stream slots (8+ elements: one kernel source, see ``kernels.inputs``)."""
 
         if self._spare is None:
             self._spare = mx.zeros((16,), dtype=mx.bfloat16)
@@ -387,8 +375,7 @@ class Plan:
 
 
 def tree_sdpa(queries: mx.array, kv: Sequence[tuple[mx.array, mx.array]], scale: float, plan: Plan) -> mx.array:
-    """Attention [1, H, R, D] of every stream's window rows: ``queries`` [1, H, R, D] (rows stream by stream),
-    ``kv[s]`` stream s's whole K and V buffers [1, HKV, capacity, D] (row-contiguous), its window rows last."""
+    """Attend grouped queries [1, H, R, D] over each stream's whole KV buffers [1, HKV, capacity, D], with window rows last."""
 
     _, H, R, D = (int(v) for v in queries.shape)
     HKV = plan.kv_heads

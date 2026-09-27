@@ -1,15 +1,4 @@
-"""Attention for verify windows and draft trees without tensor units: every row gets the bits of the one-row step at
-its position.
-
-A window row's attention runs over the committed keys [0, P) and then its own path: the key at position P + i is
-window row path[i] (a chain's row t has path 0..t; a tree node's path runs through its ancestors). The keys are cut
-into chunks of CK positions counted from 0, and a chunk's keys over SPLIT simdgroups by position (interleaved); per
-simdgroup and query head, an online softmax over its keys in ascending position (lane l holding dimensions
-[8 l, 8 l + 8)); the simdgroups' partials merge in simdgroup order, then the chunks' in chunk order. Which rows ride in the window, and where the window starts, change nothing a row computes: a serial step
-at the same position (a one-row window, its own row at P) runs the same chunks over the same key values in the same
-order. So serial decoding through this kernel is the reference drafted windows and trees reproduce, as
-``lane_attention`` is on the M5.
-"""
+"""Row-exact window and tree attention uses absolute-position chunks, interleaved simdgroup keys, and fixed softmax merge order."""
 
 from __future__ import annotations
 
@@ -18,7 +7,7 @@ from typing import Any, Sequence
 
 import mlx.core as mx
 
-from tensorfold.kernels.qwen.dense.v1 import lane_tree
+from tensorfold.kernels.inputs import ints
 
 CK = 128           # keys a chunk (fixed: part of the arithmetic)
 SPLIT = 4          # simdgroups a query head's chunk is split over, keys interleaved (fixed: part of the arithmetic)
@@ -165,9 +154,7 @@ def paths_of(parents: Sequence[int]) -> tuple[list[int], list[list[int]]]:
 
 def row_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: float, start: int,
              parents: Sequence[int]) -> mx.array:
-    """queries [1, H, W, D] of a window whose rows sit at ``start`` + their depth; keys and values [1, HKV, cap, D]
-    (a KV cache's whole buffers: row-contiguous, ``cap`` at least start + W) hold the committed keys at
-    [0, start) and the window's rows at start + row. -> [1, H, W, D]."""
+    """Attend queries [1, H, W, D] over committed keys and each row's path in whole KV buffers [1, HKV, cap, D], with cap >= start + W."""
 
     _, H, W, D = (int(s) for s in queries.shape)
     HKV, CAP = int(keys.shape[1]), int(keys.shape[2])
@@ -180,9 +167,8 @@ def row_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: float, 
     if CAP < int(start) + W:
         raise ValueError(f"row_sdpa: the buffers hold {CAP} positions, the window reaches {int(start) + W}")
     dims = mx.array([int(start), W, CAP, nch, maxd], dtype=mx.int32)
-    depth_a = _const(("depth", tuple(parents)), lambda: lane_tree.kernel_ints(depths))
-    path_a = _const(("path", tuple(parents)), lambda: lane_tree.kernel_ints(
-        [r for p in paths for r in p + [0] * (maxd - len(p))]))
+    depth_a = _const(("depth", tuple(parents)), lambda: ints(depths))
+    path_a = _const(("path", tuple(parents)), lambda: ints([r for p in paths for r in p + [0] * (maxd - len(p))]))
     scale_a = _const(("scale", float(scale)), lambda: mx.array([float(scale)], dtype=mx.float32))
     if G * SPLIT * 32 > 1024:
         raise ValueError(f"row_sdpa: {G} query heads a kv head need {G * SPLIT * 32} threads a threadgroup")

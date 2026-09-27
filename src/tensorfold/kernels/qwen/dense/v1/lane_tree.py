@@ -1,10 +1,4 @@
-"""Draft-tree bookkeeping and the one-stream entry points of the lane decoder.
-
-A draft tree's nodes share a committed prefix and branch after it; each node is verified with the bits serial
-decoding would give it along its own path. The forward and commit are ``lane_multi``'s (one stream is a multi-stream
-call with one stream); this module keeps the tree helpers, the one-stream recurrence kernels the decoder without
-tensor units builds on (``row_forward``), and the small-array rule every kernel input follows.
-"""
+"""Draft-tree bookkeeping and the lane decoder's one-stream entry points (its forward and commit are lane_multi's)."""
 
 from __future__ import annotations
 
@@ -13,23 +7,10 @@ from typing import Any, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels.inputs import MIN_ELEMENTS, ints
+
 MAX_DEPTH = 128         # rows of a window (trees up to 32 rows; chains up to 128)
 MAX_TREE = 32
-
-# MLX 0.31 declares a custom kernel's input of fewer than 8 elements in the constant address space and a larger one in
-# device memory, under one kernel name. When a name's source changes, MLX rebuilds its library and drops the old
-# pipeline, which command buffers (made with unretained references) may still hold: windows of 5 and 13 rows in one
-# command buffer (several streams in one forward) faulted the GPU, and a stream whose window crossed 8 rows recompiled
-# the kernels. Index arrays handed to a kernel are padded to 8 or more elements, so each kernel name has one source.
-KERNEL_MIN_ELEMENTS = 8
-
-
-def kernel_ints(values: Sequence[int]) -> mx.array:
-    """int32 values for a custom kernel, padded with zeros to ``KERNEL_MIN_ELEMENTS`` (kernels read only their own)."""
-
-    out = [int(v) for v in values]
-    out += [0] * max(0, KERNEL_MIN_ELEMENTS - len(out))
-    return mx.array(out, dtype=mx.int32)
 
 
 _TREE_SOURCE = r"""
@@ -173,10 +154,7 @@ def tree_paths(parents: Sequence[int]) -> tuple[list[int], list[list[int]]]:
 
 def gated_delta_tree(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: mx.array,
                      state: mx.array, parents: Sequence[int]) -> mx.array:
-    """Per-node outputs [1, W, Hv, Dv] of the recurrence walked from ``state`` along each path.
-
-    q, k: [1, W, Hk, Dk]; v: [1, W, Hv, Dv]; g, beta: [1, W, Hv]; state: [1, Hv, Dv, Dk].
-    """
+    """Walk each path from state [1, Hv, Dv, Dk], using q/k [1, W, Hk, Dk], v [1, W, Hv, Dv] and g/beta [1, W, Hv], to return [1, W, Hv, Dv]."""
 
     _, W, Hk, Dk = (int(s) for s in k.shape)
     Hv, Dv = int(v.shape[2]), int(v.shape[3])
@@ -187,7 +165,7 @@ def gated_delta_tree(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: m
     maxw = 1 if chain else (16 if W <= 16 else MAX_TREE)  # per-thread state slots (compiled variants)
     y = _kernel("tree")(
         inputs=[mx.contiguous(q), mx.contiguous(k), mx.contiguous(v), mx.contiguous(g), mx.contiguous(beta),
-                mx.contiguous(state), kernel_ints(parents), mx.array([W], dtype=mx.int32)],
+                mx.contiguous(state), ints(parents), mx.array([W], dtype=mx.int32)],
         template=[("InT", q.dtype), ("Dk", Dk), ("Dv", Dv), ("Hk", Hk), ("Hv", Hv), ("MAXW", maxw), ("CHAIN", chain)],
         grid=(32, Dv, Hv), threadgroup=(32, 4, 1),
         output_shapes=[(1, W, Hv, Dv)], output_dtypes=[q.dtype])[0]
@@ -202,7 +180,7 @@ def _conv_windows(parents: Sequence[int], n_keep: int) -> mx.array:
     for path in paths:
         rows = list(range(n_keep)) + [n_keep + r for r in path]
         windows.append(rows[-(n_keep + 1):])
-    while len(windows) * (n_keep + 1) < KERNEL_MIN_ELEMENTS:     # one source per kernel name (see kernel_ints)
+    while len(windows) * (n_keep + 1) < MIN_ELEMENTS:        # one source per kernel name (kernels.inputs)
         windows.append([0] * (n_keep + 1))
     return mx.array(windows, dtype=mx.int32)
 
@@ -214,8 +192,7 @@ HIDDEN_SINK: list | None = None
 def tree_forward(core: Any, head: Any, tokens: Sequence[int], parents: Sequence[int], cache: list[Any],
                  start: int, *, pipeline_layers: int = 4, last_only: bool = False,
                  first_alone: bool = True) -> tuple[mx.array, list[Any]]:
-    """Logits [1, W, V] for one stream's tree window whose root sits at position ``start``, and its commit record
-    (``lane_multi.multi_tree_forward`` with one stream: the kernels several streams share)."""
+    """Return logits [1, W, V] and a commit record for a tree rooted at start, using lane_multi's shared kernels."""
 
     from tensorfold.kernels.qwen.dense.v1 import lane_multi
 
@@ -249,5 +226,5 @@ def commit_tree(cache: list[Any], record: list[Any], path: Sequence[int], window
     lane_multi.commit_streams([cache], [record], [path], [window], [start])
 
 
-__all__ = ["KERNEL_MIN_ELEMENTS", "MAX_DEPTH", "MAX_TREE", "accept_path", "commit_tree", "gated_delta_tree",
-           "kernel_ints", "replay_path", "tree_forward", "tree_paths"]
+__all__ = ["MAX_DEPTH", "MAX_TREE", "accept_path", "commit_tree", "gated_delta_tree", "replay_path", "tree_forward",
+           "tree_paths"]

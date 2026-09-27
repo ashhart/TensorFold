@@ -1,12 +1,4 @@
-"""The lane decoder for GPUs without tensor units (M1 to M4): the M5 lane decoder's structure over a row-exact
-matmul (``row_matmul``) and glue kernels (``row_glue``).
-
-Every kernel treats a row on its own, so a row's bits never depend on the rows beside it: serial steps, verify
-windows, several streams' windows in one forward and prompt chains all give a row the same bits. Serial decoding
-goes through this forward too, so it is the reference drafted rounds reproduce. Attention runs query by query over
-exactly the keys the serial step sees (``exact_attention``); ``TF_ROW_ATTENTION=1`` uses ``row_attention``, which
-takes draft trees.
-"""
+"""Decode without tensor units using row-independent arithmetic, with serial steps as the reference for windows and streams."""
 
 from __future__ import annotations
 
@@ -15,6 +7,7 @@ from typing import Any, Callable, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels.inputs import ints
 from tensorfold.kernels.qwen.dense.v1 import row_matmul
 from tensorfold.kernels.qwen.dense.v1.row_glue import _chain, add_norm, gated_delta, gdn_post, gdn_pre, mlp_act
 from tensorfold.kernels.qwen.dense.v1.row_matmul import WINDOW_ROWS, logits, project, project_stack, stack_of
@@ -24,14 +17,12 @@ from tensorfold.kernels.qwen.dense.v1.row_matmul import WINDOW_ROWS, logits, pro
 PROMPT_ROWS = 128
 
 
-# Attention through ``row_attention`` (chains and draft trees; serial steps too, so it is the reference); off: MLX's
-# one-query kernel query by query (``exact_attention``, chains only)
+# TF_ROW_ATTENTION selects row-exact tree attention; otherwise use exact_attention query by query for chains.
 ROW_ATTENTION = os.environ.get("TF_ROW_ATTENTION", "0") == "1"
 
 
 class Record(list):
-    """One stream's commit record from a forward (``lane_tree.commit_tree``'s list of layer entries), with where its
-    window sat: ``start`` (its first row's position), ``width`` (its rows) and ``parents``."""
+    """Record one stream's layer commits and its window start, width and parent indices."""
 
     start: int = 0
     width: int = 0
@@ -39,8 +30,7 @@ class Record(list):
 
 
 class _Rows:
-    """The streams of one forward, rows grouped by stream: stream s holds rows [offsets[s], offsets[s] + widths[s]),
-    its first row at position ``starts[s]``; each row's position is its stream's start plus its depth."""
+    """Group rows by stream; each row's absolute position is its stream start plus its tree depth."""
 
     __slots__ = ("offsets", "widths", "parents", "chains", "starts", "records", "positions", "windows", "single")
 
@@ -114,8 +104,7 @@ def _attend(attn: Any, queries: mx.array, keys: mx.array, values: mx.array, cach
 
 
 def _attention(attn: Any, x: mx.array, items: Sequence[Any], rows: _Rows) -> mx.array:
-    """Qwen3-Next attention for every stream's rows (per-row RoPE positions; each stream's rows over its own keys):
-    the input of o_proj."""
+    """Return Qwen3-Next attention inputs to o_proj using per-row RoPE positions and each stream's own keys."""
 
     B, L, _ = x.shape
     H, nkv = attn.num_attention_heads, attn.num_key_value_heads
@@ -153,8 +142,7 @@ def _attention(attn: Any, x: mx.array, items: Sequence[Any], rows: _Rows) -> mx.
 
 def _recur(gdn: Any, y: mx.array, cache: Any, parents: tuple[int, ...], chain: bool, windows: mx.array,
            record: list[Any], n_keep: int) -> mx.array:
-    """One stream's rows of the stacked [qkv | z | b | a] projection ``y`` through the conv and the recurrence from
-    its own conv tail and state: the recurrence's output [1, w, Hv, Dv]."""
+    """Return recurrence output [1, w, Hv, Dv] from stacked [qkv | z | b | a] rows and one stream's conv tail and state."""
 
     conv_state = cache[0] if cache[0] is not None else mx.zeros((1, n_keep, gdn.conv_dim), dtype=y.dtype)
     state = cache[1]
@@ -198,9 +186,7 @@ def _gdn(gdn: Any, x: mx.array, items: Sequence[Any], rows: _Rows) -> mx.array:
 
 
 def commit(cache: list[Any], record: list[Any], path: Sequence[int], window: int, start: int) -> None:
-    """Keep only ``path``'s rows of the recorded window: attention keys moved to their slots and trimmed, conv tails
-    the forward's row after ``path[-1]``, recurrent states the recurrence's own (a chain kept whole) or replayed over
-    the path."""
+    """Keep path rows by relocating attention keys, selecting the final conv tail, and retaining or replaying the recurrence state."""
 
     from tensorfold.kernels.qwen.dense.v1 import lane_tree
 
@@ -231,7 +217,7 @@ def commit(cache: list[Any], record: list[Any], path: Sequence[int], window: int
             item[1] = state_out
         else:
             if rows is None:
-                rows, count = lane_tree.kernel_ints(path), mx.array([keep], dtype=mx.int32)
+                rows, count = ints(path), mx.array([keep], dtype=mx.int32)
             item[1] = lane_tree.replay_path(q, k, v, g, beta, state0, rows, count)
         item[0] = conv_tails[last:last + 1]
         item.advance(keep)
@@ -240,8 +226,7 @@ def commit(cache: list[Any], record: list[Any], path: Sequence[int], window: int
 
 
 def keep_rows(cache: list[Any], record: Record, keep: int) -> None:
-    """After a chain window's forward: keep its first ``keep`` rows (attention keys trimmed, conv tail and recurrent
-    state exactly as after row keep - 1). ``commit`` for a prefix of the window."""
+    """Keep a chain window's prefix with caches and recurrent state exactly as after row keep - 1."""
 
     commit(cache, record, list(range(int(keep))), record.width, record.start)
 
@@ -262,8 +247,7 @@ def _token_ids(windows: Sequence[Any]) -> mx.array:
 def _rows_forward(core: Any, windows: Sequence[Any], parents: Sequence[Sequence[int]], caches: Sequence[list[Any]],
                   starts: Sequence[int], *, pipeline_layers: int = 4, first_alone: bool = True
                   ) -> tuple[mx.array, _Rows]:
-    """Every stream's window in one pass: the final-normed rows [1, R, D] and the streams (their records). Row-wise
-    work runs once over all rows; attention and the recurrent layers run per stream over its own caches."""
+    """Return final-normed rows [1, R, D] and stream records, sharing row-wise work while keeping attention and recurrent caches per stream."""
 
     widths = [len(p) for p in parents]
     if len(windows) != len(parents) or len(caches) != len(parents) or len(starts) != len(parents):
@@ -308,8 +292,7 @@ def _rows_forward(core: Any, windows: Sequence[Any], parents: Sequence[Sequence[
 
 def forward(core: Any, head: Any, tokens: Sequence[int], parents: Sequence[int], cache: list[Any], start: int, *,
             pipeline_layers: int = 4, last_only: bool = False, first_alone: bool = True) -> tuple[mx.array, Record]:
-    """Logits [1, W, V] for one window whose root sits at ``start``, and its commit record. Attention caches take
-    the rows now; recurrent states wait for ``commit``."""
+    """Return logits [1, W, V] and a commit record; attention caches take rows immediately, while recurrent states wait for commit."""
 
     from tensorfold.kernels.qwen.dense.v1 import lane_tree
 
@@ -326,8 +309,7 @@ def forward(core: Any, head: Any, tokens: Sequence[int], parents: Sequence[int],
 def multi_forward(core: Any, head: Any, windows: Sequence[Any], parents: Sequence[Sequence[int]],
                   caches: Sequence[list[Any]], starts: Sequence[int], *, pipeline_layers: int = 4,
                   first_alone: bool = True) -> tuple[mx.array, list[Record], list[int]]:
-    """Several streams' windows in one forward, rows grouped by stream: logits [1, R, V], each stream's record
-    (``commit`` it on the stream's caches) and each stream's first row. Every row keeps its stream-alone bits."""
+    """Return logits [1, R, V], commit records and row offsets for grouped streams, preserving each stream's standalone bits."""
 
     x, rows = _rows_forward(core, windows, parents, caches, starts, pipeline_layers=pipeline_layers,
                             first_alone=first_alone)
@@ -337,8 +319,7 @@ def multi_forward(core: Any, head: Any, windows: Sequence[Any], parents: Sequenc
 def hidden_rows(core: Any, windows: Sequence[Any], caches: Sequence[list[Any]], *,
                 starts: Sequence[int] | None = None, parents: Sequence[Sequence[int]] | None = None,
                 pipeline_layers: int = 4, first_alone: bool = True) -> tuple[mx.array, list[Record]]:
-    """A family round's forward: final-normed rows [1, R, D] of every stream's chain window (``logits`` gives the
-    head) and each stream's record for ``keep_rows``. ``starts`` default to each stream's attention cache length."""
+    """Return final-normed chain rows [1, R, D] and keep_rows records; starts default to each stream's attention cache length."""
 
     if starts is None:
         starts = [next((int(c.offset) for c in cache if hasattr(c, "keys")), 0) for cache in caches]
@@ -353,10 +334,7 @@ def hidden_rows(core: Any, windows: Sequence[Any], caches: Sequence[list[Any]], 
 def check_streams(core: Any, head: Any, make_cache: Callable[[], list[Any]], copy: Callable[[list[Any]], list[Any]],
                   mixes: Sequence[Sequence[int]] = ((1, 1), (1, 4), (8, 8), (3, 1, 8, 5), (16, 2)),
                   prefixes: Sequence[int] = (32, 21, 40, 9)) -> tuple[bool, list[str]]:
-    """Whether several streams in one forward give every row the logits of its stream's window alone, bit for bit,
-    and every stream's caches after keeping part of its window equal the caches of its own round. Streams start
-    from different prompts (lengths ``prefixes``) and windows of the widths in ``mixes``. Returns (all equal,
-    failures)."""
+    """Return equality and failures for batched versus standalone logits and partial-window cache commits across prompt lengths and window widths."""
 
     def arrays(cache: list[Any]) -> list[mx.array]:
         out = []

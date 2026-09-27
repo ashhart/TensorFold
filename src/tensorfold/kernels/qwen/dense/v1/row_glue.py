@@ -1,5 +1,4 @@
-"""The pre-M5 lane decoder's glue kernels: norms, the recurrent layers' conv window and recurrence, activations.
-Each treats a row on its own."""
+"""Row-independent norms, conv windows, recurrence and activations for the decoder without tensor units."""
 
 from __future__ import annotations
 
@@ -8,6 +7,7 @@ from typing import Any, Callable, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels.inputs import ints
 from tensorfold.kernels.qwen.dense.v1.row_matmul import WINDOW_ROWS
 
 # lane_glue's arithmetic without the M5 matmul's group sums and row padding, reading stacked rows in place
@@ -70,8 +70,7 @@ _MLP_ACT = r"""
 """
 
 def _gdn_pre_source() -> str:
-    """lane_glue's gdn_pre reading the stacked [qkv | z | b | a] rows in place (qkv at 0, b at BO, a at AO, rows ZS
-    apart), which also writes the conv tail after every row."""
+    """Read stacked [qkv | z | b | a] rows in place with lane_glue arithmetic and write each row's conv tail."""
 
     from tensorfold.kernels.qwen.dense.v1 import lane_glue
     from tensorfold.kernels.qwen.dense.v1.lane_fuse import _replace_once
@@ -105,8 +104,7 @@ def _tree_source() -> str:
 """
 
 
-# lane_tree's step arithmetic for a chain (the tree kernel's bits), the row count compiled in and the next row's
-# inputs loaded under the current step
+# Use lane_tree step arithmetic for chains, compiling the row count and loading the next inputs during each step.
 _CHAIN = r"""
         auto n = thread_position_in_grid.z;
         auto hv_idx = n % Hv;
@@ -248,8 +246,7 @@ def mlp_act(gu: mx.array) -> mx.array:
 
 def gdn_pre(y: mx.array, conv_state: mx.array, conv_weight: mx.array, windows: mx.array, a_log: mx.array,
             dt_bias: mx.array, *, nk: int, nv: int, dk: int, dv: int) -> tuple[mx.array, ...]:
-    """q, k [1, W, nk, dk], v [1, W, nv, dv], g [1, W, nv] fp32, beta [1, W, nv] and the conv tail after each row
-    [W, taps - 1, C], from the stacked [qkv | z | b | a] rows ``y``."""
+    """Return q/k [1, W, nk, dk], v [1, W, nv, dv], g [1, W, nv] fp32, beta [1, W, nv], and conv tails [W, taps - 1, C] from stacked rows."""
 
     zs = int(y.shape[-1])
     W = y.size // zs
@@ -272,9 +269,7 @@ def gdn_pre(y: mx.array, conv_state: mx.array, conv_weight: mx.array, windows: m
 
 def gated_delta(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: mx.array, state: mx.array,
                 parents: Sequence[int], *, chain: bool | None = None) -> tuple[mx.array, mx.array]:
-    """``lane_tree.gated_delta_tree`` (each node's output, the recurrence walked from ``state`` along its path),
-    plus for a chain the state after its last row. ``chain``: whether ``parents`` is a chain, when the caller has
-    checked the parents already (the forward does, once a window)."""
+    """Walk each node's path from state and return its output, plus the final state for chains; chain may be supplied after parent validation."""
 
     from tensorfold.kernels.qwen.dense.v1 import lane_tree
 
@@ -293,7 +288,7 @@ def gated_delta(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: mx.arr
             output_shapes=[(1, W, Hv, Dv), tuple(state.shape)], output_dtypes=[q.dtype, mx.float32]))
     # per-thread state slots: a chain keeps one; a tree one a node (fewer registers for small trees)
     maxw = 1 if chain else (8 if W <= 8 else (16 if W <= 16 else lane_tree.MAX_TREE))
-    parents_a = _const(("parents", tuple(parents)), lambda: lane_tree.kernel_ints(parents))
+    parents_a = _const(("parents", tuple(parents)), lambda: ints(parents))
     nodes = _const(("nodes", W), lambda: mx.array([W], dtype=mx.int32))
     y, state_out = _kernel("tree")(
         inputs=[q, k, v, g, beta, state, parents_a, nodes],

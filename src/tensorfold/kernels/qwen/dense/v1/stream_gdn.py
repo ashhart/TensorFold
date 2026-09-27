@@ -1,9 +1,4 @@
-"""The recurrent layers' kernels for the rows of up to 8 streams in one launch each: conv window, tree recurrence, commit.
-
-One launch runs ``lane_fuse``'s gdn_pre over every row: a row's conv reads its own stream's conv state
-(the last taps - 1 inputs before its window) and its tree path's rows, and a row's bits depend only on those
-inputs, so a stream alone and beside other streams gets the same bits. Serial rounds call it with one stream.
-"""
+"""Batch conv, recurrence and commits using each stream's own state and tree paths, preserving standalone bits."""
 
 from __future__ import annotations
 
@@ -12,12 +7,12 @@ from typing import Any, Sequence
 
 import mlx.core as mx
 
-from tensorfold.kernels.qwen.dense.v1.lane_tree import kernel_ints, tree_paths
+from tensorfold.kernels.inputs import ints
+from tensorfold.kernels.qwen.dense.v1.lane_tree import tree_paths
 
 MAX_STREAMS = 8          # conv-state buffers per launch
 
-# lane_fuse's gdn_pre (lane_glue's arithmetic, b and a read from the stacked [z | b | a] rows); a row takes its
-# stream's conv state and reads window rows at their place among all streams' rows
+# Use lane_fuse gdn_pre arithmetic with each stream's conv state and window rows in the grouped layout.
 _PRE = r"""
   // one simdgroup per (row w, head): q heads [0, NK), k heads [NK, 2 NK), v heads [2 NK, 2 NK + NV)
   const uint lane = thread_index_in_simdgroup;
@@ -86,8 +81,7 @@ def _kernel() -> Any:
 
 
 class ConvPlan:
-    """Each row's conv inputs for streams whose windows sit stream by stream (``parents[s]``, parents first):
-    the last ``n_keep`` + 1 rows of [stream's conv state; its path], as indices into [state rows; all rows]."""
+    """Index each row's final n_keep + 1 conv inputs from its stream's conv state and ancestor path into state rows plus all window rows."""
 
     def __init__(self, parents: Sequence[Sequence[int]], n_keep: int) -> None:
         if not 1 <= len(parents) <= MAX_STREAMS:
@@ -103,16 +97,13 @@ class ConvPlan:
                 streams.append(s)
             first += len(rp)
         self.rows, self.streams = first, len(parents)
-        self.windows = kernel_ints(flat)
-        self.row_stream = kernel_ints(streams)
+        self.windows = ints(flat)
+        self.row_stream = ints(streams)
 
 
 def gdn_pre(qkv: mx.array, states: Sequence[mx.array], conv_weight: mx.array, plan: ConvPlan, zba: mx.array,
             a_log: mx.array, dt_bias: mx.array, *, nk: int, nv: int, dk: int, dv: int) -> tuple[mx.array, ...]:
-    """q, k [1, R, nk, dk], v [1, R, nv, dv], g [1, R, nv] fp32, beta [1, R, nv] for every stream's rows.
-
-    ``qkv`` [1, R, C] and ``zba`` [1, R, nv * dv + 2 nv] hold all rows; ``states[s]`` stream s's conv state
-    [1, taps - 1, C]."""
+    """Return q/k [1, R, nk, dk], v [1, R, nv, dv], g [1, R, nv] fp32, beta [1, R, nv] from grouped projections and per-stream conv states."""
 
     R = int(qkv.shape[-2])
     C = int(qkv.shape[-1])
@@ -133,8 +124,7 @@ def gdn_pre(qkv: mx.array, states: Sequence[mx.array], conv_weight: mx.array, pl
         output_dtypes=[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, qkv.dtype]))
 
 
-# the tree recurrence (mlx_lm's gated_delta_step, verbatim): nodes in row order, parents first, each one step from
-# its parent's state; one threadgroup column per (stream, head), each stream from its own committed state
+# Walk nodes parents-first from each stream's committed state using mlx_lm gated_delta_step arithmetic.
 _TREE = r"""
         auto n = thread_position_in_grid.z;                 // (stream, head)
         const int st = int(n) / Hv;
@@ -190,8 +180,7 @@ _TREE = r"""
 
 MAX_TREE = 32            # a branching window's rows (per-thread state slots); chains take up to 128
 
-# lane_tree's replay (mlx_lm's gated_delta_step, verbatim): each stream's state walks its kept rows, found among all
-# streams' rows; one threadgroup column per (stream, head)
+# Replay each stream's kept rows with lane_tree arithmetic, one threadgroup column per stream and head.
 _REPLAY = r"""
         auto n = thread_position_in_grid.z;                 // (stream, head)
         const int st = int(n) / Hv;
@@ -267,8 +256,7 @@ def _commit_kernel(name: str) -> Any:
 
 
 class TreePlan:
-    """Each stream's window among all rows (``parents[s]``: its rows' parents, -1 for the root, parents first) for
-    the tree recurrence; shared by every recurrent layer of the forward."""
+    """Share each stream's window and parent indices across recurrent layers, with parents first and -1 denoting the root."""
 
     def __init__(self, parents: Sequence[Sequence[int]]) -> None:
         if not 1 <= len(parents) <= MAX_STREAMS:
@@ -287,15 +275,12 @@ class TreePlan:
             raise ValueError(f"stream_gdn: windows of {widest} rows (trees take up to {MAX_TREE}, chains 128)")
         self.streams, self.rows, self.chain = len(parents), len(flat), chain
         self.slots = 1 if chain else (16 if widest <= 16 else MAX_TREE)   # per-thread state slots (compiled variants)
-        self.parents, self.meta = kernel_ints(flat), kernel_ints(meta)
+        self.parents, self.meta = ints(flat), ints(meta)
 
 
 def tree(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: mx.array, states: Sequence[mx.array],
          plan: TreePlan) -> mx.array:
-    """Per-row outputs [1, R, Hv, Dv] of each stream's recurrence walked from its own state along each row's path.
-
-    q, k [1, R, Hk, Dk], v [1, R, Hv, Dv], g, beta [1, R, Hv] hold every stream's rows; ``states[s]`` [1, Hv, Dv, Dk]
-    fp32."""
+    """Return recurrence outputs [1, R, Hv, Dv] by walking each row's path from its stream's own fp32 state."""
 
     _, R, Hk, Dk = (int(d) for d in k.shape)
     Hv, Dv = int(v.shape[2]), int(v.shape[3])
@@ -311,8 +296,7 @@ def tree(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: mx.array, sta
 
 
 class CommitPlan:
-    """Where each stream's kept rows sit among all streams' rows (``firsts[s]``: its first row; ``paths[s]``: its
-    kept window rows, root first) and the rows of its next conv tail. Shared by every recurrent layer."""
+    """Locate each stream's kept rows and next conv tail among grouped rows, with paths ordered root first."""
 
     def __init__(self, paths: Sequence[Sequence[int]], firsts: Sequence[int], n_keep: int) -> None:
         if not 1 <= len(paths) <= MAX_STREAMS:
@@ -325,15 +309,12 @@ class CommitPlan:
             rows += [int(first) + int(r) for r in path]
             tails += (list(range(n_keep)) + [n_keep + int(first) + int(r) for r in path])[-n_keep:]
         self.streams, self.n_keep = len(paths), n_keep
-        self.rows, self.meta, self.tails = kernel_ints(rows), kernel_ints(meta), kernel_ints(tails)
+        self.rows, self.meta, self.tails = ints(rows), ints(meta), ints(tails)
 
 
 def replay(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: mx.array, states: Sequence[mx.array],
            plan: CommitPlan) -> list[mx.array]:
-    """Each stream's state after serial steps over its kept rows (``lane_tree``'s replay arithmetic).
-
-    q, k [1, R, Hk, Dk], v [1, R, Hv, Dv], g, beta [1, R, Hv] hold all streams' rows; ``states[s]`` [1, Hv, Dv, Dk]
-    fp32."""
+    """Return each stream's state after serial steps over its kept rows using lane_tree replay arithmetic."""
 
     _, _, Hk, Dk = (int(d) for d in k.shape)
     Hv, Dv = int(v.shape[2]), int(v.shape[3])
