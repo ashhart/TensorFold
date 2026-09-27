@@ -83,6 +83,14 @@ _TOOL_PARAMETER_BLOCK_RE = re.compile(
     r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>",
     re.IGNORECASE | re.DOTALL,
 )
+# GLM-4.5 and later (GLM-5.3-Flash among them) write a call as the function name followed by key/value pairs,
+# <tool_call>NAME<arg_key>KEY</arg_key><arg_value>VALUE</arg_value>...</tool_call>, and their chat templates write a
+# string value as itself and any other value as JSON (``tojson``).
+_GLM_TOOL_BLOCK_RE = re.compile(
+    r"^\s*([\w.:-]+)\s*((?:<arg_key>.*?</arg_key>\s*<arg_value>.*?</arg_value>\s*)*)$",
+    re.DOTALL,
+)
+_GLM_TOOL_ARGUMENT_RE = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
 _JSON_FENCE_RE = re.compile(
     r"^\s*```(?:json)?\s*(.*?)\s*```\s*$",
     re.IGNORECASE | re.DOTALL,
@@ -194,6 +202,50 @@ def _parse_tool_call_payload(block: str, schemas: dict[str, dict[str, Any]] | No
     return name, arguments
 
 
+def _tool_parameter_types(tools: list[dict[str, Any]], name: str) -> dict[str, Any]:
+    """The JSON-schema ``type`` of each parameter of the offered tool called ``name`` (case-insensitive)."""
+    for tool in tools:
+        if not isinstance(tool, dict) or tool_spec_name(tool).lower() != name.lower():
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        parameters = function.get("parameters")
+        properties = parameters.get("properties") if isinstance(parameters, dict) else None
+        if not isinstance(properties, dict):
+            return {}
+        return {key: spec.get("type") for key, spec in properties.items() if isinstance(spec, dict)}
+    return {}
+
+
+def _glm_tool_argument(value: str, declared: Any) -> Any:
+    """A value as the model wrote it when its parameter is a string or untyped; for any other declared type the
+    chat template wrote it as JSON, so it is read back as JSON (and stays text when it does not parse)."""
+    declared_types = declared if isinstance(declared, list) else [declared]
+    if declared is None or "string" in declared_types:
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def parse_glm_tool_call_block(block: str, tools: list[dict[str, Any]]) -> tuple[str, dict[str, Any]] | None:
+    """GLM's ``NAME<arg_key>K</arg_key><arg_value>V</arg_value>...`` body of a ``<tool_call>`` block, or None.
+
+    Values keep their exact text (no framing whitespace is stripped), so a history resent with these arguments
+    renders back to the tokens the model wrote.
+    """
+    match = _GLM_TOOL_BLOCK_RE.match(block)
+    if match is None:
+        return None
+    name = match.group(1)
+    types = _tool_parameter_types(tools, name)
+    arguments: dict[str, Any] = {}
+    for argument in _GLM_TOOL_ARGUMENT_RE.finditer(match.group(2)):
+        key = argument.group(1).strip()
+        arguments[key] = _glm_tool_argument(argument.group(2), types.get(key))
+    return name, arguments
+
+
 def _strip_json_fence(text: str) -> str:
     match = _JSON_FENCE_RE.match(text)
     if match is None:
@@ -278,7 +330,8 @@ def parse_tool_calls_from_content(
         if max_calls is not None and len(calls) >= max_calls:
             continue
         try:
-            parsed = _parse_tool_call_payload(block, schemas, complete=max_calls is not None)
+            parsed = (_parse_tool_call_payload(block, schemas, complete=max_calls is not None)
+                      or parse_glm_tool_call_block(block, tools))
         except (ValueError, TypeError):
             if max_calls is None:
                 raise

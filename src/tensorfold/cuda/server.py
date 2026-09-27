@@ -19,6 +19,7 @@ from tensorfold.server.http import Server
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
                                         validate_modalities)
 from tensorfold.server.tool_policy import ToolCallPolicy
+from tensorfold.server.tools import parse_glm_tool_call_block
 
 _THINK_END = "</think>"
 _CALL_OPEN, _CALL_CLOSE = "<tool_call>", "</tool_call>"
@@ -94,7 +95,8 @@ def _tool_name(tool: dict[str, Any]) -> str:
 
 
 def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int | None = None) -> tuple[str, list[dict[str, Any]] | None]:
-    """Qwen ``<tool_call><function=name><parameter=k>v</parameter></function></tool_call>`` or JSON bodies."""
+    """Qwen ``<tool_call><function=name><parameter=k>v</parameter></function></tool_call>``, GLM
+    ``<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`` or JSON bodies."""
 
     if not tools:
         return text, None
@@ -124,6 +126,10 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
                     continue
                 name = m.group(1).strip()
                 args = {p.group(1).strip(): p.group(2) for p in _TOOL_PARAMETER_BLOCK_RE.finditer(m.group(2))}
+            else:
+                glm = parse_glm_tool_call_block(block, tools)
+                if glm is not None:
+                    name, args = glm
         if not name or str(name).lower() not in known:
             if max_calls is None:
                 residue.append(match.group(0))
