@@ -57,7 +57,7 @@ pub const Model = struct {
     mtp: bool = false,
     centered: bool = true,
     ngram: @import("ngram.zig").NGram = undefined,
-    shard_starts: [129]i64 = undefined,
+    ple_tables: ?@import("ple_tables.zig").Tables = null,
     pub const DraftCache = Cache;
     pub const vocab = 248320;
     pub fn eos(id: i32) bool {
@@ -101,11 +101,7 @@ pub const Model = struct {
             const expected = &@field(m.ngram, entry[1]);
             if (mx.dtype(value) != mx.c.MLX_INT64 or mx.c.mlx_array_size(value) != expected.len or !std.mem.eql(i64, mx.c.mlx_array_data_int64(value)[0..expected.len], expected)) return error.NGramConstantsMismatch;
         }
-        m.shard_starts[0] = 0;
-        for (0..128) |i| {
-            const key = try std.fmt.bufPrint(&buf, "model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}.weight", .{i});
-            m.shard_starts[i + 1] = m.shard_starts[i] + mx.dim(try m.weights.get(key), 0);
-        }
+        m.ple_tables = try @import("ple_tables.zig").Tables.init(io, dir);
         return m;
     }
     pub fn reset(m: *Model) void {
@@ -114,6 +110,7 @@ pub const Model = struct {
     }
     pub fn deinit(m: *Model) void {
         m.reset();
+        if (m.ple_tables) |*tables| tables.deinit();
         m.weights.deinit();
         m.kernels.deinit();
     }
@@ -249,20 +246,13 @@ pub const Model = struct {
     }
     fn ple(m: *Model, s: *mx.Scope, h: A, tokens: []const i32, cache: Cache, record: *Cache) !A {
         var hist = cache.history;
-        var parts: [16 * 16]A = undefined;
-        var buf: [256]u8 = undefined;
+        var ids: [16 * 16]i64 = undefined;
         for (tokens, 0..) |token, row| {
-            const ids = m.ngram.ids(hist, token);
+            @memcpy(ids[row * 16 ..][0..16], &m.ngram.ids(hist, token));
             hist = .{ hist[1], token };
-            for (ids, 0..) |id, head_| {
-                var shard: usize = 0;
-                while (shard + 1 < 128 and id >= m.shard_starts[shard + 1]) shard += 1;
-                const name = try std.fmt.bufPrint(&buf, "model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}", .{shard});
-                parts[row * 16 + head_] = try m.weights.embed(s, name, &.{@intCast(id - m.shard_starts[shard])});
-            }
         }
         const r: i32 = @intCast(tokens.len);
-        const emb = try s.reshape(try s.cat(parts[0 .. tokens.len * 16], 0), &.{ r, 2560 });
+        const emb = try s.reshape(try m.ple_tables.?.gather(s, ids[0 .. tokens.len * 16]), &.{ r, 2560 });
         const base = "model.layers.1.ple";
         const keys = try s.reshape(try m.centeredNorm(s, try m.lin(s, base, "key_proj", emb), base ++ ".norm_key", 2560), &.{ r, 4, 2560 });
         const values = try s.reshape(try m.lin(s, base, "value_proj", emb), &.{ r, 1, 2560 });
@@ -372,7 +362,7 @@ pub const Model = struct {
         var m = Model{ .centered = false };
         defer m.deinit();
         var path: [4096]u8 = undefined;
-        try m.weights.loadFile(try std.fmt.bufPrint(&path, "{s}/arrays.safetensors", .{dir}), "", "");
+        try m.weights.loadFile(io, try std.fmt.bufPrint(&path, "{s}/arrays.safetensors", .{dir}), "", "");
         const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/cases.json", .{dir}));
         defer mx.allocator.free(bytes);
         const Case = struct { key: []const u8, past: i32, pooled: i32 };

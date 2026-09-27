@@ -7,7 +7,7 @@ Macs remains explicitly separate.
 
 Completion requires execution evidence, not just source export or a passing smoke test.
 
-- [ ] Automated serial/draft regression for DFlash2 and both MTP families, CPU/Metal
+- [x] Automated serial/draft regression for DFlash2 and both MTP families, CPU/Metal
   sampling, greedy/sampled settings, small/maximum budgets, tensor/forced-SIMD paths.
 - [x] Randomized tree verification, every accepted prefix, maximum windows, rejection,
   EOS/token-budget boundaries, repeated reset/cache fork/restore cycles.
@@ -51,3 +51,24 @@ New milestone evidence and any discovered failures will be recorded below.
   three invalid replacements each. Validation now rejects unsupported activation,
   cache dtype, bias, routing normalization, PLE and MTP configuration choices instead
   of silently running the hard-coded recipe. Tensor/shard failure coverage remains open.
+
+## Bounded PLE and checkpoint reader milestone
+
+- Flash reads the selected packed PLE rows directly from safetensors instead of
+  materializing whole embedding shards. All 640 boundary/adjacent/middle rows across
+  128 shards match independent MLX load/dequantization exactly.
+- Flash's nine serial/MTP matrix comparisons now pass, including budget 15 with Metal
+  sampling. A separate greedy maximum-budget reproduction matched the original output
+  hash and completed in 1.386 s instead of the prior 85.354 s; diagnostic only, not the
+  final performance comparison. All 44 comparisons passed after integration: eight
+  Qwen, 24 Nemotron and 12 Flash, spanning greedy, 32-token CPU/Metal sampling and the
+  two-token budget boundary. The previous 33-case full suite passed, then all 11 added
+  32-token CPU cases passed with `-Ddraft-scenario=2`.
+- Flash's 96 accepted-prefix checks and 128 measured reset cycles pass. Active MLX
+  memory stays at 79,022,784,536 bytes, versus 111,025,160,216 before bounded PLE reads.
+- Thirteen host tests pass. The safetensors parser rejects malformed shapes/dtypes,
+  overlapping/gapped/truncated payloads and arithmetic overflow. File tests exercise
+  missing/truncated files, header length limits, invalid row reads and allocation
+  failure cleanup. All production safetensors loads now run this preflight validation.
+- Remaining loader work: validate every model-specific tensor shape and required tensor,
+  exercise missing MTP heads, and broaden allocation-failure cleanup beyond the new reader.

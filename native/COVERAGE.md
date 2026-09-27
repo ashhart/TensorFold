@@ -18,7 +18,7 @@ This matrix distinguishes exercised behavior from physical-device validation.
 | Nemotron SIMD | Row quantized projections and expert kernels; MLX SDPA | Forced SIMD verified rows, rollback and all 52 caches exact |
 | Nemotron long context | 128-wide tensor attention at 10K visible keys; SDPA otherwise | Kernel fixtures at 9,999 and 10,007 keys, serial/window exact |
 | Flash Next target | Four residual streams, hyper-connections, GDN, sparse attention, top-10 experts/shared gate | 248,320 Python logits exact; verified rows and all 48 caches exact |
-| Flash Next PLE | N-gram hashing/EOS reset, lazy quantized shards, gate, dilated convolution | Shipped hash constants checked; full-model parity and rollback history/conv cache exact |
+| Flash Next PLE | N-gram hashing/EOS reset, positional packed-row reads, gate, dilated convolution | Shipped hash constants checked; all 128 shard boundaries checked against MLX; rollback history/conv cache exact |
 | Flash Next MTP | Embedding and stream fusion, HC attention/MoE, separate output mixer | 16 sampled tokens match Python serial |
 | Flash sparse selection | Pool four keys, select top 512 blocks, include causal tail, merge attention | Prefixes 2,044/2,051/2,063; cold and populated pool, eight rows and rollback at every nonzero row |
 
@@ -48,6 +48,8 @@ bash scripts/fetch-zig.sh
 .zig-toolchain/zig build test-models -Doptimize=safe
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
 .zig-toolchain/zig build test-drafts -Doptimize=safe
+.zig-toolchain/zig build test-checkpoint-files -Doptimize=safe
+.zig-toolchain/zig build test-ple -Doptimize=safe
 ```
 
 The suite needs the MLX prefix described in README and Python development dependencies
@@ -62,8 +64,9 @@ Use `-Dcache-family=0|1|2` or `-Ddraft-family=0|1|2` to select Qwen, Nemotron or
 
 The shared acceptance policy is used by both DFlash trees and MTP chains. Host tests
 cover all 32 chain acceptance lengths against 33 output budgets, accepted/rejected/bonus
-EOS, and 1,000 deterministic random trees. The ten host tests pass with safety checks,
-including four supported config fixtures and 129 invalid recipe mutations.
+EOS, and 1,000 deterministic random trees. The thirteen host tests pass with safety
+checks, including four supported config fixtures and 129 invalid recipe mutations,
+safetensors parser allocation failures and all 128 PLE shard lookup boundaries.
 
 `test-cache-stress` has passed on all five model/backend combinations below. Each
 accepted prefix is compared with serial execution: logits, every cache array and its
@@ -77,7 +80,7 @@ and repeatedly restores snapshots and resets the model.
 | Qwen forced SIMD | 384 | Same | 128 | 16,734,960,640 bytes |
 | Nemotron tensor | 96 | 0, 1, 15, 16, 17, 33 | 128 | 18,816,686,464 bytes |
 | Nemotron forced SIMD | 96 | Same | 128 | 17,778,989,440 bytes |
-| Flash | 96 | Same | 128 | 111,025,160,216 bytes |
+| Flash, positional PLE reads | 96 | Same | 128 | 79,022,784,536 bytes |
 
 Qwen additionally checks every path in randomized trees with 2, 7, 15, 16, 17, 31 and
 32 rows, on each backend. Its chain windows reach the 128-row prefill limit; family
@@ -90,16 +93,39 @@ The pass now retains its replay base. Flash's saved pooled-key handle received t
 lifetime fix. Dense commit also validates position and ancestor paths before changing
 the cache, and releases temporary replay arrays at the end of each commit.
 
-`test-drafts` compares serial and drafted completions with greedy, CPU sampling and Metal
-sampling, including a two-token output budget. MTP budgets are 1, 3 and 15. The comparison
+`test-drafts` passes all 44 serial/drafted comparisons: 17-token greedy, 32-token CPU
+sampling, 32-token Metal sampling and a two-token CPU output budget. MTP budgets are
+1, 3 and 15. Use `-Ddraft-scenario=0|1|2|3` to select a scenario. The comparison
 requires actual decode rounds so an immediate EOS cannot masquerade as draft coverage.
 Completion evidence for this larger matrix is tracked in [WORK_PLAN.md](WORK_PLAN.md).
+
+## Checkpoint and PLE row reads
+
+All safetensors loads validate dtype names, bounded dimensions, checked byte-size
+arithmetic and contiguous non-overlapping offsets against the actual file size before
+calling MLX. Shard names from indexes must be simple safetensors filenames. Duplicate
+tensor names across loaded files are rejected. Native readers additionally validate
+the dtype/shape of all 384 PLE packed weight/scale/bias tensors and their total row count.
+
+`test-checkpoint-files` verifies missing files, short headers, oversized declarations,
+bad payload lengths, wrong row buffer sizes, out-of-range rows, and files truncated
+after opening. Parser and file-opening checks inject failure at every Zig allocation.
+The dense loader now cleans up array/linear ownership if map insertion fails.
+These checks do not yet validate every model-specific tensor shape or inject failures
+inside MLX itself; those remain tracked gaps.
+
+`test-ple` independently loads each shard with MLX and compares its first, adjacent,
+middle, penultimate and final rows against native positional reads: 640 exact rows.
+The production lookup bounds scratch storage to 256 packed rows (25,600 bytes), followed
+by GPU dequantization. Full-model active MLX memory dropped by 32,002,375,680 bytes in
+the repeated cache check. The previously intermittent maximum-budget Flash timeout
+did not recur in the complete Flash draft matrix after this change.
 
 ## Limits
 
 Physical validation is on one M5 Max with 128 GiB, with both normal and forced SIMD
 dispatch. Older Apple GPUs still require execution on those devices before claiming
-hardware qualification. Flash Next's short tests fit through lazy PLE access; long
+hardware qualification. Flash Next's short tests fit through positional PLE reads; long
 full-model context memory and throughput are not established on this machine.
 
 This is functional coverage of the three upstream Metal inference recipes. Native

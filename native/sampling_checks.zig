@@ -20,7 +20,7 @@ pub fn check(io: std.Io, dir: []const u8) !void {
     var store = @import("checkpoint.zig").Store.init(64);
     defer store.deinit();
     var path: [4096]u8 = undefined;
-    try store.loadFile(try std.fmt.bufPrint(&path, "{s}/arrays.safetensors", .{dir}), "", "");
+    try store.loadFile(io, try std.fmt.bufPrint(&path, "{s}/arrays.safetensors", .{dir}), "", "");
     const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/cases.json", .{dir}));
     defer mx.allocator.free(bytes);
     const cases = try std.json.parseFromSlice([]const Case, mx.allocator, bytes, .{});

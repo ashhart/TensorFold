@@ -102,6 +102,7 @@ path; attention layers gather only its K/V rows.
 | `lanes.zig`, `metal/` | Exact quantized projections, normalization, tree metadata and attention |
 | `model.zig` | Complete target forward, caches, accepted-path commit |
 | `checkpoint.zig` | Shared safetensors reader and affine quantized projections |
+| `safetensors.zig`, `ple_tables.zig` | Validated checkpoint headers and bounded positional PLE row reads |
 | `nemotron.zig` | Mamba, NoPE attention, routed/shared experts, MTP and rollback |
 | `flash.zig`, `ngram.zig` | Hyper-connections, GDN, sparse attention, MoE, PLE and MTP |
 | `family_runtime.zig` | Chained verification and completion for Nemotron/Flash Next |
@@ -141,10 +142,11 @@ zig-out/bin/tensorfold run build/models/Qwen3.8-Flash-Next-MLX-4bit-MTP \
   --tokens 1,2,3,4 --max-tokens 16 --seed 1234
 ```
 
-Flash Next contains approximately 113 GB of tensor data. Short native runs fit on the
-tested 128 GiB Mac using lazy PLE shard access, but this does not establish sufficient
-memory or useful throughput for long contexts. The upstream recommended capacity is
-192 GB or more.
+Flash Next contains approximately 113 GB of tensor data. Native PLE lookup reads only
+the selected packed rows from disk, then dequantizes those rows through MLX; it avoids
+loading the complete 32 GB table. Active MLX allocations settled at 79.02 GB in the
+cache stress check on this 128 GiB Mac. Long-context qualification and final performance
+comparisons remain separate checks. The upstream recommended capacity is 192 GB or more.
 
 ## Validation
 
@@ -201,6 +203,8 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test-models -Doptimize=safe
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
 .zig-toolchain/zig build test-drafts -Doptimize=safe
+.zig-toolchain/zig build test-checkpoint-files -Doptimize=safe
+.zig-toolchain/zig build test-ple -Doptimize=safe
 ```
 
 `test-metal` generates independent oracles through the original Python implementation
@@ -210,6 +214,12 @@ cases including 128-wide heads and 10K-token strided caches. Omit `-Dmetal-tenso
 on M1–M4. `test-models` loads the downloaded models sequentially and checks every
 family's caches; it also forces the dense Qwen and Nemotron SIMD paths. It requires
 the large checkpoints and enough unified memory. See [COVERAGE.md](COVERAGE.md).
+
+`test-checkpoint-files` runs without a GPU and exercises positional reads, truncation,
+oversized or invalid headers, missing files and allocation failures. The loader validates
+header geometry and byte offsets before passing any checkpoint to MLX. `test-ple`
+compares five rows at the beginning, middle and end of every PLE shard against an
+independent MLX load/dequantization, freeing each oracle shard before proceeding.
 
 `tools/native_reference.py --generate 128 --output FILE.json` creates the Python
 completion report for the default prompt and seed 1234. Use native `--seed 1234 --report`

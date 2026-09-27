@@ -37,6 +37,9 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = mod });
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Run native host-side unit tests (GPU parity: run --check-exact)").dependOn(&run_tests.step);
+    const file_tests = b.addRunArtifact(exe);
+    file_tests.addArgs(&.{ "check-checkpoint-files", "build/native-checks/files" });
+    b.step("test-checkpoint-files", "Exercise positional reads, corrupt checkpoints and allocation failures without a GPU").dependOn(&file_tests.step);
     const metal_tests = b.step("test-metal", "Generate Python oracles and compare native Metal kernels (requires .venv)");
     const tensor_tests = b.option(bool, "metal-tensors", "Include M5 tensor attention fixtures in test-metal") orelse false;
     for ([_][]const u8{ "sampling", "sparse", "attention" }) |kind| {
@@ -50,6 +53,9 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const ple_tests = b.addRunArtifact(exe);
+    ple_tests.addArgs(&.{ "check-ple", b.fmt("{s}/Qwen3.8-Flash-Next-MLX-4bit-MTP", .{model_root}) });
+    b.step("test-ple", "Compare native positional PLE reads against MLX at all 128 shard boundaries").dependOn(&ple_tests.step);
     var previous: ?*std.Build.Step = null;
     for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP" }, 0..) |name, index| {
         for (0..if (index < 2) @as(usize, 2) else 1) |backend| {
@@ -64,13 +70,17 @@ pub fn build(b: *std.Build) void {
     model_tests.dependOn(previous.?);
     const draft_tests = b.step("test-drafts", "Serial/draft regression matrix for all models, samplers and SIMD paths");
     const draft_family = b.option(usize, "draft-family", "Restrict draft regression to 0=Qwen, 1=Nemotron, 2=Flash");
+    const draft_scenario = b.option(usize, "draft-scenario", "Restrict draft regression to 0=greedy, 1=Metal, 2=CPU, 3=two-token CPU");
+    if (draft_family != null and draft_family.? > 2) @panic("draft-family must be 0, 1 or 2");
+    if (draft_scenario != null and draft_scenario.? > 3) @panic("draft-scenario must be 0, 1, 2 or 3");
     const directory = b.addSystemCommand(&.{ "mkdir", "-p", "build/native-checks/drafts" });
     var prior: *std.Build.Step = &directory.step;
     for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP" }, 0..) |name, family| {
         if (draft_family != null and draft_family.? != family) continue;
         for (0..if (family < 2) @as(usize, 2) else 1) |backend| {
-            for (0..3) |scenario| {
-                const count: []const u8 = if (scenario == 0) "17" else if (scenario == 1) "32" else "2";
+            for (0..4) |scenario| {
+                if (draft_scenario != null and draft_scenario.? != scenario) continue;
+                const count: []const u8 = if (scenario == 0) "17" else if (scenario == 3) "2" else "32";
                 const common = &.{ "run", b.fmt("{s}/{s}", .{ model_root, name }), if (family == 1) "--prompt" else "--tokens", if (family == 1) "Write a short Python function that computes the Fibonacci sequence." else "1,2,3,4,5,6,7,8,41,42,43,1,2,3,4,5,6,7,8", "--max-tokens", count, "--seed", "5678", "--temperature", if (scenario == 0) "0" else "0.7", "--top-k", "12", "--top-p", "0.8" };
                 const serial_report = b.fmt("build/native-checks/drafts/{d}-{d}-{d}-serial.json", .{ family, backend, scenario });
                 const serial = b.addRunArtifact(exe);

@@ -41,7 +41,7 @@ pub const Model = struct {
         }
         try m.weights.load(io, dir, "");
         if (drafts) {
-            try m.weights.loadFile(try std.fmt.bufPrint(&buf, "{s}/mtp-4bit.safetensors", .{dir}), "mtp.", "");
+            try m.weights.loadFile(io, try std.fmt.bufPrint(&buf, "{s}/mtp-4bit.safetensors", .{dir}), "mtp.", "");
             m.mtp = true;
         }
         // Small constants are prepared once; expert tables remain in their packed format.

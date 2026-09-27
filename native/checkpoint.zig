@@ -50,7 +50,8 @@ pub const Store = struct {
     pub fn has(w: *Store, key: []const u8) bool {
         return w.arrays.contains(key);
     }
-    pub fn loadFile(w: *Store, path: []const u8, prefix: []const u8, strip: []const u8) !void {
+    pub fn loadFile(w: *Store, io: std.Io, path: []const u8, prefix: []const u8, strip: []const u8) !void {
+        try @import("safetensors.zig").validateFile(io, path);
         const z = try mx.allocator.dupeSentinel(u8, path, 0);
         defer mx.allocator.free(z);
         var map = mx.c.mlx_map_string_to_array_new();
@@ -71,7 +72,9 @@ pub const Store = struct {
             const raw = std.mem.span(key);
             if (!std.mem.startsWith(u8, raw, strip)) continue;
             var buf: [512]u8 = undefined;
-            try w.put(try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, raw[strip.len..] }), value);
+            const name = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, raw[strip.len..] });
+            if (w.has(name)) return error.DuplicateWeight;
+            try w.put(name, value);
         }
     }
     pub fn load(w: *Store, io: std.Io, dir: []const u8, strip: []const u8) !void {
@@ -91,12 +94,14 @@ pub const Store = struct {
         var it = map.object.iterator();
         while (it.next()) |e| {
             if (e.value_ptr.* != .string) return error.InvalidWeightIndex;
+            try @import("safetensors.zig").shardName(e.value_ptr.string);
             if (std.mem.startsWith(u8, e.key_ptr.*, strip)) try shards.put(e.value_ptr.string, {});
         }
         var files = shards.keyIterator();
+        if (shards.count() == 0) return error.MissingWeights;
         while (files.next()) |file| {
             std.debug.print("Loading {s}\n", .{file.*});
-            try w.loadFile(try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, file.* }), "", strip);
+            try w.loadFile(io, try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, file.* }), "", strip);
         }
     }
     fn loadUnindexed(w: *Store, io: std.Io, dir: []const u8, strip: []const u8) !void {
@@ -109,7 +114,9 @@ pub const Store = struct {
             files.deinit(mx.allocator);
         }
         while (try it.next(io)) |entry| if (std.mem.startsWith(u8, entry.name, "model") and std.mem.endsWith(u8, entry.name, ".safetensors")) {
-            try files.append(mx.allocator, try mx.allocator.dupe(u8, entry.name));
+            const name = try mx.allocator.dupe(u8, entry.name);
+            errdefer mx.allocator.free(name);
+            try files.append(mx.allocator, name);
         };
         if (files.items.len == 0) return error.MissingWeights;
         std.mem.sort([]const u8, files.items, {}, struct {
@@ -126,7 +133,7 @@ pub const Store = struct {
         var buf: [4096]u8 = undefined;
         for (files.items) |name| {
             std.debug.print("Loading {s}\n", .{name});
-            try w.loadFile(try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, name }), "", strip);
+            try w.loadFile(io, try std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, name }), "", strip);
         }
     }
     pub fn triple(w: *Store, name: []const u8) ![3]A {

@@ -17,6 +17,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-sampling")) return @import("sampling_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-sparse")) return @import("flash.zig").Model.checkAttention(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-attention")) return @import("attention_checks.zig").check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-checkpoint-files")) return @import("safetensors.zig").checkFiles(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-ple")) return @import("ple_tables.zig").Tables.check(io, args[2]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
         std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--metal-simd] [--metal-sampling]\n  [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--report PATH] [--dump-logits PATH] [--check-exact]\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n", .{});
         return;
@@ -234,4 +236,6 @@ test {
     _ = @import("copy.zig");
     _ = @import("ngram.zig");
     _ = @import("acceptance.zig");
+    _ = @import("safetensors.zig");
+    _ = @import("ple_tables.zig");
 }

@@ -37,6 +37,22 @@ pub const Weights = struct {
     pub fn linear(w: *const Weights, name: []const u8) !lanes.Linear {
         return w.linears.get(name) orelse error.MissingLinear;
     }
+    // Both helpers take ownership, including when map insertion fails.
+    fn putArray(w: *Weights, name: []const u8, value: mx.Array) !void {
+        errdefer mx.free(value);
+        if (w.arrays.contains(name)) return error.DuplicateWeight;
+        const key = try mx.allocator.dupe(u8, name);
+        errdefer mx.allocator.free(key);
+        try w.arrays.put(key, value);
+    }
+    fn putLinear(w: *Weights, name: []const u8, value: lanes.Linear) !void {
+        var owned = value;
+        errdefer owned.deinit();
+        if (w.linears.contains(name)) return error.DuplicateWeight;
+        const key = try mx.allocator.dupe(u8, name);
+        errdefer mx.allocator.free(key);
+        try w.linears.put(key, owned);
+    }
     fn releaseLinearSources(w: *Weights) !void {
         var it = w.linears.keyIterator();
         var buffer: [256]u8 = undefined;
@@ -58,6 +74,7 @@ pub const Weights = struct {
         defer cfg.deinit();
         try @import("config.zig").draft(cfg.value);
         const path = try std.fmt.bufPrintSentinel(&pathbuf, "{s}/model.safetensors", .{dir}, 0);
+        try @import("safetensors.zig").validateFile(io, path);
         var map = mx.c.mlx_map_string_to_array_new();
         defer _ = mx.c.mlx_map_string_to_array_free(map);
         var meta = mx.c.mlx_map_string_to_string_new();
@@ -75,7 +92,7 @@ pub const Weights = struct {
                 mx.free(value);
                 break;
             }
-            try w.arrays.put(try mx.allocator.dupe(u8, std.mem.span(key)), value);
+            try w.putArray(std.mem.span(key), value);
         }
         var it = w.arrays.iterator();
         while (it.next()) |e| {
@@ -94,7 +111,7 @@ pub const Weights = struct {
                 arrays[j] = try s.result(rc, a);
             }
             const l = try lanes.Linear.init(&s, arrays[0], arrays[1], arrays[2]);
-            try w.linears.put(try mx.allocator.dupe(u8, name[0 .. name.len - 7]), l);
+            try w.putLinear(name[0 .. name.len - 7], l);
         }
         try w.releaseLinearSources();
     }
@@ -117,11 +134,14 @@ pub const Weights = struct {
         var it = weight_map.object.iterator();
         while (it.next()) |e| if (std.mem.startsWith(u8, e.key_ptr.*, "language_model.")) {
             if (e.value_ptr.* != .string) return error.InvalidWeightIndex;
+            try @import("safetensors.zig").shardName(e.value_ptr.string);
             try shards.put(e.value_ptr.string, {});
         };
         var files = shards.keyIterator();
+        if (shards.count() == 0) return error.MissingWeights;
         while (files.next()) |name| {
             const path = try std.fmt.bufPrintSentinel(&pathbuf, "{s}/{s}", .{ dir, name.* }, 0);
+            try @import("safetensors.zig").validateFile(io, path);
             std.debug.print("Loading {s}\n", .{name.*});
             var map = mx.c.mlx_map_string_to_array_new();
             defer _ = mx.c.mlx_map_string_to_array_free(map);
@@ -145,8 +165,7 @@ pub const Weights = struct {
                     mx.free(value);
                     continue;
                 }
-                const owned = try mx.allocator.dupe(u8, n[15..]);
-                try w.arrays.put(owned, value);
+                try w.putArray(n[15..], value);
             }
         }
         // MLX-format checkpoints already carry shifted RMS weights and [C,4,1] convs.
@@ -161,7 +180,7 @@ pub const Weights = struct {
             const weight = try w.get(try std.fmt.bufPrint(&pathbuf, "{s}.weight", .{name}));
             const biases = try w.get(try std.fmt.bufPrint(&pathbuf, "{s}.biases", .{name}));
             const linear_ = try lanes.Linear.init(&s, weight, e.value_ptr.*, biases);
-            try w.linears.put(try mx.allocator.dupe(u8, name), linear_);
+            try w.putLinear(name, linear_);
         }
         try w.releaseLinearSources();
     }
