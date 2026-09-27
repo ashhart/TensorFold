@@ -1,5 +1,5 @@
 """GLM-5.3-Flash family on a tiny random checkpoint (CPU unless noted): loading, the two forward paths, exact
-multi-row decoding, rollback, MTP drafting through the serial engine."""
+multi-row decoding, rollback, MTP drafting through the lane engine's family rounds."""
 
 from __future__ import annotations
 
@@ -124,12 +124,13 @@ def test_keep_rows_rolls_every_cache_back(checkpoint):
     assert bool(mx.array_equal(la, lb).item())
 
 
-def _run_engine(runtime, prompt, n):
-    from tensorfold.engine.family_engine import SerialEngine
-    from tensorfold.engine.lane_engine import LaneStream
+def _run_engine(runtime, prompt, n, drafts=True):
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.families.glm5_next import engine_settings
 
-    engine = SerialEngine(runtime)
-    stream = LaneStream(stream_id="s", prompt_ids=list(prompt), max_new_tokens=n)
+    engine = LaneEngine(runtime, **engine_settings(runtime))
+    assert engine.family
+    stream = LaneStream(stream_id="s", prompt_ids=list(prompt), max_new_tokens=n, drafts=drafts)
     engine.add_stream(stream)
     while engine.active_count:
         engine.step()
@@ -142,25 +143,28 @@ def test_mtp_drafts_change_speed_only(checkpoint):
     drafted = GLMFlash(model, head, drafts=3)
     serial = GLMFlash(model, None, drafts=0)
     assert drafted.mtp is not None and serial.mtp is None
+    assert drafted.exact_width >= 2 and drafted.mtp_step_ms >= 0.0
     prompt = tokens(21, seed=4)
     engine_a, a = _run_engine(drafted, prompt, 24)
     engine_b, b = _run_engine(serial, prompt, 24)
-    assert engine_a.sync_drafts and not engine_b.sync_drafts
+    assert engine_a.family_mtp and not engine_b.family_mtp
     assert engine_a.drafted > 0
     assert a.emitted == b.emitted
+    # the same model with drafts off for the request: the serial reference through the one-step-ahead rounds
+    _, c = _run_engine(drafted, prompt, 24, drafts=False)
+    assert c.emitted == b.emitted
 
 
-def test_serial_engine_resumes_from_a_stored_cache(checkpoint, tmp_path):
+def test_lane_engine_resumes_from_a_stored_cache(checkpoint, tmp_path):
     """A prefix snapshot written to disk and read back continues exactly like the in-memory cache."""
 
-    from tensorfold.engine.family_engine import SerialEngine
-    from tensorfold.engine.lane_engine import LaneStream
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
     from tensorfold.engine.prefix_snapshots import load_snapshot, save_snapshot
 
     model = backbone(checkpoint)
     runtime = GLMFlash(model, glm_mtp.load(model), drafts=2)
     prefix = tokens(26, seed=5)
-    engine = SerialEngine(runtime)
+    engine = LaneEngine(runtime)
     cache = engine.prefill_prefix(prefix)
     path = save_snapshot(tmp_path, "glm-test", prefix, cache)
     got_tokens, stored = load_snapshot(path, "glm-test")
@@ -168,9 +172,9 @@ def test_serial_engine_resumes_from_a_stored_cache(checkpoint, tmp_path):
     follow = [*prefix, 7, 8, 9]
 
     def run(c):
-        e = SerialEngine(runtime)
+        e = LaneEngine(runtime)
         s = LaneStream(stream_id="x", prompt_ids=follow, max_new_tokens=8)
-        e.add_stream(s, cache=SerialEngine.copy_single_cache(c), cached_tokens=len(prefix))
+        e.add_stream(s, cache=LaneEngine.copy_single_cache(c), cached_tokens=len(prefix))
         while e.active_count:
             e.step()
         return s.emitted

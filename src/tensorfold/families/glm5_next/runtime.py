@@ -1,14 +1,16 @@
-"""GLM-5.3-Flash as the serial engine serves it: the backbone (``model.py``) plus the checkpoint's MTP head.
+"""GLM-5.3-Flash as the lane engine serves it: the backbone (``model.py``) plus the checkpoint's MTP head.
 
-``GLMFlash`` gives ``family_engine.SerialEngine`` what it drafts with, the way ``qwen4_exp.runtime`` does for
-Flash Next:
+``GLMFlash`` gives the lane engine's family rounds (``engine.lane_family.FamilyRounds``) what they drive, the way
+``qwen4_exp.runtime`` does for Flash Next:
 
-- ``multi_row_exact``: a forward of 2-8 consecutive rows gives each row a one-row forward's bits, checked on the
-  real weights at load (``rows_match_serial``); drafting is off if it fails;
+- ``exact_width``: the widest window (up to 16 rows) whose every row gets a one-row forward's bits, checked on the
+  real weights at load (``check_windows``), and ``window_costs``, each exact width's forward time; drafting is
+  off when no window past one row is exact;
 - ``keep_rows``: roll every cache back to a prefix of a verified window (KDA states replayed from the window's
   entry state with the same kernel, attention caches trimmed);
-- the MTP head: its cache absorbs each kept position (the backbone's raw hidden and the next token), then it
-  chains up to ``drafts`` drafts, sampled with the target's keyed sampler at their positions.
+- the MTP head: ``speculate`` absorbs a verify round's rows (the backbone's raw hidden and the token sampled
+  after each) and draws each row's first draft before anything is read; ``settle`` keeps the kept rows and chains
+  up to ``drafts`` drafts from the last one, sampled with the target's keyed sampler at their positions.
 
 Drafts change speed only: every emitted token is the target's own sample.
 """
@@ -32,9 +34,19 @@ class MTPCache(MLACache):
 
 
 class GLMFlash:
+    """GLM-5.3-Flash with the backbone and head apart, the row-exact decode path, and MTP drafting."""
+
+    lane_family = True
+    # the decode path's widest window (``model.DECODE_ROWS``: wider calls take the prefill path)
+    fused_rows = DECODE_ROWS
     # tokens drawn by gpu_sampling (the exact keyed rule on the GPU): the host sampler's top-k over 154,880 logits
     # would run twice a drafted round
     gpu_sampling = True
+    # ``hidden`` takes an unread GPU token: one-token rounds (the serial reference, a checkpoint without the head)
+    # run one step ahead
+    gpu_tokens = True
+    # ``speculate`` right behind the verify, before the round's tokens are read
+    speculate_early = True
 
     def __init__(self, model: GLM5, head: Any | None = None, *, drafts: int = 1, check: bool = True) -> None:
         self.model = model
@@ -43,15 +55,19 @@ class GLMFlash:
         self.mtp = None
         self.drafts = int(drafts)
         self.check_report: dict[int, bool] = {}
-        self.multi_row_exact = bool(check) and self.rows_match_serial()
+        self.exact_width, self.window_costs = self.check_windows() if check else (1, {})
+        self.multi_row_exact = self.exact_width >= 2
         if check and not self.multi_row_exact:
             print(f"[glm5] a multi-row forward does not reproduce serial steps on this MLX/GPU "
                   f"({self.check_report}): no drafts", flush=True)
+        self._raw: mx.array | None = None
+        self._spec: tuple[mx.array, int] | None = None
+        self.mtp_step_ms = 0.0
         if self.multi_row_exact and head is not None and self.drafts > 0:
             self.mtp = head
-        self._raw: mx.array | None = None
+            self.mtp_step_ms = self._time_mtp_step()
 
-    # -- the serial engine's model interface ----------------------------------------
+    # -- the engine's model interface ---------------------------------------------------
     @property
     def layers(self) -> list[Any]:
         return self.model.layers
@@ -59,7 +75,7 @@ class GLMFlash:
     def make_cache(self) -> list[Any]:
         caches = self.model.make_cache()
         if self.mtp is not None:
-            caches.append(MTPCache())
+            caches.append(MTPCache())                          # last: the model's layers never reach it
         return caches
 
     def adopt_cache(self, cache: list[Any]) -> list[Any]:
@@ -70,6 +86,10 @@ class GLMFlash:
         return cache
 
     def hidden(self, inputs: Any, cache: list[Any]) -> mx.array:
+        """Hidden states [1, R, D] of R consecutive tokens (a [1, R] array, a GPU token not read yet, or a list),
+        advancing the backbone's caches. Up to ``fused_rows`` rows take the row-exact decode path; a prompt
+        chunk takes the batched prefill path."""
+
         tokens = inputs if isinstance(inputs, mx.array) else mx.array(np.asarray(inputs, dtype=np.int64))
         out = self.model.hidden(tokens, cache[: self.layer_count])
         self._raw = self.model.last_raw
@@ -84,116 +104,179 @@ class GLMFlash:
     def keep_rows(self, cache: list[Any], rows: int, keep: int) -> None:
         self.model.keep_rows(cache, rows, keep)
 
-    # -- drafting -------------------------------------------------------------------
+    # -- drafting ---------------------------------------------------------------------
     @property
     def last_streams(self) -> mx.array:
-        """The last hidden() call's raw hidden states (streams collapsed, before the final norm), [L, D]."""
+        """The last hidden() call's raw hidden states (streams collapsed, before the final norm), [R, D]."""
 
         return self._raw
 
     def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any]) -> None:
         """The MTP cache takes the last hidden() call's first len(next_tokens) positions (prompt rows)."""
 
-        tokens = mx.array(np.asarray(next_tokens).reshape(-1).astype(np.int64)).astype(mx.uint32)
+        tokens = next_tokens if isinstance(next_tokens, mx.array) else mx.array(np.asarray(next_tokens).reshape(-1))
+        tokens = tokens.reshape(-1).astype(mx.uint32)
         self._absorb(self._raw[: int(tokens.shape[0])], tokens, cache[-1])
 
     def _absorb(self, raw: mx.array, tokens: mx.array, mtp_cache: MTPCache) -> mx.array:
+        """Rows (raw hidden [n, D], the tokens that follow them [n]) into the head; its output rows [n, D]."""
+
         if mtp_cache.drafted:
             mtp_cache.trim(mtp_cache.drafted)
             mtp_cache.drafted = 0
-        out = self.mtp(self.model, raw, tokens, mtp_cache, int(tokens.shape[0]) <= DECODE_ROWS)
-        return out[-1:]
+        return self.mtp(self.model, raw, tokens, mtp_cache, int(tokens.shape[0]) <= self.fused_rows)
+
+    def _draft_draw(self, out: mx.array, sampling: Any, positions: Any) -> mx.array:
+        """Drafts (uint32 [n], lazy) from the head's output rows [n, D]: the target's keyed rule at ``positions``."""
+
+        from tensorfold.engine.gpu_sampling import sample as gpu_sample
+
+        return gpu_sample(self.mtp.logits(self.model, out), sampling, positions)
+
+    def speculate(self, cache: list[Any], tokens: mx.array, position: int, sampling: Any, start: int = 0,
+                  last_only: bool = False) -> mx.array:
+        """Before a verify round's tokens are read: the MTP head absorbs rows ``start`` .. of the last hidden()
+        call (their raw hidden; ``tokens`` [n], the tokens that follow them, still on the GPU) and draws each row's
+        first draft, for positions ``position`` + 2 + i (``position``: row ``start``'s). ``settle`` then keeps the
+        kept rows' part. Rows go through the head exactly as the kept ones alone would (the decode path gives a
+        row the same bits at any row count up to ``exact_width``). Returns the drafts [n] (lazy)."""
+
+        mtp_cache = cache[-1]
+        tokens = tokens.reshape(-1).astype(mx.uint32)
+        rows = int(tokens.shape[0])
+        total = int(self._raw.shape[0])
+        start = start + total if start < 0 else start
+        out = self._absorb(self._raw[start:start + rows], tokens, mtp_cache)
+        self._spec = (out, rows)
+        if last_only:                      # the last row's draft only (every row still enters the head's cache)
+            return self._draft_draw(out[-1:], sampling, [position + 1 + rows])
+        return self._draft_draw(out, sampling, [position + 2 + r for r in range(rows)])
+
+    def settle(self, cache: list[Any], keep: int, first: int, position: int, sampling: Any, count: int) -> Any:
+        """After ``speculate``: forget the head's entries of the rows past ``keep``, then the drafts for positions
+        ``position``, ``position`` + 1, ...: the kept row's first draft ``first`` and ``count`` - 1 chained ones,
+        each drawn on the GPU and fed to the next step unread (a lazy array the next round's inputs take)."""
+
+        mtp_cache = cache[-1]
+        out, rows = self._spec
+        self._spec = None
+        if rows > keep:
+            mtp_cache.trim(rows - keep)
+        if count <= 0:
+            return []
+        first = int(first.item()) if isinstance(first, mx.array) else int(first)
+        if count == 1:
+            return [first]
+        last = out[keep - 1:keep]
+        chain = [mx.array([first], dtype=mx.uint32)]
+        for j in range(1, count):
+            last = self.mtp(self.model, last, chain[-1], mtp_cache, True)
+            mtp_cache.drafted += 1
+            chain.append(self._draft_draw(last, sampling, [position + j]))
+        drafts = mx.concatenate(chain)
+        mx.async_eval(drafts)
+        return drafts
+
+    def unspeculate(self, cache: list[Any]) -> None:
+        """Undo ``speculate`` entirely (the round's rows are absorbed another way)."""
+
+        if self._spec is not None:
+            cache[-1].trim(self._spec[1])
+            self._spec = None
 
     def draft(self, cache: list[Any], streams: mx.array, tokens: list[int], position: int, sampling: Any,
               count: int | None = None) -> list[int]:
         """Absorb positions whose raw hidden states are ``streams`` [n, D] and whose next tokens are ``tokens``,
-        then chain ``count`` (default ``drafts``) drafts for positions ``position``, ``position`` + 1, ..."""
+        then chain ``count`` (default ``drafts``) drafts for positions ``position``, ``position`` + 1, ... (read
+        back as ints: tests and tools; the engine takes ``speculate`` and ``settle``)."""
 
         mtp_cache = cache[-1]
-        out = self._absorb(streams, mx.array([int(t) for t in tokens], dtype=mx.uint32), mtp_cache)
+        out = self._absorb(streams, mx.array([int(t) for t in tokens], dtype=mx.uint32), mtp_cache)[-1:]
         drafts: list[int] = []
         count = self.drafts if count is None else int(count)
         for j in range(count):
-            d = _sample(self.mtp.logits(self.model, out)[0], position + j, sampling)
+            d = int(self._draft_draw(out, sampling, [position + j]).item())
             drafts.append(d)
             if j + 1 < count:
                 out = self.mtp(self.model, out, mx.array([d], dtype=mx.uint32), mtp_cache, True)
                 mtp_cache.drafted += 1
         return drafts
 
-    # -- draft depth ---------------------------------------------------------------------
-    # A verify forward of k rows and a chained draft step, ms: the full model on an M3 Ultra (MLX 0.32.0, fused
-    # decode, 4,096 keys; 1, 2 and 4 rows measured, the rest on their line).
-    # TF_GLM_VERIFY_MS ("t1,t2,...") and TF_GLM_DRAFT_MS override them.
-    VERIFY_MS = (22.7, 29.8, 37.9, 46.0, 54.1, 62.2, 70.3, 78.4)
-    DRAFT_MS = 1.8
-    CHAIN_DECAY = 0.8
+    def _time_mtp_step(self) -> float:
+        """One chained draft step as ``settle`` takes it (the head's layer, the vocabulary head, a draw read back),
+        ms, fastest of 6: the engine's depth rule adds it per draft before measured rounds replace the estimate."""
 
-    def depth_for(self, rates: Any) -> int:
-        """Drafts for the next round: the depth d that maximises expected tokens a round over its time. ``rates``:
-        for each draft position j, the chance that draft j lands given that the ones before it landed (a float:
-        the same at every position; positions past the list repeat its last entry). Expected tokens
-        1 + a_0 + a_0 a_1 + ...; time verify(1 + d) + d draft steps. TF_GLM_DEPTH fixes it (measurements)."""
+        import time
 
-        import os
-
-        fixed = os.environ.get("TF_GLM_DEPTH", "").strip()
-        if fixed:
-            return max(1, min(self.drafts, int(fixed)))
-        verify = self.VERIFY_MS
-        if os.environ.get("TF_GLM_VERIFY_MS"):
-            verify = tuple(float(v) for v in os.environ["TF_GLM_VERIFY_MS"].split(","))
-        draft = float(os.environ.get("TF_GLM_DRAFT_MS", self.DRAFT_MS))
-        single = isinstance(rates, (int, float))
-        seq = [float(rates)] if single else [float(r) for r in rates] or [0.8]
-        best, best_d = -1.0, 1
-        tokens, reach = 1.0, 1.0
-        for d in range(1, max(1, min(self.drafts, len(verify) - 1)) + 1):
-            if d - 1 < len(seq):
-                a = seq[d - 1]
-            else:
-                # a position not measured yet: a chained draft lands less often than the one before it (M3 Ultra: 0.81
-                # then 0.69 on prose, 0.87 then 0.60 on code); a single rate means the same at every position
-                a = seq[-1] * (1.0 if single else self.CHAIN_DECAY ** (d - len(seq)))
-            reach *= min(max(a, 0.0), 1.0)
-            tokens += reach
-            speed = tokens / (verify[d] + d * draft)
-            if speed > best + 1e-12:
-                best, best_d = speed, d
-        return best_d
+        vocab = int(self.args.vocab_size)
+        cache = MTPCache()
+        raw = mx.zeros((1, int(self.args.hidden_size)), dtype=mx.bfloat16)
+        out = self.mtp(self.model, raw, mx.array([3001 % vocab], dtype=mx.uint32), cache, True)
+        mx.eval(out)
+        best = float("inf")
+        for i in range(6):
+            started = time.perf_counter()
+            out = self.mtp(self.model, out, mx.array([(3002 + i) % vocab], dtype=mx.uint32), cache, True)
+            self._draft_draw(out, None, [100 + i]).item()
+            best = min(best, (time.perf_counter() - started) * 1e3)
+        return round(best, 3)
 
     # -- load-time check ------------------------------------------------------------------
-    def rows_match_serial(self, widths: tuple[int, ...] = (2, 3, 4, 8)) -> bool:
-        """Drafted rounds are exact only if a forward of k rows gives each row a one-row forward's bits."""
+    def check_windows(self, widest: int | None = None) -> tuple[int, dict[int, float]]:
+        """The widest window (up to ``fused_rows``) whose every narrower window gives each row a one-row forward's
+        logits bit for bit, from a 48-token prompt; and every exact width's forward time in ms (fastest of 3).
+        ``check_report``: each width tried and whether it matched."""
+
+        import time
 
         from tensorfold.engine.lane_engine import LaneEngine
 
+        copy = LaneEngine.copy_single_cache
+        widest = int(widest or self.fused_rows)
         vocab = int(self.args.vocab_size)
         prompt = mx.array([[((37 * i + 11) % 50_000 + 1000) % vocab for i in range(48)]], dtype=mx.uint32)
+        window = [(3001 + 17 * r) % vocab for r in range(widest)]
         base = self.model.make_cache()
         mx.eval(self.model.hidden(prompt, base))
-        ok = True
-        for width in widths:
-            one, many = LaneEngine.copy_single_cache(base), LaneEngine.copy_single_cache(base)
-            rows = [mx.array([[(3001 + 17 * r) % vocab]], dtype=mx.uint32) for r in range(width)]
-            serial = mx.concatenate([self.model.head(self.model.hidden(t, one)) for t in rows], axis=1)
-            window = self.model.head(self.model.hidden(mx.concatenate(rows, axis=1), many))
-            same = bool(mx.array_equal(serial, window).item())
+        one = copy(base)
+        serial = []
+        for token in window:
+            logits = self.model.head(self.model.hidden(mx.array([[token]], dtype=mx.uint32), one))
+            mx.eval(logits)
+            serial.append(logits[0, -1])
+        exact = 1
+        self.check_report = {}
+        for width in range(2, widest + 1):
+            logits = self.model.head(self.model.hidden(mx.array([window[:width]], dtype=mx.uint32), copy(base)))
+            mx.eval(logits)
+            same = all(bool(mx.array_equal(logits[0, i], serial[i]).item()) for i in range(width))
             self.check_report[width] = same
-            ok = ok and same
-        return ok
+            if not same:
+                break
+            exact = width
+        costs: dict[int, float] = {}
+        for width in range(1, exact + 1):
+            best = float("inf")
+            for _ in range(3):
+                cache = copy(base)
+                started = time.perf_counter()
+                mx.eval(self.model.head(self.model.hidden(mx.array([window[:width]], dtype=mx.uint32), cache)))
+                best = min(best, (time.perf_counter() - started) * 1e3)
+            costs[width] = round(best, 3)
+        return exact, costs
 
+    def rows_match_serial(self, widths: tuple[int, ...] = (2, 3, 4, 8)) -> bool:
+        """Drafted rounds are exact only if a forward of k rows gives each row a one-row forward's bits (the
+        load-time check, over the listed widths)."""
 
-def _sample(logits: mx.array, position: int, sampling: Any) -> int:
-    if sampling is None:
-        return int(mx.argmax(logits.reshape(-1)).item())
-    from tensorfold.engine.gpu_sampling import sample as gpu_sample
-
-    return int(gpu_sample(logits.reshape(1, -1), sampling, [position])[0].item())
+        exact, _ = self.check_windows(max(widths))
+        return all(w <= exact for w in widths)
 
 
 def load(model_dir: Path, *, drafts: int | None = None, check: bool = True) -> tuple[GLMFlash, Any]:
-    """``drafts`` (default TF_GLM_MTP, else 1; 0: none): the most drafts a round from the MTP head."""
+    """``drafts`` (default TF_GLM_MTP, else 3; 0: none): the most drafts a round from the MTP head. The engine
+    picks up to this many a round from the stream's recent acceptance at each depth and the measured window
+    costs, so a deeper chain is tried only where it pays."""
 
     import os
 
@@ -201,7 +284,10 @@ def load(model_dir: Path, *, drafts: int | None = None, check: bool = True) -> t
     from tensorfold.families.glm5_next import mtp as mtp_module
 
     model, tokenizer = glm.load(Path(model_dir))
-    drafts = int(os.environ.get("TF_GLM_MTP", "1")) if drafts is None else int(drafts)
+    drafts = int(os.environ.get("TF_GLM_MTP", "3")) if drafts is None else int(drafts)
     head = mtp_module.load(model) if drafts > 0 and mtp_module.has_mtp(model_dir) else None
     model.weights = None                                                 # the checkpoint's shard index is done
-    return GLMFlash(model, head, drafts=drafts, check=check), tokenizer
+    runtime = GLMFlash(model, head, drafts=drafts, check=check)
+    print(f"[glm5] exact window {runtime.exact_width} rows, forward ms by width {runtime.window_costs}, "
+          f"MTP step {runtime.mtp_step_ms} ms, drafts up to {runtime.drafts if runtime.mtp else 0}", flush=True)
+    return runtime, tokenizer
