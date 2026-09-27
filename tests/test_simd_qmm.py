@@ -40,6 +40,32 @@ def test_scalar_kernel_matches_mma_kernel(n, k):
     assert simd_qmm.check(q, s, b)
 
 
+def test_m2_launch_caps_physical_groups_but_keeps_logical_splits(monkeypatch):
+    monkeypatch.setattr(simd_qmm.mx, "device_info", lambda: {"device_name": "Apple M2 Max"}, raising=False)
+    for rows, physical in ((8, 16), (16, 8)):
+        consts, _, threadgroup, _ = simd_qmm._launch("mma", rows, 48, 5120)
+        assert dict(consts)["S"] == 32
+        assert dict(consts)["PS"] == physical
+        assert threadgroup == (physical * 32, 1, 1)
+
+
+def test_physical_group_count_does_not_change_bits(monkeypatch):
+    n, k = 48, 5120
+    q, s, b = _weights(n, k, seed=17)
+    x = (mx.random.normal((16, k)) * 0.5).astype(mx.bfloat16)
+    try:
+        for rows, groups in ((8, (16, 8)), (16, (8, 4))):
+            outputs = []
+            for physical in groups:
+                monkeypatch.setattr(simd_qmm, "physical_simdgroups",
+                                    lambda splits, _, physical=physical: min(splits, physical))
+                simd_qmm._plans.clear()
+                outputs.append(simd_qmm.qmm(x[:rows], q, s, b))
+            assert _same(*outputs)
+    finally:
+        simd_qmm._plans.clear()
+
+
 @pytest.mark.parametrize("n,k", [(5120, 17408), (1024, 5120)])
 def test_as_accurate_as_mlx(n, k):
     q, s, b = _weights(n, k, seed=5)

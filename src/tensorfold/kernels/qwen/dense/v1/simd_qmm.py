@@ -18,8 +18,8 @@ Two kernels compute exactly that:
   eight links of P's chain. The product is D^T = W X^T: lane (fm, fn) holds words fn and fn + 1 of weight row
   n + fm (8 bytes a group, each word loaded once a simdgroup, no shuffles) and inputs x[row fn / fn + 1][8 fm ..
   8 fm + 7]; step s multiplies nibble s of each word. Nibbles enter unshifted, q' = word & (0xF << 4 s), against
-  x' = x * 2^-4s, so x' q' = x q exactly. No threadgroup staging or barriers in the K loop; a threadgroup is S
-  simdgroups (one a chunk) that combine through threadgroup memory at the end.
+  x' = x * 2^-4s, so x' q' = x q exactly. No threadgroup staging or barriers in the K loop; a threadgroup has
+  up to S simdgroups, each processing one or more chunks before they combine through threadgroup memory.
 - ``scalar`` (1 row): lane (chunk c, output j) holds whole groups of its outputs' weights in registers and runs
   the same chain with scalar FMAs, reading pre-scaled inputs that the threadgroup stages in chain order in
   threadgroup memory; chunks combine by butterfly shuffles in the same tree. Serial decoding goes through it, so it
@@ -153,9 +153,10 @@ _SCALAR = r"""
 
 _MMA = r"""
   // R rows: threadgroup (x, y) takes rows 8 RT y .. 8 RT y + 8 RT - 1 in RT tiles of 8 (rows >= R read row R - 1;
-  // their results are dropped) and S simdgroups, simdgroup c running chunk c for NT tiles of 8 outputs.
+  // their results are dropped). PS physical simdgroups process S logical chunks, so devices with a lower
+  // per-pipeline threadgroup limit keep the same split reduction and the same bits.
   const uint lane = thread_index_in_simdgroup;
-  const int c = int(simdgroup_index_in_threadgroup);
+  const int physical = int(simdgroup_index_in_threadgroup);
   const int qid = int(lane) / 4;
   const int fm = (qid & 4) + ((int(lane) / 2) % 4);
   const int fn = (qid & 2) * 2 + (int(lane) % 2) * 2;
@@ -170,73 +171,76 @@ _MMA = r"""
   for (int t = 0; t < NT; t++) wrow[t] = min(nb + 8 * t + fm, N - 1);
   int xr0[RT], xr1[RT];
   for (int rt = 0; rt < RT; rt++) { xr0[rt] = min(rb + 8 * rt + fn, R - 1); xr1[rt] = min(rb + 8 * rt + fn + 1, R - 1); }
-  float acc[RT][NT][2];
-  for (int rt = 0; rt < RT; rt++)
-    for (int t = 0; t < NT; t++) { acc[rt][t][0] = 0.0f; acc[rt][t][1] = 0.0f; }
-  for (int g = c; g < G; g += S) {
-    uint2 wv[NT];
-    PRAGMA_UNROLL
-    for (int t = 0; t < NT; t++) wv[t] = W2[size_t(wrow[t]) * (K / 16) + 4 * g + fn / 2];
-    uint4 xa[RT], xb[RT];
-    float xs0[RT], xs1[RT];
-    PRAGMA_UNROLL
-    for (int rt = 0; rt < RT; rt++) {
-      xa[rt] = LOAD8(xr0[rt], 8 * g + fm);
-      xb[rt] = LOAD8(xr1[rt], 8 * g + fm);
-      float v = sum8(xa[rt], one), u = sum8(xb[rt], one);
-      v = fma(simd_shuffle_xor(v, ushort(2)), one, v); u = fma(simd_shuffle_xor(u, ushort(2)), one, u);
-      v = fma(simd_shuffle_xor(v, ushort(4)), one, v); u = fma(simd_shuffle_xor(u, ushort(4)), one, u);
-      v = fma(simd_shuffle_xor(v, ushort(16)), one, v); u = fma(simd_shuffle_xor(u, ushort(16)), one, u);
-      xs0[rt] = v; xs1[rt] = u;
-    }
-    simdgroup_matrix<float, 8, 8> P[RT][NT];
-    PRAGMA_UNROLL
+  for (int c = physical; c < S; c += PS) {
+    float acc[RT][NT][2];
     for (int rt = 0; rt < RT; rt++)
-      for (int t = 0; t < NT; t++) P[rt][t] = simdgroup_matrix<float, 8, 8>(0.0f);
-    PRAGMA_UNROLL
-    for (int s = 0; s < 8; s++) {
-      const float ps = pre(s);
-      const uint mask = 0xFu << (4 * s);
-      simdgroup_matrix<float, 8, 8> bm[RT];
+      for (int t = 0; t < NT; t++) { acc[rt][t][0] = 0.0f; acc[rt][t][1] = 0.0f; }
+    for (int g = c; g < G; g += S) {
+      uint2 wv[NT];
+      PRAGMA_UNROLL
+      for (int t = 0; t < NT; t++) wv[t] = W2[size_t(wrow[t]) * (K / 16) + 4 * g + fn / 2];
+      uint4 xa[RT], xb[RT];
+      float xs0[RT], xs1[RT];
       PRAGMA_UNROLL
       for (int rt = 0; rt < RT; rt++) {
-        bm[rt].thread_elements()[0] = bf8(xa[rt], s) * ps;
-        bm[rt].thread_elements()[1] = bf8(xb[rt], s) * ps;
+        xa[rt] = LOAD8(xr0[rt], 8 * g + fm);
+        xb[rt] = LOAD8(xr1[rt], 8 * g + fm);
+        float v = sum8(xa[rt], one), u = sum8(xb[rt], one);
+        v = fma(simd_shuffle_xor(v, ushort(2)), one, v); u = fma(simd_shuffle_xor(u, ushort(2)), one, u);
+        v = fma(simd_shuffle_xor(v, ushort(4)), one, v); u = fma(simd_shuffle_xor(u, ushort(4)), one, u);
+        v = fma(simd_shuffle_xor(v, ushort(16)), one, v); u = fma(simd_shuffle_xor(u, ushort(16)), one, u);
+        xs0[rt] = v; xs1[rt] = u;
+      }
+      simdgroup_matrix<float, 8, 8> P[RT][NT];
+      PRAGMA_UNROLL
+      for (int rt = 0; rt < RT; rt++)
+        for (int t = 0; t < NT; t++) P[rt][t] = simdgroup_matrix<float, 8, 8>(0.0f);
+      PRAGMA_UNROLL
+      for (int s = 0; s < 8; s++) {
+        const float ps = pre(s);
+        const uint mask = 0xFu << (4 * s);
+        simdgroup_matrix<float, 8, 8> bm[RT];
+        PRAGMA_UNROLL
+        for (int rt = 0; rt < RT; rt++) {
+          bm[rt].thread_elements()[0] = bf8(xa[rt], s) * ps;
+          bm[rt].thread_elements()[1] = bf8(xb[rt], s) * ps;
+        }
+        PRAGMA_UNROLL
+        for (int t = 0; t < NT; t++) {
+          simdgroup_matrix<float, 8, 8> am;
+          am.thread_elements()[0] = float(wv[t].x & mask);
+          am.thread_elements()[1] = float(wv[t].y & mask);
+          PRAGMA_UNROLL
+          for (int rt = 0; rt < RT; rt++) simdgroup_multiply_accumulate(P[rt][t], am, bm[rt], P[rt][t]);
+        }
       }
       PRAGMA_UNROLL
       for (int t = 0; t < NT; t++) {
-        simdgroup_matrix<float, 8, 8> am;
-        am.thread_elements()[0] = float(wv[t].x & mask);
-        am.thread_elements()[1] = float(wv[t].y & mask);
+        const float sc = float(SC[size_t(wrow[t]) * G + g]);
+        const float bi = float(BI[size_t(wrow[t]) * G + g]);
         PRAGMA_UNROLL
-        for (int rt = 0; rt < RT; rt++) simdgroup_multiply_accumulate(P[rt][t], am, bm[rt], P[rt][t]);
-      }
-    }
-    PRAGMA_UNROLL
-    for (int t = 0; t < NT; t++) {
-      const float sc = float(SC[size_t(wrow[t]) * G + g]);
-      const float bi = float(BI[size_t(wrow[t]) * G + g]);
-      PRAGMA_UNROLL
-      for (int rt = 0; rt < RT; rt++) {
-        acc[rt][t][0] = fma(bi, xs0[rt], fma(sc, P[rt][t].thread_elements()[0], acc[rt][t][0]));
-        acc[rt][t][1] = fma(bi, xs1[rt], fma(sc, P[rt][t].thread_elements()[1], acc[rt][t][1]));
-      }
-    }
-  }
-  if (S == 1) {
-    for (int rt = 0; rt < RT; rt++)
-      for (int t = 0; t < NT; t++)
-        for (int e = 0; e < 2; e++) {
-          const int row = rb + 8 * rt + fn + e, n = nb + 8 * t + fm;
-          if (row < R && n < N) OUT[size_t(row) * N + n] = bfloat(acc[rt][t][e]);
+        for (int rt = 0; rt < RT; rt++) {
+          acc[rt][t][0] = fma(bi, xs0[rt], fma(sc, P[rt][t].thread_elements()[0], acc[rt][t][0]));
+          acc[rt][t][1] = fma(bi, xs1[rt], fma(sc, P[rt][t].thread_elements()[1], acc[rt][t][1]));
         }
-    return;
+      }
+    }
+    if (S == 1) {
+      for (int rt = 0; rt < RT; rt++)
+        for (int t = 0; t < NT; t++)
+          for (int e = 0; e < 2; e++) {
+            const int row = rb + 8 * rt + fn + e, n = nb + 8 * t + fm;
+            if (row < R && n < N) OUT[size_t(row) * N + n] = bfloat(acc[rt][t][e]);
+          }
+    } else {
+      for (int rt = 0; rt < RT; rt++)
+        for (int t = 0; t < NT; t++)
+          for (int e = 0; e < 2; e++) red[((c * RT + rt) * NT + t) * 64 + int(lane) * 2 + e] = acc[rt][t][e];
+    }
   }
-  for (int rt = 0; rt < RT; rt++)
-    for (int t = 0; t < NT; t++)
-      for (int e = 0; e < 2; e++) red[((c * RT + rt) * NT + t) * 64 + int(lane) * 2 + e] = acc[rt][t][e];
+  if (S == 1) return;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (int idx = c * 32 + int(lane); idx < RT * NT * 64; idx += S * 32) {
+  for (int idx = physical * 32 + int(lane); idx < RT * NT * 64; idx += PS * 32) {
     float v[S];
     for (int k = 0; k < S; k++) v[k] = red[k * (RT * NT * 64) + idx];
     for (int w = 1; w < S; w *= 2)
@@ -308,6 +312,16 @@ def splits(n: int, k: int) -> int:
     return 32 if n <= 64 else (16 if n <= 2048 else 8)
 
 
+def physical_simdgroups(s: int, rows: int) -> int:
+    """Limit M2's physical MMA workers without changing the logical splits that determine the output bits."""
+
+    device_info = getattr(mx, "device_info", None) or mx.metal.device_info
+    name = device_info().get("device_name", "")
+    # On an M2 Max the 8-row pipeline permits 704 threads, the 16-row pipeline 448, and a simple Metal pipeline
+    # 1024. Use 512 or 256 threads respectively; the logical S and its reduction order stay fixed.
+    return min(s, 16 if rows <= 8 else 8) if name.startswith("Apple M2") else s
+
+
 def tiles(n: int, rows: int, s: int) -> int:
     """Tiles of 8 outputs a simdgroup in the MMA kernel (speed only: no effect on the bits), at most 16 KB of
     threadgroup memory for the split reduction."""
@@ -342,8 +356,9 @@ def _launch(kind: str, rows: int, n: int, dims: int) -> tuple:
         return consts, (-(-n // per) * sgs * 32, 1, 1), (sgs * 32, 1, 1), [(1, n)]
     rt = min(RT_MAX, (rows + 7) // 8)
     nt = tiles(n, rt * 8, s)
-    consts = (("K", dims), ("N", n), ("S", s), ("NT", nt), ("RT", rt))
-    return consts, (-(-n // (8 * nt)) * s * 32, -(-rows // (8 * rt)), 1), (s * 32, 1, 1), [(rows, n)]
+    ps = physical_simdgroups(s, rows)
+    consts = (("K", dims), ("N", n), ("S", s), ("PS", ps), ("NT", nt), ("RT", rt))
+    return consts, (-(-n // (8 * nt)) * ps * 32, -(-rows // (8 * rt)), 1), (ps * 32, 1, 1), [(rows, n)]
 
 
 def qmm(x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, group_size: int = GROUP, *,
