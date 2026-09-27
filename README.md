@@ -252,6 +252,22 @@ docs/recipes/            what we did per family, and how to add one (Mac and CUD
 tools/bench_openai.py    the single-stream client every speed above was measured with
 ```
 
+## Request-level reasoning and tool parameters
+
+On the MLX server, chat requests can set `reasoning_effort` to `none`, `low`, `medium`,
+`high`, or `xhigh`. `none` disables thinking; the other values enable it and pass the
+requested effort to the chat template (`high` maps to Qwen's `xhigh`). An explicit
+`chat_template_kwargs.enable_thinking` takes precedence. Omitting the field preserves
+the server default. Effort support depends on the model's chat template; it does not
+set a separate reasoning-token budget.
+
+Qwen XML tool parameters use the offered tool schema's explicit `type` to decode
+arrays, objects, booleans, integers, numbers, and nulls. String parameters preserve
+text and whitespace. Streaming buffers typed values until their closing parameter
+tag; string values continue streaming incrementally. Malformed or mismatched values
+remain strings for the client to validate. Union types and schema references are not
+resolved by this conversion.
+
 ## Development
 
 ```bash
