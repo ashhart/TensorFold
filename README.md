@@ -47,7 +47,9 @@ checkpoints TensorFold is built and tested with, all on Hugging Face:
 | --- | --- | --- | --- |
 | Nemotron 3.5 Lightning 30B-A3B | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 18.6 GB | 32 GB or more |
 | Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` and its draft model `z-lab/Qwen3.8-27B-DFlash2` | 16.1 GB + 3.8 GB | 32 GB or more; an M5-generation GPU for the fast kernels |
+| Qwen3.8-27B (EXL3) | `turboderp/Qwen3.8-27B-exl3` (branches `3.00bpw`, `4.00bpw`; any codebook, 1 to 8 bits per weight) | 13 GB / 16 GB | — (NVIDIA only) |
 | Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 113 GB | 192 GB or more |
+| Qwen3.8 Flash Next (EXL3) | `turboderp/Qwen3.8-Flash-Next-exl3` (branch `3.05bpw_H5_ng5`; any codebook, a width per tensor) | 80 GB | — (NVIDIA only) |
 
 The three main checkpoints come from the `Vontra` Hugging Face namespace; Qwen3.8-27B's optional DFlash2
 drafter comes from `z-lab`.

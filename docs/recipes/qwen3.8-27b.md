@@ -256,3 +256,61 @@ and the tree had nothing deeper, and at two thirds of the misses the right token
 16 candidates for that position: a tree that spends its rows on depth before siblings is the next thing to
 try.
 
+### EXL3 checkpoints
+
+The same engine reads turboderp's EXL3 packs of the model (`turboderp/Qwen3.8-27B-exl3`, one branch per size,
+`mul1` codebook, 6-bit head) through `src/tensorfold/cuda/exl3/` ([EXL3 weights](exl3.md)), and drafts with
+the same `z-lab/Qwen3.8-27B-DFlash2`. Download a size by its branch, then serve the directory:
+
+```bash
+python -c "from huggingface_hub import snapshot_download as d; d('turboderp/Qwen3.8-27B-exl3', revision='3.00bpw', local_dir='qwen27b-exl3-3.00bpw')"
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve qwen27b-exl3-3.00bpw --host 0.0.0.0 --port 8080
+```
+
+One Spark, the bench above (`tools/bench_openai.py`, 64-token replies, median of seeds 1234 to 1238, the same
+two prompts), every row in one exclusive session with the page cache dropped before each server:
+
+| | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
+| --- | ---: | ---: | ---: | ---: |
+| TensorFold, EXL3 3.00bpw | **82.1** | 43.1 | **63.2** | **45.7** |
+| TensorFold, EXL3 4.00bpw | 60.5 | 36.2 | 52.1 | 45.3 |
+| TensorFold, MLX 4-bit | 48.7 | **44.7** | 48.2 | 44.9 |
+| ExLlamaV3, EXL3 3.00bpw, DFlash2 | 45.0 | 30.3 | 39.6 | 30.1 |
+| ExLlamaV3, EXL3 4.00bpw, DFlash2 | 35.3 | 25.7 | 35.8 | 25.7 |
+| TensorFold, EXL3 3.00bpw, serial | 16.6 | 16.6 | 16.7 | 16.6 |
+| TensorFold, EXL3 4.00bpw, serial | 14.4 | 14.4 | 14.5 | 14.4 |
+| TensorFold, MLX 4-bit, serial | 12.9 | 12.8 | 12.8 | 12.8 |
+| ExLlamaV3, EXL3 3.00bpw, serial | 16.5 | 16.5 | 16.5 | 16.5 |
+| ExLlamaV3, EXL3 4.00bpw, serial | 15.8 | 15.8 | 15.8 | 15.8 |
+
+TensorFold's serial rows are `tensorfold serve ... --no-drafts`. ExLlamaV3 (commit 249f22a) ran its own
+`Generator` behind a minimal OpenAI wrapper with an 8192-token cache and the same sampling (greedy as top-k 1),
+drafting with the same DFlash2 checkpoint at its default 7 tokens a round; its dynamic draft length (`-dds`,
+confidence 0.6) was slower on every column. Its drafted output was not compared with its serial output here.
+Ours was: on both prompts, greedy and all five seeds, the drafted token ids equal serial decoding by SHA-256 on
+both packs (24 of 24), and `tests/cuda/test_qwen27_exl3.py` checks it on a pack named by
+`TENSORFOLD_QWEN27_EXL3` and `TENSORFOLD_QWEN27_DRAFTER`. Drafting needs nothing converted: the drafter reads
+the target's 6-bit head over its draft vocabulary by slicing the head's 128-column strips as they are stored,
+so its logits are the target's logits bit for bit. The 3.00bpw engine and drafter take 13.2 GiB.
+
+Single seeds vary as much as with the MLX checkpoint (3.00bpw code, sampled: 58.6 to 83.0 tok/s), which is
+why the table uses medians. The packs were the `3.00bpw` and `4.00bpw` branches at revisions `6fe61ad6` and
+`113cf7ab`.
+
+A serial step, one row, exclusive GPU, change by change (wall time a token of greedy decoding, median of three
+32-token runs; the new plain linear sums in a different order, so greedy text can change with it):
+
+| Step | 3.00bpw | 4.00bpw |
+| --- | ---: | ---: |
+| The first EXL3 engine | 83.8 ms (11.9 tok/s) | 88.0 ms (11.4 tok/s) |
+| The plain fp16/bf16 linear (the DeltaNet `in_proj_a/b`) a warp per output instead of a thread | 69.2 ms | 73.0 ms |
+| The EXL3 linear loads the next k tile's words while it decodes this one (same bits) | 62.3 ms | 70.3 ms |
+| K splits and warps measured per projection shape at 1 and 12 rows | 59.9 ms (16.7 tok/s) | 69.1 ms (14.5 tok/s) |
+
+Where the 3.00bpw step goes now (torch.profiler on a shared GPU, so the shares rather than the totals: 59.4 ms
+wall, 57.8 ms of GPU): the EXL3 projections 51.9 ms for 10.1 GB (194 GB/s; the 6-bit head alone 238), the
+DeltaNet recurrence 2.1, the plain linears 1.1, the input rotations 0.65, the fused norms 0.37, everything else
+about 1.2. The host enqueues a step in 15 ms, well under the GPU's time, and committing it takes 1.6 ms. Before
+the changes above the plain linears alone were 15.8 ms of an 82 ms forward. At 3.00bpw the serial decode is
+level with ExLlamaV3's; at 4.00bpw ExLlamaV3 is still 10% ahead (15.8 against 14.4 tok/s).

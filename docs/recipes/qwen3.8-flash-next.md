@@ -339,6 +339,107 @@ Greedy code on two Sparks is the weakest cell: a greedy draft must match an exac
 draft shares its position's Gumbel noise with the target and agrees whenever the two distributions are close.
 The next steps are fewer bytes per verify row and cheaper hyper-connection kernels, which are latency-bound.
 
+### EXL3 checkpoints
+
+The same engine serves EXL3 checkpoints of Flash Next (`quant_method: exl3`): any codebook, and a width per
+tensor, so mixed-K packs where one layer's experts range from 2 to 8 bits load as they are. The MLX path is
+unchanged; `families/qwen4_exp/cuda/exl3.py` fills the same weight structures.
+
+```bash
+python -m tensorfold.cuda.exl3.inspect ~/models/flashnext-exl3-sage-4.15bpw   # bits per tensor, from headers
+tensorfold serve ~/models/flashnext-exl3-sage-4.15bpw --backend cuda --host 0.0.0.0 --port 8080
+tensorfold serve ~/models/flashnext-exl3-3.05bpw --backend cuda --host 0.0.0.0 --port 8080 --no-drafts
+```
+
+- Dense projections (attention, DeltaNet, the MTP head's fc layers, the head) run on the row-invariant EXL3
+  linear (`cuda/exl3/linear.py`). Routed experts and the shared expert (as expert 512 of the same table) run on
+  the grouped EXL3 expert kernel (`cuda/exl3/experts.py`), each expert matrix at its own width. The fp32 router,
+  its top-k with id tie-break, and the write-back in slot order are the MLX path's.
+- The tensors a pack leaves unquantized (hyper-connection down / inject / up, DeltaNet `in_proj_a/b`, the n-gram
+  key and value) run on an fp16 Triton matmul whose tiles and K split depend only on the shape. No cuBLAS.
+- The packs store every centred RMSNorm weight as gamma - 1: the hyper-connection norms, q/k norms, the
+  indexer's, the n-gram branch's three and the MTP head's two input norms. The loader detects this and adds 1
+  in fp32. Checked tensor by tensor against the MLX checkpoint: after the offset the largest difference is
+  0.031 (hyper-connection norms) and 0.004 (n-gram norms). DeltaNet's gated norm, `A_log`, `dt_bias`, the conv weights and the router equal the MLX values.
+- The 128 `ple.ngram_embedding.shard_*` tensors are named `.trellis` but are not EXL3 tiles. They use
+  ExLlamaV3's n-gram row codec: a row is one fp16 scale followed by 160 values of K bits in a tail-biting mul1
+  trellis, and each head has an fp16 bias. The engine decodes a window's rows as ExLlamaV3's `ngram_dequant`
+  does, bit for bit (tested at 2 to 8 bits). The rows stay in the checkpoint, memory-mapped.
+- turboderp's packs keep the MTP head's final mixer in `mtp_hyper_connection_mixer_patch.safetensors`,
+  outside the index, and the reader loads it from there. Both packs carry the MTP layer, so both draft with
+  it. For the draft head, the head's rows for the draft vocabulary are decoded through the EXL3 linear and
+  requantized to 4-bit groups of 32. This affects only which drafts are proposed; verification uses the full
+  EXL3 head.
+
+GPU memory allocated after loading on one Spark: 63.4 GiB for our mixed-K SAGE 4.15 bpw pack, 47.5 GiB for
+turboderp's 3.05 bpw pack, and 73.4 GiB for the MLX 4-bit checkpoint. `tensorfold serve` is ready in about 95 s, 75 s and 95 s.
+
+#### Against ExLlamaV3 on the same pack
+
+The comparison is teacher-forced over 2,048 positions: the first 2,049 tokens of ExLlamaV3's
+`eval/eval_texts`, all fed in one pass. TensorFold decodes in 64-row windows. ExLlamaV3 is the fork at 249f22a
+with its mixed-K expert path. The token ids are the same for all three checkpoints, which share one
+tokenizer.
+
+| | top-1 agreement | TensorFold NLL | ExLlamaV3 NLL | TensorFold top-1 acc | ExLlamaV3 top-1 acc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SAGE 4.15 bpw (mixed-K, 2-8 bits) | 0.954 | 1.0640 | 1.0642 | 0.718 | 0.720 |
+| turboderp 3.05 bpw | 0.959 | 0.8510 | 0.8506 | 0.774 | 0.779 |
+| TensorFold, MLX 4-bit (same tokens) | | 1.0574 | | 0.726 | |
+
+The two engines' mean NLLs agree within 0.0005. The positions where they pick different tokens are close
+calls. Where ExLlamaV3's top two logits are at least 0.5 apart, the engines agree on 98.8% (SAGE) and 99.1%
+(3.05) of positions; at a gap of at least 1.0 they agree on 99.7%. ExLlamaV3 is no closer to itself when the
+batch shape changes: rerunning the first 1,025 tokens alone, instead of as part of all 2,049, it agrees with its
+own full pass on 96.4% (SAGE) and 97.2% (3.05) of positions. At the same positions TensorFold agrees with
+ExLlamaV3's full pass on 95.5% and 97.0%. The per-position NLL difference has a median of 0.018 and 0.011.
+
+On TensorFold's side, `tests/cuda/test_qwen4_exp_exl3.py` checks the following against the SAGE pack, cut to
+4 layers plus the head and the MTP head:
+
+- a window of 1 to 128 rows gives one-row steps' logits bit for bit;
+- MTP-drafted decoding gives serial decoding's tokens, eager and in CUDA graphs, greedy and sampled;
+- a real layer's experts match an fp64 reference and are row-invariant.
+
+Through `tensorfold serve` on the full packs, each reply was requested with `"draft": false` and again with
+drafts. The prompts were the benchmark's two, the raw prompt as chat, and two 256-token chats, each greedy and
+with seeds 1234 to 1238. On both packs, 30 of 30 replies had identical token-id SHA-256s. A drafted round
+emitted 2.93 tokens on average on SAGE and 3.16 on 3.05.
+
+```bash
+TENSORFOLD_EXL3_FLASHNEXT=~/models/flashnext-exl3-sage-4.15bpw pytest -q tests/cuda/test_qwen4_exp_exl3.py
+```
+
+#### Speed
+
+These are decode tokens per second after the first token, on one Spark. Each cell is one stream, 64-token replies,
+and the median of seeds 1234 to 1238 after one warm-up. Every engine went through the same client:
+`python tools/bench_openai.py http://127.0.0.1:PORT MODEL --tokens 64 --reps 5`. All TensorFold rows ran in
+one exclusive GPU session, with every pack's page cache dropped before each server started. ExLlamaV3 ran behind a
+minimal OpenAI shim around its `Generator`, serially: batch size 1, an 8,192-token cache, n-gram tables in host
+RAM, no drafts. The ExLlamaV3 SAGE row comes from a second session. In that session it first failed to load
+("Insufficient VRAM in split") while the previous server's pack was still in the page cache. The second session
+also re-measured TensorFold on SAGE serially at 34.6 / 34.4 / 34.8 / 34.6, within 3.5% of the table.
+
+| | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
+| --- | ---: | ---: | ---: | ---: |
+| ExLlamaV3, SAGE 4.15 bpw, serial | 22.3 | 22.2 | 22.3 | 22.2 |
+| TensorFold, SAGE 4.15 bpw, serial | 34.3 | 34.0 | 34.5 | 33.5 |
+| TensorFold, SAGE 4.15 bpw, MTP drafts | 58.2 | 52.0 | 47.3 | 67.3 |
+| ExLlamaV3, turboderp 3.05 bpw, serial | 37.0 | 36.9 | 37.1 | 36.9 |
+| TensorFold, turboderp 3.05 bpw, serial | 34.9 | 34.9 | 35.1 | 35.0 |
+| TensorFold, turboderp 3.05 bpw, MTP drafts | 79.1 | 56.3 | 79.0 | 62.4 |
+| TensorFold, MLX 4-bit, serial | 36.8 | 36.7 | 37.0 | 36.8 |
+| TensorFold, MLX 4-bit, MTP drafts | 66.8 | 59.4 | 71.8 | 58.6 |
+
+Serially on the mixed-K pack, TensorFold is 1.51-1.55x ExLlamaV3. On the uniform 3.05 bpw pack
+TensorFold's serial path is 5-6% behind ExLlamaV3's, and on both EXL3 packs it is 5-9% behind its own MLX path.
+With drafts, TensorFold on the 3.05 bpw pack is 1.52-2.14x ExLlamaV3's serial speed and runs ahead of the
+MLX checkpoint in three of four cells. The MLX drafted row matches the one-Spark README row (68.3 / 58.5 /
+73.1 / 60.2) to within 2.7%. Greedy cells decode a single text, so each drafted greedy cell measures how often
+the drafts are accepted on that one text. On SAGE, greedy code (47.3) and greedy chat (67.3) are the pack's two
+extremes.
+
 ### Limits
 
 - One stream: requests decode one at a time.

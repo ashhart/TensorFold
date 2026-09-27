@@ -16,6 +16,8 @@ On NVIDIA GPUs (DGX Spark), the same contract with CUDA kernels:
 - [The CUDA recipe book](cuda.md): the method, the numbers against vLLM, and the traps.
 - [Adding a CUDA family](adding-a-cuda-family.md): the engine interface, the exactness tests, measuring.
 - [GLM-5.3-Flash](glm-5.3-flash.md): two Sparks, CUDA only.
+- [EXL3 weights](exl3.md): one module for every EXL3 codebook and width, and the layer that reads them.
+- [Universal EXL3 experts](exl3-universal-experts.md): one grouped launch per MoE projection, any codebook, any width per expert.
 
 ## The contract
 

@@ -6,6 +6,7 @@ how to do the same for yours. The per-family pages have the numbers:
 - [Qwen3.8-27B dense](qwen3.8-27b.md#dgx-spark-cuda): one or two Sparks, DFlash2 draft trees.
 - [Qwen3.8 Flash Next](qwen3.8-flash-next.md#dgx-spark-cuda): one or two Sparks, MTP drafts, CUDA graphs.
 - [GLM-5.3-Flash](glm-5.3-flash.md): two Sparks, MTP and DFlash2 drafts, CUDA graphs.
+- [EXL3 weights](exl3.md): every EXL3 codebook and width, one module, and the layer that reads them.
 - [Adding a CUDA family](adding-a-cuda-family.md): the package interface, the tests and how to measure.
 
 | Model | Sparks | vs vLLM with MTP, same client (range over the four columns) |
@@ -27,6 +28,14 @@ window of several rows is exact when every row gets the bits a one-row step of t
 position. Serial decoding runs through the same kernels, so it is the reference. The bits differ from the
 Mac's, and they differ from a stock PyTorch forward. Sampling is the same keyed rule
 (`engine/exact_sampling.py`): a draft is accepted exactly when it is the token serial decoding samples there.
+
+## Weight formats: EXL3
+
+An EXL3 checkpoint's trellis is read by one shared module for every family, any codebook (3inst, mcg, mul1)
+and any width 1 to 8, mixed across a checkpoint and inside one MoE layer: `src/tensorfold/cuda/exl3/`. A family
+whose CUDA engine reads it declares `EXL3_VARIANT = "any"` and TensorFold checks the checkpoint before
+downloading. The dense linear layer, its plan and its measured throughput are in
+[EXL3 weights](exl3.md); `python -m tensorfold.cuda.exl3.inspect MODEL_DIR` prints what a checkpoint holds.
 
 ## The method
 

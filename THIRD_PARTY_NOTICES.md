@@ -45,10 +45,16 @@ kernels are written for TensorFold. What they follow:
   Apache-2.0), with its own kernels; no code from it is included. The hidden states GLM's DFlash2 reads and
   its thinking-off chat rendering were checked against Mia-AiLab's GLM-5.3-Flash DGX Spark recipe; no code from
   that recipe is included either.
-- GLM-5.3-Flash's EXL3 support (`families/glm5_next/cuda/exl3.py`, `exl3.cu`, `exl3_mm.py`) reads the EXL3
-  format of [ExLlamaV3](https://github.com/turboderp-org/exllamav3) (MIT License, Copyright (c) 2025 Turboderp,
-  text below): its trellis layout, its "mcg" codebook and its tensor-core fragment order. The decoder and kernels
-  are written for TensorFold and checked bit for bit against ExLlamaV3's dequantization.
+- GLM-5.3-Flash's EXL3 support (`families/glm5_next/cuda/exl3.py`, `exl3.cu`, `exl3_mm.py`), the shared EXL3
+  module (`src/tensorfold/cuda/exl3/`: `format.py`, `inspect.py`, `decode.cuh`, `linear.cu`, `experts.cu`,
+  `experts_grouped.cuh`, `experts_cb{0,1,2}.cu`) and the EXL3 loaders of Qwen3.8-27B and Qwen3.8 Flash Next
+  (`families/qwen3_5/cuda/exl3_load.py`, `families/qwen4_exp/cuda/exl3.py`) read the EXL3 format of
+  [ExLlamaV3](https://github.com/turboderp-org/exllamav3) (MIT License, Copyright (c) 2025 Turboderp, text
+  below): its trellis layout and bitstream, its "3inst", "mcg" and "mul1" codebooks, its half-integer bit widths
+  and its tensor-core fragment order. The decoders and kernels are written for TensorFold and checked bit for bit
+  against ExLlamaV3's dequantization (`reconstruct`). The n-gram row codec that Qwen3.8 Flash Next's packs carry
+  (`families/qwen4_exp/cuda/exl3.py`) reads the same rows ExLlamaV3's `ngram_dequant` reads; the code is written
+  for TensorFold and checked bit for bit against that dequantizer.
 
 ## Vendored code
 
