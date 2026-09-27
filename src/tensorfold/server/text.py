@@ -77,7 +77,25 @@ def render_prompt_ids(
         rendered = tokenizer.apply_chat_template(messages, **kwargs)
     if isinstance(rendered, str):
         rendered = tokenizer.encode(rendered)
-    return [int(t) for t in rendered]
+    ids = [int(t) for t in rendered]
+    if not enable_thinking and add_generation_prompt:
+        ids = _close_open_think(tokenizer, ids)
+    return ids
+
+
+def _close_open_think(tokenizer: Any, ids: list[int]) -> list[int]:
+    """Thinking off on a template that ignores the switch (GLM-5.3's always ends on ``<think>``): close the block as
+    the template writes a turn without reasoning. Templates that honour it never end on a bare ``<think>``."""
+
+    if not ids:
+        return ids
+    try:
+        if tokenizer.decode([ids[-1]]).strip() != "<think>":
+            return ids
+        close = tokenizer.encode("</think>", add_special_tokens=False)
+    except Exception:  # noqa: BLE001 - a tokenizer without these tokens keeps the prompt as rendered
+        return ids
+    return ids + [int(t) for t in close] if len(close) == 1 else ids
 
 
 def template_late_system(tokenizer: Any) -> str:

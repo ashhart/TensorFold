@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# fp32 matmuls in fp32 on M5-generation GPUs, as GLM-5.3-Flash serves (its MLX_ENV); MLX reads this once a process
+os.environ.setdefault("MLX_ENABLE_TF32", "0")
 
 TENSOR_UNIT_TESTS = {
     "test_lane_qmm.py", "test_lane_attention.py", "test_lane_tree.py", "test_lane_fuse.py", "test_lane_glue_norm.py",

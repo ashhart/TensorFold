@@ -35,8 +35,9 @@ KERNEL_VERSION = "v1"
 QUANT_METHODS = {"mlx": ("mlx",), "cuda": ("mlx", "exl3")}
 # the EXL3 variant the CUDA kernels read (4-bit trellis, the "mcg" codebook, routed experts only)
 EXL3_VARIANT = {"bits": 4, "codebook": "mcg", "scope": "glm53_routed_experts_only"}
-# MLX command buffers: GLM's decode step is about 1,200 kernels a token (set before MLX starts, as for Flash Next)
-MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}
+# MLX command buffers: GLM's decode step is about 1,200 kernels a token (set before MLX starts, as for Flash Next).
+# MLX_ENABLE_TF32=0: M5-generation GPUs otherwise round fp32 matmuls to TF32, and the row kernels repeat fp32.
+MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000", "MLX_ENABLE_TF32": "0"}
 
 
 def check(model_dir: str | Path) -> None:

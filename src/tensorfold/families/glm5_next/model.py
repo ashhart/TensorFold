@@ -914,8 +914,8 @@ class Layer:
 
 
 class GLM5:
-    """The backbone: ``hidden`` (final-normed hidden states) and ``head`` (logits), with the raw (pre-norm, streams
-    collapsed) hidden of the last call in ``last_raw`` for the MTP head."""
+    """The backbone: ``hidden`` (final-normed hidden states) and ``head`` (logits); the last call's rows stay in
+    ``last_normed`` for the MTP head."""
 
     def __init__(self, cfg: Config, embed: Q, layers: list[Layer], norm: mx.array, lm_head: Q) -> None:
         self.args = cfg
@@ -923,7 +923,7 @@ class GLM5:
         self.layers = layers
         self.norm = norm
         self.lm_head = lm_head
-        self.last_raw: mx.array | None = None
+        self.last_normed: mx.array | None = None
 
     def make_cache(self) -> list[Any]:
         return [KDACache() if layer.is_linear else MLACache() for layer in self.layers]
@@ -970,8 +970,9 @@ class GLM5:
         for s in range(1, int(x.shape[1])):
             raw = raw + xs[:, s]
         raw = (raw * (1.0 / int(x.shape[1]))).astype(x.dtype)
-        self.last_raw = raw
-        return mx.fast.rms_norm(raw, self.norm, self.args.rms_norm_eps)[None]
+        # the MTP head reads the row the LM head reads: its drafts land more often than from the streams' mean
+        self.last_normed = mx.fast.rms_norm(raw, self.norm, self.args.rms_norm_eps)
+        return self.last_normed[None]
 
     def head(self, hidden: mx.array) -> mx.array:
         shape = hidden.shape

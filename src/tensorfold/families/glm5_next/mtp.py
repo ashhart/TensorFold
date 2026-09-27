@@ -1,8 +1,8 @@
 """GLM-5.3-Flash's MTP head (``layers.<num_hidden_layers>`` in the checkpoint, DeepSeek-V3 style): drafts the
 token after next.
 
-At position i it reads the backbone's raw hidden h_i (streams collapsed, before the final norm) and the
-embedding of token i+1:
+At position i it reads the backbone's final-normed hidden h_i (the row the LM head reads) and the embedding of
+token i+1:
 
     x = eh_proj([enorm(embed(t_{i+1})), hnorm(h_i)])
     x = x + sparse attention(input_layernorm(x))        over the head's own cache (MLA + indexer)
@@ -32,7 +32,7 @@ class GLMMTP:
         return MLACache()
 
     def __call__(self, model: GLM5, h: mx.array, tokens: mx.array, cache: MLACache, decode: bool) -> mx.array:
-        """Rows h [n, D] (raw hidden) with their next tokens [n]: the head's output rows [n, D] (pre-norm)."""
+        """Rows h [n, D] (final-normed hidden) with their next tokens [n]: the head's output rows [n, D] (pre-norm)."""
 
         e = mx.fast.rms_norm(model.embed_tokens(tokens), self.enorm, self.eps)
         hh = mx.fast.rms_norm(h, self.hnorm, self.eps)

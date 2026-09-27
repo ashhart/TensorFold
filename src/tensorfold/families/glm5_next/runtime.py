@@ -8,9 +8,9 @@
   off when no window past one row is exact;
 - ``keep_rows``: roll every cache back to a prefix of a verified window (KDA states replayed from the window's
   entry state with the same kernel, attention caches trimmed);
-- the MTP head: ``speculate`` absorbs a verify round's rows (the backbone's raw hidden and the token sampled
-  after each) and draws each row's first draft before anything is read; ``settle`` keeps the kept rows and chains
-  up to ``drafts`` drafts from the last one, sampled with the target's keyed sampler at their positions.
+- the MTP head: ``speculate`` absorbs a verify round's rows (the backbone's final-normed rows and the token
+  sampled after each) and draws each row's first draft before anything is read; ``settle`` keeps the kept rows
+  and chains up to ``drafts`` drafts from the last one, sampled with the target's keyed sampler at their positions.
 
 Drafts change speed only: every emitted token is the target's own sample.
 """
@@ -60,7 +60,7 @@ class GLMFlash:
         if check and not self.multi_row_exact:
             print(f"[glm5] a multi-row forward does not reproduce serial steps on this MLX/GPU "
                   f"({self.check_report}): no drafts", flush=True)
-        self._raw: mx.array | None = None
+        self._rows: mx.array | None = None
         self._spec: tuple[mx.array, int] | None = None
         self.mtp_step_ms = 0.0
         if self.multi_row_exact and head is not None and self.drafts > 0:
@@ -92,7 +92,7 @@ class GLMFlash:
 
         tokens = inputs if isinstance(inputs, mx.array) else mx.array(np.asarray(inputs, dtype=np.int64))
         out = self.model.hidden(tokens, cache[: self.layer_count])
-        self._raw = self.model.last_raw
+        self._rows = self.model.last_normed
         return out
 
     def head(self, hidden: mx.array) -> mx.array:
@@ -107,31 +107,24 @@ class GLMFlash:
     # -- drafting ---------------------------------------------------------------------
     @property
     def last_streams(self) -> mx.array:
-        """The last hidden() call's raw hidden states (streams collapsed, before the final norm), [R, D]."""
+        """The last hidden() call's final-normed hidden states, [R, D]."""
 
-        return self._raw
+        return self._rows
 
     def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any], start: int = 0) -> None:
         """The MTP cache takes the last hidden() call's rows start .. start + len(next_tokens) - 1 (prompt rows)."""
 
         tokens = next_tokens if isinstance(next_tokens, mx.array) else mx.array(np.asarray(next_tokens).reshape(-1))
         tokens = tokens.reshape(-1).astype(mx.uint32)
-        self._absorb(self._raw[start:start + int(tokens.shape[0])], tokens, cache[-1])
+        self._absorb(self._rows[start:start + int(tokens.shape[0])], tokens, cache[-1])
 
-    # TF_GLM_MTP_NORMED=1: the head reads the backbone's final-normed hidden row instead of the streams' mean before
-    # the norm (the CUDA engine found the head agrees more often that way; oMLX feeds the mean). Drafts only: every
-    # emitted token is still the target's sample, so either setting is exact.
-    mtp_normed = os.environ.get("TF_GLM_MTP_NORMED", "0") == "1"
-
-    def _absorb(self, raw: mx.array, tokens: mx.array, mtp_cache: MTPCache) -> mx.array:
-        """Rows (raw hidden [n, D], the tokens that follow them [n]) into the head; its output rows [n, D]."""
+    def _absorb(self, rows: mx.array, tokens: mx.array, mtp_cache: MTPCache) -> mx.array:
+        """Rows (final-normed hidden [n, D], the tokens that follow them [n]) into the head; its output rows [n, D]."""
 
         if mtp_cache.drafted:
             mtp_cache.trim(mtp_cache.drafted)
             mtp_cache.drafted = 0
-        if self.mtp_normed:
-            raw = mx.fast.rms_norm(raw, self.model.norm, self.args.rms_norm_eps)
-        return self.mtp(self.model, raw, tokens, mtp_cache, int(tokens.shape[0]) <= self.fused_rows)
+        return self.mtp(self.model, rows, tokens, mtp_cache, int(tokens.shape[0]) <= self.fused_rows)
 
     def _draft_draw(self, out: mx.array, sampling: Any, positions: Any) -> mx.array:
         """Drafts (uint32 [n], lazy) from the head's output rows [n, D]: the target's keyed rule at ``positions``."""
@@ -143,7 +136,7 @@ class GLMFlash:
     def speculate(self, cache: list[Any], tokens: mx.array, position: int, sampling: Any, start: int = 0,
                   last_only: bool = False) -> mx.array:
         """Before a verify round's tokens are read: the MTP head absorbs rows ``start`` .. of the last hidden()
-        call (their raw hidden; ``tokens`` [n], the tokens that follow them, still on the GPU) and draws each row's
+        call (their final-normed rows; ``tokens`` [n], the tokens that follow them, still on the GPU) and draws each row's
         first draft, for positions ``position`` + 2 + i (``position``: row ``start``'s). ``settle`` then keeps the
         kept rows' part. Rows go through the head exactly as the kept ones alone would (the decode path gives a
         row the same bits at any row count up to ``exact_width``). Returns the drafts [n] (lazy)."""
@@ -151,9 +144,9 @@ class GLMFlash:
         mtp_cache = cache[-1]
         tokens = tokens.reshape(-1).astype(mx.uint32)
         rows = int(tokens.shape[0])
-        total = int(self._raw.shape[0])
+        total = int(self._rows.shape[0])
         start = start + total if start < 0 else start
-        out = self._absorb(self._raw[start:start + rows], tokens, mtp_cache)
+        out = self._absorb(self._rows[start:start + rows], tokens, mtp_cache)
         self._spec = (out, rows)
         if last_only:                      # the last row's draft only (every row still enters the head's cache)
             return self._draft_draw(out[-1:], sampling, [position + 1 + rows])
@@ -193,7 +186,7 @@ class GLMFlash:
 
     def draft(self, cache: list[Any], streams: mx.array, tokens: list[int], position: int, sampling: Any,
               count: int | None = None) -> list[int]:
-        """Absorb positions whose raw hidden states are ``streams`` [n, D] and whose next tokens are ``tokens``,
+        """Absorb positions whose final-normed hidden states are ``streams`` [n, D] and whose next tokens are ``tokens``,
         then chain ``count`` (default ``drafts``) drafts for positions ``position``, ``position`` + 1, ... (read
         back as ints: tests and tools; the engine takes ``speculate`` and ``settle``)."""
 
