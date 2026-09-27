@@ -144,7 +144,9 @@ pub const Store = struct {
         return dequantize(s, t, w.group);
     }
     pub fn embed(w: *Store, s: *mx.Scope, name: []const u8, ids: []const i32) !A {
-        const ix = try s.ints(ids);
+        return w.embedArray(s, name, try s.ints(ids));
+    }
+    pub fn embedArray(w: *Store, s: *mx.Scope, name: []const u8, ix: A) !A {
         const t = try w.triple(name);
         return dequantize(s, .{ try s.take(t[0], ix, 0), try s.take(t[1], ix, 0), try s.take(t[2], ix, 0) }, w.group);
     }

@@ -3,7 +3,7 @@ const std = @import("std");
 const mx = @import("mlx.zig");
 const cp = @import("checkpoint.zig");
 const sources = @import("kernel_sources.zig");
-const Kind = enum { scope, store, dense_weights, indexed, unindexed, kernels };
+const Kind = enum { scope, store, dense_weights, indexed, unindexed, draft_vocab, kernels };
 
 fn exercise(a: std.mem.Allocator, kind: Kind, io: std.Io, dir: []const u8) !void {
     const previous = mx.allocator;
@@ -30,6 +30,16 @@ fn exercise(a: std.mem.Allocator, kind: Kind, io: std.Io, dir: []const u8) !void
             try std.testing.expectEqual(@as(i32, 8), mx.dim(try store.get("weight0"), 0));
         },
         .dense_weights => try @import("weights.zig").Weights.checkOwnedInsertions(),
+        .draft_vocab => {
+            var store = cp.Store.init(64);
+            defer store.deinit();
+            var path: [4096]u8 = undefined;
+            try store.load(io, try std.fmt.bufPrint(&path, "{s}/indexed", .{dir}), "");
+            inline for (.{ "weight", "scales", "biases" }) |suffix|
+                try store.put("lm_head." ++ suffix, try store.get("projection." ++ suffix));
+            try @import("draft_vocab.zig").install(&store, "1 3 7 9 15 17 23 31", 32, 8);
+            try mx.eval(try store.linear(&kernels, &s, "draft_lm_head", try s.zeros(&.{ 1, 64 }, mx.bf16), true));
+        },
         .indexed, .unindexed => {
             var store = cp.Store.init(64);
             defer store.deinit();

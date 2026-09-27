@@ -55,6 +55,8 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--drafter DIR` | Enable DFlash2 and context-copy proposals; omit for serial decoding |
 | `--mtp-drafts N` | Nemotron/Flash Next: chained MTP budget, default 3, maximum 15 |
 | `--no-drafts` | Nemotron/Flash Next: disable MTP and decode serially |
+| `--full-draft-vocab` | Nemotron/Flash Next: score the full draft head instead of the original reduced ID list |
+| `--no-queued-drafts` | Nemotron/Flash Next: read each Metal draft token on the host instead of queuing the chain |
 | `--no-copy` | Disable context-copy proposals to exercise the neural draft head |
 | `--metal-simd` | Force the non-tensor Metal path for coverage on M5 |
 | `--metal-sampling` | Use the original fp32 Metal sampler instead of CPU f64 sampling |
@@ -111,6 +113,7 @@ path; attention layers gather only its K/V rows.
 | `nemotron.zig` | Mamba, NoPE attention, routed/shared experts, MTP and rollback |
 | `flash.zig`, `ngram.zig` | Hyper-connections, GDN, sparse attention, MoE, PLE and MTP |
 | `family_runtime.zig` | Chained verification and completion for Nemotron/Flash Next |
+| `draft_vocab.zig` | Original reduced draft ID lists, packed head row selection, and ID mapping |
 | `drafter.zig`, `copy.zig` | DFlash2 and context-copy proposals |
 | `sampling.zig` | Deterministic greedy/top-k/top-p selection |
 | `main.zig` | Native completion CLI and decoding loop |
@@ -131,6 +134,15 @@ uses the original BF16 Metal radix top-k kernel. Nemotron uses tensor attention 
 10,000 visible keys on M5 and MLX SDPA otherwise.
 
 ## Additional model families
+
+MTP defaults to the original reduced vocabulary: 32,768 Nemotron IDs and 79,592 Flash
+IDs (the original 79,591-ID list padded to eight rows). The executable embeds the
+original lists at build time and selects the quantized head rows during loading.
+Mapped sampling keys noise by the original token ID. The target still verifies every
+proposal against the full vocabulary. `--full-draft-vocab` restores the full draft head.
+With `--metal-sampling`, dependent MTP proposals stay on the GPU until one read at the
+end of the chain; `--no-queued-drafts` restores per-token reads. CPU sampling uses host
+reads. The [runtime audit](RUNTIME_AUDIT.md) records remaining scheduling differences.
 
 All four required checkpoints are downloaded under ignored `build/models/` in this
 checkout, including Nemotron's `mtp-4bit.safetensors` and all 22 Flash Next shards:
@@ -208,6 +220,8 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test-metal -Doptimize=safe -Dmetal-tensors=true
 .zig-toolchain/zig build test-variants -Doptimize=safe
 .zig-toolchain/zig build test-allocation-failures -Doptimize=safe
+.zig-toolchain/zig build test-draft-vocab -Doptimize=safe
+.zig-toolchain/zig build test-mtp-runtime
 .zig-toolchain/zig build test-nemotron-simd-reference -Doptimize=safe
 .zig-toolchain/zig build test-models -Doptimize=safe
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
@@ -220,7 +234,7 @@ The build exposes reproducible coverage targets:
 ```
 
 `test-metal` generates independent oracles through the original Python implementation
-and runs native comparisons: 44 sampling/top-k cases, three sparse-attention threshold
+and runs native comparisons: 76 CPU/Metal sampling/top-k cases, three sparse-attention threshold
 cases with every row and rollback continuation checked, and six tensor-attention
 cases including 128-wide heads and 10K-token strided caches, plus 36 PLE normalization
 cases that detect the former fused-reduction substitution. Omit `-Dmetal-tensors=true`
@@ -235,10 +249,16 @@ boundaries. All outputs match bit for bit. Diagnostic coverage does not make eac
 variant a selectable production mode; [COVERAGE.md](COVERAGE.md) records that distinction.
 The full [86-kernel inventory](KERNEL_INVENTORY.md) lists integration sites and fixture counts.
 
-`test-allocation-failures` injects 327 failures into native ownership operations with
+`test-allocation-failures` injects 425 failures into native ownership operations with
 real MLX handles and small checkpoint files. Every allocation is released, with zero
 retained MLX active memory. It also tests API error recovery; MLX's internal allocator
 and the driver are outside this injection boundary.
+
+`test-draft-vocab` compares every selected packed head row and mapped ID with original
+Python row selection. `test-mtp-runtime` compares serial output against full/cut head
+and queued/host proposal modes at budgets 1/3/15, with greedy, Metal and CPU sampling.
+Queued/host comparisons also check the SHA-256 of every proposal window, round counts
+and accepted drafts. Select one family with `-Dmtp-family=nemotron` or `flash`.
 
 `test-checkpoint-files` runs without a GPU and exercises positional reads, truncation,
 oversized or invalid headers, missing files and allocation failures. The loader validates

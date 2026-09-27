@@ -88,16 +88,24 @@ pub fn top(allocator: std.mem.Allocator, values: []const f32, n: usize) ![]Candi
     return result;
 }
 pub fn rows(k: *mx.Kernels, s: *mx.Scope, logits: mx.Array, positions: []const i32, settings: Sampling) ![]i32 {
+    return rowsMapped(k, s, logits, positions, settings, null);
+}
+/// Mapping must be sorted ascending, preserving token-ID tie ordering.
+pub fn rowsMapped(k: *mx.Kernels, s: *mx.Scope, logits: mx.Array, positions: []const i32, settings: Sampling, mapping: ?mx.Array) ![]i32 {
+    if (mapping) |ids| {
+        if (mx.dtype(ids) != mx.c.MLX_UINT32 or mx.c.mlx_array_size(ids) != @as(usize, @intCast(mx.dim(logits, -1)))) return error.InvalidSamplingMapping;
+    }
     const out = try mx.allocator.alloc(i32, positions.len);
     errdefer mx.allocator.free(out);
     if (settings.metal) {
-        const ids = try @import("gpu_sampling.zig").sample(k, s, logits, positions, settings, null);
+        const ids = try @import("gpu_sampling.zig").sample(k, s, logits, positions, settings, mapping);
         try mx.eval(ids);
         for (out, 0..) |*v, i| v.* = @intCast(mx.c.mlx_array_data_uint32(ids)[i]);
         return out;
     }
     if (settings.temperature == 0) {
-        const ids = try s.argmax(logits);
+        const picked = try s.argmax(logits);
+        const ids = if (mapping) |ids| try s.take(ids, picked, 0) else picked;
         try mx.eval(ids);
         for (out, 0..) |*v, i| v.* = @intCast(mx.c.mlx_array_data_uint32(ids)[i]);
         return out;
@@ -106,9 +114,16 @@ pub fn rows(k: *mx.Kernels, s: *mx.Scope, logits: mx.Array, positions: []const i
     try mx.eval(f);
     const width: usize = @intCast(mx.dim(f, -1));
     const ptr = mx.c.mlx_array_data_float32(f);
+    const id_map = if (mapping) |ids| blk: {
+        try mx.eval(ids);
+        break :blk mx.c.mlx_array_data_uint32(ids)[0..width];
+    } else null;
     for (positions, 0..) |pos, i| {
         const candidates = try top(mx.allocator, ptr[i * width ..][0..width], settings.top_k);
         defer mx.allocator.free(candidates);
+        if (id_map) |ids| for (candidates) |*candidate| {
+            candidate.id = @intCast(ids[@intCast(candidate.id)]);
+        };
         out[i] = settings.choose(candidates, @intCast(pos));
     }
     return out;

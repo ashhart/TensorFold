@@ -36,9 +36,13 @@ pub fn check(io: std.Io, dir: []const u8) !void {
         } else if (std.mem.eql(u8, case.op, "sample")) {
             const out = try gpu.sample(&kernels, &s, x, case.positions, .{ .seed = case.seed, .temperature = case.temperature, .top_k = case.k, .top_p = case.p }, if (case.mapped) try store.field(case.key, "ids") else null);
             try equal(&s, out, try store.field(case.key, "expected"));
+        } else if (std.mem.eql(u8, case.op, "cpu_sample")) {
+            const out = try @import("sampling.zig").rowsMapped(&kernels, &s, x, case.positions, .{ .seed = case.seed, .temperature = case.temperature, .top_k = case.k, .top_p = case.p }, if (case.mapped) try store.field(case.key, "ids") else null);
+            defer mx.allocator.free(out);
+            try equal(&s, try s.cast(try s.ints(out), mx.c.MLX_UINT32), try store.field(case.key, "expected"));
         } else return error.UnknownFixtureOperation;
     }
-    std.debug.print("PASS: {d} Python Metal sampling/top-k fixtures match bit for bit.\n", .{cases.value.len});
+    std.debug.print("PASS: {d} Python CPU/Metal sampling/top-k fixtures match bit for bit.\n", .{cases.value.len});
 }
 pub fn equal(s: *mx.Scope, a: mx.Array, b: mx.Array) !void {
     if (mx.dtype(a) != mx.dtype(b) or !std.mem.eql(c_int, mx.shape(a), mx.shape(b))) return error.FixtureShapeMismatch;

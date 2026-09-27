@@ -20,9 +20,12 @@ Completion requires execution evidence, not just source export or a passing smok
 - [x] Inventory and native execution coverage for remaining upstream fused projection,
   GDN and row-forward optimization variants; distinguish selectable production paths
   and diagnostic variants in the final inventory.
-- [ ] Audit original runtime optimizations (reduced draft vocabulary, queued MTP,
+- [x] Audit original runtime optimizations (reduced draft vocabulary, queued MTP,
   stacked SIMD projections), documenting production choices and any remaining behavior
   that needs a native implementation or an independent execution check.
+- [ ] Close the additional scheduler gaps identified by the audit: early MTP speculation
+  and accepted-state reuse, adaptive draft depth, pipelined serial decode and attention
+  buffer reuse. Preserve the bounded PLE memory strategy when evaluating Flash paths.
 - [ ] Final matched end-to-end benchmarks against the original Python engines: same
   checkpoints, prompts, seeds, sampling and token counts, serial and drafting, repeated
   runs, cold process/load/prefill/decode/total breakdown and token parity. Document any
@@ -151,3 +154,21 @@ New milestone evidence and any discovered failures will be recorded below.
   MLX/driver internal allocation sites are not instrumented by this native-boundary test.
 - All fifteen host tests and all five real-model cache checks pass after the ownership
   changes. Runtime optimization audit and final engine benchmarks remain outstanding.
+
+## Reduced-vocabulary and queued-MTP milestone
+
+- Embedded the two original ID lists directly through the build graph. Native MTP
+  selects their packed head rows by default; full-vocabulary and per-token host-read
+  switches preserve both configurations. CPU/Metal sampling use the original token
+  IDs for noise and tie ordering. Target verification always uses the full vocabulary.
+- All 90 real-checkpoint serial/MTP comparisons pass, including 36 queued/host pairs
+  with exact proposal hashes and acceptance/round counts. Budgets 1/3/15 cover greedy,
+  Metal and CPU sampling, Nemotron tensor/SIMD and Flash. Context copies are disabled.
+- Original Python row-selection fixtures verify all 32,768 Nemotron and 79,592 padded
+  Flash IDs and packed weight/scale/bias rows. All 121 shared CPU/Metal fixtures and
+  sixteen safety-enabled host tests pass. Allocation cleanup now checks 425 failure
+  points, including reduced-head construction; retained active MLX memory is zero.
+- RUNTIME_AUDIT.md records the remaining Python scheduling features separately from
+  complete kernel execution coverage. Early speculation/state reuse, adaptive depth,
+  serial pipelining and attention-buffer reuse still need native work or an explicitly
+  justified memory constraint. Final benchmarks and the README comparison remain open.

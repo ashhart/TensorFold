@@ -4,6 +4,31 @@ This fork ports the inference hosts to Zig and embeds the original author's Meta
 kernels. MLX-C supplies arrays, scheduling, safetensors, and general operations.
 This matrix distinguishes exercised behavior from physical-device validation.
 
+## Latest runtime milestone
+
+- Native MTP now uses the original reduced vocabulary by default: 32,768 Nemotron IDs
+  and 79,592 padded Flash IDs. `test-draft-vocab` independently verifies every mapped
+  ID and selected packed weight/scale/bias row against Python; packed uint32 data is
+  compared directly, without a lossy float conversion.
+- Metal MTP can queue a whole dependent proposal chain before reading tokens. All
+  **90 serial/MTP comparisons** pass across full/reduced heads, queued/host modes,
+  budgets 1/3/15, greedy/Metal/CPU sampling and Nemotron tensor/SIMD plus Flash.
+  All **36 queued/host pairs** also match every proposal window's SHA-256, round count
+  and accepted-draft count. Context copies are disabled throughout this matrix.
+- Added 32 independent CPU sampler fixtures, including mapped token IDs and ties.
+  All **121 shared CPU/Metal fixtures** and **16 safety-enabled host tests** pass.
+- Reduced-head construction and cleanup add 98 host allocation failure points;
+  **425 total failures** pass with all bytes released and zero retained MLX memory.
+- The [runtime audit](RUNTIME_AUDIT.md) identifies remaining scheduling work: early MTP
+  speculation/reuse, adaptive depth, serial pipelining and attention buffer reuse.
+  Whole-chain queuing alone does not establish parity with Python's full pipeline.
+  Final original-engine performance comparisons remain pending.
+
+Reproduce with `zig build test-draft-vocab`, `zig build test-mtp-runtime`,
+`zig build test-metal -Dmetal-tensors=true`, and `zig build test-allocation-failures`
+using `.zig-toolchain/zig`. The baseline and earlier milestones below retain their
+original counts to distinguish historical runs from the expanded checks.
+
 ## Model paths
 
 | Path | Native implementation | Executed checks on M5 Max |

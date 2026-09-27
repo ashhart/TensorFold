@@ -24,6 +24,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mod.addImport("mlx_c", bindings.createModule());
+    const draft_vocab = b.addOptions();
+    draft_vocab.addOption([]const u8, "nemotron", @embedFile("src/tensorfold/families/nemotron_h/draft_ids.txt"));
+    draft_vocab.addOption([]const u8, "flash", @embedFile("src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt"));
+    mod.addOptions("draft_vocab_data", draft_vocab);
     mod.addIncludePath(b.path(b.fmt("{s}/include", .{prefix})));
     mod.addLibraryPath(b.path(b.fmt("{s}/lib", .{prefix})));
     mod.addRPath(b.path(b.fmt("{s}/lib", .{prefix})));
@@ -52,6 +56,11 @@ pub fn build(b: *std.Build) void {
     allocation_checks.addArgs(&.{ "check-allocation-failures", "build/native-checks/allocations" });
     allocation_checks.step.dependOn(&allocation_fixture.step);
     b.step("test-allocation-failures", "Inject every host allocation failure at MLX ownership boundaries").dependOn(&allocation_checks.step);
+    const vocab_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_draft_vocab_fixtures.py", "build/native-checks/draft-vocab" });
+    const vocab_checks = b.addRunArtifact(exe);
+    vocab_checks.addArgs(&.{ "check-draft-vocab", "build/native-checks/draft-vocab" });
+    vocab_checks.step.dependOn(&vocab_fixture.step);
+    b.step("test-draft-vocab", "Compare every original draft ID and quantized head row against Python").dependOn(&vocab_checks.step);
     for ([_][]const u8{ "sampling", "sparse", "attention", "ple_norm" }) |kind| {
         if (std.mem.eql(u8, kind, "attention") and !tensor_tests) continue;
         const dir = b.fmt("build/native-checks/{s}", .{kind});
@@ -64,6 +73,12 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const mtp_runtime = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_mtp_runtime.py" });
+    mtp_runtime.addArtifactArg(exe);
+    mtp_runtime.addArgs(&.{ "--model-root", model_root });
+    const mtp_family = b.option([]const u8, "mtp-family", "Restrict MTP runtime checks to nemotron or flash");
+    if (mtp_family) |family| mtp_runtime.addArgs(&.{ "--family", family });
+    b.step("test-mtp-runtime", "Compare full/cut vocabulary and queued/host MTP proposal streams and target output").dependOn(&mtp_runtime.step);
     const simd_dir = b.addSystemCommand(&.{ "mkdir", "-p", "build/native-checks/simd-reference" });
     const simd_model = b.fmt("{s}/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", .{model_root});
     const simd_options = &.{ "--prompt", "Write a short Python function that computes the Fibonacci sequence.", "--seed", "5678", "--temperature", "0", "--top-k", "12", "--top-p", "0.8" };

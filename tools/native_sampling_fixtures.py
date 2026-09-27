@@ -5,7 +5,7 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
-from tensorfold.engine.exact_sampling import Sampling
+from tensorfold.engine.exact_sampling import Sampling, choose
 from tensorfold.engine import gpu_sampling, topk
 
 
@@ -40,9 +40,19 @@ def main():
                         arrays[key + ".ids"] = ids
                     cases.append(dict(key=key, op="sample", seed=seed, temperature=temp,
                                       k=count, p=prob, mapped=mapped, positions=positions))
+                    key = f"c{len(cases)}"
+                    values = np.array(x.astype(mx.float32))
+                    mapping = np.array(ids) if mapped else np.arange(vocab, dtype=np.uint32)
+                    cpu = [int(mapping[np.argmax(row)]) if not temp else choose(row, mapping, pos, settings)
+                           for row, pos in zip(values, positions)]
+                    arrays.update({key + ".x": x, key + ".expected": mx.array(cpu, dtype=mx.uint32)})
+                    if mapped:
+                        arrays[key + ".ids"] = ids
+                    cases.append(dict(key=key, op="cpu_sample", seed=seed, temperature=temp,
+                                      k=count, p=prob, mapped=mapped, positions=positions))
     mx.save_safetensors(str(args.output / "arrays.safetensors"), arrays)
     (args.output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
-    print(f"Saved {len(cases)} GPU sampling/top-k cases in {args.output}")
+    print(f"Saved {len(cases)} CPU/Metal sampling/top-k cases in {args.output}")
 
 
 if __name__ == "__main__":

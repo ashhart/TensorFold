@@ -191,14 +191,17 @@ pub const Model = struct {
         m.position += n;
     }
     pub fn draftStep(m: *Model, s: *mx.Scope, hidden: A, token: i32, cache: *Cache) !A {
-        const e = try m.norm(s, try m.weights.embed(s, "backbone.embeddings", &.{token}), "mtp.layers.0.enorm");
+        return m.draftStepArray(s, hidden, try s.ints(&.{token}), cache, false);
+    }
+    pub fn draftStepArray(m: *Model, s: *mx.Scope, hidden: A, token: A, cache: *Cache, queued: bool) !A {
+        const e = try m.norm(s, try m.weights.embedArray(s, "backbone.embeddings", token), "mtp.layers.0.enorm");
         const h = try m.norm(s, hidden, "mtp.layers.0.hnorm");
         var x = try m.lin(s, "mtp.layers.0.eh_proj", try s.cat(&.{ e, h }, -1));
         var record = Cache{};
         const delta = try m.attention(s, "mtp.layers.0.mixer", try m.norm(s, x, "mtp.layers.0.norm"), cache.*, &record);
         x = try s.binary(mx.c.mlx_add, x, delta);
         const out = try m.moe(s, "mtp.layers.1.mixer", x, try m.norm(s, x, "mtp.layers.1.norm"), try m.weights.get("mtp.layers.1.final_layernorm.weight"));
-        try mx.evalMany(&.{ out[1], record.a, record.b }, false);
+        if (!queued) try mx.evalMany(&.{ out[1], record.a, record.b }, false);
         try mx.replace(&cache.a, record.a);
         try mx.replace(&cache.b, record.b);
         return out[1];
@@ -207,6 +210,7 @@ pub const Model = struct {
         return m.lin(s, "lm_head", h);
     }
     pub fn draftHead(m: *Model, s: *mx.Scope, h: A) !A {
-        return m.head(s, h);
+        return m.lin(s, if (m.weights.has("draft_ids")) "draft_lm_head" else "lm_head", h);
     }
+    pub const draft_vocabulary = @import("draft_vocab.zig").data.nemotron;
 };

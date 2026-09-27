@@ -22,9 +22,19 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var long_cache = false;
     var warm = false;
     var copy_enabled = true;
+    var reduced_vocab = true;
+    var queued_drafts = true;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         const key = args[i];
+        if (std.mem.eql(u8, key, "--full-draft-vocab")) {
+            reduced_vocab = false;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--no-queued-drafts")) {
+            queued_drafts = false;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--check-long-cache")) {
             long_cache = true;
             continue;
@@ -82,6 +92,8 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         try check(M, &m);
         return;
     }
+    if (m.mtp and reduced_vocab) try @import("draft_vocab.zig").install(&m.weights, M.draft_vocabulary, M.vocab, 8);
+    const draft_ids = m.weights.arrays.get("draft_ids");
     if (warm) {
         var p = try m.forward(&.{42});
         defer p.deinit();
@@ -148,6 +160,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     defer history.deinit(a);
     var accepted: usize = 0;
     var rounds: usize = 0;
+    var proposal_hash = std.crypto.hash.sha2.Sha256.init(.{});
     if (max_tokens > 0) try generated.append(a, @intCast(pending));
     while (generated.items.len < max_tokens and !M.eos(pending)) {
         var stage: []const u8 = "draft proposals";
@@ -171,10 +184,28 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
                 var dc = try head_cache.clone();
                 defer dc.deinit();
                 var dh = last;
-                for (0..budget) |j| {
+                if (queued_drafts and settings.metal) {
+                    var proposed: [15]mx.Array = undefined;
+                    var token = try scope.ints(&.{pending});
+                    for (0..budget) |j| {
+                        proposal = j;
+                        dh = try m.draftStepArray(&scope, dh, token, &dc, true);
+                        token = try @import("gpu_sampling.zig").sample(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 2}, settings, draft_ids);
+                        proposed[j] = token;
+                    }
+                    // One host synchronization for the entire dependent proposal chain.
+                    // Discard proposals after its first EOS before target verification.
+                    const chain = try scope.cat(proposed[0..budget], 0);
+                    try mx.eval(chain);
+                    for (mx.c.mlx_array_data_uint32(chain)[0..budget]) |id| {
+                        window[n] = @intCast(id);
+                        n += 1;
+                        if (M.eos(@intCast(id))) break;
+                    }
+                } else for (0..budget) |j| {
                     proposal = j;
                     dh = try m.draftStep(&scope, dh, window[j], &dc);
-                    const ids = try sampling.rows(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 2}, settings);
+                    const ids = try sampling.rowsMapped(&m.kernels, &scope, try m.draftHead(&scope, dh), &.{m.position + @as(i32, @intCast(j)) + 2}, settings, draft_ids);
                     defer mx.allocator.free(ids);
                     window[n] = ids[0];
                     n += 1;
@@ -183,6 +214,9 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             }
         }
         stage = "target verification";
+        const width = [_]u8{@intCast(n)};
+        proposal_hash.update(&width);
+        proposal_hash.update(std.mem.sliceAsBytes(window[0..n]));
         var p = try m.forward(window[0..n]);
         defer p.deinit();
         var positions: [16]i32 = undefined;
@@ -216,6 +250,8 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     try out.interface.writeAll("\n");
     try out.interface.flush();
     var digest: [32]u8 = undefined;
+    var proposal_digest: [32]u8 = undefined;
+    proposal_hash.final(&proposal_digest);
     std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(generated.items), &digest, .{});
     std.debug.print("Generated {d} tokens in {d:.3}s ({d:.2} tok/s), {d} rounds, {d} accepted drafts\nSHA-256: {s}\n", .{ generated.items.len, seconds, @as(f64, @floatFromInt(generated.items.len)) / seconds, rounds, accepted, std.fmt.bytesToHex(digest, .lower) });
     if (report) |file| {
@@ -223,7 +259,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         var active: usize = 0;
         try mx.check(mx.c.mlx_get_peak_memory(&peak));
         try mx.check(mx.c.mlx_get_active_memory(&active));
-        const bytes = try std.json.Stringify.valueAlloc(a, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .prefill_seconds = prefill, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        const bytes = try std.json.Stringify.valueAlloc(a, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .draft_vocab_size = if (draft_ids) |ids| mx.c.mlx_array_size(ids) else @as(usize, M.vocab), .queued_drafts = m.mtp and queued_drafts and settings.metal, .proposal_sha256 = std.fmt.bytesToHex(proposal_digest, .lower), .prefill_seconds = prefill, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
         defer a.free(bytes);
         const f = try std.Io.Dir.cwd().createFile(io, file, .{});
         defer f.close(io);

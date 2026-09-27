@@ -15,6 +15,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-sampling")) return @import("sampling_checks.zig").check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-vocab")) return @import("draft_vocab_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-sparse")) return @import("flash.zig").Model.checkAttention(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-attention")) return @import("attention_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-checkpoint-files")) return @import("safetensors.zig").checkFiles(io, args[2]);
@@ -24,6 +25,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-allocation-failures")) return @import("failure_checks.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-model-schema")) return @import("schema.zig").checkCheckpoint(std.meta.stringToEnum(@import("schema.zig").Kind, args[2]) orelse return error.UnsupportedModel, io, args[3]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
+        std.debug.print("Nemotron/Flash MTP options: --full-draft-vocab, --no-queued-drafts\n", .{});
         std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--no-copy] [--metal-simd] [--metal-sampling]\n  [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--report PATH] [--dump-logits PATH] [--check-exact] [--check-cache-stress] [--check-long-cache]\n  [--trace-dir EXISTING_DIR (Flash only)]\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n  tensorfold check-model-schema qwen|dflash|nemotron|flash MODEL_DIR\n", .{});
         return;
     }
@@ -249,6 +251,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("draft_vocab.zig");
     _ = @import("lanes.zig");
     _ = @import("sampling.zig");
     _ = @import("config.zig");

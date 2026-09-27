@@ -345,8 +345,9 @@ pub const Model = struct {
     pub fn draftHead(m: *Model, s: *mx.Scope, h: A) !A {
         const hn = try m.hcNorm(s, h, null, mx.empty);
         const mixed = try m.hcProject(s, "mtp.hyper_connection_mixer", hn[0], hn[1], false);
-        return m.weights.linear(&m.kernels, s, "lm_head", mixed[0], true);
+        return m.weights.linear(&m.kernels, s, if (m.weights.has("draft_ids")) "draft_lm_head" else "lm_head", mixed[0], true);
     }
+    pub const draft_vocabulary = @import("draft_vocab.zig").data.flash;
     pub fn commit(m: *Model, p: *Pass, keep: usize) !void {
         if (keep == 0 or keep > p.count) return error.InvalidCommit;
         const n: i32 = @intCast(keep);
@@ -377,13 +378,16 @@ pub const Model = struct {
         m.position = end;
     }
     pub fn draftStep(m: *Model, s: *mx.Scope, hidden: A, token: i32, cache: *Cache) !A {
-        const e = try m.lin(s, "mtp", "fc_embedding", try m.centeredNorm(s, try m.weights.embed(s, "model.embed_tokens", &.{token}), "mtp.pre_fc_norm_embedding", 2560));
+        return m.draftStepArray(s, hidden, try s.ints(&.{token}), cache, false);
+    }
+    pub fn draftStepArray(m: *Model, s: *mx.Scope, hidden: A, token: A, cache: *Cache, queued: bool) !A {
+        const e = try m.lin(s, "mtp", "fc_embedding", try m.centeredNorm(s, try m.weights.embedArray(s, "model.embed_tokens", token), "mtp.pre_fc_norm_embedding", 2560));
         const hn = try m.centeredNorm(s, hidden, "mtp.pre_fc_norm_hidden", 10240);
         const hs = try m.lin(s, "mtp", "fc_hidden", try s.reshape(hn, &.{ 4, 2560 }));
         const h = try s.reshape(try s.binary(mx.c.mlx_add, hs, e), &.{ 1, 10240 });
         var rec = Cache{};
         const out = try m.layer(s, "mtp.layers.0", h, cache.*, &rec, false);
-        try mx.eval(out);
+        if (!queued) try mx.eval(out);
         var next = try rec.clone();
         errdefer next.deinit();
         cache.deinit();
