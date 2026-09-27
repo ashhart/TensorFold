@@ -315,3 +315,51 @@ def test_tree_window_nodes_equal_serial_paths(tiny, monkeypatch):
         for x, y in zip(a.state, b.state):
             if x is not None:
                 assert _same(x, y)
+
+
+@pytest.mark.parametrize("backend_name", ["row_qmv", "simd_qmm"])
+def test_one_kernel_signature_for_every_window(backend_name):
+    """The row decoder's kernels keep one Metal signature (tests/kernel_signatures.py) through rounds of these widths:
+    a chunked prompt, windows of 7 rows kept 3, 2 rows, 1 row and a full-width window, and with the 16-row backend 12
+    rows kept 9. Tree parents, conv windows and replayed rows follow the window, and before MLX 0.32 a changed
+    signature lost dispatches."""
+
+    from tests.kernel_signatures import changed, recording
+
+    from tensorfold.kernels.qwen.dense.v1 import row_attention, simd_qmm
+
+    make = {"row_qmv": row_forward.row_qmv_backend, "simd_qmm": row_forward.simd_qmm_backend}[backend_name]
+    caches = [row_forward._variants, row_forward._kernels, lane_tree._kernels, simd_qmm._kernels, simd_qmm._plans,
+              row_attention._kernels]
+    saved = [dict(c) for c in caches]
+    saved_globals = (row_forward._gate_up_kernel, row_qmv._kernel, row_forward.BACKEND)
+    try:
+        with recording() as seen:
+            for c in caches:
+                c.clear()                                      # made again, inside the recorder
+            row_forward._gate_up_kernel, row_qmv._kernel = None, None
+            backend = make()
+            if backend is None:
+                pytest.skip(f"no {backend_name} backend on this GPU")
+            exact_attention.install()
+            model = _tiny_model(seed=31)
+            row_forward.install(model, backend)
+            mx.random.seed(12)
+            tokens = [int(t) for t in mx.random.randint(0, 512, (80,)).tolist()]
+            cache = _prefill(model, tokens[:20])
+            start = 20
+            rounds = [(7, 3), (2, 2), (1, 1), (backend.max_rows, backend.max_rows), (1, 1)]
+            if backend.max_rows >= 12:
+                rounds.append((12, 9))                         # a replay of 9 rows: past MLX's 8-element threshold
+            for n, keep in rounds:
+                logits = _run(model, tokens[start:start + n], cache, start, keep=keep)
+                assert bool(mx.all(mx.isfinite(logits)).item())
+                start += keep
+    finally:
+        for c, old in zip(caches, saved):
+            c.clear()
+            c.update(old)
+        row_forward._gate_up_kernel, row_qmv._kernel, row_forward.BACKEND = saved_globals
+    names = {name.rsplit("_", 1)[0] for name, _ in seen}
+    assert {"row_forward_tree", "row_forward_gdn_pre", "gated_delta_replay"} <= names, names
+    assert not changed(seen), "kernels called with more than one signature: " + changed(seen)

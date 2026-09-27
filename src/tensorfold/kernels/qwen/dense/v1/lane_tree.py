@@ -17,6 +17,8 @@ from typing import Any, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels.metal_inputs import MIN_DEVICE_ELEMENTS, device_ints
+
 MAX_DEPTH = 128         # rows of a window (trees up to 32 rows; chains up to 128)
 MAX_TREE = 32
 
@@ -175,7 +177,7 @@ def gated_delta_tree(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: m
     maxw = 1 if chain else (16 if W <= 16 else MAX_TREE)  # per-thread state slots (compiled variants)
     y = _kernel("tree")(
         inputs=[mx.contiguous(q), mx.contiguous(k), mx.contiguous(v), mx.contiguous(g), mx.contiguous(beta),
-                mx.contiguous(state), mx.array(list(parents), dtype=mx.int32), mx.array([W], dtype=mx.int32)],
+                mx.contiguous(state), device_ints(parents), mx.array([W], dtype=mx.int32)],
         template=[("InT", q.dtype), ("Dk", Dk), ("Dv", Dv), ("Hk", Hk), ("Hv", Hv), ("MAXW", maxw), ("CHAIN", chain)],
         grid=(32, Dv, Hv), threadgroup=(32, 4, 1),
         output_shapes=[(1, W, Hv, Dv)], output_dtypes=[q.dtype])[0]
@@ -281,6 +283,8 @@ def _conv_windows(parents: Sequence[int], n_keep: int) -> mx.array:
     for path in paths:
         rows = list(range(n_keep)) + [n_keep + r for r in path]
         windows.append(rows[-(n_keep + 1):])
+    while len(windows) * (n_keep + 1) < MIN_DEVICE_ELEMENTS:   # rows past W are never read: one signature
+        windows.append([0] * (n_keep + 1))
     return mx.array(windows, dtype=mx.int32)
 
 
@@ -362,6 +366,7 @@ def commit_tree(cache: list[Any], record: list[Any], path: Sequence[int], window
 
     keep = len(path)
     rows = mx.array(list(path), dtype=mx.int32)
+    replay_rows = device_ints(path)                   # the replay reads the first ``count``: one signature
     count = mx.array([keep], dtype=mx.int32)
     in_place = list(path) == list(range(keep))
     tails: dict[int, mx.array] = {}    # conv-tail rows, built once for all recurrent layers (48 identical arrays before)
@@ -383,7 +388,7 @@ def commit_tree(cache: list[Any], record: list[Any], path: Sequence[int], window
         if kind != "gdn":
             raise RuntimeError(f"record entry {j - 1} is {kind!r}, the cache has a recurrent layer")
         q, k, v, g, beta, state0, seq, n_keep = entry
-        item[1] = replay_path(q, k, v, g, beta, state0, rows, count)
+        item[1] = replay_path(q, k, v, g, beta, state0, replay_rows, count)
         if n_keep not in tails:           # the last n_keep of [conv state rows; the path's window rows]
             tails[n_keep] = mx.array((list(range(n_keep)) + [n_keep + int(r) for r in path])[-n_keep:], dtype=mx.int32)
         item[0] = mx.contiguous(mx.take(seq, tails[n_keep], axis=0)[None])

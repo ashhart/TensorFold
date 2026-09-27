@@ -375,7 +375,7 @@ def mlp_act(gu: mx.array) -> mx.array:
 def warm(model: Any, *, rows: tuple[int, ...] = (1, 17, 33)) -> int:
     """Compile the stacked shapes' lane matmul variants (per row tile) and the consumer kernels."""
 
-    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree
 
     seen: set[tuple[int, int, int, bool]] = set()
     outs: list[mx.array] = []
@@ -401,7 +401,7 @@ def warm(model: Any, *, rows: tuple[int, ...] = (1, 17, 33)) -> int:
                     nk, dk = int(module.num_k_heads), int(module.head_k_dim)
                     taps = int(module.conv_kernel_size)
                     C = 2 * nk * dk + nv * dv
-                    windows = mx.zeros((m, taps), dtype=mx.int32)
+                    windows = lane_tree._conv_windows(list(range(-1, m - 1)), taps - 1)   # as served: padded
                     outs.extend(gdn_pre(mx.zeros((1, m, C), dtype=mx.bfloat16),
                                         mx.zeros((1, taps - 1, C), dtype=mx.bfloat16), module.conv1d.weight,
                                         windows, y[None], module.A_log, module.dt_bias, nk=nk, nv=nv, dk=dk, dv=dv))

@@ -262,7 +262,7 @@ _TAIL = r"""
     for (int q = 0; q < 16; q++) {
       const int row = fm + (q & 1) * 8;
       if (row >= G) continue;
-      const auto src = POA + (baseA + row) * D + (q >> 1) * 16 + fn;   // a placeholder is tiny: constant space
+      const auto src = POA + (baseA + row) * D + (q >> 1) * 16 + fn;
       for (int j = 0; j < 4; j++) { Olo[4 * q + j] = src[j]; Ohi[4 * q + j] = src[128 + j]; }
     }
     if (r0 < G) { m0 = PMA[baseA + r0]; l0 = PLA[baseA + r0]; }
@@ -469,6 +469,7 @@ def lane_tree_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: f
     holding the window run per node with the node's keys gathered into their slots.
     """
 
+    from tensorfold.kernels.metal_inputs import MIN_DEVICE_ELEMENTS, device_ints
     from tensorfold.kernels.qwen.dense.v1.lane_tree import MAX_DEPTH, tree_paths
 
     _, H, W, D = (int(s) for s in queries.shape)
@@ -496,7 +497,7 @@ def lane_tree_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: f
         dimsA = mx.array([PT, CA, W, 0, SGA], dtype=mx.int32)
         poA, pmA, plA = _partial(qA, keys, values, sc, dimsA, G=G, D=D, SG=SG, SGA=SGA, HKV=HKV, nch=CA, RP=RP)
     else:
-        poA = pmA = plA = mx.zeros((1,), dtype=mx.float32)
+        poA = pmA = plA = mx.zeros((MIN_DEVICE_ELEMENTS,), dtype=mx.float32)   # never read (CA = 0: PT = 0)
     # per-node part: [HKV, W, 16 rows (G valid), D] queries
     qB = queries.reshape(HKV, G, W, D).transpose(0, 2, 1, 3)
     qB = mx.contiguous(mx.concatenate([qB, mx.zeros((HKV, W, 16 - G, D), dtype=queries.dtype)], axis=2))
@@ -505,7 +506,7 @@ def lane_tree_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: f
         flat[node * MAX_DEPTH: node * MAX_DEPTH + len(path)] = [row for row in path]
     dimsB = mx.array([L, P, PT, NCB, W, RP, CA], dtype=mx.int32)
     paths_mx = mx.array(flat, dtype=mx.int32)
-    depths_mx = mx.array(depths, dtype=mx.int32)
+    depths_mx = device_ints(depths)
     poB, pmB, plB = _kernel("tail")(
         inputs=[qB, keys, values, sc, dimsB, paths_mx, depths_mx, poA, pmA, plA],
         template=[("G", G), ("D", D), ("CK", CHUNK), ("TK", TILE), ("MAXD", MAX_DEPTH)],

@@ -18,6 +18,8 @@ from typing import Any, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels.metal_inputs import device_ints
+
 CK = 128           # keys a chunk (fixed: part of the arithmetic)
 SPLIT = 4          # simdgroups a query head's chunk is split over, keys interleaved (fixed: part of the arithmetic)
 BLK = 4            # keys a simdgroup scores before one softmax update (fixed: part of the arithmetic)
@@ -177,9 +179,10 @@ def row_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: float, 
     if CAP < int(start) + W:
         raise ValueError(f"row_sdpa: the buffers hold {CAP} positions, the window reaches {int(start) + W}")
     dims = mx.array([int(start), W, CAP, nch, maxd], dtype=mx.int32)
-    depth_a = _const(("depth", tuple(parents)), lambda: mx.array(depths, dtype=mx.int32))
-    path_a = _const(("path", tuple(parents)), lambda: mx.array(
-        [p + [0] * (maxd - len(p)) for p in paths], dtype=mx.int32).reshape(-1))
+    # padded at the end to one Metal signature (metal_inputs): the kernel reads rows below W only, path at w * MAXD
+    depth_a = _const(("depth", tuple(parents)), lambda: device_ints(depths))
+    path_a = _const(("path", tuple(parents)),
+                    lambda: device_ints([r for p in paths for r in p + [0] * (maxd - len(p))]))
     scale_a = _const(("scale", float(scale)), lambda: mx.array([float(scale)], dtype=mx.float32))
     if G * SPLIT * 32 > 1024:
         raise ValueError(f"row_sdpa: {G} query heads a kv head need {G * SPLIT * 32} threads a threadgroup")

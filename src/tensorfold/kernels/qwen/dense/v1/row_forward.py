@@ -35,6 +35,8 @@ from typing import Any, Callable, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels.metal_inputs import device_ints
+
 
 class Backend:
     """A row-exact 4-bit matmul: ``qmm(x, weight, scales, biases, group_size)`` for up to ``max_rows`` rows.
@@ -676,7 +678,7 @@ def gated_delta(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: mx.arr
     if W > (lane_tree.MAX_DEPTH if chain else lane_tree.MAX_TREE):
         raise ValueError(f"window of {W} rows: trees take up to {lane_tree.MAX_TREE}, chains {lane_tree.MAX_DEPTH}")
     maxw = 1 if chain else (16 if W <= 16 else lane_tree.MAX_TREE)
-    parents_a = _const(("parents", tuple(parents)), lambda: mx.array(list(parents), dtype=mx.int32))
+    parents_a = _const(("parents", tuple(parents)), lambda: device_ints(parents))   # one signature (metal_inputs)
     nodes = _const(("nodes", W), lambda: mx.array([W], dtype=mx.int32))
     y, state_out = _kernel("tree")(
         inputs=[q, k, v, g, beta, state, parents_a, nodes],

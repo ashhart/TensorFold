@@ -13,3 +13,6 @@ version cannot reuse a snapshot computed by different kernels.
 
 Nemotron's long-context attention uses `lane_sdpa` from Qwen dense `v1`; its snapshot fingerprint includes that
 shared source too.
+
+`metal_inputs.py` (outside any version) pads kernel inputs whose length follows the window, so each kernel keeps
+one Metal signature; the kernels never read the padding, so it changes no bits.

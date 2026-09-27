@@ -9,7 +9,8 @@ nn = pytest.importorskip("mlx.nn")
 
 from tensorfold.kernels.qwen.dense.v1 import lane_fuse, lane_glue, lane_qmm  # noqa: E402
 
-from tensorfold.kernels.qwen.dense.v1 import lane_tree  # noqa: E402
+from tensorfold.kernels.qwen.dense.v1 import lane_attention, lane_tree  # noqa: E402
+from tests.kernel_signatures import changed, recording  # noqa: E402
 
 K = 5120
 ROWS = (1, 7, 16, 17, 32, 64, 128)
@@ -293,3 +294,57 @@ def test_tree_forward_fused_equals_unfused():
     for i, (p, f, a) in enumerate(zip(plain, fused, after)):
         assert _same(f, p), f"output {i} changed with the stacked projections"
         assert _same(a, p), f"output {i} changed after the stacks were built"
+
+
+@pytest.mark.parametrize("fused", [False, True])
+def test_kernel_signatures_do_not_change_between_calls(fused):
+    """One signature per lane kernel (tests/kernel_signatures.py: a change lost dispatches before MLX 0.32), from the
+    lane matmul's install and the lane_qmm / lane_fuse warm-ups through lane-decoder rounds of these shapes: a 40-row prompt, a 16-node tree
+    keeping 7 rows, a 20-row chain, single rows and a 3-row chain, the committed keys crossing a 64-key tile (the
+    attention tail's shared partial goes from none to real); stacked projections or not (lane_fuse / lane_glue)."""
+
+    _needs_tensor_units()
+    model = _tiny_model()
+    core, head = model.model, model.lm_head
+    mx.random.seed(8)
+    tokens = [int(t) for t in mx.random.randint(0, 512, (81,)).tolist()]
+    tree_parents = [-1, 0, 1, 2, 0, 4, 5, 1, 7, 3, 9, 10, 2, 12, 13, 14]
+    rounds = ((tokens[:40], [-1] + list(range(39)), list(range(40))),
+              (tokens[40:56], tree_parents, [0, 1, 2, 3, 9, 10, 11]),
+              (tokens[56:76], [-1] + list(range(19)), list(range(20))),
+              (tokens[76:77], [-1], [0]),
+              (tokens[77:80], [-1, 0, 1], [0, 1, 2]),
+              (tokens[80:81], [-1], [0]))
+    caches = [lane_qmm._kernels, lane_attention._kernels, lane_glue._kernels, lane_tree._kernels, lane_fuse._variants]
+    saved_kernels = [dict(c) for c in caches]
+    saved = lane_fuse.enabled
+    try:
+        with recording() as seen:
+            for c in caches:
+                c.clear()                             # made again, inside the recorder
+            lane_qmm.install(model, rows=lane_qmm.MAX_ROWS, wide=True)
+            lane_qmm.warm(model)
+            lane_fuse.enabled = fused
+            if fused:
+                lane_fuse.build(model)
+                lane_fuse.warm(model)
+            cache = model.make_cache()
+            start = 0
+            for window, parents, keep in rounds:
+                logits, record = lane_tree.tree_forward(core, head, window, parents, cache, start, pipeline_layers=2)
+                lane_tree.commit_tree(cache, record, keep, len(window), start)
+                start += len(keep)
+                mx.eval(logits, [a for c in cache for a in c.state if a is not None])
+                assert bool(mx.all(mx.isfinite(logits)).item())
+    finally:
+        lane_fuse.enabled = saved
+        lane_qmm.uninstall()
+        lane_fuse.clear(model)
+        for c, old in zip(caches, saved_kernels):
+            c.clear()
+            c.update(old)
+    names = {name.rsplit("_", 1)[0] for name, _ in seen}
+    expect = {"lane_attention_tail", "lane_attention_tree_merge", "gated_delta_tree", "gated_delta_replay",
+              "lane_fuse_gdn_pre" if fused else "lane_glue_gdn_pre"}
+    assert expect <= names, names
+    assert not changed(seen), "kernels called with more than one signature: " + changed(seen)
