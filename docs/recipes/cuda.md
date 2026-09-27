@@ -10,6 +10,12 @@ CUDA kernels. Use the [runbook](../../RUNBOOK.md#nvidia-gpus) for the container 
 | [Nemotron 3.5 Lightning](nemotron-3.5.md#cuda) | One or two ranks, MTP chains and CUDA graphs |
 | [GLM-5.3-Flash](glm-5.3-flash.md#cuda) | Two ranks, MTP and optional DFlash2 |
 
+An EXL3 checkpoint's trellis is read by one shared module for every family, any codebook (3inst, mcg, mul1)
+and any width 1 to 8, mixed across a checkpoint and inside one MoE layer: `src/tensorfold/cuda/exl3/`. A family
+whose CUDA engine reads it declares `EXL3_VARIANT = "any"`, and TensorFold checks the checkpoint before
+downloading. The dense linear layer, its plan and its measured throughput are in [EXL3 weights](exl3.md);
+`python -m tensorfold.cuda.exl3.inspect MODEL_DIR` prints what a checkpoint holds.
+
 ## Arithmetic and state
 
 Each engine defines its own serial reference. A verify row uses the same group order, K split and

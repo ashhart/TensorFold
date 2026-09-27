@@ -23,6 +23,8 @@ produces on this machine. The bits differ from the Mac engine's; each engine is 
 | `tensorfold/cuda/kernels/attention.py` | `_paths`, `_shared`, `_tail`, `_merge` | tree attention over each stream's committed keys and its root-to-node path | a query's chunks and merge order depend on its own key range, never on other rows or streams |
 | `tensorfold/cuda/sampling.py` | `sample_rows`, `sample_streams` | position-keyed sampling (the rule in `engine/exact_sampling.py`): top-k candidates on the GPU, the draw on the host in float64 | one row at a time |
 | `distributed.py` | `row_partial`, `gather_rank_partials` | default two-rank decode: column-parallel projections keep whole output rows; row-parallel ones return fp32 partials that both ranks all-gather and add rank 0 then rank 1, rounding once | a fixed summation order instead of NCCL's all-reduce |
+| `b16.cu` | `b16_linear` | a plain fp16/bf16 projection (`x @ W.T + bias`) for the tensors an EXL3 pack stores at 16 bits, one warp per output | each output sums its own row in a fixed order, whatever the row count |
+| `exl3_load.py` | the shared module | `Exl3Linear` for the pack's EXL3 tensors: the rotation, the trellis GEMV of any codebook and width, and the split-K plan the weight's shape decides | the shared module's kernels are row-invariant by construction |
 | `dflash2.py` | `_dconv_kernel`, `_prep_kernel` | the DFlash2 draft model with 4-bit projections through the same lane matmul, fused dynamic convolution and norm plus rotary; on two GPUs each rank holds half the heads, MLP and draft vocabulary | drafts only propose; the target verifies every token |
 
 ## The rest of the package

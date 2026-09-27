@@ -7,10 +7,13 @@ Each family page describes its supported checkpoint, kernels and operating limit
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md) |
-| GLM-5.3-Flash | [Two-rank CUDA](glm-5.3-flash.md) |
+| GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
+| Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
 
 Contributor guides cover [adding an MLX family](adding-a-family.md),
 [adding a CUDA family](adding-a-cuda-family.md) and [CUDA implementation rules](cuda.md).
+[EXL3 weights](exl3.md) and [universal EXL3 experts](exl3-universal-experts.md) describe the shared EXL3
+module every CUDA family can read: any codebook, any width per tensor, one grouped launch per MoE projection.
 
 ## The contract
 

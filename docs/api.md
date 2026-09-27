@@ -58,6 +58,9 @@ for the client to validate. Union types and schema references are not resolved b
 CUDA parses Qwen tool-call envelopes after generation and leaves XML parameter values as strings;
 it does not apply the MLX schema conversion.
 
+A reply that is not a call returns as content, never an error: prose, JSON that names no offered tool
+(a structured answer), and malformed or unoffered `<tool_call>` blocks, which keep their text.
+
 With `parallel_tool_calls: false`, the server buffers tool deltas until it can return the first valid
 completed call. Prose and reasoning can still stream. Usage counts the entire decoded reply, including
 additional calls omitted from the response.

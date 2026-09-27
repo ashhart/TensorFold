@@ -17,6 +17,39 @@ identifiers. Copyright 2026 The Qwen Team and The HuggingFace Inc. team, Apache 
 See [the license text](LICENSES/Apache-2.0.txt). The same helpers appear in mlx-vlm's
 `models/qwen4_exp/language.py`, MIT License, Copyright © 2025 Prince Canuma.
 
+## GLM-5.3-Flash on Apple Silicon
+
+The MLX engine of `glm5_next` (`src/tensorfold/families/glm5_next/`: the forward pass in `model.py`, `kda.py`,
+`mla.py` and `mlp.py`, the draft head in `mtp.py`, `runtime.py`) and its Metal kernels
+(`src/tensorfold/kernels/glm/flash/v1/`) are written for TensorFold. What they follow or port:
+
+- The forward pass follows, op for op on its prefill path, the GLM-5.3-Flash (`glm5_next`)
+  implementation added to [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) by PR #2030 (by Lazarus-931; MIT License,
+  Copyright (c) 2025 Prince Canuma), as vendored by [oMLX](https://github.com/jundot/omlx) (Apache-2.0). Nothing is
+  imported from either at runtime.
+- `kernels/glm/flash/v1/kda.py` is ported from mlx-vlm PR #2105 ("glm5_next: fuse the KDA decode chain into one
+  Metal kernel", by avlp12; `mlx_vlm/models/glm5_next/fused_kda.py`; closed without merging, MIT License,
+  Copyright (c) 2025 Prince Canuma): the whole KDA decode step in one Metal kernel. TensorFold runs a window of
+  rows in order inside the launch, folds the 4-bit `f_b` / `g_b` projections in with MLX's one-row `qmv_quad`
+  arithmetic, and keeps its own rounding points. Its precision rules (precise exp, uncontracted sums of squares)
+  are also used in `fused.py`, `moe.py` and `hc.py`.
+- `kernels/glm/flash/v1/sparse_attention.py` is mlx-vlm's `indexed_sparse_attention` kernel
+  (`mlx_vlm/models/sparse_attention.py`) as extended by mlx-vlm PR #2245 ("Fix GLM-5.3 cached decode batch
+  invariance", by raullenchai; closed without merging, MIT License, Copyright (c) 2025 Prince Canuma), adapted to
+  TensorFold's single latent cache.
+- mlx-vlm PR #2107 (the sparse indexer's incremental decode and a stale-pool fix, by avlp12) needed no code:
+  TensorFold's cache already pools once per completed block. Its stale-pool case is pinned by
+  `tests/test_glm5_ported_kernels.py`.
+- The hyper-connection kernel `_HC_SPLIT` in `kernels/glm/flash/v1/kernels.py`, and the sinkhorn and collapse in
+  `hc.py`, repeat the `hc_sinkhorn_collapse` kernel of mlx-vlm's `mlx_vlm/models/deepseek_v4/hyper_connection.py`
+  (MIT License, Copyright (c) 2026 Apple Inc.), with its output type set to the input's.
+- The 4-bit matvec `_QMV_ROWS` in `kernels.py` is Flash Next's `qmv_rows` with MLX's group-64 scale indexing, and
+  the expert kernels (`_EXPERT_GROUP`, `_EXPERT_QMV`) follow Flash Next's `expert_group` / `grouped_gateup`. The
+  row kernels in `kernels.py`, `moe.py` and `hc.py` repeat the arithmetic and partitions of MLX 0.32's own kernels (MIT
+  License, Copyright © 2023 Apple Inc.): `qmv_fast`, `qmv_quad` and `gather_qmv_fast` (`quantized.h`), `GEMVKernel`
+  and `GEMVTKernel` (`gemv.h`) and the `rms_norm` kernels, one row per grid slice with the tiling MLX picks for one
+  row, so each row keeps MLX's one-row bits.
+
 ## CUDA
 
 CUDA backends use [PyTorch](https://github.com/pytorch/pytorch), BSD-3-Clause, and
@@ -32,9 +65,14 @@ GLM's CUDA engine implements transformers' `models/glm5_next/modular_glm5_next.p
 without including that source. Its draft inputs and thinking-off rendering follow the public GLM recipe
 from Mia-AiLab without including recipe code.
 
-GLM EXL3 reads [ExLlamaV3](https://github.com/turboderp-org/exllamav3)'s trellis layout, mcg codebook and
-fragment order. ExLlamaV3 uses the MIT License, Copyright © 2025 Turboderp. TensorFold's decoder and
-kernels are separate implementations.
+GLM EXL3 (`families/glm5_next/cuda/exl3.py`, `exl3.cu`, `exl3_mm.py`), the shared EXL3 module
+(`src/tensorfold/cuda/exl3/`) and the EXL3 loaders of Qwen3.8-27B and Qwen3.8 Flash Next
+(`families/qwen3_5/cuda/exl3_load.py`, `families/qwen4_exp/cuda/exl3.py`) read
+[ExLlamaV3](https://github.com/turboderp-org/exllamav3)'s EXL3 format: its trellis layout and bitstream, its
+"3inst", "mcg" and "mul1" codebooks, its half-integer bit widths and its tensor-core fragment order. Flash
+Next's packs also carry ExLlamaV3's n-gram row codec, read as its `ngram_dequant` reads it. ExLlamaV3 uses the
+MIT License, Copyright © 2025 Turboderp. TensorFold's decoders and kernels are separate implementations,
+checked bit for bit against ExLlamaV3's dequantization.
 
 ## Vendored code and weights
 

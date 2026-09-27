@@ -9,7 +9,8 @@ tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
 Use `http://127.0.0.1:8080/v1` as the client base URL and the model ID from `/v1/models`.
-Python 3.11 or newer is required. See the [runbook](RUNBOOK.md) for installation and a first request.
+Python 3.11 or newer is required, and MLX 0.32.2 or newer on a Mac (pip installs it). See the [runbook](RUNBOOK.md)
+for installation and a first request.
 
 ## Models
 
@@ -18,7 +19,10 @@ Python 3.11 or newer is required. See the [runbook](RUNBOOK.md) for installation
 | Nemotron 3.5 Lightning | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | MLX, CUDA | Included MTP head; context copies on MLX |
 | Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` | MLX, CUDA | `z-lab/Qwen3.8-27B-DFlash2` and context copies; DFlash2 is optional on MLX |
 | Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX, CUDA | Included MTP head and context copies |
-| GLM-5.3-Flash | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | CUDA with two ranks | MTP; optional DFlash2 |
+| GLM-5.3-Flash | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | MLX on a 256 GB Mac, CUDA with two ranks | MTP; optional DFlash2 on CUDA |
+| Gemma 4 26B-A4B | `mlx-community/gemma-4-26b-a4b-it-4bit` | MLX | Context copies |
+| Qwen3.8-27B (EXL3, experimental) | `turboderp/Qwen3.8-27B-exl3` (branches `3.00bpw`, `4.00bpw`; any codebook, 1 to 8 bits per weight) | CUDA | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
+| Qwen3.8 Flash Next (EXL3, experimental) | `turboderp/Qwen3.8-Flash-Next-exl3` (branch `3.05bpw_h5_ng5`; any codebook, a width per tensor) | CUDA | Included MTP head and context copies |
 
 `tensorfold models` lists families and checkpoints. `tensorfold info MODEL` checks configuration without
 fetching weights. `serve` downloads a missing checkpoint; `pull` downloads it ahead of time.
@@ -39,10 +43,15 @@ keep the installed MLX version within the package requirements. The named checkp
 
 Flash Next requires 4-bit/group-32 weights. Without an MTP head it can run without MTP drafting on MLX;
 on CUDA, explicitly pass `--no-drafts`. Nemotron CUDA requires 4-bit/group-64 weights and an MTP head
-unless `--no-drafts` is set. GLM CUDA reads MLX 4-bit/group-64 weights and the experimental
-`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` conversion. GLM's optional
+unless `--no-drafts` is set. GLM on MLX reads 4-bit/group-64 weights and mlx-lm's mixed-bit conversions,
+whose 5-, 6- and 8-bit tensors take their own row kernels; it needs MLX 0.32.2 or later. GLM CUDA reads
+MLX 4-bit/group-64 weights and the experimental `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` conversion. GLM's optional
 `incoai/GLM-5.3-Flash-DFlash2` checkpoint has non-commercial license
 terms, described in [third-party notices](THIRD_PARTY_NOTICES.md).
+
+Gemma 4 has no draft head and drafts copies of its context. Its kernels read 4-bit weights in groups of 32 or 64
+with an 8-bit router, as the mlx-community conversion stores them; `serve` refuses other Gemma 4 layouts
+before downloading.
 
 See the [recipes](docs/recipes/README.md) for supported formats and backend limits.
 
@@ -105,7 +114,8 @@ A positive CUDA value must fit both the native window and the capacity estimate 
 otherwise startup refuses it with fitting guidance. Increasing GLM beyond its dense window enables
 its sparse-attention path. The startup report distinguishes native and allocated capacity.
 
-MLX uses a process budget capped by 70% of RAM and the GPU's recommended working set. It reserves 3 GiB
+MLX uses a process budget capped by 70% of RAM and the GPU's recommended working set. A family can state a
+larger share: GLM-5.3-Flash takes 85% on a Mac with 256 GB or less, with nothing else loaded. It reserves 3 GiB
 for the rest of the process before setting the MLX allocator limit. Admission accounts for weights,
 cache growth, reply tokens and prefill workspace. `TENSORFOLD_MEMORY_LIMIT_GB` can lower the budget in
 GiB. Retained prefixes and reusable MLX buffers have separate limits. Admission can evict retained
@@ -140,8 +150,10 @@ not minimum-memory promises. Weights that exceed the MLX budget are refused befo
 On MLX, chunk starts come from the rendered token sequence. Resume points are assistant-message
 starts and the second message start, using markers discovered from the chat template. The planner
 skips points less than 256 tokens from the previous chunk start and otherwise cuts at the first
-eligible point or after 2,048 tokens. Without recognized markers it uses the 2,048-token grid.
-There is no configurable `--prefill-grid` option.
+eligible point or after the model family's chunk. Qwen3.8 Flash Next measures one chunk at startup and
+takes the largest of 8,192, 4,096 and 2,048 tokens (4,096 and 2,048 on GPUs without tensor units) that
+still leaves room for 128K tokens of context; other families use 2,048. Without recognized markers it
+uses that grid. There is no configurable `--prefill-grid` option.
 
 Fresh and resumed requests use the same chunk plan. Reuse stops at a matching token prefix and a valid
 chunk boundary; the previous reply is prefilled again under the current prompt. A template that rewrites
@@ -173,14 +185,10 @@ model data; the startup estimate is not a measured maximum capacity.
 
 ## Measurements
 
-| Backend | Decode rate | Cold and resumed first-token latency | Concurrent throughput |
-| --- | --- | --- | --- |
-| MLX | TBD [release-0.3.5] | TBD [release-0.3.5] | TBD [release-0.3.5] |
-| CUDA | TBD [release-0.3.5] | TBD [release-0.3.5] | TBD for supported shared rounds [release-0.3.5] |
-
-These 0.3.5 results await release measurement. The
-[recipe book](docs/recipes/README.md#measurements) gives the public prompts and benchmark command.
-Historical results with those fixtures are labelled separately in the CUDA family recipes.
+Each release's notes give its measured decode, prompt and concurrency numbers against the previous release and the
+standard servers, on the machines they name: see [CHANGELOG.md](CHANGELOG.md) and the GitHub releases. The
+[recipe book](docs/recipes/README.md#measurements) gives the public prompts and benchmark command, and each family's
+recipe keeps its own tables.
 
 ## Updating
 
@@ -188,6 +196,9 @@ Historical results with those fixtures are labelled separately in the CUDA famil
 restart. A normal installation uses the same interpreter's pip. An editable clone must be clean and able
 to fast-forward to the release tag; afterwards run `python -m pip install -e .` in the checkout to refresh
 metadata and dependencies. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` disables startup checks.
+
+When the update finishes it prints what changed since your version, from [CHANGELOG.md](CHANGELOG.md), which lists
+every release. The first time a new version serves, it prints one line linking to its notes.
 
 ## Development and license
 

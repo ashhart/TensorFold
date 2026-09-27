@@ -199,7 +199,7 @@ def test_every_family_names_an_importable_kernel_version():
         assert family.lanes                 # every family decodes through the lane engine
         if family.model_type == "qwen3_5":
             model = SimpleNamespace(_tensorfold_lanes=True)
-            assert families.kernel_version(family, model).startswith("qwen-dense-v1-")
+            assert families.kernel_version(family, model).startswith(("qwen-dense-v1-", f"{family.model_type}-v1-"))
         else:
             assert families.kernel_version(family, None).startswith(f"{family.model_type}-v1-")
 

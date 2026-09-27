@@ -32,8 +32,8 @@ They widen packed values for the tensor operations without changing those values
 keep separate calls where a fused projection needs one width. Examples include
 `Vontra/Qwen3.8-27B-oQ2` and `Vontra/Qwen3.8-27B-oQ4`.
 
-On M1 through M4, only 4-bit/group-64 projections are supported. CUDA support here is also 4-bit/group-64;
-the MLX lane-width list does not describe CUDA support. On MLX, unsupported projection formats and tied
+On M1 through M4, only 4-bit/group-64 projections are supported. CUDA reads MLX 4-bit/group-64 and
+[EXL3 packs](#exl3-checkpoints-experimental); the MLX lane-width list does not describe CUDA support. On MLX, unsupported projection formats and tied
 embedding heads are refused from `config.json` before weight downloads and again at load; loaded
 projections must also be covered by the selected decoder. `--lane-kernels on` requires M5 tensor units.
 Lower weight precision does not guarantee faster decode or a fitting context. Release memory and
@@ -53,6 +53,40 @@ The verify matmul fixes reduction order by weight shape. Tree attention reads on
 node's own path; recurrent commits replay that path. Two-rank reductions gather fp32 partials and add in
 rank order. Each rank count has its own serial reference. See the
 [CUDA kernel map](../../src/tensorfold/families/qwen3_5/cuda/README.md).
+
+### EXL3 checkpoints (experimental)
+
+The CUDA engine also reads turboderp's EXL3 packs of the model (`turboderp/Qwen3.8-27B-exl3`, a branch per size,
+`mul1` codebook, 6-bit head) through the shared EXL3 module ([EXL3 weights](exl3.md)) and drafts with the same
+`z-lab/Qwen3.8-27B-DFlash2`. One GPU: two ranks read the MLX checkpoint. Download a size by its branch, then
+serve the folder:
+
+```bash
+python -c "from huggingface_hub import snapshot_download as d; d('turboderp/Qwen3.8-27B-exl3', revision='3.00bpw', local_dir='qwen27b-exl3-3.00bpw')"
+tensorfold pull z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve qwen27b-exl3-3.00bpw --host 0.0.0.0 --port 8080
+```
+
+Verify windows use the row-invariant EXL3 linear, so drafted replies equal `"draft": false` ones; prompts use the
+EXL3 prompt path (W_q decoded once a chunk, a fixed-tile GEMM), whose bits do not depend on chunking, so the
+engine keeps prompt ends as it does for the MLX checkpoint. The drafter reads the target's 6-bit head over its
+draft vocabulary by slicing the head's 128-column strips as stored: its logits are the target's, bit for bit.
+
+Measured on one DGX Spark (GB10) through `tensorfold serve`, the 3.00bpw pack against the MLX 4-bit checkpoint on
+the same engine and box, the [public benchmark command](README.md#measurements), medians of 15 runs a cell:
+
+| Cell | EXL3 3.00bpw | MLX 4-bit | vLLM MTP=3 |
+| --- | ---: | ---: | ---: |
+| Code, sampled | 83.4 tok/s | 57.5 tok/s | 23.4 tok/s |
+| Chat, sampled | 44.2 tok/s | 49.7 tok/s | 25.4 tok/s |
+| Code, greedy | 64.5 tok/s | 53.6 tok/s | 25.8 tok/s |
+| Chat, greedy | 39.9 tok/s | 50.0 tok/s | 24.7 tok/s |
+
+A 12-row round costs 75 ms on the pack against 84 on the MLX checkpoint (10.1 GB of weights a token against
+14.4). The chat cells keep fewer drafted tokens a round (3.0-3.3 against 4.2), since DFlash2 was trained on the
+unquantized model. Cold prefill runs 880-970 tok/s from 2k to 16k and 720-890 at 32k-64k, about half the MLX
+checkpoint's FP8 prompt path. The engine and drafter take 13.2 GiB after loading; a 64k prompt peaks at 28 GiB
+allocated. Other branches of the pack load through the same path; only 3.00bpw is measured here.
 
 ### Historical public-fixture results
 
