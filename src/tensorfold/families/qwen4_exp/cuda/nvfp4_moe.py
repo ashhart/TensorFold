@@ -220,6 +220,27 @@ def expert4_from_bf16(gate: torch.Tensor, up: torch.Tensor, down: torch.Tensor) 
     return Expert4(gu, nvfp4.fp4_from_bf16(down.contiguous()))
 
 
+def moe4_from_bf16(gate_up: torch.Tensor, down: torch.Tensor,
+                   shared: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> MoE4:
+    """The stacked BF16 experts (the MTP layer's, ``mtp.layers.0.mlp.experts`` in the checkpoint's
+    exclusions): gate_up [E, 2NI, K] and down [E, K, NI] ride the FP4 kernels as identity-scaled tables —
+    bit-exact (the bf16 values are the stored operands, scale 1), the shared expert its own tables."""
+
+    gu = _stacked(*_one_bf16(gate_up))
+    dn = _stacked(*_one_bf16(down))
+    return MoE4(gu, dn, expert4_from_bf16(*shared))
+
+
+def _one_bf16(t: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """A [E, N, K] bf16 stack -> the code-bit grid [E, N, K] (uint16 patterns) and identity row scales
+    [E, N, K/16] fp32 — the ``_fp4_stack`` face, so the stacked tables are built the same way."""
+
+    e, n, k = t.shape
+    bits = t.contiguous().view(torch.uint16)
+    rows = torch.ones((e, n, k // nvfp4.GS), dtype=torch.float32, device=t.device)
+    return bits, rows
+
+
 def moe4_from_experts(gate: list, up: list, down: list, shared: tuple) -> MoE4:
     """Per-expert FP4 pairs (the CPU/test path): gate/up/down each a list of (words, weight_scale,
     weight_scale_2) over the routed experts, shared the BF16 (gate, up, down)."""

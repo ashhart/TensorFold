@@ -501,7 +501,9 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         """The NVFP4 checkpoint's MoE: the 512 routed experts FP4 (per-expert ``{proj}.weight`` /
         ``.weight_scale`` / ``.weight_scale_2``), everything else BF16 (the checkpoint's ``ignore``). The
         shared expert is BF16 riding identity-scaled tables; the shared gate's row is BF16 as stored.
-        Tensor parallel takes a rank's gate/up rows and down input blocks (16-wide, the NVFP4 block)."""
+        The MTP layer's experts are BF16 stacked too (``mtp.layers.0.mlp.experts`` is excluded): they ride
+        the same tables as identity-scaled FP4. Tensor parallel takes a rank's gate/up rows and down input
+        blocks (16-wide, the NVFP4 block)."""
 
         from . import nvfp4_moe
 
@@ -513,26 +515,32 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         gs = full.nvfp4_group
         lo, hi = rank * w_ // world, (rank + 1) * w_ // world
         dlo, dhi = rank * w_ // world // gs, (rank + 1) * w_ // world // gs
-
-        def stack(base: str, proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            w = torch.stack([raw(f"{name}.experts.{i}.{base}.weight") for i in range(e)])
-            s = torch.stack([raw(f"{name}.experts.{i}.{base}.weight_scale") for i in range(e)])
-            s2 = torch.stack([raw(f"{name}.experts.{i}.{base}.weight_scale_2") for i in range(e)])
-            return w, s, s2
-
-        gate = stack("mlp", "gate_proj")
-        up = stack("mlp", "up_proj")
-        down = stack("mlp", "down_proj")
-        if world > 1:
-            gate = (gate[0][:, lo:hi], gate[1][:, lo:hi], gate[2])
-            up = (up[0][:, lo:hi], up[1][:, lo:hi], up[2])
-            down = (down[0][:, :, dlo:dhi], down[1][:, :, dlo:dhi], down[2])
         shared = (raw(f"{name}.shared_expert.gate_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
                   raw(f"{name}.shared_expert.up_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
                   raw(f"{name}.shared_expert.down_proj.weight").to(torch.bfloat16)[:, dlo * gs:dhi * gs]
                   .contiguous())
-        moe4 = nvfp4_moe.moe4_from_checkpoint(gate, up, down, shared)
-        del gate, up, down                               # the stacks are dead once the grids are tiled
+        if rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):      # the main layers: per-expert FP4
+            def stack(base: str, proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                w = torch.stack([raw(f"{name}.experts.{i}.{base}.weight") for i in range(e)])
+                s = torch.stack([raw(f"{name}.experts.{i}.{base}.weight_scale") for i in range(e)])
+                s2 = torch.stack([raw(f"{name}.experts.{i}.{base}.weight_scale_2") for i in range(e)])
+                return w, s, s2
+
+            gate = stack("mlp", "gate_proj")
+            up = stack("mlp", "up_proj")
+            down = stack("mlp", "down_proj")
+            if world > 1:
+                gate = (gate[0][:, lo:hi], gate[1][:, lo:hi], gate[2])
+                up = (up[0][:, lo:hi], up[1][:, lo:hi], up[2])
+                down = (down[0][:, :, dlo:dhi], down[1][:, :, dlo:dhi], down[2])
+            moe4 = nvfp4_moe.moe4_from_checkpoint(gate, up, down, shared)
+            del gate, up, down                           # the stacks are dead once the grids are tiled
+        else:                                            # the MTP layer: BF16 stacked experts (excluded)
+            gu = raw(name + ".experts.gate_up_proj").to(torch.bfloat16)          # [E, 2*NI, D]
+            dn = raw(name + ".experts.down_proj").to(torch.bfloat16)             # [E, D, NI]
+            if world > 1:
+                gu, dn = gu[:, lo:hi], dn[:, :, dlo * gs:dhi * gs]
+            moe4 = nvfp4_moe.moe4_from_bf16(gu, dn, shared)
         return MoEW(router, moe4)
 
     def attention(name: str) -> AttnW:
