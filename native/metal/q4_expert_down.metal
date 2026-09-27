@@ -22,13 +22,14 @@
   const device bfloat* DBp = shared ? SDB : DB;
   const device bfloat* x = ACT + (r * SLOTS + k) * NI;
   float xa[16], xb[16];
-  const float sa = load16(x + lane * 16, xa);
+  const bool first = int(lane) < NC;
+  const float sa = first ? load16(x + lane * 16, xa) : 0.0f;
   const bool second = int(lane) < NC - 32;
   const float sb = second ? load16(x + (32 + lane) * 16, xb) : 0.0f;
   for (int row = 0; row < 8; row++) {
     const size_t at = e * D + d0 + row;
     const device uint8_t* w = (const device uint8_t*)DWp + at * KB;
-    float acc = qdot16(w + lane * 8, xa, float(DSp[at * KG + lane / 2]), float(DBp[at * KG + lane / 2]), sa);
+    float acc = first ? qdot16(w + lane * 8, xa, float(DSp[at * KG + lane / 2]), float(DBp[at * KG + lane / 2]), sa) : 0.0f;
     if (second)
       acc += qdot16(w + (32 + lane) * 8, xb, float(DSp[at * KG + (32 + lane) / 2]), float(DBp[at * KG + (32 + lane) / 2]), sb);
     acc = simd_sum(acc);

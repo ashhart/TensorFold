@@ -11,6 +11,7 @@ from pathlib import Path
 import mlx.core as mx
 from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_glue, lane_tree, lane_attention
 from tensorfold.kernels.qwen.dense.v1 import row_attention, simd_qmm
+from tensorfold.kernels.qwen.dense.v1 import lane_fuse, lane_gdn, row_forward, row_qmv
 from tensorfold.kernels.nemotron.lightning.v1 import kernels as nemotron, rows as nemotron_rows
 from tensorfold.kernels.qwen.flash_next.v1 import kernels as flash
 from tensorfold.engine import gpu_sampling, topk
@@ -66,14 +67,39 @@ def main():
             (lane_tree, ["tree", "replay"]),
             (lane_attention, ["tail", "tree_merge", "partial", "partial_direct", "partial_128", "partial_direct_128", "merge"]),
             (row_attention, ["partial", "merge"]),
+            (lane_fuse, list(lane_fuse._variant_sources())),
+            (row_forward, list(row_forward._SPECS)),
         ]:
-            module._kernels.clear()
+            (module._variants if module is lane_fuse else module._kernels).clear()
             for name in names:
                 spec = module._kernel(name)
                 key = module.__name__.rsplit(".", 1)[-1] + "_" + name
                 export(key, spec)
         simd_qmm._kernels.clear()
-        export("simd_qmm_mma", simd_qmm._compiled("mma", ()))
+        # The custom load prologue is the exact example exercised by upstream tests.
+        # It is a diagnostic specialization, not an arbitrary runtime shader API.
+        test_tree = ast.parse((ROOT / "tests/test_simd_qmm.py").read_text())
+        prologue_test = next(node for node in test_tree.body if isinstance(node, ast.FunctionDef)
+                             and node.name == "test_prologue_gives_the_unfused_bits")
+        scale_header = next(ast.literal_eval(node.value) for node in prologue_test.body
+                            if isinstance(node, ast.Assign) and node.targets[0].id == "header")
+        scale = simd_qmm.Prologue("scale", "scale8(X, E, (r), (j), K)", ("E",), scale_header)
+        for kind in ("mma", "scalar"):
+            export(f"simd_qmm_{kind}", simd_qmm._compiled(kind, ()))
+            export(f"simd_qmm_{kind}_dep", simd_qmm._compiled(kind, (), dep=True))
+            export(f"simd_qmm_{kind}_scale", simd_qmm._compiled(kind, (), prologue=scale))
+        row_qmv._kernel = None
+        export("row_qmv", row_qmv._compiled())
+        row_forward._variants.clear()
+        for norm in (False, True):
+            for epilogue in ("plain", "act", "residual"):
+                export(f"row_forward_qmv_{int(norm)}_{epilogue}", row_forward._variant_kernel(norm, epilogue))
+        export("row_forward_gate_up_act", dict(source=row_forward._gate_up_act_source(), header=row_qmv._HEADER,
+               input_names=["X", "W", "S", "B"], output_names=["OUT"]))
+        for name, source in (("step", lane_gdn._STEP_SOURCE), ("step_kh", lane_gdn._STEP_SOURCE_KH)):
+            export("lane_gdn_" + name, dict(source=source,
+                   input_names=["q", "k", "v", "log_g", "beta", "s0kq", "log_prev", "k_hist", "d_hist", "lg_hist", "tlen"],
+                   output_names=["y", "delta_out", "log_out"]))
         # Extract static kernel declarations directly, preserving each module's header.
         # Dynamic source variants are enumerated below, so no model weights are needed.
         for module in (nemotron, nemotron_rows, flash):

@@ -42,6 +42,11 @@ pub fn build(b: *std.Build) void {
     b.step("test-checkpoint-files", "Exercise positional reads, corrupt checkpoints and allocation failures without a GPU").dependOn(&file_tests.step);
     const metal_tests = b.step("test-metal", "Generate Python oracles and compare native Metal kernels (requires .venv)");
     const tensor_tests = b.option(bool, "metal-tensors", "Include M5 tensor attention fixtures in test-metal") orelse false;
+    const variants_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/variants" });
+    const variants = b.addRunArtifact(exe);
+    variants.addArgs(&.{ "check-variants", "build/native-checks/variants" });
+    variants.step.dependOn(&variants_fixture.step);
+    b.step("test-variants", "Run original optional-kernel tests and compare their launches through native embedded Metal").dependOn(&variants.step);
     for ([_][]const u8{ "sampling", "sparse", "attention", "ple_norm" }) |kind| {
         if (std.mem.eql(u8, kind, "attention") and !tensor_tests) continue;
         const dir = b.fmt("build/native-checks/{s}", .{kind});

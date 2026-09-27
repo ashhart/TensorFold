@@ -215,6 +215,13 @@ pub const Kernels = struct {
         k.items.deinit();
     }
     pub fn run(k: *Kernels, s: *Scope, spec: @import("kernel_sources.zig").Spec, inputs: []const Array, templates: []const Template, grid: [3]c_int, group: [3]c_int, outputs: []const Output) ![5]Array {
+        if (outputs.len > 5) return error.TooManyKernelOutputs;
+        var result_: [5]Array = @splat(empty);
+        try k.runInto(s, spec, inputs, templates, grid, group, outputs, result_[0..outputs.len], null);
+        return result_;
+    }
+    pub fn runInto(k: *Kernels, s: *Scope, spec: @import("kernel_sources.zig").Spec, inputs: []const Array, templates: []const Template, grid: [3]c_int, group: [3]c_int, outputs: []const Output, result_: []Array, init_value: ?f32) !void {
+        if (result_.len != outputs.len or outputs.len != spec.outputs.len or inputs.len != spec.inputs.len) return error.InvalidKernelArity;
         const entry = try k.items.getOrPut(spec.name);
         if (!entry.found_existing) {
             errdefer _ = k.items.remove(spec.name);
@@ -228,6 +235,7 @@ pub const Kernels = struct {
         }
         const cfg = c.mlx_fast_metal_kernel_config_new();
         defer c.mlx_fast_metal_kernel_config_free(cfg);
+        if (init_value) |value| try check(c.mlx_fast_metal_kernel_config_set_init_value(cfg, value));
         try check(c.mlx_fast_metal_kernel_config_set_grid(cfg, grid[0], grid[1], grid[2]));
         try check(c.mlx_fast_metal_kernel_config_set_thread_group(cfg, group[0], group[1], group[2]));
         for (templates) |t| try check(switch (t.value) {
@@ -241,12 +249,10 @@ pub const Kernels = struct {
         var outs = c.mlx_vector_array_new();
         defer _ = c.mlx_vector_array_free(outs);
         try check(c.mlx_fast_metal_kernel_apply(&outs, entry.value_ptr.*, ins, cfg, stream));
-        var result_: [5]Array = @splat(empty);
         for (0..outputs.len) |i| {
             var a = c.mlx_array_new();
             const rc = c.mlx_vector_array_get(&a, outs, i);
             result_[i] = try s.result(rc, a);
         }
-        return result_;
     }
 };

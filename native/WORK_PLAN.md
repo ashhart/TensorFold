@@ -95,3 +95,34 @@ New milestone evidence and any discovered failures will be recorded below.
   embedded kernel sources remain identical to upstream Python.
 - Remaining backend/oracle checks include Qwen long-context Python SIMD parity and the
   Nemotron short code-prompt SIMD reference. Final performance measurements are pending.
+
+## Long-cache and optional-kernel milestone
+
+- All 384 long-context accepted-prefix checks pass: 144 each for Qwen tensor/forced
+  SIMD, 32 each for Nemotron tensor/forced SIMD, and 32 for Flash. Every cache array,
+  verified row and continuation matches serial after partial commits and full rejection.
+- Native replay now exercises 1,041 original Python launches across 44 optional and
+  production kernel variants. The embedded catalog has 84 kernels; source checks pass.
+  The Python fixture suite passes 89 tests and skips one undefined quantization shape.
+  Coverage includes fused/row dense paths, scalar/matrix SIMD with dependency/custom
+  prologue examples, Nemotron expert/routing/norm variants, and Flash grouped experts,
+  projections, embeddings and routing ties. A required-variant inventory prevents
+  silently losing a diagnostic path. Details and limitations are in COVERAGE.md.
+- Fixed out-of-bounds reads below width 512 in all three original Flash expert-down
+  shaders and their native copies. Independent all-ones dot-product checks cover eight
+  widths from 32 to 1,024, shared/unshared outputs, and invalid-width rejection.
+  Checkpoint-width arithmetic is preserved. Diagnostic outputs intentionally left
+  unwritten by original kernels are zero-initialized before comparison.
+- Fifteen safety-enabled host tests pass after the native dispatch refactor to support
+  variants with six outputs. All 89 shared Metal fixtures pass. Flash's 96 short-cache
+  checks and 128 reset cycles pass again with no active-memory growth (79,023,013,912 bytes).
+  All twelve Flash serial/MTP comparisons pass again after the normalization and shader
+  changes, including CPU/Metal sampling, greedy and the two-token budget boundary.
+  Remaining work includes backend oracles, allocation cleanup,
+  the final kernel/production-path inventory audit, and end-to-end engine benchmarks.
+- The current static inventory leaves `lane_attention_partial` and
+  `lane_attention_partial_128` without direct native fixture execution (production uses
+  the direct variants). Flash's original eight-group `ple_lookup` specialization also
+  needs diagnostic coverage; production uses the separately verified bounded row reader.
+  Audit runtime optimizations such as reduced draft vocabulary and queued MTP proposals
+  separately from operation coverage before declaring parity with all Python modes.

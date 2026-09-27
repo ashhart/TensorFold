@@ -116,6 +116,7 @@ path; attention layers gather only its K/V rows.
 | `main.zig` | Native completion CLI and decoding loop |
 | `verification.zig` | Branch/partial-commit/continuation/cache parity check |
 | `acceptance.zig`, `cache_checks.zig` | Shared tree/chain acceptance and full-checkpoint cache property tests |
+| `variant_checks.zig` | Replay Python fixture launches through the embedded Metal catalog and compare output bits |
 | `vendor/` | MIT tokenizer and I/O helpers from mlx-serve; preserved license |
 
 The HTTP service, chat-template rendering, vision, and disk prefix caches are not part
@@ -205,6 +206,7 @@ The build exposes reproducible coverage targets:
 ```sh
 .zig-toolchain/zig build test -Doptimize=safe
 .zig-toolchain/zig build test-metal -Doptimize=safe -Dmetal-tensors=true
+.zig-toolchain/zig build test-variants -Doptimize=safe
 .zig-toolchain/zig build test-models -Doptimize=safe
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
 .zig-toolchain/zig build test-drafts -Doptimize=safe
@@ -223,6 +225,12 @@ cases that detect the former fused-reduction substitution. Omit `-Dmetal-tensors
 on M1–M4. `test-models` loads the downloaded models sequentially and checks every
 family's caches; it also forces the dense Qwen and Nemotron SIMD paths. It requires
 the large checkpoints and enough unified memory. See [COVERAGE.md](COVERAGE.md).
+
+`test-variants` runs upstream kernel assertions and additional boundary fixtures, then
+replays 1,041 captured launches through 44 native embedded variants. It covers optional
+fused/row paths, scalar and matrix SIMD, grouped experts, routing ties and quantization
+boundaries. All outputs match bit for bit. Diagnostic coverage does not make each
+variant a selectable production mode; [COVERAGE.md](COVERAGE.md) records that distinction.
 
 `test-checkpoint-files` runs without a GPU and exercises positional reads, truncation,
 oversized or invalid headers, missing files and allocation failures. The loader validates

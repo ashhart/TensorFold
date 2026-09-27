@@ -46,6 +46,7 @@ bash scripts/fetch-zig.sh
 .zig-toolchain/zig build test -Doptimize=safe
 .venv/bin/python tools/export_native_kernels.py --check
 .zig-toolchain/zig build test-metal -Doptimize=safe -Dmetal-tensors=true
+.zig-toolchain/zig build test-variants -Doptimize=safe
 .zig-toolchain/zig build test-models -Doptimize=safe
 .zig-toolchain/zig build test-cache-stress -Doptimize=safe
 .zig-toolchain/zig build test-drafts -Doptimize=safe
@@ -170,3 +171,46 @@ PLE now follows the original operation order; the strict long tests pass without
 `tools/native_flash_trace.py` and `--trace-dir` compare 242 layer/projection intermediates;
 `--gdn-layer N` / `--trace-gdn N` trace one recurrent block across the entire prefill.
 Use `-Dlong-family=0|1|2` and optionally `-Dlong-tokens=N` to isolate a long-context case.
+
+`test-long-cache` also passes all five model/backend combinations: Qwen tensor and
+forced SIMD each check 144 accepted prefixes at 9,999/10,007 tokens (16/128-row
+windows); Nemotron tensor and forced SIMD each check 32; Flash checks 32 at
+2,051/2,063 tokens. All 384 checks compare every cache array, verified logits and
+continuation after partial acceptance, complete rejection and rollback. These are
+separate from the short-context reset/memory checks above.
+
+## Optional implementation variants
+
+`test-variants` passes **1,041 native launches across 44 embedded variants**, with
+every output bit matching Python. It runs upstream assertions before recording
+inputs, templates, launch geometry and expected arrays; Zig replays the launches
+using its embedded catalog, validates source hashes, and never executes fixture source.
+The generator fails if any required variant is absent. Its Python tests pass 89 cases;
+one group-128/width-1,856 combination is skipped because that quantization is undefined.
+
+| Family | Executed variants and boundaries |
+| --- | --- |
+| Dense fused/row paths | Three lane-fuse variants; both historical GDN steps; row-forward norms, pre/post-GDN, MLP, tree, partial sums, fused gate/up, six quantized projection epilogues; groups 32/64/128 |
+| SIMD projection | Scalar and simdgroup matrix, 1–128 rows, five original projection shapes, dependency inputs and the upstream scaling-prologue example |
+| Nemotron | Row projections and both expert projections with original fp32 error-bound assertions; routing ties, selection bias, saturated sigmoid, zero probability, 0/1/2 shared slots; three residual/norm variants |
+| Flash | Quantized row projections, tiled embedding, stacked SwiGLU; top-10 ties/random/dominant routing at 32/512 experts; grouped/ungrouped gate-up and down, shared and unshared outputs, 1/3/16 rows |
+| Expert-down bounds | Independently exact dot products at widths 32/64/128/480/512/544/768/1,024; rejected zero, half-group and oversized widths |
+
+The narrow expert-down cases exposed out-of-bounds reads in all three original down
+kernels: inactive SIMD lanes still loaded 16 inputs and packed weights below width 512.
+Python and embedded Metal now guard those lanes and validate group-32 widths through
+1,024. The supported checkpoint width keeps the same arithmetic.
+
+These fixtures intentionally use contiguous inputs. Separate attention tests cover
+strided caches. Unwritten output regions (branched-tree terminal state and unused
+expert-group slots) are initialized to zero on both sides. SIMD's Python constexpr
+dimensions become equal-valued native template arguments; the kernel body is unchanged.
+The custom-prologue example is finite diagnostic coverage, not support for arbitrary
+runtime shader source. These additional embedded variants are diagnostic entry points;
+production inference still selects the implementations documented in the model matrix.
+
+After these changes, Flash again passes all 96 short accepted-prefix checks and 128
+post-warmup reset cycles. Active MLX memory remains exactly 79,023,013,912 bytes across
+the measured cycles. All 89 shared Metal fixtures and 15 safety-enabled host tests pass.
+All twelve Flash serial/MTP comparisons also pass again: greedy, CPU and Metal sampling,
+two-token output budgets, and MTP budgets 1/3/15.
