@@ -151,6 +151,11 @@ Each change was measured in one process through the serial engine on fixed promp
   parts run in parallel and merge in order, so a row's result does not depend on the other rows.
 - Block selection: fp32 scores (the sum over index heads of relu(q . pooled block) over sqrt(d)), radix select
   of the top 512 with the lowest block id among ties, keys in position order, then the tail.
+- Prefill: a prompt chunk over 16 rows runs MLX's forward, a shorter one the fused decode kernels. A chunk's bits
+  depend on its length, so the engine cuts prompts on a fixed 2,048-token grid and keeps checkpoints only on it,
+  and a reply is prefilled again from the last grid point: a resumed conversation matches the same prompt fed
+  fresh at MLX's prefill speed. A chunk queues at most two layers ahead of the GPU, so peak memory stays near
+  the weights and caches at any context length.
 - Rollback: DeltaNet conv and recurrent states are kept for every row of the last call; the n-gram history and
   the PLE conv tail are restored; attention caches are trimmed, including pooled blocks no longer complete.
 - At load, windows of 2, 3 and 4 rows are compared with one-row steps from a 48-token prompt, logits exactly;
@@ -181,8 +186,8 @@ NCCL 2.30.7), one Spark and two Sparks linked by their 200 Gb/s ports.
 ```bash
 tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --host 0.0.0.0 --port 8080
 # two Sparks, the same command on each (rank 1 first); rank 0 serves HTTP
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.168.100.1
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0 --port 8080
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --host 0.0.0.0 --port 8080
 ```
 
 A round verifies the pending token and up to 6 MTP drafts, and a chain stops before any draft the head gives

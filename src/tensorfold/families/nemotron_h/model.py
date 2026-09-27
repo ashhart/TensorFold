@@ -84,11 +84,6 @@ class NemotronH:
                 print("[nemotron] no verify window reproduces one-token steps with these kernels here: one token a "
                       "round", flush=True)
         self.multi_row_exact = self.exact_width >= 2
-        # prompts through the row-exact decode kernels, a window at a time: mlx_lm's chunked prefill gives other
-        # bits than decoding, so a prompt resumed from a stored prefix differed from a fresh one (logits up to 1.6
-        # apart, M5 Max, 2026-09-26). TF_NEMOTRON_EXACT_PREFILL=0: mlx_lm's chunks (faster, not split-invariant).
-        exact_prefill = os.environ.get("TF_NEMOTRON_EXACT_PREFILL", "1") != "0"
-        self.prefill_rows = self.exact_width if self.multi_row_exact and exact_prefill else 0
         # the MTP head (converted from the BF16 release, see nemotron_mtp): drafts the token after next
         self.mtp = None
         self.drafts = max(0, int(drafts))

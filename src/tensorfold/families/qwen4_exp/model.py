@@ -210,6 +210,15 @@ class HyperConnection(nn.Module):
         return mixed, inject
 
 
+def _queue(value: mx.array, previous: mx.array | None) -> None:
+    """Hand ``value`` to the GPU, then wait for ``previous``: MLX allocates an op's buffers when it is queued and
+    frees them when it completes, so work queued ahead of the GPU holds all its temporaries."""
+
+    mx.async_eval(value)
+    if previous is not None:
+        mx.eval(previous)
+
+
 def _write_back(h: mx.array, branch: mx.array, inject: mx.array) -> mx.array:
     """Add the block's output to every residual stream, scaled by that stream's gate."""
 
@@ -404,6 +413,9 @@ class Indexer(nn.Module):
 
 
 class SparseAttention(nn.Module):
+    split_keys = 8192
+    split_rows = 256
+
     def __init__(self, cfg: Config) -> None:
         super().__init__()
         self.heads, self.kv_heads, self.dims = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
@@ -431,10 +443,22 @@ class SparseAttention(nn.Module):
         keys = mx.fast.rope(keys, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
         index_query, index_key = self.indexer.project(x)
         keys, values, raw = cache.update(keys, values, index_key)
-        mask = self.indexer.select(index_query, raw, cache, past)
-        if mask is None and length > 1:
-            mask = "causal"
-        out = mx.fast.scaled_dot_product_attention(queries, keys, values, scale=self.scale, mask=mask)
+        # past ``split_keys`` keys the query rows go in parts of ``split_rows``, each over the keys up to its last
+        # row, two parts queued at a time: MLX materializes the scores at this head size, and they grow with keys
+        step = self.split_rows if past + length > self.split_keys else length
+        outs = []
+        for begin in range(0, length, step):
+            end = min(length, begin + step)
+            mask = self.indexer.select(index_query[:, begin:end], raw, cache, past + begin)
+            if mask is None and end - begin > 1:
+                mask = "causal"
+            visible = past + end
+            part = mx.fast.scaled_dot_product_attention(queries[:, :, begin:end], keys[:, :, :visible],
+                                                        values[:, :, :visible], scale=self.scale, mask=mask)
+            if step < length:
+                _queue(part, outs[-1] if outs else None)
+            outs.append(part)
+        out = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
         out = out.transpose(0, 2, 1, 3).reshape(batch, length, -1)
         return self.o_proj(out * mx.sigmoid(gate))
 
@@ -653,8 +677,9 @@ class Body(nn.Module):
 
 
 class Qwen4Exp(nn.Module):
-    # layers per slice handed to the GPU while Python builds the next slice (same graph, same bits)
-    pipeline_layers = 4
+    # layers per slice handed to the GPU while Python builds the next, two slices queued at most (same graph,
+    # same bits)
+    pipeline_layers = 1
     # decode steps of up to this many rows go through ``decode.FusedDecode`` when it is attached
     fused_rows = 16
 
@@ -682,10 +707,12 @@ class Qwen4Exp(nn.Module):
             return fused(tokens, cache)
         h = self.model.embed_tokens(mx.array(tokens.astype(np.int32)))
         h = mx.tile(h, (1, 1, self.args.hc_count))
+        queued = None
         for i, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
             h = layer(h, tokens, layer_cache)
             if self.pipeline_layers and (i + 1) % self.pipeline_layers == 0:
-                mx.async_eval(h)
+                _queue(h, queued)
+                queued = h
         self.__dict__["last_streams"] = h[0]          # [L, S*D]: the residual streams before the final mixer
         return self.model.hyper_connection_mixer(h)
 

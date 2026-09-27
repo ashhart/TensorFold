@@ -334,13 +334,15 @@ class CheckpointStore:
     def nbytes(self) -> int:
         return sum(entry.nbytes for entry in self._entries)
 
-    def match(self, prompt: list[int]) -> tuple[int, list[Any], list[int]] | None:
-        """Longest strict-prefix hit as (length, cache copy, previous prompt)."""
+    def match(self, prompt: list[int], usable: Any = None) -> tuple[int, list[Any], list[int]] | None:
+        """Longest strict-prefix hit as (length, cache copy, previous prompt), of lengths ``usable`` accepts."""
 
         with self._lock:
             best: CheckpointEntry | None = None
             for entry in self._entries:
                 tokens = entry.tokens
+                if usable is not None and not usable(len(tokens)):
+                    continue
                 if 0 < len(tokens) < len(prompt) and prompt[: len(tokens)] == tokens:
                     if best is None or len(tokens) > len(best.tokens):
                         best = entry
@@ -694,17 +696,18 @@ class Scheduler:
             cached = 0
             last_prompt: list[int] | None = None
             checkpoints_at: list[int] = []
+            # checkpoints are taken on the engine's prefill grid, so a shared prefix is kept at its grid point
+            shared_at = {self.engine.on_grid(n) for n in job.shared_prefix_lens} - {0}
             if self.checkpoints is not None:
                 self._read_disk_block(job.prompt_ids)
-                hit = self.checkpoints.match(job.prompt_ids)
+                hit = self.checkpoints.match(job.prompt_ids, usable=lambda n: self.engine.on_grid(n) == n)
                 if hit is not None:
                     cached, cache, last_prompt = hit
-                    if self.disk_blocks is not None and cached in job.shared_prefix_lens:
+                    if self.disk_blocks is not None and cached in shared_at:
                         self.disk_blocks.touch(job.prompt_ids[:cached])
-                checkpoints_at = sorted({
-                    *choose_checkpoints(job.history_len, cached, last_prompt, job.prompt_ids),
-                    *(n for n in job.shared_prefix_lens if cached < n < len(job.prompt_ids)),
-                })
+                chosen = choose_checkpoints(job.history_len, cached, last_prompt, job.prompt_ids)
+                checkpoints_at = sorted(at for at in {*(self.engine.on_grid(n) for n in chosen), *shared_at}
+                                        if cached < at < len(job.prompt_ids))
             proposer = job.proposer
             if proposer is None and job.drafts and self.proposer_factory is not None:
                 proposer = self.proposer_factory()
@@ -725,13 +728,13 @@ class Scheduler:
             self.engine.add_stream(stream, cache=cache, cached_tokens=cached, checkpoints_at=checkpoints_at)
             if self.checkpoints is not None:
                 for tokens, snapshot in stream.history_checkpoints:
-                    shared = len(tokens) in job.shared_prefix_lens
+                    shared = len(tokens) in shared_at
                     self.checkpoints.insert(tokens, snapshot, last_prompt=job.prompt_ids, pinned=shared)
                     if self.snapshot_dir is not None and shared:
                         self._persist(tokens, snapshot)
             stream.history_checkpoints = []
             job.prefilled_at = time.perf_counter()
-            job.cached_tokens = int(cached)
+            job.cached_tokens = int(stream.cached_tokens)      # 0 when a stored state off the grid was not used
             if stream.emitted:
                 job.chunks.put(list(stream.emitted))
             if stream.finished:
@@ -923,7 +926,9 @@ class ChatApp:
 
     def _warm_known_blocks(self, snapshot_dir: Path, model_id: str) -> None:
         """Compute, in the background, the newest system block saved by other kernels (a snapshot's bits depend
-        on the kernels that computed it), so the next session finds it ready after a kernel or MLX change."""
+        on the kernels that computed it), so the next session finds it ready after a kernel or MLX change. It goes
+        one prefill grid chunk a job, each a background job resuming from the last, so a request that arrives
+        waits for at most one chunk; the block's last grid point is pinned and saved."""
 
         from tensorfold.engine.prefix_snapshots import blocks_to_warm
 
@@ -931,20 +936,26 @@ class ChatApp:
         if not blocks:
             return
         pad = int(self.tokenizer.encode("\n", add_special_tokens=False)[-1])
+        grid = self.engine.prefill_grid
 
         def warm() -> None:
             for tokens in blocks:
-                n = len(tokens)
-                job = ChatJob(
-                    job_id=f"warm-{uuid.uuid4().hex[:8]}", prompt_ids=[*tokens, pad], max_tokens=1,
-                    temperature=0.0, history_len=n,
-                    shared_prefix_lens=tuple(m for m in (n - 2048, n - 512, n) if m >= 512), drafts=False)
                 started = time.perf_counter()
-                self.scheduler.submit(job)
-                while job.chunks.get() is not None:
-                    pass
-                print(f"[tensorfold] warmed system block tokens={n} in {time.perf_counter() - started:.1f}s",
-                      flush=True)
+                points = list(range(grid, len(tokens) + 1, grid)) if grid else [len(tokens)]
+                for i, at in enumerate(points):
+                    final = i == len(points) - 1
+                    while True:
+                        job = ChatJob(
+                            job_id=f"warm-{uuid.uuid4().hex[:8]}", prompt_ids=[*tokens[:at], pad], max_tokens=1,
+                            temperature=0.0, history_len=at, shared_prefix_lens=(at,) if final else (),
+                            drafts=False, background=True)
+                        self.scheduler.submit(job)
+                        while job.chunks.get() is not None:
+                            pass
+                        if not job.preempted:
+                            break
+                print(f"[tensorfold] warmed system block tokens={points[-1] if points else 0} of {len(tokens)} in "
+                      f"{time.perf_counter() - started:.1f}s", flush=True)
 
         print(f"[tensorfold] warming {len(blocks)} saved system block(s) for these kernels", flush=True)
         threading.Thread(target=warm, name="warm-blocks", daemon=True).start()

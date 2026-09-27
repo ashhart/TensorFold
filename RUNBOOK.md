@@ -198,8 +198,8 @@ CUDA engine yet.
    Then start rank 1 on the second Spark and rank 0 on the first, both with rank 0's address on the link:
 
    ```bash
-   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.168.100.1
-   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0
+   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1
+   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 --host 0.0.0.0
    ```
 
    Rank 0 serves HTTP once both have loaded. The ranks refuse to start when they were given different settings

@@ -4,9 +4,8 @@ A family model (``lane_family = True``: Nemotron-H, Flash Next) brings its forwa
 batch-cache protocol:
 
     make_cache()                     one cache object per layer, the draft head's last
-    prefill_rows                     optional: absorb prompts in chunks of this many rows (the row-exact decode
-                                     path), so a prompt resumed from a stored prefix equals a fresh prefill
     hidden(inputs, cache)            hidden states [1, R, D] of R consecutive tokens [1, R], advancing the caches
+                                     (prompts: chunks on the engine's ``prefill_align`` grid from position 0)
     head(hidden)                     logits [1, R, V]
     keep_rows(cache, rows, keep)     after an R-row call, keep its first ``keep`` rows: KV trimmed, recurrent
                                      state as it was after row keep - 1
@@ -86,8 +85,6 @@ class FamilyRounds:
     """The lane engine's rounds for model families; ``LaneEngine`` mixes it in and uses it when the model says
     ``lane_family``."""
 
-    # prompt tokens per prefill forward (only the last position goes through the head)
-    family_prefill_step = 2048
     # matching tokens behind a copied continuation before a round takes it: coincidental short matches in fresh
     # code (indentation, "self.") failed 56 of 70 copied tokens and cost 5% (Flash Next, 2026-09-25)
     enter_match = 8
@@ -131,9 +128,8 @@ class FamilyRounds:
         import mlx.core as mx
 
         last = None
-        # a model whose prompt must be absorbed through its row-exact decode kernels (``prefill_rows``: their
-        # widest window) gets the same cache wherever a prefill starts, so a resumed prompt equals a fresh one
-        step = max(1, int(getattr(self.model, "prefill_rows", 0) or self.family_prefill_step))
+        # ``tokens`` start on the grid: every chunk is a fresh prefill's chunk
+        step = self._align() or max(1, int(self.prefill_step))
         self._fed_rows = 0
         for begin in range(0, len(tokens), step):
             chunk = [int(t) for t in tokens[begin:begin + step]]
@@ -149,23 +145,30 @@ class FamilyRounds:
             mx.eval(last, *cache_arrays(cache))
         return last
 
+    def _family_start(self, cache: list[Any] | None, cached_tokens: int, length: int) -> tuple[list[Any], int]:
+        """The working cache and the position its prefill starts at: a stored state off the grid is not used
+        (it cannot resume exactly), so the prompt is prefilled from 0."""
+
+        align = self._align()
+        if cache is None or (align and int(cached_tokens) % align):
+            return self.model.make_cache(), 0
+        start = int(cached_tokens)
+        if not 0 <= start < length:
+            raise ValueError("cached_tokens must leave a suffix to prefill")
+        adopt = getattr(self.model, "adopt_cache", None)
+        return (adopt(cache) if adopt is not None else cache), start
+
     def _family_prefill(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
                         checkpoints_at: Sequence[int]) -> list[Any]:
         from tensorfold.engine.gpu_sampling import sample as gpu_sample
 
         if not stream.prompt_ids:
             raise ValueError(f"{stream.stream_id}: empty prompt")
-        if cache is None:
-            work, start = self.model.make_cache(), 0
-        else:
-            work, start = cache, int(cached_tokens)
-            adopt = getattr(self.model, "adopt_cache", None)
-            if adopt is not None:
-                work = adopt(work)
-        if not 0 <= start < len(stream.prompt_ids):
-            raise ValueError(f"{stream.stream_id}: cached_tokens must leave a suffix to prefill")
+        work, start = self._family_start(cache, cached_tokens, len(stream.prompt_ids))
+        cached_tokens = start
         stream.history_checkpoints = []
-        for boundary in sorted({int(b) for b in checkpoints_at}):
+        align = self._align()
+        for boundary in sorted({(int(b) // align) * align if align else int(b) for b in checkpoints_at}):
             if not start < boundary < len(stream.prompt_ids):
                 continue
             self._family_feed(stream.prompt_ids[start:boundary], work, following=stream.prompt_ids[boundary])
@@ -215,10 +218,7 @@ class FamilyRounds:
                                cached_tokens: int) -> list[Any]:
         if not prompt_ids:
             raise ValueError("empty prefix")
-        work = self.model.make_cache() if cache is None else cache
-        start = int(cached_tokens) if cache is not None else 0
-        if not 0 <= start < len(prompt_ids):
-            raise ValueError("cached_tokens must leave a suffix to prefill")
+        work, start = self._family_start(cache, cached_tokens, len(prompt_ids))
         self._family_feed(list(prompt_ids[start:]), work)
         return drop_spares(work)
 
@@ -258,7 +258,7 @@ class FamilyRounds:
                 stream.finished_at = time.perf_counter()
                 self._inflight.pop(stream.stream_id, None)
                 self._next.pop(stream.stream_id, None)
-                if self.retain_finished_caches and stream.retain:
+                if self._keeps_decoded(stream):
                     # one-token rounds leave the last token absorbed when they ran ahead; ``cache_len`` counts it
                     self.finished_caches[stream.stream_id] = (stream.context[: stream.cache_len], drop_spares(cache))
         self._live = [(s, c) for s, c in self._live if not s.finished]

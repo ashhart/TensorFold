@@ -521,11 +521,9 @@ class LaneEngine(FamilyRounds):
     lane_commit: Callable[..., Any] | None = None
     # Draft trees in tree rounds (False: chains only, for a decoder without a tree attention)
     tree_drafts = True
-    # Exact resumes without the lane decoder's prefill (``lane_prefill`` 0): prompts are prefilled in chunks on a
-    # grid of this many tokens from position 0, checkpoints are taken only on the grid and decoded states are not
-    # kept, so a prompt resumed from a checkpoint is prefilled in exactly the chunks a fresh prefill uses and gets
-    # its bits (0: chunks and checkpoints anywhere, decoded states kept)
-    prefill_align = 0
+    # MLX's prefill on a grid of this many tokens from position 0 (every family, unless ``lane_prefill``): chunks and
+    # checkpoints only on the grid, decoded states not kept, so a resumed prompt gets a fresh prefill's chunks and bits
+    prefill_align = 2048
 
     PAD_TOKEN = 0
 
@@ -775,6 +773,8 @@ class LaneEngine(FamilyRounds):
             raise ValueError("empty prefix")
         work: list[Any] = self.model.make_cache() if cache is None else cache
         start = int(cached_tokens) if cache is not None else 0
+        if start != self.on_grid(start):
+            work, start = self.model.make_cache(), 0         # off the grid: the whole prefix again
         if not 0 <= start < len(prompt_ids):
             raise ValueError("cached_tokens must leave a suffix to prefill")
         self._prefill_tokens(list(prompt_ids[start:]), work)
@@ -805,14 +805,26 @@ class LaneEngine(FamilyRounds):
         _, core, head = self._resolve_stack()
         logits = None
         step = self._align() or max(1, int(self.prefill_step))
+        # DFlash taps: each chunk's forward replaces the last one's; the drafter reads the last 2,048 rows
+        taps_store = getattr(self.model, "_hidden_states", None)
+        gathered: list[Any] | None = [None] * len(taps_store) if taps_store else None
         for begin in range(0, len(tokens), step):
             chunk = [int(t) for t in tokens[begin:begin + step]]
             hidden = core(mx.array([chunk], dtype=mx.uint32), cache=cache)
             last = hidden[:, -1:, :]
             logits = head(last) if begin + step >= len(tokens) else None
-            mx.eval(*self._cache_arrays(cache), logits if logits is not None else last)
+            if gathered is not None:
+                for i, tap in enumerate(taps_store):
+                    if tap is not None:
+                        joined = tap if gathered[i] is None else mx.concatenate([gathered[i], tap], axis=1)
+                        gathered[i] = joined[:, -2048:]
+            mx.eval(*self._cache_arrays(cache), logits if logits is not None else last,
+                    *(g for g in (gathered or []) if g is not None))
             if begin + step < len(tokens):
                 mx.clear_cache()
+        if gathered is not None:
+            for i, tap in enumerate(gathered):
+                taps_store[i] = tap
         return logits
 
     def _lane_prefill_tokens(self, tokens: Sequence[int], cache: list[Any]) -> Any:
@@ -874,6 +886,18 @@ class LaneEngine(FamilyRounds):
         """The prefill grid (``prefill_align``) when prompts go through MLX's prefill, else 0."""
 
         return int(self.prefill_align) if self.prefill_align and not self.lane_prefill else 0
+
+    @property
+    def prefill_grid(self) -> int:
+        """Tokens between the grid points prompts are prefilled and checkpointed on (0: anywhere)."""
+
+        return self._align()
+
+    def on_grid(self, position: int) -> int:
+        """The checkpoint a prefill takes for ``position``: the grid point at or before it (itself without a grid)."""
+
+        align = self._align()
+        return (int(position) // align) * align if align else int(position)
 
     def _keeps_decoded(self, stream: LaneStream) -> bool:
         """Whether a finished stream's decoded state is kept for the next turn (never on a prefill grid: its rows
@@ -1030,7 +1054,8 @@ class LaneEngine(FamilyRounds):
         back-to-back prefills. The engine owns ``cache`` afterwards.
         """
 
-        if self.family:
+        if self.family or self._align():
+            # on a prefill grid a suffix absorbed through decode windows would not get the prefill's bits
             self.add_stream(stream, cache=cache, cached_tokens=cached_tokens)
             return
         cut = int(cached_tokens)

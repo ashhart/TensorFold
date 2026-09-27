@@ -2,10 +2,13 @@
 
 On a GPU with Metal 4 tensor units (the M5 generation) TensorFold's lane kernels take over the matmuls and
 attention (``kernels.lane_qmm``, ``kernels.lane_attention``, ``kernels.lane_fuse``): a verify window of up to
-32 rows gives every row the bits of a one-row step, drafts are verified as trees (up to 15 nodes, chains of
-up to 31 for copies and tool calls) and prompts are prefilled through the same kernels, so a snapshot of a
-prompt has the bits decoding would give it. Drafts come from the context (copies of earlier spans, the known
-structure of tool calls) and, with ``drafter``, from a DFlash2 draft model (``drafters.dflash_drafter``).
+32 rows gives every row the bits of a one-row step and drafts are verified as trees (up to 15 nodes, chains of
+up to 31 for copies and tool calls). Drafts come from the context (copies of earlier spans, the known structure
+of tool calls) and, with ``drafter``, from a DFlash2 draft model (``drafters.dflash_drafter``).
+
+On every chip prompts go through MLX's prefill in chunks on a 2,048-token grid from position 0, and prefixes
+resume only from grid points (``TF_ROW_PREFILL``, ``set_prefill``), so a resumed prompt gets a fresh prefill's
+bits at MLX's prompt speed.
 
 Without tensor units (the M1 to M4 generations) every round and every prompt goes through the lane decoder
 ``kernels.row_forward``: TensorFold's row-exact matvec (``kernels.row_qmv``: MLX's one-row loop run for each row)
@@ -33,7 +36,7 @@ KERNEL_VERSION = "v1"
 
 # the lane engine's switches with lane kernels (measured on an M5 Max: see docs/recipes/qwen3.8-27b.md): trees of
 # up to 15 drafted nodes, chains of up to 31 (copies, tool-call structure), prompts through the lane decoder in
-# chains of 128, windows of at most 32 rows (exact), 16 without strong evidence, 16 rows a round
+# chains of 128 with TF_ROW_PREFILL=1, windows of at most 32 rows (exact), 16 without strong evidence, 16 rows a round
 LANE_SETTINGS = {"tree_nodes": 15, "chain_nodes": 31, "lane_prefill": 128, "exact_window": 32, "cheap_window": 16,
                  "max_rows": 16, "max_draft": 15}
 
@@ -218,20 +221,28 @@ def install_mlx_lanes(model: Any) -> tuple[int, int]:
     LaneEngine.exact_window = exact
     LaneEngine.cheap_window = exact
     LaneEngine.window_costs = costs
-    # Prompts, so that a resumed conversation's state has the bits a fresh prefill gives it (TF_ROW_PREFILL):
-    #   "aligned"  (default) MLX's prefill in chunks on a 2,048-token grid, checkpoints only on the grid, decoded
-    #              replies prefilled again next turn: exact resumes at MLX's prompt speed (a 20k-token prompt in
-    #              ~50 s on an M3 Ultra, against ~220 s through the lane decoder)
-    #   "1"        through the lane decoder in chains of ``exact`` rows (decoded replies are resumed as they are)
-    #   "0"        MLX's prefill anywhere (0.3.3: a resumed reply can differ from a fresh one)
-    mode = os.environ.get("TF_ROW_PREFILL", "aligned")
-    LaneEngine.lane_prefill = exact if mode not in ("0", "aligned") else 0
-    LaneEngine.prefill_align = LaneEngine.prefill_step if mode == "aligned" else 0
+    set_prefill(exact)
     timing = ", ".join(f"{w} rows {ms:.1f} ms" for w, ms in sorted(costs.items()))
     print(f"[tensorfold] no tensor units: the lane decoder with the {backend.name} matmul ({stacked}); drafted "
           f"windows of up to {exact} rows reproduce one-row steps here ({timing}); each round drafts as many as pay "
           f"at the request's acceptance", flush=True)
     return exact, exact
+
+
+def set_prefill(lane_rows: int) -> None:
+    """How prompts are prefilled, so that a resumed conversation's state has the bits a fresh prefill gives it
+    (``TF_ROW_PREFILL``):
+      "aligned"  (default) MLX's prefill in chunks on a 2,048-token grid, checkpoints only on the grid, decoded
+                 replies prefilled again next turn: exact resumes at MLX's prompt speed (a 20k-token prompt in
+                 ~50 s on an M3 Ultra, against ~220 s through the lane decoder)
+      "1"        through the lane decoder in chains of ``lane_rows`` (decoded replies are resumed as they are)
+      "0"        MLX's prefill anywhere (0.3.3: a resumed reply can differ from a fresh one)"""
+
+    from tensorfold.engine.lane_engine import LaneEngine
+
+    mode = os.environ.get("TF_ROW_PREFILL", "aligned")
+    LaneEngine.lane_prefill = int(lane_rows) if mode not in ("0", "aligned") else 0
+    LaneEngine.prefill_align = LaneEngine.prefill_step if mode == "aligned" else 0
 
 
 def load(model_dir: Path, *, lane_kernels: str = "auto", **_: Any) -> tuple[Any, Any]:
@@ -281,7 +292,7 @@ def install_lane_kernels(model: Any) -> None:
     lane_attention.warm(max_queries=lane_attention.MAX_QUERIES)
     LaneEngine.simple_masks = True
     LaneEngine.tree_nodes = LANE_SETTINGS["tree_nodes"]
-    LaneEngine.lane_prefill = LANE_SETTINGS["lane_prefill"]
+    set_prefill(LANE_SETTINGS["lane_prefill"])
     LaneEngine.chain_nodes = LANE_SETTINGS["chain_nodes"]
     from tensorfold.drafters.dflash_drafter import DFlashProposer
 
@@ -334,6 +345,10 @@ def kernel_version(model: Any) -> str:
     folder = Path(lane_qmm.__file__).parent
     sources.extend(path.read_text() for path in sorted(folder.glob("*.py")))
     sources.extend(path.read_text() for path in sorted(Path(__file__).parent.glob("*.py")))
+    from tensorfold.engine.lane_engine import LaneEngine
+
+    # a snapshot's bits also depend on how its prompt was prefilled
+    sources.append(f"prefill={LaneEngine.lane_prefill}/{LaneEngine.prefill_align}/{LaneEngine.prefill_step}")
     return f"qwen-dense-{KERNEL_VERSION}-" + hashlib.sha256("\n".join(sources).encode()).hexdigest()[:12]
 
 

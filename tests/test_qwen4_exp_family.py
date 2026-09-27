@@ -144,7 +144,7 @@ def test_ngram_ids_match_the_reference_formula_at_full_vocab():
     assert np.array_equal(emb.ids(history, tokens), _reference_ngram_ids(emb, history, tokens))
 
 
-def test_lane_engine_resumes_from_a_checkpoint_bit_identically():
+def test_lane_engine_resumes_from_a_grid_checkpoint_bit_identically():
     from tensorfold.engine.lane_engine import LaneEngine, LaneStream
     from tensorfold.families.qwen4_exp.runtime import FlashNext
 
@@ -152,31 +152,62 @@ def test_lane_engine_resumes_from_a_checkpoint_bit_identically():
     assert model.lane_family and model.exact_width == 1
     prompt = [int(t) for t in np.random.default_rng(3).integers(6, 97, size=18)]
 
-    def run(checkpoints_at=()):
+    def engine_on(grid: int = 4) -> LaneEngine:
         engine = LaneEngine(model, retain_finished_caches=True)
+        engine.prefill_align = grid                   # the 2,048 grid, scaled to the tiny prompt
         assert engine.family
-        stream = LaneStream(stream_id="s", prompt_ids=list(prompt), max_new_tokens=12)
-        engine.add_stream(stream, checkpoints_at=checkpoints_at)
+        return engine
+
+    def run(engine, stream_id, ids, max_new, **kw):
+        stream = LaneStream(stream_id=stream_id, prompt_ids=list(ids), max_new_tokens=max_new)
+        engine.add_stream(stream, **kw)
         while engine.active_count:
             engine.step()
-        return engine, stream
+        return stream
 
-    engine, whole = run()
-    assert len(whole.emitted) == 12
-    tokens, cache = engine.finished_caches["s"]
-    assert tokens == whole.context[:-1]
-    # the reply's cache continues the conversation exactly like a fresh prefill of the same tokens
-    follow = [*tokens, whole.emitted[-1], 7, 8]
-    resumed = LaneEngine(model)
-    a = LaneStream(stream_id="a", prompt_ids=follow, max_new_tokens=4)
-    resumed.add_stream(a, cache=LaneEngine.copy_single_cache(cache), cached_tokens=len(tokens))
-    while resumed.active_count:
-        resumed.step()
-    fresh = LaneEngine(model)
-    b = LaneStream(stream_id="b", prompt_ids=follow, max_new_tokens=4)
-    fresh.add_stream(b)
-    while fresh.active_count:
-        fresh.step()
-    assert a.emitted == b.emitted
-    _, split = run(checkpoints_at=(9,))
-    assert split.emitted == whole.emitted and split.history_checkpoints[0][0] == prompt[:9]
+    whole_engine = engine_on()
+    whole = run(whole_engine, "s", prompt, 12)
+    assert len(whole.emitted) == 12 and "s" not in whole_engine.finished_caches      # decoded states not kept
+    split = run(engine_on(), "c", prompt, 12, checkpoints_at=(9,))
+    tokens, cache = split.history_checkpoints[0]
+    assert split.emitted == whole.emitted and tokens == prompt[:8]                    # the checkpoint moves to the grid
+    # the next turn resumes from the grid checkpoint (the reply is prefilled again) like a fresh prefill
+    follow = [*prompt, *whole.emitted, 7, 8]
+    fresh = run(engine_on(), "b", follow, 4)
+    resumed = run(engine_on(), "a", follow, 4, cache=LaneEngine.copy_single_cache(cache), cached_tokens=8)
+    off_grid = run(engine_on(), "o", follow, 4, cache=LaneEngine.copy_single_cache(cache), cached_tokens=9)
+    assert resumed.emitted == fresh.emitted == off_grid.emitted
+
+
+def test_long_context_attention_in_query_parts(monkeypatch):
+    """Past ``split_keys`` keys the reference attention runs its query rows in parts, each over the keys up to its
+    last row: the same outputs up to rounding, and a resumed prompt still equals a fresh one bit for bit."""
+
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
+
+    model = tiny()
+    prompt = [int(t) for t in np.random.default_rng(5).integers(6, 97, size=40)]
+    whole = _logits_whole(model, prompt)
+    monkeypatch.setattr(q4.SparseAttention, "split_keys", 8)
+    monkeypatch.setattr(q4.SparseAttention, "split_rows", 3)
+    parted = _logits_whole(model, prompt)
+    assert np.allclose(np.array(parted.astype(mx.float32)), np.array(whole.astype(mx.float32)), atol=5e-2)
+
+    flash = FlashNext(model, None, drafts=0)
+
+    def run(ids, **kw):
+        engine = LaneEngine(flash)
+        engine.prefill_align = 8
+        stream = LaneStream(stream_id="x", prompt_ids=list(ids), max_new_tokens=4)
+        engine.add_stream(stream, **kw)
+        while engine.active_count:
+            engine.step()
+        return stream
+
+    first = run(prompt[:30], checkpoints_at=(26,))
+    tokens, cache = first.history_checkpoints[0]
+    assert tokens == prompt[:24]
+    fresh = run(prompt)
+    resumed = run(prompt, cache=LaneEngine.copy_single_cache(cache), cached_tokens=24)
+    assert resumed.emitted == fresh.emitted

@@ -417,9 +417,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
         if value is not None:
             sampling[key] = value
     snapshot_dir = None if str(args.snapshot_dir).lower() == "none" else Path(args.snapshot_dir).expanduser()
-    # a snapshot's bits depend on the MLX version and the kernels that computed it: never mix them
+    # a snapshot's bits depend on the MLX version, the kernels that computed it and how prompts were prefilled
+    prefill = f"lane{LaneEngine.lane_prefill}" if LaneEngine.lane_prefill else f"grid{LaneEngine.prefill_align}"
     model_id = (f"{model_dir.resolve()}|mlx={mx.__version__}|kernels={families.kernel_version(family, model)}"
-                f"|tensorfold={__version__}")
+                f"|prefill={prefill}|tensorfold={__version__}")
     gib = args.prompt_cache_gib
     if gib is None:
         ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")

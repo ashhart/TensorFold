@@ -20,7 +20,7 @@ from tensorfold.server.app import (
     eos_ids_of,
     render_prompt_ids,
 )
-from tests.lane_fakes import FakeEngine, fake_serial
+from tests.lane_fakes import FakeBatchItem, FakeEngine, fake_serial
 
 EOS = 49
 
@@ -60,7 +60,7 @@ class FakeTokenizer:
     def decode(self, ids: list[int]) -> str:
         return "".join(chr(TOKEN_CHAR_BASE + int(t)) for t in ids)
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, **_: Any) -> list[int]:
         return self._char_ids(text)
 
 
@@ -548,3 +548,68 @@ def test_scheduler_runs_its_stop_hook_in_its_own_thread() -> None:
     scheduler.start()
     scheduler.stop(timeout=5.0)
     assert seen == ["tensorfold-engine"]
+
+
+def test_checkpoints_and_shared_prefixes_are_taken_on_the_prefill_grid() -> None:
+    from tensorfold.server.app import ChatJob, Scheduler
+
+    class GridEngine(FakeEngine):
+        prefill_align = 4
+
+    store = CheckpointStore(4, copier=lambda c: c)
+    scheduler = Scheduler(GridEngine(), lanes=1, eos_ids=frozenset(), checkpoints=store)
+    job = ChatJob(job_id="j", prompt_ids=list(range(1, 11)), max_tokens=2, temperature=0.0, history_len=9,
+                  shared_prefix_lens=(7,))
+    scheduler._start_job(job)
+    # the history boundary 9 is kept at 8, the system block's 7 at 4 (pinned)
+    assert sorted((len(e.tokens), e.pinned) for e in store._entries) == [(4, True), (8, False)]
+
+
+def test_a_saved_block_is_warmed_in_background_jobs_one_grid_chunk_each(tmp_path) -> None:
+    mx = pytest.importorskip("mlx.core")
+    from mlx_lm.models.cache import KVCache
+
+    from tensorfold.engine.prefix_snapshots import save_snapshot
+    from tensorfold.server.app import Scheduler
+
+    class GridEngine(FakeEngine):
+        prefill_align = 4
+
+    kv = KVCache()
+    kv.update_and_fetch(mx.ones((1, 2, 10, 4)), mx.ones((1, 2, 10, 4)))
+    save_snapshot(tmp_path, "/models/fake|kernels=old", list(range(5, 15)), [kv])   # computed by other kernels
+    seen: list[tuple[int, bool]] = []
+    real = Scheduler.submit
+
+    def submit(self: Any, job: Any) -> None:
+        seen.append((len(job.prompt_ids), job.background))
+        real(self, job)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Scheduler, "submit", submit)
+        app = make_app(engine_factory=GridEngine, snapshot_dir=tmp_path, model_id="/models/fake|kernels=new")
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline and not any(e.pinned for e in app.checkpoints._entries):
+                time.sleep(0.02)
+        finally:
+            app.scheduler.stop(timeout=5.0)
+    # grid points 4 and 8 of the 10-token block, each with one padding token, in background jobs; 8 is pinned
+    assert seen == [(5, True), (9, True)]
+    assert [len(e.tokens) for e in app.checkpoints._entries if e.pinned] == [8]
+
+
+def test_a_stored_state_off_the_grid_is_never_matched() -> None:
+    from tensorfold.server.app import ChatJob, Scheduler
+
+    class GridEngine(FakeEngine):
+        prefill_align = 4
+
+    store = CheckpointStore(4, copier=lambda c: c)
+    engine = GridEngine()
+    scheduler = Scheduler(engine, lanes=1, eos_ids=frozenset(), checkpoints=store)
+    prompt = list(range(1, 12))
+    for n in (4, 6):                               # a grid state and a longer one off the grid (from disk, say)
+        store.insert(prompt[:n], [FakeBatchItem([prompt[:n]])], last_prompt=prompt[:n])
+    scheduler._start_job(ChatJob(job_id="j", prompt_ids=prompt, max_tokens=2, temperature=0.0))
+    assert engine.prefill_calls[-1] == ("j", 4)

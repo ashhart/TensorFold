@@ -131,8 +131,8 @@ the address rank 0 has on that link. Rank 0 serves HTTP. The container also need
 ```bash
 docker run -it --gpus all --ipc=host --network host --device /dev/infiniband --ulimit memlock=-1 \
   --cap-add IPC_LOCK -v ~/.cache/huggingface:/root/.cache/huggingface nvcr.io/nvidia/pytorch:26.07-py3
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.168.100.1   # on the second Spark
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1   # on the second Spark
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 --host 0.0.0.0
 ```
 
 Set `NCCL_SOCKET_IFNAME` and `NCCL_IB_HCA` to the link's interface and adapters if NCCL does not find them
@@ -227,10 +227,11 @@ windows still need enough memory for the actual prompt and reply.
 
 ## Prompt caching
 
-Agent clients resend the whole conversation every turn. TensorFold keeps the caches of recent conversation
-prefixes, so a follow-up only prefills its new suffix. It saves the system block, which a client sends with
-every session, to disk once, so a new session starts without prefilling it. The newest conversations are saved
-at shutdown and read back on demand.
+Agent clients resend the whole conversation every turn. TensorFold prefills prompts in blocks on a fixed
+2,048-token grid and keeps the caches of recent conversations at grid points, so a follow-up prefills from the last
+grid point before its new text and gets exactly the bits of the same conversation fed fresh. It saves the system
+block, which a client sends with every session, to disk once, so a new session starts from it. The newest
+conversations are saved at shutdown and read back on demand.
 
 ## Layout
 

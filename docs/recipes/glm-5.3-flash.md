@@ -25,8 +25,8 @@ below).
 Start rank 1 on the second Spark, then rank 0 on the first; both take rank 0's address on the link:
 
 ```bash
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 1 --master 192.168.100.1
-tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0 --port 8080
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --host 0.0.0.0 --port 8080
 ```
 
 Each rank reads its half of every layer straight from the pulled checkpoint (`cuda/split.py` has the rules) and
@@ -40,7 +40,7 @@ A Spark short on disk can write its half once (about 91 GB) and serve that folde
 
 ```bash
 python -m tensorfold.families.glm5_next.cuda.split ~/.cache/huggingface/hub/models--Vontra--GLM-5.3-Flash-MLX-4bit-MTP/snapshots/<revision> --rank 1 glm-rank1
-tensorfold serve glm-rank1 --tp 2 --rank 1 --master 192.168.100.1
+tensorfold serve glm-rank1 --tp 2 --rank 1 --master 192.0.2.1
 ```
 
 ### Draft policies
@@ -156,8 +156,8 @@ Pull it on both Sparks and start it the same way:
 
 ```bash
 tensorfold pull Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw
-tensorfold serve Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw --tp 2 --rank 1 --master 192.168.100.1
-tensorfold serve Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0 --port 8080
+tensorfold serve Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw --tp 2 --rank 0 --master 192.0.2.1 --host 0.0.0.0 --port 8080
 ```
 
 Each rank holds 88.6 GB. Through this package, with an empty kernel cache, both ranks were ready 297 s after

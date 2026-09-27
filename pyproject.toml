@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorfold"
-version = "0.3.4"
+version = "0.3.4.1"
 description = "Fast, exact LLM decoding on Apple Silicon (MLX) and NVIDIA GPUs (CUDA) behind an OpenAI-compatible endpoint"
 readme = "README.md"
 requires-python = ">=3.11"

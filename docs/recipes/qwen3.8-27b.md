@@ -186,8 +186,8 @@ Spark and two Sparks linked by their 200 Gb/s ports.
 ```bash
 tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --host 0.0.0.0 --port 8080
 # two Sparks, the same command on each (rank 1 first); rank 0 serves HTTP
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.168.100.1
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.168.100.1 --host 0.0.0.0 --port 8080
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 --host 0.0.0.0 --port 8080
 ```
 
 Pull both checkpoints first on every Spark (`tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit

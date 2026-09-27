@@ -1,5 +1,5 @@
-"""Drafted rounds on Macs without tensor units: the row-exact matvec, the per-round draft count, and the DFlash2
-proposer's running acceptance."""
+"""Drafted rounds on Macs without tensor units: the row-exact matvec, the per-round draft count, the DFlash2
+proposer's running acceptance; and the 27B's prompts on the prefill grid on every chip."""
 
 from types import SimpleNamespace
 
@@ -95,3 +95,22 @@ def test_tool_requests_get_a_draft_count_through_the_fallback():
                                  context=[1, 2, 3, 4, 5])
         drafts = LaneEngine._drafts_for(engine, stream)
         assert fallback.model_cap == want and seen[-1] == want and len(drafts) == want
+
+
+@pytest.mark.parametrize("mode, lane_prefill, align", [(None, 0, 2048), ("aligned", 0, 2048), ("1", 128, 0),
+                                                        ("0", 0, 0)])
+def test_the_27b_prefills_on_the_grid_unless_told_and_snapshots_name_the_mode(monkeypatch, mode, lane_prefill, align):
+    from tensorfold.families import qwen3_5
+
+    if mode is None:
+        monkeypatch.delenv("TF_ROW_PREFILL", raising=False)
+    else:
+        monkeypatch.setenv("TF_ROW_PREFILL", mode)
+    monkeypatch.setattr(LaneEngine, "lane_prefill", LaneEngine.lane_prefill)
+    monkeypatch.setattr(LaneEngine, "prefill_align", LaneEngine.prefill_align)
+    qwen3_5.set_prefill(128)
+    assert (LaneEngine.lane_prefill, LaneEngine.prefill_align) == (lane_prefill, align)
+    lanes = SimpleNamespace(_tensorfold_lanes=True)
+    version = qwen3_5.kernel_version(lanes)
+    monkeypatch.setattr(LaneEngine, "prefill_align", 0 if align else 2048)
+    assert qwen3_5.kernel_version(lanes) != version        # a snapshot never resumes under another prefill

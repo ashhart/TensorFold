@@ -121,33 +121,16 @@ class FlashNext:
             cache.append(MTPCache())
         return cache
 
-    # Prompts through the decode kernels, ``fused_rows`` rows at a time: each prompt row then gets a one-row step's
-    # bits whatever the chunking, so a prompt resumed from any cached prefix (a checkpoint, a finished reply's
-    # cache) gives what the same prompt fed fresh gives. MLX's prefill kernels sum a row differently by chunk: a
-    # second chat turn resumed from the first differed from the same turn fed fresh (thinking on, M3 Ultra,
-    # 2026-09-26). False: MLX's prefill (faster, not exact across chunkings).
-    exact_prefill = True
-
     def hidden(self, inputs: Any, cache: list[Any]) -> mx.array:
+        """Mixed hidden states [1, R, D]: up to ``fused_rows`` rows through the fused decode kernels, a longer
+        prompt chunk through MLX's forward, whose bits depend on the chunk; the engine's aligned prefill gives a
+        resumed prompt the chunks of the same prompt fed fresh."""
+
         tokens = np.asarray(inputs, dtype=np.int64)
         if tokens.ndim == 1:
             tokens = tokens[None]
-        rows = tokens.shape[1]
-        if self.fused is not None and rows > self.fused_rows and self.exact_prefill and tokens.shape[0] == 1:
-            layers = cache[: self.layer_count]
-            outs, streams = [], []
-            for begin in range(0, rows, self.fused_rows):
-                outs.append(self.fused(tokens[:, begin:begin + self.fused_rows], layers))
-                streams.append(self.fused.last_streams)
-                # one window in flight behind the one being built: the host builds a window in a few ms and the
-                # GPU runs it in ~60, and every window's per-row DeltaNet states (1.8 GB) stay alive until it runs
-                mx.async_eval(outs[-1], streams[-1])
-                if len(outs) > 1:
-                    mx.eval(outs[-2])
-            self._streams = mx.concatenate(streams)
-            return mx.concatenate(outs, axis=1)
         out = self.model.hidden(tokens, cache[: self.layer_count])
-        fused = self.fused is not None and rows <= self.fused_rows
+        fused = self.fused is not None and tokens.shape[0] == 1 and tokens.shape[1] <= self.fused_rows
         self._streams = self.fused.last_streams if fused else self.model.__dict__["last_streams"]
         return out
 

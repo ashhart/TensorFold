@@ -41,8 +41,8 @@ def test_two_gpus_need_a_master_before_anything_loads(tmp_path):
 
 
 def test_serve_parses_the_cuda_flags():
-    args = cli.build_parser().parse_args(["serve", "owner/model", "--tp", "2", "--rank", "1", "--master", "10.1.1.1"])
-    assert (args.backend, args.tp, args.rank, args.master, args.master_port) == ("auto", 2, 1, "10.1.1.1", 29551)
+    args = cli.build_parser().parse_args(["serve", "owner/model", "--tp", "2", "--rank", "1", "--master", "192.0.2.11"])
+    assert (args.backend, args.tp, args.rank, args.master, args.master_port) == ("auto", 2, 1, "192.0.2.11", 29551)
 
 
 def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatch):
@@ -79,7 +79,7 @@ def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatc
     assert qwen4_exp.cuda_engine(tmp_path).depth == 6
 
     # GLM: --mtp-drafts 0 with the DFlash2 drafter still drafts (DFlash2 alone); without it, the serial reference
-    glm = dict(tp=2, master="10.0.0.1")
+    glm = dict(tp=2, master="192.0.2.10")
     assert glm5_next.cuda_engine(tmp_path, drafter=str(tmp_path), mtp_drafts=0, **glm).policy == "fc5:0.3"
     assert glm5_next.cuda_engine(tmp_path, mtp_drafts=0, **glm).policy == "0"
     assert glm5_next.cuda_engine(tmp_path, drafter=str(tmp_path), **glm).policy == "auto"

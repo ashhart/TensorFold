@@ -93,6 +93,8 @@ class FakeEngine(LaneEngine):
     # The fake target has no row cost curve: windows are not capped, so the tests
     # keep exercising ragged windows and rollbacks.
     cheap_window = 1_000
+    # its prefill (below) takes checkpoints anywhere and keeps decoded states: the engine without a prefill grid
+    prefill_align = 0
 
     def __init__(self, model: Any = None, **kwargs: Any) -> None:
         super().__init__(model=model, **kwargs)
