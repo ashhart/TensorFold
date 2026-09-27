@@ -190,11 +190,15 @@ def _stacked(bits: torch.Tensor, rows: torch.Tensor) -> nvfp4.FP4:
 def _fp4_stack(w: torch.Tensor, s: torch.Tensor, s2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Stacked checkpoint arrays (words [E, N, K/2] uint8, weight_scale [E, N, K/16] fp8e4m3,
     weight_scale_2 [E] fp32) -> code bits [E, N, K] uint16 and row scales [E, N, K/16] fp32 (the
-    per-tensor factors folded into the row scales — the FP4 table's form)."""
+    per-tensor factors folded into the row scales — the FP4 table's form). A scalar ``s2``: the same
+    per-tensor scale on every expert (the 512 tiny per-expert scalars read as one stack)."""
 
+    bits = nvfp4.e2m1_bits(w)
     e = int(w.shape[0])
-    bits = torch.stack([nvfp4.e2m1_bits(w[i]) for i in range(e)])
-    rows = torch.stack([nvfp4.row_scales(s[i], float(s2[i])) for i in range(e)])
+    if isinstance(s2, torch.Tensor) and s2.dim() == 0:
+        rows = nvfp4.row_scales(s, float(s2)).reshape(e, s.shape[-2], s.shape[-1])
+    else:
+        rows = torch.stack([nvfp4.row_scales(s[i], float(s2[i])) for i in range(e)])
     return bits, rows
 
 

@@ -87,11 +87,11 @@ def _tensor_scale(weight_scale_2) -> float:
 
 
 def e2m1_bits(words: torch.Tensor) -> torch.Tensor:
-    """(N, K/2) uint8 -> [N, K] uint16: the bf16 bit pattern of each E2M1 code (the kernel's grid)."""
+    """(..., N, K/2) uint8 -> (..., N, K) uint16: the bf16 bit pattern of each E2M1 code (the kernel's
+    grid). Stacked inputs (a leading expert axis) decode whole — the 512 experts' words in one pass."""
 
-    n, k2 = words.shape
     w = words.to(torch.int32)
-    code = torch.stack([w & 0xF, (w >> 4) & 0xF], dim=-1).reshape(n, k2 * 2)
+    code = torch.stack([w & 0xF, (w >> 4) & 0xF], dim=-1).reshape(*w.shape[:-1], w.shape[-1] * 2)
     return torch.tensor(BF16_BITS, dtype=torch.uint16, device=words.device)[code & 0x7] \
         | ((code >> 3) * 0x8000).to(torch.uint16)                  # sign bit 15, the pattern's sign
 
