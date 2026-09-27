@@ -1,18 +1,4 @@
-"""DSA's sparse top-k attention for GLM-5.3-Flash contexts past 2051 tokens (the Hugging Face definition).
-
-Each DSA layer's indexer keeps, per token, a key k = LayerNorm(wk x) and a pool gate g = x . compress_gate (both
-bf16, 128 wide). Every 4 tokens form a pool with key bf16(sum_j bf16(bf16(softmax_j(g_j + ape_j)) * k_j)).
-A query row at position q with index query qi = wq_b(q_resid) (32 heads of 128) and head weights
-w = weights_proj(x) / sqrt(32) scores each complete pool ending at or before q:
-
-    s_p = sum_h w_h * relu(qi_h . pool_p / sqrt(128))        (bf16 inputs, fp32 products and sums)
-
-keeps the 512 best pools (ties to the lower pool), adds the visible tokens of the incomplete last pool, and
-attends to those tokens only. While a row has at most 512 complete pools (q < 2051) it keeps them all, which is
-dense causal attention (``attention.attention``). A row's selection and its attention depend only on that row,
-so a window row gets the bits of the serial step at its position. Attention visits the selected tokens in
-ascending position, 512 at a time, and merges the chunks in order.
-"""
+"""Sparse DSA keeps lower-index pools on score ties and visits selected tokens and chunks in position order so window rows preserve serial bits."""
 
 from __future__ import annotations
 
@@ -82,9 +68,9 @@ def index_update(k_raw: torch.Tensor, gate: torch.Tensor, ln_w: torch.Tensor, ln
 
 
 @triton.jit
-def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, H: tl.constexpr, D: tl.constexpr, BP: tl.constexpr):
-    """Program (r, pool block): s_p = sum_h w_h relu(scale * qi_h . pool_p) for pools p ending at or before
-    pos + r (-inf after)."""
+def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, wscale, H: tl.constexpr, HP: tl.constexpr,
+            D: tl.constexpr, BP: tl.constexpr):
+    """Program (r, pool block): s_p = sum_h w_h relu(scale * qi_h . pool_p); H heads padded to HP rows of zeros."""
 
     r = tl.program_id(0)
     pb = tl.program_id(1)
@@ -92,11 +78,12 @@ def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, H: tl.constexpr, D: tl.
     npool = (P + r + 1) // 4
     p = pb * BP + tl.arange(0, BP)
     d = tl.arange(0, D)
-    hh = tl.arange(0, H)
-    q = tl.load(QI + (r * H + hh[:, None]) * D + d[None, :]).to(tl.bfloat16)           # [H, D]
+    hh = tl.arange(0, HP)
+    hok = hh < H
+    q = tl.load(QI + (r * H + hh[:, None]) * D + d[None, :], mask=hok[:, None], other=0.0).to(tl.bfloat16)  # [HP, D]
     k = tl.load(PK + p[:, None] * D + d[None, :], mask=(p < npool)[:, None], other=0.0).to(tl.bfloat16)  # [BP, D]
-    dots = tl.dot(q, tl.trans(k))                                                     # [H, BP] fp32
-    w = tl.load(W + r * w_stride + hh).to(tl.float32) * (1.0 / 5.656854249492381)     # 32 ** -0.5
+    dots = tl.dot(q, tl.trans(k))                                                     # [HP, BP] fp32
+    w = tl.load(W + r * w_stride + hh, mask=hok, other=0.0).to(tl.float32) * wscale
     s = tl.sum(w[:, None] * tl.maximum(dots * scale, 0.0), axis=0)
     s = tl.where(p < npool, s, float("-inf"))
     tl.store(OUT + r * NP + p, s, mask=p < NP)
@@ -109,8 +96,12 @@ def select_tokens(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: in
     scores = torch.empty((R, np_max), dtype=torch.float32, device=qi.device)
     if qi.stride(0) != qi.shape[1] or wts.stride(1) != 1:
         raise ValueError("select_tokens: index queries must be contiguous rows, weights unit-stride columns")
-    _scores[(R, triton.cdiv(np_max, 64))](qi, wts, wts.stride(0), pk, scores, pos_dev, R, np_max, 128 ** -0.5, H=32,
-                                         D=128, BP=64, num_warps=4)
+    # heads and width from the tensors: fixed ones read past a row's index query into its window neighbours
+    H = wts.shape[1]
+    D = qi.shape[1] // H
+    wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # 32 ** -0.5
+    _scores[(R, triton.cdiv(np_max, 64))](qi, wts, wts.stride(0), pk, scores, pos_dev, R, np_max, D ** -0.5, wscale,
+                                         H=H, HP=max(16, triton.next_power_of_2(H)), D=D, BP=64, num_warps=4)
     order = torch.sort(scores, dim=1, descending=True, stable=True).indices[:, :TOPK_POOLS]
     pools = torch.sort(order, dim=1).values                                            # ascending pool index
     width = TOPK_POOLS * POOL + POOL - 1
@@ -147,8 +138,7 @@ def _gtile(q, k, v, m, l, o, valid, SCALE: tl.constexpr):
 @triton.jit
 def _sparse_chunks(Q, KC, VC, TOK, CNT, PO, PM, PL, W: tl.constexpr, H: tl.constexpr, D: tl.constexpr,
                    CH: tl.constexpr, SCALE: tl.constexpr):
-    """Program (row, head, chunk): the row's selected tokens [c CH, (c + 1) CH) in list order; the query sits in
-    tile row 0 of a 16-row tile (rows 1-15 idle), the 27B kernel's arithmetic per row."""
+    """Attend selected tokens in list order with the query in row 0 of a 16-row tile and the other tile rows idle."""
 
     r = tl.program_id(0)
     h = tl.program_id(1)
@@ -202,8 +192,7 @@ def _sparse_merge(PO, PM, PL, OUT, CNT, H: tl.constexpr, D: tl.constexpr, NCH: t
 
 def sparse_attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, tokens: torch.Tensor, counts: torch.Tensor,
                      out: torch.Tensor, scale: float) -> None:
-    """Rows with counts > 0: attention over their selected tokens, written into ``out`` [R, H, D] (other rows
-    untouched)."""
+    """Write attention for rows with positive counts into out [R, H, D], leaving other rows untouched."""
 
     R, H, D = q.shape
     W = tokens.shape[1]
