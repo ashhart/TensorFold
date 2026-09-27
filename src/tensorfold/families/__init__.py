@@ -57,6 +57,8 @@ OWN_MODEL_HELP = (f"To run a model or checkpoint TensorFold has no recipe for, w
                   f"({RECIPES_URL}: adding a family on a Mac, adding a CUDA family on NVIDIA GPUs), and read the "
                   f"runbook first ({RUNBOOK_URL}).")
 MLX_QUANT = "mlx"
+EXL3_QUANT = "exl3"
+EXL3_VARIANT_ANY = "any"          # a family declaring EXL3_VARIANT = EXL3_VARIANT_ANY reads every codebook and width
 
 
 def _quantization_block(config: dict[str, Any]) -> dict[str, Any] | None:
@@ -147,6 +149,11 @@ def require_readable(family: Family, config: dict[str, Any], backend: str) -> No
         raise ValueError(f"{family.title} on {where} does not read this checkpoint's weights "
                          f"({describe_quantization(config)}); it reads {reads}. Tested checkpoints: {tested}. "
                          f"{OWN_MODEL_HELP}")
+    if backend == "cuda" and method == EXL3_QUANT and getattr(family.package, "EXL3_VARIANT", None) == EXL3_VARIANT_ANY:
+        # every EXL3 codebook and width: the config is checked here, the tensors by the loader's scan
+        from tensorfold.cuda.exl3 import format as exl3_format
+
+        exl3_format.require_config(config, where=where, tested=tested, help=OWN_MODEL_HELP)
     expected = getattr(family.package, "CUDA_QUANTIZATION", None) if backend == "cuda" else None
     if expected is not None and method == MLX_QUANT and quantization(config) != tuple(expected):
         bits, group = expected
