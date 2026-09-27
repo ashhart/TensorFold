@@ -1,25 +1,4 @@
-"""The decode forward's glue in a few kernels: our own decoder for 1-32 rows.
-
-Between its matmuls a verify forward ran ~1,400 small MLX kernels (norms,
-residual adds, the recurrent layers' conv and gates, the lane matmul's group
-sums), each ~3 us when the next depends on it: ~7 ms of a 45 ms forward. Here
-each step between two matmuls is one kernel:
-
-    norm_xs    residual add + RMSNorm + the next matmul's 64-group input sums
-    gdn_pre    conv windows + conv + SiLU + q/k RMSNorm and scales + g + beta
-    gdn_post   gated RMSNorm + the output projection's group sums
-    mlp_act    SiLU(gate) * up + the down projection's group sums
-
-Every value is a function of its own row only, so a row's bits never depend on
-the window it rides in. The arithmetic follows mlx_lm's ops closely (fp32
-math, bf16 where mlx_lm stores bf16) but is its own: every decode forward,
-serial ones included, goes through these kernels, which is what keeps drafted
-output byte identical to serial decoding. The group sums of gdn_post and
-mlp_act are the lane matmul's own (sequential fp32 over each group's 64 bf16
-inputs, as ``lane_qmm``'s XSUM kernel); norm_xs sums a group as four
-16-element partials (see its source), and the projections it feeds always
-take those sums, in serial decoding and in drafted rounds alike.
-"""
+"""The decode forward's glue in a few kernels: our own decoder for 1-32 rows."""
 
 from __future__ import annotations
 
@@ -28,9 +7,6 @@ from typing import Any
 
 import mlx.core as mx
 
-# norm_xs, live (2026-09-24): blocks of rounds alternating on 21k contexts, 60.02 -> 58.30 ms a round over 1,500
-# rounds; drafted output byte-identical to serial (drafts off) under it. (Comments inside the source below are part
-# of the lane decoder's version hash, which keys every stored snapshot: edit them only with the arithmetic.)
 _NORM_XS = r"""
   // one threadgroup of K / 16 threads per row: thread t holds elements [16 t, 16 t + 16) in registers.
   // The row's sum of squares is each thread's sequential fma over its 16, then simd_sum, then the

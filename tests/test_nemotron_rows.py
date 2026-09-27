@@ -40,7 +40,8 @@ def _mm(a, b):
 
 
 def _exact_and_bound(x, w, bias):
-    """x [R, K] (fp32 values of bf16 inputs) @ w.T exactly, and the bf16 rounding bound of MLX's arithmetic."""
+    """x [R, K] (fp32 values of bf16 inputs) @ w.T in fp32 on the CPU, and the bf16 rounding bound of MLX's
+    arithmetic around it."""
 
     y = _mm(x, w.T)
     ax = mx.abs(x)
@@ -89,14 +90,17 @@ def test_row_linear_routes_by_row_count():
     linear = nn.QuantizedLinear(2688, 64, bias=False, group_size=64, bits=4)
     q, s, b = _quantized(64, 2688, seed=11)
     linear.weight, linear.scales, linear.biases = q, s, b
-    x = (mx.random.normal((20, 2688), key=mx.random.key(4)) * 0.5).astype(mx.bfloat16)
+    x = (mx.random.normal((40, 2688), key=mx.random.key(4)) * 0.5).astype(mx.bfloat16)
     mlx_out = linear(x)
     mlx_one = linear(x[:1])
     linear.__class__ = rows.RowLinear
     object.__setattr__(linear, "mlx_one_row", False)
+    object.__setattr__(linear, "qmv_rows", 32)
     assert _same(linear(x[:7]), rows.qmv(x[:7], q, s, b, 64))
     assert _same(linear(x[:1]), rows.qmv(x[:1], q, s, b, 64))
-    assert _same(linear(x), mlx_out)                     # more than 16 rows: MLX's quantized matmul
+    one_by_one = mx.concatenate([rows.qmv(x[i:i + 1], q, s, b, 64) for i in range(32)])
+    assert _same(linear(x[:32]), one_by_one)             # a shared round past 16 rows: every row its one-row bits
+    assert _same(linear(x), mlx_out)                     # past qmv_rows (prompt chunks): MLX's quantized matmul
     object.__setattr__(linear, "mlx_one_row", True)
     assert _same(linear(x[:1]), mlx_one)                 # one row: MLX's kernel when told its bits are the same
     assert _same(linear(x[:2]), rows.qmv(x[:2], q, s, b, 64))
@@ -134,9 +138,46 @@ def test_experts_rows_do_not_depend_on_row_count():
     assert _same(again[:, :3], full[:, 3:]) and _same(again[:, 3:], full[:, :3])
 
 
+def test_expert_groups_list_every_pair_once():
+    import numpy as np
+
+    for experts, count, seed in ((12, 16 * 6, 50), (130, 32 * 8, 51), (128, 1, 52), (128, 170 * 6, 53)):
+        ids = mx.random.randint(0, experts, (count,), key=mx.random.key(seed)).astype(mx.uint32)
+        uids, start, counts, members, used = rows.group(ids, experts)
+        mx.eval(uids, start, counts, members, used)
+        host = np.array(ids)
+        want = sorted(set(host.tolist()))
+        n = int(used.item())
+        assert n == len(want) and np.array(uids)[:n].tolist() == want
+        for u, e in enumerate(want):
+            first, many = int(start[u].item()), int(counts[u].item())
+            assert np.array(members)[first:first + many].tolist() == np.nonzero(host == e)[0].tolist()
+
+
+@pytest.mark.parametrize("experts", [16, 130])
+def test_grouped_experts_equal_pair_by_pair_at_every_threshold(experts, monkeypatch):
+    """The same bits for every pair whatever the grouping: a pair alone in a one-row call, all pairs one by one,
+    or grouped by expert, at thresholds that put every window size on either side."""
+
+    table = _Table(experts=experts, dims=640, hidden=192, seed=60 + experts)
+    x = (mx.random.normal((32, 640), key=mx.random.key(61)) * 0.5).astype(mx.bfloat16)
+    ids = _routing(32, experts, 6, seed=62)                  # 32 rows x 6 slots: many experts picked several times
+    alone = mx.concatenate([rows.experts(table, x[i:i + 1], ids[i:i + 1], grouped=False) for i in range(32)])
+    mx.eval(alone)
+    for m in (1, 2, 3, 4, 5, 8, 12, 16, 24, 32):
+        assert _same(rows.experts(table, x[:m], ids[:m], grouped=True), alone[:m]), f"grouped, {m} rows"
+        assert _same(rows.experts(table, x[:m], ids[:m], grouped=False), alone[:m]), f"pair by pair, {m} rows"
+    for threshold in (1, 2, 4, 8, 16, 32, 33):
+        monkeypatch.setattr(rows, "GROUP_ROWS", threshold)
+        for m in (1, 4, 7, 8, 9, 16, 31, 32):
+            assert _same(rows.experts(table, x[:m], ids[:m]), alone[:m]), f"threshold {threshold}, {m} rows"
+        # a window starting elsewhere
+        assert _same(rows.experts(table, x[9:30], ids[9:30]), alone[9:30]), f"threshold {threshold}, rows 9-29"
+
+
 def _switch_mlp_exact_and_bound(table, x, ids):
-    """fc2(relu(fc1 x)^2) per (row, slot) in exact fp32 arithmetic, and the bf16 rounding bound of mlx_lm's
-    computation (MLX's arithmetic in each matvec, fc1's output and relu2's output stored in bf16)."""
+    """fc2(relu(fc1 x)^2) per (row, slot) in fp32 without intermediate rounding, and the bf16 rounding bound of
+    mlx_lm's computation (MLX's arithmetic in each matvec, fc1's output and relu2's output stored in bf16)."""
 
     w1, b1 = _fp32(table.fc1["weight"], table.fc1["scales"], table.fc1["biases"])
     w2, b2 = _fp32(table.fc2["weight"], table.fc2["scales"], table.fc2["biases"])

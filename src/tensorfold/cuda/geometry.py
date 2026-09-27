@@ -1,0 +1,172 @@
+"""Cache and loader geometry shared by CUDA family constructors."""
+
+from __future__ import annotations
+
+import math
+from .capacity import Geometry, SIZES
+
+
+def size(info: dict) -> int:
+    return math.prod(info["shape"]) * SIZES[info["dtype"]]
+
+
+def padded(info: dict, shape: list[int], *, float32: bool = False) -> int:
+    dims = list(shape)
+    if info["dtype"] in ("U32", "I32") and len(dims) >= 2:
+        dims[-2] = ((dims[-2] + 63) // 64) * 64
+    return math.prod(dims) * (4 if float32 else SIZES[info["dtype"]])
+
+
+def linear_weights(name: str, info: dict) -> tuple[int, int]:
+    if name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp."):
+        return 0, 0
+    amount = padded(info, info["shape"], float32=name.endswith((".A_log", ".dt_bias")))
+    return amount * (2 if "lm_head." in name else 1), 0
+
+
+def indexed_weights(world: int, mtp: bool):
+    def transform(name: str, info: dict) -> tuple[int, int]:
+        if "vision" in name or (not mtp and (name.startswith("mtp.") or ".mtp." in name)):
+            return 0, 0
+        if ".ngram_embedding.shard_" in name:
+            return 0, size(info)
+        shape = list(info["shape"])
+        if world > 1 and not info.get("split"):
+            if ".switch_mlp." in name or ".shared_expert." in name:
+                axis = -1 if ".down_proj." in name else -2
+                shape[axis] //= world
+            elif ".indexer." not in name and (".self_attn." in name or ".linear_attn." in name):
+                if any(f".{part}." in name for part in ("q_proj", "k_proj", "v_proj", "in_proj_qkv", "in_proj_z",
+                                                        "in_proj_a", "in_proj_b", "conv1d")):
+                    shape[0] //= world
+                elif any(f".{part}." in name for part in ("o_proj", "out_proj")):
+                    shape[-1] //= world
+                elif name.endswith((".A_log", ".dt_bias")):
+                    shape[0] //= world
+            elif name.endswith(("lm_head.weight", "lm_head.scales", "lm_head.biases")):
+                shape[0] //= world
+        cast = name.endswith((".A_log", ".dt_bias", ".q_norm.weight", ".k_norm.weight", ".hc_norm.weight"))
+        amount = padded(info, shape, float32=cast)
+        if mtp and "lm_head." in name:
+            amount *= 2  # the additional vocabulary-subset draft head
+        return amount, 0
+    return transform
+
+
+def split_weights(rule, world: int = 2):
+    def transform(name: str, info: dict) -> tuple[int, int]:
+        kind = rule(name)
+        if kind == "drop":
+            return 0, 0
+        shape = list(info["shape"])
+        if not info.get("split") and kind != "rep":
+            axis = {"row": 0, "col": -1, "dim1": 1}[kind]
+            if shape[axis] % world:
+                raise ValueError(f"checkpoint tensor does not split evenly: {name}")
+            shape[axis] //= world
+        if name.startswith("lm_head."):
+            shape[0] //= world
+        cast = name.endswith((".A_log", ".dt_bias", ".hc_attn_base", ".hc_attn_scale", ".hc_ffn_base",
+                              ".hc_ffn_scale", ".e_score_correction_bias"))
+        total = padded(info, shape, float32=cast)
+        if name == "lm_head.weight" and info["dtype"] in ("BF16", "F16", "F32"):
+            total += math.prod(shape) * 9 // 16  # the additional 4-bit draft head
+        return total, 0
+    return transform
+
+
+def layer_counts(t: dict) -> tuple[int, int]:
+    if "layer_types" in t:
+        linear = sum(kind == "linear_attention" for kind in t["layer_types"])
+        return linear, len(t["layer_types"]) - linear
+    layers, interval = int(t["num_hidden_layers"]), int(t.get("full_attention_interval", 4))
+    return layers - layers // interval, layers // interval
+
+
+def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False) -> Geometry:
+    linear, attention = layer_counts(t)
+    d, h = int(t["hidden_size"]), int(t["num_attention_heads"]) // world
+    hk = int(t["num_key_value_heads"]) // world
+    hd = int(t.get("head_dim") or d // int(t["num_attention_heads"]))
+    nk, nv = int(t["linear_num_key_heads"]) // world, int(t["linear_num_value_heads"]) // world
+    dk, dv = int(t["linear_key_head_dim"]), int(t["linear_value_head_dim"])
+    conv = int(t["linear_conv_kernel_dim"])
+    streams = int(t.get("hc_count", 1))
+    index_dim, ratio = int(t.get("indexer_head_dim", 128)), int(t.get("indexer_compress_ratio", 4))
+    width = 2 * nk * dk + 2 * nv * dv + 2 * nv
+    # Persistent state, retained recurrent prefixes, rollback and row replay inputs.
+    fixed = linear * ((6 if indexed else 4) * nv * dk * dv * 4 +
+                      4 * (conv - 1) * (2 * nk * dk + nv * dv) * 2)
+    rows = 64 if indexed else 128
+    fixed += linear * rows * (width * 2 + nk * dk * 4 + nv * dv * 4 + nv * 8)
+    # Bound the concurrent activation arrays, MoE expert rows, logits and split-K scratch.
+    slots = int(t.get("num_experts_per_tok", 1)) + 1
+    intermediate = int(t.get("moe_intermediate_size", t.get("intermediate_size", d))) // world
+    extent = d * streams + int(t["vocab_size"]) // world + slots * (intermediate + d) + width + h * hd
+    fixed += 16 * rows * extent * 4
+    fixed += (2 if mtp else 1) * 32 * rows * 2560 * 4
+    if indexed:
+        fixed += 4 * (int(t.get("ple_conv_kernel_size", 4)) - 1) * int(t.get("ngram_size", 3)) * streams * d * 2
+    count = attention + int(mtp)
+    def bytes_at(capacity: int) -> int:
+        if indexed:
+            # Separate K/V arrays in both the main state and the lazy serial-reference twin.
+            cache = 4 * count * capacity * hk * hd * 2
+            cache += 2 * count * (capacity + (capacity + ratio - 1) // ratio) * index_dim * 2
+            scratch = (2 if mtp else 1) * rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
+            scratch += (2 if mtp else 1) * rows * ((capacity + ratio - 1) // ratio) * 4
+        else:
+            # Only committed rows grow KV; speculative rows use separate workspace.
+            # Two retained independent prefixes, current state and a growth copy are bounded.
+            rounded = 1 << (max(1024, capacity - reserve) - 1).bit_length()
+            cache = 4 * attention * rounded * hk * hd * 4
+            scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
+        return fixed + cache + scratch
+    return Geometry(bytes_at, reserve)
+
+
+def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560) -> Geometry:
+    linear, attention = layer_counts(t)
+    lin = t.get("linear_attn_config") or {}
+    heads = int(t["num_attention_heads"]) // world
+    lh = int(lin.get("num_heads", t.get("linear_num_heads", 64))) // world
+    ld = int(lin.get("head_dim", t.get("linear_head_dim", 128)))
+    conv = int(lin.get("short_conv_kernel_size", t.get("linear_conv_kernel_dim", 4)))
+    kd = int(t["qk_nope_head_dim"]) + int(t.get("qk_rope_head_dim", 0))
+    vd, index = int(t["v_head_dim"]), int(t.get("index_head_dim", 128))
+    mtp = int(t.get("num_nextn_predict_layers", 0)) > 0
+    rows, d, streams = 64, int(t["hidden_size"]), int(t.get("hc_mult", 4))
+    fixed = linear * (4 * lh * ld * ld * 4 + 3 * (conv - 1) * 3 * lh * ld * 2)
+    fixed += linear * rows * (3 * lh * ld + 2 * ld + lh) * 2
+    fixed += linear * rows * lh * (12 * ld + 4)
+    slots = int(t["num_experts_per_tok"]) + 1
+    width = int(t["moe_intermediate_size"]) // world
+    extent = d * streams + int(t["vocab_size"]) // world + slots * (d + width) + heads * (2 * kd + vd)
+    extent += int(t.get("q_lora_rank", d)) * 2 + int(t.get("kv_lora_rank", d)) * 2
+    extent += int(t.get("intermediate_size", width)) * 3 // world + int(t.get("index_n_heads", 32)) * index
+    fixed += (2 if mtp else 1) * (16 * rows * extent * 4 + 8 * rows * 16384 * 4)
+    if (t.get("_quantization") or {}).get("quant_method") == "exl3":
+        fixed += 128 * rows * slots * max(width, d) * 4
+    count = attention + int(mtp)
+    def bytes_at(capacity: int) -> int:
+        cache = count * capacity * heads * (kd + vd) * 2
+        cache += count * (2 * capacity + capacity // 4 + 2) * index * 2
+        scratch = (2 if mtp else 1) * ((capacity + rows + 511) // 512) * rows * heads * (kd + 2) * 4
+        scratch += rows * ((capacity + 3) // 4) * 4
+        scratch += 128 * heads * (kd + 2) * 4 * ((int(t.get("index_topk", 2048)) + 515) // 512)
+        return fixed + cache + scratch
+    return Geometry(bytes_at, reserve, minimum_slots)
+
+
+def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False) -> Geometry:
+    layers = int(t["num_hidden_layers"])
+    heads = int(t["num_key_value_heads"]) // world
+    hd = int(t["head_dim"])
+    block = int((t.get("dflash_config") or {}).get("block_size", 16))
+    window = int(t.get("sliding_window", 0))
+    hidden = int(t["hidden_size"])
+    fixed = 16 * max(64, block) * (hidden + int(t["intermediate_size"])) * 4
+    def bytes_at(capacity: int) -> int:
+        slots = min(capacity, window) if bounded and window > 0 else capacity
+        return fixed + 4 * layers * heads * hd * (slots + block) * 2
+    return Geometry(bytes_at, reserve)

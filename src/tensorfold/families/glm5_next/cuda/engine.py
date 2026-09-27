@@ -1,34 +1,4 @@
-"""GLM-5.3-Flash's CUDA engine behind ``tensorfold.cuda.server``: two ranks over NCCL, one per machine.
-
-Rank 0 serves HTTP and sends each request's header and prompt to rank 1 over the engine's all-gather; both ranks
-then run the same prefill and drafted decode. Both sample every row with the same keyed rule from the same
-gathered candidates, so they agree without a broadcast, and the reply is byte-identical to serial decoding on
-the same two ranks.
-
-Prefix reuse: the committed state after the last request's prompt and after its reply are kept (``decode.
-Snapshot``), and a prompt that extends either resumes from it. Rows never depend on their chunk-mates, so a
-resumed prompt ends in the state a fresh prefill gives. Both ranks keep the same snapshots; rank 0 names the one
-it resumes from in the header.
-
-A request's draft policy is a spec (the engine's default, or the request's through ``app.GlmApp``):
-
-    0             serial: one token a round
-    N             N MTP drafts a round (the checkpoint's MTP head)
-    a[:LOW:HIGH]  1 to 3 MTP drafts from the running acceptance (the default, a:0.6:0.85)
-    cN:P          up to N MTP drafts while the product of the drafts' own probabilities stays at or above P
-    f...          the same with DFlash2 drafts (fN, fcN:P, fa:...), when both ranks loaded the draft model
-    auto          the default. Greedy requests: each round drafts with the MTP head (c3:0.35) or DFlash2
-                  (fc5:0.3), whichever has committed more tokens per millisecond in this request
-                  (``decode.DrafterChoice``: 2 rounds of each first, then a 3% margin to switch and one round of
-                  the other every 8). Sampled requests: MTP drafts, 1 to 3 from the running acceptance
-                  (a:0.6:0.85), where DFlash2's sampled chains measured slower. MTP only without the draft model.
-                  On an EXL3 checkpoint with the draft model, every request drafts with DFlash2 (fc5:0.3), which
-                  measured best or tied in all four cells there. A checkpoint without the MTP head drafts with
-                  DFlash2 only (MTP specs run as their DFlash2 versions) and needs the draft model.
-    auto:E:EVERY:MARGIN
-                  the same choice with E rounds of each first, a probe every EVERY rounds and a MARGIN to switch,
-                  for sampled requests too (MTP a:0.6:0.85 against DFlash2 there)
-"""
+"""GLM-5.3-Flash's CUDA engine behind ``tensorfold.cuda.server``: two ranks over NCCL, one per machine."""
 
 from __future__ import annotations
 
@@ -116,7 +86,7 @@ class GlmEngine:
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
     def __init__(self, model_dir: Path, *, rank: int, master: str, port: int, policy: str = DEFAULT_POLICY,
-                 drafter: Path | None = None, context: int = 0, serial_only: bool = False, comm=None) -> None:
+                 drafter: Path | None = None, context: int | None = None, context_explicit: bool | None = None, serial_only: bool = False, comm=None) -> None:
         """``comm``: a communicator with ``all_gather`` and ``barrier`` instead of NCCL between two machines (tests)."""
 
         import torch
@@ -124,6 +94,9 @@ class GlmEngine:
         from .comm import NCCL
         from .decode import Engine
         from .weights import Config, load
+        from .split import rule
+        from tensorfold.cuda.capacity import admit
+        from tensorfold.cuda.geometry import draft_geometry, mla_geometry, split_weights
 
         encode_policy(policy)                           # a bad default fails here, not in the first request
         torch.cuda.set_device(0)
@@ -131,12 +104,16 @@ class GlmEngine:
         self.rank = rank
         self.policy = "0" if serial_only else policy
         self.serial_only = serial_only
-        cfg = Config.read(model_dir)
-        long_context = context > cfg.dense_limit
-        capacity = max(DENSE_CAPACITY, context + MAX_ROWS) if long_context else DENSE_CAPACITY
-        self.limit = capacity - MAX_ROWS if long_context else cfg.dense_limit
         self.comm = comm if comm is not None else NCCL(rank, 2, master, port)
         self.comm.barrier()
+        self.capacity_plan = admit(model_dir, context, context_explicit, torch,
+                                   lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY),
+                                   split_weights(rule), rank=rank, world=2, gather=self._gather_ints,
+                                   draft_dir=drafter, draft_geometry=lambda text: draft_geometry(text, 2, MAX_ROWS))
+        cfg = Config.read(model_dir)
+        self.limit = self.capacity_plan["context_window"]
+        capacity = self.capacity_plan["cache_slots"]
+        long_context = self.limit > cfg.dense_limit
         # both ranks must run the same calls: refuse to start when they were given different settings
         mine = [int(drafter is not None), capacity, int(long_context), int(serial_only)]
         both = self._gather_ints(mine)

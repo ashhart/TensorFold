@@ -1,15 +1,17 @@
 # Kernel layout
 
-| Model family | Active kernel package | Version |
-| --- | --- | --- |
-| Qwen3.8 dense | `qwen/dense/v1/` | `v1` |
-| Qwen3.8 Flash Next | `qwen/flash_next/v1/` | `v1` |
-| NVIDIA Nemotron 3.5 Lightning | `nemotron/lightning/v1/` | `v1` |
+| Family | Active Metal kernel package |
+| --- | --- |
+| Nemotron 3.5 Lightning | `nemotron/lightning/v1/` |
+| Qwen3.8 dense | `qwen/dense/v1/` |
+| Qwen3.8 Flash Next | `qwen/flash_next/v1/` |
 
-Each folder contains the kernels the matching family imports. `v1` names this implementation, not the model
-release. A later incompatible implementation gets its own `v2` folder, and the family changes its import to
-select it. The CLI also hashes the active source code in its prompt-snapshot key, so editing code within a
-version cannot reuse a snapshot computed by different kernels.
+The version names the implementation, not the model release. Each family imports its active package;
+incompatible versions can occupy separate directories. CUDA kernels live in the family's `cuda/` package.
 
-Nemotron's long-context attention uses `lane_sdpa` from Qwen dense `v1`; its snapshot fingerprint includes that
-shared source too.
+Snapshot fingerprints hash family code, active kernels and declared shared dependencies.
+Nemotron declares dense-Qwen attention as a shared dependency. The snapshot key also includes the
+prefill plan and the MLX, mlx-lm and TensorFold versions.
+
+See [the family guide](../../../docs/recipes/adding-a-family.md) for arithmetic, state and verification
+requirements. A multi-row kernel must match its own serial row before it can verify drafts.

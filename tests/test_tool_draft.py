@@ -71,7 +71,7 @@ def test_snapshot_round_trip(tmp_path):
 def test_streamed_tool_call_arguments_equal_the_parsed_call():
     import json
 
-    from tensorfold.server.http import parse_tool_calls_from_content
+    from tensorfold.server.tools import parse_tool_calls_from_content
     from tensorfold.engine.tool_draft import ToolCallStreamer
 
     tools = [{"type": "function", "function": {"name": "write", "parameters": {
@@ -108,7 +108,7 @@ def test_parameter_values_keep_their_own_whitespace():
     """
     import json
 
-    from tensorfold.server.http import parse_tool_calls_from_content
+    from tensorfold.server.tools import parse_tool_calls_from_content
     from tensorfold.engine.tool_draft import ToolCallStreamer
 
     tools = [{"type": "function", "function": {"name": "write", "parameters": {
@@ -192,3 +192,22 @@ def test_target_candidates_reach_the_capture_sidecar(tmp_path):
     positions = np.frombuffer(data, np.int64, count, 8)
     ids = np.frombuffer(data, np.int32, count * k, 8 + 8 * count).reshape(count, k)
     assert list(positions) == [11, 12] and (ids[1] == keep["cand"][1]).all()
+
+
+def test_the_family_rounds_copy_gate_takes_structure_and_the_fallbacks_copies():
+    from types import SimpleNamespace
+
+    class Copies:
+        last_match = 0
+
+        def propose(self, context, max_draft):
+            self.last_match = 9
+            return [5, 6, 7]
+
+    blank = SimpleNamespace(decode=lambda ids: "", encode=lambda text, **_: [7, 8], convert_tokens_to_ids=lambda t: -1)
+    opening = ToolCallProposer(blank, TOOLS, 3, fallback=Copies())
+    assert opening.propose([1, 2, 3, 4], 15) == [7, 8] and opening.last_match >= 1 << 20   # the call's opening
+    prose = SimpleNamespace(decode=lambda ids: "Some prose.", encode=lambda text, **_: [1],
+                            convert_tokens_to_ids=lambda t: -1)
+    fallback = ToolCallProposer(prose, TOOLS, 3, fallback=Copies())
+    assert fallback.propose([1, 2, 3, 4], 15) == [5, 6, 7] and fallback.last_match == 9    # the fallback's copy

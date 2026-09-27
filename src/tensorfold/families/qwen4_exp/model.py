@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -376,6 +377,32 @@ class Indexer(nn.Module):
         return mx.fast.rope(pooled[:, None], self.rotary_dim, traditional=False, base=self.base,
                             scale=float(self.ratio), offset=start)[:, 0]
 
+    def pool(self, raw: mx.array, cache: AttentionCache, blocks: int) -> mx.array:
+        """Pooled keys of blocks [0, blocks), pooling the ones the cache does not hold yet."""
+
+        done = 0 if cache.pooled is None else cache.pooled.shape[1]
+        if blocks > done:
+            fresh = self._pool(raw, done, blocks)
+            cache.pooled = fresh if cache.pooled is None else mx.concatenate([cache.pooled, fresh], axis=1)
+        return cache.pooled[:, :blocks]
+
+    def rotated(self, query: mx.array, past: int) -> mx.array:
+        """Normed, rotated queries [B, heads, L, dims]."""
+
+        q = self.q_layernorm(query).transpose(0, 2, 1, 3)
+        return mx.fast.rope(q, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
+
+    def block_scores(self, query: mx.array, raw: mx.array, cache: AttentionCache, past: int) -> mx.array:
+        """Every row's score of every complete block, [L, blocks] fp32 (batch 1), as ``select`` scores them."""
+
+        blocks = (past + query.shape[1]) // self.ratio
+        pooled = self.pool(raw, cache, blocks)[0].astype(mx.float32).T
+        q = self.rotated(query, past)[0].astype(mx.float32)
+        scores = mx.maximum(q[0] @ pooled, 0)
+        for h in range(1, self.heads):
+            scores = scores + mx.maximum(q[h] @ pooled, 0)
+        return scores / math.sqrt(self.dims)
+
     def select(self, query: mx.array, raw: mx.array, cache: AttentionCache, past: int) -> mx.array | None:
         """Keys each query may read, [B, 1, L, keys] (bool), or None while the context is short (causal)."""
 
@@ -384,13 +411,8 @@ class Indexer(nn.Module):
         blocks = keys // self.ratio
         if blocks <= self.top_blocks:
             return None
-        done = 0 if cache.pooled is None else cache.pooled.shape[1]
-        if blocks > done:
-            fresh = self._pool(raw, done, blocks)
-            cache.pooled = fresh if cache.pooled is None else mx.concatenate([cache.pooled, fresh], axis=1)
-        pooled = cache.pooled[:, :blocks]
-        q = self.q_layernorm(query).transpose(0, 2, 1, 3)
-        q = mx.fast.rope(q, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
+        pooled = self.pool(raw, cache, blocks)
+        q = self.rotated(query, past)
         # float32 scores: which blocks win is a discrete choice and rounding flips the ones at the cut
         scores = q.astype(mx.float32) @ pooled.astype(mx.float32)[:, None].transpose(0, 1, 3, 2)
         scores = mx.sum(mx.maximum(scores, 0), axis=1) / math.sqrt(self.dims)          # [B, L, blocks]
@@ -443,6 +465,10 @@ class SparseAttention(nn.Module):
         keys = mx.fast.rope(keys, self.rotary_dim, traditional=False, base=self.base, scale=1.0, offset=past)
         index_query, index_key = self.indexer.project(x)
         keys, values, raw = cache.update(keys, values, index_key)
+        ix = self.indexer
+        if self.__dict__.get("kernel_select") and batch == 1 and (past + length) // ix.ratio > ix.top_blocks:
+            out = self._selected(queries, index_query, raw, cache, past)
+            return self.o_proj(out * mx.sigmoid(gate))
         # past ``split_keys`` keys the query rows go in parts of ``split_rows``, each over the keys up to its last
         # row, two parts queued at a time: MLX materializes the scores at this head size, and they grow with keys
         step = self.split_rows if past + length > self.split_keys else length
@@ -461,6 +487,29 @@ class SparseAttention(nn.Module):
         out = outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
         out = out.transpose(0, 2, 1, 3).reshape(batch, length, -1)
         return self.o_proj(out * mx.sigmoid(gate))
+
+    # partial outputs a row's key list is cut into by the selected-keys kernel (prompt chunks have rows enough to
+    # fill the GPU)
+    kernel_parts = 4
+
+    def _selected(self, queries: mx.array, index_query: mx.array, raw: mx.array, cache: AttentionCache,
+                  past: int) -> mx.array:
+        """Through the decode's kernels: a row past ``top`` complete blocks reads its selected blocks' keys and its
+        tail, a shorter row all its keys; each row's result depends only on its own inputs. [1, L, H * D]."""
+
+        from tensorfold.kernels.qwen.flash_next.v1 import attention as kernels
+
+        ix = self.indexer
+        length = queries.shape[2]
+        ends = list(range(past + 1, past + length + 1))
+        complete = [e // ix.ratio for e in ends]
+        ids = kernels.select_blocks(ix.block_scores(index_query, raw, cache, past), complete, ends,
+                                    top=ix.top_blocks)
+        sparse = [c > ix.top_blocks for c in complete]
+        counts = [ix.ratio * (ix.top_blocks - c) + e if s else e for e, c, s in zip(ends, complete, sparse)]
+        out = kernels.attention_rows(queries[0].transpose(1, 0, 2), cache.keys, cache.values, counts, ids, sparse,
+                                     self.scale, parts=self.kernel_parts)
+        return out.reshape(1, length, -1)
 
 
 # -- MoE -----------------------------------------------------------------------
@@ -560,6 +609,9 @@ class NGramEmbedding(nn.Module):
             self.shard_starts.append(self.shard_starts[-1] + count)
         self.dims = cfg.ple_embed_dim // self.heads
         self.shards = [nn.Embedding(count, self.dims) for count in shard_rows]
+        # the shards' rows on the host instead (``host_table.HostTable``: the checkpoint's memory map), set by load()
+        self.host = None
+        self.quant_group, self.quant_bits = cfg.group_size, cfg.bits
 
     def ids(self, history: np.ndarray, tokens: np.ndarray) -> np.ndarray:
         """Row ids [B, L, heads] for ``tokens`` [B, L] after ``history`` [B, n-1] (EOS resets the n-grams)."""
@@ -586,6 +638,11 @@ class NGramEmbedding(nn.Module):
         return np.concatenate(blocks, axis=-1)[:, -tokens.shape[1]:]
 
     def __call__(self, ids: np.ndarray) -> mx.array:
+        if self.host is not None:
+            words, scales, biases = self.host.gather(ids)
+            rows = mx.dequantize(mx.array(words), mx.array(scales).view(mx.bfloat16),
+                                 mx.array(biases).view(mx.bfloat16), group_size=self.quant_group, bits=self.quant_bits)
+            return rows.reshape(*ids.shape[:-1], self.heads * self.dims)
         flat = ids.reshape(-1)
         shard = np.searchsorted(np.asarray(self.shard_starts), flat, side="right") - 1
         parts, order = [], []
@@ -666,6 +723,14 @@ class DecoderLayer(nn.Module):
         h = _write_back(h, branch, inject)
         mixed, inject = self.mlp_hyper_connection(h)
         return _write_back(h, self.mlp(mixed), inject)
+
+
+def select_by_kernels(layers: list[Any]) -> None:
+    """Prompt chunks past the dense range attend through the decode's selection and attention kernels (Metal)."""
+
+    for layer in layers:
+        if "self_attn" in layer:
+            layer.self_attn.__dict__["kernel_select"] = True
 
 
 class Body(nn.Module):
@@ -768,6 +833,27 @@ def norms_stored_around_one(weights: dict[str, mx.array]) -> bool:
     return around_one
 
 
+def ngrams_on_host(model_dir: Path) -> bool:
+    """Whether the n-gram tables (32 GB) stay in the checkpoint's memory map, a lookup's rows copied out each
+    step: when the checkpoint passes 3/4 of the GPU's recommended working set (113 of 115 GB on a 128 GB Mac), or
+    with TF_NGRAM_HOST=1 (0: never)."""
+
+    flag = os.environ.get("TF_NGRAM_HOST", "")
+    if flag in ("0", "1"):
+        return flag == "1"
+    size = sum(p.stat().st_size for p in Path(model_dir).glob("model*.safetensors"))
+    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+    return size > 0.75 * int(info["max_recommended_working_set_size"])
+
+
+def prefetch_ngrams(model: Qwen4Exp) -> None:
+    """Read host n-gram tables' pages once, so lookups hit the page cache."""
+
+    for _, module in model.named_modules():
+        if isinstance(module, NGramEmbedding) and module.host is not None:
+            module.host.prefetch()
+
+
 def load(model_dir: Path, *, lazy: bool = False) -> tuple[Qwen4Exp, Any]:
     from mlx_lm.utils import load_tokenizer
 
@@ -776,8 +862,20 @@ def load(model_dir: Path, *, lazy: bool = False) -> tuple[Qwen4Exp, Any]:
     model = Qwen4Exp(cfg)
     weights: dict[str, mx.array] = {}
     for path in sorted(Path(model_dir).glob("model*.safetensors")):
-        weights.update(mx.load(str(path)))
+        weights.update(mx.load(str(path), stream=mx.cpu))
     weights, extras = sanitize(weights)
+    if ngrams_on_host(model_dir):
+        from tensorfold.families.qwen4_exp import host_table
+
+        for path, emb in [(p, m) for p, m in model.named_modules() if isinstance(m, NGramEmbedding)]:
+            emb.shards = []
+            emb.host = host_table.from_checkpoint(model_dir, f"language_model.{path}.ngram_embedding",
+                                                  len(emb.shard_starts) - 1)
+            if emb.host.rows != emb.shard_starts[-1]:
+                raise ValueError(f"{path}: n-gram tables hold {emb.host.rows} rows, expected {emb.shard_starts[-1]}")
+        weights = {k: v for k, v in weights.items() if ".ple_embedding.shards." not in k}
+    if not lazy:
+        mx.eval(list(weights.values()))
 
     def quantized(path: str, module: nn.Module) -> bool:
         return hasattr(module, "to_quantized") and f"{path}.scales" in weights
@@ -797,13 +895,12 @@ def load(model_dir: Path, *, lazy: bool = False) -> tuple[Qwen4Exp, Any]:
             raise ValueError(f"{key}: checkpoint {shipped} != derived {derived}")
     if not lazy:
         mx.eval(model.parameters())
-        import os
-
         if os.environ.get("TF_FLASH_FUSED", "1") != "0":
             from tensorfold.families.qwen4_exp.decode import FusedDecode
 
             # kept out of the module tree (a plain attribute), so parameters() stays the checkpoint's
             model.__dict__["fused"] = FusedDecode(model)
+            select_by_kernels(model.layers)
     eos = config.get("eos_token_id")
     tokenizer = load_tokenizer(Path(model_dir), eos_token_ids=eos if isinstance(eos, list) else None)
     return model, tokenizer

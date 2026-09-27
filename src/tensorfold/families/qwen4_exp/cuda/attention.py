@@ -3,8 +3,8 @@
 Keys are cut into fixed 512-key chunks by absolute position, eight 64-key tensor-core tiles each; a
 program takes one row, one KV head (its 12 query heads as 16 tile rows) and one chunk, and the chunks
 merge in position order. A row's chunks hold the same keys whether it runs alone or in a window, so its
-bits do not depend on the window. The committed length P0 is read on the device and the grid covers the
-cache's capacity (programs past a row's keys write empty partials), so a step can be graph-captured.
+bits do not depend on the window. The committed length P0 is read on the device; launch bounds cover the
+live context or its graph bucket, with the allocated cache strides retained.
 
 Past the indexer's budget (a row whose position p has (p + 1) // 4 > 512 complete 4-key blocks) a row
 reads only its best 512 blocks and its unfinished tail, as the model does (QSA): ``pool`` keeps each
@@ -124,7 +124,7 @@ class AttnScratch:
 
 
 def attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, pos0: torch.Tensor, scratch: AttnScratch,
-              rows: int, scale: float) -> torch.Tensor:
+              rows: int, scale: float, *, context: int | None = None) -> torch.Tensor:
     """q [R, H, D] bf16 (normed, rotated), kc/vc [cap, HK, D] bf16 caches holding positions [0, P0 + R),
     pos0 [1] int32 (P0) -> [R, H, D] bf16. Sparse rows read scratch.ids (``select``)."""
 
@@ -132,7 +132,11 @@ def attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, pos0: torch.T
     hk = kc.shape[1]
     g = h // hk
     nch = scratch.nch
-    _chunks[(rows, hk, nch)](q, kc, vc, pos0, scratch.po, scratch.pm, scratch.pl, scratch.ids, scratch.nk,
+    keys = nch * CHUNK if context is None else context
+    if scratch.qsa:
+        keys = min(keys, (scratch.budget // scratch.ratio + 1) * scratch.ratio - 1)
+    chunks = min(nch, triton.cdiv(keys, CHUNK))
+    _chunks[(rows, hk, chunks)](q, kc, vc, pos0, scratch.po, scratch.pm, scratch.pl, scratch.ids, scratch.nk,
                              scratch.sparse, H=h, HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, SCALE=scale,
                              IDW=scratch.idw, QSA=scratch.qsa, num_warps=4, num_stages=1)
     _merge[(rows, hk)](scratch.po, scratch.pm, scratch.pl, pos0, scratch.out, scratch.nk, scratch.sparse, H=h,
@@ -240,7 +244,8 @@ def _select(SC, POS0, IDS, NKR, SPR, NB, RATIO: tl.constexpr, TOP: tl.constexpr,
 
 
 def qsa_select(iq: torch.Tensor, ikc: torch.Tensor, pooled: torch.Tensor, pos0: torch.Tensor, ik_scale: torch.Tensor,
-               inv_freq: torch.Tensor, eps: float, scratch: AttnScratch, rows: int) -> None:
+               inv_freq: torch.Tensor, eps: float, scratch: AttnScratch, rows: int,
+               *, context: int | None = None) -> None:
     """Pool the blocks the window completes, score and select each sparse row's blocks (scratch.ids/nk/sparse)."""
 
     di = ikc.shape[1]
@@ -248,7 +253,8 @@ def qsa_select(iq: torch.Tensor, ikc: torch.Tensor, pooled: torch.Tensor, pos0: 
     _pool[(rows // ratio + 2,)](ikc, pooled, pos0, ik_scale, inv_freq, eps, rows, DI=di, HALF=inv_freq.numel(),
                                 RATIO=ratio, num_warps=1)
     bb = 64
-    _scores[(rows, triton.cdiv(scratch.nb, bb))](iq, pooled, pos0, scratch.scores, scratch.nb, HI=iq.shape[1],
+    blocks = scratch.nb if context is None else min(scratch.nb, max(1, triton.cdiv(context, ratio)))
+    _scores[(rows, triton.cdiv(blocks, bb))](iq, pooled, pos0, scratch.scores, scratch.nb, HI=iq.shape[1],
                                                  DI=di, RATIO=ratio, TOP=top, BB=bb, num_warps=4)
     _select[(rows,)](scratch.scores, pos0, scratch.ids, scratch.nk, scratch.sparse, scratch.nb, RATIO=ratio,
-                     TOP=top, IDW=scratch.idw, BLOCK=triton.next_power_of_2(scratch.nb), num_warps=16)
+                     TOP=top, IDW=scratch.idw, BLOCK=triton.next_power_of_2(blocks), num_warps=16)

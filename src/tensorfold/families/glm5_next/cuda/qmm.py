@@ -107,10 +107,6 @@ def dequantize_q4(q: Q4) -> torch.Tensor:
 SPLIT_TARGET = 192
 
 
-# Per-shape settings ("NxK": K slices / "NxK": (groups per step, warps, stages) at <= 16 rows) for each rank's share
-# of GLM-5.3-Flash on two DGX Sparks, from a per-shape sweep with every shape timed on distinct weight copies: dense
-# matmuls 11.05 -> 9.73 ms a 1-row forward (the KDA projection 163 -> 134 us). The K slices are part of the
-# arithmetic (they change bits, for every row alike, so serial and windows stay equal); the settings change no bits.
 SHAPE_SK: dict[str, int] = {"12576x4096": 4, "4096x4096": 2, "2048x4096": 4, "8192x1536": 4, "8192x512": 4,
                             "4096x8192": 8}
 SHAPE_CFG: dict[str, tuple] = {"12576x4096": (2, 4, 3), "4096x4096": (2, 4, 3), "2048x4096": (1, 4, 3),

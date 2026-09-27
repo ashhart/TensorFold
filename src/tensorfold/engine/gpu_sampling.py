@@ -1,23 +1,4 @@
-"""Exact keyed sampling on the GPU, so the next token never waits on the host.
-
-The token at absolute position p of a row with logits l is
-
-    argmax over the kept candidates i of  v_i + g(seed, p, i),   v = l / T,
-
-where the candidates are the row's top values in (v desc, id asc) order (at most
-top_k, and at most 1,024), cut to the smallest prefix holding top_p of the
-probability (softmax over the whole row when top_k is 0, over the top_k when it
-is set), and g is Gumbel noise from a splitmix64 hash of (seed, p, i). It is
-``exact_sampling``'s rule computed in fp32 on the device with 24-bit uniforms:
-a function of the row's own logits and its position only, so a draft row
-verifies against the same token serial decoding samples.
-
-One threadgroup of 1,024 threads per row: the row max and normalizer; the
-candidates (the tokens within 20 of the max when they hold the nucleus, gathered
-without atomics; else a radix select of the 1,024 largest with the lowest ids
-among ties); a bitonic sort; the nucleus; the Gumbel argmax. The token stays on the GPU: a decode loop feeds
-it to the next forward before reading it.
-"""
+"""Key GPU Gumbel draws by seed, absolute position, and token id so verified drafts match serial sampling with the same fp32 rule."""
 
 from __future__ import annotations
 
@@ -25,6 +6,8 @@ import hashlib
 from typing import Any, Sequence
 
 import mlx.core as mx
+
+from tensorfold.kernels.inputs import floats, ints, padded
 
 CANDIDATES = 1024
 # tokens this far (in logits / T) below the row's max are gathered directly when they hold the nucleus
@@ -52,9 +35,12 @@ _SOURCE = r"""
   const uint lane = thread_index_in_simdgroup;
   const uint sg = simdgroup_index_in_threadgroup;
   const size_t base = size_t(row) * V;
-  const float inv_t = cfg[0];
-  const float top_p = cfg[1];
-  const uint cap = (kcap[0] == 0u || kcap[0] > C) ? C : kcap[0];
+  // the row's settings, read once (device memory: the compiler cannot keep them across the loops' stores)
+  const float inv_t = cfg[3 * row];
+  const float top_p = cfg[3 * row + 1];
+  const float near = cfg[3 * row + 2];
+  const uint kc = kcap[row];
+  const uint cap = (kc == 0u || kc > C) ? C : kc;
   const ulong seed = ulong(seeds[2 * row]) | (ulong(seeds[2 * row + 1]) << 32);
   const uint position = positions[row];
 
@@ -85,7 +71,7 @@ _SOURCE = r"""
     const float e = metal::exp(v - m);
     ls += e;
     for (int w = 0; w < 3; w++) {
-      if (v >= m - cfg[2] / float(1 << w)) { lnear[w] += e; near_count[w]++; }
+      if (v >= m - near / float(1 << w)) { lnear[w] += e; near_count[w]++; }
     }
   }
   ls = simd_sum(ls);
@@ -112,12 +98,12 @@ _SOURCE = r"""
       count += ush[s];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    const bool holds = count <= C && (kcap[0] == 0u
+    const bool holds = count <= C && (kc == 0u
         ? (top_p > 0.0f && top_p < 1.0f && znear >= (top_p + 1e-4f) * z)
-        : count >= min(kcap[0], uint(C)));
+        : count >= min(kc, uint(C)));
     if (window < 0 && holds) { window = w; offset = off; n_near = count; }
   }
-  const float floor_v = window < 0 ? INFINITY : m - cfg[2] / float(1 << window);
+  const float floor_v = window < 0 ? INFINITY : m - near / float(1 << window);
 
   // When a window holds the rule's candidates they are gathered at offsets from the prefix sum above (no
   // atomics), then sorted; otherwise the radix path finds the C largest. Both give the same candidates for
@@ -227,7 +213,7 @@ _SOURCE = r"""
   if (t == 0) {
     const uint n = min(n_cand, cap);
     float norm = z;
-    if (kcap[0] != 0u) {
+    if (kc != 0u) {
       norm = 0.0f;
       for (uint j = 0; j < n; j++) norm += metal::exp(tf_val(ck[j]) - m);
     }
@@ -265,8 +251,7 @@ _SOURCE = r"""
   }
 """
 
-# A draft head that scores a subset of the vocabulary (column c is token IDS[c], ids ascending): the noise is keyed by
-# the token id, not the column, so a draft still shares the target's noise at its position; the draw is the id.
+# Key subset-vocabulary noise by ascending token ids rather than columns, returning an id with the target's noise.
 _SOURCE_IDS = (_SOURCE.replace("tf_uniform(seed, position, ci[t])", "tf_uniform(seed, position, IDS[ci[t]])")
                .replace("TOK[row] = ci[bj];", "TOK[row] = IDS[ci[bj]];"))
 assert _SOURCE_IDS.count("IDS[") == 2
@@ -297,33 +282,44 @@ def _get_kernel_ids() -> Any:
 
 def sample(logits: mx.array, sampling: Any, positions: Sequence[int] | mx.array, ids: mx.array | None = None
            ) -> mx.array:
-    """Tokens [R] (uint32, lazy) for logits [R, V] at absolute ``positions``; greedy when ``sampling`` is None.
-    ``ids`` [V] (uint32, ascending): the logits' columns are those token ids (a draft head over part of the
-    vocabulary); the noise is keyed by id and the result is an id."""
+    """Sample logits [R, V] at absolute positions; optional ascending ``ids`` map columns to returned token ids and key the noise."""
 
     logits = logits.reshape(-1, logits.shape[-1])
-    if sampling is None:
-        picked = mx.argmax(logits, axis=-1).astype(mx.uint32)
-        return picked if ids is None else ids[picked]
+    return sample_rows(logits, [sampling] * int(logits.shape[0]), positions, ids)
+
+
+def sample_rows(logits: mx.array, samplings: Sequence[Any], positions: Sequence[int] | mx.array,
+                ids: mx.array | None = None) -> mx.array:
+    """Sample rows with their own settings in one kernel, with the same result each row would get alone."""
+
+    logits = logits.reshape(-1, logits.shape[-1])
     rows, vocab = logits.shape
-    seed = int(sampling.seed) & 0xFFFFFFFFFFFFFFFF
-    seeds = mx.array([seed & 0xFFFFFFFF, seed >> 32] * rows, dtype=mx.uint32)
-    if not isinstance(positions, mx.array):
-        positions = mx.array([int(p) for p in positions], dtype=mx.uint32)
-    assert isinstance(positions, mx.array)
-    cfg = mx.array([1.0 / max(float(sampling.temperature), 1e-6), float(sampling.top_p), NEAR], dtype=mx.float32)
-    kcap = mx.array([int(sampling.top_k or 0)], dtype=mx.uint32)
-    if ids is not None:
-        return _get_kernel_ids()(
-            inputs=[logits, seeds, positions.astype(mx.uint32), cfg, kcap, ids],
-            template=[("V", vocab), ("C", CANDIDATES)],
-            grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
-            output_shapes=[(rows,)], output_dtypes=[mx.uint32])[0]
-    return _get_kernel()(
-        inputs=[logits, seeds, positions.astype(mx.uint32), cfg, kcap],
-        template=[("V", vocab), ("C", CANDIDATES)],
-        grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
-        output_shapes=[(rows,)], output_dtypes=[mx.uint32])[0]
+    greedy = [s is None for s in samplings]
+    picked = None
+    if any(greedy):
+        picked = mx.argmax(logits, axis=-1).astype(mx.uint32)
+        if all(greedy):
+            return picked if ids is None else ids[picked]
+    seeds: list[int] = []
+    cfg: list[float] = []
+    caps: list[int] = []
+    for s in samplings:
+        seed = int(s.seed) & 0xFFFFFFFFFFFFFFFF if s is not None else 0
+        seeds += [seed & 0xFFFFFFFF, seed >> 32]
+        cfg += ([1.0 / max(float(s.temperature), 1e-6), float(s.top_p), NEAR] if s is not None else [1.0, 1.0, NEAR])
+        caps.append(int(s.top_k or 0) if s is not None else 1)
+    if isinstance(positions, mx.array):
+        positions = padded(positions.astype(mx.uint32))
+    else:
+        positions = ints(positions, mx.uint32)
+    inputs = [logits, ints(seeds, mx.uint32), positions, floats(cfg), ints(caps, mx.uint32)]
+    kernel = _get_kernel() if ids is None else _get_kernel_ids()
+    out = kernel(inputs=inputs if ids is None else [*inputs, ids], template=[("V", vocab), ("C", CANDIDATES)],
+                 grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
+                 output_shapes=[(rows,)], output_dtypes=[mx.uint32])[0]
+    if picked is not None:
+        out = mx.where(mx.array(greedy), picked if ids is None else ids[picked], out)
+    return out
 
 
 def reference(values: Any, sampling: Any, position: int) -> int:

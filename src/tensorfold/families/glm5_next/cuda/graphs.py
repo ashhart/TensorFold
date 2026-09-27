@@ -1,8 +1,4 @@
-"""CUDA graphs for GLM-5.3-Flash decode steps: one per (window rows, KDA state parity) for the model, one per row
-count for the MTP head. A captured step replays the eager kernels with their arguments (static buffers,
-positions read on the device), so its bits equal the eager step's; attention visits every chunk the cache
-can hold (empty chunks are skipped by the merge). Collectives (NCCL on the current stream) are captured too.
-"""
+"""CUDA graphs preserve eager bits by replaying static buffers, device positions, and collectives, with empty attention chunks skipped."""
 
 from __future__ import annotations
 

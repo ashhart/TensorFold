@@ -1,12 +1,4 @@
-"""A plain PyTorch forward of Qwen3.8 dense, fp32 arithmetic, to check the kernels against.
-
-It follows mlx_lm's ``qwen3_5`` math: RMSNorm (stored weights), Gated DeltaNet with a depthwise
-conv of width 4, q and k RMS-normalised and scaled, g = exp(-exp(A_log) softplus(a + dt_bias)),
-beta = sigmoid(b), the delta-rule recurrence in fp32, gated RMSNorm with silu(z); attention with
-[q | gate] per head, q/k norms, RoPE on the first rope_dims dims (rotate-half), sigmoid gate;
-SwiGLU MLP. Activations are rounded to bf16 where the model stores them. Slow: every call
-dequantizes the weights it uses.
-"""
+"""Check Qwen3.8 CUDA kernels against an fp32 PyTorch forward that rounds stored activations to bf16."""
 
 from __future__ import annotations
 
@@ -151,7 +143,7 @@ def forward(w: Weights, tokens: torch.Tensor, st: State) -> torch.Tensor:
 
     hd = untile(w.head)
     parts = []
-    for s0 in range(0, hd.n, 32768):                            # the head in slices: 5 GB as one fp32 matrix
+    for s0 in range(0, hd.n, 32768):                            # Slice the head to avoid materializing the full fp32 matrix.
         s1 = min(hd.n, s0 + 32768)
         parts.append(h @ dequantize(hd.weight[s0:s1], hd.scales[s0:s1], hd.biases[s0:s1]).T)
     return torch.cat(parts, dim=1)

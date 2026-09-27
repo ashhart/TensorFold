@@ -1,69 +1,49 @@
 # Third-party notices
 
-TensorFold depends on [MLX](https://github.com/ml-explore/mlx) and
-[mlx-lm](https://github.com/ml-explore/mlx-lm) (MIT License, Copyright © 2023
-Apple Inc.), installed as packages.
+TensorFold uses [MLX](https://github.com/ml-explore/mlx) and
+[mlx-lm](https://github.com/ml-explore/mlx-lm), MIT License, Copyright © 2023 Apple Inc.
+They are installed as dependencies.
 
-## Code adapted from mlx-lm
+## MLX and mlx-lm adaptations
 
-These files reproduce parts of mlx-lm 0.31.3 so their results match mlx-lm's
-bit for bit, under mlx-lm's MIT License (Copyright © 2023 Apple Inc.):
+The DeltaNet implementations in `src/tensorfold/kernels/qwen/dense/v1/lane_gdn.py` and
+`lane_tree.py` adapt mlx-lm's `qwen3_5` and `gated_delta` model math and kernels under its MIT License.
 
-- `src/tensorfold/kernels/gdn_capture.py` follows
-  `mlx_lm/models/qwen3_5.py` (`GatedDeltaNet.__call__`) op for op.
-- `src/tensorfold/kernels/lane_tree.py` repeats the arithmetic of mlx-lm's
-  `gated_delta_step` Metal kernel (`mlx_lm/models/gated_delta.py`) inside its
-  own kernels.
+## Qwen Flash Next
 
-## Code adapted from transformers and mlx-vlm
+The n-gram ID helpers in `src/tensorfold/families/qwen4_exp/model.py` and `cuda/ngram.py` translate
+Hugging Face transformers' `models/qwen4_exp/modeling_qwen4_exp.py` into MLX and NumPy with renamed
+identifiers. Copyright 2026 The Qwen Team and The HuggingFace Inc. team, Apache License 2.0.
+See [the license text](LICENSES/Apache-2.0.txt). The same helpers appear in mlx-vlm's
+`models/qwen4_exp/language.py`, MIT License, Copyright © 2025 Prince Canuma.
 
-The n-gram embedding's id helpers of Qwen3.8 Flash Next (`_splitmix64`, `_is_prime`,
-`_find_nth_prime_after`, the per-layer multipliers and the shift-and-xor id mixing) in
-`src/tensorfold/families/qwen4_exp/model.py` and `src/tensorfold/families/qwen4_exp/cuda/ngram.py` are
-translated, with renamed identifiers, into MLX and NumPy from Hugging Face transformers'
-`models/qwen4_exp/modeling_qwen4_exp.py` (Copyright 2026 The Qwen Team and The HuggingFace Inc. team),
-licensed under the Apache License, Version 2.0; the license text is in
-[`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt). The same helpers are in mlx-vlm's
-`models/qwen4_exp/language.py` (MIT License, Copyright (c) 2025 Prince Canuma).
+## CUDA
 
-## CUDA engines
+CUDA backends use [PyTorch](https://github.com/pytorch/pytorch), BSD-3-Clause, and
+[Triton](https://github.com/triton-lang/triton), MIT, supplied by NVIDIA's container rather than bundled.
+Dense Qwen implements mlx-lm's model math. CUDA DFlash2 implementations port z-lab's architecture under
+the MIT License, Copyright © 2026 Z Lab.
 
-On Linux the CUDA engines use [PyTorch](https://github.com/pytorch/pytorch) (BSD-3-Clause) and
-[Triton](https://github.com/triton-lang/triton) (MIT), taken from NVIDIA's PyTorch container, not bundled. Their
-kernels are written for TensorFold. What they follow:
+Flash Next implements transformers' model math under the attribution above. Its new DeltaNet kernel
+follows flash-linear-attention's numerics, MIT; its NCCL wrapper follows vLLM's stream convention,
+Apache-2.0, without copying either implementation.
 
-- `src/tensorfold/families/qwen3_5/cuda/` implements the model math of mlx-lm's `qwen3_5` model (MIT, above).
-- The CUDA DFlash2 drafters (`families/qwen3_5/cuda/dflash2.py`, `families/glm5_next/cuda/dflash2.py`) port the
-  DFlash2 architecture of z-lab's `dflash/model_mlx.py` to PyTorch and Triton, under its MIT License
-  (Copyright (c) 2026 Z Lab, text below).
-- `src/tensorfold/families/qwen4_exp/cuda/` implements the model math of transformers'
-  `modeling_qwen4_exp.py` (Apache-2.0, above) in its own kernels; `gdn.cu` reproduces the gated delta rule
-  with flash-linear-attention's numerics (MIT) in a new kernel, and `comm.py` calls NCCL on the caller's stream
-  the way vLLM's `pynccl` does (Apache-2.0), without code from either.
-- `src/tensorfold/families/glm5_next/cuda/` implements the math of the GLM-5 definition in Hugging Face
-  [transformers](https://github.com/huggingface/transformers) (`models/glm5_next/modular_glm5_next.py`,
-  Apache-2.0), with its own kernels; no code from it is included. The hidden states GLM's DFlash2 reads and
-  its thinking-off chat rendering were checked against Mia-AiLab's GLM-5.3-Flash DGX Spark recipe; no code from
-  that recipe is included either.
-- GLM-5.3-Flash's EXL3 support (`families/glm5_next/cuda/exl3.py`, `exl3.cu`, `exl3_mm.py`) reads the EXL3
-  format of [ExLlamaV3](https://github.com/turboderp-org/exllamav3) (MIT License, Copyright (c) 2025 Turboderp,
-  text below): its trellis layout, its "mcg" codebook and its tensor-core fragment order. The decoder and kernels
-  are written for TensorFold and checked bit for bit against ExLlamaV3's dequantization.
+GLM's CUDA engine implements transformers' `models/glm5_next/modular_glm5_next.py` math, Apache-2.0,
+without including that source. Its draft inputs and thinking-off rendering follow the public GLM recipe
+from Mia-AiLab without including recipe code.
 
-## Vendored code
+GLM EXL3 reads [ExLlamaV3](https://github.com/turboderp-org/exllamav3)'s trellis layout, mcg codebook and
+fragment order. ExLlamaV3 uses the MIT License, Copyright © 2025 Turboderp. TensorFold's decoder and
+kernels are separate implementations.
 
-- `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is
-  `dflash/model_mlx.py` from [z-lab/dflash](https://github.com/z-lab/dflash),
-  MIT License, Copyright (c) 2026 Z Lab, unmodified.
+## Vendored code and weights
 
-## Model weights
+`src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified `dflash/model_mlx.py` from
+[z-lab/dflash](https://github.com/z-lab/dflash), MIT License, Copyright © 2026 Z Lab.
 
-TensorFold ships no weights. The DFlash2 draft model it can use for
-Qwen3.8-27B (`z-lab/Qwen3.8-27B-DFlash2`) is published under Apache-2.0 per its
-model card. GLM-5.3-Flash's optional DFlash2 draft model
-(`incoai/GLM-5.3-Flash-DFlash2`) is published under CC BY-NC-ND 4.0 (non-commercial
-use only) per its model card; without it GLM drafts with its own MTP head. Each
-model you serve keeps its own license.
+TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
+The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
+without derivatives. Each checkpoint keeps its own license.
 
 ## MIT License text
 

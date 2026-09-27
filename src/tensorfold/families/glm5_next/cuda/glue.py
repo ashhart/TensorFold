@@ -343,9 +343,6 @@ def _router_sum(PART, OUT, total, KS: tl.constexpr, BLOCK: tl.constexpr):
     tl.store(OUT + i, acc, mask=ok)
 
 
-# The router's K slices: 8 slices give 72 programs for 288 experts and a fixed-order sum (the single-pass kernel,
-# 5 programs, took about 30 us a layer and serves shapes the slices do not divide). Every row gets the same bits
-# alone or in a window; the two kernels differ from each other in the last bits, so the choice is part of the model.
 ROUTER_KS = 8
 
 

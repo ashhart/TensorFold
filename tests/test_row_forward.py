@@ -1,5 +1,5 @@
-"""The lane decoder without tensor units (row_forward): windows reproduce one-row steps bit for bit, stacked
-projections change no bits and store no weight twice, and the glue variants read the stacked rows in place."""
+"""The lane decoder without tensor units (row_forward): windows, trees and several streams' windows reproduce
+one-row steps bit for bit, and stacked projections change no bits and store no weight twice."""
 
 import pytest
 
@@ -7,7 +7,8 @@ mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
 from tensorfold.engine.lane_engine import LaneEngine  # noqa: E402
-from tensorfold.kernels.qwen.dense.v1 import exact_attention, lane_glue, lane_tree, row_forward, row_qmv  # noqa: E402
+from tensorfold.kernels.qwen.dense.v1 import (  # noqa: E402
+    exact_attention, lane_glue, lane_tree, row_forward, row_glue, row_matmul)
 
 
 def _same(a, b):
@@ -40,7 +41,7 @@ def tiny():
     exact_attention.install()
     model = _tiny_model()
     originals = {id(m): (m, mx.array(m["weight"])) for _, m in model.named_modules() if isinstance(m, nn.QuantizedLinear)}
-    stacked = row_forward.install(model, row_forward.row_qmv_backend())
+    stacked = row_matmul.install(model)
     return model, originals, stacked
 
 
@@ -56,26 +57,30 @@ def _run(model, tokens, cache, start, keep=None):
 
 def _prefill(model, prompt):
     cache = model.make_cache()
-    most = row_forward.BACKEND.max_rows
+    most = row_matmul.WINDOW_ROWS
     for begin in range(0, len(prompt), most):
         _run(model, prompt[begin:begin + most], cache, begin)
     return cache
 
 
-def test_stacks_are_views_with_the_same_bits(tiny):
+def test_stacks_hold_the_weights_once(tiny):
+    """The members become views of the stacked weight (same values, nothing stored twice); the stacked projection
+    matches each member's to rounding (simd_qmm's split count follows the output count, so stacking is part of the
+    arithmetic every path shares)."""
+
     model, originals, stacked = tiny
-    assert stacked == {"in": 3, "gu": 4}
+    assert stacked == {"in": 3, "qkv": 1, "gu": 4}
     for m, before in originals.values():
-        assert _same(m["weight"], before)                 # the members hold views with the same values
+        assert _same(m["weight"], before)
     gdn = model.model.layers[0].linear_attn
-    stack = row_forward.stack_of(gdn, "in")
+    stack = row_matmul.stack_of(gdn, "in")
     x = (mx.random.normal((1, 5, 1024), key=mx.random.key(3)) * 0.5).astype(mx.bfloat16)
-    y = row_forward.project_stack(stack, x)
+    y = row_matmul.project_stack(stack, x)
     offset = 0
-    for name in row_forward.GROUPS["in"]:
+    for name in row_matmul.GROUPS["in"]:
         member = getattr(gdn, name)
         n = int(member["weight"].shape[0])
-        assert _same(y[..., offset:offset + n], row_forward.project(member, x)), name
+        assert bool(mx.allclose(y[..., offset:offset + n], row_matmul.project(member, x), atol=2e-2).item()), name
         offset += n
 
 
@@ -83,7 +88,7 @@ def test_windows_reproduce_one_row_steps(tiny):
     model, _, _ = tiny
     mx.random.seed(5)
     prompt = [int(t) for t in mx.random.randint(0, 512, (21,)).tolist()]
-    tokens = [int(t) for t in mx.random.randint(0, 512, (row_forward.BACKEND.max_rows,)).tolist()]
+    tokens = [int(t) for t in mx.random.randint(0, 512, (row_matmul.WINDOW_ROWS,)).tolist()]
     base = _prefill(model, prompt)
     start = len(prompt)
     serial_cache = LaneEngine.copy_single_cache(base)
@@ -113,10 +118,14 @@ def test_partly_kept_windows_leave_serial_state(tiny):
 
 
 def test_prefill_chunking_does_not_change_bits(tiny):
+    """Chunks of any width give the same caches: 19 rows in one chain (the tree kernel's recurrence) or split
+    (the compiled chain kernel's)."""
+
     model, _, _ = tiny
     mx.random.seed(11)
     prompt = [int(t) for t in mx.random.randint(0, 512, (19,)).tolist()]
-    whole = _prefill(model, prompt)
+    whole = model.make_cache()
+    _run(model, prompt, whole, 0)
     split = model.make_cache()
     begin = 0
     for size in (3, 1, 8, 7):
@@ -129,9 +138,9 @@ def test_prefill_chunking_does_not_change_bits(tiny):
 
 
 def _gdn_inputs(gdn, W, seed):
-    stack = row_forward.stack_of(gdn, "in")
+    stack = row_matmul.stack_of(gdn, "in")
     x = (mx.random.normal((1, W, 1024), key=mx.random.key(seed)) * 0.5).astype(mx.bfloat16)
-    y = row_forward.project_stack(stack, x)
+    y = row_matmul.project_stack(stack, x)
     conv_state = (mx.random.normal((1, 3, gdn.conv_dim), key=mx.random.key(seed + 1)) * 0.5).astype(mx.bfloat16)
     state = (mx.random.normal((1, gdn.num_v_heads, gdn.head_v_dim, gdn.head_k_dim), key=mx.random.key(seed + 2))
              * 0.1).astype(mx.float32)
@@ -151,7 +160,7 @@ def test_recurrent_glue_keeps_lane_glue_and_tree_bits(tiny):
     nv, dv = gdn.num_v_heads, gdn.head_v_dim
     parents = list(range(-1, W - 1))
     windows = lane_tree._conv_windows(parents, 3)
-    q, k, v, g, beta, conv_out = row_forward.gdn_pre(y, conv_state, gdn.conv1d.weight, windows, gdn.A_log,
+    q, k, v, g, beta, conv_out = row_glue.gdn_pre(y, conv_state, gdn.conv1d.weight, windows, gdn.A_log,
                                                      gdn.dt_bias, **heads)
     b = mx.contiguous(y[..., C + nv * dv:C + nv * dv + nv])
     a = mx.contiguous(y[..., C + nv * dv + nv:])
@@ -160,8 +169,9 @@ def test_recurrent_glue_keeps_lane_glue_and_tree_bits(tiny):
     for name, ours, glue in zip("qkvgb", (q, k, v, g, beta), pre):
         assert _same(ours, glue), name
     seq = mx.concatenate([conv_state, y[..., :C]], axis=1)[0]
-    assert _same(conv_out[0], seq[-3:])
-    rec, state_out = row_forward.gated_delta(q, k, v, g, beta, state, parents)
+    for w in range(W):                                  # the conv tail after each row: its last three conv inputs
+        assert _same(conv_out[w], seq[w + 1:w + 4])
+    rec, state_out = row_glue.gated_delta(q, k, v, g, beta, state, parents)
     assert _same(rec, lane_tree.gated_delta_tree(q, k, v, g, beta, state, parents))
     replayed = lane_tree.replay_path(q, k, v, g, beta, state, mx.arange(W, dtype=mx.int32),
                                      mx.array([W], dtype=mx.int32))
@@ -174,109 +184,48 @@ def test_tree_nodes_equal_their_paths(tiny):
     parents = [-1, 0, 0, 1, 2, 2, 4, 3]
     W = len(parents)
     y, conv_state, state, heads = _gdn_inputs(gdn, W, 7)
-    pre = row_forward.gdn_pre(y, conv_state, gdn.conv1d.weight, lane_tree._conv_windows(parents, 3), gdn.A_log,
+    pre = row_glue.gdn_pre(y, conv_state, gdn.conv1d.weight, lane_tree._conv_windows(parents, 3), gdn.A_log,
                               gdn.dt_bias, **heads)
-    rec = row_forward.gated_delta(*pre[:5], state, parents)[0]
+    rec = row_glue.gated_delta(*pre[:5], state, parents)[0]
     _, paths = lane_tree.tree_paths(parents)
     for node, path in enumerate(paths):
         rows = mx.array(path, dtype=mx.int32)
         chain = list(range(-1, len(path) - 1))
-        one_pre = row_forward.gdn_pre(mx.take(y, rows, axis=1), conv_state, gdn.conv1d.weight,
+        one_pre = row_glue.gdn_pre(mx.take(y, rows, axis=1), conv_state, gdn.conv1d.weight,
                                       lane_tree._conv_windows(chain, 3), gdn.A_log, gdn.dt_bias, **heads)
-        one = row_forward.gated_delta(*one_pre[:5], state, chain)[0]
+        one = row_glue.gated_delta(*one_pre[:5], state, chain)[0]
         assert _same(rec[:, node], one[:, -1]), f"node {node} differs from its path as a chain"
 
 
-def test_gate_up_act_equals_matmul_then_act(tiny):
-    """row_qmv with SiLU(gate) * up as its epilogue gives the bits of the stacked matmul followed by mlp_act."""
-
-    model, _, _ = tiny
-    mlp = model.model.layers[2].mlp
-    stack = row_forward.stack_of(mlp, "gu")
-    for rows in (1, 3, row_qmv.MAX_ROWS):
-        x = (mx.random.normal((1, rows, 1024), key=mx.random.key(rows)) * 0.5).astype(mx.bfloat16)
-        fused = row_forward.row_qmv_gate_up_act(x, stack.weight, stack.scales, stack.biases, stack.group_size)
-        plain = row_forward.mlp_act(row_qmv.qmv(x, stack.weight, stack.scales, stack.biases, stack.group_size))
-        assert _same(fused, plain), rows
-
-
-def test_folded_variants_keep_rows_and_partials(tiny):
-    """The matmul with the norm on load / the residual epilogue: a row's bits do not depend on the rows beside it,
-    the residual is mlx_lm's bf16 add, and the partial sums are row_parts' of the result."""
-
-    model, _, _ = tiny
-    mlp = model.model.layers[0].mlp
-    gu = row_forward.stack_of(mlp, "gu")
-    down = mlp.down_proj
-    rows = row_qmv.MAX_ROWS
-    h = (mx.random.normal((1, rows, 1024), key=mx.random.key(31)) * 2).astype(mx.bfloat16)
-    parts = row_forward.row_parts(h)
-    nw = (mx.random.normal((1024,), key=mx.random.key(32)) * 0.1 + 1).astype(mx.bfloat16)
-    norm = (parts, nw, 1e-6)
-    act = row_forward.row_qmv_variant(h, gu.weight, gu.scales, gu.biases, 64, norm=norm, epilogue="act")
-    for r in range(rows):
-        one = row_forward.row_qmv_variant(h[:, r:r + 1], gu.weight, gu.scales, gu.biases, 64,
-                                          norm=(parts[:, r:r + 1], nw, 1e-6), epilogue="act")
-        assert _same(one[0, 0], act[0, r])
-    res = (mx.random.normal((1, rows, 1024), key=mx.random.key(33))).astype(mx.bfloat16)
-    h2, parts2 = row_forward.row_qmv_variant(act, down["weight"], down["scales"], down["biases"], 64,
-                                             epilogue="residual", res=res)
-    y = row_qmv.qmv(act, down["weight"], down["scales"], down["biases"], 64)
-    assert _same(h2, (res.astype(mx.float32) + y.astype(mx.float32)).astype(mx.bfloat16))
-    assert bool(mx.array_equal(parts2, row_forward.row_parts(h2)).item())
-
-
-@pytest.mark.parametrize("fold", [False, True])
-def test_backends_windows_reproduce_one_row_steps(tiny, fold):
-    """Plain row_qmv (separate norm kernels) and row_qmv with the norms folded in (``Backend.variant``)."""
-
-    model, _, _ = tiny
-    saved = row_forward.BACKEND
-    row_forward.BACKEND = row_forward.Backend("row_qmv", row_qmv.qmv, row_qmv.MAX_ROWS, row_qmv.fits,
-                                              variant=row_forward.row_qmv_variant if fold else None)
-    try:
-        mx.random.seed(15)
-        prompt = [int(t) for t in mx.random.randint(0, 512, (9,)).tolist()]
-        tokens = [int(t) for t in mx.random.randint(0, 512, (6,)).tolist()]
-        base = _prefill(model, prompt)
-        serial_cache = LaneEngine.copy_single_cache(base)
-        serial = [_run(model, [t], serial_cache, len(prompt) + i)[0, -1] for i, t in enumerate(tokens)]
-        window = _run(model, tokens, LaneEngine.copy_single_cache(base), len(prompt))
-        for i in range(len(tokens)):
-            assert _same(window[0, i], serial[i]), i
-    finally:
-        row_forward.BACKEND = saved
-
-
 def test_aligned_prefill_resumes_exactly(tiny, monkeypatch):
-    """MLX's prefill on a grid: a prompt resumed from a grid checkpoint gets a fresh prefill's bits; a checkpoint
-    asked for off the grid is taken at the grid point below it; decoded states are not kept."""
+    """The family's prompts take MLX's prefill on the engine's grid: a prompt resumed from a grid checkpoint gets a
+    fresh prefill's bits; a checkpoint asked for off the grid is taken at the grid point below it; a state off the
+    grid is not resumed; decoded states are not kept."""
 
     from tensorfold.engine.lane_engine import LaneStream
+    from tensorfold.families.qwen3_5.family import Qwen35Family
 
     model, _, _ = tiny
-    monkeypatch.setattr(LaneEngine, "lane_prefill", 0)
     monkeypatch.setattr(LaneEngine, "prefill_step", 8)
     monkeypatch.setattr(LaneEngine, "prefill_align", 8)
-    engine = LaneEngine(model, max_rows=1, max_draft=0, retain_finished_caches=True)
+    family = Qwen35Family(model, widest=row_matmul.WINDOW_ROWS, rows=True)
+    engine = LaneEngine(family, max_rows=family.exact_width, max_draft=family.exact_width - 1,
+                        retain_finished_caches=True)
     mx.random.seed(21)
     prompt = [int(t) for t in mx.random.randint(0, 512, (29,)).tolist()]
 
     def arrays(cache):
         return [a for c in cache for a in c.state if a is not None]
 
-    fresh = engine.prefill(LaneStream("fresh", prompt, max_new_tokens=1))
+    fresh = engine.prefill_prefix(prompt)
     first = LaneStream("first", prompt[:19], max_new_tokens=1)
-    engine.prefill(first, checkpoints_at=[13, 19])
+    engine.add_stream(first, checkpoints_at=[13, 19])
     assert [len(tokens) for tokens, _ in first.history_checkpoints] == [8, 16]
     tokens, cache = first.history_checkpoints[-1]
-    resumed = engine.prefill(LaneStream("resumed", prompt, max_new_tokens=1), cache=cache, cached_tokens=len(tokens))
-    for a, b in zip(arrays(fresh), arrays(resumed)):
-        assert _same(a, b)
-    off_grid = engine.prefill(LaneStream("off", prompt, max_new_tokens=1),
-                              cache=LaneEngine.copy_single_cache(cache), cached_tokens=13)
-    for a, b in zip(arrays(fresh), arrays(off_grid)):
-        assert _same(a, b)
+    resumed = engine.prefill_prefix(prompt, cache=LaneEngine.copy_single_cache(cache), cached_tokens=len(tokens))
+    assert all(_same(a, b) for a, b in zip(arrays(fresh), arrays(resumed)))
+    off_grid = engine.prefill_prefix(prompt, cache=LaneEngine.copy_single_cache(cache), cached_tokens=13)
+    assert all(_same(a, b) for a, b in zip(arrays(fresh), arrays(off_grid)))
     stream = LaneStream("decoded", prompt, max_new_tokens=3)
     engine.add_stream(stream)
     engine.run()
@@ -315,3 +264,107 @@ def test_tree_window_nodes_equal_serial_paths(tiny, monkeypatch):
         for x, y in zip(a.state, b.state):
             if x is not None:
                 assert _same(x, y)
+
+
+def test_streams_in_one_forward_equal_each_alone(tiny):
+    """Several streams' windows in one forward (rows grouped by stream, each over its own caches): every row's
+    logits and every stream's caches after keeping part of its window equal the stream's own round, bit for bit."""
+
+    model, _, _ = tiny
+    # (40, 2, 1): a prompt chunk riding with two streams' decode windows
+    mixes = [(1, 1), (1, 4), (3, 1, 2, 2), (8, 8), (3, 1, 8, 5), (16, 2), (1, 2, 3, 1, 1, 2, 1, 1, 3, 1, 2), (40, 2, 1)]
+    ok, failures = row_forward.check_streams(model.model, model.lm_head, model.make_cache, LaneEngine.copy_single_cache,
+                                             mixes=mixes)
+    assert ok, failures
+
+
+def test_stream_check_reads_only_the_table(tiny, monkeypatch):
+    """The memory past the embedding table changes between the solo and the shared rounds; MLX gathers are unchecked."""
+
+    model, _, _ = tiny
+    emb = model.model.embed_tokens
+    vocab = int(emb["weight"].shape[0])
+    backing = [{k: mx.concatenate([emb[k], mx.full((2048, *emb[k].shape[1:]), fill, emb[k].dtype)])
+                for k in ("weight", "scales", "biases")} for fill in (1, 2)]
+
+    def table(phase):
+        for k, whole in backing[phase].items():
+            monkeypatch.setattr(emb, k, whole[:vocab])
+
+    copies = []
+
+    def copy(cache):
+        copies.append(cache)
+        if len(copies) == 3:                       # mix (1, 4): two solo rounds' copies, then the shared round's
+            table(1)
+        return LaneEngine.copy_single_cache(cache)
+
+    table(0)
+    ok, failures = row_forward.check_streams(model.model, model.lm_head, model.make_cache, copy, mixes=[(1, 4)],
+                                             prefixes=(9,))
+    assert ok, failures
+
+
+def test_hidden_rows_and_keep_rows(tiny):
+    """The family interface: hidden_rows + logits give multi_forward's logits (GPU token arrays taken unread),
+    starts default to each stream's cache length, and keep_rows leaves the caches commit leaves."""
+
+    model, _, _ = tiny
+    core, head = model.model, model.lm_head
+    mx.random.seed(23)
+    prompts = [[int(t) for t in mx.random.randint(0, 512, (n,)).tolist()] for n in (7, 12)]
+    bases = [_prefill(model, p) for p in prompts]
+    windows = [[5, 17, 300], [9, 44]]
+    keeps = [2, 1]
+    caches = [LaneEngine.copy_single_cache(b) for b in bases]
+    ref, records, offsets = row_forward.multi_forward(core, head, windows, [[-1, 0, 1], [-1, 0]], caches,
+                                                      [len(p) for p in prompts])
+    for cache, record, window, keep, prompt in zip(caches, records, windows, keeps, prompts):
+        row_forward.commit(cache, record, list(range(keep)), len(window), len(prompt))
+    mine = [LaneEngine.copy_single_cache(b) for b in bases]
+    x, recs = row_forward.hidden_rows(core, [mx.array(w, dtype=mx.int32) for w in windows], mine)
+    lg = row_matmul.logits(head, x)
+    for cache, record, keep in zip(mine, recs, keeps):
+        row_forward.keep_rows(cache, record, keep)
+    mx.eval(ref, lg)
+    assert offsets == [0, 3]
+    assert [r.start for r in recs] == [len(p) for p in prompts]
+    assert _same(ref, lg)
+    for a, b in zip(caches, mine):
+        for ia, ib in zip(a, b):
+            for u, v in zip(ia.state, ib.state):
+                if u is not None:
+                    assert _same(u, v)
+
+
+def test_streams_with_trees_equal_each_alone(tiny, monkeypatch):
+    """With ``row_attention`` a stream's window can be a draft tree: a tree and a chain in one forward give each
+    stream's rows the bits of its window alone, and a tree path kept off the window's first rows commits exactly."""
+
+    monkeypatch.setattr(row_forward, "ROW_ATTENTION", True)
+    model, _, _ = tiny
+    core, head = model.model, model.lm_head
+    mx.random.seed(29)
+    prompts = [[int(t) for t in mx.random.randint(0, 512, (n,)).tolist()] for n in (10, 6)]
+    bases = [_prefill(model, p) for p in prompts]
+    parents = [[-1, 0, 0, 1, 2], [-1, 0, 1]]
+    windows = [[int(t) for t in mx.random.randint(0, 512, (len(p),)).tolist()] for p in parents]
+    paths = [[0, 2, 4], [0, 1]]
+    alone = []
+    for base, window, par, prompt, path in zip(bases, windows, parents, prompts, paths):
+        own = LaneEngine.copy_single_cache(base)
+        lg, record = row_forward.forward(core, head, window, par, own, len(prompt))
+        row_forward.commit(own, record, path, len(window), len(prompt))
+        mx.eval(lg)
+        alone.append((lg, own))
+    caches = [LaneEngine.copy_single_cache(b) for b in bases]
+    lg, records, offsets = row_forward.multi_forward(core, head, windows, parents, caches, [len(p) for p in prompts])
+    for cache, record, window, prompt, path in zip(caches, records, windows, prompts, paths):
+        row_forward.commit(cache, record, path, len(window), len(prompt))
+    mx.eval(lg)
+    for (ref, own), cache, a, window in zip(alone, caches, offsets, windows):
+        assert _same(lg[0, a:a + len(window)], ref[0])
+        for ia, ib in zip(cache, own):
+            for u, v in zip(ia.state, ib.state):
+                if u is not None:
+                    assert _same(u, v)

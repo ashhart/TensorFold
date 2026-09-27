@@ -18,26 +18,29 @@ from typing import Any, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels.qwen.dense.v1 import lane_tree
+
 CK = 128           # keys a chunk (fixed: part of the arithmetic)
 SPLIT = 4          # simdgroups a query head's chunk is split over, keys interleaved (fixed: part of the arithmetic)
 BLK = 4            # keys a simdgroup scores before one softmax update (fixed: part of the arithmetic)
 
 _PARTIAL = r"""
-  // threadgroup (chunk c, kv head h): simdgroup (g, s) = (sg / SPLIT, sg % SPLIT) takes query head h G + g and the
-  // chunk's keys at positions k0 + s, k0 + s + SPLIT, ... up to the row's own position, an online softmax over
-  // them in that order (lane l: dimensions [DPL l, DPL l + DPL)); the SPLIT partials of a head then merge in
-  // simdgroup order. One window row at a time. A row's key at position P + i is window row path[i].
+  // threadgroup (chunk c, kv head h, window row w): simdgroup (g, s) = (sg / SPLIT, sg % SPLIT) takes query head
+  // h G + g and the chunk's keys at positions k0 + s, k0 + s + SPLIT, ... up to the row's own position, an online
+  // softmax over them in that order (lane l: dimensions [DPL l, DPL l + DPL)); the SPLIT partials of a head then
+  // merge in simdgroup order. A row's key at position P + i is window row path[i].
   const uint lane = thread_index_in_simdgroup;
   const uint sgi = simdgroup_index_in_threadgroup;
   const int g = int(sgi) / SPLIT, s = int(sgi) % SPLIT;
   const int c = int(threadgroup_position_in_grid.y);
-  const int h = int(threadgroup_position_in_grid.z);
   const int P = dims[0], W = dims[1], CAP = dims[2], NCH = dims[3], MAXD = dims[4];
+  const int h = int(threadgroup_position_in_grid.z) / W;     // one threadgroup per (chunk, kv head, window row)
+  const int w = int(threadgroup_position_in_grid.z) % W;
   constexpr int DPL = D / 32;
   const int qh = h * G + g;
   threadgroup float sm[G * SPLIT], sl[G * SPLIT];
   threadgroup float so[G * SPLIT][D];
-  for (int w = 0; w < W; w++) {
+  {
     const int last = P + depth[w];                       // this row's own position
     const int k0 = c * CK;
     const int k1 = min(k0 + CK, last + 1);
@@ -177,9 +180,9 @@ def row_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: float, 
     if CAP < int(start) + W:
         raise ValueError(f"row_sdpa: the buffers hold {CAP} positions, the window reaches {int(start) + W}")
     dims = mx.array([int(start), W, CAP, nch, maxd], dtype=mx.int32)
-    depth_a = _const(("depth", tuple(parents)), lambda: mx.array(depths, dtype=mx.int32))
-    path_a = _const(("path", tuple(parents)), lambda: mx.array(
-        [p + [0] * (maxd - len(p)) for p in paths], dtype=mx.int32).reshape(-1))
+    depth_a = _const(("depth", tuple(parents)), lambda: lane_tree.kernel_ints(depths))
+    path_a = _const(("path", tuple(parents)), lambda: lane_tree.kernel_ints(
+        [r for p in paths for r in p + [0] * (maxd - len(p))]))
     scale_a = _const(("scale", float(scale)), lambda: mx.array([float(scale)], dtype=mx.float32))
     if G * SPLIT * 32 > 1024:
         raise ValueError(f"row_sdpa: {G} query heads a kv head need {G * SPLIT * 32} threads a threadgroup")
@@ -187,7 +190,7 @@ def row_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: float, 
     pm, pl, po = _kernel("partial")(
         inputs=[q, mx.contiguous(keys), mx.contiguous(values), depth_a, path_a, scale_a, dims],
         template=[("D", D), ("G", G), ("CK", CK), ("SPLIT", SPLIT), ("BLK", BLK)],
-        grid=(32 * G * SPLIT, nch, HKV), threadgroup=(32 * G * SPLIT, 1, 1),
+        grid=(32 * G * SPLIT, nch, HKV * W), threadgroup=(32 * G * SPLIT, 1, 1),
         output_shapes=[(H * W * nch,), (H * W * nch,), (H * W * nch, D)],
         output_dtypes=[mx.float32, mx.float32, mx.float32])
     return _kernel("merge")(

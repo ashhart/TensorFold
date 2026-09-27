@@ -10,8 +10,12 @@ from typing import Any
 def parameter_schemas(tools: Sequence[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
     result = {}
     for tool in tools or []:
-        function = tool.get("function", tool)
-        result[str(function.get("name", "")).lower()] = function.get("parameters", {}).get("properties", {})
+        function = tool["function"] if isinstance(tool.get("function"), dict) else tool
+        parameters = function.get("parameters") or function.get("input_schema") or {}
+        properties = parameters.get("properties") or {} if isinstance(parameters, dict) else {}
+        result[str(function.get("name", "")).lower()] = {
+            name: schema for name, schema in properties.items() if isinstance(schema, dict)
+        } if isinstance(properties, dict) else {}
     return result
 
 
@@ -25,6 +29,7 @@ def decode_parameter(value: str, schema: dict[str, Any]) -> Any:
         return value
     try:
         parsed = json.loads(value)
+        json.dumps(parsed, allow_nan=False)
     except (ValueError, TypeError):
         return value
     kind = schema["type"]

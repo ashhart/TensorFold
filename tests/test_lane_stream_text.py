@@ -1,7 +1,7 @@
 """What the lane server streams while a reply is written: reasoning apart from the answer, tool-call
 markup out of the visible text, and nothing ever taken back."""
 
-from tensorfold.server.app import hide_tool_calls, split_thinking
+from tensorfold.server.text import hide_tool_calls, split_thinking
 
 REPLY = ("The user wants the jobs listed. I could call <tool_call> here, but first think.\n</think>\n\n"
          "Checking the jobs.\n<tool_call>\n<function=hub>\n<parameter=op>\njobs\n</parameter>\n"

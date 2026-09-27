@@ -1,21 +1,4 @@
-"""The stream's own text as a prior over DFlash2's draft lattice: a session n-gram model.
-
-Agent sessions repeat themselves: identifiers, paths, tool-call syntax and whole phrases come
-back from the prompt and from what the model already wrote. ``SessionNGram`` counts the 1..4-grams
-of everything in one stream's context (prompt + committed output) and gives P(next | last 3 tokens)
-with interpolated backoff: starting from 1/V, each order whose context was seen c times mixes in
-its relative frequency with weight c / (c + 2). The draft tree adds ``weight * log P`` to each
-child's score before the log-softmax over its siblings (``DFlashProposer.ngram_weight``).
-
-Replayed on 703 traced agent rounds (2026-09-23): weight 0.1 lands 4.615 tokens per pass against
-4.494 without it (+2.7%, better in 10 of 14 sessions); 0.2 and above lose.
-
-Cost. The first update indexes the prompt with numpy: per order the sorted distinct 64-bit
-(context, next) keys and their counts (~2 ms for 30k tokens, run while the drafter's forward is
-on the GPU). Later updates add only the new tokens, to small dicts. A context's next-token counts
-are pulled out of the index the first time a tree node needs them and kept current after that, so
-a round's lookups are mostly dict reads; only the 16 candidates of each expanded node are scored.
-"""
+"""Use a stream's prompt and committed output as an interpolated n-gram prior over DFlash2's draft lattice."""
 
 from __future__ import annotations
 
@@ -36,11 +19,7 @@ def key4(t3: int, t2: int, t1: int) -> int:
 
 
 class SessionNGram:
-    """Counts of one stream's 1..4-grams; ``rescorer`` turns them into a tree-score bonus.
-
-    ``update(context)`` is called with the whole context every round; only the tokens past what
-    it has seen are counted. A context that does not extend the previous one starts it over.
-    """
+    """Count a stream's 1..4-grams incrementally, resetting when the full context no longer extends the previous one."""
 
     def __init__(self, vocab: int = 248320, *, prior: float = 2.0) -> None:
         self.vocab = int(vocab)
@@ -52,8 +31,7 @@ class SessionNGram:
         self.seen = 0                    # context tokens counted
         self.tail: list[int] = []        # the last (up to) 3 of them
         self.unigram: np.ndarray | None = None
-        # order k in 2..4, from the first update: the sorted distinct (context << 18 | next) keys
-        # and where each one's run starts among all the keys (so key i was seen bounds[i+1] - bounds[i] times) ...
+        # Sorted distinct (context << 18 | next) keys for orders 2..4 have counts bounds[i+1] - bounds[i].
         self._keys: list[np.ndarray | None] = [None] * 5
         self._bounds: list[np.ndarray | None] = [None] * 5
         # ... {context: [total, {next: count}]} once pulled out of the index (kept current) ...
@@ -168,10 +146,7 @@ class SessionNGram:
         return float(prior(tuple(hist), 0)[0])
 
     def rescorer(self, cands: np.ndarray, weight: float) -> Callable[[tuple, int], np.ndarray] | None:
-        """For one lattice ``cands`` [D, K]: (history (t3, t2, t1), depth) -> weight * log P(cands[depth]).
-
-        None when there is nothing to add (weight 0 or no text counted yet).
-        """
+        """Return a history/depth callback for weight * log P(cands[depth]), or None without weight or counted text."""
 
         n = self.seen
         if not weight or not n or self.unigram is None:
@@ -194,8 +169,7 @@ class SessionNGram:
                 e = get2(t1) or entry(2, t1)
                 if e[0]:
                     parts.append(e)
-                    # a context never seen as an n-gram of one order lower (its parent's counts, when
-                    # already pulled) was never followed by anything: no lookup
+                    # Skip lookup when cached lower-order counts prove this context was never followed by a token.
                     up = get2(t2) if t2 is not None else None
                     if t2 is not None and (up is None or t1 in up[1]):
                         c3 = (t2 << _BITS) | t1

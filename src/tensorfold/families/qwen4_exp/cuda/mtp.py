@@ -37,7 +37,8 @@ def mtp_stage(w: Weights, st: State, b: Buffers, next_tokens: Sequence[int], str
     return n
 
 
-def mtp_compute(w: Weights, st: State, b: Buffers, n: int, *, last_only: bool = True) -> torch.Tensor:
+def mtp_compute(w: Weights, st: State, b: Buffers, n: int, *, last_only: bool = True,
+                context: int | None = None) -> torch.Tensor:
     """The MTP head's GPU work on staged rows (capturable)."""
 
     c = w.cfg
@@ -48,7 +49,8 @@ def mtp_compute(w: Weights, st: State, b: Buffers, n: int, *, last_only: bool = 
     hn, xh = glue.rmsnorm(b.mtp_in[:n], m.norm_h, c.eps, out=b.mtp_hn[:n], xs=b.mtp_xh[:n])
     _mm(hn.view(n * c.streams, c.hidden), m.fc_h, xh.view(n * c.streams, c.hidden // 32), b.mtp_hs[:n * c.streams], b)
     glue.add_streams(b.mtp_eo[:n], b.mtp_hs[:n * c.streams], b.h[:n], c.streams)
-    pending = layer_forward(m.layer, w, st, b, n, None, mtp=True)
+    ctx = st.mtp_len + n if context is None else context
+    pending = layer_forward(m.layer, w, st, b, n, None, mtp=True, context=ctx)
     finish(w, m.mixer, b, n, pending, logits=False)
     if last_only:
         head = w.head if w.draft_head is None else w.draft_head

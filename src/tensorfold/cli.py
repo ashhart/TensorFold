@@ -44,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
     generation.add_argument("--context", type=int, default=None,
-                            help="context window: prompt plus reply tokens (default: model config; 0: no limit)")
+                            help="prompt plus reply window (default: model config; CUDA default/0: affordable native capacity; Metal 0: remove metadata cap)")
     generation.add_argument("--max-tokens", type=int, default=4096,
                             help="reply tokens when a request does not say")
     generation.add_argument("--temperature", type=float, default=None,
@@ -75,7 +75,14 @@ def build_parser() -> argparse.ArgumentParser:
     speed.add_argument("--snapshot-dir", default=str(Path.home() / ".cache" / "tensorfold" / "prefix-snapshots"),
                        help="where system-block and conversation snapshots are kept ('none': in memory only)")
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
+    speed.add_argument("--parallel", default="auto",
+                       help="requests decoded together, their windows sharing each round's forward: a number, or "
+                            "auto (up to 8, each started only while the projected memory fits 70%% of RAM)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
+    speed.add_argument("--prefill-grid", type=_prefill_grid, default=2048,
+                       help="prompt tokens a prefill chunk takes (Mac); a resumed prompt is prefilled again from the "
+                            "last multiple, so smaller means cheaper follow-ups and slower cold prompts "
+                            "(256, 512, 1024 or 2048)")
 
     speed.add_argument("--no-update-check", action="store_true",
                        help="don't ask GitHub whether a newer release exists (also TENSORFOLD_NO_UPDATE_CHECK=1)")
@@ -295,6 +302,13 @@ def _note_untested(family: Any, model: str) -> None:
               f"decoding, speed and quality are unmeasured. {families.OWN_MODEL_HELP}", flush=True)
 
 
+def _prefill_grid(value: str) -> int:
+    grid = int(value)
+    if grid not in (256, 512, 1024, 2048):
+        raise argparse.ArgumentTypeError("--prefill-grid takes 256, 512, 1024 or 2048")
+    return grid
+
+
 def _backend(choice: str, family: Any) -> str:
     """mlx or cuda: auto picks MLX on macOS and CUDA elsewhere; a family serves only the backends it has."""
 
@@ -306,7 +320,7 @@ def _backend(choice: str, family: Any) -> str:
     return backend
 
 
-def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path) -> int:
+def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context: int | None = None) -> int:
     """Serve with the family's CUDA engine (``cuda_engine``) behind ``tensorfold.cuda.server``."""
 
     from tensorfold import hub
@@ -315,14 +329,17 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path) -> int:
         raise ValueError("--tp 2 needs --master: rank 0's address on the link between the two machines")
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2")
+    if args.prefill_grid != 2048:
+        print("[tensorfold] --prefill-grid is for the Mac engine: CUDA prefill resumes a prompt at any position",
+              flush=True)
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
-    if args.context is not None:
-        options["context"] = int(args.context)
+    options["context"] = context if context is not None else args.context
+    options["context_explicit"] = args.context is not None
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
@@ -339,19 +356,35 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path) -> int:
             sampling[key] = value
     app_class = getattr(family.package, "CUDA_APP", None) or App
     app = app_class(engine, model_dir, served, default_thinking=bool(args.thinking), sampling=sampling,
-                    max_tokens=int(args.max_tokens))
+                    max_tokens=int(args.max_tokens), context_window=context if context is not None else args.context)
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
+    effective_context = app.effective_context_window
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 on CUDA{where} "
           f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
+          f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
     serve(app, args.host, int(args.port))
     return 0
 
 
-def cmd_serve(args: argparse.Namespace) -> int:
-    from http.server import ThreadingHTTPServer
+# concurrent requests are admitted while this process's projected footprint stays under this share of RAM, less
+# what the rest of the machine holds
+MEMORY_FRACTION = 0.70
 
+
+def _parallel(value: Any) -> int:
+    """``--parallel``: "auto" is up to 8 requests at once; a number caps it."""
+
+    if str(value).strip().lower() == "auto":
+        return 8
+    try:
+        return max(1, int(value))
+    except ValueError:
+        raise SystemExit(f"--parallel takes a number or auto, not {value!r}") from None
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
     from tensorfold import families, hub
 
     if not args.no_update_check:
@@ -379,7 +412,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if needs_full_snapshot and check is not None:
         check(model_dir)                         # checks that need the complete index, such as an MTP head
     if backend == "cuda":
-        return _serve_cuda(args, family, model_dir)
+        return _serve_cuda(args, family, model_dir, context)
     for key, value in getattr(family.package, "MLX_ENV", {}).items():
         os.environ.setdefault(key, value)       # before MLX starts: it reads them once
 
@@ -389,13 +422,26 @@ def cmd_serve(args: argparse.Namespace) -> int:
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     import mlx.core as mx
 
-    # MLX keeps freed buffers up to its memory limit: long contexts, whose attention buffers change size every
-    # chunk, grow a server by tens of GB without a cap
-    mx.set_cache_limit(int(float(args.mlx_cache_gib) * 1024**3))
+    from tensorfold.server.memory_budget import configure_mlx
+
+    memory_limit = configure_mlx(mx, int(float(args.mlx_cache_gib) * 1024**3))
+    print(f"[tensorfold] MLX memory budget {memory_limit / 1024**3:.1f} GiB", flush=True)
+    return _serve_mlx(args, family, model_dir, context, required_files, memory_limit)
+
+
+def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: int,
+               required_files: Any, memory_limit: int) -> int:
+    import mlx.core as mx
+    from tensorfold import families, hub
+    from tensorfold.engine.lane_engine import LaneEngine
+
+    # chunks and resumable checkpoints share one grid from position 0, so a resumed prompt keeps a fresh one's bits
+    LaneEngine.prefill_step = LaneEngine.prefill_align = int(args.prefill_grid)
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
+    parallel = _parallel(args.parallel)
     options: dict[str, Any] = {"lane_kernels": args.lane_kernels, "drafter": drafter,
-                               "drafter_bits": args.drafter_bits}
+                               "drafter_bits": args.drafter_bits, "parallel": parallel}
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
@@ -406,9 +452,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
               f"{'active' if not args.no_drafts and getattr(model, 'mtp', None) is not None else 'inactive'}",
               flush=True)
 
-    from tensorfold.engine.lane_engine import LaneEngine
     from tensorfold.server.app import ChatApp
-    from tensorfold.server.http import make_handler
+    from tensorfold.server.http import Server, make_handler
 
     engine_factory = LaneEngine            # every family decodes through lanes
     engine_kwargs = dict(getattr(family.package, "engine_settings", lambda m: {})(model))
@@ -417,9 +462,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
         if value is not None:
             sampling[key] = value
     snapshot_dir = None if str(args.snapshot_dir).lower() == "none" else Path(args.snapshot_dir).expanduser()
-    # a snapshot's bits depend on the MLX version, the kernels that computed it and how prompts were prefilled
-    prefill = f"lane{LaneEngine.lane_prefill}" if LaneEngine.lane_prefill else f"grid{LaneEngine.prefill_align}"
-    model_id = (f"{model_dir.resolve()}|mlx={mx.__version__}|kernels={families.kernel_version(family, model)}"
+    from importlib.metadata import version
+
+    # Both libraries and the active prompt kernels determine a snapshot's bits.
+    prefill = f"grid{LaneEngine.prefill_align}"
+    model_id = (f"{model_dir.resolve()}|mlx={mx.__version__}|mlx_lm={version('mlx-lm')}"
+                f"|kernels={families.kernel_version(family, model)}"
                 f"|prefill={prefill}|tensorfold={__version__}")
     gib = args.prompt_cache_gib
     if gib is None:
@@ -432,7 +480,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         served_name=served,
         model_aliases=list(args.alias),
         engine_factory=engine_factory,
-        lanes=1,
+        lanes=parallel,
+        memory_fraction=MEMORY_FRACTION if parallel > 1 else None,
         max_rows=int(engine_kwargs.get("max_rows", 16)),
         max_draft=int(engine_kwargs.get("max_draft", 32)),
         default_max_tokens=int(args.max_tokens),
@@ -444,6 +493,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         max_snapshots=int(args.max_snapshots),
         checkpoint_slots=0 if budget <= 0 else None,
         checkpoint_budget_bytes=budget if budget > 0 else None,
+        memory_budget_bytes=memory_limit,
         use_proposer=not args.no_drafts,
         snapshot_dir=snapshot_dir,
         model_id=model_id,
@@ -451,7 +501,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     hook = getattr(family.package, "setup", None)
     if hook is not None:
         hook(app, model, **options)
-    server = ThreadingHTTPServer((args.host, int(args.port)), make_handler(app))  # type: ignore[arg-type]
+    server = Server((args.host, int(args.port)), make_handler(app))  # type: ignore[arg-type]
     shown = "greedy" if float(sampling.get("temperature", 0.0) or 0.0) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 "

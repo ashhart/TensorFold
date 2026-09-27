@@ -18,9 +18,6 @@ LANES = True
 MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP",)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
 KERNEL_VERSION = "v1"
-# MLX command buffers: MLX ends a buffer once the bytes bound in it pass MLX_MAX_MB_PER_BUFFER, and every expert
-# kernel binds the 420 MB expert stacks, so with the default each of them ended one (an empty kernel binding them
-# cost 28 us a launch against 12). Set by the CLI before MLX starts, unless the environment already sets them.
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}
 
 
@@ -63,6 +60,17 @@ def engine_settings(model: Any) -> dict[str, Any]:
     return {"max_rows": width, "max_draft": max(0, width - 1)}
 
 
+def kernel_version(model: Any) -> str:
+    """Include the loaded model's prompt-attention selection modes in its kernel fingerprint."""
+
+    from tensorfold.families import families, kernel_source_version
+
+    modes = [str(int(bool(getattr(layer.self_attn, "kernel_select", False))))
+             for layer in getattr(model, "layers", ()) if hasattr(layer, "self_attn")]
+    source = kernel_source_version(families()["qwen4_exp"])
+    return f"{source}|prompt_attention={','.join(modes)}"
+
+
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
 CUDA_QUANTIZATION = (4, 32)
 
@@ -81,7 +89,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
 
     if drafter:
         raise ValueError(f"{TITLE} drafts with its own MTP head on CUDA: a separate draft model does not apply")
-    from .cuda import CONTEXT, DEPTH
+    from .cuda import DEPTH
     from .cuda.engine import FlashNextEngine
 
     depth = 0 if no_drafts else DEPTH if mtp_drafts is None else int(mtp_drafts)
@@ -89,5 +97,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
         raise ValueError(f"this checkpoint has no MTP head, which {TITLE}'s CUDA engine drafts with ({MODELS[0]} "
                          "has one): without it every round would decode one token. Serve a checkpoint with the "
                          "head, or pass --no-drafts for the serial reference")
-    return FlashNextEngine(Path(model_dir), depth=depth, max_len=int(context) if context else CONTEXT, tp=int(tp),
+    return FlashNextEngine(Path(model_dir), depth=depth, max_len=context, context_explicit=options.get("context_explicit"), tp=int(tp),
                            rank=int(rank), master=master, port=int(master_port))

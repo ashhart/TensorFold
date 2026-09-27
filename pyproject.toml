@@ -50,6 +50,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "tensorfold.drafters.vendor.z_lab_dflash" = ["README.md"]
+"tensorfold.families.qwen3_5" = ["*.json"]
 "tensorfold.families.qwen3_5.cuda" = ["*.cu", "*.cpp"]
 "tensorfold.families.qwen4_exp.cuda" = ["*.cu", "*.cpp", "*.txt"]
 "tensorfold.families.nemotron_h" = ["*.txt"]

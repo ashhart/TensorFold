@@ -8,6 +8,8 @@ from tensorfold.server.http import make_handler
 
 
 class FakeTokenizer:
+    vocab_size = 256
+
     def decode(self, tokens: list[int]) -> str:
         return "".join(chr(token) for token in tokens)
 
@@ -172,7 +174,7 @@ def test_chat_completions_stream_starts_with_assistant_role() -> None:
     assert "data: [DONE]" in body
 
 
-def test_stream_error_after_headers_still_sends_finish_reason() -> None:
+def test_stream_error_after_headers_sends_an_error_event() -> None:
     app = FakeApp(fail_stream=True)
     server = serve_fake(app)
     try:
@@ -191,8 +193,8 @@ def test_stream_error_after_headers_still_sends_finish_reason() -> None:
 
     assert status == 200
     assert '"object": "chat.completion.chunk"' in body
-    assert '"finish_reason": "stop"' in body
-    assert '"tensorfold_error"' in body
+    assert '"finish_reason": "stop"' not in body
+    assert '"error": {"message": "boom", "type": "server_error"}' in body
     assert "data: [DONE]" in body
 
 

@@ -62,7 +62,7 @@ class ChainModel:
     def keep_rows(self, cache, rows: int, keep: int) -> None:
         del cache[0].fed[len(cache[0].fed) - (rows - keep):]
 
-    def absorb_draft_context(self, hidden, next_tokens, cache) -> None:
+    def absorb_draft_context(self, hidden, next_tokens, cache, start=0) -> None:
         pass
 
     def _guess(self, token: int) -> int:
@@ -209,7 +209,7 @@ def lane_expected(prompt, max_new, budget, close):
 def test_lane_engine_forces_the_close_at_the_budget(pattern, budget):
     close = (91, LANE_END, 92)
     prompt = [5, 11, 23, 42]
-    engine = FakeEngine(max_rows=16, max_draft=6, pending_cap=8)
+    engine = FakeEngine(max_rows=16, max_draft=6)
     stream = LaneStream(stream_id="l", prompt_ids=list(prompt), max_new_tokens=40, think_budget=budget,
                         think_close=close, think_end=LANE_END, think_open=True, proposer=PatternProposer(pattern))
     engine.add_stream(stream)

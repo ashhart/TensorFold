@@ -1,116 +1,70 @@
-# Adding a model family
+# Adding an MLX family
 
-A family is a package in `src/tensorfold/families/<name>/`. Nothing registers it: the CLI scans the folder,
-reads each package's `MODEL_TYPES`, and picks the package whose list holds the checkpoint's `model_type`
-(from `config.json`, or `text_config.model_type`). Start from the family closest to yours and copy its layout.
+Create `src/tensorfold/families/<name>/`. The CLI discovers packages by `MODEL_TYPES`, matching
+`config.json` or its `text_config`. Keep backend imports inside the loader so discovery does not load a model.
 
-## The package
+## Package interface
 
 ```python
-# src/tensorfold/families/mymodel/__init__.py
-MODEL_TYPES = ("mymodel",)        # config.json model_type values this package serves
-TITLE = "My Model"                # shown by `tensorfold models`
-LANES = False                     # False: the serial engine; True: the lane engine (mlx_lm-style batch caches)
+MODEL_TYPES = ("mymodel",)
+TITLE = "My model"
+LANES = True
+MODELS = ("example/checkpoint",)
+KERNEL_PACKAGE = "tensorfold.kernels.mymodel.v1"
+KERNEL_VERSION = "v1"
 
-def load(model_dir, **options):   # -> (model, tokenizer); ignore options you don't know
-    ...
-
-# optional
-MODELS = ("owner/checkpoint",)                 # Hugging Face checkpoints it is tested with (`tensorfold models`)
-DRAFTER = "owner/draft-model"                  # a draft model `serve` uses once it has been pulled
-KERNEL_PACKAGE = "tensorfold.kernels.mymodel.v1"  # active versioned kernel folder
-KERNEL_VERSION = "v1"                          # shown by `tensorfold models` and used in snapshot keys
-def check(model_dir): ...                      # raise for a checkpoint the kernels cannot read, before any download
-MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200"}   # set before MLX starts, unless the environment sets them
-def engine_settings(model): ...                # keyword arguments for the engine, e.g. {"max_rows": 16}
-def kernel_version(model): ...                 # a name for the kernels (prefix snapshots are keyed by it)
-def setup(app, model, **options): ...          # extras on the server app, e.g. a draft model
+def load(model_dir, **options):
+    ...  # return model, tokenizer
 ```
 
-Without `kernel_version`, snapshots are keyed by a hash of the family and `KERNEL_PACKAGE` source files, so
-editing a kernel never reuses a snapshot computed by the old one. Add `KERNEL_DEPENDENCIES` for any kernel
-modules another family's package supplies. `check` should reject unsupported settings from `config.json` before
-the weights download; the CLI calls it again after a full download so it can inspect the weight index too.
-Publish the checkpoint you test with on Hugging Face and
-list it in `MODELS`, so people pull exactly what your kernels expect.
+Optional declarations include `DRAFTER`, `MLX_ENV`, `check`, `engine_settings`, `kernel_version` and `setup`.
+`check` must reject unsupported configuration before downloading weights, then validate the weight index
+when available. List shared kernel modules in `KERNEL_DEPENDENCIES` so snapshot keys include them.
 
-## The model object (serial engine)
+## Model interface
 
-The serial engine (`engine/family_engine.py`) needs three things:
+`load` returns a model with `lane_family = True` and a tokenizer. The complete model protocol is in
+`engine/lane_family.py`.
 
-| Member | What it returns |
+| Member | Contract |
 | --- | --- |
-| `make_cache()` | one cache object per layer (mlx_lm's cache classes work) |
-| `hidden(inputs, cache)` | the last hidden states `[1, L, D]` for token ids `[1, L]`, advancing the cache |
-| `head(hidden)` | logits `[..., V]` |
+| `make_cache()` | New state for one stream |
+| `hidden(inputs, cache)` | Consecutive hidden rows, advancing the cache |
+| `head(hidden)` | Target logits |
+| `keep_rows(cache, rows, keep)` | Restore precisely the accepted prefix |
+| `exact_width`, `window_costs` | Checked window width and measured cost by width |
+| `prefill(inputs, cache)` | Optional prompt path, called on the engine's planned chunks |
+| `hidden_rows`, `keep_rows_streams` | Shared forward and independent stream commits |
+| `batch_rows`, `max_streams`, `shared_costs` | Shared-forward limits and costs |
+| `speculate`, `settle`, `draft_streams` | Optional draft-head operations |
+| `adopt_cache(cache)` | Restore family-specific cache classes from snapshots |
 
-That is enough for correct decoding: one token a round, sampled with the exact keyed rule. Get this right first.
-It is the reference every faster path must reproduce bit for bit, and prompt caching and snapshots work with it
-unchanged. The rest is speed:
+Start with `exact_width = 1`. Use one sampler consistently for serial and drafted calls; the host and GPU
+implementations can differ at near-ties. Prompt chunks must follow the engine's plan both fresh and resumed.
+The CLI finds message markers in the tokenizer's chat template. The plan uses assistant-message starts
+and the second message's start as resume points, with chunk starts at least 256 and at most 2,048 tokens
+apart. Without usable markers it uses 2,048-token chunks from position zero. A cache lookup must not
+choose a different prefill shape for an otherwise identical prompt.
 
-| Member | Effect |
-| --- | --- |
-| `multi_row_exact = True` | the model promises that a forward of several consecutive rows gives each row the bits of a one-row forward. The engine then verifies drafts in one pass. Check it at load time (see below) and set it only when the check passes. |
-| `keep_rows(cache, rows, keep)` | roll the caches back to the first `keep` rows of the last `rows`-row call (KV trim, recurrent states of the kept row) |
-| `gpu_tokens = True` | `hidden` accepts the token as an unread GPU array. The engine then samples on the GPU (`engine/gpu_sampling.py`, same rule) and queues the next step before reading the token, so Python overlaps the GPU. |
-| `gpu_sampling = True` | draw tokens with `gpu_sampling` in synchronous rounds too (saves a large host-side top-k) |
-| `mtp`, `draft(...)`, `drafts`, `last_streams`, `absorb_draft_context(...)` | a draft head. Each round verifies the pending token and up to `drafts` drafts, then asks `draft` for the next ones from the kept rows. See `families/qwen4_exp/runtime.py`. |
-| `adopt_cache(cache)` | convert a cache read from a snapshot into the model's own cache classes |
+## Verification
 
-Copy windows come for free once `multi_row_exact` and `keep_rows` exist. When the context already holds the
-text being written (file edits, repeated code, tool arguments) and at least 8 tokens before the cursor match
-it, the engine verifies up to 7 copied tokens a round.
+Check each projection and attention row alone and in a window using exact equality. Compare recurrent
+state after partial keeps, then continue decoding. Check shared forwards against streams run separately,
+including unequal stream lengths. Disable an unsupported wider path when a load-time check fails.
 
-## Proving row invariance
+Row-dependent matmul dispatch, shape-dependent reductions, attention masks, routing ties and different
+rounding points can break exactness. Fix arithmetic order per row. Pass per-step values in buffers instead
+of creating a new kernel specialization for each token. Evaluate derived weights on the loading thread.
 
-Drafted decoding is exact only when a row's arithmetic does not depend on how many rows share the call. Check it
-on the real weights at load time, the way `rows_match_serial` does in the Flash Next and Nemotron packages:
+Compare model quality against a trusted forward on a named public fixture. Use teacher-forced NLL and
+top-token agreement, and report the reference's own numerical variation. Tests on small synthetic models
+must be supplemented by the real model dimensions.
 
-1. prefill a short prompt;
-2. from two copies of that cache, run k single-row steps on one and one k-row step on the other, for k = 2, 3,
-   4 (and up to your largest window);
-3. compare the logits with `mx.array_equal`. Any difference means no drafts on this machine.
+## Tests and measurements
 
-Things that break row invariance:
+Use `tests/lane_fakes.py` and `tests/test_family_streams.py` for model-free engine cases. Add family tests
+for forward correctness, row equality, shared streams, rollback, snapshots and context/memory admission.
+Exercise thinking on and off, tools, later instructions and templates that rewrite earlier turns.
 
-- MLX's quantized matmul picks a different kernel by row count, and some of them sum in a different order. On
-  an M3 Ultra with MLX 0.32.0, 2 to 4 rows did not match one row (on an M5 Max with MLX 0.31.2 they did).
-  `kernels/qwen/flash_next/v1/kernels.py` has a matvec (`qmv_rows`) that gives every row MLX's one-row bits: a
-  simdgroup per row, weights read once for all rows.
-- Reductions whose split depends on the row count (a threadgroup per k rows, a split-K chosen by shape).
-- Attention kernels chosen by query count, and masks that differ between one-row and multi-row calls. Give
-  each row its own key range, or write one kernel that treats every row the same way (`attention_rows` in the
-  Flash Next kernels).
-- Templating a Metal kernel on a per-step value (row count, key count). Each new value compiles a new kernel,
-  and different specialisations can round differently. Pass such values in a small buffer.
-- Fast-math reassociation: any edit to a kernel's source can change its bits. After every kernel change,
-  regenerate the serial reference output and compare again.
-
-## Checking quality
-
-Row invariance says drafted equals serial. It says nothing about whether serial is right. Compare your decode
-path with a reference forward (mlx_lm's model, or a straightforward MLX implementation of the architecture)
-by teacher-forced negative log-likelihood over a few thousand tokens of real text, at short and long context.
-The two should agree to within noise (a few thousandths of a nat). Also check that they choose the same argmax
-on at least 98% of positions. A kernel that is fast but shifts the NLL is not done.
-
-## Measuring
-
-1. The bandwidth floor: bytes of weights read per token (all dense weights, plus the experts a token uses)
-   divided by the machine's memory bandwidth. That is the best one-row step can do.
-2. The kernel count per token. Each dependent kernel costs a few microseconds even when it does nothing (we
-   measured about 5.5 us of GPU time on an M3 Ultra, 2.5 to 3 us per small op on an M5 Max), so 1,000 small
-   kernels cost 3 to 6 ms.
-3. The cost of each extra verify row, split by component: stub one component at a time and time 1, 2, 4 and
-   8 rows. Deeper drafting pays only while an extra row costs less than the tokens it is expected to add.
-
-Time kernels in dependent chains (each call's input is the previous call's output), never as many independent
-calls of one shape: independent calls fill the GPU whatever the kernel's parallelism and favour the wrong
-variant. Confirm every kernel change with a whole-model timing, and ideally a live A/B on real requests.
-
-## Tests to write
-
-- the family's forward on a tiny random config on the CPU (whole prompt equals token by token);
-- row invariance on the real weights (at load time, or a test that is skipped when the weights are absent);
-- drafted equals serial for your engine path: the fakes in `tests/test_thinking_budget.py` and
-  `tests/lane_fakes.py` show how to drive the engines without a model.
+Measure whole requests with the [public benchmark fixtures](README.md#measurements). Record revisions,
+commands, runtime and output hashes. Measure complete dependent chains before promoting a kernel change.

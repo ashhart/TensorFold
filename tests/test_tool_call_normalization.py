@@ -11,7 +11,7 @@ agentic turn whose history contains a prior tool call.
 """
 from __future__ import annotations
 
-from tensorfold.server.http import _normalize_tool_call_arguments
+from tensorfold.server.messages import _normalize_tool_call_arguments
 
 
 def _msg(args):

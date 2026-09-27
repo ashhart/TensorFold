@@ -1,20 +1,4 @@
-"""Attention over a verify window computed exactly as serial decoding computes it.
-
-MLX runs a single query through its vector attention kernel and several
-queries through a different (full) kernel whose summation order differs, so
-the attention output of window row t differs in its last bits from the serial
-step at the same position, and a near-tie can flip the next token: the lane
-engine's drafted output diverged from its own serial decode at characters
-591, 1,439 and 1,664 on three prompts even with 9-row windows (2026-09-23).
-
-Here each query of a short window goes through the one-query kernel over
-exactly the keys the serial step at its position would see (the cache
-through that position), so window row t is bit-identical to that step.
-Consecutive queries share one causal call where MLX provably runs the same
-kernel with the same key partition as their one-query calls (up to 5 queries
-for 24 query heads over 4 key heads): at 20k keys an 8-row window's attention
-drops from 1.70 to 1.14 ms a layer.
-"""
+"""Match serial attention bits by grouping queries only when their one-query calls share MLX's kernel variant and key partition."""
 
 from __future__ import annotations
 
@@ -22,19 +6,14 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels.qwen.dense.v1 import prompt_attention
+
 EXACT_MAX_QUERIES = 16
-# Share one causal call among consecutive queries where MLX 0.31.2 provably gives each its one-query bits (below);
-# False: one call per query, exact whatever MLX's dispatch (a Mac whose MLX groups queries differently)
+# Group queries with identical one-query arithmetic; disable when MLX dispatch differs.
 GROUP_QUERIES = True
 _STOCK: Any = None
 
-# MLX 0.31.2 runs its vector kernel for up to 8 queries while queries x (query heads per
-# key head) <= 32, and within it a key's slot depends only on its index: a masked tail
-# key is skipped. So a causal call over a few consecutive queries gives each query the
-# bits of its own one-query call, unless the two calls' key counts fall on different
-# sides of a point where MLX changes variant (one pass from 1024 keys on the M5 Max,
-# two-pass blocks at 1025, 8193, 32769, 65537; 4096/16384/65536 on other chips).
-# Checked bit for bit against one-query calls at 23 key counts around those points.
+# MLX 0.31.2 skips masked tail keys without changing key slots; grouping is exact only within one kernel regime.
 _REGIME_POINTS = (1024, 1025, 4096, 8193, 16384, 32769, 65536, 65537)
 
 
@@ -49,6 +28,10 @@ def _one(queries: mx.array, keys: mx.array, values: mx.array, scale: float, mask
 def exact_sdpa(queries: mx.array, keys: mx.array, values: mx.array, cache: Any, scale: float,
                mask: Any, sinks: Any = None) -> mx.array:
     T = int(queries.shape[2])
+    if T > EXACT_MAX_QUERIES and int(queries.shape[-1]) == 256 \
+            and isinstance(mask, str) and mask == "causal" and sinks is None \
+            and not hasattr(cache, "bits"):
+        return prompt_attention.attend(queries, keys, values, scale)      # prompt chunks: bounded memory
     if T < 2 or T > EXACT_MAX_QUERIES or sinks is not None or hasattr(cache, "bits"):
         return _STOCK(queries, keys, values, cache, scale, mask, sinks)
     L = int(keys.shape[2])

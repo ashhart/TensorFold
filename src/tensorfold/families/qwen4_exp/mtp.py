@@ -1,17 +1,4 @@
-"""Flash Next's MTP head (``language_model.mtp.*`` in the checkpoint): drafts the token after next.
-
-At position i it reads the main model's four residual streams after the last
-layer (h_i, before the final mixer) and the embedding of token i+1:
-
-    x = fc_embedding(norm_e(embed(t_{i+1})))            one stream's worth, added to every stream
-      + fc_hidden(norm_h(h_i)) per stream               norm_h is one RMSNorm over all four streams
-    x = decoder layer (sparse attention over the head's own cache, MoE), four streams
-    logits = lm_head(mixer(x))                          the main model's head
-
-Its output streams feed the next draft the same way (drafts chain). The norms
-follow the checkpoint's convention (stored around 1 in this conversion; the
-loader recentres them like the main model's).
-"""
+"""Draft the token after next from the preceding residual streams and next-token embedding, chaining output streams."""
 
 from __future__ import annotations
 
@@ -76,16 +63,17 @@ def load(model_dir, cfg: Config) -> FlashMTP:
 
     weights: dict[str, mx.array] = {}
     for path in sorted(Path(model_dir).glob("model*.safetensors")):
-        found = {k: v for k, v in mx.load(str(path)).items() if k.startswith("language_model.mtp.")}
+        found = {k: v for k, v in mx.load(str(path), stream=mx.cpu).items() if k.startswith("language_model.mtp.")}
         weights.update(found)
     weights = sanitize(weights)
+    mx.eval(list(weights.values()))          # read before any GPU work uses them (see model.load)
     head = FlashMTP(cfg)
     nn.quantize(head, group_size=cfg.group_size, bits=cfg.bits,
                 class_predicate=lambda p, m: hasattr(m, "to_quantized") and f"{p}.scales" in weights)
     # the same storage convention as the main model's centred norms (checked on its hc_norm anchors)
     main = {}
     for path in sorted(Path(model_dir).glob("model*.safetensors")):
-        main.update({k[len("language_model."):]: v for k, v in mx.load(str(path)).items()
+        main.update({k[len("language_model."):]: v for k, v in mx.load(str(path), stream=mx.cpu).items()
                      if k.startswith("language_model.model.layers.") and k.endswith("attn_hyper_connection.hc_norm.weight")})
     if norms_stored_around_one(main):
         for path_, module in head.named_modules():

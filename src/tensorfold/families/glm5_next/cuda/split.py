@@ -1,20 +1,4 @@
-"""How GLM-5.3-Flash's checkpoint splits between the two ranks, and an optional one-time split to disk.
-
-The engine reads each rank's share straight from the checkpoint ``tensorfold pull`` downloaded (``RankReader``).
-Per tensor a rule picks the split, and the rank's part is sliced as bytes (no value is converted):
-
-  row   first-axis halves: output rows of column-parallel projections (heads, expert and MLP width), per-head
-        vectors (A_log, dt_bias, the conv weights)
-  col   last-axis halves of a 2-D tensor: input columns of row-parallel projections (o_proj, down_proj); packed
-        words hold 8 inputs and groups hold 64, so every split lands on a group boundary
-  rep   both ranks whole (norms, hyper-connections, router, indexer, MLA down-projections, embeddings, head)
-  drop  the vision tower
-
-A machine short on disk can write its rank's share once and serve that folder instead (85 GB against the
-checkpoint's 182 GB); the engine reads either:
-
-    python -m tensorfold.families.glm5_next.cuda.split MODEL_DIR --rank R OUT
-"""
+"""Read each rank directly from checkpoint bytes or a saved rank folder, preserving packed groups at every split boundary."""
 
 from __future__ import annotations
 
@@ -58,8 +42,7 @@ SMALL = ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_c
          "processor_config.json", "model.safetensors.index.json")
 
 
-# EXL3 experts (``exl3.py``): trellis [K/16, N/16, 64], suh [K], svh [N], mcg. gate/up split by outputs (tile
-# columns, svh), down by inputs (tile rows, suh); the rest of each is replicated.
+# EXL3 gate/up split tile columns and svh; down splits tile rows and suh; each replicates the remaining tensors.
 EXL3_EXPERT = re.compile(r"\.mlp\.experts\.\d+\.(gate|up|down)_proj\.(trellis|suh|svh|mcg)$")
 EXL3_RULES = {("gate", "trellis"): "dim1", ("gate", "suh"): "rep", ("gate", "svh"): "row",
               ("down", "trellis"): "row", ("down", "suh"): "row", ("down", "svh"): "rep"}
@@ -120,8 +103,7 @@ def rank_files(model_dir: str | Path, rank: int) -> list[Path]:
 
 
 class RankReader:
-    """One rank's tensors by checkpoint name (CPU tensors in the stored dtype): sliced from the full checkpoint,
-    or read from a folder ``split`` wrote for this rank."""
+    """Read stored-dtype CPU tensors for one rank from the full checkpoint or its pre-split folder."""
 
     def __init__(self, model_dir: str | Path, rank: int) -> None:
         self.dir, self.rank = Path(model_dir), rank

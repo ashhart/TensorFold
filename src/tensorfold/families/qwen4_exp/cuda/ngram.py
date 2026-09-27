@@ -1,9 +1,4 @@
-"""Flash Next's hashed 2- and 3-gram ids (the PLE embedding's rows), on the host with numpy.
-
-A port of ``model.NGramEmbedding.ids`` (which imports MLX): each of the 16 heads hashes the last 2 or 3
-tokens (EOS resets the n-grams) into a prime-sized table; the row id is global over the concatenated
-tables. The checkpoint ships the hashing constants; ``NGram.check`` compares them with the derived ones.
-"""
+"""Hash n-gram rows on the host, resetting on EOS and checking derived constants against the checkpoint."""
 
 from __future__ import annotations
 

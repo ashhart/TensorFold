@@ -9,7 +9,7 @@ nn = pytest.importorskip("mlx.nn")
 
 from tensorfold.kernels.qwen.dense.v1 import lane_fuse, lane_glue, lane_qmm  # noqa: E402
 
-from tensorfold.kernels.qwen.dense.v1 import lane_tree  # noqa: E402
+from tensorfold.kernels.qwen.dense.v1 import lane_tree, stream_gdn  # noqa: E402
 
 K = 5120
 ROWS = (1, 7, 16, 17, 32, 64, 128)
@@ -122,13 +122,14 @@ def test_gdn_glue_reads_the_stack_in_place(W):
     a_log = mx.log(mx.random.uniform(low=0.5, high=16.0, shape=(nv,)))                   # fp32, as served
     dt_bias = (mx.random.normal((nv,)) * 2.0).astype(mx.bfloat16)
     parents = [-1] + [max(-1, r - 1 - (r % 3 == 0)) for r in range(1, W)]
-    windows = lane_tree._conv_windows(parents, taps - 1)
+    plan = stream_gdn.ConvPlan([parents], taps - 1)
+    windows = plan.windows
     z = mx.contiguous(zba[..., :nv * dv])
     b = mx.contiguous(zba[..., nv * dv:nv * dv + nv])
     a = mx.contiguous(zba[..., nv * dv + nv:])
     heads = dict(nk=nk, nv=nv, dk=dk, dv=dv)
     ref = lane_glue.gdn_pre(qkv, conv_state, conv_weight, windows, a, b, a_log, dt_bias, **heads)
-    ours = lane_fuse.gdn_pre(qkv, conv_state, conv_weight, windows, zba, a_log, dt_bias, **heads)
+    ours = stream_gdn.gdn_pre(qkv, [conv_state], conv_weight, plan, zba, a_log, dt_bias, **heads)
     mx.eval(ref, ours)
     for name, r, o in zip(("q", "k", "v", "g", "beta"), ref, ours):
         assert _same(o, r), f"gdn_pre {name} changed"
@@ -293,3 +294,33 @@ def test_tree_forward_fused_equals_unfused():
     for i, (p, f, a) in enumerate(zip(plain, fused, after)):
         assert _same(f, p), f"output {i} changed with the stacked projections"
         assert _same(a, p), f"output {i} changed after the stacks were built"
+
+
+def test_streams_conv_window_in_one_launch_equals_one_stream_calls():
+    """Every row of a multi-stream gdn_pre has the bits of the same row from its own stream's call."""
+    _needs_tensor_units()
+    nk, nv, dk, dv, taps = 16, 48, 128, 128, 4
+    C = 2 * nk * dk + nv * dv
+    zs = nv * dv + 2 * nv
+    mx.random.seed(77)
+    parents = [[-1, 0, 0, 1, 3], [-1], [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]]
+    R = sum(len(p) for p in parents)
+    qkv = (mx.random.normal((1, R, C)) * 2.0).astype(mx.bfloat16)
+    zba = (mx.random.normal((1, R, zs)) * 4.0).astype(mx.bfloat16)
+    states = [(mx.random.normal((1, taps - 1, C)) * 2.0).astype(mx.bfloat16) for _ in parents]
+    conv_weight = (mx.random.normal((C, taps, 1)) * 0.5).astype(mx.bfloat16)
+    a_log = mx.log(mx.random.uniform(low=0.5, high=16.0, shape=(nv,)))
+    dt_bias = (mx.random.normal((nv,)) * 2.0).astype(mx.bfloat16)
+    heads = dict(nk=nk, nv=nv, dk=dk, dv=dv)
+    together = stream_gdn.gdn_pre(qkv, states, conv_weight, stream_gdn.ConvPlan(parents, taps - 1), zba, a_log,
+                                  dt_bias, **heads)
+    mx.eval(together)
+    first = 0
+    for s, rp in enumerate(parents):
+        W = len(rp)
+        alone = stream_gdn.gdn_pre(qkv[:, first:first + W], [states[s]], conv_weight,
+                                   stream_gdn.ConvPlan([rp], taps - 1), zba[:, first:first + W], a_log, dt_bias, **heads)
+        mx.eval(alone)
+        for name, t, a in zip(("q", "k", "v", "g", "beta"), together, alone):
+            assert _same(t[:, first:first + W], a), f"stream {s} {name} differs from its own call"
+        first += W

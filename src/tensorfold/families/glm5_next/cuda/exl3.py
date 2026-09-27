@@ -1,35 +1,4 @@
-"""EXL3 weights (ExLlamaV3's trellis quantization) as GLM-5.3-Flash's EXL3 checkpoints store them: the format and a
-reference decoder in plain numpy and torch, the definition the CUDA kernels are checked against.
-
-The format is ExLlamaV3's (https://github.com/turboderp-org/exllamav3, MIT, Copyright (c) 2025 Turboderp), version
-0.0.43, as used by ``Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`` for the routed experts. A linear layer with K inputs and
-N outputs is stored as four tensors:
-
-    trellis  int16 [K/16, N/16, 16 * bits]   one 16x16 tile of the weight per (k tile, n tile), row-major tiles
-    suh      fp16  [K]                        input scales (signs and magnitudes)
-    svh      fp16  [N]                        output scales
-    mcg      int32 [1]                        present: the tile values use the "mcg" codebook (0xCBAC1FED)
-
-A tile holds 256 values in 256 * bits bits. Its int16 words, read in pairs as little-endian 32-bit words, form a
-circular bitstream read from the most significant bit of each 32-bit word. Value p of the tile (p = 0..255) is
-decoded from the 16 bits of the stream that end at bit (p + 1) * bits, taken as an unsigned integer s (first bit
-most significant):
-
-    x = s * 0xCBAC1FED mod 2^32
-    x = (x & 0x8FFF8FFF) ^ 0x3B603B60
-    value = fp16(x & 0xFFFF) + fp16(x >> 16)            one fp16 addition, rounded to nearest even
-
-and lands in the tile at row 2 * (l % 4) + (j & 1) + 8 * ((j >> 1) & 1), column l // 4 + 8 * (j >> 2), where
-l = p // 8 and j = p % 8 (the tensor-core fragment order of ExLlamaV3's kernels). The tiles make W_q [K, N], the
-weight in the rotated domain. With H the 128x128 Sylvester Hadamard matrix scaled by 1/sqrt(128), applied to each
-block of 128 inputs or outputs, the layer computes
-
-    y = x @ W,   W = diag(suh) @ H_K @ W_q @ H_N @ diag(svh),   so   y = ((((x * suh) @ H_K) @ W_q) @ H_N) * svh
-
-Splitting a layer over two ranks keeps whole tiles and whole Hadamard blocks: by outputs, each rank takes its
-columns of tiles and of svh and all of suh; by inputs, its rows of tiles and of suh and all of svh, and the ranks'
-outputs add up before (or, since H_N and svh are linear, after) the output transform.
-"""
+"""EXL3 reference decoding preserves whole tiles and Hadamard blocks across ranks; format from ExLlamaV3, https://github.com/turboderp-org/exllamav3, MIT, Copyright (c) 2025 Turboderp."""
 
 from __future__ import annotations
 

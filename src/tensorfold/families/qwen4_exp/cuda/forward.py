@@ -324,8 +324,9 @@ def attn_block(layer: LayerW, w: Weights, kc, vc, ikc, pooled, pos_dev: torch.Te
                    c.eps, q_heads=c.heads, kv_heads=c.kv_heads, head_dim=c.head_dim, index_heads=c.index_heads,
                    index_dim=c.index_dim)
     if b.attn.qsa:
-        attn_mod.qsa_select(b.iq[:R], ikc, pooled, pos_dev, a.ik_scale, w.inv_freq, c.eps, b.attn, R)
-    o = attn_mod.attention(b.q[:R], kc, vc, pos_dev, b.attn, R, c.head_dim ** -0.5)
+        attn_mod.qsa_select(b.iq[:R], ikc, pooled, pos_dev, a.ik_scale, w.inv_freq, c.eps, b.attn, R,
+                            context=context)
+    o = attn_mod.attention(b.q[:R], kc, vc, pos_dev, b.attn, R, c.head_dim ** -0.5, context=context)
     glue.attn_gate(o[:R], b.pa[:R], b.gated[:R], b.xs_gated[:R], q_heads=c.heads, head_dim=c.head_dim)
     return _out_proj(w, b, b.gated[:R], a.o, b.xs_gated[:R], R)
 

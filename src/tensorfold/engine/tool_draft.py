@@ -1,26 +1,4 @@
-"""Drafts for tool calls: the call's fixed structure, proposed ahead of the model.
-
-Qwen 3.x writes a call as
-
-    <tool_call>
-    <function=NAME>
-    <parameter=ARG>
-    value
-    </parameter>
-    </function>
-    </tool_call>
-
-Most of a short call is that scaffolding. Once the model has picked a tool,
-the tags, the rest of a unique tool or parameter name, the header of the next
-schema parameter and the closing tags follow from the schema, so a verify
-window can absorb them in one forward instead of one token per round. The
-values (paths, patterns, code) come from the copy-span proposer, which finds
-them earlier in the conversation.
-
-Every proposal is only a draft: the lane engine keeps a drafted token only
-where it equals the target's own argmax, so the call is exactly the one the
-model would have written token by token.
-"""
+"""Draft schema-determined tool-call structure, accepting tokens only when they match the target's own choice."""
 
 from __future__ import annotations
 
@@ -76,8 +54,7 @@ class ToolCallProposer:
         self.end_text = bool(self.end_ids)
         self._decoded_upto = 0
         self._text = ""
-        # the output's text is only needed from its last <tool_call> on (and whether it has any text):
-        # decoding all of it every round cost 5.8 ms a round at 32k tokens (2026-09-23)
+        # Only text from the last tool-call opening and whether any non-whitespace text exists are needed.
         open_id = end("<tool_call>") if callable(end) else None
         self._open_id = int(open_id) if isinstance(open_id, int) and open_id >= 0 else None
         self._last_open: int | None = None      # emitted index of the last <tool_call> token
@@ -87,10 +64,8 @@ class ToolCallProposer:
         self.structural_tokens = 0
         self.structural_accepted = 0
 
-    # -- the text written so far -------------------------------------------------
     def _output(self, context: Sequence[int]) -> str:
-        """What ``structure`` needs of the output: '' while it is blank, text without a call opening while
-        no call has opened, else the text from the last <tool_call> on (the same answers as the full text)."""
+        """Return text from the last tool-call opening, or blank/non-call text sufficient to preserve ``structure`` decisions."""
 
         n = len(context) - self.prompt_len
         if n == self._decoded_upto:
@@ -117,7 +92,6 @@ class ToolCallProposer:
     def _encode(self, text: str) -> list[int]:
         return [int(t) for t in self.tokenizer.encode(text, add_special_tokens=False)]
 
-    # -- what must come next ---------------------------------------------------------
     def structure(self, text: str) -> str | None:
         """The text that must follow ``text`` inside a tool call, if it is determined."""
 
@@ -168,14 +142,18 @@ class ToolCallProposer:
 
     @staticmethod
     def _header(param: str) -> str:
-        # the whole header: this tokenizer writes '=path' as one token, so a draft
-        # that stops at '<parameter=' misses the model's next token
+        # Draft the whole header because a tokenizer may combine '=path' into one token.
         return f"<parameter={param}>\n"
 
-    # -- the proposer protocol the lane engine calls -----------------------------------
     @property
     def last_confident(self) -> bool:
         return self._last_structural or bool(getattr(self.fallback, "last_confident", False))
+
+    @property
+    def last_match(self) -> int:
+        """Use the known structure's certain match count, or the fallback copy's own count."""
+
+        return 1 << 30 if self._last_structural else int(getattr(self.fallback, "last_match", 0) or 0)
 
     def propose(self, context: Sequence[int], max_draft: int) -> list[int]:
         self._last_structural = False
@@ -266,20 +244,7 @@ class ToolCallProposer:
 
 
 class ToolCallStreamer:
-    """The model's XML tool calls, as they are written, as OpenAI ``tool_calls`` deltas.
-
-    Fed the whole decoded reply so far after every round, it emits the call's
-    name as soon as ``<function=NAME>`` is complete, then the arguments object
-    piece by piece: ``{"path":"`` when a parameter opens, the value's text as it
-    grows (JSON-escaped; the last few characters held back in case they begin
-    ``</parameter>``, trailing whitespace held until the value closes), ``"}``
-    when the function closes. The concatenated argument deltas are the same
-    JSON the end-of-reply parser builds. Schema-typed values buffer until closed;
-    of a value's whitespace
-    only the template's one framing newline a side is dropped, so the client's
-    resent history is the tokens the model wrote, so a client can show a file
-    being written instead of a silent minute.
-    """
+    """Stream XML tool calls as JSON deltas matching the final parser, buffering typed values and possible closing tags while dropping only framing newlines."""
 
     _TAIL = "</parameter>"
 

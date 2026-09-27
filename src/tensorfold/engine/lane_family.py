@@ -1,99 +1,21 @@
-"""Model families on the lane engine: one stream's verify rounds over the family's own forward and caches.
-
-A family model (``lane_family = True``: Nemotron-H, Flash Next) brings its forward instead of mlx_lm's
-batch-cache protocol:
-
-    make_cache()                     one cache object per layer, the draft head's last
-    hidden(inputs, cache)            hidden states [1, R, D] of R consecutive tokens [1, R], advancing the caches
-                                     (prompts: chunks on the engine's ``prefill_align`` grid from position 0)
-    head(hidden)                     logits [1, R, V]
-    keep_rows(cache, rows, keep)     after an R-row call, keep its first ``keep`` rows: KV trimmed, recurrent
-                                     state as it was after row keep - 1
-    exact_width                      the widest window whose every row gets a one-row forward's bits here
-                                     (checked at load; 1: no drafts)
-    window_costs                     {rows: ms} of a forward, timed at load for every exact width
-    gpu_tokens                       ``hidden`` takes unread GPU token arrays: one-token rounds run one step ahead
-    adopt_cache(cache)               optional: a stored or copied cache in the model's own classes
-
-and with a draft head (``mtp`` set):
-
-    absorb_draft_context(hidden, next_tokens, cache)       prompt positions into the head's cache
-    speculate(cache, tokens, position, sampling, start=0, last_only=False)
-                                     the head absorbs rows start .. start + n - 1 of the last ``hidden`` call
-                                     (row start + i followed by tokens[i], n = len(tokens)) and draws each one's
-                                     first draft, for positions position + 2 + i (``position``: row start's);
-                                     ``last_only``: only the last row's
-    speculate_early                  True: ``speculate`` every row right behind the verify, before anything is
-                                     read (a host round trip less); False: after the read, only the kept rows,
-                                     so the head's GPU work overlaps the host building the next round
-    settle(cache, keep, first, position, sampling, count)  after ``speculate``: the head keeps its first
-                                     ``keep`` rows; returns ``count`` drafts for positions position, ...: the
-                                     kept row's ``first`` and count - 1 chained on the head's own output (a
-                                     host list, or a lazy GPU array the next round feeds unread)
-    unspeculate(cache)               forget the speculated rows
-    drafts                           the most drafts a round
-    mtp_step_ms                      optional: one chained draft step, timed at load
-
-A round verifies the pending token and its drafts in one forward, samples every row with the keyed rule on the
-GPU, keeps drafts up to the first that differs from the target's own sample, and rolls every cache back to
-exactly the kept rows. Every committed token is the target's sample at its position, so drafted output is
-byte-identical to one-token rounds, which run through the same kernels. Drafts come from, in order: the
-thinking budget's forced close, a copied continuation of the context or a tool call's known structure (backed
-by ``enter_match`` matching tokens), then the draft head's chain. Its depth each round is the one with the most
-expected tokens a millisecond at the stream's recent acceptance at each depth and the measured costs.
-
-A stream with ``drafts`` off decodes one token a round: the serial reference. With ``gpu_tokens`` those rounds
-run one step ahead (the next forward is queued on the unread token), as before, and copied continuations are
-verified in windows between them.
-"""
+"""Verify drafts against position-keyed target samples and roll back every cache to accepted rows so shared and serial rounds agree."""
 
 from __future__ import annotations
 
-import os
 import time
-from typing import Any, Sequence
+from typing import Any
 
-# TF_FAMILY_PROFILE=1: every 200 rounds, the mean host time of each phase of a round (build, wait for the GPU,
-# after the read, the head's drafts), printed to the log
-_PROFILE = os.environ.get("TF_FAMILY_PROFILE", "") == "1"
-
-
-def drop_spares(cache: list[Any]) -> list[Any]:
-    """``alternating_kv.drop_spares`` (imported when used: this module loads without MLX)."""
-
-    from tensorfold.engine.alternating_kv import drop_spares as drop
-
-    return drop(cache)
+from tensorfold.engine.family_common import _PROFILE, _ROUND_LOG, drop_spares
+from tensorfold.engine.family_depth import DraftDepth, extend_costs
+from tensorfold.engine.family_prefill import FamilyPrefill
+from tensorfold.engine.family_shared import SharedRounds
 
 
-def cache_arrays(cache: list[Any]) -> list[Any]:
-    """Every array a cache list holds (a KV cache nothing was written to yet has none)."""
+class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
+    """Provide lane-engine rounds for models exposing the ``lane_family`` protocol."""
 
-    arrays: list[Any] = []
-    for item in cache:
-        if getattr(item, "keys", 0) is None:
-            continue
-        state = item.state
-        if isinstance(state, (list, tuple)):
-            arrays.extend(a for a in state if a is not None and hasattr(a, "shape"))
-        elif state is not None and hasattr(state, "shape"):
-            arrays.append(state)
-    return arrays
-
-
-class FamilyRounds:
-    """The lane engine's rounds for model families; ``LaneEngine`` mixes it in and uses it when the model says
-    ``lane_family``."""
-
-    # matching tokens behind a copied continuation before a round takes it: coincidental short matches in fresh
-    # code (indentation, "self.") failed 56 of 70 copied tokens and cost 5% (Flash Next, 2026-09-25)
+    # Require enough matching context to reject coincidental copied continuations such as indentation.
     enter_match = 8
-    # per-depth acceptance: the prior, the weight of the newest round, and rounds between probes one deeper
-    depth_prior = (0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5)
-    depth_rate = 0.15
-    depth_probe_every = 8
-    # a round's wall time by depth: measured rounds replace the load-time estimate at this rate
-    cost_rate = 0.2
 
     def _family_setup(self) -> None:
         model = self.model
@@ -119,148 +41,78 @@ class FamilyRounds:
         self.family_costs = {int(w): float(ms) for w, ms in costs.items() if 1 <= int(w) <= self.family_width}
         self.mtp_step_ms = float(getattr(model, "mtp_step_ms", 0.0) or 0.0)
         self._round_ms: dict[int, float] = {}        # measured wall time of a round with d head drafts
+        # several live streams share one forward (``model.hidden_rows``) of at most this many rows and streams
+        self.family_streams = (self.family_width >= 2 and getattr(model, "streams_exact", True) is True
+                               and callable(getattr(model, "hidden_rows", None)))
+        self.batch_rows = int(getattr(model, "batch_rows", 0) or 32)
+        self.batch_streams = int(getattr(model, "max_streams", 0) or 32) if self.family_streams else 1
+        self._served: dict[str, int] = {}            # stream id -> the last shared round it took part in
+        self._shared_rounds = 0
+        # Allocation uses forward cost by total rows and round overhead by stream count.
+        timed = {int(w): float(ms) for table in (costs, getattr(model, "shared_costs", None) or {})
+                 for w, ms in table.items() if 1 <= int(w) <= self.batch_rows}
+        self.shared_costs = extend_costs(timed, self.batch_rows)
+        if timed and self.family_streams and max(timed) < self.batch_rows:
+            print(f"[lanes] forward costs timed up to {max(timed)} rows of a shared round's {self.batch_rows}: wider "
+                  f"rounds are costed at {timed[max(timed)] / max(timed):.2f} ms a row", flush=True)
+        self._overhead_ms: dict[int, float] = {}
+        # heads that give each drafted node's chance of landing draft a budget first; rows are allocated after
+        self.node_probabilities = callable(getattr(model, "draft_probabilities", None))
+        self._granted: dict[str, int] = {}           # stream id -> drafts its last shared round kept
 
-    # -- prefill -----------------------------------------------------------------------------------------------
-    def _family_feed(self, tokens: Sequence[int], cache: list[Any], following: int | None = None) -> Any:
-        """Absorb ``tokens``; the last position's hidden state [1, 1, D]. The draft head's cache takes every
-        position whose next token is known: the next prompt token, and ``following`` after the last one."""
-
-        import mlx.core as mx
-
-        last = None
-        # ``tokens`` start on the grid: every chunk is a fresh prefill's chunk
-        step = self._align() or max(1, int(self.prefill_step))
-        self._fed_rows = 0
-        for begin in range(0, len(tokens), step):
-            chunk = [int(t) for t in tokens[begin:begin + step]]
-            hidden = self.model.hidden(mx.array([chunk], dtype=mx.uint32), cache)
-            self._fed_rows = len(chunk)
-            last = hidden[:, -1:, :]
-            if getattr(self.model, "mtp", None) is not None:
-                nxt = [int(t) for t in tokens[begin + 1:begin + step + 1]]
-                if len(nxt) < len(chunk) and following is not None:
-                    nxt.append(int(following))
-                if nxt:
-                    self.model.absorb_draft_context(hidden[:, :len(nxt)], mx.array(nxt, dtype=mx.uint32), cache)
-            mx.eval(last, *cache_arrays(cache))
-        return last
-
-    def _family_start(self, cache: list[Any] | None, cached_tokens: int, length: int) -> tuple[list[Any], int]:
-        """The working cache and the position its prefill starts at: a stored state off the grid is not used
-        (it cannot resume exactly), so the prompt is prefilled from 0."""
-
-        align = self._align()
-        if cache is None or (align and int(cached_tokens) % align):
-            return self.model.make_cache(), 0
-        start = int(cached_tokens)
-        if not 0 <= start < length:
-            raise ValueError("cached_tokens must leave a suffix to prefill")
-        adopt = getattr(self.model, "adopt_cache", None)
-        return (adopt(cache) if adopt is not None else cache), start
-
-    def _family_prefill(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
-                        checkpoints_at: Sequence[int]) -> list[Any]:
-        from tensorfold.engine.gpu_sampling import sample as gpu_sample
-
-        if not stream.prompt_ids:
-            raise ValueError(f"{stream.stream_id}: empty prompt")
-        work, start = self._family_start(cache, cached_tokens, len(stream.prompt_ids))
-        cached_tokens = start
-        stream.history_checkpoints = []
-        align = self._align()
-        for boundary in sorted({(int(b) // align) * align if align else int(b) for b in checkpoints_at}):
-            if not start < boundary < len(stream.prompt_ids):
-                continue
-            self._family_feed(stream.prompt_ids[start:boundary], work, following=stream.prompt_ids[boundary])
-            stream.history_checkpoints.append((list(stream.prompt_ids[:boundary]),
-                                               drop_spares(self.copy_single_cache(work))))
-            start = boundary
-        hidden = self._family_feed(stream.prompt_ids[start:], work)
-        prompt_len = len(stream.prompt_ids)
-        stream.emitted = []
-        stream.pending = []
-        stream.cache_len = prompt_len
-        stream.cached_tokens = int(cached_tokens)
-        stream.started_at = time.perf_counter()
-        token = gpu_sample(self.model.head(hidden), stream.sampling, [prompt_len])
-        if self.family_mtp and stream.drafts:
-            import mlx.core as mx
-
-            # the head reads the prompt's last position and the first token, and drafts the one after it
-            firsts = self.model.speculate(work, token, prompt_len - 1, stream.sampling, start=self._fed_rows - 1)
-            first, first_draft = [int(t) for t in mx.concatenate([token, firsts.astype(token.dtype)]).tolist()]
-            depth = self._depth(stream)
-            self._next[stream.stream_id] = self.model.settle(work, 1, first_draft, prompt_len + 1, stream.sampling,
-                                                             depth)
-        elif self.pipelined:
-            self._queue_next(stream, work, token)
-            first = int(token.item())
-        else:
-            first = int(token.item())
-        stream.commit([first])
-        stream.pending = [first]
-        return work
-
-    def _queue_next(self, stream: Any, cache: list[Any], token: Any) -> None:
-        """Feed ``token`` (a GPU array, not read yet) and queue the draw of the one after it."""
+    def _draw(self, logits: Any, sampling: Any, positions: Any) -> Any:
+        """Use the same model sampler or GPU sampler for every draw so streams match their own serial runs."""
 
         import mlx.core as mx
 
         from tensorfold.engine.gpu_sampling import sample as gpu_sample
 
-        hidden = self.model.hidden(token.reshape(1, 1), cache)
-        stream.cache_len += 1
-        nxt = gpu_sample(self.model.head(hidden), stream.sampling, [stream.cache_len])
-        mx.async_eval(nxt)
-        self._inflight[stream.stream_id] = nxt
+        own = getattr(self.model, "sample", None)
+        if callable(own):
+            out = own(logits, sampling, positions)
+            return out if isinstance(out, mx.array) else mx.array([int(t) for t in out], dtype=mx.uint32)
+        return gpu_sample(logits, sampling, positions)
 
-    def _family_prefill_prefix(self, prompt_ids: Sequence[int], *, cache: list[Any] | None,
-                               cached_tokens: int) -> list[Any]:
-        if not prompt_ids:
-            raise ValueError("empty prefix")
-        work, start = self._family_start(cache, cached_tokens, len(prompt_ids))
-        self._family_feed(list(prompt_ids[start:]), work)
-        return drop_spares(work)
-
-    def _family_add_stream(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
-                           checkpoints_at: Sequence[int]) -> None:
-        work = self._family_prefill(stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at)
-        self.streams.append(stream)
-        if stream.finished:
-            stream.finished_at = time.perf_counter()
-            self._inflight.pop(stream.stream_id, None)
-            self._next.pop(stream.stream_id, None)
-            return
-        self._live.append((stream, work))
-
-    # -- rounds ------------------------------------------------------------------------------------------------
     def _family_step(self) -> dict[str, list[int]]:
         landed: dict[str, list[int]] = {}
+        live = [(s, c) for s, c in self._live if not s.finished]
+        if len(live) > 1 and self.family_streams:
+            # a shared round is synchronous: a stream that ran a step ahead lands its queued token first
+            for stream, _ in live:
+                if stream.stream_id in self._inflight:
+                    landed[stream.stream_id] = self._land_inflight(stream)
+            live = [(s, c) for s, c in live if not s.finished]
+        if len(live) > 1 and self.family_streams:
+            live = self._take_turns(live)
+            self._shared_rounds += 1
+            for stream, _ in live:
+                self._served[stream.stream_id] = self._shared_rounds
+            for stream_id, (got, rows, keep) in self._family_round_streams(live).items():
+                landed[stream_id] = landed.get(stream_id, []) + got
+        else:
+            for stream, cache in live:
+                started = time.perf_counter()
+                if (self.family_mtp and stream.drafts) or not self.pipelined:
+                    got, rows, keep = self._family_round(stream, cache)
+                else:
+                    got, rows, keep = self._pipelined_round(stream, cache)
+                landed[stream.stream_id] = landed.get(stream.stream_id, []) + got
+                stream.min_rows = rows if not stream.min_rows else min(stream.min_rows, rows)
+                ms = (time.perf_counter() - started) * 1e3
+                from tensorfold.engine.lane_engine import RoundStats
+
+                self.round_stats.append(RoundStats(
+                    streams=1, width=rows, rows=rows, ragged=False, rollbacks=int(0 < keep < rows),
+                    committed=len(got), forward_ms=ms, finalize_ms=0.0, rollback_ms=0.0, total_ms=ms,
+                    started_at=started))
         for stream, cache in self._live:
             if stream.finished:
-                self._inflight.pop(stream.stream_id, None)
-                self._next.pop(stream.stream_id, None)
-                continue
-            started = time.perf_counter()
-            if (self.family_mtp and stream.drafts) or not self.pipelined:
-                got, rows, keep = self._family_round(stream, cache)
-            else:
-                got, rows, keep = self._pipelined_round(stream, cache)
-            landed[stream.stream_id] = got
-            stream.min_rows = rows if not stream.min_rows else min(stream.min_rows, rows)
-            ms = (time.perf_counter() - started) * 1e3
-            from tensorfold.engine.lane_engine import RoundStats
-
-            self.round_stats.append(RoundStats(
-                streams=1, width=rows, rows=rows, ragged=False, rollbacks=int(0 < keep < rows), committed=len(got),
-                forward_ms=ms, finalize_ms=0.0, rollback_ms=0.0, total_ms=ms, started_at=started))
-            if stream.finished:
                 stream.finished_at = time.perf_counter()
-                self._inflight.pop(stream.stream_id, None)
-                self._next.pop(stream.stream_id, None)
+                self._release_stream_state(stream.stream_id)
                 if self._keeps_decoded(stream):
                     # one-token rounds leave the last token absorbed when they ran ahead; ``cache_len`` counts it
-                    self.finished_caches[stream.stream_id] = (stream.context[: stream.cache_len], drop_spares(cache))
+                    self.finished_caches[stream.stream_id] = (stream.context[: stream.cache_len],
+                                                              drop_spares(self.copy_single_cache(cache)))
         self._live = [(s, c) for s, c in self._live if not s.finished]
         return landed
 
@@ -275,8 +127,7 @@ class FamilyRounds:
         return None
 
     def _copy_proposal(self, stream: Any, min_match: int | None = None) -> list[int]:
-        """The proposer's continuation (2+ tokens): a copied span backed by ``enter_match`` matching tokens, or
-        a tool call's known structure."""
+        """Propose copied spans backed by ``enter_match`` matching tokens or a tool call's known structure."""
 
         if stream.proposer is None or self.max_copy <= 0 or stream.force:
             return []
@@ -325,42 +176,155 @@ class FamilyRounds:
             self._mode[stream.stream_id] = "drain"          # a copy window is ahead: land the queued step
         return got, 1, 1
 
-    def _family_round(self, stream: Any, cache: list[Any], copied: list[int] | None = None
-                      ) -> tuple[list[int], int, int]:
-        """The pending token and its drafts in one forward, kept up to the first draft that differs from the
-        token sampled there; returns (committed tokens, rows, rows kept)."""
+    def _plan_window(self, stream: Any, copied: list[int] | None = None
+                     ) -> tuple[str, Any, list[int], list[int] | None]:
+        """Return (kind, drafts, forced, parents), prioritizing forced tokens then copies then head drafts; tree parents precede children and -1 denotes the pending row."""
 
         import mlx.core as mx
 
-        from tensorfold.engine.gpu_sampling import sample as gpu_sample
+        queued = self._next.pop(stream.stream_id, None)
+        forced = []
+        if stream.force:
+            width = min(self.family_width, self.batch_rows) if stream.drafts else 1
+            forced = stream.force[:width - 1]
+            del stream.force[:len(forced)]
+            return "forced", forced, forced, None
+        if copied is None:
+            copied = [] if not stream.drafts else self._copy_proposal(stream)
+        if copied:
+            return "copy", copied, forced, None
+        if stream.drafts and queued is not None:
+            parents = None
+            if isinstance(queued, tuple):
+                queued, tree = queued
+                tree = [int(q) for q in tree]
+                parents = None if tree == list(range(-1, len(tree) - 1)) else tree
+                if parents is not None:
+                    queued = [int(t) for t in (queued.tolist() if isinstance(queued, mx.array) else queued)]
+            count = int(queued.shape[0]) if isinstance(queued, mx.array) else len(queued)
+            if count:
+                return "head", queued, forced, parents
+        return "none", [], forced, None
+
+    @staticmethod
+    def _window_tokens(stream: Any, drafts: Any) -> Any:
+        """The window's input tokens [rows] (uint32): the pending token, then the drafts."""
+
+        import mlx.core as mx
+
+        pending = mx.array([stream.pending[-1]], dtype=mx.uint32)
+        if isinstance(drafts, mx.array):
+            return mx.concatenate([pending, drafts.astype(mx.uint32)])
+        return mx.array([stream.pending[-1], *[int(t) for t in drafts]], dtype=mx.uint32)
+
+    @staticmethod
+    def _row_parents(rows: int, parents: list[int] | None) -> list[int]:
+        """Each window row's parent row (row 0 is the pending token): a chain when ``parents`` is None."""
+
+        if parents is None:
+            return [-1, *range(rows - 1)]
+        return [-1, *[0 if q < 0 else q + 1 for q in parents]]
+
+    def _conclude(self, stream: Any, kind: str, forced: list[int], sampled: list[int], window: list[int],
+                  rows_parents: list[int]) -> tuple[list[int], list[int], int | None, list[int]]:
+        """Commit the target-sampled path after the thinking-budget cut, returning landed tokens, kept rows, the cut, and each kept row's following token."""
+
+        from tensorfold.kernels.qwen.dense.v1.lane_tree import accept_path, tree_paths
+
+        rows = len(window)
+        if kind == "forced":
+            path = list(range(rows))
+            bonus = stream.force.pop(0) if stream.force else sampled[-1]
+            committed = [*forced, bonus]
+        else:
+            path = accept_path(window, rows_parents, sampled)
+            committed = [*[window[r] for r in path[1:]], sampled[path[-1]]]
+            if rows > 1:
+                accepted = len(path) - 1
+                self.drafted += rows - 1
+                self.accepted += accepted
+                stream.drafted += rows - 1
+                stream.accepted += accepted
+                if kind == "copy":
+                    observe = getattr(stream.proposer, "observe", None)
+                    if callable(observe):
+                        observe(rows - 1, accepted)
+                elif kind == "head":
+                    self._observe_depth(stream, max(tree_paths(rows_parents)[0]), accepted)
+        cut = stream.think_cut(committed)
+        if cut is not None:
+            path = path[:cut + 1]
+            committed = [*committed[:cut], stream.start_close()]
+        stream.rounds += 1
+        got = stream.commit(committed)
+        if stream.finished and len(got) < len(path):
+            # Keep only rows whose tokens landed, including budget cuts, so retained caches match committed tokens.
+            path = path[:len(got) + 1]
+        keep = len(path)
+        stream.cache_len += keep
+        stream.pending = [committed[keep - 1]]
+        return got, path, cut, committed[:keep]
+
+    @staticmethod
+    def _is_prefix(path: list[int]) -> bool:
+        return path == list(range(len(path)))
+
+    def _head_depth(self, stream: Any, budget: int | None = None) -> int:
+        if stream.finished:
+            depth = 0
+        elif budget is not None:
+            depth = budget
+        elif self.node_probabilities:
+            depth = min(self.most_drafts, max(1, stream.draft_room - 1))
+        else:
+            depth = self._depth(stream)
+        if stream.force:
+            return 0                   # the next round verifies the thinking budget's forced tokens
+        if depth and self._copy_proposal(stream):
+            return 1                   # a copied continuation is ahead: one head draft, in case it is gone
+        return depth
+
+    def _draft_late(self, stream: Any, cache: list[Any], position: int, follow: list[int], rows: list[int],
+                    budget: int | None = None) -> None:
+        """Read kept forward rows with their following tokens and queue the next round's drafts."""
+
+        import mlx.core as mx
+
+        model = self.model
+        depth = self._head_depth(stream, budget)
+        where = ({"start": rows[0]} if rows == list(range(rows[0], rows[0] + len(rows))) else {"rows": list(rows)})
+        heads = model.speculate(cache, mx.array(follow, dtype=mx.uint32), position, stream.sampling, **where,
+                                last_only=True)
+        self._next[stream.stream_id] = model.settle(cache, len(follow), heads[-1], stream.cache_len + 1,
+                                                    stream.sampling, depth)
+
+    def _family_round(self, stream: Any, cache: list[Any], copied: list[int] | None = None
+                      ) -> tuple[list[int], int, int]:
+        """Verify pending and drafted tokens together, keeping drafts until the first sample mismatch; return committed tokens, rows, and kept rows."""
+
+        import mlx.core as mx
 
         model = self.model
         started = time.perf_counter()
         position = stream.cache_len
-        queued = self._next.pop(stream.stream_id, None)
-        forced, stream.force = list(stream.force), []
-        if copied is None:
-            copied = [] if forced or not stream.drafts else self._copy_proposal(stream)
-        kind, drafts = "none", []
-        if forced:
-            kind, drafts = "forced", forced
-        elif copied:
-            kind, drafts = "copy", copied
-        elif stream.drafts and queued is not None:
-            drafts = queued
-            count = int(drafts.shape[0]) if isinstance(drafts, mx.array) else len(drafts)
-            kind = "head" if count else "none"
-        pending = mx.array([stream.pending[-1]], dtype=mx.uint32)
-        if isinstance(drafts, mx.array):
-            inputs = mx.concatenate([pending, drafts.astype(mx.uint32)])
-        else:
-            inputs = mx.array([stream.pending[-1], *[int(t) for t in drafts]], dtype=mx.uint32)
+        from tensorfold.kernels.qwen.dense.v1.lane_tree import tree_paths
+
+        kind, drafts, forced, parents = self._plan_window(stream, copied)
+        if kind == "head" and self.node_probabilities:
+            plan = [stream, cache, position, kind, drafts, forced, parents]
+            self._allocate([plan])
+            kind, drafts, parents = plan[3], plan[4], plan[6]
+        inputs = self._window_tokens(stream, drafts)
         rows = int(inputs.shape[0])
-        hidden = model.hidden(inputs.reshape(1, rows), cache)
+        rows_parents = self._row_parents(rows, parents)
+        depths = tree_paths(rows_parents)[0]
+        tree = {} if parents is None else {"parents": rows_parents}
+        hidden = model.hidden(inputs.reshape(1, rows), cache, **tree)
         logits = model.head(hidden)
         logits = logits.reshape(logits.shape[1:])            # [R, V] as a view (MLX's [0] is a gather)
-        tokens = gpu_sample(logits, stream.sampling, [position + 1 + r for r in range(rows)])
-        speculate = self.family_mtp and stream.drafts and kind != "forced" and self.speculate_early
+        tokens = self._draw(logits, stream.sampling, [position + 1 + d for d in depths])
+        speculate = (self.family_mtp and stream.drafts and kind != "forced" and self.speculate_early
+                     and parents is None)
         parts = [tokens]
         if speculate:
             # the head's first draft for every row, queued behind the verify before anything is read
@@ -373,61 +337,31 @@ class FamilyRounds:
         sampled = values[:rows]
         firsts = values[rows:2 * rows] if speculate else []
         proposed = values[-(rows - 1):] if isinstance(drafts, mx.array) and rows > 1 else [int(t) for t in drafts]
-        keep = 1
-        if kind == "forced":
-            keep = rows
-            sampled = [*forced, sampled[-1]]
-        elif proposed:
-            for i, draft in enumerate(proposed):
-                if sampled[i] != draft:
-                    break
-                keep += 1
-            self.drafted += len(proposed)
-            self.accepted += keep - 1
-            stream.drafted += len(proposed)
-            stream.accepted += keep - 1
-            if kind == "copy":
-                observe = getattr(stream.proposer, "observe", None)
-                if callable(observe):
-                    observe(len(proposed), keep - 1)
-            elif kind == "head":
-                self._observe_depth(stream, len(proposed), keep - 1)
-        cut = stream.think_cut(sampled[:keep])
-        if cut is not None:
-            keep = cut + 1
-            sampled = [*sampled[:cut], stream.start_close()]
-        stream.rounds += 1
-        got = stream.commit(sampled[:keep])
-        if stream.finished and len(got) < keep:
-            # an end token or the length limit inside the kept drafts: the cache keeps only rows whose tokens
-            # landed (row r holds the token after r - 1 committed ones), so a retained cache matches its tokens
-            keep = len(got) + 1
-        if keep < rows:
-            model.keep_rows(cache, rows, keep)
-        stream.cache_len += keep
-        stream.pending = [sampled[keep - 1]]
+        window = [int(stream.pending[-1]), *proposed]          # the rows' tokens, the pending one first
+        got, path, cut, follow = self._conclude(stream, kind, forced, sampled, window, rows_parents)
+        keep = len(path)
+        if keep < rows or parents is not None:      # a tree commits in keep_rows, even one kept whole
+            model.keep_rows(cache, rows, keep if self._is_prefix(path) else path)
         if self.family_mtp and stream.drafts:
-            depth = 0 if stream.finished else self._depth(stream)
-            if stream.force:
-                depth = 0              # the next round verifies the thinking budget's forced tokens
-            elif depth and self._copy_proposal(stream):
-                depth = 1              # a copied continuation is ahead: one head draft, in case it is gone
             if speculate and cut is None:
-                self._next[stream.stream_id] = model.settle(cache, keep, firsts[keep - 1], stream.cache_len + 1,
-                                                            stream.sampling, depth)
+                self._next[stream.stream_id] = model.settle(cache, keep, firsts[path[-1]], stream.cache_len + 1,
+                                                            stream.sampling, self._head_depth(stream))
             else:
-                # the head reads the kept rows now, with the tokens that follow them (row r is followed by
-                # sampled[r]): late speculation, a forced round, or the budget replaced the kept row's next token
+                # late speculation, a forced round, or the budget replaced the kept row's next token
                 if speculate:
                     model.unspeculate(cache)
-                follow = mx.array(sampled[:keep], dtype=mx.uint32)
-                heads = model.speculate(cache, follow, position, stream.sampling, last_only=True)
-                self._next[stream.stream_id] = model.settle(cache, keep, heads[-1], stream.cache_len + 1,
-                                                            stream.sampling, depth)
+                self._draft_late(stream, cache, position, follow, path)
             if kind == "head":
-                self._observe_cost(len(proposed), (time.perf_counter() - started) * 1e3)
+                self._observe_cost(len(proposed), (time.perf_counter() - started) * 1e3,
+                                   initializing=stream.rounds == 1)
         if _PROFILE:
             self._profile(rows, built - started, read - built, time.perf_counter() - read)
+        ms = (time.perf_counter() - started) * 1e3
+        if kind == "head":
+            self._observe_overhead(1, rows, ms)
+        if _ROUND_LOG:
+            with open(_ROUND_LOG, "a") as handle:
+                handle.write(f"{position} {kind} {rows} {keep} {ms:.2f}\n")
         return got, rows, keep
 
     def _profile(self, rows: int, build: float, wait: float, after: float) -> None:
@@ -443,76 +377,18 @@ class FamilyRounds:
                   f"{acc[3] / n:.2f}, after the read {acc[4] / n:.2f} (mean of {n})", flush=True)
             self._prof = [0, 0.0, 0.0, 0.0, 0.0]
 
-    # -- the draft head's depth ----------------------------------------------------------------------------------
-    def _depth_rates(self, stream: Any) -> list[float]:
-        state = self._depth_state.get(stream.stream_id)
-        if state is None:
-            state = {"p": [float(p) for p in self.depth_prior[:max(1, self.most_drafts)]], "rounds": 0}
-            self._depth_state[stream.stream_id] = state
-        return state["p"]
+    def _release_stream_state(self, stream_id: str) -> None:
+        for table in (self._inflight, self._next, self._mode, self._depth_state, self._served, self._granted):
+            table.pop(stream_id, None)
 
-    def _observe_depth(self, stream: Any, proposed: int, accepted: int) -> None:
-        """Draft j was tried when drafts 1 .. j - 1 were kept; its estimate moves toward whether it was kept."""
-
-        rates = self._depth_rates(stream)
-        for j in range(min(proposed, len(rates))):
-            if accepted < j:
-                break
-            rates[j] += self.depth_rate * ((1.0 if accepted > j else 0.0) - rates[j])
-
-    def _observe_cost(self, drafts: int, ms: float) -> None:
-        if drafts <= 0:
-            return
-        before = self._round_ms.get(drafts)
-        self._round_ms[drafts] = ms if before is None else before + self.cost_rate * (ms - before)
-
-    def _round_cost(self, drafts: int) -> float | None:
-        """A round's wall time with ``drafts`` head drafts: measured, else the load-time forward cost plus the
-        head's steps."""
-
-        if drafts in self._round_ms:
-            return self._round_ms[drafts]
-        forward = self.family_costs.get(drafts + 1)
-        if forward is None:
-            return None
-        return forward + self.mtp_step_ms * drafts
-
-    def _depth(self, stream: Any) -> int:
-        """Head drafts for the next round (1 .. most): the most expected tokens a millisecond at the stream's
-        per-depth acceptance, one deeper every ``depth_probe_every`` rounds so the deeper estimate stays current.
-        Without measured costs: 1 below 80% first-draft acceptance, 2 below 90%, else 3."""
-
-        # every drafted round verifies at least one draft (a window of 2+ rows), also when the length limit or
-        # the thinking budget leaves room for one token: ``commit`` and the budget's cut drop what does not land
-        most = min(self.most_drafts, max(1, stream.draft_room - 1))
-        if most <= 0:
-            return 0
-        rates = self._depth_rates(stream)
-        if not self.family_costs:
-            rate = rates[0]
-            return max(1, min(most, 1 if rate < 0.8 else 2 if rate < 0.9 else 3))
-        best, best_rate = 1, -1.0
-        expected = run = 1.0
-        for d in range(1, most + 1):
-            cost = self._round_cost(d)
-            if cost is None:
-                break
-            run *= rates[d - 1] if d - 1 < len(rates) else rates[-1]
-            expected += run
-            if expected / cost > best_rate:
-                best, best_rate = d, expected / cost
-        state = self._depth_state[stream.stream_id]
-        state["rounds"] += 1
-        if best < most and state["rounds"] % self.depth_probe_every == 0:
-            best += 1
-        return best
-
-    # -- engine surface ------------------------------------------------------------------------------------------
     def _family_reset(self) -> None:
         self._live = []
         self._inflight = {}
         self._next = {}
         self._mode = {}
+        self._depth_state = {}
+        self._served = {}
+        self._granted = {}
 
     def _family_summary(self) -> dict[str, Any]:
         return {"engine": "lanes", "family": True, "rounds": len(self.round_stats), "streams": len(self.streams),

@@ -103,3 +103,37 @@ def test_install_tiles_in_place_and_uninstall_restores():
     finally:
         lane_qmm.uninstall()
     assert bool(mx.all(wide.weight == q).item()) and not getattr(wide, "_lane_tiled", True)
+
+
+@pytest.mark.parametrize("n,k,nt", [(2560, 6144, 64), (16480, 2560, 32), (13952, 2560, 64), (79592, 2560, 0)])
+def test_groups_of_32_rows_do_not_depend_on_row_count(n, k, nt):
+    _needs_tensor_units()
+    mx.random.seed(17)
+    w = (mx.random.normal((n, k)) * 0.02).astype(mx.bfloat16)
+    q, s, b = mx.quantize(w, group_size=32, bits=4)
+    sbt = lane_qmm.pack_scales(s, b)
+    qt = lane_qmm.tile_weight(q, nt, group=32) if nt else q
+    if nt:
+        assert bool(mx.all(lane_qmm.untile_weight(qt, nt, group=32) == q).item())
+    x = (mx.random.normal((128, k)) * 0.5).astype(mx.bfloat16)
+    full = lane_qmm.lane_matmul(x, qt, sbt, tiled=bool(nt), nt=nt or lane_qmm.NT, group=32)
+    for m in (1, 2, 5, 16, 17, 24, 32, 33, 64, 100):
+        part = lane_qmm.lane_matmul(x[:m], qt, sbt, tiled=bool(nt), nt=nt or lane_qmm.NT, group=32)
+        assert _same(part, full[:m]), f"{m} rows: the row count changed the bits"
+    for r in (0, 9, 63, 127):
+        alone = lane_qmm.lane_matmul(x[r:r + 1], qt, sbt, tiled=bool(nt), nt=nt or lane_qmm.NT, group=32)
+        assert _same(alone, full[r:r + 1]), f"row {r} alone differs"
+
+
+def test_groups_of_32_as_accurate_as_mlx():
+    _needs_tensor_units()
+    mx.random.seed(19)
+    n, k = 4096, 2560
+    w = (mx.random.normal((n, k)) * 0.02).astype(mx.bfloat16)
+    q, s, b = mx.quantize(w, group_size=32, bits=4)
+    x = (mx.random.normal((8, k)) * 0.5).astype(mx.bfloat16)
+    ref = x.astype(mx.float32) @ mx.dequantize(q, s, b, group_size=32, bits=4).astype(mx.float32).T
+    ours = lane_qmm.lane_matmul(x, lane_qmm.tile_weight(q, 64, group=32), lane_qmm.pack_scales(s, b), tiled=True, nt=64,
+                                group=32).astype(mx.float32)
+    theirs = mx.quantized_matmul(x, q, s, b, transpose=True, group_size=32, bits=4).astype(mx.float32)
+    assert mx.max(mx.abs(ours - ref)).item() <= 2.5 * mx.max(mx.abs(theirs - ref)).item() + 1e-6

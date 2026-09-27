@@ -1,29 +1,4 @@
-"""Gated-delta layers for many short lanes of one prefix, without copying the state.
-
-Every lane forks the same prefix, so every lane starts from the same
-recurrent state S0 in each gated-delta layer. The stock step kernel keeps a
-full [Hv, Dv, Dk] state per lane and reads and writes all of it per token:
-151 MB per lane per round in bfloat16, 19 GB at 128 lanes. A lane's suffix
-is short, so its state is better kept as S0 plus the few rank-one updates it
-has made. With G_t the product of the step decays,
-
-    S_t = G_t S0 + sum_{i <= t} (G_t / G_i) d_i k_i^T
-
-and the two things the rule reads from the state become
-
-    S_{t-1} decayed, applied to k_t = G_t S0 k_t + sum_{i < t} (G_t / G_i) (k_i . k_t) d_i
-    S_t q_t                         = G_t S0 q_t + sum_{i <= t} (G_t / G_i) (k_i . q_t) d_i
-
-S0 is read once per round for all lanes; each lane reads only its own t
-past keys and deltas. The recurrence is the one in
-``mlx_lm.models.gated_delta`` (scalar decay per value head, keys shared by
-Hv / Hk value heads); only the order of the arithmetic changes, so a lane's
-tokens can differ from the state-kernel path at near-ties, like any other
-change of kernel shape.
-
-A padded suffix position (ragged absorb) has decay 1 and beta 0: its delta
-is zero, so it changes nothing.
-"""
+"""Share prefix state S0 across lanes using S_t = G_t S0 + sum_{i <= t} (G_t / G_i) d_i k_i^T; reordered arithmetic may change near-ties, while padding with decay 1 and beta 0 leaves state unchanged."""
 
 from __future__ import annotations
 
@@ -108,10 +83,7 @@ _STEP_SOURCE = """
     }
 """
 
-# One threadgroup per (lane, key head) instead: the R = Hv / Hk value heads that
-# share a key head share its past-key dot products, so the key history is read
-# once, not R times (a third less history traffic at R = 3), and S0 k, S0 q
-# are read in the [Hv, N, 2, Dv] order the batched matmul writes them.
+# Value heads sharing a key head reuse history dot products and read S0 k and S0 q in the batched matmul's [Hv, N, 2, Dv] order.
 _STEP_SOURCE_KH = """
     const uint tid = thread_position_in_threadgroup.x;
     const uint r = tid / DV;
@@ -354,13 +326,7 @@ class LaneGDNCache:
     kernel_version = 2  # 2: one threadgroup per key head; 1: one per value head
 
     def _flush(self) -> None:
-        """Write the previous step's entry into the history buffers.
-
-        Deferred by one step on purpose: written before the next kernel reads the
-        buffers, the update is the only user of the old buffer and MLX updates it
-        in place; written right after the kernel that read it, the update had to
-        copy the whole buffer (0.5 ms a layer at 128 lanes, 2026-09-22).
-        """
+        """Defer each history write until the next step so its buffer has one user and MLX can update it in place."""
 
         if self._pending is None:
             return

@@ -1,14 +1,4 @@
-"""Exact causal attention for GLM's MLA layers on chains of rows (keys and values expanded per head, head dim
-256, no RoPE), with the committed length read on the device so a forward can be captured in a CUDA graph.
-
-The window's keys and values are written into the cache (slots P .. P + R - 1) before attention, so row r
-(absolute position P + r) attends to cache keys 0 .. P + r. A program handles up to 16 rows of one head and
-one 512-key chunk (eight 64-key tensor-core tiles, the 27B engine's tile step); chunk partials merge in
-absolute key order. A row's arithmetic is the same whatever the other rows of its tile, and chunks are
-fixed by absolute key position, so a window row gets the bits of the serial step at that position.
-Chunks past the last key are empty and skipped by the merge, so the chunk count (exact, or a capacity
-bound for a captured graph) never changes a result.
-"""
+"""Causal MLA attention preserves serial bits with absolute-position chunks merged in key order and empty chunks skipped."""
 
 from __future__ import annotations
 
@@ -103,8 +93,7 @@ class AttnScratch:
 
 def attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, pos: torch.Tensor, scratch: AttnScratch,
               *, scale: float, nch: int | None = None) -> torch.Tensor:
-    """q [R, H, D] (rows at positions pos .. pos + R - 1), caches [capacity, H, D] holding keys through pos + R - 1,
-    pos an int32 [1] device tensor. ``nch``: chunks to visit (default: all the scratch holds). -> [R, H, D] bf16."""
+    """Attend over q [R, H, D] using caches filled through pos + R - 1, device int32 pos, and at most nch chunks; return bf16 [R, H, D]."""
 
     R, H, D = q.shape
     nch = scratch.nch if nch is None else min(nch, scratch.nch)

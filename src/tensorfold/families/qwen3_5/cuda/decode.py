@@ -101,13 +101,7 @@ def serial_decode(w: Weights, st: State, pending: int, count: int,
 
 
 class CopyIndex:
-    """Where each ``min_match``-gram of the context occurs, kept up to date as the context grows.
-
-    ``propose`` returns what ``copy_chain`` would: the longest continuation (up to ``max_nodes``)
-    after an earlier occurrence of the context's last ``min_match`` tokens, the latest occurrence
-    winning ties, or nothing when the continuation is shorter than ``min_match``. Scanning the
-    whole context in Python each round cost ~10 ms at 20k tokens.
-    """
+    """Where each ``min_match``-gram of the context occurs, kept up to date as the context grows."""
 
     def __init__(self, min_match: int = 8):
         self.n = min_match

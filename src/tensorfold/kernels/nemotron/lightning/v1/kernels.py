@@ -1,12 +1,8 @@
-"""Nemotron-H decode glue in a few kernels (Nemotron 3.5 Lightning 30B-A3B).
-
-mlx_lm's decode step runs ~900 small kernels a token (7.3 ms on the M5 Max and
-on the M3 Ultra, where the weights alone take 3.7 and 2.2 ms). Between the
-matmuls each step is one kernel here:
+"""Nemotron-H decode glue in a few kernels (Nemotron 3.5 Lightning 30B-A3B). Between the matmuls:
 
     add_norm     residual add (with the MoE combine) + the next block's RMSNorm
     route        sigmoid scores + correction bias -> top 6 experts and their weights
-    mamba_step   conv window + conv + SiLU + dt + SSM state update + D skip + SiLU(z) gate
+    mamba_scan   conv + SiLU over every row at once, then dt + SSM state update + D skip + SiLU(z) gate in order
     group_norm   the Mamba output's RMSNorm over groups of 512
 
 Every kernel takes R rows of consecutive tokens and treats them in order, and
@@ -22,6 +18,9 @@ import hashlib
 from typing import Any
 
 import mlx.core as mx
+
+from tensorfold.kernels.inputs import ints, padded
+from tensorfold.kernels.nemotron.lightning.v1 import rows as row_kernels
 
 _ADD_NORM = r"""
   // one threadgroup of T threads per row; thread t owns elements t, t + T, t + 2T, ...
@@ -53,12 +52,34 @@ _ADD_NORM = r"""
   }
 """
 
-# experts with the shared one folded in: bf16(sum_e w_e y_e)
-_MIX_EXPERTS = r"""{
-      float routed = 0.0f;
-      for (int e = 0; e < E; e++) routed = fma(float(Y[(int(r) * E + e) * D + c]), WE[int(r) * E + e], routed);
-      delta = float(bfloat(routed));
-    }"""
+
+def _with_group_sums(source: str) -> str:
+    """``_ADD_NORM`` that also writes the lane matmul's input sums of OUT: XS [D / 64, MP] for rows padded to MP
+    (dims = (R, MP)), each group's 64 bf16 values summed in order in fp32 as lane_qmm's XSUM kernel does (same
+    bits), rows past R zero. The next dense projection then skips its XSUM dispatch."""
+
+    head = "  const uint r = threadgroup_position_in_grid.x;\n"
+    store = "    OUT[int(r) * D + c] = bfloat(float(W[c]) * (hv[i] * scale));\n"
+    assert head in source and store in source
+    source = source.replace(head, head + """  threadgroup bfloat xb[D];
+  if (int(r) >= dims[0]) {
+    for (int g = int(t); g < D / 64; g += T) XS[g * dims[1] + int(r)] = 0.0f;
+    return;
+  }
+""")
+    source = source.replace(store, """    const bfloat x = bfloat(float(W[c]) * (hv[i] * scale));
+    OUT[int(r) * D + c] = x;
+    xb[c] = x;
+""")
+    return source + """  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (int g = int(t); g < D / 64; g += T) {
+    float acc = 0.0f;
+    for (int i = 0; i < 64; i++) acc += float(xb[g * 64 + i]);
+    XS[g * dims[1] + int(r)] = acc;
+  }
+"""
+
+
 # plain residual: the block's output
 _MIX_PLAIN = "delta = float(X[at]);"
 # MoE: sum_e w_e y_e (fp32, experts in order) rounded to bf16, plus the shared expert (bf16 add), as mlx_lm
@@ -97,63 +118,62 @@ _ROUTE = r"""
     p = simd_sum(p);
     picked[k] = p;
     total += p;
-    if (lane == 0) IDX[int(r) * OK + k] = uint(winner);
+    if (lane == 0) IDX[int(r) * K + k] = uint(winner);
   }
   if (lane == 0) {
     const float denominator = total + 1e-20f;
-    for (int k = 0; k < K; k++) WT[int(r) * OK + k] = picked[k] / denominator * scaling[0];
-    for (int k = K; k < OK; k++) { IDX[int(r) * OK + k] = uint(NE + k - K); WT[int(r) * OK + k] = 1.0f; }
+    for (int k = 0; k < K; k++) WT[int(r) * K + k] = picked[k] / denominator * scaling[0];
   }
 """
 
-_MAMBA_STEP = r"""
-  // grid (32, DH, H): lane = 4 state elements, y = channel d of head h. Rows are consecutive tokens.
+_MAMBA_CONV = r"""
+  // grid (CD, R): channel ch of row rr. Rows come in segments, one per stream (SEG: a row's segment, START: a
+  // segment's first row); a segment's taps before its first row come from its conv state, row SLOT[s] of CS_IN.
+  // Writes the conv output bf16(silu(bf16(conv))) as mlx_lm rounds it, and the row's conv state (its segment's
+  // last KC-1 inputs).
+  constexpr int CD = XD + 2 * NG * DS;
+  const int ch = int(thread_position_in_grid.x);
+  const int rr = int(thread_position_in_grid.y);
+  const int s = SEG[rr];
+  const int b = START[s];
+  const int loc = rr - b;
+  const int slot = SLOT[s];
+  #define TAP(lp) ((lp) < 0 ? CS_IN[(slot * (KC - 1) + (lp) + KC - 1) * CD + ch] : P[(b + (lp)) * PROJ + XOFF + ch])
+  float a = float(CB[ch]);
+  for (int k = 0; k < KC; k++) a = fma(CW[k * CD + ch], float(TAP(loc - (KC - 1) + k)), a);
+  const float cv = float(bfloat(a));
+  XBC[rr * CD + ch] = bfloat(cv / (1.0f + metal::exp(-cv)));
+  for (int k = 0; k < KC - 1; k++) CS_OUT[(rr * (KC - 1) + k) * CD + ch] = TAP(loc - (KC - 2) + k);
+  #undef TAP
+"""
+
+_MAMBA_SCAN = r"""
+  // grid (32, DH, H): lane = NS state elements of channel d of head h. Rows in order; segment s starts from its
+  // stream's SSM state, row SLOT[s] of S_IN. A row's arithmetic depends only on its own inputs and the state
+  // before it.
   const uint lane = thread_position_in_threadgroup.x;
   const uint d = thread_position_in_grid.y;
   const uint h = thread_position_in_grid.z;
   const uint g = h / (H / NG);
   const int R = dims[0];
   constexpr int NS = DS / 32;
-  constexpr int CD = XD + 2 * NG * DS;          // conv channels: x, B, C
+  constexpr int CD = XD + 2 * NG * DS;
   const int cx = int(h) * DH + int(d);
   const int cb = XD + int(g) * DS + int(lane) * NS;
   const int cc = XD + NG * DS + int(g) * DS + int(lane) * NS;
-  float st[NS];
-  const int sbase = (cx * DS) + int(lane) * NS;
-  for (int i = 0; i < NS; i++) st[i] = float(S_IN[sbase + i]);
+  const int sbase = cx * DS + int(lane) * NS;
   const float A = -metal::exp(float(A_LOG[h]));
   const float dskip = float(bfloat(float(DSKIP[h])));
   const float dtb = float(DT_BIAS[h]);
-
-  // conv of channel ch at row rr: taps over inputs rr-3 .. rr (rows < 0 come from the conv state)
-  #define TAP(ch, pos) ((pos) < 0 ? float(CS_IN[((pos) + KC - 1) * CD + (ch)]) : float(P[(pos) * PROJ + XOFF + (ch)]))
-  #define CONV(ch, rr, out) { \
-      float a_ = float(CB[ch]); \
-      for (int k_ = 0; k_ < KC; k_++) a_ = fma(CW[k_ * CD + (ch)], TAP(ch, (rr) - (KC - 1) + k_), a_); \
-      const float cv_ = float(bfloat(a_)); \
-      out = float(bfloat(cv_ / (1.0f + metal::exp(-cv_)))); }
-
-  // B and C of this head's group, every row, computed once per threadgroup (thread tid owns one of 2 DS channels)
-  threadgroup float bc[MAXR * 2 * DS];
-  const uint tid = thread_position_in_threadgroup.y * 32 + lane;
+  float st[NS];
+  int cur = -1;
   for (int rr = 0; rr < R; rr++) {
-    for (uint c = tid; c < 2 * DS; c += 32 * TGY) {
-      const int ch = c < DS ? XD + int(g) * DS + int(c) : XD + NG * DS + int(g) * DS + int(c - DS);
-      float v; CONV(ch, rr, v);
-      bc[rr * 2 * DS + c] = v;
+    const int s = SEG[rr];
+    if (s != cur) {
+      cur = s;
+      for (int i = 0; i < NS; i++) st[i] = float(S_IN[size_t(SLOT[s]) * SSZ + sbase + i]);
     }
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-
-  for (int rr = 0; rr < R; rr++) {
-    float xv = 0.0f;
-    if (lane == 0) { CONV(cx, rr, xv); }
-    xv = simd_broadcast(xv, 0);
-    float bv[NS], cvv[NS];
-    for (int i = 0; i < NS; i++) {
-      bv[i] = bc[rr * 2 * DS + int(lane) * NS + i];
-      cvv[i] = bc[rr * 2 * DS + DS + int(lane) * NS + i];
-    }
+    const float xv = float(XBC[rr * CD + cx]);
     float dt = float(P[rr * PROJ + DTOFF + int(h)]) + dtb;
     dt = metal::max(dt, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(dt)));   // softplus (logaddexp(x, 0))
     dt = metal::clamp(dt, limits[0], limits[1]);
@@ -161,9 +181,9 @@ _MAMBA_STEP = r"""
     const float xdt = xv * dt;
     float acc = 0.0f;
     for (int i = 0; i < NS; i++) {
-      const float s = dA * st[i] + xdt * bv[i];
-      st[i] = s;
-      acc += s * cvv[i];
+      const float sv = dA * st[i] + xdt * float(XBC[rr * CD + cb + i]);
+      st[i] = sv;
+      acc += sv * float(XBC[rr * CD + cc + i]);
     }
     acc = simd_sum(acc);
     if (lane == 0) {
@@ -174,24 +194,6 @@ _MAMBA_STEP = r"""
     }
     // the SSM state after this row (a verify window keeps the state of its last accepted row)
     for (int i = 0; i < NS; i++) S_OUT[size_t(rr) * SSZ + sbase + i] = st[i];
-    // the conv state after this row: its last KC-1 inputs; each channel written by one thread
-    if (lane == 0) {
-      for (int k = 0; k < KC - 1; k++) {
-        const int pos = rr - (KC - 2) + k;
-        CS_OUT[(rr * (KC - 1) + k) * CD + cx] = pos < 0 ? CS_IN[(pos + KC - 1) * CD + cx] : P[pos * PROJ + XOFF + cx];
-      }
-    }
-    if ((h % (H / NG)) == 0 && d == 0) {
-      for (int i = 0; i < NS; i++) {
-        for (int k = 0; k < KC - 1; k++) {
-          const int pos = rr - (KC - 2) + k;
-          CS_OUT[(rr * (KC - 1) + k) * CD + cb + i] =
-              pos < 0 ? CS_IN[(pos + KC - 1) * CD + cb + i] : P[pos * PROJ + XOFF + cb + i];
-          CS_OUT[(rr * (KC - 1) + k) * CD + cc + i] =
-              pos < 0 ? CS_IN[(pos + KC - 1) * CD + cc + i] : P[pos * PROJ + XOFF + cc + i];
-        }
-      }
-    }
   }
 """
 
@@ -220,13 +222,14 @@ _GROUP_NORM = r"""
 
 
 _ROUTER = r"""
-  // bf16 router logits for R rows: one threadgroup of SG simdgroups per expert. Simdgroup g sums its D / SG inputs
-  // (lane l: 4 consecutive inputs at a time, 128 apart), then simd_sum; the simdgroups' sums are added in order.
-  // A row's logits have the same bits at any row count (the row count is a runtime value).
+  // bf16 router logits for R rows: one threadgroup of SG simdgroups per (expert, block of MAXR rows). Simdgroup g
+  // sums its D / SG inputs (lane l: 4 consecutive inputs at a time, 128 apart), then simd_sum; the simdgroups'
+  // sums are added in order. A row's logits have the same bits at any row count (the row count is a runtime value).
   const uint lane = thread_index_in_simdgroup;
   const uint g = simdgroup_index_in_threadgroup;
   const int e = int(threadgroup_position_in_grid.y);
-  const int R = rows[0];
+  const int rb = int(threadgroup_position_in_grid.z) * MAXR;
+  const int R = min(rows[0] - rb, MAXR);
   constexpr int PART = D / SG;
   threadgroup float part[MAXR][SG];
   float acc[MAXR];
@@ -237,7 +240,7 @@ _ROUTER = r"""
     const float w2 = float(GW[size_t(e) * D + c + 2]), w3 = float(GW[size_t(e) * D + c + 3]);
     for (int r = 0; r < MAXR; r++) {
       if (r >= R) break;
-      const device bfloat* xr = X + r * D + c;
+      const device bfloat* xr = X + (rb + r) * D + c;
       acc[r] = fma(float(xr[3]), w3, fma(float(xr[2]), w2, fma(float(xr[1]), w1, fma(float(xr[0]), w0, acc[r]))));
     }
   }
@@ -250,12 +253,11 @@ _ROUTER = r"""
   if (g == 0 && int(lane) < R) {
     float total = 0.0f;
     for (int k = 0; k < SG; k++) total += part[lane][k];
-    OUT[int(lane) * NE + e] = bfloat(total);
+    OUT[(rb + int(lane)) * NE + e] = bfloat(total);
   }
 """
 
 _kernels: dict[str, Any] = {}
-MAX_ROWS = 16          # rows of one mamba_step call (its B/C buffer lives in threadgroup memory)
 
 
 def tensor_units() -> bool:
@@ -280,50 +282,52 @@ def _kernel(name: str, source: str, inputs: list[str], outputs: list[str]) -> An
     return kernel
 
 
-def add_norm(h: mx.array, delta: mx.array, weight: mx.array, eps: mx.array) -> tuple[mx.array, mx.array]:
-    """(h + delta, RMSNorm(h + delta) * weight) for rows [R, D], both bf16."""
+_NORM_DIMS: dict[int, mx.array] = {}
+
+
+def _norm_call(name: str, mix: str, names: list[str], inputs: list[mx.array], template: list, rows: int, dims: int,
+               group_sums: bool) -> tuple[mx.array, ...]:
+    threads = 896 if dims % 896 == 0 else 256
+    source = _ADD_NORM.replace("MIX", mix)
+    outputs, shapes, dtypes = ["HN", "OUT"], [(rows, dims), (rows, dims)], [mx.bfloat16, mx.bfloat16]
+    grid = rows
+    if group_sums:
+        grid = 16 * -(-rows // 16)                  # the lane matmul's padded rows
+        if rows not in _NORM_DIMS:
+            _NORM_DIMS[rows] = ints((rows, grid))
+        source, name = _with_group_sums(source), name + "_xs"
+        names, inputs = names + ["dims"], inputs + [_NORM_DIMS[rows]]
+        outputs, shapes, dtypes = outputs + ["XS"], shapes + [(dims // 64, grid)], dtypes + [mx.float32]
+    kernel = _kernel(name, source, names, outputs)
+    return tuple(kernel(inputs=inputs, template=[("D", dims), ("T", threads), *template],
+                        grid=(threads * grid, 1, 1), threadgroup=(threads, 1, 1),
+                        output_shapes=shapes, output_dtypes=dtypes))
+
+
+def add_norm(h: mx.array, delta: mx.array, weight: mx.array, eps: mx.array, *, group_sums: bool = False
+             ) -> tuple[mx.array, ...]:
+    """(h + delta, RMSNorm(h + delta) * weight) for rows [R, D], both bf16; with ``group_sums`` also the lane
+    matmul's input sums of the second (``_with_group_sums``)."""
 
     rows, dims = h.shape[0], h.shape[-1]
-    threads = 896 if dims % 896 == 0 else 256
-    source = _ADD_NORM.replace("MIX", _MIX_PLAIN)
-    kernel = _kernel("nemotron_add_norm", source, ["H", "X", "W", "eps"], ["HN", "OUT"])
-    return kernel(inputs=[h, delta, weight, eps], template=[("D", dims), ("T", threads)],
-                  grid=(threads * rows, 1, 1), threadgroup=(threads, 1, 1),
-                  output_shapes=[(rows, dims), (rows, dims)], output_dtypes=[mx.bfloat16, mx.bfloat16])
+    return _norm_call("nemotron_add_norm", _MIX_PLAIN, ["H", "X", "W", "eps"], [h, delta, weight, eps], [],
+                      rows, dims, group_sums)
 
 
 def add_norm_moe(h: mx.array, routed: mx.array, weights: mx.array, shared: mx.array, weight: mx.array,
-                 eps: mx.array) -> tuple[mx.array, mx.array]:
+                 eps: mx.array, *, group_sums: bool = False) -> tuple[mx.array, ...]:
     """As ``add_norm`` with delta = bf16(bf16(sum_e w_e y_e) + shared): routed [R, E, D], weights [R, E]."""
 
     rows, experts, dims = routed.shape
-    threads = 896 if dims % 896 == 0 else 256
-    source = _ADD_NORM.replace("MIX", _MIX_MOE)
-    kernel = _kernel("nemotron_add_norm_moe", source, ["H", "Y", "WE", "SH", "W", "eps"], ["HN", "OUT"])
-    return kernel(inputs=[h, routed, weights, shared, weight, eps],
-                  template=[("D", dims), ("T", threads), ("E", experts)],
-                  grid=(threads * rows, 1, 1), threadgroup=(threads, 1, 1),
-                  output_shapes=[(rows, dims), (rows, dims)], output_dtypes=[mx.bfloat16, mx.bfloat16])
-
-
-def add_norm_experts(h: mx.array, routed: mx.array, weights: mx.array, weight: mx.array,
-                     eps: mx.array) -> tuple[mx.array, mx.array]:
-    """As ``add_norm`` with delta = bf16(sum_e w_e y_e) over routed [R, E, D] (shared expert among them)."""
-
-    rows, experts, dims = routed.shape
-    threads = 896 if dims % 896 == 0 else 256
-    source = _ADD_NORM.replace("MIX", _MIX_EXPERTS)
-    kernel = _kernel("nemotron_add_norm_experts", source, ["H", "Y", "WE", "W", "eps"], ["HN", "OUT"])
-    return kernel(inputs=[h, routed, weights, weight, eps], template=[("D", dims), ("T", threads), ("E", experts)],
-                  grid=(threads * rows, 1, 1), threadgroup=(threads, 1, 1),
-                  output_shapes=[(rows, dims), (rows, dims)], output_dtypes=[mx.bfloat16, mx.bfloat16])
+    return _norm_call("nemotron_add_norm_moe", _MIX_MOE, ["H", "Y", "WE", "SH", "W", "eps"],
+                      [h, routed, padded(weights), shared, weight, eps], [("E", experts)], rows, dims, group_sums)
 
 
 _ROUTER_ROWS: dict[int, mx.array] = {}
 
 
 def router_logits(x: mx.array, gate_w: mx.array, *, simdgroups: int = 8) -> mx.array:
-    """x [R, D] @ gate_w.T [D, E] -> [R, E] bf16, each row with the same bits at any R (R <= 16)."""
+    """x [R, D] @ gate_w.T [D, E] -> [R, E] bf16, each row with the same bits at any R (blocks of 16 rows)."""
 
     rows, dims = x.shape
     experts = gate_w.shape[0]
@@ -335,7 +339,7 @@ def router_logits(x: mx.array, gate_w: mx.array, *, simdgroups: int = 8) -> mx.a
         raise ValueError("router_logits: D must split into simdgroups of 4-wide steps")
     kernel = _kernel("nemotron_router", _ROUTER, ["X", "GW", "rows"], ["OUT"])
     return kernel(inputs=[x, gate_w, count], template=[("D", dims), ("NE", experts), ("SG", simdgroups), ("MAXR", 16)],
-                  grid=(32 * simdgroups, experts, 1), threadgroup=(32 * simdgroups, 1, 1),
+                  grid=(32 * simdgroups, experts, -(-rows // 16)), threadgroup=(32 * simdgroups, 1, 1),
                   output_shapes=[(rows, experts)], output_dtypes=[mx.bfloat16])[0]
 
 
@@ -358,77 +362,89 @@ def _stack_linears(linears: list[Any]) -> tuple[Any, list[int]]:
     return stacked, cuts
 
 
-def _fold_shared(mixer: Any) -> Any:
-    """The MoE's expert tables with the shared expert as two more experts (its up rows and down columns halved).
-
-    The shared expert is relu2(x @ up.T) @ down.T with 2x the routed width, so each half is shaped like a
-    routed expert: rows [0, w) / [w, 2w) of up, and the matching column blocks of down (a whole number of
-    quantization groups). Weight 1 in the router's output adds it to the routed sum.
-    """
-
-    import copy as _copy
-
-    table = mixer.switch_mlp          # replaced in place: the old tables are freed (prompts route to ids < E)
-    up, down = mixer.shared_experts.up_proj, mixer.shared_experts.down_proj
-    width = mixer.switch_mlp.fc1.weight.shape[1]
-    per_word, group = 32 // down.bits, down.group_size
-    fc1, fc2 = _copy.copy(mixer.switch_mlp.fc1), _copy.copy(mixer.switch_mlp.fc2)
-    for name in ("weight", "scales", "biases"):
-        halves = [getattr(up, name)[:width], getattr(up, name)[width:]]
-        setattr(fc1, name, mx.concatenate([getattr(mixer.switch_mlp.fc1, name), mx.stack(halves)], axis=0))
-        cut = width // per_word if name == "weight" else width // group
-        full = getattr(down, name)
-        halves = [full[:, :cut], full[:, cut:]]
-        setattr(fc2, name, mx.concatenate([getattr(mixer.switch_mlp.fc2, name), mx.stack(halves)], axis=0))
-    table.fc1, table.fc2 = fc1, fc2
-    mx.eval(fc1.parameters(), fc2.parameters())
-    return table
-
-
-def route(logits: mx.array, bias: mx.array, top_k: int, scaling: mx.array, *,
-          shared_slots: int = 0) -> tuple[mx.array, mx.array]:
-    """Expert ids [R, K] (best first; ties to the lower id) and weights [R, K] (fp32) from gate logits [R, E].
-
-    ``shared_slots`` appends experts E, E + 1, ... with weight 1 (the shared expert folded into the table).
-    """
+def route(logits: mx.array, bias: mx.array, top_k: int, scaling: mx.array) -> tuple[mx.array, mx.array]:
+    """Expert ids [R, K] (best first; ties to the lower id) and weights [R, K] (fp32) from gate logits [R, E]."""
 
     rows, experts = logits.shape
-    width = top_k + shared_slots
     kernel = _kernel("nemotron_route", _ROUTE, ["G", "bias", "scaling"], ["IDX", "WT"])
-    return kernel(inputs=[logits, bias, scaling], template=[("NE", experts), ("K", top_k), ("OK", width)],
+    return kernel(inputs=[logits, bias, scaling], template=[("NE", experts), ("K", top_k)],
                   grid=(32 * rows, 1, 1), threadgroup=(32, 1, 1),
-                  output_shapes=[(rows, width), (rows, width)], output_dtypes=[mx.uint32, mx.float32])
+                  output_shapes=[(rows, top_k), (rows, top_k)], output_dtypes=[mx.uint32, mx.float32])
+
+
+_TABLES: dict[tuple[str, tuple[int, ...]], Any] = {}      # a call's small index tables, by the call's layout
+
+
+def _table(kind: str, key: tuple[int, ...], build: Any) -> Any:
+    found = _TABLES.get((kind, key))
+    if found is None:
+        if len(_TABLES) >= 1024:                             # many streams give many layouts: keep the recent
+            _TABLES.clear()
+        found = _TABLES[(kind, key)] = build()
+    return found
+
+
+def _segments(lengths: tuple[int, ...]) -> tuple[mx.array, mx.array, mx.array]:
+    """(row count, each row's segment, each segment's first row) for segments of ``lengths`` rows."""
+
+    def build() -> tuple[mx.array, mx.array, mx.array]:
+        seg = [i for i, n in enumerate(lengths) for _ in range(n)]
+        starts, at = [], 0
+        for n in lengths:
+            starts.append(at)
+            at += n
+        return mx.array([at], dtype=mx.int32), ints(seg), ints(starts)
+
+    return _table("segments", lengths, build)
+
+
+def mamba_scan(proj: mx.array, conv_states: mx.array, ssm_states: mx.array, lengths: tuple[int, ...],
+               conv_w: mx.array, conv_b: mx.array, a_log: mx.array, d_skip: mx.array, dt_bias: mx.array,
+               limits: mx.array, *, heads: int, head_dim: int, groups: int, state_dim: int,
+               slots: tuple[int, ...] | None = None) -> tuple[mx.array, mx.array, mx.array]:
+    """Rows of several streams through one Mamba-2 mixer's conv and scan: segment i is ``lengths[i]`` consecutive
+    tokens of stream i, from its conv state ``conv_states[slots[i]]`` [KC-1, CD] and SSM state
+    ``ssm_states[slots[i]]`` [H, DH, DS] (slot i when ``slots`` is None). Returns gated y [R, XD] and every row's
+    conv and SSM states after it: [R, KC-1, CD] and [R, H, DH, DS]. A row's arithmetic is the same whatever the
+    other rows and segments (one code path)."""
+
+    rows, width = proj.shape
+    slots = tuple(range(len(lengths))) if slots is None else tuple(int(s) for s in slots)
+    held = min(int(conv_states.shape[0]), int(ssm_states.shape[0]))
+    if sum(lengths) != rows or len(slots) != len(lengths) or not all(0 <= s < held for s in slots):
+        raise ValueError("mamba_scan: lengths must cover the rows, a state slot per segment")
+    slot = _table("slots", slots, lambda: ints(slots))
+    xd = heads * head_dim
+    conv_dim = xd + 2 * groups * state_dim
+    kc = conv_w.shape[0]
+    dims, seg, starts = _segments(tuple(int(n) for n in lengths))
+    conv = _kernel("nemotron_mamba_conv", _MAMBA_CONV, ["P", "CS_IN", "CW", "CB", "SEG", "START", "SLOT"],
+                   ["XBC", "CS_OUT"])
+    xbc, conv_rows = conv(
+        inputs=[proj, conv_states, conv_w, conv_b, seg, starts, slot],
+        template=[("XD", xd), ("NG", groups), ("DS", state_dim), ("KC", kc), ("PROJ", width), ("XOFF", xd)],
+        grid=(conv_dim, rows, 1), threadgroup=(min(256, conv_dim), 1, 1),
+        output_shapes=[(rows, conv_dim), (rows, kc - 1, conv_dim)], output_dtypes=[mx.bfloat16, conv_states.dtype])
+    scan = _kernel("nemotron_mamba_scan", _MAMBA_SCAN,
+                   ["P", "XBC", "S_IN", "A_LOG", "DSKIP", "DT_BIAS", "limits", "dims", "SEG", "SLOT"], ["Y", "S_OUT"])
+    y, ssm_rows = scan(
+        inputs=[proj, xbc, ssm_states, a_log, d_skip, dt_bias, limits, dims, seg, slot],
+        template=[("H", heads), ("DH", head_dim), ("NG", groups), ("DS", state_dim), ("XD", xd), ("PROJ", width),
+                  ("DTOFF", xd + conv_dim), ("SSZ", heads * head_dim * state_dim)],
+        grid=(32, head_dim, heads), threadgroup=(32, 8, 1),
+        output_shapes=[(rows, xd), (rows, heads, head_dim, state_dim)], output_dtypes=[mx.bfloat16, ssm_states.dtype])
+    return y, conv_rows, ssm_rows
 
 
 def mamba_step(proj: mx.array, conv_state: mx.array, ssm_state: mx.array, conv_w: mx.array, conv_b: mx.array,
                a_log: mx.array, d_skip: mx.array, dt_bias: mx.array, limits: mx.array, *, heads: int,
                head_dim: int, groups: int, state_dim: int) -> tuple[mx.array, mx.array, mx.array]:
-    """R consecutive tokens through one Mamba-2 mixer's conv and scan.
+    """R consecutive tokens of one stream through one Mamba-2 mixer's conv and scan (``mamba_scan`` with one
+    segment): gated y [R, XD] and the conv and SSM states after every row, [R, KC-1, CD] and [R, H, DH, DS] (row
+    r's states are the cache after the first r+1 tokens)."""
 
-    Returns gated y [R, XD] and the conv and SSM states after every row: [R, KC-1, CD] and [R, H, DH, DS]
-    (row r's states are the cache after the first r+1 tokens).
-    """
-
-    rows, width = proj.shape
-    if rows > MAX_ROWS:
-        raise ValueError(f"mamba_step takes at most {MAX_ROWS} rows")
-    xd = heads * head_dim
-    conv_dim = xd + 2 * groups * state_dim
-    kc = conv_w.shape[0]
-    dims = mx.array([rows], dtype=mx.int32)
-    kernel = _kernel("nemotron_mamba_step", _MAMBA_STEP,
-                     ["P", "CS_IN", "S_IN", "CW", "CB", "A_LOG", "DSKIP", "DT_BIAS", "limits", "dims"],
-                     ["Y", "CS_OUT", "S_OUT"])
-    ssz = heads * head_dim * state_dim
-    return kernel(
-        inputs=[proj, conv_state, ssm_state, conv_w, conv_b, a_log, d_skip, dt_bias, limits, dims],
-        template=[("H", heads), ("DH", head_dim), ("NG", groups), ("DS", state_dim), ("XD", xd), ("KC", kc),
-                  ("PROJ", width), ("XOFF", xd), ("DTOFF", xd + conv_dim), ("MAXR", MAX_ROWS), ("TGY", 8),
-                  ("SSZ", ssz)],
-        grid=(32, head_dim, heads), threadgroup=(32, 8, 1),
-        output_shapes=[(rows, xd), (rows, kc - 1, conv_dim), (rows, heads, head_dim, state_dim)],
-        output_dtypes=[mx.bfloat16, conv_state.dtype, ssm_state.dtype],
-    )
+    return mamba_scan(proj, conv_state, ssm_state, (int(proj.shape[0]),), conv_w, conv_b, a_log, d_skip, dt_bias,
+                      limits, heads=heads, head_dim=head_dim, groups=groups, state_dim=state_dim)
 
 
 def group_norm(x: mx.array, weight: mx.array, eps: mx.array, group: int) -> mx.array:
@@ -442,10 +458,10 @@ def group_norm(x: mx.array, weight: mx.array, eps: mx.array, group: int) -> mx.a
 class FusedDecode:
     """Nemotron-H decode (one or more consecutive rows) through the kernels above and MLX's matmuls."""
 
-    # layers per slice handed to the GPU while the rest of the step is built (0: the caller evaluates)
+    # layers per slice handed to the GPU while the rest of the forward is built (0: the caller evaluates)
     eval_every = 8
 
-    def __init__(self, model: Any, *, fold_shared: bool = True) -> None:
+    def __init__(self, model: Any) -> None:
         args = model.args
         self.model = model
         self.backbone = model.backbone
@@ -464,9 +480,6 @@ class FusedDecode:
         # the last call's Mamba states after each of its rows, by layer (for keeping a prefix of a window)
         self.row_states: dict[int, tuple[mx.array, mx.array]] = {}
         self._compiled_blocks: dict[int, Any] = {}
-        import os
-
-        self.compiled = os.environ.get("TF_NEMOTRON_COMPILE", "1") != "0"
         self.mamba_conv_dim = int(args.mamba_num_heads * args.mamba_head_dim + 2 * args.n_groups * args.ssm_state_size)
         for i, layer in enumerate(self.layers):
             if layer.block_type == "M":
@@ -480,16 +493,14 @@ class FusedDecode:
                           for i, layer in enumerate(self.layers) if layer.block_type == "E"}
         mx.eval(list(self.gate_bias.values()))
         self.qkv: dict[int, tuple[Any, list[int]]] = {}
-        self.experts: dict[int, Any] = {}
         for i, layer in enumerate(self.layers):
             if layer.block_type == "*":
                 self.qkv[i] = _stack_linears([layer.mixer.q_proj, layer.mixer.k_proj, layer.mixer.v_proj])
-            elif layer.block_type == "E" and fold_shared:
-                self.experts[i] = _fold_shared(layer.mixer)
-        self.shared_slots = 2 if fold_shared else 0
-        # the routed experts: None runs MLX's switch_mlp gather; else fn(table, x, experts) -> [R, K, D] bf16
-        # (``rows.experts``, row-exact by construction, on GPUs without tensor units)
-        self.experts_fn: Any = None
+        # with the lane matmul (set when it is installed): each norm kernel also writes the next projection's
+        # 64-group input sums, handed to it (in_proj, q|k|v, shared up, head) instead of its own XSUM dispatch;
+        # ``_no_xs`` stands in where no sums exist (the first layer's input, or no lane matmul)
+        self.lane_xs = False
+        self._no_xs = mx.zeros((1,), dtype=mx.float32)
 
     def __call__(self, inputs: mx.array, cache: list[Any]) -> mx.array:
         """Hidden states after the final norm, [1, R, D], for R consecutive tokens (batch 1)."""
@@ -498,6 +509,7 @@ class FusedDecode:
         rows = tokens.shape[0]
         h = self.backbone.embeddings(tokens)                                     # [R, D]
         normed = mx.fast.rms_norm(h, self.layers[0].norm.weight, self.eps_value)
+        xs = self._no_xs
         cache_at = 0
         for i, layer in enumerate(self.layers):
             kind = layer.block_type
@@ -506,22 +518,129 @@ class FusedDecode:
                 c = cache[cache_at]
                 cache_at += 1
                 conv_state, ssm_state = self._mamba_states(c, normed.dtype)
-                block = self._block(i, "M", nxt) if self.compiled else self._mamba_block(i, nxt)
-                h, normed, conv_rows, ssm_rows = block(normed, h, conv_state, ssm_state)
-                c[0], c[1] = conv_rows[rows - 1:rows], ssm_rows[rows - 1:rows]
+                block = self._block(i, "M", nxt)
+                h, normed, xs, conv_rows, ssm_rows = block(normed, xs, h, conv_state, ssm_state)
+                self._hold(c, conv_rows, ssm_rows, rows - 1)
                 self.row_states[i] = (conv_rows, ssm_rows)
                 c.advance(rows)
             elif kind == "*":
                 c = cache[cache_at]
                 cache_at += 1
+                self._use_sums(normed, xs)
                 delta = self._attention(layer.mixer, normed, c, i)
-                h, normed = add_norm(h, delta, nxt, self.eps)
+                h, normed, xs = self._add_norm(h, delta, nxt, xs)
             else:
-                block = self._block(i, "E", nxt) if self.compiled else self._moe_block(i, nxt)
-                h, normed = block(normed, h)
+                block = self._block(i, "E", nxt)
+                h, normed, xs = block(normed, xs, h)
             if self.eval_every and (i + 1) % self.eval_every == 0:
                 mx.async_eval(normed)
-        return normed.reshape(1, rows, -1)
+        return self._use_sums(normed.reshape(1, rows, -1), xs)
+
+    def run_streams(self, tokens: mx.array, lengths: tuple[int, ...], caches: list[list[Any]]) -> mx.array:
+        """Hidden states after the final norm, [1, N, D], for several streams' consecutive tokens in one forward:
+        rows laid out stream by stream (``lengths``), stream i's rows advancing only ``caches[i]``. A row gets the
+        bits it gets in a call of its stream alone: every kernel treats rows on their own, the scan carries each
+        stream's state through its own segment, and attention reads each stream's own keys."""
+
+        lengths = tuple(int(n) for n in lengths)
+        if len(lengths) == 1:
+            return self(tokens, caches[0])
+        tokens = tokens.reshape(-1)
+        rows = int(tokens.shape[0])
+        offsets = [sum(lengths[:i]) for i in range(len(lengths))]
+        h = self.backbone.embeddings(tokens)                                     # [N, D]
+        normed = mx.fast.rms_norm(h, self.layers[0].norm.weight, self.eps_value)
+        xs = self._no_xs
+        cache_at = 0
+        for i, layer in enumerate(self.layers):
+            kind = layer.block_type
+            nxt = self.layers[i + 1].norm.weight if i + 1 < len(self.layers) else self.backbone.norm_f.weight
+            if kind == "M":
+                layer_caches = [c[cache_at] for c in caches]
+                cache_at += 1
+                conv_in, ssm_in, slots = self._states_in(layer_caches, normed.dtype)
+                mixer = layer.mixer
+                conv_w, conv_b, a_log, d_skip, dt_bias = self.mamba[i]
+                y, conv_rows, ssm_rows = mamba_scan(
+                    mixer.in_proj(self._use_sums(normed, xs)), conv_in, ssm_in, lengths, conv_w, conv_b, a_log,
+                    d_skip, dt_bias,
+                    self.limits, heads=self.heads, head_dim=self.head_dim, groups=self.groups,
+                    state_dim=self.state_dim, slots=slots)
+                y = group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
+                h, normed, xs = self._add_norm(h, mixer.out_proj(y), nxt, xs)
+                for c, at, n in zip(layer_caches, offsets, lengths):
+                    self._hold(c, conv_rows, ssm_rows, at + n - 1)
+                    c.advance(n)
+                self.row_states[i] = (conv_rows, ssm_rows)
+            elif kind == "*":
+                layer_caches = [c[cache_at] for c in caches]
+                cache_at += 1
+                self._use_sums(normed, xs)
+                delta = self._attention_streams(layer.mixer, normed, layer_caches, lengths, i)
+                h, normed, xs = self._add_norm(h, delta, nxt, xs)
+            else:
+                block = self._block(i, "E", nxt)
+                h, normed, xs = block(normed, xs, h)
+            if self.eval_every and (i + 1) % self.eval_every == 0:
+                mx.async_eval(normed)
+        return self._use_sums(normed.reshape(1, rows, -1), xs)
+
+    def keep_rows_streams(self, caches: list[list[Any]], lengths: tuple[int, ...], keeps: tuple[int, ...]) -> None:
+        """After ``run_streams``: stream i keeps the first ``keeps[i]`` of its ``lengths[i]`` rows."""
+
+        offsets = [sum(lengths[:i]) for i in range(len(lengths))]
+        cache_at = 0
+        for i, layer in enumerate(self.layers):
+            if layer.block_type not in "M*":
+                continue
+            for cache, at, n, keep in zip(caches, offsets, lengths, keeps):
+                if keep == n:
+                    continue
+                c = cache[cache_at]
+                if layer.block_type == "M":
+                    conv_rows, ssm_rows = self.row_states[i]
+                    self._hold(c, conv_rows, ssm_rows, at + keep - 1)
+                else:
+                    c.trim(n - keep)
+            cache_at += 1
+
+    @staticmethod
+    def _hold(cache: Any, conv_rows: mx.array, ssm_rows: mx.array, row: int) -> None:
+        """The layer's states after row ``row`` of a call: kept a row of the call's states when the cache can."""
+
+        point = getattr(cache, "point", None)
+        if point is not None:
+            point(conv_rows, ssm_rows, row)
+        else:
+            cache[0], cache[1] = conv_rows[row:row + 1], ssm_rows[row:row + 1]
+
+    def _states_in(self, caches: list[Any], dtype: Any) -> tuple[mx.array, mx.array, tuple[int, ...] | None]:
+        """Every stream's (conv, SSM) state for one scan: rows of one earlier call's states when every stream's
+        still is (read through slots, no copy), else the states stacked."""
+
+        refs = [getattr(c, "ref", None) for c in caches]
+        if refs[0] is not None and all(r is not None and r[1] is refs[0][1] for r in refs):
+            return refs[0][0], refs[0][1], tuple(r[2] for r in refs)
+        states = [self._mamba_states(c, dtype) for c in caches]
+        return mx.concatenate([s[0] for s in states]), mx.concatenate([s[1] for s in states]), None
+
+    def _add_norm(self, h: mx.array, delta: mx.array, weight: mx.array, xs: mx.array
+                  ) -> tuple[mx.array, mx.array, mx.array]:
+        """add_norm, and the output's group sums with the lane matmul (else ``xs`` passes through)."""
+
+        if not self.lane_xs:
+            return (*add_norm(h, delta, weight, self.eps), xs)
+        return add_norm(h, delta, weight, self.eps, group_sums=True)
+
+    def _use_sums(self, x: mx.array, xs: mx.array) -> mx.array:
+        """``x``, its group sums handed to the lane matmul's next call on it (when ``xs`` holds them: not
+        ``_no_xs``). Inside a compiled block this is decided per trace: xs has its own shape there."""
+
+        if self.lane_xs and xs.ndim == 2:
+            from tensorfold.kernels.qwen.dense.v1 import lane_glue
+
+            lane_glue.remember(x, xs)
+        return x
 
     def _mamba_states(self, cache: Any, dtype: Any) -> tuple[mx.array, mx.array]:
         conv_state, ssm_state = cache[0], cache[1]
@@ -533,7 +652,7 @@ class FusedDecode:
 
     def _block(self, index: int, kind: str, nxt: mx.array) -> Any:
         """The layer's work between its input norm and the next layer's, compiled (a traced graph per row
-        count replaces ~8-12 Python-built ops: 30 -> 4 us of host time a layer, same bits)."""
+        count replaces ~8-12 Python-built ops."""
 
         fn = self._compiled_blocks.get(index)
         if fn is None:
@@ -545,46 +664,28 @@ class FusedDecode:
         mixer = self.layers[index].mixer
         conv_w, conv_b, a_log, d_skip, dt_bias = self.mamba[index]
 
-        def block(x: mx.array, h: mx.array, conv_state: mx.array, ssm_state: mx.array) -> tuple[mx.array, ...]:
-            proj = mixer.in_proj(x)
+        def block(x: mx.array, xs: mx.array, h: mx.array, conv_state: mx.array, ssm_state: mx.array
+                  ) -> tuple[mx.array, ...]:
+            proj = mixer.in_proj(self._use_sums(x, xs))
             y, conv_rows, ssm_rows = mamba_step(proj, conv_state, ssm_state, conv_w, conv_b, a_log, d_skip,
                                                 dt_bias, self.limits, heads=self.heads, head_dim=self.head_dim,
                                                 groups=self.groups, state_dim=self.state_dim)
             y = group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
-            hn, xn = add_norm(h, mixer.out_proj(y), nxt, self.eps)
-            return hn, xn, conv_rows, ssm_rows
+            hn, xn, xsn = self._add_norm(h, mixer.out_proj(y), nxt, xs)
+            return hn, xn, xsn, conv_rows, ssm_rows
 
         return block
 
     def _moe_block(self, index: int, nxt: mx.array) -> Any:
         mixer = self.layers[index].mixer
 
-        def block(x: mx.array, h: mx.array) -> tuple[mx.array, mx.array]:
-            routed, weights, shared = self._moe(index, mixer, x)
-            if shared is None:
-                return add_norm_experts(h, routed, weights, nxt, self.eps)
-            return add_norm_moe(h, routed, weights, shared, nxt, self.eps)
+        def block(x: mx.array, xs: mx.array, h: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+            routed, weights, shared = self._moe(index, mixer, self._use_sums(x, xs))
+            if not self.lane_xs:
+                return (*add_norm_moe(h, routed, weights, shared, nxt, self.eps), xs)
+            return add_norm_moe(h, routed, weights, shared, nxt, self.eps, group_sums=True)
 
         return block
-
-    def _mamba(self, index: int, mixer: Any, x: mx.array, cache: Any) -> mx.array:
-        conv_w, conv_b, a_log, d_skip, dt_bias = self.mamba[index]
-        proj = mixer.in_proj(x)                                                  # [R, 10304]
-        rows = x.shape[0]
-        conv_state = cache[0]
-        if conv_state is None:
-            conv_state = mx.zeros((1, conv_w.shape[0] - 1, conv_w.shape[1]), dtype=x.dtype)
-        ssm_state = cache[1]
-        if ssm_state is None:
-            ssm_state = mx.zeros((1, self.heads, self.head_dim, self.state_dim), dtype=mx.float32)
-        y, conv_rows, ssm_rows = mamba_step(proj, conv_state, ssm_state, conv_w, conv_b, a_log, d_skip, dt_bias,
-                                            self.limits, heads=self.heads, head_dim=self.head_dim,
-                                            groups=self.groups, state_dim=self.state_dim)
-        cache[0], cache[1] = conv_rows[rows - 1:rows], ssm_rows[rows - 1:rows]
-        self.row_states[index] = (conv_rows, ssm_rows)
-        cache.advance(rows)
-        y = group_norm(y, mixer.norm.weight, self.eps, mixer.norm.group_size)
-        return mixer.out_proj(y)
 
     def keep_rows(self, cache: list[Any], rows: int, keep: int) -> None:
         """After a call on ``rows`` rows, make ``cache`` hold only its first ``keep`` rows."""
@@ -600,11 +701,17 @@ class FusedDecode:
             cache_at += 1
             if layer.block_type == "M":
                 conv_rows, ssm_rows = self.row_states[i]
-                c[0], c[1] = conv_rows[keep - 1:keep], ssm_rows[keep - 1:keep]
+                self._hold(c, conv_rows, ssm_rows, keep - 1)
             else:
                 c.trim(drop)
 
     def _attention(self, mixer: Any, x: mx.array, cache: Any, index: int | None = None) -> mx.array:
+        return self._attention_streams(mixer, x, [cache], (int(x.shape[0]),), index)
+
+    def _attention_streams(self, mixer: Any, x: mx.array, caches: list[Any], lengths: tuple[int, ...],
+                           index: int | None = None) -> mx.array:
+        """q/k/v for all rows, then each stream's rows against its own cache (``lengths``: rows a stream)."""
+
         rows = x.shape[0]
         if index in self.qkv:
             stacked, cuts = self.qkv[index]
@@ -614,6 +721,18 @@ class FusedDecode:
         q = q.reshape(1, rows, mixer.num_heads, -1).transpose(0, 2, 1, 3)
         k = k.reshape(1, rows, mixer.num_key_value_heads, -1).transpose(0, 2, 1, 3)
         v = v.reshape(1, rows, mixer.num_key_value_heads, -1).transpose(0, 2, 1, 3)
+        if len(lengths) == 1:
+            out = self._attend_stream(mixer, q, k, v, caches[0], rows)
+        else:
+            outs, at = [], 0
+            for cache, n in zip(caches, lengths):
+                outs.append(self._attend_stream(mixer, q[:, :, at:at + n], k[:, :, at:at + n], v[:, :, at:at + n],
+                                                cache, n))
+                at += n
+            out = mx.concatenate(outs, axis=2)
+        return mixer.o_proj(out.transpose(0, 2, 1, 3).reshape(rows, -1))
+
+    def _attend_stream(self, mixer: Any, q: mx.array, k: mx.array, v: mx.array, cache: Any, rows: int) -> mx.array:
         keys, values = cache.update_and_fetch(k, v)
         # the kernel is chosen by each row's own key count, so a row gets the bits serial decoding gives it:
         # a window straddling the switch attends row by row
@@ -624,36 +743,22 @@ class FusedDecode:
             # must get serial decoding's bits; the lane kernel's rows are independent by construction
             outs = [self._attend(q[:, :, r:r + 1], keys[:, :, :first + r], values[:, :, :first + r], mixer.scale,
                                  lane_rows[r], 1) for r in range(rows)]
-            out = mx.concatenate(outs, axis=2)
-        else:
-            out = self._attend(q, keys, values, mixer.scale, lane_rows[0], rows)
-        return mixer.o_proj(out.transpose(0, 2, 1, 3).reshape(rows, -1))
+            return mx.concatenate(outs, axis=2)
+        return self._attend(q, keys, values, mixer.scale, lane_rows[0], rows)
 
     @staticmethod
     def _attend(q: mx.array, keys: mx.array, values: mx.array, scale: float, lane: bool, rows: int) -> mx.array:
         if lane:
-            # the 16 query heads of a KV head are one 16-row tile of the tensor-unit kernel: each key read once.
-            # M5 Max, 6 dependent calls: 60k keys 0.323 -> 0.194 ms a call, 32k 0.191 -> 0.120, 12k 0.154 ->
-            # 0.123, but 4k 0.194 -> 0.280 and 1k 0.091 -> 0.250 (its extra launches): from 10k keys on
+            # the 16 query heads of a KV head are one 16-row tile of the tensor-unit kernel: each key read once
+            # (its extra launches cost more than it saves below ``lane_attention_from`` keys)
             from tensorfold.kernels.qwen.dense.v1.lane_attention import lane_sdpa
 
             return lane_sdpa(q, keys, values, scale)
-        # (a block-per-threadgroup kernel sharing each key block across the 16 heads of a KV head was correct
-        # but slower than MLX's per-head kernel at 60k keys, 0.73 vs 0.51 ms, 2026-09-25)
         return mx.fast.scaled_dot_product_attention(q, keys, values, scale=scale, mask="causal" if rows > 1 else None)
 
-    def _moe(self, index: int, mixer: Any, x: mx.array) -> tuple[mx.array, mx.array, mx.array | None]:
-        # (one kernel for norm + router + selection was tried 2026-09-25: a threadgroup reading the 0.69 MB
-        # router alone made decode 220 -> 141 tok/s; the router stays MLX's matmul, then ``route``)
+    def _moe(self, index: int, mixer: Any, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
         # our own router matvec, row-invariant by construction: MLX's bf16 matmul sums 2 rows in another order
-        # than 1 (a logit 1 bf16 unit off at layer 29 of a real decode, 2026-09-25), and per-row gemvs cost a
-        # kernel a row
+        # than 1; then the row-exact expert kernels
         logits = router_logits(x, mixer.gate.weight)
-        experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling,
-                                 shared_slots=self.shared_slots)
-        table = self.experts.get(index)
-        fn = self.experts_fn
-        if table is None:
-            routed = mixer.switch_mlp(x, experts) if fn is None else fn(mixer.switch_mlp, x, experts)
-            return routed, weights, mixer.shared_experts(x)
-        return (table(x, experts) if fn is None else fn(table, x, experts)), weights, None   # shared inside
+        experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling)
+        return row_kernels.experts(mixer.switch_mlp, x, experts), weights, mixer.shared_experts(x)

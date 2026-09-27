@@ -1,16 +1,4 @@
-"""Computed system blocks on disk, so a new agent session never waits for them.
-
-An agent harness sends the same system-and-tools block (~16k tokens for one coding agent)
-with every new session. The lane scheduler keeps a snapshot of that block's
-cache after the first session, but only in memory: every server restart threw
-it away and the first window after it paid the whole prefill again. Here the
-snapshot is written once to disk, keyed by the model and a hash of its
-tokens, and loaded into the checkpoint store when the server starts.
-
-A cache is a list of per-layer objects (``KVCache``, ``ArraysCache``); each is
-stored generically: its ``mx.array`` attributes (and lists of arrays) as
-tensors, its plain attributes as JSON, its class by import path.
-"""
+"""Computed system blocks on disk, so a new."""
 
 from __future__ import annotations
 
@@ -50,6 +38,9 @@ def save_snapshot(directory: Path, model_id: str, tokens: Sequence[int], cache: 
     arrays: dict[str, mx.array] = {}
     layers: list[dict[str, Any]] = []
     for index, item in enumerate(cache):
+        materialize = getattr(item, "materialize", None)
+        if materialize is not None:
+            materialize()
         cls = type(item)
         entry: dict[str, Any] = {"class": f"{cls.__module__}:{cls.__qualname__}", "plain": {},
                                  "arrays": [], "lists": {}, "numpy": []}
@@ -98,12 +89,8 @@ def save_snapshot(directory: Path, model_id: str, tokens: Sequence[int], cache: 
     return target
 
 
-def load_snapshots(directory: Path, model_id: str, *, limit: int | None = None):
-    """Stored snapshots for ``model_id``, newest first, at most ``limit``, one at a time.
-
-    A generator: each snapshot is read only when the caller asks for it. Reading all of them
-    into a list first held every block in memory at once (24 files, 33 GB, 2026-09-23).
-    """
+def load_snapshots(directory: Path, model_id: str, *, limit: int | None = None, allow: Any = None):
+    """Stored snapshots for ``model_id``, newest first, at most ``limit``, one at a time."""
 
     if not directory.is_dir():
         return
@@ -118,6 +105,8 @@ def load_snapshots(directory: Path, model_id: str, *, limit: int | None = None):
             if read_metadata(path).get("model") != model_id:
                 continue                          # another configuration's block: not read at all
         except Exception:  # noqa: BLE001 - a bad file is skipped, never fatal
+            continue
+        if allow is not None and not allow(path):
             continue
         loaded = load_snapshot(path, model_id)
         if loaded is None:
@@ -161,16 +150,7 @@ def load_snapshot(path: Path, model_id: str) -> tuple[list[int], list[Any]] | No
 
 
 class DiskBlocks:
-    """The stored blocks' tokens, so a request can read the one its prompt starts with.
-
-    The server loads only the newest few blocks when it starts. On 2026-09-23 three short
-    blocks from one side request (3,042 / 4,578 / 5,090 tokens) were newer than the
-    main 21,415-token block, so a restart loaded those and left agent sessions to prefill
-    the main block again. A block the checkpoint store lacks is now read when a prompt
-    that starts with it arrives (~1.5 GB: well under a second, against ~40 s of prefill),
-    and a used block's file is touched, so the newest files are the blocks in use.
-    Metadata is read once per file (and again only if the file changes).
-    """
+    """The stored blocks' tokens, so a request can read the one its prompt starts with."""
 
     def __init__(self, directory: Path, model_id: str) -> None:
         self.directory = Path(directory)
@@ -237,15 +217,7 @@ def read_metadata(path: Path) -> dict[str, str]:
 
 
 def blocks_to_warm(directory: Path, model_id: str) -> list[list[int]]:
-    """System blocks saved for the same model under another configuration but not yet under ``model_id``.
-
-    Snapshots are keyed by the kernels that computed them (MLX version, attention
-    mode), so a server started with different kernels has none of the blocks the
-    user's agent sessions need. Only blocks of the same model (the part of the id
-    before the first ``|``) count: another model's token ids mean nothing to this
-    tokenizer. Returns the longest such token lists (a block that is a prefix of
-    another is covered by warming the longer one), newest first.
-    """
+    """System blocks saved for the same model under another configuration but not yet under ``model_id``."""
 
     if not directory.is_dir():
         return []

@@ -13,14 +13,10 @@ from typing import Any
 
 import pytest
 
-from tensorfold.server.app import (
-    CheckpointStore,
-    ChatApp,
-    choose_checkpoints,
-    eos_ids_of,
-    render_prompt_ids,
-)
-from tests.lane_fakes import FakeBatchItem, FakeEngine, fake_serial
+from tensorfold.server.app import ChatApp
+from tensorfold.server.checkpoints import CheckpointStore, choose_checkpoints
+from tensorfold.server.text import eos_ids_of, render_prompt_ids
+from tests.lane_fakes import FakeBatchItem, FakeEngine, FakeFamily, fake_serial
 
 EOS = 49
 
@@ -67,11 +63,8 @@ class FakeTokenizer:
 class SlowFakeEngine(FakeEngine):
     """Rounds take real time so concurrent submissions overlap deterministically."""
 
-    round_delay = 0.004
-
-    def _forward_rows(self, rows: list[list[int]], cache: list[Any]) -> tuple[Any, Any]:
-        time.sleep(self.round_delay)
-        return super()._forward_rows(rows, cache)
+    def __init__(self, model: Any = None, **kwargs: Any) -> None:
+        super().__init__(FakeFamily(delay=0.004), **kwargs)
 
 
 def make_app(**kwargs: Any) -> ChatApp:
@@ -80,7 +73,6 @@ def make_app(**kwargs: Any) -> ChatApp:
         "lanes": 2,
         "max_rows": 16,
         "max_draft": 4,
-        "pending_cap": 6,
         "default_max_tokens": 12,
         "checkpoint_slots": 2,
         "model_aliases": ["alias-a"],
@@ -325,7 +317,7 @@ def test_a_title_request_steps_aside_for_the_turn_and_reruns_exactly() -> None:
 
 
 def test_is_title_request_matches_only_short_tool_free_title_prompts() -> None:
-    from tensorfold.server.app import is_title_request
+    from tensorfold.server.text import is_title_request
 
     title = [{"role": "system", "content": "Write a ~5 word title using only the task."},
              {"role": "user", "content": "<user>hi</user>"}]
@@ -445,16 +437,16 @@ def test_finish_checkpoint_serves_a_verbatim_continuation() -> None:
 def test_scheduler_survives_a_failed_round() -> None:
     app = make_app(lanes=1)
     try:
-        original = app.engine._forward_rows
+        original = app.engine._family_round
         state = {"failed": False}
 
-        def flaky(rows: list[list[int]], cache: list[Any]) -> tuple[Any, Any]:
+        def flaky(*args: Any, **kwargs: Any) -> Any:
             if not state["failed"]:
                 state["failed"] = True
                 raise RuntimeError("metal hiccup")
-            return original(rows, cache)
+            return original(*args, **kwargs)
 
-        app.engine._forward_rows = flaky  # type: ignore[method-assign]
+        app.engine._family_round = flaky  # type: ignore[method-assign]
         with pytest.raises(RuntimeError, match="metal hiccup"):
             app.chat([{"role": "user", "content": "boom"}], max_tokens=6)
         assert app.scheduler.failed_rounds == 1
@@ -488,7 +480,7 @@ def test_scheduler_reads_a_stored_block_the_store_lacks(tmp_path) -> None:
     mx = pytest.importorskip("mlx.core")
     from mlx_lm.models.cache import KVCache
 
-    from tensorfold.server.app import Scheduler
+    from tensorfold.server.scheduler import Scheduler
     from tensorfold.engine.prefix_snapshots import save_snapshot
 
     kv = KVCache()
@@ -511,7 +503,8 @@ def test_conversations_saved_at_shutdown_are_read_back_on_demand(tmp_path) -> No
     mx = pytest.importorskip("mlx.core")
     from mlx_lm.models.cache import KVCache
 
-    from tensorfold.server.app import Scheduler, save_conversations
+    from tensorfold.server.checkpoints import save_conversations
+    from tensorfold.server.scheduler import Scheduler
 
     def cache(n: int) -> list[Any]:
         kv = KVCache()
@@ -540,7 +533,7 @@ def test_conversations_saved_at_shutdown_are_read_back_on_demand(tmp_path) -> No
 
 
 def test_scheduler_runs_its_stop_hook_in_its_own_thread() -> None:
-    from tensorfold.server.app import Scheduler
+    from tensorfold.server.scheduler import Scheduler
 
     scheduler = Scheduler(FakeEngine(), lanes=1, eos_ids=frozenset())
     seen: list[str] = []
@@ -551,7 +544,7 @@ def test_scheduler_runs_its_stop_hook_in_its_own_thread() -> None:
 
 
 def test_checkpoints_and_shared_prefixes_are_taken_on_the_prefill_grid() -> None:
-    from tensorfold.server.app import ChatJob, Scheduler
+    from tensorfold.server.scheduler import ChatJob, Scheduler
 
     class GridEngine(FakeEngine):
         prefill_align = 4
@@ -570,7 +563,7 @@ def test_a_saved_block_is_warmed_in_background_jobs_one_grid_chunk_each(tmp_path
     from mlx_lm.models.cache import KVCache
 
     from tensorfold.engine.prefix_snapshots import save_snapshot
-    from tensorfold.server.app import Scheduler
+    from tensorfold.server.scheduler import Scheduler
 
     class GridEngine(FakeEngine):
         prefill_align = 4
@@ -600,7 +593,7 @@ def test_a_saved_block_is_warmed_in_background_jobs_one_grid_chunk_each(tmp_path
 
 
 def test_a_stored_state_off_the_grid_is_never_matched() -> None:
-    from tensorfold.server.app import ChatJob, Scheduler
+    from tensorfold.server.scheduler import ChatJob, Scheduler
 
     class GridEngine(FakeEngine):
         prefill_align = 4
@@ -613,3 +606,76 @@ def test_a_stored_state_off_the_grid_is_never_matched() -> None:
         store.insert(prompt[:n], [FakeBatchItem([prompt[:n]])], last_prompt=prompt[:n])
     scheduler._start_job(ChatJob(job_id="j", prompt_ids=prompt, max_tokens=2, temperature=0.0))
     assert engine.prefill_calls[-1] == ("j", 4)
+
+
+def test_a_job_that_would_not_fit_waits_for_a_live_stream_to_finish() -> None:
+    from tensorfold.engine.memory import Admission, StreamMemory
+    from tensorfold.server.scheduler import ChatJob, Scheduler
+
+    # 100 bytes up to 1,000 tokens, then 1 a token (a stream's footprint by length); rounds take 50
+    memory = StreamMemory(short_tokens=1000, short=100, long_tokens=2000, long=1100, per_token=1.0, prefill_a=0.0,
+                          prefill_b=0.0, round_bytes=50)
+    jobs = [ChatJob(job_id=f"j{i}", prompt_ids=list(range(1, 11)), max_tokens=40, temperature=0.0) for i in range(2)]
+
+    def started(budget: int) -> tuple[list[str], Any]:
+        engine = FakeEngine()
+        admission = Admission(budget, memory, used=lambda: 1000)
+        scheduler = Scheduler(engine, lanes=4, eos_ids=frozenset(), admission=admission)
+        for job in jobs:
+            job.stream, job.error = None, None
+            scheduler.submit(job)
+        scheduler._admit()
+        return [s.stream_id for s in engine.streams], scheduler
+
+    # the second: 1,000 in use, the first grown from 11 to its longest 50 tokens (39), itself at its longest (50 +
+    # 256 tokens of slack: 100) and a round (50); the first always starts
+    need = 1000 + 39 + 100 + 50
+    ids, scheduler = started(budget=need - 1)
+    assert ids == ["j0"] and scheduler._held is jobs[1] and scheduler.admission.refused == 1
+    ids, _ = started(budget=need)
+    assert ids == ["j0", "j1"]
+
+
+def test_admission_projects_growth_prefill_and_rounds() -> None:
+    from tensorfold.engine.memory import Admission, StreamMemory
+
+    memory = StreamMemory(short_tokens=64, short=1_000, long_tokens=264, long=3_000, per_token=10.0, prefill_a=2.0,
+                          prefill_b=0.001, round_bytes=5_000)
+    # 256 tokens of slack: 0 tokens priced at 256, between the two lengths measured; 8 at the longer one
+    assert [memory.stream_bytes(t) for t in (0, 8)] == [1_000 + 2_000 * 192 // 200, 3_000]
+    admission = Admission(10**6, memory, used=lambda: 20_000)
+    # new stream of 100 + 400 tokens; one live stream at 300 of its 1,000; prefill of 100 tokens under the round
+    expected = 20_000 + 700 * 10 + (3_000 + 10 * (500 + 256 - 264)) + max(5_000, int(2.0 * 100 + 0.001 * 100 * 100))
+    assert admission.projected(100, 500, [(300, 1_000)]) == expected
+    assert memory.prefill_bytes(10_000) == int(2.0 * 2048 + 0.001 * 2048 * 10_000)
+    assert Admission(expected, memory, used=lambda: 20_000).admits(100, 500, [(300, 1_000)])
+    assert not Admission(expected - 1, memory, used=lambda: 20_000).admits(100, 500, [(300, 1_000)])
+    assert Admission(40_000, memory, used=lambda: 20_000).fitting(500) == 1          # 7,920 a stream in 15,000
+
+
+def test_the_app_measures_a_streams_memory_and_prints_its_admission(capsys) -> None:
+    pytest.importorskip("mlx.core")
+    app = make_app(lanes=2, memory_fraction=0.7)
+    try:
+        admission = app.scheduler.admission
+        assert admission is not None and admission.budget > 0
+        memory = admission.memory
+        assert memory.short_tokens < memory.long_tokens and memory.per_token >= 0
+        assert "memory budget" in capsys.readouterr().out
+    finally:
+        app.close()
+
+
+def test_kv_caches_set_the_floor_of_a_streams_per_token_memory() -> None:
+    mx = pytest.importorskip("mlx.core")
+    from mlx_lm.models.cache import KVCache
+
+    from tensorfold.engine.alternating_kv import AlternatingKVCache
+    from tensorfold.engine.memory import _kv_bytes
+
+    plain, alternating = KVCache(), AlternatingKVCache()
+    for cache in (plain, alternating):
+        cache.update_and_fetch(mx.ones((1, 2, 40, 8), dtype=mx.bfloat16), mx.ones((1, 2, 40, 8), dtype=mx.bfloat16))
+    each = 2 * (2 * 8 * 2)                 # keys and values: heads x head_dim x bf16 bytes, a position
+    assert _kv_bytes([plain]) == (each, 0)
+    assert _kv_bytes([plain, alternating, object()]) == (2 * each, each)   # decoding adds a spare buffer

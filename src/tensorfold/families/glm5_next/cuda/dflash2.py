@@ -1,19 +1,4 @@
-"""DFlash2 drafts for GLM-5.3-Flash on CUDA (checkpoint incoai/GLM-5.3-Flash-DFlash2).
-
-The drafter is five Qwen3 layers with grouped dynamic convolutions and a candidate selector. Its context is
-the committed positions' target taps: the mean of the four residual streams after target layers 5, 14, 24,
-33 and 42 (vLLM's Eagle3 aux hidden states for glm5_next: ``hc_contract(hc_post(...))`` after those layers),
-concatenated, projected by ``fc`` and normed, then each layer's keys and values. A round embeds
-[pending token, mask x 7] at positions p .. p + 7 (attention inside the block is bidirectional; the context
-comes in as keys and values), and rows 1.. give candidates for positions p + 1, p + 2, ... through the target's
-head. A chain takes one candidate a position with the selector's edge scores and, when sampling, the
-target's own keyed Gumbel noise for that position (the 27B Metal policy: edge 0.6, noise 0.7).
-
-Drafts only change acceptance: the verifier keeps a draft only when it equals the serial sample. With two
-ranks each holds half the attention heads, half the MLP and half the vocabulary; o_proj and down_proj
-partials are gathered and added in rank order, and both ranks merge the same top candidates, so both chain
-the same drafts. The weights are quantized to 4 bits (groups of 64) at load, like the 27B's drafter.
-"""
+"""DFlash2 drafts use committed target taps and identical rank-ordered candidate merges; verification accepts only the serial sample."""
 
 from __future__ import annotations
 
@@ -65,8 +50,7 @@ def _dconv_kernel(X, DYN, BASE, RES, OUT, D: tl.constexpr, G: tl.constexpr, GS: 
 @triton.jit
 def _prep_kernel(QKV, QN, KN, COS, SIN, QO, KO, VO, L, stride, eps,
                  H: tl.constexpr, HKV: tl.constexpr, HALF: tl.constexpr):
-    """Program (row, head) over [q heads | k heads | v heads]: q and k get their RMS norm and rotary embedding,
-    v is copied; outputs are (heads, rows, head_dim)."""
+    """Normalize and rotate q and k in [q heads | k heads | v heads], copy v, and return [heads, rows, head_dim]."""
 
     row = tl.program_id(0)
     head = tl.program_id(1)
@@ -104,9 +88,7 @@ def _prep_kernel(QKV, QN, KN, COS, SIN, QO, KO, VO, L, stride, eps,
 @triton.jit
 def _dattn_kernel(Q, K, V, OUT, POS, window, scale, N: tl.constexpr, G: tl.constexpr, NH: tl.constexpr,
                   HD: tl.constexpr, CAP: tl.constexpr, BK: tl.constexpr, CAUSAL: tl.constexpr):
-    """Program = one key/value head: its G query heads x N block rows against keys [0, s + N), where s is the
-    committed length on the device: context keys within the sliding window, and the block's own keys (all of
-    them, or up to the row when causal). Online softmax in fp32; out [N, NH * HD] bf16."""
+    """Each KV head attends its query groups to sliding-window context and block keys, masking future block keys when causal, with fp32 softmax."""
 
     kvh = tl.program_id(0)
     M: tl.constexpr = G * N
@@ -181,9 +163,7 @@ class DraftLayer:
 
 
 class Drafter:
-    """The DFlash2 drafter for one sequence: static per-layer context keys and values (position-indexed, the
-    committed length on the device), a block pass, and ``propose``. ``capture()`` records the block pass and the
-    context update for 1..8 rows as CUDA graphs (same kernels and buffers, so the same drafts)."""
+    """Draft one sequence from position-indexed context using device lengths and static buffers shared by eager execution and CUDA graphs."""
 
     def __init__(self, draft_dir: str | Path, w: Weights, *, block: int | None = None, capacity: int = 2560) -> None:
         path = Path(draft_dir)
@@ -260,8 +240,7 @@ class Drafter:
                     down=quantize4(gpu(dn))))
         torch.cuda.empty_cache()
         self.inv_freq = 1.0 / theta ** (torch.arange(hd // 2, device=dev, dtype=torch.float32) * 2 / hd)
-        # context keys and values by position (the block's own rows are written past the committed length
-        # during a pass and overwritten by the next context update)
+        # Block rows sit past committed context and the next context update overwrites them.
         self.cap = capacity + self.block
         self.kc = [torch.zeros((KV, self.cap, hd), dtype=torch.bfloat16, device=dev) for _ in self.layers]
         self.vc = [torch.zeros((KV, self.cap, hd), dtype=torch.bfloat16, device=dev) for _ in self.layers]
@@ -374,8 +353,7 @@ class Drafter:
 
     # -- drafts -------------------------------------------------------------------------------------------------
     def _block_compute(self) -> None:
-        """One pass over [pending, mask x (block - 1)] at the committed length: every row's top candidates
-        (merged over the ranks' vocabulary halves) and the selector's projected rows."""
+        """Run [pending, mask x (block - 1)] at the committed length and merge candidates over both ranks' vocabulary halves."""
 
         n = self.block
         x = torch.empty((n, self.D), dtype=torch.bfloat16, device=self.dev)
@@ -447,9 +425,7 @@ class Drafter:
 
     def chain(self, tokens: np.ndarray, values: np.ndarray, proj: np.ndarray, anchor: int, first: int,
               sampling: Sampling | None, confidence: float = 0.0) -> list[int]:
-        """One candidate a position: logits plus the selector's edge from the previous pick, plus the target's
-        keyed noise at that position when sampling. ``confidence`` > 0: stop once the product of the picks'
-        probabilities (softmax over the candidates) falls below it; the first draft is always kept."""
+        """Choose candidates with selector edges and target keyed noise; stop below cumulative confidence, always keeping the first draft."""
 
         depth = tokens.shape[0]
         sampled = sampling is not None and sampling.temperature > 0

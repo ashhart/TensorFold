@@ -37,10 +37,13 @@ class Qwen27Engine:
 
     def __init__(self, model_dir: Path, draft_dir: Path | None, *, max_rows: int = 12, tp: int = 1,
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
-                 tp_draft: bool = False, allow_copy: bool = True):
+                 tp_draft: bool = False, allow_copy: bool = True,
+                 context: int | None = None, context_explicit: bool | None = None):
         import torch
 
         from .weights import load
+        from tensorfold.cuda.capacity import admit, gather_ints
+        from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, linear_weights
 
         self.torch = torch
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
@@ -60,6 +63,17 @@ class Qwen27Engine:
                 raise RuntimeError("the two ranks were started with different settings (two-rank drafter, rows, "
                                    f"head split, copies): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}; "
                                    "pull the draft model on both machines, or pass --no-drafts to both")
+            gather = lambda values: gather_ints(torch, lambda send, recv: dist.all_gather_into_tensor(recv, send), values)
+        else:
+            gather = None
+        self.capacity_plan = admit(model_dir, context, context_explicit, torch,
+                                   lambda text: gdn_geometry(text, tp, max_rows), linear_weights,
+                                   rank=rank, world=tp, gather=gather,
+                                   draft_dir=draft_dir if rank == 0 or tp_draft else None,
+                                   draft_geometry=lambda text: draft_geometry(text, tp if tp_draft else 1, max_rows, bounded=True),
+                                   startup_copies=int(tp == 2))
+        self.context_window = self.capacity_plan["context_window"]
+        if tp == 2:
             full = load(model_dir)
             self.w = split_weights(full, rank, tiled=True, split_head=split_head)
         else:
@@ -107,6 +121,10 @@ class Qwen27Engine:
 
         from .decode import draft_decode, prefill
 
+        if len(prompt) >= self.context_window:
+            raise ValueError(f"prompt of {len(prompt)} tokens exceeds the {self.context_window}-token safe capacity; "
+                             "shorten the prompt or reserve fewer reply tokens")
+        max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         t0 = time.perf_counter()
         hit = self._resume(prompt) if draft else None
         if self.tp == 2:

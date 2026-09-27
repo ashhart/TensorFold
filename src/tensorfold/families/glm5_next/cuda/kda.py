@@ -1,11 +1,4 @@
-"""GLM-5.3-Flash's KDA chain on CUDA (``kda.cu``): one fused kernel per layer and window.
-
-``chain`` runs R consecutive rows from the committed state: conv + SiLU, q/k L2 norms, per-channel decay,
-beta, the delta rule and the gated RMSNorm, writing the rows' outputs, the state after the last row, and
-what a replay needs (normalized k, v, the decay and beta per row). ``replay`` rebuilds the state after the
-first ``keep`` rows of a window with the same update routine, so keeping a prefix of a window gives the
-bits of serial steps.
-"""
+"""Fused KDA chains and prefix replay use the same state update routine so a kept prefix preserves serial bits."""
 
 from __future__ import annotations
 
@@ -27,8 +20,7 @@ def _ext():
 
 
 class KDAScratch:
-    """Static per-window buffers (outputs and replay inputs) for up to ``rows`` rows of ``heads`` heads. With
-    ``parent``/``index``: views into one allocation for all layers (so a commit replays every layer at once)."""
+    """Static window outputs and replay inputs, with optional views into shared storage so all layers can replay together."""
 
     def __init__(self, rows: int, heads: int, device, parent: "KDAScratchSet | None" = None, index: int = 0) -> None:
         if parent is None:
@@ -67,8 +59,7 @@ def chain(p: torch.Tensor, b_off: int, a: torch.Tensor, g: torch.Tensor, conv_st
           conv_w: torch.Tensor, state_in: torch.Tensor, a_log: torch.Tensor, dt_bias: torch.Tensor,
           norm_w: torch.Tensor, eps: float, lower: float, rows: int, scratch: KDAScratch,
           state_out: torch.Tensor) -> torch.Tensor:
-    """p: projection rows [q | k | v | ... | b at b_off ...] (row stride p.stride(0)); a, g: the forget-gate and
-    output-gate rows (bf16, row strides their own). Returns scratch.out[:rows]."""
+    """Run projection rows p [q | k | v | ... | b at b_off ...] and bf16 gate rows a and g using their own strides; return scratch.out[:rows]."""
 
     _ext().chain(p, p.stride(0), int(b_off), a, a.stride(0), g, g.stride(0), conv_state, conv_w, state_in, a_log,
                  dt_bias, norm_w, float(eps), float(lower), int(rows), scratch.out, state_out, scratch.k, scratch.v,

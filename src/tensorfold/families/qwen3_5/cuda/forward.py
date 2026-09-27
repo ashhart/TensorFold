@@ -76,14 +76,7 @@ Record = GDNRecord | AttentionRecord
 
 
 class State:
-    """Committed cache state, with one local sequence and no per-node copies.
-
-    Attention keys and values live in growable buffers: rows [0, pos) are committed and a commit
-    writes the accepted rows in place (a copy of the whole cache per round cost ~13 ms at 20k
-    keys). Cloned states share buffers; a clone only ever writes rows at or past its own ``pos``,
-    so an older clone's rows stay intact, while a longer one that shares the buffer is overwritten
-    (``cuda_server`` drops such cache entries when it resumes from a shorter one).
-    """
+    """Committed cache state, with one local sequence and no per-node copies."""
 
     def __init__(self, w: Weights):
         c = w.config
@@ -208,9 +201,6 @@ def commit(st: State, record: Sequence[Record], path: Sequence[int]) -> None:
 
     if not path or len(record) != len(st.rec):
         raise ValueError("record and nonempty path required")
-    # All layers at once: one GDN replay launch for every layer, the conv rows of every layer in one
-    # gather, the new key/value rows in one multi-tensor copy. Per layer this was ~130 small launches
-    # a round (~2.3 ms of a ~62 ms round on two Sparks); the arithmetic is unchanged.
     device = record[0].k.device
     n = len(path)
     take = torch.tensor(list(path), dtype=torch.int64, device=device)

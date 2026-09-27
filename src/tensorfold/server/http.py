@@ -10,21 +10,43 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 import traceback
 import uuid
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from tensorfold.tool_parameters import decode_parameter, parameter_schemas
+from tensorfold.server.tools import active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas
+from tensorfold.server.errors import RequestError
+from tensorfold.server.request_options import parse_numbers
+from tensorfold.server.messages import normalize_messages, validate_modalities
+from tensorfold.server.tool_policy import ToolCallPolicy
+from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
 
 
-class RequestError(ValueError):
-    """A request the server refuses: answered with HTTP 400 (in a stream, an error event)."""
+def _memory(reset_peak: bool, *, admission: Any = None) -> dict[str, int]:
+    """MLX's memory in bytes: live buffers, its cache of freed ones, and the peak (since the last reset)."""
+
+    if admission is not None:
+        return admission.memory_snapshot(reset_peak)
+    try:
+        import mlx.core as mx
+    except ImportError:          # the CUDA server
+        return {}
+    memory = {"active": int(mx.get_active_memory()), "cache": int(mx.get_cache_memory()),
+              "peak": int(mx.get_peak_memory())}
+    if reset_peak:
+        mx.reset_peak_memory()
+    return memory
+
+
+class Server(ThreadingHTTPServer):
+    """One thread a connection; the listen backlog takes a burst of clients connecting at once."""
+
+    request_queue_size = 128
 
 
 def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list[str]:
@@ -36,400 +58,6 @@ def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list
         if model_id and model_id not in ids:
             ids.append(model_id)
     return ids
-
-
-def _normalize_tool_call_arguments(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Make assistant tool_call arguments a MAPPING for the chat template.
-
-    The OpenAI wire format carries `function.arguments` as a JSON STRING, and
-    that is what real clients send. The Qwen3.6 template does
-
-        {%- for args_name, args_value in tool_call.arguments|items %}
-
-    which requires a mapping, so a string raises
-    "TypeError: Can only get item pairs from a mapping." inside Jinja. The
-    request then dies with no response at all -- the client sits on a spinner
-    forever. It fires on every turn whose history contains a prior assistant
-    tool call, i.e. every agentic turn after the first.
-
-    Parse the string into a dict when possible and leave everything else alone.
-    Copies only the messages it has to touch.
-    """
-
-    if not messages:
-        return messages
-    out: list[dict[str, Any]] = []
-    changed = False
-    for message in messages:
-        calls = message.get("tool_calls") if isinstance(message, dict) else None
-        if not calls:
-            out.append(message)
-            continue
-        new_calls = []
-        touched = False
-        for call in calls:
-            fn = call.get("function") if isinstance(call, dict) else None
-            args = fn.get("arguments") if isinstance(fn, dict) else None
-            if isinstance(args, str):
-                try:
-                    parsed = json.loads(args)
-                except (ValueError, TypeError):
-                    parsed = None
-                if isinstance(parsed, dict):
-                    call = {**call, "function": {**fn, "arguments": parsed}}
-                    touched = True
-            new_calls.append(call)
-        if touched:
-            out.append({**message, "tool_calls": new_calls})
-            changed = True
-        else:
-            out.append(message)
-    return out if changed else messages
-
-
-def longest_common_prefix_len(a: list[int], b: list[int]) -> int:
-    """How many leading tokens two prompts share."""
-    n = min(len(a), len(b))
-    for i in range(n):
-        if a[i] != b[i]:
-            return i
-    return n
-
-
-def longest_reusable_prefix(cached: list[int], requested: list[int]) -> int:
-    """Return how many cached tokens can seed the new request.
-
-    The live cache is reusable only when every cached token is a strict prefix
-    of the request, leaving at least one request token to produce logits.
-    """
-
-    if not cached or len(cached) >= len(requested):
-        return 0
-    if requested[: len(cached)] != cached:
-        return 0
-    return len(cached)
-
-
-def strip_trailing_stops(tokens: list[int], stop_ids: set[int]) -> list[int]:
-    end = len(tokens)
-    while end > 0 and tokens[end - 1] in stop_ids:
-        end -= 1
-    return tokens[:end]
-
-
-def tool_spec_name(tool: dict[str, Any]) -> str:
-    function = tool.get("function") if isinstance(tool, dict) else None
-    if isinstance(function, dict):
-        return str(function.get("name") or "").strip()
-    return str(tool.get("name") or "").strip() if isinstance(tool, dict) else ""
-
-
-def normalize_tool_specs(tools: Any) -> list[dict[str, Any]]:
-    if tools is None:
-        return []
-    if not isinstance(tools, list):
-        raise ValueError("tools must be a list")
-    normalized: list[dict[str, Any]] = []
-    for index, tool in enumerate(tools):
-        if not isinstance(tool, dict):
-            raise ValueError(f"tools[{index}] must be an object")
-        if not tool_spec_name(tool):
-            raise ValueError(f"tools[{index}] must include a function name")
-        normalized.append(tool)
-    return normalized
-
-
-def tool_choice_disables_tools(tool_choice: Any) -> bool:
-    if tool_choice is None:
-        return False
-    if isinstance(tool_choice, str):
-        return tool_choice.strip().lower() == "none"
-    if isinstance(tool_choice, dict):
-        value = tool_choice.get("type") or tool_choice.get("mode")
-        return isinstance(value, str) and value.strip().lower() == "none"
-    return False
-
-
-def validate_tool_choice(tools: list[dict[str, Any]], tool_choice: Any) -> None:
-    if not isinstance(tool_choice, dict):
-        return
-    if str(tool_choice.get("type") or "").lower() != "function":
-        return
-    function = tool_choice.get("function")
-    if not isinstance(function, dict):
-        raise ValueError("tool_choice function must include a function object")
-    requested = str(function.get("name") or "").strip()
-    if not requested:
-        raise ValueError("tool_choice function must include a name")
-    known = {tool_spec_name(tool) for tool in tools}
-    if requested not in known:
-        raise ValueError(f"tool_choice requested unknown tool '{requested}'")
-
-
-def active_tool_specs(tools: Any, tool_choice: Any) -> list[dict[str, Any]]:
-    specs = normalize_tool_specs(tools)
-    if not specs or tool_choice_disables_tools(tool_choice):
-        return []
-    validate_tool_choice(specs, tool_choice)
-    return specs
-
-
-_TOOL_CALL_BLOCK_RE = re.compile(
-    r"<tool_call>\s*(.*?)\s*</tool_call>",
-    re.IGNORECASE | re.DOTALL,
-)
-_NAMESPACED_TOOL_CALL_BLOCK_RE = re.compile(
-    r"<([A-Za-z_][\w.-]*):tool_call>\s*(.*?)\s*</\1:tool_call>",
-    re.IGNORECASE | re.DOTALL,
-)
-_TOOL_FUNCTION_BLOCK_RE = re.compile(
-    r"^\s*<function=([^>\s]+)>\s*(.*?)\s*</function>\s*$",
-    re.IGNORECASE | re.DOTALL,
-)
-# One framing newline a side, as the chat template writes (and vLLM's Qwen parser reads) them: a
-# value's own leading or trailing whitespace (a file's last newline, indentation) is part of it, and
-# stripping it made the resent history differ from the tokens the model wrote, so the whole reply
-# was prefilled again (a 15,007-token file write: 51 s to first token on the next turn).
-_TOOL_PARAMETER_BLOCK_RE = re.compile(
-    r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>",
-    re.IGNORECASE | re.DOTALL,
-)
-_JSON_FENCE_RE = re.compile(
-    r"^\s*```(?:json)?\s*(.*?)\s*```\s*$",
-    re.IGNORECASE | re.DOTALL,
-)
-_MISSING = object()
-
-
-def _tool_json_object(value: Any) -> dict[str, Any]:
-    if value is None:
-        parsed: Any = {}
-    elif isinstance(value, str):
-        text = value.strip()
-        parsed = json.loads(text) if text else {}
-    else:
-        parsed = value
-    if not isinstance(parsed, dict):
-        raise ValueError("tool_call arguments must be a JSON object")
-    return parsed
-
-
-def _loose_tool_arguments(payload: dict[str, Any], explicit: Any) -> Any:
-    if explicit is not _MISSING:
-        return explicit
-    return {
-        key: value
-        for key, value in payload.items()
-        if key not in {"name", "tool", "function", "call", "type"}
-    }
-
-
-def _parse_tool_call_payload(block: str, schemas: dict[str, dict[str, Any]] | None = None) -> tuple[str, dict[str, Any]] | None:
-    try:
-        payload = json.loads(block)
-    except json.JSONDecodeError:
-        payload = None
-    if isinstance(payload, list):
-        for item in payload:
-            parsed = _parse_tool_call_payload(json.dumps(item, ensure_ascii=False))
-            if parsed is not None:
-                return parsed
-        return None
-    if isinstance(payload, dict):
-        function = payload.get("function")
-        if isinstance(function, dict):
-            name = function.get("name") or function.get("tool") or function.get("function")
-            explicit_arguments = function.get(
-                "arguments",
-                function.get("args", function.get("parameters", _MISSING)),
-            )
-            arguments = _loose_tool_arguments(function, explicit_arguments)
-        else:
-            name = (
-                payload.get("name")
-                or payload.get("tool")
-                or payload.get("function")
-                or payload.get("call")
-            )
-            explicit_arguments = payload.get(
-                "arguments",
-                payload.get("args", payload.get("parameters", _MISSING)),
-            )
-            arguments = _loose_tool_arguments(payload, explicit_arguments)
-        name_text = str(name or "").strip()
-        if not name_text:
-            raise ValueError("tool_call is missing a function name")
-        return name_text, _tool_json_object(arguments)
-
-    match = _TOOL_FUNCTION_BLOCK_RE.match(block)
-    if match is None:
-        return None
-    name = match.group(1).strip()
-    arguments: dict[str, Any] = {}
-    body = match.group(2)
-    for param_match in _TOOL_PARAMETER_BLOCK_RE.finditer(body):
-        key = param_match.group(1).strip()
-        schema = (schemas or {}).get(name.lower(), {}).get(key, {})
-        arguments[key] = decode_parameter(param_match.group(2), schema)
-    if not name:
-        raise ValueError("tool_call is missing a function name")
-    return name, arguments
-
-
-def _strip_json_fence(text: str) -> str:
-    match = _JSON_FENCE_RE.match(text)
-    if match is None:
-        return text
-    return match.group(1).strip()
-
-
-def _openai_tool_call(raw_name: str, arguments: dict[str, Any], known: dict[str, str]) -> dict[str, Any]:
-    name = known.get(raw_name.lower())
-    if name is None:
-        raise ValueError(f"unknown tool '{raw_name}'")
-    return {
-        "id": f"call_{uuid.uuid4().hex[:24]}",
-        "type": "function",
-        "function": {
-            "name": name,
-            "arguments": json.dumps(
-                arguments,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-        },
-    }
-
-
-def _parse_bare_json_tool_calls(text: str, known: dict[str, str]) -> list[dict[str, Any]] | None:
-    stripped = _strip_json_fence(text.strip())
-    if not stripped or stripped[0] not in "[{":
-        return None
-    try:
-        payload = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-    payloads = payload if isinstance(payload, list) else [payload]
-    calls: list[dict[str, Any]] = []
-    for item in payloads:
-        if not isinstance(item, dict):
-            return None
-        parsed = _parse_tool_call_payload(json.dumps(item, ensure_ascii=False))
-        if parsed is None:
-            return None
-        raw_name, arguments = parsed
-        if raw_name.lower() not in known:
-            return None
-        calls.append(_openai_tool_call(raw_name, arguments, known))
-    return calls or None
-
-
-def parse_tool_calls_from_content(
-    text: str,
-    tools: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, Any]] | None]:
-    if not tools:
-        return text, None
-    known = {tool_spec_name(tool).lower(): tool_spec_name(tool) for tool in tools}
-    schemas = parameter_schemas(tools)
-    envelopes: list[tuple[int, int, str]] = []
-    for match in _TOOL_CALL_BLOCK_RE.finditer(text):
-        envelopes.append((match.start(), match.end(), match.group(1).strip()))
-    for match in _NAMESPACED_TOOL_CALL_BLOCK_RE.finditer(text):
-        envelopes.append((match.start(), match.end(), match.group(2).strip()))
-    if not envelopes:
-        bare_calls = _parse_bare_json_tool_calls(text, known)
-        if bare_calls is not None:
-            return "", bare_calls
-        return text, None
-    envelopes.sort(key=lambda item: item[0])
-    calls: list[dict[str, Any]] = []
-    residue_parts: list[str] = []
-    cursor = 0
-    for index, (start, end, block) in enumerate(envelopes):
-        residue_parts.append(text[cursor:start])
-        cursor = end
-        parsed = _parse_tool_call_payload(block, schemas)
-        if parsed is None:
-            raise ValueError("unsupported tool_call payload format")
-        raw_name, arguments = parsed
-        if raw_name.lower() not in known:
-            # A call to a tool the client did not offer stays in the reply as text:
-            # raising here ended the stream, and the agent client retried the same turn in a loop.
-            residue_parts.append(text[start:end])
-            continue
-        calls.append(_openai_tool_call(raw_name, arguments, known))
-        if index + 1 < len(envelopes) and envelopes[index + 1][0] < end:
-            raise ValueError("overlapping tool_call blocks")
-    residue_parts.append(text[cursor:])
-    content = "".join(residue_parts).strip()
-    return content, calls or None
-
-
-def stream_tool_call_deltas(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    deltas: list[dict[str, Any]] = []
-    for index, tool_call in enumerate(tool_calls):
-        function = tool_call.get("function") if isinstance(tool_call, dict) else None
-        if not isinstance(function, dict):
-            continue
-        deltas.append(
-            {
-                "tool_calls": [
-                    {
-                        "index": index,
-                        "id": str(tool_call.get("id") or f"call_{index}"),
-                        "type": str(tool_call.get("type") or "function"),
-                        "function": {
-                            "name": str(function.get("name") or ""),
-                            "arguments": "",
-                        },
-                    }
-                ]
-            }
-        )
-        arguments = str(function.get("arguments") or "")
-        if arguments:
-            deltas.append({"tool_calls": [{"index": index, "function": {"arguments": arguments}}]})
-    return deltas
-
-
-HARMONY_FINAL_MARKER = "<|channel|>final<|message|>"
-HARMONY_ANALYSIS_MARKER = "<|channel|>analysis<|message|>"
-HARMONY_TERMINATORS = ("<|return|>", "<|end|>", "<|call|>", "<|start|>")
-
-
-def parse_harmony_output(text: str) -> tuple[str, str | None]:
-    """Split harmony-format output (GPT-OSS) into (content, reasoning).
-
-    Non-harmony text passes through unchanged with no reasoning. When the
-    final channel never arrived (token budget spent inside analysis), content
-    is empty and the partial analysis is surfaced as reasoning.
-    """
-
-    if "<|channel|>" not in text:
-        return text, None
-
-    reasoning: str | None = None
-    if HARMONY_ANALYSIS_MARKER in text:
-        reasoning = text.split(HARMONY_ANALYSIS_MARKER, 1)[1]
-        for terminator in (HARMONY_FINAL_MARKER, *HARMONY_TERMINATORS):
-            reasoning = reasoning.split(terminator, 1)[0]
-
-    if HARMONY_FINAL_MARKER not in text:
-        return "", reasoning
-    content = text.split(HARMONY_FINAL_MARKER, 1)[1]
-    for terminator in HARMONY_TERMINATORS:
-        content = content.split(terminator, 1)[0]
-    return content, reasoning
-
-
-def streaming_visible_text(text: str) -> str:
-    """The part of partially-decoded output that should stream to the client."""
-
-    if "<|channel|>" not in text:
-        return text
-    content, _ = parse_harmony_output(text)
-    return content
 
 
 def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
@@ -461,6 +89,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         "model": app.served_name,
                         "model_ids": app.model_ids,
                         "max_batch_size": app.max_batch_size,
+                        "warming": bool(getattr(app, "warming", False)),
+                        "memory": _memory("reset_peak=1" in self.path, admission=getattr(app, "prompt_memory", None)),
                     }
                 )
                 return
@@ -494,11 +124,22 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return ""
             return str(prompt)
 
-        def _messages_from_legacy_completion(self, body: dict[str, Any]) -> list[dict[str, Any]]:
-            messages = body.get("messages")
-            if isinstance(messages, list) and messages:
-                return messages
-            return [{"role": "user", "content": self._legacy_prompt_to_text(body.get("prompt", ""))}]
+        def _legacy_prompt(self, prompt: Any) -> str | list[int]:
+            """A completion's prompt as the model reads it: token ids as given, anything else as text."""
+
+            if isinstance(prompt, list) and prompt and all(isinstance(t, int) for t in prompt):
+                with app.tokenizer_lock:
+                    tokenizer = app.tokenizer
+                    if not hasattr(type(tokenizer), "__len__"):
+                        tokenizer = getattr(tokenizer, "_tokenizer", tokenizer)
+                    try:
+                        vocab = len(tokenizer)
+                    except TypeError:
+                        vocab = int(tokenizer.vocab_size)
+                if any(type(t) is not int or not 0 <= t < vocab for t in prompt):
+                    raise RequestError(f"prompt token ids must be integers in the valid range 0 to {vocab - 1}")
+                return list(prompt)
+            return self._legacy_prompt_to_text(prompt)
 
         def do_POST(self) -> None:
             route = self._route()
@@ -510,17 +151,23 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
 
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                body = json.loads(self.rfile.read(length) or b"{}")
+                body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
+                validate_modalities(body)
                 if _REQUEST_LOG and body.get("priority") != "background":   # batch jobs are not client traffic
                     with open(_REQUEST_LOG, "a") as handle:
                         handle.write(json.dumps(body) + "\n")
+                raw_kw: dict[str, Any] = {}
                 if is_chat_completion:
-                    messages = body.get("messages")
-                    if not isinstance(messages, list) or not messages:
-                        raise ValueError("messages must be a non-empty list")
+                    messages = normalize_messages(body.get("messages"))
                     tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
+                elif isinstance(body.get("messages"), list) and body["messages"]:
+                    messages, tools = normalize_messages(body["messages"]), []    # a completion sent as a chat
+                elif getattr(app, "accepts_raw_prompt", False):
+                    # a text completion reads its prompt raw, as vLLM and mlx_lm do: no chat template, no think block
+                    messages, tools = [], []
+                    raw_kw["prompt"] = self._legacy_prompt(body.get("prompt", ""))
                 else:
-                    messages = self._messages_from_legacy_completion(body)
+                    messages = [{"role": "user", "content": self._legacy_prompt_to_text(body.get("prompt", ""))}]
                     tools = []
                 max_tokens = body.get("max_tokens") or body.get("max_completion_tokens")
                 temperature = float(body.get("temperature") or 0.0)
@@ -530,18 +177,27 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "seed", "priority", "draft",
                                                         "thinking_budget")
                                    if k in body}
-                if "reasoning_effort" in body:
-                    effort = body["reasoning_effort"]
-                    if effort not in ("none", "low", "medium", "high", "xhigh"):
-                        raise ValueError("reasoning_effort must be none, low, medium, high or xhigh")
-                    sampling_fields["reasoning_effort"] = "xhigh" if effort == "high" else effort
+                effort = body.get("reasoning_effort")
+                if effort is not None:
+                    # null means the server's default; OpenAI's "minimal" is the template's "low"
+                    if effort not in ("none", "minimal", "low", "medium", "high", "xhigh"):
+                        raise ValueError("reasoning_effort must be none, minimal, low, medium, high or xhigh")
+                    sampling_fields["reasoning_effort"] = {"high": "xhigh", "minimal": "low"}.get(effort, effort)
                     sampling_fields["enable_thinking"] = effort != "none"
                 template_kwargs = body.get("chat_template_kwargs") or {}
                 if isinstance(template_kwargs, dict) and "enable_thinking" in template_kwargs:
                     sampling_fields["enable_thinking"] = bool(template_kwargs["enable_thinking"])
+                    if sampling_fields["enable_thinking"] and sampling_fields.get("reasoning_effort") == "none":
+                        sampling_fields.pop("reasoning_effort")
                 sampling_kw = ({"sampling": sampling_fields}
                                if getattr(app, "accepts_sampling", False) else {})
+                if getattr(app, "accepts_cancellation", False):
+                    sampling_kw["cancellation"] = socket_cancellation(self.connection)
                 stream = bool(body.get("stream", False))
+                tool_policy = ToolCallPolicy(body)
+            except RequestError as exc:
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
             except Exception as exc:
                 self._send_json({"error": {"message": str(exc)}}, status=400)
                 return
@@ -579,16 +235,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return extras
 
             def attach_tool_calls(reply: dict[str, Any]) -> dict[str, Any]:
-                if not tools:
-                    return reply
-                content, tool_calls = parse_tool_calls_from_content(str(reply.get("content") or ""), tools)
-                if not tool_calls:
-                    return reply
-                next_reply = dict(reply)
-                next_reply["content"] = content
-                next_reply["tool_calls"] = tool_calls
-                next_reply["finish_reason"] = "tool_calls"
-                return next_reply
+                return tool_policy.finish(reply, tools, parse_tool_calls_from_content)
 
             def stream_chunk(
                 delta: str | dict[str, Any] = "",
@@ -641,16 +288,12 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         error: BaseException | None = None,
                         extras: dict[str, Any] | None = None,
                     ) -> None:
-                        payload = stream_chunk("", finish_reason or "length")
-                        if extras:
-                            # Telemetry rides the final chunk so streaming
-                            # clients see the same extras as JSON replies.
-                            payload.update(extras)
                         if error is not None:
-                            payload["tensorfold_error"] = {
-                                "type": type(error).__name__,
-                                "message": str(error),
-                            }
+                            payload = {"error": {"message": str(error), "type": "server_error"}}
+                        else:
+                            payload = stream_chunk("", finish_reason or "length")
+                            if extras:
+                                payload.update(extras)
                         emit(payload)
                         self.wfile.write(b"data: [DONE]\n\n")
                         self.wfile.flush()
@@ -666,7 +309,10 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         if tools:
                             streamed = [False]
 
-                            def on_prose(delta: str) -> None:
+                            def on_prose(delta: str | dict[str, Any]) -> None:
+                                delta = tool_policy.delta(delta)
+                                if not delta:
+                                    return
                                 if not streamed[0]:
                                     streamed[0] = True
                                     emit(stream_chunk({"role": "assistant"}))
@@ -684,8 +330,15 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                                     tools=tools,
                                     **extra,
                                     **sampling_kw,
+                                    **raw_kw,
                                 )
                             )
+                            tail = tool_policy.flush()
+                            if tail:
+                                if not streamed[0]:
+                                    streamed[0] = True
+                                    emit(stream_chunk({"role": "assistant"}))
+                                emit(stream_chunk(tail))
                             tool_calls = reply.get("tool_calls")
                             if tool_calls and not reply.get("tool_calls_streamed"):
                                 # (calls the app already streamed as they were written are not sent twice)
@@ -703,9 +356,12 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                                 temperature=temperature,
                                 on_delta=on_delta,
                                 **sampling_kw,
+                                **raw_kw,
                             )
-                    except BrokenPipeError:
+                    except (BrokenPipeError, ConnectionResetError):
                         raise
+                    except RequestCancelled:
+                        return
                     except RequestError as exc:
                         emit({"error": {"message": str(exc), "type": "invalid_request_error"}})
                         self.wfile.write(b"data: [DONE]\n\n")
@@ -718,7 +374,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         )
                         traceback.print_exc()
                         try:
-                            finish_stream("stop", error=exc)
+                            finish_stream(None, error=exc)
                         except BrokenPipeError:
                             pass
                         return
@@ -737,6 +393,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         temperature=temperature,
                         tools=tools or None,
                         **sampling_kw,
+                        **raw_kw,
                     )
                 )
                 if is_text_completion:
@@ -785,7 +442,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         **response_extras(reply),
                     }
                 )
-            except BrokenPipeError:
+            except (BrokenPipeError, ConnectionResetError, RequestCancelled):
                 pass
             except RequestError as exc:
                 self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)

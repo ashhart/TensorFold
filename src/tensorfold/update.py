@@ -1,10 +1,4 @@
-"""Version tracking against the GitHub releases, and ``tensorfold update``.
-
-``serve`` starts ``check_in_background()``: one request to GitHub's releases API in a daemon thread (the result is
-cached for a day), which prints a line when a newer release exists and never delays or stops the server. Set
-``TENSORFOLD_NO_UPDATE_CHECK=1`` or pass ``--no-update-check`` to skip it. ``tensorfold update`` installs the latest
-release with this Python's pip, or fast-forwards a clean local clone that is installed in editable mode.
-"""
+"""Check releases without blocking the server; update with pip or fast-forward a clean editable clone."""
 
 from __future__ import annotations
 
@@ -143,8 +137,7 @@ def update(*, check_only: bool = False, force: bool = False) -> int:
         if code != 0:
             print(f"[tensorfold] {clone} could not fast-forward to {tag}: update it yourself", file=sys.stderr)
         return code
-    # Upgrade tensorfold itself; its dependencies change only when the new release needs other versions, so
-    # MLX on a Mac and PyTorch in NVIDIA's container stay as they are.
+    # Upgrade dependencies only when the new release requires different versions.
     code = _run([sys.executable, "-m", "pip", "install", "--upgrade", f"git+{REPO_URL}@{tag}"])
     if code == 0:
         installed = subprocess.run([sys.executable, "-c", "import tensorfold; print(tensorfold.__version__)"],

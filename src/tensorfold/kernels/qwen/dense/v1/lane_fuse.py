@@ -37,9 +37,6 @@ import mlx.core as mx
 enabled = False         # the lane decoder uses the stacked groups (off until proven)
 auto_build = True       # a layer's groups are stacked on first use when build() has not run
 kinds = {"zba", "kv", "gu"}     # the groups used (a subset switches the others back to separate calls)
-# row counts where a stack measured slower than its members' two concurrent calls (dependent chains of
-# 64 blocks, M5 Max, 2026-09-23): gate/up at 17-32 rows (one 32-row op per group) lost ~11 us a layer,
-# while it saved ~9 at 1-16 rows and ~5 at 48-128
 separate_rows: dict[str, range] = {"gu": range(17, 33)}
 
 # group kind -> the parent module's projections, stacked in this order
@@ -269,13 +266,10 @@ def _replace_once(source: str, old: str, new: str) -> str:
 def _variant_sources() -> dict[str, tuple[str, list[str], list[str]]]:
     from tensorfold.kernels.qwen.dense.v1 import lane_glue
 
-    pre = _replace_once(lane_glue._GDN_PRE, "float(Ain[w * NV + hv])", "float(Ain[w * ZS + AO + hv])")
-    pre = _replace_once(pre, "float(Bin[w * NV + hv])", "float(Bin[w * ZS + BO + hv])")
     post = _replace_once(lane_glue._GDN_POST, "float(Z[m * NV * DV + hv * DV + d])", "float(Z[m * ZS + hv * DV + d])")
     act = _replace_once(lane_glue._MLP_ACT, "float(GATE[e])", "float(GATE[e + int(m) * N])")    # rows of 2N
     act = _replace_once(act, "float(UP[e])", "float(UP[e + int(m) * N + N])")
     return {
-        "gdn_pre": (pre, ["QKV", "CS", "CW", "windows", "Ain", "Bin", "ALOG", "DT"], ["Q", "Kout", "Vout", "G", "BETA"]),
         "gdn_post": (post, ["Y", "Z", "NW", "eps", "dims"], ["OUT", "XS"]),
         "mlp_act": (act, ["GATE", "UP", "dims"], ["HOUT", "XS"]),
     }
@@ -315,30 +309,6 @@ def _eps(eps: float) -> mx.array:
     return _consts[key]
 
 
-def gdn_pre(qkv: mx.array, conv_state: mx.array, conv_weight: mx.array, windows: mx.array, zba: mx.array,
-            a_log: mx.array, dt_bias: mx.array, *, nk: int, nv: int, dk: int, dv: int) -> tuple[mx.array, ...]:
-    """``lane_glue.gdn_pre`` with b and a read in place from ``gdn_in``'s [z | b | a] rows."""
-
-    W = int(qkv.shape[-2])
-    C = int(qkv.shape[-1])
-    taps = int(conv_weight.shape[1])
-    zs = int(zba.shape[-1])
-    if dk != dv or dk % 32:
-        raise ValueError("gdn_pre: needs head_k_dim == head_v_dim, a multiple of 32")
-    if zs != nv * dv + 2 * nv:
-        raise ValueError(f"gdn_pre: [z | b | a] rows of {nv * dv + 2 * nv} expected, got {zs}")
-    zba2 = zba.reshape(W, zs)
-    q, k, v, g, beta = _kernel("gdn_pre")(
-        inputs=[qkv.reshape(W, C), conv_state.reshape(taps - 1, C), conv_weight.reshape(C, taps), windows,
-                zba2, zba2, a_log, dt_bias],                  # Ain and Bin: the same rows, at a's and b's columns
-        template=[("NK", nk), ("NV", nv), ("DK", dk), ("DV", dv), ("TAPS", taps),
-                  ("ZS", zs), ("AO", nv * dv + nv), ("BO", nv * dv)],
-        grid=(32, 2 * nk + nv, W), threadgroup=(32, 1, 1),
-        output_shapes=[(1, W, nk, dk), (1, W, nk, dk), (1, W, nv, dv), (1, W, nv), (1, W, nv)],
-        output_dtypes=[qkv.dtype, qkv.dtype, qkv.dtype, mx.float32, qkv.dtype])
-    return q, k, v, g, beta
-
-
 def gdn_post(y: mx.array, zba: mx.array, weight: mx.array, eps: float) -> mx.array:
     """``lane_glue.gdn_post`` with z read in place from ``gdn_in``'s [z | b | a] rows."""
 
@@ -375,7 +345,7 @@ def mlp_act(gu: mx.array) -> mx.array:
 def warm(model: Any, *, rows: tuple[int, ...] = (1, 17, 33)) -> int:
     """Compile the stacked shapes' lane matmul variants (per row tile) and the consumer kernels."""
 
-    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, stream_gdn
 
     seen: set[tuple[int, int, int, bool]] = set()
     outs: list[mx.array] = []
@@ -401,13 +371,14 @@ def warm(model: Any, *, rows: tuple[int, ...] = (1, 17, 33)) -> int:
                     nk, dk = int(module.num_k_heads), int(module.head_k_dim)
                     taps = int(module.conv_kernel_size)
                     C = 2 * nk * dk + nv * dv
-                    windows = mx.zeros((m, taps), dtype=mx.int32)
-                    outs.extend(gdn_pre(mx.zeros((1, m, C), dtype=mx.bfloat16),
-                                        mx.zeros((1, taps - 1, C), dtype=mx.bfloat16), module.conv1d.weight,
-                                        windows, y[None], module.A_log, module.dt_bias, nk=nk, nv=nv, dk=dk, dv=dv))
+                    plan = stream_gdn.ConvPlan([[-1] + list(range(m - 1))], taps - 1)
+                    outs.extend(stream_gdn.gdn_pre(mx.zeros((1, m, C), dtype=mx.bfloat16),
+                                                   [mx.zeros((1, taps - 1, C), dtype=mx.bfloat16)],
+                                                   module.conv1d.weight, plan, y[None], module.A_log, module.dt_bias,
+                                                   nk=nk, nv=nv, dk=dk, dv=dv))
     mx.eval(outs)
     return len(seen)
 
 
-__all__ = ["GROUPS", "attn_kv", "auto_build", "build", "clear", "enabled", "gdn_in", "gdn_post", "gdn_pre", "kinds",
+__all__ = ["GROUPS", "attn_kv", "auto_build", "build", "clear", "enabled", "gdn_in", "gdn_post", "kinds",
            "mlp_act", "mlp_gate_up", "separate_rows", "sources", "stats", "warm"]

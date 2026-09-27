@@ -1,12 +1,4 @@
-"""Top-k over a vocabulary row, fast and deterministic: radix select on bf16 keys.
-
-MLX's argpartition over [16, 248320] takes 2-3 ms and ran twice a round (exact
-sampling's candidates, DFlash2's lattice). A bf16 logit is a 16-bit key: two
-256-bin histogram passes find the k-th largest key T, one pass collects every
-element above T and the ties at T with the smallest token ids, and one
-simdgroup sorts the k survivors by (value desc, id asc). One threadgroup per
-row; each row's result depends only on that row.
-"""
+"""Radix-select bf16 top-k logits per row, resolving ties by lowest token id so each row is independent."""
 
 from __future__ import annotations
 

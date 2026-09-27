@@ -1,8 +1,4 @@
-"""Models from Hugging Face: a repo id (``Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP``) or a local directory.
-
-A repo id resolves to its snapshot in the Hugging Face cache (``~/.cache/huggingface/hub`` unless ``HF_HOME`` or
-``HF_HUB_CACHE`` say otherwise), downloading it first when it is not there yet.
-"""
+"""Resolve local model directories or Hugging Face snapshots, downloading missing weights when requested."""
 
 from __future__ import annotations
 
@@ -21,8 +17,7 @@ def is_repo_id(name: str) -> bool:
 
 
 def cached(repo_id: str, *, cache_dir: Any = None) -> Path | None:
-    """The repo's snapshot in the local cache, or None when it has not been downloaded. A cache written without
-    ``refs/main`` (some download tools skip it) falls back to its newest snapshot holding a config.json."""
+    """Use the cached snapshot, falling back to the newest config-bearing snapshot when refs/main is absent."""
 
     from huggingface_hub import snapshot_download
 
@@ -49,12 +44,7 @@ def pull(repo_id: str, *, cache_dir: Any = None) -> Path:
 
 
 def _cached_weights_complete(snapshot: Path, *, required_files: tuple[str, ...] = ()) -> bool:
-    """A config-only snapshot is enough for ``info``, but not for ``serve``.
-
-    Hugging Face's local-only snapshot lookup also returns partial snapshots, so check the model weights before
-    skipping the full download. The supported checkpoints use either a safetensors index, numbered model shards,
-    or a single model.safetensors file.
-    """
+    """Require complete weights before serving because Hugging Face also returns partial local snapshots."""
 
     if not all((snapshot / name).is_file() for name in required_files):
         return False

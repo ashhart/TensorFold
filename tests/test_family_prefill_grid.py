@@ -109,3 +109,9 @@ def test_without_a_grid_decoded_states_are_kept():
     stream = LaneStream("a", list(range(5)), 4)
     _run(engine, stream)
     assert "a" in engine.finished_caches
+
+
+def test_every_prompt_chunk_counts_as_progress():
+    engine = _engine()
+    _run(engine, LaneStream("a", list(range(10, 21)), 3))          # 11 tokens on a grid of 4: 3 chunks
+    assert engine.prefill_chunks == 3

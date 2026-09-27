@@ -1,22 +1,4 @@
-"""Sampling that is byte exact to serial decoding: every token a fixed function of its position.
-
-Greedy decoding is what makes lanes simple to check, but Qwen3.8 ships with
-``do_sample: true, temperature 1.0, top_k 20, top_p 0.95`` and loops under
-greedy decoding in agent sessions (an agent session repeated one tool call six
-times and then doubled its reply every turn to 32k tokens, 2026-09-23).
-
-Here the token at absolute position p is
-
-    argmax over the kept candidates i of  logit_i / T + g(seed, p, i)
-
-where the kept candidates are the top_k logits (ties broken by token id) cut to
-the smallest set holding top_p of the tempered probability, and g is Gumbel
-noise from a hash of (seed, p, i). That is an exact draw from the top-k/top-p
-distribution (Gumbel-max), and it depends only on the row's own logits and its
-position. A verify window row gets the same token as the serial step at that
-position, so drafted output stays byte identical to serial sampling with the
-same seed, and a draft is accepted exactly when it equals that token.
-"""
+"""Key Gumbel draws by seed, absolute position, and token id so verification matches serial top-k/top-p sampling."""
 
 from __future__ import annotations
 
@@ -37,6 +19,9 @@ class Sampling:
     temperature: float = 1.0
     top_k: int = 20
     top_p: float = 0.95
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "top_k", max(0, int(self.top_k)))
 
 
 def seed_for(tokens: Sequence[int], salt: int = 0) -> int:
@@ -91,9 +76,7 @@ def choose(values: np.ndarray, ids: np.ndarray, position: int, s: Sampling) -> i
 
 
 def choose_rows(values: np.ndarray, ids: np.ndarray, positions: Sequence[int], s: Sampling) -> list[int]:
-    """``choose`` for every row at once, with the same bits: each step is elementwise or runs along
-    one row in the same order (a row alone or among others gives the same token; checked against
-    ``choose`` on 46,750 rows, ties included). ~0.23 -> 0.035 ms for 16 rows (2026-09-24)."""
+    """Choose each row with the same operation order and bits as an independent ``choose`` call."""
 
     rows, width = ids.shape
     order = np.lexsort((ids, -values), axis=-1)
@@ -110,8 +93,7 @@ def choose_rows(values: np.ndarray, ids: np.ndarray, positions: Sequence[int], s
 
 
 def top_candidates(logits: Any, s: Sampling) -> tuple[Any, Any] | None:
-    """The rows' candidates ``sample_rows`` reads (lazy MLX arrays), so a caller can evaluate them with
-    the forward instead of in a GPU round trip of their own; None where ``sample_rows`` takes another path."""
+    """Return lazy candidates for evaluation with the forward, or None when ``sample_rows`` uses another path."""
 
     import mlx.core as mx
 
@@ -126,19 +108,20 @@ def top_candidates(logits: Any, s: Sampling) -> tuple[Any, Any] | None:
 
 def sample_rows(logits: Any, positions: Sequence[int], s: Sampling, keep: dict | None = None,
                 top: tuple[Any, Any] | None = None) -> list[int]:
-    """Rows of ``logits`` [W, V] (MLX) at absolute ``positions`` -> one token each.
-
-    ``keep`` (a dict) receives the rows' candidates the draw chose among: ``cand`` [W, K] ids and
-    ``vals`` [W, K] logits (host arrays already read for the draw; nothing more is computed).
-    ``top``: ``top_candidates(logits, s)``, already evaluated.
-    """
+    """Sample logits [W, V] at absolute positions, optionally recording candidates in ``keep`` or reusing evaluated ``top``."""
 
     import mlx.core as mx
 
     if not s.top_k and 0.0 < s.top_p < 1.0 and top is None and keep is None:
         drawn = _nucleus_rows(logits, positions, s)
         if drawn is not None:
-            return drawn
+            missing = [r for r, token in enumerate(drawn) if token is None]
+            if missing:
+                rows = logits.reshape(-1, logits.shape[-1])[mx.array(missing, dtype=mx.int32)]
+                fallback = sample_rows(rows, [positions[r] for r in missing], s, keep={})
+                for row, token in zip(missing, fallback):
+                    drawn[row] = token
+            return [int(token) for token in drawn]
     if top is None:
         top = top_candidates(logits, s)
     if top is not None:
@@ -158,16 +141,8 @@ def sample_rows(logits: Any, positions: Sequence[int], s: Sampling, keep: dict |
     return choose_rows(vals_np, cand_np.astype(np.int64), positions, s)
 
 
-def _nucleus_rows(logits: Any, positions: Sequence[int], s: Sampling) -> list[int] | None:
-    """top_k 0 and 0 < top_p < 1 without sorting the vocabulary on the host.
-
-    The GPU returns each row's top ``NUCLEUS_CANDIDATES`` logits and the log of its full
-    normalizer; the nucleus is cut from the candidates in (value, id) order with those
-    probabilities. Every token above the candidates' lowest value is a candidate, so a
-    nucleus that ends above that value is the one the whole row gives; a row whose nucleus
-    reaches it returns None and is drawn from the whole vocabulary. ~0.4 ms a row for a
-    131k vocabulary instead of ~9.7 (2026-09-25).
-    """
+def _nucleus_rows(logits: Any, positions: Sequence[int], s: Sampling) -> list[int | None] | None:
+    """Draw each narrow nucleus independently; None marks rows needing the whole vocabulary."""
 
     import mlx.core as mx
 
@@ -181,17 +156,18 @@ def _nucleus_rows(logits: Any, positions: Sequence[int], s: Sampling) -> list[in
     vals = mx.take_along_axis(flat, cand, axis=-1)
     norm = mx.logsumexp(flat / temperature, axis=-1)
     cand_np, vals_np, norm_np = np.array(cand).astype(np.int64), np.array(vals), np.array(norm).astype(np.float64)
-    out: list[int] = []
+    out: list[int | None] = []
     for row in range(cand_np.shape[0]):
         order = np.lexsort((cand_np[row], -vals_np[row]))
         ids, values = cand_np[row][order], vals_np[row][order].astype(np.float64)
         scaled = values / temperature
         kept = int((np.cumsum(np.exp(scaled - norm_np[row])) < s.top_p).sum()) + 1
         if kept >= count or values[kept - 1] <= values[-1]:
-            return None
+            out.append(None)
+            continue
         score = scaled[:kept] - np.log(-np.log(uniform(s.seed, int(positions[row]), ids[:kept])))
         out.append(int(ids[int(np.argmax(score))]))
-    return out
+    return out if any(token is not None for token in out) else None
 
 
 __all__ = ["MARGIN", "Sampling", "choose", "choose_rows", "sample_rows", "seed_for", "top_candidates", "uniform",

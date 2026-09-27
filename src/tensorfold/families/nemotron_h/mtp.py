@@ -1,16 +1,4 @@
-"""Nemotron-H's MTP head (one attention block + one MoE block) for drafting the token after next.
-
-The released BF16 checkpoint carries ``mtp.layers.0`` (enorm, hnorm, eh_proj and an attention block) and
-``mtp.layers.1`` (a 128-expert MoE block and a final norm); the MLX 4-bit conversion dropped them.
-``convert`` quantizes them like the main model (4-bit affine, group 64; router, norms and correction
-bias kept) into one safetensors file. At position i the head reads the main model's hidden state h_i
-and the embedding of token i+1 and predicts token i+2 through the main model's LM head:
-
-    x = eh_proj([enorm(embed(token_{i+1})), hnorm(h_i)])
-    x = x + attention(norm0(x))        # over the head's own cache of earlier positions
-    x = x + moe(norm1(x))
-    logits = lm_head(final_layernorm(x))
-"""
+"""Draft token i+2 from hidden state i and embedding i+1 through a separate attention cache and the shared LM head."""
 
 from __future__ import annotations
 
@@ -51,8 +39,7 @@ class _MoEBlock(nn.Module):
 
 
 class MTPCache(KVCache):
-    """The head's KV cache. ``drafted``: how many of its last entries are chained drafts, which the next absorb
-    trims first (the count travels with the cache through copies and snapshots)."""
+    """Track trailing chained drafts so the next absorb trims them, preserving the count through copies and snapshots."""
 
     drafted = 0
 
@@ -67,11 +54,7 @@ class NemotronMTP(nn.Module):
 
     def __call__(self, hidden: mx.array, next_embeddings: mx.array, cache: Any, *,
                  tail: int | None = None) -> mx.array | None:
-        """hidden [1, R, D] (main model, position i), next_embeddings [1, R, D] (token i+1) -> [1, R, D] normed.
-
-        Every row extends the head's cache (its attention block); ``tail`` rows (the last ones, all if None)
-        go on through the MoE block, the rest are only context: [1, tail, D], or None for tail 0.
-        """
+        """Extend attention context with every row; return the normed MoE output for the tail rows, or None for an empty tail."""
 
         first, second = self.layers
         x = first.eh_proj(mx.concatenate([first.enorm(next_embeddings), first.hnorm(hidden)], axis=-1))

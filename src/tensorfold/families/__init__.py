@@ -196,6 +196,12 @@ def kernel_version(family: Family, model: Any) -> str:
     hook = getattr(family.package, "kernel_version", None)
     if hook is not None:
         return str(hook(model))
+    return kernel_source_version(family)
+
+
+def kernel_source_version(family: Family) -> str:
+    """Hash a family's source and kernel dependencies without invoking its runtime hook."""
+
     digest = hashlib.sha256()
     modules = (family.module, getattr(family.package, "KERNEL_PACKAGE", ""),
                *getattr(family.package, "KERNEL_DEPENDENCIES", ()))

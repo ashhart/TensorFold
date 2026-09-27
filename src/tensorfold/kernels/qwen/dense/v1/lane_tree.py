@@ -1,13 +1,9 @@
-"""Exact draft-tree verification pieces: the recurrence walked per tree node.
+"""Draft-tree bookkeeping and the one-stream entry points of the lane decoder.
 
-A draft tree's nodes share a committed prefix and branch after it. A Gated
-DeltaNet layer's output at node v is its recurrence run from the prefix state
-S_P along v's path (root -> v). ``gated_delta_tree`` runs that walk for every
-node in parallel (one threadgroup column per node), with each step's code copied
-from mlx_lm's ``gated_delta_step`` kernel, so node v's output has the bits of
-serial decoding's step at v's position. No node's state is stored; after
-verification the accepted path is replayed into the cache with mlx_lm's own
-kernel.
+A draft tree's nodes share a committed prefix and branch after it; each node is verified with the bits serial
+decoding would give it along its own path. The forward and commit are ``lane_multi``'s (one stream is a multi-stream
+call with one stream); this module keeps the tree helpers, the one-stream recurrence kernels the decoder without
+tensor units builds on (``row_forward``), and the small-array rule every kernel input follows.
 """
 
 from __future__ import annotations
@@ -19,6 +15,22 @@ import mlx.core as mx
 
 MAX_DEPTH = 128         # rows of a window (trees up to 32 rows; chains up to 128)
 MAX_TREE = 32
+
+# MLX 0.31 declares a custom kernel's input of fewer than 8 elements in the constant address space and a larger one in
+# device memory, under one kernel name. When a name's source changes, MLX rebuilds its library and drops the old
+# pipeline, which command buffers (made with unretained references) may still hold: windows of 5 and 13 rows in one
+# command buffer (several streams in one forward) faulted the GPU, and a stream whose window crossed 8 rows recompiled
+# the kernels. Index arrays handed to a kernel are padded to 8 or more elements, so each kernel name has one source.
+KERNEL_MIN_ELEMENTS = 8
+
+
+def kernel_ints(values: Sequence[int]) -> mx.array:
+    """int32 values for a custom kernel, padded with zeros to ``KERNEL_MIN_ELEMENTS`` (kernels read only their own)."""
+
+    out = [int(v) for v in values]
+    out += [0] * max(0, KERNEL_MIN_ELEMENTS - len(out))
+    return mx.array(out, dtype=mx.int32)
+
 
 _TREE_SOURCE = r"""
         auto n = thread_position_in_grid.z;                 // head
@@ -175,102 +187,11 @@ def gated_delta_tree(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: m
     maxw = 1 if chain else (16 if W <= 16 else MAX_TREE)  # per-thread state slots (compiled variants)
     y = _kernel("tree")(
         inputs=[mx.contiguous(q), mx.contiguous(k), mx.contiguous(v), mx.contiguous(g), mx.contiguous(beta),
-                mx.contiguous(state), mx.array(list(parents), dtype=mx.int32), mx.array([W], dtype=mx.int32)],
+                mx.contiguous(state), kernel_ints(parents), mx.array([W], dtype=mx.int32)],
         template=[("InT", q.dtype), ("Dk", Dk), ("Dv", Dv), ("Hk", Hk), ("Hv", Hv), ("MAXW", maxw), ("CHAIN", chain)],
         grid=(32, Dv, Hv), threadgroup=(32, 4, 1),
         output_shapes=[(1, W, Hv, Dv)], output_dtypes=[q.dtype])[0]
     return y
-
-
-
-
-# -- the target model over a tree window --------------------------------------------------------
-
-def _positions(parents: Sequence[int], start: int) -> list[int]:
-    depths, _ = tree_paths(parents)
-    return [start + d for d in depths]
-
-
-def _attention(attn: Any, x: mx.array, cache: Any, parents: Sequence[int], positions: list[int],
-               record: list[Any]) -> mx.array:
-    """Qwen3-Next attention for tree rows (mlx_lm's call, per-row RoPE, tree-exact attention)."""
-
-    from tensorfold.kernels.qwen.dense.v1 import lane_fuse
-    from tensorfold.kernels.qwen.dense.v1.lane_attention import lane_tree_sdpa
-
-    B, L, _ = x.shape
-    H, nkv = attn.num_attention_heads, attn.num_key_value_heads
-    q_proj_output = attn.q_proj(x)
-    queries, gate = mx.split(q_proj_output.reshape(B, L, H, -1), 2, axis=-1)
-    gate = gate.reshape(B, L, -1)
-    kv = lane_fuse.attn_kv(attn, x)                   # [k | v] in one lane matmul (None: two calls)
-    if kv is None:
-        keys, values = attn.k_proj(x), attn.v_proj(x)
-        queries = attn.q_norm(queries)
-        keys = attn.k_norm(keys.reshape(B, L, nkv, -1))
-        values = values.reshape(B, L, nkv, -1)
-    else:
-        # RMSNorm runs per head row, so it takes whole outputs and the rows it should skip are
-        # dropped after (each row's bits are its own): a slice of rows would first be copied
-        D = int(queries.shape[-1])
-        queries = attn.q_norm(q_proj_output.reshape(B, L, 2 * H, D))[:, :, 0::2]   # [q_h | gate_h] per head
-        kv = kv.reshape(B, L, 2 * nkv, -1)
-        keys = attn.k_norm(kv)[:, :, :nkv]
-        values = kv[:, :, nkv:]
-    queries = queries.transpose(0, 2, 1, 3)
-    keys = keys.transpose(0, 2, 1, 3)
-    values = values.transpose(0, 2, 1, 3)
-    pos = mx.array(positions, dtype=mx.int32)
-    # one position per row: rows go to the batch axis, where RoPE takes an offset each
-    queries = attn.rope(queries.transpose(2, 1, 0, 3), offset=pos).transpose(2, 1, 0, 3)
-    keys = attn.rope(keys.transpose(2, 1, 0, 3), offset=pos).transpose(2, 1, 0, 3)
-    record.append(("kv", keys, values))        # the window's rows, for the commit's moves
-    keys, values = cache.update_and_fetch(keys, values)
-    output = lane_tree_sdpa(queries, keys, values, attn.scale, parents)
-    output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-    return attn.o_proj(output * mx.sigmoid(gate))
-
-
-def _gdn(gdn: Any, x: mx.array, cache: Any, parents: Sequence[int], windows: mx.array,
-         record: list[Any]) -> mx.array:
-    """Gated DeltaNet for tree rows: per-node conv windows and the node-order recurrence.
-
-    ``x`` carries its group sums (``lane_glue.norm_xs``); the conv, SiLU, q/k norms and gates
-    run as one kernel (``lane_glue.gdn_pre``), the gated norm as another.
-    """
-
-    from tensorfold.kernels.qwen.dense.v1 import lane_fuse, lane_glue
-
-    B, S, _ = x.shape
-    qkv = gdn.in_proj_qkv(x)
-    zba = lane_fuse.gdn_in(gdn, x)                    # [z | b | a] in one lane matmul (None: three calls)
-    if zba is None:
-        z = gdn.in_proj_z(x)
-        b = gdn.in_proj_b(x)
-        a = gdn.in_proj_a(x)
-    n_keep = gdn.conv_kernel_size - 1
-    conv_state = cache[0] if cache[0] is not None else mx.zeros((B, n_keep, gdn.conv_dim), dtype=x.dtype)
-    heads = dict(nk=gdn.num_k_heads, nv=gdn.num_v_heads, dk=gdn.head_k_dim, dv=gdn.head_v_dim)
-    if zba is None:
-        q, k, v, g, beta = lane_glue.gdn_pre(qkv, conv_state, gdn.conv1d.weight, windows, a, b, gdn.A_log,
-                                             gdn.dt_bias, **heads)
-    else:                                             # b and a read in place from the stacked rows
-        q, k, v, g, beta = lane_fuse.gdn_pre(qkv, conv_state, gdn.conv1d.weight, windows, zba, gdn.A_log,
-                                             gdn.dt_bias, **heads)
-    state = cache[1]
-    if state is None:
-        state = mx.zeros((B, gdn.num_v_heads, gdn.head_v_dim, gdn.head_k_dim), dtype=mx.float32)
-    # (Running the last round's commit replay inside this kernel, same bits, was slower live: 61.03 against
-    # 60.16 ms a round, 700 rounds each, 2026-09-24. Left as its own kernel, the replay runs beside the
-    # forward's early layers.)
-    y = gated_delta_tree(q, k, v, g, beta, state, parents)
-    seq = mx.concatenate([conv_state, qkv], axis=1)[0]           # [n_keep + W, C], read by the commit only
-    record.append(("gdn", q, k, v, g, beta, state, seq, n_keep))
-    if zba is None:
-        out = lane_glue.gdn_post(y, z, gdn.norm.weight, gdn.norm.eps)
-    else:
-        out = lane_fuse.gdn_post(y, zba, gdn.norm.weight, gdn.norm.eps)
-    return gdn.out_proj(out)
 
 
 def _conv_windows(parents: Sequence[int], n_keep: int) -> mx.array:
@@ -281,6 +202,8 @@ def _conv_windows(parents: Sequence[int], n_keep: int) -> mx.array:
     for path in paths:
         rows = list(range(n_keep)) + [n_keep + r for r in path]
         windows.append(rows[-(n_keep + 1):])
+    while len(windows) * (n_keep + 1) < KERNEL_MIN_ELEMENTS:     # one source per kernel name (see kernel_ints)
+        windows.append([0] * (n_keep + 1))
     return mx.array(windows, dtype=mx.int32)
 
 
@@ -291,54 +214,15 @@ HIDDEN_SINK: list | None = None
 def tree_forward(core: Any, head: Any, tokens: Sequence[int], parents: Sequence[int], cache: list[Any],
                  start: int, *, pipeline_layers: int = 4, last_only: bool = False,
                  first_alone: bool = True) -> tuple[mx.array, list[Any]]:
-    """Logits [1, W, V] for a tree window whose root sits at position ``start``.
+    """Logits [1, W, V] for one stream's tree window whose root sits at position ``start``, and its commit record
+    (``lane_multi.multi_tree_forward`` with one stream: the kernels several streams share)."""
 
-    Attention layers append the W rows to their caches (compacted by ``commit_tree``);
-    recurrent layers leave their state untouched and record what ``commit_tree`` replays.
-    DFlash tap hooks (``_LayerHook``) get the layer outputs as a normal forward would give.
-    Each residual add runs inside the next norm's kernel (``lane_glue.norm_xs``).
-    """
+    from tensorfold.kernels.qwen.dense.v1 import lane_multi
 
-    from tensorfold.kernels.qwen.dense.v1 import lane_fuse, lane_glue
-
-    positions = _positions(parents, start)
-    hidden = core.embed_tokens(mx.array([list(tokens)], dtype=mx.uint32))
-    record: list[Any] = []
-    layers = list(core.layers)
-    windows = None
-    pending: mx.array | None = None                   # the last MLP's output, not yet added
-    tapped: Any = None                                # (storage, index) waiting for this layer's input
-    for index, (layer, item) in enumerate(zip(layers, cache)):
-        inner = getattr(layer, "_layer", layer)
-        norm = inner.input_layernorm
-        hidden, x = lane_glue.norm_xs(hidden, pending, norm.weight, norm.eps)
-        if tapped is not None:
-            tapped[0][tapped[1]] = hidden
-        if getattr(inner, "is_linear", False):
-            if windows is None:
-                windows = _conv_windows(parents, inner.linear_attn.conv_kernel_size - 1)
-            r = _gdn(inner.linear_attn, x, item, parents, windows, record)
-        else:
-            r = _attention(inner.self_attn, x, item, parents, positions, record)
-        norm = inner.post_attention_layernorm
-        hidden, x = lane_glue.norm_xs(hidden, r, norm.weight, norm.eps)
-        mlp = inner.mlp
-        gu = lane_fuse.mlp_gate_up(mlp, x)            # [gate | up] in one lane matmul (None: two calls)
-        act = lane_glue.mlp_act(mlp.gate_proj(x), mlp.up_proj(x)) if gu is None else lane_fuse.mlp_act(gu)
-        pending = mlp.down_proj(act)
-        storage = getattr(layer, "_storage", None)
-        tapped = (storage, layer._idx) if storage is not None else None
-        # the first layer goes alone: the GPU starts ~0.4 ms sooner than on a whole first slice (it idles until then)
-        if pipeline_layers and ((index + 1) % pipeline_layers == 0 or (index == 0 and first_alone)) and index + 1 < len(layers):
-            mx.async_eval(hidden, pending)
-    hidden, x = lane_glue.norm_xs(hidden, pending, core.norm.weight, core.norm.eps)
-    if tapped is not None:
-        tapped[0][tapped[1]] = hidden
-    if HIDDEN_SINK is not None:                       # a hidden-state proposer reads every row's post-norm hidden
-        HIDDEN_SINK.append(x)
-        if len(HIDDEN_SINK) > 1024:
-            del HIDDEN_SINK[0]
-    return head(x[:, -1:] if last_only else x), record
+    logits, records, _ = lane_multi.multi_tree_forward(core, head, [tokens], [parents], [cache], [start],
+                                                       pipeline_layers=pipeline_layers, first_alone=first_alone,
+                                                       last_only=last_only)
+    return logits, records[0]
 
 
 def accept_path(tokens: Sequence[int], parents: Sequence[int], preds: Sequence[int]) -> list[int]:
@@ -358,38 +242,12 @@ def accept_path(tokens: Sequence[int], parents: Sequence[int], preds: Sequence[i
 
 
 def commit_tree(cache: list[Any], record: list[Any], path: Sequence[int], window: int, start: int) -> None:
-    """Keep only ``path``'s rows: attention keys moved to their logical slots, recurrence replayed."""
+    """Keep only ``path``'s rows of the last ``window``: ``lane_multi.commit_streams`` with one stream."""
 
-    keep = len(path)
-    rows = mx.array(list(path), dtype=mx.int32)
-    count = mx.array([keep], dtype=mx.int32)
-    in_place = list(path) == list(range(keep))
-    tails: dict[int, mx.array] = {}    # conv-tail rows, built once for all recurrent layers (48 identical arrays before)
-    j = 0
-    for item in cache:
-        kind, *entry = record[j]
-        j += 1
-        if hasattr(item, "keys") and hasattr(item, "values"):
-            if kind != "kv":
-                raise RuntimeError(f"record entry {j - 1} is {kind!r}, the cache has an attention layer")
-            if not in_place:
-                # taken from the window's own rows, not the cache buffer: the buffer then has one
-                # owner and the slice update writes in place (a take from it copied the whole cache)
-                win_k, win_v = entry
-                item.keys[..., start:start + keep, :] = mx.take(win_k, rows, axis=2)
-                item.values[..., start:start + keep, :] = mx.take(win_v, rows, axis=2)
-            item.trim(window - keep)
-            continue
-        if kind != "gdn":
-            raise RuntimeError(f"record entry {j - 1} is {kind!r}, the cache has a recurrent layer")
-        q, k, v, g, beta, state0, seq, n_keep = entry
-        item[1] = replay_path(q, k, v, g, beta, state0, rows, count)
-        if n_keep not in tails:           # the last n_keep of [conv state rows; the path's window rows]
-            tails[n_keep] = mx.array((list(range(n_keep)) + [n_keep + int(r) for r in path])[-n_keep:], dtype=mx.int32)
-        item[0] = mx.contiguous(mx.take(seq, tails[n_keep], axis=0)[None])
-        item.advance(keep)
-    if j != len(record):
-        raise RuntimeError(f"recorded {len(record)} layers, cache has {j}")
+    from tensorfold.kernels.qwen.dense.v1 import lane_multi
+
+    lane_multi.commit_streams([cache], [record], [path], [window], [start])
 
 
-__all__ = ["MAX_DEPTH", "accept_path", "commit_tree", "gated_delta_tree", "tree_forward", "tree_paths"]
+__all__ = ["KERNEL_MIN_ELEMENTS", "MAX_DEPTH", "MAX_TREE", "accept_path", "commit_tree", "gated_delta_tree",
+           "kernel_ints", "replay_path", "tree_forward", "tree_paths"]

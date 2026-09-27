@@ -21,9 +21,15 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
+
+from tensorfold.server.errors import RequestError
+from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
+                                        validate_modalities)
+from tensorfold.server.tool_policy import ToolCallPolicy
 
 _THINK_END = "</think>"
 _CALL_OPEN, _CALL_CLOSE = "<tool_call>", "</tool_call>"
@@ -104,7 +110,7 @@ def _tool_name(tool: dict[str, Any]) -> str:
     return str((fn or tool).get("name") or "").strip() if isinstance(tool, dict) else ""
 
 
-def parse_tool_calls(text: str, tools: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]] | None]:
+def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int | None = None) -> tuple[str, list[dict[str, Any]] | None]:
     """Qwen ``<tool_call><function=name><parameter=k>v</parameter></function></tool_call>`` or JSON bodies."""
 
     if not tools:
@@ -116,6 +122,8 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]]) -> tuple[str, list[
     for match in _TOOL_CALL_BLOCK_RE.finditer(text):
         residue.append(text[cursor:match.start()])
         cursor = match.end()
+        if max_calls is not None and len(calls) >= max_calls:
+            continue
         block = match.group(1).strip()
         name, args = None, {}
         try:
@@ -129,11 +137,21 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]]) -> tuple[str, list[
         except (json.JSONDecodeError, AttributeError):
             m = _TOOL_FUNCTION_BLOCK_RE.match(block)
             if m:
+                if max_calls is not None and _TOOL_PARAMETER_BLOCK_RE.sub("", m.group(2)).strip():
+                    continue
                 name = m.group(1).strip()
                 args = {p.group(1).strip(): p.group(2) for p in _TOOL_PARAMETER_BLOCK_RE.finditer(m.group(2))}
         if not name or str(name).lower() not in known:
-            residue.append(match.group(0))
+            if max_calls is None:
+                residue.append(match.group(0))
             continue
+        if max_calls is not None:
+            try:
+                if not isinstance(args, dict):
+                    continue
+                json.dumps(args, allow_nan=False)
+            except (ValueError, TypeError):
+                continue
         calls.append({"id": f"call_{uuid.uuid4().hex[:24]}", "type": "function",
                       "function": {"name": known[str(name).lower()],
                                    "arguments": json.dumps(args, ensure_ascii=False, separators=(",", ":"))}})
@@ -169,17 +187,12 @@ class ChatTemplate:
         self.template = env.from_string(source)
         self.specials = {k: (v.get("content") if isinstance(v, dict) else v)
                          for k, v in cfg.items() if k in ("bos_token", "eos_token", "pad_token", "unk_token")}
+        self.late_system = late_system_role(
+            lambda messages: self.template.render(**self.specials, messages=messages, add_generation_prompt=False))
 
     def render(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None,
                enable_thinking: bool, extra: dict[str, Any] | None = None) -> str:
-        for m in messages:                       # tool_call arguments arrive as JSON strings
-            for call in m.get("tool_calls") or []:
-                fn = call.get("function") or {}
-                if isinstance(fn.get("arguments"), str):
-                    try:
-                        fn["arguments"] = json.loads(fn["arguments"])
-                    except json.JSONDecodeError:
-                        pass
+        messages = _normalize_tool_call_arguments(normalize_messages(messages, late_system=self.late_system))
         kwargs = dict(self.specials, messages=messages, tools=tools or None, add_generation_prompt=True,
                       enable_thinking=enable_thinking)
         kwargs.update(extra or {})
@@ -188,12 +201,31 @@ class ChatTemplate:
 
 # -- HTTP ------------------------------------------------------------------------------------
 
+@dataclass(slots=True)
+class PreparedRequest:
+    prompt: list[int]
+    max_tokens: int
+    tools: list[dict[str, Any]]
+    thinking: bool
+
+
+def _native_context(model_dir: Path) -> int:
+    path = model_dir / "config.json"
+    if not path.exists():
+        return 0
+    config = json.loads(path.read_text())
+    text = config.get("text_config") or config
+    limit = text.get("max_position_embeddings") or config.get("max_position_embeddings")
+    return int(limit) if isinstance(limit, int) and limit > 0 else 0
+
+
 class App:
     """One engine behind the OpenAI routes. ``sampling``: temperature, top_k and top_p for requests that do not
     set them (the model's generation config and the CLI's flags); ``max_tokens``: the reply length likewise."""
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
-                 sampling: dict[str, Any] | None = None, max_tokens: int = 4096):
+                 sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
+                 context_window: int | None = None):
         from tokenizers import Tokenizer
 
         self.engine = engine
@@ -203,18 +235,112 @@ class App:
         self.default_thinking = default_thinking
         self.sampling = {"temperature": 1.0, "top_k": 20, "top_p": 0.95, **(sampling or {})}
         self.max_tokens = int(max_tokens)
+        self.native_context_window = _native_context(model_dir)
+        self.context_window = self.native_context_window if context_window is None else int(context_window)
+        if self.context_window < 0:
+            raise ValueError("context_window must be 0 or a positive token count")
         self.lock = threading.Lock()
 
-    def check(self, body: dict[str, Any]) -> str | None:
-        """Why the request cannot run, or None. Checked before a stream's headers are sent."""
-
+    def _check_fields(self, body: dict[str, Any]) -> str | None:
         import inspect
 
+        if not isinstance(body, dict):
+            return "the request body must be a JSON object"
         if body.get("draft", True) is False and "draft" not in inspect.signature(self.engine.generate).parameters:
             return "this model's CUDA engine has no serial switch (\"draft\": false)"
         if not isinstance(body.get("messages", []), list):
             return "messages must be a list"
         return None
+
+    def _engine_capacity(self) -> int | None:
+        capacities = []
+        for name in ("context_window", "limit"):
+            limit = getattr(self.engine, name, None)
+            if isinstance(limit, int):
+                capacities.append(max(0, limit))
+        return min(capacities) if capacities else None
+
+    def _context_limit(self) -> int | None:
+        limits = [self.context_window] if self.context_window > 0 else []
+        capacity = self._engine_capacity()
+        if capacity is not None:
+            limits.append(capacity)
+        return min(limits) if limits else None
+
+    @property
+    def effective_context_window(self) -> int | None:
+        """Safe prompt-plus-reply capacity; None is unlimited, while zero refuses every prompt."""
+
+        return self._context_limit()
+
+    def _requested_tokens(self, body: dict[str, Any]) -> int:
+        for name in ("max_tokens", "max_completion_tokens"):
+            value = body.get(name)
+            if value is not None:
+                try:
+                    int(value)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise RequestError(f"{name} must be an integer token count") from exc
+        return max(1, int(body.get("max_tokens") or body.get("max_completion_tokens") or self.max_tokens))
+
+    def _prepare(self, body: dict[str, Any], chat: bool) -> PreparedRequest:
+        validate_modalities(body)
+        ToolCallPolicy(body)
+        max_tokens = self._requested_tokens(body)
+        tools = body.get("tools") or []
+        kwargs = dict(body.get("chat_template_kwargs") or {})
+        thinking = bool(kwargs.pop("enable_thinking", self.default_thinking))
+        if chat:
+            if not isinstance(body.get("messages"), list):
+                raise RequestError("messages must be a list")
+            text = self.template.render(body["messages"], tools=tools, enable_thinking=thinking, extra=kwargs)
+        else:
+            text = body.get("prompt")
+            if not isinstance(text, str):
+                raise RequestError("prompt must be a string")
+        prompt = self.tok.encode(text, add_special_tokens=False).ids
+        if not prompt:
+            raise RequestError("rendered prompt is empty")
+        return PreparedRequest(prompt, max_tokens, tools, thinking)
+
+    def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
+        """Why the request cannot run, or None; rendered before a stream's headers are sent."""
+
+        problem = self._check_fields(body)
+        if problem:
+            return problem
+        if prepared is None:
+            try:
+                prepared = self._prepare(body, "messages" in body)
+            except RequestError as exc:
+                return str(exc)
+        limit = self._context_limit()
+        if limit is not None and len(prepared.prompt) >= limit:
+            kind = "safe cache capacity" if limit == self._engine_capacity() else "context window"
+            native = f" (model window: {self.native_context_window} tokens)" if self.native_context_window else ""
+            return (f"the rendered prompt has {len(prepared.prompt)} tokens and leaves no room for a reply in "
+                    f"the server's {limit}-token {kind}{native}; shorten the prompt or restart with a larger "
+                    "supported --context")
+        asked = body.get("max_tokens") or body.get("max_completion_tokens")
+        if limit is not None and asked and len(prepared.prompt) + prepared.max_tokens > limit:
+            kind = "safe cache capacity" if limit == self._engine_capacity() else "context window"
+            return (f"the rendered prompt has {len(prepared.prompt)} tokens and requests {prepared.max_tokens} "
+                    f"reply tokens, exceeding the server's {limit}-token {kind}; reduce the prompt or reply "
+                    "length, or restart with a larger supported --context")
+        return None
+
+    def prepare(self, body: dict[str, Any], chat: bool) -> PreparedRequest:
+        problem = self._check_fields(body)
+        if problem:
+            raise RequestError(problem)
+        prepared = self._prepare(body, chat)
+        problem = self.check(body, prepared=prepared)
+        if problem:
+            raise RequestError(problem)
+        limit = self._context_limit()
+        if limit is not None:
+            prepared.max_tokens = min(prepared.max_tokens, limit - len(prepared.prompt))
+        return prepared
 
     def sampling_for(self, body: dict[str, Any], prompt: list[int]):
         """Keyed sampling (the seed, else one drawn from the prompt), or None for greedy decoding."""
@@ -229,16 +355,12 @@ class App:
         top_p = body["top_p"] if body.get("top_p") is not None else self.sampling["top_p"]
         return Sampling(int(seed) if seed is not None else seed_for(prompt), temp, int(top_k), float(top_p))
 
-    def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
-        tools = body.get("tools") or []
-        kwargs = dict(body.get("chat_template_kwargs") or {})
-        thinking = bool(kwargs.pop("enable_thinking", self.default_thinking))
-        if chat:
-            text = self.template.render(body["messages"], tools=tools, enable_thinking=thinking, extra=kwargs)
-        else:
-            text = body["prompt"]
-        prompt = self.tok.encode(text, add_special_tokens=False).ids
-        max_tokens = int(body.get("max_tokens") or body.get("max_completion_tokens") or self.max_tokens)
+    def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
+            prepared: PreparedRequest | None = None) -> dict[str, Any]:
+        prepared = prepared if prepared is not None else self.prepare(body, chat)
+        prompt, max_tokens = prepared.prompt, prepared.max_tokens
+        tools, thinking = prepared.tools, prepared.thinking
+        policy = ToolCallPolicy(body)
         sampling = self.sampling_for(body, prompt)
         out: list[int] = []
         sent = {"reasoning": 0, "content": 0}
@@ -252,7 +374,8 @@ class App:
             else:
                 reasoning, answer = "", raw
             if tools:
-                answer = hide_tool_calls(answer, finished=finished)
+                answer = (policy.content(answer, finished=finished) if policy.single
+                          else hide_tool_calls(answer, finished=finished))
             return reasoning, answer
 
         def on_tokens(new: list[int]) -> bool:
@@ -282,7 +405,8 @@ class App:
                                                     skip_special_tokens=False), finished=True)[1] \
             if chat and thinking else self.tok.decode([t for t in out if t not in self.engine.eos],
                                                       skip_special_tokens=False)
-        content, calls = parse_tool_calls(raw_answer, tools) if tools else (answer, None)
+        content, calls = parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
+        content = policy.content(content) if tools else content
         tail = content[sent["content"]:] if content.startswith(answer[:sent["content"]]) else ""
         if tail:
             final["content"] = tail
@@ -322,9 +446,10 @@ def make_handler(app: App):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             except json.JSONDecodeError:
                 return self._json(400, {"error": {"message": "the request body is not JSON", "type": "invalid_request_error"}})
-            problem = app.check(body)
-            if problem:
-                return self._json(400, {"error": {"message": problem, "type": "invalid_request_error"}})
+            try:
+                prepared = app.prepare(body, chat)
+            except RequestError as exc:
+                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             rid = f"chatcmpl-{uuid.uuid4().hex[:24]}" if chat else f"cmpl-{uuid.uuid4().hex[:24]}"
             created = int(time.time())
             stream = bool(body.get("stream"))
@@ -354,7 +479,17 @@ def make_handler(app: App):
 
                 if chat:
                     emit({"role": "assistant"})
-                result = app.run(body, chat, emit)
+                try:
+                    result = app.run(body, chat, emit, prepared=prepared)
+                except RequestError as exc:
+                    error = {"error": {"message": str(exc), "type": "invalid_request_error"}}
+                    try:
+                        self.wfile.write(f"data: {json.dumps(error)}\n\ndata: [DONE]\n\n".encode())
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    self.close_connection = True
+                    return
                 if result["final"]:
                     emit(result["final"])
                 if result["calls"]:
@@ -374,7 +509,10 @@ def make_handler(app: App):
                     pass
                 self.close_connection = True
                 return
-            result = app.run(body, chat, lambda delta: True)
+            try:
+                result = app.run(body, chat, lambda delta: True, prepared=prepared)
+            except RequestError as exc:
+                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             usage = {"prompt_tokens": result["prompt_tokens"], "completion_tokens": result["completion_tokens"],
                      "total_tokens": result["prompt_tokens"] + result["completion_tokens"]}
             if chat:
@@ -399,13 +537,14 @@ def serve(app: App, host: str, port: int) -> None:
     """Serve until interrupted (SIGTERM included)."""
 
     import signal
-    from http.server import ThreadingHTTPServer
+
+    from tensorfold.server.http import Server
 
     def _terminate(signum: int, frame: Any) -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _terminate)
-    server = ThreadingHTTPServer((host, port), make_handler(app))
+    server = Server((host, port), make_handler(app))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

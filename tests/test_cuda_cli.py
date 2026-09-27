@@ -45,6 +45,45 @@ def test_serve_parses_the_cuda_flags():
     assert (args.backend, args.tp, args.rank, args.master, args.master_port) == ("auto", 2, 1, "192.0.2.11", 29551)
 
 
+@pytest.mark.parametrize("override, expected", [(None, 128), (0, 0), (64, 64)])
+def test_cuda_dispatch_keeps_the_resolved_context(tmp_path, monkeypatch, override, expected):
+    import json
+
+    from tensorfold import families, hub
+
+    (tmp_path / "config.json").write_text(json.dumps({"max_position_embeddings": 128}))
+    family = _family(cuda_engine=lambda *a, **k: None)
+    family.model_type = "test"
+    monkeypatch.setattr(families, "detect", lambda path: family)
+    monkeypatch.setattr(families, "require_readable", lambda *a: None)
+    monkeypatch.setattr(hub, "resolve", lambda *a, **k: tmp_path)
+    seen = []
+    monkeypatch.setattr(cli, "_serve_cuda", lambda args, found, path, context: seen.append(context) or 0)
+    command = ["serve", str(tmp_path), "--backend", "cuda", "--no-update-check"]
+    if override is not None:
+        command += ["--context", str(override)]
+    assert cli.cmd_serve(cli.build_parser().parse_args(command)) == 0
+    assert seen == [expected]
+
+
+def test_cuda_admission_metadata_does_not_enlarge_the_engine_cache(tmp_path, monkeypatch, capsys):
+    import tensorfold.cuda.server as server
+
+    made, served = [], []
+    engine = SimpleNamespace(max_len=8192)
+    family = _family(cuda_engine=lambda *a, **k: made.append(k) or engine)
+    family.model_type = "test"
+    monkeypatch.setattr(server, "App", lambda *a, **k: served.append(k) or
+                        SimpleNamespace(effective_context_window=8185))
+    monkeypatch.setattr(server, "serve", lambda *a: None)
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--backend", "cuda", "--no-drafts"])
+    assert cli._serve_cuda(args, family, tmp_path, 262144) == 0
+    assert made[0]["context"] == 262144
+    assert made[0]["context_explicit"] is False
+    assert served[0]["context_window"] == 262144
+    assert "context: 8185" in capsys.readouterr().out
+
+
 def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatch):
     """Everything on the lanes: a CUDA engine whose drafter is missing refuses to start rather than decode one token
     a round, and names the fix; --no-drafts (the serial reference) still starts."""

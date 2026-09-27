@@ -100,14 +100,11 @@ def groups_per_iteration(per: int, want: int = 4) -> int:
     return 1
 
 
-# (groups per unrolled step, warps, pipeline stages) by row bucket; every choice gives the same bits.
-# Measured on the GB10 at 1-128 rows over the 27B's projection shapes (logs/bench-qmm-variants.json).
 CONFIG = {16: (4, 4, 2), 32: (2, 4, 2), 64: (1, 4, 2), 128: (1, 4, 3)}
 
 
 def config_for(n: int, k: int, bm: int) -> tuple[int, int, int]:
-    """Settings by row bucket only. Per-shape picks from isolated sweeps (logs/bench-qmm-tp-shapes.json)
-    looked 3-8% faster alone but made the whole forward 1.5-2 ms slower at 16 rows (fwd_ab.py, 26 Sep)."""
+    """Settings by row bucket only."""
 
     return CONFIG[bm]
 
@@ -191,12 +188,7 @@ def stack_small(layer) -> None:
 
 
 def prepare(w: Weights, *, fuse: bool = False) -> None:
-    """Regroup every projection and the head in place (the embedding is a row lookup and stays).
-
-    ``fuse``: also stack [z | b | a] and [k | v]. That changes which K split those columns use,
-    so it changes bits relative to separate calls; serial and drafted rounds use the same stacks.
-    Off by default: measured 73.8 -> 73.2 ms at 1 row and no gain at 16 rows (fwd_ab.py, 26 Sep).
-    """
+    """Regroup every projection and the head in place (the embedding is a row lookup and stays)."""
 
     for layer in w.layers:
         if fuse:

@@ -1,0 +1,189 @@
+"""Prompt rendering and streamed reply text with think blocks, tool markup and locked tokenizer access."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from tensorfold.server.messages import _normalize_tool_call_arguments, late_system_role, normalize_messages
+
+_THINK_END = "</think>"
+_CALL_OPEN = "<tool_call>"
+_CALL_CLOSE = "</tool_call>"
+
+
+def _partial_tag(text: str, tag: str) -> int:
+    """How many characters at the end of ``text`` could be the start of ``tag``."""
+
+    for k in range(min(len(tag) - 1, len(text)), 0, -1):
+        if text.endswith(tag[:k]):
+            return k
+    return 0
+
+
+def split_thinking(text: str, *, finished: bool) -> tuple[str, str]:
+    """Split reasoning from the answer at ``</think>``, withholding partial closing tags so emitted reasoning never changes."""
+
+    end = text.find(_THINK_END)
+    if end < 0:
+        return text[: len(text) - (0 if finished else _partial_tag(text, _THINK_END))], ""
+    return text[:end], text[end + len(_THINK_END):].lstrip("\n")
+
+
+def hide_tool_calls(text: str, *, finished: bool) -> str:
+    """Hide tool-call blocks and partial opening tags while streaming so visible text only grows and calls arrive as deltas."""
+
+    out: list[str] = []
+    pos = 0
+    while True:
+        start = text.find(_CALL_OPEN, pos)
+        if start < 0:
+            tail = text[pos:]
+            out.append(tail[: len(tail) - (0 if finished else _partial_tag(tail, _CALL_OPEN))])
+            return "".join(out)
+        out.append(text[pos:start])
+        end = text.find(_CALL_CLOSE, start)
+        if end < 0:
+            return "".join(out)
+        pos = end + len(_CALL_CLOSE)
+
+
+def render_prompt_ids(
+    tokenizer: Any,
+    messages: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    enable_thinking: bool = False,
+    add_generation_prompt: bool = True,
+    reasoning_effort: str | None = None,
+    late_system: str | None = None,
+) -> list[int]:
+    """Render chat tokens; Qwen3.8 thinking effort ``medium`` preserves the system block, while default ``xhigh`` adds an instruction."""
+
+    if late_system is None:
+        late_system = template_late_system(tokenizer)
+    messages = _normalize_tool_call_arguments(normalize_messages(messages, late_system=late_system))
+    kwargs: dict[str, Any] = {
+        "add_generation_prompt": add_generation_prompt,
+        "enable_thinking": enable_thinking,
+    }
+    if enable_thinking and reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
+    if tools:
+        kwargs["tools"] = tools
+    try:
+        rendered = tokenizer.apply_chat_template(messages, **kwargs)
+    except TypeError:
+        kwargs.pop("tools", None)
+        rendered = tokenizer.apply_chat_template(messages, **kwargs)
+    if isinstance(rendered, str):
+        rendered = tokenizer.encode(rendered)
+    return [int(t) for t in rendered]
+
+
+def template_late_system(tokenizer: Any) -> str:
+    """The role a later system message renders as in this tokenizer's chat template (see ``late_system_role``)."""
+
+    return late_system_role(lambda messages: tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=False))
+
+
+def eos_ids_of(tokenizer: Any) -> frozenset[int]:
+    values = getattr(tokenizer, "eos_token_ids", None)
+    if values:
+        return frozenset(int(t) for t in values)
+    single = getattr(tokenizer, "eos_token_id", None)
+    return frozenset({int(single)}) if single is not None else frozenset()
+
+
+def is_title_request(messages: list[dict[str, Any]], tools: Any) -> bool:
+    """Identify short session-title requests without tools so they can yield to foreground turns."""
+
+    if tools or not messages or messages[0].get("role") != "system":
+        return False
+    size = sum(len(m["content"]) if isinstance(m.get("content"), str) else 4096 for m in messages)
+    text = messages[0].get("content")
+    return size < 4096 and isinstance(text, str) and "title" in text.lower()
+
+
+
+class IncrementalText:
+    """Decode only new tokens with the previous chunk as context so multi-byte characters split across tokens remain whole."""
+
+    def __init__(self, tokenizer: Any, lock: Any) -> None:
+        self.tokenizer = tokenizer
+        self.lock = lock
+        self.tokens: list[int] = []
+        self.text = ""
+        self._prefix = 0
+        self._read = 0
+
+    def extend(self, tokens: list[int]) -> str:
+        self.tokens.extend(int(t) for t in tokens)
+        with self.lock:
+            before = self.tokenizer.decode(self.tokens[self._prefix:self._read])
+            after = self.tokenizer.decode(self.tokens[self._prefix:])
+        if len(after) > len(before) and not after.endswith("\ufffd"):
+            self.text += after[len(before):]
+            self._prefix, self._read = self._read, len(self.tokens)
+        return self.text
+
+
+class _LockedTokenizer:
+    """The app's tokenizer behind its lock, for proposers on the scheduler thread."""
+
+    def __init__(self, tokenizer: Any, lock: Any) -> None:
+        self._tokenizer = tokenizer
+        self._lock = lock
+
+    def decode(self, ids: list[int]) -> str:
+        with self._lock:
+            return self._tokenizer.decode(ids)
+
+    def encode(self, text: str, **kwargs: Any) -> list[int]:
+        with self._lock:
+            return self._tokenizer.encode(text, **kwargs)
+
+    def convert_tokens_to_ids(self, token: str) -> Any:
+        with self._lock:
+            return self._tokenizer.convert_tokens_to_ids(token)
+
+
+def strip_trailing_stops(tokens: list[int], stop_ids: set[int]) -> list[int]:
+    end = len(tokens)
+    while end > 0 and tokens[end - 1] in stop_ids:
+        end -= 1
+    return tokens[:end]
+
+
+HARMONY_FINAL_MARKER = "<|channel|>final<|message|>"
+HARMONY_ANALYSIS_MARKER = "<|channel|>analysis<|message|>"
+HARMONY_TERMINATORS = ("<|return|>", "<|end|>", "<|call|>", "<|start|>")
+
+
+def parse_harmony_output(text: str) -> tuple[str, str | None]:
+    """Split Harmony content and reasoning, pass other text unchanged, and return empty content when the final channel is absent."""
+
+    if "<|channel|>" not in text:
+        return text, None
+
+    reasoning: str | None = None
+    if HARMONY_ANALYSIS_MARKER in text:
+        reasoning = text.split(HARMONY_ANALYSIS_MARKER, 1)[1]
+        for terminator in (HARMONY_FINAL_MARKER, *HARMONY_TERMINATORS):
+            reasoning = reasoning.split(terminator, 1)[0]
+
+    if HARMONY_FINAL_MARKER not in text:
+        return "", reasoning
+    content = text.split(HARMONY_FINAL_MARKER, 1)[1]
+    for terminator in HARMONY_TERMINATORS:
+        content = content.split(terminator, 1)[0]
+    return content, reasoning
+
+
+def streaming_visible_text(text: str) -> str:
+    """The part of partially-decoded output that should stream to the client."""
+
+    if "<|channel|>" not in text:
+        return text
+    content, _ = parse_harmony_output(text)
+    return content

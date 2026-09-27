@@ -1,26 +1,4 @@
-"""Row-exact 4-bit matvecs for Nemotron-H on Macs without the M5's tensor units (M1 to M4).
-
-MLX 0.32 sums a row of a quantized matmul one way when it rides alone (``qmv``) and another way from 2 rows on
-(``qmv_wide`` on gen-15 GPUs and later), so on an M3 Ultra no verify window reproduced one-row decoding. Here the
-decode path's 4-bit projections (Mamba in/out, the stacked q/k/v, o_proj, the shared expert, the head) and the
-routed experts run through kernels in which each input row is its own simdgroup running one row's loop. Every row
-executes the same instructions whatever the row count, and reads nothing of the other rows, so its bits cannot
-depend on the rows beside it. Serial decoding goes through the same kernels: they define the reference drafted
-rounds reproduce.
-
-    qmv        x [R, K] @ W.T, 4-bit weights in groups of 32, 64 or 128, R <= 16, K a multiple of 64: lane l takes
-               inputs 16 l .. 16 l + 15 of each 512-input step (MLX's qmv_fast loop), then, when K % 512 != 0,
-               lanes below (K % 512) / 16 take one more 16-input chunk
-    experts    mlx_lm's SwitchMLP (fc1, relu squared, fc2) for R <= 16 rows of top-k slots: each (row, slot) pair
-               is one simdgroup per 4 output rows running qmv's loop over its expert's rows; bf16 where mlx_lm
-               stores bf16 (fc1's output, relu squared, fc2's output)
-
-M3 Ultra, MLX 0.32.0, 2k context, 2026-09-26: windows of 2 to 16 rows reproduce one-row steps (MLX's kernels:
-none). Wall ms of a forward (hidden + head) at 1 / 2 / 3 / 4 / 8 / 16 rows: 4.8 / 6.3 / 7.9 / 9.5 / 15.9 / 27.9,
-MLX's 5.0 / 6.5 / 7.9 / 9.4 / 14.7 / 25.0. The experts beat MLX's gather at every width (its loop for K = 2,688
-and 1,856 reads 8 inputs a lane); the dense projections lose from 3 rows on (0.45 ms at 3, 3.1 at 16), where
-MLX's qmv_wide unpacks each weight once for up to 5 rows and ``qmv`` once a row.
-"""
+"""Row-exact 4-bit matvecs use the same independent per-row arithmetic for serial decoding, verify windows and grouped experts."""
 
 from __future__ import annotations
 
@@ -29,6 +7,8 @@ from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
+
+from tensorfold.kernels.inputs import MIN_ELEMENTS, ints, padded
 
 MAX_ROWS = 16
 RPS = 4                 # output rows a simdgroup
@@ -98,37 +78,78 @@ _QMV = r"""
     for (int j = 0; j < RPS; j++) OUT[size_t(r) * N + row0 + j] = bfloat(acc[j]);
 """
 
-# Routed experts, one (row, slot) pair a threadgroup column: pair p is row p / TOPK's slot p % TOPK and uses expert
-# IDS[p]; simdgroup g of threadgroup (b, p) takes the expert's output rows RPS (SG b + g) .. + RPS - 1.
-_EXPERT_UP = r"""
-  // fc1 and mlx_lm's relu2 on its bf16 output: bf16(max(bf16(sum), 0)^2)
+# Each expert group walks its MEMBERS in order, preserving per-pair bits regardless of grouping; groups past UCOUNT[0] are empty.
+_GROUP_HEAD = r"""
   const uint lane = thread_index_in_simdgroup;
-  const int p = int(threadgroup_position_in_grid.z);
-  const size_t e = size_t(IDS[p]);
+  const int u = int(threadgroup_position_in_grid.z);
+  if (u >= UCOUNT[0]) return;
+  const size_t e = size_t(UIDS[u]);
   const int row0 = (int(threadgroup_position_in_grid.y) * SG + int(simdgroup_index_in_threadgroup)) * RPS;
   const size_t at = e * N + size_t(row0);
-  float acc[RPS];
-  tf_rowdot<K, GS, RPS>((const device uint8_t*)W + at * (K / 2), S + at * (K / GS), B + at * (K / GS),
-                        X + size_t(p / TOPK) * K, lane, acc);
-  if (lane == 0)
-    for (int j = 0; j < RPS; j++) {
-      const float h = metal::max(float(bfloat(acc[j])), 0.0f);
-      ACT[size_t(p) * N + row0 + j] = bfloat(h * h);
-    }
+  const int first = START[u], last = START[u] + COUNT[u];
 """
 
-_EXPERT_DOWN = r"""
-  // fc2 over the pair's activation (bf16 out)
+_EXPERT_UP = _GROUP_HEAD + r"""
+  // fc1 and mlx_lm's relu2 on its bf16 output: bf16(max(bf16(sum), 0)^2)
+  #pragma clang loop unroll(disable)
+  for (int m = first; m < last; m++) {
+    const int p = MEMBERS[m];
+    float acc[RPS];
+    tf_rowdot<K, GS, RPS>((const device uint8_t*)W + at * (K / 2), S + at * (K / GS), B + at * (K / GS),
+                          X + size_t(p / TOPK) * K, lane, acc);
+    if (lane == 0)
+      for (int j = 0; j < RPS; j++) {
+        const float h = metal::max(float(bfloat(acc[j])), 0.0f);
+        ACT[size_t(p) * N + row0 + j] = bfloat(h * h);
+      }
+  }
+"""
+
+_EXPERT_DOWN = _GROUP_HEAD + r"""
+  // fc2 over each member pair's activation (bf16 out)
+  #pragma clang loop unroll(disable)
+  for (int m = first; m < last; m++) {
+    const int p = MEMBERS[m];
+    float acc[RPS];
+    tf_rowdot<K, GS, RPS>((const device uint8_t*)W + at * (K / 2), S + at * (K / GS), B + at * (K / GS),
+                          X + size_t(p) * K, lane, acc);
+    if (lane == 0)
+      for (int j = 0; j < RPS; j++) Y[size_t(p) * N + row0 + j] = bfloat(acc[j]);
+  }
+"""
+
+_GROUP = r"""
+  // One threadgroup of T >= E threads: thread e counts the pairs that picked expert e; the used experts, in
+  // increasing id, get groups u = 0, 1, ...: UIDS[u] = e, START[u] / COUNT[u] = its run in MEMBERS, where its
+  // pairs sit in increasing order; UCOUNT[0] = the number of groups.
+  const uint t = thread_position_in_threadgroup.x;
   const uint lane = thread_index_in_simdgroup;
-  const int p = int(threadgroup_position_in_grid.z);
-  const size_t e = size_t(IDS[p]);
-  const int row0 = (int(threadgroup_position_in_grid.y) * SG + int(simdgroup_index_in_threadgroup)) * RPS;
-  const size_t at = e * N + size_t(row0);
-  float acc[RPS];
-  tf_rowdot<K, GS, RPS>((const device uint8_t*)W + at * (K / 2), S + at * (K / GS), B + at * (K / GS),
-                        X + size_t(p) * K, lane, acc);
-  if (lane == 0)
-    for (int j = 0; j < RPS; j++) Y[size_t(p) * N + row0 + j] = bfloat(acc[j]);
+  const uint sg = simdgroup_index_in_threadgroup;
+  const int P = pairs[0];
+  threadgroup uint ids[MAXP];
+  threadgroup int sg_pairs[T / 32], sg_used[T / 32];
+  for (int p = int(t); p < P; p += T) ids[p] = IDS[p];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const int e = int(t);
+  int count = 0;
+  if (e < E)
+    for (int p = 0; p < P; p++) count += int(ids[p]) == e ? 1 : 0;
+  const int used = count > 0 ? 1 : 0;
+  const int pairs_before = simd_prefix_exclusive_sum(count);
+  const int used_before = simd_prefix_exclusive_sum(used);
+  if (lane == 31) { sg_pairs[sg] = pairs_before + count; sg_used[sg] = used_before + used; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  int start = pairs_before, u = used_before;
+  for (uint q = 0; q < sg; q++) { start += sg_pairs[q]; u += sg_used[q]; }
+  if (used) {
+    UIDS[u] = uint(e);
+    START[u] = start;
+    COUNT[u] = count;
+    int m = start;
+    for (int p = 0; p < P; p++)
+      if (int(ids[p]) == e) MEMBERS[m++] = p;
+  }
+  if (int(t) == T - 1) UCOUNT[0] = u + used;
 """
 
 _kernels: dict[str, Any] = {}
@@ -145,22 +166,24 @@ def _kernel(name: str, source: str, inputs: list[str], outputs: list[str]) -> An
 
 
 def fits(weight: mx.array, scales: mx.array, group_size: int, bits: int, mode: str = "affine") -> bool:
-    """Whether a 4-bit matrix [..., N, K / 8] has the layout the kernels read: groups of 32, 64 or 128, bf16 scales,
-    K a multiple of 64, N a multiple of 8."""
+    """Require affine 4-bit weights [..., N, K / 8], bf16 scales, groups of 32/64/128, K divisible by 64 and N divisible by 8."""
 
     return (bits == 4 and group_size in (32, 64, 128) and mode == "affine" and scales.dtype == mx.bfloat16
             and weight.dtype == mx.uint32 and (int(weight.shape[-1]) * 8) % 64 == 0 and int(weight.shape[-2]) % 8 == 0)
 
 
 def qmv(x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, group_size: int) -> mx.array:
-    """x [..., K] bf16 (1 to MAX_ROWS rows) @ W.T for 4-bit weights [N, K / 8] -> [..., N] bf16; a row's bits do not
-    depend on the other rows or on how many there are."""
+    """Multiply bf16 x [..., K] by 4-bit W.T [K, N], returning bf16 [..., N] with each row's bits independent of other rows."""
 
     shape = x.shape
     dims = int(shape[-1])
     x2 = x.reshape(-1, dims)
     rows = int(x2.shape[0])
     n = int(weight.shape[0])
+    if rows > MAX_ROWS:
+        # rows are independent: a longer input (several streams' windows) runs in calls of MAX_ROWS rows
+        parts = [qmv(x2[i:i + MAX_ROWS], weight, scales, biases, group_size) for i in range(0, rows, MAX_ROWS)]
+        return mx.concatenate(parts).reshape(*shape[:-1], n)
     if not 1 <= rows <= MAX_ROWS or n % (2 * RPS) or dims % 64:
         raise ValueError(f"rows.qmv: needs 1 to {MAX_ROWS} rows, N % {2 * RPS} == 0, K % 64 == 0 "
                          f"(R {rows}, N {n}, K {dims})")
@@ -173,42 +196,92 @@ def qmv(x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, group
     return out.reshape(*shape[:-1], n)
 
 
-def experts(table: Any, x: mx.array, indices: mx.array, *, simdgroups: int = 2) -> mx.array:
-    """mlx_lm's SwitchMLP ``table`` (fc1, relu2, fc2) on x [R, D] bf16 for each row's experts ``indices`` [R, k]:
-    [R, k, D] bf16. Each (row, slot) pair is computed on its own, the same way at any R (R <= MAX_ROWS)."""
+# Grouping shares each expert's weight reads above this row threshold while preserving the same per-pair bits.
+GROUP_ROWS = 12
+MAX_GROUP_PAIRS = 1024          # pairs one grouping pass takes (it keeps the ids in threadgroup memory)
+_pair_tables: dict[int, tuple[mx.array, mx.array, mx.array, mx.array]] = {}
+_pair_counts: dict[int, mx.array] = {}
+
+
+def _pairs(count: int) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+    """A group for each pair: (START, COUNT, MEMBERS, UCOUNT) for ``count`` pairs, UIDS being the pairs' experts."""
+
+    tables = _pair_tables.get(count)
+    if tables is None:
+        order = ints(range(count))
+        tables = (order, ints([1] * count), order, mx.array([count], dtype=mx.int32))
+        mx.eval(*tables)
+        _pair_tables[count] = tables
+    return tables
+
+
+def group(ids: mx.array, experts: int) -> tuple[mx.array, ...]:
+    """Return (UIDS, START, COUNT, MEMBERS, UCOUNT) from uint32 expert ids [P], ordering groups by expert id and each group's pairs by input order."""
+
+    pairs = int(ids.shape[0])
+    if pairs > MAX_GROUP_PAIRS:
+        raise ValueError(f"rows.group: at most {MAX_GROUP_PAIRS} pairs")
+    threads = max(32, -(-experts // 32) * 32)
+    count = _pair_counts.get(pairs)
+    if count is None:
+        count = _pair_counts[pairs] = mx.array([pairs], dtype=mx.int32)
+    kernel = _kernel("nemotron_rows_expert_group", _GROUP, ["IDS", "pairs"], ["UIDS", "START", "COUNT", "MEMBERS",
+                                                                            "UCOUNT"])
+    size = max(pairs, MIN_ELEMENTS)                 # the tables are the expert kernels' inputs
+    return tuple(kernel(inputs=[padded(ids), count], template=[("E", experts), ("T", threads),
+                                                               ("MAXP", MAX_GROUP_PAIRS)],
+                        grid=(threads, 1, 1), threadgroup=(threads, 1, 1),
+                        output_shapes=[(size,), (size,), (size,), (size,), (1,)],
+                        output_dtypes=[mx.uint32, mx.int32, mx.int32, mx.int32, mx.int32]))
+
+
+def experts(table: Any, x: mx.array, indices: mx.array, *, simdgroups: int = 2, grouped: bool | None = None
+            ) -> mx.array:
+    """Run SwitchMLP ``table`` for ``indices`` [R, k] on bf16 x [R, D], returning bf16 [R, k, D] with identical per-pair bits whether grouped or alone."""
 
     fc1, fc2 = table.fc1, table.fc2
     rows, dims = int(x.shape[0]), int(x.shape[-1])
     top_k = int(indices.shape[-1])
+    count = int(fc1["weight"].shape[0])
     hidden, out = int(fc1["weight"].shape[1]), int(fc2["weight"].shape[1])
     block = RPS * simdgroups
-    if rows > MAX_ROWS or hidden % block or out % block or dims % 64 or hidden % 64:
-        raise ValueError(f"rows.experts: needs at most {MAX_ROWS} rows and widths a multiple of {block} and 64")
+    if hidden % block or out % block or dims % 64 or hidden % 64:
+        raise ValueError(f"rows.experts: needs widths a multiple of {block} and 64")
     ids = indices.reshape(-1)
     if ids.dtype != mx.uint32:
         ids = ids.astype(mx.uint32)
     pairs = rows * top_k
-    up = _kernel("nemotron_rows_expert_up", _EXPERT_UP, ["X", "IDS", "W", "S", "B"], ["ACT"])
-    act = up(inputs=[x.reshape(rows, dims), ids, fc1["weight"], fc1["scales"], fc1["biases"]],
+    if grouped is None:
+        grouped = rows >= GROUP_ROWS
+    if grouped and pairs <= MAX_GROUP_PAIRS:
+        uids, start, counts, members, used = group(ids, count)
+        groups = min(pairs, count)
+    else:
+        (start, counts, members, used), uids, groups = _pairs(pairs), padded(ids), pairs
+    inputs = ["X", "UIDS", "START", "COUNT", "MEMBERS", "UCOUNT", "W", "S", "B"]
+    up = _kernel("nemotron_rows_expert_up", _EXPERT_UP, inputs, ["ACT"])
+    act = up(inputs=[x.reshape(rows, dims), uids, start, counts, members, used, fc1["weight"], fc1["scales"],
+                     fc1["biases"]],
              template=[("K", dims), ("N", hidden), ("GS", int(fc1.group_size)), ("RPS", RPS), ("SG", simdgroups),
                        ("TOPK", top_k)],
-             grid=(32 * simdgroups, hidden // block, pairs), threadgroup=(32 * simdgroups, 1, 1),
+             grid=(32 * simdgroups, hidden // block, groups), threadgroup=(32 * simdgroups, 1, 1),
              output_shapes=[(pairs, hidden)], output_dtypes=[mx.bfloat16])[0]
-    down = _kernel("nemotron_rows_expert_down", _EXPERT_DOWN, ["X", "IDS", "W", "S", "B"], ["Y"])
-    y = down(inputs=[act, ids, fc2["weight"], fc2["scales"], fc2["biases"]],
+    down = _kernel("nemotron_rows_expert_down", _EXPERT_DOWN, inputs, ["Y"])
+    y = down(inputs=[act, uids, start, counts, members, used, fc2["weight"], fc2["scales"], fc2["biases"]],
              template=[("K", hidden), ("N", out), ("GS", int(fc2.group_size)), ("RPS", RPS), ("SG", simdgroups)],
-             grid=(32 * simdgroups, out // block, pairs), threadgroup=(32 * simdgroups, 1, 1),
+             grid=(32 * simdgroups, out // block, groups), threadgroup=(32 * simdgroups, 1, 1),
              output_shapes=[(pairs, out)], output_dtypes=[mx.bfloat16])[0]
     return y.reshape(rows, top_k, out)
 
 
 class RowLinear(nn.QuantizedLinear):
-    """A 4-bit linear whose calls of 1 to MAX_ROWS rows run ``qmv`` (one-row calls MLX's kernel when
-    ``mlx_one_row`` is set: its bits equal ``qmv``'s there); longer inputs (prompts) MLX's quantized matmul."""
+    """A 4-bit linear: calls of up to ``qmv_rows`` rows (a shared round's) run ``qmv``, longer ones MLX's kernel."""
+
+    qmv_rows = MAX_ROWS             # ``install`` raises it to the model's ``batch_rows``
 
     def __call__(self, x: mx.array) -> mx.array:
         rows = x.size // x.shape[-1]
-        if (rows > MAX_ROWS or x.dtype != mx.bfloat16 or (rows == 1 and getattr(self, "mlx_one_row", False))):
+        if (rows > self.qmv_rows or x.dtype != mx.bfloat16 or (rows == 1 and getattr(self, "mlx_one_row", False))):
             return super().__call__(x)
         y = qmv(x, self["weight"], self["scales"], self["biases"], self.group_size)
         if "bias" in self:
@@ -217,11 +290,7 @@ class RowLinear(nn.QuantizedLinear):
 
 
 def matches_mlx(linear: Any, *, seed: int = 0, trials: int = 64) -> bool:
-    """Whether ``qmv`` on one row equals MLX's one-row quantized matmul bit for bit for this weight, over ``trials``
-    random rows. Only a K that is a multiple of 512 can: there MLX's one-row kernel runs the same loop
-    (``qmv_fast``); for other K it runs 8 inputs a lane in 256-input steps and sums in another order. A bf16
-    output rarely shows an fp32 difference (a few in 10^5 outputs flip), so a few rows prove nothing: 2026-09-26
-    on the M3 Ultra, 16 of Nemotron's non-512 projections passed a 3-row check and then broke drafted windows."""
+    """Check bit equality with MLX over ``trials`` random rows; only K divisible by 512 shares its one-row loop, and sparse bf16 differences need many trials."""
 
     k = int(linear["weight"].shape[1]) * 8
     if k % 512:
@@ -255,9 +324,7 @@ def linears(nemotron: Any) -> list[Any]:
 
 
 def install(nemotron: Any, *, mlx_one_row: bool = False) -> dict[str, int]:
-    """Route a ``NemotronH``'s decode step through the row-exact kernels: its 4-bit linears become ``RowLinear``,
-    and its fused decode's routed experts run ``experts``. One-row calls (serial decoding) go through ``qmv`` too,
-    unless ``mlx_one_row`` and ``matches_mlx``. Every kernel variant is compiled here. Returns counts."""
+    """Install and compile row-exact linears and experts, allowing MLX for one row only when ``mlx_one_row`` and ``matches_mlx`` both hold; return counts."""
 
     covered = mlx_rows = 0
     first: dict[tuple[int, int, int], Any] = {}
@@ -267,6 +334,7 @@ def install(nemotron: Any, *, mlx_one_row: bool = False) -> dict[str, int]:
                 and fits(linear["weight"], linear["scales"], linear.group_size, linear.bits, mode)):
             continue
         linear.__class__ = RowLinear
+        object.__setattr__(linear, "qmv_rows", int(nemotron.batch_rows))   # MLX's kernel would change a row's bits
         covered += 1
         first.setdefault((int(linear["weight"].shape[0]), int(linear["weight"].shape[1]), int(linear.group_size)),
                          linear)
@@ -278,7 +346,6 @@ def install(nemotron: Any, *, mlx_one_row: bool = False) -> dict[str, int]:
         for fc in (table.fc1, table.fc2):
             if not fits(fc["weight"], fc["scales"], fc.group_size, fc.bits, getattr(fc, "mode", "affine")):
                 raise ValueError("rows.install: an expert table does not have the layout the kernels read")
-    nemotron.fused.experts_fn = experts
     # compile every variant now, not inside the load-time window check
     warm = [qmv(mx.zeros((2, int(m["weight"].shape[1]) * 8), dtype=mx.bfloat16), m["weight"], m["scales"],
                 m["biases"], m.group_size) for m in first.values()]

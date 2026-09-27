@@ -1,287 +1,197 @@
-![TensorFold mesh and measured decode speeds for Qwen3.8 27B, Nemotron 3.5, and Qwen3.8 Flash Next](assets/tensorfold-hero-speeds.png)
-
 # TensorFold
 
-<p align="center">
-  <img src="assets/tensorfold-logo.png" alt="TensorFold folded tensor mesh logo" width="280">
-</p>
-
-TensorFold serves a local LLM on Apple Silicon or NVIDIA GPUs at an OpenAI-compatible endpoint, fast and exact.
-Name a model on Hugging Face, choose the context window and sampling, and TensorFold downloads it, loads it with
-Metal or CUDA kernels written for that model family, and serves `/v1/chat/completions`. On DGX Spark it decodes
-1.6 to 3x faster than vLLM with MTP drafts, one Spark or two ([DGX Spark](#dgx-spark-and-other-nvidia-gpus)).
-
-**All Apple Silicon chips now support lane batching.** Qwen3.8-27B verifies its drafted tokens together in one
-forward on every M1 to M5 GPU, and its output stays byte-identical to serial decoding: through the lane kernels
-on M5, and on M1 to M4 through TensorFold's own row-exact lane decoder and simdgroup matmul (0.3.4: 1.9 to 4x
-serial speed on an M3 Ultra, [details](docs/recipes/qwen3.8-27b.md#macs-without-tensor-units-m1-to-m4)).
-Nemotron and Flash Next run on the same lane engine.
-
-Setting this up with an AI agent? Give it the [AI agent runbook](RUNBOOK.md) for the install, model download,
-server startup and a request that checks the result.
+TensorFold serves text models on Apple Silicon and NVIDIA GPUs through an OpenAI-compatible API.
+Each model family supplies its own kernels and draft verification.
 
 ```bash
-pip install git+https://github.com/ashhart/TensorFold.git
-tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --context 65536
+python -m pip install git+https://github.com/ashhart/TensorFold.git
+tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
-Any OpenAI client can then use `http://127.0.0.1:8080/v1`, including coding agents, SDKs and `curl`:
-
-```bash
-curl http://127.0.0.1:8080/v1/chat/completions -H "Content-Type: application/json" \
-  -d '{"model": "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "messages": [{"role": "user", "content": "Hi"}]}'
-```
-
-TensorFold needs a Mac with Apple Silicon and Python 3.11 or newer. It is tested with MLX 0.31.2 on an M5 Max
-and MLX 0.32.0 on an M3 Ultra. Flash Next and Nemotron check at load that drafted rows reproduce one-row decoding
-on your MLX and GPU, and draft only when they do. On an M5, MLX 0.32.2 fails that check for Nemotron, which
-then runs without drafts (same output, slower); `pip install mlx==0.31.2` brings them back. The Qwen3.8-27B lane
-kernels do their own arithmetic, so their exactness does not depend on the MLX version.
+Use `http://127.0.0.1:8080/v1` as the client base URL and the model ID from `/v1/models`.
+Python 3.11 or newer is required. See the [runbook](RUNBOOK.md) for installation and a first request.
 
 ## Models
 
-Each model family has its own package of kernels, picked from the checkpoint's `config.json`. These are the
-checkpoints TensorFold is built and tested with, all on Hugging Face:
-
-| Model | Pull | Size | Mac |
+| Model | Checkpoint | Backend | Drafting |
 | --- | --- | --- | --- |
-| Nemotron 3.5 Lightning 30B-A3B | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 18.6 GB | 32 GB or more |
-| Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` and its draft model `z-lab/Qwen3.8-27B-DFlash2` | 16.1 GB + 3.8 GB | 32 GB or more; an M5-generation GPU for the fast kernels |
-| Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 113 GB | 192 GB or more |
+| Nemotron 3.5 Lightning | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | MLX, CUDA | Included MTP head; context copies on MLX |
+| Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` | MLX, CUDA | `z-lab/Qwen3.8-27B-DFlash2` and context copies; DFlash2 is optional on MLX |
+| Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX, CUDA | Included MTP head and context copies |
+| GLM-5.3-Flash | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | CUDA with two ranks | MTP; optional DFlash2 |
 
-The three main checkpoints come from the `Vontra` Hugging Face namespace; Qwen3.8-27B's optional DFlash2
-drafter comes from `z-lab`.
+`tensorfold models` lists families and checkpoints. `tensorfold info MODEL` checks configuration without
+fetching weights. `serve` downloads a missing checkpoint; `pull` downloads it ahead of time.
 
 ```bash
 tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit
 ```
 
-`serve` downloads a model it doesn't have yet; `pull` downloads ahead of time. Models go into the Hugging Face
-cache (`~/.cache/huggingface`), and a local model directory works too. `tensorfold models` lists the families
-and their checkpoints.
+Qwen3.8-27B's M5 tensor-unit path reads MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit projections in groups of 64.
+On M1 through M4, `row_forward` uses the row-exact `simd_qmm` decoder, with 4-bit/group-64 weights and
+windows of up to 16 rows. Serial and drafted calls use the same decoder. On CUDA, pull DFlash2 before
+serving; without it, explicitly choose `--no-drafts` for the serial reference.
 
-What each checkpoint needs:
+Nemotron uses TensorFold projections and routed-expert kernels. Its load-time row check controls drafting;
+keep the installed MLX version within the package requirements. The named checkpoint includes
+`mtp-4bit.safetensors`, which `pull` and `serve` check for.
 
-- Qwen3.8 Flash Next drafts with the MTP head stored in its checkpoint, and its kernels read 4-bit weights in
-  groups of 32. Use the `-MLX-4bit-MTP` conversion. TensorFold refuses other bit widths before downloading
-  anything, and a conversion without the MTP head runs without drafts.
-- Qwen3.8-27B drafts with the DFlash2 draft model once it has been pulled; `serve` picks it up automatically.
-  Its lane kernels need 4-bit weights in groups of 64 and Metal 4 tensor units (M5-generation GPUs). On M1 to
-  M4 GPUs, drafted windows of up to 8 rows go through TensorFold's row-exact matvec instead, so drafted output
-  is still byte-identical to serial decoding. Each round drafts as many tokens as pay at the request's
-  acceptance.
-- Nemotron 3.5 Lightning drafts with its MTP head, which the checkpoint above ships as `mtp-4bit.safetensors`
-  (converted from NVIDIA's BF16 release; the standard MLX conversion drops it), and from the context.
-  `pull` checks for the head, and `serve` completes an older cache that lacks it before loading.
+Flash Next requires 4-bit/group-32 weights. Without an MTP head it can run without MTP drafting on MLX;
+on CUDA, explicitly pass `--no-drafts`. Nemotron CUDA requires 4-bit/group-64 weights and an MTP head
+unless `--no-drafts` is set. GLM CUDA reads MLX 4-bit/group-64 weights and the experimental
+`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` conversion. GLM's optional
+`incoai/GLM-5.3-Flash-DFlash2` checkpoint has non-commercial license
+terms, described in [third-party notices](THIRD_PARTY_NOTICES.md).
 
-Other checkpoints: `tensorfold info MODEL` says, from `config.json` alone, whether an engine here reads a
-checkpoint's weights. A different conversion in a supported format runs with a note that it is untested; a model
-or weight format with no recipe (NVFP4, GPTQ, AWQ and so on today) is refused before anything downloads. EXL3 is
-read for GLM-5.3-Flash only, as an experiment (below).
-Want another model? [The recipe book](docs/recipes/README.md) describes what we did for each family and how
-to add yours, and [the runbook](RUNBOOK.md#your-own-model) has the steps.
+See the [recipes](docs/recipes/README.md) for supported formats and backend limits.
 
-## Speed
+## Exact decoding
 
-Decode speeds we measured through the server. They depend on content: copies of earlier text (file edits)
-and predictable output (code, tool calls) draft well, fresh prose less so. The Nemotron rows predate its MTP
-drafts, which are now on by default; in-engine they reached 217 tok/s on prose and 228 on code.
+A draft is accepted only when it equals the token the same engine would produce serially.
+Sampling depends on the prompt or explicit seed, absolute position and token ID. Verify kernels keep each
+row's arithmetic independent of the other rows in the call. Compare a request with the same request using
+`"draft": false` to check drafted versus serial output.
 
-| Model | Machine | Workload | tok/s |
-| --- | --- | --- | --- |
-| Nemotron 3.5 Lightning, 4-bit | M5 Max, 128 GB | short answer with thinking | 188-206 (mlx_lm: 138) |
-| | | about 20k-token context | 175 |
-| | | about 60k-token context | 162 |
-| Qwen3.8-27B, 4-bit, DFlash2 drafter | M5 Max, 128 GB | short answer with thinking | 120-124 (27 without drafts) |
-| | | code | 189 (26 without drafts) |
-| | M3 Ultra, 256 GB | code, 64 tokens | 141-158 (38-39 without drafts) |
-| | | chat, 64 tokens | 74 (38-39 without drafts) |
-| Qwen3.8 Flash Next, 4-bit | M3 Ultra, 256 GB | short answer with thinking | 105-107 (79 without drafts) |
-| | | code | 112 (80 without drafts) |
-| | | file edit | 190 |
-| | | 18k-token context | 98.5 |
-| | | 23k-token agent prompt, 512 thinking tokens, then a long tool call | 103-115 |
+The MLX engine can share a round across requests. Each stream keeps its own state and sampling key, with
+concurrent output required to match its solo output. Load-time checks restrict window width and shared
+forwards where a family cannot reproduce its serial arithmetic. On CUDA, `--parallel N` with N greater
+than one enables shared rounds for Qwen3.8-27B on one or two ranks and Flash Next on one rank.
+Flash Next rejects concurrent two-rank execution. GLM and Nemotron CUDA serve one request at a time;
+CUDA `--parallel auto` also means one request at a time.
 
-In 0.3.4, bench_openai's cells (64-token replies, thinking off, median of seeds; code sampled / chat sampled /
-code greedy / chat greedy) gave Nemotron on the M5 Max 288 / 223 / 292 / 243 tok/s, against 173 / 173 / 179 / 176
-for mlx_lm's own server through the same client. The 138 in the table above was TensorFold's older server
-running mlx_lm's model, not mlx_lm itself.
+Exactness is against the same engine, weights, runtime and settings. It does not imply identical output
+between MLX and CUDA, different quantizations, or different tensor-parallel rank counts.
 
-## DGX Spark and other NVIDIA GPUs
+## Serve options
 
-![TensorFold CUDA Engine: exact decoding on DGX Spark, on Mac with Metal and on NVIDIA GPUs with CUDA](assets/tensorfold-cuda-banner.png)
+| Option | Meaning | Backend |
+| --- | --- | --- |
+| `--host`, `--port` | Listen address, default `127.0.0.1:8080` | Both |
+| `--name` | Model ID advertised to clients | Both |
+| `--alias` | Additional model IDs | MLX |
+| `--context N` | Prompt plus reply capacity | Both |
+| `--max-tokens N` | Default reply limit, 4096 | Both |
+| `--temperature`, `--top-p`, `--top-k` | Sampling defaults; temperature zero is greedy | Both |
+| `--thinking`, `--no-thinking` | Template thinking toggle | Both |
+| `--reasoning-effort` | Template effort, default `medium` | MLX |
+| `--thinking-budget N` | Token-count limit inside reasoning | MLX |
+| `--backend auto`, `mlx`, `cuda` | Select backend; auto uses MLX on macOS | Both |
+| `--parallel N` | MLX `auto` admits up to 8 within budget; CUDA `auto` is 1, explicit N enables supported shared rounds | Both |
+| `--no-drafts` | Decode serially | Both |
+| `--drafter auto`, `none`, or model ID | Select an optional draft model where the family supports it | Both |
+| `--mtp-drafts N` | Family-specific cap on MTP drafts | Both |
+| `--tp 2 --rank R --master HOST` | Two-rank CUDA execution | CUDA |
+| `--prompt-cache-gib N` | Retained conversation-prefix budget; zero disables retention | MLX |
+| `--mlx-cache-gib N` | Reusable freed-buffer cache, default 8 GiB | MLX |
+| `--snapshot-dir DIR` | Persistent prefix snapshots; `none` disables them | MLX |
+| `--no-update-check` | Disable the startup release check | Both |
 
-On Linux with an NVIDIA GPU, `tensorfold serve` runs the family's CUDA engine (PyTorch, Triton and CUDA
-kernels in `src/tensorfold/families/<name>/cuda/`). It reads the same MLX 4-bit checkpoints from Hugging Face.
-Run it inside NVIDIA's PyTorch container, which has the CUDA toolkit, PyTorch and Triton the kernels build
-with:
+The default sampling settings come from `generation_config.json`. Requests can override sampling and reply
+length. CUDA does not implement the MLX-only options above. See [API fields](docs/api.md) for request scope.
+
+<a id="memory"></a>
+
+## Context and memory
+
+On MLX, omitted `--context` targets the model's metadata window and reduces it to the startup memory
+estimate when needed, allowing room to retain a prompt for the next turn. An explicit positive value
+that cannot fit one request is refused at startup. `--context 0` removes the metadata cap; finite engine
+capacity and memory admission still apply. Use the reported context when configuring client compaction.
+
+On CUDA, Qwen defaults to the affordable native capacity. GLM targets a dense 2,051-token window,
+and Nemotron targets 16,384 tokens; the capacity estimate can lower these defaults. Explicit `--context 0` targets the affordable native capacity for every CUDA family.
+A positive CUDA value must fit both the native window and the capacity estimate on every rank;
+otherwise startup refuses it with fitting guidance. Increasing GLM beyond its dense window enables
+its sparse-attention path. The startup report distinguishes native and allocated capacity.
+
+MLX uses a process budget capped by 70% of RAM and the GPU's recommended working set. It reserves 3 GiB
+for the rest of the process before setting the MLX allocator limit. Admission accounts for weights,
+cache growth, reply tokens and prefill workspace. `TENSORFOLD_MEMORY_LIMIT_GB` can lower the budget in
+GiB. Retained prefixes and reusable MLX buffers have separate limits. Admission can evict retained
+prefixes or queue another stream; fitting weights alone does not establish a usable context size.
+
+An explicit reply limit is reserved before prefill. A request that exceeds context or memory is refused
+with fitting guidance; an omitted reply limit is capped by the remaining context. MLX reports a
+context refusal as HTTP 400 for a non-streamed request or as an error event after opening a stream.
+CUDA checks context before opening a stream.
+
+The memory-class table below keeps the model combinations under qualification. Its GiB budget ceilings
+emulate the listed RAM classes before the 3 GiB process reserve. The actual default budget uses
+OS-reported physical memory; a smaller GPU working set or an explicit memory limit lowers it. Context and peak-memory results remain TBD until a public
+prompt fixture, checkpoint revision, runtime, command and measurement output accompany each result.
+
+| Nominal RAM class | Budget ceiling | Qwen3.8-27B + DFlash2 | Qwen3.8-27B, `--drafter none` | Nemotron 3.5 Lightning | Qwen3.8 Flash Next |
+| --- | --- | --- | --- | --- | --- |
+| 36 GB | 25.2 GiB | TBD | TBD | TBD | TBD |
+| 48 GB | 33.6 GiB | TBD | TBD | TBD | TBD |
+| 64 GB | 44.8 GiB | TBD | TBD | TBD | TBD |
+| 96 GB | 67.2 GiB | TBD | TBD | TBD | TBD |
+| 128 GB | 89.6 GiB | TBD | TBD | TBD | TBD |
+| 192 GB | 134.4 GiB | TBD | TBD | TBD | TBD |
+| 256 GB | 179.2 GiB | TBD | TBD | TBD | TBD |
+
+Each model cell needs the fitted context and peak physical process footprint. An emulated budget on
+a larger host is not a measurement on hardware with that RAM size. These are qualification slots,
+not minimum-memory promises. Weights that exceed the MLX budget are refused before loading.
+
+## Prompt caching
+
+On MLX, chunk starts come from the rendered token sequence. Resume points are assistant-message
+starts and the second message start, using markers discovered from the chat template. The planner
+skips points less than 256 tokens from the previous chunk start and otherwise cuts at the first
+eligible point or after 2,048 tokens. Without recognized markers it uses the 2,048-token grid.
+There is no configurable `--prefill-grid` option.
+
+Fresh and resumed requests use the same chunk plan. Reuse stops at a matching token prefix and a valid
+chunk boundary; the previous reply is prefilled again under the current prompt. A template that rewrites
+an earlier turn can reduce reuse. A follow-up therefore need not reprocess a full grid cell, but short
+messages or changed earlier text can make it reprocess more than the latest reply and new messages.
+
+Snapshots include the model, runtime, kernel and chunk-plan identity. System prefixes and retained
+conversations can survive restarts. CUDA engines keep their own prompt/reply states and do not use the
+MLX disk-snapshot or retained-prefix options.
+
+<a id="dgx-spark-and-other-nvidia-gpus"></a>
+
+## NVIDIA GPUs
+
+Use NVIDIA's PyTorch container for CUDA, PyTorch, Triton and the extension compiler; the package has no
+`cuda` installation extra. Install TensorFold inside the container without replacing that toolchain.
 
 ```bash
-docker run -it --gpus all --ipc=host --network host -v ~/.cache/huggingface:/root/.cache/huggingface \
-  nvcr.io/nvidia/pytorch:26.07-py3
-pip install git+https://github.com/ashhart/TensorFold.git
+docker run -it --gpus all --ipc=host --network host nvcr.io/nvidia/pytorch:26.07-py3
+python -m pip install git+https://github.com/ashhart/TensorFold.git
 tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --host 0.0.0.0
 ```
 
-Two Sparks split a model between them over their direct link. Run the same command on each, rank 1 first, with
-the address rank 0 has on that link. Rank 0 serves HTTP. The container also needs the network devices:
+Qwen3.8-27B, Flash Next and Nemotron support one or two CUDA ranks; GLM requires two.
+For two ranks, see the [CUDA runbook](RUNBOOK.md#nvidia-gpus). Each rank needs its checkpoint and any
+optional drafter. Rank 0 serves HTTP. Unified GPU/host memory also holds runtime buffers and file-backed
+model data; the startup estimate is not a measured maximum capacity.
 
-```bash
-docker run -it --gpus all --ipc=host --network host --device /dev/infiniband --ulimit memlock=-1 \
-  --cap-add IPC_LOCK -v ~/.cache/huggingface:/root/.cache/huggingface nvcr.io/nvidia/pytorch:26.07-py3
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1   # on the second Spark
-tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 --host 0.0.0.0
-```
+## Measurements
 
-Set `NCCL_SOCKET_IFNAME` and `NCCL_IB_HCA` to the link's interface and adapters if NCCL does not find them
-([the runbook](RUNBOOK.md#dgx-spark) has the steps).
+| Backend | Decode rate | Cold and resumed first-token latency | Concurrent throughput |
+| --- | --- | --- | --- |
+| MLX | TBD [release-0.3.5] | TBD [release-0.3.5] | TBD [release-0.3.5] |
+| CUDA | TBD [release-0.3.5] | TBD [release-0.3.5] | TBD for supported shared rounds [release-0.3.5] |
 
-Measured on DGX Spark against vLLM with MTP=3 through the same OpenAI client: decode tok/s, one stream,
-64-token replies, median of seeds 1234-1238, code and chat prompts, sampled (T 1, top-k 20, top-p 0.95) and
-greedy. Each TensorFold number is byte-identical to its own serial decoding.
+These 0.3.5 results await release measurement. The
+[recipe book](docs/recipes/README.md#measurements) gives the public prompts and benchmark command.
+Historical results with those fixtures are labelled separately in the CUDA family recipes.
 
-| Model | Sparks | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Qwen3.8-27B + DFlash2 | 1 | 49.6 vs 17.7 (2.8x) | 45.8 vs 15.0 (3.1x) | 49.2 vs 17.7 (2.8x) | 45.9 vs 17.0 (2.7x) |
-| Qwen3.8-27B + DFlash2 | 2 | 82.4 vs 33.1 (2.5x) | 58.9 vs 30.4 (1.9x) | 76.2 vs 31.6 (2.4x) | 71.1 vs 30.5 (2.3x) |
-| Qwen3.8 Flash Next | 1 | 68.3 vs 42.4 (1.6x) | 58.5 vs 33.2 (1.8x) | 73.1 vs 40.9 (1.8x) | 60.2 vs 37.6 (1.6x) |
-| Qwen3.8 Flash Next | 2 | 103.8 vs 46.4 (2.2x) | 84.0 vs 41.4 (2.0x) | 96.2 vs 55.2 (1.7x) | 100.2 vs 50.7 (2.0x) |
-| GLM-5.3-Flash | 2 | 49.4 vs 24.5 (2.0x) | 43.3 vs 24.3 (1.8x) | 66.3 vs 32.2 (2.1x) | 45.2 vs 24.7 (1.8x) |
-| GLM-5.3-Flash, Mia-AiLab's EXL3 weights (experimental) | 2 | 36.4 vs 24.5 (1.5x) | 29.7 vs 24.3 (1.2x) | 43.8 vs 32.2 (1.4x) | 32.9 vs 24.7 (1.3x) |
+## Updating
 
-GLM-5.3-Flash needs two Sparks. For each greedy request it measures its MTP head against a DFlash2 draft model
-and keeps whichever commits more tokens per millisecond ([its recipe](docs/recipes/glm-5.3-flash.md)). That draft
-model, `incoai/GLM-5.3-Flash-DFlash2`, is licensed for non-commercial use only (CC BY-NC-ND 4.0); without it GLM
-drafts with its MTP head alone. vLLM's GLM numbers come from Mia-AiLab's recipe, which serves the EXL3 checkpoint
-`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`. TensorFold now reads that checkpoint too, as an experiment; the table's
-last row compares both engines on those same weights. It is slower than the MLX checkpoint because only its
-routed experts are 4-bit, so each Spark reads 10.7 GB a token against 5.0
-([its recipe](docs/recipes/glm-5.3-flash.md#mia-ailabs-exl3-checkpoint-experimental)). What we did on
-CUDA, and how to bring up another model, is in [the CUDA recipe book](docs/recipes/cuda.md).
+`tensorfold update --check` checks for a release; `tensorfold update` installs it, then the server must
+restart. A normal installation uses the same interpreter's pip. An editable clone must be clean and able
+to fast-forward to the release tag; afterwards run `python -m pip install -e .` in the checkout to refresh
+metadata and dependencies. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` disables startup checks.
 
-## Exact means byte-identical
+## Development and license
 
-Speculative decoding usually trades determinism for speed: drafted tokens are accepted by a random test, so the
-same prompt and seed give different text depending on how drafting went. TensorFold keeps two guarantees
-instead.
-
-1. Every token is the model's own sample. The token at position `p` is the argmax over the top-k/top-p
-   candidates of `logit / T + g(seed, p, token)`, with `g` Gumbel noise from a hash of the seed, the position
-   and the token id. That is an exact draw from the top-k/top-p distribution, and it depends only on that row's
-   logits and its position.
-2. A row of a multi-row verify pass gets the same bits as a one-row step. The kernels are written so that a
-   row's arithmetic does not depend on how many rows share the pass.
-
-So a draft is accepted exactly when it equals the token one-token-at-a-time decoding would sample there, and
-drafted decoding writes the same bytes as serial decoding. Drafts change speed only. You can check it yourself:
-send the same request with `"draft": false`, which decodes one token a round, and compare.
-
-The default seed is a hash of the prompt, so the same conversation gets the same reply. Pass `"seed"` to vary
-it. One limit: for Flash Next and Nemotron the prompt's cache can differ in its last bits depending on which
-prefix was already cached, so a reply can too ([details](docs/recipes/README.md#a-known-limit)). Drafted and
-serial decoding from the same cache always agree.
-
-## Serve
-
-```bash
-tensorfold serve MODEL [options]    # MODEL: a Hugging Face repo id or a model directory
-tensorfold pull REPO [REPO ...]      # download models or draft models
-tensorfold models                   # families and the checkpoints they are tested with
-tensorfold info MODEL               # which family serves a model (reads its config.json only)
-tensorfold update                   # install the newest release from GitHub (--check: only say if there is one)
-```
-
-As it starts, `serve` asks GitHub whether a newer release exists (one request to api.github.com a day, with nothing
-about you or your models in it) and prints a line if there is one; the server starts either way. `tensorfold
-update` installs it with the same Python's pip and leaves MLX and PyTorch as they are unless the release needs
-other versions. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` switches the check off.
-
-| Option | Default | What it does |
-| --- | --- | --- |
-| `--host`, `--port` | `127.0.0.1`, `8080` | where to listen (`--host 0.0.0.0` for other machines) |
-| `--name`, `--alias` | the model's name | the model id clients send |
-| `--context N` | the model's `max_position_embeddings` | prompt plus reply tokens a request may use; longer prompts get HTTP 400; `0` removes TensorFold's cap |
-| `--max-tokens N` | 4096 | reply length when a request does not set `max_tokens` |
-| `--temperature`, `--top-p`, `--top-k` | the model's `generation_config.json` | sampling defaults; `--temperature 0` is greedy |
-| `--thinking` / `--no-thinking` | on | open a think block when the chat template supports one |
-| `--reasoning-effort` | `medium` | for chat templates that take one (Qwen3.8) |
-| `--thinking-budget N` | no limit | most thinking tokens before the server closes the think block |
-| `--backend` | `auto` | `mlx` on macOS, `cuda` elsewhere |
-| `--tp 2 --rank R --master HOST` | one GPU | split the model over two machines, one GPU each (CUDA; see [DGX Spark](#dgx-spark-and-other-nvidia-gpus)) |
-| `--no-drafts` | off | one token a round: the serial reference |
-| `--drafter` | `auto` | the family's draft model once pulled; a repo id or directory; or `none` |
-| `--mtp-drafts N` | 3 (6 on CUDA) | most MTP drafts a round (Qwen3.8 Flash Next; on CUDA the chain also stops under 30% confidence); 0 turns MTP drafts off |
-| `--no-update-check` | off | don't ask GitHub for a newer release at start |
-| `--prompt-cache-gib` | an eighth of RAM, at most 16 | memory for cached conversation prefixes |
-| `--snapshot-dir` | `~/.cache/tensorfold/prefix-snapshots` | system blocks and conversations kept across restarts |
-
-Requests can override the sampling fields, the thinking switch and the budget. See [the API notes](docs/api.md)
-for the fields TensorFold reads and what it returns.
-
-By default, `serve` reads temperature, top-p and top-k from the checkpoint's `generation_config.json`; a
-checkpoint with `do_sample: false` decodes greedily. CLI sampling flags override those values, and each
-request can override them again. The context default comes from the checkpoint's `config.json`; large
-windows still need enough memory for the actual prompt and reply.
-
-## Prompt caching
-
-Agent clients resend the whole conversation every turn. TensorFold prefills prompts in blocks on a fixed
-2,048-token grid and keeps the caches of recent conversations at grid points, so a follow-up prefills from the last
-grid point before its new text and gets exactly the bits of the same conversation fed fresh. It saves the system
-block, which a client sends with every session, to disk once, so a new session starts from it. The newest
-conversations are saved at shutdown and read back on demand.
-
-## Layout
-
-```
-src/tensorfold/
-  cli.py                 the tensorfold command
-  hub.py                 models by Hugging Face repo id
-  server/                OpenAI HTTP layer (http.py) and the request queue, caches and streaming (app.py)
-  engine/                the serial engine, the lane engine, exact sampling, prompt caches
-  kernels/qwen/dense/v1/        Qwen3.8 dense lane kernels
-  kernels/qwen/flash_next/v1/   Qwen3.8 Flash Next fused kernels
-  kernels/nemotron/lightning/v1/  Nemotron 3.5 Lightning fused kernels
-  drafters/              the DFlash2 drafter
-  families/<name>/       one package per model family: forward pass and draft heads
-  families/<name>/cuda/  the family's CUDA engine and kernels (NVIDIA GPUs)
-  cuda/server.py         the OpenAI HTTP layer for the CUDA engines
-docs/recipes/            what we did per family, and how to add one (Mac and CUDA)
-tools/bench_openai.py    the single-stream client every speed above was measured with
-```
-
-## Request-level reasoning and tool parameters
-
-On the MLX server, chat requests can set `reasoning_effort` to `none`, `low`, `medium`,
-`high`, or `xhigh`. `none` disables thinking; the other values enable it and pass the
-requested effort to the chat template (`high` maps to Qwen's `xhigh`). An explicit
-`chat_template_kwargs.enable_thinking` takes precedence. Omitting the field preserves
-the server default. Effort support depends on the model's chat template; it does not
-set a separate reasoning-token budget.
-
-Qwen XML tool parameters use the offered tool schema's explicit `type` to decode
-arrays, objects, booleans, integers, numbers, and nulls. String parameters preserve
-text and whitespace. Streaming buffers typed values until their closing parameter
-tag; string values continue streaming incrementally. Malformed or mismatched values
-remain strings for the client to validate. Union types and schema references are not
-resolved by this conversion.
-
-## Development
-
-```bash
-git clone https://github.com/ashhart/TensorFold.git
-cd TensorFold
-pip install -e ".[test]"
-pytest
-```
-
-The kernel tests of the lane engine need an M5-generation GPU and are skipped elsewhere. The CUDA engines'
-tests in `tests/cuda/` run where PyTorch sees an NVIDIA GPU (inside NVIDIA's container: `pip install pytest`
-first) and are skipped elsewhere.
-
-## License
-
-MIT. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md). Each model keeps its own license;
-see its Hugging Face page.
+Family interfaces, kernel layout and verification requirements are in the [recipe book](docs/recipes/README.md),
+[family map](src/tensorfold/families/README.md) and [kernel map](src/tensorfold/kernels/README.md).
+MIT; see [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+Model weights keep their own licenses.

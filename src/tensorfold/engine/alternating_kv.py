@@ -1,15 +1,4 @@
-"""A KV cache for pipelined decoding: decode writes alternate between two buffers.
-
-MLX writes rows into a cache buffer in place only when nothing else holds the
-buffer. A pipelined decode queues step s+1 while step s still runs, and step s
-reads the buffer (its command buffer holds it until the GPU finishes), so step
-s+1's write copied the whole cache first: 6 attention layers x (K, V) x 30 MB
-at 60k keys, ~1 ms a token on an M5 Max (2026-09-25). Here each decode write
-goes to the other buffer, last read by step s-1, which has finished: the rows
-that buffer lacks (step s's) are written with the new ones, and nothing is
-copied. The buffers hold the same values a ``KVCache`` holds, so attention
-reads the same bits.
-"""
+"""Alternate KV writes between buffers, filling missing recent rows so pipelined readers retain identical cache values without copies."""
 
 from __future__ import annotations
 
@@ -18,12 +7,7 @@ from mlx_lm.models.cache import KVCache
 
 
 class AlternatingKVCache(KVCache):
-    """``KVCache`` whose writes of up to ``alternate_rows`` rows go to a spare buffer.
-
-    ``keys``/``values`` hold positions [0, offset) as in ``KVCache``. The spare holds
-    [0, spare_len) and ``recent_keys``/``recent_values`` the rows [spare_len, offset) it
-    lacks. Longer writes (prompt chunks) go to the current buffer and drop the spare.
-    """
+    """Keep [0, offset) in the current buffer and recent rows missing from the spare; longer writes discard the spare."""
 
     alternate_rows = 16
     grow = 2048                      # spare capacity added at a time (a copy of the buffer each time)

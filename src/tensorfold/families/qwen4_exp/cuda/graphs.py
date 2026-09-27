@@ -4,7 +4,7 @@ A forward's GPU work (``forward.compute``) reads only static buffers and device-
 be captured once per window size and replayed with new inputs staged beforehand (token ids and the n-gram
 rows, ``forward.stage``). DeltaNet layers read their committed state from one of two buffers and write the
 new state to the other; every commit flips all layers together, so there are two graphs per window size
-(one per parity). The MTP head's step (``mtp.mtp_compute``) has no DeltaNet state: one graph per row count.
+(one per parity). Graphs also include the live context bucket; the MTP head has no DeltaNet parity.
 
 Replaying a graph runs the same kernels with the same launch parameters as the eager call, so it gives the
 same bits (checked in ``tests/cuda/test_flashnext_forward.py`` against eager decoding).
@@ -22,9 +22,9 @@ class Graphs:
     def __init__(self, e, *, max_rows: int = 8) -> None:
         self.e = e
         self.max_rows = max_rows
-        self.main: dict[tuple[int, int], torch.cuda.CUDAGraph] = {}
-        self.mtp: dict[int, torch.cuda.CUDAGraph] = {}
-        self.mtp_out: dict[int, torch.Tensor] = {}
+        self.main: dict[tuple[int, int, int], torch.cuda.CUDAGraph] = {}
+        self.mtp: dict[tuple[int, int], torch.cuda.CUDAGraph] = {}
+        self.mtp_out: dict[tuple[int, int], torch.Tensor] = {}
         self.pool = torch.cuda.graph_pool_handle()
         self.captures = 0
 
@@ -49,6 +49,9 @@ class Graphs:
         self.captures += 1
         return g
 
+    def _bucket(self, end: int) -> int:
+        return min(self.e.st.capacity, max(8192, 1 << (end - 1).bit_length()))
+
     @torch.no_grad()
     def forward(self, tokens) -> torch.Tensor:
         e = self.e
@@ -56,11 +59,12 @@ class Graphs:
         R = stage(w, st, b, tokens)
         if R > self.max_rows:
             return compute(w, st, b, R)
-        key = (R, st.cur[0] if st.cur else 0)
+        context = self._bucket(st.pos + R)
+        key = (R, st.cur[0] if st.cur else 0, context)
         g = self.main.get(key)
         if g is None:
-            compute(w, st, b, R)                     # eager warm-up: compiles every kernel for this shape
-            g = self._capture(lambda: compute(w, st, b, R))
+            compute(w, st, b, R, context=context)     # eager warm-up: compiles this launch shape
+            g = self._capture(lambda: compute(w, st, b, R, context=context))
             self.main[key] = g
         g.replay()
         return b.logits[:R]
@@ -72,14 +76,16 @@ class Graphs:
         n = mtp_stage(w, st, b, next_tokens, streams)
         if n > self.max_rows:
             return mtp_compute(w, st, b, n)
-        g = self.mtp.get(n)
+        context = self._bucket(st.mtp_len + n)
+        key = (n, context)
+        g = self.mtp.get(key)
         if g is None:
-            out = mtp_compute(w, st, b, n)            # eager warm-up; its result is the view replays fill
-            g = self._capture(lambda: mtp_compute(w, st, b, n))
-            self.mtp[n] = g
-            self.mtp_out[n] = out
+            out = mtp_compute(w, st, b, n, context=context)
+            g = self._capture(lambda: mtp_compute(w, st, b, n, context=context))
+            self.mtp[key] = g
+            self.mtp_out[key] = out
         g.replay()
-        return self.mtp_out[n]
+        return self.mtp_out[key]
 
     @torch.no_grad()
     def warm(self, rows: int | None = None) -> int:

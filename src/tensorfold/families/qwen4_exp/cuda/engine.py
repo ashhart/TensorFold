@@ -33,12 +33,14 @@ class FlashNextEngine:
     """``eos``, ``generate`` (rank 0 or one GPU) and ``follow`` (rank 1), as ``tensorfold.cuda.server`` expects."""
 
     def __init__(self, model_dir: Path, *, depth: int = DEPTH, confidence: float = CONFIDENCE,
-                 draft_vocab: str | int | None = "default", max_len: int = CONTEXT, tp: int = 1, rank: int = 0,
+                 draft_vocab: str | int | None = "default", max_len: int | None = None, context_explicit: bool | None = None, tp: int = 1, rank: int = 0,
                  master: str = "", port: int = 29551, prefetch: bool = True, graphs: bool = True) -> None:
         import torch
 
         from .decode import Engine
         from .weights import draft_token_ids, load
+        from tensorfold.cuda.capacity import admit, gather_ints
+        from tensorfold.cuda.geometry import gdn_geometry, indexed_weights
 
         if tp not in (1, 2) or rank not in range(tp):
             raise ValueError(f"rank {rank} of {tp}: Flash Next runs on one GPU or two")
@@ -46,7 +48,6 @@ class FlashNextEngine:
             raise ValueError(f"MTP drafts a round: 0 to {MAX_DEPTH}, not {depth}")
         torch.cuda.set_device(0)
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
-        self.max_len = int(max_len)
         self.comm = None
         ids = draft_token_ids(draft_vocab) if self.depth > 0 else None
         if tp == 2:
@@ -56,6 +57,12 @@ class FlashNextEngine:
                 raise ValueError("two ranks need rank 0's address (master)")
             self.comm = NCCL(rank, 2, master, port)
             self.comm.barrier()
+        gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
+        self.capacity_plan = admit(model_dir, max_len, context_explicit, torch,
+                                   lambda text: gdn_geometry(text, tp, self.depth + 1, indexed=True, mtp=self.depth > 0),
+                                   indexed_weights(tp, self.depth > 0), rank=rank, world=tp, gather=gather)
+        self.max_len = self.capacity_plan["cache_slots"]
+        if tp == 2:
             self._same_settings(torch, ids)
         w = load(model_dir, mtp=self.depth > 0, tp=(rank, 2) if tp == 2 else None,
                  draft_vocab=draft_vocab if self.depth > 0 else None)
@@ -78,7 +85,8 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
-        print(f"[tensorfold] Flash Next on CUDA: {rule}; {self.max_len}-token context; n-gram tables read in "
+        print(f"[tensorfold] Flash Next on CUDA: {rule}; {self.context_window}-token prompt/reply window; "
+              f"{self.max_len}-token cache; n-gram tables read in "
               f"{read_s:.1f}s; {captured} decode graphs captured", flush=True)
 
     def _same_settings(self, torch, ids) -> None:
@@ -140,6 +148,12 @@ class FlashNextEngine:
         s = body["sampling"]
         return (body["prompt"], body["max_tokens"], None if s is None else Sampling(s[0], s[1], s[2], s[3]),
                 body["draft"], body["cached"])
+
+    @property
+    def context_window(self) -> int:
+        """Prompt and reply capacity after reserving speculative scratch positions."""
+
+        return max(0, self.max_len - self.depth - 1)
 
     # -- decoding ------------------------------------------------------------------------------------------------
     def _limit(self, prompt: list[int], max_tokens: int) -> int:

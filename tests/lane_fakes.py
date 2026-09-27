@@ -1,15 +1,15 @@
 """A history-dependent fake target for lane engine and lane server tests.
 
-The next token depends on the WHOLE absorbed history, so any rollback,
-refeed, padding, or checkpoint mistake shows up as a byte divergence from
-the fake's own serial decode.
+The next token depends on the WHOLE absorbed history, so any rollback, refeed or checkpoint mistake shows up as a
+byte divergence from the fake's own serial decode. ``FakeFamily`` serves it as a lane-engine family.
 """
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+import time
+from typing import Any
 
-from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+from tensorfold.engine.lane_engine import LaneEngine
 
 VOCAB = 97
 
@@ -31,7 +31,10 @@ def fake_serial(prompt: list[int], max_new: int, eos: set[int]) -> list[int]:
 
 
 class PatternProposer:
-    """Proposes the true continuation for ``good`` tokens, then a wrong one."""
+    """Proposes the true continuation for ``good`` tokens, then a wrong one; every proposal is confident (the family
+    round verifies it as a copy)."""
+
+    last_match = 1 << 30
 
     def __init__(self, pattern: list[int]) -> None:
         self.pattern = pattern
@@ -56,133 +59,87 @@ class PatternProposer:
 
 
 class FakeBatchItem:
-    """Per-row absorbed history standing in for a cache layer."""
+    """Absorbed history standing in for a cache layer (one row)."""
 
     def __init__(self, rows: list[list[int]]) -> None:
         self.rows = [list(r) for r in rows]
-        self.prepared: list[tuple[list[int], list[int]]] = []
-        self.lengths: list[int] | None = None
-        self.finalized = 0
 
     @property
     def state(self) -> list[Any]:
         return []
 
-    def prepare(self, *, lengths: list[int], right_padding: list[int]) -> None:
-        # Real caches mask the padded tail; the fake must not absorb it.
-        self.prepared.append((list(lengths), list(right_padding)))
-        self.lengths = list(lengths)
 
-    def finalize(self) -> None:
-        self.finalized += 1
-        self.lengths = None
+class FakeFamily:
+    """The fake target as a family: a cache holds the absorbed history, each row's hidden state carries the token the
+    target picks after it, and a rollback trims the history. ``delay``: seconds a forward takes."""
 
-    def extend(self, other: "FakeBatchItem") -> None:
-        self.rows.extend(other.rows)
+    lane_family = True
+    streams_exact = True
+    exact_width = 16
+    mtp = None
+    gpu_tokens = False
 
-    def filter(self, keep: list[int]) -> None:
-        self.rows = [self.rows[i] for i in keep]
+    def __init__(self, delay: float = 0.0) -> None:
+        self.delay = float(delay)
 
-    def extract(self, row: int) -> "FakeBatchItem":
-        return FakeBatchItem([self.rows[row]])
+    def make_cache(self) -> list[Any]:
+        return [FakeBatchItem([[]])]
+
+    def hidden(self, inputs: Any, cache: list[Any], parents: Any = None) -> Any:
+        import mlx.core as mx
+        import numpy as np
+
+        if self.delay:
+            time.sleep(self.delay)
+        history = cache[0].rows[0]
+        out = []
+        for token in np.array(inputs).reshape(-1).tolist():
+            history.append(int(token))
+            out.append(fake_next(history))
+        return mx.array(out, dtype=mx.float32).reshape(1, -1, 1)
+
+    def hidden_rows(self, windows: list[Any], caches: list[list[Any]], parents: Any = None) -> Any:
+        import mlx.core as mx
+
+        return mx.concatenate([self.hidden(w, c) for w, c in zip(windows, caches)], axis=1)
+
+    def head(self, hidden: Any) -> Any:
+        import mlx.core as mx
+        import numpy as np
+
+        picks = np.array(hidden).reshape(-1).astype(np.int64)
+        logits = np.zeros((1, len(picks), VOCAB), dtype=np.float32)
+        logits[0, np.arange(len(picks)), picks] = 10.0
+        return mx.array(logits)
+
+    def keep_rows(self, cache: list[Any], rows: int, keep: Any) -> None:
+        kept = keep if isinstance(keep, int) else len(keep)
+        if kept < rows:
+            del cache[0].rows[0][kept - rows:]
+
+    def keep_rows_streams(self, caches: list[list[Any]], lengths: Any, keeps: Any) -> None:
+        for cache, rows, keep in zip(caches, lengths, keeps):
+            self.keep_rows(cache, int(rows), keep)
 
 
 class FakeEngine(LaneEngine):
-    """LaneEngine over the fake target; MLX seams replaced with lists."""
+    """LaneEngine over ``FakeFamily``, without a prefill grid (checkpoints anywhere, decoded states kept); records
+    each prefill's (stream id, cached tokens) and checks a resumed cache holds exactly the prompt's prefix."""
 
-    # The fake target has no row cost curve: windows are not capped, so the tests
-    # keep exercising ragged windows and rollbacks.
-    cheap_window = 1_000
-    # its prefill (below) takes checkpoints anywhere and keeps decoded states: the engine without a prefill grid
     prefill_align = 0
 
     def __init__(self, model: Any = None, **kwargs: Any) -> None:
-        super().__init__(model=model, **kwargs)
-        self.filter_calls: list[list[int]] = []
-        self.rollback_calls: list[list[int]] = []
+        super().__init__(model if model is not None else FakeFamily(), **kwargs)
         self.prefill_calls: list[tuple[str, int]] = []
 
-    def prefill(
-        self,
-        stream: LaneStream,
-        *,
-        cache: list[Any] | None = None,
-        cached_tokens: int = 0,
-        checkpoints_at: Sequence[int] = (),
-    ) -> list[Any]:
-        if cache is None:
-            history = list(stream.prompt_ids)
-            cached_tokens = 0
-        else:
-            history = list(cache[0].rows[0]) + list(stream.prompt_ids[int(cached_tokens) :])
-        if history != list(stream.prompt_ids):
+    def _family_prefill(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
+                        checkpoints_at: Any) -> list[Any]:
+        cached = int(cached_tokens) if cache is not None else 0
+        if cache is not None and list(cache[0].rows[0]) != list(stream.prompt_ids[:cached]):
             raise AssertionError("checkpoint was not a prefix of the prompt")
-        self.prefill_calls.append((stream.stream_id, int(cached_tokens)))
-        stream.history_checkpoints = []
-        for boundary in sorted({int(b) for b in checkpoints_at}):
-            if int(cached_tokens) < boundary < len(history):
-                head = list(stream.prompt_ids[:boundary])
-                stream.history_checkpoints.append((head, [FakeBatchItem([head])]))
-        first = fake_next(history)
-        stream.emitted = []
-        stream.cache_len = len(stream.prompt_ids)
-        stream.cached_tokens = int(cached_tokens)
-        stream.commit([first])
-        stream.pending = [first]
-        return [FakeBatchItem([history])]
-
-    def prefill_prefix(
-        self,
-        prompt_ids: Sequence[int],
-        *,
-        cache: list[Any] | None = None,
-        cached_tokens: int = 0,
-    ) -> list[Any]:
-        if cache is None:
-            history = list(prompt_ids)
-        else:
-            history = list(cache[0].rows[0]) + list(prompt_ids[int(cached_tokens) :])
-        if history != list(prompt_ids):
-            raise AssertionError("prefix checkpoint was not a prefix of the prompt")
-        return [FakeBatchItem([history])]
-
-    def _merge(self, caches: list[list[Any]]) -> list[Any]:
-        return [FakeBatchItem([c[0].rows[0] for c in caches])]
-
-    def _snapshot_recurrent(self, cache: list[Any]) -> list[Any]:
-        return [[list(r) for r in cache[0].rows]]
-
-    def _forward_rows(self, rows: list[list[int]], cache: list[Any]) -> tuple[Any, Any]:
-        item = cache[0]
-        preds: list[list[int]] = []
-        for row_index, row in enumerate(rows):
-            real = item.lengths[row_index] if item.lengths is not None else len(row)
-            history = list(item.rows[row_index])
-            out: list[int] = []
-            for position, token in enumerate(row):
-                if position < real:
-                    history.append(token)
-                    out.append(fake_next(history))
-                else:
-                    out.append(-1)  # masked pad position: garbage, never read
-            preds.append(out)
-            item.rows[row_index] = history
-        return preds, None
-
-    def _eval(self, cache: list[Any], *extra: Any) -> None:
-        del cache, extra
-
-    def _rollback_rows(self, cache: list[Any], amounts: list[int], snaps: list[Any]) -> None:
-        self.rollback_calls.append(list(amounts))
-        for row, amount in enumerate(amounts):
-            if amount > 0:
-                cache[0].rows[row] = list(snaps[0][row])
-
-    def _filter(self, keep: list[int]) -> None:
-        self.filter_calls.append(list(keep))
-        if self._batch is not None:
-            for item in self._batch:
-                item.filter(keep)
+        self.prefill_calls.append((stream.stream_id, cached))
+        return super()._family_prefill(stream, cache=cache, cached_tokens=cached_tokens,
+                                       checkpoints_at=checkpoints_at)
 
     @staticmethod
     def copy_single_cache(cache: list[Any]) -> list[Any]:

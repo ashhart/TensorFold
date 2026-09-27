@@ -1,16 +1,4 @@
-"""GLM-5.3-Flash (model_type ``glm5_next``) on two NVIDIA GPUs: a CUDA engine only, tensor parallel over two
-DGX Sparks.
-
-45 decoder layers over a hidden size of 4,096: 34 of Kimi delta attention and 11 of DeepSeek sparse attention
-(MLA with an indexer), 288 routed experts (top 8) plus a shared expert, four residual streams mixed by
-hyper-connections, a 154,880-token vocabulary and an MTP layer. The MLX 4-bit checkpoint is 182 GB and Mia's
-EXL3 one (routed experts in ExLlamaV3's 4-bit trellis format, the rest in BF16, ``cuda/exl3.py``) 164 GB, so each
-Spark holds half of every layer (``cuda/``). Drafts come from the checkpoint's MTP head and, when it has been
-pulled on both machines, from the DFlash2 draft model.
-
-There is no MLX engine for this family (no ``load``), so ``tensorfold serve`` refuses the MLX backend for it.
-Recipe and measurements: docs/recipes/glm-5.3-flash.md.
-"""
+"""GLM-5.3-Flash uses a CUDA-only engine with tensor parallelism over two GPUs and MTP or DFlash2 drafts."""
 
 from __future__ import annotations
 
@@ -28,8 +16,7 @@ EXL3_VARIANT = {"bits": 4, "codebook": "mcg", "scope": "glm53_routed_experts_onl
 
 
 def check(model_dir: str | Path) -> None:
-    """The engine reads MLX affine 4-bit weights in groups of 64, or Mia's EXL3 layout (4-bit mcg trellis routed
-    experts, BF16 elsewhere), and runs on two GPUs."""
+    """Require two GPUs and MLX affine 4-bit groups of 64 or EXL3 4-bit mcg trellis routed experts with BF16 elsewhere."""
 
     from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quant_method, quantization, read_config
 
@@ -57,19 +44,7 @@ CUDA_QUANTIZATION = (4, 64)
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None, **options: Any):
-    """The CUDA engine, set up as the recipe measured on two DGX Sparks.
-
-    Each rank reads its half of the checkpoint (``cuda/split.py``) and the ranks all-gather fp32 partials every
-    layer. By default a greedy request drafts each round with the MTP head or, with ``drafter`` (both machines),
-    DFlash2, whichever has committed more tokens per millisecond so far; a sampled request drafts with the MTP
-    head, 1 to 3 drafts a round from the running acceptance. A request can ask for another policy
-    (``cuda/app.py``, specs in ``cuda/engine.py``). A prompt that extends the last request's prompt or reply
-    resumes from its kept state.
-    ``mtp_drafts``: a fixed number of MTP drafts a round instead; 0 drafts with DFlash2 alone (``fc5:0.3``) when the
-    draft model is there, else it is the serial reference like ``no_drafts`` (serial decoding only).
-    ``options["context"]``: prompt plus reply tokens; up to 2,051 (the default) attention stays dense, as measured;
-    longer contexts run DSA's sparse top-k past 2,051 tokens without CUDA graphs.
-    """
+    """Build the two-rank engine with adaptive drafting, reusable prompt state, or serial decoding when drafts are disabled."""
 
     if int(tp) != 2:
         raise ValueError("GLM-5.3-Flash needs two GPUs, one per machine: run the same `tensorfold serve` command "
@@ -86,7 +61,8 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
         policy = str(int(mtp_drafts))
     return GlmEngine(Path(model_dir), rank=int(rank), master=master, port=int(master_port), policy=policy,
                      drafter=Path(drafter) if drafter and not no_drafts else None,
-                     context=int(options.get("context") or 0), serial_only=bool(no_drafts))
+                     context=options.get("context"), context_explicit=options.get("context_explicit"),
+                     serial_only=bool(no_drafts))
 
 
 def __getattr__(name: str) -> Any:
