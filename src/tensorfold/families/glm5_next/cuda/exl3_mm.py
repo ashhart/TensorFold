@@ -1,17 +1,4 @@
-"""GLM-5.3-Flash's routed experts in EXL3 on CUDA (``exl3.cu``): the grouped trellis GEMV and the rotations.
-
-A window's routed (row, slot) pairs go through, per layer:
-
-    rot_in           Xg, Xu = fp16((x * suh) @ H) for each pair's expert (gate and up have their own suh)
-    grouped          Zg, Zu = X @ W_q for every distinct expert's rows, per fixed K split (fp32)
-    gateup_epilogue  g, u = (sum of splits) @ H * svh; act = GLM's limited SwiGLU; Xd = fp16((act * suh_d) @ H)
-    grouped          Zd = Xd @ W_q(down), per fixed K split
-    down_epilogue    Y[row, slot] = (sum of splits) @ H * svh_d      (this rank's share, fp32)
-
-H is the 128-block Hadamard / sqrt(128) (``exl3.py``). The shared expert is BF16 and fills Y's last slot
-elsewhere; ``glue.combine`` then adds the slots in order as before. Splits of K and warps are fixed by the shape,
-so a pair's outputs never depend on the window's other rows.
-"""
+"""EXL3 expert kernels fix K splits and warps by shape so each routed pair's output is independent of the window's other rows."""
 
 from __future__ import annotations
 
@@ -21,8 +8,9 @@ from pathlib import Path
 
 import torch
 
-# (n tiles a block, warps a block, K splits) for the gate/up (K = model width) and down (K = the rank's expert
-# width) matrices; none changes a row's bits across row counts.
+from tensorfold.cuda import experts as grouped
+
+# Gate/up and down tile counts, warps, and K splits stay fixed across row counts to preserve each row's bits.
 GATEUP_CFG = (8, 4, 4)
 DOWN_CFG = (8, 4, 1)
 
@@ -79,17 +67,20 @@ class Scratch:
         self.rows, self.slots = rows, slots
 
 
-def routed(x: torch.Tensor, pick: torch.Tensor, group, ex: Exl3Experts, s: Scratch, y: torch.Tensor, R: int,
-           limit: float) -> None:
-    """Y[row * slots + slot] for every routed slot of rows 0..R-1 (fp32, [.., D]); x: the normed rows (bf16)."""
+def routed(x: torch.Tensor, pick: torch.Tensor, plan: grouped.Plan, ex: Exl3Experts, s: Scratch, y: torch.Tensor,
+           R: int, limit: float) -> None:
+    """Y[row * slots + slot] (fp32) for rows 0..R-1's routed slots, from normed bf16 x and ``experts.route``'s plan."""
 
+    if plan.tile != grouped.TILE:
+        raise ValueError("the EXL3 kernel takes items of 16 pairs")
     ext = _ext()
     slots, P = s.slots, s.rows * s.slots
     D, NI = ex.dims, ex.width
+    items = grouped.max_items(R * slots, plan.experts)
     ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots)
     nt, w, sk = GATEUP_CFG
-    ext.grouped(s.xg, s.xu, ex.gt, ex.ut, group.ids, group.count, group.members, s.z, 2, D, NI, P, sk, slots, nt, w)
+    ext.grouped(s.xg, s.xu, ex.gt, ex.ut, plan.items, plan.counts, plan.members, s.z, 2, D, NI, P, sk, items, nt, w)
     ext.gateup_epilogue(s.z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, NI, sk, slots, float(limit))
     nt, w, sk = DOWN_CFG
-    ext.grouped(s.xd, s.xd, ex.dt, ex.dt, group.ids, group.count, group.members, s.z, 1, NI, D, P, sk, slots, nt, w)
+    ext.grouped(s.xd, s.xd, ex.dt, ex.dt, plan.items, plan.counts, plan.members, s.z, 1, NI, D, P, sk, items, nt, w)
     ext.down_epilogue(s.z, pick, ex.svh_d, y, R, P, D, sk, slots)

@@ -85,6 +85,8 @@ class ChatApp(RequestOptions):
         snapshot_dir: Path | None = None,
         model_id: str = "",
         memory_fraction: float | None = None,
+        memory_overhead_bytes: int | None = None,
+        fit_context: bool = False,
     ) -> None:
         # three candidate entries per conversation (history boundary, stable prefix, reply end)
         if checkpoint_slots is None:
@@ -126,21 +128,31 @@ class ChatApp(RequestOptions):
             if int(checkpoint_slots) > 0 else None
         )
         self.requests_completed = 0
+        # Delay background requests while foreground requests arrive and prepare so the session turn is admitted first.
         self.background_grace_s = 0.15
         self._preparing = 0
         self._preparing_lock = threading.Lock()
         self.min_match = int(min_match)
         self.use_proposer = bool(use_proposer)
-        admission = self._admission(float(memory_fraction), int(lanes)) if memory_fraction and lanes > 1 else None
         self.prompt_memory: Any = None
+        self.context_fitted = False       # the window is what the memory budget fits, below the configured one
         if memory_budget_bytes is not None:
-            from tensorfold.server.prompt_memory import PromptMemory
+            from tensorfold.server.prompt_memory import PromptMemory, probe_tokens
 
             self.prompt_memory = PromptMemory(memory_budget_bytes, model, runtime=memory_runtime,
-                                              store=self.checkpoints, window_tokens=self.context_window)
+                                              store=self.checkpoints, window_tokens=self.context_window,
+                                              chunk_rows=getattr(self.engine.prefill_plan, "step",
+                                                                 self.engine.prefill_step),
+                                              **({} if memory_overhead_bytes is None
+                                                 else {"overhead_bytes": memory_overhead_bytes}))
             if self.checkpoints is not None:
                 # admission evicts on demand, so a long conversation keeps its newest prefix past the budget
                 self.checkpoints.admit_oversize = True
+        measure = lambda: self._admission(float(memory_fraction), int(lanes)) if memory_fraction and lanes > 1 else None
+        admission = measure() if self.prompt_memory is None else self.prompt_memory.sized(
+            self.engine, measure, probe_tokens(tokenizer))
+        if self.prompt_memory is not None:
+            self.context_window, self.context_fitted = self.prompt_memory.fit_window(self.context_window, fit_context)
         self.scheduler = Scheduler(
             self.engine,
             lanes=int(lanes),
@@ -172,10 +184,8 @@ class ChatApp(RequestOptions):
             # only when these kernels have no block yet: a warmed block is pinned after the loaded ones
             self._warm_known_blocks(snapshot_dir, model_id)
 
-    # -- request path -----------------------------------------------------------
     def _admission(self, fraction: float, lanes: int) -> Any:
-        """Concurrent streams start only while the projected footprint stays under ``fraction`` of RAM less what
-        the rest of the machine holds (``engine.memory``)."""
+        """Admit concurrent streams only within ``fraction`` of RAM minus memory held elsewhere on the machine."""
 
         from tensorfold.engine import memory
 
@@ -183,12 +193,15 @@ class ChatApp(RequestOptions):
         used = memory._mlx_used()
         ram = memory.ram_bytes()
         elsewhere = memory.used_elsewhere(used)
-        admission = memory.Admission(int(fraction * ram) - elsewhere, stream)
+        share = self.prompt_memory.budget if self.prompt_memory is not None else int(fraction * ram)
+        admission = memory.Admission(min(int(fraction * ram) - elsewhere, share), stream,
+                                     used=None if self.prompt_memory is None else self.prompt_memory.held)
         tokens = self.default_max_tokens + 4096
         gib, mib = 1024**3, 1024**2
         print(f"[tensorfold] concurrency: up to {lanes} requests share each round; memory budget "
-              f"{admission.budget / gib:.1f} GB ({fraction:.0%} of {ram / gib:.0f} GB less {elsewhere / gib:.1f} GB "
-              f"in use elsewhere); a stream {stream.short / mib:.0f} MB at {stream.short_tokens} tokens, "
+              f"{admission.budget / gib:.1f} GB (MLX's share {share / gib:.1f} GB, or {fraction:.0%} of "
+              f"{ram / gib:.0f} GB less {elsewhere / gib:.1f} GB in use elsewhere); a stream "
+              f"{stream.short / mib:.0f} MB at {stream.short_tokens} tokens, "
               f"{stream.long / mib:.0f} MB at {stream.long_tokens:,}, then {stream.per_token / 1024:.1f} KB a token; "
               f"a shared round up to {stream.round_bytes / gib:.2f} GB; {admission.fitting(tokens)} streams of "
               f"{tokens:,} tokens fit now (more wait their turn)", flush=True)
@@ -215,9 +228,7 @@ class ChatApp(RequestOptions):
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None,
         prompt_ids: list[int], thinking: bool | None = None,
     ) -> int:
-        """Tokens of the prompt that any session with this system block shares. Rendered by swapping the first user
-        message for a probe and taking the common prefix, so it needs no knowledge of the chat template. Zero when
-        the shared part is too short to be worth a snapshot."""
+        """Find a reusable system prefix by substituting a probe for the first user message; return zero for short matches."""
 
         effort = (getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort", self.reasoning_effort)
         first_user = next((i for i, m in enumerate(messages) if m.get("role") == "user"), None)
@@ -310,7 +321,7 @@ class ChatApp(RequestOptions):
                 preparing.release()
 
     class _Preparing:
-        """A."""
+        """A user's request between arrival and submission: background requests wait for these."""
 
         def __init__(self, app: "ChatApp") -> None:
             self.app = app
@@ -362,8 +373,10 @@ class ChatApp(RequestOptions):
         if self.context_window:
             room = self.context_window - len(prompt_ids)
             if room < 1:
-                raise RequestError(f"the prompt has {len(prompt_ids)} tokens; this server's context window is "
-                                   f"{self.context_window}")
+                why = ", the most this server's memory budget fits" if self.context_fitted else ""
+                raise RequestError(f"This server's maximum context length is {self.context_window:,} tokens{why}, "
+                                   f"but the rendered prompt has {len(prompt_ids):,} tokens and leaves no room for a "
+                                   "reply. Compact or shorten the conversation.")
             if reply_limit_explicit and limit > room:
                 raise RequestError(
                     f"the rendered prompt has {len(prompt_ids)} tokens and requests {limit} reply tokens; "
@@ -383,8 +396,7 @@ class ChatApp(RequestOptions):
                 max_tokens=limit,
                 temperature=float(temperature),
                 history_len=history_len,
-                # the block's end can differ between sessions (a client that names the terminal or the date in
-                # it): snapshots 512 and 2,048 tokens before it keep most of it
+                # Snapshot before the system block ends to retain reusable prefixes when session-specific tails differ.
                 shared_prefix_lens=tuple(n for n in (system_len - 2048, system_len - 512, system_len)
                                          if n >= 512) if system_len else (),
                 sampling=spec,
@@ -409,7 +421,7 @@ class ChatApp(RequestOptions):
 
         job = make_job()
         if background:
-            # the session's first turn is usually a few ms behind: let it arrive and render first
+            # Let the session's foreground turn arrive and render before submitting background work.
             deadline = received_at + self.background_grace_s
             while time.perf_counter() < deadline or (self._preparing and time.perf_counter() < received_at + 2.0):
                 cancellation.check()
@@ -440,6 +452,7 @@ class ChatApp(RequestOptions):
             cancellation.check()
             if chunk is None:
                 if job.preempted and job.error is None:
+                    # Replay preempted work with the same prompt and sampling, dropping tokens already delivered.
                     preemptions += 1
                     replay = list(collected)
                     job = make_job()

@@ -27,6 +27,7 @@ def main() -> None:
     p.add_argument("--max-bytes", type=int, default=2_000_000, help="skip files larger than this")
     p.add_argument("--min-count", type=int, default=10,
                    help="leave out ids seen fewer times (rare names and one-off words); the id prefix fills the rest")
+    p.add_argument("--added-tokens", action="store_true", help="always keep the tokenizer's added (special) tokens")
     args = p.parse_args()
     tok = Tokenizer.from_file(args.tokenizer)
     counts: collections.Counter = collections.Counter()
@@ -45,6 +46,8 @@ def main() -> None:
         total += len(ids)
         used += 1
     keep = set(range(args.keep_below))
+    if args.added_tokens:
+        keep |= {t["id"] for t in json.loads(open(args.tokenizer).read())["added_tokens"]}
     for tid, count in counts.most_common():
         if len(keep) >= args.size or count < args.min_count:
             break

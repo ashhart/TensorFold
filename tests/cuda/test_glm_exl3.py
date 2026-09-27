@@ -122,6 +122,7 @@ def test_exl3_experts_match_the_reference_and_rows_are_independent():
     """A layer's routed experts (rotations, trellis GEMVs, SwiGLU) against the float64 reference with the kernels'
     roundings, on synthetic experts; each row alone gives the bits it gets inside a window."""
 
+    from tensorfold.cuda import experts as grouped
     from tensorfold.families.glm5_next.cuda import exl3_mm
 
     D, NI, E, SLOTS, LIMIT = 512, 128, 6, 3, 10.0
@@ -153,24 +154,13 @@ def test_exl3_experts_match_the_reference_and_rows_are_independent():
 
     def run(rows, picks):
         n = len(rows)
-        used = sorted({int(e) for e in picks[:, :SLOTS - 1].flatten()})
-        ids = torch.zeros((len(used) + 1,), dtype=torch.int32)
-        members = torch.full((len(used) + 1, n), -1, dtype=torch.int32)
-        for u, e in enumerate(used):
-            ids[u] = e
-            j = 0
-            for r in range(n):
-                for s in range(SLOTS - 1):
-                    if int(picks[r, s]) == e:
-                        members[u, j] = r * 32 + s
-                        j += 1
-        group = type("G", (), {})()
-        group.ids, group.count, group.members = ids.cuda(), torch.tensor([len(used)], dtype=torch.int32).cuda(), members.cuda()
-        scratch = exl3_mm.Scratch(8, SLOTS, D, NI, "cuda")
-        y = torch.zeros((8 * SLOTS, D), dtype=torch.float32, device="cuda")
         full_pick = torch.full((8, SLOTS), E, dtype=torch.int32)
         full_pick[:n] = picks
-        exl3_mm.routed(x[rows].contiguous(), full_pick.cuda(), group, experts, scratch, y, n, LIMIT)
+        plan = grouped.Plan(8, SLOTS, E + 1, "cuda")
+        grouped.route(full_pick[:n].contiguous().cuda(), plan)
+        scratch = exl3_mm.Scratch(8, SLOTS, D, NI, "cuda")
+        y = torch.zeros((8 * SLOTS, D), dtype=torch.float32, device="cuda")
+        exl3_mm.routed(x[rows].contiguous(), full_pick.cuda(), plan, experts, scratch, y, n, LIMIT)
         return y.view(8, SLOTS, D)[:n].cpu()
 
     def bf16(v):

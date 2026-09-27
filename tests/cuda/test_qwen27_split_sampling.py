@@ -9,7 +9,7 @@ if not torch.cuda.is_available():
 
 from tensorfold.engine.exact_sampling import Sampling
 from tensorfold.families.qwen3_5.cuda.decode_tp import choose_merged, split_candidates
-from tensorfold.families.qwen3_5.cuda.sampling import sample_rows
+from tensorfold.cuda.sampling import sample_rows
 
 
 @pytest.mark.parametrize("sampling", [None, Sampling(11, 1.0, 20, 0.95), Sampling(5, 0.7, 20, 0.9)])

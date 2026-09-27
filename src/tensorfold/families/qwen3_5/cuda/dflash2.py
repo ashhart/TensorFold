@@ -1,13 +1,7 @@
-"""Torch DFlash2 proposals for the exact 128-node CUDA verifier.
-
-The draft model may disagree numerically with its MLX implementation: every
-proposal is checked by the target model, so disagreement changes acceptance,
-not output. The target taps and the checkpoint are the original Qwen3.8 ones.
-"""
+"""DFlash2 proposals use committed Qwen3.8 target taps and target verification, so draft rounding changes acceptance without changing output."""
 
 from __future__ import annotations
 
-import heapq
 import json
 from pathlib import Path
 from typing import Sequence
@@ -19,8 +13,9 @@ import triton
 import triton.language as tl
 from safetensors import safe_open
 
-from tensorfold.engine.exact_sampling import Sampling, uniform_rows
+from tensorfold.engine.exact_sampling import Sampling
 
+from .draft_tree import best_first
 from .glue import embed, swiglu
 from .qmm import group_sums
 from .qmm_fast import matmul, tile, untile
@@ -28,15 +23,15 @@ from .weights import QLinear, Weights
 
 
 @triton.jit
-def _dconv_kernel(X, DYN, BASE, RES, OUT, D: tl.constexpr, G: tl.constexpr, GS: tl.constexpr,
+def _dconv_kernel(X, DYN, BASE, RES, OUT, SEG, D: tl.constexpr, G: tl.constexpr, GS: tl.constexpr,
                   BRANCH: tl.constexpr, HAS_RES: tl.constexpr, BLOCK: tl.constexpr):
-    """``_conv`` (plus the residual add that follows it) as one kernel: row r mixes rows r and r-1."""
+    """``_conv`` and its residual add as one kernel; row r mixes rows r and r-1 of its ``SEG``-row block."""
 
     row = tl.program_id(0)
     c = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     ok = c < D
     x = tl.load(X + row * D + c, mask=ok, other=0.0).to(tl.float32)
-    prev = tl.load(X + (row - 1) * D + c, mask=ok & (row > 0), other=0.0).to(tl.float32)
+    prev = tl.load(X + (row - 1) * D + c, mask=ok & (row % SEG > 0), other=0.0).to(tl.float32)
     grp = c // GS
     d0 = tl.load(DYN + ((row * 2 + BRANCH) * 2) * G + grp, mask=ok, other=0.0).to(tl.float32)
     d1 = tl.load(DYN + ((row * 2 + BRANCH) * 2 + 1) * G + grp, mask=ok, other=0.0).to(tl.float32)
@@ -54,8 +49,7 @@ def _dconv_kernel(X, DYN, BASE, RES, OUT, D: tl.constexpr, G: tl.constexpr, GS: 
 @triton.jit
 def _prep_kernel(QKV, QN, KN, COS, SIN, QO, KO, VO, L, stride, eps,
                  H: tl.constexpr, HKV: tl.constexpr, HALF: tl.constexpr):
-    """Program (row, head) over [q heads | k heads | v heads] of a projection row: q and k get their
-    RMS norm and rotary embedding, v is copied; outputs are (heads, rows, head_dim)."""
+    """Normalize and rotate projected q/k while copying v into (heads, rows, head_dim) outputs, one program per row and head."""
 
     row = tl.program_id(0)
     head = tl.program_id(1)
@@ -91,14 +85,14 @@ def _prep_kernel(QKV, QN, KN, COS, SIN, QO, KO, VO, L, stride, eps,
 
 
 def _dconv(x: torch.Tensor, dyn: torch.Tensor, base: torch.Tensor, branch: int, group_size: int,
-           residual: torch.Tensor | None = None) -> torch.Tensor:
+           residual: torch.Tensor | None = None, seg: int | None = None) -> torch.Tensor:
     rows, d = x.shape
     x = x.contiguous()
     dyn = dyn.contiguous()
     out = torch.empty_like(x)
     block = 1024
     _dconv_kernel[(rows, triton.cdiv(d, block))](x, dyn, base, residual if residual is not None else x, out,
-                                                 D=d, G=d // group_size, GS=group_size, BRANCH=branch,
+                                                 seg or rows, D=d, G=d // group_size, GS=group_size, BRANCH=branch,
                                                  HAS_RES=residual is not None, BLOCK=block, num_warps=4)
     return out
 
@@ -149,70 +143,13 @@ def quantize4(w: torch.Tensor) -> QLinear:
     return QLinear(words, scale.contiguous(), bias.contiguous())
 
 
-# The tree policy's knobs (the Metal engine's values). Under keyed sampling a draft is accepted only
-# if it is the exact token the target samples, and the target's Gumbel noise for each position and
-# token is known in advance, so ``noise`` weighs that noise into the draft scores; ``nucleus`` drops
-# candidates outside the drafter's own top-p set, which the target can never sample.
-POLICY = {"edge": 0.6, "noise": 0.7, "scale": 1.5, "branch": 4, "nucleus": False}
-
-
-def _best_first(cands: np.ndarray, unary: np.ndarray, projected: np.ndarray,
-                pred: np.ndarray, succ: np.ndarray, anchor: int, max_nodes: int,
-                sampling: Sampling | None, first_position: int) -> tuple[list[int], list[int]]:
-    """The Metal best-first lattice policy without MLX or a host-side model copy."""
-
-    depth_count = cands.shape[0]
-    temp = max(float(sampling.temperature), 1e-6) if sampling is not None else 1.0
-    noise = None
-    if sampling is not None:
-        positions = first_position + np.arange(depth_count)
-        noise = -np.log(-np.log(uniform_rows(sampling.seed, positions, cands)))
-    successor = [succ[cands[d]].astype(np.float64) for d in range(depth_count)]
-    heap: list[tuple[float, int, int, int]] = []
-    tokens: list[int] = []
-    parents: list[int] = []
-
-    def expand(token: int, depth: int, parent: int, path_score: float) -> None:
-        edge = successor[depth] @ (pred[token].astype(np.float64) * projected[depth])
-        values = (unary[depth] + POLICY["edge"] * edge) / temp
-        if noise is not None:
-            if POLICY["nucleus"] and sampling.top_p < 1:
-                probs = np.exp(values - values.max())
-                probs /= probs.sum()
-                order = np.argsort(-probs)
-                keep = int(np.searchsorted(np.cumsum(probs[order]), sampling.top_p)) + 1
-                values = np.full_like(values, -np.inf)
-                values[order[:keep]] = ((unary[depth] + POLICY["edge"] * edge) / temp)[order[:keep]]
-            values = values + POLICY["noise"] * noise[depth]
-        values = values / POLICY["scale"]
-        values -= values.max()
-        logp = values - np.log(np.exp(values).sum())
-        for i in np.argsort(-logp)[:POLICY["branch"]]:
-            if not np.isfinite(logp[i]):
-                break
-            heapq.heappush(heap, (path_score - float(logp[i]), parent,
-                                  int(cands[depth, i]), depth))
-
-    expand(anchor, 0, -1, 0.0)
-    while heap and len(tokens) < max_nodes:
-        score, parent, token, depth = heapq.heappop(heap)
-        me = len(tokens)
-        tokens.append(token)
-        parents.append(parent)
-        if depth + 1 < depth_count:
-            expand(token, depth + 1, me, score)
-    return tokens, parents
-
-
 class DFlash2:
     """Five-layer DFlash2; context is the last 2,047 committed target taps."""
 
     def __init__(self, draft_dir: str | Path, target: Weights, bits: int = 4, block: int = 16,
                  fast: bool = True, rank: int = 0, world: int = 1):
         path = Path(draft_dir)
-        # ``world=2``: this rank drafts with half the attention heads, half the MLP and half the draft
-        # vocabulary (row-parallel sums gathered and added in rank order, top candidates merged), so
-        # both ranks call ``propose_tree`` and ``add_taps`` together. Needs the fused path.
+        # Two-rank drafting requires both ranks to call propose_tree/add_taps together on the fused path with ordered partial sums.
         if world not in (1, 2) or (world == 2 and not (fast and bits == 4)):
             raise ValueError("a two-rank drafter needs world=2 with the fused 4-bit path")
         self.rank, self.world = rank, world
@@ -243,7 +180,8 @@ class DFlash2:
         self.inv_freq = (1.0 / self.theta **
                          (torch.arange(self.head_dim // 2, device=self.device,
                                        dtype=torch.float32) * 2 / self.head_dim))
-        spans = ((0, 98304), (248032, min(248320, target.config.vocab)))
+        vocab = target.config.vocab
+        spans = tuple((a, min(b, vocab)) for a, b in ((0, 98304), (248032, 248320)) if a < vocab)
         self.vocab_spans = spans
         self.head_ids = torch.cat([torch.arange(a, b, device=self.device) for a, b in spans])
         head = untile(target.head)
@@ -259,12 +197,9 @@ class DFlash2:
         if target.head.layout == "tiled":
             self.sub_head = tile(self.sub_head)
         del head
-        # The large projections run as 4-bit lane matmuls: drafting reads ~1 GB a round instead of
-        # ~3.5 GB of bf16. Drafts only change acceptance, never the output.
+        # Quantized draft projections can change acceptance but never target output.
         self.q4: dict[str, QLinear] = {}
-        # ``fast``: [q | k | v] (and [k | v] for context rows) as one projection each, the norms,
-        # rotary embedding and dynamic convolutions as fused kernels, one mask and one rotary table
-        # a round: ~170 kernels a round instead of ~920. Different rounding, so different drafts.
+        # Fused projections, norms, rotary embeddings, and convolutions may round differently and change draft proposals.
         self.fast = fast and bits == 4
         self.heads_local, self.kv_local = self.heads // world, self.kv_heads // world
         if self.fast:
@@ -299,8 +234,7 @@ class DFlash2:
                     self.q4[name] = tile(quantize4(t.to(torch.bfloat16)))
                     del self.weights[name]
             torch.cuda.empty_cache()
-        # Keys and values of the context rows, per layer: each depends only on its row and position,
-        # so they are projected once when the row arrives instead of every round.
+        # Context keys and values depend only on their row and position, so project each once on arrival.
         self.kc: list[torch.Tensor | None] = [None] * self.layers
         self.vc: list[torch.Tensor | None] = [None] * self.layers
         self.context_len = 0
@@ -310,10 +244,7 @@ class DFlash2:
         q = self.q4.get(name)
         if q is None:
             return F.linear(x, self.weights[name])
-        x = x.to(torch.bfloat16).contiguous()
-        if x.shape[0] <= 128:
-            return matmul(x, q)
-        return torch.cat([matmul(x[i:i + 128], q) for i in range(0, x.shape[0], 128)])
+        return matmul(x.to(torch.bfloat16).contiguous(), q)
 
     def snapshot(self):
         return (list(self.kc), list(self.vc), self.context_len, self.context_end)
@@ -321,6 +252,12 @@ class DFlash2:
     def restore(self, snap) -> None:
         kc, vc, self.context_len, self.context_end = snap
         self.kc, self.vc = list(kc), list(vc)
+
+    def skip(self, n: int) -> None:
+        """Skip ``n`` rows untapped; the caller adds at least ``window`` more before drafting, so they drop out."""
+
+        self.kc, self.vc = [None] * self.layers, [None] * self.layers
+        self.context_len, self.context_end = 0, self.context_end + n
 
     @torch.no_grad()
     def add_taps(self, taps: torch.Tensor) -> None:
@@ -354,6 +291,35 @@ class DFlash2:
             self.vc[layer] = vc[:, -self.window:].contiguous()
         self.context_len = min(self.window, self.context_len + n)
         self.context_end += n
+
+    @torch.no_grad()
+    def add_taps_streams(self, snaps: list, taps: list[torch.Tensor]) -> list:
+        """``add_taps`` for several streams, each projection run once over all their rows; returns the new contexts."""
+
+        if not self.fast:
+            out = []
+            for snap, t in zip(snaps, taps):
+                self.restore(snap)
+                self.add_taps(t)
+                out.append(self.snapshot())
+            return out
+        sizes = [t.shape[0] for t in taps]
+        projected = _norm(self._lin(torch.cat(taps) if len(taps) > 1 else taps[0], "fc.weight"),
+                          self.weights["hidden_norm.weight"], self.eps)
+        pos = torch.tensor([p for snap, n in zip(snaps, sizes) for p in range(snap[3], snap[3] + n)],
+                           dtype=torch.float32).pin_memory().to(self.device, non_blocking=True)
+        phase = pos[:, None] * self.inv_freq[None, :]
+        cos, sin = phase.cos().contiguous(), phase.sin().contiguous()
+        kcs, vcs = [list(snap[0]) for snap in snaps], [list(snap[1]) for snap in snaps]
+        for layer in range(self.layers):
+            _, k, v = self._prep(self._lin(projected, f"layers.{layer}.self_attn.kv.weight"), layer, cos, sin, 0)
+            a0 = 0
+            for kc, vc, n in zip(kcs, vcs, sizes):
+                kn, vn = k[:, a0:a0 + n], v[:, a0:a0 + n]
+                kc[layer] = (kn if kc[layer] is None else torch.cat((kc[layer], kn), dim=1))[:, -self.window:].contiguous()
+                vc[layer] = (vn if vc[layer] is None else torch.cat((vc[layer], vn), dim=1))[:, -self.window:].contiguous()
+                a0 += n
+        return [(kc, vc, min(self.window, snap[2] + n), snap[3] + n) for kc, vc, snap, n in zip(kcs, vcs, snaps, sizes)]
 
     def _attention(self, layer: int, x: torch.Tensor) -> torch.Tensor:
         w = self.weights
@@ -425,31 +391,36 @@ class DFlash2:
                                                         HALF=d // 2, num_warps=1)
         return q, k, v
 
-    def _layer_fast(self, i: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-                    mask: torch.Tensor) -> torch.Tensor:
+    def _layer_fast(self, i: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, ctx: list,
+                    masks: list[torch.Tensor], length: int) -> torch.Tensor:
+        """One layer over several streams' blocks (``length`` rows each); each block attends its own context."""
+
         w = self.weights
         base = f"layers.{i}."
-        rows = x.shape[0]
         normed = F.rms_norm(x, (self.hidden,), w[base + "input_layernorm.weight"], self.eps)
         dyn = self._lin(normed, base + "attention_conv.kernel_projection.weight")
         conv = w[base + "attention_conv.base_kernel"]
-        q, k, v = self._prep(self._lin(_dconv(normed, dyn, conv, 0, self.group_size),
+        q, k, v = self._prep(self._lin(_dconv(normed, dyn, conv, 0, self.group_size, seg=length),
                                        base + "self_attn.qkv.weight"), i, cos, sin, self.heads_local)
-        keys = torch.cat((self.kc[i], k), dim=1)
-        values = torch.cat((self.vc[i], v), dim=1)
-        out = F.scaled_dot_product_attention(q[None], keys[None], values[None], attn_mask=mask[None, None],
-                                             scale=self.head_dim ** -0.5, enable_gqa=True)
-        out = out[0].transpose(0, 1).reshape(rows, self.heads_local * self.head_dim)
-        x = _dconv(self._row(out, base + "self_attn.o_proj.weight"), dyn, conv, 1, self.group_size, x)
+        outs = []
+        for j, snap in enumerate(ctx):
+            r = slice(j * length, (j + 1) * length)
+            keys = torch.cat((snap[0][i], k[:, r]), dim=1)
+            values = torch.cat((snap[1][i], v[:, r]), dim=1)
+            o = F.scaled_dot_product_attention(q[None, :, r], keys[None], values[None], attn_mask=masks[j][None, None],
+                                               scale=self.head_dim ** -0.5, enable_gqa=True)
+            outs.append(o[0].transpose(0, 1).reshape(length, self.heads_local * self.head_dim))
+        out = outs[0] if len(outs) == 1 else torch.cat(outs)
+        x = _dconv(self._row(out, base + "self_attn.o_proj.weight"), dyn, conv, 1, self.group_size, x, seg=length)
         normed = F.rms_norm(x, (self.hidden,), w[base + "post_attention_layernorm.weight"], self.eps)
         dyn = self._lin(normed, base + "mlp_conv.kernel_projection.weight")
         conv = w[base + "mlp_conv.base_kernel"]
-        h = _dconv(normed, dyn, conv, 0, self.group_size)
+        h = _dconv(normed, dyn, conv, 0, self.group_size, seg=length)
         xs = group_sums(h)
         act, act_xs = swiglu(matmul(h, self.q4[base + "mlp.gate_proj.weight"], xs),
                              matmul(h, self.q4[base + "mlp.up_proj.weight"], xs))
         mlp = self._row(act, base + "mlp.down_proj.weight", act_xs)
-        return _dconv(mlp, dyn, conv, 1, self.group_size, x)
+        return _dconv(mlp, dyn, conv, 1, self.group_size, x, seg=length)
 
     def in_vocab(self, token: int) -> bool:
         """Whether the drafter's head can propose ``token`` at all."""
@@ -465,32 +436,52 @@ class DFlash2:
 
         return gather_rank_partials(row_partial(x.contiguous(), self.q4[name], xs=xs))
 
+    def _mask(self, s: int, length: int) -> torch.Tensor:
+        """A block's attention: its context's last ``window`` rows, then the block (causal if trained so)."""
+
+        qidx = torch.arange(length, device=self.device)[:, None]
+        kidx = torch.arange(s + length, device=self.device)[None, :]
+        block_allowed = kidx >= s
+        if self.is_causal:
+            block_allowed = block_allowed & (kidx <= s + qidx)
+        return ((kidx < s) & (s + qidx - kidx < self.window + 1)) | block_allowed
+
     @torch.no_grad()
-    def propose_tree(self, pending: int, context_length: int, max_nodes: int,
-                     sampling: Sampling | None = None, block: int | None = None) -> tuple[list[int], list[int]]:
-        if self.context_len == 0 or max_nodes < 1:
-            return [], []
+    def launch_block(self, pending: int, max_nodes: int, block: int | None = None):
+        """``launch_blocks`` for the current context alone."""
+
+        return self.launch_blocks([self.snapshot()], [pending], max_nodes, block)[0]
+
+    @torch.no_grad()
+    def launch_blocks(self, snaps: list, pendings: list[int], max_nodes: int, block: int | None = None) -> list:
+        """GPU half of ``propose_tree`` for several streams, each weight read once; None where a context is empty."""
+
+        out: list = [None] * len(snaps)
+        live = [i for i, snap in enumerate(snaps) if snap[2] > 0]
+        if not live or max_nodes < 1:
+            return out
         length = min(block or self.block, max_nodes + 1)
-        tokens = torch.tensor([pending] + [self.mask_id] * (length - 1),
+        tokens = torch.tensor([t for i in live for t in [pendings[i]] + [self.mask_id] * (length - 1)],
                               dtype=torch.int32, device=self.device)
-        x = embed(tokens, self.target.embed.weight, self.target.embed.scales,
-                  self.target.embed.biases, self.hidden)
+        x = embed(tokens, self.target.embed.weight, self.target.embed.scales, self.target.embed.biases, self.hidden)
         if self.fast:
-            s = self.kc[0].shape[1]
-            qidx = torch.arange(length, device=self.device)[:, None]
-            kidx = torch.arange(s + length, device=self.device)[None, :]
-            block_allowed = kidx >= s
-            if self.is_causal:
-                block_allowed = block_allowed & (kidx <= s + qidx)
-            mask = ((kidx < s) & (s + qidx - kidx < self.window + 1)) | block_allowed
-            cos, sin = self._rotary(self.context_end, length)
-            for i in range(self.layers):
-                x = self._layer_fast(i, x, cos, sin, mask)
-            h = F.rms_norm(x[1:], (self.hidden,), self.weights["norm.weight"], self.eps)
-        else:
-            for i in range(self.layers):
-                x = self._layer(i, x)
-            h = _norm(x[1:], self.weights["norm.weight"], self.eps)
+            ctx = [snaps[i] for i in live]
+            rot = [self._rotary(snap[3], length) for snap in ctx]
+            cos, sin = torch.cat([c for c, _ in rot]), torch.cat([s for _, s in rot])
+            masks = [self._mask(snap[0][0].shape[1], length) for snap in ctx]
+            for layer in range(self.layers):
+                x = self._layer_fast(layer, x, cos, sin, ctx, masks, length)
+            h = F.rms_norm(x.view(len(live), length, -1)[:, 1:].reshape(-1, self.hidden), (self.hidden,),
+                           self.weights["norm.weight"], self.eps)
+        else:                                    # the reference path, one stream at a time
+            hs = []
+            for j, i in enumerate(live):
+                self.restore(snaps[i])
+                y = x[j * length:(j + 1) * length]
+                for layer in range(self.layers):
+                    y = self._layer(layer, y)
+                hs.append(_norm(y[1:], self.weights["norm.weight"], self.eps))
+            h = torch.cat(hs)
         projected = self._lin(h, "candidate_selector.hidden_projection.weight").float()
         logits = matmul(h, self.sub_head)
         values, local_ids = torch.topk(logits.float(), k=16, dim=-1, sorted=False)
@@ -505,11 +496,28 @@ class DFlash2:
             merged = torch.cat((both_values[0], both_values[1]), dim=1)
             values, pick = torch.topk(merged, k=16, dim=-1, sorted=False)
             global_ids = torch.cat((both_ids[0], both_ids[1]), dim=1).gather(1, pick)
-        ids = global_ids.cpu().numpy().astype(np.int64)
+        shared = [global_ids, torch.cat((values, projected), dim=1), None]     # read back once, by the first finish
+        for j, i in enumerate(live):
+            out[i] = (shared, j * (length - 1), length - 1, int(pendings[i]))
+        return out
+
+    def finish_tree(self, launched, context_length: int, max_nodes: int,
+                    sampling: Sampling | None = None) -> tuple[list[int], list[int], list[float]]:
+        """The host half: the tree policy over a launched block's candidates; nodes, parents and scores in pop order."""
+
+        if launched is None:
+            return [], [], []
+        shared, start, rows, pending = launched
+        if shared[2] is None:
+            shared[2] = (shared[0].cpu().numpy().astype(np.int64), shared[1].cpu().numpy().astype(np.float64))
+        ids, floats = shared[2][0][start:start + rows], shared[2][1][start:start + rows]
         self.last_candidates = ids                       # (depths, 16) ids this round, for decode traces
-        unary = values.cpu().numpy().astype(np.float64)
-        hproj = projected.cpu().numpy().astype(np.float64)
-        return _best_first(ids, unary, hproj,
-                           self.weights["candidate_selector.predecessor_codebook"],
-                           self.weights["candidate_selector.successor_codebook"],
-                           int(pending), min(127, max_nodes), sampling, context_length)
+        return best_first(ids, floats[:, :16], floats[:, 16:],
+                          self.weights["candidate_selector.predecessor_codebook"],
+                          self.weights["candidate_selector.successor_codebook"],
+                          pending, min(127, max_nodes), sampling, context_length)
+
+    @torch.no_grad()
+    def propose_tree(self, pending: int, context_length: int, max_nodes: int,
+                     sampling: Sampling | None = None, block: int | None = None) -> tuple[list[int], list[int]]:
+        return self.finish_tree(self.launch_block(pending, max_nodes, block), context_length, max_nodes, sampling)[:2]

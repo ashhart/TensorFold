@@ -1,9 +1,4 @@
-"""Qwen3.8 dense weights on the GPU, read from the MLX 4-bit checkpoint as stored.
-
-Every projection, the embedding and the head are MLX affine 4-bit (group 64): (N, K/8) 32-bit
-words plus (N, K/64) bf16 scales and biases. They load unchanged; the vision tower is skipped.
-Norm weights are stored already shifted (around 1), as mlx_lm uses them.
-"""
+"""Load unchanged MLX affine 4-bit packed projections, embeddings, and head with group-64 bf16 scales and biases, shifted norms, and no vision tower."""
 
 from __future__ import annotations
 
@@ -16,11 +11,12 @@ import torch
 
 @dataclass
 class QLinear:
-    weight: torch.Tensor      # (N, K/8) int32 (MLX's uint32 words); tiled: [N/64][K/64][64][8]
-    scales: torch.Tensor      # (N, K/64) bf16; tiled: (K/64, N)
-    biases: torch.Tensor      # (N, K/64) bf16; tiled: (K/64, N)
+    weight: torch.Tensor      # (N, K/8) int32 (MLX's uint32 words); tiled: the shared kernel's packed words
+    scales: torch.Tensor      # (N, K/64) bf16; tiled: (K/64, N padded to 64)
+    biases: torch.Tensor      # (N, K/64) bf16; tiled: (K/64, N padded to 64)
     layout: str = "mlx"       # "mlx" as stored, or "tiled" (``qmm_fast.tile``)
     rows: int = 0             # N when tiled (the tiled words are padded to 64 columns)
+    gs: int = 64              # inputs per quantization group
 
     @property
     def n(self) -> int:

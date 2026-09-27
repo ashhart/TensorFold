@@ -1,13 +1,4 @@
-"""The ``tensorfold`` command.
-
-    tensorfold pull Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP
-    tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP [--port 8080] [--context 65536] [--temperature 0.7] ...
-    tensorfold models
-    tensorfold info MODEL
-
-A model is a Hugging Face repo id (downloaded into the Hugging Face cache on first use) or a local directory.
-``serve`` loads it with its family's kernels and serves an OpenAI-compatible API at ``http://HOST:PORT/v1``.
-"""
+"""Load local or Hugging Face models and serve them through their family kernels at an OpenAI-compatible endpoint."""
 
 from __future__ import annotations
 
@@ -78,7 +69,8 @@ def build_parser() -> argparse.ArgumentParser:
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
     speed.add_argument("--parallel", default="auto",
                        help="requests decoded together, their windows sharing each round's forward: a number, or "
-                            "auto (up to 8, each started only while the projected memory fits 70%% of RAM)")
+                            "auto (Mac: up to 8, each started only while the projected memory fits 70%% of RAM; "
+                            "CUDA: one at a time, the others waiting their turn)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
 
     speed.add_argument("--no-update-check", action="store_true",
@@ -130,8 +122,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _config_dir(model: str) -> Path:
-    """A directory holding the model's config.json: the model directory, its cached snapshot, or (for a repo id not
-    downloaded yet) a snapshot with config.json alone, so the family and its checks run before any weight moves."""
+    """Resolve config.json without downloading weights so family compatibility checks run first."""
 
     from tensorfold import hub
 
@@ -287,8 +278,7 @@ def _drafter(family: Any, choice: str) -> str:
 
 
 def _note_untested(family: Any, model: str) -> None:
-    """A Hugging Face checkpoint that is not one the family is tested with runs if its format matches, with a
-    note saying so and where to go to bring up a model properly."""
+    """Explain that an unlisted Hugging Face checkpoint runs when its storage format matches the family kernels."""
 
     from tensorfold import families, hub
 
@@ -327,6 +317,9 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         options["mtp_drafts"] = int(args.mtp_drafts)
     options["context"] = context if context is not None else args.context
     options["context_explicit"] = args.context is not None
+    streams = 1 if str(args.parallel).strip().lower() == "auto" else _parallel(args.parallel)
+    if streams > 1:
+        options["parallel"] = streams
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
@@ -355,8 +348,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     return 0
 
 
-# concurrent requests are admitted while this process's projected footprint stays under this share of RAM, less
-# what the rest of the machine holds
+# Admit concurrent requests within this RAM fraction after accounting for the rest of the machine.
 MEMORY_FRACTION = 0.70
 # a resume point begins a prompt chunk when at least this many tokens follow the last chunk start
 MIN_CHUNK = 256
@@ -411,10 +403,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     import mlx.core as mx
 
-    from tensorfold.server.memory_budget import configure_mlx
+    from tensorfold.server.memory_budget import PROCESS_BYTES, configure_mlx
 
     memory_limit = configure_mlx(mx, int(float(args.mlx_cache_gib) * 1024**3))
-    print(f"[tensorfold] MLX memory budget {memory_limit / 1024**3:.1f} GiB", flush=True)
+    gib = 1024**3
+    print(f"[tensorfold] memory budget {memory_limit / gib:.1f} GiB: MLX's buffers up to "
+          f"{(memory_limit - PROCESS_BYTES) / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB for the rest of the process",
+          flush=True)
+    weights = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
+    if weights >= memory_limit - PROCESS_BYTES:
+        raise ValueError(f"{family.title}'s weights ({weights / gib:.1f} GiB) do not fit this server's "
+                         f"{memory_limit / gib:.1f} GiB memory budget (70% of RAM, or TENSORFOLD_MEMORY_LIMIT_GB): "
+                         "serve it on a Mac with more memory, or use a smaller or more quantized checkpoint")
     return _serve_mlx(args, family, model_dir, context, required_files, memory_limit)
 
 
@@ -487,10 +487,15 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         checkpoint_slots=0 if budget <= 0 else None,
         checkpoint_budget_bytes=budget if budget > 0 else None,
         memory_budget_bytes=memory_limit,
+        fit_context=args.context is None,
         use_proposer=not args.no_drafts,
         snapshot_dir=snapshot_dir,
         model_id=model_id,
     )
+    if app.context_fitted:
+        print(f"[tensorfold] context window {app.context_window:,} tokens: the most one request can use in the "
+              f"{memory_limit / 1024**3:.1f} GiB memory budget (the model's window is {context:,}); have clients "
+              "compact before it", flush=True)
     hook = getattr(family.package, "setup", None)
     if hook is not None:
         hook(app, model, **options)
@@ -499,7 +504,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         f"{k} {v}" for k, v in sampling.items())
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 "
           f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
-          f"context: {context or 'unlimited'}; loaded in {time.perf_counter() - started:.1f}s)", flush=True)
+          f"context: {app.context_window or 'unlimited'}; loaded in {time.perf_counter() - started:.1f}s)", flush=True)
 
     def _terminate(signum: int, frame: Any) -> None:
         raise KeyboardInterrupt      # the cleanup below runs (a plain SIGTERM would skip it)

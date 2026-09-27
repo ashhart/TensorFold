@@ -1,5 +1,4 @@
-"""The n-gram embedding's row shards on the host: memory-mapped from the checkpoint's safetensors files and read a
-lookup's rows at a time (the CUDA engine's tables, and the Metal engine's where the checkpoint would not fit the GPU)."""
+"""Memory-map n-gram shards on the host for CUDA and for Metal checkpoints that exceed GPU memory, reading only requested rows."""
 
 from __future__ import annotations
 
@@ -10,8 +9,7 @@ import numpy as np
 
 
 class HostTable:
-    """The n-gram embedding's 128 row shards, memory-mapped from the checkpoint (never copied to the GPU):
-    a token reads 16 rows of 100 bytes from 32 GB of tables, so ``gather`` copies just those rows out."""
+    """Keep n-gram shards memory-mapped on the host; gather copies only requested rows, never whole tables to the GPU."""
 
     def __init__(self, files: list[tuple[Path, dict, dict, dict]]) -> None:
         import struct
@@ -64,6 +62,23 @@ class HostTable:
             sc[at] = mm[so[at, None] + ag]
             bi[at] = mm[bo[at, None] + ag]
         return w.view(np.uint32), sc.view(np.uint16), bi.view(np.uint16)
+
+    def lock(self) -> bool:
+        """Pin every shard's pages (mlock); False, with nothing locked, where the memory-lock limit forbids it."""
+
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mlock.argtypes = libc.munlock.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
+        done = []
+        for arr in self.words + self.scales + self.biases:
+            at, size = arr.ctypes.data, arr.nbytes
+            if libc.mlock(at, size) != 0:
+                for a, n in done:
+                    libc.munlock(a, n)
+                return False
+            done.append((at, size))
+        return True
 
     def prefetch(self, workers: int = 8) -> float:
         """Read every shard once so the lookups hit the page cache (seconds taken); the pages stay evictable."""

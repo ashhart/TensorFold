@@ -28,7 +28,7 @@ def measured_runtime(monkeypatch):
     monkeypatch.setitem(sys.modules, "mlx", mlx)
     monkeypatch.setitem(sys.modules, "mlx.core", core)
     model = SimpleNamespace(args=SimpleNamespace(num_attention_heads=1, head_dim=128))
-    guard = PromptMemory(5300, model, runtime=runtime, overhead_bytes=0, bootstrap_bytes=0)
+    guard = PromptMemory(5300, model, runtime=runtime, overhead_bytes=0, bootstrap_bytes=0, chunk_rows=256)
     return runtime, cache, guard
 
 
@@ -121,3 +121,11 @@ def test_legacy_health_app_keeps_metric_reset(measured_runtime):
     with serving() as port:
         metrics = health(port)
     assert metrics["peak"] == peak and runtime.peak == runtime.get_active_memory()
+
+
+def test_health_reports_the_budget_and_the_process_footprint(measured_runtime):
+    _, _, guard = measured_runtime
+    with serving(guard) as port:
+        metrics = health(port, reset=False)
+    assert metrics["budget"] == 5300 and metrics["mlx_budget"] == 5300
+    assert metrics["footprint"] > 1024**2            # this test process, Metal buffers included

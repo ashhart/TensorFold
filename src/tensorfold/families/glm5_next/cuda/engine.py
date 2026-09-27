@@ -1,4 +1,4 @@
-"""GLM-5.3-Flash's CUDA engine behind ``tensorfold.cuda.server``: two ranks over NCCL, one per machine."""
+"""GLM-5.3-Flash on two NCCL ranks; both sample by one keyed rule from the same gathered candidates, so no broadcast."""
 
 from __future__ import annotations
 
@@ -19,8 +19,7 @@ DENSE_CAPACITY = 2560                 # cache slots while DSA attention stays de
 
 
 def encode_policy(spec: str) -> list[int]:
-    """A policy spec as 4 ints: kind (0 serial, 1 fixed, 2 running acceptance, 3 confidence; plus 10 for DFlash2
-    drafts), most drafts, two parameters in millionths."""
+    """Encode policy kind, maximum drafts, and two parameters in millionths as four integers, with 10 added to kind for DFlash2."""
 
     spec = str(spec).strip()
     bad = ValueError(f"draft policy {spec!r}: expected auto[:E:EVERY:MARGIN], 0, N, a[:LOW:HIGH], cN:P, or one of "
@@ -58,8 +57,7 @@ def encode_policy(spec: str) -> list[int]:
 
 
 def decode_policy(code: list[int]):
-    """The ``decode.DepthPolicy`` for a code, None for serial decoding, or ("auto", explore, every, margin,
-    choose for sampled requests too)."""
+    """Decode a serial, MTP, or automatic policy, retaining exploration, sampling, and margin settings."""
 
     from .decode import DepthPolicy
 
@@ -91,7 +89,7 @@ class GlmEngine:
 
         import torch
 
-        from .comm import NCCL
+        from tensorfold.cuda.comm import NCCL
         from .decode import Engine
         from .weights import Config, load
         from .split import rule
@@ -106,11 +104,13 @@ class GlmEngine:
         self.serial_only = serial_only
         self.comm = comm if comm is not None else NCCL(rank, 2, master, port)
         self.comm.barrier()
-        self.capacity_plan = admit(model_dir, context, context_explicit, torch,
+        cfg = Config.read(model_dir)
+        # Without --context the window stays dense, attending every key without indexer work.
+        explicit = context is not None if context_explicit is None else bool(context_explicit)
+        self.capacity_plan = admit(model_dir, context if explicit else cfg.dense_limit, explicit, torch,
                                    lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY),
                                    split_weights(rule), rank=rank, world=2, gather=self._gather_ints,
                                    draft_dir=drafter, draft_geometry=lambda text: draft_geometry(text, 2, MAX_ROWS))
-        cfg = Config.read(model_dir)
         self.limit = self.capacity_plan["context_window"]
         capacity = self.capacity_plan["cache_slots"]
         long_context = self.limit > cfg.dense_limit
@@ -134,7 +134,7 @@ class GlmEngine:
             from .dflash2 import Drafter
 
             self.drafter = Drafter(drafter, w, capacity=capacity)
-        self.e = Engine(w, capacity=capacity, max_rows=MAX_ROWS, prefill_rows=64, graphs=True, graph_rows=GRAPH_ROWS,
+        self.e = Engine(w, capacity=capacity, max_rows=MAX_ROWS, graphs=True, graph_rows=GRAPH_ROWS,
                         long_context=long_context, taps=self.drafter.tap_layers if self.drafter is not None else ())
         if self.drafter is not None:
             self.drafter.capture()
@@ -150,13 +150,7 @@ class GlmEngine:
         self.cache: list = []               # decode.Snapshot entries, each a prefix of the next
 
     def _calibrate(self) -> dict:
-        """Milliseconds for ``decode.DrafterChoice``, timed on random tokens as rounds use them and made the same on
-        both ranks (the slower rank's time of each): a verify window of 1 to MAX_ROWS rows; an MTP draft (absorbing
-        one row, sampling its draft), each further chained draft and each further absorbed row; a DFlash2 block with
-        its host chain and each tap row DFlash2 takes. The machine has slow moments of a few seconds (page
-        migration, most of all right after loading), so every piece is timed in turns over several passes and
-        keeps its fastest run, and the windows of 2 rows and more follow a line through their times fitted with
-        the median of pairwise slopes."""
+        """Per-piece ms for ``drafter_choice.DrafterChoice``: fastest of interleaved passes, equal on both ranks."""
 
         import statistics
 
@@ -173,7 +167,7 @@ class GlmEngine:
             return [int(t) for t in rng.integers(0, vocab, n)]
 
         prefill(e, tokens(64), None, mtp=True, drafter=self.drafter)
-        hidden = e.main_hidden(slice(0, MAX_ROWS)).clone()
+        hidden = e.pbuf.fnormed[:MAX_ROWS].clone()          # rows for timing the draft steps
         one, six = tokens(1), tokens(6)
         start = st.mtp_len
 
@@ -188,7 +182,7 @@ class GlmEngine:
             pieces["m6"] = (lambda: draft(e, hidden[:6], six, st.pos + 1, 1, None), rewind)
         if self.drafter is not None:
             d = self.drafter
-            taps = e.tap_rows(8).clone()
+            taps = e.tap_rows(8, e.pbuf).clone()
             ctx = d.context_end
 
             def back() -> None:
@@ -253,8 +247,7 @@ class GlmEngine:
         return [int(v) for v in allv[:count].tolist()]
 
     def _effective(self, code: list[int]) -> list[int]:
-        """The code a request runs: plain ``auto`` is ``EXL3_AUTO`` on an EXL3 checkpoint with the draft model; on a
-        checkpoint without the MTP head, ``auto`` is ``DFLASH_POLICY`` and an MTP spec runs as its DFlash2 version."""
+        """Resolve auto and MTP policies to the available heads, using EXL3_AUTO for EXL3 with DFlash2 and DFlash2 when MTP is absent."""
 
         if code[0] == 4 and self.drafter is not None and self.w.cfg.quant == "exl3":
             return encode_policy(EXL3_AUTO)
@@ -287,8 +280,8 @@ class GlmEngine:
 
     def _run(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool, on_tokens: Callable[[list[int]], Any],
              code: list[int], hit, draft: bool) -> dict[str, Any]:
-        from .decode import (DepthPolicy, DrafterChoice, auto_decode, dflash_decode, mtp_decode, prefill,
-                             serial_decode, take_snapshot)
+        from .decode import DepthPolicy, dflash_decode, mtp_decode, prefill, serial_decode, take_snapshot
+        from .drafter_choice import DrafterChoice, auto_decode
 
         auto, use_mtp, use_dflash = self._drafters(code)
         drafter = self.drafter if use_dflash else None
@@ -325,15 +318,6 @@ class GlmEngine:
         else:
             res = mtp_decode(self.e, first, max_tokens, sampling, policy=policy, stop_eos=stop_eos,
                              on_tokens=on_tokens)
-        if draft and policy is not None and res.keeps:
-            committed = list(prompt) + res.tokens[:self.e.st.pos - len(prompt)]
-            if auto:
-                pending = res.pending
-            else:
-                pending = None if use_dflash else self.e.main_hidden(slice(0, res.keeps[-1]))
-            self._remember(take_snapshot(self.e, committed, pending, mtp=use_mtp, drafter=drafter))
-        elif policy is None:
-            self.cache = [c for c in self.cache if len(c.ids) <= len(prompt)]   # the reply's rows are not kept
         stats.update(decode_s=res.seconds, rounds=res.rounds, min_rows=1 + min(res.depths, default=0),
                      tokens_per_round=round((len(res.tokens) - 1) / max(res.rounds, 1), 3),
                      sha256=hashlib.sha256(json.dumps(res.tokens).encode()).hexdigest()[:16])
@@ -344,8 +328,7 @@ class GlmEngine:
         return stats
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True) -> dict[str, Any]:
-        """Rank 0: one request, mirrored by rank 1 (``follow``). ``draft=False``: serial decoding and a fresh
-        prefill, the reference drafted replies must equal."""
+        """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal."""
 
         if len(prompt) >= self.limit:
             raise ValueError(f"prompt of {len(prompt)} tokens: this engine serves contexts up to {self.limit}")

@@ -1,17 +1,4 @@
-"""GLM-5.3-Flash's small kernels on CUDA (Triton): each program reads only its own row, so a row's bits never
-depend on the other rows of a window.
-
-Arithmetic follows the Hugging Face definition: fp32 math and one bf16 rounding wherever the model stores a
-bf16 tensor. RMSNorm is Llama's: bf16(w * bf16(x * rsqrt(mean(x^2) + eps))). Kernels feeding a 4-bit matmul
-also write the fp32 sums of each 64-input group of the bf16 values they store.
-
-Manifold-constrained hyper-connections (4 residual streams of D, kept in bf16):
-    hc_pre   mix = rsqrt(mean(X^2) + eps) * (X . fn) (24 dots over the 4D flattened streams, split into 16
-             fixed K blocks summed in order); pre = sigmoid(.) + eps, post = 2 sigmoid(.), comb = Sinkhorn(
-             softmax(.) + eps, 20 iterations); collapsed = bf16(sum_s pre_s X_s); then the layer's RMSNorm
-    hc_post  X_s = bf16(post_s * branch + sum_j comb[j, s] X_j), branch = bf16(the ranks' fp32 partials summed
-             in rank order)
-"""
+"""Row-independent kernels preserve serial bits with fp32 arithmetic, explicit bf16 rounding, and fixed-order reductions across blocks and ranks."""
 
 from __future__ import annotations
 
@@ -98,9 +85,7 @@ def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float, out: torch.Tensor, xs:
 # -- hyper-connections ----------------------------------------------------------------------------------------
 @triton.jit
 def _hc_partial(X, FN, PART, WIDE: tl.constexpr, NB: tl.constexpr, SUB: tl.constexpr):
-    """Program (r, b): over K block b of row r's flattened streams, the 24 partial dots with fn (rows padded to
-    32) and the partial sum of squares, accumulated SUB elements at a time in order. PART[r, b, 0:24] dots,
-    PART[r, b, 24] squares."""
+    """Accumulate each row's 24 mixing dots and sum of squares in ordered SUB steps within fixed K blocks."""
 
     r = tl.program_id(0)
     b = tl.program_id(1)
@@ -122,8 +107,7 @@ def _hc_partial(X, FN, PART, WIDE: tl.constexpr, NB: tl.constexpr, SUB: tl.const
 @triton.jit
 def _hc_finish(X, PART, BASE, SCALE, NW, OUT, XS, POST, COMB, eps_norm, hc_eps,
                D: tl.constexpr, S: tl.constexpr, NB: tl.constexpr, ITERS: tl.constexpr, BLOCK: tl.constexpr):
-    """Row r: mixes from the partials (blocks in order), pre/post/comb, the collapsed row, and the layer's
-    RMSNorm of it (bf16 + 64-group sums). POST[r, s] and COMB[r, i, j] are kept for hc_post."""
+    """Sum blocks in order, compute the collapsed row and its RMSNorm, and retain POST and COMB for hc_post."""
 
     r = tl.program_id(0)
     m = tl.arange(0, 32)
@@ -191,8 +175,7 @@ def hc_pre(x: torch.Tensor, fn: torch.Tensor, base: torch.Tensor, scale: torch.T
 @triton.jit
 def _hc_post(X, XOUT, G, POST, COMB, RS, D: tl.constexpr, S: tl.constexpr, WORLD: tl.constexpr,
              BLOCK: tl.constexpr):
-    """Program (r, c): X_s[d] = bf16(post_s * branch + (((comb0s X0 + comb1s X1) + comb2s X2) + comb3s X3)),
-    branch = bf16(partials summed rank 0 first); G is [WORLD, R, D] fp32 (RS = R * D apart)."""
+    """Round rank-ordered partials to bf16 before combining the branch with residual streams in fixed order and rounding the output."""
 
     r = tl.program_id(0)
     cb = tl.program_id(1)
@@ -343,6 +326,7 @@ def _router_sum(PART, OUT, total, KS: tl.constexpr, BLOCK: tl.constexpr):
     tl.store(OUT + i, acc, mask=ok)
 
 
+# Router kernel choice is fixed by shape because the sliced and single-pass reductions differ in their last bits.
 ROUTER_KS = 8
 
 
@@ -367,8 +351,7 @@ def router(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
 @triton.jit
 def _topk(L, BIAS, PICK, WTS, scale, NE: tl.constexpr, TOPK: tl.constexpr, SLOTS: tl.constexpr,
           BLOCK: tl.constexpr, SLOTP: tl.constexpr, NORM: tl.constexpr):
-    """Row r: scores = sigmoid(logits); the TOPK largest scores + bias (largest first, the lower id among equals);
-    weights = score / (sum + 1e-20) * scale in pick order; then the shared expert (id NE) with weight 1."""
+    """Pick experts by biased score with lower-id ties, normalize weights in pick order, and append the shared expert with weight 1."""
 
     r = tl.program_id(0)
     ar = tl.arange(0, BLOCK)
@@ -397,57 +380,26 @@ def _topk(L, BIAS, PICK, WTS, scale, NE: tl.constexpr, TOPK: tl.constexpr, SLOTS
     tl.store(WTS + r * SLOTS + ak, wts, mask=ak < SLOTS)
 
 
-@triton.jit
-def _group(PICK, UIDS, UCOUNT, UMEM, R, SLOTS: tl.constexpr, MAXU: tl.constexpr, MAXM: tl.constexpr,
-           BLOCK: tl.constexpr):
-    """One program: the distinct experts of all rows in increasing id order: UIDS[u], UMEM[u][j] = row * 32 +
-    slot of the j-th row (in row order) that picked it (-1 after the last), UCOUNT[0] = their number."""
+def select(logits: torch.Tensor, bias: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, top_k: int, experts: int,
+           scale: float, norm: bool) -> None:
+    """Each row's top-k experts and weights, then the shared expert (id ``experts``, weight 1)."""
 
-    ar = tl.arange(0, BLOCK)
-    counts = tl.zeros((BLOCK,), dtype=tl.int32)
-    for r in range(R):
-        for k in tl.static_range(SLOTS):
-            e = tl.load(PICK + r * SLOTS + k)
-            counts += tl.where(ar == e, 1, 0)
-    used = counts > 0
-    place = tl.cumsum(used.to(tl.int32), axis=0) - 1
-    n_used = tl.sum(used.to(tl.int32), axis=0)
-    tl.store(UIDS + place, ar, mask=used)
-    tl.store(UCOUNT, n_used)
-    filled = tl.zeros((BLOCK,), dtype=tl.int32)
-    for r in range(R):
-        for k in tl.static_range(SLOTS):
-            e = tl.load(PICK + r * SLOTS + k)
-            hit = ar == e
-            tl.store(UMEM + place * MAXM + filled, r * 32 + k, mask=hit)
-            filled += tl.where(hit, 1, 0)
-    for j in range(MAXM):
-        tl.store(UMEM + place * MAXM + j, -1, mask=used & (filled <= j))
-    tail = n_used + ar
-    for j in range(MAXM):
-        tl.store(UMEM + tail * MAXM + j, -1, mask=tail < MAXU)
-
-
-def select(logits: torch.Tensor, bias: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ids: torch.Tensor,
-           count: torch.Tensor, members: torch.Tensor, top_k: int, experts: int, scale: float, norm: bool) -> None:
     rows = logits.shape[0]
     block = triton.next_power_of_2(experts + 1)
     _topk[(rows,)](logits, bias, pick, wts, float(scale), NE=experts, TOPK=top_k, SLOTS=top_k + 1, BLOCK=block,
                    SLOTP=triton.next_power_of_2(top_k + 1), NORM=norm, num_warps=4)
-    _group[(1,)](pick, ids, count, members, rows, SLOTS=top_k + 1, MAXU=ids.shape[0], MAXM=members.shape[1],
-                 BLOCK=block, num_warps=8)
 
 
 @triton.jit
 def _combine(Y, WTS, OUT, D: tl.constexpr, SLOTS: tl.constexpr, BLOCK: tl.constexpr):
-    """A rank's MoE share, fp32: sum over slots in order of w_k y_k (the shared expert last, weight 1)."""
+    """A rank's fp32 MoE share: w_k y_k summed in slot order, shared expert last with weight 1; y is bf16 in prefill."""
 
     r = tl.program_id(0)
     c = tl.program_id(1)
     d = c * BLOCK + tl.arange(0, BLOCK)
     acc = tl.zeros((BLOCK,), dtype=tl.float32)
     for k in tl.static_range(SLOTS):
-        acc = acc + tl.load(Y + (r * SLOTS + k) * D + d) * tl.load(WTS + r * SLOTS + k)
+        acc = acc + tl.load(Y + (r * SLOTS + k) * D + d).to(tl.float32) * tl.load(WTS + r * SLOTS + k)
     tl.store(OUT + r * D + d, acc)
 
 

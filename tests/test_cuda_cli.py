@@ -123,3 +123,18 @@ def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatc
     assert glm5_next.cuda_engine(tmp_path, mtp_drafts=0, **glm).policy == "0"
     assert glm5_next.cuda_engine(tmp_path, drafter=str(tmp_path), **glm).policy == "auto"
     assert glm5_next.cuda_engine(tmp_path, mtp_drafts=2, **glm).policy == "2"
+
+
+@pytest.mark.parametrize("flag, streams", [(None, None), ("auto", None), ("1", None), ("4", 4)])
+def test_cuda_parallel_is_one_request_at_a_time_unless_a_number_asks(tmp_path, monkeypatch, flag, streams):
+    import tensorfold.cuda.server as server
+
+    made = []
+    engine = SimpleNamespace(context_window=4096)
+    family = _family(cuda_engine=lambda *a, **k: made.append(k) or engine)
+    family.model_type = "test"
+    monkeypatch.setattr(server, "App", lambda *a, **k: SimpleNamespace(effective_context_window=4096))
+    monkeypatch.setattr(server, "serve", lambda *a: None)
+    command = ["serve", str(tmp_path), "--backend", "cuda", "--no-drafts"] + (["--parallel", flag] if flag else [])
+    assert cli._serve_cuda(cli.build_parser().parse_args(command), family, tmp_path, 4096) == 0
+    assert made[0].get("parallel") == streams

@@ -122,14 +122,13 @@ def fake_runtime(monkeypatch):
     def both(send, recv):
         recv.view(-1).copy_(torch.cat([send.view(-1), send.view(-1)]))
     comm = SimpleNamespace(barrier=lambda: None, all_gather=both)
+    monkeypatch.setitem(sys.modules, "tensorfold.cuda.comm", SimpleNamespace(NCCL=lambda *a: comm))
     for family in ("qwen3_5", "qwen4_exp", "glm5_next"):
         prefix = f"tensorfold.families.{family}.cuda"
         weights = SimpleNamespace(load=load, draft_token_ids=lambda *a: None,
                                   Config=SimpleNamespace(read=lambda *a: SimpleNamespace(dense_limit=2051)))
         monkeypatch.setitem(sys.modules, prefix + ".weights", weights)
         monkeypatch.setitem(sys.modules, prefix + ".decode", SimpleNamespace(Engine=None))
-        if family != "qwen3_5":
-            monkeypatch.setitem(sys.modules, prefix + ".comm", SimpleNamespace(NCCL=lambda *a: comm))
     import torch.distributed as dist
     monkeypatch.setattr(dist, "init_process_group", lambda *a, **kw: None)
     monkeypatch.setattr(dist, "all_gather_into_tensor", lambda recv, send: both(send, recv))
@@ -164,6 +163,7 @@ def test_real_constructors_choose_native_or_explicit_before_loading(tmp_path, fa
     with pytest.raises(Loaded):
         start()
     assert len(calls) == 1
+    window = 2051 if family == "mla" and not explicit else window          # GLM stays dense unless asked
     assert obj.capacity_plan["native_window"] == 65536
     assert obj.capacity_plan["context_window"] == window
     assert obj.capacity_plan["cache_slots"] >= window + (1 if family == "indexed" else 8)
@@ -184,8 +184,9 @@ def test_real_constructors_shrink_default_and_refuse_explicit_before_loading(tmp
     obj, start = construct(family, tmp_path, None, None, world)
     with pytest.raises(Loaded):
         start()
-    fitting = obj.capacity_plan["context_window"]
+    fitting = obj.capacity_plan["largest_window"]
     assert 0 < fitting < 65536
+    assert obj.capacity_plan["context_window"] == (2051 if family == "mla" else fitting)
     assert obj.capacity_plan["total_bytes_estimate"] <= budget
     calls.clear()
     _, reject = construct(family, tmp_path, fitting + 1, True, world)
@@ -257,12 +258,12 @@ def test_actual_distributed_startup_agrees_on_smaller_rank_before_loading(tmp_pa
     if family == "linear":
         weights = capacity.Weights(weights.resident, weights.staging + weights.resident)
     budgets = [weights.resident + geom.needed(n) for n in (20000, 9000)]
-    requested = 12000 if explicit else None
+    requested = 12000 if explicit else 2051 if family == "mla" else None
     plans = [capacity.make_plan(65536, requested, explicit, budget, weights, geom) for budget in budgets]
-    statuses = [[0, *plan.settings, plan.fitting] for plan in plans]
+    statuses = [[0, *plan.settings, plan.fitting, plan.largest] for plan in plans]
     def gather(*args):
         values = args[-1]
-        return statuses if len(values) == 5 else [values, values]
+        return statuses if len(values) == 6 else [values, values]
     monkeypatch.setattr(capacity, "gather_ints", gather)
     monkeypatch.setattr(GlmEngine, "_gather_ints", lambda self, values: gather(values))
     for rank in (0, 1):

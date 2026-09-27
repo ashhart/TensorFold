@@ -1,14 +1,8 @@
-"""Exact one-stream decode with the 27B split across two ranks (two Sparks).
-
-Rank 0 drafts, samples and picks the accepted path; rank 1 follows. Each round rank 0 broadcasts
-the window's tokens and parents, both ranks run the tensor-parallel forward (heads and MLP width
-split, fixed-order fp32 rank sums), rank 0 samples every row and broadcasts the accepted path, and
-both ranks commit it. Serial decoding is the same loop with one-row windows, so a drafted stream
-matches serial on the same two ranks byte for byte.
-"""
+"""Two-rank decode matches serial bits through fixed-order fp32 rank sums and rank-zero broadcasts of proposals and accepted paths."""
 
 from __future__ import annotations
 
+import struct
 import time
 from typing import Callable, Sequence
 
@@ -19,7 +13,7 @@ from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
 from .decode import CopyIndex, DecodeResult, clone_state
 from .forward import State, _paths, commit, tree_forward
-from .sampling import sample_rows
+from tensorfold.cuda.sampling import sample_rows
 from .weights import Weights
 
 
@@ -27,11 +21,7 @@ _FIRST = 256        # ints in a share's first broadcast: the length, then up to 
 
 
 def _share(values: Sequence[int] | None, rank: int, device: torch.device) -> list[int]:
-    """Broadcast an int list from rank 0 (an empty list is the stop signal).
-
-    One broadcast carries the length and up to 255 values, so a round's small shares cost one
-    collective each; longer lists (prompts) send the rest in a second.
-    """
+    """Broadcast an int list from rank zero, with an empty list signaling stop and lists over 255 values using a second broadcast."""
 
     head = torch.zeros((_FIRST,), dtype=torch.int32, device=device)
     if rank == 0:
@@ -50,9 +40,32 @@ def _share(values: Sequence[int] | None, rank: int, device: torch.device) -> lis
     return list(values) if rank == 0 else got[1:] + rest.tolist()
 
 
+def _words(value: int) -> list[int]:
+    return [(value >> (16 * i)) & 0xFFFF for i in range(4)]
+
+
+def _value(words: Sequence[int]) -> int:
+    return sum(int(w) << (16 * i) for i, w in enumerate(words))
+
+
+def pack_sampling(sampling: Sampling | None) -> list[int]:
+    """14 ints for a share: the seed and the float settings cross as their exact bits (16-bit words)."""
+
+    if sampling is None:
+        return [0] * 14
+    bits = [struct.unpack("<Q", struct.pack("<d", float(x)))[0] for x in (sampling.temperature, sampling.top_p)]
+    return [1, int(sampling.top_k), *_words(int(sampling.seed)), *_words(bits[0]), *_words(bits[1])]
+
+
+def unpack_sampling(words: Sequence[int]) -> Sampling | None:
+    if not words[0]:
+        return None
+    temperature, top_p = (struct.unpack("<d", struct.pack("<Q", _value(words[i:i + 4])))[0] for i in (6, 10))
+    return Sampling(_value(words[2:6]), temperature, int(words[1]), top_p)
+
+
 def split_candidates(logits: torch.Tensor, sampling: Sampling | None, offset: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """A rank's candidates from its half of the vocabulary: the first maximum when greedy, else the
-    top ``top_k + MARGIN`` (the same count ``sample_rows`` reads from the whole vocabulary)."""
+    """Return the first local maximum when greedy, otherwise enough local candidates to contain the global top-k."""
 
     if sampling is None or sampling.temperature <= 0:
         values, ids = logits.float().max(dim=-1)
@@ -63,9 +76,7 @@ def split_candidates(logits: torch.Tensor, sampling: Sampling | None, offset: in
 
 
 def choose_merged(values, ids, positions: Sequence[int], sampling: Sampling | None) -> list[int]:
-    """Rows of candidates from both halves, rank 0's first, -> the token ``sample_rows`` would draw
-    from the whole vocabulary: the union holds each half's top candidates, so the global top-k, ties
-    by id included, is among them, and ``choose_rows`` orders candidates by (value, id) itself."""
+    """Merge rank-zero candidates first to preserve first-maximum ties, then sample the union in value-and-id order."""
 
     if sampling is None or sampling.temperature <= 0:
         # the whole vocabulary's first maximum: rank 0's half holds the lower ids
@@ -96,30 +107,17 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
 @torch.no_grad()
 def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, rank: int,
                draft=None, *, state: State | None = None) -> tuple[State, int]:
-    """Both ranks commit the prompt in 128-row chains; rank 0 samples the first token and shares it.
+    """Both ranks prefill, from a prompt-end ``state`` with a fresh prefill's bits; rank 0 shares the first token."""
 
-    ``state``: a committed state for the prompt's first ``state.pos`` tokens (prefix reuse); only the
-    rest is processed. Rows never depend on their chain-mates, so the result equals a fresh prefill.
-    """
+    from .forward import _mm
+    from .prefill import prefill_state
 
     device = w.norm.device
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
     st = clone_state(state) if state is not None else State(w)
-    done = st.pos
-    last = None
-    for start in range(done, len(prompt), 128):
-        chunk = list(prompt[start:start + 128])
-        parents = list(range(-1, len(chunk) - 1))
-        taps = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
-        out = tree_forward(w, _tokens(chunk, device), parents, st, tp=True,
-                           full_logits=split or rank == 0, capture_taps=taps)
-        if taps:
-            logits, record, tapped = out
-            draft.add_taps(tapped)
-        else:
-            logits, record = out
-        last = logits[-1:]
-        commit(st, record, list(range(len(chunk))))
+    taps = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
+    normed = prefill_state(w, prompt, st, tp=True, draft=draft if taps else None)
+    last = _mm(normed, w.head) if split or rank == 0 else None
     if split:
         first = _sample_split(last, [len(prompt)], sampling, rank)
     else:
@@ -150,16 +148,7 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
               sampling: Sampling | None, rank: int, draft=None, *, max_rows: int = 16,
               allow_copy: bool = False, stop_eos: bool = True,
               on_tokens: Callable[[list[int]], bool | None] | None = None) -> DecodeResult | None:
-    """Draft (rank 0 with ``draft``, or serial when ``draft`` is None), verify on both ranks, commit.
-
-    A two-rank drafter (``DFlash2(..., world=2)``, passed on both ranks) drafts on both ranks
-    together: each round rank 0 first shares whether to draft and the pending token.
-
-    ``count`` includes the pending token. On rank 0 ``tokens`` is the pending token and every sampled
-    one. Rank 1 never sees the last sampled token (it is not committed), so its ``tokens`` is the
-    committed ones, read from the windows, plus -1 in that place: ``prompt + tokens[:-1]`` names the
-    committed state on both ranks, which keeps their prefix caches in step.
-    """
+    """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token."""
 
     device = w.norm.device
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
@@ -250,6 +239,6 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
     torch.cuda.synchronize()
     seconds = time.perf_counter() - start
     if rank != 0:
-        return DecodeResult(committed + [-1], seconds, 0, 0, 0, state=st)
+        return DecodeResult(committed + [-1], seconds, 0, 0, 0)
     return DecodeResult(out, seconds, rounds, drafted_rows, accepted, stages["draft"], stages["verify"],
-                        stages["sample"], stages["commit"], widths, state=st)
+                        stages["sample"], stages["commit"], widths)

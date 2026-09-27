@@ -65,7 +65,7 @@ _MAIN = r"""
     auto P = op.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();
     op.run(a, b, P);
     for (int t = 0; t < TMR; t++) {
-      const bool live = rb + t * 16 < MP;      // a 32-row block can end past MP: rows never stored, and XS ends at MP
+      const bool live = !EDGE || rb + t * 16 < MP;     // EDGE: the last 32-row block passes MP, where XS ends
       const float xs0 = live ? XS[g * MP + rb + t * 16 + fm] : 0.0f;
       const float xs1 = live ? XS[g * MP + rb + t * 16 + fm + 8] : 0.0f;
       for (int f = 0; f < NF; f++)
@@ -134,7 +134,7 @@ _COOP = r"""
     op.run(a, b, P);
     for (int i = 0; i < CAP; i++) {
       const vec<bfloat, 2> sb = as_type<vec<bfloat, 2>>(sbw[g * N + n0 + ecol[i]]);
-      const float xs = rb + erow[i] < MP ? XS[g * MP + rb + erow[i]] : 0.0f;     // rows past MP are never stored
+      const float xs = !EDGE || rb + erow[i] < MP ? XS[g * MP + rb + erow[i]] : 0.0f;     // EDGE: see _MAIN
       C[i] = fma(float(sb[0]), P[i], fma(float(sb[1]), xs, C[i]));
     }
   }
@@ -154,7 +154,7 @@ _COOP = r"""
       if (m < M) Y[m * N + n] = static_cast<bfloat>(C[i]);
     }
 """
-AB_FLAG = [False]                                    # a live A/B flips this every few rounds (engine side)
+AB_FLAG = [False]                                    # The engine can switch kernel variants between rounds.
 
 _kernels: dict[str, Any] = {}
 
@@ -168,8 +168,7 @@ def _named(base: str, source: str) -> str:
 
 
 class _Baked:
-    """A kernel called like MLX's, its ``template`` integers written into the source as constants: MLX runs a
-    std::regex over template arguments on every call (lane_matmul built."""
+    """Bake template integers into source to avoid MLX's per-call regex, caching each constant set under its source hash."""
 
     def __init__(self, base: str, body: str, inputs: list[str], outputs: list[str]) -> None:
         self.base, self.body, self.inputs, self.outputs = base, body, inputs, outputs
@@ -305,6 +304,7 @@ def lane_matmul(x: mx.array, weight: mx.array, sbt: mx.array, *, tiled: bool = F
     sk = int(sk) if sk else split_k(N, K)       # a column's bits follow K and sk (lane_fuse's stacks)
     nt = int(nt) if tiled else NT
     block = MP if MP <= ROW_BLOCK else ROW_BLOCK
+    edge = int(MP % block != 0)     # a bound check only where the last block passes MP (33-48, 65-80, 97-112 rows)
     if bits != 4:
         if tiled and N % NT:
             raise ValueError(f"tiled weights need N to be a multiple of {NT}, got {N}")
@@ -316,14 +316,16 @@ def lane_matmul(x: mx.array, weight: mx.array, sbt: mx.array, *, tiled: bool = F
         return y.reshape(*lead, N)
     if nt == 64:
         y = _kernel("coop")(inputs=[x2, xs, weight, sbt, mdims],
-                            template=[("TMR", block // 16), ("N", N), ("K", K), ("SK", sk), ("GS", group)],
+                            template=[("TMR", block // 16), ("N", N), ("K", K), ("SK", sk), ("GS", group),
+                                      ("EDGE", edge)],
                             grid=((N // 64) * 64 * sk, -(-MP // block), 1), threadgroup=(64 * sk, 1, 1),
                             output_shapes=[(M, N)], output_dtypes=[mx.bfloat16])[0]
         return y.reshape(*lead, N)
     if tiled and N % nt:
         raise ValueError(f"tiled weights need N to be a multiple of {nt}, got {N}")
     y = _kernel("main_tiled" if tiled else "main")(inputs=[x2, xs, weight, sbt, mdims],
-                        template=[("TMR", block // 16), ("N", N), ("K", K), ("NT", nt), ("SK", sk), ("GS", group)],
+                        template=[("TMR", block // 16), ("N", N), ("K", K), ("NT", nt), ("SK", sk), ("GS", group),
+                                  ("EDGE", edge)],
                         grid=(-(-N // nt) * 32 * sk, -(-MP // block), 1), threadgroup=(32 * sk, 1, 1),
                         output_shapes=[(M, N)], output_dtypes=[mx.bfloat16])[0]
     return y.reshape(*lead, N)

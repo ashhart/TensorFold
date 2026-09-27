@@ -1,15 +1,4 @@
-"""Flash Next weights on the GPU from the MLX 4-bit checkpoint (affine, groups of 32).
-
-Projections are regrouped once for ``qmm`` (tiled words, group-major scales and biases); projections
-that read the same input are stacked into one matrix (DeltaNet q/k/v, z, b, a; attention q|gate, k, v,
-indexer q and key; a hyper-connection's down and inject rows). The 512 routed experts and the shared
-expert are one table of 513 experts per layer (the shared expert is expert 512). The router stays bf16,
-with the shared expert's gate row (dequantized to bf16) appended as row 512. The n-gram tables' 128 row
-shards are concatenated in order. The vision tower is skipped.
-
-The checkpoint stores the centred norms' gamma itself (around 1), not gamma - 1: ``norms_around_one``
-checks that on the hyper-connection norms, and every centred-norm scale is kept as fp32.
-"""
+"""Pack affine group-32 MLX weights with the shared expert last, concatenate n-gram shards in order, and retain centered-norm gamma itself as fp32 after checking it is around one."""
 
 from __future__ import annotations
 
@@ -24,7 +13,9 @@ import torch
 
 from ..host_table import HostTable, read_header as _header
 from .ngram import NGram
-from .qmm import Experts, Q4, dequantize, make_experts, make_q4, stack_q4
+from tensorfold.cuda import experts as grouped
+
+from .qmm import Q4, dequantize, make_q4, stack_q4
 
 
 @dataclass
@@ -124,6 +115,8 @@ class HC:
     up: Q4                    # [S*D, low]
     scale: torch.Tensor       # [S*D] fp32 (hc_norm gamma)
     inject: bool
+    prefill_down: Q4 | None = None      # the same matrices packed for the shared prefill matmul
+    prefill_up: Q4 | None = None
 
 
 @dataclass
@@ -149,7 +142,7 @@ class AttnW:
 @dataclass
 class MoEW:
     router: torch.Tensor      # [E + 1, D] bf16: router rows, then the shared expert's gate row
-    experts: Experts          # E + 1 experts (the shared expert last)
+    experts: grouped.Experts  # E + 1 experts (the shared expert last)
 
 
 @dataclass
@@ -234,8 +227,7 @@ _DT = {"U32": torch.int32, "I32": torch.int32, "BF16": torch.bfloat16, "F16": to
 
 
 class _Reader:
-    """Tensors by name from the checkpoint's shards, read with large sequential reads (not mmap page faults:
-    those streamed ~."""
+    """Read checkpoint shards sequentially and release each shard's cached pages."""
 
     def __init__(self, model_dir: Path, device: str) -> None:
         index = json.loads((model_dir / "model.safetensors.index.json").read_text())
@@ -279,8 +271,7 @@ class _Reader:
         return name in self.where
 
     def release(self) -> None:
-        """Drop the read shards' cached pages: a full load would otherwise hold ~110 GB of page cache beside the
-        same bytes on the GPU (unified memory)."""
+        """Drop read shards' cached pages so unified memory does not retain both host-cache and GPU copies."""
 
         for shard in list(self.touched):
             try:
@@ -326,8 +317,7 @@ def _groups(t3, g0: int, g1: int):
 
 
 def draft_token_ids(draft_vocab: int | str | None) -> np.ndarray | None:
-    """The token ids the MTP drafts' head scores, sorted: "default" (``draft_vocab.txt`` beside this module), a
-    file of ids, an int N (ids below N), or None (the full vocabulary)."""
+    """The token ids the MTP drafts' head scores, sorted: "default" (``draft_vocab.txt`` beside this module), a file of ids, an int N (ids below N), or None (the full vocabulary)."""
 
     if not draft_vocab:
         return None
@@ -339,11 +329,7 @@ def draft_token_ids(draft_vocab: int | str | None) -> np.ndarray | None:
 
 def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: tuple[int, int] | None = None,
          draft_vocab: int | str | None = None) -> Weights:
-    """``tp`` = (rank, world): this rank's share for tensor parallelism (heads, expert width, vocabulary rows
-    split; hyper-connections, router, embeddings and the MTP input layers replicated).
-
-    ``draft_vocab``: the MTP drafts' head scores only these token ids: "default" (``draft_vocab.txt`` beside this
-    module), a file of ids, or an int N (ids below N). Drafts only change speed; None scores the full vocabulary."""
+    """Load rank ``tp``'s head, expert-width and vocabulary shares while replicating other weights; ``draft_vocab`` restricts draft scoring to default/file ids or ids below N, with None using all ids."""
 
     import time
     from dataclasses import replace
@@ -377,7 +363,9 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         parts = [triple(name + ".input_mix_weight_down")]
         if inject:
             parts.append(triple(name + ".block_inject_weight"))
-        return HC(stack_q4(parts), q4(name + ".input_mix_weight_up"), cscale(name + ".hc_norm.weight"), inject)
+        up = triple(name + ".input_mix_weight_up")
+        return HC(stack_q4(parts, "tiled"), make_q4(*up, "tiled"), cscale(name + ".hc_norm.weight"), inject,
+                  stack_q4(parts, "frag"), make_q4(*up, "frag"))
 
     def moe(name: str) -> MoEW:
         gate_rows = raw(name + ".gate.weight").to(torch.bfloat16)
@@ -388,11 +376,15 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         # a rank takes its half of every expert's intermediate width: gate/up rows, down input groups
         gu = lambda t, width: _rows(t, rank * width // world, (rank + 1) * width // world)          # noqa: E731
         dn = lambda t, width: _groups(t, rank * width // world // 32, (rank + 1) * width // world // 32)  # noqa: E731
-        experts = make_experts(gu(triple(name + ".switch_mlp.gate_proj"), w_), gu(triple(name + ".switch_mlp.up_proj"), w_),
-                               dn(triple(name + ".switch_mlp.down_proj"), w_),
-                               (gu(triple(name + ".shared_expert.gate_proj"), sw_),
-                                gu(triple(name + ".shared_expert.up_proj"), sw_),
-                                dn(triple(name + ".shared_expert.down_proj"), sw_)))
+        def table(routed, shared):
+            return tuple(torch.cat([r, t[None]]) for r, t in zip(routed, shared))
+
+        experts = grouped.make([table(gu(triple(name + ".switch_mlp.gate_proj"), w_),
+                                      gu(triple(name + ".shared_expert.gate_proj"), sw_)),
+                                table(gu(triple(name + ".switch_mlp.up_proj"), w_),
+                                      gu(triple(name + ".shared_expert.up_proj"), sw_))],
+                               table(dn(triple(name + ".switch_mlp.down_proj"), w_),
+                                     dn(triple(name + ".shared_expert.down_proj"), sw_)), 32)
         return MoEW(router, experts)
 
     def attention(name: str) -> AttnW:

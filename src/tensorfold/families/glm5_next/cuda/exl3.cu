@@ -52,36 +52,27 @@ __device__ __forceinline__ uint32_t load_pair(const half* x, bool ok) {
     return ok ? *reinterpret_cast<const uint32_t*>(x) : 0u;
 }
 
-// Program (u, n block, (mat * SK + split) * MT + member tile): 16 members of distinct expert u (rows of X, one
-// row per member) times W_q of matrix `mat` over this split's K range, for NT columns;
-// Z[mat][split][member row][n]. Warp w of W runs a fixed contiguous range of the split's k tiles; warps are
-// added in order 0..W-1.
+// Grid (item, n block, mat * SK + split) -> Z[mat][split][pair][n]; warps sum fixed k ranges, added in warp order.
 template <int NT, int W>
 __global__ void __launch_bounds__(W * 32) grouped_kernel(
     const half* __restrict__ X0, const half* __restrict__ X1, const uint32_t* __restrict__ T0,
-    const uint32_t* __restrict__ T1, const int* __restrict__ uids, const int* __restrict__ ucount,
-    const int* __restrict__ members, float* __restrict__ Z, int K, int N, int P, int SK, int maxm, int slots, int E) {
-    const int u = blockIdx.x;
-    if (u >= ucount[0] || uids[u] >= E) return;          // the shared expert (id E) is not EXL3
-    const int MT = (maxm + 15) / 16;
-    const int mtile = blockIdx.z % MT;
-    const int split = (blockIdx.z / MT) % SK;
-    const int mat = blockIdx.z / MT / SK;
+    const uint32_t* __restrict__ T1, const int* __restrict__ items, const int* __restrict__ counts,
+    const int* __restrict__ members, float* __restrict__ Z, int K, int N, int P, int SK, int E) {
+    const int item = blockIdx.x;
+    if (item >= counts[0]) return;
+    const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
+    if (e >= E) return;                                  // the shared expert (id E) is not EXL3
+    const int split = blockIdx.z % SK;
+    const int mat = blockIdx.z / SK;
     const half* X = mat ? X1 : X0;
     const uint32_t* T = mat ? T1 : T0;
-    const int e = uids[u];
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int g = lane >> 2, t = lane & 3;
     const int KT = K >> 4, NTILES = N >> 4;
 
     __shared__ int rows_sh[16];
-    if (threadIdx.x < 16) {
-        const int m = mtile * 16 + threadIdx.x;
-        int code = m < maxm ? members[u * maxm + m] : -1;
-        rows_sh[threadIdx.x] = code >= 0 ? (code >> 5) * slots + (code & 31) : -1;
-    }
+    if (threadIdx.x < 16) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
     __syncthreads();
-    if (rows_sh[0] < 0) return;                           // members come first, so this tile is empty
     const int r0 = rows_sh[g], r1 = rows_sh[g + 8];
     const half* x0 = X + (size_t)(r0 < 0 ? 0 : r0) * K + 2 * t;
     const half* x1 = X + (size_t)(r1 < 0 ? 0 : r1) * K + 2 * t;
@@ -245,25 +236,23 @@ __global__ void down_epilogue_kernel(const float* __restrict__ Z, const int* __r
 
 }  // namespace
 
-// Z [mats, SK, P, N] fp32 = X_mat[members of each distinct expert] @ W_q(T_mat[expert]) over each split.
+// Z [mats, SK, P, N] fp32 = X_mat[each item's pairs] @ W_q(T_mat[the item's expert]) over each split.
 void exl3_grouped_cuda(const at::Tensor& X0, const at::Tensor& X1, const at::Tensor& T0, const at::Tensor& T1,
-                       const at::Tensor& uids, const at::Tensor& ucount, const at::Tensor& members, at::Tensor& Z,
-                       int64_t mats, int64_t K, int64_t N, int64_t P, int64_t SK, int64_t slots, int64_t nt,
+                       const at::Tensor& items, const at::Tensor& counts, const at::Tensor& members, at::Tensor& Z,
+                       int64_t mats, int64_t K, int64_t N, int64_t P, int64_t SK, int64_t max_items, int64_t nt,
                        int64_t warps, int64_t E) {
-    const int maxm = (int)members.size(1);
-    const int64_t MT = (maxm + 15) / 16;
     TORCH_CHECK(K % (16 * SK * warps) == 0 && N % (16 * nt) == 0, "K and N must split evenly");
-    dim3 grid((unsigned)uids.size(0), (unsigned)(N / (16 * nt)), (unsigned)(mats * SK * MT));
+    dim3 grid((unsigned)max_items, (unsigned)(N / (16 * nt)), (unsigned)(mats * SK));
     auto stream = at::cuda::getCurrentCUDAStream();
     auto x0 = reinterpret_cast<const half*>(X0.data_ptr());
     auto x1 = reinterpret_cast<const half*>(X1.data_ptr());
     auto t0 = reinterpret_cast<const uint32_t*>(T0.data_ptr());
     auto t1 = reinterpret_cast<const uint32_t*>(T1.data_ptr());
 #define LAUNCH(NT_, W_)                                                                                          \
-    grouped_kernel<NT_, W_><<<grid, W_ * 32, 0, stream>>>(x0, x1, t0, t1, uids.data_ptr<int>(),                 \
-                                                          ucount.data_ptr<int>(), members.data_ptr<int>(),     \
+    grouped_kernel<NT_, W_><<<grid, W_ * 32, 0, stream>>>(x0, x1, t0, t1, items.data_ptr<int>(),                \
+                                                          counts.data_ptr<int>(), members.data_ptr<int>(),     \
                                                           Z.data_ptr<float>(), (int)K, (int)N, (int)P, (int)SK, \
-                                                          maxm, (int)slots, (int)E)
+                                                          (int)E)
     if (nt == 8 && warps == 4) LAUNCH(8, 4);
     else if (nt == 4 && warps == 4) LAUNCH(4, 4);
     else if (nt == 4 && warps == 8) LAUNCH(4, 8);

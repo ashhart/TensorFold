@@ -1,16 +1,4 @@
-"""The OpenAI routes for GLM-5.3-Flash (``CUDA_APP``): ``tensorfold.cuda.server.App`` plus two request fields.
-
-- A request picks its draft policy with ``"model": "<served name>@<spec>"`` or ``"tf_policy": "<spec>"`` (specs in
-  ``engine.py``); without one the engine's default applies.
-- ``"ignore_eos": true`` decodes ``max_tokens`` tokens past an end-of-sequence token (the benchmarks use it).
-
-A request whose prompt plus ``max_tokens`` needs more context than the engine was started for gets an HTTP 400
-before anything streams, naming the ``--context`` to restart both ranks with. Without ``max_tokens`` the reply
-stops where the context ends.
-
-With thinking off, a chat renders the way GLM-5.3's thinking-off template does: the checkpoint's template always
-opens a think block, so it gets an empty ``<think></think>`` and no reasoning-effort line.
-"""
+"""GLM request routes validate context before streaming and render an empty think block without a reasoning-effort line when thinking is off."""
 
 from __future__ import annotations
 
@@ -40,8 +28,7 @@ class GlmApp(App):
         self.template = ThinkingOffTemplate(self.template)
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
-        """``App.check``, then the context: the prompt as ``run`` renders it plus ``max_tokens`` must fit the
-        engine's limit (2,051 tokens unless the server was started with a larger ``--context``)."""
+        """Validate the rendered prompt plus max_tokens against the engine context limit before streaming."""
 
         problem = self._check_fields(body)
         limit = getattr(self.engine, "limit", None)
@@ -59,7 +46,7 @@ class GlmApp(App):
             return super().check(body, prepared=prepared)
         detail = f"{prompt} prompt tokens plus max_tokens {int(asked)}" if asked else f"a {prompt}-token prompt"
         return (f"this request needs a {need}-token context ({detail}), and this server was started for {limit}: "
-                f"restart both ranks with --context {need} or more")
+                f"shorten the prompt or reply{self._restart(need, ' both ranks')}")
 
     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
             prepared: PreparedRequest | None = None) -> dict[str, Any]:

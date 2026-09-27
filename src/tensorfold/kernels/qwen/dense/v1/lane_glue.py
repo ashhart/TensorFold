@@ -1,4 +1,4 @@
-"""The decode forward's glue in a few kernels: our own decoder for 1-32 rows."""
+"""Use row-local arithmetic for serial and drafted forwards alike; gdn_post and mlp_act match lane_qmm group sums, while norm_xs projections always use its four-part sums."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from typing import Any
 
 import mlx.core as mx
 
+# Kernel source comments belong to the decoder version hash and must change only with the arithmetic.
 _NORM_XS = r"""
   // one threadgroup of K / 16 threads per row: thread t holds elements [16 t, 16 t + 16) in registers.
   // The row's sum of squares is each thread's sequential fma over its 16, then simd_sum, then the
   // simdgroups' sums in order; a 64-group's input sum (for the next lane matmul) is ((g0 + g1) + (g2 + g3))
-  // over its 4 threads' sequential sums. Arithmetic since 2026-09-24 (it was 256 strided threads, two
-  // barriers and 64-long sums read back from threadgroup memory): 11.5 -> 7 us a call at 16 rows.
+  // over its 4 threads' sequential sums.
   const uint t = thread_position_in_threadgroup.x;
   const uint m = threadgroup_position_in_grid.y;
   const int M = dims[0], MP = dims[1];
@@ -212,10 +212,7 @@ def remember(x: mx.array, xs: mx.array) -> mx.array:
 
 def norm_xs(hidden: mx.array, residual: mx.array | None, weight: mx.array, eps: float
             ) -> tuple[mx.array, mx.array]:
-    """(h, x): h = hidden + residual (hidden when residual is None), x = RMSNorm(h) * weight.
-
-    ``x`` comes with its group sums remembered for the lane matmul. Shapes (1, M, K), bf16.
-    """
+    """Return h = hidden + residual, or hidden if residual is None, and RMSNorm(h) * weight as (1, M, K) bf16 arrays with norm output group sums."""
 
     lead = hidden.shape[:-1]
     K = int(hidden.shape[-1])
@@ -247,10 +244,7 @@ def norm_xs(hidden: mx.array, residual: mx.array | None, weight: mx.array, eps: 
 def gdn_pre(qkv: mx.array, conv_state: mx.array, conv_weight: mx.array, windows: mx.array, a: mx.array,
             b: mx.array, a_log: mx.array, dt_bias: mx.array, *, nk: int, nv: int, dk: int, dv: int
             ) -> tuple[mx.array, ...]:
-    """q, k [1, W, nk, dk], v [1, W, nv, dv], g [1, W, nv] fp32, beta [1, W, nv] for W window rows.
-
-    ``windows`` [W, taps] indexes rows of [conv_state (taps - 1 rows); qkv rows]: row w's conv inputs.
-    """
+    """Return q/k [1, W, nk, dk], v [1, W, nv, dv], g/beta [1, W, nv] with g in fp32; windows [W, taps] indexes [conv_state; qkv] rows."""
 
     W = int(qkv.shape[-2])
     C = int(qkv.shape[-1])

@@ -1,17 +1,4 @@
-"""Flash Next's small kernels on CUDA (Triton), each row on its own.
-
-A program reads only its own row (or its own row and head), so a row's bits never depend on the other
-rows of a window. Arithmetic follows the checkpoint's training framework: fp32 math, one bf16 rounding
-where the model stores a bf16 tensor. Kernels that feed a 4-bit matmul also write the fp32 sums of each
-32-input group of the bf16 values they store, so the matmul need not read its input twice.
-
-Hyper-connection block (4 residual streams of D):
-    hc_writeback  streams += bf16(branch * inject[s]) (the branch: a projection's output, or the MoE's slots
-                  combined in slot order), partial sums of squares per stream
-    hc_normed     bf16(h * rsqrt(mean(h^2) + eps) * scale) and its group sums
-    hc_act        from the down projection [low | inject]: bf16(silu(bf16(v / S))) and 2 sigmoid(v / S)
-    hc_mix        mean over streams of bf16(sigmoid(up) * normed)
-"""
+"""Row-independent CUDA kernels use fp32 math with bf16 rounding at stored model tensors and write ordered fp32 sums of stored bf16 inputs for 4-bit matmuls."""
 
 from __future__ import annotations
 
@@ -30,7 +17,6 @@ def _bsilu(x):
     return (x / (1.0 + tl.exp(-x))).to(tl.bfloat16).to(tl.float32)
 
 
-# -- embedding ------------------------------------------------------------------------------------
 @triton.jit
 def _embed(IDS, W, S, B, OUT, D: tl.constexpr, S_COPIES: tl.constexpr):
     """Row r, group g: dequantize 32 values of token IDS[r]'s row (MLX layout), bf16, into S_COPIES streams."""
@@ -59,17 +45,11 @@ def embed(ids: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, biases:
     return out
 
 
-# -- hyper-connections ------------------------------------------------------------------------------
 @triton.jit
 def _hc_writeback(H, HOUT, PSS, BR, INJ, Y, WTS, RS,
                   D: tl.constexpr, S: tl.constexpr, MODE: tl.constexpr, TOPK: tl.constexpr, SLOTS: tl.constexpr,
                   BLOCK: tl.constexpr, WORLD: tl.constexpr):
-    """Program (r, c): dims [c BLOCK, (c + 1) BLOCK) of every stream. MODE 0: no write-back; 1: branch BR [R, D]
-    bf16; 2: the MoE's slots Y [R, SLOTS, D] fp32 combined as fp32 sum_k w_k y_k (k < TOPK, in order) + w_s y_s
-    (the shared expert, slot TOPK), rounded once; 3: tensor-parallel fp32 partials gathered in rank order
-    (BR [WORLD] blocks RS apart, each [R, D]) summed rank 0 first, rounded once; 4: a matmul's unreduced K slices
-    (BR [WORLD] slices RS apart) summed in slice order and rounded once, the bits of ``qmm._reduce``. Streams
-    h_s = bf16(h_s + bf16(branch * inject_s)); PSS[r, c, s] = the chunk's fp32 sum of h_s^2."""
+    """MODE 0 none, 1 branch, 2 MoE slots, 3 rank partials, 4 K slices; fp32 sums in fixed order, rounded once."""
 
     r = tl.program_id(0)
     c = tl.program_id(1)
@@ -86,7 +66,7 @@ def _hc_writeback(H, HOUT, PSS, BR, INJ, Y, WTS, RS,
         acc = tl.zeros((BLOCK,), dtype=tl.float32)
         for k in tl.static_range(TOPK + 1):
             wk = tl.load(WTS + r * SLOTS + k)
-            yk = tl.load(Y + (r * SLOTS + k) * D + d)
+            yk = tl.load(Y + (r * SLOTS + k) * D + d).to(tl.float32)
             acc = acc + yk * wk
         branch = acc.to(tl.bfloat16).to(tl.float32)
     for s in tl.static_range(S):
@@ -101,8 +81,7 @@ def _hc_writeback(H, HOUT, PSS, BR, INJ, Y, WTS, RS,
 @triton.jit
 def _hc_normed(H, PSS, SCALE, NORMED, XS, eps,
                D: tl.constexpr, S: tl.constexpr, NC: tl.constexpr, BLOCK: tl.constexpr):
-    """Program (r, j): elements [j BLOCK, (j + 1) BLOCK) of row r's S*D streams (inside one stream):
-    bf16(h * rinv_s * scale), and its 32-group sums. rinv_s from the stream's NC partial sums in order."""
+    """Program (r, j): elements [j BLOCK, (j + 1) BLOCK) of row r's S*D streams (inside one stream): bf16(h * rinv_s * scale), and its 32-group sums. rinv_s from the stream's NC partial sums in order."""
 
     r = tl.program_id(0)
     j = tl.program_id(1)
@@ -123,8 +102,7 @@ def _hc_normed(H, PSS, SCALE, NORMED, XS, eps,
 def hc_writeback(h: torch.Tensor, hout: torch.Tensor, pss: torch.Tensor, streams: int, mode: int,
                  branch: torch.Tensor | None = None, inject: torch.Tensor | None = None,
                  y: torch.Tensor | None = None, wts: torch.Tensor | None = None, block: int = 256) -> None:
-    """mode 3: ``branch`` is the gathered partials [world, R, D] fp32 (contiguous); mode 4: a matmul's K slices
-    [SK, R, D] fp32."""
+    """mode 3: ``branch`` is the gathered partials [world, R, D] fp32 (contiguous); mode 4: a matmul's K slices [SK, R, D] fp32."""
 
     rows, wide = h.shape
     d = wide // streams
@@ -148,7 +126,7 @@ def _moe_partial(Y, WTS, OUT, D: tl.constexpr, TOPK: tl.constexpr, SLOTS: tl.con
     d = c * BLOCK + tl.arange(0, BLOCK)
     acc = tl.zeros((BLOCK,), dtype=tl.float32)
     for k in tl.static_range(TOPK + 1):
-        acc = acc + tl.load(Y + (r * SLOTS + k) * D + d) * tl.load(WTS + r * SLOTS + k)
+        acc = acc + tl.load(Y + (r * SLOTS + k) * D + d).to(tl.float32) * tl.load(WTS + r * SLOTS + k)
     tl.store(OUT + r * D + d, acc)
 
 
@@ -169,8 +147,7 @@ def hc_normed(h: torch.Tensor, pss: torch.Tensor, scale: torch.Tensor, normed: t
 @triton.jit
 def _hc_act(DN, ACT, XS, INJ, S: tl.constexpr, LOW: tl.constexpr, LOWP: tl.constexpr, HAS_INJ: tl.constexpr,
             NDN: tl.constexpr):
-    """Row r of the down projection [low | inject]: act = bf16(silu(bf16(v / S))) and its 32-group sums; inject
-    gates bf16(2 bf16(sigmoid(bf16(v / S))))."""
+    """Row r of the down projection [low | inject]: act = bf16(silu(bf16(v / S))) and its 32-group sums; inject gates bf16(2 bf16(sigmoid(bf16(v / S))))."""
 
     r = tl.program_id(0)
     i = tl.arange(0, LOWP)
@@ -237,8 +214,7 @@ def hc_act(dn: torch.Tensor, act: torch.Tensor, xs: torch.Tensor, inj: torch.Ten
 
 @triton.jit
 def _hc_mix(UP, NORMED, MIXED, XS, D: tl.constexpr, S: tl.constexpr, BLOCK: tl.constexpr):
-    """Program (r, c): mixed[d] = bf16((sum over streams, in order, of bf16(bf16(sigmoid(up_s)) * normed_s)) / S)
-    for dims [c BLOCK, (c + 1) BLOCK), and its 32-group sums."""
+    """Program (r, c): mixed[d] = bf16((sum over streams, in order, of bf16(bf16(sigmoid(up_s)) * normed_s)) / S) for dims [c BLOCK, (c + 1) BLOCK), and its 32-group sums."""
 
     r = tl.program_id(0)
     c = tl.program_id(1)
@@ -261,11 +237,9 @@ def hc_mix(up: torch.Tensor, normed: torch.Tensor, mixed: torch.Tensor, xs: torc
     _hc_mix[(rows, d // block)](up, normed, mixed, xs, D=d, S=streams, BLOCK=block, num_warps=2)
 
 
-# -- plain RMSNorm (MTP inputs, PLE norms) ------------------------------------------------------------
 @triton.jit
 def _rmsnorm(X, W, OUT, XS, eps, x_stride, D: tl.constexpr, G: tl.constexpr, BLOCK: tl.constexpr):
-    """Program (r, grp): RMSNorm of each run of G features on its own (G = D: one norm), scale W, bf16 out,
-    and 32-group sums. BLOCK >= G."""
+    """Program (r, grp): RMSNorm of each run of G features on its own (G = D: one norm), scale W, bf16 out, and 32-group sums. BLOCK >= G."""
 
     r = tl.program_id(0)
     grp = tl.program_id(1)
@@ -294,16 +268,11 @@ def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float, group: int | None = No
     return out, xs
 
 
-# -- attention --------------------------------------------------------------------------------------
 @triton.jit
 def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps,
                PW: tl.constexpr, NQ: tl.constexpr, NKV: tl.constexpr, HD: tl.constexpr, NI: tl.constexpr,
                IHD: tl.constexpr, HALF: tl.constexpr):
-    """Program (r, head) over the stacked projection [q|gate pairs (NQ x 2HD) | k (NKV HD) | v (NKV HD) |
-    indexer q (NI IHD) | indexer key (IHD)]. Heads [0, NQ): queries; [NQ, NQ + NKV): keys, written to the
-    cache at position POS0 + r with the values; then NI indexer queries; the last: the raw indexer key,
-    written to its cache. RMSNorm with the stored scale in fp32, bf16, then RoPE on the first 2 HALF dims
-    (rotate-half) at the row's position, bf16."""
+    """Normalize stacked q/k/indexer heads in fp32, round to bf16, apply rotate-half RoPE and round again; store keys, values and raw indexer keys at POS0 + r."""
 
     r = tl.program_id(0)
     head = tl.program_id(1)
@@ -387,11 +356,9 @@ def attn_gate(o: torch.Tensor, p: torch.Tensor, out: torch.Tensor, xs: torch.Ten
     _attn_gate[(rows, q_heads)](o, p, out, xs, PW=p.shape[1], NQ=q_heads, HD=head_dim, num_warps=2)
 
 
-# -- n-gram embedding (PLE) ---------------------------------------------------------------------------
 @triton.jit
 def _ple_embed(W, S, B, OUT, XS, HEADS: tl.constexpr, DH: tl.constexpr):
-    """Program (r, h): gathered n-gram row r * HEADS + h (DH values, MLX layout, group 32) ->
-    OUT[r, h DH: (h + 1) DH] bf16 and its group sums."""
+    """Program (r, h): gathered n-gram row r * HEADS + h (DH values, MLX layout, group 32) -> OUT[r, h DH: (h + 1) DH] bf16 and its group sums."""
 
     r = tl.program_id(0)
     h = tl.program_id(1)
@@ -420,9 +387,7 @@ def ple_embed(rows: int, weight: torch.Tensor, scales: torch.Tensor, biases: tor
 @triton.jit
 def _ple_gate(KEYS, VALS, H, NK, NQ, GATED, PSS, eps,
               D: tl.constexpr, S: tl.constexpr, BLOCK: tl.constexpr):
-    """Program r. keys = bf16(norm_key(key_proj)) per stream, queries = bf16(norm_query(h)) per stream;
-    gate_s = sum(keys_s * queries_s) / sqrt(D) (fp32), signed sqrt, sigmoid; gated_s = bf16(sigmoid * values);
-    PSS[r, s] = sum of gated_s^2 (for norm_conv). Two passes over D per stream."""
+    """Normalize key and query streams to bf16, apply signed sqrt and sigmoid to their scaled fp32 dot product, then store bf16 gated values and their squared sums for norm_conv."""
 
     r = tl.program_id(0)
     NCH: tl.constexpr = D // BLOCK
@@ -470,9 +435,7 @@ def ple_gate(keys, vals, h, norm_key, norm_query, gated, pss, eps: float, stream
 @triton.jit
 def _ple_conv(GATED, PSS, NC, TAIL, CW, H, HOUT, NROW, eps, R,
               D: tl.constexpr, S: tl.constexpr, TAPS: tl.constexpr, DIL: tl.constexpr, BLOCK: tl.constexpr):
-    """Program (r, c): normed = bf16(gated * rinv_s * norm_conv) for row r; conv over [TAIL rows; normed rows]
-    (depthwise, TAPS taps DIL apart, fp32), SiLU (bf16); h = bf16(h + bf16(gated + silu)). NROW[r] receives
-    row r's normed values (the conv window's next rows)."""
+    """Convolve bf16 normed rows over [TAIL; current rows] in fp32 with TAPS taps DIL apart, apply bf16 SiLU and residual additions, and retain normed rows in NROW."""
 
     r = tl.program_id(0)
     c = tl.program_id(1)
@@ -509,7 +472,6 @@ def ple_conv(gated, pss, norm_conv, tail, conv_w, h, hout, nrow, eps: float, str
                                    D=wide // streams, S=streams, TAPS=taps, DIL=dilation, BLOCK=512, num_warps=4)
 
 
-# -- MTP input -----------------------------------------------------------------------------------------
 @triton.jit
 def _add_streams(E, HS, OUT, D: tl.constexpr, S: tl.constexpr, BLOCK: tl.constexpr):
     """out[r, s, :] = bf16(e[r] + hs[r, s]) (the MTP input: the embedding branch added to each stream)."""

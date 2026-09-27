@@ -1,20 +1,4 @@
-"""The Qwen3.8 Flash Next CUDA engine behind ``tensorfold.cuda.server``: one GPU, or two ranks over NCCL.
-
-One request decodes at a time, MTP-drafted: a round verifies the pending token and 1 to ``depth`` drafts (a
-chain ends before a later draft the MTP head gives less than ``confidence``), so every round is a window of two
-rows or more. Drafted output is byte-identical to serial decoding on the same engine and ranks.
-
-Prefix reuse: the engine keeps the state after the last request's prompt and after its reply, and a prompt
-that extends either resumes from it. The caches hold one sequence, so the kept states are prefixes of it; a
-fresh prompt starts over. A request with ``draft=False`` decodes one token a round from a fresh prefill in a
-separate state, leaving the kept states as they are: the serial reference.
-
-With two ranks, rank 0 serves HTTP and hands each request (prompt, sampling, the serial switch, the cached
-length it resumes from) to rank 1 through the communicator's TCP store. Both decode it to the end in lockstep:
-every sum across ranks is taken in rank order and both ranks draw each token from the same gathered
-candidates, so they hold the same tokens. A request decodes to its end even when its client stops reading,
-so the two ranks stay in step.
-"""
+"""The Flash Next CUDA engine: MTP chains verified exactly on one GPU or two ranks in lockstep."""
 
 from __future__ import annotations
 
@@ -24,26 +8,31 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from . import CONFIDENCE, CONTEXT, DEPTH
+from . import CONFIDENCE, DEPTH
 
 MAX_DEPTH = 15           # a verify window of at most 16 rows
+KEEP = 8                 # prompt ends a concurrent decoder keeps to resume from
 
 
 class FlashNextEngine:
     """``eos``, ``generate`` (rank 0 or one GPU) and ``follow`` (rank 1), as ``tensorfold.cuda.server`` expects."""
 
     def __init__(self, model_dir: Path, *, depth: int = DEPTH, confidence: float = CONFIDENCE,
-                 draft_vocab: str | int | None = "default", max_len: int | None = None, context_explicit: bool | None = None, tp: int = 1, rank: int = 0,
-                 master: str = "", port: int = 29551, prefetch: bool = True, graphs: bool = True) -> None:
+                 draft_vocab: str | int | None = "default", max_len: int | None = None,
+                 context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
+                 prefetch: bool = True, graphs: bool = True, streams: int = 1) -> None:
         import torch
 
         from .decode import Engine
         from .weights import draft_token_ids, load
         from tensorfold.cuda.capacity import admit, gather_ints
-        from tensorfold.cuda.geometry import gdn_geometry, indexed_weights
+        from tensorfold.cuda.geometry import gdn_geometry, indexed_stream_geometry, indexed_weights
 
         if tp not in (1, 2) or rank not in range(tp):
             raise ValueError(f"rank {rank} of {tp}: Flash Next runs on one GPU or two")
+        if streams > 1 and tp > 1:
+            raise ValueError("--parallel decodes several Flash Next requests together on one GPU; with --tp 2 it "
+                             "serves one request at a time for now, so drop --parallel")
         if not 0 <= int(depth) <= MAX_DEPTH:
             raise ValueError(f"MTP drafts a round: 0 to {MAX_DEPTH}, not {depth}")
         torch.cuda.set_device(0)
@@ -51,16 +40,19 @@ class FlashNextEngine:
         self.comm = None
         ids = draft_token_ids(draft_vocab) if self.depth > 0 else None
         if tp == 2:
-            from .comm import NCCL
+            from tensorfold.cuda.comm import NCCL
 
             if not master:
                 raise ValueError("two ranks need rank 0's address (master)")
             self.comm = NCCL(rank, 2, master, port)
             self.comm.barrier()
         gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
-        self.capacity_plan = admit(model_dir, max_len, context_explicit, torch,
-                                   lambda text: gdn_geometry(text, tp, self.depth + 1, indexed=True, mtp=self.depth > 0),
-                                   indexed_weights(tp, self.depth > 0), rank=rank, world=tp, gather=gather)
+        each, mtp = self.depth + 1, self.depth > 0
+        # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
+        geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp)) if streams > 1 else
+                    (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp)))
+        self.capacity_plan = admit(model_dir, max_len, context_explicit, torch, geometry, indexed_weights(tp, mtp),
+                                   rank=rank, world=tp, gather=gather)
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
             self._same_settings(torch, ids)
@@ -71,27 +63,48 @@ class FlashNextEngine:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
                              "that has it, or --no-drafts for the serial reference (one token a round)")
         self.w = w
-        self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs)
+        # ``streams`` > 1: up to that many requests decoded together, every stream's chain in one forward
+        self.concurrent = streams > 1
+        self.multi = self.scheduler = None
+        if self.concurrent:
+            from tensorfold.cuda.scheduler import Scheduler
+
+            from .multi import MultiDecoder
+
+            self.e = None
+            self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
+                                      confidence=self.confidence, keep=KEEP)
+            self.scheduler = Scheduler(self.multi, max_streams=streams)
+        else:
+            self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs)
         started = time.perf_counter()
+        locked = False
         if prefetch:                                  # the n-gram tables' pages, read now rather than by requests
-            for layer in w.layers:
-                if layer.ple is not None:
-                    layer.ple.table.prefetch()
+            tables = {id(layer.ple.table): layer.ple.table for layer in w.layers if layer.ple is not None}
+            size = sum(a.nbytes for t in tables.values() for a in t.words + t.scales + t.biases)
+            # pinned pages are no longer reclaimable: lock only what the startup budget leaves room for
+            room = self.capacity_plan["budget_bytes"] - self.capacity_plan["total_bytes_estimate"]
+            for table in tables.values():
+                locked = room >= size and table.lock()
+                if not locked:
+                    table.prefetch()
         read_s = time.perf_counter() - started
-        captured = self.e.graphs.warm(self.depth + 1) if self.e.graphs is not None else 0
+        captured = self.e.graphs.warm(self.depth + 1) if self.e is not None and self.e.graphs is not None else 0
         self.eos = tuple(w.cfg.eos)
         self.served = 0
         self.cache: list[tuple[list[int], dict]] = []    # (committed ids, what resuming from them needs)
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
-        print(f"[tensorfold] Flash Next on CUDA: {rule}; {self.context_window}-token prompt/reply window; "
-              f"{self.max_len}-token cache; n-gram tables read in "
-              f"{read_s:.1f}s; {captured} decode graphs captured", flush=True)
+        where = (f"{streams} streams of {self.context_window} prompt/reply tokens "
+                 f"({self.multi.slot_bytes / 2**20:.0f} MiB a stream), eager" if self.concurrent else
+                 f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
+        how = "locked in memory" if locked else "read"
+        print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}; n-gram tables {how} in {read_s:.1f}s; {captured} "
+              "decode graphs captured", flush=True)
 
     def _same_settings(self, torch, ids) -> None:
-        """Both ranks must decode with the same rule, context and draft vocabulary, or they would fall out of
-        step: refuse to start otherwise."""
+        """Both ranks must decode with the same rule, context and draft vocabulary, or they would fall out of step: refuse to start otherwise."""
 
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
@@ -103,7 +116,6 @@ class FlashNextEngine:
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
                                f"draft vocabulary): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
 
-    # -- two ranks: rank 0 hands each request to rank 1 ------------------------------------------------------
     def _key(self, n: int) -> str:
         return f"tensorfold/flashnext/request/{n}"
 
@@ -155,14 +167,12 @@ class FlashNextEngine:
 
         return max(0, self.max_len - self.depth - 1)
 
-    # -- decoding ------------------------------------------------------------------------------------------------
     def _limit(self, prompt: list[int], max_tokens: int) -> int:
         room = self.max_len - len(prompt) - self.depth - 1
         if room < 1:
             raise ValueError(f"a prompt of {len(prompt)} tokens leaves no room in the {self.max_len}-token context")
         return max(1, min(max_tokens, room))
 
-    # -- prefix reuse ----------------------------------------------------------------------------------------------
     def _resume(self, prompt: list[int]):
         """The longest kept state the prompt extends (with at least one new token), or None."""
 
@@ -173,8 +183,7 @@ class FlashNextEngine:
         return best
 
     def _start_from(self, hit) -> None:
-        """Before a prefill: resuming overwrites the cache rows past the kept prefix, so the states that extend it
-        go; a fresh prompt overwrites them all."""
+        """Before a prefill: resuming overwrites the cache rows past the kept prefix, so the states that extend it go; a fresh prompt overwrites them all."""
 
         if hit is None:
             self.cache = []
@@ -184,13 +193,6 @@ class FlashNextEngine:
 
     def _remember(self, ids: list[int], snap: dict) -> None:
         self.cache = [c for c in self.cache if c[0] != ids][-1:] + [(ids, snap)]
-
-    # -- decoding ------------------------------------------------------------------------------------------------
-    def _limit(self, prompt: list[int], max_tokens: int) -> int:
-        room = self.max_len - len(prompt) - self.depth - 1
-        if room < 1:
-            raise ValueError(f"a prompt of {len(prompt)} tokens leaves no room in the {self.max_len}-token context")
-        return max(1, min(max_tokens, room))
 
     def _serial(self, prompt: list[int], max_tokens: int, sampling, on_tokens) -> dict[str, Any]:
         """One token a round from a fresh prefill in the serial engine's own state (no drafts, no kept states)."""
@@ -233,17 +235,16 @@ class FlashNextEngine:
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=True, on_tokens=on_tokens)
-        if res.committed:          # the reply's state: every committed position is in the MTP cache
-            self._remember(list(prompt) + res.committed, {"state": self.e.st.snapshot(), "tail": None})
         stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, decode_tps=round(res.tokens_per_second, 2))
         return stats
 
     def generate(self, prompt: list[int], max_tokens: int, sampling,
                  on_tokens: Callable[[list[int]], bool | None], draft: bool = True) -> dict[str, Any]:
-        """``draft=False``: one token a round with no MTP drafts, from a fresh prefill that leaves the kept
-        states alone: the serial reference."""
+        """``draft=False``: one token a round with no MTP drafts, from a fresh prefill that leaves the kept states alone: the serial reference."""
 
         max_tokens = self._limit(prompt, max_tokens)
+        if self.scheduler is not None:
+            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens)
         hit = self._resume(prompt) if draft else None
         if self.tp == 2:                     # rank 0 decodes exactly what it hands rank 1
             prompt, max_tokens, sampling, draft, _ = self._share(prompt, max_tokens, sampling, draft,

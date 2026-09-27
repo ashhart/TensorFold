@@ -1,14 +1,4 @@
-"""CUDA graphs for Flash Next's decode steps: one ~1,100-kernel forward becomes one graph launch.
-
-A forward's GPU work (``forward.compute``) reads only static buffers and device-side positions, so it can
-be captured once per window size and replayed with new inputs staged beforehand (token ids and the n-gram
-rows, ``forward.stage``). DeltaNet layers read their committed state from one of two buffers and write the
-new state to the other; every commit flips all layers together, so there are two graphs per window size
-(one per parity). Graphs also include the live context bucket; the MTP head has no DeltaNet parity.
-
-Replaying a graph runs the same kernels with the same launch parameters as the eager call, so it gives the
-same bits (checked in ``tests/cuda/test_flashnext_forward.py`` against eager decoding).
-"""
+"""Capture static-buffer forwards by window size, context bucket and DeltaNet buffer parity, staging new inputs before replay with the eager path's kernels and launch parameters."""
 
 from __future__ import annotations
 
@@ -34,8 +24,7 @@ class Graphs:
         torch.cuda.synchronize()
         gc.collect()
         g = torch.cuda.CUDAGraph()
-        # no garbage collection while capturing: collecting an old engine's graphs calls cuGraphExecDestroy, which
-        # invalidates the capture (seen when one process built a second engine)
+        # Collecting old graphs calls cuGraphExecDestroy and invalidates an active capture.
         enabled = gc.isenabled()
         gc.disable()
         try:
@@ -56,15 +45,16 @@ class Graphs:
     def forward(self, tokens) -> torch.Tensor:
         e = self.e
         w, st, b = e.w, e.st, e.buf
-        R = stage(w, st, b, tokens)
+        segs = stage(w, b, [(st, tokens)])
+        R = segs[-1][2]
         if R > self.max_rows:
-            return compute(w, st, b, R)
+            return compute(w, segs, b)
         context = self._bucket(st.pos + R)
         key = (R, st.cur[0] if st.cur else 0, context)
         g = self.main.get(key)
         if g is None:
-            compute(w, st, b, R, context=context)     # eager warm-up: compiles this launch shape
-            g = self._capture(lambda: compute(w, st, b, R, context=context))
+            compute(w, segs, b, context=context)     # eager warm-up: compiles this launch shape
+            g = self._capture(lambda: compute(w, segs, b, context=context))
             self.main[key] = g
         g.replay()
         return b.logits[:R]
@@ -73,15 +63,16 @@ class Graphs:
     def mtp_forward(self, next_tokens, streams: torch.Tensor) -> torch.Tensor:
         e = self.e
         w, st, b = e.w, e.st, e.mbuf
-        n = mtp_stage(w, st, b, next_tokens, streams)
+        segs = mtp_stage(w, b, [(st, next_tokens, streams)])
+        n = segs[-1][2]
         if n > self.max_rows:
-            return mtp_compute(w, st, b, n)
+            return mtp_compute(w, segs, b)
         context = self._bucket(st.mtp_len + n)
         key = (n, context)
         g = self.mtp.get(key)
         if g is None:
-            out = mtp_compute(w, st, b, n, context=context)
-            g = self._capture(lambda: mtp_compute(w, st, b, n, context=context))
+            out = mtp_compute(w, segs, b, context=context)     # eager warm-up; its result is the view replays fill
+            g = self._capture(lambda: mtp_compute(w, segs, b, context=context))
             self.mtp[key] = g
             self.mtp_out[key] = out
         g.replay()
@@ -89,8 +80,7 @@ class Graphs:
 
     @torch.no_grad()
     def warm(self, rows: int | None = None) -> int:
-        """Capture every decode shape up front (windows of 1..rows rows at both DeltaNet parities, MTP steps of
-        1..rows rows), so no capture lands inside a timed run. Leaves the sequence state dirty: prefill after."""
+        """Capture all decode windows at both DeltaNet parities and all MTP step sizes before decoding; this dirties sequence state, so prefill afterward."""
 
         e = self.e
         st = e.st

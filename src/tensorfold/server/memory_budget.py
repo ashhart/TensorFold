@@ -10,10 +10,31 @@ from typing import Any, Mapping, Sequence
 GIB = 1024**3
 MEMORY_FRACTION = 0.70
 LIMIT_ENV = "TENSORFOLD_MEMORY_LIMIT_GB"
+# the process's memory outside MLX's buffers and Metal's late returns
+PROCESS_BYTES = 3 * GIB
 
 
 def physical_memory_bytes() -> int:
     return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+
+
+def process_footprint() -> int | None:
+    """This process's physical footprint as macOS counts it (Metal buffers included); None where it can't be read."""
+
+    import ctypes
+
+    class Usage(ctypes.Structure):      # rusage_info_v4 up to ri_phys_footprint, then the rest unread
+        _fields_ = [("uuid", ctypes.c_uint8 * 16), ("counters", ctypes.c_uint64 * 7), ("footprint", ctypes.c_uint64),
+                    ("rest", ctypes.c_uint64 * 27)]
+
+    try:
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        info = Usage()
+        if libc.proc_pid_rusage(os.getpid(), 4, ctypes.byref(info)) != 0:
+            return None
+    except (OSError, AttributeError):
+        return None
+    return int(info.footprint)
 
 
 def memory_limit_bytes(mx: Any, *, environ: Mapping[str, str] | None = None,
@@ -40,16 +61,17 @@ def memory_limit_bytes(mx: Any, *, environ: Mapping[str, str] | None = None,
     return limit
 
 
-def configure_mlx(mx: Any, cache_limit_bytes: int, **kwargs: Any) -> int:
-    """Apply both limits before loading weights; an explicit limit can lower the hardware budget."""
+def configure_mlx(mx: Any, cache_limit_bytes: int, *, reserve_bytes: int = PROCESS_BYTES, **kwargs: Any) -> int:
+    """The process's memory budget, applied before weights load; MLX's buffers get it less ``reserve_bytes``."""
 
-    limit = memory_limit_bytes(mx, **kwargs)
+    budget = memory_limit_bytes(mx, **kwargs)
     cache = int(cache_limit_bytes)
     if cache < 0:
         raise ValueError("MLX cache limit must be nonnegative")
+    limit = max(1, budget - int(reserve_bytes))
     mx.set_memory_limit(limit)
     mx.set_cache_limit(min(cache, limit))
-    return limit
+    return budget
 
 
 def _array_bytes(value: Any, seen: set[int] | None = None) -> int:
@@ -81,16 +103,17 @@ class CacheMemory:
     fixed_bytes: int
     bytes_per_token: int
     step: int = 256
+    entry_bytes_per_token: int = 0      # the largest growing entry's; 0: unknown, the whole cache grows at once
 
     def __post_init__(self) -> None:
-        if self.fixed_bytes < 0 or self.bytes_per_token < 0 or self.step < 1:
+        if min(self.fixed_bytes, self.bytes_per_token, self.entry_bytes_per_token) < 0 or self.step < 1:
             raise ValueError("cache sizes must be nonnegative and step positive")
 
     @classmethod
     def from_cache(cls, cache: Sequence[Any]) -> "CacheMemory":
         """Size a populated probe cache; bounded timelines stay fixed, alternating KV reserves both buffers."""
 
-        fixed = per_token = 0
+        fixed = per_token = entry = 0
         step = 256
         for item in cache:
             held = _held_bytes(item)
@@ -117,15 +140,24 @@ class CacheMemory:
                 continue
             alternating = hasattr(item, "spare_keys")
             per_token += each * (2 if alternating else 1) + auxiliary
+            entry = max(entry, each + auxiliary)
             step = max(step, int(getattr(item, "step", 256)),
                        int(getattr(item, "grow", 256)) if alternating else 256)
-        return cls(fixed, per_token, step)
+        return cls(fixed, per_token, step, entry)
 
     def cache_bytes(self, tokens: int) -> int:
         if tokens < 0:
             raise ValueError("tokens must be nonnegative")
         positions = -(-int(tokens) // self.step) * self.step
         return self.fixed_bytes + positions * self.bytes_per_token
+
+    def growth_bytes(self, tokens: int, in_flight: int = 2) -> int:
+        """A prompt chunk's growth: each entry's old buffer lives until its copy lands, a few entries at a time."""
+
+        positions = -(-int(tokens) // self.step) * self.step
+        each = self.bytes_per_token if not self.entry_bytes_per_token else min(
+            self.bytes_per_token, in_flight * self.entry_bytes_per_token)
+        return self.fixed_bytes + positions * each
 
 
 def needed_bytes(memory: CacheMemory, tokens: int, *, resident_bytes: int, working_bytes: int = 0,
@@ -158,5 +190,5 @@ def largest_context(memory: CacheMemory, window_tokens: int, *, budget_bytes: in
     return lo
 
 
-__all__ = ["CacheMemory", "cache_nbytes", "configure_mlx", "fits", "largest_context", "memory_limit_bytes",
-           "needed_bytes"]
+__all__ = ["PROCESS_BYTES", "CacheMemory", "cache_nbytes", "configure_mlx", "fits", "largest_context",
+           "memory_limit_bytes", "needed_bytes", "process_footprint"]

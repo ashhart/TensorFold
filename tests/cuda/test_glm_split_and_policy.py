@@ -136,8 +136,7 @@ def test_family_is_cuda_only_and_needs_two_ranks(tmp_path):
 
 
 def test_requests_past_the_context_get_a_400_before_streaming(tmp_path):
-    """The HTTP check runs before a stream's headers: a prompt plus max_tokens past the engine's limit is refused with
-    the --context to restart with; without max_tokens only a prompt that leaves no room is refused."""
+    """Past the limit a request gets a 400 before streaming, naming a --context only when startup would admit it."""
 
     import threading
 
@@ -156,6 +155,7 @@ def test_requests_past_the_context_get_a_400_before_streaming(tmp_path):
         limit = 12
         eos = (0,)
         request = threading.local()
+        capacity_plan = {"largest_window": 64}
 
         def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True):
             raise AssertionError("not reached")

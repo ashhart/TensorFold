@@ -1,9 +1,4 @@
-"""Two-rank tensor-parallel shards for the unchanged MLX 4-bit checkpoint.
-
-Output shards retain complete packed rows. Input shards start and end on 64-input
-group boundaries, so their packed words, scales and biases need no repacking.
-Row-parallel projections keep fp32 partials until the ranks sum in rank order.
-"""
+"""Two-rank shards preserve packed rows and quantization-group boundaries, keeping row-parallel partials in fp32 until rank-ordered summation."""
 
 from __future__ import annotations
 
@@ -32,11 +27,7 @@ def _rank(rank: int, world_size: int) -> None:
 def output_rows(n: int, rank: int, world_size: int = 2,
                 segments: Sequence[int] | None = None, block: int = 1,
                 device: torch.device | str = "cpu") -> torch.Tensor:
-    """Rank-local output indices, preserving the order within each logical segment.
-
-    ``segments=(Q, K, V)`` handles GDN's concatenated projection. Attention's
-    fused query/gate tensor uses one segment and ``block=2*head_dim``.
-    """
+    """Return rank-local indices in segment order, preserving concatenated GDN projections and complete attention query/gate head blocks."""
 
     _rank(rank, world_size)
     lengths = tuple(segments) if segments is not None else (n,)
@@ -134,14 +125,7 @@ def split_layer(layer: Layer, cfg: Config, rank: int, world_size: int = 2) -> La
 
 def split_weights(w: Weights, rank: int, world_size: int = 2, *, tiled: bool = False,
                   fuse: bool = False, split_head: bool = False) -> Weights:
-    """Build the rank-local model while retaining replicated embedding and head.
-
-    ``tiled``: regroup every shard (and the head) for ``qmm_fast`` after splitting; the splits
-    need the stored MLX layout, and the regrouping changes no bits.
-    ``split_head``: each rank keeps its half of the vocabulary's head rows (every logit is still one
-    row's full dot product, so no logit changes); ``decode_tp`` then samples from both halves'
-    candidates, so rank 0 no longer computes all 248k logits alone.
-    """
+    """Shard stored MLX words before optional bit-preserving tiling, optionally splitting head rows whose full dot products preserve logits and merged-candidate sampling."""
 
     _rank(rank, world_size)
     c = w.config
@@ -238,6 +222,8 @@ def row_partial(x: torch.Tensor, q: QLinear, sk: int | None = None,
     from .qmm import BN, bucket, group_sums, split_k
 
     m = x.shape[0]
+    if m > 128:
+        raise ValueError("the stored-layout row partial takes at most 128 rows (one row tile)")
     bm = bucket(m)
     x = x.contiguous()
     xs = group_sums(x)
@@ -266,24 +252,19 @@ def sum_rank_partials(partials: Sequence[torch.Tensor], dtype: torch.dtype = tor
 
 def gather_rank_partials(local: torch.Tensor, group=None,
                          dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
-    """Exchange two fp32 partials, sum rank 0 then rank 1, and round once.
-
-    Both ranks call this collective at every row-parallel attention/GDN output
-    and MLP down projection. This deliberately favors reproducibility over an
-    in-place NCCL all-reduce, whose summation order is an implementation detail.
-    """
+    """Add two ranks' partials rank 0 first in fp32 and round once; an NCCL all-reduce leaves the order to NCCL."""
 
     if not dist.is_initialized() or dist.get_world_size(group) != 2:
         raise RuntimeError("a two-rank process group must be initialized")
-    if local.dtype != torch.float32 or local.ndim != 2:
-        raise ValueError("local partial must be a 2-D fp32 tensor")
+    if local.dtype not in (torch.float32, torch.bfloat16) or local.ndim != 2:
+        raise ValueError("local partial must be a 2-D fp32 or bf16 tensor")
     if dist.get_backend(group) == "nccl" and not local.is_cuda:
         raise ValueError("NCCL partial must be on CUDA")
     local = local.contiguous()
     if os.environ.get("TF_TP_REDUCE") == "allreduce":
         dist.all_reduce(local, op=dist.ReduceOp.SUM, group=group)
         return local.to(dtype)
-    gathered = torch.empty((2 * local.shape[0], local.shape[1]), dtype=torch.float32, device=local.device)
+    gathered = torch.empty((2 * local.shape[0], local.shape[1]), dtype=local.dtype, device=local.device)
     dist.all_gather_into_tensor(gathered, local, group=group)
     rank_parts = gathered.view(2, *local.shape)
-    return (rank_parts[0] + rank_parts[1]).to(dtype)
+    return (rank_parts[0].float() + rank_parts[1].float()).to(dtype)

@@ -682,3 +682,15 @@ def test_kv_caches_set_the_floor_of_a_streams_per_token_memory() -> None:
     each = 2 * (2 * 8 * 2)                 # keys and values: heads x head_dim x bf16 bytes, a position
     assert _kv_bytes([plain]) == (each, 0)
     assert _kv_bytes([plain, alternating, object()]) == (2 * each, each)   # decoding adds a spare buffer
+
+
+def test_concurrent_admission_never_plans_past_the_prompt_admissions_budget(capsys) -> None:
+    mx = pytest.importorskip("mlx.core")
+    app = make_app(lanes=2, memory_fraction=0.7, memory_budget_bytes=int(mx.get_active_memory()) + 2**30,
+                   memory_overhead_bytes=0)
+    try:
+        assert 0 < app.scheduler.admission.budget <= app.prompt_memory.budget
+        assert app.scheduler.admission.used == app.prompt_memory.held       # freed buffers and prefixes are free
+        assert "MLX's share" in capsys.readouterr().out
+    finally:
+        app.close()

@@ -1,0 +1,170 @@
+"""The 27B's prefill: any chunking gives the same bits, a resume equals a fresh prompt, and drafts equal serial."""
+
+import pytest
+import torch
+
+if not torch.cuda.is_available():
+    pytest.skip("CUDA only", allow_module_level=True)
+
+from tensorfold.cuda.kernels import qmm as shared  # noqa: E402
+from tensorfold.cuda.kernels.prefill_attention import attention  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.decode import draft_decode, prefill, serial_decode  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.forward import State  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.prefill import prefill_chunk, prefill_state  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.qmm_fast import prepare  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
+
+V = 256
+
+
+def _model():
+    gen = torch.Generator(device="cuda").manual_seed(21)
+    dev = "cuda"
+
+    def qlinear(n, k):
+        words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen,
+                              device=dev, dtype=torch.int64).to(torch.int32)
+        scales = (torch.rand(n, k // 64, generator=gen, device=dev) * 0.003 + 0.001).bfloat16()
+        biases = (torch.rand(n, k // 64, generator=gen, device=dev) * 0.003 - 0.0015).bfloat16()
+        return QLinear(words, scales, biases)
+
+    norm = torch.ones(128, device=dev, dtype=torch.bfloat16)
+    gdn = GDN(qlinear(384, 128), qlinear(128, 128), qlinear(1, 128), qlinear(1, 128),
+              qlinear(128, 128), torch.randn(384, 4, generator=gen, device=dev).bfloat16() * 0.1,
+              torch.zeros(1, device=dev), torch.zeros(1, device=dev), norm)
+    attn = Attention(qlinear(2 * 2 * 128, 128), qlinear(128, 128), qlinear(128, 128), qlinear(128, 2 * 128),
+                     norm, norm)
+    layers = [Layer(True, norm, norm, gdn, None, qlinear(128, 128), qlinear(128, 128), qlinear(128, 128)),
+              Layer(False, norm, norm, None, attn, qlinear(128, 128), qlinear(128, 128), qlinear(128, 128))]
+    config = Config(hidden=128, intermediate=128, layers=2, heads=2, kv_heads=1,
+                    head_dim=128, vocab=V, k_heads=1, v_heads=1, dk=128, dv=128,
+                    conv_kernel=4, interval=2, eps=1e-6, rope_dims=32,
+                    rope_theta=10000000.0, eos=(0,))
+    w = Weights(config, qlinear(V, 128), layers, norm, qlinear(V, 128), torch.ones(16, device=dev))
+    prepare(w)
+    return w
+
+
+def _prompt(n, seed=5):
+    g = torch.Generator().manual_seed(seed)
+    return torch.randint(1, V, (n,), generator=g).tolist()
+
+
+def _chunked(w, prompt, bounds):
+    st = State(w)
+    ids = torch.tensor(prompt, dtype=torch.int32, device="cuda")
+    normed = None
+    for a, b in bounds:
+        normed, _ = prefill_chunk(w, ids[a:b], st)
+    return st, normed
+
+
+def _same_state(a, b):
+    assert a.pos == b.pos
+    for x, y in zip(a.rec, b.rec):
+        assert (x is None) == (y is None) and (x is None or torch.equal(x, y))
+    for x, y in zip(a.conv, b.conv):
+        assert (x is None) == (y is None) and (x is None or torch.equal(x, y))
+    for x, y in zip(a.kv, b.kv):
+        if x is not None:
+            assert torch.equal(x[0][:a.pos], y[0][:b.pos]) and torch.equal(x[1][:a.pos], y[1][:b.pos])
+
+
+@pytest.mark.parametrize("size", [1, 7, 16, 64, 256])
+def test_every_chunking_gives_the_same_state(size):
+    w = _model()
+    prompt = _prompt(300)
+    whole, h_whole = _chunked(w, prompt, [(0, 300)])
+    parts, h_parts = _chunked(w, prompt, [(a, min(a + size, 300)) for a in range(0, 300, size)])
+    _same_state(whole, parts)
+    assert torch.equal(h_whole, h_parts)
+
+
+def test_ragged_resume_equals_fresh():
+    w = _model()
+    prompt = _prompt(300, seed=6)
+    fresh, h_fresh = _chunked(w, prompt, [(0, 300)])
+    resumed, _ = _chunked(w, prompt, [(0, 137)])
+    ids = torch.tensor(prompt, dtype=torch.int32, device="cuda")
+    h_resumed = None
+    for a, b in [(137, 140), (140, 211), (211, 300)]:
+        h_resumed, _ = prefill_chunk(w, ids[a:b], resumed)
+    _same_state(fresh, resumed)
+    assert torch.equal(h_fresh, h_resumed)
+
+
+def test_prefix_reuse_through_prefill_equals_fresh_and_drafts_equal_serial():
+    w = _model()
+    prompt = _prompt(240, seed=7)
+    fresh, first_fresh = prefill(w, prompt, None)
+    cached, _ = prefill(w, prompt[:101], None)
+    resumed, first_resumed = prefill(w, prompt, None, state=cached)
+    _same_state(fresh, resumed)
+    assert first_fresh == first_resumed
+    serial = serial_decode(w, fresh, first_fresh, 24, None, stop_eos=False)
+    drafted = draft_decode(w, resumed, prompt, first_resumed, 24, None, draft=None, stop_eos=False)
+    assert drafted.tokens == serial.tokens
+
+
+def test_prefill_matmul_rows_do_not_depend_on_chunking():
+    gen = torch.Generator(device="cuda").manual_seed(3)
+    n, k = 1000, 1024
+    words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen, device="cuda", dtype=torch.int64)
+    scales = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.01 + 0.001).bfloat16()
+    biases = (torch.randn(n, k // 64, generator=gen, device="cuda") * 0.02).bfloat16()
+    q = shared.pack(words.to(torch.int32), scales, biases, 64)
+    x = torch.randn(333, k, generator=gen, device="cuda").bfloat16()
+    whole = shared.prefill_matmul(x, q, f32=True)
+    for tile in range(5):
+        assert torch.equal(whole, shared.prefill_matmul(x, q, f32=True, tile=tile))
+    for size in (1, 7, 16, 64, 256):
+        parts = [shared.prefill_matmul(x[a:a + size].contiguous(), q, f32=True) for a in range(0, 333, size)]
+        assert torch.equal(whole, torch.cat(parts))
+    q_ = ((words[:, :, None] >> torch.arange(0, 32, 4, device="cuda")) & 0xF).reshape(n, k).double()
+    dense = q_ * scales.double().repeat_interleave(64, 1) + biases.double().repeat_interleave(64, 1)
+    ref = x.double() @ dense.t()
+    assert ((whole.double() - ref).norm() / ref.norm()).item() < 4e-3
+
+
+@pytest.mark.parametrize("heads,kv_heads,dim", [(24, 4, 256), (8, 2, 128)])
+def test_prefill_attention_rows_do_not_depend_on_chunking(heads, kv_heads, dim):
+    gen = torch.Generator(device="cuda").manual_seed(4)
+    total = 700
+    q = torch.randn(total, heads, dim, generator=gen, device="cuda").bfloat16()
+    k = torch.randn(total, kv_heads, dim, generator=gen, device="cuda").bfloat16()
+    v = torch.randn(total, kv_heads, dim, generator=gen, device="cuda").bfloat16()
+    scale = dim ** -0.5
+    whole = attention(q, k, v, 0, scale=scale)
+    for size in (1, 7, 16, 64, 256, 333):
+        parts = [attention(q[a:a + size].contiguous(), k, v, a, scale=scale) for a in range(0, total, size)]
+        assert torch.equal(whole, torch.cat(parts)), size
+    g = heads // kv_heads
+    kk = k.float().repeat_interleave(g, 1).transpose(0, 1)
+    vv = v.float().repeat_interleave(g, 1).transpose(0, 1)
+    s = q.float().transpose(0, 1) @ kk.transpose(1, 2) * scale
+    s = s.masked_fill(torch.ones(total, total, device="cuda").triu(1).bool(), float("-inf"))
+    ref = (s.softmax(-1) @ vv).transpose(0, 1)
+    assert ((whole.float() - ref).norm() / ref.norm()).item() < 1e-2
+
+
+@pytest.mark.parametrize("gs", [64, 32])
+def test_fp8_prefill_matmul_rows_do_not_depend_on_chunking(gs):
+    gen = torch.Generator(device="cuda").manual_seed(8)
+    n, k = 1000, 1024
+    words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen, device="cuda", dtype=torch.int64)
+    scales = (torch.rand(n, k // gs, generator=gen, device="cuda") * 0.01 + 0.001).bfloat16()
+    biases = (torch.randn(n, k // gs, generator=gen, device="cuda") * 0.02).bfloat16()
+    q = shared.pack(words.to(torch.int32), scales, biases, gs)
+    x = torch.randn(333, k, generator=gen, device="cuda").bfloat16()
+    x[:, 5] *= 50                                                   # an outlier channel
+    run = lambda rows, tile=0: shared.prefill_matmul8(shared.quantize_rows(rows.contiguous(), gs), q, f32=True,
+                                                      tile=tile)
+    whole = run(x)
+    for tile in range(1, 3):
+        assert torch.equal(whole, run(x, tile))
+    for size in (1, 7, 16, 64, 256):
+        assert torch.equal(whole, torch.cat([run(x[a:a + size]) for a in range(0, 333, size)]))
+    q_ = ((words[:, :, None] >> torch.arange(0, 32, 4, device="cuda")) & 0xF).reshape(n, k).double()
+    dense = q_ * scales.double().repeat_interleave(gs, 1) + biases.double().repeat_interleave(gs, 1)
+    ref = x.double() @ dense.t()
+    assert ((whole.double() - ref).norm() / ref.norm()).item() < 5e-2

@@ -45,7 +45,8 @@ def test_matmul_rows_invariant_and_close():
 
 @cuda
 def test_moe_kernels_rows_invariant():
-    from tensorfold.families.glm5_next.cuda import glue, qmm
+    from tensorfold.cuda import experts as grouped
+    from tensorfold.families.glm5_next.cuda import glue
 
     gen = torch.Generator().manual_seed(1)
     E, NI, D, K = 9, 128, 256, 3
@@ -53,26 +54,22 @@ def test_moe_kernels_rows_invariant():
     up = [_q4(NI, D, gen)[1] for _ in range(E)]
     down = [_q4(D, NI, gen)[1] for _ in range(E)]
     st = lambda parts: tuple(torch.stack([p[i] for p in parts]).cuda() for i in range(3))  # noqa: E731
-    ex = qmm.make_experts(st(gate), st(up), st(down))
+    ex = grouped.make([st(gate), st(up)], st(down), 64, limit=10.0)
     router = (torch.randn((E - 1, D), generator=gen) * 0.1).to(torch.bfloat16).cuda()
     bias = (torch.randn((E - 1,), generator=gen) * 0.01).cuda()
 
     def run(x):
         R = x.shape[0]
-        xs = qmm.group_sums(x)
         logits = glue.router(x, router, torch.empty((R, E - 1), device="cuda"))
         pick = torch.empty((R, K + 1), dtype=torch.int32, device="cuda")
         wts = torch.empty((R, K + 1), device="cuda")
-        maxu = min(R * K, E - 1) + 1
-        grp = qmm.Group(torch.zeros((maxu,), dtype=torch.int32, device="cuda"),
-                        torch.zeros((1,), dtype=torch.int32, device="cuda"),
-                        torch.full((maxu, R), -1, dtype=torch.int32, device="cuda"))
-        glue.select(logits, bias, pick, wts, grp.ids, grp.count, grp.members, K, E - 1, 2.5, True)
-        act = torch.empty((R, K + 1, NI), dtype=torch.bfloat16, device="cuda")
-        axs = torch.empty((R, K + 1, NI // 64), device="cuda")
+        glue.select(logits, bias, pick, wts, K, E - 1, 2.5, True)
+        plan = grouped.Plan(R, K + 1, E, "cuda")
+        grouped.route(pick, plan)
+        act = torch.empty((R * (K + 1), NI), dtype=torch.bfloat16, device="cuda")
         y = torch.empty((R, K + 1, D), device="cuda")
-        qmm.moe_gateup(x, xs, ex, grp, act, axs, 10.0)
-        qmm.moe_down(act, axs, ex, grp, y)
+        grouped.gate_up(x, ex, plan, act, R)
+        grouped.down(act, ex, plan, y.view(-1, D), R)
         out = torch.empty((R, D), device="cuda")
         glue.combine(y, wts, out)
         return out, pick, wts

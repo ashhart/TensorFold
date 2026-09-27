@@ -8,6 +8,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
+from tensorfold.cuda import experts as grouped  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda import qmm  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.decode import Engine, mtp_decode, prefill, serial_decode  # noqa: E402
@@ -46,13 +47,18 @@ class _Rand:
         return (1 + 0.05 * torch.randn((n,), generator=self.g, device=DEV)).float()
 
     def hc(self, inject: bool) -> HC:
-        down = qmm.stack_q4([self.mlx(LOW, S * D)] + ([self.mlx(S, S * D)] if inject else []))
-        return HC(down, self.q4(S * D, LOW), self.norm(S * D), inject)
+        parts = [self.mlx(LOW, S * D)] + ([self.mlx(S, S * D)] if inject else [])
+        up = self.mlx(S * D, LOW)
+        return HC(qmm.stack_q4(parts, "tiled"), qmm.make_q4(*up, "tiled"), self.norm(S * D), inject,
+                  qmm.stack_q4(parts, "frag"), qmm.make_q4(*up, "frag"))
 
     def moe(self) -> MoEW:
         router = (torch.randn((E + 1, D), generator=self.g, device=DEV) * 0.05).to(torch.bfloat16)
-        ex = qmm.make_experts(self.mlx(W, D, (E,)), self.mlx(W, D, (E,)), self.mlx(D, W, (E,)),
-                              (self.mlx(W, D), self.mlx(W, D), self.mlx(D, W)))
+        def table(routed, shared):
+            return tuple(torch.cat([a, b[None]]) for a, b in zip(routed, shared))
+
+        ex = grouped.make([table(self.mlx(W, D, (E,)), self.mlx(W, D)), table(self.mlx(W, D, (E,)), self.mlx(W, D))],
+                          table(self.mlx(D, W, (E,)), self.mlx(D, W)), 32)
         return MoEW(router, ex)
 
     def attention(self, c: Config) -> AttnW:
@@ -85,8 +91,7 @@ def test_windows_match_serial_steps_and_prefix_commits_continue():
     w = _model()
     e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
     prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12]
-    forward(w, e.st, e.buf, prompt)
-    commit(w, e.st, e.buf, len(prompt), len(prompt))
+    prefill(e, prompt, None)
     nxt = [401, 33, 2048, 5, 77, 1500, 9, 10, 11]
     serial = e.st.clone()
     logits, streams = [], []
@@ -192,21 +197,59 @@ def test_server_engine_streams_serial_tokens(tmp_path):
         assert seen[:3] == want[:3] and len(seen) < len(want) + 1
 
 
-@pytest.mark.parametrize("sampling", [None, Sampling(seed=11, top_k=20, top_p=0.95)])
-def test_long_prefill_chunks_match_short_chunks(sampling):
-    """A 64-row prefill chunk (the server's) gives the bits of 16-row chunks, and drafting after it emits serial
-    tokens. The MTP head absorbs a chunk's rows through fc_hidden as rows x 4 streams, past one 128-row tile."""
+def _state(e: Engine) -> list[torch.Tensor]:
+    """What a prefill leaves: the kept-state snapshot, the caches' rows below the position, the MTP cache's."""
+
+    st = e.st
+    snap = st.snapshot()
+    out = [snap["rec"], snap["conv"], snap["ple_tail"], e.last_streams]
+    out += [k[:st.pos] for k in st.kc + st.vc + st.ikc] + [st.mtp_kc[:st.mtp_len], st.mtp_vc[:st.mtp_len]]
+    return out
+
+
+def test_prefill_tracks_the_decode_path():
+    """Prompt chunks and decode windows agree to bf16 rounding: DeltaNet states, attention keys, the last logits."""
 
     w = _model()
-    prompt = [(37 * i + 11) % V for i in range(90)]
-    short = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, graphs=True)
-    long = Engine(w, capacity=1024, max_rows=8, prefill_rows=64, graphs=True)
-    first = prefill(short, prompt, sampling)
-    ref = serial_decode(short, first, 20, sampling).tokens
-    assert prefill(long, prompt, sampling) == first
-    assert serial_decode(long, first, 20, sampling).tokens == ref
-    prefill(long, prompt, sampling)
-    assert mtp_decode(long, first, 20, sampling, depth=4, confidence=0.0).tokens == ref
+    prompt = [(29 * i + 3) % V for i in range(40)]
+    pre = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+    prefill(pre, prompt, None, mtp=False)                     # the head would reuse the logits buffer
+    dec = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+    dec.reset()
+    for s0 in range(0, len(prompt), 8):
+        chunk = prompt[s0:s0 + 8]
+        logits = forward(w, dec.st, dec.buf, chunk)[len(chunk) - 1:len(chunk)].float()
+        commit(w, dec.st, dec.buf, len(chunk), len(chunk))
+    a, b = pre.st.snapshot()["rec"], dec.st.snapshot()["rec"]
+    assert float((a - b).abs().max()) <= 2e-2 * float(b.abs().max())
+    ka, kb = pre.st.kc[0][:len(prompt)].float(), dec.st.kc[0][:len(prompt)].float()
+    assert float((ka - kb).abs().max()) <= 2e-2 * float(kb.abs().max())
+    cos = torch.nn.functional.cosine_similarity(pre.pbuf.logits[:1].float(), logits, dim=1)
+    assert float(cos) > 0.999, float(cos)
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=11, top_k=20, top_p=0.95)])
+def test_prefill_chunks_and_resumes_give_the_same_state(sampling):
+    """Any chunking, or a resume from another prompt's end, leaves the same state bit for bit; drafts stay serial."""
+
+    w = _model()
+    prompt = [(37 * i + 11) % V for i in range(300)]
+    ref_e = Engine(w, capacity=1024, max_rows=8, prefill_rows=300, graphs=True)
+    first = prefill(ref_e, prompt, sampling)
+    want = _state(ref_e)
+    ref = serial_decode(ref_e, first, 20, sampling).tokens
+    for rows in (7, 16, 64):
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=rows, graphs=True)
+        assert prefill(e, prompt, sampling) == first, rows
+        assert all(torch.equal(a, b) for a, b in zip(_state(e), want)), rows
+        assert mtp_decode(e, first, 20, sampling, depth=4, confidence=0.0).tokens == ref, rows
+    e = Engine(w, capacity=1024, max_rows=8, prefill_rows=64, graphs=True)
+    prefill(e, prompt[:131], sampling)
+    kept = {"state": e.st.snapshot(), "tail": e.last_streams.clone()}
+    serial_decode(e, 5, 9, sampling)                             # a reply decodes past the kept prompt
+    assert prefill(e, prompt, sampling, resume=kept) == first
+    assert all(torch.equal(a, b) for a, b in zip(_state(e), want))
+    assert mtp_decode(e, first, 20, sampling, depth=4, confidence=0.0).tokens == ref
 
 
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=21, top_k=20, top_p=0.95)])
@@ -222,7 +265,7 @@ def test_the_family_hook_serves_the_recipe(tmp_path, sampling):
 
     assert (DEPTH, CONFIDENCE, CONTEXT) == (6, 0.3, 8192)
     _checkpoint(tmp_path)
-    eng = cuda_engine(tmp_path)
+    eng = cuda_engine(tmp_path, context=8185)                  # the synthetic checkpoint names no native window
     assert (eng.depth, eng.confidence, eng.max_len, eng.tp) == (6, 0.3, 8192, 1)
     assert eng.w.draft_ids is not None
     prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
@@ -232,7 +275,7 @@ def test_the_family_hook_serves_the_recipe(tmp_path, sampling):
     stats = eng.generate(prompt, 30, sampling, lambda new: got.extend(new))
     assert got == ref and stats["min_rows"] >= 2
     serial = cuda_engine(tmp_path, no_drafts=True, context=1024)
-    assert (serial.depth, serial.max_len) == (0, 1024) and serial.w.mtp is None
+    assert (serial.depth, serial.max_len) == (0, 1025) and serial.w.mtp is None    # the window and one row
     plain: list[int] = []
     serial.generate(prompt, 30, sampling, lambda new: plain.extend(new))
     assert plain == ref
@@ -265,10 +308,7 @@ def test_prefix_reuse_and_the_serial_switch(tmp_path, sampling):
             ask(first)                                           # the first request's states again
         prompt = first + (reply if extend == "reply" else []) + [401, 33, 2048]
         warm, warm_stats = ask(prompt)
-        # the reply's kept state holds every token but the pending last one (all of them when the last round
-        # kept one past the limit)
-        want = len(first) + len(reply) - 1 if extend == "reply" else len(first)
-        assert warm_stats["cached"] in (want, want + (extend == "reply")), (extend, warm_stats)
+        assert warm_stats["cached"] == len(first), (extend, warm_stats)     # prompt ends only: the reply prefills again
         serial, serial_stats = ask(prompt, draft=False)          # one token a round, a fresh prefill
         assert serial == warm and serial_stats["drafts"] is False and serial_stats["cached"] == 0
         again, again_stats = ask(prompt + [9])                   # the kept states survived the serial request

@@ -1,32 +1,21 @@
-"""OpenAI-compatible server for TensorFold's CUDA engines (DGX Spark and other NVIDIA GPUs).
-
-One request decodes at a time, as one exact stream: drafted output is byte-identical to serial decoding on the
-same engine. The chat template is the model's own ``chat_template.jinja``; Qwen tool calls are parsed from the
-reply; with thinking on, text before ``</think>`` streams as ``reasoning_content``.
-
-A family's CUDA engine (``cuda_engine`` in its package) provides:
-
-    eos                                              # token ids that end a reply
-    generate(prompt, max_tokens, sampling, on_tokens) -> dict
-                                                     # decode; on_tokens(new_ids) returns True to stop early
-    follow()                                         # two GPUs: rank 1 mirrors every request rank 0 serves
-
-``tensorfold serve MODEL`` builds the engine and serves it here (see ``tensorfold.cli``).
-"""
+"""OpenAI server for the CUDA engines: a family's ``cuda_engine`` gives ``eos``, ``generate`` and ``follow``."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import threading
 import time
 import uuid
 from datetime import datetime
+from contextlib import nullcontext
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
 from tensorfold.server.errors import RequestError
+from tensorfold.server.http import Server
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
                                         validate_modalities)
 from tensorfold.server.tool_policy import ToolCallPolicy
@@ -48,13 +37,7 @@ def _partial_tag(text: str, tag: str) -> int:
 
 
 class StreamDecoder:
-    """The text of a growing token list, decoding only a short window each time tokens arrive.
-
-    Decoding the whole reply every round grows with its length. Each step decodes the tokens from
-    ``prefix`` on twice, with and without the newest ones, and appends the difference, the way vLLM
-    detokenizes: the shared window keeps a decoder's leading-space and byte-level rules the same on
-    both sides. A trailing partial multi-byte character waits for the next tokens.
-    """
+    """Decode a shared token window to preserve leading spaces and byte boundaries, deferring incomplete characters."""
 
     def __init__(self, tok, skip: tuple[int, ...] = ()):
         self.tok, self.skip = tok, frozenset(skip)
@@ -220,8 +203,7 @@ def _native_context(model_dir: Path) -> int:
 
 
 class App:
-    """One engine behind the OpenAI routes. ``sampling``: temperature, top_k and top_p for requests that do not
-    set them (the model's generation config and the CLI's flags); ``max_tokens``: the reply length likewise."""
+    """Serve one engine with sampling and reply-length defaults for requests that omit them."""
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
@@ -259,6 +241,14 @@ class App:
             if isinstance(limit, int):
                 capacities.append(max(0, limit))
         return min(capacities) if capacities else None
+
+    def _restart(self, need: int, ranks: str = "") -> str:
+        """A larger ``--context`` to restart with, only where the startup admission would accept it."""
+
+        largest = (getattr(self.engine, "capacity_plan", None) or {}).get("largest_window")
+        if largest is None or need > largest:
+            return ""
+        return f", or restart{ranks} with --context {need} or more (this memory admits up to {largest})"
 
     def _context_limit(self) -> int | None:
         limits = [self.context_window] if self.context_window > 0 else []
@@ -319,14 +309,14 @@ class App:
             kind = "safe cache capacity" if limit == self._engine_capacity() else "context window"
             native = f" (model window: {self.native_context_window} tokens)" if self.native_context_window else ""
             return (f"the rendered prompt has {len(prepared.prompt)} tokens and leaves no room for a reply in "
-                    f"the server's {limit}-token {kind}{native}; shorten the prompt or restart with a larger "
-                    "supported --context")
+                    f"the server's {limit}-token {kind}{native}; shorten the prompt"
+                    f"{self._restart(len(prepared.prompt) + 1)}")
         asked = body.get("max_tokens") or body.get("max_completion_tokens")
         if limit is not None and asked and len(prepared.prompt) + prepared.max_tokens > limit:
             kind = "safe cache capacity" if limit == self._engine_capacity() else "context window"
             return (f"the rendered prompt has {len(prepared.prompt)} tokens and requests {prepared.max_tokens} "
                     f"reply tokens, exceeding the server's {limit}-token {kind}; reduce the prompt or reply "
-                    "length, or restart with a larger supported --context")
+                    f"length{self._restart(len(prepared.prompt) + prepared.max_tokens)}")
         return None
 
     def prepare(self, body: dict[str, Any], chat: bool) -> PreparedRequest:
@@ -394,9 +384,11 @@ class App:
             return stopped["client"]
 
         draft = body.get("draft", True) is not False
-        with self.lock:
+        # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
+        with (nullcontext() if getattr(self.engine, "concurrent", False) else self.lock):
             stats = self.engine.generate(prompt, max_tokens, sampling, on_tokens,
                                          **({} if draft else {"draft": False}))
+        stats = {**(stats or {}), "token_sha": token_sha(out)}
         reasoning, answer = visible(True)
         final: dict[str, Any] = {}
         if len(reasoning) > sent["reasoning"]:
@@ -413,6 +405,12 @@ class App:
         finish = "tool_calls" if calls else ("stop" if out and out[-1] in self.engine.eos else "length")
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "stats": stats}
+
+
+def token_sha(tokens: list[int]) -> str:
+    """A reply's token ids, hashed as the Mac server does: drafted and ``"draft": false`` replies must match."""
+
+    return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
 
 
 def make_handler(app: App):
@@ -498,6 +496,7 @@ def make_handler(app: App):
                                               "function": {"name": call["function"]["name"],
                                                            "arguments": call["function"]["arguments"]}}]})
                 end = chunk({}, result["finish"])
+                end["tensorfold"] = result["stats"]
                 usage = {"prompt_tokens": result["prompt_tokens"], "completion_tokens": result["completion_tokens"],
                          "total_tokens": result["prompt_tokens"] + result["completion_tokens"]}
                 if (body.get("stream_options") or {}).get("include_usage"):
@@ -537,8 +536,6 @@ def serve(app: App, host: str, port: int) -> None:
     """Serve until interrupted (SIGTERM included)."""
 
     import signal
-
-    from tensorfold.server.http import Server
 
     def _terminate(signum: int, frame: Any) -> None:
         raise KeyboardInterrupt

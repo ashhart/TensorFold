@@ -1,20 +1,4 @@
-"""Row-invariant 4-bit projections on CUDA: the lane matmul in Triton.
-
-One arithmetic for every row count, the contract of the Metal ``lane_qmm``. For weight group g
-(64 inputs, one scale s and bias b per output column):
-
-    P[m, n, g] = x[m, g-block] . q[n, g-block]     tensor cores, bf16 x integer-valued bf16 -> fp32
-    y[m, n]    = sum over g, in order, of  s[n, g] * P[m, n, g] + b[n, g] * xs[m, g]
-
-where xs[m, g] is the fp32 sum of the group's 64 inputs. The K groups are split into SK slices
-fixed by the weight's shape, never by the row count, and the slices are added in slice order.
-Weights stay in MLX's packed layout: (N, K/8) 32-bit words, element i of a group at bits
-4 * (i % 8) of word i // 8, with (N, K/64) bf16 scales and biases.
-
-Rows run as one block of 16, 32, 64 or 128 (a compile-time bucket). A row's bits do not depend
-on the bucket or on the other rows: each output element is the same chain of tensor-core steps
-over the same groups in the same order.
-"""
+"""Row-invariant affine 4-bit projections preserve MLX packing and sum fp32 group dot products and bias corrections in shape-fixed slice order, independent of row count or tile bucket."""
 
 from __future__ import annotations
 
@@ -22,17 +6,18 @@ import torch
 import triton
 import triton.language as tl
 
-MAX_ROWS = 128
 BN = 64                   # output columns per program
 
 
 def bucket(m: int) -> int:
-    if m < 1 or m > MAX_ROWS:
-        raise ValueError(f"lane matmul takes 1..{MAX_ROWS} rows, got {m}")
-    for b in (16, 32, 64, 128):
+    """The row tile; past 128 rows, 128-row tiles side by side (a row's sum never depends on the tile)."""
+
+    if m < 1:
+        raise ValueError("lane matmul takes at least one row")
+    for b in (16, 32, 64):
         if m <= b:
             return b
-    return MAX_ROWS
+    return 128
 
 
 def split_k(n: int, k: int) -> int:

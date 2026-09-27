@@ -1,16 +1,4 @@
-"""Nemotron-H decode glue in a few kernels (Nemotron 3.5 Lightning 30B-A3B). Between the matmuls:
-
-    add_norm     residual add (with the MoE combine) + the next block's RMSNorm
-    route        sigmoid scores + correction bias -> top 6 experts and their weights
-    mamba_scan   conv + SiLU over every row at once, then dt + SSM state update + D skip + SiLU(z) gate in order
-    group_norm   the Mamba output's RMSNorm over groups of 512
-
-Every kernel takes R rows of consecutive tokens and treats them in order, and
-a row's value depends only on its own inputs and the rows before it, so the
-bits of a row do not depend on how many rows ride with it. The arithmetic
-follows mlx_lm's (fp32 math, bf16 where mlx_lm stores bf16) but is its own:
-serial decoding goes through these kernels too, so they define the reference.
-"""
+"""Nemotron-H decode kernels preserve each row's bits across row counts and use the same arithmetic for serial decoding."""
 
 from __future__ import annotations
 
@@ -21,42 +9,20 @@ import mlx.core as mx
 
 from tensorfold.kernels.inputs import ints, padded
 from tensorfold.kernels.nemotron.lightning.v1 import rows as row_kernels
-
-_ADD_NORM = r"""
-  // one threadgroup of T threads per row; thread t owns elements t, t + T, t + 2T, ...
-  const uint t = thread_position_in_threadgroup.x;
-  const uint r = threadgroup_position_in_grid.x;
-  constexpr int PER = D / T;
-  threadgroup float partial[T / 32];
-  float hv[PER];
-  float ss = 0.0f;
-  for (int i = 0; i < PER; i++) {
-    const int c = int(t) + i * T;
-    const int at = int(r) * D + c;
-    float delta;
-    MIX
-    const bfloat hn = bfloat(float(H[at]) + delta);
-    HN[at] = hn;
-    hv[i] = float(hn);
-    ss = fma(hv[i], hv[i], ss);
-  }
-  ss = simd_sum(ss);
-  if (thread_index_in_simdgroup == 0) partial[simdgroup_index_in_threadgroup] = ss;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  float total = 0.0f;
-  for (int s = 0; s < T / 32; s++) total += partial[s];
-  const float scale = metal::rsqrt(total / float(D) + eps[0]);
-  for (int i = 0; i < PER; i++) {
-    const int c = int(t) + i * T;
-    OUT[int(r) * D + c] = bfloat(float(W[c]) * (hv[i] * scale));
-  }
-"""
+from tensorfold.kernels.nemotron.lightning.v1.sources import (
+    _ADD_NORM,
+    _MIX_PLAIN,
+    _MIX_MOE,
+    _ROUTE,
+    _MAMBA_CONV,
+    _MAMBA_SCAN,
+    _GROUP_NORM,
+    _ROUTER,
+)
 
 
 def _with_group_sums(source: str) -> str:
-    """``_ADD_NORM`` that also writes the lane matmul's input sums of OUT: XS [D / 64, MP] for rows padded to MP
-    (dims = (R, MP)), each group's 64 bf16 values summed in order in fp32 as lane_qmm's XSUM kernel does (same
-    bits), rows past R zero. The next dense projection then skips its XSUM dispatch."""
+    """Write XS [D / 64, MP] with each group summed in fp32 order exactly as lane_qmm XSUM does, zeroing rows past R."""
 
     head = "  const uint r = threadgroup_position_in_grid.x;\n"
     store = "    OUT[int(r) * D + c] = bfloat(float(W[c]) * (hv[i] * scale));\n"
@@ -79,183 +45,6 @@ def _with_group_sums(source: str) -> str:
   }
 """
 
-
-# plain residual: the block's output
-_MIX_PLAIN = "delta = float(X[at]);"
-# MoE: sum_e w_e y_e (fp32, experts in order) rounded to bf16, plus the shared expert (bf16 add), as mlx_lm
-_MIX_MOE = r"""{
-      float routed = 0.0f;
-      for (int e = 0; e < E; e++) routed = fma(float(Y[(int(r) * E + e) * D + c]), WE[int(r) * E + e], routed);
-      delta = float(bfloat(float(bfloat(routed)) + float(SH[at])));
-    }"""
-
-_ROUTE = r"""
-  // one simdgroup per row: lane l holds experts l, l + 32, l + 64, l + 96
-  const uint lane = thread_index_in_simdgroup;
-  const uint r = threadgroup_position_in_grid.x;
-  float sel[NE / 32], prob[NE / 32];
-  for (int j = 0; j < NE / 32; j++) {
-    const int e = int(lane) + 32 * j;
-    const float g = float(G[int(r) * NE + e]);
-    prob[j] = 1.0f / (1.0f + metal::exp(-g));
-    sel[j] = prob[j] + bias[e];
-  }
-  float total = 0.0f;
-  float picked[K];
-  for (int k = 0; k < K; k++) {
-    float best = -INFINITY;
-    int best_e = 1 << 20;
-    for (int j = 0; j < NE / 32; j++) {
-      const int e = int(lane) + 32 * j;
-      if (sel[j] > best) { best = sel[j]; best_e = e; }
-    }
-    const float top = simd_max(best);
-    const int winner = simd_min(best == top ? best_e : (1 << 20));   // ties: the lowest expert id
-    float p = 0.0f;
-    for (int j = 0; j < NE / 32; j++) {
-      if (int(lane) + 32 * j == winner) { p = prob[j]; sel[j] = -INFINITY; }
-    }
-    p = simd_sum(p);
-    picked[k] = p;
-    total += p;
-    if (lane == 0) IDX[int(r) * K + k] = uint(winner);
-  }
-  if (lane == 0) {
-    const float denominator = total + 1e-20f;
-    for (int k = 0; k < K; k++) WT[int(r) * K + k] = picked[k] / denominator * scaling[0];
-  }
-"""
-
-_MAMBA_CONV = r"""
-  // grid (CD, R): channel ch of row rr. Rows come in segments, one per stream (SEG: a row's segment, START: a
-  // segment's first row); a segment's taps before its first row come from its conv state, row SLOT[s] of CS_IN.
-  // Writes the conv output bf16(silu(bf16(conv))) as mlx_lm rounds it, and the row's conv state (its segment's
-  // last KC-1 inputs).
-  constexpr int CD = XD + 2 * NG * DS;
-  const int ch = int(thread_position_in_grid.x);
-  const int rr = int(thread_position_in_grid.y);
-  const int s = SEG[rr];
-  const int b = START[s];
-  const int loc = rr - b;
-  const int slot = SLOT[s];
-  #define TAP(lp) ((lp) < 0 ? CS_IN[(slot * (KC - 1) + (lp) + KC - 1) * CD + ch] : P[(b + (lp)) * PROJ + XOFF + ch])
-  float a = float(CB[ch]);
-  for (int k = 0; k < KC; k++) a = fma(CW[k * CD + ch], float(TAP(loc - (KC - 1) + k)), a);
-  const float cv = float(bfloat(a));
-  XBC[rr * CD + ch] = bfloat(cv / (1.0f + metal::exp(-cv)));
-  for (int k = 0; k < KC - 1; k++) CS_OUT[(rr * (KC - 1) + k) * CD + ch] = TAP(loc - (KC - 2) + k);
-  #undef TAP
-"""
-
-_MAMBA_SCAN = r"""
-  // grid (32, DH, H): lane = NS state elements of channel d of head h. Rows in order; segment s starts from its
-  // stream's SSM state, row SLOT[s] of S_IN. A row's arithmetic depends only on its own inputs and the state
-  // before it.
-  const uint lane = thread_position_in_threadgroup.x;
-  const uint d = thread_position_in_grid.y;
-  const uint h = thread_position_in_grid.z;
-  const uint g = h / (H / NG);
-  const int R = dims[0];
-  constexpr int NS = DS / 32;
-  constexpr int CD = XD + 2 * NG * DS;
-  const int cx = int(h) * DH + int(d);
-  const int cb = XD + int(g) * DS + int(lane) * NS;
-  const int cc = XD + NG * DS + int(g) * DS + int(lane) * NS;
-  const int sbase = cx * DS + int(lane) * NS;
-  const float A = -metal::exp(float(A_LOG[h]));
-  const float dskip = float(bfloat(float(DSKIP[h])));
-  const float dtb = float(DT_BIAS[h]);
-  float st[NS];
-  int cur = -1;
-  for (int rr = 0; rr < R; rr++) {
-    const int s = SEG[rr];
-    if (s != cur) {
-      cur = s;
-      for (int i = 0; i < NS; i++) st[i] = float(S_IN[size_t(SLOT[s]) * SSZ + sbase + i]);
-    }
-    const float xv = float(XBC[rr * CD + cx]);
-    float dt = float(P[rr * PROJ + DTOFF + int(h)]) + dtb;
-    dt = metal::max(dt, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(dt)));   // softplus (logaddexp(x, 0))
-    dt = metal::clamp(dt, limits[0], limits[1]);
-    const float dA = metal::exp(A * dt);
-    const float xdt = xv * dt;
-    float acc = 0.0f;
-    for (int i = 0; i < NS; i++) {
-      const float sv = dA * st[i] + xdt * float(XBC[rr * CD + cb + i]);
-      st[i] = sv;
-      acc += sv * float(XBC[rr * CD + cc + i]);
-    }
-    acc = simd_sum(acc);
-    if (lane == 0) {
-      const float y = float(bfloat(acc + xv * dskip));
-      const float z = float(P[rr * PROJ + cx]);
-      const float sz = float(bfloat(z / (1.0f + metal::exp(-z))));
-      Y[rr * XD + cx] = bfloat(sz * y);
-    }
-    // the SSM state after this row (a verify window keeps the state of its last accepted row)
-    for (int i = 0; i < NS; i++) S_OUT[size_t(rr) * SSZ + sbase + i] = st[i];
-  }
-"""
-
-_GROUP_NORM = r"""
-  // one threadgroup of GS / 4 threads per (row, group): thread t owns 4 consecutive elements
-  const uint t = thread_position_in_threadgroup.x;
-  const uint grp = threadgroup_position_in_grid.x;
-  const uint r = threadgroup_position_in_grid.y;
-  constexpr int T = GS / 4;
-  threadgroup float partial[T / 32];
-  const int base = int(r) * XD + int(grp) * GS + int(t) * 4;
-  float v[4];
-  float ss = 0.0f;
-  for (int i = 0; i < 4; i++) { v[i] = float(X[base + i]); ss = fma(v[i], v[i], ss); }
-  ss = simd_sum(ss);
-  if (thread_index_in_simdgroup == 0) partial[simdgroup_index_in_threadgroup] = ss;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  float total = 0.0f;
-  for (int s = 0; s < T / 32; s++) total += partial[s];
-  const float scale = metal::rsqrt(total / float(GS) + eps[0]);
-  for (int i = 0; i < 4; i++) {
-    const int c = int(grp) * GS + int(t) * 4 + i;
-    OUT[base + i] = bfloat(float(W[c]) * float(bfloat(v[i] * scale)));
-  }
-"""
-
-
-_ROUTER = r"""
-  // bf16 router logits for R rows: one threadgroup of SG simdgroups per (expert, block of MAXR rows). Simdgroup g
-  // sums its D / SG inputs (lane l: 4 consecutive inputs at a time, 128 apart), then simd_sum; the simdgroups'
-  // sums are added in order. A row's logits have the same bits at any row count (the row count is a runtime value).
-  const uint lane = thread_index_in_simdgroup;
-  const uint g = simdgroup_index_in_threadgroup;
-  const int e = int(threadgroup_position_in_grid.y);
-  const int rb = int(threadgroup_position_in_grid.z) * MAXR;
-  const int R = min(rows[0] - rb, MAXR);
-  constexpr int PART = D / SG;
-  threadgroup float part[MAXR][SG];
-  float acc[MAXR];
-  for (int r = 0; r < MAXR; r++) acc[r] = 0.0f;
-  const int begin = int(g) * PART;
-  for (int c = begin + 4 * int(lane); c < begin + PART; c += 128) {
-    const float w0 = float(GW[size_t(e) * D + c]), w1 = float(GW[size_t(e) * D + c + 1]);
-    const float w2 = float(GW[size_t(e) * D + c + 2]), w3 = float(GW[size_t(e) * D + c + 3]);
-    for (int r = 0; r < MAXR; r++) {
-      if (r >= R) break;
-      const device bfloat* xr = X + (rb + r) * D + c;
-      acc[r] = fma(float(xr[3]), w3, fma(float(xr[2]), w2, fma(float(xr[1]), w1, fma(float(xr[0]), w0, acc[r]))));
-    }
-  }
-  for (int r = 0; r < MAXR; r++) {
-    if (r >= R) break;
-    const float total = simd_sum(acc[r]);
-    if (lane == 0) part[r][g] = total;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (g == 0 && int(lane) < R) {
-    float total = 0.0f;
-    for (int k = 0; k < SG; k++) total += part[lane][k];
-    OUT[(rb + int(lane)) * NE + e] = bfloat(total);
-  }
-"""
 
 _kernels: dict[str, Any] = {}
 
@@ -306,8 +95,7 @@ def _norm_call(name: str, mix: str, names: list[str], inputs: list[mx.array], te
 
 def add_norm(h: mx.array, delta: mx.array, weight: mx.array, eps: mx.array, *, group_sums: bool = False
              ) -> tuple[mx.array, ...]:
-    """(h + delta, RMSNorm(h + delta) * weight) for rows [R, D], both bf16; with ``group_sums`` also the lane
-    matmul's input sums of the second (``_with_group_sums``)."""
+    """Return bf16 residual and RMSNorm rows [R, D], plus the norm output's lane matmul input sums when ``group_sums`` is set."""
 
     rows, dims = h.shape[0], h.shape[-1]
     return _norm_call("nemotron_add_norm", _MIX_PLAIN, ["H", "X", "W", "eps"], [h, delta, weight, eps], [],
@@ -402,11 +190,7 @@ def mamba_scan(proj: mx.array, conv_states: mx.array, ssm_states: mx.array, leng
                conv_w: mx.array, conv_b: mx.array, a_log: mx.array, d_skip: mx.array, dt_bias: mx.array,
                limits: mx.array, *, heads: int, head_dim: int, groups: int, state_dim: int,
                slots: tuple[int, ...] | None = None) -> tuple[mx.array, mx.array, mx.array]:
-    """Rows of several streams through one Mamba-2 mixer's conv and scan: segment i is ``lengths[i]`` consecutive
-    tokens of stream i, from its conv state ``conv_states[slots[i]]`` [KC-1, CD] and SSM state
-    ``ssm_states[slots[i]]`` [H, DH, DS] (slot i when ``slots`` is None). Returns gated y [R, XD] and every row's
-    conv and SSM states after it: [R, KC-1, CD] and [R, H, DH, DS]. A row's arithmetic is the same whatever the
-    other rows and segments (one code path)."""
+    """Scan ``lengths[i]`` tokens from state slot ``slots[i]`` or i, returning gated y and every row's conv/SSM states with bits independent of other segments."""
 
     rows, width = proj.shape
     slots = tuple(range(len(lengths))) if slots is None else tuple(int(s) for s in slots)
@@ -439,9 +223,7 @@ def mamba_scan(proj: mx.array, conv_states: mx.array, ssm_states: mx.array, leng
 def mamba_step(proj: mx.array, conv_state: mx.array, ssm_state: mx.array, conv_w: mx.array, conv_b: mx.array,
                a_log: mx.array, d_skip: mx.array, dt_bias: mx.array, limits: mx.array, *, heads: int,
                head_dim: int, groups: int, state_dim: int) -> tuple[mx.array, mx.array, mx.array]:
-    """R consecutive tokens of one stream through one Mamba-2 mixer's conv and scan (``mamba_scan`` with one
-    segment): gated y [R, XD] and the conv and SSM states after every row, [R, KC-1, CD] and [R, H, DH, DS] (row
-    r's states are the cache after the first r+1 tokens)."""
+    """Scan one stream, returning gated y [R, XD] and conv/SSM states after each row as [R, KC-1, CD] and [R, H, DH, DS]."""
 
     return mamba_scan(proj, conv_state, ssm_state, (int(proj.shape[0]),), conv_w, conv_b, a_log, d_skip, dt_bias,
                       limits, heads=heads, head_dim=head_dim, groups=groups, state_dim=state_dim)
@@ -496,9 +278,7 @@ class FusedDecode:
         for i, layer in enumerate(self.layers):
             if layer.block_type == "*":
                 self.qkv[i] = _stack_linears([layer.mixer.q_proj, layer.mixer.k_proj, layer.mixer.v_proj])
-        # with the lane matmul (set when it is installed): each norm kernel also writes the next projection's
-        # 64-group input sums, handed to it (in_proj, q|k|v, shared up, head) instead of its own XSUM dispatch;
-        # ``_no_xs`` stands in where no sums exist (the first layer's input, or no lane matmul)
+        # Norms supply the next lane projection's 64-group input sums; ``_no_xs`` marks inputs without sums.
         self.lane_xs = False
         self._no_xs = mx.zeros((1,), dtype=mx.float32)
 
@@ -537,10 +317,7 @@ class FusedDecode:
         return self._use_sums(normed.reshape(1, rows, -1), xs)
 
     def run_streams(self, tokens: mx.array, lengths: tuple[int, ...], caches: list[list[Any]]) -> mx.array:
-        """Hidden states after the final norm, [1, N, D], for several streams' consecutive tokens in one forward:
-        rows laid out stream by stream (``lengths``), stream i's rows advancing only ``caches[i]``. A row gets the
-        bits it gets in a call of its stream alone: every kernel treats rows on their own, the scan carries each
-        stream's state through its own segment, and attention reads each stream's own keys."""
+        """Return hidden states [1, N, D] for stream-by-stream ``lengths`` rows, advancing only each stream's cache and preserving its standalone bits."""
 
         lengths = tuple(int(n) for n in lengths)
         if len(lengths) == 1:
@@ -615,8 +392,7 @@ class FusedDecode:
             cache[0], cache[1] = conv_rows[row:row + 1], ssm_rows[row:row + 1]
 
     def _states_in(self, caches: list[Any], dtype: Any) -> tuple[mx.array, mx.array, tuple[int, ...] | None]:
-        """Every stream's (conv, SSM) state for one scan: rows of one earlier call's states when every stream's
-        still is (read through slots, no copy), else the states stacked."""
+        """Read conv/SSM state slots without copies when all streams reference one earlier call; otherwise stack the states."""
 
         refs = [getattr(c, "ref", None) for c in caches]
         if refs[0] is not None and all(r is not None and r[1] is refs[0][1] for r in refs):
@@ -633,8 +409,7 @@ class FusedDecode:
         return add_norm(h, delta, weight, self.eps, group_sums=True)
 
     def _use_sums(self, x: mx.array, xs: mx.array) -> mx.array:
-        """``x``, its group sums handed to the lane matmul's next call on it (when ``xs`` holds them: not
-        ``_no_xs``). Inside a compiled block this is decided per trace: xs has its own shape there."""
+        """Hand ``x`` and its group sums to the next lane matmul when ``xs`` is not ``_no_xs``, with compiled blocks deciding per trace."""
 
         if self.lane_xs and xs.ndim == 2:
             from tensorfold.kernels.qwen.dense.v1 import lane_glue
@@ -651,8 +426,7 @@ class FusedDecode:
         return conv_state, ssm_state
 
     def _block(self, index: int, kind: str, nxt: mx.array) -> Any:
-        """The layer's work between its input norm and the next layer's, compiled (a traced graph per row
-        count replaces ~8-12 Python-built ops."""
+        """Compile the layer's work between consecutive input norms, preserving its arithmetic for each row count."""
 
         fn = self._compiled_blocks.get(index)
         if fn is None:
@@ -734,13 +508,11 @@ class FusedDecode:
 
     def _attend_stream(self, mixer: Any, q: mx.array, k: mx.array, v: mx.array, cache: Any, rows: int) -> mx.array:
         keys, values = cache.update_and_fetch(k, v)
-        # the kernel is chosen by each row's own key count, so a row gets the bits serial decoding gives it:
-        # a window straddling the switch attends row by row
+        # Choose attention by each row's key count, attending row by row when a window crosses the kernel switch.
         first = cache.offset - rows + 1
         lane_rows = [self.lane_attention and first + r >= self.lane_attention_from for r in range(rows)]
         if rows > 1 and not all(lane_rows):
-            # row by row (each with its own keys): MLX's attention picks its kernel by query count, and a row
-            # must get serial decoding's bits; the lane kernel's rows are independent by construction
+            # MLX attention selects by query count, so separate rows preserve serial bits while lane rows are independent.
             outs = [self._attend(q[:, :, r:r + 1], keys[:, :, :first + r], values[:, :, :first + r], mixer.scale,
                                  lane_rows[r], 1) for r in range(rows)]
             return mx.concatenate(outs, axis=2)
@@ -749,16 +521,14 @@ class FusedDecode:
     @staticmethod
     def _attend(q: mx.array, keys: mx.array, values: mx.array, scale: float, lane: bool, rows: int) -> mx.array:
         if lane:
-            # the 16 query heads of a KV head are one 16-row tile of the tensor-unit kernel: each key read once
-            # (its extra launches cost more than it saves below ``lane_attention_from`` keys)
+            # One KV head's 16 query heads fill a tensor-unit tile and read each key once.
             from tensorfold.kernels.qwen.dense.v1.lane_attention import lane_sdpa
 
             return lane_sdpa(q, keys, values, scale)
         return mx.fast.scaled_dot_product_attention(q, keys, values, scale=scale, mask="causal" if rows > 1 else None)
 
     def _moe(self, index: int, mixer: Any, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
-        # our own router matvec, row-invariant by construction: MLX's bf16 matmul sums 2 rows in another order
-        # than 1; then the row-exact expert kernels
+        # The router and expert kernels preserve each row's bits; MLX bf16 matmul changes summation order with row count.
         logits = router_logits(x, mixer.gate.weight)
         experts, weights = route(logits, self.gate_bias[index], self.top_k, self.scaling)
         return row_kernels.experts(mixer.switch_mlp, x, experts), weights, mixer.shared_experts(x)

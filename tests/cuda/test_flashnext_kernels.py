@@ -7,6 +7,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
+from tensorfold.cuda import experts as grouped  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda import gdn, moe, qmm  # noqa: E402
 
 DEV = "cuda"
@@ -68,7 +69,11 @@ def _experts(e: int, width: int, dims: int):
     sg = _mlx_weights(width, dims, 14)
     su = _mlx_weights(width, dims, 15)
     sd = _mlx_weights(dims, width, 16)
-    return qmm.make_experts(gate, up, down, (sg, su, sd)), (gate, up, down, sg, su, sd)
+    def table(routed, shared):
+        return tuple(torch.cat([a, b[None]]) for a, b in zip(routed, shared))
+
+    ex = grouped.make([table(gate, sg), table(up, su)], table(down, sd), 32)
+    return ex, (gate, up, down, sg, su, sd)
 
 
 class _Cfg:
@@ -80,8 +85,7 @@ class _Cfg:
 
 def _moe_rows(x, router_rows, ex, rows_max):
     buf = moe.MoEBuffers(rows_max, _Cfg, DEV)
-    xs = qmm.group_sums(x)
-    moe.moe(x, xs, router_rows, ex, buf, _Cfg)
+    moe.moe(x, router_rows, ex, buf, _Cfg.num_experts_per_tok, _Cfg.num_experts)
     return buf
 
 
@@ -100,25 +104,8 @@ def test_moe_rows_do_not_depend_on_the_window():
             assert torch.equal(b.pick[r], singles[r][0])
             assert torch.equal(b.wts[r], singles[r][1])
             assert torch.equal(b.y[r], singles[r][2]), (m, r)
-        count = int(b.group.count.item())
-        ids = b.group.ids[:count].tolist()
-        assert ids == sorted(set(b.pick[:m].reshape(-1).tolist()))
-
-
-def test_moe_launch_settings_keep_the_bits():
-    ex, _ = _experts(64, 640, 2560)
-    torch.manual_seed(7)
-    router_rows = (torch.randn((65, 2560), device=DEV) * 0.02).to(torch.bfloat16)
-    x = torch.randn((4, 2560), device=DEV).to(torch.bfloat16)
-    ref = _moe_rows(x, router_rows, ex, 4)
-    y0 = ref.y.clone()
-    for block_n, gpi, warps, stages in ((32, 1, 4, 2), (32, 4, 8, 3), (64, 2, 8, 4)):
-        xs = qmm.group_sums(x)
-        qmm.moe_gateup(x, xs, ex, ref.group, ref.act, ref.axs, gpi=gpi, num_warps=warps, num_stages=stages,
-                       block_n=block_n)
-        qmm.moe_down(ref.act, ref.axs, ex, ref.group, ref.y, gpi=gpi, num_warps=warps, num_stages=stages,
-                     block_n=block_n)
-        assert torch.equal(ref.y[:4], y0[:4]), (block_n, gpi, warps, stages)
+        items = b.plan.items[:int(b.plan.counts[0])].tolist()
+        assert sorted({it[0] for it in items}) == sorted(set(b.pick[:m].reshape(-1).tolist()))
 
 
 def test_moe_matches_fp32():
@@ -155,22 +142,27 @@ def _gdn_inputs(rows: int, seed: int):
     return p, cs, cw, state, a_log, dt, nw
 
 
+def _gdn_out(rows: int, nv: int = gdn.NV):
+    return (torch.empty((rows, nv * gdn.DV), dtype=torch.bfloat16, device=DEV),
+            torch.empty((rows, nv * gdn.DV // 32), dtype=torch.float32, device=DEV))
+
+
 def test_gdn_window_rows_and_replay_match_serial_steps():
     rows = 6
     p, cs, cw, state, a_log, dt, nw = _gdn_inputs(rows, 21)
-    win = gdn.GDNScratch(rows, DEV)
+    win, (out, xs) = gdn.GDNScratch(rows, DEV), _gdn_out(rows)
     out_state = torch.empty_like(state)
-    gdn.chain(p, cs, cw, state, a_log, dt, nw, 1e-6, rows, win, out_state)
+    gdn.chain(p, cs, cw, state, a_log, dt, nw, 1e-6, rows, win, out_state, out, xs)
     # serial: one row at a time, conv window and state carried forward
     st = state.clone()
     conv = cs.clone()
-    one = gdn.GDNScratch(1, DEV)
+    one, (one_out, one_xs) = gdn.GDNScratch(1, DEV), _gdn_out(1)
     states = []
     for r in range(rows):
         nxt = torch.empty_like(st)
-        gdn.chain(p[r:r + 1].contiguous(), conv, cw, st, a_log, dt, nw, 1e-6, 1, one, nxt)
-        assert torch.equal(one.out[0], win.out[r]), r
-        assert torch.equal(one.xs[0], win.xs[r]), r
+        gdn.chain(p[r:r + 1].contiguous(), conv, cw, st, a_log, dt, nw, 1e-6, 1, one, nxt, one_out, one_xs)
+        assert torch.equal(one_out[0], out[r]), r
+        assert torch.equal(one_xs[0], xs[r]), r
         conv = torch.cat([conv, p[r:r + 1, :gdn.CONV]])[1:].contiguous()
         st = nxt
         states.append(st.clone())
@@ -184,9 +176,9 @@ def test_gdn_window_rows_and_replay_match_serial_steps():
 def test_gdn_matches_fp32():
     rows = 3
     p, cs, cw, state, a_log, dt, nw = _gdn_inputs(rows, 22)
-    win = gdn.GDNScratch(rows, DEV)
+    win, (out, xs) = gdn.GDNScratch(rows, DEV), _gdn_out(rows)
     out_state = torch.empty_like(state)
-    gdn.chain(p, cs, cw, state, a_log, dt, nw, 1e-6, rows, win, out_state)
+    gdn.chain(p, cs, cw, state, a_log, dt, nw, 1e-6, rows, win, out_state, out, xs)
     F = torch.nn.functional
     C, NV, DV, NK, DK = gdn.CONV, gdn.NV, gdn.DV, gdn.NK, gdn.DK
     inp = torch.cat([cs, p[:, :C]]).float()
@@ -213,7 +205,7 @@ def test_gdn_matches_fp32():
         yn = y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + 1e-6) * nw.float()
         outs.append((yn * torch.sigmoid(z[t])).reshape(-1))
     ref = torch.stack(outs)
-    err = (win.out.float() - ref).abs().max().item()
+    err = (out.float() - ref).abs().max().item()
     assert err < 0.05 * ref.abs().max().item(), err
     assert (out_state - S).abs().max().item() < 1e-2
 
@@ -285,15 +277,15 @@ def test_gdn_at_a_tensor_parallel_ranks_head_counts():
     a_log = torch.randn((nv,), generator=g, device=DEV) * 0.5
     dt = torch.randn((nv,), generator=g, device=DEV) * 0.5
     nw = torch.ones((128,), device=DEV).to(torch.bfloat16)
-    win = gdn.GDNScratch(rows, DEV, nk, nv)
+    win, (out, xs) = gdn.GDNScratch(rows, DEV, nk, nv), _gdn_out(rows, nv)
     out_state = torch.empty_like(state)
-    gdn.chain(p, cs, cw, state, a_log, dt, nw, 1e-6, rows, win, out_state)
+    gdn.chain(p, cs, cw, state, a_log, dt, nw, 1e-6, rows, win, out_state, out, xs)
     st, cv = state.clone(), cs.clone()
-    one = gdn.GDNScratch(1, DEV, nk, nv)
+    one, (one_out, one_xs) = gdn.GDNScratch(1, DEV, nk, nv), _gdn_out(1, nv)
     for r in range(rows):
         nxt = torch.empty_like(st)
-        gdn.chain(p[r:r + 1].contiguous(), cv, cw, st, a_log, dt, nw, 1e-6, 1, one, nxt)
-        assert torch.equal(one.out[0], win.out[r]), r
+        gdn.chain(p[r:r + 1].contiguous(), cv, cw, st, a_log, dt, nw, 1e-6, 1, one, nxt, one_out, one_xs)
+        assert torch.equal(one_out[0], out[r]), r
         cv = torch.cat([cv, p[r:r + 1, :conv]])[1:].contiguous()
         st = nxt
         if r == 2:
@@ -375,7 +367,7 @@ def test_hc_upmix_gives_the_bits_of_the_matmul_then_the_mix(rows):
     from tensorfold.families.qwen4_exp.cuda import glue
 
     S, D, LOW = 4, 2560, 320
-    q = qmm.make_q4(*_mlx_weights(S * D, LOW, 11))
+    q = qmm.make_q4(*_mlx_weights(S * D, LOW, 11), "tiled")
     g = torch.Generator(device=DEV).manual_seed(rows)
     act = torch.randn((rows, LOW), generator=g, device=DEV).to(torch.bfloat16)
     xs = qmm.group_sums(act)
@@ -402,8 +394,8 @@ def test_hc_readout_fused_gives_the_separate_kernels_bits(rows, inject):
     from tensorfold.families.qwen4_exp.cuda.weights import HC
 
     S, D, LOW = 4, 2560, 320
-    down = qmm.stack_q4([_mlx_weights(LOW, S * D, 5)] + ([_mlx_weights(S, S * D, 6)] if inject else []))
-    hc = HC(down, qmm.make_q4(*_mlx_weights(S * D, LOW, 7)),
+    down = qmm.stack_q4([_mlx_weights(LOW, S * D, 5)] + ([_mlx_weights(S, S * D, 6)] if inject else []), "tiled")
+    hc = HC(down, qmm.make_q4(*_mlx_weights(S * D, LOW, 7), "tiled"),
             1 + 0.05 * torch.randn((S * D,), generator=torch.Generator(device=DEV).manual_seed(8), device=DEV), inject)
     g = torch.Generator(device=DEV).manual_seed(rows + 100 * inject)
     h = (torch.randn((rows, S * D), generator=g, device=DEV) * 3).to(torch.bfloat16)
@@ -421,7 +413,7 @@ def test_hc_readout_fused_gives_the_separate_kernels_bits(rows, inject):
                             mixed=torch.empty((rows, D), dtype=bf, device=DEV),
                             xs_mixed=torch.empty((rows, D // 32), dtype=f32, device=DEV),
                             part=torch.empty((32 * 16 * 2560,), dtype=f32, device=DEV),
-                            inj=torch.empty((rows, S), dtype=bf, device=DEV))
+                            inj=torch.empty((rows, S), dtype=bf, device=DEV), prefill=False)
         glue.hc_writeback(h, h, b.pss, S, 0)
         return b
 

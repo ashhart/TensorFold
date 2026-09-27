@@ -251,6 +251,44 @@ def _generate(engine, prompt, sampling, *, draft=True, policy=None, tokens=24):
     return out, stats
 
 
+def _state(e) -> list[torch.Tensor]:
+    """What a prompt leaves: the KDA states and conv windows, the attention and MTP cache rows below the position."""
+
+    st = e.st
+    return [st.rec[st.cur[0]], st.conv] + [x[:st.pos] for x in st.kc + st.vc] + [st.mtp_kc[:st.mtp_len],
+                                                                                 st.mtp_vc[:st.mtp_len]]
+
+
+def test_prompt_chunks_leave_the_same_state(engine):
+    """Any prompt chunking leaves bit-identical states and first tokens; decode windows land within bf16 rounding."""
+
+    from tensorfold.families.glm5_next.cuda.decode import Engine, prefill
+    from tensorfold.families.glm5_next.cuda.forward import commit, forward
+
+    w = engine.w
+    prompt = [int(t) for t in np.random.default_rng(5).integers(0, 1000, size=100)]
+    ref = Engine(w, capacity=2560, max_rows=8, prefill_rows=100)
+    first = prefill(ref, prompt, None)
+    want = [t.clone() for t in _state(ref)]
+    prefill(ref, prompt, None, mtp=False)               # the head would reuse the logits buffer
+    logits = ref.pbuf.logits[:1].float().clone()
+    for rows in (7, 16):
+        e = Engine(w, capacity=2560, max_rows=8, prefill_rows=rows)
+        assert prefill(e, prompt, None) == first, rows
+        assert all(torch.equal(a, b) for a, b in zip(_state(e), want)), rows
+    dec = Engine(w, capacity=2560, max_rows=8, prefill_rows=16)
+    dec.reset()
+    for s0 in range(0, len(prompt), 8):
+        chunk = prompt[s0:s0 + 8]
+        last = forward(w, dec.st, dec.buf, chunk)[len(chunk) - 1:len(chunk)].float()
+        commit(w, dec.st, dec.buf, len(chunk), len(chunk))
+    a, b = want[0], dec.st.rec[dec.st.cur[0]]
+    assert float((a - b).abs().max()) <= 2e-2 * float(b.abs().max())
+    ka, kb = want[2].float(), dec.st.kc[0][:len(prompt)].float()
+    assert float((ka - kb).abs().max()) <= 2e-2 * float(kb.abs().max())
+    assert float(torch.nn.functional.cosine_similarity(logits, last, dim=1)) > 0.999
+
+
 @pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
 def test_drafted_replies_equal_serial(engine, sampling):
     prompt = list(np.random.default_rng(5).integers(0, 1000, size=37))
@@ -280,7 +318,7 @@ def test_drafter_choice_equals_serial(engine_f, sampling):
 
 
 def test_drafter_choice_resumes(engine_f):
-    """A reply drafted with both drafters leaves a state that both drafters resume from."""
+    """After a reply from both drafters, a prompt carrying it resumes from the prompt's end with every drafter."""
 
     sampling = Sampling(11, 1.0, 20, 0.95)
     rng = np.random.default_rng(12)
@@ -291,22 +329,22 @@ def test_drafter_choice_resumes(engine_f):
     after = first + reply + [21, 22]
     for policy in ("auto:1:1:0", "auto", "2", "f3"):
         warm, stats = _generate(engine_f, after, sampling, policy=policy)
-        assert stats["cached"] >= len(first) + len(reply) - 1, policy
+        assert stats["cached"] == len(first), policy
         _generate(engine_f, unrelated, sampling)
         cold, stats = _generate(engine_f, after, sampling, policy=policy)
         assert stats["cached"] == 0 and warm == cold, policy
-        _generate(engine_f, first, sampling, policy="auto:1:1:0", tokens=30)      # the state after the reply again
+        _generate(engine_f, first, sampling, policy="auto:1:1:0", tokens=30)      # the prompt's state again
 
 
 @pytest.mark.parametrize("sampling", [Sampling(7, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
 def test_resumed_prompts_equal_fresh_prefills(engine, sampling):
     rng = np.random.default_rng(9)
-    first = list(rng.integers(0, 1000, size=70))       # more than one 64-row prefill chunk
+    first = list(rng.integers(0, 1000, size=70))
     unrelated = list(rng.integers(0, 1000, size=12))
     reply, _ = _generate(engine, first, sampling)
     after_reply = first + reply + [5, 6, 7]
     warm, stats = _generate(engine, after_reply, sampling)
-    assert stats["cached"] >= len(first) + len(reply) - 1
+    assert stats["cached"] == len(first)                # the reply prefills again
     _generate(engine, unrelated, sampling)              # a fresh prefill: every kept state goes
     cold, stats = _generate(engine, after_reply, sampling)
     assert stats["cached"] == 0 and warm == cold
@@ -346,7 +384,7 @@ def test_exl3_checkpoint_resumes(engine_x):
     reply, _ = _generate(engine_x, first, sampling, policy="auto:1:1:0", tokens=20)
     after = first + reply + [31, 32]
     warm, stats = _generate(engine_x, after, sampling)
-    assert stats["cached"] >= len(first) + len(reply) - 1
+    assert stats["cached"] == len(first)
     _generate(engine_x, unrelated, sampling)
     cold, stats = _generate(engine_x, after, sampling)
     assert stats["cached"] == 0 and warm == cold
@@ -398,8 +436,7 @@ def engine_long(tmp_path_factory):
 
 @pytest.mark.parametrize("sampling", [Sampling(99, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
 def test_drafted_replies_equal_serial_past_the_dense_limit(engine_long, sampling):
-    """Past 2,051 tokens every row selects its tokens from the indexer's scores; a window's rows must score like
-    serial steps. This model has 2 index heads, which a scoring kernel fixed at 32 heads read past."""
+    """Past 2,051 tokens a window's rows must score like serial steps (2 index heads, not GLM-5.3-Flash's 32)."""
 
     prompt = list(np.random.default_rng(11).integers(0, 1000, size=2100))
     serial, _ = _generate(engine_long, prompt, sampling, draft=False, tokens=32)

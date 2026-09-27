@@ -1,11 +1,4 @@
-"""Flash Next's Gated DeltaNet chain on CUDA (``gdn.cu``): one fused kernel per layer and window.
-
-``chain`` runs R consecutive rows from the committed state: conv + SiLU, q/k L2 norms, gates, the
-delta rule and the gated RMSNorm, writing the rows' outputs (and their 32-group sums for the out
-projection), the state after the last row, and what a replay needs (normalized k, v, g, beta).
-``replay`` rebuilds the state after the first ``keep`` rows of a window with the same update routine,
-so keeping a prefix of a window gives the bits of serial steps.
-"""
+"""Run a row-exact DeltaNet chain and retain normalized k, v, g and beta so replaying any accepted prefix reconstructs serial state with the same update routine."""
 
 from __future__ import annotations
 
@@ -36,11 +29,9 @@ def _ext():
 
 
 class GDNScratch:
-    """Static per-window buffers (outputs and replay inputs) for up to ``rows`` rows."""
+    """A sequence's replay inputs for its last window of up to ``rows`` rows."""
 
     def __init__(self, rows: int, device, nk: int = NK, nv: int = NV) -> None:
-        self.out = torch.empty((rows, nv * DV), dtype=torch.bfloat16, device=device)
-        self.xs = torch.empty((rows, nv * DV // 32), dtype=torch.float32, device=device)
         self.k = torch.empty((rows, nk, DK), dtype=torch.float32, device=device)
         self.v = torch.empty((rows, nv, DV), dtype=torch.bfloat16, device=device)
         self.g = torch.empty((rows, nv), dtype=torch.float32, device=device)
@@ -49,9 +40,11 @@ class GDNScratch:
 
 def chain(p: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor, state_in: torch.Tensor,
           a_log: torch.Tensor, dt_bias: torch.Tensor, norm_w: torch.Tensor, eps: float, rows: int,
-          scratch: GDNScratch, state_out: torch.Tensor) -> None:
-    _ext().chain(p, conv_state, conv_w, state_in, a_log, dt_bias, norm_w, float(eps), int(rows), scratch.out,
-                 scratch.xs, state_out, scratch.k, scratch.v, scratch.g, scratch.b)
+          scratch: GDNScratch, state_out: torch.Tensor, out: torch.Tensor, xs: torch.Tensor) -> None:
+    """``out`` [rows, NV*DV] bf16 and ``xs`` (its 32-group sums) may be row views of a larger buffer."""
+
+    _ext().chain(p, conv_state, conv_w, state_in, a_log, dt_bias, norm_w, float(eps), int(rows), out, xs,
+                 state_out, scratch.k, scratch.v, scratch.g, scratch.b)
 
 
 def replay(state_in: torch.Tensor, scratch: GDNScratch, rows: int, state_out: torch.Tensor) -> None:

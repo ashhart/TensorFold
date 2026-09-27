@@ -217,9 +217,9 @@ def test_ranks_split_heads_experts_and_vocabulary(models):
 
 def test_tp_logits_agree_with_one_gpu_to_rounding(models):
     single, ranks, _ = models
-    e1 = Engine(single, capacity=1024, max_rows=8, prefill_rows=16)
+    e1 = Engine(single, capacity=1024, max_rows=16, prefill_rows=16)
     ref = forward(single, e1.st, e1.buf, PROMPT)[:len(PROMPT)].float().clone()
-    engines = [Engine(w, capacity=1024, max_rows=8, prefill_rows=16) for w in ranks]
+    engines = [Engine(w, capacity=1024, max_rows=16, prefill_rows=16) for w in ranks]
     parts = _run_ranks(lambda r, e: forward(e.w, e.st, e.buf, PROMPT)[:len(PROMPT)].float().clone(), engines)
     got = torch.cat(parts, dim=1)
     cos = torch.nn.functional.cosine_similarity(got, ref, dim=1)
@@ -229,7 +229,7 @@ def test_tp_logits_agree_with_one_gpu_to_rounding(models):
 
 def test_tp_windows_match_serial_steps_and_prefix_commits_continue(models):
     _, ranks, _ = models
-    engines = [Engine(w, capacity=1024, max_rows=8, prefill_rows=16) for w in ranks]
+    engines = [Engine(w, capacity=1024, max_rows=16, prefill_rows=16) for w in ranks]
     nxt = [401, 33, 2048, 5, 77, 1500, 9, 10, 11]
 
     def body(r, e):
@@ -314,7 +314,7 @@ def test_tp_kept_drafts_give_serial_tokens(models, sampling, monkeypatch):
             out[name + "_keeps"] = got.keeps
         return out
 
-    engines = [Engine(w, capacity=1024, max_rows=8, prefill_rows=16) for w in ranks]
+    engines = [Engine(w, capacity=1024, max_rows=16, prefill_rows=16) for w in ranks]
     a, b = _run_ranks(body, engines)
     assert a == b
     for name in ("d3", "d5", "d6"):
@@ -329,7 +329,7 @@ def test_tp_candidates_gathered_in_the_step_match_the_eager_gather(models):
     from tensorfold.families.qwen4_exp.cuda.decode import choose_gathered, tp_sample_rows
 
     _, _, drafts = models
-    engines = [Engine(w, capacity=1024, max_rows=8, prefill_rows=16) for w in drafts]
+    engines = [Engine(w, capacity=1024, max_rows=16, prefill_rows=16) for w in drafts]
     samplings = (None, Sampling(seed=4321, top_k=20, top_p=0.95))
 
     def body(r, e):
@@ -359,7 +359,7 @@ def _fake_nccl(monkeypatch, hub):
 
     from torch.distributed import TCPStore
 
-    from tensorfold.families.qwen4_exp.cuda import comm as comm_mod
+    from tensorfold.cuda import comm as comm_mod
 
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -419,7 +419,7 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
         got, _ = ask(PROMPT, sampling)
         serial, serial_stats = ask(PROMPT, sampling, draft=False)      # one token a round on both ranks
         prompt2 = PROMPT + got + [7, 8, 9]
-        warm, warm_stats = ask(prompt2, sampling)                      # resumes from the reply on both ranks
+        warm, warm_stats = ask(prompt2, sampling)                      # resumes from the prompt on both ranks
         cold, _ = ask(prompt2, sampling, draft=False)
         greedy, _ = ask(PROMPT, None)
     engines[0].shutdown()
@@ -429,7 +429,7 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
     eos = [i for i, t in enumerate(ref) if t in engines[0].eos]
     assert got == (ref[:eos[0] + 1] if eos else ref)
     assert serial == got and serial_stats["drafts"] is False
-    assert warm_stats["cached"] >= len(PROMPT) + len(got) - 1 and warm == cold
+    assert warm_stats["cached"] == len(PROMPT) and warm == cold             # the reply prefills again
     assert len(greedy) >= 1
 
 

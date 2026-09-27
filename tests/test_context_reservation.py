@@ -107,3 +107,19 @@ def test_http_requested_reserve_refuses_with_counts_and_next_request_recovers(fi
         server.shutdown()
         server.server_close()
         app.close()
+
+
+def test_a_prompt_past_the_window_names_the_maximum_and_whether_memory_set_it():
+    app = make_app(context_window=10)
+    try:
+        messages = [{"role": "user", "content": "abcdefghij"}]
+        assert len(app.render(messages)[0]) == 13
+        with pytest.raises(RequestError, match=r"maximum context length is 10 tokens.*prompt has 13 tokens") as error:
+            app.chat(messages)
+        assert "memory" not in str(error.value)
+        app.context_fitted = True           # the window is what the memory budget fits, below the model's own
+        with pytest.raises(RequestError, match=r"10 tokens, the most this server's memory budget fits.*Compact"):
+            app.chat(messages)
+        assert not app.engine.prefill_calls and app._preparing == 0
+    finally:
+        app.close()

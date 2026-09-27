@@ -10,7 +10,7 @@ if not cuda.is_available():
 from tensorfold.families.qwen3_5.cuda import qmm  # noqa: E402
 
 SHAPES = [(48, 5120), (1024, 5120), (5120, 6144), (10240, 5120), (5120, 17408)]
-ROWS = [1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 127, 128]
+ROWS = [1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 127, 128, 129, 200, 384]
 
 
 def _weights(n: int, k: int, seed: int):
@@ -26,13 +26,13 @@ def _weights(n: int, k: int, seed: int):
 def test_rows_do_not_depend_on_row_count(n, k):
     weight, scales, biases = _weights(n, k, n + k)
     g = torch.Generator(device="cuda").manual_seed(7)
-    x = torch.randn((128, k), generator=g, device="cuda").to(torch.bfloat16)
-    alone = torch.cat([qmm.lane_matmul(x[r:r + 1], weight, scales, biases) for r in range(128)])
+    x = torch.randn((384, k), generator=g, device="cuda").to(torch.bfloat16)
+    alone = torch.cat([qmm.lane_matmul(x[r:r + 1], weight, scales, biases) for r in range(384)])
     for m in ROWS:
         batch = qmm.lane_matmul(x[:m], weight, scales, biases)
         assert torch.equal(batch, alone[:m]), f"{n}x{k}: rows differ at M={m}"
     # a row placed anywhere in a window gives the same bits
-    perm = torch.randperm(128, generator=torch.Generator().manual_seed(3)).cuda()
+    perm = torch.randperm(384, generator=torch.Generator().manual_seed(3)).cuda()
     shuffled = qmm.lane_matmul(x[perm], weight, scales, biases)
     assert torch.equal(shuffled, alone[perm])
 
@@ -64,6 +64,6 @@ def test_tiled_layout_gives_the_same_bits(n, k):
     t = qmm_fast.tile(q)
     back = qmm_fast.untile(t)
     assert torch.equal(back.weight, weight) and torch.equal(back.scales, scales)
-    x = torch.randn((128, k), device="cuda").to(torch.bfloat16)
-    for m in (1, 7, 16, 17, 32, 33, 64, 100, 128):
+    x = torch.randn((384, k), device="cuda").to(torch.bfloat16)
+    for m in (1, 7, 16, 17, 32, 33, 64, 100, 128, 129, 384):
         assert torch.equal(qmm_fast.matmul(x[:m], t), qmm.lane_matmul(x[:m], weight, scales, biases)), (n, k, m)

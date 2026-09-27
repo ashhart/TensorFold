@@ -1,21 +1,4 @@
-"""GLM-5.3-Flash weights on the GPU, one rank's share of the MLX 4-bit checkpoint (affine, groups of 64) or of an
-EXL3 checkpoint (routed experts in ExLlamaV3's trellis format, ``exl3.py``; every other weight in BF16).
-
-``split.RankReader`` gives this rank's part of each tensor: sliced from the full checkpoint, or read from a folder
-``split`` wrote. Column-parallel outputs (heads, expert and MLP width) are halves by rows, row-parallel inputs
-(o_proj, down_proj) halves by input groups, everything else replicated.
-
-Per rank (HL = local attention heads, 32 of 64):
-  KDA  proj [q | k | v | f_a | g_a | b] (3 HL 128 + 128 + 128 + HL rows), f_b and g_b (HL 128 x 128), conv
-       [q | k | v] taps, A_log, dt_bias, the gated norm, o_proj (row parallel)
-  DSA  proj [q_a | kv_a] (replicated), q_b (HL 256 rows), kv_b split into its key and value rows (HL 256 each),
-       o_proj (row parallel); the indexer is kept raw (unused until a context passes 2048 tokens)
-  MoE  router rows (bf16) and correction bias, 288 routed experts + the shared expert as expert 288, each with
-       this rank's half of the intermediate width; dense MLP layers stack [gate | up]
-  head this rank's half of the vocabulary rows; embedding and norms replicated
-With an EXL3 checkpoint the routed experts are ``exl3_mm.Exl3Experts`` and the shared expert a BF16 MLP of its own;
-every projection above is a ``qmm.B16`` instead of a ``qmm.Q4``, the embedding a BF16 table.
-"""
+"""Load one rank of MLX affine 4-bit weights or EXL3 routed experts with BF16 elsewhere, preserving heads and quantization groups at split boundaries."""
 
 from __future__ import annotations
 
@@ -26,8 +9,10 @@ from typing import Any
 
 import torch
 
+from tensorfold.cuda import experts as grouped
+
 from .exl3_mm import Exl3Experts, words as exl3_words
-from .qmm import B16, Experts, Q4, as_i32, make_b16, make_experts, make_q4, quantize4, stack_b16, stack_q4
+from .qmm import B16, Q4, as_i32, make_b16, make_q4, quantize4, stack_b16, stack_q4
 
 PREFIX = "model.language_model."
 
@@ -145,8 +130,7 @@ class KDAW:
 
 @dataclass
 class IndexW:
-    """DSA's indexer (replicated on every rank): [wk | weights_proj] on x, wq_b on the query residual, the key
-    LayerNorm, the pool gate (bf16, 128 x D) and the pool position bias."""
+    """Replicated DSA indexer weights include key and query projections, head weights, key LayerNorm, pool gates, and pool position bias."""
 
     kw: Q4
     qb: Q4
@@ -180,7 +164,7 @@ class MLPW:
 class MoEW:
     router: torch.Tensor      # [E, D] bf16
     bias: torch.Tensor        # [E] fp32
-    experts: Experts | Exl3Experts        # 4-bit: E + 1 (shared expert last); EXL3: the E routed experts
+    experts: grouped.Experts | Exl3Experts  # 4-bit: E + 1 (shared expert last); EXL3: the E routed experts
     shared: MLPW | None = None            # EXL3 checkpoints: the shared expert (BF16)
 
 
@@ -235,7 +219,7 @@ class Weights:
             if isinstance(t, torch.Tensor) and t.data_ptr() not in seen:
                 seen.add(t.data_ptr())
                 total += t.numel() * t.element_size()
-            elif isinstance(t, (Q4, B16, Experts, Exl3Experts, HCW, KDAW, DSAW, MLPW, MoEW, LayerW, MTPW, IndexW)):
+            elif isinstance(t, (Q4, B16, grouped.Experts, Exl3Experts, HCW, KDAW, DSAW, MLPW, MoEW, LayerW, MTPW, IndexW)):
                 for v in vars(t).values():
                     add(v)
             elif isinstance(t, (list, tuple)):
@@ -255,8 +239,7 @@ class Weights:
 
 
 def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
-    """Rank ``rank`` of two: its share of every layer, the MTP layer and its half of the head's vocabulary.
-    ``model_dir``: the checkpoint, or a folder ``split`` wrote for this rank."""
+    """Read one of two ranks from a full checkpoint or rank folder, including MTP and its half of the vocabulary head."""
 
     from .split import RankReader
 
@@ -352,7 +335,7 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
             ss.append(rd.get(PREFIX + p + f"shared_experts.{proj}.scales"))
             bs.append(rd.get(PREFIX + p + f"shared_experts.{proj}.biases"))
             parts[proj] = (torch.stack(ws).to(dev), torch.stack(ss).to(dev), torch.stack(bs).to(dev))
-        ex = make_experts(parts["gate_proj"], parts["up_proj"], parts["down_proj"])
+        ex = grouped.make([parts["gate_proj"], parts["up_proj"]], parts["down_proj"], 64, limit=cfg.limit)
         del parts
         return MoEW(router, bias, ex)
 
@@ -383,7 +366,7 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
     draft_head = None
     if exl3:
         head = make_b16(rd.get("lm_head.weight")[rank * vl:(rank + 1) * vl].to(dev))
-        draft_head = quantize4(head.weight)        # MTP and DFlash2 steps read 0.18 GB a rank instead of 0.63
+        draft_head = quantize4(head.weight)        # Draft steps use the quantized head; verification keeps the original head.
     else:
         hw, hs, hb = (rd.get("lm_head." + x) for x in ("weight", "scales", "biases"))
         head = make_q4(as_i32(hw[rank * vl:(rank + 1) * vl]).to(dev), hs[rank * vl:(rank + 1) * vl].to(dev),

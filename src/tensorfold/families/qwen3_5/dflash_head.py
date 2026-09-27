@@ -1,9 +1,4 @@
-"""DFlash2 as a family model's draft head: each stream's drafter state rides as the last entry of its cache list.
-
-A stream's lattice reads the target's taps of the rows the stream kept, and its best-first tree is the next round's
-drafts: (tokens, parents), parents indexing the drafts (-1: the pending row), most likely first, each with its chance
-of landing (``draft_probabilities``) so the engine can split a shared round's rows across streams.
-"""
+"""DFlash2 uses each stream's final cache entry for drafter state and committed target taps to build probability-ranked drafts."""
 
 from __future__ import annotations
 
@@ -46,6 +41,18 @@ class DraftSlot:
     def state(self) -> list[Any]:
         unread = self._unread()
         return [] if unread is None else [unread.context]
+
+    @property
+    def nbytes(self) -> int:
+        """The drafter context's arrays (its sliding window: fixed memory a stream holds; a copy starts empty)."""
+
+        proposer = self.proposer
+        if proposer is None:
+            return 0
+        arrays = [getattr(proposer, "context", None)]
+        for item in getattr(proposer, "cache", None) or []:
+            arrays += [getattr(item, "keys", None), getattr(item, "values", None)]
+        return sum(int(getattr(a, "nbytes", 0) or 0) for a in arrays if a is not None)
 
     def __copy__(self) -> "DraftSlot":
         slot = DraftSlot(self.drafter, self.chains)
@@ -105,8 +112,7 @@ class DFlashHead:
         return DraftSlot(self.drafter, self.chains)
 
     def absorb(self, cache: list[Any], first: int, rows: int, row: int = 0) -> None:
-        """The last forward's rows ``row`` .. ``row + rows`` - 1 (positions ``first`` ..) into the stream's drafter
-        context."""
+        """Absorb forward rows [row, row + rows), starting at position first, into the stream's drafter context."""
 
         taps = self.drafter.taps()
         if taps is None:
@@ -129,8 +135,7 @@ class DFlashHead:
                 item.offset += held - window
 
     def read(self, cache: list[Any], rows: Sequence[int], follow: Sequence[int], sampling: Any) -> None:
-        """The stream's kept ``rows`` of the last forward into its drafter context; ``follow``: the tokens committed
-        after them, the new pending token last."""
+        """Absorb the stream's kept rows and committed follow tokens, with the new pending token last."""
 
         proposer = cache[-1].get(sampling)
         taps = self.drafter.taps()
@@ -151,8 +156,7 @@ class DFlashHead:
         return cache[-1].chances
 
     def _drafts(self, slot: DraftSlot, tree: Any, position: int, sampling: Any, nodes: int) -> Any:
-        """The tree most likely first (parents before children) as drafts; each node's chance to ``slot.chances``:
-        the calibrated table's for its depth and path score, else the drafter's own (e^score)."""
+        """Order drafts by chance with parents before children, storing calibrated probabilities or e^score in slot.chances."""
 
         tokens, parents = [int(t) for t in tree[0]], [int(q) for q in tree[1]]
         scores = slot.proposer.last_scores if slot.proposer is not None else None
@@ -210,8 +214,7 @@ def by_chance(tokens: Sequence[int], parents: Sequence[int], chances: Sequence[f
 
 
 def as_drafts(tree: tuple[list[int], list[int]], nodes: int) -> Any:
-    """A best-first tree's first ``nodes`` pops as the family rounds take drafts: a list for a chain, else (tokens,
-    parents)."""
+    """Take the first nodes of a best-first tree, returning a token list for a chain or (tokens, parents) otherwise."""
 
     tokens, parents = [int(t) for t in tree[0][:nodes]], [int(q) for q in tree[1][:nodes]]
     return tokens if parents == list(range(-1, len(tokens) - 1)) else (tokens, parents)

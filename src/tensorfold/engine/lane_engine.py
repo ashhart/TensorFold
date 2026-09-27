@@ -1,11 +1,4 @@
-"""The lane engine: every model decodes as a lane-engine family (``engine.lane_family``).
-
-A round verifies each live stream's pending token and its drafts in one forward, every row with the bits a one-row
-step gives it, keeps the drafts up to the first that differs from the target's own sample and rolls the caches
-back to exactly the kept rows; concurrent streams share each round's forward. Every committed token is the model's
-own sample at its position, so drafted output is byte-identical to one-token-a-round decoding, which runs through
-the same kernels.
-"""
+"""Verify each draft against the target sample and roll caches back to accepted rows so shared rounds match serial decoding."""
 
 from __future__ import annotations
 
@@ -18,13 +11,7 @@ from tensorfold.engine.prefill_plan import PrefillPlan, PromptChunks
 
 
 class SuffixLookupProposer:
-    """Copy-span proposer: continue the longest earlier occurrence of the suffix.
-
-    Width is earned by evidence (7ee74d3): a proposal is made only when the
-    current suffix matches an earlier span of at least ``min_match`` tokens,
-    and its length never exceeds the evidence-scaled budget. Wrong proposals
-    cost rows, never bytes.
-    """
+    """Propose continuations only with enough matching context, limiting width by evidence so rejected drafts cost rows without changing output."""
 
     name = "suffix-lookup"
 
@@ -44,6 +31,7 @@ class SuffixLookupProposer:
         self.ngram = int(ngram)
         self.min_match = int(min_match)
         self.max_extension = int(max_extension)
+        # Pause after repeated rejections because short n-gram matches can be coincidental.
         self.silence_rounds = int(silence_rounds)
         self.window = max(1, int(window))
         self._recent: list[int] = []
@@ -145,12 +133,6 @@ class SuffixLookupProposer:
             "silenced_rounds": self.silenced_rounds,
         }
 
-
-# --------------------------------------------------------------------------
-# stream state and pure bookkeeping
-# --------------------------------------------------------------------------
-
-
 @dataclass
 class LaneStream:
     """One exact stream: its prompt, its commits, and what its cache holds."""
@@ -172,14 +154,11 @@ class LaneStream:
     cached_tokens: int = 0
     started_at: float = 0.0
     finished_at: float = 0.0
-    # False for lane fragments nobody resumes: the engine then skips the
-    # row extraction it would otherwise do for ``retain_finished_caches``.
+    # Disable retention for lane fragments that will not resume to skip cache-row extraction.
     retain: bool = True
-    # (tokens, single-row cache copy) pairs captured mid-prefill at boundaries
-    # the next turn of the conversation can still match.
+    # Capture (tokens, single-row cache copy) at prefill boundaries the next turn can match.
     history_checkpoints: list[tuple[list[int], list[Any]]] = field(default_factory=list)
-    # ``exact_sampling.Sampling`` (None = greedy): the token at each position is a fixed
-    # function of that row's logits and the position, so drafts verify the same way.
+    # Key sampling by each row's logits and position so drafts verify identically; None means greedy.
     sampling: Any = None
     # False: one token a round, no drafts of any kind (the serial reference drafted output is checked against)
     drafts: bool = True
@@ -203,8 +182,7 @@ class LaneStream:
         return self.think_open and self.think_budget > 0 and bool(self.think_close)
 
     def think_cut(self, tokens: Sequence[int]) -> int | None:
-        """The index in ``tokens`` (about to be committed) that the thinking budget replaces by ``think_close[0]``,
-        or None: the budget-th reply token, unless the model closed the think block before it."""
+        """Return the index the thinking budget replaces with ``think_close[0]``, or None if the model already closed the think block."""
 
         if not self._budget_active():
             return None
@@ -253,11 +231,7 @@ class LaneStream:
 
 
 def sanitize_tree(tokens: Sequence[int], parents: Sequence[int], budget: int) -> tuple[list[int], list[int]]:
-    """Truncate a proposal to ``budget`` nodes and drop any node whose parent is missing or comes after it.
-
-    Proposers emit parents before children, so this normally just truncates; a malformed proposal loses the
-    orphaned subtrees instead of raising inside the round.
-    """
+    """Truncate to the node budget and discard orphaned subtrees or nodes whose parents do not precede them."""
 
     kept: dict[int, int] = {}
     out_t: list[int] = []
@@ -318,11 +292,9 @@ class LaneEngine(FamilyRounds):
         self.prefill_guard: Any = None       # the server's cancellation and memory checks between prompt chunks
         self._family_setup()
 
-    # -- prefill and membership -----------------------------------------------------------------------------------
     def prefill_prefix(self, prompt_ids: Sequence[int], *, cache: list[Any] | None = None,
                        cached_tokens: int = 0) -> list[Any]:
-        """Absorb ``prompt_ids`` into a new cache (from ``cache`` at ``cached_tokens`` when given) without
-        generating; the caller owns the cache."""
+        """Prefill a caller-owned cache without generating, resuming at ``cached_tokens`` when given."""
 
         return self._family_prefill_prefix(prompt_ids, cache=cache, cached_tokens=cached_tokens)
 
@@ -349,6 +321,13 @@ class LaneEngine(FamilyRounds):
 
         self._family_reset()
         self.streams.clear()
+
+    def release_rounds(self) -> None:
+        """With no stream live, let the family drop what its last forward keeps for rolling rows back."""
+
+        release = getattr(self.model, "release_rounds", None)
+        if release is not None and not self.active_count:
+            release()
 
     def discard_stream(self, stream: LaneStream) -> None:
         """Release a cancelled stream between rounds: no retained cache, no pending draws or drafts."""
@@ -382,8 +361,7 @@ class LaneEngine(FamilyRounds):
 
     @staticmethod
     def copy_single_cache(cache: list[Any]) -> list[Any]:
-        """A batch-1 cache list to retain: whole arrays shared (MLX never writes a shared buffer), a view (a state
-        sliced from a call's per-row states) copied out, so it does not keep its whole base buffer alive."""
+        """Share whole arrays because MLX never writes shared buffers; copy views so retained caches release unused base rows."""
 
         import copy as _copy
 
@@ -413,7 +391,6 @@ class LaneEngine(FamilyRounds):
             mx.async_eval(*copies)
         return out
 
-    # -- rounds ---------------------------------------------------------------------------------------------------
     def step(self) -> dict[str, list[int]]:
         """One round for every live stream. Returns newly committed tokens per stream."""
 

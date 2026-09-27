@@ -5,6 +5,9 @@ from __future__ import annotations
 import math
 from .capacity import Geometry, SIZES
 
+PREFILL_ROWS = 2048     # a prompt chunk's rows: Flash Next and GLM keep buffers of this many rows
+PREFILL_ATT_ROWS = 256  # Flash Next's prompt attention block
+
 
 def size(info: dict) -> int:
     return math.prod(info["shape"]) * SIZES[info["dtype"]]
@@ -107,22 +110,39 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
     fixed += (2 if mtp else 1) * 32 * rows * 2560 * 4
     if indexed:
         fixed += 4 * (int(t.get("ple_conv_kernel_size", 4)) - 1) * int(t.get("ngram_size", 3)) * streams * d * 2
+        fixed += PREFILL_ROWS * _indexed_prefill_row(t, world, h, hk, hd, nv, dv, width, slots, intermediate)
     count = attention + int(mtp)
+    budget = int(t.get("indexer_budget", 2048))
     def bytes_at(capacity: int) -> int:
         if indexed:
             # Separate K/V arrays in both the main state and the lazy serial-reference twin.
             cache = 4 * count * capacity * hk * hd * 2
             cache += 2 * count * (capacity + (capacity + ratio - 1) // ratio) * index_dim * 2
-            scratch = (2 if mtp else 1) * rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
-            scratch += (2 if mtp else 1) * rows * ((capacity + ratio - 1) // ratio) * 4
+            # chunk partials cover the keys a row reads (at most the indexer budget and a block's tail)
+            chunks = (min(capacity, budget + ratio - 1) + 511) // 512
+            blocks = (capacity + ratio - 1) // ratio
+            scratch = (2 if mtp else 1) * rows * (h * (hd + 2) * chunks + blocks) * 4
+            scratch += PREFILL_ATT_ROWS * (h * (hd + 2) * chunks + blocks) * 4
         else:
-            # Only committed rows grow KV; speculative rows use separate workspace.
-            # Two retained independent prefixes, current state and a growth copy are bounded.
+            # Bound two retained prefixes, current KV state and a growth copy; speculative rows use separate workspace.
             rounded = 1 << (max(1024, capacity - reserve) - 1).bit_length()
             cache = 4 * attention * rounded * hk * hd * 4
             scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
         return fixed + cache + scratch
     return Geometry(bytes_at, reserve)
+
+
+def _indexed_prefill_row(t: dict, world: int, h: int, hk: int, hd: int, nv: int, dv: int, width: int, slots: int,
+                         moe: int) -> int:
+    """Bytes a row of Flash Next's prompt-chunk buffers holds, rounded up by group (``state.Buffers``)."""
+
+    d, streams = int(t["hidden_size"]), int(t.get("hc_count", 1))
+    heads, dim = int(t.get("indexer_n_heads", 4)), int(t.get("indexer_head_dim", 128))
+    experts, low = int(t.get("num_experts", 1)), int(t.get("hc_lowrank", 320))
+    ple = int(t.get("ple_embed_dim") or d)
+    return (21 * streams * d + (12 + 12 * world) * d + 4 * ple + 12 * h * hd + 4 * hk * hd + 6 * heads * dim
+            + 4 * experts + slots * (2 * moe + 2 * d + 24 + experts // 256) + 2 * width + 3 * nv * dv + 8 * low
+            + 12 * streams + 64)
 
 
 def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560) -> Geometry:
@@ -145,6 +165,8 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     extent += int(t.get("q_lora_rank", d)) * 2 + int(t.get("kv_lora_rank", d)) * 2
     extent += int(t.get("intermediate_size", width)) * 3 // world + int(t.get("index_n_heads", 32)) * index
     fixed += (2 if mtp else 1) * (16 * rows * extent * 4 + 8 * rows * 16384 * 4)
+    # prompt-chunk buffers: at most 5 row extents a row without the head
+    fixed += PREFILL_ROWS * 5 * (extent - int(t["vocab_size"]) // world)
     if (t.get("_quantization") or {}).get("quant_method") == "exl3":
         fixed += 128 * rows * slots * max(width, d) * 4
     count = attention + int(mtp)
@@ -158,15 +180,135 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     return Geometry(bytes_at, reserve, minimum_slots)
 
 
-def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False) -> Geometry:
+def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, streams: int = 1,
+                   kept: int = 0) -> Geometry:
     layers = int(t["num_hidden_layers"])
     heads = int(t["num_key_value_heads"]) // world
     hd = int(t["head_dim"])
     block = int((t.get("dflash_config") or {}).get("block_size", 16))
     window = int(t.get("sliding_window", 0))
     hidden = int(t["hidden_size"])
-    fixed = 16 * max(64, block) * (hidden + int(t["intermediate_size"])) * 4
+    fixed = 16 * max(64, streams * block) * (hidden + int(t["intermediate_size"])) * 4
+    copies = 2 * streams + kept      # a stream's context and the one its taps replace it with; each kept prompt end
     def bytes_at(capacity: int) -> int:
         slots = min(capacity, window) if bounded and window > 0 else capacity
-        return fixed + 4 * layers * heads * hd * (slots + block) * 2
+        return fixed + copies * 2 * layers * heads * hd * (slots + block) * 2
     return Geometry(bytes_at, reserve)
+
+
+def _gdn_dims(t: dict, world: int) -> tuple:
+    d, heads = int(t["hidden_size"]), int(t["num_attention_heads"])
+    nk, nv = int(t["linear_num_key_heads"]) // world, int(t["linear_num_value_heads"]) // world
+    dk, dv = int(t["linear_key_head_dim"]), int(t["linear_value_head_dim"])
+    return (d, heads // world, int(t["num_key_value_heads"]) // world, int(t.get("head_dim") or d // heads),
+            nk, nv, dk, dv, 2 * nk * dk + 2 * nv * dv + 2 * nv)
+
+
+def stream_geometry(t: dict, world: int, streams: int, keep: int) -> Geometry:
+    """The 27B's concurrent decoder: each live stream, ``keep`` cached prompt ends and rows for every window."""
+
+    linear, attention = layer_counts(t)
+    d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, world)
+    rows = 16 * streams
+    state = linear * (nv * dk * dv * 4 + (int(t["linear_conv_kernel_dim"]) - 1) * (2 * nk * dk + nv * dv) * 2)
+    # a commit writes a stream's new states before its old ones go; a cached end is added before the oldest leaves
+    fixed = (2 * streams + keep + 2) * state + linear * rows * (width * 2 + nk * dk * 4 + nv * dv * 4 + nv * 8)
+    slots = int(t.get("num_experts_per_tok", 1)) + 1
+    intermediate = int(t.get("moe_intermediate_size", t.get("intermediate_size", d))) // world
+    extent = d + int(t["vocab_size"]) // world + slots * (intermediate + d) + width + h * hd
+    fixed += 16 * max(128, rows) * extent * 4 + 32 * rows * 2560 * 4
+    def bytes_at(capacity: int) -> int:
+        kv = attention * capacity * hk * hd * 2 * 2
+        scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
+        return fixed + (streams + keep + 1) * kv + kv // max(1, attention) + scratch   # one layer's growth copy
+    return Geometry(bytes_at, 1)
+
+
+def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool) -> Geometry:
+    """Flash Next's concurrent decoder on one GPU: ``streams`` slots of ``each``-row windows and kept snapshots."""
+
+    linear, attention = layer_counts(t)
+    d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, 1)
+    hc = int(t.get("hc_count", 1))
+    index_dim, ratio = int(t.get("indexer_head_dim", 128)), int(t.get("indexer_compress_ratio", 4))
+    budget, rows = int(t.get("indexer_budget", 2048)), streams * each
+    rec = linear * nv * dk * dv * 4
+    conv = linear * (int(t["linear_conv_kernel_dim"]) - 1) * (2 * nk * dk + nv * dv) * 2
+    tail = (int(t.get("ple_conv_kernel_size", 4)) - 1) * int(t.get("ngram_size", 3)) * hc * d * 2
+    fixed = streams * (2 * rec + conv + tail + linear * each * (nk * dk * 4 + nv * dv * 4 + nv * 8))
+    fixed += (min(keep, streams) + 1) * (rec + conv + tail)     # a snapshot is taken before a kept one leaves
+    slots = int(t.get("num_experts_per_tok", 1)) + 1
+    moe = int(t.get("moe_intermediate_size", t.get("intermediate_size", d)))
+    extent = d * hc + int(t["vocab_size"]) + slots * (moe + d) + width + h * hd
+    fixed += (1 + mtp) * (linear * rows * width * 2 + 32 * max(rows, 4) * 2560 * 4) + 16 * max(64, rows) * extent * 4
+    fixed += PREFILL_ROWS * _indexed_prefill_row(t, 1, h, hk, hd, nv, dv, width, slots, moe)
+    count = attention + int(mtp)
+    def bytes_at(capacity: int) -> int:
+        blocks = (capacity + ratio - 1) // ratio
+        cache = streams * count * (2 * capacity * hk * hd + (capacity + blocks) * index_dim) * 2
+        chunks = (min(capacity, budget + ratio - 1) + 511) // 512
+        scratch = ((1 + mtp) * rows + PREFILL_ATT_ROWS) * (h * (hd + 2) * chunks + blocks + budget + ratio) * 4
+        return fixed + cache + scratch
+    return Geometry(bytes_at, each)
+
+
+def _pattern(t: dict) -> str:
+    if t.get("hybrid_override_pattern"):
+        return "".join(t["hybrid_override_pattern"])
+    return "".join({"mamba": "M", "attention": "*", "moe": "E", "mlp": "-"}[k] for k in t["layers_block_type"])
+
+
+def hybrid_geometry(t: dict, world: int, reserve: int, *, rows: int, chunk: int, drafts: bool,
+                    draft: int) -> Geometry:
+    """Nemotron-H: the engine and its serial twin, the MTP head, three prompt-end snapshots and the row buffers."""
+
+    pattern = _pattern(t)
+    nm, na = pattern.count("M"), pattern.count("*")
+    d, vocab, hd = int(t["hidden_size"]), int(t["vocab_size"]), int(t.get("head_dim") or 128)
+    heads, kv = int(t["num_attention_heads"]) // world, int(t["num_key_value_heads"]) // world
+    mh, mhd, ms = int(t["mamba_num_heads"]) // world, int(t["mamba_head_dim"]), int(t["ssm_state_size"])
+    cd = mh * mhd + 2 * (int(t["n_groups"]) // world) * ms
+    proj, qkv, experts = mh * mhd + cd + mh, (heads + 2 * kv) * hd, int(t["n_routed_experts"]) + 2
+    slots, width = int(t["num_experts_per_tok"]) + 2, int(t["moe_intermediate_size"])
+    extent = d + proj + qkv + slots * (width + d) + experts
+    state = nm * (mh * mhd * ms * 4 + (int(t["conv_kernel"]) - 1) * cd * 2 + 2 * rows * (2 * cd * 2 + mh * 4))
+    buffers = rows * (vocab * 2 + 4 * extent * 4) + PREFILL_ROWS * (2 * d + cd + slots * (width + d) + 8 * slots) * 2
+    fixed = 2 * buffers + 5 * state                  # the engine and its twin; three snapshots clone the state
+    fixed += 8 * max(rows, 64) * extent * 4 + PREFILL_ROWS * (d + proj + qkv + experts) * 4 * 4
+    row = d // 2 + d // 64 * 4                       # a 4-bit head row with its scales and biases
+    if world > 1:                                    # the rank's vocabulary scales and biases, and the partials
+        fixed += vocab // world * (d // 64) * 4 + 4 * PREFILL_ROWS * d * 4
+    if drafts:                                       # a draft list's rows, cut from the untiled head (24 B a weight)
+        fixed += rows * d * 2 + ((draft // world) * row + 24 * vocab * d if draft else 0)
+    def bytes_at(capacity: int) -> int:
+        length = -(-capacity // chunk) * chunk
+        cache = (2 + 3) * 2 * na * length * kv * hd * 2
+        cache += (1 + 3) * 2 * length * kv * hd * 2 if drafts else 0
+        scratch = (2 + int(drafts)) * rows * (length // chunk) * heads * (hd + 2) * 4
+        return fixed + cache + scratch
+    return Geometry(bytes_at, reserve)
+
+
+def hybrid_weights(world: int):
+    def transform(name: str, info: dict) -> tuple[int, int]:
+        shape = list(info["shape"])
+        if world > 1 and not info.get("split"):
+            tiles = ".switch_mlp." in name or ".shared_experts." in name
+            if tiles and (".fc1." in name or ".up_proj." in name):
+                halves = 1 if ".switch_mlp." in name else 2      # the shared expert folds in as two experts
+                shape[-2] = (shape[-2] // (64 * halves) + 1) // 2 * 64 * halves   # rank 0's larger tile share
+            elif tiles:                                   # the down projection's input columns, by the same tiles
+                unit, halves = (8 if info["dtype"] in ("U32", "I32") else 1), 1 if ".switch_mlp." in name else 2
+                shape[-1] = (shape[-1] // (unit * halves) + 1) // 2 * unit * halves
+            elif any(f".{p}." in name for p in ("q_proj", "k_proj", "v_proj", "in_proj", "conv1d")):
+                shape[0] //= world
+            elif any(f".{p}." in name for p in ("o_proj", "out_proj")):
+                shape[-1] //= world
+            elif name.endswith((".A_log", ".D", ".dt_bias", ".mixer.norm.weight")):
+                shape[0] //= world
+        cast = name.endswith((".A_log", ".D", ".dt_bias", ".e_score_correction_bias")) or ".conv1d." in name
+        amount = padded(info, shape, float32=cast)
+        if world > 1 and name.startswith("layers.") and shape != list(info["shape"]):
+            amount += padded(info, list(info["shape"]), float32=cast)   # the MTP head is kept whole beside its split
+        return amount, 0
+    return transform

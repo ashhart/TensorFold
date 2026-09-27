@@ -63,7 +63,7 @@ def populated(tokens=256):
 def controller(budget=1_000_000, store=None, runtime=None):
     model = SimpleNamespace(args=SimpleNamespace(num_attention_heads=1))
     return PromptMemory(budget, model, runtime=runtime or Runtime(), store=store, window_tokens=8192,
-                        overhead_bytes=0, bootstrap_bytes=0)
+                        overhead_bytes=0, bootstrap_bytes=0, chunk_rows=256)
 
 
 def test_large_first_request_refuses_after_bounded_chunk_and_names_a_fitting_prompt():
@@ -118,8 +118,10 @@ def test_freed_cache_and_nonmlx_footprint_are_reserved():
     assert memory.budget == 900
     assert runtime.cache == 0
     runtime.resident = 901
-    with pytest.raises(RequestError, match="process overhead"):
+    with pytest.raises(RequestError, match=r"of the 0\.0 GiB .* rest of the process") as error:
         memory.begin(32, 4)
+    assert "--prompt-cache-gib 0" not in str(error.value)     # retained prefixes were evicted before refusing
+    assert "reserved in full" in str(error.value) and "smaller --context" in str(error.value)
 
 
 def test_workspace_profile_survives_freed_buffers_and_released_probe_cache():
@@ -269,3 +271,230 @@ def test_oversized_disk_snapshot_is_skipped_before_tensor_load(monkeypatch, tmp_
     monkeypatch.setattr(prefix_snapshots, "read_metadata", lambda path: {"model": "fixture"})
     monkeypatch.setattr(prefix_snapshots, "load_snapshot", lambda *args: pytest.fail("snapshot allocated"))
     assert list(prefix_snapshots.load_snapshots(tmp_path, "fixture", allow=lambda path: False)) == []
+
+
+def test_a_short_first_chunk_does_not_fix_the_workspace_a_full_chunk_needs():
+    runtime = Runtime()
+    cache = populated()
+    runtime.caches.append(cache)
+    memory = controller(runtime=runtime)
+    memory.begin(64, 0)
+    memory.before_chunk(None, 64)
+    runtime.peak = runtime.get_active_memory() + 100
+    memory.after_chunk(cache, 64)
+    assert memory.observed_work == 100 and not memory.workspace_profiled
+    memory.end()
+    memory.begin(512, 0)
+    memory.before_chunk(cache, 256)
+    assert runtime.get_peak_memory() == runtime.get_active_memory()      # the full chunk's peak starts here
+    runtime.peak = runtime.get_active_memory() + 400
+    memory.after_chunk(cache, 256)
+    assert memory.observed_work == 400 and memory.workspace_profiled
+
+
+class ProbeEngine:
+    """Feeds a prompt in chunks through the prefill guard; each chunk peaks 400 bytes above what stays active."""
+
+    prefill_step = prefill_align = 256
+    prefill_guard = None
+
+    def __init__(self, runtime, carry=0):
+        self.runtime = runtime
+        self.probes, self.fed = [], []
+        self.carry = carry                    # held between chunks outside the cache (the last hidden states, taps)
+
+    def prefill_prefix(self, tokens, *, cache=None, cached_tokens=0):
+        self.probes.append(len(tokens))
+        self.fed = list(tokens)
+        done, cache = 0, None
+        while done < len(tokens):
+            rows = min(self.prefill_step, len(tokens) - done)
+            self.prefill_guard.before_chunk(cache, rows)
+            done += rows
+            cache = populated(-(-done // 256) * 256)
+            self.runtime.caches[:] = [cache]
+            self.runtime.resident += self.carry if done == rows else 0
+            self.runtime.peak = self.runtime.get_active_memory() + 400
+            self.prefill_guard.after_chunk(cache, rows)
+        self.runtime.caches.clear()
+        self.runtime.resident -= self.carry
+        self.runtime.cache += 1000            # the probe's buffers, freed
+        return cache
+
+
+def test_profile_probe_sizes_a_full_chunk_before_any_request_and_releases_it():
+    runtime = Runtime()
+    memory = controller(runtime=runtime)
+    engine = ProbeEngine(runtime)
+    memory.profile_probe(engine)
+    assert engine.probes == [256 + 64]
+    assert memory.workspace_profiled and memory.observed_work == 400
+    assert memory.profile.bytes_per_token == 4 and memory.profile.step == 256
+    assert engine.prefill_guard is None and runtime.cache == 0
+
+
+def test_largest_window_releases_retained_prefixes_and_freed_buffers_but_nothing_live():
+    runtime = Runtime(resident=1000)
+    store = CheckpointStore(3, copier=lambda cache: cache, budget_bytes=1 << 20, sizer=cache_nbytes)
+    memory = controller(budget=200_000, store=store, runtime=runtime)
+    memory.profile_probe(ProbeEngine(runtime))
+    empty = memory.largest_window(8192)
+
+    def total(tokens):
+        return runtime.resident + memory.profile.cache_bytes(tokens) + memory._work(tokens)
+
+    assert 0 < empty < 8192
+    assert total(empty) <= memory.budget < total(empty + 1)
+    store.insert([1], populated(4096), last_prompt=[1], pinned=True)
+    store.insert([2], populated(1024), last_prompt=[2])
+    runtime.get_active_memory = lambda: runtime.resident + store.nbytes
+    runtime.cache = 50_000
+    assert memory.largest_window(8192) == empty
+    assert memory.largest_window(100) == 100
+    runtime.resident += 100_000               # a live stream's memory is not released
+    assert memory.largest_window(8192) < empty
+    runtime.resident += 10**9
+    assert memory.largest_window(8192) == 0
+
+
+def test_growth_is_priced_per_entry_in_flight():
+    from tensorfold.server.memory_budget import CacheMemory
+
+    memory = controller()
+    memory.profile = CacheMemory(1000, 16 * 64, 256, 64)          # sixteen entries of 64 bytes a position
+    memory.observed_work = 500
+    assert memory._work(4096) == 500 + 1000 + 4096 * 2 * 64 + 2 * 144 * 1 * 4096 * 2
+
+
+def test_the_default_window_keeps_room_to_retain_the_prompt_for_the_next_turn():
+    runtime = Runtime(resident=1000)
+    store = CheckpointStore(3, copier=lambda cache: cache, budget_bytes=1 << 20, sizer=cache_nbytes)
+    memory = controller(budget=200_000, store=store, runtime=runtime)
+    memory.profile_probe(ProbeEngine(runtime))
+    bare, resumable = memory.largest_window(8192), memory.largest_window(8192, resumable=True)
+
+    def total(tokens, kept):
+        return (runtime.resident + (1 + kept) * memory.profile.cache_bytes(tokens) + memory._work(tokens))
+
+    assert 0 < resumable < bare
+    assert total(resumable, 1) <= memory.budget < total(resumable + 1, 1)
+    assert memory.fit_window(8192, True) == (resumable // 1024 * 1024 if resumable >= 1024 else resumable, True)
+    assert memory.fit_window(bare, False) == (bare, False)          # an explicit window up to the bare most fits
+    with pytest.raises(ValueError, match="does not fit"):
+        memory.fit_window(bare + 1, False)
+
+
+def test_concurrent_admission_counts_freed_buffers_and_retained_prefixes_as_reclaimable():
+    from tensorfold.engine.memory import Admission, StreamMemory
+
+    gib = 1024**3
+    runtime = Runtime(resident=19 * gib)          # the second pass's 48 GB state: weights, a live stream
+    runtime.cache = 6 * gib                       # freed buffers MLX keeps for reuse
+    store = CheckpointStore(3, copier=lambda cache: cache, budget_bytes=8 * gib, sizer=lambda cache: 3 * gib)
+    store.insert([1], [object()], last_prompt=[1])
+    runtime.get_active_memory = lambda: runtime.resident + store.nbytes
+    memory = PromptMemory(int(0.70 * 48 * gib), None, runtime=runtime, store=store)
+    stream = StreamMemory(64, 200 * 1024**2, 2112, 330 * 1024**2, 64 * 1024, 20_000.0, 2.0, gib // 2)
+    admission = Admission(memory.budget, stream, used=memory.held)
+    scheduler = Scheduler(SimpleNamespace(active_count=1), lanes=8, eos_ids=frozenset(), admission=admission,
+                          prompt_memory=memory)
+    job = ChatJob(job_id="second", prompt_ids=[1] * 8_000, max_tokens=4_096, temperature=0.0)
+    assert memory.held() == 19 * gib
+    assert memory.would_fit(8_000, 4_096) and scheduler._fits(job)
+
+
+def test_the_window_counts_what_a_request_holds_between_chunks_and_the_probe_reads_real_text():
+    runtime = Runtime(resident=1000)
+    memory = controller(budget=200_000, runtime=runtime)
+    engine = ProbeEngine(runtime, carry=3000)
+    text = list(range(7, 7 + 100))
+    memory.profile_probe(engine, tokens=text)
+    assert engine.fed[:100] == text and len(engine.fed) == 256 + 64       # the text, repeated to a full chunk
+    assert memory.carry == 3000 and runtime.resident == 1000
+    window = memory.largest_window(8192)
+
+    def total(tokens):
+        return runtime.resident + memory.carry + memory.profile.cache_bytes(tokens) + memory._work(tokens)
+
+    assert total(window) <= memory.budget < total(window + 1)
+
+
+def test_probe_text_is_this_modules_source_through_the_models_tokenizer():
+    from tensorfold.server.prompt_memory import probe_tokens
+
+    seen = []
+    tokens = probe_tokens(SimpleNamespace(encode=lambda text, add_special_tokens: seen.append(text) or [1, 2, 3]))
+    assert tokens == [1, 2, 3] and "class PromptMemory" in seen[0]
+    assert probe_tokens(object()) == []
+
+
+def test_sizing_releases_what_the_probes_left_in_reference_cycles():
+    import gc
+    import weakref
+
+    live = weakref.WeakSet()
+
+    class Buffer:                              # an array only a reference cycle keeps alive
+        def __init__(self):
+            live.add(self)
+            self.me = self
+
+    runtime = Runtime(resident=1000)
+    runtime.get_active_memory = lambda: 1000 + 100_000 * len(live) + sum(cache_nbytes(c) for c in runtime.caches)
+    memory = controller(budget=200_000, runtime=runtime)
+
+    def probes():
+        Buffer()                               # garbage the concurrency probes leave behind
+        return "admission"
+
+    gc.disable()
+    try:
+        assert memory.sized(ProbeEngine(runtime), probes) == "admission"
+        assert len(live) == 0
+    finally:
+        gc.enable()
+
+
+def test_sizing_releases_the_probes_last_round_before_measuring_the_model():
+    runtime = Runtime(resident=1000)
+    memory = controller(budget=200_000, runtime=runtime)
+    engine = ProbeEngine(runtime)
+    order = []
+
+    def release_rounds():                     # the family drops its last shared round's per-row states
+        order.append("release")
+        runtime.resident -= 150_000
+
+    engine.release_rounds = release_rounds
+
+    def probes():
+        order.append("concurrency")
+        runtime.resident += 150_000
+        return "admission"
+
+    original = engine.prefill_prefix
+    engine.prefill_prefix = lambda *a, **k: order.append("prompt") or original(*a, **k)
+    assert memory.sized(engine, probes) == "admission"
+    assert order == ["concurrency", "release", "prompt"]
+    assert memory.largest_window(8192) > 0
+
+
+def test_nemotron_releases_its_last_rounds_row_states():
+    from tensorfold.families.nemotron_h.model import NemotronH
+
+    family = NemotronH.__new__(NemotronH)
+    family.fused = SimpleNamespace(row_states={0: ("conv", "ssm")})
+    family._last_hidden = "hidden"
+    family.release_rounds()
+    assert family.fused.row_states == {} and family._last_hidden is None
+
+
+def test_the_engine_releases_rounds_only_with_no_stream_live():
+    engine = FakeEngine()
+    calls = []
+    engine.model.release_rounds = lambda: calls.append(1)
+    engine.release_rounds()
+    assert calls == [1]
+    engine._live = [(SimpleNamespace(finished=False), [])]
+    engine.release_rounds()
+    assert calls == [1]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tensorfold"
-version = "0.3.4.1"
+dynamic = ["version"]
 description = "Fast, exact LLM decoding on Apple Silicon (MLX) and NVIDIA GPUs (CUDA) behind an OpenAI-compatible endpoint"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,11 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-# Flash Next and Nemotron check at load that a multi-row forward reproduces one-row steps on the installed MLX
-# and GPU, and decode without drafts when it does not; the Qwen3.8 dense lane kernels do their own arithmetic.
-# mlx-lm stays below its next minor: TensorFold builds on its model classes and caches.
-# On Linux the CUDA engines take torch and triton from NVIDIA's PyTorch container (see RUNBOOK.md), so pip leaves
-# them alone; their kernels' .cu sources build on first use with the container's nvcc.
+# mlx-lm stays below its next minor (TensorFold builds on its models); CUDA uses the container's torch and triton.
 dependencies = [
   "mlx>=0.31.2; sys_platform == 'darwin'",
   "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin'",
@@ -50,11 +46,13 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "tensorfold.drafters.vendor.z_lab_dflash" = ["README.md"]
+"tensorfold.cuda" = ["*.cu", "*.cuh", "*.cpp"]
+"tensorfold.cuda.kernels" = ["*.cu", "*.cuh", "*.cpp"]
 "tensorfold.families.qwen3_5" = ["*.json"]
-"tensorfold.families.qwen3_5.cuda" = ["*.cu", "*.cpp"]
 "tensorfold.families.qwen4_exp.cuda" = ["*.cu", "*.cpp", "*.txt"]
 "tensorfold.families.nemotron_h" = ["*.txt"]
 "tensorfold.families.glm5_next.cuda" = ["*.cu", "*.cpp"]
+"tensorfold.families.nemotron_h.cuda" = ["*.cu", "*.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -62,3 +60,6 @@ pythonpath = ["src", "tests"]
 
 [tool.ruff]
 line-length = 120
+
+[tool.setuptools.dynamic]
+version = { attr = "tensorfold.__version__" }

@@ -1,9 +1,4 @@
-"""The forward's small kernels, one program per row (or per row and head): row-invariant by design.
-
-Each program reads only its own row, so a row's bits never depend on the other rows of a window.
-Where a matmul follows, the kernel also writes that matmul's 64-input group sums (fp32) from the
-bf16 values it stores, so the lane matmul need not read its input twice.
-"""
+"""Each kernel reads only its row and writes fp32 group sums from its stored bf16 values, preserving row bits independently of the window."""
 
 from __future__ import annotations
 
@@ -46,18 +41,20 @@ def add_rmsnorm(x: torch.Tensor, r: torch.Tensor | None, w: torch.Tensor, eps: f
 
 
 @triton.jit
-def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA,
-             C: tl.constexpr, KH: tl.constexpr, VH: tl.constexpr, DK: tl.constexpr, NKEEP: tl.constexpr):
-    """Program (row, head): conv over the row's 4 inputs, SiLU, then q/k RMS-scaled; v as is."""
+def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID,
+             C: tl.constexpr, KH: tl.constexpr, VH: tl.constexpr, DK: tl.constexpr, NKEEP: tl.constexpr,
+             MULTI: tl.constexpr):
+    """Program (row, head): conv, SiLU, RMS-scaled q/k, plain v; ``MULTI``: row r's conv rows at CS[SID[r] * NKEEP]."""
 
     row = tl.program_id(0)
     head = tl.program_id(1)                   # 0..KH-1 q, KH..2KH-1 k, then VH v heads
     ch = head * DK + tl.arange(0, DK)
     acc = tl.zeros((DK,), dtype=tl.float32)
+    cs_row = tl.load(SID + row) * NKEEP if MULTI else 0
     for j in tl.static_range(NKEEP + 1):
         src = tl.load(WIN + row * (NKEEP + 1) + j)
         from_state = src < NKEEP
-        xs = tl.load(CS + src * C + ch, mask=(ch < C) & from_state, other=0.0)
+        xs = tl.load(CS + (cs_row + src) * C + ch, mask=(ch < C) & from_state, other=0.0)
         xw = tl.load(QKV + (src - NKEEP) * C + ch, mask=(ch < C) & (src >= NKEEP), other=0.0)
         x = tl.where(from_state, xs, xw).to(tl.float32)
         w = tl.load(CW + ch * (NKEEP + 1) + j).to(tl.float32)
@@ -86,22 +83,22 @@ def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA,
 
 
 def gdn_pre(qkv: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor, windows: torch.Tensor,
-            a: torch.Tensor, b: torch.Tensor, A_log: torch.Tensor, dt_bias: torch.Tensor, *, kh: int, vh: int, dk: int):
-    """qkv (W, C) bf16; conv_state (n_keep, C); windows (W, n_keep+1) int32 rows of [conv_state; qkv].
-
-    Returns q, k (W, kh, dk) bf16, v (W, vh, dk) bf16, g and beta (W, vh) fp32.
-    """
+            a: torch.Tensor, b: torch.Tensor, A_log: torch.Tensor, dt_bias: torch.Tensor, *, kh: int, vh: int, dk: int,
+            stream_ids: torch.Tensor | None = None, nkeep: int | None = None):
+    """windows (W, nkeep + 1) index [conv_state; qkv]; given ``stream_ids``, state indices are per stream."""
 
     W, C = qkv.shape
-    nkeep = conv_state.shape[0]
+    nkeep = conv_state.shape[0] if nkeep is None else nkeep
     dev = qkv.device
     q = torch.empty((W, kh, dk), dtype=torch.bfloat16, device=dev)
     k = torch.empty((W, kh, dk), dtype=torch.bfloat16, device=dev)
     v = torch.empty((W, vh, dk), dtype=torch.bfloat16, device=dev)
     g = torch.empty((W, vh), dtype=torch.float32, device=dev)
     beta = torch.empty((W, vh), dtype=torch.float32, device=dev)
+    multi = stream_ids is not None
     _gdn_pre[(W, 2 * kh + vh)](qkv, conv_state, conv_w, windows, a, b, A_log, dt_bias, q, k, v, g, beta,
-                              C=C, KH=kh, VH=vh, DK=dk, NKEEP=nkeep, num_warps=2)
+                              stream_ids if multi else windows, C=C, KH=kh, VH=vh, DK=dk, NKEEP=nkeep, MULTI=multi,
+                              num_warps=2)
     return q, k, v, g, beta
 
 

@@ -1,10 +1,4 @@
-"""Nemotron-H (model_type ``nemotron_h``), e.g. Nemotron 3.5 Lightning 30B-A3B.
-
-``model``: mlx_lm's blocks with the backbone and head apart, decoded by the lane engine's family rounds
-(``engine.lane_family``) through ``kernels`` (TensorFold's fused decode); ``mtp``: the MTP head (converted from
-the BF16 release with ``mtp.convert``; the tested checkpoint ships it as ``mtp-4bit.safetensors``), whose chained
-drafts every round verifies, as many as pay at the measured window costs.
-"""
+"""Nemotron-H family support with fused decode kernels and verified MTP draft chains."""
 
 from __future__ import annotations
 
@@ -20,8 +14,7 @@ KERNEL_PACKAGE = "tensorfold.kernels.nemotron.lightning.v1"
 KERNEL_VERSION = "v1"
 # The long-context path also calls Qwen dense's lane attention kernel.
 KERNEL_DEPENDENCIES = ("tensorfold.kernels.qwen.dense.v1.lane_attention",)
-# MLX command buffers: up to 200 ops a buffer (MLX's default commits more often on this model's many small
-# kernels); set by the CLI before MLX starts, unless the environment already sets them
+# Set command-buffer limits before MLX starts, preserving explicit environment settings.
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}
 
 
@@ -95,3 +88,23 @@ def engine_settings(model: Any) -> dict[str, Any]:
 
     width = int(getattr(model, "exact_width", 1) or 1)
     return {"max_rows": width, "max_draft": max(0, width - 1)}
+
+
+# the CUDA engine's kernels read MLX affine weights of this (bits, group size)
+CUDA_QUANTIZATION = (4, 64)
+
+
+def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
+                master_port: int = 29571, no_drafts: bool = False, mtp_drafts: int | None = None,
+                context: int | None = None, **options: Any):
+    """The CUDA engine: MTP chains verified exactly on one GPU or two (``tp=2``; start rank 1 first)."""
+
+    if drafter:
+        raise ValueError(f"{TITLE} drafts with its own MTP head on CUDA: a separate draft model does not apply")
+    from .cuda import CONTEXT, DRAFTS
+    from .cuda.app import NemotronEngine
+
+    drafts = 0 if no_drafts else DRAFTS if mtp_drafts is None else int(mtp_drafts)
+    explicit = bool(options.get("context_explicit"))
+    return NemotronEngine(Path(model_dir), drafts=drafts, context=context if explicit else CONTEXT,
+                          context_explicit=explicit, tp=int(tp), rank=int(rank), master=master, port=int(master_port))

@@ -1,19 +1,11 @@
-"""Nemotron-H (model_type ``nemotron_h``): Mamba-2, attention and MoE blocks.
-
-Nemotron 3.5 Lightning 30B-A3B: 52 blocks (23 Mamba-2, 6 attention, 23 MoE with
-128 experts, top 6, and a shared expert), 4-bit weights in groups of 64. The
-blocks are mlx_lm's ``nemotron_h`` (its sanitize drops the MTP head); this
-module gives the lane engine's family rounds (``engine.lane_family``) the
-hidden/head split, the rollback and the MTP head's drafts they drive.
-"""
+"""Expose Nemotron-H backbone/head separation, cache rollback and MTP drafts to the lane engine."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-# the text the load-time window check decodes (real tokens route to experts the way decoding does, so the timed
-# costs are realistic)
+# Use real text for load-time checks so tokens exercise the experts reached during decoding.
 _CHECK_TEXT = ("def merge(intervals):\n    \"\"\"Merge overlapping intervals and return them sorted.\"\"\"\n"
                "    intervals = sorted(intervals)\n    out = [intervals[0]]\n    for start, end in intervals[1:]:\n"
                "        if start <= out[-1][1]:\n            out[-1][1] = max(out[-1][1], end)\n        else:\n"
@@ -22,11 +14,7 @@ _CHECK_TEXT = ("def merge(intervals):\n    \"\"\"Merge overlapping intervals and
 
 
 class NemotronH:
-    """mlx_lm's Nemotron-H with the backbone and the vocabulary head apart.
-
-    Up to ``fused_rows`` consecutive tokens (decode steps, verify windows) run through ``kernels``; longer inputs
-    (prompt chunks on the engine's prefill grid) through mlx_lm's forward. Both keep the same cache layout.
-    """
+    """Separate backbone and head, using fused kernels for short windows and mlx_lm for longer inputs with the same cache layout."""
 
     fused_rows = 16
     lane_family = True
@@ -34,8 +22,7 @@ class NemotronH:
     # a shared forward's rows and streams (``hidden_rows``): the lane matmul (M5) and ``rows.qmv`` keep a row's bits
     batch_rows = 128
     max_streams = 64
-    # the head drafts after a round is read, from the kept rows only: its GPU work overlaps the host's build of
-    # the next round
+    # Draft from kept rows after reading a round, overlapping GPU work with host preparation of the next round.
     speculate_early = False
     # the head's acceptance at depth 1, 2, ... given the ones before it, until a stream has its own
     draft_prior = (0.8, 0.72, 0.68, 0.62, 0.58, 0.55, 0.5, 0.5)
@@ -51,8 +38,7 @@ class NemotronH:
             from tensorfold.kernels.nemotron.lightning.v1 import rows
             from tensorfold.kernels.nemotron.lightning.v1.kernels import FusedDecode, tensor_units
 
-            # every row-count gets a row the same bits: the routed experts through the row-exact pair kernel, the
-            # dense projections and the head through the lane matmul (tensor units) or the row-exact matvecs
+            # Use row-exact expert and projection kernels so row counts cannot change a row's bits.
             self.fused = FusedDecode(model)
             if tensor_units():
                 self._install_lane_matmul()
@@ -60,8 +46,7 @@ class NemotronH:
                 print(f"[nemotron] row-exact kernels: {rows.install(self)}", flush=True)
         # the decode step takes its token as a GPU array: one-token rounds run one step ahead
         self.gpu_tokens = self.fused is not None
-        # the widest verify window whose every row gets a one-row forward's bits on this MLX and GPU, and each
-        # exact width's forward time (ms)
+        # Keep the widest serial-exact window and each exact width's forward time.
         self.exact_width, self.window_costs = (1, {})
         if self.fused is not None:
             self.exact_width, self.window_costs = self.check_windows(tokenizer)
@@ -73,7 +58,7 @@ class NemotronH:
         self.shared_costs = (self.time_shared_rows(tokenizer)
                              if self.fused is not None and self.multi_row_exact and self.batch_rows > self.exact_width
                              else {})
-        # the MTP head (converted from the BF16 release, see nemotron_mtp): drafts the token after next
+        # The MTP head drafts the token after next.
         self.mtp = None
         self.drafts = max(0, int(drafts))
         self.mtp_step_ms = 0.0
@@ -84,7 +69,7 @@ class NemotronH:
 
             self.mtp = nemotron_mtp.load(Path(mtp_path), model.args)
             self._draft_ids, self._draft_head = self._load_draft_head()
-            # drafts need no row-exactness: the head's projections keep MLX's own kernels, faster for one row
+            # Drafts need no row-exactness, so head projections use MLX kernels.
             _plain_matmuls(self.mtp)
             if self._draft_head is not None:
                 _plain_matmuls(self._draft_head)
@@ -97,9 +82,7 @@ class NemotronH:
                   f"{'off' if self.mtp is None else f'on, a step {self.mtp_step_ms:.2f} ms'}", flush=True)
 
     def _install_lane_matmul(self) -> None:
-        """On a GPU with tensor units: every dense 4-bit projection and the head through ``lane_qmm``, whose rows
-        get the same bits at any row count up to 128 by construction (MLX's own kernels match only up to 9), with
-        the weights regrouped in place."""
+        """Route dense 4-bit projections and the head through row-exact lane_qmm on tensor-unit GPUs, regrouping weights in place."""
 
         import mlx.nn as nn
 
@@ -130,9 +113,15 @@ class NemotronH:
             ids = [((37 * i + 11) % 50_000 + 1000) % int(self.args.vocab_size) for i in range(count)]
         return ids[:count]
 
+    def release_rounds(self) -> None:
+        """Drop the last call's per-row states and hidden rows (no stream keeps rows of it; the next call sets them)."""
+
+        if self.fused is not None:
+            self.fused.row_states = {}
+        self._last_hidden = None
+
     def check_windows(self, tokenizer: Any = None, *, widest: int | None = None) -> tuple[int, dict[int, float]]:
-        """The widest window (up to ``fused_rows``) whose every narrower window gives each row a one-row forward's
-        logits bit for bit, from a 48-token prompt; and every exact width's forward time in ms (fastest of 3)."""
+        """Return the widest window whose narrower windows all match serial logits bit for bit, with forward times for each exact width."""
 
         import time
 
@@ -205,12 +194,7 @@ class NemotronH:
         return costs
 
     def _load_draft_head(self) -> tuple[Any, Any]:
-        """The vocabulary head's rows for ``draft_ids.txt``: 32,768 ids, a quarter of the head, read by every draft
-        step. The list is the most frequent ids in public text, every id below 1,024, and the lowest unused ids as
-        padding. The text is CPython 3.14.5's standard library (its *.py files, site-packages excluded) and this
-        package's own tracked *.py and *.md files, 10.2M tokens: ``python tools/draft_vocab.py tokenizer.json
-        draft_ids.txt --size 32768 --min-count 1 'cpython/**/*.py' 'tensorfold/**/*.py' 'tensorfold/**/*.md'``.
-        A token outside the list is never drafted, which costs speed, never output."""
+        """Load vocabulary-head rows for draft_ids.txt; excluding tokens restricts drafts but cannot change verified output."""
 
         import mlx.core as mx
         import mlx.nn as nn
@@ -237,7 +221,7 @@ class NemotronH:
         return (self._draft_head if self._draft_head is not None else self.model.lm_head)(state)
 
     def _time_mtp_step(self) -> float:
-        """One chained draft step (the head on one row, its logits and a draw), fastest of 5, in ms."""
+        """Return the shortest measured duration of a chained draft step in milliseconds."""
 
         import time
 
@@ -270,8 +254,7 @@ class NemotronH:
 
         from tensorfold.families.nemotron_h.state_cache import RowStateCache
 
-        # attention layers alternate their decode writes between two buffers (no whole-cache copy a token
-        # while the pipelined step before still reads the cache); Mamba layers keep a shared forward's rows
+        # Alternate attention buffers while prior steps read them; retain Mamba rows for shared-forward commits.
         caches = [AlternatingKVCache() if type(c) is KVCache else RowStateCache(2) if type(c) is ArraysCache else c
                   for c in self.model.make_cache()]
         if self.mtp is not None:
@@ -335,8 +318,7 @@ class NemotronH:
         return len(path)
 
     def hidden_rows(self, windows: list[Any], caches: list[list[Any]], parents: list[Any] | None = None) -> Any:
-        """Several streams' windows in one forward: rows laid out stream by stream, stream i's rows advancing only
-        ``caches[i]``; [1, N, D]. Each row gets the bits its stream's own call gives it."""
+        """Return grouped stream rows [1, N, D], advancing only each stream's own cache and preserving standalone bits."""
 
         import mlx.core as mx
 
@@ -354,8 +336,7 @@ class NemotronH:
         return out
 
     def keep_rows_streams(self, caches: list[list[Any]], lengths: tuple[int, ...], keeps: tuple[Any, ...]) -> None:
-        """After ``hidden_rows``: stream i keeps the first ``keeps[i]`` of its ``lengths[i]`` rows (a count, or the
-        path of a chain); not the MTP's cache."""
+        """Keep each stream's window prefix after hidden_rows, leaving MTP caches to their own commit path."""
 
         self.fused.keep_rows_streams(caches, lengths, tuple(self._kept(k) for k in keeps))
 
@@ -373,15 +354,13 @@ class NemotronH:
             mcache.drafted = 0
 
     def _head_step(self, hidden: Any, embeddings: Any, mcache: Any, tail: int | None) -> Any:
-        """The MTP head on rows (main-model hidden [1, R, D], next tokens' embeddings [1, R, D]): every row enters
-        its cache, the last ``tail`` rows (all if None) go on through its MoE block; [1, tail, D] normed, or None."""
+        """Cache all hidden/embedding rows, then run the last tail rows through the MTP MoE block, or all rows if tail is None."""
 
         return self.mtp(hidden, embeddings, mcache, tail=tail)
 
     def _head_rows(self, hidden: Any, embeddings: Any, mcaches: list[Any], lengths: tuple[int, ...],
                    last_only: bool) -> Any:
-        """The head on several streams' rows at once (the fused decode's kernels): every row enters its stream's head
-        cache; each stream's last row (``last_only``) or every row goes on through the MoE block. [1, S or N, D]."""
+        """Cache each stream's rows and return [1, S or N, D] after running its last row or all rows through the MTP MoE block."""
 
         import mlx.core as mx
 
@@ -414,10 +393,7 @@ class NemotronH:
 
     def draft_streams(self, caches: list[list[Any]], follows: list[list[int]], rows: list[list[int]],
                       positions: list[int], samplings: list[Any], depths: list[int]) -> list[Any]:
-        """Several streams' heads at once, after a shared round: stream i's head absorbs its kept rows (``rows[i]``
-        of the last ``hidden_rows`` call, consecutive, the k-th followed by ``follows[i][k]``) and drafts
-        ``depths[i]`` tokens for positions ``positions[i]``, ...; the chains step together, one head forward a depth
-        for every stream still drafting. Returns each stream's drafts (lazy uint32 arrays, [] for depth 0)."""
+        """Absorb each stream's consecutive kept rows with their following tokens, then draft chains together as lazy uint32 arrays, or [] at depth zero."""
 
         import mlx.core as mx
 
@@ -467,8 +443,7 @@ class NemotronH:
         return result
 
     def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any], start: int = 0) -> None:
-        """Extend the MTP head's cache with rows it will not draft from (prompt positions): its attention
-        block only."""
+        """Extend the MTP cache with prompt rows through attention only, without drafting from them."""
 
         mcache = cache[-1]
         self._trim_chained(mcache)
@@ -477,9 +452,7 @@ class NemotronH:
 
     def speculate(self, cache: list[Any], tokens: Any, position: int, sampling: Any, start: int = 0,
                   last_only: bool = False, rows: list[int] | None = None) -> Any:
-        """The head absorbs rows ``start`` .. of the last ``hidden`` call, row start + i followed by tokens[i] (a
-        GPU array, unread), and draws each row's first draft for position ``position`` + 2 + i (``last_only``:
-        the last row's only; the others go through its attention block alone). Lazy [n] or [1]."""
+        """Absorb rows from start with their following tokens and lazily draft at position + 2 + i, optionally drafting only from the final row."""
 
         from tensorfold.engine.gpu_sampling import sample as gpu_sample
 
@@ -502,9 +475,7 @@ class NemotronH:
         return gpu_sample(logits.reshape(logits.shape[1:]), sampling, drafted, ids=self._draft_ids)
 
     def settle(self, cache: list[Any], keep: int, first: Any, position: int, sampling: Any, count: int) -> Any:
-        """After ``speculate``: the head keeps its first ``keep`` rows; ``count`` drafts for positions
-        ``position``, ...: ``first`` (the kept row's draft) and count - 1 chained on the head's own output, queued
-        on the GPU (a lazy uint32 array the next round feeds unread)."""
+        """Keep the first keep MTP rows and return first plus chained drafts at successive positions as a lazy uint32 array."""
 
         import mlx.core as mx
 
@@ -539,8 +510,7 @@ class NemotronH:
 
 
 def _plain_matmuls(module: Any) -> None:
-    """Every quantized linear under ``module`` (and ``module`` itself) with MLX's own quantized matmul, whatever
-    kernel a lane install routes ``nn.QuantizedLinear`` calls to."""
+    """Route module and its quantized linears through MLX quantized matmul regardless of installed lane routing."""
 
     import mlx.nn as nn
 
@@ -572,8 +542,7 @@ MTP_FILE = "mtp-4bit.safetensors"
 
 
 def find_mtp_head(model_dir: Path, choice: str = "") -> Path | None:
-    """The converted MTP head: ``choice`` (or TF_NEMOTRON_MTP; "0": none), else ``mtp-4bit.safetensors`` beside the
-    weights (the TensorFold-tested checkpoint ships it), else the one ``mtp.convert`` writes by default."""
+    """Resolve an explicit or environment-selected MTP head, then a sibling checkpoint or the default directory; "0" disables it."""
 
     import os
 
@@ -591,8 +560,7 @@ def find_mtp_head(model_dir: Path, choice: str = "") -> Path | None:
 
 
 def load(model_dir: Path, *, mtp_head: str = "", mtp_drafts: int | None = None) -> tuple[Any, Any]:
-    """The model, with its MTP head when one is found (``find_mtp_head``) and ``mtp_drafts`` is not 0: every round
-    then verifies the head's drafts, up to ``mtp_drafts`` (default 4, the engine picks each round's depth)."""
+    """Load the model with an available MTP head unless mtp_drafts is zero, verifying every draft within the configured depth limit."""
 
     from mlx_lm import load as mlx_load
 

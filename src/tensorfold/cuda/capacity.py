@@ -43,6 +43,8 @@ class Plan:
     budget: int
     weights: Weights
     geometry: Geometry
+    keeps_tables: bool | None = None   # a default window sized so the mapped tables keep their pages
+    largest: int = 0                   # the largest window the budget fits up to the native one: what a restart gets
 
     @property
     def settings(self) -> list[int]:
@@ -60,7 +62,7 @@ class Plan:
                 "total_bytes_estimate": self.weights.resident + max(self.weights.staging, self.geometry.needed(window)),
                 "full_mapped_working_set_bytes_estimate": self.weights.resident +
                 max(self.weights.staging, self.geometry.needed(window)) + self.weights.mapped,
-                "mapped_pages_reclaimable": True}
+                "mapped_pages_reclaimable": True, "mapped_tables_resident": self.keeps_tables}
 
 
 def config(model_dir: str | Path) -> dict:
@@ -70,9 +72,9 @@ def config(model_dir: str | Path) -> dict:
     return text
 
 
-def headers(model_dir: str | Path, *, rank: int | None = None) -> dict:
+def headers(model_dir: str | Path, *, rank: int | None = None, files: list[Path] | None = None) -> dict:
     path = Path(model_dir)
-    files = sorted(path.glob(f"*.rank{rank}.safetensors")) if rank is not None else []
+    files = list(files or []) or (sorted(path.glob(f"*.rank{rank}.safetensors")) if rank is not None else [])
     if not files:
         other = sorted(path.glob("*.rank*.safetensors"))
         if other:
@@ -102,10 +104,11 @@ def headers(model_dir: str | Path, *, rank: int | None = None) -> dict:
     return out
 
 
-def estimate_weights(model_dir: str | Path, transform: Callable, *, rank: int | None = None) -> Weights:
+def estimate_weights(model_dir: str | Path, transform: Callable, *, rank: int | None = None,
+                     files: list[Path] | None = None) -> Weights:
     layers: dict[str, int] = {}
     resident = mapped = largest = 0
-    for name, info in headers(model_dir, rank=rank).items():
+    for name, info in headers(model_dir, rank=rank, files=files).items():
         size, host = transform(name, info)
         size, host = int(size), int(host)
         if min(size, host) < 0:
@@ -121,22 +124,44 @@ def estimate_weights(model_dir: str | Path, transform: Callable, *, rank: int | 
     return Weights(resident, staging, mapped)
 
 
-def available_bytes(torch) -> int:
-    free, total = map(int, torch.cuda.mem_get_info())
-    reserve = max(4 * GIB, math.ceil(total / 10))
-    available = max(0, free - reserve)
-    # Unified devices share RAM with CPU tensor staging; discrete devices remain conservatively bounded.
+def _meminfo() -> dict | None:
     try:
         rows = Path("/proc/meminfo").read_text().splitlines()
         memory = {key.rstrip(":"): int(value) * 1024 for key, value, *_ in (row.split() for row in rows)}
-        available = min(available, max(0, memory["MemAvailable"] - max(4 * GIB, memory["MemTotal"] // 10)))
-    except (OSError, KeyError, ValueError):
-        pass
-    return available
+    except (OSError, ValueError):
+        return None
+    return memory if {"MemTotal", "MemAvailable"} <= memory.keys() else None
+
+
+def unified(torch) -> bool:
+    """A GPU on the host's memory (GB10): its free figure is MemFree, which counts the page cache as used."""
+
+    try:
+        return bool(torch.cuda.get_device_properties(0).is_integrated)
+    except (AttributeError, AssertionError, RuntimeError):
+        return False
+
+
+def available_bytes(torch) -> int:
+    free, total = map(int, torch.cuda.mem_get_info())
+    available = max(0, free - max(4 * GIB, math.ceil(total / 10)))
+    memory = _meminfo()
+    if memory is None:
+        return available
+    host = max(0, memory["MemAvailable"] - max(4 * GIB, memory["MemTotal"] // 10))
+    # one pool on a unified GPU: reclaimable page cache is available; a discrete GPU is bounded by both
+    return host if unified(torch) else min(available, host)
+
+
+def page_room(torch) -> int | None:
+    """What caches and mapped read-only tables share on a unified GPU (MemAvailable); None on a discrete GPU."""
+
+    memory = _meminfo()
+    return memory["MemAvailable"] if memory is not None and unified(torch) else None
 
 
 def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
-              weights: Weights, geometry: Geometry) -> Plan:
+              weights: Weights, geometry: Geometry, room: int | None = None) -> Plan:
     native = int(native)
     requested = None if requested is None else int(requested)
     if requested is not None and requested < 0:
@@ -145,17 +170,24 @@ def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
     if target <= 0:
         raise ValueError("checkpoint has no native window; give an explicit positive --context")
     upper = min(target, native) if native > 0 else target
-    low, high = 0, upper
-    fixed = weights.resident
-    if fixed + weights.staging > budget:
-        high = 0
-    while low < high:
-        middle = (low + high + 1) // 2
-        if fixed + geometry.needed(middle) <= budget:
-            low = middle
-        else:
-            high = middle - 1
-    return Plan(native, requested, bool(explicit), low, int(budget), weights, geometry)
+
+    def fit(ceiling: int, top: int = upper) -> int:
+        low, high = 0, 0 if weights.resident + weights.staging > budget else top
+        while low < high:
+            middle = (low + high + 1) // 2
+            if weights.resident + geometry.needed(middle) <= ceiling:
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    fitting, keeps = fit(budget), None
+    if not explicit and weights.mapped and room is not None:
+        # a default window leaves the mapped tables their pages (page cache, like the reserve); else they page
+        resident = fit(min(budget, room - weights.mapped))
+        fitting, keeps = (resident, True) if resident else (fitting, False)
+    largest = fit(budget, native if native > 0 else target)
+    return Plan(native, requested, bool(explicit), fitting, int(budget), weights, geometry, keeps, largest)
 
 
 def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
@@ -171,7 +203,10 @@ def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
                          f"estimated fitting prompt-plus-reply capacity is {fitting} tokens; reduce --context and "
                          "the prompt/reply reserve, or free memory/use smaller weights")
     if fitting <= 0 or (plan.explicit and plan.requested and target > fitting):
-        raise ValueError(f"CUDA startup memory budget cannot fit requested context {target}; estimated largest fitting "
+        kind = "native" if target == plan.native else "default"
+        wanted = (f"requested context {target}" if plan.explicit and plan.requested
+                  else f"the {target}-token {kind} window or any smaller one")
+        raise ValueError(f"CUDA startup memory budget cannot fit {wanted}; estimated largest fitting "
                          f"prompt-plus-reply window: {fitting} tokens across the ranks. " +
                          (f"Use --context {fitting} with a smaller prompt/reply reserve, or " if fitting else "Please ") +
                          "free memory or use smaller/quantized weights; no model weights "
@@ -181,7 +216,9 @@ def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
 
 def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, torch,
           geometry: Geometry | Callable, transform: Callable, *, rank: int = 0, world: int = 1,
-          gather: Callable | None = None, draft_dir: Path | None = None, draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0) -> dict:
+          gather: Callable | None = None, draft_dir: Path | None = None,
+          draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
+          extra_files: tuple[Path, ...] = (), files: list[Path] | None = None) -> dict:
     """Reach the same refusal or capacity before either rank allocates model tensors."""
 
     error = None
@@ -189,7 +226,10 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
     try:
         text = config(model_dir)
         geometry = geometry(text) if callable(geometry) else geometry
-        weights = estimate_weights(model_dir, transform, rank=rank)
+        weights = estimate_weights(model_dir, transform, rank=rank, files=files)
+        if extra_files:                      # loaded after the model with the same layout (Nemotron's MTP head)
+            more = estimate_weights(model_dir, transform, files=list(extra_files))
+            weights = Weights(weights.resident + more.resident, max(weights.staging, more.staging), weights.mapped)
         weights = Weights(weights.resident, weights.staging + startup_copies * weights.resident, weights.mapped)
         if draft_dir is not None:
             draft = estimate_weights(draft_dir, lambda name, info: (math.prod(info["shape"]) *
@@ -202,19 +242,22 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
                                     main.reserve, main.minimum_slots)
         plan = make_plan(int(text.get("max_position_embeddings") or 0), requested,
                          requested is not None if explicit is None else explicit,
-                         available_bytes(torch), weights, geometry)
+                         available_bytes(torch), weights, geometry, room=page_room(torch))
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
         error = str(exc)
-    status = [1 if error else 0, *(plan.settings + [plan.fitting] if plan else [0, -1, 0, 0])]
+    status = [1 if error else 0, *(plan.settings + [plan.fitting, plan.largest] if plan else [0, -1, 0, 0, 0])]
     both = gather(status) if world > 1 else [status]
     if any(row[0] for row in both):
         raise ValueError("CUDA startup memory geometry could not be established on every rank: " +
                          (error or "another rank could not read its checkpoint; check both folders/configs"))
     window = choose(plan, [row[1:] for row in both])
-    receipt = plan.receipt(window)
+    receipt = {**plan.receipt(window), "largest_window": min(row[5] for row in both)}
     print(f"[tensorfold] CUDA rank {rank} startup estimate {receipt['total_bytes_estimate'] / GIB:.2f} GiB "
           f"within {plan.budget / GIB:.2f} GiB; native {plan.native}, allocated prompt/reply window {window}, "
           f"cache slots {receipt['cache_slots']}", flush=True)
+    if plan.keeps_tables is False:
+        print(f"[tensorfold] the {plan.weights.mapped / GIB:.1f} GiB of mapped tables do not fit beside the weights "
+              "and caches: lookups will page them from disk (free memory to keep them resident)", flush=True)
     return receipt
 
 

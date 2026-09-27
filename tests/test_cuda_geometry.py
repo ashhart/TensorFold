@@ -19,6 +19,10 @@ class Allocation:
         return 2 if self.dtype in ("bf16", "fp16", "int16") else 4
     def __getitem__(self, index):
         return self
+    def __add__(self, other):            # arange(rows)[:, None] + arange(k): the [rows, k] tap table
+        return Allocation(self.shape + other.shape, self.dtype, self.device)
+    def contiguous(self):
+        return self
 
 
 @pytest.fixture
@@ -41,6 +45,7 @@ def allocations(monkeypatch):
     fake = SimpleNamespace(bfloat16="bf16", float16="fp16", float32="fp32", int16="int16", int32="int32", int64="int64",
                            zeros=allocate, empty=allocate, full=lambda shape, fill, **kw: allocate(shape, **kw),
                            zeros_like=lambda x: allocate(x.shape, dtype=x.dtype, device=x.device),
+                           arange=lambda n, **kw: allocate((n,), **kw),
                            cuda=SimpleNamespace(is_available=lambda: False))
     # Imports use real torch annotations; only the allocation sites are replaced.
     try:
@@ -65,7 +70,7 @@ def bytes_in(arrays):
 @pytest.mark.parametrize("mtp", [False, True])
 def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, allocations, world, mtp):
     arrays, fake = allocations
-    mod = importlib.import_module("tensorfold.families.qwen4_exp.cuda.forward")
+    mod = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
     gdn = importlib.import_module("tensorfold.families.qwen4_exp.cuda.gdn")
     monkeypatch.setattr(mod, "torch", fake)
     monkeypatch.setattr(gdn, "torch", fake)
@@ -87,10 +92,12 @@ def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, alloc
     mod.Buffers(weights, 64, slots)
     if mtp:
         mod.Buffers(weights, 64, slots)
+    mod.Buffers(weights, 2048, slots, prefill=True)     # the prompt chunks' buffers, as ``decode.Engine`` makes them
     mod.State(weights, slots, 64)
     mod.State(weights, slots, 64)  # the actual serial-reference twin constructor
     estimated = geometry.gdn_geometry(text, world, 7, indexed=True, mtp=mtp).bytes_at(slots)
-    assert bytes_in(arrays) <= estimated
+    kv = 2 * 2 * 2 * slots * cfg.kv_heads * cfg.head_dim * 2     # two states' K and V of two attention layers
+    assert kv <= bytes_in(arrays) <= estimated
 
 
 @pytest.mark.parametrize("mtp", [False, True])
@@ -118,8 +125,10 @@ def test_mla_actual_cache_and_replay_state_are_budgeted(monkeypatch, allocations
     mod.Buffers(weights, 64, slots)
     if mtp:
         mod.Buffers(weights, 64, slots)
+    mod.Buffers(weights, 2048, slots, prefill=True)     # the prompt chunks' buffers, as ``decode.Engine`` makes them
     mod.State(weights, slots, 64)
     estimated = geometry.mla_geometry(text, 2, 8).bytes_at(slots)
+    assert any(slots in t.shape for t in arrays)             # the constructors ran on the fake allocator
     assert bytes_in(arrays) <= estimated
 
 

@@ -11,7 +11,7 @@ import torch
 from tensorfold.engine.exact_sampling import Sampling
 
 from .forward import State, _paths, commit, tree_forward
-from .sampling import sample_rows
+from tensorfold.cuda.sampling import sample_rows
 from .weights import Weights
 
 
@@ -19,7 +19,7 @@ def clone_state(st: State) -> State:
     """The committed tensors are immutable; commits replace their list entries."""
 
     other = object.__new__(State)
-    other.pos = st.pos
+    other.pos, other.limit = st.pos, st.limit
     other.conv = st.conv.copy()
     other.rec = st.rec.copy()
     other.kv = st.kv.copy()
@@ -33,30 +33,18 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
 @torch.no_grad()
 def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
             draft=None, *, state: State | None = None) -> tuple[State, int]:
-    """Commit the prompt in exact 128-row chains and sample the first output.
+    """Commit the prompt and sample the first token; resuming a prompt-end ``state`` gives a fresh prefill's bits."""
 
-    ``state``: a committed state for the prompt's first ``state.pos`` tokens (prefix reuse); only the
-    rest is processed. Rows never depend on their chain-mates, so the result equals a fresh prefill.
-    """
+    from .forward import _mm
+    from .prefill import prefill_state
 
     if not prompt:
         raise ValueError("prefill requires at least one token")
     st = clone_state(state) if state is not None else State(w)
     if st.pos >= len(prompt):
         raise ValueError("a reused state must leave at least one prompt token to process")
-    last_logits = None
-    for start in range(st.pos, len(prompt), 128):
-        chunk = prompt[start:start + 128]
-        parents = list(range(-1, len(chunk) - 1))
-        if draft is None:
-            logits, record = tree_forward(w, _tokens(chunk, w.norm.device), parents, st)
-        else:
-            logits, record, taps = tree_forward(
-                w, _tokens(chunk, w.norm.device), parents, st, capture_taps=True)
-            draft.add_taps(taps)
-        last_logits = logits[-1:]
-        commit(st, record, list(range(len(chunk))))
-    pending = sample_rows(last_logits, [len(prompt)], sampling)[0]
+    normed = prefill_state(w, prompt, st, draft=draft)
+    pending = sample_rows(_mm(normed, w.head), [len(prompt)], sampling)[0]
     return st, pending
 
 
@@ -72,7 +60,6 @@ class DecodeResult:
     sample_seconds: float = 0.0
     commit_seconds: float = 0.0
     widths: list[int] = field(default_factory=list)
-    state: "State | None" = None          # the committed state after the last round (for prefix reuse)
 
     @property
     def tokens_per_second(self) -> float:
@@ -101,7 +88,7 @@ def serial_decode(w: Weights, st: State, pending: int, count: int,
 
 
 class CopyIndex:
-    """Where each ``min_match``-gram of the context occurs, kept up to date as the context grows."""
+    """Index earlier suffix matches and propose the longest continuation, breaking ties by latest occurrence and requiring ``min_match`` tokens."""
 
     def __init__(self, min_match: int = 8):
         self.n = min_match
@@ -110,8 +97,7 @@ class CopyIndex:
 
     def update(self, context: Sequence[int]) -> None:
         n = self.n
-        # a gram starting at s is complete once s + n <= len(context); the gram at the very end is
-        # the query itself and is added on the next update, so a match is always an earlier one
+        # Index complete grams except the trailing query itself so matches always refer to earlier occurrences.
         last = len(context) - n
         for start in range(self.indexed, last):
             self.positions.setdefault(tuple(context[start:start + n]), []).append(start)
@@ -185,12 +171,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
                  allow_copy: bool = True, stop_eos: bool = True,
                  on_tokens: Callable[[list[int]], bool | None] | None = None,
                  trace: list | None = None) -> DecodeResult:
-    """Verify a 128-node tree, keep one matching path, replay it, and repeat.
-
-    ``trace``: a list that receives one record per round (proposal source, rows, depth reached, nodes
-    per depth, accepted drafts, why the round stopped, and at a miss whether the target's token was
-    among the drafter's candidates for that depth). Host bookkeeping only; tokens are unchanged.
-    """
+    """Verify trees and replay matching paths, with optional host-only trace records that leave output tokens unchanged."""
 
     if count < 1 or not 1 <= max_rows <= 128:
         raise ValueError("count >= 1 and 1 <= max_rows <= 128 required")
@@ -272,4 +253,4 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
             stopped = bool(on_tokens([tokens[row] for row in path[1:]] + [terminal]))
     return DecodeResult(out, time.perf_counter() - start, rounds, drafted_rows,
                         accepted_drafts, stages["draft"], stages["verify"],
-                        stages["sample"], stages["commit"], widths, state=st)
+                        stages["sample"], stages["commit"], widths)

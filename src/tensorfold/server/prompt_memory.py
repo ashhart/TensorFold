@@ -7,7 +7,7 @@ from threading import RLock
 from typing import Any
 
 from tensorfold.server.errors import RequestError
-from tensorfold.server.memory_budget import CacheMemory, GIB, cache_nbytes
+from tensorfold.server.memory_budget import PROCESS_BYTES, CacheMemory, GIB, cache_nbytes, process_footprint
 
 
 def attention_geometry(model: Any) -> tuple[int, int]:
@@ -50,17 +50,33 @@ def attention_geometry(model: Any) -> tuple[int, int]:
     return (max(fallback) if fallback else 0 if configurations else -1), rows
 
 
+def probe_tokens(tokenizer: Any) -> list[int]:
+    """Real text for the admission's probe: this module's source, as the model's tokenizer reads it."""
+
+    from pathlib import Path
+
+    try:
+        return [int(t) for t in tokenizer.encode(Path(__file__).read_text(), add_special_tokens=False)]
+    except Exception:  # noqa: BLE001 - a tokenizer that can't: the probe falls back to synthetic ids
+        return []
+
+
 class PromptMemory:
     """One model's profile, learned from a request's first existing prefill chunk."""
 
     def __init__(self, budget_bytes: int, model: Any, *, runtime: Any = None, store: Any = None,
-                 window_tokens: int = 0, overhead_bytes: int = 4 * GIB, bootstrap_bytes: int = 256 * 1024**2):
+                 window_tokens: int = 0, overhead_bytes: int = PROCESS_BYTES, bootstrap_bytes: int = 256 * 1024**2,
+                 chunk_rows: int = 2048):
         if runtime is None:
             import mlx.core as runtime
         self.runtime, self.store = runtime, store
+        self.process_budget = int(budget_bytes)      # the whole process; ``budget`` is MLX's share of it
         self.budget = max(0, int(budget_bytes) - int(overhead_bytes))
         self.bootstrap = int(bootstrap_bytes)
         self.window = int(window_tokens)
+        self.chunk_rows = max(1, int(chunk_rows))     # a full prompt chunk: only its peak sizes the workspace
+        self.affordable: int | None = None
+        self.carry, self._probe_base = 0, None
         self.heads, self.score_rows = attention_geometry(model)
         self.profile: CacheMemory | None = None
         self.observed_work = 0
@@ -71,13 +87,22 @@ class PromptMemory:
     def memory_snapshot(self, reset_peak: bool = False) -> dict[str, int]:
         with self._memory_lock:
             memory = {"active": int(self.runtime.get_active_memory()),
-                      "cache": int(self.runtime.get_cache_memory()), "peak": int(self.runtime.get_peak_memory())}
+                      "cache": int(self.runtime.get_cache_memory()), "peak": int(self.runtime.get_peak_memory()),
+                      "budget": self.process_budget, "mlx_budget": self.budget}
+            footprint = process_footprint()
+            if footprint is not None:
+                memory["footprint"] = footprint
             if reset_peak and (not self.prompt or self.workspace_profiled):
                 self.runtime.reset_peak_memory()
             return memory
 
     def _used(self) -> int:
         return int(self.runtime.get_active_memory() + self.runtime.get_cache_memory())
+
+    def held(self) -> int:
+        """MLX memory no admission can take back: live buffers less retained prefixes (freed buffers count as free)."""
+
+        return max(0, int(self.runtime.get_active_memory()) - (self.store.nbytes if self.store is not None else 0))
 
     def _reclaim(self, keep: Any = None) -> bool:
         before = self._used()
@@ -105,8 +130,8 @@ class PromptMemory:
     def _work(self, tokens: int) -> int:
         if self.profile is None:
             return self.bootstrap
-        # Queued layer forwards can hold the old KV timelines while growth allocates their replacements.
-        growth = self.profile.cache_bytes(tokens)
+        # MLX's limit is this budget, so its eval waits on queued work before more old buffers than this pile up
+        growth = self.profile.growth_bytes(tokens)
         scores = 2 * self.score_rows * max(0, self.heads) * int(tokens) * 2
         return max(self.bootstrap, self.observed_work) + growth + scores
 
@@ -160,11 +185,13 @@ class PromptMemory:
             else:
                 hi = mid - 1
         needed = self.projected(self.prompt, current_cache=current_cache)
-        return RequestError(f"This request needs about {needed / GIB:.1f} GiB of MLX memory against a "
-                            f"{self.budget / GIB:.1f} GiB budget after reserving process overhead; this server "
-                            f"fits up to {lo:,} tokens in the prompt with {self.reply:,} reply tokens. "
-                            "Reduce the prompt or max_tokens, disable retained prefixes with --prompt-cache-gib 0, "
-                            "or use a smaller or more quantized checkpoint or a Mac with more RAM.")
+        return RequestError(f"This request needs about {needed / GIB:.1f} GiB of the {self.budget / GIB:.1f} GiB "
+                            f"MLX may use (this server's {self.process_budget / GIB:.1f} GiB memory budget less "
+                            f"{(self.process_budget - self.budget) / GIB:.1f} GiB for the rest of the process); it "
+                            f"fits up to {lo:,} tokens in the prompt with {self.reply:,} reply tokens. Shorten the "
+                            "prompt or max_tokens (the reply is reserved in full), or start the server with a smaller "
+                            "--context so clients compact sooner; --drafter none, a smaller or more quantized "
+                            "checkpoint, or a Mac with more RAM leaves more room.")
 
     def before_chunk(self, cache: Any, rows: int) -> None:
         self.require(cache if self.profile is not None else None)
@@ -173,7 +200,7 @@ class PromptMemory:
             with self._memory_lock:
                 self.runtime.reset_peak_memory()
 
-    def observe_cache(self, cache: Any, *, workspace: bool = True) -> None:
+    def observe_cache(self, cache: Any, *, workspace: bool = True, rows: int | None = None) -> None:
         with self._memory_lock:
             measured = CacheMemory.from_cache(cache)
             if measured.bytes_per_token and self.heads < 0:
@@ -184,15 +211,101 @@ class PromptMemory:
             else:
                 self.profile = CacheMemory(max(self.profile.fixed_bytes, measured.fixed_bytes),
                                            max(self.profile.bytes_per_token, measured.bytes_per_token),
-                                           max(self.profile.step, measured.step))
+                                           max(self.profile.step, measured.step),
+                                           max(self.profile.entry_bytes_per_token, measured.entry_bytes_per_token))
             if workspace and not self.workspace_profiled:
-                self.observed_work = max(0, int(self.runtime.get_peak_memory()) -
-                                         int(self.runtime.get_active_memory()))
-                self.workspace_profiled = True
+                work = max(0, int(self.runtime.get_peak_memory()) - int(self.runtime.get_active_memory()))
+                # a shorter chunk only raises the floor: its workspace is smaller than a full chunk's
+                full = rows is None or int(rows) >= self.chunk_rows
+                self.observed_work = work if full else max(self.observed_work, work)
+                self.workspace_profiled = full
 
     def after_chunk(self, cache: Any, rows: int) -> None:
-        self.observe_cache(cache)
+        self.observe_cache(cache, rows=rows)
+        if self._probe_base is not None:          # what a prompt holds between chunks outside its cache
+            held = int(self.runtime.get_active_memory()) - cache_nbytes(cache) - self._probe_base
+            self.carry = max(self.carry, held)
         self.require(cache)
+
+    def profile_probe(self, engine: Any, tokens: Any = None) -> None:
+        """Size the cache, a full chunk's workspace and what a prompt holds between chunks with one probe prompt."""
+
+        from tensorfold.server.cancellation import Cancellation, PrefillGuard
+
+        # real text: a mixture of experts routes it as it routes a prompt (synthetic ids reach fewer experts)
+        text = [int(t) for t in tokens or ()] or [1000 + i for i in range(self.chunk_rows + 64)]
+        probe = (text * (-(-(self.chunk_rows + 64) // len(text))))[:self.chunk_rows + 64]
+        previous, engine.prefill_guard = engine.prefill_guard, PrefillGuard(Cancellation(), self)
+        self.runtime.clear_cache()
+        self._probe_base, self.workspace_profiled = int(self.runtime.get_active_memory()), False
+        try:
+            engine.prefill_prefix(probe, cache=None, cached_tokens=0)
+        finally:
+            engine.prefill_guard, self._probe_base = previous, None
+            self.runtime.clear_cache()
+
+    def sized(self, engine: Any, probes: Any, tokens: Any = None) -> Any:
+        """Run ``probes`` (the concurrency measurement), then this admission's own probe on ``tokens``; their result."""
+
+        import gc
+
+        try:
+            measured = probes()
+            release = getattr(engine, "release_rounds", None)
+            if release is not None:
+                release()                      # the probes' last shared round: no stream keeps rows of it
+            gc.collect()                       # arrays the probes left in reference cycles, before anything is sized
+            self.profile_probe(engine, tokens)
+        except RequestError:
+            raise ValueError(self._no_room()) from None
+        gc.collect()
+        self.runtime.clear_cache()
+        return measured
+
+    def _no_room(self) -> str:
+        return (f"this server's {self.process_budget / GIB:.1f} GiB memory budget ({self.budget / GIB:.1f} GiB for MLX) "
+                f"leaves no room for a prompt beside the model: it and one prompt chunk need about "
+                f"{self.projected(0) / GIB:.1f} GiB. Serve it on a Mac with more memory, without its draft model "
+                "(--drafter none), or use a smaller or more quantized checkpoint")
+
+    def fit_window(self, window: int, fit: bool) -> tuple[int, bool]:
+        """(the context window, whether memory lowered it): omitted, what the budget affords; explicit, it must fit."""
+
+        self.affordable = self.largest_window(window)
+        if not self.affordable:
+            raise ValueError(self._no_room())
+        # with prompts retained, the next turn resumes only if this one's prompt can be kept beside the working cache
+        kept = self.largest_window(window, resumable=True) if self.store is not None else None
+        resumable = kept or self.affordable
+        fitted = bool(fit) and (not window or resumable < window)
+        if fitted:
+            window = resumable // 1024 * 1024 if resumable >= 1024 else resumable
+        elif window > self.affordable:
+            raise ValueError(f"a {window:,}-token context window does not fit this server's memory budget: the most "
+                             f"one request can use is {self.affordable:,} tokens (prompt plus reply)")
+        self.window = int(window)
+        return self.window, fitted
+
+    def largest_window(self, limit: int = 0, *, resumable: bool = False) -> int | None:
+        """Most prompt-plus-reply tokens one request holds (``resumable``: and keeps its prompt for the next turn)."""
+
+        with self._memory_lock:
+            if self.profile is None:
+                return None
+            retained = self.store.nbytes if self.store is not None else 0
+            floor = max(0, int(self.runtime.get_active_memory()) - retained) + self.carry
+            kept = 2 if resumable else 1
+
+            def fits(tokens: int) -> bool:
+                return floor + kept * self.profile.cache_bytes(tokens) + self._work(tokens) <= self.budget
+
+            if not fits(0):
+                return 0
+            lo, hi = 0, int(limit) if limit > 0 else 1 << 24
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                lo, hi = (mid, hi) if fits(mid) else (lo, mid - 1)
+            return lo
 
     def _over_store_budget(self, size: int) -> bool:
         store = self.store
@@ -217,4 +330,4 @@ class PromptMemory:
         return True
 
 
-__all__ = ["PromptMemory", "attention_geometry"]
+__all__ = ["PromptMemory", "attention_geometry", "probe_tokens"]

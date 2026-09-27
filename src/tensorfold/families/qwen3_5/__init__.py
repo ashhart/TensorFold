@@ -1,14 +1,4 @@
-"""Qwen3.8 dense (model_type ``qwen3_5``), e.g. Qwen3.8-27B: mlx_lm's model as a lane-engine family.
-
-The family (``family.Qwen35Family``) runs every round through TensorFold's lane decoder, whose rows get the same
-bits at any window width: with Metal 4 tensor units (the M5 generation) the lane kernels (``kernels.lane_qmm``,
-``kernels.lane_attention``, ``kernels.lane_fuse``, and the stream kernels for several requests in one forward);
-without (M1 to M4) ``kernels.row_forward`` over the row-exact ``simd_qmm`` matmul. Serial decoding goes through the
-same decoder, so drafted output equals it. Drafts come from a DFlash2 draft model (trees, or chains where the
-decoder's attention takes no trees) and from copies of the context; concurrent requests share each round.
-
-Prompts go through MLX's prefill in the engine's chunks and resume only at chunk starts: a fresh prefill's bits.
-"""
+"""Qwen3.8 dense uses row-exact serial and drafted decoding, resuming prefill only at chunk starts to preserve fresh-prefill bits."""
 
 from __future__ import annotations
 
@@ -69,8 +59,7 @@ def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
 
 
 def install_row_decoder(model: Any) -> bool:
-    """The lane decoder without tensor units (``row_forward``: the row-exact ``simd_qmm`` matmul over stacked
-    projections, attention query by query) for the family path; False where the weights do not take it."""
+    """Install row-exact simd_qmm decoding without tensor units, returning False for unsupported weights."""
 
     from tensorfold.kernels.qwen.dense.v1 import exact_attention, row_forward, row_matmul
 
@@ -125,8 +114,7 @@ def check(model_dir: str | Path) -> None:
 
 def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 4,
          **_: Any) -> tuple[Any, Any]:
-    """The family model: the lane kernels when ``lane_kernels`` is "on", or "auto" on a GPU with tensor units, else
-    the lane decoder without them. Checkpoints the lane decoders cannot read are refused."""
+    """Load a supported checkpoint with tensor-unit lane kernels when enabled, otherwise the row-exact decoder."""
 
     from tensorfold.families import read_config
     from tensorfold.families.qwen3_5.family import Qwen35Family
@@ -193,13 +181,12 @@ def load_drafter(model: Any, drafter: str, drafter_bits: int = 4) -> Any:
 
 
 def install_lane_kernels(model: Any) -> None:
-    """Swap in the lane matmul, fused projections and lane attention, and compile every variant now (not inside the
-    first requests)."""
+    """Install lane matmul, fused projections and lane attention, compiling every variant before requests arrive."""
 
     from tensorfold.kernels.qwen.dense.v1 import exact_attention, lane_attention, lane_fuse, lane_qmm
 
     exact_attention.install()      # verify windows attend query by query, as one-row steps do
-    # TF_LANE_TILE=0 keeps MLX's weight layout (same bits, slower; for A/B timing)
+    # TF_LANE_TILE=0 keeps MLX's weight layout without changing results.
     lane_qmm.install(model, rows=lane_qmm.MAX_ROWS, tile=os.environ.get("TF_LANE_TILE", "1") != "0", wide=True)
     warmed = lane_qmm.warm(model)
     lane_fuse.enabled = True
@@ -212,8 +199,7 @@ def install_lane_kernels(model: Any) -> None:
 
 
 def engine_settings(model: Any) -> dict[str, Any]:
-    """Keyword arguments for the lane engine (``max_rows``: rows a round verifies; ``max_draft``: drafts a stream
-    offers a round)."""
+    """Set max_rows to the verification width and max_draft to the drafts each stream may offer per round."""
 
     width = int(getattr(model, "exact_width", 1) or 1)
     return {"max_rows": width, "max_draft": max(0, width - 1)}
@@ -252,14 +238,7 @@ CUDA_QUANTIZATION = (4, 64)
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, **options: Any):
-    """The CUDA engine (``tensorfold serve`` on an NVIDIA GPU), set up as the recipe measured on DGX Spark.
-
-    DFlash2 draft trees are verified in windows of 12 rows (the same drafts accepted as at 16 rows, for less
-    time a round). On two GPUs (``tp=2``) the model is tensor parallel with fp32 partials summed in rank
-    order, the head is split by vocabulary, and both ranks draft with half the draft model each, so both
-    machines need it. ``no_drafts``: one token a round, the serial reference. Without the draft model every
-    round but a copied one would decode one token, so drafting needs ``drafter``.
-    """
+    """The CUDA engine for ``tensorfold serve``; tp=2 adds fp32 partials in rank order and needs the drafter on both."""
 
     from .cuda.engine import Qwen27Engine
 
@@ -268,6 +247,8 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                          f"would decode one token. Run `tensorfold pull {DRAFTER}` once (on both machines for "
                          "--tp 2), or pass --no-drafts for the serial reference")
     draft = Path(drafter) if drafter and not no_drafts else None
+    streams = max(1, int(options.get("parallel") or 1))
     return Qwen27Engine(Path(model_dir), draft, max_rows=12, tp=tp, rank=rank, master=master, port=master_port,
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
-                        context=options.get("context"), context_explicit=options.get("context_explicit"))
+                        streams=streams, context=options.get("context"),
+                        context_explicit=options.get("context_explicit"))

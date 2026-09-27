@@ -232,6 +232,7 @@ def test_glm_explicit_reply_refusal_and_request_policy(model_dir):
     class GlmEngine(Engine):
         limit = 12
         request = threading.local()
+        capacity_plan = {"largest_window": 64}
 
         def generate(self, *args, **kwargs):
             self.policy = self.request.policy
@@ -249,6 +250,19 @@ def test_glm_explicit_reply_refusal_and_request_policy(model_dir):
                                       ignore_eos=True), False)
     assert status == 200 and engine.calls[0][1] == 4
     assert engine.policy == "request-policy" and engine.stop_eos is False
+
+
+@pytest.mark.parametrize("largest", [None, 12, 64])
+def test_refusals_suggest_only_a_context_the_admission_accepts(model_dir, largest):
+    class Windowed(Engine):
+        context_window = limit = 12
+        request = threading.local()
+        capacity_plan = {} if largest is None else {"largest_window": largest}
+
+    for app in (server.App(Windowed(), model_dir, "test"), GlmApp(Windowed(), model_dir, "test")):
+        problem = app.check(request(8, False, max_tokens=5))
+        assert ("--context 13 or more" in problem) == (largest == 64)
+        assert "shorten the prompt" in problem or "reduce the prompt" in problem
 
 
 @pytest.mark.parametrize("stream", [False, True])
