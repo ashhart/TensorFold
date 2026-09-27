@@ -426,6 +426,34 @@ Fixed depths, the same prompts (tok/s):
 A round of 1 to 4 drafts took 31.8, 40.5, 49.9 and 62.7 ms: each extra verify row costs 8 to 10 ms, most of it the
 experts it adds. File edits draft from copy windows, where depth hardly matters.
 
+### On 0.3.4: the lane engine's family rounds (256 GB M3 Ultra, MLX 0.32.2, `--context 1048576`)
+
+The serial engine left in 0.3.4, so the runtime now speaks `engine/lane_family.py`'s contract (as Flash Next):
+`exact_width` and `window_costs` measured at load, `speculate` / `settle` for the head with the chained drafts left
+on the GPU, one-step-ahead rounds for `"draft": false`, the engine's own depth rule from the measured costs.
+
+- Load-time check on the real weights: every window up to 16 rows exact. Forward ms by width 1: 20.7, 2: 28.0,
+  3: 36.5, 4: 45.8, 8: 84.2, 16: 159.4 (8.6 ms an extra row); the head's chained step 1.28 ms; loaded in 45 s.
+- Drafted replies byte-identical to `"draft": false` on 15 of 15 cases: 6 greedy, 6 seeded (T 0.6 to 1.0 with
+  top-p / top-k), a tool call and its result leg, a 32K-token context; content, reasoning and the assembled tool
+  calls compared.
+- Decode through the server, T 0, 200-token replies: 55 to 57 tok/s (drafted; 48.7 serial), 65 on a short
+  arithmetic answer, 48.5 / 41.7 at 32K context. Prefill 317 tok/s at 8K and 263 at 32K, cold.
+- `TF_FAMILY_PROFILE=1`: a round of 2.5 rows spends ~36 ms on the GPU and 3 ms building its graph
+  (`TF_GLM5_EVAL_EVERY=0` separates the two; with the default 2 the host time shown is command-buffer submission).
+  The rounds are GPU-bound. `TF_GLM5_EVAL_EVERY` 1 / 2 / 4 and `--mtp-drafts` 1 / 3 all land within 2 tok/s of each
+  other; `TF_GLM_MTP_NORMED=1` (the head reads the final-normed hidden row, as the CUDA engine found useful)
+  moved first-draft acceptance from 61-76% to 66-78% on four prompts and speed by +0.5 tok/s, inside the noise, so
+  it stays off by default.
+- Where an extra verify row goes (real first 8 layers, 1 to 8 rows): the MoE block 0.48 to 1.56 ms a layer (the
+  distinct experts a window adds: 12.6 MB each), KDA 0.44 to 0.88 (rows run in order inside the kernel), MLA
+  attention 0.49 to 1.12, hyper-connections flat.
+- The floor: about 9 GB of 4-bit weights a token at ~630 GB/s is 14.5 ms, so serial tops out near 69 tok/s here
+  and drafted rounds near 80-85 at the measured acceptance and row cost. Flash Next's 114 comes from 4.26 GB a
+  token. Fewer bytes a token (or a draft head that lands more often) is what would take this family to 100 on
+  this chip; the kernel room left in the one-row step is about 6 ms (the indexer's small ops, the 90
+  hyper-connection boundaries, launch latency).
+
 ### Where the time goes
 
 Stubbing one part at a time out of the 22.3 ms one-row step: routed and shared experts 9.9 ms (about 540 GB/s), KDA
