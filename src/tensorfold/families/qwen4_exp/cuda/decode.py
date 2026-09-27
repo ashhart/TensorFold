@@ -262,7 +262,11 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
     for start in range(begin, len(prompt), e.prefill_rows):
         chunk = list(prompt[start:start + e.prefill_rows])
         R = len(chunk)
-        last = forward(w, st, pb, chunk).clone()
+        final = start + R >= len(prompt)
+        # only the prompt's last row is sampled: the head runs on the final chunk alone
+        logits = forward(w, st, pb, chunk, logits=final)
+        if final:
+            last = logits.clone()
         streams_last = pb.streams[R - 1:R].clone()
         if use_mtp:
             nxt = list(prompt[start + 1:start + R + 1])

@@ -323,3 +323,40 @@ def test_prefix_reuse_and_the_serial_switch(tmp_path, sampling):
         ask([1500, 9, 10])                                       # an unrelated prompt: nothing to resume from
         cold, cold_stats = ask(prompt)
         assert cold_stats["cached"] == 0 and cold == warm, extend
+
+
+def _prefill_state(e: Engine) -> dict:
+    st = e.st
+    n, m = st.pos, st.mtp_len
+    out = {"streams": e.last_streams, "rec": st.rec[st.cur[0]], "conv": st.conv,
+           "mtp_kc": st.mtp_kc[:m], "mtp_vc": st.mtp_vc[:m], "mtp_ikc": st.mtp_ikc[:m]}
+    for i in range(len(st.kc)):
+        out[f"kc{i}"], out[f"vc{i}"], out[f"ikc{i}"] = st.kc[i][:n], st.vc[i][:n], st.ikc[i][:n]
+        out[f"pooled{i}"] = st.pooled[i][:n // 4]
+    return {k: v.clone() for k, v in out.items()}
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=17, top_k=20, top_p=0.95)])
+def test_prefill_head_on_the_final_chunk_keeps_every_bit(monkeypatch, sampling):
+    """Past the sparse attention budget, any chunking with the head on the final chunk alone gives the one-chunk prefill's first token and whole state."""
+
+    from tensorfold.families.qwen4_exp.cuda import decode
+
+    w = _model(7)
+    g = torch.Generator().manual_seed(8)
+    prompt = torch.randint(1, V, (2600,), generator=g).tolist()
+    one = Engine(w, capacity=4096, max_rows=8, prefill_rows=len(prompt))
+    first = prefill(one, prompt, sampling)
+    want = _prefill_state(one)
+    del one
+    heads = []
+    real = decode.forward
+    monkeypatch.setattr(decode, "forward", lambda *a, **kw: (heads.append(kw.get("logits", True)), real(*a, **kw))[1])
+    for rows in (64, 256, 1024):
+        heads.clear()
+        e = Engine(w, capacity=4096, max_rows=8, prefill_rows=rows)
+        assert prefill(e, prompt, sampling) == first
+        got = _prefill_state(e)
+        assert [k for k in want if not torch.equal(want[k], got[k])] == [], rows
+        assert heads == [False] * (-(-len(prompt) // rows) - 1) + [True], rows
+        del e
