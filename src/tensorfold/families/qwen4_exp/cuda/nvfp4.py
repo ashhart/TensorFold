@@ -49,6 +49,7 @@ BN = 64                   # output columns per stored tile
 
 _E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)      # FP4 magnitudes by code & 7
 BF16_BITS = (0x0000, 0x3F00, 0x3F80, 0x3FC0, 0x4000, 0x4040, 0x4080, 0x40C0)   # their bf16 patterns
+E4M3_BF16_BITS = (0x0000, 0x3B00, 0x3B80, 0x3BC0, 0x3C00, 0x3C20, 0x3C40, 0x3C60)  # the fp8 subnormals m*2**-9 (m 0..7)
 BF16_SCALE2 = 0x3F800000                                # 1.0 as an fp32 pattern: e4m3 -> bf16's exponent shift
 
 
@@ -102,27 +103,31 @@ def quantized_values(words: torch.Tensor) -> torch.Tensor:
     return e2m1_bits(words).view(torch.bfloat16)
 
 
+def _subnormal_bits(b: torch.Tensor) -> torch.Tensor:
+    """The fp8 subnormals' bf16 patterns, value-wise: a subnormal is ``m * 2**-9`` (m 1..7) — exact
+    bf16 values, the pattern table ``E4M3_BF16_BITS`` (m 0 is the signed zero)."""
+
+    table = torch.tensor(E4M3_BF16_BITS, dtype=torch.int32, device=b.device)
+    return table[b & 0x7]
+
+
 def e4m3_bits(scale: torch.Tensor) -> torch.Tensor:
     """fp8e4m3 -> bf16 bit patterns (uint16), exact. Built by hand: torch's fp8 casts are unreliable
     (the bf16 cast of fp8 goes through an fp32 view of the storage and yields zeros).
 
-    The fp8 byte is sign (bit 7), exponent (bits 3..6, bias 7), mantissa (bits 0..2). The widening to
-    fp32 is one shift of the byte: ``byte * 2**20`` (int64 — the sign lands on bit 31). The bf16 pattern
-    of a normal fp8 value is that fp32 pattern with the exponent rebased (fp8 bias 7 -> fp32 bias 127:
-    ``+ 120 << 23``, i.e. the bf16 field ``0x7000 + (e << 9) + (m << 6)``); the fp8 subnormals
-    (e == 0, value ``m * 2**-9``) are widened as values, not fields, and rounded to nearest-even in bf16
-    (their values need at most 3 significand bits, so a bf16 subnormal with 4 spare bits below — exact)."""
+    The fp8 byte is sign (bit 7), exponent (bits 3..6, bias 7), mantissa (bits 0..2). A normal fp8
+    value widens by rebasing the exponent (fp8 bias 7 -> bf16 bias 127: ``+ 120``, the bf16 field
+    ``((e + 120) << 7) | (m << 4)``); the fp8 subnormals (e == 0, value ``m * 2**-9``) are widened as
+    values, not fields (the table — ``m * 2**-9`` is a bf16 power of two times a 3-bit significand,
+    exact). The NaN codes (e == 15, m == 7) keep their payload as bf16 NaNs. Checked byte-for-byte
+    against torch's fp32 widening over all 256 codes (NaNs compared as NaNs)."""
 
-    b = scale.view(torch.uint8).to(torch.int64)
+    b = scale.view(torch.uint8).to(torch.int32)
     e = (b >> 3) & 0xF
     m = b & 0x7
     sign = (b & 0x80) << 8
-    normal = 0x7000 + (e << 9) + (m << 6)
-    f32 = b << 20                                                     # the fp8 byte widened, sign at bit 31
-    sub_hi = (f32 >> 16) & ~0x7FFFF                                   # bf16's kept bits of the fp32 pattern
-    tie = (f32 & 0x8000)                                              # round-to-nearest-even in bf16
-    sub = (sub_hi + tie) >> 0
-    pat = torch.where(e == 0, sub, (normal | sign))
+    normal = torch.where((e == 15) & (m == 7), 0x7FC0, ((e + 120) << 7) | (m << 4))   # NaN codes -> the NaN pattern
+    pat = torch.where(e == 0, _subnormal_bits(b), normal) | sign
     return pat.to(torch.int64).to(torch.uint16)
 
 

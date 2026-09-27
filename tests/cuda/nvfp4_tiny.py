@@ -20,26 +20,29 @@ DTYPE_NAMES = {torch.bfloat16: "BF16", torch.float32: "F32", torch.uint8: "U8",
 
 
 def _quant_rows(rows: torch.Tensor, rng: torch.Generator) -> tuple[torch.Tensor, torch.Tensor, float]:
-    """A bf16 [N, K] matrix as the checkpoint's FP4 arrays: round to the E2M1 grid per 16-block (the
-    block scale the max code allows), pack the codes. The values are the grid's, so the loader's
-    dequantize reproduces the matrix's scale-1 form (the test compares kernels, not requantization)."""
+    """A bf16 [N, K] matrix as the checkpoint's FP4 arrays: the FP4 grid spans +-6, the e4m3 block scale
+    spans +-448 (with subnormals down to 2**-9), so a value lands exactly as
+    ``value = code * (e4m3 * 2**-7 * scale_2)``: a per-tensor power-of-two scale puts the matrix's range
+    on the grid, the per-block scale takes the block's largest value, the e4m3 of the rest lands on its
+    own grid point (both grids' points are few-significant-bit values — the product is exact in fp32)."""
 
     n, k = rows.shape
     mags = torch.tensor(nvfp4._E2M1, dtype=torch.float32)
     w = rows.to(torch.float32)
     g = w.reshape(n, k // 16, 16)
-    scale2 = 1.0
-    s = g.abs().amax(dim=-1, keepdim=True) / 6.0                      # the block scale: the max maps to 6
-    e4 = (s * (2.0 ** 7) / scale2).clamp(2.0 ** -6, 448.0)            # the e4m3 grid, normal range
-    e4 = e4.to(torch.float8_e4m3fn)
-    s8 = e4.to(torch.float32) * (2.0 ** -7) * scale2                  # what the loader will read back
-    q = (g / s8).clamp(-6.0, 6.0)
-    sign = (q < 0).to(torch.int32) * 8
-    mag = q.abs().unsqueeze(-1) - mags
-    code = mag.abs().argmin(dim=-1).to(torch.int32) + sign
+    amax = w.abs().amax()
+    scale2 = torch.pow(torch.tensor(2.0), torch.floor(torch.log2(amax)) - 1.0)   # the max near the byte's 128
+    v = g / scale2                                                              # the values, the grid's span
+    s_blk = v.abs().amax(dim=-1, keepdim=True) / 6.0                            # the block scale, byte / 128
+    q = (v / s_blk).clamp(-6.0, 6.0)                                            # the code's value (approximate)
+    code = (q.abs().unsqueeze(-1) - mags).abs().argmin(dim=-1).to(torch.int32) \
+        + (q < 0).to(torch.int32) * 8
     code = code.reshape(n, k)
     words = (code[:, 1::2] << 4 | code[:, 0::2]).to(torch.uint8)
-    return words, e4.reshape(n, k // 16), scale2
+    # the loader dequantizes with ``fp32(e4m3) * 2**-7 * scale_2``: the byte is ``s_blk / scale2 * 2**7``
+    # (scale2 a power of two — the byte lands on its own grid, the dequantized matrix is what tests compare)
+    e4m3 = (s_blk.squeeze(-1) / scale2 * (2.0 ** 7)).clamp(2.0 ** -9, 448.0).to(torch.float8_e4m3fn)
+    return words, e4m3, float(scale2)
 
 
 def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hidden: int = 256,
@@ -164,11 +167,15 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
         entries[name]["data_offsets"] = [offset, offset + t.numel() * t.element_size()]
         offset += t.numel() * t.element_size()
     header = json.dumps({"__metadata__": {"format": "pt"}, **entries}, separators=(",", ":")).encode()
+
+    def raw(t: torch.Tensor) -> bytes:
+        return (t.reshape(1).contiguous() if t.dim() == 0 else t).view(torch.uint8).numpy().tobytes()
+
     with open(shard, "wb") as f:
         f.write(struct.pack("<Q", len(header)))
         f.write(header)
         for t in blobs:
-            f.write(t.view(torch.uint8).numpy().tobytes())
+            f.write(raw(t))
     (dir / "model.safetensors.index.json").write_text(json.dumps(
         {"metadata": {"total_size": offset}, "weight_map": {n: shard.name for n in entries}}))
     return dir

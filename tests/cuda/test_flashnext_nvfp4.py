@@ -51,6 +51,17 @@ def test_e2m1_table_matches_the_bf16_patterns_the_kernel_uses():
     assert torch.equal(table[8:], -mags)
 
 
+def test_e4m3_bits_widens_every_code_exactly():
+    """The fp8e4m3 byte -> bf16 pattern, checked byte-for-byte over all 256 codes against torch's
+    fp8 -> fp32 cast (torch's fp8 -> bf16 cast is broken, the fp32 cast is the format's truth)."""
+
+    b = torch.arange(256, dtype=torch.uint8)
+    ref = b.view(torch.float8_e4m3fn).float()
+    ours = nvfp4._bits_to_f32(nvfp4.e4m3_bits(b))
+    ok = (ours == ref) | (ref.isnan() & ours.isnan())
+    assert bool(ok.all()), [hex(int(x)) for x in b[~ok]]
+
+
 def test_nibble_packing_is_low_even_high_odd():
     codes = torch.tensor([[0x1, 0x2, 0xA, 0xF]], dtype=torch.int64)
     words = _packed(codes)
