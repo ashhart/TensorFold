@@ -153,12 +153,12 @@ def dequantize(words: torch.Tensor, weight_scale: torch.Tensor, weight_scale_2) 
 
 
 def _untile_bits(bits: torch.Tensor, n: int, k: int) -> torch.Tensor:
-    """The FP4 table's tile of bf16 patterns back to a [n, k] pattern grid (a leading [E] axis stacked:
-    E*N rows)."""
+    """The FP4 table's tile of bf16 patterns back to a pattern grid (a leading [E] axis stacked: the
+    dataclass ``n`` counts rows *per expert*, so a stacked grid comes back [E*n, k])."""
 
     if bits.dim() == 5:                                                  # [E, N/BN, K/64, 64, BN]
-        e = bits.shape[0]
-        bits = bits.permute(0, 1, 3, 2, 4).reshape(e * (n // e), k)
+        rows = n * bits.shape[0]
+        bits = bits.permute(0, 1, 3, 2, 4).reshape(rows, k)
     else:                                                                # [N/BN, K/64, 64, BN]
         bits = bits.permute(0, 2, 1, 3).reshape(n, k)
     return bits
@@ -168,12 +168,13 @@ def dequantize_fp4(fp: FP4) -> torch.Tensor:
     """The stored layout back to the exact fp32 weight [n, k] (the reference for kernel checks). The
     stacked-expert layout (a leading expert axis) comes back as E*N rows, the grouped kernels' row order."""
 
+    e = int(fp.weight.shape[0]) if fp.weight.dim() == 5 else 1   # the tile grid's leading axis, not the dataclass n
     w = _bits_to_f32(_untile_bits(fp.weight, fp.n, fp.k))
     s = fp.scale
-    if s.dim() == 3:                                                     # [E, K/16, N/E]
-        s = s.permute(0, 2, 1).reshape(fp.n, fp.k // GS)
+    if s.dim() == 3:                                             # [E, K/16, N/E]
+        s = s.permute(0, 2, 1).reshape(w.shape[0], fp.k // GS)
     else:
-        s = s.t()                                                        # [K/16, N] -> [N, K/16]
+        s = s.t()                                                # [K/16, N] -> [N, K/16]
     return w * s.repeat_interleave(GS, dim=1)
 
 
