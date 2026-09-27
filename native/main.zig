@@ -76,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
     if (warmup) {
         std.debug.print("Warming Metal variants...\n", .{});
         for ([_]usize{ 1, 16, 32 }) |n| {
-            const fake = [_]i32{42} ** 32;
+            const fake: [32]i32 = @splat(42);
             var parents: [32]i32 = undefined;
             for (0..n) |j| parents[j] = if (j == 0) -1 else @intCast((j - 1) / 2);
             var p = try m.forward(fake[0..n], parents[0..n]);
@@ -129,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
         defer mx.allocator.free(ids);
         pending = ids[n - 1];
         if (dump) |path| {
-            const z = try allocator.dupeZ(u8, path);
+            const z = try allocator.dupeSentinel(u8, path, 0);
             defer allocator.free(z);
             const f = try p.scope.cast(p.logits, mx.f32t);
             try mx.eval(f);

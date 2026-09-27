@@ -40,6 +40,11 @@ def main():
         emit(OUT / f"{key}.h", spec.get("header", ""))
         ins = ", ".join(json.dumps(x) for x in spec["input_names"])
         outs = ", ".join(json.dumps(x) for x in spec["output_names"])
+        # Match Zig 0.17's formatter for multi-element array literals.
+        if len(spec["input_names"]) > 1:
+            ins = f" {ins} "
+        if len(spec["output_names"]) > 1:
+            outs = f" {outs} "
         contiguous = str(spec.get("ensure_row_contiguous", True)).lower()
         definitions.append(
             f'pub const {key} = Spec{{ .name = "{key}", '

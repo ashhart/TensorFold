@@ -31,7 +31,7 @@ pub const Pass = struct {
     scope: mx.Scope = .{},
     logits: A = mx.empty,
     hidden: A = mx.empty,
-    records: [48]Cache = [_]Cache{.{}} ** 48,
+    records: [48]Cache = @splat(.{}),
     tokens: [16]i32 = undefined,
     count: usize = 0,
     pub fn deinit(p: *Pass) void {
@@ -41,7 +41,7 @@ pub const Pass = struct {
 pub const Model = struct {
     weights: cp.Store = cp.Store.init(32),
     kernels: mx.Kernels = mx.Kernels.init(),
-    cache: [48]Cache = [_]Cache{.{}} ** 48,
+    cache: [48]Cache = @splat(.{}),
     position: i32 = 0,
     mtp: bool = false,
     centered: bool = true,
@@ -314,7 +314,7 @@ pub const Model = struct {
         if (keep == 0 or keep > p.count) return error.InvalidCommit;
         const n: i32 = @intCast(keep);
         const end = m.position + n;
-        var next = [_]Cache{.{}} ** 48;
+        var next: [48]Cache = @splat(.{});
         errdefer for (&next) |*c| c.deinit();
         for (0..48) |i| {
             const rec = p.records[i];

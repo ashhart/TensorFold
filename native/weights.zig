@@ -57,7 +57,7 @@ pub const Weights = struct {
         const cfg = try std.json.parseFromSlice(std.json.Value, mx.allocator, bytes, .{});
         defer cfg.deinit();
         try @import("config.zig").draft(cfg.value);
-        const path = try std.fmt.bufPrintZ(&pathbuf, "{s}/model.safetensors", .{dir});
+        const path = try std.fmt.bufPrintSentinel(&pathbuf, "{s}/model.safetensors", .{dir}, 0);
         var map = mx.c.mlx_map_string_to_array_new();
         defer _ = mx.c.mlx_map_string_to_array_free(map);
         var meta = mx.c.mlx_map_string_to_string_new();
@@ -121,7 +121,7 @@ pub const Weights = struct {
         };
         var files = shards.keyIterator();
         while (files.next()) |name| {
-            const path = try std.fmt.bufPrintZ(&pathbuf, "{s}/{s}", .{ dir, name.* });
+            const path = try std.fmt.bufPrintSentinel(&pathbuf, "{s}/{s}", .{ dir, name.* }, 0);
             std.debug.print("Loading {s}\n", .{name.*});
             var map = mx.c.mlx_map_string_to_array_new();
             defer _ = mx.c.mlx_map_string_to_array_free(map);

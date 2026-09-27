@@ -40,7 +40,7 @@ pub fn check(m: *model.Model) !void {
     var next = try m.forward(&.{29}, &.{-1});
     defer next.deinit();
     try m.commit(&next, &.{0});
-    var cached: [64]model.Cache = [_]model.Cache{.{}} ** 64;
+    var cached: [64]model.Cache = @splat(.{});
     defer for (&cached) |*c| c.deinit();
     for (m.cache, 0..) |c, i| {
         cached[i].a = try mx.retain(c.a);

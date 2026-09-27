@@ -100,7 +100,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         defer mx.allocator.free(ids);
         pending = ids[0];
         if (dump) |file| {
-            const z = try a.dupeZ(u8, file);
+            const z = try a.dupeSentinel(u8, file, 0);
             defer a.free(z);
             const f = try p.scope.cast(p.logits, mx.f32t);
             try mx.eval(f);

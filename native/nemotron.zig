@@ -10,7 +10,7 @@ pub const Pass = struct {
     scope: mx.Scope = .{},
     logits: A = mx.empty,
     hidden: A = mx.empty,
-    records: [52]Cache = [_]Cache{.{}} ** 52,
+    records: [52]Cache = @splat(.{}),
     pub fn deinit(p: *Pass) void {
         p.scope.deinit();
     }
@@ -19,7 +19,7 @@ pub const Model = struct {
     pub const DraftCache = Cache;
     weights: cp.Store = cp.Store.init(64),
     kernels: mx.Kernels = mx.Kernels.init(),
-    cache: [52]Cache = [_]Cache{.{}} ** 52,
+    cache: [52]Cache = @splat(.{}),
     kinds: [52]u8 = undefined,
     position: i32 = 0,
     mtp: bool = false,
@@ -166,7 +166,7 @@ pub const Model = struct {
     }
     pub fn commit(m: *Model, p: *Pass, keep: usize) !void {
         if (keep == 0 or keep > @as(usize, @intCast(mx.dim(p.hidden, 0)))) return error.InvalidCommit;
-        var next = [_]Cache{.{}} ** 52;
+        var next: [52]Cache = @splat(.{});
         errdefer for (&next) |*c| c.deinit();
         const n: i32 = @intCast(keep);
         for (m.kinds, 0..) |kind, i| {

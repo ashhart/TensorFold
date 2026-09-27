@@ -51,7 +51,7 @@ pub const Store = struct {
         return w.arrays.contains(key);
     }
     pub fn loadFile(w: *Store, path: []const u8, prefix: []const u8, strip: []const u8) !void {
-        const z = try mx.allocator.dupeZ(u8, path);
+        const z = try mx.allocator.dupeSentinel(u8, path, 0);
         defer mx.allocator.free(z);
         var map = mx.c.mlx_map_string_to_array_new();
         defer _ = mx.c.mlx_map_string_to_array_free(map);

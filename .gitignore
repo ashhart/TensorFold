@@ -13,3 +13,4 @@ venv/
 *.log
 .zig-cache/
 zig-out/
+.zig-toolchain/

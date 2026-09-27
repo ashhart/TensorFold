@@ -10,7 +10,7 @@ const conv_spec = @import("kernel_sources.zig").Spec{ .name = "dflash_dynamic_co
 pub const Proposal = struct { tokens: [31]i32 = undefined, parents: [31]i32 = undefined, len: usize = 0 };
 pub const Drafter = struct {
     weights: weights.Weights,
-    cache: [5]model.Cache = [_]model.Cache{.{}} ** 5,
+    cache: [5]model.Cache = @splat(.{}),
     offset: i32 = 0,
     head: lanes.Linear,
     pred: A,
@@ -70,7 +70,7 @@ pub const Drafter = struct {
         var positions: [128]i32 = undefined;
         for (rows, 0..) |_, j| positions[j] = d.offset + @as(i32, @intCast(j));
         const pos = try s.ints(positions[0..rows.len]);
-        var next: [5]model.Cache = [_]model.Cache{.{}} ** 5;
+        var next: [5]model.Cache = @splat(.{});
         errdefer for (&next) |*v| v.deinit();
         for (0..5) |i| {
             var keys = try s.rms(try s.reshape(try d.project(k, s, i, "self_attn.k_proj", ctx), &.{ 1, count, 8, 128 }), try d.get(i, "self_attn.k_norm.weight"));
@@ -135,7 +135,7 @@ pub const Drafter = struct {
     pub fn propose(d: *Drafter, target: *model.Model, anchor: i32, budget: usize, settings: sampling.Sampling) !Proposal {
         if (budget == 0 or d.cache[0].a.ctx == null) return .{};
         const n: usize = @min(16, budget + 1);
-        var block = [_]i32{248070} ** 16;
+        var block: [16]i32 = @splat(248070);
         block[0] = anchor;
         var s = mx.Scope{};
         defer s.deinit();
@@ -192,7 +192,7 @@ pub const Drafter = struct {
                 var sum: f64 = 0;
                 for (scores) |score| sum += @exp(score - max);
                 const normalizer = max + @log(sum);
-                var chosen = [_]bool{false} ** 16;
+                var chosen: [16]bool = @splat(false);
                 for (0..4) |_| {
                     var best: usize = 0;
                     var best_score: f64 = -std.math.inf(f64);

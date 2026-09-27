@@ -19,12 +19,12 @@ pub const Cache = struct {
         c.* = .{};
     }
 };
-pub const Record = struct { values: [8]A = .{mx.empty} ** 8 };
+pub const Record = struct { values: [8]A = @splat(mx.empty) };
 pub const Pass = struct {
     scope: mx.Scope = .{},
     logits: A = mx.empty,
-    records: [64]Record = [_]Record{.{}} ** 64,
-    taps: [5]A = .{mx.empty} ** 5,
+    records: [64]Record = @splat(.{}),
+    taps: [5]A = @splat(mx.empty),
     pub fn deinit(p: *Pass) void {
         p.scope.deinit();
     }
@@ -32,7 +32,7 @@ pub const Pass = struct {
 pub const Model = struct {
     weights: Weights,
     kernels: mx.Kernels,
-    cache: [64]Cache = [_]Cache{.{}} ** 64,
+    cache: [64]Cache = @splat(.{}),
     position: i32 = 0,
     pub fn init(io: std.Io, dir: []const u8) !Model {
         var m = Model{ .weights = Weights.init(), .kernels = mx.Kernels.init() };
@@ -133,7 +133,7 @@ pub const Model = struct {
         const ids = try s.ints(rows);
         const count = try s.ints(&.{@intCast(rows.len)});
         // Build all new caches first; a failed kernel cannot half-commit a stream.
-        var next: [64]Cache = [_]Cache{.{}} ** 64;
+        var next: [64]Cache = @splat(.{});
         errdefer for (&next) |*c| c.deinit();
         for (&p.records, 0..) |*rec, i| {
             const v = rec.values;

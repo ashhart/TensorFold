@@ -80,8 +80,8 @@ pub fn mlp(k: *mx.Kernels, s: *mx.Scope, gate: A, up: A) !Act {
 
 pub const Tree = struct {
     parents: []const i32,
-    depths: [128]i32 = .{0} ** 128,
-    paths: [128 * 128]i32 = .{0} ** (128 * 128),
+    depths: [128]i32 = @splat(0),
+    paths: [128 * 128]i32 = @splat(0),
     windows: [128 * 4]i32 = undefined,
     chain: bool = true,
     max_depth: i32 = 0,

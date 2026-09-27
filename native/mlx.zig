@@ -1,9 +1,7 @@
 //! MLX-C ownership boundary. A Scope owns temporary graph handles; persistent
 //! weights/cache entries explicitly retain their own handles with `retain`.
 const std = @import("std");
-pub const c = @cImport({
-    @cInclude("mlx/c/mlx.h");
-});
+pub const c = @import("mlx_c");
 pub const Array = c.mlx_array;
 pub const empty: Array = .{ .ctx = null };
 pub const bf16 = c.MLX_BFLOAT16;
@@ -133,9 +131,9 @@ pub const Scope = struct {
         return s.result(rc, a);
     }
     pub fn slice(s: *Scope, x: Array, axis: usize, start: c_int, end: c_int) !Array {
-        var starts = [_]c_int{0} ** 8;
+        var starts: [8]c_int = @splat(0);
         var stops: [8]c_int = undefined;
-        const steps = [_]c_int{1} ** 8;
+        const steps: [8]c_int = @splat(1);
         const dims = shape(x);
         @memcpy(stops[0..dims.len], dims);
         starts[axis] = start;
@@ -243,7 +241,7 @@ pub const Kernels = struct {
         var outs = c.mlx_vector_array_new();
         defer _ = c.mlx_vector_array_free(outs);
         try check(c.mlx_fast_metal_kernel_apply(&outs, entry.value_ptr.*, ins, cfg, stream));
-        var result_ = [_]Array{empty} ** 5;
+        var result_: [5]Array = @splat(empty);
         for (0..outputs.len) |i| {
             var a = c.mlx_array_new();
             const rc = c.mlx_vector_array_get(&a, outs, i);

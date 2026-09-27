@@ -1,6 +1,6 @@
-# Native Zig Qwen3.8-27B on Mac
+# Native Zig Metal inference on Mac
 
-This is a native port of TensorFold's Qwen3.8-27B M5 Metal inference path, following the
+This is a native port of TensorFold's Qwen3.8-27B, Nemotron Lightning, and Flash Next Metal inference paths, following the
 Zig → MLX-C → MLX/Metal architecture in the neighboring `mlx-serve` project. Zig owns
 loading, tokenization, the forward pass, recurrent/KV caches, DFlash2, tree verification,
 and deterministic sampling. The executable does not import or launch Python.
@@ -12,17 +12,20 @@ reimplement Apple's GPU runtime.
 
 ## Build and run
 
-Requirements: Zig **0.16.0**, Apple M5-generation GPU, macOS **26.2+**, and a compatible
+Requirements: Zig **0.17.0-dev.2248+3f6a02acd** (the same nightly as `../mlx-serve`), Apple Silicon, macOS **26.2+**, and a compatible
 MLX/MLX-C installation built with Metal tensor support. The tested machine is an M5 Max
-with 128 GiB unified memory. The executable rejects older GPUs before loading weights.
+with 128 GiB unified memory. M5 uses tensor kernels; older GPUs select SIMD kernels.
+The SIMD path can also be exercised on M5 with `--metal-simd`; physical M1–M4 machines
+have not been tested for this native port.
 
 From the repository root, using the already-built libraries in `../mlx-serve`:
 
 ```sh
 mkdir -p build
 cp -R ../mlx-serve/lib/mlx build/mlx
-zig build
-zig build test
+bash scripts/fetch-zig.sh
+.zig-toolchain/zig build
+.zig-toolchain/zig build test
 zig-out/bin/tensorfold run build/models/Qwen3.8-27B-MLX-4bit \
   --drafter build/models/Qwen3.8-27B-DFlash2 \
   --prompt 'Write a short Python function that computes the Fibonacci sequence.' \
@@ -36,7 +39,9 @@ above. These are ignored build artifacts, not committed dependencies or weights.
 Use `-Dmlx-prefix=/absolute/install/prefix` to link another compatible installation.
 The runtime needs `libmlx.dylib`, `libmlxc.dylib`, and `mlx.metallib` together in that
 prefix's `lib` directory. Rebuild if the prefix moves; its path is embedded as an rpath.
-`zig build -Doptimize=ReleaseSafe` enables runtime safety checks; the default is ReleaseFast.
+`.zig-toolchain/zig build -Doptimize=safe` enables runtime safety checks; the default is `fast`.
+The version pin is in `.zig-version`. Zig 0.17 translates the public MLX C header in the
+build graph and imports the resulting module; no `@cImport` language builtin is needed.
 
 The target checkpoint is `Vontra/Qwen3.8-27B-MLX-4bit`: sanitized BF16/affine 4-bit,
 group size 64. The optional draft checkpoint is `z-lab/Qwen3.8-27B-DFlash2`; its linear
@@ -48,16 +53,20 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--tokens ID,ID,...` | Exact prompt token IDs, overriding text |
 | `--max-tokens N` | Maximum output tokens, default 32; stops at model EOS |
 | `--drafter DIR` | Enable DFlash2 and context-copy proposals; omit for serial decoding |
+| `--mtp-drafts N` | Nemotron/Flash Next: chained MTP budget, default 3, maximum 15 |
+| `--no-drafts` | Nemotron/Flash Next: disable MTP and decode serially |
+| `--metal-simd` | Force the non-tensor Metal path for coverage on M5 |
 | `--temperature T` | Default 1; zero selects greedy decoding |
 | `--top-k N`, `--top-p P` | Defaults 20 and 0.95; top-k zero considers the full vocabulary |
 | `--seed N` | Override the default SHA-256-derived prompt seed |
 | `--warmup` | Compile common Metal variants before timing prompt/decode |
 | `--report FILE` | Write prompt/output IDs, decoded text, timing, and token hash as JSON |
 | `--dump-logits FILE.npy` | Save float32 logits from the final prompt block |
-| `--check-exact` | Run the GPU tree/cache parity check and exit |
+| `--check-exact` | Run the family's GPU verification/partial-commit parity check and exit |
 
 Text goes to stdout when decoding finishes; diagnostics go to stderr. Report parent
-directories must already exist. Long prompts prefill in 128-token chunks. Prompt plus
+directories must already exist. Dense Qwen prefills in 128-token chunks; Nemotron and
+Flash Next use 16-token chunks. Prompt plus
 requested output is bounded to 262,144 tokens; actual memory requirements grow with context.
 
 ## How the port works
@@ -90,24 +99,53 @@ path; attention layers gather only its K/V rows.
 | `weights.zig`, `config.zig` | Checkpoint validation/loading and packed weight preparation |
 | `lanes.zig`, `metal/` | Exact quantized projections, normalization, tree metadata and attention |
 | `model.zig` | Complete target forward, caches, accepted-path commit |
+| `checkpoint.zig` | Shared safetensors reader and affine quantized projections |
+| `nemotron.zig` | Mamba, NoPE attention, routed/shared experts, MTP and rollback |
+| `flash.zig`, `ngram.zig` | Hyper-connections, GDN, sparse attention, MoE, PLE and MTP |
+| `family_runtime.zig` | Chained verification and completion for Nemotron/Flash Next |
 | `drafter.zig`, `copy.zig` | DFlash2 and context-copy proposals |
 | `sampling.zig` | Deterministic greedy/top-k/top-p selection |
 | `main.zig` | Native completion CLI and decoding loop |
 | `verification.zig` | Branch/partial-commit/continuation/cache parity check |
 | `vendor/` | MIT tokenizer and I/O helpers from mlx-serve; preserved license |
 
-The HTTP service, chat-template rendering, vision, disk prefix caches, other model
-families, and the M1–M4 SIMD backend are not part of this native port. Attention cache
+The HTTP service, chat-template rendering, vision, and disk prefix caches are not part
+of this native port. Attention cache
 commit currently concatenates the prefix, so long-context performance needs separate
 measurement. This is the native inference backend and completion CLI, not a replacement
-for every `tensorfold serve` feature.
+for every `tensorfold serve` feature. The native sampler currently uses CPU f64
+position-keyed sampling; the separate Python GPU sampling and radix top-k utilities
+have not yet been ported. Nemotron long-context attention currently uses MLX SDPA.
+
+## Additional model families
+
+All four required checkpoints are downloaded under ignored `build/models/` in this
+checkout, including Nemotron's `mtp-4bit.safetensors` and all 22 Flash Next shards:
+
+| Checkpoint directory | Native inference components |
+| --- | --- |
+| `Qwen3.8-27B-MLX-4bit` + `Qwen3.8-27B-DFlash2` | GDN, full attention, dense MLP, DFlash2 trees, context copies, recurrent replay |
+| `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | Mamba convolution/SSM, NoPE attention, top-6 routed and shared experts, MTP |
+| `Qwen3.8-Flash-Next-MLX-4bit-MTP` | Four residual streams, hyper-connections, GDN, indexed sparse attention, top-10 MoE, PLE hash/lookup/convolution, MTP |
+
+```sh
+zig-out/bin/tensorfold run build/models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit \
+  --prompt 'Write a short Python function that computes the Fibonacci sequence.' --seed 1234
+zig-out/bin/tensorfold run build/models/Qwen3.8-Flash-Next-MLX-4bit-MTP \
+  --tokens 1,2,3,4 --max-tokens 16 --seed 1234
+```
+
+Flash Next contains approximately 113 GB of tensor data. Short native runs fit on the
+tested 128 GiB Mac using lazy PLE shard access, but this does not establish sufficient
+memory or useful throughput for long contexts. The upstream recommended capacity is
+192 GB or more.
 
 ## Validation
 
 The checks below use the actual downloaded 27B model, not a toy substitute:
 
 ```sh
-zig build test
+.zig-toolchain/zig build test
 zig-out/bin/tensorfold run build/models/Qwen3.8-27B-MLX-4bit --check-exact
 ```
 
@@ -137,6 +175,13 @@ runs, not server throughput figures; loading, warm-up, and prefill are excluded.
 Separate 64-token checks also matched Python exactly for a Danish prompt with greedy
 sampling and a story prompt with seed 5678, temperature 0.7, top-k 12, and top-p 0.8.
 The GPU cache check and greedy DFlash2 run also passed in a ReleaseSafe build.
+
+Nemotron's four-token pass matched all **524,288 logits** from Python exactly; its
+32-token sampled MTP completion matched Python serial, and window/partial-commit
+continuation checks passed. Flash Next's one-token full pass matched all **248,320
+logits** exactly. Its 16-token MTP run completed; full draft/serial and long-context
+sparse-selection comparisons are still pending. Dense Qwen's forced SIMD tree/cache
+check passed on M5. Embedded kernels alone are not counted as execution coverage.
 
 `tools/native_reference.py --generate 128 --output FILE.json` creates the Python
 completion report for the default prompt and seed 1234. Use native `--seed 1234 --report`
@@ -180,5 +225,5 @@ cmake -S build/deps/mlx-c -B build/mlxc-build \
   -DCMAKE_PREFIX_PATH="$PWD/build/mlx" -DCMAKE_INSTALL_PREFIX="$PWD/build/mlx"
 cmake --build build/mlxc-build --parallel 8
 cmake --install build/mlxc-build
-zig build
+.zig-toolchain/zig build
 ```
