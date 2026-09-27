@@ -30,7 +30,10 @@ class KDA:
             self.cuts.append(at)
         self.in_proj = Q.stack(parts)
         self.f_b, self.g_b, self.o_proj = w["f_b_proj"], w["g_b_proj"], w["o_proj"]
-        taps = [w[f"{c}_conv1d"] for c in "qkv"]                       # [C, 1, T] (torch) or [C, T, 1]
+        if "conv1d" in w:                                                # one fused conv over q | k | v (mlxlm layout)
+            taps = [w["conv1d"]]                                         # [3 C, T, 1]
+        else:
+            taps = [w[f"{c}_conv1d"] for c in "qkv"]                     # [C, 1, T] (torch) or [C, T, 1]
         conv = mx.concatenate([t.reshape(t.shape[0], -1) for t in taps])  # [3 width, T]
         self.taps = int(conv.shape[1])
         self.conv_w = mx.contiguous(conv.T.astype(mx.float32))          # [T, 3 width]

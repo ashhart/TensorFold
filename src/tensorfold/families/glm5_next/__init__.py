@@ -74,8 +74,9 @@ def has_mtp(model_dir: str | Path) -> bool:
     index = Path(model_dir) / "model.safetensors.index.json"
     if not index.is_file():
         return False
-    names = json.loads(index.read_text())["weight_map"]
-    return any(name.endswith(f"layers.{n}.eh_proj.weight") for name in names)
+    from tensorfold.families.glm5_next.layouts import mtp_layer_names
+
+    return mtp_layer_names(json.loads(index.read_text())["weight_map"], n)
 
 
 def _require_mlx(least: tuple[int, ...]) -> None:

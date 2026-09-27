@@ -28,16 +28,24 @@ class MLA:
         self.scale = self.nope ** -0.5
         self.q_a, self.q_b, self.kv_a, self.o_proj = w["q_a_proj"], w["q_b_proj"], w["kv_a_proj_with_mqa"], w["o_proj"]
         self.q_norm, self.kv_norm = w["q_a_layernorm"], w["kv_a_layernorm"]
-        kvb: Q = w["kv_b_proj"]                                          # [H (nope + v), rank]
-        per = self.nope + self.vdim
+        if "kv_b_proj" in w:
+            kvb: Q = w["kv_b_proj"]                                      # [H (nope + v), rank]
+            per = self.nope + self.vdim
 
-        def heads(a: mx.array, lo: int, hi: int) -> mx.array:
-            return mx.contiguous(a.reshape(self.heads, per, -1)[:, lo:hi])
+            def heads(a: mx.array, lo: int, hi: int) -> mx.array:
+                return mx.contiguous(a.reshape(self.heads, per, -1)[:, lo:hi])
 
-        self.wk = Q(heads(kvb.weight, 0, self.nope), heads(kvb.scales, 0, self.nope), heads(kvb.biases, 0, self.nope),
-                    bits=kvb.bits, group=kvb.group)
-        self.wv = Q(heads(kvb.weight, self.nope, per), heads(kvb.scales, self.nope, per),
-                    heads(kvb.biases, self.nope, per), bits=kvb.bits, group=kvb.group)
+            # keys [H, nope, rank] quantized along rank: absorb = q @ wk (transpose False), keys = lat @ wk^T
+            self.wk = Q(heads(kvb.weight, 0, self.nope), heads(kvb.scales, 0, self.nope),
+                        heads(kvb.biases, 0, self.nope), bits=kvb.bits, group=kvb.group)
+            self.wv = Q(heads(kvb.weight, self.nope, per), heads(kvb.scales, self.nope, per),
+                        heads(kvb.biases, self.nope, per), bits=kvb.bits, group=kvb.group)
+            self.wk_t = False
+        else:
+            # the mlxlm layout's absorbed pair: embed_q [H, rank, nope] quantized along nope (kv_b's key half
+            # transposed), unembed_out [H, v, rank] as kv_b's value half; absorb = q @ embed_q^T (transpose True)
+            self.wk, self.wv = w["embed_q"], w["unembed_out"]
+            self.wk_t = True
         # indexer
         self.iq, self.ik_proj, self.iw = w["indexer.wq_b"], w["indexer.wk"], w["indexer.weights_proj"]
         self.ik_norm_w, self.ik_norm_b = w["indexer.k_norm.weight"], w["indexer.k_norm.bias"]
@@ -61,7 +69,7 @@ class MLA:
         """q_nope [H, n, nope] -> latent queries [H, n, rank]."""
 
         wk = self.wk
-        return mx.quantized_matmul(q, wk.weight, wk.scales, wk.biases, transpose=False, group_size=wk.group,
+        return mx.quantized_matmul(q, wk.weight, wk.scales, wk.biases, transpose=self.wk_t, group_size=wk.group,
                                    bits=wk.bits)
 
     def unabsorb(self, out: mx.array) -> mx.array:
@@ -124,7 +132,7 @@ class MLA:
         if batched:
             # the latent maps with the rows as a batch (each keeps its one-row bits), attention row by row
             ql = mx.quantized_matmul(q[:, :, None, :], self.wk.weight, self.wk.scales, self.wk.biases,
-                                     transpose=False, group_size=self.wk.group, bits=self.wk.bits)   # [R, H, 1, rank]
+                                     transpose=self.wk_t, group_size=self.wk.group, bits=self.wk.bits)  # [R, H, 1, rank]
         outs, at = [], 0
         for cache, n in zip(caches, lengths):
             one = len(lengths) == 1
