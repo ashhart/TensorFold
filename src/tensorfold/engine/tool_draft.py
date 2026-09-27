@@ -27,6 +27,8 @@ from __future__ import annotations
 import re
 from typing import Any, Sequence
 
+from tensorfold.tool_parameters import decode_parameter, parameter_schemas, typed_parameter
+
 _OPEN = "<tool_call>"
 _END = "\x00end"  # placeholder: after a closed call the draft is the end-of-turn token
 _SINGLE_LINE = re.compile(r"path|file|dir|name|pattern|glob|url|query|id|mode|lang|cwd|limit|offset",
@@ -272,15 +274,20 @@ class ToolCallStreamer:
     grows (JSON-escaped; the last few characters held back in case they begin
     ``</parameter>``, trailing whitespace held until the value closes), ``"}``
     when the function closes. The concatenated argument deltas are the same
-    JSON the end-of-reply parser builds (all strings; of a value's whitespace
+    JSON the end-of-reply parser builds. Schema-typed values buffer until closed;
+    of a value's whitespace
     only the template's one framing newline a side is dropped, so the client's
-    resent history is the tokens the model wrote), so a client can show a file
+    resent history is the tokens the model wrote, so a client can show a file
     being written instead of a silent minute.
     """
 
     _TAIL = "</parameter>"
 
     def __init__(self, tools: Sequence[dict[str, Any]] | None) -> None:
+        self.schemas = parameter_schemas(tools)
+        self.current_schema = {}
+        self.typed = False
+        self.value_buffer = ""
         self.known = {name.lower(): name for name in tool_schema(tools)}
         self.pos = 0
         self.state = "outside"
@@ -321,6 +328,7 @@ class ToolCallStreamer:
                 if name is None:
                     self.state = "abort"
                     break
+                self.current_schema = self.schemas.get(name.lower(), {})
                 self.index += 1
                 self.streamed = True
                 out.append({"tool_calls": [{"index": self.index, "id": f"call_{uuid.uuid4().hex[:24]}",
@@ -332,8 +340,11 @@ class ToolCallStreamer:
             elif self.state == "function":
                 m = re.match(r"\s*<parameter=([^>\n]+)>\n?", rest)
                 if m is not None:
+                    self.value_schema = self.current_schema.get(m.group(1).strip(), {})
+                    self.typed = typed_parameter(self.value_schema)
+                    self.value_buffer = ""
                     out.append(self._args(("," if self.args_open else "{")
-                                          + self._esc_key(m.group(1).strip()) + ':"'))
+                                          + self._esc_key(m.group(1).strip()) + (':' if self.typed else ':"')))
                     self.args_open = True
                     self.pos += m.end()
                     self.state = "value"
@@ -361,11 +372,17 @@ class ToolCallStreamer:
                 else:
                     keep = piece.rstrip()   # its last newline may be the framing one
                     self.held = piece[len(keep):]
-                if keep:
+                if self.typed:
+                    self.value_buffer += keep
+                elif keep:
                     out.append(self._args(self._esc(keep)))
                 if end < 0:
                     break
-                out.append(self._args('"'))
+                if self.typed:
+                    import json
+                    out.append(self._args(json.dumps(decode_parameter(self.value_buffer, self.value_schema), ensure_ascii=False)))
+                else:
+                    out.append(self._args('"'))
                 self.pos += len(self._TAIL)
                 self.state = "function"
             elif self.state == "closing":

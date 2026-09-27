@@ -17,6 +17,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
+from tensorfold.tool_parameters import decode_parameter, parameter_schemas
+
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
 
@@ -222,7 +224,7 @@ def _loose_tool_arguments(payload: dict[str, Any], explicit: Any) -> Any:
     }
 
 
-def _parse_tool_call_payload(block: str) -> tuple[str, dict[str, Any]] | None:
+def _parse_tool_call_payload(block: str, schemas: dict[str, dict[str, Any]] | None = None) -> tuple[str, dict[str, Any]] | None:
     try:
         payload = json.loads(block)
     except json.JSONDecodeError:
@@ -266,7 +268,9 @@ def _parse_tool_call_payload(block: str) -> tuple[str, dict[str, Any]] | None:
     arguments: dict[str, Any] = {}
     body = match.group(2)
     for param_match in _TOOL_PARAMETER_BLOCK_RE.finditer(body):
-        arguments[param_match.group(1).strip()] = param_match.group(2)
+        key = param_match.group(1).strip()
+        schema = (schemas or {}).get(name.lower(), {}).get(key, {})
+        arguments[key] = decode_parameter(param_match.group(2), schema)
     if not name:
         raise ValueError("tool_call is missing a function name")
     return name, arguments
@@ -327,6 +331,7 @@ def parse_tool_calls_from_content(
     if not tools:
         return text, None
     known = {tool_spec_name(tool).lower(): tool_spec_name(tool) for tool in tools}
+    schemas = parameter_schemas(tools)
     envelopes: list[tuple[int, int, str]] = []
     for match in _TOOL_CALL_BLOCK_RE.finditer(text):
         envelopes.append((match.start(), match.end(), match.group(1).strip()))
@@ -344,7 +349,7 @@ def parse_tool_calls_from_content(
     for index, (start, end, block) in enumerate(envelopes):
         residue_parts.append(text[cursor:start])
         cursor = end
-        parsed = _parse_tool_call_payload(block)
+        parsed = _parse_tool_call_payload(block, schemas)
         if parsed is None:
             raise ValueError("unsupported tool_call payload format")
         raw_name, arguments = parsed
@@ -525,6 +530,12 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "seed", "priority", "draft",
                                                         "thinking_budget")
                                    if k in body}
+                if "reasoning_effort" in body:
+                    effort = body["reasoning_effort"]
+                    if effort not in ("none", "low", "medium", "high", "xhigh"):
+                        raise ValueError("reasoning_effort must be none, low, medium, high or xhigh")
+                    sampling_fields["reasoning_effort"] = "xhigh" if effort == "high" else effort
+                    sampling_fields["enable_thinking"] = effort != "none"
                 template_kwargs = body.get("chat_template_kwargs") or {}
                 if isinstance(template_kwargs, dict) and "enable_thinking" in template_kwargs:
                     sampling_fields["enable_thinking"] = bool(template_kwargs["enable_thinking"])

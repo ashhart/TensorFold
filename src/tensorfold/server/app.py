@@ -893,11 +893,12 @@ class ChatApp:
         """Prompt ids plus the length of the rendered history that prefixes them."""
 
         thinking = self.enable_thinking if thinking is None else bool(thinking)
+        effort = (getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort", self.reasoning_effort)
         with self.tokenizer_lock:
             prompt = render_prompt_ids(self.tokenizer, messages, tools=tools, enable_thinking=thinking,
-                                       reasoning_effort=self.reasoning_effort)
+                                       reasoning_effort=effort)
             history = render_prompt_ids(self.tokenizer, messages, tools=tools, enable_thinking=thinking,
-                                        reasoning_effort=self.reasoning_effort, add_generation_prompt=False)
+                                        reasoning_effort=effort, add_generation_prompt=False)
         history_len = len(history) if 0 < len(history) < len(prompt) and prompt[: len(history)] == history else 0
         return prompt, history_len
 
@@ -909,6 +910,7 @@ class ChatApp:
         message for a probe and taking the common prefix, so it needs no knowledge of the chat template. Zero when
         the shared part is too short to be worth a snapshot."""
 
+        effort = (getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort", self.reasoning_effort)
         first_user = next((i for i, m in enumerate(messages) if m.get("role") == "user"), None)
         if first_user is None:
             return 0
@@ -918,7 +920,7 @@ class ChatApp:
                 other = render_prompt_ids(
                     self.tokenizer, probe, tools=tools,
                     enable_thinking=self.enable_thinking if thinking is None else bool(thinking),
-                    reasoning_effort=self.reasoning_effort)
+                    reasoning_effort=effort)
         except Exception:  # noqa: BLE001 - a template quirk must not fail the request
             return 0
         shared = longest_common_prefix(prompt_ids, other)
@@ -1160,6 +1162,8 @@ class ChatApp:
             "completion_tokens": len(collected),
             "seconds": seconds,
             "runtime": {
+                "enable_thinking": thinking,
+                "reasoning_effort": fields.get("reasoning_effort", self.reasoning_effort) if thinking else "none",
                 "engine": self.exact_mode["engine"],
                 "tokens_per_second": (decode_tokens / decode_seconds) if decode_seconds > 0 else 0.0,
                 "seconds": seconds,
@@ -1188,6 +1192,7 @@ class ChatApp:
         store = self.checkpoints
         print(
             f"[tensorfold] done {job.job_id} prompt={len(prompt_ids)} cached={job.cached_tokens} "
+            f"thinking={thinking} effort={reply['runtime']['reasoning_effort']} "
             f"tokens={len(collected)} sha={_token_sha(collected)} finish={reply['finish_reason']} "
             f"tok/s={reply['runtime']['tokens_per_second']:.1f} "
             f"ttft={(first_token_at - received_at) if first_token_at else -1:.2f}s "
