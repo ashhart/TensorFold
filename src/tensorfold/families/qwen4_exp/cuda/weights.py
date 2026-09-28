@@ -1,1 +1,1 @@
-LOADING_FROM_FILE_/tmp/WEIGHTS_PY_BODY.txt
+{"__load__":"/workspace/agent-tools/PUSH_EXACT_NOW.json","__field__":"files.0.content"}
