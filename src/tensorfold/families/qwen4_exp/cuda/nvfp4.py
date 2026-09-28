@@ -89,12 +89,18 @@ def _tensor_scale(weight_scale_2) -> float:
 
 def e2m1_bits(words: torch.Tensor) -> torch.Tensor:
     """(..., N, K/2) uint8 -> (..., N, K) uint16: the bf16 bit pattern of each E2M1 code (the kernel's
-    grid). Stacked inputs (a leading expert axis) decode whole — the 512 experts' words in one pass."""
+    grid). Stacked inputs (a leading expert axis) decode whole — the 512 experts' words in one pass.
+
+    The patterns are gathered as int32 and widened once: torch's CUDA index kernel has no UInt16
+    (``index_cuda`` is unimplemented for it), and the 16-bit patterns are exact either way."""
 
     w = words.to(torch.int32)
     code = torch.stack([w & 0xF, (w >> 4) & 0xF], dim=-1).reshape(*w.shape[:-1], w.shape[-1] * 2)
-    return torch.tensor(BF16_BITS, dtype=torch.uint16, device=words.device)[code & 0x7] \
-        | ((code >> 3) * 0x8000).to(torch.uint16)                  # sign bit 15, the pattern's sign
+    table = torch.tensor(BF16_BITS, dtype=torch.int32, device=words.device)
+    # the gather and the sign bit are int32 work (torch's CUDA kernels have neither index nor bitwise
+    # ops for UInt16); the 16-bit patterns are exact in either width
+    pat = table[(code & 0x7).to(torch.int64)] | ((code >> 3) * 0x8000)   # sign bit 15, the pattern's sign
+    return pat.to(torch.uint16)
 
 
 def quantized_values(words: torch.Tensor) -> torch.Tensor:
@@ -163,9 +169,9 @@ def _untile_bits(bits: torch.Tensor, n: int, k: int) -> torch.Tensor:
 
     if bits.dim() == 5:                                                  # [E, N/BN, K/64, 64, BN]
         rows = n * bits.shape[0]
-        bits = bits.permute(0, 1, 3, 2, 4).reshape(rows, k)
+        bits = bits.permute(0, 1, 4, 2, 3).reshape(rows, k)
     else:                                                                # [N/BN, K/64, 64, BN]
-        bits = bits.permute(0, 2, 1, 3).reshape(n, k)
+        bits = bits.permute(0, 3, 1, 2).reshape(n, k)
     return bits
 
 
@@ -193,7 +199,9 @@ def _tile_bits(bits: torch.Tensor) -> torch.Tensor:
     if k % 64:
         raise ValueError(f"NVFP4 tiling needs K a multiple of 64, got {k}")
     e = bits.reshape(*lead, n // BN, BN, k // 64, 64)
-    return e.permute(*range(len(lead)), len(lead), len(lead) + 2, len(lead) + 1, len(lead) + 3).contiguous()
+    # [.., N/BN, K/64, 64, BN]: a program's K block is contiguous the way the kernel reads it (the 64 K
+    # values a stride of BN apart, the BN columns of a row next to each other)
+    return e.permute(*range(len(lead)), len(lead), len(lead) + 2, len(lead) + 3, len(lead) + 1).contiguous()
 
 
 def make_fp4(words: torch.Tensor, weight_scale: torch.Tensor, weight_scale_2) -> FP4:
@@ -262,14 +270,16 @@ try:
     @triton.jit
     def _fp4mm(X, W, S, OUT, PART, M, x_stride,
                N: tl.constexpr, K: tl.constexpr, SK: tl.constexpr, BM: tl.constexpr,
-               BLOCK_N: tl.constexpr, GPI: tl.constexpr, F32: tl.constexpr):
+               SBN: tl.constexpr, BLOCK_N: tl.constexpr, GPI: tl.constexpr, F32: tl.constexpr):
         """x [M, K] bf16 @ FP4.T -> [M, N] bf16 (split-K: fp32 partials, reduced in slice order). One program:
         a row tile x a column tile x one K slice; blocks in order, each block one tensor-core dot of the 16
         bf16 inputs against the block's stored code values (the uint16 grid widened to bf16 — the same
         widening the reference does), times the block's fp32 row scale: one fp32 rounding per block
-        product, the dequantize reference's order."""
+        product, the dequantize reference's order. ``SBN`` is the stored N tile (a constexpr: Triton reads
+        no globals) and ``BLOCK_N`` the program's slice of it."""
 
         PER: tl.constexpr = (K // 16) // SK             # quantization blocks per slice
+        SUB: tl.constexpr = SBN // BLOCK_N              # programs per stored N tile
         pid_n = tl.program_id(1)
         pid_s = tl.program_id(2)
         rm = tl.program_id(0) * BM + tl.arange(0, BM)
@@ -277,7 +287,10 @@ try:
         r16 = tl.arange(0, 16)
         m_ok = rm < M
         n_ok = rn < N
-        # a quantization block b lives in stored K block kb = b // 4, rows (b % 4) * 16 .. + 15 of [N/BN, K/64, 64, BN]
+        # a quantization block b lives in stored K block kb = b // 4, rows (b % 4) * 16 .. + 15 of
+        # [N/SBN, K/64, 64, SBN]
+        tile = W + (pid_n // SUB) * (K // 64 * 64 * SBN)
+        local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
         acc = tl.zeros((BM, BLOCK_N), dtype=tl.float32)
         KT: tl.constexpr = K // 64
         for i in range(PER // GPI):
@@ -286,8 +299,7 @@ try:
                 kb = b // 4
                 row0 = (b % 4) * 16
                 x = tl.load(X + rm[:, None] * x_stride + (b * 16 + r16)[None, :], mask=m_ok[:, None], other=0.0)
-                wbits = tl.load(W + (pid_n * KT + kb) * (64 * BN) + (row0 + r16)[:, None] * BN
-                                + tl.arange(0, BLOCK_N)[None, :])
+                wbits = tl.load(tile + kb * (64 * SBN) + (row0 + r16)[:, None] * SBN + local[None, :])
                 wv = _bf16_widen(wbits).to(tl.bfloat16)
                 p = tl.dot(x, wv)
                 s = tl.load(S + b * N + rn, mask=n_ok, other=0.0)
@@ -362,7 +374,7 @@ def matmul(x: torch.Tensor, fp: FP4, *, out: torch.Tensor | None = None, f32: bo
     bn = block_n or BN
     grid = (triton.cdiv(m, bm), fp.n // bn, sk)
     _fp4mm[grid](x, fp.weight, fp.scale, out, part if sk > 1 else out, m, x.stride(0),
-                 N=fp.n, K=k, SK=sk, BM=bm, BLOCK_N=bn, GPI=g, F32=f32,
+                 N=fp.n, K=k, SK=sk, BM=bm, SBN=BN, BLOCK_N=bn, GPI=g, F32=f32,
                  num_warps=num_warps or c_warps, num_stages=num_stages)
     if sk > 1:
         total = m * fp.n

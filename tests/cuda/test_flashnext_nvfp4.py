@@ -151,8 +151,8 @@ def test_matmul_splitk_sum_order_is_the_reduces_one():
     part = torch.empty((sk, 4, n), dtype=torch.float32, device="cuda")
     out = torch.empty((4, n), dtype=torch.bfloat16, device="cuda")
     nvfp4._fp4mm[(1, n // nvfp4.BN, sk)](x, fp.weight, fp.scale, out, part, 4, x.stride(0),
-                                         N=n, K=k, SK=sk, BM=16, BLOCK_N=nvfp4.BN,
-                                         GPI=nvfp4.gpi_for((k // nvfp4.GS) // sk, 2),
+                                         N=n, K=k, SK=sk, BM=16, SBN=nvfp4.BN, BLOCK_N=nvfp4.BN,
+                                         GPI=nvfp4.gpi_for((k // nvfp4.GS) // sk, 2), F32=False,
                                          num_warps=4, num_stages=3)
     got = torch.empty_like(out)
     nvfp4._reduce[(triton.cdiv(4 * n, 1024),)](part, got, 4 * n, SK=sk, BLOCK=1024, num_warps=4)
