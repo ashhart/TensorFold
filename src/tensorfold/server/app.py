@@ -11,7 +11,7 @@ import uuid
 
 from tensorfold.engine.lane_engine import LaneEngine, SuffixLookupProposer
 from tensorfold.server.admission import concurrency
-from tensorfold.server.checkpoints import CheckpointStore, longest_common_prefix, save_conversations
+from tensorfold.server.checkpoints import CheckpointStore, longest_common_prefix, save_conversations, spill_conversation
 from tensorfold.server.cancellation import Cancellation
 from tensorfold.server.errors import RequestError
 from tensorfold.server.request_options import RequestOptions
@@ -79,6 +79,7 @@ class ChatApp(RequestOptions):
         max_snapshots: int = 3,
         checkpoint_slots: int | None = None,
         checkpoint_budget_bytes: int | None = 16 * 1024**3,
+        spill_bytes: int = 0,
         memory_budget_bytes: int | None = None,
         memory_runtime: Any = None,
         model_aliases: list[str] | None = None,
@@ -168,6 +169,12 @@ class ChatApp(RequestOptions):
             model_id=model_id,
             prompt_memory=self.prompt_memory,
         )
+        # evicted conversations go to disk (``spill_bytes`` of this model's files at most) and come back on demand
+        self.spill_bytes = int(spill_bytes) if self.checkpoints is not None and self.scheduler.session_dir else 0
+        if self.spill_bytes > 0:
+            session_dir, spill_limit = Path(self.scheduler.session_dir), self.spill_bytes
+            self.checkpoints.on_evict = lambda entry: spill_conversation(entry, session_dir, model_id,
+                                                                         limit_bytes=spill_limit)
         loaded_count = 0
         if snapshot_dir is not None and self.checkpoints is not None:
             from tensorfold.engine.prefix_snapshots import load_snapshots
@@ -576,4 +583,8 @@ class ChatApp(RequestOptions):
 
         if self.scheduler.session_dir is None or self.checkpoints is None:
             return 0
+        if self.spill_bytes > 0:
+            # the session directory is a disk tier under its own byte budget, not the newest two conversations
+            return save_conversations(self.checkpoints, Path(self.scheduler.session_dir), self.scheduler.model_id,
+                                      keep=1 << 30, limit_bytes=self.spill_bytes)
         return save_conversations(self.checkpoints, Path(self.scheduler.session_dir), self.scheduler.model_id)

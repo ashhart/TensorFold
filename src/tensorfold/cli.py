@@ -69,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
                        help="memory for cached conversation prefixes (0: off; default: an eighth of RAM, at most 16)")
+    speed.add_argument("--checkpoint-slots", type=int, default=None,
+                       help="cached conversation prefixes kept in memory (default: 3 per parallel lane, at least 8); "
+                            "with long conversations this, not --prompt-cache-gib, is usually the limit")
+    speed.add_argument("--spill-gib", type=float, default=0.0,
+                       help="write evicted conversation prefixes to disk, up to this many GiB, and read them back on "
+                            "demand instead of prefilling again (0: off; needs --snapshot-dir)")
     speed.add_argument("--snapshot-dir", default=str(Path.home() / ".cache" / "tensorfold" / "prefix-snapshots"),
                        help="where system-block and conversation snapshots are kept ('none': in memory only)")
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
@@ -547,8 +553,9 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         thinking_budget=int(args.thinking_budget),
         default_sampling=sampling,
         max_snapshots=int(args.max_snapshots),
-        checkpoint_slots=0 if budget <= 0 else None,
+        checkpoint_slots=0 if budget <= 0 else args.checkpoint_slots,
         checkpoint_budget_bytes=budget if budget > 0 else None,
+        spill_bytes=int(float(args.spill_gib) * 1024**3),
         memory_budget_bytes=memory_limit,
         fit_context=args.context is None,
         use_proposer=not args.no_drafts,
