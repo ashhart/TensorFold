@@ -62,7 +62,7 @@ class MoE4:
     # The grouped step resolves its plan's item list, its member gather and its member scatter on the device
     # (``nvfp4_grouped``), so the engine can capture a decode step again. The grid it launches is fixed in the
     # plan's capacity, so the routing decides how many items are live, never how many programs run.
-    capturable = True  # grouped kernels; scale2 must be contiguous (stacked_fp4) for GB10
+    capturable = False  # grouped MoE on, graphs off: capture was producing zero-token garbage on Spark
 
     # The shared expert's output and split-K partials, kept between steps: an allocation made inside a capture
     # is a block the graph pool may hand back while the kernel reading it still runs, which is what killed a
