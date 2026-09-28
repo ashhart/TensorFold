@@ -58,10 +58,15 @@ class MoE4:
     as identity-scaled tables. Expert id ``count - 1`` is the shared one; ``width`` / ``dims`` are the
     qmm names for NI / K (the MoE buffers take them)."""
 
-    gate_up: nvfp4.FP4    # tiles [E, 2NI/BN, D/64, 64, BN], scales [E, D/16, 2NI]
-    down_proj: nvfp4.FP4  # tiles [E, D/BN, NI/64, 64, BN], scales [E, NI/16, D]
+    gate_up: nvfp4.FP4    # packed tiles [E, 2NI/BN, D/64, 32, BN], fp8 scales [E, D/16, 2NI]
+    down_proj: nvfp4.FP4  # packed tiles [E, D/BN, NI/64, 32, BN], fp8 scales [E, NI/16, D]
     shared: Expert4       # the BF16 shared expert as identity-scaled tables
     kernel: str = "nvfp4"
+
+    # The grouped step walks its plan's item list and counts on the host (``items``: a synchronising copy),
+    # which a CUDA graph capture rejects — so the engine decodes this model eagerly. A device-side item loop
+    # (the generic grouped path's) is what would let it capture again.
+    capturable = False
 
     @property
     def routed(self) -> int:

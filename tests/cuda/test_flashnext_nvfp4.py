@@ -187,3 +187,13 @@ def test_a_packed_stack_keeps_each_experts_bytes_and_decodes_them():
     assert fp.weight.shape == (e, n // nvfp4.BN, k // 64, 32, nvfp4.BN)
     slab = nvfp4.FP4(fp.weight[1], fp.scale[1], n, k, scale2=fp.scale2[1], packed=True)
     assert torch.equal(nvfp4.dequantize_fp4(slab), nvfp4.dequantize(words[1], scale[1], factors[1]))
+
+
+def test_the_nvfp4_experts_declare_themselves_uncapturable():
+    """The NVFP4 grouped step walks its plan's item list and counts on the host — a synchronising copy that a
+    CUDA graph capture rejects (cudaErrorStreamCaptureInvalidated, after the weights are loaded). The route
+    says so, and the engine reads that answer instead of capturing a step that cannot be captured."""
+
+    from tensorfold.families.qwen4_exp.cuda import nvfp4_moe
+
+    assert nvfp4_moe.MoE4.capturable is False

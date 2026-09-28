@@ -417,3 +417,17 @@ def test_prefill_head_on_the_final_chunk_keeps_every_bit(monkeypatch, sampling):
         assert [k for k in want if not torch.equal(want[k], got[k])] == [], rows
         assert heads == [False] * (-(-len(prompt) // rows) - 1) + [True], rows
         del e
+
+
+def test_capture_is_declined_when_the_experts_cannot_be_captured():
+    """An engine asked for graphs must not build them over experts that declare themselves uncapturable: the
+    NVFP4 route reads its plan on the host, which a capture rejects. Decoding still works, eagerly."""
+
+    w = _model()
+    for layer in w.layers:
+        layer.moe.experts.capturable = False
+    e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, graphs=True)
+    assert e.graphs is None
+    prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
+    first = prefill(e, prompt, None)
+    assert len(serial_decode(e, first, 8, None).tokens) == 8
