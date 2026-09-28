@@ -18,18 +18,3 @@ from .ngram import NGram
 from tensorfold.cuda import experts as grouped
 
 from .qmm import Q4, dequantize, make_q4, stack_q4
-
-
-def stop_ids(configured: Any, generation: Path) -> tuple[int, ...]:
-    """config.json's end-of-reply ids, then generation_config.json's it lacks (EXL3 packs keep <|im_end|> there)."""
-
-    def ids(value: Any) -> list[int]:
-        return [] if value is None else [int(e) for e in value] if isinstance(value, list) else [int(value)]
-
-    found = ids(configured)
-    if generation.exists():
-        found += ids(json.loads(generation.read_text()).get("eos_token_id"))
-    out = tuple(dict.fromkeys(found))
-    if not out:
-        raise ValueError("no eos_token_id in config.json or generation_config.json")
-    return out
