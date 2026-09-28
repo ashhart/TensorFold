@@ -279,14 +279,17 @@ def make_fp4(words: torch.Tensor, weight_scale: torch.Tensor, weight_scale_2) ->
 def stacked_fp4(words: torch.Tensor, weight_scale: torch.Tensor, scale2) -> FP4:
     """Stacked per-expert arrays (words [E, N, K/2] uint8, scales [E, N, K/16] fp8e4m3, scale2 [E] fp32) -> one
     packed table with a leading expert axis (``n`` rows per expert; the kernels slice ``weight[e]``/``scale[e]``
-    and read ``scale2[e]``)."""
+    and read ``scale2[e]``).
+
+    ``scale2`` is always materialised contiguous: an ``expand`` view (stride 0 on N) makes Triton's
+    ``S2 + e*N + rn`` walk off the underlying E-vector and illegal-memory-access on a near-full GB10."""
 
     e, n, k2 = words.shape
     factors = torch.as_tensor(scale2, dtype=torch.float32, device=words.device)
     if factors.numel() == e:                        # one factor an expert: the same for its whole row block
         factors = factors.reshape(e, 1).expand(e, n)
     return FP4(_tile_words(words), _fp8_bytes(weight_scale).permute(0, 2, 1).contiguous(), n, k2 * 2,
-               scale2=factors.reshape(e, n), packed=True)
+               scale2=factors.reshape(e, n).contiguous(), packed=True)
 
 
 def fp4_from_rows(weight_bits: torch.Tensor, scale: torch.Tensor) -> FP4:

@@ -652,9 +652,11 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))
         del head_raw
     # the draft head rides 4-bit on an NVFP4 checkpoint (drafts change speed, never the bits): the bf16
-    # lm_head requantized once at load — a draft step reads ~0.3 GB of it, the bf16 head ~1.2 GB. Its
-    # rows stay in token-id order (quantize4 keeps rows), so its column j scores token j; with a draft
-    # vocabulary the sampler maps the subset's ids as on the MLX path.
+    # lm_head requantized once at load — a draft step reads ~0.3 GB of it, the bf16 head ~1.2 GB. Rows are
+    # the draft vocabulary only (same as the MLX / EXL3 path): column j of the draft head scores
+    # ``draft_ids[j]``, and the sampler maps those columns back to token ids. Quantizing the full lm_head
+    # left logits over the full vocabulary while ``draft_ids`` stayed a ~80k subset — ``_draft_host[cols]``
+    # then IndexError'd on Spark.
     draft_head, draft_ids = None, None
     ids = draft_token_ids(draft_vocab)
     if ids is not None:
@@ -662,7 +664,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         ids = torch.from_numpy(ids).to(device)
         draft_ids = ids
         if cfg.quant == "modelopt":
-            draft_head = quantize4(raw("lm_head.weight").to(torch.bfloat16))
+            draft_head = quantize4(raw("lm_head.weight").to(torch.bfloat16)[ids.cpu()])
         else:
             draft_head = make_q4(*_rows_at(triple("lm_head"), ids))
     inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (

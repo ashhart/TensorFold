@@ -173,6 +173,8 @@ def gateup(fp, x: torch.Tensor, act: torch.Tensor, plan, ni: int, slots: int, bl
     if fp.scale2 is None:                              # pattern tables: identity factor, as matmul does
         shape = (experts, fp.n) if stacked else (fp.n,)
         fp.scale2 = torch.ones(shape, dtype=torch.float32, device=x.device)
+    elif not fp.scale2.is_contiguous():
+        fp.scale2 = fp.scale2.contiguous()
     _gateup_grouped[_grid(plan, ni, block_n)](x, fp.weight, fp.scale, fp.scale2, plan.items, plan.counts[:1],
                                               plan.members, act, x.stride(0), slots, NI=ni, K=fp.k, SBN=BN,
                                               BLOCK_N=block_n, PACKED=fp.packed, STACKED=stacked,
@@ -188,6 +190,8 @@ def down(fp, act: torch.Tensor, y: torch.Tensor, plan, slots: int, block_n: int 
     if fp.scale2 is None:
         shape = (experts, fp.n) if stacked else (fp.n,)
         fp.scale2 = torch.ones(shape, dtype=torch.float32, device=act.device)
+    elif not fp.scale2.is_contiguous():
+        fp.scale2 = fp.scale2.contiguous()
     _down_grouped[_grid(plan, d, block_n)](act, fp.weight, fp.scale, fp.scale2, plan.items, plan.counts[:1],
                                            plan.members, y, act.stride(0), D=d, K=fp.k, SBN=BN,
                                            BLOCK_N=block_n, PACKED=fp.packed, F32=y.dtype == torch.float32,
