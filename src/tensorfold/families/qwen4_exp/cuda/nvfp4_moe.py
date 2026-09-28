@@ -178,6 +178,10 @@ class MoE4:
                  y: torch.Tensor, top_k: int) -> torch.Tensor:
         """The down step writing at the flat codes into y [R, slots, D] fp32 (the combine adds the slots
         in order); the shared expert's slot for every row. The down outputs are fp32 sums."""
+    def down_out(self, act: torch.Tensor, plan, y: torch.Tensor, top_k: int) -> torch.Tensor:
+        """The down step writing at the plan's member indices into y [R, slots, D] (the combine adds the
+        slots in order; a prefill buffer's bf16 slots round each sum once, so the fp32 sum is rounded into
+        the slot's own dtype — a decode plan's slots are fp32). The shared expert's slot for every row."""
 
         d, ni = self.dims, self.width
         slots = y.shape[1]
@@ -192,6 +196,10 @@ class MoE4:
                 dest = self._dest(codes, slots)
                 flat[dest] = nvfp4.matmul(act.reshape(-1, ni)[dest], self._expert(e).down, f32=True)
         y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True)
+        for e, dest in self.items(plan):
+            flat[dest] = nvfp4.matmul(act.reshape(-1, ni)[dest], self._expert(e).down,
+                                      f32=True).to(flat.dtype)
+        y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True).to(y.dtype)
         return y
 
 

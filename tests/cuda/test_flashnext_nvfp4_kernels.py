@@ -143,3 +143,39 @@ def test_moe4_gateup_down_on_gpu_matches_the_grouped_reference():
     ex.gateup_out(x, groups, perm, act, 1)
     ref = torch.stack([ex.gateup_rows(x[i:i + 1], int(rows[i]))[0] for i in range(4)])
     assert torch.equal(act[:, 0], ref)
+
+
+def test_down_out_rounds_an_fp32_sum_into_a_bf16_prefill_buffer():
+    """A prefill plan's y slots are bf16 (a decode plan's are fp32): the down step accumulates in fp32 and
+    rounds once into the slot's own dtype. Handing the fp32 tensor straight to a bf16 index_put raised on a
+    real checkpoint at the first generated token — no test drove down_out with a prefill buffer before."""
+
+    torch.manual_seed(5)
+    dev = "cuda"
+    e, d, ni = 3, 256, 128
+    gate = [(torch.randint(0, 256, (ni, d // 2), dtype=torch.uint8, device=dev),
+             torch.randint(90, 115, (ni, d // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn),
+             0.01) for _ in range(e)]
+    up = [(torch.randint(0, 256, (ni, d // 2), dtype=torch.uint8, device=dev),
+           torch.randint(90, 115, (ni, d // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn),
+           0.01) for _ in range(e)]
+    down = [(torch.randint(0, 256, (d, ni // 2), dtype=torch.uint8, device=dev),
+             torch.randint(90, 115, (d, ni // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn),
+             0.01) for _ in range(e)]
+    shared = tuple((torch.randn(o, i) * 0.02).to(torch.bfloat16).to(dev)
+                   for o, i in ((ni, d), (ni, d), (d, ni)))
+    ex = nvfp4_moe.moe4_from_experts(gate, up, down, shared)
+    x = (torch.randn(4, d, device=dev) * 0.5).to(torch.bfloat16)
+    rows = torch.tensor([0, 2, 0, 1], device=dev)
+    picks = torch.stack([rows, torch.full_like(rows, ex.count - 1)], dim=1).to(torch.int32)   # slot 1: shared
+    plan = grouped.Plan(4, 2, ex.count, dev)
+    grouped.route(picks, plan)
+
+    act = torch.zeros((4, 2, ni), dtype=torch.bfloat16, device=dev)
+    ex.gateup_out(x, plan, act, 1)
+    y = torch.zeros((4, 2, d), dtype=torch.bfloat16, device=dev)          # a prefill buffer's dtype
+    ex.down_out(act, plan, y, 1)
+    ref = torch.stack([ex.down_rows(act[i:i + 1, 0], int(rows[i]))[0] for i in range(4)]).to(torch.bfloat16)
+    assert torch.equal(y[:, 0], ref)
+    shared_ref = nvfp4.matmul(act[:, 1], ex.shared.down, f32=True).to(torch.bfloat16)
+    assert torch.equal(y[:, 1], shared_ref)
