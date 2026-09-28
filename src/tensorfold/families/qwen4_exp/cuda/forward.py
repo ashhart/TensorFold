@@ -38,6 +38,11 @@ def _mm(x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, out: torch.Tensor, b: Buff
 
 
 def _embed(w: Weights, ids: torch.Tensor, copies: int, out: torch.Tensor) -> torch.Tensor:
+    # NVFP4: embed is a B16 (rows as stored). EXL3: a one-tensor tuple. MLX: the 4-bit trilogue.
+    if isinstance(w.embed, bf16.B16):
+        from .exl3_mm import embed
+
+        return embed(ids, w.embed.weight, w.cfg.hidden, copies, out)
     if len(w.embed) == 1:     # an EXL3 checkpoint's unquantized embedding
         from .exl3_mm import embed
 
