@@ -52,27 +52,31 @@ def _item(ITEMS, NITEMS, pid):
 
 @triton.jit
 def _kpass(X, src, rows_ok, x_stride, tile, S, s2, N: tl.constexpr, PER: tl.constexpr, SBN: tl.constexpr,
-           BLOCK_N: tl.constexpr, local, soff, packed: tl.constexpr):
+           BLOCK_N: tl.constexpr, local, soff, n_ok, packed: tl.constexpr):
     """One column tile's K pass: a 16-input quantization block is 8 stored bytes, times the block's scale."""
 
     r16 = tl.arange(0, 16)
     acc = tl.zeros((TILE, BLOCK_N), dtype=tl.float32)
+    # GB10 faults on OOB addresses even when the load is masked; keep inactive lanes on row 0.
+    src_a = tl.where(rows_ok, src, 0)
     for b in range(PER):
         kb = b // 4
         row0 = (b % 4) * 16
-        x = tl.load(X + src[:, None] * x_stride + (b * 16 + r16)[None, :], mask=rows_ok[:, None], other=0.0)
+        x = tl.load(X + src_a[:, None] * x_stride + (b * 16 + r16)[None, :], mask=rows_ok[:, None], other=0.0)
         if packed:
-            w8 = tl.load(tile + kb * (32 * SBN) + (row0 // 2 + r16 // 2)[:, None] * SBN + local[None, :])
+            w8 = tl.load(tile + kb * (32 * SBN) + (row0 // 2 + r16 // 2)[:, None] * SBN + local[None, :],
+                         mask=n_ok[None, :], other=0)
             code = tl.where((r16 % 2)[:, None] == 0, w8 & 0xF, w8 >> 4).to(tl.int32)
             wv = _bf16_widen(_e2m1_pattern(code)).to(tl.bfloat16)
         else:
-            wbits = tl.load(tile + kb * (64 * SBN) + (row0 + r16)[:, None] * SBN + local[None, :])
+            wbits = tl.load(tile + kb * (64 * SBN) + (row0 + r16)[:, None] * SBN + local[None, :],
+                            mask=n_ok[None, :], other=0)
             wv = _bf16_widen(wbits).to(tl.bfloat16)
         p = tl.dot(x, wv)
         if packed:
-            s = _e4m3_value(tl.load(S + b * N + soff).to(tl.int32)) * (s2 * 0.0078125)
+            s = _e4m3_value(tl.load(S + b * N + soff, mask=n_ok, other=0).to(tl.int32)) * (s2 * 0.0078125)
         else:
-            s = tl.load(S + b * N + soff)
+            s = tl.load(S + b * N + soff, mask=n_ok, other=0.0)
         acc += p * s[None, :]
     return acc
 
@@ -96,6 +100,8 @@ def _gateup_grouped(X, GU, GS, GS2, ITEMS, NITEMS, MEMBERS, ACT, x_stride, slots
     N2: tl.constexpr = 2 * NI
     PER: tl.constexpr = K // 16
     SUB: tl.constexpr = SBN // BLOCK_N
+    # Packed tiles store K/2 bytes a row; pattern (MTP) tables store K uint16 codes a row.
+    KSTRIDE: tl.constexpr = K // 2 if PACKED else K
     TG: tl.constexpr = (K // 64) * (32 if PACKED else 64) * SBN
     pid_n = tl.program_id(1)
     rm = tl.arange(0, TILE)
@@ -106,7 +112,7 @@ def _gateup_grouped(X, GU, GS, GS2, ITEMS, NITEMS, MEMBERS, ACT, x_stride, slots
     src = mrow // slots
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
-    base_w = GU + (e * N2 * (K // 2) if STACKED else 0)
+    base_w = GU + (e * N2 * KSTRIDE if STACKED else 0)
     base_s = GS + (e * PER * N2 if STACKED else 0)
     base_2 = GS2 + (e * N2 if STACKED else 0)
     n_ok = rn < NI
@@ -115,8 +121,8 @@ def _gateup_grouped(X, GU, GS, GS2, ITEMS, NITEMS, MEMBERS, ACT, x_stride, slots
     s2u = tl.load(base_2 + NI + rn_a, mask=n_ok, other=1.0)
     tile_g = base_w + (pid_n // SUB) * TG
     tile_u = tile_g + (NI // SBN) * TG
-    g = _kpass(X, src, rows_ok, x_stride, tile_g, base_s, s2g, N2, PER, SBN, BLOCK_N, local, rn_a, PACKED)
-    u = _kpass(X, src, rows_ok, x_stride, tile_u, base_s, s2u, N2, PER, SBN, BLOCK_N, local, NI + rn_a, PACKED)
+    g = _kpass(X, src, rows_ok, x_stride, tile_g, base_s, s2g, N2, PER, SBN, BLOCK_N, local, rn_a, n_ok, PACKED)
+    u = _kpass(X, src, rows_ok, x_stride, tile_u, base_s, s2u, N2, PER, SBN, BLOCK_N, local, NI + rn_a, n_ok, PACKED)
     gf = g.to(tl.bfloat16).to(tl.float32)
     uf = u.to(tl.bfloat16).to(tl.float32)
     val = ((gf / (1.0 + tl.exp(-gf))).to(tl.bfloat16).to(tl.float32) * uf).to(tl.bfloat16)
@@ -139,6 +145,7 @@ def _down_grouped(ACT, DW, DS, DS2, ITEMS, NITEMS, MEMBERS, Y, act_stride,
         return
     PER: tl.constexpr = K // 16
     SUB: tl.constexpr = SBN // BLOCK_N
+    KSTRIDE: tl.constexpr = K // 2 if PACKED else K
     TG: tl.constexpr = (K // 64) * (32 if PACKED else 64) * SBN
     pid_n = tl.program_id(1)
     rm = tl.arange(0, TILE)
@@ -147,14 +154,15 @@ def _down_grouped(ACT, DW, DS, DS2, ITEMS, NITEMS, MEMBERS, Y, act_stride,
     mrow = tl.load(MEMBERS + first + rm_a, mask=rows_ok, other=0)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
-    base_w = DW + (e * D * (K // 2) if STACKED else 0)
+    base_w = DW + (e * D * KSTRIDE if STACKED else 0)
     base_s = DS + (e * PER * D if STACKED else 0)
     # Clamp rn: D is a multiple of BLOCK_N for Flash Next, but keep addresses in-bounds on every GPU.
     n_ok = rn < D
     rn_a = tl.where(n_ok, rn, 0)
     s2 = tl.load(DS2 + (e * D if STACKED else 0) + rn_a, mask=n_ok, other=1.0)
     tile = base_w + (pid_n // SUB) * TG
-    acc = _kpass(ACT, mrow, rows_ok, act_stride, tile, base_s, s2, D, PER, SBN, BLOCK_N, local, rn_a, PACKED)
+    acc = _kpass(ACT, mrow, rows_ok, act_stride, tile, base_s, s2, D, PER, SBN, BLOCK_N, local, rn_a, n_ok,
+                 PACKED)
     val = acc if F32 else acc.to(tl.bfloat16)
     tl.store(Y + mrow[:, None] * D + rn_a[None, :], val, mask=rows_ok[:, None] & n_ok[None, :])
 
