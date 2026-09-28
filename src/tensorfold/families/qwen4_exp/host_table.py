@@ -232,7 +232,22 @@ def _memmap(path: Path, entry: dict, dtype) -> np.ndarray:
         header = struct.unpack("<Q", f.read(8))[0]
     begin, end = entry["data_offsets"]
     shape = tuple(entry["shape"])
-    return np.memmap(path, dtype=dtype, mode="r", offset=8 + header + begin, shape=shape)
+    array = np.memmap(path, dtype=dtype, mode="r", offset=8 + header + begin, shape=shape)
+    _random_access(array)
+    return array
+
+
+def _random_access(array: np.ndarray) -> None:
+    """Advise random access on a lookup table's mapping: every reader gathers rows by key, so the kernel's
+    read-ahead brings in pages nobody asked for and pushes useful ones out (a 102 GB n-gram table's pages
+    beside 79 GiB of weights). Best-effort: a platform without ``madvise`` keeps the default advice."""
+
+    try:
+        import mmap as _mmap
+
+        array._mmap.madvise(_mmap.MADV_RANDOM)          # type: ignore[attr-defined]
+    except (AttributeError, OSError, ValueError):
+        pass
 
 
 def _prefetch(arrays: list[np.ndarray], workers: int = 8) -> float:

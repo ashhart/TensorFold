@@ -88,8 +88,10 @@ class MoE4:
         grids per program without materialising these). Exact by construction: the stacked grids' tile
         and scale rows for expert ``e`` are the per-expert table's, row for row (checked in the tests)."""
 
-        gu = nvfp4.FP4(self.gate_up.weight[e], self.gate_up.scale[e], 2 * self.width, self.gate_up.k)
-        down = nvfp4.FP4(self.down_proj.weight[e], self.down_proj.scale[e], self.dims, self.width)
+        gu = nvfp4.FP4(self.gate_up.weight[e], self.gate_up.scale[e], 2 * self.width, self.gate_up.k,
+                       scale2=self.gate_up.scale2[e], packed=self.gate_up.packed)
+        down = nvfp4.FP4(self.down_proj.weight[e], self.down_proj.scale[e], self.dims, self.width,
+                         scale2=self.down_proj.scale2[e], packed=self.down_proj.packed)
         return Expert4(gu, down)
 
     def gateup_rows(self, x: torch.Tensor, e: int) -> torch.Tensor:
@@ -146,43 +148,32 @@ class MoE4:
         return y
 
 
-def _stacked(bits: torch.Tensor, rows: torch.Tensor) -> nvfp4.FP4:
-    """Per-expert code-bit grids [E, N, K] (uint16) and row scales [E, N, K/16] fp32 -> one FP4 table with
-    a leading expert axis over the tiles (``n`` rows per expert; the tile count and the scale's leading
-    axis carry the expert axis — ``_tile_bits`` keeps leading dims)."""
+def _stacked_bf16(bits: torch.Tensor, rows: torch.Tensor) -> nvfp4.FP4:
+    """Per-expert bf16-pattern grids [E, N, K] (uint16) and identity row scales [E, N, K/16] fp32 -> one table
+    with a leading expert axis over the tiles (``n`` rows per expert; the tile count and the scale's leading
+    axis carry the expert axis — ``_tile_bits`` keeps leading dims). The exact-BF16 form: patterns and fp32
+    scales, not the checkpoint's packed bytes."""
 
     e, n, k = bits.shape
     return nvfp4.FP4(nvfp4._tile_bits(bits.contiguous()), rows.permute(0, 2, 1).contiguous(), n, k)
 
 
-def _fp4_stack(w: torch.Tensor, s: torch.Tensor, s2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Stacked checkpoint arrays (words [E, N, K/2] uint8, weight_scale [E, N, K/16] fp8e4m3,
-    weight_scale_2 [E] fp32) -> code bits [E, N, K] uint16 and row scales [E, N, K/16] fp32 (the
-    per-tensor factors folded into the row scales — the FP4 table's form). A scalar ``s2``: the same
-    per-tensor scale on every expert (the 512 tiny per-expert scalars read as one stack)."""
-
-    bits = nvfp4.e2m1_bits(w)
-    e = int(w.shape[0])
-    if isinstance(s2, torch.Tensor) and s2.dim() == 0:
-        rows = nvfp4.row_scales(s, float(s2)).reshape(e, s.shape[-2], s.shape[-1])
-    else:
-        rows = torch.stack([nvfp4.row_scales(s[i], float(s2[i])) for i in range(e)])
-    return bits, rows
-
-
 def moe4_from_checkpoint(gate: tuple, up: tuple, down: tuple,
                          shared: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> MoE4:
     """One layer from the checkpoint's stacked per-expert arrays: gate/up/down each a
-    ([E, N, K/2] uint8, [E, N, K/16] fp8e4m3, [E] fp32) stack (the loader gathers the per-expert tensors
-    into stacks), shared the BF16 (gate, up, down) [out, in] tensors. Gate and up rows join row-wise per
-    expert, so the stacked gate/up grid keeps expert e's rows contiguous (gate first, then up)."""
+    ([E, N, K/2] uint8 words, [E, N, K/16] fp8e4m3 block scales, [E] fp32 per-tensor scales) stack (the loader
+    gathers the per-expert tensors into stacks), shared the BF16 (gate, up, down) [out, in] tensors. Gate and
+    up rows join row-wise per expert, so the stacked gate/up table keeps expert e's rows contiguous (gate
+    first, then up) with its own per-tensor scale beside each half. Nothing is widened here: the checkpoint's
+    bytes go to the device and the kernels decode them, which is what keeps the model the size of its file."""
 
-    gb, gr = _fp4_stack(*gate)
-    ub, ur = _fp4_stack(*up)
-    db, dr = _fp4_stack(*down)
-    gu_bits = torch.cat([gb, ub], dim=1)                       # [E, 2NI, K]: gate rows, then up rows
-    gu_rows = torch.cat([gr, ur], dim=1)                       # [E, 2NI, K/16]
-    return MoE4(_stacked(gu_bits, gu_rows), _stacked(db, dr), expert4_from_bf16(*shared))
+    gw, gs, g2 = gate
+    uw, us, u2 = up
+    dw, ds, d2 = down
+    e, ni = int(gw.shape[0]), int(gw.shape[1])
+    gu = nvfp4.stacked_fp4(torch.cat([gw, uw], dim=1), torch.cat([gs, us], dim=1),
+                           torch.cat([g2[:, None].expand(e, ni), u2[:, None].expand(e, ni)], dim=1))
+    return MoE4(gu, nvfp4.stacked_fp4(dw, ds, d2[:, None].expand(e, int(dw.shape[1]))), expert4_from_bf16(*shared))
 
 
 def expert4_from_bf16(gate: torch.Tensor, up: torch.Tensor, down: torch.Tensor) -> Expert4:
@@ -198,8 +189,8 @@ def moe4_from_bf16(gate_up: torch.Tensor, down: torch.Tensor,
     exclusions): gate_up [E, 2NI, K] and down [E, K, NI] ride the FP4 kernels as identity-scaled tables —
     bit-exact (the bf16 values are the stored operands, scale 1), the shared expert its own tables."""
 
-    gu = _stacked(*_one_bf16(gate_up))
-    dn = _stacked(*_one_bf16(down))
+    gu = _stacked_bf16(*_one_bf16(gate_up))
+    dn = _stacked_bf16(*_one_bf16(down))
     return MoE4(gu, dn, expert4_from_bf16(*shared))
 
 

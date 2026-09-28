@@ -150,13 +150,40 @@ def test_matmul_splitk_sum_order_is_the_reduces_one():
     assert sk > 1, "this test pins the reduce's order: it needs a split shape"
     part = torch.empty((sk, 4, n), dtype=torch.float32, device="cuda")
     out = torch.empty((4, n), dtype=torch.bfloat16, device="cuda")
-    nvfp4._fp4mm[(1, n // nvfp4.BN, sk)](x, fp.weight, fp.scale, out, part, 4, x.stride(0),
+    nvfp4._fp4mm[(1, n // nvfp4.BN, sk)](x, fp.weight, fp.scale, fp.scale2, out, part, 4, x.stride(0),
                                          N=n, K=k, SK=sk, BM=16, SBN=nvfp4.BN, BLOCK_N=nvfp4.BN,
                                          GPI=nvfp4.gpi_for((k // nvfp4.GS) // sk, 2), F32=False,
-                                         num_warps=4, num_stages=3)
+                                         PACKED=fp.packed, num_warps=4, num_stages=3)
     got = torch.empty_like(out)
     nvfp4._reduce[(triton.cdiv(4 * n, 1024),)](part, got, 4 * n, SK=sk, BLOCK=1024, num_warps=4)
     serial = part[0]
     for s in range(1, sk):
         serial = serial + part[s]
     assert torch.equal(got, serial.to(torch.bfloat16))
+
+
+def test_a_packed_table_holds_the_checkpoints_own_bytes():
+    """The point of the packed form: the device holds the file's own bytes — a nibble a value, a byte a
+    scale — so a checkpoint that fits on disk fits in memory. The widened grid was four times the codes."""
+
+    words, scale, s2, _ = fake_layer(128, 256, seed=11)
+    fp = nvfp4.make_fp4(words, scale, s2)
+    assert fp.packed
+    assert fp.nbytes() == words.numel() + scale.numel() + fp.scale2.numel() * 4     # codes + fp8 + factors
+    assert fp.weight.dtype == torch.uint8 and fp.weight.numel() == words.numel()
+    assert fp.scale.dtype == torch.uint8 and fp.scale.numel() == scale.numel()
+
+
+def test_a_packed_stack_keeps_each_experts_bytes_and_decodes_them():
+    """A stacked table carries the same guarantee per expert, and expert e's slab still decodes to that
+    expert's weights (the slicing the serving path and the grouped kernels both rely on)."""
+
+    e, n, k = 3, 128, 256
+    words = torch.randint(0, 256, (e, n, k // 2), dtype=torch.uint8)
+    scale = torch.randint(90, 115, (e, n, k // 16), dtype=torch.uint8).view(torch.float8_e4m3fn)
+    factors = torch.tensor([0.01, 0.02, 0.03])
+    fp = nvfp4.stacked_fp4(words, scale, factors)
+    assert fp.nbytes() == words.numel() + scale.numel() + e * n * 4
+    assert fp.weight.shape == (e, n // nvfp4.BN, k // 64, 32, nvfp4.BN)
+    slab = nvfp4.FP4(fp.weight[1], fp.scale[1], n, k, scale2=fp.scale2[1], packed=True)
+    assert torch.equal(nvfp4.dequantize_fp4(slab), nvfp4.dequantize(words[1], scale[1], factors[1]))
