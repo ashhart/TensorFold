@@ -816,12 +816,17 @@ def test_a_cut_chunk_commits_as_one_and_returns_the_state_at_the_cut(cpu, cached
 def test_prefill_keeping_a_point_equals_one_without_and_keeps_the_prefix_state(cpu, length, cached):
     torch = cpu.torch
     prompt = _prompt(length, length)
-    prefix = cpu.run(prompt[:cached])[0][0] if cached else None
-    (ref, ref_pending), ref_logits = cpu.run(prompt, state=prefix)
+
+    def prefix():
+        """A prefix of its own for each run: states resumed from one prefix share its key/value buffers."""
+        return cpu.run(prompt[:cached])[0][0] if cached else None
+
+    (ref, ref_pending), ref_logits = cpu.run(prompt, state=prefix())
     points = sorted({cached, cached + 1, length - 1, length, 64, 65, (cached + length) // 2} &
                     set(range(cached, length + 1)))
     for point in points:
-        (st, pending, (kept, snap)), logits = cpu.run(prompt, state=prefix, keep_at=point)
+        (st, pending, (kept, snap)), logits = cpu.run(prompt, state=prefix(), keep_at=point)
+        assert all(kv is None or kv[0] is not ref.kv[i][0] for i, kv in enumerate(st.kv))
         assert _bits_equal(torch, logits, ref_logits) and pending == ref_pending
         _assert_same_state(torch, st, ref)
         assert kept.pos == point and snap is None and _shares_kv(kept, st)
@@ -855,7 +860,9 @@ def test_the_same_prompt_again_resumes_from_its_kept_state_with_one_token(cpu):
     (st, pending, (again, _)), logits = cpu.run(prompt, state=kept, keep_at=entry_end(prompt))
     assert _bits_equal(torch, logits, fresh_logits) and pending == fresh_pending
     _assert_same_state(torch, st, fresh)
-    _assert_same_state(torch, again, kept)
+    # ``again`` is ``kept`` resumed with nothing prefilled, so it holds kept's tensors: compare it with a fresh prefix
+    (fresh_prefix, _), _ = cpu.run(prompt[:entry_end(prompt)])
+    _assert_same_state(torch, again, fresh_prefix)
 
 
 @pytest.mark.parametrize("cached,length,point", [(0, 1025, 1024), (1000, 1025, 1024), (1000, 1030, 1024)])
