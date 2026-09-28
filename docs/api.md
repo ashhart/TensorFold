@@ -36,7 +36,9 @@ Image, audio and video input or output requests receive HTTP 400.
 CUDA does not enforce the MLX-only fields above. Its Qwen engines also ignore `ignore_eos`. Unsupported
 generation features include multiple choices through `n` and `logprobs`. On MLX, `ignore_eos: true`
 keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
-MLX rejects malformed numeric controls and out-of-vocabulary raw prompt IDs with HTTP 400;
+Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
+the request samples: booleans, non-finite numbers, non-numeric strings, and non-integral `top_k` or `seed`.
+MLX also rejects its other malformed numeric controls and out-of-vocabulary raw prompt IDs.
 `top_k` at zero or below disables top-k filtering, and null sampling fields retain server defaults.
 
 On MLX, `--parallel auto` is the default: requests share rounds within the configured concurrency and memory
@@ -105,7 +107,10 @@ and fitting guidance before generation. MLX returns HTTP 400 for non-streamed re
 `invalid_request_error` event after opening a stream. CUDA returns HTTP 400 before opening a stream.
 The 0.3.4.1 MLX server capped that explicit limit to the remaining context.
 When the request omits the reply limit, the server still caps its configured default to the remaining context.
-MLX also returns generation errors in the stream after streaming starts.
+CUDA returns HTTP 400 before generation when the chat template rejects the request or
+`chat_template_kwargs` is neither an object nor null. A generation error returns HTTP 500 for a
+non-streamed request; after a stream opens, both backends send an error event of type `server_error`,
+then `[DONE]`.
 MLX also checks projected memory before prefill. CUDA checks its allocated cache capacity and model window.
 A startup capacity estimate is not a measured release capacity.
 
