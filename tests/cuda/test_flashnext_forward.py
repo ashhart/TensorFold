@@ -197,13 +197,19 @@ def test_server_engine_streams_serial_tokens(tmp_path):
         assert seen[:3] == want[:3] and len(seen) < len(want) + 1
 
 
+def _rows(cache, n: int) -> list[torch.Tensor]:
+    """A KV cache's first n positions: keys and values, and their scales when quantized."""
+
+    return [t[:n] for t in ((cache.k, cache.v, cache.ks, cache.vs) if cache.quantized else (cache.k, cache.v))]
+
+
 def _state(e: Engine) -> list[torch.Tensor]:
     """What a prefill leaves: the kept-state snapshot, the caches' rows below the position, the MTP cache's."""
 
     st = e.st
     snap = st.snapshot()
     out = [snap["rec"], snap["conv"], snap["ple_tail"], e.last_streams]
-    out += [k[:st.pos] for k in st.kc + st.vc + st.ikc] + [st.mtp_kc[:st.mtp_len], st.mtp_vc[:st.mtp_len]]
+    out += [x for c in st.kc for x in _rows(c, st.pos)] + [k[:st.pos] for k in st.ikc] + _rows(st.mtp_kc, st.mtp_len)
     return out
 
 
@@ -222,28 +228,29 @@ def test_prefill_tracks_the_decode_path():
         commit(w, dec.st, dec.buf, len(chunk), len(chunk))
     a, b = pre.st.snapshot()["rec"], dec.st.snapshot()["rec"]
     assert float((a - b).abs().max()) <= 2e-2 * float(b.abs().max())
-    ka, kb = pre.st.kc[0][:len(prompt)].float(), dec.st.kc[0][:len(prompt)].float()
+    ka, kb = pre.st.kc[0].k[:len(prompt)].float(), dec.st.kc[0].k[:len(prompt)].float()
     assert float((ka - kb).abs().max()) <= 2e-2 * float(kb.abs().max())
     cos = torch.nn.functional.cosine_similarity(pre.pbuf.logits[:1].float(), logits, dim=1)
     assert float(cos) > 0.999, float(cos)
 
 
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8", "int4"])
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=11, top_k=20, top_p=0.95)])
-def test_prefill_chunks_and_resumes_give_the_same_state(sampling):
+def test_prefill_chunks_and_resumes_give_the_same_state(sampling, kv_dtype):
     """Any chunking, or a resume from another prompt's end, leaves the same state bit for bit; drafts stay serial."""
 
     w = _model()
     prompt = [(37 * i + 11) % V for i in range(300)]
-    ref_e = Engine(w, capacity=1024, max_rows=8, prefill_rows=300, graphs=True)
+    ref_e = Engine(w, capacity=1024, max_rows=8, prefill_rows=300, graphs=True, kv_dtype=kv_dtype)
     first = prefill(ref_e, prompt, sampling)
     want = _state(ref_e)
     ref = serial_decode(ref_e, first, 20, sampling).tokens
     for rows in (7, 16, 64):
-        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=rows, graphs=True)
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=rows, graphs=True, kv_dtype=kv_dtype)
         assert prefill(e, prompt, sampling) == first, rows
         assert all(torch.equal(a, b) for a, b in zip(_state(e), want)), rows
         assert mtp_decode(e, first, 20, sampling, depth=4, confidence=0.0).tokens == ref, rows
-    e = Engine(w, capacity=1024, max_rows=8, prefill_rows=64, graphs=True)
+    e = Engine(w, capacity=1024, max_rows=8, prefill_rows=64, graphs=True, kv_dtype=kv_dtype)
     prefill(e, prompt[:131], sampling)
     kept = {"state": e.st.snapshot(), "tail": e.last_streams.clone()}
     serial_decode(e, 5, 9, sampling)                             # a reply decodes past the kept prompt

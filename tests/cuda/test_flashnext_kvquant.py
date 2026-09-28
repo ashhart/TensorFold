@@ -8,16 +8,13 @@ one reference quantizer, the rotation trick against an explicit un-rotate, and t
 (windows, chunks, drafted tokens, the MTP cache) with the quantized cache in place.
 """
 
-import sys
-from pathlib import Path
-
 import pytest
 import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
-from test_flashnext_forward import _model  # noqa: E402
+from test_flashnext_forward import V, _model, _state  # noqa: E402
 
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda import attention as attn_mod  # noqa: E402
@@ -33,15 +30,17 @@ PROMPT = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
 WIDTHS = [("int8", 8), ("int4", 4)]
 # half a code step, in the rotated domain, before the inverse H32 (gain sqrt(32))
 HALF_STEP = {8: 256.0, 4: 16.0}
-# measured on this box, then given a little room: int8 stays under 2%, int4 under 12%
+# attention output against bf16's, relative to its largest value
 ATTN_REL = {8: 0.02, 4: 0.12}
 NLL_DELTA = {8: 0.05, 4: 0.40}
 TOP1 = {8: 0.95, 4: 0.80}
 
 
 def _engines(w, dtype: str = "int8", **kw):
-    return (Engine(w, capacity=1024, max_rows=8, prefill_rows=16, **kw),
-            Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=dtype, **kw))
+    """A bf16 engine and one at ``dtype``, both with windows of up to 16 rows (the prompt and chunks go through them)."""
+
+    return (Engine(w, capacity=1024, max_rows=16, prefill_rows=16, **kw),
+            Engine(w, capacity=1024, max_rows=16, prefill_rows=16, kv_dtype=dtype, **kw))
 
 
 def _write(w, rows: int, seed: int, dtype: str, bits: int):
@@ -103,18 +102,9 @@ def _exl3_h32(x: torch.Tensor) -> torch.Tensor:
 
 
 def _exl3_ext():
-    """The installed ExLlamaV3 extension, if this box has it. Skips otherwise."""
+    """The installed ExLlamaV3 extension, if this machine has it; skips otherwise."""
 
-    try:
-        import exllamav3_ext as ext
-        return ext
-    except ImportError:
-        root = Path.home() / "mimo-exl3" / "exllamav3"
-        if not list(root.glob("exllamav3_ext*.so")):
-            pytest.skip("exllamav3_ext is not installed")
-        sys.path.insert(0, str(root))
-        import exllamav3_ext as ext
-        return ext
+    return pytest.importorskip("exllamav3_ext")
 
 
 # -- the transform ---------------------------------------------------------------------------------------
@@ -424,3 +414,32 @@ def test_logits_stay_close_to_bf16_end_to_end(dtype, bits):
     top1 = float((la[:-1].argmax(-1) == lb[:-1].argmax(-1)).float().mean())
     assert nll_b - nll_a < NLL_DELTA[bits], (bits, nll_a, nll_b)
     assert top1 > TOP1[bits], (bits, top1)
+
+
+@pytest.mark.parametrize("dtype", ["int8", "int4"])
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=5, top_k=20, top_p=0.95)])
+def test_sparse_rows_and_prompt_blocks_read_the_quantized_cache(dtype, sampling):
+    """Past the indexer budget rows attend over their selected blocks (QSA) of the quantized cache, and prompt chunks
+    attend in 256-row blocks: chunkings and a resume leave the same codes, and drafted tokens equal serial ones."""
+
+    w = _model()
+    prompt = [(37 * i + 11) % V for i in range(2600)]            # rows past 2,051 keys are sparse
+    ref_e = Engine(w, capacity=4096, max_rows=8, prefill_rows=2048, graphs=True, kv_dtype=dtype)
+    assert ref_e.pbuf.attn.qsa and ref_e.buf.attn.qsa
+    first = prefill(ref_e, prompt, sampling)
+    want = _state(ref_e)
+    ref = serial_decode(ref_e, first, 24, sampling).tokens
+    for rows, graphs in ((512, True), (1000, False)):
+        e = Engine(w, capacity=4096, max_rows=8, prefill_rows=rows, graphs=graphs, kv_dtype=dtype)
+        assert prefill(e, prompt, sampling) == first, rows
+        assert all(torch.equal(a, b) for a, b in zip(_state(e), want)), rows
+        for depth in (3, 6):
+            prefill(e, prompt, sampling)
+            assert mtp_decode(e, first, 24, sampling, depth=depth, confidence=0.3).tokens == ref, (rows, depth)
+    e = Engine(w, capacity=4096, max_rows=8, prefill_rows=512, graphs=True, kv_dtype=dtype)
+    prefill(e, prompt[:2300], sampling)
+    kept = {"state": e.st.snapshot(), "tail": e.last_streams.clone()}
+    serial_decode(e, 5, 9, sampling)                              # a reply decodes past the kept prompt
+    assert prefill(e, prompt, sampling, resume=kept) == first
+    assert all(torch.equal(a, b) for a, b in zip(_state(e), want))
+    assert mtp_decode(e, first, 24, sampling, depth=6, confidence=0.3).tokens == ref

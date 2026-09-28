@@ -114,6 +114,16 @@ def split_weights(rule, world: int = 2):
     return transform
 
 
+def kv_bytes(head_dim: int, bits: int = 16) -> int:
+    """One position's keys (or values) for one KV head: bf16, or codes plus an fp16 scale per 32 values."""
+
+    if bits == 16:
+        return 2 * head_dim
+    if head_dim % 32:
+        raise ValueError(f"a quantized KV cache needs a head dim that is a multiple of 32, not {head_dim}")
+    return head_dim * bits // 8 + head_dim // 32 * 2
+
+
 def layer_counts(t: dict) -> tuple[int, int]:
     if "layer_types" in t:
         linear = sum(kind == "linear_attention" for kind in t["layer_types"])
@@ -122,7 +132,8 @@ def layer_counts(t: dict) -> tuple[int, int]:
     return layers - layers // interval, layers // interval
 
 
-def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False) -> Geometry:
+def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
+                 kv_bits: int = 16) -> Geometry:
     linear, attention = layer_counts(t)
     d, h = int(t["hidden_size"]), int(t["num_attention_heads"]) // world
     hk = int(t["num_key_value_heads"]) // world
@@ -149,10 +160,11 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
         fixed += PREFILL_ROWS * _indexed_prefill_row(t, world, h, hk, hd, nv, dv, width, slots, intermediate)
     count = attention + int(mtp)
     budget = int(t.get("indexer_budget", 2048))
+    row = kv_bytes(hd, kv_bits)
     def bytes_at(capacity: int) -> int:
         if indexed:
             # Separate K/V arrays in both the main state and the lazy serial-reference twin.
-            cache = 4 * count * capacity * hk * hd * 2
+            cache = 4 * count * capacity * hk * row
             cache += 2 * count * (capacity + (capacity + ratio - 1) // ratio) * index_dim * 2
             # chunk partials cover the keys a row reads (at most the indexer budget and a block's tail)
             chunks = (min(capacity, budget + ratio - 1) + 511) // 512
@@ -277,7 +289,7 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int) -> Geometry:
     return Geometry(bytes_at, 1)
 
 
-def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool) -> Geometry:
+def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool, kv_bits: int = 16) -> Geometry:
     """Flash Next's concurrent decoder on one GPU: ``streams`` slots of ``each``-row windows and kept snapshots."""
 
     linear, attention = layer_counts(t)
@@ -295,10 +307,10 @@ def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp:
     extent = d * hc + int(t["vocab_size"]) + slots * (moe + d) + width + h * hd
     fixed += (1 + mtp) * (linear * rows * width * 2 + 32 * max(rows, 4) * 2560 * 4) + 16 * max(64, rows) * extent * 4
     fixed += PREFILL_ROWS * _indexed_prefill_row(t, 1, h, hk, hd, nv, dv, width, slots, moe)
-    count = attention + int(mtp)
+    count, row = attention + int(mtp), kv_bytes(hd, kv_bits)
     def bytes_at(capacity: int) -> int:
         blocks = (capacity + ratio - 1) // ratio
-        cache = streams * count * (2 * capacity * hk * hd + (capacity + blocks) * index_dim) * 2
+        cache = streams * count * (2 * capacity * hk * row + (capacity + blocks) * index_dim * 2)
         chunks = (min(capacity, budget + ratio - 1) + 511) // 512
         scratch = ((1 + mtp) * rows + PREFILL_ATT_ROWS) * (h * (hd + 2) * chunks + blocks + budget + ratio) * 4
         return fixed + cache + scratch

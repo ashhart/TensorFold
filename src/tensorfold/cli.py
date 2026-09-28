@@ -14,6 +14,7 @@ from typing import Any
 
 from tensorfold import __version__
 from tensorfold.server.memory_budget import MEMORY_FRACTION
+from tensorfold.serve_options import check as _check_serve_options
 
 COMMANDS = ("serve", "pull", "models", "info", "update")
 
@@ -327,13 +328,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
-    kv_dtype = getattr(args, "kv_dtype", "bf16")
-    if kv_dtype != "bf16":
-        supported = getattr(family.package, "CUDA_KV_DTYPES", ("bf16",))
-        if kv_dtype not in supported:
-            raise ValueError(f"{family.title} on CUDA serves a {' or '.join(supported)} KV cache, "
-                             f"not --kv-dtype {kv_dtype}")
-        options["kv_dtype"] = kv_dtype
+    if getattr(args, "kv_dtype", "bf16") != "bf16":
+        options["kv_dtype"] = args.kv_dtype
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
     if args.ple_on_ssd:
@@ -406,9 +402,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.ple_on_ssd and not hasattr(family.package, "ple_bytes"):
         raise ValueError(f"--ple-on-ssd: {family.title} has no n-gram (PLE) tables to read from SSD")
     backend = _backend(args.backend, family)
-    if getattr(args, "kv_dtype", "bf16") != "bf16" and backend != "cuda":
-        raise ValueError(f"--kv-dtype {args.kv_dtype} is a CUDA engine option: the MLX path caches keys and "
-                         "values as bf16")
+    _check_serve_options(args, family, backend)
     families.require_readable(family, families.read_config(config_dir), backend)
     _note_untested(family, args.model)
     required_files = getattr(family.package, "REQUIRED_FILES", {}).get(args.model, ())

@@ -74,10 +74,12 @@ def test_stream_geometry_counts_every_stream_and_kept_prompt_end():
 
 @pytest.mark.torch
 @pytest.mark.parametrize("streams", [2, 5])
-def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocations, streams):  # noqa: F811
+@pytest.mark.parametrize("kv_dtype,bits", [("bf16", 16), ("int8", 8), ("int4", 4)])
+def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocations, streams, kv_dtype,
+                                                         bits):  # noqa: F811
     arrays, fake = allocations
     state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
-    for mod in (state, state.gdn_mod, state.attn_mod, state.moe_mod):
+    for mod in (state, state.gdn_mod, state.attn_mod, state.moe_mod, state.kvcache):
         monkeypatch.setattr(mod, "torch", fake)
     multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
     text = {"hidden_size": 512, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 64,
@@ -93,14 +95,16 @@ def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocation
                               mtp=SimpleNamespace(), meta={"world": 1}, head=SimpleNamespace(n=1024), comm=None,
                               draft_ids=None)
     slots, depth, keep = 65536, 3, 8
-    dec = multi.MultiDecoder(weights, slots=streams, capacity=slots, depth=depth, keep=keep)   # no late memory query
-    from tensorfold.cuda.geometry import indexed_stream_geometry
+    dec = multi.MultiDecoder(weights, slots=streams, capacity=slots, depth=depth, keep=keep,
+                             kv_dtype=kv_dtype)                                          # no late memory query
+    from tensorfold.cuda.geometry import indexed_stream_geometry, kv_bytes
     one = dec.free[0]
     snapshot = bytes_in([one.rec]) // 2 + bytes_in([one.conv, one.ple_tail])
     used = bytes_in(arrays) + (min(keep, streams) + 1) * snapshot
-    kv = streams * 2 * 3 * slots * cfg.kv_heads * cfg.head_dim * 2     # K and V of two attention layers and the MTP's
-    assert len(dec.free) == streams and kv <= used
-    assert used <= indexed_stream_geometry(text, streams, depth + 1, keep, mtp=True).bytes_at(slots)
+    kv = [t for t in arrays if t.shape[:2] == (slots, cfg.kv_heads)]      # K and V of two attention layers and the MTP's
+    assert len(dec.free) == streams and all(st.kv_dtype == kv_dtype for st in dec.free)
+    assert bytes_in(kv) == streams * 3 * 2 * slots * cfg.kv_heads * kv_bytes(cfg.head_dim, bits)
+    assert used <= indexed_stream_geometry(text, streams, depth + 1, keep, mtp=True, kv_bits=bits).bytes_at(slots)
 
 
 def handshake(monkeypatch, path, rank, **kw):

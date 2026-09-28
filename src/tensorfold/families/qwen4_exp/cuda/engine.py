@@ -34,7 +34,7 @@ class FlashNextEngine:
             raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram tables; an EXL3 pack maps its own table "
                              "from its file, so drop --ple-on-ssd")
         from .decode import Engine
-        from .kvcache import check as check_kv
+        from .kvcache import BITS_OF, check as check_kv
         from .weights import draft_token_ids, load
         from tensorfold.cuda.capacity import admit, gather_ints
         from tensorfold.cuda.geometry import gdn_geometry, indexed_stream_geometry, indexed_weights
@@ -46,6 +46,8 @@ class FlashNextEngine:
                              "serves one request at a time for now, so drop --parallel")
         if not 0 <= int(depth) <= MAX_DEPTH:
             raise ValueError(f"MTP drafts a round: 0 to {MAX_DEPTH}, not {depth}")
+        if not 0.0 <= float(confidence) <= 1.0:
+            raise ValueError(f"MTP draft confidence: a probability from 0 to 1, not {confidence}")
         torch.cuda.set_device(0)
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
         self.kv_dtype = check_kv(kv_dtype)
@@ -59,10 +61,11 @@ class FlashNextEngine:
             self.comm = NCCL(rank, 2, master, port)
             self.comm.barrier()
         gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
-        each, mtp = self.depth + 1, self.depth > 0
+        each, mtp, bits = self.depth + 1, self.depth > 0, BITS_OF[self.kv_dtype]
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
-        geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp)) if streams > 1 else
-                    (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp)))
+        geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp, kv_bits=bits))
+                    if streams > 1 else
+                    (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp, kv_bits=bits)))
         if exl3:
             geometry = admission(geometry)
         self.capacity_plan = admit(model_dir, max_len, context_explicit, torch, geometry,
@@ -88,7 +91,7 @@ class FlashNextEngine:
 
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
-                                      confidence=self.confidence, keep=KEEP)
+                                      confidence=self.confidence, keep=KEEP, kv_dtype=self.kv_dtype)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
@@ -124,9 +127,11 @@ class FlashNextEngine:
     def _same_settings(self, torch, ids) -> None:
         """Both ranks must decode with the same rule, context, draft vocabulary and KV cache, or they would fall out of step: refuse to start otherwise."""
 
+        from .kvcache import BITS_OF
+
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
-                             len(ids) if ids is not None else -1, total, {"bf16": 0, "int8": 8, "int4": 4}[self.kv_dtype]],
+                             len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype]],
                             dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)

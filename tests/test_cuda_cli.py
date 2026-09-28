@@ -117,8 +117,49 @@ def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatc
         args = argparse.Namespace(tp=1, rank=0, master="", master_port=29551, no_drafts=True, drafter="none",
                                   mtp_drafts=None, name="", model=str(tmp_path), kv_dtype="int8")
         with pytest.raises(ValueError, match="KV cache, not --kv-dtype int8"):
-            cli._serve_cuda(args, SimpleNamespace(title=module.TITLE, package=module), tmp_path)
+            cli._check_serve_options(args, SimpleNamespace(title=module.TITLE, package=module), "cuda")
     assert not made[1:]
+
+
+@pytest.mark.parametrize("flags,backend,family,message", [
+    (["--kv-dtype", "int8"], "mlx", "qwen4_exp", "MLX path caches keys and values as bf16"),
+    (["--kv-dtype", "int4"], "cuda", "qwen3_5", "KV cache, not --kv-dtype int4"),
+    (["--kv-dtype", "int8"], "cuda", "nemotron_h", "KV cache, not --kv-dtype int8"),
+    (["--mtp-confidence", "0.6"], "mlx", "qwen4_exp", "on MLX has no such rule"),
+    (["--mtp-confidence", "0.6"], "cuda", "glm5_next", "on CUDA has no such rule"),
+    (["--mtp-confidence", "0.6"], "cuda", "nemotron_h", "on CUDA has no such rule"),
+    (["--mtp-confidence", "1.5"], "cuda", "qwen4_exp", "probability from 0 to 1"),
+    (["--mtp-confidence", "-0.1"], "cuda", "qwen4_exp", "probability from 0 to 1"),
+])
+def test_cache_and_confidence_options_are_refused_before_any_download(tmp_path, monkeypatch, flags, backend, family,
+                                                                      message):
+    """Every family and backend answers ``--kv-dtype`` and ``--mtp-confidence``: served as asked, or refused by name
+    before a weight moves; none ignores them."""
+
+    import importlib
+
+    from tensorfold import families, hub
+
+    module = importlib.import_module(f"tensorfold.families.{family}")
+    found = SimpleNamespace(title=module.TITLE, package=module, model_type=family)
+    monkeypatch.setattr(families, "detect", lambda path: found)
+    monkeypatch.setattr(cli, "_backend", lambda choice, fam: backend)
+    monkeypatch.setattr(hub, "resolve", lambda *a, **k: pytest.fail("weights were fetched before the refusal"))
+    monkeypatch.setattr(families, "require_readable",
+                        lambda *a: pytest.fail("the checkpoint was read before the refusal"))
+    command = ["serve", str(tmp_path), "--no-update-check"] + flags
+    with pytest.raises(ValueError, match=message):
+        cli.cmd_serve(cli.build_parser().parse_args(command))
+
+
+@pytest.mark.parametrize("flags", [["--kv-dtype", "int8"], ["--kv-dtype", "int4", "--mtp-confidence", "0.6"],
+                                   ["--mtp-confidence", "0"], ["--mtp-confidence", "1"]])
+def test_flash_next_on_cuda_takes_both_options(tmp_path, flags):
+    from tensorfold.families import qwen4_exp
+
+    args = cli.build_parser().parse_args(["serve", str(tmp_path)] + flags)
+    family = SimpleNamespace(title=qwen4_exp.TITLE, package=qwen4_exp, model_type="qwen4_exp")
+    assert cli._check_serve_options(args, family, "cuda") is None
 
 
 @pytest.mark.torch

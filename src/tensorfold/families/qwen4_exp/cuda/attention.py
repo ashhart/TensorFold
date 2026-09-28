@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .kvcache import dequant_group_4, dequant_group_8, h32
+from .kvquant import dequant_group_4, dequant_group_8, h32
 
 CHUNK = 512
 TILE = 64
@@ -55,9 +55,7 @@ def _chunks(Q, KC, VC, KSC, VSC, POS0, PO, PM, PL, IDS, NKR, SPR,
                     ki = tl.load(IDS + r * IDW + ki, mask=valid, other=0)
             off = (ki[:, None].to(tl.int64) * HK + hk) * D + d[None, :]
             if BITS:
-                # codes + one fp16 scale per 32 values: dequantize the tile before the dot (the keys are
-                # stored rotated; the query is rotated by the write path, so no rotation is undone here).
-                # 4-bit codes are two per byte, so the tile is D/2 wide.
+                # codes with an fp16 scale per 32 values, dequantized before the dot; q carries the keys' rotation
                 gs = tl.arange(0, D // 32)
                 sgc = (ki[:, None].to(tl.int64) * HK + hk) * (D // 32) + gs[None, :]
                 sc = tl.load(KSC + sgc, mask=valid[:, None], other=0.0)
@@ -114,8 +112,7 @@ def _merge(PO, PM, PL, POS0, OUT, NKR, SPR, H: tl.constexpr, HK: tl.constexpr, D
         m = next_m
     result = o / l[:, None]
     if BITS:
-        # the values are stored rotated: o = p . (H v) = H (p . v), so one rotation a row puts the merged
-        # output back, whatever windows and chunks it came from
+        # values are stored rotated: p . (H v) = H (p . v), so one H32 a row restores the merged output
         result = tl.reshape(h32(tl.reshape(result, (16 * D // 32, 32)), M=16 * D // 32), (16, D))
     tl.store(OUT + (r * H + head[:, None]) * D + d[None, :], result.to(tl.bfloat16), mask=gg[:, None] < G)
 
@@ -143,16 +140,9 @@ class AttnScratch:
 def attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, pos0: torch.Tensor, scratch: AttnScratch,
               rows: int, scale: float, out: torch.Tensor | None = None, *,
               context: int | None = None, ks: torch.Tensor | None = None, vs: torch.Tensor | None = None,
-              kvq: bool = False, bits: int = 0) -> torch.Tensor:
-    """q [R, H, D] against caches holding [0, P0 + R) -> [R, H, D] bf16; sparse rows read ``scratch.ids``.
+              bits: int = 0) -> torch.Tensor:
+    """q [R, H, D] against caches holding [0, P0 + R) -> [R, H, D] bf16; sparse rows read ``scratch.ids``; ``bits`` 8 or 4: codes with ``ks``/``vs`` scales, q rotated in, the output rotated back."""
 
-    ``bits`` 8 or 4: the caches hold codes and one fp16 scale per 32 values (``ks``/``vs``), and both ``q``
-    and the returned output are in the caches' H32 rotation: ``q`` was rotated by ``glue.attn_prep``, and the
-    output is rotated back in ``_merge``, so the caller sees the same arithmetic either way. ``kvq=True``
-    is the 8-bit path."""
-
-    if bits == 0 and kvq:
-        bits = 8
     if bits and (ks is None or vs is None):
         raise ValueError("a quantized KV cache needs its scale tensors")
     if ks is None:

@@ -6,7 +6,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .kvcache import h32, quant_groups_4, quant_groups_8
+from .kvquant import h32, quant_groups_4, quant_groups_8
 
 
 @triton.jit
@@ -274,12 +274,7 @@ def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float, group: int | None = No
 def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps,
                PW: tl.constexpr, NQ: tl.constexpr, NKV: tl.constexpr, HD: tl.constexpr, NI: tl.constexpr,
                IHD: tl.constexpr, HALF: tl.constexpr, BITS: tl.constexpr):
-    """Normalize stacked q/k/indexer heads in fp32, round to bf16, apply rotate-half RoPE and round again; store keys, values and raw indexer keys at POS0 + r.
-
-    With BITS of 8 or 4 the keys and values are quantized into their caches (``kvcache.quant_groups``:
-    the group rotated by H32, one fp16 scale per 32 values, the midpoint grid) and the *query* is rotated
-    the same way, which is what lets the attention kernel read the quantized keys without rotating them
-    back: q . (H k) = (H q) . k. 4-bit stores two codes per byte. The indexer keys stay bf16."""
+    """Normalize stacked q/k/indexer heads in fp32, round to bf16, apply rotate-half RoPE and round again; store keys, values and raw indexer keys at POS0 + r; BITS 8 or 4 quantize keys and values and rotate q alike (q . Hk = Hq . k)."""
 
     r = tl.program_id(0)
     head = tl.program_id(1)
@@ -362,15 +357,10 @@ def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps,
 
 def attn_prep(p: torch.Tensor, pos0: torch.Tensor, q_scale, k_scale, i_scale, inv_freq, q, kc, vc, iq, ikc,
               eps: float, *, q_heads: int, kv_heads: int, head_dim: int, index_heads: int, index_dim: int,
-              ks: torch.Tensor | None = None, vs: torch.Tensor | None = None, kvq: bool = False,
-              bits: int = 0) -> None:
-    """Write the rows' queries (rotated when the cache is quantized), keys and values. ``bits`` is 0 (bf16),
-    8 or 4. ``kvq=True`` is the 8-bit path, kept so older callers still compile. ``ks``/``vs`` are the
-    quantized caches' scales (unused, but still passed, with a bf16 cache)."""
+              ks: torch.Tensor | None = None, vs: torch.Tensor | None = None, bits: int = 0) -> None:
+    """Write the rows' queries (rotated when the cache is quantized), keys and values; ``bits`` 0 (bf16), 8 or 4 with scales ``ks``/``vs``."""
 
     rows, pw = p.shape
-    if bits == 0 and kvq:
-        bits = 8
     if bits and (ks is None or vs is None):
         raise ValueError("a quantized KV cache needs its scale tensors")
     if ks is None:
