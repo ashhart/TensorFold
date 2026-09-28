@@ -182,8 +182,10 @@ class Qwen27Engine:
         prefill_s = time.perf_counter() - t0
         if on_tokens([pending]):
             return {"prefill_s": prefill_s, "cached": hit[1].pos if hit else 0}
+        # the cache holds the state before the last prompt token, not ``st``: the decode may commit into it
         result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
-                              max_rows=self.max_rows, allow_copy=self.allow_copy and draft, on_tokens=on_tokens)
+                              max_rows=self.max_rows, allow_copy=self.allow_copy and draft, on_tokens=on_tokens,
+                              inplace=True)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0)}
 
@@ -209,7 +211,8 @@ class Qwen27Engine:
         prefill_s = time.perf_counter() - t0
         stop_now = bool(on_tokens([pending]))
         result = decode_tp(self.w, st, prompt, pending, 1 if stop_now else max_tokens, sampling, 0, drafter,
-                           max_rows=self.max_rows, allow_copy=self.allow_copy and draft, on_tokens=on_tokens)
+                           max_rows=self.max_rows, allow_copy=self.allow_copy and draft, on_tokens=on_tokens,
+                           inplace=True)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds, "cached": cached,
                 "drafts": draft, "min_rows": min(result.widths, default=0)}
 
@@ -243,4 +246,5 @@ class Qwen27Engine:
                                             limit=self.context_window, stops=stops, keep=keep, keep_at=end)
             if end is not None:
                 self._remember(list(prompt[:end]), *kept[0])
-            result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, 1, drafter, max_rows=self.max_rows)
+            result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, 1, drafter, max_rows=self.max_rows,
+                               inplace=True)
