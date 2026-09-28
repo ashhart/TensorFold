@@ -69,56 +69,130 @@ def index_update(k_raw: torch.Tensor, gate: torch.Tensor, ln_w: torch.Tensor, ln
 
 @triton.jit
 def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, wscale, H: tl.constexpr, HP: tl.constexpr,
-            D: tl.constexpr, BP: tl.constexpr):
-    """Program (r, pool block): s_p = sum_h w_h relu(scale * qi_h . pool_p); H heads padded to HP rows of zeros."""
+            D: tl.constexpr, BP: tl.constexpr, RB: tl.constexpr):
+    """Program (RB rows, pool block): s_p = sum_h w_h relu(scale * qi_h . pool_p) up to each row's position, heads padded to HP; RB never changes a row's bits."""
 
-    r = tl.program_id(0)
+    rb = tl.program_id(0)
     pb = tl.program_id(1)
     P = tl.load(POS)
-    npool = (P + r + 1) // 4
     p = pb * BP + tl.arange(0, BP)
     d = tl.arange(0, D)
     hh = tl.arange(0, HP)
     hok = hh < H
-    q = tl.load(QI + (r * H + hh[:, None]) * D + d[None, :], mask=hok[:, None], other=0.0).to(tl.bfloat16)  # [HP, D]
-    k = tl.load(PK + p[:, None] * D + d[None, :], mask=(p < npool)[:, None], other=0.0).to(tl.bfloat16)  # [BP, D]
-    dots = tl.dot(q, tl.trans(k))                                                     # [HP, BP] fp32
-    w = tl.load(W + r * w_stride + hh, mask=hok, other=0.0).to(tl.float32) * wscale
-    s = tl.sum(w[:, None] * tl.maximum(dots * scale, 0.0), axis=0)
-    s = tl.where(p < npool, s, float("-inf"))
-    tl.store(OUT + r * NP + p, s, mask=p < NP)
+    k = tl.load(PK + p[:, None] * D + d[None, :], mask=(p < (P + rb * RB + RB) // 4)[:, None],
+                other=0.0).to(tl.bfloat16)                                              # [BP, D]
+    for i in tl.static_range(RB):
+        r = rb * RB + i
+        if r < R:
+            npool = (P + r + 1) // 4
+            q = tl.load(QI + (r * H + hh[:, None]) * D + d[None, :], mask=hok[:, None], other=0.0).to(tl.bfloat16)
+            kr = tl.where((p < npool)[:, None], k, 0.0)
+            dots = tl.dot(q, tl.trans(kr))                                                # [HP, BP] fp32
+            w = tl.load(W + r * w_stride + hh, mask=hok, other=0.0).to(tl.float32) * wscale
+            sc = tl.sum(w[:, None] * tl.maximum(dots * scale, 0.0), axis=0)
+            sc = tl.where(p < npool, sc, float("-inf"))
+            tl.store(OUT + r * NP + p, sc, mask=p < NP)
 
 
-def select_tokens(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: int, R: int, np_max: int,
-                  pos_dev: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Each row's attended tokens: [R, 2051] int32 ascending (-1 padded) and how many, for rows past 2050."""
+def _top_pools(scores: torch.Tensor, k: int) -> torch.Tensor:
+    """Reference top-k: each row's k best pools, ties to the lower pool, ascending, as a stable descending sort keeps them (unique int64 keys)."""
+    bits = (scores + 0.0).view(torch.int32)                              # + 0.0: -0 becomes +0, as the sort ties them
+    ordered = torch.where(bits < 0, bits ^ 0x7FFFFFFF, bits)          # IEEE order as signed ints (negatives flipped)
+    keys = ordered.to(torch.int64).bitwise_left_shift_(32)
+    keys.bitwise_or_(0xFFFFFFFF - torch.arange(scores.shape[1], device=scores.device, dtype=torch.int64))
+    best = torch.topk(keys, k, dim=1, sorted=False).values
+    del keys
+    return torch.sort(0xFFFFFFFF - (best & 0xFFFFFFFF), dim=1).values
 
-    scores = torch.empty((R, np_max), dtype=torch.float32, device=qi.device)
+
+@triton.jit
+def _order_key(s):
+    """A float32 score as a uint32 whose unsigned order is the scores' order (-0 counted as +0)."""
+    bits = (s + 0.0).to(tl.int32, bitcast=True)
+    return (bits ^ ((bits >> 31) | -2147483648)).to(tl.uint32, bitcast=True)
+
+
+@triton.jit
+def _select_rows(S, OUT, NP, K: tl.constexpr, BLOCK: tl.constexpr):
+    """Program r: a radix select (8 bits a pass) finds the K-th best score, then one pass in pool order writes the pools above it and the lowest ties."""
+
+    r = tl.program_id(0).to(tl.int64)
+    row = S + r * NP
+    bins = tl.arange(0, 256)
+    prefix = tl.zeros((), dtype=tl.uint32)
+    fixed = tl.zeros((), dtype=tl.uint32)
+    need = K
+    for p in tl.static_range(4):
+        hist = tl.zeros((256,), dtype=tl.int32)
+        for c in range(0, NP, BLOCK):
+            i = c + tl.arange(0, BLOCK)
+            ok = i < NP
+            u = _order_key(tl.load(row + i, mask=ok, other=0.0))
+            match = ok & ((u & fixed) == prefix)
+            hist += tl.histogram(((u >> (24 - 8 * p)) & 0xFF).to(tl.int32), 256, mask=match)
+        at_or_above = tl.sum(hist, 0) - tl.cumsum(hist, 0) + hist           # pools with this digit or a higher one
+        digit = tl.max(tl.where(at_or_above >= need, bins, 0), 0)
+        need -= tl.sum(tl.where(bins > digit, hist, 0), 0)
+        prefix = prefix | (digit.to(tl.uint32) << (24 - 8 * p))
+        fixed = fixed | (tl.full((), 0xFF, tl.uint32) << (24 - 8 * p))
+    written = 0
+    equal_seen = 0
+    for c in range(0, NP, BLOCK):
+        i = c + tl.arange(0, BLOCK)
+        ok = i < NP
+        u = _order_key(tl.load(row + i, mask=ok, other=0.0))
+        eq = (ok & (u == prefix)).to(tl.int32)
+        take = (ok & (u > prefix)) | ((eq == 1) & (tl.cumsum(eq, 0) - eq + equal_seen < need))
+        t = take.to(tl.int32)
+        tl.store(OUT + r * K + written + tl.cumsum(t, 0) - t, i.to(tl.int64), mask=take)
+        written += tl.sum(t, 0)
+        equal_seen += tl.sum(eq, 0)
+
+
+def top_pools(scores: torch.Tensor, k: int) -> torch.Tensor:
+    """``_top_pools``'s pools in one kernel, ascending, without int64 keys, top-k or sort."""
+    R, NP = scores.shape
+    if NP < k or not scores.is_contiguous():
+        return _top_pools(scores, k)
+    out = torch.empty((R, k), dtype=torch.int64, device=scores.device)
+    _select_rows[(R,)](scores, out, NP, K=k, BLOCK=1024, num_warps=4)
+    return out
+
+
+def pool_bucket(pos: int, R: int, np_max: int) -> int:
+    """Pools to score for rows pos .. pos + R - 1: the visible ones rounded up to a power of two (at least 1024), at most the capacity's."""
+    visible = (pos + R) // POOL + 1
+    return min(np_max, max(1024, 1 << (visible - 1).bit_length()))
+
+
+def select_tokens(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: int | None, R: int, np_max: int,
+                  pos_dev: torch.Tensor, *, bucket: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Each row's attended tokens [R, 2051] ascending (-1 padded) and their count past the dense limit; ``bucket`` fixes the pool count for graphs."""
+
     if qi.stride(0) != qi.shape[1] or wts.stride(1) != 1:
         raise ValueError("select_tokens: index queries must be contiguous rows, weights unit-stride columns")
+    # score only visible pools, rounded up to a power of two so the allocator reuses a few sizes (exact sizes fragmented memory at 128k)
+    np_max = bucket if bucket is not None else pool_bucket(pos, R, np_max)
+    scores = torch.empty((R, np_max), dtype=torch.float32, device=qi.device)
     # heads and width from the tensors: fixed ones read past a row's index query into its window neighbours
     H = wts.shape[1]
     D = qi.shape[1] // H
-    wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # 32 ** -0.5
+    wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # 32 ** -0.5 exactly as before
     _scores[(R, triton.cdiv(np_max, 64))](qi, wts, wts.stride(0), pk, scores, pos_dev, R, np_max, D ** -0.5, wscale,
-                                         H=H, HP=max(16, triton.next_power_of_2(H)), D=D, BP=64, num_warps=4)
-    order = torch.sort(scores, dim=1, descending=True, stable=True).indices[:, :TOPK_POOLS]
-    pools = torch.sort(order, dim=1).values                                            # ascending pool index
+                                         H=H, HP=max(16, triton.next_power_of_2(H)), D=D, BP=64, RB=1, num_warps=4)
+    pools = top_pools(scores, TOPK_POOLS)                                               # ascending pool index
+    dev = qi.device
     width = TOPK_POOLS * POOL + POOL - 1
-    tokens = torch.full((R, width), -1, dtype=torch.int32, device=qi.device)
-    counts = []
-    for r in range(R):
-        q = pos + r
-        npool = (q + 1) // POOL
-        if npool <= TOPK_POOLS:               # dense row: every visible token (the dense kernel's result is kept)
-            counts.append(0)
-            continue
-        body = (pools[r, :, None] * POOL + torch.arange(POOL, device=qi.device)).reshape(-1)
-        tail = torch.arange(npool * POOL, q + 1, device=qi.device)
-        row = torch.cat([body, tail])
-        tokens[r, :row.numel()] = row.to(torch.int32)
-        counts.append(row.numel())
-    return tokens, torch.tensor(counts, dtype=torch.int32, device=qi.device)
+    # all rows at once: the 512 pools' tokens ascending, then the incomplete last pool's visible tokens; rows within the dense limit count 0
+    q = pos_dev.to(torch.int64) + torch.arange(R, device=dev)
+    npool = (q + 1) // POOL
+    tokens = torch.empty((R, width), dtype=torch.int32, device=dev)
+    tokens[:, :TOPK_POOLS * POOL] = (pools[:, :, None] * POOL + torch.arange(POOL, device=dev)).reshape(R, -1)
+    tail = npool[:, None] * POOL + torch.arange(POOL - 1, device=dev)
+    tail_ok = tail <= q[:, None]
+    tokens[:, TOPK_POOLS * POOL:] = torch.where(tail_ok, tail, -1)
+    counts = torch.where(npool > TOPK_POOLS, TOPK_POOLS * POOL + tail_ok.sum(1), 0).to(torch.int32)
+    return tokens, counts
 
 
 @triton.jit

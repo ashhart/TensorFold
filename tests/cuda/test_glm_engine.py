@@ -243,6 +243,13 @@ def engine_x(tmp_path_factory):
     return GlmEngine(path / "model", rank=0, master="", port=0, drafter=path / "dflash2", comm=_TwoCopies())
 
 
+def _forget(engine) -> None:
+    """Drop every kept snapshot, so the next request prefills from scratch (the engine keeps several
+    conversations, so an unrelated prompt no longer does this)."""
+    engine.cache.clear()
+    engine.live = []
+
+
 def _generate(engine, prompt, sampling, *, draft=True, policy=None, tokens=24):
     out: list[int] = []
     engine.request.policy = policy
@@ -255,8 +262,9 @@ def _state(e) -> list[torch.Tensor]:
     """What a prompt leaves: the KDA states and conv windows, the attention and MTP cache rows below the position."""
 
     st = e.st
-    return [st.rec[st.cur[0]], st.conv] + [x[:st.pos] for x in st.kc + st.vc] + [st.mtp_kc[:st.mtp_len],
-                                                                                 st.mtp_vc[:st.mtp_len]]
+    caches = [x[:st.pos] for x in st.kc + st.vc if x is not None]            # the latent cache keeps no values
+    mtp = [x[:st.mtp_len] for x in (st.mtp_kc, getattr(st, "mtp_vc", None)) if x is not None]
+    return [st.rec[st.cur[0]], st.conv] + caches + mtp
 
 
 def test_prompt_chunks_leave_the_same_state(engine):
@@ -285,7 +293,8 @@ def test_prompt_chunks_leave_the_same_state(engine):
     a, b = want[0], dec.st.rec[dec.st.cur[0]]
     assert float((a - b).abs().max()) <= 2e-2 * float(b.abs().max())
     ka, kb = want[2].float(), dec.st.kc[0][:len(prompt)].float()
-    assert float((ka - kb).abs().max()) <= 2e-2 * float(kb.abs().max())
+    tol = 3e-2 if dec.st.vc[0] is None else 2e-2           # latent rows (up to ~4): a few bf16 steps of 1/32
+    assert float((ka - kb).abs().max()) <= tol * float(kb.abs().max())
     assert float(torch.nn.functional.cosine_similarity(logits, last, dim=1)) > 0.999
 
 
@@ -323,14 +332,13 @@ def test_drafter_choice_resumes(engine_f):
     sampling = Sampling(11, 1.0, 20, 0.95)
     rng = np.random.default_rng(12)
     first = list(rng.integers(0, 1000, size=30))
-    unrelated = list(rng.integers(0, 1000, size=9))
     reply, stats = _generate(engine_f, first, sampling, policy="auto:1:1:0", tokens=30)
     assert set(stats["drafters"]) == {"m", "f"}
     after = first + reply + [21, 22]
     for policy in ("auto:1:1:0", "auto", "2", "f3"):
         warm, stats = _generate(engine_f, after, sampling, policy=policy)
         assert stats["cached"] == len(first), policy
-        _generate(engine_f, unrelated, sampling)
+        _forget(engine_f)
         cold, stats = _generate(engine_f, after, sampling, policy=policy)
         assert stats["cached"] == 0 and warm == cold, policy
         _generate(engine_f, first, sampling, policy="auto:1:1:0", tokens=30)      # the prompt's state again
@@ -340,19 +348,18 @@ def test_drafter_choice_resumes(engine_f):
 def test_resumed_prompts_equal_fresh_prefills(engine, sampling):
     rng = np.random.default_rng(9)
     first = list(rng.integers(0, 1000, size=70))
-    unrelated = list(rng.integers(0, 1000, size=12))
     reply, _ = _generate(engine, first, sampling)
     after_reply = first + reply + [5, 6, 7]
     warm, stats = _generate(engine, after_reply, sampling)
     assert stats["cached"] == len(first)                # the reply prefills again
-    _generate(engine, unrelated, sampling)              # a fresh prefill: every kept state goes
+    _forget(engine)                                     # every kept state goes: the next prefill is fresh
     cold, stats = _generate(engine, after_reply, sampling)
     assert stats["cached"] == 0 and warm == cold
     _generate(engine, first, sampling)
     after_prompt = first + [11, 12, 13]
     warm, stats = _generate(engine, after_prompt, sampling, policy="2")
     assert stats["cached"] == len(first)
-    _generate(engine, unrelated, sampling)
+    _forget(engine)
     cold, stats = _generate(engine, after_prompt, sampling, policy="2")
     assert stats["cached"] == 0 and warm == cold
     serial, _ = _generate(engine, after_prompt, sampling, draft=False)
@@ -380,12 +387,11 @@ def test_exl3_checkpoint_resumes(engine_x):
     sampling = Sampling(21, 1.0, 20, 0.95)
     rng = np.random.default_rng(22)
     first = list(rng.integers(0, 1000, size=70))
-    unrelated = list(rng.integers(0, 1000, size=9))
     reply, _ = _generate(engine_x, first, sampling, policy="auto:1:1:0", tokens=20)
     after = first + reply + [31, 32]
     warm, stats = _generate(engine_x, after, sampling)
     assert stats["cached"] == len(first)
-    _generate(engine_x, unrelated, sampling)
+    _forget(engine_x)
     cold, stats = _generate(engine_x, after, sampling)
     assert stats["cached"] == 0 and warm == cold
 

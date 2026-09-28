@@ -12,6 +12,7 @@ import torch
 from tensorfold.cuda import experts as grouped
 
 from .exl3_mm import Exl3Experts, words as exl3_words
+from . import latent
 from .qmm import B16, Q4, as_i32, make_b16, make_q4, quantize4, stack_b16, stack_q4
 
 PREFIX = "model.language_model."
@@ -151,6 +152,7 @@ class DSAW:
     o: Q4
     heads: int
     index: IndexW | None = None
+    absorb: object = None     # latent.AbsorbW: kv_b split per head, for attention on the latent cache
 
 
 @dataclass
@@ -289,16 +291,26 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
         if exl3:
             w = t(p + "kv_b_proj.weight")
             kv_k, kv_v = make_b16(w[krows]), make_b16(w[vrows])
+            full_k, full_v = (lambda: w[krows].float()), (lambda: w[vrows].float())
         else:
             w, s, b = trip(p + "kv_b_proj")
             kv_k = make_q4(w[krows], s[krows], b[krows])
             kv_v = make_q4(w[vrows], s[vrows], b[vrows])
+        if not latent.ENABLED:
+            absorb = None
+        elif exl3:
+            absorb = latent.AbsorbW.from_rows(full_k(), full_v(), HL)
+        elif cfg.group_size == 64:        # the checkpoint's own 4-bit rows, read as they are stored
+            absorb = latent.AbsorbQ4((w[krows], s[krows], b[krows]), (w[vrows], s[vrows], b[vrows]), HL)
+        else:
+            absorb = latent.AbsorbW.from_rows(latent.dequant_mlx4(w[krows], s[krows], b[krows], cfg.group_size),
+                                              latent.dequant_mlx4(w[vrows], s[vrows], b[vrows], cfg.group_size), HL)
         ix = IndexW(stack([p + "indexer.wk", p + "indexer.weights_proj"]), q4(p + "indexer.wq_b"),
                     t(p + "indexer.k_norm.weight"), t(p + "indexer.k_norm.bias"),
                     t(p + "indexer.index_kpool_compress_gate", torch.bfloat16).contiguous(),
                     t(p + "indexer.index_kpool_compress_ape", torch.bfloat16).contiguous())
         return DSAW(proj, t(p + "q_a_layernorm.weight"), t(p + "kv_a_layernorm.weight"), q4(p + "q_b_proj"),
-                    kv_k, kv_v, q4(p + "o_proj"), HL, ix)
+                    kv_k, kv_v, q4(p + "o_proj"), HL, ix, absorb)
 
     def mlp(p: str) -> MLPW:
         gu = stack([p + "gate_proj", p + "up_proj"])

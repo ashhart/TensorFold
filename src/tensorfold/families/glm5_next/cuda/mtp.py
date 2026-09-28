@@ -27,7 +27,7 @@ def mtp_stage(w: Weights, st: State, b: Buffers, next_tokens: Sequence[int], hid
 
 
 def mtp_compute(w: Weights, st: State, b: Buffers, n: int, *, last_only: bool = True,
-                nch: int | None = None, host_pos: int | None = None) -> torch.Tensor:
+                nch: int | None = None, host_pos: int | None = None, sparse_np: int | None = None) -> torch.Tensor:
     """The MTP head's GPU work on staged rows (capturable)."""
 
     c = w.cfg
@@ -42,7 +42,7 @@ def mtp_compute(w: Weights, st: State, b: Buffers, n: int, *, last_only: bool = 
     layer = m.layer
     glue.rmsnorm(b.mx[:n], layer.in_norm, c.eps, b.normed[:n], b.xs[:n])
     g = dsa_block(layer, w, st.mtp_kc, st.mtp_vc, st.mtp_pos_dev, b, n, nch,
-                  st.index[-1] if st.index is not None else None, host_pos)
+                  st.index[-1] if st.index is not None else None, host_pos, sparse_np)
     glue.residual_add(b.mx[:n], b.mx[:n], g)
     glue.rmsnorm(b.mx[:n], layer.post_norm, c.eps, b.normed[:n], b.xs[:n])
     g = moe_block(layer, w, b, n)

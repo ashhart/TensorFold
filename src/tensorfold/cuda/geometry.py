@@ -181,7 +181,7 @@ def _indexed_prefill_row(t: dict, world: int, h: int, hk: int, hd: int, nv: int,
             + 12 * streams + 64)
 
 
-def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560) -> Geometry:
+def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560, latent: bool = False) -> Geometry:
     linear, attention = layer_counts(t)
     lin = t.get("linear_attn_config") or {}
     heads = int(t["num_attention_heads"]) // world
@@ -206,12 +206,21 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     if (t.get("_quantization") or {}).get("quant_method") == "exl3":
         fixed += 128 * rows * slots * max(width, d) * 4
     count = attention + int(mtp)
+    lw = int(t.get("kv_lora_rank", 512))
     def bytes_at(capacity: int) -> int:
-        cache = count * capacity * heads * (kd + vd) * 2
+        if latent:
+            # latent cache (one kv_lora row a token), dense and sparse attention partials of a prompt chunk, its pool scores and selection temporaries
+            cache = count * capacity * lw * 2
+            dense = min(capacity, minimum_slots) + PREFILL_ROWS
+            scratch = (2 if mtp else 1) * ((dense + 511) // 512) * PREFILL_ROWS * heads * (lw + 2) * 4
+            scratch += ((int(t.get("index_topk", 2048)) + 515) // 512) * PREFILL_ROWS * heads * (lw + 2) * 4
+            scratch += PREFILL_ROWS * ((capacity + 3) // 4) * 16
+        else:
+            cache = count * capacity * heads * (kd + vd) * 2
+            scratch = (2 if mtp else 1) * ((capacity + rows + 511) // 512) * rows * heads * (kd + 2) * 4
+            scratch += rows * ((capacity + 3) // 4) * 4
+            scratch += 128 * heads * (kd + 2) * 4 * ((int(t.get("index_topk", 2048)) + 515) // 512)
         cache += count * (2 * capacity + capacity // 4 + 2) * index * 2
-        scratch = (2 if mtp else 1) * ((capacity + rows + 511) // 512) * rows * heads * (kd + 2) * 4
-        scratch += rows * ((capacity + 3) // 4) * 4
-        scratch += 128 * heads * (kd + 2) * 4 * ((int(t.get("index_topk", 2048)) + 515) // 512)
         return fixed + cache + scratch
     return Geometry(bytes_at, reserve, minimum_slots)
 

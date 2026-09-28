@@ -46,11 +46,36 @@ sparse attention beyond that boundary if the startup memory estimate admits it o
 `--context 0` instead targets the affordable native window. An explicit reply reservation beyond the allocated window receives HTTP 400 before streaming; an omitted reply limit
 is capped to the remaining space. Larger-context restart advice appears only when the estimate allows it.
 
-Prompt prefill uses the shared CUDA prefill kernels. Decode uses CUDA graphs in the dense attention
-range and eager execution beyond it. The engine keeps prompt and reply states for prefix reuse and
-serves one request at a time. Both ranks finish a started reply after a client disconnects.
-Full-model long-context qualification, including sparse attention and prefix reuse, is TBD [release-0.3.5];
-allocation capacity is not qualification.
+Prompt prefill uses the shared CUDA prefill kernels. Decode uses CUDA graphs, past the dense limit one per
+pool bucket. The engine keeps up to 8 conversations' prompts (`TF_GLM_CACHE_ENTRIES`): when another
+conversation takes the attention caches, a kept prompt's rows are saved, within `TF_GLM_CACHE_GIB` (default 3)
+for its KDA states and saved rows together. It serves one request at a time. Both ranks finish a started reply
+after a client disconnects.
+
+### Long contexts: the latent cache
+
+The DSA layers are NoPE MLA: head h's key is `Wk_h c` and its value `Wv_h c`, with `c` the token's 512-wide
+normalized latent and `Wk_h`, `Wv_h` blocks of `kv_b_proj`. So `score_h = (Wk_h^T q_h) . c` and
+`out_h = Wv_h (sum_j p_j c_j)`. The CUDA engine caches `c` only (bf16, 1 KB a token and layer, shared by the
+heads and both ranks; `TF_GLM_LATENT=0` returns to per-head keys and values), absorbs the query once per row,
+attends over latents and expands the attended latent once. Past 2,051 tokens a row attends to its top 512 index
+pools (2,048 tokens) plus its incomplete pool; the pools are ranked by one radix-select kernel over the pools the
+chunk can see, rounded up to a power of two. Every kernel computes a row alone in an order fixed by its own
+position, so a decode window's rows keep the serial steps' bits; prompt chunks give the same bits for any
+chunking. The memory estimate sizes the latent cache (`mla_geometry(latent=True)`).
+
+Measured on two DGX Sparks (GB10, 128 GB each) with the MLX 4-bit checkpoint, MTP drafts only, a synthetic
+codebase with one hidden fact, cold prompts:
+
+| Prompt | Prompt reading | First token | Decode at that depth | Hidden fact |
+| --- | ---: | ---: | ---: | :---: |
+| 32,770 tokens | 1,155 tok/s | 28 s | 42.7 tok/s | found |
+| 130,839 tokens | 1,110 tok/s | 118 s | 45.1 tok/s | found |
+| 262,099 tokens | 1,033 tok/s | 254 s | 40.1 tok/s | found |
+
+`--context 262144` left at least 14 GB free on each Spark through the 256k prompt; `--context 0` allocated a
+487,495-token window, not measured that far. Drafted replies equaled serial ones (9/9). Short prompts decoded at
+49.8 / 42.3 / 60.9 / 48.0 tok/s (code and chat, sampled and greedy, 64 tokens, median of 5 seeds).
 
 ### EXL3
 
