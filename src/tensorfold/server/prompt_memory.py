@@ -333,9 +333,17 @@ class PromptMemory:
         return (store is not None and store.budget_bytes is not None and size > store.budget_bytes
                 and not store.admit_oversize)
 
+    def _extra_fits_after_reclaim(self, size: int, *, current_cache: Any = None) -> bool:
+        """Do not evict prefixes for a copy that still cannot fit with every reclaimable buffer gone."""
+
+        freeable = int(self.runtime.get_cache_memory()) + (self.store.nbytes if self.store is not None else 0)
+        return self.projected(self.prompt, current_cache=current_cache, extra_bytes=size) - freeable <= self.budget
+
     def allow_checkpoint(self, cache: Any) -> bool:
         size = cache_nbytes(cache)
-        if self.store is None or self._over_store_budget(size):
+        if self.store is None or self._over_store_budget(size) or not self._extra_fits_after_reclaim(
+            size, current_cache=cache
+        ):
             return False
         while self.projected(self.prompt, current_cache=cache, extra_bytes=size) > self.budget:
             if not self._reclaim():
@@ -343,7 +351,7 @@ class PromptMemory:
         return True
 
     def allow_load(self, size: int) -> bool:
-        if self._over_store_budget(size):
+        if self._over_store_budget(size) or not self._extra_fits_after_reclaim(size):
             return False
         while self.projected(self.prompt, extra_bytes=size) > self.budget:
             if not self._reclaim():
