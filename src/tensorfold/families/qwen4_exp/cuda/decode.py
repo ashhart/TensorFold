@@ -130,8 +130,8 @@ class Engine:
             # rejects it — as cudaErrorStreamCaptureInvalidated, after the weights are already loaded. Decline
             # it here, where the model's own answer is known, rather than let the load end in a capture error.
             if any(getattr(layer.moe.experts, "capturable", True) is False for layer in w.layers):
-                print("[tensorfold] CUDA graphs off: this MoE reads its plan's item list on the host, which a "
-                      "capture rejects; decode runs eagerly (correct, slower)")
+                print("[tensorfold] CUDA graphs off: a layer's experts declare themselves uncapturable; "
+                      "decode runs eagerly (correct, slower)")
             else:
                 self.graphs = Graphs(self, max_rows=max_rows)
 

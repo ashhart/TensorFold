@@ -61,10 +61,10 @@ class MoE4:
     shared: Expert4       # the BF16 shared expert as identity-scaled tables
     kernel: str = "nvfp4"
 
-    # The grouped step walks its plan's item list and counts on the host (``items``: a synchronising copy),
-    # which a CUDA graph capture rejects — so the engine decodes this model eagerly. A device-side item loop
-    # (the generic grouped path's) is what would let it capture again.
-    capturable = False
+    # The grouped step resolves its plan's item list, its member gather and its member scatter on the device
+    # (``nvfp4_grouped``), so the engine can capture a decode step again. The grid it launches is fixed in the
+    # plan's capacity, so the routing decides how many items are live, never how many programs run.
+    capturable = True
 
     @property
     def routed(self) -> int:

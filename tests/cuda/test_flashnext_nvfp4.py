@@ -189,11 +189,17 @@ def test_a_packed_stack_keeps_each_experts_bytes_and_decodes_them():
     assert torch.equal(nvfp4.dequantize_fp4(slab), nvfp4.dequantize(words[1], scale[1], factors[1]))
 
 
-def test_the_nvfp4_experts_declare_themselves_uncapturable():
-    """The NVFP4 grouped step walks its plan's item list and counts on the host — a synchronising copy that a
-    CUDA graph capture rejects (cudaErrorStreamCaptureInvalidated, after the weights are loaded). The route
-    says so, and the engine reads that answer instead of capturing a step that cannot be captured."""
+def test_the_nvfp4_experts_declare_themselves_capturable():
+    """The grouped step reads its plan's item list, its member gather and its member scatter on the device, so
+    a CUDA graph capture accepts it (the first form's host read was what cudaErrorStreamCaptureInvalidated
+    rejected). The grid it launches is fixed in the plan's capacity — never in what the routing wrote — which
+    is the property a capture needs: the routing decides how many items are live, not how many programs run."""
 
-    from tensorfold.families.qwen4_exp.cuda import nvfp4_moe
+    from tensorfold.families.qwen4_exp.cuda import nvfp4_grouped, nvfp4_moe
+    from tensorfold.cuda.experts import Plan
 
-    assert nvfp4_moe.MoE4.capturable is False
+    assert nvfp4_moe.MoE4.capturable is True
+    plan = Plan(rows=1024, slots=4, experts=8, device="cpu")
+    assert nvfp4_grouped._grid(plan, 256, 64) == (plan.items.shape[0], 4)
+    plan.counts[0] = 0                        # no item live: same grid, the kernels return on the count
+    assert nvfp4_grouped._grid(plan, 256, 64) == (plan.items.shape[0], 4)
