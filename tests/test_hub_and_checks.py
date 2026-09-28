@@ -183,9 +183,9 @@ def test_models_lists_the_tested_checkpoints(capsys):
     assert main(["models"]) == 0
     out = capsys.readouterr().out
     for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",
-                 "Vontra/Qwen3.8-27B-MLX-4bit", "z-lab/Qwen3.8-27B-DFlash2"):
+                 "Vontra/Qwen3.8-27B-MLX-4bit", "z-lab/Qwen3.8-27B-DFlash2", "mlx-community/gemma-4-26b-a4b-it-4bit"):
         assert repo in out
-    for folder in ("qwen/dense/v1", "qwen/flash_next/v1", "nemotron/lightning/v1"):
+    for folder in ("qwen/dense/v1", "qwen/flash_next/v1", "nemotron/lightning/v1", "gemma/v1"):
         assert f"kernels  {folder}" in out
 
 
@@ -194,10 +194,6 @@ def test_every_family_names_an_importable_kernel_version():
         package = family.package
         if not hasattr(package, "load"):
             continue                     # a CUDA-only family (its kernels live in its cuda/ package)
-        if not getattr(package, "KERNEL_PACKAGE", ""):
-            # a family on mlx_lm's forward (gemma4): snapshots keyed by a hash of the family's source alone
-            assert len(families.kernel_version(family, None)) == 12
-            continue
         kernels = importlib.import_module(package.KERNEL_PACKAGE)
         assert kernels.VERSION == package.KERNEL_VERSION == "v1"
         assert family.lanes                 # every family decodes through the lane engine

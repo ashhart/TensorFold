@@ -83,6 +83,11 @@ _TOOL_PARAMETER_BLOCK_RE = re.compile(
     r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>",
     re.IGNORECASE | re.DOTALL,
 )
+# Gemma 4: <|tool_call>call:NAME{key:value,...}<tool_call|>, keys bare, strings between <|"|> marks
+_GEMMA_TOOL_CALL_BLOCK_RE = re.compile(r"<\|tool_call>\s*(.*?)\s*<tool_call\|>", re.DOTALL)
+_GEMMA_CALL_RE = re.compile(r"^call:([\w.-]+)\s*(\{.*\})$", re.DOTALL)
+_GEMMA_STRING_RE = re.compile(r'<\|"\|>(.*?)<\|"\|>', re.DOTALL)
+_GEMMA_KEY_RE = re.compile(r"(?<=[{,])\s*([A-Za-z_][\w-]*)\s*:")
 _JSON_FENCE_RE = re.compile(
     r"^\s*```(?:json)?\s*(.*?)\s*```\s*$",
     re.IGNORECASE | re.DOTALL,
@@ -140,7 +145,28 @@ def _parse_glm_payload(block: str, schemas: dict[str, dict[str, Any]] | None, *,
                   for key, value in _GLM_ARG_RE.findall(rest)}
 
 
+def _parse_gemma_call(block: str) -> tuple[str, dict[str, Any]] | None:
+    """Gemma 4's ``call:NAME{...}`` as (name, arguments): its strings become JSON strings, its bare keys quoted."""
+
+    match = _GEMMA_CALL_RE.match(block)
+    if match is None:
+        return None
+    strings: list[str] = []
+
+    def keep(found: re.Match[str]) -> str:
+        strings.append(found.group(1))
+        return f"\x00{len(strings) - 1}\x00"
+
+    text = _GEMMA_KEY_RE.sub(lambda found: f'"{found.group(1)}":', _GEMMA_STRING_RE.sub(keep, match.group(2)))
+    for index, value in enumerate(strings):
+        text = text.replace(f"\x00{index}\x00", json.dumps(value, ensure_ascii=False))
+    return match.group(1), _tool_json_object(text)
+
+
 def _parse_tool_call_payload(block: str, schemas: dict[str, dict[str, Any]] | None = None, *, complete: bool = False) -> tuple[str, dict[str, Any]] | None:
+    gemma = _parse_gemma_call(block) if block.startswith("call:") else None
+    if gemma is not None:
+        return gemma
     try:
         payload = json.loads(block)
     except json.JSONDecodeError:
@@ -268,6 +294,8 @@ def parse_tool_calls_from_content(
         envelopes.append((match.start(), match.end(), match.group(1).strip()))
     for match in _NAMESPACED_TOOL_CALL_BLOCK_RE.finditer(text):
         envelopes.append((match.start(), match.end(), match.group(2).strip()))
+    for match in _GEMMA_TOOL_CALL_BLOCK_RE.finditer(text):
+        envelopes.append((match.start(), match.end(), match.group(1).strip()))
     if not envelopes:
         bare_calls = _parse_bare_json_tool_calls(text, known, max_calls=max_calls)
         if bare_calls is not None:

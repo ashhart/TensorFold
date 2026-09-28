@@ -378,6 +378,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         from tensorfold import update
 
         update.check_in_background()
+        news = update.first_run_notice()
+        if news:
+            print(news, flush=True)
     config_dir = _config_dir(args.model)
     family = families.detect(config_dir)
     if args.ple_on_ssd and not hasattr(family.package, "ple_bytes"):

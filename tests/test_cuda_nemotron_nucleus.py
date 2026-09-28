@@ -6,7 +6,8 @@ import sys
 from types import ModuleType
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from tensorfold.engine.exact_sampling import Sampling
 

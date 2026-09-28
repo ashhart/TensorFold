@@ -7,8 +7,11 @@ from typing import Any
 from tensorfold.server.messages import _normalize_tool_call_arguments, late_system_role, normalize_messages
 
 _THINK_END = "</think>"
-_CALL_OPEN = "<tool_call>"
-_CALL_CLOSE = "</tool_call>"
+# (what a reply writes to open its think block, what closes it): Qwen's prompt opens the block; Gemma 4's reply does
+THINK_MARKERS = ("", _THINK_END)
+CHANNEL_MARKERS = ("<|channel>thought", "<channel|>")
+# (opener, closer) of a tool call's markup: Qwen's, then Gemma 4's
+_CALLS = (("<tool_call>", "</tool_call>"), ("<|tool_call>", "<tool_call|>"))
 
 
 def _partial_tag(text: str, tag: str) -> int:
@@ -20,13 +23,29 @@ def _partial_tag(text: str, tag: str) -> int:
     return 0
 
 
-def split_thinking(text: str, *, finished: bool) -> tuple[str, str]:
-    """Split reasoning from the answer at ``</think>``, withholding partial closing tags so emitted reasoning never changes."""
+def split_thinking(text: str, *, finished: bool, markers: tuple[str, str] = THINK_MARKERS) -> tuple[str, str]:
+    """(reasoning, answer) of a thinking reply; while it streams, a tail that could begin a marker is held back."""
 
-    end = text.find(_THINK_END)
+    opener, closer = markers
+    if opener:
+        if not text.startswith(opener):                      # a reply that did not open the block has no reasoning
+            return ("", "") if not finished and opener.startswith(text) else ("", text)
+        text = text[len(opener):].lstrip("\n")
+    end = text.find(closer)
     if end < 0:
-        return text[: len(text) - (0 if finished else _partial_tag(text, _THINK_END))], ""
-    return text[:end], text[end + len(_THINK_END):].lstrip("\n")
+        return text[: len(text) - (0 if finished else _partial_tag(text, closer))], ""
+    return text[:end], text[end + len(closer):].lstrip("\n")
+
+
+def think_markers(tokenizer: Any) -> tuple[str, str]:
+    """Gemma 4's thought channel when the tokenizer has its ``<channel|>`` token, else Qwen's ``</think>``."""
+
+    try:
+        close = tokenizer.convert_tokens_to_ids(CHANNEL_MARKERS[1])
+    except Exception:  # noqa: BLE001 - a tokenizer without the lookup: the default markers
+        return THINK_MARKERS
+    unk = getattr(tokenizer, "unk_token_id", None)
+    return CHANNEL_MARKERS if isinstance(close, int) and close >= 0 and close != unk else THINK_MARKERS
 
 
 def hide_tool_calls(text: str, *, finished: bool) -> str:
@@ -35,16 +54,19 @@ def hide_tool_calls(text: str, *, finished: bool) -> str:
     out: list[str] = []
     pos = 0
     while True:
-        start = text.find(_CALL_OPEN, pos)
-        if start < 0:
+        found = [(text.find(opener, pos), opener, closer) for opener, closer in _CALLS]
+        found = [f for f in found if f[0] >= 0]
+        if not found:
             tail = text[pos:]
-            out.append(tail[: len(tail) - (0 if finished else _partial_tag(tail, _CALL_OPEN))])
+            held = 0 if finished else max(_partial_tag(tail, opener) for opener, _ in _CALLS)
+            out.append(tail[: len(tail) - held])
             return "".join(out)
+        start, opener, closer = min(found)
         out.append(text[pos:start])
-        end = text.find(_CALL_CLOSE, start)
+        end = text.find(closer, start + len(opener))
         if end < 0:
             return "".join(out)
-        pos = end + len(_CALL_CLOSE)
+        pos = end + len(closer)
 
 
 def render_prompt_ids(

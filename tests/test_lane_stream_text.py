@@ -40,3 +40,72 @@ def test_text_without_calls_is_unchanged():
     assert hide_tool_calls("a < b and <b>bold</b>", finished=True) == "a < b and <b>bold</b>"
     assert hide_tool_calls("ends with <tool", finished=False) == "ends with "
     assert hide_tool_calls("ends with <tool", finished=True) == "ends with <tool"
+
+
+def test_gemma_thought_channel_streams_as_reasoning():
+    from tensorfold.server.text import CHANNEL_MARKERS, think_markers
+
+    reply = "<|channel>thought\nSky: Rayleigh scattering.\n<channel|>The sky is blue because air scatters blue light."
+    sent = ""
+    for n in range(1, len(reply) + 1):
+        reasoning, answer = split_thinking(reply[:n], finished=False, markers=CHANNEL_MARKERS)
+        assert reasoning.startswith(sent) and "<|channel>" not in reasoning
+        sent = reasoning
+    assert split_thinking(reply, finished=True, markers=CHANNEL_MARKERS) == (
+        "Sky: Rayleigh scattering.\n", "The sky is blue because air scatters blue light.")
+    assert split_thinking("Blue.", finished=True, markers=CHANNEL_MARKERS) == ("", "Blue.")
+
+    class Tokens:
+        unk_token_id = 3
+
+        def __init__(self, vocab):
+            self.vocab = vocab
+
+        def convert_tokens_to_ids(self, token):
+            return self.vocab.get(token, 3)
+
+    assert think_markers(Tokens({"<channel|>": 101})) == CHANNEL_MARKERS
+    assert think_markers(Tokens({"</think>": 7})) == ("", "</think>")
+
+
+def test_gemma_tool_calls_are_parsed_and_kept_out_of_the_streamed_text():
+    import json
+
+    from tensorfold.server.tools import parse_tool_calls_from_content
+
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}]
+    call = ('<|tool_call>call:read_file{flags:[<|"|>x, y: {z}<|"|>],limit:20,opts:{deep:true},'
+            'path:<|"|>src/a.py<|"|>}<tool_call|>')
+    reply = "Reading it now." + call
+    content, calls = parse_tool_calls_from_content(reply, tools)
+    assert content == "Reading it now." and len(calls) == 1
+    assert calls[0]["function"]["name"] == "read_file"
+    assert json.loads(calls[0]["function"]["arguments"]) == {
+        "flags": ["x, y: {z}"], "limit": 20, "opts": {"deep": True}, "path": "src/a.py"}
+    shown = ""
+    for n in range(1, len(reply) + 1):
+        visible = hide_tool_calls(reply[:n], finished=False)
+        assert visible.startswith(shown) and "<|" not in visible
+        shown = visible
+    assert shown == hide_tool_calls(reply, finished=True) == "Reading it now."
+
+
+def test_glm_and_gemma_calls_parse_through_one_parser():
+    """GLM's <arg_key> calls and Gemma 4's call:NAME{...} calls in one reply, each in the order written."""
+
+    import json
+
+    from tensorfold.server.tools import parse_tool_calls_from_content
+
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object", "properties": {
+        "path": {"type": "string"}, "limit": {"type": "integer"}}}}},
+             {"type": "function", "function": {"name": "call:search", "parameters": {"type": "object", "properties": {
+                 "query": {"type": "string"}}}}}]
+    glm = "<tool_call>read_file<arg_key>path</arg_key><arg_value>a.py</arg_value></tool_call>"
+    gemma = '<|tool_call>call:read_file{limit:5,path:<|"|>b.py<|"|>}<tool_call|>'
+    named = "<tool_call>call:search<arg_key>query</arg_key><arg_value>x</arg_value></tool_call>"
+    content, calls = parse_tool_calls_from_content("Two reads." + glm + gemma + named, tools)
+    got = [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in calls]
+    assert content == "Two reads."
+    assert got == [("read_file", {"path": "a.py"}), ("read_file", {"limit": 5, "path": "b.py"}),
+                   ("call:search", {"query": "x"})]

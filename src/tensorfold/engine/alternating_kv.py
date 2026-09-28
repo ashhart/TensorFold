@@ -91,9 +91,10 @@ class AlternatingKVCache(KVCache):
 
 
 def drop_spares(cache: list) -> list:
-    """``cache`` with every alternating layer down to one buffer (for retained copies)."""
+    """``cache`` with every alternating layer (any cache with ``drop_spare``) down to one buffer, for retained copies."""
 
     for item in cache:
-        if isinstance(item, AlternatingKVCache):
-            item.drop_spare()
+        drop = getattr(item, "drop_spare", None)
+        if callable(drop):
+            drop()
     return cache

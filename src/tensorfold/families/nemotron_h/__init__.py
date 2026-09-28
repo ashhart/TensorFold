@@ -84,10 +84,15 @@ def load(model_dir: Path, *, mtp_head: str = "", mtp_drafts: int | None = None, 
 
 
 def engine_settings(model: Any) -> dict[str, Any]:
-    """Rows a round verifies at most: the widest window checked exact at load."""
+    """Rows a round verifies at most and, with tensor units, prompt chunks of up to 8,192 tokens where memory allows."""
+
+    from tensorfold.families.qwen3_5 import tensor_units
 
     width = int(getattr(model, "exact_width", 1) or 1)
-    return {"max_rows": width, "max_draft": max(0, width - 1)}
+    settings: dict[str, Any] = {"max_rows": width, "max_draft": max(0, width - 1)}
+    if tensor_units():
+        settings["prefill_steps"] = (8192, 4096, 2048)
+    return settings
 
 
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)

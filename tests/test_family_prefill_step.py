@@ -86,3 +86,13 @@ def test_the_largest_step_that_leaves_the_context_floor_is_chosen(monkeypatch):
     assert prefill_step.choose(make, (2048,), 1 << 40, []) == 2048 and made == []
     assert prefill_step.choose(make, (8192, 4096, 2048), 1 << 40, list(range(50))) == 8192 and made == [2048]
     assert prefill_step.choose(make, (8192, 4096, 2048), 0, []) == 2048 and Engine.model.tightened == 2
+
+
+def test_nemotron_offers_8192_token_prompt_chunks_with_tensor_units(monkeypatch):
+    from tensorfold.families import nemotron_h, qwen3_5
+
+    model = SimpleNamespace(exact_width=5)
+    for units, steps in ((True, (8192, 4096, 2048)), (False, None)):
+        monkeypatch.setattr(qwen3_5, "tensor_units", lambda units=units: units)
+        settings = nemotron_h.engine_settings(model)
+        assert settings.get("prefill_steps") == steps and settings["max_rows"] == 5 and settings["max_draft"] == 4

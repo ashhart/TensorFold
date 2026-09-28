@@ -19,6 +19,8 @@ RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 REPO_URL = f"https://github.com/{REPO}.git"
 CACHE = Path.home() / ".cache" / "tensorfold" / "update-check.json"
 CACHE_SECONDS = 24 * 3600
+CHANGELOG = "CHANGELOG.md"
+SEEN = Path.home() / ".cache" / "tensorfold" / "version-seen"    # the last version whose news was shown
 
 
 def parse_version(text: str) -> tuple[int, ...]:
@@ -71,10 +73,85 @@ def notice(tag: str | None) -> str | None:
     return None
 
 
+def _checks_off() -> bool:
+    return os.environ.get("TENSORFOLD_NO_UPDATE_CHECK", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def whats_new(text: str, since: str, upto: str) -> str:
+    """The changelog's sections for versions after ``since`` up to ``upto``, as written (newest first)."""
+
+    lines, keep = [], False
+    for line in text.splitlines():
+        heading = re.match(r"##\s+v?(\d+(?:\.\d+)+)", line)
+        if heading:
+            keep = parse_version(since) < parse_version(heading.group(1)) <= parse_version(upto)
+        elif line.startswith("# "):
+            keep = False
+        if keep:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def changelog(tag: str, clone: Path | None = None) -> str | None:
+    """CHANGELOG.md at ``tag``: the clone's copy when there is one, else GitHub's; None when unreachable."""
+
+    if clone is not None:
+        try:
+            return (clone / CHANGELOG).read_text()
+        except OSError:
+            return None
+    import urllib.request
+
+    request = urllib.request.Request(f"https://raw.githubusercontent.com/{REPO}/{tag}/{CHANGELOG}",
+                                     headers={"User-Agent": f"tensorfold/{__version__}"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.read().decode("utf-8", "replace")
+    except Exception:                  # offline or blocked: the link printed after it still works
+        return None
+
+
+def _remember(version: str) -> None:
+    try:
+        SEEN.parent.mkdir(parents=True, exist_ok=True)
+        SEEN.write_text(version)
+    except OSError:
+        pass
+
+
+def show_whats_new(since: str, tag: str, clone: Path | None = None) -> None:
+    """Print what changed between ``since`` and ``tag``, then where every release's notes live."""
+
+    text = changelog(tag, clone)
+    notes = whats_new(text, since, tag) if text else ""
+    if notes:
+        print(f"\nWhat's new since {since}:\n\n{notes}\n", flush=True)
+    print(f"[tensorfold] every release's notes: https://github.com/{REPO}/blob/{tag}/{CHANGELOG}", flush=True)
+    _remember(tag.lstrip("v"))
+
+
+def first_run_notice() -> str | None:
+    """One line the first time a version runs, so installs updated some other way still hear what's new."""
+
+    if _checks_off():
+        return None
+    try:
+        seen = SEEN.read_text().strip()
+    except OSError:
+        seen = ""
+    if seen == __version__:
+        return None
+    _remember(__version__)
+    if seen and not newer(__version__, seen):
+        return None
+    return (f"[tensorfold] this is TensorFold {__version__}; what's new: "
+            f"https://github.com/{REPO}/blob/v{__version__}/{CHANGELOG}")
+
+
 def check_in_background() -> threading.Thread | None:
     """Look for a newer release without delaying anything; print one line if there is one."""
 
-    if os.environ.get("TENSORFOLD_NO_UPDATE_CHECK", "").strip().lower() in ("1", "true", "yes", "on"):
+    if _checks_off():
         return None
 
     def run() -> None:
@@ -136,6 +213,8 @@ def update(*, check_only: bool = False, force: bool = False) -> int:
         code = _run(["git", "-C", str(clone), "merge", "--ff-only", tag])
         if code != 0:
             print(f"[tensorfold] {clone} could not fast-forward to {tag}: update it yourself", file=sys.stderr)
+        else:
+            show_whats_new(__version__, tag, clone)
         return code
     # Upgrade dependencies only when the new release requires different versions.
     code = _run([sys.executable, "-m", "pip", "install", "--upgrade", f"git+{REPO_URL}@{tag}"])
@@ -147,4 +226,5 @@ def update(*, check_only: bool = False, force: bool = False) -> int:
             CACHE.unlink()
         except OSError:
             pass
+        show_whats_new(__version__, tag)
     return code

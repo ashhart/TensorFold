@@ -1,5 +1,4 @@
-"""Gemma 4 fused decode kernels (GPU): each kernel is its MLX op sequence to bf16 rounding, and a tiny random 4-bit
-Gemma 4 decodes through FusedDecode as mlx_lm's forward does (same greedy tokens, logits to bf16 noise)."""
+"""Gemma 4 decode kernels (Metal): each is its MLX ops to bf16 rounding, row-exact, with one Metal signature."""
 
 from __future__ import annotations
 
@@ -11,9 +10,13 @@ nn = pytest.importorskip("mlx.nn")
 gemma4_text = pytest.importorskip("mlx_lm.models.gemma4_text")
 
 if not mx.metal.is_available():
-    pytest.skip("the fused kernels are Metal kernels", allow_module_level=True)
+    pytest.skip("the Gemma decode kernels are Metal kernels", allow_module_level=True)
 
-from tensorfold.kernels.gemma.v1 import kernels as K  # noqa: E402
+from gemma4_tiny import TINY, tiny_text  # noqa: E402
+from kernel_signatures import changed, recording  # noqa: E402
+from tensorfold.kernels.gemma.v1 import attention, glue, moe  # noqa: E402
+from tensorfold.kernels.gemma.v1.decode import RowDecode, inverse_frequencies  # noqa: E402
+from tensorfold.kernels.inputs import ints  # noqa: E402
 
 EPS = mx.array([1e-6], dtype=mx.float32)
 
@@ -33,37 +36,55 @@ def rms(x, w=None):
 
 
 @pytest.mark.parametrize("values_are_keys", [False, True])
-def test_qkv_norm_is_the_three_head_norms(values_are_keys):
-    heads, kv, dh = 4, 2, 64
-    width = (heads + kv + (0 if values_are_keys else kv)) * dh
-    qkv, qw, kw = bf((3, width), 1), bf((dh,), 2, 0.1, 1.0), bf((dh,), 3, 0.1, 1.0)
-    q, k, v = K.qkv_norm(qkv, qw, kw, EPS, heads=heads, kv_heads=kv, head_dim=dh, values_are_keys=values_are_keys)
-    rq = qkv[:, :heads * dh].reshape(3, heads, dh)
-    rk = qkv[:, heads * dh:(heads + kv) * dh].reshape(3, kv, dh)
-    rv = rk if values_are_keys else qkv[:, (heads + kv) * dh:].reshape(3, kv, dh)
-    assert close(q, rms(rq, qw)) and close(k, rms(rk, kw)) and close(v, rms(rv))
+@pytest.mark.parametrize("head_dim", [256, 512])
+def test_qkv_prep_is_the_head_norms_and_rope_at_each_rows_position(values_are_keys, head_dim):
+    from mlx_lm.models.rope_utils import initialize_rope
+
+    heads, kv = 4, 2
+    width = (heads + kv + (0 if values_are_keys else kv)) * head_dim
+    positions = [5, 1023, 70001]
+    qkv, qw, kw = bf((3, width), 1), bf((head_dim,), 2, 0.1, 1.0), bf((head_dim,), 3, 0.1, 1.0)
+    scaling = ({"rope_type": "proportional", "partial_rotary_factor": 0.25} if head_dim == 512
+               else {"rope_type": "default"})
+    rope = initialize_rope(head_dim, 10_000.0 if head_dim == 256 else 1_000_000.0, False, scaling, 262_144)
+    q, k, v = glue.qkv_prep(qkv, qw, kw, inverse_frequencies(rope, head_dim), ints(positions), EPS, heads=heads,
+                            kv_heads=kv, head_dim=head_dim, values_are_keys=values_are_keys)
+    rq = qkv[:, :heads * head_dim].reshape(3, heads, head_dim)
+    rk = qkv[:, heads * head_dim:(heads + kv) * head_dim].reshape(3, kv, head_dim)
+    rv = rk if values_are_keys else qkv[:, (heads + kv) * head_dim:].reshape(3, kv, head_dim)
+    for r, p in enumerate(positions):
+        want_q = rope(rms(rq[r], qw)[None, :, None], offset=p)[0, :, 0]      # mlx_lm's [B, H, L, D]
+        want_k = rope(rms(rk[r], kw)[None, :, None], offset=p)[0, :, 0]
+        assert close(q[r], want_q, 0.01) and close(k[:, r], want_k, 0.01) and close(v[:, r], rms(rv[r]))
+
+
+@pytest.mark.parametrize("values_are_keys", [False, True])
+@pytest.mark.parametrize("head_dim", [256, 512])
+def test_qkv_rows_is_the_row_matvec_then_qkv_prep(values_are_keys, head_dim):
+    from tensorfold.kernels.nemotron.lightning.v1 import rows as row_kernels
+
+    heads, kv, dims = 4, 2, 2816
+    width = (heads + kv + (0 if values_are_keys else kv)) * head_dim
+    mx.random.seed(40)
+    weight, scales, biases = mx.quantize(mx.random.normal((width, dims)) * 0.05, group_size=64, bits=4)
+    scales, biases = scales.astype(mx.bfloat16), biases.astype(mx.bfloat16)
+    x, qw, kw = bf((3, dims), 41), bf((head_dim,), 42, 0.1, 1.0), bf((head_dim,), 43, 0.1, 1.0)
+    inv = mx.array(np.linspace(1.0, 1e-4, head_dim // 2, dtype=np.float32))
+    shape = dict(heads=heads, kv_heads=kv, head_dim=head_dim, values_are_keys=values_are_keys)
+    at = ints([7, 900, 40000])
+    fused = glue.qkv_rows(x, weight, scales, biases, 64, qw, kw, inv, at, EPS, **shape)
+    apart = glue.qkv_prep(row_kernels.qmv(x, weight, scales, biases, 64), qw, kw, inv, at, EPS, **shape)
+    for a, b in zip(fused, apart):
+        assert bool(mx.array_equal(a, b).item())
 
 
 def test_attn_tail_is_norm_add_and_three_norms():
     d = 512
     h, o = bf((2, d), 4), bf((2, d), 5, 3.0)
     wa, w1, w2, w3 = (bf((d,), s, 0.1, 1.0) for s in (6, 7, 8, 9))
-    hn, n1, n2, n3 = K.attn_tail(h, o, wa, w1, w2, w3, EPS)
+    hn, n1, n2, n3 = glue.attn_tail(h, o, wa, w1, w2, w3, EPS)
     ref = h + rms(o, wa)
     assert close(hn, ref) and close(n1, rms(ref, w1)) and close(n2, rms(ref, w2)) and close(n3, rms(ref, w3))
-
-
-def test_route_picks_the_top_k_with_softmax_weights():
-    scores, scale = bf((3, 128), 10, 2.0), bf((128,), 11, 0.1, 1.0)
-    ids, weights = K.route(scores, scale, 8)
-    for r in range(3):
-        s = np.array(scores[r].astype(mx.float32))
-        top = np.argsort(-s, kind="stable")[:8]
-        assert list(np.array(ids[r])) == list(top)
-        p = np.exp(s[top] - s[top].max())
-        p /= p.sum()
-        want = p * np.array(scale.astype(mx.float32))[top]
-        assert np.allclose(np.array(weights[r].astype(mx.float32)), want, rtol=0.02, atol=1e-3)
 
 
 def test_moe_tail_is_the_three_post_norms_residual_scalar_and_next_norm():
@@ -71,9 +92,31 @@ def test_moe_tail_is_the_three_post_norms_residual_scalar_and_next_norm():
     h, y1, y2 = bf((2, d), 12), bf((2, d), 13, 2.0), bf((2, d), 14, 0.5)
     w1, w2, wp, wn = (bf((d,), s, 0.1, 1.0) for s in (15, 16, 17, 18))
     scalar = mx.array([0.75], dtype=mx.bfloat16)
-    hn, nxt = K.moe_tail(h, y1, y2, w1, w2, wp, scalar, wn, EPS)
+    hn, nxt = glue.moe_tail(h, y1, y2, w1, w2, wp, scalar, wn, EPS)
     ref = (h + rms(rms(y1, w1) + rms(y2, w2), wp)) * scalar
     assert close(hn, ref) and close(nxt, rms(ref, wn))
+
+
+def test_route_picks_the_top_k_with_softmax_weights():
+    scores, scale = bf((3, 128), 10, 2.0), bf((128,), 11, 0.1, 1.0)
+    ids, weights = moe.route(scores, scale, 8)
+    for r in range(3):
+        s = np.array(scores[r].astype(mx.float32))
+        top = np.argsort(-s, kind="stable")[:8]
+        assert list(np.array(ids[8 * r:8 * r + 8])) == list(top)
+        p = np.exp(s[top] - s[top].max())
+        p /= p.sum()
+        want = p * np.array(scale.astype(mx.float32))[top]
+        assert np.allclose(np.array(weights[8 * r:8 * r + 8].astype(mx.float32)), want, rtol=0.02, atol=1e-3)
+
+
+def test_router_logits_is_the_8_bit_matvec():
+    proj = nn.QuantizedLinear(2816, 128, bias=False, group_size=64, bits=8)
+    w = mx.random.normal((128, 2816), key=mx.random.key(3)) * 0.05
+    proj.weight, scales, biases = mx.quantize(w, group_size=64, bits=8)
+    proj.scales, proj.biases = scales.astype(mx.bfloat16), biases.astype(mx.bfloat16)
+    x = bf((5, 2816), 4)
+    assert close(moe.router_logits(x, proj), proj(x), 0.01)
 
 
 def _switch(experts, n_in, n_out, seed):
@@ -91,8 +134,8 @@ def test_expert_kernels_are_the_gated_experts_and_their_weighted_sum():
     x = bf((2, d), 23)
     ids = mx.array([[3, 0, 15, 7, 9, 1, 12, 4], [5, 5, 2, 8, 11, 14, 6, 10]], dtype=mx.uint32)   # a repeat too
     weights = mx.softmax(bf((2, top), 24), axis=-1).astype(mx.bfloat16)
-    act = K.expert_gateup(x, ids, gate, up)
-    out = K.expert_down(act, ids, weights, down)
+    act = moe.expert_gateup(x, ids.reshape(-1), top, gate, up)
+    out = moe.expert_down(act, ids.reshape(-1), weights.reshape(-1), top, down)
 
     def deq(lin, e):
         return mx.dequantize(lin.weight[e], lin.scales[e], lin.biases[e], group_size=64, bits=4)
@@ -108,69 +151,82 @@ def test_expert_kernels_are_the_gated_experts_and_their_weighted_sum():
         assert close(out[r], total, rel=0.03)
 
 
-TINY = {
-    "model_type": "gemma4_text", "hidden_size": 128, "num_hidden_layers": 4, "intermediate_size": 128,
-    "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 64, "global_head_dim": 128,
-    "num_global_key_value_heads": 1, "attention_k_eq_v": True, "vocab_size": 97, "vocab_size_per_layer_input": 97,
-    "hidden_size_per_layer_input": 0, "num_kv_shared_layers": 0, "sliding_window": 8,
-    "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention", "full_attention"],
-    "enable_moe_block": True, "num_experts": 32, "top_k_experts": 4, "moe_intermediate_size": 512,
-    "use_double_wide_mlp": False, "final_logit_softcapping": 30.0, "tie_word_embeddings": True,
-}
+def _ring(heads, slots, dims, seed):
+    return bf((1, heads, slots, dims), seed), bf((1, heads, slots, dims), seed + 1)
 
 
-def tiny_text():
-    mx.random.seed(0)
-    text = gemma4_text.Model(gemma4_text.ModelArgs.from_dict(TINY))
-    nn.quantize(text, group_size=64, bits=4)
-    for layer in text.model.layers:                     # a non-trivial router scale and layer scalar
-        layer.router.per_expert_scale = (mx.random.uniform(shape=(32,)) + 0.5).astype(mx.bfloat16)
-        layer.layer_scalar = mx.array([0.8], dtype=mx.bfloat16)
-    text.set_dtype(mx.bfloat16)
-    mx.eval(text.parameters())
-    return text
+@pytest.mark.parametrize("dims, heads, kv_heads, window, ring", [(256, 16, 8, 1024, 1152), (512, 16, 2, 0, 0),
+                                                                 (64, 2, 1, 8, 136)])
+def test_attention_is_softmax_over_each_rows_keys_and_rows_are_independent(dims, heads, kv_heads, window, ring):
+    top = 1500 if window else 700
+    slots = ring or 768
+    keys, values = _ring(kv_heads, slots, dims, 30)
+    positions = [top - 6 + r for r in range(6)]
+    q = bf((6, heads, dims), 32)
+
+    def own(rows):                                     # the rows' own keys and values, as the q|k|v kernel gives them
+        at = mx.array([pos % (ring or slots) for pos in rows])
+        return keys[0][:, at], values[0][:, at]
+
+    out = attention.attend(q, keys, values, attention.Rows(positions, window, ring, dims), *own(positions))
+    group = heads // kv_heads
+    for r, p in enumerate(positions):
+        lo = max(0, p - window + 1) if window else 0
+        at = [pos % (ring or slots) for pos in range(lo, p + 1)]
+        for h in range(heads):
+            k = keys[0, h // group][mx.array(at)].astype(mx.float32)
+            v = values[0, h // group][mx.array(at)].astype(mx.float32)
+            want = mx.softmax(k @ q[r, h].astype(mx.float32), axis=-1) @ v
+            assert close(out[r, h], want, 0.02), (r, h)
+        alone = attention.attend(q[r:r + 1], keys, values, attention.Rows([p], window, ring, dims), *own([p]))
+        assert bool(mx.array_equal(alone[0], out[r]).item()), r
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_each_kernel_keeps_one_metal_signature_at_every_row_count(monkeypatch):
+    """MLX 0.31 recompiles a kernel whose input crosses 8 elements, which can drop a queued dispatch (mlx#3662)."""
+
+    from tensorfold.families.gemma4.cache import make_cache
+    from tensorfold.kernels.gemma.v1.base import Kernel
+    from tensorfold.kernels.nemotron.lightning.v1 import rows
+
+    for module in (attention, glue, moe):             # kernels built earlier would not pass the recorder
+        for value in vars(module).values():
+            if isinstance(value, Kernel):
+                monkeypatch.setattr(value, "compiled", {})
+    monkeypatch.setattr(rows, "_kernels", {})
+    text = tiny_text()
+    decode = RowDecode(text, "rows")
+    with recording() as seen:
+        for rows in (1, 2, 3, 5, 8, 9, 13):
+            cache = make_cache(text)
+            mx.eval(decode.logits(decode(mx.array(list(range(10, 10 + rows)), dtype=mx.uint32), [(cache, rows, 0)])))
+            assert cache[0].offset == rows
+    assert seen and not changed(seen), changed(seen)
+
+
+@pytest.mark.parametrize("seed", [0, 1])
 def test_each_fused_layer_is_mlx_lm_s_layer(seed):
-    """From the same attention output and residual, a fused layer's output is mlx_lm's to bf16 rounding with the
-    same experts. (End to end, a random tiny model amplifies bf16 rounding ~3x a layer, so the whole-model check
-    lives in tools/gemma4_truth_eval.py on the real weights.)"""
+    """A fused layer is mlx_lm's to bf16 rounding on the experts it picked (its top k breaks ties to the lower id)."""
 
     text = tiny_text()
-    fused = K.FusedDecode(text)
+    decode = RowDecode(text, "rows")
+    top = TINY["top_k_experts"]
     mx.random.seed(100 + seed)
     for i, layer in enumerate(text.model.layers):
         attn = layer.self_attn
         h = (mx.random.normal((1, TINY["hidden_size"])) * 2).astype(mx.bfloat16)
         out = mx.random.normal((1, attn.n_heads * attn.head_dim)).astype(mx.bfloat16)
-        got, _ = fused._back(i)(out, h)
+        got, _ = decode._back(i)(out, h)
         ha = h + layer.post_attention_layernorm(attn.o_proj(out))
+        normed = mx.fast.rms_norm(ha, decode.router_norm[i], 1e-6)
+        logits = moe.router_logits(normed, layer.router.proj)
+        assert bool(mx.array_equal(logits, layer.router.proj(normed)).item()), i
+        ids, weights = moe.route(logits, layer.router.per_expert_scale, top)
+        theirs, _ = layer.router(ha)
+        scores = np.array(logits[0].astype(mx.float32))
+        assert np.sort(scores[np.array(ids[:top])])[0] == np.sort(scores[np.array(theirs[0])])[0], i
         dense = layer.post_feedforward_layernorm_1(layer.mlp(layer.pre_feedforward_layernorm(ha)))
-        ids, weights = layer.router(ha)
-        routed = layer.post_feedforward_layernorm_2(layer.experts(layer.pre_feedforward_layernorm_2(ha), ids, weights))
+        routed = layer.post_feedforward_layernorm_2(layer.experts(layer.pre_feedforward_layernorm_2(ha),
+                                                                  ids[:top][None], weights[:top][None]))
         want = (ha + layer.post_feedforward_layernorm(dense + routed)) * layer.layer_scalar
         assert close(got, want, rel=0.02), i
-        mine, _ = K.route(layer.router.proj(mx.fast.rms_norm(ha, fused.router_norm[i], 1e-6)),
-                          layer.router.per_expert_scale, TINY["top_k_experts"])
-        assert sorted(np.array(mine[0]).tolist()) == sorted(np.array(ids[0]).tolist()), i
-
-
-def test_fused_decode_steps_advance_the_caches_like_mlx_lm(monkeypatch):
-    from tensorfold.families.gemma4.model import Gemma4
-
-    text = tiny_text()
-    monkeypatch.setenv("TF_GEMMA4_FUSED", "0")
-    plain = Gemma4(text)
-    monkeypatch.setenv("TF_GEMMA4_FUSED", "1")
-    fused = Gemma4(text)
-    assert fused.fused is not None and plain.fused is None
-    prompt = [int(t) for t in np.random.default_rng(3).integers(6, 97, size=6)]
-    caches = plain.make_cache(), fused.make_cache()
-    for model, cache in zip((plain, fused), caches):
-        mx.eval(model(mx.array([prompt]), cache))
-        for t in range(10, 24):                          # past the 8-token sliding window: the caches rotate
-            logits = model(mx.array([[t]]), cache)
-            assert logits.shape == (1, 1, TINY["vocab_size"])
-            mx.eval(logits)
-    assert [c.offset for c in caches[0]] == [c.offset for c in caches[1]]

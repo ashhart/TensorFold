@@ -1,45 +1,42 @@
-"""Gemma 4 decode: time the one-row step and check the fused path against mlx_lm's forward.
-
-    python tools/gemma4_decode_bench.py MODEL_DIR [--steps 200] [--nll-tokens 2048] [--fused 0|1]
-
-Timing: greedy one-token steps from a chat prompt, each step evaluated before the next (the serial engine's
-synchronous path), ms per step after a warm-up. Quality (``--nll-tokens``): see ``quality``.
-"""
+"""Gemma 4 decode: one-row steps and verify windows timed, and the decode path scored against mlx_lm's forward."""
 
 from __future__ import annotations
 
 import argparse
-import os
 import time
 from pathlib import Path
 
+
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="Greedy one-row steps from a chat prompt, each evaluated before the next "
+                                 "(median ms after 20 warm-ups), then one forward of each window width from the same "
+                                 "state; --nll-tokens scores the decode path teacher-forced against mlx_lm's forward.")
     ap.add_argument("model")
     ap.add_argument("--steps", type=int, default=200)
-    ap.add_argument("--nll-tokens", type=int, default=0)
-    ap.add_argument("--fused", default=None, help="sets TF_GEMMA4_FUSED before load")
+    ap.add_argument("--windows", default="2,4,8,16", help="window widths to time (comma-separated)")
+    ap.add_argument("--nll-tokens", type=int, default=0, help="answer tokens to score (0: none)")
+    ap.add_argument("--backend", choices=("lane", "rows", "mlx"), default=None,
+                    help="the decode matmul (default: by GPU), or mlx: mlx_lm's own forward")
     ap.add_argument("--eval-file", default="/tmp/gemma4-eval-set.json")
     args = ap.parse_args()
-    if args.fused is not None:
-        os.environ["TF_GEMMA4_FUSED"] = args.fused
 
     import mlx.core as mx
 
     from tensorfold.families.gemma4.model import load
 
-    model, tokenizer = load(Path(args.model))
-    print(f"fused={getattr(model, 'fused', None) is not None}", flush=True)
+    ours = args.backend != "mlx"
+    model, tokenizer = load(Path(args.model), backend=args.backend if ours else None, check=ours)
+    step = Stepper(model, ours)
+    print(f"decode path: {model.decode.backend if ours else 'mlx_lm forward'}", flush=True)
 
     prompt = _chat(tokenizer, "Write a Python function that parses ISO-8601 durations and explain it.")
-    cache = model.make_cache()
-    logits = model(mx.array([prompt]), cache)
-    tok = mx.argmax(logits[0, -1]).reshape(1, 1)
+    cache = step.start(prompt)
+    tok = mx.argmax(step.last[0, -1]).reshape(1, 1)
     mx.eval(tok)
     times, out = [], []
     for i in range(args.steps + 20):
         t0 = time.perf_counter()
-        tok = mx.argmax(model(tok, cache)[0, -1]).reshape(1, 1)
+        tok = mx.argmax(step(tok, cache)[0, -1]).reshape(1, 1)
         mx.eval(tok)
         if i >= 20:
             times.append(time.perf_counter() - t0)
@@ -49,11 +46,39 @@ def main() -> int:
     print(f"decode: median {med * 1e3:.2f} ms/step = {1 / med:.1f} tok/s  (p10 {times[len(times) // 10] * 1e3:.2f}, "
           f"p90 {times[len(times) * 9 // 10] * 1e3:.2f})", flush=True)
     print("greedy head:", repr(tokenizer.decode(out[:40])), flush=True)
-    print("greedy ids hash:", hash(tuple(out)), flush=True)
+    if ours:
+        from tensorfold.engine.lane_engine import LaneEngine
+
+        for width in (int(w) for w in args.windows.split(",") if w):
+            best = float("inf")
+            for _ in range(5):
+                work = LaneEngine.copy_single_cache(cache)
+                t0 = time.perf_counter()
+                mx.eval(step(mx.array([out[:width]], dtype=mx.uint32), work))
+                best = min(best, time.perf_counter() - t0)
+            print(f"window of {width} rows: {best * 1e3:.2f} ms", flush=True)
 
     if args.nll_tokens:
-        quality(model, tokenizer, args.nll_tokens, Path(args.eval_file))
+        quality(step, tokenizer, args.nll_tokens, Path(args.eval_file))
     return 0
+
+
+class Stepper:
+    """Prompt then decode rows through the family's decode path, or through mlx_lm's forward (``ours`` False)."""
+
+    def __init__(self, model, ours: bool) -> None:
+        self.model, self.ours, self.last = model, ours, None
+
+    def start(self, prompt: list[int]):
+        import mlx.core as mx
+
+        cache = self.model.make_cache() if self.ours else self.model.text.make_cache()
+        hidden = self.model.prefill(mx.array([prompt]), cache) if self.ours else None
+        self.last = self.model.head(hidden[:, -1:]) if self.ours else self.model.text(mx.array([prompt]), cache=cache)
+        return cache
+
+    def __call__(self, tokens, cache):
+        return self.model(tokens, cache) if self.ours else self.model.text(tokens, cache=cache)
 
 
 def _chat(tokenizer, prompt: str) -> list[int]:
@@ -63,10 +88,7 @@ def _chat(tokenizer, prompt: str) -> list[int]:
 
 
 def eval_set(model, tokenizer, total: int, path: Path) -> list[tuple[list[int], list[int]]]:
-    """(prompt, answer) token lists: the model's own sampled answers (mlx_lm's forward, temperature 1.0, seed
-    0) to fixed prompts, generated once and kept in ``path`` so every variant is scored on the same tokens.
-    Text the model would not write itself (a pasted README, a chat template) has a near-flat next-token
-    distribution, where rounding noise flips the argmax and says nothing about a kernel."""
+    """The model's own sampled answers to fixed prompts (mlx_lm, temperature 1, seed 0), kept in ``path``."""
 
     import json
 
@@ -109,12 +131,12 @@ PROMPTS = (
 )
 
 
-def quality(model, tokenizer, total: int, path: Path) -> None:
-    """Teacher-forced answer tokens through the decode path (prompt prefilled, then one row a step) against
-    mlx_lm's whole-sequence forward: mean NLL of each, mean KL(ref || decode) and argmax agreement."""
+def quality(step: Stepper, tokenizer, total: int, path: Path) -> None:
+    """Teacher-forced answers through the decode path against mlx_lm's whole forward: NLL, KL, argmax agreement."""
 
     import mlx.core as mx
 
+    model = step.model
     pairs = eval_set(model, tokenizer, total, path)
     ref_nll, dec_nll, kls, agree, n = 0.0, 0.0, 0.0, 0.0, 0
     for prompt, answer in pairs:
@@ -122,10 +144,10 @@ def quality(model, tokenizer, total: int, path: Path) -> None:
         k = len(prompt)
         ref = model.model(mx.array([seq]))[0, k - 1:-1].astype(mx.float32)   # predicts answer[0:]
         ref = ref - mx.logsumexp(ref, axis=-1, keepdims=True)
-        cache = model.make_cache()
-        rows = [model(mx.array([prompt]), cache)[0, -1]]
+        cache = step.start(prompt)
+        rows = [step.last[0, -1]]
         for t in answer[:-1]:
-            rows.append(model(mx.array([[t]]), cache)[0, -1])
+            rows.append(step(mx.array([[t]]), cache)[0, -1])
             if len(rows) % 64 == 0:
                 mx.eval(rows[-64:])
         dec = mx.stack(rows).astype(mx.float32)

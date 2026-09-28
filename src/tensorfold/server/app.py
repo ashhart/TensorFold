@@ -25,7 +25,7 @@ from tensorfold.server.text import (
     is_title_request,
     parse_harmony_output,
     render_prompt_ids,
-    split_thinking,
+    split_thinking, think_markers,
     streaming_visible_text,
     template_late_system,
     strip_trailing_stops,
@@ -105,6 +105,7 @@ class ChatApp(RequestOptions):
         # the default thinking budget (0: none; a request's "thinking_budget" overrides it)
         self.thinking_budget = int(thinking_budget)
         self._think_tokens: tuple[tuple[int, ...], int] | None = None
+        self.think_markers = think_markers(tokenizer)
         # ``exact_sampling.Sampling`` fields used when a request names none (None: greedy)
         self.default_sampling = dict(default_sampling) if default_sampling else None
         self.max_snapshots = int(max_snapshots)
@@ -321,7 +322,7 @@ class ChatApp(RequestOptions):
                 preparing.release()
 
     class _Preparing:
-        """A."""
+        """A user's request between arrival and submission: background requests wait for these."""
 
         def __init__(self, app: "ChatApp") -> None:
             self.app = app
@@ -485,7 +486,7 @@ class ChatApp(RequestOptions):
             answer = text
             if thinking:
                 # the prompt opened a think block: reasoning streams as reasoning_content until </think>
-                reasoning_so_far, answer = split_thinking(text, finished=False)
+                reasoning_so_far, answer = split_thinking(text, finished=False, markers=self.think_markers)
                 piece = reasoning_so_far[len(streamed_reasoning):]
                 if piece:
                     streamed_reasoning = reasoning_so_far
@@ -506,7 +507,7 @@ class ChatApp(RequestOptions):
         with self.tokenizer_lock:
             text = stops.visible(self.tokenizer.decode(content_tokens))
         if thinking:
-            reasoning_text, content = split_thinking(text, finished=True)
+            reasoning_text, content = split_thinking(text, finished=True, markers=self.think_markers)
             reasoning = reasoning_text.strip() or None
         else:
             content, reasoning = parse_harmony_output(text)

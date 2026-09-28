@@ -66,6 +66,8 @@ inline void tf_rowdot(const device uint8_t* w, const device bfloat* sc, const de
 }
 """
 
+HEADER = _HEADER             # the qmv loop, for kernels that must give rows.qmv's bits
+
 _QMV = r"""
   // Threadgroup: one simdgroup per input row (x) for BLK blocks of RPS output rows (y). The row count is a launch
   // dimension only: every simdgroup runs the same instructions over its own row.

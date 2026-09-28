@@ -1,20 +1,9 @@
-"""How far each Gemma 4 decode path lands from the quantized model's fp32 forward.
-
-    python tools/gemma4_truth_eval.py truth   MODEL_DIR EVAL_SET.json TRUTH.npz
-    python tools/gemma4_truth_eval.py compare MODEL_DIR EVAL_SET.json TRUTH.npz [--fused 0|1]
-
-The same 4-bit weights run with fp32 activations (every norm, matmul input, attention and sum in fp32) are the
-reference: a path's distance from it is its rounding error, not its distance from another bf16 path. ``truth``
-keeps each answer position's top 256 tokens and their log-probabilities. ``compare`` scores mlx_lm's bf16
-whole-sequence forward and the decode path (prompt prefilled, then one row a step) against it: KL(truth || path)
-over those 256 tokens (almost all the mass) and argmax agreement with the truth.
-"""
+"""How far each Gemma 4 decode path lands from the same 4-bit weights run with fp32 activations."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 
 TOP = 256
@@ -44,37 +33,41 @@ def truth(model_dir: Path, eval_set: Path, out: Path) -> None:
     np.savez(out, ids=np.concatenate(ids_all), lps=np.concatenate(lps_all))
 
 
-def compare(model_dir: Path, eval_set: Path, truth_file: Path) -> None:
+def compare(model_dir: Path, eval_set: Path, truth_file: Path, backend: str | None) -> None:
     import mlx.core as mx
     import numpy as np
 
     from tensorfold.families.gemma4.model import load
 
-    model, _ = load(model_dir)
+    model, _ = load(model_dir, backend=backend, check=False)
     data = np.load(truth_file)
     t_ids, t_lps = mx.array(data["ids"]), mx.array(data["lps"])
     t_p = mx.exp(t_lps)
-    rows_whole, rows_decode = [], []
+    rows_whole, rows_mlx, rows_decode = [], [], []
     for prompt, answer in _pairs(eval_set):
         seq = prompt + answer
         k = len(prompt)
         rows_whole.append(model.model(mx.array([seq]))[0, k - 1:-1].astype(mx.float32))
+        ref_cache = model.text.make_cache()
+        mlx_steps = [model.text(mx.array([prompt]), cache=ref_cache)[0, -1]]
         cache = model.make_cache()
-        steps = [model(mx.array([prompt]), cache)[0, -1]]
+        steps = [model.head(model.prefill(mx.array([prompt]), cache)[:, -1:])[0, -1]]
         for t in answer[:-1]:
+            mlx_steps.append(model.text(mx.array([[t]]), cache=ref_cache)[0, -1])
             steps.append(model(mx.array([[t]]), cache)[0, -1])
             if len(steps) % 64 == 0:
-                mx.eval(steps[-64:])
+                mx.eval(steps[-64:], mlx_steps[-64:])
+        rows_mlx.append(mx.stack(mlx_steps).astype(mx.float32))
         rows_decode.append(mx.stack(steps).astype(mx.float32))
-    for name, rows in (("mlx_lm whole-sequence forward", rows_whole), ("decode path", rows_decode)):
+    for name, rows in (("mlx_lm whole-sequence forward", rows_whole), ("mlx_lm decode", rows_mlx),
+                       (f"decode path ({model.decode.backend})", rows_decode)):
         lg = mx.concatenate(rows)
         lp = lg - mx.logsumexp(lg, axis=-1, keepdims=True)
         q = mx.take_along_axis(lp, t_ids, axis=-1)
         kl = np.array((t_p * (t_lps - q)).sum(-1))
         best = mx.take_along_axis(t_ids, mx.argmax(t_lps, axis=-1, keepdims=True), axis=-1)[:, 0]
         agree = (mx.argmax(lp, axis=-1) == best).astype(mx.float32).mean().item()
-        # a few positions sit on a knife edge where any bf16 rounding flips the answer: the mean is dominated by
-        # them, so the median and the mean without the worst 0.5% say more about a path's rounding
+        # a few knife-edge positions dominate the mean: the median and the mean without the worst 0.5% say more
         trimmed = np.sort(kl)[: int(len(kl) * 0.995)].mean()
         print(f"{name:32s} KL(truth || path) mean {kl.mean():.5f}, trimmed {trimmed:.5f}, median "
               f"{np.median(kl):.2e} nats/token; {int((kl > 1).sum())} tokens over 1 nat; argmax = truth's "
@@ -82,19 +75,19 @@ def compare(model_dir: Path, eval_set: Path, truth_file: Path) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="truth: the fp32-activation forward's top 256 log-probabilities at each "
+                                 "answer position; compare: KL(truth || path) and argmax agreement for mlx_lm's whole "
+                                 "forward, mlx_lm's decode and the family's decode path (a path's rounding error).")
     ap.add_argument("mode", choices=("truth", "compare"))
     ap.add_argument("model")
     ap.add_argument("eval_set")
     ap.add_argument("truth")
-    ap.add_argument("--fused", default=None)
+    ap.add_argument("--backend", choices=("lane", "rows"), default=None, help="default: by GPU")
     args = ap.parse_args()
-    if args.fused is not None:
-        os.environ["TF_GEMMA4_FUSED"] = args.fused
     if args.mode == "truth":
         truth(Path(args.model), Path(args.eval_set), Path(args.truth))
     else:
-        compare(Path(args.model), Path(args.eval_set), Path(args.truth))
+        compare(Path(args.model), Path(args.eval_set), Path(args.truth), args.backend)
     return 0
 
 
