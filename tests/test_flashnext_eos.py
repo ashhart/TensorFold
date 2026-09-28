@@ -5,6 +5,7 @@ import json
 import pytest
 
 pytest.importorskip("torch")
+pytest.importorskip("triton")          # Flash Next's CUDA weights import its triton kernels
 
 from tensorfold.families.qwen4_exp.cuda.weights import Config, stop_ids  # noqa: E402
 
