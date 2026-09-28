@@ -47,8 +47,28 @@ def test_unsupported_formats_are_refused_before_and_at_load(tmp_path, entry, mon
         weights.load_backbone(folder)
 
 
-def test_projections_stacked_into_one_matrix_need_one_format(tmp_path):
+def test_projections_of_one_input_at_two_formats_stay_separate_calls(tmp_path):
     gate = "model.language_model.layers.0.mlp.gate_proj"
     folder = write_checkpoint(tmp_path / "m", overrides={gate: {"bits": 8, "group_size": 64}})
-    with pytest.raises(ValueError, match="one format"):
-        weights.load_backbone(folder)
+    gate_up = weights.load_backbone(folder).layers[0].mlp.gate_up
+    assert isinstance(gate_up, linear.QSplit) and [p.bits for p in gate_up.parts] == [8, 4]
+    x = mx.random.normal((3, gate_up.parts[0].ins)).astype(mx.bfloat16)
+    want = mx.concatenate([p(x) for p in gate_up.parts], axis=-1)
+    for rows_exact in (False, True):
+        assert bool(mx.array_equal(linear.project(x, gate_up, rows_exact=rows_exact), want).item())
+
+
+def test_a_mixed_checkpoints_entries_are_read_by_the_layouts_names(tmp_path):
+    from glm5_fakes import TEXT
+
+    from tensorfold.families.glm5_next.config import quant_formats
+
+    # mlx-lm's keys: a stated entry without bits takes MLX's default for its mode (to_quantized), as the 27B reads it
+    config = {"text_config": TEXT, "quantization": {"bits": 4, "group_size": 64, "language_model.lm_head": {"bits": 8},
+                                                    "language_model.model.layers.1.self_attn.forget_gate.f_b_proj":
+                                                        {"group_size": 64}, "language_model.mtp.0.eh_proj": False}}
+    default, stated = quant_formats(config)
+    assert default == (4, 64, "affine")
+    assert stated == {"language_model.lm_head": (8, 64, "affine"),
+                      "language_model.model.layers.1.self_attn.forget_gate.f_b_proj": (4, 64, "affine"),
+                      "language_model.mtp.0.eh_proj": None}

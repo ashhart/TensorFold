@@ -301,7 +301,7 @@ class GatedDeltaNet(nn.Module):
         qkv, z, b, a = prefill_mm.deltanet_in(self, x)
         tail = cache.conv if cache.conv is not None else mx.zeros((batch, self.kernel - 1, self.conv_dim), x.dtype)
         conv_in = mx.concatenate([tail, qkv], axis=1)
-        cache.conv = conv_in[:, -(self.kernel - 1):]
+        cache.conv = mx.contiguous(conv_in[:, -(self.kernel - 1):])     # a copy: a view would keep the chunk
         conv = nn.silu(self.conv1d(conv_in))
         q, k, v = mx.split(conv, [self.key_dim, 2 * self.key_dim], axis=-1)
         q = q.reshape(batch, length, self.nk, self.dk)

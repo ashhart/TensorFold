@@ -237,6 +237,31 @@ def test_prefill_resumed_at_every_grid_point_has_a_fresh_prefills_bits(checkpoin
         assert np.array_equal(feed(prompt[at:], LaneEngine.copy_single_cache(cache)), fresh), at
 
 
+def test_dense_prompt_chunks_attend_their_causal_prefix_as_decode_does(checkpoint, monkeypatch):
+    """Chunks inside the indexer's reach take one causal attention over the latent, close to decode's dense rows."""
+
+    from dataclasses import replace
+
+    from tensorfold.families.glm5_next import config as C
+    from tensorfold.families.glm5_next.mla import MLA
+
+    model = backbone(checkpoint)
+    attn = next(layer.attn for layer in model.layers if isinstance(layer.attn, MLA))
+    monkeypatch.setattr(attn, "cfg", replace(attn.cfg, index_topk=64))           # 48 positions: all dense
+    mx.random.seed(4)
+    x = (0.5 * mx.random.normal((48, TEXT["hidden_size"]))).astype(mx.bfloat16)
+
+    def run(chunk):
+        cache, outs = caches.MLACache(), []
+        for s in range(0, 48, chunk):
+            part = x[s:s + chunk]
+            outs.append(attn(part, [cache], (int(part.shape[0]),), int(part.shape[0]) <= C.DECODE_ROWS))
+        return np.array(mx.concatenate(outs).astype(mx.float32))
+
+    prompt, steps = run(24), run(1)
+    assert np.abs(prompt - steps).max() < 0.05 * np.abs(steps).max()
+
+
 def test_prompt_attention_matches_the_decode_path(checkpoint):
     """Prompt chunks attend over the keys each query's decode step would choose (bits aside: the paths differ)."""
 
@@ -313,6 +338,9 @@ def test_concurrent_streams_emit_what_they_emit_alone(checkpoint, device):
     model = backbone(checkpoint)
     runtime = GLMFlash(model, glm_mtp.load(model), drafts=3)
     assert runtime.max_streams > 1
+    if device == "cpu":
+        # MLX's CPU rms_norm (fp32) gives a row other bits once a call holds 8 rows or more: CPU rounds stay under 8
+        runtime.exact_width = runtime.batch_rows = min(runtime.exact_width, 7)
     specs = [
         (tokens(21, seed=4), 20, None, True),
         (tokens(9, seed=5), 14, Sampling(seed=3, temperature=0.8, top_k=40, top_p=0.9), True),

@@ -6,6 +6,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels import inputs
 from tensorfold.kernels.glm.flash.v1 import kernels as K
 from tensorfold.kernels.glm.flash.v1 import widths as W
 from tensorfold.kernels.glm.flash.v1.fused import MAX_ROWS, _kernel
@@ -190,9 +191,7 @@ _MOE_GATEUP = r"""
   const uint lane = thread_index_in_simdgroup;
   const int m = int(simdgroup_index_in_threadgroup);
   if (PART == 1 && SB != 4) {
-    // the shared expert alone at SB bits (the mixed-bit checkpoint's 8-bit shared experts; stream J): its input
-    // row r = m through MLX's one-row qmv_fast loop for that width (SV inputs, SLB weight bytes a lane a block),
-    // then the same SwiGLU tail. ACT [R][1][N].
+    // the shared expert alone at SB bits: row r = m by MLX's one-row qmv_fast loop at that width, then SwiGLU
     constexpr int SBLK = 32 * SV;
     constexpr int SKB = K * SB / 8;
     constexpr int KG1 = K / 64;
@@ -285,7 +284,7 @@ _MOE_DOWN = r"""
   const uint lane = thread_index_in_simdgroup;
   const int m = int(simdgroup_index_in_threadgroup);
   if (PART == 1 && SB != 4) {
-    // the shared expert's down projection alone at SB bits (stream J): row r = m, MLX's one-row qmv_fast loop
+    // the shared expert's down projection alone at SB bits: row r = m, MLX's one-row qmv_fast loop
     constexpr int SBLK = 32 * SV;
     constexpr int SKB = K * SB / 8;
     constexpr int KG1 = K / 64;
@@ -371,8 +370,7 @@ _MOE_COMBINE = r"""
 
 
 def moe_fits(moe: Any) -> bool:
-    """4-bit group-64 routed experts whose input dims are whole 512-value blocks, a shared expert (4-bit, or with
-    SPLIT_SHARED any width MLX runs through qmv_fast: 5 / 6 / 8-bit), top-k <= 32."""
+    """4-bit group-64 routed experts on 512-value blocks, a 4-bit or split 5 / 6 / 8-bit shared one, top-k <= 32."""
 
     if moe.shared is None:
         return False
@@ -429,7 +427,7 @@ def moe_rows(moe: Any, x: mx.array, *, rps: int = 4) -> mx.array:
         # the shared expert first, from x alone (its group inputs are placeholders it never reads)
         none = moe.__dict__.get("_no_group")
         if none is None:
-            none = moe._no_group = mx.zeros((1,), dtype=mx.int32)
+            none = moe._no_group = inputs.ints(())                      # padded: the group inputs stay device arrays
             mx.eval(none)
         ys = dn(gu(1, 1, 1, none, none, none), 1, 1, 1, none, none, none)
     logits = router_rows(x.astype(mx.float32), moe)                                   # [R, E] fp32
@@ -439,7 +437,8 @@ def moe_rows(moe: Any, x: mx.array, *, rps: int = 4) -> mx.array:
         inputs=[logits, moe.bias, moe.scale_arr],
         template=[("NE", experts), ("TOPK", top), ("MAXR", MAX_ROWS), ("NT", threads)],
         grid=(threads, 1, 1), threadgroup=(threads, 1, 1),
-        output_shapes=[(rows, top), (rows, top), (rows * top,), (rows * top, MAX_ROWS), (1,)],
+        output_shapes=[(rows, top), (rows, top), (max(rows * top, inputs.MIN_ELEMENTS),), (rows * top, MAX_ROWS),
+                       (inputs.MIN_ELEMENTS,)],
         output_dtypes=[mx.int32, mx.float32, mx.int32, mx.int32, mx.int32])
     if split:
         y = dn(gu(2, top, maxu, uids, umem, ucount), 2, top, maxu, uids, umem, ucount)

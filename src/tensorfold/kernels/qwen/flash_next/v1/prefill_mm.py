@@ -243,12 +243,26 @@ def gather_sorted(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, 
                 output_shapes=[(m, n)], output_dtypes=[mx.bfloat16])[0]
 
 
+# MLX's sorted gather kernel on M5 keeps row offsets in 16 bits (to 0.32.2): a call takes at most this many rows
+MAX_SORTED_ROWS = 32768
+
+
 def _experts(x: mx.array, layer: Any, idx: mx.array) -> mx.array:
     """A QuantizedSwitchLinear on rows sorted by expert: ``gather_sorted``, or MLX's sorted gather_qmm."""
 
     # MLX's sorted gather_qmm runs QMV below 4 routes an expert, and QMV sums in another order: keep its dispatch
     if x.shape[0] // int(layer.weight.shape[0]) >= 4 and tiles():
         return gather_sorted(x, layer.weight, layer.scales, layer.biases, idx)
+    return _mlx_experts(x, layer, idx)
+
+
+def _mlx_experts(x: mx.array, layer: Any, idx: mx.array) -> mx.array:
+    """MLX's sorted gather_qmm, in balanced slices of at most MAX_SORTED_ROWS rows (a fixed function of the rows)."""
+
+    rows = int(x.shape[0])
+    if rows > MAX_SORTED_ROWS:
+        size = -(-rows // -(-rows // MAX_SORTED_ROWS))
+        return mx.concatenate([_mlx_experts(x[a:a + size], layer, idx[a:a + size]) for a in range(0, rows, size)])
     return mx.gather_qmm(x[:, None], layer.weight, layer.scales, layer.biases, rhs_indices=idx, transpose=True,
                          group_size=32, bits=4, sorted_indices=True)[:, 0]
 

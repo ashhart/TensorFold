@@ -9,7 +9,7 @@ from typing import Any, Callable, Sequence
 
 # a stream is priced this many tokens past its length (KV caches grow in steps of 256 positions)
 _SLACK_TOKENS = 256
-# the longest prompt chunk a prefill runs at a time (the engine's step)
+# the longest prompt chunk a prefill runs at a time when the engine has no plan
 _CHUNK = 2048
 # positions a decode spare buffer grows by at a time (``alternating_kv.AlternatingKVCache.grow``)
 _SPARE_STEP = 2048
@@ -44,6 +44,7 @@ class StreamMemory:
     prefill_a: float
     prefill_b: float
     round_bytes: int
+    chunk: int = _CHUNK                                     # the engine's prefill chunk
 
     def stream_bytes(self, tokens: int) -> int:
         t = int(tokens) + _SLACK_TOKENS
@@ -55,7 +56,7 @@ class StreamMemory:
         return int(self.long + self.per_token * (t - self.long_tokens))
 
     def prefill_bytes(self, tokens: int) -> int:
-        chunk = min(_CHUNK, max(1, int(tokens)))
+        chunk = min(self.chunk, max(1, int(tokens)))
         return int(self.prefill_a * chunk + self.prefill_b * chunk * int(tokens))
 
 
@@ -112,13 +113,15 @@ def _kv_bytes(cache: list[Any]) -> tuple[float, float]:
     return kv, spare
 
 
-def measure(engine: Any, probe: tuple[int, int, int] = (64, _CHUNK + 64, 2 * _CHUNK + 64)) -> StreamMemory:
-    """Probe cache growth beyond bounded draft context and peak prefill memory, then account for the shared-round working set."""
+def measure(engine: Any, probe: tuple[int, int, int] | None = None) -> StreamMemory:
+    """Probe cache growth beyond bounded draft context and peak prefill memory on the engine's chunks, then account for the shared-round working set."""
 
     import mlx.core as mx
 
     from tensorfold.engine.family_common import cache_arrays
 
+    chunk = int(getattr(getattr(engine, "prefill_plan", None), "step", 0) or _CHUNK)
+    probe = probe or (64, chunk + 64, 2 * chunk + 64)
     sizes, peaks, held = [], [], []
     # Replace retained forward state before probing so measured growth belongs only to the probe caches.
     mx.eval(*cache_arrays(engine.prefill_prefix([1000 + i for i in range(probe[0])], cache=None, cached_tokens=0)))
@@ -139,12 +142,12 @@ def measure(engine: Any, probe: tuple[int, int, int] = (64, _CHUNK + 64, 2 * _CH
     per_token = max((s3 - s2) / (n3 - n2), kv + spare)
     s1, s2 = s1 + spare * _SPARE_STEP, s2 + spare * _SPARE_STEP
     # Fit t = a c + b c L for c-row chunks at context length L; both probes finish with full chunks.
-    b = max(0.0, (t3 - t2) / (_CHUNK * (n3 - n2)))
-    a = max(0.0, t2 / _CHUNK - b * (n2 - 64))
+    b = max(0.0, (t3 - t2) / (chunk * (n3 - n2)))
+    a = max(0.0, t2 / chunk - b * (n2 - 64))
     del held
     mx.clear_cache()
     round_bytes = int(getattr(engine, "round_working_set", lambda: 0)())
-    return StreamMemory(n1, s1, n2, max(s1, s2), per_token, a, b, round_bytes)
+    return StreamMemory(n1, s1, n2, max(s1, s2), per_token, a, b, round_bytes, chunk)
 
 
 __all__ = ["Admission", "StreamMemory", "measure", "ram_bytes", "used_elsewhere"]

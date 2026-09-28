@@ -92,6 +92,8 @@ def hidden(model: Any, tokens: np.ndarray, cache: list[Any]) -> mx.array:
     h = mx.tile(h, (1, streams))                                        # [L, S*D]
     pending = None
     queued = None
+    depth = model.__dict__.get("prefill_queue", QUEUE_LAYERS)          # 1 where memory is tight
+    states: list[mx.array] = []
     for i, (layer, c) in enumerate(zip(model.layers, cache)):
         entry = fused.layers[i]
         if "ple" in layer:
@@ -104,8 +106,10 @@ def hidden(model: Any, tokens: np.ndarray, cache: list[Any]) -> mx.array:
         branch = mixer(mixed[None], c)[0]
         h, mixed, inj2 = hyper_connection(entry["mlp_hc"], h, (branch, inj), streams=streams, eps=eps)
         pending = (layer.mlp(mixed[None])[0], inj2)
-        if QUEUE_LAYERS and (i + 1) % QUEUE_LAYERS == 0:
-            step = (h, *pending)
+        states += c.state                   # evaluated with its layer, so the chunk's inputs they read go with it
+        if depth and (i + 1) % depth == 0:
+            step = (h, *pending, *states)
+            states = []
             mx.async_eval(*step)
             if queued is not None:
                 mx.eval(*queued)

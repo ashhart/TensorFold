@@ -72,6 +72,10 @@ def build_parser() -> argparse.ArgumentParser:
                             "auto (Mac: up to 8, each started only while the projected memory fits 70%% of RAM; "
                             "CUDA: one at a time, the others waiting their turn)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
+    speed.add_argument("--ple-on-ssd", action="store_true",
+                       help="Flash Next: read the n-gram (PLE) tables from the checkpoint on SSD at each lookup "
+                            "instead of holding them in memory. A trade: a few percent of decode speed for about "
+                            "40 GiB less at peak (the tables are 29.8 GiB); a 128 GB Mac needs it")
 
     speed.add_argument("--no-update-check", action="store_true",
                        help="don't ask GitHub whether a newer release exists (also TENSORFOLD_NO_UPDATE_CHECK=1)")
@@ -315,6 +319,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
+    if args.ple_on_ssd:
+        options["ple_on_ssd"] = True
     options["context"] = context if context is not None else args.context
     options["context_explicit"] = args.context is not None
     streams = 1 if str(args.parallel).strip().lower() == "auto" else _parallel(args.parallel)
@@ -374,6 +380,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         update.check_in_background()
     config_dir = _config_dir(args.model)
     family = families.detect(config_dir)
+    if args.ple_on_ssd and not hasattr(family.package, "ple_bytes"):
+        raise ValueError(f"--ple-on-ssd: {family.title} has no n-gram (PLE) tables to read from SSD")
     backend = _backend(args.backend, family)
     families.require_readable(family, families.read_config(config_dir), backend)
     _note_untested(family, args.model)
@@ -403,19 +411,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     import mlx.core as mx
 
-    from tensorfold.engine.memory import used_elsewhere
     from tensorfold.server.memory_budget import PROCESS_BYTES, configure_mlx, model_fraction
 
     fraction = model_fraction(family.package)
-    elsewhere = used_elsewhere(0) if fraction > MEMORY_FRACTION else 0     # an allowance takes only what is left
-    memory_limit = configure_mlx(mx, int(float(args.mlx_cache_gib) * 1024**3), fraction=fraction, elsewhere=elsewhere)
+    memory_limit = configure_mlx(mx, int(float(args.mlx_cache_gib) * 1024**3), fraction=fraction)
     gib = 1024**3
-    note = (f" ({fraction:.0%} of RAM, this model's allowance, less {elsewhere / gib:.1f} GiB in use elsewhere)"
-            if fraction > MEMORY_FRACTION else "")
+    note = f" ({fraction:.0%} of RAM, this model's allowance)" if fraction > MEMORY_FRACTION else ""
     print(f"[tensorfold] memory budget {memory_limit / gib:.1f} GiB{note}: MLX's buffers up to "
           f"{(memory_limit - PROCESS_BYTES) / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB for the rest of the process",
           flush=True)
     weights = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
+    if args.ple_on_ssd:
+        weights -= family.package.ple_bytes(model_dir)      # read from disk at each lookup, never loaded
     if weights >= memory_limit - PROCESS_BYTES:
         raise ValueError(f"{family.title}'s weights ({weights / gib:.1f} GiB) do not fit this server's "
                          f"{memory_limit / gib:.1f} GiB memory budget ({fraction:.0%} of RAM, or "
@@ -438,22 +445,37 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
                                "drafter_bits": args.drafter_bits, "parallel": parallel}
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
+    if args.ple_on_ssd:
+        options["ple_on_ssd"] = True
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type})", flush=True)
     model, tokenizer = family.package.load(model_dir, **options)
-    # prompt chunks start where replies begin too, so a follow-up resumes where its latest reply began
-    openers, assistant = message_markers(tokenizer)
-    plan = PrefillPlan(LaneEngine.prefill_step, openers, MIN_CHUNK, assistant)
+    engine_kwargs = dict(getattr(family.package, "engine_settings", lambda m: {})(model))
     if required_files:
         print(f"[tensorfold] Nemotron MTP head: "
               f"{'active' if not args.no_drafts and getattr(model, 'mtp', None) is not None else 'inactive'}",
               flush=True)
+    from tensorfold.engine import prefill_step
+    from tensorfold.server.memory_budget import PROCESS_BYTES
+    from tensorfold.server.prompt_memory import probe_tokens
+    from tensorfold.server.residency import unwire, wire_resident
+
+    getattr(model, "release_rounds", lambda: None)()       # load-time checks' rows go before the weights are wired
+    wired = wire_resident(mx, memory_limit - PROCESS_BYTES)
+    print(f"[tensorfold] {wired / 1024**3:.1f} GiB of weights kept resident", flush=True)
+    # prompt chunks start where replies begin too, so a follow-up resumes where its latest reply began
+    openers, assistant = message_markers(tokenizer)
+    steps = engine_kwargs.pop("prefill_steps", None) or (LaneEngine.prefill_step,)
+    step = prefill_step.choose(lambda grid: LaneEngine(model, prefill_plan=PrefillPlan(grid)), steps,
+                               memory_limit - PROCESS_BYTES, probe_tokens(tokenizer), context)
+    plan = PrefillPlan(step, openers, MIN_CHUNK, assistant)
+    print(f"[tensorfold] prompt chunks of up to {step:,} tokens, cut at replies {plan.min_chunk:,}+ tokens apart",
+          flush=True)
 
     from tensorfold.server.app import ChatApp
     from tensorfold.server.http import Server, make_handler
 
     engine_factory = functools.partial(LaneEngine, prefill_plan=plan)      # every family decodes through lanes
-    engine_kwargs = dict(getattr(family.package, "engine_settings", lambda m: {})(model))
     sampling = _generation_config(model_dir)
     for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k)):
         if value is not None:
@@ -523,6 +545,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     finally:
         server.server_close()
         app.close()        # the engine thread saves the newest conversations as it stops
+        unwire(mx)
     return 0
 
 

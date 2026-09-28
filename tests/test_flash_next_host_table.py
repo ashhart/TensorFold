@@ -44,10 +44,11 @@ def _checkpoint(tmp_path, counts):
     return shards
 
 
-def test_host_rows_give_the_gpu_tables_bits(tmp_path):
+@pytest.mark.parametrize("ssd", [False, True])
+def test_host_rows_give_the_gpu_tables_bits(tmp_path, ssd):
     counts = [37, 5, 64, 19, 3, 41, 28, 11, 50, 7, 1, 33, 20, 9, 16, 2]   # 16 shards: 2 a GPU table group
     shards = _checkpoint(tmp_path, counts)
-    table = host_table.from_checkpoint(tmp_path, "emb", len(counts))
+    table = host_table.from_checkpoint(tmp_path, "emb", len(counts), ssd=ssd)
     assert table.rows == sum(counts)
     ids = np.random.default_rng(1).integers(0, table.rows, (5, 16))
     starts = np.cumsum([0] + counts)
@@ -108,7 +109,8 @@ def test_flash_next_refuses_them_before_building(monkeypatch):
 
     fake = nn.Module()
     fake.layers = [_linear(256, 64, 8, 32)]
-    monkeypatch.setattr(q4, "load", lambda path: (fake, "tokenizer"))
+    seen = []
+    monkeypatch.setattr(q4, "load", lambda path, **k: seen.append(k) or (fake, "tokenizer"))
     monkeypatch.setattr(decode, "DENSE", "lane")
     monkeypatch.setattr(runtime, "FlashNext", lambda *a, **k: pytest.fail("built before refusing"))
     with pytest.raises(SystemExit, match="1 8-bit g32 linears"):
@@ -117,3 +119,5 @@ def test_flash_next_refuses_them_before_building(monkeypatch):
     monkeypatch.setattr(runtime, "FlashNext", lambda *a, **k: "built")
     monkeypatch.setattr(q4, "prefetch_ngrams", lambda model: None)
     assert runtime.load("unused", drafts=0) == ("built", "tokenizer")
+    assert runtime.load("unused", drafts=0, ple_on_ssd=True) == ("built", "tokenizer")
+    assert seen[-2:] == [{"ple_on_ssd": False}, {"ple_on_ssd": True}]

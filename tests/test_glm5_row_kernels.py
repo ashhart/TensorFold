@@ -84,7 +84,7 @@ def test_fallbacks_are_the_one_row_calls(cpu):
 def test_expert_group_lists_each_experts_picks(gpu):
     idx = mx.array([[5, 1, 9], [9, 2, 5]], dtype=mx.uint32)
     uids, umem, count = K.expert_group(idx, 40)
-    n = int(count.item())
+    n = int(count[0].item())                                     # the count is padded (kernels.inputs)
     assert n == 4
     assert uids[:n].tolist() == [1, 2, 5, 9]
     members = [[m for m in row if m >= 0] for row in umem[:n].tolist()]
@@ -240,6 +240,7 @@ def test_real_weights_long_context_windows_are_exact(gpu):
         assert _same(window, serial[:, :width]), width
 
 
+# -- a mixed-bit checkpoint's widths: 5-, 6- and 8-bit tensors through the row kernels ---------------------------
 def _qbits(n: int, k: int, bits: int, seed: int, scale: float = 0.05) -> linear.Q:
     mx.random.seed(seed)
     return linear.Q(*mx.quantize((scale * mx.random.normal((n, k))).astype(mx.bfloat16), group_size=64, bits=bits),
@@ -249,8 +250,7 @@ def _qbits(n: int, k: int, bits: int, seed: int, scale: float = 0.05) -> linear.
 @pytest.mark.parametrize("bits", [8, 6, 5])
 @pytest.mark.parametrize("shape", [(1024, 4096), (4096, 1536), (512, 2048), (32, 4096), (8, 512)])
 def test_qmv_rows_other_bits_give_mlx_one_row_bits(gpu, bits, shape):
-    """8 / 6 / 5-bit, group-64 weights at the abliterated checkpoint's shape classes (K a multiple of 512, N of 8):
-    every row of a 2-32-row window gets the bits MLX's one-row quantized matmul (qmv_fast at that width) gives it."""
+    """8-, 6- and 5-bit group-64 weights: every row of a 2-32-row window gets MLX's one-row qmv_fast bits."""
 
     n, k = shape
     q = _qbits(n, k, bits, seed=bits + n)
@@ -316,8 +316,7 @@ def _requant(q: linear.Q, bits: int) -> linear.Q:
 
 
 def test_moe_window_with_8bit_shared_expert_is_row_by_row(gpu, monkeypatch):
-    """The fused MoE (SPLIT_SHARED) with the shared expert at 8 bits, as the abliterated checkpoint stores it: a
-    window gives every row the bits the row-by-row block (MLX's one-row calls) gives it."""
+    """The fused MoE with an 8-bit shared expert gives every row of a window the row-by-row block's bits."""
 
     from tensorfold.kernels.glm.flash.v1 import moe as F
 
@@ -341,8 +340,7 @@ def _rows_part(gate_up: linear.Q, half: int) -> linear.Q:
 
 
 def test_kda_rows_with_8bit_f_b_g_b_is_row_by_row(gpu, tmp_path, monkeypatch):
-    """kda.py's fused step with f_b / g_b at 8 bits (28 of the abliterated checkpoint's 34 KDA layers): the kernel's
-    rows equal kda_rows_ops (one row at a time, MLX's one-row qmv_quad for the 8-bit maps)."""
+    """The fused KDA step with 8-bit f_b / g_b: a window equals its rows one at a time, and y equals the ops path's."""
 
     from glm5_fakes import write_checkpoint
     from tensorfold.kernels.glm.flash.v1 import kda as KDA_K
@@ -356,9 +354,7 @@ def test_kda_rows_with_8bit_f_b_g_b_is_row_by_row(gpu, tmp_path, monkeypatch):
     model = weights.load_backbone(path)
     kda = model.layers[0].attn
     kda.f_b, kda.g_b = _requant(kda.f_b, 8), _requant(kda.g_b, 8)
-    assert not KDA_K.fits(kda)                       # opt-in (TF_GLM5_KDA_BITS8): it moves the serial reference
-    monkeypatch.setenv("TF_GLM5_KDA_BITS8", "1")
-    assert KDA_K.fits(kda)
+    assert KDA_K.fits(kda)                           # the fused step takes 8-bit f_b / g_b too
     for rows in (1, 2, 3, 5, 8, 16):
         mx.random.seed(rows)
         proj = (0.5 * mx.random.normal((rows, kda.in_proj.outs))).astype(mx.bfloat16)
@@ -371,8 +367,7 @@ def test_kda_rows_with_8bit_f_b_g_b_is_row_by_row(gpu, tmp_path, monkeypatch):
             yr, s1, c1 = KDA_K.kda_rows(kda, mx.contiguous(proj[r:r + 1]), c1, s1)
             ys.append(yr)
         assert _same(y, mx.concatenate(ys)) and _same(st, s1) and _same(cs, c1), rows
-        # and against the ops path: y equal; the fp32 state may differ in its last bits (reported, not asserted,
-        # the same as the 4-bit kernel: this kernel is the reference where it runs)
+        # y equals the ops path's; the fp32 state may differ in its last bits (printed: the kernel is the decode path)
         y2, st2, cs2 = KDA_K.kda_rows_ops(kda, proj, conv, state)
         assert _same(y, y2) and _same(cs, cs2), rows
         if not _same(st, st2):

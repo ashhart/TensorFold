@@ -9,8 +9,6 @@ from typing import Any, Mapping, Sequence
 
 GIB = 1024**3
 MEMORY_FRACTION = 0.70
-# a family's larger allowance counts only memory the rest of the machine leaves, keeping this share of RAM free
-FREE_FLOOR = 0.08
 LIMIT_ENV = "TENSORFOLD_MEMORY_LIMIT_GB"
 # the process's memory outside MLX's buffers and Metal's late returns
 PROCESS_BYTES = 3 * GIB
@@ -47,15 +45,12 @@ def model_fraction(package: Any, ram: int | None = None) -> float:
     return float(allowance) if allowance else MEMORY_FRACTION
 
 
-def memory_limit_bytes(mx: Any, *, fraction: float = MEMORY_FRACTION, elsewhere: int = 0,
+def memory_limit_bytes(mx: Any, *, fraction: float = MEMORY_FRACTION,
                        environ: Mapping[str, str] | None = None, physical_bytes: int | None = None) -> int:
     ram = physical_memory_bytes() if physical_bytes is None else int(physical_bytes)
     if ram <= 0:
         raise ValueError("physical memory must be positive")
     limit = int(fraction * ram)
-    if fraction > MEMORY_FRACTION:
-        room = ram - int(elsewhere) - int(FREE_FLOOR * ram)
-        limit = max(int(MEMORY_FRACTION * ram), min(limit, room))
     device_info = getattr(mx, "device_info", None)
     if device_info is None:
         device_info = getattr(getattr(mx, "metal", None), "device_info", None)

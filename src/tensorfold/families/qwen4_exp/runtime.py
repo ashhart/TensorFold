@@ -8,7 +8,7 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
-from tensorfold.families.qwen4_exp.model import AttentionCache, select_by_kernels
+from tensorfold.families.qwen4_exp.model import AttentionCache, _write_back, select_by_kernels
 
 
 class MTPCache(AttentionCache):
@@ -117,6 +117,35 @@ class FlashNext:
             raise RuntimeError("Flash Next's prefill arithmetic changed after the snapshot key was fixed: reload")
         return key
 
+    def release_rounds(self) -> None:
+        """Drop the last forward's per-row states and streams (no stream keeps rows of it; the next call sets them)."""
+
+        if self.fused is not None:
+            self.fused.row_states = {}
+            self.fused.last_streams = None
+            self.fused._last_heads = []
+        self._streams = None
+
+    def prefetch_prompt(self, tokens: Any, begin: int, end: int) -> None:
+        """Start reading the host n-gram rows prompt chunk [begin, end) will look up (tables on the host only)."""
+
+        for layer in self.model.layers:
+            emb = layer.ple.ple_embedding if "ple" in layer else None
+            read_ahead = getattr(getattr(emb, "host", None), "read_ahead", None)
+            if read_ahead is None:
+                continue
+            before = [emb.eos] * emb.context + [int(t) for t in tokens[max(0, begin - emb.context):begin]]
+            history = np.array([before[len(before) - emb.context:]], dtype=np.int64)
+            read_ahead(emb.ids(history, np.array([[int(t) for t in tokens[begin:end]]], dtype=np.int64)))
+
+    def tighten_prefill(self) -> bool:
+        """Queue a prompt chunk one layer at a time (about half its working memory, the same bits); False if it does."""
+
+        if self.model.__dict__.get("prefill_queue") == 1:
+            return False
+        self.model.__dict__["prefill_queue"] = 1
+        return True
+
     def resolve_prefill_identity(self) -> None:
         """Fix the actual matmul route before snapshot keying; its required self-check belongs to startup."""
 
@@ -168,7 +197,8 @@ class FlashNext:
 
         return replace(self.args, num_hidden_layers=1, layer_types=["sparse_attention"], ple_layer_ids=[])
 
-    def _mtp_step(self, tokens: Any, streams: mx.array, mtp_cache: MTPCache) -> tuple[mx.array, mx.array]:
+    def _mtp_step(self, tokens: Any, streams: mx.array, mtp_cache: MTPCache,
+                  last_only: bool = False) -> tuple[mx.array, mx.array]:
         """Run MTP on next tokens and residual streams, using reference modules for prompts and fused kernels for decode."""
 
         head = self.mtp
@@ -192,8 +222,12 @@ class FlashNext:
         e = head.fc_embedding(head.pre_fc_norm_embedding(emb))
         hs = head.fc_hidden(head.pre_fc_norm_hidden(streams).reshape(rows, head.streams, dims))
         x = (e[:, None, :] + hs).reshape(rows, wide)
-        x = head.layers[0](x[None], None, mtp_cache)
-        return head.hyper_connection_mixer(x), x[0]
+        layer = head.layers[0]
+        if not last_only:
+            x = layer(x[None], None, mtp_cache)
+            return head.hyper_connection_mixer(x), x[0]
+        h = last_row_layer(layer, x[None], mtp_cache)
+        return head.hyper_connection_mixer(h), h[0]
 
     def _draft_draw(self, mixed: mx.array, sampling: Any, positions: Any) -> mx.array:
         """Draw lazy uint32 drafts [n] with the target's keyed rule over the cut head's ids or the whole vocabulary."""
@@ -216,7 +250,7 @@ class FlashNext:
         if mtp_cache.drafted:
             mtp_cache.trim(mtp_cache.drafted, self.args.indexer_compress_ratio)
             mtp_cache.drafted = 0
-        mixed, out = self._mtp_step(tokens, streams, mtp_cache)
+        mixed, out = self._mtp_step(tokens, streams, mtp_cache, last_only=True)
         return mixed[:, -1:], out[-1:]
 
     def draft(self, cache: list[Any], streams: mx.array, tokens: list[int], position: int, sampling: Any,
@@ -473,7 +507,16 @@ class FlashNext:
         return True
 
 
-def load(model_dir: Path, *, drafts: int | None = None) -> tuple[FlashNext, Any]:
+def last_row_layer(layer: Any, x: mx.array, cache: Any) -> mx.array:
+    """``layer`` on rows ``x`` [1, R, W]: every row enters its attention cache, only the last row is carried on."""
+
+    mixed, inject = layer.attn_hyper_connection(x)
+    h = _write_back(x[:, -1:], layer.self_attn(mixed, cache)[:, -1:], inject[:, -1:])
+    mixed, inject = layer.mlp_hyper_connection(h)
+    return _write_back(h, layer.mlp(mixed), inject)
+
+
+def load(model_dir: Path, *, drafts: int | None = None, ple_on_ssd: bool = False) -> tuple[FlashNext, Any]:
     """Load with an MTP draft cap from ``drafts`` or TF_FLASH_MTP, defaulting to 3; zero disables drafts."""
 
     import os
@@ -482,7 +525,7 @@ def load(model_dir: Path, *, drafts: int | None = None) -> tuple[FlashNext, Any]
     from tensorfold.families.qwen4_exp import model as q4
     from tensorfold.families.qwen4_exp import mtp as mtp_module
 
-    model, tokenizer = q4.load(Path(model_dir))
+    model, tokenizer = q4.load(Path(model_dir), ple_on_ssd=ple_on_ssd)
     drafts = int(os.environ.get("TF_FLASH_MTP", "3")) if drafts is None else int(drafts)
     head = mtp_module.load(Path(model_dir), model.args) if drafts > 0 and model.__dict__.get("fused") else None
     missed = decode.unreadable(model, head) if decode.DENSE == "lane" else {}   # simd_qmm checks a shape on first use

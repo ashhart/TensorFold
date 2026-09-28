@@ -20,7 +20,7 @@ class FlashNextEngine:
     def __init__(self, model_dir: Path, *, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  draft_vocab: str | int | None = "default", max_len: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
-                 prefetch: bool = True, graphs: bool = True, streams: int = 1) -> None:
+                 prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False) -> None:
         import torch
 
         from .decode import Engine
@@ -51,13 +51,14 @@ class FlashNextEngine:
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
         geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp)) if streams > 1 else
                     (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp)))
-        self.capacity_plan = admit(model_dir, max_len, context_explicit, torch, geometry, indexed_weights(tp, mtp),
-                                   rank=rank, world=tp, gather=gather)
+        self.capacity_plan = admit(model_dir, max_len, context_explicit, torch, geometry,
+                                   indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd), rank=rank, world=tp,
+                                   gather=gather)
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
             self._same_settings(torch, ids)
         w = load(model_dir, mtp=self.depth > 0, tp=(rank, 2) if tp == 2 else None,
-                 draft_vocab=draft_vocab if self.depth > 0 else None)
+                 draft_vocab=draft_vocab if self.depth > 0 else None, ple_on_ssd=ple_on_ssd)
         w.comm = self.comm
         if self.depth > 0 and w.mtp is None:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
@@ -79,7 +80,7 @@ class FlashNextEngine:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs)
         started = time.perf_counter()
         locked = False
-        if prefetch:                                  # the n-gram tables' pages, read now rather than by requests
+        if prefetch and not ple_on_ssd:               # the n-gram tables' pages, read now rather than by requests
             tables = {id(layer.ple.table): layer.ple.table for layer in w.layers if layer.ple is not None}
             size = sum(a.nbytes for t in tables.values() for a in t.words + t.scales + t.biases)
             # pinned pages are no longer reclaimable: lock only what the startup budget leaves room for
@@ -99,8 +100,9 @@ class FlashNextEngine:
         where = (f"{streams} streams of {self.context_window} prompt/reply tokens "
                  f"({self.multi.slot_bytes / 2**20:.0f} MiB a stream), eager" if self.concurrent else
                  f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
-        how = "locked in memory" if locked else "read"
-        print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}; n-gram tables {how} in {read_s:.1f}s; {captured} "
+        how = ("read from SSD at each lookup" if ple_on_ssd else
+               f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s")
+        print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}; n-gram tables {how}; {captured} "
               "decode graphs captured", flush=True)
 
     def _same_settings(self, torch, ids) -> None:

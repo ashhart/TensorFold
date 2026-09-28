@@ -7,6 +7,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels import inputs
 from tensorfold.kernels.glm.flash.v1 import widths as W
 
 # MLX's one-row 4-bit matvec a simdgroup lane (as Flash Next's qmv_rows, bit for bit), 16 inputs a 512 block
@@ -368,8 +369,7 @@ def qmv_rows_fits(weights: Any, rows: int) -> bool:
 
 
 def qmv_rows(x: mx.array, weights: Any, *, rows_per_simdgroup: int = 4) -> mx.array:
-    """x [R, K] (bf16) through 4-bit (or 5 / 6 / 8-bit, ``fast_shape``), group-64 weights: each row MLX's one-row
-    bits, weight reads shared."""
+    """x [R, K] (bf16) through group-64 weights (4-bit, or 5 / 6 / 8 by ``fast_shape``): one-row bits, reads shared."""
 
     rows, dims = x.shape
     n = int(weights.weight.shape[0])
@@ -397,8 +397,7 @@ def qmv_quad_rows_fits(weights: Any, rows: int) -> bool:
 
 
 def qmv_quad_rows(x: mx.array, weights: Any) -> mx.array:
-    """x [R, K] (bf16, K 64 or 128) through 4-bit or 8-bit, group-64 weights: each row the bits of MLX's one-row
-    quantized matmul (qmv_quad). Without Metal: one MLX call a row."""
+    """x [R, K] (K 64 or 128) through 4- or 8-bit group-64 weights with MLX's one-row qmv_quad bits; else by row."""
 
     rows, dims = x.shape
     if not metal():
@@ -425,7 +424,8 @@ def expert_group(idx: mx.array, experts: int) -> tuple[mx.array, mx.array, mx.ar
     return tuple(kernel(inputs=[mx.contiguous(idx.astype(mx.uint32))],
                         template=[("NE", experts), ("TOPK", top), ("MAXR", MAX_ROWS)],
                         grid=(threads, 1, 1), threadgroup=(threads, 1, 1),
-                        output_shapes=[(rows * top,), (rows * top, MAX_ROWS), (1,)],
+                        output_shapes=[(max(rows * top, inputs.MIN_ELEMENTS),), (rows * top, MAX_ROWS),
+                                       (inputs.MIN_ELEMENTS,)],
                         output_dtypes=[mx.int32, mx.int32, mx.int32]))
 
 

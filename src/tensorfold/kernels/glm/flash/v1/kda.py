@@ -9,10 +9,7 @@ import mlx.core as mx
 
 # MLX's sigmoid, transcribed (#2105): instantiated on the type the eager op used, with the precise exp.
 _HEADER = r"""
-// f_b / g_b (128 -> H*D) for one head's D outputs: MLX's one-row qmv_quad arithmetic at the weights' width (a quad of
-// lanes per output, PER inputs a lane, quad_sum by the caller). 4-bit: nibbles pre-scaled, bf16-chained input sums,
-// the 16-bit qdot (as it was). 8-bit (the mixed-bit abliterated checkpoint; stream J): float sums in order, a byte
-// per weight (qmv_quad_impl<T, 64, 8> of MLX 0.32.2's quantized.h).
+// f_b / g_b for one output: MLX 0.32.2's one-row qmv_quad at 4 or 8 bits (the caller does the quad_sum)
 template <int BITS, int PER>
 inline float quad_dot(device const bfloat* x, device const uint8_t* wb, float s, float bb);
 template <>
@@ -131,8 +128,7 @@ _SOURCE = r"""
 
   for (int r = 0; r < R; ++r) {
     device const bfloat* prow = P + (size_t)r * PS;
-    // ---- f_b / g_b (128 -> H*D, FB- / GB-bit, groups of 64) for this head's D outputs each: MLX's one-row qmv_quad
-    // (a quad of lanes per output, 32 inputs a lane, quad_sum), as kernels.qmv_quad_rows does.
+    // ---- f_b / g_b (128 -> H*D, FB- / GB-bit groups of 64): MLX's one-row qmv_quad, as kernels.qmv_quad_rows
     {
       constexpr int PER = D / 4;
       constexpr int KG = D / 64;
@@ -303,17 +299,10 @@ def _kernel() -> Any:
 
 
 def fits(kda: Any) -> bool:
-    """The kernel's shapes: head dim 128 (64 for the test checkpoint), 4- or 8-bit group-64 f_b / g_b with head-dim
-    inputs (MLX's qmv_quad widths), a stacked in-projection whose tail is f_a | g_a | b."""
-
-    import os
+    """The kernel's shapes: head dim 64 or 128, 4- or 8-bit group-64 f_b / g_b, the stacked in-projection's tail."""
 
     fb, gb = kda.f_b, kda.g_b
-    # 8-bit f_b / g_b (the abliterated checkpoint): the kernel can take them (stream J, 9/27), but on that checkpoint
-    # the layers run the ops path today, and this kernel is the ops path's function, not its bits (recurrent state /
-    # conv window differ in the last bits) — folding them moves the serial reference, so it is opt-in.
-    widths = (4, 8) if os.environ.get("TF_GLM5_KDA_BITS8", "0").strip().lower() in ("1", "true", "yes", "on") else (4,)
-    return (kda.dim in (64, 128) and all(q.bits in widths and q.group == 64 and q.ins == kda.dim for q in (fb, gb))
+    return (kda.dim in (64, 128) and all(q.bits in (4, 8) and q.group == 64 and q.ins == kda.dim for q in (fb, gb))
             and kda.cuts[2] == 3 * kda.width and kda.cuts[3] - kda.cuts[2] == kda.dim
             and kda.cuts[4] - kda.cuts[3] == kda.dim and kda.in_proj.outs - kda.cuts[4] == kda.heads)
 

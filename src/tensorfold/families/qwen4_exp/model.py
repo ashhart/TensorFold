@@ -105,7 +105,7 @@ class NGramEmbedding(nn.Module):
             self.shard_starts.append(self.shard_starts[-1] + count)
         self.dims = cfg.ple_embed_dim // self.heads
         self.shards = [nn.Embedding(count, self.dims) for count in shard_rows]
-        # the shards' rows on the host instead (``host_table.HostTable``: the checkpoint's memory map), set by load()
+        # the shards' rows on the host instead (HostTable's memory map or SSDTable's reads), set by load()
         self.host = None
         self.quant_group, self.quant_bits = cfg.group_size, cfg.bits
 
@@ -194,9 +194,7 @@ class PLELayer(nn.Module):
         normed = self.norm_conv(gated)
         tail = cache.ple_conv if cache.ple_conv is not None else mx.zeros((batch, self.tail, h.shape[-1]), h.dtype)
         conv_in = mx.concatenate([tail, normed], axis=1)
-        cache.ple_conv = conv_in[:, -self.tail:]
-        # what keeping only the first rows of this call needs: the history before it, its tokens, the conv window
-        cache.ple_rollback = (history, tokens.astype(np.int64), conv_in)
+        cache.ple_conv = mx.contiguous(conv_in[:, -self.tail:])    # a copy: a view would keep the chunk
         return gated + nn.silu(self.conv1d(conv_in))
 
 
@@ -329,10 +327,14 @@ def norms_stored_around_one(weights: dict[str, mx.array]) -> bool:
     return around_one
 
 
-def ngrams_on_host(model_dir: Path) -> bool:
-    """Keep n-gram tables memory-mapped above the GPU working-set threshold, with TF_NGRAM_HOST overriding the choice."""
+def ngrams_on_host(model_dir: Path, ssd: bool = False) -> bool:
+    """Host n-gram tables when read from SSD, else past the GPU working-set threshold (TF_NGRAM_HOST=0/1 overrides)."""
 
     flag = os.environ.get("TF_NGRAM_HOST", "")
+    if ssd:
+        if flag == "0":
+            raise ValueError("--ple-on-ssd reads the n-gram tables on the host: unset TF_NGRAM_HOST=0")
+        return True
     if flag in ("0", "1"):
         return flag == "1"
     size = sum(p.stat().st_size for p in Path(model_dir).glob("model*.safetensors"))
@@ -348,9 +350,10 @@ def prefetch_ngrams(model: Qwen4Exp) -> None:
             module.host.prefetch()
 
 
-def load(model_dir: Path, *, lazy: bool = False) -> tuple[Qwen4Exp, Any]:
+def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False) -> tuple[Qwen4Exp, Any]:
     from mlx_lm.utils import load_tokenizer
 
+    on_host = ngrams_on_host(model_dir, ple_on_ssd)
     config = json.loads((Path(model_dir) / "config.json").read_text())
     cfg = Config.from_dict(config)
     model = Qwen4Exp(cfg)
@@ -359,13 +362,13 @@ def load(model_dir: Path, *, lazy: bool = False) -> tuple[Qwen4Exp, Any]:
     for path in sorted(Path(model_dir).glob("model*.safetensors")):
         weights.update(mx.load(str(path), stream=mx.cpu))
     weights, extras = sanitize(weights)
-    if ngrams_on_host(model_dir):
+    if on_host:
         from tensorfold.families.qwen4_exp import host_table
 
         for path, emb in [(p, m) for p, m in model.named_modules() if isinstance(m, NGramEmbedding)]:
             emb.shards = []
-            emb.host = host_table.from_checkpoint(model_dir, f"language_model.{path}.ngram_embedding",
-                                                  len(emb.shard_starts) - 1)
+            emb.host = host_table.ReadAhead(host_table.from_checkpoint(
+                model_dir, f"language_model.{path}.ngram_embedding", len(emb.shard_starts) - 1, ssd=ple_on_ssd))
             if emb.host.rows != emb.shard_starts[-1]:
                 raise ValueError(f"{path}: n-gram tables hold {emb.host.rows} rows, expected {emb.shard_starts[-1]}")
         weights = {k: v for k, v in weights.items() if ".ple_embedding.shards." not in k}

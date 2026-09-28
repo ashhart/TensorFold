@@ -21,7 +21,13 @@ class FamilyPrefill:
         last = None
         feed = getattr(self.model, "prefill", None) or self.model.hidden
         self._fed_rows = 0
-        for begin, end in chunks:
+        chunks = list(chunks)
+        ahead = getattr(self.model, "prefetch_prompt", None)
+        if ahead is not None and chunks:
+            ahead(tokens, *chunks[0])
+        for n, (begin, end) in enumerate(chunks):
+            if ahead is not None and n + 1 < len(chunks):
+                ahead(tokens, *chunks[n + 1])                 # its host reads run while this chunk computes
             chunk = [int(t) for t in tokens[begin:end]]
             if self.prefill_guard is not None:
                 self.prefill_guard.before_chunk(cache, len(chunk))

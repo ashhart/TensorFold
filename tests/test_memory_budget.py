@@ -200,6 +200,9 @@ def _serve_to_app(monkeypatch, tmp_path, argv, capsys):
     core.set_memory_limit = lambda value: None
     core.device_info = lambda: {"max_recommended_working_set_size": 64 * GIB, "memory_size": 128 * GIB}
     core.__version__ = "0.0"
+    core.synchronize = core.clear_cache = lambda: None               # the weights' wiring after load
+    core.get_active_memory = lambda: 0
+    core.set_wired_limit = lambda value: 0
     mlx = ModuleType("mlx")
     mlx.core = core
     monkeypatch.setitem(sys.modules, "mlx", mlx)
@@ -325,17 +328,13 @@ def test_growth_is_reserved_for_entries_in_flight_not_a_second_copy_of_every_lay
     assert CacheMemory(10, 8, 256).growth_bytes(256) == 10 + 256 * 8    # a size reported without entries: all of it
 
 
-def test_a_family_allowance_sets_the_budget_less_what_else_is_loaded():
+def test_a_family_allowance_sets_the_budget():
     from tensorfold.server.memory_budget import model_fraction
 
     mx = SimpleNamespace(device_info=lambda: {"max_recommended_working_set_size": 240 * GIB})
     ram = 256 * GIB
     assert memory_limit_bytes(mx, environ={}, physical_bytes=ram) == int(0.70 * ram)
     assert memory_limit_bytes(mx, fraction=0.85, environ={}, physical_bytes=ram) == int(0.85 * ram)
-    # another model's memory comes out of the allowance, 8% of RAM stays free, and the default is the floor
-    trimmed = memory_limit_bytes(mx, fraction=0.85, elsewhere=40 * GIB, environ={}, physical_bytes=ram)
-    assert trimmed == ram - 40 * GIB - int(0.08 * ram)
-    assert memory_limit_bytes(mx, fraction=0.85, elsewhere=100 * GIB, environ={}, physical_bytes=ram) == int(0.70 * ram)
     assert model_fraction(SimpleNamespace(), ram) == 0.70
     assert model_fraction(SimpleNamespace(memory_fraction=lambda ram: 0.85 if ram <= 256 * GIB else None), ram) == 0.85
     assert model_fraction(SimpleNamespace(memory_fraction=lambda ram: 0.85 if ram <= 256 * GIB else None),
@@ -343,7 +342,6 @@ def test_a_family_allowance_sets_the_budget_less_what_else_is_loaded():
 
 
 def test_serve_applies_the_family_allowance_before_loading(monkeypatch, tmp_path):
-    from tensorfold.engine import memory
     from tensorfold.server import memory_budget
 
     calls = []
@@ -358,7 +356,6 @@ def test_serve_applies_the_family_allowance_before_loading(monkeypatch, tmp_path
     monkeypatch.delenv("TENSORFOLD_MEMORY_LIMIT_GB", raising=False)
     monkeypatch.setattr("faulthandler.register", lambda *args, **kwargs: None)
     monkeypatch.setattr(memory_budget, "physical_memory_bytes", lambda: 256 * GIB)
-    monkeypatch.setattr(memory, "used_elsewhere", lambda own: 10 * GIB)
     for name, value in (("_config_dir", lambda model: tmp_path), ("_model_context", lambda path: 262144),
                         ("_backend", lambda *args: "mlx"), ("_note_untested", lambda *args: None),
                         ("_drafter", lambda *args: "")):

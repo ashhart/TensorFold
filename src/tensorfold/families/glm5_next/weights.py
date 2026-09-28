@@ -18,9 +18,7 @@ from tensorfold.families.glm5_next.model import GLM5, HC, Layer
 
 
 class Weights:
-    """The checkpoint's language-model tensors by name (``layers.N....``, ``lm_head``, ``embed_tokens``, ``norm``),
-    read shard by shard as they are asked for. Names of either on-disk layout (``layouts``) resolve to the same
-    short names; ``mtp_layer`` is the index the MTP layer takes (``num_hidden_layers``)."""
+    """The language model's tensors by short name in either layout (``layouts``), read shard by shard when asked."""
 
     def __init__(self, model_dir: Path, mtp_layer: int | None = None) -> None:
         index = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
@@ -32,7 +30,8 @@ class Weights:
             short = self._short(name)
             if short is not None:
                 self.where[short] = shard
-        self.default, self.overrides = quant_formats(json.loads((model_dir / "config.json").read_text()))
+        self.default, stated = quant_formats(json.loads((model_dir / "config.json").read_text()))
+        self.overrides = {layouts.canonical(key, mtp_layer) or key: fmt for key, fmt in stated.items()}
         self._shard: tuple[str, dict[str, mx.array]] | None = None
         self._cache: dict[str, dict[str, mx.array]] = {}
 
@@ -75,10 +74,6 @@ class Weights:
         if self.has(f"{prefix}.scales"):
             return self.q(prefix)
         return Dense(self.get(f"{prefix}.weight"))
-
-
-def _short(name: str) -> str | None:
-    return layouts.canonical(name)
 
 
 def _materialize(*arrays: Any) -> None:

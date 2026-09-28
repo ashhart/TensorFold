@@ -124,10 +124,10 @@ def test_policies_and_the_request_header():
         assert (parts[2] << 62) | (parts[1] << 31) | parts[0] == seed
 
 
-def test_family_is_cuda_only_and_needs_two_ranks(tmp_path):
+def test_family_has_a_mac_engine_and_cuda_needs_two_ranks(tmp_path):
     from tensorfold.families import glm5_next
 
-    assert glm5_next.MODEL_TYPES == ("glm5_next",) and not hasattr(glm5_next, "load")
+    assert glm5_next.MODEL_TYPES == ("glm5_next",) and callable(glm5_next.load)
     assert glm5_next.CUDA_APP.__name__ == "GlmApp"
     with pytest.raises(ValueError, match="two GPUs"):
         glm5_next.cuda_engine(tmp_path, tp=1)
@@ -175,7 +175,7 @@ def test_requests_past_the_context_get_a_400_before_streaming(tmp_path):
 def test_check_accepts_mlx_4bit_and_mias_exl3_only(tmp_path):
     from tensorfold.families import glm5_next
 
-    assert glm5_next.QUANT_METHODS == {"cuda": ("mlx", "exl3")}
+    assert glm5_next.QUANT_METHODS == {"mlx": ("mlx",), "cuda": ("mlx", "exl3")}
     cases = {
         "mlx4": ({"quantization": {"bits": 4, "group_size": 64}}, True),
         "mlx8": ({"quantization": {"bits": 8, "group_size": 64}}, False),

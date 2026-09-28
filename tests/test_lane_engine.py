@@ -218,3 +218,55 @@ def test_sanitize_tree_truncates_and_drops_orphans() -> None:
     tokens, parents = sanitize_tree([9, 8, 7, 6], [-1, 2, 0, 1], budget=4)   # node 1's parent comes after it
     assert tokens == [9, 7] and parents == [-1, 0]                            # node 3 followed node 1 out
     assert sanitize_tree([9, 8, 7], [1, 0, 5], budget=3) == ([], [])         # nothing valid survives
+
+
+def test_serving_never_releases_round_state_and_idle_release_waits_for_no_live_stream() -> None:
+    from tests.lane_fakes import FakeFamily
+
+    class Releasing(FakeFamily):
+        def __init__(self) -> None:
+            super().__init__()
+            self.released = 0
+
+        def release_rounds(self) -> None:
+            self.released += 1
+
+    model = Releasing()
+    engine = FakeEngine(model, max_rows=24, max_draft=6)
+    prompts, limits = [[1, 2, 3], [4, 5, 6, 7], [8, 9]], [40, 9, 31]       # the second finishes while others decode
+    streams = [LaneStream(f"s{i}", prompts[i], limits[i], proposer=PatternProposer([3, 0, 6, 1])) for i in range(2)]
+    for stream in streams:
+        engine.add_stream(stream)
+    engine.step()
+    late = LaneStream("s2", prompts[2], limits[2], proposer=PatternProposer([6, 6, 1, 0, 3]))
+    engine.add_stream(late)
+    streams.append(late)
+    engine.release_rounds()                                              # a live stream: the model keeps its rows
+    assert model.released == 0
+    while engine.active_count:
+        engine.step()
+        assert model.released == 0
+    for stream, prompt, limit in zip(streams, prompts, limits):
+        assert stream.emitted == fake_serial(prompt, limit, set()), stream.stream_id
+    engine.release_rounds()                                              # idle: now it may drop them
+    assert model.released == 1
+
+
+def test_a_prompt_chunks_host_reads_start_one_chunk_ahead() -> None:
+    from tensorfold.engine.prefill_plan import PrefillPlan
+    from tests.lane_fakes import FakeFamily
+
+    calls: list[tuple] = []
+
+    class Family(FakeFamily):
+        def prefetch_prompt(self, tokens, begin, end):
+            calls.append(("ahead", begin, end))
+
+        def hidden(self, inputs, cache, parents=None):
+            calls.append(("forward", int(inputs.size)))
+            return super().hidden(inputs, cache, parents)
+
+    engine = LaneEngine(Family(), prefill_plan=PrefillPlan(4), max_rows=8, max_draft=2)
+    engine.prefill_prefix(list(range(1, 11)))
+    assert calls == [("ahead", 0, 4), ("ahead", 4, 8), ("forward", 4), ("ahead", 8, 10), ("forward", 4),
+                     ("forward", 2)]

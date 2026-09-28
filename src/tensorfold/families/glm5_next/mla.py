@@ -42,8 +42,7 @@ class MLA:
                         heads(kvb.biases, self.nope, per), bits=kvb.bits, group=kvb.group)
             self.wk_t = False
         else:
-            # the mlxlm layout's absorbed pair: embed_q [H, rank, nope] quantized along nope (kv_b's key half
-            # transposed), unembed_out [H, v, rank] as kv_b's value half; absorb = q @ embed_q^T (transpose True)
+            # mlx-lm's absorbed pair: embed_q [H, rank, nope] (kv_b's key half transposed), unembed_out [H, v, rank]
             self.wk, self.wv = w["embed_q"], w["unembed_out"]
             self.wk_t = True
         # indexer
@@ -273,8 +272,15 @@ class MLA:
         for c0 in range(0, rows, chunk):
             c1 = min(c0 + chunk, rows)
             c = c1 - c0
-            pos = mx.arange(start + c0, start + c1)                     # query positions
             last = start + c1                                           # keys this chunk may read: [0, last)
+            if last <= cfg.index_topk:
+                # every query reads its whole causal prefix: one causal attention over the latent, as decode attends
+                keys = cache.keys[:last][None, None]
+                o = mx.fast.scaled_dot_product_attention(ql_all[None, :, c0:c1], keys, keys, scale=self.scale,
+                                                         mask="causal")
+                outs.append(o[0].transpose(1, 0, 2))                    # [c, H, rank]
+                continue
+            pos = mx.arange(start + c0, start + c1)                     # query positions
             blocks = last // kp
             dense = pos + 1 <= cfg.index_topk                           # queries that read all their keys
             if last > cfg.index_topk:

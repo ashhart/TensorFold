@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from ..host_table import HostTable, read_header as _header
+from ..ssd_table import SSDTable
 from .ngram import NGram
 from tensorfold.cuda import experts as grouped
 
@@ -147,7 +148,7 @@ class MoEW:
 
 @dataclass
 class PLEW:
-    table: HostTable          # the 128 shards (host memory map)
+    table: HostTable | SSDTable   # the 128 shards: host memory map, or read from SSD at each lookup
     key: Q4                   # [S*D, ple_dim]
     value: Q4                 # [D, ple_dim]
     norm_key: torch.Tensor    # [S*D] fp32
@@ -328,7 +329,7 @@ def draft_token_ids(draft_vocab: int | str | None) -> np.ndarray | None:
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: tuple[int, int] | None = None,
-         draft_vocab: int | str | None = None) -> Weights:
+         draft_vocab: int | str | None = None, ple_on_ssd: bool = False) -> Weights:
     """Load rank ``tp``'s head, expert-width and vocabulary shares while replicating other weights; ``draft_vocab`` restricts draft scoring to default/file ids or ids below N, with None using all ids."""
 
     import time
@@ -431,7 +432,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                 headers[shard] = _header(model_dir / shard)
             h = headers[shard]
             files.append((model_dir / shard, h[key + ".weight"], h[key + ".scales"], h[key + ".biases"]))
-        table = HostTable(files)
+        table = SSDTable(files) if ple_on_ssd else HostTable(files)
         if table.rows != ngram.rows:
             raise ValueError(f"n-gram tables hold {table.rows} rows, expected {ngram.rows}")
         conv = raw(name + ".conv1d.weight").reshape(cfg.streams * cfg.hidden, cfg.ple_kernel).to(torch.bfloat16)

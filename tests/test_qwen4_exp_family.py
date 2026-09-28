@@ -213,3 +213,83 @@ def test_long_context_attention_in_query_parts(monkeypatch):
     fresh = run(prompt)
     resumed = run(prompt, cache=LaneEngine.copy_single_cache(cache), cached_tokens=24)
     assert resumed.emitted == fresh.emitted
+
+
+def test_prompt_chunks_offer_8192_with_tensor_units(monkeypatch):
+    from tensorfold.families import qwen3_5, qwen4_exp
+
+    model = q4.Qwen4Exp(q4.Config.from_dict({"text_config": TEXT}))
+    for units, steps in ((True, (8192, 4096, 2048)), (False, (4096, 2048))):
+        monkeypatch.setattr(qwen3_5, "tensor_units", lambda units=units: units)
+        settings = qwen4_exp.engine_settings(model)
+        assert settings["prefill_steps"] == steps and "min_chunk" not in settings
+
+
+def test_releasing_rounds_drops_the_last_forwards_rows():
+    from types import SimpleNamespace
+
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
+
+    fused = SimpleNamespace(row_states={0: [("conv", "ssm", 0)]}, last_streams="streams", _last_heads=["head"])
+    runtime = SimpleNamespace(fused=fused, _streams="streams")
+    FlashNext.release_rounds(runtime)
+    assert fused.row_states == {} and fused.last_streams is None and fused._last_heads == [] and runtime._streams is None
+
+
+def test_the_head_absorbs_every_prompt_row_into_its_cache_and_carries_only_the_last():
+    from tensorfold.families.qwen4_exp.runtime import last_row_layer
+
+    mx.random.seed(3)
+    model = q4.Qwen4Exp(q4.Config.from_dict({"text_config": TEXT}))
+    layer = next(layer for layer in model.layers if not layer.is_linear)
+    wide = model.args.hc_count * model.args.hidden_size
+    x = mx.random.normal((1, 24, wide))
+    full_cache, trimmed_cache = q4.AttentionCache(), q4.AttentionCache()
+    full = layer(x, None, full_cache)
+    trimmed = last_row_layer(layer, x, trimmed_cache)
+    for a, b in zip(full_cache.state, trimmed_cache.state):
+        assert bool(mx.array_equal(a, b).item())
+    assert trimmed.shape == (1, 1, wide)
+    assert np.allclose(np.array(full[:, -1:]), np.array(trimmed), atol=1e-4)
+
+
+def test_a_prompt_chunk_leaves_only_its_states_in_the_cache():
+    model = tiny()
+    tokens = (np.arange(1024, dtype=np.int64) % 90 + 6)[None]
+    cache = model.make_cache()
+    mx.synchronize()
+    mx.clear_cache()
+    before = mx.get_active_memory()
+    out = model.hidden(tokens, cache)
+    buffers = [a for c in cache for a in (
+        (c.keys, c.values, c.index_keys, c.pooled) if isinstance(c, q4.AttentionCache) else (c.conv, c.ssm, c.ple_conv))
+        if a is not None]
+    mx.eval(out, *buffers)
+    del out
+    model.__dict__.pop("last_streams")
+    mx.synchronize()
+    mx.clear_cache()
+    held = mx.get_active_memory() - before
+    # the chunk's conv inputs (~2.5 MB here) must not stay behind views of their last rows; buffers round to pages
+    assert held <= sum(a.nbytes + (16 << 10) for a in buffers) + (64 << 10)
+
+
+def test_the_prompt_read_ahead_asks_for_each_chunks_lookup_ids():
+    from types import SimpleNamespace
+
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
+
+    model = tiny()
+    emb = next(layer.ple.ple_embedding for layer in model.layers if "ple" in layer)
+    asked = []
+    emb.host = SimpleNamespace(read_ahead=asked.append)
+    tokens = [int(t) for t in np.arange(20) * 7 % 90 + 6]
+    tokens[9] = emb.eos                                      # an EOS inside the prompt resets the n-grams
+    chunks = [(0, 5), (5, 12), (12, 20)]
+    for begin, end in chunks:
+        FlashNext.prefetch_prompt(SimpleNamespace(model=model), tokens, begin, end)
+    history = np.full((1, emb.context), emb.eos, dtype=np.int64)       # as PLELayer carries it from chunk to chunk
+    for (begin, end), ids in zip(chunks, asked, strict=True):
+        chunk = np.array([tokens[begin:end]], dtype=np.int64)
+        assert np.array_equal(ids, emb.ids(history, chunk))
+        history = np.concatenate([history, chunk], axis=1)[:, -emb.context:]

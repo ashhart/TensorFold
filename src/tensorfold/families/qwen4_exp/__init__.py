@@ -41,17 +41,31 @@ def check(model_dir: Path) -> None:
               flush=True)
 
 
-def load(model_dir: Path, *, mtp_drafts: int | None = None, **_: Any) -> tuple[Any, Any]:
+def ple_bytes(model_dir: Path) -> int:
+    """Bytes of the checkpoint's n-gram (PLE) tables, which --ple-on-ssd leaves on disk."""
+
+    from tensorfold.families.qwen4_exp.host_table import read_header
+
+    return sum(entry["data_offsets"][1] - entry["data_offsets"][0]
+               for path in Path(model_dir).glob("model*.safetensors")
+               for name, entry in read_header(path).items() if ".ngram_embedding.shard_" in name)
+
+
+def load(model_dir: Path, *, mtp_drafts: int | None = None, ple_on_ssd: bool = False, **_: Any) -> tuple[Any, Any]:
     from tensorfold.families.qwen4_exp.runtime import load as load_runtime
 
-    return load_runtime(Path(model_dir), drafts=mtp_drafts if has_mtp(Path(model_dir)) else 0)
+    drafts = mtp_drafts if has_mtp(Path(model_dir)) else 0
+    return load_runtime(Path(model_dir), drafts=drafts, ple_on_ssd=ple_on_ssd)
 
 
 def engine_settings(model: Any) -> dict[str, Any]:
-    """Rows a round verifies at most: the widest window checked exact at load."""
+    """The widest exact window, prompt chunks the memory allows (8,192 where tensor units run MLX's gathers)."""
+
+    from tensorfold.families.qwen3_5 import tensor_units
 
     width = int(getattr(model, "exact_width", 1) or 1)
-    return {"max_rows": width, "max_draft": max(0, width - 1)}
+    steps = (8192, 4096, 2048) if tensor_units() else (4096, 2048)
+    return {"max_rows": width, "max_draft": max(0, width - 1), "prefill_steps": steps}
 
 
 def kernel_version(model: Any) -> str:
@@ -71,7 +85,7 @@ CUDA_QUANTIZATION = (4, 32)
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
-                context: int | None = None, **options: Any):
+                context: int | None = None, ple_on_ssd: bool = False, **options: Any):
     """The CUDA engine: MTP chains verified exactly on one GPU or two (``tp=2``; start rank 1 first)."""
 
     if drafter:
@@ -86,4 +100,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                          "head, or pass --no-drafts for the serial reference")
     return FlashNextEngine(Path(model_dir), depth=depth, max_len=context,
                            context_explicit=options.get("context_explicit"), tp=int(tp), rank=int(rank),
-                           master=master, port=int(master_port), streams=max(1, int(options.get("parallel") or 1)))
+                           master=master, port=int(master_port), streams=max(1, int(options.get("parallel") or 1)),
+                           ple_on_ssd=ple_on_ssd)

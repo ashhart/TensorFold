@@ -1,8 +1,4 @@
-"""The mlx-lm converted layout of GLM-5.3-Flash (``families/glm5_next/layouts.py``): the same tiny checkpoint written
-the way ``mlx_lm.convert`` / oMLX 0.6.4 write it (``attn_hc.*``, one fused ``conv1d``, ``forget_gate.*``, the
-absorbed ``embed_q`` / ``unembed_out`` pair, ``mtp.0.*`` with a bf16 ``eh_proj``, fp32 hyper-connection mixes and
-router, per-tensor 8 / 6 / 5-bit overrides, a vision tower) loads through the same loader, computes the same
-function as the vontra layout, and keeps exact multi-row decoding and drafting."""
+"""mlx-lm's converted layout of GLM-5.3-Flash: the tiny checkpoint written that way loads, matches and drafts."""
 
 from __future__ import annotations
 
@@ -20,8 +16,7 @@ from tensorfold.families.glm5_next import mtp as glm_mtp  # noqa: E402
 from tensorfold.families.glm5_next.runtime import GLMFlash  # noqa: E402
 
 N = TEXT["num_hidden_layers"]
-# tensors re-quantized at other bits (the grant-ai abliterated checkpoint's pattern: 8-bit attention and shared
-# experts in most layers, 5 / 6-bit in a few, 8-bit embeddings and head, 4-bit routed experts everywhere)
+# tensors re-quantized at other widths, as mixed conversions store them (routed experts stay 4-bit)
 OVERRIDES = {
     "language_model.model.layers.0.self_attn.q_proj": 8, "language_model.model.layers.0.self_attn.k_proj": 8,
     "language_model.model.layers.0.self_attn.v_proj": 8, "language_model.model.layers.0.self_attn.forget_gate.f_a_proj": 8,
@@ -53,8 +48,7 @@ def _requant(t: dict, prefix: str, bits: int) -> None:
 
 
 def to_mlxlm(vontra: dict) -> dict:
-    """The vontra fake's tensors in the mlx-lm converted layout (the conversion mlx-lm's sanitize performs, run
-    backwards from what it reads)."""
+    """The fake's tensors in mlx-lm's layout: the conversion mlx-lm's sanitize performs, run backwards."""
 
     c = TEXT
     h, nope = c["num_attention_heads"], c["qk_nope_head_dim"]
@@ -165,8 +159,7 @@ def pair(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def clean_pair(tmp_path_factory):
-    """The twin with only what the conversion forces: embed_q / unembed_out re-quantized, at 8 bits so the
-    re-quantization itself is nearly lossless (a layout mistake would show as a large difference)."""
+    """The twin with only embed_q / unembed_out re-quantized, at 8 bits: a layout mistake shows as a large error."""
 
     previous = mx.default_device()
     mx.set_default_device(mx.cpu)
@@ -233,8 +226,7 @@ def test_mlxlm_layout_loads_with_mixed_bits(pair):
     assert isinstance(model.layers[5].attn.x_proj, linear.Q) and not model.layers[5].attn.wk_t is False
     assert model.layers[3].mlp.shared.gate_up.bits == 8
     assert model.lm_head.bits == 8 and model.embed.bits == 8
-    # fp32 tensors holding bf16 values (the converted checkpoint's hc mixes and routers) go bf16 losslessly, so
-    # the packed bf16 kernels can take them on the real shapes; genuine fp32 values stay fp32
+    # fp32 tensors holding bf16 values go bf16 losslessly; genuine fp32 values stay fp32
     exact = mx.random.normal((24, 64)).astype(mx.bfloat16).astype(mx.float32)
     assert linear.bf16_if_exact(exact).dtype == mx.bfloat16
     assert linear.bf16_if_exact(exact + 1e-6).dtype == mx.float32
@@ -254,8 +246,7 @@ def _logits(model, ids: list[int]) -> tuple[np.ndarray, np.ndarray]:
 
 @pytest.mark.parametrize("length", [9, 40])   # 40 > index_topk (16): the sparse selection with pooled blocks
 def test_mlxlm_layout_computes_the_vontra_function(clean_pair, length):
-    """Same weights in both layouts (only the absorbed pair re-quantized, at 8 bits): the same logits to that
-    rounding, on the prefill and the decode path."""
+    """The same weights in both layouts give the same logits to the 8-bit pair's rounding, prompt and decode path."""
 
     vontra, mlxlm = clean_pair
     ids = tokens(length)
@@ -263,14 +254,12 @@ def test_mlxlm_layout_computes_the_vontra_function(clean_pair, length):
     ma, mb = _logits(weights.load_backbone(mlxlm), ids)
     for ref, got in ((va, ma), (vb, mb)):
         assert int(ref.argmax()) == int(got.argmax())
-        # measured on this fake: 0.25-0.375 of a 9.2 max logit from the 8-bit re-quantization along the other
-        # axis (the per-map check below bounds it at the layer); a transposed or misread map differs in whole
+        # the 8-bit pair's rounding moves logits a little; a transposed or misread map moves them whole
         assert np.max(np.abs(ref - got)) < 0.06 * np.max(np.abs(ref)) + 0.05, np.max(np.abs(ref - got))
 
 
 def test_absorbed_pair_is_kv_b_in_the_other_orientation(clean_pair):
-    """The MLA latent maps of both layouts agree to the 8-bit re-quantization: absorb (q -> latent) and unabsorb
-    (latent -> values), so embed_q is read transposed and unembed_out as stored."""
+    """Absorb and unabsorb agree across layouts: embed_q is read transposed, unembed_out as stored."""
 
     vontra, mlxlm = clean_pair
     a, b = weights.load_backbone(vontra).layers[3].attn, weights.load_backbone(mlxlm).layers[3].attn
@@ -292,8 +281,7 @@ def test_absorbed_pair_is_kv_b_in_the_other_orientation(clean_pair):
 
 @pytest.mark.parametrize("length", [9, 40])
 def test_mixed_bits_prefill_path_agrees_with_decode_path(pair, length):
-    """With 8 / 6 / 5-bit tensors beside 4-bit ones (QSplit stacks, per-row projections, a Dense head), the two
-    paths still compute the same function, and the choice matches the vontra twin's."""
+    """With 8-, 6- and 5-bit tensors beside 4-bit ones, prompt and decode paths agree and pick the twin's token."""
 
     vontra, mlxlm = pair
     ids = tokens(length)
@@ -332,3 +320,31 @@ def test_mlxlm_mtp_drafts_change_speed_only(pair):
     assert out[0][0].family_mtp and not out[1][0].family_mtp
     assert out[0][0].drafted > 0
     assert out[0][1].emitted == out[1][1].emitted
+
+
+@pytest.mark.parametrize("device", ["cpu", "gpu"])
+def test_mixed_bits_keep_every_rows_bits_in_windows_and_shared_rounds(pair, device):
+    """The mixed-bit twin: windows up to 16 rows and streams sharing rounds each keep their own call's bits."""
+
+    from test_glm5_next_family import _run_streams
+
+    from tensorfold.engine.exact_sampling import Sampling
+
+    if device == "gpu":
+        if not mx.metal.is_available():
+            pytest.skip("needs Metal")
+        mx.set_default_device(mx.gpu)
+    model = weights.load_backbone(pair[1])
+    runtime = GLMFlash(model, glm_mtp.load(model), drafts=3)
+    assert runtime.multi_row_exact, runtime.check_report
+    if device == "cpu":
+        # MLX's CPU rms_norm (fp32) gives a row other bits once a call holds 8 rows or more: CPU rounds stay under 8
+        runtime.exact_width = runtime.batch_rows = min(runtime.exact_width, 7)
+    if device == "gpu":                             # the row kernels' claim: every width and stream count on Metal
+        assert runtime.exact_width == 16 and runtime.streams_exact and runtime.max_streams > 1, runtime.check_report
+    specs = [(tokens(21, seed=4), 20, None, True), (tokens(9, seed=5), 14, Sampling(seed=3, temperature=0.8), True),
+             (tokens(33, seed=6), 17, None, False)]
+    alone, _ = _run_streams(runtime, specs, together=False)
+    shared, engine = _run_streams(runtime, specs, together=True)
+    assert shared == alone and engine.drafted > 0
+    assert engine._shared_rounds > 0 or not runtime.streams_exact

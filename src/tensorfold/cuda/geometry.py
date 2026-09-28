@@ -27,12 +27,12 @@ def linear_weights(name: str, info: dict) -> tuple[int, int]:
     return amount * (2 if "lm_head." in name else 1), 0
 
 
-def indexed_weights(world: int, mtp: bool):
+def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True):
     def transform(name: str, info: dict) -> tuple[int, int]:
         if "vision" in name or (not mtp and (name.startswith("mtp.") or ".mtp." in name)):
             return 0, 0
-        if ".ngram_embedding.shard_" in name:
-            return 0, size(info)
+        if ".ngram_embedding.shard_" in name:          # host pages when mapped; none when read from SSD
+            return 0, size(info) if mapped_tables else 0
         shape = list(info["shape"])
         if world > 1 and not info.get("split"):
             if ".switch_mlp." in name or ".shared_expert." in name:

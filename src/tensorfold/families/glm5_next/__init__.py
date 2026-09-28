@@ -17,8 +17,8 @@ KERNEL_VERSION = "v1"
 QUANT_METHODS = {"mlx": ("mlx",), "cuda": ("mlx", "exl3")}
 # the EXL3 variant the CUDA kernels read (4-bit trellis, the "mcg" codebook, routed experts only)
 EXL3_VARIANT = {"bits": 4, "codebook": "mcg", "scope": "glm53_routed_experts_only"}
-# MLX command buffers sized for ~1,200 kernels a token; no TF32, as the row kernels repeat MLX's fp32 matmuls
-MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000", "MLX_ENABLE_TF32": "0"}
+# buffers of 200 ops and 200 MB, so a prompt chunk's memory frees as it runs; no TF32: row kernels repeat fp32
+MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "200", "MLX_ENABLE_TF32": "0"}
 
 
 def check(model_dir: str | Path) -> None:
@@ -52,9 +52,7 @@ def check(model_dir: str | Path) -> None:
         if bad:
             raise ValueError(f"GLM-5.3-Flash's Mac engine reads MLX affine weights of 2 to 8 bits in groups of 32, 64 or "
                              f"128; this checkpoint stores {len(bad)} module(s) otherwise, {bad[0]} first. {OWN_MODEL_HELP}")
-        # per-tensor overrides (mlx-lm's mixed-bit conversions, e.g. grant-ai's abliterated conversion): the loader
-        # reads them; 8-, 6- and 5-bit tensors take their own row kernels (kernels.qmv_rows / expert_qmv at MLX's
-        # one-row bits for that width), the shared expert stays in the fused MoE
+        # a mixed-bit conversion's 5-, 6- and 8-bit tensors take row kernels at their width (widths.py), one-row bits
         base = quantization(config)[0]
         overrides = [k for k, v in quant_formats(config)[1].items() if v is not None and v[0] != base]
         if overrides:

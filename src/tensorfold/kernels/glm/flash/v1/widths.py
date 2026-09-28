@@ -4,13 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-# The same one-row loop for MLX's other affine widths (qmv_fast_impl of MLX 0.32.2's quantized.h for 5, 6 and 8
-# bits, as the mixed-bit abliterated checkpoint stores its attention, shared experts and head): per 32-lane block a
-# lane takes V inputs (8 for 8- and 6-bit, 16 for 5-bit) and LB weight bytes, sums the inputs the way load_vector
-# does (float adds of the bf16 values for 8-bit; bf16-chained sums of 4 / 8 for 6- / 5-bit, the inputs pre-scaled
-# for their bit positions) and multiplies against its packed bytes in qdot's order and expression shape. Which
-# widths MLX runs through qmv_fast: N % 8 == 0 and K % (32 V) == 0 (quantized.cpp: qmv_fast_k_alignment); the
-# callers check the same before using these.
+# MLX 0.32.2's qmv_fast_impl at 5, 6 and 8 bits: each lane's V inputs summed as load_vector sums them, qdot's order
 _HEADER_B = r"""
 inline float bfsum4(const device bfloat* x) {
   return float(bfloat(float(bfloat(float(bfloat(float(x[0]) + float(x[1]))) + float(x[2]))) + float(x[3])));
@@ -137,9 +131,7 @@ QFAST = {8: (8, 8), 6: (8, 6), 5: (16, 10)}
 QFAST_ALL = {4: (16, 8), **QFAST}          # 4-bit too (load16 / qdot16 as loadv<4, 16> / qdotv<4, 16>)
 
 _QMV_ROWS_B = r"""
-  // _QMV_ROWS for BITS-bit weights (5, 6, 8): simdgroup r = input row r, output rows RPS b .. RPS b + RPS - 1, MLX's
-  // one-row qmv_fast loop at that width (V inputs and LB weight bytes a lane a block, a group of 64 spans 64 / V
-  // lanes); the R simdgroups read the same weight rows once.
+  // _QMV_ROWS at BITS (5, 6, 8): simdgroup r takes input row r through MLX's one-row qmv_fast loop at that width
   const uint lane = thread_index_in_simdgroup;
   const int r = int(simdgroup_index_in_threadgroup);
   const int row0 = int(threadgroup_position_in_grid.y) * RPS;
@@ -169,8 +161,7 @@ _QMV_ROWS_B = r"""
 """
 
 _EXPERT_QMV_B = r"""
-  // _EXPERT_QMV for BITS-bit expert matrices [E, N, K] (5, 6, 8): the m-th pick of distinct expert u through MLX's
-  // one-row qmv_fast loop at that width (what affine_gather_qmv_fast runs for one row).
+  // _EXPERT_QMV at BITS (5, 6, 8): pick m of expert u through the one-row loop affine_gather_qmv_fast runs
   const uint lane = thread_index_in_simdgroup;
   const int m = int(simdgroup_index_in_threadgroup);
   const int u = int(threadgroup_position_in_grid.z);
@@ -204,8 +195,7 @@ _EXPERT_QMV_B = r"""
   }
 """
 
-# MLX's one-row 8-bit matvec for 64- / 128-input matrices (qmv_quad_impl at 8 bits: a quad of lanes per output row,
-# K / 4 inputs a lane, float sums in order, quad_sum), the window's rows in grid x, as _QMV_QUAD_ROWS does for 4-bit.
+# MLX's one-row 8-bit qmv_quad for 64- and 128-input matrices, a window's rows in grid x (as _QMV_QUAD_ROWS at 4 bits)
 _QMV_QUAD_ROWS_8 = r"""
   constexpr int QUADS = 8;
   constexpr int PER = K / 4;                       // inputs (and weight bytes) a lane
@@ -236,9 +226,7 @@ _QMV_QUAD_ROWS_8 = r"""
 """
 
 def fast_shape(weights: Any, n: int) -> bool:
-    """Whether MLX's one-row quantized matmul of these 5 / 6 / 8-bit, group-64 weights (n output rows) is its
-    qmv_fast kernel (quantized.cpp: N % 8 == 0 and K a whole number of 32 V blocks), the loop the row kernels
-    reproduce. K of 64 or 128 is qmv_quad territory (power-of-2 bits), not this."""
+    """Whether MLX runs these 5 / 6 / 8-bit group-64 weights through qmv_fast (N % 8, K whole blocks, not qmv_quad)."""
 
     bits = getattr(weights, "bits", None)
     if bits not in QFAST or weights.group != 64:

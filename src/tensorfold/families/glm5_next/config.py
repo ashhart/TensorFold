@@ -27,29 +27,14 @@ BITS = (2, 3, 4, 5, 6, 8)
 GROUPS = (32, 64, 128)
 
 
-def module_name(key: str) -> str:
-    """A config key or tensor name as the loader names modules (the language model's prefix dropped)."""
-
-    for prefix in ("model.language_model.", "language_model.model.", "language_model."):
-        if key.startswith(prefix):
-            return key[len(prefix):]
-    return key
-
-
 def quant_formats(config: dict[str, Any]) -> tuple[tuple[int, int, str], dict[str, tuple[int, int, str] | None]]:
-    """The checkpoint's (bits, group size, mode) and its per-module overrides (None: a module left unquantized)."""
+    """The checkpoint's (bits, group size, mode) and its per-module entries by config key (None: left unquantized)."""
 
-    block = config.get("quantization") or config.get("quantization_config") or {}
+    from tensorfold.families import _quantization_block, layer_quantization
+
+    block = _quantization_block(config) or {}
     default = (int(block.get("bits") or 0), int(block.get("group_size") or 0), str(block.get("mode") or "affine"))
-    overrides: dict[str, tuple[int, int, str] | None] = {}
-    for key, value in block.items():
-        if isinstance(value, dict):
-            overrides[module_name(key)] = (int(value.get("bits") or default[0]),
-                                           int(value.get("group_size") or default[1]),
-                                           str(value.get("mode") or default[2]))
-        elif value is False:
-            overrides[module_name(key)] = None
-    return default, overrides
+    return default, {**layer_quantization(config), **{key: None for key, value in block.items() if value is False}}
 
 
 def unreadable(fmt: tuple[int, int, str] | None) -> bool:

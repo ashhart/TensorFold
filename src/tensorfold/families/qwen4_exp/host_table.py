@@ -1,19 +1,24 @@
-"""Memory-map n-gram shards on the host for CUDA and for Metal checkpoints that exceed GPU memory, reading only requested rows."""
+"""Host n-gram shards for CUDA and for Metal past GPU memory: memory-mapped here, or read from disk by SSDTable."""
 
 from __future__ import annotations
 
 import json
+import os
+import struct
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+
+from tensorfold.families.qwen4_exp.ssd_table import SSDTable
+
+_PARTS = ("weight", "scales", "biases")
 
 
 class HostTable:
     """Keep n-gram shards memory-mapped on the host; gather copies only requested rows, never whole tables to the GPU."""
 
     def __init__(self, files: list[tuple[Path, dict, dict, dict]]) -> None:
-        import struct
-
         self.words, self.scales, self.biases, starts = [], [], [], [0]
         maps: dict = {}
         fidx, wbase, sbase, bbase = [], [], [], []
@@ -98,9 +103,42 @@ class HostTable:
         return time.time() - t0
 
 
-def _memmap(path: Path, entry: dict, dtype) -> np.ndarray:
-    import struct
+class ReadAhead:
+    """A host table whose rows for a coming lookup are read on a thread while the GPU works: the same bytes, sooner."""
 
+    depth = 2                           # lookups read ahead at most (the next prompt chunk, and the one after)
+
+    def __init__(self, table: Any) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        self.table = table
+        self._pool = ThreadPoolExecutor(1, thread_name_prefix="ngram-read-ahead")
+        self._ahead: dict[bytes, Any] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "table":
+            raise AttributeError(name)
+        return getattr(self.table, name)
+
+    def read_ahead(self, ids: np.ndarray) -> None:
+        """Start reading rows ``ids`` for a lookup of the same ids to take."""
+
+        key = _key(ids)
+        if key not in self._ahead:
+            while len(self._ahead) >= self.depth:
+                self._ahead.pop(next(iter(self._ahead)))
+            self._ahead[key] = self._pool.submit(self.table.gather, ids)
+
+    def gather(self, ids: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ahead = self._ahead.pop(_key(ids), None)
+        return ahead.result() if ahead is not None else self.table.gather(ids)
+
+
+def _key(ids: np.ndarray) -> bytes:
+    return np.ascontiguousarray(np.asarray(ids, dtype=np.int64).reshape(-1)).tobytes()
+
+
+def _memmap(path: Path, entry: dict, dtype) -> np.ndarray:
     with open(path, "rb") as f:
         header = struct.unpack("<Q", f.read(8))[0]
     begin, end = entry["data_offsets"]
@@ -109,22 +147,29 @@ def _memmap(path: Path, entry: dict, dtype) -> np.ndarray:
 
 
 def read_header(path: Path) -> dict:
-    import struct
+    """A safetensors file's JSON header, refusing a truncated or malformed one."""
 
     with open(path, "rb") as f:
-        n = struct.unpack("<Q", f.read(8))[0]
-        return json.loads(f.read(n))
+        head = f.read(8)
+        n = struct.unpack("<Q", head)[0] if len(head) == 8 else -1
+        if not 0 <= n <= min(100 << 20, os.fstat(f.fileno()).st_size - 8):
+            raise ValueError(f"{Path(path).name}: truncated or invalid safetensors header")
+        header = json.loads(f.read(n))
+    if not isinstance(header, dict):
+        raise ValueError(f"{Path(path).name}: the safetensors header is not a JSON object")
+    return header
 
 
-def from_checkpoint(model_dir: Path, name: str, count: int) -> HostTable:
-    """The table of shards ``{name}.shard_{i}``, i < count (each shard's words, scales and biases in one file)."""
+def from_checkpoint(model_dir: Path, name: str, count: int, *, ssd: bool = False) -> HostTable | SSDTable:
+    """Shards ``{name}.shard_{i}``, i < count, each in one file: memory-mapped, or with ``ssd`` read at each lookup."""
 
-    files, headers = [], {}
-    for path in sorted(Path(model_dir).glob("model*.safetensors")):
-        headers[path] = read_header(path)
+    headers = {path: read_header(path) for path in sorted(Path(model_dir).glob("model*.safetensors"))}
+    files = []
     for i in range(count):
         key = f"{name}.shard_{i}"
-        path = next(p for p, h in headers.items() if key + ".weight" in h)
-        h = headers[path]
-        files.append((path, h[key + ".weight"], h[key + ".scales"], h[key + ".biases"]))
-    return HostTable(files)
+        found = [(path, h) for path, h in headers.items() if any(f"{key}.{part}" in h for part in _PARTS)]
+        if len(found) != 1 or not all(f"{key}.{part}" in found[0][1] for part in _PARTS):
+            raise ValueError(f"{key}: expected its weight, scales and biases together in one checkpoint file")
+        path, h = found[0]
+        files.append((path, *(h[f"{key}.{part}"] for part in _PARTS)))
+    return SSDTable(files) if ssd else HostTable(files)
