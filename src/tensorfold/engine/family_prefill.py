@@ -62,6 +62,24 @@ class FamilyPrefill:
         prompt = stream.prompt_ids
         if not prompt:
             raise ValueError(f"{stream.stream_id}: empty prompt")
+        if stream.multimodal is not None:
+            if cache is not None or cached_tokens or checkpoints_at:
+                raise ValueError("image requests cannot resume token-only prompt caches")
+            work = self.model.make_vision_cache()
+            if self.prefill_guard is not None:
+                self.prefill_guard.before_chunk(work, len(prompt))
+            self._prefill_at = None
+            hidden = self.model.vision_prefill(stream.multimodal, work)
+            self._fed_rows = len(prompt)
+            self.prefill_chunks += 1
+            self._prefill_at = len(prompt)
+            first = self._family_first(stream, work, hidden[:, -1:, :], 0, len(prompt) - 1)
+            self._family_commit_first(
+                stream, int(first.item()) if hasattr(first, "item") else int(first)
+            )
+            if self.prefill_guard is not None:
+                self.prefill_guard.after_chunk(work, len(prompt))
+            return work
         chunks = self.prompt_chunks(prompt)
         work, start = self._family_start(cache, cached_tokens, chunks)
         cached_tokens = self._prefill_at = start

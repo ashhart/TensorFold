@@ -8,9 +8,20 @@ from tensorfold.server.errors import RequestError
 _MEDIA = ("image", "images", "image_url", "input_image", "audio", "input_audio", "video", "video_url")
 
 
-def validate_modalities(body: dict[str, Any]) -> None:
-    if any(body.get(k) for k in _MEDIA) or body.get("modalities") not in (None, ["text"]):
-        raise RequestError("this server accepts and produces text only; image, audio and video are unsupported")
+def validate_modalities(body: dict[str, Any], *, allow_images: bool = False) -> None:
+    if any(body.get(k) for k in _MEDIA):
+        raise RequestError("top-level image, audio and video inputs are unsupported")
+    modalities = body.get("modalities")
+    if modalities is None:
+        return
+    if (
+        not isinstance(modalities, list)
+        or not modalities
+        or any(modality != "text" for modality in modalities)
+    ):
+        raise RequestError(
+            "only text output is supported; image, audio and video output are unsupported"
+        )
 
 
 _PROBE = "tensorfold-late-system-probe"
@@ -28,12 +39,18 @@ def late_system_role(render: Callable[[list[dict[str, Any]]], Any]) -> str:
         return "user"
 
 
-def normalize_messages(messages: list[dict[str, Any]], *, late_system: str = "system") -> list[dict[str, Any]]:
+def normalize_messages(
+    messages: list[dict[str, Any]],
+    *,
+    late_system: str = "system",
+    allow_images: bool = False,
+) -> list[dict[str, Any]]:
     """Merge leading instructions as system text and retain later instructions as ``late_system`` so earlier conversation tokens stay unchanged."""
 
     if not isinstance(messages, list) or not messages:
         raise RequestError("messages must be a non-empty list")
     out, instructions = [], []
+    image_count = 0
     for message in messages:
         if not isinstance(message, dict):
             raise RequestError("each message must be an object")
@@ -45,14 +62,41 @@ def normalize_messages(messages: list[dict[str, Any]], *, late_system: str = "sy
         content = message.get("content")
         if isinstance(content, list):
             text = []
+            has_image = False
             for part in content:
-                if (not isinstance(part, dict) or part.get("type") != "text"
-                        or any(part.get(k) for k in _MEDIA)):
-                    raise RequestError("this server accepts text parts only; image, audio and video inputs are unsupported")
-                if not isinstance(part.get("text"), str):
-                    raise RequestError("a text content part must contain a text string")
-                text.append(part["text"])
-            content = "".join(text)
+                if not isinstance(part, dict):
+                    raise RequestError("message content parts must be objects")
+                part_type = part.get("type")
+                if part_type == "text" and not any(part.get(k) for k in _MEDIA):
+                    if not isinstance(part.get("text"), str):
+                        raise RequestError("a text content part must contain a text string")
+                    text.append(part["text"])
+                    continue
+                if part_type == "image_url":
+                    if not allow_images:
+                        raise RequestError(
+                            "this server accepts text parts only; image inputs are unsupported"
+                        )
+                    if role != "user":
+                        raise RequestError("image inputs are allowed only in user messages")
+                    image_spec = part.get("image_url")
+                    if not isinstance(image_spec, dict) or not isinstance(
+                        image_spec.get("url"), str
+                    ):
+                        raise RequestError("an image_url part must contain an image URL string")
+                    image_count += 1
+                    if image_count > 1:
+                        raise RequestError("only one image is supported per request")
+                    has_image = True
+                    continue
+                if part_type in ("audio", "input_audio", "video", "video_url"):
+                    prefix = "" if allow_images else "this server accepts text only; "
+                    raise RequestError(f"{prefix}audio and video inputs are unsupported")
+                raise RequestError(
+                    "message content may contain text and one image_url part only"
+                )
+            if not has_image:
+                content = "".join(text)
         elif content is None:
             content = ""
         elif not isinstance(content, str):

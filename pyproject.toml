@@ -25,6 +25,8 @@ classifiers = [
 dependencies = [
   "mlx>=0.32.2; sys_platform == 'darwin'",
   "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin'",
+  "mlx-vlm==0.7.3; sys_platform == 'darwin'",
+  "Pillow>=12,<13; sys_platform == 'darwin'",
   "numpy>=1.26",
   "huggingface-hub>=0.24",
   "tokenizers>=0.20; sys_platform != 'darwin'",

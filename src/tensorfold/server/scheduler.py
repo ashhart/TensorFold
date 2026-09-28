@@ -23,6 +23,7 @@ class ChatJob:
     prompt_ids: list[int]
     max_tokens: int
     temperature: float
+    multimodal: Any = None
     history_len: int = 0
     # Snapshot system-and-tools blocks for reuse across sessions; history boundaries already include session-specific text.
     shared_prefix_lens: tuple[int, ...] = ()
@@ -352,8 +353,17 @@ class Scheduler:
         if self.engine.active_count == 0:
             return True
         memory = self.prompt_memory
-        if memory is not None and not memory.would_fit(len(job.prompt_ids), int(job.max_tokens)):
-            return False
+        if memory is not None:
+            if job.multimodal is None:
+                fits = memory.would_fit(len(job.prompt_ids), int(job.max_tokens))
+            else:
+                fits = memory.would_fit(
+                    len(job.prompt_ids),
+                    int(job.max_tokens),
+                    extra_bytes=int(job.multimodal.reserved_bytes),
+                )
+            if not fits:
+                return False
         if self.admission is None:
             return True
         live = [(len(j.stream.context), len(j.prompt_ids) + int(j.max_tokens)) for j in self._jobs.values()
@@ -399,7 +409,12 @@ class Scheduler:
             job.cancellation.check()
             memory = self.prompt_memory
             if memory is not None:
-                memory.begin(len(job.prompt_ids), int(job.max_tokens), admit=self.checkpoints is None)
+                memory.begin(
+                    len(job.prompt_ids),
+                    int(job.max_tokens),
+                    admit=self.checkpoints is None,
+                    extra_bytes=int(getattr(job.multimodal, "reserved_bytes", 0) or 0),
+                )
             self.engine.prefill_guard = PrefillGuard(job.cancellation, memory)
             cache = None
             cached = 0
@@ -408,7 +423,7 @@ class Scheduler:
             # checkpoints sit at the prompt's chunk starts: a shared prefix is kept at the start at or before its end
             starts = self.engine.prompt_chunks(job.prompt_ids)
             shared_at = {starts.floor(n) for n in job.shared_prefix_lens} - {0}
-            if self.checkpoints is not None:
+            if self.checkpoints is not None and job.multimodal is None:
                 usable = lambda n: n in starts
                 self._read_disk_block(job.prompt_ids, usable)
                 entry = self.checkpoints.peek(job.prompt_ids, usable=usable)
@@ -432,10 +447,12 @@ class Scheduler:
                 stream_id=job.job_id,
                 prompt_ids=list(job.prompt_ids),
                 max_new_tokens=int(job.max_tokens),
+                multimodal=job.multimodal,
                 eos_ids=frozenset() if job.ignore_eos else self.eos_ids,
                 stop_check=job.stop_check,
                 proposer=proposer if job.drafts else None,
                 drafts=bool(job.drafts),
+                retain=job.multimodal is None,
                 sampling=job.sampling,
                 think_budget=int(job.think_budget),
                 think_close=tuple(job.think_close),
@@ -473,6 +490,9 @@ class Scheduler:
 
         stream = job.stream
         if stream is None:
+            return
+        if job.multimodal is not None:
+            stream.history_checkpoints = []
             return
         kept, stream.history_checkpoints = stream.history_checkpoints, []
         for tokens, snapshot in kept if self.checkpoints is not None else ():

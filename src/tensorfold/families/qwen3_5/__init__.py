@@ -60,6 +60,23 @@ def load_lane_model(model_dir: Path) -> tuple[Any, Any]:
         TextModel.sanitize = original  # type: ignore[method-assign]
 
 
+def load_vision_model(model_dir: Path, language_model: Any) -> tuple[Any, Any]:
+    """Load mlx-vlm lazily, retaining its MRoPE-aware language path for image requests."""
+
+    from mlx_vlm import load
+    import mlx.core as mx
+
+    model, processor = load(str(model_dir), lazy=True)
+    # Materialize lazy shard reads on the loading thread. MLX CPU streams are
+    # thread-local and the scheduler executes image prefill on its own thread.
+    mx.eval(model.parameters())
+    text_model = getattr(language_model, "language_model", language_model)
+    # mlx-vlm and mlx-lm currently expose different attention APIs. Text requests
+    # stay on TensorFold's mlx-lm kernels; image requests use mlx-vlm end to end.
+    model._tensorfold_language_model = text_model
+    return model, processor
+
+
 def install_row_decoder(model: Any) -> bool:
     """Install row-exact simd_qmm decoding without tensor units, returning False for unsupported weights."""
 
@@ -129,18 +146,26 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     why = refusal(read_config(model_dir), lanes)
     if why:
         raise SystemExit(f"[tensorfold] {TITLE} cannot run this checkpoint: {why}. Use {MODELS[0]}")
-    model, tokenizer = load_lane_model(Path(model_dir))
+    config = read_config(model_dir)
+    vision = bool(config.get("vision_config"))
+    language_model, tokenizer = load_lane_model(Path(model_dir))
+    model, processor = (
+        load_vision_model(Path(model_dir), language_model)
+        if vision
+        else (language_model, tokenizer)
+    )
+    language_model._tensorfold_lanes = bool(lanes)
     model._tensorfold_lanes = bool(lanes)
     if lanes:
-        missed = lane_qmm.uncovered(model)
+        missed = lane_qmm.uncovered(language_model)
         if missed:
             kinds = ", ".join(f"{n} {kind}" for kind, n in sorted(missed.items()))
             raise SystemExit(f"[tensorfold] {TITLE}: the lane kernels do not take this checkpoint's layers ({kinds}): "
                              f"MLX's kernels would give drafted rows other bits than one-row steps. Use {MODELS[0]}")
-        install_lane_kernels(model)
-    elif not install_row_decoder(model):
+        install_lane_kernels(language_model)
+    elif not install_row_decoder(language_model):
         raise SystemExit(f"[tensorfold] {TITLE}: the lane decoder without tensor units does not take these weights")
-    loaded = load_drafter(model, drafter, drafter_bits) if drafter else None
+    loaded = load_drafter(language_model, drafter, drafter_bits) if drafter else None
     if lanes:
         family = Qwen35Family(model, drafter=loaded, widest=WIDEST)
     else:
@@ -152,7 +177,12 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     decoder = "lane kernels" if lanes else "lane decoder without tensor units"
     print(f"[tensorfold] {decoder}: windows of up to {family.exact_width} rows reproduce one-row steps here "
           f"(ms by rows {timing})", flush=True)
-    return family, tokenizer
+    if vision:
+        from tensorfold.families.qwen3_5.vision import QwenVisionRuntime
+
+        family.vision = QwenVisionRuntime(model, processor)
+        return family, tokenizer
+    return family, processor
 
 
 def load_drafter(model: Any, drafter: str, drafter_bits: int = 4) -> Any:

@@ -82,7 +82,7 @@ class PromptMemory:
         self.profile: CacheMemory | None = None
         self.observed_work = 0
         self.workspace_profiled = False
-        self.prompt = self.reply = 0
+        self.prompt = self.reply = self.extra_bytes = 0
         self._memory_lock = RLock()
 
     def memory_snapshot(self, reset_peak: bool = False) -> dict[str, int]:
@@ -121,9 +121,12 @@ class PromptMemory:
             return True
         return False
 
-    def begin(self, prompt: int, reply: int, *, admit: bool = True) -> None:
+    def begin(
+        self, prompt: int, reply: int, *, admit: bool = True, extra_bytes: int = 0
+    ) -> None:
         with self._memory_lock:
             self.prompt, self.reply = int(prompt), int(reply)
+            self.extra_bytes = max(0, int(extra_bytes))
             self.runtime.reset_peak_memory()
             if self.profile is None and self.store is not None and self.store._entries:
                 self.observe_cache(self.store._entries[0].cache, workspace=False)
@@ -132,7 +135,7 @@ class PromptMemory:
 
     def end(self) -> None:
         with self._memory_lock:
-            self.prompt = self.reply = 0
+            self.prompt = self.reply = self.extra_bytes = 0
 
     def _work(self, tokens: int) -> int:
         if self.profile is None:
@@ -147,9 +150,15 @@ class PromptMemory:
         current = cache_nbytes(current_cache) if current_cache is not None else 0
         resident = max(0, self._used() - current)
         if self.profile is None:
-            return resident + int(extra_bytes) + self.bootstrap
+            return resident + self.extra_bytes + int(extra_bytes) + self.bootstrap
         tokens = int(prompt) + self.reply
-        return resident + int(extra_bytes) + self.profile.cache_bytes(tokens) + self._work(tokens)
+        return (
+            resident
+            + self.extra_bytes
+            + int(extra_bytes)
+            + self.profile.cache_bytes(tokens)
+            + self._work(tokens)
+        )
 
     def require(self, current_cache: Any = None, keep: Any = None) -> None:
         """Reclaim until the prompt fits, never evicting ``keep``; refuse when nothing is left to free."""
@@ -163,17 +172,21 @@ class PromptMemory:
                 return False
         return True
 
-    def would_fit(self, prompt: int, reply: int) -> bool:
+    def would_fit(self, prompt: int, reply: int, *, extra_bytes: int = 0) -> bool:
         """Whether a request would fit now once every retained prefix and freed buffer is released; no side effects."""
 
         with self._memory_lock:
-            saved = self.prompt, self.reply
-            self.prompt, self.reply = int(prompt), int(reply)
+            saved = self.prompt, self.reply, self.extra_bytes
+            self.prompt, self.reply, self.extra_bytes = (
+                int(prompt),
+                int(reply),
+                max(0, int(extra_bytes)),
+            )
             try:
                 freeable = int(self.runtime.get_cache_memory()) + (self.store.nbytes if self.store is not None else 0)
                 return self.projected(self.prompt) - freeable <= self.budget
             finally:
-                self.prompt, self.reply = saved
+                self.prompt, self.reply, self.extra_bytes = saved
 
     def fits_now(self) -> bool:
         """Whether the prompt fits beside every retained prefix, after releasing only freed MLX buffers."""

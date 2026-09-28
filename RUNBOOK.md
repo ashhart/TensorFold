@@ -47,6 +47,8 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
 Use the ID returned by `/v1/models` if the server was started without `--name local-model`.
 The client base URL is `http://127.0.0.1:8080/v1`. Reasoning can appear separately from the answer.
 See [API fields](docs/api.md) for streaming and tool calls.
+Qwen3.8-27B on MLX accepts one standard `image_url` part; see its
+[image example](docs/recipes/qwen3.8-27b.md#images-on-mlx). CUDA and other models remain text-only.
 
 <a id="dgx-spark"></a>
 

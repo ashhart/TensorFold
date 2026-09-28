@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import time
@@ -11,14 +12,28 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from tensorfold.server.tools import active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.request_options import parse_numbers
 from tensorfold.server.messages import normalize_messages, validate_modalities
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
+from tensorfold.server.images import image_url_from_messages, load_image_url
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
+_MAX_REQUEST_BYTES = 32 * 1024**2
+
+
+def _redact_request(value: Any) -> Any:
+    """Copy a request body while removing image payloads and remote URLs."""
+
+    if isinstance(value, list):
+        return [_redact_request(item) for item in value]
+    if isinstance(value, dict):
+        if value.get("type") == "image_url":
+            return {"type": "image_url", "image_url": {"url": "<redacted>"}}
+        return {key: _redact_request(item) for key, item in value.items()}
+    return value
 
 
 def _memory(reset_peak: bool, *, admission: Any = None) -> dict[str, int]:
@@ -143,18 +158,31 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return
 
             try:
-                length = int(self.headers.get("Content-Length", "0"))
+                if self.headers.get("Transfer-Encoding"):
+                    raise RequestError("transfer-encoded request bodies are unsupported")
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError as exc:
+                    raise RequestError("Content-Length must be an integer") from exc
+                if length < 0 or length > _MAX_REQUEST_BYTES:
+                    raise RequestError(
+                        f"request body must not exceed {_MAX_REQUEST_BYTES} bytes"
+                    )
                 body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
-                validate_modalities(body)
-                if _REQUEST_LOG and body.get("priority") != "background":   # batch jobs are not client traffic
-                    with open(_REQUEST_LOG, "a") as handle:
-                        handle.write(json.dumps(body) + "\n")
+                allow_images = bool(
+                    is_chat_completion and getattr(app, "accepts_images", False)
+                )
+                validate_modalities(body, allow_images=allow_images)
                 raw_kw: dict[str, Any] = {}
                 if is_chat_completion:
-                    messages = normalize_messages(body.get("messages"))
+                    messages = normalize_messages(
+                        body.get("messages"), allow_images=allow_images
+                    )
                     tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
                 elif isinstance(body.get("messages"), list) and body["messages"]:
-                    messages, tools = normalize_messages(body["messages"]), []    # a completion sent as a chat
+                    messages, tools = normalize_messages(
+                        body["messages"], allow_images=False
+                    ), []    # a completion sent as a chat
                 elif getattr(app, "accepts_raw_prompt", False):
                     # a text completion reads its prompt raw, as vLLM and mlx_lm do: no chat template, no think block
                     messages, tools = [], []
@@ -180,12 +208,58 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     sampling_fields["enable_thinking"] = bool(template_kwargs["enable_thinking"])
                     if sampling_fields["enable_thinking"] and sampling_fields.get("reasoning_effort") == "none":
                         sampling_fields.pop("reasoning_effort")
+                if _REQUEST_LOG and body.get("priority") != "background":
+                    with open(_REQUEST_LOG, "a") as handle:
+                        handle.write(json.dumps(_redact_request(body)) + "\n")
                 sampling_kw = ({"sampling": sampling_fields}
                                if getattr(app, "accepts_sampling", False) else {})
+                request_cancellation = None
                 if getattr(app, "accepts_cancellation", False):
-                    sampling_kw["cancellation"] = socket_cancellation(self.connection)
+                    request_cancellation = socket_cancellation(self.connection)
+                    sampling_kw["cancellation"] = request_cancellation
                 stream = bool(body.get("stream", False))
                 tool_policy = ToolCallPolicy(body)
+                image_url = image_url_from_messages(messages)
+                if image_url is not None:
+                    reserve = getattr(app, "reserve_image_slot", None)
+                    release_slot = None
+                    if callable(reserve):
+                        try:
+                            parameters = inspect.signature(reserve).parameters.values()
+                        except (TypeError, ValueError):
+                            parameters = ()
+                        accepts_cancellation = any(
+                            parameter.name == "cancellation"
+                            or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                            for parameter in parameters
+                        )
+                        release_slot = (
+                            reserve(cancellation=request_cancellation)
+                            if accepts_cancellation
+                            else reserve()
+                        )
+                    try:
+                        prepared_image = load_image_url(image_url)
+                    except BaseException:
+                        if release_slot is not None:
+                            release_slot()
+                        raise
+                    raw_kw["vision_prompt"] = app.prepare_image(
+                        messages,
+                        prepared_image,
+                        release_slot=release_slot,
+                        tools=tools or None,
+                        thinking=sampling_fields.get("enable_thinking"),
+                        reasoning_effort=sampling_fields.get("reasoning_effort"),
+                    )
+            except RequestCancelled:
+                return
+            except CapacityError as exc:
+                self._send_json(
+                    {"error": {"message": str(exc), "type": "server_capacity_error"}},
+                    status=503,
+                )
+                return
             except RequestError as exc:
                 self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
                 return
@@ -443,5 +517,9 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     self._send_json({"error": {"message": str(exc)}}, status=500)
                 except Exception:
                     pass
+            finally:
+                vision_prompt = raw_kw.get("vision_prompt")
+                if vision_prompt is not None and hasattr(vision_prompt, "release"):
+                    vision_prompt.release()
 
     return Handler

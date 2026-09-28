@@ -20,6 +20,12 @@ def _chain(rows: int) -> list[int]:
     return [-1, *range(rows - 1)]
 
 
+class FamilyCache(list):
+    """A cache list that may carry request-local multimodal position metadata."""
+
+    vision_state: dict[str, Any] | None = None
+
+
 class Qwen35Family:
     """Qwen3.8 dense on the lane kernels, as a family model."""
 
@@ -32,8 +38,19 @@ class Qwen35Family:
     def __init__(self, model: Any, *, drafter: Any = None, nodes: int = 15, widest: int = 32,
                  rows: bool = False) -> None:
         self.inner = model
-        language_model = getattr(model, "language_model", model)
+        language_model = getattr(
+            model, "_tensorfold_language_model", getattr(model, "language_model", model)
+        )
+        self.language_model = language_model
         self.core = language_model.model
+        self.vision_language = (
+            getattr(model, "language_model", None)
+            if hasattr(model, "_tensorfold_language_model")
+            else None
+        )
+        self.vision_core = (
+            self.vision_language.model if self.vision_language is not None else None
+        )
         args = getattr(language_model, "args", None)
         tied = args is not None and getattr(args, "tie_word_embeddings", False)
         self.lm_head = self.core.embed_tokens.as_linear if tied else language_model.lm_head
@@ -53,10 +70,15 @@ class Qwen35Family:
         self.exact_width, self.window_costs = self.check_windows(int(widest), int(self.batch_rows))
 
     def make_cache(self) -> list[Any]:
-        caches = list(self.inner.make_cache())
+        caches = FamilyCache(self.language_model.make_cache())
         if self.head_drafts is not None:
             caches.append(self.head_drafts.slot())
         return caches
+
+    def make_vision_cache(self) -> list[Any]:
+        if self.vision_language is None:
+            raise ValueError("this Qwen runtime has no MRoPE-aware language model")
+        return FamilyCache(self.vision_language.make_cache())
 
     def adopt_cache(self, cache: list[Any]) -> list[Any]:
         if self.head_drafts is not None and not (cache and isinstance(cache[-1], DraftSlot)):
@@ -76,6 +98,22 @@ class Qwen35Family:
 
         tokens, layers = _tokens(inputs), self._layers(cache)
         start, rows = self._position(layers), len(tokens)
+        state = getattr(cache, "vision_state", None)
+        if state is not None:
+            import mlx.core as mx
+
+            if parents is not None or rows != 1:
+                raise ValueError("image requests decode serially, one token per round")
+            positions = mx.full(
+                (3, 1, rows), start + int(state["rope_delta"]), dtype=mx.int32
+            )
+            hidden = self.vision_core(
+                mx.array([tokens], dtype=mx.uint32),
+                cache=layers,
+                position_ids=positions,
+            )
+            self._last = {id(cache): (None, rows, start, 0)}
+            return hidden
         tree = list(parents) if parents is not None else _chain(rows)
         if self.rows:
             from tensorfold.kernels.qwen.dense.v1 import row_forward
@@ -100,7 +138,40 @@ class Qwen35Family:
         self._last = {id(cache): (None, len(tokens), self._position(layers), 0)}
         return self.core(mx.array([tokens], dtype=mx.uint32), cache=layers)
 
+    def vision_prefill(self, prompt: Any, cache: list[Any]) -> Any:
+        """Encode one image, fuse its embeddings, and prefill with Qwen MRoPE."""
+
+        import mlx.core as mx
+
+        if not hasattr(self.inner, "get_input_embeddings"):
+            raise ValueError("this Qwen runtime has no vision tower")
+        model_inputs = {
+            key: value if isinstance(value, mx.array) else mx.array(value)
+            for key, value in prompt.model_inputs.items()
+        }
+        input_ids = model_inputs.pop("input_ids")
+        features = self.inner.get_input_embeddings(input_ids=input_ids, **model_inputs)
+        layers = self._layers(cache)
+        hidden = self.vision_core(
+            input_ids,
+            inputs_embeds=features.inputs_embeds,
+            cache=layers,
+            position_ids=features.position_ids,
+        )
+        rope_delta = int(features.rope_deltas.reshape(-1)[0].item())
+        cache.vision_state = {
+            "rope_delta": rope_delta,
+            "image_digest": prompt.image_digest,
+        }
+        self._last = {id(cache): (None, int(input_ids.shape[-1]), 0, 0)}
+        from tensorfold.engine.family_common import cache_arrays
+
+        mx.eval(hidden, *cache_arrays(layers))
+        return hidden
+
     def _commit(self, layers: list[Any], record: Any, path: list[int], rows: int, start: int) -> None:
+        if record is None:
+            return
         if self.rows:
             from tensorfold.kernels.qwen.dense.v1 import row_forward
 
@@ -125,7 +196,20 @@ class Qwen35Family:
         layers = [self._layers(c) for c in caches]
         starts = [self._position(c) for c in layers]
         trees = [list(p) for p in parents] if parents is not None else [_chain(len(t)) for t in tokens]
-        if self.rows:
+        if any(getattr(cache, "vision_state", None) is not None for cache in caches):
+            import mlx.core as mx
+
+            outputs, records = [], []
+            for index, (window, cache) in enumerate(zip(windows, caches)):
+                parent = None if parents is None else parents[index]
+                if getattr(cache, "vision_state", None) is not None:
+                    parent = None
+                elif parent is None:
+                    parent = _chain(len(_tokens(window)))
+                outputs.append(self.hidden(window, cache, parents=parent))
+                records.append(self._last[id(cache)][0])
+            hidden = mx.concatenate(outputs, axis=1)
+        elif self.rows:
             from tensorfold.kernels.qwen.dense.v1 import row_forward
 
             hidden, records = row_forward.hidden_rows(self.core, tokens, layers, starts=starts, parents=trees)
@@ -150,7 +234,7 @@ class Qwen35Family:
 
     def _commit_streams(self, layers: list[Any], records: list[Any], paths: list[list[int]], widths: list[int],
                         starts: list[int]) -> None:
-        if self.rows:
+        if self.rows or any(record is None for record in records):
             for cache, record, path, width, start in zip(layers, records, paths, widths, starts):
                 self._commit(cache, record, path, width, start)
             return

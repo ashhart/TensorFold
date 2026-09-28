@@ -1,6 +1,6 @@
 # TensorFold
 
-TensorFold serves text models on Apple Silicon and NVIDIA GPUs through an OpenAI-compatible API.
+TensorFold serves models on Apple Silicon and NVIDIA GPUs through an OpenAI-compatible API.
 Each model family supplies its own kernels and draft verification.
 
 ```bash
@@ -36,6 +36,8 @@ Qwen3.8-27B's M5 tensor-unit path reads MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit 
 On M1 through M4, `row_forward` uses the row-exact `simd_qmm` decoder, with 4-bit/group-64 weights and
 windows of up to 16 rows. Serial and drafted calls use the same decoder. On CUDA, pull DFlash2 before
 serving; without it, explicitly choose `--no-drafts` for the serial reference.
+On MLX, Qwen3.8-27B also accepts one OpenAI `image_url` part (HTTPS or a base64 JPEG/PNG/WebP data URL)
+per chat request. See the [Qwen recipe](docs/recipes/qwen3.8-27b.md#images-on-mlx).
 
 Nemotron uses TensorFold projections and routed-expert kernels. Its load-time row check controls drafting;
 keep the installed MLX version within the package requirements. The named checkpoint includes

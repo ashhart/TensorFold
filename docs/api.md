@@ -6,12 +6,18 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | --- | --- |
 | `GET /v1/models` | Served model ID; MLX also lists configured aliases |
 | `GET /health` | Server health and available status information |
-| `POST /v1/chat/completions` | Text chat, tools and reasoning; streamed or non-streamed |
+| `POST /v1/chat/completions` | Text chat, tools and reasoning; Qwen3.8 MLX also accepts one image |
 | `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 require a string `prompt`.
-Image, audio and video input or output requests receive HTTP 400.
+Qwen3.8-27B on MLX accepts one OpenAI `image_url` content part in a user message. Other families,
+CUDA, `/v1/completions`, multiple images, image output, audio and video receive HTTP 400.
+
+Image URLs must be HTTPS or a base64 `data:image/...` URL. JPEG, PNG and WebP are accepted within
+the server's byte and pixel limits. Redirect targets are checked independently; private, loopback,
+link-local and other non-public addresses are rejected. SVG and animated images are unsupported.
+Image requests run serial target decoding and do not read or write token-only prefix caches.
 
 ## Request fields
 

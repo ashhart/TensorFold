@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import os
 from pathlib import Path
 import queue
 import threading
@@ -12,7 +14,7 @@ import uuid
 from tensorfold.engine.lane_engine import LaneEngine, SuffixLookupProposer
 from tensorfold.server.checkpoints import CheckpointStore, longest_common_prefix, save_conversations
 from tensorfold.server.cancellation import Cancellation
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
 from tensorfold.server.scheduler import ChatJob, Scheduler
@@ -57,6 +59,7 @@ class ChatApp(RequestOptions):
     accepts_raw_prompt = True
     # the request's tool list never stops prose from streaming
     streams_prose_with_tools = True
+    accepts_images = False
 
     def __init__(
         self,
@@ -92,6 +95,15 @@ class ChatApp(RequestOptions):
         if checkpoint_slots is None:
             checkpoint_slots = max(3 * int(lanes), 8)
         self._model = model
+        self.vision = getattr(model, "vision", None)
+        self.accepts_images = self.vision is not None
+        self._vision_slots = threading.BoundedSemaphore(max(1, int(lanes)))
+        self._vision_waiters = threading.BoundedSemaphore(max(8, int(lanes) * 16))
+        self.image_queue_timeout = float(
+            os.environ.get("TENSORFOLD_IMAGE_QUEUE_TIMEOUT", "600")
+        )
+        if not math.isfinite(self.image_queue_timeout) or self.image_queue_timeout <= 0:
+            raise ValueError("TENSORFOLD_IMAGE_QUEUE_TIMEOUT must be a finite positive number")
         self.served_name = served_name
         self.model_ids = served_model_ids(served_name, model_aliases)
         self.max_batch_size = int(lanes)
@@ -225,6 +237,65 @@ class ChatApp(RequestOptions):
         history_len = len(history) if 0 < len(history) < len(prompt) and prompt[: len(history)] == history else 0
         return prompt, history_len
 
+    def prepare_image(
+        self,
+        messages: list[dict[str, Any]],
+        image: Any,
+        *,
+        release_slot: Callable[[], None] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        thinking: bool | None = None,
+        reasoning_effort: str | None = None,
+    ) -> Any:
+        """Run bounded CPU-side image processing before an HTTP response begins."""
+
+        if self.vision is None:
+            raise RequestError("image inputs are unsupported by this model")
+        if release_slot is None:
+            release_slot = self.reserve_image_slot()
+        try:
+            prompt = self.vision.prepare(
+                messages,
+                image,
+                tools=tools,
+                enable_thinking=self.enable_thinking if thinking is None else bool(thinking),
+                reasoning_effort=reasoning_effort or self.reasoning_effort,
+            )
+            prompt.release_slot = release_slot
+            return prompt
+        except RequestError:
+            release_slot()
+            raise
+        except Exception as exc:
+            release_slot()
+            raise RequestError("image could not be processed") from exc
+
+    def reserve_image_slot(
+        self, cancellation: Cancellation | None = None
+    ) -> Callable[[], None]:
+        """Bound image fetch, decode and processor buffers before allocating them."""
+
+        if not self._vision_waiters.acquire(blocking=False):
+            raise CapacityError("image request queue is full; retry shortly")
+        try:
+            deadline = time.monotonic() + self.image_queue_timeout
+            while True:
+                if cancellation is not None:
+                    cancellation.check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise CapacityError("image processing capacity is busy; retry shortly")
+                if self._vision_slots.acquire(timeout=min(0.25, remaining)):
+                    try:
+                        if cancellation is not None:
+                            cancellation.check()
+                    except BaseException:
+                        self._vision_slots.release()
+                        raise
+                    return self._vision_slots.release
+        finally:
+            self._vision_waiters.release()
+
     def system_prefix_len(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None,
         prompt_ids: list[int], thinking: bool | None = None,
@@ -299,6 +370,7 @@ class ChatApp(RequestOptions):
         sampling: dict[str, Any] | None = None,
         cancellation: Cancellation | None = None,
         prompt: str | list[int] | None = None,
+        vision_prompt: Any = None,
     ) -> dict[str, Any]:
         """A reply to ``messages``, or with ``prompt`` (text or token ids) a raw completion: no template, no thinking."""
 
@@ -313,13 +385,16 @@ class ChatApp(RequestOptions):
             return self._chat_prepared(messages, max_tokens=limit, temperature=temperature, on_delta=on_delta,
                                        tools=tools, received_at=received_at, background=background,
                                        preparing=preparing, reply_limit_explicit=max_tokens is not None,
-                                       cancellation=cancellation, prompt=prompt)
+                                       cancellation=cancellation, prompt=prompt,
+                                       vision_prompt=vision_prompt)
         except BaseException:
             self.scheduler.cancel(cancellation)
             raise
         finally:
             if preparing is not None:
                 preparing.release()
+            if vision_prompt is not None and hasattr(vision_prompt, "release"):
+                vision_prompt.release()
 
     class _Preparing:
         """A user's request between arrival and submission: background requests wait for these."""
@@ -350,6 +425,7 @@ class ChatApp(RequestOptions):
         reply_limit_explicit: bool = True,
         cancellation: Cancellation | None = None,
         prompt: str | list[int] | None = None,
+        vision_prompt: Any = None,
     ) -> dict[str, Any]:
         # a request's chat_template_kwargs.enable_thinking (via the sampling fields) overrides the server's
         cancellation = cancellation or Cancellation()
@@ -358,7 +434,12 @@ class ChatApp(RequestOptions):
         stops = StopPolicy(fields, self.tokenizer, self.tokenizer_lock, self.stop_ids)
         requested = fields.get("enable_thinking")
         thinking = self.enable_thinking if requested is None else bool(requested)
-        if prompt is not None:
+        if vision_prompt is not None:
+            if prompt is not None:
+                raise RequestError("image inputs cannot be combined with a raw prompt")
+            thinking, history_len = thinking, 0
+            prompt_ids = list(vision_prompt.input_ids)
+        elif prompt is not None:
             thinking, history_len = False, 0
             if isinstance(prompt, str):
                 with self.tokenizer_lock:
@@ -386,9 +467,17 @@ class ChatApp(RequestOptions):
                     "including chat template and thinking tokens."
                 )
             limit = min(limit, room)
-        system_len = 0 if prompt is not None else self.system_prefix_len(messages, tools, prompt_ids, thinking=thinking)
+        system_len = (
+            0
+            if prompt is not None or vision_prompt is not None
+            else self.system_prefix_len(messages, tools, prompt_ids, thinking=thinking)
+        )
         spec = self._resolve_sampling(fields, temperature, prompt_ids)
-        drafts = self.use_proposer and fields.get("draft", True) is not False
+        drafts = (
+            vision_prompt is None
+            and self.use_proposer
+            and fields.get("draft", True) is not False
+        )
 
         def make_job() -> ChatJob:
             job = ChatJob(
@@ -396,6 +485,7 @@ class ChatApp(RequestOptions):
                 prompt_ids=prompt_ids,
                 max_tokens=limit,
                 temperature=float(temperature),
+                multimodal=vision_prompt,
                 history_len=history_len,
                 # Snapshot before the system block ends to retain reusable prefixes when session-specific tails differ.
                 shared_prefix_lens=tuple(n for n in (system_len - 2048, system_len - 512, system_len)

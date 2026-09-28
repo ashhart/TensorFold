@@ -12,6 +12,23 @@ DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables tha
 `--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
 The target verifies every proposed token against its own serial sample.
 
+## Images on MLX
+
+The MLX server loads this checkpoint's vision tower and accepts one OpenAI `image_url` part per
+chat request. CUDA remains text-only. The URL may be bounded HTTPS or a JPEG/PNG/WebP base64 data URL:
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"bench","messages":[{"role":"user","content":[
+    {"type":"image_url","image_url":{"url":"https://example.com/chart.png"}},
+    {"type":"text","text":"What does this chart compare?"}
+  ]}],"max_tokens":64}'
+```
+
+Visual embeddings and multimodal RoPE are computed during prefill. Image requests deliberately disable
+drafting and retained/disk prefix caches; different images therefore cannot collide in a token-only cache.
+
 ## MLX
 
 M5 tensor-unit GPUs run the lane decoder with draft trees. M1 through M4 use `row_forward` and the

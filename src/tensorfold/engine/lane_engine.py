@@ -140,6 +140,8 @@ class LaneStream:
     stream_id: str
     prompt_ids: list[int]
     max_new_tokens: int
+    # Qwen vision processor output; None keeps the byte-identical text path.
+    multimodal: Any = None
     eos_ids: frozenset[int] = frozenset()
     proposer: Any = None
     emitted: list[int] = field(default_factory=list)
