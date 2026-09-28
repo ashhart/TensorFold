@@ -19,7 +19,7 @@ Image, audio and video input or output requests receive HTTP 400.
 | --- | --- | --- |
 | `messages` | Text messages, including system, developer, assistant tool calls and tool results | Both |
 | `tools` | OpenAI function tools | Both |
-| `tool_choice` | `none` hides tools from the template | MLX |
+| `tool_choice` | `none` hides tools from the template; `required` or a named function makes the reply call a tool | Both |
 | `parallel_tool_calls` | False returns at most one completed call | Both |
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k` | Sampling overrides; zero temperature is greedy | Both |
@@ -42,7 +42,13 @@ MLX rejects malformed numeric controls and out-of-vocabulary raw prompt IDs with
 On MLX, `--parallel auto` is the default: requests share rounds within the configured concurrency and memory
 budget. Background work waits behind foreground requests. An active background request yields when a
 foreground request needs its lane or memory, then restarts with already-delivered tokens suppressed.
-Session-title requests are also treated as background work. CUDA serializes generation through its server lock.
+Session-title requests are also treated as background work.
+
+On CUDA, `--parallel auto` serves one request at a time. An explicit `--parallel N` above one shares rounds
+for Qwen3.8-27B on one or two ranks and for Flash Next on one rank; GLM, Nemotron and Qwen3.6 stay serialized.
+When a client disconnects, its CUDA request stops at the next round, and a request still waiting behind
+another in one-at-a-time serving does not start; two-rank Flash Next, Nemotron and GLM requests finish on
+both ranks.
 
 ## Messages and tools
 
@@ -65,13 +71,27 @@ With `parallel_tool_calls: false`, the server buffers tool deltas until it can r
 completed call. Prose and reasoning can still stream. Usage counts the entire decoded reply, including
 additional calls omitted from the response.
 
+With `tool_choice: "required"`, or a function named in `tool_choice`, the reply's answer (after any think block
+or thought channel) opens a call to an offered tool. The server replaces the first answer token that isn't
+whitespace with the tool-call opener (`<tool_call>`, or Gemma 4's `<|tool_call>`) and the template's text before a
+tool name, then holds the name to the offered tools: a token that leaves them is replaced by the rest of the first
+offered name its written part starts. The template's own rendered call gives that text. A named function is the
+only tool the template offers. Each fix depends only on the tokens before it, so drafted, serial and concurrent
+decoding write the same call. The MLX engine fixes tokens inside its rounds; CUDA stops the engine at a fix and
+decodes on from the reply. The model writes the arguments; a malformed call returns as content.
+
 ## Reasoning
 
 On MLX, `reasoning_effort: none` disables thinking; other effort values enable it and reach the chat template.
+MLX also reads it from `chat_template_kwargs.reasoning_effort`, where vLLM's clients send it; the top-level field wins.
 `high` maps to `xhigh`, and `minimal` maps to `low`. An explicit
 `chat_template_kwargs.enable_thinking` takes precedence. Effort support depends on the checkpoint's
 template, and effort does not set a token budget. The GLM CUDA handler closes the template's open
 think block when thinking is disabled.
+
+A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
+on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.
+A call only mentioned while thinking, with the block closed after it, stays reasoning.
 
 `thinking_budget` on MLX forces a newline and the closing think marker at the budget, then continues the
 answer. The cut depends on token count, so serial and drafted decoding use the same cut. A model that

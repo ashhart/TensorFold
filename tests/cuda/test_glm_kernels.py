@@ -340,3 +340,63 @@ def test_dflash2_attention_and_conv_against_torch():
         prev = torch.cat((torch.zeros_like(x[:1]), x[:-1])).float()
         want = (res.float() + (x.float() * k0 + prev * k1).bfloat16().float()).bfloat16()
         assert torch.equal(got, want), branch
+
+
+@pytest.mark.parametrize("np_", [512, 700, 1024, 5003, 32264])
+def test_radix_top_pools_pick_the_sorted_top_k(np_):
+    """The one-kernel top-512 (radix select) keeps exactly the pools a stable descending sort keeps first, ties to
+    the lower pool: many equal scores, -inf past the visible pools, -0 beside +0, and rows with fewer than 512
+    finite scores."""
+    from tensorfold.families.glm5_next.cuda import sparse
+
+    g = torch.Generator(device="cpu").manual_seed(np_)
+    rows = []
+    rows.append(torch.randn(np_, generator=g))                                       # distinct
+    rows.append(torch.randint(-3, 4, (np_,), generator=g).float())                   # few values, heavy ties
+    r = torch.randn(np_, generator=g)
+    r[np_ // 3:] = float("-inf")                                                      # past the visible pools
+    rows.append(r)
+    r = torch.zeros(np_)
+    r[::2] = -0.0
+    r[5::7] = 1.0
+    rows.append(r)                                                                    # -0 and +0 tie
+    r = torch.full((np_,), float("-inf"))
+    r[:100] = torch.randn(100, generator=g)
+    rows.append(r)                                                                    # fewer than 512 finite
+    rows.append(torch.full((np_,), 2.5))                                              # all equal
+    rows.append((torch.randn(np_, generator=g) * 1e-30).to(torch.bfloat16).float())    # tiny, rounded: ties
+    scores = torch.stack(rows).to("cuda").contiguous()
+    got = sparse.top_pools(scores, 512)
+    order = torch.sort(-(scores.cpu() + 0.0), dim=1, stable=True).indices[:, :512]
+    want = torch.sort(order, dim=1).values.to(got.device)
+    assert torch.equal(got, want)
+    assert torch.equal(got, sparse._top_pools(scores, 512))
+
+
+@pytest.mark.parametrize("rows,heads", [(1, 4), (64, 4), (300, 32), (2048, 32)])
+def test_kda_wide_chain_gives_the_fused_chains_bits(rows, heads):
+    """Long windows run the KDA chain as three kernels (state-independent work for all rows, the delta rule row by
+    row on every SM, the gated norm): outputs, saved replay rows and the final state equal the fused kernel's."""
+    from tensorfold.families.glm5_next.cuda import kda
+
+    g = torch.Generator().manual_seed(rows + heads)
+    C = 3 * heads * kda.DK
+    b_off = C + 256
+    p = (torch.randn((rows, b_off + heads + 32), generator=g) * 0.5).to(torch.bfloat16).cuda()
+    a = torch.randn((rows, heads * kda.DK), generator=g).to(torch.bfloat16).cuda()
+    gate = torch.randn((rows, heads * kda.DV), generator=g).to(torch.bfloat16).cuda()
+    cs = (torch.randn((3, C), generator=g) * 0.5).to(torch.bfloat16).cuda()
+    cw = (torch.randn((C, 4), generator=g) * 0.5).to(torch.bfloat16).cuda()
+    state = (torch.randn((heads, kda.DV, kda.DK), generator=g) * 0.1).cuda()
+    a_log = (torch.rand(heads, generator=g) * 2 - 1).cuda()
+    dt_bias = (torch.randn(heads * kda.DK, generator=g) * 0.1).cuda()
+    norm_w = (torch.rand(kda.DV, generator=g) + 0.5).to(torch.bfloat16).cuda()
+    got = []
+    for wide in (False, True):
+        sc = kda.KDAScratch(rows, heads, "cuda")
+        out_state = torch.empty_like(state)
+        out = kda.chain(p, b_off, a, gate, cs, cw, state, a_log, dt_bias, norm_w, 1e-5, -5.0, rows, sc, out_state,
+                        wide=wide).clone()
+        got.append((out, out_state, sc.k[:rows], sc.v[:rows], sc.g[:rows], sc.b[:rows]))
+    for name, x, y in zip(("out", "state", "k", "v", "g", "beta"), *got):
+        assert torch.equal(x, y), name

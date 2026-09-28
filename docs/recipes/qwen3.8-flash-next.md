@@ -13,6 +13,23 @@ for such a conversion; the default positive draft depth otherwise refuses the mi
 
 ## MLX execution
 
+N-gram tables stay in host file mappings when the checkpoint's model files exceed 75% of the GPU's
+recommended working set. `TF_NGRAM_HOST=1` forces this mode; `TF_NGRAM_HOST=0` keeps the tables in MLX.
+Startup admission uses the same choice as the loader and subtracts the mapped weights, scales and biases
+from the checkpoint's size. For the named 4-bit checkpoint, about 29.8 GiB of its 105.4 GiB is mapped,
+leaving a conservative 75.6 GiB resident-weight estimate. The default command selects host mode on an
+M4 Max with 128 GiB, whose process budget is 89.6 GiB, including the 3 GiB process reserve.
+
+Mapped pages still use RAM while cached. The loader prefetches them after its initial forwards; macOS
+can reclaim them, and subsequent lookups may read from disk. The remaining weights must fit the MLX
+budget, and the server sizes context from runtime cache and workspace needs. `TENSORFOLD_MEMORY_LIMIT_GB`
+can lower or raise the default budget, capped by physical RAM and the GPU's recommended working set.
+For example, `TENSORFOLD_MEMORY_LIMIT_GB=110` gives a 128 GiB M4 Max a 110 GiB process budget and
+107 GiB for MLX. An explicit context must still fit the startup estimate; a larger budget does not
+establish full-window inference or keep every mapped page resident.
+After measuring shared rounds, the runtime releases the probes' rollback buffers before sizing prompt
+memory, so those unused states do not reduce the available context.
+
 Fused kernels handle hyper-connections, routing, experts, recurrence and sparse attention. Row-exact
 projections and stable routing ties keep each verify row independent of the other rows. M5 GPUs use
 the lane matmul; M1 through M4 use the per-row projection and hyper-connection kernels by default. Rejected tails
@@ -80,6 +97,29 @@ On an M3 Ultra, each flag was held to a smaller Mac's budget and compared on the
   107.6-129.7 (0.31-0.39x), and prefill at 332-354 against 1,014-1,081 tok/s.
 - A smaller budget also halves the prompt chunk, to 2,048 tokens. Prompts past that length then reply
   differently from a 256 GB Mac's run, whichever flags are set.
+
+### KV cache
+
+`--kv-dtype bf16` is the default. `--kv-dtype int8` and `--kv-dtype int4` store each attention layer's keys and
+values as codes with one fp16 scale per 32 values, the arithmetic of ExLlamaV3's `-cq 8` and `-cq 4` (the
+non-companded grid): each group of 32 is rotated by a 32-point Hadamard, its absmax is the scale, and the codes sit
+on the midpoint grid. 8-bit stores `q - 128` as int8; 4-bit stores two unsigned codes a byte, low nibble first. The
+query is rotated the same way and the merged attention output is rotated back, so the stored keys and values stay
+rotated. Indexer keys and pooled block keys stay bf16.
+
+A token costs 30,784 bytes in bf16, 18,304 in int8 and 11,648 in int4, counting the scales and the MTP head's own
+cache: 1.68x and 2.64x smaller (the keys and values alone shrink 1.88x and 3.56x). The startup admission counts
+those bytes, so an omitted `--context` admits a longer window at int8 and int4, and an explicit `--context` is
+checked against the quantized cache. The dtype holds on every path: prompt chunks and decode windows, the MTP head,
+`"draft": false` requests, `--parallel N` streams and their kept prompt ends, and both ranks of `--tp 2`, which
+refuse to start with different `--kv-dtype` values.
+
+A quantized cache changes the output, so its replies differ from bf16's. Drafted output still equals
+`"draft": false` output at the same dtype, and a resumed prompt equals a fresh one. The MLX path and the other
+families refuse `--kv-dtype` before any download.
+
+`--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
+default is 0.30. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
 
 ### EXL3 checkpoints (experimental)
 

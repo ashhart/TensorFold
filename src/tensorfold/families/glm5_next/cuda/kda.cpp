@@ -5,6 +5,10 @@ void kda_chain_cuda(const at::Tensor&, int64_t, int64_t, const at::Tensor&, int6
                     const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                     const at::Tensor&, double, double, int64_t, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&,
                     at::Tensor&, at::Tensor&);
+void kda_chain_wide_cuda(const at::Tensor&, int64_t, int64_t, const at::Tensor&, int64_t, const at::Tensor&, int64_t,
+                         const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                         const at::Tensor&, double, double, int64_t, at::Tensor&, at::Tensor&, at::Tensor&,
+                         at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&);
 void kda_replay_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                      int64_t, at::Tensor&);
 void kda_replay_layers_cuda(const at::Tensor&, int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&,
@@ -41,6 +45,39 @@ void chain(const at::Tensor& P, int64_t p_stride, int64_t b_off, const at::Tenso
                    lower, rows, out, state_out, k_save, v_save, g_save, b_save);
 }
 
+void chain_wide(const at::Tensor& P, int64_t p_stride, int64_t b_off, const at::Tensor& A, int64_t a_stride,
+                const at::Tensor& G, int64_t g_stride, const at::Tensor& cs, const at::Tensor& cw,
+                const at::Tensor& state_in, const at::Tensor& a_log, const at::Tensor& dt_bias,
+                const at::Tensor& norm_w, double eps, double lower, int64_t rows, at::Tensor out,
+                at::Tensor state_out, at::Tensor k_save, at::Tensor v_save, at::Tensor g_save, at::Tensor b_save,
+                at::Tensor q_tmp, at::Tensor y_tmp) {
+    check(P, at::kBFloat16, "P");
+    check(A, at::kBFloat16, "A");
+    check(G, at::kBFloat16, "G");
+    check(cs, at::kBFloat16, "conv state");
+    check(cw, at::kBFloat16, "conv weight");
+    check(state_in, at::kFloat, "state");
+    check(out, at::kBFloat16, "out");
+    check(k_save, at::kFloat, "k");
+    check(v_save, at::kBFloat16, "v");
+    check(g_save, at::kFloat, "g");
+    check(b_save, at::kFloat, "beta");
+    check(q_tmp, at::kFloat, "q scratch");
+    check(y_tmp, at::kBFloat16, "read-out scratch");
+    const int64_t H = a_log.numel();
+    TORCH_CHECK(cs.is_contiguous() && cw.is_contiguous() && state_in.is_contiguous() && out.is_contiguous(),
+                "conv state, conv weight, state and out must be contiguous");
+    TORCH_CHECK(dt_bias.numel() == H * 128 && norm_w.numel() == 128, "dt_bias [H*128], norm [128]");
+    TORCH_CHECK(cw.size(0) == 3 * H * 128 && cw.size(1) == 4, "conv weight [3*H*128, 4]");
+    TORCH_CHECK(state_in.numel() == H * 128 * 128, "state must be [H, 128, 128]");
+    TORCH_CHECK(rows >= 1 && P.size(0) >= rows && out.size(0) >= rows, "rows");
+    TORCH_CHECK(k_save.numel() >= rows * H * 128 && q_tmp.numel() >= rows * H * 128 &&
+                y_tmp.numel() >= rows * H * 128 && b_save.numel() >= rows * H, "scratch rows");
+    c10::cuda::CUDAGuard guard(P.device());
+    kda_chain_wide_cuda(P, p_stride, b_off, A, a_stride, G, g_stride, cs, cw, state_in, a_log, dt_bias, norm_w, eps,
+                        lower, rows, out, state_out, k_save, v_save, g_save, b_save, q_tmp, y_tmp);
+}
+
 void replay(const at::Tensor& state_in, const at::Tensor& k_save, const at::Tensor& v_save, const at::Tensor& g_save,
             const at::Tensor& b_save, int64_t rows, at::Tensor state_out) {
     check(state_in, at::kFloat, "state");
@@ -62,6 +99,7 @@ void replay_layers(const at::Tensor& state_in, int64_t state_stride, const at::T
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("chain", &chain);
+    m.def("chain_wide", &chain_wide);
     m.def("replay", &replay);
     m.def("replay_layers", &replay_layers);
 }

@@ -1,4 +1,4 @@
-"""BF16 row inputs for prompt projections that skip the FP8 path (an EXL3 pack's)."""
+"""BF16 row inputs for prompt projections that skip the FP8 path: an EXL3 pack's, or affine formats past 4-bit g64."""
 
 from . import glue
 

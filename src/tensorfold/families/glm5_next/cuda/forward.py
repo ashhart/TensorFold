@@ -11,7 +11,7 @@ import triton.language as tl
 from tensorfold.cuda import experts as grouped
 from tensorfold.cuda.kernels import prefill_attention, qmm as shared
 
-from . import glue, kda as kda_mod, qmm, sparse
+from . import glue, kda as kda_mod, latent, prof, qmm, sparse
 from .attention import AttnScratch, attention, kv_write
 from .weights import LayerW, Weights
 
@@ -32,7 +32,13 @@ class Buffers:
         self.ids = torch.zeros((rows,), dtype=torch.int32, device=dev)
         self.ids_host = torch.zeros((rows,), dtype=torch.int32, pin_memory=torch.cuda.is_available())
         self.staged = torch.cuda.Event() if torch.cuda.is_available() else None
-        self.attn = AttnScratch(1 if prefill else rows, HL, c.qk_dim, capacity, dev)
+        if latent.ENABLED:
+            # Dense attention only ever covers contexts up to the dense limit; longer rows go sparse.
+            self.attn = None
+            self.lat_s = latent.LatentScratch(rows, HL, latent.chunks_for(min(capacity, 2560) + rows), dev,
+                                              lw=c.kv_lora)
+        else:
+            self.attn = AttnScratch(1 if prefill else rows, HL, c.qk_dim, capacity, dev)
         if prefill:
             kda_layers = [l for l in w.layers if l.kind == "kda"]
             width = kda_layers[0].kda.proj.n if kda_layers else 0
@@ -82,11 +88,12 @@ class Buffers:
         self.ey = torch.empty((rows, slots, D), dtype=bf if prefill and not exl3 else f32, device=dev)
         self.plan = grouped.Plan(rows, slots, c.experts + 1, dev, prefill=prefill and not exl3)
         self.exl3 = None
+        sl = c.shared_width // w.world
         if c.quant == "exl3":            # EXL3 routed experts, and the shared expert as a BF16 MLP
             from .exl3_mm import Scratch
 
-            sl = c.shared_width // w.world
             self.exl3 = Scratch(rows, slots, D, ml, dev)
+        if c.quant == "exl3" or any(l.moe is not None and l.moe.shared is not None for l in w.layers):
             self.sgu = torch.empty((rows, 2 * sl), dtype=bf, device=dev)
             self.sact = torch.empty((rows, sl), dtype=bf, device=dev)
             self.sxs = torch.empty((rows, sl // 64), dtype=f32, device=dev)
@@ -150,13 +157,22 @@ class State:
         self.proj = torch.zeros((n, rows, width), dtype=torch.bfloat16, device=dev)
         self.scratch_set = kda_mod.KDAScratchSet(n, rows, LL, dev) if n else None
         self.scratch = self.scratch_set.views if n else []
-        self.kc = [torch.zeros((capacity, HL, c.qk_dim), dtype=torch.bfloat16, device=dev) for _ in dsa_layers]
-        self.vc = [torch.zeros((capacity, HL, c.v_dim), dtype=torch.bfloat16, device=dev) for _ in dsa_layers]
+        self.latent = latent.ENABLED
+        if self.latent:              # one 512-wide latent a token and layer (kc), no separate values (vc)
+            self.kc = [torch.zeros((capacity, c.kv_lora), dtype=torch.bfloat16, device=dev) for _ in dsa_layers]
+            self.vc = [None for _ in dsa_layers]
+        else:
+            self.kc = [torch.zeros((capacity, HL, c.qk_dim), dtype=torch.bfloat16, device=dev) for _ in dsa_layers]
+            self.vc = [torch.zeros((capacity, HL, c.v_dim), dtype=torch.bfloat16, device=dev) for _ in dsa_layers]
         self.mtp_len = 0
         self.mtp_drafted = 0
         if w.mtp is not None:
-            self.mtp_kc = torch.zeros((capacity, HL, c.qk_dim), dtype=torch.bfloat16, device=dev)
-            self.mtp_vc = torch.zeros((capacity, HL, c.v_dim), dtype=torch.bfloat16, device=dev)
+            if self.latent:
+                self.mtp_kc = torch.zeros((capacity, c.kv_lora), dtype=torch.bfloat16, device=dev)
+                self.mtp_vc = None
+            else:
+                self.mtp_kc = torch.zeros((capacity, HL, c.qk_dim), dtype=torch.bfloat16, device=dev)
+                self.mtp_vc = torch.zeros((capacity, HL, c.v_dim), dtype=torch.bfloat16, device=dev)
         # DSA indexer caches (long contexts only): per layer (and the MTP layer, last) keys, gates, pool keys
         self.index = None
         if w.meta.get("long_context"):
@@ -194,12 +210,12 @@ class State:
         other.pos_dev = self.pos_dev.clone()
         other.mtp_pos_dev = self.mtp_pos_dev.clone()
         other.kc = [x.clone() for x in self.kc]
-        other.vc = [x.clone() for x in self.vc]
+        other.vc = [x.clone() if x is not None else None for x in self.vc]
         if self.index is not None:
             other.index = [tuple(x.clone() for x in trio) for trio in self.index]
         if hasattr(self, "mtp_kc"):
             other.mtp_kc = self.mtp_kc.clone()
-            other.mtp_vc = self.mtp_vc.clone()
+            other.mtp_vc = self.mtp_vc.clone() if self.mtp_vc is not None else None
         return other
 
 
@@ -249,8 +265,9 @@ def kda_block(layer: LayerW, w: Weights, st: State, b: Buffers, R: int) -> torch
 
 
 def dsa_block(layer: LayerW, w: Weights, kc: torch.Tensor, vc: torch.Tensor, pos_dev: torch.Tensor, b: Buffers,
-              R: int, nch: int | None, index=None, host_pos: int | None = None) -> torch.Tensor:
-    """Write every index key and pool; eager rows beyond the dense limit select sparse pools using host_pos while device pos controls attention."""
+              R: int, nch: int | None, index=None, host_pos: int | None = None,
+              sparse_np: int | None = None) -> torch.Tensor:
+    """Write every index key and pool; rows past the dense limit attend to their top-512 pools (host_pos eager, or sparse_np in a captured graph)."""
 
     c = w.cfg
     a = layer.dsa
@@ -259,6 +276,10 @@ def dsa_block(layer: LayerW, w: Weights, kc: torch.Tensor, vc: torch.Tensor, pos
     glue.rmsnorm(b.dp[:R, c.q_lora:], a.kv_norm, c.eps, b.lat[:R], b.xs_lat[:R])
     HL = a.heads
     mm(b, b.qr[:R], a.q_b, b.xs_qr[:R], b.q[:R].view(R, HL * c.qk_dim))
+    if a.absorb is not None:
+        return _dsa_latent(a, w, kc, pos_dev, b, R, nch, index, host_pos, sparse_np)
+    if sparse_np is not None:
+        raise ValueError("sparse CUDA graphs need the latent cache (TF_GLM_LATENT=1)")
     mm(b, b.lat[:R], a.kv_k, b.xs_lat[:R], b.kn[:R].view(R, HL * c.qk_dim))
     mm(b, b.lat[:R], a.kv_v, b.xs_lat[:R], b.vn[:R].view(R, HL * c.v_dim))
     kv_write(b.kn[:R], b.vn[:R], kc, vc, pos_dev)
@@ -284,6 +305,45 @@ def dsa_block(layer: LayerW, w: Weights, kc: torch.Tensor, vc: torch.Tensor, pos
     return out_proj(w, b, o, a.o, None if b.prefill else qmm.group_sums(o, b.xs_ao[:R]), R)
 
 
+def _dsa_latent(a, w: Weights, lc: torch.Tensor, pos_dev: torch.Tensor, b: Buffers, R: int, nch: int | None,
+                index, host_pos: int | None, sparse_np: int | None = None) -> torch.Tensor:
+    """DSA on the latent cache: the same indexer and selection, attention over latents with kv_b's key blocks absorbed into the query."""
+
+    c = w.cfg
+    HL = a.heads
+    s = b.lat_s
+    with prof.timed("dsa: latent write"):
+        latent.latent_write(b.lat[:R], lc, pos_dev)
+    # sparse_np: every row is past the dense limit (a captured graph); else the host position decides
+    all_sparse = sparse_np is not None or (host_pos is not None and host_pos >= c.dense_limit)
+    sparse_rows = index is not None and (all_sparse or (host_pos is not None and host_pos + R - 1 >= c.dense_limit))
+    if index is not None:
+        ik, ig, pk = index
+        ix = a.index
+        with prof.timed("dsa: indexer update"):
+            mm(b, b.normed[:R], ix.kw, b.xs[:R], b.ikr[:R])
+            glue.router(b.normed[:R], ix.gate, b.igr[:R])
+            sparse.index_update(b.ikr[:R, :c.index_dim], b.igr[:R], ix.ln_w, ix.ln_b, ix.ape, ik, ig, pk, pos_dev)
+    with prof.timed("dsa: absorb"):
+        qa = latent.absorb_q(b.q[:R], a.absorb, s.qa[:R])
+    ol = s.ol[:R]
+    scale = c.qk_dim ** -0.5
+    if not all_sparse:
+        # Rows past the dense limit are recomputed sparsely below, so the dense pass needs only the chunks up to it.
+        with prof.timed("dsa: dense attention"):
+            latent.attention(qa, lc, pos_dev, s, scale=scale, nch=min(nch or s.nch, s.nch), out=ol)
+    if sparse_rows:
+        with prof.timed("dsa: select tokens"):
+            mm(b, b.qr[:R], ix.qb, b.xs_qr[:R], b.qi[:R])
+            tokens, counts = sparse.select_tokens(b.qi[:R], b.ikr[:R, c.index_dim:], pk, host_pos, R,
+                                                  pk.shape[0] - 2, pos_dev, bucket=sparse_np)
+        with prof.timed("dsa: sparse attention"):
+            latent.sparse_attention(qa, lc, tokens, counts, ol, scale)
+    with prof.timed("dsa: expand"):
+        o = latent.expand_v(ol, a.absorb, b.vn[:R]).view(R, HL * c.v_dim)
+    return out_proj(w, b, o, a.o, qmm.group_sums(o, b.xs_ao[:R]), R)
+
+
 def mlp_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> torch.Tensor:
     m = layer.mlp
     mm(b, b.normed[:R], m.gu, b.xs[:R], b.gu[:R])
@@ -294,9 +354,10 @@ def mlp_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> torch.Tensor:
 def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> torch.Tensor:
     c = w.cfg
     m = layer.moe
-    glue.router(b.normed[:R], m.router, b.mlog[:R])
-    glue.select(b.mlog[:R], m.bias, b.pick[:R], b.wts[:R], c.top_k, c.experts, c.routed_scale, c.norm_topk)
-    grouped.route(b.pick[:R], b.plan)
+    with prof.timed("moe: route"):
+        glue.router(b.normed[:R], m.router, b.mlog[:R])
+        glue.select(b.mlog[:R], m.bias, b.pick[:R], b.wts[:R], c.top_k, c.experts, c.routed_scale, c.norm_topk)
+        grouped.route(b.pick[:R], b.plan)
     if m.shared is not None:
         # EXL3: the routed slots through the trellis kernels, the shared expert (last slot) through BF16 matmuls
         from . import exl3_mm
@@ -309,30 +370,38 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> torch.Tensor:
         b.ey[:R, c.top_k].copy_(b.sy[:R])
         glue.combine(b.ey[:R], b.wts[:R], b.part[:R])
         return gather(w, b, R)
-    grouped.gate_up(b.normed[:R], m.experts, b.plan, b.eact, R)
-    grouped.down(b.eact, m.experts, b.plan, b.ey.view(-1, c.hidden), R)
-    glue.combine(b.ey[:R], b.wts[:R], b.part[:R])
-    return gather(w, b, R)
+    with prof.timed("moe: gate/up"):
+        grouped.gate_up(b.normed[:R], m.experts, b.plan, b.eact, R)
+    with prof.timed("moe: down"):
+        grouped.down(b.eact, m.experts, b.plan, b.ey.view(-1, c.hidden), R)
+    with prof.timed("moe: combine"):
+        glue.combine(b.ey[:R], b.wts[:R], b.part[:R])
+    with prof.timed("moe: all-gather"):
+        return gather(w, b, R)
 
 
 def layer_forward(layer: LayerW, w: Weights, st: State, b: Buffers, R: int, nch: int | None = None,
-                  host_pos: int | None = None) -> None:
+                  host_pos: int | None = None, sparse_np: int | None = None) -> None:
     c = w.cfg
     x = b.x[:R]
     h = layer.attn_hc
     glue.hc_pre(x, h.fn, h.base, h.scale, layer.in_norm, b.normed[:R], b.xs[:R], b.post[:R], b.comb[:R],
                 b.hcpart[:R], c.eps, c.hc_eps, c.hc_iters)
     if layer.kind == "kda":
-        g = kda_block(layer, w, st, b, R)
+        with prof.timed("kda"):
+            g = kda_block(layer, w, st, b, R)
     else:
         di = st.dsa_index[layer.index]
-        g = dsa_block(layer, w, st.kc[di], st.vc[di], st.pos_dev, b, R, nch,
-                      st.index[di] if st.index is not None else None, host_pos)
-    glue.hc_post(x, x, g, b.post[:R], b.comb[:R])
-    h = layer.ffn_hc
-    glue.hc_pre(x, h.fn, h.base, h.scale, layer.post_norm, b.normed[:R], b.xs[:R], b.post[:R], b.comb[:R],
-                b.hcpart[:R], c.eps, c.hc_eps, c.hc_iters)
-    g = mlp_block(layer, w, b, R) if layer.mlp is not None else moe_block(layer, w, b, R)
+        with prof.timed("dsa (total)"):
+            g = dsa_block(layer, w, st.kc[di], st.vc[di], st.pos_dev, b, R, nch,
+                          st.index[di] if st.index is not None else None, host_pos, sparse_np)
+    with prof.timed("hc"):
+        glue.hc_post(x, x, g, b.post[:R], b.comb[:R])
+        h = layer.ffn_hc
+        glue.hc_pre(x, h.fn, h.base, h.scale, layer.post_norm, b.normed[:R], b.xs[:R], b.post[:R], b.comb[:R],
+                    b.hcpart[:R], c.eps, c.hc_eps, c.hc_iters)
+    with prof.timed("moe (total)" if layer.mlp is None else "mlp"):
+        g = mlp_block(layer, w, b, R) if layer.mlp is not None else moe_block(layer, w, b, R)
     glue.hc_post(x, x, g, b.post[:R], b.comb[:R])
 
 
@@ -360,13 +429,13 @@ def stage(w: Weights, st: State, b: Buffers, tokens: Sequence[int]) -> int:
 
 
 def compute(w: Weights, st: State, b: Buffers, R: int, *, logits: bool = True, nch: int | None = None,
-            host_pos: int | None = None):
-    """Run capturable GPU work on static buffers and device positions; eager long contexts use host_pos to select sparse attention."""
+            host_pos: int | None = None, sparse_np: int | None = None):
+    """Run capturable GPU work on static buffers and device positions; eager long contexts use host_pos (graphs sparse_np) to select sparse attention."""
 
     c = w.cfg
     glue.embed(b.ids[:R], w.embed, c.hidden, c.streams, b.x[:R])
     for layer in w.layers:
-        layer_forward(layer, w, st, b, R, nch, host_pos)
+        layer_forward(layer, w, st, b, R, nch, host_pos, sparse_np)
         for slot in b.tap_at.get(layer.index, ()):
             glue.stream_mean(b.x[:R], b.taps[slot][:R])
     glue.stream_mean(b.x[:R], b.hidden[:R])

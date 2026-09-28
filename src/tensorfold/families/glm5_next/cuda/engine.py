@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import hashlib
 import json
 import struct
@@ -107,15 +109,22 @@ class GlmEngine:
         cfg = Config.read(model_dir)
         # Without --context the window stays dense, attending every key without indexer work.
         explicit = context is not None if context_explicit is None else bool(context_explicit)
+        from . import latent
+
         self.capacity_plan = admit(model_dir, context if explicit else cfg.dense_limit, explicit, torch,
-                                   lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY),
+                                   lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY,
+                                                             latent=latent.ENABLED),
                                    split_weights(rule), rank=rank, world=2, gather=self._gather_ints,
                                    draft_dir=drafter, draft_geometry=lambda text: draft_geometry(text, 2, MAX_ROWS))
         self.limit = self.capacity_plan["context_window"]
         capacity = self.capacity_plan["cache_slots"]
         long_context = self.limit > cfg.dense_limit
         # both ranks must run the same calls: refuse to start when they were given different settings
-        mine = [int(drafter is not None), capacity, int(long_context), int(serial_only)]
+        from .decode import PREFILL_ROWS
+
+        prefill_rows = int(os.environ.get("TF_GLM_PREFILL_ROWS", str(PREFILL_ROWS)))
+        mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(latent.ENABLED),
+                prefill_rows]
         both = self._gather_ints(mine)
         if both[0] != both[1]:
             raise RuntimeError("the two ranks were started with different settings (draft model, context, drafts): "
@@ -134,7 +143,7 @@ class GlmEngine:
             from .dflash2 import Drafter
 
             self.drafter = Drafter(drafter, w, capacity=capacity)
-        self.e = Engine(w, capacity=capacity, max_rows=MAX_ROWS, graphs=True, graph_rows=GRAPH_ROWS,
+        self.e = Engine(w, capacity=capacity, max_rows=MAX_ROWS, prefill_rows=prefill_rows, graphs=True, graph_rows=GRAPH_ROWS,
                         long_context=long_context, taps=self.drafter.tap_layers if self.drafter is not None else ())
         if self.drafter is not None:
             self.drafter.capture()
@@ -147,7 +156,11 @@ class GlmEngine:
                   f"DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
         self.eos = tuple(w.cfg.eos)
         self.request = threading.local()    # the calling request's policy and stop-at-EOS (``app.GlmApp``)
-        self.cache: list = []               # decode.Snapshot entries, each a prefix of the next
+        # kept conversations (decode.Snapshot, least recently used first) and the live caches' ids; states and saved rows stay within TF_GLM_CACHE_GIB
+        self.cache: list = []
+        self.live: list[int] = []
+        self.cache_bytes = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
+        self.cache_entries = int(os.environ.get("TF_GLM_CACHE_ENTRIES", "8"))
 
     def _calibrate(self) -> dict:
         """Per-piece ms for ``drafter_choice.DrafterChoice``: fastest of interleaved passes, equal on both ranks."""
@@ -275,8 +288,50 @@ class GlmEngine:
         return best
 
     def _remember(self, snap) -> None:
-        self.cache = [c for c in self.cache if len(c.ids) < len(snap.ids) and snap.ids[:len(c.ids)] == c.ids]
-        self.cache = self.cache[-1:] + [snap]
+        self.cache = [c for c in self.cache if c.ids != snap.ids] + [snap]
+        dropped = False
+        while len(self.cache) > 1 and (len(self.cache) > self.cache_entries or self._held_bytes() > self.cache_bytes):
+            self.cache.pop(0)
+            dropped = True
+        if dropped:
+            import torch
+
+            torch.cuda.empty_cache()
+
+    def _take_over(self, keep: list[int]) -> None:
+        """Save the rows of every kept snapshot the next prefill overwrites, dropping the oldest entries past the memory budget; both ranks decide alike."""
+        from .decode import row_bytes, save_rows
+
+        live = self.live
+        dropped = False
+        for snap in list(self.cache):
+            n = len(snap.ids)
+            if snap not in self.cache or snap.rows is not None or (n <= len(keep) and keep[:n] == snap.ids):
+                continue
+            if live[:n] != snap.ids:                  # its rows are already gone: nothing to resume from
+                self.cache.remove(snap)
+                continue
+            need = row_bytes(self.e, snap)
+            while self._held_bytes() + need > self.cache_bytes:
+                old = next((c for c in self.cache if c is not snap), None)
+                if old is None:
+                    break
+                self.cache.remove(old)
+                dropped = True
+            if self._held_bytes() + need > self.cache_bytes:
+                self.cache.remove(snap)
+                dropped = True
+                continue
+            save_rows(self.e, snap)
+        if dropped:
+            import torch
+
+            torch.cuda.empty_cache()             # give the freed rows back rather than keep them in torch's pool
+
+    def _held_bytes(self) -> int:
+        from .decode import snapshot_bytes
+
+        return sum(snapshot_bytes(c) for c in self.cache)
 
     def _run(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool, on_tokens: Callable[[list[int]], Any],
              code: list[int], hit, draft: bool) -> dict[str, Any]:
@@ -286,9 +341,15 @@ class GlmEngine:
         auto, use_mtp, use_dflash = self._drafters(code)
         drafter = self.drafter if use_dflash else None
         t0 = time.perf_counter()
-        # a request writes the attention caches from its resume point on: every longer snapshot is overwritten
+        # a request writes the caches from its resume point: other conversations' rows are saved first, a saved resume point's restored
+        from .decode import load_rows
+
         cut = len(hit.ids) if hit is not None else 0
-        self.cache = [c for c in self.cache if len(c.ids) <= cut]
+        self._take_over(list(hit.ids) if hit is not None else [])
+        if hit is not None and hit.rows is not None:
+            load_rows(self.e, hit)
+            hit.rows, hit.nbytes = None, 0            # live again
+        self.live = list(prompt)
         first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=hit)
         prefill_s = time.perf_counter() - t0
         if draft:
@@ -318,6 +379,8 @@ class GlmEngine:
         else:
             res = mtp_decode(self.e, first, max_tokens, sampling, policy=policy, stop_eos=stop_eos,
                              on_tokens=on_tokens)
+        # the caches now hold prompt and reply; only prompts are snapshotted, since a later prompt prefills the reply again
+        self.live = list(prompt) + res.tokens[:self.e.st.pos - len(prompt)]
         stats.update(decode_s=res.seconds, rounds=res.rounds, min_rows=1 + min(res.depths, default=0),
                      tokens_per_round=round((len(res.tokens) - 1) / max(res.rounds, 1), 3),
                      sha256=hashlib.sha256(json.dumps(res.tokens).encode()).hexdigest()[:16])

@@ -15,6 +15,25 @@ Packages: `src/tensorfold/families/gemma4/` and `src/tensorfold/kernels/gemma/v1
 - mlx_lm's step runs about 40 small kernels a layer around the matmuls and takes 14.6 ms synchronous, 13.3
   ms decoded one step ahead.
 
+## Drafts
+
+The checkpoint has no draft head, so a stream drafts copies of its context. With `--drafter
+z-lab/gemma-4-26B-A4B-it-DFlash --drafter-bits 8` (Apache-2.0; `tensorfold pull` it first), z-lab's DFlash model
+drafts a chain of up to 15 tokens a round. It reads the target's hidden rows after layers 1, 6, 11, 17, 22 and 27,
+and the engine sets each round's depth from its costs. Replies stay equal to `"draft": false` ones.
+
+Measured on an M3 Ultra (MLX 0.32.2, quick cells, 64 and 256 tokens, thinking off, gemma/mlx_lm's server):
+
+| Cell | No draft model | DFlash |
+| --- | --- | --- |
+| Chat, greedy | 1.31-1.35 | 1.52-1.53 |
+| Chat, sampled | 1.12-1.16 | 1.29-1.31 |
+| Code, greedy | 1.31-1.35 | 2.03-2.12 |
+| Code, sampled | 1.10-1.16 | 1.62-1.84 |
+
+Rounds average 3-5 rows at 13-20 ms, and the draft takes about 4 ms of that. The draft model runs once per stream
+in a round, so four streams sharing rounds make 173-179 tok/s together against 196 without it.
+
 ## What worked
 
 One-row steps, greedy, median ms a step on a chat prompt (`tools/gemma4_decode_bench.py` for synchronous,

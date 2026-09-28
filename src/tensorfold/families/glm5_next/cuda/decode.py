@@ -11,8 +11,10 @@ import torch
 
 from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
+from . import glue, prof, qmm
 from .forward import Buffers, State, chunks_for, commit, compute, stage
 from .mtp import mtp_compute, mtp_forward, mtp_stage
+from .sparse import pool_bucket
 from .weights import Weights
 
 
@@ -92,6 +94,7 @@ class Engine:
         self.last_hidden: torch.Tensor | None = None
         self.draft_n = w.head.n
         self.graphs = None
+        self.replays = {"main": 0, "sparse": 0, "mtp": 0, "sparse_mtp": 0, "eager": 0}   # steps by path
         if graphs:
             from .graphs import Graphs
 
@@ -106,10 +109,18 @@ class Engine:
 
         R = stage(self.w, self.st, self.buf, tokens)
         dense = self.st.pos + R <= self.w.cfg.dense_limit
-        g = self.graphs.main.get((R, self.st.parity)) if self.graphs is not None and dense else None
+        g, kind = None, "main"
+        if self.graphs is not None and dense:
+            g = self.graphs.main.get((R, self.st.parity))
+        elif self.graphs is not None and self.st.pos >= self.w.cfg.dense_limit and self.st.index is not None:
+            # every row past the dense limit: the sparse graph for this pool bucket (same kernels as eager)
+            bucket = pool_bucket(self.st.pos, R, self.st.index[0][2].shape[0] - 2)
+            g, kind = self.graphs.sparse.get((R, self.st.parity, bucket)), "sparse"
         if g is not None:
+            self.replays[kind] += 1
             g.replay()
             return self.buf.logits[:R]
+        self.replays["eager"] += 1
         return compute(self.w, self.st, self.buf, R, nch=chunks_for(self.st, R), host_pos=self.st.pos)
 
     def mtp(self, next_tokens: Sequence[int], hidden: torch.Tensor) -> torch.Tensor:
@@ -117,8 +128,15 @@ class Engine:
 
         n = mtp_stage(self.w, self.st, self.mbuf, next_tokens, hidden)
         dense = self.st.mtp_len + n <= self.w.cfg.dense_limit
-        g = self.graphs.mtp.get(n) if self.graphs is not None and not self.mbuf.zero_first and dense else None
+        g, kind = None, "mtp"
+        if self.graphs is not None and not self.mbuf.zero_first and dense:
+            g = self.graphs.mtp.get(n)
+        elif (self.graphs is not None and not self.mbuf.zero_first and self.st.index is not None
+              and self.st.mtp_len >= self.w.cfg.dense_limit):
+            bucket = pool_bucket(self.st.mtp_len, n, self.st.index[-1][2].shape[0] - 2)
+            g, kind = self.graphs.sparse_mtp.get((n, bucket)), "sparse_mtp"
         if g is not None:
+            self.replays[kind] += 1
             g.replay()
             return self.mbuf.logits[:1, :self.draft_n]
         from .attention import CHUNK
@@ -201,6 +219,8 @@ class Snapshot:
     pending: torch.Tensor | None
     mtp_len: int
     drafter_end: int
+    rows: list | None = None      # the attention rows of ids, saved when another conversation took the live caches
+    nbytes: int = 0
 
 
 def take_snapshot(e: Engine, ids: Sequence[int], pending: torch.Tensor | None, *, mtp: bool,
@@ -210,6 +230,48 @@ def take_snapshot(e: Engine, ids: Sequence[int], pending: torch.Tensor | None, *
     return Snapshot(list(ids), rec, st.conv.clone(), pending.clone() if pending is not None else None,
                     st.mtp_len - st.mtp_drafted if mtp and pending is not None else -1,
                     drafter.context_end if drafter is not None else -1)
+
+
+def _row_views(st, n: int, m: int) -> list[torch.Tensor]:
+    """Views of the attention rows a snapshot of n tokens (m in the MTP head) depends on: latents or keys and values, indexer keys, gates and pools."""
+    views = [kc[:n] for kc in st.kc] + [vc[:n] for vc in st.vc if vc is not None]
+    idx = st.index or []
+    main_idx = idx[:len(st.kc)]
+    for ik, ig, pk in main_idx:
+        views += [ik[:n], ig[:n], pk[:n // 4 + 1]]
+    if m > 0 and hasattr(st, "mtp_kc"):
+        views.append(st.mtp_kc[:m])
+        if getattr(st, "mtp_vc", None) is not None:
+            views.append(st.mtp_vc[:m])
+        if len(idx) > len(st.kc):
+            ik, ig, pk = idx[-1]
+            views += [ik[:m], ig[:m], pk[:m // 4 + 1]]
+    return views
+
+
+def save_rows(e: Engine, snap: Snapshot) -> None:
+    """Copy a snapshot's attention rows out of the live caches before another conversation overwrites them; DFlash2 caches are not kept."""
+    views = _row_views(e.st, len(snap.ids), max(snap.mtp_len, 0))
+    snap.rows = [v.clone() for v in views]
+    snap.nbytes = sum(r.numel() * r.element_size() for r in snap.rows)
+    snap.drafter_end = -1
+
+
+def row_bytes(e: Engine, snap: Snapshot) -> int:
+    """What ``save_rows`` would copy for this snapshot."""
+    return sum(v.numel() * v.element_size() for v in _row_views(e.st, len(snap.ids), max(snap.mtp_len, 0)))
+
+
+def snapshot_bytes(snap: Snapshot) -> int:
+    """Device memory a kept snapshot holds: its KDA states, conv windows, pending MTP rows and any saved rows."""
+    held = [snap.rec, snap.conv] + ([snap.pending] if snap.pending is not None else [])
+    return sum(t.numel() * t.element_size() for t in held) + (snap.nbytes if snap.rows is not None else 0)
+
+
+def load_rows(e: Engine, snap: Snapshot) -> None:
+    """Put a saved snapshot's attention rows back into the live caches."""
+    for dst, src in zip(_row_views(e.st, len(snap.ids), max(snap.mtp_len, 0)), snap.rows):
+        dst.copy_(src)
 
 
 def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
@@ -226,7 +288,6 @@ def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
 
 
 # -- prefill ----------------------------------------------------------------------------------------------------
-@torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True, drafter=None,
             resume: Snapshot | None = None) -> int:
     """Commit the prompt in chunks and sample its first token; a resumed prompt ends in a fresh prefill's state."""
@@ -251,6 +312,7 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
             k = resume.pending.shape[0]
             _absorb_rows(e, resume.pending, list(prompt[begin - k + 1:begin + 1]))
     last = None
+    prof.active = True
     for start in range(begin, len(prompt), e.prefill_rows):
         chunk = list(prompt[start:start + e.prefill_rows])
         R = len(chunk)
@@ -261,8 +323,12 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
         if use_mtp:
             nxt = list(prompt[start + 1:start + R + 1])
             if nxt:
-                _absorb_rows(e, b.fnormed[:len(nxt)], nxt)
-        commit(w, st, b, R, R)
+                with prof.timed("mtp absorb"):
+                    _absorb_rows(e, b.fnormed[:len(nxt)], nxt)
+        with prof.timed("commit"):
+            commit(w, st, b, R, R)
+    prof.active = False
+    prof.report(len(prompt) - begin)
     return e.sample(last, [len(prompt)], sampling)[0]
 
 

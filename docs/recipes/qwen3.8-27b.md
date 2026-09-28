@@ -1,7 +1,9 @@
 # Qwen3.8-27B
 
-The `qwen3_5` family combines Gated DeltaNet and full attention. It serves the same MLX affine
-4-bit/group-64 checkpoint on MLX and CUDA.
+This branch adds experimental [packed affine formats](../quantization.md), including 8-bit and mixed layer precision.
+
+The `qwen3_5` family combines Gated DeltaNet and full attention. The standard recipe below uses its
+4-bit/group-64 checkpoint; this branch also adds the affine formats listed in the quantization guide.
 
 ```bash
 tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
@@ -15,7 +17,8 @@ The target verifies every proposed token against its own serial sample.
 ## MLX
 
 M5 tensor-unit GPUs run the lane decoder with draft trees. M1 through M4 use `row_forward` and the
-row-exact `simd_qmm` decoder with chains of up to 16 rows by default. Both paths use the same arithmetic for serial
+packed row decoder with windows of up to 16 rows by default. Its existing 4-bit formats use `simd_qmm`,
+and other supported affine formats use the general packed kernel. Both paths use the same arithmetic for serial
 and drafted calls. Load-time checks determine usable window widths and shared-forward support.
 
 The engine can share a round across requests while keeping each stream's attention, recurrent state and
@@ -32,10 +35,12 @@ They widen packed values for the tensor operations without changing those values
 keep separate calls where a fused projection needs one width. Examples include
 `Vontra/Qwen3.8-27B-oQ2` and `Vontra/Qwen3.8-27B-oQ4`.
 
-On M1 through M4, only 4-bit/group-64 projections are supported. CUDA reads MLX 4-bit/group-64 and
-[EXL3 packs](#exl3-checkpoints-experimental); the MLX lane-width list does not describe CUDA support. On MLX, unsupported projection formats and tied
-embedding heads are refused from `config.json` before weight downloads and again at load; loaded
-projections must also be covered by the selected decoder. `--lane-kernels on` requires M5 tensor units.
+The packed row readers on Apple Silicon and the CUDA readers cover MLX affine 2/3/4/5/6/8-bit projections
+with groups of 32/64/128, including mixed layers. CUDA also reads [EXL3 packs](#exl3-checkpoints-experimental).
+A fused projection keeps its members separate where their bit width or group size differs. Unsupported formats
+and tied embedding heads are refused from `config.json` before weight downloads and again at load; loaded
+projections must also be covered by the selected decoder. `--lane-kernels on` requires M5 tensor units and
+formats they read; `auto` falls back to the packed row decoder for the rest.
 Lower weight precision does not guarantee faster decode or a fitting context. Release memory and
 quality comparisons are TBD [release-0.3.5].
 
@@ -87,6 +92,24 @@ A 12-row round costs 75 ms on the pack against 84 on the MLX checkpoint (10.1 GB
 unquantized model. Cold prefill runs 880-970 tok/s from 2k to 16k and 720-890 at 32k-64k, about half the MLX
 checkpoint's FP8 prompt path. The engine and drafter take 13.2 GiB after loading; a 64k prompt peaks at 28 GiB
 allocated. Other branches of the pack load through the same path; only 3.00bpw is measured here.
+
+### Concurrent requests
+
+```bash
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --parallel 16 --context 8192 --name bench
+```
+
+`--parallel N` decodes up to N requests in shared rounds: each stream verifies its own DFlash2 tree in one
+forward, and every reply equals the same request served alone. A new prompt prefills 1,024 tokens a round
+while the other streams decode. States kept at message starts let prompts that share a system prompt resume
+there, and each stream's caches are sized once, at admission.
+
+On one DGX Spark, with the workload from issue #38 (48 chat requests of 3,000 to 5,100 tokens sharing a
+2,900-token system prompt, up to 512 tokens each, greedy, all sent at once), TensorFold serves 161.7 tok/s at
+16 in flight with a 25.4 GiB peak (nvidia-smi). vLLM with `nvidia/Qwen3.8-27B-NVFP4`, MTP=3, prefix caching
+and `--max-num-seqs 16` serves 132.1 tok/s at 51.7 GiB on the same Spark. At 8 and 4 in flight TensorFold
+serves 147.5 and 112.0 tok/s. `tools/shared_prefix_prompts.py` builds the workload and
+`tools/shared_prefix_load.py` sends it (`--concurrency`, `--mem` for the memory peak).
 
 ### Historical public-fixture results
 

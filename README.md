@@ -20,7 +20,7 @@ for installation and a first request.
 | Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` | MLX, CUDA | `z-lab/Qwen3.8-27B-DFlash2` and context copies; DFlash2 is optional on MLX |
 | Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX, CUDA | Included MTP head and context copies |
 | GLM-5.3-Flash | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | MLX on a 256 GB Mac, CUDA with two ranks | MTP; optional DFlash2 on CUDA |
-| Gemma 4 26B-A4B | `mlx-community/gemma-4-26b-a4b-it-4bit` | MLX | Context copies |
+| Gemma 4 26B-A4B | `mlx-community/gemma-4-26b-a4b-it-4bit` | MLX | Context copies; `z-lab/gemma-4-26B-A4B-it-DFlash` is optional |
 | Qwen3.8-27B (EXL3, experimental) | `turboderp/Qwen3.8-27B-exl3` (branches `3.00bpw`, `4.00bpw`; any codebook, 1 to 8 bits per weight) | CUDA | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
 | Qwen3.8 Flash Next (EXL3, experimental) | `turboderp/Qwen3.8-Flash-Next-exl3` (branch `3.05bpw_h5_ng5`; any codebook, a width per tensor) | CUDA | Included MTP head and context copies |
 
@@ -32,10 +32,11 @@ tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit
 ```
 
-Qwen3.8-27B's M5 tensor-unit path reads MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit projections in groups of 64.
-On M1 through M4, `row_forward` uses the row-exact `simd_qmm` decoder, with 4-bit/group-64 weights and
-windows of up to 16 rows. Serial and drafted calls use the same decoder. On CUDA, pull DFlash2 before
-serving; without it, explicitly choose `--no-drafts` for the serial reference.
+Qwen3.8-27B reads MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit checkpoints, including mixed layer formats.
+This branch adds packed row readers for groups of 32, 64 and 128 on Apple Silicon and CUDA, with hardware
+qualification still pending for the new paths. M5 keeps its native tensor-unit kernels for compatible formats,
+and other formats use the row decoder. See [quantized checkpoints](docs/quantization.md) for the exact scope.
+On CUDA, pull DFlash2 before serving; without it, explicitly choose `--no-drafts` for the serial reference.
 
 Nemotron uses TensorFold projections and routed-expert kernels. Its load-time row check controls drafting;
 keep the installed MLX version within the package requirements. The named checkpoint includes
@@ -49,7 +50,8 @@ MLX 4-bit/group-64 weights and the experimental `Mia-AiLab/GLM-5.3-Flash-EXL3-TR
 `incoai/GLM-5.3-Flash-DFlash2` checkpoint has non-commercial license
 terms, described in [third-party notices](THIRD_PARTY_NOTICES.md).
 
-Gemma 4 has no draft head and drafts copies of its context. Its kernels read 4-bit weights in groups of 32 or 64
+Gemma 4 has no draft head. It drafts copies of its context, and chains from z-lab's DFlash model when served with
+`--drafter z-lab/gemma-4-26B-A4B-it-DFlash` (pulled once). Its kernels read 4-bit weights in groups of 32 or 64
 with an 8-bit router, as the mlx-community conversion stores them; `serve` refuses other Gemma 4 layouts
 before downloading.
 
@@ -90,8 +92,12 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--no-drafts` | Decode serially | Both |
 | `--drafter auto`, `none`, or model ID | Select an optional draft model where the family supports it | Both |
 | `--mtp-drafts N` | Family-specific cap on MTP drafts | Both |
+| `--kv-dtype bf16`, `int8`, `int4` | Flash Next: `int8` or `int4` stores keys and values with one fp16 scale per 32 values. Other families and the MLX path refuse it | CUDA |
+| `--mtp-confidence P` | Flash Next: stop a draft chain before a later draft under this probability, 0 to 1 (default 0.30) | CUDA |
 | `--tp 2 --rank R --master HOST` | Two-rank CUDA execution | CUDA |
 | `--prompt-cache-gib N` | Retained conversation-prefix budget; zero disables retention | MLX |
+| `--checkpoint-slots N` | Retained conversation prefixes (default 3 per lane, at least 8); long conversations hit this before the byte budget | MLX |
+| `--spill-gib N` | Write evicted conversation prefixes to disk (up to N GiB) and read them back instead of prefilling again; zero disables | MLX |
 | `--mlx-cache-gib N` | Reusable freed-buffer cache, default 8 GiB | MLX |
 | `--snapshot-dir DIR` | Persistent prefix snapshots; `none` disables them | MLX |
 | `--no-update-check` | Disable the startup release check | Both |
@@ -109,17 +115,27 @@ that cannot fit one request is refused at startup. `--context 0` removes the met
 capacity and memory admission still apply. Use the reported context when configuring client compaction.
 
 On CUDA, Qwen defaults to the affordable native capacity. GLM targets a dense 2,051-token window,
-and Nemotron targets 16,384 tokens; the capacity estimate can lower these defaults. Explicit `--context 0` targets the affordable native capacity for every CUDA family.
+and Nemotron targets 16,384 tokens; the capacity estimate can lower these defaults. Flash Next's `--kv-dtype int8` or `int4` counts
+its smaller cache, so the same memory admits a longer window. Explicit `--context 0` targets the affordable native capacity for every CUDA family.
 A positive CUDA value must fit both the native window and the capacity estimate on every rank;
 otherwise startup refuses it with fitting guidance. Increasing GLM beyond its dense window enables
 its sparse-attention path. The startup report distinguishes native and allocated capacity.
 
-MLX uses a process budget capped by 70% of RAM and the GPU's recommended working set. A family can state a
-larger share: GLM-5.3-Flash takes 85% on a Mac with 256 GB or less, with nothing else loaded. It reserves 3 GiB
-for the rest of the process before setting the MLX allocator limit. Admission accounts for weights,
-cache growth, reply tokens and prefill workspace. `TENSORFOLD_MEMORY_LIMIT_GB` can lower the budget in
-GiB. Retained prefixes and reusable MLX buffers have separate limits. Admission can evict retained
-prefixes or queue another stream; fitting weights alone does not establish a usable context size.
+MLX defaults to a process budget of 70% of RAM. A family can state a larger share: GLM-5.3-Flash takes 85%
+on a Mac with 256 GB or less, with nothing else loaded. `TENSORFOLD_MEMORY_LIMIT_GB` replaces that default in
+GiB, raising or lowering it; physical RAM and the GPU's recommended working set still cap the result.
+The server reserves 3 GiB for the rest of the process before setting the MLX allocator limit, so a
+110 GiB process budget allows 107 GiB of MLX buffers. Concurrent admission honors the raised budget
+while accounting for memory held elsewhere on the machine. Admission accounts for weights, cache
+growth, reply tokens and prefill workspace. Retained prefixes and reusable MLX buffers have separate
+limits. Admission can evict retained prefixes or queue another stream; fitting weights alone does not
+establish a usable context size. A larger budget leaves less RAM for other applications and cached file pages.
+The startup line says how far the variable can raise the budget on this Mac, and a startup refusal says how far it
+must go. On a 32 GB Mac, Qwen3.8-27B needs more than the default 22.4 GiB, with or without its draft model.
+
+Flash Next's startup weight check excludes n-gram tensors when the loader keeps them in host file
+mappings. The startup report shows resident and file-backed bytes separately. Cached file pages still
+consume RAM and can be reclaimed by the OS; see [Flash Next memory](docs/recipes/qwen3.8-flash-next.md#mlx-execution).
 
 An explicit reply limit is reserved before prefill. A request that exceeds context or memory is refused
 with fitting guidance; an omitted reply limit is capped by the remaining context. MLX reports a
@@ -128,11 +144,13 @@ CUDA checks context before opening a stream.
 
 The memory-class table below keeps the model combinations under qualification. Its GiB budget ceilings
 emulate the listed RAM classes before the 3 GiB process reserve. The actual default budget uses
-OS-reported physical memory; a smaller GPU working set or an explicit memory limit lowers it. Context and peak-memory results remain TBD until a public
+OS-reported physical memory and the GPU working set; an explicit memory budget can lower or raise it.
+Context and peak-memory results remain TBD until a public
 prompt fixture, checkpoint revision, runtime, command and measurement output accompany each result.
 
 | Nominal RAM class | Budget ceiling | Qwen3.8-27B + DFlash2 | Qwen3.8-27B, `--drafter none` | Nemotron 3.5 Lightning | Qwen3.8 Flash Next |
 | --- | --- | --- | --- | --- | --- |
+| 32 GB | 22.4 GiB | TBD | TBD | TBD | TBD |
 | 36 GB | 25.2 GiB | TBD | TBD | TBD | TBD |
 | 48 GB | 33.6 GiB | TBD | TBD | TBD | TBD |
 | 64 GB | 44.8 GiB | TBD | TBD | TBD | TBD |
