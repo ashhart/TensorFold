@@ -101,8 +101,8 @@ def test_limit_configuration_requires_finite_positive_values(kwargs):
 
 def test_hash_uses_pixels_dimensions_and_ignores_container_and_metadata():
     png = encoded(pnginfo=None)
-    bmp = encoded(format="BMP")
-    first, second = load_images([ImageSource(data_url(png)), ImageSource(data_url(bmp), "high")])
+    webp = encoded(format="WEBP", lossless=True)
+    first, second = load_images([ImageSource(data_url(png)), ImageSource(data_url(webp, "image/webp"), "high")])
     assert first.content_hash == second.content_hash
     assert first.detail == "auto" and second.detail == "high"
     assert first.pixels == bytes([10, 20, 30]) * 6
@@ -188,9 +188,15 @@ def test_alpha_is_composited_on_white_and_grayscale_becomes_rgb():
 def test_animation_is_rejected():
     output = io.BytesIO()
     first, second = Image.new("RGB", (2, 2), "red"), Image.new("RGB", (2, 2), "blue")
-    first.save(output, format="GIF", save_all=True, append_images=[second])
+    first.save(output, format="WEBP", save_all=True, append_images=[second], lossless=True)
     with pytest.raises(ImageInputError, match="single frame"):
-        load_images([ImageSource(data_url(output.getvalue()))])
+        load_images([ImageSource(data_url(output.getvalue(), "image/webp"))])
+
+
+@pytest.mark.parametrize("format", ["GIF", "BMP", "TIFF"])
+def test_only_jpeg_png_and_webp_decode(format):
+    with pytest.raises(ImageInputError, match="JPEG, PNG or WebP"):
+        load_images([ImageSource(data_url(encoded(format=format)))])
 
 
 def test_pillow_missing_error_is_actionable(monkeypatch):
@@ -241,18 +247,18 @@ def test_redirect_is_resolved_and_checked_again(monkeypatch):
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
 
     monkeypatch.setattr(socket, "getaddrinfo", dns)
-    monkeypatch.setattr(images_http, "_request", lambda *args: (None, "http://metadata.example/image"))
+    monkeypatch.setattr(images_http, "_request", lambda *args: (None, "https://metadata.example/image", None))
     with pytest.raises(ImageInputError, match="only to public"):
-        images_http.fetch_image("http://example.com/image", max_bytes=100, deadline=time.monotonic() + 1,
+        images_http.fetch_image("https://example.com/image", max_bytes=100, deadline=time.monotonic() + 1,
                                 max_redirects=3, max_url_chars=4096)
     assert hosts == ["example.com", "metadata.example"]
 
 
 def test_redirect_cannot_access_filesystem(monkeypatch):
     monkeypatch.setattr(images_http, "_resolve", lambda *args: [])
-    monkeypatch.setattr(images_http, "_request", lambda *args: (None, "file:///image.png"))
+    monkeypatch.setattr(images_http, "_request", lambda *args: (None, "file:///image.png", None))
     with pytest.raises(ImageInputError, match="HTTP"):
-        images_http.fetch_image("http://example.com/image", max_bytes=100, deadline=time.monotonic() + 1,
+        images_http.fetch_image("https://example.com/image", max_bytes=100, deadline=time.monotonic() + 1,
                                 max_redirects=3, max_url_chars=4096)
 
 
@@ -279,7 +285,7 @@ class FakeResponse:
 
     def __init__(self, body, headers=None):
         self.body = io.BytesIO(body)
-        self.headers = headers or {}
+        self.headers = {"Content-Type": "image/png", **(headers or {})}
 
     def getheader(self, name, default=None):
         return self.headers.get(name, default)
@@ -306,8 +312,14 @@ def mock_http(monkeypatch, response):
         def close(self):
             pass
 
+    class Context:                                     # TLS on the fake socket: every fetch is HTTPS
+        def wrap_socket(self, raw, *, server_hostname, do_handshake_on_connect):
+            return raw
+
+    sock.do_handshake = lambda: None
     monkeypatch.setattr(socket, "socket", lambda *args: sock)
     monkeypatch.setattr(images_http.http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(images_http.ssl, "create_default_context", Context)
     return sock, requests
 
 
@@ -317,31 +329,48 @@ def test_connection_uses_checked_ip_without_second_dns_lookup(monkeypatch):
     def dns(*args, **kwargs):
         dns_calls.append(args)
         address = "1.1.1.1" if len(dns_calls) == 1 else "127.0.0.1"
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 80))]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))]
 
     monkeypatch.setattr(socket, "getaddrinfo", dns)
     sock, requests = mock_http(monkeypatch, FakeResponse(b"image"))
-    result = images_http.fetch_image("http://example.com/image", max_bytes=10, deadline=time.monotonic() + 1,
-                                    max_redirects=3, max_url_chars=4096)
-    assert result == b"image" and len(dns_calls) == 1
-    assert sock.connected == ("1.1.1.1", 80) and sock.closed
+    result = images_http.fetch_image("https://example.com/image", max_bytes=10, deadline=time.monotonic() + 1,
+                                     max_redirects=3, max_url_chars=4096)
+    assert result == (b"image", "image/png") and len(dns_calls) == 1
+    assert sock.connected == ("1.1.1.1", 443) and sock.closed
     assert requests[0][0] == ("GET", "/image")
+    headers = requests[0][1]["headers"]
+    assert headers["User-Agent"].startswith("TensorFold/") and headers["Accept"] == "image/jpeg, image/png, image/webp"
+
+
+@pytest.mark.parametrize("url", ["http://example.com/image", "https://example.com:8443/image",
+                                 "https://example.com/image#part"])
+def test_remote_urls_are_https_on_443_without_fragments(url):
+    with pytest.raises(ImageInputError, match="HTTPS on port 443"):
+        images_http._url(url, 4096)
+
+
+@pytest.mark.parametrize("media", ["text/html", "image/gif", "application/octet-stream", ""])
+def test_remote_content_type_must_be_an_accepted_image(monkeypatch, media):
+    mock_http(monkeypatch, FakeResponse(b"image", {"Content-Type": media}))
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))]
+    with pytest.raises(ImageInputError, match="content type"):
+        images_http._request("example.com", 443, "/", addresses, 10, time.monotonic() + 1)
 
 
 @pytest.mark.parametrize("body,headers", [(b"123456", {}), (b"", {"Content-Length": "6"}),
                                           (b"", {"Content-Encoding": "gzip"})])
 def test_remote_body_is_bounded(monkeypatch, body, headers):
     sock, _ = mock_http(monkeypatch, FakeResponse(body, headers))
-    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 80))]
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))]
     with pytest.raises(ImageInputError):
-        images_http._request("http", "example.com", 80, "/", addresses, 5, time.monotonic() + 1)
+        images_http._request("example.com", 443, "/", addresses, 5, time.monotonic() + 1)
     assert sock.closed
 
 
 def test_expired_download_does_not_reach_network(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: pytest.fail("no DNS after deadline"))
     with pytest.raises(ImageInputError, match="timed out"):
-        images_http.fetch_image("http://example.com/image", max_bytes=10, deadline=time.monotonic() - 1,
+        images_http.fetch_image("https://example.com/image", max_bytes=10, deadline=time.monotonic() - 1,
                                 max_redirects=3, max_url_chars=4096)
 
 
@@ -386,9 +415,9 @@ def test_slow_headers_are_interrupted_by_total_timeout(monkeypatch):
         return response
 
     monkeypatch.setattr(connection_type, "getresponse", slow_response)
-    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 80))]
+    addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))]
     with pytest.raises(ImageInputError, match="timed out"):
-        images_http._request("http", "example.com", 80, "/", addresses, 10, time.monotonic() + 0.02)
+        images_http._request("example.com", 443, "/", addresses, 10, time.monotonic() + 0.02)
     assert sock.closed
 
 
@@ -406,23 +435,23 @@ def test_https_verifies_original_hostname_on_pinned_socket(monkeypatch):
 
     monkeypatch.setattr(images_http.ssl, "create_default_context", Context)
     addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 443))]
-    data, redirect = images_http._request("https", "example.com", 443, "/", addresses, 10, time.monotonic() + 1)
-    assert data == b"image" and redirect is None
+    data, redirect, media = images_http._request("example.com", 443, "/", addresses, 10, time.monotonic() + 1)
+    assert data == b"image" and redirect is None and media == "image/png"
     assert names == ["example.com"] and handshake == [True]
     assert sock.connected == ("1.1.1.1", 443)
 
 
 def test_redirect_count_is_bounded(monkeypatch):
     monkeypatch.setattr(images_http, "_resolve", lambda *args: [])
-    monkeypatch.setattr(images_http, "_request", lambda *args: (None, "/image"))
+    monkeypatch.setattr(images_http, "_request", lambda *args: (None, "/image", None))
     with pytest.raises(ImageInputError, match="too many redirects"):
-        images_http.fetch_image("http://example.com/image", max_bytes=100, deadline=time.monotonic() + 1,
+        images_http.fetch_image("https://example.com/image", max_bytes=100, deadline=time.monotonic() + 1,
                                 max_redirects=0, max_url_chars=4096)
 
 
 def test_remote_input_uses_same_decoder_and_hash(monkeypatch):
     data = encoded()
-    monkeypatch.setattr(images, "fetch_image", lambda *args, **kwargs: data)
+    monkeypatch.setattr(images, "fetch_image", lambda *args, **kwargs: (data, "image/png"))
     remote, inline = load_images([ImageSource("https://example.com/image"), ImageSource(data_url(data))], allow_urls=True)
     assert remote == inline
 

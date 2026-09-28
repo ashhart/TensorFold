@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.http import Server
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
                                         validate_modalities)
@@ -478,7 +478,8 @@ def make_handler(app: App):
             try:
                 prepared = app.prepare(body, chat)
             except RequestError as exc:
-                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                return self._json(503 if isinstance(exc, CapacityError) else 400,
+                                  {"error": {"message": str(exc), "type": "invalid_request_error"}})
             except Exception as exc:        # any other failure to read the request is refused too, as on MLX
                 _log_error(exc)
                 return self._json(400, {"error": {"message": _error_message(exc)}})
@@ -549,7 +550,8 @@ def make_handler(app: App):
                 self.close_connection = True
                 return
             except RequestError as exc:
-                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                return self._json(503 if isinstance(exc, CapacityError) else 400,
+                                  {"error": {"message": str(exc), "type": "invalid_request_error"}})
             except Exception as exc:
                 _log_error(exc)
                 try:

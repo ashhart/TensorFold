@@ -12,7 +12,7 @@ from typing import Any
 
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.request_options import parse_numbers
 from tensorfold.server.messages import normalize_messages, validate_modalities
 from tensorfold.server.tool_policy import ToolCallPolicy
@@ -42,6 +42,18 @@ class Server(ThreadingHTTPServer):
     """One thread a connection; the listen backlog takes a burst of clients connecting at once."""
 
     request_queue_size = 128
+
+
+def redact_images(value: Any) -> Any:
+    """A request body for the request log: every image part's URL or data replaced, the rest kept."""
+
+    if isinstance(value, list):
+        return [redact_images(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("type") == "image_url":
+        return {**value, "image_url": {"url": "<redacted>"}}
+    return {key: redact_images(item) for key, item in value.items()}
 
 
 def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list[str]:
@@ -151,7 +163,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 validate_modalities(body)
                 if _REQUEST_LOG and body.get("priority") != "background":   # batch jobs are not client traffic
                     with open(_REQUEST_LOG, "a") as handle:
-                        handle.write(json.dumps(body) + "\n")
+                        handle.write(json.dumps(redact_images(body)) + "\n")
                 raw_kw: dict[str, Any] = {}
                 if is_chat_completion:
                     messages = normalize_messages(body.get("messages"), allow_images=getattr(app, "vision", None) is not None)
@@ -194,7 +206,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 stream = bool(body.get("stream", False))
                 tool_policy = ToolCallPolicy(body)
             except RequestError as exc:
-                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}},
+                                status=503 if isinstance(exc, CapacityError) else 400)
                 return
             except Exception as exc:
                 self._send_json({"error": {"message": str(exc)}}, status=400)

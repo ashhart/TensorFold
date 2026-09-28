@@ -14,10 +14,10 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote_to_bytes
 
-from .images_http import ImageInputError, fetch_image
+from .images_http import MEDIA_TYPES, ImageInputError, fetch_image
 
 _DETAILS = {"auto", "low", "high"}
-_FORMATS = ("JPEG", "PNG", "WEBP", "GIF", "BMP", "TIFF")
+_FORMATS = tuple(MEDIA_TYPES.values())
 _MEDIA = {"image", "images", "image_url", "input_image", "audio", "input_audio", "video", "video_url"}
 
 
@@ -104,8 +104,8 @@ def _check_source(source: ImageSource, limits: ImageLimits, allow_urls: bool = F
     if source.url.startswith("data:"):
         if len(source.url) > limits.max_encoded_bytes * 3 + 256:
             raise ImageInputError("image data URL exceeds the encoded byte limit")
-    elif not source.url.startswith(("http://", "https://")):
-        raise ImageInputError("images require data URLs or public HTTP(S) URLs")
+    elif not source.url.startswith("https://"):
+        raise ImageInputError("images require data URLs or public HTTPS URLs")
     elif not allow_urls:
         raise ImageInputError("image URLs are off on this server; send the image as a data URL, or start the server "
                               "with --vision-urls")
@@ -208,7 +208,7 @@ def _decode(data: bytes, detail: str, limits: ImageLimits, remaining_pixels: int
     except ImageInputError:
         raise
     except (OSError, ValueError, SyntaxError, image.DecompressionBombWarning, image.DecompressionBombError):
-        raise ImageInputError("image bytes are invalid or unsupported; use JPEG, PNG, WEBP, GIF, BMP or TIFF") from None
+        raise ImageInputError("image bytes are invalid or unsupported; use JPEG, PNG or WebP") from None
 
 
 def load_images(sources: list[ImageSource], *, limits: ImageLimits = DEFAULT_LIMITS, allow_urls: bool = False
@@ -227,9 +227,9 @@ def load_images(sources: list[ImageSource], *, limits: ImageLimits = DEFAULT_LIM
         if source.url.startswith("data:"):
             data = _data_bytes(source.url, remaining)
         else:
-            data = fetch_image(source.url, max_bytes=remaining,
-                               deadline=min(deadline, time.monotonic() + limits.timeout_seconds),
-                               max_redirects=limits.max_redirects, max_url_chars=limits.max_url_chars)
+            data, _ = fetch_image(source.url, max_bytes=remaining,
+                                  deadline=min(deadline, time.monotonic() + limits.timeout_seconds),
+                                  max_redirects=limits.max_redirects, max_url_chars=limits.max_url_chars)
         total_bytes += len(data)
         decoded = _decode(data, source.detail, limits, limits.max_total_pixels - total_pixels)
         if time.monotonic() >= deadline:

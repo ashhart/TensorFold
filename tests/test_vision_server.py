@@ -443,9 +443,41 @@ def test_prepare_images_fetches_urls_only_when_the_frontend_allows(monkeypatch):
     part = messages[0]["content"][1]
     data = base64.b64decode(part["image_url"]["url"].split(",", 1)[1])
     part["image_url"] = {"url": "https://example.com/image.png"}
-    monkeypatch.setattr(images, "fetch_image", lambda *args, **kwargs: data)
+    monkeypatch.setattr(images, "fetch_image", lambda *args, **kwargs: (data, "image/png"))
     with pytest.raises(RequestError, match="--vision-urls"):
         prepare_images(Frontend(), messages, str)
     frontend = Frontend()
     frontend.allow_urls = True
     assert prepare_images(frontend, messages, str).tokens == [10, 11, 12, 13]
+
+
+def test_image_preparation_is_bounded_and_refuses_with_capacity_errors(monkeypatch):
+    import threading
+
+    from tensorfold.server import prompts
+    from tensorfold.server.errors import CapacityError
+
+    monkeypatch.setattr(prompts, "IMAGE_SLOTS", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(prompts, "IMAGE_WAITERS", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(prompts, "IMAGE_WAIT_S", 0.01)
+    held = prompts.image_slot()
+    with pytest.raises(CapacityError, match="busy"):          # a slot never frees within the wait
+        prompts.image_slot()
+    assert prompts.IMAGE_WAITERS.acquire(blocking=False)      # the waiter it took was given back
+    with pytest.raises(CapacityError, match="queue is full"):  # every waiter place taken: refused at once
+        prompts.image_slot()
+    prompts.IMAGE_WAITERS.release()
+    held.release()
+    prompts.image_slot().release()
+
+
+def test_request_log_redacts_every_image_part():
+    from tensorfold.server.http import redact_images
+
+    body = {"model": "m", "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "what is this"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "low"}}]}]}
+    logged = redact_images(body)
+    assert logged["messages"][0]["content"][1] == {"type": "image_url", "image_url": {"url": "<redacted>"}}
+    assert logged["messages"][0]["content"][0] == body["messages"][0]["content"][0] and logged["model"] == "m"
+    assert body["messages"][0]["content"][1]["image_url"]["url"].startswith("data:")    # the request is untouched

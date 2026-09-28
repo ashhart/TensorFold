@@ -1,4 +1,4 @@
-"""Bounded HTTP image retrieval with validated, pinned public addresses."""
+"""Bounded HTTPS image retrieval with validated, pinned public addresses."""
 
 from __future__ import annotations
 
@@ -11,6 +11,9 @@ import threading
 import time
 from urllib.parse import quote, urljoin, urlsplit
 
+from tensorfold import __version__
+
+MEDIA_TYPES = {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}     # a declared type, its format
 _DNS_SLOTS = threading.BoundedSemaphore(4)
 _REDIRECTS = {301, 302, 303, 307, 308}
 _SPECIAL_V4 = (ipaddress.ip_network("192.0.0.0/24"), ipaddress.ip_network("168.63.129.16/32"))
@@ -79,22 +82,22 @@ def _url(value: str, max_url_chars: int) -> tuple[str, str, int, str]:
         raise ImageInputError("image URL is too long or contains whitespace/control characters")
     try:
         parsed = urlsplit(value)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        if parsed.scheme != "https" or not parsed.hostname or parsed.fragment:
             raise ValueError
         if parsed.username is not None or parsed.password is not None or "\\" in value:
             raise ValueError
         host = parsed.hostname.encode("idna").decode("ascii")
-        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
-        if "%" in host or not 1 <= port <= 65535:
+        port = parsed.port if parsed.port is not None else 443
+        if "%" in host or port != 443:
             raise ValueError
     except (ValueError, UnicodeError):
-        raise ImageInputError("image URL must be an HTTP(S) URL without credentials") from None
+        raise ImageInputError("image URL must be HTTPS on port 443, without credentials or a fragment") from None
     if host.rstrip(".").lower() in {"localhost", "metadata.google.internal", "instance-data"}:
         raise ImageInputError("image URLs must use public internet hosts")
     target = quote(parsed.path or "/", safe="/%:@!$&'()*+,;=-._~")
     if parsed.query:
         target += "?" + quote(parsed.query, safe="/%?:@!$&'()*+,;=-._~")
-    return parsed.scheme, host, port, target
+    return host, port, target
 
 
 def _close_socket(sock: socket.socket) -> None:
@@ -105,8 +108,8 @@ def _close_socket(sock: socket.socket) -> None:
     sock.close()
 
 
-def _request(scheme: str, host: str, port: int, target: str, addresses: list[tuple],
-             max_bytes: int, deadline: float) -> tuple[bytes | None, str | None]:
+def _request(host: str, port: int, target: str, addresses: list[tuple],
+             max_bytes: int, deadline: float) -> tuple[bytes | None, str | None, str | None]:
     """A watchdog bounds slow headers and TLS handshakes, not just individual reads."""
     timeout = _remaining(deadline)
     family, kind, protocol, _, address = addresses[0]
@@ -119,25 +122,28 @@ def _request(scheme: str, host: str, port: int, target: str, addresses: list[tup
         timer.start()
         sock.settimeout(_remaining(deadline))
         sock.connect(address)
-        if scheme == "https":
-            context = ssl.create_default_context()
-            sock = context.wrap_socket(sock, server_hostname=host, do_handshake_on_connect=False)
-            live_socket[0] = sock
-            sock.settimeout(_remaining(deadline))
-            sock.do_handshake()
+        context = ssl.create_default_context()        # TLS verified for the host, on the address checked for it
+        sock = context.wrap_socket(sock, server_hostname=host, do_handshake_on_connect=False)
+        live_socket[0] = sock
+        sock.settimeout(_remaining(deadline))
+        sock.do_handshake()
         connection.sock = sock
-        connection.request("GET", target, headers={"Accept": "image/*", "Accept-Encoding": "identity"})
+        connection.request("GET", target, headers={"Accept": ", ".join(MEDIA_TYPES), "Accept-Encoding": "identity",
+                                                   "User-Agent": f"TensorFold/{__version__}"})
         response = connection.getresponse()
         _remaining(deadline)
         if response.status in _REDIRECTS:
             location = response.getheader("Location")
             if not location:
                 raise ImageInputError("image redirect has no destination")
-            return None, location
+            return None, location, None
         if response.status != 200:
             raise ImageInputError(f"image download returned HTTP {response.status}")
         if response.getheader("Content-Encoding", "identity").lower() != "identity":
             raise ImageInputError("compressed HTTP image responses are unsupported")
+        media = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
+        if media not in MEDIA_TYPES:
+            raise ImageInputError("image URL content type must be JPEG, PNG or WebP")
         length = response.getheader("Content-Length")
         if length is not None:
             if not length.isascii() or not length.isdecimal() or int(length) > max_bytes:
@@ -152,7 +158,7 @@ def _request(scheme: str, host: str, port: int, target: str, addresses: list[tup
         if len(data) > max_bytes:
             raise ImageInputError("image response exceeds the encoded byte limit")
         _remaining(deadline)
-        return bytes(data), None
+        return bytes(data), None, media
     finally:
         timer.cancel()
         connection.close()
@@ -160,15 +166,15 @@ def _request(scheme: str, host: str, port: int, target: str, addresses: list[tup
 
 
 def fetch_image(url: str, *, max_bytes: int, deadline: float, max_redirects: int,
-                max_url_chars: int) -> bytes:
+                max_url_chars: int) -> tuple[bytes, str]:
     """Resolve and validate each redirect, then connect directly to its checked address."""
     try:
         for redirect in range(max_redirects + 1):
-            scheme, host, port, target = _url(url, max_url_chars)
+            host, port, target = _url(url, max_url_chars)
             addresses = _resolve(host, port, deadline)
-            data, location = _request(scheme, host, port, target, addresses, max_bytes, deadline)
+            data, location, media = _request(host, port, target, addresses, max_bytes, deadline)
             if location is None:
-                return data
+                return data, media
             if redirect == max_redirects:
                 raise ImageInputError("image download has too many redirects")
             url = urljoin(url, location)
