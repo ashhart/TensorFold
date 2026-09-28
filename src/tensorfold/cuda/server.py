@@ -5,6 +5,7 @@ import hashlib
 import json
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime
 from contextlib import nullcontext
@@ -18,6 +19,7 @@ from tensorfold.server.errors import RequestError
 from tensorfold.server.http import Server
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
                                         validate_modalities)
+from tensorfold.server.request_options import parse_numbers
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, call_format, generate_gated
 from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
@@ -66,12 +68,16 @@ class ChatTemplate:
 
 # -- HTTP ------------------------------------------------------------------------------------
 
+_SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "seed")
+
+
 @dataclass(slots=True)
 class PreparedRequest:
     prompt: list[int]
     max_tokens: int
     tools: list[dict[str, Any]]
     thinking: bool
+    sampling: Any          # the engine's ``Sampling``, or None for greedy decoding
 
 
 def _native_context(model_dir: Path) -> int:
@@ -156,6 +162,8 @@ class App:
         return max(1, int(body.get("max_tokens") or body.get("max_completion_tokens") or self.max_tokens))
 
     def _prepare(self, body: dict[str, Any], chat: bool) -> PreparedRequest:
+        from jinja2.exceptions import TemplateError
+
         validate_modalities(body)
         ToolCallPolicy(body)
         max_tokens = self._requested_tokens(body)
@@ -163,12 +171,20 @@ class App:
             tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
         except ValueError as exc:
             raise RequestError(str(exc)) from None
-        kwargs = dict(body.get("chat_template_kwargs") or {})
+        kwargs = body.get("chat_template_kwargs")
+        if kwargs is None:                   # absent or null: the server's defaults
+            kwargs = {}
+        elif not isinstance(kwargs, dict):   # [], "", false and 0 included
+            raise RequestError("chat_template_kwargs must be a JSON object or null")
+        kwargs = dict(kwargs)
         thinking = bool(kwargs.pop("enable_thinking", self.default_thinking))
         if chat:
             if not isinstance(body.get("messages"), list):
                 raise RequestError("messages must be a list")
-            text = self.template.render(body["messages"], tools=tools, enable_thinking=thinking, extra=kwargs)
+            try:
+                text = self.template.render(body["messages"], tools=tools, enable_thinking=thinking, extra=kwargs)
+            except TemplateError as exc:     # the checkpoint's template refuses the request (``raise_exception``)
+                raise RequestError(f"the chat template rejected the request: {exc}") from exc
         else:
             text = body.get("prompt")
             if not isinstance(text, str):
@@ -176,7 +192,8 @@ class App:
         prompt = self.tok.encode(text, add_special_tokens=False).ids
         if not prompt:
             raise RequestError("rendered prompt is empty")
-        return PreparedRequest(prompt, max_tokens, tools, thinking)
+        # sampling is resolved here, so a malformed control is refused before a stream opens
+        return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt))
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
         """Why the request cannot run, or None; rendered before a stream's headers are sent."""
@@ -218,16 +235,17 @@ class App:
         return prepared
 
     def sampling_for(self, body: dict[str, Any], prompt: list[int]):
-        """Keyed sampling (the seed, else one drawn from the prompt), or None for greedy decoding."""
+        """Keyed sampling (the seed, else one drawn from the prompt), or None for greedy; RequestError if malformed."""
 
         from tensorfold.engine.exact_sampling import Sampling, seed_for
 
-        temp = float(body["temperature"] if body.get("temperature") is not None else self.sampling["temperature"])
+        fields = parse_numbers({k: body[k] for k in _SAMPLING_FIELDS if body.get(k) is not None})
+        temp = float(fields.get("temperature", self.sampling["temperature"]))
         if temp <= 0:
             return None
-        seed = body.get("seed")
-        top_k = body["top_k"] if body.get("top_k") is not None else self.sampling["top_k"]
-        top_p = body["top_p"] if body.get("top_p") is not None else self.sampling["top_p"]
+        seed = fields.get("seed")
+        top_k = fields.get("top_k", self.sampling["top_k"])
+        top_p = fields.get("top_p", self.sampling["top_p"])
         return Sampling(int(seed) if seed is not None else seed_for(prompt), temp, int(top_k), float(top_p))
 
     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
@@ -238,7 +256,7 @@ class App:
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
         tools, thinking = prepared.tools, prepared.thinking
         policy = ToolCallPolicy(body)
-        sampling = self.sampling_for(body, prompt)
+        sampling = prepared.sampling
         out: list[int] = []
         sent = {"reasoning": 0, "content": 0}
         stopped = {"client": False}
@@ -352,6 +370,15 @@ def token_sha(tokens: list[int]) -> str:
     return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
 
 
+def _error_message(exc: BaseException) -> str:
+    return str(exc) or type(exc).__name__
+
+
+def _log_error(exc: BaseException) -> None:
+    print(f"[tensorfold] request error: {type(exc).__name__}: {exc}", flush=True)
+    traceback.print_exception(exc)
+
+
 def make_handler(app: App):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -370,6 +397,16 @@ def make_handler(app: App):
             except (BrokenPipeError, ConnectionResetError):          # the client has gone
                 self.close_connection = True
 
+        def _stream_error(self, error: dict[str, Any]) -> None:
+            """End an open stream with an error event and ``[DONE]``, as the MLX server does."""
+
+            try:
+                self.wfile.write(f"data: {json.dumps({'error': error})}\n\ndata: [DONE]\n\n".encode())
+                self.wfile.flush()
+            except OSError:
+                pass
+            self.close_connection = True
+
         def do_GET(self):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [{"id": app.served, "object": "model", "owned_by": "tensorfold"}]})
@@ -384,12 +421,15 @@ def make_handler(app: App):
                 return self._json(404, {"error": "not found"})
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 return self._json(400, {"error": {"message": "the request body is not JSON", "type": "invalid_request_error"}})
             try:
                 prepared = app.prepare(body, chat)
             except RequestError as exc:
                 return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            except Exception as exc:        # any other failure to read the request is refused too, as on MLX
+                _log_error(exc)
+                return self._json(400, {"error": {"message": _error_message(exc)}})
             rid = f"chatcmpl-{uuid.uuid4().hex[:24]}" if chat else f"cmpl-{uuid.uuid4().hex[:24]}"
             created = int(time.time())
             stream = bool(body.get("stream"))
@@ -427,14 +467,10 @@ def make_handler(app: App):
                     self.close_connection = True
                     return
                 except RequestError as exc:
-                    error = {"error": {"message": str(exc), "type": "invalid_request_error"}}
-                    try:
-                        self.wfile.write(f"data: {json.dumps(error)}\n\ndata: [DONE]\n\n".encode())
-                        self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError):
-                        pass
-                    self.close_connection = True
-                    return
+                    return self._stream_error({"message": str(exc), "type": "invalid_request_error"})
+                except Exception as exc:
+                    _log_error(exc)
+                    return self._stream_error({"message": _error_message(exc), "type": "server_error"})
                 if result["final"]:
                     emit(result["final"])
                 if result["calls"]:
@@ -462,6 +498,13 @@ def make_handler(app: App):
                 return
             except RequestError as exc:
                 return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            except Exception as exc:
+                _log_error(exc)
+                try:
+                    self._json(500, {"error": {"message": _error_message(exc)}})
+                except OSError:
+                    pass
+                return
             usage = {"prompt_tokens": result["prompt_tokens"], "completion_tokens": result["completion_tokens"],
                      "total_tokens": result["prompt_tokens"] + result["completion_tokens"]}
             if chat:
