@@ -32,7 +32,7 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
 
 @torch.no_grad()
 def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
-            draft=None, *, state: State | None = None) -> tuple[State, int]:
+            draft=None, *, state: State | None = None, limit: int = 0) -> tuple[State, int]:
     """Commit the prompt and sample the first token; resuming a prompt-end ``state`` gives a fresh prefill's bits."""
 
     from .forward import _mm
@@ -41,6 +41,8 @@ def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
     if not prompt:
         raise ValueError("prefill requires at least one token")
     st = clone_state(state) if state is not None else State(w)
+    if state is None:
+        st.limit = limit                    # a fresh state's attention caches stop here; a resumed one keeps its own
     if st.pos >= len(prompt):
         raise ValueError("a reused state must leave at least one prompt token to process")
     normed = prefill_state(w, prompt, st, draft=draft)

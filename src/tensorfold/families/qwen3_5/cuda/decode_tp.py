@@ -106,7 +106,7 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
 
 @torch.no_grad()
 def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, rank: int,
-               draft=None, *, state: State | None = None) -> tuple[State, int]:
+               draft=None, *, state: State | None = None, limit: int = 0) -> tuple[State, int]:
     """Both ranks prefill, from a prompt-end ``state`` with a fresh prefill's bits; rank 0 shares the first token."""
 
     from .forward import _mm
@@ -115,6 +115,8 @@ def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, ran
     device = w.norm.device
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
     st = clone_state(state) if state is not None else State(w)
+    if state is None:
+        st.limit = limit                    # a fresh state's attention caches stop here; a resumed one keeps its own
     taps = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
     normed = prefill_state(w, prompt, st, tp=True, draft=draft if taps else None)
     last = _mm(normed, w.head) if split or rank == 0 else None
