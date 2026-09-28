@@ -110,6 +110,7 @@ def scripted_decoder(multi, script=SCRIPT, eos=(0,)):
     return dec
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("script", [SCRIPT, [0] + SCRIPT[1:]], ids=["end-later", "end-first"])
 @pytest.mark.parametrize("draft", [True, False])
 def test_concurrent_streams_each_stop_at_their_own_end_tokens(allocations, draft, script):  # noqa: F811
@@ -129,6 +130,7 @@ def test_concurrent_streams_each_stop_at_their_own_end_tokens(allocations, draft
     assert (ignoring.rounds < 11) is draft and any(0 in r[:-1] for r in rounds) is draft
 
 
+@pytest.mark.torch
 def test_the_scheduler_hands_stop_eos_to_its_stream(allocations):  # noqa: F811
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
     sched = Scheduler(scripted_decoder(multi), max_streams=2)
@@ -152,14 +154,15 @@ def bare_engine(engine_mod, **attrs):
     return eng
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("stop_eos", [None, True, False])
 @pytest.mark.parametrize("draft", [True, False])
 def test_the_engine_passes_stop_eos_to_the_one_gpu_decode(monkeypatch, allocations, stop_eos, draft):  # noqa: F811
     engine_mod = importlib.import_module("tensorfold.families.qwen3_5.cuda.engine")
     decode = importlib.import_module("tensorfold.families.qwen3_5.cuda.decode")
     seen = {}
-    monkeypatch.setattr(decode, "prefill", lambda w, prompt, sampling, drafter, state=None, **kw:
-                        (SimpleNamespace(pos=0), 5))
+    monkeypatch.setattr(decode, "prefill", lambda w, prompt, sampling, drafter, state=None, keep_at=None, **kw:
+                        (SimpleNamespace(pos=0), 5, (SimpleNamespace(pos=keep_at), None)))
     monkeypatch.setattr(decode, "draft_decode", lambda *a, **kw: seen.update(kw) or SimpleNamespace(
         seconds=0.0, rounds=0, widths=[]))
     eng = bare_engine(engine_mod)
@@ -168,6 +171,7 @@ def test_the_engine_passes_stop_eos_to_the_one_gpu_decode(monkeypatch, allocatio
     assert seen["stop_eos"] is (stop_eos is not False)
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("stop_eos", [True, False])
 def test_the_engine_passes_stop_eos_to_rank_zero_of_two(monkeypatch, allocations, stop_eos):  # noqa: F811
     engine_mod = importlib.import_module("tensorfold.families.qwen3_5.cuda.engine")
@@ -175,15 +179,17 @@ def test_the_engine_passes_stop_eos_to_rank_zero_of_two(monkeypatch, allocations
     seen, shared = {}, []
     monkeypatch.setattr(decode_tp, "_share", lambda values, rank, device: shared.append(list(values)) or values)
     monkeypatch.setattr(decode_tp, "prefill_tp",
-                        lambda w, prompt, sampling, rank, drafter, state=None, **kw: (SimpleNamespace(pos=0), 5))
+                        lambda w, prompt, sampling, rank, drafter, state=None, keep_at=None, **kw:
+                        (SimpleNamespace(pos=0), 5, (SimpleNamespace(pos=keep_at), None)))
     monkeypatch.setattr(decode_tp, "decode_tp", lambda *a, **kw: seen.update(kw) or SimpleNamespace(
         seconds=0.0, rounds=0, widths=[]))
     eng = bare_engine(engine_mod, tp=2)
     eng.generate([1, 2, 3], 8, None, lambda new: False, stop_eos=stop_eos)
     assert seen["stop_eos"] is stop_eos
-    assert len(shared[0]) == 18                   # the header rank 1 reads is unchanged: it follows rank 0's windows
+    assert len(shared[0]) == 19                   # no stop_eos field: rank 1 follows rank 0 (19th: image flag)
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("stop_eos", [True, False])
 def test_the_engine_passes_stop_eos_to_its_scheduler(allocations, stop_eos):  # noqa: F811
     engine_mod = importlib.import_module("tensorfold.families.qwen3_5.cuda.engine")
@@ -195,13 +201,14 @@ def test_the_engine_passes_stop_eos_to_its_scheduler(allocations, stop_eos):  # 
     assert kw == {"stop_eos": stop_eos} and args[:4] == ([1, 2, 3], 8, None, True)
 
 
+@pytest.mark.torch
 def test_the_admit_message_rank_one_reads_is_unchanged(allocations):  # noqa: F811
     """Rank 1 builds its streams from the ADMIT message alone and commits the paths rank 0 sends: end tokens are
-    decided on rank 0 only, so the message carries no new field."""
+    decided on rank 0 only, so the message carries no stop_eos field (its 20th is the image flag)."""
 
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
     dec = scripted_decoder(multi)
     sent = []
     dec.world, dec._send = 2, sent.append
     dec.admit(Stream([1, 2], 12, stop_eos=False))
-    assert sent[0][:5] == [multi.ADMIT, 0, 12, 1, 0] and len(sent[0]) == 19
+    assert sent[0][:5] == [multi.ADMIT, 0, 12, 1, 0] and len(sent[0]) == 20

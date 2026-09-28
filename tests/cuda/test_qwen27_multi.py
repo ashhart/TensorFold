@@ -16,7 +16,7 @@ from tensorfold.families.qwen3_5.cuda.decode import prefill, serial_decode  # no
 from tensorfold.families.qwen3_5.cuda.forward import (State, commit, commit_streams, multi_tree_forward,  # noqa: E402
                                                         tree_forward)
 from tensorfold.families.qwen3_5.cuda.draft_tree import allocate  # noqa: E402
-from tensorfold.families.qwen3_5.cuda.multi import TREE, MultiDecoder, kept, private  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.multi import TREE, MultiDecoder, private, viewed  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
 
 V = 256
@@ -186,12 +186,12 @@ def test_a_failed_prompt_end_copy_fails_only_its_request(monkeypatch):
     refs = {tuple(p): _serial(w, p, smp, 20) for p, smp in zip(PROMPTS, SAMPLINGS)}
     doomed = [2, 9, 4, 4, 1, 8, 8]                      # no other prompt has its length: only its copy fails
 
-    def failing(st):
-        if st.pos == len(doomed):
-            raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end copy)")
-        return kept(st)
+    def failing(st):                                    # the prompt-end entry sits one token before the end
+        if st.pos == len(doomed) - 1:
+            raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end entry)")
+        return viewed(st)
 
-    monkeypatch.setattr("tensorfold.families.qwen3_5.cuda.multi.kept", failing)
+    monkeypatch.setattr("tensorfold.families.qwen3_5.cuda.multi.viewed", failing)
     dec = _Oracle(w, refs, seed=5)
     sched = Scheduler(dec, max_streams=3)
     results: dict = {}

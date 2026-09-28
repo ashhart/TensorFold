@@ -48,23 +48,25 @@ class St:
 
 @pytest.fixture
 def decoders(monkeypatch, allocations):  # noqa: F811
-    """``make(world)``: the 27B's ``MultiDecoder`` on CPU stand-ins; ``fail["copy"]`` fails the next prompt-end copy."""
+    """``make(world)``: the 27B's ``MultiDecoder`` on CPU stand-ins; ``fail["copy"]`` fails the next prompt-end entry."""
 
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
     fail = {"copy": False}
 
-    def prefill_state(w, prompt, st, **kw):
+    def prefill_state(w, prompt, st, *, keep_at=None, **kw):
         st.pos = len(prompt)
+        return None if keep_at is None else (None, (St(keep_at), None))
 
-    def kept(st):
+    def entry(st):
         if fail["copy"]:
             fail["copy"] = False
-            raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end copy)")
+            raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end entry)")
         return St(st.pos)
 
     monkeypatch.setattr(multi, "prefill_state", prefill_state)
     monkeypatch.setattr(multi, "first_token", lambda *args: 7)
-    monkeypatch.setattr(multi, "kept", kept)
+    monkeypatch.setattr(multi, "kept", entry)
+    monkeypatch.setattr(multi, "viewed", entry)
     monkeypatch.setattr(multi, "private", lambda st, rows: St(st.pos))
     monkeypatch.setattr(multi, "State", lambda w: St())
     monkeypatch.setattr(multi, "_share", lambda values, src, device: values)      # two ranks: no NCCL here
@@ -104,8 +106,8 @@ def test_a_failed_prompt_end_copy_answers_its_request_and_the_worker_goes_on(dec
     assert d is not None and d[0] == "done", d
     assert sched.thread.is_alive()
     assert dec.live() == 0 and not dec.streams
-    assert B not in [entry[0] for entry in dec.cache.entries]
-    assert [entry[0] for entry in dec.cache.entries] == [A, C, D]
+    assert B[:-1] not in [entry[0] for entry in dec.cache.entries]
+    assert [entry[0] for entry in dec.cache.entries] == [A[:-1], C[:-1], D[:-1]]      # entries end a token early
 
 
 def test_a_failed_admission_leaves_the_live_streams_decoding(decoders):

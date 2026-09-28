@@ -45,6 +45,7 @@ def app_for(tmp_path, content="Hello"):
     app.max_tokens = 4096
     app.native_context_window = app.context_window = 0
     app.lock = threading.Lock()
+    app.vision = None                      # served without --vision
     return app
 
 
@@ -71,7 +72,7 @@ def test_cuda_image_refuses_before_headers_and_generate(tmp_path, stream):
             {"type": "image_url", "image_url": {"url": "https://example.com/picture.png"}}]}],
             "stream": stream}, True)
     assert status == 400 and app.engine.calls == []
-    assert "text" in json.loads(body)["error"]["message"].lower()
+    assert "--vision" in json.loads(body)["error"]["message"]
 
 
 @pytest.mark.parametrize("stream", [False, True])

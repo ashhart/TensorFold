@@ -16,6 +16,7 @@ class Stream:
     sampling: Any = None
     draft: bool = True                            # False: one row a round, the serial reference
     stop_eos: bool = True                         # False: an end token does not end it (ignore_eos)
+    vision: Any = None
     emit: Callable[[list[int]], bool | None] | None = None
     sid: int = 0
     st: Any = None                                # the committed model state

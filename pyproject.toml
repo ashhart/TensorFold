@@ -36,6 +36,7 @@ dependencies = [
 test = ["pytest>=8"]
 # --ssd-experts builds a small MLX extension on first use, with MLX's own nanobind
 ssd = ["cmake>=3.27; sys_platform == 'darwin'", "nanobind==2.15.0; sys_platform == 'darwin'"]
+vision = ["Pillow>=10", "transformers>=5.3,<6", "mlx-vlm>=0.7.3,<0.8; sys_platform == 'darwin'"]
 
 [project.scripts]
 tensorfold = "tensorfold.cli:main"

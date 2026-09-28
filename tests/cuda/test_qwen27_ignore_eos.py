@@ -11,10 +11,10 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
 from tensorfold.cuda.scheduler import Scheduler  # noqa: E402
-from tensorfold.cuda.streams import Stream  # noqa: E402
+from tensorfold.cuda.streams import PrefixCache, Stream  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.decode import draft_decode, prefill, serial_decode  # noqa: E402
-from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.engine import KEEP_ONE, Qwen27Engine  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.forward import State  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.multi import TREE, MultiDecoder  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
@@ -24,7 +24,7 @@ SAMPLINGS = [None, Sampling(1234, 1.0, 20, 0.95)]
 
 
 def _model():
-    """A GDN layer and an attention layer, as tests/cuda/test_qwen27_multi.py builds them."""
+    """A GDN and an attention layer as in test_qwen27_multi.py, with weights centred on zero so greedy paths vary."""
 
     gen = torch.Generator(device="cuda").manual_seed(11)
     dev = "cuda"
@@ -33,7 +33,8 @@ def _model():
         words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen,
                               device=dev, dtype=torch.int64).to(torch.int32)
         scales = (torch.rand(n, k // 64, generator=gen, device=dev) * 0.003 + 0.001).bfloat16()
-        biases = (torch.rand(n, k // 64, generator=gen, device=dev) * 0.003 - 0.0015).bfloat16()
+        noise = torch.rand(n, k // 64, generator=gen, device=dev) * 0.003 - 0.0015
+        biases = (noise - 7.5 * scales.float()).bfloat16()   # 4-bit codes average 7.5: the weights average 0
         return QLinear(words, scales, biases)
 
     norm = torch.ones(128, device=dev, dtype=torch.bfloat16)
@@ -117,7 +118,8 @@ def _engine(w):
 
     eng = Qwen27Engine.__new__(Qwen27Engine)
     eng.torch, eng.tp, eng.rank, eng.max_rows, eng.allow_copy = torch, 1, 0, 12, True
-    eng.w, eng.draft, eng.cache, eng.multi, eng.scheduler = w, None, [], None, None
+    eng.w, eng.draft, eng.cache, eng.multi, eng.scheduler = w, None, PrefixCache(KEEP_ONE), None, None
+    eng.points = None
     eng.context_window, eng.eos, eng.concurrent = 4096, tuple(w.config.eos), False
     return eng
 
@@ -137,16 +139,20 @@ def test_engine_decodes_past_end_tokens_and_keeps_only_prompt_ends(sampling):
             for p in (first, longer) for stop in (True, False)}
     assert all(len(refs[(tuple(p), True)]) < 32 == len(refs[(tuple(p), False)]) for p in (first, longer))
     eng = _engine(w)
-    # drafted from a fresh prefill, the serial reference, then a longer prompt resumed from the first one's end
-    for prompt, draft, cached in ((first, True, 0), (first, False, 0), (longer, True, len(first))):
+    # drafted from a fresh prefill, then again from its own entry (one token early); the serial reference from
+    # scratch; then a longer prompt from the first one's entry, and again from its own
+    cached = {(True, False): 0, (True, True): len(first) - 1, (False, False): 0, (False, True): 0}
+    for prompt, draft in ((first, True), (first, False), (longer, True)):
         for stop_eos in (False, True):
             got: list[int] = []
             stats = eng.generate(prompt, 32, sampling, lambda new: got.extend(new) or False, draft=draft,
                                  stop_eos=stop_eos)
             assert got == refs[(tuple(prompt), stop_eos)], (prompt, draft, stop_eos)
-            assert stats["cached"] == cached, (prompt, draft, stop_eos)
-    # the kept states are prompt ends: no token past an end token (or any reply token) entered the cache
-    assert [(ids, st.pos) for ids, st, _ in eng.cache] == [(first, len(first)), (longer, len(longer))]
+            want = cached[(draft, stop_eos)] if prompt is first else (len(first) - 1, len(longer) - 1)[stop_eos]
+            assert stats["cached"] == want, (prompt, draft, stop_eos)
+    # the kept states end one token before their prompts: no token past an end token (or any reply token) entered
+    assert [(ids, st.pos) for ids, st, _ in eng.cache.entries] == [(first[:-1], len(first) - 1),
+                                                                   (longer[:-1], len(longer) - 1)]
 
 
 class _Oracle(MultiDecoder):

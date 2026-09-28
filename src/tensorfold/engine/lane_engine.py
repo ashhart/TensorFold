@@ -142,6 +142,7 @@ class LaneStream:
     max_new_tokens: int
     eos_ids: frozenset[int] = frozenset()
     proposer: Any = None
+    prompt_data: Any = None
     emitted: list[int] = field(default_factory=list)
     pending: list[int] = field(default_factory=list)
     cache_len: int = 0

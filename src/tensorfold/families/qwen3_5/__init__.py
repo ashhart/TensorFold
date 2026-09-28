@@ -128,12 +128,10 @@ def check(model_dir: str | Path) -> None:
 
 
 def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 4,
-         **_: Any) -> tuple[Any, Any]:
+         vision: bool = False, vision_urls: bool = False, **_: Any) -> tuple[Any, Any]:
     """Load a supported checkpoint with tensor-unit lane kernels when enabled, otherwise the row-exact decoder."""
 
     from tensorfold.families import read_config
-    from tensorfold.families.qwen3_5.family import Qwen35Family
-    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
     if lane_kernels == "on" and not tensor_units():      # the lane kernels' fragment layouts are the M5's
         raise SystemExit(f"[tensorfold] {TITLE}: --lane-kernels on needs Metal 4 tensor units (an M5-generation GPU), "
@@ -147,16 +145,36 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
             raise ValueError("this format uses the packed affine row kernels; use --lane-kernels auto or off")
         lanes = False
     model, tokenizer = load_lane_model(Path(model_dir))
+    family = lane_family(model, lanes=lanes, drafter=drafter, drafter_bits=drafter_bits, title=TITLE, use=MODELS[0])
+    if vision:
+        from tensorfold.vision.qwen_mlx import QwenVisionFrontend
+        from tensorfold.vision.rotary import install_rotary
+
+        family.vision = QwenVisionFrontend.load(Path(model_dir), family.core.embed_tokens, allow_urls=vision_urls)
+        print(f"[tensorfold] image encoder: {family.vision.workspace_bytes / 1024**3:.2f} GiB workspace measured at "
+              "the largest image request (four images, 4,096 image tokens)", flush=True)
+        config = read_config(model_dir).get("text_config", {})
+        sections = config.get("rope_parameters", {}).get("mrope_section", [11, 11, 10])
+        install_rotary(family.core, sections)
+    return family, tokenizer
+
+
+def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, title: str, use: str) -> Any:
+    """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model`` and wrap it, drafter included."""
+
+    from tensorfold.families.qwen3_5.family import Qwen35Family
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+
     model._tensorfold_lanes = bool(lanes)
     if lanes:
         missed = lane_qmm.uncovered(model)
         if missed:
             kinds = ", ".join(f"{n} {kind}" for kind, n in sorted(missed.items()))
-            raise SystemExit(f"[tensorfold] {TITLE}: the lane kernels do not take this checkpoint's layers ({kinds}): "
-                             f"MLX's kernels would give drafted rows other bits than one-row steps. Use {MODELS[0]}")
+            raise SystemExit(f"[tensorfold] {title}: the lane kernels do not take this checkpoint's layers ({kinds}): "
+                             f"MLX's kernels would give drafted rows other bits than one-row steps. Use {use}")
         install_lane_kernels(model)
     elif not install_row_decoder(model):
-        raise SystemExit(f"[tensorfold] {TITLE}: the lane decoder without tensor units does not take these weights")
+        raise SystemExit(f"[tensorfold] {title}: the lane decoder without tensor units does not take these weights")
     loaded = load_drafter(model, drafter, drafter_bits) if drafter else None
     if lanes:
         family = Qwen35Family(model, drafter=loaded, widest=WIDEST)
@@ -169,7 +187,7 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     decoder = "lane kernels" if lanes else "lane decoder without tensor units"
     print(f"[tensorfold] {decoder}: windows of up to {family.exact_width} rows reproduce one-row steps here "
           f"(ms by rows {timing})", flush=True)
-    return family, tokenizer
+    return family
 
 
 def load_drafter(model: Any, drafter: str, drafter_bits: int = 4) -> Any:
@@ -275,4 +293,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     return Qwen27Engine(Path(model_dir), draft, max_rows=12, tp=tp, rank=rank, master=master, port=master_port,
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
                         streams=streams, context=options.get("context"),
-                        context_explicit=options.get("context_explicit"))
+                        context_explicit=options.get("context_explicit"), vision=bool(options.get("vision", False)),
+                        vision_urls=bool(options.get("vision_urls", False)))

@@ -23,11 +23,11 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
 from tensorfold.cuda.sampling import sample_rows  # noqa: E402
-from tensorfold.cuda.streams import Stream  # noqa: E402
+from tensorfold.cuda.streams import PrefixCache, Stream  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.families.qwen3_5.cuda import decode  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.decode import clone_state, draft_decode, prefill, serial_decode  # noqa: E402
-from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine, entry_end  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.engine import KEEP_ONE, Qwen27Engine, entry_end  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.forward import State  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.multi import MultiDecoder  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.prefill import CHUNK, prefill_chunk, prefill_state  # noqa: E402
@@ -342,7 +342,8 @@ def _engine(w) -> Qwen27Engine:
     engine = object.__new__(Qwen27Engine)
     engine.torch = torch
     engine.tp, engine.rank, engine.max_rows, engine.allow_copy = 1, 0, 12, True
-    engine.w, engine.draft, engine.eos, engine.cache = w, None, tuple(w.config.eos), []
+    engine.w, engine.draft, engine.eos, engine.cache = w, None, tuple(w.config.eos), PrefixCache(KEEP_ONE)
+    engine.points = None
     engine.context_window, engine.concurrent, engine.multi, engine.scheduler = 1 << 14, False, None, None
     return engine
 
@@ -368,7 +369,7 @@ def test_the_engine_resumes_the_next_turn_exactly(monkeypatch, w, sampling, base
     first, second = _turns(base, seed=60 + base)
     engine = _engine(w)
     _generate(engine, first, sampling)
-    assert [ids for ids, _, _ in engine.cache] == [first[:-1]]
+    assert [ids for ids, _, _ in engine.cache.entries] == [first[:-1]]
     captured, sampled = [], []
     real_prefill = decode.prefill
 
@@ -395,8 +396,8 @@ def test_the_engine_resumes_the_next_turn_exactly(monkeypatch, w, sampling, base
     _assert_same_state(st, fresh)
     assert reply == _generate(_engine(w), second, sampling)[0] == _generate(_engine(w), second, sampling,
                                                                            draft=False)[0]
-    assert [ids for ids, _, _ in engine.cache] == [first[:-1], second[:-1]]
-    for ids, entry, _ in engine.cache:
+    assert [ids for ids, _, _ in engine.cache.entries] == [first[:-1], second[:-1]]
+    for ids, entry, _ in engine.cache.entries:
         _assert_same_state(entry, _prefill(monkeypatch, w, ids)[0][0])
 
 

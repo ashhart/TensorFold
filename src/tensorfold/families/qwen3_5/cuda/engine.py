@@ -12,10 +12,7 @@ KEEP_ONE = 4         # prompt states one stream keeps (they share its attention 
 
 
 def entry_end(prompt: Sequence[int]) -> int:
-    """Where a prompt's prefix-cache entry ends: one token before the prompt's end (a one-token prompt: at its end).
-    A chat prompt ends in the generation prompt, ``<think>`` and a newline; a next turn that sends that reply back
-    without its reasoning renders an empty reasoning block, ``<think>`` and two newlines (another token), so it extends
-    all of the prompt but its last token."""
+    """Where a prompt's cache entry ends: one token early, since a next turn sent back without its reasoning renders ``<think>`` and two newlines there."""
 
     return max(1, len(prompt) - 1)
 
@@ -26,7 +23,8 @@ class Qwen27Engine:
     def __init__(self, model_dir: Path, draft_dir: Path | None, *, max_rows: int = 12, tp: int = 1,
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
                  tp_draft: bool = False, allow_copy: bool = True, streams: int = 1,
-                 context: int | None = None, context_explicit: bool | None = None):
+                 context: int | None = None, context_explicit: bool | None = None, vision: bool = False,
+                 vision_urls: bool = False):
         import torch
 
         from .exl3_load import admission, quant_config
@@ -39,9 +37,12 @@ class Qwen27Engine:
         from tensorfold.cuda.capacity import admit, gather_ints
         from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, stream_geometry
         from .affine_memory import weight_transform
+        from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
 
         self.torch = torch
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
+        self.vision = None
+        self.vision_enabled = bool(vision)
         torch.cuda.set_device(0)
         if streams > 1 and tp == 1:          # streams' caches of many sizes come and go: growable segments, less slack
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
@@ -53,7 +54,8 @@ class Qwen27Engine:
             dist.init_process_group("nccl", init_method=f"tcp://{master}:{port}", rank=rank, world_size=2)
             # both ranks must run the same calls: refuse to start when they were given different settings
             flags = torch.tensor([int(draft_dir is not None and tp_draft), max_rows, int(split_head), int(allow_copy),
-                                  streams, -1 if context is None else int(context), int(bool(context_explicit))],
+                                  streams, -1 if context is None else int(context), int(bool(context_explicit)),
+                                  int(vision)],
                                  dtype=torch.int64, device="cuda")
             both = torch.empty((2, flags.numel()), dtype=torch.int64, device="cuda")
             dist.all_gather_into_tensor(both, flags)
@@ -74,7 +76,8 @@ class Qwen27Engine:
             geometry, tensor_bytes = admission(geometry)
         # one admission for one stream or many, on every rank, before any weight loads
         self.capacity_plan = admit(model_dir, context, context_explicit, torch,
-                                   geometry, tensor_bytes,
+                                   capacity_geometry(geometry, model_dir, vision, rank),
+                                   vision_weights(tensor_bytes, vision, rank),
                                    rank=rank, world=tp, gather=gather,
                                    draft_dir=draft_dir if rank == 0 or tp_draft else None,
                                    draft_geometry=lambda text: draft_geometry(text, tp if tp_draft else 1, max_rows,
@@ -95,6 +98,10 @@ class Qwen27Engine:
             # tp_draft: both ranks hold half the drafter and draft together (rank 1 needs --draft too)
             self.draft = DFlash2(draft_dir, full, rank=rank, world=2) if tp == 2 and tp_draft else DFlash2(draft_dir, full)
         del full
+        if vision and rank == 0:
+            from tensorfold.vision.qwen_cuda import QwenCudaVision
+
+            self.vision = QwenCudaVision(model_dir, self.w.norm.device, allow_urls=vision_urls)
         torch.cuda.empty_cache()
         from tensorfold.cuda.markers import resume_points
         from tensorfold.cuda.streams import PrefixCache
@@ -111,7 +118,8 @@ class Qwen27Engine:
             from .multi import MultiDecoder
 
             self.multi = MultiDecoder(self.w, self.draft, allow_copy=allow_copy, rank=rank, world=tp,
-                                      context=self.capacity_plan["cache_slots"], keep=KEEP, points=self.points)
+                                      context=self.capacity_plan["cache_slots"], keep=KEEP, points=self.points,
+                                      vision=self.vision)
             self.multi.calibrate(streams)
             if rank == 0:
                 print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens", flush=True)
@@ -153,30 +161,36 @@ class Qwen27Engine:
         return not (stops and len(prompt) - stops[-1] < MIN_GAP)
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
-                 draft: bool = True, stop_eos: bool = True):
+                 draft: bool = True, stop_eos: bool = True, *, vision=None):
         """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``: past end tokens (``ignore_eos``)."""
 
         from .decode import draft_decode, prefill
 
+        if vision is not None and self.vision is None:
+            raise ValueError("image inputs require starting this engine with --vision")
         if len(prompt) >= self.context_window:
             raise ValueError(f"prompt of {len(prompt)} tokens exceeds the {self.context_window}-token safe capacity; "
                              "shorten the prompt or reserve fewer reply tokens")
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         if self.scheduler is not None:
-            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos)
+            if vision is None:
+                return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos)
+            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
+                                         vision=vision)
         t0 = time.perf_counter()
-        hit = self._resume(prompt) if draft else None
+        hit = self._resume(prompt) if draft and vision is None else None
+        encoded = self.vision.encode(vision, prompt) if vision is not None else None
         if self.tp == 2:
-            return self._generate_tp(prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos)
+            return self._generate_tp(prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos, vision=encoded)
         drafter = self.draft if draft else None
         if hit is not None and drafter is not None:
             drafter.restore(hit[2])
         elif drafter is not None:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
-        stops, keep = self._stops(prompt, hit, draft)
-        end = entry_end(prompt) if draft and self._ends(prompt, stops) else None
+        stops, keep = self._stops(prompt, hit, draft) if vision is None else ((), None)
+        end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
         st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
-                                     limit=self.context_window, stops=stops, keep=keep, keep_at=end)
+                                     limit=self.context_window, stops=stops, keep=keep, keep_at=end, vision=encoded)
         if end is not None:
             self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0
@@ -190,22 +204,26 @@ class Qwen27Engine:
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0)}
 
     # two ranks: rank 0 sends each request's header and prompt to rank 1, both run the same calls
-    def _generate_tp(self, prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos=True):
+    def _generate_tp(self, prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos=True, vision=None):
         from .decode_tp import _share, decode_tp, pack_sampling, prefill_tp
+        from tensorfold.vision.qwen_cuda import broadcast_encoded
 
         dev = self.w.norm.device
         cached = hit[1].pos if hit else 0
-        _share([1, max_tokens, cached, int(draft), *pack_sampling(sampling)], 0, dev)
+        _share([1, max_tokens, cached, int(draft), *pack_sampling(sampling), int(vision is not None)], 0, dev)
         _share(prompt, 0, dev)
+        if vision is not None:
+            vision = broadcast_encoded(vision, 0, dev, hidden=self.w.config.hidden, prompt_length=len(prompt))
         drafter = self.draft if draft else None
         if hit is not None and drafter is not None:
             drafter.restore(hit[2])
         elif drafter is not None:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
-        stops, keep = self._stops(prompt, hit, draft)
-        end = entry_end(prompt) if draft and self._ends(prompt, stops) else None
+        stops, keep = self._stops(prompt, hit, draft) if vision is None else ((), None)
+        end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
         st, pending, *kept = prefill_tp(self.w, prompt, sampling, 0, drafter, state=hit[1] if hit else None,
-                                        limit=self.context_window, stops=stops, keep=keep, keep_at=end)
+                                        limit=self.context_window, stops=stops, keep=keep, keep_at=end,
+                                        vision=vision)
         if end is not None:
             self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0
@@ -225,6 +243,7 @@ class Qwen27Engine:
             return
 
         from .decode_tp import _share, decode_tp, prefill_tp, unpack_sampling
+        from tensorfold.vision.qwen_cuda import broadcast_encoded
 
         dev = self.w.norm.device
         while True:
@@ -232,6 +251,8 @@ class Qwen27Engine:
             _, max_tokens, cached, draft = header[:4]
             sampling = unpack_sampling(header[4:18])
             prompt = _share(None, 1, dev)
+            vision = (broadcast_encoded(None, 1, dev, hidden=self.w.config.hidden, prompt_length=len(prompt))
+                      if len(header) > 18 and header[18] else None)
             drafter = self.draft if draft else None
             hit = self.cache.named(prompt, cached) if cached else None
             if cached and hit is None:
@@ -241,10 +262,12 @@ class Qwen27Engine:
             if drafter is not None:             # a two-rank drafter: mirror rank 0's drafter state
                 drafter.restore(hit[2] if hit is not None else
                                 ([None] * drafter.layers, [None] * drafter.layers, 0, 0))
-            stops, keep = self._stops(prompt, hit, draft)
-            end = entry_end(prompt) if draft and self._ends(prompt, stops) else None     # the same entries as rank 0
+            stops, keep = self._stops(prompt, hit, draft) if vision is None else ((), None)
+            # the same entries as rank 0
+            end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
             st, pending, *kept = prefill_tp(self.w, prompt, sampling, 1, drafter, state=hit[1] if hit else None,
-                                            limit=self.context_window, stops=stops, keep=keep, keep_at=end)
+                                            limit=self.context_window, stops=stops, keep=keep, keep_at=end,
+                                            vision=vision)
             if end is not None:
                 self._remember(list(prompt[:end]), *kept[0])
             result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, 1, drafter, max_rows=self.max_rows,

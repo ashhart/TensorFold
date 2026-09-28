@@ -25,11 +25,12 @@ _SMALL_TAIL = 8 * 1024 * 1024    # an untiled tail is tiled into the stack as a 
 class _Group:
     """A stacked projection: ``weight`` (sum N, K*bits/32) and ``sbt`` (K/64, sum N, 2) for one lane matmul."""
 
-    __slots__ = ("weight", "sbt", "tiled", "sk", "k", "sizes", "added", "members", "held", "sbts", "nt")
+    __slots__ = ("weight", "sbt", "tiled", "sk", "k", "sizes", "added", "members", "held", "sbts", "nt", "rotate")
 
     def __init__(self, weight: Any, sbt: Any, tiled: bool, sk: int, k: int, sizes: tuple[int, ...], added: int,
-                 members: tuple[Any, ...], nt: int = 32) -> None:
+                 members: tuple[Any, ...], nt: int = 32, rotate: Any = None) -> None:
         self.weight, self.sbt, self.tiled, self.sk, self.k, self.sizes = weight, sbt, tiled, sk, k, sizes
+        self.rotate = rotate                                              # the members' shared input transform
         self.nt = nt                                                      # the stack's tile width (lane_qmm)
         self.added = added                                                # bytes not shared with the modules
         self.members = members
@@ -69,10 +70,16 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
 
     from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
-    members = tuple(getattr(parent, name, None) for name in GROUPS[kind])
+    outer = tuple(getattr(parent, name, None) for name in GROUPS[kind])
+    # a projection that transforms its rows first (``rotate``) stacks its ``inner`` matmul when all share the transform
+    members = tuple(getattr(m, "inner", m) if hasattr(m, "rotate") else m for m in outer)
     no = _Unfusable(members)
     if not all(isinstance(m, nn.QuantizedLinear) for m in members):
         return no
+    transforms = {id(getattr(m, "signs", None)) for m in outer}
+    if len(transforms) != 1 or len({hasattr(m, "rotate") for m in outer}) != 1:
+        return no
+    rotate = outer[0].rotate if hasattr(outer[0], "rotate") else None
     for m in members:
         w = m["weight"]
         if not lane_qmm.takes(m) or m.group_size != 64 or "bias" in m or w.dtype != mx.uint32 or w.ndim != 2:
@@ -128,7 +135,8 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
             views.append(m["weight"])
         offset += n
     mx.eval(views)
-    return _Group(weight, sbt, stacked_tiled, sk, k, sizes, sbt.nbytes + copied, members, nt if stacked_tiled else lane_qmm.NT)
+    return _Group(weight, sbt, stacked_tiled, sk, k, sizes, sbt.nbytes + copied, members,
+                  nt if stacked_tiled else lane_qmm.NT, rotate)
 
 
 def _group(parent: Any, kind: str, *, build: bool | None = None) -> _Group | None:
@@ -166,6 +174,8 @@ def _project(parent: Any, kind: str, x: mx.array) -> mx.array | None:
     group = _group(parent, kind)
     if group is None or group.k != k:
         return None
+    if group.rotate is not None:
+        x = group.rotate(x)
     return lane_qmm.lane_matmul(x, group.weight, group.sbt, tiled=group.tiled, sk=group.sk, nt=group.nt)
 
 

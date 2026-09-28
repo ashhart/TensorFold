@@ -145,6 +145,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
 
             try:
                 length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= 32 * 1024**2:
+                    raise RequestError("request body exceeds the 32 MiB limit")
                 body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
                 validate_modalities(body)
                 if _REQUEST_LOG and body.get("priority") != "background":   # batch jobs are not client traffic
@@ -152,10 +154,10 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         handle.write(json.dumps(body) + "\n")
                 raw_kw: dict[str, Any] = {}
                 if is_chat_completion:
-                    messages = normalize_messages(body.get("messages"))
+                    messages = normalize_messages(body.get("messages"), allow_images=getattr(app, "vision", None) is not None)
                     tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
                 elif isinstance(body.get("messages"), list) and body["messages"]:
-                    messages, tools = normalize_messages(body["messages"]), []    # a completion sent as a chat
+                    messages, tools = normalize_messages(body["messages"], allow_images=getattr(app, "vision", None) is not None), []
                 elif getattr(app, "accepts_raw_prompt", False):
                     # a text completion reads its prompt raw, as vLLM and mlx_lm do: no chat template, no think block
                     messages, tools = [], []

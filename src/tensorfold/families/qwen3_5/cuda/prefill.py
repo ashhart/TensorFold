@@ -56,7 +56,7 @@ def _grow(st: State, i: int, need: int) -> tuple[torch.Tensor, torch.Tensor]:
 
 @torch.no_grad()
 def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = False, capture_taps: bool = False,
-                  last: bool = True, every: bool = False, cut: int = 0):
+                  last: bool = True, every: bool = False, cut: int = 0, vision=None):
     """Commit ``tokens`` at [st.pos, st.pos + W) into ``st`` without writing through its entries (``every``: all rows' final normed states; ``cut``: also the state after the first ``cut`` rows, the GDN chains run as two launches with one launch's bits)."""
 
     c = w.config
@@ -67,10 +67,15 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
     p0 = st.pos
     keep = c.conv_kernel - 1
     dev = tokens.device
-    pos = torch.arange(p0, p0 + W, device=dev, dtype=torch.int32)
+    pos = (torch.arange(p0, p0 + W, device=dev, dtype=torch.int32) if vision is None
+           else vision.positions[:, p0:p0 + W].contiguous())
     windows = (torch.arange(W, device=dev, dtype=torch.int32)[:, None]
                + torch.arange(keep + 1, device=dev, dtype=torch.int32)[None, :])
     x = glue.embedding(tokens.to(torch.int32), w.embed)
+    if vision is not None:
+        from tensorfold.vision.qwen_cuda import replace_rows
+
+        x = replace_rows(x, vision, p0, p0 + W)
     pending: torch.Tensor | None = None
     taps: list[torch.Tensor] = []
     part = clone_state(st) if cut else None
@@ -116,7 +121,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
                 key = _mm(h, attn.k)
                 value = _mm(h, attn.v).reshape(W, c.kv_heads, c.head_dim)
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos, w.inv_freq, c.eps, heads=c.heads,
-                                    kv_heads=c.kv_heads, head_dim=c.head_dim)
+                                    kv_heads=c.kv_heads, head_dim=c.head_dim, mrope_section=c.mrope_section)
             kbuf, vbuf = _grow(st, i, p0 + W)
             kbuf[p0:p0 + W] = key.view(W, c.kv_heads, c.head_dim)
             vbuf[p0:p0 + W] = value
@@ -152,17 +157,17 @@ def chunks(start: int, end: int, size: int = CHUNK) -> list[tuple[int, int]]:
 
 @torch.no_grad()
 def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = False, draft=None,
-                  size: int = CHUNK, keep_at: int | None = None):
-    """Commit prompt[st.pos:] into ``st``; the drafter gets taps only for rows its window keeps at the prompt's end.
-
-    ``keep_at`` returns ``(normed, (state, snapshot))``: also the state after prompt[:keep_at], on the prompt state's
-    key/value buffers, and the drafter's snapshot there. The spans do not change; the one holding the point splits
-    its GDN chains there (``prefill_chunk(cut=...)``)."""
+                  size: int = CHUNK, keep_at: int | None = None, vision=None):
+    """Commit prompt[st.pos:] into ``st``, tapping the drafter's window; ``keep_at``: ``(normed, (state, snapshot))``, the state after prompt[:keep_at] from a cut chunk."""
 
     dev = w.norm.device
     base, n = st.pos, len(prompt)
     if keep_at is not None and not base <= keep_at <= n:
         raise ValueError(f"keep_at {keep_at} is outside the prefilled range [{base}, {n}]")
+    if vision is not None:                         # a later prefill step goes on with the rope its first step set
+        if base and getattr(st, "rope_delta", None) is not vision.rope_delta:
+            raise ValueError("image prompts require a fresh prefill state")
+        st.rope_delta = vision.rope_delta
     ids = torch.tensor(list(prompt[base:]), dtype=torch.int32, device=dev)
     normed, kept = None, None
     end = n if keep_at is None else keep_at        # the drafter's window then also covers the kept point
@@ -178,7 +183,7 @@ def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = Fa
         cut = keep_at - a if keep_at is not None and a < keep_at < b else 0
         want = draft is not None and b > tap_from
         normed, taps, *part = prefill_chunk(w, ids[a - base:b - base], st, tp=tp, capture_taps=want,
-                                            last=j == len(spans) - 1, cut=cut)
+                                            last=j == len(spans) - 1, cut=cut, vision=vision)
         snap = None
         if want:
             rows = taps[max(0, tap_from - a):]

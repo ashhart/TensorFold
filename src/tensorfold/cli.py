@@ -14,7 +14,7 @@ from typing import Any
 
 from tensorfold import __version__
 from tensorfold.server.memory_budget import MEMORY_FRACTION
-from tensorfold.serve_options import check as _check_serve_options
+from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
 COMMANDS = ("serve", "pull", "models", "info", "update")
 
@@ -35,6 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     endpoint.add_argument("--port", type=int, default=8080)
     endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
+    endpoint.add_argument("--vision", action="store_true", help="enable image input for Qwen3.5/3.8 dense vision checkpoints")
+    endpoint.add_argument("--vision-urls", action="store_true",
+                          help="with --vision, accept public HTTP(S) image URLs (default: data URLs only)")
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
     generation.add_argument("--context", type=int, default=None,
@@ -340,6 +343,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
     if getattr(args, "kv_dtype", "bf16") != "bf16":
         options["kv_dtype"] = args.kv_dtype
+    options.update(_vision_options(args))
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
     if args.ple_on_ssd:
@@ -412,7 +416,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.ple_on_ssd and not hasattr(family.package, "ple_bytes"):
         raise ValueError(f"--ple-on-ssd: {family.title} has no n-gram (PLE) tables to read from SSD")
     backend = _backend(args.backend, family)
-    _check_serve_options(args, family, backend)
+    _check_serve_options(args, family, backend, config_dir)
     families.require_readable(family, families.read_config(config_dir), backend)
     _note_untested(family, args.model)
     required_files = getattr(family.package, "REQUIRED_FILES", {}).get(args.model, ())
@@ -482,6 +486,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     parallel = _parallel(args.parallel)
     options: dict[str, Any] = {"lane_kernels": args.lane_kernels, "drafter": drafter,
                                "drafter_bits": args.drafter_bits, "parallel": parallel}
+    options.update(_vision_options(args))
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
     if args.ple_on_ssd:

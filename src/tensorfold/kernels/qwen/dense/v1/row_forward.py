@@ -125,6 +125,10 @@ def _attention(attn: Any, x: mx.array, items: Sequence[Any], rows: _Rows) -> mx.
     keys = keys.transpose(0, 2, 1, 3)
     values = values.transpose(0, 2, 1, 3)
     pos = rows.positions
+    if any(getattr(c, "vision_rope_delta", 0) for c in items):
+        shifts = [int(getattr(c, "vision_rope_delta", 0)) for c, width in zip(items, rows.widths)
+                  for _ in range(width)]
+        pos = pos + mx.array(shifts, dtype=mx.int32)
     queries = attn.rope(queries.transpose(2, 1, 0, 3), offset=pos).transpose(2, 1, 0, 3)
     keys = attn.rope(keys.transpose(2, 1, 0, 3), offset=pos).transpose(2, 1, 0, 3)
     if rows.single:

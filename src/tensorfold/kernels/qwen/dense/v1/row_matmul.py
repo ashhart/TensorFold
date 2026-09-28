@@ -139,8 +139,11 @@ def build(model: Any, backend: Backend) -> dict[str, int]:
 
 
 def project(module: Any, x: mx.array) -> mx.array:
-    """One projection through the backend (any bias added after)."""
+    """One projection through the backend (any bias added after); a module with ``project_rows`` runs its own."""
 
+    own = getattr(module, "project_rows", None)
+    if own is not None:
+        return own(x)
     y = BACKEND(x, module["weight"], module["scales"], module["biases"], module.group_size, module.bits)
     if "bias" in module:
         y = y + module["bias"]
@@ -154,6 +157,9 @@ def project_stack(stack: Stack, x: mx.array) -> mx.array:
 def logits(head: Any, x: mx.array) -> mx.array:
     """The head over rows ``x`` (final-normed hidden states [1, R, D]) through the row-exact matmul."""
 
+    own = getattr(head, "project_rows", None)
+    if own is not None:
+        return own(x)
     return BACKEND(x, head["weight"], head["scales"], head["biases"], head.group_size, head.bits)
 
 
@@ -216,6 +222,7 @@ def fits(model: Any, backend: Backend) -> bool:
 
     language_model = getattr(model, "language_model", model)
     head = getattr(language_model, "lm_head", None)
+    head = getattr(head, "inner", head)              # a head that transforms its rows first wraps its matmul
     if not isinstance(head, nn.QuantizedLinear) or not backend.fits(head):
         return False
     for layer in language_model.model.layers:

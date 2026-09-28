@@ -110,7 +110,7 @@ def test_one_stream_stops_early_and_stays_exact():
     # the prompt end kept by the stopped request resumes a longer prompt with a fresh prefill's tokens
     longer = prompt + ref[:5] + [42, 43]
     got = _run(app, longer, sampling, count=12)
-    assert got["stats"]["cached"] == len(prompt)
+    assert got["stats"]["cached"] == len(prompt) - 1                   # the entry ends a token early (#65)
     assert got["stats"]["token_sha"] == server.token_sha(_serial(w, longer, sampling, 12))
     with pytest.raises(RuntimeError, match="emit failed"):
         _run(app, prompt, sampling, emit=_failing(3))

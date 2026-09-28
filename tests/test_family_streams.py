@@ -149,6 +149,22 @@ def test_streams_together_emit_what_they_emit_alone(wrong_every, count):
             assert stream.min_rows >= 2
 
 
+def test_the_first_token_is_out_before_the_first_drafts_settle():
+    model = StreamsModel(wrong_every=3)
+    settled = []
+    settle = model.settle
+    model.settle = lambda *args: settled.append(args[3]) or settle(*args)
+    engine = LaneEngine(model)
+    stream = _stream(0, SPECS[1])
+    engine.add_stream(stream)
+    assert stream.emitted == chain(SPECS[1][0][-1], SPECS[1][1], SPECS[1][2])[:1] and settled == []
+    engine.step()
+    assert settled[:1] == [len(SPECS[1][0]) + 1]      # settled once, at the first round, for the position after it
+    while engine.active_count:
+        engine.step()
+    assert stream.emitted == chain(SPECS[1][0][-1], SPECS[1][1], SPECS[1][2])
+
+
 def test_streams_join_and_leave_between_rounds():
     model = StreamsModel(wrong_every=3)
     engine = LaneEngine(model)

@@ -60,8 +60,9 @@ class ChatTemplate:
             lambda messages: self.template.render(**self.specials, messages=messages, add_generation_prompt=False))
 
     def render(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None,
-               enable_thinking: bool, extra: dict[str, Any] | None = None) -> str:
-        messages = _normalize_tool_call_arguments(normalize_messages(messages, late_system=self.late_system))
+               enable_thinking: bool, extra: dict[str, Any] | None = None, allow_images: bool = False) -> str:
+        messages = _normalize_tool_call_arguments(normalize_messages(messages, late_system=self.late_system,
+                                                                     allow_images=allow_images))
         kwargs = dict(self.specials, messages=messages, tools=tools or None, add_generation_prompt=True,
                       enable_thinking=enable_thinking)
         kwargs.update(extra or {})
@@ -82,6 +83,7 @@ class PreparedRequest:
     sampling: Any          # the engine's ``Sampling``, or None for greedy decoding
     ignore_eos: bool = False
     stop: tuple[str, ...] = ()
+    vision: Any = None
 
 
 def _native_context(model_dir: Path) -> int:
@@ -105,6 +107,7 @@ class App:
         from tokenizers import Tokenizer
 
         self.engine = engine
+        self.vision = getattr(engine, "vision", None)
         self.served = served
         self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         self.template = ChatTemplate(model_dir)
@@ -188,10 +191,22 @@ class App:
         if chat:
             if not isinstance(body.get("messages"), list):
                 raise RequestError("messages must be a list")
-            try:
-                text = self.template.render(body["messages"], tools=tools, enable_thinking=thinking, extra=kwargs)
-            except TemplateError as exc:     # the checkpoint's template refuses the request (``raise_exception``)
-                raise RequestError(f"the chat template rejected the request: {exc}") from exc
+            from tensorfold.server.prompts import has_images, prepare_images
+
+            def render(messages: list[dict[str, Any]], **images: bool) -> str:   # text renders as it always has
+                try:
+                    return self.template.render(messages, tools=tools, enable_thinking=thinking, extra=kwargs,
+                                                **images)
+                except TemplateError as exc:     # the checkpoint's template refuses the request (``raise_exception``)
+                    raise RequestError(f"the chat template rejected the request: {exc}") from exc
+
+            if has_images(body["messages"]):
+                rendered = prepare_images(self.vision, body["messages"],
+                                          lambda messages: render(messages, allow_images=True),
+                                          context_limit=self._context_limit())
+                return PreparedRequest(rendered.tokens, max_tokens, tools, thinking,
+                                       self.sampling_for(body, rendered.tokens), ignore_eos, stop, rendered.vision)
+            text = render(body["messages"])
         else:
             text = body.get("prompt")
             if not isinstance(text, str):
@@ -329,7 +344,14 @@ class App:
             options["stop_eos"] = not prepared.ignore_eos
 
         def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
-            return self.engine.generate(ids, count, sampling, feed, **options)
+            extra = dict(options)
+            if prepared.vision is not None:          # a gate's continuation keeps the images, positions extended
+                from tensorfold.vision.qwen_processing import continued
+
+                same = list(ids) == list(prepared.vision.token_ids)
+                extra["vision"] = prepared.vision if same else continued(prepared.vision, ids,
+                                                                       self.vision.frontend.config)
+            return self.engine.generate(ids, count, sampling, feed, **extra)
 
         # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
         with (nullcontext() if getattr(self.engine, "concurrent", False) else self.lock):
@@ -445,7 +467,12 @@ def make_handler(app: App):
             if not chat and not self.path.rstrip("/").endswith("/completions"):
                 return self._json(404, {"error": "not found"})
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                length = int(self.headers.get("Content-Length", 0))
+                if not 0 <= length <= 32 * 1024**2:
+                    self.close_connection = True             # the unread body must not reach the next request
+                    return self._json(400, {"error": {"message": "request body exceeds the 32 MiB limit",
+                                                      "type": "invalid_request_error"}})
+                body = json.loads(self.rfile.read(length) or b"{}")
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return self._json(400, {"error": {"message": "the request body is not JSON", "type": "invalid_request_error"}})
             try:

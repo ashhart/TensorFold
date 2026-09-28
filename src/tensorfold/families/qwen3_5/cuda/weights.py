@@ -126,6 +126,7 @@ class Config:
     experts: int = 0          # routed experts a MoE layer picks from (0: dense MLPs)
     top_k: int = 0
     moe_width: int = 0
+    mrope_section: tuple[int, int, int] = (11, 11, 10)
 
     @classmethod
     def read(cls, model_dir: str | Path) -> "Config":
@@ -154,6 +155,7 @@ class Config:
             rope_theta=float(rope.get("rope_theta", t.get("rope_theta") or 10000000.0)),
             eos=eos, experts=int(t.get("num_experts", 0)), top_k=int(t.get("num_experts_per_tok", 0)),
             moe_width=int(t.get("moe_intermediate_size", 0)),
+            mrope_section=tuple(rope.get("mrope_section", (11, 11, 10))),
         )
 
     def is_linear(self, layer: int) -> bool:

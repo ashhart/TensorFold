@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from functools import partial
 import time
 from typing import Any, Sequence
 
 from tensorfold.engine.family_common import cache_arrays, drop_spares
+from tensorfold.engine.prefill_plan import PromptChunks
 
 
 class FamilyPrefill:
@@ -13,7 +15,8 @@ class FamilyPrefill:
 
     _prefill_at: int | None = None                     # the prompt position the working cache holds whole
 
-    def _family_feed(self, tokens: Sequence[int], cache: list[Any], chunks: Sequence[tuple[int, int]]) -> Any:
+    def _family_feed(self, tokens: Sequence[int], cache: list[Any], chunks: Sequence[tuple[int, int]],
+                     prompt_data: Any = None) -> Any:
         """Absorb the ``chunks`` ([begin, end) of ``tokens``); the last hidden state [1, 1, D], draft head fed too."""
 
         import mlx.core as mx
@@ -32,7 +35,9 @@ class FamilyPrefill:
             if self.prefill_guard is not None:
                 self.prefill_guard.before_chunk(cache, len(chunk))
             self._prefill_at = None                    # a chunk in flight: the cache holds no prompt prefix whole
-            hidden = feed(mx.array([chunk], dtype=mx.uint32), cache)
+            inputs = mx.array([chunk], dtype=mx.uint32)
+            hidden = (self.model.prefill_vision(inputs, cache, prompt_data, begin, end)
+                      if prompt_data is not None else feed(inputs, cache))
             self._fed_rows = len(chunk)
             self.prefill_chunks += 1
             last = hidden[:, -1:, :]
@@ -42,8 +47,9 @@ class FamilyPrefill:
                 if nxt:
                     self.model.absorb_draft_context(hidden[:, :len(nxt)], mx.array(nxt, dtype=mx.uint32), cache,
                                                     start=0)
-            # an earlier chunk is read only through its caches: MLX then skips its last layer's attention and MLP
-            mx.eval(*((last,) if drafting or n + 1 == len(chunks) else ()), *cache_arrays(cache))
+            # an earlier chunk is read only through its caches (and a taps head's taps): MLX skips its last layer
+            reads_last = n + 1 == len(chunks) or (drafting and getattr(self.model, "draft_reads_hidden", True))
+            mx.eval(*((last,) if reads_last else ()), *cache_arrays(cache))
             self._prefill_at = end
             if self.prefill_guard is not None:
                 self.prefill_guard.after_chunk(cache, len(chunk))
@@ -62,8 +68,16 @@ class FamilyPrefill:
         prompt = stream.prompt_ids
         if not prompt:
             raise ValueError(f"{stream.stream_id}: empty prompt")
-        chunks = self.prompt_chunks(prompt)
+        prepared = getattr(stream, "prompt_data", None)
+        # an image prompt never resumes, so it needs no cut at message starts: its chunks are the step grid alone
+        chunks = self.prompt_chunks(prompt) if prepared is None else PromptChunks(
+            None, len(prompt), step=getattr(self.prefill_plan, "step", None) or self.prefill_step)
         work, start = self._family_start(cache, cached_tokens, chunks)
+        if prepared is not None:
+            if start or cache is not None:
+                raise ValueError("image prompts require a fresh cache")
+            prepared = self.model.encode_vision(prepared, work)
+            checkpoints_at = ()
         cached_tokens = self._prefill_at = start
         stream.history_checkpoints = []
         try:
@@ -75,11 +89,11 @@ class FamilyPrefill:
                     stream.history_checkpoints.append((list(prompt[:boundary]),
                                                        drop_spares(self.copy_single_cache(work))))
                 start = boundary
-            hidden = self._family_feed(prompt, work, chunks.between(start, len(prompt)))
+            hidden = self._family_feed(prompt, work, chunks.between(start, len(prompt)), prepared)
         except BaseException:
             at = self._prefill_at                      # stopped between chunks: keep the progress, a taken prefix too
             kept = [len(tokens) for tokens, _ in stream.history_checkpoints]
-            if at is not None and at in chunks and at not in kept:
+            if prepared is None and at is not None and at in chunks and at not in kept:
                 stream.history_checkpoints.append((list(prompt[:at]), drop_spares(self.copy_single_cache(work))))
             raise
         first = self._family_first(stream, work, hidden, cached_tokens, self._fed_rows - 1)
@@ -104,8 +118,9 @@ class FamilyPrefill:
         if self.family_mtp and stream.drafts:
             # the head reads the prompt's last position and the first token, and drafts the one after it
             firsts = self.model.speculate(work, token, prompt_len - 1, stream.sampling, start=row)
-            self._next[stream.stream_id] = self.model.settle(work, 1, firsts.reshape(-1)[:1], prompt_len + 1,
-                                                             stream.sampling, self._depth(stream))
+            # the first drafts settle at the next round, so the first token goes out without the draft forward
+            self._next[stream.stream_id] = partial(self.model.settle, work, 1, firsts.reshape(-1)[:1],
+                                                   prompt_len + 1, stream.sampling, self._depth(stream))
         elif self.pipelined:
             self._queue_next(stream, work, token)
         return token

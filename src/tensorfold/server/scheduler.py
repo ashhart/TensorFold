@@ -52,6 +52,7 @@ class ChatJob:
     ignore_eos: bool = False
     stop_check: Callable[[list[int]], bool] | None = None
     call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
+    vision: Any = None
 
 
 class _JobQueue(queue.PriorityQueue):
@@ -400,7 +401,9 @@ class Scheduler:
             job.cancellation.check()
             memory = self.prompt_memory
             if memory is not None:
-                memory.begin(len(job.prompt_ids), int(job.max_tokens), admit=self.checkpoints is None)
+                memory.begin(len(job.prompt_ids), int(job.max_tokens), admit=self.checkpoints is None or job.vision is not None)
+                if job.vision is not None:
+                    memory.require_workspace(self.engine.model.vision.estimate_workspace_bytes(job.vision))
             self.engine.prefill_guard = PrefillGuard(job.cancellation, memory)
             cache = None
             cached = 0
@@ -409,7 +412,7 @@ class Scheduler:
             # checkpoints sit at the prompt's chunk starts: a shared prefix is kept at the start at or before its end
             starts = self.engine.prompt_chunks(job.prompt_ids)
             shared_at = {starts.floor(n) for n in job.shared_prefix_lens} - {0}
-            if self.checkpoints is not None:
+            if self.checkpoints is not None and job.vision is None:
                 usable = lambda n: n in starts
                 self._read_disk_block(job.prompt_ids, usable)
                 entry = self.checkpoints.peek(job.prompt_ids, usable=usable)
@@ -443,6 +446,8 @@ class Scheduler:
                 think_end=int(job.think_end),
                 think_open=bool(job.think_budget),
                 call_gate=job.call_gate,
+                prompt_data=job.vision,
+                retain=job.vision is None,
             )
             job.stream = stream
             self.engine.add_stream(stream, cache=cache, cached_tokens=cached, checkpoints_at=checkpoints_at)
@@ -474,7 +479,7 @@ class Scheduler:
         """Store the prefixes the job's prefill kept (system blocks pinned and saved to disk), once."""
 
         stream = job.stream
-        if stream is None:
+        if stream is None or job.vision is not None:
             return
         kept, stream.history_checkpoints = stream.history_checkpoints, []
         for tokens, snapshot in kept if self.checkpoints is not None else ():
@@ -503,7 +508,7 @@ class Scheduler:
             return
         stream = job.stream
         retained = self.engine.finished_caches.pop(job.job_id, None)
-        if retained is not None and self.checkpoints is not None:
+        if retained is not None and self.checkpoints is not None and job.vision is None:
             tokens, cache = retained
             if len(tokens) > len(job.prompt_ids):
                 self.checkpoints.insert(tokens, cache, last_prompt=job.prompt_ids)

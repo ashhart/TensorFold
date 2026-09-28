@@ -95,6 +95,7 @@ class ChatApp(RequestOptions):
         if checkpoint_slots is None:
             checkpoint_slots = max(3 * int(lanes), 8)
         self._model = model
+        self.vision = getattr(model, "vision", None)
         self.served_name = served_name
         self.model_ids = served_model_ids(served_name, model_aliases)
         self.max_batch_size = int(lanes)
@@ -345,15 +346,12 @@ class ChatApp(RequestOptions):
         stops = StopPolicy(fields, self.tokenizer, self.tokenizer_lock, self.stop_ids)
         requested = fields.get("enable_thinking")
         thinking = self.enable_thinking if requested is None else bool(requested)
+        from tensorfold.server.prompts import prepare_prompt
+
         if prompt is not None:
-            thinking, history_len = False, 0
-            if isinstance(prompt, str):
-                with self.tokenizer_lock:
-                    prompt_ids = [int(t) for t in self.tokenizer.encode(prompt)]
-            else:
-                prompt_ids = [int(t) for t in prompt]
-        else:
-            prompt_ids, history_len = self.render(messages, tools, thinking=thinking)
+            thinking = False
+        rendered = prepare_prompt(self, messages, tools, thinking, prompt, fields)
+        prompt_ids, history_len = rendered.tokens, rendered.history_len
         cancellation.check()
         if not prompt_ids:
             raise RequestError("rendered prompt is empty")
@@ -373,7 +371,7 @@ class ChatApp(RequestOptions):
                     "including chat template and thinking tokens."
                 )
             limit = min(limit, room)
-        system_len = 0 if prompt is not None else self.system_prefix_len(messages, tools, prompt_ids, thinking=thinking)
+        system_len = 0 if prompt is not None or rendered.vision is not None else self.system_prefix_len(messages, tools, prompt_ids, thinking=thinking)
         spec = self._resolve_sampling(fields, temperature, prompt_ids)
         drafts = self.use_proposer and fields.get("draft", True) is not False
 
@@ -392,6 +390,7 @@ class ChatApp(RequestOptions):
                 drafts=drafts,
                 ignore_eos=stops.ignore_eos, stop_check=stops if stops.strings else None,
                 cancellation=cancellation, call_gate=self._call_gate(fields, prompt_ids, tools),
+                vision=rendered.vision,
             )
             budget = int(fields.get("thinking_budget") or self.thinking_budget) if thinking else 0
             if budget > 0:

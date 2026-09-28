@@ -158,6 +158,16 @@ class PromptMemory:
         if not self.fits(current_cache, keep=keep):
             raise self._refusal(current_cache)
 
+    def require_workspace(self, size: int) -> None:
+        """Reserve image encoder workspace beside the complete prompt and reply cache before encoding."""
+        if type(size) is not int or size < 0:
+            raise ValueError("workspace size must be a nonnegative byte count")
+        with self._memory_lock:
+            while self.projected(self.prompt, extra_bytes=size) > self.budget:
+                if not self._reclaim():
+                    raise RequestError("image encoding and this prompt exceed the memory budget; reduce image "
+                                       "resolution or count, shorten the prompt, or use a smaller checkpoint")
+
     def fits(self, current_cache: Any = None, *, keep: Any = None) -> bool:
         while self.projected(self.prompt, current_cache=current_cache) > self.budget:
             if not self._reclaim(keep=keep):

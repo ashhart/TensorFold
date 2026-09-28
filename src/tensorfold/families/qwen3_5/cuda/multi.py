@@ -73,10 +73,11 @@ class MultiDecoder:
     """The ``Scheduler``'s decoder on one GPU or as ``rank`` of two; a stream's window holds at most 16 rows."""
 
     def __init__(self, w: Weights, draft=None, *, max_rows: int = 16, allow_copy: bool = True, stop_eos: bool = True,
-                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None) -> None:
+                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None) -> None:
         if not 1 <= max_rows <= 16:
             raise ValueError("a stream's window is 1 to 16 rows (the multi-stream GDN tree kernel's limit)")
         self.w, self.draft, self.max_rows, self.allow_copy = w, draft, max_rows, allow_copy
+        self.vision = vision
         self.context = context                                # prompt plus reply tokens a stream holds (0: no bound)
         self.eos = tuple(w.config.eos) if stop_eos else ()
         self.rank, self.world, self.device = rank, world, w.norm.device
@@ -113,11 +114,22 @@ class MultiDecoder:
                 raise ValueError(f"a prompt of {len(s.prompt)} tokens leaves no room in the {self.context}-token "
                                  "context (--context)")
             s.count = min(s.count, room)
-        hit = self.cache.longest(s.prompt) if s.draft else None
+        prepared = getattr(s, "vision", None)
+        if prepared is not None and self.vision is None:
+            raise ValueError("image inputs require starting this engine with --vision")
+        encoded = self.vision.encode(prepared, s.prompt) if prepared is not None else None
+        hit = self.cache.longest(s.prompt) if s.draft and encoded is None else None
         s.sid, s.cached = self.next_id, len(hit[0]) if hit else 0
         self.next_id += 1
-        self._send([ADMIT, s.sid, s.count, int(s.draft), s.cached, *pack_sampling(s.sampling)])
+        self._send([ADMIT, s.sid, s.count, int(s.draft), s.cached, *pack_sampling(s.sampling),
+                    int(encoded is not None)])
         self._send(list(s.prompt))
+        if self.world == 2 and encoded is not None:     # rank 1 takes the image rows as rank 0 encoded them
+            from tensorfold.vision.qwen_cuda import broadcast_encoded
+
+            encoded = broadcast_encoded(encoded, 0, self.device, hidden=self.w.config.hidden,
+                                        prompt_length=len(s.prompt))
+        s.vision = encoded
         self._queue(s, hit)
 
     def _queue(self, s: Stream, hit) -> None:
@@ -128,7 +140,7 @@ class MultiDecoder:
         s.snap = None if drafter is None else own(hit[2]) if hit and hit[2] is not None else \
             ([None] * drafter.layers, [None] * drafter.layers, 0, 0)
         s.stops = ([p for p in self.points(s.prompt) if p >= state.pos + MIN_GAP]
-                   if self.points is not None and s.draft else [])
+                   if self.points is not None and s.draft and s.vision is None else [])    # image prompts keep none
         self.filling.append(s)
 
     def _fill(self) -> list[Stream]:
@@ -162,9 +174,10 @@ class MultiDecoder:
             if drafter is not None:
                 drafter.restore(s.snap)
             n = len(s.prompt)             # the prompt end is kept one token early, unless a message start covers it
-            end = entry_end(s.prompt) if stop == n and s.draft and not (s.stops and n - s.stops[-1] < MIN_GAP) \
-                else None
-            out = prefill_state(self.w, s.prompt[:stop], s.st, tp=self.world == 2, draft=drafter, keep_at=end)
+            end = entry_end(s.prompt) if (stop == n and s.draft and s.vision is None
+                                          and not (s.stops and n - s.stops[-1] < MIN_GAP)) else None
+            out = prefill_state(self.w, s.prompt[:stop], s.st, tp=self.world == 2, draft=drafter, keep_at=end,
+                                vision=s.vision)
             normed = out if end is None else out[0]
             if drafter is not None:
                 s.snap = drafter.snapshot()
@@ -359,10 +372,17 @@ class MultiDecoder:
             if msg[0] == ADMIT:
                 sid, count, draft, cached = msg[1:5]
                 s = Stream(_share(None, 1, self.device), count, unpack_sampling(msg[5:19]), draft=bool(draft), sid=sid)
+                vision = None
+                if len(msg) > 19 and msg[19]:
+                    from tensorfold.vision.qwen_cuda import broadcast_encoded
+
+                    vision = broadcast_encoded(None, 1, self.device, hidden=self.w.config.hidden,
+                                               prompt_length=len(s.prompt))
                 hit = self.cache.named(s.prompt, cached) if cached else None
                 if cached and hit is None:
                     raise RuntimeError(f"rank 1 has no cached state for the {cached} tokens rank 0 resumes from")
                 s.cached = cached
+                s.vision = vision
                 self._queue(s, hit)
             elif msg[0] == FILL:
                 self._step(next(s for s in self.filling if s.sid == msg[1]), msg[2])

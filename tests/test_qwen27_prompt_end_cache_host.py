@@ -29,7 +29,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from tensorfold.families.qwen3_5.cuda.engine import KEEP, Qwen27Engine, entry_end
+from tensorfold.cuda.streams import PrefixCache
+from tensorfold.families.qwen3_5.cuda.engine import KEEP, KEEP_ONE, Qwen27Engine, entry_end
 
 NL, NL2 = 198, 271          # Qwen's "\n" and "\n\n"
 THINK, END_THINK = 300, 301  # stand-ins for <think> and </think> (the real ids are past the toy vocabularies)
@@ -83,7 +84,8 @@ class Recorder:
     def __init__(self):
         self.prefills = []
 
-    def prefill(self, w, prompt, sampling, drafter=None, *, state=None, keep_at=None, rank=None):
+    def prefill(self, w, prompt, sampling, drafter=None, *, state=None, keep_at=None, rank=None, limit=0, stops=(),
+                keep=None, vision=None):
         start = state.pos if state is not None else 0
         if state is not None:
             assert list(prompt[:start]) == state.ids, "resumed from a state that is not a prefix of the prompt"
@@ -108,7 +110,7 @@ def _bare_engine(tp=1, rank=0, drafter=None):
     engine = object.__new__(Qwen27Engine)
     engine.tp, engine.rank, engine.max_rows, engine.allow_copy = tp, rank, 12, True
     engine.w = SimpleNamespace(norm=SimpleNamespace(device="cpu"))
-    engine.draft, engine.eos, engine.cache = drafter, (0,), []
+    engine.draft, engine.eos, engine.cache, engine.points = drafter, (0,), PrefixCache(KEEP_ONE), None
     engine.context_window, engine.scheduler, engine.multi = 1 << 20, None, None
     return engine
 
@@ -119,9 +121,10 @@ def _one_gpu(monkeypatch, drafter=None):
     fake = types.ModuleType(PKG + ".decode")
     fake.prefill = rec.prefill
 
-    def draft_decode(w, st, prompt, pending, count, sampling, draft, *, max_rows, allow_copy, on_tokens, inplace):
+    def draft_decode(w, st, prompt, pending, count, sampling, draft, *, max_rows, allow_copy, on_tokens, inplace,
+                     stop_eos=True):
         # the decode may commit into the prompt state: no entry holds it
-        assert inplace and all(st is not entry for _, entry, _ in engine.cache)
+        assert inplace and all(st is not entry for _, entry, _ in engine.cache.entries)
         result = rec.decode(st, prompt, pending, count)
         on_tokens(result.tokens[1:])
         return result
@@ -136,14 +139,14 @@ def _run(engine, prompt, max_tokens=4, **kwargs):
 
 
 def _entries(engine):
-    return [ids for ids, _, _ in engine.cache]
+    return [ids for ids, _, _ in engine.cache.entries]
 
 
 def _check_entries(engine):
-    """At most two entries, each holding the state for exactly its ids."""
+    """At most ``KEEP_ONE`` entries, each holding the state for exactly its ids."""
 
-    assert len(engine.cache) <= 2
-    for ids, st, _ in engine.cache:
+    assert len(engine.cache.entries) <= KEEP_ONE
+    for ids, st, _ in engine.cache.entries:
         assert st.ids == ids and st.pos == len(ids)
 
 
@@ -202,10 +205,10 @@ def test_a_one_token_prompt_keeps_its_whole_prompt(monkeypatch):
 def test_the_serial_reference_keeps_nothing_and_leaves_the_cache_alone(monkeypatch):
     engine, rec = _one_gpu(monkeypatch)
     _run(engine, list(range(20, 30)))
-    before = list(engine.cache)
+    before = list(engine.cache.entries)
     _run(engine, list(range(20, 30)), draft=False)
     assert rec.prefills[-1].start == 0 and rec.prefills[-1].keep_at is None
-    assert engine.cache == before
+    assert engine.cache.entries == before
 
 
 def test_a_client_stop_after_the_first_token_keeps_the_prompt_entry(monkeypatch):
@@ -221,38 +224,39 @@ def test_the_drafter_resumes_from_the_entrys_own_snapshot(monkeypatch):
     engine, rec = _one_gpu(monkeypatch, drafter)
     first = _chat([([40, 41, 42], None)])
     _run(engine, first)
-    assert engine.cache[0][2] == ("drafter at", len(first) - 1)
+    assert engine.cache.entries[0][2] == ("drafter at", len(first) - 1)
     second = _chat([([40, 41, 42], [50, 51]), ([43, 44], None)])
     _run(engine, second)
     empty = ([None] * drafter.layers, [None] * drafter.layers, 0, 0)
     assert drafter.restored == [empty, ("drafter at", len(first) - 1)]
     assert rec.prefills[-1].drafter is drafter
-    assert [snap for _, _, snap in engine.cache] == [("drafter at", len(first) - 1), ("drafter at", len(second) - 1)]
+    assert [snap for _, _, snap in engine.cache.entries] == [("drafter at", len(first) - 1),
+                                                            ("drafter at", len(second) - 1)]
 
 
-def _expected_cache(before, prompt):
-    """The engine's rule, restated: resume from the longest strict prefix, drop its extensions, keep the last other
-    entry and the new one."""
+def _expected_cache(cache, prompt):
+    """The engine's rule on a copy of its cache: resume from the longest strict prefix, drop its extensions, add."""
 
-    hit = max((ids for ids in before if len(ids) < len(prompt) and prompt[:len(ids)] == ids), key=len, default=None)
-    cache = list(before)
+    model = PrefixCache(cache.keep)
+    model.entries, model.hit = [(ids, None, None) for ids, _, _ in cache.entries], set(cache.hit)
+    hit = model.longest(prompt)
     if hit is not None:
-        cache = [ids for ids in cache if len(ids) <= len(hit) or ids[:len(hit)] != hit]
-    new = prompt[:entry_end(prompt)]
-    return (len(hit) if hit else 0), [ids for ids in cache if ids != new][-1:] + [new]
+        model.entries = [e for e in model.entries if len(e[0]) <= len(hit[0]) or e[0][:len(hit[0])] != hit[0]]
+    model.add(prompt[:entry_end(prompt)], None, None)
+    return (len(hit[0]) if hit else 0), [ids for ids, _, _ in model.entries]
 
 
 @pytest.mark.parametrize("seed", range(4))
 def test_entries_stay_two_and_each_resume_takes_the_longest_match(monkeypatch, seed):
-    """Chat turns, retries, extensions and unrelated prompts: at most two entries, each ending one token before its
-    prompt's end and holding its own ids, and every prefill resumes from the longest strict prefix."""
+    """Chat turns, retries, extensions and unrelated prompts: at most ``KEEP_ONE`` entries, each ending one token before
+    its prompt's end and holding its own ids, and every prefill resumes from the longest strict prefix."""
 
     engine, rec = _one_gpu(monkeypatch)
     rng = random.Random(seed)
     turns = [([rng.randrange(20, 90) for _ in range(rng.randrange(1, 5))], None)]
     prompt = _chat(turns)
     for _ in range(60):
-        start, cache = _expected_cache(_entries(engine), prompt)
+        start, cache = _expected_cache(engine.cache, prompt)
         stats = _run(engine, prompt, max_tokens=rng.randrange(1, 5))
         assert rec.prefills[-1].start == start == stats["cached"]
         assert rec.prefills[-1].keep_at == entry_end(prompt)
@@ -292,12 +296,12 @@ def _two_ranks(monkeypatch):
             raise _Done
         return shares.pop(0)
 
-    def prefill_tp(w, prompt, sampling, rank, drafter=None, *, state=None, keep_at=None):
+    def prefill_tp(w, prompt, sampling, rank, drafter=None, *, state=None, keep_at=None, **stops):
         return rec.prefill(w, prompt, sampling, drafter, state=state, keep_at=keep_at, rank=rank)
 
     def decode_tp(w, st, prompt, pending, count, sampling, rank, drafter, *, max_rows, allow_copy=True,
-                  on_tokens=None, inplace=False):
-        assert inplace and all(st is not entry for _, entry, _ in engines[rank].cache)
+                  on_tokens=None, inplace=False, stop_eos=True):
+        assert inplace and all(st is not entry for _, entry, _ in engines[rank].cache.entries)
         result = rec.decode(st, prompt, pending, count)
         if on_tokens is not None:
             on_tokens(result.tokens[1:])
@@ -397,34 +401,45 @@ def _ids_of(st):
 CONTEXT = 1 << 16
 
 
+def _snap(n):
+    """A stand-in drafter snapshot at ``n`` (its per-layer lists, then its lengths)."""
+
+    return ([("drafter at", n)], [], n, n)
+
+
 def _stand_in_prefills(m, monkeypatch):
-    """``prefill`` and ``prefill_tp`` for ``multi``: states that hold their ids, one record per rank."""
+    """``prefill_state`` and ``first_token`` for ``multi``: states that hold their ids, one record per rank."""
 
-    recs = {rank: SimpleNamespace(prefills=[], kept=[]) for rank in (0, 1)}
+    recs = {rank: SimpleNamespace(prefills=[], kept=[], last=None) for rank in (0, 1)}
 
-    def prefill(w, prompt, sampling, drafter=None, *, state=None, keep_at=None, rank=0):
-        start = state.pos
-        assert _ids_of(state) == list(prompt[:start]) and state.limit == CONTEXT
-        recs[rank].prefills.append(SimpleNamespace(prompt=list(prompt), start=start, keep_at=keep_at))
-        pending = _reply(prompt)[0]
+    def prefill_state(w, prompt, st, *, tp=False, draft=None, keep_at=None, vision=None):
+        rec, start = recs[w.rank], st.pos
+        assert _ids_of(st) == list(prompt[:start]) and st.limit >= len(prompt)
+        rec.prefills.append(SimpleNamespace(prompt=list(prompt), start=start, keep_at=keep_at))
+        rec.last = list(prompt)
+        st.pos, st.kv = len(prompt), _ids_state(m, prompt).kv       # the prompt committed into the stream's state
         if keep_at is None:
-            return _ids_state(m, prompt), pending
+            return "normed"
         kept = _ids_state(m, prompt[:keep_at])
-        recs[rank].kept.append(kept)
-        return _ids_state(m, prompt), pending, (kept, ("drafter at", keep_at))
+        rec.kept.append(kept)
+        return "normed", (kept, _snap(keep_at))
 
-    def prefill_tp(w, prompt, sampling, rank, drafter=None, *, state=None, keep_at=None):
-        return prefill(w, prompt, sampling, drafter, state=state, keep_at=keep_at, rank=rank)
-
-    monkeypatch.setattr(m.multi, "prefill", prefill)
-    monkeypatch.setattr(m.multi, "prefill_tp", prefill_tp)
+    monkeypatch.setattr(m.multi, "prefill_state", prefill_state)
+    monkeypatch.setattr(m.multi, "first_token", lambda w, normed, n, *rest: _reply(recs[w.rank].last)[0])
     return recs
 
 
 def _decoder(m, *, rank=0, world=1):
     w = SimpleNamespace(config=SimpleNamespace(eos=(0,), vocab=8), norm=m.torch.zeros(1), head=SimpleNamespace(n=8),
-                        layers=[])
+                        layers=[], rank=rank)
     return m.multi.MultiDecoder(w, None, keep=KEEP, rank=rank, world=world, context=CONTEXT)
+
+
+def _admitted(dec, s):
+    """Admit ``s`` and run its prompt's prefill step (no stream decodes, so one step takes the whole prompt)."""
+
+    dec.admit(s)
+    dec._fill()
 
 
 def _cache_ids(dec):
@@ -458,18 +473,20 @@ def test_concurrent_admissions_keep_prompt_entries_one_token_short(cuda_modules,
     rec = _stand_in_prefills(m, monkeypatch)[0]
     dec = _decoder(m)
     for prompt, draft in _prompts(seed):
-        before = _cache_ids(dec)
+        model = PrefixCache(KEEP)                         # the decoder's cache rule, on a copy of its entries
+        model.entries, model.hit = [(ids, None, None) for ids in _cache_ids(dec)], set(dec.cache.hit)
+        hit = model.longest(prompt) if draft else None
+        if draft:
+            model.add(prompt[:-1], None, None)
         s = m.multi.Stream(list(prompt), 3, None, draft=draft)
-        dec.admit(s)
-        hit = max((ids for ids in before if len(ids) < len(prompt) and prompt[:len(ids)] == ids), key=len,
-                  default=[]) if draft else []
-        assert s.cached == rec.prefills[-1].start == len(hit)
+        _admitted(dec, s)
+        assert s.cached == rec.prefills[-1].start == (len(hit[0]) if hit else 0)
         assert rec.prefills[-1].keep_at == (entry_end(prompt) if draft else None)
-        new = [prompt[:-1]] if draft else []
-        assert _cache_ids(dec) == ([ids for ids in before if ids not in new] + new)[-KEEP:]
+        assert _cache_ids(dec) == [ids for ids, _, _ in model.entries]
         for ids, st, snap in dec.cache.entries:
-            assert _ids_of(st) == ids and st.pos == len(ids) and snap == ("drafter at", len(ids))
-            assert all(st.kv[0][0] is not kept.kv[0][0] for kept in rec.kept)     # private copies
+            assert _ids_of(st) == ids and st.pos == len(ids) and snap == _snap(len(ids))
+        assert not s.st.kv or all(s.st.kv[0][0].data_ptr() != st.kv[0][0].data_ptr()      # the stream's own buffers
+                                  for _, st, _ in dec.cache.entries)
         dec.finish([s])
 
 
@@ -490,7 +507,7 @@ def test_both_ranks_admit_from_and_keep_the_same_entries(cuda_modules, monkeypat
     caches0 = []
     for prompt, draft in prompts:
         s = m.multi.Stream(list(prompt), 3, None, draft=draft)
-        dec0.admit(s)
+        _admitted(dec0, s)
         caches0.append(_cache_ids(dec0))
         dec0.finish([s])
     queue.append([])                                         # rank 0 ends the follow loop
@@ -534,7 +551,7 @@ class TapDraft:
 def _fake_chunks(m, monkeypatch):
     calls = []
 
-    def fake_chunk(w, tokens, st, *, tp=False, capture_taps=False, last=True, cut=0):
+    def fake_chunk(w, tokens, st, *, tp=False, capture_taps=False, last=True, cut=0, vision=None):
         rows, p0 = int(tokens.shape[0]), st.pos
         assert 0 <= cut < rows
         calls.append((p0, rows, cut, capture_taps, last))
@@ -664,7 +681,7 @@ def _cpu_kernels(torch, monkeypatch, prefill, forward):
         return rows(lambda a, b: (a.float() * torch.rsqrt(a.float().pow(2).mean(-1, keepdim=True) + eps) * w.float()
                                   * F.silu(b.float())).reshape(-1).bfloat16(), y, z)
 
-    def attn_prep(qg, key, q_norm, k_norm, pos, inv_freq, eps, *, heads, kv_heads, head_dim):
+    def attn_prep(qg, key, q_norm, k_norm, pos, inv_freq, eps, *, heads, kv_heads, head_dim, mrope_section=None):
         q = rows(lambda a, p: (a.float().reshape(heads, 2 * head_dim)[:, :head_dim] * q_norm.float()
                                + 1e-3 * p.float()).bfloat16(), qg, pos)
         k = rows(lambda a, p: (a.float().reshape(kv_heads, head_dim) * k_norm.float() + 1e-3 * p.float()).bfloat16(),
@@ -709,8 +726,9 @@ def _cpu_model(torch, layers=4):
     c = Config(hidden=128, intermediate=128, layers=layers, heads=2, kv_heads=1, head_dim=64, vocab=VOCAB, k_heads=1,
                v_heads=2, dk=64, dv=64, conv_kernel=4, interval=4, eps=1e-6, rope_dims=16, rope_theta=1e6, eos=(0,))
 
-    def lin(n, k):
-        return QLinear(torch.randn(n, k, generator=gen) * k ** -0.5, torch.empty(0), torch.empty(0))
+    def lin(n, k):                                          # bf16 scale stand-ins: the 4-bit g64 (FP8 prompt) path
+        return QLinear(torch.randn(n, k, generator=gen) * k ** -0.5, torch.empty(0, dtype=torch.bfloat16),
+                       torch.empty(0, dtype=torch.bfloat16))
 
     def norm(d):
         return (1 + 0.1 * torch.randn(d, generator=gen)).bfloat16()
@@ -731,7 +749,8 @@ def _cpu_model(torch, layers=4):
                              norm(c.head_dim), norm(c.head_dim))
         out.append(Layer(c.is_linear(i), norm(c.hidden), norm(c.hidden), gdn, attn, lin(c.intermediate, c.hidden),
                          lin(c.intermediate, c.hidden), lin(c.hidden, c.intermediate)))
-    embed = QLinear(torch.randn(c.vocab, c.hidden, generator=gen), torch.empty(0), torch.empty(0))
+    embed = QLinear(torch.randn(c.vocab, c.hidden, generator=gen), torch.empty(0, dtype=torch.bfloat16),
+                    torch.empty(0, dtype=torch.bfloat16))
     return Weights(c, embed, out, norm(c.hidden), lin(c.vocab, c.hidden), torch.ones(c.rope_dims // 2))
 
 

@@ -232,6 +232,48 @@ def test_build_keeps_the_weights_and_adds_only_the_scales(bits):
     lane_fuse.clear(root)
 
 
+@pytest.mark.parametrize("kind", ["kv", "gu"])
+def test_rotated_projections_stack_under_their_shared_rotation(kind):
+    """Projections that rotate their rows first (Bonsai) stack their inner matmuls, rotating x once, same bits."""
+
+    _needs_tensor_units()
+    from tensorfold.families.bonsai.modules import RotatedLinear
+
+    mx.random.seed(21)
+    signs = mx.where(mx.random.uniform(shape=(K,)) < 0.5, -1.0, 1.0).astype(mx.float32)
+
+    def rotated(n, seed):
+        q = nn.QuantizedLinear(K, n, bias=False, group_size=64, bits=2)
+        q.weight, q.scales, q.biases = _quantized(n, K, seed, bits=2)
+        return RotatedLinear(q, signs)
+
+    parent = nn.Module()
+    names = lane_fuse.GROUPS[kind]
+    for i, name in enumerate(names):
+        setattr(parent, name, rotated(1024, 40 + i))
+    other = nn.Module()                                   # members under different rotations stay separate
+    for i, name in enumerate(names):
+        setattr(other, name, RotatedLinear(rotated(1024, 50 + i).inner, signs if i == 0 else -signs))
+    x = (mx.random.normal((1, 16, K)) * 0.5).astype(mx.bfloat16)
+    saved = lane_fuse.enabled
+    try:
+        lane_qmm.install(parent, rows=lane_qmm.MAX_ROWS)
+        lane_qmm.install(other, rows=lane_qmm.MAX_ROWS)
+        alone = {rows: mx.concatenate([getattr(parent, name)(x[:, :rows]) for name in names], axis=-1)
+                 for rows in (1, 7, 16)}
+        mx.eval(alone)
+        assert lane_fuse.build(parent)[kind] == 1 and lane_fuse.build(other)[kind] == 0
+        lane_fuse.enabled = True
+        call = lane_fuse.attn_kv if kind == "kv" else lane_fuse.mlp_gate_up
+        for rows, want in alone.items():
+            assert _same(call(parent, x[:, :rows]), want), rows
+    finally:
+        lane_fuse.enabled = saved
+        lane_qmm.uninstall()
+    lane_fuse.clear(parent)
+    lane_fuse.clear(other)
+
+
 def test_groups_of_mixed_widths_stay_separate():
     """A mixed 3/4-bit checkpoint (gate 3-bit, up 4-bit): no stack, each member keeps its own lane call."""
 

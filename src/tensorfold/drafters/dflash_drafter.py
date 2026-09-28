@@ -97,11 +97,16 @@ class DFlashDrafter:
     def candidate_logits(self, hidden: mx.array) -> tuple[mx.array, mx.array | None]:
         """The head's logits over ``draft_vocab`` and each column's token id, or (all logits, None)."""
 
+        head = self.model.lm_head
+        if hasattr(head, "rotate"):          # a head stored in a rotated basis: its rows are rotated, then its matmul
+            hidden, head = head.rotate(hidden), head.inner
         sub = self._sub_head()
         if sub is None:
             plain = self._plain_sub_head()
             if plain is None:
-                return self.model.compute_logits(hidden), None
+                logits = head(hidden) * self.model.config.output_multiplier
+                cap = self.model.config.final_logit_softcapping
+                return (mx.tanh(logits / cap) * cap if cap is not None and cap > 0 else logits), None
             # Draft logits need no row-exact matmul; use views of the draft vocabulary's head rows.
             from tensorfold.kernels.qwen.dense.v1.row_matmul import draft_matmul
 
@@ -122,6 +127,12 @@ class DFlashDrafter:
             logits = mx.tanh(logits / cap) * cap
         return logits, ids
 
+    def _matmul_head(self) -> Any:
+        """The head's matmul: the head itself, or the matmul under a head that rotates its rows first."""
+
+        head = self.model.lm_head
+        return head.inner if hasattr(head, "rotate") else head
+
     def _plain_sub_head(self) -> tuple[list[tuple[mx.array, mx.array, mx.array]], mx.array, int, int] | None:
         """``draft_vocab``'s rows of a head in MLX's layout (views: no copy), built once."""
 
@@ -129,7 +140,7 @@ class DFlashDrafter:
             self._plain_sub = None
             import mlx.nn as nn
 
-            head = self.model.lm_head
+            head = self._matmul_head()
             if os.environ.get("TF_DRAFT_VOCAB", "") != "full" and isinstance(head, nn.QuantizedLinear) \
                     and "bias" not in head and not getattr(head, "_lane_tiled", False):
                 n = int(head["weight"].shape[0])
@@ -146,7 +157,7 @@ class DFlashDrafter:
 
         if getattr(self, "_sub", False) is False:
             self._sub = None
-            head = self.model.lm_head
+            head = self._matmul_head()
             if (os.environ.get("TF_DRAFT_VOCAB", "") != "full" and getattr(head, "_lane_tiled", False)
                     and getattr(head, "_lane_sbt", None) is not None):
                 n = int(head["weight"].shape[0])

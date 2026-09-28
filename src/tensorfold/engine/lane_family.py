@@ -75,6 +75,9 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
 
     def _family_step(self) -> dict[str, list[int]]:
         landed: dict[str, list[int]] = {}
+        for stream_id, queued in list(self._next.items()):
+            if callable(queued):                  # a new stream's first drafts, settled before anything reads them
+                self._next[stream_id] = queued()
         live = [(s, c) for s, c in self._live if not s.finished]
         if len(live) > 1 and self.family_streams:
             # a shared round is synchronous: a stream that ran a step ahead lands its queued token first
