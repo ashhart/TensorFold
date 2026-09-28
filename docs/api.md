@@ -27,6 +27,7 @@ Image, audio and video input or output requests receive HTTP 400.
 | `stream` | Server-sent events with final usage | Both |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
+| `response_format`, `guided_json`, `structured_outputs.json` | JSON schema or any JSON object the reply must be | CUDA 27B |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | MLX and GLM CUDA |
 | `stop` | Stop at a string or any string in a list; omit the matched text from the response | MLX |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high` or `xhigh` | MLX |
@@ -79,6 +80,21 @@ offered name its written part starts. The template's own rendered call gives tha
 only tool the template offers. Each fix depends only on the tokens before it, so drafted, serial and concurrent
 decoding write the same call. The MLX engine fixes tokens inside its rounds; CUDA stops the engine at a fix and
 decodes on from the reply. The model writes the arguments; a malformed call returns as content.
+
+## Structured output
+
+On CUDA, Qwen3.8-27B on one GPU enforces `response_format` (`{"type": "json_schema", "json_schema": {"schema":
+...}}` or `{"type": "json_object"}`), and vLLM's `guided_json` and `structured_outputs.json`, with xgrammar:
+`pip install 'tensorfold[grammar]'`. Before a token is chosen, each verify row's logits are masked to the tokens the
+grammar allows after that row's path, and drafts the grammar rejects are dropped before the forward. A constrained
+reply equals its `"draft": false` reply and, with `--parallel N`, its solo run. With thinking on, the schema applies
+after `</think>`. The grammar allows the end token only once the value is complete; a reply cut at `max_tokens` is
+incomplete JSON with `finish_reason: "length"`.
+
+CUDA answers HTTP 400 instead of an unconstrained reply when the engine cannot enforce the schema (other families, two
+ranks) or xgrammar is missing, for a schema xgrammar cannot compile, for `guided_regex`, `guided_choice` and
+`guided_grammar`, and for a schema sent with `tool_choice: "required"` or a named function. A reply whose grammar fails
+while decoding ends with HTTP 500 (an error event when streaming); other requests go on. MLX ignores these fields.
 
 ## Reasoning
 
