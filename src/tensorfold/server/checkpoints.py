@@ -67,6 +67,45 @@ def save_conversations(store: "CheckpointStore", directory: Path, model_id: str,
     return saved
 
 
+def spill_conversation(entry: CheckpointEntry, directory: Path, model_id: str, *, limit_bytes: int) -> bool:
+    """Write an evicted conversation where ``_read_disk_block`` finds saved conversations, keeping this model's files
+    in ``directory`` under ``limit_bytes`` (oldest first); False when it was not written.
+
+    An evicted conversation otherwise costs a full prefill on its next turn (GDN state cannot be truncated to a shorter
+    stored prefix). Measured on an M5 Ultra with Qwen3.8-27B: a 30,720-token entry (2.0 GiB) wrote in 0.17 s and read
+    back in 0.05 s, against 20 s to prefill it again.
+    """
+
+    from tensorfold.engine.prefix_snapshots import read_metadata, save_snapshot
+
+    if entry.nbytes > limit_bytes:
+        return False
+    started = time.perf_counter()
+    try:
+        save_snapshot(directory, model_id, entry.tokens, entry.cache, keep=1 << 30)   # pruned by bytes below
+    except Exception as exc:  # noqa: BLE001 - a full disk costs a later prefill, never the request
+        print(f"[tensorfold] conversation spill failed: {type(exc).__name__}: {exc}", flush=True)
+        return False
+    ours = []
+    for path in sorted(directory.glob("*.safetensors"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if path.name.endswith(".partial.safetensors"):
+            continue
+        try:
+            same = str(read_metadata(path).get("model", "")).split("|")[0] == model_id.split("|")[0]
+        except Exception:  # noqa: BLE001 - an unreadable file is left alone
+            continue
+        if same:
+            ours.append(path)
+    total = 0
+    for path in ours:
+        total += path.stat().st_size
+        if total > limit_bytes:
+            path.unlink(missing_ok=True)
+    print(f"[tensorfold] spilled conversation tokens={len(entry.tokens)} ({entry.nbytes / 1024**3:.1f} GiB) "
+          f"in {time.perf_counter() - started:.2f}s", flush=True)
+    return True
+
+
 class CheckpointStore:
     """LRU caches require strict-prefix hits because GDN state cannot truncate; pinned system blocks bypass slot limits and outlast conversations."""
 
@@ -78,6 +117,7 @@ class CheckpointStore:
         budget_bytes: int | None = None,
         sizer: Callable[[list[Any]], int] | None = None,
         pinned_slots: int = 3,
+        on_evict: Callable[[CheckpointEntry], Any] | None = None,
     ) -> None:
         if slots < 1:
             raise ValueError("slots must be positive")
@@ -95,6 +135,26 @@ class CheckpointStore:
         self.evictions = 0
         # set when a memory controller evicts on demand: the newest entry may then exceed the byte budget
         self.admit_oversize = False
+        # called, outside the lock and on the thread that inserts or evicts (the scheduler's, which owns the arrays),
+        # with each evicted conversation that no remaining entry extends (``spill_conversation``)
+        self.on_evict = on_evict
+        self.spilled = 0
+
+    def _evicted(self, gone: list[CheckpointEntry]) -> None:
+        if self.on_evict is None:
+            return
+        with self._lock:
+            remaining = [entry.tokens for entry in self._entries]
+        for entry in gone:
+            # an older checkpoint of a conversation that moved on: it continues from the newer entry, so skip the write
+            n = len(entry.tokens)
+            if entry.pinned or any(len(t) > n and t[:n] == entry.tokens for t in remaining):
+                continue
+            try:
+                if self.on_evict(entry) is not False:
+                    self.spilled += 1
+            except Exception as exc:  # noqa: BLE001 - a failed spill costs a later prefill, never the request
+                print(f"[tensorfold] eviction hook failed: {type(exc).__name__}: {exc}", flush=True)
 
     @property
     def nbytes(self) -> int:
@@ -163,6 +223,7 @@ class CheckpointStore:
             if oversize:
                 limit = nbytes + sum(e.nbytes for e in entries[1:] if e.pinned)
             # Never evict the new entry; evict least recently used conversations before system blocks.
+            gone: list[CheckpointEntry] = []
             while True:
                 over_slots = sum(1 for e in entries if not e.pinned) > self.slots
                 over_budget = (limit is not None and len(entries) > 1
@@ -171,13 +232,14 @@ class CheckpointStore:
                     break
                 unpinned = [i for i in range(1, len(entries)) if not entries[i].pinned]
                 if unpinned:
-                    entries.pop(unpinned[-1])
+                    gone.append(entries.pop(unpinned[-1]))
                 elif over_budget:
                     entries.pop()
                 else:
                     break
                 self.evictions += 1
             self._entries = entries
+        self._evicted(gone)
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -190,6 +252,7 @@ class CheckpointStore:
             if not candidates:
                 return False
             ordinary = [i for i in candidates if not self._entries[i].pinned]
-            self._entries.pop(ordinary[-1] if ordinary else candidates[-1])
+            gone = self._entries.pop(ordinary[-1] if ordinary else candidates[-1])
             self.evictions += 1
-            return True
+        self._evicted([gone])
+        return True

@@ -92,6 +92,8 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--mtp-drafts N` | Family-specific cap on MTP drafts | Both |
 | `--tp 2 --rank R --master HOST` | Two-rank CUDA execution | CUDA |
 | `--prompt-cache-gib N` | Retained conversation-prefix budget; zero disables retention | MLX |
+| `--checkpoint-slots N` | Retained conversation prefixes (default 3 per lane, at least 8); long conversations hit this before the byte budget | MLX |
+| `--spill-gib N` | Write evicted conversation prefixes to disk (up to N GiB) and read them back instead of prefilling again; zero disables | MLX |
 | `--mlx-cache-gib N` | Reusable freed-buffer cache, default 8 GiB | MLX |
 | `--snapshot-dir DIR` | Persistent prefix snapshots; `none` disables them | MLX |
 | `--no-update-check` | Disable the startup release check | Both |
