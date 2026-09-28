@@ -159,29 +159,40 @@ def mtp_decode(w, head: Head, st: State, mc: Cache, carry: Carry, pending: int, 
     context, copies = list(prompt) + [pending], CopyIndex()
     start = time.perf_counter()
     while len(out) < count and not (stop_eos and out[-1] in w.config.eos):
-        n = st.pos                                        # the pending token's position
-        normed, logits = step(carry.states, carry.tokens, mc.pos)
-        mc.pos += len(carry.tokens)
-        guesses = copies.propose(context, COPY_ROWS - 1)  # an exact repeat of the context first: a long, likely window
-        while not guesses:
-            token, prob = draft(logits, n + 1, sampling, head.ids)
-            guesses.append(token)
-            while prob >= confidence and len(guesses) < depth:
-                normed, logits = step(normed[-1:], [token], mc.pos + len(guesses) - 1)
-                token, prob = draft(logits, n + 1 + len(guesses), sampling, head.ids)
-                guesses.append(token)
-        tokens = [out[-1]] + guesses
-        parents = list(range(-1, len(tokens) - 1))
-        logits, record, states = verify(tokens)
-        sampled = sample_rows(logits, [n + 1 + i for i in range(len(tokens))], sampling)
-        path, terminal = accept(tokens, parents, sampled, count - len(out), w.config.eos if stop_eos else ())
-        commit(st, record, path, in_place=runner is not None)
-        new = [tokens[r] for r in path[1:]] + [terminal]
-        carry = Carry(states[path[0]:path[-1] + 1], new)
+        tokens, path, new, carry = mtp_round(st, mc, carry, out[-1], count - len(out), sampling, context, copies,
+                                             depth=depth, confidence=confidence, ids=head.ids, verify=verify,
+                                             step=step, eos=w.config.eos if stop_eos else (),
+                                             in_place=runner is not None)
         out.extend(new)
         context.extend(new)
-        rounds, drafted, kept = rounds + 1, drafted + len(guesses), kept + len(path) - 1
+        rounds, drafted, kept = rounds + 1, drafted + len(tokens) - 1, kept + len(path) - 1
         widths.append(len(tokens))
         if on_tokens is not None and on_tokens(new):
             break
     return Result(out, time.perf_counter() - start, rounds, drafted, kept, widths)
+
+
+def mtp_round(st: State, mc: Cache, carry: Carry, pending: int, room: int, sampling: Sampling | None,
+              context: Sequence[int], copies: CopyIndex, *, depth: int, confidence: float, ids, verify, step,
+              eos: Sequence[int] = (), in_place: bool = False) -> tuple[list[int], list[int], list[int], Carry]:
+    """One round: absorb the carry, propose a copied continuation or an MTP chain, verify, commit the kept path (at
+    most ``room`` rows). Returns the window's tokens, the kept rows, the new tokens and the next carry."""
+
+    n = st.pos                                            # the pending token's position
+    normed, logits = step(carry.states, carry.tokens, mc.pos)
+    mc.pos += len(carry.tokens)
+    guesses = copies.propose(context, COPY_ROWS - 1)      # an exact repeat of the context first: a long, likely window
+    while not guesses:
+        token, prob = draft(logits, n + 1, sampling, ids)
+        guesses.append(token)
+        while prob >= confidence and len(guesses) < depth:
+            normed, logits = step(normed[-1:], [token], mc.pos + len(guesses) - 1)
+            token, prob = draft(logits, n + 1 + len(guesses), sampling, ids)
+            guesses.append(token)
+    tokens = [pending] + guesses
+    logits, record, states = verify(tokens)
+    sampled = sample_rows(logits, [n + 1 + i for i in range(len(tokens))], sampling)
+    path, terminal = accept(tokens, list(range(-1, len(tokens) - 1)), sampled, room, eos)
+    commit(st, record, path, in_place=in_place)
+    new = [tokens[r] for r in path[1:]] + [terminal]
+    return tokens, path, new, Carry(states[path[0]:path[-1] + 1], new)

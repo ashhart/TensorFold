@@ -23,18 +23,24 @@ def mtp_weights(name: str, info: dict) -> tuple[int, int]:
 
 def stream_geometry(text: dict, streams: int, keep: int, depth: int):
     """The 27B's concurrent geometry (each stream, ``keep`` kept prompt ends, every window's rows) plus the MTP
-    head's keys and values for each of them; ``depth + 1`` slots past a window are draft scratch."""
+    head's keys and values for each of them and, with drafts, the one-stream graphs' buffers (a stream's worth);
+    ``depth + 1`` slots past a window are draft scratch."""
 
     from tensorfold.cuda.capacity import Geometry
-    from tensorfold.cuda.geometry import stream_geometry as dense
+    from tensorfold.cuda.geometry import layer_counts, stream_geometry as dense
 
     base = dense(text, 1, streams, keep)
+    linear, attention = layer_counts(text)
     kv_heads, heads = int(text["num_key_value_heads"]), int(text["num_attention_heads"])
     head_dim = int(text.get("head_dim") or int(text["hidden_size"]) // heads)
     layer = 2 * kv_heads * head_dim * 2               # a layer's keys and values a slot
+    nk, nv = int(text["linear_num_key_heads"]), int(text["linear_num_value_heads"])
+    dk, dv = int(text["linear_key_head_dim"]), int(text["linear_value_head_dim"])
+    state = linear * (nv * dk * dv * 4 + (int(text["linear_conv_kernel_dim"]) - 1) * (2 * nk * dk + nv * dv) * 2)
     if not depth:
         return Geometry(base.bytes_at, 1)
-    return Geometry(lambda slots: base.bytes_at(slots) + (streams + keep + 1) * slots * layer, depth + 1)
+    return Geometry(lambda slots: base.bytes_at(slots) + (streams + keep + 1) * slots * layer
+                    + state + slots * (attention + 1) * layer, depth + 1)
 
 
 class Qwen36Engine:
@@ -77,10 +83,10 @@ class Qwen36Engine:
             from tensorfold.families.qwen4_exp.cuda.weights import draft_token_ids
 
             self.head = Head(self.w, m, draft_token_ids("default"))    # the same tokenizer's ids
-            if not many:
-                from .graphs import Graphs
+            from .graphs import Graphs
 
-                self.graphs = Graphs(self.w, self.head, self.context_window + self.depth + 1)
+            # decoding buffers that outlive requests (with --parallel, the one stream decoding alone's)
+            self.graphs = Graphs(self.w, self.head, self.context_window + self.depth + 1)
         torch.cuda.empty_cache()
         self.eos = tuple(self.w.config.eos)
         self.points = resume_points(model_dir)
@@ -94,11 +100,12 @@ class Qwen36Engine:
             from .multi import MultiDecoder
 
             self.multi = MultiDecoder(self.w, self.head, depth=self.depth, confidence=self.confidence,
-                                      context=self.capacity_plan["cache_slots"], keep=KEEP_MANY, points=self.points)
+                                      context=self.capacity_plan["cache_slots"], keep=KEEP_MANY, points=self.points,
+                                      graphs=self.graphs)
             started = time.perf_counter()
             self.multi.warm(streams)
-            print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens, verified together "
-                  f"(eager); kernels warmed in {time.perf_counter() - started:.1f}s", flush=True)
+            print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens: together, rounds run "
+                  f"eagerly; alone, in CUDA graphs; kernels warmed in {time.perf_counter() - started:.1f}s", flush=True)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
 
     def _resume(self, prompt: list[int]):
