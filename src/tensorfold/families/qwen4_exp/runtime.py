@@ -97,6 +97,18 @@ class FlashNext:
             caches.append(MTPCache())                         # last: the model's layers never reach it
         return caches
 
+    def release_rounds(self) -> None:
+        """Drop the last forward's rollback and draft rows when no stream is live; the next forward rebuilds them."""
+
+        for fused in (self.fused, getattr(self, "mtp_fused", None)):
+            if fused is not None:
+                fused.row_states.clear()
+                fused._last_heads.clear()
+                fused.last_streams = None
+        self._streams = None
+        self._specs.clear()
+        self.model.__dict__.pop("last_streams", None)
+
     def adopt_cache(self, cache: list[Any]) -> list[Any]:
         """A stored or copied cache without an MTP entry gets an empty one (drafts then see less context)."""
 

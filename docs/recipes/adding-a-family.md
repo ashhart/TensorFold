@@ -43,6 +43,7 @@ admission still applies after loading; this hook does not change the memory budg
 | `batch_rows`, `max_streams`, `shared_costs` | Shared-forward limits and costs |
 | `speculate`, `settle`, `draft_streams` | Optional draft-head operations |
 | `adopt_cache(cache)` | Restore family-specific cache classes from snapshots |
+| `release_rounds()` | Drop the last forward's rollback buffers when no stream is live, including after startup probes |
 
 Start with `exact_width = 1`. Use one sampler consistently for serial and drafted calls; the host and GPU
 implementations can differ at near-ties. Prompt chunks must follow the engine's plan both fresh and resumed.

@@ -24,6 +24,8 @@ Mapped pages still use RAM while cached. The loader prefetches them after its in
 can reclaim them, and subsequent lookups may read from disk. The remaining weights must fit the MLX
 budget, and the server sizes context from runtime cache and workspace needs. `TENSORFOLD_MEMORY_LIMIT_GB`
 can lower the budget; it cannot raise the default ceiling.
+After measuring shared rounds, the runtime releases the probes' rollback buffers before sizing prompt
+memory, so those unused states do not reduce the available context.
 
 Fused kernels handle hyper-connections, routing, experts, recurrence and sparse attention. Row-exact
 projections and stable routing ties keep each verify row independent of the other rows. M5 GPUs use
