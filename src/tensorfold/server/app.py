@@ -10,6 +10,7 @@ from typing import Any, Callable
 import uuid
 
 from tensorfold.engine.lane_engine import LaneEngine, SuffixLookupProposer
+from tensorfold.server.admission import concurrency
 from tensorfold.server.checkpoints import CheckpointStore, longest_common_prefix, save_conversations
 from tensorfold.server.cancellation import Cancellation
 from tensorfold.server.errors import RequestError
@@ -149,7 +150,8 @@ class ChatApp(RequestOptions):
             if self.checkpoints is not None:
                 # admission evicts on demand, so a long conversation keeps its newest prefix past the budget
                 self.checkpoints.admit_oversize = True
-        measure = lambda: self._admission(float(memory_fraction), int(lanes)) if memory_fraction and lanes > 1 else None
+        measure = lambda: (concurrency(self.engine, self.prompt_memory, float(memory_fraction), int(lanes),
+                                       self.default_max_tokens) if memory_fraction and lanes > 1 else None)
         admission = measure() if self.prompt_memory is None else self.prompt_memory.sized(
             self.engine, measure, probe_tokens(tokenizer))
         if self.prompt_memory is not None:
@@ -184,32 +186,6 @@ class ChatApp(RequestOptions):
         if snapshot_dir is not None and self.checkpoints is not None and not loaded_count:
             # only when these kernels have no block yet: a warmed block is pinned after the loaded ones
             self._warm_known_blocks(snapshot_dir, model_id)
-
-    def _admission(self, fraction: float, lanes: int) -> Any:
-        """Admit within the default RAM share or a larger process budget, accounting for memory held elsewhere."""
-
-        from tensorfold.engine import memory
-
-        stream = memory.measure(self.engine)
-        used = memory._mlx_used()
-        ram = memory.ram_bytes()
-        elsewhere = memory.used_elsewhere(used)
-        allowance = int(fraction * ram)
-        share = self.prompt_memory.budget if self.prompt_memory is not None else allowance
-        if self.prompt_memory is not None:
-            allowance = max(allowance, self.prompt_memory.process_budget)
-        admission = memory.Admission(min(allowance - elsewhere, share), stream,
-                                     used=None if self.prompt_memory is None else self.prompt_memory.held)
-        tokens = self.default_max_tokens + 4096
-        gib, mib = 1024**3, 1024**2
-        print(f"[tensorfold] concurrency: up to {lanes} requests share each round; memory budget "
-              f"{admission.budget / gib:.1f} GB (MLX's share {share / gib:.1f} GB, or {allowance / ram:.0%} of "
-              f"{ram / gib:.0f} GB less {elsewhere / gib:.1f} GB in use elsewhere); a stream "
-              f"{stream.short / mib:.0f} MB at {stream.short_tokens} tokens, "
-              f"{stream.long / mib:.0f} MB at {stream.long_tokens:,}, then {stream.per_token / 1024:.1f} KB a token; "
-              f"a shared round up to {stream.round_bytes / gib:.2f} GB; {admission.fitting(tokens)} streams of "
-              f"{tokens:,} tokens fit now (more wait their turn)", flush=True)
-        return admission
 
     def render(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,

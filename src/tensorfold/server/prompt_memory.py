@@ -7,7 +7,8 @@ from threading import RLock
 from typing import Any
 
 from tensorfold.server.errors import RequestError
-from tensorfold.server.memory_budget import PROCESS_BYTES, CacheMemory, GIB, cache_nbytes, process_footprint
+from tensorfold.server.memory_budget import (PROCESS_BYTES, CacheMemory, GIB, budget_ceiling, cache_nbytes,
+                                             process_footprint, raise_hint)
 
 
 def attention_geometry(model: Any) -> tuple[int, int]:
@@ -271,9 +272,11 @@ class PromptMemory:
         return measured
 
     def _no_room(self) -> str:
+        need = self.projected(0)
+        hint = raise_hint(need + self.process_budget - self.budget, budget_ceiling(self.runtime))
         return (f"this server's {self.process_budget / GIB:.1f} GiB memory budget ({self.budget / GIB:.1f} GiB for MLX) "
                 f"leaves no room for a prompt beside the model: it and one prompt chunk need about "
-                f"{self.projected(0) / GIB:.1f} GiB. Serve it on a Mac with more memory, without its draft model "
+                f"{need / GIB:.1f} GiB. {hint or 'Serve it'} on a Mac with more memory, without its draft model "
                 "(--drafter none), or use a smaller or more quantized checkpoint")
 
     def fit_window(self, window: int, fit: bool) -> tuple[int, bool]:

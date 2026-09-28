@@ -49,14 +49,20 @@ def check(model_dir: Path) -> None:
               flush=True)
 
 
+# a table's tensors in the checkpoint: weights, scales and biases of each shard, the only bytes read on the host
+_TABLE = r"language_model\.model\.layers\.\d+\.ple\.ple_embedding\.ngram_embedding\.shard_\d+\.(weight|scales|biases)"
+
+
 def ple_bytes(model_dir: Path) -> int:
-    """Bytes of the checkpoint's n-gram (PLE) tables, which --ple-on-ssd leaves on disk."""
+    """Bytes of the checkpoint's n-gram (PLE) tables, which stay on the host (mapped, or on SSD with --ple-on-ssd)."""
+
+    import re
 
     from tensorfold.families.qwen4_exp.host_table import read_header
 
     return sum(entry["data_offsets"][1] - entry["data_offsets"][0]
                for path in Path(model_dir).glob("model*.safetensors")
-               for name, entry in read_header(path).items() if ".ngram_embedding.shard_" in name)
+               for name, entry in read_header(path).items() if re.fullmatch(_TABLE, name))
 
 
 def expert_bytes(model_dir: Path) -> int:
@@ -68,25 +74,13 @@ def expert_bytes(model_dir: Path) -> int:
                         and ".mlp.switch_mlp." in name)
 
 
-def weight_bytes(model_dir: Path) -> int:
-    """MLX startup weight estimate: keep the file-size bound, less the n-gram tensors the loader will memory-map."""
+def weight_bytes(model_dir: Path, ple_on_ssd: bool = False) -> int:
+    """The bytes MLX loads: the checkpoint, less its n-gram tables where the loader keeps them on the host."""
 
-    import re
+    from tensorfold.families.qwen4_exp.host_table import ngrams_on_host
 
-    from tensorfold.families.qwen4_exp.host_table import ngrams_on_host, read_header
-
-    paths = list(Path(model_dir).glob("*.safetensors"))
-    size = sum(p.stat().st_size for p in paths)
-    if ngrams_on_host(model_dir):
-        for path in paths:
-            if not path.name.startswith("model"):
-                continue
-            for name, entry in read_header(path).items():
-                if re.fullmatch(r"language_model\.model\.layers\.\d+\.ple\.ple_embedding\.ngram_embedding\."
-                                r"shard_\d+\.(weight|scales|biases)", name):
-                    begin, end = entry["data_offsets"]
-                    size -= end - begin
-    return size
+    size = sum(p.stat().st_size for p in Path(model_dir).glob("*.safetensors"))
+    return size - ple_bytes(model_dir) if ngrams_on_host(model_dir, ple_on_ssd) else size
 
 
 def load(model_dir: Path, *, mtp_drafts: int | None = None, ple_on_ssd: bool = False,

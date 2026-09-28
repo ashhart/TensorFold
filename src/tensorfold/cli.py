@@ -419,20 +419,20 @@ def cmd_serve(args: argparse.Namespace) -> int:
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     import mlx.core as mx
 
-    from tensorfold.server.memory_budget import PROCESS_BYTES, configure_mlx, model_fraction
+    from tensorfold.server.memory_budget import PROCESS_BYTES, budget_ceiling, configure_mlx, model_fraction, raise_hint
 
     fraction = model_fraction(family.package)
     memory_limit = configure_mlx(mx, int(float(args.mlx_cache_gib) * 1024**3), fraction=fraction)
     gib = 1024**3
     note = f" ({fraction:.0%} of RAM, this model's allowance)" if fraction > MEMORY_FRACTION else ""
+    ceiling = budget_ceiling(mx)
+    more = f"; TENSORFOLD_MEMORY_LIMIT_GB can raise it to {ceiling / gib:.1f}" if ceiling > memory_limit + gib else ""
     print(f"[tensorfold] memory budget {memory_limit / gib:.1f} GiB{note}: MLX's buffers up to "
-          f"{(memory_limit - PROCESS_BYTES) / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB for the rest of the process",
-          flush=True)
+          f"{(memory_limit - PROCESS_BYTES) / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB for the rest of the process"
+          f"{more}", flush=True)
     checkpoint = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
     estimate = getattr(family.package, "weight_bytes", None)
-    weights = checkpoint if estimate is None else estimate(model_dir)
-    if args.ple_on_ssd:
-        weights = checkpoint - family.package.ple_bytes(model_dir)      # read from disk at each lookup, never loaded
+    weights = checkpoint if estimate is None else estimate(model_dir, ple_on_ssd=args.ple_on_ssd)
     if args.ssd_experts is not None:
         weights += int(args.ssd_experts * gib) - family.package.expert_bytes(model_dir)   # the pool, not the stacks
     if weights < checkpoint:
@@ -441,10 +441,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if weights >= memory_limit - PROCESS_BYTES:
         stream = ("stream its routed experts from SSD with --ssd-experts GIB (slower), "
                   if args.ssd_experts is None and hasattr(family.package, "expert_bytes") else "")
+        hint = raise_hint(weights + PROCESS_BYTES, ceiling)
         raise ValueError(f"{family.title}'s weights ({weights / gib:.1f} GiB) do not fit this server's "
-                         f"{memory_limit / gib:.1f} GiB memory budget ({fraction:.0%} of RAM by default, or "
-                         f"TENSORFOLD_MEMORY_LIMIT_GB): serve it on a Mac with more memory, {stream}or use a smaller "
-                         "or more quantized checkpoint")
+                         f"{memory_limit / gib:.1f} GiB memory budget. {hint or 'Serve it'} on a Mac with more memory, "
+                         f"{stream}or use a smaller or more quantized checkpoint")
     return _serve_mlx(args, family, model_dir, context, required_files, memory_limit, fraction)
 
 

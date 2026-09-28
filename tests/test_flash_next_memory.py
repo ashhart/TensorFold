@@ -80,7 +80,9 @@ def test_serve_fits_host_ngrams_within_the_original_budget(tmp_path, monkeypatch
         assert cli.cmd_serve(args) == 0
         assert budgets == [int(0.70 * 128 * GIB)]
     else:
-        with pytest.raises(ValueError, match=r"weights \(105\.0 GiB\) do not fit.*89\.6 GiB"):
+        with pytest.raises(ValueError, match=r"weights \(105\.0 GiB\) do not fit.*89\.6 GiB.*Raise the budget "
+                                             r"past 108\.0 GiB with TENSORFOLD_MEMORY_LIMIT_GB \(this Mac takes up to "
+                                             r"120\.0"):
             cli.cmd_serve(args)
         assert budgets == []
 
@@ -109,7 +111,18 @@ def test_serve_passes_a_raised_budget_to_the_allocator_and_server(tmp_path, monk
     assert cli.cmd_serve(args) == 0
     assert allocations == [107 * GIB]
     assert budgets == [(110 * GIB, 262144, 131072)]
-    assert "memory budget 110.0 GiB: MLX's buffers up to 107.0 GiB" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "memory budget 110.0 GiB: MLX's buffers up to 107.0 GiB" in out
+    assert "TENSORFOLD_MEMORY_LIMIT_GB can raise it to 120.0" in out     # the working set caps it
+
+
+def test_the_startup_line_names_how_far_the_budget_can_rise(tmp_path, monkeypatch, runtime, capsys):
+    _checkpoint(tmp_path, main=75 * GIB, mapped=30 * GIB)
+    monkeypatch.setattr(cli, "_serve_mlx", lambda *a: 0)
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--backend", "mlx", "--no-update-check"])
+    assert cli.cmd_serve(args) == 0
+    assert "memory budget 89.6 GiB" in (out := capsys.readouterr().out)
+    assert "TENSORFOLD_MEMORY_LIMIT_GB can raise it to 120.0" in out
 
 
 def test_only_mapped_table_tensors_are_subtracted(tmp_path, monkeypatch, runtime):
@@ -122,6 +135,9 @@ def test_only_mapped_table_tensors_are_subtracted(tmp_path, monkeypatch, runtime
     total += _file(tmp_path / "unused.safetensors", {f"{NGRAM}.shard_9.weight": 512})
     monkeypatch.setenv("TF_NGRAM_HOST", "1")
     assert qwen4_exp.weight_bytes(tmp_path) == total - 1600
+    monkeypatch.delenv("TF_NGRAM_HOST")
+    assert qwen4_exp.weight_bytes(tmp_path) == total                        # a small checkpoint: tables on the GPU
+    assert qwen4_exp.weight_bytes(tmp_path, ple_on_ssd=True) == total - 1600 == total - qwen4_exp.ple_bytes(tmp_path)
     monkeypatch.setenv("TF_NGRAM_HOST", "0")
     monkeypatch.setattr(host_table, "read_header", lambda *a: pytest.fail("resident tables need no header scan"))
     assert qwen4_exp.weight_bytes(tmp_path) == total

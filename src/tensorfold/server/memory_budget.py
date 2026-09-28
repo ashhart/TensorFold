@@ -62,13 +62,25 @@ def memory_limit_bytes(mx: Any, *, fraction: float = MEMORY_FRACTION,
         if not math.isfinite(gib) or gib <= 0:
             raise ValueError(f"{LIMIT_ENV} must be a positive number in GiB")
         limit = max(1, int(min(gib, ram / GIB) * GIB))
-    device_info = getattr(mx, "device_info", None)
-    if device_info is None:
-        device_info = getattr(getattr(mx, "metal", None), "device_info", None)
+    return min(limit, budget_ceiling(mx, ram))
+
+
+def budget_ceiling(mx: Any, physical_bytes: int | None = None) -> int:
+    """The largest budget this Mac takes: physical RAM, capped by the GPU's recommended working set."""
+
+    ram = physical_memory_bytes() if physical_bytes is None else int(physical_bytes)
+    device_info = getattr(mx, "device_info", None) or getattr(getattr(mx, "metal", None), "device_info", None)
     recommended = int(device_info().get("max_recommended_working_set_size", 0)) if device_info else 0
-    if recommended > 0:
-        limit = min(limit, recommended)
-    return limit
+    return min(ram, recommended) if recommended > 0 else ram
+
+
+def raise_hint(need: int, ceiling: int) -> str:
+    """How to give the process ``need`` bytes with the environment variable, or "" when this Mac can't."""
+
+    if need >= ceiling:
+        return ""
+    return (f"Raise the budget past {need / GIB:.1f} GiB with {LIMIT_ENV} (this Mac takes up to {ceiling / GIB:.1f}; "
+            "the default leaves the rest of RAM to other apps), or serve it")
 
 
 def configure_mlx(mx: Any, cache_limit_bytes: int, *, reserve_bytes: int = PROCESS_BYTES, **kwargs: Any) -> int:
@@ -206,5 +218,6 @@ def largest_context(memory: CacheMemory, window_tokens: int, *, budget_bytes: in
     return lo
 
 
-__all__ = ["PROCESS_BYTES", "CacheMemory", "cache_nbytes", "configure_mlx", "fits", "largest_context",
-           "memory_limit_bytes", "model_fraction", "needed_bytes", "process_footprint"]
+__all__ = ["PROCESS_BYTES", "CacheMemory", "budget_ceiling", "cache_nbytes", "configure_mlx", "fits",
+           "largest_context", "memory_limit_bytes", "model_fraction", "needed_bytes", "process_footprint",
+           "raise_hint"]

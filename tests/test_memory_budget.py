@@ -119,21 +119,18 @@ def test_raised_budget_keeps_the_process_reserve_and_cache_limit():
 def test_concurrent_admission_respects_the_resolved_budget_and_other_processes(monkeypatch, capsys,
                                                                              limit, elsewhere, expected):
     from tensorfold.engine import memory
-    from tensorfold.server.app import ChatApp
+    from tensorfold.server.admission import concurrency
 
     environ = {} if limit is None else {"TENSORFOLD_MEMORY_LIMIT_GB": limit}
     budget = memory_limit_bytes(SimpleNamespace(), environ=environ, physical_bytes=128 * GIB)
-    app = ChatApp.__new__(ChatApp)
-    app.engine, app.default_max_tokens = object(), 4096
-    app.prompt_memory = SimpleNamespace(process_budget=budget, budget=budget - PROCESS_BYTES,
-                                        held=lambda: 90 * GIB)
+    prompt_memory = SimpleNamespace(process_budget=budget, budget=budget - PROCESS_BYTES, held=lambda: 90 * GIB)
     monkeypatch.setattr(memory, "ram_bytes", lambda: 128 * GIB)
     monkeypatch.setattr(memory, "used_elsewhere", lambda own: elsewhere * GIB)
-    monkeypatch.setattr(memory, "_mlx_used", app.prompt_memory.held)
+    monkeypatch.setattr(memory, "_mlx_used", prompt_memory.held)
     monkeypatch.setattr(memory, "measure", lambda engine: memory.StreamMemory(64, 1024, 2112, 2048, 1, 1, 0, 1024))
-    admission = app._admission(0.70, 8)
+    admission = concurrency(object(), prompt_memory, 0.70, 8, 4096)
     assert admission.budget == expected
-    assert admission.used == app.prompt_memory.held
+    assert admission.used == prompt_memory.held
     if limit == "110":
         assert admission.admits(64, 128, [])       # a model above the old 89.6 GiB ceiling still has request room
         assert "86% of 128 GB" in capsys.readouterr().out
