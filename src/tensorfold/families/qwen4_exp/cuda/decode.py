@@ -125,7 +125,15 @@ class Engine:
         if graphs:
             from .graphs import Graphs
 
-            self.graphs = Graphs(self, max_rows=max_rows)
+            # Capture is what makes decoding fast, but it cannot hold a step that reads device data on the
+            # host: the NVFP4 expert path walks its plan's item list (a synchronising copy), and a capture
+            # rejects it — as cudaErrorStreamCaptureInvalidated, after the weights are already loaded. Decline
+            # it here, where the model's own answer is known, rather than let the load end in a capture error.
+            if any(getattr(layer.moe.experts, "capturable", True) is False for layer in w.layers):
+                print("[tensorfold] CUDA graphs off: this MoE reads its plan's item list on the host, which a "
+                      "capture rejects; decode runs eagerly (correct, slower)")
+            else:
+                self.graphs = Graphs(self, max_rows=max_rows)
 
     def reset(self) -> None:
         self.st.reset(self.w)
