@@ -9,11 +9,12 @@ import torch
 import triton
 import triton.language as tl
 
+from tensorfold.cuda import moe as moe_mod
 from tensorfold.cuda.kernels import gdn as shared_gdn
 
 from . import attention as attn_mod
 from . import gdn as gdn_mod
-from . import gdn_io, glue, moe as moe_mod, qmm
+from . import gdn_io, glue, qmm
 from .state import ATT_ROWS, CAND, Buffers, State
 from .weights import HC, LayerW, Weights
 

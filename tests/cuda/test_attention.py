@@ -100,3 +100,18 @@ def test_attention_matches_torch_reference():
         scores = torch.einsum("hd,thd->ht", q[node].float(), keys) / 16
         ref = torch.einsum("ht,thd->hd", scores.softmax(-1), values).bfloat16()
         assert (out[node].float() - ref.float()).abs().max() < 0.035
+
+
+@pytest.mark.parametrize("w,p,context", [(1, 0, 4096), (4, 1300, 4096), (3, 2047, 2048), (4, 4000, 8192)])
+def test_a_padded_plan_gives_the_exact_plans_bits(w, p, context):
+    """A graph's plan (items for every chunk below ``context``, the stream's keys set later) equals the exact plan."""
+
+    inputs = _inputs(w, p)
+    q, kn, vn, kc, vc = inputs
+    parents = list(range(-1, w - 1))
+    want = _attend(q, kn, vn, [(kc, vc)], [parents], [p], 1 / 16)
+    flat, items, chunks = shared.padded_host(parents, context, q.shape[1] // kn.shape[1])
+    flat[w + 2], flat[w + 3] = p, -(-(p + w) // shared.CHUNK)
+    plan = shared.from_packed(torch.tensor(flat, dtype=torch.int32, device="cuda"), 1, w, items, chunks)
+    offs = torch.tensor(shared.offsets([(kc, vc)], "cuda"), dtype=torch.int64, device="cuda").view(-1, 2)
+    assert torch.equal(shared.attention(q, kn, vn, offs, plan, scale=1 / 16), want)

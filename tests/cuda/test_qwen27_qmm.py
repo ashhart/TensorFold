@@ -67,3 +67,20 @@ def test_tiled_layout_gives_the_same_bits(n, k):
     x = torch.randn((384, k), device="cuda").to(torch.bfloat16)
     for m in (1, 7, 16, 17, 32, 33, 64, 100, 128, 129, 384):
         assert torch.equal(qmm_fast.matmul(x[:m], t), qmm.lane_matmul(x[:m], weight, scales, biases)), (n, k, m)
+
+
+@pytest.mark.parametrize("m", [1, 16, 37, 256])
+def test_head_row_views_give_the_stacked_copy_bits(m):
+    """The drafter's rows of the head as views (plus a small copy off a tile edge) equal a stacked copy's matmul."""
+
+    from tensorfold.families.qwen3_5.cuda.qmm_fast import matmul, matmul_rows, rows, tile
+    from tensorfold.families.qwen3_5.cuda.weights import QLinear
+
+    n, k, spans = 248320, 256, ((0, 98304), (248032, 248320))
+    weight, scales, biases = _weights(n, k, 5)
+    head = tile(QLinear(weight, scales, biases))
+    stacked = tile(QLinear(*(torch.cat([t[a:b] for a, b in spans]).contiguous() for t in (weight, scales, biases))))
+    parts = [rows(head, a, b) for a, b in spans]
+    assert parts[0].weight.data_ptr() == head.weight.data_ptr()
+    x = torch.randn((m, k), generator=torch.Generator(device="cuda").manual_seed(m), device="cuda").to(torch.bfloat16)
+    assert torch.equal(matmul_rows(x, parts), matmul(x, stacked))

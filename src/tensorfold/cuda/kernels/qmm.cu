@@ -274,7 +274,7 @@ void launch(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, cons
         reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), xs.data_ptr<float>(),
         reinterpret_cast<const uint32_t*>(w.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(scales.data_ptr()),
         reinterpret_cast<const __nv_bfloat16*>(biases.data_ptr()), out.data_ptr(),
-        part.defined() ? part.data_ptr<float>() : nullptr, M, N, K, SK, static_cast<int>(scales.size(1)),
+        part.defined() ? part.data_ptr<float>() : nullptr, M, N, K, SK, static_cast<int>(scales.stride(0)),
         M == 1 ? K : static_cast<int>(x.stride(0)), group));
 }
 

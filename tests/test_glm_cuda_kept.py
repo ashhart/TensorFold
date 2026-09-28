@@ -10,6 +10,8 @@ import pytest
 
 from tensorfold.families.glm5_next.cuda.engine import GlmEngine
 
+pytestmark = pytest.mark.torch
+
 
 class Snap:
     def __init__(self, ids, need, states=5):

@@ -17,8 +17,9 @@ from tensorfold.engine.exact_sampling import Sampling
 
 from .draft_tree import best_first
 from .glue import embedding, swiglu
+from .draft_attention import append, block_attention
 from .qmm import group_sums
-from .qmm_fast import matmul, tile, untile
+from .qmm_fast import matmul, matmul_rows, rows, tile, untile
 from .weights import Exl3, QLinear, Weights
 
 
@@ -197,7 +198,7 @@ class DFlash2:
                             "candidate_selector.successor_codebook"):
                     self.weights[name] = tensor.float().numpy().copy()
                 else:
-                    self.weights[name] = tensor.to(self.device)
+                    self.weights[name] = tensor              # on the host until packed: no bf16 copy on the device
         self.inv_freq = (1.0 / self.theta **
                          (torch.arange(self.head_dim // 2, device=self.device,
                                        dtype=torch.float32) * 2 / self.head_dim))
@@ -206,11 +207,14 @@ class DFlash2:
         self.vocab_spans = spans
         self.head_ids = torch.cat([torch.arange(a, b, device=self.device) for a, b in spans])
         self.head_cols: torch.Tensor | None = None           # an EXL3 head's span columns in its sliced strips
+        self.sub_rows: list[QLinear] | None = None           # one GPU, tiled head: its rows as views, no copy
         if isinstance(target.head, Exl3):
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
             sub, self.head_cols = _exl3_sub_head(target.head.layer, spans)
             self.sub_head = Exl3(sub)
+        elif world == 1 and target.head.layout == "tiled":
+            self.sub_rows = [rows(target.head, a, b) for a, b in spans]
         else:
             head = untile(target.head)
             self.sub_head = QLinear(torch.cat([head.weight[a:b] for a, b in spans]).contiguous(),
@@ -223,7 +227,7 @@ class DFlash2:
             self.head_ids = self.head_ids[lo:hi].contiguous()
             self.sub_head = QLinear(self.sub_head.weight[lo:hi].contiguous(), self.sub_head.scales[lo:hi].contiguous(),
                                     self.sub_head.biases[lo:hi].contiguous())
-        if isinstance(target.head, QLinear) and target.head.layout == "tiled":
+        if isinstance(target.head, QLinear) and target.head.layout == "tiled" and self.sub_rows is None:
             self.sub_head = tile(self.sub_head)
         # Quantized draft projections can change acceptance but never target output.
         self.q4: dict[str, QLinear] = {}
@@ -259,9 +263,12 @@ class DFlash2:
                 t = self.weights[name]
                 if (isinstance(t, torch.Tensor) and t.ndim == 2 and name.endswith(".weight")
                         and t.shape[0] % 64 == 0 and t.shape[1] % 64 == 0 and t.numel() >= 1 << 20):
-                    self.q4[name] = tile(quantize4(t.to(torch.bfloat16)))
+                    self.q4[name] = tile(quantize4(t.to(self.device, torch.bfloat16)))
                     del self.weights[name]
-            torch.cuda.empty_cache()
+        for name, t in self.weights.items():
+            if isinstance(t, torch.Tensor):
+                self.weights[name] = t.to(self.device)
+        torch.cuda.empty_cache()
         # Context keys and values depend only on their row and position, so project each once on arrival.
         self.kc: list[torch.Tensor | None] = [None] * self.layers
         self.vc: list[torch.Tensor | None] = [None] * self.layers
@@ -322,7 +329,7 @@ class DFlash2:
 
     @torch.no_grad()
     def add_taps_streams(self, snaps: list, taps: list[torch.Tensor]) -> list:
-        """``add_taps`` for several streams, each projection run once over all their rows; returns the new contexts."""
+        """``add_taps`` for several streams, each projection run once over all their rows; returns the new contexts (each snapshot's own lists updated in place, so a layer's old window goes as its new one lands)."""
 
         if not self.fast:
             out = []
@@ -338,15 +345,12 @@ class DFlash2:
                            dtype=torch.float32).pin_memory().to(self.device, non_blocking=True)
         phase = pos[:, None] * self.inv_freq[None, :]
         cos, sin = phase.cos().contiguous(), phase.sin().contiguous()
-        kcs, vcs = [list(snap[0]) for snap in snaps], [list(snap[1]) for snap in snaps]
+        kcs, vcs = [snap[0] for snap in snaps], [snap[1] for snap in snaps]
         for layer in range(self.layers):
             _, k, v = self._prep(self._lin(projected, f"layers.{layer}.self_attn.kv.weight"), layer, cos, sin, 0)
-            a0 = 0
-            for kc, vc, n in zip(kcs, vcs, sizes):
-                kn, vn = k[:, a0:a0 + n], v[:, a0:a0 + n]
-                kc[layer] = (kn if kc[layer] is None else torch.cat((kc[layer], kn), dim=1))[:, -self.window:].contiguous()
-                vc[layer] = (vn if vc[layer] is None else torch.cat((vc[layer], vn), dim=1))[:, -self.window:].contiguous()
-                a0 += n
+            for cache, fresh in ((kcs, k), (vcs, v)):        # every stream's window in one copy a tensor
+                for c, out in zip(cache, append(fresh, [c[layer] for c in cache], sizes, self.window)):
+                    c[layer] = out
         return [(kc, vc, min(self.window, snap[2] + n), snap[3] + n) for kc, vc, snap, n in zip(kcs, vcs, snaps, sizes)]
 
     def _attention(self, layer: int, x: torch.Tensor) -> torch.Tensor:
@@ -420,7 +424,7 @@ class DFlash2:
         return q, k, v
 
     def _layer_fast(self, i: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, ctx: list,
-                    masks: list[torch.Tensor], length: int) -> torch.Tensor:
+                    length: int) -> torch.Tensor:
         """One layer over several streams' blocks (``length`` rows each); each block attends its own context."""
 
         w = self.weights
@@ -430,15 +434,8 @@ class DFlash2:
         conv = w[base + "attention_conv.base_kernel"]
         q, k, v = self._prep(self._lin(_dconv(normed, dyn, conv, 0, self.group_size, seg=length),
                                        base + "self_attn.qkv.weight"), i, cos, sin, self.heads_local)
-        outs = []
-        for j, snap in enumerate(ctx):
-            r = slice(j * length, (j + 1) * length)
-            keys = torch.cat((snap[0][i], k[:, r]), dim=1)
-            values = torch.cat((snap[1][i], v[:, r]), dim=1)
-            o = F.scaled_dot_product_attention(q[None, :, r], keys[None], values[None], attn_mask=masks[j][None, None],
-                                               scale=self.head_dim ** -0.5, enable_gqa=True)
-            outs.append(o[0].transpose(0, 1).reshape(length, self.heads_local * self.head_dim))
-        out = outs[0] if len(outs) == 1 else torch.cat(outs)
+        out = block_attention(q, k, v, [snap[0][i] for snap in ctx], [snap[1][i] for snap in ctx], length,
+                              self.window, self.head_dim ** -0.5, self.is_causal)
         x = _dconv(self._row(out, base + "self_attn.o_proj.weight"), dyn, conv, 1, self.group_size, x, seg=length)
         normed = F.rms_norm(x, (self.hidden,), w[base + "post_attention_layernorm.weight"], self.eps)
         dyn = self._lin(normed, base + "mlp_conv.kernel_projection.weight")
@@ -464,16 +461,6 @@ class DFlash2:
 
         return gather_rank_partials(row_partial(x.contiguous(), self.q4[name], xs=xs))
 
-    def _mask(self, s: int, length: int) -> torch.Tensor:
-        """A block's attention: its context's last ``window`` rows, then the block (causal if trained so)."""
-
-        qidx = torch.arange(length, device=self.device)[:, None]
-        kidx = torch.arange(s + length, device=self.device)[None, :]
-        block_allowed = kidx >= s
-        if self.is_causal:
-            block_allowed = block_allowed & (kidx <= s + qidx)
-        return ((kidx < s) & (s + qidx - kidx < self.window + 1)) | block_allowed
-
     @torch.no_grad()
     def launch_block(self, pending: int, max_nodes: int, block: int | None = None):
         """``launch_blocks`` for the current context alone."""
@@ -496,9 +483,8 @@ class DFlash2:
             ctx = [snaps[i] for i in live]
             rot = [self._rotary(snap[3], length) for snap in ctx]
             cos, sin = torch.cat([c for c, _ in rot]), torch.cat([s for _, s in rot])
-            masks = [self._mask(snap[0][0].shape[1], length) for snap in ctx]
             for layer in range(self.layers):
-                x = self._layer_fast(layer, x, cos, sin, ctx, masks, length)
+                x = self._layer_fast(layer, x, cos, sin, ctx, length)
             h = F.rms_norm(x.view(len(live), length, -1)[:, 1:].reshape(-1, self.hidden), (self.hidden,),
                            self.weights["norm.weight"], self.eps)
         else:                                    # the reference path, one stream at a time
@@ -513,6 +499,8 @@ class DFlash2:
         projected = self._lin(h, "candidate_selector.hidden_projection.weight").float()
         if self.head_cols is not None:
             logits = self.sub_head(h.contiguous()).index_select(1, self.head_cols)
+        elif self.sub_rows is not None:
+            logits = matmul_rows(h, self.sub_rows)
         else:
             logits = matmul(h, self.sub_head)
         values, local_ids = torch.topk(logits.float(), k=16, dim=-1, sorted=False)

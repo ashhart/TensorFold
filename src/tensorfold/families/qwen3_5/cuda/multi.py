@@ -6,24 +6,43 @@ import time
 
 import torch
 
+from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import PrefixCache, Stream, accept
 
-from .decode import CopyIndex, clone_state, prefill
-from .decode_tp import _sample_split, _share, pack_sampling, prefill_tp, unpack_sampling
+from .decode import CopyIndex, clone_state
+from .decode_tp import _sample_split, _share, first_token, pack_sampling, unpack_sampling
 from .draft_tree import allocate
-from .forward import State, _paths, commit_streams, multi_tree_forward, path_indices
+from .forward import State, _paths, commit_streams, multi_tree_forward, path_indices, reserve
+from .prefill import prefill_state
 from .weights import Weights
 
-ADMIT, ROUND, DONE = 1, 2, 3            # rank 0's messages
+ADMIT, ROUND, DONE, FILL = 1, 2, 3, 4   # rank 0's messages
 COPY, TREE, ONE = 0, 1, 2               # a stream's window this round
+STEP = 1024                             # prompt rows a prefill step takes while other streams decode
 
 
-def private(st: State) -> State:
-    """A copy of a committed state that shares no buffer with it (attention caches copied up to ``pos``)."""
+def private(st: State, rows: int) -> State:
+    """A copy of a committed state with its own attention caches of ``rows`` rows (rows below ``pos`` copied in)."""
 
     other = clone_state(st)
-    other.kv = [None if kv is None else (kv[0][:st.pos].clone(), kv[1][:st.pos].clone()) for kv in st.kv]
+    reserve(other, rows)                              # new buffers now: prefill never grows or reallocates them
+    return other
+
+
+def own(snap):
+    """A drafter snapshot with its own per-layer lists (``add_taps_streams`` replaces their entries in place)."""
+
+    return None if snap is None else (list(snap[0]), list(snap[1]), snap[2], snap[3])
+
+
+def kept(st: State) -> State:
+    """A cached state: attention rows below ``pos`` viewed in place (commits only write past a stream's ``pos``), DeltaNet states copied (decoding replays them in place)."""
+
+    other = clone_state(st)
+    other.kv = [None if kv is None else (kv[0][:st.pos], kv[1][:st.pos]) for kv in st.kv]
+    other.rec = [None if r is None else r.clone() for r in st.rec]
+    other.conv = [None if c is None else c.clone() for c in st.conv]
     return other
 
 
@@ -46,7 +65,7 @@ class MultiDecoder:
     """The ``Scheduler``'s decoder on one GPU or as ``rank`` of two; a stream's window holds at most 16 rows."""
 
     def __init__(self, w: Weights, draft=None, *, max_rows: int = 16, allow_copy: bool = True, stop_eos: bool = True,
-                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0) -> None:
+                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None) -> None:
         if not 1 <= max_rows <= 16:
             raise ValueError("a stream's window is 1 to 16 rows (the multi-stream GDN tree kernel's limit)")
         self.w, self.draft, self.max_rows, self.allow_copy = w, draft, max_rows, allow_copy
@@ -55,7 +74,9 @@ class MultiDecoder:
         self.rank, self.world, self.device = rank, world, w.norm.device
         self.split = world == 2 and 2 * w.head.n == w.config.vocab       # each rank holds half the head
         self.drafts = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
-        self.streams: dict[int, Stream] = {}
+        self.streams: dict[int, Stream] = {}                  # decoding
+        self.filling: list[Stream] = []                        # admitted, prompts still prefilling (oldest first)
+        self.points = points                                  # a prompt's message starts to keep states at, or None
         self.cache = PrefixCache(keep)
         self.next_id = 0
         self.broken: Exception | None = None
@@ -63,7 +84,7 @@ class MultiDecoder:
         self.overhead = (8.0, 1.5)                            # a round's other ms: fixed, and per stream
 
     def live(self) -> int:
-        return len(self.streams)
+        return len(self.streams) + len(self.filling)
 
     def _send(self, values: list[int]) -> None:
         if self.world == 2 and self.broken is None:
@@ -75,7 +96,7 @@ class MultiDecoder:
 
     @torch.no_grad()
     def admit(self, s: Stream) -> None:
-        """Prefill a request, from the longest cached prefix of its prompt, and emit its first token."""
+        """Queue a request on the longest cached prefix of its prompt; rounds prefill the rest a step at a time."""
 
         self._check()
         if self.context:
@@ -89,43 +110,82 @@ class MultiDecoder:
         self.next_id += 1
         self._send([ADMIT, s.sid, s.count, int(s.draft), s.cached, *pack_sampling(s.sampling)])
         self._send(list(s.prompt))
+        self._queue(s, hit)
+
+    def _queue(self, s: Stream, hit) -> None:
+        drafter = self.draft if s.draft and self.drafts else None
+        need = len(s.prompt) + s.count                       # the most a stream's attention caches ever hold
+        state = private(hit[1] if hit else State(self.w), min(self.context, need) if self.context else need)
+        s.st = state
+        s.snap = None if drafter is None else own(hit[2]) if hit and hit[2] is not None else \
+            ([None] * drafter.layers, [None] * drafter.layers, 0, 0)
+        s.stops = ([p for p in self.points(s.prompt) if p >= state.pos + MIN_GAP]
+                   if self.points is not None and s.draft else [])
+        self.filling.append(s)
+
+    def _fill(self) -> list[Stream]:
+        """One prefill step for the oldest queued prompt: to its next kept state, or STEP rows while others decode."""
+
+        s = self.filling[0]
+        pos, n = s.st.pos, len(s.prompt)
+        stop = next((p for p in s.stops if p > pos), n)
+        if any(not x.done for x in self.streams.values()):
+            stop = min(stop, pos + STEP)
+        self._send([FILL, s.sid, stop])
         try:
-            first = self._admit(s, hit)
+            first = self._step(s, stop)
+        except Exception as exc:                 # noqa: BLE001  (one GPU: this request fails, the others go on)
+            if self.world == 2:
+                raise
+            self.filling = [x for x in self.filling if x is not s]
+            s.error, s.done = exc, True
+            return [s]
+        if first is None:
+            return []
+        s.take([first], self.eos)
+        return [s] if s.done else []
+
+    def _step(self, s: Stream, stop: int) -> int | None:
+        """Prefill prompt[pos:stop] (the same bits for any stops); at the end, sample the first token and start decoding."""
+
+        t0 = time.perf_counter()
+        drafter = self.draft if s.draft and self.drafts else None
+        try:
+            if drafter is not None:
+                drafter.restore(s.snap)
+            normed = prefill_state(self.w, s.prompt[:stop], s.st, tp=self.world == 2, draft=drafter)
+            if drafter is not None:
+                s.snap = drafter.snapshot()
+            if stop in s.stops:
+                self.cache.add(list(s.prompt[:stop]), kept(s.st), own(s.snap))
+            first = None if stop < len(s.prompt) else \
+                first_token(self.w, normed, len(s.prompt), s.sampling, self.rank, self.world)
+            if first is not None and s.draft and not (s.stops and len(s.prompt) - s.stops[-1] < MIN_GAP):
+                self.cache.add(list(s.prompt), kept(s.st), own(s.snap))   # a message start just before the end covers it
         except Exception as exc:
             if self.world == 2:
                 self.broken = exc
             raise
-        s.take([first], self.eos)
-
-    def _admit(self, s: Stream, hit) -> int:
-        t0 = time.perf_counter()
-        drafter = self.draft if s.draft and self.drafts else None
-        if drafter is not None:
-            empty = ([None] * drafter.layers, [None] * drafter.layers, 0, 0)
-            drafter.restore(hit[2] if hit and hit[2] is not None else empty)
-        state = private(hit[1]) if hit else State(self.w)
-        state.limit = self.context
-        if self.world == 2:
-            s.st, first = prefill_tp(self.w, s.prompt, s.sampling, self.rank, drafter, state=state)
-        else:
-            s.st, first = prefill(self.w, s.prompt, s.sampling, drafter, state=state)
-        s.snap = drafter.snapshot() if drafter is not None else None
+        finally:
+            s.prefill_s += time.perf_counter() - t0
+        if first is None:
+            return None
         s.copies = CopyIndex() if self.allow_copy and s.draft and self.rank == 0 else None
         s.context = list(s.prompt)
-        s.prefill_s, s.started = time.perf_counter() - t0, time.perf_counter()
-        if s.draft:
-            self.cache.add(list(s.prompt), private(s.st), s.snap)
-        self.streams[s.sid] = s                       # last, so a failed copy leaves no stream behind
+        s.started = time.perf_counter()
+        self.filling = [x for x in self.filling if x is not s]
+        self.streams[s.sid] = s                       # after every step that can fail: a failure leaves it queued
         return first
 
     @torch.no_grad()
     def round(self) -> list[Stream]:
-        """One round over the live streams; returns the ones that finished."""
+        """A prefill step for the oldest queued prompt, then one round over the decoding streams; returns the finished."""
 
+        self._check()
+        done = self._fill() if self.filling else []
         live = [s for s in self.streams.values() if not s.done]
         if not live:
-            return []
-        self._check()
+            return done
         copied: dict[int, list[int]] = {}
         plan = [(s.sid, self._mode(s, copied), s.out[-1], len(s.context)) for s in live]
         self._send([ROUND, len(plan), *[x for item in plan for x in item]])
@@ -139,7 +199,7 @@ class MultiDecoder:
         self._commit(plan, wins, record, taps, starts, paths)
         for s, (tokens, _), path, end in zip(live, wins, paths, ends):
             s.take([tokens[r] for r in path[1:]] + [end], self.eos)
-        return [s for s in live if s.done]
+        return done + [s for s in live if s.done]
 
     def _mode(self, s: Stream, copied: dict[int, list[int]]) -> int:
         if not s.draft:
@@ -202,6 +262,7 @@ class MultiDecoder:
                     times.append(1e3 * (time.perf_counter() - t0))
             points.append((r, sorted(times)[len(times) // 2]))
         self.costs = points
+        torch.cuda.empty_cache()                      # the widest windows' scratch goes back before any request
 
     def _verify(self, plan, copied=None):
         """Both ranks: drafter blocks, rank 0's windows, the forward and each stream's samples."""
@@ -235,7 +296,7 @@ class MultiDecoder:
         rows = [[starts[k] + r for r in path] for k, path in enumerate(paths)]
         indices = path_indices(record, rows)
         streams = [self.streams[item[0]] for item in plan]
-        commit_streams([s.st for s in streams], record, rows, indices)
+        commit_streams([s.st for s in streams], record, rows, indices, in_place=True)
         drafting = []
         for s, (tokens, _), path, (_, _, take) in zip(streams, wins, paths, indices):
             s.committed.extend(tokens[r] for r in path)
@@ -256,7 +317,7 @@ class MultiDecoder:
                 self._finish(s.sid)
 
     def _finish(self, sid: int) -> None:
-        self.streams.pop(sid)
+        self.streams.pop(sid, None)
 
     def drop(self) -> list[Stream]:
         """After an error in a round: forget the live streams (two ranks can no longer be trusted to agree)."""
@@ -264,6 +325,8 @@ class MultiDecoder:
         live = [s for s in self.streams.values() if not s.done]
         for s in live:
             del self.streams[s.sid]
+        live += self.filling
+        self.filling = []
         if self.world == 2 and self.broken is None:
             self.broken = RuntimeError("a round failed")
         return live
@@ -283,7 +346,9 @@ class MultiDecoder:
                 if cached and hit is None:
                     raise RuntimeError(f"rank 1 has no cached state for the {cached} tokens rank 0 resumes from")
                 s.cached = cached
-                self._admit(s, hit)
+                self._queue(s, hit)
+            elif msg[0] == FILL:
+                self._step(next(s for s in self.filling if s.sid == msg[1]), msg[2])
             elif msg[0] == ROUND:
                 plan = [tuple(msg[2 + 4 * i:6 + 4 * i]) for i in range(msg[1])]
                 wins, record, taps, starts, _ = self._verify(plan)

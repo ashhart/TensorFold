@@ -112,12 +112,14 @@ def test_a_reply_committed_to_the_window_end_stays_within_the_limit(allocations,
 
 
 def _engine(tp, rank):
+    from tensorfold.cuda.streams import PrefixCache
     from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
 
     engine = object.__new__(Qwen27Engine)
     engine.tp, engine.rank, engine.max_rows, engine.allow_copy = tp, rank, 12, True
     engine.w = SimpleNamespace(norm=SimpleNamespace(device="cpu"))
-    engine.draft, engine.cache, engine.multi, engine.scheduler = None, [], None, None
+    engine.draft, engine.cache, engine.multi, engine.scheduler = None, PrefixCache(4), None, None
+    engine.points = None
     engine.context_window = WINDOW
     return engine
 
@@ -131,11 +133,11 @@ def test_engine_prefills_within_its_context_window(allocations, monkeypatch):  #
     decode_tp = importlib.import_module(Q + "decode_tp")
     limits = []
 
-    def prefill(w, prompt, sampling, draft=None, *, state=None, limit=0):
+    def prefill(w, prompt, sampling, draft=None, *, state=None, limit=0, **stops):
         limits.append(("one", limit))
         return SimpleNamespace(pos=len(prompt)), 5
 
-    def prefill_tp(w, prompt, sampling, rank, draft=None, *, state=None, limit=0):
+    def prefill_tp(w, prompt, sampling, rank, draft=None, *, state=None, limit=0, **stops):
         limits.append((f"rank {rank}", limit))
         return SimpleNamespace(pos=len(prompt)), 5
 

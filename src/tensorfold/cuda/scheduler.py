@@ -72,4 +72,4 @@ class Scheduler:
                     self._reply(s, "error", exc)
             self.decoder.finish(done)
             for s in done:
-                self._reply(s, "done", s.stats())
+                self._reply(s, *(("error", s.error) if s.error is not None else ("done", s.stats())))

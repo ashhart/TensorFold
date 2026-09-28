@@ -104,27 +104,37 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
     return torch.tensor(list(ids), dtype=torch.int32, device=device)
 
 
-@torch.no_grad()
-def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, rank: int,
-               draft=None, *, state: State | None = None, limit: int = 0) -> tuple[State, int]:
-    """Both ranks prefill, from a prompt-end ``state`` with a fresh prefill's bits; rank 0 shares the first token."""
+def first_token(w: Weights, normed: torch.Tensor, n: int, sampling: Sampling | None, rank: int = 0,
+                world: int = 1) -> int:
+    """The token after an ``n``-token prompt from its last row's normed state; two ranks share rank 0's draw."""
 
     from .forward import _mm
-    from .prefill import prefill_state
 
-    device = w.norm.device
+    if world == 1:
+        return sample_rows(_mm(normed, w.head), [n], sampling)[0]
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
+    last = _mm(normed, w.head) if split or rank == 0 else None
+    if split:
+        first = _sample_split(last, [n], sampling, rank)
+    else:
+        first = [sample_rows(last, [n], sampling)[0]] if rank == 0 else None
+    return _share(first, rank, w.norm.device)[0]
+
+
+@torch.no_grad()
+def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, rank: int,
+               draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
+               keep: Callable | None = None) -> tuple[State, int]:
+    """Both ranks prefill, from a kept ``state`` with a fresh prefill's bits; rank 0 shares the first token."""
+
+    from .decode import prefill_stops
+
     st = clone_state(state) if state is not None else State(w)
     if state is None:
         st.limit = limit                    # a fresh state's attention caches stop here; a resumed one keeps its own
     taps = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
-    normed = prefill_state(w, prompt, st, tp=True, draft=draft if taps else None)
-    last = _mm(normed, w.head) if split or rank == 0 else None
-    if split:
-        first = _sample_split(last, [len(prompt)], sampling, rank)
-    else:
-        first = [sample_rows(last, [len(prompt)], sampling)[0]] if rank == 0 else None
-    return st, _share(first, rank, device)[0]
+    normed = prefill_stops(w, prompt, st, draft if taps else None, stops=stops, keep=keep, tp=True)
+    return st, first_token(w, normed, len(prompt), sampling, rank, 2)
 
 
 def _accept(tokens: list[int], parents: list[int], sampled: list[int], room: int,

@@ -30,13 +30,26 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
     return torch.tensor(ids, dtype=torch.int32, device=device)
 
 
+def prefill_stops(w: Weights, prompt: Sequence[int], st: State, draft=None, *, stops: Sequence[int] = (),
+                  keep: Callable | None = None, tp: bool = False) -> torch.Tensor:
+    """Commit the rest of the prompt into ``st``, handing ``keep(p, state, drafter context)`` the state after each stop."""
+
+    from .prefill import prefill_state
+
+    for p in stops:
+        if st.pos < p < len(prompt) and keep is not None:
+            prefill_state(w, prompt[:p], st, tp=tp, draft=draft)
+            keep(p, clone_state(st), draft.snapshot() if draft is not None else None)
+    return prefill_state(w, prompt, st, tp=tp, draft=draft)
+
+
 @torch.no_grad()
 def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
-            draft=None, *, state: State | None = None, limit: int = 0) -> tuple[State, int]:
-    """Commit the prompt and sample the first token; resuming a prompt-end ``state`` gives a fresh prefill's bits."""
+            draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
+            keep: Callable | None = None) -> tuple[State, int]:
+    """Commit the prompt and sample the first token; resuming a kept ``state`` gives a fresh prefill's bits."""
 
     from .forward import _mm
-    from .prefill import prefill_state
 
     if not prompt:
         raise ValueError("prefill requires at least one token")
@@ -45,7 +58,7 @@ def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
         st.limit = limit                    # a fresh state's attention caches stop here; a resumed one keeps its own
     if st.pos >= len(prompt):
         raise ValueError("a reused state must leave at least one prompt token to process")
-    normed = prefill_state(w, prompt, st, draft=draft)
+    normed = prefill_stops(w, prompt, st, draft, stops=stops, keep=keep)
     pending = sample_rows(_mm(normed, w.head), [len(prompt)], sampling)[0]
     return st, pending
 

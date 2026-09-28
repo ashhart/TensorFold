@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
 
@@ -113,6 +114,9 @@ class Config:
     rope_dims: int
     rope_theta: float
     eos: tuple[int, ...]
+    experts: int = 0          # routed experts a MoE layer picks from (0: dense MLPs)
+    top_k: int = 0
+    moe_width: int = 0
 
     @classmethod
     def read(cls, model_dir: str | Path) -> "Config":
@@ -123,7 +127,7 @@ class Config:
         eos = raw.get("eos_token_id", t.get("eos_token_id"))
         eos = tuple(eos) if isinstance(eos, list) else (int(eos),)
         return cls(
-            hidden=int(t["hidden_size"]), intermediate=int(t["intermediate_size"]),
+            hidden=int(t["hidden_size"]), intermediate=int(t.get("intermediate_size", 0)),
             layers=int(t["num_hidden_layers"]), heads=int(t["num_attention_heads"]),
             kv_heads=int(t["num_key_value_heads"]), head_dim=head_dim, vocab=int(t["vocab_size"]),
             k_heads=int(t["linear_num_key_heads"]), v_heads=int(t["linear_num_value_heads"]),
@@ -132,7 +136,8 @@ class Config:
             eps=float(t.get("rms_norm_eps", 1e-6)),
             rope_dims=int(head_dim * float(rope.get("partial_rotary_factor", t.get("partial_rotary_factor", 0.25)))),
             rope_theta=float(rope.get("rope_theta", t.get("rope_theta") or 10000000.0)),
-            eos=eos,
+            eos=eos, experts=int(t.get("num_experts", 0)), top_k=int(t.get("num_experts_per_tok", 0)),
+            moe_width=int(t.get("moe_intermediate_size", 0)),
         )
 
     def is_linear(self, layer: int) -> bool:
@@ -171,9 +176,10 @@ class Layer:
     post_norm: torch.Tensor
     gdn: GDN | None
     attn: Attention | None
-    gate: QLinear
-    up: QLinear
-    down: QLinear
+    gate: QLinear | None
+    up: QLinear | None
+    down: QLinear | None
+    moe: Any = None           # routed experts and a shared expert (``tensorfold.cuda.moe``) instead of gate/up/down
 
 
 @dataclass
@@ -189,28 +195,43 @@ class Weights:
     def nbytes(self) -> int:
         total = self.embed.nbytes() + self.head.nbytes()
         for layer in self.layers:
-            mods = [layer.gate, layer.up, layer.down]
+            mods = [m for m in (layer.gate, layer.up, layer.down) if m is not None]
             mods += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []
             mods += [layer.attn.q, layer.attn.k, layer.attn.v, layer.attn.o] if layer.attn else []
             total += sum(m.nbytes() for m in mods)
         return total
 
 
-def _tensors(model_dir: Path, device: str) -> dict[str, torch.Tensor]:
-    from safetensors import safe_open
+class _Tensors:
+    """Checkpoint tensors read one at a time, so the weights never sit in device memory twice while they pack."""
 
-    out: dict[str, torch.Tensor] = {}
-    for path in sorted(model_dir.glob("*.safetensors")):
-        with safe_open(str(path), framework="pt", device=device) as f:
+    def __init__(self, model_dir: Path, device: str) -> None:
+        from contextlib import ExitStack
+
+        from safetensors import safe_open
+
+        self.device, self.files, self.where = device, ExitStack(), {}
+        for path in sorted(model_dir.glob("*.safetensors")):
+            f = self.files.enter_context(safe_open(str(path), framework="pt", device="cpu"))
             for name in f.keys():
-                if name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp."):
-                    continue
-                out[name] = f.get_tensor(name)
-    return out
+                if not (name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp.")):
+                    self.where[name] = f
+
+    def __contains__(self, name: str) -> bool:
+        return name in self.where
+
+    def __iter__(self):
+        return iter(list(self.where))
+
+    def pop(self, name: str) -> torch.Tensor:
+        return self.where.pop(name).get_tensor(name).to(self.device)
+
+    def close(self) -> None:
+        self.files.close()
 
 
-def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False) -> Weights:
-    """The checkpoint's weights: MLX affine 4-bit as stored (``tiled``: packed for the shared matmul), or an EXL3 pack."""
+def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, mlp=None) -> Weights:
+    """MLX affine 4-bit (``tiled``: projections packed as read; ``mlp(prefix, get, qlinear, cfg)``: a layer's MLP fields), or an EXL3 pack."""
 
     from .exl3_load import load_exl3, quant_config
 
@@ -218,16 +239,21 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False) ->
     if quant_config(model_dir) is not None:
         return load_exl3(model_dir, device)
     cfg = Config.read(model_dir)
-    t = _tensors(model_dir, device)
+    t = _Tensors(model_dir, device)
     prefix = "language_model." if any(k.startswith("language_model.") for k in t) else ""
 
     def get(name: str) -> torch.Tensor:
         return t.pop(prefix + name)
 
-    def qlinear(name: str) -> QLinear:
+    def qlinear(name: str, pack: bool = True) -> QLinear:
         w = get(name + ".weight")
         w = w.view(torch.int32) if w.dtype != torch.int32 else w
-        return QLinear(w.contiguous(), get(name + ".scales").contiguous(), get(name + ".biases").contiguous())
+        q = QLinear(w.contiguous(), get(name + ".scales").contiguous(), get(name + ".biases").contiguous())
+        if tiled and pack:
+            from .qmm_fast import tile
+
+            return tile(q)
+        return q
 
     layers = []
     for i in range(cfg.layers):
@@ -246,20 +272,20 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False) ->
                              v=qlinear(p + "self_attn.v_proj"), o=qlinear(p + "self_attn.o_proj"),
                              q_norm=get(p + "self_attn.q_norm.weight").contiguous(),
                              k_norm=get(p + "self_attn.k_norm.weight").contiguous())
+        fields = mlp(p + "mlp.", get, qlinear, cfg) if mlp is not None else \
+            {"gate": qlinear(p + "mlp.gate_proj"), "up": qlinear(p + "mlp.up_proj"), "down": qlinear(p + "mlp.down_proj")}
         layers.append(Layer(linear=cfg.is_linear(i), input_norm=get(p + "input_layernorm.weight").contiguous(),
                             post_norm=get(p + "post_attention_layernorm.weight").contiguous(), gdn=gdn, attn=attn,
-                            gate=qlinear(p + "mlp.gate_proj"), up=qlinear(p + "mlp.up_proj"),
-                            down=qlinear(p + "mlp.down_proj")))
-    w = Weights(config=cfg, embed=qlinear("model.embed_tokens"), layers=layers, norm=get("model.norm.weight"),
-                head=qlinear("lm_head"))
+                            **{"gate": None, "up": None, "down": None, **fields}))
+    w = Weights(config=cfg, embed=qlinear("model.embed_tokens", pack=False), layers=layers,
+                norm=get("model.norm.weight"), head=qlinear("lm_head"))
     half = cfg.rope_dims // 2
     inv = cfg.rope_theta ** (-torch.arange(0, half, dtype=torch.float64) / half)
     w.inv_freq = inv.to(torch.float32).to(device)
-    left = [k for k in t if not k.startswith("vision")]
+    left = list(t)
+    t.close()
     if left:
         raise ValueError(f"unused checkpoint tensors: {left[:5]} ...")
     if tiled:
-        from .qmm_fast import prepare
-
-        prepare(w)
+        torch.cuda.empty_cache()
     return w

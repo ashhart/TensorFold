@@ -32,9 +32,18 @@ def split_thinking(text: str, *, finished: bool, markers: tuple[str, str] = THIN
             return ("", "") if not finished and opener.startswith(text) else ("", text)
         text = text[len(opener):].lstrip("\n")
     end = text.find(closer)
-    if end < 0:
-        return text[: len(text) - (0 if finished else _partial_tag(text, closer))], ""
-    return text[:end], text[end + len(closer):].lstrip("\n")
+    if end >= 0:
+        return text[:end], text[end + len(closer):].lstrip("\n")
+    call = min((at for at in (text.find(opener) for opener, _ in _CALLS) if at >= 0), default=-1)
+    if call >= 0:
+        # a call written before the block closes: held while the block may still close, the answer if the reply ends
+        if not finished:
+            return text[:call], ""
+        if any(text.startswith(opener, call) and close in text[call:] for opener, close in _CALLS):
+            return text[:call], text[call:]
+        return text, ""
+    held = 0 if finished else max(_partial_tag(text, tag) for tag in (closer, *(opener for opener, _ in _CALLS)))
+    return text[: len(text) - held], ""
 
 
 def think_markers(tokenizer: Any) -> tuple[str, str]:

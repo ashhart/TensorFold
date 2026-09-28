@@ -44,7 +44,9 @@ class StopPolicy:
         return text
 
     def flush(self, callback: Any, content: str, reasoning: str | None, sent: str, thought: str, tools: bool) -> None:
-        if callback is None or not self.strings:
+        """Stream what the final reply adds to what streamed: text held back as a possible stop string or tag."""
+
+        if callback is None:
             return
         if reasoning and reasoning.startswith(thought) and len(reasoning) > len(thought):
             callback({"reasoning_content": reasoning[len(thought):]})

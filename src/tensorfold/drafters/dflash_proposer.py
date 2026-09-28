@@ -29,7 +29,7 @@ class DFlashProposer:
         self.drafter = drafter
         # Couple draft draws to the target's position-keyed Gumbel noise.
         self.sampling = sampling
-        self.cache = concat_updates(drafter.model.make_cache())
+        self.cache = concat_updates(drafter.make_cache())
         self.context: mx.array | None = None   # taps the drafter has not read yet
         self.ready = False
         self.copy = copy
@@ -115,6 +115,11 @@ class DFlashProposer:
             # Use the draft vocabulary and radix top-k when the head is not lane-tiled.
             hidden = self.drafter.model.hidden_states(inputs, self.context, self.cache, 1)
             tokens = self._chain_on_draft_vocab(hidden, inputs[:, 0], len(context))
+        elif not hasattr(self.drafter.model, "candidate_selector"):
+            # DFlash without DFlash2's selector: each position's most likely token (a keyed draw lands less often)
+            from .dflash_block import block_chain
+
+            tokens = block_chain(self.drafter, inputs, self.context, self.cache)
         elif self.sampling is None:
             tokens, _, _ = self.drafter.model.propose(inputs, self.context, self.cache, 0.0, logits_start=1)
         else:

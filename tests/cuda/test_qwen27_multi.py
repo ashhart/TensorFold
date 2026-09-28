@@ -16,7 +16,7 @@ from tensorfold.families.qwen3_5.cuda.decode import prefill, serial_decode  # no
 from tensorfold.families.qwen3_5.cuda.forward import (State, commit, commit_streams, multi_tree_forward,  # noqa: E402
                                                         tree_forward)
 from tensorfold.families.qwen3_5.cuda.draft_tree import allocate  # noqa: E402
-from tensorfold.families.qwen3_5.cuda.multi import TREE, MultiDecoder, private  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.multi import TREE, MultiDecoder, kept, private  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
 
 V = 256
@@ -80,11 +80,11 @@ def test_multi_forward_rows_equal_their_streams_windows():
     logits, record, _, starts = multi_tree_forward(w, [(t, p, st) for (t, p), st in zip(trees, states)])
     assert starts == [0, 4, 6, 11]
     for s, ((tokens, parents), st) in enumerate(zip(trees, states)):
-        ref = private(st)
+        ref = private(st, st.pos + 16)
         single, rec = tree_forward(w, _tok(tokens), parents, ref)
         assert torch.equal(logits[starts[s]:starts[s + 1]], single), s
         commit(ref, rec, paths[s])
-        mine = private(st)
+        mine = private(st, st.pos + 16)
         commit(mine, record, [starts[s] + r for r in paths[s]])
         _same_state(mine, ref)
 
@@ -188,9 +188,9 @@ def test_a_failed_prompt_end_copy_fails_only_its_request(monkeypatch):
     def failing(st):
         if st.pos == len(doomed):
             raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end copy)")
-        return private(st)
+        return kept(st)
 
-    monkeypatch.setattr("tensorfold.families.qwen3_5.cuda.multi.private", failing)
+    monkeypatch.setattr("tensorfold.families.qwen3_5.cuda.multi.kept", failing)
     dec = _Oracle(w, refs, seed=5)
     sched = Scheduler(dec, max_streams=3)
     results: dict = {}
@@ -239,10 +239,12 @@ def test_context_bounds_each_stream():
         dec.admit(Stream(list(range(1, 24)), 5))
     s = Stream(PROMPTS[1], 100, SAMPLINGS[1])
     dec.admit(s)
+    need = len(PROMPTS[1]) + s.count                     # admission sizes the stream's caches once, in full
+    assert all(kv is None or kv[0].shape[0] == need for kv in s.st.kv)
     while dec.live():
         dec.finish(dec.round())
     assert s.count == 24 - len(PROMPTS[1]) - 1 and s.out == _serial(w, PROMPTS[1], SAMPLINGS[1], s.count)
-    assert all(kv is None or kv[0].shape[0] <= 24 for kv in s.st.kv)
+    assert all(kv is None or kv[0].shape[0] == need <= 24 for kv in s.st.kv)
 
 
 def test_accept_and_prefix_cache():
@@ -258,7 +260,9 @@ def test_accept_and_prefix_cache():
     assert cache.longest([1, 2, 3, 4])[1] == "b" and cache.longest([1, 2, 3])[1] == "a"
     assert cache.longest([1, 2]) is None and cache.named([1, 2, 3, 4], 2)[1] == "a"
     cache.add([7], "c", None)
-    assert [e[1] for e in cache.entries] == ["b", "c"]
+    assert [e[1] for e in cache.entries] == ["a", "c"]          # the last hit ("a") outlives the older "b"
+    cache.add([8], "d", None)
+    assert [e[1] for e in cache.entries] == ["a", "d"]          # an entry resumed from outlives newer ones never hit
 
 
 def test_commit_streams_equals_each_stream_alone():
@@ -270,9 +274,97 @@ def test_commit_streams_equals_each_stream_alone():
     paths = [[0, 1, 3], [0], [0, 1, 2, 3, 4]]
     together = [_prefilled(w, p) for p in prompts]
     alone = [_prefilled(w, p) for p in prompts]
+    in_place = [_prefilled(w, p) for p in prompts]
+    held = [[r for r in st.rec] for st in in_place]
     _, record, _, starts = multi_tree_forward(w, [(t, p, st) for (t, p), st in zip(trees, together)])
     rows = [[starts[k] + r for r in path] for k, path in enumerate(paths)]
     commit_streams(together, record, rows)
+    commit_streams(in_place, record, rows, in_place=True)
     for k in range(len(prompts)):
         commit(alone[k], record, rows[k])
         _same_state(together[k], alone[k])
+        _same_state(in_place[k], alone[k])
+        assert all(a is b for a, b in zip(in_place[k].rec, held[k]))     # the same tensors, overwritten
+
+
+def _points_after(k):
+    """Snapshot points for the test prompts: position ``k`` when a prompt is longer."""
+
+    return lambda ids: [k] if len(ids) > k + 1 else []
+
+
+@pytest.mark.parametrize("step", [1024, 3])
+def test_prompts_resume_a_shared_start_and_equal_fresh(monkeypatch, step):
+    """A prompt resuming another's kept state at a message start decodes a fresh prefill's tokens, prefill steps interleaved or not."""
+
+    from tensorfold.cuda import markers
+    from tensorfold.families.qwen3_5.cuda import multi
+
+    monkeypatch.setattr(multi, "STEP", step)
+    monkeypatch.setattr(multi, "MIN_GAP", 2)
+    monkeypatch.setattr(markers, "MIN_GAP", 2)
+    w = _model()
+    shared = [11, 12, 13, 14, 15, 16]
+    prompts = [shared + [21, 22, 23], shared + [31, 32], shared + [41, 42, 43, 44, 45], [7, 8, 9, 10, 11]]
+    refs = {tuple(p): _serial(w, p, smp, 16) for p, smp in zip(prompts, SAMPLINGS)}
+    dec = _Oracle(w, refs, seed=5, points=_points_after(len(shared)))
+    first = Stream(prompts[0], 16, SAMPLINGS[0])
+    dec.admit(first)
+    while dec.live():
+        dec.finish(dec.round())
+    assert first.out == refs[tuple(prompts[0])] and first.cached == 0
+    assert any(e[0] == shared for e in dec.cache.entries)
+    rest = []
+    for prompt, sampling in zip(prompts[1:], SAMPLINGS[1:]):
+        s = Stream(prompt, 16, sampling)
+        dec.admit(s)
+        rest.append(s)
+    while dec.live():
+        dec.finish(dec.round())
+    for s in rest:
+        assert s.out == refs[tuple(s.prompt)], s.prompt
+        assert s.cached == (len(shared) if s.prompt[:len(shared)] == shared else 0), (s.prompt, s.cached)
+
+
+def test_streams_keep_decoding_while_a_prompt_prefills(monkeypatch):
+    """With streams decoding, a queued prompt prefills STEP rows a round and the others keep taking tokens."""
+
+    from tensorfold.families.qwen3_5.cuda import multi
+
+    monkeypatch.setattr(multi, "STEP", 2)
+    w = _model()
+    long_prompt = list(range(40, 52))
+    refs = {tuple(PROMPTS[0]): _serial(w, PROMPTS[0], None, 64), tuple(long_prompt): _serial(w, long_prompt, None, 12)}
+    dec = _Oracle(w, refs, seed=2)
+    a = Stream(PROMPTS[0], 64, None)
+    dec.admit(a)
+    dec.finish(dec.round())                           # nothing else decodes: a's prompt prefills whole, then a round
+    assert a.st.pos > len(PROMPTS[0]) and not dec.filling
+    b = Stream(long_prompt, 12, None)
+    dec.admit(b)
+    steps = 0
+    while any(x is b for x in dec.filling):
+        before = len(a.out)
+        dec.finish(dec.round())
+        steps += 1
+        assert len(a.out) > before and not a.done
+    assert steps == len(long_prompt) // 2
+    while dec.live():
+        dec.finish(dec.round())
+    assert a.out == refs[tuple(PROMPTS[0])] and b.out == refs[tuple(long_prompt)]
+
+
+def test_prefill_keeps_states_at_stops_that_resume_exactly():
+    """A state kept at a stop (a message start) resumes another prompt with that prefix to a fresh prefill's bits."""
+
+    w = _model()
+    a, b = [11, 12, 13, 14, 15, 16, 21, 22, 23], [11, 12, 13, 14, 15, 16, 31, 32]
+    kept = {}
+    st_a, first_a = prefill(w, a, SAMPLINGS[1], stops=[6], keep=lambda p, st, snap: kept.setdefault(p, st))
+    fresh_a, ref_a = prefill(w, a, SAMPLINGS[1])
+    _same_state(st_a, fresh_a)
+    assert first_a == ref_a and kept[6].pos == 6
+    st_b, first_b = prefill(w, b, SAMPLINGS[1], state=kept[6])
+    fresh_b, ref_b = prefill(w, b, SAMPLINGS[1])
+    _same_state(st_b, fresh_b)
+    assert first_b == ref_b

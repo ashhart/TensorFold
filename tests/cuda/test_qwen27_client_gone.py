@@ -14,7 +14,8 @@ from test_qwen27_multi import PROMPTS, SAMPLINGS, _Oracle, _model, _serial  # no
 
 from tensorfold.cuda import server  # noqa: E402
 from tensorfold.cuda.scheduler import Scheduler  # noqa: E402
-from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine  # noqa: E402
+from tensorfold.cuda.streams import PrefixCache  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.engine import KEEP_ONE, Qwen27Engine  # noqa: E402
 from tensorfold.server.cancellation import RequestCancelled  # noqa: E402
 
 COUNT = 20
@@ -39,7 +40,8 @@ def _app(engine):
 def _engine(w, scheduler=None):
     engine = Qwen27Engine.__new__(Qwen27Engine)
     engine.torch, engine.tp, engine.rank, engine.max_rows, engine.allow_copy = torch, 1, 0, 6, True
-    engine.w, engine.draft, engine.eos, engine.cache = w, None, tuple(w.config.eos), []
+    engine.w, engine.draft, engine.eos, engine.cache = w, None, tuple(w.config.eos), PrefixCache(KEEP_ONE)
+    engine.points = None
     engine.context_window = 4096
     engine.concurrent, engine.multi, engine.scheduler = scheduler is not None, None, scheduler
     return engine

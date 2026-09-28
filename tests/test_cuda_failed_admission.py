@@ -6,7 +6,8 @@ import time
 from types import SimpleNamespace
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from tensorfold.cuda.scheduler import Scheduler
 from tensorfold.cuda.streams import Stream
@@ -52,18 +53,19 @@ def decoders(monkeypatch, allocations):  # noqa: F811
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
     fail = {"copy": False}
 
-    def prefill(w, prompt, sampling, *rest, state=None):
-        return St(len(prompt)), 7
+    def prefill_state(w, prompt, st, **kw):
+        st.pos = len(prompt)
 
-    def private(st):
+    def kept(st):
         if fail["copy"]:
             fail["copy"] = False
             raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end copy)")
         return St(st.pos)
 
-    monkeypatch.setattr(multi, "prefill", prefill)
-    monkeypatch.setattr(multi, "prefill_tp", prefill)
-    monkeypatch.setattr(multi, "private", private)
+    monkeypatch.setattr(multi, "prefill_state", prefill_state)
+    monkeypatch.setattr(multi, "first_token", lambda *args: 7)
+    monkeypatch.setattr(multi, "kept", kept)
+    monkeypatch.setattr(multi, "private", lambda st, rows: St(st.pos))
     monkeypatch.setattr(multi, "State", lambda w: St())
     monkeypatch.setattr(multi, "_share", lambda values, src, device: values)      # two ranks: no NCCL here
 

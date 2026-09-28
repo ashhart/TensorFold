@@ -42,13 +42,14 @@ def check(model_dir: str | Path) -> None:
                              f"{spec.get('bits')}-bit weights. {OWN_MODEL_HELP}")
 
 
-def load(model_dir: Path, *, lane_kernels: str = "auto", **_: Any) -> tuple[Any, Any]:
-    """MLX's qmv loop a row by default (fastest one-row step); ``lane_kernels`` "on": the tensor-unit lane matmul."""
+def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 8,
+         **_: Any) -> tuple[Any, Any]:
+    """MLX's qmv loop a row by default; ``lane_kernels`` "on": the lane matmul; ``drafter``: a DFlash model's chains."""
 
     from tensorfold.families.gemma4.model import load as load_model
 
     backend = "lane" if str(lane_kernels) == "on" else "rows"
-    return load_model(Path(model_dir), backend=backend)
+    return load_model(Path(model_dir), backend=backend, drafter=drafter, drafter_bits=drafter_bits)
 
 
 def engine_settings(model: Any) -> dict[str, Any]:

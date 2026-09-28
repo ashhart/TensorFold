@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 
-KEEP = 8             # prompt ends a concurrent decoder keeps to resume from
+KEEP = 3             # prompt states a concurrent decoder keeps to resume from (each holds a DeltaNet copy)
+KEEP_ONE = 4         # prompt states one stream keeps (they share its attention buffers)
 
 
 class Qwen27Engine:
@@ -32,6 +33,8 @@ class Qwen27Engine:
         self.torch = torch
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
         torch.cuda.set_device(0)
+        if streams > 1 and tp == 1:          # streams' caches of many sizes come and go: growable segments, less slack
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         if tp == 2:
             import torch.distributed as dist
 
@@ -82,8 +85,12 @@ class Qwen27Engine:
             self.draft = DFlash2(draft_dir, full, rank=rank, world=2) if tp == 2 and tp_draft else DFlash2(draft_dir, full)
         del full
         torch.cuda.empty_cache()
+        from tensorfold.cuda.markers import resume_points
+        from tensorfold.cuda.streams import PrefixCache
+
         self.eos = tuple(self.w.config.eos)
-        self.cache: list[tuple[list[int], Any, Any]] = []   # (committed ids, state, drafter snapshot)
+        self.points = resume_points(model_dir)              # message starts a prefill keeps states at
+        self.cache = PrefixCache(KEEP_ONE)                  # (committed ids, state, drafter snapshot)
         # ``streams`` > 1: up to that many requests decoded together, their windows verified in one forward
         self.concurrent = streams > 1
         self.multi = self.scheduler = None
@@ -93,7 +100,7 @@ class Qwen27Engine:
             from .multi import MultiDecoder
 
             self.multi = MultiDecoder(self.w, self.draft, allow_copy=allow_copy, rank=rank, world=tp,
-                                      context=self.capacity_plan["cache_slots"], keep=KEEP)
+                                      context=self.capacity_plan["cache_slots"], keep=KEEP, points=self.points)
             self.multi.calibrate(streams)
             if rank == 0:
                 print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens", flush=True)
@@ -102,10 +109,7 @@ class Qwen27Engine:
                 self.scheduler = Scheduler(self.multi, max_streams=streams)
 
     def _resume(self, prompt: list[int]):
-        best = None
-        for ids, st, snap in self.cache:
-            if len(ids) < len(prompt) and prompt[:len(ids)] == ids and (best is None or len(ids) > len(best[0])):
-                best = (ids, st, snap)
+        best = self.cache.longest(prompt)
         if best is not None:
             self._drop_extensions(best[0])
         return best
@@ -114,10 +118,28 @@ class Qwen27Engine:
         """Drop cached extensions before resuming a shorter prefix because cloned states share KV buffers and resumed writes overwrite longer prefixes."""
 
         n = len(ids)
-        self.cache = [c for c in self.cache if len(c[0]) <= n or c[0][:n] != ids]
+        self.cache.entries = [c for c in self.cache.entries if len(c[0]) <= n or c[0][:n] != ids]
 
     def _remember(self, ids: list[int], st, snap) -> None:
-        self.cache = [c for c in self.cache if c[0] != ids][-1:] + [(ids, st, snap)]
+        self.cache.add(ids, st, snap)
+
+    def _stops(self, prompt: list[int], hit, draft: bool) -> tuple[list[int], Callable | None]:
+        """Message starts past the resumed prefix, and the callback that keeps their states."""
+
+        from tensorfold.cuda.markers import MIN_GAP
+
+        if not draft or self.points is None:
+            return [], None
+        base = len(hit[0]) if hit else 0
+        stops = [p for p in self.points(prompt) if p >= base + MIN_GAP]
+        return stops, lambda p, st, snap: self._remember(list(prompt[:p]), st, snap)
+
+    def _ends(self, prompt: list[int], stops: list[int]) -> bool:
+        """Whether to keep the prompt end too: not when a kept message start sits just before it."""
+
+        from tensorfold.cuda.markers import MIN_GAP
+
+        return not (stops and len(prompt) - stops[-1] < MIN_GAP)
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True):
@@ -140,9 +162,10 @@ class Qwen27Engine:
             drafter.restore(hit[2])
         elif drafter is not None:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
+        stops, keep = self._stops(prompt, hit, draft)
         st, pending = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
-                              limit=self.context_window)
-        if draft:
+                              limit=self.context_window, stops=stops, keep=keep)
+        if draft and self._ends(prompt, stops):
             self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
         prefill_s = time.perf_counter() - t0
         if on_tokens([pending]):
@@ -165,9 +188,10 @@ class Qwen27Engine:
             drafter.restore(hit[2])
         elif drafter is not None:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
+        stops, keep = self._stops(prompt, hit, draft)
         st, pending = prefill_tp(self.w, prompt, sampling, 0, drafter, state=hit[1] if hit else None,
-                                 limit=self.context_window)
-        if draft:
+                                 limit=self.context_window, stops=stops, keep=keep)
+        if draft and self._ends(prompt, stops):
             self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
         prefill_s = time.perf_counter() - t0
         stop_now = bool(on_tokens([pending]))
@@ -192,8 +216,7 @@ class Qwen27Engine:
             sampling = unpack_sampling(header[4:18])
             prompt = _share(None, 1, dev)
             drafter = self.draft if draft else None
-            hit = next(((ids, st, snap) for ids, st, snap in self.cache if len(ids) == cached and prompt[:cached] == ids),
-                       None) if cached else None
+            hit = self.cache.named(prompt, cached) if cached else None
             if cached and hit is None:
                 raise RuntimeError(f"rank 1 has no cached state for the {cached} tokens rank 0 resumes from")
             if hit is not None:
@@ -201,8 +224,9 @@ class Qwen27Engine:
             if drafter is not None:             # a two-rank drafter: mirror rank 0's drafter state
                 drafter.restore(hit[2] if hit is not None else
                                 ([None] * drafter.layers, [None] * drafter.layers, 0, 0))
+            stops, keep = self._stops(prompt, hit, draft)
             st, pending = prefill_tp(self.w, prompt, sampling, 1, drafter, state=hit[1] if hit else None,
-                                     limit=self.context_window)
-            if draft:
+                                     limit=self.context_window, stops=stops, keep=keep)
+            if draft and self._ends(prompt, stops):
                 self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
             result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, 1, drafter, max_rows=self.max_rows)

@@ -5,9 +5,10 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from tensorfold.cuda import moe as moe_mod
+
 from . import attention as attn_mod
 from . import gdn as gdn_mod
-from . import moe as moe_mod
 from .weights import Weights
 
 

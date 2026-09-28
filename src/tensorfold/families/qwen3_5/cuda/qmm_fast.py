@@ -25,6 +25,27 @@ def untile(q: QLinear) -> QLinear:
     return QLinear(*shared.unpack(shared.Q4(q.weight, q.scales, q.biases, q.n, q.k, 64)))
 
 
+def rows(q: QLinear, a: int, b: int) -> QLinear:
+    """Rows [a, b) of a tiled weight: a view when they are whole 128-row blocks from a tile edge, else a small copy."""
+
+    if a % 64 == 0 and (b - a) % 128 == 0:
+        return QLinear(q.weight[a // 64:b // 64], q.scales[:, a:b], q.biases[:, a:b], layout="tiled", rows=b - a)
+    t0, t1 = a // 64, -(-b // 64)
+    part = shared.Q4(q.weight[t0:t1], q.scales[:, t0 * 64:t1 * 64].contiguous(),
+                     q.biases[:, t0 * 64:t1 * 64].contiguous(), (t1 - t0) * 64, q.k, q.gs)
+    w, s, bias = shared.unpack(part)
+    lo, hi = a - t0 * 64, b - t0 * 64
+    return tile(QLinear(w[lo:hi].contiguous(), s[lo:hi].contiguous(), bias[lo:hi].contiguous()))
+
+
+def matmul_rows(x: torch.Tensor, parts: list[QLinear]) -> torch.Tensor:
+    """``x`` against row blocks of one weight, with the bits of the stacked weight's matmul."""
+
+    sk = shared.split_k(sum(p.n for p in parts), parts[0].k, parts[0].gs)
+    xs = shared.group_sums(x, parts[0].gs)
+    return torch.cat([shared.matmul(x, p, xs, sk=sk) for p in parts], dim=1)
+
+
 def matmul(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch.Tensor:
     """The lane matmul for either layout; both give the same bits."""
 

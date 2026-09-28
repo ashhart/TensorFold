@@ -67,6 +67,13 @@ class DFlashDrafter:
         self.window = int(window) - 1 if window else 0
         self._trim = vendor._trim_recent_cache
 
+    def make_cache(self) -> list[Any]:
+        """The draft model's caches; a full-attention layer's never rotates, so its context may start past 0."""
+
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+        return [RotatingKVCache(max_size=1 << 30, keep=0) if type(c) is KVCache else c for c in self.model.make_cache()]
+
     def taps(self) -> mx.array | None:
         """The last target forward's taps, [batch, rows, 5 * hidden]."""
 

@@ -24,6 +24,8 @@ class Stream:
     context: list[int] = field(default_factory=list)
     committed: list[int] = field(default_factory=list)     # tokens committed after the prompt, on every rank
     drafts: list[int] = field(default_factory=list)       # an MTP family's drafts for the next round
+    stops: list[int] = field(default_factory=list)        # prompt positions whose states the prefill keeps
+    error: Exception | None = None                        # why a stream ended without finishing
     done: bool = False
     rounds: int = 0
     min_rows: int = 0
@@ -74,21 +76,38 @@ class PrefixCache:
     def __init__(self, keep: int = 8) -> None:
         self.keep = keep
         self.entries: list[tuple[list[int], Any, Any]] = []
+        self.hit: set[tuple[int, ...]] = set()             # entries a later prompt resumed from
 
     def longest(self, prompt: Sequence[int]):
-        """The longest entry the prompt strictly extends (one prompt token is always left to prefill)."""
+        """The longest entry the prompt strictly extends (one prompt token is always left to prefill), now newest."""
 
         best = None
         for entry in self.entries:
             ids = entry[0]
             if len(ids) < len(prompt) and list(prompt[:len(ids)]) == ids and (best is None or len(ids) > len(best[0])):
                 best = entry
-        return best
+        return self._touch(best)
 
     def named(self, prompt: Sequence[int], length: int):
-        """The entry holding the prompt's first ``length`` ids (a follower rank finds the leader's pick)."""
+        """The entry holding the prompt's first ``length`` ids (a follower rank finds the leader's pick), now newest."""
 
-        return next((e for e in self.entries if len(e[0]) == length and list(prompt[:length]) == e[0]), None)
+        return self._touch(next((e for e in self.entries if len(e[0]) == length and list(prompt[:length]) == e[0]),
+                                None))
+
+    def _touch(self, entry):
+        """A hit becomes the newest entry, so a shared system block outlives the prompts that reuse it."""
+
+        if entry is not None:
+            self.entries = [e for e in self.entries if e is not entry] + [entry]
+            self.hit.add(tuple(entry[0]))
+        return entry
 
     def add(self, ids: list[int], state: Any, snap: Any) -> None:
-        self.entries = ([e for e in self.entries if e[0] != ids] + [(ids, state, snap)])[-self.keep:]
+        """Newest last; past ``keep``, the oldest entry never resumed from goes first, else the oldest."""
+
+        self.entries = [e for e in self.entries if e[0] != ids] + [(ids, state, snap)]
+        while len(self.entries) > self.keep:
+            cold = [e for e in self.entries[:-1] if tuple(e[0]) not in self.hit]
+            gone = cold[0] if cold else self.entries[0]
+            self.entries = [e for e in self.entries if e is not gone]
+        self.hit &= {tuple(e[0]) for e in self.entries}

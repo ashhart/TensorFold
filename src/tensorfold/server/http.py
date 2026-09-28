@@ -171,14 +171,16 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                                    if k in body}
                 if tools and tool_choice_requires_call(body.get("tool_choice")):
                     sampling_fields["tool_call_required"] = True     # the engine opens the answer with a call
+                template_kwargs = body.get("chat_template_kwargs") or {}
                 effort = body.get("reasoning_effort")
+                if effort is None and isinstance(template_kwargs, dict):
+                    effort = template_kwargs.get("reasoning_effort")    # where vLLM's clients put it
                 if effort is not None:
                     # null means the server's default; OpenAI's "minimal" is the template's "low"
                     if effort not in ("none", "minimal", "low", "medium", "high", "xhigh"):
                         raise ValueError("reasoning_effort must be none, minimal, low, medium, high or xhigh")
                     sampling_fields["reasoning_effort"] = {"high": "xhigh", "minimal": "low"}.get(effort, effort)
                     sampling_fields["enable_thinking"] = effort != "none"
-                template_kwargs = body.get("chat_template_kwargs") or {}
                 if isinstance(template_kwargs, dict) and "enable_thinking" in template_kwargs:
                     sampling_fields["enable_thinking"] = bool(template_kwargs["enable_thinking"])
                     if sampling_fields["enable_thinking"] and sampling_fields.get("reasoning_effort") == "none":
