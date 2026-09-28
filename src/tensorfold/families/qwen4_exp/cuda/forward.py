@@ -14,8 +14,8 @@ from tensorfold.cuda.kernels import gdn as shared_gdn
 
 from . import attention as attn_mod
 from . import gdn as gdn_mod
-from . import gdn_io, glue, qmm
-from .state import ATT_ROWS, CAND, Buffers, State
+from . import bf16, gdn_io, glue, nvfp4_moe, qmm
+from .state import ATT_ROWS, CAND, Buffers, State, _MoECfg
 from .weights import HC, LayerW, Weights
 
 
@@ -29,6 +29,8 @@ def _gather(w: Weights, b: Buffers, part: torch.Tensor, flat: torch.Tensor, R: i
 
 
 def _mm(x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, out: torch.Tensor, b: Buffers, **kw) -> torch.Tensor:
+    if getattr(q, "kernel", "qmm") == "b16":      # an NVFP4 checkpoint's BF16 linear (non-experts)
+        return bf16.matmul(x, q, out=out)
     if not isinstance(q, qmm.Q4):                 # an EXL3 pack's matrix (``exl3_mm``): prompts on its prompt path
         return q.prefill(x, out) if b.prefill else q(x, out)
     mm = qmm.prefill_matmul if b.prefill else qmm.matmul
@@ -36,7 +38,7 @@ def _mm(x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, out: torch.Tensor, b: Buff
 
 
 def _embed(w: Weights, ids: torch.Tensor, copies: int, out: torch.Tensor) -> torch.Tensor:
-    if len(w.embed) == 1:     # an EXL3 checkpoint's unquantized embedding
+    if len(w.embed) == 1:     # an unquantized embedding: an EXL3 pack's, or an NVFP4 checkpoint's BF16 table
         from .exl3_mm import embed
 
         return embed(ids, w.embed[0], w.cfg.hidden, copies, out)
@@ -57,10 +59,24 @@ FUSED_ROWS = 16      # decode windows: the read-out in 3 kernels; wider windows 
 def _readout(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject) -> None:
     """normed streams -> down -> SiLU / inject -> up -> mix: b.mixed [R, D] and its group sums."""
 
-    if R <= FUSED_ROWS and not b.prefill and isinstance(hc.down, qmm.Q4):
+    if getattr(hc.down, "kernel", "qmm") == "b16":     # an NVFP4 checkpoint: the same steps, bf16 kernels
+        _readout_b16(hc, b, h, R, eps, streams, low, inject)
+    elif R <= FUSED_ROWS and not b.prefill and isinstance(hc.down, qmm.Q4):
         _readout_fused(hc, b, h, R, eps, streams, low, inject)
     else:
         _readout_plain(hc, b, h, R, eps, streams, low, inject)
+
+
+def _readout_b16(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject) -> None:
+    """The read-out through the BF16 kernels: norm, bf16 down, the activation and inject gates (with the
+    slice sums fused), bf16 up, the mix — the plain path's steps, the same bits per row."""
+
+    glue.hc_normed(h[:R], b.pss[:R], hc.scale, b.normed[:R], b.xs_normed[:R], streams, eps)
+    got = bf16.matmul(b.normed[:R], hc.down.b, out=torch.empty((R, hc.down.n), dtype=torch.float32,
+                                                               device=h.device), f32=True)
+    glue.hc_act(got, b.act[:R], b.xs_act[:R], inject, streams, low)
+    _mm(b.act[:R], hc.up, b.xs_act[:R], b.up[:R], b)
+    glue.hc_mix(b.up[:R], b.normed[:R], b.mixed[:R], b.xs_mixed[:R], streams)
 
 
 def _readout_fused(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject) -> None:
@@ -135,7 +151,7 @@ def _prefill_chain(g, st: State, li: int, b: Buffers, a0: int, a1: int, c) -> No
 def _out_proj(w: Weights, b: Buffers, x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, R: int):
     """A block's output projection: (1, bf16 branch) on one GPU; (3, gathered fp32 partials) across ranks."""
 
-    if not isinstance(q, qmm.Q4):                     # an EXL3 pack (one GPU): the bf16 branch
+    if not isinstance(q, qmm.Q4):      # an NVFP4 checkpoint's BF16 face, or an EXL3 pack (one GPU): the bf16 branch
         return 1, _mm(x, q, xs, b.branch[:R], b)
     if w.comm is None:
         got = _mm(x, q, xs, b.branch[:R], b, reduce=False)
@@ -235,9 +251,13 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> tuple:
     """Routed experts + the shared expert. Returns the pending write-back: (2, slots y, weights) on one GPU, (3, gathered fp32 partials, None) across ranks."""
 
     m = layer.moe
-    if w.x3 is not None:                              # an EXL3 pack: each expert at its own width, one GPU
+    if getattr(m.experts, "kernel", "qmm") == "nvfp4":      # an NVFP4 checkpoint: the FP4 experts
+        buf = b.moe
+        nvfp4_moe.moe(b.mixed[:R], b.xs_mixed[:R], m.router, m.experts, buf, _MoECfg(w.cfg))
+    elif w.x3 is not None:                              # an EXL3 pack: each expert at its own width, one GPU
         return _exl3_moe(m, w, b, R)
-    buf = moe_mod.moe(b.mixed[:R], m.router, m.experts, b.moe, w.cfg.top_k, w.cfg.experts)
+    else:
+        buf = moe_mod.moe(b.mixed[:R], m.router, m.experts, b.moe, w.cfg.top_k, w.cfg.experts)
     if w.comm is None:
         return 2, buf.y[:R], buf.wts[:R]
     glue.moe_partial(buf.y[:R], buf.wts[:R], b.part_moe, R)

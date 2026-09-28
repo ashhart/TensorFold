@@ -179,11 +179,31 @@ def test_flash_next_refuses_other_quantizations_and_notes_a_missing_mtp_head(tmp
     assert not qwen4_exp.has_mtp(plain) and "no MTP head" in capsys.readouterr().out
 
 
+def test_flash_next_reads_the_nvfp4_checkpoint_and_refuses_other_fp4_blocks(tmp_path):
+    from tensorfold.families import qwen4_exp
+
+    # the Swift checkpoint (NVFP4, ModelOpt FP4): the CUDA engine reads its experts in blocks of 16
+    nvfp4 = {"model_type": "qwen4_exp",
+             "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4",
+                                     "config_groups": {"group_0": {"weights": {"group_size": 16}}}}}
+    (tmp_path / "config.json").write_text(json.dumps(nvfp4))
+    qwen4_exp.check(tmp_path)
+    other_group = json.loads(json.dumps(nvfp4))
+    other_group["quantization_config"]["config_groups"]["group_0"]["weights"]["group_size"] = 32
+    other_algo = json.loads(json.dumps(nvfp4))
+    other_algo["quantization_config"]["quant_algo"] = "MXFP4"
+    for other in (other_group, other_algo):
+        (tmp_path / "config.json").write_text(json.dumps(other))
+        with pytest.raises(ValueError, match="blocks of 16"):
+            qwen4_exp.check(tmp_path)
+
+
 def test_models_lists_the_tested_checkpoints(capsys):
     assert main(["models"]) == 0
     out = capsys.readouterr().out
-    for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",
-                 "Vontra/Qwen3.8-27B-MLX-4bit", "z-lab/Qwen3.8-27B-DFlash2", "mlx-community/gemma-4-26b-a4b-it-4bit"):
+    for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4",
+                 "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Vontra/Qwen3.8-27B-MLX-4bit",
+                 "z-lab/Qwen3.8-27B-DFlash2", "mlx-community/gemma-4-26b-a4b-it-4bit"):
         assert repo in out
     for folder in ("qwen/dense/v1", "qwen/flash_next/v1", "nemotron/lightning/v1", "gemma/v1"):
         assert f"kernels  {folder}" in out
