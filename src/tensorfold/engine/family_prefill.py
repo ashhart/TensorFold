@@ -98,7 +98,7 @@ class FamilyPrefill:
         stream.cached_tokens = int(cached_tokens)
         stream.started_at = time.perf_counter()
         token = self._draw(self.model.head(hidden), stream.sampling, [prompt_len])
-        forced = self._forced_next(stream)
+        forced = self._forced_next(stream, token)
         if forced is not None:
             token = mx.array([forced], dtype=mx.uint32)
         if self.family_mtp and stream.drafts:

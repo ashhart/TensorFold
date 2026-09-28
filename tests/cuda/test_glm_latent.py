@@ -297,3 +297,31 @@ def test_prefill_head_tiles_give_the_decode_tiles_bits():
         latent.sparse_attention(qa[r:r + 1].contiguous(), cache, tokens[r:r + 1].contiguous(),
                                 counts[r:r + 1].contiguous(), one, 0.07)
         assert torch.equal(wide[r], one[0]), f"sparse row {r}"
+
+
+@cuda
+def test_a_deep_prompt_chunk_stays_within_the_estimates_chunk_scratch():
+    """The deepest prompt chunk of a 262,144-token window (GLM-5.3-Flash's shapes on one of two ranks): token
+    selection, then sparse latent attention, allocate no more than geometry.mla_chunk_scratch budgets."""
+    from tensorfold.cuda.geometry import mla_chunk_scratch
+    from tensorfold.families.glm5_next.cuda import latent, sparse
+
+    text = {"num_attention_heads": 64, "kv_lora_rank": 512, "index_topk": 2048, "qk_nope_head_dim": 256}
+    cap, R, H, IH, ID = 262152, 2048, 32, 32, 128
+    pos = cap - 8 - R
+    gen = torch.Generator(device="cuda").manual_seed(4)
+
+    def rand(*shape):
+        return torch.empty(shape, dtype=torch.bfloat16, device="cuda").normal_(generator=gen)
+    cache, pk, qi, wts, qa = rand(cap, L), rand(cap // 4 + 2, ID), rand(R, IH * ID), rand(R, IH), rand(R, H, L)
+    ol = torch.zeros((R, H, L), dtype=torch.bfloat16, device="cuda")
+    pos_dev = torch.tensor([pos], dtype=torch.int32, device="cuda")
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    tokens, counts = sparse.select_tokens(qi, wts, pk, pos, R, cap // 4, pos_dev)
+    latent.sparse_attention(qa, cache, tokens, counts, ol, 0.0625)
+    torch.cuda.synchronize()
+    used = torch.cuda.max_memory_allocated() - base
+    assert bool((counts > 0).all())
+    assert used <= mla_chunk_scratch(text, 2, cap, latent=True), used

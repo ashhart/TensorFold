@@ -88,12 +88,11 @@ class Buffers:
         self.ey = torch.empty((rows, slots, D), dtype=bf if prefill and not exl3 else f32, device=dev)
         self.plan = grouped.Plan(rows, slots, c.experts + 1, dev, prefill=prefill and not exl3)
         self.exl3 = None
-        sl = c.shared_width // w.world
         if c.quant == "exl3":            # EXL3 routed experts, and the shared expert as a BF16 MLP
             from .exl3_mm import Scratch
 
+            sl = c.shared_width // w.world
             self.exl3 = Scratch(rows, slots, D, ml, dev)
-        if c.quant == "exl3" or any(l.moe is not None and l.moe.shared is not None for l in w.layers):
             self.sgu = torch.empty((rows, 2 * sl), dtype=bf, device=dev)
             self.sact = torch.empty((rows, sl), dtype=bf, device=dev)
             self.sxs = torch.empty((rows, sl // 64), dtype=f32, device=dev)

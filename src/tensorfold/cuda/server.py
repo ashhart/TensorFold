@@ -19,7 +19,8 @@ from tensorfold.server.http import Server
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
                                         validate_modalities)
 from tensorfold.server.tool_policy import ToolCallPolicy
-from tensorfold.server.tools import parse_glm_tool_call_block
+from tensorfold.engine.call_gate import CallGate, call_format, generate_gated
+from tensorfold.server.tools import active_tool_specs, parse_glm_tool_call_block, tool_choice_requires_call
 
 _THINK_END = "</think>"
 _CALL_OPEN, _CALL_CLOSE = "<tool_call>", "</tool_call>"
@@ -282,7 +283,10 @@ class App:
         validate_modalities(body)
         ToolCallPolicy(body)
         max_tokens = self._requested_tokens(body)
-        tools = body.get("tools") or []
+        try:
+            tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
+        except ValueError as exc:
+            raise RequestError(str(exc)) from None
         kwargs = dict(body.get("chat_template_kwargs") or {})
         thinking = bool(kwargs.pop("enable_thinking", self.default_thinking))
         if chat:
@@ -389,10 +393,14 @@ class App:
             return stopped["client"]
 
         draft = body.get("draft", True) is not False
+        gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
+
+        def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
+            return self.engine.generate(ids, count, sampling, feed, **({} if draft else {"draft": False}))
+
         # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
         with (nullcontext() if getattr(self.engine, "concurrent", False) else self.lock):
-            stats = self.engine.generate(prompt, max_tokens, sampling, on_tokens,
-                                         **({} if draft else {"draft": False}))
+            stats = generate_gated(generate, prompt, max_tokens, gate, on_tokens)
         stats = {**(stats or {}), "token_sha": token_sha(out)}
         reasoning, answer = visible(True)
         final: dict[str, Any] = {}
@@ -412,6 +420,36 @@ class App:
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "stats": stats}
+
+    def _call_gate(self, prompt: list[int], tools: list[dict[str, Any]]) -> CallGate:
+        """The gate a required tool call needs, from this template's call markup and the rendered prompt."""
+
+        if not hasattr(self, "_form"):
+            probe = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_0", "type": "function", "function": {"name": "tfprobe_fn", "arguments": {}}}]}]
+            try:
+                text = self.template.render(probe, tools=None, enable_thinking=False)
+            except Exception:  # noqa: BLE001 - a template that renders no calls: the opener alone
+                text = ""
+            openers = [o for o in ("<tool_call>", "<|tool_call>") if self.tok.token_to_id(o) is not None]
+            self._form = call_format(text, "tfprobe_fn", openers) or ((openers[0], None, None) if openers else None)
+        if self._form is None:
+            raise RequestError('tool_choice "required" or a named function needs a chat template that marks tool calls '
+                               '(<tool_call> or <|tool_call>), and this one does not: send "auto"')
+        opener, lead, tail = self._form
+        eos = set(self.engine.eos)
+
+        def text(token: int) -> str:
+            return self.tok.decode([token], skip_special_tokens=False)
+
+        def blank(token: int) -> bool:
+            return token not in eos and not text(token).strip()
+
+        think = [-1 if self.tok.token_to_id(t) is None else self.tok.token_to_id(t) for t in ("<think>", "</think>")]
+        names = [str((t.get("function") or t).get("name") or "") for t in tools] if lead is not None else []
+        return CallGate.after_prompt(prompt, self.tok.token_to_id(opener), blank, think_open=think[0],
+                                     think_end=think[1], text=text, lead=lead or "", names=names, tail=tail or "",
+                                     encode=lambda t: list(self.tok.encode(t, add_special_tokens=False).ids))
 
 
 def token_sha(tokens: list[int]) -> str:

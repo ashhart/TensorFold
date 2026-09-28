@@ -51,6 +51,7 @@ class ChatJob:
     cancellation: Cancellation = field(default_factory=Cancellation)
     ignore_eos: bool = False
     stop_check: Callable[[list[int]], bool] | None = None
+    call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
 
 
 class _JobQueue(queue.PriorityQueue):
@@ -441,6 +442,7 @@ class Scheduler:
                 think_close=tuple(job.think_close),
                 think_end=int(job.think_end),
                 think_open=bool(job.think_budget),
+                call_gate=job.call_gate,
             )
             job.stream = stream
             self.engine.add_stream(stream, cache=cache, cached_tokens=cached, checkpoints_at=checkpoints_at)

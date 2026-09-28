@@ -10,7 +10,8 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from tensorfold.server.tools import active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas
+from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
+                                     tool_choice_requires_call)
 from tensorfold.server.errors import RequestError
 from tensorfold.server.request_options import parse_numbers
 from tensorfold.server.messages import normalize_messages, validate_modalities
@@ -168,6 +169,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "seed", "priority", "draft",
                                                         "thinking_budget", "ignore_eos", "stop")
                                    if k in body}
+                if tools and tool_choice_requires_call(body.get("tool_choice")):
+                    sampling_fields["tool_call_required"] = True     # the engine opens the answer with a call
                 effort = body.get("reasoning_effort")
                 if effort is not None:
                     # null means the server's default; OpenAI's "minimal" is the template's "low"

@@ -208,21 +208,29 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     count = attention + int(mtp)
     lw = int(t.get("kv_lora_rank", 512))
     def bytes_at(capacity: int) -> int:
+        scratch = mla_chunk_scratch(t, world, capacity, latent=latent)
         if latent:
-            # latent cache (one kv_lora row a token), dense and sparse attention partials of a prompt chunk, its pool scores and selection temporaries
+            # latent cache; one prompt chunk's latent partials and absorbed rows (the MTP absorbs through the same buffers)
             cache = count * capacity * lw * 2
             dense = min(capacity, minimum_slots) + PREFILL_ROWS
-            scratch = (2 if mtp else 1) * ((dense + 511) // 512) * PREFILL_ROWS * heads * (lw + 2) * 4
-            scratch += ((int(t.get("index_topk", 2048)) + 515) // 512) * PREFILL_ROWS * heads * (lw + 2) * 4
-            scratch += PREFILL_ROWS * ((capacity + 3) // 4) * 16
+            scratch += ((dense + 511) // 512) * PREFILL_ROWS * heads * (lw + 2) * 4 + 4 * PREFILL_ROWS * heads * lw
         else:
             cache = count * capacity * heads * (kd + vd) * 2
-            scratch = (2 if mtp else 1) * ((capacity + rows + 511) // 512) * rows * heads * (kd + 2) * 4
-            scratch += rows * ((capacity + 3) // 4) * 4
-            scratch += 128 * heads * (kd + 2) * 4 * ((int(t.get("index_topk", 2048)) + 515) // 512)
+            scratch += (2 if mtp else 1) * ((capacity + rows + 511) // 512) * rows * heads * (kd + 2) * 4
         cache += count * (2 * capacity + capacity // 4 + 2) * index * 2
         return fixed + cache + scratch
     return Geometry(bytes_at, reserve, minimum_slots)
+
+
+def mla_chunk_scratch(t: dict, world: int, capacity: int, *, latent: bool) -> int:
+    """A prompt chunk's transient bytes: token selection (fp32 pool scores, chosen pools, token lists), then sparse attention's partials."""
+
+    heads, topk = int(t["num_attention_heads"]) // world, int(t.get("index_topk", 2048))
+    select = PREFILL_ROWS * (4 * ((capacity + 3) // 4) + 16 * (topk + 3))
+    if latent:
+        return select + ((topk + 515) // 512) * PREFILL_ROWS * heads * (int(t.get("kv_lora_rank", 512)) + 2) * 4
+    kd = int(t["qk_nope_head_dim"]) + int(t.get("qk_rope_head_dim", 0))
+    return select + 128 * heads * (kd + 2) * 4 * ((topk + 515) // 512)
 
 
 def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, streams: int = 1,

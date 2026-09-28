@@ -117,14 +117,19 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         return landed
 
     @staticmethod
-    def _forced_next(stream: Any) -> int | None:
-        """The token the thinking budget writes at the stream's next position, or None."""
+    def _forced_next(stream: Any, drawn: Any) -> int | None:
+        """The token the thinking budget or a required call's fix writes at the next position instead of ``drawn``."""
 
         if stream.force:
             return int(stream.force.pop(0))
         if stream.think_cut([-1]) == 0:
             return stream.start_close()
-        return None
+        gate = stream.call_gate
+        hit = gate.cut([int(drawn.item())]) if gate is not None and gate.watching else None   # read only then
+        if hit is None:
+            return None
+        stream.force = list(hit[1][1:])
+        return int(hit[1][0])
 
     def _copy_proposal(self, stream: Any, min_match: int | None = None) -> list[int]:
         """Propose copied spans backed by ``enter_match`` matching tokens or a tool call's known structure."""
@@ -159,9 +164,9 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
             self._queue_next(stream, cache, mx.array([stream.pending[-1]], dtype=mx.uint32))
             return [], 1, 1
         current = self._inflight.pop(stream.stream_id)
-        forced = self._forced_next(stream)
+        forced = self._forced_next(stream, current)
         if forced is not None:
-            current = mx.array([forced], dtype=mx.uint32)   # the thinking budget's token, not the sample
+            current = mx.array([forced], dtype=mx.uint32)   # the thinking budget's or the call's token, not the sample
         if mode == "drain":
             token = int(current.item())                     # the last queued step: no new one
             self._mode[stream.stream_id] = "verify"
@@ -255,6 +260,11 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         if cut is not None:
             path = path[:cut + 1]
             committed = [*committed[:cut], stream.start_close()]
+        elif stream.call_gate is not None and (hit := stream.call_gate.cut(committed)) is not None:
+            cut, fix = hit
+            path = path[:cut + 1]
+            committed = [*committed[:cut], fix[0]]
+            stream.force = list(fix[1:])        # the fix's rest, forced like the thinking budget's close
         stream.rounds += 1
         got = stream.commit(committed)
         if stream.finished and len(got) < len(path):

@@ -101,14 +101,40 @@ def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, alloc
     assert kv <= bytes_in(arrays) <= estimated
 
 
+def test_mla_latent_estimate_grows_by_the_cache_and_counts_one_prompt_chunk_scratch():
+    """Per token, the latent estimate grows by the latent and indexer caches of every attention layer (the MTP's
+    too) plus one fp32 pool score for each prompt-chunk row; the MTP head adds its caches and decode buffers, never a
+    second set of the prompt chunk's latent partials (it absorbs through the same prefill buffers)."""
+
+    text = {"hidden_size": 512, "num_attention_heads": 8, "num_hidden_layers": 4,
+            "layer_types": ["linear_attention", "full_attention"] * 2, "linear_num_heads": 8,
+            "qk_nope_head_dim": 256, "v_head_dim": 256, "vocab_size": 1024, "kv_lora_rank": 512,
+            "moe_intermediate_size": 512, "num_experts_per_tok": 2}
+    rows, heads, lw, index = geometry.PREFILL_ROWS, 4, 512, 128
+    a, b = 1 << 18, (1 << 18) + 4096
+    const = {}
+    for mtp in (0, 1):
+        g = geometry.mla_geometry({**text, "num_nextn_predict_layers": mtp}, 2, 8, latent=True)
+        count = 2 + mtp
+        slope = count * lw * 2 + count * index * 2 * 9 // 4 + rows
+        assert g.bytes_at(b) - g.bytes_at(a) == (b - a) * slope
+        const[mtp] = g.bytes_at(a) - a * slope
+    partials = ((2560 + rows + 511) // 512) * rows * heads * (lw + 2) * 4
+    assert 0 < const[1] - const[0] < partials
+
+
 @pytest.mark.torch
+@pytest.mark.parametrize("latent", [True, False], ids=["latent", "per-head"])
 @pytest.mark.parametrize("mtp", [False, True])
-def test_mla_actual_cache_and_replay_state_are_budgeted(monkeypatch, allocations, mtp):
+def test_mla_actual_cache_and_replay_state_are_budgeted(monkeypatch, allocations, mtp, latent):
     arrays, fake = allocations
     mod = importlib.import_module("tensorfold.families.glm5_next.cuda.forward")
     kda = importlib.import_module("tensorfold.families.glm5_next.cuda.kda")
+    cache = importlib.import_module("tensorfold.families.glm5_next.cuda.latent")
     monkeypatch.setattr(mod, "torch", fake)
     monkeypatch.setattr(kda, "torch", fake)
+    monkeypatch.setattr(cache, "torch", fake)
+    monkeypatch.setattr(cache, "ENABLED", latent)
     text = {"hidden_size": 512, "num_attention_heads": 8, "num_hidden_layers": 4,
             "layer_types": ["linear_attention", "full_attention"] * 2, "linear_num_heads": 8,
             "qk_nope_head_dim": 256, "v_head_dim": 256, "vocab_size": 1024,
@@ -129,7 +155,7 @@ def test_mla_actual_cache_and_replay_state_are_budgeted(monkeypatch, allocations
         mod.Buffers(weights, 64, slots)
     mod.Buffers(weights, 2048, slots, prefill=True)     # the prompt chunks' buffers, as ``decode.Engine`` makes them
     mod.State(weights, slots, 64)
-    estimated = geometry.mla_geometry(text, 2, 8).bytes_at(slots)
+    estimated = geometry.mla_geometry(text, 2, 8, latent=latent).bytes_at(slots)
     assert any(slots in t.shape for t in arrays)             # the constructors ran on the fake allocator
     assert bytes_in(arrays) <= estimated
 

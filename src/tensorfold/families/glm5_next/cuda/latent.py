@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
 
-# The latent path is on unless TF_GLM_LATENT=0 (the expanded per-head caches, TensorFold 0.3.4's path, for A/B).
-ENABLED = os.environ.get("TF_GLM_LATENT", "1") != "0"
+from . import LATENT as ENABLED     # off (TF_GLM_LATENT=0): per-head keys and values, 0.3.5's path, for A/B
 
 L = 512            # GLM-5.3-Flash's latent width (kv_lora_rank); the kernels take the width from the tensors
 CHUNK = 512        # keys per chunk program, merged in absolute order

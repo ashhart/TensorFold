@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from tensorfold import cli
+from tensorfold.families.glm5_next.cuda import LATENT
 
 
 def checkpoint(path, config, tensors):
@@ -179,7 +180,7 @@ def test_real_constructors_shrink_default_and_refuse_explicit_before_loading(tmp
     calls, capacity = fake_runtime
     from tensorfold.cuda.geometry import gdn_geometry, mla_geometry
     text = small_config()
-    geometry = (mla_geometry(text, world, 8) if family == "mla" else
+    geometry = (mla_geometry(text, world, 8, latent=LATENT) if family == "mla" else
                 gdn_geometry(text, world, 1 if family == "indexed" else 12, indexed=family == "indexed"))
     budget = geometry.needed(12000) + 32768
     monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
@@ -199,6 +200,29 @@ def test_real_constructors_shrink_default_and_refuse_explicit_before_loading(tmp
     with pytest.raises(Loaded):
         retry()
     assert len(calls) == 1
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("room,wanted", [(8, None), (1.25, None), (8, "0.5")])
+def test_glm_keeps_other_conversations_in_what_the_window_leaves(tmp_path, monkeypatch, fake_runtime, room, wanted):
+    """GLM's kept conversations get min(TF_GLM_CACHE_GIB, budget - estimate) in whole MiB, inside the reported estimate,
+    so an optional cache never shrinks the window and never pushes the engine past its budget."""
+    checkpoint(tmp_path, small_config(), [("lm_head.weight", "U32", [64, 8], 2048)])
+    calls, capacity = fake_runtime
+    if wanted is not None:
+        monkeypatch.setenv("TF_GLM_CACHE_GIB", wanted)
+    obj, start = construct("mla", tmp_path, None, None, 2)
+    with pytest.raises(Loaded):
+        start()                                    # 16 GiB: the geometry's own estimate
+    total = obj.capacity_plan["total_bytes_estimate"] - obj.cache_bytes
+    monkeypatch.setattr(capacity, "available_bytes", lambda t: total + int(room * capacity.GIB))
+    obj, start = construct("mla", tmp_path, None, None, 2)
+    with pytest.raises(Loaded):
+        start()
+    plan = obj.capacity_plan
+    grant = min(int(float(wanted or 3) * capacity.GIB), int(room * capacity.GIB)) >> 20 << 20
+    assert obj.cache_bytes == plan["kept_bytes"] == grant
+    assert plan["total_bytes_estimate"] == total + grant <= plan["budget_bytes"]
 
 
 @pytest.mark.parametrize("peer_fit", [0, 9000])
@@ -254,7 +278,7 @@ def test_actual_distributed_startup_agrees_on_smaller_rank_before_loading(tmp_pa
 
     checkpoint(tmp_path, small_config(), [("lm_head.weight", "U32", [64, 8], 2048)])
     calls, capacity = fake_runtime
-    geom = (mla_geometry(small_config(), 2, 8) if family == "mla" else
+    geom = (mla_geometry(small_config(), 2, 8, latent=LATENT) if family == "mla" else
             gdn_geometry(small_config(), 2, 1 if family == "indexed" else 12, indexed=family == "indexed"))
     transform = split_weights(rule) if family == "mla" else indexed_weights(2, False) if family == "indexed" else linear_weights
     weights = capacity.estimate_weights(tmp_path, transform)
@@ -265,8 +289,8 @@ def test_actual_distributed_startup_agrees_on_smaller_rank_before_loading(tmp_pa
     plans = [capacity.make_plan(65536, requested, explicit, budget, weights, geom) for budget in budgets]
     statuses = [[0, *plan.settings, plan.fitting, plan.largest] for plan in plans]
     def gather(*args):
-        values = args[-1]
-        return statuses if len(values) == 6 else [values, values]
+        values = list(args[-1])
+        return statuses if values in statuses else [values, values]      # admission's status rows, else agreement
     monkeypatch.setattr(capacity, "gather_ints", gather)
     monkeypatch.setattr(GlmEngine, "_gather_ints", lambda self, values: gather(values))
     for rank in (0, 1):

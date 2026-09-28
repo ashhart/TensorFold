@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import os
-
 import hashlib
 import json
+import os
 import struct
 import threading
 import time
@@ -86,7 +85,8 @@ class GlmEngine:
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
     def __init__(self, model_dir: Path, *, rank: int, master: str, port: int, policy: str = DEFAULT_POLICY,
-                 drafter: Path | None = None, context: int | None = None, context_explicit: bool | None = None, serial_only: bool = False, comm=None) -> None:
+                 drafter: Path | None = None, context: int | None = None, context_explicit: bool | None = None, serial_only: bool = False, comm=None,
+                 prefill_rows: int | None = None) -> None:
         """``comm``: a communicator with ``all_gather`` and ``barrier`` instead of NCCL between two machines (tests)."""
 
         import torch
@@ -96,7 +96,7 @@ class GlmEngine:
         from .weights import Config, load
         from .split import rule
         from tensorfold.cuda.capacity import admit
-        from tensorfold.cuda.geometry import draft_geometry, mla_geometry, split_weights
+        from tensorfold.cuda.geometry import PREFILL_ROWS, draft_geometry, mla_geometry, split_weights
 
         encode_policy(policy)                           # a bad default fails here, not in the first request
         torch.cuda.set_device(0)
@@ -109,27 +109,37 @@ class GlmEngine:
         cfg = Config.read(model_dir)
         # Without --context the window stays dense, attending every key without indexer work.
         explicit = context is not None if context_explicit is None else bool(context_explicit)
-        from . import latent
+        from . import LATENT
 
         self.capacity_plan = admit(model_dir, context if explicit else cfg.dense_limit, explicit, torch,
                                    lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY,
-                                                             latent=latent.ENABLED),
+                                                             latent=LATENT),
                                    split_weights(rule), rank=rank, world=2, gather=self._gather_ints,
                                    draft_dir=drafter, draft_geometry=lambda text: draft_geometry(text, 2, MAX_ROWS))
         self.limit = self.capacity_plan["context_window"]
         capacity = self.capacity_plan["cache_slots"]
         long_context = self.limit > cfg.dense_limit
         # both ranks must run the same calls: refuse to start when they were given different settings
-        from .decode import PREFILL_ROWS
-
-        prefill_rows = int(os.environ.get("TF_GLM_PREFILL_ROWS", str(PREFILL_ROWS)))
-        mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(latent.ENABLED),
+        prefill_rows = PREFILL_ROWS if prefill_rows is None else int(prefill_rows)
+        mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(LATENT),
                 prefill_rows]
-        both = self._gather_ints(mine)
-        if both[0] != both[1]:
-            raise RuntimeError("the two ranks were started with different settings (draft model, context, drafts): "
-                               f"rank 0 {both[0]}, rank 1 {both[1]}; pull the draft model on both machines (or pass "
-                               "--drafter none to both) and give both the same flags")
+        # other conversations' kept prompts get what the window leaves, at most TF_GLM_CACHE_GIB, the same on both ranks
+        plan = self.capacity_plan
+        wanted = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
+        spare = max(0, min(wanted, plan["budget_bytes"] - plan["total_bytes_estimate"]))
+        both = self._gather_ints(mine + [spare >> 20])
+        if both[0][:-1] != both[1][:-1]:
+            raise RuntimeError("the two ranks were started with different settings (draft model, context, drafts, "
+                               "TF_GLM_LATENT): "
+                               f"rank 0 {both[0][:-1]}, rank 1 {both[1][:-1]}; pull the draft model on both machines "
+                               "(or pass --drafter none to both) and give both the same flags")
+        self.cache_bytes = min(both[0][-1], both[1][-1]) << 20
+        plan["kept_bytes"] = self.cache_bytes
+        for key in ("serving_peak_bytes_estimate", "total_bytes_estimate"):
+            plan[key] = plan[key] + self.cache_bytes
+        if rank == 0 and self.cache_bytes < wanted:
+            print(f"[tensorfold] other conversations' prompts are kept in {self.cache_bytes / 2 ** 30:.1f} GiB, what "
+                  f"the {self.limit}-token window leaves (TF_GLM_CACHE_GIB asks {wanted / 2 ** 30:.1f})", flush=True)
         w = load(model_dir, rank=rank)
         w.comm = self.comm
         self.comm.barrier()
@@ -156,10 +166,9 @@ class GlmEngine:
                   f"DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
         self.eos = tuple(w.cfg.eos)
         self.request = threading.local()    # the calling request's policy and stop-at-EOS (``app.GlmApp``)
-        # kept conversations (decode.Snapshot, least recently used first) and the live caches' ids; states and saved rows stay within TF_GLM_CACHE_GIB
+        # kept conversations (decode.Snapshot, least recently used first) and the live caches' ids; states and saved rows stay within cache_bytes
         self.cache: list = []
         self.live: list[int] = []
-        self.cache_bytes = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
         self.cache_entries = int(os.environ.get("TF_GLM_CACHE_ENTRIES", "8"))
 
     def _calibrate(self) -> dict:
@@ -287,11 +296,18 @@ class GlmEngine:
                 best = snap
         return best
 
+    def _drop(self, snap) -> None:
+        """Forget a kept snapshot and free its saved rows now, even while a caller still holds the object."""
+        snap.rows, snap.nbytes = None, 0
+        self.cache.remove(snap)
+
     def _remember(self, snap) -> None:
-        self.cache = [c for c in self.cache if c.ids != snap.ids] + [snap]
+        for c in [c for c in self.cache if c.ids == snap.ids]:
+            self._drop(c)
+        self.cache.append(snap)
         dropped = False
         while len(self.cache) > 1 and (len(self.cache) > self.cache_entries or self._held_bytes() > self.cache_bytes):
-            self.cache.pop(0)
+            self._drop(self.cache[0])
             dropped = True
         if dropped:
             import torch
@@ -304,22 +320,26 @@ class GlmEngine:
 
         live = self.live
         dropped = False
+
+        def resumes(c) -> bool:
+            return len(c.ids) <= len(keep) and keep[:len(c.ids)] == c.ids
+
         for snap in list(self.cache):
             n = len(snap.ids)
-            if snap not in self.cache or snap.rows is not None or (n <= len(keep) and keep[:n] == snap.ids):
+            if snap not in self.cache or snap.rows is not None or resumes(snap):
                 continue
             if live[:n] != snap.ids:                  # its rows are already gone: nothing to resume from
-                self.cache.remove(snap)
+                self._drop(snap)
                 continue
             need = row_bytes(self.e, snap)
             while self._held_bytes() + need > self.cache_bytes:
-                old = next((c for c in self.cache if c is not snap), None)
+                old = next((c for c in self.cache if c is not snap and not resumes(c)), None)
                 if old is None:
                     break
-                self.cache.remove(old)
+                self._drop(old)
                 dropped = True
             if self._held_bytes() + need > self.cache_bytes:
-                self.cache.remove(snap)
+                self._drop(snap)
                 dropped = True
                 continue
             save_rows(self.e, snap)

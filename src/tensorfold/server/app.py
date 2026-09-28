@@ -404,7 +404,7 @@ class ChatApp(RequestOptions):
                 background=background,
                 drafts=drafts,
                 ignore_eos=stops.ignore_eos, stop_check=stops if stops.strings else None,
-                cancellation=cancellation,
+                cancellation=cancellation, call_gate=self._call_gate(fields, prompt_ids, tools),
             )
             budget = int(fields.get("thinking_budget") or self.thinking_budget) if thinking else 0
             if budget > 0:

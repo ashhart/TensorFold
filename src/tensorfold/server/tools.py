@@ -42,6 +42,17 @@ def tool_choice_disables_tools(tool_choice: Any) -> bool:
     return False
 
 
+def tool_choice_requires_call(tool_choice: Any) -> bool:
+    """OpenAI's "required" or a named function: the reply must call a tool."""
+
+    if isinstance(tool_choice, str):
+        return tool_choice.strip().lower() == "required"
+    if isinstance(tool_choice, dict):
+        value = str(tool_choice.get("type") or tool_choice.get("mode") or "").strip().lower()
+        return value == "required" or (value == "function" and isinstance(tool_choice.get("function"), dict))
+    return False
+
+
 def validate_tool_choice(tools: list[dict[str, Any]], tool_choice: Any) -> None:
     if not isinstance(tool_choice, dict):
         return
@@ -59,10 +70,19 @@ def validate_tool_choice(tools: list[dict[str, Any]], tool_choice: Any) -> None:
 
 
 def active_tool_specs(tools: Any, tool_choice: Any) -> list[dict[str, Any]]:
+    """The tools the template offers: none for "none", only the named one for a named function."""
+
     specs = normalize_tool_specs(tools)
-    if not specs or tool_choice_disables_tools(tool_choice):
+    if tool_choice_disables_tools(tool_choice):
+        return []
+    if not specs:
+        if tool_choice_requires_call(tool_choice):
+            raise ValueError("tool_choice requires a tool call, but the request offers no tools")
         return []
     validate_tool_choice(specs, tool_choice)
+    if isinstance(tool_choice, dict) and str(tool_choice.get("type") or "").lower() == "function":
+        named = str(tool_choice["function"].get("name") or "").strip()
+        return [tool for tool in specs if tool_spec_name(tool) == named]
     return specs
 
 

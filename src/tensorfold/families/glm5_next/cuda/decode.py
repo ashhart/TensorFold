@@ -288,6 +288,7 @@ def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
 
 
 # -- prefill ----------------------------------------------------------------------------------------------------
+@torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True, drafter=None,
             resume: Snapshot | None = None) -> int:
     """Commit the prompt in chunks and sample its first token; a resumed prompt ends in a fresh prefill's state."""
