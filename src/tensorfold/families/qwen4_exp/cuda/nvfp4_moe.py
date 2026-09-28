@@ -107,11 +107,16 @@ class MoE4:
     def _expert(self, e: int) -> Expert4:
         """One expert as per-expert FP4 tables (the CPU/test path; the serving path slices the stacked
         grids per program without materialising these). Exact by construction: the stacked grids' tile
-        and scale rows for expert ``e`` are the per-expert table's, row for row (checked in the tests)."""
+        and scale rows for expert ``e`` are the per-expert table's, row for row (checked in the tests).
 
-        gu = nvfp4.FP4(self.gate_up.weight[e], self.gate_up.scale[e], 2 * self.width, self.gate_up.k,
+        Slices are made contiguous: Triton pointer math in ``nvfp4.matmul`` assumes a dense tile slab,
+        and ``weight[e]`` on a stacked 5-D grid is a view that is not contiguous along the tile axis."""
+
+        gu = nvfp4.FP4(self.gate_up.weight[e].contiguous(), self.gate_up.scale[e].contiguous(),
+                       2 * self.width, self.gate_up.k,
                        scale2=_slice(self.gate_up.scale2, e), packed=self.gate_up.packed)
-        down = nvfp4.FP4(self.down_proj.weight[e], self.down_proj.scale[e], self.dims, self.width,
+        down = nvfp4.FP4(self.down_proj.weight[e].contiguous(), self.down_proj.scale[e].contiguous(),
+                         self.dims, self.width,
                          scale2=_slice(self.down_proj.scale2, e), packed=self.down_proj.packed)
         return Expert4(gu, down)
 
