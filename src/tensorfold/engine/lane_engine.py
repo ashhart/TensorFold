@@ -171,6 +171,7 @@ class LaneStream:
     think_open: bool = False
     force: list[int] = field(default_factory=list)
     stop_check: Callable[[list[int]], bool] | None = None
+    cancellation: Any = None
 
     @property
     def context(self) -> list[int]:
@@ -346,6 +347,11 @@ class LaneEngine(FamilyRounds):
         """Prefill a stream (from ``cache`` at ``cached_tokens`` when given); it takes part from the next round."""
 
         self._family_add_stream(stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at)
+
+    def add_vision_streams(self, streams: Sequence[LaneStream]) -> None:
+        """Prefill multiple image streams in one model batch; they take part from the next round."""
+
+        self._family_add_vision_streams(list(streams))
 
     @staticmethod
     def cache_nbytes(cache: list[Any]) -> int:

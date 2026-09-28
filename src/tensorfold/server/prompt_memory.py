@@ -83,6 +83,9 @@ class PromptMemory:
         self.observed_work = 0
         self.workspace_profiled = False
         self.prompt = self.reply = self.extra_bytes = 0
+        self.cache_copies = self.cache_instances = 1
+        self._batch_prompts: tuple[int, ...] | None = None
+        self._batch_replies: tuple[int, ...] | None = None
         self._memory_lock = RLock()
 
     def memory_snapshot(self, reset_peak: bool = False) -> dict[str, int]:
@@ -122,11 +125,37 @@ class PromptMemory:
         return False
 
     def begin(
-        self, prompt: int, reply: int, *, admit: bool = True, extra_bytes: int = 0
+        self, prompt: int, reply: int, *, admit: bool = True, extra_bytes: int = 0,
+        cache_copies: int = 1, cache_instances: int = 1,
     ) -> None:
         with self._memory_lock:
+            self._batch_prompts = self._batch_replies = None
             self.prompt, self.reply = int(prompt), int(reply)
             self.extra_bytes = max(0, int(extra_bytes))
+            self.cache_copies = max(1, int(cache_copies))
+            self.cache_instances = max(1, int(cache_instances))
+            self.runtime.reset_peak_memory()
+            if self.profile is None and self.store is not None and self.store._entries:
+                self.observe_cache(self.store._entries[0].cache, workspace=False)
+            if admit:
+                self.require()
+
+    def begin_batch(
+        self, prompts: list[int], replies: list[int], *, admit: bool = True, extra_bytes: int = 0
+    ) -> None:
+        """Reserve all rows of one batched prefill as a single memory transaction."""
+
+        if len(prompts) != len(replies) or not prompts:
+            raise ValueError("batch prompts and replies must be non-empty and have equal lengths")
+        prompt_rows = tuple(map(int, prompts))
+        reply_rows = tuple(map(int, replies))
+        if min(*prompt_rows, *reply_rows) < 0:
+            raise ValueError("batch token counts must be nonnegative")
+        with self._memory_lock:
+            self._batch_prompts, self._batch_replies = prompt_rows, reply_rows
+            self.prompt, self.reply = len(prompt_rows) * max(prompt_rows), 0
+            self.extra_bytes = max(0, int(extra_bytes))
+            self.cache_copies, self.cache_instances = 2, len(prompt_rows)
             self.runtime.reset_peak_memory()
             if self.profile is None and self.store is not None and self.store._entries:
                 self.observe_cache(self.store._entries[0].cache, workspace=False)
@@ -136,12 +165,14 @@ class PromptMemory:
     def end(self) -> None:
         with self._memory_lock:
             self.prompt = self.reply = self.extra_bytes = 0
+            self.cache_copies = self.cache_instances = 1
+            self._batch_prompts = self._batch_replies = None
 
     def _work(self, tokens: int) -> int:
         if self.profile is None:
             return self.bootstrap
         # MLX's limit is this budget, so its eval waits on queued work before more old buffers than this pile up
-        growth = self.profile.growth_bytes(tokens)
+        growth = self.profile.growth_bytes(tokens) + (self.cache_instances - 1) * self.profile.fixed_bytes
         scores = (self.workspace_per_token * int(tokens) if self.workspace_per_token
                   else 2 * self.score_rows * max(0, self.heads) * int(tokens) * 2)
         return max(self.bootstrap, self.observed_work) + growth + scores
@@ -152,11 +183,31 @@ class PromptMemory:
         if self.profile is None:
             return resident + self.extra_bytes + int(extra_bytes) + self.bootstrap
         tokens = int(prompt) + self.reply
+        if self._batch_prompts is not None and self._batch_replies is not None:
+            # The shared source cache is rectangular, while extraction materializes one
+            # independently rounded cache per row before that source can be released.
+            padded = self.profile.cache_bytes(max(self._batch_prompts)) * len(self._batch_prompts)
+            extracted = sum(
+                self.profile.cache_bytes(rows + reply)
+                for rows, reply in zip(self._batch_prompts, self._batch_replies)
+            )
+            return (
+                resident
+                + self.extra_bytes
+                + int(extra_bytes)
+                + padded
+                + extracted
+                + self._work(tokens)
+            )
         return (
             resident
             + self.extra_bytes
             + int(extra_bytes)
-            + self.profile.cache_bytes(tokens)
+            + self.cache_copies * (
+                self.cache_instances * self.profile.fixed_bytes
+                + self.profile.cache_bytes(tokens)
+                - self.profile.fixed_bytes
+            )
             + self._work(tokens)
         )
 
@@ -172,21 +223,63 @@ class PromptMemory:
                 return False
         return True
 
-    def would_fit(self, prompt: int, reply: int, *, extra_bytes: int = 0) -> bool:
+    def would_fit(
+        self, prompt: int, reply: int, *, extra_bytes: int = 0,
+        cache_copies: int = 1, cache_instances: int = 1,
+    ) -> bool:
         """Whether a request would fit now once every retained prefix and freed buffer is released; no side effects."""
 
         with self._memory_lock:
-            saved = self.prompt, self.reply, self.extra_bytes
-            self.prompt, self.reply, self.extra_bytes = (
+            saved = self.prompt, self.reply, self.extra_bytes, self.cache_copies, self.cache_instances
+            self.prompt, self.reply, self.extra_bytes, self.cache_copies, self.cache_instances = (
                 int(prompt),
                 int(reply),
                 max(0, int(extra_bytes)),
+                max(1, int(cache_copies)),
+                max(1, int(cache_instances)),
             )
             try:
                 freeable = int(self.runtime.get_cache_memory()) + (self.store.nbytes if self.store is not None else 0)
                 return self.projected(self.prompt) - freeable <= self.budget
             finally:
-                self.prompt, self.reply, self.extra_bytes = saved
+                self.prompt, self.reply, self.extra_bytes, self.cache_copies, self.cache_instances = saved
+
+    def would_fit_batch(self, prompts: list[int], replies: list[int], *, extra_bytes: int = 0) -> bool:
+        """Whether all rows of a batched prefill fit together, without changing controller state."""
+
+        if len(prompts) != len(replies) or not prompts:
+            return False
+        prompt_rows = tuple(map(int, prompts))
+        reply_rows = tuple(map(int, replies))
+        if min(*prompt_rows, *reply_rows) < 0:
+            return False
+        with self._memory_lock:
+            saved = (
+                self.prompt,
+                self.reply,
+                self.extra_bytes,
+                self.cache_copies,
+                self.cache_instances,
+                self._batch_prompts,
+                self._batch_replies,
+            )
+            self.prompt, self.reply = len(prompt_rows) * max(prompt_rows), 0
+            self.extra_bytes = max(0, int(extra_bytes))
+            self.cache_copies, self.cache_instances = 2, len(prompt_rows)
+            self._batch_prompts, self._batch_replies = prompt_rows, reply_rows
+            try:
+                freeable = int(self.runtime.get_cache_memory()) + (self.store.nbytes if self.store is not None else 0)
+                return self.projected(self.prompt) - freeable <= self.budget
+            finally:
+                (
+                    self.prompt,
+                    self.reply,
+                    self.extra_bytes,
+                    self.cache_copies,
+                    self.cache_instances,
+                    self._batch_prompts,
+                    self._batch_replies,
+                ) = saved
 
     def fits_now(self) -> bool:
         """Whether the prompt fits beside every retained prefix, after releasing only freed MLX buffers."""
@@ -221,9 +314,19 @@ class PromptMemory:
             with self._memory_lock:
                 self.runtime.reset_peak_memory()
 
-    def observe_cache(self, cache: Any, *, workspace: bool = True, rows: int | None = None) -> None:
+    def observe_cache(
+        self, cache: Any, *, workspace: bool = True, rows: int | None = None, instances: int = 1
+    ) -> None:
         with self._memory_lock:
             measured = CacheMemory.from_cache(cache)
+            instances = max(1, int(instances))
+            if instances > 1:
+                measured = CacheMemory(
+                    -(-measured.fixed_bytes // instances),
+                    measured.bytes_per_token,
+                    measured.step,
+                    measured.entry_bytes_per_token,
+                )
             if measured.bytes_per_token and self.heads < 0 and not self.workspace_per_token:
                 raise RequestError("Cannot size this checkpoint's attention workspace; its configuration must "
                                    "specify num_attention_heads before long prompts can be admitted.")
@@ -241,8 +344,8 @@ class PromptMemory:
                 self.observed_work = work if full else max(self.observed_work, work)
                 self.workspace_profiled = full
 
-    def after_chunk(self, cache: Any, rows: int) -> None:
-        self.observe_cache(cache, rows=rows)
+    def after_chunk(self, cache: Any, rows: int, *, instances: int = 1) -> None:
+        self.observe_cache(cache, rows=rows, instances=instances)
         if self._probe_base is not None:          # what a prompt holds between chunks outside its cache
             held = int(self.runtime.get_active_memory()) - cache_nbytes(cache) - self._probe_base
             self.carry = max(self.carry, held)

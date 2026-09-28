@@ -142,11 +142,24 @@ class CacheMemory:
             if positions < 1 or int(values.shape[2]) != positions:
                 raise ValueError("KV arrays must contain the same positive number of positions")
             main = _array_bytes(keys) + _array_bytes(values)
-            each = -(-main // positions)
+            batch = max(1, int(keys.shape[0]))
+            each = -(-main // (positions * batch))
             spare = _array_bytes(getattr(item, "spare_keys", None))
             spare += _array_bytes(getattr(item, "spare_values", None))
             extra = max(0, held - main - spare)
-            valid = max(1, min(positions, int(getattr(item, "offset", positions))))
+            offset = getattr(item, "offset", positions)
+            if batch > 1 and getattr(offset, "ndim", 0) > 0:
+                # Batch cache row offsets and left-padding vectors are fixed metadata,
+                # not a token timeline. Charging them per token compounds a few bytes
+                # into a large false admission cost.
+                fixed += extra
+                extra = 0
+            if getattr(offset, "ndim", 0) > 0:
+                values_list = offset.reshape(-1).tolist()
+                valid = sum(max(0, min(positions, int(value))) for value in values_list)
+            else:
+                valid = max(0, min(positions, int(offset)))
+            valid = max(1, valid)
             auxiliary = -(-extra // valid)
             capacity = int(getattr(item, "max_size", 0) or 0)
             if capacity:

@@ -28,6 +28,11 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 
 Visual embeddings and multimodal RoPE are computed during prefill. Image requests deliberately disable
 drafting and retained/disk prefix caches; different images therefore cannot collide in a token-only cache.
+When multiple image requests are waiting, up to `--parallel` of them share one vision-tower and language
+prefill. Shorter rows are right-padded for the shared forward, then each MRoPE cache is normalized and split
+back into an independent stream before decoding. The server
+keeps one additional bounded image batch prepared so concurrent clients can reach this path; requests that
+cannot fit together remain queued and a failed batch is retried row by row.
 
 ## MLX
 

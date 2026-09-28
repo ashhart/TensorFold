@@ -56,10 +56,13 @@ class PrefillGuard:
             self.memory.before_chunk(cache, tokens)
         self.cancellation.check()
 
-    def after_chunk(self, cache: Any, tokens: int) -> None:
+    def after_chunk(self, cache: Any, tokens: int, *, instances: int = 1) -> None:
         self.cancellation.check()
         if self.memory is not None:
-            self.memory.after_chunk(cache, tokens)
+            if instances == 1:
+                self.memory.after_chunk(cache, tokens)
+            else:
+                self.memory.after_chunk(cache, tokens, instances=instances)
         self.cancellation.check()
 
     def allow_checkpoint(self, cache: Any) -> bool:

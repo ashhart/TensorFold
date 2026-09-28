@@ -326,7 +326,7 @@ class Scheduler:
                 self._retire(job)
 
     def _admit(self) -> None:
-        """Admit fitting jobs before the next round, prefilling each prompt separately to preserve its individual prefill bits."""
+        """Admit fitting jobs before the next round, batching adjacent image prefills when lanes permit."""
 
         while self.engine.active_count < self.lanes:
             job = self._held
@@ -345,7 +345,26 @@ class Scheduler:
             if job.cancellation.cancelled:
                 self._finish_cancelled(job)
                 continue
-            self._start_job(job)
+            if job.multimodal is None:
+                self._start_job(job)
+                continue
+            batch = [job]
+            while self.engine.active_count + len(batch) < self.lanes:
+                try:
+                    candidate = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if candidate.cancellation.cancelled:
+                    self._finish_cancelled(candidate)
+                    continue
+                if candidate.multimodal is None or not self._fits_batch([*batch, candidate]):
+                    self._held = candidate
+                    break
+                batch.append(candidate)
+            if len(batch) == 1:
+                self._start_job(job)
+            else:
+                self._start_vision_batch(batch)
 
     def _fits(self, job: ChatJob) -> bool:
         """Start alone for prompt admission to validate memory, or beside streams only when prompt memory and admission projections fit."""
@@ -369,6 +388,41 @@ class Scheduler:
         live = [(len(j.stream.context), len(j.prompt_ids) + int(j.max_tokens)) for j in self._jobs.values()
                 if j.stream is not None and not j.stream.finished]
         return self.admission.admits(len(job.prompt_ids), len(job.prompt_ids) + int(job.max_tokens), live)
+
+    def _fits_batch(self, jobs: list[ChatJob]) -> bool:
+        """Whether image jobs can prefill together beside the currently live streams."""
+
+        if not jobs:
+            return False
+        memory = self.prompt_memory
+        if memory is not None and not memory.would_fit_batch(
+            [len(job.prompt_ids) for job in jobs],
+            [int(job.max_tokens) for job in jobs],
+            extra_bytes=sum(int(job.multimodal.reserved_bytes) for job in jobs),
+        ):
+            return False
+        if memory is not None:
+            # Admission is calibrated from text decode rounds and double-counts the multimodal
+            # prefill workspace already reserved above. PromptMemory validates the aggregate
+            # image graph here and again before/after its real cache allocation.
+            return True
+        if self.admission is None:
+            return True
+        live = [
+            (len(job.stream.context), len(job.prompt_ids) + int(job.max_tokens))
+            for job in self._jobs.values()
+            if job.stream is not None and not job.stream.finished
+        ]
+        for index, job in enumerate(jobs):
+            # Preserve the existing rule that a first request may start alone and let prompt admission
+            # produce the detailed error. Every additional row must fit beside the rows before it.
+            if live or index:
+                if not self.admission.admits(
+                    len(job.prompt_ids), len(job.prompt_ids) + int(job.max_tokens), live
+                ):
+                    return False
+            live.append((len(job.prompt_ids), len(job.prompt_ids) + int(job.max_tokens)))
+        return True
 
     def _read_disk_block(self, prompt: list[int], usable: Any = None) -> None:
         """Put the longest stored prefix ``usable`` accepts (system blocks, saved conversations) in the store."""
@@ -443,22 +497,7 @@ class Scheduler:
             proposer = job.proposer
             if proposer is None and job.drafts and self.proposer_factory is not None:
                 proposer = self.proposer_factory()
-            stream = LaneStream(
-                stream_id=job.job_id,
-                prompt_ids=list(job.prompt_ids),
-                max_new_tokens=int(job.max_tokens),
-                multimodal=job.multimodal,
-                eos_ids=frozenset() if job.ignore_eos else self.eos_ids,
-                stop_check=job.stop_check,
-                proposer=proposer if job.drafts else None,
-                drafts=bool(job.drafts),
-                retain=job.multimodal is None,
-                sampling=job.sampling,
-                think_budget=int(job.think_budget),
-                think_close=tuple(job.think_close),
-                think_end=int(job.think_end),
-                think_open=bool(job.think_budget),
-            )
+            stream = self._new_stream(job, proposer)
             job.stream = stream
             self.engine.add_stream(stream, cache=cache, cached_tokens=cached, checkpoints_at=checkpoints_at)
             self._keep_checkpoints(job, shared_at)
@@ -484,6 +523,100 @@ class Scheduler:
             self.engine.prefill_guard = None
             if self.prompt_memory is not None:
                 self.prompt_memory.end()
+
+    def _new_stream(self, job: ChatJob, proposer: Any = None) -> LaneStream:
+        return LaneStream(
+            stream_id=job.job_id,
+            prompt_ids=list(job.prompt_ids),
+            max_new_tokens=int(job.max_tokens),
+            multimodal=job.multimodal,
+            eos_ids=frozenset() if job.ignore_eos else self.eos_ids,
+            stop_check=job.stop_check,
+            proposer=proposer if job.drafts else None,
+            drafts=bool(job.drafts),
+            retain=job.multimodal is None,
+            sampling=job.sampling,
+            think_budget=int(job.think_budget),
+            think_close=tuple(job.think_close),
+            think_end=int(job.think_end),
+            think_open=bool(job.think_budget),
+            cancellation=job.cancellation,
+        )
+
+    def _start_vision_batch(self, jobs: list[ChatJob]) -> None:
+        """Prefill image jobs in one model batch, then expose each as an independent stream."""
+
+        ready: list[ChatJob] = []
+        for job in jobs:
+            if job.cancellation.cancelled:
+                self._finish_cancelled(job)
+            else:
+                ready.append(job)
+        if len(ready) < 2:
+            if ready:
+                self._start_job(ready[0])
+            return
+        jobs = ready
+        now = time.perf_counter()
+        for job in jobs:
+            job.started_at = now
+            self.starts += 1
+            job.stream = self._new_stream(job)
+        self._starting = jobs[0]
+        memory = self.prompt_memory
+        batch_error: Exception | None = None
+        try:
+            if memory is not None:
+                memory.begin_batch(
+                    [len(job.prompt_ids) for job in jobs],
+                    [int(job.max_tokens) for job in jobs],
+                    admit=self.checkpoints is None,
+                    extra_bytes=sum(int(job.multimodal.reserved_bytes) for job in jobs),
+                )
+            # A batch cannot be interrupted inside one MLX graph. Individual cancellations are
+            # checked immediately before and after it so one departed client does not fail peers.
+            self.engine.prefill_guard = PrefillGuard(Cancellation(), memory)
+            self.engine.add_vision_streams([job.stream for job in jobs])
+            for job in jobs:
+                stream = job.stream
+                if job.cancellation.cancelled:
+                    self._discard_job(job)
+                    continue
+                job.prefilled_at = time.perf_counter()
+                job.cached_tokens = 0
+                if stream.emitted:
+                    job.chunks.put(list(stream.emitted))
+                if stream.finished:
+                    self._retire(job)
+                else:
+                    self._jobs[stream.stream_id] = job
+        except Exception as exc:  # noqa: BLE001 - one batch failure is reported to every waiting request
+            batch_error = exc
+        finally:
+            self.engine.prefill_guard = None
+            if memory is not None:
+                memory.end()
+        if batch_error is not None:
+            traceback.print_exception(batch_error)
+            error_type, error_message = type(batch_error).__name__, str(batch_error)
+            print(
+                f"[tensorfold] image batch prefill failed; retrying rows separately: "
+                f"{error_type}: {error_message}",
+                flush=True,
+            )
+            batch_error.__traceback__ = batch_error.__cause__ = batch_error.__context__ = None
+            batch_error = None
+            if memory is not None:
+                memory.release_freed()
+            self.starts -= len(jobs)
+            for job in jobs:
+                if job.stream is not None:
+                    self.engine.discard_stream(job.stream)
+                job.stream = None
+                if job.cancellation.cancelled:
+                    self._finish_cancelled(job)
+                else:
+                    self._start_job(job)
 
     def _keep_checkpoints(self, job: ChatJob, shared_at: set[int]) -> None:
         """Store the prefixes the job's prefill kept (system blocks pinned and saved to disk), once."""
@@ -532,6 +665,9 @@ class Scheduler:
 
     @staticmethod
     def _finish(job: ChatJob) -> None:
+        discard = getattr(job.multimodal, "discard_buffers", None)
+        if callable(discard):
+            discard()
         job.finished_at = time.perf_counter()
         job.chunks.put(None)
         job.done.set()

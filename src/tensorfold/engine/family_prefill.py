@@ -79,6 +79,9 @@ class FamilyPrefill:
             )
             if self.prefill_guard is not None:
                 self.prefill_guard.after_chunk(work, len(prompt))
+            discard = getattr(stream.multimodal, "discard_buffers", None)
+            if callable(discard):
+                discard()
             return work
         chunks = self.prompt_chunks(prompt)
         work, start = self._family_start(cache, cached_tokens, chunks)
@@ -162,3 +165,46 @@ class FamilyPrefill:
             self._release_stream_state(stream.stream_id)
             return
         self._live.append((stream, work))
+
+    def _family_add_vision_streams(self, streams: Sequence[Any]) -> None:
+        """Run one multimodal prefill and split its rows into independently decoded streams."""
+
+        if len(streams) < 2:
+            raise ValueError("a vision batch requires at least two streams")
+        if any(not stream.prompt_ids or stream.multimodal is None for stream in streams):
+            raise ValueError("every vision batch row requires a non-empty multimodal prompt")
+        prompts = [stream.multimodal for stream in streams]
+        batch_cache = self.model.make_vision_batch_cache(prompts)
+        rows = sum(len(stream.prompt_ids) for stream in streams)
+        if self.prefill_guard is not None:
+            self.prefill_guard.before_chunk(batch_cache, rows)
+        self._prefill_at = None
+        hidden, rope_deltas = self.model.vision_prefill_batch(prompts, batch_cache)
+        self.prefill_chunks += len(streams)
+        if self.prefill_guard is not None:
+            self.prefill_guard.after_chunk(batch_cache, rows, instances=len(streams))
+        active = [
+            index
+            for index, stream in enumerate(streams)
+            if stream.cancellation is None or not stream.cancellation.cancelled
+        ]
+        works = self.model.split_vision_batch(prompts, batch_cache, rope_deltas, active)
+        staged: list[tuple[Any, list[Any]]] = []
+        for index in active:
+            stream, work = streams[index], works[index]
+            self._fed_rows = len(stream.prompt_ids)
+            first = self._family_first(stream, work, hidden[index : index + 1, -1:, :], 0, len(stream.prompt_ids) - 1)
+            self._family_commit_first(stream, int(first.item()) if hasattr(first, "item") else int(first))
+            staged.append((stream, work))
+        for prompt in prompts:
+            discard = getattr(prompt, "discard_buffers", None)
+            if callable(discard):
+                discard()
+        self._prefill_at = max(len(stream.prompt_ids) for stream in streams)
+        for stream, work in staged:
+            self.streams.append(stream)
+            if stream.finished:
+                stream.finished_at = time.perf_counter()
+                self._release_stream_state(stream.stream_id)
+            else:
+                self._live.append((stream, work))

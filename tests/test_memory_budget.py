@@ -118,6 +118,26 @@ def test_cache_profile_prices_kv_and_fixed_recurrent_state_from_the_arrays():
     assert profile.cache_bytes(513) == recurrent.nbytes + 768 * profile.bytes_per_token
 
 
+def test_cache_profile_normalizes_batched_kv_capacity_and_array_offsets():
+    import numpy as np
+
+    keys = Array((2, 4, 512, 256))
+    values = Array(keys.shape)
+    cache = [
+        SimpleNamespace(
+            keys=keys,
+            values=values,
+            state=(keys, values),
+            offset=np.asarray([510, 512]),
+        )
+    ]
+
+    profile = CacheMemory.from_cache(cache)
+
+    assert profile.bytes_per_token == 4 * 256 * 2 * 2
+    assert profile.fixed_bytes == cache[0].offset.nbytes
+
+
 def test_bounded_cache_and_alternating_spare_are_reserved_without_existing_spare_arrays():
     keys = Array((1, 2, 256, 128))
     values = Array(keys.shape)

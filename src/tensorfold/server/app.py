@@ -97,7 +97,10 @@ class ChatApp(RequestOptions):
         self._model = model
         self.vision = getattr(model, "vision", None)
         self.accepts_images = self.vision is not None
-        self._vision_slots = threading.BoundedSemaphore(max(1, int(lanes)))
+        # Keep one ready batch queued behind the active lanes. Holding only ``lanes``
+        # slots makes short image requests arrive at the scheduler one-by-one, so a
+        # multimodal prefill batch can never form.
+        self._vision_slots = threading.BoundedSemaphore(max(2, int(lanes) * 2))
         self._vision_waiters = threading.BoundedSemaphore(max(8, int(lanes) * 16))
         self.image_queue_timeout = float(
             os.environ.get("TENSORFOLD_IMAGE_QUEUE_TIMEOUT", "600")

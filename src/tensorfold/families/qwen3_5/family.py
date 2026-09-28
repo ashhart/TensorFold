@@ -80,6 +80,30 @@ class Qwen35Family:
             raise ValueError("this Qwen runtime has no MRoPE-aware language model")
         return FamilyCache(self.vision_language.make_cache())
 
+    def make_vision_batch_cache(self, prompts: Sequence[Any]) -> list[Any]:
+        """Create mlx-vlm's right-padding-aware cache for a multimodal prompt batch."""
+
+        if self.vision_language is None:
+            raise ValueError("this Qwen runtime has no MRoPE-aware language model")
+        from mlx_vlm.generate.ar import _make_cache
+
+        lengths = [len(prompt.input_ids) for prompt in prompts]
+        longest = max(lengths)
+        work = FamilyCache(
+            _make_cache(
+                self.vision_language,
+                [0] * len(lengths),
+                prefill_length=longest,
+            )
+        )
+        right_padding = [longest - length for length in lengths]
+        for item in work:
+            prepare = getattr(item, "prepare", None)
+            if not callable(prepare):
+                raise ValueError(f"{type(item).__name__} does not support right-padded image batches")
+            prepare(right_padding=right_padding, lengths=lengths)
+        return work
+
     def adopt_cache(self, cache: list[Any]) -> list[Any]:
         if self.head_drafts is not None and not (cache and isinstance(cache[-1], DraftSlot)):
             cache.append(self.head_drafts.slot())
@@ -168,6 +192,62 @@ class Qwen35Family:
 
         mx.eval(hidden, *cache_arrays(layers))
         return hidden
+
+    def vision_prefill_batch(self, prompts: list[Any], cache: list[Any]) -> tuple[Any, Any]:
+        """Encode and prefill multiple image prompts in one MRoPE-aware MLX graph."""
+
+        import mlx.core as mx
+
+        from tensorfold.engine.family_common import cache_arrays
+        from tensorfold.families.qwen3_5.vision import merge_vision_prompts
+
+        if not hasattr(self.inner, "get_input_embeddings"):
+            raise ValueError("this Qwen runtime has no vision tower")
+        batch = merge_vision_prompts(prompts)
+        model_inputs = {
+            key: value if isinstance(value, mx.array) else mx.array(value)
+            for key, value in batch.model_inputs.items()
+        }
+        input_ids = model_inputs.pop("input_ids")
+        features = self.inner.get_input_embeddings(input_ids=input_ids, **model_inputs)
+        layers = self._layers(cache)
+        hidden = self.vision_core(
+            input_ids,
+            inputs_embeds=features.inputs_embeds,
+            cache=layers,
+            position_ids=features.position_ids,
+        )
+        last_hidden = mx.stack(
+            [hidden[index, length - 1] for index, length in enumerate(batch.lengths)]
+        )[:, None, :]
+        mx.eval(last_hidden, features.rope_deltas, *cache_arrays(layers))
+        for item in layers:
+            finalize = getattr(item, "finalize", None)
+            if not callable(finalize):
+                raise ValueError(f"{type(item).__name__} does not support finalizing image batch padding")
+            finalize()
+        return last_hidden, features.rope_deltas
+
+    def split_vision_batch(
+        self, prompts: list[Any], cache: list[Any], rope_deltas: Any, indices: Sequence[int] | None = None
+    ) -> dict[int, list[Any]]:
+        """Extract independent single-row caches and attach each row's multimodal position state."""
+
+        from mlx_vlm.apc import extract_prompt_cache_from_batch
+
+        rows: dict[int, list[Any]] = {}
+        for index in range(len(prompts)) if indices is None else indices:
+            prompt = prompts[index]
+            extracted = extract_prompt_cache_from_batch(self._layers(cache), index)
+            if extracted is None:
+                raise ValueError("mlx-vlm could not split the batched image prompt cache")
+            work = FamilyCache(extracted)
+            work.vision_state = {
+                "rope_delta": int(rope_deltas[index].reshape(-1)[0].item()),
+                "image_digest": prompt.image_digest,
+            }
+            rows[index] = work
+        return rows
 
     def _commit(self, layers: list[Any], record: Any, path: list[int], rows: int, start: int) -> None:
         if record is None:
