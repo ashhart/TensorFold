@@ -6,6 +6,7 @@ import time
 
 import torch
 
+from tensorfold.cuda.grammar import GrammarError
 from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import PrefixCache, Stream, accept
@@ -159,7 +160,7 @@ class MultiDecoder:
             if stop in s.stops:
                 self.cache.add(list(s.prompt[:stop]), kept(s.st), own(s.snap))
             first = None if stop < len(s.prompt) else \
-                first_token(self.w, normed, len(s.prompt), s.sampling, self.rank, self.world)
+                first_token(self.w, normed, len(s.prompt), s.sampling, self.rank, self.world, s.constraint)
             if first is not None and s.draft and not (s.stops and len(s.prompt) - s.stops[-1] < MIN_GAP):
                 self.cache.add(list(s.prompt), kept(s.st), own(s.snap))   # a message start just before the end covers it
         except Exception as exc:
@@ -198,7 +199,16 @@ class MultiDecoder:
         self._send([x for path in paths for x in (len(path), *path)])
         self._commit(plan, wins, record, taps, starts, paths)
         for s, (tokens, _), path, end in zip(live, wins, paths, ends):
-            s.take([tokens[r] for r in path[1:]] + [end], self.eos)
+            new = [tokens[r] for r in path[1:]] + [end]
+            if s.constraint is not None and s.error is None:
+                try:
+                    s.constraint.advance(new)
+                except GrammarError as exc:
+                    s.error = exc
+            if s.error is not None:                   # its grammar failed: this request ends alone, with the error
+                s.done, s.finished = True, time.perf_counter()
+                continue
+            s.take(new, self.eos)
         return done + [s for s in live if s.done]
 
     def _mode(self, s: Stream, copied: dict[int, list[int]]) -> int:
@@ -273,8 +283,10 @@ class MultiDecoder:
             launched = self.draft.launch_blocks([self.streams[sid].snap for sid, _ in tree],
                                                 [pending for _, pending in tree], self.max_rows - 1)
             blocks = {sid: block for (sid, _), block in zip(tree, launched)}
+        grammars = {}
         if self.rank == 0:
             wins = self._windows(plan, copied, blocks)
+            grammars = self._constrain(plan, wins)
             self._send([x for tokens, parents in wins for x in (len(tokens), *tokens, *parents)])
         else:
             wins = _unflatten(_share(None, 1, self.device), pairs=True)
@@ -283,6 +295,8 @@ class MultiDecoder:
         logits, record, taps, starts = multi_tree_forward(
             self.w, [(t, p, st) for (t, p), st in zip(wins, states)],
             full_logits=self.split or self.rank == 0, tp=self.world == 2, capture_taps=taps_wanted)
+        for k, window in grammars.items():          # a constrained stream's rows, each masked by its path
+            self.streams[plan[k][0]].constraint.mask(logits[starts[k]:starts[k + 1]], window)
         positions = [[st.pos + d + 1 for d in _paths(parents)[0]] for (_, parents), st in zip(wins, states)]
         samplings = [self.streams[item[0]].sampling for item in plan]
         if self.split:                                # both ranks gather their halves' candidates
@@ -291,6 +305,23 @@ class MultiDecoder:
         else:
             sampled = sample_streams(logits, starts, positions, samplings) if self.rank == 0 else [None] * len(plan)
         return wins, record, taps, starts, sampled
+
+    def _constrain(self, plan, wins) -> dict:
+        """Rank 0: each constrained stream's window without the drafts its grammar rules out, and its rows' masks."""
+
+        grammars = {}
+        for k, (sid, *_) in enumerate(plan):
+            s = self.streams[sid]
+            if s.constraint is None or s.error is not None:
+                continue
+            try:
+                window = s.constraint.window(*wins[k])
+            except GrammarError as exc:              # this request ends after the round; the others go on
+                s.error = exc
+                continue
+            wins[k] = (window.tokens, window.parents)
+            grammars[k] = window
+        return grammars
 
     def _commit(self, plan, wins, record, taps, starts, paths) -> None:
         rows = [[starts[k] + r for r in path] for k, path in enumerate(paths)]

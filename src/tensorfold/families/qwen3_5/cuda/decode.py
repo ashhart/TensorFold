@@ -46,7 +46,7 @@ def prefill_stops(w: Weights, prompt: Sequence[int], st: State, draft=None, *, s
 @torch.no_grad()
 def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
             draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
-            keep: Callable | None = None) -> tuple[State, int]:
+            keep: Callable | None = None, constraint=None) -> tuple[State, int]:
     """Commit the prompt and sample the first token; resuming a kept ``state`` gives a fresh prefill's bits."""
 
     from .forward import _mm
@@ -59,7 +59,12 @@ def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
     if st.pos >= len(prompt):
         raise ValueError("a reused state must leave at least one prompt token to process")
     normed = prefill_stops(w, prompt, st, draft, stops=stops, keep=keep)
-    pending = sample_rows(_mm(normed, w.head), [len(prompt)], sampling)[0]
+    logits = _mm(normed, w.head)
+    if constraint is not None:                  # a reply's grammar (tensorfold.cuda.grammar): masked, then followed
+        constraint.mask(logits)
+    pending = sample_rows(logits, [len(prompt)], sampling)[0]
+    if constraint is not None:
+        constraint.advance([pending])
     return st, pending
 
 
@@ -185,7 +190,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
                  *, max_rows: int = 128, tree_rows: int | None = None,
                  allow_copy: bool = True, stop_eos: bool = True,
                  on_tokens: Callable[[list[int]], bool | None] | None = None,
-                 trace: list | None = None) -> DecodeResult:
+                 trace: list | None = None, constraint=None) -> DecodeResult:
     """Verify trees and replay matching paths, with optional host-only trace records that leave output tokens unchanged."""
 
     if count < 1 or not 1 <= max_rows <= 128:
@@ -215,6 +220,10 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
             guesses, parents = [], []
         tokens = [out[-1]] + guesses
         tree_parents = [-1] + [0 if p < 0 else p + 1 for p in parents]
+        window = None
+        if constraint is not None:           # a grammar drops drafts no path can keep, then masks each row by its path
+            window = constraint.window(tokens, tree_parents)
+            tokens, tree_parents = window.tokens, window.parents
         torch.cuda.synchronize()
         spent = {"draft": time.perf_counter() - stage}
         stages["draft"] += spent["draft"]
@@ -225,6 +234,8 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
         spent["verify"] = time.perf_counter() - stage
         stages["verify"] += spent["verify"]
         stage = time.perf_counter()
+        if window is not None:
+            constraint.mask(logits, window)
         depths, _ = _paths(tree_parents)
         sampled = sample_rows(logits, [st.pos + d + 1 for d in depths], sampling)
         children: dict[tuple[int, int], int] = {}
@@ -243,6 +254,8 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
                 break
             path.append(child)
             terminal = sampled[child]
+        if constraint is not None:
+            constraint.advance([tokens[row] for row in path[1:]] + [terminal])
         spent["sample"] = time.perf_counter() - stage
         stages["sample"] += spent["sample"]
         if trace is not None:
@@ -261,7 +274,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
         if trace is not None:
             trace[-1]["commit_ms"] = round(1000 * (time.perf_counter() - stage), 3)
         rounds += 1
-        drafted_rows += len(guesses)
+        drafted_rows += len(tokens) - 1
         accepted_drafts += len(path) - 1
         widths.append(len(tokens))
         if on_tokens is not None:

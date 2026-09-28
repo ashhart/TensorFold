@@ -91,6 +91,7 @@ class Qwen27Engine:
         from tensorfold.cuda.streams import PrefixCache
 
         self.eos = tuple(self.w.config.eos)
+        self.structured_output = tp == 1                    # generate takes a response_format constraint on one GPU
         self.points = resume_points(model_dir)              # message starts a prefill keeps states at
         self.cache = PrefixCache(KEEP_ONE)                  # (committed ids, state, drafter snapshot)
         # ``streams`` > 1: up to that many requests decoded together, their windows verified in one forward
@@ -144,7 +145,7 @@ class Qwen27Engine:
         return not (stops and len(prompt) - stops[-1] < MIN_GAP)
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
-                 draft: bool = True):
+                 draft: bool = True, constraint=None):
         """``draft=False`` runs serial decoding from a fresh prefill without draft proposals, copies, or prefix-cache changes."""
 
         from .decode import draft_decode, prefill
@@ -153,8 +154,10 @@ class Qwen27Engine:
             raise ValueError(f"prompt of {len(prompt)} tokens exceeds the {self.context_window}-token safe capacity; "
                              "shorten the prompt or reserve fewer reply tokens")
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
+        if constraint is not None and not self.structured_output:
+            raise ValueError("structured output runs on one GPU")
         if self.scheduler is not None:
-            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens)
+            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, constraint=constraint)
         t0 = time.perf_counter()
         hit = self._resume(prompt) if draft else None
         if self.tp == 2:
@@ -166,14 +169,15 @@ class Qwen27Engine:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
         stops, keep = self._stops(prompt, hit, draft)
         st, pending = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
-                              limit=self.context_window, stops=stops, keep=keep)
+                              limit=self.context_window, stops=stops, keep=keep, constraint=constraint)
         if draft and self._ends(prompt, stops):
             self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
         prefill_s = time.perf_counter() - t0
         if on_tokens([pending]):
             return {"prefill_s": prefill_s, "cached": hit[1].pos if hit else 0}
         result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
-                              max_rows=self.max_rows, allow_copy=self.allow_copy and draft, on_tokens=on_tokens)
+                              max_rows=self.max_rows, allow_copy=self.allow_copy and draft, on_tokens=on_tokens,
+                              constraint=constraint)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0)}
 
