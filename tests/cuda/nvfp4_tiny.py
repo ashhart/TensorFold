@@ -14,9 +14,19 @@ from pathlib import Path
 import torch
 
 from tensorfold.families.qwen4_exp.cuda import nvfp4
+from tensorfold.families.qwen4_exp.cuda.ngram import NGram
 
 DTYPE_NAMES = {torch.bfloat16: "BF16", torch.float32: "F32", torch.uint8: "U8",
                torch.float8_e4m3fn: "F8_E4M3", torch.int64: "I64"}
+
+
+def tiny_ngram(vocab: int) -> NGram:
+    """The tiny checkpoint's n-gram constants and table size, derived with the params ``_config`` writes
+    (one head over a two-gram table, the config's seed and vocab base): the real checkpoint ships its
+    own, and the loader's ``NGram.check`` compares them value for value."""
+
+    return NGram(vocab=vocab, ngram_size=2, heads_per_ngram=1, vocab_base=vocab, divisor=1, shards=1,
+                 seed=1234, eos=0, embed_dim=64, ple_index=0)
 
 
 def _quant_rows(rows: torch.Tensor, rng: torch.Generator) -> tuple[torch.Tensor, torch.Tensor, float]:
@@ -118,12 +128,13 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
             for nm in ("norm_key", "norm_query", "norm_conv"):
                 add(f"{b}.ple.{nm}.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
             add(f"{b}.ple.conv1d.weight", rand(streams * hidden, 4))
-            add(f"{b}.ple.ple_embedding.layer_multipliers", torch.ones(1, dtype=torch.float32))
-            # one shard, the n-gram heads for a two-ngram table over a small vocab (NGram.check's math)
-            heads_rows = 2 * (vocab // 8)
-            add(f"{b}.ple.ple_embedding.ngram_heads_offsets", torch.tensor([0, vocab // 8], dtype=torch.int64))
-            add(f"{b}.ple.ple_embedding.ngram_heads_vocab_sizes",
-                torch.tensor([vocab // 8, vocab // 8], dtype=torch.int64))
+            ng = tiny_ngram(vocab)
+            # the hashing constants the checkpoint ships (the loader's check compares them) and the
+            # one-shard table they index: the MLX 4-bit layout, rows = the derived table size
+            add(f"{b}.ple.ple_embedding.layer_multipliers", torch.as_tensor(ng.multipliers))
+            add(f"{b}.ple.ple_embedding.ngram_heads_offsets", torch.as_tensor(ng.head_offsets))
+            add(f"{b}.ple.ple_embedding.ngram_heads_vocab_sizes", torch.as_tensor(ng.head_sizes))
+            heads_rows = int(ng.rows)
             words = torch.randint(0, 256, (heads_rows, 8), generator=rng, dtype=torch.uint8)
             scales = rand(heads_rows, 2)
             biases = rand(heads_rows, 2)

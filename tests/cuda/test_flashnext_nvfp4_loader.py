@@ -83,4 +83,4 @@ def test_the_loader_builds_the_nvfp4_faces(tiny: Path) -> None:
         lo, hi = e["data_offsets"]
         f.seek(8 + n + lo)
         dn = torch.frombuffer(bytearray(f.read(hi - lo)), dtype=torch.bfloat16).reshape(2, 256, 128)
-    assert torch.equal(fd, dn[0].to(torch.float32))
+    assert torch.equal(fd, dn[0].to(device=fd.device, dtype=torch.float32))
