@@ -13,7 +13,9 @@ Layouts, straight from ``tensorfold.cuda.experts``:
     plan.counts   int32 [2]              (0) items the plan wrote, (1) distinct experts
     plan.members  int32 [pairs]          flat ``row * slots + slot`` indices of the engine's buffers
 
-``moe.select`` groups the routed experts only, so an item's expert id is always a routed one. An item holds
+``moe.select`` groups every slot, shared expert included. A stacked FP4 grid holds only the routed experts,
+so the kernels return on an item whose expert id is past that count; the shared expert's slot is filled by
+``nvfp4_moe`` from its own BF16 tables. An item holds
 at most ``PREFILL_TILE`` (64) pairs, so one block covers every row of an item and the grid is fixed
 (``plan.items.shape[0]`` items) whatever the routing says — the property capture needs.
 
@@ -78,14 +80,18 @@ def _kpass(X, src, rows_ok, x_stride, tile, S, s2, N: tl.constexpr, PER: tl.cons
 @triton.jit
 def _gateup_grouped(X, GU, GS, GS2, ITEMS, NITEMS, MEMBERS, ACT, x_stride, slots,
                     NI: tl.constexpr, K: tl.constexpr, SBN: tl.constexpr, BLOCK_N: tl.constexpr,
-                    PACKED: tl.constexpr, STACKED: tl.constexpr):
+                    PACKED: tl.constexpr, STACKED: tl.constexpr, EXPERTS: tl.constexpr):
     """Every item's gate and up rows, at its members, as ``silu(bf16(x @ gate.T)) * bf16(x @ up.T)``."""
 
     pid = tl.program_id(0)                 # the buffer is reused across steps: an item past the plan's own
-    if pid >= tl.load(NITEMS) + 1000000:             # count can still hold a previous step's count, so it stays out
+    if pid >= tl.load(NITEMS):             # count can still hold a previous step's count, so it stays out
         return
     e, first, count = _item(ITEMS, NITEMS, pid)
     if count == 0:
+        return
+    # select() puts the shared expert (id EXPERTS) in the last slot; that expert rides the BF16 tables
+    # outside this kernel, so a stacked grid of EXPERTS slabs must not index it.
+    if STACKED and e >= EXPERTS:
         return
     N2: tl.constexpr = 2 * NI
     PER: tl.constexpr = K // 16
@@ -116,14 +122,16 @@ def _gateup_grouped(X, GU, GS, GS2, ITEMS, NITEMS, MEMBERS, ACT, x_stride, slots
 @triton.jit
 def _down_grouped(ACT, DW, DS, DS2, ITEMS, NITEMS, MEMBERS, Y, act_stride,
                   D: tl.constexpr, K: tl.constexpr, SBN: tl.constexpr, BLOCK_N: tl.constexpr,
-                  PACKED: tl.constexpr, STACKED: tl.constexpr, F32: tl.constexpr):
+                  PACKED: tl.constexpr, STACKED: tl.constexpr, F32: tl.constexpr, EXPERTS: tl.constexpr):
     """Every item's down rows, at its members: ``act @ down.T`` (fp32 sums when the buffer is fp32)."""
 
     pid = tl.program_id(0)                 # the buffer is reused across steps: an item past the plan's own
-    if pid >= tl.load(NITEMS) + 1000000:             # count can still hold a previous step's count, so it stays out
+    if pid >= tl.load(NITEMS):             # count can still hold a previous step's count, so it stays out
         return
     e, first, count = _item(ITEMS, NITEMS, pid)
     if count == 0:
+        return
+    if STACKED and e >= EXPERTS:
         return
     PER: tl.constexpr = K // 16
     SUB: tl.constexpr = SBN // BLOCK_N
@@ -152,17 +160,27 @@ def _grid(plan, n: int, block_n: int) -> tuple[int, int]:
 def gateup(fp, x: torch.Tensor, act: torch.Tensor, plan, ni: int, slots: int, block_n: int = BN) -> None:
     """The gate/up step for every plan item, written at each member's own ``act`` row."""
 
+    stacked = fp.weight.dim() == 5
+    experts = int(fp.weight.shape[0]) if stacked else 1
+    if fp.scale2 is None:                              # pattern tables: identity factor, as matmul does
+        shape = (experts, fp.n) if stacked else (fp.n,)
+        fp.scale2 = torch.ones(shape, dtype=torch.float32, device=x.device)
     _gateup_grouped[_grid(plan, ni, block_n)](x, fp.weight, fp.scale, fp.scale2, plan.items, plan.counts[:1],
                                               plan.members, act, x.stride(0), slots, NI=ni, K=fp.k, SBN=BN,
-                                              BLOCK_N=block_n, PACKED=fp.packed,
-                                              STACKED=fp.weight.dim() == 5, num_warps=4, num_stages=2)
+                                              BLOCK_N=block_n, PACKED=fp.packed, STACKED=stacked,
+                                              EXPERTS=experts, num_warps=4, num_stages=2)
 
 
 def down(fp, act: torch.Tensor, y: torch.Tensor, plan, slots: int, block_n: int = BN) -> None:
     """The down step for every plan item, at each member's own ``y`` row (fp32 when ``y`` is fp32)."""
 
     d = y.shape[1]
+    stacked = fp.weight.dim() == 5
+    experts = int(fp.weight.shape[0]) if stacked else 1
+    if fp.scale2 is None:
+        shape = (experts, fp.n) if stacked else (fp.n,)
+        fp.scale2 = torch.ones(shape, dtype=torch.float32, device=act.device)
     _down_grouped[_grid(plan, d, block_n)](act, fp.weight, fp.scale, fp.scale2, plan.items, plan.counts[:1],
                                            plan.members, y, act.stride(0), D=d, K=fp.k, SBN=BN,
                                            BLOCK_N=block_n, PACKED=fp.packed, F32=y.dtype == torch.float32,
-                                           STACKED=fp.weight.dim() == 5, num_warps=4, num_stages=2)
+                                           STACKED=stacked, EXPERTS=experts, num_warps=4, num_stages=2)
