@@ -206,17 +206,19 @@ class MultiDecoder:
         top, col = row.max(dim=-1, keepdim=True)
         lse = torch.logsumexp(row, dim=-1, keepdim=True)
         got = torch.cat([vals, idx.float(), top, col.float(), lse], dim=1).cpu().numpy()
+        # Map only when logits width matches the draft vocabulary (else columns are already token ids).
+        mapped = self.draft_host is not None and int(row.shape[1]) == int(self.draft_host.shape[0])
         out = []
         for i, (pos, smp) in enumerate(zip(positions, samplings)):
             g = got[i]
             lse_i = float(g[2 * k + 2])
             if smp is None or smp.temperature <= 0:
                 c = int(g[2 * k + 1])
-                out.append((int(self.draft_host[c]) if self.draft_host is not None else c,
+                out.append((int(self.draft_host[c]) if mapped else c,
                             float(np.exp(float(g[2 * k]) - lse_i))))
                 continue
             cols = g[k:2 * k].astype(np.int64)
-            ids = self.draft_host[cols] if self.draft_host is not None else cols
+            ids = self.draft_host[cols] if mapped else cols
             tok = choose_rows(g[None, :k].astype(np.float32), ids[None, :], [pos], smp)[0]
             hit = np.nonzero(ids == tok)[0]
             out.append((int(tok), float(np.exp(float(g[hit[0]]) - lse_i)) if len(hit) else 0.0))
