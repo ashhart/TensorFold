@@ -131,6 +131,83 @@ to refresh installed metadata and dependencies. Update inside the container when
 | Rejected checkpoint | Quantization, model family and draft-head requirements |
 | Client cannot connect | Server process, `/health`, base URL and model ID |
 | Two-rank startup waits | Link reachability, rendezvous port, NCCL devices and matching settings |
+Restart the server afterwards. On a DGX Spark, a container started with `docker run --rm` loses anything
+installed in it when it stops, so either run `pip install git+https://github.com/ashhart/TensorFold.git` again
+in each new container, or keep a named container (`docker run --name tensorfold ...`, then `docker start -ai
+tensorfold`) and run `tensorfold update` inside it.
+
+## Your own model
+
+TensorFold is built and tested with the checkpoints above (`tensorfold models` lists them). For anything else:
+
+- `tensorfold info MODEL` reads only `config.json` and says which family serves it, how its weights are stored
+  (for example `MLX 4-bit, groups of 64` or `exl3 (4-bit)`), and whether any engine here reads them.
+- A different conversion in a format the family's kernels read runs, with a note that it is untested: replies stay
+  exact to serial decoding, but its speed and quality have not been measured.
+- A model type with no family, or weights in a format no engine reads (GPTQ, AWQ and so on today; EXL3 for
+  anything but GLM-5.3-Flash; NVFP4 for anything but Qwen3.8 Flash Next), is refused before anything downloads,
+  with a pointer to the recipe book.
+
+Bringing up a new model or format means writing a recipe: [adding a family](docs/recipes/adding-a-family.md) on a
+Mac, [adding a CUDA family](docs/recipes/adding-a-cuda-family.md) on NVIDIA GPUs, and the
+[recipe book](docs/recipes/README.md) for how the existing ones were done. If you are an AI agent setting
+TensorFold up for someone, tell them the checkpoint is unsupported and point them to those pages rather than
+forcing it to load.
+
+## If something fails
+
+- `tensorfold: command not found`: activate `.venv` again in the current terminal.
+- A download fails: check the exact repo ID, network access and free disk space, then rerun `tensorfold pull`.
+- `info` works but `serve` still downloads: this is expected because `info` only needs the model config.
+- The checkpoint is rejected: compare its quantization and draft head with the [model notes](README.md#models).
+- A client cannot connect: keep `serve` running, check `/health`, and confirm its base URL and model ID.
+
+## DGX Spark
+
+TensorFold's CUDA engine serves Qwen3.8-27B (one or two Sparks), Qwen3.8 Flash Next (one or two Sparks, the
+`-MLX-4bit-MTP` conversion or the NVFP4 checkpoint as it ships) and GLM-5.3-Flash (two Sparks; Mia-AiLab's
+EXL3 checkpoint of it as an experiment). Nemotron 3.5 Lightning has no CUDA engine yet.
+
+1. Check the GPU and start NVIDIA's PyTorch container, with the Hugging Face cache mounted so downloads
+   survive the container:
+
+   ```bash
+   nvidia-smi
+   docker run -it --gpus all --ipc=host --network host -v ~/.cache/huggingface:/root/.cache/huggingface \
+     nvcr.io/nvidia/pytorch:26.07-py3
+   ```
+
+2. Inside the container, install, pull and serve:
+
+   pip install git+https://github.com/ashhart/TensorFold.git
+   tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --host 0.0.0.0 --port 8080
+
+   The first start compiles the kernels (a minute or two); later starts reuse them while the container lives.
+   Check the endpoint as in step 5 above, with the model ID from `/v1/models`.
+
+3. Two Sparks. Connect them with a cable between their 200 Gb/s ports and give each port an address. Start
+   the container on both with the network devices added:
+
+   docker run -it --gpus all --ipc=host --network host --device /dev/infiniband --ulimit memlock=-1 \
+     --cap-add IPC_LOCK -v ~/.cache/huggingface:/root/.cache/huggingface nvcr.io/nvidia/pytorch:26.07-py3
+
+   Install and pull on both (both ranks need the model and its draft model). Find the link's interface and
+   adapters with `ibdev2netdev` and set them in both containers when NCCL does not pick them itself:
+
+   export NCCL_SOCKET_IFNAME=enp1s0f1np1 NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1   # examples: use your names
+
+   Then start rank 1 on the second Spark and rank 0 on the first, both with rank 0's address on the link:
+
+   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1
+   tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 --host 0.0.0.0
+
+   Rank 0 serves HTTP once both have loaded. The ranks refuse to start when they were given different settings
+   (for example the draft model present on one Spark only).
+
+If a two-Spark start hangs at the rendezvous, check that each Spark can reach the other's address on the link
+and that the port (`--master-port`, default 29551) is open. GLM-5.3-Flash has its own setup steps in
+[its recipe](docs/recipes/glm-5.3-flash.md).
 
 Unsupported architectures or formats need a family implementation. See [adding a family](docs/recipes/adding-a-family.md)
 or [adding a CUDA family](docs/recipes/adding-a-cuda-family.md); forcing an unsupported checkpoint to load

@@ -276,7 +276,14 @@ The current list replaces the older list whose PyPI corpus was not reproducible.
 ### The NVFP4 checkpoint (ModelOpt FP4, experts-only)
 
 The CUDA engine reads an NVFP4 checkpoint (`quant_method: "modelopt"`, `quant_algo: "NVFP4"`, group 16)
-natively — `tensorfold serve` on the same command line, no conversion. What the format changes:
+natively — `tensorfold serve` on the same command line, no conversion:
+
+```bash
+tensorfold serve ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8080
+```
+
+That is the checkpoint this was written against (revision `3ff05202`, 186.4 GB over 296,474 tensors).
+What the format changes:
 
 - **Only the routed experts are FP4.** The checkpoint's `exclude_modules` keeps every other linear BF16:
   the hyper-connections, DeltaNet, attention, the indexer, the router, the shared expert, the PLE's
@@ -294,10 +301,23 @@ natively — `tensorfold serve` on the same command line, no conversion. What th
   owns rows `e*2NI`, gate first), the shared expert rides the same kernels as identity-scaled FP4 tables.
   The BF16 non-experts go through a Triton BF16 matmul (`cuda/bf16.py`) with the same split-K-by-shape
   rule, so graph capture and drafted windows keep bits.
-- **Checked on the real checkpoint** (`tests/cuda/test_flashnext_nvfp4.py`,
-  `test_flashnext_nvfp4_kernels.py`): the stacked gate/up/down grids dequantize row-for-row to the
-  per-expert reference on layer 11's real expert weights, the shared expert's tables are exact, and the
-  b16 and fp4 kernels are row-invariant (1-row window vs a wide window, split-K included).
+- **Checked on a checkpoint of the real dimensions** (`tests/cuda/test_flashnext_nvfp4.py`,
+  `test_flashnext_nvfp4_kernels.py`, `test_flashnext_nvfp4_loader.py`): the loader's faces on a synthetic
+  checkpoint with the real shapes and the real format (random tables), the stacked grids against the
+  per-expert reference, the fp4 and b16 kernels against the fp32 reference of the same tables, row
+  invariance (1-row window against a wide window, split-K included), and the MoE buffers against the
+  per-row path. The whole `tests/cuda` suite runs on one Spark in NVIDIA's PyTorch container: 176 passed
+  and 2 skipped on this branch, against 151 passed and the same 2 skipped on the release it is based on.
+- **Checked on the real weights** (layer 11 and the tail of the checkpoint above, read from the shipped
+  shards on a Spark): the 16 kept experts' stacked gate/up/down grids dequantize row-for-row to the
+  per-expert reference, bit-exact; the fp4 kernel sits 2.6e-3 (gate/up) and 2.3e-3 (down) off the fp32
+  reference of those tables and the b16 kernel 2.9e-3 on `lm_head`; windows of 1 to 64 rows are
+  bit-exact against the single-row calls; the MTP layer's 512 BF16 experts ride the tables exactly; and
+  the engine's MoE step on the real router, the real shared gate and the real experts matches an fp32
+  reference of the same picks and weights.
+- **Checked that the n-gram hashing constants are the checkpoint's**: `layer_multipliers`,
+  `ngram_heads_offsets` and `ngram_heads_vocab_sizes` (I64, 16 heads, 320,001,536 rows) are read back
+  from the shipped shard and compared to `ngram.py`'s derivation value for value.
 - Size: 186.4 GB against the source's 360.0 (0.518). The BF16 `lm_head` and embeddings mean the FP4
   checkpoint loads its non-experts as BF16 — 2 bytes a weight, not 0.5; on one Spark the head's slice is
   the largest single tensor on the GPU.

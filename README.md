@@ -54,6 +54,25 @@ Gemma 4 has no draft head. It drafts copies of its context, and chains from z-la
 `--drafter z-lab/gemma-4-26B-A4B-it-DFlash` (pulled once). Its kernels read 4-bit weights in groups of 32 or 64
 with an 8-bit router, as the mlx-community conversion stores them; `serve` refuses other Gemma 4 layouts
 before downloading.
+- Qwen3.8 Flash Next drafts with the MTP head stored in its checkpoint, and its kernels read 4-bit weights in
+  groups of 32. Use the `-MLX-4bit-MTP` conversion. TensorFold refuses other bit widths before downloading
+  anything, and a conversion without the MTP head runs without drafts. On a Spark the NVFP4 checkpoint
+  (ModelOpt FP4, experts only) is read as it ships, on the same command line.
+- Qwen3.8-27B drafts with the DFlash2 draft model once it has been pulled; `serve` picks it up automatically.
+  Its lane kernels need 4-bit weights in groups of 64 and Metal 4 tensor units (M5-generation GPUs). On M1 to
+  M4 GPUs, drafted windows of up to 8 rows go through TensorFold's row-exact matvec instead, so drafted output
+  is still byte-identical to serial decoding. Each round drafts as many tokens as pay at the request's
+  acceptance.
+- Nemotron 3.5 Lightning drafts with its MTP head, which the checkpoint above ships as `mtp-4bit.safetensors`
+  (converted from NVIDIA's BF16 release; the standard MLX conversion drops it), and from the context.
+  `pull` checks for the head, and `serve` completes an older cache that lacks it before loading.
+
+Other checkpoints: `tensorfold info MODEL` says, from `config.json` alone, whether an engine here reads a
+checkpoint's weights. A different conversion in a supported format runs with a note that it is untested; a model
+or weight format with no recipe (GPTQ, AWQ and so on today) is refused before anything downloads. EXL3 is
+read for GLM-5.3-Flash only, as an experiment (below), and NVFP4 for Qwen3.8 Flash Next.
+Want another model? [The recipe book](docs/recipes/README.md) describes what we did for each family and how
+to add yours, and [the runbook](RUNBOOK.md#your-own-model) has the steps.
 
 See the [recipes](docs/recipes/README.md) for supported formats and backend limits.
 
@@ -188,6 +207,11 @@ MLX disk-snapshot or retained-prefix options.
 
 Use NVIDIA's PyTorch container for CUDA, PyTorch, Triton and the extension compiler; the package has no
 `cuda` installation extra. Install TensorFold inside the container without replacing that toolchain.
+On Linux with an NVIDIA GPU, `tensorfold serve` runs the family's CUDA engine (PyTorch, Triton and CUDA
+kernels in `src/tensorfold/families/<name>/cuda/`). It reads the same MLX 4-bit checkpoints from Hugging Face;
+Qwen3.8 Flash Next also runs from its NVFP4 checkpoint as it ships, on the same command line.
+Run it inside NVIDIA's PyTorch container, which has the CUDA toolkit, PyTorch and Triton the kernels build
+with:
 
 ```bash
 docker run -it --gpus all --ipc=host --network host nvcr.io/nvidia/pytorch:26.07-py3
@@ -217,6 +241,18 @@ metadata and dependencies. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1`
 
 When the update finishes it prints what changed since your version, from [CHANGELOG.md](CHANGELOG.md), which lists
 every release. The first time a new version serves, it prints one line linking to its notes.
+Qwen3.8 Flash Next's NVFP4 checkpoint serves on the same command line but has no row above: it has not been
+timed here ([its recipe](docs/recipes/qwen3.8-flash-next.md) has the numbers it does have).
+
+GLM-5.3-Flash needs two Sparks. For each greedy request it measures its MTP head against a DFlash2 draft model
+and keeps whichever commits more tokens per millisecond ([its recipe](docs/recipes/glm-5.3-flash.md)). That draft
+model, `incoai/GLM-5.3-Flash-DFlash2`, is licensed for non-commercial use only (CC BY-NC-ND 4.0); without it GLM
+drafts with its MTP head alone. vLLM's GLM numbers come from Mia-AiLab's recipe, which serves the EXL3 checkpoint
+`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`. TensorFold now reads that checkpoint too, as an experiment; the table's
+last row compares both engines on those same weights. It is slower than the MLX checkpoint because only its
+routed experts are 4-bit, so each Spark reads 10.7 GB a token against 5.0
+([its recipe](docs/recipes/glm-5.3-flash.md#mia-ailabs-exl3-checkpoint-experimental)). What we did on
+CUDA, and how to bring up another model, is in [the CUDA recipe book](docs/recipes/cuda.md).
 
 ## Development and license
 
