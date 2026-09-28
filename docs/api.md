@@ -42,7 +42,13 @@ MLX rejects malformed numeric controls and out-of-vocabulary raw prompt IDs with
 On MLX, `--parallel auto` is the default: requests share rounds within the configured concurrency and memory
 budget. Background work waits behind foreground requests. An active background request yields when a
 foreground request needs its lane or memory, then restarts with already-delivered tokens suppressed.
-Session-title requests are also treated as background work. CUDA serializes generation through its server lock.
+Session-title requests are also treated as background work.
+
+On CUDA, `--parallel auto` serves one request at a time. An explicit `--parallel N` above one shares rounds
+for Qwen3.8-27B on one or two ranks and for Flash Next on one rank; GLM and Nemotron stay serialized.
+When a client disconnects, its CUDA request stops at the next round, and a request still waiting behind
+another in one-at-a-time serving does not start; two-rank Flash Next, Nemotron and GLM requests finish on
+both ranks.
 
 ## Messages and tools
 
