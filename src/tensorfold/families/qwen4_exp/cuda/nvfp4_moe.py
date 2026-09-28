@@ -214,7 +214,9 @@ class MoE4:
             if count == 0 or e >= self.routed:
                 continue
             dest = members[first:first + count].to(device=act.device, dtype=torch.long)
-            flat[dest] = nvfp4.matmul(act_flat[dest], self._expert(e).down, f32=True).to(flat.dtype)
+            # Contiguous activation rows: advanced indexing is already dense, but keep the contract
+            # explicit for the packed matmul (unit-stride K, dense M).
+            flat[dest] = nvfp4.matmul(act_flat[dest].contiguous(), self._expert(e).down, f32=True).to(flat.dtype)
         out, part = self.shared_out(act[:, top_k], self.shared.down, f32=True)
         y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True, out=out, part=part).to(y.dtype)
         return y
@@ -222,9 +224,15 @@ class MoE4:
 
 def _slice(factor: torch.Tensor | None, e: int) -> torch.Tensor | None:
     """Expert ``e``'s per-tensor factor, or None where the table carries none — a BF16 pattern grid, where the
-    kernel applies its own default. Indexing None is what raised on a real serve's first draft step."""
+    kernel applies its own default. Indexing None is what raised on a real serve's first draft step.
 
-    return None if factor is None else factor[e]
+    Contiguous: a stacked ``scale2`` can be an expand-view (stride 0); Triton's ``S2 + rn`` assumes unit
+    stride, so a non-contiguous row would multiply the wrong lanes."""
+
+    if factor is None:
+        return None
+    row = factor[e]
+    return row if row.is_contiguous() else row.contiguous()
 
 
 def _stacked_bf16(bits: torch.Tensor, rows: torch.Tensor) -> nvfp4.FP4:

@@ -393,19 +393,23 @@ try:
         r16 = tl.arange(0, 16)
         m_ok = rm < M
         n_ok = rn < N
+        # GB10 faults on out-of-range addresses even when the load/store is masked (near-full VRAM
+        # leaves no adjacent mapping to absorb the OOB). Clamp the index used for pointer math.
+        rm_a = tl.where(m_ok, rm, 0)
+        rn_a = tl.where(n_ok, rn, 0)
         # a quantization block b lives in stored K block kb = b // 4, rows (b % 4) * 16 .. + 15 of
         # [N/SBN, K/64, 64, SBN] — the packed form, 32 bytes a K block and 8 rows a quantization block
         tile = W + (pid_n // SUB) * ((K // 64) * (32 if PACKED else 64) * SBN)
         local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
         acc = tl.zeros((BM, BLOCK_N), dtype=tl.float32)
-        s2 = tl.load(S2 + rn, mask=n_ok, other=1.0)     # the per-tensor factor, one a row (a stacked table)
+        s2 = tl.load(S2 + rn_a, mask=n_ok, other=1.0)     # the per-tensor factor, one a row (a stacked table)
         KT: tl.constexpr = K // 64
         for i in range(PER // GPI):
             for j in tl.static_range(GPI):
                 b = pid_s * PER + i * GPI + j
                 kb = b // 4
                 row0 = (b % 4) * 16
-                x = tl.load(X + rm[:, None] * x_stride + (b * 16 + r16)[None, :], mask=m_ok[:, None], other=0.0)
+                x = tl.load(X + rm_a[:, None] * x_stride + (b * 16 + r16)[None, :], mask=m_ok[:, None], other=0.0)
                 if PACKED:
                     # a block's 16 values are its 8 stored bytes: read a byte a value (half the weight
                     # traffic of the widened grid) and take the low nibble for the even input
@@ -417,24 +421,25 @@ try:
                     wv = _bf16_widen(wbits).to(tl.bfloat16)
                 p = tl.dot(x, wv)
                 if PACKED:
-                    s = _e4m3_value(tl.load(S + b * N + rn, mask=n_ok, other=0).to(tl.int32)) * (s2 * 0.0078125)
+                    s = _e4m3_value(tl.load(S + b * N + rn_a, mask=n_ok, other=0).to(tl.int32)) * (s2 * 0.0078125)
                 else:
-                    s = tl.load(S + b * N + rn, mask=n_ok, other=0.0)
+                    s = tl.load(S + b * N + rn_a, mask=n_ok, other=0.0)
                 acc += p * s[None, :]
         out_mask = m_ok[:, None] & n_ok[None, :]
         if SK == 1:
-            tl.store(OUT + rm[:, None] * N + rn[None, :], acc if F32 else acc.to(tl.bfloat16), mask=out_mask)
+            tl.store(OUT + rm_a[:, None] * N + rn_a[None, :], acc if F32 else acc.to(tl.bfloat16), mask=out_mask)
         else:
-            tl.store(PART + (pid_s * M + rm[:, None]) * N + rn[None, :], acc, mask=out_mask)
+            tl.store(PART + (pid_s * M + rm_a[:, None]) * N + rn_a[None, :], acc, mask=out_mask)
 
     @triton.jit
     def _reduce(PART, OUT, total, SK: tl.constexpr, BLOCK: tl.constexpr):
         offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         ok = offs < total
-        acc = tl.load(PART + offs, mask=ok, other=0.0)
+        offs_a = tl.where(ok, offs, 0)
+        acc = tl.load(PART + offs_a, mask=ok, other=0.0)
         for s in tl.static_range(1, SK):
-            acc = acc + tl.load(PART + s * total + offs, mask=ok, other=0.0)
-        tl.store(OUT + offs, acc.to(tl.bfloat16), mask=ok)
+            acc = acc + tl.load(PART + s * total + offs_a, mask=ok, other=0.0)
+        tl.store(OUT + offs_a, acc.to(tl.bfloat16), mask=ok)
 except ModuleNotFoundError:                   # the CPU tests of the format import this module without Triton
     HAS_TRITON = False
 

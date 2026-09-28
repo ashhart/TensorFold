@@ -107,16 +107,18 @@ def _gateup_grouped(X, GU, GS, GS2, ITEMS, NITEMS, MEMBERS, ACT, x_stride, slots
     base_w = GU + (e * N2 * (K // 2) if STACKED else 0)
     base_s = GS + (e * PER * N2 if STACKED else 0)
     base_2 = GS2 + (e * N2 if STACKED else 0)
-    s2g = tl.load(base_2 + rn)
-    s2u = tl.load(base_2 + NI + rn)
+    n_ok = rn < NI
+    rn_a = tl.where(n_ok, rn, 0)
+    s2g = tl.load(base_2 + rn_a, mask=n_ok, other=1.0)
+    s2u = tl.load(base_2 + NI + rn_a, mask=n_ok, other=1.0)
     tile_g = base_w + (pid_n // SUB) * TG
     tile_u = tile_g + (NI // SBN) * TG
-    g = _kpass(X, src, rows_ok, x_stride, tile_g, base_s, s2g, N2, PER, SBN, BLOCK_N, local, rn, PACKED)
-    u = _kpass(X, src, rows_ok, x_stride, tile_u, base_s, s2u, N2, PER, SBN, BLOCK_N, local, NI + rn, PACKED)
+    g = _kpass(X, src, rows_ok, x_stride, tile_g, base_s, s2g, N2, PER, SBN, BLOCK_N, local, rn_a, PACKED)
+    u = _kpass(X, src, rows_ok, x_stride, tile_u, base_s, s2u, N2, PER, SBN, BLOCK_N, local, NI + rn_a, PACKED)
     gf = g.to(tl.bfloat16).to(tl.float32)
     uf = u.to(tl.bfloat16).to(tl.float32)
     val = ((gf / (1.0 + tl.exp(-gf))).to(tl.bfloat16).to(tl.float32) * uf).to(tl.bfloat16)
-    tl.store(ACT + mrow[:, None] * NI + rn[None, :], val, mask=rows_ok[:, None])
+    tl.store(ACT + mrow[:, None] * NI + rn_a[None, :], val, mask=rows_ok[:, None] & n_ok[None, :])
 
 
 @triton.jit
@@ -144,11 +146,14 @@ def _down_grouped(ACT, DW, DS, DS2, ITEMS, NITEMS, MEMBERS, Y, act_stride,
     local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
     base_w = DW + (e * D * (K // 2) if STACKED else 0)
     base_s = DS + (e * PER * D if STACKED else 0)
-    s2 = tl.load(DS2 + (e * D if STACKED else 0) + rn)
+    # Clamp rn: D is a multiple of BLOCK_N for Flash Next, but keep addresses in-bounds on every GPU.
+    n_ok = rn < D
+    rn_a = tl.where(n_ok, rn, 0)
+    s2 = tl.load(DS2 + (e * D if STACKED else 0) + rn_a, mask=n_ok, other=1.0)
     tile = base_w + (pid_n // SUB) * TG
-    acc = _kpass(ACT, mrow, rows_ok, act_stride, tile, base_s, s2, D, PER, SBN, BLOCK_N, local, rn, PACKED)
+    acc = _kpass(ACT, mrow, rows_ok, act_stride, tile, base_s, s2, D, PER, SBN, BLOCK_N, local, rn_a, PACKED)
     val = acc if F32 else acc.to(tl.bfloat16)
-    tl.store(Y + mrow[:, None] * D + rn[None, :], val, mask=rows_ok[:, None])
+    tl.store(Y + mrow[:, None] * D + rn_a[None, :], val, mask=rows_ok[:, None] & n_ok[None, :])
 
 
 def _grid(plan, n: int, block_n: int) -> tuple[int, int]:
