@@ -12,7 +12,7 @@ pytest.importorskip("jinja2")
 
 from tensorfold.cuda import server
 from tensorfold.cuda.scheduler import Scheduler
-from tensorfold.cuda.streams import Stream, accept
+from tensorfold.cuda.streams import PrefixCache, Stream, accept
 from tests.test_cuda_admission import http_server
 from tests.test_cuda_geometry import allocations  # noqa: F401  (fixture: fake triton, so the modules import)
 from tests.test_cuda_stop_strings import END, Engine, ids, make_app, reply
@@ -82,10 +82,15 @@ def scripted_decoder(multi, script=SCRIPT, eos=(0,)):
     dec.w, dec.draft, dec.max_rows, dec.allow_copy = None, None, 16, False
     dec.context, dec.eos, dec.rank, dec.world, dec.device = 0, tuple(eos), 0, 1, None
     dec.split, dec.drafts, dec.streams, dec.cache = False, False, {}, PrefixCache(8)
-    dec.next_id, dec.broken, dec.costs = 0, None, None
+    dec.next_id, dec.broken, dec.costs, dec.filling, dec.points = 0, None, None, [], None
 
-    def _admit(s, hit):
+    def _queue(s, hit):                                   # a prompt's prefill step: the script's first token
+        s.st, s.snap, s.stops = SimpleNamespace(pos=0), None, []
+        dec.filling.append(s)
+
+    def _step(s, stop):
         s.context, s.copies = list(s.prompt), None
+        dec.filling = [x for x in dec.filling if x is not s]
         dec.streams[s.sid] = s
         return script[0]
 
@@ -99,7 +104,7 @@ def scripted_decoder(multi, script=SCRIPT, eos=(0,)):
             sampled.append([script[n + i] if n + i < len(script) else 99 for i in range(len(guesses) + 1)])
         return wins, None, None, None, sampled
 
-    dec._admit, dec._verify = _admit, _verify
+    dec._queue, dec._step, dec._verify = _queue, _step, _verify
     dec._commit = lambda plan, wins, record, taps, starts, paths: [
         dec.streams[item[0]].counted(len(w[0])) for item, w in zip(plan, wins)]
     return dec
@@ -138,7 +143,8 @@ def test_the_scheduler_hands_stop_eos_to_its_stream(allocations):  # noqa: F811
 
 def bare_engine(engine_mod, **attrs):
     eng = engine_mod.Qwen27Engine.__new__(engine_mod.Qwen27Engine)
-    eng.context_window, eng.scheduler, eng.tp, eng.draft, eng.cache = 1000, None, 1, None, []
+    eng.context_window, eng.scheduler, eng.tp, eng.draft, eng.cache = 1000, None, 1, None, PrefixCache(4)
+    eng.points = None
     eng.max_rows, eng.allow_copy, eng.eos = 12, True, (0,)
     eng.w = SimpleNamespace(norm=SimpleNamespace(device="cpu"))
     for k, v in attrs.items():
@@ -152,7 +158,8 @@ def test_the_engine_passes_stop_eos_to_the_one_gpu_decode(monkeypatch, allocatio
     engine_mod = importlib.import_module("tensorfold.families.qwen3_5.cuda.engine")
     decode = importlib.import_module("tensorfold.families.qwen3_5.cuda.decode")
     seen = {}
-    monkeypatch.setattr(decode, "prefill", lambda w, prompt, sampling, drafter, state=None: (SimpleNamespace(pos=0), 5))
+    monkeypatch.setattr(decode, "prefill", lambda w, prompt, sampling, drafter, state=None, **kw:
+                        (SimpleNamespace(pos=0), 5))
     monkeypatch.setattr(decode, "draft_decode", lambda *a, **kw: seen.update(kw) or SimpleNamespace(
         seconds=0.0, rounds=0, widths=[]))
     eng = bare_engine(engine_mod)
@@ -168,7 +175,7 @@ def test_the_engine_passes_stop_eos_to_rank_zero_of_two(monkeypatch, allocations
     seen, shared = {}, []
     monkeypatch.setattr(decode_tp, "_share", lambda values, rank, device: shared.append(list(values)) or values)
     monkeypatch.setattr(decode_tp, "prefill_tp",
-                        lambda w, prompt, sampling, rank, drafter, state=None: (SimpleNamespace(pos=0), 5))
+                        lambda w, prompt, sampling, rank, drafter, state=None, **kw: (SimpleNamespace(pos=0), 5))
     monkeypatch.setattr(decode_tp, "decode_tp", lambda *a, **kw: seen.update(kw) or SimpleNamespace(
         seconds=0.0, rounds=0, widths=[]))
     eng = bare_engine(engine_mod, tp=2)

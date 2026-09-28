@@ -167,3 +167,22 @@ def test_a_long_prompt_absorbs_through_the_prefill_kernel_and_decodes_serially()
     res = decode.mtp_decode(w, head, st, mc, carry, first, 24, None, depth=3, confidence=0.0,
                             runner=Graphs(w, head, 400))
     assert res.tokens == want
+
+
+def test_ignore_eos_decodes_past_end_tokens_as_serial_does():
+    """``stop_eos=False`` (ignore_eos) runs drafted rounds through an end token to the count, as serial rounds do."""
+
+    from tensorfold.families.qwen3_5_moe.cuda.graphs import Graphs
+
+    w, head = _model()
+    prompt = PROMPTS[0]
+    st, first = serial_prefill(w, prompt, None)
+    free = draft_decode(w, st, prompt, first, 40, None, None, allow_copy=False, stop_eos=False).tokens
+    w.config.eos = (free[5],)                               # an end token inside the reply
+    runs = {}
+    for stop_eos in (False, True):
+        st, mc, first, carry = decode.prefill(w, head, prompt, None)
+        runs[stop_eos] = decode.mtp_decode(w, head, st, mc, carry, first, 40, None, depth=3, confidence=0.0,
+                                           stop_eos=stop_eos, runner=Graphs(w, head, 128)).tokens
+    assert runs[False] == free and len(free) == 40
+    assert runs[True] == free[:free.index(free[5]) + 1]

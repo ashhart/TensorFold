@@ -145,8 +145,7 @@ class Qwen27Engine:
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True):
-        """``draft=False`` runs serial decoding from a fresh prefill without draft proposals, copies, or prefix-cache changes;
-        ``stop_eos=False`` decodes past end tokens to ``max_tokens`` (``ignore_eos``)."""
+        """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``: past end tokens (``ignore_eos``)."""
 
         from .decode import draft_decode, prefill
 
