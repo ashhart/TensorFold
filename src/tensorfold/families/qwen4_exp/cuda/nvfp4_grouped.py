@@ -100,7 +100,9 @@ def _gateup_grouped(X, GU, GS, GS2, ITEMS, NITEMS, MEMBERS, ACT, x_stride, slots
     pid_n = tl.program_id(1)
     rm = tl.arange(0, TILE)
     rows_ok = rm < count
-    mrow = tl.load(MEMBERS + first + rm, mask=rows_ok, other=0)
+    # Clamp: members is only pairs long; masked lanes with first+rm past that fault on GB10.
+    rm_a = tl.where(rows_ok, rm, 0)
+    mrow = tl.load(MEMBERS + first + rm_a, mask=rows_ok, other=0)
     src = mrow // slots
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -141,7 +143,8 @@ def _down_grouped(ACT, DW, DS, DS2, ITEMS, NITEMS, MEMBERS, Y, act_stride,
     pid_n = tl.program_id(1)
     rm = tl.arange(0, TILE)
     rows_ok = rm < count
-    mrow = tl.load(MEMBERS + first + rm, mask=rows_ok, other=0)
+    rm_a = tl.where(rows_ok, rm, 0)
+    mrow = tl.load(MEMBERS + first + rm_a, mask=rows_ok, other=0)
     rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
     base_w = DW + (e * D * (K // 2) if STACKED else 0)
