@@ -62,7 +62,7 @@ class MoE4:
     # The grouped step resolves its plan's item list, its member gather and its member scatter on the device
     # (``nvfp4_grouped``), so the engine can capture a decode step again. The grid it launches is fixed in the
     # plan's capacity, so the routing decides how many items are live, never how many programs run.
-    capturable = True  # grouped kernels; member/index clamps required on GB10 near-full VRAM
+    capturable = False  # grouped down still IMA on Spark after member clamps; Python plan loop below
 
     # The shared expert's output and split-K partials, kept between steps: an allocation made inside a capture
     # is a block the graph pool may hand back while the kernel reading it still runs, which is what killed a
@@ -177,13 +177,20 @@ class MoE4:
 
 
     def gateup_out(self, x: torch.Tensor, plan, act: torch.Tensor, top_k: int) -> torch.Tensor:
-        """The gate/up step for every plan item into act [R, slots, NI] bf16; the shared expert's slot is
-        filled for every row from its BF16 tables. The plan's item list stays on the device."""
+        """Plan-driven gate/up via host item loop (grouped Triton IMA on Spark)."""
 
         ni = self.width
         slots = act.shape[1]
         flat = act.reshape(-1, ni)
-        nvfp4_grouped.gateup(self.gate_up, x, flat, plan, ni, slots)
+        n = int(plan.counts[0].item())
+        items = plan.items[:n].detach().cpu().tolist()
+        members = plan.members.detach().cpu()
+        for e, first, count in items:
+            e, first, count = int(e), int(first), int(count)
+            if count == 0 or e >= self.routed:
+                continue
+            dest = members[first:first + count].to(device=x.device, dtype=torch.long)
+            flat[dest] = self.gateup_rows(x[dest // slots], e)
         out, part = self.shared_out(x, self.shared.gu)
         g = nvfp4.matmul(x, self.shared.gu, out=out, part=part)
         gate = g[:, :ni].to(torch.float32)
@@ -194,13 +201,20 @@ class MoE4:
 
 
     def down_out(self, act: torch.Tensor, plan, y: torch.Tensor, top_k: int) -> torch.Tensor:
-        """The down step for every plan item into y [R, slots, D] (the combine adds the slots in order; a
-        prefill buffer's bf16 slots round each sum once, so the fp32 sum is rounded into the slot's own
-        dtype — a decode plan's slots are fp32). The shared expert's slot for every row."""
+        """Plan-driven down via host item loop (grouped Triton IMA on Spark)."""
 
         d, ni = self.dims, self.width
         flat = y.reshape(-1, d)
-        nvfp4_grouped.down(self.down_proj, act.reshape(-1, ni), flat, plan, slots=y.shape[1])
+        n = int(plan.counts[0].item())
+        items = plan.items[:n].detach().cpu().tolist()
+        members = plan.members.detach().cpu()
+        act_flat = act.reshape(-1, ni)
+        for e, first, count in items:
+            e, first, count = int(e), int(first), int(count)
+            if count == 0 or e >= self.routed:
+                continue
+            dest = members[first:first + count].to(device=act.device, dtype=torch.long)
+            flat[dest] = nvfp4.matmul(act_flat[dest].contiguous(), self._expert(e).down, f32=True).to(flat.dtype)
         out, part = self.shared_out(act[:, top_k], self.shared.down, f32=True)
         y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True, out=out, part=part).to(y.dtype)
         return y
