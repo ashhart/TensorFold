@@ -92,9 +92,9 @@ class MoE4:
         and scale rows for expert ``e`` are the per-expert table's, row for row (checked in the tests)."""
 
         gu = nvfp4.FP4(self.gate_up.weight[e], self.gate_up.scale[e], 2 * self.width, self.gate_up.k,
-                       scale2=self.gate_up.scale2[e], packed=self.gate_up.packed)
+                       scale2=_slice(self.gate_up.scale2, e), packed=self.gate_up.packed)
         down = nvfp4.FP4(self.down_proj.weight[e], self.down_proj.scale[e], self.dims, self.width,
-                         scale2=self.down_proj.scale2[e], packed=self.down_proj.packed)
+                         scale2=_slice(self.down_proj.scale2, e), packed=self.down_proj.packed)
         return Expert4(gu, down)
 
     def gateup_rows(self, x: torch.Tensor, e: int) -> torch.Tensor:
@@ -201,6 +201,13 @@ class MoE4:
                                       f32=True).to(flat.dtype)
         y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True).to(y.dtype)
         return y
+
+
+def _slice(factor: torch.Tensor | None, e: int) -> torch.Tensor | None:
+    """Expert ``e``'s per-tensor factor, or None where the table carries none — a BF16 pattern grid, where the
+    kernel applies its own default. Indexing None is what raised on a real serve's first draft step."""
+
+    return None if factor is None else factor[e]
 
 
 def _stacked_bf16(bits: torch.Tensor, rows: torch.Tensor) -> nvfp4.FP4:

@@ -296,8 +296,7 @@ def fp4_from_rows(weight_bits: torch.Tensor, scale: torch.Tensor) -> FP4:
     read must never allocate during capture."""
 
     n, k = weight_bits.shape
-    return FP4(_tile_bits(weight_bits), scale.t().contiguous(), n, k,
-               scale2=torch.ones(n, dtype=torch.float32, device=weight_bits.device))
+    return FP4(_tile_bits(weight_bits), scale.t().contiguous(), n, k)
 
 
 def fp4_from_bf16(rows: torch.Tensor) -> FP4:
@@ -490,7 +489,7 @@ def matmul(x: torch.Tensor, fp: FP4, *, out: torch.Tensor | None = None, f32: bo
     if sk > 1 and part is None:
         part = torch.empty((sk, m, fp.n), dtype=torch.float32, device=x.device)
     bn = block_n or BN
-    if fp.scale2 is None:                        # the pattern form: its fp32 scales already carry the factor
+    if fp.scale2 is None:                        # a table built before the factor became mandatory
         fp.scale2 = torch.ones(fp.n, dtype=torch.float32, device=x.device)
     grid = (triton.cdiv(m, bm), fp.n // bn, sk)
     _fp4mm[grid](x, fp.weight, fp.scale, fp.scale2, out, part if sk > 1 else out, m, x.stride(0),

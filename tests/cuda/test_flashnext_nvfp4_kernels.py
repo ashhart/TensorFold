@@ -179,3 +179,33 @@ def test_down_out_rounds_an_fp32_sum_into_a_bf16_prefill_buffer():
     assert torch.equal(y[:, 0], ref)
     shared_ref = nvfp4.matmul(act[:, 1], ex.shared.down, f32=True).to(torch.bfloat16)
     assert torch.equal(y[:, 1], shared_ref)
+
+
+def test_a_pattern_moe_runs_its_experts():
+    """The MTP head's experts are BF16 pattern tables (``moe4_from_bf16``), built with no factor of their own:
+    the expert slabs slice that factor, so a table built without one must still decode. A real serve raised
+    ``TypeError: 'NoneType' object is not subscriptable`` at the first draft step, on the head's experts."""
+
+    torch.manual_seed(7)
+    dev = "cuda"
+    e, d, ni = 3, 256, 128
+    gate_up = (torch.randn(e, 2 * ni, d, device=dev) * 0.02).to(torch.bfloat16)
+    down = (torch.randn(e, d, ni, device=dev) * 0.02).to(torch.bfloat16)
+    shared = tuple((torch.randn(o, i) * 0.02).to(torch.bfloat16).to(dev)
+                   for o, i in ((ni, d), (ni, d), (d, ni)))
+    ex = nvfp4_moe.moe4_from_bf16(gate_up, down, shared)
+    assert not ex.gate_up.packed                       # a pattern grid: the kernel's other branch
+    assert ex.gate_up.scale2 is None                   # no factor of its own: the kernel's default applies
+    slab = ex._expert(1)
+    assert slab.gu.scale2 is None                      # and slicing it per expert is what raised
+    assert torch.equal(slab.gu.weight, ex.gate_up.weight[1])      # the slab is that expert's own tiles
+    assert torch.equal(slab.gu.scale, ex.gate_up.scale[1])        # and its own scale rows
+
+    x = (torch.randn(3, d, device=dev) * 0.5).to(torch.bfloat16)
+    act = ex.gateup_rows(x, 1)                         # the gate/up activation: [M, NI]
+    assert act.shape == (3, ni) and bool(torch.isfinite(act).all())
+    y = ex.down_rows(act, 1)
+    assert y.shape == (3, d) and bool(torch.isfinite(y).all())
+    # Not asserted: the stacked pattern path's values against ``x @ gate_up[1].T``. A single pattern table is
+    # exact (see the probe in the branch notes), the stacked one is not — an open difference on the MTP head's
+    # experts, whose effect is draft quality (the main model verifies every draft), not the emitted tokens.
