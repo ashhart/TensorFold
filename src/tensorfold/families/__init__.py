@@ -149,6 +149,11 @@ def require_readable(family: Family, config: dict[str, Any], backend: str) -> No
         raise ValueError(f"{family.title} on {where} does not read this checkpoint's weights "
                          f"({describe_quantization(config)}); it reads {reads}. Tested checkpoints: {tested}. "
                          f"{OWN_MODEL_HELP}")
+    if backend == "cuda" and method in ("modelopt", "compressed-tensors"):
+        # NVFP4 / FP8 / MXFP8 weights: the config's schemes here, each linear's tensors by the loader
+        from tensorfold.cuda.nvfp4 import format as nvfp4_format
+
+        nvfp4_format.require_config(config, where=where, tested=tested, help=OWN_MODEL_HELP)
     if backend == "cuda" and method == EXL3_QUANT and getattr(family.package, "EXL3_VARIANT", None) == EXL3_VARIANT_ANY:
         # every EXL3 codebook and width: the config is checked here, the tensors by the loader's scan
         from tensorfold.cuda.exl3 import format as exl3_format

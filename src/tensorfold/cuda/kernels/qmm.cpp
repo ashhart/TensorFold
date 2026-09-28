@@ -5,6 +5,8 @@ void qmm_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at:
               at::Tensor&, const at::Tensor&, int, int, int, int, bool, bool);
 void qmm_prefill_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int,
                       int, bool, int);
+void qmm_prefill8w_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int,
+                        int, bool, int);
 void qmm_prefill8_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                        const at::Tensor&, at::Tensor&, int, int, bool, int);
 
@@ -88,8 +90,29 @@ void qmm_prefill8(const at::Tensor& x8, const at::Tensor& xs, const at::Tensor& 
                       static_cast<int>(tile));
 }
 
+// Prefill in FP8 over e4m3 weight bytes (fragment order): x8 and a from ``quantize_rows``, a bf16 scale per (gs, column).
+void qmm_prefill8w(const at::Tensor& x8, const at::Tensor& a, const at::Tensor& w8, const at::Tensor& scales,
+                   at::Tensor& out, int64_t n, int64_t gs, bool f32, int64_t tile) {
+    TORCH_CHECK(tile >= 0 && tile <= 2, "tile 0-2");
+    TORCH_CHECK(gs == 32 || gs == 64, "groups of 32 or 64 inputs");
+    TORCH_CHECK(x8.is_cuda() && x8.scalar_type() == at::kByte && x8.dim() == 2 && x8.is_contiguous() &&
+                x8.size(0) >= 1, "x8: (M, K) e4m3 bytes, contiguous");
+    const int64_t m = x8.size(0), k = x8.size(1);
+    TORCH_CHECK(k % 64 == 0 && n % 128 == 0, "K a multiple of 64 and n of 128");
+    TORCH_CHECK(a.is_cuda() && a.is_contiguous() && a.scalar_type() == at::kFloat && a.numel() == m, "a: (M,) fp32");
+    TORCH_CHECK(w8.is_cuda() && w8.is_contiguous() && w8.scalar_type() == at::kByte && w8.numel() == n * k,
+                "staged weight: n * K e4m3 bytes");
+    TORCH_CHECK(scales.is_cuda() && scales.is_contiguous() && scales.scalar_type() == at::kBFloat16 &&
+                scales.size(0) == k / gs && scales.size(1) == n, "scales: (K / gs, n) bf16");
+    TORCH_CHECK(out.is_cuda() && out.is_contiguous() && out.size(0) == m && out.size(1) == n &&
+                out.scalar_type() == (f32 ? at::kFloat : at::kBFloat16), "out: (M, n)");
+    c10::cuda::CUDAGuard guard(x8.device());
+    qmm_prefill8w_cuda(x8, a, w8, scales, out, static_cast<int>(n), static_cast<int>(gs), f32, static_cast<int>(tile));
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("qmm", &qmm);
     m.def("qmm_prefill", &qmm_prefill);
     m.def("qmm_prefill8", &qmm_prefill8);
+    m.def("qmm_prefill8w", &qmm_prefill8w);
 }

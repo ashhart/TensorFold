@@ -40,26 +40,8 @@ def _header() -> str:
     h = _header_cache.get("base")
     if h is None:
         seen: set[str] = set()
-        h = "\n".join(_inline(f"mlx/backend/metal/kernels/{p}", seen)
-                      for p in ("steel/gemm/gemm.h", "quantized_utils.h", "quantized.h"))
-        # affine_gather_qmm_rhs as a helper: threadgroup buffers passed in, alignment as template arguments
-        with open(os.path.join(_INCLUDE, "mlx/backend/metal/kernels/quantized.h")) as f:
-            src = f.read()
-        at = src.index("[[kernel]] void affine_gather_qmm_rhs(")
-        start = src.rindex("template <", 0, at)
-        depth, end = 0, src.index("{", at)
-        while True:
-            depth += {"{": 1, "}": -1}.get(src[end], 0)
-            if depth == 0 and src[end] == "}":
-                break
-            end += 1
-        fn = src[start:end + 1]
-        fn = fn.replace("    bool transpose>", "    bool transpose,\n    bool align_M,\n    bool align_N,\n    bool align_K>", 1)
-        fn = fn.replace("[[kernel]] void affine_gather_qmm_rhs(",
-                        "METAL_FUNC void tf_gather_qmm_rhs_impl(\n    threadgroup T* Xs,\n    threadgroup T* Ws,", 1)
-        fn = re.sub(r"\s*\[\[[a-z_]+(\(\d+\))?\]\]", "", fn)
-        fn = re.sub(r"\n\s*threadgroup T (Xs|Ws)\[[^\]]*\];", "", fn)
-        h = _header_cache["base"] = h + "\n" + fn
+        h = _header_cache["base"] = "\n".join(_inline(f"mlx/backend/metal/kernels/{p}", seen)
+                                              for p in ("steel/gemm/gemm.h", "quantized_utils.h", "quantized.h"))
     return h
 
 
@@ -71,14 +53,111 @@ _QMM_BODY = """
       threadgroup_position_in_grid, thread_index_in_threadgroup, simdgroup_index_in_threadgroup,
       thread_index_in_simdgroup);
 """
+
+# First row of each expert in the sorted rows (and M at the end): a lower bound a thread.
+_OFFSETS = """
+  const int g = int(thread_position_in_grid.x);
+  if (g > EE[0]) return;
+  int lo = 0, hi = MM[0];
+  while (lo < hi) {
+    const int mid = (lo + hi) / 2;
+    if (int(IDX[mid]) < g) lo = mid + 1; else hi = mid;
+  }
+  OFF[g] = lo;
+"""
+
+# A tile's expert and rows from one simdgroup scan of tile counts, then one K pass with MLX's loaders, MMA and K order
+_TILES_FN = """
+template <typename T, const int group_size, const int bits, const int BM, const int BN, const int BK, const int WM,
+          const int WN>
+METAL_FUNC void tf_gather_qmm_tiles(
+    threadgroup T* Xs, threadgroup T* Ws, const device T* x, const device uint32_t* w, const device T* scales,
+    const device T* biases, const device int* off, device T* y, const int M, const int N, const int K, const int E,
+    uint3 tid, uint simd_group_id, uint simd_lane_id) {
+  constexpr int pack_factor = get_pack_factor<bits, 8>();
+  constexpr int bytes_per_pack = get_bytes_per_pack<bits>();
+  constexpr int BK_padded = (BK + 16 / sizeof(T));
+  using mma_t = mlx::steel::BlockMMA<T, T, BM, BN, BK, WM, WN, false, true, BK_padded, BK_padded>;
+  using loader_x_t = mlx::steel::BlockLoader<T, BM, BK, BK_padded, 1, WM * WN * SIMD_SIZE>;
+  using loader_w_t = QuantizedBlockLoader<T, BN, BK, BK_padded, true, WM * WN * SIMD_SIZE, group_size, bits>;
+
+  // tile tid.y: lane l counts the tiles of experts [l * EPL, (l + 1) * EPL)
+  const int t = int(tid.y);
+  const int EPL = (E + 31) / 32;
+  int mine = 0;
+  for (int i = 0; i < EPL; i++) {
+    const int e = int(simd_lane_id) * EPL + i;
+    if (e < E) mine += (off[e + 1] - off[e] + BM - 1) / BM;
+  }
+  const int before = simd_prefix_exclusive_sum(mine);
+  const int total = simd_shuffle(before + mine, ushort(31));
+  if (t >= total) return;
+  int hit_e = 0, hit_row = 0, hit_n = 0;
+  if (t >= before && t < before + mine) {
+    int acc = before;
+    for (int i = 0; i < EPL; i++) {
+      const int e = int(simd_lane_id) * EPL + i;
+      const int rows = off[e + 1] - off[e];
+      const int tiles = (rows + BM - 1) / BM;
+      if (t < acc + tiles) {
+        hit_e = e;
+        hit_row = off[e] + (t - acc) * BM;
+        hit_n = min(BM, rows - (t - acc) * BM);
+        break;
+      }
+      acc += tiles;
+    }
+  }
+  const uint32_t index = uint32_t(simd_max(hit_e));  // one lane holds the tile; the others hold zeros
+  const int y_row = simd_max(hit_row);
+  const short rows = short(simd_max(hit_n));
+
+  const int K_w = K * bytes_per_pack / pack_factor;
+  const int K_g = K / group_size;
+  const int K_it = K / BK;
+  const size_t stride_w = size_t(N) * K_w;
+  const size_t stride_s = size_t(N) * K_g;
+  const int y_col = int(tid.x) * BN;
+  const short tgp_bm = short(min(BM, M - y_row));       // rows loadable from memory (the tile's are the first)
+  const short tgp_bn = short(min(BN, N - y_col));
+  const int k_remain = K - K_it * BK;
+  const short2 tile_x = short2(k_remain, tgp_bm);
+  const short2 tile_w = short2(k_remain, tgp_bn);
+  auto wl = (const device uint8_t*)w;
+  x += size_t(y_row) * K;
+  y += size_t(y_row) * N + y_col;
+  wl += size_t(y_col) * K_w + index * stride_w;
+  scales += size_t(y_col) * K_g + index * stride_s;
+  biases += size_t(y_col) * K_g + index * stride_s;
+  thread mma_t mma_op(simd_group_id, simd_lane_id);
+  thread loader_x_t loader_x(x, K, Xs, simd_group_id, simd_lane_id);
+  thread loader_w_t loader_w(wl, scales, biases, K, Ws, simd_group_id, simd_lane_id);
+  if (tgp_bm == BM && tgp_bn == BN) {
+    gemm_loop_aligned(Xs, Ws, mma_op, loader_x, loader_w, K_it);
+  } else if (tgp_bn == BN) {
+    gemm_loop_unaligned<false, true, true>(Xs, Ws, mma_op, loader_x, loader_w, K_it, tgp_bm, tgp_bn, BK);
+  } else if (tgp_bm == BM) {
+    gemm_loop_unaligned<true, false, true>(Xs, Ws, mma_op, loader_x, loader_w, K_it, tgp_bm, tgp_bn, BK);
+  } else {
+    gemm_loop_unaligned<false, false, true>(Xs, Ws, mma_op, loader_x, loader_w, K_it, tgp_bm, tgp_bn, BK);
+  }
+  if (k_remain) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    gemm_loop_finalize(Xs, Ws, mma_op, loader_x, loader_w, tile_x, tile_w);
+  }
+  if (rows == BM && tgp_bn == BN) mma_op.store_result(y, N);
+  else mma_op.store_result_slice(y, N, short2(0, 0), short2(tgp_bn, rows));
+}
+"""
+
 _GATHER_BODY = """
   constexpr int BK_padded = BK + 16 / sizeof(bfloat16_t);
   threadgroup bfloat16_t Xs[BM * BK_padded];
   threadgroup bfloat16_t Ws[BN * BK_padded];
-  tf_gather_qmm_rhs_impl<bfloat16_t, 32, 4, BM, BN, BK, WM, WN, true, AM != 0, AN != 0, AK != 0>(
-      Xs, Ws, X, W, S, B, IDX, Y, MM[0], NN[0], KK[0],
+  tf_gather_qmm_tiles<bfloat16_t, GS, 4, BM, BN, BK, WM, WN>(Xs, Ws, X, W, S, B, OFF, Y, MM[0], NN[0], KK[0], EE[0],
       threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
 """
+
 _kernels: dict[str, Any] = {}
 
 
@@ -151,7 +230,7 @@ def tiles() -> bool:
 
 
 def _self_check() -> bool:
-    """``qmm`` (both tiles) and ``gather_sorted`` against MLX on small random products (their own PRNG key)."""
+    """``qmm`` (both tiles) and ``gather_sorted`` (every shape) against MLX on small random products (own key)."""
 
     keys = mx.random.split(mx.random.key(20260926), 4)
 
@@ -172,7 +251,7 @@ def _self_check() -> bool:
     idx = mx.sort(mx.random.randint(0, 16, (400,), key=keys[2])).astype(mx.uint32)
     ref = mx.gather_qmm(x[:, None], w, s, b, rhs_indices=idx, transpose=True, group_size=32, bits=4,
                         sorted_indices=True)[:, 0]
-    same.append(mx.array_equal(gather_sorted(x, w, s, b, idx), ref))
+    same.extend(mx.array_equal(gather_sorted(x, w, s, b, idx, shape), ref) for shape in SHAPES)
     mx.eval(same)
     return all(bool(v.item()) for v in same)
 
@@ -229,17 +308,34 @@ def linear(layer: Any, x: mx.array) -> mx.array:
     return y.reshape(*lead, y.shape[-1])
 
 
-def gather_sorted(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, idx: mx.array) -> mx.array:
-    """x [M, K] bf16 with rows sorted by expert, idx [M] uint32 (sorted) -> [M, N]: row i times expert idx[i]."""
+# (BM, BN, WM, WN): bits are the same for every shape; M3 Ultra sweeps: 16 rows best below ~56 rows an expert, then 32
+SHAPES = ((16, 32, 1, 2), (32, 32, 1, 2))
+
+
+def shape_for(rows: int, experts: int) -> tuple[int, int, int, int]:
+    """The tile shape for ``rows`` sorted rows over ``experts`` experts."""
+
+    return SHAPES[0] if rows < 56 * max(1, experts) else SHAPES[1]
+
+
+def gather_sorted(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, idx: mx.array,
+                  shape: tuple[int, int, int, int] | None = None) -> mx.array:
+    """x [M, K] bf16 sorted by expert, idx [M] uint32 -> [M, N]: row i times expert idx[i], one K pass a row."""
 
     m, k = x.shape
-    n = int(w.shape[1])
-    bm, bn, wm, wn = 16, 32, 1, 2
-    kern = _k("tf_prefill_gather_qmm", _GATHER_BODY, ["X", "W", "S", "B", "IDX", "MM", "NN", "KK"], ["Y"], _header())
-    return kern(inputs=[x, w, scales, biases, idx, _int(m), _int(n), _int(k)],
-                template=[("BM", bm), ("BN", bn), ("BK", 32), ("WM", wm), ("WN", wn),
-                          ("AM", int(m % bm == 0)), ("AN", int(n % bn == 0)), ("AK", int(k % 32 == 0))],
-                grid=(-(-n // bn) * 32, -(-m // bm) * wn, wm), threadgroup=(32, wn, wm),
+    experts, n = int(w.shape[0]), int(w.shape[1])
+    group = k // int(scales.shape[-1])
+    bm, bn, wm, wn = shape or shape_for(m, experts)
+    count = _int(experts)
+    offsets = _k("tf_expert_offsets", _OFFSETS, ["IDX", "MM", "EE"], ["OFF"])(
+        inputs=[idx, _int(m), count], grid=(experts + 1, 1, 1), threadgroup=(min(256, experts + 1), 1, 1),
+        output_shapes=[(experts + 1,)], output_dtypes=[mx.int32])[0]
+    most = min(m, -(-m // bm) + experts)                                # tiles past the last exit at once
+    kern = _k("tf_gather_qmm_tiles", _GATHER_BODY, ["X", "W", "S", "B", "OFF", "MM", "NN", "KK", "EE"], ["Y"],
+              _header() + _TILES_FN)
+    return kern(inputs=[x, w, scales, biases, offsets, _int(m), _int(n), _int(k), count],
+                template=[("GS", group), ("BM", bm), ("BN", bn), ("BK", 32), ("WM", wm), ("WN", wn)],
+                grid=(-(-n // bn) * 32, most * wn, wm), threadgroup=(32, wn, wm),
                 output_shapes=[(m, n)], output_dtypes=[mx.bfloat16])[0]
 
 

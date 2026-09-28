@@ -11,8 +11,8 @@ import struct
 from typing import Callable
 
 GIB = 1024**3
-SIZES = {"U8": 1, "I8": 1, "BOOL": 1, "BF16": 2, "F16": 2, "I16": 2, "U16": 2,
-         "U32": 4, "I32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
+SIZES = {"U8": 1, "I8": 1, "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1, "BF16": 2, "F16": 2, "I16": 2,
+         "U16": 2, "U32": 4, "I32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
 
 
 @dataclass(frozen=True)

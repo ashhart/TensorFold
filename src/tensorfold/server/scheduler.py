@@ -422,6 +422,7 @@ class Scheduler:
                     memory.require(current_cache=None if entry is None else entry.cache, keep=entry)
                     take = entry is not None and not memory.fits_now()
                 hit = self.checkpoints.match(job.prompt_ids, usable=usable, take=take)
+                entry = None        # held through the prefill, a stored prefix evicted for this prompt's copy stays
                 if hit is not None:
                     cached, cache, last_prompt = hit
                     if self.disk_blocks is not None and cached in shared_at:

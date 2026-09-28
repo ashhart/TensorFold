@@ -206,9 +206,9 @@ class Weights:
     embed: QLinear | Plain
     layers: list[Layer]
     norm: torch.Tensor
-    head: QLinear | Exl3
+    head: Any                                        # QLinear, Exl3, or an NVFP4 checkpoint's linear
     inv_freq: torch.Tensor | None = None             # (rope_dims/2,) fp32
-    quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16)
+    quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16); "nvfp4"
 
     @cached_property
     def fast_prefill(self) -> bool:
@@ -235,16 +235,17 @@ class Weights:
 class _Tensors:
     """Checkpoint tensors read one at a time, so the weights never sit in device memory twice while they pack."""
 
-    def __init__(self, model_dir: Path, device: str) -> None:
+    def __init__(self, model_dir: Path, device: str, skip=None) -> None:
         from contextlib import ExitStack
 
         from safetensors import safe_open
 
+        skip = skip or (lambda name: name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp."))
         self.device, self.files, self.where = device, ExitStack(), {}
         for path in sorted(model_dir.glob("*.safetensors")):
             f = self.files.enter_context(safe_open(str(path), framework="pt", device="cpu"))
             for name in f.keys():
-                if not (name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp.")):
+                if not skip(name):
                     self.where[name] = f
 
     def __contains__(self, name: str) -> bool:
@@ -261,13 +262,16 @@ class _Tensors:
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, mlp=None) -> Weights:
-    """MLX affine 4-bit (``tiled``: projections packed as read; ``mlp(prefix, get, qlinear, cfg)``: a layer's MLP fields), or an EXL3 pack."""
+    """MLX affine 4-bit (``tiled``: projections packed as read; ``mlp(prefix, get, qlinear, cfg)``: a layer's MLP fields), an EXL3 pack, or NVFP4."""
 
     from .exl3_load import load_exl3, quant_config
+    from .nvfp4_load import load_nvfp4, quantized
 
     model_dir = Path(model_dir)
     if quant_config(model_dir) is not None:
         return load_exl3(model_dir, device)
+    if quantized(model_dir):
+        return load_nvfp4(model_dir, device)
     cfg = Config.read(model_dir)
     raw = json.loads((model_dir / "config.json").read_text())
     t = _Tensors(model_dir, device)

@@ -27,12 +27,14 @@ class Qwen27Engine:
                  vision_urls: bool = False):
         import torch
 
+        from . import nvfp4_load
         from .exl3_load import admission, quant_config
 
         exl3 = quant_config(Path(model_dir)) is not None
-        if exl3 and tp != 1:
-            raise ValueError("EXL3 packs of Qwen3.8-27B run on one GPU: drop --tp 2, or serve the MLX checkpoint "
-                             "(Vontra/Qwen3.8-27B-MLX-4bit) on two")
+        nvfp4 = not exl3 and nvfp4_load.quantized(Path(model_dir))
+        if (exl3 or nvfp4) and tp != 1:
+            raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Qwen3.8-27B run on one GPU: drop "
+                             "--tp 2, or serve the MLX checkpoint (Vontra/Qwen3.8-27B-MLX-4bit) on two")
         from .weights import load
         from tensorfold.cuda.capacity import admit, gather_ints
         from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, stream_geometry
@@ -74,6 +76,8 @@ class Qwen27Engine:
         tensor_bytes = weight_transform(model_dir)
         if exl3:
             geometry, tensor_bytes = admission(geometry)
+        elif nvfp4:
+            geometry, tensor_bytes = nvfp4_load.admission(geometry)
         # one admission for one stream or many, on every rank, before any weight loads
         self.capacity_plan = admit(model_dir, context, context_explicit, torch,
                                    capacity_geometry(geometry, model_dir, vision, rank),

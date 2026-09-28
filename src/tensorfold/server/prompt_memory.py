@@ -339,24 +339,23 @@ class PromptMemory:
         freeable = int(self.runtime.get_cache_memory()) + (self.store.nbytes if self.store is not None else 0)
         return self.projected(self.prompt, current_cache=current_cache, extra_bytes=size) - freeable <= self.budget
 
-    def allow_checkpoint(self, cache: Any) -> bool:
-        size = cache_nbytes(cache)
-        if self.store is None or self._over_store_budget(size) or not self._extra_fits_after_reclaim(
-            size, current_cache=cache
-        ):
-            return False
-        while self.projected(self.prompt, current_cache=cache, extra_bytes=size) > self.budget:
-            if not self._reclaim():
+    def _make_room(self, size: int, current_cache: Any = None) -> bool:
+        """Reclaim for ``size`` more bytes, first checking at every step that what is left to free could make room."""
+
+        while self.projected(self.prompt, current_cache=current_cache, extra_bytes=size) > self.budget:
+            # an eviction that freed less than its entry's size (arrays still held elsewhere) stops the next ones
+            if not self._extra_fits_after_reclaim(size, current_cache=current_cache) or not self._reclaim():
                 return False
         return True
 
-    def allow_load(self, size: int) -> bool:
-        if self._over_store_budget(size) or not self._extra_fits_after_reclaim(size):
+    def allow_checkpoint(self, cache: Any) -> bool:
+        size = cache_nbytes(cache)
+        if self.store is None or self._over_store_budget(size):
             return False
-        while self.projected(self.prompt, extra_bytes=size) > self.budget:
-            if not self._reclaim():
-                return False
-        return True
+        return self._make_room(size, cache)
+
+    def allow_load(self, size: int) -> bool:
+        return not self._over_store_budget(size) and self._make_room(size)
 
 
 __all__ = ["PromptMemory", "attention_geometry", "probe_tokens"]

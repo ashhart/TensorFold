@@ -124,21 +124,28 @@ def test_mlx_matmuls_serve_when_the_tiles_step_aside(monkeypatch, why):
     assert bool(mx.array_equal(fast, moe(x)).item())
 
 
-def test_gather_sorted_is_mlx_bit_for_bit():
+@pytest.mark.parametrize("group", [32, 64])
+def test_gather_sorted_is_mlx_bit_for_bit(group):
+    """Every tile shape, skewed routes with empty experts and a part tile: MLX's sorted gather_qmm's bits."""
+
     from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
 
     if prefill_mm._tensor_units():
         pytest.skip("MLX's sorted expert matmul uses the tensor units here: the tiles do not serve")
     mx.random.seed(1)
     experts, k, n, m = 16, 512, 64, 400
-    idx = mx.array(np.sort(np.random.default_rng(2).integers(0, experts, size=m)).astype(np.uint32))
+    p = 1.0 / np.arange(1, experts + 1) ** 1.2
+    p[[3, 7]] = 0.0
+    idx = mx.array(np.sort(np.random.default_rng(2).choice(experts, size=m, p=p / p.sum())).astype(np.uint32))
     x = (mx.random.normal((m, k)) * 0.5).astype(mx.bfloat16)
     w = mx.random.randint(0, 2**31, (experts, n, k // 8), dtype=mx.uint32)
-    s = (mx.random.normal((experts, n, k // 32)) * 0.02).astype(mx.bfloat16)
-    b = (mx.random.normal((experts, n, k // 32)) * 0.02).astype(mx.bfloat16)
-    ref = mx.gather_qmm(x[:, None, :], w, s, b, rhs_indices=idx, transpose=True, group_size=32, bits=4,
+    s = (mx.random.normal((experts, n, k // group)) * 0.02).astype(mx.bfloat16)
+    b = (mx.random.normal((experts, n, k // group)) * 0.02).astype(mx.bfloat16)
+    ref = mx.gather_qmm(x[:, None, :], w, s, b, rhs_indices=idx, transpose=True, group_size=group, bits=4,
                         sorted_indices=True)[:, 0, :]
-    assert bool(mx.array_equal(prefill_mm.gather_sorted(x, w, s, b, idx), ref).item())
+    for shape in (None, *prefill_mm.SHAPES, (64, 64, 2, 2)):
+        got = prefill_mm.gather_sorted(x, w, s, b, idx, shape)
+        assert bool(mx.array_equal(got.view(mx.uint16), ref.view(mx.uint16)).item()), shape
 
 
 @pytest.mark.parametrize(("experts", "rows"), [(16, 128), (128, 64)])
@@ -328,7 +335,7 @@ def test_ngram_lookup_through_the_fused_tables_is_bit_identical():
     emb = q4bits(q4.NGramEmbedding(config(), 0))
     tables = K.PleTables(emb)
     tokens = np.random.default_rng(8).integers(6, 97, size=(1, 200))
-    tokens[0, 50] = 5
+    tokens[0, 50] = 5                                                   # an EOS: the n-grams restart after it
     ids = emb.ids(np.full((1, emb.context), emb.eos, dtype=np.int64), tokens)
     ref = emb(ids)
     emb.__dict__["fused_tables"] = tables
@@ -357,7 +364,7 @@ def test_whole_model_prefill_is_as_exact_as_the_reference(monkeypatch):
     """Two chunks, then four decode steps: the prefill path lands as close to fp32 as the bf16 reference does."""
 
     tokens = np.random.default_rng(11).integers(6, 97, size=(1, 404))
-    tokens[0, 100] = 5
+    tokens[0, 100] = 5                                                  # an EOS: the n-grams restart after it
 
     def run(model, fused=None):
         cache = model.make_cache()

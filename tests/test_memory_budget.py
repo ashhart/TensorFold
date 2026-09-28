@@ -8,6 +8,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from tensorfold import cli, families, hub
+from tensorfold.server import memory_budget
 from tensorfold.server.memory_budget import (
     PROCESS_BYTES,
     CacheMemory,
@@ -30,6 +31,7 @@ def test_serve_limits_memory_before_loading_without_changing_residency(monkeypat
     core.set_memory_limit = lambda value: calls.append(("memory", value))
     core.device_info = lambda: {"max_recommended_working_set_size": 64 * GIB, "memory_size": 128 * GIB}
     core.metal = SimpleNamespace(is_available=lambda: metal)
+    monkeypatch.setattr(memory_budget, "physical_memory_bytes", lambda: 128 * GIB)     # the host's RAM plays no part
     core.set_wired_limit = lambda value: calls.append(("wired", value)) or 7 * GIB
     core.synchronize = lambda: calls.append(("sync", None))
     mlx = ModuleType("mlx")
@@ -247,6 +249,7 @@ def _serve_to_app(monkeypatch, tmp_path, argv, capsys):
     core.set_memory_limit = lambda value: None
     core.device_info = lambda: {"max_recommended_working_set_size": 64 * GIB, "memory_size": 128 * GIB}
     core.__version__ = "0.0"
+    monkeypatch.setattr(memory_budget, "physical_memory_bytes", lambda: 128 * GIB)     # the host's RAM plays no part
     core.synchronize = core.clear_cache = lambda: None               # the weights' wiring after load
     core.get_active_memory = lambda: 0
     core.set_wired_limit = lambda value: 0

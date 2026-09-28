@@ -109,6 +109,30 @@ def test_a_resumed_prefix_is_copied_and_kept_when_memory_allows():
     assert prompt[:48] in stored(store)
 
 
+def test_a_resumed_prompt_holds_no_reference_to_the_stored_prefix_it_copied():
+    import gc
+    import weakref
+
+    prompt = [3] * 64
+    store = CheckpointStore(3, copier=lambda c: sized(c[0].rows[0], 400), sizer=cache_nbytes)
+    store.insert(prompt[:48], sized(prompt[:48], 400), last_prompt=prompt[:48])
+    scheduler, engine = scheduler_with(store, budget=1_000_000)
+    stored, seen = weakref.ref(store._entries[0]), []
+    prefill = engine._family_prefill
+
+    def evicting(stream, **kwargs):
+        store.evict_one()                   # the prompt's own checkpoint copy needs the room
+        gc.collect()
+        seen.append(stored())
+        return prefill(stream, **kwargs)
+
+    engine._family_prefill = evicting
+    job = ChatJob("resume", prompt, 4, 0.0)
+    scheduler._start_job(job)
+    assert job.error is None and engine.prefill_calls == [("resume", 48)]
+    assert seen == [None]                   # evicting it freed it: nothing but the store held it
+
+
 def test_a_refused_prompt_keeps_the_prefix_it_would_resume():
     prompt = [3] * 4096
     store = CheckpointStore(3, copier=refuse_copy, sizer=cache_nbytes)
