@@ -111,8 +111,10 @@ length. CUDA does not implement the MLX-only options above. See [API fields](doc
 
 On MLX, omitted `--context` targets the model's metadata window and reduces it to the startup memory
 estimate when needed, allowing room to retain a prompt for the next turn. An explicit positive value
-that cannot fit one request is refused at startup. `--context 0` removes the metadata cap; finite engine
-capacity and memory admission still apply. Use the reported context when configuring client compaction.
+that cannot fit one request is refused at startup. A larger explicit window may fit a request without
+leaving room to retain its prompt, so a later turn can need a full prefill. `--context 0` removes the
+metadata cap; finite engine capacity and memory admission still apply. Use the reported context when
+configuring client compaction.
 
 On CUDA, Qwen defaults to the affordable native capacity. GLM targets a dense 2,051-token window,
 and Nemotron targets 16,384 tokens; the capacity estimate can lower these defaults. Flash Next's `--kv-dtype int8` or `int4` counts

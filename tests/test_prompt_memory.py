@@ -96,6 +96,58 @@ def test_checkpoint_copy_is_suppressed_before_allocation_when_it_exceeds_store_b
     assert not memory.allow_checkpoint(cache)
 
 
+def retained_prefix_memory(budget):
+    """An in-flight cache and an unrelated retained prefix compete for the same MLX budget."""
+
+    work = populated(64)
+    store = CheckpointStore(3, copier=lambda cache: cache, budget_bytes=1 << 20, sizer=cache_nbytes)
+    store.insert([1], populated(64), last_prompt=[1])
+    runtime = Runtime()
+    runtime.cache = 128
+    runtime.get_active_memory = lambda: runtime.resident + store.nbytes + cache_nbytes(work)
+    model = SimpleNamespace(args=SimpleNamespace(num_attention_heads=1, head_dim=128))
+    memory = PromptMemory(budget, model, runtime=runtime, store=store, overhead_bytes=0,
+                          bootstrap_bytes=0)
+    memory.begin(64, 0, admit=False)
+    memory.observe_cache(work, workspace=False)
+    return memory, runtime, store, work
+
+
+def test_impossible_checkpoint_copy_preserves_retained_prefixes():
+    memory, runtime, store, work = retained_prefix_memory(3200)
+    size = cache_nbytes(work)
+    assert memory.projected(64, current_cache=work, extra_bytes=size) - runtime.cache - store.nbytes > memory.budget
+
+    assert not memory.allow_checkpoint(work)
+    assert store.match([1, 2]) is not None
+    assert store.evictions == 0
+    assert runtime.cache == 128
+
+
+def test_impossible_snapshot_load_preserves_retained_prefixes():
+    memory, runtime, store, work = retained_prefix_memory(3500)
+    size = cache_nbytes(work)
+    assert memory.projected(64, extra_bytes=size) - runtime.cache - store.nbytes > memory.budget
+
+    assert not memory.allow_load(size)
+    assert store.match([1, 2]) is not None
+    assert store.evictions == 0
+    assert runtime.cache == 128
+
+
+@pytest.mark.parametrize("kind,budget", [("checkpoint", 3400), ("load", 3600)])
+def test_reclaim_still_admits_a_copy_that_can_fit(kind, budget):
+    memory, runtime, store, work = retained_prefix_memory(budget)
+    size = cache_nbytes(work)
+    assert memory.projected(64, current_cache=work if kind == "checkpoint" else None,
+                            extra_bytes=size) > memory.budget
+
+    allowed = memory.allow_checkpoint(work) if kind == "checkpoint" else memory.allow_load(size)
+    assert allowed
+    assert runtime.cache == 0
+    assert store.evictions == 1
+
+
 def test_retained_prefixes_are_evicted_before_refusing_the_next_request():
     cache = populated()
     runtime = Runtime()
