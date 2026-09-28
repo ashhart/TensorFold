@@ -1,6 +1,7 @@
 """CUDA startup capacity checks without models or devices."""
 
 import json
+import math
 import struct
 from types import SimpleNamespace
 
@@ -334,3 +335,31 @@ def test_speculative_reserve_does_not_double_committed_dynamic_kv():
     a, b = geometry.needed(32768), geometry.needed(32769)
     assert b > a
     assert b - a > 16 * 1024**2
+
+
+def test_fp8_block_scales_are_sized(tmp_path):
+    """The FP4 checkpoints store their block scales as ``F8_E4M3`` (the published Swift revision carries
+    73,728 of them: the one dtype the startup estimate could not size), one byte a value like every fp8."""
+
+    from tensorfold.cuda import capacity
+
+    checkpoint(tmp_path, small_config(), [("model.layers.0.mlp.experts.0.down_proj.weight_scale", "F8_E4M3",
+                                           [2560, 40], 2560 * 40)])
+    weights = capacity.estimate_weights(
+        tmp_path, lambda name, info: (math.prod(info["shape"]) * capacity.itemsize(info, name), 0))
+    assert weights.resident == 2560 * 40
+    assert capacity.SIZES["F8_E4M3"] == capacity.SIZES["F8_E5M2"] == 1
+
+
+def test_an_unsizable_dtype_names_its_tensor_in_the_operators_message(tmp_path, monkeypatch):
+    """A dtype the estimate cannot size must say which tensor carried it, and that has to survive ``admit``,
+    whose message is what the operator reads when a rank cannot read its checkpoint."""
+
+    from tensorfold.cuda import capacity
+
+    checkpoint(tmp_path, small_config(), [("model.layers.0.w", "F8_E9M9", [4, 4], 16)])
+    monkeypatch.setattr(capacity, "available_bytes", lambda torch: 16 * capacity.GIB)
+    monkeypatch.setattr(capacity, "page_room", lambda torch: None)
+    geometry = capacity.Geometry(lambda slots: slots * 1024, 8)
+    with pytest.raises(ValueError, match=r"F8_E9M9.*model\.layers\.0\.w|model\.layers\.0\.w.*F8_E9M9"):
+        capacity.admit(tmp_path, None, None, object(), geometry, lambda name, info: (1, 0))

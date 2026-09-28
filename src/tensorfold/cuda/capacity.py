@@ -11,8 +11,20 @@ import struct
 from typing import Callable
 
 GIB = 1024**3
-SIZES = {"U8": 1, "I8": 1, "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1, "BF16": 2, "F16": 2, "I16": 2,
-         "U16": 2, "U32": 4, "I32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
+# safetensors dtype names -> bytes a value (FP8: the FP4 checkpoints' block scales)
+SIZES = {"U8": 1, "I8": 1, "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
+         "BF16": 2, "F16": 2, "I16": 2, "U16": 2, "U32": 4, "I32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
+
+
+def itemsize(info: dict, name: str) -> int:
+    """Bytes a value for one tensor header; an unknown dtype names the tensor instead of raising a bare KeyError."""
+
+    dtype = info.get("dtype")
+    item = SIZES.get(dtype) if isinstance(dtype, str) else None
+    if item is None:
+        raise ValueError(f"checkpoint tensor {name} has dtype {dtype!r}, which the startup estimate cannot "
+                         f"size; known dtypes: {', '.join(sorted(SIZES))}")
+    return item
 
 
 @dataclass(frozen=True)
@@ -97,7 +109,7 @@ def headers(model_dir: str | Path, *, rank: int | None = None, files: list[Path]
             if name in out:
                 raise ValueError(f"duplicate checkpoint tensor: {name}")
             shape = info["shape"]
-            item = SIZES[info["dtype"]]
+            item = itemsize(info, name)
             if any(int(n) < 0 for n in shape) or math.prod(shape) * item != info["data_offsets"][1] - info["data_offsets"][0]:
                 raise ValueError(f"invalid checkpoint tensor geometry: {name}")
             out[name] = {**info, "split": ".rank" in file.name}
@@ -234,7 +246,7 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
         weights = Weights(weights.resident, weights.staging + startup_copies * weights.resident, weights.mapped)
         if draft_dir is not None:
             draft = estimate_weights(draft_dir, lambda name, info: (math.prod(info["shape"]) *
-                                      max(4, SIZES[info["dtype"]]), 0))
+                                      max(4, itemsize(info, name)), 0))
             weights = Weights(weights.resident + draft.resident, weights.staging + draft.staging, weights.mapped)
             if draft_geometry is not None:
                 draft_geometry = draft_geometry(config(draft_dir)) if callable(draft_geometry) else draft_geometry
@@ -245,7 +257,7 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
                          requested is not None if explicit is None else explicit,
                          available_bytes(torch), weights, geometry, room=page_room(torch))
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
-        error = str(exc)
+        error = f"{type(exc).__name__}: {exc}"     # name the cause: its text alone has hidden a dtype's KeyError
     status = [1 if error else 0, *(plan.settings + [plan.fitting, plan.largest] if plan else [0, -1, 0, 0, 0])]
     both = gather(status) if world > 1 else [status]
     if any(row[0] for row in both):
