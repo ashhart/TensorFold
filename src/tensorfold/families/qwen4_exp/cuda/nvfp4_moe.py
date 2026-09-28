@@ -170,21 +170,21 @@ class MoE4:
                 yield e, codes // 32
 
 
+
     def gateup_out(self, x: torch.Tensor, plan, act: torch.Tensor, top_k: int) -> torch.Tensor:
-        """Plan-driven gate/up: host item loop (exact vs gateup_rows). Grouped Triton IMA on Spark
-        under investigation; capturable stays False while this path is live."""
+        """Plan-driven gate/up via host item loop (grouped Triton IMA on Spark)."""
 
         ni = self.width
         slots = act.shape[1]
         flat = act.reshape(-1, ni)
         n = int(plan.counts[0].item())
-        for i in range(n):
-            e = int(plan.items[i, 0].item())
-            first = int(plan.items[i, 1].item())
-            count = int(plan.items[i, 2].item())
+        items = plan.items[:n].detach().cpu().tolist()
+        members = plan.members.detach().cpu()
+        for e, first, count in items:
+            e, first, count = int(e), int(first), int(count)
             if count == 0 or e >= self.routed:
                 continue
-            dest = plan.members[first:first + count].to(dtype=torch.long)
+            dest = members[first:first + count].to(device=x.device, dtype=torch.long)
             flat[dest] = self.gateup_rows(x[dest // slots], e)
         out, part = self.shared_out(x, self.shared.gu)
         g = nvfp4.matmul(x, self.shared.gu, out=out, part=part)
@@ -196,22 +196,20 @@ class MoE4:
 
 
     def down_out(self, act: torch.Tensor, plan, y: torch.Tensor, top_k: int) -> torch.Tensor:
-        """Plan-driven down: host item loop (exact vs down_rows / nvfp4.matmul). Same Spark IMA note
-        as gateup_out."""
+        """Plan-driven down via host item loop (grouped Triton IMA on Spark)."""
 
         d, ni = self.dims, self.width
-        slots = y.shape[1]
         flat = y.reshape(-1, d)
         n = int(plan.counts[0].item())
-        for i in range(n):
-            e = int(plan.items[i, 0].item())
-            first = int(plan.items[i, 1].item())
-            count = int(plan.items[i, 2].item())
+        items = plan.items[:n].detach().cpu().tolist()
+        members = plan.members.detach().cpu()
+        act_flat = act.reshape(-1, ni)
+        for e, first, count in items:
+            e, first, count = int(e), int(first), int(count)
             if count == 0 or e >= self.routed:
                 continue
-            dest = plan.members[first:first + count].to(dtype=torch.long)
-            flat[dest] = nvfp4.matmul(act.reshape(-1, ni)[dest], self._expert(e).down,
-                                      f32=True).to(flat.dtype)
+            dest = members[first:first + count].to(device=act.device, dtype=torch.long)
+            flat[dest] = nvfp4.matmul(act_flat[dest], self._expert(e).down, f32=True).to(flat.dtype)
         out, part = self.shared_out(act[:, top_k], self.shared.down, f32=True)
         y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True, out=out, part=part).to(y.dtype)
         return y

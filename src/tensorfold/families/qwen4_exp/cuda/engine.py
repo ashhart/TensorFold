@@ -110,13 +110,18 @@ class FlashNextEngine:
         read_s = time.perf_counter() - started
         captured = self.e.graphs.warm(self.depth + 1) if self.e is not None and self.e.graphs is not None else 0
         started = time.perf_counter()
-        if self.concurrent:
+        import os
+        if os.environ.get("TENSORFOLD_SKIP_WARM", "").strip() in ("1", "true", "yes"):
+            print("[tensorfold] prompt-kernel warm skipped (TENSORFOLD_SKIP_WARM)", flush=True)
+            warm_s = 0.0
+        elif self.concurrent:
             self.multi.warm()
+            warm_s = time.perf_counter() - started
         else:
             from .decode import warm
 
             warm(self.e)
-        warm_s = time.perf_counter() - started
+            warm_s = time.perf_counter() - started
         self.eos = tuple(w.cfg.eos)
         self.served = 0
         self.cache: list[tuple[list[int], dict]] = []    # (committed ids, what resuming from them needs)
