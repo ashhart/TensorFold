@@ -186,7 +186,7 @@ class ChatApp(RequestOptions):
             self._warm_known_blocks(snapshot_dir, model_id)
 
     def _admission(self, fraction: float, lanes: int) -> Any:
-        """Admit concurrent streams only within ``fraction`` of RAM minus memory held elsewhere on the machine."""
+        """Admit within the default RAM share or a larger process budget, accounting for memory held elsewhere."""
 
         from tensorfold.engine import memory
 
@@ -194,13 +194,16 @@ class ChatApp(RequestOptions):
         used = memory._mlx_used()
         ram = memory.ram_bytes()
         elsewhere = memory.used_elsewhere(used)
-        share = self.prompt_memory.budget if self.prompt_memory is not None else int(fraction * ram)
-        admission = memory.Admission(min(int(fraction * ram) - elsewhere, share), stream,
+        allowance = int(fraction * ram)
+        share = self.prompt_memory.budget if self.prompt_memory is not None else allowance
+        if self.prompt_memory is not None:
+            allowance = max(allowance, self.prompt_memory.process_budget)
+        admission = memory.Admission(min(allowance - elsewhere, share), stream,
                                      used=None if self.prompt_memory is None else self.prompt_memory.held)
         tokens = self.default_max_tokens + 4096
         gib, mib = 1024**3, 1024**2
         print(f"[tensorfold] concurrency: up to {lanes} requests share each round; memory budget "
-              f"{admission.budget / gib:.1f} GB (MLX's share {share / gib:.1f} GB, or {fraction:.0%} of "
+              f"{admission.budget / gib:.1f} GB (MLX's share {share / gib:.1f} GB, or {allowance / ram:.0%} of "
               f"{ram / gib:.0f} GB less {elsewhere / gib:.1f} GB in use elsewhere); a stream "
               f"{stream.short / mib:.0f} MB at {stream.short_tokens} tokens, "
               f"{stream.long / mib:.0f} MB at {stream.long_tokens:,}, then {stream.per_token / 1024:.1f} KB a token; "

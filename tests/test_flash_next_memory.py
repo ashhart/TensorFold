@@ -97,6 +97,21 @@ def test_host_mode_still_refuses_resident_weights_past_the_limit(tmp_path, monke
         cli.cmd_serve(args)
 
 
+def test_serve_passes_a_raised_budget_to_the_allocator_and_server(tmp_path, monkeypatch, runtime, capsys):
+    _checkpoint(tmp_path, main=75 * GIB, mapped=30 * GIB)
+    monkeypatch.setenv("TENSORFOLD_MEMORY_LIMIT_GB", "110")
+    allocations, budgets = [], []
+    runtime.set_memory_limit = allocations.append
+    monkeypatch.setattr(cli, "_serve_mlx", lambda args, family, path, context, required, budget, *rest:
+                        budgets.append((budget, context, args.max_tokens)) or 0)
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--backend", "mlx", "--no-update-check",
+                                         "--context", "262144", "--max-tokens", "131072"])
+    assert cli.cmd_serve(args) == 0
+    assert allocations == [107 * GIB]
+    assert budgets == [(110 * GIB, 262144, 131072)]
+    assert "memory budget 110.0 GiB: MLX's buffers up to 107.0 GiB" in capsys.readouterr().out
+
+
 def test_only_mapped_table_tensors_are_subtracted(tmp_path, monkeypatch, runtime):
     total = _checkpoint(tmp_path)
     total += _file(tmp_path / "model-extra.safetensors", {

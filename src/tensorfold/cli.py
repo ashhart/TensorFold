@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from tensorfold import __version__
+from tensorfold.server.memory_budget import MEMORY_FRACTION
 
 COMMANDS = ("serve", "pull", "models", "info", "update")
 
@@ -69,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
     speed.add_argument("--parallel", default="auto",
                        help="requests decoded together, their windows sharing each round's forward: a number, or "
-                            "auto (Mac: up to 8, each started only while the projected memory fits 70%% of RAM; "
+                            "auto (Mac: up to 8, each started only while the projected memory fits the budget; "
                             "CUDA: one at a time, the others waiting their turn)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
     speed.add_argument("--ssd-experts", type=float, default=None, metavar="GIB",
@@ -357,8 +358,6 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     return 0
 
 
-# Admit concurrent requests within this RAM fraction, or the family's, after the rest of the machine.
-MEMORY_FRACTION = 0.70
 # a resume point begins a prompt chunk when at least this many tokens follow the last chunk start
 MIN_CHUNK = 256
 
@@ -443,7 +442,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         stream = ("stream its routed experts from SSD with --ssd-experts GIB (slower), "
                   if args.ssd_experts is None and hasattr(family.package, "expert_bytes") else "")
         raise ValueError(f"{family.title}'s weights ({weights / gib:.1f} GiB) do not fit this server's "
-                         f"{memory_limit / gib:.1f} GiB memory budget ({fraction:.0%} of RAM, or "
+                         f"{memory_limit / gib:.1f} GiB memory budget ({fraction:.0%} of RAM by default, or "
                          f"TENSORFOLD_MEMORY_LIMIT_GB): serve it on a Mac with more memory, {stream}or use a smaller "
                          "or more quantized checkpoint")
     return _serve_mlx(args, family, model_dir, context, required_files, memory_limit, fraction)
