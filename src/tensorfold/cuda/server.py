@@ -90,7 +90,8 @@ def _native_context(model_dir: Path) -> int:
 class App:
     """Serve one engine with sampling and reply-length defaults for requests that omit them."""
 
-    # True where the engine reads ``ignore_eos`` itself (``GlmApp`` hands it to the GLM engine)
+    # True where the engine reads ``ignore_eos`` itself (``GlmApp`` hands it to the GLM engine); an engine whose
+    # ``generate`` takes ``stop_eos`` is given it
     reads_ignore_eos = False
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
@@ -241,6 +242,8 @@ class App:
             prepared: PreparedRequest | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         """One reply; once ``cancelled()`` holds, a waiting request raises ``RequestCancelled`` unstarted, a running one stops at its next round and raises it after ``generate``."""
 
+        import inspect
+
         prepared = prepared if prepared is not None else self.prepare(body, chat)
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
         tools, thinking = prepared.tools, prepared.thinking
@@ -248,7 +251,8 @@ class App:
         sampling = self.sampling_for(body, prompt)
         # end tokens end the reply and stay out of its text, unless it asks ignore_eos of an engine that reads it:
         # then, as on the Mac, they are text like any other token
-        ends = () if prepared.ignore_eos and self.reads_ignore_eos else tuple(self.engine.eos)
+        takes_stop_eos = "stop_eos" in inspect.signature(self.engine.generate).parameters
+        ends = () if prepared.ignore_eos and (self.reads_ignore_eos or takes_stop_eos) else tuple(self.engine.eos)
         stops = StopStrings(prepared.stop, self.tok, ends)
         out: list[int] = []
         sent = {"reasoning": 0, "content": 0}
@@ -305,9 +309,12 @@ class App:
 
         draft = body.get("draft", True) is not False
         gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
+        options: dict[str, Any] = {} if draft else {"draft": False}
+        if takes_stop_eos:
+            options["stop_eos"] = not prepared.ignore_eos
 
         def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
-            return self.engine.generate(ids, count, sampling, feed, **({} if draft else {"draft": False}))
+            return self.engine.generate(ids, count, sampling, feed, **options)
 
         # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
         with (nullcontext() if getattr(self.engine, "concurrent", False) else self.lock):

@@ -47,7 +47,8 @@ python3 tools/bench_openai.py http://127.0.0.1:8080 bench \
 
 The client warms each cell, uses seeds 1234 through 1238, and reports the median decode rate after the
 first token. Sampled cells use temperature 1, top-k 20 and top-p 0.95. The client sends `ignore_eos: true`;
-MLX and GLM CUDA honor it, while the Qwen CUDA engines can stop at EOS before the requested limit.
+MLX, GLM CUDA and the Qwen3.8-27B CUDA engine honor it, while the Flash Next, Nemotron and Qwen3.6 CUDA engines
+can stop at EOS before the requested limit.
 It measures throughput; it does not itself prove token equality. Record checkpoint and tokenizer revisions,
 runtime versions, backend, rank count, launch command and output hashes with a result. Compare serial and drafted output separately.
 

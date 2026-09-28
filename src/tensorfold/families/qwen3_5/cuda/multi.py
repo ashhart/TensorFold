@@ -142,7 +142,7 @@ class MultiDecoder:
             return [s]
         if first is None:
             return []
-        s.take([first], self.eos)
+        s.take([first], self._ends(s))
         return [s] if s.done else []
 
     def _step(self, s: Stream, stop: int) -> int | None:
@@ -192,14 +192,19 @@ class MultiDecoder:
         wins, record, taps, starts, sampled = self._verify(plan, copied)
         paths, ends = [], []
         for s, (tokens, parents), rows in zip(live, wins, sampled):
-            path, end = accept(tokens, parents, rows, s.count - len(s.out), self.eos)
+            path, end = accept(tokens, parents, rows, s.count - len(s.out), self._ends(s))
             paths.append(path)
             ends.append(end)
         self._send([x for path in paths for x in (len(path), *path)])
         self._commit(plan, wins, record, taps, starts, paths)
         for s, (tokens, _), path, end in zip(live, wins, paths, ends):
-            s.take([tokens[r] for r in path[1:]] + [end], self.eos)
+            s.take([tokens[r] for r in path[1:]] + [end], self._ends(s))
         return done + [s for s in live if s.done]
+
+    def _ends(self, s: Stream) -> tuple[int, ...]:
+        """The end tokens that end this stream: none when its request ignores them (rank 1 follows rank 0's paths)."""
+
+        return self.eos if s.stop_eos else ()
 
     def _mode(self, s: Stream, copied: dict[int, list[int]]) -> int:
         if not s.draft:

@@ -27,15 +27,16 @@ Image, audio and video input or output requests receive HTTP 400.
 | `stream` | Server-sent events with final usage | Both |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
-| `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | MLX and GLM CUDA |
+| `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | MLX, GLM and Qwen3.8-27B CUDA |
 | `stop` | Stop at a string or any string in a list; omit the matched text from the response | Both |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high` or `xhigh` | MLX |
 | `thinking_budget` | Token-count limit inside reasoning | MLX |
 | `priority` | `background` yields to foreground requests | MLX |
 
-CUDA does not enforce the MLX-only fields above. Its Qwen and Nemotron engines stop at an end token whatever
-`ignore_eos` says. Unsupported generation features include multiple choices through `n` and `logprobs`.
-`ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
+CUDA does not enforce the MLX-only fields above. Its Flash Next, Nemotron and Qwen3.6 engines stop at an end
+token whatever `ignore_eos` says. Unsupported generation features include multiple choices through `n` and
+`logprobs`. `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans
+streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 MLX rejects malformed numeric controls and out-of-vocabulary raw prompt IDs with HTTP 400;
 `top_k` at zero or below disables top-k filtering, and null sampling fields retain server defaults.
