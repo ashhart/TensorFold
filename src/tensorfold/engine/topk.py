@@ -7,7 +7,10 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels import threads
+
 MAX_K = 64
+TPG = 1024          # threads a row: the pipeline reserves them on every GPU
 
 _SOURCE = r"""
   // one threadgroup (TPG threads) per row of X [R, V] bf16
@@ -113,9 +116,12 @@ _kernels: dict[str, Any] = {}
 
 def _kernel() -> Any:
     if "topk" not in _kernels:
-        digest = hashlib.sha256(_SOURCE.encode()).hexdigest()[:16]
+        consts = f"  constexpr int TPG = {TPG};\n  constexpr int MAXK = {MAX_K};\n  constexpr int MAXT = 2048;\n"
+        source = consts + _SOURCE
+        header = threads.reserve(TPG)
+        digest = hashlib.sha256((header + source).encode()).hexdigest()[:16]
         _kernels["topk"] = mx.fast.metal_kernel(name=f"radix_topk_{digest}", input_names=["X", "dims"],
-                                                output_names=["IDX", "VAL"], source=_SOURCE)
+                                                output_names=["IDX", "VAL"], source=source, header=header)
     return _kernels["topk"]
 
 
@@ -129,11 +135,9 @@ def topk_rows(x: mx.array, k: int) -> tuple[mx.array, mx.array]:
     k = int(k)
     if not 1 <= k <= MAX_K or k > vocab:
         raise ValueError(f"topk_rows: k must be in [1, {MAX_K}] and at most the row length")
-    tpg = 1024
     idx, val = _kernel()(
         inputs=[x2, mx.array([vocab, k], dtype=mx.int32)],
-        template=[("TPG", tpg), ("MAXK", MAX_K), ("MAXT", 2048)],
-        grid=(rows * tpg, 1, 1), threadgroup=(tpg, 1, 1),
+        grid=(rows * TPG, 1, 1), threadgroup=(TPG, 1, 1),
         output_shapes=[(rows, k), (rows, k)], output_dtypes=[mx.int32, mx.float32])
     return idx, val
 

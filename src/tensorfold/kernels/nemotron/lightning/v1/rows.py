@@ -8,6 +8,7 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 
+from tensorfold.kernels import threads
 from tensorfold.kernels.inputs import MIN_ELEMENTS, ints, padded
 
 MAX_ROWS = 16
@@ -152,15 +153,15 @@ _GROUP = r"""
   if (int(t) == T - 1) UCOUNT[0] = u + used;
 """
 
-_kernels: dict[str, Any] = {}
+_kernels: dict[Any, Any] = {}
 
 
-def _kernel(name: str, source: str, inputs: list[str], outputs: list[str]) -> Any:
+def _kernel(name: str, source: str, inputs: list[str], outputs: list[str], header: str = _HEADER) -> Any:
     kernel = _kernels.get(name)
     if kernel is None:
-        digest = hashlib.sha256((_HEADER + source).encode()).hexdigest()[:16]
+        digest = hashlib.sha256((header + source).encode()).hexdigest()[:16]
         kernel = mx.fast.metal_kernel(name=f"{name}_{digest}", input_names=inputs, output_names=outputs,
-                                      source=source, header=_HEADER)
+                                      source=source, header=header)
         _kernels[name] = kernel
     return kernel
 
@@ -188,10 +189,15 @@ def qmv(x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, group
         raise ValueError(f"rows.qmv: needs 1 to {MAX_ROWS} rows, N % {2 * RPS} == 0, K % 64 == 0 "
                          f"(R {rows}, N {n}, K {dims})")
     blocks = 2 if rows <= 8 else 1
-    kernel = _kernel("nemotron_rows_qmv", _QMV, ["X", "W", "S", "B"], ["OUT"])
-    out = kernel(inputs=[x2, weight, scales, biases],
-                 template=[("K", dims), ("N", n), ("GS", int(group_size)), ("RPS", RPS)],
-                 grid=(32 * rows, n // RPS, 1), threadgroup=(32 * rows, blocks, 1),
+    kernel = _kernels.get(("qmv", dims, n, int(group_size)))
+    if kernel is None:
+        consts = (("K", dims), ("N", n), ("GS", int(group_size)), ("RPS", RPS))
+        source = "".join(f"  constexpr int {k} = {v};\n" for k, v in consts) + _QMV
+        # up to MAX_ROWS rows in one threadgroup: the pipeline reserves them on every GPU
+        kernel = _kernels[("qmv", dims, n, int(group_size))] = _kernel(
+            f"nemotron_rows_qmv_{dims}_{n}_{group_size}", source, ["X", "W", "S", "B"], ["OUT"],
+            _HEADER + threads.reserve(32 * MAX_ROWS))
+    out = kernel(inputs=[x2, weight, scales, biases], grid=(32 * rows, n // RPS, 1), threadgroup=(32 * rows, blocks, 1),
                  output_shapes=[(rows, n)], output_dtypes=[mx.bfloat16])[0]
     return out.reshape(*shape[:-1], n)
 

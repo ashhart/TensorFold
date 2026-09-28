@@ -43,9 +43,9 @@ def sizes(monkeypatch):
 
     monkeypatch.setattr(mx.fast, "metal_kernel", recording)
     monkeypatch.setattr(K, "_kernels", {})
+    monkeypatch.setattr(K, "_norms", {})
     monkeypatch.setattr(rows, "_kernels", {})
-    monkeypatch.setattr(gpu_sampling, "_kernel", None)
-    monkeypatch.setattr(gpu_sampling, "_kernel_ids", None)
+    monkeypatch.setattr(gpu_sampling, "_kernels", {})
     return seen
 
 

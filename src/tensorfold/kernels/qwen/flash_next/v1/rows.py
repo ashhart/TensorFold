@@ -122,7 +122,7 @@ def qmv_rows(x: mx.array, weights: Any, *, rows_per_simdgroup: int = 4) -> mx.ar
     n = int(weights.weight.shape[0])
     if dims % 512 or n % rows_per_simdgroup:
         raise ValueError(f"qmv_rows: needs K % 512 == 0 and N % {rows_per_simdgroup} == 0")
-    run = kernel("q4_qmv_rows", _QMV_ROWS, ["X", "W", "S", "B"], ["OUT"])
+    run = kernel("q4_qmv_rows", _QMV_ROWS, ["X", "W", "S", "B"], ["OUT"], reserve=32 * ROWS_A_CALL)
     parts = []
     for lo in range(0, rows, ROWS_A_CALL):
         part = x2[lo:lo + ROWS_A_CALL]

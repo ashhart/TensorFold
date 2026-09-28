@@ -7,6 +7,7 @@ from typing import Any, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels import threads
 from tensorfold.kernels.inputs import floats, ints, padded
 
 CANDIDATES = 1024
@@ -256,28 +257,22 @@ _SOURCE_IDS = (_SOURCE.replace("tf_uniform(seed, position, ci[t])", "tf_uniform(
                .replace("TOK[row] = ci[bj];", "TOK[row] = IDS[ci[bj]];"))
 assert _SOURCE_IDS.count("IDS[") == 2
 
-_kernel: Any = None
-_kernel_ids: Any = None
+_kernels: dict[tuple[bool, int], Any] = {}
 
 
-def _get_kernel() -> Any:
-    global _kernel
-    if _kernel is None:
-        digest = hashlib.sha256((_HEADER + _SOURCE).encode()).hexdigest()[:16]
-        _kernel = mx.fast.metal_kernel(
-            name=f"tf_gpu_sample_{digest}", input_names=["L", "seeds", "positions", "cfg", "kcap"],
-            output_names=["TOK"], source=_SOURCE, header=_HEADER)
-    return _kernel
+def _get_kernel(vocab: int, ids: bool = False) -> Any:
+    """The kernel for this vocabulary, reserving its 1024 threads (the reductions' order is theirs) on every GPU."""
 
-
-def _get_kernel_ids() -> Any:
-    global _kernel_ids
-    if _kernel_ids is None:
-        digest = hashlib.sha256((_HEADER + _SOURCE_IDS).encode()).hexdigest()[:16]
-        _kernel_ids = mx.fast.metal_kernel(
-            name=f"tf_gpu_sample_ids_{digest}", input_names=["L", "seeds", "positions", "cfg", "kcap", "IDS"],
-            output_names=["TOK"], source=_SOURCE_IDS, header=_HEADER)
-    return _kernel_ids
+    kernel = _kernels.get((ids, vocab))
+    if kernel is None:
+        consts = f"  constexpr int V = {vocab};\n  constexpr int C = {CANDIDATES};\n"
+        source = consts + (_SOURCE_IDS if ids else _SOURCE)
+        header = _HEADER + threads.reserve(1024)
+        digest = hashlib.sha256((header + source).encode()).hexdigest()[:16]
+        kernel = _kernels[(ids, vocab)] = mx.fast.metal_kernel(
+            name=f"tf_gpu_sample{'_ids' if ids else ''}_{digest}", output_names=["TOK"], source=source, header=header,
+            input_names=["L", "seeds", "positions", "cfg", "kcap", *(["IDS"] if ids else [])])
+    return kernel
 
 
 def sample(logits: mx.array, sampling: Any, positions: Sequence[int] | mx.array, ids: mx.array | None = None
@@ -313,10 +308,9 @@ def sample_rows(logits: mx.array, samplings: Sequence[Any], positions: Sequence[
     else:
         positions = ints(positions, mx.uint32)
     inputs = [logits, ints(seeds, mx.uint32), positions, floats(cfg), ints(caps, mx.uint32)]
-    kernel = _get_kernel() if ids is None else _get_kernel_ids()
-    out = kernel(inputs=inputs if ids is None else [*inputs, ids], template=[("V", vocab), ("C", CANDIDATES)],
-                 grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
-                 output_shapes=[(rows,)], output_dtypes=[mx.uint32])[0]
+    out = _get_kernel(int(vocab), ids is not None)(inputs=inputs if ids is None else [*inputs, ids],
+                                                  grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
+                                                  output_shapes=[(rows,)], output_dtypes=[mx.uint32])[0]
     if picked is not None:
         out = mx.where(mx.array(greedy), picked if ids is None else ids[picked], out)
     return out

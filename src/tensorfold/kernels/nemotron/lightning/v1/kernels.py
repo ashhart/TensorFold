@@ -7,6 +7,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels import threads as tg
 from tensorfold.kernels.inputs import ints, padded
 from tensorfold.kernels.nemotron.lightning.v1 import rows as row_kernels
 from tensorfold.kernels.nemotron.lightning.v1.sources import (
@@ -62,16 +63,17 @@ def _named(base: str, source: str) -> str:
     return f"{base}_{hashlib.sha256(source.encode()).hexdigest()[:16]}"
 
 
-def _kernel(name: str, source: str, inputs: list[str], outputs: list[str]) -> Any:
-    key = _named(name, source)
+def _kernel(name: str, source: str, inputs: list[str], outputs: list[str], header: str = "") -> Any:
+    key = _named(name, header + source)
     kernel = _kernels.get(key)
     if kernel is None:
-        kernel = mx.fast.metal_kernel(name=key, input_names=inputs, output_names=outputs, source=source)
+        kernel = mx.fast.metal_kernel(name=key, input_names=inputs, output_names=outputs, source=source, header=header)
         _kernels[key] = kernel
     return kernel
 
 
 _NORM_DIMS: dict[int, mx.array] = {}
+_norms: dict[tuple, Any] = {}                 # the plain norms' kernels by name, hidden size and template
 
 
 def _norm_call(name: str, mix: str, names: list[str], inputs: list[mx.array], template: list, rows: int, dims: int,
@@ -87,9 +89,16 @@ def _norm_call(name: str, mix: str, names: list[str], inputs: list[mx.array], te
         source, name = _with_group_sums(source), name + "_xs"
         names, inputs = names + ["dims"], inputs + [_NORM_DIMS[rows]]
         outputs, shapes, dtypes = outputs + ["XS"], shapes + [(dims // 64, grid)], dtypes + [mx.float32]
-    kernel = _kernel(name, source, names, outputs)
-    return tuple(kernel(inputs=inputs, template=[("D", dims), ("T", threads), *template],
-                        grid=(threads * grid, 1, 1), threadgroup=(threads, 1, 1),
+        kernel = _kernel(name, source, names, outputs)      # tensor-unit GPUs only: every pipeline takes 1024
+        return tuple(kernel(inputs=inputs, template=[("D", dims), ("T", threads), *template],
+                            grid=(threads * grid, 1, 1), threadgroup=(threads, 1, 1),
+                            output_shapes=shapes, output_dtypes=dtypes))
+    kernel = _norms.get((name, dims, *template))
+    if kernel is None:
+        # the sum of squares runs in the order of T threads: the pipeline reserves them on every GPU
+        consts = "".join(f"  constexpr int {k} = {int(v)};\n" for k, v in (("D", dims), ("T", threads), *template))
+        kernel = _norms[(name, dims, *template)] = _kernel(name, consts + source, names, outputs, tg.reserve(threads))
+    return tuple(kernel(inputs=inputs, grid=(threads * grid, 1, 1), threadgroup=(threads, 1, 1),
                         output_shapes=shapes, output_dtypes=dtypes))
 
 

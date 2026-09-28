@@ -7,6 +7,7 @@ from typing import Any, Callable, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels import threads
 from tensorfold.kernels.inputs import ints
 from tensorfold.kernels.qwen.dense.v1.row_matmul import WINDOW_ROWS
 
@@ -171,21 +172,25 @@ _SPECS: dict[str, tuple[str, str, list[str], list[str]]] = {
 }
 
 
-_kernels: dict[str, tuple[str, Any]] = {}
+_kernels: dict[Any, tuple[str, Any]] = {}
 
 
 def sources() -> dict[str, str]:
     return {name: header + source for name, (source, header, _, _) in _SPECS.items()}
 
 
-def _kernel(name: str) -> Any:
-    hit = _kernels.get(name)
+def _kernel(name: str, K: int = 0) -> Any:
+    """The kernel; a norm's is per hidden size K, which it keeps in its source to reserve its K / 16 threads."""
+
+    hit = _kernels.get((name, K))
     if hit is None:
         source, header, inputs, outputs = _SPECS[name]
+        if K:
+            source, header = f"  constexpr int K = {K};\n" + source, header + threads.reserve(K // 16)
         digest = hashlib.sha256((header + source).encode()).hexdigest()[:16]
         kernel = mx.fast.metal_kernel(name=f"row_forward_{name}_{digest}", input_names=inputs, output_names=outputs,
                                       source=source, header=header)
-        hit = _kernels[name] = (source, kernel)
+        hit = _kernels[(name, K)] = (source, kernel)
     return hit[1]
 
 
@@ -213,13 +218,13 @@ def add_norm(hidden: mx.array, residual: mx.array | None, weight: mx.array, eps:
     M = hidden.size // K
     if K % 512 or K > 16384:
         raise ValueError(f"norm: the hidden size must be a multiple of 512 up to 16384, got {K}")
-    common = dict(template=[("K", K)], grid=(K // 16, M, 1), threadgroup=(K // 16, 1, 1))
+    common = dict(grid=(K // 16, M, 1), threadgroup=(K // 16, 1, 1))
     if residual is None:
-        x = _kernel("norm_nores")(inputs=[hidden.reshape(M, K), weight, _eps(eps)], output_shapes=[(M, K)],
-                                  output_dtypes=[mx.bfloat16], **common)[0]
+        x = _kernel("norm_nores", K)(inputs=[hidden.reshape(M, K), weight, _eps(eps)], output_shapes=[(M, K)],
+                                     output_dtypes=[mx.bfloat16], **common)[0]
         return hidden, x.reshape(*lead, K)
-    h, x = _kernel("norm")(inputs=[hidden.reshape(M, K), residual.reshape(M, K), weight, _eps(eps)],
-                           output_shapes=[(M, K), (M, K)], output_dtypes=[mx.bfloat16, mx.bfloat16], **common)
+    h, x = _kernel("norm", K)(inputs=[hidden.reshape(M, K), residual.reshape(M, K), weight, _eps(eps)],
+                              output_shapes=[(M, K), (M, K)], output_dtypes=[mx.bfloat16, mx.bfloat16], **common)
     return h.reshape(*lead, K), x.reshape(*lead, K)
 
 

@@ -7,6 +7,7 @@ from typing import Any, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels import threads
 from tensorfold.kernels.inputs import ints
 
 CK = 128           # keys a chunk (fixed: part of the arithmetic)
@@ -109,23 +110,30 @@ _MERGE = r"""
   for (int i = 0; i < DPL; i++) OUT[((qh * W) + w) * D + int(lane) * DPL + i] = bfloat(acc[i] / lsum);
 """
 
-_kernels: dict[str, Any] = {}
+_kernels: dict[Any, Any] = {}
 
 
 def sources() -> dict[str, str]:
     return {"partial": _PARTIAL, "merge": _MERGE, "chunk": f"{CK}/{SPLIT}/{BLK}"}
 
 
-def _kernel(name: str) -> Any:
-    if name not in _kernels:
+def _kernel(name: str, D: int = 0, G: int = 0) -> Any:
+    """The merge, or the partial kernel for head dim D and G heads a kv head (it reserves its 32 G SPLIT threads)."""
+
+    if (name, D, G) not in _kernels:
         source, inputs, outputs = {
             "partial": (_PARTIAL, ["Q", "K", "V", "depth", "path", "scale", "dims"], ["PM", "PL", "PO"]),
             "merge": (_MERGE, ["PM", "PL", "PO", "dims"], ["OUT"]),
         }[name]
-        digest = hashlib.sha256((source + f"{CK}/{SPLIT}/{BLK}").encode()).hexdigest()[:16]
-        _kernels[name] = mx.fast.metal_kernel(name=f"row_attention_{name}_{digest}", input_names=inputs,
-                                              output_names=outputs, source=source)
-    return _kernels[name]
+        header = ""
+        if name == "partial":
+            consts = (("D", D), ("G", G), ("CK", CK), ("SPLIT", SPLIT), ("BLK", BLK))
+            source = "".join(f"  constexpr int {k} = {v};\n" for k, v in consts) + source
+            header = threads.reserve(32 * G * SPLIT)
+        digest = hashlib.sha256((header + source + f"{CK}/{SPLIT}/{BLK}").encode()).hexdigest()[:16]
+        _kernels[(name, D, G)] = mx.fast.metal_kernel(name=f"row_attention_{name}_{digest}", input_names=inputs,
+                                                      output_names=outputs, source=source, header=header)
+    return _kernels[(name, D, G)]
 
 
 _consts: dict[Any, mx.array] = {}
@@ -173,9 +181,8 @@ def row_sdpa(queries: mx.array, keys: mx.array, values: mx.array, scale: float, 
     if G * SPLIT * 32 > 1024:
         raise ValueError(f"row_sdpa: {G} query heads a kv head need {G * SPLIT * 32} threads a threadgroup")
     q = mx.contiguous(queries)
-    pm, pl, po = _kernel("partial")(
+    pm, pl, po = _kernel("partial", D, G)(
         inputs=[q, mx.contiguous(keys), mx.contiguous(values), depth_a, path_a, scale_a, dims],
-        template=[("D", D), ("G", G), ("CK", CK), ("SPLIT", SPLIT), ("BLK", BLK)],
         grid=(32 * G * SPLIT, nch, HKV * W), threadgroup=(32 * G * SPLIT, 1, 1),
         output_shapes=[(H * W * nch,), (H * W * nch,), (H * W * nch, D)],
         output_dtypes=[mx.float32, mx.float32, mx.float32])

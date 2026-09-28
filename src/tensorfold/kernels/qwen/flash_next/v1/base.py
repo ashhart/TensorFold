@@ -8,6 +8,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels import threads
 from tensorfold.kernels.inputs import ints, padded  # noqa: F401  (8+ elements, one source a kernel name)
 
 MAX_ROWS = 16
@@ -169,30 +170,36 @@ consts: dict[Any, mx.array] = {}
 class _Kernel:
     """Cache kernels per integer template with constants embedded in source to avoid per-call template regex work."""
 
-    def __init__(self, name: str, source: Any, inputs: list[str], outputs: list[str], header: str) -> None:
+    def __init__(self, name: str, source: Any, inputs: list[str], outputs: list[str], header: str,
+                 reserve: int) -> None:
         self.name, self.source, self.inputs, self.outputs, self.header = name, source, inputs, outputs, header
+        self.reserve = reserve
         self.compiled: dict[tuple, Any] = {}
 
     def __call__(self, *, template: Any = (), **kwargs: Any) -> Any:
-        key = tuple(template)
+        tg = kwargs["threadgroup"]
+        size = self.reserve or int(tg[0]) * int(tg[1]) * int(tg[2])
+        size = size if size > threads.SAFE else 0             # a pipeline past SAFE reserves its threads everywhere
+        key = (tuple(template), size)
         run = self.compiled.get(key)
         if run is None:
             if callable(self.source):
                 self.source = self.source()
-            text = "".join(f"  constexpr int {k} = {int(v)};\n" for k, v in key) + self.source
-            digest = hashlib.sha256((self.header + text).encode()).hexdigest()[:16]
+            text = "".join(f"  constexpr int {k} = {int(v)};\n" for k, v in key[0]) + self.source
+            header = self.header + (threads.reserve(size) if size else "")
+            digest = hashlib.sha256((header + text).encode()).hexdigest()[:16]
             run = self.compiled[key] = mx.fast.metal_kernel(name=f"{self.name}_{digest}", input_names=self.inputs,
-                                                            output_names=self.outputs, source=text,
-                                                            header=self.header)
+                                                            output_names=self.outputs, source=text, header=header)
         return run(**kwargs)
 
 
-def kernel(name: str, source: Any, inputs: list[str], outputs: list[str], header: str = QDOT_HEADER) -> _Kernel:
-    """The kernel for ``name`` (one source per name; ``source`` may be a callable, built once)."""
+def kernel(name: str, source: Any, inputs: list[str], outputs: list[str], header: str = QDOT_HEADER, *,
+           reserve: int = 0) -> _Kernel:
+    """The kernel for ``name`` (one source per name, may be a callable); ``reserve`` fixes its largest threadgroup."""
 
     found = _kernels.get(name)
     if found is None:
-        found = _kernels[name] = _Kernel(name, source, inputs, outputs, header)
+        found = _kernels[name] = _Kernel(name, source, inputs, outputs, header, reserve)
     return found
 
 

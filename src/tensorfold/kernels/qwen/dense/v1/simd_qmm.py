@@ -7,9 +7,11 @@ from typing import Any, NamedTuple, Sequence
 
 import mlx.core as mx
 
+from tensorfold.kernels import threads
+
 MAX_ROWS = 1 << 16   # rows a call routed here (prompt chunks included); every row's bits are its one-row bits
 RT_MAX = 2           # 8-row tiles a threadgroup: more rows than 8 RT_MAX spread over the grid's y axis
-MMA_SGS = 16         # physical simdgroups; arithmetic chunks stay shape-dependent
+MMA_SGS = 16         # physical simdgroups at most (fewer where a pipeline takes fewer threads): same chunks
 GROUP = 64
 
 _HEADER = r"""
@@ -384,8 +386,8 @@ def fits(module: Any) -> bool:
             and getattr(module, "mode", "affine") == "affine")
 
 
-def _launch(kind: str, rows: int, n: int, dims: int, group: int = GROUP) -> tuple:
-    """Return constants, grid, threadgroup and output shapes; constants depend on shape and row tile count."""
+def _launch(kind: str, rows: int, n: int, dims: int, group: int = GROUP, most: int = MMA_SGS) -> tuple:
+    """Return constants, grid, threadgroup and output shapes; an MMA launch uses up to ``most`` simdgroups."""
 
     s = splits(n, dims)
     if kind == "scalar":
@@ -401,9 +403,40 @@ def _launch(kind: str, rows: int, n: int, dims: int, group: int = GROUP) -> tupl
     if 16 < rows <= 24:                # Use one threadgroup of three row tiles with two output tiles to avoid padding a partial row tile.
         rt = 3
     nt = tiles(n, rt * 8, s)
-    sgs = min(s, MMA_SGS)
+    sgs = min(s, most)
     consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NT", nt), ("RT", rt), ("GS", group))
     return consts, (-(-n // (8 * nt)) * sgs * 32, -(-rows // (8 * rt)), 1), (sgs * 32, 1, 1), [(rows, n)]
+
+
+def _go(kind: str, plan: tuple, dep: bool, pro: Prologue, inputs: list) -> mx.array:
+    consts, grid, tg, oshape = plan
+    return _compiled(kind, consts, dep, pro)(inputs=inputs, grid=grid, threadgroup=tg, output_shapes=oshape,
+                                            output_dtypes=_BF16)[0]
+
+
+def _run(kind: str, rows: int, n: int, dims: int, group: int, dep: bool, pro: Prologue, inputs: list) -> mx.array:
+    """Launch through the call's cached plan; a new MMA plan takes the physical simdgroups its pipeline allows here."""
+
+    key = (kind, rows, n, dims, group, dep, pro.name)
+    plan = _plans.get(key)
+    if plan is not None:
+        return _go(kind, plan, dep, pro, inputs)
+    shape = "scalar" if kind == "scalar" else "mma"
+    if kind == "scalar":
+        plan = _plans[key] = _launch(shape, rows, n, dims, group)
+        return _go(kind, plan, dep, pro, inputs)
+    consts = _launch(shape, rows, n, dims, group)[0]
+    made: list[tuple] = []
+
+    def launch(size: int) -> mx.array:
+        made.append(_launch(shape, rows, n, dims, group, size // 32))
+        return _go(kind, made[-1], dep, pro, inputs)
+
+    pipeline = (f"simd_qmm {kind}", tuple(c for c in consts if c[0] != "SGS"), dep, pro.name)
+    out = threads.fit(pipeline, [32 * g for g in (16, 8, 4, 2, 1) if g <= dict(consts)["SGS"]], launch, inputs)
+    if threads.fitted(pipeline) is not None:
+        _plans[key] = made[-1]
+    return out
 
 
 def qmm(x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, group_size: int = GROUP, *,
@@ -424,13 +457,7 @@ def qmm(x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, group
     pro = prologue or _DEFAULT
     assert len(extra) == len(pro.inputs)
     inputs = [x2, weight, scales, biases, _one, *extra] + ([dep] if dep is not None else [])
-    plan = _plans.get((kind, rows, n, dims, group_size))
-    if plan is None:
-        plan = _plans[(kind, rows, n, dims, group_size)] = _launch(kind, rows, n, dims, group_size)
-    consts, grid, tg, oshape = plan
-    out = _compiled(kind, consts, dep is not None, pro)(inputs=inputs, grid=grid, threadgroup=tg,
-                                                        output_shapes=oshape, output_dtypes=_BF16)[0]
-    return out.reshape(*shape[:-1], n)
+    return _run(kind, rows, n, dims, group_size, dep is not None, pro, inputs).reshape(*shape[:-1], n)
 
 
 def fragments(x: mx.array, *, prologue: Prologue | None = None, extra: Sequence[mx.array] = ()
@@ -460,13 +487,8 @@ def qmm_fragments(frags: tuple[mx.array, mx.array], weight: mx.array, scales: mx
     xf, xs = frags
     rows, groups = int(xs.shape[0]), int(xs.shape[1])
     dims, n = groups * GROUP, int(weight.shape[0])
-    plan = _plans.get(("mmaf", rows, n, dims))
-    if plan is None:
-        plan = _plans[("mmaf", rows, n, dims)] = _launch("mma", rows, n, dims)
-    consts, grid, tg, oshape = plan
     inputs = [xf, xs, weight, scales, biases, _one] + ([dep] if dep is not None else [])
-    return _compiled("mmaf", consts, dep is not None)(inputs=inputs, grid=grid, threadgroup=tg, output_shapes=oshape,
-                                                     output_dtypes=_BF16)[0]
+    return _run("mmaf", rows, n, dims, GROUP, dep is not None, _DEFAULT, inputs)
 
 
 def check(weight: mx.array, scales: mx.array, biases: mx.array, *, seed: int = 0, group_size: int = GROUP) -> bool:
@@ -481,18 +503,19 @@ def check(weight: mx.array, scales: mx.array, biases: mx.array, *, seed: int = 0
                                    full[r:r + m]).item()) for r, m in calls)
 
 
-def _plan(module: Any, rows: int) -> tuple:
-    """Cache the kernel call for this linear and row count."""
+def _first(module: Any, x: mx.array, rows: int) -> tuple[mx.array, tuple | None]:
+    """The linear's first call at this row count, and its cached kernel call once the pipeline is fitted."""
 
     global _one
     if _one is None:
         _one = mx.array([1.0], dtype=mx.float32)
-    weight = module["weight"]
+    weight, group = module["weight"], int(module.group_size)
     n, dims = int(weight.shape[0]), int(weight.shape[1]) * 8
-    kind = "scalar" if scalar_kind(rows, n, dims, module.group_size) else "mma"
-    consts, grid, tg, oshape = _launch(kind, rows, n, dims, module.group_size)
+    kind = "scalar" if scalar_kind(rows, n, dims, group) else "mma"
     tail = [weight, module["scales"], module["biases"], _one]
-    return _compiled(kind, consts), grid, tg, oshape, n, dims, tail
+    y = _run(kind, rows, n, dims, group, False, _DEFAULT, [x.reshape(rows, dims), *tail])
+    plan = _plans.get((kind, rows, n, dims, group, False, _DEFAULT.name))
+    return y, None if plan is None else (_compiled(kind, plan[0]), *plan[1:], n, dims, tail)
 
 
 def _call(self: Any, x: mx.array) -> mx.array:
@@ -505,10 +528,14 @@ def _call(self: Any, x: mx.array) -> mx.array:
         return _ORIG(self, x)
     p = plans.get(rows)
     if p is None:
-        p = plans[rows] = _plan(self, rows)
-    kernel, grid, tg, oshape, n, _, tail = p
-    y = kernel(inputs=[x.reshape(rows, dims), *tail], grid=grid, threadgroup=tg, output_shapes=oshape,
-               output_dtypes=_BF16)[0]
+        y, p = _first(self, x, rows)
+        if p is not None:
+            plans[rows] = p
+        n = int(self["weight"].shape[0])
+    else:
+        kernel, grid, tg, oshape, n, _, tail = p
+        y = kernel(inputs=[x.reshape(rows, dims), *tail], grid=grid, threadgroup=tg, output_shapes=oshape,
+                   output_dtypes=_BF16)[0]
     if x.ndim != 2:
         y = y.reshape(*x.shape[:-1], n)
     if "bias" in self:
