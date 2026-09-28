@@ -11,7 +11,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from tensorfold.kernels.glm.flash.v1 import kernels as K  # noqa: E402
-from tensorfold.families.glm5_next import model as glm  # noqa: E402
+from tensorfold.families.glm5_next import config, linear, mla, mlp, weights  # noqa: E402
 
 
 @pytest.fixture
@@ -36,10 +36,10 @@ def _same(a: mx.array, b: mx.array) -> bool:
     return a.shape == b.shape and bool(mx.array_equal(a, b).item())
 
 
-def _experts(e: int, n: int, k: int, seed: int) -> glm.Q:
+def _experts(e: int, n: int, k: int, seed: int) -> linear.Q:
     mx.random.seed(seed)
     w = (0.02 * mx.random.normal((e, n, k))).astype(mx.bfloat16)
-    return glm.Q(*mx.quantize(w, group_size=64, bits=4))
+    return linear.Q(*mx.quantize(w, group_size=64, bits=4))
 
 
 def _picks(rows: int, top: int, experts: int, seed: int) -> mx.array:
@@ -53,24 +53,19 @@ def _picks(rows: int, top: int, experts: int, seed: int) -> mx.array:
     return idx
 
 
-def _one_row(x: mx.array, idx: mx.array, q: glm.Q) -> mx.array:
+def _one_row(x: mx.array, idx: mx.array, q: linear.Q) -> mx.array:
     """What model.MoE.experts runs for one row: mx.gather_qmm on [1, k, 1, K] -> [1, k, N]."""
 
     return mx.gather_qmm(x[None], q.weight, q.scales, q.biases, rhs_indices=idx, transpose=True, group_size=64,
                          bits=4).squeeze(-2)
 
 
-def test_row_kernel_switch(monkeypatch):
-    for value, expected in (("all", set(glm.ROW_KERNELS)), ("none", set()), ("router,hc", {"router", "hc"})):
-        monkeypatch.setenv("TF_GLM5_ROW_KERNELS", value)
-        assert glm._row_kernels() == expected
-    monkeypatch.setenv("TF_GLM5_ROW_KERNELS", "router,nope")
-    with pytest.raises(ValueError):
-        glm._row_kernels()
-    monkeypatch.setattr(glm, "ENABLED", frozenset({"router"}))
-    assert glm.row_kernel("router", 2, True)
-    assert not glm.row_kernel("router", 1, True) and not glm.row_kernel("router", 2, False)
-    assert not glm.row_kernel("experts", 2, True)
+def test_row_kernel_rule(monkeypatch):
+    assert config.ENABLED == frozenset(config.ROW_KERNELS)
+    monkeypatch.setattr(config, "ENABLED", frozenset({"router"}))
+    assert config.row_kernel("router", 2, True)
+    assert not config.row_kernel("router", 1, True) and not config.row_kernel("router", 2, False)
+    assert not config.row_kernel("experts", 2, True)
 
 
 def test_fallbacks_are_the_one_row_calls(cpu):
@@ -134,8 +129,8 @@ def test_matmul_rows_gives_mlx_one_row_bits(gpu, case):
         assert _same(K.matmul_rows(x[:rows], m, transposed=transposed), one[:rows]), rows
 
 
-def _moe(dims: int = 512, width: int = 512, experts: int = 24, top: int = 4) -> glm.MoE:
-    cfg = glm.Config.from_dict({
+def _moe(dims: int = 512, width: int = 512, experts: int = 24, top: int = 4) -> mlp.MoE:
+    cfg = config.Config.from_dict({
         "hidden_size": dims, "num_hidden_layers": 1, "layer_types": ["linear_attention"], "mlp_layer_types": ["sparse"],
         "vocab_size": 16, "rms_norm_eps": 1e-5, "num_attention_heads": 1, "q_lora_rank": 64, "kv_lora_rank": 64,
         "qk_nope_head_dim": 64, "v_head_dim": 64, "index_n_heads": 1, "index_head_dim": 64, "index_topk": 16,
@@ -146,13 +141,13 @@ def _moe(dims: int = 512, width: int = 512, experts: int = 24, top: int = 4) -> 
     gate, up, down = _experts(experts, width, dims, 6), _experts(experts, width, dims, 7), _experts(experts, dims,
                                                                                                     width, 8)
 
-    def lin(n: int, k: int) -> glm.Q:
-        return glm.Q(*mx.quantize((0.05 * mx.random.normal((n, k))).astype(mx.bfloat16), group_size=64, bits=4))
+    def lin(n: int, k: int) -> linear.Q:
+        return linear.Q(*mx.quantize((0.05 * mx.random.normal((n, k))).astype(mx.bfloat16), group_size=64, bits=4))
 
-    shared = glm.DenseMLP(lin(width, dims), lin(width, dims), lin(dims, width), 10.0)
+    shared = mlp.DenseMLP(lin(width, dims), lin(width, dims), lin(dims, width), 10.0)
     router = (0.3 * mx.random.normal((experts, dims))).astype(mx.float32)
     bias = (0.1 * mx.random.normal((experts,))).astype(mx.float32)
-    return glm.MoE(router, bias, gate, up, down, shared, cfg)
+    return mlp.MoE(router, bias, gate, up, down, shared, cfg)
 
 
 @pytest.mark.parametrize("enabled", [("experts", "router"), ("router",), ()])
@@ -160,7 +155,7 @@ def test_moe_window_rows_are_one_row_steps(gpu, monkeypatch, enabled):
     """The MoE block on a window (router + expert kernels, router only, or row by row) gives every row its
     one-row bits."""
 
-    monkeypatch.setattr(glm, "ENABLED", frozenset(enabled))
+    monkeypatch.setattr(config, "ENABLED", frozenset(enabled))
     moe = _moe()
     x = (0.5 * mx.random.normal((16, 512))).astype(mx.bfloat16)
     one = mx.concatenate([moe(x[r:r + 1], True) for r in range(16)])
@@ -172,7 +167,7 @@ def test_moe_window_rows_are_one_row_steps(gpu, monkeypatch, enabled):
 def test_qmv_quad_rows_gives_mlx_one_row_bits(gpu, shape):
     n, k = shape
     mx.random.seed(9)
-    q = glm.Q(*mx.quantize((0.05 * mx.random.normal((n, k))).astype(mx.bfloat16), group_size=64, bits=4))
+    q = linear.Q(*mx.quantize((0.05 * mx.random.normal((n, k))).astype(mx.bfloat16), group_size=64, bits=4))
     x = mx.random.normal((16, k)).astype(mx.bfloat16)
     one = mx.concatenate([q(x[r:r + 1]) for r in range(16)])
     for rows in range(2, 17):
@@ -192,9 +187,9 @@ def test_every_row_kernel_switch_keeps_windows_exact(gpu, monkeypatch, tmp_path)
         path = write_checkpoint(tmp_path / "glm5")
     finally:
         mx.set_default_device(previous)
-    model = glm.load_backbone(path)
-    for enabled in [(name,) for name in glm.ROW_KERNELS] + [glm.ROW_KERNELS]:
-        monkeypatch.setattr(glm, "ENABLED", frozenset(enabled))
+    model = weights.load_backbone(path)
+    for enabled in [(name,) for name in config.ROW_KERNELS] + [config.ROW_KERNELS]:
+        monkeypatch.setattr(config, "ENABLED", frozenset(enabled))
         runtime = GLMFlash(model, check=True)
         assert runtime.multi_row_exact, (enabled, runtime.check_report)
 
@@ -208,21 +203,21 @@ def test_indexer_choices_are_each_rows_own(gpu, start):
 
     cfg = types.SimpleNamespace(index_topk=2048, index_kpool=4, index_tail=True)
     stub = types.SimpleNamespace(cfg=cfg)
-    stub.index_scores = lambda iq, iw, pool: glm.MLA.index_scores(stub, iq, iw, pool)
+    stub.index_scores = lambda iq, iw, pool: mla.MLA.index_scores(stub, iq, iw, pool)
     mx.random.seed(12)
     rows = 16
     pool = mx.round(4 * mx.random.normal(((start + rows) // 4 + 1, 128))).astype(mx.bfloat16) / 4
     cache = types.SimpleNamespace(pool=pool)
     iq = mx.round(2 * mx.random.normal((rows, 32, 128))).astype(mx.bfloat16) / 2
     iw = mx.random.normal((rows, 32)).astype(mx.bfloat16)
-    got = glm.MLA._choices(stub, iq, iw, cache, start)
+    got = mla.MLA._choices(stub, iq, iw, cache, start)
     for r in range(rows):
         position = start + r
         if position + 1 <= cfg.index_topk:
             assert got[r] is None
             continue
         blocks = (position + 1) // 4
-        want = glm.MLA.selected(stub, stub.index_scores(iq[r][None], iw[r][None], pool[:blocks]), position)
+        want = mla.MLA.selected(stub, stub.index_scores(iq[r][None], iw[r][None], pool[:blocks]), position)
         assert _same(got[r], want), r
 
 
@@ -235,8 +230,8 @@ def test_real_weights_long_context_windows_are_exact(gpu):
 
     from tensorfold.engine.lane_engine import LaneEngine
 
-    model = glm.load_backbone(os.environ["TF_GLM5_MODEL"], layers=8)
-    assert glm.ENABLED == frozenset(glm.ROW_KERNELS)
+    model = weights.load_backbone(os.environ["TF_GLM5_MODEL"], layers=8)
+    assert config.ENABLED == frozenset(config.ROW_KERNELS)
     base = model.make_cache()
     prompt = [1000 + (37 * i) % 50_000 for i in range(4093)]
     for c0 in range(0, len(prompt), 2048):

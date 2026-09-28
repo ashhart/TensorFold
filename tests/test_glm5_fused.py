@@ -1,6 +1,4 @@
-"""GLM-5.3-Flash fused decode kernels (kernels/glm/flash/v1/fused.py):
-a window's rows keep their one-row bits, and the fused MoE / hyper-connection / router kernels give the row-by-row
-path's bits."""
+"""GLM-5.3-Flash's fused decode kernels give a window's rows the row-by-row path's one-row bits."""
 
 from __future__ import annotations
 
@@ -9,7 +7,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from glm5_fakes import write_checkpoint  # noqa: E402
-from tensorfold.families.glm5_next import model as glm  # noqa: E402
+from tensorfold.families.glm5_next import config, model, weights  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -36,23 +34,13 @@ def _same(a, b) -> bool:
     return a.shape == b.shape and bool(mx.array_equal(a, b).item())
 
 
-def test_fused_switch(monkeypatch):
-    for value, expected in (("all", set(glm.FUSED_KERNELS)), ("none", set()), ("moe", {"moe"}),
-                            ("moe,hc", {"moe", "hc"})):
-        monkeypatch.setenv("TF_GLM5_FUSED", value)
-        assert glm._fused() == expected
-    monkeypatch.setenv("TF_GLM5_FUSED", "kda")   # the KDA step is kda.py (TF_GLM5_FUSED_KDA)
-    with pytest.raises(ValueError):
-        glm._fused()
-
-
 def test_fused_model_drafts_exact(checkpoint, monkeypatch, device):
     from test_glm5_next_family import _run_engine, tokens
     from tensorfold.families.glm5_next import mtp as glm_mtp
     from tensorfold.families.glm5_next.runtime import GLMFlash
 
-    monkeypatch.setattr(glm, "FUSED", frozenset(glm.FUSED_KERNELS))
-    model = glm.load_backbone(checkpoint)
+    monkeypatch.setattr(config, "FUSED", frozenset(config.FUSED_KERNELS))
+    model = weights.load_backbone(checkpoint)
     runtime = GLMFlash(model, glm_mtp.load(model), drafts=3)
     assert runtime.multi_row_exact, runtime.check_report
     prompt = tokens(30, seed=8)
@@ -63,15 +51,14 @@ def test_fused_model_drafts_exact(checkpoint, monkeypatch, device):
 
 @pytest.fixture(params=[1, 0], ids=["shared-split", "shared-in-slot"])
 def split_shared(request, monkeypatch):
-    from tensorfold.kernels.glm.flash.v1 import fused as F
+    from tensorfold.kernels.glm.flash.v1 import moe as F
 
     monkeypatch.setattr(F, "SPLIT_SHARED", request.param)
     return request.param
 
 
 def test_fused_moe_is_the_row_by_row_block(monkeypatch, split_shared):
-    """On Metal the five-kernel MoE gives every row of a 1-16-row window the row-by-row block's bits (router,
-    top-k order with ties, normalised weights, experts, SwiGLU, combine, shared expert)."""
+    """On Metal the five-kernel MoE gives every row of a 1-16-row window the row-by-row block's bits."""
 
     if not mx.metal.is_available():
         pytest.skip("needs Metal")
@@ -83,36 +70,34 @@ def test_fused_moe_is_the_row_by_row_block(monkeypatch, split_shared):
         moe = _moe()
         assert moe.fused_ok
         x = (0.5 * mx.random.normal((16, 512))).astype(mx.bfloat16)
-        monkeypatch.setattr(glm, "FUSED", frozenset())
-        monkeypatch.setattr(glm, "ENABLED", frozenset())
+        monkeypatch.setattr(config, "FUSED", frozenset())
+        monkeypatch.setattr(config, "ENABLED", frozenset())
         ref = mx.concatenate([moe(x[r:r + 1], True) for r in range(16)])
-        monkeypatch.setattr(glm, "FUSED", frozenset({"moe"}))
+        monkeypatch.setattr(config, "FUSED", frozenset({"moe"}))
         for rows in (1, 2, 3, 4, 8, 16):
             assert _same(moe(x[:rows], True), ref[:rows]), rows
         # ties in the router: equal logits pick the lower expert id, as mx.argpartition does
         moe.router = mx.zeros_like(moe.router)
         moe.bias = mx.zeros_like(moe.bias)
-        monkeypatch.setattr(glm, "FUSED", frozenset())
+        monkeypatch.setattr(config, "FUSED", frozenset())
         ref = mx.concatenate([moe(x[r:r + 1], True) for r in range(4)])
-        monkeypatch.setattr(glm, "FUSED", frozenset({"moe"}))
+        monkeypatch.setattr(config, "FUSED", frozenset({"moe"}))
         assert _same(moe(x[:4], True), ref)
     finally:
         mx.set_default_device(previous)
 
 
 def test_fused_hc_boundary_is_the_row_by_row_path(monkeypatch):
-    """At GLM-5.3-Flash's width (4 streams of 4,096): write-back + split + RMSNorm in three kernels give the
-    row-by-row path's streams, normed input, post and comb for 1-16 rows, the first block (no write-back) and the
-    last write-back (no split)."""
+    """At GLM's width the three hyper-connection kernels give the row-by-row bits for 1-16 rows and at both ends."""
 
     if not mx.metal.is_available():
         pytest.skip("needs Metal")
-    from tensorfold.kernels.glm.flash.v1 import fused as F
+    from tensorfold.kernels.glm.flash.v1 import hc as F
 
     previous = mx.default_device()
     mx.set_default_device(mx.gpu)
     try:
-        cfg = glm.Config.from_dict({
+        cfg = config.Config.from_dict({
             "hidden_size": 4096, "num_hidden_layers": 1, "layer_types": ["linear_attention"],
             "mlp_layer_types": ["dense"], "vocab_size": 16, "rms_norm_eps": 1e-5, "num_attention_heads": 1,
             "q_lora_rank": 64, "kv_lora_rank": 64, "qk_nope_head_dim": 64, "v_head_dim": 64, "index_n_heads": 1,
@@ -120,7 +105,7 @@ def test_fused_hc_boundary_is_the_row_by_row_path(monkeypatch):
             "moe_intermediate_size": 64, "intermediate_size": 64, "routed_scaling_factor": 1.0,
             "eos_token_id": [0]})
         mx.random.seed(21)
-        hc = glm.HC(0.05 * mx.random.normal((24, 16384)), 0.3 * mx.random.normal((24,)),
+        hc = model.HC(0.05 * mx.random.normal((24, 16384)), 0.3 * mx.random.normal((24,)),
                     mx.array([0.5, 0.5, 0.5]), cfg)
         w = (1 + 0.1 * mx.random.normal((4096,))).astype(mx.bfloat16)
         x = mx.random.normal((16, 4, 4096)).astype(mx.bfloat16)
@@ -128,10 +113,10 @@ def test_fused_hc_boundary_is_the_row_by_row_path(monkeypatch):
         post = mx.random.uniform(0, 2, (16, 4))
         comb = mx.random.uniform(shape=(16, 4, 4))
         assert F.hc_fits(hc, 4096)
-        monkeypatch.setattr(glm, "ENABLED", frozenset())
+        monkeypatch.setattr(config, "ENABLED", frozenset())
 
         def reference(xs, b, p, c, first):
-            new = xs if first else glm.hc_expand(b, xs, p, c, True)
+            new = xs if first else model.hc_expand(b, xs, p, c, True)
             xc, po, co = hc.split(new, True)
             return new, mx.fast.rms_norm(xc, w, 1e-5), po, co
 
@@ -144,20 +129,19 @@ def test_fused_hc_boundary_is_the_row_by_row_path(monkeypatch):
                 for a, b in zip(got, ref):
                     assert _same(a, b[:rows]), (first, rows)
         last = F.hc_step(x, (branch, post, comb), None, None, 1e-5)[0]
-        assert _same(last, glm.hc_expand(branch, x, post, comb, False))
+        assert _same(last, model.hc_expand(branch, x, post, comb, False))
     finally:
         mx.set_default_device(previous)
 
 
 def test_router_kernel_gives_mlx_one_row_bits():
-    """The repacked router (288 experts x 4,096, stored bf16) gives MLX's one-row fp32 matmul bits, 1-16 rows,
-    with the fetching threadgroup and without."""
+    """The repacked router gives MLX's one-row fp32 matmul bits for 1-16 rows, with or without the fetching group."""
 
     if not mx.metal.is_available():
         pytest.skip("needs Metal")
     import types
 
-    from tensorfold.kernels.glm.flash.v1 import fused as F
+    from tensorfold.kernels.glm.flash.v1 import moe as F
 
     previous = mx.default_device()
     mx.set_default_device(mx.gpu)

@@ -1,4 +1,4 @@
-"""GLM-5.3-Flash sparse MLA decode rows: attention that reads the chosen latent keys straight from the cache."""
+"""Sparse MLA attention reading each query's chosen latent keys by index, a threadgroup a (row, head): mlx-vlm #2245."""
 
 from __future__ import annotations
 
@@ -78,10 +78,6 @@ _SOURCE = r"""
 _kernel_obj: dict[str, Any] = {}
 
 
-def sources() -> dict[str, str]:
-    return {"indexed_sparse_attention": _SOURCE}
-
-
 def metal() -> bool:
     return mx.default_device() == mx.gpu and mx.metal.is_available()
 
@@ -99,8 +95,7 @@ def _kernel() -> Any:
 
 def indexed_attention(queries: mx.array, keys: mx.array, indices: mx.array, key_length: int,
                       scale: float) -> mx.array:
-    """queries [R, H, 512] bf16 (latent queries), keys [capacity, 512] bf16 (the cache: keys are values),
-    indices [R, TOPK] int32 (-1: none) -> [R, H, 512] bf16: each (row, head) attends over its indexed keys."""
+    """Each (row, head) of queries [R, H, 512] attends over its indexed cache keys (keys are values; -1: none)."""
 
     rows, heads, dim = queries.shape
     topk = int(indices.shape[-1])

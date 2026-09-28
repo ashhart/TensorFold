@@ -9,7 +9,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from glm5_fakes import TEXT, write_checkpoint  # noqa: E402
-from tensorfold.families.glm5_next import model as glm  # noqa: E402
+from tensorfold.families.glm5_next import caches, linear, mlp, weights  # noqa: E402
 from tensorfold.families.glm5_next import mtp as glm_mtp  # noqa: E402
 from tensorfold.families.glm5_next.runtime import GLMFlash  # noqa: E402
 
@@ -33,7 +33,7 @@ def checkpoint(tmp_path_factory):
 
 
 def backbone(checkpoint):
-    return glm.load_backbone(checkpoint)
+    return weights.load_backbone(checkpoint)
 
 
 def tokens(n: int, seed: int = 1) -> list[int]:
@@ -46,14 +46,38 @@ def test_family_is_detected_and_checked(checkpoint):
 
     assert families.detect(checkpoint).module == "tensorfold.families.glm5_next"
     glm5_next.check(checkpoint)
-    assert glm_mtp.has_mtp(checkpoint)
+    assert glm5_next.has_mtp(checkpoint)
+
+
+def test_check_reads_json_only_and_names_the_mlx_it_needs(tmp_path, monkeypatch):
+    """The CLI runs ``check`` before it sets the family's MLX environment, so it must not start MLX; an MLX older than
+    0.32.2 is refused with the command that fixes it."""
+
+    import json
+    import subprocess
+    import sys
+    from importlib import metadata
+
+    from tensorfold.families import glm5_next
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "glm5_next", "text_config": TEXT,
+                                                      "quantization": {"bits": 4, "group_size": 64}}))
+    code = ("import sys; from tensorfold.families import glm5_next; glm5_next.check(sys.argv[1]); "
+            "print('mlx.core' in sys.modules)")
+    out = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True, check=True,
+                         env={**__import__("os").environ, "PYTHONPATH": ":".join(sys.path)})
+    assert out.stdout.strip().splitlines()[-1] == "False"
+    monkeypatch.setattr(metadata, "version", lambda name: "0.32.0")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with pytest.raises(ValueError, match="mlx>=0.32.2"):
+        glm5_next.check(tmp_path)
 
 
 def test_loads_the_checkpoint_layout(checkpoint):
     model = backbone(checkpoint)
     kinds = ["kda" if layer.is_linear else "mla" for layer in model.layers]
     assert kinds == ["kda", "kda", "kda", "mla", "kda", "mla"]
-    assert isinstance(model.layers[0].mlp, glm.DenseMLP) and isinstance(model.layers[1].mlp, glm.MoE)
+    assert isinstance(model.layers[0].mlp, mlp.DenseMLP) and isinstance(model.layers[1].mlp, mlp.MoE)
     assert model.layers[1].mlp.gate.weight.shape[0] == TEXT["n_routed_experts"]
     mla = model.layers[3].attn
     # kv_b split per head in its stored layout: keys [H, nope, rank], values [H, v, rank]
@@ -114,7 +138,7 @@ def test_keep_rows_rolls_every_cache_back(checkpoint):
     for c1, c2 in zip(a, b):
         assert c1.offset == c2.offset
         for x, y in zip(c1.state, c2.state):
-            n = c1.offset if isinstance(c1, glm.MLACache) else None
+            n = c1.offset if isinstance(c1, caches.MLACache) else None
             if n is not None and x.shape[0] >= n:
                 x, y = x[:n], y[:n]
             assert bool(mx.array_equal(x, y).item())
@@ -155,31 +179,104 @@ def test_mtp_drafts_change_speed_only(checkpoint):
     assert c.emitted == b.emitted
 
 
-def test_lane_engine_resumes_from_a_stored_cache(checkpoint, tmp_path):
-    """A prefix snapshot written to disk and read back continues exactly like the in-memory cache."""
+def test_lane_engine_resumes_from_a_grid_checkpoint(checkpoint, tmp_path):
+    """A checkpoint on the prefill grid, kept in memory or written to disk and read back, resumes exactly like a fresh
+    prefill of the whole prompt (the 2,048 grid scaled to the tiny prompt)."""
 
     from tensorfold.engine.lane_engine import LaneEngine, LaneStream
     from tensorfold.engine.prefix_snapshots import load_snapshot, save_snapshot
 
     model = backbone(checkpoint)
     runtime = GLMFlash(model, glm_mtp.load(model), drafts=2)
-    prefix = tokens(26, seed=5)
-    engine = LaneEngine(runtime)
-    cache = engine.prefill_prefix(prefix)
+    prompt = tokens(30, seed=5)
+
+    def run(ids, **kw):
+        engine = LaneEngine(runtime)
+        engine.prefill_align = 8
+        stream = LaneStream(stream_id="x", prompt_ids=list(ids), max_new_tokens=8)
+        engine.add_stream(stream, **kw)
+        while engine.active_count:
+            engine.step()
+        return stream
+
+    first = run(prompt[:26], checkpoints_at=(26,))
+    prefix, cache = first.history_checkpoints[0]
+    assert prefix == prompt[:24]                                   # the checkpoint moves to the grid
     path = save_snapshot(tmp_path, "glm-test", prefix, cache)
     got_tokens, stored = load_snapshot(path, "glm-test")
     assert got_tokens == prefix
-    follow = [*prefix, 7, 8, 9]
+    fresh = run(prompt).emitted
+    assert run(prompt, cache=LaneEngine.copy_single_cache(cache), cached_tokens=24).emitted == fresh
+    assert run(prompt, cache=LaneEngine.copy_single_cache(stored), cached_tokens=24).emitted == fresh
 
-    def run(c):
-        e = LaneEngine(runtime)
-        s = LaneStream(stream_id="x", prompt_ids=follow, max_new_tokens=8)
-        e.add_stream(s, cache=LaneEngine.copy_single_cache(c), cached_tokens=len(prefix))
-        while e.active_count:
-            e.step()
-        return s.emitted
 
-    assert run(stored) == run(cache)
+@pytest.mark.parametrize("device", ["cpu", "gpu"])
+def test_shared_forward_gives_each_stream_its_own_bits(checkpoint, device):
+    """Streams at different lengths in one forward, past the indexer's budget (sparse attention), equal each stream's
+    own call bit for bit, before and after each keeps part of its rows."""
+
+    if device == "gpu":
+        if not mx.metal.is_available():
+            pytest.skip("needs Metal")
+        mx.set_default_device(mx.gpu)
+    runtime = GLMFlash(backbone(checkpoint), check=True)
+    assert runtime.multi_row_exact, runtime.check_report
+    assert runtime.check_streams() and runtime.max_streams > 1 and runtime.batch_rows == runtime.exact_width
+
+
+def _run_streams(runtime, specs, together):
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.families.glm5_next import engine_settings
+
+    def stream(i, spec):
+        prompt, n, sampling, drafts = spec
+        return LaneStream(stream_id=f"s{i}", prompt_ids=list(prompt), max_new_tokens=n, sampling=sampling,
+                          drafts=drafts)
+
+    if not together:
+        out = []
+        for i, spec in enumerate(specs):
+            engine = LaneEngine(runtime, **engine_settings(runtime))
+            s = stream(i, spec)
+            engine.add_stream(s)
+            while engine.active_count:
+                engine.step()
+            out.append(s.emitted)
+        return out, None
+    engine = LaneEngine(runtime, **engine_settings(runtime))
+    streams = [stream(i, spec) for i, spec in enumerate(specs)]
+    for s in streams:
+        engine.add_stream(s)
+    while engine.active_count:
+        engine.step()
+    return [s.emitted for s in streams], engine
+
+
+@pytest.mark.parametrize("device", ["cpu", "gpu"])
+def test_concurrent_streams_emit_what_they_emit_alone(checkpoint, device):
+    """Streams sharing every round (drafted and serial, greedy and sampled, different lengths and limits) each emit
+    exactly their tokens alone; their heads draft together (``draft_streams``)."""
+
+    from tensorfold.engine.exact_sampling import Sampling
+
+    if device == "gpu":
+        if not mx.metal.is_available():
+            pytest.skip("needs Metal")
+        mx.set_default_device(mx.gpu)
+    model = backbone(checkpoint)
+    runtime = GLMFlash(model, glm_mtp.load(model), drafts=3)
+    assert runtime.max_streams > 1
+    specs = [
+        (tokens(21, seed=4), 20, None, True),
+        (tokens(9, seed=5), 14, Sampling(seed=3, temperature=0.8, top_k=40, top_p=0.9), True),
+        (tokens(33, seed=6), 17, None, False),
+        (tokens(14, seed=7), 11, Sampling(seed=9), True),
+    ]
+    alone, _ = _run_streams(runtime, specs, together=False)
+    shared, engine = _run_streams(runtime, specs, together=True)
+    assert shared == alone
+    assert engine._shared_rounds > 0 and engine.drafted > 0
+    assert any(r.streams > 1 for r in engine.round_stats)
 
 
 def test_qmv_rows_gives_mlx_one_row_bits():
@@ -192,7 +289,7 @@ def test_qmv_rows_gives_mlx_one_row_bits():
     mx.set_default_device(mx.gpu)
     assert kernels.metal()
     mx.random.seed(3)
-    w = glm.Q(*mx.quantize((0.05 * mx.random.normal((256, 1024))).astype(mx.bfloat16), group_size=64, bits=4))
+    w = linear.Q(*mx.quantize((0.05 * mx.random.normal((256, 1024))).astype(mx.bfloat16), group_size=64, bits=4))
     for rows in (2, 3, 4, 8):
         x = mx.random.normal((rows, 1024)).astype(mx.bfloat16)
         many = kernels.qmv_rows(x, w)
@@ -226,7 +323,7 @@ def test_real_weights_first_layers_rows_are_exact():
         pytest.skip("needs Metal")
     mx.set_default_device(mx.gpu)
     path = os.environ["TF_GLM5_MODEL"]
-    model = glm.load_backbone(path, layers=6)
+    model = weights.load_backbone(path, layers=6)
     assert ["kda" if layer.is_linear else "mla" for layer in model.layers] == ["kda"] * 3 + ["mla", "kda", "kda"]
     runtime = GLMFlash(model, glm_mtp.load(model), drafts=3)
     assert runtime.multi_row_exact, runtime.check_report

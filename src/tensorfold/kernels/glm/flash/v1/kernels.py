@@ -1,26 +1,10 @@
-"""Metal kernels for GLM-5.3-Flash decode rows, each written so a row's bits do not depend on the other rows.
+"""Metal row kernels for GLM-5.3-Flash's decode path: each row of a window gets the bits its one-row call gives.
 
-    qmv_rows    a 4-bit, group-64 matvec with a simdgroup per input row: every row gets MLX's one-row
-                ``qmv_fast`` bits (the loop of MLX 0.32's kernel, as ``kernels/qwen/flash_next/v1``'s ``qmv_rows``
-                does for groups of 32), and the rows share the weight reads. MLX's own quantized matmul sums a row
-                differently when 2-4 rows ride together on an M3 Ultra (MLX 0.32.0), so a verify window cannot
-                go through it.
-    hc_split    a hyper-connection's sinkhorn and stream collapse, one threadgroup per row (the kernel of
-                mlx-vlm's DeepSeek-V4 hyper-connection, ``hc_sinkhorn_collapse``; MIT, Apple Inc.).
-    expert_group / expert_qmv   a window's routed experts: the distinct experts of its picks with the picks of
-                each (Flash Next's ``expert_group`` grouping), then every pick through its expert with MLX's one-row
-                gather_qmv_fast loop (a pick keeps its one-row mx.gather_qmm bits) and each expert's weights read
-                once for the window. 8 rows pick about 64 experts, many shared, so this is most of a window's
-                weight traffic.
-    qmv_quad_rows  the same for 64- or 128-input 4-bit matrices (KDA's f_b / g_b), whose one-row kernel is
-                MLX's qmv_quad: a quad of lanes per output row, rows in the grid.
-    matmul_rows MLX's one-row unquantized matmul (gemv / gemv_t from mlx's gemv.h, with the tiling MLX picks for
-                one row) for every row of a window in one launch: the router's fp32 logits, the hyper-connection
-                mix, the indexer gate. MLX multiplies 2+ rows with a different kernel.
-
-The KDA recurrence uses mlx-lm's gated-delta kernel (vectorized gates), which already runs the time steps of
-one call in order inside one thread: a step's bits do not depend on how many steps share the call.
-On a machine without Metal (tests on Linux) every function falls back to MLX ops with the same rule.
+qmv_rows (a 4-bit, group-64 matvec: MLX's qmv_fast loop a row, weights read once for the window), expert_group /
+expert_qmv (a window's routed experts, each distinct expert read once), qmv_quad_rows (KDA's 64- and 128-input
+projections), matmul_rows (MLX's one-row gemv / gemv_t for unquantized matrices) and hc_split (sinkhorn and collapse,
+from mlx-vlm: see THIRD_PARTY_NOTICES.md). MLX's own kernels sum a row differently once two or more rows share a
+call, so a verify window can't use them. Without Metal each falls back to one MLX call a row.
 """
 
 from __future__ import annotations
@@ -397,13 +381,6 @@ def _kernel(name: str, source: str, inputs: list[str], outputs: list[str], heade
     return kernel
 
 
-def sources() -> dict[str, str]:
-    """The kernel sources, for naming prefix snapshots."""
-
-    return {"header": _HEADER, "qmv_rows": _QMV_ROWS, "hc_split": _HC_SPLIT, "expert_group": _EXPERT_GROUP,
-            "expert_qmv": _EXPERT_QMV, "gemv_t_rows": _GEMV_T_ROWS, "gemv_rows": _GEMV_ROWS}
-
-
 def qmv_rows_fits(weights: Any, rows: int) -> bool:
     k = int(weights.scales.shape[-1]) * int(weights.group)
     return (weights.bits == 4 and weights.group == 64 and k % 512 == 0 and int(weights.weight.shape[0]) % 4 == 0
@@ -504,8 +481,8 @@ def expert_qmv(x: mx.array, idx: mx.array, group: tuple[mx.array, mx.array, mx.a
 
 def gemv_params(transposed: bool, in_len: int, out_len: int) -> tuple[int, int, int, int, int, int]:
     """The (BM, BN, SM, SN, TM, TN) tiling MLX 0.32's matmul picks for one row (mlx/backend/metal/matmul.cpp):
-    ``transposed``: x @ M with M [K, N] row-major (gemv_t), else x @ M.T with M [N, K] (gemv). Checked bit for bit
-    at GLM-5.3-Flash's shapes on an M3 Ultra (tests)."""
+    ``transposed``: x @ M with M [K, N] row-major (gemv_t), else x @ M.T with M [N, K] (gemv). The tests check it
+    bit for bit at GLM-5.3-Flash's shapes."""
 
     tm, tn, sm, sn, bm, bn = 4, 4, 1, 32, 1, 1
     if transposed:

@@ -6,10 +6,11 @@ parallel over two DGX Sparks.
 hyper-connections, a 154,880-token vocabulary and an MTP layer. The MLX 4-bit checkpoint is 182 GB and Mia's
 EXL3 one (routed experts in ExLlamaV3's 4-bit trellis format, the rest in BF16, ``cuda/exl3.py``) 164 GB.
 
-On a Mac (``load``): ``model`` is TensorFold's forward pass for the checkpoint, with a decode path whose rows each
-get one-row bits; ``tensorfold.kernels.glm.flash.v1`` holds its Metal kernels; ``mtp`` is the checkpoint's MTP
-layer; ``runtime`` is what the lane engine's family rounds serve (``engine.lane_family``: exact MTP drafting when
-the load-time row check passes). It needs a Mac with 256 GB or more and reads the MLX 4-bit checkpoint only.
+On a Mac (``load``): ``model`` and the layers beside it (``kda``, ``mla``, ``mlp``) are TensorFold's forward pass,
+with a decode path whose rows each get one-row bits, read from the checkpoint by ``weights``;
+``tensorfold.kernels.glm.flash.v1`` holds its Metal kernels; ``mtp`` is the checkpoint's MTP layer; ``runtime`` is
+what the lane engine's family rounds serve (``engine.lane_family``: exact MTP drafting, concurrent requests in shared
+rounds, both behind load-time row checks). It needs a Mac with 256 GB or more and reads the MLX 4-bit checkpoint only.
 
 On NVIDIA GPUs (``cuda_engine``): each Spark holds half of every layer (``cuda/``). Drafts come from the
 checkpoint's MTP head and, when it has been pulled on both machines, from the DFlash2 draft model.
@@ -65,8 +66,7 @@ def check(model_dir: str | Path) -> None:
                          f"CUDA, EXL3 ({MODELS[1]}); this checkpoint has {describe_quantization(config)}. "
                          f"{OWN_MODEL_HELP}")
     if sys.platform == "darwin":
-        from tensorfold.families.glm5_next.mtp import has_mtp
-
+        _require_mlx((0, 32, 2))
         if (method != "exl3" and (Path(model_dir) / "model.safetensors.index.json").is_file()
                 and not has_mtp(model_dir)):
             print(f"[tensorfold] this checkpoint has no MTP layer: decoding without MTP drafts ({MODELS[0]} has "
@@ -74,6 +74,42 @@ def check(model_dir: str | Path) -> None:
         return
     print("[tensorfold] GLM-5.3-Flash runs on two NVIDIA GPUs with 128 GB each (two DGX Sparks): pull it on both "
           "and serve with --tp 2 on both (docs/recipes/glm-5.3-flash.md)", flush=True)
+
+
+def has_mtp(model_dir: str | Path) -> bool:
+    """Whether the checkpoint kept the MTP layer (``layers.<num_hidden_layers>.eh_proj``); reads JSON only, so the
+    CLI's check runs before MLX starts."""
+
+    import json
+
+    config = json.loads((Path(model_dir) / "config.json").read_text())
+    text = config.get("text_config") or config
+    n = int(text.get("num_hidden_layers", 0))
+    if int(text.get("num_nextn_predict_layers", 0)) < 1:
+        return False
+    index = Path(model_dir) / "model.safetensors.index.json"
+    if not index.is_file():
+        return False
+    names = json.loads(index.read_text())["weight_map"]
+    return any(name.endswith(f"layers.{n}.eh_proj.weight") for name in names)
+
+
+def _require_mlx(least: tuple[int, ...]) -> None:
+    """Refuse an older MLX, read from the package's metadata (MLX itself is not imported yet)."""
+
+    import re
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        found = version("mlx")
+    except PackageNotFoundError:
+        return
+    parts = tuple(int(p) for p in re.findall(r"\d+", found)[:3])
+    if parts < least:
+        need = ".".join(str(p) for p in least)
+        raise ValueError(f"GLM-5.3-Flash needs MLX {need} or later (this is {found}): with 0.32.0 its weights dropped "
+                         f"out of wired memory on a 256 GB Mac and decoding fell to a few tokens a second. Install it "
+                         f"with: python -m pip install \"mlx>={need}\"")
 
 
 def load(model_dir: Path, *, mtp_drafts: int | None = None, **_: Any) -> tuple[Any, Any]:
@@ -101,15 +137,13 @@ def engine_settings(model: Any) -> dict[str, Any]:
 
 
 def kernel_version(model: Any) -> str:
-    """Names the kernels that computed a prefix snapshot: the MLX engine's and the kernel package's sources, the
-    MLX version (MLX's own kernels compute the prefill) and the switches that change the decode path's arithmetic."""
+    """Names the kernels that computed a prefix snapshot: the MLX engine's and the kernel package's sources, and the
+    MLX version (MLX's own kernels compute the prefill)."""
 
     import hashlib
     import importlib
 
     import mlx.core as mx
-
-    from tensorfold.families.glm5_next import model as glm
 
     digest = hashlib.sha256()
     for module in (__name__, KERNEL_PACKAGE):
@@ -118,7 +152,6 @@ def kernel_version(model: Any) -> str:
             digest.update(path.relative_to(folder).as_posix().encode())
             digest.update(path.read_bytes())
     digest.update(mx.__version__.encode())
-    digest.update(f"fused_kda={glm.FUSED_KDA} sparse={glm.SPARSE_KERNEL} fused={sorted(glm.FUSED)}".encode())
     return f"{MODEL_TYPES[0]}-{KERNEL_VERSION}-" + digest.hexdigest()[:12]
 
 

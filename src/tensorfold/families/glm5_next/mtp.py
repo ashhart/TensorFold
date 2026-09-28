@@ -9,7 +9,7 @@ token i+1:
     x = x + MoE(post_attention_layernorm(x))            one stream: this layer has no hyper-connections
     logits = lm_head(shared_head.norm(x))               the backbone's head
 
-Its output x feeds the next draft in place of h (drafts chain), as oMLX's GLM-5.3 runtime does.
+Its output x feeds the next draft in place of h (drafts chain).
 """
 
 from __future__ import annotations
@@ -18,7 +18,10 @@ from typing import Any
 
 import mlx.core as mx
 
-from tensorfold.families.glm5_next.model import GLM5, MLACache, Q, load_layer, project
+from tensorfold.families.glm5_next.caches import MLACache
+from tensorfold.families.glm5_next.linear import Q, project
+from tensorfold.families.glm5_next.weights import load_layer
+from tensorfold.families.glm5_next.model import GLM5
 
 
 class GLMMTP:
@@ -31,40 +34,24 @@ class GLMMTP:
     def make_cache(self) -> MLACache:
         return MLACache()
 
-    def __call__(self, model: GLM5, h: mx.array, tokens: mx.array, cache: MLACache, decode: bool) -> mx.array:
-        """Rows h [n, D] (final-normed hidden) with their next tokens [n]: the head's output rows [n, D] (pre-norm)."""
+    def __call__(self, model: GLM5, h: mx.array, tokens: mx.array, caches: list[MLACache], lengths: tuple[int, ...],
+                 decode: bool) -> mx.array:
+        """Rows h [n, D] (final-normed hidden) with their next tokens [n], ``lengths`` rows for each stream's head
+        cache in ``caches``: the head's output rows [n, D] (pre-norm)."""
 
         e = mx.fast.rms_norm(model.embed_tokens(tokens), self.enorm, self.eps)
         hh = mx.fast.rms_norm(h, self.hnorm, self.eps)
         x = project(mx.concatenate([e, hh], axis=-1), self.eh_proj, rows_exact=decode)
-        return self.layer(x, cache, decode)
+        return self.layer(x, caches, lengths, decode)
 
     def logits(self, model: GLM5, out: mx.array) -> mx.array:
         return model.head(mx.fast.rms_norm(out, self.norm, self.eps))
 
 
-def has_mtp(model_dir: Any) -> bool:
-    """Whether the checkpoint kept the nextn layer (``layers.<num_hidden_layers>.eh_proj``)."""
-
-    import json
-    from pathlib import Path
-
-    config = json.loads((Path(model_dir) / "config.json").read_text())
-    text = config.get("text_config") or config
-    n = int(text.get("num_hidden_layers", 0))
-    if int(text.get("num_nextn_predict_layers", 0)) < 1:
-        return False
-    index = Path(model_dir) / "model.safetensors.index.json"
-    if not index.is_file():
-        return False
-    names = json.loads(index.read_text())["weight_map"]
-    return any(name.endswith(f"layers.{n}.eh_proj.weight") for name in names)
-
-
 def load(model: GLM5) -> GLMMTP:
     """The head from the checkpoint the model was loaded from (4-bit like the backbone, its router fp32)."""
 
-    from tensorfold.families.glm5_next.model import _materialize
+    from tensorfold.families.glm5_next.weights import _materialize
 
     w = model.weights
     cfg = model.args

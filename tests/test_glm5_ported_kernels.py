@@ -1,12 +1,4 @@
-"""The kernels ported from mlx-vlm into GLM-5.3-Flash's decode path:
-
-- the fused KDA step (mlx-vlm #2105): one launch per KDA layer, R rows in order, f_b / g_b folded in;
-- indexed sparse attention (mlx-vlm #2245): chosen latent keys read from the cache by index;
-- the sparse indexer's incremental pool (mlx-vlm #2107's decode path and its stale-pool fix): TensorFold's cache
-  already pools once per completed block; a trim followed by new rows must never score a stale block.
-
-On Metal: each kernel against its MLX-ops form (close), and against itself one row at a time (bit-identical). On
-Linux the MLX-ops forms are checked for the same row rule through the whole tiny model."""
+"""Kernels ported from mlx-vlm (fused KDA #2105, indexed sparse attention #2245, #2107's pool case) keep rows exact."""
 
 from __future__ import annotations
 
@@ -16,7 +8,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from glm5_fakes import TEXT, write_checkpoint  # noqa: E402
-from tensorfold.families.glm5_next import model as glm  # noqa: E402
+from tensorfold.families.glm5_next import caches, config, weights  # noqa: E402
 from tensorfold.families.glm5_next.runtime import GLMFlash  # noqa: E402
 from tensorfold.kernels.glm.flash.v1 import kda as KDA_K  # noqa: E402
 from tensorfold.kernels.glm.flash.v1 import sparse_attention as SA  # noqa: E402
@@ -70,7 +62,7 @@ def _kda_inputs(kda, rows: int, seed: int):
 def test_fused_kda_rows_are_one_row_steps(gpu, checkpoint, rows):
     """R rows in one launch == R one-row launches chained (y, state, conv window), and close to the MLX ops."""
 
-    model = glm.load_backbone(checkpoint)
+    model = weights.load_backbone(checkpoint)
     kda = model.layers[0].attn
     assert KDA_K.fits(kda)
     proj, conv, state = _kda_inputs(kda, rows, seed=rows)
@@ -89,7 +81,7 @@ def test_fused_kda_rows_are_one_row_steps(gpu, checkpoint, rows):
 def test_fused_kda_keep_replays_a_prefix_exactly(gpu, checkpoint):
     from tensorfold.engine.lane_engine import LaneEngine
 
-    model = glm.load_backbone(checkpoint)
+    model = weights.load_backbone(checkpoint)
     base = model.make_cache()
     model.hidden(mx.array([_tokens(30)]), base)
     window = [7, 9, 11, 13, 17, 19]
@@ -100,15 +92,15 @@ def test_fused_kda_keep_replays_a_prefix_exactly(gpu, checkpoint):
         for t in window[:keep]:
             model.hidden(mx.array([[t]]), b)
         for c1, c2 in zip(a, b):
-            if isinstance(c1, glm.KDACache):
+            if isinstance(c1, caches.KDACache):
                 assert _same(c1.ssm, c2.ssm) and _same(c1.conv, c2.conv) and c1.offset == c2.offset
         assert _same(model.head(model.hidden(mx.array([[21]]), a)), model.head(model.hidden(mx.array([[21]]), b)))
 
 
 @pytest.mark.parametrize("fused", [True, False])
 def test_windows_stay_exact_with_and_without_the_fused_kda(checkpoint, monkeypatch, fused):
-    monkeypatch.setattr(glm, "FUSED_KDA", fused)
-    runtime = GLMFlash(glm.load_backbone(checkpoint), check=True)
+    monkeypatch.setattr(config, "FUSED_KDA", fused)
+    runtime = GLMFlash(weights.load_backbone(checkpoint), check=True)
     assert runtime.multi_row_exact, runtime.check_report
 
 
@@ -133,13 +125,12 @@ def test_indexed_attention_rows_are_independent_and_close(gpu):
 
 @pytest.mark.parametrize("sparse", [True, False])
 def test_long_context_windows_are_exact(checkpoint, monkeypatch, sparse):
-    """Past index_topk (16 in the test checkpoint) every decode row reads its chosen blocks: windows of 2-8 rows
-    give each row its one-row bits with the sparse kernel on (Metal) or its ops form (CPU), and without it."""
+    """Past index_topk every decode row reads its chosen blocks: 2-8-row windows keep one-row bits, kernel on or off."""
 
     from tensorfold.engine.lane_engine import LaneEngine
 
-    monkeypatch.setattr(glm, "SPARSE_KERNEL", sparse)
-    model = glm.load_backbone(checkpoint)
+    monkeypatch.setattr(config, "SPARSE_KERNEL", sparse)
+    model = weights.load_backbone(checkpoint)
     base = model.make_cache()
     mx.eval(model.hidden(mx.array([_tokens(37, seed=5)]), base))
     for width in (2, 3, 5, 8):
@@ -151,10 +142,9 @@ def test_long_context_windows_are_exact(checkpoint, monkeypatch, sparse):
 
 
 def test_sparse_kernel_matches_the_gathered_attention(checkpoint, monkeypatch):
-    """The indexed kernel reads the keys ``selected`` picks, in its order: one MLA decode row past the budget with the
-    kernel and with gather + SDPA agree to bf16 rounding (logits of the random test model amplify rounding)."""
+    """The indexed kernel reads the keys ``selected`` picks: it agrees with gather + SDPA to bf16 rounding."""
 
-    model = glm.load_backbone(checkpoint)
+    model = weights.load_backbone(checkpoint)
     cache = model.make_cache()
     mx.eval(model.hidden(mx.array([_tokens(37, seed=5)]), cache))
     mla, c = model.layers[3].attn, cache[3]
@@ -169,30 +159,27 @@ def test_sparse_kernel_matches_the_gathered_attention(checkpoint, monkeypatch):
     assert ids[:len(chosen)] == chosen and all(v == -1 for v in ids[len(chosen):])
     outs = {}
     for sparse in (True, False):
-        monkeypatch.setattr(glm, "SPARSE_KERNEL", sparse)
+        monkeypatch.setattr(config, "SPARSE_KERNEL", sparse)
         outs[sparse] = mla._decode_row(q, iq, iw, c, position).astype(mx.float32)
     diff = float(mx.abs(outs[True] - outs[False]).max())
     assert diff <= 0.02 * float(mx.abs(outs[False]).max()) + 1e-3
 
 
 def test_trim_never_scores_a_stale_pool_block(checkpoint):
-    """mlx-vlm #2107's stale-pool bug (a trimmed cache reusing pooled blocks of the positions it dropped) cannot
-    happen here: the pool of a block is rewritten when its last position is written again, and a query scores only
-    blocks complete at its own position. A rolled-back cache that takes other tokens == a cache that never saw
-    the dropped ones."""
+    """A trimmed cache taking other tokens equals one that never saw the dropped ones (mlx-vlm #2107's stale pool)."""
 
-    model = glm.load_backbone(checkpoint)
+    model = weights.load_backbone(checkpoint)
     prompt = _tokens(37, seed=9)
     a, b = model.make_cache(), model.make_cache()
     mx.eval(model.hidden(mx.array([prompt]), a), model.hidden(mx.array([prompt]), b))
     for t in (40, 41, 42, 43, 44, 45):                         # a: 6 tokens that will be dropped
         model.hidden(mx.array([[t]]), a)
     for c in a:
-        if isinstance(c, glm.MLACache):
+        if isinstance(c, caches.MLACache):
             c.trim(6)
-    kda_b = [c for c in b if isinstance(c, glm.KDACache)]
+    kda_b = [c for c in b if isinstance(c, caches.KDACache)]
     for i, c in enumerate(a):                                  # KDA states are not what this checks: copy them
-        if isinstance(c, glm.KDACache):
+        if isinstance(c, caches.KDACache):
             c.conv, c.ssm, c.offset = kda_b[0].conv, kda_b[0].ssm, kda_b[0].offset
             kda_b.pop(0)
     for t in (60, 61, 62, 63, 64, 65, 66):
@@ -200,6 +187,6 @@ def test_trim_never_scores_a_stale_pool_block(checkpoint):
         lb = model.head(model.hidden(mx.array([[t]]), b))
         assert _same(la, lb), t
     for c1, c2 in zip(a, b):
-        if isinstance(c1, glm.MLACache):
+        if isinstance(c1, caches.MLACache):
             n = c1.offset // 4
             assert _same(c1.pool[:n], c2.pool[:n])

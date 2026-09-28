@@ -1,27 +1,9 @@
-"""GLM-5.3-Flash KDA (Kimi Delta Attention) decode rows in ONE Metal kernel per layer.
+"""The KDA decode step in one Metal kernel a layer: the conv window, the norms and gates, the delta-rule state update
+and the gated RMSNorm, with f_b / g_b folded in (ported from mlx-vlm #2105: see THIRD_PARTY_NOTICES.md).
 
-Ported from mlx-vlm PR #2105 (``mlx_vlm/models/glm5_next/fused_kda.py``, "glm5_next: fuse the KDA decode chain
-into one Metal kernel", by avlp12; mlx-vlm is MIT licensed, Copyright (c) 2025 Prince Canuma). That kernel folds the
-whole post-projection chain of one KDA decode step -- the causal conv1d window update, silu, the two L2 norms, the
-safe forget gate, the sigmoid beta, the gated delta-rule state update and the gated RMSNorm, ~30 MLX dispatches --
-into one launch, one threadgroup per head, the 128x128 fp32 state streamed through registers once, and proved it
-bit-identical to mlx-vlm's eager ops. What TensorFold changes:
-
-- **rows**: the kernel takes a verify window of R <= 16 consecutive rows and runs them in order inside the launch
-  (the state stays in registers between rows). Every row's arithmetic is the same whatever R is, so a window gives
-  each row the bits a one-row call gives it -- the exactness contract of TensorFold's drafted rounds. Rolling back to
-  a prefix (``KDACache.keep``) re-runs the kept rows from the window's entry state and conv window through the same
-  kernel, so the state after the kept prefix is bit-identical too.
-- **the projections**: the input is TensorFold's stacked in-projection output (q | k | v | f_a | g_a | b) as it
-  comes out of the matmul, no slices or copies; ``f_b_proj`` and ``g_b_proj`` (128 -> 8192, 4-bit, groups of 64)
-  run inside the kernel with MLX's one-row ``qmv_quad`` arithmetic (the 4-bit form of #2105's opt-in 8-bit fold).
-  One dispatch per KDA layer between the in-projection and ``o_proj``.
-- **TensorFold's own rounding points**: the conv sums its taps in fp32 in tap order, silu and beta are MLX's precise
-  sigmoid in bf16, the decays are ``exp(lower_bound * sigmoid(A * (a + dt_bias)))`` in fp32 with ``A = exp(A_log)``.
-  This kernel IS the decode path's arithmetic (strategy C in the recipe book: the serial reference moves with
-  it); the prefill path (> 16 rows) stays on MLX ops, as before.
-
-Without Metal (tests on Linux) ``kda_rows_ops`` runs the same formulas one row at a time with MLX ops.
+A window's rows run in order inside the launch, so a row's bits don't depend on the window's width, and a rollback
+replays the kept rows from the entry state through the same kernel. The kernel sets the decode path's arithmetic;
+prompt chunks take MLX ops. ``kda_rows_ops`` is the same arithmetic in MLX ops, for machines without Metal.
 """
 
 from __future__ import annotations
@@ -245,10 +227,6 @@ _SOURCE = r"""
 
 _kernel_obj: dict[str, Any] = {}
 TY = 32
-
-
-def sources() -> dict[str, str]:
-    return {"kda_header": _HEADER, "kda_rows": _SOURCE}
 
 
 def metal() -> bool:
