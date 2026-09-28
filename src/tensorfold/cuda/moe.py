@@ -1,14 +1,23 @@
-"""Flash Next's MoE, top 10 of 512 on fp32 logits (ties to the lower id); each row routes and runs on its own."""
+"""Softmax top-k MoE with a sigmoid-gated shared expert, on fp32 logits (ties to the lower id); each row routes and runs on its own."""
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import torch
 import triton
 import triton.language as tl
 
-from tensorfold.cuda import experts as grouped
+from . import experts as grouped
 
-from . import qmm
+
+def _tile(m: int) -> int:
+    """Rows a router program takes: 16 to 128, then tiles of 128 (a row's bits never depend on its tile)."""
+
+    for b in (16, 32, 64, 128):
+        if m <= b:
+            return b
+    return 128
 
 
 @triton.jit
@@ -36,7 +45,7 @@ def router(x: torch.Tensor, rows: torch.Tensor, out: torch.Tensor | None = None)
     ne = rows.shape[0]
     if out is None:
         out = torch.empty((m, ne), dtype=torch.float32, device=x.device)
-    bm = qmm.bucket(m)
+    bm = _tile(m)
     if bm == 16:
         be, bk, stages = 32, 256, 4
     else:
@@ -116,3 +125,61 @@ def moe(x: torch.Tensor, router_rows: torch.Tensor, ex: grouped.Experts, buf: Mo
     grouped.gate_up(x, ex, buf.plan, buf.act.view(-1, ex.width), rows)
     grouped.down(buf.act.view(-1, ex.width), ex, buf.plan, buf.y.view(-1, ex.dims), rows)
     return buf
+
+
+@triton.jit
+def _combine(Y, W, OUT, S: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr):
+    """Program (row, column block): the row's slots summed in slot order, fp32 w * y, rounded once to bf16."""
+
+    r = tl.program_id(0)
+    d = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    ok = d < D
+    acc = tl.zeros((BLOCK,), tl.float32)
+    for k in tl.static_range(S):
+        w = tl.load(W + r * S + k)
+        acc += w * tl.load(Y + (r * S + k) * D + d, mask=ok, other=0.0).to(tl.float32)
+    tl.store(OUT + r * D + d, acc.to(tl.bfloat16), mask=ok)
+
+
+def combine(y: torch.Tensor, wts: torch.Tensor) -> torch.Tensor:
+    """y [R, S, D] (fp32, or bf16 in prefill) and wts [R, S] fp32 -> [R, D] bf16; a row's bits never depend on R."""
+
+    rows, slots, dims = y.shape
+    out = torch.empty((rows, dims), dtype=torch.bfloat16, device=y.device)
+    _combine[(rows, triton.cdiv(dims, 512))](y, wts, out, S=slots, D=dims, BLOCK=512, num_warps=4)
+    return out
+
+
+@dataclass
+class Routed:
+    """A layer's router rows [E + 1, D] bf16 (the shared expert's gate row last) and its E + 1 experts."""
+
+    router: torch.Tensor
+    experts: grouped.Experts
+    top_k: int
+
+    @property
+    def count(self) -> int:
+        return self.router.shape[0] - 1
+
+
+class _Shape:
+    def __init__(self, m: Routed) -> None:
+        self.num_experts_per_tok, self.num_experts = m.top_k, m.count
+        self.moe_intermediate_size, self.hidden_size = m.experts.width, m.experts.dims
+
+
+_scratch: dict[tuple, MoEBuffers] = {}
+
+
+def run(x: torch.Tensor, m: Routed, *, prefill: bool = False) -> torch.Tensor:
+    """x [R, D] bf16 -> [R, D] bf16: its top-k experts by renormalized softmax weight plus the shared expert."""
+
+    rows = x.shape[0]
+    size = 1 << max(4, (rows - 1).bit_length())                 # scratch per power of two, reused by every layer
+    key = (size, m.count, m.top_k, m.experts.width, m.experts.dims, prefill, x.device)
+    buf = _scratch.get(key)
+    if buf is None:
+        buf = _scratch[key] = MoEBuffers(size, _Shape(m), x.device, prefill=prefill)
+    moe(x.contiguous(), m.router, m.experts, buf, m.top_k, m.count)
+    return combine(buf.y[:rows], buf.wts[:rows])

@@ -52,6 +52,7 @@ class ChatJob:
     cancellation: Cancellation = field(default_factory=Cancellation)
     ignore_eos: bool = False
     stop_check: Callable[[list[int]], bool] | None = None
+    call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
 
 
 class _JobQueue(queue.PriorityQueue):

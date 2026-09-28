@@ -9,6 +9,7 @@ Each family page describes its supported checkpoint, kernels and operating limit
 | Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
+| Qwen3.6-35B-A3B | [One-GPU CUDA](qwen3.6-moe.md) |
 
 Contributor guides cover [adding an MLX family](adding-a-family.md),
 [adding a CUDA family](adding-a-cuda-family.md) and [CUDA implementation rules](cuda.md).

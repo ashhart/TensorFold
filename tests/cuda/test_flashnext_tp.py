@@ -227,9 +227,10 @@ def test_tp_logits_agree_with_one_gpu_to_rounding(models):
     assert float((got - ref).abs().max()) < 0.05 * float(ref.abs().max())
 
 
-def test_tp_windows_match_serial_steps_and_prefix_commits_continue(models):
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8", "int4"])
+def test_tp_windows_match_serial_steps_and_prefix_commits_continue(models, kv_dtype):
     _, ranks, _ = models
-    engines = [Engine(w, capacity=1024, max_rows=16, prefill_rows=16) for w in ranks]
+    engines = [Engine(w, capacity=1024, max_rows=16, prefill_rows=16, kv_dtype=kv_dtype) for w in ranks]
     nxt = [401, 33, 2048, 5, 77, 1500, 9, 10, 11]
 
     def body(r, e):
@@ -256,8 +257,9 @@ def test_tp_windows_match_serial_steps_and_prefix_commits_continue(models):
         assert not bad, (r, bad)
 
 
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95)])
-def test_tp_mtp_drafts_give_serial_tokens_on_both_ranks(models, sampling):
+def test_tp_mtp_drafts_give_serial_tokens_on_both_ranks(models, sampling, kv_dtype):
     _, ranks, drafts = models
 
     def body(r, e):
@@ -275,7 +277,7 @@ def test_tp_mtp_drafts_give_serial_tokens_on_both_ranks(models, sampling):
         return out
 
     for group in (ranks, drafts):
-        engines = [Engine(w, capacity=1024, max_rows=8, prefill_rows=16) for w in group]
+        engines = [Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype) for w in group]
         a, b = _run_ranks(body, engines)
         assert a == b
         for name in ("d1", "d3", "d5", "d5c", "d6c30", "d7c90"):
@@ -380,7 +382,8 @@ def _fake_nccl(monkeypatch, hub):
     monkeypatch.setattr(comm_mod, "NCCL", FakeNCCL)
 
 
-def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, models, monkeypatch):
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
+def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, models, monkeypatch, kv_dtype):
     """engine.FlashNextEngine with two ranks: rank 0 hands each request to rank 1 through the TCP store, both
     decode it in lockstep, rank 0 streams the tokens tensor-parallel serial decoding gives, and rank 1 leaves
     when rank 0 shuts down."""
@@ -390,7 +393,7 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
     _, ranks, _ = models
     sampling = Sampling(seed=1234, top_k=20, top_p=0.95)
     refs = _run_ranks(lambda r, e: serial_decode(e, prefill(e, PROMPT, sampling), 20, sampling).tokens,
-                      [Engine(w, capacity=512, max_rows=8, prefill_rows=16) for w in ranks])
+                      [Engine(w, capacity=512, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype) for w in ranks])
     hub = _Hub(2)
     _fake_nccl(monkeypatch, hub)
     engines: list = [None, None]
@@ -399,7 +402,7 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
     def build(r):
         try:
             engines[r] = FlashNextEngine(checkpoint, depth=4, confidence=0.001, draft_vocab=None, max_len=512, tp=2,
-                                         rank=r, master="127.0.0.1", prefetch=False, graphs=False)
+                                         rank=r, master="127.0.0.1", prefetch=False, graphs=False, kv_dtype=kv_dtype)
             if r == 1:
                 engines[1].follow()
         except BaseException as exc:            # noqa: BLE001
@@ -433,8 +436,9 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
     assert len(greedy) >= 1
 
 
-def test_tp_ranks_started_with_different_settings_refuse_to_start(checkpoint, monkeypatch):
-    """Two ranks with different draft rules would fall out of step: both raise before loading the weights."""
+@pytest.mark.parametrize("differ", ["depth", "kv_dtype"])
+def test_tp_ranks_started_with_different_settings_refuse_to_start(checkpoint, monkeypatch, differ):
+    """Two ranks with different draft rules or KV caches would fall out of step: both raise before loading the weights."""
 
     from tensorfold.families.qwen4_exp.cuda.engine import FlashNextEngine
 
@@ -444,8 +448,9 @@ def test_tp_ranks_started_with_different_settings_refuse_to_start(checkpoint, mo
 
     def build(r):
         try:
-            FlashNextEngine(checkpoint, depth=4 if r == 0 else 3, draft_vocab=None, max_len=512, tp=2, rank=r,
-                            master="127.0.0.1", prefetch=False, graphs=False)
+            other = {"depth": 3} if differ == "depth" else {"kv_dtype": "int8"}
+            FlashNextEngine(checkpoint, **{"depth": 4, **(other if r else {})}, draft_vocab=None, max_len=512, tp=2,
+                            rank=r, master="127.0.0.1", prefetch=False, graphs=False)
         except RuntimeError as exc:
             raised[r] = exc
 

@@ -3,6 +3,40 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.3.6.2 (28 Sep 2026)
+
+- **EXL3 replies stop at the end of the turn.** Flash Next and 27B EXL3 packs list `<|im_end|>` only in
+  `generation_config.json`, so replies ran past their turn and leaked tool calls and think tags. The CUDA engine now
+  reads that file too. Thanks to @vcruz305 (#69).
+- **pip installs serve 27B EXL3 packs.** The package was missing the 27B's CUDA sources; a test now checks that every
+  CUDA source ships. Thanks to @taussoe (#66).
+- **A quantized KV cache for Flash Next on CUDA.** `--kv-dtype int8` or `int4` holds about 1.7x or 2.6x the default
+  window in the same memory, and drafted replies still equal serial ones. `--mtp-confidence` sets where MTP chains
+  stop. Thanks to @vcruz305 (#47).
+- **Flash Next on CUDA reaches the first token sooner.** The head runs on a prompt's final chunk only, and the prompt
+  kernels load at startup, so the first 2k prompt takes 1.26 s instead of 1.79 s. Thanks to @MovieMaker93 (#40).
+- **GLM on two Sparks holds 256k tokens** with a latent attention cache; its next-token loss is within 0.001 nats of
+  the per-head cache. Thanks to @taussoe (#54).
+- **Mixed-bit Qwen checkpoints** (4-bit with some 5- and 6-bit layers, such as oQ4) load on every lane backend,
+  exact, with new row kernels for 2- to 8-bit weights. On an M3 Ultra, oQ4 27B decodes 114-120 tok/s on code and
+  59-61 on chat, against mlx_lm's 34-36.
+- **Concurrent 27B on CUDA:** `--parallel 16` serves 161.7 tok/s on one Spark in 25.4 GiB, each reply equal to its
+  solo run (#38). **Qwen3.6-35B-A3B on CUDA,** exact: decode 1.36-1.49x vLLM with MTP, prompts 1.21-1.37x (#45).
+- **Gemma 4 drafts (opt-in):** `--drafter z-lab/gemma-4-26B-A4B-it-DFlash` decodes 1.3-2.1x mlx_lm on an M3 Ultra,
+  exact.
+- **Tool calls:** `tool_choice: "required"` and a named tool are enforced on both servers (#52), and a complete tool
+  call inside an unclosed think block comes back as a tool call (#60).
+- **Conversations come back warm on Macs.** `--spill-gib N` writes a conversation pushed out of the prompt cache
+  to disk, up to N GiB, and reads it back when the conversation returns. On a 48 GB budget a 35k-token
+  conversation came back in 0.27 s on an M5 Max instead of 75 s, with the same reply. Off by default;
+  `--checkpoint-slots` sets how many conversations stay in memory. Thanks to @gilby (#68, #55).
+- **Memory:** `TENSORFOLD_MEMORY_LIMIT_GB` raises the budget above the default share, and Flash Next's memory check
+  counts its host-mapped n-gram tables, so it starts on a 128 GB Mac. Thanks to @Chedrian07 (#49, #50).
+- **CUDA server fixes from @nood-co1:** an abandoned request stops within a round (#57), keys and values stay within
+  the admitted window (#58), and a failed admission no longer stops the scheduler (#59).
+- **M1-M4:** a prompt split into parts attends exactly as it does in one piece at every length; two 8,192-key cases
+  rounded differently in 0.3.6.
+
 ## 0.3.6.1 (28 Sep 2026)
 
 - **CUDA builds inside NVIDIA's containers again.** Their `TORCH_CUDA_ARCH_LIST` names every architecture back to

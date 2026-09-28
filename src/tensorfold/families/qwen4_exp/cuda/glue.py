@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .kvquant import h32, quant_groups_4, quant_groups_8
+
 
 @triton.jit
 def _bsig(x):
@@ -269,10 +271,10 @@ def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float, group: int | None = No
 
 
 @triton.jit
-def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps,
+def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps,
                PW: tl.constexpr, NQ: tl.constexpr, NKV: tl.constexpr, HD: tl.constexpr, NI: tl.constexpr,
-               IHD: tl.constexpr, HALF: tl.constexpr):
-    """Normalize stacked q/k/indexer heads in fp32, round to bf16, apply rotate-half RoPE and round again; store keys, values and raw indexer keys at POS0 + r."""
+               IHD: tl.constexpr, HALF: tl.constexpr, BITS: tl.constexpr):
+    """Normalize stacked q/k/indexer heads in fp32, round to bf16, apply rotate-half RoPE and round again; store keys, values and raw indexer keys at POS0 + r; BITS 8 or 4 quantize keys and values and rotate q alike (q . Hk = Hq . k)."""
 
     r = tl.program_id(0)
     head = tl.program_id(1)
@@ -314,11 +316,37 @@ def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps,
         rot = tl.where(d < HALF, xn * cos - xpn * sin, tl.where(d < 2 * HALF, xpn * sin + xn * cos, xn))
         out = rot.to(tl.bfloat16)
         if head < NQ:
+            if BITS:                                 # the query rides the cache's rotation (see the docstring)
+                out = tl.reshape(h32(tl.reshape(out.to(tl.float32), (HD // 32, 32)), M=HD // 32),
+                                 (HD,)).to(tl.bfloat16)
             tl.store(Q + (r * NQ + head) * HD + d, out)
         elif head < NQ + NKV:
-            tl.store(KC + (pos.to(tl.int64) * NKV + head - NQ) * HD + d, out)
-            v = tl.load(P + r * PW + NQ * 2 * HD + NKV * HD + (head - NQ) * HD + d)
-            tl.store(VC + (pos.to(tl.int64) * NKV + head - NQ) * HD + d, v)
+            slot = pos.to(tl.int64) * NKV + head - NQ
+            if BITS:
+                gg = tl.arange(0, HD // 32)
+                block = tl.reshape(out.to(tl.float32), (HD // 32, 32))
+                v = tl.load(P + r * PW + NQ * 2 * HD + NKV * HD + (head - NQ) * HD + d)
+                vblock = tl.reshape(v.to(tl.float32), (HD // 32, 32))
+                if BITS == 4:
+                    kc, ks = quant_groups_4(block, M=HD // 32)
+                    vc, vs = quant_groups_4(vblock, M=HD // 32)
+                else:
+                    kc, ks = quant_groups_8(block, M=HD // 32)
+                    vc, vs = quant_groups_8(vblock, M=HD // 32)
+                tl.store(KS + slot * (HD // 32) + gg, ks)
+                tl.store(VS + slot * (HD // 32) + gg, vs)
+                if BITS == 4:
+                    gb = tl.arange(0, 16)
+                    tl.store(KC + slot * (HD // 2) + gg[:, None] * 16 + gb[None, :], kc)
+                    tl.store(VC + slot * (HD // 2) + gg[:, None] * 16 + gb[None, :], vc)
+                else:
+                    gd = tl.arange(0, 32)
+                    tl.store(KC + slot * HD + gg[:, None] * 32 + gd[None, :], kc)
+                    tl.store(VC + slot * HD + gg[:, None] * 32 + gd[None, :], vc)
+            else:
+                tl.store(KC + slot * HD + d, out)
+                v = tl.load(P + r * PW + NQ * 2 * HD + NKV * HD + (head - NQ) * HD + d)
+                tl.store(VC + slot * HD + d, v)
         else:
             tl.store(IQ + (r * NI + head - NQ - NKV) * IHD + d, out, mask=live)
     else:
@@ -328,11 +356,18 @@ def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps,
 
 
 def attn_prep(p: torch.Tensor, pos0: torch.Tensor, q_scale, k_scale, i_scale, inv_freq, q, kc, vc, iq, ikc,
-              eps: float, *, q_heads: int, kv_heads: int, head_dim: int, index_heads: int, index_dim: int) -> None:
+              eps: float, *, q_heads: int, kv_heads: int, head_dim: int, index_heads: int, index_dim: int,
+              ks: torch.Tensor | None = None, vs: torch.Tensor | None = None, bits: int = 0) -> None:
+    """Write the rows' queries (rotated when the cache is quantized), keys and values; ``bits`` 0 (bf16), 8 or 4 with scales ``ks``/``vs``."""
+
     rows, pw = p.shape
+    if bits and (ks is None or vs is None):
+        raise ValueError("a quantized KV cache needs its scale tensors")
+    if ks is None:
+        ks = vs = kc
     _attn_prep[(rows, q_heads + kv_heads + index_heads + 1)](
-        p, pos0, q_scale, k_scale, i_scale, inv_freq, q, kc, vc, iq, ikc, eps, PW=pw, NQ=q_heads, NKV=kv_heads,
-        HD=head_dim, NI=index_heads, IHD=index_dim, HALF=inv_freq.numel(), num_warps=2)
+        p, pos0, q_scale, k_scale, i_scale, inv_freq, q, kc, vc, ks, vs, iq, ikc, eps, PW=pw, NQ=q_heads, NKV=kv_heads,
+        HD=head_dim, NI=index_heads, IHD=index_dim, HALF=inv_freq.numel(), BITS=bits, num_warps=2)
 
 
 @triton.jit

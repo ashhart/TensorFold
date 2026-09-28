@@ -12,7 +12,9 @@ from typing import Any, Callable
 import uuid
 
 from tensorfold.engine.lane_engine import LaneEngine, SuffixLookupProposer
-from tensorfold.server.checkpoints import CheckpointStore, longest_common_prefix, save_conversations
+from tensorfold.server.admission import concurrency
+from tensorfold.server.checkpoints import (CheckpointStore, longest_common_prefix, prune_conversations,
+                                           save_conversations, spill_conversation)
 from tensorfold.server.cancellation import Cancellation
 from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.request_options import RequestOptions
@@ -81,6 +83,7 @@ class ChatApp(RequestOptions):
         max_snapshots: int = 3,
         checkpoint_slots: int | None = None,
         checkpoint_budget_bytes: int | None = 16 * 1024**3,
+        spill_bytes: int = 0,
         memory_budget_bytes: int | None = None,
         memory_runtime: Any = None,
         model_aliases: list[str] | None = None,
@@ -164,7 +167,8 @@ class ChatApp(RequestOptions):
             if self.checkpoints is not None:
                 # admission evicts on demand, so a long conversation keeps its newest prefix past the budget
                 self.checkpoints.admit_oversize = True
-        measure = lambda: self._admission(float(memory_fraction), int(lanes)) if memory_fraction and lanes > 1 else None
+        measure = lambda: (concurrency(self.engine, self.prompt_memory, float(memory_fraction), int(lanes),
+                                       self.default_max_tokens) if memory_fraction and lanes > 1 else None)
         admission = measure() if self.prompt_memory is None else self.prompt_memory.sized(
             self.engine, measure, probe_tokens(tokenizer))
         if self.prompt_memory is not None:
@@ -181,6 +185,12 @@ class ChatApp(RequestOptions):
             model_id=model_id,
             prompt_memory=self.prompt_memory,
         )
+        # evicted conversations go to disk (``spill_bytes`` of this model's files at most) and come back on demand
+        self.spill_bytes = int(spill_bytes) if self.checkpoints is not None and self.scheduler.session_dir else 0
+        if self.spill_bytes > 0:
+            session_dir, spill_limit = Path(self.scheduler.session_dir), self.spill_bytes
+            self.checkpoints.on_evict = lambda entry: spill_conversation(entry, session_dir, model_id,
+                                                                         limit_bytes=spill_limit)
         loaded_count = 0
         if snapshot_dir is not None and self.checkpoints is not None:
             from tensorfold.engine.prefix_snapshots import load_snapshots
@@ -199,29 +209,6 @@ class ChatApp(RequestOptions):
         if snapshot_dir is not None and self.checkpoints is not None and not loaded_count:
             # only when these kernels have no block yet: a warmed block is pinned after the loaded ones
             self._warm_known_blocks(snapshot_dir, model_id)
-
-    def _admission(self, fraction: float, lanes: int) -> Any:
-        """Admit concurrent streams only within ``fraction`` of RAM minus memory held elsewhere on the machine."""
-
-        from tensorfold.engine import memory
-
-        stream = memory.measure(self.engine)
-        used = memory._mlx_used()
-        ram = memory.ram_bytes()
-        elsewhere = memory.used_elsewhere(used)
-        share = self.prompt_memory.budget if self.prompt_memory is not None else int(fraction * ram)
-        admission = memory.Admission(min(int(fraction * ram) - elsewhere, share), stream,
-                                     used=None if self.prompt_memory is None else self.prompt_memory.held)
-        tokens = self.default_max_tokens + 4096
-        gib, mib = 1024**3, 1024**2
-        print(f"[tensorfold] concurrency: up to {lanes} requests share each round; memory budget "
-              f"{admission.budget / gib:.1f} GB (MLX's share {share / gib:.1f} GB, or {fraction:.0%} of "
-              f"{ram / gib:.0f} GB less {elsewhere / gib:.1f} GB in use elsewhere); a stream "
-              f"{stream.short / mib:.0f} MB at {stream.short_tokens} tokens, "
-              f"{stream.long / mib:.0f} MB at {stream.long_tokens:,}, then {stream.per_token / 1024:.1f} KB a token; "
-              f"a shared round up to {stream.round_bytes / gib:.2f} GB; {admission.fitting(tokens)} streams of "
-              f"{tokens:,} tokens fit now (more wait their turn)", flush=True)
-        return admission
 
     def render(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
@@ -497,7 +484,7 @@ class ChatApp(RequestOptions):
                 background=background,
                 drafts=drafts,
                 ignore_eos=stops.ignore_eos, stop_check=stops if stops.strings else None,
-                cancellation=cancellation,
+                cancellation=cancellation, call_gate=self._call_gate(fields, prompt_ids, tools),
             )
             budget = int(fields.get("thinking_budget") or self.thinking_budget) if thinking else 0
             if budget > 0:
@@ -690,4 +677,9 @@ class ChatApp(RequestOptions):
 
         if self.scheduler.session_dir is None or self.checkpoints is None:
             return 0
-        return save_conversations(self.checkpoints, Path(self.scheduler.session_dir), self.scheduler.model_id)
+        directory, model = Path(self.scheduler.session_dir), self.scheduler.model_id
+        if self.spill_bytes > 0:        # with spilling, the directory holds every conversation that fits its budget
+            saved = save_conversations(self.checkpoints, directory, model, keep=1 << 30, limit_bytes=self.spill_bytes)
+            prune_conversations(directory, model, self.spill_bytes)
+            return saved
+        return save_conversations(self.checkpoints, directory, model)

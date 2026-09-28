@@ -19,6 +19,21 @@ from tensorfold.cuda import experts as grouped
 from .qmm import Q4, dequantize, make_q4, stack_q4
 
 
+def stop_ids(configured: Any, generation: Path) -> tuple[int, ...]:
+    """config.json's end-of-reply ids, then generation_config.json's it lacks (EXL3 packs keep <|im_end|> there)."""
+
+    def ids(value: Any) -> list[int]:
+        return [] if value is None else [int(e) for e in value] if isinstance(value, list) else [int(value)]
+
+    found = ids(configured)
+    if generation.exists():
+        found += ids(json.loads(generation.read_text()).get("eos_token_id"))
+    out = tuple(dict.fromkeys(found))
+    if not out:
+        raise ValueError("no eos_token_id in config.json or generation_config.json")
+    return out
+
+
 @dataclass
 class Config:
     hidden: int
@@ -68,8 +83,7 @@ class Config:
         head_dim = int(t.get("head_dim") or t["hidden_size"] // t["num_attention_heads"])
         partial = float(rope.get("partial_rotary_factor", t.get("partial_rotary_factor", 0.25)))
         teos = t.get("eos_token_id")
-        eos = raw.get("eos_token_id", teos)
-        eos = tuple(int(e) for e in eos) if isinstance(eos, list) else (int(eos),)
+        eos = stop_ids(raw.get("eos_token_id", teos), Path(model_dir) / "generation_config.json")
         quant = raw.get("quantization") or raw.get("quantization_config") or {}
         return cls(
             hidden=int(t["hidden_size"]), layers=int(t["num_hidden_layers"]),

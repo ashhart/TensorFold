@@ -109,6 +109,18 @@ def test_weights_that_leave_no_room_refuse_to_start():
     assert "--drafter none" in str(error.value) and "max_tokens" not in str(error.value)
 
 
+@pytest.mark.parametrize("ceiling_gib, raise_it", [(64, True), (1, False)])
+def test_the_refusal_names_the_budget_that_would_fit_and_this_macs_ceiling(ceiling_gib, raise_it):
+    runtime = Runtime(2**30)
+    runtime.device_info = lambda: {"max_recommended_working_set_size": ceiling_gib * 2**30}
+    with pytest.raises(ValueError, match="no room") as error:
+        app(2**30 + 2**20, context_window=0, fit_context=True, memory_runtime=runtime)
+    message = str(error.value)
+    hint = "Raise the budget past 1.3 GiB with TENSORFOLD_MEMORY_LIMIT_GB (this Mac takes up to 64.0"
+    assert (hint in message) is raise_it
+    assert ("Serve it on a Mac with more memory" in message) is not raise_it
+
+
 def test_without_prompt_retention_the_default_window_reserves_no_retained_copy():
     served = app(int(1.375 * 2**30), context_window=262144, fit_context=True, checkpoint_slots=0)
     try:

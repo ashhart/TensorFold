@@ -7,12 +7,6 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 
 from tensorfold.kernels.qwen.dense.v1 import exact_attention, prompt_attention
-from tensorfold.families.qwen3_5 import tensor_units
-
-# Known in 0.3.5.1 too: on M1-M4 with MLX 0.32.2 a 129- or 17-row tail part at 8,192 keys leaves different bits from
-# one stock call. The engine stays self-consistent (drafted == serial, resumed == fresh); the fix is due in 0.3.6.1.
-M1_M4_KNOWN = pytest.mark.xfail(not tensor_units(), reason="M1-M4 with MLX 0.32.2: split tail parts at 8,192 keys",
-                                strict=False)
 
 
 def test_fused_prompt_heads_keep_stock_dispatch(monkeypatch):
@@ -25,8 +19,8 @@ def test_fused_prompt_heads_keep_stock_dispatch(monkeypatch):
     assert calls == ["stock"]
 
 
-@pytest.mark.parametrize("rows,total", [(129, 4097), (256, 8192), pytest.param(257, 8192, marks=M1_M4_KNOWN), (272, 8192),
-                                        pytest.param(273, 8192, marks=M1_M4_KNOWN)])
+@pytest.mark.parametrize("rows,total", [(129, 4097), (256, 8192), (257, 8192), (272, 8192), (273, 8192), (300, 5000),
+                                        (400, 8192), (385, 6001)])
 @pytest.mark.parametrize("dtype", [mx.bfloat16, mx.float16])
 def test_bounded_prompt_matches_stock_causal_bits(rows, total, dtype):
     q = mx.random.normal((1, 24, rows, 256), key=mx.random.key(41)).astype(dtype)

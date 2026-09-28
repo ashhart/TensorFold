@@ -8,7 +8,8 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
 from tensorfold.cuda import experts as grouped  # noqa: E402
-from tensorfold.families.qwen4_exp.cuda import gdn, moe, qmm  # noqa: E402
+from tensorfold.cuda import moe  # noqa: E402
+from tensorfold.families.qwen4_exp.cuda import gdn, qmm  # noqa: E402
 
 DEV = "cuda"
 

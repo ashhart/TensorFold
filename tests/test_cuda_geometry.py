@@ -16,7 +16,8 @@ class Allocation:
     def numel(self):
         return math.prod(self.shape)
     def element_size(self):
-        return 2 if self.dtype in ("bf16", "fp16", "int16") else 4
+        return getattr(self.dtype, "itemsize", None) or {"bf16": 2, "fp16": 2, "int16": 2, "int8": 1, "uint8": 1}.get(
+            self.dtype, 4)
     def __getitem__(self, index):
         return self
     def __add__(self, other):            # arange(rows)[:, None] + arange(k): the [rows, k] tap table
@@ -42,7 +43,8 @@ def allocations(monkeypatch):
         tensor = Allocation(shape, kw.get("dtype", "fp32"), kw.get("device", "cpu"))
         recorded.append(tensor)
         return tensor
-    fake = SimpleNamespace(bfloat16="bf16", float16="fp16", float32="fp32", int16="int16", int32="int32", int64="int64",
+    fake = SimpleNamespace(bfloat16="bf16", float16="fp16", float32="fp32", int8="int8", uint8="uint8", int16="int16",
+                           int32="int32", int64="int64",
                            zeros=allocate, empty=allocate, full=lambda shape, fill, **kw: allocate(shape, **kw),
                            zeros_like=lambda x: allocate(x.shape, dtype=x.dtype, device=x.device),
                            arange=lambda n, **kw: allocate((n,), **kw),
@@ -69,12 +71,14 @@ def bytes_in(arrays):
 @pytest.mark.torch
 @pytest.mark.parametrize("world", [1, 2])
 @pytest.mark.parametrize("mtp", [False, True])
-def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, allocations, world, mtp):
+@pytest.mark.parametrize("kv_dtype,bits", [("bf16", 16), ("int8", 8), ("int4", 4)])
+def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, allocations, world, mtp, kv_dtype, bits):
     arrays, fake = allocations
     mod = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
     gdn = importlib.import_module("tensorfold.families.qwen4_exp.cuda.gdn")
     monkeypatch.setattr(mod, "torch", fake)
     monkeypatch.setattr(gdn, "torch", fake)
+    monkeypatch.setattr(mod.kvcache, "torch", fake)
     text = {"hidden_size": 512, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 64,
             "num_hidden_layers": 4, "layer_types": ["linear_attention", "full_attention"] * 2,
             "linear_num_key_heads": 2, "linear_num_value_heads": 4, "linear_key_head_dim": 128,
@@ -94,21 +98,49 @@ def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, alloc
     if mtp:
         mod.Buffers(weights, 64, slots)
     mod.Buffers(weights, 2048, slots, prefill=True)     # the prompt chunks' buffers, as ``decode.Engine`` makes them
-    mod.State(weights, slots, 64)
-    mod.State(weights, slots, 64)  # the actual serial-reference twin constructor
-    estimated = geometry.gdn_geometry(text, world, 7, indexed=True, mtp=mtp).bytes_at(slots)
-    kv = 2 * 2 * 2 * slots * cfg.kv_heads * cfg.head_dim * 2     # two states' K and V of two attention layers
-    assert kv <= bytes_in(arrays) <= estimated
+    mod.State(weights, slots, 64, kv_dtype)
+    mod.State(weights, slots, 64, kv_dtype)  # the actual serial-reference twin constructor
+    estimated = geometry.gdn_geometry(text, world, 7, indexed=True, mtp=mtp, kv_bits=bits).bytes_at(slots)
+    kv = [t for t in arrays if t.shape[:2] == (slots, cfg.kv_heads)]      # codes and scales, or bf16 keys and values
+    caches = 2 * (2 + int(mtp))                                          # two states: two attention layers, the MTP's
+    assert bytes_in(kv) == caches * 2 * slots * cfg.kv_heads * geometry.kv_bytes(cfg.head_dim, bits)
+    assert bytes_in(arrays) <= estimated
+
+
+def test_mla_latent_estimate_grows_by_the_cache_and_counts_one_prompt_chunk_scratch():
+    """Per token, the latent estimate grows by the latent and indexer caches of every attention layer (the MTP's
+    too) plus one fp32 pool score for each prompt-chunk row; the MTP head adds its caches and decode buffers, never a
+    second set of the prompt chunk's latent partials (it absorbs through the same prefill buffers)."""
+
+    text = {"hidden_size": 512, "num_attention_heads": 8, "num_hidden_layers": 4,
+            "layer_types": ["linear_attention", "full_attention"] * 2, "linear_num_heads": 8,
+            "qk_nope_head_dim": 256, "v_head_dim": 256, "vocab_size": 1024, "kv_lora_rank": 512,
+            "moe_intermediate_size": 512, "num_experts_per_tok": 2}
+    rows, heads, lw, index = geometry.PREFILL_ROWS, 4, 512, 128
+    a, b = 1 << 18, (1 << 18) + 4096
+    const = {}
+    for mtp in (0, 1):
+        g = geometry.mla_geometry({**text, "num_nextn_predict_layers": mtp}, 2, 8, latent=True)
+        count = 2 + mtp
+        slope = count * lw * 2 + count * index * 2 * 9 // 4 + rows
+        assert g.bytes_at(b) - g.bytes_at(a) == (b - a) * slope
+        const[mtp] = g.bytes_at(a) - a * slope
+    partials = ((2560 + rows + 511) // 512) * rows * heads * (lw + 2) * 4
+    assert 0 < const[1] - const[0] < partials
 
 
 @pytest.mark.torch
+@pytest.mark.parametrize("latent", [True, False], ids=["latent", "per-head"])
 @pytest.mark.parametrize("mtp", [False, True])
-def test_mla_actual_cache_and_replay_state_are_budgeted(monkeypatch, allocations, mtp):
+def test_mla_actual_cache_and_replay_state_are_budgeted(monkeypatch, allocations, mtp, latent):
     arrays, fake = allocations
     mod = importlib.import_module("tensorfold.families.glm5_next.cuda.forward")
     kda = importlib.import_module("tensorfold.families.glm5_next.cuda.kda")
+    cache = importlib.import_module("tensorfold.families.glm5_next.cuda.latent")
     monkeypatch.setattr(mod, "torch", fake)
     monkeypatch.setattr(kda, "torch", fake)
+    monkeypatch.setattr(cache, "torch", fake)
+    monkeypatch.setattr(cache, "ENABLED", latent)
     text = {"hidden_size": 512, "num_attention_heads": 8, "num_hidden_layers": 4,
             "layer_types": ["linear_attention", "full_attention"] * 2, "linear_num_heads": 8,
             "qk_nope_head_dim": 256, "v_head_dim": 256, "vocab_size": 1024,
@@ -129,7 +161,7 @@ def test_mla_actual_cache_and_replay_state_are_budgeted(monkeypatch, allocations
         mod.Buffers(weights, 64, slots)
     mod.Buffers(weights, 2048, slots, prefill=True)     # the prompt chunks' buffers, as ``decode.Engine`` makes them
     mod.State(weights, slots, 64)
-    estimated = geometry.mla_geometry(text, 2, 8).bytes_at(slots)
+    estimated = geometry.mla_geometry(text, 2, 8, latent=latent).bytes_at(slots)
     assert any(slots in t.shape for t in arrays)             # the constructors ran on the fake allocator
     assert bytes_in(arrays) <= estimated
 

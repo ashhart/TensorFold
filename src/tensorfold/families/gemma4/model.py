@@ -25,6 +25,9 @@ class Gemma4:
     # ``hidden`` takes an unread GPU token: one-token rounds run one step ahead
     gpu_tokens = True
     mtp = None
+    drafts = 0
+    # a draft model reads the kept rows' taps once a round is read
+    speculate_early = False
     # the widest verify window checked at load
     fused_rows = 16
     # a shared forward's rows and streams (``hidden_rows``)
@@ -32,14 +35,21 @@ class Gemma4:
     max_streams = 16
 
     def __init__(self, model: Any, *, backend: str | None = None, head_backend: str | None = None, check: bool = True,
-                 tokenizer: Any = None) -> None:
-        # private arrays (proportional RoPE's ``_freqs``) load lazily on this thread's stream: the engine thread can't
-        mx.eval([v for _, module in model.named_modules() for v in module.values() if isinstance(v, mx.array)])
+                 tokenizer: Any = None, drafter: Any = None) -> None:
+        realize(model)
         self.model = model
         self.text = getattr(model, "language_model", model)      # gemma4.Model wraps gemma4_text.Model
         self.backbone = self.text.model
         self.args = self.text.args
         self.decode = RowDecode(self.text, backend or "rows", head_backend)
+        self.head_drafts = None
+        self._last: dict[int, tuple[int, int]] = {}          # cache id -> its last forward's first position and row
+        if drafter is not None:
+            from tensorfold.families.gemma4.drafts import DFlashChains
+
+            self.mtp, self.head_drafts = drafter, DFlashChains(drafter)
+            self.drafts = self.head_drafts.nodes
+            self.decode.taps = (tuple(int(i) for i in drafter.model.config.target_layer_ids), model._hidden_states)
         self.exact_width, self.window_costs = (1, {})
         self.shared_costs: dict[int, float] = {}
         if check:
@@ -63,22 +73,35 @@ class Gemma4:
         return self.text.layers
 
     def make_cache(self) -> list[Any]:
-        return caches.make_cache(self.text)
+        made = caches.make_cache(self.text)
+        return made + [self.head_drafts.slot()] if self.head_drafts is not None else made
 
     def adopt_cache(self, cache: list[Any]) -> list[Any]:
-        return caches.adopt(cache)
+        cache = caches.adopt(cache)
+        if self.head_drafts is not None and len(cache) == len(self.text.layers):
+            cache.append(self.head_drafts.slot())
+        return cache
+
+    def _layers(self, cache: list[Any]) -> list[Any]:
+        """The layers' caches, without the draft model's slot (a stream's last entry when drafting)."""
+
+        return cache[:len(self.text.layers)]
 
     def prefill(self, inputs: Any, cache: list[Any]) -> mx.array:
         """A prompt chunk [1, L] through mlx_lm's forward (MLX's batched kernels) into the same caches."""
 
-        return self.backbone(inputs, cache=cache)
+        layers = self._layers(cache)
+        self._last[id(cache)] = (int(layers[0].offset), 0)
+        return self.backbone(inputs, cache=layers)
 
     def hidden(self, inputs: Any, cache: list[Any], parents: Any = None) -> mx.array:
         """Hidden rows [1, R, D] of R consecutive tokens (an array, or an unread GPU token), advancing the caches."""
 
         self._chain_only(parents)
         tokens = self._tokens(inputs)
-        return self.decode(tokens, [(cache, int(tokens.shape[0]), cache[0].offset)])[None]
+        layers = self._layers(cache)
+        self._last = {id(cache): (int(layers[0].offset), 0)}
+        return self.decode(tokens, [(layers, int(tokens.shape[0]), layers[0].offset)])[None]
 
     def hidden_rows(self, windows: list[Any], caches_: list[list[Any]], parents: Any = None) -> mx.array:
         """Every stream's window in one forward [1, N, D], stream i's rows advancing only ``caches_[i]``."""
@@ -87,7 +110,9 @@ class Gemma4:
             self._chain_only(rows)
         parts = [self._tokens(w) for w in windows]
         tokens = mx.concatenate(parts) if len(parts) > 1 else parts[0]
-        streams = [(c, int(p.shape[0]), c[0].offset) for c, p in zip(caches_, parts)]
+        streams = [(self._layers(c), int(p.shape[0]), self._layers(c)[0].offset) for c, p in zip(caches_, parts)]
+        firsts = [sum(int(p.shape[0]) for p in parts[:i]) for i in range(len(parts))]
+        self._last = {id(c): (int(s[2]), f) for c, s, f in zip(caches_, streams, firsts)}
         return self.decode(tokens, streams)[None]
 
     def head(self, hidden: mx.array) -> mx.array:
@@ -101,12 +126,32 @@ class Gemma4:
 
         drop = int(rows) - self._kept(keep)
         if drop:
-            for c in cache:
+            for c in self._layers(cache):
                 c.trim(drop)
 
     def keep_rows_streams(self, caches_: list[list[Any]], lengths: Any, keeps: Any) -> None:
         for cache, rows, keep in zip(caches_, lengths, keeps):
             self.keep_rows(cache, rows, keep)
+
+    # -- draft model protocol (``--drafter``): the engine's late speculation, a chain a round --------------------------
+    def absorb_draft_context(self, hidden: mx.array, next_tokens: Any, cache: list[Any], start: int = 0) -> None:
+        position, first = self._last[id(cache)]
+        self.head_drafts.absorb(cache, position + start, int(hidden.shape[1]), first + start)
+
+    def speculate(self, cache: list[Any], tokens: Any, position: int, sampling: Any, start: int = 0,
+                  last_only: bool = False, rows: Any = None) -> mx.array:
+        """Read the kept rows (``rows``, or ``start`` ..) of the last forward; ``settle`` drafts."""
+
+        follow = [int(t) for t in (tokens.reshape(-1).tolist() if isinstance(tokens, mx.array) else tokens)]
+        kept = [int(r) for r in rows] if rows is not None else list(range(start, start + len(follow)))
+        self.head_drafts.read(cache, kept, follow, sampling)      # rows of the last forward, streams' rows in order
+        return mx.array([0], dtype=mx.uint32)
+
+    def settle(self, cache: list[Any], keep: int, first: Any, position: int, sampling: Any, count: int) -> Any:
+        return self.head_drafts.tree(cache, position, sampling, count) if count > 0 else []
+
+    def unspeculate(self, cache: list[Any]) -> None:
+        pass
 
     @staticmethod
     def _tokens(inputs: Any) -> mx.array:
@@ -258,8 +303,22 @@ class Gemma4:
         return costs
 
 
-def load(model_dir: Path, *, backend: str | None = None, check: bool = True) -> tuple[Gemma4, Any]:
+def realize(model: Any) -> None:
+    """Evaluate the modules' private arrays too (proportional RoPE's ``_freqs``): the engine thread can't load them."""
+
+    mx.eval([v for _, module in model.named_modules() for v in module.values() if isinstance(v, mx.array)])
+
+
+def load(model_dir: Path, *, backend: str | None = None, check: bool = True, drafter: str = "",
+         drafter_bits: int = 8) -> tuple[Gemma4, Any]:
     from mlx_lm import load as mlx_load
 
     model, tokenizer = mlx_load(str(model_dir))
-    return Gemma4(model, backend=backend, check=check, tokenizer=tokenizer), tokenizer
+    realize(model)                     # before a draft model wraps the tapped layers
+    draft = None
+    if drafter:
+        from tensorfold.drafters.dflash_drafter import DFlashDrafter
+
+        draft = DFlashDrafter(model, drafter, bits=int(drafter_bits))
+        print(f"[tensorfold] drafter {draft.path} block={draft.block_size} bits={drafter_bits or 16}", flush=True)
+    return Gemma4(model, backend=backend, check=check, tokenizer=tokenizer, drafter=draft), tokenizer

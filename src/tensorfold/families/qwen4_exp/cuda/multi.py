@@ -11,7 +11,7 @@ from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import Stream, accept
 from tensorfold.engine.exact_sampling import MARGIN, choose_rows
 
-from .decode import PREFILL_ROWS, Engine, draft, prefill
+from .decode import PREFILL_ROWS, WARM_TAIL, Engine, draft, prefill
 from .forward import commit, compute, stage
 from .mtp import mtp_compute, mtp_stage
 from .state import Buffers, State
@@ -30,7 +30,7 @@ class MultiDecoder:
     """Rounds over the live streams; ``slots`` streams at most, each with ``capacity`` tokens of context."""
 
     def __init__(self, w, *, slots: int, capacity: int, depth: int = DEPTH, confidence: float = CONFIDENCE,
-                 stop_eos: bool = True, keep: int = 8) -> None:
+                 stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16") -> None:
         if w.comm is not None:
             raise ValueError("concurrent Flash Next runs on one GPU for now")
         self.w, self.depth, self.confidence, self.capacity = w, depth, confidence, capacity
@@ -39,7 +39,7 @@ class MultiDecoder:
         self.buf = Buffers(w, rows, capacity)
         self.mbuf = Buffers(w, rows, capacity) if w.mtp is not None else None
         self.pbuf = Buffers(w, PREFILL_ROWS, capacity, prefill=True)
-        self.free = [State(w, capacity, depth + 1) for _ in range(slots)]      # sized by the startup admission
+        self.free = [State(w, capacity, depth + 1, kv_dtype) for _ in range(slots)]   # sized by the startup admission
         self.slot_bytes = sum(t.numel() * t.element_size() for t in _tensors(self.free[0]))
         self.streams: dict[int, Stream] = {}
         self.next_id = 0
@@ -87,6 +87,19 @@ class MultiDecoder:
 
     def live(self) -> int:
         return len(self.streams)
+
+    @torch.no_grad()
+    def warm(self) -> None:
+        """A synthetic greedy request through prefill, its drafts and one round, then forgotten, so no request compiles or loads a kernel."""
+
+        s = Stream([0] * min(PREFILL_ROWS + WARM_TAIL, self.capacity - self.depth - 2), 2)
+        self.admit(s)
+        if not s.done:
+            self.round()
+        self.streams.pop(s.sid, None)
+        self._drop_kept(s.st)
+        if all(f is not s.st for f in self.free):
+            self.free.append(s.st)
 
     @torch.no_grad()
     def admit(self, s: Stream) -> None:
@@ -228,11 +241,8 @@ class MultiDecoder:
 
 def _tensors(st: State):
     for value in vars(st).values():
-        if isinstance(value, torch.Tensor):
-            yield value
-        elif isinstance(value, list):
-            for v in value:
-                if isinstance(v, torch.Tensor):
-                    yield v
-                elif hasattr(v, "__dict__"):
-                    yield from (t for t in vars(v).values() if isinstance(t, torch.Tensor))
+        for v in value if isinstance(value, list) else [value]:
+            if isinstance(v, torch.Tensor):
+                yield v
+            elif hasattr(v, "__dict__"):                  # scratch and KV cache objects, the MTP head's too
+                yield from (t for t in vars(v).values() if isinstance(t, torch.Tensor))

@@ -49,8 +49,9 @@ def test_segments_give_each_stream_its_own_rows():
         assert torch.equal(forward(w, st, b, [chain[keep] if keep < len(chain) else 1])[0], nxt)
 
 
-@pytest.mark.parametrize("confidence,vocab", [(0.0, False), (0.3, False), (0.3, True)])
-def test_streams_decoded_together_equal_each_alone(confidence, vocab):
+@pytest.mark.parametrize("confidence,vocab,kv_dtype", [(0.0, False, "bf16"), (0.3, False, "bf16"), (0.3, True, "bf16"),
+                                                       (0.3, True, "int8"), (0.0, False, "int4")])
+def test_streams_decoded_together_equal_each_alone(confidence, vocab, kv_dtype):
     w = _model()
     if vocab:                                            # drafts over a token subset (the real model's draft head)
         words, scales, biases = qmm.to_mlx(w.head)
@@ -60,10 +61,11 @@ def test_streams_decoded_together_equal_each_alone(confidence, vocab):
     samplings = [None, Sampling(seed=1234, top_k=20, top_p=0.95), Sampling(seed=7, top_k=20, top_p=0.95), None]
     refs = []
     for prompt, sampling in zip(PROMPTS, samplings):
-        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype)
         first = prefill(e, prompt, sampling)
         refs.append(serial_decode(e, first, 20, sampling).tokens)
-    dec = MultiDecoder(w, slots=4, capacity=1024, depth=3, confidence=confidence)
+    dec = MultiDecoder(w, slots=4, capacity=1024, depth=3, confidence=confidence, kv_dtype=kv_dtype)
+    assert all(st.kv_dtype == kv_dtype and st.kc[0].dtype == kv_dtype for st in dec.free)
     streams = []
     for i, (prompt, sampling) in enumerate(zip(PROMPTS, samplings)):
         got: list[int] = []
@@ -78,10 +80,11 @@ def test_streams_decoded_together_equal_each_alone(confidence, vocab):
     assert len(dec.free) + len({id(k[1]) for k in dec.kept}) == 4 and not dec.live()     # every slot back or kept
 
 
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8", "int4"])
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=31, top_k=20, top_p=0.95)])
-def test_prompts_that_extend_a_finished_stream_resume_from_its_slot(sampling):
+def test_prompts_that_extend_a_finished_stream_resume_from_its_slot(sampling, kv_dtype):
     w = _model()
-    dec = MultiDecoder(w, slots=2, capacity=1024, depth=3, confidence=0.3)
+    dec = MultiDecoder(w, slots=2, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype)
 
     def run(prompt, count, draft=True):
         s = Stream(list(prompt), count, sampling, draft=draft)
@@ -91,7 +94,7 @@ def test_prompts_that_extend_a_finished_stream_resume_from_its_slot(sampling):
         return s
 
     def fresh(prompt, count):
-        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype)
         return serial_decode(e, prefill(e, prompt, sampling), count, sampling).tokens
 
     first = run(PROMPTS[1], 12)

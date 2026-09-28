@@ -15,6 +15,23 @@ from tensorfold.families.qwen4_exp.ssd_table import SSDTable
 _PARTS = ("weight", "scales", "biases")
 
 
+def ngrams_on_host(model_dir: Path, ssd: bool = False) -> bool:
+    """Host n-gram tables when read from SSD, else past the GPU working-set threshold (TF_NGRAM_HOST=0/1 overrides)."""
+
+    flag = os.environ.get("TF_NGRAM_HOST", "")
+    if ssd:
+        if flag == "0":
+            raise ValueError("--ple-on-ssd reads the n-gram tables on the host: unset TF_NGRAM_HOST=0")
+        return True
+    if flag in ("0", "1"):
+        return flag == "1"
+    import mlx.core as mx
+
+    size = sum(p.stat().st_size for p in Path(model_dir).glob("model*.safetensors"))
+    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+    return size > 0.75 * int(info["max_recommended_working_set_size"])
+
+
 class HostTable:
     """Keep n-gram shards memory-mapped on the host; gather copies only requested rows, never whole tables to the GPU."""
 

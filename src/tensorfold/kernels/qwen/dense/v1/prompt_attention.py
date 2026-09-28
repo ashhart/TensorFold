@@ -6,6 +6,7 @@ import mlx.core as mx
 
 ROWS = 128
 FROM_KEYS = 4096
+KEY_BLOCK = 16          # MLX 0.32.2's key block before M5: a part ending inside one rounds unlike one whole call
 
 
 def attend(queries: mx.array, keys: mx.array, values: mx.array, scale: float) -> mx.array:
@@ -14,10 +15,15 @@ def attend(queries: mx.array, keys: mx.array, values: mx.array, scale: float) ->
     rows, total = int(queries.shape[2]), int(keys.shape[2])
     if total <= FROM_KEYS or rows <= ROWS:
         return mx.fast.scaled_dot_product_attention(queries, keys, values, scale=scale, mask="causal")
+    from tensorfold.families.qwen3_5 import tensor_units
+
+    block = 1 if tensor_units() else KEY_BLOCK
     outs: list[mx.array] = []
     begin = 0
     while begin < rows:
         end = min(rows, begin + ROWS)
+        if end < rows:
+            end -= (total - rows + end) % block                   # its keys end on a key block
         # A short tail would select vector attention and change the full prompt's bits.
         if 0 < rows - end <= 16:
             end = rows
@@ -32,4 +38,4 @@ def attend(queries: mx.array, keys: mx.array, values: mx.array, scale: float) ->
     return mx.concatenate(outs, axis=2)
 
 
-__all__ = ["FROM_KEYS", "ROWS", "attend"]
+__all__ = ["FROM_KEYS", "KEY_BLOCK", "ROWS", "attend"]

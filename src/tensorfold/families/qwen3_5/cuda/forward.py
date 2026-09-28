@@ -5,8 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+import numpy as np
 import torch
 
+from tensorfold.cuda import moe
 from tensorfold.cuda.kernels import attention as tree_attention
 from tensorfold.cuda.kernels import gdn as deltanet
 
@@ -28,6 +30,17 @@ def _row_mm(x: torch.Tensor, w: QLinear, tp: bool,
     from .distributed import gather_rank_partials, row_partial
 
     return gather_rank_partials(row_partial(x, w, xs=xs if w.layout == "tiled" else None))
+
+
+def _mlp(layer, h: torch.Tensor, xs: torch.Tensor, tp: bool) -> torch.Tensor:
+    """A layer's MLP on its normed rows: routed experts with the shared expert, or the dense SwiGLU."""
+
+    if layer.moe is not None:
+        if tp:
+            raise ValueError("routed experts run on one GPU")
+        return moe.run(h, layer.moe)
+    act, act_xs = glue.swiglu(_mm(h, layer.gate, xs), _mm(h, layer.up, xs))
+    return _row_mm(act, layer.down, tp, act_xs)
 
 
 def _paths(parents: Sequence[int]) -> tuple[list[int], bool]:
@@ -108,11 +121,62 @@ class State:
                                 torch.empty((0, c.kv_heads, c.head_dim), device=device, dtype=torch.bfloat16)))
 
 
+@dataclass
+class Staged:
+    """A chain window's device inputs for graph replays: static plans, and a pinned mirror copied in before each replay."""
+
+    width: int
+    ids: torch.Tensor
+    pos: torch.Tensor
+    plan: deltanet.Plan
+    aplan: tree_attention.Plan
+    aoffs: dict[int, torch.Tensor]
+    windows: torch.Tensor
+    host: torch.Tensor
+    dev: torch.Tensor
+
+    def refresh(self, tokens: Sequence[int], p: int) -> None:
+        """This round's tokens at positions [p, p + width) (the host mirror, then one copy)."""
+
+        w, h = self.width, self.host.numpy()
+        h[:w] = tokens
+        h[w:2 * w] = np.arange(p, p + w)
+        h[2 * w + w + 2] = p                                 # the attention stream's committed keys and chunks
+        h[2 * w + w + 3] = -(-(p + w) // tree_attention.CHUNK)
+        self.dev.copy_(self.host, non_blocking=True)
+
+
+def stage(w: Weights, st: State, width: int, context: int) -> Staged:
+    """Static inputs for chains of ``width`` rows over at most ``context`` committed keys (``st``'s buffers fixed)."""
+
+    c, device = w.config, w.norm.device
+    parents = list(range(-1, width - 1))
+    flat, items, chunks = tree_attention.padded_host(parents, context, c.heads // c.kv_heads)
+    host = torch.tensor([0] * (2 * width) + flat, dtype=torch.int32).pin_memory()
+    dev = host.to(device)
+    softmax = [i for i, layer in enumerate(w.layers) if not layer.linear]
+    return Staged(width, dev[:width], dev[width:2 * width], deltanet.plan([parents], device),
+                  tree_attention.from_packed(dev[2 * width:], 1, width, items, chunks),
+                  _cache_offsets([st], softmax, device), _conv_windows(parents, c.conv_kernel - 1).to(device), host, dev)
+
+
+def reserve(st: State, rows: int) -> None:
+    """Grow every attention cache to ``rows`` now, so later commits never move a buffer (graphs keep addresses)."""
+
+    for i, kv in enumerate(st.kv):
+        if kv is not None and kv[0].shape[0] < rows:
+            k, v = kv[0].new_empty((rows, *kv[0].shape[1:])), kv[1].new_empty((rows, *kv[1].shape[1:]))
+            k[:st.pos], v[:st.pos] = kv[0][:st.pos], kv[1][:st.pos]
+            st.kv[i] = (k, v)
+    st.limit = rows
+
+
 @torch.no_grad()
 def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: State,
                  *, full_logits: bool = True, tp: bool = False,
                  initial: tuple[torch.Tensor, torch.Tensor] | None = None,
-                 finish: bool = True, capture_taps: bool = False):
+                 finish: bool = True, capture_taps: bool = False, hidden: bool = False,
+                 staged: Staged | None = None):
     """Return uncommitted node logits and layer data for topologically sorted parents, with each node seeing only its ancestors and committed prefix."""
 
     c = w.config
@@ -123,13 +187,17 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
         raise ValueError("tokens must be a 1-D int tensor matching parents")
     if tokens.device != w.norm.device:
         raise ValueError("tokens and weights must share a device")
-    ids = tokens.to(torch.int32)
-    pos = torch.tensor([st.pos + d for d in depths], device=tokens.device, dtype=torch.int32)
-    plan = deltanet.plan([parents], tokens.device)
-    softmax = [i for i, layer in enumerate(w.layers) if not layer.linear]
-    aplan = tree_attention.plan([parents], [st.pos], c.heads // c.kv_heads, tokens.device)
-    aoffs = _cache_offsets([st], softmax, tokens.device)
-    windows = _conv_windows(parents, c.conv_kernel - 1).to(tokens.device)
+    if staged is not None:                          # a graph replay's inputs, refreshed in place
+        ids, pos, plan, aplan = staged.ids, staged.pos, staged.plan, staged.aplan
+        aoffs, windows = staged.aoffs, staged.windows
+    else:
+        ids = tokens.to(torch.int32)
+        pos = torch.tensor([st.pos + d for d in depths], device=tokens.device, dtype=torch.int32)
+        plan = deltanet.plan([parents], tokens.device)
+        softmax = [i for i, layer in enumerate(w.layers) if not layer.linear]
+        aplan = tree_attention.plan([parents], [st.pos], c.heads // c.kv_heads, tokens.device)
+        aoffs = _cache_offsets([st], softmax, tokens.device)
+        windows = _conv_windows(parents, c.conv_kernel - 1).to(tokens.device)
     if initial is None:
         x = glue.embedding(ids, w.embed)
         pending: torch.Tensor | None = None
@@ -180,10 +248,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             r = _row_mm(gated, attn.o, tp, out_xs)
             record.append(AttentionRecord(key, value))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
-        gate = _mm(h, layer.gate, xs)
-        up = _mm(h, layer.up, xs)
-        act, act_xs = glue.swiglu(gate, up)
-        pending = _row_mm(act, layer.down, tp, act_xs)
+        pending = _mlp(layer, h, xs, tp)
         if capture_taps and i in (5, 19, 33, 47, 61):
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
     if not finish:
@@ -196,6 +261,8 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
         if len(taps) != 5:
             raise ValueError("DFlash2 taps require the complete 64-layer target")
         return logits, record, torch.cat(taps, dim=-1)
+    if hidden:                                     # the rows' final normed states (what an MTP head reads)
+        return logits, record, h
     return logits, record
 
 
@@ -289,10 +356,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             r = _row_mm(gated, attn.o, tp, out_xs)
             record.append(AttentionRecord(key, value))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
-        gate = _mm(h, layer.gate, xs)
-        up = _mm(h, layer.up, xs)
-        act, act_xs = glue.swiglu(gate, up)
-        pending = _row_mm(act, layer.down, tp, act_xs)
+        pending = _mlp(layer, h, xs, tp)
         if capture_taps and i in (5, 19, 33, 47, 61):
             taps.append((x.float() + pending.float()).to(torch.bfloat16))
     _, h, xs = glue.add_rmsnorm(x, pending, w.norm, c.eps)
@@ -321,25 +385,26 @@ def path_indices(record: Sequence[Record], paths: Sequence[Sequence[int]]) -> li
     return out
 
 
-def commit(st: State, record: Sequence[Record], path: Sequence[int], indices: tuple | None = None) -> None:
-    """Replay only an accepted root-to-leaf path into the committed state (``indices``: ``path_indices``')."""
+def commit(st: State, record: Sequence[Record], path: Sequence[int], indices: tuple | None = None, *,
+           in_place: bool = False) -> None:
+    """Replay only an accepted root-to-leaf path into the committed state (``in_place``: states no clone shares)."""
 
     rows, count, take = indices if indices is not None else path_indices(record, [path])[0]
-    _commit([st], record, [path], rows.view(1, -1), count, [take])
+    _commit([st], record, [path], rows.view(1, -1), count, [take], in_place)
 
 
 def commit_streams(states: Sequence[State], record: Sequence[Record], paths: Sequence[Sequence[int]],
-                   indices: list | None = None) -> None:
-    """Commit each stream's accepted path into its own state with one GDN replay launch for every stream."""
+                   indices: list | None = None, *, in_place: bool = False) -> None:
+    """Commit each stream's accepted path into its own state with one GDN replay launch for every stream (``in_place``: states nothing else holds)."""
 
     indices = indices if indices is not None else path_indices(record, paths)
     width = record[0].k.shape[0]
     packed = indices[0][0].as_strided((len(paths), width + 1), (width + 1, 1))    # path_indices' one copy
-    _commit(states, record, paths, packed[:, :width], packed[:, width], [t for _, _, t in indices])
+    _commit(states, record, paths, packed[:, :width], packed[:, width], [t for _, _, t in indices], in_place)
 
 
 def _commit(states: Sequence[State], record: Sequence[Record], paths: Sequence[Sequence[int]], rows: torch.Tensor,
-            counts: torch.Tensor, takes: Sequence[torch.Tensor]) -> None:
+            counts: torch.Tensor, takes: Sequence[torch.Tensor], in_place: bool = False) -> None:
     if any(not p for p in paths) or any(len(record) != len(st.rec) for st in states):
         raise ValueError("record and nonempty paths required")
     # one GDN replay launch covers every layer and stream
@@ -351,7 +416,8 @@ def _commit(states: Sequence[State], record: Sequence[Record], paths: Sequence[S
         ptrs = deltanet.replay_table([t.k for t in items], [t.v for t in items], [t.g for t in items],
                                      [t.beta for t in items], [[st.rec[i] for i, _ in linear] for st in states])
         table = deltanet.to_device(ptrs, torch.int64, rows.device)
-        replayed = deltanet.replay(table, len(items), len(states), rows, counts, items[0].k, items[0].v)
+        replayed = deltanet.replay(table, len(items), len(states), rows, counts, items[0].k, items[0].v,
+                                   in_place=in_place)
     device = rows.device
     if linear:
         # a stream's new conv rows are the last ``keep`` of [its committed rows | its accepted rows]
@@ -370,8 +436,12 @@ def _commit(states: Sequence[State], record: Sequence[Record], paths: Sequence[S
             news = [torch.cat([old, t.qkv]).index_select(0, pick_t) for old, t in zip(olds, items)]
         for j, ((i, _), new) in enumerate(zip(linear, news)):
             for s, st in enumerate(states):
-                st.rec[i] = replayed[s, j]
-                st.conv[i] = new[s * keep:(s + 1) * keep]
+                if replayed is not None:
+                    st.rec[i] = replayed[s, j]
+                if in_place:
+                    st.conv[i].copy_(new[s * keep:(s + 1) * keep])
+                else:
+                    st.conv[i] = new[s * keep:(s + 1) * keep]
     if att:
         for st, path in zip(states, paths):
             need = st.pos + len(path)

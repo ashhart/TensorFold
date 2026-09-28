@@ -224,6 +224,8 @@ class LaneStream:
             landed.append(value)
             if value == self.think_end:
                 self.think_open = False
+            if self.call_gate is not None:
+                self.call_gate.observe(value)
             if value in self.eos_ids or (self.stop_check is not None and self.stop_check(self.emitted)):
                 self.finished = True
                 self.finish_reason = "stop"

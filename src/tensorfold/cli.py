@@ -13,6 +13,8 @@ import time
 from typing import Any
 
 from tensorfold import __version__
+from tensorfold.server.memory_budget import MEMORY_FRACTION
+from tensorfold.serve_options import check as _check_serve_options
 
 COMMANDS = ("serve", "pull", "models", "info", "update")
 
@@ -60,16 +62,25 @@ def build_parser() -> argparse.ArgumentParser:
     speed.add_argument("--mtp-drafts", type=int, default=None,
                        help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 30%% "
                             "confidence); 0: no MTP drafts (any family)")
+    speed.add_argument("--mtp-confidence", type=float, default=None,
+                       help="on CUDA, stop an MTP chain before a later draft under this probability "
+                            "(Flash Next default 0.30)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
                        help="memory for cached conversation prefixes (0: off; default: an eighth of RAM, at most 16)")
+    speed.add_argument("--checkpoint-slots", type=int, default=None,
+                       help="cached conversation prefixes kept in memory (default: 3 per parallel lane, at least 8); "
+                            "with long conversations this, not --prompt-cache-gib, is usually the limit")
+    speed.add_argument("--spill-gib", type=float, default=0.0,
+                       help="write evicted conversation prefixes to disk, up to this many GiB, and read them back on "
+                            "demand instead of prefilling again (0: off; needs --snapshot-dir)")
     speed.add_argument("--snapshot-dir", default=str(Path.home() / ".cache" / "tensorfold" / "prefix-snapshots"),
                        help="where system-block and conversation snapshots are kept ('none': in memory only)")
     speed.add_argument("--max-snapshots", type=int, default=3, help="system-block snapshots loaded at start")
     speed.add_argument("--parallel", default="auto",
                        help="requests decoded together, their windows sharing each round's forward: a number, or "
-                            "auto (Mac: up to 8, each started only while the projected memory fits 70%% of RAM; "
+                            "auto (Mac: up to 8, each started only while the projected memory fits the budget; "
                             "CUDA: one at a time, the others waiting their turn)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
     speed.add_argument("--ssd-experts", type=float, default=None, metavar="GIB",
@@ -92,6 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="with --tp 2: this machine's rank; rank 0 serves HTTP, rank 1 follows it")
     cuda.add_argument("--master", default="", help="with --tp 2: rank 0's address on the link between the machines")
     cuda.add_argument("--master-port", type=int, default=29551, help="with --tp 2: rank 0's rendezvous port")
+    cuda.add_argument("--kv-dtype", choices=("bf16", "int8", "int4"), default="bf16",
+                      help="KV cache: bf16 (the default), int8, or int4. Quantized keys and values use one "
+                           "fp16 scale per 32 values (changes the output; Flash Next on CUDA only)")
     serve.set_defaults(func=cmd_serve)
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
@@ -230,6 +244,10 @@ def cmd_info(args: argparse.Namespace) -> int:
         if key in text:
             print(f"{key:12s} {text[key]}" if len(key) <= 12 else f"{key} {text[key]}")
     print(f"quantization {families.describe_quantization(config)}")
+    bits = getattr(family.package, "CUDA_AFFINE_BITS", ())
+    groups = getattr(family.package, "CUDA_AFFINE_GROUPS", ())
+    if bits and groups:
+        print(f"CUDA formats affine {'/'.join(map(str, bits))}-bit, groups {'/'.join(map(str, groups))}")
     readers = [b for b in families.backends_of(family)
                if families.quant_method(config) in families.readable_quants(family, b)]
     if readers:
@@ -320,10 +338,14 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
+    if getattr(args, "kv_dtype", "bf16") != "bf16":
+        options["kv_dtype"] = args.kv_dtype
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
     if args.ple_on_ssd:
         options["ple_on_ssd"] = True
+    if getattr(args, "mtp_confidence", None) is not None:
+        options["mtp_confidence"] = float(args.mtp_confidence)
     options["context"] = context if context is not None else args.context
     options["context_explicit"] = args.context is not None
     streams = 1 if str(args.parallel).strip().lower() == "auto" else _parallel(args.parallel)
@@ -357,8 +379,6 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     return 0
 
 
-# Admit concurrent requests within this RAM fraction, or the family's, after the rest of the machine.
-MEMORY_FRACTION = 0.70
 # a resume point begins a prompt chunk when at least this many tokens follow the last chunk start
 MIN_CHUNK = 256
 
@@ -392,6 +412,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.ple_on_ssd and not hasattr(family.package, "ple_bytes"):
         raise ValueError(f"--ple-on-ssd: {family.title} has no n-gram (PLE) tables to read from SSD")
     backend = _backend(args.backend, family)
+    _check_serve_options(args, family, backend)
     families.require_readable(family, families.read_config(config_dir), backend)
     _note_untested(family, args.model)
     required_files = getattr(family.package, "REQUIRED_FILES", {}).get(args.model, ())
@@ -420,27 +441,32 @@ def cmd_serve(args: argparse.Namespace) -> int:
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     import mlx.core as mx
 
-    from tensorfold.server.memory_budget import PROCESS_BYTES, configure_mlx, model_fraction
+    from tensorfold.server.memory_budget import PROCESS_BYTES, budget_ceiling, configure_mlx, model_fraction, raise_hint
 
     fraction = model_fraction(family.package)
     memory_limit = configure_mlx(mx, int(float(args.mlx_cache_gib) * 1024**3), fraction=fraction)
     gib = 1024**3
     note = f" ({fraction:.0%} of RAM, this model's allowance)" if fraction > MEMORY_FRACTION else ""
+    ceiling = budget_ceiling(mx)
+    more = f"; TENSORFOLD_MEMORY_LIMIT_GB can raise it to {ceiling / gib:.1f}" if ceiling > memory_limit + gib else ""
     print(f"[tensorfold] memory budget {memory_limit / gib:.1f} GiB{note}: MLX's buffers up to "
-          f"{(memory_limit - PROCESS_BYTES) / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB for the rest of the process",
-          flush=True)
-    weights = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
-    if args.ple_on_ssd:
-        weights -= family.package.ple_bytes(model_dir)      # read from disk at each lookup, never loaded
+          f"{(memory_limit - PROCESS_BYTES) / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB for the rest of the process"
+          f"{more}", flush=True)
+    checkpoint = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
+    estimate = getattr(family.package, "weight_bytes", None)
+    weights = checkpoint if estimate is None else estimate(model_dir, ple_on_ssd=args.ple_on_ssd)
     if args.ssd_experts is not None:
         weights += int(args.ssd_experts * gib) - family.package.expert_bytes(model_dir)   # the pool, not the stacks
+    if weights < checkpoint:
+        print(f"[tensorfold] weights: {weights / gib:.1f} GiB resident, "
+              f"{(checkpoint - weights) / gib:.1f} GiB file-backed", flush=True)
     if weights >= memory_limit - PROCESS_BYTES:
         stream = ("stream its routed experts from SSD with --ssd-experts GIB (slower), "
                   if args.ssd_experts is None and hasattr(family.package, "expert_bytes") else "")
+        hint = raise_hint(weights + PROCESS_BYTES, ceiling)
         raise ValueError(f"{family.title}'s weights ({weights / gib:.1f} GiB) do not fit this server's "
-                         f"{memory_limit / gib:.1f} GiB memory budget ({fraction:.0%} of RAM, or "
-                         f"TENSORFOLD_MEMORY_LIMIT_GB): serve it on a Mac with more memory, {stream}or use a smaller "
-                         "or more quantized checkpoint")
+                         f"{memory_limit / gib:.1f} GiB memory budget. {hint or 'Serve it'} on a Mac with more memory, "
+                         f"{stream}or use a smaller or more quantized checkpoint")
     return _serve_mlx(args, family, model_dir, context, required_files, memory_limit, fraction)
 
 
@@ -527,8 +553,9 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         thinking_budget=int(args.thinking_budget),
         default_sampling=sampling,
         max_snapshots=int(args.max_snapshots),
-        checkpoint_slots=0 if budget <= 0 else None,
+        checkpoint_slots=0 if budget <= 0 else args.checkpoint_slots,
         checkpoint_budget_bytes=budget if budget > 0 else None,
+        spill_bytes=int(float(args.spill_gib) * 1024**3),
         memory_budget_bytes=memory_limit,
         fit_context=args.context is None,
         use_proposer=not args.no_drafts,

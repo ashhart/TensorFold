@@ -15,7 +15,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_glm_kda_v1", sources=[str(here / "kda.cpp"), str(here / "kda.cu")],
+    return load(name="tensorfold_glm_kda_v2", sources=[str(here / "kda.cpp"), str(here / "kda.cu")],
                 extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)
 
 
@@ -55,12 +55,33 @@ def replay_layers(state_in: torch.Tensor, scratch: KDAScratchSet, rows: int, sta
                          scratch.rows * H, L, H, int(rows), state_out)
 
 
+WIDE_ROWS = 64          # windows of this many rows or more (prefill chunks) run the chain in three kernels
+_tmp: dict = {}
+
+
+def _wide_scratch(rows: int, heads: int, device) -> tuple[torch.Tensor, torch.Tensor]:
+    """The normalized q and the read-out of a long window, shared by every layer (they run one after another)."""
+    key = (heads, device)
+    q, y = _tmp.get(key, (None, None))
+    if q is None or q.shape[0] < rows:
+        q = torch.empty((rows, heads, DK), dtype=torch.float32, device=device)
+        y = torch.empty((rows, heads, DV), dtype=torch.bfloat16, device=device)
+        _tmp[key] = (q, y)
+    return q, y
+
+
 def chain(p: torch.Tensor, b_off: int, a: torch.Tensor, g: torch.Tensor, conv_state: torch.Tensor,
           conv_w: torch.Tensor, state_in: torch.Tensor, a_log: torch.Tensor, dt_bias: torch.Tensor,
           norm_w: torch.Tensor, eps: float, lower: float, rows: int, scratch: KDAScratch,
-          state_out: torch.Tensor) -> torch.Tensor:
-    """Run projection rows p [q | k | v | ... | b at b_off ...] and bf16 gate rows a and g using their own strides; return scratch.out[:rows]."""
+          state_out: torch.Tensor, *, wide: bool | None = None) -> torch.Tensor:
+    """Run projection rows p [q | k | v | ... | b at b_off ...] and bf16 gate rows a and g; windows of WIDE_ROWS rows or more take the three-kernel path, same bits."""
 
+    if wide if wide is not None else rows >= WIDE_ROWS:
+        q_tmp, y_tmp = _wide_scratch(rows, a_log.numel(), p.device)
+        _ext().chain_wide(p, p.stride(0), int(b_off), a, a.stride(0), g, g.stride(0), conv_state, conv_w, state_in,
+                          a_log, dt_bias, norm_w, float(eps), float(lower), int(rows), scratch.out, state_out,
+                          scratch.k, scratch.v, scratch.g, scratch.b, q_tmp, y_tmp)
+        return scratch.out[:rows]
     _ext().chain(p, p.stride(0), int(b_off), a, a.stride(0), g, g.stride(0), conv_state, conv_w, state_in, a_log,
                  dt_bias, norm_w, float(eps), float(lower), int(rows), scratch.out, state_out, scratch.k, scratch.v,
                  scratch.g, scratch.b)

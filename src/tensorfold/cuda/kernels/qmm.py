@@ -82,20 +82,24 @@ def pack(weight: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, gs: i
     return Q4(out, major(scales), major(biases), n, k, gs)
 
 
-def unpack(q: Q4) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The stored MLX layout again: (n, k/8) int32 words, (n, k/gs) scales and biases."""
+def unpack(q: Q4, chunk: int = 64) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The stored MLX layout again: (n, k/8) int32 words, (n, k/gs) scales and biases, ``chunk`` tiles at a time."""
 
     t, kg, _, _, v = q.weight.shape
     dev = q.weight.device
     shifts = torch.arange(8, device=dev, dtype=torch.int32) * 4
+    wide = shifts.to(torch.int64)
     offs = _offsets(q.gs, dev)
-    w = q.weight.reshape(t, kg, 8, 8, 4, v).permute(0, 2, 3, 1, 5, 4)                        # (T, j, r, kg, V, 4)
-    nib = (w[..., None] >> shifts) & 0xF                                                      # (T, j, r, kg, V, 4, 8)
-    qv = torch.zeros((t, 8, 8, kg, q.gs), dtype=torch.int32, device=dev)
-    qv[..., offs] = nib
-    qv = qv.reshape(t * 64, q.k)[:q.n].reshape(q.n, q.k // 8, 8)
-    words = _to_int32((qv.to(torch.int64) << shifts.to(torch.int64)).sum(-1))
-    return words.contiguous(), q.scales[:, :q.n].t().contiguous(), q.biases[:, :q.n].t().contiguous()
+    words = torch.empty((t * 64, q.k // 8), dtype=torch.int32, device=dev)
+    for a in range(0, t, chunk):
+        b = min(a + chunk, t)
+        w = q.weight[a:b].reshape(b - a, kg, 8, 8, 4, v).permute(0, 2, 3, 1, 5, 4)          # (T, j, r, kg, V, 4)
+        nib = (w[..., None] >> shifts) & 0xF                                                  # (T, j, r, kg, V, 4, 8)
+        qv = torch.zeros((b - a, 8, 8, kg, q.gs), dtype=torch.int32, device=dev)
+        qv[..., offs] = nib
+        qv = qv.reshape((b - a) * 64, q.k // 8, 8)
+        words[a * 64:b * 64] = _to_int32((qv.to(torch.int64) << wide).sum(-1))
+    return words[:q.n].contiguous(), q.scales[:, :q.n].t().contiguous(), q.biases[:, :q.n].t().contiguous()
 
 
 def split_k(n: int, k: int, gs: int = 64, target: int = 192) -> int:

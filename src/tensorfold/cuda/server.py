@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import threading
 import time
 import uuid
@@ -14,140 +13,18 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.errors import RequestError
 from tensorfold.server.http import Server
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
                                         validate_modalities)
 from tensorfold.server.tool_policy import ToolCallPolicy
-from tensorfold.server.tools import parse_glm_tool_call_block
+from tensorfold.engine.call_gate import CallGate, call_format, generate_gated
+from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
-_THINK_END = "</think>"
-_CALL_OPEN, _CALL_CLOSE = "<tool_call>", "</tool_call>"
-_TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.IGNORECASE | re.DOTALL)
-_TOOL_FUNCTION_BLOCK_RE = re.compile(r"^\s*<function=([^>\s]+)>\s*(.*?)\s*</function>\s*$", re.IGNORECASE | re.DOTALL)
-_TOOL_PARAMETER_BLOCK_RE = re.compile(r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>", re.IGNORECASE | re.DOTALL)
+from tensorfold.cuda.reply_text import StreamDecoder, hide_tool_calls, parse_tool_calls
+from tensorfold.server.text import split_thinking
 
-
-# -- text helpers (same rules as the Mac lane server) ---------------------------------------
-
-def _partial_tag(text: str, tag: str) -> int:
-    for k in range(min(len(tag) - 1, len(text)), 0, -1):
-        if text.endswith(tag[:k]):
-            return k
-    return 0
-
-
-class StreamDecoder:
-    """Decode a shared token window to preserve leading spaces and byte boundaries, deferring incomplete characters."""
-
-    def __init__(self, tok, skip: tuple[int, ...] = ()):
-        self.tok, self.skip = tok, frozenset(skip)
-        self.ids: list[int] = []
-        self.text = ""
-        self.prefix = 0             # window start
-        self.read = 0               # tokens already reflected in ``text``
-
-    def _decode(self, ids: list[int]) -> str:
-        return self.tok.decode(ids, skip_special_tokens=False)
-
-    def add(self, new: list[int]) -> str:
-        self.ids.extend(t for t in new if t not in self.skip)
-        before = self._decode(self.ids[self.prefix:self.read])
-        after = self._decode(self.ids[self.prefix:])
-        if len(after) > len(before) and not after.endswith("\ufffd"):
-            self.text += after[len(before):]
-            self.prefix, self.read = self.read, len(self.ids)
-        return self.text
-
-    def final(self) -> str:
-        """Everything, including a trailing partial character (as decoding it all at once gives)."""
-
-        before = self._decode(self.ids[self.prefix:self.read])
-        return self.text + self._decode(self.ids[self.prefix:])[len(before):]
-
-
-def split_thinking(text: str, *, finished: bool) -> tuple[str, str]:
-    end = text.find(_THINK_END)
-    if end < 0:
-        return text[: len(text) - (0 if finished else _partial_tag(text, _THINK_END))], ""
-    return text[:end], text[end + len(_THINK_END):].lstrip("\n")
-
-
-def hide_tool_calls(text: str, *, finished: bool) -> str:
-    out: list[str] = []
-    pos = 0
-    while True:
-        start = text.find(_CALL_OPEN, pos)
-        if start < 0:
-            tail = text[pos:]
-            out.append(tail[: len(tail) - (0 if finished else _partial_tag(tail, _CALL_OPEN))])
-            return "".join(out)
-        out.append(text[pos:start])
-        end = text.find(_CALL_CLOSE, start)
-        if end < 0:
-            return "".join(out)
-        pos = end + len(_CALL_CLOSE)
-
-
-def _tool_name(tool: dict[str, Any]) -> str:
-    fn = tool.get("function") if isinstance(tool, dict) else None
-    return str((fn or tool).get("name") or "").strip() if isinstance(tool, dict) else ""
-
-
-def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int | None = None) -> tuple[str, list[dict[str, Any]] | None]:
-    """Qwen ``<function=name><parameter=k>v</parameter></function>``, GLM ``name<arg_key>..`` or JSON calls."""
-
-    if not tools:
-        return text, None
-    known = {_tool_name(t).lower(): _tool_name(t) for t in tools}
-    calls: list[dict[str, Any]] = []
-    residue: list[str] = []
-    cursor = 0
-    for match in _TOOL_CALL_BLOCK_RE.finditer(text):
-        residue.append(text[cursor:match.start()])
-        cursor = match.end()
-        if max_calls is not None and len(calls) >= max_calls:
-            continue
-        block = match.group(1).strip()
-        name, args = None, {}
-        try:
-            payload = json.loads(block)
-            if isinstance(payload, dict):
-                fn = payload.get("function") if isinstance(payload.get("function"), dict) else payload
-                name = fn.get("name")
-                args = fn.get("arguments", fn.get("parameters", {}))
-                if isinstance(args, str):
-                    args = json.loads(args) if args.strip() else {}
-        except (json.JSONDecodeError, AttributeError):
-            m = _TOOL_FUNCTION_BLOCK_RE.match(block)
-            if m:
-                if max_calls is not None and _TOOL_PARAMETER_BLOCK_RE.sub("", m.group(2)).strip():
-                    continue
-                name = m.group(1).strip()
-                args = {p.group(1).strip(): p.group(2) for p in _TOOL_PARAMETER_BLOCK_RE.finditer(m.group(2))}
-            else:
-                glm = parse_glm_tool_call_block(block, tools, complete=max_calls is not None)
-                if glm is not None:
-                    name, args = glm
-        if not name or str(name).lower() not in known:
-            if max_calls is None:
-                residue.append(match.group(0))
-            continue
-        if max_calls is not None:
-            try:
-                if not isinstance(args, dict):
-                    continue
-                json.dumps(args, allow_nan=False)
-            except (ValueError, TypeError):
-                continue
-        calls.append({"id": f"call_{uuid.uuid4().hex[:24]}", "type": "function",
-                      "function": {"name": known[str(name).lower()],
-                                   "arguments": json.dumps(args, ensure_ascii=False, separators=(",", ":"))}})
-    residue.append(text[cursor:])
-    return "".join(residue).strip(), calls or None
-
-
-# -- chat template -------------------------------------------------------------------------
 
 class ChatTemplate:
     """The model's own Jinja chat template, rendered the way Hugging Face's apply_chat_template does."""
@@ -282,7 +159,10 @@ class App:
         validate_modalities(body)
         ToolCallPolicy(body)
         max_tokens = self._requested_tokens(body)
-        tools = body.get("tools") or []
+        try:
+            tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
+        except ValueError as exc:
+            raise RequestError(str(exc)) from None
         kwargs = dict(body.get("chat_template_kwargs") or {})
         thinking = bool(kwargs.pop("enable_thinking", self.default_thinking))
         if chat:
@@ -351,7 +231,9 @@ class App:
         return Sampling(int(seed) if seed is not None else seed_for(prompt), temp, int(top_k), float(top_p))
 
     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
-            prepared: PreparedRequest | None = None) -> dict[str, Any]:
+            prepared: PreparedRequest | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        """One reply; once ``cancelled()`` holds, a waiting request raises ``RequestCancelled`` unstarted, a running one stops at its next round and raises it after ``generate``."""
+
         prepared = prepared if prepared is not None else self.prepare(body, chat)
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
         tools, thinking = prepared.tools, prepared.thinking
@@ -360,6 +242,7 @@ class App:
         out: list[int] = []
         sent = {"reasoning": 0, "content": 0}
         stopped = {"client": False}
+        failed: list[Exception] = []
         stream = StreamDecoder(self.tok, tuple(self.engine.eos))
 
         def visible(finished: bool) -> tuple[str, str]:
@@ -374,25 +257,44 @@ class App:
             return reasoning, answer
 
         def on_tokens(new: list[int]) -> bool:
-            out.extend(new)
-            stream.add(new)
-            reasoning, answer = visible(False)
-            delta: dict[str, Any] = {}
-            if len(reasoning) > sent["reasoning"]:
-                delta["reasoning_content"] = reasoning[sent["reasoning"]:]
-                sent["reasoning"] = len(reasoning)
-            if len(answer) > sent["content"]:
-                delta["content"] = answer[sent["content"]:]
-                sent["content"] = len(answer)
-            if delta and not emit(delta):
-                stopped["client"] = True
+            # True stops the engine after this round; engines that finish on both ranks keep calling and get True
+            if stopped["client"] or failed:
+                return True
+            try:
+                out.extend(new)
+                stream.add(new)
+                reasoning, answer = visible(False)
+                delta: dict[str, Any] = {}
+                if len(reasoning) > sent["reasoning"]:
+                    delta["reasoning_content"] = reasoning[sent["reasoning"]:]
+                    sent["reasoning"] = len(reasoning)
+                if len(answer) > sent["content"]:
+                    delta["content"] = answer[sent["content"]:]
+                    sent["content"] = len(answer)
+                if delta and not emit(delta):
+                    stopped["client"] = True
+                elif cancelled is not None and cancelled():     # every round, with or without new text
+                    stopped["client"] = True
+            except Exception as exc:        # noqa: BLE001  raised after generate returns, never into the engine
+                failed.append(exc)
+                return True
             return stopped["client"]
 
         draft = body.get("draft", True) is not False
+        gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
+
+        def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
+            return self.engine.generate(ids, count, sampling, feed, **({} if draft else {"draft": False}))
+
         # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
         with (nullcontext() if getattr(self.engine, "concurrent", False) else self.lock):
-            stats = self.engine.generate(prompt, max_tokens, sampling, on_tokens,
-                                         **({} if draft else {"draft": False}))
+            if cancelled is not None and cancelled():                # the client left while this request waited
+                raise RequestCancelled("the client left before the request started")
+            stats = generate_gated(generate, prompt, max_tokens, gate, on_tokens)
+        if failed:
+            raise failed[0]
+        if stopped["client"]:                                        # as the Mac server: nothing more is written
+            raise RequestCancelled("the client left during the reply")
         stats = {**(stats or {}), "token_sha": token_sha(out)}
         reasoning, answer = visible(True)
         final: dict[str, Any] = {}
@@ -413,6 +315,36 @@ class App:
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "stats": stats}
 
+    def _call_gate(self, prompt: list[int], tools: list[dict[str, Any]]) -> CallGate:
+        """The gate a required tool call needs, from this template's call markup and the rendered prompt."""
+
+        if not hasattr(self, "_form"):
+            probe = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_0", "type": "function", "function": {"name": "tfprobe_fn", "arguments": {}}}]}]
+            try:
+                text = self.template.render(probe, tools=None, enable_thinking=False)
+            except Exception:  # noqa: BLE001 - a template that renders no calls: the opener alone
+                text = ""
+            openers = [o for o in ("<tool_call>", "<|tool_call>") if self.tok.token_to_id(o) is not None]
+            self._form = call_format(text, "tfprobe_fn", openers) or ((openers[0], None, None) if openers else None)
+        if self._form is None:
+            raise RequestError('tool_choice "required" or a named function needs a chat template that marks tool calls '
+                               '(<tool_call> or <|tool_call>), and this one does not: send "auto"')
+        opener, lead, tail = self._form
+        eos = set(self.engine.eos)
+
+        def text(token: int) -> str:
+            return self.tok.decode([token], skip_special_tokens=False)
+
+        def blank(token: int) -> bool:
+            return token not in eos and not text(token).strip()
+
+        think = [-1 if self.tok.token_to_id(t) is None else self.tok.token_to_id(t) for t in ("<think>", "</think>")]
+        names = [str((t.get("function") or t).get("name") or "") for t in tools] if lead is not None else []
+        return CallGate.after_prompt(prompt, self.tok.token_to_id(opener), blank, think_open=think[0],
+                                     think_end=think[1], text=text, lead=lead or "", names=names, tail=tail or "",
+                                     encode=lambda t: list(self.tok.encode(t, add_special_tokens=False).ids))
+
 
 def token_sha(tokens: list[int]) -> str:
     """A reply's token ids, hashed as the Mac server does: drafted and ``"draft": false`` replies must match."""
@@ -429,11 +361,14 @@ def make_handler(app: App):
 
         def _json(self, code: int, payload: dict[str, Any]) -> None:
             data = json.dumps(payload).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):          # the client has gone
+                self.close_connection = True
 
         def do_GET(self):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
@@ -459,6 +394,8 @@ def make_handler(app: App):
             created = int(time.time())
             stream = bool(body.get("stream"))
             kind = "chat.completion.chunk" if chat else "text_completion"
+            gone = socket_cancellation(self.connection)          # the Mac server's check: the client has closed
+            cancelled = lambda: gone.cancelled                  # noqa: E731
 
             def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
                 if chat:
@@ -479,13 +416,16 @@ def make_handler(app: App):
                         self.wfile.write(f"data: {json.dumps(chunk(delta))}\n\n".encode())
                         self.wfile.flush()
                         return True
-                    except (BrokenPipeError, ConnectionResetError):
+                    except OSError:             # reset, broken pipe, timed out, host unreachable: the client has gone
                         return False
 
                 if chat:
                     emit({"role": "assistant"})
                 try:
-                    result = app.run(body, chat, emit, prepared=prepared)
+                    result = app.run(body, chat, emit, prepared=prepared, cancelled=cancelled)
+                except RequestCancelled:
+                    self.close_connection = True
+                    return
                 except RequestError as exc:
                     error = {"error": {"message": str(exc), "type": "invalid_request_error"}}
                     try:
@@ -516,7 +456,10 @@ def make_handler(app: App):
                 self.close_connection = True
                 return
             try:
-                result = app.run(body, chat, lambda delta: True, prepared=prepared)
+                result = app.run(body, chat, lambda delta: True, prepared=prepared, cancelled=cancelled)
+            except RequestCancelled:
+                self.close_connection = True
+                return
             except RequestError as exc:
                 return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             usage = {"prompt_tokens": result["prompt_tokens"], "completion_tokens": result["completion_tokens"],

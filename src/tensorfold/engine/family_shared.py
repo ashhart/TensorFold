@@ -32,9 +32,9 @@ class SharedRounds:
         import mlx.core as mx
 
         current = self._inflight.pop(stream.stream_id)
-        forced = self._forced_next(stream)
+        forced = self._forced_next(stream, current)
         if forced is not None:
-            current = mx.array([forced], dtype=mx.uint32)   # the thinking budget's token, not the sample
+            current = mx.array([forced], dtype=mx.uint32)   # the thinking budget's or the call's token, not the sample
         token = int(current.item())
         stream.rounds += 1
         got = stream.commit([token])

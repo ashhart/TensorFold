@@ -63,27 +63,29 @@ def _shared(Q, KC, VC, OFF, STREAM, ITEMS, PO, PM, PL, W, H: tl.constexpr, HK: t
     start = tl.load(STREAM + s * 4)
     rows = tl.load(STREAM + s * 4 + 1)
     p = tl.load(STREAM + s * 4 + 2)
-    koff = tl.load(OFF + s * 2)
-    voff = tl.load(OFF + s * 2 + 1)
-    rr = first + tl.arange(0, 16)
-    ok = rr < rows * G
-    node = start + rr // G
-    head = hk * G + rr % G
-    d = tl.arange(0, D)
-    key = chunk * CH + tl.arange(0, 64)
-    q = tl.load(Q + (node[:, None] * H + head[:, None]) * D + d[None, :], mask=ok[:, None], other=0).to(tl.bfloat16)
-    m = tl.full((16,), float("-inf"), tl.float32)
-    l = tl.zeros((16,), tl.float32)
-    o = tl.zeros((16, D), tl.float32)
-    for t in range(CH // 64):
-        ki = key + t * 64
-        kk = tl.load(KC + koff + (ki[:, None] * HK + hk) * D + d[None, :]).to(tl.bfloat16)
-        vv = tl.load(VC + voff + (ki[:, None] * HK + hk) * D + d[None, :]).to(tl.bfloat16)
-        m, l, o = _tile(q, kk, vv, m, l, o, ki < p, SCALE)
-    base = (chunk * W + node) * H + head
-    tl.store(PO + base[:, None] * D + d[None, :], o, mask=ok[:, None])
-    tl.store(PM + base, m, mask=ok)
-    tl.store(PL + base, l, mask=ok)
+    if (chunk + 1) * CH <= p:                 # a plan padded for a longer context (a graph's) skips missing chunks
+        koff = tl.load(OFF + s * 2)
+        voff = tl.load(OFF + s * 2 + 1)
+        rr = first + tl.arange(0, 16)
+        ok = rr < rows * G
+        node = start + rr // G
+        head = hk * G + rr % G
+        d = tl.arange(0, D)
+        key = chunk * CH + tl.arange(0, 64)
+        q = tl.load(Q + (node[:, None] * H + head[:, None]) * D + d[None, :], mask=ok[:, None],
+                    other=0).to(tl.bfloat16)
+        m = tl.full((16,), float("-inf"), tl.float32)
+        l = tl.zeros((16,), tl.float32)
+        o = tl.zeros((16, D), tl.float32)
+        for t in range(CH // 64):
+            ki = key + t * 64
+            kk = tl.load(KC + koff + (ki[:, None] * HK + hk) * D + d[None, :]).to(tl.bfloat16)
+            vv = tl.load(VC + voff + (ki[:, None] * HK + hk) * D + d[None, :]).to(tl.bfloat16)
+            m, l, o = _tile(q, kk, vv, m, l, o, ki < p, SCALE)
+        base = (chunk * W + node) * H + head
+        tl.store(PO + base[:, None] * D + d[None, :], o, mask=ok[:, None])
+        tl.store(PM + base, m, mask=ok)
+        tl.store(PL + base, l, mask=ok)
 
 
 @triton.jit
@@ -187,6 +189,16 @@ def plan_host(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: i
                 items += [s, first, chunk]
         start += w
     return rows + streams + items + glob, len(items) // 3, most
+
+
+def padded_host(parents: Sequence[int], context: int, group: int) -> tuple[list[int], int, int]:
+    """``plan_host`` for one stream with items for every full chunk below ``context`` (a graph covers that range)."""
+
+    flat, _, _ = plan_host([parents], [0], group)            # rows, the stream's row (refreshed per replay), parents
+    w = len(parents)
+    items = [x for first in range(0, w * group, QUERY_TILE) for chunk in range(context // CHUNK)
+             for x in (0, first, chunk)]
+    return flat[:w + 4] + items + flat[w + 4:], len(items) // 3, -(-(context + w) // CHUNK)
 
 
 def plan(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: int, device) -> Plan:

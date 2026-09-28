@@ -162,9 +162,8 @@ def _gdn(gdn: Any, x: mx.array, items: Sequence[Any], rows: _Rows) -> mx.array:
     from tensorfold.kernels.qwen.dense.v1 import row_streams
 
     stack = stack_of(gdn, "in")
-    if stack is None:
-        raise RuntimeError("row_forward: the recurrent layer's projections are not stacked (build(model) first)")
-    y = project_stack(stack, x)                                                     # [qkv | z | b | a]
+    y = (project_stack(stack, x) if stack is not None else mx.concatenate(
+        [project(getattr(gdn, name), x) for name in row_matmul.GROUPS["in"]], axis=-1))
     n_keep = gdn.conv_kernel_size - 1
     if rows.single:
         if rows.windows is None:

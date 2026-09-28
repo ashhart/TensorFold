@@ -24,9 +24,10 @@ void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const a
                 xs.size(1) == kg, "xs: (M, K / gs) fp32");
     TORCH_CHECK(w.is_cuda() && w.is_contiguous() && w.scalar_type() == at::kInt && w.numel() == npad * k / 8,
                 "packed weight does not match n and K");
-    TORCH_CHECK(scales.is_contiguous() && biases.is_contiguous() && scales.scalar_type() == at::kBFloat16 &&
+    TORCH_CHECK(scales.stride(1) == 1 && biases.stride(1) == 1 && scales.stride(0) >= npad &&
+                biases.stride(0) == scales.stride(0) && scales.scalar_type() == at::kBFloat16 &&
                 biases.scalar_type() == at::kBFloat16 && scales.size(0) == kg && scales.size(1) == npad &&
-                biases.sizes() == scales.sizes(), "scales and biases: (K / gs, n padded to 128) bf16");
+                biases.sizes() == scales.sizes(), "scales and biases: (K / gs, n padded to 128) bf16, rows may be strided");
     TORCH_CHECK(out.is_cuda() && out.is_contiguous() && out.size(0) == m && out.size(1) == n &&
                 out.scalar_type() == (f32 ? at::kFloat : at::kBFloat16), "out: (M, n)");
     c10::cuda::CUDAGuard guard(x.device());

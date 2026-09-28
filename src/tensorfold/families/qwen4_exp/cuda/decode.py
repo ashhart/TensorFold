@@ -112,14 +112,15 @@ class Engine:
     """Weights, one sequence's state, buffers for decode windows (main model and MTP head) and for prompt chunks."""
 
     def __init__(self, w: Weights, *, capacity: int = 4096, max_rows: int = 8, prefill_rows: int = PREFILL_ROWS,
-                 graphs: bool = False) -> None:
+                 graphs: bool = False, kv_dtype: str = "bf16") -> None:
         self.w = w
         self.capacity = capacity
         self.rows, self.prefill_rows = max_rows, prefill_rows
+        self.kv_dtype = kv_dtype
         self.buf = Buffers(w, max_rows, capacity)
         self.mbuf = Buffers(w, max_rows, capacity) if w.mtp is not None else None
         self.pbuf = Buffers(w, prefill_rows, capacity, prefill=True)
-        self.st = State(w, capacity, max_rows)
+        self.st = State(w, capacity, max_rows, kv_dtype)
         self.graphs = None
         if graphs:
             from .graphs import Graphs
@@ -135,7 +136,7 @@ class Engine:
         other = object.__new__(Engine)
         other.w, other.capacity, other.rows, other.prefill_rows = self.w, self.capacity, self.rows, self.prefill_rows
         other.buf, other.mbuf, other.pbuf, other.graphs = self.buf, None, self.pbuf, None
-        other.st = State(self.w, self.capacity, self.rows)
+        other.st = State(self.w, self.capacity, self.rows, self.st.kv_dtype)
         return other
 
     def forward(self, tokens: Sequence[int]) -> torch.Tensor:
@@ -261,7 +262,11 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
     for start in range(begin, len(prompt), e.prefill_rows):
         chunk = list(prompt[start:start + e.prefill_rows])
         R = len(chunk)
-        last = forward(w, st, pb, chunk).clone()
+        final = start + R >= len(prompt)
+        # only the prompt's last row is sampled: the head runs on the final chunk alone
+        logits = forward(w, st, pb, chunk, logits=final)
+        if final:
+            last = logits.clone()
         streams_last = pb.streams[R - 1:R].clone()
         if use_mtp:
             nxt = list(prompt[start + 1:start + R + 1])
@@ -273,6 +278,17 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
     e.last_streams = streams_last
     e.first = first
     return first
+
+
+WARM_TAIL = 18      # a partial chunk after a full one: neither its rows nor the MTP head's 17 divide by 16
+
+
+@torch.no_grad()
+def warm(e: Engine) -> None:
+    """Prefill a synthetic prompt (a full chunk, then a partial one) and empty the state, so no request compiles or loads a prompt kernel."""
+
+    prefill(e, [0] * min(e.prefill_rows + WARM_TAIL, e.capacity), None)
+    e.reset()
 
 
 @dataclass

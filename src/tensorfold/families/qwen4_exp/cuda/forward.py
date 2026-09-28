@@ -9,11 +9,12 @@ import torch
 import triton
 import triton.language as tl
 
+from tensorfold.cuda import moe as moe_mod
 from tensorfold.cuda.kernels import gdn as shared_gdn
 
 from . import attention as attn_mod
 from . import gdn as gdn_mod
-from . import gdn_io, glue, moe as moe_mod, qmm
+from . import gdn_io, glue, qmm
 from .state import ATT_ROWS, CAND, Buffers, State
 from .weights import HC, LayerW, Weights
 
@@ -149,9 +150,9 @@ def _caches(layer: LayerW, st: State, mtp: bool) -> tuple:
     """The layer's caches and committed length (on the device and on the host)."""
 
     if mtp:
-        return st.mtp_kc, st.mtp_vc, st.mtp_ikc, st.mtp_pooled, st.mtp_pos, st.mtp_len
+        return st.mtp_kc, st.mtp_ikc, st.mtp_pooled, st.mtp_pos, st.mtp_len
     ai = st.att_index[layer.index]
-    return st.kc[ai], st.vc[ai], st.ikc[ai], st.pooled[ai], st.pos_dev, st.pos
+    return st.kc[ai], st.ikc[ai], st.pooled[ai], st.pos_dev, st.pos
 
 
 def attn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int, mtp: bool,
@@ -163,11 +164,12 @@ def attn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: in
     _mm(b.mixed[:R], a.proj, b.xs_mixed[:R], b.pa[:R], b)
     scale = c.head_dim ** -0.5
     for st, a0, a1 in segs:
-        kc, vc, ikc, pooled, pos, host_pos = _caches(layer, st, mtp)
+        cache, ikc, pooled, pos, host_pos = _caches(layer, st, mtp)
+        bits = 0 if not cache.quantized else cache.bits
         keys = context if context is not None else host_pos + a1 - a0
-        glue.attn_prep(b.pa[a0:a1], pos, a.q_scale, a.k_scale, a.iq_scale, w.inv_freq, b.q[a0:], kc, vc, b.iq[a0:],
-                       ikc, c.eps, q_heads=c.heads, kv_heads=c.kv_heads, head_dim=c.head_dim,
-                       index_heads=c.index_heads, index_dim=c.index_dim)
+        glue.attn_prep(b.pa[a0:a1], pos, a.q_scale, a.k_scale, a.iq_scale, w.inv_freq, b.q[a0:], cache.k, cache.v,
+                       b.iq[a0:], ikc, c.eps, q_heads=c.heads, kv_heads=c.kv_heads, head_dim=c.head_dim,
+                       index_heads=c.index_heads, index_dim=c.index_dim, ks=cache.ks, vs=cache.vs, bits=bits)
         if b.prefill:
             if b.attn.qsa:
                 attn_mod.qsa_pool(ikc, pooled, pos, a.ik_scale, w.inv_freq, c.eps, b.attn, a1 - a0)
@@ -177,13 +179,14 @@ def attn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: in
                 ends = host_pos + r0 - a0 + n
                 if b.attn.qsa:
                     attn_mod.qsa_rows(b.iq[r0:r0 + n], pooled, b.pos_blk, b.attn, n, context=ends)
-                attn_mod.attention(b.q[r0:r0 + n], kc, vc, b.pos_blk, b.attn, n, scale, out=b.attn_o[r0:r0 + n],
-                                   context=ends)
+                attn_mod.attention(b.q[r0:r0 + n], cache.k, cache.v, b.pos_blk, b.attn, n, scale,
+                                   out=b.attn_o[r0:r0 + n], context=ends, ks=cache.ks, vs=cache.vs, bits=bits)
             continue
         if b.attn.qsa:
             attn_mod.qsa_select(b.iq[a0:a1], ikc, pooled, pos, a.ik_scale, w.inv_freq, c.eps, b.attn, a1 - a0,
                                 context=keys)
-        o = attn_mod.attention(b.q[a0:a1], kc, vc, pos, b.attn, a1 - a0, scale, context=keys)
+        o = attn_mod.attention(b.q[a0:a1], cache.k, cache.v, pos, b.attn, a1 - a0, scale, context=keys,
+                               ks=cache.ks, vs=cache.vs, bits=bits)
         if len(segs) > 1:                       # the scratch output is the next stream's too
             b.attn_o[a0:a1].copy_(o[:a1 - a0])
     o = b.attn_o if b.prefill or len(segs) > 1 else o

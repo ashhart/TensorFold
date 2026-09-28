@@ -84,6 +84,84 @@ def test_cuda_admission_metadata_does_not_enlarge_the_engine_cache(tmp_path, mon
     assert "context: 8185" in capsys.readouterr().out
 
 
+def test_serve_parses_the_kv_cache_flag():
+    plain = cli.build_parser().parse_args(["serve", "owner/model"])
+    assert plain.kv_dtype == "bf16"                        # the cache stays bf16 unless it is asked for
+    assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "int8"]).kv_dtype == "int8"
+    assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "int4"]).kv_dtype == "int4"
+    assert cli.build_parser().parse_args(["serve", "owner/model", "--mtp-confidence", "0.6"]).mtp_confidence == 0.6
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "fp8"])
+
+
+@pytest.mark.torch
+def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatch):
+    """``CUDA_KV_DTYPES`` is the gate: a family that does not list a dtype is refused before anything loads, and
+    a family that does gets it through its engine."""
+
+    import json
+
+    from tensorfold.families import glm5_next, qwen3_5, qwen4_exp
+    from tensorfold.families.qwen4_exp.cuda import engine as fn_engine
+
+    made = []
+    monkeypatch.setattr(fn_engine, "FlashNextEngine", lambda *a, **k: made.append(k) or SimpleNamespace(**k))
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"mtp.fc.weight": "x"}}))
+
+    assert qwen4_exp.CUDA_KV_DTYPES == ("bf16", "int8", "int4")
+    assert qwen4_exp.cuda_engine(tmp_path, kv_dtype="int8").kv_dtype == "int8"
+    assert made[-1]["kv_dtype"] == "int8"
+    with pytest.raises(ValueError, match="kv-dtype"):
+        qwen4_exp.cuda_engine(tmp_path, kv_dtype="fp8")
+    for module in (qwen3_5, glm5_next):
+        args = argparse.Namespace(tp=1, rank=0, master="", master_port=29551, no_drafts=True, drafter="none",
+                                  mtp_drafts=None, name="", model=str(tmp_path), kv_dtype="int8")
+        with pytest.raises(ValueError, match="KV cache, not --kv-dtype int8"):
+            cli._check_serve_options(args, SimpleNamespace(title=module.TITLE, package=module), "cuda")
+    assert not made[1:]
+
+
+@pytest.mark.parametrize("flags,backend,family,message", [
+    (["--kv-dtype", "int8"], "mlx", "qwen4_exp", "MLX path caches keys and values as bf16"),
+    (["--kv-dtype", "int4"], "cuda", "qwen3_5", "KV cache, not --kv-dtype int4"),
+    (["--kv-dtype", "int8"], "cuda", "nemotron_h", "KV cache, not --kv-dtype int8"),
+    (["--mtp-confidence", "0.6"], "mlx", "qwen4_exp", "on MLX has no such rule"),
+    (["--mtp-confidence", "0.6"], "cuda", "glm5_next", "on CUDA has no such rule"),
+    (["--mtp-confidence", "0.6"], "cuda", "nemotron_h", "on CUDA has no such rule"),
+    (["--mtp-confidence", "1.5"], "cuda", "qwen4_exp", "probability from 0 to 1"),
+    (["--mtp-confidence", "-0.1"], "cuda", "qwen4_exp", "probability from 0 to 1"),
+])
+def test_cache_and_confidence_options_are_refused_before_any_download(tmp_path, monkeypatch, flags, backend, family,
+                                                                      message):
+    """Every family and backend answers ``--kv-dtype`` and ``--mtp-confidence``: served as asked, or refused by name
+    before a weight moves; none ignores them."""
+
+    import importlib
+
+    from tensorfold import families, hub
+
+    module = importlib.import_module(f"tensorfold.families.{family}")
+    found = SimpleNamespace(title=module.TITLE, package=module, model_type=family)
+    monkeypatch.setattr(families, "detect", lambda path: found)
+    monkeypatch.setattr(cli, "_backend", lambda choice, fam: backend)
+    monkeypatch.setattr(hub, "resolve", lambda *a, **k: pytest.fail("weights were fetched before the refusal"))
+    monkeypatch.setattr(families, "require_readable",
+                        lambda *a: pytest.fail("the checkpoint was read before the refusal"))
+    command = ["serve", str(tmp_path), "--no-update-check"] + flags
+    with pytest.raises(ValueError, match=message):
+        cli.cmd_serve(cli.build_parser().parse_args(command))
+
+
+@pytest.mark.parametrize("flags", [["--kv-dtype", "int8"], ["--kv-dtype", "int4", "--mtp-confidence", "0.6"],
+                                   ["--mtp-confidence", "0"], ["--mtp-confidence", "1"]])
+def test_flash_next_on_cuda_takes_both_options(tmp_path, flags):
+    from tensorfold.families import qwen4_exp
+
+    args = cli.build_parser().parse_args(["serve", str(tmp_path)] + flags)
+    family = SimpleNamespace(title=qwen4_exp.TITLE, package=qwen4_exp, model_type="qwen4_exp")
+    assert cli._check_serve_options(args, family, "cuda") is None
+
+
 @pytest.mark.torch
 def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatch):
     """Everything on the lanes: a CUDA engine whose drafter is missing refuses to start rather than decode one token

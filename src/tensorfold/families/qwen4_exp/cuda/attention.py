@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .kvquant import dequant_group_4, dequant_group_8, h32
+
 CHUNK = 512
 TILE = 64
 
@@ -25,9 +27,9 @@ def _tile(q, k, v, m, l, o, valid, scale: tl.constexpr):
 
 
 @triton.jit
-def _chunks(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR,
+def _chunks(Q, KC, VC, KSC, VSC, POS0, PO, PM, PL, IDS, NKR, SPR,
             H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, G: tl.constexpr, CH: tl.constexpr,
-            NCH: tl.constexpr, SCALE: tl.constexpr, IDW: tl.constexpr, QSA: tl.constexpr):
+            NCH: tl.constexpr, SCALE: tl.constexpr, IDW: tl.constexpr, QSA: tl.constexpr, BITS: tl.constexpr):
     r = tl.program_id(0)
     hk = tl.program_id(1)
     c = tl.program_id(2)
@@ -51,8 +53,30 @@ def _chunks(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR,
             if QSA:
                 if sparse:
                     ki = tl.load(IDS + r * IDW + ki, mask=valid, other=0)
-            kk = tl.load(KC + (ki[:, None].to(tl.int64) * HK + hk) * D + d[None, :], mask=valid[:, None], other=0.0)
-            vv = tl.load(VC + (ki[:, None].to(tl.int64) * HK + hk) * D + d[None, :], mask=valid[:, None], other=0.0)
+            off = (ki[:, None].to(tl.int64) * HK + hk) * D + d[None, :]
+            if BITS:
+                # codes with an fp16 scale per 32 values, dequantized before the dot; q carries the keys' rotation
+                gs = tl.arange(0, D // 32)
+                sgc = (ki[:, None].to(tl.int64) * HK + hk) * (D // 32) + gs[None, :]
+                sc = tl.load(KSC + sgc, mask=valid[:, None], other=0.0)
+                sv = tl.load(VSC + sgc, mask=valid[:, None], other=0.0)
+                if BITS == 4:
+                    db = tl.arange(0, D // 2)
+                    offb = (ki[:, None].to(tl.int64) * HK + hk) * (D // 2) + db[None, :]
+                    kc = tl.load(KC + offb, mask=valid[:, None], other=0)
+                    vc = tl.load(VC + offb, mask=valid[:, None], other=0)
+                else:
+                    kc = tl.load(KC + off, mask=valid[:, None], other=0)
+                    vc = tl.load(VC + off, mask=valid[:, None], other=0)
+                if BITS == 4:
+                    kk = dequant_group_4(kc, sc, M=64, W=D)
+                    vv = dequant_group_4(vc, sv, M=64, W=D)
+                else:
+                    kk = dequant_group_8(kc, sc, M=64, W=D)
+                    vv = dequant_group_8(vc, sv, M=64, W=D)
+            else:
+                kk = tl.load(KC + off, mask=valid[:, None], other=0.0)
+                vv = tl.load(VC + off, mask=valid[:, None], other=0.0)
             m, l, o = _tile(q, kk, vv, m, l, o, valid, SCALE)
         base = (r * NCH + c) * H + hk * G + gg
         tl.store(PO + base[:, None] * D + d[None, :], o, mask=gg[:, None] < G)
@@ -62,7 +86,7 @@ def _chunks(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR,
 
 @triton.jit
 def _merge(PO, PM, PL, POS0, OUT, NKR, SPR, H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, G: tl.constexpr,
-           CH: tl.constexpr, NCH: tl.constexpr, QSA: tl.constexpr):
+           CH: tl.constexpr, NCH: tl.constexpr, QSA: tl.constexpr, BITS: tl.constexpr):
     r = tl.program_id(0)
     hk = tl.program_id(1)
     n = tl.load(POS0) + r + 1
@@ -87,6 +111,9 @@ def _merge(PO, PM, PL, POS0, OUT, NKR, SPR, H: tl.constexpr, HK: tl.constexpr, D
         l = l * a + cl * b
         m = next_m
     result = o / l[:, None]
+    if BITS:
+        # values are stored rotated: p . (H v) = H (p . v), so one H32 a row restores the merged output
+        result = tl.reshape(h32(tl.reshape(result, (16 * D // 32, 32)), M=16 * D // 32), (16, D))
     tl.store(OUT + (r * H + head[:, None]) * D + d[None, :], result.to(tl.bfloat16), mask=gg[:, None] < G)
 
 
@@ -112,23 +139,32 @@ class AttnScratch:
 
 def attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, pos0: torch.Tensor, scratch: AttnScratch,
               rows: int, scale: float, out: torch.Tensor | None = None, *,
-              context: int | None = None) -> torch.Tensor:
-    """q [R, H, D] against caches holding [0, P0 + R) -> [R, H, D] bf16; sparse rows read ``scratch.ids``."""
+              context: int | None = None, ks: torch.Tensor | None = None, vs: torch.Tensor | None = None,
+              bits: int = 0) -> torch.Tensor:
+    """q [R, H, D] against caches holding [0, P0 + R) -> [R, H, D] bf16; sparse rows read ``scratch.ids``; ``bits`` 8 or 4: codes with ``ks``/``vs`` scales, q rotated in, the output rotated back."""
 
+    if bits and (ks is None or vs is None):
+        raise ValueError("a quantized KV cache needs its scale tensors")
+    if ks is None:
+        ks = vs = kc
     _, h, d = q.shape
     hk = kc.shape[1]
     g = h // hk
+    if g > 16:
+        raise ValueError(
+            f"this attention kernel tiles 16 query heads per KV head (G={g} does not fit); "
+            "a G under 16 is masked off after the rotation, not rotated differently")
     nch = scratch.nch
     keys = nch * CHUNK if context is None else context
     if scratch.qsa:
         keys = min(keys, (scratch.budget // scratch.ratio + 1) * scratch.ratio - 1)
     chunks = min(nch, triton.cdiv(keys, CHUNK))
     out = scratch.out if out is None else out
-    _chunks[(rows, hk, chunks)](q, kc, vc, pos0, scratch.po, scratch.pm, scratch.pl, scratch.ids, scratch.nk,
+    _chunks[(rows, hk, chunks)](q, kc, vc, ks, vs, pos0, scratch.po, scratch.pm, scratch.pl, scratch.ids, scratch.nk,
                              scratch.sparse, H=h, HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, SCALE=scale,
-                             IDW=scratch.idw, QSA=scratch.qsa, num_warps=4, num_stages=1)
+                             IDW=scratch.idw, QSA=scratch.qsa, BITS=bits, num_warps=4, num_stages=1)
     _merge[(rows, hk)](scratch.po, scratch.pm, scratch.pl, pos0, out, scratch.nk, scratch.sparse, H=h,
-                       HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, QSA=scratch.qsa, num_warps=4)
+                       HK=hk, D=d, G=g, CH=CHUNK, NCH=nch, QSA=scratch.qsa, BITS=bits, num_warps=4)
     return out
 
 

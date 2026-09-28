@@ -35,6 +35,8 @@ class RowDecode:
 
     # layers per slice handed to the GPU while the rest of the forward is built
     eval_every = 8
+    # a draft model's taps: (layer ids, the list it reads), each layer's output rows [1, N, D] written there
+    taps: tuple[tuple[int, ...], list[Any]] | None = None
 
     def __init__(self, text_model: Any, backend: str, head_backend: str | None = None) -> None:
         args = text_model.args
@@ -115,6 +117,8 @@ class RowDecode:
                 start += n
             out = outs[0] if len(outs) == 1 else mx.concatenate(outs)
             h, normed = self._back(i)(out.reshape(rows, -1), h)
+            if self.taps is not None and i in self.taps[0]:
+                self.taps[1][self.taps[0].index(i)] = h[None]
             if self.eval_every and (i + 1) % self.eval_every == 0:
                 mx.async_eval(normed)
         return normed

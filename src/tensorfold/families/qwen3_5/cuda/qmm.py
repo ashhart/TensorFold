@@ -129,13 +129,21 @@ def lane_matmul(x: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, bia
     return out
 
 
-def dequantize(weight: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor) -> torch.Tensor:
-    """Reference: (N, K/8) packed 4-bit -> (N, K) fp32 values s * q + b."""
+def dequantize(weight: torch.Tensor, scales: torch.Tensor | None, biases: torch.Tensor | None,
+               bits: int = 4, gs: int = 64) -> torch.Tensor:
+    """Diagnostic reference only; serving kernels read packed words directly."""
 
-    n, k8 = weight.shape
+    if scales is None:
+        return weight.float()
+    n = weight.shape[0]
+    k = scales.shape[1] * gs
     words = weight.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
-    shifts = torch.arange(8, device=weight.device, dtype=torch.int64) * 4
-    q = ((words[:, :, None] >> shifts) & 0xF).reshape(n, k8 * 8).to(torch.float32)
-    s = scales.to(torch.float32).repeat_interleave(64, dim=1)
-    b = biases.to(torch.float32).repeat_interleave(64, dim=1)
+    offsets = torch.arange(k, device=weight.device, dtype=torch.int64) * bits
+    index, shifts = offsets // 32, offsets % 32
+    padded = torch.cat([words, words.new_zeros((n, 1))], dim=1)
+    low, high = padded[:, index], padded[:, index + 1]
+    q = ((low >> shifts) | torch.where(shifts + bits > 32, high << (32 - shifts), 0)) & ((1 << bits) - 1)
+    q = q.to(torch.float32)
+    s = scales.to(torch.float32).repeat_interleave(gs, dim=1)
+    b = biases.to(torch.float32).repeat_interleave(gs, dim=1)
     return q * s + b
