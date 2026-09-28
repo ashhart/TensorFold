@@ -14,7 +14,7 @@ from tensorfold.cuda.kernels import gdn as shared_gdn
 
 from . import attention as attn_mod
 from . import gdn as gdn_mod
-from . import bf16, gdn_io, glue, moe as moe_mod, nvfp4_moe, qmm
+from . import bf16, gdn_io, glue, nvfp4_moe, qmm      # moe_mod comes from tensorfold.cuda (main's layout)
 from .state import ATT_ROWS, CAND, Buffers, State
 from .weights import HC, LayerW, Weights
 

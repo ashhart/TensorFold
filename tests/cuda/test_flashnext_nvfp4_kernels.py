@@ -11,6 +11,7 @@ import pytest
 torch = pytest.importorskip("torch")
 triton = pytest.importorskip("triton")
 
+from tensorfold.cuda import experts as grouped  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda import bf16, nvfp4, nvfp4_moe  # noqa: E402
 
 
