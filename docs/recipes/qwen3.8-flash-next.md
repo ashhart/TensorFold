@@ -13,6 +13,18 @@ for such a conversion; the default positive draft depth otherwise refuses the mi
 
 ## MLX execution
 
+N-gram tables stay in host file mappings when the checkpoint's model files exceed 75% of the GPU's
+recommended working set. `TF_NGRAM_HOST=1` forces this mode; `TF_NGRAM_HOST=0` keeps the tables in MLX.
+Startup admission uses the same choice as the loader and subtracts the mapped weights, scales and biases
+from the checkpoint's size. For the named 4-bit checkpoint, about 29.8 GiB of its 105.4 GiB is mapped,
+leaving a conservative 75.6 GiB resident-weight estimate. The default command selects host mode on an
+M4 Max with 128 GiB, whose process budget is 89.6 GiB, including the 3 GiB process reserve.
+
+Mapped pages still use RAM while cached. The loader prefetches them after its initial forwards; macOS
+can reclaim them, and subsequent lookups may read from disk. The remaining weights must fit the MLX
+budget, and the server sizes context from runtime cache and workspace needs. `TENSORFOLD_MEMORY_LIMIT_GB`
+can lower the budget; it cannot raise the default ceiling.
+
 Fused kernels handle hyper-connections, routing, experts, recurrence and sparse attention. Row-exact
 projections and stable routing ties keep each verify row independent of the other rows. M5 GPUs use
 the lane matmul; M1 through M4 use the per-row projection and hyper-connection kernels by default. Rejected tails

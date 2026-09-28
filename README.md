@@ -111,6 +111,10 @@ cache growth, reply tokens and prefill workspace. `TENSORFOLD_MEMORY_LIMIT_GB` c
 GiB. Retained prefixes and reusable MLX buffers have separate limits. Admission can evict retained
 prefixes or queue another stream; fitting weights alone does not establish a usable context size.
 
+Flash Next's startup weight check excludes n-gram tensors when the loader keeps them in host file
+mappings. The startup report shows resident and file-backed bytes separately. Cached file pages still
+consume RAM and can be reclaimed by the OS; see [Flash Next memory](docs/recipes/qwen3.8-flash-next.md#mlx-execution).
+
 An explicit reply limit is reserved before prefill. A request that exceeds context or memory is refused
 with fitting guidance; an omitted reply limit is capped by the remaining context. MLX reports a
 context refusal as HTTP 400 for a non-streamed request or as an error event after opening a stream.

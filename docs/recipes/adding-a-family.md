@@ -21,6 +21,11 @@ Optional declarations include `DRAFTER`, `MLX_ENV`, `check`, `engine_settings`, 
 `check` must reject unsupported configuration before downloading weights, then validate the weight index
 when available. List shared kernel modules in `KERNEL_DEPENDENCIES` so snapshot keys include them.
 
+`weight_bytes(model_dir)` can provide a conservative resident-weight estimate for MLX startup admission.
+Without it, the CLI counts every safetensors file's size. Read headers only, use the loader's placement
+decision, and exclude only tensor bytes kept in reclaimable host file mappings. Runtime cache and workspace
+admission still applies after loading; this hook does not change the memory budget.
+
 ## Model interface
 
 `load` returns a model with `lane_family = True` and a tokenizer. The complete model protocol is in
