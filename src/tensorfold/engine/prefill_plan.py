@@ -102,6 +102,8 @@ class PromptChunks:
 def message_markers(tokenizer: Any) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """(the special tokens that open a message, the tokens that open an assistant message) in this chat template."""
 
+    if getattr(type(tokenizer), "message_markers", None) is not None:     # markers the probe cannot see (not special)
+        return tokenizer.message_markers
     from tensorfold.server.text import render_prompt_ids, template_late_system
 
     decoder = getattr(tokenizer, "added_tokens_decoder", None) or {}

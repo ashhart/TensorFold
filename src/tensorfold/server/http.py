@@ -17,6 +17,7 @@ from tensorfold.server.request_options import parse_numbers
 from tensorfold.server.messages import normalize_messages, validate_modalities
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
+from tensorfold.server.stacks import Rearming
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
@@ -68,7 +69,7 @@ def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list
 
 
 def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(Rearming):              # USR1's stack dump armed again after each request
         protocol_version = "HTTP/1.1"
 
         def log_message(self, format: str, *args: Any) -> None:

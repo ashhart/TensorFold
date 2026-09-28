@@ -11,13 +11,13 @@ import uuid
 from datetime import datetime
 from contextlib import nullcontext
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.http import Server
+from tensorfold.server.stacks import Rearming
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
                                         validate_modalities)
 from tensorfold.server.request_options import parse_numbers
@@ -205,7 +205,8 @@ class App:
                                           lambda messages: render(messages, allow_images=True),
                                           context_limit=self._context_limit())
                 return PreparedRequest(rendered.tokens, max_tokens, tools, thinking,
-                                       self.sampling_for(body, rendered.tokens), ignore_eos, stop, rendered.vision)
+                                       self.sampling_for(body, rendered.tokens), ignore_eos=ignore_eos, stop=stop,
+                                       vision=rendered.vision)
             text = render(body["messages"])
         else:
             text = body.get("prompt")
@@ -215,7 +216,8 @@ class App:
         if not prompt:
             raise RequestError("rendered prompt is empty")
         # sampling is resolved here, so a malformed control is refused before a stream opens
-        return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt), ignore_eos, stop)
+        return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt),
+                               ignore_eos=ignore_eos, stop=stop)
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
         """Why the request cannot run, or None; rendered before a stream's headers are sent."""
@@ -427,7 +429,7 @@ def _log_error(exc: BaseException) -> None:
 
 
 def make_handler(app: App):
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(Rearming):              # USR1's stack dump armed again after each request
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt, *args):  # quiet

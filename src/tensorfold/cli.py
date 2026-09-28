@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from tensorfold import __version__
+from tensorfold.server import stacks
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
@@ -359,6 +360,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
     engine = family.package.cuda_engine(model_dir, **options)
+    stacks.arm()            # its warmup may have loaded a compiler that took USR1
     if args.tp == 2 and args.rank == 1:
         print(f"[tensorfold] rank 1 ready in {time.perf_counter() - started:.1f}s, following rank 0", flush=True)
         engine.follow()
@@ -435,10 +437,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if needs_full_snapshot and check is not None:
         check(model_dir)                         # checks that need the complete index, such as an MTP head
 
-    # `kill -USR1 <pid>` prints every thread's Python stack: the way to see where a silent server waits
-    import faulthandler
-
-    faulthandler.register(signal.SIGUSR1, all_threads=True)
+    stacks.start()          # `kill -USR1 <pid>` prints every thread's Python stack: where a silent server waits
     if backend == "cuda":
         return _serve_cuda(args, family, model_dir, context)
     for key, value in getattr(family.package, "MLX_ENV", {}).items():

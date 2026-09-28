@@ -20,6 +20,7 @@ def test_parse_accepts_null_parameters():
 
 
 def test_http_chat_with_null_parameters_tool():
+    pytest.importorskip("mlx.core")          # the Mac server's app
     app = make_app()
     server = serve_fake(app)
     try:
@@ -34,6 +35,7 @@ def test_http_chat_with_null_parameters_tool():
 
 
 def test_http_stream_with_null_parameters_tool():
+    pytest.importorskip("mlx.core")          # the Mac server's app
     app = make_app()
     server = serve_fake(app)
     try:

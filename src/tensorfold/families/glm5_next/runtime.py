@@ -34,6 +34,7 @@ class GLMFlash:
     max_streams = DECODE_ROWS
     # False when a forward over several streams' rows misses a stream's own bits: the engine then shares no round
     streams_exact = True
+    tag = "glm5"                 # log prefix
 
     def __init__(self, model: GLM5, head: Any | None = None, *, drafts: int = 1, check: bool = True) -> None:
         self.model = model
@@ -46,13 +47,13 @@ class GLMFlash:
         self.multi_row_exact = self.exact_width >= 2
         self.batch_rows = self.exact_width
         if check and not self.multi_row_exact:
-            print(f"[glm5] a multi-row forward does not reproduce serial steps on this MLX/GPU "
+            print(f"[{self.tag}] a multi-row forward does not reproduce serial steps on this MLX/GPU "
                   f"({self.check_report}): no drafts", flush=True)
         elif check and not self.check_streams():
             self.max_streams = 1
             self.streams_exact = False
-            print("[glm5] a forward over several streams' rows does not reproduce each stream's own call here: one "
-                  "stream a forward", flush=True)
+            print(f"[{self.tag}] a forward over several streams' rows does not reproduce each stream's own call here: "
+                  "one stream a forward", flush=True)
         self._rows: mx.array | None = None
         self._specs: dict[int, tuple[mx.array, int]] = {}     # head cache id -> (speculate's output rows, rows)
         self.mtp_step_ms = 0.0
@@ -68,15 +69,26 @@ class GLMFlash:
     def make_cache(self) -> list[Any]:
         caches = self.model.make_cache()
         if self.mtp is not None:
-            caches.append(MTPCache())                          # last: the model's layers never reach it
+            caches.append(self.new_mtp_cache())                # last: the model's layers never reach it
         return caches
 
     def adopt_cache(self, cache: list[Any]) -> list[Any]:
         """A stored or copied cache without an MTP entry gets an empty one (drafts then see less context)."""
 
         if self.mtp is not None and len(cache) == self.layer_count:
-            cache.append(MTPCache())
+            cache.append(self.new_mtp_cache())
         return cache
+
+    def new_mtp_cache(self) -> Any:
+        return MTPCache()
+
+    def draft_rows(self) -> mx.array:
+        """What the draft head reads of the last forward: its final-normed rows."""
+
+        return self.model.last_normed
+
+    def blank_draft_rows(self) -> mx.array:
+        return mx.zeros((1, int(self.args.hidden_size)), dtype=mx.bfloat16)
 
     def hidden(self, inputs: Any, cache: list[Any], parents: Any = None) -> mx.array:
         """Hidden states [1, R, D] of R tokens (maybe unread on the GPU): up to ``fused_rows`` decode, else prefill."""
@@ -84,7 +96,7 @@ class GLMFlash:
         self._chain_only(parents)
         tokens = inputs if isinstance(inputs, mx.array) else mx.array(np.asarray(inputs, dtype=np.int64))
         out = self.model.hidden(tokens, cache[: self.layer_count])
-        self._rows = self.model.last_normed
+        self._rows = self.draft_rows()
         return out
 
     def hidden_rows(self, windows: list[Any], caches: list[list[Any]], parents: Any = None) -> mx.array:
@@ -97,7 +109,7 @@ class GLMFlash:
         lengths = tuple(int(p.shape[0]) for p in parts)
         out = self.model.hidden_rows(mx.concatenate(parts) if len(parts) > 1 else parts[0],
                                      [c[: self.layer_count] for c in caches], lengths)
-        self._rows = self.model.last_normed
+        self._rows = self.draft_rows()
         return out
 
     def head(self, hidden: mx.array) -> mx.array:
@@ -264,8 +276,8 @@ class GLMFlash:
         import time
 
         vocab = int(self.args.vocab_size)
-        cache = MTPCache()
-        rows = mx.zeros((1, int(self.args.hidden_size)), dtype=mx.bfloat16)
+        cache = self.new_mtp_cache()
+        rows = self.blank_draft_rows()
         out = self.mtp(self.model, rows, mx.array([3001 % vocab], dtype=mx.uint32), [cache], (1,), True)
         mx.eval(out)
         best = float("inf")

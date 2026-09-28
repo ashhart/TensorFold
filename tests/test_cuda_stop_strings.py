@@ -215,7 +215,7 @@ def test_tool_calls_are_parsed_from_the_truncated_text(tmp_path, stream):
     through = len(ids(text[:text.find("STOP") + 4]))
     # the content is the cut text less its call (a streamed reply keeps the space the non-streamed one strips)
     assert [(g[0].strip(), g[2], g[3], g[4], [json.loads(a) for a in g[5]]) for g in got] == \
-        [("Sure.", "tool_calls", through, server.token_sha(reply_ids[:through]), [{"value": "1"}])] * 2
+        [("Sure.", "tool_calls", through, server.token_sha(reply_ids[:through]), [{"value": 1}])] * 2
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -299,7 +299,7 @@ def test_ignore_eos_tool_calls_are_parsed_from_text_that_keeps_end_tokens(tmp_pa
         got = [reply(port, True, stream, tools=TOOLS, ignore_eos=True, max_tokens=len(reply_ids), draft=d)
                for d in (True, False)]
     assert [(g[0].strip(), g[2], g[3], g[4], [json.loads(a) for a in g[5]]) for g in got] == \
-        [("Sure." + END, "tool_calls", len(reply_ids), server.token_sha(reply_ids), [{"value": "1"}])] * 2
+        [("Sure." + END, "tool_calls", len(reply_ids), server.token_sha(reply_ids), [{"value": 1}])] * 2
 
 
 @pytest.mark.parametrize("stream", [False, True])

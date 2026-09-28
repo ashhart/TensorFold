@@ -102,6 +102,7 @@ def test_render_prompt_ids_passes_tools_and_thinking_and_normalizes_arguments() 
     ids = render_prompt_ids(tokenizer, messages, tools=[{"type": "function"}], enable_thinking=True)
     assert ids and tokenizer.template_calls[-1]["tools"] == [{"type": "function"}]
     assert tokenizer.template_calls[-1]["enable_thinking"] is True
+    assert tokenizer.template_calls[-1]["thinking_mode"] == "thinking"
     assert messages[0]["tool_calls"][0]["function"]["arguments"] == '{"a": 1}'  # caller's copy untouched
 
 
