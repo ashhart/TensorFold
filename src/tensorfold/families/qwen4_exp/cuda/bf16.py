@@ -21,6 +21,7 @@ except ModuleNotFoundError:
     HAS_TRITON = False
 
 BN = 64
+BK = 64                     # the K block a program reads a step (the split keeps slices whole blocks)
 GS = 32                     # the MLX group size this module's quantize4 emits
 
 
@@ -41,12 +42,15 @@ def make_b16(weight: torch.Tensor) -> B16:
     return B16(w, int(w.shape[0]), int(w.shape[1]))
 
 
-def split_k(n: int, k: int, target: int = 160) -> int:
-    """K-slice count: the weight's shape only (never the row count), a power of two, >= 8 columns a slice."""
+def split_k(n: int, k: int, target: int = 160, bk: int = BK) -> int:
+    """K-slice count: the weight's shape only (never the row count), a power of two, and whole BK blocks a
+    slice — the kernel reads one BK block a step, so a slice that did not hold whole blocks would read past
+    its own K end (and past the weight)."""
 
     tiles = -(-n // BN)
+    blocks = k // bk
     sk = 1
-    while sk < 32 and tiles * sk < target and k % (sk * 2) == 0 and k // (sk * 2) >= 8:
+    while sk < 32 and tiles * sk < target and blocks % (sk * 2) == 0 and blocks // (sk * 2) >= 1:
         sk *= 2
     return sk
 
@@ -67,8 +71,10 @@ if HAS_TRITON:
         m_ok = rm < M
         n_ok = rn < N
         KS: tl.constexpr = K // SK
+        NB: tl.constexpr = KS // BK               # whole BK blocks a slice (split_k picks SK for that)
         acc = tl.zeros((BM, BLOCK_N), dtype=tl.float32)
-        for k0 in range(pid_s * KS, pid_s * KS + KS, BK):
+        for i in range(NB):
+            k0 = (pid_s * NB + i) * BK
             x = tl.load(X + rm[:, None] * x_stride + (k0 + rk)[None, :], mask=m_ok[:, None], other=0.0)
             w = tl.load(W + rn[:, None] * K + (k0 + rk)[None, :], mask=n_ok[:, None], other=0.0)
             acc = tl.dot(x, tl.trans(w), acc)
@@ -90,7 +96,7 @@ if HAS_TRITON:
 
 def matmul(x: torch.Tensor, b: B16, *, out: torch.Tensor | None = None, f32: bool = False,
            sk: int | None = None, num_warps: int = 4, num_stages: int = 3,
-           block_n: int = BN, bk: int = 64) -> torch.Tensor:
+           block_n: int = BN, bk: int = BK) -> torch.Tensor:
     """x [M, K] bf16 (rows may be strided) @ b.T -> [M, N] bf16 (or fp32 sums). Slices sum in slice order.
     The kernel face ``qmm.matmul`` has (the row count never picks the split), so ``forward._mm`` routes by
     the weight's ``kernel`` tag."""
@@ -100,7 +106,9 @@ def matmul(x: torch.Tensor, b: B16, *, out: torch.Tensor | None = None, f32: boo
     m, k = x.shape
     if k != b.k or x.stride(1) != 1:
         raise ValueError(f"b16 matmul: x {tuple(x.shape)} does not match K={b.k}")
-    sk = int(sk) if sk else split_k(b.n, b.k)
+    if k % bk:
+        raise ValueError(f"b16 matmul: K {k} is not a multiple of the K block {bk}")
+    sk = int(sk) if sk else split_k(b.n, b.k, bk=bk)
     if out is None:
         out = torch.empty((m, b.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
     elif out.shape != (m, b.n) or not out.is_contiguous() or (out.dtype == torch.float32) != f32:
