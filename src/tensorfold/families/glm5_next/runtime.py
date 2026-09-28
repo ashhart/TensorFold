@@ -111,12 +111,12 @@ class GLMFlash:
 
         return self._raw
 
-    def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any]) -> None:
-        """The MTP cache takes the last hidden() call's first len(next_tokens) positions (prompt rows)."""
+    def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any], start: int = 0) -> None:
+        """The MTP cache takes the last hidden() call's rows start .. start + len(next_tokens) - 1 (prompt rows)."""
 
         tokens = next_tokens if isinstance(next_tokens, mx.array) else mx.array(np.asarray(next_tokens).reshape(-1))
         tokens = tokens.reshape(-1).astype(mx.uint32)
-        self._absorb(self._raw[: int(tokens.shape[0])], tokens, cache[-1])
+        self._absorb(self._raw[start:start + int(tokens.shape[0])], tokens, cache[-1])
 
     # TF_GLM_MTP_NORMED=1: the head reads the backbone's final-normed hidden row instead of the streams' mean before
     # the norm (the CUDA engine found the head agrees more often that way; oMLX feeds the mean). Drafts only: every
