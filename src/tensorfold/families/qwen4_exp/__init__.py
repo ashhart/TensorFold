@@ -68,6 +68,27 @@ def expert_bytes(model_dir: Path) -> int:
                         and ".mlp.switch_mlp." in name)
 
 
+def weight_bytes(model_dir: Path) -> int:
+    """MLX startup weight estimate: keep the file-size bound, less the n-gram tensors the loader will memory-map."""
+
+    import re
+
+    from tensorfold.families.qwen4_exp.host_table import ngrams_on_host, read_header
+
+    paths = list(Path(model_dir).glob("*.safetensors"))
+    size = sum(p.stat().st_size for p in paths)
+    if ngrams_on_host(model_dir):
+        for path in paths:
+            if not path.name.startswith("model"):
+                continue
+            for name, entry in read_header(path).items():
+                if re.fullmatch(r"language_model\.model\.layers\.\d+\.ple\.ple_embedding\.ngram_embedding\."
+                                r"shard_\d+\.(weight|scales|biases)", name):
+                    begin, end = entry["data_offsets"]
+                    size -= end - begin
+    return size
+
+
 def load(model_dir: Path, *, mtp_drafts: int | None = None, ple_on_ssd: bool = False,
          ssd_experts: float | None = None, **_: Any) -> tuple[Any, Any]:
     from tensorfold.families.qwen4_exp.runtime import load as load_runtime

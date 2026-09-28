@@ -429,11 +429,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"[tensorfold] memory budget {memory_limit / gib:.1f} GiB{note}: MLX's buffers up to "
           f"{(memory_limit - PROCESS_BYTES) / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB for the rest of the process",
           flush=True)
-    weights = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
+    checkpoint = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
+    estimate = getattr(family.package, "weight_bytes", None)
+    weights = checkpoint if estimate is None else estimate(model_dir)
     if args.ple_on_ssd:
-        weights -= family.package.ple_bytes(model_dir)      # read from disk at each lookup, never loaded
+        weights = checkpoint - family.package.ple_bytes(model_dir)      # read from disk at each lookup, never loaded
     if args.ssd_experts is not None:
         weights += int(args.ssd_experts * gib) - family.package.expert_bytes(model_dir)   # the pool, not the stacks
+    if weights < checkpoint:
+        print(f"[tensorfold] weights: {weights / gib:.1f} GiB resident, "
+              f"{(checkpoint - weights) / gib:.1f} GiB file-backed", flush=True)
     if weights >= memory_limit - PROCESS_BYTES:
         stream = ("stream its routed experts from SSD with --ssd-experts GIB (slower), "
                   if args.ssd_experts is None and hasattr(family.package, "expert_bytes") else "")
