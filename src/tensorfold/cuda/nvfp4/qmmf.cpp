@@ -4,6 +4,9 @@
 void qmmf_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, double, at::Tensor&, const at::Tensor&, int64_t,
                int64_t, int64_t, int64_t, int64_t, int64_t, bool);
 void stage_fp4_cuda(const at::Tensor&, const at::Tensor&, double, at::Tensor&, at::Tensor&, int64_t, int64_t);
+void nvfp4_experts_cuda(int64_t, const at::Tensor&, int64_t, int64_t, const at::Tensor&, const at::Tensor&, int64_t,
+                        int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t, double,
+                        int64_t, int64_t);
 
 // out (M, N) = x (M, K) bf16 @ W: mode 0 NVFP4 (tiled words, e4m3 block scales [npad/64, K/64, 64, 4]), 1 FP8
 // (fragment-order bytes), 2 MXFP8 (those with e8m0 scales [npad/64, K/64, 64, 2]); ``scale`` the per-tensor factor.
@@ -38,7 +41,22 @@ void stage_fp4(const at::Tensor& words, const at::Tensor& bs, double global, at:
     stage_fp4_cuda(words, bs, global, w8, scales, kg, npad);
 }
 
+// Grouped experts on a plan (``tensorfold.cuda.experts``): blocks [E, N/32, K/32, M, 144] int32, scales [E, M] fp32.
+void experts(int64_t epi, const at::Tensor& x, int64_t x_stride, int64_t slots, const at::Tensor& w,
+             const at::Tensor& scale, int64_t kg, int64_t nb, const at::Tensor& items, const at::Tensor& counts,
+             const at::Tensor& members, at::Tensor out, int64_t n, double limit, int64_t skip, int64_t max_units) {
+    TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1 && x_stride % 4 == 0,
+                "x: bf16 rows, 8-byte aligned");
+    TORCH_CHECK(w.is_contiguous() && w.scalar_type() == at::kInt && w.size(-1) == 144, "w: [E, N/32, K/32, M, 144]");
+    TORCH_CHECK(scale.is_contiguous() && scale.scalar_type() == at::kFloat && scale.size(0) == w.size(0),
+                "scale: [E, M] fp32");
+    TORCH_CHECK(out.is_contiguous() && out.scalar_type() == (epi == 0 ? at::kFloat : at::kBFloat16), "out dtype");
+    nvfp4_experts_cuda(epi, x, x_stride, slots, w, scale, kg, nb, items, counts, members, out, n, limit, skip,
+                       max_units);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("qmmf", &qmmf);
     m.def("stage_fp4", &stage_fp4);
+    m.def("experts", &experts);
 }

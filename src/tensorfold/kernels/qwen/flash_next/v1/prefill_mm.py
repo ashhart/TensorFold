@@ -318,6 +318,13 @@ def shape_for(rows: int, experts: int) -> tuple[int, int, int, int]:
     return SHAPES[0] if rows < 56 * max(1, experts) else SHAPES[1]
 
 
+def gather_fits(x: mx.array, w: mx.array, biases: mx.array | None, bits: int, group: int) -> bool:
+    """Whether gather_sorted gives this sorted gather_qmm call's bits: 4-bit affine bf16, 4+ rows an expert, M1-M4."""
+
+    return (bits == 4 and biases is not None and group % 32 == 0 and x.dtype == mx.bfloat16 and w.dtype == mx.uint32
+            and x.size // int(x.shape[-1]) // int(w.shape[0]) >= 4 and fast_prefill() and tiles())
+
+
 def gather_sorted(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, idx: mx.array,
                   shape: tuple[int, int, int, int] | None = None) -> mx.array:
     """x [M, K] bf16 sorted by expert, idx [M] uint32 -> [M, N]: row i times expert idx[i], one K pass a row."""

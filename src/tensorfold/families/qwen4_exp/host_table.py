@@ -130,13 +130,7 @@ class HostTable:
 
 
 class BF16Table:
-    """The NVFP4 checkpoint's n-gram shards: plain bf16 rows, memory-mapped here and gathered a lookup at a time.
-
-    The published revision stores the table as ``…shard_N.weight`` bf16 ``[rows, ple_dim / heads]`` tensors with
-    no per-shard scale or bias, where the MLX-layout checkpoints pack 4-bit words plus a scale and bias every 32
-    values. The rows mean the same thing either way, so ``gather`` hands back the bf16 bits and the engine
-    dequantizes nothing.
-    """
+    """bf16 n-gram shards (the NVFP4 checkpoint's): memory-mapped, gathered a lookup at a time as bf16 bits."""
 
     bits = 16
 
@@ -154,19 +148,27 @@ class BF16Table:
         self.width = int(self.values[0].shape[1])       # bf16 values a row (the engine's ``dh``)
         self.wrow = self.width * 2                      # bytes a row
         self.nbytes = sum(a.nbytes for a in self.values)
+        self._pool = ThreadPoolExecutor(GATHER_THREADS, thread_name_prefix="ngram-gather")
 
-    def gather(self, ids: np.ndarray) -> np.ndarray:
-        """Rows ``ids`` (global) -> [n, W] uint16 (the bf16 bits of W values)."""
+    def _where(self, ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Each id's shard and row in it, after checking the ids lie in the table."""
 
         flat = np.asarray(ids, dtype=np.int64).reshape(-1)
         if flat.size and (flat.min() < 0 or flat.max() >= self.rows):
             raise ValueError(f"n-gram row ids must lie in [0, {self.rows})")
         shard = np.searchsorted(self.starts, flat, side="right") - 1
-        local = flat - self.starts[shard]
-        out = np.empty((flat.size, self.width), dtype=np.uint16)
-        for f in np.unique(shard):
-            at = np.nonzero(shard == f)[0]
+        return shard, flat - self.starts[shard]
+
+    def gather(self, ids: np.ndarray) -> np.ndarray:
+        """Rows ``ids`` (global) -> [n, W] uint16 (the bf16 bits of W values)."""
+
+        shard, local = self._where(ids)
+        out = np.empty((shard.size, self.width), dtype=np.uint16)
+
+        def copy(f: int, at: np.ndarray) -> None:
             out[at] = self.values[f][local[at]]
+
+        _copy_rows(self._pool, shard, copy)
         return out
 
     def lock(self) -> bool:
@@ -190,6 +192,111 @@ class BF16Table:
         """Read every shard once so the lookups hit the page cache (seconds taken); the pages stay evictable."""
 
         return _prefetch(self.values, workers)
+
+
+class FP8Table(BF16Table):
+    """e4m3 n-gram shards with one table scale: lookups give bf16(e4m3 x scale) through a 256-entry table."""
+
+    def __init__(self, files: list[tuple[Path, dict]], scale: float) -> None:
+        from tensorfold.cuda.nvfp4.format import e4m3
+
+        self.values, starts = [], [0]
+        for path, weight in files:
+            if not isinstance(weight, dict) or weight.get("dtype") != "F8_E4M3":
+                raise ValueError(f"{Path(path).name}: the n-gram weights must be F8_E4M3 tensors")
+            self.values.append(_memmap(path, weight, np.uint8))
+            if self.values[-1].shape[1] != self.values[0].shape[1]:
+                raise ValueError(f"{Path(path).name}: the n-gram shards differ in row width")
+            starts.append(starts[-1] + self.values[-1].shape[0])
+        self.starts = np.array(starts, dtype=np.int64)
+        self.rows = int(self.starts[-1])
+        self.width = int(self.values[0].shape[1])
+        self.wrow = self.width
+        self.nbytes = sum(a.nbytes for a in self.values)
+        self._pool = ThreadPoolExecutor(GATHER_THREADS, thread_name_prefix="ngram-gather")
+        f32 = (e4m3(np.arange(256)) * np.float32(scale)).astype(np.float32).view(np.uint32).astype(np.uint64)
+        self.lut = ((f32 + 0x7FFF + ((f32 >> 16) & 1)) >> 16).astype(np.uint16)   # round to nearest even
+        self.lut[(np.arange(256) & 0x7F) == 0x7F] = 0x7FC0                         # e4m3's NaN codes stay NaN
+
+    def gather(self, ids: np.ndarray) -> np.ndarray:
+        """Rows ``ids`` (global) -> [n, W] uint16 (bf16 bits of e4m3 x scale)."""
+
+        return self.lut[super().gather(ids)]
+
+
+class NVFP4Table(BF16Table):
+    """NVFP4 n-gram shards (e2m1 codes, e4m3 a 16 values, one fp32 table scale): lookups give bf16(code x scale x g)."""
+
+    def __init__(self, files: list[tuple[Path, dict, dict]], scale: float) -> None:
+        from tensorfold.cuda.nvfp4.format import E2M1, e4m3
+
+        self.values, self.scales, starts = [], [], [0]
+        for path, weight, block in files:
+            if weight.get("dtype") != "U8" or block.get("dtype") != "F8_E4M3":
+                raise ValueError(f"{Path(path).name}: NVFP4 n-gram shards are U8 codes with F8_E4M3 scales")
+            self.values.append(_memmap(path, weight, np.uint8))
+            self.scales.append(_memmap(path, block, np.uint8))
+            if self.values[-1].shape[1] != self.values[0].shape[1] or \
+                    self.scales[-1].shape[1] * 8 != self.values[-1].shape[1]:
+                raise ValueError(f"{Path(path).name}: the n-gram shards differ in row width")
+            starts.append(starts[-1] + self.values[-1].shape[0])
+        self.starts = np.array(starts, dtype=np.int64)
+        self.rows = int(self.starts[-1])
+        self.width = int(self.values[0].shape[1]) * 2
+        self.wrow = self.width // 2
+        self.nbytes = sum(a.nbytes for a in self.values + self.scales)
+        self.e2m1, self.e4m3, self.g = E2M1, e4m3(np.arange(256)), np.float32(scale)
+        self._pool = ThreadPoolExecutor(GATHER_THREADS, thread_name_prefix="ngram-gather")
+
+    def gather(self, ids: np.ndarray) -> np.ndarray:
+        """Rows ``ids`` (global) -> [n, W] uint16: bf16 bits of the fp32 code x block scale x table scale, rounded once."""
+
+        shard, local = self._where(ids)
+        codes = np.empty((shard.size, self.width // 2), dtype=np.uint8)
+        blocks = np.empty((shard.size, self.width // 16), dtype=np.uint8)
+
+        def copy(f: int, at: np.ndarray) -> None:
+            codes[at], blocks[at] = self.values[f][local[at]], self.scales[f][local[at]]
+
+        _copy_rows(self._pool, shard, copy)
+        nib = np.stack([codes & 0xF, codes >> 4], -1).reshape(shard.size, self.width)
+        v = (self.e2m1[nib] * np.repeat(self.e4m3[blocks], 16, axis=1)).astype(np.float32) * self.g
+        f32 = v.astype(np.float32).view(np.uint32).astype(np.uint64)
+        return ((f32 + 0x7FFF + ((f32 >> 16) & 1)) >> 16).astype(np.uint16)
+
+    def lock(self) -> bool:
+        return False
+
+    def prefetch(self, workers: int = 8) -> float:
+        return _prefetch(self.values + self.scales, workers)
+
+
+def open_table(model_dir: Path, shards: list[tuple[str, str]], scale):
+    """The n-gram table in its shards' layout (MLX 4-bit, bf16, FP8, NVFP4); ``scale(name)`` reads a table scale."""
+
+    headers: dict[str, dict] = {}
+    kinds: dict[str, list] = {"mlx": [], "bf16": [], "fp8": [], "nvfp4": []}
+    for shard, key in shards:
+        if shard not in headers:
+            headers[shard] = read_header(model_dir / shard)
+        h, path = headers[shard], model_dir / shard
+        if key + ".scales" in h:
+            kinds["mlx"].append((path, h[key + ".weight"], h[key + ".scales"], h[key + ".biases"]))
+        elif h[key + ".weight"].get("dtype") == "F8_E4M3":
+            kinds["fp8"].append((path, h[key + ".weight"]))
+        elif key + ".weight_scale" in h:
+            kinds["nvfp4"].append((path, h[key + ".weight"], h[key + ".weight_scale"]))
+        else:
+            kinds["bf16"].append((path, h[key + ".weight"]))
+    used = [k for k, v in kinds.items() if v]
+    if len(used) != 1:
+        raise ValueError(f"the n-gram shards mix layouts: {', '.join(used)}")
+    files = kinds[used[0]]
+    if used[0] == "nvfp4":
+        return NVFP4Table(files, scale("weight_scale_2"))
+    if used[0] == "fp8":
+        return FP8Table(files, scale("weight_scale"))
+    return BF16Table(files) if used[0] == "bf16" else HostTable(files)
 
 
 class ReadAhead:
@@ -223,6 +330,21 @@ class ReadAhead:
         return ahead.result() if ahead is not None else self.table.gather(ids)
 
 
+def _copy_rows(pool: ThreadPoolExecutor, shard: np.ndarray, copy) -> None:
+    """``copy(f, at)`` for each shard's rows; a prompt chunk's (2 GATHER_SPLIT rows or more) split over the pool."""
+
+    if GATHER_THREADS > 1 and shard.size >= 2 * GATHER_SPLIT:
+        jobs = []
+        for f in np.unique(shard):
+            at = np.nonzero(shard == f)[0]
+            parts = max(1, min(GATHER_THREADS, len(at) // GATHER_SPLIT))
+            jobs += [(f, piece) for piece in np.array_split(at, parts)]
+        list(pool.map(lambda job: copy(*job), jobs))
+    else:
+        for f in np.unique(shard):
+            copy(f, np.nonzero(shard == f)[0])
+
+
 def _key(ids: np.ndarray) -> bytes:
     return np.ascontiguousarray(np.asarray(ids, dtype=np.int64).reshape(-1)).tobytes()
 
@@ -238,9 +360,7 @@ def _memmap(path: Path, entry: dict, dtype) -> np.ndarray:
 
 
 def _random_access(array: np.ndarray) -> None:
-    """Advise random access on a lookup table's mapping: every reader gathers rows by key, so the kernel's
-    read-ahead brings in pages nobody asked for and pushes useful ones out (a 102 GB n-gram table's pages
-    beside 79 GiB of weights). Best-effort: a platform without ``madvise`` keeps the default advice."""
+    """Advise random access on a table's mapping (read-ahead only evicts useful pages); best effort."""
 
     try:
         import mmap as _mmap

@@ -20,10 +20,11 @@ class CommitEngine(LaneEngine):
     def __init__(self, model=None, **kwargs):
         super().__init__(SimpleNamespace(lane_family=True, exact_width=4), **kwargs)
 
-    def _family_prefill(self, stream, **kwargs):
+    def _family_prefill_steps(self, stream, **kwargs):
         stream.cache_len = len(stream.prompt_ids)
         stream.commit(REPLY[:1])
         return []
+        yield                                        # a one-step prefill
 
     def _family_round(self, stream, cache):
         start = len(stream.emitted)

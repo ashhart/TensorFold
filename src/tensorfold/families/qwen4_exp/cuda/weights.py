@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,13 +10,14 @@ from typing import Any
 import numpy as np
 import torch
 
-from ..host_table import BF16Table, HostTable, read_header as _header
+from ..host_table import BF16Table, HostTable, open_table, read_header as _header
 from ..ssd_table import SSDTable
 from .bf16 import b16_from_rows, make_b16, quantize4, stack_b16
 from .ngram import NGram
 from tensorfold.cuda import experts as grouped
 
 from .qmm import Q4, dequantize, make_q4, stack_q4
+from .reader import _DT, _Reader, _groups, _rows, _rows_at, norms_around_one  # noqa: F401
 
 
 def stop_ids(configured: Any, generation: Path) -> tuple[int, ...]:
@@ -252,101 +252,6 @@ class Weights:
         return sum(seen.values()) + (self.x3.nbytes() if self.x3 is not None else 0)
 
 
-_DT = {"U32": torch.int32, "I32": torch.int32, "BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32,
-       "I64": torch.int64, "U8": torch.uint8, "I8": torch.int8, "U16": torch.int16, "I16": torch.int16,
-       "F8_E4M3": torch.float8_e4m3fn}
-
-
-class _Reader:
-    """Read checkpoint shards sequentially and release each shard's cached pages."""
-
-    def __init__(self, model_dir: Path, device: str) -> None:
-        index = json.loads((model_dir / "model.safetensors.index.json").read_text())
-        self.where = index["weight_map"]
-        self.dir = model_dir
-        self.device = device
-        self.headers: dict[str, tuple[int, dict]] = {}
-        self.touched: set[str] = set()
-
-    def _header(self, shard: str) -> tuple[int, dict]:
-        got = self.headers.get(shard)
-        if got is None:
-            import struct
-
-            with open(self.dir / shard, "rb") as f:
-                n = struct.unpack("<Q", f.read(8))[0]
-                got = (8 + n, json.loads(f.read(n)))
-            self.headers[shard] = got
-        return got
-
-    def get(self, name: str) -> torch.Tensor:
-        shard = self.where[name]
-        base, header = self._header(shard)
-        entry = header[name]
-        begin, end = entry["data_offsets"]
-        raw = torch.empty((end - begin,), dtype=torch.uint8)
-        view = memoryview(raw.numpy())
-        with open(self.dir / shard, "rb", buffering=0) as f:
-            f.seek(base + begin)
-            at = 0
-            while at < len(view):
-                got = f.readinto(view[at:at + (64 << 20)])
-                if not got:
-                    raise IOError(f"short read of {name}")
-                at += got
-        self.touched.add(shard)
-        dtype = _DT[entry["dtype"]]
-        return raw.view(dtype).reshape(entry["shape"]).to(self.device)
-
-    def has(self, name: str) -> bool:
-        return name in self.where
-
-    def release(self) -> None:
-        """Drop read shards' cached pages so unified memory does not retain both host-cache and GPU copies."""
-
-        for shard in list(self.touched):
-            try:
-                fd = os.open(self.dir / shard, os.O_RDONLY)
-                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-                os.close(fd)
-            except (OSError, AttributeError):
-                pass
-        self.touched.clear()
-
-
-def norms_around_one(reader: _Reader, prefix: str, layers: list[int]) -> bool:
-    means = []
-    for i in layers:
-        name = f"{prefix}model.layers.{i}.attn_hyper_connection.hc_norm.weight"
-        if reader.has(name):
-            means.append(float(reader.get(name).float().mean()))
-    if not means:
-        return True
-    means = np.array(means)
-    around_one = (means > 0.5).mean() >= 0.9 and 0.75 <= float(np.median(means)) <= 1.5
-    around_zero = (means > 0.5).mean() <= 0.1 and -0.5 <= float(np.median(means)) <= 0.25
-    if not (around_one or around_zero):
-        raise ValueError(f"cannot tell how the norm weights are stored (median mean {np.median(means):.3f})")
-    return around_one
-
-
-def _rows(t3, lo: int, hi: int):
-    """Output rows [lo, hi) of (words, scales, biases), stacked experts included."""
-
-    return tuple(x[..., lo:hi, :].contiguous() for x in t3)
-
-
-def _rows_at(t3, idx: torch.Tensor):
-    return tuple(x.index_select(x.dim() - 2, idx).contiguous() for x in t3)
-
-
-def _groups(t3, g0: int, g1: int):
-    """Input groups [g0, g1) (32 inputs each) of (words, scales, biases): no repacking."""
-
-    w, sc, b = t3
-    return w[..., g0 * 4:g1 * 4].contiguous(), sc[..., g0:g1].contiguous(), b[..., g0:g1].contiguous()
-
-
 def draft_token_ids(draft_vocab: int | str | None) -> np.ndarray | None:
     """The token ids the MTP drafts' head scores, sorted: "default" (``draft_vocab.txt`` beside this module), a file of ids, an int N (ids below N), or None (the full vocabulary)."""
 
@@ -377,8 +282,10 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                                           moe_width=full.moe_width // world, shared_width=full.shared_width // world)
     rd = _Reader(model_dir, device)
     prefix = "language_model." if rd.has("language_model.model.embed_tokens.weight") else ""
+    # NVFP4 names the language model ``model.language_model.*``; its lm_head and mtp sit at the top level
+    mbase = "model.language_model." if rd.has("model.language_model.embed_tokens.weight") else "model."
     chosen = list(range(cfg.layers))
-    around_one = norms_around_one(rd, prefix, chosen)
+    around_one = norms_around_one(rd, prefix + mbase, chosen)
 
     def raw(name: str) -> torch.Tensor:
         return rd.get(prefix + name)
@@ -406,6 +313,32 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         """One linear as the NVFP4 checkpoint stores it (BF16, torch layout [out, in]), on the qmm matmul face."""
         return b16_from_rows(raw(name + ".weight"))
 
+    def dense(name: str, rows=None, cols: slice | None = None):
+        """A linear's weight and its e8m0 scales (MXFP8) or None (bf16), a rank's rows or 32-aligned input columns."""
+
+        w = raw(name + ".weight")
+        s = raw(name + ".weight_scale") if w.dtype == torch.float8_e4m3fn else None
+        if s is not None and s.dtype != torch.uint8:
+            raise ValueError(f"{name}: FP8 with a per-tensor scale; Flash Next reads MXFP8 (a scale every 32 inputs)")
+        if rows is not None:
+            w, s = w[rows], None if s is None else s[rows]
+        if cols is not None:
+            w, s = w[:, cols], None if s is None else s[:, cols.start // 32:cols.stop // 32]
+        return w, s
+
+    def face(*parts):
+        """Linears of one input as one face by their storage: bf16 rows on ``bf16.matmul``, MXFP8 on the lane matmul."""
+
+        got = [dense(*p) for p in parts]
+        if all(s is None for _, s in got):
+            faces = [b16_rows(w.to(torch.bfloat16)) for w, _ in got]
+            return faces[0] if len(faces) == 1 else stack_b16(faces)
+        if all(s is not None for _, s in got):
+            from tensorfold.cuda.nvfp4.linear import Mx8Linear
+
+            return Mx8Linear.from_checkpoint(torch.cat([w for w, _ in got]), torch.cat([s for _, s in got]))
+        raise ValueError(f"{parts[0][0]}: a projection stack mixes MXFP8 and bf16 weights")
+
     def hc_nvfp4(name: str, inject: bool) -> HC:
         parts = [b16(name + ".input_mix_weight_down")]
         if inject:
@@ -413,74 +346,55 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return HC(stack_b16(parts), b16(name + ".input_mix_weight_up"), cscale(name + ".hc_norm.weight"), inject)
 
     def gdn_nvfp4(name: str) -> GDNW:
-        """A DeltaNet block from the NVFP4 checkpoint (every linear BF16, the checkpoint's ``ignore``): the
-        stacked in_proj rows the rank takes, the conv and the per-head vectors as stored."""
+        """A DeltaNet block from the NVFP4 checkpoint (bf16 or MXFP8 linears): the rank's rows, conv and head vectors."""
 
         kl, vl = full.nk // world, full.nv // world
         dk, dv = full.dk, full.dv
         q_rows = torch.arange(rank * kl * dk, (rank + 1) * kl * dk, device=device)
         v_rows = 2 * full.nk * dk + torch.arange(rank * vl * dv, (rank + 1) * vl * dv, device=device)
         channels = torch.cat([q_rows, full.nk * dk + q_rows, v_rows])
-        qkv = raw(name + ".in_proj_qkv.weight").to(torch.bfloat16).index_select(0, channels)
-        z = raw(name + ".in_proj_z.weight").to(torch.bfloat16)[rank * vl * dv:(rank + 1) * vl * dv]
-        bb = raw(name + ".in_proj_b.weight").to(torch.bfloat16)[rank * vl:(rank + 1) * vl]
-        aa = raw(name + ".in_proj_a.weight").to(torch.bfloat16)[rank * vl:(rank + 1) * vl]
-        proj = stack_b16([b16_rows(qkv), b16_rows(z), b16_rows(bb), b16_rows(aa)])
+        one = world == 1
+        proj = face((name + ".in_proj_qkv", None if one else channels),
+                    (name + ".in_proj_z", None if one else slice(rank * vl * dv, (rank + 1) * vl * dv)),
+                    (name + ".in_proj_b", None if one else slice(rank * vl, (rank + 1) * vl)),
+                    (name + ".in_proj_a", None if one else slice(rank * vl, (rank + 1) * vl)))
         conv = raw(name + ".conv1d.weight").reshape(full.conv_dim, full.conv_kernel).to(torch.bfloat16)
         conv = conv.index_select(0, channels).contiguous()
         return GDNW(proj, conv, raw(name + ".A_log").float()[rank * vl:(rank + 1) * vl].contiguous(),
                     raw(name + ".dt_bias").float()[rank * vl:(rank + 1) * vl].contiguous(),
                     raw(name + ".norm.weight").to(torch.bfloat16).contiguous(),
-                    b16_rows(raw(name + ".out_proj.weight").to(torch.bfloat16)
-                             [:, rank * vl * dv:(rank + 1) * vl * dv].contiguous()))
+                    face((name + ".out_proj", None, None if one else slice(rank * vl * dv, (rank + 1) * vl * dv))))
 
     def attention_nvfp4(name: str) -> AttnW:
-        """An attention block from the NVFP4 checkpoint (every linear BF16)."""
+        """An attention block from the NVFP4 checkpoint (bf16 or MXFP8 linears)."""
 
         hd = full.head_dim
         hl, kl = full.heads // world, full.kv_heads // world
-        q = raw(name + ".q_proj.weight").to(torch.bfloat16)[rank * hl * 2 * hd:(rank + 1) * hl * 2 * hd]
-        k = raw(name + ".k_proj.weight").to(torch.bfloat16)[rank * kl * hd:(rank + 1) * kl * hd]
-        v = raw(name + ".v_proj.weight").to(torch.bfloat16)[rank * kl * hd:(rank + 1) * kl * hd]
-        iq = raw(name + ".indexer.index_qk_proj.weight").to(torch.bfloat16)
-        proj = stack_b16([b16_rows(q), b16_rows(k), b16_rows(v), b16_rows(iq)])
-        o = b16_rows(raw(name + ".o_proj.weight").to(torch.bfloat16)
-                     [:, rank * hl * hd:(rank + 1) * hl * hd].contiguous())
+        one = world == 1
+        proj = face((name + ".q_proj", None if one else slice(rank * hl * 2 * hd, (rank + 1) * hl * 2 * hd)),
+                    (name + ".k_proj", None if one else slice(rank * kl * hd, (rank + 1) * kl * hd)),
+                    (name + ".v_proj", None if one else slice(rank * kl * hd, (rank + 1) * kl * hd)),
+                    (name + ".indexer.index_qk_proj", None))
+        o = face((name + ".o_proj", None, None if one else slice(rank * hl * hd, (rank + 1) * hl * hd)))
         return AttnW(proj, cscale(name + ".q_norm.weight"), cscale(name + ".k_norm.weight"),
                      cscale(name + ".indexer.q_layernorm.weight"), cscale(name + ".indexer.k_layernorm.weight"),
                      o)
 
     def ple_nvfp4(name: str, ple_index: int) -> PLEW:
-        """A PLE layer from the NVFP4 checkpoint: the n-gram shards are the published revision's bf16 rows, or
-        the MLX 4-bit words with a scale and bias every 32 where a conversion kept that layout; key/value/norms
-        and the conv are BF16 either way."""
+        """A PLE layer from the NVFP4 checkpoint: n-gram rows from bf16, FP8, NVFP4 or MLX 4-bit shards, the rest bf16."""
 
+        if ple_on_ssd:
+            raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram shards from disk; an NVFP4 checkpoint's "
+                             "tables stay memory-mapped, so drop --ple-on-ssd")
         ngram = cfg.ngram(ple_index)
         base = name + ".ple_embedding."
         ngram.check(raw(base + "layer_multipliers").cpu().numpy(), raw(base + "ngram_heads_offsets").cpu().numpy(),
                     raw(base + "ngram_heads_vocab_sizes").cpu().numpy())
-        files: list = []
-        plain: list[tuple[Path, dict]] = []
-        headers: dict[str, dict] = {}
-        for i in range(cfg.ngram_shards):
-            key = prefix + base + f"ngram_embedding.shard_{i}"
-            shard = rd.where[key + ".weight"]
-            if shard not in headers:
-                headers[shard] = _header(model_dir / shard)
-            h = headers[shard]
-            if key + ".scales" in h:                       # 4-bit words, scale and bias every 32 values
-                files.append((model_dir / shard, h[key + ".weight"], h[key + ".scales"], h[key + ".biases"]))
-            else:                                          # bf16 rows, as the published revision ships them
-                plain.append((model_dir / shard, h[key + ".weight"]))
-        if len(files) not in (0, cfg.ngram_shards) or len(plain) not in (0, cfg.ngram_shards):
-            raise ValueError("the n-gram shards mix the 4-bit and the bf16 layouts")
-        table: HostTable | BF16Table
-        if plain:
-            table = BF16Table(plain)
-            if table.width != ngram.dims:
-                raise ValueError(f"the n-gram rows hold {table.width} values, expected {ngram.dims}")
-        else:
-            table = HostTable(files)
+        keys = [prefix + base + f"ngram_embedding.shard_{i}" for i in range(cfg.ngram_shards)]
+        table = open_table(model_dir, [(rd.where[k + ".weight"], k) for k in keys],
+                           lambda n: float(raw(base + "ngram_embedding." + n).float().reshape(-1)[0]))
+        if getattr(table, "width", ngram.dims) != ngram.dims:
+            raise ValueError(f"the n-gram rows hold {table.width} values, expected {ngram.dims}")
         if table.rows != ngram.rows:
             raise ValueError(f"n-gram tables hold {table.rows} rows, expected {ngram.rows}")
         conv = raw(name + ".conv1d.weight").reshape(cfg.streams * cfg.hidden, cfg.ple_kernel).to(torch.bfloat16)
@@ -512,12 +426,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return MoEW(router, experts)
 
     def moe_nvfp4(name: str) -> MoEW:
-        """The NVFP4 checkpoint's MoE: the 512 routed experts FP4 (per-expert ``{proj}.weight`` /
-        ``.weight_scale`` / ``.weight_scale_2``), everything else BF16 (the checkpoint's ``ignore``). The
-        shared expert is BF16 riding identity-scaled tables; the shared gate's row is BF16 as stored.
-        The MTP layer's experts are BF16 stacked too (``mtp.layers.0.mlp.experts`` is excluded): they ride
-        the same tables as identity-scaled FP4. Tensor parallel takes a rank's gate/up rows and down input
-        blocks (16-wide, the NVFP4 block)."""
+        """The NVFP4 checkpoint's MoE: FP4 routed experts (bf16 in the MTP layer), the bf16 shared expert and gate."""
 
         from . import nvfp4_moe
 
@@ -529,10 +438,14 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         gs = full.nvfp4_group
         lo, hi = rank * w_ // world, (rank + 1) * w_ // world
         dlo, dhi = rank * w_ // world // gs, (rank + 1) * w_ // world // gs
-        shared = (raw(f"{name}.shared_expert.gate_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
-                  raw(f"{name}.shared_expert.up_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
-                  raw(f"{name}.shared_expert.down_proj.weight").to(torch.bfloat16)[:, dlo * gs:dhi * gs]
-                  .contiguous())
+        se = f"{name}.shared_expert."
+        if raw(se + "gate_proj.weight").dtype == torch.float8_e4m3fn:     # MXFP8: its own lane-matmul faces
+            shared = nvfp4_moe.Expert4(face((se + "gate_proj", slice(lo, hi)), (se + "up_proj", slice(lo, hi))),
+                                       face((se + "down_proj", None, slice(dlo * gs, dhi * gs))))
+        else:
+            shared = (raw(se + "gate_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
+                      raw(se + "up_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
+                      raw(se + "down_proj.weight").to(torch.bfloat16)[:, dlo * gs:dhi * gs].contiguous())
         if rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):      # the main layers: per-expert FP4
             def stack(proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 w = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight") for i in range(e)])
@@ -546,7 +459,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             if world > 1:
                 gate = (gate[0][:, lo:hi], gate[1][:, lo:hi], gate[2])
                 up = (up[0][:, lo:hi], up[1][:, lo:hi], up[2])
-                down = (down[0][:, :, dlo:dhi], down[1][:, :, dlo:dhi], down[2])
+                down = (down[0][:, :, dlo * gs // 2:dhi * gs // 2], down[1][:, :, dlo:dhi], down[2])   # 8 bytes a block
             moe4 = nvfp4_moe.moe4_from_checkpoint(gate, up, down, shared)
             del gate, up, down                           # the stacks are dead once the grids are tiled
         else:                                            # the MTP layer: BF16 stacked experts (excluded)
@@ -626,9 +539,6 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
     if cfg.quant not in ("mlx", "modelopt"):
         raise ValueError(f"Flash Next's CUDA engine reads MLX 4-bit (groups of 32) or NVFP4 (experts-only) "
                          f"checkpoints, not {cfg.quant}")
-    # the NVFP4 checkpoint names the language model ``model.language_model.*`` (MLX files: ``language_model.model.*``);
-    # its lm_head and mtp ride at the top level, so only the model group takes the inner prefix
-    mbase = "model.language_model." if rd.has("model.language_model.embed_tokens.weight") else "model."
     embed = ((raw(mbase + "embed_tokens.weight").to(torch.bfloat16).contiguous(),) if cfg.quant == "modelopt"
              else triple("model.embed_tokens"))
     loaded = []
@@ -644,10 +554,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         head_raw = triple("lm_head")
         head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))
         del head_raw
-    # the draft head rides 4-bit on an NVFP4 checkpoint (drafts change speed, never the bits): the bf16
-    # lm_head requantized once at load — a draft step reads ~0.3 GB of it, the bf16 head ~1.2 GB. Its
-    # rows stay in token-id order (quantize4 keeps rows), so its column j scores token j; with a draft
-    # vocabulary the sampler maps the subset's ids as on the MLX path.
+    # NVFP4: the draft head is the bf16 lm_head's draft rows requantized 4-bit at load (drafts only)
     draft_head, draft_ids = None, None
     ids = draft_token_ids(draft_vocab)
     if ids is not None:
@@ -655,7 +562,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         ids = torch.from_numpy(ids).to(device)
         draft_ids = ids
         if cfg.quant == "modelopt":
-            draft_head = quantize4(raw("lm_head.weight").to(torch.bfloat16))
+            draft_head = quantize4(raw("lm_head.weight").index_select(0, ids).to(torch.bfloat16))
         else:
             draft_head = make_q4(*_rows_at(triple("lm_head"), ids))
     inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (

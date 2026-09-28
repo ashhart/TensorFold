@@ -3,7 +3,7 @@
 
 The checkpoint's quantized tensors are the routed experts: per expert and projection, packed E2M1 nibbles
 (uint8 [N, K/2]), fp8e4m3 block scales ([N, K/16], groups of 16) and a second per-tensor scale (fp32 scalar).
-The dequantized weight is code * (2**-7 * scale_2 * fp32(block scale)), groups of 16 — the fp32 row scale
+The dequantized weight is code * (scale_2 * fp32(block scale)), groups of 16 — the fp32 row scale
 the FP4 table stores, the E2M1 codes riding as exact bf16 operands.
 """
 
@@ -41,6 +41,22 @@ def fake_layer(n: int, k: int, seed: int = 0):
     scale2 = torch.tensor(2.0 ** -7, dtype=torch.float32)
     w = q * nvfp4.row_scales(scale, scale2).repeat_interleave(nvfp4.GS, dim=1)
     return _packed(codes), scale, scale2, w
+
+
+def test_dequantize_is_modelopts_formula():
+    """code * e4m3 * scale_2, with no other factor: the shared reader's numpy dequantizer and torch's fp8 cast agree."""
+
+    import numpy as np
+
+    from tensorfold.cuda.nvfp4 import format as fmt
+
+    words, scale, _, _ = fake_layer(64, 128, seed=3)
+    scale2 = 0.0123
+    want = fmt.dequant("nvfp4", words.numpy(), scale.view(torch.uint8).numpy(), scale2)
+    got = nvfp4.dequantize(words, scale, torch.tensor(scale2, dtype=torch.float32))
+    assert np.allclose(got.numpy(), want, rtol=1e-6, atol=0)
+    by_torch = nvfp4.unpack_codes(words) * (scale.float() * torch.tensor(scale2)).repeat_interleave(16, 1)
+    assert torch.equal(got, by_torch)
 
 
 def test_e2m1_table_matches_the_bf16_patterns_the_kernel_uses():
@@ -189,11 +205,9 @@ def test_a_packed_stack_keeps_each_experts_bytes_and_decodes_them():
     assert torch.equal(nvfp4.dequantize_fp4(slab), nvfp4.dequantize(words[1], scale[1], factors[1]))
 
 
-def test_the_nvfp4_experts_declare_themselves_uncapturable():
-    """The NVFP4 grouped step walks its plan's item list and counts on the host — a synchronising copy that a
-    CUDA graph capture rejects (cudaErrorStreamCaptureInvalidated, after the weights are loaded). The route
-    says so, and the engine reads that answer instead of capturing a step that cannot be captured."""
+def test_the_nvfp4_experts_are_capturable():
+    """The NVFP4 MoE step keeps its plan on the device (the grouped kernel), so decode graphs capture it."""
 
     from tensorfold.families.qwen4_exp.cuda import nvfp4_moe
 
-    assert nvfp4_moe.MoE4.capturable is False
+    assert nvfp4_moe.MoE4.capturable is True

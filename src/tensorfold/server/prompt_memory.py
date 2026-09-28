@@ -77,7 +77,9 @@ class PromptMemory:
         self.window = int(window_tokens)
         self.chunk_rows = max(1, int(chunk_rows))     # a full prompt chunk: only its peak sizes the workspace
         self.affordable: int | None = None
+        self.resumable: int | None = None
         self.carry, self._probe_base = 0, None
+        self.stream_per_token = 0      # a live stream's growth a token, beyond its cache (a draft model's context)
         self.heads, self.score_rows = attention_geometry(model)
         self.workspace_per_token = int(getattr(model, "prefill_workspace_per_token", 0) or 0)
         self.profile: CacheMemory | None = None
@@ -270,6 +272,8 @@ class PromptMemory:
 
         try:
             measured = probes()
+            stream = getattr(measured, "memory", None)
+            self.stream_per_token = int(getattr(stream, "per_token", 0) or 0)
             release = getattr(engine, "release_rounds", None)
             if release is not None:
                 release()                      # the probes' last shared round: no stream keeps rows of it
@@ -297,6 +301,7 @@ class PromptMemory:
             raise ValueError(self._no_room())
         # with prompts retained, the next turn resumes only if this one's prompt can be kept beside the working cache
         kept = self.largest_window(window, resumable=True) if self.store is not None else None
+        self.resumable = kept                 # the longest request whose prompt is kept for the next turn
         resumable = kept or self.affordable
         fitted = bool(fit) and (not window or resumable < window)
         if fitted:
@@ -316,9 +321,11 @@ class PromptMemory:
             retained = self.store.nbytes if self.store is not None else 0
             floor = max(0, int(self.runtime.get_active_memory()) - retained) + self.carry
             kept = 2 if resumable else 1
+            beyond = max(0, self.stream_per_token - self.profile.bytes_per_token)   # the live stream's, not kept
 
             def fits(tokens: int) -> bool:
-                return floor + kept * self.profile.cache_bytes(tokens) + self._work(tokens) <= self.budget
+                return (floor + kept * self.profile.cache_bytes(tokens) + beyond * int(tokens) + self._work(tokens)
+                        <= self.budget)
 
             if not fits(0):
                 return 0

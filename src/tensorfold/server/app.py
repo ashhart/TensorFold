@@ -90,6 +90,7 @@ class ChatApp(RequestOptions):
         memory_fraction: float | None = None,
         memory_overhead_bytes: int | None = None,
         fit_context: bool = False,
+        decode_share: float = 0.25,
     ) -> None:
         # three candidate entries per conversation (history boundary, stable prefix, reply end)
         if checkpoint_slots is None:
@@ -170,6 +171,7 @@ class ChatApp(RequestOptions):
             session_dir=None if snapshot_dir is None else Path(snapshot_dir).parent / "session-snapshots",
             model_id=model_id,
             prompt_memory=self.prompt_memory,
+            decode_share=decode_share,
         )
         # evicted conversations go to disk (``spill_bytes`` of this model's files at most) and come back on demand
         self.spill_bytes = int(spill_bytes) if self.checkpoints is not None and self.scheduler.session_dir else 0
@@ -310,7 +312,7 @@ class ChatApp(RequestOptions):
                 preparing.release()
 
     class _Preparing:
-        """A."""
+        """A user's request between arrival and submission: background requests wait for these."""
 
         def __init__(self, app: "ChatApp") -> None:
             self.app = app

@@ -278,6 +278,7 @@ def _serve_to_app(monkeypatch, tmp_path, argv, capsys):
             made.update(kwargs)
             self.context_window = 61440 if kwargs["fit_context"] else kwargs["context_window"]
             self.context_fitted = kwargs["fit_context"]
+            self.prompt_memory = SimpleNamespace(resumable=61440)
 
         def close(self):
             pass
@@ -311,7 +312,9 @@ def test_an_omitted_context_is_fitted_to_memory_and_the_banner_shows_the_window(
     assert "model's window is 262,144" in out
     made, out = _serve_to_app(monkeypatch, tmp_path, ["--context", "32768"], capsys)
     assert made["fit_context"] is False and made["context_window"] == 32768
-    assert "context: 32768" in out
+    assert "context: 32768" in out and "keep their prompt" not in out
+    made, out = _serve_to_app(monkeypatch, tmp_path, ["--context", "131072"], capsys)
+    assert "context: 131072" in out and "requests up to 61,440 tokens keep their prompt for the next turn" in out
 
 
 def test_weights_past_the_budget_are_refused_before_loading(monkeypatch, tmp_path):

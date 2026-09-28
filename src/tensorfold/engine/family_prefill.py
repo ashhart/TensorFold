@@ -4,10 +4,20 @@ from __future__ import annotations
 
 from functools import partial
 import time
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 from tensorfold.engine.family_common import cache_arrays, drop_spares
 from tensorfold.engine.prefill_plan import PromptChunks
+
+
+def drain(steps: Iterator[Any]) -> Any:
+    """Run a generator of prefill steps to its end and return its value."""
+
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value
 
 
 class FamilyPrefill:
@@ -19,6 +29,12 @@ class FamilyPrefill:
                      prompt_data: Any = None) -> Any:
         """Absorb the ``chunks`` ([begin, end) of ``tokens``); the last hidden state [1, 1, D], draft head fed too."""
 
+        return drain(self._family_feed_steps(tokens, cache, chunks, prompt_data))
+
+    def _family_feed_steps(self, tokens: Sequence[int], cache: list[Any], chunks: Sequence[tuple[int, int]],
+                           prompt_data: Any = None) -> Iterator[None]:
+        """``_family_feed`` as steps: it yields between chunks, each chunk's forward, draft absorb and eval whole."""
+
         import mlx.core as mx
 
         last = None
@@ -29,6 +45,8 @@ class FamilyPrefill:
         if ahead is not None and chunks:
             ahead(tokens, *chunks[0])
         for n, (begin, end) in enumerate(chunks):
+            if n:
+                yield                                         # between chunks: the scheduler may run decode rounds
             if ahead is not None and n + 1 < len(chunks):
                 ahead(tokens, *chunks[n + 1])                 # its host reads run while this chunk computes
             chunk = [int(t) for t in tokens[begin:end]]
@@ -65,6 +83,13 @@ class FamilyPrefill:
 
     def _family_prefill(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
                         checkpoints_at: Sequence[int]) -> list[Any]:
+        return drain(self._family_prefill_steps(stream, cache=cache, cached_tokens=cached_tokens,
+                                                checkpoints_at=checkpoints_at))
+
+    def _family_prefill_steps(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
+                              checkpoints_at: Sequence[int]) -> Iterator[None]:
+        """The prompt's prefill, yielding only between its chunks; the last chunk and the first token go together."""
+
         prompt = stream.prompt_ids
         if not prompt:
             raise ValueError(f"{stream.stream_id}: empty prompt")
@@ -81,15 +106,21 @@ class FamilyPrefill:
         cached_tokens = self._prefill_at = start
         stream.history_checkpoints = []
         try:
+            fed = False
             for boundary in sorted({chunks.floor(int(b)) for b in checkpoints_at}):
                 if not start < boundary < len(prompt):
                     continue
-                self._family_feed(prompt, work, chunks.between(start, boundary))
+                if fed:
+                    yield
+                yield from self._family_feed_steps(prompt, work, chunks.between(start, boundary))
+                fed = True
                 if self.prefill_guard is None or self.prefill_guard.allow_checkpoint(work):
                     stream.history_checkpoints.append((list(prompt[:boundary]),
                                                        drop_spares(self.copy_single_cache(work))))
                 start = boundary
-            hidden = self._family_feed(prompt, work, chunks.between(start, len(prompt)), prepared)
+            if fed:
+                yield
+            hidden = yield from self._family_feed_steps(prompt, work, chunks.between(start, len(prompt)), prepared)
         except BaseException:
             at = self._prefill_at                      # stopped between chunks: keep the progress, a taken prefix too
             kept = [len(tokens) for tokens, _ in stream.history_checkpoints]
@@ -151,8 +182,11 @@ class FamilyPrefill:
         return drop_spares(work)
 
     def _family_add_stream(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
-                           checkpoints_at: Sequence[int]) -> None:
-        work = self._family_prefill(stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at)
+                           checkpoints_at: Sequence[int]) -> Iterator[None]:
+        """Prefill a stream a chunk a step; after the last chunk it takes part in the rounds."""
+
+        work = yield from self._family_prefill_steps(stream, cache=cache, cached_tokens=cached_tokens,
+                                                     checkpoints_at=checkpoints_at)
         self.streams.append(stream)
         if stream.finished:
             stream.finished_at = time.perf_counter()

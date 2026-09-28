@@ -687,3 +687,57 @@ def test_the_engine_releases_rounds_only_with_no_stream_live():
     engine._live = [(SimpleNamespace(finished=False), [])]
     engine.release_rounds()
     assert calls == [1]
+
+
+def test_the_window_counts_a_live_streams_growth_beyond_its_cache():
+    memory = controller(budget=40_000_000, store=CheckpointStore(4, copier=lambda c: c, sizer=cache_nbytes))
+    memory.begin(256, 64, admit=False)
+    memory.observe_cache(populated(), workspace=False)
+    per = memory.profile.bytes_per_token
+    kept, alone = memory.largest_window(1 << 20, resumable=True), memory.largest_window(1 << 20)
+    memory.stream_per_token = per                                   # a stream that is only its cache: no change
+    assert memory.largest_window(1 << 20, resumable=True) == kept and memory.largest_window(1 << 20) == alone
+    memory.stream_per_token = 3 * per                               # twice as much again outside it, as measured
+    assert 0 < memory.largest_window(1 << 20, resumable=True) < kept
+    assert 0 < memory.largest_window(1 << 20) < alone
+
+
+def kv(tokens):
+    keys, values = Array((1, 1, tokens, 256)), Array((1, 1, tokens, 256))    # 1 KiB of keys and values a token
+    return [SimpleNamespace(keys=keys, values=values, state=(keys, values), offset=tokens)]
+
+
+@pytest.mark.parametrize("counted", [True, False])
+def test_a_growing_conversation_keeps_each_turns_prompt_up_to_the_fitted_window(counted):
+    """Bounded memory: a turn's cache, its stream's growth outside it and a kept copy fit, turn after turn."""
+
+    extra = 512                                                     # a stream's own growth a token (draft state)
+    store = CheckpointStore(4, copier=lambda c: c, budget_bytes=1 << 20, sizer=cache_nbytes)
+    store.admit_oversize = True
+    runtime, live = Runtime(resident=64 << 20), []
+    runtime.get_active_memory = lambda: (runtime.resident + store.nbytes
+                                         + sum(cache_nbytes(c) + extra * c[0].offset for c in live))
+    model = SimpleNamespace(args=SimpleNamespace(num_attention_heads=1, head_dim=128))
+    memory = PromptMemory(96 << 20, model, runtime=runtime, store=store, overhead_bytes=0, bootstrap_bytes=0,
+                          chunk_rows=256)
+    memory.observe_cache(kv(256), workspace=False)
+    memory.stream_per_token = memory.profile.bytes_per_token + (extra if counted else 0)   # the probe's reading
+    window, fitted = memory.fit_window(1 << 20, True)
+    assert fitted and 0 < window < 16_000
+    kept = []
+    for prompt in [*range(1_000, window - 64, 1_000), window - 64]:  # the last turn fills the window
+        memory.begin(prompt, 64, admit=False)
+        store.match(list(range(prompt)), take=True)                 # the last turn's prefix becomes this turn's cache
+        boundary = prompt // 256 * 256                              # the last chunk start: the copy happens here
+        live[:] = [kv(boundary)]
+        kept.append(memory.allow_checkpoint(live[0]))
+        assert memory.projected(prompt, current_cache=live[0], extra_bytes=cache_nbytes(live[0])) <= memory.budget \
+            or not kept[-1]
+        if kept[-1]:
+            store.insert(list(range(boundary)), kv(boundary), last_prompt=list(range(prompt)))
+        live[0] = kv(prompt + 64)                                   # the prompt and reply, then the turn ends
+        assert runtime.get_active_memory() <= memory.budget or not counted
+        live.clear()
+        memory.end()
+    assert len(kept) > 8
+    assert all(kept) if counted else not kept[-1]                   # uncounted, the window's top can't be kept

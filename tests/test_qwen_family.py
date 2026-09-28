@@ -62,6 +62,34 @@ def test_a_prefill_checkpoint_keeps_the_prompt_taps_the_drafter_has_not_read():
     assert copy.copy(slot).proposer is None and slot.state == []
 
 
+def test_a_prefill_holds_only_the_drafter_windows_taps_not_every_chunks():
+    from tensorfold.drafters.dflash_proposer import DFlashProposer
+
+    class Proposer:
+        absorb = DFlashProposer.absorb
+
+        def __init__(self) -> None:
+            self.cache = [SimpleNamespace(offset=0)]
+            self.context, self.ready, self.sampling = None, False, None
+
+    taps: list = [None]
+    drafter = SimpleNamespace(window=7, taps=lambda: taps[0], proposer=lambda copy=None, sampling=None: Proposer())
+    head, cache = DFlashHead(drafter), [DraftSlot(drafter)]
+    chunk = 64 * 4096 * 2                                            # a chunk's taps: 64 rows of 4,096 halves
+    mx.eval(mx.zeros((1,)))
+    before = mx.get_active_memory()
+    for n in range(40):                                              # a 2,560-token prefill in 64-row chunks
+        taps[0] = mx.full((1, 64, 4096), n, dtype=mx.float16)
+        mx.eval(taps[0])                                             # the target's forward materialized them
+        head.absorb(cache, 64 * n, 64)
+        taps[0] = None
+    context = cache[-1].proposer.context
+    mx.eval(context)
+    assert mx.get_active_memory() - before < 4 * chunk               # not 40 chunks' taps
+    assert context.shape == (1, 7, 4096) and bool(mx.all(context == 39))
+    assert cache[-1].proposer.cache[0].offset == 40 * 64 - 7
+
+
 def test_start_trees_batches_equal_blocks_and_runs_the_rest_alone(monkeypatch):
     calls = []
 

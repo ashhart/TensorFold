@@ -12,7 +12,7 @@ if not torch.cuda.is_available():
 
 from tensorfold.cuda.kernels.qmm import quantize_rows
 from tensorfold.cuda.nvfp4 import format as fmt
-from tensorfold.cuda.nvfp4.linear import Fp4Linear, Fp8Linear
+from tensorfold.cuda.nvfp4.linear import Fp4Linear, Fp8Linear, Mx8Linear
 
 
 def _fp4(n, k, seed):
@@ -71,3 +71,33 @@ def test_prompt_gemms_track_decode_and_keep_rows_in_any_chunk():
         assert float((got.float() - want).norm() / want.norm()) < bound
         parts = [lin.prefill(quantize_rows(x[a:b].contiguous())) for a, b in ((0, 1), (1, 130), (130, 300))]
         assert torch.equal(torch.cat(parts), got)
+
+
+def _mx8(n, k, seed):
+    rng = np.random.default_rng(seed)
+    w = rng.integers(0, 256, size=(n, k), dtype=np.uint8)
+    w[(w & 0x7F) >= 0x70] = 0x30
+    return w, rng.integers(118, 132, size=(n, k // 32), dtype=np.uint8)            # e8m0 2^-9 .. 2^4
+
+
+@pytest.mark.parametrize("n,k", [(128, 256), (320, 2560)])
+def test_mxfp8_decode_is_exact_and_prompts_track_it_in_any_chunk(n, k):
+    w, s = _mx8(n, k, n)
+    lin = Mx8Linear.from_checkpoint(torch.from_numpy(w).cuda().view(torch.float8_e4m3fn), torch.from_numpy(s).cuda())
+    x = (torch.randn((16, k), generator=torch.Generator().manual_seed(5)) * 0.5).to(torch.bfloat16).cuda()
+    full = _check_rows(lin, x)
+    ref = x.double() @ torch.from_numpy(fmt.dequant("mxfp8", w, s)).double().cuda().t()
+    assert ((full.double() - ref).abs() / (ref.abs() + ref.abs().mean())).max().item() < 1e-2
+    xp = (torch.randn((300, k), generator=torch.Generator().manual_seed(6)) * 0.5).to(torch.bfloat16).cuda()
+    want, got = lin(xp).float(), lin.prefill(xp)
+    assert float((got.float() - want).norm() / want.norm()) < 0.04
+    parts = [lin.prefill(xp[a:b].contiguous()) for a, b in ((0, 1), (1, 130), (130, 300))]
+    assert torch.equal(torch.cat(parts), got)
+
+
+def test_mxfp8_stack_keeps_each_projection():
+    a, b = (Mx8Linear.from_checkpoint(torch.from_numpy(w).cuda().view(torch.float8_e4m3fn), torch.from_numpy(s).cuda())
+            for w, s in (_mx8(96, 256, 1), _mx8(48, 256, 2)))
+    st = Mx8Linear.stack([a, b])
+    x = (torch.randn((5, 256), generator=torch.Generator().manual_seed(7)) * 0.5).to(torch.bfloat16).cuda()
+    assert st.n == 144 and torch.allclose(st(x).float(), torch.cat([a(x), b(x)], 1).float(), rtol=1e-2, atol=1e-2)

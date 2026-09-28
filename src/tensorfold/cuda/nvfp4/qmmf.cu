@@ -37,6 +37,8 @@ __device__ __forceinline__ uint32_t fp8pair(uint32_t w) {
     return r;
 }
 
+__device__ __forceinline__ uint32_t comp(const uint4& v, int c) { return c == 0 ? v.x : c == 1 ? v.y : c == 2 ? v.z : v.w; }
+
 __device__ __forceinline__ float e4m3f(uint8_t b) {
     return __half2float(__half(__nv_cvt_fp8_to_halfraw(b, __NV_E4M3)));
 }
@@ -51,7 +53,7 @@ struct Tile {
     static constexpr int X = BM * ROW;
     static constexpr int W = MODE == FP4 ? BN * GS / 2 : BN * GS;
     static constexpr int S = MODE == FP4 ? BN * 4 : MODE == MXFP8 ? BN * 2 : 0;   // block scales a group
-    static constexpr int STAGE = X + W + (S > 16 ? S : 16);
+    static constexpr int STAGE = (X + W + S + 127) / 128 * 128;   // on 128-byte lines: shifted stages slow FP8
     static constexpr int PARTIALS = MT * NT * 4 * THREADS * 4;
     static constexpr int SMEM = STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS;
 };
@@ -114,6 +116,28 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         const unsigned char* pw = p + T::X;
         const uint8_t* ps = p + T::X + T::W;
         float d[T::MT][T::NT][4];
+        uint4 wq[T::NT];                                   // a lane's words for the stage, read once (16 or 8 bytes)
+        uint32_t sq[T::NT][2];                             // its two columns' block scales for the stage (4 or 2 bytes)
+#pragma unroll
+        for (int j = 0; j < T::NT; ++j) {
+            const int jj = wn * T::NT + j;
+            const int col = wn * (BN / WN) + j * 8 + (lane & 3) * 2;
+            if constexpr (MODE == FP4) {
+                const uint2 v = *reinterpret_cast<const uint2*>(ps + col * 4);
+                sq[j][0] = v.x;
+                sq[j][1] = v.y;
+            } else if constexpr (MODE == MXFP8) {
+                const uint32_t v = *reinterpret_cast<const uint32_t*>(ps + col * 2);
+                sq[j][0] = v & 0xFFFFu;
+                sq[j][1] = v >> 16;
+            }
+            if constexpr (MODE == FP4) {
+                const uint2 u = reinterpret_cast<const uint2*>(pw)[jj * 32 + lane];
+                wq[j] = make_uint4(u.x, u.y, 0u, 0u);
+            } else {
+                wq[j] = reinterpret_cast<const uint4*>(pw)[jj * 32 + lane];
+            }
+        }
 #pragma unroll
         for (int kt = 0; kt < GS / 16; ++kt) {
             uint32_t a[T::MT][4];
@@ -125,15 +149,13 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
             }
 #pragma unroll
             for (int j = 0; j < T::NT; ++j) {
-                const int jj = wn * T::NT + j;
                 uint32_t b0, b1;
                 if constexpr (MODE == FP4) {
-                    const uint32_t word = reinterpret_cast<const uint32_t*>(pw)[(jj * 32 + lane) * 2 + kt / 2];
+                    const uint32_t word = kt < 2 ? wq[j].x : wq[j].y;
                     b0 = fp4pair(word, (kt & 1) * 8);
                     b1 = fp4pair(word, (kt & 1) * 8 + 4);
                 } else {
-                    const uint2 u = reinterpret_cast<const uint2*>(pw)[(jj * 32 + lane) * 2 + kt / 2];
-                    const uint32_t word = (kt & 1) ? u.y : u.x;
+                    const uint32_t word = comp(wq[j], kt);
                     b0 = fp8pair(word & 0xFFFFu);
                     b1 = fp8pair(word >> 16);
                 }
@@ -149,14 +171,13 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
                     const int blk = MODE == FP4 ? kt : kt / 2;
 #pragma unroll
                     for (int j = 0; j < T::NT; ++j) {
-                        const int col = wn * (BN / WN) + j * 8 + (lane & 3) * 2;
                         float s0, s1;
                         if constexpr (MODE == FP4) {
-                            s0 = e4m3f(ps[col * 4 + blk]);
-                            s1 = e4m3f(ps[(col + 1) * 4 + blk]);
+                            s0 = e4m3f(static_cast<uint8_t>(sq[j][0] >> (8 * blk)));
+                            s1 = e4m3f(static_cast<uint8_t>(sq[j][1] >> (8 * blk)));
                         } else {
-                            s0 = __int_as_float(static_cast<int>(ps[col * 2 + blk]) << 23);
-                            s1 = __int_as_float(static_cast<int>(ps[(col + 1) * 2 + blk]) << 23);
+                            s0 = __int_as_float(static_cast<int>((sq[j][0] >> (8 * blk)) & 0xFFu) << 23);
+                            s1 = __int_as_float(static_cast<int>((sq[j][1] >> (8 * blk)) & 0xFFu) << 23);
                         }
 #pragma unroll
                         for (int i = 0; i < T::MT; ++i)

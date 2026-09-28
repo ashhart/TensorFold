@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import torch
@@ -10,11 +11,13 @@ import torch
 FP4, FP8, MXFP8 = 0, 1, 2
 
 
+@lru_cache(maxsize=1)
 def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_nvfp4_v1", sources=[str(here / "qmmf.cpp"), str(here / "qmmf.cu")],
+    return load(name="tensorfold_nvfp4_v2", sources=[str(here / "qmmf.cpp"), str(here / "qmmf.cu"),
+                                                      str(here / "experts.cu")],
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3"], verbose=False)
 
 
@@ -126,7 +129,7 @@ class Fp4Linear:
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
         return _matmul(FP4, self.words, self.bs, self.scale, self.n, self.k, self.npad, x, out)
 
-    def prefill(self, xq: tuple) -> torch.Tensor:
+    def prefill(self, xq) -> torch.Tensor:
         """Prompt rows (FP8 from the glue) times this weight staged as e4m3 per (64 inputs, column), once a call."""
 
         from tensorfold.cuda.kernels import qmm
@@ -136,7 +139,7 @@ class Fp4Linear:
         w8, s8 = self.staging.take(self.npad, self.k, self.words.device)
         _ext().stage_fp4(self.words, self.bs, self.scale, w8, s8)
         out = torch.empty((xq[0].shape[0], self.npad), dtype=torch.bfloat16, device=xq[0].device)
-        qmm._ext().qmm_prefill8w(xq[0], xq[2], w8, s8, out, self.npad, 64, False, 0)
+        qmm._ext().qmm_prefill8w(xq[0], xq[2], w8, s8, out, self.npad, 64, False, 0, False)
         return out if self.npad == self.n else out[:, :self.n].contiguous()
 
 
@@ -198,8 +201,76 @@ class Fp8Linear:
 
         groups = self.groups if self.groups is not None else _ones(self.k // 64, self.npad, self.w8.device)
         out = torch.empty((xq[0].shape[0], self.npad), dtype=torch.bfloat16, device=xq[0].device)
-        qmm._ext().qmm_prefill8w(xq[0], xq[2] * self.scale, self.w8, groups, out, self.npad, 64, False, 0)
+        qmm._ext().qmm_prefill8w(xq[0], xq[2] * self.scale, self.w8, groups, out, self.npad, 64, False, 0, False)
         return out if self.npad == self.n else out[:, :self.n].contiguous()
+
+
+@dataclass
+class Mx8Linear:
+    """An MXFP8 projection: e4m3 bytes in the FP8 GEMM's fragment order, an e8m0 scale per 32 inputs."""
+
+    w8: torch.Tensor              # uint8, [npad/64][K/64][8][32][2][8]
+    bs: torch.Tensor              # uint8 [npad/64, K/64, 64, 2]: e8m0 exponents, a tile's together
+    n: int
+    k: int
+    npad: int
+    layout: str = "mxfp8"
+    kernel: str = "mx8"
+    groups: torch.Tensor | None = None   # bf16 [K/32, npad], the scales as powers of two (prompts, made on first use)
+
+    @classmethod
+    def from_checkpoint(cls, weight: torch.Tensor, scale: torch.Tensor) -> "Mx8Linear":
+        """``weight`` e4m3 [N, K] and ``scale`` e8m0 bytes [N, K/32] (compressed-tensors / ModelOpt MXFP8)."""
+
+        n, k = weight.shape
+        if k % 64:
+            raise ValueError(f"MXFP8 weight [{n}, {k}]: K must be a multiple of 64")
+        npad = -(-n // 128) * 128
+        bs = torch.full((npad, k // 32), 127, dtype=torch.uint8, device=weight.device)
+        bs[:n] = scale.contiguous().view(torch.uint8)
+        bs = bs.view(npad // 64, 64, k // 64, 2).permute(0, 2, 1, 3).contiguous()
+        return cls(_fragment_order(weight.contiguous().view(torch.uint8), npad), bs, n, k, npad)
+
+    @classmethod
+    def stack(cls, parts: list["Mx8Linear"]) -> "Mx8Linear":
+        """Projections of one input as one: outputs in order (each part's padding dropped, the stack's own added)."""
+
+        dense = [(p.w8_rows(), p.scale_rows()) for p in parts]
+        return cls.from_checkpoint(torch.cat([w for w, _ in dense]), torch.cat([s for _, s in dense]))
+
+    def w8_rows(self) -> torch.Tensor:
+        """The stored e4m3 bytes back to [n, K] (the fragment order undone)."""
+
+        kk, nn = fragment_index(self.k, self.npad, self.w8.device)
+        rows = torch.empty((self.npad, self.k), dtype=torch.uint8, device=self.w8.device)
+        rows.t()[kk, nn] = self.w8.view(kk.shape)
+        return rows[:self.n].view(torch.float8_e4m3fn)
+
+    def scale_rows(self) -> torch.Tensor:
+        return self.bs.permute(0, 2, 1, 3).reshape(self.npad, self.k // 32)[:self.n]
+
+    def nbytes(self) -> int:
+        return self.w8.numel() + self.bs.numel() + (self.groups.numel() * 2 if self.groups is not None else 0)
+
+    def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        return _matmul(MXFP8, self.w8, self.bs, 1.0, self.n, self.k, self.npad, x, out)
+
+    def prefill(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        """bf16 prompt rows through FP8 rows and the stored bytes, each 32 inputs' power of two as a bf16 scale."""
+
+        from tensorfold.cuda.kernels import qmm
+
+        if self.groups is None:
+            e = self.bs.permute(1, 3, 0, 2).reshape(self.k // 32, self.npad).to(torch.int32)
+            self.groups = torch.ldexp(torch.ones_like(e, dtype=torch.float32), e - 127).to(torch.bfloat16)
+        xq = qmm.quantize_rows(x if x.stride(-1) == 1 else x.contiguous())
+        y = torch.empty((x.shape[0], self.npad), dtype=torch.bfloat16, device=x.device)
+        qmm._ext().qmm_prefill8w(xq[0], xq[2], self.w8, self.groups, y, self.npad, 32, False, 0, True)
+        y = y if self.npad == self.n else y[:, :self.n]
+        if out is None:
+            return y.contiguous()
+        out.copy_(y)
+        return out
 
 
 def _matmul(mode: int, w: torch.Tensor, bs: torch.Tensor | None, scale: float, n: int, k: int, npad: int,

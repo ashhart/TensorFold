@@ -11,7 +11,6 @@ import pytest
 torch = pytest.importorskip("torch")
 triton = pytest.importorskip("triton")
 
-from tensorfold.cuda import experts as grouped  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda import bf16, nvfp4, nvfp4_moe  # noqa: E402
 
 
@@ -108,37 +107,51 @@ def test_fp4_matmul_matches_the_dequantize_reference():
     scale = torch.randint(90, 115, (n, k // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn)
     fp = nvfp4.make_fp4(words, scale, 0.01)
     x = (torch.randn(5, k, device=dev) * 0.5).to(torch.bfloat16)
-    got = nvfp4.matmul(x, fp, f32=True)
-    want = x.to(torch.float32) @ nvfp4.dequantize_fp4(fp).T
-    assert (got - want).abs().max().item() < 1e-2
+    got = nvfp4.matmul(x, fp, f32=True).double()
+    want = x.double() @ nvfp4.dequantize_fp4(fp).double().T          # fp64: no TF32 in the reference
+    assert ((got - want).abs().max() / want.abs().max()).item() < 1e-4
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
-def test_moe4_gateup_down_on_gpu_matches_the_grouped_reference():
-    """The MoE4 serving path through the GPU kernels (gateup_out / down_out): a row through its expert's
-    grouped call and through the grouped buffers give the same bits."""
+def test_moe4_step_runs_each_row_through_its_expert_and_the_shared_one():
+    """The MoE step on the grouped NVFP4 kernel: each row's routed slot is its expert's SwiGLU and down product, the
+    shared slot the bf16 expert's, and a row alone gives the bits it gets among the others."""
+
+    from types import SimpleNamespace
+
+    from tensorfold.cuda import moe as moe_mod
+    from tensorfold.cuda.nvfp4 import experts as nvx
 
     torch.manual_seed(5)
     dev = "cuda"
     e, d, ni = 3, 256, 128
-    gate = [(torch.randint(0, 256, (ni, d // 2), dtype=torch.uint8, device=dev),
-             torch.randint(90, 115, (ni, d // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn),
-             0.01) for _ in range(e)]
-    up = [(torch.randint(0, 256, (ni, d // 2), dtype=torch.uint8, device=dev),
-           torch.randint(90, 115, (ni, d // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn),
-           0.01) for _ in range(e)]
-    down = [(torch.randint(0, 256, (d, ni // 2), dtype=torch.uint8, device=dev),
-             torch.randint(90, 115, (d, ni // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn),
-             0.01) for _ in range(e)]
-    shared = tuple((torch.randn(o, i) * 0.02).to(torch.bfloat16).to(dev)
-                   for o, i in ((ni, d), (ni, d), (d, ni)))
+
+    def proj(n, k):
+        return (torch.randint(0, 256, (n, k // 2), dtype=torch.uint8, device=dev),
+                torch.randint(40, 60, (n, k // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn), 0.01)
+
+    gate, up, down = ([proj(ni, d) for _ in range(e)], [proj(ni, d) for _ in range(e)],
+                      [proj(d, ni) for _ in range(e)])
+    shared = tuple((torch.randn(o, i) * 0.02).to(torch.bfloat16).to(dev) for o, i in ((ni, d), (ni, d), (d, ni)))
     ex = nvfp4_moe.moe4_from_experts(gate, up, down, shared)
+    cfg = SimpleNamespace(num_experts_per_tok=1, num_experts=e, moe_intermediate_size=ni, hidden_size=d)
+    router = (torch.randn(e + 1, d, device=dev) * 0.1).to(torch.bfloat16)
     x = (torch.randn(4, d, device=dev) * 0.5).to(torch.bfloat16)
-    rows = torch.tensor([0, 2, 0, 1], device=dev)
-    picks = torch.stack([rows, torch.full_like(rows, ex.count - 1)], dim=1).to(torch.int32)   # slot 1: shared
-    plan = grouped.Plan(4, 2, ex.count, dev)
-    grouped.route(picks, plan)
-    act = torch.zeros((4, 2, ni), dtype=torch.bfloat16, device=dev)
-    ex.gateup_out(x, plan, act, 1)
-    ref = torch.stack([ex.gateup_rows(x[i:i + 1], int(rows[i]))[0] for i in range(4)])
-    assert torch.equal(act[:, 0], ref)
+
+    def step(rows):
+        buf = moe_mod.MoEBuffers(4, cfg, dev)
+        nvfp4_moe.moe(rows, None, router, ex, buf, cfg)
+        return buf.pick[:rows.shape[0]].clone(), buf.y[:rows.shape[0]].clone()
+
+    picks, y = step(x)
+    for r in range(4):
+        k = int(picks[r, 0])
+        gv = (x[r].double() @ nvx.dense(ex.routed_experts, k, "gate").double().T).float().to(torch.bfloat16).float()
+        uv = (x[r].double() @ nvx.dense(ex.routed_experts, k, "up").double().T).float().to(torch.bfloat16).float()
+        act = ((gv / (1 + torch.exp(-gv))).to(torch.bfloat16).float() * uv).to(torch.bfloat16)
+        want = act.double() @ nvx.dense(ex.routed_experts, k, "down").double().T
+        assert float((y[r, 0].double() - want).abs().max() / want.abs().max()) < 3e-2, r
+        sa = ex.shared_act(x[r:r + 1])
+        assert torch.equal(y[r, 1], nvfp4.matmul(sa, ex.shared.down, f32=True)[0])
+    alone = step(x[2:3].contiguous())[1]
+    assert torch.equal(alone[0], y[2])

@@ -122,7 +122,7 @@ def test_memory_pressure_preempts_only_enough_background_work(lanes, backgrounds
     assert sum(ref() is not None for ref in refs) == remaining
     assert all(scheduler._jobs[str(i)].stream.finish_reason == "preempted" for i in range(needed))
     admitted = []
-    scheduler._start_job = admitted.append
+    scheduler._open_job = admitted.append
     scheduler._admit()
     assert admitted == [foreground] and scheduler._held is None
 

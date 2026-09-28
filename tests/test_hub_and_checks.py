@@ -182,7 +182,7 @@ def test_flash_next_refuses_other_quantizations_and_notes_a_missing_mtp_head(tmp
 def test_flash_next_reads_the_nvfp4_checkpoint_and_refuses_other_fp4_blocks(tmp_path):
     from tensorfold.families import qwen4_exp
 
-    # the Swift checkpoint (NVFP4, ModelOpt FP4): the CUDA engine reads its experts in blocks of 16
+    # a ModelOpt NVFP4 export (RadixArk's): the CUDA engine reads its experts in blocks of 16
     nvfp4 = {"model_type": "qwen4_exp",
              "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4",
                                      "config_groups": {"group_0": {"weights": {"group_size": 16}}}}}
@@ -192,7 +192,23 @@ def test_flash_next_reads_the_nvfp4_checkpoint_and_refuses_other_fp4_blocks(tmp_
     other_group["quantization_config"]["config_groups"]["group_0"]["weights"]["group_size"] = 32
     other_algo = json.loads(json.dumps(nvfp4))
     other_algo["quantization_config"]["quant_algo"] = "MXFP4"
-    for other in (other_group, other_algo):
+    # local-inference-lab's export: MIXED_PRECISION, MXFP8 DeltaNet / attention / shared experts, NVFP4 experts
+    mixed = {"model_type": "qwen4_exp",
+             "quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION",
+                                     "quantized_layers": {"model.language_model.layers.0.linear_attn.out_proj":
+                                                          {"quant_algo": "MXFP8", "group_size": 32},
+                                                          "model.language_model.layers.0.mlp.experts":
+                                                          {"quant_algo": "NVFP4", "group_size": 16},
+                                                          "mtp.layers.0.mlp.experts":
+                                                          {"quant_algo": "W4A16_NVFP4", "group_size": 16}},
+                                     "config_groups": {"mx": {"weights": {"num_bits": 8, "group_size": 32}},
+                                                       "fp4": {"weights": {"num_bits": 4, "group_size": 16}}}}}
+    (tmp_path / "config.json").write_text(json.dumps(mixed))
+    qwen4_exp.check(tmp_path)
+    per_tensor = json.loads(json.dumps(mixed))
+    per_tensor["quantization_config"]["quantized_layers"]["model.language_model.layers.0.linear_attn.out_proj"] = {
+        "quant_algo": "FP8"}
+    for other in (other_group, other_algo, per_tensor):
         (tmp_path / "config.json").write_text(json.dumps(other))
         with pytest.raises(ValueError, match="blocks of 16"):
             qwen4_exp.check(tmp_path)
@@ -201,7 +217,8 @@ def test_flash_next_reads_the_nvfp4_checkpoint_and_refuses_other_fp4_blocks(tmp_
 def test_models_lists_the_tested_checkpoints(capsys):
     assert main(["models"]) == 0
     out = capsys.readouterr().out
-    for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4",
+    for repo in ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "local-inference-lab/Qwen3.8-Flash-Next-NVFP4",
+                 "RadixArk/Qwen3.8-Flash-Next-NVFP4",
                  "Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Vontra/Qwen3.8-27B-MLX-4bit",
                  "z-lab/Qwen3.8-27B-DFlash2", "mlx-community/gemma-4-26b-a4b-it-4bit"):
         assert repo in out

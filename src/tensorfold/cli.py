@@ -86,6 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="requests decoded together, their windows sharing each round's forward: a number, or "
                             "auto (Mac: up to 8, each started only while the projected memory fits the budget; "
                             "CUDA: one at a time, the others waiting their turn)")
+    speed.add_argument("--decode-share", type=float, default=None, help="Mac: while a prompt prefills, running replies "
+                       "keep moving for this share of each chunk's time and later prompts start later (default 0.25; "
+                       "0: whole prompts first, as 0.3.6.2)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
     speed.add_argument("--ssd-experts", type=float, default=None, metavar="GIB",
                        help="stream routed experts from the checkpoint into a GPU pool of this many GiB, for models "
@@ -543,13 +546,10 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     app = ChatApp(
         model,
         tokenizer,
-        served_name=served,
-        model_aliases=list(args.alias),
-        engine_factory=engine_factory,
-        lanes=parallel,
+        served_name=served, model_aliases=list(args.alias),
+        engine_factory=engine_factory, lanes=parallel,
         memory_fraction=fraction if parallel > 1 else None,
-        max_rows=int(engine_kwargs.get("max_rows", 16)),
-        max_draft=int(engine_kwargs.get("max_draft", 32)),
+        max_rows=int(engine_kwargs.get("max_rows", 16)), max_draft=int(engine_kwargs.get("max_draft", 32)),
         default_max_tokens=int(args.max_tokens),
         context_window=context,
         enable_thinking=bool(args.thinking),
@@ -563,13 +563,18 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         memory_budget_bytes=memory_limit,
         fit_context=args.context is None,
         use_proposer=not args.no_drafts,
-        snapshot_dir=snapshot_dir,
-        model_id=model_id,
+        snapshot_dir=snapshot_dir, model_id=model_id,
+        decode_share=0.25 if args.decode_share is None else float(args.decode_share),
     )
     if app.context_fitted:
         print(f"[tensorfold] context window {app.context_window:,} tokens: the most one request can use in the "
-              f"{memory_limit / 1024**3:.1f} GiB memory budget (the model's window is {context:,}); have clients "
-              "compact before it", flush=True)
+              f"{memory_limit / 1024**3:.1f} GiB memory budget and still keep its prompt for the next turn (the "
+              f"model's window is {context:,}); have clients compact before it", flush=True)
+    kept = getattr(getattr(app, "prompt_memory", None), "resumable", None)
+    if kept is not None and not app.context_fitted and (not app.context_window or kept < app.context_window):
+        print(f"[tensorfold] requests up to {kept:,} tokens keep their prompt for the next turn in the "
+              f"{memory_limit / 1024**3:.1f} GiB memory budget; a longer one is served, and its next turn prefills "
+              "again", flush=True)
     hook = getattr(family.package, "setup", None)
     if hook is not None:
         hook(app, model, **options)

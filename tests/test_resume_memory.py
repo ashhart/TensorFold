@@ -118,15 +118,15 @@ def test_a_resumed_prompt_holds_no_reference_to_the_stored_prefix_it_copied():
     store.insert(prompt[:48], sized(prompt[:48], 400), last_prompt=prompt[:48])
     scheduler, engine = scheduler_with(store, budget=1_000_000)
     stored, seen = weakref.ref(store._entries[0]), []
-    prefill = engine._family_prefill
+    prefill = engine._family_prefill_steps          # the prompt prefills a chunk a step
 
     def evicting(stream, **kwargs):
         store.evict_one()                   # the prompt's own checkpoint copy needs the room
         gc.collect()
         seen.append(stored())
-        return prefill(stream, **kwargs)
+        return (yield from prefill(stream, **kwargs))
 
-    engine._family_prefill = evicting
+    engine._family_prefill_steps = evicting
     job = ChatJob("resume", prompt, 4, 0.0)
     scheduler._start_job(job)
     assert job.error is None and engine.prefill_calls == [("resume", 48)]

@@ -131,14 +131,14 @@ class FakeEngine(LaneEngine):
         super().__init__(model if model is not None else FakeFamily(), **kwargs)
         self.prefill_calls: list[tuple[str, int]] = []
 
-    def _family_prefill(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
-                        checkpoints_at: Any) -> list[Any]:
+    def _family_prefill_steps(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
+                              checkpoints_at: Any) -> Any:
         cached = int(cached_tokens) if cache is not None else 0
         if cache is not None and list(cache[0].rows[0]) != list(stream.prompt_ids[:cached]):
             raise AssertionError("checkpoint was not a prefix of the prompt")
         self.prefill_calls.append((stream.stream_id, cached))
-        return super()._family_prefill(stream, cache=cache, cached_tokens=cached_tokens,
-                                       checkpoints_at=checkpoints_at)
+        return (yield from super()._family_prefill_steps(stream, cache=cache, cached_tokens=cached_tokens,
+                                                         checkpoints_at=checkpoints_at))
 
     @staticmethod
     def copy_single_cache(cache: list[Any]) -> list[Any]:

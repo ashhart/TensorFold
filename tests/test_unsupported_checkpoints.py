@@ -93,13 +93,21 @@ def test_unknown_model_types_point_to_the_recipe_book(tmp_path):
 
 
 def test_serve_refuses_an_unreadable_checkpoint_before_downloading(tmp_path, capsys, monkeypatch):
-    # an NVFP4 (ModelOpt) Qwen3.8 dense checkpoint: no engine of that family reads it
-    (tmp_path / "config.json").write_text(json.dumps(NVFP4))
+    # a GPTQ Qwen3.8 dense checkpoint: no engine of that family reads it (NVFP4 ModelOpt ones it does, on CUDA)
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5",
+                                                      "quantization_config": {"quant_method": "gptq", "bits": 4}}))
     monkeypatch.setattr(cli.sys, "platform", "linux")
     monkeypatch.setenv("TENSORFOLD_NO_UPDATE_CHECK", "1")
     assert cli.main(["serve", str(tmp_path)]) == 1
     err = capsys.readouterr().err
-    assert "modelopt" in err and "recipe book" in err
+    assert "gptq" in err and "recipe book" in err
+
+
+def test_qwen_dense_reads_nvfp4_on_cuda_only():
+    family = families.families()["qwen3_5"]
+    families.require_readable(family, NVFP4, "cuda")
+    with pytest.raises(ValueError, match="modelopt"):
+        families.require_readable(family, NVFP4, "mlx")
 
 
 @pytest.mark.parametrize("config,named", [

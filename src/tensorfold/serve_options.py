@@ -8,7 +8,7 @@ from typing import Any
 
 
 def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any = None) -> None:
-    """Refuse a KV cache, draft rule or image option the backend or family has no path for, before any download."""
+    """Refuse a KV cache, draft rule, image or share option the backend or family can't serve, before any download."""
 
     if getattr(args, "vision_urls", False) and not getattr(args, "vision", False):
         raise ValueError("--vision-urls needs --vision")
@@ -17,6 +17,12 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
         from tensorfold.vision.config import validate_vision_config
 
         validate_vision_config(read_config(config_dir) if config_dir else {}, family.model_type)
+    share = getattr(args, "decode_share", None)
+    if share is not None and backend == "cuda":
+        raise ValueError("--decode-share sets the Mac server's share; the CUDA engine runs a round after each 1,024 "
+                         "prompt rows")
+    if share is not None and share < 0:
+        raise ValueError(f"--decode-share is 0 (whole prompts first) or more, not {share}")
     kv = getattr(args, "kv_dtype", "bf16")
     if kv != "bf16" and backend != "cuda":
         raise ValueError(f"--kv-dtype {kv} is a CUDA engine option: the MLX path caches keys and values as bf16")

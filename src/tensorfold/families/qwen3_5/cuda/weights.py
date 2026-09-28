@@ -214,6 +214,8 @@ class Weights:
     def fast_prefill(self) -> bool:
         if self.quant == "exl3":                     # an EXL3 pack's prompt glue stays in bf16
             return False
+        if self.quant == "nvfp4":                    # NVFP4, FP8 and the gates' copies all take FP8 prompt rows
+            return True
         for layer in self.layers:
             modules = [m for m in (layer.gate, layer.up, layer.down) if m is not None]    # a MoE layer's are None
             modules += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []

@@ -117,8 +117,9 @@ def describe_quantization(config: dict[str, Any]) -> str:
     if method == MLX_QUANT:
         bits, group = quantization(config)
         return f"MLX {bits}-bit, groups of {group}"
-    bits = (_quantization_block(config) or {}).get("bits")
-    return f"{method}" + (f" ({bits}-bit)" if bits else "")
+    block = _quantization_block(config) or {}
+    bits, algo = block.get("bits"), block.get("quant_algo") or block.get("format")    # ModelOpt / compressed-tensors
+    return f"{method}" + (f" {algo}" if algo else "") + (f" ({bits}-bit)" if bits else "")
 
 
 def backends_of(family: Family) -> tuple[str, ...]:

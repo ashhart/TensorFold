@@ -65,7 +65,7 @@ struct Tile {
 template <int CHUNKS, int PER128>
 __device__ __forceinline__ int swz8(int r, int c) { return c ^ ((r / PER128) % CHUNKS); }
 
-template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool W8>
+template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool W8, bool L64 = false>
 __global__ void __launch_bounds__(WM * WN * 32, 2) prefill8_kernel(
         const uint8_t* __restrict__ x, const __nv_bfloat16* __restrict__ xs, const float* __restrict__ scale,
         const uint32_t* __restrict__ w, const __nv_bfloat16* __restrict__ scales,
@@ -89,11 +89,20 @@ __global__ void __launch_bounds__(WM * WN * 32, 2) prefill8_kernel(
         }
         unsigned char* pw = p + T::X;
         constexpr int TILE_BYTES = W8 ? 64 * GS : 64 * GS / 2;
+        if constexpr (L64) {   // bytes stored in 64-input fragment order: this group is half g & 1, 8 bytes a lane
 #pragma unroll
-        for (int c = tid; c < T::W / 16; c += T::THREADS) {
-            const int t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
-            cp16(pw + c * 16, reinterpret_cast<const unsigned char*>(w) +
-                              (static_cast<size_t>(n0 / 64 + t) * KG + g) * TILE_BYTES + off * 16);
+            for (int c = tid; c < T::W / 8; c += T::THREADS) {
+                const int t = c / 256, lane8 = c % 256;
+                cp8(pw + c * 8, reinterpret_cast<const unsigned char*>(w) +
+                                (static_cast<size_t>(n0 / 64 + t) * (KG / 2) + (g >> 1)) * 4096 + (lane8 * 2 + (g & 1)) * 8);
+            }
+        } else {
+#pragma unroll
+            for (int c = tid; c < T::W / 16; c += T::THREADS) {
+                const int t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
+                cp16(pw + c * 16, reinterpret_cast<const unsigned char*>(w) +
+                                  (static_cast<size_t>(n0 / 64 + t) * KG + g) * TILE_BYTES + off * 16);
+            }
         }
         unsigned char* ps = pw + T::W;
         for (int c = tid; c < T::S / 16; c += T::THREADS)
@@ -233,12 +242,12 @@ __global__ void __launch_bounds__(WM * WN * 32, 2) prefill8_kernel(
     }
 }
 
-template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool W8 = false>
+template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool W8 = false, bool L64 = false>
 void launch(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& scale, const at::Tensor& w,
             const at::Tensor& scales, const at::Tensor& biases, at::Tensor& out, int N) {
     using T = Tile<GS, BM, BN, WM, WN, STAGES, W8>;
     const int M = x.size(0), K = x.size(1);
-    auto kernel = prefill8_kernel<GS, BM, BN, WM, WN, STAGES, F32, W8>;
+    auto kernel = prefill8_kernel<GS, BM, BN, WM, WN, STAGES, F32, W8, L64>;
     static bool configured = false;
     if (!configured) {
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM);
@@ -267,13 +276,13 @@ void dispatch(int tile, const at::Tensor& x, const at::Tensor& xs, const at::Ten
 
 } // namespace
 
-template <int GS, bool F32>
+template <int GS, bool F32, bool L64 = false>
 void dispatch_w8(int tile, const at::Tensor& x, const at::Tensor& a, const at::Tensor& w, const at::Tensor& s,
                  at::Tensor& out, int N) {
     switch (tile) {
-        case 1: launch<GS, 64, 128, 1, 4, 4, F32, true>(x, x, a, w, s, s, out, N); break;
-        case 2: launch<GS, 128, 128, 2, 4, 3, F32, true>(x, x, a, w, s, s, out, N); break;
-        default: launch<GS, 128, 128, 2, 2, 3, F32, true>(x, x, a, w, s, s, out, N); break;
+        case 1: launch<GS, 64, 128, 1, 4, 4, F32, true, L64>(x, x, a, w, s, s, out, N); break;
+        case 2: launch<GS, 128, 128, 2, 4, 3, F32, true, L64>(x, x, a, w, s, s, out, N); break;
+        default: launch<GS, 128, 128, 2, 2, 3, F32, true, L64>(x, x, a, w, s, s, out, N); break;
     }
 }
 
@@ -285,9 +294,11 @@ void qmm_prefill8_cuda(const at::Tensor& x, const at::Tensor& xs, const at::Tens
     else { if (f32) dispatch<32, true>(tile, x, xs, a, w, scales, biases, out, N); else dispatch<32, false>(tile, x, xs, a, w, scales, biases, out, N); }
 }
 
-// The same over e4m3 weight bytes in fragment order with a bf16 scale per (group of 32 or 64 inputs, column), no bias.
+// The same over e4m3 weight bytes in fragment order with a bf16 scale per (group of 32 or 64 inputs, column), no bias;
+// ``l64``: 32-input groups read from bytes stored in the 64-input order (MXFP8: one copy for decode and prompts).
 void qmm_prefill8w_cuda(const at::Tensor& x, const at::Tensor& a, const at::Tensor& w, const at::Tensor& scales,
-                        at::Tensor& out, int N, int gs, bool f32, int tile) {
-    if (gs == 32) { if (f32) dispatch_w8<32, true>(tile, x, a, w, scales, out, N); else dispatch_w8<32, false>(tile, x, a, w, scales, out, N); }
+                        at::Tensor& out, int N, int gs, bool f32, int tile, bool l64) {
+    if (l64) { if (f32) dispatch_w8<32, true, true>(tile, x, a, w, scales, out, N); else dispatch_w8<32, false, true>(tile, x, a, w, scales, out, N); }
+    else if (gs == 32) { if (f32) dispatch_w8<32, true>(tile, x, a, w, scales, out, N); else dispatch_w8<32, false>(tile, x, a, w, scales, out, N); }
     else { if (f32) dispatch_w8<64, true>(tile, x, a, w, scales, out, N); else dispatch_w8<64, false>(tile, x, a, w, scales, out, N); }
 }

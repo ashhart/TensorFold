@@ -282,7 +282,11 @@ def scheduler_fixture(memory=None):
         stream.history_checkpoints = [(stream.prompt_ids[:2], [object()])]
         engine.streams.append(stream)
 
-    engine.add_stream = add_stream
+    def begin_stream(stream, **kwargs):
+        add_stream(stream, **kwargs)               # the whole prefill in the first step
+        yield from ()
+
+    engine.add_stream, engine.begin_stream = add_stream, begin_stream
     scheduler = Scheduler(engine, lanes=4, eos_ids=frozenset(), checkpoints=checkpoints, prompt_memory=memory)
     scheduler._read_disk_block = lambda *args: checkpoints.calls.append("disk")
     return scheduler, calls, checkpoints

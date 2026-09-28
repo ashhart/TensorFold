@@ -30,40 +30,40 @@ def tiny_ngram(vocab: int) -> NGram:
 
 
 def _quant_rows(rows: torch.Tensor, rng: torch.Generator) -> tuple[torch.Tensor, torch.Tensor, float]:
-    """A bf16 [N, K] matrix as the checkpoint's FP4 arrays: the FP4 grid spans +-6, the e4m3 block scale
-    spans +-448 (with subnormals down to 2**-9), so a value lands exactly as
-    ``value = code * (e4m3 * 2**-7 * scale_2)``: a per-tensor power-of-two scale puts the matrix's range
-    on the grid, the per-block scale takes the block's largest value, the e4m3 of the rest lands on its
-    own grid point (both grids' points are few-significant-bit values — the product is exact in fp32)."""
+    """A bf16 [N, K] matrix as the checkpoint's FP4 arrays, ModelOpt's recipe: ``value = code * e4m3 * scale_2``,
+    ``scale_2`` the tensor's max over 6 * 448 (here rounded up to a power of two, so every product is exact)."""
 
     n, k = rows.shape
     mags = torch.tensor(nvfp4._E2M1, dtype=torch.float32)
     w = rows.to(torch.float32)
     g = w.reshape(n, k // 16, 16)
     amax = w.abs().amax()
-    scale2 = torch.pow(torch.tensor(2.0), torch.floor(torch.log2(amax)) - 1.0)   # the max near the byte's 128
-    v = g / scale2                                                              # the values, the grid's span
-    s_blk = v.abs().amax(dim=-1, keepdim=True) / 6.0                            # the block scale, byte / 128
-    q = (v / s_blk).clamp(-6.0, 6.0)                                            # the code's value (approximate)
+    scale2 = torch.pow(torch.tensor(2.0), torch.ceil(torch.log2(amax / (6.0 * 448.0))))
+    s_blk = (g.abs().amax(dim=-1, keepdim=True) / 6.0 / scale2).clamp(2.0 ** -9, 448.0)   # the block scale
+    e4m3 = s_blk.squeeze(-1).to(torch.float8_e4m3fn)
+    q = (g / (e4m3.float().unsqueeze(-1) * scale2)).clamp(-6.0, 6.0)          # the code's value (approximate)
     code = (q.abs().unsqueeze(-1) - mags).abs().argmin(dim=-1).to(torch.int32) \
         + (q < 0).to(torch.int32) * 8
     code = code.reshape(n, k)
     words = (code[:, 1::2] << 4 | code[:, 0::2]).to(torch.uint8)
-    # the loader dequantizes with ``fp32(e4m3) * 2**-7 * scale_2``: the byte is ``s_blk / scale2 * 2**7``
-    # (scale2 a power of two — the byte lands on its own grid, the dequantized matrix is what tests compare)
-    e4m3 = (s_blk.squeeze(-1) / scale2 * (2.0 ** 7)).clamp(2.0 ** -9, 448.0).to(torch.float8_e4m3fn)
     return words, e4m3, float(scale2)
 
 
 def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hidden: int = 256,
-          heads: int = 2, kv_heads: int = 2, nk: int = 2, nv: int = 4, dk: int = 64, dv: int = 64,
+          heads: int = 2, kv_heads: int = 2, hd: int = 64, nk: int = 8, nv: int = 24, dk: int = 128, dv: int = 128,
           moe_width: int = 128, shared_width: int = 64, streams: int = 4, low: int = 64,
-          ple: bool = True, mtp: bool = True, seed: int = 0, prefix: str = "", ple_bf16: bool = False) -> Path:
+          ple: bool = True, mtp: bool = True, seed: int = 0, prefix: str = "", ple_bf16: bool = False,
+          mxfp8: bool = False, ple_nvfp4: bool = False, centred: bool = False) -> Path:
+    """``mxfp8``: DeltaNet, attention and shared-expert linears in MXFP8 and ``ple_nvfp4``: NVFP4 n-gram rows, as
+    local-inference-lab's export stores them; ``centred``: RMSNorm weights stored around 0 (the model adds 1)."""
     dir.mkdir(parents=True, exist_ok=True)
     rng = torch.Generator().manual_seed(seed)
 
     def rand(*shape, scale: float = 0.02, dtype=torch.bfloat16) -> torch.Tensor:
         return (torch.randn(*shape, generator=rng) * scale).to(dtype)
+
+    def norm(n: int) -> torch.Tensor:
+        return rand(n, scale=0.05, dtype=torch.float32) + (0.0 if centred else 1.0)
 
     entries: dict[str, dict] = {}
     blobs: list[torch.Tensor] = []
@@ -76,9 +76,14 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
                          "data_offsets": [0, 0]}                                      # patched on write
         blobs.append(t)
 
-    def linear(name: str, n: int, k: int, *, fp4: bool) -> None:
+    def linear(name: str, n: int, k: int, *, fp4: bool, mx: bool = False) -> None:
         w = rand(n, k)
-        if fp4:
+        if mx and mxfp8:                                   # e4m3 with a power-of-two scale every 32 inputs
+            g = w.float().view(n, k // 32, 32)
+            e = torch.ceil(torch.log2(g.abs().amax(-1).clamp_min(1e-30) / 448.0)).clamp(-127, 127)
+            add(name + ".weight", (g / torch.pow(2.0, e)[..., None]).view(n, k).to(torch.float8_e4m3fn))
+            add(name + ".weight_scale", (e + 127).to(torch.uint8))
+        elif fp4:
             words, s8, s2 = _quant_rows(w, rng)
             add(name + ".weight", words)
             add(name + ".weight_scale", s8.view(torch.uint8).view(torch.float8_e4m3fn))
@@ -87,7 +92,7 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
         else:
             add(name + ".weight", w)
 
-    cfg = _config(layers, experts, vocab, hidden, heads, kv_heads, nk, nv, dk, dv, moe_width,
+    cfg = _config(layers, experts, vocab, hidden, heads, kv_heads, hd, nk, nv, dk, dv, moe_width,
                   shared_width, streams, low, ple)
     (dir / "config.json").write_text(json.dumps(cfg, indent=1))
 
@@ -98,12 +103,12 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
             linear(f"{b}.{hc}.input_mix_weight_down", low, streams * hidden, fp4=False)
             linear(f"{b}.{hc}.input_mix_weight_up", streams * hidden, low, fp4=False)
             linear(f"{b}.{hc}.block_inject_weight", low, streams * hidden, fp4=False)
-            add(f"{b}.{hc}.hc_norm.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
+            add(f"{b}.{hc}.hc_norm.weight", norm(streams * hidden))
         linear(f"{b}.mlp.gate", experts, hidden, fp4=False)
         add(f"{b}.mlp.shared_expert_gate.weight", rand(1, hidden))
         for proj, n_, k_ in (("gate_proj", moe_width, hidden), ("up_proj", moe_width, hidden),
                              ("down_proj", hidden, moe_width)):
-            linear(f"{b}.mlp.shared_expert.{proj}", n_, k_, fp4=False)
+            linear(f"{b}.mlp.shared_expert.{proj}", n_, k_, fp4=False, mx=True)
         for e in range(experts):
             for proj, n_, k_ in (("gate_proj", moe_width, hidden), ("up_proj", moe_width, hidden),
                                  ("down_proj", hidden, moe_width)):
@@ -112,23 +117,23 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
                              ("in_proj_z", nv * dv, hidden),
                              ("in_proj_b", nv, hidden), ("in_proj_a", nv, hidden),
                              ("out_proj", hidden, nv * dv)):
-            linear(f"{b}.linear_attn.{proj}", n_, k_, fp4=False)
+            linear(f"{b}.linear_attn.{proj}", n_, k_, fp4=False, mx=True)
         add(f"{b}.linear_attn.conv1d.weight", rand(2 * nk * dk + nv * dv, 4))
         add(f"{b}.linear_attn.A_log", rand(nv, dtype=torch.float32) - 4.0)
         add(f"{b}.linear_attn.dt_bias", rand(nv, dtype=torch.float32))
         add(f"{b}.linear_attn.norm.weight", rand(dv) + 1.0)
-        for proj, n_, k_ in (("q_proj", 2 * heads * dk, hidden), ("k_proj", kv_heads * dk, hidden),
-                             ("v_proj", kv_heads * dk, hidden),
-                             ("o_proj", hidden, heads * dk),
-                             ("indexer.index_qk_proj", 4 * 128, hidden)):
-            linear(f"{b}.self_attn.{proj}", n_, k_, fp4=False)
-        for nm in ("q_norm", "k_norm", "indexer.q_layernorm", "indexer.k_layernorm"):
-            add(f"{b}.self_attn.{nm}.weight", rand(64, scale=0.05, dtype=torch.float32) + 1.0)
+        for proj, n_, k_ in (("q_proj", 2 * heads * hd, hidden), ("k_proj", kv_heads * hd, hidden),
+                             ("v_proj", kv_heads * hd, hidden),
+                             ("o_proj", hidden, heads * hd),
+                             ("indexer.index_qk_proj", (4 + 1) * 128, hidden)):
+            linear(f"{b}.self_attn.{proj}", n_, k_, fp4=False, mx=True)
+        for nm, size in (("q_norm", hd), ("k_norm", hd), ("indexer.q_layernorm", 128), ("indexer.k_layernorm", 128)):
+            add(f"{b}.self_attn.{nm}.weight", norm(size))
         if ple and i == 1:
             linear(f"{b}.ple.key_proj", streams * hidden, 64, fp4=False)
             linear(f"{b}.ple.value_proj", hidden, 64, fp4=False)
             for nm in ("norm_key", "norm_query", "norm_conv"):
-                add(f"{b}.ple.{nm}.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
+                add(f"{b}.ple.{nm}.weight", norm(streams * hidden))
             add(f"{b}.ple.conv1d.weight", rand(streams * hidden, 4))
             ng = tiny_ngram(vocab)
             # the hashing constants the checkpoint ships (the loader's check compares them) and the
@@ -140,6 +145,12 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
             dims = int(ng.dims)
             if ple_bf16:                                   # the published revision: plain bf16 rows, no scales
                 add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.weight", rand(heads_rows, dims))
+            elif ple_nvfp4:                                # codes, e4m3 a 16 values, one table scale
+                words, s8, s2 = _quant_rows(rand(heads_rows, dims), rng)
+                add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.weight", words)
+                add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.weight_scale",
+                    s8.view(torch.uint8).view(torch.float8_e4m3fn))
+                add(f"{b}.ple.ple_embedding.ngram_embedding.weight_scale_2", torch.tensor([s2]))
             else:
                 # a shard row is one head's embedding at ``dims`` 4-bit values: dims/8 int32 words and
                 # dims/32 fp16 scales/biases (``host_table.HostTable`` reads the words as int32 and the
@@ -152,18 +163,18 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
                 add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.biases", biases)
     linear("model.hyper_connection_mixer.input_mix_weight_down", low, streams * hidden, fp4=False)
     linear("model.hyper_connection_mixer.input_mix_weight_up", streams * hidden, low, fp4=False)
-    add("model.hyper_connection_mixer.hc_norm.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
+    add("model.hyper_connection_mixer.hc_norm.weight", norm(streams * hidden))
     linear("lm_head", vocab, hidden, fp4=False)
     if mtp:
-        add("mtp.pre_fc_norm_embedding.weight", rand(hidden, scale=0.05, dtype=torch.float32) + 1.0)
-        add("mtp.pre_fc_norm_hidden.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
+        add("mtp.pre_fc_norm_embedding.weight", norm(hidden))
+        add("mtp.pre_fc_norm_hidden.weight", norm(streams * hidden))
         linear("mtp.fc_embedding", hidden, hidden, fp4=False)
         linear("mtp.fc_hidden", hidden, hidden, fp4=False)
         for hc in ("attn_hyper_connection", "mlp_hyper_connection"):
             linear(f"mtp.layers.0.{hc}.input_mix_weight_down", low, streams * hidden, fp4=False)
             linear(f"mtp.layers.0.{hc}.input_mix_weight_up", streams * hidden, low, fp4=False)
             linear(f"mtp.layers.0.{hc}.block_inject_weight", low, streams * hidden, fp4=False)
-            add(f"mtp.layers.0.{hc}.hc_norm.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
+            add(f"mtp.layers.0.{hc}.hc_norm.weight", norm(streams * hidden))
         linear("mtp.layers.0.mlp.gate", experts, hidden, fp4=False)
         add("mtp.layers.0.mlp.shared_expert_gate.weight", rand(1, hidden))
         for proj, n_, k_ in (("gate_proj", moe_width, hidden), ("up_proj", moe_width, hidden),
@@ -171,15 +182,15 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
             linear(f"mtp.layers.0.mlp.shared_expert.{proj}", n_, k_, fp4=False)
         add("mtp.layers.0.mlp.experts.gate_up_proj", rand(experts, 2 * moe_width, hidden))
         add("mtp.layers.0.mlp.experts.down_proj", rand(experts, hidden, moe_width))
-        for proj, n_, k_ in (("q_proj", 2 * heads * dk, hidden), ("k_proj", kv_heads * dk, hidden),
-                             ("v_proj", kv_heads * dk, hidden), ("o_proj", hidden, heads * dk),
-                             ("indexer.index_qk_proj", 4 * 128, hidden)):
+        for proj, n_, k_ in (("q_proj", 2 * heads * hd, hidden), ("k_proj", kv_heads * hd, hidden),
+                             ("v_proj", kv_heads * hd, hidden), ("o_proj", hidden, heads * hd),
+                             ("indexer.index_qk_proj", (4 + 1) * 128, hidden)):
             linear(f"mtp.layers.0.self_attn.{proj}", n_, k_, fp4=False)
-        for nm in ("q_norm", "k_norm", "indexer.q_layernorm", "indexer.k_layernorm"):
-            add(f"mtp.layers.0.self_attn.{nm}.weight", rand(64, scale=0.05, dtype=torch.float32) + 1.0)
+        for nm, size in (("q_norm", hd), ("k_norm", hd), ("indexer.q_layernorm", 128), ("indexer.k_layernorm", 128)):
+            add(f"mtp.layers.0.self_attn.{nm}.weight", norm(size))
         linear("mtp.hyper_connection_mixer.input_mix_weight_down", low, streams * hidden, fp4=False)
         linear("mtp.hyper_connection_mixer.input_mix_weight_up", streams * hidden, low, fp4=False)
-        add("mtp.hyper_connection_mixer.hc_norm.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
+        add("mtp.hyper_connection_mixer.hc_norm.weight", norm(streams * hidden))
 
     shard = dir / "model-00001-of-00001.safetensors"
     offset = 0
@@ -201,7 +212,7 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
     return dir
 
 
-def _config(layers, experts, vocab, hidden, heads, kv_heads, nk, nv, dk, dv, moe_width, shared_width,
+def _config(layers, experts, vocab, hidden, heads, kv_heads, hd, nk, nv, dk, dv, moe_width, shared_width,
             streams, low, ple) -> dict:
     return {
         "architectures": ["Qwen4ExpForConditionalGeneration"],
@@ -209,7 +220,8 @@ def _config(layers, experts, vocab, hidden, heads, kv_heads, nk, nv, dk, dv, moe
         "text_config": {
             "hidden_size": hidden, "num_hidden_layers": layers, "vocab_size": vocab,
             "rms_norm_eps": 1e-6, "num_attention_heads": heads, "num_key_value_heads": kv_heads,
-            "head_dim": dk, "layer_types": ["linear", "attention"] * (layers // 2) + (["linear"] if layers % 2 else []),
+            "head_dim": hd, "layer_types": (["linear_attention", "full_attention"] * (layers // 2) +
+                                            (["linear_attention"] if layers % 2 else [])),
             "rope_parameters": {"rope_theta": 10_000_000, "partial_rotary_factor": 0.25},
             "linear_num_key_heads": nk, "linear_num_value_heads": nv,
             "linear_key_head_dim": dk, "linear_value_head_dim": dv, "linear_conv_kernel_dim": 4,

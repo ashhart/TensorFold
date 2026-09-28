@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
+from tensorfold.engine.family_prefill import drain
 from tensorfold.engine.lane_family import FamilyRounds
 from tensorfold.engine.prefill_plan import PrefillPlan, PromptChunks
 
@@ -348,7 +349,13 @@ class LaneEngine(FamilyRounds):
                    checkpoints_at: Sequence[int] = ()) -> None:
         """Prefill a stream (from ``cache`` at ``cached_tokens`` when given); it takes part from the next round."""
 
-        self._family_add_stream(stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at)
+        drain(self.begin_stream(stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at))
+
+    def begin_stream(self, stream: LaneStream, *, cache: list[Any] | None = None, cached_tokens: int = 0,
+                     checkpoints_at: Sequence[int] = ()) -> Iterator[None]:
+        """``add_stream`` a prompt chunk a step (each ``next`` feeds one); rounds may run between the steps."""
+
+        return self._family_add_stream(stream, cache=cache, cached_tokens=cached_tokens, checkpoints_at=checkpoints_at)
 
     @staticmethod
     def cache_nbytes(cache: list[Any]) -> int:
