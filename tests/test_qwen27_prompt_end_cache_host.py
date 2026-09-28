@@ -1,8 +1,9 @@
 """Host checks for the 27B CUDA engine's prompt-end cache entry, kept one token before the prompt's end (no GPU).
 
-A chat prompt ends in the generation prompt, ``<think>`` and a newline (Qwen token 198); the next request's history
-renders that turn with an empty reasoning block, ``<think>`` and two newlines (token 271). An entry for the whole
-prompt differs from the next prompt in its last token, so it never matched; the entry at ``len(prompt) - 1`` does.
+A chat prompt ends in the generation prompt, ``<think>`` and a newline (Qwen token 198); a next request that sends
+that turn back without its reasoning renders an empty reasoning block, ``<think>`` and two newlines (token 271). An
+entry for the whole prompt then differs from the next prompt in its last token and does not match; the entry at
+``len(prompt) - 1`` does.
 
 - The one-stream engine's bookkeeping, on one GPU and on both ranks of two, with stand-ins for ``decode`` and
   ``decode_tp`` (no PyTorch needed): which entry each prompt resumes from and what each entry holds.

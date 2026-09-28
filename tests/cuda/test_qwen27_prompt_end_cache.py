@@ -1,7 +1,8 @@
 """The 27B's prompt-end cache entry, kept one token before the prompt's end, keeps prefill and resumes exact.
 
-A chat prompt ends in ``<think>`` and a newline (Qwen token 198); the next request's history renders that turn with an
-empty reasoning block, ``<think>`` and two newlines (token 271), so only ``prompt[:n - 1]`` is a prefix of it.
+A chat prompt ends in ``<think>`` and a newline (Qwen token 198); a next request that sends that turn back without
+its reasoning renders an empty reasoning block, ``<think>`` and two newlines (token 271), so only ``prompt[:n - 1]``
+is a prefix of it.
 ``prefill(keep_at=k)`` also returns the state after the prompt's first ``k`` tokens: the chunk that holds ``k`` runs
 each GDN chain as two launches, rows before ``k`` and rows from it. Compared as raw bytes on a toy model with the
 27B's layer pattern (three GDN layers, then attention):

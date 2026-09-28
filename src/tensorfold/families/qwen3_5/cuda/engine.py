@@ -13,9 +13,9 @@ KEEP_ONE = 4         # prompt states one stream keeps (they share its attention 
 
 def entry_end(prompt: Sequence[int]) -> int:
     """Where a prompt's prefix-cache entry ends: one token before the prompt's end (a one-token prompt: at its end).
-    A chat prompt ends in the generation prompt, ``<think>`` and a newline; the next turn renders that reply with an
-    empty reasoning block, ``<think>`` and two newlines (another token), so it extends all of the prompt but its last
-    token."""
+    A chat prompt ends in the generation prompt, ``<think>`` and a newline; a next turn that sends that reply back
+    without its reasoning renders an empty reasoning block, ``<think>`` and two newlines (another token), so it extends
+    all of the prompt but its last token."""
 
     return max(1, len(prompt) - 1)
 
