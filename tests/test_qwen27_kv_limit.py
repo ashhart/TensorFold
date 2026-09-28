@@ -33,7 +33,7 @@ def _host(monkeypatch, pattern=(True, False, True, False)):
     decode_tp = importlib.import_module(Q + "decode_tp")
     sizes = []
 
-    def chunk(w, tokens, st, *, tp=False, capture_taps=False, last=True):     # the kernels need a GPU
+    def chunk(w, tokens, st, *, tp=False, capture_taps=False, last=True, cut=0):     # the kernels need a GPU
         a, b = st.pos, st.pos + int(tokens.shape[0])
         for i, kv in enumerate(st.kv):
             if kv is not None:
@@ -134,13 +134,17 @@ def test_engine_prefills_within_its_context_window(allocations, monkeypatch):  #
     decode_tp = importlib.import_module(Q + "decode_tp")
     limits = []
 
-    def prefill(w, prompt, sampling, draft=None, *, state=None, limit=0, **stops):
-        limits.append(("one", limit))
-        return SimpleNamespace(pos=len(prompt)), 5
+    def prefilled(prompt, keep_at):                 # with keep_at, also the state kept there (no drafter)
+        kept = [] if keep_at is None else [(SimpleNamespace(pos=keep_at), None)]
+        return (SimpleNamespace(pos=len(prompt)), 5, *kept)
 
-    def prefill_tp(w, prompt, sampling, rank, draft=None, *, state=None, limit=0, **stops):
+    def prefill(w, prompt, sampling, draft=None, *, state=None, limit=0, keep_at=None, **stops):
+        limits.append(("one", limit))
+        return prefilled(prompt, keep_at)
+
+    def prefill_tp(w, prompt, sampling, rank, draft=None, *, state=None, limit=0, keep_at=None, **stops):
         limits.append((f"rank {rank}", limit))
-        return SimpleNamespace(pos=len(prompt)), 5
+        return prefilled(prompt, keep_at)
 
     done = SimpleNamespace(seconds=0.0, rounds=0, widths=[])
     monkeypatch.setattr(decode, "prefill", prefill)

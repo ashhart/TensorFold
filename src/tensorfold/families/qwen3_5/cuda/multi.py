@@ -13,6 +13,7 @@ from tensorfold.cuda.streams import PrefixCache, Stream, accept
 from .decode import CopyIndex, clone_state
 from .decode_tp import _sample_split, _share, first_token, pack_sampling, unpack_sampling
 from .draft_tree import allocate
+from .engine import entry_end
 from .forward import State, _paths, commit_streams, multi_tree_forward, path_indices, reserve
 from .prefill import prefill_state
 from .weights import Weights
@@ -36,13 +37,14 @@ def own(snap):
     return None if snap is None else (list(snap[0]), list(snap[1]), snap[2], snap[3])
 
 
-def kept(st: State) -> State:
-    """A cached state: attention rows below ``pos`` viewed in place (commits only write past a stream's ``pos``), DeltaNet states copied (decoding replays them in place)."""
+def kept(st: State, owned: bool = False) -> State:
+    """A cached state: attention rows below ``pos`` viewed in place (commits only write past a stream's ``pos``), DeltaNet states copied (decoding replays them in place); ``owned``: states no stream holds, not copied."""
 
     other = clone_state(st)
     other.kv = [None if kv is None else (kv[0][:st.pos], kv[1][:st.pos]) for kv in st.kv]
-    other.rec = [None if r is None else r.clone() for r in st.rec]
-    other.conv = [None if c is None else c.clone() for c in st.conv]
+    if not owned:
+        other.rec = [None if r is None else r.clone() for r in st.rec]
+        other.conv = [None if c is None else c.clone() for c in st.conv]
     return other
 
 
@@ -150,18 +152,22 @@ class MultiDecoder:
 
         t0 = time.perf_counter()
         drafter = self.draft if s.draft and self.drafts else None
+        n = len(s.prompt)
+        # the prompt's entry ends one token before its end (engine.entry_end); a message start just before the end
+        # covers it
+        end = entry_end(s.prompt) if stop == n and s.draft and not (s.stops and n - s.stops[-1] < MIN_GAP) else None
         try:
             if drafter is not None:
                 drafter.restore(s.snap)
-            normed = prefill_state(self.w, s.prompt[:stop], s.st, tp=self.world == 2, draft=drafter)
+            out = prefill_state(self.w, s.prompt[:stop], s.st, tp=self.world == 2, draft=drafter, keep_at=end)
+            normed, at_end = (out, None) if end is None else out
             if drafter is not None:
                 s.snap = drafter.snapshot()
             if stop in s.stops:
                 self.cache.add(list(s.prompt[:stop]), kept(s.st), own(s.snap))
-            first = None if stop < len(s.prompt) else \
-                first_token(self.w, normed, len(s.prompt), s.sampling, self.rank, self.world)
-            if first is not None and s.draft and not (s.stops and len(s.prompt) - s.stops[-1] < MIN_GAP):
-                self.cache.add(list(s.prompt), kept(s.st), own(s.snap))   # a message start just before the end covers it
+            first = None if stop < n else first_token(self.w, normed, n, s.sampling, self.rank, self.world)
+            if end is not None:                  # at a point before the end, the prefill kept states of their own
+                self.cache.add(list(s.prompt[:end]), kept(at_end[0], owned=end < n), own(at_end[1]))
         except Exception as exc:
             if self.world == 2:
                 self.broken = exc

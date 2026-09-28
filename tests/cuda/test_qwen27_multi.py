@@ -166,13 +166,14 @@ def test_scheduler_serves_concurrent_requests_exactly():
         t.join(timeout=120)
     assert {i: results[i][0] for i in results} == {i: refs[tuple(PROMPTS[i])] for i in range(len(PROMPTS))}
     assert all(stats["min_rows"] >= 2 for _, stats in results.values())
-    # a prompt extending a finished reply resumes from that request's prompt end and decodes a fresh prefill's tokens
+    # a prompt extending a finished reply resumes from that request's prompt entry (all but its last token) and
+    # decodes a fresh prefill's tokens
     longer = PROMPTS[1] + refs[tuple(PROMPTS[1])][:-1] + [42, 43]
     want = _serial(w, longer, SAMPLINGS[1], 12)
     sched.decoder.truth[tuple(longer)] = want
     got: list[int] = []
     stats = sched.submit(longer, 12, SAMPLINGS[1], draft=True, emit=lambda new: got.extend(new) or False)
-    assert got == want and stats["cached"] == len(PROMPTS[1]), stats
+    assert got == want and stats["cached"] == len(PROMPTS[1]) - 1, stats
     serial: list[int] = []
     stats = sched.submit(longer, 12, SAMPLINGS[1], draft=False, emit=lambda new: serial.extend(new) or False)
     assert serial == want and stats["cached"] == 0 and stats["min_rows"] == 1
@@ -185,10 +186,10 @@ def test_a_failed_prompt_end_copy_fails_only_its_request(monkeypatch):
     refs = {tuple(p): _serial(w, p, smp, 20) for p, smp in zip(PROMPTS, SAMPLINGS)}
     doomed = [2, 9, 4, 4, 1, 8, 8]                      # no other prompt has its length: only its copy fails
 
-    def failing(st):
-        if st.pos == len(doomed):
+    def failing(st, **kw):
+        if st.pos == len(doomed) - 1:                   # the entry ends one token before the prompt's end
             raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end copy)")
-        return kept(st)
+        return kept(st, **kw)
 
     monkeypatch.setattr("tensorfold.families.qwen3_5.cuda.multi.kept", failing)
     dec = _Oracle(w, refs, seed=5)
@@ -218,7 +219,7 @@ def test_a_failed_prompt_end_copy_fails_only_its_request(monkeypatch):
         got, stats = results[i]
         assert isinstance(stats, dict) and got == refs[tuple(prompt)], (i, stats)
     assert sched.thread.is_alive() and not dec.streams
-    assert all(entry[0] != doomed for entry in dec.cache.entries)
+    assert all(entry[0] != doomed[:-1] for entry in dec.cache.entries)
 
 
 def test_allocate_prices_drafts_against_the_curve():

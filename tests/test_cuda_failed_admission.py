@@ -53,10 +53,11 @@ def decoders(monkeypatch, allocations):  # noqa: F811
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
     fail = {"copy": False}
 
-    def prefill_state(w, prompt, st, **kw):
+    def prefill_state(w, prompt, st, keep_at=None, **kw):
         st.pos = len(prompt)
+        return None if keep_at is None else (None, (St(keep_at), None))   # with keep_at, the state kept there
 
-    def kept(st):
+    def kept(st, owned=False):
         if fail["copy"]:
             fail["copy"] = False
             raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end copy)")
@@ -104,8 +105,8 @@ def test_a_failed_prompt_end_copy_answers_its_request_and_the_worker_goes_on(dec
     assert d is not None and d[0] == "done", d
     assert sched.thread.is_alive()
     assert dec.live() == 0 and not dec.streams
-    assert B not in [entry[0] for entry in dec.cache.entries]
-    assert [entry[0] for entry in dec.cache.entries] == [A, C, D]
+    assert B[:-1] not in [entry[0] for entry in dec.cache.entries]
+    assert [entry[0] for entry in dec.cache.entries] == [A[:-1], C[:-1], D[:-1]]      # entries end one token short
 
 
 def test_a_failed_admission_leaves_the_live_streams_decoding(decoders):
