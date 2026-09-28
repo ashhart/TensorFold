@@ -889,3 +889,33 @@ def test_the_kept_state_holds_the_buffers_grown_after_the_point(cpu, cached, len
     (fresh_other, fresh_pending), fresh_logits = cpu.run(other)
     assert _bits_equal(torch, again_logits, fresh_logits) and again_pending == fresh_pending
     _assert_same_state(torch, again, fresh_other)
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("length,cached", [(1, 0), (3, 0), (65, 0), (130, 1), (130, 64)])
+def test_the_two_rank_prefill_keeps_the_point_as_prefill_does(cpu, monkeypatch, rank, length, cached):
+    """``prefill_tp`` on one process holding every weight (its rank sum and its share are the identity): with
+    ``keep_at`` it returns ``prefill``'s prompt state, first token and kept state; without, two items as before."""
+
+    torch, m = cpu.torch, cpu.m
+    from tensorfold.families.qwen3_5.cuda import distributed
+
+    prompt = _prompt(length, 70 + length)
+
+    def prefix():
+        return cpu.run(prompt[:cached])[0][0] if cached else None
+
+    (_, ref_pending), _ = cpu.run(prompt, state=prefix())
+    monkeypatch.setattr(distributed, "gather_rank_partials", lambda local: local)
+    monkeypatch.setattr(m.decode_tp, "sample_rows", m.decode.sample_rows)             # the fixture's argmax
+    monkeypatch.setattr(m.decode_tp, "_share",
+                        lambda values, r, device: list(values) if r == 0 else [ref_pending])
+    st, pending = m.decode_tp.prefill_tp(cpu.w, prompt, None, rank, state=prefix())
+    assert pending == ref_pending
+    for point in sorted({cached, cached + 1, length - 1, length, 64, 65} & set(range(max(cached, 1), length + 1))):
+        (ref, _, (ref_kept, _)), _ = cpu.run(prompt, state=prefix(), keep_at=point)
+        st, pending, (kept, snap) = m.decode_tp.prefill_tp(cpu.w, prompt, None, rank, state=prefix(), keep_at=point)
+        assert all(kv is None or kv[0] is not ref.kv[i][0] for i, kv in enumerate(st.kv))
+        assert pending == ref_pending and kept.pos == point and snap is None and _shares_kv(kept, st)
+        _assert_same_state(torch, st, ref)
+        _assert_same_state(torch, kept, ref_kept)
