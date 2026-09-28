@@ -23,7 +23,7 @@ pytest.importorskip("tokenizers")
 pytest.importorskip("jinja2")
 
 from tensorfold.cuda.streams import PrefixCache
-from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine, entry_end
+from tensorfold.families.qwen3_5.cuda.engine import KEEP_ONE, Qwen27Engine, entry_end
 
 REPO = "Vontra/Qwen3.8-27B-MLX-4bit"
 FILES = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja")
@@ -67,7 +67,8 @@ def _lookups(entry, prompt):
     """What the one-stream engine and the concurrent ``PrefixCache`` resume ``prompt`` from, given only ``entry``."""
 
     engine = object.__new__(Qwen27Engine)
-    engine.cache = [entry]
+    engine.cache = PrefixCache(KEEP_ONE)            # as the engine builds it
+    engine.cache.add(*entry)
     cache = PrefixCache()
     cache.add(*entry)
     return engine._resume(prompt), cache.longest(prompt)

@@ -260,3 +260,19 @@ def test_encode_uses_target_embeddings_and_replaces_only_visual_rows():
     np.testing.assert_array_equal(encoded.inputs_embeds[0, 2:6], features)
     assert np.all(encoded.inputs_embeds[0, [0, 1, 6, 7]] == 1e10)
     assert encoded.rope_delta == -2 and encoded.position_ids.shape == (3, 1, 8)
+
+
+def test_a_continued_image_prompt_extends_positions_as_a_fresh_prepare_would():
+    from tensorfold.vision.qwen_processing import continued, image_positions
+
+    front = QwenImageProcessor(CONFIG, ImageProcessor(), Tokenizer())
+    prepared = front.prepare("a<start><image><end>b", [image()])
+    more = (*prepared.token_ids, 99, 98)
+    grown = continued(prepared, more, CONFIG)
+    positions, delta, spans = image_positions(more, prepared.image_grid_thw, CONFIG)
+    assert grown.token_ids == more and grown.rope_delta == delta == prepared.rope_delta
+    np.testing.assert_array_equal(grown.position_ids, positions)
+    np.testing.assert_array_equal(grown.position_ids[:, :, :len(prepared.token_ids)], prepared.position_ids)
+    assert grown.pixel_values is prepared.pixel_values and grown.image_spans == prepared.image_spans
+    with pytest.raises(ValueError, match="start with"):
+        continued(prepared, (5, *prepared.token_ids), CONFIG)

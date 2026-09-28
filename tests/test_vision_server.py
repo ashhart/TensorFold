@@ -481,3 +481,23 @@ def test_request_log_redacts_every_image_part():
     assert logged["messages"][0]["content"][1] == {"type": "image_url", "image_url": {"url": "<redacted>"}}
     assert logged["messages"][0]["content"][0] == body["messages"][0]["content"][0] and logged["model"] == "m"
     assert body["messages"][0]["content"][1]["image_url"]["url"].startswith("data:")    # the request is untouched
+
+
+def test_cuda_required_call_continuation_keeps_the_images(monkeypatch):
+    from tensorfold.vision import qwen_processing
+
+    app = cuda_app(Frontend())
+    app.vision.frontend = NS(config={"image_token_id": 7})
+    grown = []
+    monkeypatch.setattr(qwen_processing, "continued",
+                        lambda prepared, ids, config: grown.append((prepared, list(ids), config)) or NS(ids=list(ids)))
+    cuts = iter([(0, [1000])])
+    app._call_gate = lambda prompt, tools: NS(cut=lambda new: next(cuts, None), observe=lambda token: None)
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {"type": "object", "properties": {}}}}]
+    body = {"messages": image_messages(), "max_tokens": 4, "tools": tools, "tool_choice": "required"}
+    prepared = app.prepare(body, True)
+    app.run(body, True, lambda chunk: True, prepared=prepared)
+    first, second = app.engine_calls[0], app.engine_calls[1]
+    assert first[0] == prepared.prompt and first[4] == {"vision": prepared.vision}
+    assert second[0] == [*prepared.prompt, 1000] and second[4] == {"vision": NS(ids=second[0])}
+    assert grown == [(prepared.vision, second[0], {"image_token_id": 7})]
