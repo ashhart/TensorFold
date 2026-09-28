@@ -79,6 +79,7 @@ class SSDTable:
             raise ValueError("the n-gram table has no shards")
         opened: dict[Path, tuple[int, int, int]] = {}
         starts, fidx, bases, widths = [0], [], [], None
+        total = 0
         for path, *entries in files:
             path = Path(path)
             if path not in opened:
@@ -99,6 +100,7 @@ class SSDTable:
             if widths not in (None, (wrow, grow)):
                 raise ValueError(f"{path.name}: the n-gram shards differ in row width")
             widths = (wrow, grow)
+            total += rows * (wrow + 2 * grow)
             starts.append(starts[-1] + rows)
             fidx.append(index)
             bases.append((w0, s0, b0))
@@ -107,6 +109,7 @@ class SSDTable:
         self.fidx = np.array(fidx, dtype=np.int64)
         self.bases = np.array(bases, dtype=np.int64)        # [shard, component]: file offset of row 0
         self.wrow, self.grow = widths
+        self.nbytes = total
         self._fd_of = np.array(self._fds, dtype=np.int64)
 
     def gather(self, ids: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

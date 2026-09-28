@@ -283,14 +283,25 @@ tensorfold serve ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port
 ```
 
 That is the checkpoint this was written against (revision `3ff05202`, 186.4 GB over 296,474 tensors).
+That is the checkpoint this was written against (revision `3ff05202`, 186.4 GB over 296,474 tensors). Its
+language-model tensors are spelled `model.language_model.*` while `lm_head` and `mtp.*` stay at the top
+level; `weights.py` detects that instead of assuming one layout.
+
+**The n-gram table ships as BF16 rows.** That revision stores the PLE layer's table as
+`…ple_embedding.ngram_embedding.shard_N.weight`, `[2500012, 160]` BF16 a shard, with no per-shard `scales`
+or `biases`; `host_table.BF16Table` memory-maps those rows and `stage_ple_rows` copies them to the device as
+they are, so the PLE layer loads and serves too. The MLX 4-bit shard layout (`HostTable`, words plus scales
+and biases) is what the converted checkpoints ship and stays the reader's other branch. The routed FP4
+experts and every BF16 linear read as they ship (checked bit-for-bit against the real shards).
 What the format changes:
 
 - **Only the routed experts are FP4.** The checkpoint's `exclude_modules` keeps every other linear BF16:
   the hyper-connections, DeltaNet, attention, the indexer, the router, the shared expert, the PLE's
   key/value, the embeddings, `lm_head` and the MTP head's projections. `weights.py` routes on
   `cfg.quant == "modelopt"`: `moe_nvfp4` for the experts, a `b16` face for the rest.
-- **The n-gram tables are bitwise passthroughs of the MLX files** (same names, same 4-bit layout): the
-  `HostTable` reads them as-is; the PLE's shards need no loader.
+- **The n-gram hashing tensors are bitwise passthroughs of the MLX files** (same names): the multipliers,
+  head offsets and head vocab sizes are read as-is and checked against the derived ones. The table itself
+  is read in whichever layout the revision ships — 4-bit shards (`HostTable`) or BF16 rows (`BF16Table`).
 - **The FP4 format** (`cuda/nvfp4.py`): packed E2M1 nibbles ([N, K/2] uint8), fp8-e4m3 block scales
   ([N, K/16]) and a per-tensor scale; the dequantized weight is `E2M1(code) * (fp32(e4m3) * 2**-7 *
   scale_2)` per 16-value block. The stored grid keeps the format's math off torch's fp8 casts (whose bf16

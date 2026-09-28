@@ -44,6 +44,11 @@ keep the installed MLX version within the package requirements. The named checkp
 
 Flash Next requires 4-bit/group-32 weights. Without an MTP head it can run without MTP drafting on MLX;
 on CUDA, explicitly pass `--no-drafts`. Nemotron CUDA requires 4-bit/group-64 weights and an MTP head
+on CUDA, explicitly pass `--no-drafts`. On CUDA it also reads the NVFP4 (ModelOpt FP4) checkpoint
+`ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` as it ships, whose routed experts are FP4 and every other
+linear BF16; its speed has not been measured here. Its PLE table ships as BF16 rows without the per-shard
+`scales`/`biases` of the MLX layout, and the reader takes that layout as it is, so no tensor family stops the
+load. Nemotron CUDA requires 4-bit/group-64 weights and an MTP head
 unless `--no-drafts` is set. GLM on MLX reads 4-bit/group-64 weights and mlx-lm's mixed-bit conversions,
 whose 5-, 6- and 8-bit tensors take their own row kernels; it needs MLX 0.32.2 or later. GLM CUDA reads
 MLX 4-bit/group-64 weights and the experimental `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` conversion. GLM's optional

@@ -420,6 +420,31 @@ def ple_embed(rows: int, weight: torch.Tensor, scales: torch.Tensor, biases: tor
 
 
 @triton.jit
+def _ple_embed_bf16(V, OUT, XS, HEADS: tl.constexpr, DH: tl.constexpr):
+    """Program (r, h): gathered n-gram row r * HEADS + h (DH bf16 values, as the checkpoint ships them)
+    -> OUT[r, h DH : (h + 1) DH] bf16 and its group sums."""
+
+    r = tl.program_id(0)
+    h = tl.program_id(1)
+    G: tl.constexpr = DH // 32
+    row = (r * HEADS + h).to(tl.int64)
+    gi = tl.arange(0, 8)
+    gok = gi < G
+    k = tl.arange(0, 32)
+    at = gi[:, None] * 32 + k[None, :]
+    v = tl.load(V + row * DH + at, mask=gok[:, None], other=0.0)
+    tl.store(OUT + r * (HEADS * DH) + h * DH + at, v, mask=gok[:, None])
+    tl.store(XS + r * (HEADS * DH // 32) + h * G + gi, tl.sum(v.to(tl.float32), axis=1), mask=gok)
+
+
+def ple_embed_bf16(rows: int, values: torch.Tensor, heads: int, dh: int, out: torch.Tensor,
+                   xs: torch.Tensor) -> None:
+    """A bf16 table's gathered rows (``BF16Table.gather``, row r * heads + h) -> out [rows, heads * dh] bf16."""
+
+    _ple_embed_bf16[(rows, heads)](values, out, xs, HEADS=heads, DH=dh, num_warps=1)
+
+
+@triton.jit
 def _ple_gate(KEYS, VALS, H, NK, NQ, GATED, PSS, eps,
               D: tl.constexpr, S: tl.constexpr, BLOCK: tl.constexpr):
     """Normalize key and query streams to bf16, apply signed sqrt and sigmoid to their scaled fp32 dot product, then store bf16 gated values and their squared sums for norm_conv."""

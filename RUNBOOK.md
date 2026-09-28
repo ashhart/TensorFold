@@ -67,6 +67,9 @@ use a retained container or configure persistent storage when downloads should s
 There is no `tensorfold[cuda]` extra. Qwen3.8-27B, Flash Next and Nemotron have one- and two-rank CUDA
 engines; GLM requires two ranks. Nemotron CUDA uses its included MTP head and 4-bit/group-64 weights.
 Qwen3.8-27B CUDA requires DFlash2 unless `--no-drafts` selects the serial reference.
+Qwen3.8-27B CUDA requires DFlash2 unless `--no-drafts` selects the serial reference. Flash Next also reads
+the NVFP4 (ModelOpt FP4) checkpoint `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` as it ships — its PLE layer
+included, whose table ships as BF16 rows with no per-shard `scales`, a layout the reader takes as it is.
 
 CUDA `--parallel auto` serves one request at a time. To share rounds, set `--parallel N` greater than
 one for Qwen3.8-27B on one or two ranks, or Flash Next on one rank. Pass the same N on both Qwen ranks.

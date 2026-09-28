@@ -58,7 +58,7 @@ def _quant_rows(rows: torch.Tensor, rng: torch.Generator) -> tuple[torch.Tensor,
 def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hidden: int = 256,
           heads: int = 2, kv_heads: int = 2, nk: int = 2, nv: int = 4, dk: int = 64, dv: int = 64,
           moe_width: int = 128, shared_width: int = 64, streams: int = 4, low: int = 64,
-          ple: bool = True, mtp: bool = True, seed: int = 0, prefix: str = "") -> Path:
+          ple: bool = True, mtp: bool = True, seed: int = 0, prefix: str = "", ple_bf16: bool = False) -> Path:
     dir.mkdir(parents=True, exist_ok=True)
     rng = torch.Generator().manual_seed(seed)
 
@@ -137,16 +137,19 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
             add(f"{b}.ple.ple_embedding.ngram_heads_offsets", torch.as_tensor(ng.head_offsets))
             add(f"{b}.ple.ple_embedding.ngram_heads_vocab_sizes", torch.as_tensor(ng.head_sizes))
             heads_rows = int(ng.rows)
-            # a shard row is one head's embedding at ``dims`` 4-bit values: dims/8 int32 words and
-            # dims/32 fp16 scales/biases (``host_table.HostTable`` reads the words as int32 and the
-            # scales as int16, and the engine's PLE buffer row is the same width)
             dims = int(ng.dims)
-            words = torch.randint(0, 256, (heads_rows, dims // 8), generator=rng, dtype=torch.int32)
-            scales = rand(heads_rows, dims // 32)
-            biases = rand(heads_rows, dims // 32)
-            add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.weight", words)
-            add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.scales", scales)
-            add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.biases", biases)
+            if ple_bf16:                                   # the published revision: plain bf16 rows, no scales
+                add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.weight", rand(heads_rows, dims))
+            else:
+                # a shard row is one head's embedding at ``dims`` 4-bit values: dims/8 int32 words and
+                # dims/32 fp16 scales/biases (``host_table.HostTable`` reads the words as int32 and the
+                # scales as int16, and the engine's PLE buffer row is the same width)
+                words = torch.randint(0, 256, (heads_rows, dims // 8), generator=rng, dtype=torch.int32)
+                scales = rand(heads_rows, dims // 32)
+                biases = rand(heads_rows, dims // 32)
+                add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.weight", words)
+                add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.scales", scales)
+                add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.biases", biases)
     linear("model.hyper_connection_mixer.input_mix_weight_down", low, streams * hidden, fp4=False)
     linear("model.hyper_connection_mixer.input_mix_weight_up", streams * hidden, low, fp4=False)
     add("model.hyper_connection_mixer.hc_norm.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
