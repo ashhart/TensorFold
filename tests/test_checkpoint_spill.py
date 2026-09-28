@@ -97,7 +97,8 @@ def test_the_spill_directory_keeps_the_newest_within_its_byte_limit(tmp_path):
 
     model = "/models/qwen|mlx=1"
     for i in range(3):
-        spill_conversation(CheckpointEntry([i, 1], [Layer(64)], [i, 1], nbytes=10), tmp_path, model, limit_bytes=1 << 30)
+        entry = CheckpointEntry([i, 1], [Layer(64)], [i, 1], nbytes=10)
+        spill_conversation(entry, tmp_path, model, limit_bytes=1 << 30)
     files = sorted(tmp_path.glob("*.safetensors"), key=lambda p: p.stat().st_mtime)
     for n, path in enumerate(files):                                # distinct mtimes, oldest first
         os.utime(path, (1_000_000 + n, 1_000_000 + n))

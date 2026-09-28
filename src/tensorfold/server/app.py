@@ -11,7 +11,8 @@ import uuid
 
 from tensorfold.engine.lane_engine import LaneEngine, SuffixLookupProposer
 from tensorfold.server.admission import concurrency
-from tensorfold.server.checkpoints import CheckpointStore, longest_common_prefix, save_conversations, spill_conversation
+from tensorfold.server.checkpoints import (CheckpointStore, longest_common_prefix, prune_conversations,
+                                           save_conversations, spill_conversation)
 from tensorfold.server.cancellation import Cancellation
 from tensorfold.server.errors import RequestError
 from tensorfold.server.request_options import RequestOptions
@@ -308,7 +309,7 @@ class ChatApp(RequestOptions):
                 preparing.release()
 
     class _Preparing:
-        """A."""
+        """A user's request between arrival and submission: background requests wait for these."""
 
         def __init__(self, app: "ChatApp") -> None:
             self.app = app
@@ -583,8 +584,9 @@ class ChatApp(RequestOptions):
 
         if self.scheduler.session_dir is None or self.checkpoints is None:
             return 0
-        if self.spill_bytes > 0:
-            # the session directory is a disk tier under its own byte budget, not the newest two conversations
-            return save_conversations(self.checkpoints, Path(self.scheduler.session_dir), self.scheduler.model_id,
-                                      keep=1 << 30, limit_bytes=self.spill_bytes)
-        return save_conversations(self.checkpoints, Path(self.scheduler.session_dir), self.scheduler.model_id)
+        directory, model = Path(self.scheduler.session_dir), self.scheduler.model_id
+        if self.spill_bytes > 0:        # with spilling, the directory holds every conversation that fits its budget
+            saved = save_conversations(self.checkpoints, directory, model, keep=1 << 30, limit_bytes=self.spill_bytes)
+            prune_conversations(directory, model, self.spill_bytes)
+            return saved
+        return save_conversations(self.checkpoints, directory, model)

@@ -68,15 +68,9 @@ def save_conversations(store: "CheckpointStore", directory: Path, model_id: str,
 
 
 def spill_conversation(entry: CheckpointEntry, directory: Path, model_id: str, *, limit_bytes: int) -> bool:
-    """Write an evicted conversation where ``_read_disk_block`` finds saved conversations, keeping this model's files
-    in ``directory`` under ``limit_bytes`` (oldest first); False when it was not written.
+    """Write an evicted conversation where ``_read_disk_block`` finds it, this model's files kept under ``limit_bytes``."""
 
-    An evicted conversation otherwise costs a full prefill on its next turn (GDN state cannot be truncated to a shorter
-    stored prefix). Measured on an M5 Ultra with Qwen3.8-27B: a 30,720-token entry (2.0 GiB) wrote in 0.17 s and read
-    back in 0.05 s, against 20 s to prefill it again.
-    """
-
-    from tensorfold.engine.prefix_snapshots import read_metadata, save_snapshot
+    from tensorfold.engine.prefix_snapshots import save_snapshot
 
     if entry.nbytes > limit_bytes:
         return False
@@ -86,6 +80,17 @@ def spill_conversation(entry: CheckpointEntry, directory: Path, model_id: str, *
     except Exception as exc:  # noqa: BLE001 - a full disk costs a later prefill, never the request
         print(f"[tensorfold] conversation spill failed: {type(exc).__name__}: {exc}", flush=True)
         return False
+    prune_conversations(directory, model_id, limit_bytes)
+    print(f"[tensorfold] spilled conversation tokens={len(entry.tokens)} ({entry.nbytes / 1024**3:.1f} GiB) "
+          f"in {time.perf_counter() - started:.2f}s", flush=True)
+    return True
+
+
+def prune_conversations(directory: Path, model_id: str, limit_bytes: int) -> None:
+    """Delete this model's oldest saved conversations until the rest fit ``limit_bytes``."""
+
+    from tensorfold.engine.prefix_snapshots import read_metadata
+
     ours = []
     for path in sorted(directory.glob("*.safetensors"), key=lambda p: p.stat().st_mtime, reverse=True):
         if path.name.endswith(".partial.safetensors"):
@@ -101,9 +106,6 @@ def spill_conversation(entry: CheckpointEntry, directory: Path, model_id: str, *
         total += path.stat().st_size
         if total > limit_bytes:
             path.unlink(missing_ok=True)
-    print(f"[tensorfold] spilled conversation tokens={len(entry.tokens)} ({entry.nbytes / 1024**3:.1f} GiB) "
-          f"in {time.perf_counter() - started:.2f}s", flush=True)
-    return True
 
 
 class CheckpointStore:
@@ -135,8 +137,7 @@ class CheckpointStore:
         self.evictions = 0
         # set when a memory controller evicts on demand: the newest entry may then exceed the byte budget
         self.admit_oversize = False
-        # called, outside the lock and on the thread that inserts or evicts (the scheduler's, which owns the arrays),
-        # with each evicted conversation that no remaining entry extends (``spill_conversation``)
+        # each evicted conversation no remaining entry extends, outside the lock on the thread that owns the arrays
         self.on_evict = on_evict
         self.spilled = 0
 
@@ -146,7 +147,7 @@ class CheckpointStore:
         with self._lock:
             remaining = [entry.tokens for entry in self._entries]
         for entry in gone:
-            # an older checkpoint of a conversation that moved on: it continues from the newer entry, so skip the write
+            # an older checkpoint of a conversation that moved on continues from the newer entry: no write
             n = len(entry.tokens)
             if entry.pinned or any(len(t) > n and t[:n] == entry.tokens for t in remaining):
                 continue
