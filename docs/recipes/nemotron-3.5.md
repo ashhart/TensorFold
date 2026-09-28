@@ -109,3 +109,11 @@ rebuild. This subset affects draft proposals only; the target still verifies aga
 Use the [public benchmark command](README.md#measurements) with the server above.
 Compare drafted/serial and resumed/fresh output on each backend and rank count, plus concurrent/solo
 requests on MLX. Decode rate, cold/resumed first-token latency and peak memory are TBD [release-0.3.5].
+
+On a 64 GB M5 Pro with TensorFold 0.3.5.1 and `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit@8bbcb5b6`
+(#70; setup in the [Qwen3.8-27B recipe](qwen3.8-27b.md#a-64-gb-m5-pro-on-0351)), the fitted context was the full
+262,144 tokens and the lifetime peak footprint 42.21 GiB, reached during load and warm-up. A 261,780-token prompt
+prefilled in 311.5 s and resumed in 0.63 s with 261,774 tokens cached. Decode medians were 146.0, 123.3, 131.3 and
+135.3 tok/s with MTP (code sampled, chat sampled, code greedy, chat greedy) and 107.8, 109.0, 109.5 and 109.0 with
+`--no-drafts`. All 180 concurrent replies at 1, 2, 4 and 8 streams equaled their solo runs, and every solo run
+equaled `"draft": false`. These are 0.3.5.1 results, not a later release's.

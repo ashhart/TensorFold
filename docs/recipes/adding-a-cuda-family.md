@@ -21,7 +21,10 @@ An optional `CUDA_APP` subclasses `tensorfold.cuda.server.App` for family-specif
 
 The engine exposes `eos`, `generate(prompt, max_tokens, sampling, on_tokens)` and, for a follower rank,
 `follow()`. `generate` receives token IDs and keyed sampling settings, reports newly committed tokens
-through the callback, honors its stop result where supported, and returns statistics. Expose cache capacity
+through the callback, honors its stop result where supported, and returns statistics. A `generate` that also
+takes `stop_eos` is passed `stop_eos=False` for an `ignore_eos` request and decodes past end tokens; without it,
+an end token ends every reply, unless the family's `CUDA_APP` hands `ignore_eos` to the engine and sets
+`reads_ignore_eos`, as GLM's does. Expose cache capacity
 so the server can reject oversized prompt-plus-reply requests before streaming.
 
 Use the dense Qwen engine as a starting point. Both ranks must agree on settings, request headers,

@@ -7,8 +7,10 @@ Each family page describes its supported checkpoint, kernels and operating limit
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md) |
+| Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
+| DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [One-GPU CUDA](qwen3.6-moe.md) |
 
 Contributor guides cover [adding an MLX family](adding-a-family.md),
@@ -47,7 +49,8 @@ python3 tools/bench_openai.py http://127.0.0.1:8080 bench \
 
 The client warms each cell, uses seeds 1234 through 1238, and reports the median decode rate after the
 first token. Sampled cells use temperature 1, top-k 20 and top-p 0.95. The client sends `ignore_eos: true`;
-MLX and GLM CUDA honor it, while the Qwen CUDA engines can stop at EOS before the requested limit.
+MLX, GLM CUDA and the Qwen3.8-27B and Qwen3.6 CUDA engines honor it, while the Flash Next and Nemotron CUDA engines can stop
+at EOS before the requested limit.
 It measures throughput; it does not itself prove token equality. Record checkpoint and tokenizer revisions,
 runtime versions, backend, rank count, launch command and output hashes with a result. Compare serial and drafted output separately.
 

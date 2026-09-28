@@ -328,7 +328,7 @@ def test_ngram_lookup_through_the_fused_tables_is_bit_identical():
     emb = q4bits(q4.NGramEmbedding(config(), 0))
     tables = K.PleTables(emb)
     tokens = np.random.default_rng(8).integers(6, 97, size=(1, 200))
-    tokens[0, 50] = 5                                                   # an EOS: the n-grams restart after it
+    tokens[0, 50] = 5
     ids = emb.ids(np.full((1, emb.context), emb.eos, dtype=np.int64), tokens)
     ref = emb(ids)
     emb.__dict__["fused_tables"] = tables
@@ -357,7 +357,7 @@ def test_whole_model_prefill_is_as_exact_as_the_reference(monkeypatch):
     """Two chunks, then four decode steps: the prefill path lands as close to fp32 as the bf16 reference does."""
 
     tokens = np.random.default_rng(11).integers(6, 97, size=(1, 404))
-    tokens[0, 100] = 5                                                  # an EOS: the n-grams restart after it
+    tokens[0, 100] = 5
 
     def run(model, fused=None):
         cache = model.make_cache()

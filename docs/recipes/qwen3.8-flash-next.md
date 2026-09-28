@@ -239,6 +239,45 @@ Serially on the mixed-K pack, TensorFold is 1.51-1.55x ExLlamaV3. On the uniform
 TensorFold's serial path is 5-6% behind ExLlamaV3's, and on both EXL3 packs it is 5-9% behind its own MLX path.
 With drafts on the current engine (the table above), the 3.05 bpw pack decodes 1.6-2.2x ExLlamaV3's serial speed.
 
+### NVFP4 checkpoints
+
+The CUDA engine reads two published ModelOpt NVFP4 exports as they ship, MTP head included, on one GPU:
+
+```bash
+tensorfold serve local-inference-lab/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8080
+```
+
+| Checkpoint (revision) | Routed experts | DeltaNet, attention, shared expert | n-gram table |
+| --- | --- | --- | --- |
+| `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (`7c4f1bc1`) | NVFP4 | MXFP8 | NVFP4 rows |
+| `RadixArk/Qwen3.8-Flash-Next-NVFP4` (`7b719225`) | NVFP4 | bf16 | FP8 rows |
+
+The loader reads each linear by its tensors. An NVFP4 weight is an E2M1 code times its e4m3 scale (a block of 16
+inputs) times the tensor's fp32 `weight_scale_2`; an MXFP8 weight is an e4m3 byte times a power of two (a block of
+32). Both products fit bf16 exactly, so decode multiplies them in bf16 MMAs, adds each block's products times its
+scale in block order and applies the tensor's scale once; the K split depends on the shape alone, so drafted
+windows keep serial decoding's bits. Prompts run the MXFP8 linears on the FP8 prompt matmul with the stored bytes.
+Tests check the kernels against an fp64 reference built by an independent numpy dequantizer
+(`tensorfold/cuda/nvfp4/format.py`). Both exports store their RMSNorm weights centred (gamma - 1), and the loader
+tells centred from uncentred norms by their stored values. An n-gram table's shards must share one layout, or the
+load stops.
+
+The routed experts run on a grouped NVFP4 kernel that reads the step's routing plan on the GPU, so a decode graph
+captured for one step's experts replays another step's. A test decodes a checkpoint whose expert picks change
+every step with graphs on and off and compares the tokens; on both exports, replies with the decode graphs equal
+replies without them.
+
+Both exports were served with `tensorfold serve` and checked: drafted replies equal `"draft": false` ones (nine
+pairs, 2k-16k-token prompts, greedy and sampled), resumed prompts equal fresh ones, and each reply of concurrent
+requests (`--parallel 4`) equals the same request alone.
+
+Not supported here:
+- `--tp 2` and `--ple-on-ssd` on an NVFP4 checkpoint stop at startup: two ranks read the MLX checkpoint, and the
+  NVFP4 exports' tables stay memory-mapped.
+- `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` (186 GB; bf16 linears and n-gram table) has the RadixArk layout apart
+  from its bf16 table, which the loader reads, but the whole checkpoint has not been loaded or served here, so it
+  is not listed as tested.
+
 ## Draft vocabulary provenance
 
 Both backends read the public list in `src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt`.

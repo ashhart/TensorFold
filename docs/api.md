@@ -6,12 +6,14 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | --- | --- |
 | `GET /v1/models` | Served model ID; MLX also lists configured aliases |
 | `GET /health` | Server health and available status information |
-| `POST /v1/chat/completions` | Text chat, tools and reasoning; streamed or non-streamed |
+| `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
 | `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 require a string `prompt`.
-Image, audio and video input or output requests receive HTTP 400.
+With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept user `image_url` content parts alongside text.
+See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
+Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
 ## Request fields
 
@@ -27,20 +29,32 @@ Image, audio and video input or output requests receive HTTP 400.
 | `stream` | Server-sent events with final usage | Both |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
-| `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | MLX and GLM CUDA |
-| `stop` | Stop at a string or any string in a list; omit the matched text from the response | MLX |
+| `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | MLX, and GLM, Qwen3.8-27B and Qwen3.6 CUDA |
+| `stop` | Stop at a string or any string in a list; omit the matched text from the response | Both |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high` or `xhigh` | MLX |
 | `thinking_budget` | Token-count limit inside reasoning | MLX |
 | `priority` | `background` yields to foreground requests | MLX |
 
-CUDA does not enforce the MLX-only fields above. Its Qwen engines also ignore `ignore_eos`. Unsupported
-generation features include multiple choices through `n` and `logprobs`. On MLX, `ignore_eos: true`
-keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
-MLX rejects malformed numeric controls and out-of-vocabulary raw prompt IDs with HTTP 400;
+CUDA does not enforce the MLX-only fields above. Its Flash Next and Nemotron engines stop at an end token
+whatever `ignore_eos` says. Unsupported generation features include multiple choices through `n` and `logprobs`.
+`ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
+Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
+Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
+the request samples: booleans, non-finite numbers, non-numeric strings, and non-integral `top_k` or `seed`.
+MLX also rejects its other malformed numeric controls and out-of-vocabulary raw prompt IDs.
 `top_k` at zero or below disables top-k filtering, and null sampling fields retain server defaults.
 
+On CUDA, stop strings are checked after every token on the generated text, reasoning included, so drafted and
+`"draft": false` replies stop at the same token; usage and `token_sha` count the tokens through the one that
+completes the match. The GLM engine, and Flash Next and Nemotron on two ranks, decode on after a match to an end
+token or the reply limit; the server returns the reply only up to the match. Where a CUDA engine honors
+`ignore_eos`, end tokens inside the reply are decoded into its text, as on MLX, and `finish_reason` is `length`
+unless a stop string or a tool call ended the reply.
+
 On MLX, `--parallel auto` is the default: requests share rounds within the configured concurrency and memory
-budget. Background work waits behind foreground requests. An active background request yields when a
+budget. A new prompt prefills one chunk at a time, and running replies take rounds between its chunks for
+`--decode-share` of each chunk's time (default 0.25): they keep moving, and queued prompts' first tokens come later.
+`--decode-share 0` prefills each prompt whole first, as 0.3.6.2 did. Background work waits behind foreground requests. An active background request yields when a
 foreground request needs its lane or memory, then restarts with already-delivered tokens suppressed.
 Session-title requests are also treated as background work.
 
@@ -105,7 +119,11 @@ and fitting guidance before generation. MLX returns HTTP 400 for non-streamed re
 `invalid_request_error` event after opening a stream. CUDA returns HTTP 400 before opening a stream.
 The 0.3.4.1 MLX server capped that explicit limit to the remaining context.
 When the request omits the reply limit, the server still caps its configured default to the remaining context.
-MLX also returns generation errors in the stream after streaming starts.
+CUDA returns HTTP 400 before generation when the chat template rejects the request or
+`chat_template_kwargs` is neither an object nor null. A generation error returns HTTP 500 for a
+non-streamed request; after a stream opens, both backends send an error event of type `server_error`,
+then `[DONE]`. On two CUDA ranks such an error can leave the ranks out of step, so restart both: the 27B's
+`--parallel` decoder refuses every later request until then, and the other two-rank engines don't detect it.
 MLX also checks projected memory before prefill. CUDA checks its allocated cache capacity and model window.
 A startup capacity estimate is not a measured release capacity.
 

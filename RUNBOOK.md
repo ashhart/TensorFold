@@ -66,7 +66,9 @@ The first start compiles kernels. Container removal discards an unpersisted inst
 use a retained container or configure persistent storage when downloads should survive removal.
 There is no `tensorfold[cuda]` extra. Qwen3.8-27B, Flash Next and Nemotron have one- and two-rank CUDA
 engines; GLM requires two ranks. Nemotron CUDA uses its included MTP head and 4-bit/group-64 weights.
-Qwen3.8-27B CUDA requires DFlash2 unless `--no-drafts` selects the serial reference.
+Qwen3.8-27B CUDA requires DFlash2 unless `--no-drafts` selects the serial reference. Flash Next also reads
+the NVFP4 (ModelOpt FP4) checkpoint `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` as it ships — its PLE layer
+included, whose table ships as BF16 rows with no per-shard `scales`, a layout the reader takes as it is.
 
 CUDA `--parallel auto` serves one request at a time. To share rounds, set `--parallel N` greater than
 one for Qwen3.8-27B on one or two ranks, or Flash Next on one rank. Pass the same N on both Qwen ranks.
@@ -88,8 +90,9 @@ tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 0 --master 192.0.2.1 
 ```
 
 Replace the documentation address with rank 0's reachable address. Both ranks must agree on context and
-drafting settings. The default rendezvous port is 29551. GLM requires two CUDA ranks; Flash Next can use
-one or two and needs `--no-drafts` when its checkpoint lacks an MTP head.
+drafting settings. The default rendezvous port is 29551. The rendezvous port and the link between the ranks
+are not authenticated: keep them on a private link, or firewall the port to the peer. GLM requires two CUDA
+ranks; Flash Next can use one or two and needs `--no-drafts` when its checkpoint lacks an MTP head.
 
 ## Memory and context
 
@@ -131,6 +134,7 @@ to refresh installed metadata and dependencies. Update inside the container when
 | Rejected checkpoint | Quantization, model family and draft-head requirements |
 | Client cannot connect | Server process, `/health`, base URL and model ID |
 | Two-rank startup waits | Link reachability, rendezvous port, NCCL devices and matching settings |
+| CUDA start stops after `loading …`, GPU idle | `kill -USR1 <pid>` prints every thread's Python stack. A wait in the extension build is a build lock, whose path the start log names: when no other build is running, stop the start, delete the lock and start again |
 
 Unsupported architectures or formats need a family implementation. See [adding a family](docs/recipes/adding-a-family.md)
 or [adding a CUDA family](docs/recipes/adding-a-cuda-family.md); forcing an unsupported checkpoint to load

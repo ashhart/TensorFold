@@ -57,6 +57,7 @@ def test_cuda_dispatch_keeps_the_resolved_context(tmp_path, monkeypatch, overrid
     monkeypatch.setattr(families, "detect", lambda path: family)
     monkeypatch.setattr(families, "require_readable", lambda *a: None)
     monkeypatch.setattr(hub, "resolve", lambda *a, **k: tmp_path)
+    monkeypatch.setattr("faulthandler.register", lambda *a, **k: None)
     seen = []
     monkeypatch.setattr(cli, "_serve_cuda", lambda args, found, path, context: seen.append(context) or 0)
     command = ["serve", str(tmp_path), "--backend", "cuda", "--no-update-check"]
@@ -64,6 +65,28 @@ def test_cuda_dispatch_keeps_the_resolved_context(tmp_path, monkeypatch, overrid
         command += ["--context", str(override)]
     assert cli.cmd_serve(cli.build_parser().parse_args(command)) == 0
     assert seen == [expected]
+
+
+def test_a_cuda_start_dumps_its_stacks_on_sigusr1(tmp_path, monkeypatch):
+    """`kill -USR1 <pid>` shows where a CUDA start waits, as on the Mac: the handler is in place before any load."""
+
+    import json
+    import signal
+
+    from tensorfold import families, hub
+
+    (tmp_path / "config.json").write_text(json.dumps({"max_position_embeddings": 128}))
+    family = _family(cuda_engine=lambda *a, **k: None)
+    family.model_type = "test"
+    monkeypatch.setattr(families, "detect", lambda path: family)
+    monkeypatch.setattr(families, "require_readable", lambda *a: None)
+    monkeypatch.setattr(hub, "resolve", lambda *a, **k: tmp_path)
+    events = []
+    monkeypatch.setattr("faulthandler.register", lambda signum, **k: events.append(("register", signum, k)))
+    monkeypatch.setattr(cli, "_serve_cuda", lambda *a: events.append(("serve",)) or 0)
+    command = ["serve", str(tmp_path), "--backend", "cuda", "--no-update-check"]
+    assert cli.cmd_serve(cli.build_parser().parse_args(command)) == 0
+    assert events == [("register", signal.SIGUSR1, {"all_threads": True}), ("serve",)]
 
 
 def test_cuda_admission_metadata_does_not_enlarge_the_engine_cache(tmp_path, monkeypatch, capsys):
