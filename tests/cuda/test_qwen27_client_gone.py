@@ -51,7 +51,7 @@ def _run(app, prompt, sampling, count=COUNT, emit=lambda delta: True, cancelled=
     body = ({"temperature": 0.0} if sampling is None else
             {"temperature": sampling.temperature, "seed": sampling.seed, "top_k": sampling.top_k,
              "top_p": sampling.top_p})
-    prepared = server.PreparedRequest(list(prompt), count, [], False)
+    prepared = server.PreparedRequest(list(prompt), count, [], False, app.sampling_for(body, list(prompt)))
     return app.run(body, False, emit, prepared=prepared, cancelled=cancelled)
 
 
