@@ -1,4 +1,8 @@
-"""OpenAI server for the CUDA engines: a family's ``cuda_engine`` gives ``eos``, ``generate`` and ``follow``."""
+"""OpenAI server for the CUDA engines: a family's ``cuda_engine`` gives ``eos``, ``generate`` and ``follow``.
+
+An engine with ``structured_output`` set takes ``constraint`` in ``generate`` and enforces ``response_format``
+(``tensorfold.cuda.grammar``); other engines refuse it with a 400 rather than reply unconstrained.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +17,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorfold.cuda import grammar
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.errors import RequestError
 from tensorfold.server.http import Server
@@ -72,6 +77,7 @@ class PreparedRequest:
     max_tokens: int
     tools: list[dict[str, Any]]
     thinking: bool
+    grammar: Any = None             # the compiled response_format, or None
 
 
 def _native_context(model_dir: Path) -> int:
@@ -94,6 +100,7 @@ class App:
 
         self.engine = engine
         self.served = served
+        self.model_dir = Path(model_dir)
         self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         self.template = ChatTemplate(model_dir)
         self.default_thinking = default_thinking
@@ -114,7 +121,27 @@ class App:
             return "this model's CUDA engine has no serial switch (\"draft\": false)"
         if not isinstance(body.get("messages", []), list):
             return "messages must be a list"
+        try:
+            spec = grammar.request_spec(body)
+        except RequestError as exc:
+            return str(exc)
+        if spec is not None and not getattr(self.engine, "structured_output", False):
+            return f"{spec.field}: this model's CUDA engine does not enforce structured output"
+        if spec is not None and body.get("tools") and tool_choice_requires_call(body.get("tool_choice")):
+            return f'{spec.field} cannot be combined with tool_choice "required" or a named function: send one'
         return None
+
+    def _grammars(self) -> grammar.Grammars:
+        """The tokenizer's grammar compiler, built on the first structured request."""
+
+        found = getattr(self, "grammars", None)
+        if found is None:
+            model_dir = getattr(self, "model_dir", None)
+            vocab = grammar.vocab_size(model_dir) if model_dir is not None else None
+            if vocab is None:
+                raise RequestError("structured output needs the checkpoint's config.json vocab_size")
+            found = self.grammars = grammar.for_model(model_dir, vocab, tuple(self.engine.eos))
+        return found
 
     def _engine_capacity(self) -> int | None:
         capacities = []
@@ -176,7 +203,9 @@ class App:
         prompt = self.tok.encode(text, add_special_tokens=False).ids
         if not prompt:
             raise RequestError("rendered prompt is empty")
-        return PreparedRequest(prompt, max_tokens, tools, thinking)
+        spec = grammar.request_spec(body)
+        compiled = self._grammars().compile(spec) if spec is not None else None
+        return PreparedRequest(prompt, max_tokens, tools, thinking, compiled)
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
         """Why the request cannot run, or None; rendered before a stream's headers are sent."""
@@ -280,11 +309,13 @@ class App:
                 return True
             return stopped["client"]
 
-        draft = body.get("draft", True) is not False
+        extra: dict[str, Any] = {} if body.get("draft", True) is not False else {"draft": False}
+        if prepared.grammar is not None:    # response_format: a fresh grammar state, after </think> when thinking
+            extra["constraint"] = self._grammars().constraint(prepared.grammar, after_think=chat and thinking)
         gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
 
         def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
-            return self.engine.generate(ids, count, sampling, feed, **({} if draft else {"draft": False}))
+            return self.engine.generate(ids, count, sampling, feed, **extra)
 
         # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
         with (nullcontext() if getattr(self.engine, "concurrent", False) else self.lock):
@@ -426,8 +457,9 @@ def make_handler(app: App):
                 except RequestCancelled:
                     self.close_connection = True
                     return
-                except RequestError as exc:
-                    error = {"error": {"message": str(exc), "type": "invalid_request_error"}}
+                except (RequestError, grammar.GrammarError) as exc:
+                    kind = "server_error" if isinstance(exc, grammar.GrammarError) else "invalid_request_error"
+                    error = {"error": {"message": str(exc), "type": kind}}
                     try:
                         self.wfile.write(f"data: {json.dumps(error)}\n\ndata: [DONE]\n\n".encode())
                         self.wfile.flush()
@@ -462,6 +494,8 @@ def make_handler(app: App):
                 return
             except RequestError as exc:
                 return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            except grammar.GrammarError as exc:           # this reply's grammar failed; the server goes on
+                return self._json(500, {"error": {"message": str(exc), "type": "server_error"}})
             usage = {"prompt_tokens": result["prompt_tokens"], "completion_tokens": result["completion_tokens"],
                      "total_tokens": result["prompt_tokens"] + result["completion_tokens"]}
             if chat:
