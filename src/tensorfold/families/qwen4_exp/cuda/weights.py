@@ -403,7 +403,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
 
     def b16(name: str):
         """One linear as the NVFP4 checkpoint stores it (BF16, torch layout [out, in]), on the qmm matmul face."""
-        return bf16_from_rows(raw(name + ".weight"))
+        return b16_from_rows(raw(name + ".weight"))
 
     def hc_nvfp4(name: str, inject: bool) -> HC:
         parts = [b16(name + ".input_mix_weight_down")]
@@ -520,15 +520,15 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                   raw(f"{name}.shared_expert.down_proj.weight").to(torch.bfloat16)[:, dlo * gs:dhi * gs]
                   .contiguous())
         if rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):      # the main layers: per-expert FP4
-            def stack(base: str, proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-                w = torch.stack([raw(f"{name}.experts.{i}.{base}.weight") for i in range(e)])
-                s = torch.stack([raw(f"{name}.experts.{i}.{base}.weight_scale") for i in range(e)])
-                s2 = torch.stack([raw(f"{name}.experts.{i}.{base}.weight_scale_2") for i in range(e)])
+            def stack(proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                w = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight") for i in range(e)])
+                s = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight_scale") for i in range(e)])
+                s2 = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight_scale_2") for i in range(e)])
                 return w, s, s2
 
-            gate = stack("mlp", "gate_proj")
-            up = stack("mlp", "up_proj")
-            down = stack("mlp", "down_proj")
+            gate = stack("gate_proj")
+            up = stack("up_proj")
+            down = stack("down_proj")
             if world > 1:
                 gate = (gate[0][:, lo:hi], gate[1][:, lo:hi], gate[2])
                 up = (up[0][:, lo:hi], up[1][:, lo:hi], up[2])
