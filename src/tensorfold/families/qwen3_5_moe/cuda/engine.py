@@ -10,6 +10,7 @@ from typing import Any, Callable
 from . import CONFIDENCE, DEPTH
 
 KEEP = 4             # prompt states kept to resume from (they share the live request's buffers)
+KEEP_MANY = 3        # prompt states a concurrent decoder keeps (each holds a DeltaNet copy), as the 27B's
 
 
 def mtp_weights(name: str, info: dict) -> tuple[int, int]:
@@ -20,11 +21,28 @@ def mtp_weights(name: str, info: dict) -> tuple[int, int]:
     return math.prod(info["shape"]) * SIZES[info["dtype"]], 0
 
 
+def stream_geometry(text: dict, streams: int, keep: int, depth: int):
+    """The 27B's concurrent geometry (each stream, ``keep`` kept prompt ends, every window's rows) plus the MTP
+    head's keys and values for each of them; ``depth + 1`` slots past a window are draft scratch."""
+
+    from tensorfold.cuda.capacity import Geometry
+    from tensorfold.cuda.geometry import stream_geometry as dense
+
+    base = dense(text, 1, streams, keep)
+    kv_heads, heads = int(text["num_key_value_heads"]), int(text["num_attention_heads"])
+    head_dim = int(text.get("head_dim") or int(text["hidden_size"]) // heads)
+    layer = 2 * kv_heads * head_dim * 2               # a layer's keys and values a slot
+    if not depth:
+        return Geometry(base.bytes_at, 1)
+    return Geometry(lambda slots: base.bytes_at(slots) + (streams + keep + 1) * slots * layer, depth + 1)
+
+
 class Qwen36Engine:
-    """``eos``, ``generate`` and ``context_window`` for ``tensorfold.cuda.server``."""
+    """``eos``, ``generate`` and ``context_window`` for ``tensorfold.cuda.server``; ``streams`` > 1 decodes up to
+    that many requests together (``concurrent``)."""
 
     def __init__(self, model_dir: Path, *, depth: int = DEPTH, confidence: float = CONFIDENCE,
-                 context: int | None = None, context_explicit: bool | None = None) -> None:
+                 context: int | None = None, context_explicit: bool | None = None, streams: int = 1) -> None:
         import torch
 
         from tensorfold.cuda.capacity import admit
@@ -37,9 +55,14 @@ class Qwen36Engine:
 
         torch.cuda.set_device(0)
         self.depth, self.confidence = int(depth), float(confidence)
+        many = streams > 1
+        if many:             # streams' caches of many sizes come and go: growable segments, less slack
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         extra = (Path(model_dir) / MTP_FILE,) if self.depth and (Path(model_dir) / MTP_FILE).is_file() else ()
-        self.capacity_plan = admit(model_dir, context, context_explicit, torch,
-                                   lambda text: gdn_geometry(text, 1, self.depth + 1, mtp=self.depth > 0),
+        # one admission for one stream or many (every stream's states and caches, kept prompt ends), before any load
+        geometry = ((lambda text: stream_geometry(text, streams, KEEP_MANY, self.depth)) if many else
+                    (lambda text: gdn_geometry(text, 1, self.depth + 1, mtp=self.depth > 0)))
+        self.capacity_plan = admit(model_dir, context, context_explicit, torch, geometry,
                                    lambda name, info: (mtp_weights(name, info) if ".mtp." in name
                                                        else linear_weights(name, info)),
                                    extra_files=extra)
@@ -54,13 +77,29 @@ class Qwen36Engine:
             from tensorfold.families.qwen4_exp.cuda.weights import draft_token_ids
 
             self.head = Head(self.w, m, draft_token_ids("default"))    # the same tokenizer's ids
-            from .graphs import Graphs
+            if not many:
+                from .graphs import Graphs
 
-            self.graphs = Graphs(self.w, self.head, self.context_window + self.depth + 1)
+                self.graphs = Graphs(self.w, self.head, self.context_window + self.depth + 1)
         torch.cuda.empty_cache()
         self.eos = tuple(self.w.config.eos)
         self.points = resume_points(model_dir)
         self.cache = PrefixCache(KEEP)       # (ids, target state, (head cache, held row)) at message starts and ends
+        # ``streams`` > 1: up to that many requests decoded together, every stream's window verified in one forward
+        self.concurrent = many
+        self.multi = self.scheduler = None
+        if many:
+            from tensorfold.cuda.scheduler import Scheduler
+
+            from .multi import MultiDecoder
+
+            self.multi = MultiDecoder(self.w, self.head, depth=self.depth, confidence=self.confidence,
+                                      context=self.capacity_plan["cache_slots"], keep=KEEP_MANY, points=self.points)
+            started = time.perf_counter()
+            self.multi.warm(streams)
+            print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens, verified together "
+                  f"(eager); kernels warmed in {time.perf_counter() - started:.1f}s", flush=True)
+            self.scheduler = Scheduler(self.multi, max_streams=streams)
 
     def _resume(self, prompt: list[int]):
         """The longest kept prefix, after dropping longer entries its resumed writes would overwrite (they share buffers)."""
@@ -86,6 +125,8 @@ class Qwen36Engine:
                              "shorten the prompt or reserve fewer reply tokens")
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         grammar = {} if constraint is None else {"constraint": constraint}     # a plain request calls as before
+        if self.scheduler is not None:
+            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens)
         t0 = time.perf_counter()
         if not draft or self.head is None:
             st, first = serial_prefill(self.w, prompt, sampling, **grammar)

@@ -85,7 +85,7 @@ class Head:
                 staged: "Staged | None" = None) -> torch.Tensor:
         """Rows at positions [p0, p0 + n): each a (state at t, token t + 1) pair attending to slots below p0 and to each other; returns their normed outputs and writes their keys at [p0, p0 + n)."""
 
-        w, m, c = self.w, self.m, self.w.config
+        c = self.w.config
         n = states.shape[0]
         if p0 + n > cache.k.shape[0]:
             raise ValueError("MTP positions past the cache")
@@ -98,6 +98,56 @@ class Head:
             aoffs = None if wide else offsets(cache)
         else:
             ids, pos, aplan, aoffs = staged.ids, staged.pos, staged.aplan, staged.aoffs
+
+        def attend(q: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+            slots = pos.long()
+            if wide:
+                cache.k.index_copy_(0, slots, key)
+                cache.v.index_copy_(0, slots, value)
+                return prefill_attention(q, cache.k, cache.v, p0, scale=c.head_dim ** -0.5)
+            out = tree_attention.attention(q, key, value, aoffs, aplan, scale=c.head_dim ** -0.5)
+            cache.k.index_copy_(0, slots, key)
+            cache.v.index_copy_(0, slots, value)
+            return out
+
+        return self._layer(states, ids, pos, attend)
+
+    @torch.no_grad()
+    def forward_streams(self, caches: Sequence[Cache], states: Sequence[torch.Tensor],
+                        tokens: Sequence[Sequence[int]], starts: Sequence[int]) -> torch.Tensor:
+        """``forward`` for several streams' rows (at most 128 each, over their own caches) in one call, each row with its bits alone."""
+
+        c = self.w.config
+        sizes = [s.shape[0] for s in states]
+        for cache, n, p0 in zip(caches, sizes, starts):
+            if not 1 <= n <= tree_attention.MAX_NODES or p0 + n > cache.k.shape[0]:
+                raise ValueError("MTP rows: 1 to 128 a stream, within its cache")
+        device, width = states[0].device, sum(sizes)
+        host = [int(t) for ts in tokens for t in ts] + [p for p0, n in zip(starts, sizes) for p in range(p0, p0 + n)]
+        dev = torch.tensor(host, dtype=torch.int32).pin_memory().to(device, non_blocking=True)
+        ids, pos = dev[:width], dev[width:]
+        aplan = tree_attention.plan([list(range(-1, n - 1)) for n in sizes], list(starts), c.heads // c.kv_heads,
+                                    device)
+        aoffs = torch.tensor(tree_attention.offsets([(x.k, x.v) for x in caches], device), dtype=torch.int64,
+                             device=device).view(len(caches), 2)
+
+        def attend(q: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+            out = tree_attention.attention(q, key, value, aoffs, aplan, scale=c.head_dim ** -0.5)
+            dst, src, a0 = [], [], 0
+            for cache, n, p0 in zip(caches, sizes, starts):          # each stream's keys at its own slots
+                dst += [cache.k[p0:p0 + n], cache.v[p0:p0 + n]]
+                src += [key[a0:a0 + n], value[a0:a0 + n]]
+                a0 += n
+            torch._foreach_copy_(dst, src)
+            return out
+
+        return self._layer(states[0] if len(states) == 1 else torch.cat(list(states)), ids, pos, attend)
+
+    def _layer(self, states: torch.Tensor, ids: torch.Tensor, pos: torch.Tensor, attend) -> torch.Tensor:
+        """The layer on its rows; ``attend(q, key, value)`` attends and writes the rows' keys where they belong."""
+
+        w, m, c = self.w, self.m, self.w.config
+        n = states.shape[0]
         e = glue.embed(ids, w.embed.weight, w.embed.scales, w.embed.biases, c.hidden)
         _, en, exs = glue.add_rmsnorm(e, None, m.norm_e, c.eps)
         _, hn, hxs = glue.add_rmsnorm(states.contiguous(), None, m.norm_h, c.eps)
@@ -110,17 +160,7 @@ class Head:
         q, key = glue.attn_prep(qg, key, a.q_norm, a.k_norm, pos, w.inv_freq, c.eps, heads=c.heads,
                                 kv_heads=c.kv_heads, head_dim=c.head_dim)
         key = key.view(n, c.kv_heads, c.head_dim).contiguous()
-        slots = pos.long()
-        if wide:
-            cache.k.index_copy_(0, slots, key)
-            cache.v.index_copy_(0, slots, value)
-            out = prefill_attention(q.view(n, c.heads, c.head_dim).contiguous(), cache.k, cache.v, p0,
-                                    scale=c.head_dim ** -0.5)
-        else:
-            out = tree_attention.attention(q.view(n, c.heads, c.head_dim).contiguous(), key, value, aoffs, aplan,
-                                           scale=c.head_dim ** -0.5)
-            cache.k.index_copy_(0, slots, key)
-            cache.v.index_copy_(0, slots, value)
+        out = attend(q.view(n, c.heads, c.head_dim).contiguous(), key, value)
         gated, gxs = glue.gate_mul(out, qg, heads=c.heads, head_dim=c.head_dim)
         x, h, _ = glue.add_rmsnorm(x, matmul(gated, a.o, gxs), m.post_norm, c.eps)
         _, normed, _ = glue.add_rmsnorm(x, moe.run(h, m.moe), m.norm, c.eps)

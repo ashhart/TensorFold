@@ -54,6 +54,39 @@ def draft(logits: torch.Tensor, position: int, sampling: Sampling | None,
     return token, float(torch.softmax(row, -1)[pick].item())
 
 
+def picks(logits: torch.Tensor, positions: Sequence[int], samplings: Sequence[Sampling | None],
+          ids: np.ndarray | None = None) -> list[tuple[int, float]]:
+    """``draft`` for every row of ``logits`` (a stream's row each; ``ids``: the draft vocabulary on the host), rows
+    grouped by candidate count and read back together."""
+
+    rows = logits.float()
+    probs = torch.softmax(rows, -1)
+    width = rows.shape[1]
+    groups: dict[int, list[int]] = {}
+    for i, smp in enumerate(samplings):
+        greedy = smp is None or smp.temperature <= 0
+        groups.setdefault(0 if greedy else min(width, int(smp.top_k) + MARGIN) if smp.top_k else width, []).append(i)
+    launched = []
+    for k, members in groups.items():
+        sub = rows if len(members) == len(samplings) else rows[members]
+        values, cols = (None, sub.argmax(-1, keepdim=True)) if k == 0 else torch.topk(sub, k)
+        mine = probs if len(members) == len(samplings) else probs[members]
+        launched.append((members, values, cols, mine.gather(1, cols)))
+    out: list[tuple[int, float]] = [(0, 0.0)] * len(samplings)
+    for members, values, cols, p in launched:
+        cols, p = cols.cpu().numpy(), p.cpu().numpy()
+        values = values.cpu().numpy() if values is not None else None
+        for j, i in enumerate(members):
+            tokens = (ids[cols[j]] if ids is not None else cols[j]).astype(np.int64)
+            if values is None:
+                out[i] = int(tokens[0]), float(p[j, 0])
+                continue
+            chosen = choose_rows(values[j][None], tokens[None], [positions[i]], samplings[i])[0]
+            at = int(np.nonzero(tokens == chosen)[0][0])
+            out[i] = int(chosen), float(p[j, at])
+    return out
+
+
 @torch.no_grad()
 def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | None, *,
             state: State | None = None, cache: Cache | None = None, held: torch.Tensor | None = None,
@@ -67,21 +100,11 @@ def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | No
     mc = None
     if head is not None:
         mc = cache.view(len(prompt)) if cache is not None else Cache(w, len(prompt))      # the prompt's rows only
-    ids = torch.tensor(list(prompt[st.pos:]), dtype=torch.int32, device=w.norm.device)
-    base, normed = st.pos, None
-    bounds = sorted({p for p in stops if base < p < len(prompt)} | {len(prompt)}) if keep is not None else \
+    normed = None
+    bounds = sorted({p for p in stops if st.pos < p < len(prompt)} | {len(prompt)}) if keep is not None else \
         [len(prompt)]
     for end in bounds:
-        for a, b in chunks(st.pos, end):
-            normed, _ = prefill_chunk(w, ids[a - base:b - base], st, every=head is not None)
-            if head is None:
-                continue
-            rows = normed if held is None else torch.cat([held, normed])
-            start = a - (0 if held is None else 1)
-            if rows.shape[0] > 1:
-                head.forward(mc, rows[:-1], prompt[start + 1:b], start)
-                mc.pos = b - 1
-            held = rows[-1:]
+        normed, held = extend(w, head, prompt, st, mc, held, end)
         if end < len(prompt):
             keep(end, clone_state(st), mc.view() if mc is not None else None, held)
     logits = _mm(normed[-1:], w.head)
@@ -92,6 +115,27 @@ def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | No
         constraint.advance([first])
     carry = Carry(held, [first]) if head is not None else None
     return st, mc, first, carry
+
+
+@torch.no_grad()
+def extend(w, head: Head | None, prompt: Sequence[int], st: State, mc: Cache | None, held: torch.Tensor | None,
+           end: int) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Commit prompt[st.pos:end] in chunks (the state's bits never depend on ``end``; the head's only pick drafts);
+    the head absorbs every row but the last, which comes back held with the last chunk's normed rows."""
+
+    ids = torch.tensor(list(prompt[st.pos:end]), dtype=torch.int32, device=w.norm.device)
+    base, normed = st.pos, None
+    for a, b in chunks(st.pos, end):
+        normed, _ = prefill_chunk(w, ids[a - base:b - base], st, every=head is not None)
+        if head is None:
+            continue
+        rows = normed if held is None else torch.cat([held, normed])
+        start = a - (0 if held is None else 1)
+        if rows.shape[0] > 1:
+            head.forward(mc, rows[:-1], prompt[start + 1:b], start)
+            mc.pos = b - 1
+        held = rows[-1:]
+    return normed, held
 
 
 COPY_ROWS = 16       # a copied continuation's verify window
