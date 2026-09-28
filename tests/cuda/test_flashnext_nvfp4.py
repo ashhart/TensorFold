@@ -189,6 +189,23 @@ def test_a_packed_stack_keeps_each_experts_bytes_and_decodes_them():
     assert torch.equal(nvfp4.dequantize_fp4(slab), nvfp4.dequantize(words[1], scale[1], factors[1]))
 
 
+def test_stacked_fp4_materialises_an_expand_view_scale2():
+    """The checkpoint path passes ``d2[:, None].expand(e, D)`` for down (gate/up densify via cat). An
+    expand-view has stride 0 on the row; Triton's flat ``S2 + e*N + rn`` then walks past the real [E]
+    storage — the grouped down IMA on GB10. stacked_fp4 must hand the kernel a contiguous factor grid."""
+
+    e, n, k = 3, 128, 256
+    words = torch.randint(0, 256, (e, n, k // 2), dtype=torch.uint8)
+    scale = torch.randint(90, 115, (e, n, k // 16), dtype=torch.uint8).view(torch.float8_e4m3fn)
+    d2 = torch.tensor([0.01, 0.02, 0.03], dtype=torch.float32)
+    expanded = d2[:, None].expand(e, n)
+    assert not expanded.is_contiguous()
+    fp = nvfp4.stacked_fp4(words, scale, expanded)
+    assert fp.scale2.is_contiguous() and fp.scale2.shape == (e, n)
+    assert torch.equal(fp.scale2[:, 0], d2)
+    assert torch.equal(fp.scale2[:, -1], d2)
+
+
 def test_the_nvfp4_experts_declare_themselves_capturable():
     """The grouped step reads its plan's item list, its member gather and its member scatter on the device, so
     a CUDA graph capture accepts it (the first form's host read was what cudaErrorStreamCaptureInvalidated
