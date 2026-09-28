@@ -135,13 +135,11 @@ def test_moe4_gateup_down_on_gpu_matches_the_grouped_reference():
     ex = nvfp4_moe.moe4_from_experts(gate, up, down, shared)
     x = (torch.randn(4, d, device=dev) * 0.5).to(torch.bfloat16)
     rows = torch.tensor([0, 2, 0, 1], device=dev)
-    groups = torch.tensor([0, 1, 2], dtype=torch.int32, device=dev)
-    perm = torch.full((3, 4), -1, dtype=torch.int32, device=dev)
-    for g, e_ in enumerate((0, 1, 2)):
-        m = int((rows == e_).sum())
-        perm[g, :m] = (rows == e_).nonzero(as_tuple=True)[0] * 32
+    picks = torch.stack([rows, torch.full_like(rows, ex.count - 1)], dim=1).to(torch.int32)
+    plan = grouped.Plan(4, 2, ex.count, dev)
+    grouped.route(picks, plan)
     act = torch.zeros((4, 2, ni), dtype=torch.bfloat16, device=dev)
-    ex.gateup_out(x, groups, perm, act, 1)
+    ex.gateup_out(x, plan, act, 1)
     ref = torch.stack([ex.gateup_rows(x[i:i + 1], int(rows[i]))[0] for i in range(4)])
     assert torch.equal(act[:, 0], ref)
 
