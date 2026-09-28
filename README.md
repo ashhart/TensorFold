@@ -105,11 +105,14 @@ A positive CUDA value must fit both the native window and the capacity estimate 
 otherwise startup refuses it with fitting guidance. Increasing GLM beyond its dense window enables
 its sparse-attention path. The startup report distinguishes native and allocated capacity.
 
-MLX uses a process budget capped by 70% of RAM and the GPU's recommended working set. It reserves 3 GiB
-for the rest of the process before setting the MLX allocator limit. Admission accounts for weights,
-cache growth, reply tokens and prefill workspace. `TENSORFOLD_MEMORY_LIMIT_GB` can lower the budget in
-GiB. Retained prefixes and reusable MLX buffers have separate limits. Admission can evict retained
-prefixes or queue another stream; fitting weights alone does not establish a usable context size.
+MLX defaults to a process budget of 70% of RAM. `TENSORFOLD_MEMORY_LIMIT_GB` replaces that default in
+GiB, raising or lowering it; physical RAM and the GPU's recommended working set still cap the result.
+The server reserves 3 GiB for the rest of the process before setting the MLX allocator limit, so a
+110 GiB process budget allows 107 GiB of MLX buffers. Concurrent admission honors the raised budget
+while accounting for memory held elsewhere on the machine. Admission accounts for weights, cache
+growth, reply tokens and prefill workspace. Retained prefixes and reusable MLX buffers have separate
+limits. Admission can evict retained prefixes or queue another stream; fitting weights alone does not
+establish a usable context size. A larger budget leaves less RAM for other applications and cached file pages.
 
 Flash Next's startup weight check excludes n-gram tensors when the loader keeps them in host file
 mappings. The startup report shows resident and file-backed bytes separately. Cached file pages still
@@ -122,7 +125,8 @@ CUDA checks context before opening a stream.
 
 The memory-class table below keeps the model combinations under qualification. Its GiB budget ceilings
 emulate the listed RAM classes before the 3 GiB process reserve. The actual default budget uses
-OS-reported physical memory; a smaller GPU working set or an explicit memory limit lowers it. Context and peak-memory results remain TBD until a public
+OS-reported physical memory and the GPU working set; an explicit memory budget can lower or raise it.
+Context and peak-memory results remain TBD until a public
 prompt fixture, checkpoint revision, runtime, command and measurement output accompany each result.
 
 | Nominal RAM class | Budget ceiling | Qwen3.8-27B + DFlash2 | Qwen3.8-27B, `--drafter none` | Nemotron 3.5 Lightning | Qwen3.8 Flash Next |

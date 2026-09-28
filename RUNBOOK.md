@@ -99,6 +99,16 @@ and 16,384 for Nemotron; the capacity estimate can lower these defaults. On CUDA
 removes the metadata cap while memory admission still applies. A positive context that cannot fit
 is refused at startup.
 
+On MLX, `TENSORFOLD_MEMORY_LIMIT_GB` sets the process budget in GiB in place of the default 70% of RAM.
+It can raise or lower the budget, within physical RAM and the GPU's recommended working set:
+
+```bash
+TENSORFOLD_MEMORY_LIMIT_GB=110 tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP
+```
+
+On a 128 GiB M4 Max this gives 110 GiB to the process and 107 GiB to MLX after the 3 GiB reserve.
+The same budget reaches concurrent admission; context and request memory checks still apply.
+
 Requested replies need cache space too. Reduce context, reply length, retained prefixes on MLX, or
 checkpoint size after a memory refusal. The MLX process budget reserves 3 GiB outside the allocator.
 Release-qualified memory and speed results are TBD [release-0.3.5]; see the

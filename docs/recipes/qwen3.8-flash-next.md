@@ -23,7 +23,10 @@ M4 Max with 128 GiB, whose process budget is 89.6 GiB, including the 3 GiB proce
 Mapped pages still use RAM while cached. The loader prefetches them after its initial forwards; macOS
 can reclaim them, and subsequent lookups may read from disk. The remaining weights must fit the MLX
 budget, and the server sizes context from runtime cache and workspace needs. `TENSORFOLD_MEMORY_LIMIT_GB`
-can lower the budget; it cannot raise the default ceiling.
+can lower or raise the default budget, capped by physical RAM and the GPU's recommended working set.
+For example, `TENSORFOLD_MEMORY_LIMIT_GB=110` gives a 128 GiB M4 Max a 110 GiB process budget and
+107 GiB for MLX. An explicit context must still fit the startup estimate; a larger budget does not
+establish full-window inference or keep every mapped page resident.
 After measuring shared rounds, the runtime releases the probes' rollback buffers before sizing prompt
 memory, so those unused states do not reduce the available context.
 

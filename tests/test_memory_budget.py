@@ -86,7 +86,57 @@ def test_mlx_buffers_are_capped_at_the_budget_less_the_rest_of_the_process():
     assert configure_mlx(mx, GIB // 2, environ={}, physical_bytes=48 * GIB) == int(0.70 * 48 * GIB)
     assert calls == [("memory", int(0.70 * 48 * GIB) - PROCESS_BYTES), ("cache", GIB // 2)]
     budget = memory_limit_bytes(mx, environ={"TENSORFOLD_MEMORY_LIMIT_GB": "1000"}, physical_bytes=48 * GIB)
-    assert budget == int(0.70 * 48 * GIB)
+    assert budget == 48 * GIB
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("value, recommended, expected", [
+    ("64", 120, 64), ("110", 120, 110), ("110", 96, 96), ("1000", 256, 128),
+    ("110", 0, 110), ("1e308", 0, 128),
+])
+def test_explicit_budget_can_raise_or_lower_the_default_within_hardware_limits(legacy, value, recommended, expected):
+    info = SimpleNamespace(device_info=lambda: {"max_recommended_working_set_size": recommended * GIB})
+    mx = SimpleNamespace(metal=info) if legacy else info
+    assert memory_limit_bytes(mx, environ={"TENSORFOLD_MEMORY_LIMIT_GB": value},
+                              physical_bytes=128 * GIB) == expected * GIB
+
+
+def test_raised_budget_keeps_the_process_reserve_and_cache_limit():
+    calls = []
+    mx = SimpleNamespace(device_info=lambda: {"max_recommended_working_set_size": 120 * GIB},
+                         set_memory_limit=lambda n: calls.append(("memory", n)),
+                         set_cache_limit=lambda n: calls.append(("cache", n)))
+    assert configure_mlx(mx, 8 * GIB, environ={"TENSORFOLD_MEMORY_LIMIT_GB": "110"},
+                         physical_bytes=128 * GIB) == 110 * GIB
+    assert calls == [("memory", 107 * GIB), ("cache", 8 * GIB)]
+
+
+@pytest.mark.parametrize("limit, elsewhere, expected", [
+    (None, 0, int(0.70 * 128 * GIB) - PROCESS_BYTES),
+    (None, 8, int(0.70 * 128 * GIB) - 8 * GIB),
+    ("110", 0, 107 * GIB), ("110", 8, 102 * GIB), ("64", 20, 61 * GIB),
+])
+def test_concurrent_admission_respects_the_resolved_budget_and_other_processes(monkeypatch, capsys,
+                                                                             limit, elsewhere, expected):
+    from tensorfold.engine import memory
+    from tensorfold.server.app import ChatApp
+
+    environ = {} if limit is None else {"TENSORFOLD_MEMORY_LIMIT_GB": limit}
+    budget = memory_limit_bytes(SimpleNamespace(), environ=environ, physical_bytes=128 * GIB)
+    app = ChatApp.__new__(ChatApp)
+    app.engine, app.default_max_tokens = object(), 4096
+    app.prompt_memory = SimpleNamespace(process_budget=budget, budget=budget - PROCESS_BYTES,
+                                        held=lambda: 90 * GIB)
+    monkeypatch.setattr(memory, "ram_bytes", lambda: 128 * GIB)
+    monkeypatch.setattr(memory, "used_elsewhere", lambda own: elsewhere * GIB)
+    monkeypatch.setattr(memory, "_mlx_used", app.prompt_memory.held)
+    monkeypatch.setattr(memory, "measure", lambda engine: memory.StreamMemory(64, 1024, 2112, 2048, 1, 1, 0, 1024))
+    admission = app._admission(0.70, 8)
+    assert admission.budget == expected
+    assert admission.used == app.prompt_memory.held
+    if limit == "110":
+        assert admission.admits(64, 128, [])       # a model above the old 89.6 GiB ceiling still has request room
+        assert "86% of 128 GB" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("value", ["", "0", "-1", "nan", "inf", "12GB"])

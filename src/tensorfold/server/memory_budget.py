@@ -39,16 +39,12 @@ def process_footprint() -> int | None:
 
 def memory_limit_bytes(mx: Any, *, environ: Mapping[str, str] | None = None,
                        physical_bytes: int | None = None) -> int:
+    """The explicit process budget or 70% of RAM, capped by physical memory and the GPU's recommended working set."""
+
     ram = physical_memory_bytes() if physical_bytes is None else int(physical_bytes)
     if ram <= 0:
         raise ValueError("physical memory must be positive")
     limit = int(MEMORY_FRACTION * ram)
-    device_info = getattr(mx, "device_info", None)
-    if device_info is None:
-        device_info = getattr(getattr(mx, "metal", None), "device_info", None)
-    recommended = int(device_info().get("max_recommended_working_set_size", 0)) if device_info else 0
-    if recommended > 0:
-        limit = min(limit, recommended)
     value = (os.environ if environ is None else environ).get(LIMIT_ENV)
     if value is not None:
         try:
@@ -57,7 +53,13 @@ def memory_limit_bytes(mx: Any, *, environ: Mapping[str, str] | None = None,
             raise ValueError(f"{LIMIT_ENV} must be a positive number in GiB") from None
         if not math.isfinite(gib) or gib <= 0:
             raise ValueError(f"{LIMIT_ENV} must be a positive number in GiB")
-        limit = min(limit, max(1, int(gib * GIB)))
+        limit = max(1, int(min(gib, ram / GIB) * GIB))
+    device_info = getattr(mx, "device_info", None)
+    if device_info is None:
+        device_info = getattr(getattr(mx, "metal", None), "device_info", None)
+    recommended = int(device_info().get("max_recommended_working_set_size", 0)) if device_info else 0
+    if recommended > 0:
+        limit = min(limit, recommended)
     return limit
 
 
