@@ -140,7 +140,8 @@ class Qwen27Engine:
             drafter.restore(hit[2])
         elif drafter is not None:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
-        st, pending = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None)
+        st, pending = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
+                              limit=self.context_window)
         if draft:
             self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
         prefill_s = time.perf_counter() - t0
@@ -164,7 +165,8 @@ class Qwen27Engine:
             drafter.restore(hit[2])
         elif drafter is not None:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
-        st, pending = prefill_tp(self.w, prompt, sampling, 0, drafter, state=hit[1] if hit else None)
+        st, pending = prefill_tp(self.w, prompt, sampling, 0, drafter, state=hit[1] if hit else None,
+                                 limit=self.context_window)
         if draft:
             self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
         prefill_s = time.perf_counter() - t0
@@ -199,7 +201,8 @@ class Qwen27Engine:
             if drafter is not None:             # a two-rank drafter: mirror rank 0's drafter state
                 drafter.restore(hit[2] if hit is not None else
                                 ([None] * drafter.layers, [None] * drafter.layers, 0, 0))
-            st, pending = prefill_tp(self.w, prompt, sampling, 1, drafter, state=hit[1] if hit else None)
+            st, pending = prefill_tp(self.w, prompt, sampling, 1, drafter, state=hit[1] if hit else None,
+                                     limit=self.context_window)
             if draft:
                 self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
             result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, 1, drafter, max_rows=self.max_rows)

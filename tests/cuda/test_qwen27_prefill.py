@@ -8,8 +8,8 @@ if not torch.cuda.is_available():
 
 from tensorfold.cuda.kernels import qmm as shared  # noqa: E402
 from tensorfold.cuda.kernels.prefill_attention import attention  # noqa: E402
-from tensorfold.families.qwen3_5.cuda.decode import draft_decode, prefill, serial_decode  # noqa: E402
-from tensorfold.families.qwen3_5.cuda.forward import State  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.decode import clone_state, draft_decode, prefill, serial_decode  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.forward import State, commit, tree_forward  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.prefill import prefill_chunk, prefill_state  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.qmm_fast import prepare  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
@@ -104,6 +104,37 @@ def test_prefix_reuse_through_prefill_equals_fresh_and_drafts_equal_serial():
     serial = serial_decode(w, fresh, first_fresh, 24, None, stop_eos=False)
     drafted = draft_decode(w, resumed, prompt, first_resumed, 24, None, draft=None, stop_eos=False)
     assert drafted.tokens == serial.tokens
+
+
+@pytest.mark.parametrize("length,limit", [(9000, 9100), (1000, 1100)])
+def test_a_cache_limit_changes_no_bits(length, limit):
+    """9,000 rows: the third chunk grows to 9,100 rows, not 12,000; 1,000 rows: the reply grows to 1,100, not 2,048."""
+    w = _model()
+    prompt = _prompt(length, seed=9)
+    free, bounded = State(w), State(w)
+    bounded.limit = limit
+    h_free = prefill_state(w, prompt, free)
+    h_bounded = prefill_state(w, prompt, bounded)
+    _same_state(free, bounded)
+    assert torch.equal(h_free, h_bounded)
+    fresh, first = prefill(w, prompt, None)
+    kept, first_kept = prefill(w, prompt, None, limit=limit)
+    assert kept.limit == limit and first_kept == first
+    sizes = {kv[0].shape[0] for st in (bounded, kept) for kv in st.kv if kv is not None}
+    assert max(sizes) <= limit
+    serial = serial_decode(w, fresh, first, 90, None, stop_eos=False)
+    assert serial_decode(w, kept, first_kept, 90, None, stop_eos=False).tokens == serial.tokens
+    drafted = draft_decode(w, kept, prompt, first_kept, 90, None, draft=None, stop_eos=False)
+    assert drafted.tokens == serial.tokens
+    replied = []
+    for st in (fresh, kept):                        # the reply's commits, kept to compare the states after it
+        st = clone_state(st)
+        for token in serial.tokens[:-1]:
+            _, record = tree_forward(w, torch.tensor([token], dtype=torch.int32, device="cuda"), [-1], st)
+            commit(st, record, [0])
+        replied.append(st)
+    _same_state(*replied)
+    assert max(kv[0].shape[0] for kv in replied[1].kv if kv is not None) <= limit
 
 
 def test_prefill_matmul_rows_do_not_depend_on_chunking():
