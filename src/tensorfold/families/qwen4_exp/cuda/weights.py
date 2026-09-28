@@ -627,14 +627,19 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
     if cfg.quant not in ("mlx", "modelopt"):
         raise ValueError(f"Flash Next's CUDA engine reads MLX 4-bit (groups of 32) or NVFP4 (experts-only) "
                          f"checkpoints, not {cfg.quant}")
-    embed = (make_b16(raw("model.embed_tokens.weight")) if cfg.quant == "modelopt"
+    # The NVFP4 checkpoint names the language model ``model.language_model.*`` (MLX files:
+    # ``language_model.model.*`` via ``prefix``). ``lm_head`` and ``mtp.*`` stay at the top level, so
+    # only the model group takes this inner base. Lost in the main rebase; restored so a real serve
+    # of ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4 finds embed/layers/mixer.
+    mbase = "model.language_model." if rd.has("model.language_model.embed_tokens.weight") else "model."
+    embed = (make_b16(raw(mbase + "embed_tokens.weight")) if cfg.quant == "modelopt"
              else triple("model.embed_tokens"))
     loaded = []
     for i in chosen:
-        loaded.append(layer(i, f"model.layers.{i}", cfg.layer_types[i], True))
+        loaded.append(layer(i, f"{mbase}layers.{i}", cfg.layer_types[i], True))
         rd.release()
         torch.cuda.empty_cache()
-    mixer = (hc_nvfp4 if cfg.quant == "modelopt" else hc)("model.hyper_connection_mixer", False)
+    mixer = (hc_nvfp4 if cfg.quant == "modelopt" else hc)(mbase + "hyper_connection_mixer", False)
     vl = full.vocab // world
     if cfg.quant == "modelopt":
         head = b16_rows(raw("lm_head.weight").to(torch.bfloat16)[rank * vl:(rank + 1) * vl])
