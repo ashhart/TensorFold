@@ -328,14 +328,14 @@ def test_ngram_lookup_through_the_fused_tables_is_bit_identical():
     emb = q4bits(q4.NGramEmbedding(config(), 0))
     tables = K.PleTables(emb)
     tokens = np.random.default_rng(8).integers(6, 97, size=(1, 200))
-    tokens[0, 50] = 5
+    tokens[0, 50] = 5                                                   # an EOS: the n-grams restart after it
     ids = emb.ids(np.full((1, emb.context), emb.eos, dtype=np.int64), tokens)
     ref = emb(ids)
     emb.__dict__["fused_tables"] = tables
     assert bool(mx.array_equal(emb(ids), ref).item())
 
 
-def tiny_model(seed: int = 0) -> q4.Qwen4Exp:
+def tiny_model(seed: int = 0, **overrides) -> q4.Qwen4Exp:
     """Four layers (3 DeltaNet, 1 attention, PLE on the first), 512 wide, 32 experts, 4-bit but the router."""
 
     from mlx.utils import tree_flatten
@@ -343,7 +343,7 @@ def tiny_model(seed: int = 0) -> q4.Qwen4Exp:
     from tensorfold.families.qwen4_exp.decode import FusedDecode
 
     mx.random.seed(seed)
-    model = q4.Qwen4Exp(config(hidden_size=512, num_experts=32))
+    model = q4.Qwen4Exp(config(**{"hidden_size": 512, "num_experts": 32, **overrides}))
     # centred norms start at zero; give them some weight so (1 + w) is exercised
     model.load_weights([(name, 0.1 * mx.random.normal(v.shape) if "norm" in name and name.endswith("weight") else v)
                         for name, v in tree_flatten(model.parameters())])
@@ -357,7 +357,7 @@ def test_whole_model_prefill_is_as_exact_as_the_reference(monkeypatch):
     """Two chunks, then four decode steps: the prefill path lands as close to fp32 as the bf16 reference does."""
 
     tokens = np.random.default_rng(11).integers(6, 97, size=(1, 404))
-    tokens[0, 100] = 5
+    tokens[0, 100] = 5                                                  # an EOS: the n-grams restart after it
 
     def run(model, fused=None):
         cache = model.make_cache()
@@ -390,6 +390,35 @@ def test_whole_model_prefill_is_as_exact_as_the_reference(monkeypatch):
     (fast_err, fast_top), (ref_err, ref_top) = error(fast), error(ref)
     assert fast.shape == (404, 97) and np.isfinite(fast).all()
     assert fast_err < 1.2 * ref_err and fast_top > ref_top - 0.04, (fast_err, ref_err, fast_top, ref_top)
+
+
+def test_releasing_probe_rounds_frees_buffers_and_preserves_the_next_forward(monkeypatch):
+    import gc
+    import weakref
+
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
+
+    monkeypatch.setattr(FlashNext, "check_windows", lambda self: (4, {1: 1.0, 4: 2.0}))
+    model = tiny_model(vocab_size=128, moe_intermediate_size=512, shared_expert_intermediate_size=512)
+    runtime = FlashNext(model, drafts=0)
+    caches = [runtime.make_cache() for _ in range(2)]
+    heads = [weakref.ref(cache[0]) for cache in caches]
+    tokens = [[7, 11, 13, 17], [19, 23, 29]]
+    logits = runtime.head(runtime.hidden_rows(tokens, caches))
+    assert bool(mx.all(mx.isfinite(logits)).item())
+    want = np.array(logits.view(mx.uint16))
+    del logits
+    del caches
+    gc.collect()
+    before = mx.get_active_memory()
+    assert all(head() is not None for head in heads)       # the last shared forward keeps these alive
+    runtime.release_rounds()
+    gc.collect()
+    assert all(head() is None for head in heads)
+    assert mx.get_active_memory() < before
+    fresh = [runtime.make_cache() for _ in range(2)]
+    got = np.array(runtime.head(runtime.hidden_rows(tokens, fresh)).view(mx.uint16))
+    assert np.array_equal(got, want)
 
 
 def test_snapshot_keys_name_the_prefill_path(monkeypatch):

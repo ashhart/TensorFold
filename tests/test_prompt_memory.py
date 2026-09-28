@@ -489,6 +489,44 @@ def test_nemotron_releases_its_last_rounds_row_states():
     assert family.fused.row_states == {} and family._last_hidden is None
 
 
+@pytest.mark.parametrize("fused", [False, True])
+def test_flash_next_sizing_releases_probe_rows_and_draft_references(fused):
+    import weakref
+
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
+
+    class Buffer:
+        pass
+
+    live = weakref.WeakSet()
+    runtime = Runtime(resident=1000)
+    active = runtime.get_active_memory
+    runtime.get_active_memory = lambda: active() + 150_000 * len(live)
+    memory = controller(budget=200_000, runtime=runtime)
+    engine = ProbeEngine(runtime)
+    family = FlashNext.__new__(FlashNext)
+    family.model = SimpleNamespace()
+    family.fused = SimpleNamespace(row_states={}, _last_heads=[]) if fused else None
+    family.mtp_fused = SimpleNamespace(row_states={}, _last_heads=[]) if fused else None
+    family._specs = {}
+    engine.release_rounds = family.release_rounds
+
+    def probes():
+        buffer = Buffer()
+        live.add(buffer)
+        family._streams = family.model.last_streams = buffer
+        family._specs[0] = (buffer, 4)
+        for decode in (family.fused, family.mtp_fused):
+            if decode is not None:
+                decode.row_states[0] = [(buffer, buffer, 0)]
+                decode._last_heads.append(buffer)
+                decode.last_streams = buffer
+        return "admission"
+
+    assert memory.sized(engine, probes) == "admission"
+    assert not live and memory.largest_window(8192) > 0
+
+
 def test_the_engine_releases_rounds_only_with_no_stream_live():
     engine = FakeEngine()
     calls = []

@@ -230,10 +230,15 @@ def test_releasing_rounds_drops_the_last_forwards_rows():
 
     from tensorfold.families.qwen4_exp.runtime import FlashNext
 
-    fused = SimpleNamespace(row_states={0: [("conv", "ssm", 0)]}, last_streams="streams", _last_heads=["head"])
-    runtime = SimpleNamespace(fused=fused, _streams="streams")
+    heads = [SimpleNamespace(row_states={0: [("conv", "ssm", 0)]}, last_streams="streams", _last_heads=["head"])
+             for _ in range(2)]
+    model = SimpleNamespace(last_streams="prompt streams")
+    runtime = SimpleNamespace(fused=heads[0], mtp_fused=heads[1], _streams="streams", _specs={1: ("out", 2)},
+                              model=model)
     FlashNext.release_rounds(runtime)
-    assert fused.row_states == {} and fused.last_streams is None and fused._last_heads == [] and runtime._streams is None
+    for fused in heads:
+        assert fused.row_states == {} and fused.last_streams is None and fused._last_heads == []
+    assert runtime._streams is None and runtime._specs == {} and "last_streams" not in vars(model)
 
 
 def test_the_head_absorbs_every_prompt_row_into_its_cache_and_carries_only_the_last():
