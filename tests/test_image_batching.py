@@ -158,6 +158,23 @@ def test_failed_batch_and_singleton_fallback_release_every_image_slot():
     assert releases == [True, True]
 
 
+def test_batch_admission_reserves_live_stream_reply_growth():
+    service = scheduler(BatchFakeEngine(), lanes=3)
+    calls = []
+    service.prompt_memory = SimpleNamespace(
+        would_fit_batch=lambda prompts, replies, **kwargs: calls.append(kwargs) or True
+    )
+    service.admission = SimpleNamespace(memory=SimpleNamespace(per_token=5))
+    active = ChatJob("active", list(range(10)), 4, 0.0)
+    active.stream = SimpleNamespace(context=list(range(8)), finished=False)
+    service._jobs[active.job_id] = active
+
+    assert service._fits_batch([image_job("first", [1, 2]), image_job("second", [3, 4])])
+
+    # Six remaining live tokens plus both prepared-image reservations.
+    assert calls == [{"extra_bytes": 2 * 128 + 6 * 5}]
+
+
 def test_vision_prompt_merge_right_pads_text_and_concatenates_patches():
     first = vision_prompt([7, 8], patches=2, digest="a")
     second = vision_prompt([9, 10, 11], patches=3, digest="b")
@@ -323,3 +340,13 @@ def test_batch_projection_rounds_source_and_each_extracted_row_independently():
     padded_source = 3 * (100 + 512 * 10)
     extracted_rows = (100 + 256 * 10) + (100 + 512 * 10) + (100 + 256 * 10)
     assert memory.projected(sum(memory._batch_prompts)) == padded_source + extracted_rows
+
+
+def test_batch_work_growth_rounds_each_padded_row_independently():
+    memory = PromptMemory.__new__(PromptMemory)
+    memory.profile = CacheMemory(fixed_bytes=100, bytes_per_token=10, step=256)
+    memory._batch_prompts = (1, 1, 1)
+    memory.bootstrap = memory.observed_work = memory.workspace_per_token = memory.heads = 0
+    memory.score_rows = 144
+
+    assert memory._work(3) == 3 * (100 + 256 * 10)

@@ -172,7 +172,10 @@ class PromptMemory:
         if self.profile is None:
             return self.bootstrap
         # MLX's limit is this budget, so its eval waits on queued work before more old buffers than this pile up
-        growth = self.profile.growth_bytes(tokens) + (self.cache_instances - 1) * self.profile.fixed_bytes
+        if self._batch_prompts is not None:
+            growth = len(self._batch_prompts) * self.profile.growth_bytes(max(self._batch_prompts))
+        else:
+            growth = self.profile.growth_bytes(tokens) + (self.cache_instances - 1) * self.profile.fixed_bytes
         scores = (self.workspace_per_token * int(tokens) if self.workspace_per_token
                   else 2 * self.score_rows * max(0, self.heads) * int(tokens) * 2)
         return max(self.bootstrap, self.observed_work) + growth + scores

@@ -394,25 +394,29 @@ class Scheduler:
 
         if not jobs:
             return False
-        memory = self.prompt_memory
-        if memory is not None and not memory.would_fit_batch(
-            [len(job.prompt_ids) for job in jobs],
-            [int(job.max_tokens) for job in jobs],
-            extra_bytes=sum(int(job.multimodal.reserved_bytes) for job in jobs),
-        ):
-            return False
-        if memory is not None:
-            # Admission is calibrated from text decode rounds and double-counts the multimodal
-            # prefill workspace already reserved above. PromptMemory validates the aggregate
-            # image graph here and again before/after its real cache allocation.
-            return True
-        if self.admission is None:
-            return True
         live = [
             (len(job.stream.context), len(job.prompt_ids) + int(job.max_tokens))
             for job in self._jobs.values()
             if job.stream is not None and not job.stream.finished
         ]
+        live_reply_bytes = (
+            int(sum(max(0, longest - current) for current, longest in live) * self.admission.memory.per_token)
+            if self.admission is not None
+            else 0
+        )
+        memory = self.prompt_memory
+        if memory is not None and not memory.would_fit_batch(
+            [len(job.prompt_ids) for job in jobs],
+            [int(job.max_tokens) for job in jobs],
+            extra_bytes=sum(int(job.multimodal.reserved_bytes) for job in jobs) + live_reply_bytes,
+        ):
+            return False
+        if memory is not None:
+            # Admission's text-prefill workspace would reject valid multimodal batches, but its
+            # live reply growth is included in PromptMemory's aggregate reservation above.
+            return True
+        if self.admission is None:
+            return True
         for index, job in enumerate(jobs):
             # Preserve the existing rule that a first request may start alone and let prompt admission
             # produce the detailed error. Every additional row must fit beside the rows before it.
@@ -567,11 +571,18 @@ class Scheduler:
         batch_error: Exception | None = None
         try:
             if memory is not None:
+                live_reply_bytes = 0
+                if self.admission is not None:
+                    live_reply_bytes = int(sum(
+                        max(0, len(active.prompt_ids) + int(active.max_tokens) - len(active.stream.context))
+                        for active in self._jobs.values()
+                        if active.stream is not None and not active.stream.finished
+                    ) * self.admission.memory.per_token)
                 memory.begin_batch(
                     [len(job.prompt_ids) for job in jobs],
                     [int(job.max_tokens) for job in jobs],
                     admit=self.checkpoints is None,
-                    extra_bytes=sum(int(job.multimodal.reserved_bytes) for job in jobs),
+                    extra_bytes=sum(int(job.multimodal.reserved_bytes) for job in jobs) + live_reply_bytes,
                 )
             # A batch cannot be interrupted inside one MLX graph. Individual cancellations are
             # checked immediately before and after it so one departed client does not fail peers.
