@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 
 KEEP = 3             # prompt states a concurrent decoder keeps to resume from (each holds a DeltaNet copy)
 KEEP_ONE = 4         # prompt states one stream keeps (they share its attention buffers)
+
+
+def entry_end(prompt: Sequence[int]) -> int:
+    """Where a prompt's prefix-cache entry ends: one token before the prompt's end (a one-token prompt: at its end).
+    A chat prompt ends in the generation prompt, ``<think>`` and a newline; the next turn renders that reply with an
+    empty reasoning block, ``<think>`` and two newlines (another token), so it extends all of the prompt but its last
+    token."""
+
+    return max(1, len(prompt) - 1)
 
 
 class Qwen27Engine:
@@ -165,10 +174,11 @@ class Qwen27Engine:
         elif drafter is not None:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
         stops, keep = self._stops(prompt, hit, draft)
-        st, pending = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
-                              limit=self.context_window, stops=stops, keep=keep)
-        if draft and self._ends(prompt, stops):
-            self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
+        end = entry_end(prompt) if draft and self._ends(prompt, stops) else None
+        st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
+                                     limit=self.context_window, stops=stops, keep=keep, keep_at=end)
+        if end is not None:
+            self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0
         if on_tokens([pending]):
             return {"prefill_s": prefill_s, "cached": hit[1].pos if hit else 0}
@@ -192,10 +202,11 @@ class Qwen27Engine:
         elif drafter is not None:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
         stops, keep = self._stops(prompt, hit, draft)
-        st, pending = prefill_tp(self.w, prompt, sampling, 0, drafter, state=hit[1] if hit else None,
-                                 limit=self.context_window, stops=stops, keep=keep)
-        if draft and self._ends(prompt, stops):
-            self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
+        end = entry_end(prompt) if draft and self._ends(prompt, stops) else None
+        st, pending, *kept = prefill_tp(self.w, prompt, sampling, 0, drafter, state=hit[1] if hit else None,
+                                        limit=self.context_window, stops=stops, keep=keep, keep_at=end)
+        if end is not None:
+            self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0
         stop_now = bool(on_tokens([pending]))
         # rank 0 alone decides where a reply ends; rank 1 follows its windows (no header field needed)
@@ -230,8 +241,9 @@ class Qwen27Engine:
                 drafter.restore(hit[2] if hit is not None else
                                 ([None] * drafter.layers, [None] * drafter.layers, 0, 0))
             stops, keep = self._stops(prompt, hit, draft)
-            st, pending = prefill_tp(self.w, prompt, sampling, 1, drafter, state=hit[1] if hit else None,
-                                     limit=self.context_window, stops=stops, keep=keep)
-            if draft and self._ends(prompt, stops):
-                self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
+            end = entry_end(prompt) if draft and self._ends(prompt, stops) else None     # the same entries as rank 0
+            st, pending, *kept = prefill_tp(self.w, prompt, sampling, 1, drafter, state=hit[1] if hit else None,
+                                            limit=self.context_window, stops=stops, keep=keep, keep_at=end)
+            if end is not None:
+                self._remember(list(prompt[:end]), *kept[0])
             result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, 1, drafter, max_rows=self.max_rows)

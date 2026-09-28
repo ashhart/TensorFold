@@ -31,8 +31,8 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
 
 
 def prefill_stops(w: Weights, prompt: Sequence[int], st: State, draft=None, *, stops: Sequence[int] = (),
-                  keep: Callable | None = None, tp: bool = False) -> torch.Tensor:
-    """Commit the rest of the prompt into ``st``, handing ``keep(p, state, drafter context)`` the state after each stop."""
+                  keep: Callable | None = None, tp: bool = False, keep_at: int | None = None):
+    """Commit the rest of the prompt into ``st``, handing ``keep(p, state, drafter context)`` the state after each stop (``keep_at``: ``prefill_state``'s)."""
 
     from .prefill import prefill_state
 
@@ -40,14 +40,14 @@ def prefill_stops(w: Weights, prompt: Sequence[int], st: State, draft=None, *, s
         if st.pos < p < len(prompt) and keep is not None:
             prefill_state(w, prompt[:p], st, tp=tp, draft=draft)
             keep(p, clone_state(st), draft.snapshot() if draft is not None else None)
-    return prefill_state(w, prompt, st, tp=tp, draft=draft)
+    return prefill_state(w, prompt, st, tp=tp, draft=draft, keep_at=keep_at)
 
 
 @torch.no_grad()
 def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
             draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
-            keep: Callable | None = None) -> tuple[State, int]:
-    """Commit the prompt and sample the first token; resuming a kept ``state`` gives a fresh prefill's bits."""
+            keep: Callable | None = None, keep_at: int | None = None):
+    """Commit the prompt and sample the first token; resuming a kept ``state`` gives a fresh prefill's bits (``keep_at`` adds a third item: the state after prompt[:keep_at] and the drafter's snapshot there)."""
 
     from .forward import _mm
 
@@ -58,9 +58,10 @@ def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
         st.limit = limit                    # a fresh state's attention caches stop here; a resumed one keeps its own
     if st.pos >= len(prompt):
         raise ValueError("a reused state must leave at least one prompt token to process")
-    normed = prefill_stops(w, prompt, st, draft, stops=stops, keep=keep)
+    out = prefill_stops(w, prompt, st, draft, stops=stops, keep=keep, keep_at=keep_at)
+    normed = out if keep_at is None else out[0]
     pending = sample_rows(_mm(normed, w.head), [len(prompt)], sampling)[0]
-    return st, pending
+    return (st, pending) if keep_at is None else (st, pending, out[1])
 
 
 @dataclass

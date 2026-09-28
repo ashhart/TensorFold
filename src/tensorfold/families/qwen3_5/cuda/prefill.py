@@ -13,6 +13,7 @@ from tensorfold.cuda.kernels.prefill_attention import attention
 
 from . import glue
 from . import prefill_bf16, prefill_glue
+from .decode import clone_state
 from .forward import State
 from .qmm_fast import matmul, matmul_partial, tile
 from .weights import QLinear, Weights
@@ -55,12 +56,14 @@ def _grow(st: State, i: int, need: int) -> tuple[torch.Tensor, torch.Tensor]:
 
 @torch.no_grad()
 def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = False, capture_taps: bool = False,
-                  last: bool = True, every: bool = False):
-    """Commit ``tokens`` at [st.pos, st.pos + W) into ``st``, replacing its list entries, never writing through them (``every``: all rows' final normed states)."""
+                  last: bool = True, every: bool = False, cut: int = 0):
+    """Commit ``tokens`` at [st.pos, st.pos + W) into ``st`` without writing through its entries (``every``: all rows' final normed states; ``cut``: also the state after the first ``cut`` rows, the GDN chains run as two launches with one launch's bits)."""
 
     c = w.config
     pg = prefill_glue if w.fast_prefill else prefill_bf16         # FP8 inputs only where every projection is 4-bit g64
     W = int(tokens.shape[0])
+    if not 0 <= cut < W:
+        raise ValueError(f"cut {cut} is not inside a chunk of {W} rows")
     p0 = st.pos
     keep = c.conv_kernel - 1
     dev = tokens.device
@@ -70,6 +73,9 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
     x = glue.embedding(tokens.to(torch.int32), w.embed)
     pending: torch.Tensor | None = None
     taps: list[torch.Tensor] = []
+    part = clone_state(st) if cut else None
+    if part is not None:
+        part.kv = []            # the chunk's final buffers, set below: these would outlive a grow that replaces them
     for i, layer in enumerate(w.layers):
         x, h = pg.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
@@ -88,7 +94,13 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
             q, k, v, g, beta = glue.gdn_pre(qkv, st.conv[i], gdn.conv, windows, a, b, gdn.A_log, gdn.dt_bias,
                                             kh=c.k_heads, vh=c.v_heads, dk=c.dk)
             final = torch.empty_like(st.rec[i])
-            yr = deltanet.chain(q, k, v, g, beta, st.rec[i], final)
+            if part is None:
+                yr = deltanet.chain(q, k, v, g, beta, st.rec[i], final)
+            else:
+                part.rec[i] = torch.empty_like(st.rec[i])
+                yr = torch.cat([deltanet.chain(q[:cut], k[:cut], v[:cut], g[:cut], beta[:cut], st.rec[i], part.rec[i]),
+                                deltanet.chain(q[cut:], k[cut:], v[cut:], g[cut:], beta[cut:], part.rec[i], final)])
+                part.conv[i] = torch.cat([st.conv[i], qkv[max(0, cut - keep):cut]])[-keep:].contiguous()
             r = _row_mm(pg.gated_norm(yr, z, gdn.norm, c.eps), gdn.out, tp)
             st.conv[i] = torch.cat([st.conv[i], qkv[-keep:]])[-keep:].contiguous()
             st.rec[i] = final
@@ -124,7 +136,11 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
         _, normed, _ = glue.add_rmsnorm(x, pending, w.norm, c.eps)
     elif last:
         _, normed, _ = glue.add_rmsnorm(x[-1:].contiguous(), pending[-1:].contiguous(), w.norm, c.eps)
-    return normed, (torch.cat(taps, dim=-1) if capture_taps else None)
+    taps_out = torch.cat(taps, dim=-1) if capture_taps else None
+    if part is None:
+        return normed, taps_out
+    part.pos, part.kv = p0 + cut, st.kv.copy()      # the chunk's buffers: their rows below part.pos stay as committed
+    return normed, taps_out, part
 
 
 def chunks(start: int, end: int, size: int = CHUNK) -> list[tuple[int, int]]:
@@ -136,20 +152,47 @@ def chunks(start: int, end: int, size: int = CHUNK) -> list[tuple[int, int]]:
 
 @torch.no_grad()
 def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = False, draft=None,
-                  size: int = CHUNK) -> torch.Tensor:
-    """Commit prompt[st.pos:] into ``st``; the drafter gets taps only for rows its window keeps at the prompt's end."""
+                  size: int = CHUNK, keep_at: int | None = None):
+    """Commit prompt[st.pos:] into ``st``; the drafter gets taps only for rows its window keeps at the prompt's end.
+
+    ``keep_at`` returns ``(normed, (state, snapshot))``: also the state after prompt[:keep_at], on the prompt state's
+    key/value buffers, and the drafter's snapshot there. The spans do not change; the one holding the point splits
+    its GDN chains there (``prefill_chunk(cut=...)``)."""
 
     dev = w.norm.device
-    ids = torch.tensor(list(prompt[st.pos:]), dtype=torch.int32, device=dev)
-    base, normed = st.pos, None
+    base, n = st.pos, len(prompt)
+    if keep_at is not None and not base <= keep_at <= n:
+        raise ValueError(f"keep_at {keep_at} is outside the prefilled range [{base}, {n}]")
+    ids = torch.tensor(list(prompt[base:]), dtype=torch.int32, device=dev)
+    normed, kept = None, None
+    end = n if keep_at is None else keep_at        # the drafter's window then also covers the kept point
     tap_from = base
-    if draft is not None and len(prompt) - draft.window > base:
-        tap_from = len(prompt) - draft.window
+    if draft is not None and end - draft.window > base:
+        tap_from = end - draft.window
         draft.skip(tap_from - base)
-    spans = chunks(base, len(prompt), size)
+    spans = chunks(base, n, size)
     for j, (a, b) in enumerate(spans):
+        if keep_at == a:
+            kept = (clone_state(st), draft.snapshot() if draft is not None else None)
+            kept[0].kv = []                        # the final buffers, set below, as for a cut
+        cut = keep_at - a if keep_at is not None and a < keep_at < b else 0
         want = draft is not None and b > tap_from
-        normed, taps = prefill_chunk(w, ids[a - base:b - base], st, tp=tp, capture_taps=want, last=j == len(spans) - 1)
+        normed, taps, *part = prefill_chunk(w, ids[a - base:b - base], st, tp=tp, capture_taps=want,
+                                            last=j == len(spans) - 1, cut=cut)
+        snap = None
         if want:
-            draft.add_taps(taps[max(0, tap_from - a):])
-    return normed
+            rows = taps[max(0, tap_from - a):]
+            if cut:                                # the drafter at the point, then the rest of the chunk
+                split = keep_at - max(a, tap_from)
+                if split:
+                    draft.add_taps(rows[:split])
+                snap, rows = draft.snapshot(), rows[split:]
+            draft.add_taps(rows)
+        if part:
+            kept = (part[0], snap)
+    if keep_at is None:
+        return normed
+    if keep_at == n:
+        kept = (clone_state(st), draft.snapshot() if draft is not None else None)
+    kept[0].kv = st.kv.copy()                      # grown buffers copy the committed rows: never hold the old ones
+    return normed, kept
