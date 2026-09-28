@@ -291,10 +291,13 @@ def stacked_fp4(words: torch.Tensor, weight_scale: torch.Tensor, scale2) -> FP4:
 
 def fp4_from_rows(weight_bits: torch.Tensor, scale: torch.Tensor) -> FP4:
     """An FP4 from a bf16-pattern grid (uint16 [N, K]) and [N, K/16] fp32 row scales: the gate/up stack
-    (gate and up code grids joined, each projection's row scales its own) and any pre-decoded table."""
+    (gate and up code grids joined, each projection's row scales its own) and any pre-decoded table. The
+    per-tensor factor is materialised here, not lazily: a table both the eager step and a CUDA graph capture
+    read must never allocate during capture."""
 
     n, k = weight_bits.shape
-    return FP4(_tile_bits(weight_bits), scale.t().contiguous(), n, k)
+    return FP4(_tile_bits(weight_bits), scale.t().contiguous(), n, k,
+               scale2=torch.ones(n, dtype=torch.float32, device=weight_bits.device))
 
 
 def fp4_from_bf16(rows: torch.Tensor) -> FP4:
