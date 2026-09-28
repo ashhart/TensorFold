@@ -24,6 +24,7 @@ import importlib.util
 import random
 import sys
 import types
+import weakref
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -890,6 +891,35 @@ def test_the_kept_state_holds_the_buffers_grown_after_the_point(cpu, cached, len
     (fresh_other, fresh_pending), fresh_logits = cpu.run(other)
     assert _bits_equal(torch, again_logits, fresh_logits) and again_pending == fresh_pending
     _assert_same_state(torch, again, fresh_other)
+
+
+@pytest.mark.parametrize("where", ["prompt end", "last span start"])
+def test_keeping_a_point_holds_no_buffer_that_a_grow_replaces(cpu, monkeypatch, where):
+    """A fresh prefill frees each key/value buffer as soon as it grows it (the last span of 1,030 tokens grows them
+    past 1,024 rows). The state kept at the point takes the final buffers after the chunk and never holds the ones a
+    grow replaced, so keeping a point holds no extra buffers while the prefill runs."""
+
+    m = cpu.m
+    prompt = _prompt(1030, 52)
+    point = len(prompt) - 1 if where == "prompt end" else m.prefill.chunks(0, len(prompt))[-1][0]
+    grow, attention, replaced, alive = m.prefill._grow, m.prefill.attention, [], []
+
+    def tracked_grow(st, i, need):
+        before = st.kv[i]
+        out = grow(st, i, need)
+        if out is not before:
+            replaced.append(weakref.ref(before[0]))
+        return out
+
+    def checked_attention(q, kbuf, vbuf, p0, *, scale):
+        alive.append(sum(ref() is not None for ref in replaced))
+        return attention(q, kbuf, vbuf, p0, scale=scale)
+
+    monkeypatch.setattr(m.prefill, "_grow", tracked_grow)
+    monkeypatch.setattr(m.prefill, "attention", checked_attention)
+    (st, _, (kept, _)), _ = cpu.run(prompt, keep_at=point)
+    assert replaced and alive and not any(alive), alive
+    assert kept.pos == point and _shares_kv(kept, st)
 
 
 @pytest.mark.parametrize("rank", [0, 1])
