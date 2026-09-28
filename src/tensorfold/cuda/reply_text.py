@@ -7,6 +7,7 @@ import re
 import uuid
 from typing import Any
 
+from tensorfold.server.stopping import StopPolicy
 from tensorfold.server.tools import parse_glm_tool_call_block
 
 _CALL_OPEN, _CALL_CLOSE = "<tool_call>", "</tool_call>"
@@ -51,6 +52,27 @@ class StreamDecoder:
         before = self._decode(self.ids[self.prefix:self.read])
         return self.text + self._decode(self.ids[self.prefix:])[len(before):]
 
+
+
+class StopStrings:
+    """A request's ``stop`` strings, decided token by token, so a reply cuts at the same token however its tokens arrive."""
+
+    def __init__(self, strings: tuple[str, ...], tok, skip: tuple[int, ...] = ()):
+        self.strings, self.tok, self.skip = strings, tok, frozenset(skip)
+        # a new match lies in the last (its UTF-8 length) tokens, plus eight as the Mac's ``StopPolicy`` keeps
+        self.tail = max((len(s.encode()) for s in strings), default=0) + 8
+
+    def hit(self, tokens: list[int]) -> bool:
+        """Whether the text through the newest token holds a stop string (earlier tokens were checked already)."""
+
+        ids = [t for t in tokens[-self.tail:] if t not in self.skip]
+        text = self.tok.decode(ids, skip_special_tokens=False)
+        return any(stop in text for stop in self.strings)
+
+    def visible(self, text: str, *, partial: bool = False) -> str:
+        """The text before the first match; ``partial`` also holds back an end that may begin one (the Mac's rule)."""
+
+        return StopPolicy.visible(self, text, partial=partial)
 
 
 def hide_tool_calls(text: str, *, finished: bool) -> str:

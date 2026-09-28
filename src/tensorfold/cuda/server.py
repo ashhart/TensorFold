@@ -20,11 +20,12 @@ from tensorfold.server.http import Server
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
                                         validate_modalities)
 from tensorfold.server.request_options import parse_numbers
+from tensorfold.server.stopping import stop_options
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, call_format, generate_gated
 from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
-from tensorfold.cuda.reply_text import StreamDecoder, hide_tool_calls, parse_tool_calls
+from tensorfold.cuda.reply_text import StopStrings, StreamDecoder, hide_tool_calls, parse_tool_calls
 from tensorfold.server.text import split_thinking
 
 
@@ -78,6 +79,8 @@ class PreparedRequest:
     tools: list[dict[str, Any]]
     thinking: bool
     sampling: Any          # the engine's ``Sampling``, or None for greedy decoding
+    ignore_eos: bool = False
+    stop: tuple[str, ...] = ()
 
 
 def _native_context(model_dir: Path) -> int:
@@ -92,6 +95,8 @@ def _native_context(model_dir: Path) -> int:
 
 class App:
     """Serve one engine with sampling and reply-length defaults for requests that omit them."""
+
+    reads_ignore_eos = False            # True where the engine reads ``ignore_eos`` itself (``GlmApp``)
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
@@ -166,6 +171,7 @@ class App:
 
         validate_modalities(body)
         ToolCallPolicy(body)
+        ignore_eos, stop = stop_options(body)
         max_tokens = self._requested_tokens(body)
         try:
             tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
@@ -193,7 +199,7 @@ class App:
         if not prompt:
             raise RequestError("rendered prompt is empty")
         # sampling is resolved here, so a malformed control is refused before a stream opens
-        return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt))
+        return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt), ignore_eos, stop)
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
         """Why the request cannot run, or None; rendered before a stream's headers are sent."""
@@ -257,14 +263,19 @@ class App:
         tools, thinking = prepared.tools, prepared.thinking
         policy = ToolCallPolicy(body)
         sampling = prepared.sampling
+        # end tokens end the reply and stay out of its text, unless it asks ignore_eos of an engine that reads it
+        ends = () if prepared.ignore_eos and self.reads_ignore_eos else tuple(self.engine.eos)
+        stops = StopStrings(prepared.stop, self.tok, ends)
         out: list[int] = []
         sent = {"reasoning": 0, "content": 0}
-        stopped = {"client": False}
+        stopped = {"client": False, "stop": False}
         failed: list[Exception] = []
-        stream = StreamDecoder(self.tok, tuple(self.engine.eos))
+        stream = StreamDecoder(self.tok, ends)
 
         def visible(finished: bool) -> tuple[str, str]:
             raw = stream.final() if finished else stream.text
+            # stop strings match the generated text, reasoning included, before it is split (as on the Mac)
+            raw = stops.visible(raw, partial=not finished) if stops.strings else raw
             if chat and thinking:
                 reasoning, answer = split_thinking(raw, finished=finished)
             else:
@@ -276,10 +287,20 @@ class App:
 
         def on_tokens(new: list[int]) -> bool:
             # True stops the engine after this round; engines that finish on both ranks keep calling and get True
-            if stopped["client"] or failed:
+            if stopped["client"] or stopped["stop"] or failed:
                 return True
             try:
-                out.extend(new)
+                if stops.strings:
+                    kept = []
+                    for token in new:             # token by token: the round's width cannot move the cut
+                        kept.append(token)
+                        out.append(token)
+                        if stops.hit(out):
+                            stopped["stop"] = True
+                            break
+                    new = kept
+                else:
+                    out.extend(new)
                 stream.add(new)
                 reasoning, answer = visible(False)
                 delta: dict[str, Any] = {}
@@ -296,7 +317,7 @@ class App:
             except Exception as exc:        # noqa: BLE001  raised after generate returns, never into the engine
                 failed.append(exc)
                 return True
-            return stopped["client"]
+            return stopped["client"] or stopped["stop"]
 
         draft = body.get("draft", True) is not False
         gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
@@ -318,16 +339,14 @@ class App:
         final: dict[str, Any] = {}
         if len(reasoning) > sent["reasoning"]:
             final["reasoning_content"] = reasoning[sent["reasoning"]:]
-        raw_answer = split_thinking(self.tok.decode([t for t in out if t not in self.engine.eos],
-                                                    skip_special_tokens=False), finished=True)[1] \
-            if chat and thinking else self.tok.decode([t for t in out if t not in self.engine.eos],
-                                                      skip_special_tokens=False)
+        text = stops.visible(self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False))
+        raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
         content, calls = parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
         content = policy.content(content) if tools else content
         tail = content[sent["content"]:] if content.startswith(answer[:sent["content"]]) else ""
         if tail:
             final["content"] = tail
-        finish = "tool_calls" if calls else ("stop" if out and out[-1] in self.engine.eos else "length")
+        finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
