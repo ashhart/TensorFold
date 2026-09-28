@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from .capacity import Geometry, SIZES
 
 PREFILL_ROWS = 2048     # a prompt chunk's rows: Flash Next and GLM keep buffers of this many rows
@@ -215,6 +216,9 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
             scratch = (2 if mtp else 1) * ((dense + 511) // 512) * PREFILL_ROWS * heads * (lw + 2) * 4
             scratch += ((int(t.get("index_topk", 2048)) + 515) // 512) * PREFILL_ROWS * heads * (lw + 2) * 4
             scratch += PREFILL_ROWS * ((capacity + 3) // 4) * 16
+            # bf16 copies of kv_b per head for prompt chunks' absorb/expand, and the kept conversations' budget
+            scratch += count * heads * (kd + vd) * lw * 2
+            scratch += int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
         else:
             cache = count * capacity * heads * (kd + vd) * 2
             scratch = (2 if mtp else 1) * ((capacity + rows + 511) // 512) * rows * heads * (kd + 2) * 4

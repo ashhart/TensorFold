@@ -12,6 +12,7 @@ ENABLED = os.environ.get("TF_GLM_PROFILE", "0") == "1"
 active = False                     # set only around prefill chunks
 totals: dict[str, float] = {}
 peaks: dict[str, int] = {}         # the most memory a block allocated on top of what was live before it
+top = [0]                           # the most memory torch held (reserved) at the end of any timed block
 
 
 @contextmanager
@@ -27,6 +28,7 @@ def timed(name: str):
     torch.cuda.synchronize()
     totals[name] = totals.get(name, 0.0) + time.perf_counter() - t
     peaks[name] = max(peaks.get(name, 0), torch.cuda.max_memory_allocated() - before)
+    top[0] = max(top[0], torch.cuda.max_memory_reserved())
 
 
 def report(tokens: int) -> None:
@@ -38,6 +40,7 @@ def report(tokens: int) -> None:
           flush=True)
     big = ", ".join(f"{k} {v / 2**30:.2f}" for k, v in sorted(peaks.items(), key=lambda kv: -kv[1])[:6])
     print(f"[tensorfold] prefill memory (GiB): allocated {torch.cuda.memory_allocated() / 2**30:.1f}, reserved "
-          f"{torch.cuda.memory_reserved() / 2**30:.1f}; most a block added: {big}", flush=True)
+          f"{torch.cuda.memory_reserved() / 2**30:.1f}, peak reserved {top[0] / 2**30:.2f}; most a block added: {big}",
+          flush=True)
     totals.clear()
     peaks.clear()
