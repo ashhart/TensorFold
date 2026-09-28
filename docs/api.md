@@ -28,16 +28,24 @@ Image, audio and video input or output requests receive HTTP 400.
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | MLX and GLM CUDA |
-| `stop` | Stop at a string or any string in a list; omit the matched text from the response | MLX |
+| `stop` | Stop at a string or any string in a list; omit the matched text from the response | Both |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high` or `xhigh` | MLX |
 | `thinking_budget` | Token-count limit inside reasoning | MLX |
 | `priority` | `background` yields to foreground requests | MLX |
 
-CUDA does not enforce the MLX-only fields above. Its Qwen engines also ignore `ignore_eos`. Unsupported
-generation features include multiple choices through `n` and `logprobs`. On MLX, `ignore_eos: true`
-keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
+CUDA does not enforce the MLX-only fields above. Its Qwen and Nemotron engines stop at an end token whatever
+`ignore_eos` says. Unsupported generation features include multiple choices through `n` and `logprobs`.
+`ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
+Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 MLX rejects malformed numeric controls and out-of-vocabulary raw prompt IDs with HTTP 400;
 `top_k` at zero or below disables top-k filtering, and null sampling fields retain server defaults.
+
+On CUDA, stop strings are checked after every token on the generated text, reasoning included, so drafted and
+`"draft": false` replies stop at the same token; usage and `token_sha` count the tokens through the one that
+completes the match. The GLM engine, and Flash Next and Nemotron on two ranks, decode on after a match to an end
+token or the reply limit; the server returns the reply only up to the match. Where a CUDA engine honors
+`ignore_eos`, end tokens inside the reply are decoded into its text, as on MLX, and `finish_reason` is `length`
+unless a stop string or a tool call ended the reply.
 
 On MLX, `--parallel auto` is the default: requests share rounds within the configured concurrency and memory
 budget. Background work waits behind foreground requests. An active background request yields when a
