@@ -144,8 +144,9 @@ class Qwen27Engine:
         return not (stops and len(prompt) - stops[-1] < MIN_GAP)
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
-                 draft: bool = True):
-        """``draft=False`` runs serial decoding from a fresh prefill without draft proposals, copies, or prefix-cache changes."""
+                 draft: bool = True, stop_eos: bool = True):
+        """``draft=False`` runs serial decoding from a fresh prefill without draft proposals, copies, or prefix-cache changes;
+        ``stop_eos=False`` decodes past end tokens to ``max_tokens`` (``ignore_eos``)."""
 
         from .decode import draft_decode, prefill
 
@@ -154,11 +155,11 @@ class Qwen27Engine:
                              "shorten the prompt or reserve fewer reply tokens")
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         if self.scheduler is not None:
-            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens)
+            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos)
         t0 = time.perf_counter()
         hit = self._resume(prompt) if draft else None
         if self.tp == 2:
-            return self._generate_tp(prompt, max_tokens, sampling, on_tokens, hit, t0, draft)
+            return self._generate_tp(prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos)
         drafter = self.draft if draft else None
         if hit is not None and drafter is not None:
             drafter.restore(hit[2])
@@ -173,12 +174,13 @@ class Qwen27Engine:
         if on_tokens([pending]):
             return {"prefill_s": prefill_s, "cached": hit[1].pos if hit else 0}
         result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
-                              max_rows=self.max_rows, allow_copy=self.allow_copy and draft, on_tokens=on_tokens)
+                              max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
+                              on_tokens=on_tokens)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0)}
 
     # two ranks: rank 0 sends each request's header and prompt to rank 1, both run the same calls
-    def _generate_tp(self, prompt, max_tokens, sampling, on_tokens, hit, t0, draft):
+    def _generate_tp(self, prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos=True):
         from .decode_tp import _share, decode_tp, pack_sampling, prefill_tp
 
         dev = self.w.norm.device
@@ -197,8 +199,10 @@ class Qwen27Engine:
             self._remember(list(prompt), st, drafter.snapshot() if drafter else None)
         prefill_s = time.perf_counter() - t0
         stop_now = bool(on_tokens([pending]))
+        # rank 0 alone decides where a reply ends; rank 1 follows its windows (no header field needed)
         result = decode_tp(self.w, st, prompt, pending, 1 if stop_now else max_tokens, sampling, 0, drafter,
-                           max_rows=self.max_rows, allow_copy=self.allow_copy and draft, on_tokens=on_tokens)
+                           max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
+                           on_tokens=on_tokens)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds, "cached": cached,
                 "drafts": draft, "min_rows": min(result.widths, default=0)}
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import threading
 import time
@@ -96,7 +97,7 @@ def _native_context(model_dir: Path) -> int:
 class App:
     """Serve one engine with sampling and reply-length defaults for requests that omit them."""
 
-    reads_ignore_eos = False            # True where the engine reads ``ignore_eos`` itself (``GlmApp``)
+    reads_ignore_eos = False            # True where the engine reads ``ignore_eos`` itself; a ``stop_eos`` engine is given it
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
@@ -264,7 +265,8 @@ class App:
         policy = ToolCallPolicy(body)
         sampling = prepared.sampling
         # end tokens end the reply and stay out of its text, unless it asks ignore_eos of an engine that reads it
-        ends = () if prepared.ignore_eos and self.reads_ignore_eos else tuple(self.engine.eos)
+        takes_stop_eos = "stop_eos" in inspect.signature(self.engine.generate).parameters
+        ends = () if prepared.ignore_eos and (self.reads_ignore_eos or takes_stop_eos) else tuple(self.engine.eos)
         stops = StopStrings(prepared.stop, self.tok, ends)
         out: list[int] = []
         sent = {"reasoning": 0, "content": 0}
@@ -322,8 +324,12 @@ class App:
         draft = body.get("draft", True) is not False
         gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
 
+        options: dict[str, Any] = {} if draft else {"draft": False}
+        if takes_stop_eos:
+            options["stop_eos"] = not prepared.ignore_eos
+
         def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
-            return self.engine.generate(ids, count, sampling, feed, **({} if draft else {"draft": False}))
+            return self.engine.generate(ids, count, sampling, feed, **options)
 
         # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
         with (nullcontext() if getattr(self.engine, "concurrent", False) else self.lock):
