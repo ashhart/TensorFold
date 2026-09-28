@@ -57,6 +57,11 @@ class Scheduler:
                 done.append(stream)
         return done
 
+    def _reply(self, s: Stream, kind: str, value: Any) -> None:
+        box = self.boxes.pop(id(s), None)            # None: the stream's request has had its reply
+        if box is not None:
+            box.put((kind, value))
+
     def _loop(self) -> None:
         while True:
             done = self._admit(None if self.decoder.live() else self.waiting.get())   # idle: wait for a request
@@ -64,7 +69,7 @@ class Scheduler:
                 done += self.decoder.round()
             except Exception as exc:                 # noqa: BLE001  (the live requests fail)
                 for s in self.decoder.drop():
-                    self.boxes.pop(id(s)).put(("error", exc))
+                    self._reply(s, "error", exc)
             self.decoder.finish(done)
             for s in done:
-                self.boxes.pop(id(s)).put(("done", s.stats()))
+                self._reply(s, "done", s.stats())

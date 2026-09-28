@@ -178,6 +178,49 @@ def test_scheduler_serves_concurrent_requests_exactly():
     assert serial == want and stats["cached"] == 0 and stats["min_rows"] == 1
 
 
+def test_a_failed_prompt_end_copy_fails_only_its_request(monkeypatch):
+    """One request's prompt-end copy runs out of memory: it gets the error, the others their serial tokens."""
+
+    w = _model()
+    refs = {tuple(p): _serial(w, p, smp, 20) for p, smp in zip(PROMPTS, SAMPLINGS)}
+    doomed = [2, 9, 4, 4, 1, 8, 8]                      # no other prompt has its length: only its copy fails
+
+    def failing(st):
+        if st.pos == len(doomed):
+            raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end copy)")
+        return private(st)
+
+    monkeypatch.setattr("tensorfold.families.qwen3_5.cuda.multi.private", failing)
+    dec = _Oracle(w, refs, seed=5)
+    sched = Scheduler(dec, max_streams=3)
+    results: dict = {}
+
+    def go(key, prompt, sampling):
+        got: list[int] = []
+        try:
+            results[key] = (got, sched.submit(prompt, 20, sampling, draft=True,
+                                              emit=lambda new: got.extend(new) or False))
+        except Exception as exc:                        # noqa: BLE001
+            results[key] = (got, exc)
+
+    batches = [[(i, PROMPTS[i], SAMPLINGS[i]) for i in range(3)] + [("doomed", doomed, None)],
+               [(i, PROMPTS[i], SAMPLINGS[i]) for i in (3, 4)]]           # the second after the failure
+    for batch in batches:
+        threads = [threading.Thread(target=go, args=args, daemon=True) for args in batch]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=120)
+    assert len(results) == len(PROMPTS) + 1, sorted(map(str, results))
+    got, err = results["doomed"]
+    assert got == [] and isinstance(err, torch.OutOfMemoryError), err
+    for i, prompt in enumerate(PROMPTS):
+        got, stats = results[i]
+        assert isinstance(stats, dict) and got == refs[tuple(prompt)], (i, stats)
+    assert sched.thread.is_alive() and not dec.streams
+    assert all(entry[0] != doomed for entry in dec.cache.entries)
+
+
 def test_allocate_prices_drafts_against_the_curve():
     flat = lambda rows: 10.0                            # noqa: E731  (rows cost nothing: every draft pays)
     assert allocate([[0.1, 0.5, 3.0], [0.2]], 2, 2.0, flat) == [3, 1]

@@ -113,9 +113,9 @@ class MultiDecoder:
         s.copies = CopyIndex() if self.allow_copy and s.draft and self.rank == 0 else None
         s.context = list(s.prompt)
         s.prefill_s, s.started = time.perf_counter() - t0, time.perf_counter()
-        self.streams[s.sid] = s
         if s.draft:
             self.cache.add(list(s.prompt), private(s.st), s.snap)
+        self.streams[s.sid] = s                       # last, so a failed copy leaves no stream behind
         return first
 
     @torch.no_grad()
