@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from . import nvfp4
+from . import nvfp4, nvfp4_grouped
 
 
 @dataclass
@@ -167,6 +167,7 @@ class MoE4:
             codes = codes[codes >= 0]
             if codes.numel():
                 flat[self._dest(codes, slots)] = self.gateup_rows(x[codes // 32], e)
+        nvfp4_grouped.gateup(self.gate_up, x, flat, plan, ni, slots)
         g = nvfp4.matmul(x, self.shared.gu)
         gate = g[:, :ni].to(torch.float32)
         up = g[:, ni:].to(torch.float32)
@@ -199,6 +200,7 @@ class MoE4:
         for e, dest in self.items(plan):
             flat[dest] = nvfp4.matmul(act.reshape(-1, ni)[dest], self._expert(e).down,
                                       f32=True).to(flat.dtype)
+        nvfp4_grouped.down(self.down_proj, act.reshape(-1, ni), flat, plan, slots)
         y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True).to(y.dtype)
         return y
 
