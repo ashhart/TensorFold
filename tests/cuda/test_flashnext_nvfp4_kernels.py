@@ -122,5 +122,5 @@ def test_moe4_gateup_down_on_gpu_matches_the_grouped_reference():
         perm[g, :m] = (rows == e_).nonzero(as_tuple=True)[0] * 32
     act = torch.zeros((4, 2, ni), dtype=torch.bfloat16, device=dev)
     ex.gateup_out(x, groups, perm, act, 1)
-    ref = torch.stack([ex.gateup_rows(x[i], int(rows[i])) for i in range(4)])
+    ref = torch.stack([ex.gateup_rows(x[i:i + 1], int(rows[i]))[0] for i in range(4)])
     assert torch.equal(act[:, 0], ref)

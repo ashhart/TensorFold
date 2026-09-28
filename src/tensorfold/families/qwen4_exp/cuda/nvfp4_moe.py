@@ -53,7 +53,7 @@ class MoE4:
     """One layer's experts (the engine's ``MoEW.experts``). The routed experts ride two stacked grids —
     ``gate_up`` [E, 2NI, D] (expert e's rows at e*2NI, gate first then up) and ``down_proj`` [E, D, NI]
     (expert e's rows at e*D) — with a leading expert axis over the tiles; ``shared`` is the BF16 expert
-    as identity-scaled tables. Expert id ``count() - 1`` is the shared one; ``width`` / ``dims`` are the
+    as identity-scaled tables. Expert id ``count - 1`` is the shared one; ``width`` / ``dims`` are the
     qmm names for NI / K (the MoE buffers take them)."""
 
     gate_up: nvfp4.FP4    # tiles [E, 2NI/BN, D/64, 64, BN], scales [E, D/16, 2NI]
@@ -109,8 +109,8 @@ class MoE4:
     def gateup(self, x: torch.Tensor, groups: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
         """x [M, K] bf16, top-k routed slots. ``groups`` [U] the distinct expert ids (in increasing
         order), ``perm`` [U, maxm] flat row*32 + slot codes per group (-1 after the last): act [M, NI]
-        bf16. The shared expert (id ``count() - 1``) rides every row: the caller folds its output in
-        (``gateup_rows(x, count() - 1)``)."""
+        bf16. The shared expert (id ``count - 1``) rides every row: the caller folds its output in
+        (``gateup_rows(x, count - 1)``)."""
 
         act = torch.empty((x.shape[0], self.width), dtype=torch.bfloat16, device=x.device)
         for e, rows in self._rows(groups, perm):
@@ -125,12 +125,19 @@ class MoE4:
             y[rows] = self.down_rows(act[rows], e)
         return y
 
+    @staticmethod
+    def _dest(codes: torch.Tensor, slots: int) -> torch.Tensor:
+        """The grouping's codes (``row * 32 + slot``, the ``qmm.Group`` convention) as the engine buffer's
+        flat ``row * slots + slot`` index (the qmm kernels' ``dest``; ``slots`` is the buffer's)."""
+
+        return (codes // 32) * slots + (codes % 32)
+
     def _rows(self, groups: torch.Tensor, perm: torch.Tensor):
         """(expert id, row indices) per group, the shared expert's id skipped."""
 
         for u in range(int(groups.shape[0])):
             e = int(groups[u])
-            if e == self.count() - 1:
+            if e == self.count - 1:
                 continue                                     # the shared expert: the caller's path
             codes = perm[u]
             codes = codes[codes >= 0]
@@ -143,15 +150,16 @@ class MoE4:
         engine's buffers); the shared expert's slot filled for every row from its BF16 tables."""
 
         ni = self.width
+        slots = act.shape[1]
         flat = act.reshape(-1, ni)
         for u in range(int(groups.shape[0])):
             e = int(groups[u])
-            if e == self.count() - 1:
+            if e == self.count - 1:
                 continue
             codes = perm[u]
             codes = codes[codes >= 0]
             if codes.numel():
-                flat[codes] = self.gateup_rows(x[codes // 32], e)
+                flat[self._dest(codes, slots)] = self.gateup_rows(x[codes // 32], e)
         g = nvfp4.matmul(x, self.shared.gu)
         gate = g[:, :ni].to(torch.float32)
         up = g[:, ni:].to(torch.float32)
@@ -165,15 +173,17 @@ class MoE4:
         in order); the shared expert's slot for every row. The down outputs are fp32 sums."""
 
         d, ni = self.dims, self.width
+        slots = y.shape[1]
         flat = y.reshape(-1, d)
         for u in range(int(groups.shape[0])):
             e = int(groups[u])
-            if e == self.count() - 1:
+            if e == self.count - 1:
                 continue
             codes = perm[u]
             codes = codes[codes >= 0]
             if codes.numel():
-                flat[codes] = nvfp4.matmul(act.reshape(-1, ni)[codes], self._expert(e).down, f32=True)
+                dest = self._dest(codes, slots)
+                flat[dest] = nvfp4.matmul(act.reshape(-1, ni)[dest], self._expert(e).down, f32=True)
         y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True)
         return y
 
