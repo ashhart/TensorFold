@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.errors import RequestError
 from tensorfold.server.http import Server
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
@@ -355,7 +356,11 @@ class App:
         return Sampling(int(seed) if seed is not None else seed_for(prompt), temp, int(top_k), float(top_p))
 
     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
-            prepared: PreparedRequest | None = None) -> dict[str, Any]:
+            prepared: PreparedRequest | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
+        """One reply. ``cancelled()`` is true once the client has gone: a request that has not started raises
+        ``RequestCancelled`` without an engine call. A running one stops at its next round, as it does when ``emit``
+        fails, and raises ``RequestCancelled`` once ``generate`` returns, so no truncated reply is written."""
+
         prepared = prepared if prepared is not None else self.prepare(body, chat)
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
         tools, thinking = prepared.tools, prepared.thinking
@@ -364,6 +369,7 @@ class App:
         out: list[int] = []
         sent = {"reasoning": 0, "content": 0}
         stopped = {"client": False}
+        failed: list[Exception] = []
         stream = StreamDecoder(self.tok, tuple(self.engine.eos))
 
         def visible(finished: bool) -> tuple[str, str]:
@@ -378,18 +384,28 @@ class App:
             return reasoning, answer
 
         def on_tokens(new: list[int]) -> bool:
-            out.extend(new)
-            stream.add(new)
-            reasoning, answer = visible(False)
-            delta: dict[str, Any] = {}
-            if len(reasoning) > sent["reasoning"]:
-                delta["reasoning_content"] = reasoning[sent["reasoning"]:]
-                sent["reasoning"] = len(reasoning)
-            if len(answer) > sent["content"]:
-                delta["content"] = answer[sent["content"]:]
-                sent["content"] = len(answer)
-            if delta and not emit(delta):
-                stopped["client"] = True
+            # True stops the engine after this round. Engines that finish on both ranks (two-rank Flash Next,
+            # Nemotron and GLM) keep calling; they get True again, and no more text is decoded or sent.
+            if stopped["client"] or failed:
+                return True
+            try:
+                out.extend(new)
+                stream.add(new)
+                reasoning, answer = visible(False)
+                delta: dict[str, Any] = {}
+                if len(reasoning) > sent["reasoning"]:
+                    delta["reasoning_content"] = reasoning[sent["reasoning"]:]
+                    sent["reasoning"] = len(reasoning)
+                if len(answer) > sent["content"]:
+                    delta["content"] = answer[sent["content"]:]
+                    sent["content"] = len(answer)
+                if delta and not emit(delta):
+                    stopped["client"] = True
+                elif cancelled is not None and cancelled():     # every round, with or without new text
+                    stopped["client"] = True
+            except Exception as exc:        # noqa: BLE001  raised after generate returns, never into the engine
+                failed.append(exc)
+                return True
             return stopped["client"]
 
         draft = body.get("draft", True) is not False
@@ -400,7 +416,13 @@ class App:
 
         # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
         with (nullcontext() if getattr(self.engine, "concurrent", False) else self.lock):
+            if cancelled is not None and cancelled():                # the client left while this request waited
+                raise RequestCancelled("the client left before the request started")
             stats = generate_gated(generate, prompt, max_tokens, gate, on_tokens)
+        if failed:
+            raise failed[0]
+        if stopped["client"]:                                        # as the Mac server: nothing more is written
+            raise RequestCancelled("the client left during the reply")
         stats = {**(stats or {}), "token_sha": token_sha(out)}
         reasoning, answer = visible(True)
         final: dict[str, Any] = {}
@@ -467,11 +489,14 @@ def make_handler(app: App):
 
         def _json(self, code: int, payload: dict[str, Any]) -> None:
             data = json.dumps(payload).encode()
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):          # the client has gone
+                self.close_connection = True
 
         def do_GET(self):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
@@ -497,6 +522,8 @@ def make_handler(app: App):
             created = int(time.time())
             stream = bool(body.get("stream"))
             kind = "chat.completion.chunk" if chat else "text_completion"
+            gone = socket_cancellation(self.connection)          # the Mac server's check: the client has closed
+            cancelled = lambda: gone.cancelled                  # noqa: E731
 
             def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
                 if chat:
@@ -517,13 +544,16 @@ def make_handler(app: App):
                         self.wfile.write(f"data: {json.dumps(chunk(delta))}\n\n".encode())
                         self.wfile.flush()
                         return True
-                    except (BrokenPipeError, ConnectionResetError):
+                    except OSError:             # reset, broken pipe, timed out, host unreachable: the client has gone
                         return False
 
                 if chat:
                     emit({"role": "assistant"})
                 try:
-                    result = app.run(body, chat, emit, prepared=prepared)
+                    result = app.run(body, chat, emit, prepared=prepared, cancelled=cancelled)
+                except RequestCancelled:
+                    self.close_connection = True
+                    return
                 except RequestError as exc:
                     error = {"error": {"message": str(exc), "type": "invalid_request_error"}}
                     try:
@@ -554,7 +584,10 @@ def make_handler(app: App):
                 self.close_connection = True
                 return
             try:
-                result = app.run(body, chat, lambda delta: True, prepared=prepared)
+                result = app.run(body, chat, lambda delta: True, prepared=prepared, cancelled=cancelled)
+            except RequestCancelled:
+                self.close_connection = True
+                return
             except RequestError as exc:
                 return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             usage = {"prompt_tokens": result["prompt_tokens"], "completion_tokens": result["completion_tokens"],

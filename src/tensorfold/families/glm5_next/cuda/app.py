@@ -49,8 +49,8 @@ class GlmApp(App):
                 f"shorten the prompt or reply{self._restart(need, ' both ranks')}")
 
     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
-            prepared: PreparedRequest | None = None) -> dict[str, Any]:
+            prepared: PreparedRequest | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         model = str(body.get("model") or "")
         self.engine.request.policy = body.get("tf_policy") or (model.split("@", 1)[1] if "@" in model else None)
         self.engine.request.stop_eos = not bool(body.get("ignore_eos", False))
-        return super().run(body, chat, emit, prepared=prepared)
+        return super().run(body, chat, emit, prepared=prepared, cancelled=cancelled)
