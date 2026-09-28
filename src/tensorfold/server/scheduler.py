@@ -135,6 +135,7 @@ class Scheduler:
         self.cancelled = 0
         self.starts = 0
         self._starting: ChatJob | None = None
+        self._released_at = 0            # ``starts`` when MLX's freed buffers were last handed back
         # Evaluate and save cache arrays on the scheduler thread that owns their streams during shutdown.
         self.on_stop: Callable[[], Any] | None = None
         self.stall_s = 120.0            # no round, start or finish while requests wait: dump stacks
@@ -246,6 +247,7 @@ class Scheduler:
             self._retire_externally_finished()
             if self.engine.active_count == 0:
                 if self._held is None:
+                    self._release_idle()
                     try:
                         self._held = self._queue.get(timeout=self.idle_wait)
                     except queue.Empty:
@@ -290,6 +292,13 @@ class Scheduler:
                     del self._jobs[stream_id]
                     self._retire(job)
             job = landed = tokens = None
+
+    def _release_idle(self) -> None:
+        """Once no stream is left and nothing waits, hand MLX's freed buffers back: no round can want them now."""
+
+        if self.prompt_memory is not None and self._released_at != self.starts and self._queue.empty():
+            self._released_at = self.starts
+            self.prompt_memory.release_freed()
 
     def _preempt_background(self) -> None:
         """Release background work until the next foreground request has both a lane and enough memory."""

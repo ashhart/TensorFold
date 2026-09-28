@@ -97,6 +97,12 @@ class PromptMemory:
                 self.runtime.reset_peak_memory()
             return memory
 
+    def release_freed(self) -> None:
+        """MLX's cache of freed buffers back to the system; live arrays, retained prefixes among them, stay."""
+
+        with self._memory_lock:
+            self.runtime.clear_cache()
+
     def _used(self) -> int:
         return int(self.runtime.get_active_memory() + self.runtime.get_cache_memory())
 

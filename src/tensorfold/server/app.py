@@ -49,23 +49,6 @@ def _token_sha(tokens: list[int]) -> str:
     return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
 
 
-def _mlx_memory_note() -> str:
-    """Empty MLX's freed-buffer cache after a request, then report its memory (active, cache, peak) for the done
-    line."""
-
-    import os
-
-    try:
-        import mlx.core as mx
-    except ImportError:
-        return ""
-    if os.environ.get("TF_CLEAR_CACHE_AFTER_REQUEST", "1") != "0":
-        mx.clear_cache()
-    gib = 1024**3
-    return (f" mlx=(active {mx.get_active_memory() / gib:.1f} GiB, cache {mx.get_cache_memory() / gib:.1f} GiB, "
-            f"peak {mx.get_peak_memory() / gib:.1f} GiB)")
-
-
 class ChatApp(RequestOptions):
     """One model behind the OpenAI endpoint (``server.http.make_handler``)."""
 
@@ -586,8 +569,7 @@ class ChatApp(RequestOptions):
                 f"hits={store.hits} misses={store.misses} evictions={store.evictions})"
                 if store is not None
                 else "checkpoints=off"
-            )
-            + _mlx_memory_note(),
+            ),
             flush=True,
         )
         return reply
