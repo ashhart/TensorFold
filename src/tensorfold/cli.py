@@ -430,15 +430,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     model_dir = hub.resolve(args.model, required_files=required_files)
     if needs_full_snapshot and check is not None:
         check(model_dir)                         # checks that need the complete index, such as an MTP head
-    if backend == "cuda":
-        return _serve_cuda(args, family, model_dir, context)
-    for key, value in getattr(family.package, "MLX_ENV", {}).items():
-        os.environ.setdefault(key, value)       # before MLX starts: it reads them once
 
     # `kill -USR1 <pid>` prints every thread's Python stack: the way to see where a silent server waits
     import faulthandler
 
     faulthandler.register(signal.SIGUSR1, all_threads=True)
+    if backend == "cuda":
+        return _serve_cuda(args, family, model_dir, context)
+    for key, value in getattr(family.package, "MLX_ENV", {}).items():
+        os.environ.setdefault(key, value)       # before MLX starts: it reads them once
     import mlx.core as mx
 
     from tensorfold.server.memory_budget import PROCESS_BYTES, budget_ceiling, configure_mlx, model_fraction, raise_hint
