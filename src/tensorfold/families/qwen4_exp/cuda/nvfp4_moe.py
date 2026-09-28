@@ -17,18 +17,16 @@ convention: 0..E-1 routed, E the shared one.
 The serving path is the single row-invariant ``nvfp4.matmul``: which rows go to which expert is data, and
 a row's bits depend only on its own input, never on the window it was drafted in — the same contract
 ``tests/cuda/test_flashnext_nvfp4.py`` checks kernel-first, the way ``adding-a-cuda-family.md`` asks.
-``gateup_out`` / ``down_out`` take the rows grouped per expert (``groups``: the distinct expert ids in
-increasing order, ``perm``: flat row*32 + slot codes per group in expert order, padded with -1 — what
-``moe.select`` builds) and write each row back at its own code:
+``gateup_out`` / ``down_out`` take the engine's ``Plan`` (item list, members and counts on the device) and
+write each row back at its own member index:
 
     gate/up: act = silu(bf16(x @ gate.T)) * (x @ up.T)      (the checkpoint's gate and up, one grid)
     down:    y   = act @ down.T                             (fp32 sums: the combine adds the slots in order)
 
 ``moe`` is the full step (router, selection, the grouped experts, the shared expert with its sigmoid
 gate) into the qmm ``MoEBuffers`` contract: ``y`` [R, slots, D] fp32 with slot k the shared expert,
-``wts`` the routed weights then the shared gate. The grouped loop is one ``nvfp4.matmul`` per distinct
-expert — the same per-row arithmetic as the one-expert path; the flat batched kernel joins when it
-measures faster on Spark.
+``wts`` the routed weights then the shared gate. The flat grouped kernels (`nvfp4_grouped`) resolve the
+plan on the device so a CUDA-graph capture accepts the step.
 """
 
 from __future__ import annotations
@@ -171,22 +169,13 @@ class MoE4:
             if codes.numel():
                 yield e, codes // 32
 
-    def gateup_out(self, x: torch.Tensor, groups: torch.Tensor, perm: torch.Tensor,
-                   act: torch.Tensor, top_k: int) -> torch.Tensor:
-        """The gate/up step writing at the flat codes (row * 32 + slot) into act [R, slots, NI] bf16 (the
-        engine's buffers); the shared expert's slot filled for every row from its BF16 tables."""
+    def gateup_out(self, x: torch.Tensor, plan, act: torch.Tensor, top_k: int) -> torch.Tensor:
+        """The gate/up step for every plan item into act [R, slots, NI] bf16; the shared expert's slot is
+        filled for every row from its BF16 tables. The plan's item list stays on the device."""
 
         ni = self.width
         slots = act.shape[1]
         flat = act.reshape(-1, ni)
-        for u in range(int(groups.shape[0])):
-            e = int(groups[u])
-            if e == self.count - 1:
-                continue
-            codes = perm[u]
-            codes = codes[codes >= 0]
-            if codes.numel():
-                flat[self._dest(codes, slots)] = self.gateup_rows(x[codes // 32], e)
         nvfp4_grouped.gateup(self.gate_up, x, flat, plan, ni, slots)
         out, part = self.shared_out(x, self.shared.gu)
         g = nvfp4.matmul(x, self.shared.gu, out=out, part=part)
@@ -196,31 +185,14 @@ class MoE4:
                          * up).to(torch.bfloat16)
         return act
 
-    def down_out(self, act: torch.Tensor, groups: torch.Tensor, perm: torch.Tensor,
-                 y: torch.Tensor, top_k: int) -> torch.Tensor:
-        """The down step writing at the flat codes into y [R, slots, D] fp32 (the combine adds the slots
-        in order); the shared expert's slot for every row. The down outputs are fp32 sums."""
     def down_out(self, act: torch.Tensor, plan, y: torch.Tensor, top_k: int) -> torch.Tensor:
-        """The down step writing at the plan's member indices into y [R, slots, D] (the combine adds the
-        slots in order; a prefill buffer's bf16 slots round each sum once, so the fp32 sum is rounded into
-        the slot's own dtype — a decode plan's slots are fp32). The shared expert's slot for every row."""
+        """The down step for every plan item into y [R, slots, D] (the combine adds the slots in order; a
+        prefill buffer's bf16 slots round each sum once, so the fp32 sum is rounded into the slot's own
+        dtype — a decode plan's slots are fp32). The shared expert's slot for every row."""
 
         d, ni = self.dims, self.width
         slots = y.shape[1]
         flat = y.reshape(-1, d)
-        for u in range(int(groups.shape[0])):
-            e = int(groups[u])
-            if e == self.count - 1:
-                continue
-            codes = perm[u]
-            codes = codes[codes >= 0]
-            if codes.numel():
-                dest = self._dest(codes, slots)
-                flat[dest] = nvfp4.matmul(act.reshape(-1, ni)[dest], self._expert(e).down, f32=True)
-        y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True)
-        for e, dest in self.items(plan):
-            flat[dest] = nvfp4.matmul(act.reshape(-1, ni)[dest], self._expert(e).down,
-                                      f32=True).to(flat.dtype)
         nvfp4_grouped.down(self.down_proj, act.reshape(-1, ni), flat, plan, slots)
         out, part = self.shared_out(act[:, top_k], self.shared.down, f32=True)
         y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True, out=out, part=part).to(y.dtype)
@@ -310,17 +282,14 @@ def moe(x: torch.Tensor, xs: torch.Tensor, router_rows: torch.Tensor, ex: MoE4, 
     shared gate's sigmoid). ``xs`` (the 32-group sums) is unused: NVFP4 has no biases, the format is
     purely multiplicative."""
 
-    from . import moe as moe_mod
+    from tensorfold.cuda import moe as moe_mod
 
     rows = x.shape[0]
     top_k = int(cfg.num_experts_per_tok)
     moe_mod.router(x, router_rows, buf.logits[:rows])
     moe_mod.select(buf.logits[:rows], buf, top_k, ex.routed)
-    group = buf.group
-    used = int(group.count[0])
-    ids, members = group.ids[:used], group.members[:used]
-    ex.gateup_out(x, ids, members, buf.act[:rows], top_k)
-    ex.down_out(buf.act[:rows], ids, members, buf.y[:rows], top_k)
+    ex.gateup_out(x, buf.plan, buf.act[:rows], top_k)
+    ex.down_out(buf.act[:rows], buf.plan, buf.y[:rows], top_k)
     sg = buf.logits[:rows, ex.routed].to(torch.bfloat16).to(torch.float32)
     buf.wts[:rows, top_k] = (1.0 / (1.0 + torch.exp(-sg))).to(torch.bfloat16).to(torch.float32)
     return buf
