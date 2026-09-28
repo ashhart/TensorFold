@@ -177,34 +177,86 @@ def test_mtp_drafts_change_speed_only(checkpoint):
     assert c.emitted == b.emitted
 
 
-def test_lane_engine_resumes_from_a_grid_checkpoint(checkpoint, tmp_path):
-    """A grid checkpoint, in memory or read back from disk, resumes exactly like a fresh prefill of the whole prompt."""
+@pytest.mark.parametrize(("grid", "length", "cut", "kept"), [(8, 30, 26, 24), (32, 100, 80, 64)])
+def test_lane_engine_resumes_from_a_chunk_start(checkpoint, tmp_path, grid, length, cut, kept):
+    """A checkpoint at a chunk start, in memory or read back from disk, resumes exactly like a fresh prefill."""
 
     from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.engine.prefill_plan import PrefillPlan
     from tensorfold.engine.prefix_snapshots import load_snapshot, save_snapshot
 
     model = backbone(checkpoint)
     runtime = GLMFlash(model, glm_mtp.load(model), drafts=2)
-    prompt = tokens(30, seed=5)
+    prompt = tokens(length, seed=5)
 
     def run(ids, **kw):
         engine = LaneEngine(runtime)
-        engine.prefill_align = 8
+        engine.prefill_plan = PrefillPlan(grid)                     # 32-row chunks take the prompt path, 8-row decode's
         stream = LaneStream(stream_id="x", prompt_ids=list(ids), max_new_tokens=8)
         engine.add_stream(stream, **kw)
         while engine.active_count:
             engine.step()
         return stream
 
-    first = run(prompt[:26], checkpoints_at=(26,))
+    first = run(prompt[:cut], checkpoints_at=(cut,))
     prefix, cache = first.history_checkpoints[0]
-    assert prefix == prompt[:24]                                   # the checkpoint moves to the grid
+    assert prefix == prompt[:kept]                                 # the checkpoint moves to a chunk start
     path = save_snapshot(tmp_path, "glm-test", prefix, cache)
     got_tokens, stored = load_snapshot(path, "glm-test")
     assert got_tokens == prefix
     fresh = run(prompt).emitted
-    assert run(prompt, cache=LaneEngine.copy_single_cache(cache), cached_tokens=24).emitted == fresh
-    assert run(prompt, cache=LaneEngine.copy_single_cache(stored), cached_tokens=24).emitted == fresh
+    assert run(prompt, cache=LaneEngine.copy_single_cache(cache), cached_tokens=kept).emitted == fresh
+    assert run(prompt, cache=LaneEngine.copy_single_cache(stored), cached_tokens=kept).emitted == fresh
+
+
+@pytest.mark.parametrize("device", ["cpu", "gpu"])
+@pytest.mark.parametrize("length", [20, 33, 70, 131, 200])
+def test_prefill_resumed_at_every_grid_point_has_a_fresh_prefills_bits(checkpoint, monkeypatch, device, length):
+    """Chunks on a 32-row grid (sub-chunks of 12 queries): a prompt resumed at any grid point gets fresh bits."""
+
+    from tensorfold.engine.lane_engine import LaneEngine
+    from tensorfold.families.glm5_next import mla
+
+    if device == "gpu":
+        if not mx.metal.is_available():
+            pytest.skip("needs Metal")
+        mx.set_default_device(mx.gpu)
+    monkeypatch.setattr(mla, "PREFILL_QUERIES", 12)
+    model, prompt, grid = backbone(checkpoint), tokens(length, seed=7), 32
+
+    def feed(ids, cache):
+        for b in range(0, len(ids), grid):
+            out = model.hidden(mx.array([ids[b:b + grid]], dtype=mx.uint32), cache)
+            mx.eval(out)
+        return np.array(model.head(out[:, -1:]).astype(mx.float32))
+
+    fresh = feed(prompt, model.make_cache())
+    for at in range(grid, length, grid):
+        cache = model.make_cache()
+        feed(prompt[:at], cache)
+        assert np.array_equal(feed(prompt[at:], LaneEngine.copy_single_cache(cache)), fresh), at
+
+
+def test_prompt_attention_matches_the_decode_path(checkpoint):
+    """Prompt chunks attend over the keys each query's decode step would choose (bits aside: the paths differ)."""
+
+    from tensorfold.families.glm5_next import config as C
+    from tensorfold.families.glm5_next.mla import MLA
+
+    model = backbone(checkpoint)
+    attn = next(layer.attn for layer in model.layers if isinstance(layer.attn, MLA))
+    mx.random.seed(3)
+    x = (0.5 * mx.random.normal((200, TEXT["hidden_size"]))).astype(mx.bfloat16)
+
+    def run(chunk):
+        cache, outs = caches.MLACache(), []
+        for s in range(0, 200, chunk):
+            part = x[s:s + chunk]
+            outs.append(attn(part, [cache], (int(part.shape[0]),), int(part.shape[0]) <= C.DECODE_ROWS))
+        return np.array(mx.concatenate(outs).astype(mx.float32))
+
+    prompt, steps = run(40), run(1)
+    assert np.abs(prompt - steps).max() < 0.1 * np.abs(steps).max()
 
 
 @pytest.mark.parametrize("device", ["cpu", "gpu"])

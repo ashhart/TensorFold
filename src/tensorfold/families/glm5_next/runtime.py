@@ -32,6 +32,8 @@ class GLMFlash:
     speculate_early = True
     # streams in one shared forward (each takes a row at least); its rows are ``batch_rows``, the widest exact window
     max_streams = DECODE_ROWS
+    # False when a forward over several streams' rows misses a stream's own bits: the engine then shares no round
+    streams_exact = True
 
     def __init__(self, model: GLM5, head: Any | None = None, *, drafts: int = 1, check: bool = True) -> None:
         self.model = model
@@ -48,6 +50,7 @@ class GLMFlash:
                   f"({self.check_report}): no drafts", flush=True)
         elif check and not self.check_streams():
             self.max_streams = 1
+            self.streams_exact = False
             print("[glm5] a forward over several streams' rows does not reproduce each stream's own call here: one "
                   "stream a forward", flush=True)
         self._rows: mx.array | None = None
@@ -131,10 +134,10 @@ class GLMFlash:
 
     @property
     def prefill_workspace_per_token(self) -> int:
-        """Prefill bytes a position of context: sparse attention's per-head keys and values, a query chunk's scores."""
+        """Prefill bytes a position of context: two live copies of a query chunk's per-head indexer scores (bf16)."""
 
         a = self.args
-        return a.num_attention_heads * (a.qk_nope_head_dim + a.v_head_dim) * 2 + 2 * a.num_attention_heads * PREFILL_QUERIES * 4
+        return PREFILL_QUERIES * (2 * a.index_n_heads * 2 + 10) // a.index_kpool
 
     # -- drafting ---------------------------------------------------------------------
     def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any], start: int = 0) -> None:

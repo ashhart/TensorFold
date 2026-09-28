@@ -14,7 +14,7 @@ from tensorfold.kernels.glm.flash.v1 import kernels as K
 from tensorfold.kernels.glm.flash.v1 import sparse_attention as SA
 
 
-# query rows a prefill attention call scores at once against every key so far
+# prompt queries attended at once, each over the ~2,051 keys it gathers from the latent cache
 PREFILL_QUERIES = 512
 
 
@@ -70,16 +70,6 @@ class MLA:
         wv = self.wv
         return mx.quantized_matmul(out, wv.weight, wv.scales, wv.biases, transpose=True, group_size=wv.group,
                                    bits=wv.bits)
-
-    def keys_values(self, lat: mx.array) -> tuple[mx.array, mx.array]:
-        """Per-head keys and values [H, n, 256] of latent keys [n, rank] (prefill)."""
-
-        wk, wv = self.wk, self.wv
-        k = mx.quantized_matmul(lat[None], wk.weight, wk.scales, wk.biases, transpose=True, group_size=wk.group,
-                                bits=wk.bits)
-        v = mx.quantized_matmul(lat[None], wv.weight, wv.scales, wv.biases, transpose=True, group_size=wv.group,
-                                bits=wv.bits)
-        return k, v
 
     def index_scores(self, iq: mx.array, iw: mx.array, pool: mx.array) -> mx.array:
         """Block scores [n, P] = sum over indexer heads of w_h relu(q_h . pool) (iq [n, HI, DI], iw [n, HI])."""
@@ -147,9 +137,6 @@ class MLA:
                                               iw if one else iw[span], cache, start))
             elif decode:
                 outs += [self._decode_row(q[at + r], iq[at + r], iw[at + r], cache, start + r) for r in range(n)]
-            elif C.PREFILL_MODE == "absorbed":
-                outs.append(self._prefill_absorbed(q if one else q[span], iq if one else iq[span],
-                                                   iw if one else iw[span], cache, start))
             else:
                 outs.append(self._prefill(q if one else q[span], iq if one else iq[span], iw if one else iw[span],
                                           cache, start))
@@ -264,11 +251,8 @@ class MLA:
             out = self._attend(ql, iq, iw, cache, position)
         return self.unabsorb(out[0]).reshape(1, -1)                      # [1, H v]
 
-    def _prefill_absorbed(self, q: mx.array, iq: mx.array, iw: mx.array, cache: MLACache, start: int,
-                          chunk: int = 512) -> mx.array:
-        """Prefill attention the way the decode path attends (``_attend``): queries absorbed into the latent space,
-        each query over ITS keys — the indexer's best ``index_topk`` keys plus its unfinished tail past
-        ``index_topk`` keys, all of them before — gathered from the latent cache, values un-absorbed after."""
+    def _prefill(self, q: mx.array, iq: mx.array, iw: mx.array, cache: MLACache, start: int) -> mx.array:
+        """Prompt rows as decode attends: absorbed queries over their own keys in the latent cache, flat in context."""
 
         cfg = self.cfg
         rows = int(q.shape[0])
@@ -276,6 +260,7 @@ class MLA:
         width = cfg.index_topk + (kp - 1 if cfg.index_tail else 0)
         rank = int(cache.keys.shape[1])
         ql_all = self.absorb(q.transpose(1, 0, 2))                       # [H, rows, rank]
+        chunk = PREFILL_QUERIES
         outs = []
         for c0 in range(0, rows, chunk):
             c1 = min(c0 + chunk, rows)
@@ -308,52 +293,10 @@ class MLA:
             w = int(ids.shape[1])
             keys = mx.take(cache.keys[:last], mx.where(valid_sel, ids, 0).reshape(-1), axis=0).reshape(c, w, rank)
             ql = ql_all[:, c0:c1].transpose(1, 0, 2)                      # [c, H, rank]
+            # two batched matmuls, scores in fp32: one attention call per query would reread its keys for every head
             s = mx.matmul(ql, keys.transpose(0, 2, 1)).astype(mx.float32) * self.scale   # [c, H, w]
             s = mx.where(valid_sel[:, None, :], s, mx.array(-1e30, mx.float32))
             p = mx.softmax(s, axis=-1)
             outs.append(mx.matmul(p.astype(keys.dtype), keys))              # [c, H, rank]
         att = mx.concatenate(outs) if len(outs) > 1 else outs[0]             # [rows, H, rank]
         return self.unabsorb(att.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(rows, -1)
-
-    def _prefill(self, q: mx.array, iq: mx.array, iw: mx.array, cache: MLACache, start: int,
-                 chunk: int = PREFILL_QUERIES) -> mx.array:
-        cfg = self.cfg
-        rows = int(q.shape[0])
-        end = start + rows
-        k, v = self.keys_values(cache.keys[:end])                       # [H, end, 256]
-        qh = q.transpose(1, 0, 2)                                       # [H, rows, nope]
-        kp = cfg.index_kpool
-        outs = []
-        for c0 in range(0, rows, chunk):
-            c1 = min(c0 + chunk, rows)
-            pos = mx.arange(start + c0, start + c1)                     # query positions
-            last = start + c1                                           # keys this chunk reads: [0, last)
-            key_pos = mx.arange(last)
-            causal = key_pos[None] <= pos[:, None]
-            if last > cfg.index_topk:
-                blocks = last // kp
-                scores = self.index_scores(iq[c0:c1], iw[c0:c1], cache.pool[:blocks])      # [c, P]
-                valid = (mx.arange(blocks)[None] * kp + kp - 1) <= pos[:, None]
-                scores = mx.where(valid, scores, mx.array(-1e30, scores.dtype))
-                top = min(cfg.index_topk // kp, blocks)
-                pick = mx.argpartition(-scores, kth=top - 1, axis=-1)[..., :top]
-                picked_valid = mx.take_along_axis(valid, pick, axis=-1)
-                block_of_key = key_pos // kp
-                chosen = mx.zeros((c1 - c0, blocks + 1), dtype=mx.bool_)
-                safe = mx.where(picked_valid, pick, blocks)
-                chosen = mx.put_along_axis(chosen, safe, mx.array(True), axis=-1)[:, :blocks]
-                in_block = mx.take(chosen, mx.minimum(block_of_key, blocks - 1), axis=1) & (block_of_key[None] < blocks)
-                tail_start = pos + 1 - (pos + 1) % kp
-                in_tail = (key_pos[None] >= tail_start[:, None]) & causal
-                if not cfg.index_tail:
-                    in_tail = mx.zeros_like(in_tail)
-                # queries with at most index_topk keys read them all (every block of theirs is chosen)
-                dense = (pos + 1 <= cfg.index_topk)[:, None]
-                mask = mx.where(dense, causal, (in_block & causal) | in_tail)
-            else:
-                mask = causal
-            o = mx.fast.scaled_dot_product_attention(qh[None, :, c0:c1], k[None, :, :last], v[None, :, :last],
-                                                     scale=self.scale, mask=mask[None, None])
-            outs.append(o[0].transpose(1, 0, 2).reshape(c1 - c0, -1))
-        return mx.concatenate(outs) if len(outs) > 1 else outs[0]
-

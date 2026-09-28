@@ -137,6 +137,12 @@ def kernel_version(model: Any) -> str:
     return f"{MODEL_TYPES[0]}-{KERNEL_VERSION}-" + digest.hexdigest()[:12]
 
 
+def memory_fraction(ram_bytes: int) -> float | None:
+    """85% of RAM on a Mac of 256 GB or less, approved for this checkpoint with nothing else loaded."""
+
+    return 0.85 if ram_bytes <= 256 * 1024**3 else None
+
+
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size); EXL3 checkpoints are checked above
 CUDA_QUANTIZATION = (4, 64)
 

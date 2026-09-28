@@ -66,6 +66,14 @@ def test_prompt_admission_takes_the_models_prefill_workspace():
 
 def test_glm_states_its_prefill_workspace(tmp_path):
     runtime = GLMFlash(weights.load_backbone(write_checkpoint(tmp_path / "glm5")), check=False)
-    heads, keys, values = TEXT["num_attention_heads"], TEXT["qk_nope_head_dim"], TEXT["v_head_dim"]
-    # per-head keys and values of every position (bf16), fp32 scores and probabilities of a 512-query chunk
-    assert runtime.prefill_workspace_per_token == heads * (keys + values) * 2 + 2 * heads * 512 * 4
+    # a 512-query chunk's indexer scores per head (bf16, two live copies) and its selection arrays, a block of 4
+    assert runtime.prefill_workspace_per_token == 512 * (2 * TEXT["index_n_heads"] * 2 + 10) // TEXT["index_kpool"]
+
+
+def test_glm_states_its_allowance_for_a_256_gb_mac():
+    from tensorfold.families import glm5_next
+    from tensorfold.server.memory_budget import model_fraction
+
+    gib = 1024**3
+    assert model_fraction(glm5_next, 256 * gib) == 0.85
+    assert model_fraction(glm5_next, 512 * gib) == 0.70

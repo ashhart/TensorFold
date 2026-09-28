@@ -348,7 +348,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     return 0
 
 
-# Admit concurrent requests within this RAM fraction after accounting for the rest of the machine.
+# Admit concurrent requests within this RAM fraction, or the family's, after the rest of the machine.
 MEMORY_FRACTION = 0.70
 # a resume point begins a prompt chunk when at least this many tokens follow the last chunk start
 MIN_CHUNK = 256
@@ -403,23 +403,29 @@ def cmd_serve(args: argparse.Namespace) -> int:
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     import mlx.core as mx
 
-    from tensorfold.server.memory_budget import PROCESS_BYTES, configure_mlx
+    from tensorfold.engine.memory import used_elsewhere
+    from tensorfold.server.memory_budget import PROCESS_BYTES, configure_mlx, model_fraction
 
-    memory_limit = configure_mlx(mx, int(float(args.mlx_cache_gib) * 1024**3))
+    fraction = model_fraction(family.package)
+    elsewhere = used_elsewhere(0) if fraction > MEMORY_FRACTION else 0     # an allowance takes only what is left
+    memory_limit = configure_mlx(mx, int(float(args.mlx_cache_gib) * 1024**3), fraction=fraction, elsewhere=elsewhere)
     gib = 1024**3
-    print(f"[tensorfold] memory budget {memory_limit / gib:.1f} GiB: MLX's buffers up to "
+    note = (f" ({fraction:.0%} of RAM, this model's allowance, less {elsewhere / gib:.1f} GiB in use elsewhere)"
+            if fraction > MEMORY_FRACTION else "")
+    print(f"[tensorfold] memory budget {memory_limit / gib:.1f} GiB{note}: MLX's buffers up to "
           f"{(memory_limit - PROCESS_BYTES) / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB for the rest of the process",
           flush=True)
     weights = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
     if weights >= memory_limit - PROCESS_BYTES:
         raise ValueError(f"{family.title}'s weights ({weights / gib:.1f} GiB) do not fit this server's "
-                         f"{memory_limit / gib:.1f} GiB memory budget (70% of RAM, or TENSORFOLD_MEMORY_LIMIT_GB): "
-                         "serve it on a Mac with more memory, or use a smaller or more quantized checkpoint")
-    return _serve_mlx(args, family, model_dir, context, required_files, memory_limit)
+                         f"{memory_limit / gib:.1f} GiB memory budget ({fraction:.0%} of RAM, or "
+                         "TENSORFOLD_MEMORY_LIMIT_GB): serve it on a Mac with more memory, or use a smaller or more "
+                         "quantized checkpoint")
+    return _serve_mlx(args, family, model_dir, context, required_files, memory_limit, fraction)
 
 
 def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: int,
-               required_files: Any, memory_limit: int) -> int:
+               required_files: Any, memory_limit: int, fraction: float = MEMORY_FRACTION) -> int:
     import mlx.core as mx
     from tensorfold import families, hub
     from tensorfold.engine.lane_engine import LaneEngine
@@ -474,7 +480,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         model_aliases=list(args.alias),
         engine_factory=engine_factory,
         lanes=parallel,
-        memory_fraction=MEMORY_FRACTION if parallel > 1 else None,
+        memory_fraction=fraction if parallel > 1 else None,
         max_rows=int(engine_kwargs.get("max_rows", 16)),
         max_draft=int(engine_kwargs.get("max_draft", 32)),
         default_max_tokens=int(args.max_tokens),

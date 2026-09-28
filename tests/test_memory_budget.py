@@ -323,3 +323,59 @@ def test_growth_is_reserved_for_entries_in_flight_not_a_second_copy_of_every_lay
     single = CacheMemory.from_cache([layers[0], recurrent])
     assert single.growth_bytes(1000) == fixed + 1024 * entry            # never more than the whole cache
     assert CacheMemory(10, 8, 256).growth_bytes(256) == 10 + 256 * 8    # a size reported without entries: all of it
+
+
+def test_a_family_allowance_sets_the_budget_less_what_else_is_loaded():
+    from tensorfold.server.memory_budget import model_fraction
+
+    mx = SimpleNamespace(device_info=lambda: {"max_recommended_working_set_size": 240 * GIB})
+    ram = 256 * GIB
+    assert memory_limit_bytes(mx, environ={}, physical_bytes=ram) == int(0.70 * ram)
+    assert memory_limit_bytes(mx, fraction=0.85, environ={}, physical_bytes=ram) == int(0.85 * ram)
+    # another model's memory comes out of the allowance, 8% of RAM stays free, and the default is the floor
+    trimmed = memory_limit_bytes(mx, fraction=0.85, elsewhere=40 * GIB, environ={}, physical_bytes=ram)
+    assert trimmed == ram - 40 * GIB - int(0.08 * ram)
+    assert memory_limit_bytes(mx, fraction=0.85, elsewhere=100 * GIB, environ={}, physical_bytes=ram) == int(0.70 * ram)
+    assert model_fraction(SimpleNamespace(), ram) == 0.70
+    assert model_fraction(SimpleNamespace(memory_fraction=lambda ram: 0.85 if ram <= 256 * GIB else None), ram) == 0.85
+    assert model_fraction(SimpleNamespace(memory_fraction=lambda ram: 0.85 if ram <= 256 * GIB else None),
+                          512 * GIB) == 0.70
+
+
+def test_serve_applies_the_family_allowance_before_loading(monkeypatch, tmp_path):
+    from tensorfold.engine import memory
+    from tensorfold.server import memory_budget
+
+    calls = []
+    core = ModuleType("mlx.core")
+    core.set_cache_limit = lambda value: calls.append(("cache", value))
+    core.set_memory_limit = lambda value: calls.append(("memory", value))
+    core.device_info = lambda: {"max_recommended_working_set_size": 240 * GIB}
+    mlx = ModuleType("mlx")
+    mlx.core = core
+    monkeypatch.setitem(sys.modules, "mlx", mlx)
+    monkeypatch.setitem(sys.modules, "mlx.core", core)
+    monkeypatch.delenv("TENSORFOLD_MEMORY_LIMIT_GB", raising=False)
+    monkeypatch.setattr("faulthandler.register", lambda *args, **kwargs: None)
+    monkeypatch.setattr(memory_budget, "physical_memory_bytes", lambda: 256 * GIB)
+    monkeypatch.setattr(memory, "used_elsewhere", lambda own: 10 * GIB)
+    for name, value in (("_config_dir", lambda model: tmp_path), ("_model_context", lambda path: 262144),
+                        ("_backend", lambda *args: "mlx"), ("_note_untested", lambda *args: None),
+                        ("_drafter", lambda *args: "")):
+        monkeypatch.setattr(cli, name, value)
+    monkeypatch.setattr(families, "require_readable", lambda *args: None)
+    monkeypatch.setattr(families, "read_config", lambda *args: {})
+    monkeypatch.setattr(hub, "is_repo_id", lambda model: False)
+    monkeypatch.setattr(hub, "resolve", lambda *args, **kwargs: tmp_path)
+
+    class LoadingReached(Exception):
+        pass
+
+    def load(*args, **kwargs):
+        raise LoadingReached
+
+    package = SimpleNamespace(load=load, memory_fraction=lambda ram: 0.85)
+    monkeypatch.setattr(families, "detect", lambda path: SimpleNamespace(title="f", model_type="f", package=package))
+    with pytest.raises(LoadingReached):
+        cli.cmd_serve(cli.build_parser().parse_args(["serve", str(tmp_path), "--no-update-check"]))
+    assert ("memory", int(0.85 * 256 * GIB) - memory_budget.PROCESS_BYTES) in calls      # MLX gets the rest

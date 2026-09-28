@@ -9,6 +9,8 @@ from typing import Any, Mapping, Sequence
 
 GIB = 1024**3
 MEMORY_FRACTION = 0.70
+# a family's larger allowance counts only memory the rest of the machine leaves, keeping this share of RAM free
+FREE_FLOOR = 0.08
 LIMIT_ENV = "TENSORFOLD_MEMORY_LIMIT_GB"
 # the process's memory outside MLX's buffers and Metal's late returns
 PROCESS_BYTES = 3 * GIB
@@ -37,12 +39,23 @@ def process_footprint() -> int | None:
     return int(info.footprint)
 
 
-def memory_limit_bytes(mx: Any, *, environ: Mapping[str, str] | None = None,
-                       physical_bytes: int | None = None) -> int:
+def model_fraction(package: Any, ram: int | None = None) -> float:
+    """The share of RAM a family's model may use on this Mac: its stated allowance, else ``MEMORY_FRACTION``."""
+
+    hook = getattr(package, "memory_fraction", None)
+    allowance = hook(physical_memory_bytes() if ram is None else int(ram)) if callable(hook) else None
+    return float(allowance) if allowance else MEMORY_FRACTION
+
+
+def memory_limit_bytes(mx: Any, *, fraction: float = MEMORY_FRACTION, elsewhere: int = 0,
+                       environ: Mapping[str, str] | None = None, physical_bytes: int | None = None) -> int:
     ram = physical_memory_bytes() if physical_bytes is None else int(physical_bytes)
     if ram <= 0:
         raise ValueError("physical memory must be positive")
-    limit = int(MEMORY_FRACTION * ram)
+    limit = int(fraction * ram)
+    if fraction > MEMORY_FRACTION:
+        room = ram - int(elsewhere) - int(FREE_FLOOR * ram)
+        limit = max(int(MEMORY_FRACTION * ram), min(limit, room))
     device_info = getattr(mx, "device_info", None)
     if device_info is None:
         device_info = getattr(getattr(mx, "metal", None), "device_info", None)
@@ -197,4 +210,4 @@ def largest_context(memory: CacheMemory, window_tokens: int, *, budget_bytes: in
 
 
 __all__ = ["PROCESS_BYTES", "CacheMemory", "cache_nbytes", "configure_mlx", "fits", "largest_context",
-           "memory_limit_bytes", "needed_bytes", "process_footprint"]
+           "memory_limit_bytes", "model_fraction", "needed_bytes", "process_footprint"]
