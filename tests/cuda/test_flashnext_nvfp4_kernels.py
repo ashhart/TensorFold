@@ -33,6 +33,25 @@ def test_b16_matmul_is_row_invariant():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+@pytest.mark.parametrize("heads,dh", [(2, 32), (16, 160)])
+def test_ple_embed_bf16_places_the_rows_and_sums_them(heads: int, dh: int) -> None:
+    """A bf16 table's rows reach the embedding as they ship: row r * heads + h lands in OUT's h-th slice of row
+    r and every group of 32 carries its sum -- the 4-bit kernel's contract without the unpacking."""
+
+    from tensorfold.families.qwen4_exp.cuda import glue
+
+    torch.manual_seed(2)
+    dev, rows = "cuda", 5
+    values = (torch.randn(rows * heads, dh, device=dev) * 0.5).to(torch.bfloat16)
+    out = torch.empty((rows, heads * dh), dtype=torch.bfloat16, device=dev)
+    xs = torch.empty((rows, heads * dh // 32), dtype=torch.float32, device=dev)
+    glue.ple_embed_bf16(rows, values, heads, dh, out, xs)
+    want = values.view(rows, heads * dh)
+    assert torch.equal(out, want)
+    assert torch.equal(xs, want.float().view(rows, heads * dh // 32, 32).sum(-1))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 def test_b16_matmul_matches_reference():
     torch.manual_seed(1)
     dev = "cuda"

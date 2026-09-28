@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from ..host_table import HostTable, read_header as _header
+from ..host_table import BF16Table, HostTable, read_header as _header
 from ..ssd_table import SSDTable
 from .bf16 import b16_from_rows, make_b16, quantize4, stack_b16
 from .ngram import NGram
@@ -177,7 +177,7 @@ class MoEW:
 
 @dataclass
 class PLEW:
-    table: HostTable | SSDTable   # the 128 shards: host memory map, or read from SSD at each lookup
+    table: HostTable | SSDTable | BF16Table   # the 128 shards: host memory map, SSD at each lookup, or bf16 rows
     key: Q4                   # [S*D, ple_dim]
     value: Q4                 # [D, ple_dim]
     norm_key: torch.Tensor    # [S*D] fp32
@@ -451,16 +451,16 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                      o)
 
     def ple_nvfp4(name: str, ple_index: int) -> PLEW:
-        """A PLE layer from the NVFP4 checkpoint: the n-gram shards ride the MLX 4-bit layout (weight, scales
-        and biases per shard, HostTable reads them as-is) and key/value/norms/conv are BF16. The published
-        checkpoint instead ships its table as BF16 rows with no per-shard scales, so the load stops here;
-        the routed experts and every other linear read as they ship."""
+        """A PLE layer from the NVFP4 checkpoint: the n-gram shards are the published revision's bf16 rows, or
+        the MLX 4-bit words with a scale and bias every 32 where a conversion kept that layout; key/value/norms
+        and the conv are BF16 either way."""
 
         ngram = cfg.ngram(ple_index)
         base = name + ".ple_embedding."
         ngram.check(raw(base + "layer_multipliers").cpu().numpy(), raw(base + "ngram_heads_offsets").cpu().numpy(),
                     raw(base + "ngram_heads_vocab_sizes").cpu().numpy())
-        files = []
+        files: list = []
+        plain: list[tuple[Path, dict]] = []
         headers: dict[str, dict] = {}
         for i in range(cfg.ngram_shards):
             key = prefix + base + f"ngram_embedding.shard_{i}"
@@ -468,8 +468,19 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             if shard not in headers:
                 headers[shard] = _header(model_dir / shard)
             h = headers[shard]
-            files.append((model_dir / shard, h[key + ".weight"], h[key + ".scales"], h[key + ".biases"]))
-        table = HostTable(files)
+            if key + ".scales" in h:                       # 4-bit words, scale and bias every 32 values
+                files.append((model_dir / shard, h[key + ".weight"], h[key + ".scales"], h[key + ".biases"]))
+            else:                                          # bf16 rows, as the published revision ships them
+                plain.append((model_dir / shard, h[key + ".weight"]))
+        if len(files) not in (0, cfg.ngram_shards) or len(plain) not in (0, cfg.ngram_shards):
+            raise ValueError("the n-gram shards mix the 4-bit and the bf16 layouts")
+        table: HostTable | BF16Table
+        if plain:
+            table = BF16Table(plain)
+            if table.width != ngram.dims:
+                raise ValueError(f"the n-gram rows hold {table.width} values, expected {ngram.dims}")
+        else:
+            table = HostTable(files)
         if table.rows != ngram.rows:
             raise ValueError(f"n-gram tables hold {table.rows} rows, expected {ngram.rows}")
         conv = raw(name + ".conv1d.weight").reshape(cfg.streams * cfg.hidden, cfg.ple_kernel).to(torch.bfloat16)

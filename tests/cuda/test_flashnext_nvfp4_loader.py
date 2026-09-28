@@ -10,6 +10,7 @@ import struct
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 pytest.importorskip("triton")
@@ -118,4 +119,65 @@ def _names(dir: Path) -> set[str]:
 
     index = json.loads((dir / "model.safetensors.index.json").read_text())
     return set(index["weight_map"])
+
+
+def _tensor(dir: Path, name: str) -> torch.Tensor:
+    """One tensor of a tiny checkpoint, read out of the file the index names."""
+
+    shard = dir / json.loads((dir / "model.safetensors.index.json").read_text())["weight_map"][name]
+    with open(shard, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        entry = json.loads(f.read(n))[name]
+        lo, hi = entry["data_offsets"]
+        f.seek(8 + n + lo)
+        raw = bytearray(f.read(hi - lo))
+    dtype = {"BF16": torch.bfloat16, "I32": torch.int32}[entry["dtype"]]
+    return torch.frombuffer(raw, dtype=dtype).reshape(entry["shape"])
+
+
+def test_the_loader_reads_the_published_bf16_table(tmp_path: Path) -> None:
+    """The published revision stores the n-gram table as bf16 rows with no per-shard scales and biases: the
+    loader takes that layout as it ships, and a gather hands back the checkpoint's own bytes."""
+
+    from tensorfold.families.qwen4_exp.host_table import BF16Table
+
+    tiny = write(tmp_path / "bf16", ple_bf16=True)
+    ngram = Config.read(tiny).ngram(0)
+    assert "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.scales" not in _names(tiny)
+
+    from tensorfold.families.qwen4_exp.cuda.weights import load
+
+    if not torch.cuda.is_available():                                   # the loader builds CUDA tensors
+        pytest.skip("the loader builds CUDA tensors")
+    w = load(tiny, mtp=True, draft_vocab=None)
+    ple = next(layer.ple for layer in w.layers if layer.ple is not None)
+    assert isinstance(ple.table, BF16Table), "a bf16 table must not go through the 4-bit HostTable"
+    assert (ple.table.rows, ple.table.width) == (ngram.rows, ngram.dims)
+    ids = np.array([0, 17, ngram.rows - 1, 500])
+    got = ple.table.gather(ids)
+    stored = _tensor(tiny, "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight")
+    want = stored[torch.from_numpy(ids)].view(torch.int16).numpy()
+    assert got.dtype == np.uint16 and np.array_equal(got.view(np.int16), want)
+
+
+def test_the_bf16_rows_reach_the_engine_buffers(tmp_path: Path) -> None:
+    """``stage_ple_rows`` copies a bf16 table's rows to the device buffer the PLE kernel reads, bit for bit."""
+
+    from tensorfold.families.qwen4_exp.cuda.forward import stage_ple_rows
+    from tensorfold.families.qwen4_exp.cuda.state import Buffers
+
+    tiny = write(tmp_path / "bf16-stage", ple_bf16=True)
+    ngram = Config.read(tiny).ngram(0)
+    if not torch.cuda.is_available():                                   # the loader builds CUDA tensors
+        pytest.skip("the loader builds CUDA tensors")
+    from tensorfold.families.qwen4_exp.cuda.weights import load
+
+    w = load(tiny, mtp=True, draft_vocab=None)
+    ple = next(layer.ple for layer in w.layers if layer.ple is not None)
+    b = Buffers(w, rows=3, capacity=64)
+    ids = (np.arange(3 * ngram.heads) % ngram.rows).reshape(3, ngram.heads)
+    stage_ple_rows(ple, b, ids, at=0)
+    stored = _tensor(tiny, "model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight")
+    want = stored.index_select(0, torch.from_numpy(ids.reshape(-1)))
+    assert torch.equal(b.ple_v[:ids.size].cpu(), want.cpu())
 

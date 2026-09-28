@@ -68,6 +68,7 @@ class HostTable:
         self.wbase, self.sbase, self.bbase = (np.array(x, dtype=np.int64) for x in (wbase, sbase, bbase))
         self.wrow = self.words[0].shape[1] * 4
         self.grow = self.scales[0].shape[1] * 2
+        self.nbytes = sum(a.nbytes for a in self.words + self.scales + self.biases)
         # threads start with the first threaded gather
         self._pool = ThreadPoolExecutor(GATHER_THREADS, thread_name_prefix="ngram-gather")
 
@@ -125,19 +126,70 @@ class HostTable:
     def prefetch(self, workers: int = 8) -> float:
         """Read every shard once so the lookups hit the page cache (seconds taken); the pages stay evictable."""
 
-        import time
-        from concurrent.futures import ThreadPoolExecutor
+        return _prefetch(self.words + self.scales + self.biases, workers)
 
-        def touch(arr) -> None:
-            flat = arr.reshape(-1).view(np.uint8)
-            step = 64 << 20
-            for i in range(0, flat.size, step):
-                np.asarray(flat[i:i + step]).sum(dtype=np.uint64)
 
-        t0 = time.time()
-        with ThreadPoolExecutor(workers) as pool:
-            list(pool.map(touch, self.words + self.scales + self.biases))
-        return time.time() - t0
+class BF16Table:
+    """The NVFP4 checkpoint's n-gram shards: plain bf16 rows, memory-mapped here and gathered a lookup at a time.
+
+    The published revision stores the table as ``…shard_N.weight`` bf16 ``[rows, ple_dim / heads]`` tensors with
+    no per-shard scale or bias, where the MLX-layout checkpoints pack 4-bit words plus a scale and bias every 32
+    values. The rows mean the same thing either way, so ``gather`` hands back the bf16 bits and the engine
+    dequantizes nothing.
+    """
+
+    bits = 16
+
+    def __init__(self, files: list[tuple[Path, dict]]) -> None:
+        self.values, starts = [], [0]
+        for path, weight in files:
+            if not isinstance(weight, dict) or weight.get("dtype") != "BF16":
+                raise ValueError(f"{Path(path).name}: the n-gram weights must be BF16 tensors")
+            self.values.append(_memmap(path, weight, np.uint16))
+            if self.values[-1].shape[1] != self.values[0].shape[1]:
+                raise ValueError(f"{Path(path).name}: the n-gram shards differ in row width")
+            starts.append(starts[-1] + self.values[-1].shape[0])
+        self.starts = np.array(starts, dtype=np.int64)
+        self.rows = int(self.starts[-1])
+        self.width = int(self.values[0].shape[1])       # bf16 values a row (the engine's ``dh``)
+        self.wrow = self.width * 2                      # bytes a row
+        self.nbytes = sum(a.nbytes for a in self.values)
+
+    def gather(self, ids: np.ndarray) -> np.ndarray:
+        """Rows ``ids`` (global) -> [n, W] uint16 (the bf16 bits of W values)."""
+
+        flat = np.asarray(ids, dtype=np.int64).reshape(-1)
+        if flat.size and (flat.min() < 0 or flat.max() >= self.rows):
+            raise ValueError(f"n-gram row ids must lie in [0, {self.rows})")
+        shard = np.searchsorted(self.starts, flat, side="right") - 1
+        local = flat - self.starts[shard]
+        out = np.empty((flat.size, self.width), dtype=np.uint16)
+        for f in np.unique(shard):
+            at = np.nonzero(shard == f)[0]
+            out[at] = self.values[f][local[at]]
+        return out
+
+    def lock(self) -> bool:
+        """Pin every shard's pages (mlock); False, with nothing locked, where the memory-lock limit forbids it."""
+
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.mlock.argtypes = libc.munlock.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
+        done = []
+        for arr in self.values:
+            at, size = arr.ctypes.data, arr.nbytes
+            if libc.mlock(at, size) != 0:
+                for a, n in done:
+                    libc.munlock(a, n)
+                return False
+            done.append((at, size))
+        return True
+
+    def prefetch(self, workers: int = 8) -> float:
+        """Read every shard once so the lookups hit the page cache (seconds taken); the pages stay evictable."""
+
+        return _prefetch(self.values, workers)
 
 
 class ReadAhead:
@@ -181,6 +233,24 @@ def _memmap(path: Path, entry: dict, dtype) -> np.ndarray:
     begin, end = entry["data_offsets"]
     shape = tuple(entry["shape"])
     return np.memmap(path, dtype=dtype, mode="r", offset=8 + header + begin, shape=shape)
+
+
+def _prefetch(arrays: list[np.ndarray], workers: int = 8) -> float:
+    """Read each array once so the lookups hit the page cache (seconds taken); the pages stay evictable."""
+
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    def touch(arr) -> None:
+        flat = arr.reshape(-1).view(np.uint8)
+        step = 64 << 20
+        for i in range(0, flat.size, step):
+            np.asarray(flat[i:i + step]).sum(dtype=np.uint64)
+
+    t0 = time.time()
+    with ThreadPoolExecutor(workers) as pool:
+        list(pool.map(touch, arrays))
+    return time.time() - t0
 
 
 def read_header(path: Path) -> dict:

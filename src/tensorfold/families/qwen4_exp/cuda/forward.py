@@ -68,8 +68,7 @@ def _readout(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: i
 
 
 def _readout_b16(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject) -> None:
-    """The read-out through the BF16 kernels: norm, bf16 down, the activation and inject gates (with the
-    slice sums fused), bf16 up, the mix — the plain path's steps, the same bits per row."""
+    """The read-out on the bf16 kernels: norm, down, activation and inject gates, up, the mix; same bits per row."""
 
     glue.hc_normed(h[:R], b.pss[:R], hc.scale, b.normed[:R], b.xs_normed[:R], streams, eps)
     got = bf16.matmul(b.normed[:R], hc.down.b, out=torch.empty((R, hc.down.n), dtype=torch.float32,
@@ -215,6 +214,7 @@ def ple_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int
 
     c = w.cfg
     p = layer.ple
+    assert p is not None                             # ple_block only runs on a layer that carries one
     if w.x3 is not None:                              # an EXL3 pack: the rows' codec, fp16 key/value weights
         from .exl3_mm import ple_rows
 
@@ -222,6 +222,10 @@ def ple_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int
                        w.x3.ple_emb[:R])
         _mm(emb, p.key, None, b.ple_keys[:R], b)
         _mm(emb, p.value, None, b.ple_vals[:R], b)
+    elif getattr(p.table, "bits", 4) == 16:           # the published revision's rows: bf16, nothing to unpack
+        glue.ple_embed_bf16(R, b.ple_v, p.ngram.heads, p.ngram.dims, b.ple_emb[:R], b.xs_ple[:R])
+        _mm(b.ple_emb[:R], p.key, b.xs_ple[:R], b.ple_keys[:R], b)
+        _mm(b.ple_emb[:R], p.value, b.xs_ple[:R], b.ple_vals[:R], b)
     else:
         glue.ple_embed(R, b.ple_w, b.ple_s, b.ple_b, p.ngram.heads, p.ngram.dims, b.ple_emb[:R], b.xs_ple[:R])
         _mm(b.ple_emb[:R], p.key, b.xs_ple[:R], b.ple_keys[:R], b)
@@ -236,6 +240,12 @@ def ple_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int
 def stage_ple_rows(p, b: Buffers, ids: np.ndarray, at: int = 0) -> None:
     """Copy the rows' n-gram table entries (host memory map) to the GPU buffers, from staging row ``at``."""
 
+    if getattr(p.table, "bits", 4) == 16:                  # a bf16 table: the rows go over as they are
+        values = p.table.gather(ids)
+        rows = slice(at, at + values.shape[0])
+        b.ple_hv[rows].view(torch.int16).numpy()[:] = values.view(np.int16)
+        b.ple_v[rows].copy_(b.ple_hv[rows], non_blocking=True)
+        return
     words, scales, biases = p.table.gather(ids)
     n = words.shape[0]
     rows = slice(at, at + n)

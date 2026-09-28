@@ -2,6 +2,11 @@
 head): windows give serial steps' bits, commits of a window prefix continue like serial decoding, CUDA
 graphs replay the eager bits, and MTP-drafted decoding emits serial decoding's tokens."""
 
+import json
+import struct
+import tempfile
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -14,19 +19,43 @@ from tensorfold.families.qwen4_exp.cuda import qmm  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.decode import Engine, mtp_decode, prefill, serial_decode  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.forward import commit, forward  # noqa: E402
 from tensorfold.families.qwen4_exp.cuda.weights import (  # noqa: E402
-    AttnW, Config, GDNW, HC, LayerW, MoEW, MTPW, Weights)
+    AttnW, Config, GDNW, HC, LayerW, MoEW, MTPW, PLEW, Weights)
+from tensorfold.families.qwen4_exp.host_table import BF16Table, read_header  # noqa: E402
 
 DEV = "cuda"
 D, S, LOW, E, W, V = 1024, 4, 320, 64, 128, 4096
 
 
-def _cfg() -> Config:
+def _cfg(ple: bool = False) -> Config:
     return Config(hidden=D, layers=2, layer_types=["linear", "attention"], vocab=V, eps=1e-6, heads=24, kv_heads=2,
                   head_dim=256, rope_theta=1e7, rotary_dim=64, nk=16, nv=48, dk=128, dv=128, conv_kernel=4,
                   experts=E, top_k=10, moe_width=W, shared_width=W, streams=S, low=LOW, index_heads=4,
-                  index_dim=128, index_budget=2048, index_ratio=4, ple_layers=[], ple_dim=D, ple_kernel=4,
-                  ngram_size=3, heads_per_ngram=8, ngram_base=1000, ngram_divisor=128, ngram_shards=1, seed=1,
-                  ple_eos=0, eos=(0,), group_size=32, bits=4)
+                  index_dim=128, index_budget=2048, index_ratio=4, ple_layers=[1] if ple else [], ple_dim=D,
+                  ple_kernel=4, ngram_size=3, heads_per_ngram=8, ngram_base=1000, ngram_divisor=128,
+                  ngram_shards=1, seed=1, ple_eos=0, eos=(0,), group_size=32, bits=4)
+
+
+def _bf16_table(path: Path, rows: int, dims: int, seed: int = 7) -> BF16Table:
+    """A one-shard n-gram table in the layout the published NVFP4 revision ships: plain bf16 rows."""
+
+    g = torch.Generator().manual_seed(seed)
+    values = ((torch.rand((rows, dims), generator=g) - 0.5) * 0.02).to(torch.bfloat16)
+    name = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight"
+    blob = json.dumps({name: {"dtype": "BF16", "shape": [rows, dims], "data_offsets": [0, rows * dims * 2]}})
+    blob = blob.encode() + b" " * ((8 - len(blob) % 8) % 8)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(blob)))
+        f.write(blob)
+        f.write(values.view(torch.uint16).numpy().tobytes())
+    return BF16Table([(path, read_header(path)[name])])
+
+
+def _ple(c: Config, table: BF16Table, r: "_Rand") -> PLEW:
+    """The PLE layer's faces over ``table``: the key/value and the norms the engine's gate and conv read."""
+
+    conv = (torch.randn((S * D, c.ple_kernel), generator=r.g, device=DEV) * 0.3).to(torch.bfloat16)
+    return PLEW(table, r.q4(S * D, c.ple_dim), r.q4(D, c.ple_dim), r.norm(S * D), r.norm(S * D), r.norm(S * D),
+                conv, c.ngram(0))
 
 
 class _Rand:
@@ -74,11 +103,13 @@ class _Rand:
         return GDNW(self.q4(pw, D), conv, a_log, dt, self.norm(c.dv).to(torch.bfloat16), self.q4(D, c.nv * c.dv))
 
 
-def _model(seed: int = 3) -> Weights:
-    c = _cfg()
+def _model(seed: int = 3, ple: PLEW | None = None) -> Weights:
+    c = _cfg(ple is not None)
     r = _Rand(seed)
     layers = [LayerW(0, True, r.hc(True), r.hc(True), r.gdn(c), None, r.moe()),
               LayerW(1, False, r.hc(True), r.hc(True), None, r.attention(c), r.moe())]
+    if ple is not None:
+        layers[1].ple = ple
     embed = r.mlx(V, D, scale=0.5)
     inv = (c.rope_theta ** (-torch.arange(0, 32, dtype=torch.float64) / 32)).float().to(DEV)
     w = Weights(c, embed, layers, r.hc(False), r.q4(V, D, scale=0.2), inv)
@@ -109,6 +140,32 @@ def test_windows_match_serial_steps_and_prefix_commits_continue():
                 assert torch.equal(e.buf.streams[r], streams[r]), (R, r)
             commit(w, st, e.buf, R, keep)
             assert torch.equal(forward(w, st, e.buf, [nxt[keep]])[0], logits[keep]), (R, keep)
+
+
+def test_a_bf16_ngram_table_holds_the_same_window_contract():
+    """The published revision's n-gram table is plain bf16 rows, no per-shard scales: with the PLE layer live,
+    a window's logits still equal serial steps' bits, the rows gathered host-side and staged to the device."""
+
+    c = _cfg(ple=True)
+    r = _Rand(3)
+    with tempfile.TemporaryDirectory() as tmp:
+        table = _bf16_table(Path(tmp) / "shard_0.safetensors", c.ngram(0).rows, c.ngram(0).dims)
+        assert table.rows == c.ngram(0).rows and table.width == c.ngram(0).dims
+        w = _model(ple=_ple(c, table, r))
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+        prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12]
+        prefill(e, prompt, None)
+        nxt = [401, 33, 2048, 5, 77, 1500, 9, 10, 11]
+        serial = e.st.clone()
+        logits = []
+        for t in nxt:
+            logits.append(forward(w, serial, e.buf, [t])[0].clone())
+            commit(w, serial, e.buf, 1, 1)
+        for R in (2, 3, 4, 8):
+            st = e.st.clone()
+            lg = forward(w, st, e.buf, nxt[:R])
+            for i in range(R):
+                assert torch.equal(lg[i], logits[i]), (R, i)
 
 
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95)])
