@@ -17,7 +17,7 @@ SMALL = 1024             # pairs the one-block plan takes; wider plans rank in b
 
 @lru_cache(maxsize=1)
 def _ext():
-    from torch.utils.cpp_extension import load
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
     return load(name="tensorfold_experts_v6", sources=[str(here / "experts.cpp"), str(here / "experts.cu"),

@@ -22,7 +22,7 @@ GLM_DOWN = (8, 4, 1, 1)
 
 @lru_cache(maxsize=1)
 def _ext():
-    from torch.utils.cpp_extension import load
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
     srcs = [str(here / f) for f in ("experts.cpp", "experts.cu", "experts_cb0.cu", "experts_cb1.cu", "experts_cb2.cu")]

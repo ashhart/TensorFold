@@ -12,7 +12,7 @@ from .gdn import DK, DV
 
 @lru_cache(maxsize=1)
 def _ext():
-    from torch.utils.cpp_extension import load
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
     return load(name="tensorfold_qwen4_exp_gdn_io", sources=[str(here / "gdn_io.cpp"), str(here / "gdn_io.cu")],

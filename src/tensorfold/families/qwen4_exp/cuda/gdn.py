@@ -21,7 +21,7 @@ def widths(nk: int, nv: int) -> tuple[int, int]:
 
 @lru_cache(maxsize=1)
 def _ext():
-    from torch.utils.cpp_extension import load
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
     return load(name="tensorfold_qwen4_exp_gdn", sources=[str(here / "gdn.cpp"), str(here / "gdn.cu")],

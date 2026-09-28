@@ -3,6 +3,13 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.3.6.1 (28 Sep 2026)
+
+- **CUDA builds inside NVIDIA's containers again.** Their `TORCH_CUDA_ARCH_LIST` names every architecture back to
+  sm_80, so the kernels' thread-block clusters and FP8 MMA failed to compile for GPUs that lack them. Every extension
+  now builds for the GPU that is present, and a GPU older than compute capability 9.0 gets a clear message. Thanks to
+  @ss-cong for the report and the exact errors (#56).
+
 ## 0.3.6 (28 Sep 2026)
 
 - **GLM-5.3-Flash on Macs** with 256 GB, drafted replies equal to serial ones. Prompts process at or above mlx-vlm

@@ -13,7 +13,7 @@ import triton.language as tl
 
 @lru_cache(maxsize=1)
 def _ext():
-    from torch.utils.cpp_extension import load
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
     return load(name="tensorfold_qmm_v3", sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"),

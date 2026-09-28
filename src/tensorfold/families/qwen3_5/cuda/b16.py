@@ -10,7 +10,7 @@ import torch
 
 @lru_cache(maxsize=1)
 def _ext():
-    from torch.utils.cpp_extension import load
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
     return load(name="tensorfold_qwen_b16_v1", sources=[str(here / "b16.cpp"), str(here / "b16.cu")],

@@ -191,7 +191,7 @@ def scan(proj, xc, dt, state, a, d_skip, dt_bias, meta, rows: int, *, heads: int
 
 @lru_cache(maxsize=1)
 def _ext():
-    from torch.utils.cpp_extension import load
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
     return load(name="tensorfold_nemotron_scan_rows", sources=[str(here / "scan_rows.cpp"), str(here / "scan_rows.cu")],

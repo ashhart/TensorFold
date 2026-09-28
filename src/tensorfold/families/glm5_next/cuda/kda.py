@@ -12,7 +12,7 @@ DK = DV = 128
 
 @lru_cache(maxsize=1)
 def _ext():
-    from torch.utils.cpp_extension import load
+    from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
     return load(name="tensorfold_glm_kda_v1", sources=[str(here / "kda.cpp"), str(here / "kda.cu")],
