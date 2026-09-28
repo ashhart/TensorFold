@@ -20,7 +20,7 @@ class Graphs:
     def __init__(self, w, head: Head, capacity: int) -> None:
         self.w, self.head, self.capacity = w, head, capacity
         self.st, self.mc, self.rows = None, None, 0
-        self.pool = torch.cuda.graph_pool_handle()
+        self.pool = None                                # a new pool each time the buffers grow (``load``)
         self.target: dict[tuple[int, int], tuple] = {}
         self.mtp: dict[tuple[int, int], tuple] = {}
 
@@ -36,6 +36,9 @@ class Graphs:
             self.mtp.clear()
             self.st = self.mc = None
             gc.collect()
+            # the dropped graphs' pool can stay registered with no graph left (expandable segments leave it so),
+            # and torch refuses a capture into such a pool: capture into a new one
+            self.pool = torch.cuda.graph_pool_handle()
             self.st = State(self.w)
             reserve(self.st, self.rows)
             self.mc = Cache(self.w, self.rows)
