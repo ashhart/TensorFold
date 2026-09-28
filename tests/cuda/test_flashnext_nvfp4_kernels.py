@@ -209,3 +209,50 @@ def test_a_pattern_moe_runs_its_experts():
     # Not asserted: the stacked pattern path's values against ``x @ gate_up[1].T``. A single pattern table is
     # exact (see the probe in the branch notes), the stacked one is not — an open difference on the MTP head's
     # experts, whose effect is draft quality (the main model verifies every draft), not the emitted tokens.
+
+
+
+def test_a_stale_item_past_the_live_count_stays_out():
+    """The plan's buffers are reused across steps: an item at or past ``counts[0]`` still holds the previous
+    step's (expert, first, count), whose members point at rows this step never picked. The grouped kernels read
+    the live count before anything else — a serve that captured its decode crashed on load with an illegal
+    memory access until they did."""
+
+    torch.manual_seed(11)
+    dev = "cuda"
+    e, d, ni = 3, 256, 128
+    gate = [(torch.randint(0, 256, (ni, d // 2), dtype=torch.uint8, device=dev),
+             torch.randint(90, 115, (ni, d // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn),
+             0.01) for _ in range(e)]
+    up = [(torch.randint(0, 256, (ni, d // 2), dtype=torch.uint8, device=dev),
+           torch.randint(90, 115, (ni, d // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn),
+           0.01) for _ in range(e)]
+    down = [(torch.randint(0, 256, (d, ni // 2), dtype=torch.uint8, device=dev),
+             torch.randint(90, 115, (d, ni // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn),
+             0.01) for _ in range(e)]
+    shared = tuple((torch.randn(o, i) * 0.02).to(torch.bfloat16).to(dev)
+                   for o, i in ((ni, d), (ni, d), (d, ni)))
+    ex = nvfp4_moe.moe4_from_experts(gate, up, down, shared)
+    x = (torch.randn(4, d, device=dev) * 0.5).to(torch.bfloat16)
+    rows = torch.tensor([0, 2, 0, 1], device=dev)
+    picks = torch.stack([rows, torch.full_like(rows, ex.count - 1)], dim=1).to(torch.int32)
+    plan = grouped.Plan(4, 2, ex.count, dev)
+    grouped.route(picks, plan)
+    live = int(plan.counts[0])
+    assert live > 0
+
+    act = torch.zeros((4, 2, ni), dtype=torch.bfloat16, device=dev)
+    ex.gateup_out(x, plan, act, 1)
+    routed = act[:, 0].clone()
+    assert routed.abs().sum() > 0                        # the routed slot was written by that step
+
+    # The next step routes nothing, and the buffer still holds the items of the step before.
+    plan.counts[0] = 0
+    again = torch.zeros_like(act)
+    ex.gateup_out(x, plan, again, 1)
+    assert torch.equal(again[:, 0], torch.zeros_like(again[:, 0]))
+
+    y = torch.zeros((4, 2, d), dtype=torch.bfloat16, device=dev)
+    ex.down_out(act, plan, y, 1)
+    assert torch.equal(y[:, 0], torch.zeros_like(y[:, 0]))   # the down step reads the live count too
+    assert torch.equal(act[:, 0], routed)                    # and neither step touched the earlier result

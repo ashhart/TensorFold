@@ -54,7 +54,7 @@ def _kpass(X, src, rows_ok, x_stride, tile, S, s2, N: tl.constexpr, PER: tl.cons
     """One column tile's K pass: a 16-input quantization block is 8 stored bytes, times the block's scale."""
 
     r16 = tl.arange(0, 16)
-    acc = tl.zeros((local.shape[0], BLOCK_N), dtype=tl.float32)
+    acc = tl.zeros((TILE, BLOCK_N), dtype=tl.float32)
     for b in range(PER):
         kb = b // 4
         row0 = (b % 4) * 16
@@ -81,7 +81,9 @@ def _gateup_grouped(X, GU, GS, GS2, ITEMS, NITEMS, MEMBERS, ACT, x_stride, slots
                     PACKED: tl.constexpr, STACKED: tl.constexpr):
     """Every item's gate and up rows, at its members, as ``silu(bf16(x @ gate.T)) * bf16(x @ up.T)``."""
 
-    pid = tl.program_id(0)
+    pid = tl.program_id(0)                 # the buffer is reused across steps: an item past the plan's own
+    if pid >= tl.load(NITEMS):             # count can still hold a previous step's count, so it stays out
+        return
     e, first, count = _item(ITEMS, NITEMS, pid)
     if count == 0:
         return
@@ -117,7 +119,9 @@ def _down_grouped(ACT, DW, DS, DS2, ITEMS, NITEMS, MEMBERS, Y, act_stride,
                   PACKED: tl.constexpr, STACKED: tl.constexpr, F32: tl.constexpr):
     """Every item's down rows, at its members: ``act @ down.T`` (fp32 sums when the buffer is fp32)."""
 
-    pid = tl.program_id(0)
+    pid = tl.program_id(0)                 # the buffer is reused across steps: an item past the plan's own
+    if pid >= tl.load(NITEMS):             # count can still hold a previous step's count, so it stays out
+        return
     e, first, count = _item(ITEMS, NITEMS, pid)
     if count == 0:
         return
