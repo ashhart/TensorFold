@@ -56,8 +56,7 @@ def draft(logits: torch.Tensor, position: int, sampling: Sampling | None,
 
 def picks(logits: torch.Tensor, positions: Sequence[int], samplings: Sequence[Sampling | None],
           ids: np.ndarray | None = None) -> list[tuple[int, float]]:
-    """``draft`` for every row of ``logits`` (a stream's row each; ``ids``: the draft vocabulary on the host), rows
-    grouped by candidate count and read back together."""
+    """``draft`` for every row of ``logits`` (a stream's row each; ``ids``: the draft vocabulary), read back together by candidate count."""
 
     rows = logits.float()
     probs = torch.softmax(rows, -1)
@@ -120,8 +119,7 @@ def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | No
 @torch.no_grad()
 def extend(w, head: Head | None, prompt: Sequence[int], st: State, mc: Cache | None, held: torch.Tensor | None,
            end: int) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Commit prompt[st.pos:end] in chunks (the state's bits never depend on ``end``; the head's only pick drafts);
-    the head absorbs every row but the last, which comes back held with the last chunk's normed rows."""
+    """Commit prompt[st.pos:end] in chunks (bits independent of ``end``); the head absorbs every row but the last, returned held."""
 
     ids = torch.tensor(list(prompt[st.pos:end]), dtype=torch.int32, device=w.norm.device)
     base, normed = st.pos, None
@@ -165,32 +163,10 @@ def mtp_decode(w, head: Head, st: State, mc: Cache, carry: Carry, pending: int, 
     context, copies = list(prompt) + [pending], CopyIndex()
     start = time.perf_counter()
     while len(out) < count and not (stop_eos and out[-1] in w.config.eos):
-        n = st.pos                                        # the pending token's position
-        normed, logits = step(carry.states, carry.tokens, mc.pos)
-        mc.pos += len(carry.tokens)
-        guesses = copies.propose(context, COPY_ROWS - 1)  # an exact repeat of the context first: a long, likely window
-        while not guesses:
-            token, prob = draft(logits, n + 1, sampling, head.ids)
-            guesses.append(token)
-            while prob >= confidence and len(guesses) < depth:
-                normed, logits = step(normed[-1:], [token], mc.pos + len(guesses) - 1)
-                token, prob = draft(logits, n + 1 + len(guesses), sampling, head.ids)
-                guesses.append(token)
-        tokens = [out[-1]] + guesses
-        window = constraint.window(tokens, list(range(-1, len(tokens) - 1))) if constraint is not None else None
-        if window is not None:                           # the drafts no accepted path can hold are cut first
-            tokens = window.tokens
-        parents = list(range(-1, len(tokens) - 1))
-        logits, record, states = verify(tokens)
-        if window is not None:
-            logits = constraint.mask(logits, window)
-        sampled = sample_rows(logits, [n + 1 + i for i in range(len(tokens))], sampling)
-        path, terminal = accept(tokens, parents, sampled, count - len(out), w.config.eos if stop_eos else ())
-        commit(st, record, path, in_place=runner is not None)
-        new = [tokens[r] for r in path[1:]] + [terminal]
-        if constraint is not None:
-            constraint.advance(new)
-        carry = Carry(states[path[0]:path[-1] + 1], new)
+        tokens, path, new, carry = mtp_round(st, mc, carry, out[-1], count - len(out), sampling, context, copies,
+                                             depth=depth, confidence=confidence, ids=head.ids, verify=verify,
+                                             step=step, eos=w.config.eos if stop_eos else (),
+                                             in_place=runner is not None, constraint=constraint)
         out.extend(new)
         context.extend(new)
         rounds, drafted, kept = rounds + 1, drafted + len(tokens) - 1, kept + len(path) - 1
@@ -198,3 +174,36 @@ def mtp_decode(w, head: Head, st: State, mc: Cache, carry: Carry, pending: int, 
         if on_tokens is not None and on_tokens(new):
             break
     return Result(out, time.perf_counter() - start, rounds, drafted, kept, widths)
+
+
+def mtp_round(st: State, mc: Cache, carry: Carry, pending: int, room: int, sampling: Sampling | None,
+              context: Sequence[int], copies: CopyIndex, *, depth: int, confidence: float, ids, verify, step,
+              eos: Sequence[int] = (), in_place: bool = False,
+              constraint=None) -> tuple[list[int], list[int], list[int], Carry]:
+    """One round (carry absorbed, copy or MTP chain proposed, verified, at most ``room`` rows kept): (tokens, path, new, carry)."""
+
+    n = st.pos                                            # the pending token's position
+    normed, logits = step(carry.states, carry.tokens, mc.pos)
+    mc.pos += len(carry.tokens)
+    guesses = copies.propose(context, COPY_ROWS - 1)      # an exact repeat of the context first: a long, likely window
+    while not guesses:
+        token, prob = draft(logits, n + 1, sampling, ids)
+        guesses.append(token)
+        while prob >= confidence and len(guesses) < depth:
+            normed, logits = step(normed[-1:], [token], mc.pos + len(guesses) - 1)
+            token, prob = draft(logits, n + 1 + len(guesses), sampling, ids)
+            guesses.append(token)
+    tokens = [pending] + guesses
+    window = constraint.window(tokens, list(range(-1, len(tokens) - 1))) if constraint is not None else None
+    if window is not None:                                # the drafts no accepted path can hold are cut first
+        tokens = window.tokens
+    logits, record, states = verify(tokens)
+    if window is not None:
+        logits = constraint.mask(logits, window)
+    sampled = sample_rows(logits, [n + 1 + i for i in range(len(tokens))], sampling)
+    path, terminal = accept(tokens, list(range(-1, len(tokens) - 1)), sampled, room, eos)
+    commit(st, record, path, in_place=in_place)
+    new = [tokens[r] for r in path[1:]] + [terminal]
+    if constraint is not None:
+        constraint.advance(new)
+    return tokens, path, new, Carry(states[path[0]:path[-1] + 1], new)

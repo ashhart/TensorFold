@@ -536,3 +536,73 @@ def test_context_bounds_each_stream_and_warm_leaves_nothing():
     assert all(kv is None or kv[0].shape[0] == need for kv in s.st.kv)
     with pytest.raises(ValueError, match="1 to 15"):
         MultiDecoder(w, head, depth=16, confidence=0.3)
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(1234, 1.0, 20, 0.95)])
+def test_a_stream_alone_replays_the_one_stream_graphs(sampling):
+    """A stream decoding alone takes the solo engine's rounds in its graphs; another joins (both decode eagerly, the
+    first still in the graphs' buffers) and leaves; the first goes on in the graphs. All emit serial tokens."""
+
+    from tensorfold.families.qwen3_5_moe.cuda.graphs import Graphs
+
+    w, head = _model()
+    runner = Graphs(w, head, 1024)
+    dec = MultiDecoder(w, head, depth=3, confidence=0.3, graphs=runner)
+    a = Stream(PROMPTS[1], 24, sampling)
+    dec.admit(a)
+    _drain(dec)
+    solo = _solo(w, head, PROMPTS[1], sampling, 24)
+    assert a.out == _serial(w, PROMPTS[1], sampling, 24) == solo.tokens and a.rounds == solo.rounds
+    assert runner.target and runner.mtp and dec.resident is None
+    first, second = Stream(list(range(20, 60)), 64, sampling), Stream(PROMPTS[0], 12, SAMPLED[1])
+    dec.admit(first)
+    for _ in range(4):
+        dec.finish(dec.round())
+    assert dec.resident is first and first.st is runner.st
+    dec.admit(second)
+    rounds = 0
+    while not second.done:
+        dec.finish(dec.round())
+        rounds += 1
+    assert rounds > 2 and not first.done and dec.resident is first    # decoded together, first still resident
+    _drain(dec)
+    assert first.out == _serial(w, first.prompt, sampling, 64)
+    assert second.out == _serial(w, PROMPTS[0], SAMPLED[1], 12)
+
+
+@pytest.mark.parametrize("expandable", [False, True])
+@pytest.mark.parametrize("sampling", [None, Sampling(1234, 1.0, 20, 0.95)])
+def test_a_stream_alone_grows_the_graph_buffers_while_others_run(expandable, sampling):
+    """A long stream alone grows the graphs' buffers past 8,192 rows (recapturing into a new pool, which expandable
+    segments need); a short one joins, decodes beside it and leaves; the long one goes on in the new graphs."""
+
+    from tensorfold.families.qwen3_5_moe.cuda.graphs import BUCKET, Graphs
+
+    w, head = _model(vocab=1 << 20)          # two chain widths' logits map the pool's expandable segment twice
+    runner = Graphs(w, head, 4 * BUCKET)
+    long = [3 + (i * 7) % 200 for i in range(BUCKET)]           # with its reply, past the first BUCKET rows
+    with _segments(expandable):
+        refs = {tuple(p): _serial(w, p, sampling, n) for p, n in ((PROMPTS[1], 24), (long, 40), (PROMPTS[0], 12),
+                                                                   (PROMPTS[2], 24))}
+        dec = MultiDecoder(w, head, depth=3, confidence=0.0, graphs=runner)
+        short = Stream(PROMPTS[1], 24, sampling)
+        dec.admit(short)
+        _drain(dec)
+        assert runner.rows == BUCKET
+        grown = Stream(long, 40, sampling)
+        dec.admit(grown)
+        while grown.rounds < 2:
+            dec.finish(dec.round())
+        assert runner.rows == 2 * BUCKET and dec.resident is grown
+        joined = Stream(PROMPTS[0], 12, sampling)
+        dec.admit(joined)
+        while not joined.done:
+            dec.finish(dec.round())
+        assert not grown.done
+        _drain(dec)
+        last = Stream(PROMPTS[2], 24, sampling)
+        dec.admit(last)
+        _drain(dec)
+    assert runner.rows == 2 * BUCKET
+    for s in (short, grown, joined, last):
+        assert s.out == refs[tuple(s.prompt)], s.prompt

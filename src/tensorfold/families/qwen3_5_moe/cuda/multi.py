@@ -14,7 +14,7 @@ from tensorfold.families.qwen3_5.cuda.decode import CopyIndex
 from tensorfold.families.qwen3_5.cuda.forward import State, _mm, commit_streams, multi_tree_forward
 from tensorfold.families.qwen3_5.cuda.multi import kept, private
 
-from .decode import COPY_ROWS, Carry, extend, picks
+from .decode import COPY_ROWS, Carry, extend, mtp_round, picks
 from .mtp import Cache, Head
 
 STEP = 1024          # prompt rows a prefill step takes while other streams decode
@@ -40,10 +40,11 @@ def own(mc: Cache, rows: int) -> Cache:
 
 class MultiDecoder:
     """The ``Scheduler``'s decoder: each round a prefill step for the oldest queued prompt, then every stream's MTP
-    chain (or copied continuation) verified in one forward; a stream's window holds at most 16 rows."""
+    chain (or copied continuation) verified in one forward; a stream's window holds at most 16 rows. With
+    ``graphs`` (a ``graphs.Graphs``), a stream decoding alone replays the one-stream engine's CUDA graphs."""
 
     def __init__(self, w, head: Head | None, *, depth: int, confidence: float, context: int = 0, keep: int = 3,
-                 points=None, stop_eos: bool = True) -> None:
+                 points=None, stop_eos: bool = True, graphs=None) -> None:
         if head is not None and depth > 0 and not 1 <= depth <= 15:
             raise ValueError(f"MTP drafts a round with --parallel: 1 to 15 (a window holds 16 rows), not {depth}")
         self.w, self.head = w, head if depth > 0 else None
@@ -56,6 +57,8 @@ class MultiDecoder:
         self.points = points                         # a prompt's message starts to keep states at, or None
         self.cache = PrefixCache(keep)               # (ids, state, (head cache, held row)) at message starts and ends
         self.next_id = 0
+        self.graphs = graphs if self.head is not None else None
+        self.resident: Stream | None = None          # the stream whose state is in the graphs' buffers
 
     def live(self) -> int:
         return len(self.streams) + len(self.filling)
@@ -144,6 +147,8 @@ class MultiDecoder:
         live = [s for s in self.streams.values() if not s.done]
         if not live:
             return done
+        if len(live) == 1 and self._fits(live[0]):
+            return done + self._alone(live[0])
         self._propose(live)
         wins = [[s.out[-1]] + s.drafts for s in live]
         chains = [list(range(-1, len(t) - 1)) for t in wins]
@@ -163,6 +168,29 @@ class MultiDecoder:
                 s.snap.carry = Carry(hidden[starts[k] + path[0]:starts[k] + path[-1] + 1], new)
             s.take(new, self.eos)
         return done + [s for s in live if s.done]
+
+    def _fits(self, s: Stream) -> bool:
+        """Whether a drafting stream's caches fit the graphs' buffers (else it decodes eagerly in its own)."""
+
+        return (s.snap is not None and self.graphs is not None and
+                (s is self.resident or len(s.prompt) + s.count + self.depth <= self.graphs.capacity))
+
+    def _alone(self, s: Stream) -> list[Stream]:
+        """The one decoding stream's round as the one-stream engine runs it, in its graphs: the stream's state moves
+        into their fixed buffers once and stays there, decoding eagerly with the others when streams join."""
+
+        g, d = self.graphs, s.snap
+        if self.resident is not s:
+            s.st, d.cache = g.load(s.st, d.cache, min(g.capacity, len(s.prompt) + s.count + COPY_ROWS))
+            self.resident = s
+        tokens, path, new, d.carry = mtp_round(s.st, d.cache, d.carry, s.out[-1], s.count - len(s.out), s.sampling,
+                                               s.context, s.copies, depth=self.depth, confidence=self.confidence,
+                                               ids=self.head.ids, verify=g.verify, step=g.draft, eos=self.eos,
+                                               in_place=True)
+        s.committed.extend(tokens[r] for r in path)
+        s.counted(len(tokens))
+        s.take(new, self.eos)
+        return [s] if s.done else []
 
     def _propose(self, live: list[Stream]) -> None:
         """Each drafting stream absorbs its carry (every stream in one head call), then proposes a copied continuation
@@ -236,6 +264,8 @@ class MultiDecoder:
 
         for s in done:
             self.streams.pop(s.sid, None)
+            if s is self.resident:
+                self.resident = None
 
     def drop(self) -> list[Stream]:
         """After an error in a round: forget the live streams and the queued prompts."""
@@ -245,4 +275,5 @@ class MultiDecoder:
             del self.streams[s.sid]
         live += self.filling
         self.filling = []
+        self.resident = None
         return live
