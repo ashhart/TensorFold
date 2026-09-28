@@ -124,8 +124,15 @@ class Config:
         t = raw.get("text_config", raw)
         rope = t.get("rope_parameters") or {}
         head_dim = int(t.get("head_dim") or t["hidden_size"] // t["num_attention_heads"])
-        eos = raw.get("eos_token_id", t.get("eos_token_id"))
-        eos = tuple(eos) if isinstance(eos, list) else (int(eos),)
+        gen = Path(model_dir) / "generation_config.json"
+        found: list[int] = []
+        # EXL3 packs name the chat turn's end, <|im_end|>, in generation_config.json only
+        for value in (raw.get("eos_token_id", t.get("eos_token_id")),
+                      json.loads(gen.read_text()).get("eos_token_id") if gen.exists() else None):
+            found += [] if value is None else [int(e) for e in value] if isinstance(value, list) else [int(value)]
+        if not found:
+            raise ValueError("no eos_token_id in config.json or generation_config.json")
+        eos = tuple(dict.fromkeys(found))
         return cls(
             hidden=int(t["hidden_size"]), intermediate=int(t.get("intermediate_size", 0)),
             layers=int(t["num_hidden_layers"]), heads=int(t["num_attention_heads"]),
