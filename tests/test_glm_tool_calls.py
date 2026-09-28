@@ -79,11 +79,10 @@ def test_a_tool_the_client_did_not_offer_stays_in_the_reply(parser):
 
 @PARSERS
 def test_qwen_function_blocks_are_unchanged(parser):
-    # since 0.3.5 the Mac server types Qwen parameters by the tool's schema; the CUDA server keeps them as text
-    days = "3" if parser is parse_tool_calls else 3
+    # both servers type Qwen parameters by the tool's schema
     text = ("<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n"
             "<parameter=days>\n3\n</parameter>\n</function>\n</tool_call>")
-    assert _parse(parser, text) == ("", [("get_weather", {"city": "Paris", "days": days})])
+    assert _parse(parser, text) == ("", [("get_weather", {"city": "Paris", "days": 3})])
 
 
 @PARSERS

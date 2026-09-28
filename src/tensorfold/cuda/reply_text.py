@@ -9,6 +9,7 @@ from typing import Any
 
 from tensorfold.server.stopping import StopPolicy
 from tensorfold.server.tools import parse_glm_tool_call_block
+from tensorfold.tool_parameters import decode_parameter, parameter_schemas
 
 _CALL_OPEN, _CALL_CLOSE = "<tool_call>", "</tool_call>"
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.IGNORECASE | re.DOTALL)
@@ -102,6 +103,7 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
     if not tools:
         return text, None
     known = {_tool_name(t).lower(): _tool_name(t) for t in tools}
+    schemas = parameter_schemas(tools)
     calls: list[dict[str, Any]] = []
     residue: list[str] = []
     cursor = 0
@@ -126,7 +128,11 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
                 if max_calls is not None and _TOOL_PARAMETER_BLOCK_RE.sub("", m.group(2)).strip():
                     continue
                 name = m.group(1).strip()
-                args = {p.group(1).strip(): p.group(2) for p in _TOOL_PARAMETER_BLOCK_RE.finditer(m.group(2))}
+                # typed parameters (array, object, number...) decode per the tool's schema, as the Mac server does
+                props = schemas.get(name.lower(), {})
+                args = {key: decode_parameter(value, props.get(key, {}))
+                        for key, value in ((p.group(1).strip(), p.group(2))
+                                           for p in _TOOL_PARAMETER_BLOCK_RE.finditer(m.group(2)))}
             else:
                 glm = parse_glm_tool_call_block(block, tools, complete=max_calls is not None)
                 if glm is not None:

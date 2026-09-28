@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from tensorfold.cuda.reply_text import parse_tool_calls as parse_cuda_tool_calls
 from tensorfold.engine.tool_draft import ToolCallStreamer
 from tensorfold.server.http import parse_tool_calls_from_content
 
@@ -37,6 +38,9 @@ def test_parameter_type_matches_schema_in_both_paths(kind, value, expected, step
     text = f"<tool_call>\n<function=question>\n<parameter=questions>\n{value}\n</parameter>\n</function>\n</tool_call>"
     _, calls = parse_tool_calls_from_content(text, tools)
     assert json.loads(calls[0]["function"]["arguments"]) == {"questions": expected}
+    for max_calls in (None, 1):                                       # the CUDA server's parser, the same types
+        _, calls = parse_cuda_tool_calls(text, tools, max_calls=max_calls)
+        assert json.loads(calls[0]["function"]["arguments"]) == {"questions": expected}
     streamer = ToolCallStreamer(tools)
     deltas = []
     for n in range(1, len(text) + 1, step):
