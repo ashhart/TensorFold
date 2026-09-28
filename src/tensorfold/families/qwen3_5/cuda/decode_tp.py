@@ -160,12 +160,15 @@ def _accept(tokens: list[int], parents: list[int], sampled: list[int], room: int
 def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count: int,
               sampling: Sampling | None, rank: int, draft=None, *, max_rows: int = 16,
               allow_copy: bool = False, stop_eos: bool = True,
-              on_tokens: Callable[[list[int]], bool | None] | None = None) -> DecodeResult | None:
-    """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token."""
+              on_tokens: Callable[[list[int]], bool | None] | None = None,
+              inplace: bool = False) -> DecodeResult | None:
+    """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token.
+
+    ``inplace``: as ``draft_decode``'s."""
 
     device = w.norm.device
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
-    st = clone_state(st)
+    st = st if inplace else clone_state(st)
     out = [pending]
     context = list(prompt) + out
     committed: list[int] = []

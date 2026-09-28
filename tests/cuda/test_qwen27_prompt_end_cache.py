@@ -25,7 +25,7 @@ from tensorfold.cuda.sampling import sample_rows  # noqa: E402
 from tensorfold.cuda.streams import Stream  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.families.qwen3_5.cuda import decode  # noqa: E402
-from tensorfold.families.qwen3_5.cuda.decode import prefill, serial_decode  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.decode import clone_state, draft_decode, prefill, serial_decode  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine, entry_end  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.forward import State  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.multi import MultiDecoder  # noqa: E402
@@ -325,6 +325,18 @@ def test_the_drafter_ends_as_without_the_point_and_its_snapshot_is_the_prefixs(m
     assert kept.pos == point
 
 
+def test_an_inplace_decode_commits_into_the_state_it_is_given(w):
+    """The engine hands the prompt state to the decode (``inplace``): same tokens, and the state it passed moves on,
+    so nothing keeps the prompt end's GDN states once the first round commits."""
+
+    prompt = _prompt(50, seed=31)
+    st, pending = prefill(w, prompt, None)
+    ref = draft_decode(w, st, prompt, pending, 16, None, None, stop_eos=False)
+    assert st.pos == len(prompt)
+    mine = draft_decode(w, st, prompt, pending, 16, None, None, stop_eos=False, inplace=True)
+    assert mine.tokens == ref.tokens and st.pos == len(prompt) + len(ref.tokens) - 1
+
+
 def _engine(w) -> Qwen27Engine:
     engine = object.__new__(Qwen27Engine)
     engine.torch = torch
@@ -361,7 +373,7 @@ def test_the_engine_resumes_the_next_turn_exactly(monkeypatch, w, sampling, base
 
     def spy_prefill(*args, **kwargs):
         out = real_prefill(*args, **kwargs)
-        captured.append(out)
+        captured.append((clone_state(out[0]), *out[1:]))     # the decode then commits into out[0]
         return out
 
     def spy_sample(logits, positions, samp):                # the prefill samples first, then the decode's rounds

@@ -186,15 +186,18 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
                  *, max_rows: int = 128, tree_rows: int | None = None,
                  allow_copy: bool = True, stop_eos: bool = True,
                  on_tokens: Callable[[list[int]], bool | None] | None = None,
-                 trace: list | None = None) -> DecodeResult:
-    """Verify trees and replay matching paths, with optional host-only trace records that leave output tokens unchanged."""
+                 trace: list | None = None, inplace: bool = False) -> DecodeResult:
+    """Verify trees and replay matching paths, with optional host-only trace records that leave output tokens unchanged.
+
+    ``inplace`` commits into ``st`` itself, a state nothing else holds, so its first commit frees the prompt end's
+    GDN states; otherwise into a copy."""
 
     if count < 1 or not 1 <= max_rows <= 128:
         raise ValueError("count >= 1 and 1 <= max_rows <= 128 required")
     tree_rows = max_rows if tree_rows is None else tree_rows
     if not 1 <= tree_rows <= max_rows:
         raise ValueError("tree_rows must be between 1 and max_rows")
-    st = clone_state(st)
+    st = st if inplace else clone_state(st)
     out = [pending]
     context = list(prompt) + out
     copies = CopyIndex() if allow_copy else None

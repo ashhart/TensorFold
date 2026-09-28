@@ -113,17 +113,20 @@ def _bare_engine(tp=1, rank=0, drafter=None):
 
 def _one_gpu(monkeypatch, drafter=None):
     rec = Recorder()
+    engine = _bare_engine(drafter=drafter)
     fake = types.ModuleType(PKG + ".decode")
     fake.prefill = rec.prefill
 
-    def draft_decode(w, st, prompt, pending, count, sampling, draft, *, max_rows, allow_copy, on_tokens):
+    def draft_decode(w, st, prompt, pending, count, sampling, draft, *, max_rows, allow_copy, on_tokens, inplace):
+        # the decode may commit into the prompt state: no entry holds it
+        assert inplace and all(st is not entry for _, entry, _ in engine.cache)
         result = rec.decode(st, prompt, pending, count)
         on_tokens(result.tokens[1:])
         return result
 
     fake.draft_decode = draft_decode
     monkeypatch.setitem(sys.modules, PKG + ".decode", fake)
-    return _bare_engine(drafter=drafter), rec
+    return engine, rec
 
 
 def _run(engine, prompt, max_tokens=4, **kwargs):
@@ -291,7 +294,8 @@ def _two_ranks(monkeypatch):
         return rec.prefill(w, prompt, sampling, drafter, state=state, keep_at=keep_at, rank=rank)
 
     def decode_tp(w, st, prompt, pending, count, sampling, rank, drafter, *, max_rows, allow_copy=True,
-                  on_tokens=None):
+                  on_tokens=None, inplace=False):
+        assert inplace and all(st is not entry for _, entry, _ in engines[rank].cache)
         result = rec.decode(st, prompt, pending, count)
         if on_tokens is not None:
             on_tokens(result.tokens[1:])
