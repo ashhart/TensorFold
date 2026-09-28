@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
+
+
+def ngrams_on_host(model_dir: Path) -> bool:
+    """Keep n-gram tables memory-mapped above the GPU working-set threshold, with TF_NGRAM_HOST overriding the choice."""
+
+    flag = os.environ.get("TF_NGRAM_HOST", "")
+    if flag in ("0", "1"):
+        return flag == "1"
+    import mlx.core as mx
+
+    size = sum(p.stat().st_size for p in Path(model_dir).glob("model*.safetensors"))
+    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+    return size > 0.75 * int(info["max_recommended_working_set_size"])
 
 
 class HostTable:

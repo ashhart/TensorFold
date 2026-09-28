@@ -15,6 +15,7 @@ import numpy as np
 from mlx_lm.models.gated_delta import gated_delta_update
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from tensorfold.families.qwen4_exp.host_table import ngrams_on_host
 from tensorfold.families.qwen4_exp.model_layers import (
     Config,
     _derived,
@@ -327,17 +328,6 @@ def norms_stored_around_one(weights: dict[str, mx.array]) -> bool:
     if not (around_one or around_zero):
         raise ValueError(f"cannot tell how the norm weights are stored (median mean {np.median(means):.3f})")
     return around_one
-
-
-def ngrams_on_host(model_dir: Path) -> bool:
-    """Keep n-gram tables memory-mapped above the GPU working-set threshold, with TF_NGRAM_HOST overriding the choice."""
-
-    flag = os.environ.get("TF_NGRAM_HOST", "")
-    if flag in ("0", "1"):
-        return flag == "1"
-    size = sum(p.stat().st_size for p in Path(model_dir).glob("model*.safetensors"))
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-    return size > 0.75 * int(info["max_recommended_working_set_size"])
 
 
 def prefetch_ngrams(model: Qwen4Exp) -> None:

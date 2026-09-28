@@ -410,7 +410,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     print(f"[tensorfold] memory budget {memory_limit / gib:.1f} GiB: MLX's buffers up to "
           f"{(memory_limit - PROCESS_BYTES) / gib:.1f} GiB, {PROCESS_BYTES / gib:.0f} GiB for the rest of the process",
           flush=True)
-    weights = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
+    checkpoint = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
+    estimate = getattr(family.package, "weight_bytes", None)
+    weights = checkpoint if estimate is None else estimate(model_dir)
+    if weights < checkpoint:
+        print(f"[tensorfold] weights: {weights / gib:.1f} GiB resident, "
+              f"{(checkpoint - weights) / gib:.1f} GiB file-backed", flush=True)
     if weights >= memory_limit - PROCESS_BYTES:
         raise ValueError(f"{family.title}'s weights ({weights / gib:.1f} GiB) do not fit this server's "
                          f"{memory_limit / gib:.1f} GiB memory budget (70% of RAM, or TENSORFOLD_MEMORY_LIMIT_GB): "
