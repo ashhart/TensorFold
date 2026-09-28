@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import struct
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,12 @@ import numpy as np
 from tensorfold.families.qwen4_exp.ssd_table import SSDTable
 
 _PARTS = ("weight", "scales", "biases")
+# A prompt chunk's gather (2 GATHER_SPLIT rows or more) copies them on up to GATHER_THREADS threads, GATHER_SPLIT
+# rows or more each: numpy's fancy indexing releases the GIL, so rows whose pages are not in the page cache are read
+# from disk in parallel instead of one page fault at a time. The bytes are the same; a decode step's few rows (and
+# GATHER_THREADS 1) keep the single-threaded copy.
+GATHER_THREADS = 16
+GATHER_SPLIT = 512
 
 
 def ngrams_on_host(model_dir: Path, ssd: bool = False) -> bool:
@@ -61,6 +68,8 @@ class HostTable:
         self.wbase, self.sbase, self.bbase = (np.array(x, dtype=np.int64) for x in (wbase, sbase, bbase))
         self.wrow = self.words[0].shape[1] * 4
         self.grow = self.scales[0].shape[1] * 2
+        # threads start with the first threaded gather
+        self._pool = ThreadPoolExecutor(GATHER_THREADS, thread_name_prefix="ngram-gather")
 
     def gather(self, ids: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Rows ``ids`` (global) -> words [n, W] uint32, scales and biases [n, G] (bf16 bits as uint16)."""
@@ -77,12 +86,23 @@ class HostTable:
         sc = np.empty((n, self.grow), dtype=np.uint8)
         bi = np.empty((n, self.grow), dtype=np.uint8)
         aw, ag = np.arange(self.wrow), np.arange(self.grow)
-        for f in np.unique(where):
-            at = np.nonzero(where == f)[0]
-            mm = self.files[f]
+
+        def copy(job) -> None:
+            mm, at = job
             w[at] = mm[wo[at, None] + aw]
             sc[at] = mm[so[at, None] + ag]
             bi[at] = mm[bo[at, None] + ag]
+
+        if GATHER_THREADS > 1 and n >= 2 * GATHER_SPLIT:          # a prompt chunk: copy on threads
+            jobs = []
+            for f in np.unique(where):
+                at = np.nonzero(where == f)[0]
+                parts = max(1, min(GATHER_THREADS, len(at) // GATHER_SPLIT))
+                jobs += [(self.files[f], piece) for piece in np.array_split(at, parts)]
+            list(self._pool.map(copy, jobs))
+        else:
+            for f in np.unique(where):
+                copy((self.files[f], np.nonzero(where == f)[0]))
         return w.view(np.uint32), sc.view(np.uint16), bi.view(np.uint16)
 
     def lock(self) -> bool:

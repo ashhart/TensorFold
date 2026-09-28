@@ -105,6 +105,24 @@ def test_rows_from_ssd_equal_the_memory_map_byte_for_byte(tmp_path, tables, inte
         _same(ssd.gather(ids), want)
 
 
+@pytest.mark.parametrize("threads", [1, 2, 16])
+def test_a_prompt_chunks_gather_on_threads_gives_the_same_bytes(tmp_path, monkeypatch, threads):
+    """A gather past 2 GATHER_SPLIT rows copies its rows on GATHER_THREADS threads: the bytes of one thread."""
+
+    files, table = _checkpoint(tmp_path)
+    monkeypatch.setattr(host_table, "GATHER_THREADS", threads)
+    monkeypatch.setattr(host_table, "GATHER_SPLIT", 8)                # the test shards are small: split every 8 rows
+    host = HostTable(files)
+    calls = []
+    real = host._pool.map
+    monkeypatch.setattr(host._pool, "map", lambda fn, jobs: calls.append(len(jobs)) or real(fn, jobs))
+    for ids in (np.random.default_rng(5).integers(0, host.rows, (40, 16)),   # 640 rows: threaded when threads > 1
+                np.arange(host.rows)[::-1], np.array([3, 3, 1]), []):         # every row reversed; a few; none
+        flat = np.asarray(ids, dtype=np.int64).reshape(-1)
+        _same(host.gather(ids), tuple(part[flat] for part in table))
+    assert (len(calls) > 0) == (threads > 1)
+
+
 def test_from_checkpoint_picks_the_reader_by_argument_not_environment(tmp_path, monkeypatch):
     _, table = _checkpoint(tmp_path)
     monkeypatch.setenv("TF_NGRAM_HOST", "0")
