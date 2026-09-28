@@ -16,16 +16,16 @@ import torch
 from tensorfold.families.qwen4_exp.cuda import nvfp4
 from tensorfold.families.qwen4_exp.cuda.ngram import NGram
 
-DTYPE_NAMES = {torch.bfloat16: "BF16", torch.float32: "F32", torch.uint8: "U8",
+DTYPE_NAMES = {torch.bfloat16: "BF16", torch.float32: "F32", torch.uint8: "U8", torch.int32: "I32",
                torch.float8_e4m3fn: "F8_E4M3", torch.int64: "I64"}
 
 
 def tiny_ngram(vocab: int) -> NGram:
     """The tiny checkpoint's n-gram constants and table size, derived with the params ``_config`` writes
-    (one head over a two-gram table, the config's seed and vocab base): the real checkpoint ships its
-    own, and the loader's ``NGram.check`` compares them value for value."""
+    (one head a step over a three-gram table, the config's seed and vocab base): the real checkpoint ships
+    its own, and the loader's ``NGram.check`` compares them value for value."""
 
-    return NGram(vocab=vocab, ngram_size=2, heads_per_ngram=1, vocab_base=vocab, divisor=1, shards=1,
+    return NGram(vocab=vocab, ngram_size=3, heads_per_ngram=1, vocab_base=vocab, divisor=1, shards=1,
                  seed=1234, eos=0, embed_dim=64, ple_index=0)
 
 
@@ -57,8 +57,8 @@ def _quant_rows(rows: torch.Tensor, rng: torch.Generator) -> tuple[torch.Tensor,
 
 def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hidden: int = 256,
           heads: int = 2, kv_heads: int = 2, nk: int = 2, nv: int = 4, dk: int = 64, dv: int = 64,
-          moe_width: int = 128, shared_width: int = 64, streams: int = 4, low: int = 32,
-          ple: bool = True, mtp: bool = True, seed: int = 0) -> Path:
+          moe_width: int = 128, shared_width: int = 64, streams: int = 4, low: int = 64,
+          ple: bool = True, mtp: bool = True, seed: int = 0, prefix: str = "") -> Path:
     dir.mkdir(parents=True, exist_ok=True)
     rng = torch.Generator().manual_seed(seed)
 
@@ -69,6 +69,8 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
     blobs: list[torch.Tensor] = []
 
     def add(name: str, t: torch.Tensor) -> None:
+        if prefix and name.startswith("model."):        # the published checkpoint's language-model group
+            name = prefix + name[len("model."):]        # (its lm_head and mtp stay at the top level)
         t = t.contiguous()
         entries[name] = {"dtype": DTYPE_NAMES[t.dtype], "shape": list(t.shape),
                          "data_offsets": [0, 0]}                                      # patched on write
@@ -106,19 +108,19 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
             for proj, n_, k_ in (("gate_proj", moe_width, hidden), ("up_proj", moe_width, hidden),
                                  ("down_proj", hidden, moe_width)):
                 linear(f"{b}.mlp.experts.{e}.{proj}", n_, k_, fp4=True)
-        for proj, n_, k_ in (("in_proj_qkv", 2 * nk * dk + nv * dv, streams * hidden),
-                             ("in_proj_z", nv * dv, streams * hidden),
-                             ("in_proj_b", nv, streams * hidden), ("in_proj_a", nv, streams * hidden),
-                             ("out_proj", streams * hidden, nv * dv)):
+        for proj, n_, k_ in (("in_proj_qkv", 2 * nk * dk + nv * dv, hidden),
+                             ("in_proj_z", nv * dv, hidden),
+                             ("in_proj_b", nv, hidden), ("in_proj_a", nv, hidden),
+                             ("out_proj", hidden, nv * dv)):
             linear(f"{b}.linear_attn.{proj}", n_, k_, fp4=False)
         add(f"{b}.linear_attn.conv1d.weight", rand(2 * nk * dk + nv * dv, 4))
         add(f"{b}.linear_attn.A_log", rand(nv, dtype=torch.float32) - 4.0)
         add(f"{b}.linear_attn.dt_bias", rand(nv, dtype=torch.float32))
         add(f"{b}.linear_attn.norm.weight", rand(dv) + 1.0)
-        for proj, n_, k_ in (("q_proj", 2 * heads * dk, streams * hidden), ("k_proj", kv_heads * dk, streams * hidden),
-                             ("v_proj", kv_heads * dk, streams * hidden),
-                             ("o_proj", streams * hidden, heads * dk),
-                             ("indexer.index_qk_proj", 4 * 128, streams * hidden)):
+        for proj, n_, k_ in (("q_proj", 2 * heads * dk, hidden), ("k_proj", kv_heads * dk, hidden),
+                             ("v_proj", kv_heads * dk, hidden),
+                             ("o_proj", hidden, heads * dk),
+                             ("indexer.index_qk_proj", 4 * 128, hidden)):
             linear(f"{b}.self_attn.{proj}", n_, k_, fp4=False)
         for nm in ("q_norm", "k_norm", "indexer.q_layernorm", "indexer.k_layernorm"):
             add(f"{b}.self_attn.{nm}.weight", rand(64, scale=0.05, dtype=torch.float32) + 1.0)
@@ -135,21 +137,25 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
             add(f"{b}.ple.ple_embedding.ngram_heads_offsets", torch.as_tensor(ng.head_offsets))
             add(f"{b}.ple.ple_embedding.ngram_heads_vocab_sizes", torch.as_tensor(ng.head_sizes))
             heads_rows = int(ng.rows)
-            words = torch.randint(0, 256, (heads_rows, 8), generator=rng, dtype=torch.uint8)
-            scales = rand(heads_rows, 2)
-            biases = rand(heads_rows, 2)
+            # a shard row is one head's embedding at ``dims`` 4-bit values: dims/8 int32 words and
+            # dims/32 fp16 scales/biases (``host_table.HostTable`` reads the words as int32 and the
+            # scales as int16, and the engine's PLE buffer row is the same width)
+            dims = int(ng.dims)
+            words = torch.randint(0, 256, (heads_rows, dims // 8), generator=rng, dtype=torch.int32)
+            scales = rand(heads_rows, dims // 32)
+            biases = rand(heads_rows, dims // 32)
             add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.weight", words)
             add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.scales", scales)
             add(f"{b}.ple.ple_embedding.ngram_embedding.shard_0.biases", biases)
     linear("model.hyper_connection_mixer.input_mix_weight_down", low, streams * hidden, fp4=False)
     linear("model.hyper_connection_mixer.input_mix_weight_up", streams * hidden, low, fp4=False)
     add("model.hyper_connection_mixer.hc_norm.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
-    linear("lm_head", vocab, streams * hidden, fp4=False)
+    linear("lm_head", vocab, hidden, fp4=False)
     if mtp:
         add("mtp.pre_fc_norm_embedding.weight", rand(hidden, scale=0.05, dtype=torch.float32) + 1.0)
         add("mtp.pre_fc_norm_hidden.weight", rand(streams * hidden, scale=0.05, dtype=torch.float32) + 1.0)
-        linear("mtp.fc_embedding", streams * hidden, hidden, fp4=False)
-        linear("mtp.fc_hidden", streams * hidden, streams * hidden, fp4=False)
+        linear("mtp.fc_embedding", hidden, hidden, fp4=False)
+        linear("mtp.fc_hidden", hidden, hidden, fp4=False)
         for hc in ("attn_hyper_connection", "mlp_hyper_connection"):
             linear(f"mtp.layers.0.{hc}.input_mix_weight_down", low, streams * hidden, fp4=False)
             linear(f"mtp.layers.0.{hc}.input_mix_weight_up", streams * hidden, low, fp4=False)
@@ -162,9 +168,9 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
             linear(f"mtp.layers.0.mlp.shared_expert.{proj}", n_, k_, fp4=False)
         add("mtp.layers.0.mlp.experts.gate_up_proj", rand(experts, 2 * moe_width, hidden))
         add("mtp.layers.0.mlp.experts.down_proj", rand(experts, hidden, moe_width))
-        for proj, n_, k_ in (("q_proj", 2 * heads * dk, streams * hidden), ("k_proj", kv_heads * dk, streams * hidden),
-                             ("v_proj", kv_heads * dk, streams * hidden), ("o_proj", streams * hidden, heads * dk),
-                             ("indexer.index_qk_proj", 4 * 128, streams * hidden)):
+        for proj, n_, k_ in (("q_proj", 2 * heads * dk, hidden), ("k_proj", kv_heads * dk, hidden),
+                             ("v_proj", kv_heads * dk, hidden), ("o_proj", hidden, heads * dk),
+                             ("indexer.index_qk_proj", 4 * 128, hidden)):
             linear(f"mtp.layers.0.self_attn.{proj}", n_, k_, fp4=False)
         for nm in ("q_norm", "k_norm", "indexer.q_layernorm", "indexer.k_layernorm"):
             add(f"mtp.layers.0.self_attn.{nm}.weight", rand(64, scale=0.05, dtype=torch.float32) + 1.0)
@@ -209,7 +215,7 @@ def _config(layers, experts, vocab, hidden, heads, kv_heads, nk, nv, dk, dv, moe
             "hc_count": streams, "hc_lowrank": low,
             "indexer_n_heads": 4, "indexer_head_dim": 128, "indexer_budget": 128, "indexer_compress_ratio": 4,
             "ple_layer_ids": ([2] if ple and layers >= 2 else []), "ple_embed_dim": 64,
-            "ple_conv_kernel_size": 4, "ngram_size": 2, "heads_per_ngram": 1,
+            "ple_conv_kernel_size": 4, "ngram_size": 3, "heads_per_ngram": 1,
             "ngram_vocab_size_base": vocab, "make_ngram_vocab_size_divisible_by": 1, "split_ngram_parts": 1,
             "seed": 1234, "dtype": "bfloat16",
             "bos_token_id": 0, "eos_token_id": [0],

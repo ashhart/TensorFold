@@ -84,3 +84,38 @@ def test_the_loader_builds_the_nvfp4_faces(tiny: Path) -> None:
         f.seek(8 + n + lo)
         dn = torch.frombuffer(bytearray(f.read(hi - lo)), dtype=torch.bfloat16).reshape(2, 256, 128)
     assert torch.equal(fd, dn[0].to(device=fd.device, dtype=torch.float32))
+
+
+def test_the_reader_finds_the_published_naming(tmp_path: Path) -> None:
+    """The published NVFP4 checkpoint spells its language-model tensors ``model.language_model.*`` while its
+    lm_head and mtp stay top level; the loader reads the same faces as from the plain ``model.*`` layout."""
+
+    plain = write(tmp_path / "plain")
+    named = write(tmp_path / "named", prefix="model.language_model.")
+    names = _names(named)
+    assert "model.language_model.embed_tokens.weight" in names, "the fixture lost its prefix"
+    assert "model.language_model.layers.0.mlp.experts.0.gate_proj.weight" in names
+    assert "lm_head.weight" in names and "mtp.fc_embedding.weight" in names
+
+    from tensorfold.families.qwen4_exp.cuda.weights import load
+
+    if not torch.cuda.is_available():                                   # the loader builds CUDA tensors
+        pytest.skip("the loader builds CUDA tensors")
+    a, b = load(plain, mtp=True, draft_vocab=None), load(named, mtp=True, draft_vocab=None)
+    assert b.cfg.quant == "modelopt" and len(b.layers) == len(a.layers)
+    for i, (x, y) in enumerate(zip(a.layers, b.layers, strict=True)):
+        for face in ("gate_up", "down_proj"):
+            got, want = getattr(y.moe.experts, face), getattr(x.moe.experts, face)
+            assert torch.equal(nvfp4.dequantize_fp4(got), nvfp4.dequantize_fp4(want)), (i, face)
+    assert torch.equal(b.embed[0].float(), a.embed[0].float())
+    assert a.mtp is not None and b.mtp is not None
+    assert torch.equal(nvfp4.dequantize_fp4(b.mtp.layer.moe.experts.down_proj),
+                       nvfp4.dequantize_fp4(a.mtp.layer.moe.experts.down_proj))
+
+
+def _names(dir: Path) -> set[str]:
+    """Every tensor name in a tiny checkpoint's index."""
+
+    index = json.loads((dir / "model.safetensors.index.json").read_text())
+    return set(index["weight_map"])
+
