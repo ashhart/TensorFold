@@ -11,6 +11,7 @@ from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx.utils import tree_flatten
 import numpy as np
 from mlx_lm.models.gated_delta import gated_delta_update
 from mlx_lm.models.switch_layers import SwitchGLU
@@ -350,7 +351,8 @@ def prefetch_ngrams(model: Qwen4Exp) -> None:
             module.host.prefetch()
 
 
-def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False) -> tuple[Qwen4Exp, Any]:
+def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False,
+         ssd_experts: float | None = None) -> tuple[Qwen4Exp, Any]:
     from mlx_lm.utils import load_tokenizer
 
     on_host = ngrams_on_host(model_dir, ple_on_ssd)
@@ -362,6 +364,11 @@ def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False) -> tu
     for path in sorted(Path(model_dir).glob("model*.safetensors")):
         weights.update(mx.load(str(path), stream=mx.cpu))
     weights, extras = sanitize(weights)
+    quantized_paths = {k[:-len(".scales")] for k in weights if k.endswith(".scales")}
+    if ssd_experts:
+        from tensorfold.families.qwen4_exp import stream
+
+        weights = {k: v for k, v in weights.items() if not stream.switch_keys(k)}    # read into the pool instead
     if on_host:
         from tensorfold.families.qwen4_exp import host_table
 
@@ -376,7 +383,7 @@ def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False) -> tu
         mx.eval(list(weights.values()))
 
     def quantized(path: str, module: nn.Module) -> bool:
-        return hasattr(module, "to_quantized") and f"{path}.scales" in weights
+        return hasattr(module, "to_quantized") and path in quantized_paths
 
     nn.quantize(model, group_size=cfg.group_size, bits=cfg.bits, class_predicate=quantized)
     if norms_stored_around_one(weights):
@@ -384,7 +391,17 @@ def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False) -> tu
         for path, module in model.named_modules():
             if isinstance(module, CenteredRMSNorm) and f"{path}.weight" in weights:
                 weights[f"{path}.weight"] = weights[f"{path}.weight"].astype(mx.float32) - 1.0
-    model.load_weights(list(weights.items()), strict=True)
+    if ssd_experts:
+        from tensorfold.families.qwen4_exp import stream
+
+        stream.attach(model, Path(model_dir), float(ssd_experts))      # placeholders replace the routed stacks
+        expected = {k for k, _ in tree_flatten(model.parameters()) if not stream.switch_keys(k)}
+        missing = expected - set(weights)
+        if missing:
+            raise ValueError(f"checkpoint lacks {sorted(missing)[:3]}")
+        model.load_weights(list(weights.items()), strict=False)
+    else:
+        model.load_weights(list(weights.items()), strict=True)
     for key, value in extras.items():
         embedding = model.layers[int(key.split(".")[2])].ple.ple_embedding
         derived = getattr(embedding, _PLE_CONSTANTS[key.rsplit(".", 1)[-1]])

@@ -72,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "auto (Mac: up to 8, each started only while the projected memory fits 70%% of RAM; "
                             "CUDA: one at a time, the others waiting their turn)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
+    speed.add_argument("--ssd-experts", type=float, default=None, metavar="GIB",
+                       help="stream routed experts from the checkpoint into a GPU pool of this many GiB, for models "
+                            "past the memory budget (the rest stays resident; output is the resident model's)")
     speed.add_argument("--ple-on-ssd", action="store_true",
                        help="Flash Next: read the n-gram (PLE) tables from the checkpoint on SSD at each lookup "
                             "instead of holding them in memory. A trade: a few percent of decode speed for about "
@@ -383,6 +386,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
             print(news, flush=True)
     config_dir = _config_dir(args.model)
     family = families.detect(config_dir)
+    if args.ssd_experts is not None and (args.ssd_experts <= 0 or not hasattr(family.package, "expert_bytes")):
+        raise ValueError(f"--ssd-experts takes a positive GiB count for a family that streams experts; "
+                         f"{family.title} does not")
     if args.ple_on_ssd and not hasattr(family.package, "ple_bytes"):
         raise ValueError(f"--ple-on-ssd: {family.title} has no n-gram (PLE) tables to read from SSD")
     backend = _backend(args.backend, family)
@@ -426,11 +432,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     weights = sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
     if args.ple_on_ssd:
         weights -= family.package.ple_bytes(model_dir)      # read from disk at each lookup, never loaded
+    if args.ssd_experts is not None:
+        weights += int(args.ssd_experts * gib) - family.package.expert_bytes(model_dir)   # the pool, not the stacks
     if weights >= memory_limit - PROCESS_BYTES:
+        stream = ("stream its routed experts from SSD with --ssd-experts GIB (slower), "
+                  if args.ssd_experts is None and hasattr(family.package, "expert_bytes") else "")
         raise ValueError(f"{family.title}'s weights ({weights / gib:.1f} GiB) do not fit this server's "
                          f"{memory_limit / gib:.1f} GiB memory budget ({fraction:.0%} of RAM, or "
-                         "TENSORFOLD_MEMORY_LIMIT_GB): serve it on a Mac with more memory, or use a smaller or more "
-                         "quantized checkpoint")
+                         f"TENSORFOLD_MEMORY_LIMIT_GB): serve it on a Mac with more memory, {stream}or use a smaller "
+                         "or more quantized checkpoint")
     return _serve_mlx(args, family, model_dir, context, required_files, memory_limit, fraction)
 
 
@@ -450,6 +460,8 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         options["mtp_drafts"] = int(args.mtp_drafts)
     if args.ple_on_ssd:
         options["ple_on_ssd"] = True
+    if args.ssd_experts is not None:
+        options["ssd_experts"] = float(args.ssd_experts)
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type})", flush=True)
     model, tokenizer = family.package.load(model_dir, **options)

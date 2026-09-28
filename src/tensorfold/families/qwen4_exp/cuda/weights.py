@@ -201,14 +201,15 @@ class Weights:
         return self.inv_freq.device
 
     def nbytes(self) -> int:
-        total = 0
+        """Device bytes the weights hold, each storage once (an EXL3 layer's expert views share one buffer)."""
+
+        seen: dict[int, int] = {}
 
         def add(x: Any) -> None:
-            nonlocal total
             if isinstance(x, torch.Tensor):
-                total += x.numel() * x.element_size()
-            elif isinstance(x, (Q4,)):
-                total += x.nbytes()
+                if x.device.type != "cpu":
+                    storage = x.untyped_storage()
+                    seen[storage.data_ptr()] = storage.nbytes()
             elif hasattr(x, "__dataclass_fields__"):
                 for f in x.__dataclass_fields__:
                     add(getattr(x, f))
@@ -216,12 +217,9 @@ class Weights:
                 for y in x:
                     add(y)
 
-        add(self.embed)
-        add(self.layers)
-        add(self.mixer)
-        add(self.head)
-        add(self.mtp)
-        return total
+        for part in (self.embed, self.layers, self.mixer, self.head, self.mtp, self.draft_head, self.draft_ids):
+            add(part)
+        return sum(seen.values()) + (self.x3.nbytes() if self.x3 is not None else 0)
 
 
 _DT = {"U32": torch.int32, "I32": torch.int32, "BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32,

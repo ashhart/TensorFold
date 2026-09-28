@@ -1,4 +1,4 @@
-"""Flash Next's EXL3 path on CUDA (``families/qwen4_exp/cuda/exl3.py``).
+"""Flash Next's EXL3 path on CUDA (``families/qwen4_exp/cuda/exl3*.py``).
 
 Always: the unquantized fp16 matmul against an fp64 reference and its row invariance (a row alone, in any window,
 and through the K-split partials), and the n-gram row decoder against a reference of ExLlamaV3's row codec
@@ -21,7 +21,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
-from tensorfold.families.qwen4_exp.cuda import exl3 as X  # noqa: E402
+from tensorfold.families.qwen4_exp.cuda import exl3, exl3_mm, exl3_pack  # noqa: E402
 
 DEV = "cuda"
 MODEL = os.environ.get("TENSORFOLD_EXL3_FLASHNEXT", "")
@@ -35,12 +35,12 @@ WINDOWS = (1, 2, 3, 16, 17, 64, 128)
 @pytest.mark.parametrize("n,k", [(324, 10240), (10240, 320), (96, 2560), (2560, 2560), (10240, 2560)])
 def test_f16_matches_fp64_and_is_row_invariant(n, k):
     g = torch.Generator().manual_seed(n + k)
-    sc = X.Scratch(11)
+    sc = exl3_mm.Scratch(11)
     w = (torch.randn(n, k, generator=g) * 0.02).half()
-    lin = X.f16(sc, [w], DEV)
-    sc.part = torch.empty((lin.sk * X.ROWS * n,), dtype=torch.float32, device=DEV)
-    x = torch.randn(X.ROWS, k, generator=g).to(torch.bfloat16).to(DEV)
-    full = torch.empty((X.ROWS, n), dtype=torch.bfloat16, device=DEV)
+    lin = exl3_mm.f16(sc, [w], DEV)
+    sc.part = torch.empty((lin.sk * exl3_mm.ROWS * n,), dtype=torch.float32, device=DEV)
+    x = torch.randn(exl3_mm.ROWS, k, generator=g).to(torch.bfloat16).to(DEV)
+    full = torch.empty((exl3_mm.ROWS, n), dtype=torch.bfloat16, device=DEV)
     lin(x, full)
     ref = x.double() @ w.double().to(DEV).t()
     assert ((full.double() - ref).norm() / ref.norm()).item() < 1e-2
@@ -69,7 +69,7 @@ def _codec_reference(packed: np.ndarray, bits: int, bias: np.ndarray, heads: int
     states = (stream[:, src] << m).sum(axis=-1)
     prod = (states * 0x83DCD12D) & 0xFFFFFFFF
     hs = (prod & 255) + ((prod >> 8) & 255) + ((prod >> 16) & 255) + ((prod >> 24) & 255)
-    cb = ((1024 + hs).astype(np.float32) * np.float32(X.K_INV) + np.float32(X.K_BIAS)).astype(np.float16)
+    cb = ((1024 + hs).astype(np.float32) * np.float32(exl3_mm.K_INV) + np.float32(exl3_mm.K_BIAS)).astype(np.float16)
     head = np.arange(n) % heads
     return (cb.astype(np.float32) * scales[:, None] + bias[head].astype(np.float32)).astype(np.float16)
 
@@ -83,7 +83,7 @@ def test_ple_rows_match_the_row_codec(bits):
     packed[:, 0] = (rng.random(rows * heads).astype(np.float16) * np.float16(0.05) + np.float16(0.001)).view(np.int16)
     bias = (rng.standard_normal((heads, 160)) * 0.01).astype(np.float16)
     out = torch.empty((rows, heads * 160), dtype=torch.float16, device=DEV)
-    X.ple_rows(rows, torch.from_numpy(packed).to(DEV), torch.from_numpy(bias).to(DEV), heads, 160, bits, out)
+    exl3_mm.ple_rows(rows, torch.from_numpy(packed).to(DEV), torch.from_numpy(bias).to(DEV), heads, 160, bits, out)
     ref = _codec_reference(packed, bits, bias, heads).reshape(rows, heads * 160)
     got = out.cpu().numpy()
     assert np.array_equal(got.view(np.int16), ref.view(np.int16)), np.abs(got.astype(np.float32) - ref).max()
@@ -92,12 +92,12 @@ def test_ple_rows_match_the_row_codec(bits):
 # -- a real checkpoint -----------------------------------------------------------------------------------------
 @needs_model
 def test_pack_norms_are_centred_and_rows_equal_exllamav3():
-    pk = X.Pack(MODEL)
+    pk = exl3_pack.Pack(MODEL)
     names = [f"model.language_model.layers.{i}.attn_hyper_connection.hc_norm.weight" for i in range(8)]
-    assert X.centred_offset(pk, names) == 1.0
+    assert exl3.centred_offset(pk, names) == 1.0
     ext = pytest.importorskip("exllamav3.ext").exllamav3_ext
     base = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding."
-    t = X.NgramTable(pk, base, 128, DEV)
+    t = exl3_pack.NgramTable(pk, base, 128, DEV)
     rng = np.random.default_rng(1)
     ids = np.stack([rng.integers(int(t.head_offsets[h]), int(t.head_offsets[h] + t.head_sizes[h]), size=(64,))
                     for h in range(16)], axis=1).reshape(-1)
@@ -106,7 +106,7 @@ def test_pack_norms_are_centred_and_rows_equal_exllamav3():
     ref = torch.empty((len(ids), 160), dtype=torch.half, device=DEV)
     ext.ngram_dequant(rows, t.bits, heads, t.head_bias, ref)
     out = torch.empty((64, 16 * 160), dtype=torch.half, device=DEV)
-    X.ple_rows(64, rows, t.head_bias, 16, 160, t.bits, out)
+    exl3_mm.ple_rows(64, rows, t.head_bias, 16, 160, t.bits, out)
     assert torch.equal(out.view(-1, 160), ref)
 
 
@@ -115,10 +115,10 @@ def test_real_routed_experts_match_fp64_and_are_row_invariant():
     from tensorfold.cuda.exl3 import format as fmt
     from tensorfold.cuda.exl3.experts import Scratch, routed
 
-    pk = X.Pack(MODEL)
+    pk = exl3_pack.Pack(MODEL)
     name = "model.language_model.layers.5.mlp"
-    ex = X.expert_table(pk, name + ".experts", 512, name + ".shared_expert", DEV)
-    s = Scratch(ex, X.MOE_ROWS, 11, device=DEV)
+    ex = exl3.expert_table(pk, name + ".experts", 512, name + ".shared_expert", DEV)
+    s = Scratch(ex, exl3_mm.MOE_WINDOW, 11, device=DEV)
     g = torch.Generator().manual_seed(2)
     rows = 64
     x = (torch.randn(rows, 2560, generator=g) * 0.5).to(torch.bfloat16).to(DEV)
@@ -161,7 +161,7 @@ def cut_model():
 
     W.Config.read = staticmethod(cut)
     try:
-        w = X.load(MODEL, DEV, mtp=True, draft_vocab="default")
+        w = exl3.load(MODEL, DEV, mtp=True, draft_vocab="default")
     finally:
         W.Config.read = real
     yield w
@@ -175,7 +175,7 @@ def test_cut_model_windows_equal_one_row_steps(cut_model):
     from tensorfold.families.qwen4_exp.cuda.forward import commit, forward
 
     w = cut_model
-    e = Engine(w, capacity=512, max_rows=16, prefill_rows=128, graphs=False)
+    e = Engine(w, capacity=512, max_rows=max(WINDOWS), prefill_rows=128, graphs=False)
     toks = [int(t) for t in np.random.default_rng(3).integers(0, w.cfg.vocab, size=150)]
     e.reset()
     ref = []
@@ -211,3 +211,31 @@ def test_cut_model_mtp_drafts_emit_serial_tokens(cut_model, graphs):
         s = serial_decode(e, prefill(e, prompt, sampling, mtp=False), 48, sampling)
         d = mtp_decode(e, prefill(e, prompt, sampling, mtp=True), 48, sampling, depth=6)
         assert s.tokens == d.tokens, sampling
+
+
+@needs_model
+def test_cut_model_prompts_ignore_chunking_and_resume_as_fresh(cut_model):
+    """The EXL3 prompt path: state and first token do not depend on chunk size; a kept prompt end resumes as fresh."""
+
+    from tensorfold.families.qwen4_exp.cuda.decode import Engine, prefill
+
+    w = cut_model
+    prompt = [int(t) for t in np.random.default_rng(5).integers(0, w.cfg.vocab, size=150)]
+    runs = []
+    for rows in (150, 64, 17):
+        e = Engine(w, capacity=512, max_rows=8, prefill_rows=rows, graphs=False)
+        first = prefill(e, prompt, None)
+        runs.append((first, e.st.snapshot(), e.last_streams.clone()))
+    for first, snap, tail in runs[1:]:
+        assert first == runs[0][0]
+        assert torch.equal(tail, runs[0][2])
+        for key in ("rec", "conv", "ple_tail"):
+            assert torch.equal(snap[key], runs[0][1][key]), key
+    e = Engine(w, capacity=512, max_rows=8, prefill_rows=64, graphs=False)
+    prefill(e, prompt[:90], None)
+    kept = {"state": e.st.snapshot(), "tail": e.last_streams.clone()}
+    first = prefill(e, prompt, None, resume=kept)
+    assert first == runs[0][0]
+    snap = e.st.snapshot()
+    for key in ("rec", "conv", "ple_tail"):
+        assert torch.equal(snap[key], runs[0][1][key]), key

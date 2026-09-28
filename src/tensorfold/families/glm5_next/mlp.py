@@ -70,8 +70,8 @@ class MoE:
     def select(self, x: mx.array) -> tuple[mx.array, mx.array]:
         return self.route(x.astype(mx.float32) @ self.router)
 
-    def experts(self, x: mx.array, idx: mx.array) -> mx.array:
-        """Rows x [R, D] through their experts idx [R, k]: [R, k, D]."""
+    def experts(self, x: mx.array, idx: mx.array, qs: tuple[Q, Q, Q] | None = None) -> mx.array:
+        """Rows x [R, D] through their experts idx [R, k] (of ``qs``, else the resident stacks): [R, k, D]."""
 
         from mlx_lm.models.switch_layers import _gather_sort, _scatter_unsort
 
@@ -86,8 +86,9 @@ class MoE:
             return mx.gather_qmm(inp, q.weight, q.scales, q.biases, rhs_indices=ids, transpose=True,
                                  group_size=q.group, bits=q.bits, sorted_indices=do_sort)
 
-        act = swiglu(run(self.gate, h), run(self.up, h), self.cfg.swiglu_limit)
-        y = run(self.down, act)
+        gate, up, down = qs or (self.gate, self.up, self.down)
+        act = swiglu(run(gate, h), run(up, h), self.cfg.swiglu_limit)
+        y = run(down, act)
         if do_sort:
             y = _scatter_unsort(y, order, idx.shape)
         return y.squeeze(-2)
@@ -110,6 +111,10 @@ class MoE:
         return acc.astype(dtype)
 
     def __call__(self, x: mx.array, rows_exact: bool) -> mx.array:
+        if "streamer" in self.__dict__:                                 # routed experts from the slot pool
+            from tensorfold.families.glm5_next import stream
+
+            return stream.moe(self, x, rows_exact)
         rows = int(x.shape[0])
         if rows_exact and "moe" in C.FUSED and self.fused_ok and K.metal():
             return MK.moe_rows(self, x)

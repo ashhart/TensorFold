@@ -1,18 +1,4 @@
-// The grouped EXL3 expert GEMV for any EXL3 storage. Included by experts_cb{0,1,2}.cu, one codebook each, so the
-// instances build in parallel.
-//
-// Format (after ExLlamaV3, MIT, Copyright (c) 2025 Turboderp): a 16x16 tile of a matrix stored at K2 half-bits a
-// value is 4 * K2 32-bit words (16 * K int16, plus 8 for the half-integer rates), a bitstream read MSB first
-// within each little-endian word, in which the value at position p (0..255) is the 16-bit state ending at bit
-// end(p) (mod the tile), decoded by the layer's codebook. Lane L of a warp decodes positions 8L..8L+7, which are
-// exactly the B fragments of two mma.m16n8k16 (columns 0-7 and 8-15 of the tile), so a tile goes from memory to the
-// tensor cores without a layout change: the warp loads the tile's words coalesced (one word a lane, two above 4
-// bits) and each lane fetches the one or two words under each run of its windows by shuffle.
-//
-// Every output depends only on its own row: the rows of a window share an mma tile but mma keeps rows
-// independent, the K range of every warp and split is fixed by the shape, and warps are summed in a fixed order
-// through shared memory, never with atomics. For 4-bit mcg with the GLM tile settings this issues the same mma
-// sequence as TensorFold's GLM kernel (families/glm5_next/cuda/exl3.cu), so its partial sums are bit-identical.
+// Grouped EXL3 expert GEMV (after ExLlamaV3, MIT, Copyright (c) 2025 Turboderp): rows stay independent, K ranges fixed by shape, warps summed in order.
 #pragma once
 
 #include <cuda_fp16.h>
@@ -23,8 +9,7 @@
 
 namespace tf_exl3x {
 
-// Two values of codebook CB (0 3inst, 1 mcg, 2 mul1) from two 16-bit states as a half2 (first state in .x);
-// bit-identical to ExLlamaV3's decode_3inst_2<cb> (codebook.cuh) and to TensorFold's GLM mcg2.
+// Two codebook values (CB 0 3inst, 1 mcg, 2 mul1) as a half2, bit-identical to ExLlamaV3's decode_3inst_2<cb>.
 template <int CB>
 __device__ __forceinline__ uint32_t cb_pair(uint32_t s0, uint32_t s1) {
     if constexpr (CB == 2) {
@@ -53,16 +38,12 @@ __device__ __forceinline__ uint32_t cb_pair(uint32_t s0, uint32_t s1) {
     }
 }
 
-// Storage at K2 half-bits a value (K = K2 / 2 bits; odd K2 are the half-integer rates, whose positions alternate
-// K2/2 and K2/2 + 1 bits, the extra bit on odd positions). A tile is 4 * K2 words; the state of position p ends at
-// bit end(p) of the tile's bitstream (MSB first within each 32-bit word, words in order, cyclic). A lane's eight
-// windows are split into NG runs of GV that each lie within two consecutive words (checked for every lane).
+// K2 half-bits a value: a tile is 4 * K2 words; a lane's eight windows fall in NG runs of GV within two words.
 template <int K2>
 struct Fmt {
     static constexpr int TW = 4 * K2;
     static constexpr int LW = (TW + 31) / 32;
-    // how many of the lane's eight windows can share one 64-bit word merge (verified by
-    // tests/cuda/test_exl3_experts.py::test_lane_map_extracts_every_window for every K2 in 1..16)
+    // windows sharing one 64-bit merge (tests/cuda/test_exl3_experts.py checks every K2)
     static constexpr int GV = (K2 >= 13) ? 2 : ((K2 == 7 || (K2 >= 9 && K2 <= 12) || K2 == 16) ? 4 : 8);
     static constexpr int NG = 8 / GV;
     __host__ __device__ static constexpr int end(int p) { return (p >> 1) * K2 + ((p & 1) ? K2 : (K2 >> 1)); }
@@ -97,8 +78,7 @@ __device__ __forceinline__ uint32_t fetch(const uint32_t (&w)[LW], int idx) {
     }
 }
 
-// This lane's eight values of a tile (the tile's words spread over the warp, lane l holding words l, l + 32) as
-// the B fragments of the tile's two n8 halves.
+// This lane's eight values of a tile as the B fragments of its two n8 halves.
 template <int CB, int K2>
 __device__ __forceinline__ void decode_tile(const uint32_t (&w)[Fmt<K2>::LW], const LaneMap<K2>& m, int lane,
                                             uint32_t (&b0)[2], uint32_t (&b1)[2]) {
@@ -155,8 +135,7 @@ __device__ __forceinline__ void load_words(uint32_t (&dst)[Fmt<K2>::LW], const u
     }
 }
 
-// One warp's k tiles [kt0, kt0 + nkt) of one expert matrix: acc[i][h] += X rows @ W_q (columns of n tile nt0 + i).
-// PF tiles ahead are in flight.
+// One warp's k tiles [kt0, kt0 + nkt) of an expert matrix into acc, PF tiles in flight.
 template <int CB, int K2, int NT, int PF>
 __device__ __forceinline__ void warp_tiles(const uint32_t* __restrict__ T, int NTILES, int kt0, int nkt, int nt0,
                                            const half* x0, const half* x1, bool ok0, bool ok1, int lane,
@@ -202,17 +181,12 @@ __device__ __forceinline__ void warp_tiles(const uint32_t* __restrict__ T, int N
     }
 }
 
-// K2 values an instance covering [LO, HI] compiles (the storage ExLlamaV3 writes: 1..8 bits and every
-// half-integer rate 1.5 .. 7.5, so 2..16 in half-bits).
+// The K2 values an instance covering [LO, HI] compiles (half-bits 2..16).
 __host__ __device__ constexpr bool k2_supported(int k2) {
     return k2 >= 2 && k2 <= 16;
 }
 
-// Program (u, n block, (mat * SK + split) * MT + member tile): up to 16 members (row, slot) of distinct expert
-// uids[u] times W_q of matrix `mat` (trellis at TP_mat[e], K2_mat[e] half-bits a value) over this split's K range,
-// for NT n tiles: Z[mat][split][member row][n]. Warp w runs a fixed contiguous range of the split's k tiles;
-// warps are added in order 0..W-1. K2 outside [LO, HI] is not compiled into the instance (the block traps; the
-// host picks an instance covering the layer).
+// Program (expert u, n block, split and member tile): up to 16 members times W_q over the split's K range; warps added in order.
 template <int CB, int NT, int W, int PF, int LO, int HI>
 __global__ void __launch_bounds__(W * 32) grouped_kernel(
     const half* __restrict__ X0, const half* __restrict__ X1, const int64_t* __restrict__ TP0,

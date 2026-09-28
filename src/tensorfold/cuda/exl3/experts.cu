@@ -1,15 +1,4 @@
-// EXL3 routed experts of any storage on CUDA: grouping, the rotations, the SwiGLU epilogue and the fixed-order
-// combine around the grouped trellis GEMV (experts_grouped.cuh, instantiated one codebook a file in
-// experts_cb{0,1,2}.cu so they build in parallel). One grouped launch per projection covers a whole layer whose
-// experts each have their own bit width (1..8 bits and the half-integer mul1 rates, "mixed-K") in any of the three
-// EXL3 codebooks (3inst, mcg, mul1).
-//
-// Generalizes TensorFold's GLM kernels (families/glm5_next/cuda/exl3.cu, 4-bit mcg only); for 4-bit mcg with the
-// GLM tile settings every kernel here issues the same arithmetic in the same order, so the results are
-// bit-identical to that path.
-//
-// Every output depends only on its own row: the grouped GEMV keeps rows independent (see experts_grouped.cuh), and
-// splits, slots and the Hadamard butterflies are summed in a fixed order, never with atomics.
+// EXL3 routed experts, any codebook and a width per expert: fixed-order splits, slots and butterflies, no atomics; 4-bit mcg matches GLM's kernel bit for bit.
 
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -23,10 +12,7 @@ namespace {
 
 constexpr float HAD_SCALE = 0.08838834764831845f;   // 1 / sqrt(128)
 
-// ---------------------------------------------------------------------------------------------------------------
-// Grouping: one block. The distinct experts (< E) of all rows in increasing id order: uids[u], members[u][j] =
-// row * 32 + slot of the j-th row (in row order) that picked it (-1 after the last), ucount[0] = their number.
-// Picks >= E (a shared expert slot, padding) are skipped. Same layout as the GLM family's Triton _group.
+// Grouping in one block: distinct experts (< E) in id order, members row * 32 + slot in row order, -1 after the last.
 constexpr int GROUP_THREADS = 1024;
 constexpr int GROUP_PER_THREAD = 4;
 
@@ -85,9 +71,7 @@ __global__ void __launch_bounds__(GROUP_THREADS) group_kernel(const int* __restr
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Fast Walsh-Hadamard transform of 128 values held 4 per lane (lane L: values 4L..4L+3), natural order, fixed
-// butterfly order: strides 1, 2 in registers, 4..64 across lanes.
+// Walsh-Hadamard transform of 128 values, 4 a lane, fixed butterfly order (strides 1, 2 in registers, 4..64 across lanes).
 __device__ __forceinline__ void fwht128(float (&v)[4], int lane) {
     float a = v[0] + v[1], b = v[0] - v[1], c = v[2] + v[3], d = v[2] - v[3];
     v[0] = a + c; v[1] = b + d; v[2] = a - c; v[3] = b - d;
@@ -105,8 +89,7 @@ template <typename T> __device__ __forceinline__ float to_f(T v);
 template <> __device__ __forceinline__ float to_f<__nv_bfloat16>(__nv_bfloat16 v) { return __bfloat162float(v); }
 template <> __device__ __forceinline__ float to_f<half>(half v) { return __half2float(v); }
 
-// Program (member row, 128-block of K, matrix): Xh[mat][row][block] = fp16((x[row] * suh[mat][e]) @ H) for the
-// gate and up projections of every routed slot whose pick is < E. One warp per program.
+// Program (member row, 128-block of K, matrix): Xh = fp16((x * suh) @ H) for gate and up of every routed slot (pick < E).
 template <typename TIN>
 __global__ void rot_in_kernel(const TIN* __restrict__ x, int x_stride, const int* __restrict__ pick,
                               const half* __restrict__ suh0, const half* __restrict__ suh1, half* __restrict__ out0,
@@ -129,10 +112,7 @@ __global__ void rot_in_kernel(const TIN* __restrict__ x, int x_stride, const int
 
 __device__ __forceinline__ float bf16r(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
-// Program (member row, 128-block of the expert width): gate and up outputs summed over the splits in order,
-// rotated, scaled by svh; the activation; then the down projection's input rotation: Xd = fp16((act * suh_d) @ H).
-// act_mode 0: bf16 SwiGLU as in the GLM family (gate clamped to <= limit, up to [-limit, limit], bf16 roundings).
-// act_mode 1: fp32 SwiGLU, silu(g) * u with the same optional clamps and no intermediate rounding.
+// Program (member row, 128-block of the width): splits summed in order, rotated, * svh, SwiGLU (0: GLM's bf16 roundings, 1: fp32), then Xd = fp16((act * suh_d) @ H).
 __global__ void gateup_epilogue_kernel(const float* __restrict__ Z, const int* __restrict__ pick,
                                        const half* __restrict__ svh_g, const half* __restrict__ svh_u,
                                        const half* __restrict__ suh_d, half* __restrict__ xd, int P, int N, int SK,
@@ -177,8 +157,7 @@ __global__ void gateup_epilogue_kernel(const float* __restrict__ Z, const int* _
     for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
 }
 
-// Program (member row, 128-block of the model width): the down projection's output summed over the splits in
-// order, rotated and scaled by svh: Y[row * slots + slot][:] (fp32).
+// Program (member row, 128-block of the model width): Y = (splits summed in order) @ H * svh_d, fp32.
 __global__ void down_epilogue_kernel(const float* __restrict__ Z, const int* __restrict__ pick,
                                      const half* __restrict__ svh_d, float* __restrict__ y, int P, int D, int SK,
                                      int E) {
@@ -211,10 +190,7 @@ __global__ void combine_kernel(const float* __restrict__ y, const float* __restr
     out[(size_t)r * D + d] = acc;
 }
 
-// down_epilogue_kernel and combine_kernel in one launch. Program (row, 128-block of the model width), one warp a
-// slot: warp k finishes slot k's output as down_epilogue_kernel does and stores it (routed slots), or reads what the
-// caller left in y (other slots); then warp 0 runs the combine's fma chain over the slots in slot order from 0. The
-// same arithmetic in the same order as the two launches, so the same bits.
+// down_epilogue_kernel then combine_kernel in one launch, the same arithmetic in the same order (the same bits).
 __global__ void down_combine_kernel(const float* __restrict__ Z, const int* __restrict__ pick,
                                     const half* __restrict__ svh_d, float* __restrict__ y,
                                     const float* __restrict__ wts, float* __restrict__ out, int P, int D, int SK,

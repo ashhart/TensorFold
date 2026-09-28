@@ -408,9 +408,7 @@ class App:
         if tail:
             final["content"] = tail
         finish = "tool_calls" if calls else ("stop" if out and out[-1] in self.engine.eos else "length")
-        # "return_token_ids": the reply's token ids ride in the response's "tensorfold" block, for exactness checks
-        # (drafted == serial by SHA-256 of the ids through this path)
-        if body.get("return_token_ids"):
+        if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "stats": stats}
@@ -510,8 +508,6 @@ def make_handler(app: App):
                          "total_tokens": result["prompt_tokens"] + result["completion_tokens"]}
                 if (body.get("stream_options") or {}).get("include_usage"):
                     end["usage"] = usage
-                if body.get("return_token_ids") or (body.get("stream_options") or {}).get("include_tensorfold"):
-                    end["tensorfold"] = result["stats"]
                 try:
                     self.wfile.write(f"data: {json.dumps(end)}\n\ndata: [DONE]\n\n".encode())
                     self.wfile.flush()

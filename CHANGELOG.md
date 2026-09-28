@@ -3,20 +3,30 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
-## 0.3.6 (in progress)
+## 0.3.6 (28 Sep 2026)
 
-- **GLM-5.3-Flash on Macs.** GLM runs on Apple Silicon with drafted replies equal to serial ones, prompts prefill
-  through the absorbed attention path, and tool calls parse in both servers. Thanks to @chadhurley25075-png (#9, #39)
-  and @jeidbugs404 (#35).
-- **Gemma 4 26B-A4B on the lanes,** exact at every width. Thanks to @cshintov (#10).
-- **Memory back after long prompts.** The server hands MLX's freed buffers back when it goes idle. Thanks to
-  @kingjamez (#44).
-- **Flash Next on 128 GB Macs.** `--ple-on-ssd` reads its n-gram tables from disk instead of memory (#16).
-- **Faster prompt processing.** Flash Next sizes its prompt chunks to the memory it has, and Nemotron takes prompts in
-  chunks of up to 8,192 tokens on M5 GPUs. The weights stay wired in memory while a server runs.
-- **MLX 0.32.2 or newer** is required on Macs. Earlier builds processed prompts more slowly.
-- **What's new after an update.** `tensorfold update` now prints these notes when it finishes, and the first run of a
-  new version prints a link to them.
+- **GLM-5.3-Flash on Macs** with 256 GB, drafted replies equal to serial ones. Prompts process at or above mlx-vlm
+  from 2k to 32k tokens on an M3 Ultra, and tool calls parse in both servers. Thanks to @chadhurley25075-png (#9,
+  #39) and @jeidbugs404 (#35).
+- **Gemma 4 26B-A4B on the lanes,** exact at every width, with prompts at or above mlx_lm from 2k to 64k tokens on
+  an M3 Ultra. Thanks to @cshintov (#10).
+- **Bigger models on smaller Macs.** `--ple-on-ssd` reads Flash Next's n-gram tables from disk, so a 128 GB Mac holds
+  it (#16). `--ssd-experts GIB` streams routed experts from the checkpoint into a GPU pool of that size, so Flash Next
+  fits a 64 GB Mac and GLM a 128 GB one. Replies are the resident model's tokens; decode runs at 0.31-0.39x resident
+  speed for Flash Next and 0.13-0.17x for GLM (measured on an M3 Ultra; `pip install "tensorfold[ssd]"` first) (#17).
+- **EXL3 checkpoints on CUDA (experimental):** Qwen3.8-27B and Flash Next packs from turboderp, exact on the lanes.
+  Decode runs 1.6-3.6x vLLM with MTP; prompt processing is about half the MLX checkpoints' speed for now, and the
+  fix is next. Thanks to @vcruz305 (#42).
+- **Faster prompts.** Flash Next sizes its prompt chunks to the memory it has, Nemotron takes up to 8,192 tokens a
+  chunk on M5 GPUs, and the weights stay wired while a server runs.
+- **Fixes:** GLM on two Sparks answered "!" past about 2,000 prompt tokens, and EXL3 GLM prompts past 128 tokens
+  failed (#53). A reply that isn't a tool call comes back as content, not an HTTP 500 (#51). The server hands MLX's
+  freed buffers back when it goes idle (@kingjamez, #44).
+- **MLX 0.32.2 or newer** is required on Macs.
+- **What's new after an update:** `tensorfold update` prints these notes when it finishes.
+- **Known:** replies to prompts longer than one prompt chunk can differ between machines with different memory,
+  because the chunk size follows the memory budget. Within one server, drafted replies always equal serial ones and
+  resumed prompts equal fresh ones.
 
 ## 0.3.5.1 (28 Sep 2026)
 

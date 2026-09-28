@@ -19,6 +19,7 @@ def start(family, path, requested, explicit, world, streams, rank=0):
     return obj, lambda: obj.__init__(path, max_len=requested, depth=3, **kw)
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("family,world", [("linear", 1), ("linear", 2), ("indexed", 1)])
 def test_parallel_startup_is_admitted_before_any_load(tmp_path, fake_runtime, family, world):  # noqa: F811
     checkpoint(tmp_path, small_config(), WEIGHTS)
@@ -32,6 +33,7 @@ def test_parallel_startup_is_admitted_before_any_load(tmp_path, fake_runtime, fa
     assert plan["serving_peak_bytes_estimate"] <= plan["budget_bytes"]
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("family,world", [("linear", 1), ("linear", 2), ("indexed", 1)])
 def test_parallel_window_that_cannot_fit_every_stream_is_refused_before_loading(tmp_path, monkeypatch, fake_runtime,
                                                                                 family, world):  # noqa: F811
@@ -70,6 +72,7 @@ def test_stream_geometry_counts_every_stream_and_kept_prompt_end():
     assert draft_geometry(draft, 1, 12, bounded=True, streams=4, kept=9).bytes_at(9000) > 4 * single.bytes_at(9000) // 2
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("streams", [2, 5])
 def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocations, streams):  # noqa: F811
     arrays, fake = allocations
@@ -121,6 +124,7 @@ def handshake(monkeypatch, path, rank, **kw):
     return rows[0]
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("peer", [dict(streams=4), dict(streams=2, context=8192, context_explicit=True)])
 def test_two_ranks_with_different_streams_or_context_refuse_to_start(tmp_path, monkeypatch, fake_runtime,
                                                                      peer):  # noqa: F811

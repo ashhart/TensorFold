@@ -269,7 +269,7 @@ def _parse_bare_json_tool_calls(text: str, known: dict[str, str], *, max_calls: 
             parsed = _parse_tool_call_payload(json.dumps(item, ensure_ascii=False), complete=max_calls is not None)
         except (ValueError, TypeError):
             if max_calls is None:
-                raise
+                return None           # JSON that is not a call (a structured answer) is the reply's content
             continue
         if parsed is None:
             return None
@@ -278,6 +278,19 @@ def _parse_bare_json_tool_calls(text: str, known: dict[str, str], *, max_calls: 
             return None
         calls.append(_openai_tool_call(raw_name, arguments, known))
     return calls or None
+
+
+def _envelopes(text: str) -> list[tuple[int, int, str]]:
+    """(start, end, payload) of each tool-call block in order; a block inside an earlier one is part of it."""
+
+    found = sorted([(m.start(), m.end(), m.group(1).strip()) for m in _TOOL_CALL_BLOCK_RE.finditer(text)]
+                   + [(m.start(), m.end(), m.group(2).strip()) for m in _NAMESPACED_TOOL_CALL_BLOCK_RE.finditer(text)]
+                   + [(m.start(), m.end(), m.group(1).strip()) for m in _GEMMA_TOOL_CALL_BLOCK_RE.finditer(text)])
+    kept: list[tuple[int, int, str]] = []
+    for envelope in found:
+        if not kept or envelope[0] >= kept[-1][1]:
+            kept.append(envelope)
+    return kept
 
 
 def parse_tool_calls_from_content(
@@ -289,23 +302,16 @@ def parse_tool_calls_from_content(
         return text, None
     known = {tool_spec_name(tool).lower(): tool_spec_name(tool) for tool in tools}
     schemas = parameter_schemas(tools)
-    envelopes: list[tuple[int, int, str]] = []
-    for match in _TOOL_CALL_BLOCK_RE.finditer(text):
-        envelopes.append((match.start(), match.end(), match.group(1).strip()))
-    for match in _NAMESPACED_TOOL_CALL_BLOCK_RE.finditer(text):
-        envelopes.append((match.start(), match.end(), match.group(2).strip()))
-    for match in _GEMMA_TOOL_CALL_BLOCK_RE.finditer(text):
-        envelopes.append((match.start(), match.end(), match.group(1).strip()))
+    envelopes = _envelopes(text)
     if not envelopes:
         bare_calls = _parse_bare_json_tool_calls(text, known, max_calls=max_calls)
         if bare_calls is not None:
             return "", bare_calls
         return text, None
-    envelopes.sort(key=lambda item: item[0])
     calls: list[dict[str, Any]] = []
     residue_parts: list[str] = []
     cursor = 0
-    for index, (start, end, block) in enumerate(envelopes):
+    for start, end, block in envelopes:
         residue_parts.append(text[cursor:start])
         cursor = end
         if max_calls is not None and len(calls) >= max_calls:
@@ -313,22 +319,13 @@ def parse_tool_calls_from_content(
         try:
             parsed = _parse_tool_call_payload(block, schemas, complete=max_calls is not None)
         except (ValueError, TypeError):
-            if max_calls is None:
-                raise
             parsed = None
-        if parsed is None:
-            if max_calls is not None:
-                continue
-            raise ValueError("unsupported tool_call payload format")
-        raw_name, arguments = parsed
-        if raw_name.lower() not in known:
-            # Keep unoffered tool calls as text to avoid ending the stream and triggering repeated client retries.
+        if parsed is None or parsed[0].lower() not in known:
+            # A malformed or unoffered call stays text: the reply is content, never an error or a client retry loop.
             if max_calls is None:
                 residue_parts.append(text[start:end])
             continue
-        calls.append(_openai_tool_call(raw_name, arguments, known))
-        if index + 1 < len(envelopes) and envelopes[index + 1][0] < end:
-            raise ValueError("overlapping tool_call blocks")
+        calls.append(_openai_tool_call(*parsed, known))
     residue_parts.append(text[cursor:])
     content = "".join(residue_parts).strip()
     return content, calls or None

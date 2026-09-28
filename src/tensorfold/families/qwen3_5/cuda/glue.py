@@ -241,3 +241,11 @@ def embed(ids: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, biases:
     out = torch.empty((W, d), dtype=torch.bfloat16, device=ids.device)
     _embed[(W, d // 64)](ids, weight, scales, biases, out, D=d, num_warps=1)
     return out
+
+
+def embedding(ids: torch.Tensor, q) -> torch.Tensor:
+    """Token rows: an EXL3 pack's table as stored, or the MLX 4-bit table dequantized."""
+
+    if q.layout == "b16":
+        return q.weight[ids.to(torch.int64)].to(torch.bfloat16).contiguous()
+    return embed(ids, q.weight, q.scales, q.biases, q.k)

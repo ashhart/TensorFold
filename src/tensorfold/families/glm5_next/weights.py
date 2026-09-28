@@ -86,7 +86,15 @@ def _materialize(*arrays: Any) -> None:
     mx.eval(*flat)
 
 
-def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer:
+def _placeholder(w: Weights, m: str, proj: str) -> Q:
+    """A routed projection's format and shapes with no experts: a stream's pool holds them (``stream.attach``)."""
+
+    name = f"{m}.switch_mlp.{proj}" if w.has(f"{m}.switch_mlp.{proj}.weight") else f"{m}.experts.0.{proj}"
+    q = w.q(name)                                        # lazy: its bytes are never read
+    return Q(*(mx.zeros((0, *a.shape[-2:]), dtype=a.dtype) for a in q.arrays()), bits=q.bits, group=q.group)
+
+
+def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False, stream: bool = False) -> Layer:
     p = f"layers.{i}"
     attn_prefix = f"{p}.self_attn"
     if w.has(f"{attn_prefix}.q_a_proj.weight"):
@@ -125,6 +133,9 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer
                               w.q(f"{m}.shared_experts.down_proj"), cfg.swiglu_limit)
         stacked = []
         for proj in ("gate_proj", "up_proj", "down_proj"):
+            if stream:
+                stacked.append(_placeholder(w, m, proj))
+                continue
             if w.has(f"{m}.switch_mlp.{proj}.weight"):
                 q = w.q(f"{m}.switch_mlp.{proj}")
                 _materialize(q)             # read now: a lazy load first touched in a server thread has no CPU stream
@@ -156,15 +167,15 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer
     return Layer(attn, mlp, in_norm, post_norm, attn_hc, ffn_hc, cfg)
 
 
-def load_backbone(model_dir: Path, *, layers: int | None = None) -> GLM5:
-    """The backbone, layer by layer; ``layers``: only the first that many (real-weight checks in less memory)."""
+def load_backbone(model_dir: Path, *, layers: int | None = None, stream: bool = False) -> GLM5:
+    """The backbone, layer by layer; ``layers``: only the first that many; ``stream``: routed experts left on disk."""
 
     model_dir = Path(model_dir)
     config = json.loads((model_dir / "config.json").read_text())
     cfg = Config.from_dict(config)
     w = Weights(model_dir, mtp_layer=cfg.num_hidden_layers)
     count = cfg.num_hidden_layers if layers is None else min(int(layers), cfg.num_hidden_layers)
-    layers = [load_layer(w, i, cfg) for i in range(count)]
+    layers = [load_layer(w, i, cfg, stream=stream) for i in range(count)]
     embed = w.q("embed_tokens")
     lm_head = w.q("lm_head")
     norm = w.get("norm.weight")
@@ -174,10 +185,16 @@ def load_backbone(model_dir: Path, *, layers: int | None = None) -> GLM5:
     return model
 
 
-def load(model_dir: Path) -> tuple[GLM5, Any]:
+def load(model_dir: Path, *, ssd_experts: float | None = None) -> tuple[GLM5, Any]:
+    """The backbone and tokenizer; ``ssd_experts``: stream routed experts into a GPU pool of that many GiB."""
+
     from mlx_lm.utils import load_tokenizer
 
-    model = load_backbone(Path(model_dir))
+    model = load_backbone(Path(model_dir), stream=bool(ssd_experts))
+    if ssd_experts:
+        from tensorfold.families.glm5_next import stream
+
+        stream.attach(model, Path(model_dir), float(ssd_experts))
     tokenizer = load_tokenizer(Path(model_dir), eos_token_ids=model.args.eos_token_id or None)
     return model, tokenizer
 

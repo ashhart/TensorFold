@@ -487,6 +487,10 @@ class SparseMoE(nn.Module):
         return experts, weights / weights.sum(axis=-1, keepdims=True)
 
     def __call__(self, x: mx.array) -> mx.array:
+        if "streamer" in self.__dict__:                                 # routed experts from the slot pool
+            from tensorfold.families.qwen4_exp import stream
+
+            return stream.moe_chunk(self, x)
         if prefill_mm.moe_applies(self, x):
             return prefill_mm.moe(self, x)
         experts, weights = self.route(x)

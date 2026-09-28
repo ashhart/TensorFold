@@ -155,6 +155,7 @@ def construct(family, path, requested, explicit, world, rank=0):
 @pytest.mark.parametrize("family,world", [("linear", 1), ("linear", 2), ("indexed", 1), ("indexed", 2), ("mla", 2)])
 @pytest.mark.parametrize("requested,explicit,window", [(None, None, 65536), (65536, False, 65536),
                                                         (0, True, 65536), (1024, True, 1024)])
+@pytest.mark.torch
 def test_real_constructors_choose_native_or_explicit_before_loading(tmp_path, fake_runtime, family, world,
                                                                     requested, explicit, window):
     checkpoint(tmp_path, small_config(), [("lm_head.weight", "U32", [64, 8], 2048)])
@@ -170,6 +171,7 @@ def test_real_constructors_choose_native_or_explicit_before_loading(tmp_path, fa
     assert getattr(obj, "context_window", getattr(obj, "limit", window)) == window
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("family,world", [("linear", 1), ("linear", 2), ("indexed", 1), ("indexed", 2), ("mla", 2)])
 def test_real_constructors_shrink_default_and_refuse_explicit_before_loading(tmp_path, monkeypatch, fake_runtime,
                                                                          family, world):
@@ -241,6 +243,7 @@ def test_loading_peak_is_separate_from_serving_peak():
         choose(make_plan(1000, None, False, 1999, Weights(1000, 1000), geometry))
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("family", ["linear", "indexed", "mla"])
 @pytest.mark.parametrize("explicit", [False, True])
 def test_actual_distributed_startup_agrees_on_smaller_rank_before_loading(tmp_path, monkeypatch, fake_runtime,
@@ -281,6 +284,7 @@ def test_actual_distributed_startup_agrees_on_smaller_rank_before_loading(tmp_pa
             assert len(calls) == 1
 
 
+@pytest.mark.torch
 def test_admission_propagates_peer_header_failure_before_loading(tmp_path, fake_runtime):
     calls, capacity = fake_runtime
     checkpoint(tmp_path, small_config(), [("lm_head.weight", "U32", [64, 8], 2048)])

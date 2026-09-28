@@ -5,7 +5,7 @@ void exl3_rot_in_cuda(const at::Tensor&, const at::Tensor&, at::Tensor&);
 void exl3_linear_cuda(const at::Tensor&, const at::Tensor&, int64_t, int64_t, const at::Tensor&,
                       const c10::optional<at::Tensor>&, at::Tensor&, const c10::optional<at::Tensor>&, at::Tensor&,
                       int64_t, int64_t, int64_t, int64_t);
-void exl3_unpack_cuda(const at::Tensor&, at::Tensor&, int64_t, int64_t);
+void exl3_unpack_cuda(const at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t, int64_t);
 
 static void check(const at::Tensor& x, at::ScalarType t, const char* name) {
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == t && x.is_contiguous(), name,
@@ -31,9 +31,7 @@ void rot_in(const at::Tensor& x, const at::Tensor& suh, at::Tensor xh) {
     exl3_rot_in_cuda(x, suh, xh);
 }
 
-// y [M, N] = (xh @ W_q) @ H * svh + bias, W_q the trellis words T (stride_k words between k tiles, stride_nb
-// between 128-column blocks); Z: [SK, M, N] fp32 scratch when SK > 1; counters: int32 [8 * N / 128], zero,
-// owned by the layer (the kernel leaves them zero).
+// y [M, N] = (xh @ W_q) @ H * svh + bias; Z [SK, M, N] fp32 when SK > 1; counters int32 [8 * N / 128], left zero.
 void linear(const at::Tensor& xh, const at::Tensor& T, int64_t stride_k, int64_t stride_nb, const at::Tensor& svh,
             const c10::optional<at::Tensor>& bias, at::Tensor y, const c10::optional<at::Tensor>& Z,
             at::Tensor counters, int64_t K2, int64_t cb, int64_t SK, int64_t WK) {
@@ -59,14 +57,14 @@ void linear(const at::Tensor& xh, const at::Tensor& T, int64_t stride_k, int64_t
     exl3_linear_cuda(xh, T, stride_k, stride_nb, svh, bias, y, Z, counters, K2, cb, SK, WK);
 }
 
-// W [K, N] fp16 = W_q, the trellis tiles decoded (T: the stored layout, int32 [K/16, N/16, 4 * K2]).
-void unpack(const at::Tensor& T, at::Tensor W, int64_t K2, int64_t cb) {
+// W [K, N] fp16 = W_q, the trellis tiles decoded; tile (kt, nt) at kt * stride_k + (nt / 8) * stride_nb words.
+void unpack(const at::Tensor& T, at::Tensor W, int64_t stride_k, int64_t stride_nb, int64_t K2, int64_t cb) {
     check(T, at::kInt, "T");
     check(W, at::kHalf, "W");
-    TORCH_CHECK(W.dim() == 2 && W.size(0) % 16 == 0 && W.size(1) % 16 == 0, "W must be [K, N], multiples of 16");
+    TORCH_CHECK(W.dim() == 2 && W.size(0) % 128 == 0 && W.size(1) % 128 == 0, "W must be [K, N], multiples of 128");
     TORCH_CHECK(T.numel() == W.numel() * K2 / 64, "T must hold K * N * bits / 32 words");
     c10::cuda::CUDAGuard guard(T.device());
-    exl3_unpack_cuda(T, W, K2, cb);
+    exl3_unpack_cuda(T, W, stride_k, stride_nb, K2, cb);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

@@ -27,9 +27,45 @@ def linear_weights(name: str, info: dict) -> tuple[int, int]:
     return amount * (2 if "lm_head." in name else 1), 0
 
 
+def exl3_weights(name: str, info: dict) -> tuple[int, int]:
+    """A 27B EXL3 pack as loaded: tensors as stored, the head's words and svh once more for the drafter's slice; vision and MTP skipped."""
+
+    if ".visual." in name or name.startswith(("model.visual.", "vision_tower", "mtp.")) or ".mtp." in name:
+        return 0, 0
+    amount = padded(info, info["shape"], float32=name.endswith((".A_log", ".dt_bias")))
+    return (amount * 7 // 5 if name in ("lm_head.trellis", "lm_head.svh") else amount), 0
+
+
+def exl3_workspace(largest: int, rows: int, width: int) -> int:
+    """The EXL3 prompt matmul's decoded W_q (``largest`` weights) and rotated inputs (``rows`` of ``width``), fp16."""
+
+    return 2 * (largest + rows * width)
+
+
+def exl3_indexed_scratch(t: dict, window: int, rows: int) -> int:
+    """Flash Next's EXL3 buffers: routed windows of ``window`` rows, prompt matmul workspace and n-gram staging for ``rows``."""
+
+    d, hc, slots = int(t["hidden_size"]), int(t.get("hc_count", 1)), int(t.get("num_experts_per_tok", 1)) + 1
+    width = int(t.get("moe_intermediate_size", d))
+    heads, hd = int(t["num_attention_heads"]), int(t.get("head_dim") or d // int(t["num_attention_heads"]))
+    conv = 2 * int(t["linear_num_key_heads"]) * int(t["linear_key_head_dim"]) + \
+        int(t["linear_num_value_heads"]) * int(t["linear_value_head_dim"])
+    pairs = window * slots
+    moe = pairs * (4 * d + 2 * width + 4 * max(8 * width, 2 * d) + 4 * d) + (pairs + 1024) * 4
+    largest = d * max(2 * heads * hd, conv, hc * d)
+    ple = rows * (4 * 81 * 2 * int(t.get("heads_per_ngram", 8)) + 2 * int(t.get("ple_embed_dim") or d))
+    return moe + exl3_workspace(largest, rows * hc, max(d, heads * hd)) + ple
+
+
+def with_fixed(geometry: Geometry, extra: int) -> Geometry:
+    """``geometry`` plus ``extra`` bytes that do not grow with the cache."""
+
+    return Geometry(lambda slots: geometry.bytes_at(slots) + extra, geometry.reserve, geometry.minimum_slots)
+
+
 def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True):
     def transform(name: str, info: dict) -> tuple[int, int]:
-        if "vision" in name or (not mtp and (name.startswith("mtp.") or ".mtp." in name)):
+        if "vision" in name or ".visual." in name or (not mtp and (name.startswith("mtp.") or ".mtp." in name)):
             return 0, 0
         if ".ngram_embedding.shard_" in name:          # host pages when mapped; none when read from SSD
             return 0, size(info) if mapped_tables else 0

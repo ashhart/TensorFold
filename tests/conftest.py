@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 
 import pytest
@@ -26,7 +27,16 @@ def _tensor_units() -> bool:
         return False
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line("markers", "torch: needs PyTorch (the CUDA backend's code); skipped where it isn't installed")
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    if importlib.util.find_spec("torch") is None:
+        no_torch = pytest.mark.skip(reason="needs PyTorch (the CUDA backend's code)")
+        for item in items:
+            if item.get_closest_marker("torch") is not None:
+                item.add_marker(no_torch)
     if _tensor_units():
         return
     skip = pytest.mark.skip(reason="needs Metal 4 tensor units (an M5-generation GPU)")

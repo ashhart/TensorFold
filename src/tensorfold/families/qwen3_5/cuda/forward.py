@@ -11,31 +11,20 @@ from tensorfold.cuda.kernels import attention as tree_attention
 from tensorfold.cuda.kernels import gdn as deltanet
 
 from . import glue
-from .b16 import matmul as plain_matmul
 from .qmm_fast import matmul
-from .weights import Exl3, Plain, QLinear, Weights
+from .weights import QLinear, Weights
 
 
-def _mm(x: torch.Tensor, w: QLinear | Plain | Exl3, xs: torch.Tensor | None = None) -> torch.Tensor:
-    """The projection of ``x`` by ``w``, whichever of the three weight forms the checkpoint used.
-
-    MLX affine 4-bit words go to ``qmm_fast`` (``xs`` carries the group sums its kernels want), an EXL3 trellis
-    to workstream B's row-invariant linear, and a plain fp16/bf16 weight to ``b16`` (also row-invariant).
-    """
-
-    if isinstance(w, Exl3):
-        return w.layer(x)
-    if isinstance(w, Plain):
-        return plain_matmul(x, w.weight)
+def _mm(x: torch.Tensor, w: QLinear, xs: torch.Tensor | None = None) -> torch.Tensor:
+    if not isinstance(w, QLinear):
+        return w(x)                                        # an EXL3 pack's weights run their own row-invariant kernels
     return matmul(x, w, xs)
 
 
-def _row_mm(x: torch.Tensor, w: QLinear | Plain | Exl3, tp: bool,
+def _row_mm(x: torch.Tensor, w: QLinear, tp: bool,
             xs: torch.Tensor | None = None) -> torch.Tensor:
     if not tp:
         return _mm(x, w, xs)
-    if not isinstance(w, QLinear):
-        raise ValueError("tensor parallelism is not implemented for EXL3 or plain weights")
     from .distributed import gather_rank_partials, row_partial
 
     return gather_rank_partials(row_partial(x, w, xs=xs if w.layout == "tiled" else None))
@@ -142,9 +131,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
     aoffs = _cache_offsets([st], softmax, tokens.device)
     windows = _conv_windows(parents, c.conv_kernel - 1).to(tokens.device)
     if initial is None:
-        x = (glue.embed(ids, w.embed.weight, w.embed.scales, w.embed.biases, c.hidden)
-             if isinstance(w.embed, QLinear)
-             else w.embed.weight[ids.to(torch.int64)].to(torch.bfloat16).contiguous())
+        x = glue.embedding(ids, w.embed)
         pending: torch.Tensor | None = None
     else:
         x, pending = initial
@@ -257,7 +244,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
     ids_t = dev[5 * W + S + 1:6 * W + S + 1]
     windows_t = dev[6 * W + S + 1:6 * W + S + 1 + W * (keep + 1)].view(W, keep + 1)
     aplan = tree_attention.from_packed(dev[6 * W + S + 1 + W * (keep + 1):], S, W, attn_items, attn_chunks)
-    x = glue.embed(ids_t, w.embed.weight, w.embed.scales, w.embed.biases, c.hidden)
+    x = glue.embedding(ids_t, w.embed)
     pending: torch.Tensor | None = None
     record: list[Record] = []
     taps: list[torch.Tensor] = []

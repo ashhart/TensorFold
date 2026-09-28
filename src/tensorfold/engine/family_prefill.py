@@ -36,12 +36,14 @@ class FamilyPrefill:
             self._fed_rows = len(chunk)
             self.prefill_chunks += 1
             last = hidden[:, -1:, :]
-            if getattr(self.model, "mtp", None) is not None:
+            drafting = getattr(self.model, "mtp", None) is not None
+            if drafting:
                 nxt = [int(t) for t in tokens[begin + 1:end + 1]]
                 if nxt:
                     self.model.absorb_draft_context(hidden[:, :len(nxt)], mx.array(nxt, dtype=mx.uint32), cache,
                                                     start=0)
-            mx.eval(last, *cache_arrays(cache))
+            # an earlier chunk is read only through its caches: MLX then skips its last layer's attention and MLP
+            mx.eval(*((last,) if drafting or n + 1 == len(chunks) else ()), *cache_arrays(cache))
             self._prefill_at = end
             if self.prefill_guard is not None:
                 self.prefill_guard.after_chunk(cache, len(chunk))

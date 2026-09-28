@@ -28,15 +28,15 @@ def _gather(w: Weights, b: Buffers, part: torch.Tensor, flat: torch.Tensor, R: i
 
 
 def _mm(x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, out: torch.Tensor, b: Buffers, **kw) -> torch.Tensor:
-    if not isinstance(q, qmm.Q4):
-        return q(x, out)          # an EXL3 checkpoint's matrix (``exl3.X3``, ``exl3.F16``, ``exl3.Stack``)
+    if not isinstance(q, qmm.Q4):                 # an EXL3 pack's matrix (``exl3_mm``): prompts on its prompt path
+        return q.prefill(x, out) if b.prefill else q(x, out)
     mm = qmm.prefill_matmul if b.prefill else qmm.matmul
     return mm(x, q, xs, out=out, part=b.part, **kw)
 
 
 def _embed(w: Weights, ids: torch.Tensor, copies: int, out: torch.Tensor) -> torch.Tensor:
     if len(w.embed) == 1:     # an EXL3 checkpoint's unquantized embedding
-        from .exl3 import embed
+        from .exl3_mm import embed
 
         return embed(ids, w.embed[0], w.cfg.hidden, copies, out)
     return glue.embed(ids, *w.embed, w.cfg.hidden, copies=copies, out=out)
@@ -89,8 +89,10 @@ def _down_act(hc: HC, b: Buffers, R: int, streams: int, low: int, inject) -> Non
     out = b.dn[:R] if hc.down.n == b.dn.shape[1] else b.dn_mix[:R]
     if isinstance(hc.down, qmm.Q4):
         got = _mm(b.normed[:R], hc.prefill_down if b.prefill else hc.down, b.xs_normed[:R], out, b, reduce=False)
+    elif b.prefill:                                   # an EXL3 pack's fp16 matrix: summed slices, any row count
+        got = hc.down(b.normed[:R], out)
     else:
-        got = hc.down.partials(b.normed[:R])          # EXL3 checkpoint: fp16 weights, fp32 slices [SK, R, N]
+        got = hc.down.partials(b.normed[:R])          # fp32 slices [SK, R, N] that the activation sums in order
     if got.dim() == 3:
         glue.hc_reduce_act(got, b.act[:R], b.xs_act[:R], inject, streams, low)
     else:
@@ -132,8 +134,8 @@ def _prefill_chain(g, st: State, li: int, b: Buffers, a0: int, a1: int, c) -> No
 def _out_proj(w: Weights, b: Buffers, x: torch.Tensor, q: qmm.Q4, xs: torch.Tensor, R: int):
     """A block's output projection: (1, bf16 branch) on one GPU; (3, gathered fp32 partials) across ranks."""
 
-    if not isinstance(q, qmm.Q4):                     # EXL3 checkpoint (one GPU): the bf16 branch
-        return 1, q(x, b.branch[:R])
+    if not isinstance(q, qmm.Q4):                     # an EXL3 pack (one GPU): the bf16 branch
+        return 1, _mm(x, q, xs, b.branch[:R], b)
     if w.comm is None:
         got = _mm(x, q, xs, b.branch[:R], b, reduce=False)
         if got.dim() == 3:
@@ -194,13 +196,13 @@ def ple_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int
 
     c = w.cfg
     p = layer.ple
-    if w.x3 is not None:                              # EXL3 checkpoint: the rows' codec, fp16 key/value weights
-        from .exl3 import ple_rows
+    if w.x3 is not None:                              # an EXL3 pack: the rows' codec, fp16 key/value weights
+        from .exl3_mm import ple_rows
 
         emb = ple_rows(R, w.x3.ple_dev, p.table.head_bias, p.ngram.heads, p.ngram.dims, p.table.bits,
                        w.x3.ple_emb[:R])
-        p.key(emb, b.ple_keys[:R])
-        p.value(emb, b.ple_vals[:R])
+        _mm(emb, p.key, None, b.ple_keys[:R], b)
+        _mm(emb, p.value, None, b.ple_vals[:R], b)
     else:
         glue.ple_embed(R, b.ple_w, b.ple_s, b.ple_b, p.ngram.heads, p.ngram.dims, b.ple_emb[:R], b.xs_ple[:R])
         _mm(b.ple_emb[:R], p.key, b.xs_ple[:R], b.ple_keys[:R], b)
@@ -230,20 +232,33 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> tuple:
     """Routed experts + the shared expert. Returns the pending write-back: (2, slots y, weights) on one GPU, (3, gathered fp32 partials, None) across ranks."""
 
     m = layer.moe
-    if w.x3 is not None:                              # EXL3 checkpoint: each expert at its own width, one GPU
-        from tensorfold.cuda.exl3.experts import routed
-
-        # the routed kernel groups the window itself (its own scratch), so the shared plan's grouping is skipped
-        buf = b.moe
-        moe_mod.router(b.mixed[:R], m.router, buf.logits[:R])
-        moe_mod.select_rows(buf.logits[:R], buf, w.cfg.top_k, w.cfg.experts)
-        y = routed(b.mixed[:R], buf.pick[:R], None, m.experts, w.x3.moe, None, R)
-        return 2, y.view(R, buf.slots, -1), buf.wts[:R]
+    if w.x3 is not None:                              # an EXL3 pack: each expert at its own width, one GPU
+        return _exl3_moe(m, w, b, R)
     buf = moe_mod.moe(b.mixed[:R], m.router, m.experts, b.moe, w.cfg.top_k, w.cfg.experts)
     if w.comm is None:
         return 2, buf.y[:R], buf.wts[:R]
     glue.moe_partial(buf.y[:R], buf.wts[:R], b.part_moe, R)
     return 3, _gather(w, b, b.part_moe, b.g_moe, R), None
+
+
+def _exl3_moe(m, w: Weights, b: Buffers, R: int) -> tuple:
+    """Routed and shared experts on the grouped EXL3 kernel in windows (rows are independent); prompts keep bf16 slots."""
+
+    from tensorfold.cuda.exl3.experts import routed
+
+    from .exl3_pack import MOE_WINDOW
+
+    buf = b.moe
+    moe_mod.router(b.mixed[:R], m.router, buf.logits[:R])
+    moe_mod.select_rows(buf.logits[:R], buf, w.cfg.top_k, w.cfg.experts)
+    if not b.prefill and R <= MOE_WINDOW:
+        y = routed(b.mixed[:R], buf.pick[:R], None, m.experts, w.x3.moe, None, R)
+        return 2, y.view(R, buf.slots, -1), buf.wts[:R]
+    for r0 in range(0, R, MOE_WINDOW):
+        n = min(MOE_WINDOW, R - r0)
+        y = routed(b.mixed[r0:r0 + n], buf.pick[r0:r0 + n], None, m.experts, w.x3.moe, None, n)
+        buf.y[r0:r0 + n].copy_(y.view(n, buf.slots, -1))
+    return 2, buf.y[:R], buf.wts[:R]
 
 
 def _writeback(h: torch.Tensor, b: Buffers, R: int, c, pending) -> None:
@@ -341,9 +356,9 @@ def stage(w: Weights, b: Buffers, windows: Sequence[tuple[State, Sequence[int]]]
                 ids = p.ngram.ids(st.ple_history, toks)
                 st.ple_last = (st.ple_history, toks)
                 if w.x3 is not None:
-                    from .exl3 import stage_ple
+                    from .exl3_pack import stage_ple
 
-                    stage_ple(p.table, w.x3, ids)
+                    stage_ple(p.table, w.x3, ids, at=a0 * (ids.size // len(toks)))
                 else:
                     stage_ple_rows(p, b, ids, at=a0 * (ids.size // len(toks)))       # ids [rows, heads]
     b.staged.record()

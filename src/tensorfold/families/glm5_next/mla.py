@@ -306,11 +306,10 @@ class MLA:
             valid_sel = ids >= 0
             w = int(ids.shape[1])
             keys = mx.take(cache.keys[:last], mx.where(valid_sel, ids, 0).reshape(-1), axis=0).reshape(c, w, rank)
-            ql = ql_all[:, c0:c1].transpose(1, 0, 2)                      # [c, H, rank]
-            # two batched matmuls, scores in fp32: one attention call per query would reread its keys for every head
-            s = mx.matmul(ql, keys.transpose(0, 2, 1)).astype(mx.float32) * self.scale   # [c, H, w]
-            s = mx.where(valid_sel[:, None, :], s, mx.array(-1e30, mx.float32))
-            p = mx.softmax(s, axis=-1)
-            outs.append(mx.matmul(p.astype(keys.dtype), keys))              # [c, H, rank]
+            # bf16 scores (the power-of-two scale in the queries), a precise softmax: fp32's bits, a third the traffic
+            ql = ql_all[:, c0:c1].transpose(1, 0, 2) * self.scale        # [c, H, rank]
+            s = mx.matmul(ql, keys.transpose(0, 2, 1))                    # [c, H, w]
+            s = mx.where(valid_sel[:, None, :], s, mx.array(-1e30, s.dtype))
+            outs.append(mx.matmul(mx.softmax(s, axis=-1, precise=True), keys))   # [c, H, rank]
         att = mx.concatenate(outs) if len(outs) > 1 else outs[0]             # [rows, H, rank]
         return self.unabsorb(att.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(rows, -1)

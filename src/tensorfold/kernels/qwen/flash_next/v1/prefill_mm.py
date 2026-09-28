@@ -288,18 +288,18 @@ def moe_applies(module: Any, x: mx.array) -> bool:
             and all(_q4(p) for p in (sw.gate_proj, sw.up_proj, sw.down_proj)))
 
 
-def moe(module: Any, x: mx.array) -> mx.array:
+def moe(module: Any, x: mx.array, *, route: Any = None, switch: Any = None) -> mx.array:
     """model.SparseMoE on a prompt chunk x [1, L, D]: the reference's routing, sums and shared expert, MLX's bits."""
 
     batch, length, dims = x.shape
     k = module.top_k
-    experts, weights = module.route(x)                                  # [1, L, k] each
+    experts, weights = module.route(x) if route is None else route      # [1, L, k] each
     flat = experts.reshape(-1)
     order = mx.argsort(flat)
     idx = flat[order].astype(mx.uint32)
     pos = mx.argsort(order).astype(mx.int32)                            # a route's row among the sorted ones
     xs = x.reshape(length, dims)[order // k]                            # [L k, D], sorted by expert
-    sw = module.switch_mlp
+    sw = module.switch_mlp if switch is None else switch
     g = _experts(xs, sw.gate_proj, idx)
     u = _experts(xs, sw.up_proj, idx)
     act = sw.activation(u, g)                                           # SwitchGLU: activation(x_up, x_gate)

@@ -261,6 +261,10 @@ class FusedDecode:
         logits = (experts.router(x, router_rows) if rows <= step else
                   mx.concatenate([experts.router(x[i:i + step], router_rows) for i in range(0, rows, step)]))
         sw, se = moe.switch_mlp, moe.shared_expert
+        if "streamer" in moe.__dict__:            # routed experts from the slot pool (--ssd-experts)
+            from tensorfold.families.qwen4_exp import stream
+
+            return stream.moe_rows(moe, x, logits, (se.gate_proj, se.up_proj, se.down_proj))
         act, picks, weights = experts.expert_gateup(x, logits, cfg.num_experts_per_tok, cfg.num_experts, sw.gate_proj,
                                                     sw.up_proj, shared=(se.gate_proj, se.up_proj))
         return "grouped", (experts.expert_down_y(act, picks, sw.down_proj, se.down_proj), weights, logits)

@@ -206,10 +206,9 @@ def test_mixed_k_rows_are_independent_and_match_the_reference(name, cb, kfun):
 
 
 def _glm_case(E, D, NI, rows_list, seed):
+    from tensorfold.cuda import experts as grouped
     from tensorfold.cuda.exl3 import experts
-    from tensorfold.families.glm5_next.cuda import exl3_mm, glue, qmm
-
-    import triton
+    from tensorfold.families.glm5_next.cuda import exl3_mm, glue
 
     g = torch.Generator().manual_seed(seed)
 
@@ -232,21 +231,17 @@ def _glm_case(E, D, NI, rows_list, seed):
     s_ours = experts.Scratch(ours, maxr, SLOTS, experts.GLM_GATEUP, experts.GLM_DOWN)
     for R in rows_list:
         pick = sel[:R].contiguous()
-        maxu = min(R * TOPK, E) + 1
-        grp = qmm.Group(torch.zeros((maxu,), dtype=torch.int32, device="cuda"),
-                        torch.zeros((1,), dtype=torch.int32, device="cuda"),
-                        torch.full((maxu, R), -1, dtype=torch.int32, device="cuda"))
-        glue._group[(1,)](pick, grp.ids, grp.count, grp.members, R, SLOTS=SLOTS, MAXU=maxu, MAXM=R,
-                          BLOCK=triton.next_power_of_2(E + 1), num_warps=8)
+        plan = grouped.Plan(R, SLOTS, E + 1, "cuda")              # GLM's decode plan: the shared expert is id E
+        grouped.route(pick, plan)
         s_glm = exl3_mm.Scratch(R, SLOTS, D, NI, "cuda")
         y_glm = torch.full((R * SLOTS, D), 7.0, dtype=torch.float32, device="cuda")
-        exl3_mm.routed(x[:R], pick, grp, glm, s_glm, y_glm, R, LIMIT)
+        exl3_mm.routed(x[:R], pick, plan, glm, s_glm, y_glm, R, LIMIT)
         s_ours.y.fill_(7.0)
         y = experts.routed(x[:R], pick, None, ours, s_ours, None, R, limit=LIMIT, act_mode=experts.ACT_BF16)
         torch.cuda.synchronize()
         assert torch.equal(y.view(torch.int32), y_glm.view(torch.int32)), (E, D, NI, R)
         out_glm = torch.empty((R, D), dtype=torch.float32, device="cuda")
-        glue.combine(y_glm, w[:R].contiguous(), out_glm)
+        glue.combine(y_glm.view(R, SLOTS, D), w[:R].contiguous(), out_glm)
         out = experts.routed(x[:R], pick, w[:R].contiguous(), ours, s_ours, None, R, limit=LIMIT,
                              act_mode=experts.ACT_BF16, group=False)
         assert torch.equal(out.view(torch.int32), out_glm.view(torch.int32)), ("combine", E, D, NI, R)

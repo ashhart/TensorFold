@@ -11,7 +11,7 @@ from tensorfold.cuda.kernels import qmm as shared
 from tensorfold.cuda.kernels.prefill_attention import attention
 
 from . import glue
-from . import prefill_glue as pg
+from . import prefill_bf16, prefill_glue
 from .forward import State
 from .qmm_fast import tile
 from .weights import QLinear, Weights
@@ -21,8 +21,10 @@ TAP_LAYERS = (5, 19, 33, 47, 61)
 
 
 def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
-    """``x``: a quantized input (e4m3, group sums, row scales) from ``prefill_glue``."""
+    """``x``: a quantized input (e4m3, group sums, row scales) from ``prefill_glue``, or bf16 rows for an EXL3 pack."""
 
+    if not isinstance(w, QLinear):
+        return w.prefill(x)
     return shared.prefill_matmul8(x, tile(w), f32=f32)
 
 
@@ -53,6 +55,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
     """Commit ``tokens`` at [st.pos, st.pos + W) into ``st``, replacing its list entries, never writing through them."""
 
     c = w.config
+    pg = prefill_bf16 if w.quant == "exl3" else prefill_glue
     W = int(tokens.shape[0])
     p0 = st.pos
     keep = c.conv_kernel - 1
@@ -60,7 +63,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
     pos = torch.arange(p0, p0 + W, device=dev, dtype=torch.int32)
     windows = (torch.arange(W, device=dev, dtype=torch.int32)[:, None]
                + torch.arange(keep + 1, device=dev, dtype=torch.int32)[None, :])
-    x = glue.embed(tokens.to(torch.int32), w.embed.weight, w.embed.scales, w.embed.biases, c.hidden)
+    x = glue.embedding(tokens.to(torch.int32), w.embed)
     pending: torch.Tensor | None = None
     taps: list[torch.Tensor] = []
     for i, layer in enumerate(w.layers):

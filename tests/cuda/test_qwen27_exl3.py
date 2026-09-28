@@ -40,11 +40,11 @@ def _trellis_layer(n: int, k: int, bits: int, gen: torch.Generator, split=None) 
     return layer
 
 
-def _model() -> Weights:
+def _model(workspace=None) -> Weights:
     gen = torch.Generator().manual_seed(9)
 
     def ex(n, k):
-        return Exl3(_trellis_layer(n, k, 3, gen))
+        return Exl3(_trellis_layer(n, k, 3, gen), workspace=workspace)
 
     def plain(n, k):
         return Plain((torch.randn(n, k, generator=gen) * 0.05).to(torch.bfloat16).cuda())
@@ -57,7 +57,7 @@ def _model() -> Weights:
     config = Config(hidden=128, intermediate=128, layers=1, heads=1, kv_heads=1, head_dim=128, vocab=256, k_heads=1,
                     v_heads=1, dk=128, dv=128, conv_kernel=4, interval=4, eps=1e-6, rope_dims=32,
                     rope_theta=10000000.0, eos=(0,))
-    return Weights(config, plain(256, 128), [layer], norm, ex(256, 128), torch.ones(16, device="cuda"))
+    return Weights(config, plain(256, 128), [layer], norm, ex(256, 128), torch.ones(16, device="cuda"), quant="exl3")
 
 
 @pytest.mark.parametrize("shape", sorted(PLANS), ids=lambda s: f"{s[0]:g}b-{s[1]}x{s[2]}")
@@ -138,6 +138,28 @@ def test_drafter_head_is_the_target_head_sliced():
     x = torch.randn(7, 256, generator=gen).to(torch.bfloat16).cuda()
     want = torch.cat([head(x)[:, a:b] for a, b in spans], dim=1)
     assert torch.equal(sub(x).index_select(1, cols), want)
+
+
+def test_prompts_ignore_chunking_and_resume_as_fresh():
+    """The EXL3 prompt path (decoded weights, fixed-tile GEMM): a prompt's state is the same in any chunks, and a kept
+    prompt end continued with more tokens equals the longer prompt fresh."""
+
+    from tensorfold.cuda.exl3.prefill import Workspace
+    from tensorfold.families.qwen3_5.cuda.prefill import prefill_state
+
+    w = _model(Workspace())
+    prompt = [3 + (7 * i) % 250 for i in range(67)]
+    runs = []
+    for size in (67, 16, 5):
+        st = State(w)
+        runs.append((prefill_state(w, prompt, st, size=size), st))
+    for normed, st in runs[1:]:
+        assert torch.equal(normed, runs[0][0])
+        assert torch.equal(st.rec[0], runs[0][1].rec[0]) and torch.equal(st.conv[0], runs[0][1].conv[0])
+    st = State(w)
+    prefill_state(w, prompt[:30], st, size=16)
+    normed = prefill_state(w, prompt, st, size=16)
+    assert torch.equal(normed, runs[0][0]) and torch.equal(st.rec[0], runs[0][1].rec[0])
 
 
 @pytest.fixture(scope="module")

@@ -1,26 +1,4 @@
-"""Routed EXL3 experts of any storage on CUDA, one grouped launch per projection for a whole layer.
-
-Covers every EXL3 expert storage: codebooks 3inst (0), mcg (1) and mul1 (2), and a bit width per expert matrix
-(1 to 8 bits in half-bit steps: every width ExLlamaV3 writes, which is 1..8 and, with mul1, 1.5 / 2.5 / 3.5, plus the
-half-integer widths it does not write), mixed freely inside one layer (mixed-K packs such as MiMo-V2.6-Flash
-2.50bpw or a SAGE pack) as well as uniform packs. A window's routed (row, slot) pairs go through:
-
-    group            distinct experts of the window (ids ascending) and each one's member (row, slot) pairs
-    rot_in           Xg, Xu = fp16((x * suh) @ H) for each pair's expert (gate and up have their own suh)
-    grouped (x2)     Zg, Zu = X @ W_q for every distinct expert's rows, per fixed K split (fp32)
-    gateup_epilogue  g, u = (sum of splits) @ H * svh; act = SwiGLU; Xd = fp16((act * suh_d) @ H)
-    grouped          Zd = Xd @ W_q(down), per fixed K split
-    down_epilogue    Y[row, slot] = (sum of splits) @ H * svh_d      (fp32)
-    combine          out[row] = sum over slots in order of w[row, slot] * Y[row, slot]
-
-H is the 128-block Hadamard / sqrt(128). Tile settings and splits depend only on the shape, so a row's bits never
-depend on the window's other rows. With ``GLM_GATEUP`` / ``GLM_DOWN`` and ``act_mode=ACT_BF16`` on 4-bit mcg
-experts every kernel does the same arithmetic in the same order as TensorFold's GLM path
-(``families/glm5_next/cuda/exl3.cu``), so Y is bit-identical to it (tests/cuda/test_exl3_experts.py).
-
-Weights are not copied: an expert matrix is read in place from its trellis tensor (``int16 [K/16, N/16, 16 * K]``
-as stored in the checkpoint) through a pointer table; only the suh/svh vectors are stacked per layer.
-"""
+"""Routed EXL3 experts of any codebook, a width per expert, one grouped launch a projection; rows never depend on the window."""
 
 from __future__ import annotations
 
@@ -37,8 +15,7 @@ ACT_BF16, ACT_F32 = 0, 1          # SwiGLU with the GLM family's bf16 roundings 
 # Half-bits a value: 1..8 bits (2, 4, .. 16) and every half-integer rate 1.5..7.5 (3, 5, .. 15).
 K2_SUPPORTED = tuple(range(2, 17))
 
-# (n tiles a block, warps a block, K splits, tiles in flight) of the grouped GEMV. The GLM family's settings, whose
-# arithmetic order this reproduces bit for bit:
+# (n tiles a block, warps, K splits, tiles in flight): GLM's settings, whose arithmetic order this keeps bit for bit
 GLM_GATEUP = (8, 4, 4, 1)
 GLM_DOWN = (8, 4, 1, 1)
 
@@ -76,8 +53,7 @@ def k2_of(trellis: torch.Tensor) -> int:
 
 @dataclass
 class Exl3RoutedExperts:
-    """One layer's routed experts (or one rank's share of their width): trellis pointer and bit-width tables per
-    projection, stacked suh/svh, and the tensors that keep the trellises alive."""
+    """One layer's routed experts: trellis pointers and widths per projection, stacked suh/svh, the tensors keeping the trellises alive."""
 
     gate_ptr: torch.Tensor    # int64 [E]
     up_ptr: torch.Tensor
@@ -106,8 +82,7 @@ class Exl3RoutedExperts:
 
 def prepare(gate: Sequence[tuple], up: Sequence[tuple], down: Sequence[tuple], codebook: int | str,
             device="cuda") -> Exl3RoutedExperts:
-    """Build a layer from per-expert ``(trellis, suh, svh)`` triples (trellis int16 [K/16, N/16, 16K] contiguous on
-    ``device``; suh [K], svh [N] fp16). Trellises are referenced, not copied; each may have its own bit width."""
+    """A layer from per-expert (trellis, suh, svh) triples, trellises referenced in place, each at its own width."""
 
     cb = codebook_id(codebook) if isinstance(codebook, str) else int(codebook)
     E = len(gate)
@@ -147,8 +122,7 @@ def prepare(gate: Sequence[tuple], up: Sequence[tuple], down: Sequence[tuple], c
 
 def prepare_stacked(gt: torch.Tensor, ut: torch.Tensor, dt: torch.Tensor, suh_g, suh_u, svh_g, svh_u, suh_d, svh_d,
                     codebook: int | str) -> Exl3RoutedExperts:
-    """A uniform-bit layer already stacked per projection: trellis int16 [E, K/16, N/16, 16K] (or int32 words
-    [E, K/16, N/16, 8K], as the GLM family keeps them) and suh/svh [E, n]."""
+    """A uniform-width layer stacked per projection: trellis [E, K/16, N/16, 16K] (int16, or GLM's int32 words), suh/svh [E, n]."""
 
     def as16(t):
         return t.view(torch.int16) if t.dtype == torch.int32 else t
@@ -160,8 +134,7 @@ def prepare_stacked(gt: torch.Tensor, ut: torch.Tensor, dt: torch.Tensor, suh_g,
 
 
 def default_config(K: int, N: int, gateup: bool) -> tuple[int, int, int, int]:
-    """Tile setting for a projection of shape K -> N: the GLM family's where it divides, else the largest that
-    does. Depends only on the shape (so rows stay independent of the window)."""
+    """The tile setting for a K -> N projection (GLM's where it divides): the shape's alone, so rows stay independent."""
 
     cands = [GLM_GATEUP if gateup else GLM_DOWN, (8, 4, 2, 1), (8, 4, 1, 1), (4, 4, 2, 2), (4, 4, 1, 2)]
     for nt, w, sk, pf in cands:
@@ -171,19 +144,18 @@ def default_config(K: int, N: int, gateup: bool) -> tuple[int, int, int, int]:
 
 
 class Scratch:
-    """Per-window buffers for up to ``rows`` rows of ``slots`` slots. ``y`` rows of slots whose pick is not a
-    routed expert (>= E, e.g. a shared expert's slot) are never written here: the caller fills or zeroes them."""
+    """Buffers for up to ``rows`` rows of ``slots`` slots; slots whose pick is not a routed expert are left to the caller."""
 
     def __init__(self, ex: Exl3RoutedExperts, rows: int, slots: int, cfg_gu=None, cfg_d=None, device="cuda") -> None:
         D, I = ex.dims, ex.width
         self.cfg_gu = cfg_gu or default_config(D, I, True)
         self.cfg_d = cfg_d or default_config(I, D, False)
         P = rows * slots
-        sk = max(self.cfg_gu[2], self.cfg_d[2])
         self.xg = torch.zeros((P, D), dtype=torch.float16, device=device)
         self.xu = torch.zeros((P, D), dtype=torch.float16, device=device)
         self.xd = torch.zeros((P, I), dtype=torch.float16, device=device)
-        self.z = torch.zeros((2 * sk * P * max(D, I),), dtype=torch.float32, device=device)
+        # gate and up write 2 * splits * P * I partials, down splits * P * D
+        self.z = torch.zeros((max(2 * self.cfg_gu[2] * I, self.cfg_d[2] * D) * P,), dtype=torch.float32, device=device)
         self.y = torch.zeros((P, D), dtype=torch.float32, device=device)
         maxu = min(P, ex.count)
         self.ids = torch.zeros((maxu,), dtype=torch.int32, device=device)
@@ -201,10 +173,7 @@ class Scratch:
 def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Exl3RoutedExperts, s: Scratch,
            out: torch.Tensor | None, R: int, limit: float = math.inf, act_mode: int = ACT_F32,
            group: bool = True) -> torch.Tensor:
-    """The routed experts of R rows: ``pick`` int32 [>= R, slots] (expert ids; ids >= E are skipped), ``wts`` fp32
-    [R, slots] (None: stop after Y), ``x`` bf16 or fp16 [R, D] (row stride may exceed D). Writes and returns ``out``
-    fp32 [R, D] = sum_k wts[r, k] * Y[r, k] (Y = s.y viewed [R, slots, D]). No host synchronisation.
-    ``group=False`` reuses the grouping of a previous call with the same picks and R."""
+    """Routed experts of R rows (picks >= E skipped): Y per slot, or ``out`` = the wts-weighted sum when ``wts``; no host sync."""
 
     ext = _ext()
     D, I, E = ex.dims, ex.width, ex.count
@@ -234,8 +203,7 @@ def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Ex
 
 
 def dequant(trellis: torch.Tensor, codebook: int | str) -> torch.Tensor:
-    """W_q [K, N] fp16 of one matrix through the kernels' own lane decode (what ExLlamaV3's ``reconstruct``
-    writes); for tests."""
+    """W_q [K, N] fp16 of one matrix through the kernels' own lane decode (ExLlamaV3's ``reconstruct``); for tests."""
 
     cb = codebook_id(codebook) if isinstance(codebook, str) else int(codebook)
     k2 = k2_of(trellis)

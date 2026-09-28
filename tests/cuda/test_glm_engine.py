@@ -390,6 +390,26 @@ def test_exl3_checkpoint_resumes(engine_x):
     assert stats["cached"] == 0 and warm == cold
 
 
+def test_exl3_prompt_chunks_past_128_rows_leave_the_same_state(engine_x):
+    """An EXL3 checkpoint's 300-row prompt chunk leaves the bits 64-row chunks leave, and drafted equals serial after
+    it; 0.3.5.1's BF16 projections refused any prompt chunk past 128 rows."""
+
+    from tensorfold.families.glm5_next.cuda.decode import Engine, prefill
+
+    prompt = [int(t) for t in np.random.default_rng(128).integers(0, 1000, size=300)]
+    runs = []
+    for rows in (2048, 64):
+        e = Engine(engine_x.w, capacity=2560, max_rows=8, prefill_rows=rows)
+        runs.append((prefill(e, prompt, None), [t.clone() for t in _state(e)]))
+        del e
+    (a, want), (b, got) = runs
+    assert a == b and all(torch.equal(x, y) for x, y in zip(want, got))
+    sampling = Sampling(29, 1.0, 20, 0.95)
+    serial, _ = _generate(engine_x, prompt, sampling, draft=False)
+    drafted, _ = _generate(engine_x, prompt, sampling)
+    assert drafted == serial
+
+
 @pytest.fixture(scope="module")
 def engine_n(tmp_path_factory):
     """A checkpoint without the MTP head, with the drafter: every policy drafts with DFlash2."""
@@ -443,3 +463,25 @@ def test_drafted_replies_equal_serial_past_the_dense_limit(engine_long, sampling
     for policy in (None, "2", "c3:0.35"):
         drafted, _ = _generate(engine_long, prompt, sampling, policy=policy, tokens=32)
         assert drafted == serial, policy
+
+
+def test_long_prompt_chunks_leave_the_same_state(engine_long):
+    """Past the dense limit, 2,048-row prompt chunks leave the bits 64-row chunks leave; 0.3.5.1's sparse attention
+    lost rows 128 and up of a chunk, and GLM answered "!!!!" past 2,051 tokens (#53)."""
+
+    from tensorfold.families.glm5_next.cuda.decode import Engine, prefill
+
+    prompt = [int(t) for t in np.random.default_rng(53).integers(0, 1000, size=2400)]
+    runs = []
+    for rows in (2048, 64):
+        e = Engine(engine_long.w, capacity=2600, max_rows=8, prefill_rows=rows, long_context=True)
+        first = prefill(e, prompt, None)
+        index = []
+        for i, (ik, ig, pk) in enumerate(e.st.index):           # the MTP layer's indexer caches come last
+            k = e.st.mtp_len if i == len(e.st.index) - 1 else e.st.pos
+            index += [ik[:k], ig[:k], pk[:k // 4]]
+        runs.append((first, [t.clone() for t in _state(e) + index]))
+        del e
+    (a, want), (b, got) = runs
+    assert a == b
+    assert len(want) == len(got) and all(torch.equal(x, y) for x, y in zip(want, got))

@@ -23,6 +23,15 @@ class FlashNextEngine:
                  prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False) -> None:
         import torch
 
+        from .exl3_pack import admission, extra_files, is_exl3
+
+        exl3 = is_exl3(model_dir)
+        if exl3 and tp != 1:
+            raise ValueError("EXL3 packs of Flash Next run on one GPU: drop --tp 2, or serve the MLX checkpoint "
+                             "(Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP) on two")
+        if exl3 and ple_on_ssd:
+            raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram tables; an EXL3 pack maps its own table "
+                             "from its file, so drop --ple-on-ssd")
         from .decode import Engine
         from .weights import draft_token_ids, load
         from tensorfold.cuda.capacity import admit, gather_ints
@@ -51,9 +60,11 @@ class FlashNextEngine:
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
         geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp)) if streams > 1 else
                     (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp)))
+        if exl3:
+            geometry = admission(geometry)
         self.capacity_plan = admit(model_dir, max_len, context_explicit, torch, geometry,
                                    indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd), rank=rank, world=tp,
-                                   gather=gather)
+                                   gather=gather, extra_files=extra_files(model_dir) if exl3 else ())
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
             self._same_settings(torch, ids)

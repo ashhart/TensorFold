@@ -1,14 +1,4 @@
-// A plain weight linear for the Qwen3.8 engines: y = x @ W + bias with W fp16 or bf16 as stored.
-//
-// Row invariance (the verify path's contract) holds by construction here, not by tuning: one warp owns one
-// output element. Lane l sums k = 8l .. 8l+7, then 8l+256 .. 8l+263 and so on, in fp32 and in that order, and
-// the 32 lane sums are added by a fixed xor butterfly (every lane ends with the same value), so an element's
-// bits are a function of its own row and column alone. No cuBLAS, no cross-row reduction, nothing shape
-// dependent. This covers the handful of tensors an EXL3 checkpoint leaves unquantized (in_proj_a/b); the
-// trellis weights go through src/tensorfold/cuda/exl3.
-//
-// The first version gave each output one thread walking all of K alone: 96 launches over 0.5 MB weights took
-// 15.8 ms of a 27B decode step. A warp reading 16 bytes a lane streams the same weights in ~0.3 ms.
+// y = x @ W + bias for an unquantized fp16/bf16 W: one warp an output, lanes in fixed k order, a fixed xor butterfly, so a row's bits are its own.
 
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -51,9 +41,7 @@ __device__ __forceinline__ void ld8(const T* __restrict__ p, float (&v)[8]) {
 
 constexpr int WARPS = 4;
 
-// Grid (ceil(N / WARPS), M); warp w of a block owns output column blockIdx.x * WARPS + w of row blockIdx.y.
-// K % 8 == 0 and 16-byte aligned rows (checked by the host) for the vector loads; the tail past the last
-// full 256-element stride is summed per lane in the same fixed order.
+// Grid (ceil(N / WARPS), M), a warp an output; K % 8 == 0 and 16-byte rows (host-checked); the tail is summed per lane in the same order.
 template <typename T>
 __global__ void __launch_bounds__(WARPS * 32) b16_kernel(const T* __restrict__ x, const T* __restrict__ w,
                                                          const T* __restrict__ bias, T* __restrict__ y, int K, int N) {

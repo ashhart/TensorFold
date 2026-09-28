@@ -66,6 +66,7 @@ def bytes_in(arrays):
     return sum(t.numel() * t.element_size() for t in arrays)
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("world", [1, 2])
 @pytest.mark.parametrize("mtp", [False, True])
 def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, allocations, world, mtp):
@@ -100,6 +101,7 @@ def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, alloc
     assert kv <= bytes_in(arrays) <= estimated
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("mtp", [False, True])
 def test_mla_actual_cache_and_replay_state_are_budgeted(monkeypatch, allocations, mtp):
     arrays, fake = allocations

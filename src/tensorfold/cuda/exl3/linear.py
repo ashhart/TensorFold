@@ -1,22 +1,4 @@
-"""EXL3 linear layers on CUDA for every codebook and width (``linear.cu``): y = x @ W + bias for 1 to 128 rows,
-row-invariant, no cuBLAS.
-
-    layer = Exl3Linear.from_tensors(trellis, suh, svh, codebook="mul1")      # or .load(checkpoint, prefix)
-    y = layer(x)                                                              # x [M, K] fp16/bf16/fp32 -> y [M, N]
-
-Two kernels compute the layer. ``rot_in`` rotates the input once: xh = fp16((x * suh) @ H / sqrt(128)), rounded to
-fp16 as ExLlamaV3 does. ``linear`` gives each program 128 output columns (one Hadamard block) and a fixed slice of
-K; its warps read their k tiles from the read-only cache (one coalesced run a warp at 1 and 2 bits, each lane taking
-its two words by shuffle) with the next k step in flight while the current one decodes (up to 6 bits), decode them
-into tensor-core fragments (``decode.cuh``), multiply in fp32 and add their sums in warp order, and the program (or,
-with K split over several programs, the last of them to finish) rotates the outputs, scales by svh and adds the
-bias. The splits and warps
-depend only on (K, N) (``plan``), so a row's bits never depend on the other rows.
-
-At load the tiles are copied, not changed, into column strips: all k tiles of a 128-column block in k order
-(``strips``), so each warp reads one contiguous run of words. ``layout="stored"`` reads the checkpoint's order
-instead; both give the same bits.
-"""
+"""EXL3 linear layers on CUDA (``linear.cu``), any codebook and width: y = x @ W + bias for 1 to 128 rows, row-invariant, no cuBLAS."""
 
 from __future__ import annotations
 
@@ -36,7 +18,7 @@ def _ext():
     from torch.utils.cpp_extension import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_exl3_linear_v2", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
+    return load(name="tensorfold_exl3_linear_v3", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3", "--expt-relaxed-constexpr"],
                 verbose=False)
 
@@ -46,10 +28,7 @@ def k2_of(bits: float) -> int:
 
 
 def plan(k: int, n: int, blocks: int = 192, min_tiles: int = 8) -> tuple[int, int]:
-    """(K splits, warps a program) for a K x N layer, measured on a DGX Spark (docs/recipes/exl3.md): wide layers give
-    every program one 128-column block and eight warps, narrow ones split K to reach ``blocks`` programs, and a warp
-    always keeps at least ``min_tiles`` k tiles. A function of the shape only, never of the rows: a layer keeps its
-    plan for every call, which is what makes its rows independent."""
+    """(K splits, warps a program) for a K x N layer: the shape's alone, so a layer keeps one reduction for every row count."""
 
     kt, nb = k // 16, n // 128
     sk, wk = (1, 8) if nb >= 64 else (1, 4)
@@ -92,8 +71,7 @@ class Exl3Linear:
     def from_tensors(cls, trellis: torch.Tensor, suh: torch.Tensor, svh: torch.Tensor, codebook: str,
                      bias: torch.Tensor | None = None, device: str | torch.device = "cuda",
                      layout: str = "strips") -> "Exl3Linear":
-        """From a group's tensors: trellis int16 [K/16, N/16, 16 * bits]; suh [K] and svh [N] fp16 (or the packed
-        int16 sign words su [K/16] and sv [N/16] of older checkpoints); codebook "3inst", "mcg" or "mul1"."""
+        """From a group's tensors: trellis int16 [K/16, N/16, 16 * bits], suh/svh fp16 (or packed su/sv sign words), codebook name."""
 
         bits = fmt.bits_of(trellis.shape)
         if codebook not in CODEBOOK_IDS:
@@ -186,8 +164,7 @@ class Exl3Linear:
 
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None, out_dtype: torch.dtype | None = None,
                  xh: torch.Tensor | None = None, z: torch.Tensor | None = None) -> torch.Tensor:
-        """y [M, N] = x [M, K] @ W + bias, M = 1..128; fp16/bf16/fp32 in and out (out_dtype defaults to x's).
-        Scratch, allocated when not given: ``xh`` fp16 [M, K]; ``z`` fp32, at least SK * M * N (SK > 1 only)."""
+        """y [M, N] = x [M, K] @ W + bias for M = 1..128; scratch ``xh`` fp16 [M, K] and ``z`` fp32 (SK > 1) allocated when not given."""
 
         if x.dim() != 2 or x.shape[1] != self.k or not 1 <= x.shape[0] <= 128:
             raise ValueError(f"x must be [1..128, {self.k}], got {tuple(x.shape)}")
@@ -207,15 +184,11 @@ class Exl3Linear:
                    self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk)
         return out
 
-    def unpack(self) -> torch.Tensor:
-        """W_q [K, N] fp16 decoded on the GPU (the stored layout's words are rebuilt when needed)."""
+    def unpack(self, out: torch.Tensor | None = None) -> torch.Tensor:
+        """W_q [K, N] fp16 decoded on the GPU from either layout, into ``out`` when given."""
 
-        words = self.words
-        if self.layout == "strips":
-            nb, kt, _, tw = words.shape
-            words = words.permute(1, 0, 2, 3).reshape(kt, nb * 8, tw).contiguous()
-        w = torch.empty((self.k, self.n), dtype=torch.float16, device=words.device)
-        _ext().unpack(words, w, self.k2, CODEBOOK_IDS[self.codebook])
+        w = out if out is not None else torch.empty((self.k, self.n), dtype=torch.float16, device=self.words.device)
+        _ext().unpack(self.words, w, *self.strides, self.k2, CODEBOOK_IDS[self.codebook])
         return w
 
 
@@ -224,6 +197,8 @@ def unpack_cuda(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
 
     bits = fmt.bits_of(trellis.shape)
     words = trellis.cuda().contiguous().view(torch.int32)
-    w = torch.empty((16 * trellis.shape[0], 16 * trellis.shape[1]), dtype=torch.float16, device=words.device)
-    _ext().unpack(words, w, k2_of(bits), CODEBOOK_IDS[codebook])
+    k, n = 16 * trellis.shape[0], 16 * trellis.shape[1]
+    w = torch.empty((k, n), dtype=torch.float16, device=words.device)
+    tw = 4 * k2_of(bits)
+    _ext().unpack(words, w, (n // 16) * tw, 8 * tw, k2_of(bits), CODEBOOK_IDS[codebook])
     return w

@@ -118,6 +118,25 @@ def test_bf16_matmul_rows_are_independent_and_exact():
 
 
 @cuda
+def test_bf16_matmul_of_a_prompt_chunk_keeps_each_rows_bits():
+    """A prompt chunk (hundreds of rows, past the 128-row bucket) through the BF16 matmul, split-K or not, strided or
+    not: each row equals its one-row call. 0.3.5.1 refused any EXL3 prompt past 128 tokens here."""
+
+    from tensorfold.families.glm5_next.cuda import qmm
+
+    gen = torch.Generator().manual_seed(53)
+    for n, k in ((512, 1024), (4096, 1024)):
+        w = qmm.make_b16((torch.randn((n, k), generator=gen) * 0.05).cuda())
+        wide = torch.randn((300, k + 64), generator=gen).to(torch.bfloat16).cuda()
+        for x in (wide[:, :k].contiguous(), wide[:, 64:]):
+            for f32 in (True, False):
+                whole = qmm.matmul(x, w, f32=f32)
+                for r in (0, 127, 128, 255, 299):
+                    alone = qmm.matmul(x[r:r + 1], w, f32=f32)
+                    assert torch.equal(alone[0], whole[r]), (n, k, f32, r)
+
+
+@cuda
 def test_exl3_experts_match_the_reference_and_rows_are_independent():
     """A layer's routed experts (rotations, trellis GEMVs, SwiGLU) against the float64 reference with the kernels'
     roundings, on synthetic experts; each row alone gives the bits it gets inside a window."""

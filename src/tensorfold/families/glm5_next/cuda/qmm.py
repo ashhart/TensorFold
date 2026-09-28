@@ -247,7 +247,7 @@ def _matmul_b16(x: torch.Tensor, q: B16, *, out: torch.Tensor | None, f32: bool,
     m, k = x.shape
     if k != q.k or x.stride(1) != 1 or x.dtype != torch.bfloat16 or k % B16_BK:
         raise ValueError(f"matmul: x {tuple(x.shape)} {x.dtype} does not match K={q.k}")
-    bm = bucket(m)
+    bm = bucket(min(m, 128))              # a prompt chunk runs as 128-row blocks: no bucket changes a row's bits
     warps, stages = B16_CONFIG[bm]
     sk = b16_split_k(q.n, q.k)
     if out is None:

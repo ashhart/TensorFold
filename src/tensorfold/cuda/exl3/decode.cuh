@@ -1,22 +1,4 @@
-// EXL3 tiles on CUDA: device functions that decode a 16x16 trellis tile of any codebook and width straight into
-// the B fragments of two mma.m16n8k16, the definition in format.py (after ExLlamaV3, MIT, Copyright (c) 2025
-// Turboderp). Header only, no ATen: include it from any family's kernels.
-//
-// Widths are given as K2 = 2 * bits: 2, 4, 6, 8, 10, 12, 14, 16 for 1..8 bits, 3, 5, 7 for 1.5, 2.5, 3.5 (mul1).
-// Codebooks: CB_3INST, CB_MCG, CB_MUL1.
-//
-// A tile is 4 * K2 little-endian 32-bit words (the trellis' int16 [.., .., 16 * bits] viewed as int32). Lane L of a
-// warp owns the tile's values 8L..8L+7, which are exactly its B fragments of the two mma.m16n8k16 of the tile
-// (tile columns 0-7 and 8-15; rows are the k index):
-//
-//     uint32_t w[tf_exl3::lane_words<K2>()];
-//     tf_exl3::load_lane_words<K2>(tile, lane, w);          // 2 or 3 words of the tile, any memory space
-//     uint32_t b0[2], b1[2];
-//     tf_exl3::decode_lane<K2, CB>(w, lane, b0, b1);         // half2 pairs as uint32
-//     mma16816(acc_cols_0_7, a, b0); mma16816(acc_cols_8_15, a, b1);
-//
-// load_lane_words and decode_lane are split so a kernel can prefetch the words (registers, shared memory) before it
-// decodes them. Every function is exact: tf_exl3::decode_lane gives the bits format.py's reference gives.
+// EXL3 tiles (format.py, after ExLlamaV3, MIT, Copyright (c) 2025 Turboderp): lane L decodes a tile's values 8L..8L+7 straight into its two mma.m16n8k16 B fragments, bit for bit.
 
 #pragma once
 
@@ -158,8 +140,7 @@ __device__ __forceinline__ void mma16816(float (&d)[4], const uint32_t (&a)[4], 
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
-// Fast Walsh-Hadamard transform of 128 fp32 values held 4 per lane (lane L: values 4L..4L+3), natural order, in a
-// fixed butterfly order (strides 1, 2 in registers, then 4..64 across lanes). Unscaled: multiply by 1/sqrt(128).
+// Unscaled Walsh-Hadamard transform of 128 fp32 values, 4 a lane, in a fixed butterfly order (multiply by 1/sqrt(128)).
 __device__ __forceinline__ void fwht128(float (&v)[4], int lane) {
     const float a = v[0] + v[1], b = v[0] - v[1], c = v[2] + v[3], d = v[2] - v[3];
     v[0] = a + c;

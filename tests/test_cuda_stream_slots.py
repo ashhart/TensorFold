@@ -3,7 +3,11 @@
 import importlib
 from types import SimpleNamespace
 
+import pytest
+
 from tests.test_cuda_geometry import allocations  # noqa: F401  (fixture: fake triton, so the module imports)
+
+pytestmark = pytest.mark.torch
 
 
 def decoder(module, free, kept, keep=8):

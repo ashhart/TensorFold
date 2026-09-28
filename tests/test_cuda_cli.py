@@ -84,6 +84,7 @@ def test_cuda_admission_metadata_does_not_enlarge_the_engine_cache(tmp_path, mon
     assert "context: 8185" in capsys.readouterr().out
 
 
+@pytest.mark.torch
 def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatch):
     """Everything on the lanes: a CUDA engine whose drafter is missing refuses to start rather than decode one token
     a round, and names the fix; --no-drafts (the serial reference) still starts."""

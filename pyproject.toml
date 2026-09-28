@@ -34,6 +34,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+# --ssd-experts builds a small MLX extension on first use, with MLX's own nanobind
+ssd = ["cmake>=3.27; sys_platform == 'darwin'", "nanobind==2.15.0; sys_platform == 'darwin'"]
 
 [project.scripts]
 tensorfold = "tensorfold.cli:main"
@@ -54,6 +56,7 @@ where = ["src"]
 "tensorfold.families.glm5_next.cuda" = ["*.cu", "*.cpp"]
 "tensorfold.families.nemotron_h.cuda" = ["*.cu", "*.cpp"]
 "tensorfold.cuda.exl3" = ["*.cu", "*.cuh", "*.cpp"]
+"tensorfold.streaming.hostsync" = ["*.cpp", "CMakeLists.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

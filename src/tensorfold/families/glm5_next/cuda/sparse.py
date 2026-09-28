@@ -190,17 +190,23 @@ def _sparse_merge(PO, PM, PL, OUT, CNT, H: tl.constexpr, D: tl.constexpr, NCH: t
     tl.store(OUT + (r * H + h) * D + d, (o / l).to(tl.bfloat16))
 
 
+PART_ROWS = 128          # rows of one launch: the kernels keep a row's chunk partials at c * 128 + r
+
+
 def sparse_attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, tokens: torch.Tensor, counts: torch.Tensor,
                      out: torch.Tensor, scale: float) -> None:
-    """Write attention for rows with positive counts into out [R, H, D], leaving other rows untouched."""
+    """Write attention for rows with positive counts into out [R, H, D] in launches of up to 128 rows, leaving other rows untouched."""
 
     R, H, D = q.shape
     W = tokens.shape[1]
     CH = 512
     nch = triton.cdiv(W, CH)
-    po = torch.empty((nch * 128 * H * D,), dtype=torch.float32, device=q.device)
-    pm = torch.empty((nch * 128 * H,), dtype=torch.float32, device=q.device)
-    pl = torch.empty((nch * 128 * H,), dtype=torch.float32, device=q.device)
-    _sparse_chunks[(R, H, nch)](q, kc, vc, tokens, counts, po, pm, pl, W=W, H=H, D=D, CH=CH, SCALE=scale,
-                                num_warps=4, num_stages=1)
-    _sparse_merge[(R, H)](po, pm, pl, out, counts, H=H, D=D, NCH=nch, CH=CH, num_warps=4)
+    po = torch.empty((nch * PART_ROWS * H * D,), dtype=torch.float32, device=q.device)
+    pm = torch.empty((nch * PART_ROWS * H,), dtype=torch.float32, device=q.device)
+    pl = torch.empty((nch * PART_ROWS * H,), dtype=torch.float32, device=q.device)
+    for r0 in range(0, R, PART_ROWS):
+        n = min(PART_ROWS, R - r0)
+        rows = slice(r0, r0 + n)
+        _sparse_chunks[(n, H, nch)](q[rows], kc, vc, tokens[rows], counts[rows], po, pm, pl, W=W, H=H, D=D, CH=CH,
+                                    SCALE=scale, num_warps=4, num_stages=1)
+        _sparse_merge[(n, H)](po, pm, pl, out[rows], counts[rows], H=H, D=D, NCH=nch, CH=CH, num_warps=4)

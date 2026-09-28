@@ -13,11 +13,8 @@ TITLE = "Qwen3.8 dense"
 LANES = True
 MODELS = ("Vontra/Qwen3.8-27B-MLX-4bit", "turboderp/Qwen3.8-27B-exl3")
 DRAFTER = "z-lab/Qwen3.8-27B-DFlash2"
-# the storage formats the CUDA engine reads: MLX affine 4-bit, and EXL3 trellis packs through
-# cuda/exl3 (families/qwen3_5/cuda/exl3_load.py)
-QUANT_METHODS = {"cuda": ("mlx", "exl3")}
-# "any" (tensorfold.families.EXL3_VARIANT_ANY): every codebook and width, as the checkpoint states
-EXL3_VARIANT = "any"
+QUANT_METHODS = {"cuda": ("mlx", "exl3")}      # the CUDA engine reads MLX affine 4-bit and EXL3 packs
+EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.dense.v1"
 KERNEL_VERSION = "v1"
 
@@ -246,7 +243,11 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     """The CUDA engine for ``tensorfold serve``; tp=2 adds fp32 partials in rank order and needs the drafter on both."""
 
     from .cuda.engine import Qwen27Engine
+    from .cuda.exl3_load import quant_config
 
+    if quant_config(Path(model_dir)) is not None:
+        print("[tensorfold] EXL3 packs are experimental: replies are exact; on a DGX Spark decode runs 0.8-1.2x the MLX "
+              "checkpoint and prompts about half as fast (docs/recipes/qwen3.8-27b.md#exl3-checkpoints-experimental)", flush=True)
     if not drafter and not no_drafts:
         raise ValueError(f"{TITLE}'s CUDA engine drafts with {DRAFTER}, which is not here: without it every round "
                          f"would decode one token. Run `tensorfold pull {DRAFTER}` once (on both machines for "

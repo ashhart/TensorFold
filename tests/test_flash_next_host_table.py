@@ -120,4 +120,4 @@ def test_flash_next_refuses_them_before_building(monkeypatch):
     monkeypatch.setattr(q4, "prefetch_ngrams", lambda model: None)
     assert runtime.load("unused", drafts=0) == ("built", "tokenizer")
     assert runtime.load("unused", drafts=0, ple_on_ssd=True) == ("built", "tokenizer")
-    assert seen[-2:] == [{"ple_on_ssd": False}, {"ple_on_ssd": True}]
+    assert [k["ple_on_ssd"] for k in seen[-2:]] == [False, True]

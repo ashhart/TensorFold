@@ -10,6 +10,8 @@ TITLE = "Qwen3.8 Flash Next"
 LANES = True
 # 4-bit weights in groups of 32 (what the fused kernels read), with the checkpoint's MTP head kept
 MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3")
+QUANT_METHODS = {"cuda": ("mlx", "exl3")}      # the CUDA engine reads MLX affine 4-bit and EXL3 packs
+EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
 KERNEL_VERSION = "v1"
 # The CLI sets these before MLX starts, respecting environment overrides, to keep expert bindings from ending each command buffer.
@@ -57,11 +59,21 @@ def ple_bytes(model_dir: Path) -> int:
                for name, entry in read_header(path).items() if ".ngram_embedding.shard_" in name)
 
 
-def load(model_dir: Path, *, mtp_drafts: int | None = None, ple_on_ssd: bool = False, **_: Any) -> tuple[Any, Any]:
+def expert_bytes(model_dir: Path) -> int:
+    """Bytes of the decoder layers' routed expert stacks, which --ssd-experts leaves on disk."""
+
+    from tensorfold.streaming.checkpoint import tensor_bytes
+
+    return tensor_bytes(Path(model_dir), lambda name: name.startswith("language_model.model.layers.")
+                        and ".mlp.switch_mlp." in name)
+
+
+def load(model_dir: Path, *, mtp_drafts: int | None = None, ple_on_ssd: bool = False,
+         ssd_experts: float | None = None, **_: Any) -> tuple[Any, Any]:
     from tensorfold.families.qwen4_exp.runtime import load as load_runtime
 
     drafts = mtp_drafts if has_mtp(Path(model_dir)) else 0
-    return load_runtime(Path(model_dir), drafts=drafts, ple_on_ssd=ple_on_ssd)
+    return load_runtime(Path(model_dir), drafts=drafts, ple_on_ssd=ple_on_ssd, ssd_experts=ssd_experts)
 
 
 def engine_settings(model: Any) -> dict[str, Any]:
@@ -88,15 +100,17 @@ def kernel_version(model: Any) -> str:
 
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
 CUDA_QUANTIZATION = (4, 32)
-# ...and EXL3 packs (``cuda/exl3.py``): every codebook, a bit width per tensor (mixed-K packs included), one GPU
-QUANT_METHODS = {"cuda": ("mlx", "exl3")}
-EXL3_VARIANT = "any"
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
                 context: int | None = None, ple_on_ssd: bool = False, **options: Any):
     """The CUDA engine: MTP chains verified exactly on one GPU or two (``tp=2``; start rank 1 first)."""
 
+    from tensorfold.cuda.exl3.format import is_exl3
+
+    if is_exl3(Path(model_dir)):
+        print("[tensorfold] EXL3 packs are experimental: replies are exact; see "
+              "docs/recipes/qwen3.8-flash-next.md#exl3-checkpoints-experimental for how they compare", flush=True)
     if drafter:
         raise ValueError(f"{TITLE} drafts with its own MTP head on CUDA: a separate draft model does not apply")
     from .cuda import DEPTH

@@ -227,9 +227,10 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
         text = config(model_dir)
         geometry = geometry(text) if callable(geometry) else geometry
         weights = estimate_weights(model_dir, transform, rank=rank, files=files)
-        if extra_files:                      # loaded after the model with the same layout (Nemotron's MTP head)
+        if extra_files:                      # files outside the index, same layout (Nemotron's MTP head, EXL3 tables)
             more = estimate_weights(model_dir, transform, files=list(extra_files))
-            weights = Weights(weights.resident + more.resident, max(weights.staging, more.staging), weights.mapped)
+            weights = Weights(weights.resident + more.resident, max(weights.staging, more.staging),
+                              weights.mapped + more.mapped)
         weights = Weights(weights.resident, weights.staging + startup_copies * weights.resident, weights.mapped)
         if draft_dir is not None:
             draft = estimate_weights(draft_dir, lambda name, info: (math.prod(info["shape"]) *

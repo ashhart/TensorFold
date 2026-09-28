@@ -1,57 +1,4 @@
-"""EXL3 weights (ExLlamaV3's trellis quantization) as any EXL3 checkpoint stores them: the format, each tensor
-group's metadata read from the safetensors headers, and a reference decoder in numpy, the definition the CUDA
-code (``decode.cuh``, ``linear.cu``) is checked against.
-
-The format is ExLlamaV3's (https://github.com/turboderp-org/exllamav3, MIT, Copyright (c) 2025 Turboderp), as
-written by its versions 0.0.x to 1.5.x. A quantized linear layer with K inputs and N outputs (multiples of 128:
-ExLlamaV3 pads smaller layers) is a group of tensors under one prefix, ``<prefix>.<part>``:
-
-    trellis  int16 [K/16, N/16, 16 * bits]   one 16x16 tile of W_q per (k tile, n tile), tiles row-major
-    suh      fp16  [K]                        input scales (sign and magnitude)
-      or su  int16 [K/16]                     input signs only (older checkpoints), see ``unpack_signs``
-    svh      fp16  [N]                        output scales
-      or sv  int16 [N/16]                     output signs only
-    mcg      int32 []                         present: the tiles use the "mcg" codebook (the tensor holds 0xCBAC1FED)
-    mul1     int32 []                         present: the "mul1" codebook (0x83DCD12D)
-    bias     fp16  [N]                        optional
-
-With neither marker the codebook is the original "3inst". ``bits``, the bits per weight, is the trellis' last
-dimension over 16: an integer 1 to 8, or with the mul1 codebook 1.5, 2.5 or 3.5 (ExLlamaV3 1.5). It is a property
-of each tensor: one checkpoint mixes widths across layers, projections and the experts of one MoE layer, so
-config.json's ``bits`` is only the average and ``head_bits`` the head's. Tensors of an EXL3 checkpoint that are not
-in this form (embeddings, norms, routers, sometimes a head or a whole layer) are plain fp16/bf16/fp32 weights.
-
-The tile. A tile holds 256 values in R = 256 * bits bits (16 * bits int16 words). Its int16 words, read in pairs as
-little-endian 32-bit words, form a circular bitstream of R bits read from the most significant bit of each 32-bit
-word. Value p of the tile (p = 0..255) is decoded from the 16 bits of the stream that end at bit E(p) (exclusive,
-wrapping around past the tile's last bit), taken as an unsigned integer s, first bit most significant:
-
-    E(p) = (p + 1) * bits                                   integer bits
-    E(p) = ((p + 1) * (2 * KA + 1) - ((p + 1) % 2)) / 2     bits = KA + 1/2: positions alternate KA and KA + 1
-                                                            new bits, the odd positions taking the extra bit
-
-and the codebook maps the 16-bit state s to an fp16 value:
-
-    3inst  x = (s * 89226354 + 64248484) mod 2^32; x = (x & 0x8FFF8FFF) ^ 0x3B603B60;
-           value = fp16(x & 0xFFFF) + fp16(x >> 16)         one fp16 addition, rounded to nearest even
-    mcg    x = s * 0xCBAC1FED mod 2^32, then as 3inst
-    mul1   x = s * 0x83DCD12D mod 2^32; h = 1024 + (the sum of x's four bytes);
-           value = h * fp16(0x1EEE) + fp16(0xC931)          one fused multiply-add, rounded once (1/147.7, -10.39)
-
-Value p lands in its tile at row 2 * (l % 4) + (j & 1) + 8 * ((j >> 1) & 1), column l // 4 + 8 * (j >> 2), where
-l = p // 8 and j = p % 8: lane l of a warp holds values 8l..8l+7, exactly its B fragments of the two
-mma.m16n8k16 of the tile (columns 0-7 and 8-15). The tiles make W_q [K, N], the weight in the rotated domain.
-
-The layer. With H the 128x128 Sylvester Hadamard matrix scaled by 1/sqrt(128), applied to each block of 128 inputs
-or outputs,
-
-    y = x @ W + bias,   W = diag(suh) @ H_K @ W_q @ H_N @ diag(svh),
-    so  y = ((((x * suh) @ H_K) @ W_q) @ H_N) * svh + bias
-
-(``out_scales`` in the config only says whether the quantizer folded per-column scales into svh; the formula is the
-same.) Splitting a layer keeps whole tiles and whole Hadamard blocks: by outputs, take columns of tiles and of svh
-and all of suh; by inputs, rows of tiles and of suh and all of svh, and add the partial outputs.
-"""
+"""The EXL3 format (ExLlamaV3's trellis quantization, MIT, Copyright (c) 2025 Turboderp), header-only metadata and a numpy reference decoder; docs/recipes/exl3.md has the bit arithmetic."""
 
 from __future__ import annotations
 
@@ -170,8 +117,7 @@ def states(trellis: Any, bits: float) -> np.ndarray:
 
 
 def unpack(trellis: Any, bits: float, codebook_name: str, chunk: int = 16) -> np.ndarray:
-    """W_q [K, N] fp16, the weight in the rotated domain (what ExLlamaV3's ``reconstruct`` writes), from trellis
-    int16 [K/16, N/16, 16 * bits]; ``chunk`` k tiles at a time to bound memory."""
+    """W_q [K, N] fp16 in the rotated domain (ExLlamaV3's ``reconstruct``) from trellis int16 [K/16, N/16, 16 * bits], ``chunk`` k tiles at a time."""
 
     t = _as_numpy(trellis)
     if t.ndim != 3:
@@ -278,8 +224,7 @@ def read_scalar(path: str | Path, entry: dict) -> int:
 
 
 def parse_group(prefix: str, parts: dict[str, dict], files: Iterable[str] = ()) -> Exl3Tensor:
-    """An EXL3 tensor group from its parts' header entries ({"trellis": {"dtype", "shape"}, "suh": ..., ...}).
-    Raises ValueError, saying what is wrong, for a group ExLlamaV3's LinearEXL3 would not load."""
+    """An EXL3 group from its parts' header entries; ValueError, saying why, for a group ExLlamaV3's LinearEXL3 would not load."""
 
     def fail(why: str) -> ValueError:
         return ValueError(f"{prefix}: {why}")
@@ -334,9 +279,7 @@ class Checkpoint:
 
 
 def config_fields(config: dict[str, Any]) -> dict[str, Any]:
-    """The EXL3 fields a checkpoint's ``config.json`` states: ``version``, ``bits`` (the average over the model,
-    not any tensor's width), ``head_bits``, ``codebook`` and ``out_scales``. Read from ``quantization_config``,
-    ``quantization``, or the text config's of either."""
+    """The EXL3 fields config.json states (version, average bits, head_bits, codebook, out_scales), top level or text config, either key."""
 
     blocks = [(config.get(k) or {}) for k in ("quantization_config", "quantization")]
     text = config.get("text_config") or {}
@@ -348,10 +291,7 @@ def config_fields(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def require_config(config: dict[str, Any], *, where: str = "", tested: str = "", help: str = "") -> dict[str, Any]:
-    """Refuse, from ``config.json`` alone and before any weight download, an EXL3 checkpoint whose codebook or bit
-    widths the EXL3 module does not read (``CODEBOOKS``, ``BITS``): every codebook and every width is accepted, the
-    average ``bits`` of the config may be fractional whatever the codebook. Per-tensor widths and groups that do not
-    parse are ``scan``'s business. Returns the fields it read, for a note."""
+    """Refuse from config.json alone, before downloading, a codebook or width this module does not read; returns the fields read."""
 
     fields = config_fields(config)
     tail = f" Tested checkpoints: {tested}. {help}" if tested else f" {help}" if help else ""
@@ -433,3 +373,14 @@ def scan(model_dir: str | Path, read_markers: bool = True) -> Checkpoint:
              if name not in taken}
     config = json.loads((root / "config.json").read_text()) if (root / "config.json").exists() else {}
     return Checkpoint(groups, plain, bad, config, markers)
+
+
+def is_exl3(model_dir: str | Path) -> bool:
+    """Whether config.json (top level or text config, either key) or a sidecar file names the EXL3 format."""
+
+    root = Path(model_dir)
+    config = root / "config.json"
+    if config.is_file() and config_fields(json.loads(config.read_text())):
+        return True
+    side = root / "quantization_config.json"
+    return side.is_file() and str(json.loads(side.read_text()).get("quant_method", "")).lower() == "exl3"

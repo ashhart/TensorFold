@@ -19,6 +19,12 @@ class Qwen27Engine:
                  context: int | None = None, context_explicit: bool | None = None):
         import torch
 
+        from .exl3_load import admission, quant_config
+
+        exl3 = quant_config(Path(model_dir)) is not None
+        if exl3 and tp != 1:
+            raise ValueError("EXL3 packs of Qwen3.8-27B run on one GPU: drop --tp 2, or serve the MLX checkpoint "
+                             "(Vontra/Qwen3.8-27B-MLX-4bit) on two")
         from .weights import load
         from tensorfold.cuda.capacity import admit, gather_ints
         from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, linear_weights, stream_geometry
@@ -47,10 +53,14 @@ class Qwen27Engine:
         else:
             gather = None
         many = streams > 1
+        geometry = ((lambda text: stream_geometry(text, tp, streams, KEEP)) if many else
+                    (lambda text: gdn_geometry(text, tp, max_rows)))
+        tensor_bytes = linear_weights
+        if exl3:
+            geometry, tensor_bytes = admission(geometry)
         # one admission for one stream or many, on every rank, before any weight loads
         self.capacity_plan = admit(model_dir, context, context_explicit, torch,
-                                   (lambda text: stream_geometry(text, tp, streams, KEEP)) if many else
-                                   (lambda text: gdn_geometry(text, tp, max_rows)), linear_weights,
+                                   geometry, tensor_bytes,
                                    rank=rank, world=tp, gather=gather,
                                    draft_dir=draft_dir if rank == 0 or tp_draft else None,
                                    draft_geometry=lambda text: draft_geometry(text, tp if tp_draft else 1, max_rows,

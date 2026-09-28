@@ -16,10 +16,10 @@ from safetensors import safe_open
 from tensorfold.engine.exact_sampling import Sampling
 
 from .draft_tree import best_first
-from .glue import embed, swiglu
+from .glue import embedding, swiglu
 from .qmm import group_sums
 from .qmm_fast import matmul, tile, untile
-from .weights import Exl3, Plain, QLinear, Weights
+from .weights import Exl3, QLinear, Weights
 
 
 @triton.jit
@@ -144,13 +144,7 @@ def quantize4(w: torch.Tensor) -> QLinear:
 
 
 def _exl3_sub_head(layer, spans: tuple[tuple[int, int], ...]):
-    """The target's EXL3 head (an ``Exl3Linear``) over the draft vocabulary, and which of its columns are the spans.
-
-    The head's words are stored in 128-column strips (one Hadamard block each), so the 128-column blocks that hold
-    the spans slice out as they are: same codebook, same bits, same K split, nothing decoded or re-quantized. The
-    drafter's logits are then the target's own logits for those tokens, bit for bit. A span that does not start
-    or end on a block edge brings its whole block, and the returned columns drop the extra ones.
-    """
+    """The EXL3 head's strips holding ``spans`` as stored (the target's own logits, bit for bit), and the span columns."""
 
     from tensorfold.cuda.exl3.linear import Exl3Linear
 
@@ -193,7 +187,7 @@ class DFlash2:
         self.layers = int(cfg["num_hidden_layers"])
         self.window = int(cfg["sliding_window"]) - 1
         self.is_causal = bool(cfg.get("is_causal", True))
-        self.target = target
+        self.target_embed = target.embed
         self.device = target.norm.device
         self.weights: dict[str, torch.Tensor] = {}
         with safe_open(str(path / "model.safetensors"), framework="pt", device="cpu") as f:
@@ -211,13 +205,12 @@ class DFlash2:
         spans = tuple((a, min(b, vocab)) for a, b in ((0, 98304), (248032, 248320)) if a < vocab)
         self.vocab_spans = spans
         self.head_ids = torch.cat([torch.arange(a, b, device=self.device) for a, b in spans])
-        # an EXL3 checkpoint's head is a trellis: the drafter reads the target's own head over the draft
-        # vocabulary (``_exl3_sub_head``), and ``head_cols`` picks the span columns out of its 128-column blocks
-        self.head_cols: torch.Tensor | None = None
+        self.head_cols: torch.Tensor | None = None           # an EXL3 head's span columns in its sliced strips
         if isinstance(target.head, Exl3):
             if world != 1:
                 raise ValueError("a two-rank drafter needs the MLX checkpoint's 4-bit head")
-            self.sub_head, self.head_cols = _exl3_sub_head(target.head.layer, spans)
+            sub, self.head_cols = _exl3_sub_head(target.head.layer, spans)
+            self.sub_head = Exl3(sub)
         else:
             head = untile(target.head)
             self.sub_head = QLinear(torch.cat([head.weight[a:b] for a, b in spans]).contiguous(),
@@ -498,10 +491,7 @@ class DFlash2:
         length = min(block or self.block, max_nodes + 1)
         tokens = torch.tensor([t for i in live for t in [pendings[i]] + [self.mask_id] * (length - 1)],
                               dtype=torch.int32, device=self.device)
-        e = self.target.embed
-        # an EXL3 checkpoint keeps the embedding as stored: its rows, as the target's own forward reads them
-        x = (e.weight[tokens.to(torch.int64)].to(torch.bfloat16).contiguous() if isinstance(e, Plain)
-             else embed(tokens, e.weight, e.scales, e.biases, self.hidden))
+        x = embedding(tokens, self.target_embed)
         if self.fast:
             ctx = [snaps[i] for i in live]
             rot = [self._rotary(snap[3], length) for snap in ctx]

@@ -363,14 +363,15 @@ class GLMFlash:
         return True
 
 
-def load(model_dir: Path, *, drafts: int | None = None, check: bool = True) -> tuple[GLMFlash, Any]:
+def load(model_dir: Path, *, drafts: int | None = None, check: bool = True,
+         ssd_experts: float | None = None) -> tuple[GLMFlash, Any]:
     """The runtime and tokenizer; ``drafts`` (default 3, 0: none) caps the MTP drafts a round."""
 
     from tensorfold.families.glm5_next import has_mtp
     from tensorfold.families.glm5_next import mtp as mtp_module
     from tensorfold.families.glm5_next import weights as glm
 
-    model, tokenizer = glm.load(Path(model_dir))
+    model, tokenizer = glm.load(Path(model_dir), ssd_experts=ssd_experts)
     drafts = 3 if drafts is None else int(drafts)
     head = mtp_module.load(model) if drafts > 0 and has_mtp(model_dir) else None
     model.weights = None                                                 # the checkpoint's shard index is done

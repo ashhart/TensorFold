@@ -516,7 +516,8 @@ def last_row_layer(layer: Any, x: mx.array, cache: Any) -> mx.array:
     return _write_back(h, layer.mlp(mixed), inject)
 
 
-def load(model_dir: Path, *, drafts: int | None = None, ple_on_ssd: bool = False) -> tuple[FlashNext, Any]:
+def load(model_dir: Path, *, drafts: int | None = None, ple_on_ssd: bool = False,
+         ssd_experts: float | None = None) -> tuple[FlashNext, Any]:
     """Load with an MTP draft cap from ``drafts`` or TF_FLASH_MTP, defaulting to 3; zero disables drafts."""
 
     import os
@@ -525,7 +526,7 @@ def load(model_dir: Path, *, drafts: int | None = None, ple_on_ssd: bool = False
     from tensorfold.families.qwen4_exp import model as q4
     from tensorfold.families.qwen4_exp import mtp as mtp_module
 
-    model, tokenizer = q4.load(Path(model_dir), ple_on_ssd=ple_on_ssd)
+    model, tokenizer = q4.load(Path(model_dir), ple_on_ssd=ple_on_ssd, ssd_experts=ssd_experts)
     drafts = int(os.environ.get("TF_FLASH_MTP", "3")) if drafts is None else int(drafts)
     head = mtp_module.load(Path(model_dir), model.args) if drafts > 0 and model.__dict__.get("fused") else None
     missed = decode.unreadable(model, head) if decode.DENSE == "lane" else {}   # simd_qmm checks a shape on first use

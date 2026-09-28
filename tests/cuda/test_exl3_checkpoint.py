@@ -52,7 +52,7 @@ def _one_per_width() -> dict[float, str]:
 def _reconstruct(trellis: torch.Tensor, bits: float, codebook: str) -> torch.Tensor:
     """ExLlamaV3's own device dequantization of the same trellis (it writes into a caller's buffer)."""
 
-    from exllamav3.ext import exllamav3_ext as ext
+    ext = pytest.importorskip("exllamav3.ext").exllamav3_ext
 
     out = torch.empty((16 * trellis.shape[0], 16 * trellis.shape[1]), dtype=torch.half, device="cuda")
     ext.reconstruct(out, trellis.cuda(), float(bits), codebook == "mcg", codebook == "mul1")

@@ -1,24 +1,4 @@
-// EXL3 linear layers on CUDA for any codebook and width (decode.cuh, format.py): y = x @ W + bias for 1 to 128
-// rows, W = diag(suh) H W_q H diag(svh).
-//
-// Two kernels:
-//   rot_in   xh [M, K] fp16 = fp16(((x * suh) @ H) / sqrt(128)), one warp per (row, 128-input block)
-//   linear   program (128-column block nb, K split s) of WK warps; warp w owns a fixed run of the split's k
-//            tiles and decodes each one's eight 16x16 tiles straight into mma.m16n8k16 fragments. The trellis
-//            words come in through the read-only cache: at 3 bits and up each lane loads its own windows of a
-//            tile (a warp's whole search is 8 tiles - 256 B at 2 bits - so the L1 serves it from one line), at
-//            1 and 2 bits a lane's windows span two words that the warp instead loads as one 64 or 128 word run
-//            (two words a lane) and takes by shuffle. Up to 6 bits the next k step's words are loaded while the
-//            current one is decoded, which is where the read bandwidth is won at 2, 5 and 6 bits; at 7 and 8
-//            bits a step is 224 or 256 B of words a warp and the same build prefetching there reads 1-2% slower,
-//            so it loads per tile. Rows go in passes of 16. The warps' fp32 sums are added in warp order through
-//            shared memory, rows 0-7 of the pass and then rows 8-15, so a program holds WK * min(M, 8) rows of
-//            128 floats. With one split the program finishes its columns (output
-//            Hadamard, * svh, + bias); with SK splits it writes its sum to Z and the last of the column block's
-//            programs to arrive (a counter, the only atomic) adds the SK sums in split order and finishes them.
-//
-// Every output depends only on its own row: rows share an mma but mma keeps rows independent, the k ranges of
-// warps and splits depend only on (K, N), and every sum runs in a fixed order.
+// EXL3 linear, any codebook and width, 1-128 rows: a row's bits depend only on it (mma keeps rows apart, K ranges fixed by (K, N), fixed-order sums).
 
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -80,11 +60,7 @@ __device__ __forceinline__ void finish(float (&v)[4], int lane, const half* svh,
     }
 }
 
-// The trellis words of one k step (the eight 16x16 tiles of a 128-column block, 8 * TW words in a row in both
-// layouts) that a lane needs. At 1 and 2 bits a lane's windows span at most two words and the step is 64 or 128
-// words, so the warp loads the step together, TW / 4 words a lane, and each lane takes its two words of a tile
-// from their owners by shuffle. At other widths each lane loads its own lane_words of every tile (the same words
-// ldg_lane_words reads).
+// A lane's words of one k step: at 1 and 2 bits the warp loads the step together and each lane takes its words by shuffle.
 template <int K2>
 __host__ __device__ constexpr bool step_shuffled() {
     return K2 == 2 || K2 == 4;
@@ -287,13 +263,13 @@ __global__ void __launch_bounds__(WK * 32) linear_kernel(
     }
 }
 
-// W_q [K, N] fp16 from the trellis words in the stored layout: one warp per tile.
+// W_q [K, N] fp16 from the trellis words (tile (kt, nt) at kt * stride_k + (nt / 8) * stride_nb): one warp per tile.
 template <int K2, int CB>
-__global__ void __launch_bounds__(32) unpack_kernel(const uint32_t* __restrict__ T, half* __restrict__ W, int N) {
+__global__ void __launch_bounds__(32) unpack_kernel(const uint32_t* __restrict__ T, half* __restrict__ W, int N,
+                                                    int64_t stride_k, int64_t stride_nb) {
     const int kt = blockIdx.y, nt = blockIdx.x, lane = threadIdx.x;
-    const int NTILES = N >> 4;
     uint32_t w[lane_words<K2>()];
-    ldg_lane_words<K2>(T + ((size_t)kt * NTILES + nt) * tile_words<K2>(), lane, w);
+    ldg_lane_words<K2>(T + kt * stride_k + (nt >> 3) * stride_nb + (nt & 7) * tile_words<K2>(), lane, w);
     uint32_t b[2][2];
     decode_lane<K2, CB>(w, lane, b[0], b[1]);
 #pragma unroll
@@ -352,14 +328,16 @@ void exl3_linear_cuda(const at::Tensor& xh, const at::Tensor& T, int64_t stride_
     TORCH_CHECK(false, "unsupported EXL3 width/codebook: K2=", K2, " codebook=", cb);
 }
 
-void exl3_unpack_cuda(const at::Tensor& T, at::Tensor& W, int64_t K2, int64_t cb) {
+void exl3_unpack_cuda(const at::Tensor& T, at::Tensor& W, int64_t stride_k, int64_t stride_nb, int64_t K2,
+                      int64_t cb) {
     const int K = (int)W.size(0), N = (int)W.size(1);
     dim3 grid((unsigned)(N / 16), (unsigned)(K / 16));
     auto stream = at::cuda::getCurrentCUDAStream();
 #define TF_LAUNCH(K2_, CB_)                                                                                         \
     if (K2 == K2_ && cb == CB_) {                                                                                \
         unpack_kernel<K2_, CB_><<<grid, 32, 0, stream>>>(reinterpret_cast<const uint32_t*>(T.data_ptr()),         \
-                                                        reinterpret_cast<half*>(W.data_ptr()), N);               \
+                                                        reinterpret_cast<half*>(W.data_ptr()), N, stride_k,      \
+                                                        stride_nb);                                              \
         C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                          \
         return;                                                                                                  \
     }

@@ -2,7 +2,11 @@
 
 import importlib
 
+import pytest
+
 from tests.test_cuda_geometry import allocations  # noqa: F401  (fixture: fake triton, so the module imports)
+
+pytestmark = pytest.mark.torch
 
 COSTS = {"verify": [28.4, 38.8, 43.8, 48.8, 53.8, 58.8, 63.8, 68.8], "mtp": 1.79, "mtp_step": 1.56, "mtp_row": 0.17,
          "block": 3.16, "taps_row": 0.049}

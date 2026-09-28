@@ -395,7 +395,10 @@ def test_the_flag_reaches_the_metal_loader(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, runtime.__name__, runtime)
     assert qwen4_exp.load(tmp_path, ple_on_ssd=True) == ("model", "tokenizer")
     qwen4_exp.load(tmp_path)
-    assert seen == [{"drafts": 0, "ple_on_ssd": True}, {"drafts": 0, "ple_on_ssd": False}]
+    qwen4_exp.load(tmp_path, ssd_experts=24.0)
+    assert seen == [{"drafts": 0, "ple_on_ssd": True, "ssd_experts": None},
+                    {"drafts": 0, "ple_on_ssd": False, "ssd_experts": None},
+                    {"drafts": 0, "ple_on_ssd": False, "ssd_experts": 24.0}]
 
 
 def _fake_mlx(monkeypatch) -> None:
@@ -433,6 +436,37 @@ def test_tables_left_on_ssd_do_not_count_against_the_memory_budget(tmp_path, mon
     with pytest.raises(ValueError, match="do not fit"):
         cli.cmd_serve(args)
     args.ple_on_ssd = True
+    with pytest.raises(Reached):
+        cli.cmd_serve(args)
+
+
+def test_routed_experts_left_on_ssd_count_as_their_pool(tmp_path, monkeypatch):
+    folder = _flash_next(tmp_path / "flash")
+    expert = "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight"
+    size = 3 * GIB
+    header = {expert: {"dtype": "U32", "shape": [512, size // 2048], "data_offsets": [0, size]},
+              "language_model.model.norm.weight": {"dtype": "BF16", "shape": [512], "data_offsets": [size, size + 1024]}}
+    text = json.dumps(header).encode()
+    with open(folder / "model-00001-of-00001.safetensors", "wb") as f:
+        f.write(struct.pack("<Q", len(text)) + text)
+        f.truncate(8 + len(text) + size + 1024)                 # sparse: 3 GiB of experts, no blocks written
+    _fake_mlx(monkeypatch)
+    for key, value in qwen4_exp.MLX_ENV.items():
+        monkeypatch.setenv(key, os.environ.get(key, value))
+    monkeypatch.setenv("TENSORFOLD_MEMORY_LIMIT_GB", "5")      # 2 GiB for weights beside the 3 GiB process reserve
+    monkeypatch.setattr("faulthandler.register", lambda *a, **k: None)
+
+    class Reached(Exception):
+        pass
+
+    monkeypatch.setattr(cli, "_serve_mlx", lambda *a, **k: _raise(Reached))
+    args = cli.build_parser().parse_args(["serve", str(folder), "--no-update-check", "--backend", "mlx"])
+    with pytest.raises(ValueError, match="--ssd-experts GIB"):
+        cli.cmd_serve(args)
+    args.ssd_experts = 2.5                                      # a 2.5 GiB pool: still past the 2 GiB left
+    with pytest.raises(ValueError, match="do not fit"):
+        cli.cmd_serve(args)
+    args.ssd_experts = 1.0
     with pytest.raises(Reached):
         cli.cmd_serve(args)
 

@@ -103,8 +103,22 @@ def _require_mlx(least: tuple[int, ...]) -> None:
                          f"with: python -m pip install \"mlx>={need}\"")
 
 
-def load(model_dir: Path, *, mtp_drafts: int | None = None, **_: Any) -> tuple[Any, Any]:
-    """The MLX engine; ``mtp_drafts`` caps the MTP drafts a round (0: none), each round's depth set by costs."""
+def expert_bytes(model_dir: Path) -> int:
+    """Bytes of the decoder layers' routed experts, which --ssd-experts leaves on disk (the MTP layer's stay)."""
+
+    import json
+
+    from tensorfold.families.glm5_next.layouts import routed_expert
+    from tensorfold.streaming.checkpoint import tensor_bytes
+
+    config = json.loads((Path(model_dir) / "config.json").read_text())
+    layers = int((config.get("text_config") or config).get("num_hidden_layers", 0))
+    return tensor_bytes(Path(model_dir), lambda name: routed_expert(name, layers) is not None)
+
+
+def load(model_dir: Path, *, mtp_drafts: int | None = None, ssd_experts: float | None = None,
+         **_: Any) -> tuple[Any, Any]:
+    """The MLX engine; ``mtp_drafts`` caps the MTP drafts a round (0: none); ``ssd_experts``: the expert pool's GiB."""
 
     import mlx.core as mx
 
@@ -116,7 +130,7 @@ def load(model_dir: Path, *, mtp_drafts: int | None = None, **_: Any) -> tuple[A
         limit = int(info.get("max_recommended_working_set_size", 0))
         if limit:
             mx.set_wired_limit(limit)
-    return load_runtime(Path(model_dir), drafts=mtp_drafts)
+    return load_runtime(Path(model_dir), drafts=mtp_drafts, ssd_experts=ssd_experts)
 
 
 def engine_settings(model: Any) -> dict[str, Any]:

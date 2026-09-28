@@ -46,6 +46,7 @@ def nemotron(tmp_path, monkeypatch, fake_runtime):  # noqa: F811
     return tmp_path, calls, capacity, nemotron_h
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("world", [1, 2])
 def test_nemotron_context_that_cannot_fit_is_refused_before_loading(monkeypatch, nemotron, world):
     from tensorfold.cuda.geometry import hybrid_geometry
@@ -65,6 +66,7 @@ def test_nemotron_context_that_cannot_fit_is_refused_before_loading(monkeypatch,
     assert obj.capacity_plan["total_bytes_estimate"] <= obj.capacity_plan["budget_bytes"]
 
 
+@pytest.mark.torch
 def test_nemotron_default_window_is_the_family_default(nemotron):
     path, calls, _, family = nemotron
     from tensorfold.families.nemotron_h.cuda import CONTEXT
@@ -123,6 +125,7 @@ def fake_torch(monkeypatch):
             sys.modules.pop(name, None)
 
 
+@pytest.mark.torch
 def test_nemotron_geometry_bounds_the_engine_twin_head_and_snapshots(monkeypatch, fake_torch):
     recorded, fake = fake_torch
     engine = importlib.import_module("tensorfold.families.nemotron_h.cuda.engine")
@@ -159,6 +162,7 @@ def test_nemotron_weights_split_by_rank_and_keep_the_mtp_head_whole():
     assert two("layers.0.mixer.q_proj.weight", q)[0] == one("layers.0.mixer.q_proj.weight", q)[0] * 3 // 2
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("drafts", [0, 3])
 def test_an_unindexed_checkpoint_counts_the_mtp_file_once_and_only_when_drafting(nemotron, drafts):
     from tensorfold.cuda import capacity
@@ -173,6 +177,7 @@ def test_an_unindexed_checkpoint_counts_the_mtp_file_once_and_only_when_drafting
     assert obj.capacity_plan["weight_bytes_estimate"] == main + (head if drafts else 0)
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("ids", [[1, 1, 2], [1, 2, 131072]])
 def test_draft_ids_must_be_distinct_tokens_of_the_vocabulary(nemotron, ids):
     path, calls, _, _ = nemotron
@@ -182,6 +187,7 @@ def test_draft_ids_must_be_distinct_tokens_of_the_vocabulary(nemotron, ids):
     assert not calls
 
 
+@pytest.mark.torch
 def test_two_ranks_with_the_same_draft_ids_in_another_order_refuse_to_start(fake_runtime):  # noqa: F811
     import torch
     from tensorfold.families.nemotron_h.cuda.app import NemotronEngine

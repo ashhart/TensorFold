@@ -270,6 +270,35 @@ def test_sparse_selection_and_attention_rows_invariant():
 
 
 @cuda
+def test_sparse_attention_of_a_prompt_chunk_keeps_each_rows_bits():
+    """A prompt chunk's rows past the dense limit (hundreds, not a decode window's few) each get their serial step's
+    bits; 0.3.5.1 aliased the chunk partials of rows 128 and up, and GLM answered "!!!!" past 2,051 tokens (#53)."""
+
+    from tensorfold.families.glm5_next.cuda import sparse
+
+    gen = torch.Generator().manual_seed(53)
+    pos, R, H, D = 2048, 300, 4, 256
+    cap = pos + R + 4
+    npmax = cap // 4
+    pk = torch.randn((npmax + 2, 128), generator=gen).to(torch.bfloat16).cuda()
+    qi = torch.randn((R, 32 * 128), generator=gen).to(torch.bfloat16).cuda()
+    wts = torch.randn((R, 32), generator=gen).to(torch.bfloat16).cuda()
+    kc = torch.randn((cap, H, D), generator=gen).to(torch.bfloat16).cuda()
+    vc = torch.randn((cap, H, D), generator=gen).to(torch.bfloat16).cuda()
+    q = torch.randn((R, H, D), generator=gen).to(torch.bfloat16).cuda()
+    pos_dev = torch.tensor([pos], dtype=torch.int32, device="cuda")
+    tokens, counts = sparse.select_tokens(qi, wts, pk, pos, R, npmax, pos_dev)
+    assert int((counts > 0).sum()) == R - 3                  # positions 2048-2050 stay dense
+    out = torch.zeros((R, H, D), dtype=torch.bfloat16, device="cuda")
+    sparse.sparse_attention(q, kc, vc, tokens, counts, out, D ** -0.5)
+    for r in (0, 3, 127, 128, 129, 255, 256, R - 1):
+        one = torch.zeros((1, H, D), dtype=torch.bfloat16, device="cuda")
+        sparse.sparse_attention(q[r:r + 1].contiguous(), kc, vc, tokens[r:r + 1].contiguous(),
+                                counts[r:r + 1].contiguous(), one, D ** -0.5)
+        assert torch.equal(one[0], out[r]), r
+
+
+@cuda
 def test_dflash2_attention_and_conv_against_torch():
     """The DFlash2 drafter's attention kernel (keys [0, s + N), sliding window, bidirectional or causal block)
     against SDPA with the explicit mask, and its two-tap dynamic convolution against the torch definition."""

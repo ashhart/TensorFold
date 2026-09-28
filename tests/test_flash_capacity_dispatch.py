@@ -17,6 +17,7 @@ class Kernel:
         return launch
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("slots", [8192, 262151])
 @pytest.mark.parametrize("bucket", [True, False])
 def test_actual_attention_callsite_bounds_short_request_launches(monkeypatch, allocations, slots, bucket):
@@ -53,6 +54,7 @@ def test_actual_attention_callsite_bounds_short_request_launches(monkeypatch, al
     assert kernels["_scores"].calls[0][1][4] == scratch.nb
 
 
+@pytest.mark.torch
 @pytest.mark.parametrize("mtp", [False, True])
 @pytest.mark.parametrize("rows", [1, 8])
 def test_actual_graph_calls_recapture_when_live_context_crosses_bucket(monkeypatch, allocations, mtp, rows):
@@ -84,6 +86,7 @@ def test_actual_graph_calls_recapture_when_live_context_crosses_bucket(monkeypat
     assert set(computes) == {8192, 16384}
 
 
+@pytest.mark.torch
 def test_prompt_blocks_bound_their_launches_by_their_own_rows(monkeypatch, allocations):
     mod = importlib.import_module("tensorfold.families.qwen4_exp.cuda.forward")
     attention = mod.attn_mod
