@@ -15,6 +15,6 @@
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float total = 0.0f;
   for (int k = 0; k < 32; k++) total += part[k];
-  const float rinv = metal::rsqrt(total / float(G) + eps[0]);
+  const float rinv = metal::precise::rsqrt(total / float(G) + eps[0]);
   for (int i = int(t); i < G; i += 1024)
     OUT[base + i] = bfloat((float(X[base + i]) * rinv) * SCALE[(grp * G + i) % SW]);

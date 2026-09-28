@@ -26,6 +26,7 @@ pub fn check(io: std.Io, dir: []const u8) !void {
     const cases = try std.json.parseFromSlice([]const Case, mx.allocator, bytes, .{});
     defer cases.deinit();
     for (cases.value) |case| {
+        errdefer std.debug.print("Failed sampling fixture {s}: {s}, k={d}, seed={d}, temperature={d}, mapped={}\n", .{ case.key, case.op, case.k, case.seed, case.temperature, case.mapped });
         var s = mx.Scope{};
         defer s.deinit();
         const x = try store.field(case.key, "x");

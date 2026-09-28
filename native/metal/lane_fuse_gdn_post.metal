@@ -18,12 +18,12 @@
     ss += yv[j] * yv[j];
   }
   ss = simd_sum(ss);
-  const float inv = metal::rsqrt(ss / float(DV) + eps[0]);
+  const float inv = metal::precise::rsqrt(ss / float(DV) + eps[0]);
   for (int j = 0; j < PER; j++) {
     const int d = int(lane) * PER + j;
     const float x = float(bfloat(float(NW[d]) * (yv[j] * inv)));
     const float zf = float(Z[m * ZS + hv * DV + d]);
-    const bfloat o = bfloat(zf / (1.0f + metal::exp(-zf)) * x);
+    const bfloat o = bfloat(zf / (1.0f + metal::precise::exp(-zf)) * x);
     OUT[m * NV * DV + hv * DV + d] = o;
     ob[d] = o;
   }

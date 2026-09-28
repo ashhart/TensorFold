@@ -126,6 +126,7 @@ pub fn main(init: std.process.Init) !void {
         i += 1;
     }
     try settings.validate();
+    const startup_timer = Stopwatch.init(io);
     try mx.init();
     defer mx.shutdown();
     var timer = Stopwatch.init(io);
@@ -142,6 +143,8 @@ pub fn main(init: std.process.Init) !void {
     }
     var draft: ?Draft = if (draft_dir) |path| try Draft.init(io, path, &m) else null;
     defer if (draft) |*d| d.deinit();
+    const load_seconds = @as(f64, @floatFromInt(timer.read())) / 1e9;
+    const warm_timer = Stopwatch.init(io);
     if (warmup) {
         std.debug.print("Warming Metal variants...\n", .{});
         for ([_]usize{ 1, 16, 32 }) |n| {
@@ -159,6 +162,7 @@ pub fn main(init: std.process.Init) !void {
         m.reset();
         if (draft) |*d| d.reset();
     }
+    const warmup_seconds = if (warmup) @as(f64, @floatFromInt(warm_timer.read())) / 1e9 else 0;
     // The borrowed tokenizer accepts absolute paths.
     const dir = try std.Io.Dir.cwd().realPathFileAlloc(io, args[2], allocator);
     defer allocator.free(dir);
@@ -178,7 +182,8 @@ pub fn main(init: std.process.Init) !void {
     if (tokens.items.len > 262144 or max_tokens > 262144 - tokens.items.len) return error.ContextLimitExceeded;
     for (tokens.items) |id| if (id < 0 or id >= 248320) return error.InvalidToken;
     if (!explicit_seed) settings.seed = sampling.seedFor(tokens.items);
-    std.debug.print("Loaded target in {d:.2}s; prompt {d} tokens\n", .{ @as(f64, @floatFromInt(timer.read())) / 1e9, tokens.items.len });
+    const startup_seconds = @as(f64, @floatFromInt(startup_timer.read())) / 1e9;
+    std.debug.print("Loaded and prepared target in {d:.2}s; prompt {d} tokens\n", .{ startup_seconds, tokens.items.len });
     timer.reset();
     var pending: i32 = 0;
     var off: usize = 0;
@@ -286,7 +291,7 @@ pub fn main(init: std.process.Init) !void {
         var active: usize = 0;
         try mx.check(mx.c.mlx_get_peak_memory(&peak));
         try mx.check(mx.c.mlx_get_active_memory(&active));
-        const content = try std.json.Stringify.valueAlloc(allocator, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .serial_pipeline = use_serial_pipeline, .kv_buffers = @import("kv_buffer.zig").enabled, .queued_serial_steps = queued_serial_steps, .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        const content = try std.json.Stringify.valueAlloc(allocator, .{ .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .serial_pipeline = use_serial_pipeline, .kv_buffers = @import("kv_buffer.zig").enabled, .queued_serial_steps = queued_serial_steps, .load_seconds = load_seconds, .warmup_seconds = warmup_seconds, .startup_seconds = startup_seconds, .calibration_seconds = @as(f64, 0), .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
         defer allocator.free(content);
         const f = try std.Io.Dir.cwd().createFile(io, path, .{});
         defer f.close(io);

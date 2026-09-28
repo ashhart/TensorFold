@@ -17,6 +17,8 @@ def main():
     parser.add_argument("--dump-logits", type=Path, help="Save the final prefill block before generation")
     parser.add_argument("--metal-sampling", action="store_true")
     parser.add_argument("--simd", action="store_true", help="Use original SIMD projections and row attention, without stacked projections")
+    parser.add_argument("--production-kernels", action="store_true", help="Diagnostic: use production loading/fusion with lane-tree prefill (not the serving engine's prefill)")
+    parser.add_argument("--disable-fusion", action="store_true", help="Diagnostic: turn off stacked consumers after the production load")
     parser.add_argument("--output", default="build/native-checks/reference.npy")
     parser.add_argument("--compare", nargs=2)
     parser.add_argument("--compare-reports", nargs="+")
@@ -53,18 +55,40 @@ def main():
     import mlx.core as mx
     from mlx_lm.models.cache import make_prompt_cache
     from tensorfold.families.qwen3_5 import load_lane_model
-    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree, lane_attention, row_attention, simd_qmm
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree, row_attention, simd_qmm
 
-    model, tokenizer = load_lane_model(Path(args.model))
+    if args.production_kernels:
+        if args.simd:
+            parser.error("--production-kernels cannot be combined with --simd")
+        from tensorfold.families.qwen3_5 import load
+        family, tokenizer = load(Path(args.model))
+        model = family.inner
+        if args.disable_fusion:
+            from tensorfold.kernels.qwen.dense.v1 import lane_fuse
+            lane_fuse.enabled = False
+    else:
+        if args.disable_fusion:
+            parser.error("--disable-fusion requires --production-kernels")
+        model, tokenizer = load_lane_model(Path(args.model))
     if args.simd:
         # Native keeps the individual checkpoint projections. row_forward.install
         # stacks GDN projections, changing simd_qmm's shape-dependent split sums.
         # Compose the original unstacked lane host with the original SIMD kernels.
         simd_qmm.install(model)
-        def attention(q, k, v, scale, parents):
-            return row_attention.row_sdpa(q, k, v, scale, k.shape[2] - len(parents), parents)
-        lane_attention.lane_tree_sdpa = attention
-    else:
+        # tree_forward now delegates to lane_multi. Replace its attention entry
+        # point, rather than setting the removed lane_attention.lane_tree_sdpa.
+        from types import SimpleNamespace
+        from tensorfold.kernels.qwen.dense.v1 import stream_attention
+        def plan(parents, starts, heads, kv_heads):
+            if len(parents) != 1 or len(starts) != 1:
+                raise ValueError("The native SIMD oracle supports one stream")
+            return SimpleNamespace(streams=1, rows=len(parents[0]), parents=parents[0], start=starts[0])
+        def attention(q, kv, scale, layout):
+            k, v = kv[0]
+            return row_attention.row_sdpa(q, k, v, scale, layout.start, layout.parents)
+        stream_attention.Plan = plan
+        stream_attention.tree_sdpa = attention
+    elif not args.production_kernels:
         lane_qmm.install(model, rows=128, tile=True, wide=True)
     core = model.language_model.model
     head = model.language_model.lm_head

@@ -1,19 +1,20 @@
 
-  // threadgroup (chunk c, kv head h): simdgroup (g, s) = (sg / SPLIT, sg % SPLIT) takes query head h G + g and the
-  // chunk's keys at positions k0 + s, k0 + s + SPLIT, ... up to the row's own position, an online softmax over
-  // them in that order (lane l: dimensions [DPL l, DPL l + DPL)); the SPLIT partials of a head then merge in
-  // simdgroup order. One window row at a time. A row's key at position P + i is window row path[i].
+  // threadgroup (chunk c, kv head h, window row w): simdgroup (g, s) = (sg / SPLIT, sg % SPLIT) takes query head
+  // h G + g and the chunk's keys at positions k0 + s, k0 + s + SPLIT, ... up to the row's own position, an online
+  // softmax over them in that order (lane l: dimensions [DPL l, DPL l + DPL)); the SPLIT partials of a head then
+  // merge in simdgroup order. A row's key at position P + i is window row path[i].
   const uint lane = thread_index_in_simdgroup;
   const uint sgi = simdgroup_index_in_threadgroup;
   const int g = int(sgi) / SPLIT, s = int(sgi) % SPLIT;
   const int c = int(threadgroup_position_in_grid.y);
-  const int h = int(threadgroup_position_in_grid.z);
   const int P = dims[0], W = dims[1], CAP = dims[2], NCH = dims[3], MAXD = dims[4];
+  const int h = int(threadgroup_position_in_grid.z) / W;     // one threadgroup per (chunk, kv head, window row)
+  const int w = int(threadgroup_position_in_grid.z) % W;
   constexpr int DPL = D / 32;
   const int qh = h * G + g;
   threadgroup float sm[G * SPLIT], sl[G * SPLIT];
   threadgroup float so[G * SPLIT][D];
-  for (int w = 0; w < W; w++) {
+  {
     const int last = P + depth[w];                       // this row's own position
     const int k0 = c * CK;
     const int k1 = min(k0 + CK, last + 1);
@@ -40,12 +41,12 @@
         if (rows[j] >= 0) bm = metal::max(bm, sc[j]);
       }
       const float mn = metal::max(m, bm);
-      const float a = metal::exp(m - mn);
+      const float a = metal::precise::exp(m - mn);
       l *= a;
       for (int i = 0; i < DPL; i++) o[i] *= a;
       for (int j = 0; j < BLK; j++) {
         if (rows[j] < 0) continue;
-        const float b = metal::exp(sc[j] - mn);
+        const float b = metal::precise::exp(sc[j] - mn);
         l += b;
         const device bfloat* vr = V + (size_t(h) * CAP + rows[j]) * D + int(lane) * DPL;
         for (int i = 0; i < DPL; i++) o[i] = fma(b, float(vr[i]), o[i]);
@@ -62,7 +63,7 @@
       float lsum = 0.0f, acc[DPL];
       for (int i = 0; i < DPL; i++) acc[i] = 0.0f;
       for (int t = 0; t < SPLIT; t++) {
-        const float e = sl[g * SPLIT + t] > 0.0f ? metal::exp(sm[g * SPLIT + t] - mx_) : 0.0f;
+        const float e = sl[g * SPLIT + t] > 0.0f ? metal::precise::exp(sm[g * SPLIT + t] - mx_) : 0.0f;
         lsum = fma(sl[g * SPLIT + t], e, lsum);
         for (int i = 0; i < DPL; i++) acc[i] = fma(so[g * SPLIT + t][int(lane) * DPL + i], e, acc[i]);
       }

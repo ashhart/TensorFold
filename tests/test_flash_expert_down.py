@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 mx = pytest.importorskip("mlx.core")
-from tensorfold.kernels.qwen.flash_next.v1 import kernels as flash
+from tools.native_legacy import flash
 
 
 def ones_weights(shape):

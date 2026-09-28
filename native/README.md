@@ -10,6 +10,10 @@ array operations. TensorFold's specialized Metal kernels perform quantized proje
 normalization, gated DeltaNet, tree attention, and recurrent-state replay. This does not
 reimplement Apple's GPU runtime.
 
+After rebasing onto upstream 0.3.6.1, native builds, Metal oracles, variant replay
+and real-model checks pass. See [rebase verification](REBASE_VALIDATION.md) for the
+current results and scope; older performance measurements below are historical.
+
 ## Build and run
 
 Requirements: Zig **0.17.0-dev.2248+3f6a02acd** (the same nightly as `../mlx-serve`), Apple Silicon, macOS **26.2+**, and a compatible
@@ -301,13 +305,13 @@ family's caches; it also forces the dense Qwen and Nemotron SIMD paths. It requi
 the large checkpoints and enough unified memory. See [COVERAGE.md](COVERAGE.md).
 
 `test-variants` runs upstream kernel assertions and additional boundary fixtures, then
-replays 1,104 captured launches through 54 native embedded variants. It covers optional
+replays 2,190 captured launches through 54 native embedded variants. It covers optional
 fused/row paths, scalar and matrix SIMD, grouped experts, routing ties and quantization
 boundaries. All outputs match bit for bit. Diagnostic coverage does not make each
 variant a selectable production mode; [COVERAGE.md](COVERAGE.md) records that distinction.
 The full [86-kernel inventory](KERNEL_INVENTORY.md) lists integration sites and fixture counts.
 
-`test-allocation-failures` injects 956 failures into native ownership operations with
+`test-allocation-failures` injects 1,100 failures into native ownership operations with
 real MLX handles and small checkpoint files. Every allocation is released, with zero
 retained MLX active memory. It also tests API error recovery; MLX's internal allocator
 and the driver are outside this injection boundary.
@@ -371,8 +375,12 @@ completion report for the default prompt and seed 1234. Use native `--seed 1234 
 and compare with `tools/native_reference.py --compare-reports PYTHON SERIAL DRAFT`.
 Use the same prompt, seed, sampling settings, and token budget in every run.
 
-The Metal sources are checked in, generated verbatim from Python's lane modules.
-After changes there, run `tools/export_native_kernels.py` and repeat the parity checks.
+The Metal sources are checked in and generated from Python kernel modules. The exporter
+turns launch-specific constants into templates and makes transcendental precision explicit
+to match the Python MLX wheel across native MLX builds. Deliberate `fast::` calls remain
+fast. Retired interfaces retain independent, versioned references in
+[`tools/native_legacy`](../tools/native_legacy/README.md), preserving diagnostic coverage.
+After kernel edits, run `tools/export_native_kernels.py` and repeat the parity checks.
 Python is only needed for these development checks and regeneration.
 
 ## Build MLX independently

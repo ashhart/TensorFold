@@ -12,14 +12,18 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from tensorfold.families.qwen4_exp.decode import FusedDecode, _stacked
+from tensorfold.families.qwen4_exp import decode
 from tensorfold.families.qwen4_exp.model import AttentionCache
-from tensorfold.kernels.qwen.flash_next.v1 import kernels as K
+from tensorfold.kernels.qwen.flash_next.v1 import attention as K
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
+    # Native Flash preserves the original row projection arithmetic. Upstream's
+    # M5 default now uses lane projections with different rounding.
+    decode.DENSE = "rows"
     args.output.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(1422)
     arrays = {}
@@ -69,6 +73,7 @@ def main():
             arrays[key + ".pooled"] = cache.pooled[0]
         arrays[key + ".expected"] = fused._attention(0, x, cache)
         arrays[key + ".pooled_expected"] = cache.pooled[0]
+        mx.eval(arrays[key + ".expected"], arrays[key + ".pooled_expected"])
         cases.append(dict(key=key, past=past, pooled=pooled))
     mx.save_safetensors(str(args.output / "arrays.safetensors"), arrays)
     (args.output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")

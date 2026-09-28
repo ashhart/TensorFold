@@ -5,16 +5,15 @@
   const short fm = (qid & 4) | ((lane >> 1) & 3);       // fragment row of this lane (and fm + 8)
   const short fn = ((qid & 2) | (lane & 1)) * 4;        // first of its four fragment columns
   const int M = mdims[0], MP = mdims[1];
-  constexpr int KG = K / 64;
+  constexpr int KG = K / GS;
   constexpr int NF = NT / 16;
   const int n0 = threadgroup_position_in_grid.x * NT;
   const int rb = threadgroup_position_in_grid.y * 16 * TMR;   // first row of this threadgroup's row block
   const int g_begin = (sg * KG) / SK;
   const int g_end = ((sg + 1) * KG) / SK;
 
-  // one op for all TMR 16-row blocks: its destination is the blocks' fragments in order, and each
-  // row's bits equal the 16-row op's (tested); two 16-row ops per group cost 1.2-1.5x as much
-  constexpr auto desc = matmul2d_descriptor(16 * TMR, NT, 64, false, true, false, matmul2d_descriptor::mode::multiply);
+  // one op for all TMR 16-row blocks: each row gets the 16-row op's bits
+  constexpr auto desc = matmul2d_descriptor(16 * TMR, NT, GS, false, true, false, matmul2d_descriptor::mode::multiply);
   matmul2d<desc, execution_simdgroup> op;
   tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tA((device bfloat*)X + (int64_t)rb * K, dextents<int32_t, 2>(K, M - rb));
   tensor<device uint4b_format, dextents<int32_t, 2>, tensor_inline> tB((device uchar*)Wq, dextents<int32_t, 2>(K, N));
@@ -31,13 +30,14 @@
       const vec<bfloat, 8> v = as_type<vec<bfloat, 8>>(q);
       for (int j = 0; j < 4; j++) { s[f][j] = float(v[2 * j]); bb[f][j] = float(v[2 * j + 1]); }
     }
-    auto a = tA.slice(g * 64, 0);
-    auto b = tB.slice(g * 64, n0);
+    auto a = tA.slice(g * GS, 0);
+    auto b = tB.slice(g * GS, n0);
     auto P = op.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();
     op.run(a, b, P);
     for (int t = 0; t < TMR; t++) {
-      const float xs0 = XS[g * MP + rb + t * 16 + fm];
-      const float xs1 = XS[g * MP + rb + t * 16 + fm + 8];
+      const bool live = !EDGE || rb + t * 16 < MP;     // EDGE: the last 32-row block passes MP, where XS ends
+      const float xs0 = live ? XS[g * MP + rb + t * 16 + fm] : 0.0f;
+      const float xs1 = live ? XS[g * MP + rb + t * 16 + fm + 8] : 0.0f;
       for (int f = 0; f < NF; f++)
         for (int r = 0; r < 2; r++)
           for (int j = 0; j < 4; j++) {

@@ -30,7 +30,7 @@ def main():
                 model = SimpleNamespace(
                     _last_hidden=hidden[None], _draft_ids=mapping,
                     _trim_chained=lambda cache: None, _draft_logits=lambda state: state,
-                    mtp=lambda state, embedding, cache, tail=None: state if tail is None else state[:, -tail:],
+                    _head_step=lambda state, embedding, cache, tail: state if tail is None else state[:, -tail:],
                     model=SimpleNamespace(backbone=SimpleNamespace(embeddings=lambda tokens: tokens)),
                 )
                 for keep in (0, 1, 2, 3, 4):
@@ -47,6 +47,7 @@ def main():
                                                        position + keep + 1, settings, budget)
                         key = f"c{len(cases)}"
                         arrays.update({key + ".hidden": hidden, key + ".expected": expected})
+                        mx.eval(expected)
                         if mapped:
                             arrays[key + ".ids"] = mapping
                         cases.append(dict(key=key, position=position, seed=seed, temperature=temperature,

@@ -40,22 +40,22 @@ pub const Linear = struct {
         const m: i32 = @intCast(mx.c.mlx_array_size(x.x) / @as(usize, @intCast(l.k)));
         if (m < 1 or m > 128) return error.InvalidLaneWidth;
         if (!mx.tensor_units) {
-            const split: i32 = if (l.n <= 64) 32 else if (l.n <= 2048) 16 else 8;
+            const split: i32 = if (l.n <= 64) 32 else if (l.n <= 6144) 16 else 8;
             const rt = @min(2, @divTrunc(m + 7, 8));
             var nt: i32 = if (@mod(l.n, 32) == 0) 4 else if (@mod(l.n, 16) == 0) 2 else 1;
             while (nt > 1 and split * rt * nt * 64 * 4 > 16384) nt = @divExact(nt, 2);
-            const out = (try kernels.run(s, src.simd_qmm_mma, &.{ try s.reshape(x.x, &.{ m, l.k }), l.weight, l.scales, l.biases, try s.scalar(1) }, &.{ ti("K", l.k), ti("N", l.n), ti("S", split), ti("NT", nt), ti("RT", rt) }, .{ @divTrunc(l.n + 8 * nt - 1, 8 * nt) * split * 32, @divTrunc(m + 8 * rt - 1, 8 * rt), 1 }, .{ split * 32, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0];
+            const out = (try kernels.run(s, src.simd_qmm_mma, &.{ try s.reshape(x.x, &.{ m, l.k }), l.weight, l.scales, l.biases, try s.scalar(1) }, &.{ ti("K", l.k), ti("N", l.n), ti("S", split), ti("GS", 64), ti("SGS", split), ti("NT", nt), ti("RT", rt) }, .{ @divTrunc(l.n + 8 * nt - 1, 8 * nt) * split * 32, @divTrunc(m + 8 * rt - 1, 8 * rt), 1 }, .{ split * 32, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0];
             return s.reshape(out, &.{ 1, m, l.n });
         }
         const mp = @divTrunc(m + 15, 16) * 16;
         const dims = try s.ints(&.{ m, mp });
         const x2 = try s.reshape(x.x, &.{ m, l.k });
-        const sums = x.sums orelse (try kernels.run(s, src.lane_qmm_xsum, &.{ x2, dims }, &.{ti("K", l.k)}, .{ @divExact(l.k, 64), mp, 1 }, .{ @min(@divExact(l.k, 64), 256), 1, 1 }, &.{.{ .shape = &.{ @divExact(l.k, 64), mp }, .dtype = mx.f32t }}))[0];
+        const sums = x.sums orelse (try kernels.run(s, src.lane_qmm_xsum, &.{ x2, dims }, &.{ ti("K", l.k), ti("GS", 64) }, .{ @divExact(l.k, 64), mp, 1 }, .{ @min(@divExact(l.k, 64), 256), 1, 1 }, &.{.{ .shape = &.{ @divExact(l.k, 64), mp }, .dtype = mx.f32t }}))[0];
         const tiles = @divTrunc(l.n + 31, 32);
         var sk: i32 = 1;
         while (sk < 8 and tiles * sk < 1024 and @divTrunc(@divExact(l.k, 64), sk * 2) >= 8) sk *= 2;
         const block = @min(mp, 32);
-        const out = (try kernels.run(s, if (l.tiled) src.lane_qmm_main_tiled else src.lane_qmm_main, &.{ x2, sums, l.weight, l.sb, dims }, &.{ ti("TMR", @divExact(block, 16)), ti("N", l.n), ti("K", l.k), ti("NT", 32), ti("SK", sk) }, .{ tiles * 32 * sk, @divTrunc(mp + block - 1, block), 1 }, .{ 32 * sk, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0];
+        const out = (try kernels.run(s, if (l.tiled) src.lane_qmm_main_tiled else src.lane_qmm_main, &.{ x2, sums, l.weight, l.sb, dims }, &.{ ti("TMR", @divExact(block, 16)), ti("N", l.n), ti("K", l.k), ti("NT", 32), ti("SK", sk), ti("GS", 64), ti("EDGE", @intFromBool(@mod(mp, block) != 0)) }, .{ tiles * 32 * sk, @divTrunc(mp + block - 1, block), 1 }, .{ 32 * sk, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0];
         return s.reshape(out, &.{ 1, m, l.n });
     }
 };
@@ -177,7 +177,7 @@ fn rowAttention(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *cons
     var paths: [128 * 128]i32 = undefined;
     for (0..t.parents.len) |i| @memcpy(paths[i * @as(usize, @intCast(maxd)) ..][0..@intCast(maxd)], t.paths[i * 128 ..][0..@intCast(maxd)]);
     const dims = try s.ints(&.{ start, w, cap, nch, maxd });
-    const out = try k.run(s, src.row_attention_partial, &.{ try s.contiguous(q), try s.contiguous(keys), try s.contiguous(values), try s.ints(t.depths[0..t.parents.len]), try s.ints(paths[0 .. t.parents.len * @as(usize, @intCast(maxd))]), try s.scalar(0.0625), dims }, &.{ ti("D", d), ti("G", g), ti("CK", 128), ti("SPLIT", 4), ti("BLK", 4) }, .{ 32 * g * 4, nch, hkv }, .{ 32 * g * 4, 1, 1 }, &.{ .{ .shape = &.{h * w * nch}, .dtype = mx.f32t }, .{ .shape = &.{h * w * nch}, .dtype = mx.f32t }, .{ .shape = &.{ h * w * nch, d }, .dtype = mx.f32t } });
+    const out = try k.run(s, src.row_attention_partial, &.{ try s.contiguous(q), try s.contiguous(keys), try s.contiguous(values), try s.ints(t.depths[0..t.parents.len]), try s.ints(paths[0 .. t.parents.len * @as(usize, @intCast(maxd))]), try s.scalar(0.0625), dims }, &.{ ti("D", d), ti("G", g), ti("CK", 128), ti("SPLIT", 4), ti("BLK", 4) }, .{ 32 * g * 4, nch, hkv * w }, .{ 32 * g * 4, 1, 1 }, &.{ .{ .shape = &.{h * w * nch}, .dtype = mx.f32t }, .{ .shape = &.{h * w * nch}, .dtype = mx.f32t }, .{ .shape = &.{ h * w * nch, d }, .dtype = mx.f32t } });
     return (try k.run(s, src.row_attention_merge, &.{ out[0], out[1], out[2], dims }, &.{ti("D", d)}, .{ 32, h, w }, .{ 32, 1, 1 }, &.{.{ .shape = &.{ 1, h, w, d } }}))[0];
 }
 

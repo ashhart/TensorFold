@@ -4,6 +4,11 @@ This fork ports the inference hosts to Zig and embeds the original author's Meta
 kernels. MLX-C supplies arrays, scheduling, safetensors, and general operations.
 This matrix distinguishes exercised behavior from physical-device validation.
 
+For the current upstream 0.3.6.1 rebase, see [REBASE_VALIDATION.md](REBASE_VALIDATION.md).
+The detailed measurements below also include earlier milestones; they are not all
+fresh runs after this rebase. The current variant inventory records 2,190 passing
+launches across 54 variants and all 86 embedded kernels.
+
 ## Resident Flash PLE and GPU scheduling
 
 Flash's bounded positional PLE reads remain the default. `--resident-ple` loads the

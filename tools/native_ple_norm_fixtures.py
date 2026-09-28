@@ -6,7 +6,7 @@ from pathlib import Path
 import mlx.core as mx
 
 from tensorfold.families.qwen4_exp.model import CenteredRMSNorm
-from tensorfold.kernels.qwen.flash_next.v1.kernels import rms_norm_rows
+from tensorfold.kernels.qwen.flash_next.v1.embed import rms_norm_rows
 
 
 def main():

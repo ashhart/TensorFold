@@ -49,11 +49,18 @@ def main():
     import mlx.core as mx
     from tensorfold.families.qwen4_exp.model import load
     from tensorfold.families.qwen4_exp.decode import FusedDecode
-    from tensorfold.kernels.qwen.flash_next.v1 import kernels as K
-    K.PleTables = lambda embedding: embedding
-    K.ple_lookup = lambda ids, tables: tables(ids)
+    from tensorfold.kernels.qwen.flash_next.v1 import embed, hc
+    from tensorfold.families.qwen4_exp import decode
+    from types import SimpleNamespace
+    decode.DENSE = "rows"
+    K = SimpleNamespace(embed_rows=embed.embed_rows, hc_norm=hc.hc_norm, hc_project=decode.hc_project)
+    embed.PleTables = lambda embedding: embedding
+    embed.ple_lookup = lambda ids, tables: tables(ids)
     model, _ = load(args.model, lazy=True)
     fused = FusedDecode(model)
+    for layer in model.layers:
+        if "ple" in layer:
+            layer.ple.ple_embedding.__dict__.pop("fused_tables", None)
     cache = model.make_cache()
     if args.gdn_layer is not None:
         args.directory.mkdir(parents=True, exist_ok=True)

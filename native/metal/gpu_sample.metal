@@ -6,9 +6,12 @@
   const uint lane = thread_index_in_simdgroup;
   const uint sg = simdgroup_index_in_threadgroup;
   const size_t base = size_t(row) * V;
-  const float inv_t = cfg[0];
-  const float top_p = cfg[1];
-  const uint cap = (kcap[0] == 0u || kcap[0] > C) ? C : kcap[0];
+  // the row's settings, read once (device memory: the compiler cannot keep them across the loops' stores)
+  const float inv_t = cfg[3 * row];
+  const float top_p = cfg[3 * row + 1];
+  const float near = cfg[3 * row + 2];
+  const uint kc = kcap[row];
+  const uint cap = (kc == 0u || kc > C) ? C : kc;
   const ulong seed = ulong(seeds[2 * row]) | (ulong(seeds[2 * row + 1]) << 32);
   const uint position = positions[row];
 
@@ -36,10 +39,10 @@
   uint near_count[3] = {0u, 0u, 0u};
   for (uint i = t; i < V; i += TG) {
     const float v = float(L[base + i]) * inv_t;
-    const float e = metal::exp(v - m);
+    const float e = metal::precise::exp(v - m);
     ls += e;
     for (int w = 0; w < 3; w++) {
-      if (v >= m - cfg[2] / float(1 << w)) { lnear[w] += e; near_count[w]++; }
+      if (v >= m - near / float(1 << w)) { lnear[w] += e; near_count[w]++; }
     }
   }
   ls = simd_sum(ls);
@@ -66,12 +69,12 @@
       count += ush[s];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    const bool holds = count <= C && (kcap[0] == 0u
+    const bool holds = count <= C && (kc == 0u
         ? (top_p > 0.0f && top_p < 1.0f && znear >= (top_p + 1e-4f) * z)
-        : count >= min(kcap[0], uint(C)));
+        : count >= min(kc, uint(C)));
     if (window < 0 && holds) { window = w; offset = off; n_near = count; }
   }
-  const float floor_v = window < 0 ? INFINITY : m - cfg[2] / float(1 << window);
+  const float floor_v = window < 0 ? INFINITY : m - near / float(1 << window);
 
   // When a window holds the rule's candidates they are gathered at offsets from the prefix sum above (no
   // atomics), then sorted; otherwise the radix path finds the C largest. Both give the same candidates for
@@ -181,15 +184,15 @@
   if (t == 0) {
     const uint n = min(n_cand, cap);
     float norm = z;
-    if (kcap[0] != 0u) {
+    if (kc != 0u) {
       norm = 0.0f;
-      for (uint j = 0; j < n; j++) norm += metal::exp(tf_val(ck[j]) - m);
+      for (uint j = 0; j < n; j++) norm += metal::precise::exp(tf_val(ck[j]) - m);
     }
     uint keep = n;
     if (top_p > 0.0f && top_p < 1.0f) {
       float cum = 0.0f;
       for (uint j = 0; j < n; j++) {
-        cum += metal::exp(tf_val(ck[j]) - m) / norm;
+        cum += metal::precise::exp(tf_val(ck[j]) - m) / norm;
         if (cum >= top_p) { keep = j + 1; break; }
       }
     }
@@ -202,7 +205,7 @@
   float score = -INFINITY;
   uint best = 0xFFFFFFFFu;
   if (t < keep) {
-    score = tf_val(ck[t]) - metal::log(-metal::log(tf_uniform(seed, position, ci[t])));
+    score = tf_val(ck[t]) - metal::precise::log(-metal::precise::log(tf_uniform(seed, position, ci[t])));
     best = t;
   }
   const float sm = simd_max(score);

@@ -2,9 +2,11 @@
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def main():
@@ -28,21 +30,31 @@ def main():
     kind = json.loads((args.model / "config.json").read_text())["model_type"]
     if kind == "nemotron_h":
         from mlx_lm import load
-        from tensorfold.kernels.nemotron.lightning.v1 import kernels, rows
+        from tensorfold.kernels.nemotron.lightning.v1 import kernels
         from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+        from tools.native_legacy import nemotron_rows, nemotron as legacy_nemotron
         model, tokenizer = load(str(args.model))
-        fused = kernels.FusedDecode(model, fold_shared=False)
-        fused.compiled = False
+        # Native retains the original combined conv/scan and per-slot experts.
+        kernels.mamba_step = legacy_nemotron.mamba_step
+        fused = kernels.FusedDecode(model)
+        # Build the same explicit operations as native, without mx.compile
+        # combining neighboring elementwise operations.
+        fused._block = lambda index, kind, nxt: (fused._mamba_block(index, nxt) if kind == "M"
+                                                else fused._moe_block(index, nxt))
         if args.simd:
             fused.lane_attention = False
-        fused.experts_fn = rows.experts
+        def experts(index, mixer, x):
+            logits = kernels.router_logits(x, mixer.gate.weight)
+            ids, weights = kernels.route(logits, fused.gate_bias[index], fused.top_k, fused.scaling)
+            return nemotron_rows.experts(mixer.switch_mlp, x, ids), weights, mixer.shared_experts(x)
+        fused._moe = experts
         holder = nn.Module()
         holder.model = model
         holder.stacked = [x for x, _ in fused.qkv.values()]
         if args.simd:
             for _, module in holder.named_modules():
                 if isinstance(module, nn.QuantizedLinear):
-                    module.__class__ = rows.RowLinear
+                    module.__class__ = nemotron_rows.RowLinear
         else:
             lane_qmm.install(holder, rows=128, tile=True, wide=True)
         cache = model.make_cache()
@@ -52,13 +64,20 @@ def main():
         from tensorfold.families.qwen4_exp.decode import FusedDecode
         from tensorfold.families.qwen4_exp.runtime import FlashNext
         from types import SimpleNamespace
-        from tensorfold.kernels.qwen.flash_next.v1 import kernels as flash_kernels
+        from tensorfold.kernels.qwen.flash_next.v1 import embed as flash_kernels
+        from tensorfold.families.qwen4_exp import decode
+        decode.DENSE = "rows"
         # Keep the 32 GB PLE tables sharded. The reference embedding performs the
         # same lookup/dequantization without materializing a second concatenated copy.
         flash_kernels.PleTables = lambda embedding: embedding
         flash_kernels.ple_lookup = lambda ids, tables: tables(ids)
         model, tokenizer = load(args.model, lazy=True)
         model.__dict__["fused"] = FusedDecode(model)
+        # The lookup adapter holds the original sharded embedding. Remove its
+        # fused alias so calling it cannot recurse into this same adapter.
+        for layer in model.layers:
+            if "ple" in layer:
+                layer.ple.ple_embedding.__dict__.pop("fused_tables", None)
         cache = model.make_cache()
         # The serving runtime uses a row-invariant vocabulary projection; the raw
         # model's __call__ uses MLX's batch-dependent quantized matmul instead.

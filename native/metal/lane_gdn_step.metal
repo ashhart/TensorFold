@@ -24,7 +24,7 @@
     const float s0q = s0kq[((n * HV + h) * 2 + 1) * DV + dv];
 
     const float lg = log_prev[n * HV + h] + log_g[n * HV + h];
-    const float decay = metal::exp(lg);
+    const float decay = metal::precise::exp(lg);
 
     // Past keys against this key and this query; one simdgroup per stride of i.
     for (int i = int(sg); i < t; i += int(DV / 32)) {
@@ -39,7 +39,7 @@
         a = simd_sum(a);
         c = simd_sum(c);
         if (sl == 0) {
-            float w = metal::exp(lg - lg_hist[(n * HV + h) * CAP + i]);
+            float w = metal::precise::exp(lg - lg_hist[(n * HV + h) * CAP + i]);
             aw[i] = w * a;
             cw[i] = w * c;
         }

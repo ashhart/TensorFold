@@ -21,7 +21,7 @@
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float total = 0.0f;
   for (int s = 0; s < T / 32; s++) total += partial[s];
-  const float scale = metal::rsqrt(total / float(D) + eps[0]);
+  const float scale = metal::precise::rsqrt(total / float(D) + eps[0]);
   for (int i = 0; i < PER; i++) {
     const int c = int(t) + i * T;
     OUT[int(r) * D + c] = bfloat(float(W[c]) * (hv[i] * scale));

@@ -11,7 +11,7 @@
   float lsum = 0.0f, acc[DPL];
   for (int i = 0; i < DPL; i++) acc[i] = 0.0f;
   for (int c = 0; c < NCH; c++) {
-    const float e = PL[base + c] > 0.0f ? metal::exp(PM[base + c] - mx_) : 0.0f;
+    const float e = PL[base + c] > 0.0f ? metal::precise::exp(PM[base + c] - mx_) : 0.0f;
     lsum = fma(PL[base + c], e, lsum);
     for (int i = 0; i < DPL; i++) acc[i] = fma(PO[size_t(base + c) * D + int(lane) * DPL + i], e, acc[i]);
   }

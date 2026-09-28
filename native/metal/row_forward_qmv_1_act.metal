@@ -18,7 +18,7 @@
   for (int r = 0; r < R; r++) {
     float part_sum = 0.0f;
     for (int t = int(lane); t < T; t += 32) part_sum += PART[r * T + t];
-    inv[r] = metal::rsqrt(simd_sum(part_sum) / float(K) + eps[0]);
+    inv[r] = metal::precise::rsqrt(simd_sum(part_sum) / float(K) + eps[0]);
   }
   if (R == 1) {
     for (int k0 = 0; k0 < K; k0 += 512) {
@@ -62,5 +62,5 @@
     for (int r = 0; r < R; r++)
       for (int j = 0; j < RPS; j++) {
         const float gf = float(bfloat(acc[r][j]));
-        OUT[r * NH + row0 + j] = bfloat(gf / (1.0f + metal::exp(-gf)) * ups[r][j]);
+        OUT[r * NH + row0 + j] = bfloat(gf / (1.0f + metal::precise::exp(-gf)) * ups[r][j]);
       }

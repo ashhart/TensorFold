@@ -15,14 +15,14 @@
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float total = 0.0f;
   for (int k = 0; k < DI / 32; k++) total += part[k];
-  const float inv = metal::rsqrt(total / float(DI) + eps[0]);
+  const float inv = metal::precise::rsqrt(total / float(DI) + eps[0]);
   normed[d] = float(bfloat((x * inv) * W[d]));
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float out = normed[d];
   if (d < RD) {
     const int hr = RD / 2;
     const int i = d % hr;
-    const float freq = metal::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
+    const float freq = metal::precise::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
     const float angle = float(4 * b) * freq;
     const float c = metal::fast::cos(angle), s = metal::fast::sin(angle);
     out = d < hr ? normed[d] * c - normed[d + hr] * s : normed[d - hr] * s + normed[d] * c;

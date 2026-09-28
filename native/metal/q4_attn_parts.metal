@@ -27,7 +27,7 @@
     for (int i = 0; i < PER; i++) sc = fma(q[i], float(kb[key + i]), sc);
     sc = simd_sum(sc);
     const float mn = metal::max(m, sc);
-    const float f = metal::exp(m - mn), e = metal::exp(sc - mn);
+    const float f = metal::precise::exp(m - mn), e = metal::precise::exp(sc - mn);
     l = fma(l, f, e);
     for (int i = 0; i < PER; i++) o[i] = fma(e, float(vb[key + i]), o[i] * f);
     m = mn;
@@ -38,7 +38,7 @@
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float top = -INFINITY;
   for (int k = 0; k < 8; k++) top = metal::max(top, ms[k]);
-  const float mine = m == -INFINITY ? 0.0f : metal::exp(m - top);
+  const float mine = m == -INFINITY ? 0.0f : metal::precise::exp(m - top);
   for (int i = 0; i < PER; i++) tile[g][lane * PER + i] = o[i] * mine;
   threadgroup_barrier(mem_flags::mem_threadgroup);
   const size_t at = (size_t(r) * H + h) * P + part;
@@ -49,7 +49,7 @@
   }
   if (thread_position_in_threadgroup.x == 0) {
     float total = 0.0f;
-    for (int k = 0; k < 8; k++) total += ms[k] == -INFINITY ? 0.0f : ls[k] * metal::exp(ms[k] - top);
+    for (int k = 0; k < 8; k++) total += ms[k] == -INFINITY ? 0.0f : ls[k] * metal::precise::exp(ms[k] - top);
     PM[at * 2] = top;
     PM[at * 2 + 1] = total;
   }

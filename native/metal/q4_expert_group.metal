@@ -17,7 +17,7 @@
     if (lane == 0) {
       for (int k = 0; k < TOPK; k++) { picks[r][k] = ids[k]; PICK[r * TOPK + k] = uint32_t(ids[k]); }
       float ex[TOPK], total = 0.0f;
-      for (int k = 0; k < TOPK; k++) { ex[k] = metal::exp(picked[k] - picked[0]); total += ex[k]; }
+      for (int k = 0; k < TOPK; k++) { ex[k] = metal::precise::exp(picked[k] - picked[0]); total += ex[k]; }
       for (int k = 0; k < TOPK; k++) WTS[r * TOPK + k] = float(bfloat(ex[k] / total));
     }
   }

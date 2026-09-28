@@ -35,6 +35,9 @@ def main():
                     positions = [1, 513, 2049, 262144]
                     settings = Sampling(seed, temperature=temp, top_k=count, top_p=prob)
                     expected = gpu_sampling.sample(x, settings if temp else None, positions, ids)
+                    # Freeze each oracle while its inputs/settings are current;
+                    # saving the whole lazy batch produced non-reproducible draws.
+                    mx.eval(expected)
                     arrays.update({key + ".x": x, key + ".expected": expected})
                     if mapped:
                         arrays[key + ".ids"] = ids

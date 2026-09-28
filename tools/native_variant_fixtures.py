@@ -8,12 +8,15 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools.native_kernel_math import explicit_math
 
 def fingerprint(source, header):
     return hashlib.sha256((header + "\0" + source).encode()).hexdigest()
@@ -39,13 +42,13 @@ class Capture:
         kernel = self.original(**spec)
         source = spec["source"]
         constants = []
-        if spec["name"].startswith("simd_qmm_"):
-            # Python specializes dimensions as leading constexpr declarations;
-            # the embedded native body receives those same values as templates.
-            while match := re.match(r"  constexpr int (\w+) = (-?\d+);\n", source):
-                constants.append((match[1], int(match[2])))
-                source = source[match.end():]
-        source_hash = fingerprint(source, spec.get("header", ""))
+        # Python specializes dimensions as leading constexpr declarations;
+        # the embedded native body receives those same values as templates.
+        while match := re.match(r"  constexpr int (\w+) = (-?\d+);\n", source):
+            constants.append((match[1], int(match[2])))
+            source = source[match.end():]
+        header = re.sub(r"\n\[\[max_total_threads_per_threadgroup\(\d+\)\]\]\n$", "", spec.get("header", ""))
+        source_hash = fingerprint(explicit_math(source), explicit_math(header))
         key = self.catalog.get((source_hash, "DEP" in spec["input_names"]))
         if key is None:
             return kernel
@@ -84,13 +87,16 @@ class Capture:
 
 
 def extra_variants(capture):
-    from tensorfold.kernels.qwen.dense.v1 import row_forward, simd_qmm
+    from tensorfold.kernels.qwen.dense.v1 import simd_qmm
+    from tools.native_legacy import row_forward, row_qmv
     for group in (32, 64, 128):
         weight = (mx.random.normal((512, 1024), key=mx.random.key(group)) * .1).astype(mx.bfloat16)
         q, scales, biases = mx.quantize(weight, group_size=group, bits=4)
         for rows in (1, 3, 8):
             x = mx.random.normal((rows, 1024), key=mx.random.key(rows)).astype(mx.bfloat16)
             parts = row_forward.row_parts(x)
+            mx.eval(row_qmv.qmv(x, q, scales, biases, group))
+            mx.eval(row_forward.row_qmv_gate_up_act(x, q, scales, biases, group))
             norm_weight = mx.ones((1024,), dtype=mx.bfloat16)
             residual = mx.zeros((rows, 512), dtype=mx.bfloat16)
             for norm in (False, True):
@@ -111,7 +117,7 @@ def extra_variants(capture):
 
 def flash_variants(capture):
     """Exercise optional grouped experts, routing ties, embedding and projection layouts."""
-    from tensorfold.kernels.qwen.flash_next.v1 import kernels as flash
+    from tools.native_legacy import flash
 
     def weights(shape, seed):
         value = (mx.random.normal(shape, key=mx.random.key(seed)) * .02).astype(mx.bfloat16)
@@ -182,8 +188,57 @@ def flash_variants(capture):
                 mx.eval(flash.expert_down(plain_act, plain_picks, plain_probability, logits, 10, experts, down))
 
 
+def retired_glue_variants(capture):
+    """Keep removed folded/stacked glue covered against the independent lane helpers."""
+    from tensorfold.kernels.qwen.dense.v1 import lane_glue, lane_tree
+    from tools.native_legacy import row_forward
+
+    def random(shape, seed):
+        return (mx.random.normal(shape, key=mx.random.key(seed)) * .1).astype(mx.bfloat16)
+
+    def same(a, b):
+        assert a.shape == b.shape and bool(mx.array_equal(a, b).item())
+
+    for count in (1, 3, 8):
+        capture.test = f"retired-glue-{count}"
+        h, delta, weight = random((1, count, 512), 31), random((1, count, 512), 32), mx.ones((512,), dtype=mx.bfloat16)
+        for residual in (None, delta):
+            ref = lane_glue.norm_xs(h, residual, weight, 1e-6)
+            for a, b in zip(row_forward.add_norm(h, residual, weight, 1e-6), ref):
+                same(a, b)
+        gu = random((1, count, 1024), 33)
+        same(row_forward.mlp_act(gu), lane_glue.mlp_act(mx.contiguous(gu[..., :512]), mx.contiguous(gu[..., 512:])))
+        y, cs, cw = random((1, count, 1544), 34), random((1, 3, 1024), 35), random((1024, 4), 36)
+        alog, dt = mx.zeros((4,), dtype=mx.float32), mx.zeros((4,), dtype=mx.bfloat16)
+        parents = list(range(-1, count - 1))
+        windows = lane_tree._conv_windows(parents, 3)
+        pre = row_forward.gdn_pre(y, cs, cw, windows, alog, dt, nk=2, nv=4, dk=128, dv=128)
+        ref = lane_glue.gdn_pre(mx.contiguous(y[..., :1024]), cs, cw, windows,
+                                mx.contiguous(y[..., 1540:]), mx.contiguous(y[..., 1536:1540]),
+                                alog, dt, nk=2, nv=4, dk=128, dv=128)
+        for a, b in zip(pre[:5], ref):
+            same(a, b)
+        source = lane_glue._GDN_PRE.replace("float(Ain[w * NV + hv])", "float(Ain[w * ZS + AO + hv])")
+        source = source.replace("float(Bin[w * NV + hv])", "float(Bin[w * ZS + BO + hv])")
+        run = mx.fast.metal_kernel(name="retired_fused_pre", source=source,
+                  input_names=["QKV", "CS", "CW", "windows", "Ain", "Bin", "ALOG", "DT"],
+                  output_names=["Q", "Kout", "Vout", "G", "BETA"])
+        fused = run(inputs=[mx.contiguous(y[..., :1024]), cs, cw, windows, y, y, alog, dt],
+                    template=[("NK", 2), ("NV", 4), ("DK", 128), ("DV", 128), ("TAPS", 4),
+                              ("ZS", 1544), ("AO", 1540), ("BO", 1536)],
+                    grid=(32, 8, count), threadgroup=(32, 1, 1),
+                    output_shapes=[a.shape for a in ref], output_dtypes=[a.dtype for a in ref])
+        for a, b in zip(fused, ref):
+            same(a, b)
+        state = mx.zeros((1, 4, 128, 128), dtype=mx.float32)
+        rec, _ = row_forward.gated_delta(*pre[:5], state, parents)
+        same(rec, lane_tree.gated_delta_tree(*pre[:5], state, parents))
+        same(row_forward.gdn_post(rec, y, weight[:128], 1e-6, zo=1024),
+             lane_glue.gdn_post(rec, mx.contiguous(y[..., 1024:1536]), weight[:128], 1e-6))
+
+
 def nemotron_variants(capture):
-    from tensorfold.kernels.nemotron.lightning.v1 import kernels as nemotron
+    from tools.native_legacy import nemotron
     for rows in (1, 3, 16):
         for level in (-1000, 0, 1000):
             for shared in (0, 1, 2):
@@ -218,8 +273,23 @@ def nemotron_variants(capture):
 
 def attention_and_ple_variants(capture):
     from tensorfold.kernels.qwen.dense.v1 import lane_attention
-    from tensorfold.kernels.qwen.flash_next.v1 import kernels as flash
+    from tools.native_legacy import flash
     import numpy as np
+    from tools.native_legacy import tree_attention
+
+    parents = [-1, 0, 0, 1, 2, 2, 4, 3]
+    from tensorfold.kernels.qwen.dense.v1.lane_tree import tree_paths
+    _, paths = tree_paths(parents)
+    for prefix in (0, 31, 513, 10007):
+        capture.test = f"retired-tree-attention-{prefix}"
+        q = mx.random.normal((1, 4, 8, 256), key=mx.random.key(42)).astype(mx.bfloat16)
+        k = mx.random.normal((1, 2, prefix + 8, 256), key=mx.random.key(43)).astype(mx.bfloat16)
+        v = mx.random.normal(k.shape, key=mx.random.key(44)).astype(mx.bfloat16)
+        actual = tree_attention.lane_tree_sdpa(q, k, v, .0625, parents)
+        for node, path in enumerate(paths):
+            indices = mx.array(list(range(prefix)) + [prefix + row for row in path], dtype=mx.int32)
+            expected = lane_attention.lane_sdpa(q[:, :, node:node + 1], mx.take(k, indices, axis=2), mx.take(v, indices, axis=2), .0625)
+            assert bool(mx.array_equal(actual[:, :, node:node + 1], expected).item())
 
     direct = lane_attention.DIRECT_P
     try:
@@ -270,13 +340,14 @@ def main():
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
     try:
-        code = pytest.main(["-q", "--disable-warnings", "tests/test_lane_fuse.py",
+        code = pytest.main(["-q", "-rs", "--disable-warnings", "tests/test_lane_fuse.py",
                             "tests/test_lane_gdn.py", "tests/test_row_forward.py",
-                            "tests/test_simd_qmm.py", "tests/test_nemotron_rows.py",
+                            "tests/test_simd_qmm.py", "tools/native_legacy/test_nemotron_rows.py",
                             "tests/test_flash_expert_down.py"], plugins=[capture])
         if code:
             raise SystemExit(code)
         extra_variants(capture)
+        retired_glue_variants(capture)
         flash_variants(capture)
         nemotron_variants(capture)
         attention_and_ple_variants(capture)
@@ -296,6 +367,7 @@ def main():
         "qmv", "qmv_rows", "embed_rows", "swiglu", "route", "expert_gateup", "expert_group",
         "grouped_gateup", "expert_down_y", "grouped_down", "expert_down"))
     required.update(("q4_ple_lookup", "q4_router_float", "q4_router_bfloat", "lane_attention_partial", "lane_attention_partial_128"))
+    required.update(("lane_attention_tail", "lane_attention_tree_merge"))
     if missing := required - counts.keys():
         raise RuntimeError(f"Required native variant coverage missing: {sorted(missing)}")
     print(json.dumps(counts, indent=2), flush=True)

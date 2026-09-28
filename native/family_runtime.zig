@@ -141,13 +141,16 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     if (drafts > 15) return error.InvalidDraftBudget;
     if (check_mtp_state and drafts == 0) return error.InvalidDraftBudget;
     try settings.validate();
+    const startup_timer = Stopwatch.init(io);
     try mx.init();
     defer mx.shutdown();
+    const load_timer = Stopwatch.init(io);
     var m = try M.init(io, args[2], drafts > 0 and !exact and !cache_stress and !long_cache and !check_serial and !check_buffers and !check_reuse and !check_ple_state);
     defer m.deinit();
     if (@hasDecl(M, "makeResidentPLE")) {
         if (resident_ple) try m.makeResidentPLE(ple_wiring);
     }
+    const load_seconds = @as(f64, @floatFromInt(load_timer.read())) / 1e9;
     const gpu_tokens = if (@hasDecl(M, "gpuTokensEnabled")) m.gpuTokensEnabled() else @hasDecl(M, "forwardArray");
     if (@hasDecl(M, "makeResidentPLE")) {
         if (check_ple_state) return @import("cache_checks.zig").checkResident(&m, long_cache);
@@ -180,12 +183,14 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         try @import("mtp_calibration.zig").measure(M, &m, io, &depth, settings);
         calibration_seconds = @as(f64, @floatFromInt(calibration_timer.read())) / 1e9;
     }
+    const warm_timer = Stopwatch.init(io);
     if (warm) {
         var p = try m.forward(&.{42});
         defer p.deinit();
         try m.commit(&p, 1);
         m.reset();
     }
+    const warmup_seconds = if (warm) @as(f64, @floatFromInt(warm_timer.read())) / 1e9 else 0;
     const path = try std.Io.Dir.cwd().realPathFileAlloc(io, args[2], a);
     defer a.free(path);
     var tok = try @import("vendor/tokenizer.zig").loadTokenizer(io, a, path);
@@ -210,6 +215,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     defer head_cache.deinit();
     var last = mx.empty;
     defer mx.free(last);
+    const startup_seconds = @as(f64, @floatFromInt(startup_timer.read())) / 1e9;
     var timer = Stopwatch.init(io);
     var pending: i32 = 0;
     var off: usize = 0;
@@ -449,6 +455,9 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             .adaptive_drafts = adaptive_drafts and m.mtp,
             .draft_depth_counts = depth_counts,
             .calibration_seconds = calibration_seconds,
+            .load_seconds = load_seconds,
+            .warmup_seconds = warmup_seconds,
+            .startup_seconds = startup_seconds,
             .proposal_sha256 = std.fmt.bytesToHex(proposal_digest, .lower),
             .prefill_seconds = prefill,
             .decode_seconds = seconds,

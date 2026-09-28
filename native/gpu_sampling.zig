@@ -24,10 +24,20 @@ pub fn sample(k: *mx.Kernels, s: *mx.Scope, logits: mx.Array, positions: []const
     }
     const cfg = [_]f32{ @floatCast(1 / @max(settings.temperature, 1e-6)), @floatCast(settings.top_p), 20 };
     const cap: u32 = @intCast(@min(settings.top_k, @as(usize, @intCast(vocab))));
+    // Upstream's sampler accepts independent settings for each row. The CLI
+    // uses one setting, repeated with the same per-row layout.
+    const configs = try mx.allocator.alloc(f32, positions.len * 3);
+    defer mx.allocator.free(configs);
+    const caps = try mx.allocator.alloc(u32, positions.len);
+    defer mx.allocator.free(caps);
+    for (caps, 0..) |*value, i| {
+        @memcpy(configs[i * 3 ..][0..3], &cfg);
+        value.* = cap;
+    }
     var inputs = [_]mx.Array{
         x,                                                  try s.data(seeds.ptr, &.{rows * 2}, mx.c.MLX_UINT32),
-        try s.cast(try s.ints(positions), mx.c.MLX_UINT32), try s.data(&cfg, &.{3}, mx.f32t),
-        try s.data(&cap, &.{1}, mx.c.MLX_UINT32),           ids orelse mx.empty,
+        try s.cast(try s.ints(positions), mx.c.MLX_UINT32), try s.data(configs.ptr, &.{ rows, 3 }, mx.f32t),
+        try s.data(caps.ptr, &.{rows}, mx.c.MLX_UINT32),    ids orelse mx.empty,
     };
     return (try k.run(s, if (ids != null) src.gpu_sample_ids else src.gpu_sample, inputs[0..if (ids != null) @as(usize, 6) else 5], &.{ mx.ti("V", vocab), mx.ti("C", 1024) }, .{ 1024 * rows, 1, 1 }, .{ 1024, 1, 1 }, &.{.{ .shape = &.{rows}, .dtype = mx.c.MLX_UINT32 }}))[0];
 }
