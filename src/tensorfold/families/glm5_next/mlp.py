@@ -93,8 +93,7 @@ class MoE:
         return y.squeeze(-2)
 
     def expert_rows(self, x: mx.array, idx: mx.array) -> mx.array:
-        """A window's rows x [R, D] through their experts idx [R, k] -> [R, k, D], every pick with the bits its
-        one-row call (``experts`` on one row) gives it; each distinct expert's weights read once for the window."""
+        """A window's rows through their experts, each pick with its one-row call's bits, each expert read once."""
 
         group = K.expert_group(idx, int(self.gate.weight.shape[0]))
         g = K.expert_qmv(x, idx, group, self.gate, per_pick=False)

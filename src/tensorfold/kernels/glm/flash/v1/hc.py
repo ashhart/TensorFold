@@ -1,5 +1,4 @@
-"""A hyper-connection boundary in three kernels: the write-back with the stream RMS, the 24-way mix, then
-sinkhorn, collapse and the block's RMSNorm."""
+"""A hyper-connection boundary in three kernels, each in the row-by-row path's partitions and order."""
 
 from __future__ import annotations
 
@@ -17,13 +16,7 @@ _HC_COMMON = r"""
   constexpr int MIX = (2 + S) * S;                  // 24 mixes
 """
 
-# A block boundary is three kernels. Each piece repeats the row-by-row path's MLX kernels in the same partition
-# and order, so the bits are the row-by-row path's:
-#   write-back   post_s b + sum_j comb[j][s] x_j: an fp32 product, the matmul as an fma chain from comb[0] x_0
-#   stream RMS   rms_looped: thread t sums x^2 over its 4-value runs t 4 + 4096 k, then two simd_sum levels
-#   mix          gemv (BM 1, BN 8, SN 32, TM 4, TN 4): 6 threadgroups of 8 simdgroups a row, as MLX launches it
-#   split        mlx-vlm's hc_sinkhorn_collapse kernel (Apple, MIT): sigmoid pre/post, sinkhorn, collapse
-#   RMSNorm      rms_single_row over D: thread t its 4 contiguous values
+# write-back, stream RMS, mix, sinkhorn split and RMSNorm, each in the row-by-row path's MLX partition and order
 _HC_EXPAND = _HC_COMMON + r"""
   // Threadgroup r (1024 threads): the pending write-back (EXPAND) and the streams' RMS scale (SPLIT).
   const int r = int(threadgroup_position_in_grid.x);
@@ -97,8 +90,7 @@ _HC_MIX = _HC_COMMON + r"""
 """
 
 _HC_MIX_PACKED = _HC_COMMON + r"""
-  // _HC_MIX's arithmetic with the stored bf16 matrix repacked per thread (FNP[og][sgn][lane][i][tm][tn]), its
-  // U iterations' loads issued before their use.
+  // _HC_MIX's arithmetic on the bf16 matrix repacked per thread, loads issued U iterations ahead
   const int og = int(threadgroup_position_in_grid.x);
   const int r = int(threadgroup_position_in_grid.y);
   const uint lane = thread_index_in_simdgroup, sgn = simdgroup_index_in_threadgroup;
@@ -145,8 +137,7 @@ _HC_MIX_PACKED = _HC_COMMON + r"""
 """
 
 _HC_SPLIT_NORM = _HC_COMMON + r"""
-  // Threadgroup r (1024 threads): sinkhorn and pre / post / comb (hc_sinkhorn_collapse's arithmetic), the collapse
-  // and the next block's RMSNorm.
+  // Threadgroup r: sinkhorn, pre / post / comb (hc_sinkhorn_collapse), the collapse and the RMSNorm
   constexpr float HC_EPS = HC_EPS_INT * 1e-9;       // as the hc_split kernel spells its eps
   const int r = int(threadgroup_position_in_grid.x);
   const uint t = thread_position_in_threadgroup.x;
@@ -215,9 +206,7 @@ def hc_fits(hc: Any, dims: int) -> bool:
 
 def hc_step(x: mx.array, pending: tuple[mx.array, mx.array, mx.array] | None, hc: Any | None, norm_w: mx.array | None,
             eps: float) -> tuple[mx.array, mx.array | None, mx.array | None, mx.array | None]:
-    """A block boundary on streams x [R, 4, D]: the pending write-back (branch [R, D], post [R, 4], comb [R, 4, 4];
-    None at the first block), then (hc given) the next block's split and its input RMSNorm with norm_w. Returns
-    (streams, normed input [R, D] or None, post, comb) with the row-by-row path's bits."""
+    """A block boundary on streams [R, 4, D]: the pending write-back, then the next block's split and RMSNorm."""
 
     rows, streams, dims = x.shape
     expand, split = pending is not None, hc is not None
@@ -254,8 +243,7 @@ def hc_step(x: mx.array, pending: tuple[mx.array, mx.array, mx.array] | None, hc
 
 
 def pack_hc_fn(fn_bf16: mx.array) -> mx.array:
-    """The mix matrix [24, 16384] (bf16 as stored) repacked for _HC_MIX_PACKED: [og 6][sgn 8][lane 32][i 16][tm 4]
-    [tn 4], row og 4 + tm, column (32 sgn + lane) 4 + 1024 i + tn."""
+    """The stored bf16 mix matrix [24, 16384] repacked per thread for _HC_MIX_PACKED."""
 
     m = fn_bf16.reshape(6, 4, 16, 8, 32, 4)                     # [og, tm, i, sgn, lane, tn]
     return mx.contiguous(m.transpose(0, 3, 4, 2, 1, 5))

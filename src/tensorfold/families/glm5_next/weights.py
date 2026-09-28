@@ -8,17 +8,16 @@ from typing import Any
 
 import mlx.core as mx
 
-from tensorfold.families.glm5_next.config import Config
+from tensorfold.families.glm5_next.config import BITS, GROUPS, Config, quant_formats, unreadable
 from tensorfold.families.glm5_next.kda import KDA
-from tensorfold.families.glm5_next.linear import Q
+from tensorfold.families.glm5_next.linear import Q, one_format
 from tensorfold.families.glm5_next.mla import MLA
 from tensorfold.families.glm5_next.mlp import DenseMLP, MoE
 from tensorfold.families.glm5_next.model import GLM5, HC, Layer
 
 
 class Weights:
-    """The checkpoint's language-model tensors by name (``layers.N....``, ``lm_head``, ``embed_tokens``, ``norm``),
-    read shard by shard as they are asked for."""
+    """The checkpoint's language-model tensors by short name, read shard by shard as they are asked for."""
 
     def __init__(self, model_dir: Path) -> None:
         index = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
@@ -28,6 +27,7 @@ class Weights:
             short = _short(name)
             if short is not None:
                 self.where[short] = shard
+        self.default, self.overrides = quant_formats(json.loads((model_dir / "config.json").read_text()))
         self._shard: tuple[str, dict[str, mx.array]] | None = None
         self._cache: dict[str, dict[str, mx.array]] = {}
 
@@ -48,7 +48,18 @@ class Weights:
         return loaded[name]
 
     def q(self, prefix: str) -> Q:
-        return Q(self.get(f"{prefix}.weight"), self.get(f"{prefix}.scales"), self.get(f"{prefix}.biases"))
+        """A quantized linear at the format the config states for it, checked against its shapes."""
+
+        fmt = self.overrides.get(prefix, self.default)
+        if unreadable(fmt):
+            stored = "unquantized" if fmt is None else f"{fmt[0]}-bit {fmt[2]} in groups of {fmt[1]}"
+            raise ValueError(f"{prefix}: stored {stored}; GLM-5.3-Flash's Mac engine reads MLX affine weights of "
+                             f"{', '.join(map(str, BITS))} bits in groups of {', '.join(map(str, GROUPS))}")
+        try:
+            return Q(self.get(f"{prefix}.weight"), self.get(f"{prefix}.scales"), self.get(f"{prefix}.biases"),
+                     bits=fmt[0], group=fmt[1])
+        except ValueError as exc:
+            raise ValueError(f"{prefix}: {exc}") from None
 
 
 def _short(name: str) -> str | None:
@@ -108,8 +119,9 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer
                 stacked.append(w.q(f"{m}.switch_mlp.{proj}"))
                 continue
             parts = [w.q(f"{m}.experts.{e}.{proj}") for e in range(cfg.n_routed_experts)]
+            bits, group = one_format(parts)
             q = Q(mx.stack([x.weight for x in parts]), mx.stack([x.scales for x in parts]),
-                  mx.stack([x.biases for x in parts]))
+                  mx.stack([x.biases for x in parts]), bits=bits, group=group)
             _materialize(q)
             stacked.append(q)
         mlp: Any = MoE(w.get(f"{m}.gate.weight"), w.get(f"{m}.gate.e_score_correction_bias"), *stacked, shared, cfg)
@@ -131,8 +143,7 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False) -> Layer
 
 
 def load_backbone(model_dir: Path, *, layers: int | None = None) -> GLM5:
-    """The backbone from a checkpoint directory, layer by layer (each layer's tensors evaluated as it is built).
-    ``layers``: only the first that many (checks on the real weights without the whole model's memory)."""
+    """The backbone, layer by layer; ``layers``: only the first that many (real-weight checks in less memory)."""
 
     model_dir = Path(model_dir)
     config = json.loads((model_dir / "config.json").read_text())

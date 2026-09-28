@@ -1,10 +1,4 @@
-"""The KDA decode step in one Metal kernel a layer: the conv window, the norms and gates, the delta-rule state update
-and the gated RMSNorm, with f_b / g_b folded in (ported from mlx-vlm #2105: see THIRD_PARTY_NOTICES.md).
-
-A window's rows run in order inside the launch, so a row's bits don't depend on the window's width, and a rollback
-replays the kept rows from the entry state through the same kernel. The kernel sets the decode path's arithmetic;
-prompt chunks take MLX ops. ``kda_rows_ops`` is the same arithmetic in MLX ops, for machines without Metal.
-"""
+"""The KDA decode step in one Metal kernel a layer, rows in order inside the launch (from mlx-vlm #2105)."""
 
 from __future__ import annotations
 
@@ -69,8 +63,7 @@ _SOURCE = r"""
 
   for (int r = 0; r < R; ++r) {
     device const bfloat* prow = P + (size_t)r * PS;
-    // ---- f_b / g_b (128 -> H*D, 4-bit, groups of 64) for this head's D outputs each: MLX's one-row qmv_quad
-    // (a quad of lanes per output, 32 inputs a lane, quad_sum), as kernels.qmv_quad_rows does.
+    // ---- f_b / g_b (128 -> H*D, 4-bit groups of 64): MLX's one-row qmv_quad, as kernels.qmv_quad_rows
     {
       constexpr int PER = D / 4;
       constexpr int KB = D / 2;
@@ -247,8 +240,7 @@ def _kernel() -> Any:
 
 
 def fits(kda: Any) -> bool:
-    """The kernel's shapes: head dim 128 (64 for the test checkpoint), 4-bit group-64 f_b / g_b with head-dim
-    inputs, a stacked in-projection whose tail is f_a | g_a | b."""
+    """The kernel's shapes: head dim 64 or 128, 4-bit group-64 f_b / g_b, the stacked in-projection's tail order."""
 
     fb, gb = kda.f_b, kda.g_b
     return (kda.dim in (64, 128) and all(q.bits == 4 and q.group == 64 and q.ins == kda.dim for q in (fb, gb))
@@ -257,8 +249,7 @@ def fits(kda: Any) -> bool:
 
 
 def kda_rows(kda: Any, proj: mx.array, conv: mx.array, state: mx.array) -> tuple[mx.array, mx.array, mx.array]:
-    """R rows of a KDA layer's decode step: proj [R, PS] (the stacked in-projection, bf16), conv window [taps-1, 3W]
-    (bf16), state [1, H, D, D] (fp32) -> (y [R, H*D] bf16 for o_proj, the state after the last row, the new window)."""
+    """R rows of a KDA step from its conv window and fp32 state: (y for o_proj, the last row's state, the window)."""
 
     rows = int(proj.shape[0])
     if not metal():
@@ -276,8 +267,7 @@ def kda_rows(kda: Any, proj: mx.array, conv: mx.array, state: mx.array) -> tuple
 
 
 def kda_rows_ops(kda: Any, proj: mx.array, conv: mx.array, state: mx.array) -> tuple[mx.array, mx.array, mx.array]:
-    """The kernel's formulas with MLX ops, one row at a time (Linux / CPU): a row's result does not depend on how
-    many rows share the call."""
+    """The kernel's formulas in MLX ops, one row at a time (no Metal)."""
 
     from mlx_lm.models import gated_delta as gd
 

@@ -1,9 +1,4 @@
-"""The shared Metal header and kernel cache of the fused decode blocks (``moe.py``, ``hc.py``). Each fused kernel
-repeats the row-by-row decode path's partitions and summation order, so a window's rows keep their one-row bits.
-
-Precision traps (from mlx-vlm #2105): exp is metal::precise::exp where MLX's prebuilt kernels use the precise one,
-and sums of squares must not contract into fma.
-"""
+"""The fused blocks' Metal header (precise exp, no fma in sums of squares: mlx-vlm #2105) and kernel cache."""
 
 from __future__ import annotations
 

@@ -11,9 +11,7 @@ from tensorfold.kernels.glm.flash.v1 import kernels as K
 
 
 class KDACache:
-    """A KDA layer: the conv window (last ``taps - 1`` q/k/v rows) and the recurrent state [1, H, Dv, Dk] fp32.
-    ``_replay`` holds the last decode call's entry state and inputs, so ``keep`` can rebuild the state after any
-    prefix of it with the same kernel."""
+    """A KDA layer's conv window and fp32 state; ``_replay`` keeps the last decode call's entry state for ``keep``."""
 
     transient = ("_replay",)
 
@@ -50,9 +48,7 @@ class KDACache:
 
 
 class MLACache:
-    """A sparse-attention layer: latent keys [cap, 512], the indexer's raw keys and gate scores [cap, 128], and the
-    pooled block keys [cap / 4, 128] (block b is valid once position 4 b + 3 is written). Positions past
-    ``offset`` are stale; trimming only moves ``offset``."""
+    """A sparse-attention layer's latent keys, indexer keys and gates, pooled blocks; a trim only moves ``offset``."""
 
     step = 256
 
@@ -106,11 +102,16 @@ class MLACache:
     def trim(self, count: int) -> None:
         self.offset -= int(count)
 
+    def memory_growth(self) -> tuple[int, int]:
+        """(fixed bytes, bytes a token): every array grows with the context, the pooled keys one row a block."""
+
+        widths = [int(a.shape[1]) if a is not None else w for a, w in ((self.keys, 512), (self.ik, 128), (self.ig, 128))]
+        pool = int(self.pool.shape[1]) if self.pool is not None else 128
+        return 0, 2 * (sum(widths) + pool // 4)
+
 
 def pool_blocks(keys: mx.array, gates: mx.array, ape: mx.array, kpool: int) -> mx.array:
-    """Pooled keys of whole blocks: a softmax over each block's positions of gate + ape weights its raw keys.
-    Written elementwise (fp32, positions in order) so a block's bits do not depend on how many blocks are
-    pooled together."""
+    """Pooled keys of whole blocks, elementwise in fp32 so a block's bits don't depend on how many are pooled."""
 
     blocks = int(keys.shape[0]) // kpool
     k = keys.reshape(blocks, kpool, -1).astype(mx.float32)

@@ -54,8 +54,7 @@ class KDA:
         return per_row(lambda r: q(r), x, decode)
 
     def __call__(self, x: mx.array, caches: list[KDACache], lengths: tuple[int, ...], decode: bool) -> mx.array:
-        """Rows x [R, D] of consecutive streams (``lengths`` rows each, stream i advancing ``caches[i]``): the
-        projections take every row at once, the conv window and the recurrence run stream by stream."""
+        """Consecutive streams' rows: projections on all rows at once, conv window and recurrence stream by stream."""
 
         proj = project(x, self.in_proj, rows_exact=decode)
         if decode and C.FUSED_KDA and self.fused is None:

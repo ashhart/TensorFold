@@ -1,10 +1,4 @@
-"""GLM-5.3-Flash as the lane engine's family rounds drive it (``engine.lane_family``): the backbone, the checkpoint's
-MTP layer as the draft head, and the load-time checks.
-
-``check_windows`` finds the widest window (up to 16 rows) whose every row gets a one-row forward's bits on this MLX
-and GPU, and times each width; ``check_streams`` checks several streams' rows in one forward against each stream's own
-call. Drafts change speed only: every emitted token is the target's own sample.
-"""
+"""GLM-5.3-Flash as the lane engine's family rounds drive it: backbone, MTP draft head, load-time checks."""
 
 from __future__ import annotations
 
@@ -16,12 +10,12 @@ import numpy as np
 
 from tensorfold.families.glm5_next.caches import MLACache
 from tensorfold.families.glm5_next.config import DECODE_ROWS
+from tensorfold.families.glm5_next.mla import PREFILL_QUERIES
 from tensorfold.families.glm5_next.model import GLM5
 
 
 class MTPCache(MLACache):
-    """The MTP head's attention cache; ``drafted``: how many of its last entries are chained drafts (trimmed before
-    the next kept rows are absorbed)."""
+    """The MTP head's cache; ``drafted``: its last entries that are chained drafts, trimmed before the next absorb."""
 
     drafted = 0
 
@@ -32,8 +26,7 @@ class GLMFlash:
     lane_family = True
     # the decode path's widest window (``model.DECODE_ROWS``: wider calls take the prefill path)
     fused_rows = DECODE_ROWS
-    # ``hidden`` takes an unread GPU token: one-token rounds (the serial reference, a checkpoint without the head)
-    # run one step ahead
+    # ``hidden`` takes an unread GPU token, so one-token rounds run one step ahead
     gpu_tokens = True
     # the head drafts from every verify row before the round is read: a host round trip less than drafting after it
     speculate_early = True
@@ -83,9 +76,7 @@ class GLMFlash:
         return cache
 
     def hidden(self, inputs: Any, cache: list[Any], parents: Any = None) -> mx.array:
-        """Hidden states [1, R, D] of R consecutive tokens (a [1, R] array, a GPU token not read yet, or a list),
-        advancing the backbone's caches. Up to ``fused_rows`` rows take the row-exact decode path; a prompt
-        chunk takes the batched prefill path."""
+        """Hidden states [1, R, D] of R tokens (maybe unread on the GPU): up to ``fused_rows`` decode, else prefill."""
 
         self._chain_only(parents)
         tokens = inputs if isinstance(inputs, mx.array) else mx.array(np.asarray(inputs, dtype=np.int64))
@@ -94,8 +85,7 @@ class GLMFlash:
         return out
 
     def hidden_rows(self, windows: list[Any], caches: list[list[Any]], parents: Any = None) -> mx.array:
-        """Every stream's window (a token list, or an unread GPU array) in one forward, rows stream by stream, stream
-        i's rows advancing only ``caches[i]``: [1, N, D], each row with the bits its stream's own call gives it."""
+        """Every stream's window in one forward, rows stream by stream, each with its stream's own bits: [1, N, D]."""
 
         for rows in parents or ():
             self._chain_only(rows)
@@ -117,8 +107,7 @@ class GLMFlash:
         self.model.keep_rows(cache, rows, self._kept(keep))
 
     def keep_rows_streams(self, caches: list[list[Any]], lengths: Any, keeps: Any) -> None:
-        """After ``hidden_rows``: stream i keeps the first ``keeps[i]`` of its ``lengths[i]`` rows (the head's cache
-        is ``settle``'s and ``draft_streams``')."""
+        """After ``hidden_rows``: stream i keeps the first ``keeps[i]`` of its ``lengths[i]`` rows."""
 
         self.model.keep_rows_streams(caches, lengths, [self._kept(k) for k in keeps])
 
@@ -140,10 +129,16 @@ class GLMFlash:
             raise NotImplementedError("GLM-5.3-Flash keeps a prefix of a window's rows")
         return len(path)
 
+    @property
+    def prefill_workspace_per_token(self) -> int:
+        """Prefill bytes a position of context: sparse attention's per-head keys and values, a query chunk's scores."""
+
+        a = self.args
+        return a.num_attention_heads * (a.qk_nope_head_dim + a.v_head_dim) * 2 + 2 * a.num_attention_heads * PREFILL_QUERIES * 4
+
     # -- drafting ---------------------------------------------------------------------
     def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any], start: int = 0) -> None:
-        """Prompt rows into the head's cache: ``hidden`` [1, n, D] (final-normed rows of the last call) and the
-        tokens that follow them [n]."""
+        """Prompt rows into the head's cache: final-normed rows ``hidden`` [1, n, D] and the tokens after them."""
 
         tokens = next_tokens if isinstance(next_tokens, mx.array) else mx.array(np.asarray(next_tokens).reshape(-1))
         tokens = tokens.reshape(-1).astype(mx.uint32)
@@ -171,10 +166,7 @@ class GLMFlash:
 
     def speculate(self, cache: list[Any], tokens: mx.array, position: int, sampling: Any, start: int = 0,
                   last_only: bool = False, rows: Any = None) -> mx.array:
-        """Before a verify round's tokens are read: the MTP head absorbs rows ``start`` .. of the last forward
-        (their final-normed rows; ``tokens`` [n], the tokens that follow them, still on the GPU) and draws each
-        row's first draft, for positions ``position`` + 2 + i (``position``: row ``start``'s). ``settle`` then keeps
-        the kept rows' part. Returns the drafts [n] (lazy); ``last_only``: the last row's."""
+        """The head absorbs rows ``start`` .. of the last forward and draws each one's first draft before the read."""
 
         if rows is not None:
             start = int(rows[0])
@@ -192,9 +184,7 @@ class GLMFlash:
         return self._draft_draw(out, sampling, [position + 2 + r for r in range(count)])
 
     def settle(self, cache: list[Any], keep: int, first: Any, position: int, sampling: Any, count: int) -> Any:
-        """After ``speculate``: forget the head's entries of the rows past ``keep``, then the drafts for positions
-        ``position``, ``position`` + 1, ...: the kept row's first draft ``first`` (an int, or unread on the GPU) and
-        ``count`` - 1 chained ones, each drawn on the GPU and fed to the next step unread."""
+        """Keep the head's first ``keep`` rows, then ``count`` drafts: ``first`` and chained ones, drawn on the GPU."""
 
         mtp_cache = cache[-1]
         out, rows = self._specs.pop(id(mtp_cache))
@@ -224,9 +214,7 @@ class GLMFlash:
 
     def draft_streams(self, caches: list[list[Any]], follows: list[list[int]], rows: list[list[int]],
                       positions: list[int], samplings: list[Any], depths: list[int]) -> list[Any]:
-        """Every stream's head after a shared round, one head forward a depth: stream i's head absorbs its kept rows
-        (``rows[i]`` of the last ``hidden_rows`` call, the k-th followed by ``follows[i][k]``) and drafts
-        ``depths[i]`` tokens for positions ``positions[i]``, ... Returns each stream's drafts (lazy, [] for none)."""
+        """Each stream's head after a shared round, one forward a depth: absorb its kept rows, draft ``depths[i]``."""
 
         from tensorfold.engine.gpu_sampling import sample_rows
 
@@ -268,8 +256,7 @@ class GLMFlash:
         return drafts
 
     def _time_mtp_step(self) -> float:
-        """One chained draft step as ``settle`` takes it (the head's layer, the vocabulary head, a draw read back),
-        ms, fastest of 6: the engine's depth rule adds it per draft before measured rounds replace the estimate."""
+        """One chained draft step as ``settle`` takes it, in ms (fastest of 6): the depth rule's cost a draft."""
 
         import time
 
@@ -288,9 +275,7 @@ class GLMFlash:
 
     # -- load-time check ------------------------------------------------------------------
     def check_windows(self, widest: int | None = None) -> tuple[int, dict[int, float]]:
-        """The widest window (up to ``fused_rows``) whose every narrower window gives each row a one-row forward's
-        logits bit for bit, from a 48-token prompt; and every exact width's forward time in ms (fastest of 3).
-        ``check_report``: each width tried and whether it matched."""
+        """The widest window whose every row gets one-row logits bit for bit, and each exact width's forward ms."""
 
         import time
 
@@ -331,8 +316,7 @@ class GLMFlash:
         return exact, costs
 
     def check_streams(self) -> bool:
-        """Streams at different lengths in one ``hidden_rows`` call against each stream's own call, bit for bit, and
-        again after each keeps part of its rows and takes one more step."""
+        """Streams of different lengths in one forward against their own calls, bit for bit, before and after a keep."""
 
         from tensorfold.engine.lane_engine import LaneEngine
 
@@ -377,8 +361,7 @@ class GLMFlash:
 
 
 def load(model_dir: Path, *, drafts: int | None = None, check: bool = True) -> tuple[GLMFlash, Any]:
-    """``drafts`` (default 3; 0: none): the most drafts a round from the MTP head. The engine picks up to this many a
-    round from the stream's recent acceptance at each depth and the measured window costs."""
+    """The runtime and tokenizer; ``drafts`` (default 3, 0: none) caps the MTP drafts a round."""
 
     from tensorfold.families.glm5_next import has_mtp
     from tensorfold.families.glm5_next import mtp as mtp_module

@@ -8,8 +8,12 @@ from typing import Any
 
 
 def parameter_schemas(tools: Sequence[dict[str, Any]] | None) -> dict[str, dict[str, Any]]:
+    """Each offered tool's parameter schemas by lowercase name; a spec that is not an object reads as untyped."""
+
     result = {}
     for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
         function = tool["function"] if isinstance(tool.get("function"), dict) else tool
         parameters = function.get("parameters") or function.get("input_schema") or {}
         properties = parameters.get("properties") or {} if isinstance(parameters, dict) else {}

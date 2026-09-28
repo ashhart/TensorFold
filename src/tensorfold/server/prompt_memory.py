@@ -78,6 +78,7 @@ class PromptMemory:
         self.affordable: int | None = None
         self.carry, self._probe_base = 0, None
         self.heads, self.score_rows = attention_geometry(model)
+        self.workspace_per_token = int(getattr(model, "prefill_workspace_per_token", 0) or 0)
         self.profile: CacheMemory | None = None
         self.observed_work = 0
         self.workspace_profiled = False
@@ -132,7 +133,8 @@ class PromptMemory:
             return self.bootstrap
         # MLX's limit is this budget, so its eval waits on queued work before more old buffers than this pile up
         growth = self.profile.growth_bytes(tokens)
-        scores = 2 * self.score_rows * max(0, self.heads) * int(tokens) * 2
+        scores = (self.workspace_per_token * int(tokens) if self.workspace_per_token
+                  else 2 * self.score_rows * max(0, self.heads) * int(tokens) * 2)
         return max(self.bootstrap, self.observed_work) + growth + scores
 
     def projected(self, prompt: int, *, current_cache: Any = None, extra_bytes: int = 0) -> int:
@@ -203,7 +205,7 @@ class PromptMemory:
     def observe_cache(self, cache: Any, *, workspace: bool = True, rows: int | None = None) -> None:
         with self._memory_lock:
             measured = CacheMemory.from_cache(cache)
-            if measured.bytes_per_token and self.heads < 0:
+            if measured.bytes_per_token and self.heads < 0 and not self.workspace_per_token:
                 raise RequestError("Cannot size this checkpoint's attention workspace; its configuration must "
                                    "specify num_attention_heads before long prompts can be admitted.")
             if self.profile is None:

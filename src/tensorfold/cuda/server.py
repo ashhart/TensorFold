@@ -95,8 +95,7 @@ def _tool_name(tool: dict[str, Any]) -> str:
 
 
 def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int | None = None) -> tuple[str, list[dict[str, Any]] | None]:
-    """Qwen ``<tool_call><function=name><parameter=k>v</parameter></function></tool_call>``, GLM
-    ``<tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>`` or JSON bodies."""
+    """Qwen ``<function=name><parameter=k>v</parameter></function>``, GLM ``name<arg_key>..`` or JSON calls."""
 
     if not tools:
         return text, None
@@ -127,7 +126,7 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
                 name = m.group(1).strip()
                 args = {p.group(1).strip(): p.group(2) for p in _TOOL_PARAMETER_BLOCK_RE.finditer(m.group(2))}
             else:
-                glm = parse_glm_tool_call_block(block, tools)
+                glm = parse_glm_tool_call_block(block, tools, complete=max_calls is not None)
                 if glm is not None:
                     name, args = glm
         if not name or str(name).lower() not in known:

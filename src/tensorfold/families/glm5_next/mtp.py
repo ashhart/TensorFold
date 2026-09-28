@@ -1,16 +1,4 @@
-"""GLM-5.3-Flash's MTP head (``layers.<num_hidden_layers>`` in the checkpoint, DeepSeek-V3 style): drafts the
-token after next.
-
-At position i it reads the backbone's final-normed hidden h_i (the row the LM head reads) and the embedding of
-token i+1:
-
-    x = eh_proj([enorm(embed(t_{i+1})), hnorm(h_i)])
-    x = x + sparse attention(input_layernorm(x))        over the head's own cache (MLA + indexer)
-    x = x + MoE(post_attention_layernorm(x))            one stream: this layer has no hyper-connections
-    logits = lm_head(shared_head.norm(x))               the backbone's head
-
-Its output x feeds the next draft in place of h (drafts chain).
-"""
+"""GLM-5.3-Flash's MTP layer as draft head: eh_proj over the next token and the normed row, then MLA and MoE."""
 
 from __future__ import annotations
 
@@ -36,8 +24,7 @@ class GLMMTP:
 
     def __call__(self, model: GLM5, h: mx.array, tokens: mx.array, caches: list[MLACache], lengths: tuple[int, ...],
                  decode: bool) -> mx.array:
-        """Rows h [n, D] (final-normed hidden) with their next tokens [n], ``lengths`` rows for each stream's head
-        cache in ``caches``: the head's output rows [n, D] (pre-norm)."""
+        """Rows h [n, D] with their next tokens, ``lengths`` rows for each stream's head cache: output rows [n, D]."""
 
         e = mx.fast.rms_norm(model.embed_tokens(tokens), self.enorm, self.eps)
         hh = mx.fast.rms_norm(h, self.hnorm, self.eps)

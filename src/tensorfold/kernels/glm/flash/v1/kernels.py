@@ -1,11 +1,4 @@
-"""Metal row kernels for GLM-5.3-Flash's decode path: each row of a window gets the bits its one-row call gives.
-
-qmv_rows (a 4-bit, group-64 matvec: MLX's qmv_fast loop a row, weights read once for the window), expert_group /
-expert_qmv (a window's routed experts, each distinct expert read once), qmv_quad_rows (KDA's 64- and 128-input
-projections), matmul_rows (MLX's one-row gemv / gemv_t for unquantized matrices) and hc_split (sinkhorn and collapse,
-from mlx-vlm: see THIRD_PARTY_NOTICES.md). MLX's own kernels sum a row differently once two or more rows share a
-call, so a verify window can't use them. Without Metal each falls back to one MLX call a row.
-"""
+"""Metal row kernels for GLM-5.3-Flash's decode path: every row of a window gets its one-row call's bits."""
 
 from __future__ import annotations
 
@@ -14,9 +7,7 @@ from typing import Any
 
 import mlx.core as mx
 
-# MLX's one-row 4-bit quantized matvec, per lane of a simdgroup (from kernels/qwen/flash_next/v1/kernels.py, where
-# it is reproduced bit for bit): a lane takes 16 inputs a 512-value block, pre-scaled so the nibbles need no
-# shifts, and their bf16 running sum for the bias term.
+# MLX's one-row 4-bit matvec a simdgroup lane (as Flash Next's qmv_rows, bit for bit), 16 inputs a 512 block
 _HEADER = r"""
 inline float load16(const device bfloat* x, thread float* xt) {
   float sum = 0.0f;
@@ -38,9 +29,7 @@ inline float qdot16(const device uint8_t* w, const thread float* xt, float scale
 """
 
 _QMV_ROWS = r"""
-  // Threadgroup b: R simdgroups, simdgroup r computes output rows RPS b .. RPS b + RPS - 1 for input row r with
-  // MLX's one-row qmv_fast loop for 4-bit weights in groups of 64 (a group spans 4 lanes, a 512-value block
-  // 8 groups); the R simdgroups read the same weight rows, so memory serves them once.
+  // Threadgroup b: simdgroup r runs MLX's one-row qmv_fast on input row r; the rows share the weight reads
   const uint lane = thread_index_in_simdgroup;
   const int r = int(simdgroup_index_in_threadgroup);
   const int row0 = int(threadgroup_position_in_grid.y) * RPS;
@@ -65,8 +54,7 @@ _QMV_ROWS = r"""
   }
 """
 
-# Sinkhorn over the comb matrix and the pre-weighted collapse of the HC streams, one threadgroup of 256 threads
-# per row: from mlx-vlm's models/deepseek_v4/hyper_connection.py (Copyright (c) 2026 Apple Inc., MIT).
+# sinkhorn and the pre-weighted collapse, 256 threads a row (mlx-vlm's DeepSeek-V4 hyper-connection, MIT)
 _HC_SPLIT = r"""
   uint tid  = thread_position_in_threadgroup.x;
   uint row  = threadgroup_position_in_grid.x;
@@ -133,13 +121,9 @@ _HC_SPLIT = r"""
   }
 """
 
-# The routed experts of a window, grouped by expert so each expert's weights are read once for every row that
-# picked it (Flash Next's grouping from kernels/qwen/flash_next/v1, rewritten for GLM's sigmoid router: the picks
-# come in as ids, the weights stay with the caller).
+# a window's routed experts grouped by expert, so each expert's weights are read once for the rows picking it
 _EXPERT_GROUP = r"""
-  // One threadgroup, a thread per expert (NE rounded up to whole simdgroups). Thread e lists the (row, slot) picks
-  // of expert e in row order as row * TOPK + slot; the distinct experts get places u in increasing id order:
-  // UIDS[u], UMEM[u][j] (-1 past the last member), UCOUNT[0] = how many.
+  // Thread e lists expert e's picks (row * TOPK + slot); distinct experts get places in id order
   const int e = int(thread_position_in_threadgroup.x);
   const uint lane = thread_index_in_simdgroup;
   const uint g = simdgroup_index_in_threadgroup;
@@ -165,10 +149,7 @@ _EXPERT_GROUP = r"""
 """
 
 _EXPERT_QMV = r"""
-  // Threadgroup (b, u): simdgroup m takes the m-th pick (row r, slot k) of distinct expert u and computes output
-  // rows RPS b .. RPS b + RPS - 1 of that expert for its input (row r of X, or pick r TOPK + k with PER_PICK) with
-  // MLX's one-row qmv_fast loop, as mx.gather_qmm runs one row (affine_gather_qmv_fast): each pick keeps those
-  // bits, and the picks of one expert read its weight rows once. OUT[pick][n].
+  // Simdgroup m runs pick m of expert u with the one-row gather qmv_fast loop; an expert's picks share reads
   const uint lane = thread_index_in_simdgroup;
   const int m = int(simdgroup_index_in_threadgroup);
   const int u = int(threadgroup_position_in_grid.z);
@@ -198,9 +179,7 @@ _EXPERT_QMV = r"""
   }
 """
 
-# MLX's one-row 4-bit matvec for short inputs (qmv_quad_impl, quantized.h, MIT, Apple Inc.): a quad of 4 lanes
-# per output row, 8 rows a quad, one simdgroup a threadgroup; the window's rows in grid x, as MLX lays out rows
-# when it uses this kernel (it switches kernels past 8 rows, so a 16-row window cannot go through it).
+# MLX's one-row qmv_quad (a quad of lanes an output row) for short inputs; MLX switches kernels past 8 rows
 _QMV_QUAD_ROWS = r"""
   constexpr int QUADS = 8;
   constexpr int PER = K / 4;                       // inputs a lane
@@ -240,9 +219,7 @@ _QMV_QUAD_ROWS = r"""
   }
 """
 
-# MLX's unquantized one-row matrix-vector kernels (mlx/backend/metal/kernels/gemv.h, MIT, Apple Inc.), each row of
-# a window run with the one-row kernel's tiling and sums (the rows in grid z): x @ M for a row-major M [K, N]
-# (GEMVTKernel, "gemv_t") and x @ M.T (GEMVKernel, "gemv"). MLX's own matmul of 2+ rows is a different kernel.
+# MLX's one-row gemv / gemv_t, each window row with the one-row tiling and sums (its 2+ row matmul differs)
 _GEMV_T_ROWS = r"""
   constexpr int blockM = BM * SM * TM;
   constexpr int blockN = BN * SN * TN;
@@ -408,8 +385,7 @@ def qmv_quad_rows_fits(weights: Any, rows: int) -> bool:
 
 
 def qmv_quad_rows(x: mx.array, weights: Any) -> mx.array:
-    """x [R, K] (bf16, K 64 or 128) through 4-bit, group-64 weights: each row the bits of MLX's one-row
-    quantized matmul (qmv_quad). Without Metal: one MLX call a row."""
+    """x [R, K] (K 64 or 128) through 4-bit group-64 weights with MLX's one-row qmv_quad bits; no Metal: row by row."""
 
     rows, dims = x.shape
     if not metal():
@@ -423,9 +399,7 @@ def qmv_quad_rows(x: mx.array, weights: Any) -> mx.array:
 
 
 def expert_group(idx: mx.array, experts: int) -> tuple[mx.array, mx.array, mx.array] | None:
-    """Picks idx [R, k] (uint32 expert ids, R <= MAX_ROWS) -> the distinct experts in increasing id order (ids
-    [R k], member picks [R k, MAX_ROWS] as row * k + slot, -1 past the last) and their count [1]. None without
-    Metal (``expert_qmv`` then runs the picks row by row)."""
+    """A window's picks [R, k] grouped by distinct expert in id order (ids, member picks, count); None without Metal."""
 
     if not metal():
         return None
@@ -446,8 +420,7 @@ def expert_qmv_fits(weights: Any, rows: int) -> bool:
 
 
 def _gather_one_row(x: mx.array, ids: mx.array, weights: Any) -> mx.array:
-    """One row's picks the way the one-row decode path runs them: x [k or 1, 1, K] (per pick or shared), ids [1, k]
-    -> [1, k, N]."""
+    """One row's picks as the one-row decode path runs them: x [k or 1, 1, K], ids [1, k] -> [1, k, N]."""
 
     return mx.gather_qmm(x[None], weights.weight, weights.scales, weights.biases, rhs_indices=ids, transpose=True,
                          group_size=weights.group, bits=weights.bits).squeeze(-2)
@@ -455,9 +428,7 @@ def _gather_one_row(x: mx.array, ids: mx.array, weights: Any) -> mx.array:
 
 def expert_qmv(x: mx.array, idx: mx.array, group: tuple[mx.array, mx.array, mx.array] | None, weights: Any, *,
                per_pick: bool, rows_per_simdgroup: int = 4) -> mx.array:
-    """Every pick (row r, slot k) of a window through its expert's 4-bit, group-64 matrix [E, N, K]: x [R, K]
-    (per_pick False: row r's input for all its slots) or [R, k, K] (per_pick: one input a pick), idx [R, k] ->
-    [R, k, N] bf16, each pick the bits mx.gather_qmm gives it in a one-row call (``group`` from expert_group)."""
+    """Every pick of a window through its expert, each with mx.gather_qmm's one-row bits: [R, k, N] bf16."""
 
     rows, top = idx.shape
     n, dims = int(weights.weight.shape[-2]), int(x.shape[-1])
@@ -480,9 +451,7 @@ def expert_qmv(x: mx.array, idx: mx.array, group: tuple[mx.array, mx.array, mx.a
 
 
 def gemv_params(transposed: bool, in_len: int, out_len: int) -> tuple[int, int, int, int, int, int]:
-    """The (BM, BN, SM, SN, TM, TN) tiling MLX 0.32's matmul picks for one row (mlx/backend/metal/matmul.cpp):
-    ``transposed``: x @ M with M [K, N] row-major (gemv_t), else x @ M.T with M [N, K] (gemv). The tests check it
-    bit for bit at GLM-5.3-Flash's shapes."""
+    """The (BM, BN, SM, SN, TM, TN) tiling MLX 0.32's matmul picks for one row (gemv_t when ``transposed``)."""
 
     tm, tn, sm, sn, bm, bn = 4, 4, 1, 32, 1, 1
     if transposed:
@@ -501,8 +470,7 @@ def gemv_params(transposed: bool, in_len: int, out_len: int) -> tuple[int, int, 
 
 
 def matmul_rows(x: mx.array, m: mx.array, *, transposed: bool, params: tuple[int, ...] | None = None) -> mx.array:
-    """x [R, K] @ m (transposed: m [K, N] row-major) or @ m.T (m [N, K]), fp32 or bf16 (x cast to m's type), with
-    MLX's one-row matmul bits for every row: [R, N]. Without Metal: one MLX matmul a row."""
+    """x [R, K] @ m (or m.T) with MLX's one-row matmul bits for every row; no Metal: one MLX matmul a row."""
 
     x = x.astype(m.dtype)
     rows, in_len = x.shape
@@ -556,8 +524,7 @@ def hc_split(x: mx.array, mixes: mx.array, scale: mx.array, base: mx.array, *, h
 
 def gated_delta(q: mx.array, k: mx.array, v: mx.array, g: mx.array, beta: mx.array,
                 state: mx.array) -> tuple[mx.array, mx.array]:
-    """The KDA recurrence over q, k [1, T, H, Dk], v [1, T, H, Dv], per-channel decays g [1, T, H, Dk] (fp32) and
-    beta [1, T, H], from state [1, H, Dv, Dk] (fp32): mlx-lm's kernel, time steps in order in one thread."""
+    """The KDA recurrence from an fp32 state: mlx-lm's kernel, the time steps in order in one thread."""
 
     from mlx_lm.models import gated_delta as gd
 

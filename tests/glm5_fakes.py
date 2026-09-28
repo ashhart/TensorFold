@@ -27,9 +27,14 @@ TEXT = {
 }
 
 
+# per-module formats for the next checkpoint written: {full module name: {"bits": b, "group_size": g}}
+OVERRIDES: dict = {}
+
+
 def _q(tensors: dict, name: str, outs: int, ins: int, scale: float = 0.08) -> None:
     w = scale * mx.random.normal((outs, ins))
-    q, s, b = mx.quantize(w.astype(mx.bfloat16), group_size=64, bits=4)
+    fmt = OVERRIDES.get(name) or {}
+    q, s, b = mx.quantize(w.astype(mx.bfloat16), group_size=int(fmt.get("group_size", 64)), bits=int(fmt.get("bits", 4)))
     tensors[f"{name}.weight"], tensors[f"{name}.scales"], tensors[f"{name}.biases"] = q, s, b
 
 
@@ -94,7 +99,12 @@ def _mlp(t: dict, p: str, sparse: bool) -> None:
     _q(t, f"{p}.shared_experts.down_proj", D, width)
 
 
-def write_checkpoint(folder: Path, seed: int = 0, *, mtp: bool = True) -> Path:
+def write_checkpoint(folder: Path, seed: int = 0, *, mtp: bool = True, overrides: dict | None = None,
+                     stated: dict | None = None) -> Path:
+    """``overrides``: modules quantized in another format, stated in the config; ``stated``: config entries only."""
+
+    OVERRIDES.clear()
+    OVERRIDES.update(overrides or {})
     mx.random.seed(seed)
     c = TEXT
     t: dict = {}
@@ -133,6 +143,8 @@ def write_checkpoint(folder: Path, seed: int = 0, *, mtp: bool = True) -> Path:
         mx.save_safetensors(str(folder / shard), {k: t[k] for k in keys})
         weight_map.update({k: shard for k in keys})
     (folder / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
-    config = {"model_type": "glm5_next", "text_config": TEXT, "quantization": {"bits": 4, "group_size": 64}}
+    config = {"model_type": "glm5_next", "text_config": TEXT,
+              "quantization": {"bits": 4, "group_size": 64, **(overrides or {}), **(stated or {})}}
+    OVERRIDES.clear()
     (folder / "config.json").write_text(json.dumps(config))
     return folder

@@ -13,10 +13,7 @@ ROUTER_TG = 1024
 SPLIT_SHARED = 1         # the shared expert in kernels of its own, beside the router (moe_rows)
 
 _MOE_ROUTE = r"""
-  // One threadgroup (MAXR simdgroups). Simdgroup r: row r's top TOPK experts by sigmoid(logit) + bias, largest
-  // first, lowest id among ties (mx.argpartition's order here, checked), and their weights: scores / their sum
-  // (in pick order) x SCALE. Then thread e lists the picks (r TOPK + k) of expert e, and the distinct experts get
-  // places in increasing id order (expert_group's layout).
+  // Simdgroup r: row r's top TOPK by sigmoid + bias (argpartition's tie order) and weights; experts grouped by id
   const uint lane = thread_index_in_simdgroup;
   const uint g = simdgroup_index_in_threadgroup;
   const int e = int(thread_position_in_threadgroup.x);
@@ -81,11 +78,7 @@ _MOE_ROUTE = r"""
 """
 
 _ROUTER = r"""
-  // MLX's one-row gemv_t for x [RR, K] fp32 @ M [K, NE] (tiling BM 1, BN 2, SM 8, SN 4, TM 4, TN 4): thread (column
-  // quad q, thrM m) sums rows 4 m + 32 i + tm for i in order, then the shuffle-down reduction over m. The matrix
-  // comes repacked per thread (RP[q][m][i][tm][tn], its stored bf16 values: exact in fp32), so a thread streams its
-  // own values, U iterations' loads issued before their use; the window's rows share the reads (each row's sums in
-  // the same order).
+  // MLX's one-row gemv_t (BM 1, BN 2, SM 8, SN 4, TM 4, TN 4) over the repacked bf16 matrix, rows sharing reads
   const uint lane = thread_index_in_simdgroup;
   const int thrM = int(lane) / 4, thrN = int(lane) % 4;
   const int q = int(threadgroup_position_in_grid.x) * 4 + thrN;       // column quad: columns 4 q .. 4 q + 3
@@ -125,8 +118,7 @@ _ROUTER = r"""
 """
 
 _ROUTER_TG = r"""
-  // _ROUTER's arithmetic (simdgroup 0 computes, exactly as there) with the other simdgroups fetching its weights
-  // into threadgroup memory, C iterations a chunk, double-buffered.
+  // _ROUTER's arithmetic in simdgroup 0, the others double-buffering its weights in threadgroup memory
   const uint t = thread_position_in_threadgroup.x;
   const uint lane = thread_index_in_simdgroup, sg = simdgroup_index_in_threadgroup;
   const int thrM = int(lane) / 4, thrN = int(lane) % 4;
@@ -193,14 +185,10 @@ _ROUTER_TG = r"""
 """
 
 _MOE_GATEUP = r"""
-  // Threadgroup (b, u): simdgroup m takes the m-th pick of distinct expert u (u == MAXU: the shared expert, every
-  // row, slot TOPK) and computes gate and up rows RPS b .. RPS b + RPS - 1 with the one-row qmv_fast loop (the bits
-  // mx.gather_qmm and the shared expert's projection give them), then SwiGLU clamped at LIMIT as the row-by-row
-  // path's bf16 ops do it. ACT[row][slot][n].
+  // Simdgroup m: gate and up for pick m of expert u (MAXU: the shared expert) by the one-row loop, then SwiGLU
   const uint lane = thread_index_in_simdgroup;
   const int m = int(simdgroup_index_in_threadgroup);
-  // PART 0: routed and shared (ACT [R][TOPK + 1][N], the shared expert in slot TOPK); PART 1: the shared expert
-  // alone (ACT [R][1][N]); PART 2: the routed experts alone (ACT [R][TOPK][N]). The same arithmetic in each.
+  // PART 0: routed and shared; 1: the shared expert alone; 2: the routed experts alone (the same arithmetic)
   const int u = PART == 1 ? MAXU : int(threadgroup_position_in_grid.z);
   const int R = int(X_shape[0]);
   constexpr int SLOTS = PART == 0 ? TOPK + 1 : (PART == 1 ? 1 : TOPK);
@@ -248,8 +236,7 @@ _MOE_GATEUP = r"""
 """
 
 _MOE_DOWN = r"""
-  // Threadgroup (b, u): simdgroup m takes the m-th pick of distinct expert u (MAXU: the shared expert) and computes
-  // down rows RPS b .. RPS b + RPS - 1 of its activation with the one-row qmv_fast loop. Y[row][slot][d].
+  // Simdgroup m: down rows for pick m of expert u (MAXU: the shared expert) by the one-row qmv_fast loop
   const uint lane = thread_index_in_simdgroup;
   const int m = int(simdgroup_index_in_threadgroup);
   const int u = PART == 1 ? MAXU : int(threadgroup_position_in_grid.z);
@@ -318,12 +305,7 @@ def moe_fits(moe: Any) -> bool:
 
 
 def moe_rows(moe: Any, x: mx.array, *, rps: int = 4) -> mx.array:
-    """The MoE block (routed experts + shared expert) on a window's rows x [R, D]: the router's one-row matmul,
-    route + group, gate/up + SwiGLU, down, combine. Every row gets the bits the row-by-row block gives it.
-
-    SPLIT_SHARED: the shared expert's gate/up and down run as kernels of their own that read only x, so the GPU
-    runs them beside the router and the route kernel (both latency-bound) instead of after them. Same arithmetic,
-    same bits."""
+    """The MoE block on a window's rows with the row-by-row block's bits; SPLIT_SHARED runs the shared expert apart."""
 
     rows, dims = x.shape
     cfg = moe.cfg
@@ -401,8 +383,7 @@ def router_fits(moe: Any) -> bool:
 
 
 def router_rows(x: mx.array, moe: Any) -> mx.array:
-    """Router logits x [R, D] fp32 @ W^T with MLX's one-row matmul bits (its gemv_t tiling for 288 experts),
-    reading the stored bf16 weights once for the window."""
+    """Router logits x @ W^T in fp32 with MLX's one-row gemv_t bits, the stored bf16 weights read once a window."""
 
     if not router_fits(moe):
         return K.matmul_rows(x, moe.router, transposed=True)

@@ -1,21 +1,4 @@
-"""GLM-5.3-Flash (model_type ``glm5_next``): an MLX engine on one Apple Silicon Mac, and a CUDA engine tensor
-parallel over two DGX Sparks.
-
-45 decoder layers over a hidden size of 4,096: 34 of Kimi delta attention and 11 of DeepSeek sparse attention
-(MLA with an indexer), 288 routed experts (top 8) plus a shared expert, four residual streams mixed by
-hyper-connections, a 154,880-token vocabulary and an MTP layer. The MLX 4-bit checkpoint is 182 GB and Mia's
-EXL3 one (routed experts in ExLlamaV3's 4-bit trellis format, the rest in BF16, ``cuda/exl3.py``) 164 GB.
-
-On a Mac (``load``): ``model`` and the layers beside it (``kda``, ``mla``, ``mlp``) are TensorFold's forward pass,
-with a decode path whose rows each get one-row bits, read from the checkpoint by ``weights``;
-``tensorfold.kernels.glm.flash.v1`` holds its Metal kernels; ``mtp`` is the checkpoint's MTP layer; ``runtime`` is
-what the lane engine's family rounds serve (``engine.lane_family``: exact MTP drafting, concurrent requests in shared
-rounds, both behind load-time row checks). It needs a Mac with 256 GB or more and reads the MLX 4-bit checkpoint only.
-
-On NVIDIA GPUs (``cuda_engine``): each Spark holds half of every layer (``cuda/``). Drafts come from the
-checkpoint's MTP head and, when it has been pulled on both machines, from the DFlash2 draft model.
-Recipe and measurements for both: docs/recipes/glm-5.3-flash.md.
-"""
+"""GLM-5.3-Flash (model_type ``glm5_next``): an MLX engine on a 256 GB Mac, a CUDA engine over two DGX Sparks."""
 
 from __future__ import annotations
 
@@ -25,25 +8,21 @@ from typing import Any
 MODEL_TYPES = ("glm5_next",)
 TITLE = "GLM-5.3-Flash"
 LANES = True
-# 4-bit weights in groups of 64 (what the Metal and CUDA kernels read), with the checkpoint's MTP layer kept;
-# the EXL3 checkpoint is the CUDA engine's alone
+# 4-bit weights in groups of 64 with the MTP layer kept; the EXL3 checkpoint is the CUDA engine's alone
 MODELS = ("Vontra/GLM-5.3-Flash-MLX-4bit-MTP", "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw")
 DRAFTER = "incoai/GLM-5.3-Flash-DFlash2"   # the CUDA engine's optional draft model; the Mac engine drafts with MTP
 KERNEL_PACKAGE = "tensorfold.kernels.glm.flash.v1"
 KERNEL_VERSION = "v1"
-# the storage formats each engine reads: the Mac engine MLX affine 4-bit; the CUDA engine that, and EXL3 routed
-# experts with BF16 elsewhere
+# the storage formats each engine reads: MLX affine on a Mac; that or EXL3 routed experts on CUDA
 QUANT_METHODS = {"mlx": ("mlx",), "cuda": ("mlx", "exl3")}
 # the EXL3 variant the CUDA kernels read (4-bit trellis, the "mcg" codebook, routed experts only)
 EXL3_VARIANT = {"bits": 4, "codebook": "mcg", "scope": "glm53_routed_experts_only"}
-# MLX command buffers: GLM's decode step is about 1,200 kernels a token (set before MLX starts, as for Flash Next).
-# MLX_ENABLE_TF32=0: M5-generation GPUs otherwise round fp32 matmuls to TF32, and the row kernels repeat fp32.
+# MLX command buffers sized for ~1,200 kernels a token; no TF32, as the row kernels repeat MLX's fp32 matmuls
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000", "MLX_ENABLE_TF32": "0"}
 
 
 def check(model_dir: str | Path) -> None:
-    """The Mac engine reads MLX affine 4-bit weights in groups of 64; the CUDA engine those, or Mia's EXL3 layout
-    (4-bit mcg trellis routed experts, BF16 elsewhere), and runs on two GPUs."""
+    """Refuse what neither engine reads: MLX affine weights on a Mac; those or Mia's EXL3 layout on two GPUs."""
 
     import sys
 
@@ -66,7 +45,13 @@ def check(model_dir: str | Path) -> None:
                          f"CUDA, EXL3 ({MODELS[1]}); this checkpoint has {describe_quantization(config)}. "
                          f"{OWN_MODEL_HELP}")
     if sys.platform == "darwin":
+        from tensorfold.families.glm5_next.config import quant_formats, unreadable
+
         _require_mlx((0, 32, 2))
+        bad = sorted(name for name, fmt in quant_formats(config)[1].items() if unreadable(fmt))
+        if bad:
+            raise ValueError(f"GLM-5.3-Flash's Mac engine reads MLX affine weights of 2 to 8 bits in groups of 32, 64 or "
+                             f"128; this checkpoint stores {len(bad)} module(s) otherwise, {bad[0]} first. {OWN_MODEL_HELP}")
         if (method != "exl3" and (Path(model_dir) / "model.safetensors.index.json").is_file()
                 and not has_mtp(model_dir)):
             print(f"[tensorfold] this checkpoint has no MTP layer: decoding without MTP drafts ({MODELS[0]} has "
@@ -77,8 +62,7 @@ def check(model_dir: str | Path) -> None:
 
 
 def has_mtp(model_dir: str | Path) -> bool:
-    """Whether the checkpoint kept the MTP layer (``layers.<num_hidden_layers>.eh_proj``); reads JSON only, so the
-    CLI's check runs before MLX starts."""
+    """Whether the checkpoint kept the MTP layer; JSON only, so the CLI's check runs before MLX starts."""
 
     import json
 
@@ -113,8 +97,7 @@ def _require_mlx(least: tuple[int, ...]) -> None:
 
 
 def load(model_dir: Path, *, mtp_drafts: int | None = None, **_: Any) -> tuple[Any, Any]:
-    """The MLX engine. ``mtp_drafts``: the most MTP drafts a round (default ``runtime.load``; 0: none). The lane
-    engine picks each round's depth from the stream's recent acceptance and the measured window costs."""
+    """The MLX engine; ``mtp_drafts`` caps the MTP drafts a round (0: none), each round's depth set by costs."""
 
     import mlx.core as mx
 
@@ -137,8 +120,7 @@ def engine_settings(model: Any) -> dict[str, Any]:
 
 
 def kernel_version(model: Any) -> str:
-    """Names the kernels that computed a prefix snapshot: the MLX engine's and the kernel package's sources, and the
-    MLX version (MLX's own kernels compute the prefill)."""
+    """Names the kernels behind a prefix snapshot: this engine's and its kernels' sources, and MLX's version."""
 
     import hashlib
     import importlib

@@ -99,6 +99,10 @@ def _kv_bytes(cache: list[Any]) -> tuple[float, float]:
 
     kv = spare = 0.0
     for item in cache:
+        growth = getattr(item, "memory_growth", None)
+        if callable(growth):                      # a cache that states its own growth (no spare buffer)
+            kv += growth()[1]
+            continue
         keys, values = getattr(item, "keys", None), getattr(item, "values", None)
         if getattr(keys, "ndim", 0) == 4 and getattr(values, "ndim", 0) == 4 and int(keys.shape[2]):
             each = (keys.nbytes + values.nbytes) / int(keys.shape[2])

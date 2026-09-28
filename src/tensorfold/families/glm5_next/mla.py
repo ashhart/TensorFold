@@ -14,6 +14,10 @@ from tensorfold.kernels.glm.flash.v1 import kernels as K
 from tensorfold.kernels.glm.flash.v1 import sparse_attention as SA
 
 
+# query rows a prefill attention call scores at once against every key so far
+PREFILL_QUERIES = 512
+
+
 class MLA:
     """DeepSeek sparse attention, NoPE MLA over a 512-wide latent, with the pooled-block indexer."""
 
@@ -30,9 +34,10 @@ class MLA:
         def heads(a: mx.array, lo: int, hi: int) -> mx.array:
             return mx.contiguous(a.reshape(self.heads, per, -1)[:, lo:hi])
 
-        self.wk = Q(heads(kvb.weight, 0, self.nope), heads(kvb.scales, 0, self.nope), heads(kvb.biases, 0, self.nope))
+        self.wk = Q(heads(kvb.weight, 0, self.nope), heads(kvb.scales, 0, self.nope), heads(kvb.biases, 0, self.nope),
+                    bits=kvb.bits, group=kvb.group)
         self.wv = Q(heads(kvb.weight, self.nope, per), heads(kvb.scales, self.nope, per),
-                    heads(kvb.biases, self.nope, per))
+                    heads(kvb.biases, self.nope, per), bits=kvb.bits, group=kvb.group)
         # indexer
         self.iq, self.ik_proj, self.iw = w["indexer.wq_b"], w["indexer.wk"], w["indexer.weights_proj"]
         self.ik_norm_w, self.ik_norm_b = w["indexer.k_norm.weight"], w["indexer.k_norm.bias"]
@@ -40,8 +45,7 @@ class MLA:
         self.igate = mx.contiguous(w["indexer.index_kpool_compress_gate"].T)  # [D, 128]
         self.i_heads, self.i_dim = cfg.index_n_heads, cfg.index_head_dim
         self.i_scale = (self.i_heads ** -0.5) * (self.i_dim ** -0.5)
-        # projections that read the same input as one matrix each (a one-row matmul gives every output row the
-        # same bits stacked or not, checked); the per-projection names stay as row ranges of the stacked matrices
+        # projections of one input stacked (a one-row matmul's bits don't change); the names stay as row ranges
         self.x_proj = Q.stack([self.q_a, self.kv_a, self.ik_proj, self.iw])
         self.qr_proj = Q.stack([self.q_b, self.iq])
         at = [0]
@@ -99,8 +103,7 @@ class MLA:
         return ids
 
     def __call__(self, x: mx.array, caches: list[MLACache], lengths: tuple[int, ...], decode: bool) -> mx.array:
-        """Rows x [R, D] of consecutive streams (``lengths`` rows each, stream i advancing ``caches[i]``): the
-        projections take every row at once, each stream's rows attend over its own cache."""
+        """Consecutive streams' rows: projections on all rows at once, each stream's rows over its own cache."""
 
         cfg = self.cfg
         rows = int(x.shape[0])
@@ -158,8 +161,7 @@ class MLA:
         return project(out, self.o_proj, rows_exact=decode)
 
     def _attend_rows(self, ql: mx.array, iq: mx.array, iw: mx.array, cache: MLACache, start: int) -> mx.array:
-        """One stream's rows (latent queries ql [n, H, 1, rank], from position ``start``) over its cache:
-        [n, H, 1, rank]. The indexer's choice is made as the stream's own call makes it."""
+        """One stream's rows (latent queries from ``start``) over its cache, keys chosen as its own call chooses."""
 
         cfg = self.cfg
         rows = int(ql.shape[0])
@@ -181,10 +183,7 @@ class MLA:
         return mx.concatenate(parts) if rows > 1 else parts[0]
 
     def _sparse_indices(self, iq: mx.array, iw: mx.array, cache: MLACache, positions: list[int]) -> mx.array:
-        """The key ids rows at ``positions`` (each past ``index_topk`` keys) read, as the sparse attention kernel
-        takes them: [m, index_topk + kpool - 1] int32, the chosen blocks' keys then the row's unfinished tail, -1
-        past its end. The choice is ``selected``'s, made as ``_choices`` makes it (rows with the same number of
-        complete blocks scored and ranked together; each row keeps its one-row bits there)."""
+        """Key ids of rows past ``index_topk`` for the sparse kernel (-1 padded), chosen as ``_choices`` chooses."""
 
         cfg = self.cfg
         kp = cfg.index_kpool
@@ -211,9 +210,7 @@ class MLA:
         return mx.concatenate(out) if len(out) > 1 else out[0]
 
     def _choices(self, iq: mx.array, iw: mx.array, cache: MLACache, start: int, skip: Any = ()) -> list[Any]:
-        """The key ids each row of a window reads (None: all its keys), ``selected``'s choice for every row: rows
-        with the same number of complete blocks are scored and ranked together, with the rows as the matmul's and
-        the partition's batch (each row keeps its bits there; the load-time check covers it)."""
+        """Each window row's key ids (None: all), rows sharing a block count ranked together, each keeping its bits."""
 
         cfg = self.cfg
         kp = cfg.index_kpool
@@ -239,8 +236,7 @@ class MLA:
 
     def _attend(self, ql: mx.array, iq: mx.array, iw: mx.array, cache: MLACache, position: int,
                 sel: Any = ...) -> mx.array:
-        """One query at ``position`` (latent queries ql [H, 1, rank]) over its own keys: [1, H, 1, rank]. ``sel``:
-        its key ids if already chosen (``_choices``; None: all its keys)."""
+        """One query at ``position`` over its keys (``sel``: ids chosen already, None for all): [1, H, 1, rank]."""
 
         cfg = self.cfg
         n = position + 1
@@ -266,7 +262,7 @@ class MLA:
         return self.unabsorb(out[0]).reshape(1, -1)                      # [1, H v]
 
     def _prefill(self, q: mx.array, iq: mx.array, iw: mx.array, cache: MLACache, start: int,
-                 chunk: int = 512) -> mx.array:
+                 chunk: int = PREFILL_QUERIES) -> mx.array:
         cfg = self.cfg
         rows = int(q.shape[0])
         end = start + rows

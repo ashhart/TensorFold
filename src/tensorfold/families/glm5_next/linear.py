@@ -7,24 +7,21 @@ from typing import Any
 import mlx.core as mx
 import mlx.nn as nn
 
+from tensorfold.families.glm5_next.config import BITS, GROUPS
 from tensorfold.kernels.glm.flash.v1 import kernels as K
 
 
 class Q:
-    """A quantized linear's weights (MLX affine layout: [out, in * bits / 32] uint32, scales/biases [out, groups])."""
+    """A quantized linear in MLX's affine layout at its stated format (shapes can't tell 4-bit g32 from 2-bit g64)."""
 
-    def __init__(self, weight: mx.array, scales: mx.array, biases: mx.array) -> None:
+    def __init__(self, weight: mx.array, scales: mx.array, biases: mx.array, *, bits: int, group: int) -> None:
+        packed, groups = int(weight.shape[-1]), int(scales.shape[-1])
+        if (bits not in BITS or group not in GROUPS or packed * 32 != groups * group * bits
+                or tuple(scales.shape) != tuple(biases.shape)):
+            raise ValueError(f"{bits}-bit weights in groups of {group} do not fit a {tuple(weight.shape)} matrix with "
+                             f"{tuple(scales.shape)} scales")
         self.weight, self.scales, self.biases = weight, scales, biases
-        groups = int(scales.shape[-1])
-        packed = int(weight.shape[-1])
-        # in_dims = groups * group; bits = packed * 32 / in_dims, with group in {32, 64, 128}
-        for group in (64, 32, 128):
-            ins = groups * group
-            if (packed * 32) % ins == 0 and (packed * 32) // ins in (2, 3, 4, 5, 6, 8):
-                self.group, self.bits, self.ins = group, (packed * 32) // ins, ins
-                break
-        else:
-            raise ValueError(f"cannot infer the quantization of a {weight.shape} weight with {scales.shape} scales")
+        self.bits, self.group, self.ins = int(bits), int(group), groups * group
 
     @property
     def outs(self) -> int:
@@ -39,22 +36,31 @@ class Q:
 
     @classmethod
     def stack(cls, parts: list["Q"]) -> "Q":
-        """Projections that read the same input as one matrix (rows concatenated)."""
+        """Projections that read the same input as one matrix (rows concatenated), so of one format."""
 
+        bits, group = one_format(parts)
         return cls(mx.concatenate([p.weight for p in parts]), mx.concatenate([p.scales for p in parts]),
-                   mx.concatenate([p.biases for p in parts]))
+                   mx.concatenate([p.biases for p in parts]), bits=bits, group=group)
+
+
+def one_format(parts: list[Q]) -> tuple[int, int]:
+    """The (bits, group) of linears stacked into one matrix, which must share it."""
+
+    formats = sorted({(p.bits, p.group) for p in parts})
+    if len(formats) != 1:
+        raise ValueError(f"projections that read the same input are stacked into one matrix, so they need one format; "
+                         f"these are stored as {', '.join(f'{b}-bit in groups of {g}' for b, g in formats)}")
+    return formats[0]
 
 
 def _rows(q: Q, lo: int, hi: int) -> Q:
     """Output rows lo .. hi - 1 of a quantized linear (views of its arrays)."""
 
-    return Q(q.weight[lo:hi], q.scales[lo:hi], q.biases[lo:hi])
+    return Q(q.weight[lo:hi], q.scales[lo:hi], q.biases[lo:hi], bits=q.bits, group=q.group)
 
 
 def project(x: mx.array, q: Q, *, rows_exact: bool) -> mx.array:
-    """x [R, K] through a quantized linear. One row: MLX's quantized matmul. Several rows on the decode path: the
-    rows share the weight reads through ``kernels.qmv_rows`` (MLX's one-row bits) where the weights fit it, else
-    one MLX call per row."""
+    """x [R, K] through a linear: one row by MLX's matmul, a decode window by ``qmv_rows`` or row by row."""
 
     rows = int(x.shape[0])
     if rows == 1 or not rows_exact:

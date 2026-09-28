@@ -1,5 +1,4 @@
-"""GLM-5.3-Flash family on a tiny random checkpoint (CPU unless noted): loading, the two forward paths, exact
-multi-row decoding, rollback, MTP drafting through the lane engine's family rounds."""
+"""The GLM-5.3-Flash family on a tiny checkpoint: loading, both paths, exact windows, rollback, drafts, streams."""
 
 from __future__ import annotations
 
@@ -50,8 +49,7 @@ def test_family_is_detected_and_checked(checkpoint):
 
 
 def test_check_reads_json_only_and_names_the_mlx_it_needs(tmp_path, monkeypatch):
-    """The CLI runs ``check`` before it sets the family's MLX environment, so it must not start MLX; an MLX older than
-    0.32.2 is refused with the command that fixes it."""
+    """``check`` starts no MLX (the CLI runs it before the family's MLX environment) and refuses an old MLX."""
 
     import json
     import subprocess
@@ -180,8 +178,7 @@ def test_mtp_drafts_change_speed_only(checkpoint):
 
 
 def test_lane_engine_resumes_from_a_grid_checkpoint(checkpoint, tmp_path):
-    """A checkpoint on the prefill grid, kept in memory or written to disk and read back, resumes exactly like a fresh
-    prefill of the whole prompt (the 2,048 grid scaled to the tiny prompt)."""
+    """A grid checkpoint, in memory or read back from disk, resumes exactly like a fresh prefill of the whole prompt."""
 
     from tensorfold.engine.lane_engine import LaneEngine, LaneStream
     from tensorfold.engine.prefix_snapshots import load_snapshot, save_snapshot
@@ -212,8 +209,7 @@ def test_lane_engine_resumes_from_a_grid_checkpoint(checkpoint, tmp_path):
 
 @pytest.mark.parametrize("device", ["cpu", "gpu"])
 def test_shared_forward_gives_each_stream_its_own_bits(checkpoint, device):
-    """Streams at different lengths in one forward, past the indexer's budget (sparse attention), equal each stream's
-    own call bit for bit, before and after each keeps part of its rows."""
+    """Streams of different lengths in one forward, sparse attention on, equal their own calls, also after a keep."""
 
     if device == "gpu":
         if not mx.metal.is_available():
@@ -254,8 +250,7 @@ def _run_streams(runtime, specs, together):
 
 @pytest.mark.parametrize("device", ["cpu", "gpu"])
 def test_concurrent_streams_emit_what_they_emit_alone(checkpoint, device):
-    """Streams sharing every round (drafted and serial, greedy and sampled, different lengths and limits) each emit
-    exactly their tokens alone; their heads draft together (``draft_streams``)."""
+    """Streams sharing rounds (drafted and serial, greedy and sampled) each emit exactly their tokens alone."""
 
     from tensorfold.engine.exact_sampling import Sampling
 
@@ -289,7 +284,8 @@ def test_qmv_rows_gives_mlx_one_row_bits():
     mx.set_default_device(mx.gpu)
     assert kernels.metal()
     mx.random.seed(3)
-    w = linear.Q(*mx.quantize((0.05 * mx.random.normal((256, 1024))).astype(mx.bfloat16), group_size=64, bits=4))
+    w = linear.Q(*mx.quantize((0.05 * mx.random.normal((256, 1024))).astype(mx.bfloat16), group_size=64, bits=4),
+                 bits=4, group=64)
     for rows in (2, 3, 4, 8):
         x = mx.random.normal((rows, 1024)).astype(mx.bfloat16)
         many = kernels.qmv_rows(x, w)
@@ -314,8 +310,7 @@ def test_on_metal_rows_are_exact_and_drafts_change_speed_only(checkpoint):
 
 @pytest.mark.skipif(not __import__("os").environ.get("TF_GLM5_MODEL"), reason="set TF_GLM5_MODEL to the checkpoint")
 def test_real_weights_first_layers_rows_are_exact():
-    """The real checkpoint's first six layers (three KDA with dense MLPs, then sparse MLA and KDA with MoE) and its
-    head: a 2/3/4/8-row window gives each row its one-row bits on this GPU, and MTP drafts change speed only."""
+    """The real checkpoint's first six layers: 2/3/4/8-row windows get one-row bits and drafts change speed only."""
 
     import os
 

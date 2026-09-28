@@ -116,6 +116,12 @@ class CacheMemory:
         fixed = per_token = entry = 0
         step = 256
         for item in cache:
+            growth = getattr(item, "memory_growth", None)
+            if callable(growth):                  # a cache that states its own (fixed bytes, bytes a token)
+                item_fixed, item_per_token = growth()
+                fixed, per_token = fixed + int(item_fixed), per_token + int(item_per_token)
+                step = max(step, int(getattr(item, "step", 256)))
+                continue
             held = _held_bytes(item)
             keys, values = getattr(item, "keys", None), getattr(item, "values", None)
             # an empty KV cache (keys and values both unset) has no size yet; an entry without values is not KV

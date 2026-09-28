@@ -8,12 +8,10 @@ from typing import Any
 # the decode path's widest call: wider inputs (prompt chunks) take MLX's batched prefill path
 DECODE_ROWS = 16
 
-# Decode steps that take a window's rows in one kernel, each row keeping its one-row call's bits (tests switch them
-# off to compare with one MLX call a row)
+# decode steps that take a window's rows in one kernel, each row with its one-row bits (tests switch them off)
 ROW_KERNELS = ("experts", "router", "hc", "igate", "kda_proj", "mla_proj", "indexer")
 ENABLED = frozenset(ROW_KERNELS)
-# the whole KDA step in one launch (kernels/glm/flash/v1/kda.py) and sparse MLA reading its chosen keys by index
-# (sparse_attention.py): these set the decode path's arithmetic
+# the KDA step in one launch and sparse MLA reading its chosen keys by index: these set the decode arithmetic
 FUSED_KDA = True
 SPARSE_KERNEL = True
 # the MoE block and each hyper-connection boundary as fused kernels (moe.py, hc.py), each with the row-by-row bits
@@ -21,6 +19,40 @@ FUSED_KERNELS = ("moe", "hc")
 FUSED = frozenset(FUSED_KERNELS)
 # the decode graph goes to the GPU every this many layers, so the GPU starts while Python builds the rest
 EVAL_EVERY = 2
+
+
+# the MLX affine formats the loader reads (the fused kernels take 4-bit groups of 64; others take MLX's one-row calls)
+BITS = (2, 3, 4, 5, 6, 8)
+GROUPS = (32, 64, 128)
+
+
+def module_name(key: str) -> str:
+    """A config key or tensor name as the loader names modules (the language model's prefix dropped)."""
+
+    for prefix in ("model.language_model.", "language_model.model.", "language_model."):
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return key
+
+
+def quant_formats(config: dict[str, Any]) -> tuple[tuple[int, int, str], dict[str, tuple[int, int, str] | None]]:
+    """The checkpoint's (bits, group size, mode) and its per-module overrides (None: a module left unquantized)."""
+
+    block = config.get("quantization") or config.get("quantization_config") or {}
+    default = (int(block.get("bits") or 0), int(block.get("group_size") or 0), str(block.get("mode") or "affine"))
+    overrides: dict[str, tuple[int, int, str] | None] = {}
+    for key, value in block.items():
+        if isinstance(value, dict):
+            overrides[module_name(key)] = (int(value.get("bits") or default[0]),
+                                           int(value.get("group_size") or default[1]),
+                                           str(value.get("mode") or default[2]))
+        elif value is False:
+            overrides[module_name(key)] = None
+    return default, overrides
+
+
+def unreadable(fmt: tuple[int, int, str] | None) -> bool:
+    return fmt is None or fmt[2] != "affine" or fmt[0] not in BITS or fmt[1] not in GROUPS
 
 
 def row_kernel(name: str, rows: int, rows_exact: bool) -> bool:

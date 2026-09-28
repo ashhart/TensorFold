@@ -84,8 +84,7 @@ def render_prompt_ids(
 
 
 def _close_open_think(tokenizer: Any, ids: list[int]) -> list[int]:
-    """Thinking off on a template that ignores the switch (GLM-5.3's always ends on ``<think>``): close the block as
-    the template writes a turn without reasoning. Templates that honour it never end on a bare ``<think>``."""
+    """Close a trailing bare ``<think>`` when thinking is off: GLM-5.3's template writes one whatever the switch."""
 
     if not ids:
         return ids

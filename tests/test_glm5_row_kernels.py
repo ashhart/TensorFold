@@ -1,8 +1,4 @@
-"""GLM-5.3-Flash decode-row kernels: each row of a window keeps the bits its one-row call gives it.
-
-The Metal tests run at GLM-5.3-Flash's own shapes where they matter (the router, the hyper-connection mix, the
-indexer gate) and at smaller multiples of the kernels' blocks for the experts; on Linux the fallbacks are checked
-to be the one-row calls themselves."""
+"""GLM-5.3-Flash's decode-row kernels: each row of a window keeps its one-row call's bits (fallbacks: the calls)."""
 
 from __future__ import annotations
 
@@ -39,7 +35,7 @@ def _same(a: mx.array, b: mx.array) -> bool:
 def _experts(e: int, n: int, k: int, seed: int) -> linear.Q:
     mx.random.seed(seed)
     w = (0.02 * mx.random.normal((e, n, k))).astype(mx.bfloat16)
-    return linear.Q(*mx.quantize(w, group_size=64, bits=4))
+    return linear.Q(*mx.quantize(w, group_size=64, bits=4), bits=4, group=64)
 
 
 def _picks(rows: int, top: int, experts: int, seed: int) -> mx.array:
@@ -142,7 +138,8 @@ def _moe(dims: int = 512, width: int = 512, experts: int = 24, top: int = 4) -> 
                                                                                                     width, 8)
 
     def lin(n: int, k: int) -> linear.Q:
-        return linear.Q(*mx.quantize((0.05 * mx.random.normal((n, k))).astype(mx.bfloat16), group_size=64, bits=4))
+        w = (0.05 * mx.random.normal((n, k))).astype(mx.bfloat16)
+        return linear.Q(*mx.quantize(w, group_size=64, bits=4), bits=4, group=64)
 
     shared = mlp.DenseMLP(lin(width, dims), lin(width, dims), lin(dims, width), 10.0)
     router = (0.3 * mx.random.normal((experts, dims))).astype(mx.float32)
@@ -152,8 +149,7 @@ def _moe(dims: int = 512, width: int = 512, experts: int = 24, top: int = 4) -> 
 
 @pytest.mark.parametrize("enabled", [("experts", "router"), ("router",), ()])
 def test_moe_window_rows_are_one_row_steps(gpu, monkeypatch, enabled):
-    """The MoE block on a window (router + expert kernels, router only, or row by row) gives every row its
-    one-row bits."""
+    """The MoE block on a window (row kernels, router only, or row by row) gives every row its one-row bits."""
 
     monkeypatch.setattr(config, "ENABLED", frozenset(enabled))
     moe = _moe()
@@ -167,7 +163,8 @@ def test_moe_window_rows_are_one_row_steps(gpu, monkeypatch, enabled):
 def test_qmv_quad_rows_gives_mlx_one_row_bits(gpu, shape):
     n, k = shape
     mx.random.seed(9)
-    q = linear.Q(*mx.quantize((0.05 * mx.random.normal((n, k))).astype(mx.bfloat16), group_size=64, bits=4))
+    w = (0.05 * mx.random.normal((n, k))).astype(mx.bfloat16)
+    q = linear.Q(*mx.quantize(w, group_size=64, bits=4), bits=4, group=64)
     x = mx.random.normal((16, k)).astype(mx.bfloat16)
     one = mx.concatenate([q(x[r:r + 1]) for r in range(16)])
     for rows in range(2, 17):
@@ -175,8 +172,7 @@ def test_qmv_quad_rows_gives_mlx_one_row_bits(gpu, shape):
 
 
 def test_every_row_kernel_switch_keeps_windows_exact(gpu, monkeypatch, tmp_path):
-    """On the tiny checkpoint: with each row kernel alone and with all of them, 2/3/4/8-row windows give every row
-    its one-row bits (the load-time check)."""
+    """Each row kernel alone and all of them keep 2/3/4/8-row windows exact on the tiny checkpoint."""
 
     from glm5_fakes import write_checkpoint
     from tensorfold.families.glm5_next.runtime import GLMFlash
@@ -196,8 +192,7 @@ def test_every_row_kernel_switch_keeps_windows_exact(gpu, monkeypatch, tmp_path)
 
 @pytest.mark.parametrize("start", [2045, 4093])                  # windows crossing index_topk / block boundaries
 def test_indexer_choices_are_each_rows_own(gpu, start):
-    """A window's sparse key choice (rows scored and ranked in groups sharing a block count) equals each row's
-    one-row choice, at GLM-5.3-Flash's indexer shape (32 heads of 128, top 512 blocks of 4) with bf16 ties."""
+    """A window's sparse key choice equals each row's own at GLM's indexer shape, with bf16 ties."""
 
     import types
 
@@ -223,8 +218,7 @@ def test_indexer_choices_are_each_rows_own(gpu, start):
 
 @pytest.mark.skipif(not __import__("os").environ.get("TF_GLM5_MODEL"), reason="set TF_GLM5_MODEL to the checkpoint")
 def test_real_weights_long_context_windows_are_exact(gpu):
-    """The real checkpoint's first 8 layers (two sparse-attention layers, five MoE) and head past 4,096 keys, where
-    each query reads its chosen 512 blocks: 2-16-row windows give every row its one-row bits, row kernels on."""
+    """The real first 8 layers past 4,096 keys: 2-16-row windows keep every row's one-row bits."""
 
     import os
 
