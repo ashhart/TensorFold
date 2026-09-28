@@ -1,4 +1,8 @@
-"""OpenAI server for the CUDA engines: a family's ``cuda_engine`` gives ``eos``, ``generate`` and ``follow``."""
+"""OpenAI server for the CUDA engines: a family's ``cuda_engine`` gives ``eos``, ``generate`` and ``follow``.
+
+An engine with ``structured_output`` set takes ``constraint`` in ``generate`` and enforces ``response_format``
+(``tensorfold.cuda.grammar``); other engines refuse it with a 400 rather than reply unconstrained.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorfold.cuda import grammar
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.http import Server
@@ -45,6 +50,7 @@ class PreparedRequest:
     ignore_eos: bool = False
     stop: tuple[str, ...] = ()
     vision: Any = None
+    grammar: Any = None     # the compiled response_format, or None
 
 
 def _native_context(model_dir: Path) -> int:
@@ -70,6 +76,7 @@ class App:
         self.engine = engine
         self.vision = getattr(engine, "vision", None)
         self.served = served
+        self.model_dir = Path(model_dir)
         self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         self.template = ChatTemplate(model_dir)
         self.default_thinking = default_thinking
@@ -90,7 +97,27 @@ class App:
             return "this model's CUDA engine has no serial switch (\"draft\": false)"
         if not isinstance(body.get("messages", []), list):
             return "messages must be a list"
+        try:
+            spec = grammar.request_spec(body)
+        except RequestError as exc:
+            return str(exc)
+        if spec is not None and not getattr(self.engine, "structured_output", False):
+            return f"{spec.field}: this model's CUDA engine does not enforce structured output"
+        if spec is not None and body.get("tools") and tool_choice_requires_call(body.get("tool_choice")):
+            return f'{spec.field} cannot be combined with tool_choice "required" or a named function: send one'
         return None
+
+    def _grammars(self) -> grammar.Grammars:
+        """The tokenizer's grammar compiler, built on the first structured request."""
+
+        found = getattr(self, "grammars", None)
+        if found is None:
+            model_dir = getattr(self, "model_dir", None)
+            vocab = grammar.vocab_size(model_dir) if model_dir is not None else None
+            if vocab is None:
+                raise RequestError("structured output needs the checkpoint's config.json vocab_size")
+            found = self.grammars = grammar.for_model(model_dir, vocab, tuple(self.engine.eos))
+        return found
 
     def _engine_capacity(self) -> int | None:
         capacities = []
@@ -149,6 +176,8 @@ class App:
             raise RequestError("chat_template_kwargs must be a JSON object or null")
         kwargs = dict(kwargs)
         thinking = bool(kwargs.pop("enable_thinking", self.default_thinking))
+        spec = grammar.request_spec(body)
+        compiled = self._grammars().compile(spec) if spec is not None else None
         if chat:
             if not isinstance(body.get("messages"), list):
                 raise RequestError("messages must be a list")
@@ -167,7 +196,7 @@ class App:
                                           context_limit=self._context_limit())
                 return PreparedRequest(rendered.tokens, max_tokens, tools, thinking,
                                        self.sampling_for(body, rendered.tokens), ignore_eos=ignore_eos, stop=stop,
-                                       vision=rendered.vision)
+                                       vision=rendered.vision, grammar=compiled)
             text = render(body["messages"])
         else:
             text = body.get("prompt")
@@ -178,7 +207,7 @@ class App:
             raise RequestError("rendered prompt is empty")
         # sampling is resolved here, so a malformed control is refused before a stream opens
         return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt),
-                               ignore_eos=ignore_eos, stop=stop)
+                               ignore_eos=ignore_eos, stop=stop, grammar=compiled)
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
         """Why the request cannot run, or None; rendered before a stream's headers are sent."""
@@ -305,6 +334,8 @@ class App:
         options: dict[str, Any] = {} if draft else {"draft": False}
         if takes_stop_eos:
             options["stop_eos"] = not prepared.ignore_eos
+        if prepared.grammar is not None:    # response_format: a fresh grammar state, after </think> when thinking
+            options["constraint"] = self._grammars().constraint(prepared.grammar, after_think=chat and thinking)
 
         def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
             extra = dict(options)
