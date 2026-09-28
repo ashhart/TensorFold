@@ -117,6 +117,7 @@ class Qwen27Engine:
         from tensorfold.cuda.streams import PrefixCache
 
         self.eos = tuple(self.w.config.eos)
+        self.structured_output = tp == 1                    # generate takes a response_format constraint on one GPU
         self.points = resume_points(model_dir)              # message starts a prefill keeps states at
         self.cache = PrefixCache(KEEP_ONE)                  # (committed ids, state, drafter snapshot)
         # ``streams`` > 1: up to that many requests decoded together, their windows verified in one forward
@@ -171,7 +172,7 @@ class Qwen27Engine:
         return not (stops and len(prompt) - stops[-1] < MIN_GAP)
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
-                 draft: bool = True, stop_eos: bool = True, *, vision=None):
+                 draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None):
         """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``: past end tokens (``ignore_eos``)."""
 
         from .decode import draft_decode, prefill
@@ -182,11 +183,14 @@ class Qwen27Engine:
             raise ValueError(f"prompt of {len(prompt)} tokens exceeds the {self.context_window}-token safe capacity; "
                              "shorten the prompt or reserve fewer reply tokens")
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
+        if constraint is not None and not self.structured_output:
+            raise ValueError("structured output runs on one GPU")
         if self.scheduler is not None:
             if vision is None:
-                return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos)
+                return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
+                                             constraint=constraint)
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         vision=vision)
+                                         vision=vision, constraint=constraint)
         t0 = time.perf_counter()
         hit = self._resume(prompt) if draft and vision is None else None
         encoded = self.vision.encode(vision, prompt) if vision is not None else None
@@ -200,7 +204,8 @@ class Qwen27Engine:
         stops, keep = self._stops(prompt, hit, draft) if vision is None else ((), None)
         end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
         st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
-                                     limit=self.context_window, stops=stops, keep=keep, keep_at=end, vision=encoded)
+                                     limit=self.context_window, stops=stops, keep=keep, keep_at=end, vision=encoded,
+                                     constraint=constraint)
         if end is not None:
             self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0
@@ -209,7 +214,7 @@ class Qwen27Engine:
         # the cache holds the state before the last prompt token, not ``st``: the decode may commit into it
         result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
                               max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
-                              on_tokens=on_tokens, inplace=True)
+                              on_tokens=on_tokens, inplace=True, constraint=constraint)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0)}
 

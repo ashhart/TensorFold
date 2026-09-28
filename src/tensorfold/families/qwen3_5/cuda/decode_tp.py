@@ -105,13 +105,21 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
 
 
 def first_token(w: Weights, normed: torch.Tensor, n: int, sampling: Sampling | None, rank: int = 0,
-                world: int = 1) -> int:
+                world: int = 1, constraint=None) -> int:
     """The token after an ``n``-token prompt from its last row's normed state; two ranks share rank 0's draw."""
 
     from .forward import _mm
 
     if world == 1:
-        return sample_rows(_mm(normed, w.head), [n], sampling)[0]
+        logits = _mm(normed, w.head)
+        if constraint is not None:              # a reply's grammar (tensorfold.cuda.grammar): masked, then followed
+            constraint.mask(logits)
+        first = sample_rows(logits, [n], sampling)[0]
+        if constraint is not None:
+            constraint.advance([first])
+        return first
+    if constraint is not None:
+        raise ValueError("structured output runs on one GPU")
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
     last = _mm(normed, w.head) if split or rank == 0 else None
     if split:
