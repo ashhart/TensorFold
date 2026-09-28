@@ -63,7 +63,7 @@ EXL3_VARIANT_ANY = "any"          # a family declaring EXL3_VARIANT = EXL3_VARIA
 
 def _quantization_block(config: dict[str, Any]) -> dict[str, Any] | None:
     for source in (config, config.get("text_config") or {}):
-        for key in ("quantization_config", "quantization"):
+        for key in ("quantization", "quantization_config"):
             found = source.get(key)
             if isinstance(found, dict) and found:
                 return found
@@ -103,7 +103,7 @@ def layer_quantization(config: dict[str, Any]) -> dict[str, tuple[int, int, str]
     found = _quantization_block(config) or {}
     layers = {}
     for path, entry in found.items():
-        if isinstance(entry, dict):
+        if isinstance(entry, dict) and entry:
             mode = str(entry.get("mode") or "affine").lower()
             group, bits = MLX_MODE_DEFAULTS.get(mode, (64, 4))
             layers[path] = (int(entry.get("bits") or bits), int(entry.get("group_size") or group), mode)
@@ -154,6 +154,10 @@ def require_readable(family: Family, config: dict[str, Any], backend: str) -> No
         from tensorfold.cuda.exl3 import format as exl3_format
 
         exl3_format.require_config(config, where=where, tested=tested, help=OWN_MODEL_HELP)
+    check = getattr(family.package, "check_quantization", None)
+    if method == MLX_QUANT and check is not None:
+        check(config, backend)                   # the family reads its own affine widths, groups and mixed layers
+        return
     expected = getattr(family.package, "CUDA_QUANTIZATION", None) if backend == "cuda" else None
     if expected is not None and method == MLX_QUANT and quantization(config) != tuple(expected):
         bits, group = expected

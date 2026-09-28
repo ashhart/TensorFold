@@ -133,9 +133,9 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
         raise ValueError(f"{TITLE} drafts with its own MTP head on CUDA: a separate draft model does not apply")
     from .cuda import CONFIDENCE, DEPTH
     from .cuda.engine import FlashNextEngine
-    from .cuda.kvcache import check as check_kv
 
-    check_kv(kv_dtype)                       # refuse an unknown cache before any weight is read
+    if kv_dtype not in CUDA_KV_DTYPES:       # refuse an unknown cache before any weight is read (no torch import)
+        raise ValueError(f"kv-dtype {kv_dtype!r}: this engine serves {' or '.join(CUDA_KV_DTYPES)}")
     depth = 0 if no_drafts else DEPTH if mtp_drafts is None else int(mtp_drafts)
     if depth and not has_mtp(Path(model_dir)):
         raise ValueError(f"this checkpoint has no MTP head, which {TITLE}'s CUDA engine drafts with ({MODELS[0]} "

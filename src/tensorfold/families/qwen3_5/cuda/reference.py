@@ -12,7 +12,7 @@ def _linear(x: torch.Tensor, q: QLinear) -> torch.Tensor:
     from tensorfold.families.qwen3_5.cuda.qmm_fast import untile
 
     q = untile(q)
-    return (x.float() @ dequantize(q.weight, q.scales, q.biases).T).to(torch.bfloat16)
+    return (x.float() @ dequantize(q.weight, q.scales, q.biases, q.bits, q.gs).T).to(torch.bfloat16)
 
 
 def _rms(x: torch.Tensor, w: torch.Tensor | None, eps: float) -> torch.Tensor:
@@ -128,8 +128,8 @@ def forward(w: Weights, tokens: torch.Tensor, st: State) -> torch.Tensor:
     T = tokens.shape[0]
     e = w.embed
     ids = tokens.long()
-    rows = QLinear(e.weight[ids], e.scales[ids], e.biases[ids])
-    x = dequantize(rows.weight, rows.scales, rows.biases).to(torch.bfloat16)
+    x = dequantize(e.weight[ids], e.scales[ids] if e.scales is not None else None,
+                   e.biases[ids] if e.biases is not None else None, e.bits, e.gs).to(torch.bfloat16)
     for i, layer in enumerate(w.layers):
         h = _rms(x, layer.input_norm, c.eps).to(torch.bfloat16)
         r = _gdn(layer, h, st, i, c) if layer.linear else _attention(layer, h, st, i, c, w.inv_freq)
@@ -145,5 +145,6 @@ def forward(w: Weights, tokens: torch.Tensor, st: State) -> torch.Tensor:
     parts = []
     for s0 in range(0, hd.n, 32768):                            # Slice the head to avoid materializing the full fp32 matrix.
         s1 = min(hd.n, s0 + 32768)
-        parts.append(h @ dequantize(hd.weight[s0:s1], hd.scales[s0:s1], hd.biases[s0:s1]).T)
+        parts.append(h @ dequantize(hd.weight[s0:s1], hd.scales[s0:s1] if hd.scales is not None else None,
+                                    hd.biases[s0:s1] if hd.biases is not None else None, hd.bits, hd.gs).T)
     return torch.cat(parts, dim=1)

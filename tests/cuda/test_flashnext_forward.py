@@ -329,9 +329,9 @@ def _prefill_state(e: Engine) -> dict:
     st = e.st
     n, m = st.pos, st.mtp_len
     out = {"streams": e.last_streams, "rec": st.rec[st.cur[0]], "conv": st.conv,
-           "mtp_kc": st.mtp_kc[:m], "mtp_vc": st.mtp_vc[:m], "mtp_ikc": st.mtp_ikc[:m]}
+           "mtp_kc": st.mtp_kc.k[:m], "mtp_vc": st.mtp_kc.v[:m], "mtp_ikc": st.mtp_ikc[:m]}
     for i in range(len(st.kc)):
-        out[f"kc{i}"], out[f"vc{i}"], out[f"ikc{i}"] = st.kc[i][:n], st.vc[i][:n], st.ikc[i][:n]
+        out[f"kc{i}"], out[f"vc{i}"], out[f"ikc{i}"] = st.kc[i].k[:n], st.kc[i].v[:n], st.ikc[i][:n]
         out[f"pooled{i}"] = st.pooled[i][:n // 4]
     return {k: v.clone() for k, v in out.items()}
 

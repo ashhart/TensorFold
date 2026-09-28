@@ -1,9 +1,10 @@
-"""Load unchanged MLX affine 4-bit packed projections, embeddings, and head with group-64 bf16 scales and biases, shifted norms, and no vision tower."""
+"""Load each projection's declared affine format without changing its packed checkpoint words."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -12,12 +13,13 @@ import torch
 
 @dataclass
 class QLinear:
-    weight: torch.Tensor      # (N, K/8) int32 (MLX's uint32 words); tiled: the shared kernel's packed words
-    scales: torch.Tensor      # (N, K/64) bf16; tiled: (K/64, N padded to 64)
-    biases: torch.Tensor      # (N, K/64) bf16; tiled: (K/64, N padded to 64)
+    weight: torch.Tensor      # original MLX words, or the optimized four-bit tile layout
+    scales: torch.Tensor | None
+    biases: torch.Tensor | None
     layout: str = "mlx"       # "mlx" as stored, or "tiled" (``qmm_fast.tile``)
     rows: int = 0             # N when tiled (the tiled words are padded to 64 columns)
     gs: int = 64              # inputs per quantization group
+    bits: int = 4
 
     @property
     def n(self) -> int:
@@ -25,10 +27,17 @@ class QLinear:
 
     @property
     def k(self) -> int:
-        return int(self.weight.shape[1]) * (64 if self.layout == "tiled" else 8)
+        if self.layout == "dense":
+            return int(self.weight.shape[1])
+        return int(self.weight.shape[1]) * 64 if self.layout == "tiled" else int(self.scales.shape[1]) * self.gs
 
     def nbytes(self) -> int:
-        return sum(t.numel() * t.element_size() for t in (self.weight, self.scales, self.biases))
+        return sum(t.numel() * t.element_size() for t in (self.weight, self.scales, self.biases) if t is not None)
+
+    @cached_property
+    def fast(self) -> bool:
+        return (self.bits, self.gs) == (4, 64) and self.layout != "dense" and all(
+            t.dtype == torch.bfloat16 for t in (self.scales, self.biases))
 
 
 @dataclass
@@ -199,6 +208,18 @@ class Weights:
     inv_freq: torch.Tensor | None = None             # (rope_dims/2,) fp32
     quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16)
 
+    @cached_property
+    def fast_prefill(self) -> bool:
+        if self.quant == "exl3":                     # an EXL3 pack's prompt glue stays in bf16
+            return False
+        for layer in self.layers:
+            modules = [m for m in (layer.gate, layer.up, layer.down) if m is not None]    # a MoE layer's are None
+            modules += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []
+            modules += [layer.attn.q, layer.attn.k, layer.attn.v, layer.attn.o] if layer.attn else []
+            if any(not q.fast for q in modules):
+                return False
+        return True
+
     def nbytes(self) -> int:
         total = self.embed.nbytes() + self.head.nbytes()
         for layer in self.layers:
@@ -246,6 +267,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
     if quant_config(model_dir) is not None:
         return load_exl3(model_dir, device)
     cfg = Config.read(model_dir)
+    raw = json.loads((model_dir / "config.json").read_text())
     t = _Tensors(model_dir, device)
     prefix = "language_model." if any(k.startswith("language_model.") for k in t) else ""
 
@@ -253,13 +275,28 @@ def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, ml
         return t.pop(prefix + name)
 
     def qlinear(name: str, pack: bool = True) -> QLinear:
+        from tensorfold.quantization import resolve_affine, validate_shapes
+
         w = get(name + ".weight")
+        spec = resolve_affine(raw, prefix + name)
+        if spec is None:
+            if (prefix + name + ".scales") in t or (prefix + name + ".biases") in t:
+                raise ValueError(f"{name} has packed weights but no enabled affine metadata")
+            if w.ndim != 2 or w.dtype not in (torch.bfloat16, torch.float16, torch.float32):
+                raise ValueError(f"{name} needs floating weights or declared affine metadata")
+            return QLinear(w.contiguous(), None, None, layout="dense", bits=0, gs=0)
+        if w.dtype not in (torch.int32, torch.uint32):
+            raise ValueError(f"{name} declares affine quantization but its words are not 32-bit integers")
         w = w.view(torch.int32) if w.dtype != torch.int32 else w
-        q = QLinear(w.contiguous(), get(name + ".scales").contiguous(), get(name + ".biases").contiguous())
+        scales, biases = get(name + ".scales"), get(name + ".biases")
+        if any(value.dtype not in (torch.bfloat16, torch.float16, torch.float32) for value in (scales, biases)):
+            raise ValueError(f"{name} needs floating-point affine scales and biases")
+        validate_shapes(w.shape, scales.shape, biases.shape, spec)
+        q = QLinear(w.contiguous(), scales.contiguous(), biases.contiguous(), gs=spec.group_size, bits=spec.bits)
         if tiled and pack:
             from .qmm_fast import tile
 
-            return tile(q)
+            return tile(q)                                 # tile() leaves any format but 4-bit g64 as stored
         return q
 
     layers = []

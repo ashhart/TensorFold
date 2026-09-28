@@ -244,8 +244,12 @@ def embed(ids: torch.Tensor, weight: torch.Tensor, scales: torch.Tensor, biases:
 
 
 def embedding(ids: torch.Tensor, q) -> torch.Tensor:
-    """Token rows: an EXL3 pack's table as stored, or the MLX 4-bit table dequantized."""
+    """Token rows: an EXL3 pack's table as stored, the MLX 4-bit table dequantized, or another affine table's."""
 
     if q.layout == "b16":
         return q.weight[ids.to(torch.int64)].to(torch.bfloat16).contiguous()
-    return embed(ids, q.weight, q.scales, q.biases, q.k)
+    if q.fast:
+        return embed(ids, q.weight, q.scales, q.biases, q.k)
+    from tensorfold.cuda.kernels.affine import embed as affine_embed
+
+    return affine_embed(ids, q)

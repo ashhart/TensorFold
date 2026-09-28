@@ -217,16 +217,18 @@ class DFlash2:
             self.sub_rows = [rows(target.head, a, b) for a, b in spans]
         else:
             head = untile(target.head)
-            self.sub_head = QLinear(torch.cat([head.weight[a:b] for a, b in spans]).contiguous(),
-                                    torch.cat([head.scales[a:b] for a, b in spans]).contiguous(),
-                                    torch.cat([head.biases[a:b] for a, b in spans]).contiguous())
+            parts = [None if t is None else torch.cat([t[a:b] for a, b in spans]).contiguous()
+                     for t in (head.weight, head.scales, head.biases)]
+            self.sub_head = QLinear(*parts, layout=head.layout, gs=head.gs, bits=head.bits)
             del head
         if world == 2:
             half = -(-len(self.head_ids) // 2)
             lo, hi = rank * half, min((rank + 1) * half, len(self.head_ids))
             self.head_ids = self.head_ids[lo:hi].contiguous()
-            self.sub_head = QLinear(self.sub_head.weight[lo:hi].contiguous(), self.sub_head.scales[lo:hi].contiguous(),
-                                    self.sub_head.biases[lo:hi].contiguous())
+            sub = self.sub_head
+            self.sub_head = QLinear(*[None if t is None else t[lo:hi].contiguous()
+                                      for t in (sub.weight, sub.scales, sub.biases)],
+                                    layout=sub.layout, gs=sub.gs, bits=sub.bits)
         if isinstance(target.head, QLinear) and target.head.layout == "tiled" and self.sub_rows is None:
             self.sub_head = tile(self.sub_head)
         # Quantized draft projections can change acceptance but never target output.

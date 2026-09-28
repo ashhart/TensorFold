@@ -28,7 +28,8 @@ class Qwen27Engine:
                              "(Vontra/Qwen3.8-27B-MLX-4bit) on two")
         from .weights import load
         from tensorfold.cuda.capacity import admit, gather_ints
-        from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, linear_weights, stream_geometry
+        from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, stream_geometry
+        from .affine_memory import weight_transform
 
         self.torch = torch
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
@@ -58,7 +59,8 @@ class Qwen27Engine:
         many = streams > 1
         geometry = ((lambda text: stream_geometry(text, tp, streams, KEEP)) if many else
                     (lambda text: gdn_geometry(text, tp, max_rows)))
-        tensor_bytes = linear_weights
+        # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
+        tensor_bytes = weight_transform(model_dir)
         if exl3:
             geometry, tensor_bytes = admission(geometry)
         # one admission for one stream or many, on every rank, before any weight loads

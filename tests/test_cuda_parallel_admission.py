@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.test_cuda_capacity import Loaded, checkpoint, construct, fake_runtime, small_config  # noqa: F401
+from tests.test_cuda_capacity import HEAD, Loaded, checkpoint, construct, fake_runtime, small_config  # noqa: F401
 from tests.test_cuda_geometry import allocations, bytes_in  # noqa: F401
 
-WEIGHTS = [("lm_head.weight", "U32", [64, 8], 2048)]
+WEIGHTS = HEAD
 
 
 def start(family, path, requested, explicit, world, streams, rank=0):

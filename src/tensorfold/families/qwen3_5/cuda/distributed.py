@@ -46,30 +46,40 @@ def split_output(q: QLinear, rank: int, world_size: int = 2,
                  segments: Sequence[int] | None = None, block: int = 1) -> QLinear:
     """Column-parallel QLinear: each rank owns complete output rows."""
 
+    if q.layout == "tiled":
+        raise ValueError("split the checkpoint layout before tiling")
     rows = output_rows(q.n, rank, world_size, segments, block, q.weight.device)
     return QLinear(q.weight.index_select(0, rows).contiguous(),
-                   q.scales.index_select(0, rows).contiguous(),
-                   q.biases.index_select(0, rows).contiguous())
+                   q.scales.index_select(0, rows).contiguous() if q.scales is not None else None,
+                   q.biases.index_select(0, rows).contiguous() if q.biases is not None else None,
+                   layout=q.layout, gs=q.gs, bits=q.bits)
 
 
 def split_input(q: QLinear, rank: int, world_size: int = 2) -> QLinear:
-    """Row-parallel QLinear: each rank owns complete groups of 64 input columns."""
+    """Row-parallel QLinear: each rank owns complete declared quantization groups."""
 
     _rank(rank, world_size)
-    if q.k % (64 * world_size):
-        raise ValueError(f"input width {q.k} is not divisible by {64 * world_size}")
-    half_groups = q.k // (64 * world_size)
-    g0, g1 = rank * half_groups, (rank + 1) * half_groups
-    return QLinear(q.weight[:, g0 * 8:g1 * 8].contiguous(),
+    if q.layout == "dense":
+        if q.k % world_size:
+            raise ValueError("dense input width must divide into equal rank halves")
+        half = q.k // world_size
+        return QLinear(q.weight[:, rank * half:(rank + 1) * half].contiguous(), None, None,
+                       layout="dense", gs=0, bits=0)
+    if q.layout != "mlx":
+        raise ValueError("split the checkpoint layout before tiling")
+    from tensorfold.cuda.kernels.affine import input_slice
+
+    (w0, w1), (g0, g1) = input_slice(q.k, q.bits, q.gs, rank, world_size)
+    return QLinear(q.weight[:, w0:w1].contiguous(),
                    q.scales[:, g0:g1].contiguous(),
-                   q.biases[:, g0:g1].contiguous())
+                   q.biases[:, g0:g1].contiguous(), gs=q.gs, bits=q.bits)
 
 
-def local_input(x: torch.Tensor, rank: int, world_size: int = 2) -> torch.Tensor:
+def local_input(x: torch.Tensor, rank: int, world_size: int = 2, *, group_size: int = 64) -> torch.Tensor:
     """Select the activation columns corresponding to ``split_input``."""
 
     _rank(rank, world_size)
-    if x.ndim != 2 or x.shape[1] % (64 * world_size):
+    if group_size not in (1, 32, 64, 128) or x.ndim != 2 or x.shape[1] % (group_size * world_size):
         raise ValueError("activation input must be 2-D and group-aligned")
     half = x.shape[1] // world_size
     return x[:, rank * half:(rank + 1) * half].contiguous()
@@ -203,8 +213,12 @@ if triton is not None:
 
 def row_partial(x: torch.Tensor, q: QLinear, sk: int | None = None,
                 xs: torch.Tensor | None = None) -> torch.Tensor:
-    """Packed 4-bit row-parallel projection, returning an fp32 (rows, outputs) partial."""
+    """Row-parallel projection, returning an fp32 (rows, outputs) partial."""
 
+    if not q.fast:
+        from tensorfold.cuda.kernels.affine import matmul as affine_matmul
+
+        return affine_matmul(x, q, f32=True)
     if triton is None:
         raise RuntimeError("row_partial requires Triton")
     if q.layout == "tiled":

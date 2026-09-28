@@ -238,6 +238,10 @@ def cmd_info(args: argparse.Namespace) -> int:
         if key in text:
             print(f"{key:12s} {text[key]}" if len(key) <= 12 else f"{key} {text[key]}")
     print(f"quantization {families.describe_quantization(config)}")
+    bits = getattr(family.package, "CUDA_AFFINE_BITS", ())
+    groups = getattr(family.package, "CUDA_AFFINE_GROUPS", ())
+    if bits and groups:
+        print(f"CUDA formats affine {'/'.join(map(str, bits))}-bit, groups {'/'.join(map(str, groups))}")
     readers = [b for b in families.backends_of(family)
                if families.quant_method(config) in families.readable_quants(family, b)]
     if readers:

@@ -13,7 +13,7 @@ TITLE = "Qwen3.8 dense"
 LANES = True
 MODELS = ("Vontra/Qwen3.8-27B-MLX-4bit", "turboderp/Qwen3.8-27B-exl3")
 DRAFTER = "z-lab/Qwen3.8-27B-DFlash2"
-QUANT_METHODS = {"cuda": ("mlx", "exl3")}      # the CUDA engine reads MLX affine 4-bit and EXL3 packs
+QUANT_METHODS = {"cuda": ("mlx", "exl3")}      # the CUDA engine reads MLX affine weights and EXL3 packs
 EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.dense.v1"
 KERNEL_VERSION = "v1"
@@ -79,25 +79,38 @@ def install_row_decoder(model: Any) -> bool:
 def refusal(config: dict[str, Any], lanes: bool) -> str | None:
     """Why the lane kernels (``lanes``) or the decoder without tensor units cannot read a checkpoint, else None."""
 
-    from tensorfold.families import describe_quantization, layer_quantization, quantization
-    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
-
-    def reads(bits: int | None, group: int | None, mode: str = "affine") -> bool:
-        return group == 64 and (lane_qmm.readable(bits, group, mode) if lanes else (bits, mode) == (4, "affine"))
-
-    others = "/".join(str(b) for b in lane_qmm.BITS if b != 4)
-    takes = (f"{'/'.join(str(b) for b in lane_qmm.BITS)}-bit weights in groups of 64" if lanes else
-             f"4-bit weights in groups of 64 without tensor units ({others}-bit need an M5-generation GPU)")
-    if not reads(*quantization(config)):
-        return f"its lane kernels read {takes}; this checkpoint has {describe_quantization(config)}"
-    # embed_tokens is a lookup, not a matmul: only as a tied head (refused below) would it meet the lanes
-    odd = sorted({f"{b}-bit g{g}" + ("" if m == "affine" else f" {m}") for path, (b, g, m)
-                  in layer_quantization(config).items() if not reads(b, g, m) and not path.endswith("embed_tokens")})
-    if odd:
-        return f"its lane kernels read {takes}; this checkpoint has layers at {', '.join(odd)}"
-    if config.get("tie_word_embeddings") or (config.get("text_config") or {}).get("tie_word_embeddings"):
-        return "its head is the tied embedding, which runs MLX's kernel (drafted rows would get other bits)"
+    try:
+        check_quantization(config, "mlx")
+    except ValueError as exc:
+        return str(exc)
     return None
+
+
+def _language_specs(config: dict[str, Any]):
+    from tensorfold.quantization import quantization_block, resolve_affine
+
+    specs = {"": resolve_affine(config)}
+    for path, value in (quantization_block(config) or {}).items():
+        if ((isinstance(value, dict) or type(value) is bool)
+                and not any(part in path.split(".") for part in ("vision_tower", "visual"))
+                and not path.endswith("embed_tokens")):
+            specs[path] = resolve_affine(config, path)
+    return specs
+
+
+def check_quantization(config: dict[str, Any], backend: str) -> None:
+    from tensorfold.quantization import resolve_affine
+
+    if resolve_affine(config) is None:
+        raise ValueError("Qwen dense requires MLX affine quantization metadata; this checkpoint has none (unquantized weights)")
+    if config.get("tie_word_embeddings") or (config.get("text_config") or {}).get("tie_word_embeddings"):
+        raise ValueError("the tied embedding head is not supported by this packed Qwen decoder")
+    _language_specs(config)
+
+
+def native_lanes(config: dict[str, Any]) -> bool:
+    return all(spec is None or spec.group_size == 64 or (spec.bits == 4 and spec.group_size == 32)
+               for spec in _language_specs(config).values())
 
 
 def check(model_dir: str | Path) -> None:
@@ -105,11 +118,11 @@ def check(model_dir: str | Path) -> None:
 
     import sys
 
-    if sys.platform != "darwin":                  # the CUDA engine's rule is CUDA_QUANTIZATION (require_readable)
+    if sys.platform != "darwin":                  # the CUDA engine's rules are check_quantization's (require_readable)
         return
     from tensorfold.families import read_config
 
-    why = refusal(read_config(model_dir), tensor_units())     # this family sets no MLX_ENV: MLX may start here
+    why = refusal(read_config(model_dir), False)
     if why:
         raise ValueError(f"{TITLE} cannot run this checkpoint: {why}. Use {MODELS[0]}")
 
@@ -129,6 +142,10 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     why = refusal(read_config(model_dir), lanes)
     if why:
         raise SystemExit(f"[tensorfold] {TITLE} cannot run this checkpoint: {why}. Use {MODELS[0]}")
+    if lanes and not native_lanes(read_config(model_dir)):
+        if lane_kernels == "on":
+            raise ValueError("this format uses the packed affine row kernels; use --lane-kernels auto or off")
+        lanes = False
     model, tokenizer = load_lane_model(Path(model_dir))
     model._tensorfold_lanes = bool(lanes)
     if lanes:
@@ -235,8 +252,9 @@ def kernel_version(model: Any) -> str:
     return f"qwen-dense-{KERNEL_VERSION}-" + hashlib.sha256("\n".join(sources).encode()).hexdigest()[:12]
 
 
-# the CUDA engine's kernels read MLX affine weights of this (bits, group size)
-CUDA_QUANTIZATION = (4, 64)
+# The metadata-only info command also displays these CUDA affine formats.
+CUDA_AFFINE_BITS = (2, 3, 4, 5, 6, 8)
+CUDA_AFFINE_GROUPS = (32, 64, 128)
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, **options: Any):

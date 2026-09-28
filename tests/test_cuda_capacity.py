@@ -92,7 +92,13 @@ def small_config():
             "linear_num_heads": 8, "linear_head_dim": 128, "qk_nope_head_dim": 256,
             "v_head_dim": 256, "vocab_size": 1024, "num_nextn_predict_layers": 1,
             "moe_intermediate_size": 512, "intermediate_size": 1024, "num_experts_per_tok": 2,
-            "n_routed_experts": 8, "index_topk": 2048, "index_head_dim": 128}
+            "n_routed_experts": 8, "index_topk": 2048, "index_head_dim": 128,
+            "quantization": {"group_size": 64, "bits": 4}}
+
+
+# a 4-bit head as MLX packs it: the words, then a bf16 scale and bias for each group of 64 inputs
+HEAD = [("lm_head.weight", "U32", [64, 8], 2048), ("lm_head.scales", "BF16", [64, 1], 128),
+        ("lm_head.biases", "BF16", [64, 1], 128)]
 
 
 class Loaded(Exception):
@@ -159,7 +165,7 @@ def construct(family, path, requested, explicit, world, rank=0):
 @pytest.mark.torch
 def test_real_constructors_choose_native_or_explicit_before_loading(tmp_path, fake_runtime, family, world,
                                                                     requested, explicit, window):
-    checkpoint(tmp_path, small_config(), [("lm_head.weight", "U32", [64, 8], 2048)])
+    checkpoint(tmp_path, small_config(), HEAD)
     calls, _ = fake_runtime
     obj, start = construct(family, tmp_path, requested, explicit, world)
     with pytest.raises(Loaded):
@@ -176,7 +182,7 @@ def test_real_constructors_choose_native_or_explicit_before_loading(tmp_path, fa
 @pytest.mark.parametrize("family,world", [("linear", 1), ("linear", 2), ("indexed", 1), ("indexed", 2), ("mla", 2)])
 def test_real_constructors_shrink_default_and_refuse_explicit_before_loading(tmp_path, monkeypatch, fake_runtime,
                                                                          family, world):
-    checkpoint(tmp_path, small_config(), [("lm_head.weight", "U32", [64, 8], 2048)])
+    checkpoint(tmp_path, small_config(), HEAD)
     calls, capacity = fake_runtime
     from tensorfold.cuda.geometry import gdn_geometry, mla_geometry
     text = small_config()
@@ -276,7 +282,7 @@ def test_actual_distributed_startup_agrees_on_smaller_rank_before_loading(tmp_pa
     from tensorfold.families.glm5_next.cuda.split import rule
     from tensorfold.families.glm5_next.cuda.engine import GlmEngine
 
-    checkpoint(tmp_path, small_config(), [("lm_head.weight", "U32", [64, 8], 2048)])
+    checkpoint(tmp_path, small_config(), HEAD)
     calls, capacity = fake_runtime
     geom = (mla_geometry(small_config(), 2, 8, latent=LATENT) if family == "mla" else
             gdn_geometry(small_config(), 2, 1 if family == "indexed" else 12, indexed=family == "indexed"))
@@ -311,7 +317,7 @@ def test_actual_distributed_startup_agrees_on_smaller_rank_before_loading(tmp_pa
 @pytest.mark.torch
 def test_admission_propagates_peer_header_failure_before_loading(tmp_path, fake_runtime):
     calls, capacity = fake_runtime
-    checkpoint(tmp_path, small_config(), [("lm_head.weight", "U32", [64, 8], 2048)])
+    checkpoint(tmp_path, small_config(), HEAD)
     from tensorfold.cuda.geometry import gdn_geometry, linear_weights
     with pytest.raises(ValueError, match="another rank could not read"):
         capacity.admit(tmp_path, None, False, None, lambda t: gdn_geometry(t, 2, 12), linear_weights,

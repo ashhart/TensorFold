@@ -4,7 +4,8 @@ import importlib
 from types import SimpleNamespace
 
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 from tests.test_cuda_geometry import allocations  # noqa: F401
 

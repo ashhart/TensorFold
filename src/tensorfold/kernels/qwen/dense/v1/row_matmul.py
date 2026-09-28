@@ -1,4 +1,4 @@
-"""Row-exact 4-bit matmul and stacked projections for targets; draft projections may use kernels without row-exactness."""
+"""Row-exact affine matmul and compatible stacked projections for targets; draft projections may use stock kernels."""
 
 from __future__ import annotations
 
@@ -16,34 +16,47 @@ class Backend:
     """Provide row-exact qmm for up to max_rows rows and prepare each weight, scales, biases and group size once at install."""
 
     def __init__(self, name: str, qmm: Callable[..., mx.array], max_rows: int, fits: Callable[[Any], bool],
-                 prepare: Callable[[list[tuple[mx.array, mx.array, mx.array, int]]], None] | None = None) -> None:
+                 prepare: Callable[[list[tuple[mx.array, mx.array, mx.array, int, int]]], None] | None = None) -> None:
         self.name, self.qmm, self.max_rows, self.fits, self.prepare = name, qmm, int(max_rows), fits, prepare
 
-    def __call__(self, x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, group_size: int) -> mx.array:
-        return self.qmm(x, weight, scales, biases, group_size)
+    def __call__(self, x: mx.array, weight: mx.array, scales: mx.array, biases: mx.array, group_size: int,
+                 bits: int = 4) -> mx.array:
+        if bits == 4:
+            return self.qmm(x, weight, scales, biases, group_size)
+        return self.qmm(x, weight, scales, biases, group_size, bits)
 
 
 def simd_qmm_backend() -> Backend:
     """``simd_qmm``, its one-row calls through the MMA kernel for any shape whose scalar kernel's bits differ here."""
 
-    from tensorfold.kernels.qwen.dense.v1 import simd_qmm
+    from tensorfold.kernels.qwen.dense.v1 import affine_rows, simd_qmm
 
-    def prepare(weights: list[tuple[mx.array, mx.array, mx.array, int]]) -> None:
-        seen: set[tuple[int, int, int]] = set()
-        for w, s, b, gs in weights:
-            shape = (int(w.shape[0]), int(w.shape[1]) * 8, int(gs))
-            if shape not in seen:
-                seen.add(shape)
-                if not simd_qmm.check(w, s, b, group_size=gs):
-                    simd_qmm.mma_one_row.add(shape)
+    def prepare(weights: list[tuple[mx.array, mx.array, mx.array, int, int]]) -> None:
+        seen: set[tuple[Any, ...]] = set()
+        for w, s, b, gs, bits in weights:
+            shape = (int(w.shape[0]), int(w.shape[1]) * 32 // bits, int(gs))
+            key = (*shape, bits, s.dtype)
+            if key not in seen:
+                seen.add(key)
+                if fast(w, s, b, gs, bits):
+                    if not simd_qmm.check(w, s, b, group_size=gs):
+                        simd_qmm.mma_one_row.add(shape)
+                else:
+                    mx.eval(affine_rows.qmm(mx.zeros((1, shape[1]), dtype=mx.bfloat16), w, s, b, gs, bits))
 
-    def qmm(x: mx.array, w: mx.array, s: mx.array, b: mx.array, gs: int) -> mx.array:
+    def fast(w: mx.array, s: mx.array, b: mx.array, gs: int, bits: int) -> bool:
+        return (bits == 4 and gs in (32, 64) and s.dtype == mx.bfloat16 and b.dtype == mx.bfloat16
+                and int(w.shape[0]) % 8 == 0)
+
+    def qmm(x: mx.array, w: mx.array, s: mx.array, b: mx.array, gs: int, bits: int = 4) -> mx.array:
+        if not fast(w, s, b, gs, bits):
+            return affine_rows.qmm(x, w, s, b, gs, bits)
         rows = x.size // int(x.shape[-1])
         if 2 <= rows <= FRAGMENT_ROWS and gs == simd_qmm.GROUP:   # same bits as simd_qmm.qmm(x), less input work
             return simd_qmm.qmm_fragments(simd_qmm.fragments(x), w, s, b).reshape(*x.shape[:-1], int(w.shape[0]))
         return simd_qmm.qmm(x, w, s, b, gs)
 
-    return Backend("simd_qmm", qmm, int(simd_qmm.MAX_ROWS), simd_qmm.fits, prepare=prepare)
+    return Backend("simd_qmm", qmm, int(simd_qmm.MAX_ROWS), affine_rows.fits, prepare=prepare)
 
 
 BACKEND: Backend | None = None
@@ -60,11 +73,16 @@ _ATTR = "_row_forward_stacks"
 class Stack:
     """Weights of projections that read the same rows, concatenated along the outputs; the members hold views."""
 
-    __slots__ = ("weight", "scales", "biases", "group_size", "sizes", "members", "held")
+    __slots__ = ("weight", "scales", "biases", "group_size", "bits", "sizes", "members", "held")
 
     def __init__(self, members: Sequence[Any]) -> None:
+        formats = {(int(m.bits), int(m.group_size), getattr(m, "mode", "affine"), int(m["weight"].shape[1]),
+                    m["scales"].dtype, m["biases"].dtype) for m in members}
+        if len(formats) != 1:
+            raise ValueError("Stacked projections must share their bit width, group size, layout and scale dtype")
         self.members = tuple(members)
         self.group_size = int(members[0].group_size)
+        self.bits = int(members[0].bits)
         self.sizes = tuple(int(m["weight"].shape[0]) for m in members)
         self.weight = mx.concatenate([m["weight"] for m in members], axis=0)
         self.scales = mx.concatenate([m["scales"] for m in members], axis=0)
@@ -80,7 +98,8 @@ class Stack:
         self.held = tuple(m["weight"] for m in members)
 
     def valid(self) -> bool:
-        return all(m["weight"] is w for m, w in zip(self.members, self.held))
+        return all(m["weight"] is w and int(m.bits) == self.bits and int(m.group_size) == self.group_size
+                   and getattr(m, "mode", "affine") == "affine" for m, w in zip(self.members, self.held))
 
 
 def _stackable(members: Sequence[Any], backend: Backend) -> bool:
@@ -89,8 +108,8 @@ def _stackable(members: Sequence[Any], backend: Backend) -> bool:
     if not all(isinstance(m, nn.QuantizedLinear) and backend.fits(m) and "bias" not in m for m in members):
         return False
     k8 = {int(m["weight"].shape[1]) for m in members}
-    gs = {int(m.group_size) for m in members}
-    return len(k8) == 1 and len(gs) == 1
+    formats = {(int(m.bits), int(m.group_size), getattr(m, "mode", "affine"), m["scales"].dtype) for m in members}
+    return len(k8) == 1 and len(formats) == 1
 
 
 def stack_of(parent: Any, kind: str) -> Stack | None:
@@ -122,20 +141,20 @@ def build(model: Any, backend: Backend) -> dict[str, int]:
 def project(module: Any, x: mx.array) -> mx.array:
     """One projection through the backend (any bias added after)."""
 
-    y = BACKEND(x, module["weight"], module["scales"], module["biases"], module.group_size)
+    y = BACKEND(x, module["weight"], module["scales"], module["biases"], module.group_size, module.bits)
     if "bias" in module:
         y = y + module["bias"]
     return y
 
 
 def project_stack(stack: Stack, x: mx.array) -> mx.array:
-    return BACKEND(x, stack.weight, stack.scales, stack.biases, stack.group_size)
+    return BACKEND(x, stack.weight, stack.scales, stack.biases, stack.group_size, stack.bits)
 
 
 def logits(head: Any, x: mx.array) -> mx.array:
     """The head over rows ``x`` (final-normed hidden states [1, R, D]) through the row-exact matmul."""
 
-    return BACKEND(x, head["weight"], head["scales"], head["biases"], head.group_size)
+    return BACKEND(x, head["weight"], head["scales"], head["biases"], head.group_size, head.bits)
 
 
 _DRAFT_ATTR = "_row_forward_draft"
@@ -179,7 +198,8 @@ def route_drafter(model: Any) -> int:
         if isinstance(module, nn.QuantizedLinear) and BACKEND.fits(module):
             object.__setattr__(module, _DRAFT_ATTR, True)
             count += 1
-            shape = (int(module["weight"].shape[0]), int(module["weight"].shape[1]) * 8)
+            shape = (int(module["weight"].shape[0]), int(module["weight"].shape[1]) * 32 // module.bits,
+                     int(module.bits), int(module.group_size))
             if shape not in seen:                   # compiled now, not inside the first request
                 seen.add(shape)
                 for rows in (2, WINDOW_ROWS):
@@ -215,11 +235,11 @@ def install(model: Any, backend: Backend | None = None) -> dict[str, int]:
     if BACKEND.prepare is not None:
         import mlx.nn as nn
 
-        weights = [(m["weight"], m["scales"], m["biases"], int(m.group_size)) for _, m in model.named_modules()
+        weights = [(m["weight"], m["scales"], m["biases"], int(m.group_size), int(m.bits)) for _, m in model.named_modules()
                    if isinstance(m, nn.QuantizedLinear)]
         for _, module in model.named_modules():
             for stack in module.__dict__.get(_ATTR, {}).values():
-                weights.append((stack.weight, stack.scales, stack.biases, stack.group_size))
+                weights.append((stack.weight, stack.scales, stack.biases, stack.group_size, stack.bits))
         BACKEND.prepare(weights)
     return stacked
 

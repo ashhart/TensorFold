@@ -14,7 +14,7 @@ from tensorfold.cuda.kernels.prefill_attention import attention
 from . import glue
 from . import prefill_bf16, prefill_glue
 from .forward import State
-from .qmm_fast import tile
+from .qmm_fast import matmul, matmul_partial, tile
 from .weights import QLinear, Weights
 
 CHUNK = 4096
@@ -22,11 +22,14 @@ TAP_LAYERS = (5, 19, 33, 47, 61)
 
 
 def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
-    """``x``: a quantized input (e4m3, group sums, row scales) from ``prefill_glue``, or bf16 rows for an EXL3 pack."""
+    """``x``: e4m3 inputs with group sums and row scales from ``prefill_glue``, or bf16 rows from ``prefill_bf16``."""
 
     if not isinstance(w, QLinear):
-        return w.prefill(x)
-    return shared.prefill_matmul8(x, tile(w), f32=f32)
+        return w.prefill(x)                               # an EXL3 pack's projection
+    if isinstance(x, tuple):
+        return shared.prefill_matmul8(x, tile(w), f32=f32)
+    packed = tile(w)                                      # an affine format past the FP8 four-bit path
+    return matmul_partial(x, packed) if f32 else matmul(x, packed)
 
 
 def _row_mm(x, w: QLinear, tp: bool) -> torch.Tensor:
@@ -56,7 +59,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
     """Commit ``tokens`` at [st.pos, st.pos + W) into ``st``, replacing its list entries, never writing through them (``every``: all rows' final normed states)."""
 
     c = w.config
-    pg = prefill_bf16 if w.quant == "exl3" else prefill_glue
+    pg = prefill_glue if w.fast_prefill else prefill_bf16         # FP8 inputs only where every projection is 4-bit g64
     W = int(tokens.shape[0])
     p0 = st.pos
     keep = c.conv_kernel - 1
