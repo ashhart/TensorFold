@@ -8,11 +8,12 @@ from typing import Any
 MODEL_TYPES = ("qwen4_exp",)
 TITLE = "Qwen3.8 Flash Next"
 LANES = True
-# 4-bit weights in groups of 32 (what the fused kernels read), with the checkpoint's MTP head kept
-MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3")
-QUANT_METHODS = {"cuda": ("mlx", "exl3")}      # the CUDA engine reads MLX affine 4-bit and EXL3 packs
+# 4-bit weights in groups of 32 (what the fused kernels read), with the checkpoint's MTP head kept;
+# CUDA also reads the Swift NVFP4 (ModelOpt FP4) checkpoint as it ships.
+MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3",
+          "ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4")
+QUANT_METHODS = {"cuda": ("mlx", "exl3", "modelopt")}  # MLX affine 4-bit, EXL3 packs, NVFP4 experts
 EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
-MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4")
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
 KERNEL_VERSION = "v1"
 # The CLI sets these before MLX starts, respecting environment overrides, to keep expert bindings from ending each command buffer.
@@ -31,16 +32,17 @@ def has_mtp(model_dir: Path) -> bool:
 
 
 def check(model_dir: Path) -> None:
-    from tensorfold.families import EXL3_QUANT, quant_method, quantization, read_config
+    from tensorfold.families import (EXL3_QUANT, OWN_MODEL_HELP, describe_quantization, quant_method,
+                                     quantization, read_config)
 
     config = read_config(model_dir)
-    if quant_method(config) == EXL3_QUANT:
+    method = quant_method(config)
+    if method == EXL3_QUANT:
         # an EXL3 pack (the CUDA engine, any codebook and per-tensor width): only the MTP head to report
         if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
             print("[tensorfold] this EXL3 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
-    from tensorfold.families import OWN_MODEL_HELP, describe_quantization, quant_method, quantization, read_config
-
-    if quant_method(config) == "modelopt":
+        return
+    if method == "modelopt":
         # the CUDA engine's NVFP4 route (the Swift checkpoint): the FP4 group the kernels read
         found = config.get("quantization") or config.get("quantization_config") or {}
         groups = found.get("config_groups") or {}
@@ -61,8 +63,10 @@ def check(model_dir: Path) -> None:
               flush=True)
 
 
-# a table's tensors in the checkpoint: weights, scales and biases of each shard, the only bytes read on the host
-_TABLE = r"language_model\.model\.layers\.\d+\.ple\.ple_embedding\.ngram_embedding\.shard_\d+\.(weight|scales|biases)"
+# a table's tensors in the checkpoint: weights (and scales/biases of each 4-bit shard). MLX packs spell
+# them ``language_model.model.layers...``; the published NVFP4 revision spells them ``model.language_model.layers...``.
+_TABLE = (r"(?:language_model\.model|model\.language_model)\.layers\.\d+\.ple\.ple_embedding\."
+          r"ngram_embedding\.shard_\d+\.(weight|scales|biases)")
 
 
 def ple_bytes(model_dir: Path) -> int:
@@ -130,7 +134,6 @@ def kernel_version(model: Any) -> str:
 CUDA_QUANTIZATION = (4, 32)
 # the KV cache dtypes the CUDA engine can allocate (``--kv-dtype``)
 CUDA_KV_DTYPES = ("bf16", "int8", "int4")
-QUANT_METHODS = {"cuda": ("mlx", "modelopt")}
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
