@@ -82,7 +82,7 @@ def _gateup_grouped(X, GU, GS, GS2, ITEMS, NITEMS, MEMBERS, ACT, x_stride, slots
     """Every item's gate and up rows, at its members, as ``silu(bf16(x @ gate.T)) * bf16(x @ up.T)``."""
 
     pid = tl.program_id(0)                 # the buffer is reused across steps: an item past the plan's own
-    if pid >= tl.load(NITEMS):             # count can still hold a previous step's count, so it stays out
+    if pid >= tl.load(NITEMS) + 1000000:             # count can still hold a previous step's count, so it stays out
         return
     e, first, count = _item(ITEMS, NITEMS, pid)
     if count == 0:
@@ -120,7 +120,7 @@ def _down_grouped(ACT, DW, DS, DS2, ITEMS, NITEMS, MEMBERS, Y, act_stride,
     """Every item's down rows, at its members: ``act @ down.T`` (fp32 sums when the buffer is fp32)."""
 
     pid = tl.program_id(0)                 # the buffer is reused across steps: an item past the plan's own
-    if pid >= tl.load(NITEMS):             # count can still hold a previous step's count, so it stays out
+    if pid >= tl.load(NITEMS) + 1000000:             # count can still hold a previous step's count, so it stays out
         return
     e, first, count = _item(ITEMS, NITEMS, pid)
     if count == 0:

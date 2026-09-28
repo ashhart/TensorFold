@@ -66,6 +66,26 @@ class MoE4:
     # plan's capacity, so the routing decides how many items are live, never how many programs run.
     capturable = True
 
+    # The shared expert's output and split-K partials, kept between steps: an allocation made inside a capture
+    # is a block the graph pool may hand back while the kernel reading it still runs, which is what killed a
+    # cached load (and, before the capture, the 42nd layer). Allocating them once takes that decision out.
+    shared_buffers: dict = field(default_factory=dict, repr=False)
+
+    def shared_out(self, x: torch.Tensor, fp: nvfp4.FP4, *, f32: bool = False):
+        """``(out, part)`` for the shared expert, sized once from the first (uncaptured) step."""
+
+        sk = nvfp4.split_for(fp.n, fp.k)
+        key = (int(x.shape[0]), fp.n, f32)
+        got = self.shared_buffers.get(key)
+        if got is None:
+            out = torch.empty((int(x.shape[0]), fp.n), dtype=torch.float32 if f32 else torch.bfloat16,
+                              device=x.device)
+            part = torch.empty((sk, int(x.shape[0]), fp.n), dtype=torch.float32, device=x.device) if sk > 1 \
+                else None
+            got = (out, part)
+            self.shared_buffers[key] = got
+        return got
+
     @property
     def routed(self) -> int:
         return int(self.gate_up.weight.shape[0])
@@ -168,7 +188,8 @@ class MoE4:
             if codes.numel():
                 flat[self._dest(codes, slots)] = self.gateup_rows(x[codes // 32], e)
         nvfp4_grouped.gateup(self.gate_up, x, flat, plan, ni, slots)
-        g = nvfp4.matmul(x, self.shared.gu)
+        out, part = self.shared_out(x, self.shared.gu)
+        g = nvfp4.matmul(x, self.shared.gu, out=out, part=part)
         gate = g[:, :ni].to(torch.float32)
         up = g[:, ni:].to(torch.float32)
         act[:, top_k] = ((gate / (1.0 + torch.exp(-gate))).to(torch.bfloat16).to(torch.float32)
@@ -201,7 +222,8 @@ class MoE4:
             flat[dest] = nvfp4.matmul(act.reshape(-1, ni)[dest], self._expert(e).down,
                                       f32=True).to(flat.dtype)
         nvfp4_grouped.down(self.down_proj, act.reshape(-1, ni), flat, plan, slots)
-        y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True).to(y.dtype)
+        out, part = self.shared_out(act[:, top_k], self.shared.down, f32=True)
+        y[:, top_k] = nvfp4.matmul(act[:, top_k], self.shared.down, f32=True, out=out, part=part).to(y.dtype)
         return y
 
 
