@@ -69,13 +69,13 @@ codebase with one hidden fact, cold prompts:
 
 | Prompt | Prompt reading | First token | Decode at that depth | Hidden fact |
 | --- | ---: | ---: | ---: | :---: |
-| 32,770 tokens | 1,155 tok/s | 28 s | 42.7 tok/s | found |
-| 130,839 tokens | 1,110 tok/s | 118 s | 45.1 tok/s | found |
-| 262,099 tokens | 1,033 tok/s | 254 s | 40.1 tok/s | found |
+| 32,770 tokens | 1,292 tok/s | 25 s | 45.3 tok/s | found |
+| 130,839 tokens | 1,231 tok/s | 106 s | 44.2 tok/s | found |
+| 257,711 tokens | 1,139 tok/s | 226 s | 42.8 tok/s | found |
 
-`--context 262144` left at least 14 GB free on each Spark through the 256k prompt; `--context 0` allocated a
+`--context 262144` left at least 14 GB free on each Spark through a 256k prompt; `--context 0` allocated a
 487,495-token window, not measured that far. Drafted replies equaled serial ones (9/9). Short prompts decoded at
-49.8 / 42.3 / 60.9 / 48.0 tok/s (code and chat, sampled and greedy, 64 tokens, median of 5 seeds).
+49.0 / 44.0 / 63.1 / 47.6 tok/s (code and chat, sampled and greedy, 64 tokens, median of 5 seeds).
 
 ### EXL3
 
