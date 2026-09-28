@@ -357,9 +357,7 @@ class App:
 
     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
             prepared: PreparedRequest | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
-        """One reply. ``cancelled()`` is true once the client has gone: a request that has not started raises
-        ``RequestCancelled`` without an engine call. A running one stops at its next round, as it does when ``emit``
-        fails, and raises ``RequestCancelled`` once ``generate`` returns, so no truncated reply is written."""
+        """One reply; once ``cancelled()`` holds, a waiting request raises ``RequestCancelled`` unstarted, a running one stops at its next round and raises it after ``generate``."""
 
         prepared = prepared if prepared is not None else self.prepare(body, chat)
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
@@ -384,8 +382,7 @@ class App:
             return reasoning, answer
 
         def on_tokens(new: list[int]) -> bool:
-            # True stops the engine after this round. Engines that finish on both ranks (two-rank Flash Next,
-            # Nemotron and GLM) keep calling; they get True again, and no more text is decoded or sent.
+            # True stops the engine after this round; engines that finish on both ranks keep calling and get True
             if stopped["client"] or failed:
                 return True
             try:
