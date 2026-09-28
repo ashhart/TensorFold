@@ -325,7 +325,7 @@ def _dsa_latent(a, w: Weights, lc: torch.Tensor, pos_dev: torch.Tensor, b: Buffe
             glue.router(b.normed[:R], ix.gate, b.igr[:R])
             sparse.index_update(b.ikr[:R, :c.index_dim], b.igr[:R], ix.ln_w, ix.ln_b, ix.ape, ik, ig, pk, pos_dev)
     with prof.timed("dsa: absorb"):
-        qa = latent.absorb_q(b.q[:R], a.absorb, s.qa[:R])
+        qa = latent.absorb_q(b.q[:R], a.absorb, s.qa[:R], prefill=b.prefill)
     ol = s.ol[:R]
     scale = c.qk_dim ** -0.5
     if not all_sparse:
@@ -340,7 +340,7 @@ def _dsa_latent(a, w: Weights, lc: torch.Tensor, pos_dev: torch.Tensor, b: Buffe
         with prof.timed("dsa: sparse attention"):
             latent.sparse_attention(qa, lc, tokens, counts, ol, scale)
     with prof.timed("dsa: expand"):
-        o = latent.expand_v(ol, a.absorb, b.vn[:R]).view(R, HL * c.v_dim)
+        o = latent.expand_v(ol, a.absorb, b.vn[:R], prefill=b.prefill).view(R, HL * c.v_dim)
     return out_proj(w, b, o, a.o, qmm.group_sums(o, b.xs_ao[:R]), R)
 
 

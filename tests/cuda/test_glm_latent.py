@@ -297,3 +297,27 @@ def test_prefill_head_tiles_give_the_decode_tiles_bits():
         latent.sparse_attention(qa[r:r + 1].contiguous(), cache, tokens[r:r + 1].contiguous(),
                                 counts[r:r + 1].contiguous(), one, 0.07)
         assert torch.equal(wide[r], one[0]), f"sparse row {r}"
+
+
+@cuda
+def test_prefill_absorb_and_expand_are_chunk_invariant_and_close():
+    """Prompt chunks absorb and expand on one bf16 GEMM: a row's bits are the same in any chunk, and near the decode path's."""
+    from tensorfold.families.glm5_next.cuda import latent
+
+    gen = torch.Generator().manual_seed(9)
+    a, wk, wv = _absorb_q4(gen)
+    R = 200                                                # not a multiple of the 64-row tile
+    q = (torch.randn((R, H, D), generator=gen) * 0.5).to(torch.bfloat16).cuda()
+    ol = (torch.randn((R, H, L), generator=gen) * 0.5).to(torch.bfloat16).cuda()
+    qa = latent.absorb_q(q, a, torch.empty((R, H, L), dtype=torch.bfloat16, device="cuda"), prefill=True)
+    ov = latent.expand_v(ol, a, torch.empty((R, H, D), dtype=torch.bfloat16, device="cuda"), prefill=True)
+    for lo, hi in ((0, 1), (5, 70), (131, 200)):
+        qa_c = latent.absorb_q(q[lo:hi].contiguous(), a, torch.empty((hi - lo, H, L), dtype=torch.bfloat16, device="cuda"),
+                               prefill=True)
+        ov_c = latent.expand_v(ol[lo:hi].contiguous(), a, torch.empty((hi - lo, H, D), dtype=torch.bfloat16, device="cuda"),
+                               prefill=True)
+        assert torch.equal(qa_c, qa[lo:hi]) and torch.equal(ov_c, ov[lo:hi]), (lo, hi)
+    qa_d = latent.absorb_q(q, a, torch.empty((R, H, L), dtype=torch.bfloat16, device="cuda"))
+    ov_d = latent.expand_v(ol, a, torch.empty((R, H, D), dtype=torch.bfloat16, device="cuda"))
+    assert (qa.float() - qa_d.float()).abs().max() <= 2e-2 * qa_d.float().abs().max()
+    assert (ov.float() - ov_d.float()).abs().max() <= 2e-2 * ov_d.float().abs().max()

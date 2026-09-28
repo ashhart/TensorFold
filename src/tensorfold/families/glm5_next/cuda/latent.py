@@ -78,6 +78,16 @@ class AbsorbQ4:
     def nbytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in (self.wkw, self.wks, self.wkb, self.wvw, self.wvs, self.wvb))
 
+    def prefill_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """bf16 copies for prompt chunks, made once: key blocks [H, qk_dim, latent] and value blocks transposed [H, latent, v_dim]."""
+        if getattr(self, "_bf", None) is None:
+            def full(w, sc, b):
+                return torch.stack([dequant_mlx4(w[h], sc[h], b[h]) for h in range(self.heads)]).to(torch.bfloat16)
+
+            self._bf = (full(self.wkw, self.wks, self.wkb).contiguous(),
+                        full(self.wvw, self.wvs, self.wvb).transpose(1, 2).contiguous())
+        return self._bf
+
 
 # ----------------------------------------------------------------------------------------- absorb, expand ---
 
@@ -162,9 +172,37 @@ def row_block(R: int) -> int:
     return 1 if R <= 16 else 16
 
 
-def absorb_q(q: torch.Tensor, a, out: torch.Tensor) -> torch.Tensor:
-    """q [R, H, qk_dim] bf16 -> out [R, H, latent] bf16."""
+@triton.jit
+def _head_gemm(A, B, C, R, a_row, a_head, c_row, c_head, K: tl.constexpr, N: tl.constexpr,
+               BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    """Program (row tile, column tile, head): C[r, h] = A[r, h] @ B[h] on tensor cores, K in order; fixed tiles, so a row's bits never depend on R."""
+    rm = tl.program_id(0) * BM + tl.arange(0, BM)
+    rn = tl.program_id(1) * BN + tl.arange(0, BN)
+    h = tl.program_id(2).to(tl.int64)
+    rk = tl.arange(0, BK)
+    ok = rm < R
+    acc = tl.zeros((BM, BN), tl.float32)
+    for k0 in range(0, K, BK):
+        a = tl.load(A + rm[:, None].to(tl.int64) * a_row + h * a_head + (k0 + rk)[None, :], mask=ok[:, None], other=0.0)
+        b = tl.load(B + (h * K + k0 + rk[:, None]) * N + rn[None, :])
+        acc = tl.dot(a, b, acc)
+    tl.store(C + rm[:, None].to(tl.int64) * c_row + h * c_head + rn[None, :], acc.to(tl.bfloat16), mask=ok[:, None])
+
+
+def _heads_matmul(x: torch.Tensor, w: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """x [R, H, K] (rows and heads strided, K contiguous) @ w [H, K, N] -> out [R, H, N] bf16."""
+    R, H, K = x.shape
+    N = w.shape[2]
+    _head_gemm[(triton.cdiv(R, 64), N // 64, H)](x, w, out, R, x.stride(0), x.stride(1), out.stride(0), out.stride(1),
+                                                 K=K, N=N, BM=64, BN=64, BK=64, num_warps=4, num_stages=3)
+    return out
+
+
+def absorb_q(q: torch.Tensor, a, out: torch.Tensor, *, prefill: bool = False) -> torch.Tensor:
+    """q [R, H, qk_dim] bf16 -> out [R, H, latent] bf16; ``prefill``: bf16 weights on one GEMM, any chunking the same bits, not decode's."""
     R, H, D = q.shape
+    if prefill and isinstance(a, AbsorbQ4):
+        return _heads_matmul(q, a.prefill_weights()[0], out)
     if isinstance(a, AbsorbQ4):
         rb = row_block(R)
         _absorb_q4[(H, a.lw // 64, triton.cdiv(R, rb))](q, a.wkw, a.wks, a.wkb, out, R, H=H, D=D, LW=a.lw, RB=rb,
@@ -175,9 +213,11 @@ def absorb_q(q: torch.Tensor, a, out: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def expand_v(o_lat: torch.Tensor, a, out: torch.Tensor) -> torch.Tensor:
-    """o_lat [R, H, latent] bf16 -> out [R, H, v_dim] bf16."""
+def expand_v(o_lat: torch.Tensor, a, out: torch.Tensor, *, prefill: bool = False) -> torch.Tensor:
+    """o_lat [R, H, latent] bf16 -> out [R, H, v_dim] bf16; ``prefill`` as in ``absorb_q``."""
     R, H, _ = o_lat.shape
+    if prefill and isinstance(a, AbsorbQ4):
+        return _heads_matmul(o_lat, a.prefill_weights()[1], out)
     if isinstance(a, AbsorbQ4):
         BN = 16
         _expand_v4[(H, a.v_dim // BN)](o_lat, a.wvw, a.wvs, a.wvb, out, R, H=H, DV=a.v_dim, LW=a.lw, BN=BN,
