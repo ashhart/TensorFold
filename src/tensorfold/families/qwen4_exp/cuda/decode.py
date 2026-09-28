@@ -280,6 +280,17 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
     return first
 
 
+WARM_TAIL = 18      # a partial chunk after a full one: neither its rows nor the MTP head's 17 divide by 16
+
+
+@torch.no_grad()
+def warm(e: Engine) -> None:
+    """Prefill a synthetic prompt (a full chunk, then a partial one) and empty the state, so no request compiles or loads a prompt kernel."""
+
+    prefill(e, [0] * min(e.prefill_rows + WARM_TAIL, e.capacity), None)
+    e.reset()
+
+
 @dataclass
 class DecodeResult:
     tokens: list[int]

@@ -109,6 +109,14 @@ class FlashNextEngine:
                     table.prefetch()
         read_s = time.perf_counter() - started
         captured = self.e.graphs.warm(self.depth + 1) if self.e is not None and self.e.graphs is not None else 0
+        started = time.perf_counter()
+        if self.concurrent:
+            self.multi.warm()
+        else:
+            from .decode import warm
+
+            warm(self.e)
+        warm_s = time.perf_counter() - started
         self.eos = tuple(w.cfg.eos)
         self.served = 0
         self.cache: list[tuple[list[int], dict]] = []    # (committed ids, what resuming from them needs)
@@ -122,7 +130,7 @@ class FlashNextEngine:
                f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s")
         kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
-              "decode graphs captured", flush=True)
+              f"decode graphs captured; prompt kernels warmed in {warm_s:.1f}s", flush=True)
 
     def _same_settings(self, torch, ids) -> None:
         """Both ranks must decode with the same rule, context, draft vocabulary and KV cache, or they would fall out of step: refuse to start otherwise."""

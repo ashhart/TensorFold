@@ -11,7 +11,7 @@ from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import Stream, accept
 from tensorfold.engine.exact_sampling import MARGIN, choose_rows
 
-from .decode import PREFILL_ROWS, Engine, draft, prefill
+from .decode import PREFILL_ROWS, WARM_TAIL, Engine, draft, prefill
 from .forward import commit, compute, stage
 from .mtp import mtp_compute, mtp_stage
 from .state import Buffers, State
@@ -87,6 +87,19 @@ class MultiDecoder:
 
     def live(self) -> int:
         return len(self.streams)
+
+    @torch.no_grad()
+    def warm(self) -> None:
+        """A synthetic greedy request through prefill, its drafts and one round, then forgotten, so no request compiles or loads a kernel."""
+
+        s = Stream([0] * min(PREFILL_ROWS + WARM_TAIL, self.capacity - self.depth - 2), 2)
+        self.admit(s)
+        if not s.done:
+            self.round()
+        self.streams.pop(s.sid, None)
+        self._drop_kept(s.st)
+        if all(f is not s.st for f in self.free):
+            self.free.append(s.st)
 
     @torch.no_grad()
     def admit(self, s: Stream) -> None:
