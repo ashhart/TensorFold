@@ -93,12 +93,13 @@ class GLM5:
             ok = K.metal() and all(layer.attn_hc is not None and HCK.hc_fits(layer.attn_hc, dims)
                                    and HCK.hc_fits(layer.ffn_hc, dims) for layer in self.layers)
             self._hc_ok = ok
-        return ok and K.metal()
+        return ok and K.metal() and C.act() == mx.bfloat16          # the fused HC step is bf16-only
 
     def embed_tokens(self, tokens: mx.array) -> mx.array:
         e = self.embed
         ids = tokens.reshape(-1)
-        return mx.dequantize(e.weight[ids], e.scales[ids], e.biases[ids], group_size=e.group, bits=e.bits)
+        return mx.dequantize(e.weight[ids], e.scales[ids], e.biases[ids], group_size=e.group,
+                             bits=e.bits).astype(C.act())
 
     def hidden(self, tokens: Any, cache: list[Any]) -> mx.array:
         """One stream's R consecutive tokens: final-normed hidden states [1, R, D]."""

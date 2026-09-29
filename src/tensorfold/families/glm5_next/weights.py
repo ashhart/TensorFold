@@ -167,11 +167,34 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False, stream: 
     return Layer(attn, mlp, in_norm, post_norm, attn_hc, ffn_hc, cfg)
 
 
+_METAL: dict = {}                                                    # the kernel modules' own metal()
+
+
+def set_activation(config: dict) -> None:
+    """The activation dtype the checkpoint asks for; float32 leaves the bf16-only kernels to their MLX-op paths."""
+
+    from tensorfold.families.glm5_next import config as C
+    from tensorfold.kernels.glm.flash.v1 import fused, kda as kda_k, sparse_attention
+
+    want = str(config.get("tensorfold_activation_dtype") or "bfloat16")
+    if want not in ("bfloat16", "float32"):
+        raise ValueError(f"tensorfold_activation_dtype {want!r}: bfloat16 or float32")
+    C.ACT = mx.float32 if want == "float32" else mx.bfloat16
+    # the fused KDA step, the sparse-decode attention and fused.py are bf16-only; kernels.py's HC split,
+    # gated-delta recurrence and one-row GEMVs take float32 as they are, its bf16-only kernels check the dtype
+    for mod in (fused, kda_k, sparse_attention):
+        _METAL.setdefault(mod.__name__, mod.metal)
+        mod.metal = (lambda: False) if want == "float32" else _METAL[mod.__name__]
+    if want == "float32":
+        print("[glm5] float32 activations", flush=True)
+
+
 def load_backbone(model_dir: Path, *, layers: int | None = None, stream: bool = False) -> GLM5:
     """The backbone, layer by layer; ``layers``: only the first that many; ``stream``: routed experts left on disk."""
 
     model_dir = Path(model_dir)
     config = json.loads((model_dir / "config.json").read_text())
+    set_activation(config)
     cfg = Config.from_dict(config)
     w = Weights(model_dir, mtp_layer=cfg.num_hidden_layers)
     count = cfg.num_hidden_layers if layers is None else min(int(layers), cfg.num_hidden_layers)

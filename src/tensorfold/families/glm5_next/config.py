@@ -22,6 +22,16 @@ EVAL_EVERY = 2
 
 
 
+# the activation dtype: bf16, or float32 when the checkpoint's config sets tensorfold_activation_dtype
+ACT = None
+
+
+def act():
+    import mlx.core as mx
+
+    return mx.bfloat16 if ACT is None else ACT
+
+
 # the MLX affine formats the loader reads (the fused kernels take 4-bit groups of 64; others take MLX's one-row calls)
 BITS = (2, 3, 4, 5, 6, 8)
 GROUPS = (32, 64, 128)

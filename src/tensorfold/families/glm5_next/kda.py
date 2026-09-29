@@ -52,7 +52,7 @@ class KDA:
         """f_b / g_b (128 inputs: MLX's one-row kernel for them is qmv_quad, which qmv_rows does not cover)."""
 
         rows = int(x.shape[0])
-        if row_kernel("kda_proj", rows, decode) and K.qmv_quad_rows_fits(q, rows):
+        if x.dtype == mx.bfloat16 and row_kernel("kda_proj", rows, decode) and K.qmv_quad_rows_fits(q, rows):
             return K.qmv_quad_rows(x, q)
         return per_row(lambda r: q(r), x, decode)
 
@@ -74,7 +74,7 @@ class KDA:
         """One stream's rows through the fused decode kernel; the entry state is kept so ``keep`` can replay."""
 
         rows, h, d = int(proj.shape[0]), self.heads, self.dim
-        conv = cache.conv if cache.conv is not None else mx.zeros((self.taps - 1, 3 * self.width), dtype=mx.bfloat16)
+        conv = cache.conv if cache.conv is not None else mx.zeros((self.taps - 1, 3 * self.width), dtype=C.act())
         entry = cache.ssm if cache.ssm is not None else mx.zeros((1, h, d, d), dtype=mx.float32)
         y, cache.ssm, cache.conv = KDA_K.kda_rows(self, proj, conv, entry)
         cache.offset += rows
@@ -103,8 +103,8 @@ class KDA:
         v = co[:, 2 * width:].reshape(1, rows, h, d)
         # l2 norms as RMS norms: x / |x| = rms_norm(x, eps / d) / sqrt(d); q also carries d^-1/2
         eps = 1e-6 / d
-        q = (mx.fast.rms_norm(q.astype(mx.float32), None, eps) * (1.0 / d)).astype(mx.bfloat16)
-        k = (mx.fast.rms_norm(k.astype(mx.float32), None, eps) * (d ** -0.5)).astype(mx.bfloat16)
+        q = (mx.fast.rms_norm(q.astype(mx.float32), None, eps) * (1.0 / d)).astype(C.act())
+        k = (mx.fast.rms_norm(k.astype(mx.float32), None, eps) * (d ** -0.5)).astype(C.act())
         a = self._small(self.f_b, fa, decode).reshape(1, rows, h, d)
         g = mx.exp(cfg.linear_lower_bound * mx.sigmoid(self.A * (a.astype(mx.float32) + self.dt_bias)))
         beta = mx.sigmoid(b).reshape(1, rows, h)
@@ -116,4 +116,4 @@ class KDA:
         cache._replay = [rows, ci, entry, q, k, v, g, beta] if decode else None
         gate = self._small(self.g_b, ga, decode).reshape(rows, h, d)
         o = mx.fast.rms_norm(y.reshape(rows, h, d).astype(mx.float32), self.o_norm, cfg.rms_norm_eps)
-        return (o * mx.sigmoid(gate.astype(mx.float32))).astype(mx.bfloat16).reshape(rows, width)
+        return (o * mx.sigmoid(gate.astype(mx.float32))).astype(C.act()).reshape(rows, width)

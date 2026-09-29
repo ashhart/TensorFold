@@ -120,7 +120,7 @@ class MoE:
 
             return stream.moe(self, x, rows_exact)
         rows = int(x.shape[0])
-        if rows_exact and "moe" in C.FUSED and self.fused_ok and K.metal():
+        if rows_exact and "moe" in C.FUSED and self.fused_ok and K.metal() and x.dtype == mx.bfloat16:
             return MK.moe_rows(self, x)
         if row_kernel("experts", rows, rows_exact):
             idx, w = self.route(self.logits(x, True))

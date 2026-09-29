@@ -10,6 +10,12 @@ from tensorfold.kernels.glm.flash.v1 import kda as KDA_K
 from tensorfold.kernels.glm.flash.v1 import kernels as K
 
 
+def _act():
+    from tensorfold.families.glm5_next import config as C
+
+    return C.act()
+
+
 class KDACache:
     """A KDA layer's conv window and fp32 state; ``_replay`` keeps the last decode call's entry state for ``keep``."""
 
@@ -73,10 +79,10 @@ class MLACache:
             pad = mx.zeros((rows, width), dtype=dtype)
             return pad if a is None else mx.concatenate([a, pad[: rows - int(a.shape[0])]])
 
-        self.keys = grown(self.keys, 512 if self.keys is None else int(self.keys.shape[1]), new, mx.bfloat16)
-        self.ik = grown(self.ik, 128 if self.ik is None else int(self.ik.shape[1]), new, mx.bfloat16)
-        self.ig = grown(self.ig, 128 if self.ig is None else int(self.ig.shape[1]), new, mx.bfloat16)
-        self.pool = grown(self.pool, 128 if self.pool is None else int(self.pool.shape[1]), new // 4, mx.bfloat16)
+        self.keys = grown(self.keys, 512 if self.keys is None else int(self.keys.shape[1]), new, _act())
+        self.ik = grown(self.ik, 128 if self.ik is None else int(self.ik.shape[1]), new, _act())
+        self.ig = grown(self.ig, 128 if self.ig is None else int(self.ig.shape[1]), new, _act())
+        self.pool = grown(self.pool, 128 if self.pool is None else int(self.pool.shape[1]), new // 4, _act())
 
     def append(self, lat: mx.array, ik: mx.array, ig: mx.array, ape: mx.array, kpool: int) -> None:
         """Write rows [offset, offset + R) and pool every block they complete."""
@@ -84,14 +90,14 @@ class MLACache:
         rows = int(lat.shape[0])
         start, end = self.offset, self.offset + rows
         if self.keys is None:
-            self.keys = mx.zeros((0, int(lat.shape[1])), dtype=mx.bfloat16)
-            self.ik = mx.zeros((0, int(ik.shape[1])), dtype=mx.bfloat16)
-            self.ig = mx.zeros((0, int(ig.shape[1])), dtype=mx.bfloat16)
-            self.pool = mx.zeros((0, int(ik.shape[1])), dtype=mx.bfloat16)
+            self.keys = mx.zeros((0, int(lat.shape[1])), dtype=_act())
+            self.ik = mx.zeros((0, int(ik.shape[1])), dtype=_act())
+            self.ig = mx.zeros((0, int(ig.shape[1])), dtype=_act())
+            self.pool = mx.zeros((0, int(ik.shape[1])), dtype=_act())
         self._grow(end)
-        self.keys[start:end] = lat.astype(mx.bfloat16)
-        self.ik[start:end] = ik.astype(mx.bfloat16)
-        self.ig[start:end] = ig.astype(mx.bfloat16)
+        self.keys[start:end] = lat.astype(_act())
+        self.ik[start:end] = ik.astype(_act())
+        self.ig[start:end] = ig.astype(_act())
         first, last = start // kpool, end // kpool          # blocks [first, last) complete now
         if last > first:
             self.pool[first:last] = pool_blocks(self.ik[first * kpool:last * kpool],
@@ -126,5 +132,5 @@ def pool_blocks(keys: mx.array, gates: mx.array, ape: mx.array, kpool: int) -> m
     out = (e[0] / total) * k[:, 0]
     for j in range(1, kpool):
         out = out + (e[j] / total) * k[:, j]
-    return out.astype(mx.bfloat16)
+    return out.astype(_act())
 

@@ -161,6 +161,26 @@ conversions usually store per-tensor overrides: routed experts at 4 bits, attent
 windows keep one-row bits. On grant-ai's abliterated conversion, on a 256 GB M3 Ultra, the contributor measured
 46.3 tok/s drafted, equal to `"draft": false`.
 
+### Float32 activations
+
+Set `"tensorfold_activation_dtype": "float32"` in a checkpoint's `config.json` to run the residual stream, the MLA
+latent and indexer caches and the KDA states in float32 instead of bf16. The hyper-connection split, the gated-delta
+recurrence and the one-row GEMVs run their Metal kernels in float32; the fused KDA step, the sparse-decode attention
+and the fused bf16 matrix kernels step aside for their MLX-op paths. Rows keep their bits, so drafted replies still
+equal `"draft": false`, and without the key nothing changes (bf16 logits are byte-identical to before).
+
+Measured on a 512 GB M3 Ultra with GLM-5.3-Flash converted losslessly from a Q8_0 GGUF, against a float64
+reference of the same weights on 579 held-out items (MMLU-Pro 200, BBH 200, HumanEval 50, MBPP 129; per-item
+token-weighted RMS difference of mean NLL):
+
+| activations | BBH | HumanEval | MBPP | MMLU-Pro answers equal to the reference | prefill 4k / 32k tok/s | decode @32k tok/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| bf16 | 0.219 | 0.016 | 0.038 | 187 / 200 | 365 / 338 | 20.4 |
+| float32 | 0.011 | 0.002 | 0.003 | 199 / 200 | 371 / 312 | 19.6 |
+
+llama.cpp's Metal path on the same Q8_0 weights (F32 KV cache) measured 0.073 / 0.016 / 0.035 and 190 / 200.
+Memory: the caches double in size; the weights are unchanged.
+
 ### Prefill
 
 Prompt chunks attend as decode does: each query reads its own selected keys from the latent cache, so prefill cost

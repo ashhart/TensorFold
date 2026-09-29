@@ -126,7 +126,7 @@ class MLA:
             ig = K.matmul_rows(x, self.igate, transposed=True)
         else:
             ig = per_row(lambda r: r @ self.igate, x, decode)
-        iw = (parts[3] * self.i_scale).astype(mx.bfloat16)
+        iw = (parts[3] * self.i_scale).astype(C.act())
         batched = decode and row_kernel("mla_proj", rows, decode)
         if batched:
             # the latent maps with the rows as a batch (each keeps its one-row bits), attention row by row

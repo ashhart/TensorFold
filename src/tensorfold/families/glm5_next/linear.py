@@ -130,7 +130,7 @@ def project(x: mx.array, q: Any, *, rows_exact: bool) -> mx.array:
         return q(x)
     if isinstance(q, QSplit):
         return mx.concatenate([project(x, p, rows_exact=True) for p in q.parts], axis=-1)
-    if isinstance(q, Q) and K.metal() and K.qmv_rows_fits(q, rows):
+    if isinstance(q, Q) and x.dtype == mx.bfloat16 and K.metal() and K.qmv_rows_fits(q, rows):
         return K.qmv_rows(x, q)
     return mx.concatenate([q(x[r:r + 1]) for r in range(rows)])
 
