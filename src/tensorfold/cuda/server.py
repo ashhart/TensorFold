@@ -24,58 +24,10 @@ from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, call_format, generate_gated
 from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
+from tensorfold.cuda import health
 from tensorfold.cuda.chat_template import ChatTemplate
 from tensorfold.cuda.reply_text import StopStrings, StreamDecoder, hide_tool_calls, parse_tool_calls
 from tensorfold.server.text import split_thinking
-
-class _LiveTotals:
-    """Process-wide counters for a poller. Completion tokens move as they are emitted;
-    prompt tokens and prefill time move when the first output token arrives."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self.prompt = 0
-        self.completion = 0
-        self.prefill_seconds = 0.0
-        self.inflight = 0
-
-    def enter(self) -> None:
-        with self._lock:
-            self.inflight += 1
-
-    def leave(self) -> None:
-        with self._lock:
-            self.inflight = max(0, self.inflight - 1)
-
-    def note_prefill(self, prompt_tokens: int, seconds: float) -> None:
-        with self._lock:
-            self.prompt += max(0, int(prompt_tokens))
-            if seconds > 0:
-                self.prefill_seconds += float(seconds)
-
-    def add_completion(self, n: int) -> None:
-        if not n:
-            return
-        with self._lock:
-            self.completion += int(n)
-
-    def snapshot(self, context_length: int | None = None) -> dict[str, Any]:
-        with self._lock:
-            body: dict[str, Any] = {
-                "ok": True,
-                "backend": "tensorfold",
-                "busy": self.inflight > 0,
-                "requests_running": self.inflight,
-                "prompt_tokens_total": self.prompt,
-                "completion_tokens_total": self.completion,
-                "prefill_seconds_total": round(self.prefill_seconds, 6),
-            }
-        if context_length:
-            body["context_length"] = int(context_length)
-        return body
-
-
-_LIVE = _LiveTotals()
 
 
 # -- HTTP ------------------------------------------------------------------------------------
@@ -313,15 +265,8 @@ class App:
                           else hide_tool_calls(answer, finished=finished))
             return reasoning, answer
 
-        prefill_mark = {"t": 0.0, "noted": False}
-
         def on_tokens(new: list[int]) -> bool:
             # True stops the engine after this round; engines that finish on both ranks keep calling and get True
-            if new:
-                if not prefill_mark["noted"]:
-                    prefill_mark["noted"] = True
-                    _LIVE.note_prefill(len(prompt), time.perf_counter() - prefill_mark["t"])
-                _LIVE.add_completion(len(new))
             if stopped["client"] or stopped["stop"] or failed:
                 return True
             try:
@@ -375,12 +320,8 @@ class App:
         with (nullcontext() if getattr(self.engine, "concurrent", False) else self.lock):
             if cancelled is not None and cancelled():                # the client left while this request waited
                 raise RequestCancelled("the client left before the request started")
-            _LIVE.enter()
-            try:
-                prefill_mark["t"] = time.perf_counter()
-                stats = generate_gated(generate, prompt, max_tokens, gate, on_tokens)
-            finally:
-                _LIVE.leave()
+            with health.of(self).running(len(prompt), out) as request:      # /health reads ``out``; rounds never call in
+                stats = request.stats = generate_gated(generate, prompt, max_tokens, gate, on_tokens)
         if failed:
             raise failed[0]
         if stopped["client"]:                                        # as the Mac server: nothing more is written
@@ -481,7 +422,7 @@ def make_handler(app: App):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [{"id": app.served, "object": "model", "owned_by": "tensorfold"}]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
-                self._json(200, _LIVE.snapshot(getattr(app, "context_window", None)))
+                self._json(200, health.of(app).snapshot(app))
             else:
                 self._json(404, {"error": "not found"})
 

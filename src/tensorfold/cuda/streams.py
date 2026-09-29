@@ -31,6 +31,8 @@ class Stream:
     done: bool = False
     rounds: int = 0
     min_rows: int = 0
+    drafted: int = 0                                      # drafted rows its rounds verified, and the ones kept
+    accepted: int = 0
     cached: int = 0
     prefill_s: float = 0.0
     started: float = 0.0
@@ -41,6 +43,7 @@ class Stream:
 
         self.out.extend(new)
         self.context.extend(new)
+        self.accepted += max(0, len(new) - 1)             # a round's kept drafts come before its own token
         stop = bool(self.emit(new)) if self.emit is not None else False
         if stop or len(self.out) >= self.count or self.out[-1] in eos:
             self.done = True
@@ -48,11 +51,13 @@ class Stream:
 
     def counted(self, rows: int) -> None:
         self.rounds += 1
+        self.drafted += rows - 1
         self.min_rows = rows if self.min_rows == 0 else min(self.min_rows, rows)
 
     def stats(self) -> dict:
         return {"prefill_s": round(self.prefill_s, 4), "decode_s": round(max(self.finished - self.started, 0.0), 4),
-                "rounds": self.rounds, "drafts": self.draft, "cached": self.cached, "min_rows": self.min_rows}
+                "rounds": self.rounds, "drafts": self.draft, "cached": self.cached, "min_rows": self.min_rows,
+                "drafted": self.drafted, "accepted": self.accepted}
 
 
 def accept(tokens: Sequence[int], parents: Sequence[int], sampled: Sequence[int], room: int,
