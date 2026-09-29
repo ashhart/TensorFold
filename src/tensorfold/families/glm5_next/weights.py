@@ -104,9 +104,10 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False, stream: 
                  "indexer.weights_proj"]
         # kv_b_proj as stored (vontra), or the absorbed pair the mlxlm layout keeps instead
         names += ["kv_b_proj"] if w.has(f"{attn_prefix}.kv_b_proj.weight") else ["embed_q", "unembed_out"]
-        # the indexer projections as stored: quantised, or unquantised as a Q8_0 GGUF keeps them
-        aw: dict[str, Any] = {n: (w.linear if n.startswith("indexer.") else w.q)(f"{attn_prefix}.{n}")
-                              for n in names}
+        # indexer projections and o_proj as stored: quantised, or dense when the checkpoint keeps no scales
+        aw: dict[str, Any] = {
+            n: (w.linear if n.startswith("indexer.") or n == "o_proj" else w.q)(f"{attn_prefix}.{n}")
+            for n in names}
         for n in ("q_a_layernorm", "kv_a_layernorm"):
             aw[n] = w.get(f"{attn_prefix}.{n}.weight")
         for n in ("indexer.k_norm.weight", "indexer.k_norm.bias", "indexer.index_kpool_compress_ape",
@@ -118,8 +119,8 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False, stream: 
                      attn.q_norm, attn.kv_norm, attn.ik_norm_w, attn.ik_norm_b, attn.ape, attn.igate)
     else:
         names = ["q_proj", "k_proj", "v_proj", "f_a_proj", "f_b_proj", "g_a_proj", "g_b_proj", "b_proj", "o_proj"]
-        # the low-rank gate projections and beta as stored: quantised, or unquantised as a Q8_0 GGUF keeps them
-        aw = {n: (w.q if n in ("q_proj", "k_proj", "v_proj", "o_proj") else w.linear)(f"{attn_prefix}.{n}")
+        # low-rank gates, beta and o_proj as stored: quantised, or dense when the checkpoint keeps no scales
+        aw = {n: (w.q if n in ("q_proj", "k_proj", "v_proj") else w.linear)(f"{attn_prefix}.{n}")
               for n in names}
         aw["o_norm"] = w.get(f"{attn_prefix}.o_norm.weight")
         if w.has(f"{attn_prefix}.conv1d.weight"):                        # mlxlm: one conv over q | k | v

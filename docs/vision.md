@@ -1,9 +1,8 @@
 # Image input
 
-The `vision` branch adds opt-in image understanding to compatible Qwen3.5/3.8 dense checkpoints on MLX and CUDA while retaining the existing lane decoder for generated text.
-The checkpoint must contain its vision tower, tokenizer and vision configuration; text-only conversions cannot recover image support from a flag.
-The first supported checkpoint is `Vontra/Qwen3.8-27B-MLX-4bit`.
-Other families, videos, audio and image generation are not supported by this adapter.
+The opt-in `--vision` flag accepts image and text content parts through the existing OpenAI-compatible chat API. It supports GLM-5.3-Flash on MLX and Qwen3.5/3.8 dense checkpoints on MLX and CUDA. Image features enter the existing model's prompt prefill; generated text still uses that family's normal decoder and speculative path.
+The checkpoint must contain its vision tower, tokenizer, processor files and vision configuration; text-only conversions cannot recover image support from a flag. GLM-5.3-Flash uses its own GLM5-Next image processor and tower while sharing TensorFold's already-loaded language model and MTP head.
+Video, audio and image generation are not supported by this adapter.
 
 ## Start a server
 
@@ -12,13 +11,15 @@ Install this branch's optional image dependencies from its checkout:
 ```bash
 python -m pip install '.[vision]'
 tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --vision
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --vision
 ```
 
-CUDA uses the same flag with `--backend cuda`; its vision tower must use floating-point weights.
+GLM-5.3-Flash image input is currently MLX-only. CUDA uses the same flag with `--backend cuda` for supported Qwen checkpoints; their vision tower must use floating-point weights.
 MLX also reads per-module quantized tower weights when the checkpoint declares their format.
 The tower shares the server process and the existing language model's embeddings; it does not load a second language model.
 CUDA two-rank mode encodes images on rank zero and sends their features and positions to rank one.
-Use the usual model and drafter prerequisites from the [Qwen recipe](recipes/qwen3.8-27b.md).
+Use the model and drafter prerequisites from the [Qwen recipe](recipes/qwen3.8-27b.md) or [GLM recipe](recipes/glm-5.3-flash.md).
+GLM derivatives may retain selected BF16 attention output projections, including the MTP layer; these use the existing dense projection path alongside the quantized weights.
 
 ## Send an image
 
@@ -74,11 +75,12 @@ The available memory budget may impose a smaller practical image or context limi
 Image requests currently start with a fresh KV cache and do not write reusable prompt checkpoints.
 This prevents identical image-placeholder token IDs from reusing another image's state; ordinary text requests retain their prefix caching.
 Multi-turn image conversations work when the request includes the original image content parts, but image-prefix reuse and persisted image KV are not implemented.
-Each image request carries its own multimodal rotary positions and continuation offset, including during concurrent lane rounds.
+For Qwen, each image request carries its own multimodal rotary positions and continuation offset, including during concurrent lane rounds. GLM uses its native KDA/NoPE attention state.
 
 ## Verification
 
 Compare image requests with `draft: true` and `draft: false` at identical sampling settings and seed, then compare concurrent requests with their solo results.
 Tests cover input validation, bounded fetching, expanded prompt accounting, cache isolation, memory admission, rotary metadata and distributed transport contracts.
 Hardware qualification is separate from these tests: each backend and chip needs real image understanding, drafted/serial equality, concurrency, chunked-prefill and memory checks before a release claim.
-This branch is experimental pending completion of that hardware matrix, and makes no vision throughput claim.
+Checkpoint metadata must describe the decoder separately from MTP: the `mlp_layer_types` list must match `num_hidden_layers` for Transformers validation. Preserve the separate MTP configuration and weights.
+This branch is experimental pending completion of the hardware matrix, and makes no vision throughput claim.

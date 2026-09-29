@@ -57,7 +57,18 @@ def check(model_dir: str | Path) -> None:
         from tensorfold.families.glm5_next.config import quant_formats, unreadable
 
         _require_mlx((0, 32, 2))
-        bad = sorted(name for name, fmt in quant_formats(config)[1].items() if unreadable(fmt))
+        from tensorfold.families.glm5_next.layouts import canonical
+
+        text = config.get("text_config") or config
+        mtp_layer = int(text.get("num_hidden_layers", 0))
+        # Attention outputs and the MTP input projection already have a dense matmul path.
+        def dense_supported(name: str) -> bool:
+            short = canonical(name, mtp_layer) or ""
+            return (short.startswith("layers.") and short.endswith(".self_attn.o_proj")
+                    or short == f"layers.{mtp_layer}.eh_proj")
+
+        bad = sorted(name for name, fmt in quant_formats(config)[1].items()
+                     if unreadable(fmt) and not (fmt is None and dense_supported(name)))
         if bad:
             raise ValueError(f"GLM-5.3-Flash's Mac engine reads MLX affine weights of 2 to 8 bits in groups of 32, 64 or "
                              f"128; this checkpoint stores {len(bad)} module(s) otherwise, {bad[0]} first. {OWN_MODEL_HELP}")
@@ -126,7 +137,7 @@ def expert_bytes(model_dir: Path) -> int:
 
 
 def load(model_dir: Path, *, mtp_drafts: int | None = None, ssd_experts: float | None = None,
-         **_: Any) -> tuple[Any, Any]:
+         vision: bool = False, vision_urls: bool = False, **_: Any) -> tuple[Any, Any]:
     """The MLX engine; ``mtp_drafts`` caps the MTP drafts a round (0: none); ``ssd_experts``: the expert pool's GiB."""
 
     import mlx.core as mx
@@ -139,7 +150,14 @@ def load(model_dir: Path, *, mtp_drafts: int | None = None, ssd_experts: float |
         limit = int(info.get("max_recommended_working_set_size", 0))
         if limit:
             mx.set_wired_limit(limit)
-    return load_runtime(Path(model_dir), drafts=mtp_drafts, ssd_experts=ssd_experts)
+    family, tokenizer = load_runtime(Path(model_dir), drafts=mtp_drafts, ssd_experts=ssd_experts)
+    if vision:
+        from tensorfold.vision.glm_mlx import GLMVisionFrontend
+
+        family.vision = GLMVisionFrontend.load(Path(model_dir), family.model.embed_tokens, allow_urls=vision_urls)
+        print(f"[tensorfold] GLM image encoder: {family.vision.workspace_bytes / 1024**3:.2f} GiB workspace "
+              "measured at the largest admitted image request (4,096 visual tokens)", flush=True)
+    return family, tokenizer
 
 
 def engine_settings(model: Any) -> dict[str, Any]:

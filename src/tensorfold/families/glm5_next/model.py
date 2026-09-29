@@ -103,12 +103,13 @@ class GLM5:
         return mx.dequantize(e.weight[ids], e.scales[ids].astype(mx.float32), e.biases[ids].astype(mx.float32),
                              group_size=e.group, bits=e.bits).astype(mx.bfloat16)
 
-    def hidden(self, tokens: Any, cache: list[Any]) -> mx.array:
+    def hidden(self, tokens: Any, cache: list[Any], *, inputs_embeds: mx.array | None = None) -> mx.array:
         """One stream's R consecutive tokens: final-normed hidden states [1, R, D]."""
 
-        return self.hidden_rows(tokens, [cache])
+        return self.hidden_rows(tokens, [cache], inputs_embeds=inputs_embeds)
 
-    def hidden_rows(self, tokens: Any, caches: list[list[Any]], lengths: Any = None) -> mx.array:
+    def hidden_rows(self, tokens: Any, caches: list[list[Any]], lengths: Any = None,
+                    inputs_embeds: mx.array | None = None) -> mx.array:
         """Several streams' rows in one forward, each with its own call's bits; a prompt chunk is one stream's."""
 
         ids = mx.array(tokens).reshape(-1).astype(mx.uint32)
@@ -118,7 +119,18 @@ class GLM5:
         if sum(lengths) != rows or len(lengths) != len(caches) or (len(lengths) > 1 and not decode):
             raise ValueError(f"hidden_rows: {len(caches)} streams of {lengths} rows for {rows} tokens (at most "
                              f"{C.DECODE_ROWS} rows when shared)")
-        h = self.embed_tokens(ids)                                       # [R, D]
+        if inputs_embeds is None:
+            h = self.embed_tokens(ids)                                   # [R, D]
+        else:
+            if len(caches) != 1:
+                raise ValueError("GLM multimodal embeddings are accepted for one prefill stream at a time")
+            h = inputs_embeds
+            if h.ndim == 3:
+                if int(h.shape[0]) != 1:
+                    raise ValueError("GLM multimodal embeddings must have batch size one")
+                h = h[0]
+            if h.ndim != 2 or tuple(h.shape) != (rows, int(self.args.hidden_size)):
+                raise ValueError("GLM multimodal embeddings must match the prompt rows and hidden size")
         x = mx.contiguous(mx.broadcast_to(h[:, None, :], (rows, self.args.hc_mult, h.shape[-1])))
         if decode and "hc" in C.FUSED and self.hc_fused_ok():
             # each block boundary in one fused step: the previous block's write-back, the next block's split + norm
