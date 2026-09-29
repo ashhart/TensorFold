@@ -69,6 +69,54 @@ def vision_fixture(model_dir, output, height, width, image_fixture=False, image_
     print(f"Saved upstream vision stages in {out}")
 
 
+def image_http_fixtures(output):
+    import ipaddress
+    import random
+    from tensorfold.vision.images_http import _public_ip, _url, ImageInputError
+    addresses = {"invalid", "127.1", "01.2.3.4", "::ffff:8.8.8.8", "2002:0808:0808::1", "168.63.129.16"}
+    for cls in (ipaddress.IPv4Address, ipaddress.IPv6Address):
+        constants = cls._constants
+        blocks = [*constants._private_networks, *constants._private_networks_exceptions]
+        if hasattr(constants, "_reserved_networks"):
+            blocks += constants._reserved_networks
+        else:
+            blocks += [constants._public_network, constants._multicast_network]
+        for block in blocks:
+            for boundary in (int(block.network_address), int(block.broadcast_address)):
+                for offset in (-1, 0, 1):
+                    if 0 <= boundary + offset < 1 << cls.max_prefixlen:
+                        addresses.add(str(cls(boundary + offset)))
+        rng = random.Random(271828)
+        for _ in range(1024):
+            addresses.add(str(cls(rng.getrandbits(cls.max_prefixlen))))
+    urls = [
+        "https://example.com", "https://example.com:443/a?x=1", "https://example.com/a#",
+        "HTTPS://EXAMPLE.COM/a", "https://bücher.example/æ?q=ø", "https://faß.example/a",
+        "https://[2606:4700:4700::1111]/a", "https://[2606:ABCD::1]/a",
+        "https://example.com/%2f?q=%20", "https://example.com/a/../b", "https://example.com/a?x=[a]",
+        "http://example.com/a", "https://user@example.com/a", "https://user:pass@example.com/a",
+        "https://example.com:8443/a", "https://example.com/#x", "https://example.com\\@localhost/a",
+        "https://example.com/a\n", "https://%31%32%37.0.0.1/a", "https://[fe80::1%25en0]/a",
+        "https://localhost./a", "https://METADATA.GOOGLE.INTERNAL/a", "https://instance-data/a",
+        "https:///a", "https://example.com/" + "x" * 4096,
+        "https://example.com:/a", "https://example.com/a?", "https://example.com/" + "ø" * 3000,
+        "https://" + ".".join(["ø" * 30] * 6) + "/a", "https://example.com／bad/a",
+        "https://example.com:+443/a", "https://😀.example/a", "https://under_score.example/a",
+    ]
+    cases = []
+    for value in urls:
+        try:
+            host, _, target = _url(value, 4096)
+            canonical = "https://" + ("[" + host + "]" if ":" in host else host) + target
+        except ImageInputError:
+            canonical = None
+        cases.append(dict(value=value, canonical=canonical))
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(ips=[dict(value=value, public=_public_ip(value)) for value in sorted(addresses)], urls=cases)))
+    print(f"Saved {len(addresses)} upstream image address and {len(cases)} URL fixtures")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="build/models/Qwen3.8-27B-MLX-4bit")
@@ -85,6 +133,7 @@ def main():
     parser.add_argument("--image-format", choices=("PNG", "JPEG", "WEBP"), default="PNG")
     parser.add_argument("--image-alpha", action="store_true")
     parser.add_argument("--image-only", action="store_true", help="Generate preprocessing oracle without loading the vision tower")
+    parser.add_argument("--image-http-fixtures", action="store_true")
     parser.add_argument("--image-mode", choices=("RGB", "RGBA", "L", "CMYK"))
     parser.add_argument("--image-orientation", type=int, choices=range(1, 9), default=1)
     parser.add_argument("--compare-vision", type=Path)
@@ -98,6 +147,8 @@ def main():
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
+    if args.image_http_fixtures:
+        return image_http_fixtures(args.output)
     if args.vision_fixture:
         return vision_fixture(args.model, args.output, *args.vision_fixture, args.image_fixture, args.image_format, args.image_alpha, args.image_orientation, args.image_only, args.image_mode)
     if args.compare_vision or args.compare_arrays:

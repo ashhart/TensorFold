@@ -87,6 +87,8 @@ pub fn build(b: *std.Build) void {
     mod.addRPath(b.path(b.fmt("{s}/lib", .{prefix})));
     mod.linkSystemLibrary("mlxc", .{});
     mod.linkSystemLibrary("mlx", .{});
+    mod.linkSystemLibrary("curl", .{});
+    mod.linkSystemLibrary("icucore", .{});
     const exe = b.addExecutable(.{ .name = "tensorfold", .root_module = mod });
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
@@ -342,6 +344,11 @@ pub fn build(b: *std.Build) void {
     b.step("test-gemma-model", "Compare Gemma tokenization, logits, sampling and long-context cache commits against upstream").dependOn(gemma_previous);
     const vision_model = b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root});
     const image_tests = b.step("test-images", "Compare PNG/JPEG/WebP preprocessing, alpha, grayscale, CMYK and every EXIF orientation");
+    const image_http_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--image-http-fixtures", "--output", "build/native-checks/image-http.json" });
+    const image_http = b.addRunArtifact(exe);
+    image_http.addArgs(&.{ "check-image-http", "build/native-checks/image-http.json" });
+    image_http.step.dependOn(&image_http_fixture.step);
+    b.step("test-image-http", "Compare image URL and public-address policies against upstream without network access").dependOn(&image_http.step);
     var image_previous: ?*std.Build.Step = null;
     for ([_][]const u8{ "PNG", "JPEG", "WEBP" }) |format| {
         for (1..9) |orientation| {

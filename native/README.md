@@ -197,18 +197,25 @@ and `--thinking-budget N` to change these defaults. The request's
 disables it. Budgets force `\n</think>\n\n` through decoding for tokenizers with
 a whole `</think>` token, matching upstream; Gemma's thought channel is excluded.
 Chat uses each model's Jinja template. Qwen accepts user `image_url` content
-parts containing data URLs, up to four images and 20 MiB decoded bytes total;
-`detail: "low"` caps each image at 256 visual tokens. Tool calls support the
+parts containing data URLs, up to four images and 20 MiB of image-file bytes total;
+`detail: "low"` caps each image at 256 visual tokens. `--vision-urls` also accepts
+public HTTPS images on port 443, using macOS libcurl and ICU. Every DNS answer
+and redirect is checked; connections use a pinned address and verified TLS.
+Downloads allow three redirects, 10 MiB per image, 10 seconds per image and
+30 seconds across the request. Tool calls support the
 Qwen, Gemma, GLM and DeepSeek formats, named/required choice, typed arguments
 and `parallel_tool_calls: false`. Tool-enabled streams hold content until
-the completed calls have been parsed. Remote image URLs and speculative
-serving are still pending.
+the completed calls have been parsed. Speculative serving is still pending.
 One inference worker owns the model; its queue holds eight requests.
 Against a running Qwen server, compare JSON/SSE text, reasoning and images with
 `.zig-toolchain/zig run tools/native_http_checks.zig -- http://127.0.0.1:8080/v1/chat/completions /path/to/image.png`.
 Replace the image path with `--tools-only` to check a named tool call.
 Use `--controls-only` with Qwen's unmodified sampling defaults to check model
 defaults, thinking-budget transitions and required calls in JSON/SSE.
+With `--vision-urls` enabled, pass `HTTPS_IMAGE_URL LOCAL_COPY` after the chat
+endpoint to compare HTTPS/data-URL outputs, usage and streaming. Run
+`.zig-toolchain/zig build test-image-http -Doptimize=safe -j1` for offline
+upstream URL/address policy checks.
 Use `--report build/native-checks/run.json` and
 `--dump-logits build/native-checks/logits.npy` for correctness evidence; create
 the output directory first.

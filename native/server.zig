@@ -14,11 +14,17 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var defaults = try inference.Options.load(init.gpa, init.io, args[2]);
     defaults.max_tokens = 4096;
     var thinking = true;
+    var vision_urls = false;
     var effort: []const u8 = "medium";
     var overrides = std.json.Value{ .object = .empty };
     defer overrides.object.deinit(init.gpa);
     var i: usize = 3;
     while (i < args.len) {
+        if (std.mem.eql(u8, args[i], "--vision-urls") or std.mem.eql(u8, args[i], "--no-vision-urls")) {
+            vision_urls = std.mem.eql(u8, args[i], "--vision-urls");
+            i += 1;
+            continue;
+        }
         if (std.mem.eql(u8, args[i], "--thinking") or std.mem.eql(u8, args[i], "--no-thinking")) {
             thinking = std.mem.eql(u8, args[i], "--thinking");
             i += 1;
@@ -53,7 +59,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     defer parsed.deinit();
     if (parsed.value == .object) if (parsed.value.object.get("model_type")) |kind| if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) try @import("glm.zig").Model.prepareRuntime();
     var jobs: [8]*Job = undefined;
-    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort };
+    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     defer {
         worker.queue.close(init.io);
@@ -103,6 +109,7 @@ const Worker = struct {
     defaults: inference.Options,
     thinking: bool,
     effort: []const u8,
+    vision_urls: bool,
     fn run(w: *Worker) void {
         w.loop() catch |err| {
             w.startup_error = err;
@@ -116,7 +123,7 @@ const Worker = struct {
         defer session.deinit();
         w.ready.set(w.io);
         while (w.queue.getOneUncancelable(w.io)) |job| {
-            complete(&session, job.a, job.request, job.model, job.sequence, job.created, job.socket, job.body, job.is_chat, job.options, w.thinking, w.effort) catch |err| {
+            complete(&session, job.a, job.request, job.model, job.sequence, job.created, job.socket, job.body, job.is_chat, job.options, w.thinking, w.effort, w.vision_urls) catch |err| {
                 job.failure = err;
             };
             job.done.set(w.io);
@@ -169,7 +176,7 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
     if (job.failure) |err| return err;
 }
 
-fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, created: i64, socket: std.posix.fd_t, body: std.json.Value, is_chat: bool, requested: inference.Options, default_thinking: bool, default_effort: []const u8) !void {
+fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, created: i64, socket: std.posix.fd_t, body: std.json.Value, is_chat: bool, requested: inference.Options, default_thinking: bool, default_effort: []const u8, vision_urls: bool) !void {
     var options = requested;
     var ids: std.ArrayList(i32) = .empty;
     var raw_images = body.object.get("images") orelse .null;
@@ -205,8 +212,8 @@ fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request
     }
     if (!thinking) options.thinking_budget = 0;
     session.validate(ids.items, options) catch |err| return failure(a, request, .bad_request, @errorName(err));
-    const images = @import("image_source.zig").sources(a, raw_images) catch |err| return failure(a, request, .bad_request, @errorName(err));
-    if (images.len > 0 and session.backend != .qwen) return failure(a, request, .bad_request, "This model does not support image inputs");
+    if (raw_images == .array and raw_images.array.items.len > 0 and session.backend != .qwen) return failure(a, request, .bad_request, "This model does not support image inputs");
+    const images = @import("image_source.zig").load(a, session.io, raw_images, vision_urls) catch |err| return failure(a, request, .bad_request, @errorName(err));
     const id = try std.fmt.allocPrint(a, "{s}cmpl-{d}-{d}", .{ if (is_chat) "chat" else "", created, sequence });
     const markers: reply_text.Markers = if (session.backend == .gemma) reply_text.gemma_markers else .{};
     var connection = Connection{ .socket = socket };

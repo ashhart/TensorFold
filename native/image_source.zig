@@ -2,6 +2,10 @@ const std = @import("std");
 const EncodedImage = @import("vision.zig").EncodedImage;
 
 pub fn sources(a: std.mem.Allocator, value: std.json.Value) ![]const EncodedImage {
+    return load(a, null, value, false);
+}
+
+pub fn load(a: std.mem.Allocator, io: ?std.Io, value: std.json.Value, allow_urls: bool) ![]const EncodedImage {
     if (value == .null) return &.{};
     if (value != .array or value.array.items.len > 4) return error.InvalidImageCount;
     const out = try a.alloc(EncodedImage, value.array.items.len);
@@ -11,6 +15,8 @@ pub fn sources(a: std.mem.Allocator, value: std.json.Value) ![]const EncodedImag
         a.free(out);
     }
     var total: usize = 0;
+    const http = @import("image_http.zig");
+    const deadline = if (io) |clock| http.now(clock) + 30000 else 0;
     for (value.array.items, out) |item, *source| {
         if (item != .object) return error.InvalidImageSource;
         const url = item.object.get("url") orelse return error.InvalidImageSource;
@@ -18,7 +24,15 @@ pub fn sources(a: std.mem.Allocator, value: std.json.Value) ![]const EncodedImag
         const detail = item.object.get("detail") orelse std.json.Value{ .string = "auto" };
         if (detail != .string) return error.InvalidImageDetail;
         source.detail = std.meta.stringToEnum(@FieldType(EncodedImage, "detail"), detail.string) orelse return error.InvalidImageDetail;
-        source.bytes = try dataBytes(a, url.string, @min(10 * 1024 * 1024, 20 * 1024 * 1024 - total));
+        const remaining = @min(10 * 1024 * 1024, 20 * 1024 * 1024 - total);
+        if (remaining == 0) return error.ImageByteLimitExceeded;
+        if (io) |clock| if (http.now(clock) >= deadline) return error.ImageDownloadTimedOut;
+        source.bytes = if (std.mem.startsWith(u8, url.string, "data:")) try dataBytes(a, url.string, remaining) else blk: {
+            if (!std.mem.startsWith(u8, url.string, "https://")) return error.InvalidImageSource;
+            if (!allow_urls) return error.ImageUrlsDisabled;
+            const clock = io orelse return error.ImageUrlsDisabled;
+            break :blk try http.fetch(a, clock, url.string, remaining, @min(deadline, http.now(clock) + 10000));
+        };
         total += source.bytes.len;
         used += 1;
     }
@@ -71,4 +85,11 @@ test "image data URLs preserve binary bytes and enforce encoded limits" {
     for ([_][]const u8{ "data:image/png;base64,AAEr_w==", "data:image/png;base64,AAEr/w", "data:image/png,%xy", "data:image/png;base64,æ" }) |url| try std.testing.expectError(error.InvalidImageEncoding, dataBytes(a, url, 100));
     try std.testing.expectError(error.InvalidImageSource, dataBytes(a, "file:///etc/passwd", 100));
     try std.testing.expectError(error.InvalidImageEncoding, dataBytes(a, "data:image/png;charset=utf8,abc", 100));
+}
+
+test "remote images are disabled unless explicitly enabled" {
+    const a = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, "[{\"url\":\"https://example.com/image.png\"}]", .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.ImageUrlsDisabled, sources(a, parsed.value));
 }

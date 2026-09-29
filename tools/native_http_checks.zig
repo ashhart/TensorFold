@@ -80,7 +80,34 @@ fn compare(init: std.process.Init, url: []const u8, body: V) !usize {
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
-    if (args.len != 3) return error.ExpectedChatUrlAndImagePath;
+    if (args.len != 3 and args.len != 4) return error.ExpectedChatUrlAndImagePath;
+    if (args.len == 4) {
+        if (!std.mem.startsWith(u8, args[2], "https://")) return error.ExpectedRemoteImageUrl;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, args[3], a, .limited(10 * 1024 * 1024));
+        const encoder = std.base64.standard.Encoder;
+        const encoded = try a.alloc(u8, encoder.calcSize(bytes.len));
+        _ = encoder.encode(encoded, bytes);
+        const data_url = try std.mem.concat(a, u8, &.{ "data:image/png;base64,", encoded });
+        var expected: ?V = null;
+        for ([_][]const u8{ data_url, args[2] }) |image_url| {
+            const source = try std.json.Stringify.valueAlloc(a, .{ .messages = &.{.{ .role = "user", .content = .{ .{ .type = "text", .text = "Describe this image briefly." }, .{ .type = "image_url", .image_url = .{ .url = image_url, .detail = "low" } } } }}, .reasoning_effort = "none", .max_tokens = @as(usize, 8), .temperature = @as(f64, 0), .seed = @as(usize, 1234) }, .{});
+            const body = try std.json.parseFromSlice(V, a, source, .{});
+            const reply = try std.json.parseFromSlice(V, a, try post(init, args[1], body.value), .{});
+            if (reply.value.object.contains("error")) return error.RemoteImageRequestFailed;
+            if (expected) |prior| {
+                for ([_][]const u8{ "choices", "usage" }) |key| if (!std.mem.eql(u8, try std.json.Stringify.valueAlloc(a, prior.object.get(key).?, .{}), try std.json.Stringify.valueAlloc(a, reply.value.object.get(key).?, .{}))) return error.RemoteImageMismatch;
+                _ = try compare(init, args[1], body.value);
+            } else expected = reply.value;
+        }
+        for ([_][]const u8{ "https://localhost/image.png", "https://example.com:8443/image.png", "http://example.com/image.png" }) |url| {
+            const source = try std.json.Stringify.valueAlloc(a, .{ .messages = &.{.{ .role = "user", .content = &.{.{ .type = "image_url", .image_url = .{ .url = url } }} }}, .max_tokens = @as(usize, 0) }, .{});
+            const body = try std.json.parseFromSlice(V, a, source, .{});
+            const reply = try std.json.parseFromSlice(V, a, try post(init, args[1], body.value), .{});
+            if (!reply.value.object.contains("error")) return error.UnsafeImageUrlAccepted;
+        }
+        std.debug.print("PASS: HTTPS/data image outputs and usage match; JSON/SSE agree; invalid destinations rejected\n", .{});
+        return;
+    }
     if (std.mem.eql(u8, args[2], "--controls-only")) {
         var defaults = try std.json.parseFromSlice(V, a,
             \\{"messages":[{"role":"user","content":"Name three colors."}],"reasoning_effort":"none","max_tokens":24,"seed":1234,"temperature":null,"top_k":null,"top_p":null}
