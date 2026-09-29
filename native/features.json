@@ -10,9 +10,11 @@
     "limitation": "The existing 4-bit checkpoint path is implemented; TensorFold 0.4's additional layouts and hardware-specific dispatch remain unverified and unported."
   },
   {
-    "id": "bonsai-partial-widening", "state": "missing", "requirement": "Choose and widen only the Bonsai decoder layers that fit pre-M5 memory budgets",
+    "id": "bonsai-partial-widening", "state": "present", "requirement": "Choose and widen only the Bonsai decoder layers that fit pre-M5 memory budgets",
     "upstream": ["src/tensorfold/families/bonsai/pack.py"],
-    "limitation": "Packed Bonsai execution exists; the widened:N policy is not ported."
+    "implementation": [{"path":"native/bonsai.zig","symbol":"widening"}, {"path":"native/bonsai.zig","symbol":"widen"}, {"path":"native/bonsai.zig","symbol":"load"}],
+    "checks": [{"step":"test-bonsai-pack","driver":{"path":"native/bonsai.zig","symbol":"check"},"scope":"checkpoint"}, {"step":"test-bonsai-layouts","driver":{"path":"native/main.zig","symbol":"main"},"scope":"checkpoint"}],
+    "limitation": "Budget policy, packing and all layouts match upstream on M5 using its SIMD fallback; physical M1–M4 execution is unverified."
   },
   {
     "id": "deepseek-draft-folders", "state": "present", "requirement": "DeepSeek MTP/DSpark model.safetensors folders selected and validated by config model_type",

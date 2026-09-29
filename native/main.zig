@@ -14,6 +14,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    @import("bonsai.zig").memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB");
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-bonsai-pack")) return @import("bonsai.zig").check(io, args[2], args[3]);
     if (args.len == 2 and std.mem.eql(u8, args[1], "check-request-state")) return @import("request_state_checks.zig").check();
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-session-images")) return @import("session_checks.zig").checkImages(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-session-rounds")) return @import("session_checks.zig").check(io, args[2]);
@@ -165,6 +167,12 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, args[i], "--metal-simd")) {
             mx.force_simd = true;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "--bonsai-form")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            @import("bonsai.zig").form_override = try @import("bonsai.zig").Form.parse(args[i + 1]);
+            i += 1;
             continue;
         }
         if (std.mem.eql(u8, args[i], "--check-exact")) {
@@ -415,7 +423,8 @@ pub fn main(init: std.process.Init) !void {
         var active: usize = 0;
         try mx.check(mx.c.mlx_get_peak_memory(&peak));
         try mx.check(mx.c.mlx_get_active_memory(&active));
-        const content = try std.json.Stringify.valueAlloc(allocator, .{ .mlx_version = std.mem.span(mx.c.mlx_string_data(version)), .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .draft_capture = capture_base, .serial_pipeline = use_serial_pipeline, .kv_buffers = @import("kv_buffer.zig").enabled, .queued_serial_steps = queued_serial_steps, .load_seconds = load_seconds, .warmup_seconds = warmup_seconds, .startup_seconds = startup_seconds, .calibration_seconds = @as(f64, 0), .prefill_mode = if (lane_prefill) "lane" else "regular", .metal_backend = if (mx.tensor_units) "tensor" else "simd", .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        const bonsai_form = if (m.weights.bonsai_form) |form| try form.name(init.arena.allocator()) else null;
+        const content = try std.json.Stringify.valueAlloc(allocator, .{ .mlx_version = std.mem.span(mx.c.mlx_string_data(version)), .bonsai_form = bonsai_form, .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .draft_capture = capture_base, .serial_pipeline = use_serial_pipeline, .kv_buffers = @import("kv_buffer.zig").enabled, .queued_serial_steps = queued_serial_steps, .load_seconds = load_seconds, .warmup_seconds = warmup_seconds, .startup_seconds = startup_seconds, .calibration_seconds = @as(f64, 0), .prefill_mode = if (lane_prefill) "lane" else "regular", .metal_backend = if (mx.tensor_units) "tensor" else "simd", .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
         defer allocator.free(content);
         const f = try std.Io.Dir.cwd().createFile(io, path, .{});
         defer f.close(io);

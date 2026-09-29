@@ -13,6 +13,7 @@ pub const Weights = struct {
     linears: std.StringHashMap(lanes.Linear),
     embedding_format: ?@import("quantization.zig").Spec = .{},
     embedding_signs: mx.Array = mx.empty,
+    bonsai_form: ?@import("bonsai.zig").Form = null,
     embedding_kernels: mx.Kernels,
     pub fn init() Weights {
         return .{ .arrays = std.StringHashMap(mx.Array).init(mx.allocator), .linears = std.StringHashMap(lanes.Linear).init(mx.allocator), .embedding_kernels = mx.Kernels.init() };

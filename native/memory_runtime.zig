@@ -9,7 +9,7 @@ pub fn activeBytes() !u64 {
     return value;
 }
 
-fn recommendedBytes() !usize {
+pub fn recommendedBytes() !usize {
     const device = mx.c.mlx_device_new_type(mx.c.MLX_GPU, 0);
     defer _ = mx.c.mlx_device_free(device);
     var info = mx.c.mlx_device_info_new();

@@ -78,8 +78,8 @@ pub const Model = struct {
     fn project(m: *Model, s: *mx.Scope, index: usize, suffix: []const u8, x: lanes.Act) !A {
         var buf: [192]u8 = undefined;
         const l = try m.weights.linear(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ index, suffix }));
-        // Only format-compatible projections share the upstream SIMD reduction.
-        if (!mx.tensor_units and l.format != null) inline for (.{
+        // Upstream stacks plain quantized linears, never rotated Bonsai wrappers.
+        if (!mx.tensor_units and l.format != null and l.signs.ctx == null) inline for (.{
             .{ "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.in_proj_b", "linear_attn.in_proj_a" },
             .{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" },
             .{ "mlp.gate_proj", "mlp.up_proj" },
@@ -93,7 +93,7 @@ pub const Model = struct {
                 var width: i32 = 0;
                 inline for (group) |name| {
                     const other = try m.weights.linear(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ index, name }));
-                    if (!std.meta.eql(l.format, other.format) or l.k != other.k or other.scales.ctx == null or mx.dtype(l.scales) != mx.dtype(other.scales)) compatible = false;
+                    if (other.signs.ctx != null or !std.meta.eql(l.format, other.format) or l.k != other.k or other.scales.ctx == null or mx.dtype(l.scales) != mx.dtype(other.scales)) compatible = false;
                     width += other.n;
                 }
                 if (compatible) return l.applyWithReduction(&m.kernels, s, x, if (width <= 64) 32 else if (width <= 6144) 16 else 8);

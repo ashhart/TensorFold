@@ -149,6 +149,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | DeepSeek drafter conversion | `test-drafter-conversion -Doptimize=safe -j1` | Synthetic official FP8/FP4 shards; exact upstream tensor bytes and native draft generation |
 | GLM/DeepSeek kernel components | `test-large-family-kernels -Doptimize=safe -j1` | Synthetic shapes; includes hardware-specific paths |
 | Qwen, Nemotron and Flash model/cache parity | `test-models -Doptimize=safe -j1` | All three installed models; substantial unified memory |
+| Bonsai memory layouts | `test-bonsai-pack test-bonsai-layouts -Doptimize=safe -j1` | Installed Bonsai; budget selection, packed/widened conversion, all layouts and mixed-layout prefill/continuation |
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
 | Request state and interleaved generation | `test-request-state test-session-rounds test-session-images -Doptimize=safe -j1` | Synthetic ownership for all backends; Qwen/Gemma/Nemotron checkpoints and Qwen image inputs |
 | Prefix cache policy and restoration | `test-prompt-cache test-session-rounds -Doptimize=safe -j1` | Python policy oracle; exact Qwen/Gemma/Nemotron continuation after prefix reuse and eviction |
@@ -289,6 +290,10 @@ For DSpark, the requested draft budget is capped at the checkpoint's block size.
 Use `--metal-simd` for the Qwen/Nemotron/Flash SIMD path and
 `--metal-sampling` for keyed Metal sampling. Match seed, sampler, temperature
 and backend when comparing Python and Zig.
+Bonsai's SIMD path selects packed, fully widened or `widened:N` layers from
+upstream's memory policy, including `TENSORFOLD_MEMORY_LIMIT_GB`. For diagnosis,
+`--bonsai-form packed|widened|widened:N` overrides that choice with `--metal-simd`;
+`--bonsai-form lanes` requires the tensor backend.
 
 Qwen image input accepts up to four local PNG, JPEG or WebP files:
 

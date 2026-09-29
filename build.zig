@@ -138,6 +138,36 @@ pub fn build(b: *std.Build) void {
     bonsai.step.dependOn(&bonsai_fixture.step);
     b.step("test-bonsai", "Compare rotated projection, inverse embedding and dense gate kernels with upstream").dependOn(&bonsai.step);
     metal_tests.dependOn(&bonsai.step);
+    const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const bonsai_model = b.fmt("{s}/Ternary-Bonsai-2-27B-mlx-2bit", .{model_root});
+    const bonsai_pack_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", bonsai_model, "--bonsai-widening", "--output", "build/native-checks/bonsai-pack" });
+    const bonsai_pack = b.addRunArtifact(exe);
+    bonsai_pack.addArgs(&.{ "check-bonsai-pack", bonsai_model, "build/native-checks/bonsai-pack" });
+    bonsai_pack.step.dependOn(&bonsai_pack_fixture.step);
+    b.step("test-bonsai-pack", "Compare Bonsai partial-widening policy and packed code conversion with upstream").dependOn(&bonsai_pack.step);
+    var bonsai_previous: *std.Build.Step = &bonsai_pack.step;
+    const bonsai_layout = b.option(usize, "bonsai-layout", "Limit test-bonsai-layouts to one layout (0..5)");
+    if (bonsai_layout != null and bonsai_layout.? > 5) @panic("bonsai-layout must be 0..5");
+    for ([_][]const u8{ "lanes", "packed", "widened", "widened:2", "widened:32", "auto" }, 0..) |form, index| {
+        if (bonsai_layout != null and bonsai_layout.? != index) continue;
+        const base = b.fmt("build/native-checks/bonsai-layouts/{d}", .{index});
+        const oracle_dir = b.fmt("{s}/python", .{base});
+        const native_dir = b.fmt("{s}/native", .{base});
+        const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", oracle_dir });
+        const check = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", native_dir, "--native" });
+        check.addArtifactArg(exe);
+        for ([_]*std.Build.Step.Run{ oracle, check }) |step| {
+            step.addArgs(&.{ "--model", bonsai_model, "--length", if (index == 4) "2049" else "129", "--generate", "32" });
+            if (index < 5) step.addArgs(&.{ "--bonsai-form", form }) else step.setEnvironmentVariable("TENSORFOLD_MEMORY_LIMIT_GB", "24");
+            if (index != 0) step.addArg("--simd");
+        }
+        oracle.step.dependOn(bonsai_previous);
+        check.step.dependOn(&oracle.step);
+        const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", oracle_dir, "--compare", native_dir });
+        compare.step.dependOn(&check.step);
+        bonsai_previous = &compare.step;
+    }
+    b.step("test-bonsai-layouts", "Compare all Bonsai projection layouts, mixed prefill and seeded continuation on the local checkpoint").dependOn(bonsai_previous);
     const gemma_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/gemma", "--gemma-only" });
     const gemma = b.addRunArtifact(exe);
     gemma.addArgs(&.{ "check-variants", "build/native-checks/gemma" });
@@ -285,7 +315,6 @@ pub fn build(b: *std.Build) void {
         if (std.mem.eql(u8, kind, "ple_norm")) b.step("test-ple-norm", "Compare PLE normalization against original Python arithmetic").dependOn(&check.step);
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
-    const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
     const session_tests = b.step("test-session-rounds", "Interleave isolated request caches, sampling and streaming on local Qwen, Gemma and Nemotron");
     const request_states = b.addRunArtifact(exe);
     request_states.addArg("check-request-state");

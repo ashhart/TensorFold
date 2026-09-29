@@ -15,6 +15,7 @@ def main():
     parser.add_argument("--compare", type=Path)
     parser.add_argument("--native", type=Path)
     parser.add_argument("--simd", action="store_true")
+    parser.add_argument("--bonsai-form", help="Diagnostic Bonsai layout: lanes, packed, widened or widened:N")
     parser.add_argument("--final-only", action="store_true", help="Do not hook/evaluate intermediate layers")
     parser.add_argument("--image", action="append", type=Path, default=[])
     parser.add_argument("--prompt", default="Write a short Python function that computes the Fibonacci sequence.")
@@ -36,6 +37,8 @@ def main():
             raise ValueError("Trace backend or prefill mode mismatch")
         if native.get("mlx_version") != versions["mlx"]:
             raise ValueError("Native and Python MLX versions differ")
+        if native.get("bonsai_form") != report.get("bonsai_form"):
+            raise ValueError("Native and Python Bonsai layouts differ")
         continuation_matches = native["tokens"] == report.get("generated", [])
         expected = {f"{start}-{layer}-{label}.npy" for start in report["starts"]
                     for layer in range(64) for label in ("hidden", "cache0", "cache1")}
@@ -77,6 +80,8 @@ def main():
                     if args.length else ["--prompt", prompt])
         if args.simd:
             command.append("--metal-simd")
+        if args.bonsai_form:
+            command.extend(["--bonsai-form", args.bonsai_form])
         for image in args.image:
             command.extend(["--image", str(image)])
         subprocess.run(command, check=True)
@@ -84,11 +89,14 @@ def main():
     import mlx.core as mx
     (args.directory / "report.json").unlink(missing_ok=True)
     from tensorfold.families.qwen3_5 import load
+    bonsai_form = None
     if json.loads((args.model / "config.json").read_text()).get("model_type") == "prism_hadamard_qwen35":
         from tensorfold.families.bonsai import pack
         from tensorfold.families.qwen3_5 import lane_family
         from mlx_lm.utils import load_tokenizer
-        model = pack.build(args.model, form="packed" if args.simd else "lanes")
+        from tensorfold.server.memory_budget import memory_limit_bytes
+        bonsai_form = args.bonsai_form or (pack.pre_m5_form(args.model, memory_limit_bytes(mx)) if args.simd else "lanes")
+        model = pack.build(args.model, form=bonsai_form)
         family = lane_family(model, lanes=not args.simd, drafter="", drafter_bits=4, title="Ternary Bonsai 2", use=str(args.model))
         tokenizer = load_tokenizer(args.model)
     else:
@@ -187,7 +195,7 @@ def main():
                 save(64, "decode-hidden", hidden)
                 save(64, "decode-logits", family.head(hidden))
         print("Continuation:", generated, flush=True)
-    (args.directory / "report.json").write_text(json.dumps({"starts": starts, "tokens": tokens, "generated": generated, "versions": versions, "simd": args.simd, "final_only": args.final_only}) + "\n")
+    (args.directory / "report.json").write_text(json.dumps({"starts": starts, "tokens": tokens, "generated": generated, "versions": versions, "simd": args.simd, "bonsai_form": bonsai_form, "final_only": args.final_only}) + "\n")
 
 
 if __name__ == "__main__":

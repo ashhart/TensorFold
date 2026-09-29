@@ -617,6 +617,33 @@ def conversion_fixture(directory):
     print("Saved upstream MTP/DSpark conversion fixtures, split shards and exhaustive FP8/E8M0 codes")
 
 
+def bonsai_widening_fixture(directory, output):
+    import mlx.core as mx
+    from tensorfold.families.bonsai import pack
+    output.mkdir(parents=True, exist_ok=True)
+    model, layers, rest = pack.widening(directory)
+    boundaries = [model + pack.ROOM, model + pack.ROOM + sum(layers) + rest]
+    for index in range(len(layers) + 1):
+        boundaries.append(model + pack.ROOM + sum(layers[:index]))
+    budgets = sorted({0, 1, 2**63, *(max(0, b + delta) for b in boundaries for delta in (-1, 0, 1))})
+    paths = [record['path'] for record in pack.contract(directory)[0]['modules']]
+    paths.extend(['model.layers.0', 'model.layers.01.x', 'model.layers.-1.x', 'model.layers.x.x', 'lm_head', 'other.layers.0.x'])
+    forms = ['lanes', 'packed', 'widened', 'widened:0', 'widened:1', 'widened:32', 'widened:64', 'widened:100']
+    files = []
+    rng = np.random.default_rng(8129)
+    for index, (rows, words) in enumerate([(1, 1), (7, 3), (8191, 2), (8192, 3), (8193, 4), (16387, 5)]):
+        weight = mx.array(rng.integers(0, 2**32, (rows, words), dtype=np.uint32))
+        expected = pack.widen(weight)
+        name = f'widen-{index}.safetensors'
+        mx.save_safetensors(str(output / name), {'input': weight, 'output': expected})
+        files.append(name)
+    (output / 'widening.json').write_text(json.dumps(dict(model=model, layers=layers, rest=rest,
+        budgets=[dict(budget=b, form=pack.pre_m5_form(directory, b)) for b in budgets],
+        modules=[dict(form=f, path=p, result=pack.module_form(f, p)) for f in forms for p in paths],
+        invalid=['', 'auto', 'widened:', 'widened:-1', 'widened:1.2', 'widened:+1', 'widened:1:2'], weights=files)))
+    print('Saved Bonsai widening policy and bit-exact code conversion fixtures')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
@@ -638,6 +665,7 @@ def main():
     p.add_argument("--synthetic-deepseek-wide", action="store_true")
     p.add_argument("--synthetic-deepseek-packed", action="store_true")
     p.add_argument("--conversion-fixtures", action="store_true")
+    p.add_argument("--bonsai-widening", action="store_true")
     p.add_argument("--synthetic-dspark", action="store_true")
     p.add_argument("--synthetic-dspark-sorted", action="store_true")
     p.add_argument("--synthetic-dspark-wide", action="store_true")
@@ -650,6 +678,9 @@ def main():
     p.add_argument("--trace-layers", action="store_true")
     p.add_argument("--state-directory", type=Path)
     args = p.parse_args()
+    if args.bonsai_widening:
+        bonsai_widening_fixture(args.model, args.output)
+        return
     if args.tool_fixtures:
         tool_fixtures(args.output)
         return
