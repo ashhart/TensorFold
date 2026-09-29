@@ -15,9 +15,11 @@
     "limitation": "Packed Bonsai execution exists; the widened:N policy is not ported."
   },
   {
-    "id": "deepseek-draft-folders", "state": "missing", "requirement": "DeepSeek MTP/DSpark model.safetensors folders selected and validated by config model_type",
+    "id": "deepseek-draft-folders", "state": "present", "requirement": "DeepSeek MTP/DSpark model.safetensors folders selected and validated by config model_type",
     "upstream": ["src/tensorfold/families/deepseek_v4/config.py", "src/tensorfold/families/deepseek_v4/convert.py", "src/tensorfold/families/deepseek_v4/runtime.py"],
-    "limitation": "The existing named-file conversion and loading contract has not yet migrated to upstream's new folder contract."
+    "implementation": [{"path":"native/deepseek_draft_config.zig","symbol":"read"}, {"path":"native/deepseek.zig","symbol":"loadDraft"}, {"path":"native/convert_drafter.zig","symbol":"run"}],
+    "checks": [{"step":"test-drafter-conversion","driver":{"path":"native/convert_drafter.zig","symbol":"check"},"scope":"synthetic"}],
+    "limitation": "Folder validation, conversion and synthetic CLI inference are verified; full DeepSeek checkpoint inference remains unverified."
   },
   {
     "id": "server-live-status", "state": "missing", "requirement": "Live server status with prefill/decode rates and waiting request counts",

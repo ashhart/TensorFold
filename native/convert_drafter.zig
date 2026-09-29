@@ -16,7 +16,8 @@ const plain = [_]Pair{
 };
 const hyper = [_]Pair{ .{ "hc_attn", "attn_hc" }, .{ "hc_ffn", "ffn_hc" }, .{ "hc_head", "hc_head" } };
 const experts = [_]Pair{ .{ "w1", "gate_proj" }, .{ "w2", "down_proj" }, .{ "w3", "up_proj" } };
-const Kind = enum { mtp, dspark };
+const draft_folder = @import("deepseek_draft_config.zig");
+const Kind = draft_folder.Kind;
 const Entry = struct { file: usize, tensor: safe.Tensor };
 
 const Source = struct {
@@ -202,28 +203,27 @@ const DraftConfig = struct {
     }
 };
 
-fn config(io: std.Io, shard: []const u8, out: []const u8) !?DraftConfig {
+fn config(io: std.Io, shard: []const u8, out: []const u8, kind: Kind) !DraftConfig {
     const path = try std.fs.path.join(a, &.{ std.fs.path.dirname(shard) orelse ".", "config.json" });
     defer a.free(path);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 * 1024 * 1024)) catch |err| return if (err == error.FileNotFound) null else err;
+    const bytes = if (kind == .dspark) try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 * 1024 * 1024)) else try a.dupe(u8, "{}");
     defer a.free(bytes);
     const parsed = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidDraftConfig;
     var selected: std.json.ObjectMap = .empty;
     defer selected.deinit(a);
+    try selected.put(a, "model_type", .{ .string = kind.modelType() });
     var it = parsed.value.object.iterator();
     while (it.next()) |e| if (std.mem.startsWith(u8, e.key_ptr.*, "dspark_")) {
         try selected.put(a, e.key_ptr.*, e.value_ptr.*);
     };
-    const dest = try std.fs.path.join(a, &.{ std.fs.path.dirname(out) orelse ".", "config.json" });
+    const dest = try std.fs.path.join(a, &.{ out, "config.json" });
     errdefer a.free(dest);
-    const origin = try std.Io.Dir.cwd().statFile(io, path, .{});
-    if (std.Io.Dir.cwd().statFile(io, dest, .{})) |existing| {
-        if (origin.inode == existing.inode) {
-            a.free(dest);
-            return null;
-        }
+    if (std.Io.Dir.cwd().statFile(io, path, .{})) |origin| {
+        if (std.Io.Dir.cwd().statFile(io, dest, .{})) |existing| {
+            if (origin.inode == existing.inode) return error.OutputAliasesInput;
+        } else |err| if (err != error.FileNotFound) return err;
     } else |err| if (err != error.FileNotFound) return err;
     const text = try std.json.Stringify.valueAlloc(a, std.json.Value{ .object = selected }, .{ .whitespace = .indent_2 });
     return .{ .path = dest, .text = text };
@@ -241,12 +241,15 @@ pub fn run(io: std.Io, arguments: []const []const u8) !void {
     if (kind == .dspark and arguments.len != args.len) return error.LayerOnlyAppliesToMtp;
     const paths = args[1 .. args.len - 1];
     const output = args[args.len - 1];
+    if (std.Io.Dir.cwd().statFile(io, output, .{})) |stat| {
+        if (stat.kind != .directory) return error.ExpectedOutputDirectory;
+    } else |err| if (err != error.FileNotFound) return err;
     var buffer: [128]u8 = undefined;
     const prefix = if (kind == .mtp) try std.fmt.bufPrint(&buffer, "mtp.{d}.", .{layer}) else "mtp.";
     var source = try Source.open(io, paths, prefix);
     defer source.deinit();
-    const draft_config = if (kind == .dspark) try config(io, paths[0], output) else null;
-    defer if (draft_config) |value| value.deinit();
+    const draft_config = try config(io, paths[0], output, kind);
+    defer draft_config.deinit();
     try mx.init();
     defer mx.shutdown();
     const map = mx.c.mlx_map_string_to_array_new();
@@ -271,8 +274,10 @@ pub fn run(io: std.Io, arguments: []const []const u8) !void {
             try block(&source, map, try std.fmt.bufPrint(&buffer, "mtp.{d}", .{id}), try std.fmt.bufPrint(&dest, "dspark.{d}", .{id}), kind);
         }
     }
-    try save(io, &source, map, output);
-    if (draft_config) |value| try value.write(io);
+    const weights = try std.fs.path.join(a, &.{ output, draft_folder.weights_name });
+    defer a.free(weights);
+    try save(io, &source, map, weights);
+    try draft_config.write(io);
     std.debug.print("Wrote {s}\n", .{output});
 }
 
@@ -311,13 +316,25 @@ pub fn check(io: std.Io, directory: []const u8) !void {
     const out = try std.fs.path.join(temp, &.{ directory, "native" });
     try std.Io.Dir.cwd().createDirPath(io, out);
     const mtp = try std.fs.path.join(temp, &.{ raw, "mtp.safetensors" });
-    const mtp_out = try std.fs.path.join(temp, &.{ out, "mtp.safetensors" });
+    const mtp_out = try std.fs.path.join(temp, &.{ out, "mtp" });
+    const folder_bytes = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(temp, &.{ directory, "folders.json" }), temp, .limited(1024 * 1024));
+    const folder_cases = try std.json.parseFromSlice(std.json.Value, temp, folder_bytes, .{});
+    for (folder_cases.value.array.items) |case| {
+        const path = try std.fs.path.join(temp, &.{ directory, "folders", case.object.get("folder").?.string });
+        if (case.object.get("accepted").?.bool) {
+            const parsed = try draft_folder.read(temp, io, path);
+            defer parsed.deinit();
+            try std.testing.expectEqualStrings(try std.json.Stringify.valueAlloc(temp, case.object.get("config").?, .{}), try std.json.Stringify.valueAlloc(temp, parsed.value, .{}));
+        } else try std.testing.expectError(error.InvalidDraftFolder, draft_folder.read(temp, io, path));
+    }
+    try std.testing.expectError(error.FileNotFound, run(io, &.{ "dspark", try std.fs.path.join(temp, &.{ directory, "no-config/model.safetensors" }), try std.fs.path.join(temp, &.{ out, "missing-config" }) }));
+    try std.testing.expectError(error.OutputAliasesInput, run(io, &.{ "mtp", try std.fs.path.join(temp, &.{ directory, "alias/model.safetensors" }), try std.fs.path.join(temp, &.{ directory, "alias" }) }));
     try run(io, &.{ "mtp", mtp, mtp_out });
-    try run(io, &.{ "mtp", try std.fs.path.join(temp, &.{ raw, "layer3.safetensors" }), try std.fs.path.join(temp, &.{ out, "layer3.safetensors" }), "--layer", "3" });
+    try run(io, &.{ "mtp", try std.fs.path.join(temp, &.{ raw, "layer3.safetensors" }), try std.fs.path.join(temp, &.{ out, "layer3" }), "--layer", "3" });
     for ([_][]const u8{ "dspark", "split" }) |kind| {
         const first = try std.fs.path.join(temp, &.{ raw, if (std.mem.eql(u8, kind, "dspark")) "model-00000.safetensors" else "split-0.safetensors" });
         const second = try std.fs.path.join(temp, &.{ raw, if (std.mem.eql(u8, kind, "dspark")) "model-00001.safetensors" else "split-1.safetensors" });
-        try run(io, &.{ "dspark", first, second, try std.fs.path.join(temp, &.{ out, kind, "dspark.safetensors" }) });
+        try run(io, &.{ "dspark", first, second, try std.fs.path.join(temp, &.{ out, kind }) });
     }
     {
         var source = try Source.open(io, &.{try std.fs.path.join(temp, &.{ raw, "codes.safetensors" })}, "mtp.");
@@ -333,28 +350,51 @@ pub fn check(io: std.Io, directory: []const u8) !void {
         try save(io, &source, map, try std.fs.path.join(temp, &.{ out, "codes.safetensors" }));
     }
     var count: usize = 0;
-    for ([_][]const u8{ "mtp.safetensors", "layer3.safetensors", "dspark/dspark.safetensors", "split/dspark.safetensors", "codes.safetensors" }) |name| {
-        const oracle = if (std.mem.startsWith(u8, name, "split")) "dspark/dspark.safetensors" else name;
+    for ([_][]const u8{ "mtp/model.safetensors", "layer3/model.safetensors", "dspark/model.safetensors", "split/model.safetensors", "codes.safetensors" }) |name| {
+        const oracle = if (std.mem.startsWith(u8, name, "split")) "dspark/model.safetensors" else name;
         count += try compare(io, try std.fs.path.join(temp, &.{ directory, "expected", oracle }), try std.fs.path.join(temp, &.{ out, name }));
     }
-    const expected_config = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(temp, &.{ directory, "expected/dspark/config.json" }), temp, .limited(4096));
-    const want = try std.json.parseFromSlice(std.json.Value, temp, expected_config, .{});
-    for ([_][]const u8{ "dspark", "split" }) |kind| {
+    for ([_][]const u8{ "mtp", "layer3", "dspark", "split" }) |kind| {
+        const oracle = if (std.mem.eql(u8, kind, "split")) "dspark" else kind;
+        const expected_config = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(temp, &.{ directory, "expected", oracle, "config.json" }), temp, .limited(4096));
+        const want = try std.json.parseFromSlice(std.json.Value, temp, expected_config, .{});
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, try std.fs.path.join(temp, &.{ out, kind, "config.json" }), temp, .limited(4096));
         const got = try std.json.parseFromSlice(std.json.Value, temp, bytes, .{});
         try std.testing.expectEqualStrings(try std.json.Stringify.valueAlloc(temp, want.value, .{}), try std.json.Stringify.valueAlloc(temp, got.value, .{}));
     }
-    try std.testing.expectError(error.OutputAliasesInput, run(io, &.{ "mtp", mtp, mtp }));
+    try std.testing.expectError(error.ExpectedOutputDirectory, run(io, &.{ "mtp", mtp, mtp }));
+    try std.testing.expectError(error.OutputAliasesInput, run(io, &.{ "mtp", mtp, raw }));
     try std.testing.expectError(error.DuplicateWeight, run(io, &.{ "mtp", mtp, mtp, mtp_out }));
     try std.testing.expectError(error.InvalidFp8Block, run(io, &.{ "mtp", try std.fs.path.join(temp, &.{ raw, "bad-scale.safetensors" }), mtp_out }));
     try std.testing.expectError(error.MissingWeight, run(io, &.{ "mtp", try std.fs.path.join(temp, &.{ raw, "missing-expert.safetensors" }), mtp_out }));
-    _ = try compare(io, try std.fs.path.join(temp, &.{ directory, "expected/mtp.safetensors" }), mtp_out);
+    _ = try compare(io, try std.fs.path.join(temp, &.{ directory, "expected/mtp/model.safetensors" }), try std.fs.path.join(temp, &.{ mtp_out, "model.safetensors" }));
     std.debug.print("PASS: {d} converted tensors match upstream byte-for-byte; all FP8/E8M0 codes, split shards, config and failure preservation checked\n", .{count});
+    const executable = try std.process.executablePathAlloc(io, temp);
+    const bad_drafter = try std.fs.path.join(temp, &.{ directory, "folders/legacy" });
+    const rejected = try std.process.run(temp, io, .{ .argv = &.{ executable, "run", try std.fs.path.join(temp, &.{ directory, "unloadable" }), "--drafter", bad_drafter, "--tokens", "1,2", "--max-tokens", "2" }, .stdout_limit = .limited(65536), .stderr_limit = .limited(65536) });
+    try std.testing.expect(rejected.term == .exited and rejected.term.exited != 0);
+    try std.testing.expect(std.mem.indexOf(u8, rejected.stderr, "error: InvalidDraftFolder") != null);
+    var serial_output: ?[]const u8 = null;
+    for ([_][]const []const u8{ &.{"--no-drafts"}, &.{ "--mtp-drafts", "0" }, &.{ "--mtp-drafts", "3" }, &.{ "--mtp-drafts", "3" } }, 0..) |options, index| {
+        const drafter = if (index < 2) bad_drafter else try std.fs.path.join(temp, &.{ out, if (index == 2) "mtp" else "dspark" });
+        const base: []const []const u8 = &.{ executable, "run", try std.fs.path.join(temp, &.{ directory, "target" }), "--drafter", drafter, "--tokens", "1,2", "--max-tokens", "12", "--temperature", "0" };
+        const argv = try std.mem.concat(temp, []const u8, &.{ base, options });
+        const result = try std.process.run(temp, io, .{ .argv = argv, .stdout_limit = .limited(65536), .stderr_limit = .limited(65536) });
+        if (result.term != .exited or result.term.exited != 0) {
+            std.debug.print("DeepSeek drafter CLI failed: {s}\n", .{result.stderr});
+            return error.DraftCliFailed;
+        }
+        if (serial_output) |expected| try std.testing.expectEqualStrings(expected, result.stdout) else serial_output = result.stdout;
+    }
+    std.debug.print("PASS: draft-folder preflight precedes backbone loading; CLI MTP/DSpark and both disabled-draft options preserve output\n", .{});
     try mx.init();
     defer mx.shutdown();
-    for ([_][]const u8{ "", "dspark" }) |draft_path| {
+    for ([_][]const u8{ "mtp", "dspark" }) |draft_path| {
         var model = try @import("deepseek.zig").Model.init(io, try std.fs.path.join(temp, &.{ directory, "target" }));
         defer model.deinit();
+        try std.testing.expect(!model.has_mtp);
+        try std.testing.expectError(error.InvalidDraftFolder, model.loadDraft(io, try std.fs.path.join(temp, &.{ directory, "folders/legacy" })));
+        try std.testing.expect(!model.has_mtp);
         try model.loadDraft(io, try std.fs.path.join(temp, &.{ out, draft_path }));
         for ([_]f64{ 0, 0.8 }) |temperature| {
             var reference: std.ArrayList(u32) = .empty;

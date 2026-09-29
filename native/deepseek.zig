@@ -129,7 +129,6 @@ pub const Model = struct {
         try m.validateGlobal();
         try m.dispatch.prepare(&m.kernels, &.{.{ .weights = try m.weights.triple("lm_head") }});
         for (0..cache.len) |i| try m.prepare(i);
-        m.loadDraft(io, dir) catch |err| if (err != error.FileNotFound) return err;
         return m;
     }
     pub fn deinit(m: *Model) void {
@@ -154,14 +153,19 @@ pub const Model = struct {
     fn layerRatio(m: *Model, i: usize) i32 {
         return if (i < m.config.value.compress_ratios.len) m.config.value.compress_ratios[i] else 0;
     }
-    pub fn loadDraft(m: *Model, io: std.Io, dir: []const u8) !void {
-        var path: [4096]u8 = undefined;
-        const file = std.Io.Dir.cwd().openFile(io, try std.fmt.bufPrint(&path, "{s}/dspark.safetensors", .{dir}), .{}) catch |err| blk: {
-            if (err != error.FileNotFound) return err;
-            break :blk null;
+    pub fn validateDraft(io: std.Io, dir: []const u8) !void {
+        const config = @import("deepseek_draft_config.zig").read(mx.allocator, io, dir) catch |err| {
+            if (err == error.InvalidDraftFolder) std.debug.print("{s}: expected a DeepSeek draft folder with model.safetensors and config.json whose model_type is deepseek_v4_mtp or deepseek_v4_dspark\n", .{dir});
+            return err;
         };
-        if (file) |f| {
-            f.close(io);
+        config.deinit();
+    }
+    pub fn loadDraft(m: *Model, io: std.Io, dir: []const u8) !void {
+        const folder = @import("deepseek_draft_config.zig");
+        const config = try folder.read(mx.allocator, io, dir);
+        defer config.deinit();
+        var path: [4096]u8 = undefined;
+        if (try folder.kind(config.value) == .dspark) {
             const draft = try @import("deepseek_dspark.zig").Draft.init(io, dir, m.config.value);
             if (m.dspark) |*old| old.deinit();
             m.dspark = draft;
@@ -170,7 +174,7 @@ pub const Model = struct {
         }
         var raw = cp.Store.init(64);
         defer raw.deinit();
-        try raw.loadFile(io, try std.fmt.bufPrint(&path, "{s}/mtp.safetensors", .{dir}), "", "");
+        try raw.loadFile(io, try std.fmt.bufPrint(&path, "{s}/{s}", .{ dir, folder.weights_name }), "", "");
         var it = raw.arrays.iterator();
         while (it.next()) |entry| {
             if (!std.mem.startsWith(u8, entry.key_ptr.*, "mtp.")) return error.InvalidDraftCheckpoint;
@@ -830,6 +834,7 @@ pub fn checkModel(io: std.Io, dir: []const u8, output: []const u8) !void {
     try std.Io.Dir.cwd().createDirPath(io, output);
     m.trace_dir = output;
     var path: [4096]u8 = undefined;
+    try m.loadDraft(io, try std.fmt.bufPrint(&path, "{s}/drafter", .{dir}));
     var position: usize = 0;
     {
         var s = mx.Scope{};

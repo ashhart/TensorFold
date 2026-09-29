@@ -28,13 +28,13 @@ def deepseek_fixture(directory, output, wide=False, packed=False):
     from tensorfold.families.deepseek_v4.model import Block
     from tensorfold.families.glm5_next.model import hc_expand
     write_checkpoint(directory)
-    write_mtp(directory)
+    write_mtp(directory / "drafter")
     (directory / "tokenizer.json").write_text(json.dumps({"model": {"type": "BPE", "vocab": {f"t{i}": i for i in range(256)}, "merges": []}, "pre_tokenizer": {"type": "ByteLevel"}, "decoder": {"type": "ByteLevel"}}))
     output.mkdir(parents=True, exist_ok=True)
     model = load_backbone(directory)
     cache = model.make_cache()
     from tensorfold.families.deepseek_v4.mtp import load as load_mtp, MTPCache
-    mtp = load_mtp(model, directory / "mtp.safetensors")
+    mtp = load_mtp(model, directory / "drafter/model.safetensors")
     mtp_cache = MTPCache(model.args.sliding_window)
     previous_streams = None
     def save(name, value):
@@ -154,7 +154,7 @@ def deepseek_dspark_fixture(directory, output, sorted_experts=False, wide=False)
     fake.write_dspark(directory / "drafter")
     (directory / "tokenizer.json").write_text(json.dumps({"model": {"type": "BPE", "vocab": {f"t{i}": i for i in range(256)}, "merges": []}, "pre_tokenizer": {"type": "ByteLevel"}, "decoder": {"type": "ByteLevel"}}))
     model = load_backbone(directory)
-    drafter = load_dspark(model, directory / "drafter/dspark.safetensors", fake.DSPARK)
+    drafter = load_dspark(model, directory / "drafter/model.safetensors", fake.DSPARK)
     model.tap_layers = drafter.taps
     target_cache, cache = model.make_cache(), drafter.make_cache()
     output.mkdir(parents=True, exist_ok=True)
@@ -543,7 +543,7 @@ def conversion_fixture(directory):
 
     mtp = fake.write_official_mtp(raw / "mtp.safetensors")
     write(raw / "mtp.safetensors", mtp)
-    convert_mtp(raw / "mtp.safetensors", expected / "mtp.safetensors")
+    convert_mtp(raw / "mtp.safetensors", expected / "mtp")
     edge = {key.replace("mtp.0.", "mtp.3."): value for key, value in mtp.items()}
     codes = np.arange(129 * 192, dtype=np.uint32).reshape(129, 192) % 256
     codes = np.where((codes & 127) == 127, codes - 1, codes).astype(np.uint8)
@@ -551,12 +551,12 @@ def conversion_fixture(directory):
     edge["mtp.3.e_proj.scale"] = mx.array([[0, 1], [120, 128]], dtype=mx.uint8)
     edge["model.layers.0.unrelated"] = mx.ones((1,))
     write(raw / "layer3.safetensors", edge)
-    convert_mtp(raw / "layer3.safetensors", expected / "layer3.safetensors", layer=3)
+    convert_mtp(raw / "layer3.safetensors", expected / "layer3", layer=3)
     shards = fake.write_official_dspark(raw)
     for shard in shards:
         write(shard, mx.load(str(shard)))
     (raw / "config.json").write_text(json.dumps({**fake.DSPARK, "unrelated": "excluded"}))
-    convert_dspark(shards, expected / "dspark" / "dspark.safetensors")
+    convert_dspark(shards, expected / "dspark")
     # A block split between files exercises native multi-shard assembly against
     # the same upstream conversion from the original complete blocks.
     from tensorfold.families.deepseek_v4.convert import read_raw
@@ -577,6 +577,43 @@ def conversion_fixture(directory):
     del malformed["mtp.0.ffn.experts.3.w2.scale"]
     write(raw / "missing-expert.safetensors", malformed)
     fake.write_checkpoint(directory / "target")
+    (directory / "target/tokenizer.json").write_text(json.dumps({"model": {"type": "BPE", "vocab": {f"t{i}": i for i in range(256)}, "merges": []}, "pre_tokenizer": {"type": "ByteLevel"}, "decoder": {"type": "ByteLevel"}}))
+    (directory / "unloadable").mkdir(parents=True, exist_ok=True)
+    (directory / "unloadable/config.json").write_text(json.dumps(fake.TEXT))
+    from tensorfold.families.deepseek_v4.runtime import drafter_config
+    folder_cases = []
+    for name, config_text, weights in [
+        ("missing-config", None, "model.safetensors"),
+        ("malformed", "{", "model.safetensors"),
+        ("array-config", "[]", "model.safetensors"),
+        ("wrong-type", '{"model_type":"deepseek_v4"}', "model.safetensors"),
+        ("missing-type", "{}", "model.safetensors"),
+        ("null-type", '{"model_type":null}', "model.safetensors"),
+        ("legacy", '{"model_type":"deepseek_v4_mtp"}', "mtp.safetensors"),
+        ("no-weights", '{"model_type":"deepseek_v4_mtp"}', None),
+        ("directory-weights", '{"model_type":"deepseek_v4_mtp"}', "directory"),
+        ("mtp", '{"model_type":"deepseek_v4_mtp"}', "model.safetensors"),
+        ("dspark", '{"model_type":"deepseek_v4_dspark","dspark_block_size":8}', "model.safetensors"),
+    ]:
+        folder = directory / "folders" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        if config_text is not None:
+            (folder / "config.json").write_text(config_text)
+        if weights == "directory":
+            (folder / "model.safetensors").mkdir(exist_ok=True)
+        elif weights:
+            (folder / weights).write_bytes(b"")
+        try:
+            value = drafter_config(folder)
+        except (ValueError, AttributeError):
+            value = None
+        folder_cases.append({"folder": name, "accepted": value is not None, "config": value})
+    (directory / "folders.json").write_text(json.dumps(folder_cases))
+    for folder, shard in (("no-config", shards[0]), ("alias", raw / "mtp.safetensors")):
+        destination = directory / folder / "model.safetensors"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if not destination.exists():
+            destination.hardlink_to(shard)
     print("Saved upstream MTP/DSpark conversion fixtures, split shards and exhaustive FP8/E8M0 codes")
 
 

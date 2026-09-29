@@ -26,6 +26,10 @@ pub const Draft = struct {
     activations: @import("prefill_ops.zig").Ops = .{},
 
     pub fn init(io: std.Io, dir: []const u8, base: Config) !Draft {
+        const folder = @import("deepseek_draft_config.zig");
+        const metadata = try folder.read(mx.allocator, io, dir);
+        defer metadata.deinit();
+        if (try folder.kind(metadata.value) != .dspark) return error.InvalidDraftFolder;
         var path: [4096]u8 = undefined;
         const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/config.json", .{dir}));
         defer mx.allocator.free(bytes);
@@ -35,7 +39,7 @@ pub const Draft = struct {
         try g.validate(base.num_hidden_layers, base.vocab_size);
         var weights = cp.Store.init(64);
         errdefer weights.deinit();
-        try weights.loadFile(io, try std.fmt.bufPrint(&path, "{s}/dspark.safetensors", .{dir}), "", "");
+        try weights.loadFile(io, try std.fmt.bufPrint(&path, "{s}/{s}", .{ dir, folder.weights_name }), "", "");
         var count: usize = 0;
         var it = weights.arrays.keyIterator();
         while (it.next()) |key| if (std.mem.endsWith(u8, key.*, ".attn_norm.weight")) {

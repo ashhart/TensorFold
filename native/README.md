@@ -273,17 +273,19 @@ Nemotron, Flash Next and GLM use checkpoint MTP heads through `--mtp-drafts N`;
 `--no-drafts` selects serial decoding.
 Gemma accepts a standard DFlash checkpoint through `--drafter DIR`, with
 `--drafter-bits 8` (default), `4`, or `0` to retain floating-point weights.
-DeepSeek accepts a converted `mtp.safetensors` beside its weights or in
-`--drafter DIR`, with the same `--mtp-drafts N` budget.
+DeepSeek accepts `--drafter DIR` containing `model.safetensors` and `config.json`
+with `model_type` set to `deepseek_v4_mtp` or `deepseek_v4_dspark`.
+The folder is validated before loading the backbone; `--mtp-drafts 0` or
+`--no-drafts` ignores it. Without a drafter, DeepSeek uses target-only decoding.
 Convert official local shards without Python using
-`zig-out/bin/tensorfold convert-drafter mtp SHARD... OUTPUT_DIR/mtp.safetensors`
+`zig-out/bin/tensorfold convert-drafter mtp SHARD... OUTPUT_DIR`
 (optional `--layer N`, default `0`), or
-`zig-out/bin/tensorfold convert-drafter dspark SHARD... OUTPUT_DIR/dspark.safetensors`.
-DSpark copies the `dspark_*` config fields from the first shard's directory.
+`zig-out/bin/tensorfold convert-drafter dspark SHARD... OUTPUT_DIR`.
+DSpark requires `config.json` beside the first shard and copies its `dspark_*`
+fields. Both converters write the head's `model_type` and `model.safetensors`.
 Conversion uses pinned MLX arithmetic, supports blocks split across shards,
 and preserves packed FP4 expert bytes. It does not download weights.
-For DSpark, that directory contains `dspark.safetensors` and its `config.json`;
-the requested draft budget is capped at the checkpoint's block size.
+For DSpark, the requested draft budget is capped at the checkpoint's block size.
 Use `--metal-simd` for the Qwen/Nemotron/Flash SIMD path and
 `--metal-sampling` for keyed Metal sampling. Match seed, sampler, temperature
 and backend when comparing Python and Zig.

@@ -70,6 +70,9 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     }
     try settings.validate();
     if (drafts > 15) return error.InvalidDraftBudget;
+    if (@hasDecl(M, "validateDraft")) {
+        if (drafts == 0) drafter = null else if (drafter) |dir| try M.validateDraft(io, dir);
+    }
     if (@hasDecl(M, "prepareRuntime")) try M.prepareRuntime();
     try mx.init();
     defer mx.shutdown();
