@@ -179,6 +179,11 @@ zig-out/bin/tensorfold run "$HOME/.models/Vontra/Qwen3.8-27B-MLX-4bit" --prompt 
 
 This is a raw completion CLI: it does not automatically build a conversation or
 apply a chat template. Use `--tokens ID,ID,...` for controlled comparisons.
+`tensorfold serve MODEL_DIR --host 127.0.0.1 --port 8080` exposes `/health`,
+`/v1/models` and raw `/v1/completions`, including SSE, seeded sampling,
+stop strings and disconnect cancellation. One inference worker owns the
+model; its queue holds eight requests. Chat templates and API images are
+not yet exposed by this command.
 Use `--report build/native-checks/run.json` and
 `--dump-logits build/native-checks/logits.npy` for correctness evidence; create
 the output directory first.
