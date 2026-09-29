@@ -36,6 +36,9 @@ pub fn build(b: *std.Build) void {
     b.step("check-upstream", "Fetch upstream and report commits missing from fork main and the current branch").dependOn(&freshness.step);
     const sync_tests = b.addRunArtifact(b.addTest(.{ .root_module = sync_module }));
     b.step("test-sync-upstream", "Check sync worktree and remote guards without network access").dependOn(&sync_tests.step);
+    const setup_module = b.createModule(.{ .root_source_file = b.path("tools/setup_native.zig"), .target = b.graph.host, .optimize = .safe });
+    const setup_tests = b.addRunArtifact(b.addTest(.{ .root_module = setup_module }));
+    b.step("test-setup", "Check setup options and prerequisite version handling without network access").dependOn(&setup_tests.step);
     const prefix = b.option([]const u8, "mlx-prefix", "MLX and mlx-c install prefix") orelse "build/mlx";
     const bindings = b.addTranslateC(.{
         .root_source_file = b.path(b.fmt("{s}/include/mlx/c/mlx.h", .{prefix})),

@@ -7,10 +7,10 @@ Upstream sync is manual: `.zig-toolchain/zig build check-upstream` fetches and r
 TensorFold serves language models on Apple Silicon and NVIDIA GPUs through an OpenAI-compatible API.
 Each model family supplies its own kernels and draft verification.
 
-**Native Zig on Mac:** [the native Metal engine](native/README.md) runs Qwen3.8-27B/DFlash2,
-Nemotron Lightning, and Qwen3.8 Flash Next/MTP through MLX-C, with no Python runtime.
-It uses the same pinned Zig 0.17 nightly as `mlx-serve`, includes tensor and SIMD paths,
-and provides a completion CLI and exactness checks. The HTTP server remains in Python.
+**Native Zig on Mac:** See the [build and testing guide](native/README.md) for the
+standalone setup tool, prerequisites, model paths and current family coverage.
+The native completion CLI uses the same pinned Zig 0.17 nightly as `mlx-serve`
+and runs Metal through MLX-C without a Python runtime. The HTTP server remains in Python.
 
 ```bash
 python -m pip install git+https://github.com/ashhart/TensorFold.git

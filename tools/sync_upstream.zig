@@ -3,7 +3,7 @@ const std = @import("std");
 const upstream_url = "git@github.com:ashhart/TensorFold.git";
 const origin_url = "git@github.com:CerebralCoding/TensorFold.git";
 
-const Git = struct {
+pub const Git = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
 
@@ -56,12 +56,13 @@ fn validateWorktree(branch: []const u8, status: []const u8) !void {
     if (status.len != 0) return error.UncommittedChanges;
 }
 
-fn command(io: std.Io, argv: []const []const u8) !void {
+pub fn command(io: std.Io, argv: []const []const u8) !void {
     var child = try std.process.spawn(io, .{ .argv = argv });
     if (!(try child.wait(io)).success()) return error.CommandFailed;
 }
 
 fn source(git: Git, dir: []const u8, url: []const u8, revision: []const u8) ![]const u8 {
+    std.debug.print("Preparing {s} at {s}\n", .{ dir, revision });
     const exists = if (std.Io.Dir.cwd().access(git.io, dir, .{})) true else |err| switch (err) {
         error.FileNotFound => false,
         else => return err,
@@ -74,22 +75,17 @@ fn source(git: Git, dir: []const u8, url: []const u8, revision: []const u8) ![]c
     return git.output(&.{ "-C", dir, "rev-parse", "HEAD" });
 }
 
-fn alignDependencies(git: Git, tip: []const u8) !void {
-    try command(git.io, &.{ ".venv/bin/python", "tools/native_runtime.py", "--upstream-ref", tip, "--resolve" });
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(git.io, "build/native-dependencies-resolved.json", git.allocator, .limited(16384));
-    const parsed = try std.json.parseFromSlice(std.json.Value, git.allocator, bytes, .{});
-    var record = parsed.value;
-    if (record.object.get("rebuild_jpeg").?.bool) {
+pub fn buildDependencies(git: Git, record: *std.json.Value, jpeg: bool, mlx: bool, jobs: []const u8) !void {
+    if (jpeg) {
         try std.Io.Dir.cwd().createDirPath(git.io, "build/deps");
         _ = try source(git, "build/deps/libjpeg-turbo", "git@github.com:libjpeg-turbo/libjpeg-turbo.git", record.object.get("jpeg_version").?.string);
         const root = try std.process.currentPathAlloc(git.io, git.allocator);
         const prefix = try std.fmt.allocPrint(git.allocator, "-DCMAKE_INSTALL_PREFIX={s}/build/jpeg", .{root});
         try command(git.io, &.{ "cmake", "-S", "build/deps/libjpeg-turbo", "-B", "build/jpeg-build", "-DCMAKE_BUILD_TYPE=Release", "-DENABLE_SHARED=OFF", "-DENABLE_STATIC=ON", "-DWITH_TOOLS=OFF", "-DWITH_TESTS=OFF", prefix });
-        try command(git.io, &.{ "cmake", "--build", "build/jpeg-build", "--parallel", "4" });
+        try command(git.io, &.{ "cmake", "--build", "build/jpeg-build", "--parallel", jobs });
         try command(git.io, &.{ "cmake", "--install", "build/jpeg-build" });
     }
-    _ = record.object.swapRemove("rebuild_jpeg");
-    if (record.object.get("rebuild_mlx").?.bool) {
+    if (mlx) {
         try std.Io.Dir.cwd().createDirPath(git.io, "build/deps");
         const revision = try source(git, "build/deps/mlx", "git@github.com:ml-explore/mlx.git", record.object.get("mlx_revision").?.string);
         _ = try source(git, "build/deps/mlx-c", "git@github.com:ml-explore/mlx-c.git", record.object.get("mlx_c_revision").?.string);
@@ -98,14 +94,23 @@ fn alignDependencies(git: Git, tip: []const u8) !void {
         const prefix = try std.fmt.allocPrint(git.allocator, "-DCMAKE_INSTALL_PREFIX={s}/build/mlx", .{root});
         const mlx_prefix = try std.fmt.allocPrint(git.allocator, "-DCMAKE_PREFIX_PATH={s}/build/mlx", .{root});
         const fmt = try std.fmt.allocPrint(git.allocator, "-DFETCHCONTENT_SOURCE_DIR_FMT={s}/build/deps/fmt", .{root});
-        try command(git.io, &.{ "cmake", "-S", "build/deps/mlx", "-B", "build/mlx-build", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DBUILD_SHARED_LIBS=ON", "-DMLX_BUILD_TESTS=OFF", "-DMLX_BUILD_EXAMPLES=OFF", prefix, fmt });
-        try command(git.io, &.{ "cmake", "--build", "build/mlx-build", "--parallel", "4" });
+        try command(git.io, &.{ "cmake", "-S", "build/deps/mlx", "-B", "build/mlx-build", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=@loader_path", "-DBUILD_SHARED_LIBS=ON", "-DMLX_BUILD_TESTS=OFF", "-DMLX_BUILD_EXAMPLES=OFF", prefix, fmt });
+        try command(git.io, &.{ "cmake", "--build", "build/mlx-build", "--parallel", jobs });
         try command(git.io, &.{ "cmake", "--install", "build/mlx-build" });
-        try command(git.io, &.{ "cmake", "-S", "build/deps/mlx-c", "-B", "build/mlxc-build", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DBUILD_SHARED_LIBS=ON", "-DMLX_C_USE_SYSTEM_MLX=ON", "-DMLX_C_BUILD_EXAMPLES=OFF", prefix, mlx_prefix });
-        try command(git.io, &.{ "cmake", "--build", "build/mlxc-build", "--parallel", "4" });
+        try command(git.io, &.{ "cmake", "-S", "build/deps/mlx-c", "-B", "build/mlxc-build", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=@loader_path", "-DBUILD_SHARED_LIBS=ON", "-DMLX_C_USE_SYSTEM_MLX=ON", "-DMLX_C_BUILD_EXAMPLES=OFF", prefix, mlx_prefix });
+        try command(git.io, &.{ "cmake", "--build", "build/mlxc-build", "--parallel", jobs });
         try command(git.io, &.{ "cmake", "--install", "build/mlxc-build" });
         try record.object.put(git.allocator, "mlx_revision", .{ .string = revision });
     }
+}
+
+fn alignDependencies(git: Git, tip: []const u8) !void {
+    try command(git.io, &.{ ".venv/bin/python", "tools/native_runtime.py", "--upstream-ref", tip, "--resolve" });
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(git.io, "build/native-dependencies-resolved.json", git.allocator, .limited(16384));
+    const parsed = try std.json.parseFromSlice(std.json.Value, git.allocator, bytes, .{});
+    var record = parsed.value;
+    try buildDependencies(git, &record, record.object.get("rebuild_jpeg").?.bool, record.object.get("rebuild_mlx").?.bool, "4");
+    _ = record.object.swapRemove("rebuild_jpeg");
     _ = record.object.swapRemove("rebuild_mlx");
     const content = try std.json.Stringify.valueAlloc(git.allocator, record, .{ .whitespace = .indent_2 });
     const file = try std.Io.Dir.cwd().createFile(git.io, "native/dependencies.json", .{});
