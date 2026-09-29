@@ -104,7 +104,7 @@ fn alignDependencies(git: Git, tip: []const u8) !void {
     try file.writeStreamingAll(git.io, "\n");
     try command(git.io, &.{ ".venv/bin/python", "tools/native_runtime.py" });
     try command(git.io, &.{ ".venv/bin/python", "tools/export_native_kernels.py" });
-    try command(git.io, &.{ ".zig-toolchain/zig", "build", "test", "test-prefill", "test-variants", "test-models", "-Doptimize=safe", "-j1" });
+    try command(git.io, &.{ ".zig-toolchain/zig", "build", "test", "test-prefill", "test-variants", "test-metal", "test-models", "-Doptimize=safe", "-j1" });
 }
 
 pub fn main(init: std.process.Init) !void {

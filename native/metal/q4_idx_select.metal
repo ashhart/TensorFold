@@ -23,16 +23,22 @@
       if ((k & mask) == prefix) atomic_fetch_add_explicit(&hist[(k >> shift) & 255u], 1u, memory_order_relaxed);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (t == 0) {
-      uint above = 0u;
-      int bin = 255;
-      for (; bin > 0; bin--) {
-        const uint n = atomic_load_explicit(&hist[bin], memory_order_relaxed);
-        if (above + n >= need) break;
-        above += n;
+    if (sg == 0) {                            // the cut bin: lane l scans bins 255 - 8l down to 248 - 8l
+      uint c[8], mine = 0u;
+      for (int i = 0; i < 8; i++) {
+        c[i] = atomic_load_explicit(&hist[255 - 8 * int(lane) - i], memory_order_relaxed);
+        mine += c[i];
       }
-      cut_t = prefix | (uint(bin) << shift);
-      need_t = need - above;
+      uint above = simd_prefix_exclusive_sum(mine);
+      if (above < need && above + mine >= need) {
+        int bin = 248 - 8 * int(lane);
+        for (int i = 0; i < 8; i++) {
+          if (above + c[i] >= need) { bin = 255 - 8 * int(lane) - i; break; }
+          above += c[i];
+        }
+        cut_t = prefix | (uint(bin) << shift);
+        need_t = need - above;
+      }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     prefix = cut_t;
