@@ -435,6 +435,29 @@ def attention_and_ple_variants(capture):
             assert bool(mx.array_equal(actual, expected).item())
 
 
+def simd_dense_fixtures(directory):
+    from tensorfold.kernels.qwen.dense.v1 import simd_qmm as sq
+    cases = []
+    for group in (32, 64):
+        for n, k in ((32, 128), (72, 192), (80, 512), (128, 4096), (6144, 128), (6152, 128), (128, 10304)):
+            sq.mma_one_row.clear()
+            w = mx.random.normal((n, k), key=mx.random.key(n + k)).astype(mx.bfloat16)
+            weights = mx.quantize(w, group_size=group, bits=4)
+            scalar_ok = sq.check(*weights, group_size=group)
+            if not scalar_ok:
+                sq.mma_one_row.add((n, k, group))
+            key = f"shape{len(cases):03}"
+            x = (mx.random.normal((129, k), key=mx.random.key(99)) * 0.5).astype(mx.bfloat16)
+            arrays = dict(weight=weights[0], scales=weights[1], biases=weights[2], x=x)
+            rows = (1, 2, 3, 4, 8, 16, 17, 24, 25, 65, 129)
+            for count in rows:
+                arrays[f"out{count}"] = sq.qmm(x[:count], *weights, group_size=group)
+            mx.save_safetensors(str(directory / f"{key}.safetensors"), arrays)
+            cases.append(dict(key=key, group=group, scalar_ok=scalar_ok, rows=rows))
+    (directory / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
+    print(f"Saved {len(cases)} calibrated SIMD shapes: {sum(c['scalar_ok'] for c in cases)} scalar-compatible", flush=True)
+
+
 def main():
     require_mlx()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -445,8 +468,12 @@ def main():
     parser.add_argument("--gemma-only", action="store_true")
     parser.add_argument("--large-families", action="store_true")
     parser.add_argument("--row-attention", action="store_true")
+    parser.add_argument("--simd-dense", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.simd_dense:
+        simd_dense_fixtures(args.directory)
+        return
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
     if args.row_attention:

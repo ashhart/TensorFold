@@ -136,6 +136,12 @@ pub fn build(b: *std.Build) void {
     large_kernels.step.dependOn(&large_fixture.step);
     b.step("test-large-family-kernels", "Compare synthetic GLM/DeepSeek kernels and host dispatch; full models remain unverified").dependOn(&large_kernels.step);
     metal_tests.dependOn(&large_kernels.step);
+    const ds_dense_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/deepseek-dense", "--simd-dense" });
+    const ds_dense = b.addRunArtifact(exe);
+    ds_dense.addArgs(&.{ "check-deepseek-dense", "build/native-checks/deepseek-dense" });
+    ds_dense.step.dependOn(&ds_dense_fixture.step);
+    b.step("test-deepseek-dense", "Compare calibrated DeepSeek SIMD dispatch and physical threadgroup variants").dependOn(&ds_dense.step);
+    metal_tests.dependOn(&ds_dense.step);
     const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
     var glm_previous: ?*std.Build.Step = null;
     for (0..3) |case| {

@@ -12,6 +12,9 @@ pub var stream: c.mlx_stream = .{ .ctx = null };
 pub var allocator: std.mem.Allocator = std.heap.c_allocator;
 pub var tensor_units = false;
 pub var force_simd = false;
+// M1/M2 pipelines can have register-dependent limits. Eight physical groups
+// stay within their guaranteed limit without changing arithmetic chunk counts.
+pub var simd_groups: i32 = 8;
 
 fn onError(msg: [*c]const u8, _: ?*anyopaque) callconv(.c) void {
     std.debug.print("MLX: {s}\n", .{msg});
@@ -46,6 +49,7 @@ pub fn init() !void {
         var end: usize = prefix.len;
         while (end < name.len and std.ascii.isDigit(name[end])) : (end += 1) {}
         const generation = std.fmt.parseInt(u32, name[prefix.len..end], 10) catch 0;
+        simd_groups = if (generation >= 15) 16 else 8;
         tensor_units = generation >= 17 and !force_simd;
     }
     std.debug.print("Metal: {s}, {s} backend\n", .{ name, if (tensor_units) "tensor" else "SIMD" });

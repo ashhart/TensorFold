@@ -14,6 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-deepseek-dense")) return @import("deepseek_dense_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-runtime")) return @import("runtime_checks.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-glm-model")) return @import("glm.zig").checkModel(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-gemma-model")) return @import("gemma.zig").checkModel(io, args[2], args[3]);
@@ -355,6 +356,7 @@ test {
     _ = @import("image_input.zig");
     _ = @import("gemma_ops.zig");
     _ = @import("large_family_ops.zig");
+    _ = @import("deepseek_dense.zig");
     _ = @import("draft_depth.zig");
     _ = @import("draft_vocab.zig");
     _ = @import("lanes.zig");
