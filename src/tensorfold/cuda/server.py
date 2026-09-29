@@ -144,6 +144,8 @@ class App:
             return f"{spec.field}: this model's CUDA engine does not enforce structured output"
         if spec is not None and body.get("tools") and tool_choice_requires_call(body.get("tool_choice")):
             return f'{spec.field} cannot be combined with tool_choice "required" or a named function: send one'
+        if spec is not None and body.get("ignore_eos") is True:     # the grammar's end token ends a structured reply
+            return f"{spec.field} cannot be combined with ignore_eos: the schema's end token ends the reply"
         return None
 
     def _grammars(self) -> grammar.Grammars:

@@ -107,8 +107,9 @@ incomplete JSON with `finish_reason: "length"`.
 
 CUDA answers HTTP 400 instead of an unconstrained reply when the engine cannot enforce the schema (other families, two
 ranks) or xgrammar is missing, for a schema xgrammar cannot compile, for `guided_regex`, `guided_choice` and
-`guided_grammar`, and for a schema sent with `tool_choice: "required"` or a named function. A reply whose grammar fails
-while decoding ends with HTTP 500 (an error event when streaming); other requests go on. MLX ignores these fields.
+`guided_grammar`, for a schema sent with `tool_choice: "required"` or a named function, and for a schema sent with
+`ignore_eos` (the grammar's end token ends the reply). A reply whose grammar fails while decoding ends with HTTP 500 (an
+error event when streaming); other requests go on. MLX ignores these fields.
 
 ## Reasoning
 

@@ -402,7 +402,9 @@ def test_bad_schemas_and_engines_without_grammars_are_refused_before_generating(
                             (_body(stream, response_format={"type": "xml"}), "text, json_object or json_schema"),
                             (_body(stream, guided_regex="a+"), "guided_regex is not supported"),
                             (_body(stream, response_format={"type": "json_object"}, tools=[tool],
-                                   tool_choice="required"), 'cannot be combined with tool_choice "required"')):
+                                   tool_choice="required"), 'cannot be combined with tool_choice "required"'),
+                            (_body(stream, response_format={"type": "json_object"}, ignore_eos=True),
+                             "cannot be combined with ignore_eos")):
             status, text = post(port, body, True)
             assert status == 400 and words in json.loads(text)["error"]["message"], text
     with http_server(plain_app) as port:
