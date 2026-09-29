@@ -297,10 +297,10 @@ def memory_fixtures(output):
         prompt = rng.randrange(0, 8192)
         live = [(rng.randrange(10000), rng.randrange(20000)) for _ in range(rng.randrange(9))]
         used = rng.randrange(20 * GIB)
-        admission = Admission(0, memory, used=lambda: used)
+        admission = Admission(0, memory, used=lambda: used, lanes=rng.choice((1, 2, 4, 8)))
         projected = admission.projected(prompt, tokens, live)
         admission.budget = max(0, projected + rng.choice((-1, 0, 1)))
-        result["streams"].append(dict(memory=asdict(memory), tokens=tokens, prompt=prompt, used=used, budget=admission.budget,
+        result["streams"].append(dict(memory=asdict(memory), lanes=admission.lanes, tokens=tokens, prompt=prompt, used=used, budget=admission.budget,
                                       live=[dict(now=now, most=most) for now, most in live], stream=memory.stream_bytes(tokens),
                                       prefill=memory.prefill_bytes(prompt), projected=projected, admits=admission.admits(prompt, tokens, live),
                                       fitting=admission.fitting(tokens)))

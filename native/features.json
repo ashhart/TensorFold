@@ -1,5 +1,30 @@
 [
   {
+    "id": "additional-affine-kernels", "state": "missing", "requirement": "Grouped low-bit lane kernels and 5/6/8-bit SIMD row kernels introduced in TensorFold 0.4",
+    "upstream": ["src/tensorfold/kernels/qwen/dense/v1/simd_qmm_bits.py", "src/tensorfold/kernels/qwen/dense/v1/lane_widen.py", "src/tensorfold/kernels/qwen/dense/v1/row_matmul.py"],
+    "limitation": "Existing affine fallbacks are available; the new specialized kernels and dispatch checks are not ported."
+  },
+  {
+    "id": "flash-affine-layouts", "state": "missing", "requirement": "Flash Next mixed affine formats, alternate PLE/MTP names and pre-M5 row kernel selection",
+    "upstream": ["src/tensorfold/families/qwen4_exp/model.py", "src/tensorfold/families/qwen4_exp/mtp.py", "src/tensorfold/families/qwen4_exp/decode.py", "src/tensorfold/kernels/qwen/flash_next/v1/base.py", "src/tensorfold/kernels/qwen/flash_next/v1/embed.py", "src/tensorfold/kernels/qwen/flash_next/v1/experts.py", "src/tensorfold/kernels/qwen/flash_next/v1/hc.py", "src/tensorfold/kernels/qwen/flash_next/v1/rows.py"],
+    "limitation": "The existing 4-bit checkpoint path is implemented; TensorFold 0.4's additional layouts and hardware-specific dispatch remain unverified and unported."
+  },
+  {
+    "id": "bonsai-partial-widening", "state": "missing", "requirement": "Choose and widen only the Bonsai decoder layers that fit pre-M5 memory budgets",
+    "upstream": ["src/tensorfold/families/bonsai/pack.py"],
+    "limitation": "Packed Bonsai execution exists; the widened:N policy is not ported."
+  },
+  {
+    "id": "deepseek-draft-folders", "state": "missing", "requirement": "DeepSeek MTP/DSpark model.safetensors folders selected and validated by config model_type",
+    "upstream": ["src/tensorfold/families/deepseek_v4/config.py", "src/tensorfold/families/deepseek_v4/convert.py", "src/tensorfold/families/deepseek_v4/runtime.py"],
+    "limitation": "The existing named-file conversion and loading contract has not yet migrated to upstream's new folder contract."
+  },
+  {
+    "id": "server-live-status", "state": "missing", "requirement": "Live server status with prefill/decode rates and waiting request counts",
+    "upstream": ["src/tensorfold/server/live.py"],
+    "limitation": "Native health reports memory and waiting requests; upstream's terminal status display and rate meters are not ported."
+  },
+  {
     "id": "python-frontends", "state": "excluded",
     "requirement": "Python package entry points and package download/update commands",
     "limitation": "The native Mac executable loads local checkpoints; Python packaging and its download/update CLI are outside the inference port.",
@@ -133,10 +158,10 @@
   },
   {
     "id": "memory-admission", "state": "partial", "requirement": "Inference working-set budgets, residency, eviction and preemption",
-    "upstream": ["src/tensorfold/engine/memory.py", "src/tensorfold/server/admission.py", "src/tensorfold/server/memory_budget.py", "src/tensorfold/server/residency.py"],
+    "upstream": ["src/tensorfold/engine/memory.py", "src/tensorfold/server/admission.py", "src/tensorfold/server/memory_budget.py", "src/tensorfold/server/residency.py", "src/tensorfold/server/stream_gate.py"],
     "implementation": [{"path":"native/memory_budget.zig","symbol":"admits"}, {"path":"native/memory_budget.zig","symbol":"cacheBytes"}, {"path":"native/memory_runtime.zig","symbol":"init"}, {"path":"native/memory_runtime.zig","symbol":"wire"}, {"path":"native/memory_runtime.zig","symbol":"measure"}, {"path":"native/server.zig","symbol":"advance"}, {"path":"native/vision.zig","symbol":"workspaceBytes"}],
     "checks": [{"step":"test-memory-budget","driver":{"path":"native/memory_budget.zig","symbol":"check"},"scope":"host"}, {"step":"test-memory-runtime","driver":{"path":"native/memory_runtime.zig","symbol":"check"},"scope":"checkpoint"}, {"step":"test-server-lifecycle","driver":{"path":"tools/native_server_checks.zig","symbol":"main"},"scope":"checkpoint"}, {"step":"test-server-memory","driver":{"path":"tools/native_server_checks.zig","symbol":"checkMemory"},"scope":"checkpoint"}],
-    "limitation": "Serving reserves live reply growth and image workspace before admission, queues requests until they fit, and rejects requests that cannot fit alone. Cache eviction and background preemption remain missing; full GLM/DeepSeek memory profiles are unverified."
+    "limitation": "Serving reserves full live reply growth and image workspace before admission. Cache eviction, background preemption, repeated startup probes and upstream's dynamic stream-growth gate remain missing; full GLM/DeepSeek memory profiles are unverified."
   },
   {
     "id": "prompt-cache-checkpoints", "state": "missing", "requirement": "Cross-request prompt reuse, prefix snapshots, checkpoint persistence and disk spill",
@@ -151,7 +176,7 @@
   },
   {
     "id": "chat-templates", "state": "present", "requirement": "Native tokenization and upstream chat templates for all seven checkpoints",
-    "upstream": ["src/tensorfold/server/messages.py", "src/tensorfold/server/prompts.py", "src/tensorfold/families/deepseek_v4/prompts.py", "src/tensorfold/families/deepseek_v4/vendor/__init__.py", "src/tensorfold/families/deepseek_v4/vendor/encoding_dsv4.py"],
+    "upstream": ["src/tensorfold/server/messages.py", "src/tensorfold/server/prompts.py", "src/tensorfold/families/tokenizer.py", "src/tensorfold/families/deepseek_v4/prompts.py", "src/tensorfold/families/deepseek_v4/vendor/__init__.py", "src/tensorfold/families/deepseek_v4/vendor/encoding_dsv4.py"],
     "implementation": [{"path":"native/chat.zig","symbol":"renderWithDefaults"}, {"path":"native/chat.zig","symbol":"encode"}],
     "checks": [{"step":"test-chat","driver":{"path":"native/chat.zig","symbol":"check"},"scope":"checkpoint"}]
   },

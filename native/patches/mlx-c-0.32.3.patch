@@ -1,0 +1,11 @@
+diff --git a/mlx/c/ops.cpp b/mlx/c/ops.cpp
+--- a/mlx/c/ops.cpp
++++ b/mlx/c/ops.cpp
+@@ -1501,6 +1501,7 @@ extern "C" int mlx_gather_qmm(
+             (bits.has_value ? std::make_optional<int>(bits.value)
+                             : std::nullopt),
+             std::string(mode),
++            std::nullopt,
+             sorted_indices,
+             mlx_stream_get_(s)));
+   } catch (std::exception& e) {

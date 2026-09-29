@@ -77,9 +77,8 @@ pub fn launch(kernels: *mx.Kernels, s: *mx.Scope, x: A, p: Projection, scalar: b
         const per = sgs * @divExact(32, split) * nr;
         return (try kernels.run(s, src.simd_qmm_scalar, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NR", nr), ti("XB", xb), ti("GS", group), ti("RS", rows) }, .{ @divTrunc(n + per - 1, per) * sgs * 32, 1, 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
     }
-    const rt = if (rows > 16 and rows <= 24) 3 else @min(2, @divTrunc(rows + 7, 8));
+    const rt = @min(2, @divTrunc(rows + 7, 8));
     var nt: i32 = if (@mod(n, 32) == 0) 4 else if (@mod(n, 16) == 0) 2 else 1;
-    if (rt > 2) nt = @min(nt, 2);
     while (nt > 1 and split * rt * nt * 64 * 4 > 16384) nt = @divExact(nt, 2);
     const sgs = @min(split, max_groups);
     return (try kernels.run(s, src.simd_qmm_mma, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NT", nt), ti("RT", rt), ti("GS", group) }, .{ @divTrunc(n + 8 * nt - 1, 8 * nt) * sgs * 32, @divTrunc(rows + 8 * rt - 1, 8 * rt), 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];

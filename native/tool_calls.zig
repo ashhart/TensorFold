@@ -74,6 +74,32 @@ pub fn typedParameter(tools: V, name: []const u8, key: []const u8) bool {
     for ([_][]const u8{ "array", "object", "boolean", "integer", "number", "null" }) |expected| if (std.mem.eql(u8, kind.string, expected)) return true;
     return false;
 }
+fn closedJson(a: std.mem.Allocator, text: []const u8) !?[]const u8 {
+    var closers: std.ArrayList(u8) = .empty;
+    defer closers.deinit(a);
+    var in_string = false;
+    var escaped = false;
+    for (text) |ch| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+        } else switch (ch) {
+            '"' => in_string = true,
+            '[', '{' => try closers.append(a, if (ch == '[') ']' else '}'),
+            ']', '}' => if (closers.pop() != ch) return null,
+            else => {},
+        }
+    }
+    if (closers.items.len == 0 or in_string) return null;
+    std.mem.reverse(u8, closers.items);
+    return try std.mem.concat(a, u8, &.{ std.mem.trimEnd(u8, text, whitespace), closers.items });
+}
+
 pub fn parameter(a: std.mem.Allocator, tools: V, name: []const u8, key: []const u8, text: []const u8) !V {
     const fallback = V{ .string = text };
     const function = tool(tools, name) orelse return fallback;
@@ -85,7 +111,11 @@ pub fn parameter(a: std.mem.Allocator, tools: V, name: []const u8, key: []const 
     if (schema != .object) return fallback;
     const kind = schema.object.get("type") orelse return fallback;
     if (kind != .string) return fallback;
-    const parsed = std.json.parseFromSlice(V, a, text, .{}) catch return fallback;
+    const parsed = std.json.parseFromSlice(V, a, text, .{}) catch blk: {
+        if (!std.mem.eql(u8, kind.string, "array") and !std.mem.eql(u8, kind.string, "object")) return fallback;
+        const closed = try closedJson(a, text) orelse return fallback;
+        break :blk std.json.parseFromSlice(V, a, closed, .{}) catch return fallback;
+    };
     const valid = switch (parsed.value) {
         .null => std.mem.eql(u8, kind.string, "null"),
         .bool => std.mem.eql(u8, kind.string, "boolean"),

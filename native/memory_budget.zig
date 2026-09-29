@@ -108,11 +108,18 @@ pub const Admission = struct {
     budget: u64,
     memory: StreamMemory,
     refused: usize = 0,
+    lanes: u64 = 1,
+
+    pub fn roundBytes(admission: Admission, streams: u64) !u64 {
+        const lanes = @max(1, admission.lanes);
+        const total = try std.math.mul(u64, admission.memory.round_bytes, @min(@max(1, streams), lanes));
+        return total / lanes + @intFromBool(total % lanes != 0);
+    }
 
     pub fn projected(admission: Admission, used: u64, prompt: u64, longest: u64, live: []const Live) !u64 {
         var growth: u64 = 0;
         for (live) |request| growth = try std.math.add(u64, growth, request.most -| request.now);
-        const work = @max(admission.memory.round_bytes, try admission.memory.prefillBytes(prompt));
+        const work = @max(try admission.roundBytes(live.len + 1), try admission.memory.prefillBytes(prompt));
         // Preserve upstream's float addition order and final truncation.
         return bytes(@as(f64, @floatFromInt(used)) + @as(f64, @floatFromInt(growth)) * admission.memory.per_token + @as(f64, @floatFromInt(try admission.memory.streamBytes(longest))) + @as(f64, @floatFromInt(work)));
     }
@@ -125,10 +132,16 @@ pub const Admission = struct {
 
     pub fn fitting(admission: Admission, used: u64, tokens: u64) !u64 {
         const each = try admission.memory.streamBytes(tokens);
-        if (each == 0) return 64;
-        const work = @max(admission.memory.round_bytes, try admission.memory.prefillBytes(tokens));
-        const room = admission.budget -| used -| work;
-        return @min(64, room / each);
+        if (used > admission.budget) return 0;
+        const room = admission.budget - used;
+        const prefill = try admission.memory.prefillBytes(tokens);
+        var count: u64 = 0;
+        while (count < 64) : (count += 1) {
+            const retained = try std.math.mul(u64, count + 1, each);
+            const work = @max(try admission.roundBytes(count + 1), prefill);
+            if (try std.math.add(u64, retained, work) > room) break;
+        }
+        return count;
     }
 };
 
@@ -139,7 +152,7 @@ pub fn check(io: std.Io, path: []const u8) !void {
     const Fixture = struct {
         limits: []const struct { ram: u64, recommended: u64, fraction: f64, override: ?[]const u8, result: ?u64 },
         caches: []const struct { memory: CacheMemory, tokens: u64, in_flight: u64, request: CacheMemory.Request, budget: u64, window: u64, cache: u64, growth: u64, needed: u64, largest: u64 },
-        streams: []const struct { memory: StreamMemory, tokens: u64, prompt: u64, used: u64, budget: u64, live: []const Live, stream: u64, prefill: u64, projected: u64, admits: bool, fitting: u64 },
+        streams: []const struct { memory: StreamMemory, lanes: u64, tokens: u64, prompt: u64, used: u64, budget: u64, live: []const Live, stream: u64, prefill: u64, projected: u64, admits: bool, fitting: u64 },
         budgets: []const struct { ram: u64, fraction: f64, process: u64, share: u64, elsewhere: u64, result: u64 },
     };
     const parsed = try std.json.parseFromSlice(Fixture, a, source, .{});
@@ -155,7 +168,7 @@ pub fn check(io: std.Io, path: []const u8) !void {
         if (try case.memory.cacheBytes(case.tokens) != case.cache or try case.memory.growthBytes(case.tokens, case.in_flight) != case.growth or try case.memory.needed(case.tokens, case.request) != case.needed or try case.memory.largestContext(case.window, case.budget, case.request) != case.largest) return error.CacheMemoryMismatch;
     }
     for (parsed.value.streams) |case| {
-        var admission = Admission{ .budget = case.budget, .memory = case.memory };
+        var admission = Admission{ .budget = case.budget, .memory = case.memory, .lanes = case.lanes };
         if (try case.memory.streamBytes(case.tokens) != case.stream or try case.memory.prefillBytes(case.prompt) != case.prefill or try admission.projected(case.used, case.prompt, case.tokens, case.live) != case.projected or try admission.admits(case.used, case.prompt, case.tokens, case.live) != case.admits or try admission.fitting(case.used, case.tokens) != case.fitting or admission.refused != @intFromBool(!case.admits)) return error.StreamMemoryMismatch;
     }
     for (parsed.value.budgets) |case| if (concurrentBudget(case.ram, case.fraction, case.process, case.share, case.elsewhere) != case.result) return error.ConcurrentBudgetMismatch;

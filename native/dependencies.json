@@ -1,7 +1,7 @@
 {
   "python": {
-    "mlx": "0.32.2",
-    "mlx-metal": "0.32.2",
+    "mlx": "0.32.3",
+    "mlx-metal": "0.32.3",
     "mlx-lm": "0.31.3",
     "mlx-vlm": "0.7.4",
     "transformers": "5.17.0",
@@ -9,6 +9,6 @@
   },
   "vision_legacy_pixel_limits": false,
   "jpeg_version": "3.1.4.1",
-  "mlx_revision": "1f8e74e3f12f31365464a6867c6579f0e9b29d85",
+  "mlx_revision": "64ea011cb65f14d9ce2737e60db9a4ae91ed7441",
   "mlx_c_revision": "56b2d39fc831f2c0eb5bb94d82ef7191f7b31fa6"
 }

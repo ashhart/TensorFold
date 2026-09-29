@@ -390,7 +390,8 @@ def tool_fixtures(output):
         '<function=x</function>', '<function=weather>garbage</function>', 'weather',
     ]
     for key in properties:
-        for value in ('2', 'true', 'null', '1.5', '[]', '{}', '"two"', 'not json', '1e999', '\n x \n'):
+        for value in ('2', 'true', 'null', '1.5', '[]', '{}', '"two"', 'not json', '1e999', '\n x \n',
+                      '[1,2', '{"a":[1,2', '{"a":"x\\\"y"', '[1,', '[1}', '{"a":"unfinished'):
             payloads.append(f'<function=weather><parameter={key}>\n{value}\n</parameter></function>')
     texts = ['  prose  ', '{"answer":"plain JSON"}', '```json\n{"name":"weather","arguments":{}}\n```']
     for payload in payloads:

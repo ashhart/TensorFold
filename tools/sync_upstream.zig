@@ -124,9 +124,26 @@ pub fn buildDependencies(git: Git, record: *std.json.Value, jpeg: bool, mlx: boo
         try command(git.io, &.{ "cmake", "-S", mlx_source, "-B", mlx_build, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=@loader_path", "-DBUILD_SHARED_LIBS=ON", "-DMLX_BUILD_TESTS=OFF", "-DMLX_BUILD_EXAMPLES=OFF", prefix, fmt });
         try command(git.io, &.{ "cmake", "--build", mlx_build, "--parallel", jobs });
         try command(git.io, &.{ "cmake", "--install", mlx_build });
+        // MLX 0.32.3 adds an optional global scale; retain the C ABI's unscaled behavior.
+        const patch = "native/patches/mlx-c-0.32.3.patch";
+        const patch_dir = try std.fmt.allocPrint(git.allocator, "--directory={s}", .{bridge_source});
+        const compatibility = std.mem.eql(u8, record.object.get("python").?.object.get("mlx").?.string, "0.32.3");
+        if (compatibility) {
+            _ = try git.output(&.{ "apply", "--check", patch_dir, patch });
+            _ = try git.output(&.{ "apply", patch_dir, patch });
+        }
+        var restored = false;
+        defer if (!restored) {
+            if (compatibility) _ = git.output(&.{ "apply", "--reverse", patch_dir, patch }) catch |err| failed: {
+                std.debug.print("Could not remove MLX-C compatibility patch: {s}\n", .{@errorName(err)});
+                break :failed "";
+            };
+        };
         try command(git.io, &.{ "cmake", "-S", bridge_source, "-B", bridge_build, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=@loader_path", "-DBUILD_SHARED_LIBS=ON", "-DMLX_C_USE_SYSTEM_MLX=ON", "-DMLX_C_BUILD_EXAMPLES=OFF", prefix, mlx_prefix });
         try command(git.io, &.{ "cmake", "--build", bridge_build, "--parallel", jobs });
         try command(git.io, &.{ "cmake", "--install", bridge_build });
+        if (compatibility) _ = try git.output(&.{ "apply", "--reverse", patch_dir, patch });
+        restored = true;
         try record.object.put(git.allocator, "mlx_revision", .{ .string = revision });
         try record.object.put(git.allocator, "mlx_c_revision", .{ .string = bridge_revision });
         try @import("native_install.zig").record(git.allocator, git.io, "build/mlx", .mlx, revision, bridge_revision);

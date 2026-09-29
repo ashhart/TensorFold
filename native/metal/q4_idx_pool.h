@@ -100,3 +100,70 @@ inline float qdot16(const device uint8_t* w, const thread float* xt, float scale
              xt[4 * i + 2] * float(ws[i] & 0x0f00) + xt[4 * i + 3] * float(ws[i] & 0xf000);
   return scale * accum + sum * bias;
 }
+// float(v) for v < 2^23 by the exponent trick (an or and a subtract): the same value as a convert
+inline float nib(uint v) { return as_type<float>(0x4B000000u | v) - 8388608.0f; }
+// qdot16 and qgroup_dot with nib: the same bits, cheaper than the convert from two rows before M5, dearer at one
+inline float qdot16x(const device uint8_t* w, const thread float* xt, float scale, float bias, float sum) {
+  const device uint16_t* ws = (const device uint16_t*)w;
+  float accum = 0.0f;
+  for (int i = 0; i < 4; i++)
+    accum += xt[4 * i] * nib(ws[i] & 0x000fu) + xt[4 * i + 1] * nib(ws[i] & 0x00f0u) +
+             xt[4 * i + 2] * nib(ws[i] & 0x0f00u) + xt[4 * i + 3] * nib(ws[i] & 0xf000u);
+  return scale * accum + sum * bias;
+}
+inline float qgroup_dotx(const device uint32_t* w, float scale, float bias, const thread float* x) {
+  float dq = 0.0f, dx = 0.0f;
+  for (int word = 0; word < 4; word++) {
+    const uint32_t bits = w[word];
+    for (int n = 0; n < 8; n++) {
+      const float xv = x[word * 8 + n];
+      dq = fma(nib((bits >> (4 * n)) & 0xFu), xv, dq);
+      dx += xv;
+    }
+  }
+  return fma(scale, dq, bias * dx);
+}
+// two 16-bit words' nibbles q (q < 1024 each half) as half with no convert: 1024 + q by the exponent trick, minus 1024
+inline half2 nib2(uint q) { return as_type<half2>(0x64006400u | q) - half2(1024.0h); }
+// load16 with the third and fourth inputs divided by 16 and 1: with qdot16h's nibbles, the same products as qdot16's
+inline float load16h(const device bfloat* x, thread float* xt) {
+  float sum = 0.0f;
+  for (int i = 0; i < 16; i += 4) {
+    const bfloat a = x[i], b = x[i + 1], c = x[i + 2], d = x[i + 3];
+    sum += float(bfloat(float(bfloat(float(bfloat(float(a) + float(b))) + float(c))) + float(d)));
+    xt[i] = float(a); xt[i + 1] = float(b) / 16.0f; xt[i + 2] = float(c) / 16.0f; xt[i + 3] = float(d);
+  }
+  return sum;
+}
+// qdot16 over load16h's inputs with half nibbles (q, 16 q, 16 q, q): the same products in the same order
+inline float qdot16h(const device uint8_t* w, const thread float* xt, float scale, float bias, float sum) {
+  const device uint32_t* ws = (const device uint32_t*)w;
+  float accum = 0.0f;
+  for (int i = 0; i < 2; i++) {
+    const uint u = ws[i];
+    const half2 a = nib2(u & 0x000F000Fu), b = nib2(u & 0x00F000F0u), c = nib2((u >> 4) & 0x00F000F0u),
+                d = nib2((u >> 12) & 0x000F000Fu);
+    accum += xt[8 * i] * float(a.x) + xt[8 * i + 1] * float(b.x) + xt[8 * i + 2] * float(c.x) +
+             xt[8 * i + 3] * float(d.x);
+    accum += xt[8 * i + 4] * float(a.y) + xt[8 * i + 5] * float(b.y) + xt[8 * i + 6] * float(c.y) +
+             xt[8 * i + 7] * float(d.y);
+  }
+  return scale * accum + sum * bias;
+}
+// qgroup_dot with half nibbles: the same fmas in the same order
+inline float qgroup_doth(const device uint32_t* w, float scale, float bias, const thread float* x) {
+  float dq = 0.0f, dx = 0.0f;
+  for (int word = 0; word < 4; word++) {
+    const uint32_t bits = w[word];
+    const half2 q04 = nib2(bits & 0x000F000Fu), q15 = nib2((bits >> 4) & 0x000F000Fu),
+                q26 = nib2((bits >> 8) & 0x000F000Fu), q37 = nib2((bits >> 12) & 0x000F000Fu);
+    const float q[8] = {float(q04.x), float(q15.x), float(q26.x), float(q37.x),
+                        float(q04.y), float(q15.y), float(q26.y), float(q37.y)};
+    for (int n = 0; n < 8; n++) {
+      const float xv = x[word * 8 + n];
+      dq = fma(q[n], xv, dq);
+      dx += xv;
+    }
+  }
+  return fma(scale, dq, bias * dx);
+}
