@@ -22,9 +22,7 @@ def mtp_weights(name: str, info: dict) -> tuple[int, int]:
 
 
 def stream_geometry(text: dict, streams: int, keep: int, depth: int):
-    """The 27B's concurrent geometry (each stream, ``keep`` kept prompt ends, every window's rows) plus the MTP
-    head's keys and values for each of them and, with drafts, the one-stream graphs' buffers (a stream's worth);
-    ``depth + 1`` slots past a window are draft scratch."""
+    """The 27B's concurrent geometry plus the MTP head's keys and values for each stream and kept end, and the lone stream's graph buffers."""
 
     from tensorfold.cuda.capacity import Geometry
     from tensorfold.cuda.geometry import layer_counts, stream_geometry as dense
@@ -44,8 +42,7 @@ def stream_geometry(text: dict, streams: int, keep: int, depth: int):
 
 
 class Qwen36Engine:
-    """``eos``, ``generate`` and ``context_window`` for ``tensorfold.cuda.server``; ``streams`` > 1 decodes up to
-    that many requests together (``concurrent``)."""
+    """``eos``, ``generate`` and ``context_window`` for ``tensorfold.cuda.server``; ``streams`` > 1 decodes that many requests together."""
 
     def __init__(self, model_dir: Path, *, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  context: int | None = None, context_explicit: bool | None = None, streams: int = 1) -> None:
@@ -133,7 +130,8 @@ class Qwen36Engine:
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         grammar = {} if constraint is None else {"constraint": constraint}     # a plain request calls as before
         if self.scheduler is not None:
-            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens)
+            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
+                                         **grammar)
         t0 = time.perf_counter()
         if not draft or self.head is None:
             st, first = serial_prefill(self.w, prompt, sampling, **grammar)

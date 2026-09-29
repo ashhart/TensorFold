@@ -10,6 +10,7 @@ import torch
 from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.sampling import sample_rows, sample_streams
 from tensorfold.cuda.streams import PrefixCache, Stream, accept
+from tensorfold.engine.grammar import GrammarError
 from tensorfold.families.qwen3_5.cuda.decode import CopyIndex
 from tensorfold.families.qwen3_5.cuda.forward import State, _mm, commit_streams, multi_tree_forward
 from tensorfold.families.qwen3_5.cuda.multi import kept, private
@@ -39,18 +40,16 @@ def own(mc: Cache, rows: int) -> Cache:
 
 
 class MultiDecoder:
-    """The ``Scheduler``'s decoder: each round a prefill step for the oldest queued prompt, then every stream's MTP
-    chain (or copied continuation) verified in one forward; a stream's window holds at most 16 rows. With
-    ``graphs`` (a ``graphs.Graphs``), a stream decoding alone replays the one-stream engine's CUDA graphs."""
+    """The ``Scheduler``'s decoder: a prefill step, then every stream's window (16 rows at most) in one forward; a lone stream replays ``graphs``."""
 
     def __init__(self, w, head: Head | None, *, depth: int, confidence: float, context: int = 0, keep: int = 3,
-                 points=None, stop_eos: bool = True, graphs=None) -> None:
+                 points=None, graphs=None) -> None:
         if head is not None and depth > 0 and not 1 <= depth <= 15:
             raise ValueError(f"MTP drafts a round with --parallel: 1 to 15 (a window holds 16 rows), not {depth}")
         self.w, self.head = w, head if depth > 0 else None
         self.depth, self.confidence = int(depth), float(confidence)
         self.context = context                       # prompt, reply and draft slots a stream holds (0: no bound)
-        self.eos = tuple(w.config.eos) if stop_eos else ()
+        self.eos = tuple(w.config.eos)
         self.ids = head.ids.cpu().numpy() if self.head is not None and head.ids is not None else None
         self.streams: dict[int, Stream] = {}         # decoding
         self.filling: list[Stream] = []              # admitted, prompts still prefilling (oldest first)
@@ -103,7 +102,7 @@ class MultiDecoder:
             return [s]
         if first is None:
             return []
-        s.take([first], self.eos)
+        s.take([first], self._ends(s))
         return [s] if s.done else []
 
     def _keep(self, ids: list[int], s: Stream) -> None:
@@ -122,8 +121,14 @@ class MultiDecoder:
                 d.carry = Carry(held, [])
             if stop in s.stops:
                 self._keep(list(s.prompt[:stop]), s)
-            first = None if stop < len(s.prompt) else \
-                sample_rows(_mm(normed[-1:], self.w.head), [len(s.prompt)], s.sampling)[0]
+            first = None
+            if stop == len(s.prompt):
+                logits = _mm(normed[-1:], self.w.head)
+                if s.constraint is not None:          # the first token under the reply's grammar
+                    logits = s.constraint.mask(logits)
+                first = sample_rows(logits, [len(s.prompt)], s.sampling)[0]
+                if s.constraint is not None:
+                    s.constraint.advance([first])
             if first is not None and d is not None and not (s.stops and len(s.prompt) - s.stops[-1] < MIN_GAP):
                 self._keep(list(s.prompt), s)         # a message start just before the end covers it
         finally:
@@ -150,13 +155,21 @@ class MultiDecoder:
         if len(live) == 1 and self._fits(live[0]):
             return done + self._alone(live[0])
         self._propose(live)
+        grammars = self._constrain(live)
+        done += [s for s in live if s.done]
+        live = [s for s in live if not s.done]
+        if not live:
+            return done
         wins = [[s.out[-1]] + s.drafts for s in live]
         chains = [list(range(-1, len(t) - 1)) for t in wins]
         logits, record, hidden, starts = multi_tree_forward(
             self.w, [(t, p, s.st) for t, p, s in zip(wins, chains, live)], hidden=True)
+        for k, s in enumerate(live):                  # a constrained stream's rows, each masked by its path
+            if s.sid in grammars:
+                s.constraint.mask(logits[starts[k]:starts[k + 1]], grammars[s.sid])
         positions = [[s.st.pos + 1 + i for i in range(len(t))] for s, t in zip(live, wins)]
         sampled = sample_streams(logits, starts, positions, [s.sampling for s in live])
-        kept_rows = [accept(t, p, rows, s.count - len(s.out), self.eos)
+        kept_rows = [accept(t, p, rows, s.count - len(s.out), self._ends(s))
                      for s, t, p, rows in zip(live, wins, chains, sampled)]
         commit_streams([s.st for s in live], record, [[starts[k] + r for r in path]
                                                       for k, (path, _) in enumerate(kept_rows)], in_place=True)
@@ -166,8 +179,41 @@ class MultiDecoder:
             s.counted(len(tokens))
             if s.snap is not None:                    # the kept rows' final states, for the head to absorb next
                 s.snap.carry = Carry(hidden[starts[k] + path[0]:starts[k] + path[-1] + 1], new)
-            s.take(new, self.eos)
+            if s.constraint is not None and not self._follow(s, new):
+                continue
+            s.take(new, self._ends(s))
         return done + [s for s in live if s.done]
+
+    def _constrain(self, live: list[Stream]) -> dict:
+        """Each constrained stream's drafts cut where its grammar rejects one, and its rows' masks by stream id."""
+
+        grammars = {}
+        for s in live:
+            if s.constraint is None:
+                continue
+            try:
+                window = s.constraint.window([s.out[-1]] + s.drafts, list(range(-1, len(s.drafts))))
+            except GrammarError as exc:               # this request ends with its error, the others go on
+                s.error, s.done = exc, True
+                continue
+            s.drafts, grammars[s.sid] = window.tokens[1:], window
+        return grammars
+
+    @staticmethod
+    def _follow(s: Stream, new: list[int]) -> bool:
+        """The grammar follows the kept tokens; False (the stream ended with the error) when it fails."""
+
+        try:
+            s.constraint.advance(new)
+        except GrammarError as exc:
+            s.error, s.done = exc, True
+            return False
+        return True
+
+    def _ends(self, s: Stream) -> tuple[int, ...]:
+        """The end tokens that end this stream: none when its request ignores them (``ignore_eos``)."""
+
+        return self.eos if s.stop_eos else ()
 
     def _fits(self, s: Stream) -> bool:
         """Whether a drafting stream's caches fit the graphs' buffers (else it decodes eagerly in its own)."""
@@ -176,25 +222,28 @@ class MultiDecoder:
                 (s is self.resident or len(s.prompt) + s.count + self.depth <= self.graphs.capacity))
 
     def _alone(self, s: Stream) -> list[Stream]:
-        """The one decoding stream's round as the one-stream engine runs it, in its graphs: the stream's state moves
-        into their fixed buffers once and stays there, decoding eagerly with the others when streams join."""
+        """The lone stream's round in the one-stream graphs, its state moved into their buffers once (eager there when others join)."""
 
         g, d = self.graphs, s.snap
         if self.resident is not s:
             s.st, d.cache = g.load(s.st, d.cache, min(g.capacity, len(s.prompt) + s.count + COPY_ROWS))
             self.resident = s
-        tokens, path, new, d.carry = mtp_round(s.st, d.cache, d.carry, s.out[-1], s.count - len(s.out), s.sampling,
-                                               s.context, s.copies, depth=self.depth, confidence=self.confidence,
-                                               ids=self.head.ids, verify=g.verify, step=g.draft, eos=self.eos,
-                                               in_place=True)
+        try:
+            tokens, path, new, d.carry = mtp_round(s.st, d.cache, d.carry, s.out[-1], s.count - len(s.out),
+                                                   s.sampling, s.context, s.copies, depth=self.depth,
+                                                   confidence=self.confidence, ids=self.head.ids, verify=g.verify,
+                                                   step=g.draft, eos=self._ends(s), in_place=True,
+                                                   constraint=s.constraint)
+        except GrammarError as exc:                   # this request ends with its error
+            s.error, s.done = exc, True
+            return [s]
         s.committed.extend(tokens[r] for r in path)
         s.counted(len(tokens))
-        s.take(new, self.eos)
+        s.take(new, self._ends(s))
         return [s] if s.done else []
 
     def _propose(self, live: list[Stream]) -> None:
-        """Each drafting stream absorbs its carry (every stream in one head call), then proposes a copied continuation
-        of its context or a chain of up to ``depth`` MTP drafts (chains a step at a time, every stream together)."""
+        """Every drafting stream's carry absorbed in one head call, then a copy or an MTP chain each, the chains stepped together."""
 
         for s in live:
             s.drafts = []
@@ -235,8 +284,7 @@ class MultiDecoder:
 
     @torch.no_grad()
     def warm(self, streams: int) -> None:
-        """A synthetic request through prefill and a round, and forwards at the row counts ``streams`` windows bring,
-        so no request compiles or loads a kernel; then forgotten."""
+        """A synthetic request and forwards at every row count ``streams`` windows bring, so no request compiles a kernel; then forgotten."""
 
         s = Stream([0] * (min(300, self.context - self.depth - 2) if self.context else 300), 2, None, draft=True)
         self.admit(s)

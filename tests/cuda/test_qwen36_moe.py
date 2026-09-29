@@ -321,6 +321,29 @@ def test_streams_decoded_together_equal_solo_and_serial(expandable, confidence):
     assert not dec.streams and not dec.filling
 
 
+def test_a_stream_that_ignores_end_tokens_decodes_past_them_beside_one_that_stops():
+    """``stop_eos=False`` is per request: that stream decodes through an end token (together, then alone in the
+    graphs) while one beside it stops there, each equal to its serial reply."""
+
+    from tensorfold.families.qwen3_5_moe.cuda.graphs import Graphs
+
+    w, head = _model()
+    prompt = PROMPTS[0]
+    st, first = serial_prefill(w, prompt, None)
+    free = draft_decode(w, st, prompt, first, 40, None, None, allow_copy=False, stop_eos=False).tokens
+    w.config.eos = (free[5],)                               # an end token inside the reply
+    dec = MultiDecoder(w, head, depth=3, confidence=0.0, graphs=Graphs(w, head, 1024))
+    ignoring, stopping = Stream(prompt, 40, None, stop_eos=False), Stream(prompt, 40, None)
+    for s in (ignoring, stopping):
+        dec.admit(s)
+    _drain(dec)
+    assert ignoring.out == free and stopping.out == free[:free.index(free[5]) + 1]
+    alone = Stream(prompt, 40, None, stop_eos=False)
+    dec.admit(alone)
+    _drain(dec)
+    assert alone.out == free
+
+
 @pytest.mark.parametrize("sampling", [None, Sampling(1234, 1.0, 20, 0.95)])
 def test_streams_join_and_leave_mid_round(monkeypatch, sampling):
     """Requests arrive while others decode (their prompts prefilled a few rows a round) and finish at different
@@ -606,3 +629,44 @@ def test_a_stream_alone_grows_the_graph_buffers_while_others_run(expandable, sam
     assert runner.rows == 2 * BUCKET
     for s in (short, grown, joined, last):
         assert s.out == refs[tuple(s.prompt)], s.prompt
+
+
+def test_constrained_streams_together_equal_solo_and_serial():
+    """A grammar per stream cuts the drafts it rejects and masks each row by its path: beside plain streams, and alone
+    in the one-stream graphs, a constrained stream emits its serial constrained tokens, which the grammar takes."""
+
+    from tensorfold.families.qwen3_5_moe.cuda.graphs import Graphs
+
+    pytest.importorskip("xgrammar")
+    from toy_grammar import toy
+
+    grammars, compiled = toy(V)
+    w, head = _model()
+    shaped = {0, 2, 3}
+
+    def fresh(i):
+        return {"constraint": grammars.constraint(compiled)} if i in shaped else {}
+
+    refs, solo = [], []
+    for i, (p, smp) in enumerate(zip(MIXED, SAMPLED)):
+        c = fresh(i)
+        st, first = serial_prefill(w, p, smp, **c)
+        refs.append(draft_decode(w, st, p, first, 24, smp, None, allow_copy=False, **c).tokens)
+        c = fresh(i)
+        st, mc, first, carry = decode.prefill(w, head, p, smp, **c)
+        solo.append(decode.mtp_decode(w, head, st, mc, carry, first, 24, smp, depth=3, confidence=0.3, prompt=p,
+                                      **c).tokens)
+    assert solo == refs and refs[0] != _serial(w, MIXED[0], SAMPLED[0], 24)
+    for i in shaped:
+        m = grammars.xgr.GrammarMatcher(compiled)
+        assert all(m.accept_token(t) for t in refs[i]), i
+    dec = MultiDecoder(w, head, depth=3, confidence=0.3, graphs=Graphs(w, head, 1024))
+    streams = [Stream(p, 24, smp, draft=i != 3, **fresh(i)) for i, (p, smp) in enumerate(zip(MIXED, SAMPLED))]
+    for s in streams:
+        dec.admit(s)
+    _drain(dec)
+    assert [s.out for s in streams] == refs
+    alone = Stream(MIXED[0], 24, SAMPLED[0], **fresh(0))
+    dec.admit(alone)
+    _drain(dec)
+    assert alone.out == refs[0] and dec.graphs.target
