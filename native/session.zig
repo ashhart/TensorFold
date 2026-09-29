@@ -39,6 +39,7 @@ pub const Backend = union(enum) {
 };
 
 pub const Sink = struct {
+    gate: ?*@import("call_gate.zig").Gate = null,
     context: ?*anyopaque = null,
     emit: ?*const fn (?*anyopaque, []const u8) anyerror!void = null,
     cancelled: ?*const fn (?*anyopaque) bool = null,
@@ -149,8 +150,18 @@ fn generateModel(m: anytype, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, pr
     var sent: usize = 0;
     while (reply.tokens.items.len < options.max_tokens) {
         try sink.check();
+        if (sink.gate) |gate| {
+            const proposed_eos = if (M == qwen.Model) next == 248044 or next == 248046 else if (@hasDecl(M, "isEos")) m.isEos(next) else M.eos(next);
+            next = try gate.next(next, proposed_eos);
+        }
         const eos = if (M == qwen.Model) next == 248044 or next == 248046 else if (@hasDecl(M, "isEos")) m.isEos(next) else M.eos(next);
         if (eos and !options.ignore_eos) {
+            const ending = try tok.decode(a, &.{@intCast(next)}, false);
+            defer a.free(ending);
+            for ([_][]const u8{ "</tool_call>", "<tool_call|>", "</｜DSML｜tool_calls>" }) |close| if (std.mem.eql(u8, ending, close)) {
+                try reply.tokens.append(a, @intCast(next));
+                break;
+            };
             reply.finish_reason = .stop;
             break;
         }

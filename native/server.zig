@@ -3,6 +3,7 @@ const mx = @import("mlx.zig");
 const inference = @import("session.zig");
 const chat = @import("chat.zig");
 const reply_text = @import("reply_text.zig");
+const tool_calls = @import("tool_calls.zig");
 const Request = std.http.Server.Request;
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
@@ -143,11 +144,25 @@ fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request
     var ids: std.ArrayList(i32) = .empty;
     var raw_images = body.object.get("images") orelse .null;
     var thinking = false;
+    var tools: std.json.Value = .null;
+    var max_calls: ?usize = null;
+    var gate: ?@import("call_gate.zig").Gate = null;
     if (is_chat) {
+        tools = chat.activeTools(a, body) catch |err| return failure(a, request, .bad_request, @errorName(err));
+        if (body.object.get("parallel_tool_calls")) |parallel| if (parallel != .null) {
+            if (parallel != .bool) return failure(a, request, .bad_request, "parallel_tool_calls must be a boolean");
+            if (!parallel.bool) max_calls = 1;
+        };
         const rendered = session.renderChat(a, body) catch |err| return failure(a, request, .bad_request, @errorName(err));
         try ids.appendSlice(a, try chat.encode(a, &session.tokenizer, rendered));
         raw_images = rendered.images;
         thinking = rendered.thinking;
+        if (chat.requiresCall(body)) {
+            const form = (try session.chat_template.?.callForm(a, &session.tokenizer)) orelse return failure(a, request, .bad_request, "This template cannot mark required tool calls");
+            var names: std.ArrayList([]const u8) = .empty;
+            if (tools == .array) for (tools.array.items) |spec| try names.append(a, try chat.toolName(spec));
+            gate = @import("call_gate.zig").Gate.init(a, &session.tokenizer, ids.items, form, names.items, session.backend == .gemma) catch |err| return failure(a, request, .bad_request, @errorName(err));
+        }
     } else switch (body.object.get("prompt") orelse return failure(a, request, .bad_request, "Missing prompt")) {
         .string => |value| {
             for (try session.tokenizer.encode(a, value)) |id| try ids.append(a, @intCast(id));
@@ -167,9 +182,9 @@ fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request
     if (options.stream) {
         var buffer: [8192]u8 = undefined;
         var response = try request.respondStreaming(&buffer, .{ .respond_options = .{ .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" } } } });
-        var state = Stream{ .a = a, .writer = &response.writer, .transport = request.server.out, .id = id, .model = model, .created = created, .connection = connection, .is_chat = is_chat, .thinking = thinking, .markers = markers };
+        var state = Stream{ .a = a, .writer = &response.writer, .transport = request.server.out, .id = id, .model = model, .created = created, .connection = connection, .is_chat = is_chat, .thinking = thinking, .markers = markers, .tools = tools, .max_calls = max_calls };
         if (is_chat) try state.chatChunk(.{ .role = "assistant", .content = "" }, null);
-        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &state, .emit = Stream.emit, .cancelled = Stream.cancelled }, images) catch |err| {
+        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &state, .emit = Stream.emit, .cancelled = Stream.cancelled, .gate = if (gate) |*g| g else null }, images) catch |err| {
             const error_body = try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .message = @errorName(err) } }, .{});
             try response.writer.print("data: {s}\n\ndata: [DONE]\n\n", .{error_body});
             try response.end();
@@ -178,17 +193,19 @@ fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request
         defer reply.deinit(mx.allocator);
         if (is_chat) {
             try state.chatText(true);
-            try state.chatChunk(std.json.Value{ .object = .empty }, @tagName(reply.finish_reason));
+            try state.chatChunk(std.json.Value{ .object = .empty }, if (state.calls_sent > 0) "tool_calls" else @tagName(reply.finish_reason));
         } else try state.chunk("", @tagName(reply.finish_reason));
         try response.writer.writeAll("data: [DONE]\n\n");
         try response.end();
     } else {
-        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &connection, .cancelled = Connection.cancelled }, images) catch |err| return failure(a, request, .bad_request, @errorName(err));
+        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &connection, .cancelled = Connection.cancelled, .gate = if (gate) |*g| g else null }, images) catch |err| return failure(a, request, .bad_request, @errorName(err));
         defer reply.deinit(mx.allocator);
         const usage = .{ .prompt_tokens = reply.prompt_tokens, .completion_tokens = reply.tokens.items.len, .total_tokens = reply.prompt_tokens + reply.tokens.items.len };
         if (is_chat) {
             const parts = if (thinking) reply_text.splitThinking(reply.content, true, markers) else reply_text.Parts{ .content = reply.content };
-            try json(a, request, .ok, .{ .id = id, .object = "chat.completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .message = .{ .role = "assistant", .content = parts.content, .reasoning_content = parts.reasoning }, .finish_reason = @tagName(reply.finish_reason) }}, .usage = usage });
+            var parsed = try tool_calls.parse(a, parts.content, tools, max_calls, id);
+            if (max_calls != null and tools == .array and tools.array.items.len > 0) parsed.content = try tool_calls.singleContent(a, parsed.content);
+            try json(a, request, .ok, .{ .id = id, .object = "chat.completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .message = .{ .role = "assistant", .content = parsed.content, .reasoning_content = parts.reasoning, .tool_calls = parsed.calls }, .finish_reason = if (parsed.calls.len > 0) "tool_calls" else @tagName(reply.finish_reason) }}, .usage = usage });
         } else try json(a, request, .ok, .{ .id = id, .object = "text_completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .text = reply.content, .finish_reason = @tagName(reply.finish_reason), .logprobs = @as(?u8, null) }}, .usage = usage });
     }
 }
@@ -207,6 +224,9 @@ const Stream = struct {
     accumulated: std.ArrayList(u8) = .empty,
     sent_content: usize = 0,
     sent_reasoning: usize = 0,
+    tools: std.json.Value = .null,
+    max_calls: ?usize = null,
+    calls_sent: usize = 0,
     fn cancelled(context: ?*anyopaque) bool {
         const s: *Stream = @ptrCast(@alignCast(context.?));
         return Connection.cancelled(&s.connection);
@@ -236,9 +256,17 @@ const Stream = struct {
             try s.chatChunk(.{ .reasoning_content = parts.reasoning[s.sent_reasoning..] }, null);
             s.sent_reasoning = parts.reasoning.len;
         }
-        if (parts.content.len > s.sent_content) {
-            try s.chatChunk(.{ .content = parts.content[s.sent_content..] }, null);
-            s.sent_content = parts.content.len;
+        if (!finished and s.tools == .array and s.tools.array.items.len > 0) return;
+        var parsed = if (finished) try tool_calls.parse(s.a, parts.content, s.tools, s.max_calls, s.id) else tool_calls.Result{ .content = parts.content };
+        if (s.max_calls != null and finished and s.tools == .array and s.tools.array.items.len > 0) parsed.content = try tool_calls.singleContent(s.a, parsed.content);
+        if (parsed.content.len > s.sent_content) {
+            try s.chatChunk(.{ .content = parsed.content[s.sent_content..] }, null);
+            s.sent_content = parsed.content.len;
+        }
+        for (parsed.calls, 0..) |call, index| {
+            try s.chatChunk(.{ .tool_calls = &.{.{ .index = index, .id = call.id, .type = "function", .function = .{ .name = call.function.name, .arguments = "" } }} }, null);
+            try s.chatChunk(.{ .tool_calls = &.{.{ .index = index, .function = .{ .arguments = call.function.arguments } }} }, null);
+            s.calls_sent += 1;
         }
     }
 };

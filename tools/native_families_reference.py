@@ -304,7 +304,41 @@ def chat_fixture(directory, output):
     from transformers import AutoTokenizer
     from mlx_lm.tokenizer_utils import TokenizerWrapper
     from tensorfold.server.text import render_prompt_ids
+    from tensorfold.engine.call_gate import CallGate, call_format
     tokenizer = TokenizerWrapper(AutoTokenizer.from_pretrained(str(directory), local_files_only=True))
+    openers = ("<tool_call>", "<|tool_call>", "<｜DSML｜tool_calls>")
+    probe = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "tfprobe_fn", "arguments": {}}}]}]
+    form = call_format(tokenizer.decode(render_prompt_ids(tokenizer, probe, add_generation_prompt=False)), "tfprobe_fn", openers)
+    def token_id(text):
+        token = tokenizer.convert_tokens_to_ids(text)
+        return token if isinstance(token, int) and token >= 0 and token != tokenizer.unk_token_id else -1
+    if form is None:
+        form = next(((opener, None, None) for opener in openers if token_id(opener) >= 0), None)
+    is_gemma = "gemma" in directory.name.lower()
+    think_open = tokenizer.encode("<|channel>thought", add_special_tokens=False)[0] if is_gemma else token_id("<think>")
+    think_end = token_id("<channel|>" if is_gemma else "</think>")
+    eos = tokenizer.eos_token_id
+    def gate_cases(prompt):
+        if form is None:
+            return []
+        encode = lambda text: tokenizer.encode(text, add_special_tokens=False)
+        decode = lambda token: tokenizer.decode([token], skip_special_tokens=False)
+        names = ["weather", "forecast"]
+        result = []
+        for script in ("I refuse to call a tool.", "<think>reason</think>" + form[0] + (form[1] or "") + "wrong" + (form[2] or "")):
+            proposed = ([eos] + encode(script)) * 3
+            gate = CallGate.after_prompt(prompt, token_id(form[0]), lambda token: token != eos and not decode(token).strip(), think_open=think_open, think_end=think_end, text=decode, encode=encode, lead=form[1] or "", names=names if form[1] is not None else (), tail=form[2] or "")
+            forced, expected = [], []
+            for token in proposed:
+                if not forced:
+                    cut = gate.cut([token])
+                    if cut is not None:
+                        forced = list(cut[1])
+                selected = forced.pop(0) if forced else token
+                gate.observe(selected)
+                expected.append(selected)
+            result.append({"names": names, "proposed": proposed, "eos": eos, "expected": expected})
+        return result
     tool = {"type": "function", "function": {"name": "weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}
     conversations = [
         [{"role": "user", "content": "Hello, æøå 世界 👋\n123456789"}],
@@ -324,10 +358,49 @@ def chat_fixture(directory, output):
             if tools:
                 body["tools"] = tools
             ids = render_prompt_ids(tokenizer, messages, tools=tools, enable_thinking=thinking, reasoning_effort=effort)
-            cases.append({"body": body, "tokens": ids})
+            cases.append({"body": body, "tokens": ids, "gates": gate_cases(ids)})
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(cases, ensure_ascii=False))
     print(f"Saved {len(cases)} upstream chat fixtures for {directory.name}")
+
+
+def tool_fixtures(output):
+    from tensorfold.server.tools import parse_tool_calls_from_content
+    from tensorfold.server.tool_policy import ToolCallPolicy
+    properties = {"city": {"type": "string"}, "days": {"type": "integer"}, "flag": {"type": "boolean"}, "data": {"type": "object"}, "items": {"type": "array"}, "value": {"type": "number"}, "empty": {"type": "null"}}
+    tools = [{"type": "function", "function": {"name": "weather", "parameters": {"properties": properties}}}]
+    payloads = [
+        '{"name":"weather","arguments":{"city":"Paris","days":2}}',
+        '{"function":{"name":"weather","arguments":"{\\"city\\":\\"Paris\\"}"}}',
+        '{"tool":"weather","city":"Paris","days":2}',
+        '{"name":"missing","arguments":{}}', '{"name":"weather","arguments":[]}',
+        '{"name":"weather","arguments":null}', '{"name":"weather","arguments":""}',
+        '[{"name":"weather","args":{}},{"name":"weather","args":{"days":2}}]',
+        'call:weather{city:<|"|>Paris<|"|>,days:2}',
+        'call:weather{data:{city:<|"|>æøå 世界<|"|>},items:[1,2]}',
+        '<function=weather><parameter=city>Paris</parameter><parameter=days>2</parameter></function>',
+        'weather<arg_key>city</arg_key><arg_value>Paris</arg_value><arg_key>days</arg_key><arg_value>2</arg_value>',
+        '<FUNCTION=weather><PARAMETER=days>2</PARAMETER></FUNCTION>',
+        '<function=x</function>', '<function=weather>garbage</function>', 'weather',
+    ]
+    for key in properties:
+        for value in ('2', 'true', 'null', '1.5', '[]', '{}', '"two"', 'not json', '1e999', '\n x \n'):
+            payloads.append(f'<function=weather><parameter={key}>\n{value}\n</parameter></function>')
+    texts = ['  prose  ', '{"answer":"plain JSON"}', '```json\n{"name":"weather","arguments":{}}\n```']
+    for payload in payloads:
+        texts.extend((payload, f'before <tool_call>{payload}</tool_call> after', f'<x:tool_call>{payload}</x:tool_call>', f'<|tool_call>{payload}<tool_call|>'))
+    dsml = '<｜DSML｜tool_calls><｜DSML｜invoke name="weather"><｜DSML｜parameter name="city" string="true">Paris</｜DSML｜parameter><｜DSML｜parameter name="days" string="false">2</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>'
+    texts.extend((dsml, dsml + dsml, dsml.replace('>2<', '>bad<')))
+    for text in (dsml, '<tool_call>{"name":"weather","arguments":{"city":"Paris"}}</tool_call>', '<tool_call><function=x</function></tool_call>'):
+        texts.extend(text[:i] for i in range(len(text) + 1))
+    cases = []
+    for limit in (None, 1):
+        for text in texts:
+            content, calls = parse_tool_calls_from_content(text, tools, max_calls=limit)
+            cases.append({"text": text, "tools": tools, "max_calls": limit, "content": content, "single_content": ToolCallPolicy({"parallel_tool_calls": False}).content(content), "calls": [call["function"] for call in calls or []]})
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(cases, ensure_ascii=False))
+    print(f"Saved {len(cases)} upstream tool parser fixtures")
 
 
 def main():
@@ -335,6 +408,7 @@ def main():
     p.add_argument("model", type=Path)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--chat-fixtures", action="store_true")
+    p.add_argument("--tool-fixtures", action="store_true")
     p.add_argument("--tokens", help="Explicit prompt IDs, including for generation")
     p.add_argument("--dump-logits", type=Path)
     p.add_argument("--generate", type=int, default=0)
@@ -361,6 +435,9 @@ def main():
     p.add_argument("--trace-layers", action="store_true")
     p.add_argument("--state-directory", type=Path)
     args = p.parse_args()
+    if args.tool_fixtures:
+        tool_fixtures(args.output)
+        return
     if args.chat_fixtures:
         chat_fixture(args.model, args.output)
         return

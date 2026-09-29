@@ -151,7 +151,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
-| Chat templates and tokenizer parity | `test-chat -Doptimize=safe -j1` | All seven local tokenizers; no model weights loaded |
+| Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven local tokenizers; no model weights loaded |
 | Checkpoint metadata rejection | `test-schema-failures -Doptimize=safe -j1` | Installed schema checkpoints; no GPU |
 
 Start GPU verification with:
@@ -190,11 +190,15 @@ apply a chat template. Use `--tokens ID,ID,...` for controlled comparisons.
 seeded sampling, stop strings, reasoning content and disconnect cancellation.
 Chat uses each model's Jinja template. Qwen accepts user `image_url` content
 parts containing data URLs, up to four images and 20 MiB decoded bytes total;
-`detail: "low"` caps each image at 256 visual tokens. Remote image URLs,
-tool-call output handling and speculative serving are still pending.
+`detail: "low"` caps each image at 256 visual tokens. Tool calls support the
+Qwen, Gemma, GLM and DeepSeek formats, named/required choice, typed arguments
+and `parallel_tool_calls: false`. Tool-enabled streams hold content until
+the completed calls have been parsed. Remote image URLs and speculative
+serving are still pending.
 One inference worker owns the model; its queue holds eight requests.
 Against a running Qwen server, compare JSON/SSE text, reasoning and images with
 `.zig-toolchain/zig run tools/native_http_checks.zig -- http://127.0.0.1:8080/v1/chat/completions /path/to/image.png`.
+Replace the image path with `--tools-only` to check a named tool call.
 Use `--report build/native-checks/run.json` and
 `--dump-logits build/native-checks/logits.npy` for correctness evidence; create
 the output directory first.

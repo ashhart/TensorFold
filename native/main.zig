@@ -16,6 +16,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len >= 3 and std.mem.eql(u8, args[1], "serve")) return @import("server.zig").run(init, args);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-chat")) return @import("chat.zig").check(io, args[2], args[3]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-tool-calls")) return @import("tool_calls.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-gemma-prefill")) return @import("gemma_prefill.zig").check(io, args[2], args[3]);
     if (args.len == 5 and std.mem.eql(u8, args[1], "check-gemma-draft")) return @import("gemma.zig").checkDraft(io, args[2], args[3], args[4]);
     if (args.len == 5 and std.mem.eql(u8, args[1], "check-dflash")) return @import("dflash.zig").check(io, args[2], args[3], try std.fmt.parseInt(usize, args[4], 10));
@@ -366,6 +367,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("tool_calls.zig");
     _ = @import("chat.zig");
     _ = @import("image_source.zig");
     _ = @import("request_options.zig");

@@ -6,6 +6,7 @@ extern "c" fn jinja_str_free([*]u8) void;
 extern "c" fn jinja_last_error() ?[*:0]const u8;
 
 pub const Rendered = struct { text: []u8, images: V, thinking: bool };
+pub const CallForm = struct { opener: []const u8, lead: ?[]const u8 = null, tail: []const u8 = "" };
 
 pub fn encode(a: std.mem.Allocator, tokenizer: *Tokenizer, rendered: Rendered) ![]i32 {
     const tokens = try tokenizer.encode(a, rendered.text);
@@ -50,8 +51,21 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
             std.debug.print("Chat fixture {d}: native {d} tokens, upstream {d}\nRendered: {s}\n", .{ index, ids.len, expected.len, rendered.text });
             return error.ChatTemplateMismatch;
         }
+        if (case.object.get("gates")) |gates| for (gates.array.items) |fixture_gate| {
+            const form = (try template.callForm(a, &tokenizer)) orelse return error.MissingCallForm;
+            var names: std.ArrayList([]const u8) = .empty;
+            for (fixture_gate.object.get("names").?.array.items) |name| try names.append(a, name.string);
+            var gate = try @import("call_gate.zig").Gate.init(a, &tokenizer, ids, form, names.items, std.mem.indexOf(u8, directory, "gemma") != null);
+            for (fixture_gate.object.get("proposed").?.array.items, fixture_gate.object.get("expected").?.array.items, 0..) |proposed, expected_token, token_index| {
+                const got = try gate.next(@intCast(proposed.integer), proposed.integer == fixture_gate.object.get("eos").?.integer);
+                if (got != expected_token.integer) {
+                    std.debug.print("Call gate fixture {d}, token {d}: native {d}, upstream {d}\n", .{ index, token_index, got, expected_token.integer });
+                    return error.CallGateMismatch;
+                }
+            }
+        };
     }
-    std.debug.print("PASS: {d} chat prompts match upstream token IDs\n", .{cases.value.array.items.len});
+    std.debug.print("PASS: {d} chat prompts and required-call gates match upstream token IDs\n", .{cases.value.array.items.len});
 }
 pub const Template = struct {
     arena: std.heap.ArenaAllocator,
@@ -92,6 +106,31 @@ pub const Template = struct {
     }
     pub fn deinit(t: *Template) void {
         t.arena.deinit();
+    }
+    pub fn callForm(t: *const Template, a: std.mem.Allocator, tokenizer: *Tokenizer) !?CallForm {
+        const probe = try std.json.parseFromSlice(V, a,
+            \\[{"role":"user","content":"x"},{"role":"assistant","content":"","tool_calls":[{"id":"call_0","type":"function","function":{"name":"tfprobe_fn","arguments":{}}}]}]
+        , .{});
+        var context = V{ .object = try t.context.object.clone(a) };
+        try context.object.put(a, "enable_thinking", .{ .bool = false });
+        try context.object.put(a, "thinking_mode", .{ .string = "chat" });
+        const text = t.raw(a, probe.value, .null, context, false, false) catch "";
+        const openers: []const []const u8 = &.{ "<tool_call>", "<|tool_call>", "<｜DSML｜tool_calls>" };
+        var best: ?usize = null;
+        var form: ?CallForm = null;
+        if (std.mem.lastIndexOf(u8, text, "tfprobe_fn")) |name| for (openers) |opener| {
+            if (std.mem.lastIndexOf(u8, text[0..name], opener)) |start| if (best == null or start > best.?) {
+                best = start;
+                const end = name + "tfprobe_fn".len;
+                form = .{ .opener = opener, .lead = text[start + opener.len .. name], .tail = text[end..@min(end + 1, text.len)] };
+            };
+        };
+        if (form != null) return form;
+        for (openers) |opener| {
+            const ids = try tokenizer.encode(a, opener);
+            if (ids.len == 1) return .{ .opener = opener };
+        }
+        return null;
     }
     fn raw(t: *const Template, a: std.mem.Allocator, messages: V, tools: V, extra: V, generation: bool, report_error: bool) ![]u8 {
         const msg = try asJson(a, messages);
@@ -229,6 +268,13 @@ pub fn activeTools(a: std.mem.Allocator, body: V) !V {
     };
     if (required and selected.array.items.len == 0) return error.MissingRequiredTool;
     return if (selected.array.items.len > 0) selected else .null;
+}
+pub fn requiresCall(body: V) bool {
+    const choice = body.object.get("tool_choice") orelse return false;
+    const mode = if (choice == .object) choice.object.get("type") orelse choice.object.get("mode") orelse return false else choice;
+    if (mode != .string) return false;
+    const value = std.mem.trim(u8, mode.string, " \r\n\t");
+    return std.ascii.eqlIgnoreCase(value, "required") or (choice == .object and std.ascii.eqlIgnoreCase(value, "function"));
 }
 pub fn toolName(tool: V) ![]const u8 {
     if (tool != .object) return error.InvalidTools;
