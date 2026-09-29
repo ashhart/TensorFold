@@ -111,6 +111,7 @@ def message_markers(tokenizer: Any) -> tuple[tuple[int, ...], tuple[int, ...]]:
     special |= {int(i) for i in (getattr(tokenizer, "all_special_ids", None) or ())}
     late = template_late_system(tokenizer)
     pieces: dict[str, list[list[int]]] = {"user": [], "assistant": []}
+    parted: list[tuple[list[int], list[int], str]] = []      # renders that change the end of the one before
     for words in (("Alpha", "Beta", "Gamma", "Delta"), ("one two", "three four", "five six", "seven eight")):
         talk = [{"role": role, "content": text} for role, text in zip(("user", "assistant") * 2, words)]
         for thinking in (False, True):
@@ -128,14 +129,30 @@ def message_markers(tokenizer: Any) -> tuple[tuple[int, ...], tuple[int, ...]]:
             for before, after, role in pairs:
                 if len(after) > len(before) and after[:len(before)] == before:
                     pieces[role].append([int(t) for t in after[len(before):]])
+                else:
+                    parted.append((before, after, role))
+    # a template may render the last reply unlike the same reply in history (Qwen3.5 and 3.6 drop its empty think
+    # block once a user message follows): the new message then starts at the only opener past where the renders differ
+    openers = _openers(pieces, special)
+    for before, after, role in parted:
+        split = next((i for i, (a, b) in enumerate(zip(before, after)) if a != b), min(len(before), len(after)))
+        starts = [i for i in range(split, len(after)) if after[i] in openers]
+        if len(starts) == 1:
+            pieces[role].append([int(t) for t in after[starts[0]:]])
     if not pieces["user"] or not pieces["assistant"]:
         return (), ()
-    openers = tuple(sorted({group[0][0] for group in pieces.values()
-                            if group[0][0] in special and all(p[0] == group[0][0] for p in group)}))
+    openers = _openers(pieces, special)
     header, user = _common(pieces["assistant"]), _common(pieces["user"])
     cut = next((i for i, t in enumerate(header) if i >= len(user) or user[i] != t), None)
     assistant = tuple(header[:cut + 1]) if cut is not None and header and header[0] in special else ()
     return openers, assistant
+
+
+def _openers(pieces: dict[str, list[list[int]]], special: set[int]) -> tuple[int, ...]:
+    """The special tokens every piece of a role starts with."""
+
+    return tuple(sorted({group[0][0] for group in pieces.values()
+                         if group and group[0][0] in special and all(p[0] == group[0][0] for p in group)}))
 
 
 def _common(pieces: list[list[int]]) -> list[int]:

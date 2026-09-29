@@ -116,6 +116,7 @@ class _ChatTemplate:
 
 
 def test_message_markers_come_from_the_chat_template() -> None:
+    # every message opens with 1; an assistant's role text begins with "a", a user's with "u" (57 and 27 here)
     assert message_markers(_ChatTemplate()) == ((1,), (1, 57))
     assert message_markers(_ChatTemplate(special=False)) == ((), ())   # plain text never splits prompts
 
@@ -137,6 +138,37 @@ def test_role_tokens_that_open_messages_are_openers_and_the_assistants_is_its_he
             return ids
 
     assert message_markers(RoleTokens()) == ((3, 4), (4,))
+
+
+class _LastReplyThinks(_ChatTemplate):
+    """Qwen3.5/3.6-like: a reply after the last user message keeps an empty think block (3), history drops it."""
+
+    def apply_chat_template(self, messages: list[dict[str, Any]], **kwargs: Any) -> list[int]:
+        last_user = max(i for i, m in enumerate(messages) if m["role"] == "user")
+        ids: list[int] = []
+        for i, m in enumerate(messages):
+            think = [3] if m["role"] == "assistant" and i > last_user else []
+            ids += [self.opener, *self.encode(m["role"] + "\n"), *think, *self.encode(str(m.get("content", ""))), 2]
+        if kwargs.get("add_generation_prompt", True):
+            ids += [self.opener, *self.encode("assistant\n"), 3]
+        return ids
+
+
+def test_a_template_that_renders_the_last_reply_unlike_history_marks_messages_like_chatml() -> None:
+    # [user, reply] is no prefix of [user, reply, user]: the user message is found at the one opener after they part
+    assert message_markers(_LastReplyThinks()) == message_markers(_ChatTemplate()) == ((1,), (1, 57))
+    assert message_markers(_LastReplyThinks(special=False)) == ((), ())
+
+
+def test_openers_come_only_from_renders_that_extend_the_one_before() -> None:
+    class EndsEveryRender(_ChatTemplate):
+        """Phi-like: a render without the generation prompt ends in an end token (2), so none extends another."""
+
+        def apply_chat_template(self, messages: list[dict[str, Any]], **kwargs: Any) -> list[int]:
+            ids = super().apply_chat_template(messages, **kwargs)
+            return ids if kwargs.get("add_generation_prompt", True) else [*ids, 2]
+
+    assert message_markers(EndsEveryRender()) == ((), ())
 
 
 def test_a_template_that_cannot_render_the_probe_gets_the_grid_alone() -> None:
