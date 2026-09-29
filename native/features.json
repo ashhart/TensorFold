@@ -1,8 +1,10 @@
 [
   {
-    "id": "additional-affine-kernels", "state": "missing", "requirement": "Grouped low-bit lane kernels and 5/6/8-bit SIMD row kernels introduced in TensorFold 0.4",
+    "id": "additional-affine-kernels", "state": "present", "requirement": "Grouped low-bit lane kernels and 5/6/8-bit SIMD row kernels introduced in TensorFold 0.4",
     "upstream": ["src/tensorfold/kernels/qwen/dense/v1/simd_qmm_bits.py", "src/tensorfold/kernels/qwen/dense/v1/lane_widen.py", "src/tensorfold/kernels/qwen/dense/v1/row_matmul.py"],
-    "limitation": "Existing affine fallbacks are available; the new specialized kernels and dispatch checks are not ported."
+    "implementation": [{"path":"native/lanes.zig","symbol":"tensorRows"}, {"path":"native/lanes.zig","symbol":"prepareSimdGroup"}, {"path":"native/deepseek_dense.zig","symbol":"calibrate"}, {"path":"native/deepseek_dense.zig","symbol":"launch"}],
+    "checks": [{"step":"test-tensor-quantization","driver":{"path":"native/variant_checks.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-simd-bits","driver":{"path":"native/deepseek_dense_checks.zig","symbol":"check"},"scope":"synthetic"}],
+    "limitation": "Synthetic checks include production projection dimensions, stacked reductions and forced affine fallback on M5; physical M1–M4 execution is unverified."
   },
   {
     "id": "flash-affine-layouts", "state": "missing", "requirement": "Flash Next mixed affine formats, alternate PLE/MTP names and pre-M5 row kernel selection",

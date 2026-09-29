@@ -7,21 +7,26 @@ const ti = mx.ti;
 pub const Projection = struct {
     weights: [3]A,
     group: i32 = 64,
+    bits: i32 = 4,
+    reduction: ?i32 = null,
 
     pub fn validate(p: Projection) !void {
-        if (p.group != 32 and p.group != 64) return error.UnsupportedQuantization;
-        const g = try (@import("quantization.zig").Spec{ .bits = 4, .group_size = p.group }).shape(mx.shape(p.weights[0]), mx.shape(p.weights[1]), mx.shape(p.weights[2]));
+        if (p.bits != 4 and p.bits != 5 and p.bits != 6 and p.bits != 8) return error.UnsupportedQuantization;
+        if (p.group != 64 and (p.bits != 4 or p.group != 32)) return error.UnsupportedQuantization;
+        if (p.reduction) |split| if (split != 8 and split != 16 and split != 32) return error.InvalidReduction;
+        const g = try (@import("quantization.zig").Spec{ .bits = p.bits, .group_size = p.group }).shape(mx.shape(p.weights[0]), mx.shape(p.weights[1]), mx.shape(p.weights[2]));
         if (@mod(g.n, 8) != 0 or @mod(g.k, 64) != 0) return error.UnsupportedProjectionGeometry;
         if (mx.dtype(p.weights[0]) != mx.c.MLX_UINT32 or mx.dtype(p.weights[1]) != mx.bf16 or mx.dtype(p.weights[2]) != mx.bf16) return error.InvalidTensorDType;
     }
-    fn key(p: Projection) [3]i32 {
-        return .{ mx.dim(p.weights[0], 0), mx.dim(p.weights[0], 1) * 8, p.group };
+    pub fn key(p: Projection) [5]i32 {
+        const n = mx.dim(p.weights[0], 0);
+        return .{ n, @divExact(mx.dim(p.weights[0], 1) * 32, p.bits), p.group, p.bits, p.reduction orelse splits(n) };
     }
 };
 
 pub const Dense = struct {
     // The first projection of each shape controls dispatch, as in upstream prepare().
-    checked: std.AutoHashMapUnmanaged([3]i32, bool) = .empty,
+    checked: std.AutoHashMapUnmanaged([5]i32, bool) = .empty,
 
     pub fn deinit(d: *Dense) void {
         d.checked.deinit(mx.allocator);
@@ -45,10 +50,11 @@ pub const Dense = struct {
     }
     pub fn apply(d: *Dense, kernels: *mx.Kernels, s: *mx.Scope, x: A, p: Projection) !A {
         const scalar_ok = d.checked.get(p.key()) orelse return error.UncalibratedProjection;
+        if (p.bits != 4 and !scalar_ok) return error.SimdScalarMismatch;
         const rows = mx.dim(x, 0);
         const n = p.key()[0];
-        const limit: i32 = if (p.group == 32 and n > 6144) 3 else 2;
-        return launch(kernels, s, x, p, scalar_ok and rows <= limit and scalarBlock(rows, splits(n), p.group) != 0, mx.simd_groups);
+        const limit: i32 = if (p.bits != 4) 1 else if (p.group == 32 and n > 6144) 3 else 2;
+        return launch(kernels, s, x, p, scalar_ok and rows <= limit and scalarBlock(rows, p.key()[4], p.group) != 0, mx.simd_groups);
     }
 };
 
@@ -63,25 +69,24 @@ fn scalarBlock(rows: i32, split: i32, group: i32) i32 {
 
 pub fn launch(kernels: *mx.Kernels, s: *mx.Scope, x: A, p: Projection, scalar: bool, max_groups: i32) !A {
     try p.validate();
-    const n, const k, const group = p.key();
+    const n, const k, const group, const bits, const split = p.key();
     if (mx.shape(x).len != 2 or mx.dtype(x) != mx.bf16 or mx.dim(x, 1) != k) return error.InvalidProjectionInput;
     const rows = mx.dim(x, 0);
     if (rows < 1 or rows > 65536 or max_groups < 1 or max_groups > 16) return error.InvalidLaneWidth;
-    const split = splits(n);
     const inputs = [_]A{ try s.contiguous(x), p.weights[0], p.weights[1], p.weights[2], try s.scalar(1) };
     if (scalar) {
         const xb = scalarBlock(rows, split, group);
         if (xb == 0) return error.InvalidScalarRows;
-        const nr: i32 = if (n > 2048) 2 else 1;
+        const nr: i32 = if (bits != 8 and n > 2048) 2 else 1;
         const sgs = if (n > 2048) @max(1, @divTrunc(16, @divExact(32, split) * nr)) else 8;
         const per = sgs * @divExact(32, split) * nr;
-        return (try kernels.run(s, src.simd_qmm_scalar, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NR", nr), ti("XB", xb), ti("GS", group), ti("RS", rows) }, .{ @divTrunc(n + per - 1, per) * sgs * 32, 1, 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
+        return (try kernels.run(s, if (bits == 4) src.simd_qmm_scalar else src.simd_qmm_bits_scalar, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NR", nr), ti("XB", xb), ti(if (bits == 4) "GS" else "B", if (bits == 4) group else bits), ti("RS", rows) }, .{ @divTrunc(n + per - 1, per) * sgs * 32, 1, 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
     }
     const rt = @min(2, @divTrunc(rows + 7, 8));
     var nt: i32 = if (@mod(n, 32) == 0) 4 else if (@mod(n, 16) == 0) 2 else 1;
     while (nt > 1 and split * rt * nt * 64 * 4 > 16384) nt = @divExact(nt, 2);
     const sgs = @min(split, max_groups);
-    return (try kernels.run(s, src.simd_qmm_mma, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NT", nt), ti("RT", rt), ti("GS", group) }, .{ @divTrunc(n + 8 * nt - 1, 8 * nt) * sgs * 32, @divTrunc(rows + 8 * rt - 1, 8 * rt), 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
+    return (try kernels.run(s, if (bits == 4) src.simd_qmm_mma else src.simd_qmm_bits_mma, &inputs, &.{ ti("K", k), ti("N", n), ti("S", split), ti("SGS", sgs), ti("NT", nt), ti("RT", rt), ti(if (bits == 4) "GS" else "B", if (bits == 4) group else bits) }, .{ @divTrunc(n + 8 * nt - 1, 8 * nt) * sgs * 32, @divTrunc(rows + 8 * rt - 1, 8 * rt), 1 }, .{ sgs * 32, 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
 }
 
 fn calibrate(kernels: *mx.Kernels, p: Projection) !bool {
@@ -98,7 +103,7 @@ fn calibrate(kernels: *mx.Kernels, p: Projection) !bool {
     const full = try launch(kernels, &s, x, p, false, mx.simd_groups);
     for (1..5) |count| {
         const m: i32 = @intCast(count);
-        if (scalarBlock(m, splits(p.key()[0]), p.group) == 0) continue;
+        if (scalarBlock(m, p.key()[4], p.group) == 0) continue;
         var row: i32 = 0;
         while (row <= 8 - m) : (row += if (m == 1) 1 else 8 - m) {
             const out = try launch(kernels, &s, try s.slice(x, 0, row, row + m), p, true, mx.simd_groups);

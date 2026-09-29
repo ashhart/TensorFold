@@ -225,10 +225,12 @@ pub fn tb(name: [:0]const u8, value: bool) Template {
 pub const Output = struct { shape: []const c_int, dtype: c.mlx_dtype = bf16 };
 pub const Kernels = struct {
     items: std.StringHashMap(c.mlx_fast_metal_kernel),
+    affine: @import("deepseek_dense.zig").Dense = .{},
     pub fn init() Kernels {
         return .{ .items = std.StringHashMap(c.mlx_fast_metal_kernel).init(allocator) };
     }
     pub fn deinit(k: *Kernels) void {
+        k.affine.deinit();
         var it = k.items.valueIterator();
         while (it.next()) |v| c.mlx_fast_metal_kernel_free(v.*);
         k.items.deinit();

@@ -91,12 +91,18 @@ pub const Model = struct {
             if (member) {
                 var compatible = true;
                 var width: i32 = 0;
-                inline for (group) |name| {
+                var members: [group.len]lanes.Linear = undefined;
+                inline for (group, 0..) |name, j| {
                     const other = try m.weights.linear(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ index, name }));
+                    members[j] = other;
                     if (other.signs.ctx != null or !std.meta.eql(l.format, other.format) or l.k != other.k or other.scales.ctx == null or mx.dtype(l.scales) != mx.dtype(other.scales)) compatible = false;
                     width += other.n;
                 }
-                if (compatible) return l.applyWithReduction(&m.kernels, s, x, if (width <= 64) 32 else if (width <= 6144) 16 else 8);
+                if (compatible) {
+                    const reduction: i32 = if (width <= 64) 32 else if (width <= 6144) 16 else 8;
+                    if (l.simdBitsFits()) return l.simdBitsRows(&m.kernels, s, x.x, reduction, try lanes.Linear.prepareSimdGroup(&m.kernels, &members));
+                    return l.applyWithReduction(&m.kernels, s, x, reduction);
+                }
             }
         };
         return l.apply(&m.kernels, s, x);

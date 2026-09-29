@@ -139,6 +139,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Runtime loading and hardware capabilities | `test-runtime -Doptimize=safe -j1` | CPU arithmetic always checked; unavailable Metal reported explicitly |
 | Hardware-selected Metal smoke suite | `test-metal-smoke -Doptimize=safe -j1` | Synthetic SIMD checks, plus tensor/GLM checks when supported; fails if Metal is unavailable |
 | SIMD attention parity | `test-simd-attention -Doptimize=safe -j1` | Metal and Python; synthetic data |
+| Low-bit tensor and 5/6/8-bit SIMD projections | `test-tensor-quantization test-simd-bits -Doptimize=safe -j1` | M5 for tensor checks; SIMD checks include calibration, stacked reductions and affine fallback |
 | Full synthetic Metal matrix | `test-metal -Doptimize=safe -j1` | Metal and Python; includes M5-specific paths |
 | Additional M5 tensor-attention fixtures | `test-metal -Dmetal-tensors=true -Doptimize=safe -j1` | M5 Metal tensor support |
 | GLM backbone/MTP/cache/generation | `test-glm-model -Doptimize=safe -j1` | Metal and Python; small synthetic checkpoints |

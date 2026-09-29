@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Metal smoke checks cannot run: {s}. This is not a GPU verification pass.\n", .{@errorName(err)});
         return err;
     };
-    try sync.command(init.io, &.{ ".zig-toolchain/zig", "build", "test-simd-attention", "test-row-attention", "test-affine", "test-prefill-math", "-Doptimize=safe", "-j1" });
+    try sync.command(init.io, &.{ ".zig-toolchain/zig", "build", "test-simd-attention", "test-row-attention", "test-affine", "test-simd-bits", "test-prefill-math", "-Doptimize=safe", "-j1" });
     if (tensor) {
         try sync.command(init.io, &.{ ".zig-toolchain/zig", "build", "test-tensor-quantization", "test-glm-model", "-Doptimize=safe", "-j1" });
     } else std.debug.print("M5 tensor tests not applicable to this GPU; SIMD smoke checks passed.\n", .{});

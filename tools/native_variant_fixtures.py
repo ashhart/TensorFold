@@ -209,7 +209,7 @@ def large_family_variants(capture):
 
 
 def extra_variants(capture):
-    from tensorfold.kernels.qwen.dense.v1 import simd_qmm
+    from tensorfold.kernels.qwen.dense.v1 import simd_qmm, simd_qmm_bits
     from tools.native_legacy import row_forward, row_qmv
     for group in (32, 64, 128):
         weight = (mx.random.normal((512, 1024), key=mx.random.key(group)) * .1).astype(mx.bfloat16)
@@ -235,6 +235,28 @@ def extra_variants(capture):
         expected = simd_qmm.qmm(x, q, scales, biases, kind=kind)
         actual = simd_qmm.qmm(x, q, scales, biases, kind=kind, dep=mx.sum(x))
         assert bool(mx.array_equal(expected, actual).item())
+    for bits in simd_qmm_bits.BITS:
+        weights = mx.quantize(mx.random.normal((72, 1024), key=mx.random.key(bits)).astype(mx.bfloat16), group_size=64, bits=bits)
+        for kind, rows in (("scalar", 1), ("scalar", 4), ("mma", 3), ("mma", 17)):
+            capture.test = f"simd-bits-{bits}-{kind}-{rows}"
+            x = mx.random.normal((rows, 1024), key=mx.random.key(rows)).astype(mx.bfloat16)
+            mx.eval(simd_qmm_bits.qmm(x, *weights, bits, kind=kind))
+
+
+def grouped_lane_variants(capture):
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+    for bits in (2, 3, 5, 6, 8):
+        for n, k in ((36, 128), (64, 1024), (5120, 1024)):
+            weights = mx.quantize(mx.random.normal((n, k), key=mx.random.key(bits + k)).astype(mx.bfloat16), group_size=32, bits=bits)
+            x = mx.random.normal((128, k), key=mx.random.key(33)).astype(mx.bfloat16)
+            sbt = lane_qmm.pack_scales(weights[1], weights[2])
+            capture.test = f"grouped-lane-{bits}-{n}-{k}"
+            full = lane_qmm.lane_matmul(x, weights[0], sbt, group=32)
+            for rows in (1, 3, 17, 33, 65, 128):
+                for tiled in (False, True) if n % 32 == 0 else (False,):
+                    q = lane_qmm.tile_weight(weights[0], group=32, bits=bits) if tiled else weights[0]
+                    actual = lane_qmm.lane_matmul(x[:rows], q, sbt, group=32, tiled=tiled)
+                    assert mx.array_equal(actual, full[:rows]).item()
 
 
 def flash_variants(capture):
@@ -495,6 +517,41 @@ def simd_dense_fixtures(directory):
     print(f"Saved {len(cases)} calibrated SIMD shapes: {sum(c['scalar_ok'] for c in cases)} scalar-compatible", flush=True)
 
 
+def simd_bits_fixtures(directory):
+    from tensorfold.kernels.qwen.dense.v1 import simd_qmm_bits as sq, affine_rows
+    cases = []
+    for bits in sq.BITS:
+        for n, k in ((32, 128), (72, 192), (80, 512), (6152, 128), (17408, 5120), (5120, 17408), (5120, 6144), (1024, 5120), (48, 5120)):
+            sq.fallback.clear()
+            weight = (mx.random.normal((n, k), key=mx.random.key(7)) * .02).astype(mx.bfloat16)
+            weights = mx.quantize(weight, group_size=64, bits=bits)
+            scalar_ok = sq.check(*weights, bits)
+            x = (mx.random.normal((129, k), key=mx.random.key(99)) * .5).astype(mx.bfloat16)
+            arrays = dict(weight=weights[0], scales=weights[1], biases=weights[2], x=x)
+            rows = (1, 2, 3, 4, 8, 16, 17, 33, 65, 128, 129)
+            for count in rows:
+                arrays[f"out{count}"] = sq.qmm(x[:count], *weights, bits, kind="mma")
+                arrays[f"fallback{count}"] = affine_rows.qmm(x[:count], *weights, 64, bits)
+            key = f"shape{len(cases):03}"
+            mx.save_safetensors(str(directory / f"{key}.safetensors"), arrays)
+            cases.append(dict(key=key, group=64, bits=bits, scalar_ok=scalar_ok, rows=rows))
+        for sizes, k in (((48, 48), 1024), ((5120, 1024, 1024), 128), ((24, 24, 24, 24), 512)):
+            n = sum(sizes)
+            weights = mx.quantize(mx.random.normal((n, k), key=mx.random.key(bits)).astype(mx.bfloat16), group_size=64, bits=bits)
+            scalar_ok = sq.check(*weights, bits)
+            x = mx.random.normal((17, k), key=mx.random.key(99)).astype(mx.bfloat16)
+            arrays = dict(weight=weights[0], scales=weights[1], biases=weights[2], x=x)
+            rows = (1, 3, 8, 17)
+            for count in rows:
+                arrays[f"out{count}"] = sq.qmm(x[:count], *weights, bits, kind="mma")
+                arrays[f"fallback{count}"] = affine_rows.qmm(x[:count], *weights, 64, bits)
+            key = f"shape{len(cases):03}"
+            mx.save_safetensors(str(directory / f"{key}.safetensors"), arrays)
+            cases.append(dict(key=key, group=64, bits=bits, scalar_ok=scalar_ok, rows=rows, members=sizes))
+    (directory / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
+    print(f"Saved {len(cases)} calibrated 5/6/8-bit SIMD shapes and affine fallback outputs", flush=True)
+
+
 def main():
     require_mlx()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -506,10 +563,14 @@ def main():
     parser.add_argument("--large-families", action="store_true")
     parser.add_argument("--row-attention", action="store_true")
     parser.add_argument("--simd-dense", action="store_true")
+    parser.add_argument("--simd-bits", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     if args.simd_dense:
         simd_dense_fixtures(args.directory)
+        return
+    if args.simd_bits:
+        simd_bits_fixtures(args.directory)
         return
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
@@ -549,6 +610,8 @@ def main():
                 raise SystemExit(code)
             if args.gemma_only:
                 gemma_quantization_variants(capture)
+            if args.tensor_quantization:
+                grouped_lane_variants(capture)
         finally:
             mx.fast.metal_kernel = capture.original
         if not capture.cases:

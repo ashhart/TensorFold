@@ -72,6 +72,11 @@ pub const Linear = struct {
         if (l.generic) {
             if (l.sb.ctx != null) return l.tensorRows(kernels, s, x);
             if (!mx.tensor_units and l.format != null and l.format.?.bits == 4 and (l.format.?.group_size == 32 or l.format.?.group_size == 64) and mx.dtype(l.scales) == mx.bf16 and @mod(l.n, 8) == 0 and @mod(l.k, 64) == 0) return l.simdRows(kernels, s, x.x, reduction, l.format.?.group_size);
+            if (!mx.tensor_units and l.simdBitsFits()) {
+                const p = @import("deepseek_dense.zig").Projection{ .weights = .{ l.weight, l.scales, l.biases }, .bits = l.format.?.bits, .reduction = reduction };
+                try kernels.affine.prepare(kernels, &.{p});
+                return l.simdBitsRows(kernels, s, x.x, reduction, kernels.affine.checked.get(p.key()).?);
+            }
             return l.rows(kernels, s, x.x);
         }
         if (!mx.tensor_units) return l.simdRows(kernels, s, x.x, reduction, 64);
@@ -128,10 +133,57 @@ pub const Linear = struct {
         return (try kernels.run(s, src.prism_rotate, &.{ try s.reshape(x, &.{ count, l.k }), l.signs }, &.{ti("K", l.k)}, .{ 512 * @divExact(l.k, 1024), count, 1 }, .{ 512, 1, 1 }, &.{.{ .shape = mx.shape(x) }}))[0];
     }
 
-    fn tensorRows(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, input: Act) !A {
-        const x = input.x;
-        const f = l.format.?;
+    pub fn simdBitsFits(l: Linear) bool {
+        const f = l.format orelse return false;
+        return (f.bits == 5 or f.bits == 6 or f.bits == 8) and f.group_size == 64 and mx.dtype(l.scales) == mx.bf16 and mx.dtype(l.biases) == mx.bf16 and @mod(l.n, 8) == 0 and @mod(l.k, 64) == 0;
+    }
+
+    pub fn simdBitsRows(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: A, reduction: ?i32, compatible: bool) !A {
+        if (!l.simdBitsFits()) return error.UnsupportedQuantization;
+        if (!compatible) return l.rows(kernels, s, x);
         const m: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(l.k)));
+        const p = @import("deepseek_dense.zig").Projection{ .weights = .{ l.weight, l.scales, l.biases }, .bits = l.format.?.bits, .reduction = reduction };
+        return s.reshape(try @import("deepseek_dense.zig").launch(kernels, s, try s.reshape(x, &.{ m, l.k }), p, m == 1, mx.simd_groups), &.{ 1, m, l.n });
+    }
+
+    /// Calibrate the complete upstream stack once; its members keep their
+    /// storage and use the stack's reduction and fallback decision.
+    pub fn prepareSimdGroup(kernels: *mx.Kernels, members: []const Linear) !bool {
+        if (members.len < 2 or members.len > 4) return error.InvalidProjectionGroup;
+        const first = members[0];
+        var width: i32 = 0;
+        var weights: [4]A = undefined;
+        var scales: [4]A = undefined;
+        var biases: [4]A = undefined;
+        for (members, 0..) |member, i| {
+            if (!member.simdBitsFits() or member.signs.ctx != null or member.k != first.k or !std.meta.eql(member.format, first.format)) return error.InvalidProjectionGroup;
+            width = try std.math.add(i32, width, member.n);
+            weights[i] = member.weight;
+            scales[i] = member.scales;
+            biases[i] = member.biases;
+        }
+        const key = [5]i32{ width, first.k, 64, first.format.?.bits, if (width <= 64) 32 else if (width <= 6144) 16 else 8 };
+        if (kernels.affine.checked.get(key)) |compatible| return compatible;
+        var s = mx.Scope{};
+        defer s.deinit();
+        const p = @import("deepseek_dense.zig").Projection{ .weights = .{ try s.cat(weights[0..members.len], 0), try s.cat(scales[0..members.len], 0), try s.cat(biases[0..members.len], 0) }, .bits = first.format.?.bits };
+        try kernels.affine.prepare(kernels, &.{p});
+        return kernels.affine.checked.get(key).?;
+    }
+
+    /// The explicit lane API reads groups of 32 for every bit width; upstream
+    /// automatic Qwen installation only selects those groups for 4-bit weights.
+    pub fn tensorRows(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, input: Act) !A {
+        const x = input.x;
+        const f = l.format orelse return error.UnsupportedQuantization;
+        if (!mx.tensor_units or (f.group_size != 32 and f.group_size != 64) or @mod(l.n, 4) != 0 or @mod(l.k, 64) != 0) return error.UnsupportedProjectionGeometry;
+        if (mx.dtype(x) != mx.bf16 or mx.dim(x, -1) != l.k) return error.InvalidProjectionInput;
+        const m: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(l.k)));
+        if (m < 1 or m > 128) return error.InvalidLaneWidth;
+        const sb = if (l.sb.ctx != null) l.sb else blk: {
+            if (mx.dtype(l.scales) != mx.bf16 or mx.dtype(l.biases) != mx.bf16) return error.InvalidTensorDType;
+            break :blk try s.stack(&.{ try s.transpose(l.scales, &.{ 1, 0 }), try s.transpose(l.biases, &.{ 1, 0 }) }, -1);
+        };
         const mp = @divTrunc(m + 15, 16) * 16;
         const dims = try s.ints(&.{ m, mp });
         const x2 = try s.reshape(x, &.{ m, l.k });
@@ -141,9 +193,10 @@ pub const Linear = struct {
         var sk: i32 = 1;
         while (sk < 8 and tiles * sk < 1024 and @divTrunc(@divExact(l.k, 64), sk * 2) >= 8) sk *= 2;
         const block = @min(mp, 32);
-        const args = [_]mx.Template{ ti("TMR", @divExact(block, 16)), ti("N", l.n), ti("K", l.k), ti("NT", 32), ti("SK", sk), ti(if (f.bits == 4) "GS" else "BITS", if (f.bits == 4) f.group_size else f.bits), ti(if (f.bits == 4) "EDGE" else "TILED", if (f.bits == 4) @intFromBool(@mod(mp, block) != 0) else 0) };
-        const spec = if (f.bits == 4) src.lane_qmm_main else if (f.bits < 4) src.lane_qmm_lowbit else src.lane_qmm_bytes;
-        return s.reshape((try kernels.run(s, spec, &.{ x2, sums, l.weight, l.sb, dims }, &args, .{ tiles * 32 * sk, @divTrunc(mp + block - 1, block), 1 }, .{ 32 * sk, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0], &.{ 1, m, l.n });
+        const args = [_]mx.Template{ ti("TMR", @divExact(block, 16)), ti("N", l.n), ti("K", l.k), ti("NT", 32), ti("SK", sk), ti(if (f.bits == 4) "GS" else "BITS", if (f.bits == 4) f.group_size else f.bits), ti(if (f.bits == 4) "EDGE" else "TILED", if (f.bits == 4) @intFromBool(@mod(mp, block) != 0) else @intFromBool(l.tiled)), ti("GS", f.group_size) };
+        const grouped = f.bits != 4 and f.group_size != 64;
+        const spec = if (f.bits == 4) (if (l.tiled) src.lane_qmm_main_tiled else src.lane_qmm_main) else if (f.bits < 4) (if (grouped) src.lane_qmm_lowbit_grouped else src.lane_qmm_lowbit) else (if (grouped) src.lane_qmm_bytes_grouped else src.lane_qmm_bytes);
+        return s.reshape((try kernels.run(s, spec, &.{ x2, sums, l.weight, sb, dims }, args[0..if (grouped) 8 else 7], .{ tiles * 32 * sk, @divTrunc(mp + block - 1, block), 1 }, .{ 32 * sk, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0], &.{ 1, m, l.n });
     }
 
     pub fn rows(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: A) !A {

@@ -139,22 +139,24 @@ pub fn check(io: std.Io, dir: []const u8) !void {
             const want = (try kernels.run(&scope, src.gemma_attention_merge, &.{ expected[0], expected[1], expected[2], inputs[7] }, &.{ mx.ti("D", dims), mx.ti("H", heads) }, .{ 32, heads, @intCast(rows) }, .{ 32, 1, 1 }, &.{.{ .shape = mx.shape(inputs[0]) }}))[0];
             try equalBits(&scope, actual, want);
         }
-        if (std.mem.eql(u8, case.kernel, "lane_qmm_lowbit") or std.mem.eql(u8, case.kernel, "lane_qmm_bytes")) {
+        if (std.mem.startsWith(u8, case.kernel, "lane_qmm_lowbit") or std.mem.startsWith(u8, case.kernel, "lane_qmm_bytes") or std.mem.startsWith(u8, case.kernel, "lane_qmm_main")) {
             const n = parameter(case, "N");
             const width = parameter(case, "K");
-            const bits = parameter(case, "BITS");
-            const groups = @divExact(width, 64);
-            const words = @divExact(64 * bits, 32);
-            const w = if (parameter(case, "TILED") == 1) try scope.contiguous(try scope.reshape(try scope.transpose(try scope.reshape(inputs[2], &.{ @divExact(n, 32), groups, 32, words }), &.{ 0, 2, 1, 3 }), &.{ n, groups * words })) else inputs[2];
+            const bits = if (std.mem.startsWith(u8, case.kernel, "lane_qmm_main")) 4 else parameter(case, "BITS");
+            const group = if (bits == 4 or std.mem.endsWith(u8, case.kernel, "_grouped")) parameter(case, "GS") else 64;
+            const groups = @divExact(width, group);
+            const words = @divExact(group * bits, 32);
+            const tiled = if (bits == 4) std.mem.endsWith(u8, case.kernel, "_tiled") else parameter(case, "TILED") == 1;
+            const w = if (tiled) try scope.contiguous(try scope.reshape(try scope.transpose(try scope.reshape(inputs[2], &.{ @divExact(n, 32), groups, 32, words }), &.{ 0, 2, 1, 3 }), &.{ n, groups * words })) else inputs[2];
             const sb = try scope.transpose(inputs[3], &.{ 1, 0, 2 });
             const sc = try scope.reshape(try scope.slice(sb, 2, 0, 1), &.{ n, groups });
             const bs = try scope.reshape(try scope.slice(sb, 2, 1, 2), &.{ n, groups });
-            var linear = try @import("lanes.zig").Linear.initFormat(&scope, w, sc, bs, .{ .bits = bits });
+            var linear = try @import("lanes.zig").Linear.initFormat(&scope, w, sc, bs, .{ .bits = bits, .group_size = group });
             defer linear.deinit();
             // Only default launch reductions are the production dispatch contract.
             var split: i32 = 1;
-            while (split < 8 and @divTrunc(n + 31, 32) * split < 1024 and @divTrunc(groups, split * 2) >= 8) split *= 2;
-            if (split == parameter(case, "SK")) try equalBits(&scope, try linear.apply(&kernels, &scope, .{ .x = inputs[0], .sums = inputs[1] }), expected[0]);
+            while (split < 8 and @divTrunc(n + 31, 32) * split < 1024 and @divTrunc(@divExact(width, 64), split * 2) >= 8) split *= 2;
+            if (split == parameter(case, "SK")) try equalBits(&scope, try linear.tensorRows(&kernels, &scope, .{ .x = inputs[0], .sums = inputs[1] }), expected[0]);
         }
         if (std.mem.eql(u8, case.kernel, "simd_qmm_mma")) {
             const n = parameter(case, "N");

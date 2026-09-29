@@ -186,6 +186,12 @@ pub fn build(b: *std.Build) void {
     ds_dense.step.dependOn(&ds_dense_fixture.step);
     b.step("test-deepseek-dense", "Compare calibrated DeepSeek SIMD dispatch and physical threadgroup variants").dependOn(&ds_dense.step);
     metal_tests.dependOn(&ds_dense.step);
+    const simd_bits_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/simd-bits", "--simd-bits" });
+    const simd_bits = b.addRunArtifact(exe);
+    simd_bits.addArgs(&.{ "check-deepseek-dense", "build/native-checks/simd-bits" });
+    simd_bits.step.dependOn(&simd_bits_fixture.step);
+    b.step("test-simd-bits", "Compare calibrated 5/6/8-bit SIMD kernels, production dispatch and affine fallback").dependOn(&simd_bits.step);
+    metal_tests.dependOn(&simd_bits.step);
     const ds_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", "build/native-checks/deepseek-model", "--synthetic-deepseek", "--output", "build/native-checks/deepseek-model/oracle/logits.npy", "--state-directory", "build/native-checks/deepseek-model/oracle" });
     const ds_model = b.addRunArtifact(exe);
     ds_model.addArgs(&.{ "check-deepseek-model", "build/native-checks/deepseek-model", "build/native-checks/deepseek-model/native" });
