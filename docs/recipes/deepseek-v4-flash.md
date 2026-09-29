@@ -7,8 +7,8 @@ Packages: `src/tensorfold/families/deepseek_v4/` and `src/tensorfold/kernels/dee
 hyper-connection kernels and row linears.
 
 ```bash
-tensorfold pull mlx-community/DeepSeek-V4-Flash-4bit
-tensorfold serve mlx-community/DeepSeek-V4-Flash-4bit --drafter ~/models/DeepSeek-V4-Flash-dspark
+tensorfold pull mlx-community/DeepSeek-V4-Flash-4bit Vontra/DeepSeek-V4-Flash-DSpark-MLX
+tensorfold serve mlx-community/DeepSeek-V4-Flash-4bit
 ```
 
 ## The model
@@ -25,21 +25,23 @@ tensorfold serve mlx-community/DeepSeek-V4-Flash-4bit --drafter ~/models/DeepSee
 
 ## Draft heads
 
-The 4-bit checkpoint has no draft head. The family reads two, converted from DeepSeek's MIT-licensed releases, from
-the folder `--drafter` names:
+The 4-bit checkpoint has no draft head. The family reads two, converted from DeepSeek's MIT-licensed releases and
+published in this layout: `model.safetensors` beside a `config.json` whose `model_type` names the head.
 
-- DSpark, used when the folder holds `dspark.safetensors`: three MoE blocks read the target's streams after layers
-  40-42 and draft a 5-token block in one pass. Shards 46-48 of `deepseek-ai/DeepSeek-V4-Flash-DSpark` (10.9 GB)
-  convert to a 10.7 GB file; the converter copies the block fields from the release's `config.json` beside them.
-- MTP, used when the folder holds `mtp.safetensors`: the checkpoint's own next-token layer, from shard 46 of
-  `deepseek-ai/DeepSeek-V4-Flash` (3.5 GB converted).
+- DSpark, `Vontra/DeepSeek-V4-Flash-DSpark-MLX` (10.7 GB, `deepseek_v4_dspark`): three MoE blocks read the target's
+  streams after layers 40-42 and draft a 5-token block in one pass. The serve command drafts with it by default once
+  it has been pulled.
+- MTP, `Vontra/DeepSeek-V4-Flash-MTP-MLX` (3.5 GB, `deepseek_v4_mtp`): the checkpoint's own next-token layer. Serve
+  with `--drafter Vontra/DeepSeek-V4-Flash-MTP-MLX` to draft with it.
+
+The converter builds the same folders from DeepSeek's releases: shards 46-48 of `deepseek-ai/DeepSeek-V4-Flash-DSpark`
+with the release's `config.json` beside them, or shard 46 of `deepseek-ai/DeepSeek-V4-Flash`. Pass the folder to
+`--drafter`.
 
 ```bash
 python -m tensorfold.families.deepseek_v4.convert dspark model-00046-of-00048.safetensors \
-    model-00047-of-00048.safetensors model-00048-of-00048.safetensors \
-    ~/models/DeepSeek-V4-Flash-dspark/dspark.safetensors
-python -m tensorfold.families.deepseek_v4.convert mtp model-00046-of-00046.safetensors \
-    ~/models/DeepSeek-V4-Flash-mtp/mtp.safetensors
+    model-00047-of-00048.safetensors model-00048-of-00048.safetensors ~/models/DeepSeek-V4-Flash-dspark
+python -m tensorfold.families.deepseek_v4.convert mtp model-00046-of-00046.safetensors ~/models/DeepSeek-V4-Flash-mtp
 ```
 
 Without a draft head the engine decodes one row a step. The chat template is DeepSeek's own encoder (vendored,

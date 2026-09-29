@@ -220,13 +220,33 @@ def tiles() -> bool:
             try:
                 ok = _self_check()
             except Exception as e:  # noqa: BLE001 - a kernel that does not build means MLX's matmuls, not a crash
-                print(f"[tensorfold] prefill matmul kernels unavailable ({type(e).__name__}: {e}); using MLX's",
-                      file=sys.stderr)
+                lines = str(e).splitlines() or [""]
+                _fallback(f"did not build ({type(e).__name__}: {next((s for s in lines if 'error' in s), lines[0])})")
             else:
                 if not ok:
-                    print("[tensorfold] prefill matmul kernels differ from MLX's; using MLX's", file=sys.stderr)
+                    _fallback("gave other bits than MLX's")
         _tiles.append(ok)
     return _tiles[0]
+
+
+def _fallback(why: str) -> None:
+    """Say loudly that prompts left these kernels (#88): replies stay the same, prompts get slower."""
+
+    from importlib import metadata
+
+    try:
+        pins = [r.split(";")[0].replace(" ", "") for r in metadata.requires("tensorfold") or []
+                if r.startswith("mlx") and r[3:4] in "<>=!~ "]
+    except metadata.PackageNotFoundError:
+        pins = []
+    fix = f'pip install "{pins[0]}"' if pins else "install the MLX version this TensorFold requires"
+    message = (f"TensorFold's prompt kernels {why} on MLX {mx.__version__}. Prompts run on MLX's own kernels: replies "
+               f"are the same, prompt processing is slower. To restore them, {fix}; TF_REQUIRE_KERNELS=1 stops here "
+               "instead.")
+    if os.environ.get("TF_REQUIRE_KERNELS") == "1":
+        raise RuntimeError(message)
+    rule = "[tensorfold] " + "=" * 88
+    print(f"{rule}\n[tensorfold] WARNING: {message}\n{rule}", file=sys.stderr, flush=True)
 
 
 def _self_check() -> bool:

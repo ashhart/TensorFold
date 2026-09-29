@@ -11,7 +11,20 @@ from pathlib import Path
 from typing import Any
 
 SOURCE = Path(__file__).resolve().parent / "hostsync"
-NANOBIND = "2.15.0"          # MLX's own nanobind: another version cannot take mlx.core.array
+# each MLX's own nanobind (the GIT_TAG in its CMakeLists): another version cannot take mlx.core.array
+NANOBIND = {"0.32.2": "2.15.0", "0.32.3": "3.0.1"}
+
+
+def nanobind_for_mlx() -> str:
+    """The nanobind the installed MLX was built with."""
+
+    import mlx.core as mx
+
+    wanted = NANOBIND.get(mx.__version__)
+    if wanted is None:
+        raise RuntimeError(f"SSD expert streaming knows the nanobind of MLX {', '.join(NANOBIND)}, not "
+                           f"{mx.__version__}: install one of those MLX versions")
+    return wanted
 
 
 def _key() -> str:
@@ -20,7 +33,7 @@ def _key() -> str:
     digest = hashlib.sha256()
     for path in sorted(p for p in SOURCE.glob("*") if p.suffix in (".cpp", ".txt")):
         digest.update(path.name.encode() + path.read_bytes())
-    digest.update(f"{mx.__version__}|{sys.version}|{NANOBIND}".encode())
+    digest.update(f"{mx.__version__}|{sys.version}|{nanobind_for_mlx()}".encode())
     return digest.hexdigest()[:16]
 
 
@@ -44,10 +57,12 @@ def _build(folder: Path) -> None:
     except ImportError:
         nanobind = None
     cmake = shutil.which("cmake") or shutil.which("cmake", path=str(Path(sys.executable).parent))
-    if nanobind is None or nanobind.__version__ != NANOBIND or cmake is None:
-        raise RuntimeError(f"SSD expert streaming builds a small MLX extension on first use: it needs cmake and "
-                           f"nanobind {NANOBIND} (`pip install \"tensorfold[ssd]\"`) and the Xcode command line "
-                           "tools (`xcode-select --install`)")
+    wanted = nanobind_for_mlx()
+    if nanobind is None or nanobind.__version__ != wanted or cmake is None:
+        raise RuntimeError(f"SSD expert streaming builds a small MLX extension on first use: it needs cmake, the "
+                           f"nanobind this MLX was built with (`pip install nanobind=={wanted}`; "
+                           f"`pip install \"tensorfold[ssd]\"` brings cmake) and the Xcode command line tools "
+                           "(`xcode-select --install`)")
     work = folder.with_name(folder.name + ".build")
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
@@ -64,4 +79,4 @@ def _build(folder: Path) -> None:
     shutil.rmtree(work, ignore_errors=True)
 
 
-__all__ = ["NANOBIND", "load"]
+__all__ = ["NANOBIND", "load", "nanobind_for_mlx"]

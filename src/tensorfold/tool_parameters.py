@@ -28,21 +28,42 @@ def typed_parameter(schema: dict[str, Any]) -> bool:
     return isinstance(kind, str) and kind in {"array", "object", "boolean", "integer", "number", "null"}
 
 
+def closed_json(text: str) -> str | None:
+    """``text`` with the arrays and objects it left open closed, or None if it doesn't only stop short of them."""
+
+    closers, in_string, escaped = [], False, False
+    for ch in text:
+        if in_string:
+            escaped, in_string = (False, True) if escaped else (ch == "\\", ch != '"')
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            closers.append("]" if ch == "[" else "}")
+        elif ch in "]}" and (not closers or closers.pop() != ch):
+            return None
+    return text.rstrip() + "".join(reversed(closers)) if closers and not in_string else None
+
+
 def decode_parameter(value: str, schema: dict[str, Any]) -> Any:
     if not typed_parameter(schema):
         return value
-    try:
-        parsed = json.loads(value)
-        json.dumps(parsed, allow_nan=False)
-    except (ValueError, TypeError):
-        return value
     kind = schema["type"]
-    valid = {
-        "array": isinstance(parsed, list),
-        "object": isinstance(parsed, dict),
-        "boolean": isinstance(parsed, bool),
-        "integer": type(parsed) is int,
-        "number": type(parsed) in (int, float),
-        "null": parsed is None,
-    }
-    return parsed if valid[kind] else value
+    # a model can end an object or array value one closer short (#87): the value closed is what it meant
+    for text in (value, closed_json(value) if kind in ("array", "object") else None):
+        if text is None:
+            continue
+        try:
+            parsed = json.loads(text)
+            json.dumps(parsed, allow_nan=False)
+        except (ValueError, TypeError):
+            continue
+        valid = {
+            "array": isinstance(parsed, list),
+            "object": isinstance(parsed, dict),
+            "boolean": isinstance(parsed, bool),
+            "integer": type(parsed) is int,
+            "number": type(parsed) in (int, float),
+            "null": parsed is None,
+        }
+        return parsed if valid[kind] else value
+    return value

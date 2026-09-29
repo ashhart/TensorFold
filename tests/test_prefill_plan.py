@@ -116,7 +116,6 @@ class _ChatTemplate:
 
 
 def test_message_markers_come_from_the_chat_template() -> None:
-    # every message opens with 1; an assistant's role text begins with "a", a user's with "u" (57 and 27 here)
     assert message_markers(_ChatTemplate()) == ((1,), (1, 57))
     assert message_markers(_ChatTemplate(special=False)) == ((), ())   # plain text never splits prompts
 

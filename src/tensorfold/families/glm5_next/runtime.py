@@ -151,6 +151,14 @@ class GLMFlash:
         a = self.args
         return PREFILL_QUERIES * (2 * a.index_n_heads * 2 + 10) // a.index_kpool
 
+    def resolve_prefill_identity(self) -> None:
+        """Build and check the sorted expert kernels at startup, not at the first prompt (the CLI calls this)."""
+
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
+        if prefill_mm.fast_prefill():
+            prefill_mm.tiles()
+
     # -- drafting ---------------------------------------------------------------------
     def absorb_draft_context(self, hidden: Any, next_tokens: Any, cache: list[Any], start: int = 0) -> None:
         """Prompt rows into the head's cache: final-normed rows ``hidden`` [1, n, D] and the tokens after them."""

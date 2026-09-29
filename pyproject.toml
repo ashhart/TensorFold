@@ -23,8 +23,8 @@ classifiers = [
 ]
 # mlx-lm stays below its next minor (TensorFold builds on its models); CUDA uses the container's torch and triton.
 dependencies = [
-  # MLX 0.32.3 changed a gather kernel's arguments that the prompt kernels build on (#88)
-  "mlx>=0.32.2,<0.32.3; sys_platform == 'darwin'",
+  # the prompt kernels and SSD streaming are tested on MLX 0.32.2 and 0.32.3 (#88)
+  "mlx>=0.32.2,<0.32.4; sys_platform == 'darwin'",
   "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin'",
   "numpy>=1.26",
   "huggingface-hub>=0.24",
@@ -35,8 +35,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
-# --ssd-experts builds a small MLX extension on first use, with MLX's own nanobind
-ssd = ["cmake>=3.27; sys_platform == 'darwin'", "nanobind==2.15.0; sys_platform == 'darwin'"]
+# --ssd-experts builds a small MLX extension on first use with MLX's own nanobind (MLX 0.32.2 takes 2.15.0)
+ssd = ["cmake>=3.27; sys_platform == 'darwin'", "nanobind==3.0.1; sys_platform == 'darwin'"]
 vision = ["Pillow>=10", "transformers>=5.3,<6", "mlx-vlm>=0.7.3,<0.8; sys_platform == 'darwin'"]
 
 [project.scripts]

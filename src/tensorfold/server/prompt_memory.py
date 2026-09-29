@@ -165,16 +165,14 @@ class PromptMemory:
         if type(size) is not int or size < 0:
             raise ValueError("workspace size must be a nonnegative byte count")
         with self._memory_lock:
-            while self.projected(self.prompt, extra_bytes=size) > self.budget:
-                if not self._reclaim():
-                    raise RequestError("image encoding and this prompt exceed the memory budget; reduce image "
-                                       "resolution or count, shorten the prompt, or use a smaller checkpoint")
+            if not self._make_room(size):
+                raise RequestError("image encoding and this prompt exceed the memory budget; reduce image "
+                                   "resolution or count, shorten the prompt, or use a smaller checkpoint")
 
     def fits(self, current_cache: Any = None, *, keep: Any = None) -> bool:
-        while self.projected(self.prompt, current_cache=current_cache) > self.budget:
-            if not self._reclaim(keep=keep):
-                return False
-        return True
+        """Reclaim for the prompt, never ``keep``, only while what is left to free could still make room."""
+
+        return self._make_room(0, current_cache, keep=keep)
 
     def would_fit(self, prompt: int, reply: int) -> bool:
         """Whether a request would fit now once every retained prefix and freed buffer is released; no side effects."""
@@ -340,18 +338,21 @@ class PromptMemory:
         return (store is not None and store.budget_bytes is not None and size > store.budget_bytes
                 and not store.admit_oversize)
 
-    def _extra_fits_after_reclaim(self, size: int, *, current_cache: Any = None) -> bool:
-        """Do not evict prefixes for a copy that still cannot fit with every reclaimable buffer gone."""
+    def _extra_fits_after_reclaim(self, size: int, *, current_cache: Any = None, keep: Any = None) -> bool:
+        """Do not evict prefixes for a copy or a prompt that still cannot fit with every reclaimable buffer gone."""
 
-        freeable = int(self.runtime.get_cache_memory()) + (self.store.nbytes if self.store is not None else 0)
+        store = self.store
+        stored = 0 if store is None else store.nbytes - sum(e.nbytes for e in store._entries if e is keep)
+        freeable = int(self.runtime.get_cache_memory()) + stored
         return self.projected(self.prompt, current_cache=current_cache, extra_bytes=size) - freeable <= self.budget
 
-    def _make_room(self, size: int, current_cache: Any = None) -> bool:
+    def _make_room(self, size: int, current_cache: Any = None, *, keep: Any = None) -> bool:
         """Reclaim for ``size`` more bytes, first checking at every step that what is left to free could make room."""
 
         while self.projected(self.prompt, current_cache=current_cache, extra_bytes=size) > self.budget:
             # an eviction that freed less than its entry's size (arrays still held elsewhere) stops the next ones
-            if not self._extra_fits_after_reclaim(size, current_cache=current_cache) or not self._reclaim():
+            if (not self._extra_fits_after_reclaim(size, current_cache=current_cache, keep=keep)
+                    or not self._reclaim(keep=keep)):
                 return False
         return True
 

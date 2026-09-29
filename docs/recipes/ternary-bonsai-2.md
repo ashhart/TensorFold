@@ -34,6 +34,9 @@ no MTP head. Any other pack is refused from its configuration files before its w
   row decoder reads the pack's 2-bit codes and fp16 scales as stored instead, through the packed affine row kernel
   ([quantized checkpoints](../quantization.md)). A forward then takes 1.3x as long at one row and 2.1x at 16 rows
   on an M3 Ultra.
+- Between the two, the first layers widen as far as the budget allows: a 36 GB Mac's default 25.2 GiB widens 60 of
+  64. Outputs are exact within a server; how many layers widen depends on the memory budget, so servers with
+  different budgets can differ in their bits (the startup line says how many).
 - With the drafter, the model needs about 20 GiB of budget, so 16 and 24 GB Macs can't serve it.
 
 Drafting uses Qwen3.8-27B's DFlash2 model and context copies. The target verifies every draft against

@@ -9,12 +9,9 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
-from tensorfold.families.deepseek_v4.config import PREFILL_QUERIES
+from tensorfold.families.deepseek_v4.config import DSPARK_TYPE, HEAD_WEIGHTS, MTP_TYPE, PREFILL_QUERIES
 from tensorfold.families.deepseek_v4.mtp import MTPCache
 from tensorfold.families.glm5_next.runtime import GLMFlash
-
-MTP_FILE = "mtp.safetensors"          # the converted MTP layer in a drafter folder (convert.convert_mtp)
-DSPARK_FILE = "dspark.safetensors"    # the converted DSpark blocks (convert.convert_dspark), beside its config.json
 
 
 class DeepSeekFlash(GLMFlash):
@@ -175,9 +172,23 @@ def materialize(root: Any) -> int:
     return len(found)
 
 
+def drafter_config(folder: Path) -> dict[str, Any]:
+    """A draft-head folder's config.json, which names the head (DSpark or the MTP layer) beside its weights."""
+
+    try:
+        config = json.loads((folder / "config.json").read_text())
+    except (OSError, ValueError):
+        config = {}
+    if config.get("model_type") not in (DSPARK_TYPE, MTP_TYPE) or not (folder / HEAD_WEIGHTS).is_file():
+        raise ValueError(f"{folder} holds no DeepSeek-V4-Flash draft head: it needs {HEAD_WEIGHTS} and a config.json "
+                         f"whose model_type is {DSPARK_TYPE} or {MTP_TYPE} (Vontra/DeepSeek-V4-Flash-DSpark-MLX, or "
+                         f"python -m tensorfold.families.deepseek_v4.convert)")
+    return config
+
+
 def load(model_dir: Path, *, drafter: str = "", mtp_drafts: int | None = None, check: bool = True,
          **_: Any) -> tuple[DeepSeekFlash, Any]:
-    """The runtime and tokenizer; ``drafter`` holds DSpark (preferred) or the MTP layer (default 3 drafts, 0: none)."""
+    """The runtime and tokenizer; ``drafter`` is a DSpark or MTP head folder (default 3 MTP drafts, 0: none)."""
 
     from mlx_lm.utils import load_tokenizer
 
@@ -186,21 +197,17 @@ def load(model_dir: Path, *, drafter: str = "", mtp_drafts: int | None = None, c
     from tensorfold.families.deepseek_v4.prompts import DeepSeekTokenizer
     from tensorfold.families.deepseek_v4.weights import load_backbone
 
+    drafts = 3 if mtp_drafts is None else int(mtp_drafts)
+    folder = Path(drafter) if drafter and drafts > 0 else None
+    config = drafter_config(folder) if folder is not None else {}           # before 150 GB of weights load
     model = load_backbone(Path(model_dir))
     tokenizer = DeepSeekTokenizer(load_tokenizer(Path(model_dir), eos_token_ids=model.args.eos_token_id or None))
-    drafts = 3 if mtp_drafts is None else int(mtp_drafts)
-    folder = Path(drafter) if drafter else None
-    if drafts > 0 and folder is not None and (folder / DSPARK_FILE).is_file():
-        config = json.loads((folder / "config.json").read_text())
-        runtime: DeepSeekFlash = DSparkFlash(model, dspark_module.load(model, folder / DSPARK_FILE, config),
+    if config.get("model_type") == DSPARK_TYPE:
+        runtime: DeepSeekFlash = DSparkFlash(model, dspark_module.load(model, folder / HEAD_WEIGHTS, config),
                                              check=check)
         kind = "DSpark"
     else:
-        source = folder / MTP_FILE if folder is not None else None
-        head = mtp_module.load(model, source) if drafts > 0 and source is not None and source.is_file() else None
-        if drafts > 0 and head is None:
-            print(f"[deepseek_v4] no draft head ({DSPARK_FILE} or {MTP_FILE} in --drafter): decoding without drafts",
-                  flush=True)
+        head = mtp_module.load(model, folder / HEAD_WEIGHTS) if folder is not None else None
         runtime, kind = DeepSeekFlash(model, head, drafts=drafts, check=check), "MTP"
     materialize(runtime)
     print(f"[deepseek_v4] exact window {runtime.exact_width} rows, forward ms by width {runtime.window_costs}, "

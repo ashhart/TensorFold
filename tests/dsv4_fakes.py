@@ -119,7 +119,7 @@ def write_checkpoint(folder: Path, seed: int = 0) -> Path:
 
 
 def write_mtp(folder: Path, seed: int = 1) -> Path:
-    """The converted MTP layer (``mtp.*`` names, as convert.convert_mtp writes it) in a drafter folder."""
+    """The converted MTP layer (``mtp.*`` names) in a draft-head folder, as convert.convert_mtp writes it."""
 
     mx.random.seed(seed)
     folder.mkdir(parents=True, exist_ok=True)
@@ -130,7 +130,8 @@ def write_mtp(folder: Path, seed: int = 1) -> Path:
         _norm(t, name, D)
     _hc(t, "mtp.hc_head", 4)
     _block(t, "mtp", TEXT["compress_ratios"][TEXT["num_hidden_layers"]], False)
-    mx.save_safetensors(str(folder / "mtp.safetensors"), t)
+    mx.save_safetensors(str(folder / "model.safetensors"), t)
+    (folder / "config.json").write_text(json.dumps({"model_type": "deepseek_v4_mtp"}))
     return folder
 
 
@@ -144,7 +145,7 @@ def write_official_mtp(path: Path, seed: int = 2) -> dict:
 
 
 def write_official_dspark(folder: Path, blocks: int = 2, seed: int = 4) -> list[Path]:
-    """Tiny official DSpark shards, one block each; the first has main_proj, the last the head and Markov tables."""
+    """Tiny official DSpark shards (one block each) and their config.json's DSpark fields."""
 
     mx.random.seed(seed)
     taps = len(DSPARK["dspark_target_layer_ids"])
@@ -160,6 +161,7 @@ def write_official_dspark(folder: Path, blocks: int = 2, seed: int = 4) -> list[
         paths.append(folder / f"model-{i:05d}.safetensors")
         folder.mkdir(parents=True, exist_ok=True)
         mx.save_safetensors(str(paths[-1]), t)
+    (folder / "config.json").write_text(json.dumps({**TEXT, **DSPARK}))
     return paths
 
 
@@ -200,7 +202,7 @@ DSPARK = {"dspark_block_size": 4, "dspark_noise_token_id": 250, "dspark_target_l
 
 
 def write_dspark(folder: Path, blocks: int = 2, seed: int = 3) -> Path:
-    """The converted DSpark drafter (``dspark.<i>.*``, as convert.convert_dspark writes it) and its config."""
+    """The converted DSpark drafter (``dspark.<i>.*``) in a draft-head folder, as convert.convert_dspark writes it."""
 
     mx.random.seed(seed)
     folder.mkdir(parents=True, exist_ok=True)
@@ -216,6 +218,6 @@ def write_dspark(folder: Path, blocks: int = 2, seed: int = 3) -> Path:
     rank = DSPARK["dspark_markov_rank"]
     t[f"{last}.markov_head.markov_w1.weight"] = (0.5 * mx.random.normal((VOCAB, rank))).astype(mx.bfloat16)
     t[f"{last}.markov_head.markov_w2.weight"] = (0.5 * mx.random.normal((VOCAB, rank))).astype(mx.bfloat16)
-    mx.save_safetensors(str(folder / "dspark.safetensors"), t)
-    (folder / "config.json").write_text(json.dumps({**TEXT, **DSPARK}))
+    mx.save_safetensors(str(folder / "model.safetensors"), t)
+    (folder / "config.json").write_text(json.dumps({"model_type": "deepseek_v4_dspark", **DSPARK}))
     return folder

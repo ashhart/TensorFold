@@ -247,7 +247,7 @@ def test_the_store_budget_refuses_an_oversized_copy_or_load_before_reclaiming(ki
     assert call() and runtime.cache == 0
 
 
-def test_retained_prefixes_are_evicted_before_refusing_the_next_request():
+def test_a_request_that_cannot_fit_even_with_the_store_empty_is_refused_without_evicting():
     cache = populated()
     runtime = Runtime()
     store = CheckpointStore(3, copier=lambda cache: cache, budget_bytes=4096, sizer=cache_nbytes)
@@ -257,8 +257,45 @@ def test_retained_prefixes_are_evicted_before_refusing_the_next_request():
     runtime.get_active_memory = lambda: runtime.resident + store.nbytes
     with pytest.raises(RequestError):
         memory.begin(512, 64)
-    assert not len(store)
-    assert store.evictions == 2
+    assert len(store) == 2 and store.evictions == 0          # the other conversations keep their prefixes
+
+
+def admit(memory, kind, work, shelf):
+    """The projected need of admitting the prompt as ``kind`` asks, what could be freed for it, and the call."""
+
+    if kind == "workspace":
+        def call():
+            try:
+                memory.require_workspace(500)
+            except RequestError:
+                return False
+            return True
+        return memory.projected(64, extra_bytes=500), shelf.nbytes, call
+    if kind == "resume":                                          # the newest prefix resumed: kept, never evicted
+        keep = shelf._entries[0]
+        return (memory.projected(64, current_cache=keep.cache), shelf.nbytes - keep.nbytes,
+                lambda: memory.fits(keep.cache, keep=keep))
+    current = work if kind == "chunk" else None                   # a prefill chunk's check, or a request's start
+    return memory.projected(64, current_cache=current), shelf.nbytes, lambda: memory.fits(current)
+
+
+@pytest.mark.parametrize("kind", ["start", "chunk", "resume", "workspace"])
+def test_an_impossible_prompt_keeps_every_prefix_and_freed_buffer(kind):
+    memory, runtime, shelf, work = shelf_memory(entries=(128, 96, 64), cache=100)
+    need, stored, call = admit(memory, kind, work, shelf)
+    memory.budget = need - 100 - stored - 1
+    assert not call() and runtime.cache == 100 and shelf.evictions == 0 and len(shelf) == 3
+    memory.budget += 1                                            # everything that can go is exactly enough
+    assert call() and runtime.cache == 0 and len(shelf) == (1 if kind == "resume" else 0)
+
+
+@pytest.mark.parametrize("kind", ["start", "chunk", "resume", "workspace"])
+def test_a_prompt_that_fits_once_the_oldest_prefix_goes_evicts_only_it(kind):
+    memory, runtime, shelf, work = shelf_memory(entries=(128, 96, 64), cache=100)
+    need, stored, call = admit(memory, kind, work, shelf)
+    memory.budget = need - 100 - cache_nbytes(populated(128))
+    assert call() and runtime.cache == 0 and shelf.evictions == 1
+    assert [e.tokens for e in shelf._entries] == [[102], [101]]
 
 
 def test_freed_cache_and_nonmlx_footprint_are_reserved():

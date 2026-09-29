@@ -317,6 +317,7 @@ class FlashNext:
             mixed, streams = self._mtp_step(chain[-1], streams, mtp_cache)
             mtp_cache.drafted += 1
             chain.append(self._draft_draw(mixed, sampling, [position + j]))
+            mx.async_eval(chain[-1])           # the GPU starts each step while the host builds the next
         drafts = mx.concatenate(chain)
         mx.async_eval(drafts)
         return drafts

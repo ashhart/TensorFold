@@ -26,7 +26,7 @@ See [image input](docs/vision.md) for the API, checkpoint requirements, cache be
 | Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX, CUDA | Included MTP head and context copies |
 | GLM-5.3-Flash | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | MLX on a 256 GB Mac, CUDA with two ranks | MTP; optional DFlash2 on CUDA |
 | Gemma 4 26B-A4B | `mlx-community/gemma-4-26b-a4b-it-4bit` | MLX | Context copies; `z-lab/gemma-4-26B-A4B-it-DFlash` is optional |
-| DeepSeek-V4-Flash | `mlx-community/DeepSeek-V4-Flash-4bit` | MLX on a 256 GB Mac | DSpark or MTP, converted from DeepSeek's releases |
+| DeepSeek-V4-Flash | `mlx-community/DeepSeek-V4-Flash-4bit` | MLX on a 256 GB Mac | `Vontra/DeepSeek-V4-Flash-DSpark-MLX` or `Vontra/DeepSeek-V4-Flash-MTP-MLX` |
 | Qwen3.8-27B (NVFP4) | `nvidia/Qwen3.8-27B-NVFP4` (ModelOpt: NVFP4 MLP, FP8 attention) | CUDA, one GPU | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
 | Qwen3.8-27B (EXL3, experimental) | `turboderp/Qwen3.8-27B-exl3` (branches `3.00bpw`, `4.00bpw`; any codebook, 1 to 8 bits per weight) | CUDA | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
 | Qwen3.8 Flash Next (EXL3, experimental) | `turboderp/Qwen3.8-Flash-Next-exl3` (branch `3.05bpw_h5_ng5`; any codebook, a width per tensor) | CUDA | Included MTP head and context copies |
@@ -67,8 +67,8 @@ with an 8-bit router, as the mlx-community conversion stores them; `serve` refus
 before downloading.
 
 DeepSeek-V4-Flash reads the mlx-community conversion (affine 4-bit/group-64 weights, mxfp4 routed experts) and
-needs MLX 0.32.2 or later. Its draft heads come from DeepSeek's MIT-licensed releases, converted once with
-`python -m tensorfold.families.deepseek_v4.convert` and passed with `--drafter`; see
+needs MLX 0.32.2 or later. Its draft heads are DeepSeek's DSpark blocks and MTP layer (MIT), converted:
+`tensorfold pull Vontra/DeepSeek-V4-Flash-DSpark-MLX` once and `serve` drafts with it; see
 [its recipe](docs/recipes/deepseek-v4-flash.md).
 
 See the [recipes](docs/recipes/README.md) for supported formats and backend limits.
@@ -161,6 +161,13 @@ An explicit reply limit is reserved before prefill. A request that exceeds conte
 with fitting guidance; an omitted reply limit is capped by the remaining context. MLX reports a
 context refusal as HTTP 400 for a non-streamed request or as an error event after opening a stream.
 CUDA checks context before opening a stream.
+
+On MLX, streams that share rounds take memory as they grow. A stream beside others holds its next 2,048
+tokens of growth, not its whole reply, so `--parallel` streams are admitted while their real contexts fit.
+Before each round the server checks that the live streams' next growth fits. If it doesn't, it first frees
+MLX's cached buffers and retained prefixes, but only when that makes room. Then the newest streams wait a
+round, keeping their state, so their tokens don't change. If even the oldest stream can't grow, the newest one
+ends with an error that says so; the tokens it already sent stay valid.
 
 The memory-class table below keeps the model combinations under qualification. Its GiB budget ceilings
 emulate the listed RAM classes before the 3 GiB process reserve. The actual default budget uses

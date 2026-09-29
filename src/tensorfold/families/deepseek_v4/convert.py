@@ -1,4 +1,4 @@
-"""DeepSeek's MTP layer (the official checkpoint's last shard) in the mlx-community layout: FP8 -> affine 4-bit g64."""
+"""DeepSeek's MTP layer and DSpark blocks as draft-head folders in the mlx-community layout (FP8 -> affine 4-bit)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from pathlib import Path
 
 import mlx.core as mx
 import numpy as np
+
+from tensorfold.families.deepseek_v4.config import DSPARK_TYPE, HEAD_WEIGHTS, MTP_TYPE
 
 # a block's official tensors and their names in the mlx-community layout (FP8 linears, plain, hyper-connections)
 LINEARS = {"attn.wq_a": "attn.wq_a", "attn.wq_b": "attn.wq_b", "attn.wkv": "attn.wkv", "attn.wo_a": "attn.wo_a",
@@ -95,47 +97,51 @@ def convert_block(raw: dict[str, mx.array], src: str, dst: str, linears: tuple[s
     return t
 
 
-def convert_mtp(shard: Path, out: Path, layer: int = 0) -> Path:
-    """Write ``out`` (names ``mtp.*``) from the official shard holding ``mtp.<layer>.*``."""
+def _write_head(out: Path, tensors: dict[str, mx.array], config: dict) -> Path:
+    """A draft-head folder: the weights and the config.json that names the head."""
 
-    t = convert_block(read_raw(shard, f"mtp.{layer}."), f"mtp.{layer}", "mtp", MTP_LINEARS, MTP_PLAIN)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    mx.save_safetensors(str(out), t, metadata={"format": "mlx"})
+    out.mkdir(parents=True, exist_ok=True)
+    mx.save_safetensors(str(out / HEAD_WEIGHTS), tensors, metadata={"format": "mlx"})
+    (out / "config.json").write_text(json.dumps(config, indent=1) + "\n")
     return out
 
 
-def convert_dspark(shards: list[Path], out: Path) -> Path:
-    """Write ``out`` (names ``dspark.<i>.*``) from the DSpark checkpoint's shards holding its blocks ``mtp.<i>.*``."""
+def convert_mtp(shard: Path, out: Path, layer: int = 0) -> Path:
+    """The folder ``out`` (names ``mtp.*``) from the official shard holding ``mtp.<layer>.*``."""
 
+    t = convert_block(read_raw(shard, f"mtp.{layer}."), f"mtp.{layer}", "mtp", MTP_LINEARS, MTP_PLAIN)
+    return _write_head(out, t, {"model_type": MTP_TYPE})
+
+
+def convert_dspark(shards: list[Path], out: Path) -> Path:
+    """The folder ``out`` (names ``dspark.<i>.*``) from DSpark's shards (``mtp.<i>.*``) and their config's fields."""
+
+    official = shards[0].parent / "config.json"
+    if not official.is_file():
+        raise FileNotFoundError(f"{official}: DSpark's config.json (its block size, noise token and target layers)")
+    fields = {k: v for k, v in json.loads(official.read_text()).items() if k.startswith("dspark_")}
     t: dict[str, mx.array] = {}
     for shard in shards:
         raw = read_raw(shard, "mtp.")
         for i in sorted({int(k.split(".")[1]) for k in raw}):
             part = {k: v for k, v in raw.items() if k.startswith(f"mtp.{i}.")}
             t.update(convert_block(part, f"mtp.{i}", f"dspark.{i}", DSPARK_LINEARS, DSPARK_PLAIN))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    mx.save_safetensors(str(out), t, metadata={"format": "mlx"})
-    official = shards[0].parent / "config.json"
-    if official.is_file():                         # the block size, noise token and target layers the runtime reads
-        config = json.loads(official.read_text())
-        (out.parent / "config.json").write_text(json.dumps({k: v for k, v in config.items()
-                                                            if k.startswith("dspark_")}, indent=1))
-    return out
+    return _write_head(out, t, {"model_type": DSPARK_TYPE, **fields})
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python -m tensorfold.families.deepseek_v4.convert mtp SHARD OUT | dspark SHARD... OUT``."""
+    """``python -m tensorfold.families.deepseek_v4.convert mtp SHARD OUTDIR | dspark SHARD... OUTDIR``."""
 
     import argparse
 
     parser = argparse.ArgumentParser(prog="python -m tensorfold.families.deepseek_v4.convert",
                                      description="DeepSeek-V4-Flash draft heads from DeepSeek's checkpoints")
     parser.add_argument("kind", choices=("mtp", "dspark"))
-    parser.add_argument("paths", nargs="+", type=Path, help="the official shard(s), then the output file")
+    parser.add_argument("paths", nargs="+", type=Path, help="the official shard(s), then the output folder")
     args = parser.parse_args(argv)
     *shards, out = args.paths
     if not shards:
-        parser.error("give the official shard(s) and the output file")
+        parser.error("give the official shard(s) and the output folder")
     written = convert_mtp(shards[0], out) if args.kind == "mtp" else convert_dspark(shards, out)
     print(f"wrote {written}")
     return 0

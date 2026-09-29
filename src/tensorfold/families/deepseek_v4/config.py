@@ -15,6 +15,10 @@ ENABLED = frozenset(ROW_KERNELS)
 EVAL_EVERY = 2
 # prompt rows a prefill attention call takes at once (bounds the score matrix)
 PREFILL_QUERIES = 512
+# a draft-head folder: model.safetensors beside a config.json whose model_type names the head
+HEAD_WEIGHTS = "model.safetensors"
+DSPARK_TYPE = "deepseek_v4_dspark"
+MTP_TYPE = "deepseek_v4_mtp"
 
 
 def row_kernel(name: str, rows: int, rows_exact: bool) -> bool:

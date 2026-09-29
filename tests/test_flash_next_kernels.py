@@ -81,6 +81,21 @@ def test_attention_and_selection_multi_match_each_stream():
         at += n
     out = attention.attention_rows_multi(mx.concatenate(qs), keys, values, srow, counts_all, ids_multi, sparse_all, 0.0625)
     assert bool(mx.array_equal(out, mx.concatenate(single)).item())
+    # the output gate inside the merge: bf16(bf16(merged) * sigmoid(gate)), each row as its stream's own call
+    width = heads * 2 * dims + 1024
+    proj = [mx.array(rng.normal(size=(n, width)).astype(np.float32)).astype(mx.bfloat16) for n in rows]
+    gated = attention.attention_rows_multi(mx.concatenate(qs), keys, values, srow, counts_all, ids_multi, sparse_all,
+                                           0.0625, gate=mx.concatenate(proj))
+    at = 0
+    for b, n in enumerate(rows):
+        counts = counts_all[at:at + n]
+        one = attention.attention_rows(qs[b], keys[b], values[b], counts, ids_all[b], sparse_all[at:at + n], 0.0625,
+                                       gate=proj[b])
+        assert bool(mx.array_equal(gated[at:at + n], one).item()), b
+        g = proj[b][:, :heads * 2 * dims].reshape(n, heads, 2, dims)[:, :, 1].astype(mx.float32)
+        want = (single[b].astype(mx.float32) * mx.sigmoid(g)).reshape(n, heads * dims)
+        assert float(mx.abs(one.astype(mx.float32) - want).max().item()) <= 0.02 * float(mx.abs(want).max().item())
+        at += n
 
 
 
@@ -180,3 +195,62 @@ def test_gdn_pipelined_rows_equal_the_row_by_row_kernel(has_state, monkeypatch):
         got = gdn.gdn_step(p, c, s, conv_w, a_log, dt, norm, eps, **kw)
         for k in range(3):
             assert bool(mx.array_equal(got[k][:rows], ref[k][:rows]).item()), (rows, k)
+
+
+def test_ple_kernels_are_the_math_and_row_invariant():
+    """embed.ple_gate and ple_conv against float64 math, and each row of a 6-row call against its one-row call."""
+
+    from tensorfold.kernels.qwen.flash_next.v1 import embed
+
+    rng = np.random.default_rng(29)
+    S, D, R, TAPS, DIL = 4, 2560, 6, 4, 3
+    W = S * D
+
+    def bf(a):
+        return mx.array(np.asarray(a, dtype=np.float32)).astype(mx.bfloat16)
+
+    kv, h = bf(rng.normal(size=(R, W + D))), bf(0.5 * rng.normal(size=(R, W)))
+    ks, qs, cs = (mx.array((1.0 + 0.1 * rng.normal(size=(W,))).astype(np.float32)) for _ in range(3))
+    eps = mx.array([1e-6], dtype=mx.float32)
+    gated, normed = embed.ple_gate(kv, h, ks, qs, cs, eps, streams=S)
+    for r in range(R):
+        g1, n1 = embed.ple_gate(kv[r:r + 1], h[r:r + 1], ks, qs, cs, eps, streams=S)
+        assert mx.array_equal(g1[0], gated[r]).item() and mx.array_equal(n1[0], normed[r]).item(), r
+    f = lambda a: np.asarray(a.astype(mx.float32)).astype(np.float64)      # noqa: E731
+    k, q, v = f(kv)[:, :W].reshape(R, S, D), f(h).reshape(R, S, D), f(kv)[:, W:]
+    norm = lambda x, w: x / np.sqrt((x ** 2).mean(-1, keepdims=True) + 1e-6) * f(w).reshape(S, D)  # noqa: E731
+    g = (norm(k, ks) * norm(q, qs)).sum(-1, keepdims=True) / np.sqrt(D)
+    g = np.sign(g) * np.sqrt(np.maximum(np.abs(g), 1e-6))
+    want = (1.0 / (1.0 + np.exp(-g)) * v[:, None, :])
+    assert np.abs(f(gated).reshape(R, S, D) - want).max() <= 0.02 * np.abs(want).max()
+    tail = bf(rng.normal(size=(1, (TAPS - 1) * DIL, W)))
+    conv_in = mx.concatenate([tail, normed[None]], axis=1)
+    w = mx.array((0.3 * rng.normal(size=(W, TAPS))).astype(np.float32))
+    out = embed.ple_conv(conv_in[0], w, gated, h, streams=S, dilation=DIL)
+    x = f(conv_in[0])
+    y = sum(f(w)[:, j] * x[j * DIL: j * DIL + R] for j in range(TAPS))
+    ref = f(h) + f(gated) + y / (1.0 + np.exp(-y))
+    assert np.abs(f(out) - ref).max() <= 0.02 * np.abs(ref).max()
+    for r in range(R):
+        one = embed.ple_conv(conv_in[0, r:r + 1 + (TAPS - 1) * DIL], w, gated[r:r + 1], h[r:r + 1], streams=S,
+                             dilation=DIL)
+        assert mx.array_equal(one[0], out[r]).item(), r
+
+
+def test_split_router_rows_equal_one_row_calls_and_the_math():
+    """experts.router(split=True): every row of 1-16-row calls as its one-row call, and float64 math."""
+
+    from tensorfold.kernels.qwen.flash_next.v1 import experts
+
+    rng = np.random.default_rng(37)
+    rows_w = mx.array((0.05 * rng.normal(size=(513, 2560))).astype(np.float32)).astype(mx.bfloat16)
+    x = mx.array(rng.normal(size=(16, 2560)).astype(np.float32)).astype(mx.bfloat16)
+    ones = [experts.router(x[r:r + 1], rows_w, split=True) for r in range(16)]
+    for count in (2, 3, 4, 9, 16):
+        got = experts.router(x[:count], rows_w, split=True)
+        for r in range(count):
+            assert mx.array_equal(got[r], ones[r][0]).item(), (count, r)
+    f64 = lambda a: np.asarray(a.astype(mx.float32)).astype(np.float64)      # noqa: E731
+    want = f64(x) @ f64(rows_w).T
+    got = np.asarray(mx.concatenate(ones))
+    assert np.abs(got - want).max() <= 1e-4 * np.abs(want).max()

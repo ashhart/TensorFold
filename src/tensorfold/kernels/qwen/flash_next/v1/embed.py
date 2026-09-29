@@ -81,6 +81,80 @@ _RMS_ROWS = r"""
 """
 
 
+_PLE_GATE = r"""
+  // Threadgroup (s, r), 256 threads: stream s of row r. keys = norm(key projection), queries = norm(streams), each
+  // (1 + w) RMSNorm in fp32 to bf16; gate = sum of bf16(key * query) (fp32, bf16), / bf16(sqrt D), signed sqrt,
+  // sigmoid (bf16 each); gated = bf16(sigmoid * value); normed = the conv norm of gated. Sums: each thread's dims in
+  // order, simd_sum, the simdgroups in order.
+  const uint t = thread_position_in_threadgroup.x;
+  const uint lane = thread_index_in_simdgroup, sg = simdgroup_index_in_threadgroup;
+  const int s = int(threadgroup_position_in_grid.x), r = int(threadgroup_position_in_grid.y);
+  constexpr int W = S * D, PER = D / 256;
+  threadgroup float red[3][8];
+  float k[PER], q[PER], v[PER];
+  float sk = 0.0f, sq = 0.0f;
+  for (int i = 0; i < PER; i++) {
+    const int d = int(t) + 256 * i;
+    k[i] = float(KV[size_t(r) * (W + D) + s * D + d]);
+    q[i] = float(H[size_t(r) * W + s * D + d]);
+    v[i] = float(KV[size_t(r) * (W + D) + W + d]);
+    sk = fma(k[i], k[i], sk);
+    sq = fma(q[i], q[i], sq);
+  }
+  sk = simd_sum(sk); sq = simd_sum(sq);
+  if (lane == 0) { red[0][sg] = sk; red[1][sg] = sq; }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float tk = 0.0f, tq = 0.0f;
+  for (int j = 0; j < 8; j++) { tk += red[0][j]; tq += red[1][j]; }
+  const float rk = metal::rsqrt(tk / float(D) + eps[0]), rq = metal::rsqrt(tq / float(D) + eps[0]);
+  float dot = 0.0f;
+  for (int i = 0; i < PER; i++) {
+    const int e = s * D + int(t) + 256 * i;
+    const float kn = float(bfloat((k[i] * rk) * KS[e])), qn = float(bfloat((q[i] * rq) * QS[e]));
+    dot += float(bfloat(kn * qn));
+  }
+  dot = simd_sum(dot);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (lane == 0) red[2][sg] = dot;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float gd = 0.0f;
+  for (int j = 0; j < 8; j++) gd += red[2][j];
+  const float g1 = float(bfloat(float(bfloat(gd)) / float(bfloat(metal::precise::sqrt(float(D))))));
+  const float root = float(bfloat(metal::precise::sqrt(metal::max(metal::abs(g1), 1e-6f))));
+  const float g2 = float(bfloat(metal::sign(g1) * root));
+  const float sig = bsig(g2);
+  float sc = 0.0f;
+  for (int i = 0; i < PER; i++) {
+    v[i] = float(bfloat(sig * v[i]));
+    sc = fma(v[i], v[i], sc);
+  }
+  sc = simd_sum(sc);
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (lane == 0) red[0][sg] = sc;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float tc = 0.0f;
+  for (int j = 0; j < 8; j++) tc += red[0][j];
+  const float rc = metal::rsqrt(tc / float(D) + eps[0]);
+  for (int i = 0; i < PER; i++) {
+    const int e = s * D + int(t) + 256 * i;
+    GATED[size_t(r) * W + e] = bfloat(v[i]);
+    NORMED[size_t(r) * W + e] = bfloat((v[i] * rc) * CS[e]);
+  }
+"""
+
+_PLE_CONV = r"""
+  // Thread (c, r): channel c of row r. The depthwise conv over [tail ; normed] rows r + DIL j (fp32 in j order,
+  // bf16), SiLU (bf16 sigmoid, bf16 product), then h + (gated + silu) in bf16.
+  const int c = int(thread_position_in_grid.x), r = int(thread_position_in_grid.y);
+  constexpr int W = S * D;
+  float y = 0.0f;
+  for (int j = 0; j < TAPS; j++) y = fma(CW[c * TAPS + j], float(CIN[size_t(r + DIL * j) * W + c]), y);
+  const float yb = float(bfloat(y));
+  const float silu = float(bfloat(yb * bsig(yb)));
+  const size_t at = size_t(r) * W + c;
+  HOUT[at] = bfloat(float(H[at]) + float(bfloat(float(GATED[at]) + silu)));
+"""
+
 class PleTables:
     """Keep n-gram shards as views into eight GPU groups, or use the host table with its checkpoint memory-mapped."""
 
@@ -160,3 +234,35 @@ def rms_norm_rows(x: mx.array, scale: mx.array, eps: mx.array, *, group: int | N
     return run(inputs=[x, scale, eps], template=[("W", width), ("G", g), ("SW", int(scale.shape[-1]))],
                   grid=(1024 * (width // g), rows, 1), threadgroup=(1024, 1, 1),
                   output_shapes=[(rows, width)], output_dtypes=[mx.bfloat16])[0]
+
+
+def ple_gate(kv: mx.array, h: mx.array, key_scale: mx.array, query_scale: mx.array, conv_scale: mx.array,
+             eps: mx.array, *, streams: int) -> tuple[mx.array, mx.array]:
+    """PLE's gate from the stacked key|value rows [R, S*D + D] and the streams [R, S*D]: (gated, conv-normed)."""
+
+    rows, wide = h.shape
+    dims = wide // streams
+    if dims % 256:
+        raise ValueError("ple_gate: D must be a multiple of 256")
+    from tensorfold.kernels.qwen.flash_next.v1.base import QDOT_HEADER
+
+    run = kernel("q4_ple_gate", _PLE_GATE, ["KV", "H", "KS", "QS", "CS", "eps"], ["GATED", "NORMED"],
+                 header=QDOT_HEADER)
+    return tuple(run(inputs=[kv, h, key_scale, query_scale, conv_scale, eps], template=[("S", streams), ("D", dims)],
+                     grid=(256 * streams, rows, 1), threadgroup=(256, 1, 1),
+                     output_shapes=[(rows, wide), (rows, wide)], output_dtypes=[mx.bfloat16, mx.bfloat16]))
+
+
+def ple_conv(conv_in: mx.array, weight: mx.array, gated: mx.array, h: mx.array, *, streams: int,
+             dilation: int) -> mx.array:
+    """h + gated + SiLU(depthwise conv) for the rows after ``conv_in``'s tail: h_new [R, S*D] bf16."""
+
+    rows, wide = h.shape
+    taps = int(weight.shape[-1])
+    from tensorfold.kernels.qwen.flash_next.v1.base import QDOT_HEADER
+
+    run = kernel("q4_ple_conv", _PLE_CONV, ["CIN", "CW", "GATED", "H"], ["HOUT"], header=QDOT_HEADER)
+    return run(inputs=[conv_in, weight, gated, h],
+               template=[("S", streams), ("D", wide // streams), ("TAPS", taps), ("DIL", dilation)],
+               grid=(wide, rows, 1), threadgroup=(256, 1, 1), output_shapes=[(rows, wide)],
+               output_dtypes=[mx.bfloat16])[0]

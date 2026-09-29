@@ -106,10 +106,7 @@ def project(x: mx.array, linear: Any) -> mx.array:
     return simd_qmm.qmm(x, weight, linear.scales, linear.biases, linear.group_size)
 
 
-def hc_project(*args: Any, **kwargs: Any) -> tuple[mx.array, mx.array]:
-    """hc.hc_project, or with DENSE "rows" its per-row form (each row in its own threadgroups)."""
-
-    return (rows.hc_project if DENSE == "rows" else hc.hc_project)(*args, **kwargs)
+_NONE: tuple[str, tuple[mx.array, ...], Any] = ("none", (), None)
 
 
 class _HC:
@@ -175,11 +172,19 @@ class FusedDecode:
         self.mixer = _HC(model.model.hyper_connection_mixer, inject=False)
         # Concatenate the PLE tables for one lookup kernel.
         self.ple_tables = None
+        self.ple_parts: dict[int, tuple[Any, ...]] = {}
         for layer in model.layers:
             if "ple" in layer:
-                self.ple_tables = embed.PleTables(layer.ple.ple_embedding)
+                ple = layer.ple
+                self.ple_tables = embed.PleTables(ple.ple_embedding)
                 # prefill chunks look their rows up through the same tables (NGramEmbedding.__call__)
-                layer.ple.ple_embedding.__dict__["fused_tables"] = self.ple_tables
+                ple.ple_embedding.__dict__["fused_tables"] = self.ple_tables
+                if isinstance(ple.key_proj, nn.QuantizedLinear) and isinstance(ple.value_proj, nn.QuantizedLinear):
+                    kv, _ = _stacked([ple.key_proj, ple.value_proj])
+                    scales = [1.0 + n.weight.astype(mx.float32) for n in (ple.norm_key, ple.norm_query, ple.norm_conv)]
+                    conv_w = mx.contiguous(ple.conv1d.weight[:, :, 0]).astype(mx.float32)
+                    mx.eval(*scales, conv_w)
+                    self.ple_parts[id(ple)] = (kv, *scales, conv_w)
         # Keep per-row recurrent states by layer and stream for prefix rollback, plus each stream's first cache.
         self.row_states: dict[int, list[tuple[mx.array, mx.array, int]]] = {}
         self._last_heads: list[Any] = []
@@ -235,8 +240,7 @@ class FusedDecode:
         # Attend to selected blocks and the tail past ``top`` complete blocks, otherwise all keys.
         sparse = [c > top for c in complete]
         counts = [ratio * top + e - ratio * c if sp else e for e, c, sp in zip(ends, complete, sparse)]
-        out = attention.attention_rows(q, cache.keys, cache.values, counts, ids, sparse, a.scale)
-        gated = attention.attn_gate(out, p, q_heads=heads, head_dim=dims)
+        gated = attention.attention_rows(q, cache.keys, cache.values, counts, ids, sparse, a.scale, gate=p)
         return project(gated, a.o_proj)
 
     def _select(self, iq: mx.array, raw: mx.array, cache: Any, complete: list[int], ends: list[int],
@@ -251,23 +255,35 @@ class FusedDecode:
             cache.pooled = fresh if cache.pooled is None else mx.concatenate([cache.pooled, fresh], axis=1)
         return attention.index_select(iq, first(cache.pooled), complete, ends, top=top)
 
-    def _moe(self, index: int, x: mx.array) -> tuple[str, tuple[mx.array, ...]]:
-        """Compute routed and shared experts per row and slot for the next hc_norm's grouped write-back."""
+    def _moe(self, index: int, x: mx.array, h: mx.array, inject: mx.array) -> tuple[mx.array, Any]:
+        """The MoE: the streams and the grouped write-back the next hyper-connection's hc_norm applies."""
 
         moe, router_rows = self.layers[index]["moe"]
         cfg = self.cfg
         rows = int(x.shape[0])
         step = base.MAX_ROWS
-        logits = (experts.router(x, router_rows) if rows <= step else
-                  mx.concatenate([experts.router(x[i:i + step], router_rows) for i in range(0, rows, step)]))
+        split = DENSE == "rows"
+        logits = (experts.router(x, router_rows, split=split) if rows <= step else
+                  mx.concatenate([experts.router(x[i:i + step], router_rows, split=split)
+                                  for i in range(0, rows, step)]))
         sw, se = moe.switch_mlp, moe.shared_expert
         if "streamer" in moe.__dict__:            # routed experts from the slot pool (--ssd-experts)
             from tensorfold.families.qwen4_exp import stream
 
-            return stream.moe_rows(moe, x, logits, (se.gate_proj, se.up_proj, se.down_proj))
+            return h, (*stream.moe_rows(moe, x, logits, (se.gate_proj, se.up_proj, se.down_proj)), inject)
         act, picks, weights = experts.expert_gateup(x, logits, cfg.num_experts_per_tok, cfg.num_experts, sw.gate_proj,
                                                     sw.up_proj, shared=(se.gate_proj, se.up_proj))
-        return "grouped", (experts.expert_down_y(act, picks, sw.down_proj, se.down_proj), weights, logits)
+        return h, ("grouped", (experts.expert_down_y(act, picks, sw.down_proj, se.down_proj), weights, logits), inject)
+
+    def _hc(self, h: mx.array, pending: Any, conn: Any) -> tuple[mx.array, mx.array, mx.array]:
+        """Write the pending branch into the streams and mix them for the next block: (h_new, mixed, inject gates)."""
+
+        kind, branch, inject = pending
+        hn, ssp = hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)
+        project_hc = rows.hc_project if DENSE == "rows" else hc.hc_project     # before M5: each row its own threadgroups
+        mixed, gates = project_hc(hn, ssp, conn.down, conn.up, conn.scale, eps=self.eps, streams=self.streams,
+                                  low=conn.low)
+        return hn, mixed, gates
 
     # -- a step --------------------------------------------------------------------
     def __call__(self, tokens: np.ndarray, cache: list[Any]) -> mx.array:
@@ -281,37 +297,27 @@ class FusedDecode:
 
         model = self.model
         self._last_heads = [cache[0]] if cache else []
-        pending: tuple[str, tuple[mx.array, ...], mx.array | None] = ("none", (), None)
+        pending = _NONE
         for i, layer in enumerate(model.layers):
             c = cache[i]
             if "ple" in layer:
                 h = self._write_back(h, pending)
-                pending = ("none", (), None)
-                h = h + self._ple(layer.ple, h, tokens.reshape(1, -1), c)
+                pending = _NONE
+                h = self._ple(layer.ple, h, tokens.reshape(1, -1), c)
             entry = self.layers[i]
-            ahc = entry["attn_hc"]
-            kind, branch, inject = pending
-            hn, ssp = hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)
-            mixed, inj = hc_project(hn, ssp, ahc.down, ahc.up, ahc.scale, eps=self.eps, streams=self.streams, low=ahc.low)
+            h, mixed, inj = self._hc(h, pending, entry["attn_hc"])
             out = self._gdn(i, mixed, c) if layer.is_linear else self._attention(i, mixed, c)
-            mhc = entry["mlp_hc"]
-            hm, ssp = hc.hc_norm(hn, streams=self.streams, write_back="plain", branch=(out,), inject=inj)
-            mixed, inj2 = hc_project(hm, ssp, mhc.down, mhc.up, mhc.scale, eps=self.eps, streams=self.streams, low=mhc.low)
-            h = hm
-            kind, branch = self._moe(i, mixed)
-            pending = (kind, branch, inj2)
+            h, mixed, inj = self._hc(h, ("plain", (out,), inj), entry["mlp_hc"])
+            h, pending = self._moe(i, mixed, h, inj)
             if self.eval_every and (i + 1) % self.eval_every == 0:
                 mx.async_eval(h, *pending[1])
-        kind, branch, inject = pending
-        mix = self.mixer
-        hn, ssp = hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)
-        self.last_streams = hn                                    # [R, S*D] before the final mixer (the MTP reads it)
-        return hc_project(hn, ssp, mix.down, mix.up, mix.scale, eps=self.eps, streams=self.streams, low=mix.low)[0][None]
+        h, mixed, _ = self._hc(h, pending, self.mixer)
+        self.last_streams = h                                     # [R, S*D] before the final mixer (the MTP reads it)
+        return mixed[None]
 
     def _ple(self, ple: Any, h: mx.array, tokens: np.ndarray, cache: Any) -> mx.array:
-        """model.PLELayer on rows h [R, S*D], its projections through ``project`` (row-invariant)."""
+        """model.PLELayer on rows h [R, S*D], its projections through ``project`` (row-invariant): the new streams."""
 
-        rows = h.shape[0]
         emb_mod = ple.ple_embedding
         history = cache.history
         if history is None:
@@ -319,6 +325,22 @@ class FusedDecode:
         ids = emb_mod.ids(history, tokens)
         cache.history = np.concatenate([history, tokens.astype(np.int64)], axis=1)[:, -emb_mod.context:]
         emb = embed.ple_lookup(ids[0], self.ple_tables)                           # [R, E]
+        gated, normed = self._ple_gate(ple, emb, h)
+        tail = cache.ple_conv if cache.ple_conv is not None else mx.zeros((1, ple.tail, h.shape[-1]), h.dtype)
+        conv_in = mx.concatenate([tail, normed[None]], axis=1)
+        cache.ple_conv = conv_in[:, -ple.tail:]
+        cache.ple_rollback = (history, tokens.astype(np.int64), conv_in)
+        return self._ple_conv(ple, conv_in, gated, h)
+
+    def _ple_gate(self, ple: Any, emb: mx.array, h: mx.array) -> tuple[mx.array, mx.array]:
+        """(gated, conv-normed) rows [R, S*D]: before M5 two kernels, otherwise the reference ops."""
+
+        parts = self.ple_parts.get(id(ple)) if DENSE == "rows" else None
+        if parts is not None:
+            kv, key_scale, query_scale, conv_scale, _ = parts
+            return embed.ple_gate(project(emb, kv), h, key_scale, query_scale, conv_scale, self.eps,
+                                  streams=ple.streams)
+        rows = h.shape[0]
         shape = (rows, ple.streams, ple.dims)
         keys = ple.norm_key(project(emb, ple.key_proj)).reshape(shape)
         values = project(emb, ple.value_proj)
@@ -326,18 +348,21 @@ class FusedDecode:
         gate = mx.sum(keys * queries, axis=-1, keepdims=True) / float(np.sqrt(ple.dims))
         gate = mx.sign(gate) * mx.sqrt(mx.maximum(mx.abs(gate), 1e-6))
         gated = (mx.sigmoid(gate) * values[:, None, :]).reshape(h.shape)
-        normed = ple.norm_conv(gated)[None]
-        tail = cache.ple_conv if cache.ple_conv is not None else mx.zeros((1, ple.tail, h.shape[-1]), h.dtype)
-        conv_in = mx.concatenate([tail, normed], axis=1)
-        cache.ple_conv = conv_in[:, -ple.tail:]
-        cache.ple_rollback = (history, tokens.astype(np.int64), conv_in)
-        return gated + first(nn.silu(ple.conv1d(conv_in)))
+        return gated, ple.norm_conv(gated)
 
-    def _write_back(self, h: mx.array, pending: tuple[str, tuple[mx.array, ...], mx.array | None]) -> mx.array:
+    def _ple_conv(self, ple: Any, conv_in: mx.array, gated: mx.array, h: mx.array) -> mx.array:
+        """h + gated + SiLU(conv) for the rows after conv_in's tail [1, T + R, S*D]."""
+
+        parts = self.ple_parts.get(id(ple)) if DENSE == "rows" else None
+        if parts is not None:
+            return embed.ple_conv(first(conv_in), parts[-1], gated, h, streams=ple.streams, dilation=ple.dilation)
+        return h + (gated + first(nn.silu(ple.conv1d(conv_in))))
+
+    def _write_back(self, h: mx.array, pending: Any) -> mx.array:
         kind, branch, inject = pending
         if kind == "none":
             return h
-        # the PLE layer reads the streams themselves: apply the pending write-back first
+        # the PLE layer reads the streams themselves: apply the pending write-back first (M5's grouped one)
         return hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)[0]
 
     # -- several streams' rows in one forward --------------------------------------------------------------------
@@ -353,32 +378,23 @@ class FusedDecode:
             spans.append((at, at + int(n)))
             at += int(n)
         self._last_heads = [c[0] for c in caches]
-        pending: tuple[str, tuple[mx.array, ...], mx.array | None] = ("none", (), None)
+        pending = _NONE
         for i, layer in enumerate(model.layers):
             cs = [c[i] for c in caches]
             if "ple" in layer:
                 h = self._write_back(h, pending)
-                pending = ("none", (), None)
-                h = h + self._ple_multi(layer.ple, h, tokens, cs, spans)
+                pending = _NONE
+                h = self._ple_multi(layer.ple, h, tokens, cs, spans)
             entry = self.layers[i]
-            ahc = entry["attn_hc"]
-            kind, branch, inject = pending
-            hn, ssp = hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)
-            mixed, inj = hc_project(hn, ssp, ahc.down, ahc.up, ahc.scale, eps=self.eps, streams=self.streams, low=ahc.low)
+            h, mixed, inj = self._hc(h, pending, entry["attn_hc"])
             out = self._gdn_multi(i, mixed, cs, spans) if layer.is_linear else self._attention_multi(i, mixed, cs, spans)
-            mhc = entry["mlp_hc"]
-            hm, ssp = hc.hc_norm(hn, streams=self.streams, write_back="plain", branch=(out,), inject=inj)
-            mixed, inj2 = hc_project(hm, ssp, mhc.down, mhc.up, mhc.scale, eps=self.eps, streams=self.streams, low=mhc.low)
-            h = hm
-            kind, branch = self._moe(i, mixed)
-            pending = (kind, branch, inj2)
+            h, mixed, inj = self._hc(h, ("plain", (out,), inj), entry["mlp_hc"])
+            h, pending = self._moe(i, mixed, h, inj)
             if self.eval_every and (i + 1) % self.eval_every == 0:
                 mx.async_eval(h, *pending[1])
-        kind, branch, inject = pending
-        mix = self.mixer
-        hn, ssp = hc.hc_norm(h, streams=self.streams, write_back=kind, branch=branch, inject=inject)
-        self.last_streams = hn
-        return hc_project(hn, ssp, mix.down, mix.up, mix.scale, eps=self.eps, streams=self.streams, low=mix.low)[0][None]
+        h, mixed, _ = self._hc(h, pending, self.mixer)
+        self.last_streams = h
+        return mixed[None]
 
     def _gdn_multi(self, index: int, x: mx.array, caches: list[Any], spans: list[tuple[int, int]]) -> mx.array:
         proj, conv_w, g = self.layers[index]["gdn"]
@@ -455,16 +471,14 @@ class FusedDecode:
                 ids = attention.index_select_multi(iq[r0:r1], [pl if pl is not None else filler[:1] for pl in group_pooled],
                                             rel, complete_all[r0:r1], ends_all[r0:r1], top=top)
             outs.append(attention.attention_rows_multi(q[r0:r1], keys[lo:hi], values[lo:hi], rel, counts[r0:r1], ids,
-                                                sparse[r0:r1], a.scale))
-        out = outs[0] if len(outs) == 1 else mx.concatenate(outs)
-        gated = attention.attn_gate(out, p, q_heads=heads, head_dim=dims)
+                                                sparse[r0:r1], a.scale, gate=p[r0:r1]))
+        gated = outs[0] if len(outs) == 1 else mx.concatenate(outs)
         return project(gated, a.o_proj)
 
     def _ple_multi(self, ple: Any, h: mx.array, tokens: list[np.ndarray], caches: list[Any],
                    spans: list[tuple[int, int]]) -> mx.array:
-        """Run PLE across streams using each stream's own token history and convolution tail."""
+        """Run PLE across streams using each stream's own token history and convolution tail: the new streams."""
 
-        rows = h.shape[0]
         emb_mod = ple.ple_embedding
         histories, ids = [], []
         for c, t in zip(caches, tokens):
@@ -474,23 +488,16 @@ class FusedDecode:
             histories.append(history)
             ids.append(emb_mod.ids(history, t)[0])
         emb = embed.ple_lookup(np.concatenate(ids), self.ple_tables)
-        shape = (rows, ple.streams, ple.dims)
-        keys = ple.norm_key(project(emb, ple.key_proj)).reshape(shape)
-        values = project(emb, ple.value_proj)
-        queries = ple.norm_query(h).reshape(shape)
-        gate = mx.sum(keys * queries, axis=-1, keepdims=True) / float(np.sqrt(ple.dims))
-        gate = mx.sign(gate) * mx.sqrt(mx.maximum(mx.abs(gate), 1e-6))
-        gated = (mx.sigmoid(gate) * values[:, None, :]).reshape(h.shape)
-        normed = ple.norm_conv(gated)
-        convs = []
+        gated, normed = self._ple_gate(ple, emb, h)
+        outs = []
         for c, t, history, (s, e) in zip(caches, tokens, histories, spans):
             c.history = np.concatenate([history, t.astype(np.int64)], axis=1)[:, -emb_mod.context:]
             tail = c.ple_conv if c.ple_conv is not None else mx.zeros((1, ple.tail, h.shape[-1]), h.dtype)
             conv_in = mx.concatenate([tail, normed[s:e][None]], axis=1)
             c.ple_conv = conv_in[:, -ple.tail:]
             c.ple_rollback = (history, t.astype(np.int64), conv_in)
-            convs.append(first(nn.silu(ple.conv1d(conv_in))))
-        return gated + mx.concatenate(convs)
+            outs.append(self._ple_conv(ple, conv_in, gated[s:e], h[s:e]))
+        return mx.concatenate(outs)
 
     def keep_rows(self, cache: list[Any], rows: int, keep: int) -> None:
         """After a call on ``rows`` rows, make ``cache`` hold only its first ``keep`` rows."""

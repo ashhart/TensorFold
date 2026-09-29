@@ -10,6 +10,8 @@ TITLE = "DeepSeek-V4-Flash"
 LANES = True
 # affine 4-bit groups of 64, routed experts in mxfp4 (DeepSeek's own FP4 bytes)
 MODELS = ("mlx-community/DeepSeek-V4-Flash-4bit",)
+# DeepSeek's DSpark blocks converted (MIT); Vontra/DeepSeek-V4-Flash-MTP-MLX holds the MTP layer the same way
+DRAFTER = "Vontra/DeepSeek-V4-Flash-DSpark-MLX"
 KERNEL_PACKAGE = "tensorfold.kernels.deepseek.v4"
 KERNEL_VERSION = "v1"
 # the shared GLM-5.3 pieces this engine runs (hyper-connections, row linears), hashed into snapshot keys
