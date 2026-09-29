@@ -7,6 +7,7 @@ const quant = @import("quantization.zig");
 pub const Grid = @import("vision_positions.zig").Grid;
 const vp = @import("vision_positions.zig");
 const input = @import("image_input.zig");
+pub const EncodedImage = struct { bytes: []const u8, detail: enum { auto, low, high } = .auto };
 
 pub const Prompt = struct {
     scope: mx.Scope = .{},
@@ -18,6 +19,17 @@ pub const Prompt = struct {
     }
     pub fn prepare(io: std.Io, dir: []const u8, paths: []const []const u8, tokens: *std.ArrayList(i32), allocator: std.mem.Allocator, weights: *@import("weights.zig").Weights) !Prompt {
         if (paths.len == 0 or paths.len > 4) return error.InvalidImageCount;
+        var sources: [4]EncodedImage = undefined;
+        var loaded: usize = 0;
+        defer for (sources[0..loaded]) |source| mx.allocator.free(source.bytes);
+        for (paths, 0..) |path, i| {
+            sources[i] = .{ .bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, mx.allocator, .limited(10 * 1024 * 1024)) };
+            loaded += 1;
+        }
+        return prepareEncoded(io, dir, sources[0..loaded], tokens, allocator, weights);
+    }
+    pub fn prepareEncoded(io: std.Io, dir: []const u8, sources: []const EncodedImage, tokens: *std.ArrayList(i32), allocator: std.mem.Allocator, weights: *@import("weights.zig").Weights) !Prompt {
+        if (sources.len == 0 or sources.len > 4) return error.InvalidImageCount;
         var tower = try Tower.init(io, dir);
         defer tower.deinit();
         var grids: [4]Grid = undefined;
@@ -28,16 +40,14 @@ pub const Prompt = struct {
         const limits = try processorLimits(io, dir);
         var decoded_pixels: usize = 0;
         var encoded_bytes: usize = 0;
-        for (paths, 0..) |path, i| {
-            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, mx.allocator, .limited(10 * 1024 * 1024));
-            defer mx.allocator.free(bytes);
-            encoded_bytes += bytes.len;
+        for (sources, 0..) |source, i| {
+            encoded_bytes += source.bytes.len;
             if (encoded_bytes > 20 * 1024 * 1024) return error.ImageByteLimitExceeded;
-            const image = try input.Image.decode(bytes);
+            const image = try input.Image.decode(source.bytes);
             defer image.deinit();
             decoded_pixels += image.width * image.height;
             if (decoded_pixels > 32 * 1024 * 1024) return error.ImagePixelLimitExceeded;
-            const cap = @min(limits.max, 4096 / paths.len * 1024);
+            const cap = @min(@min(limits.max, 4096 / sources.len * 1024), if (source.detail == .low) @as(usize, 256 * 1024) else 4096 * 1024);
             grids[i] = try input.resizeGrid(image.height, image.width, @min(limits.min, cap), cap);
             const pixels = try input.patches(image, grids[i]);
             defer mx.allocator.free(pixels);
@@ -49,7 +59,7 @@ pub const Prompt = struct {
         var expanded: std.ArrayList(i32) = .empty;
         defer expanded.deinit(allocator);
         if (std.mem.indexOfScalar(i32, tokens.items, ids.image) == null) {
-            for (grids[0..paths.len]) |grid| {
+            for (grids[0..sources.len]) |grid| {
                 try expanded.append(allocator, ids.start);
                 try expanded.appendNTimes(allocator, ids.image, try grid.count());
                 try expanded.append(allocator, ids.end);
@@ -60,21 +70,21 @@ pub const Prompt = struct {
         if (expanded.items.len == 0) {
             for (tokens.items) |token| {
                 if (token == ids.image) {
-                    if (index >= paths.len) return error.UnmatchedImageTokens;
+                    if (index >= sources.len) return error.UnmatchedImageTokens;
                     const count = try grids[index].count();
                     try expanded.appendNTimes(allocator, token, count);
                     index += 1;
                 } else try expanded.append(allocator, token);
             }
-        } else index = paths.len;
-        if (index != paths.len) return error.MissingImageTokens;
-        const positions = try vp.Positions.init(mx.allocator, expanded.items, grids[0..paths.len], ids);
+        } else index = sources.len;
+        if (index != sources.len) return error.MissingImageTokens;
+        const positions = try vp.Positions.init(mx.allocator, expanded.items, grids[0..sources.len], ids);
         errdefer positions.deinit(mx.allocator);
         const text = try weights.embed(&scope, expanded.items);
         var parts: [9]A = undefined;
         var length: usize = 0;
         var cursor: usize = 0;
-        for (positions.spans, features[0..paths.len]) |span, feature| {
+        for (positions.spans, features[0..sources.len]) |span, feature| {
             if (span.begin > cursor) {
                 parts[length] = try scope.slice(text, 1, @intCast(cursor), @intCast(span.begin));
                 length += 1;

@@ -4,7 +4,12 @@ This fork implements TensorFold's inference orchestration in Zig and runs the
 upstream Metal kernels through MLX-C. MLX supplies tensors, graph execution,
 memory management and GPU operations. The completion executable does not run
 Python; Python supplies development dependencies and correctness oracles.
-The OpenAI-compatible HTTP server remains in the upstream Python code.
+The native HTTP server provides raw and chat completions, including Qwen image
+inputs. Serving parity with the upstream Python server is still in progress.
+
+The Zig serving architecture and vendored Jinja integration draw on
+[ddalcu's mlx-serve](https://github.com/ddalcu/mlx-serve). Jinja dependency
+credits and licenses are retained in [vendor/jinja/NOTICE](vendor/jinja/NOTICE).
 
 ## Prerequisites
 
@@ -56,7 +61,7 @@ zig-out/bin/tensorfold --help
 The initial build can take several minutes. `fetch-zig.sh` stages the exact
 nightly in [`.zig-version`](../.zig-version), verified before extraction against
 [`.zig-archive.sha256`](../.zig-archive.sha256), matching the pin used by
-`mlx-serve). It refuses to silently replace an incompatible `.zig-toolchain`.
+`mlx-serve`. It refuses to silently replace an incompatible `.zig-toolchain`.
 Use the staged compiler; a global stable Zig is not compatible.
 **No neighboring repository or model download is required.**
 
@@ -146,6 +151,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
+| Chat templates and tokenizer parity | `test-chat -Doptimize=safe -j1` | All seven local tokenizers; no model weights loaded |
 | Checkpoint metadata rejection | `test-schema-failures -Doptimize=safe -j1` | Installed schema checkpoints; no GPU |
 
 Start GPU verification with:
@@ -180,10 +186,15 @@ zig-out/bin/tensorfold run "$HOME/.models/Vontra/Qwen3.8-27B-MLX-4bit" --prompt 
 This is a raw completion CLI: it does not automatically build a conversation or
 apply a chat template. Use `--tokens ID,ID,...` for controlled comparisons.
 `tensorfold serve MODEL_DIR --host 127.0.0.1 --port 8080` exposes `/health`,
-`/v1/models` and raw `/v1/completions`, including SSE, seeded sampling,
-stop strings and disconnect cancellation. One inference worker owns the
-model; its queue holds eight requests. Chat templates and API images are
-not yet exposed by this command.
+`/v1/models`, `/v1/completions` and `/v1/chat/completions`, including SSE,
+seeded sampling, stop strings, reasoning content and disconnect cancellation.
+Chat uses each model's Jinja template. Qwen accepts user `image_url` content
+parts containing data URLs, up to four images and 20 MiB decoded bytes total;
+`detail: "low"` caps each image at 256 visual tokens. Remote image URLs,
+tool-call output handling and speculative serving are still pending.
+One inference worker owns the model; its queue holds eight requests.
+Against a running Qwen server, compare JSON/SSE text, reasoning and images with
+`.zig-toolchain/zig run tools/native_http_checks.zig -- http://127.0.0.1:8080/v1/chat/completions /path/to/image.png`.
 Use `--report build/native-checks/run.json` and
 `--dump-logits build/native-checks/logits.npy` for correctness evidence; create
 the output directory first.

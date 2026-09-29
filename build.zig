@@ -64,6 +64,13 @@ pub fn build(b: *std.Build) void {
     mod.linkFramework("ImageIO", .{});
     mod.linkFramework("CoreGraphics", .{});
     mod.linkFramework("CoreFoundation", .{});
+    mod.link_libcpp = true;
+    mod.addIncludePath(b.path("native/vendor/jinja"));
+    mod.addCSourceFiles(.{
+        .root = b.path("native/vendor/jinja"),
+        .files = &.{ "jinja_wrapper.cpp", "caps.cpp", "lexer.cpp", "parser.cpp", "runtime.cpp", "jinja_string.cpp", "value.cpp" },
+        .flags = &.{ "-std=c++17", "-O2", "-DNDEBUG" },
+    });
     const jpeg_prefix = b.option([]const u8, "jpeg-prefix", "Pillow-matched libjpeg-turbo install prefix") orelse "build/jpeg";
     mod.addObjectFile(b.path(b.fmt("{s}/lib/libturbojpeg.a", .{jpeg_prefix})));
     const dependency_check = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_runtime.py", "--mlx-prefix", prefix, "--jpeg-prefix", jpeg_prefix });
@@ -267,6 +274,16 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const chat_tests = b.step("test-chat", "Compare native Jinja prompts with upstream for all seven local tokenizers; no model weights loaded");
+    for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "Ternary-Bonsai-2-27B-mlx-2bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP", "gemma-4-26b-a4b-it-4bit", "GLM-5.3-Flash-MLX-4bit-MTP", "DeepSeek-V4-Flash-4bit" }, 0..) |name, index| {
+        const dir = b.fmt("{s}/{s}", .{ model_root, name });
+        const fixture = b.fmt("build/native-checks/chat/{d}.json", .{index});
+        const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", dir, "--chat-fixtures", "--output", fixture });
+        const check = b.addRunArtifact(exe);
+        check.addArgs(&.{ "check-chat", dir, fixture });
+        check.step.dependOn(&oracle.step);
+        chat_tests.dependOn(&check.step);
+    }
     const gemma_model = b.fmt("{s}/gemma-4-26b-a4b-it-4bit", .{model_root});
     const gemma_prefill_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", gemma_model, "--gemma-prefill", "--output", "build/native-checks/gemma-prefill/oracle/logits.npy", "--state-directory", "build/native-checks/gemma-prefill/oracle" });
     const gemma_prefill = b.addRunArtifact(exe);
@@ -275,10 +292,12 @@ pub fn build(b: *std.Build) void {
     const gemma_prefill_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", "build/native-checks/gemma-prefill/oracle", "build/native-checks/gemma-prefill/native" });
     gemma_prefill_compare.step.dependOn(&gemma_prefill.step);
     b.step("test-gemma-prefill", "Compare batched Gemma prompt arithmetic, ring wrap, caches and decode continuation").dependOn(&gemma_prefill_compare.step);
-    const gemma_draft_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", gemma_model, "--gemma-drafter", "build/native-checks/dflash-3", "--output", "build/native-checks/gemma-draft/oracle/logits.npy", "--state-directory", "build/native-checks/gemma-draft/oracle" });
-    gemma_draft_oracle.step.dependOn(dflash_previous.?);
+    const gemma_drafter_option = b.option([]const u8, "gemma-drafter", "Existing trained Gemma DFlash checkpoint; default is the synthetic oracle fixture");
+    const gemma_drafter = gemma_drafter_option orelse "build/native-checks/dflash-3";
+    const gemma_draft_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", gemma_model, "--gemma-drafter", gemma_drafter, "--output", "build/native-checks/gemma-draft/oracle/logits.npy", "--state-directory", "build/native-checks/gemma-draft/oracle" });
+    if (gemma_drafter_option == null) gemma_draft_oracle.step.dependOn(dflash_previous.?);
     const gemma_draft = b.addRunArtifact(exe);
-    gemma_draft.addArgs(&.{ "check-gemma-draft", gemma_model, "build/native-checks/dflash-3", "build/native-checks/gemma-draft/native" });
+    gemma_draft.addArgs(&.{ "check-gemma-draft", gemma_model, gemma_drafter, "build/native-checks/gemma-draft/native" });
     gemma_draft.step.dependOn(&gemma_draft_oracle.step);
     const gemma_draft_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", "build/native-checks/gemma-draft/oracle", "build/native-checks/gemma-draft/native" });
     gemma_draft_compare.step.dependOn(&gemma_draft.step);

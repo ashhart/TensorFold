@@ -1,0 +1,11 @@
+mlx-serve
+https://github.com/ddalcu/mlx-serve
+Copyright (c) 2026 David Dalcu
+
+The vendored Zig tokenizer and I/O utilities come from ddalcu's mlx-serve
+and retain its MIT license in LICENSE.
+
+The Jinja integration is also from mlx-serve. See jinja/NOTICE for its
+provenance, mlx-serve additions and underlying third-party attribution.
+The Apache License, Version 2.0 is retained in LICENSE-APACHE-2.0 and
+jinja/LICENSE; nlohmann/json.hpp retains its embedded MIT notice.

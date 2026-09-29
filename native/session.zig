@@ -48,6 +48,7 @@ pub const Sink = struct {
 };
 pub const Reply = struct {
     tokens: std.ArrayList(u32) = .empty,
+    prompt_tokens: usize = 0,
     content: []u8 = &.{},
     finish_reason: enum { stop, length } = .length,
     pub fn deinit(r: *Reply, a: std.mem.Allocator) void {
@@ -59,21 +60,41 @@ pub const Reply = struct {
 pub const Session = struct {
     backend: Backend,
     tokenizer: tokenizer.Tokenizer,
+    io: std.Io,
+    directory: []u8,
+    chat_template: ?@import("chat.zig").Template = null,
     pub fn init(io: std.Io, dir: []const u8) !Session {
         var backend = try Backend.init(io, dir);
         errdefer backend.deinit();
         const path = try std.Io.Dir.cwd().realPathFileAlloc(io, dir, mx.allocator);
-        defer mx.allocator.free(path);
-        return .{ .backend = backend, .tokenizer = try tokenizer.loadTokenizer(io, mx.allocator, path) };
+        errdefer mx.allocator.free(path);
+        return .{ .backend = backend, .tokenizer = try tokenizer.loadTokenizer(io, mx.allocator, path), .io = io, .directory = path };
     }
     pub fn deinit(s: *Session) void {
+        if (s.chat_template) |*template| template.deinit();
         s.tokenizer.deinit();
         s.backend.deinit();
+        mx.allocator.free(s.directory);
+    }
+    pub fn renderChat(s: *Session, a: std.mem.Allocator, body: std.json.Value) !@import("chat.zig").Rendered {
+        if (s.chat_template == null) s.chat_template = try @import("chat.zig").Template.load(mx.allocator, s.io, s.directory);
+        return s.chat_template.?.render(a, body);
     }
     pub fn generate(s: *Session, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink) !Reply {
         switch (s.backend) {
-            inline else => |*m| return generateModel(m, &s.tokenizer, a, prompt, options, sink),
+            inline else => |*m| return generateModel(m, &s.tokenizer, a, prompt, options, sink, null),
         }
+    }
+    pub fn generateImages(s: *Session, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink, images: []const @import("vision.zig").EncodedImage) !Reply {
+        if (images.len == 0) return s.generate(a, prompt, options, sink);
+        if (s.backend != .qwen) return error.UnsupportedModelImages;
+        try sink.check();
+        var ids: std.ArrayList(i32) = .empty;
+        defer ids.deinit(a);
+        try ids.appendSlice(a, prompt);
+        var prepared = try @import("vision.zig").Prompt.prepareEncoded(s.io, s.directory, images, &ids, a, &s.backend.qwen.weights);
+        defer prepared.deinit();
+        return generateModel(&s.backend.qwen, &s.tokenizer, a, ids.items, options, sink, &prepared);
     }
     pub fn validate(s: *Session, prompt: []const i32, options: Options) !void {
         const vocab: i32 = switch (s.backend) {
@@ -87,7 +108,7 @@ pub const Session = struct {
     }
 };
 
-fn generateModel(m: anytype, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink) !Reply {
+fn generateModel(m: anytype, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink, image: ?*@import("vision.zig").Prompt) !Reply {
     const M = @TypeOf(m.*);
     const vocab: i32 = if (M == qwen.Model) 248320 else if (@hasField(M, "vocab")) m.vocab else M.vocab;
     if (prompt.len == 0) return error.EmptyPrompt;
@@ -96,7 +117,7 @@ fn generateModel(m: anytype, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, pr
     try options.sampling.validate();
     m.reset();
     defer m.reset();
-    var reply = Reply{};
+    var reply = Reply{ .prompt_tokens = prompt.len };
     errdefer reply.deinit(a);
     if (options.max_tokens == 0) return reply;
     var settings = options.sampling;
@@ -106,7 +127,12 @@ fn generateModel(m: anytype, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, pr
     while (offset < prompt.len) {
         try sink.check();
         const count = @min(if (@hasDecl(M, "prefill")) @as(usize, 2048) else 16, prompt.len - offset);
-        var pass = if (@hasDecl(M, "prefill")) try m.prefill(prompt[offset..][0..count]) else try m.forward(prompt[offset..][0..count]);
+        var image_scope = mx.Scope{};
+        defer image_scope.deinit();
+        var pass = if (M == qwen.Model) blk: {
+            if (image) |p| break :blk try m.prefillImage(prompt[offset..][0..count], try image_scope.slice(p.embeddings, 1, @intCast(offset), @intCast(offset + count)), try p.positions.chunk(&image_scope, offset, offset + count), p.positions.delta);
+            break :blk try m.prefill(prompt[offset..][0..count]);
+        } else if (@hasDecl(M, "prefill")) try m.prefill(prompt[offset..][0..count]) else try m.forward(prompt[offset..][0..count]);
         defer pass.deinit();
         const logits = try pass.scope.reshape(pass.logits, &.{ -1, vocab });
         const rows = mx.dim(logits, 0);

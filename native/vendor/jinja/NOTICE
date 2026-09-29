@@ -1,0 +1,18 @@
+Jinja integration from ddalcu's mlx-serve:
+https://github.com/ddalcu/mlx-serve
+Copyright (c) 2026 David Dalcu
+Copied unchanged from lib/jinja_cpp in the local CerebralCoding/mlx-serve
+fork at 130cf92ac5ea6053245bb32c34336829af7e1722.
+
+The underlying Jinja engine is Wang Zhaode's jinja.cpp:
+https://github.com/wangzhaode/jinja.cpp
+Copyright 2025 Wang Zhaode
+Licensed under the Apache License, Version 2.0 (LICENSE).
+
+Modifications by mlx-serve: value.cpp and value.h add
+tojson(sort_keys=..., separators=...). jinja_wrapper.*, caps.*,
+jinja_string.* and log.h are mlx-serve additions providing the C interface
+the Zig side calls; mlx-serve's MIT license is retained in ../LICENSE.
+
+The accompanying LICENSE and notices embedded in the source files apply.
+nlohmann/json.hpp includes its MIT license notice.

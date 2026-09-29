@@ -1,6 +1,8 @@
 const std = @import("std");
 const mx = @import("mlx.zig");
 const inference = @import("session.zig");
+const chat = @import("chat.zig");
+const reply_text = @import("reply_text.zig");
 const Request = std.http.Server.Request;
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
@@ -58,7 +60,8 @@ const Job = struct {
     sequence: usize,
     created: i64,
     socket: std.posix.fd_t,
-    prompt: std.json.Value,
+    body: std.json.Value,
+    is_chat: bool,
     options: inference.Options,
     done: std.Io.Event = .unset,
     failure: ?anyerror = null,
@@ -83,7 +86,7 @@ const Worker = struct {
         defer session.deinit();
         w.ready.set(w.io);
         while (w.queue.getOneUncancelable(w.io)) |job| {
-            complete(&session, job.a, job.request, job.model, job.sequence, job.created, job.socket, job.prompt, job.options) catch |err| {
+            complete(&session, job.a, job.request, job.model, job.sequence, job.created, job.socket, job.body, job.is_chat, job.options) catch |err| {
                 job.failure = err;
             };
             job.done.set(w.io);
@@ -122,23 +125,30 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
         if (std.mem.eql(u8, route, "/v1/models") or std.mem.eql(u8, route, "/models")) return json(a, request, .ok, .{ .object = "list", .data = &.{.{ .id = model, .object = "model", .created = std.Io.Clock.real.now(worker.io).toSeconds(), .owned_by = "tensorfold" }} });
         return failure(a, request, .not_found, "Unknown route");
     }
-    if (request.head.method != .POST or (!std.mem.eql(u8, route, "/v1/completions") and !std.mem.eql(u8, route, "/completions"))) return failure(a, request, .not_found, "Unknown route");
+    const is_chat = std.mem.eql(u8, route, "/v1/chat/completions") or std.mem.eql(u8, route, "/chat/completions");
+    if (request.head.method != .POST or (!is_chat and !std.mem.eql(u8, route, "/v1/completions") and !std.mem.eql(u8, route, "/completions"))) return failure(a, request, .not_found, "Unknown route");
     var body_buffer: [8192]u8 = undefined;
     const body_reader = try request.readerExpectContinue(&body_buffer);
     const bytes = body_reader.allocRemaining(a, .limited(32 * 1024 * 1024)) catch return failure(a, request, .bad_request, "Invalid or oversized request body");
     const body = std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always }) catch return failure(a, request, .bad_request, "Invalid JSON");
     const options = inference.Options.parse(a, body.value) catch |err| return failure(a, request, .bad_request, @errorName(err));
     if (body.value.object.get("model")) |value| if (value != .string or !std.mem.eql(u8, value.string, model)) return failure(a, request, .not_found, "Unknown model");
-    const prompt = body.value.object.get("prompt") orelse return failure(a, request, .bad_request, "Missing prompt");
-    var job = Job{ .a = a, .request = request, .model = model, .sequence = sequence, .created = std.Io.Clock.real.now(worker.io).toSeconds(), .socket = socket, .prompt = prompt, .options = options };
+    var job = Job{ .a = a, .request = request, .model = model, .sequence = sequence, .created = std.Io.Clock.real.now(worker.io).toSeconds(), .socket = socket, .body = body.value, .is_chat = is_chat, .options = options };
     if (try worker.queue.putUncancelable(worker.io, &.{&job}, 0) == 0) return failure(a, request, .service_unavailable, "Inference queue is full");
     job.done.waitUncancelable(worker.io);
     if (job.failure) |err| return err;
 }
 
-fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, created: i64, socket: std.posix.fd_t, prompt: std.json.Value, options: inference.Options) !void {
+fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, created: i64, socket: std.posix.fd_t, body: std.json.Value, is_chat: bool, options: inference.Options) !void {
     var ids: std.ArrayList(i32) = .empty;
-    switch (prompt) {
+    var raw_images = body.object.get("images") orelse .null;
+    var thinking = false;
+    if (is_chat) {
+        const rendered = session.renderChat(a, body) catch |err| return failure(a, request, .bad_request, @errorName(err));
+        try ids.appendSlice(a, try chat.encode(a, &session.tokenizer, rendered));
+        raw_images = rendered.images;
+        thinking = rendered.thinking;
+    } else switch (body.object.get("prompt") orelse return failure(a, request, .bad_request, "Missing prompt")) {
         .string => |value| {
             for (try session.tokenizer.encode(a, value)) |id| try ids.append(a, @intCast(id));
         },
@@ -149,26 +159,37 @@ fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request
         else => return failure(a, request, .bad_request, "Prompt must be text or token IDs"),
     }
     session.validate(ids.items, options) catch |err| return failure(a, request, .bad_request, @errorName(err));
-    const id = try std.fmt.allocPrint(a, "cmpl-{d}-{d}", .{ created, sequence });
+    const images = @import("image_source.zig").sources(a, raw_images) catch |err| return failure(a, request, .bad_request, @errorName(err));
+    if (images.len > 0 and session.backend != .qwen) return failure(a, request, .bad_request, "This model does not support image inputs");
+    const id = try std.fmt.allocPrint(a, "{s}cmpl-{d}-{d}", .{ if (is_chat) "chat" else "", created, sequence });
+    const markers: reply_text.Markers = if (session.backend == .gemma) reply_text.gemma_markers else .{};
     var connection = Connection{ .socket = socket };
     if (options.stream) {
         var buffer: [8192]u8 = undefined;
         var response = try request.respondStreaming(&buffer, .{ .respond_options = .{ .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" } } } });
-        var state = Stream{ .a = a, .writer = &response.writer, .transport = request.server.out, .id = id, .model = model, .created = created, .connection = connection };
-        var reply = session.generate(mx.allocator, ids.items, options, .{ .context = &state, .emit = Stream.emit, .cancelled = Stream.cancelled }) catch |err| {
+        var state = Stream{ .a = a, .writer = &response.writer, .transport = request.server.out, .id = id, .model = model, .created = created, .connection = connection, .is_chat = is_chat, .thinking = thinking, .markers = markers };
+        if (is_chat) try state.chatChunk(.{ .role = "assistant", .content = "" }, null);
+        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &state, .emit = Stream.emit, .cancelled = Stream.cancelled }, images) catch |err| {
             const error_body = try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .message = @errorName(err) } }, .{});
             try response.writer.print("data: {s}\n\ndata: [DONE]\n\n", .{error_body});
             try response.end();
             return;
         };
         defer reply.deinit(mx.allocator);
-        try state.chunk("", @tagName(reply.finish_reason));
+        if (is_chat) {
+            try state.chatText(true);
+            try state.chatChunk(std.json.Value{ .object = .empty }, @tagName(reply.finish_reason));
+        } else try state.chunk("", @tagName(reply.finish_reason));
         try response.writer.writeAll("data: [DONE]\n\n");
         try response.end();
     } else {
-        var reply = session.generate(mx.allocator, ids.items, options, .{ .context = &connection, .cancelled = Connection.cancelled }) catch |err| return failure(a, request, .bad_request, @errorName(err));
+        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &connection, .cancelled = Connection.cancelled }, images) catch |err| return failure(a, request, .bad_request, @errorName(err));
         defer reply.deinit(mx.allocator);
-        try json(a, request, .ok, .{ .id = id, .object = "text_completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .text = reply.content, .finish_reason = @tagName(reply.finish_reason), .logprobs = @as(?u8, null) }}, .usage = .{ .prompt_tokens = ids.items.len, .completion_tokens = reply.tokens.items.len, .total_tokens = ids.items.len + reply.tokens.items.len } });
+        const usage = .{ .prompt_tokens = reply.prompt_tokens, .completion_tokens = reply.tokens.items.len, .total_tokens = reply.prompt_tokens + reply.tokens.items.len };
+        if (is_chat) {
+            const parts = if (thinking) reply_text.splitThinking(reply.content, true, markers) else reply_text.Parts{ .content = reply.content };
+            try json(a, request, .ok, .{ .id = id, .object = "chat.completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .message = .{ .role = "assistant", .content = parts.content, .reasoning_content = parts.reasoning }, .finish_reason = @tagName(reply.finish_reason) }}, .usage = usage });
+        } else try json(a, request, .ok, .{ .id = id, .object = "text_completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .text = reply.content, .finish_reason = @tagName(reply.finish_reason), .logprobs = @as(?u8, null) }}, .usage = usage });
     }
 }
 
@@ -180,6 +201,12 @@ const Stream = struct {
     model: []const u8,
     created: i64,
     connection: Connection,
+    is_chat: bool = false,
+    thinking: bool = false,
+    markers: reply_text.Markers = .{},
+    accumulated: std.ArrayList(u8) = .empty,
+    sent_content: usize = 0,
+    sent_reasoning: usize = 0,
     fn cancelled(context: ?*anyopaque) bool {
         const s: *Stream = @ptrCast(@alignCast(context.?));
         return Connection.cancelled(&s.connection);
@@ -193,7 +220,26 @@ const Stream = struct {
     fn emit(context: ?*anyopaque, value: []const u8) !void {
         if (value.len == 0) return;
         const s: *Stream = @ptrCast(@alignCast(context.?));
-        return s.chunk(value, null);
+        if (!s.is_chat) return s.chunk(value, null);
+        try s.accumulated.appendSlice(s.a, value);
+        try s.chatText(false);
+    }
+    fn chatChunk(s: *Stream, delta: anytype, finish: ?[]const u8) !void {
+        const body = try std.json.Stringify.valueAlloc(s.a, .{ .id = s.id, .object = "chat.completion.chunk", .created = s.created, .model = s.model, .choices = &.{.{ .index = @as(usize, 0), .delta = delta, .finish_reason = finish }} }, .{});
+        try s.writer.print("data: {s}\n\n", .{body});
+        try s.writer.flush();
+        try s.transport.flush();
+    }
+    fn chatText(s: *Stream, finished: bool) !void {
+        const parts = if (s.thinking) reply_text.splitThinking(s.accumulated.items, finished, s.markers) else reply_text.Parts{ .content = s.accumulated.items };
+        if (parts.reasoning.len > s.sent_reasoning) {
+            try s.chatChunk(.{ .reasoning_content = parts.reasoning[s.sent_reasoning..] }, null);
+            s.sent_reasoning = parts.reasoning.len;
+        }
+        if (parts.content.len > s.sent_content) {
+            try s.chatChunk(.{ .content = parts.content[s.sent_content..] }, null);
+            s.sent_content = parts.content.len;
+        }
     }
 };
 

@@ -271,7 +271,7 @@ def gemma_dflash_fixture(directory, draft_dir, output):
         for i, item in enumerate(proposer.cache):
             save(f"keys-{step}-{i}", item.state[0])
             save(f"values-{step}-{i}", item.state[1])
-    print("Saved full Gemma target taps and synthetic DFlash proposals", flush=True)
+    print("Saved full Gemma target taps and DFlash proposals", flush=True)
 
 
 def gemma_prefill_fixture(directory, output):
@@ -300,10 +300,41 @@ def gemma_prefill_fixture(directory, output):
         save(f"continuation-{step}", model.head(model.hidden(mx.array([[2000 + step]], dtype=mx.uint32), cache))[0])
 
 
+def chat_fixture(directory, output):
+    from transformers import AutoTokenizer
+    from mlx_lm.tokenizer_utils import TokenizerWrapper
+    from tensorfold.server.text import render_prompt_ids
+    tokenizer = TokenizerWrapper(AutoTokenizer.from_pretrained(str(directory), local_files_only=True))
+    tool = {"type": "function", "function": {"name": "weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}
+    conversations = [
+        [{"role": "user", "content": "Hello, æøå 世界 👋\n123456789"}],
+        [{"role": "system", "content": "Be brief."}, {"role": "developer", "content": "Use Danish."}, {"role": "user", "content": "Hi"}],
+        [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}, {"role": "developer", "content": "Be brief."}, {"role": "user", "content": "Next?"}],
+        [{"role": "user", "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": " world"}]}],
+        [{"role": "user", "content": "Weather in Copenhagen?"}],
+        [{"role": "user", "content": "Weather in Copenhagen?"}, {"role": "assistant", "content": None, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "weather", "arguments": '{"city":"Copenhagen"}'}}]}, {"role": "tool", "tool_call_id": "call_1", "name": "weather", "content": "Sunny"}, {"role": "user", "content": "Summarize."}],
+    ]
+    cases = []
+    for thinking, effort in ((False, None), (True, "low"), (True, "medium"), (True, "xhigh")):
+        for index, messages in enumerate(conversations):
+            tools = [tool] if index >= 4 else None
+            body = {"messages": messages, "chat_template_kwargs": {"enable_thinking": thinking}}
+            if effort:
+                body["reasoning_effort"] = effort
+            if tools:
+                body["tools"] = tools
+            ids = render_prompt_ids(tokenizer, messages, tools=tools, enable_thinking=thinking, reasoning_effort=effort)
+            cases.append({"body": body, "tokens": ids})
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(cases, ensure_ascii=False))
+    print(f"Saved {len(cases)} upstream chat fixtures for {directory.name}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--chat-fixtures", action="store_true")
     p.add_argument("--tokens", help="Explicit prompt IDs, including for generation")
     p.add_argument("--dump-logits", type=Path)
     p.add_argument("--generate", type=int, default=0)
@@ -330,6 +361,9 @@ def main():
     p.add_argument("--trace-layers", action="store_true")
     p.add_argument("--state-directory", type=Path)
     args = p.parse_args()
+    if args.chat_fixtures:
+        chat_fixture(args.model, args.output)
+        return
     import mlx.core as mx
     import mlx.nn as nn
     if args.gemma_prefill:
