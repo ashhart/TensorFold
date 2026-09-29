@@ -40,6 +40,16 @@ pub const Ops = struct {
         return s.result(rc, result);
     }
 };
+pub fn uncompiled(s: *mx.Scope, comptime kind: Kind, args: []const mx.Array) !mx.Array {
+    const ins = c.mlx_vector_array_new_data(args.ptr, args.len);
+    defer _ = c.mlx_vector_array_free(ins);
+    var outs = c.mlx_vector_array_new();
+    defer _ = c.mlx_vector_array_free(outs);
+    try mx.check(try graph(kind, &outs, ins));
+    var result = c.mlx_array_new();
+    const rc = c.mlx_vector_array_get(&result, outs, 0);
+    return s.result(rc, result);
+}
 fn graph(comptime kind: Kind, out: [*c]c.mlx_vector_array, ins: c.mlx_vector_array) !c_int {
     var s = mx.Scope{};
     defer s.deinit();

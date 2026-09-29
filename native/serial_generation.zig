@@ -16,6 +16,8 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
     const M = @TypeOf(m.*);
     if (tokens.len == 0 or drafts > 15) return error.InvalidGeneration;
     if (drafts > 0 and !@hasDecl(M, "propose")) return error.UnsupportedDrafts;
+    const draft_budget = if (@hasDecl(M, "maxDrafts")) @min(drafts, m.maxDrafts()) else drafts;
+    const absorb_on_commit = if (@hasDecl(M, "draftAbsorbsOnCommit")) m.draftAbsorbsOnCommit() else false;
     var result = Result{};
     errdefer result.deinit();
     var hidden = mx.empty;
@@ -27,7 +29,7 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
         var pass = try m.forward(tokens[offset..][0..count]);
         defer pass.deinit();
         const draft_hidden = if (@hasDecl(M, "draftHidden")) M.draftHidden(&pass) else pass.hidden;
-        if (comptime @hasDecl(M, "propose")) if (drafts > 0) {
+        if (comptime @hasDecl(M, "propose")) if (draft_budget > 0 and !absorb_on_commit) {
             if (offset > 0) try absorb(m, hidden, tokens[offset..][0..1]);
             if (count > 1) try absorb(m, try pass.scope.slice(draft_hidden, 0, 0, @intCast(count - 1)), tokens[offset + 1 ..][0 .. count - 1]);
         };
@@ -48,10 +50,10 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
         offset += count;
     }
     while (result.tokens.items.len < max_tokens) {
-        const count = @min(drafts + 1, max_tokens - result.tokens.items.len);
+        const count = @min(draft_budget + 1, max_tokens - result.tokens.items.len);
         var proposed: [16]i32 = undefined;
         proposed[0] = pending;
-        if (comptime @hasDecl(M, "propose")) if (drafts > 0) try m.propose(hidden, pending, proposed[0..count], settings);
+        if (comptime @hasDecl(M, "propose")) if (draft_budget > 0) try m.propose(hidden, pending, proposed[0..count], settings);
         var pass = try m.forward(proposed[0..count]);
         defer pass.deinit();
         const draft_hidden = if (@hasDecl(M, "draftHidden")) M.draftHidden(&pass) else pass.hidden;
@@ -69,7 +71,7 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
             stopped = if (@hasDecl(M, "isEos")) m.isEos(id) else M.eos(id);
             if (stopped) break;
         }
-        if (comptime @hasDecl(M, "propose")) if (drafts > 0) {
+        if (comptime @hasDecl(M, "propose")) if (draft_budget > 0 and !absorb_on_commit) {
             const rows = if (keep == 1) hidden else try pass.scope.cat(&.{ hidden, try pass.scope.slice(draft_hidden, 0, 0, @intCast(keep - 1)) }, 0);
             try absorb(m, rows, proposed[0..keep]);
         };

@@ -134,6 +134,52 @@ def deepseek_fixture(directory, output, wide=False, packed=False):
     print("Saved DeepSeek backbone oracle through 137 tokens", flush=True)
 
 
+def deepseek_dspark_fixture(directory, output, sorted_experts=False, wide=False):
+    import mlx.core as mx
+    from tests import dsv4_fakes as fake
+    from tensorfold.families.deepseek_v4.weights import load_backbone
+    from tensorfold.families.deepseek_v4.dspark import load as load_dspark
+    from tensorfold.engine.exact_sampling import Sampling
+    from tensorfold.engine.gpu_sampling import sample
+    if wide:
+        fake.D = 4096
+        fake.TEXT.update(hidden_size=4096, num_hidden_layers=3, num_attention_heads=64, head_dim=512,
+                         q_lora_rank=512, index_head_dim=128, n_routed_experts=16, moe_intermediate_size=512,
+                         compress_ratios=[0, 4, 128, 0])
+        fake.DSPARK["dspark_target_layer_ids"] = [0, 1, 2]
+    if sorted_experts:
+        fake.TEXT["num_experts_per_tok"] = 4
+        fake.DSPARK["dspark_block_size"] = 16
+    fake.write_checkpoint(directory)
+    fake.write_dspark(directory / "drafter")
+    (directory / "tokenizer.json").write_text(json.dumps({"model": {"type": "BPE", "vocab": {f"t{i}": i for i in range(256)}, "merges": []}, "pre_tokenizer": {"type": "ByteLevel"}, "decoder": {"type": "ByteLevel"}}))
+    model = load_backbone(directory)
+    drafter = load_dspark(model, directory / "drafter/dspark.safetensors", fake.DSPARK)
+    model.tap_layers = drafter.taps
+    target_cache, cache = model.make_cache(), drafter.make_cache()
+    output.mkdir(parents=True, exist_ok=True)
+    def save(name, value):
+        np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
+    position = 0
+    for round_id, count in enumerate((3, 5, 16, 7)):
+        ids = mx.array([[1 + (position + j) % 250 for j in range(count)]], dtype=mx.uint32)
+        hidden = model.hidden(ids, target_cache)
+        save(f"target-{round_id}", model.head(hidden)[0])
+        save(f"taps-{round_id}", model.last_taps)
+        drafter.absorb(model.last_taps, cache)
+        position += count
+        for i, c in enumerate(cache):
+            save(f"keys-{round_id}-{i}", c.ring_rows(c.keys, max(0, c.offset - drafter.window), c.offset))
+        token = mx.array([55 + round_id], dtype=mx.uint32)
+        logits = drafter.logits(model, token, cache)
+        save(f"draft-logits-{round_id}", logits)
+        for mode, temperature in enumerate((0.0, 0.8)):
+            settings = Sampling(seed=1234, temperature=temperature, top_k=20, top_p=0.95)
+            draws = drafter.draw(logits, token, drafter.size, lambda row, j: sample(row, None if temperature == 0 else settings, [position + j + 1]))
+            save(f"draw-{round_id}-{mode}", draws)
+    print("Saved DSpark target taps, context rings, block logits and Markov draws", flush=True)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
@@ -152,6 +198,9 @@ def main():
     p.add_argument("--synthetic-deepseek", action="store_true")
     p.add_argument("--synthetic-deepseek-wide", action="store_true")
     p.add_argument("--synthetic-deepseek-packed", action="store_true")
+    p.add_argument("--synthetic-dspark", action="store_true")
+    p.add_argument("--synthetic-dspark-sorted", action="store_true")
+    p.add_argument("--synthetic-dspark-wide", action="store_true")
     p.add_argument("--synthetic-glm-layout", action="store_true")
     p.add_argument("--synthetic-glm-mixed", action="store_true")
     p.add_argument("--serial-rows", action="store_true")
@@ -160,6 +209,9 @@ def main():
     args = p.parse_args()
     import mlx.core as mx
     import mlx.nn as nn
+    if args.synthetic_dspark or args.synthetic_dspark_sorted or args.synthetic_dspark_wide:
+        deepseek_dspark_fixture(args.model, args.state_directory, args.synthetic_dspark_sorted, args.synthetic_dspark_wide)
+        return
     if args.synthetic_deepseek or args.synthetic_deepseek_wide or args.synthetic_deepseek_packed:
         deepseek_fixture(args.model, args.state_directory, args.synthetic_deepseek_wide or args.synthetic_deepseek_packed, args.synthetic_deepseek_packed)
         return

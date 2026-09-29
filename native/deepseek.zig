@@ -7,7 +7,7 @@ const ops = @import("large_family_ops.zig");
 const A = mx.Array;
 const c = mx.c;
 
-const Config = struct {
+pub const Config = struct {
     hidden_size: i32,
     num_hidden_layers: usize,
     vocab_size: i32,
@@ -76,6 +76,7 @@ pub const Pass = struct {
     logits: A = mx.empty,
     hidden: A = mx.empty,
     streams: A = mx.empty,
+    taps: A = mx.empty,
     records: [16][]Cache = @splat(&.{}),
     rows: usize,
     position: i32,
@@ -101,6 +102,7 @@ pub const Model = struct {
     mtp_position: i32 = 0,
     mtp_generation: u64 = 0,
     has_mtp: bool = false,
+    dspark: ?@import("deepseek_dspark.zig").Draft = null,
 
     pub fn init(io: std.Io, dir: []const u8) !Model {
         var buf: [4096]u8 = undefined;
@@ -132,6 +134,7 @@ pub const Model = struct {
     }
     pub fn deinit(m: *Model) void {
         m.reset();
+        if (m.dspark) |*draft| draft.deinit();
         mx.allocator.free(m.cache);
         m.weights.deinit();
         m.kernels.deinit();
@@ -140,6 +143,7 @@ pub const Model = struct {
         m.config.deinit();
     }
     pub fn reset(m: *Model) void {
+        if (m.dspark) |*draft| draft.reset();
         for (m.cache) |*cache| cache.deinit();
         m.position = 0;
         m.generation +%= 1;
@@ -152,6 +156,18 @@ pub const Model = struct {
     }
     pub fn loadDraft(m: *Model, io: std.Io, dir: []const u8) !void {
         var path: [4096]u8 = undefined;
+        const file = std.Io.Dir.cwd().openFile(io, try std.fmt.bufPrint(&path, "{s}/dspark.safetensors", .{dir}), .{}) catch |err| blk: {
+            if (err != error.FileNotFound) return err;
+            break :blk null;
+        };
+        if (file) |f| {
+            f.close(io);
+            const draft = try @import("deepseek_dspark.zig").Draft.init(io, dir, m.config.value);
+            if (m.dspark) |*old| old.deinit();
+            m.dspark = draft;
+            m.has_mtp = true;
+            return;
+        }
         var raw = cp.Store.init(64);
         defer raw.deinit();
         try raw.loadFile(io, try std.fmt.bufPrint(&path, "{s}/mtp.safetensors", .{dir}), "", "");
@@ -165,6 +181,8 @@ pub const Model = struct {
         var projections: [7]dense.Projection = undefined;
         for ([_][]const u8{ "e_proj", "h_proj", "attn.x_proj", "attn.wq_b", "attn.wo_b", "ffn.shared_gate_up", "ffn.shared_experts.down_proj" }, &projections) |key, *projection| projection.* = .{ .weights = try m.triple(m.cache.len, key) };
         try m.dispatch.prepareAdditional(&m.kernels, &projections);
+        if (m.dspark) |*old| old.deinit();
+        m.dspark = null;
         m.mtp_cache.deinit();
         m.mtp_position = 0;
         m.mtp_generation +%= 1;
@@ -172,6 +190,12 @@ pub const Model = struct {
     }
     pub fn draftHidden(p: *Pass) A {
         return p.streams;
+    }
+    pub fn draftAbsorbsOnCommit(m: *Model) bool {
+        return m.dspark != null;
+    }
+    pub fn maxDrafts(m: *Model) usize {
+        return if (m.dspark) |draft| @intCast(draft.config.value.dspark_block_size) else 15;
     }
     pub fn isEos(m: *Model, id: i32) bool {
         const eos = m.config.value.eos_token_id;
@@ -228,15 +252,15 @@ pub const Model = struct {
         };
         for ([_][]const u8{ "attn.x_proj", "attn.wq_b", "attn.wo_b", "ffn.shared_gate_up", "ffn.shared_experts.down_proj" }) |key| try m.dispatch.prepare(&m.kernels, &.{.{ .weights = try m.triple(i, key) }});
     }
-    fn expectTensor(value: A, dims: []const i32, dtype: c.mlx_dtype) !void {
+    pub fn expectTensor(value: A, dims: []const i32, dtype: c.mlx_dtype) !void {
         if (!std.mem.eql(i32, mx.shape(value), dims)) return error.InvalidTensorShape;
         if (mx.dtype(value) != dtype) return error.InvalidTensorDType;
     }
-    fn expectFloat(value: A, dims: []const i32) !void {
+    pub fn expectFloat(value: A, dims: []const i32) !void {
         if (mx.dtype(value) != mx.f32t and mx.dtype(value) != mx.bf16) return error.InvalidTensorDType;
         if (!std.mem.eql(i32, mx.shape(value), dims)) return error.InvalidTensorShape;
     }
-    fn expectQ(weights: [3]A, n: i32, k: i32) !void {
+    pub fn expectQ(weights: [3]A, n: i32, k: i32) !void {
         if (@mod(k, 64) != 0) return error.UnsupportedProjectionGeometry;
         try expectTensor(weights[0], &.{ n, @divExact(k, 8) }, c.MLX_UINT32);
         try expectTensor(weights[1], &.{ n, @divExact(k, 64) }, mx.bf16);
@@ -533,6 +557,7 @@ pub const Model = struct {
         var logits: [16]A = undefined;
         var hidden: [16]A = undefined;
         var streams: [16]A = undefined;
+        var taps: [16]A = undefined;
         for (tokens, 0..) |token, row| {
             const position = m.position + @as(i32, @intCast(row));
             const records = try mx.allocator.dupe(Cache, if (row == 0) m.cache else p.records[row - 1]);
@@ -540,9 +565,12 @@ pub const Model = struct {
             const h = try m.weights.embed(s, "model.embed_tokens", &.{token});
             var x = try s.stack(&.{ h, h, h, h }, 1);
             var pending: ?[3]A = null;
+            var row_taps: std.ArrayList(A) = .empty;
+            defer row_taps.deinit(mx.allocator);
             for (records, 0..) |*cache, i| {
                 if (g.hidden_size == 4096) {
                     const a = try m.hcStep(s, i, "attn", x, pending);
+                    if (i > 0) try m.captureTap(s, &row_taps, i - 1, a[0]);
                     try m.trace(s, position, i, "attn-input", a[1]);
                     const branch = try m.attention(s, i, a[1], cache, position);
                     try m.trace(s, position, i, "attn-output", branch);
@@ -567,17 +595,34 @@ pub const Model = struct {
                 try m.trace(s, position, i, "ffn-output", ff);
                 x = try expand(s, x, ff, f[1], f[2]);
                 try m.trace(s, position, i, "streams", x);
+                try m.captureTap(s, &row_taps, i, x);
             }
-            if (pending) |pnd| x = (try ops.hcStep(&m.kernels, s, x, pnd, null, mx.empty, mx.empty, mx.empty, g.rms_norm_eps, g.hc_eps, g.hc_sinkhorn_iters))[0];
+            if (pending) |pnd| {
+                x = (try ops.hcStep(&m.kernels, s, x, pnd, null, mx.empty, mx.empty, mx.empty, g.rms_norm_eps, g.hc_eps, g.hc_sinkhorn_iters))[0];
+                try m.captureTap(s, &row_taps, m.cache.len - 1, x);
+            }
+            if (m.dspark != null) taps[row] = try s.cat(row_taps.items, 1);
             streams[row] = x;
             hidden[row] = try m.head(s, x, false);
             logits[row] = try m.dispatch.apply(&m.kernels, s, hidden[row], .{ .weights = try m.weights.triple("lm_head") });
         }
         p.streams = try s.cat(streams[0..tokens.len], 0);
+        if (m.dspark != null) p.taps = try s.cat(taps[0..tokens.len], 0);
         p.hidden = try s.cat(hidden[0..tokens.len], 0);
         p.logits = try s.cat(logits[0..tokens.len], 0);
         try mx.eval(p.logits);
         return p;
+    }
+    fn captureTap(m: *Model, s: *mx.Scope, taps: *std.ArrayList(A), layer: usize, x: A) !void {
+        const draft = m.dspark orelse return;
+        for (draft.config.value.dspark_target_layer_ids) |id| if (id == layer) {
+            const streams = try s.cast(x, mx.f32t);
+            var sum = try s.slice(streams, 1, 0, 1);
+            for (1..4) |j| sum = try s.binary(c.mlx_add, sum, try s.slice(streams, 1, @intCast(j), @intCast(j + 1)));
+            const out = try s.reshape(try s.cast(try s.binary(c.mlx_multiply, sum, try s.scalar(0.25)), mx.bf16), &.{ 1, m.config.value.hidden_size });
+            try taps.append(mx.allocator, out);
+            break;
+        };
     }
     fn trace(m: *Model, s: *mx.Scope, position: i32, layer: usize, label: []const u8, value: A) !void {
         const dir = m.trace_dir orelse return;
@@ -596,6 +641,10 @@ pub const Model = struct {
         for (next) |cache| inline for (comptime std.meta.fieldNames(Cache)) |field| {
             if (@field(cache, field).ctx != null) try mx.eval(@field(cache, field));
         };
+        if (m.dspark) |*draft| {
+            if (draft.position != m.position or p.taps.ctx == null) return error.InvalidDraftState;
+            try draft.absorb(&m.kernels, try p.scope.slice(p.taps, 0, 0, @intCast(keep)));
+        }
         for (m.cache) |*cache| cache.deinit();
         mx.allocator.free(m.cache);
         m.cache = next;
@@ -603,6 +652,7 @@ pub const Model = struct {
         m.generation +%= 1;
     }
     pub fn forwardMtp(m: *Model, streams: A, tokens: []const i32) !Pass {
+        if (m.dspark != null) return error.UnsupportedDraftOperation;
         return m.forwardMtpAt(streams, tokens, m.mtp_cache, m.mtp_position);
     }
     fn forwardMtpAt(m: *Model, streams: A, tokens: []const i32, entry: Cache, position: i32) !Pass {
@@ -649,6 +699,11 @@ pub const Model = struct {
         m.mtp_generation +%= 1;
     }
     pub fn propose(m: *Model, streams: A, first: i32, tokens: []i32, settings: @import("sampling.zig").Sampling) !void {
+        if (m.dspark) |*draft| {
+            if (tokens.len < 1 or draft.position != m.position) return error.InvalidDraftState;
+            tokens[0] = first;
+            return draft.draw(m, first, tokens[1..], settings);
+        }
         if (tokens.len < 1 or tokens.len > 16 or m.mtp_position != m.position - 1) return error.InvalidDraftState;
         tokens[0] = first;
         var cache = try m.mtp_cache.clone();
@@ -828,4 +883,48 @@ pub fn checkModel(io: std.Io, dir: []const u8, output: []const u8) !void {
         }
     }
     std.debug.print("PASS: DeepSeek greedy/stochastic MTP generation at draft budgets 0, 1, 3, 7 and 15.\n", .{});
+}
+
+pub fn checkDspark(io: std.Io, dir: []const u8, output: []const u8) !void {
+    try mx.init();
+    defer mx.shutdown();
+    var model = try Model.init(io, dir);
+    defer model.deinit();
+    var path: [4096]u8 = undefined;
+    try model.loadDraft(io, try std.fmt.bufPrint(&path, "{s}/drafter", .{dir}));
+    try std.Io.Dir.cwd().createDirPath(io, output);
+    for ([_]usize{ 3, 5, 16, 7 }, 0..) |count, round| {
+        var ids: [16]i32 = undefined;
+        for (ids[0..count], 0..) |*id, j| id.* = 1 + @mod(model.position + @as(i32, @intCast(j)), 250);
+        const n = @min(16, count + 2);
+        @memset(ids[count..n], 99);
+        var pass = try model.forward(ids[0..n]);
+        defer pass.deinit();
+        const s = &pass.scope;
+        try save(s, try std.fmt.bufPrint(&path, "{s}/target-{d}.npy", .{ output, round }), try s.slice(pass.logits, 0, 0, @intCast(count)));
+        try save(s, try std.fmt.bufPrint(&path, "{s}/taps-{d}.npy", .{ output, round }), try s.slice(pass.taps, 0, 0, @intCast(count)));
+        try model.commit(&pass, count);
+        const draft = &model.dspark.?;
+        if (draft.position != model.position) return error.InvalidDraftState;
+        for (draft.keys, 0..) |keys, i| try save(s, try std.fmt.bufPrint(&path, "{s}/keys-{d}-{d}.npy", .{ output, round, i }), keys);
+        const first: i32 = 55 + @as(i32, @intCast(round));
+        try save(s, try std.fmt.bufPrint(&path, "{s}/draft-logits-{d}.npy", .{ output, round }), try draft.logits(&model, s, first));
+        for ([_]f64{ 0, 0.8 }, 0..) |temperature, mode| {
+            var drawn: [16]i32 = undefined;
+            const rows: usize = @intCast(draft.config.value.dspark_block_size);
+            try draft.draw(&model, first, drawn[0..rows], .{ .seed = 1234, .temperature = temperature, .top_k = 20, .top_p = 0.95, .metal = true });
+            try save(s, try std.fmt.bufPrint(&path, "{s}/draw-{d}-{d}.npy", .{ output, round, mode }), try s.ints(drawn[0..rows]));
+        }
+    }
+    for ([_]f64{ 0, 0.8 }) |temperature| {
+        var reference: std.ArrayList(u32) = .empty;
+        defer reference.deinit(mx.allocator);
+        for ([_]usize{ 0, 1, 3, 15 }) |depth| {
+            model.reset();
+            var generated = try @import("serial_generation.zig").generate(&model, &.{ 1, 2, 3, 4 }, 12, .{ .seed = 1234, .temperature = temperature, .top_k = 20, .top_p = 0.95, .metal = true }, depth, null);
+            defer generated.deinit();
+            if (depth == 0) try reference.appendSlice(mx.allocator, generated.tokens.items) else try std.testing.expectEqualSlices(u32, reference.items, generated.tokens.items);
+        }
+    }
+    std.debug.print("PASS: DSpark partial target commits, context positions and serial/speculative generation.\n", .{});
 }

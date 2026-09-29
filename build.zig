@@ -163,6 +163,20 @@ pub fn build(b: *std.Build) void {
     const ds_packed_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", "build/native-checks/deepseek-packed/oracle", "build/native-checks/deepseek-packed/native" });
     ds_packed_compare.step.dependOn(&ds_packed.step);
     b.step("test-deepseek-packed", "Compare DeepSeek production-width BF16 packed hyper-connection and head parameters").dependOn(&ds_packed_compare.step);
+    const dspark_tests = b.step("test-dspark", "Compare DSpark taps, context caches, noncausal attention, sorted experts and Markov sampling");
+    var dspark_previous: ?*std.Build.Step = null;
+    for (0..3) |case| {
+        const dir = b.fmt("build/native-checks/dspark-{d}", .{case});
+        const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", dir, if (case == 0) "--synthetic-dspark" else if (case == 1) "--synthetic-dspark-sorted" else "--synthetic-dspark-wide", "--output", b.fmt("{s}/oracle/logits.npy", .{dir}), "--state-directory", b.fmt("{s}/oracle", .{dir}) });
+        if (dspark_previous) |previous| oracle.step.dependOn(previous);
+        const native = b.addRunArtifact(exe);
+        native.addArgs(&.{ "check-dspark", dir, b.fmt("{s}/native", .{dir}) });
+        native.step.dependOn(&oracle.step);
+        const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", b.fmt("{s}/oracle", .{dir}), b.fmt("{s}/native", .{dir}) });
+        compare.step.dependOn(&native.step);
+        dspark_previous = &compare.step;
+    }
+    dspark_tests.dependOn(dspark_previous.?);
     const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
     var glm_previous: ?*std.Build.Step = null;
     for (0..3) |case| {

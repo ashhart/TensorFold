@@ -139,6 +139,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | GLM backbone/MTP/cache/generation | `test-glm-model -Doptimize=safe -j1` | Metal and Python; small synthetic checkpoints |
 | DeepSeek backbone/MTP/cache/generation | `test-deepseek-model test-deepseek-wide test-deepseek-packed -Doptimize=safe -j1` | Synthetic checkpoints, including production hidden/attention widths and BF16 packed hyper-connections |
 | DeepSeek calibrated dense arithmetic | `test-deepseek-dense -Doptimize=safe -j1` | Synthetic scalar/MMA calibration and physical threadgroup variants |
+| DSpark block drafting | `test-dspark -Doptimize=safe -j1` | Synthetic layer taps, context caches, sorted experts, Markov draws and generation; includes production widths |
 | GLM/DeepSeek kernel components | `test-large-family-kernels -Doptimize=safe -j1` | Synthetic shapes; includes hardware-specific paths |
 | Qwen, Nemotron and Flash model/cache parity | `test-models -Doptimize=safe -j1` | All three installed models; substantial unified memory |
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
@@ -186,6 +187,8 @@ Nemotron, Flash Next and GLM use checkpoint MTP heads through `--mtp-drafts N`;
 `--no-drafts` selects serial decoding.
 DeepSeek accepts a converted `mtp.safetensors` beside its weights or in
 `--drafter DIR`, with the same `--mtp-drafts N` budget.
+For DSpark, that directory contains `dspark.safetensors` and its `config.json`;
+the requested draft budget is capped at the checkpoint's block size.
 Use `--metal-simd` for the Qwen/Nemotron/Flash SIMD path and
 `--metal-sampling` for keyed Metal sampling. Match seed, sampler, temperature
 and backend when comparing Python and Zig.
@@ -210,7 +213,7 @@ Checkpoint sizes below are approximate **weight disk space**, not peak RAM:
 | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 105 GiB | Text/MTP, resident/bounded PLE checks |
 | `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit` | 8 GiB | Text path and component checks; draft coverage incomplete |
 | `mlx-community/gemma-4-26b-a4b-it-4bit` | 14 GiB | Text/cache correctness; no native image path |
-| `mlx-community/DeepSeek-V4-Flash-4bit` | 144 GiB | Synthetic backbone/MTP/cache/generation; full checkpoint execution unverified; DSpark and optimized prefill pending |
+| `mlx-community/DeepSeek-V4-Flash-4bit` | 144 GiB | Synthetic backbone/MTP/DSpark/cache/generation; full checkpoint execution unverified; optimized prefill pending |
 | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | 173 GiB | Synthetic backbone/MTP/generation; full checkpoint execution unverified |
 
 Do not attempt full-model GLM/DeepSeek inference on a 128 GiB machine based on
