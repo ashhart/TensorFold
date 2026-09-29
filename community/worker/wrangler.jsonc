@@ -1,0 +1,10 @@
+{
+  "name": "tensorfold-community-benchmarks",
+  "main": "src/durable.js",
+  "compatibility_date": "2026-09-10",
+  "durable_objects": {
+    "bindings": [{ "name": "BENCHMARKS_STORE", "class_name": "BenchmarkStore" }]
+  },
+  "migrations": [{ "tag": "benchmark-v1", "new_sqlite_classes": ["BenchmarkStore"] }],
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }]
+}

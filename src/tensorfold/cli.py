@@ -17,7 +17,7 @@ from tensorfold.server import stacks
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
-COMMANDS = ("serve", "pull", "models", "info", "update")
+COMMANDS = ("serve", "pull", "models", "info", "update", "benchmark")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -130,6 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     info = commands.add_parser("info", help="show which family serves a model (reads its config.json only)")
     info.add_argument("model", help="a Hugging Face repo id or a model directory")
     info.set_defaults(func=cmd_info)
+    from tensorfold.benchmark.cli import add_parser as add_benchmark_parser
+    add_benchmark_parser(commands)
     return parser
 
 

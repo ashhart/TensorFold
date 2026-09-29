@@ -11,3 +11,7 @@ venv/
 .DS_Store
 *.swp
 *.log
+node_modules/
+.wrangler/
+.dev.vars*
+.env*

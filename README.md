@@ -227,6 +227,11 @@ For two ranks, see the [CUDA runbook](RUNBOOK.md#nvidia-gpus). Each rank needs i
 optional drafter. Rank 0 serves HTTP. Unified GPU/host memory also holds runtime buffers and file-backed
 model data; the startup estimate is not a measured maximum capacity.
 
+## Community benchmarks
+
+`tensorfold benchmark MODEL` runs public code/chat fixtures and saves a portable receipt;
+`--publish` optionally submits it for review at tensorfold.dev. See [benchmark commands and measurement definitions](docs/community-benchmarks.md).
+
 ## Measurements
 
 Each release's notes give its measured decode, prompt and concurrency numbers against the previous release and the

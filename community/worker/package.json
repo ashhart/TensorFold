@@ -1,0 +1,9 @@
+{
+  "name": "tensorfold-community-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:browser-validator": "node scripts/build-browser-validator.mjs",
+    "test": "node --test test/*.test.js"
+  }
+}
