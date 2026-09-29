@@ -14,6 +14,7 @@ RECIPES = (
     ("dflash", "Qwen3.8-27B-DFlash2", ""),
     ("nemotron", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", ""),
     ("flash", "Qwen3.8-Flash-Next-MLX-4bit-MTP", "language_model."),
+    ("gemma", "gemma-4-26b-a4b-it-4bit", "language_model."),
 )
 
 

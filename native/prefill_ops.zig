@@ -2,9 +2,9 @@
 //! Compile the original operation graphs through MLX-C, just as mlx-lm does.
 const mx = @import("mlx.zig");
 const c = mx.c;
-pub const Kind = enum { silu, swiglu, gated, decay, gelu, gelu_tanh };
+pub const Kind = enum { silu, swiglu, gated, decay, gelu, gelu_tanh, geglu, softcap };
 pub const Ops = struct {
-    closures: [6]c.mlx_closure = @splat(.{ .ctx = null }),
+    closures: [8]c.mlx_closure = @splat(.{ .ctx = null }),
     pub fn deinit(o: *Ops) void {
         for (o.closures) |fun| if (fun.ctx != null) {
             _ = c.mlx_closure_free(fun);
@@ -41,7 +41,12 @@ fn graph(comptime kind: Kind, out: [*c]c.mlx_vector_array, ins: c.mlx_vector_arr
         const rc = c.mlx_vector_array_get(&x, ins, i);
         a.* = try s.result(rc, x);
     }
-    if (kind == .gelu or kind == .gelu_tanh) {
+    if (kind == .softcap) {
+        const cap = try s.cast(args[1], mx.dtype(args[0]));
+        const result = try s.binary(c.mlx_multiply, try s.unary(c.mlx_tanh, try s.binary(c.mlx_divide, args[0], cap)), cap);
+        return c.mlx_vector_array_set_data(out, &result, 1);
+    }
+    if (kind == .gelu or kind == .gelu_tanh or kind == .geglu) {
         const x = args[0];
         const one = try s.cast(try s.scalar(1), mx.dtype(x));
         const half = try s.cast(try s.scalar(0.5), mx.dtype(x));
@@ -55,7 +60,8 @@ fn graph(comptime kind: Kind, out: [*c]c.mlx_vector_array, ins: c.mlx_vector_arr
             const scaled = try s.binary(c.mlx_multiply, try s.cast(try s.scalar(0.7978845608028654), mx.dtype(x)), try s.binary(c.mlx_add, x, cubic));
             break :blk try s.binary(c.mlx_multiply, try s.binary(c.mlx_multiply, half, x), try s.binary(c.mlx_add, one, try s.unary(c.mlx_tanh, scaled)));
         };
-        return c.mlx_vector_array_set_data(out, &result, 1);
+        const activated = if (kind == .geglu) try s.binary(c.mlx_multiply, result, args[1]) else result;
+        return c.mlx_vector_array_set_data(out, &activated, 1);
     }
     if (kind != .decay) {
         const x = if (kind == .gated) try s.cast(args[0], mx.f32t) else args[0];

@@ -14,6 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-gemma-model")) return @import("gemma.zig").checkModel(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-vision")) return @import("vision.zig").check(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-image")) return @import("vision.zig").checkImage(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-prefill-math")) return @import("prefill_checks.zig").check(io, args[2]);
@@ -50,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
         if (cfg.value == .object) if (cfg.value.object.get("model_type")) |kind| {
             if (kind == .string and std.mem.eql(u8, kind.string, "nemotron_h")) return @import("family_runtime.zig").run(@import("nemotron.zig").Model, init, args);
             if (kind == .string and std.mem.eql(u8, kind.string, "qwen4_exp")) return @import("family_runtime.zig").run(@import("flash.zig").Model, init, args);
+            if (kind == .string and std.mem.eql(u8, kind.string, "gemma4")) return @import("serial_runtime.zig").run(@import("gemma.zig").Model, init, args);
         };
     }
     var prompt: []const u8 = "Write a short Python function that computes the Fibonacci sequence.";
@@ -348,6 +350,7 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = @import("vision_positions.zig");
     _ = @import("image_input.zig");
+    _ = @import("gemma_ops.zig");
     _ = @import("draft_depth.zig");
     _ = @import("draft_vocab.zig");
     _ = @import("lanes.zig");

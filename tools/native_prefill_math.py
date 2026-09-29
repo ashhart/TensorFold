@@ -9,6 +9,7 @@ import numpy as np
 from mlx_lm.models.activations import swiglu
 from mlx_lm.models.gated_delta import compute_g
 from mlx_lm.models.qwen3_next import _precise_swiglu
+from mlx_lm.models.gemma4_text import geglu, logit_softcap
 from native_runtime import require_mlx
 
 
@@ -30,9 +31,13 @@ def main():
     bits = bits[(bits & 0x7f80) != 0x7f80]  # Every finite BF16, including signed zero.
     x = mx.array(bits).view(mx.bfloat16)
     save("silu", [x], nn.silu(x))
+    save("gelu", [x], nn.gelu(x))
+    save("gelu_tanh", [x], nn.gelu_approx(x))
+    save("softcap", [x, mx.array(30.0)], logit_softcap(30.0, x))
     for factor in (0.25, -1.0, 3.0):
         up = mx.full(x.shape, factor, dtype=mx.bfloat16)
         save("swiglu", [x, up], swiglu(x, up))
+        save("geglu", [x, up], geglu(x, up))
         save("gated", [x, up], _precise_swiglu(up, x, up))
     mx.random.seed(5678)
     for rows in (1, 11, 2048):

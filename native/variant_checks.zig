@@ -90,6 +90,32 @@ pub fn check(io: std.Io, dir: []const u8) !void {
             .dtype => mx.td(value.name, try dtype(value.dtype)),
         };
         try kernels.runInto(&scope, spec, inputs, params, case.grid, case.group, outputs, results, 0);
+        const gemma = @import("gemma_ops.zig");
+        if (std.mem.eql(u8, case.kernel, "gemma_qkv_rows") and parameter(case, "SG") == 32) {
+            const geometry = gemma.Geometry{ .heads = parameter(case, "NQ"), .kv_heads = parameter(case, "NK"), .head_dim = parameter(case, "DH"), .values_are_keys = parameter(case, "VK") == 1 };
+            const actual = try gemma.qkv(&kernels, &scope, geometry, inputs[0], .{ inputs[1], inputs[2], inputs[3] }, inputs[4], inputs[5], inputs[6], inputs[7], inputs[8], parameter(case, "GS"));
+            for (actual, expected) |got, want| try equalBits(&scope, got, want);
+        }
+        if (std.mem.eql(u8, case.kernel, "gemma_route")) {
+            const actual = try gemma.route(&kernels, &scope, inputs[0], inputs[1], parameter(case, "K"));
+            for (actual, expected) |got, want| try equalBits(&scope, got, want);
+        }
+        if (std.mem.eql(u8, case.kernel, "gemma_router")) try equalBits(&scope, try gemma.router(&kernels, &scope, inputs[0], .{ inputs[1], inputs[2], inputs[3] }, parameter(case, "GS")), expected[0]);
+        if (std.mem.eql(u8, case.kernel, "gemma_expert_gateup")) try equalBits(&scope, try gemma.gateUp(&kernels, &scope, inputs[0], inputs[1], parameter(case, "TOPK"), .{ inputs[2], inputs[3], inputs[4] }, .{ inputs[5], inputs[6], inputs[7] }, parameter(case, "GS")), expected[0]);
+        if (std.mem.eql(u8, case.kernel, "gemma_expert_down")) try equalBits(&scope, try gemma.down(&kernels, &scope, inputs[0], inputs[1], inputs[2], parameter(case, "TOPK"), .{ inputs[3], inputs[4], inputs[5] }, parameter(case, "GS")), expected[0]);
+        if (std.mem.eql(u8, case.kernel, "gemma_attention_partial")) {
+            try mx.evalMany(inputs[5..8], false);
+            const rows: usize = @intCast(mx.dim(inputs[0], 0));
+            const positions = mx.c.mlx_array_data_int32(inputs[5])[0..rows];
+            const lows = mx.c.mlx_array_data_int32(inputs[6])[0..rows];
+            const ring = mx.c.mlx_array_data_int32(inputs[7])[2];
+            const window = if (lows[rows - 1] > 0) positions[rows - 1] - lows[rows - 1] + 1 else 0;
+            const actual = try gemma.attention(&kernels, &scope, inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], positions, window, ring, @bitCast(parameter(case, "SCALE_BITS")));
+            const heads = mx.dim(inputs[0], 1);
+            const dims = mx.dim(inputs[0], 2);
+            const want = (try kernels.run(&scope, src.gemma_attention_merge, &.{ expected[0], expected[1], expected[2], inputs[7] }, &.{ mx.ti("D", dims), mx.ti("H", heads) }, .{ 32, heads, @intCast(rows) }, .{ 32, 1, 1 }, &.{.{ .shape = mx.shape(inputs[0]) }}))[0];
+            try equalBits(&scope, actual, want);
+        }
         if (std.mem.eql(u8, case.kernel, "lane_qmm_lowbit") or std.mem.eql(u8, case.kernel, "lane_qmm_bytes")) {
             const n = parameter(case, "N");
             const width = parameter(case, "K");

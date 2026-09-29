@@ -2,7 +2,7 @@
 const std = @import("std");
 const mx = @import("mlx.zig");
 const DType = @import("safetensors.zig").DType;
-pub const Kind = enum { qwen, dflash, nemotron, flash };
+pub const Kind = enum { qwen, dflash, nemotron, flash, gemma };
 const Spec = struct { name: []const u8, dtype: DType, shape: []const i32 };
 const Metadata = struct { dtype: DType, shape: []const i32 };
 fn source(kind: Kind) []const u8 {
@@ -11,6 +11,7 @@ fn source(kind: Kind) []const u8 {
         .dflash => @embedFile("schemas/dflash.json"),
         .nemotron => @embedFile("schemas/nemotron.json"),
         .flash => @embedFile("schemas/flash.json"),
+        .gemma => @embedFile("schemas/gemma.json"),
     };
 }
 fn check(spec: Spec, actual: ?Metadata) !void {
@@ -120,7 +121,7 @@ pub fn checkCheckpoint(kind: Kind, io: std.Io, dir: []const u8) !void {
         if (try adjusted(spec, cfg, &geometry, .BF16) == null) continue;
         var buffer: [512]u8 = undefined;
         const mtp = kind == .nemotron and std.mem.startsWith(u8, spec.name, "mtp.");
-        const key = if (mtp) spec.name[4..] else try std.fmt.bufPrint(&buffer, "{s}{s}", .{ if (kind == .qwen or kind == .flash) "language_model." else "", spec.name });
+        const key = if (mtp) spec.name[4..] else try std.fmt.bufPrint(&buffer, "{s}{s}", .{ if (kind == .qwen or kind == .flash or kind == .gemma) "language_model." else "", spec.name });
         const filename = if (mtp) "mtp-4bit.safetensors" else if (index == null) "model.safetensors" else blk: {
             const root = index.?.value;
             if (root != .object) return error.InvalidWeightIndex;
@@ -169,7 +170,7 @@ test "mixed affine schema follows config and rejects malformed quantization tens
     try std.testing.expectEqual(@as(?Spec, null), try adjusted(dense_scale, config.value, &shape, null));
 }
 test "checkpoint schemas are complete metadata sets with unique tensor names" {
-    const counts = [_]usize{ 1847, 81, 763, 3414 };
+    const counts = [_]usize{ 1847, 81, 763, 3414, 1339 };
     for (std.enums.values(Kind), counts) |kind, count| {
         const specs = try std.json.parseFromSlice([]const Spec, std.testing.allocator, source(kind), .{});
         defer specs.deinit();

@@ -28,7 +28,12 @@ def main():
     import mlx.nn as nn
     from tensorfold.engine.exact_sampling import Sampling, sample_rows
     kind = json.loads((args.model / "config.json").read_text())["model_type"]
-    if kind == "nemotron_h":
+    if kind in ("gemma4", "gemma4_text"):
+        from tensorfold.families.gemma4 import load
+        model, tokenizer = load(args.model, lane_kernels="off")
+        cache = model.make_cache()
+        forward = lambda ids: model.head(model.hidden(mx.array([ids], dtype=mx.uint32), cache))
+    elif kind == "nemotron_h":
         from mlx_lm import load
         from tensorfold.kernels.nemotron.lightning.v1 import kernels
         from tensorfold.kernels.qwen.dense.v1 import lane_qmm
@@ -104,7 +109,7 @@ def main():
     settings = Sampling(args.seed, temperature=args.temperature, top_k=args.top_k, top_p=args.top_p)
     pos = len(tokens)
     result = []
-    eos = (2, 11) if kind == "nemotron_h" else (248044, 248046)
+    eos = (1, 106, 50) if kind in ("gemma4", "gemma4_text") else (2, 11) if kind == "nemotron_h" else (248044, 248046)
     while len(result) < args.generate:
         if args.metal_sampling:
             from tensorfold.engine.gpu_sampling import sample

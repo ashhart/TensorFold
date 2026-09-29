@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import sys
+import struct
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,7 +32,7 @@ class Capture:
         self.original = mx.fast.metal_kernel
         self.catalog = {}
         for path in sorted(Path("native/metal").glob("*.metal")):
-            if path.stem.startswith(("affine_rows", "lane_qmm_", "prism_", "row_forward_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
+            if path.stem.startswith(("gemma_", "affine_rows", "lane_qmm_", "prism_", "row_forward_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
                 self.catalog[(fingerprint(path.read_text(), path.with_suffix(".h").read_text()),
                               path.stem.endswith("_dep"))] = path.stem
 
@@ -44,9 +45,15 @@ class Capture:
         constants = []
         # Python specializes dimensions as leading constexpr declarations;
         # the embedded native body receives those same values as templates.
-        while match := re.match(r"  constexpr int (\w+) = (-?\d+);\n", source):
-            constants.append((match[1], int(match[2])))
+        float_declarations = ""
+        while match := re.match(r"  constexpr (int|float) (\w+) = ([^;]+);\n", source):
+            if match[1] == "float":
+                constants.append((match[2] + "_BITS", struct.unpack("<i", struct.pack("<f", float(match[3])))[0]))
+                float_declarations += f"  const float {match[2]} = as_type<float>(uint({match[2]}_BITS));\n"
+            else:
+                constants.append((match[2], int(match[3])))
             source = source[match.end():]
+        source = float_declarations + source
         header = re.sub(r"\n\[\[max_total_threads_per_threadgroup\(\d+\)\]\]\n$", "", spec.get("header", ""))
         source_hash = fingerprint(source, header)
         key = self.catalog.get((source_hash, "DEP" in spec["input_names"]))
@@ -54,6 +61,10 @@ class Capture:
             return kernel
 
         def launch(**call):
+            # These upstream integration tests trace mx.compile; their primitive
+            # kernels are recorded by the individual tests with concrete arrays.
+            if any(name in self.test for name in ("test_each_kernel_keeps_one_metal_signature", "test_each_fused_layer_is_mlx_lm_s_layer")):
+                return kernel(**call)
             signature = repr((self.test, key, constants, call.get("template"),
                               [x.shape for x in call["inputs"]], call["grid"], call["threadgroup"]))
             if signature in self.seen:
@@ -339,19 +350,25 @@ def main():
     parser.add_argument("--affine-only", action="store_true")
     parser.add_argument("--tensor-quantization", action="store_true")
     parser.add_argument("--bonsai-only", action="store_true")
+    parser.add_argument("--gemma-only", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
-    if args.affine_only or args.tensor_quantization or args.bonsai_only:
+    if args.affine_only or args.tensor_quantization or args.bonsai_only or args.gemma_only:
         try:
-            code = pytest.main(["-q", "-rs", "tests/test_bonsai.py" if args.bonsai_only else "tests/test_lane_qmm.py" if args.tensor_quantization else "tests/test_affine_rows_metal.py"], plugins=[capture])
+            code = pytest.main(["-q", "-rs", "tests/test_gemma4_kernels.py" if args.gemma_only else "tests/test_bonsai.py" if args.bonsai_only else "tests/test_lane_qmm.py" if args.tensor_quantization else "tests/test_affine_rows_metal.py"], plugins=[capture])
             if code:
                 raise SystemExit(code)
         finally:
             mx.fast.metal_kernel = capture.original
         if not capture.cases:
             raise RuntimeError("No affine launches captured")
+        if args.gemma_only:
+            required = {name for name in capture.catalog.values() if name.startswith("gemma_")}
+            missing = required - {case["kernel"] for case in capture.cases}
+            if missing:
+                raise RuntimeError(f"Gemma kernel coverage missing: {sorted(missing)}")
         (args.directory / "cases.json").write_text(json.dumps(capture.cases, indent=2) + "\n")
         print(f"Saved {len(capture.cases)} affine launches", flush=True)
         return

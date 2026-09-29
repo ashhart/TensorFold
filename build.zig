@@ -102,6 +102,12 @@ pub fn build(b: *std.Build) void {
     bonsai.step.dependOn(&bonsai_fixture.step);
     b.step("test-bonsai", "Compare rotated projection, inverse embedding and dense gate kernels with upstream").dependOn(&bonsai.step);
     metal_tests.dependOn(&bonsai.step);
+    const gemma_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/gemma", "--gemma-only" });
+    const gemma = b.addRunArtifact(exe);
+    gemma.addArgs(&.{ "check-variants", "build/native-checks/gemma" });
+    gemma.step.dependOn(&gemma_fixture.step);
+    b.step("test-gemma", "Compare Gemma attention, projection, normalization and expert kernels against upstream").dependOn(&gemma.step);
+    metal_tests.dependOn(&gemma.step);
     const simd_attention_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_attention_fixtures.py", "build/native-checks/simd-attention", "--simd" });
     const simd_attention = b.addRunArtifact(exe);
     simd_attention.addArgs(&.{ "check-attention", "build/native-checks/simd-attention" });
@@ -147,6 +153,40 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const gemma_model = b.fmt("{s}/gemma-4-26b-a4b-it-4bit", .{model_root});
+    const gemma_cache = b.addRunArtifact(exe);
+    gemma_cache.addArgs(&.{ "run", gemma_model, "--check-long-cache" });
+    gemma_cache.step.dependOn(&gemma.step);
+    var gemma_previous: *std.Build.Step = &gemma_cache.step;
+    var gemma_tokens: [1156][]const u8 = undefined;
+    for (&gemma_tokens, 0..) |*token, j| token.* = b.fmt("{d}", .{1000 + j});
+    const gemma_long = std.mem.join(b.allocator, ",", &gemma_tokens) catch @panic("OOM");
+    for (0..3) |case| {
+        const base_path = b.fmt("build/native-checks/gemma-model-{d}", .{case});
+        const oracle_json = b.fmt("{s}-python.json", .{base_path});
+        const native_json = b.fmt("{s}-native.json", .{base_path});
+        const oracle_npy = b.fmt("{s}-python.npy", .{base_path});
+        const native_npy = b.fmt("{s}-native.npy", .{base_path});
+        const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", gemma_model, "--generate", "12", "--temperature", if (case == 0) "0" else "0.7", "--seed", "5678", "--output", oracle_json, "--dump-logits", oracle_npy });
+        const native = b.addRunArtifact(exe);
+        native.addArgs(&.{ "run", gemma_model, "--max-tokens", "12", "--temperature", if (case == 0) "0" else "0.7", "--seed", "5678", "--report", native_json, "--dump-logits", native_npy });
+        if (case > 0) {
+            oracle.addArg("--metal-sampling");
+            native.addArg("--metal-sampling");
+        }
+        if (case == 2) {
+            oracle.addArgs(&.{ "--tokens", gemma_long });
+            native.addArgs(&.{ "--tokens", gemma_long });
+        }
+        oracle.step.dependOn(gemma_previous);
+        native.step.dependOn(&oracle.step);
+        const logits = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare", oracle_npy, native_npy });
+        logits.step.dependOn(&native.step);
+        const report = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-reports", oracle_json, native_json });
+        report.step.dependOn(&logits.step);
+        gemma_previous = &report.step;
+    }
+    b.step("test-gemma-model", "Compare Gemma tokenization, logits, sampling and long-context cache commits against upstream").dependOn(gemma_previous);
     const vision_model = b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root});
     const image_tests = b.step("test-images", "Compare PNG/JPEG/WebP preprocessing, alpha, grayscale, CMYK and every EXIF orientation");
     var image_previous: ?*std.Build.Step = null;
