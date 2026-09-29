@@ -151,6 +151,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Qwen, Nemotron and Flash model/cache parity | `test-models -Doptimize=safe -j1` | All three installed models; substantial unified memory |
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
 | Request state and interleaved generation | `test-request-state test-session-rounds test-session-images -Doptimize=safe -j1` | Synthetic ownership for all backends; Qwen/Gemma/Nemotron checkpoints and Qwen image inputs |
+| Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream policy comparisons and Qwen/Gemma/Nemotron cache growth |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
 | Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven local tokenizers; no model weights loaded |
@@ -193,6 +194,10 @@ seeded sampling, stop strings, reasoning content and disconnect cancellation.
 `--batch-streams N` controls active requests (default `4`, range `1`–`8`). One
 GPU worker interleaves their prefill chunks and decode steps with separate caches;
 GPU forwards are still per request. Up to eight further requests can queue.
+Serving follows upstream's RAM allowance and `TENSORFOLD_MEMORY_LIMIT_GB`, capped
+by Metal's recommended working set, with 3 GiB reserved outside MLX. Checkpoints
+that exceed the buffer budget are rejected before loading. Request-level memory
+admission and preemption remain incomplete.
 `--request-timeout-seconds N` sets an absolute deadline from connection acceptance
 through queuing and generation (default `0`, disabled). Cooperative cancellation
 returns HTTP 408 or an SSE error; stalled sockets close after a 250 ms allowance.

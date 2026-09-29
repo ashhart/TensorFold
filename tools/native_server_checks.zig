@@ -263,6 +263,15 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     }
+    var environment = try init.environ_map.clone(init.arena.allocator());
+    defer environment.deinit();
+    for ([_][]const u8{ "nan", "0", "1" }) |budget| {
+        try environment.put("TENSORFOLD_MEMORY_LIMIT_GB", budget);
+        const result = try std.process.run(init.arena.allocator(), init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0" }, .environ_map = &environment, .stderr_limit = .limited(64 * 1024) });
+        const expected = if (std.mem.eql(u8, budget, "1")) "WeightsExceedMemoryBudget" else "InvalidMemoryBudget";
+        if (result.term.success() or std.mem.indexOf(u8, result.stderr, expected) == null or std.mem.indexOf(u8, result.stderr, "Loading ") != null or std.mem.indexOf(u8, result.stderr, "Native inference listening") != null) return error.InvalidMemoryBudgetLoadedModel;
+    }
+    std.debug.print("PASS: invalid/insufficient process budgets fail before model weights load\n", .{});
     for ([_]bool{ false, true }) |idle| {
         var scenario = Scenario{ .init = init, .idle = idle, .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--request-timeout-seconds", if (idle) "0" else "2", "--shutdown-grace-seconds", "1", "--no-thinking" }, .stderr = .pipe }) };
         defer scenario.child.kill(init.io);

@@ -132,9 +132,11 @@
     "limitation": "HTTP requests interleave prefill chunks and decode steps with independent caches. Shared GPU forwards and calibrated row allocation across active requests remain missing."
   },
   {
-    "id": "memory-admission", "state": "missing", "requirement": "Inference working-set budgets, residency, eviction and preemption",
+    "id": "memory-admission", "state": "partial", "requirement": "Inference working-set budgets, residency, eviction and preemption",
     "upstream": ["src/tensorfold/engine/memory.py", "src/tensorfold/server/admission.py", "src/tensorfold/server/memory_budget.py", "src/tensorfold/server/residency.py"],
-    "limitation": "The bounded request queue does not implement upstream memory-aware admission and preemption."
+    "implementation": [{"path":"native/memory_budget.zig","symbol":"admits"}, {"path":"native/memory_budget.zig","symbol":"cacheBytes"}, {"path":"native/memory_runtime.zig","symbol":"init"}, {"path":"native/memory_runtime.zig","symbol":"wire"}, {"path":"native/memory_runtime.zig","symbol":"measure"}],
+    "checks": [{"step":"test-memory-budget","driver":{"path":"native/memory_budget.zig","symbol":"check"},"scope":"host"}, {"step":"test-memory-runtime","driver":{"path":"native/memory_runtime.zig","symbol":"check"},"scope":"checkpoint"}, {"step":"test-server-lifecycle","driver":{"path":"tools/native_server_checks.zig","symbol":"main"},"scope":"checkpoint"}],
+    "limitation": "Process limits, weight preflight and resident-buffer wiring are applied in serving. Admission policy matches upstream and request cache probes cover Qwen/Gemma/Nemotron. Connecting those estimates to request scheduling, eviction and preemption remains missing."
   },
   {
     "id": "prompt-cache-checkpoints", "state": "missing", "requirement": "Cross-request prompt reuse, prefix snapshots, checkpoint persistence and disk spill",

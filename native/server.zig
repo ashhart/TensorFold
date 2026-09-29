@@ -74,9 +74,12 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     defer mx.allocator.free(config);
     const parsed = try std.json.parseFromSlice(std.json.Value, init.gpa, config, .{});
     defer parsed.deinit();
-    if (parsed.value == .object) if (parsed.value.object.get("model_type")) |kind| if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) try @import("glm.zig").Model.prepareRuntime();
+    const model_type = if (parsed.value == .object) parsed.value.object.get("model_type") orelse std.json.Value.null else std.json.Value.null;
+    const is_glm = model_type == .string and std.mem.eql(u8, model_type.string, "glm5_next");
+    const is_flash = model_type == .string and std.mem.eql(u8, model_type.string, "qwen4_exp");
+    if (is_glm) try @import("glm.zig").Model.prepareRuntime();
     var jobs: [8]*Job = undefined;
-    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams };
+    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams, .is_glm = is_glm, .is_flash = is_flash, .memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB") };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     defer {
         worker.queue.close(init.io);
@@ -142,6 +145,9 @@ const Worker = struct {
     effort: []const u8,
     vision_urls: bool,
     batch_streams: usize,
+    is_glm: bool,
+    is_flash: bool,
+    memory_limit: ?[]const u8,
     fn run(w: *Worker) void {
         w.loop() catch |err| {
             w.startup_error = err;
@@ -151,8 +157,12 @@ const Worker = struct {
     fn loop(w: *Worker) !void {
         try mx.init();
         defer mx.shutdown();
+        var memory = try @import("memory_runtime.zig").Runtime.init(w.memory_limit, w.is_glm);
+        defer memory.deinit();
+        try memory.checkWeights(w.io, w.dir, w.is_flash);
         var session = try inference.Session.init(w.io, w.dir);
         defer session.deinit();
+        try memory.wire();
         w.ready.set(w.io);
         var active: [8]?*Pending = @splat(null);
         var live: usize = 0;

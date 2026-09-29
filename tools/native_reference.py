@@ -256,6 +256,65 @@ def capture_fixtures(output):
     print(f'Saved {len(contexts)} upstream capture records, including every BF16 bit pattern')
 
 
+def memory_fixtures(output):
+    from dataclasses import asdict
+    import random
+    from types import SimpleNamespace
+    from tensorfold.engine.memory import StreamMemory, Admission
+    from tensorfold.server.memory_budget import CacheMemory, memory_limit_bytes, needed_bytes, largest_context, GIB
+
+    rng = random.Random(81071)
+    result = dict(limits=[], caches=[], streams=[], budgets=[])
+    for ram in (8 * GIB, 48 * GIB, 128 * GIB, 256 * GIB):
+        for recommended in (0, ram // 2, ram, ram * 2):
+            for fraction in (0.7, 0.85):
+                for override in (None, "1e308", "1000", "110", "2.5", "1e-30", " 64 ", "", "0", "-1", "nan", "inf", "12GB"):
+                    mx = SimpleNamespace(device_info=lambda: dict(max_recommended_working_set_size=recommended))
+                    try:
+                        value = memory_limit_bytes(mx, fraction=fraction, physical_bytes=ram,
+                                                   environ={} if override is None else {"TENSORFOLD_MEMORY_LIMIT_GB": override})
+                    except ValueError:
+                        value = None
+                    result["limits"].append(dict(ram=ram, recommended=recommended, fraction=fraction, override=override, result=value))
+    for _ in range(600):
+        memory = CacheMemory(rng.randrange(0, 1000000), rng.randrange(0, 100000), rng.choice((1, 16, 256, 2048)), rng.choice((0, 128, 16384)))
+        tokens = rng.choice((0, 1, 255, 256, 257, 2047, 2048, 2049, rng.randrange(262144)))
+        in_flight = rng.randrange(1, 5)
+        request = dict(resident_bytes=rng.randrange(20 * GIB), working_bytes=rng.randrange(GIB), cache_copies=rng.randrange(1, 4), reserve_tokens=rng.randrange(8192))
+        need = needed_bytes(memory, tokens, **request)
+        budget = max(0, need + rng.choice((-1, 0, 1, GIB)))
+        window = rng.choice((0, 4096, 262144))
+        result["caches"].append(dict(memory=asdict(memory), tokens=tokens, in_flight=in_flight, request=request, budget=budget, window=window,
+                                     cache=memory.cache_bytes(tokens), growth=memory.growth_bytes(tokens, in_flight), needed=need,
+                                     largest=largest_context(memory, window, budget_bytes=budget, **request)))
+    for _ in range(1000):
+        first = rng.randrange(64, 2049)
+        short = rng.randrange(0, 200000000)
+        memory = StreamMemory(first, short, first + rng.randrange(1, 4097), short + rng.randrange(20000000),
+                              rng.choice((0.0, 0.5, 131072.0, rng.random() * 65536)), rng.random() * 65536, rng.random() * 8,
+                              rng.randrange(100000000), rng.choice((16, 256, 2048)))
+        tokens = rng.choice((0, first, first - 1, first + 1, memory.long_tokens, 262144))
+        prompt = rng.randrange(0, 8192)
+        live = [(rng.randrange(10000), rng.randrange(20000)) for _ in range(rng.randrange(9))]
+        used = rng.randrange(20 * GIB)
+        admission = Admission(0, memory, used=lambda: used)
+        projected = admission.projected(prompt, tokens, live)
+        admission.budget = max(0, projected + rng.choice((-1, 0, 1)))
+        result["streams"].append(dict(memory=asdict(memory), tokens=tokens, prompt=prompt, used=used, budget=admission.budget,
+                                      live=[dict(now=now, most=most) for now, most in live], stream=memory.stream_bytes(tokens),
+                                      prefill=memory.prefill_bytes(prompt), projected=projected, admits=admission.admits(prompt, tokens, live),
+                                      fitting=admission.fitting(tokens)))
+    for fraction in (0.7, 0.85):
+        for process in (64 * GIB, 110 * GIB):
+            for elsewhere in (0, 8 * GIB, 20 * GIB, 128 * GIB):
+                share = process - 3 * GIB
+                value = max(0, min(max(int(fraction * 128 * GIB), process) - elsewhere, share))
+                result["budgets"].append(dict(ram=128 * GIB, fraction=fraction, process=process, share=share, elsewhere=elsewhere, result=value))
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result))
+
+
 def allocation_fixtures(output):
     import random
     from tensorfold.engine.allocate import allocate, chain_probabilities
@@ -355,6 +414,7 @@ def main():
     parser.add_argument("--image-http-fixtures", action="store_true")
     parser.add_argument("--calibration-fixtures", action="store_true")
     parser.add_argument("--allocation-fixtures", action="store_true")
+    parser.add_argument("--memory-fixtures", action="store_true")
     parser.add_argument("--capture-fixtures", action="store_true")
     parser.add_argument("--verify-capture", nargs=2, metavar=('DRAFTER', 'REPORT'))
     parser.add_argument("--compare-calibration", nargs=2, type=Path)
@@ -371,6 +431,8 @@ def main():
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
+    if args.memory_fixtures:
+        return memory_fixtures(args.output)
     if args.allocation_fixtures:
         return allocation_fixtures(args.output)
     if args.capture_fixtures:

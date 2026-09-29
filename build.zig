@@ -298,6 +298,15 @@ pub fn build(b: *std.Build) void {
         session_prior = &check.step;
     }
     session_tests.dependOn(session_prior.?);
+    const memory_tests = b.step("test-memory-runtime", "Verify measured cache growth on Qwen, Gemma and Nemotron checkpoints");
+    var memory_prior: ?*std.Build.Step = null;
+    for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "gemma-4-26b-a4b-it-4bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit" }) |name| {
+        const check = b.addRunArtifact(exe);
+        check.addArgs(&.{ "check-memory-runtime", b.fmt("{s}/{s}", .{ model_root, name }) });
+        if (memory_prior) |prior| check.step.dependOn(prior);
+        memory_prior = &check.step;
+    }
+    memory_tests.dependOn(memory_prior.?);
     const session_image_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--model", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--vision-fixture", "187", "311", "--image-fixture", "--image-only", "--output", "build/native-checks/session-image" });
     const session_images = b.addRunArtifact(exe);
     session_images.addArgs(&.{ "check-session-images", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "build/native-checks/session-image/image.png" });
@@ -328,6 +337,12 @@ pub fn build(b: *std.Build) void {
     tool_step.dependOn(&tool_stream_tests.step);
     const calibration_fixture = "build/native-checks/draft-calibration.json";
     const draft_allocation_fixture = "build/native-checks/draft-allocation.json";
+    const memory_fixture = "build/native-checks/memory-budget.json";
+    const memory_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--memory-fixtures", "--output", memory_fixture });
+    const memory_check = b.addRunArtifact(exe);
+    memory_check.addArgs(&.{ "check-memory-budget", memory_fixture });
+    memory_check.step.dependOn(&memory_oracle.step);
+    b.step("test-memory-budget", "Compare memory limits, cache projections and concurrent admission with upstream").dependOn(&memory_check.step);
     const allocation_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--allocation-fixtures", "--output", draft_allocation_fixture });
     const allocation_check = b.addRunArtifact(exe);
     allocation_check.addArgs(&.{ "check-draft-allocation", draft_allocation_fixture });
