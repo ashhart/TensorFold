@@ -188,6 +188,14 @@ apply a chat template. Use `--tokens ID,ID,...` for controlled comparisons.
 `tensorfold serve MODEL_DIR --host 127.0.0.1 --port 8080` exposes `/health`,
 `/v1/models`, `/v1/completions` and `/v1/chat/completions`, including SSE,
 seeded sampling, stop strings, reasoning content and disconnect cancellation.
+Sampling defaults follow the model's `generation_config.json`; `--temperature`,
+`--top-k` and `--top-p` override them, then non-null request fields take precedence.
+Serving defaults to 4096 output tokens, thinking enabled and medium reasoning
+effort. Use `--max-tokens`, `--no-thinking`, `--reasoning-effort low|medium|xhigh`
+and `--thinking-budget N` to change these defaults. The request's
+`thinking_budget` overrides a nonzero default when nonzero; a negative value
+disables it. Budgets force `\n</think>\n\n` through decoding for tokenizers with
+a whole `</think>` token, matching upstream; Gemma's thought channel is excluded.
 Chat uses each model's Jinja template. Qwen accepts user `image_url` content
 parts containing data URLs, up to four images and 20 MiB decoded bytes total;
 `detail: "low"` caps each image at 256 visual tokens. Tool calls support the
@@ -199,6 +207,8 @@ One inference worker owns the model; its queue holds eight requests.
 Against a running Qwen server, compare JSON/SSE text, reasoning and images with
 `.zig-toolchain/zig run tools/native_http_checks.zig -- http://127.0.0.1:8080/v1/chat/completions /path/to/image.png`.
 Replace the image path with `--tools-only` to check a named tool call.
+Use `--controls-only` with Qwen's unmodified sampling defaults to check model
+defaults, thinking-budget transitions and required calls in JSON/SSE.
 Use `--report build/native-checks/run.json` and
 `--dump-logits build/native-checks/logits.npy` for correctness evidence; create
 the output directory first.

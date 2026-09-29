@@ -56,8 +56,10 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
             var names: std.ArrayList([]const u8) = .empty;
             for (fixture_gate.object.get("names").?.array.items) |name| try names.append(a, name.string);
             var gate = try @import("call_gate.zig").Gate.init(a, &tokenizer, ids, form, names.items, std.mem.indexOf(u8, directory, "gemma") != null);
+            var budget = try @import("thinking_budget.zig").Budget.init(a, &tokenizer, if (fixture_gate.object.get("budget")) |v| v.integer else 0);
+            const required = if (fixture_gate.object.get("required")) |v| v.bool else true;
             for (fixture_gate.object.get("proposed").?.array.items, fixture_gate.object.get("expected").?.array.items, 0..) |proposed, expected_token, token_index| {
-                const got = try gate.next(@intCast(proposed.integer), proposed.integer == fixture_gate.object.get("eos").?.integer);
+                const got = try budget.next(if (required) &gate else null, token_index, @intCast(proposed.integer), proposed.integer == fixture_gate.object.get("eos").?.integer);
                 if (got != expected_token.integer) {
                     std.debug.print("Call gate fixture {d}, token {d}: native {d}, upstream {d}\n", .{ index, token_index, got, expected_token.integer });
                     return error.CallGateMismatch;
@@ -65,7 +67,7 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
             }
         };
     }
-    std.debug.print("PASS: {d} chat prompts and required-call gates match upstream token IDs\n", .{cases.value.array.items.len});
+    std.debug.print("PASS: {d} chat prompts, thinking budgets and required-call gates match upstream token IDs\n", .{cases.value.array.items.len});
 }
 pub const Template = struct {
     arena: std.heap.ArenaAllocator,
@@ -145,13 +147,17 @@ pub const Template = struct {
         return a.dupe(u8, output[0..len]);
     }
     pub fn render(t: *const Template, a: std.mem.Allocator, body: V) !Rendered {
+        return t.renderWithDefaults(a, body, false, null);
+    }
+
+    pub fn renderWithDefaults(t: *const Template, a: std.mem.Allocator, body: V, default_thinking: bool, default_effort: ?[]const u8) !Rendered {
         if (body != .object) return error.InvalidRequest;
         const input = body.object.get("messages") orelse return error.MissingMessages;
         var images = V{ .array = std.json.Array.init(a) };
         const messages = try normalize(a, input, t.late_system, &images);
         var context = V{ .object = try t.context.object.clone(a) };
-        var thinking = false;
-        var effort: ?[]const u8 = null;
+        var thinking = default_thinking;
+        var effort = default_effort;
         const kwargs = body.object.get("chat_template_kwargs") orelse .null;
         var value = body.object.get("reasoning_effort") orelse .null;
         if (value == .null and kwargs == .object) value = kwargs.object.get("reasoning_effort") orelse .null;
@@ -173,7 +179,7 @@ pub const Template = struct {
             if (kwargs.object.get("enable_thinking")) |enabled| {
                 if (enabled != .bool) return error.InvalidThinking;
                 thinking = enabled.bool;
-                if (thinking and effort != null and std.mem.eql(u8, effort.?, "none")) effort = null;
+                if (thinking and effort != null and std.mem.eql(u8, effort.?, "none")) effort = default_effort;
             }
         }
         try context.object.put(a, "enable_thinking", .{ .bool = thinking });
@@ -380,4 +386,30 @@ test "numeric Jinja members preserve literals, decimals and comments" {
     const result = try numericMembers(a, source);
     defer a.free(result);
     try std.testing.expectEqualStrings("raw.0 {# {{ a.0 }} #} {{ a[0].output }} {% if b[12] and 1.0 == 1.0 %}{{ 'c.0' }}{% endif %}", result);
+}
+
+test "server thinking defaults, request effort and explicit kwargs precedence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const template = Template{ .arena = undefined, .source = "{{ 'on' if enable_thinking else 'off' }}:{{ reasoning_effort|default('unset') }}", .context = .{ .object = .empty } };
+    const inputs = [_][]const u8{
+        \\{"messages":[{"role":"user","content":"Hi"}]}
+        ,
+        \\{"messages":[{"role":"user","content":"Hi"}],"reasoning_effort":null}
+        ,
+        \\{"messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"none"}
+        ,
+        \\{"messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"none","chat_template_kwargs":{"enable_thinking":true}}
+        ,
+        \\{"messages":[{"role":"user","content":"Hi"}],"reasoning_effort":"high","chat_template_kwargs":{"enable_thinking":false}}
+        ,
+        \\{"messages":[{"role":"user","content":"Hi"}],"chat_template_kwargs":{"reasoning_effort":"minimal"}}
+        ,
+    };
+    for (inputs, [_][]const u8{ "on:medium", "on:medium", "off:unset", "on:medium", "off:unset", "on:low" }) |source, want| {
+        const body = try std.json.parseFromSlice(V, a, source, .{});
+        const rendered = try template.renderWithDefaults(a, body.value, true, "medium");
+        try std.testing.expectEqualStrings(want, rendered.text);
+    }
 }

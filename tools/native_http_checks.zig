@@ -26,6 +26,10 @@ fn compare(init: std.process.Init, url: []const u8, body: V) !usize {
     }
     const choice = plain.value.object.get("choices").?.array.items[0];
     const message = choice.object.get("message").?;
+    if (body.object.get("thinking_budget")) |budget| if (budget == .integer and budget.integer == 1) {
+        if (std.mem.trim(u8, message.object.get("reasoning_content").?.string, " \r\n\t").len != 0) return error.ThinkingBudgetExceeded;
+        if (message.object.get("content").?.string.len == 0) return error.MissingAnswerAfterThinkingBudget;
+    };
     const expected_calls = message.object.get("tool_calls") orelse V{ .array = std.json.Array.init(a) };
     const arguments = try a.alloc(std.ArrayList(u8), expected_calls.array.items.len);
     for (arguments) |*value| value.* = .empty;
@@ -77,15 +81,46 @@ pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
     if (args.len != 3) return error.ExpectedChatUrlAndImagePath;
+    if (std.mem.eql(u8, args[2], "--controls-only")) {
+        var defaults = try std.json.parseFromSlice(V, a,
+            \\{"messages":[{"role":"user","content":"Name three colors."}],"reasoning_effort":"none","max_tokens":24,"seed":1234,"temperature":null,"top_k":null,"top_p":null}
+        , .{});
+        const first = try std.json.parseFromSlice(V, a, try post(init, args[1], defaults.value), .{});
+        try defaults.value.object.put(a, "temperature", .{ .float = 1.0 });
+        try defaults.value.object.put(a, "top_k", .{ .integer = 20 });
+        try defaults.value.object.put(a, "top_p", .{ .float = 0.95 });
+        const second = try std.json.parseFromSlice(V, a, try post(init, args[1], defaults.value), .{});
+        for ([_][]const u8{ "choices", "usage" }) |key| {
+            const lhs = try std.json.Stringify.valueAlloc(a, first.value.object.get(key).?, .{});
+            const rhs = try std.json.Stringify.valueAlloc(a, second.value.object.get(key).?, .{});
+            if (!std.mem.eql(u8, lhs, rhs)) return error.ModelSamplingDefaultsMismatch;
+        }
+        std.debug.print("PASS: omitted/null sampling matches Qwen generation_config defaults\n", .{});
+        for ([_][]const u8{
+            \\{"messages":[{"role":"user","content":"What is 2 + 3?"}],"thinking_budget":1,"max_tokens":48,"seed":1234}
+            ,
+            \\{"messages":[{"role":"user","content":"What is 2 + 3?"}],"thinking_budget":4,"max_tokens":48,"seed":1234}
+            ,
+            \\{"messages":[{"role":"user","content":"Say hello."}],"reasoning_effort":"none","thinking_budget":4,"max_tokens":16,"seed":1234}
+            ,
+            \\{"messages":[{"role":"user","content":"What is the weather in Copenhagen?"}],"tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"tool_choice":"required","parallel_tool_calls":false,"thinking_budget":4,"max_tokens":128,"seed":1234}
+            ,
+        }, 0..) |source, index| {
+            const body = try std.json.parseFromSlice(V, a, source, .{});
+            const calls = try compare(init, args[1], body.value);
+            if (index == 3 and calls != 1) return error.MissingRequiredToolCall;
+        }
+        return;
+    }
     if (std.mem.eql(u8, args[2], "--tools-only")) {
         const tool = try std.json.parseFromSlice(V, a,
-            \\{"messages":[{"role":"user","content":"What is the weather in Copenhagen?"}],"tools":[{"type":"function","function":{"name":"weather","description":"Get the weather in a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"tool_choice":{"type":"function","function":{"name":"weather"}},"parallel_tool_calls":false,"max_tokens":128,"seed":1234}
+            \\{"messages":[{"role":"user","content":"What is the weather in Copenhagen?"}],"tools":[{"type":"function","function":{"name":"weather","description":"Get the weather in a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"tool_choice":{"type":"function","function":{"name":"weather"}},"parallel_tool_calls":false,"reasoning_effort":"none","max_tokens":128,"seed":1234}
         , .{});
         if (try compare(init, args[1], tool.value) != 1) return error.MissingRequiredToolCall;
         return;
     }
     const base = try std.json.parseFromSlice(V, a,
-        \\{"messages":[{"role":"user","content":"Reply with one word: hello"}],"max_tokens":8,"seed":1234}
+        \\{"messages":[{"role":"user","content":"Reply with one word: hello"}],"reasoning_effort":"none","max_tokens":8,"seed":1234}
     , .{});
     _ = try compare(init, args[1], base.value);
     const thinking = try std.json.parseFromSlice(V, a,

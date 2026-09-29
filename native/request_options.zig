@@ -8,17 +8,54 @@ pub const Options = struct {
     ignore_eos: bool = false,
     stream: bool = false,
     stops: []const []const u8 = &.{},
+    thinking_budget: i64 = 0,
+
+    pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8) !Options {
+        const path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
+        defer a.free(path);
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1024 * 1024)) catch |err| switch (err) {
+            error.FileNotFound => return .{},
+            else => return err,
+        };
+        defer a.free(bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
+        defer parsed.deinit();
+        return fromGenerationConfig(parsed.value);
+    }
+
+    pub fn fromGenerationConfig(body: std.json.Value) !Options {
+        if (body != .object) return error.InvalidGenerationConfig;
+        var out = Options{};
+        try out.readSampling(body);
+        if (body.object.get("do_sample")) |v| if (v == .bool) {
+            if (!v.bool) out.sampling.temperature = 0 else if (!body.object.contains("temperature")) out.sampling.temperature = 1;
+        };
+        try out.sampling.validate();
+        return out;
+    }
+
+    fn readSampling(out: *Options, body: std.json.Value) !void {
+        if (try number(body, "temperature")) |v| out.sampling.temperature = @max(0, v);
+        if (try number(body, "top_p")) |v| out.sampling.top_p = v;
+        if (try integer(body, "top_k")) |v| out.sampling.top_k = @intCast(@max(0, v));
+    }
 
     pub fn parse(a: std.mem.Allocator, body: std.json.Value) !Options {
+        return parseWithDefaults(a, body, .{});
+    }
+
+    pub fn parseWithDefaults(a: std.mem.Allocator, body: std.json.Value, defaults: Options) !Options {
         if (body != .object) return error.InvalidRequest;
-        var out = Options{};
+        var out = defaults;
+        out.stops = &.{};
         inline for (.{ "ignore_eos", "stream" }) |name| if (body.object.get(name)) |v| {
             if (v != .bool) return error.InvalidBoolean;
             @field(out, name) = v.bool;
         };
-        if (try number(body, "temperature")) |v| out.sampling.temperature = @max(0, v);
-        if (try number(body, "top_p")) |v| out.sampling.top_p = v;
-        if (try integer(body, "top_k")) |v| out.sampling.top_k = @intCast(@max(0, v));
+        try out.readSampling(body);
+        if (try integer(body, "thinking_budget")) |v| if (v != 0) {
+            out.thinking_budget = v;
+        };
         if (try integer(body, "seed")) |v| out.seed = @bitCast(v);
         if ((try integer(body, "max_tokens")) orelse (try integer(body, "max_completion_tokens"))) |v| {
             if (v < 0 or v > 262144) return error.InvalidTokenLimit;
@@ -86,4 +123,33 @@ test "request defaults, explicit zero, numeric strings and stop validation" {
         defer bad.deinit();
         try std.testing.expectError(expected, Options.parse(a, bad.value));
     }
+}
+
+test "model sampling defaults and request overrides preserve null and explicit zero" {
+    const a = std.testing.allocator;
+    const model = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"do_sample":true,"top_k":20,"top_p":0.95,"max_tokens":999,"seed":123}
+    , .{});
+    defer model.deinit();
+    var defaults = try Options.fromGenerationConfig(model.value);
+    try std.testing.expectEqual(@as(f64, 1), defaults.sampling.temperature);
+    try std.testing.expectEqual(@as(usize, 512), defaults.max_tokens);
+    try std.testing.expectEqual(null, defaults.seed);
+    defaults.thinking_budget = 12;
+    for ([_][]const u8{ "{}", "{\"temperature\":null,\"thinking_budget\":0}", "{\"temperature\":0,\"top_k\":0,\"top_p\":1,\"thinking_budget\":-1}" }, 0..) |source, index| {
+        const request = try std.json.parseFromSlice(std.json.Value, a, source, .{});
+        defer request.deinit();
+        const options = try Options.parseWithDefaults(a, request.value, defaults);
+        defer a.free(options.stops);
+        try std.testing.expectEqual(@as(f64, if (index == 2) 0 else 1), options.sampling.temperature);
+        try std.testing.expectEqual(@as(usize, if (index == 2) 0 else 20), options.sampling.top_k);
+        try std.testing.expectEqual(@as(f64, if (index == 2) 1 else 0.95), options.sampling.top_p);
+        try std.testing.expectEqual(@as(i64, if (index == 2) -1 else 12), options.thinking_budget);
+    }
+    const greedy = try std.json.parseFromSlice(std.json.Value, a, "{\"do_sample\":false,\"temperature\":0.8}", .{});
+    defer greedy.deinit();
+    try std.testing.expectEqual(@as(f64, 0), (try Options.fromGenerationConfig(greedy.value)).sampling.temperature);
+    const bad = try std.json.parseFromSlice(std.json.Value, a, "{\"thinking_budget\":1.5}", .{});
+    defer bad.deinit();
+    try std.testing.expectError(error.InvalidInteger, Options.parseWithDefaults(a, bad.value, defaults));
 }

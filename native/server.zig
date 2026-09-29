@@ -11,11 +11,37 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var port: u16 = 8080;
     var limit: usize = 0;
     var name = std.fs.path.basename(args[2]);
+    var defaults = try inference.Options.load(init.gpa, init.io, args[2]);
+    defaults.max_tokens = 4096;
+    var thinking = true;
+    var effort: []const u8 = "medium";
+    var overrides = std.json.Value{ .object = .empty };
+    defer overrides.object.deinit(init.gpa);
     var i: usize = 3;
-    while (i < args.len) : (i += 2) {
+    while (i < args.len) {
+        if (std.mem.eql(u8, args[i], "--thinking") or std.mem.eql(u8, args[i], "--no-thinking")) {
+            thinking = std.mem.eql(u8, args[i], "--thinking");
+            i += 1;
+            continue;
+        }
         if (i + 1 == args.len) return error.MissingArgument;
-        if (std.mem.eql(u8, args[i], "--host")) host = args[i + 1] else if (std.mem.eql(u8, args[i], "--port")) port = try std.fmt.parseInt(u16, args[i + 1], 10) else if (std.mem.eql(u8, args[i], "--served-model-name")) name = args[i + 1] else if (std.mem.eql(u8, args[i], "--max-requests")) limit = try std.fmt.parseInt(usize, args[i + 1], 10) else return error.UnknownArgument;
+        const flag = args[i];
+        const value = args[i + 1];
+        i += 2;
+        if (std.mem.eql(u8, flag, "--host")) host = value else if (std.mem.eql(u8, flag, "--port")) port = try std.fmt.parseInt(u16, value, 10) else if (std.mem.eql(u8, flag, "--served-model-name")) name = value else if (std.mem.eql(u8, flag, "--max-requests")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--reasoning-effort")) {
+            if (!std.mem.eql(u8, value, "low") and !std.mem.eql(u8, value, "medium") and !std.mem.eql(u8, value, "xhigh")) return error.InvalidReasoningEffort;
+            effort = value;
+        } else {
+            const fields = .{ .{ "--temperature", "temperature" }, .{ "--top-k", "top_k" }, .{ "--top-p", "top_p" }, .{ "--max-tokens", "max_tokens" }, .{ "--thinking-budget", "thinking_budget" } };
+            var found = false;
+            inline for (fields) |pair| if (std.mem.eql(u8, flag, pair[0])) {
+                try overrides.object.put(init.gpa, pair[1], .{ .string = value });
+                found = true;
+            };
+            if (!found) return error.UnknownArgument;
+        }
     }
+    defaults = try inference.Options.parseWithDefaults(init.gpa, overrides, defaults);
     const address = try std.Io.net.IpAddress.parse(host, port);
     var listener = try address.listen(init.io, .{ .kernel_backlog = 128 });
     defer listener.deinit(init.io);
@@ -27,7 +53,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     defer parsed.deinit();
     if (parsed.value == .object) if (parsed.value.object.get("model_type")) |kind| if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) try @import("glm.zig").Model.prepareRuntime();
     var jobs: [8]*Job = undefined;
-    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs) };
+    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     defer {
         worker.queue.close(init.io);
@@ -74,6 +100,9 @@ const Worker = struct {
     ready: std.Io.Event = .unset,
     startup_error: ?anyerror = null,
     connections: std.atomic.Value(usize) = .init(0),
+    defaults: inference.Options,
+    thinking: bool,
+    effort: []const u8,
     fn run(w: *Worker) void {
         w.loop() catch |err| {
             w.startup_error = err;
@@ -87,7 +116,7 @@ const Worker = struct {
         defer session.deinit();
         w.ready.set(w.io);
         while (w.queue.getOneUncancelable(w.io)) |job| {
-            complete(&session, job.a, job.request, job.model, job.sequence, job.created, job.socket, job.body, job.is_chat, job.options) catch |err| {
+            complete(&session, job.a, job.request, job.model, job.sequence, job.created, job.socket, job.body, job.is_chat, job.options, w.thinking, w.effort) catch |err| {
                 job.failure = err;
             };
             job.done.set(w.io);
@@ -132,7 +161,7 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
     const body_reader = try request.readerExpectContinue(&body_buffer);
     const bytes = body_reader.allocRemaining(a, .limited(32 * 1024 * 1024)) catch return failure(a, request, .bad_request, "Invalid or oversized request body");
     const body = std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always }) catch return failure(a, request, .bad_request, "Invalid JSON");
-    const options = inference.Options.parse(a, body.value) catch |err| return failure(a, request, .bad_request, @errorName(err));
+    const options = inference.Options.parseWithDefaults(a, body.value, worker.defaults) catch |err| return failure(a, request, .bad_request, @errorName(err));
     if (body.value.object.get("model")) |value| if (value != .string or !std.mem.eql(u8, value.string, model)) return failure(a, request, .not_found, "Unknown model");
     var job = Job{ .a = a, .request = request, .model = model, .sequence = sequence, .created = std.Io.Clock.real.now(worker.io).toSeconds(), .socket = socket, .body = body.value, .is_chat = is_chat, .options = options };
     if (try worker.queue.putUncancelable(worker.io, &.{&job}, 0) == 0) return failure(a, request, .service_unavailable, "Inference queue is full");
@@ -140,7 +169,8 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
     if (job.failure) |err| return err;
 }
 
-fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, created: i64, socket: std.posix.fd_t, body: std.json.Value, is_chat: bool, options: inference.Options) !void {
+fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, created: i64, socket: std.posix.fd_t, body: std.json.Value, is_chat: bool, requested: inference.Options, default_thinking: bool, default_effort: []const u8) !void {
+    var options = requested;
     var ids: std.ArrayList(i32) = .empty;
     var raw_images = body.object.get("images") orelse .null;
     var thinking = false;
@@ -153,7 +183,7 @@ fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request
             if (parallel != .bool) return failure(a, request, .bad_request, "parallel_tool_calls must be a boolean");
             if (!parallel.bool) max_calls = 1;
         };
-        const rendered = session.renderChat(a, body) catch |err| return failure(a, request, .bad_request, @errorName(err));
+        const rendered = session.renderChat(a, body, default_thinking, default_effort) catch |err| return failure(a, request, .bad_request, @errorName(err));
         try ids.appendSlice(a, try chat.encode(a, &session.tokenizer, rendered));
         raw_images = rendered.images;
         thinking = rendered.thinking;
@@ -173,6 +203,7 @@ fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request
         },
         else => return failure(a, request, .bad_request, "Prompt must be text or token IDs"),
     }
+    if (!thinking) options.thinking_budget = 0;
     session.validate(ids.items, options) catch |err| return failure(a, request, .bad_request, @errorName(err));
     const images = @import("image_source.zig").sources(a, raw_images) catch |err| return failure(a, request, .bad_request, @errorName(err));
     if (images.len > 0 and session.backend != .qwen) return failure(a, request, .bad_request, "This model does not support image inputs");

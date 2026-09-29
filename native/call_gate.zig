@@ -87,8 +87,11 @@ pub const Gate = struct {
         }
         const token: i32 = @intCast(g.forced[0]);
         g.forced = g.forced[1..];
+        try g.observe(token);
+        return token;
+    }
+    pub fn observe(g: *Gate, token: i32) !void {
         const result = try g.step(token, false);
         g.state = if (result.fix.len == 0) result.state else .{ .phase = .done };
-        return token;
     }
 };

@@ -305,6 +305,10 @@ def chat_fixture(directory, output):
     from mlx_lm.tokenizer_utils import TokenizerWrapper
     from tensorfold.server.text import render_prompt_ids
     from tensorfold.engine.call_gate import CallGate, call_format
+    from tensorfold.engine.lane_engine import LaneStream
+    from tensorfold.engine.lane_family import FamilyRounds
+    from tensorfold.server.request_options import RequestOptions
+    from threading import Lock
     tokenizer = TokenizerWrapper(AutoTokenizer.from_pretrained(str(directory), local_files_only=True))
     openers = ("<tool_call>", "<|tool_call>", "<｜DSML｜tool_calls>")
     probe = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "tfprobe_fn", "arguments": {}}}]}]
@@ -318,6 +322,11 @@ def chat_fixture(directory, output):
     think_open = tokenizer.encode("<|channel>thought", add_special_tokens=False)[0] if is_gemma else token_id("<think>")
     think_end = token_id("<channel|>" if is_gemma else "</think>")
     eos = tokenizer.eos_token_id
+    options = RequestOptions()
+    options.tokenizer = tokenizer
+    options.tokenizer_lock = Lock()
+    options._think_tokens = None
+    budget_close, budget_end = options._think_close()
     def gate_cases(prompt):
         if form is None:
             return []
@@ -327,17 +336,14 @@ def chat_fixture(directory, output):
         result = []
         for script in ("I refuse to call a tool.", "<think>reason</think>" + form[0] + (form[1] or "") + "wrong" + (form[2] or "")):
             proposed = ([eos] + encode(script)) * 3
-            gate = CallGate.after_prompt(prompt, token_id(form[0]), lambda token: token != eos and not decode(token).strip(), think_open=think_open, think_end=think_end, text=decode, encode=encode, lead=form[1] or "", names=names if form[1] is not None else (), tail=form[2] or "")
-            forced, expected = [], []
-            for token in proposed:
-                if not forced:
-                    cut = gate.cut([token])
-                    if cut is not None:
-                        forced = list(cut[1])
-                selected = forced.pop(0) if forced else token
-                gate.observe(selected)
-                expected.append(selected)
-            result.append({"names": names, "proposed": proposed, "eos": eos, "expected": expected})
+            for budget in (-1, 0, 1, 2, 5, 10):
+                for required in (False, True):
+                    gate = CallGate.after_prompt(prompt, token_id(form[0]), lambda token: token != eos and not decode(token).strip(), think_open=think_open, think_end=think_end, text=decode, encode=encode, lead=form[1] or "", names=names if form[1] is not None else (), tail=form[2] or "") if required else None
+                    stream = LaneStream("fixture", prompt, len(proposed), call_gate=gate, think_budget=budget, think_end=budget_end, think_close=budget_close, think_open=budget > 0 and budget_end >= 0)
+                    for token in proposed:
+                        forced = FamilyRounds._forced_next(stream, np.array(token))
+                        stream.commit([token if forced is None else forced])
+                    result.append({"names": names, "required": required, "budget": budget, "proposed": proposed, "eos": eos, "expected": stream.emitted})
         return result
     tool = {"type": "function", "function": {"name": "weather", "description": "Get weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}
     conversations = [

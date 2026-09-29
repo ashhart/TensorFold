@@ -77,9 +77,9 @@ pub const Session = struct {
         s.backend.deinit();
         mx.allocator.free(s.directory);
     }
-    pub fn renderChat(s: *Session, a: std.mem.Allocator, body: std.json.Value) !@import("chat.zig").Rendered {
+    pub fn renderChat(s: *Session, a: std.mem.Allocator, body: std.json.Value, thinking: bool, effort: ?[]const u8) !@import("chat.zig").Rendered {
         if (s.chat_template == null) s.chat_template = try @import("chat.zig").Template.load(mx.allocator, s.io, s.directory);
-        return s.chat_template.?.render(a, body);
+        return s.chat_template.?.renderWithDefaults(a, body, thinking, effort);
     }
     pub fn generate(s: *Session, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink) !Reply {
         switch (s.backend) {
@@ -121,6 +121,9 @@ fn generateModel(m: anytype, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, pr
     var reply = Reply{ .prompt_tokens = prompt.len };
     errdefer reply.deinit(a);
     if (options.max_tokens == 0) return reply;
+    var budget_arena = std.heap.ArenaAllocator.init(a);
+    defer budget_arena.deinit();
+    var budget = try @import("thinking_budget.zig").Budget.init(budget_arena.allocator(), tok, options.thinking_budget);
     var settings = options.sampling;
     settings.seed = options.seed orelse sampling.seedFor(prompt);
     var next: i32 = 0;
@@ -150,10 +153,8 @@ fn generateModel(m: anytype, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, pr
     var sent: usize = 0;
     while (reply.tokens.items.len < options.max_tokens) {
         try sink.check();
-        if (sink.gate) |gate| {
-            const proposed_eos = if (M == qwen.Model) next == 248044 or next == 248046 else if (@hasDecl(M, "isEos")) m.isEos(next) else M.eos(next);
-            next = try gate.next(next, proposed_eos);
-        }
+        const proposed_eos = if (M == qwen.Model) next == 248044 or next == 248046 else if (@hasDecl(M, "isEos")) m.isEos(next) else M.eos(next);
+        next = try budget.next(sink.gate, reply.tokens.items.len, next, proposed_eos);
         const eos = if (M == qwen.Model) next == 248044 or next == 248046 else if (@hasDecl(M, "isEos")) m.isEos(next) else M.eos(next);
         if (eos and !options.ignore_eos) {
             const ending = try tok.decode(a, &.{@intCast(next)}, false);

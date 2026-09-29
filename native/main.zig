@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-allocation-failures")) return @import("failure_checks.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-model-schema")) return @import("schema.zig").checkCheckpoint(std.meta.stringToEnum(@import("schema.zig").Kind, args[2]) orelse return error.UnsupportedModel, io, args[3]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
-        std.debug.print("HTTP: tensorfold serve MODEL_DIR [--host 127.0.0.1] [--port 8080] [--served-model-name NAME]\n  Raw/chat completions with SSE; Qwen chat accepts image data URLs.\n", .{});
+        std.debug.print("HTTP: tensorfold serve MODEL_DIR [--host 127.0.0.1] [--port 8080] [--served-model-name NAME]\n  [--temperature T] [--top-k K] [--top-p P] [--max-tokens 4096]\n  [--thinking | --no-thinking] [--reasoning-effort medium] [--thinking-budget 0]\n  Raw/chat completions with SSE; Qwen chat accepts image data URLs.\n", .{});
         std.debug.print("Qwen images: --image LOCAL_FILE (up to four); optional explicit <|vision_start|><|image_pad|><|vision_end|> markers in --prompt.\n", .{});
         std.debug.print("Text families: Qwen/Bonsai, Nemotron, Flash Next, Gemma, GLM, DeepSeek.\nGLM/DeepSeek MTP: --mtp-drafts 0..15 or --no-drafts. DeepSeek: --drafter DIR with converted mtp.safetensors or dspark.safetensors. Gemma: --drafter DIR [--drafter-bits 8|4|0].\nNemotron/Flash MTP options: --full-draft-vocab, --no-queued-drafts, --no-early-mtp, --no-gpu-handoff, --fixed-drafts, --check-mtp-state\n", .{});
         std.debug.print("Flash resident PLE: --resident-ple [--no-ple-wiring], --check-ple-state [--check-long-cache]\nDiagnostics: tensorfold check-ngram-gpu; tensorfold check-ple-resident MODEL_DIR\n", .{});
@@ -371,6 +371,7 @@ test {
     _ = @import("chat.zig");
     _ = @import("image_source.zig");
     _ = @import("request_options.zig");
+    _ = @import("thinking_budget.zig");
     _ = @import("reply_text.zig");
     _ = @import("vision_positions.zig");
     _ = @import("image_input.zig");
