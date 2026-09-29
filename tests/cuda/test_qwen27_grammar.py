@@ -264,3 +264,67 @@ def test_a_constrained_prompt_filled_between_rounds_equals_its_solo_and_serial_r
         assert _sha(solo) == _sha(out), request[:4]
         if name is not None and got[-1] in engine.eos:
             assert valid(json.loads(_answer(chat, got, engine)), CASES[name][0]), request[:4]
+
+
+class _Failing:
+    """A grammar that fails as xgrammar might: at a round's window after ``after`` of them, or at the first token."""
+
+    def __init__(self, inner, after: int = 1 << 30, first: bool = False):
+        self.inner, self.after, self.first, self.calls = inner, after, first, 0
+
+    def window(self, tokens, parents):
+        self.calls += 1
+        if self.calls > self.after:
+            raise grammar.GrammarError("the reply's grammar failed: simulated")
+        return self.inner.window(tokens, parents)
+
+    def mask(self, logits, window=None):
+        if window is None and self.first:
+            raise grammar.GrammarError("the reply's grammar failed at the first token: simulated")
+        return self.inner.mask(logits, window)
+
+    def advance(self, tokens):
+        self.inner.advance(tokens)
+
+
+def test_a_failed_grammar_ends_only_its_own_stream(engine, chat):
+    """Under --parallel, a grammar failing at a round's window or at the first token ends that request with its error;
+    the requests beside it and the one after equal their serial replies, and the scheduler goes on."""
+
+    from tensorfold.cuda.scheduler import Scheduler
+    from tensorfold.families.qwen3_5.cuda.engine import KEEP
+    from tensorfold.families.qwen3_5.cuda.multi import MultiDecoder
+
+    multi = MultiDecoder(engine.w, engine.draft, allow_copy=True, context=4096, keep=KEEP, points=engine.points)
+    multi.calibrate(4)
+    scheduler = Scheduler(multi, max_streams=4)
+    results: dict = {}
+
+    def go(key, name, constraint, sampling):
+        out: list[int] = []
+        try:
+            results[key] = (out, scheduler.submit(chat.prompt(CASES[name][1]), 240, SAMPLINGS[sampling], True,
+                                                  lambda new: out.extend(new) and False, constraint=constraint))
+        except Exception as exc:                        # noqa: BLE001
+            results[key] = (out, exc)
+
+    jobs = [("person", "person", chat.fresh("person"), "greedy"), ("weather", "weather", chat.fresh("weather"), "seed7"),
+            ("mid", "recipe", _Failing(chat.fresh("recipe"), after=2), "greedy"),
+            ("first", "person", _Failing(chat.fresh("person"), first=True), "seed7")]
+    threads = [threading.Thread(target=go, args=job, daemon=True) for job in jobs]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=600)
+    out, err = results["mid"]
+    assert isinstance(err, grammar.GrammarError) and 1 <= len(out) < 240, err
+    out, err = results["first"]
+    assert isinstance(err, grammar.GrammarError) and out == [], err
+    for key, name, _, sampling in jobs[:2]:
+        out, stats = results[key]
+        serial, _ = _run(engine, chat.prompt(CASES[name][1]), 240, SAMPLINGS[sampling], False, chat.fresh(name))
+        assert isinstance(stats, dict) and _sha(out) == _sha(serial), key
+    go("after", "recipe", chat.fresh("recipe"), "greedy")
+    serial, _ = _run(engine, chat.prompt(CASES["recipe"][1]), 240, None, False, chat.fresh("recipe"))
+    assert _sha(results["after"][0]) == _sha(serial) and scheduler.thread.is_alive()
+    assert not multi.streams and not multi.filling
