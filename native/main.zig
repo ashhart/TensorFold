@@ -17,6 +17,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len >= 3 and std.mem.eql(u8, args[1], "serve")) return @import("server.zig").run(init, args);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-chat")) return @import("chat.zig").check(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-tool-calls")) return @import("tool_calls.zig").check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-tool-stream")) return @import("tool_stream.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-image-http")) return @import("image_http.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-image-url")) return @import("image_http.zig").fetchCheck(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-gemma-prefill")) return @import("gemma_prefill.zig").check(io, args[2], args[3]);
@@ -369,6 +370,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("tool_stream.zig");
     _ = @import("tool_calls.zig");
     _ = @import("chat.zig");
     _ = @import("image_source.zig");

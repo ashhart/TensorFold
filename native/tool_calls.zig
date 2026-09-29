@@ -58,7 +58,23 @@ fn tool(tools: V, name: []const u8) ?V {
     }
     return null;
 }
-fn parameter(a: std.mem.Allocator, tools: V, name: []const u8, key: []const u8, text: []const u8) !V {
+pub fn canonicalName(tools: V, name: []const u8) ?[]const u8 {
+    return chat.toolName(tool(tools, name) orelse return null) catch null;
+}
+pub fn typedParameter(tools: V, name: []const u8, key: []const u8) bool {
+    const function = tool(tools, name) orelse return false;
+    const parameters = function.object.get("parameters") orelse function.object.get("input_schema") orelse return false;
+    if (parameters != .object) return false;
+    const properties = parameters.object.get("properties") orelse return false;
+    if (properties != .object) return false;
+    const schema = properties.object.get(key) orelse return false;
+    if (schema != .object) return false;
+    const kind = schema.object.get("type") orelse return false;
+    if (kind != .string) return false;
+    for ([_][]const u8{ "array", "object", "boolean", "integer", "number", "null" }) |expected| if (std.mem.eql(u8, kind.string, expected)) return true;
+    return false;
+}
+pub fn parameter(a: std.mem.Allocator, tools: V, name: []const u8, key: []const u8, text: []const u8) !V {
     const fallback = V{ .string = text };
     const function = tool(tools, name) orelse return fallback;
     const parameters = function.object.get("parameters") orelse function.object.get("input_schema") orelse return fallback;
@@ -294,6 +310,36 @@ pub fn parse(a: std.mem.Allocator, text: []const u8, tools: V, max_calls: ?usize
     return .{ .content = trim(residue.items), .calls = calls.items };
 }
 
+pub fn preview(a: std.mem.Allocator, text: []const u8, tools: V, max_calls: ?usize) ![]const u8 {
+    // Bare JSON can turn into a call; an unfinished envelope can turn back into
+    // prose. Neither is safe to publish as content before its meaning is known.
+    const bare = trim(text);
+    if (bare.len > 0 and (bare[0] == '{' or bare[0] == '[' or bare[0] == '`')) return "";
+    var end = text.len;
+    var cursor: usize = 0;
+    var completed = false;
+    while (std.mem.indexOfScalarPos(u8, text, cursor, '<')) |begin| {
+        const tag_end = std.mem.indexOfScalarPos(u8, text, begin + 1, '>') orelse {
+            end = begin;
+            break;
+        };
+        const name = text[begin + 1 .. tag_end];
+        if (standardTag(name) or std.mem.eql(u8, name, "｜DSML｜tool_calls") or std.mem.eql(u8, name, "|tool_call")) {
+            const close = if (std.mem.eql(u8, name, "|tool_call")) "<tool_call|>" else try std.fmt.allocPrint(a, "</{s}>", .{name});
+            const at = std.ascii.findIgnoreCasePos(text, tag_end + 1, close) orelse {
+                end = begin;
+                break;
+            };
+            cursor = at + close.len;
+            completed = true;
+        } else cursor = begin + 1;
+    }
+    if (!completed and text.len > 0 and std.mem.indexOfScalar(u8, whitespace, text[0]) != null) return "";
+    var result = (try parse(a, text[0..end], tools, max_calls, "preview")).content;
+    if (max_calls != null) result = try singleContent(a, result);
+    return std.mem.trimEnd(u8, result, whitespace);
+}
+
 fn equal(left: V, right: V) bool {
     if (std.meta.activeTag(left) != std.meta.activeTag(right)) return false;
     return switch (left) {
@@ -322,6 +368,7 @@ pub fn check(io: std.Io, path: []const u8) !void {
     const a = arena.allocator();
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(32 * 1024 * 1024));
     const fixtures = try std.json.parseFromSlice(V, a, bytes, .{});
+    var prefixes: usize = 0;
     for (fixtures.value.array.items, 0..) |fixture, index| {
         const text = fixture.object.get("text").?.string;
         const limit = fixture.object.get("max_calls").?;
@@ -338,8 +385,23 @@ pub fn check(io: std.Io, path: []const u8) !void {
             std.debug.print("Tool fixture {d}, limit {any}, input: {s}\nExpected: {s}\nGot: {s}\n", .{ index, limit, text, try std.json.Stringify.valueAlloc(a, fixture, .{}), try std.json.Stringify.valueAlloc(a, got, .{}) });
             return error.ToolParserMismatch;
         }
+        const final_content = if (limit == .null) got.content else try singleContent(a, got.content);
+        var sent: usize = 0;
+        var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer scratch.deinit();
+        for (0..text.len + 1) |end| {
+            if (end < text.len and text[end] & 0xc0 == 0x80) continue;
+            _ = scratch.reset(.retain_capacity);
+            const content = try preview(scratch.allocator(), text[0..end], fixture.object.get("tools").?, if (limit == .null) null else @intCast(limit.integer));
+            if (content.len < sent or !std.mem.startsWith(u8, final_content, content)) {
+                std.debug.print("Tool content fixture {d}, byte {d}: {s}\nExpected final: {s}\nPreview: {s}\n", .{ index, end, text, final_content, content });
+                return error.ToolContentPrefixMismatch;
+            }
+            sent = content.len;
+            prefixes += 1;
+        }
     }
-    std.debug.print("PASS: {d} tool parser fixtures match upstream\n", .{fixtures.value.array.items.len});
+    std.debug.print("PASS: {d} tool parser fixtures match upstream; {d} content prefixes remain stable\n", .{ fixtures.value.array.items.len, prefixes });
 }
 
 test "tool grammars preserve schema types and malformed calls stay content" {

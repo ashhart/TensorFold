@@ -210,12 +210,15 @@ and redirect is checked; connections use a pinned address and verified TLS.
 Downloads allow three redirects, 10 MiB per image, 10 seconds per image and
 30 seconds across the request. Tool calls support the
 Qwen, Gemma, GLM and DeepSeek formats, named/required choice, typed arguments
-and `parallel_tool_calls: false`. Tool-enabled streams hold content until
-the completed calls have been parsed. Speculative serving is still pending.
+and `parallel_tool_calls: false`. Qwen XML arguments stream incrementally;
+typed values wait for their closing tag. Other call formats and single-call
+mode use the final parser, matching upstream. Prose streams as its interpretation
+becomes unambiguous. Speculative serving is still pending.
 One inference worker owns the model; its queue holds eight requests.
 Against a running Qwen server, compare JSON/SSE text, reasoning and images with
 `.zig-toolchain/zig run tools/native_http_checks.zig -- http://127.0.0.1:8080/v1/chat/completions /path/to/image.png`.
 Replace the image path with `--tools-only` to check a named tool call.
+Use `--tool-stream-only` to check incremental Qwen arguments against JSON output.
 Use `--controls-only` with Qwen's unmodified sampling defaults to check model
 defaults, thinking-budget transitions and required calls in JSON/SSE.
 With `--vision-urls` enabled, pass `HTTPS_IMAGE_URL LOCAL_COPY` after the chat

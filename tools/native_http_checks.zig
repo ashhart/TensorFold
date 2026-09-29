@@ -17,6 +17,10 @@ fn post(init: std.process.Init, url: []const u8, body: V) ![]const u8 {
 }
 
 fn compare(init: std.process.Init, url: []const u8, body: V) !usize {
+    return compareStream(init, url, body, false);
+}
+
+fn compareStream(init: std.process.Init, url: []const u8, body: V, incremental: bool) !usize {
     const a = init.arena.allocator();
     var request = body;
     const plain = try std.json.parseFromSlice(V, a, try post(init, url, request), .{});
@@ -41,6 +45,7 @@ fn compare(init: std.process.Init, url: []const u8, body: V) !usize {
     var reasoning: std.ArrayList(u8) = .empty;
     var finished = false;
     var done = false;
+    var argument_fragments: usize = 0;
     var lines = std.mem.splitScalar(u8, stream, '\n');
     while (lines.next()) |line| {
         if (!std.mem.startsWith(u8, line, "data: ")) continue;
@@ -59,11 +64,15 @@ fn compare(init: std.process.Init, url: []const u8, body: V) !usize {
             if (index >= arguments.len) return error.UnexpectedToolCall;
             const function = call.object.get("function").?;
             if (function.object.get("name")) |name| {
+                if (named[index]) return error.DuplicateToolName;
                 if (!std.mem.eql(u8, name.string, expected_calls.array.items[index].object.get("function").?.object.get("name").?.string)) return error.ToolNameMismatch;
                 if (call.object.get("id").?.string.len == 0) return error.MissingToolId;
                 named[index] = true;
             }
-            if (function.object.get("arguments")) |value| try arguments[index].appendSlice(a, value.string);
+            if (function.object.get("arguments")) |value| {
+                try arguments[index].appendSlice(a, value.string);
+                if (value.string.len > 0) argument_fragments += 1;
+            }
         };
         if (item.object.get("finish_reason")) |value| if (value == .string) {
             if (!std.mem.eql(u8, value.string, choice.object.get("finish_reason").?.string)) return error.FinishMismatch;
@@ -73,6 +82,7 @@ fn compare(init: std.process.Init, url: []const u8, body: V) !usize {
     if (!finished or !done) return error.MissingStreamEnd;
     if (!std.mem.eql(u8, content.items, message.object.get("content").?.string) or !std.mem.eql(u8, reasoning.items, message.object.get("reasoning_content").?.string)) return error.StreamContentMismatch;
     for (expected_calls.array.items, arguments, named) |call, value, name_seen| if (!name_seen or !std.mem.eql(u8, call.object.get("function").?.object.get("arguments").?.string, value.items)) return error.ToolArgumentsMismatch;
+    if (incremental and argument_fragments <= 2 * arguments.len) return error.ToolArgumentsNotIncremental;
     std.debug.print("PASS: JSON/SSE agree, {d} content bytes, {d} reasoning bytes, {d} tool calls\n", .{ content.items.len, reasoning.items.len, arguments.len });
     return arguments.len;
 }
@@ -144,6 +154,14 @@ pub fn main(init: std.process.Init) !void {
             \\{"messages":[{"role":"user","content":"What is the weather in Copenhagen?"}],"tools":[{"type":"function","function":{"name":"weather","description":"Get the weather in a city","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}],"tool_choice":{"type":"function","function":{"name":"weather"}},"parallel_tool_calls":false,"reasoning_effort":"none","max_tokens":128,"seed":1234}
         , .{});
         if (try compare(init, args[1], tool.value) != 1) return error.MissingRequiredToolCall;
+        return;
+    }
+    if (std.mem.eql(u8, args[2], "--tool-stream-only")) {
+        const tool = try std.json.parseFromSlice(V, a,
+            \\{"messages":[{"role":"user","content":"Call write with path notes.txt, days 2, and content containing a greeting in Danish, Chinese and English. Include two paragraphs with a newline between them. Use at least 50 words in the content."}],"tools":[{"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{"path":{"type":"string"},"days":{"type":"integer"},"content":{"type":"string"}},"required":["path","days","content"]}}}],"tool_choice":"required","reasoning_effort":"none","temperature":0,"max_tokens":384,"seed":1234}
+        , .{});
+        if (try compareStream(init, args[1], tool.value, true) != 1) return error.MissingRequiredToolCall;
+        std.debug.print("PASS: tool arguments arrive in incremental SSE fragments without duplicate calls\n", .{});
         return;
     }
     const base = try std.json.parseFromSlice(V, a,

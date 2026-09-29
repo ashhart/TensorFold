@@ -304,6 +304,7 @@ const Stream = struct {
     tools: std.json.Value = .null,
     max_calls: ?usize = null,
     calls_sent: usize = 0,
+    tool_stream: @import("tool_stream.zig").Streamer = .{},
     fn chunk(s: *Stream, value: []const u8, finish: ?[]const u8) !void {
         const body = try std.json.Stringify.valueAlloc(s.a, .{ .id = s.id, .object = "text_completion", .created = s.created, .model = s.model, .choices = &.{.{ .index = @as(usize, 0), .text = value, .finish_reason = finish, .logprobs = @as(?u8, null) }} }, .{});
         try s.writer.print("data: {s}\n\n", .{body});
@@ -330,17 +331,30 @@ const Stream = struct {
             try s.chatChunk(.{ .reasoning_content = parts.reasoning[s.sent_reasoning..] }, null);
             s.sent_reasoning = parts.reasoning.len;
         }
-        if (!finished and s.tools == .array and s.tools.array.items.len > 0) return;
-        var parsed = if (finished) try tool_calls.parse(s.a, parts.content, s.tools, s.max_calls, s.id) else tool_calls.Result{ .content = parts.content };
-        if (s.max_calls != null and finished and s.tools == .array and s.tools.array.items.len > 0) parsed.content = try tool_calls.singleContent(s.a, parsed.content);
+        const has_tools = s.tools == .array and s.tools.array.items.len > 0;
+        var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer scratch.deinit();
+        const a = scratch.allocator();
+        if (has_tools and s.max_calls == null) try s.tool_stream.feed(a, parts.content, s.tools, s, toolDelta);
+        var parsed = if (finished) try tool_calls.parse(a, parts.content, s.tools, s.max_calls, s.id) else tool_calls.Result{ .content = if (has_tools) try tool_calls.preview(a, parts.content, s.tools, s.max_calls) else parts.content };
+        if (s.max_calls != null and finished and has_tools) parsed.content = try tool_calls.singleContent(a, parsed.content);
         if (parsed.content.len > s.sent_content) {
             try s.chatChunk(.{ .content = parsed.content[s.sent_content..] }, null);
             s.sent_content = parsed.content.len;
         }
         for (parsed.calls, 0..) |call, index| {
+            if (index < s.tool_stream.count) continue;
             try s.chatChunk(.{ .tool_calls = &.{.{ .index = index, .id = call.id, .type = "function", .function = .{ .name = call.function.name, .arguments = "" } }} }, null);
             try s.chatChunk(.{ .tool_calls = &.{.{ .index = index, .function = .{ .arguments = call.function.arguments } }} }, null);
             s.calls_sent += 1;
         }
+    }
+    fn toolDelta(context: ?*anyopaque, delta: @import("tool_stream.zig").Delta) !void {
+        const s: *Stream = @ptrCast(@alignCast(context.?));
+        if (delta.name) |name| {
+            const id = try std.fmt.allocPrint(s.a, "call_{s}_{d}", .{ s.id, delta.index });
+            try s.chatChunk(.{ .tool_calls = &.{.{ .index = delta.index, .id = id, .type = "function", .function = .{ .name = name, .arguments = "" } }} }, null);
+            s.calls_sent += 1;
+        } else try s.chatChunk(.{ .tool_calls = &.{.{ .index = delta.index, .function = .{ .arguments = delta.arguments } }} }, null);
     }
 };

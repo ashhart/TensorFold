@@ -286,7 +286,12 @@ pub fn build(b: *std.Build) void {
     const tool_tests = b.addRunArtifact(exe);
     tool_tests.addArgs(&.{ "check-tool-calls", "build/native-checks/tool-calls.json" });
     tool_tests.step.dependOn(&tool_fixtures.step);
-    b.step("test-tool-calls", "Compare native tool parsers with upstream formats, schema coercion and malformed outputs").dependOn(&tool_tests.step);
+    const tool_step = b.step("test-tool-calls", "Compare native tool parsing and incremental streaming with upstream");
+    tool_step.dependOn(&tool_tests.step);
+    const tool_stream_tests = b.addRunArtifact(exe);
+    tool_stream_tests.addArgs(&.{ "check-tool-stream", "build/native-checks/tool-stream.json" });
+    tool_stream_tests.step.dependOn(&tool_fixtures.step);
+    tool_step.dependOn(&tool_stream_tests.step);
     for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "Ternary-Bonsai-2-27B-mlx-2bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP", "gemma-4-26b-a4b-it-4bit", "GLM-5.3-Flash-MLX-4bit-MTP", "DeepSeek-V4-Flash-4bit" }, 0..) |name, index| {
         const dir = b.fmt("{s}/{s}", .{ model_root, name });
         const fixture = b.fmt("build/native-checks/chat/{d}.json", .{index});

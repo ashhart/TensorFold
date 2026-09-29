@@ -407,6 +407,30 @@ def tool_fixtures(output):
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(cases, ensure_ascii=False))
     print(f"Saved {len(cases)} upstream tool parser fixtures")
+    from tensorfold.engine.tool_draft import ToolCallStreamer
+    stream_texts = [f'<tool_call>{payload}</tool_call>' for payload in payloads]
+    stream_texts.extend((
+        '<tool_call><function=weather></function></tool_call>' * 2,
+        'before <tool_call>\n<function=WEATHER>\n<parameter=city>\n  æøå 世界 👋 "quoted" \\ path\n\n</parameter>\n</function>\n</tool_call> after',
+        '<tool_call><function=weather><parameter=city>Paris</parameter>',
+        '<tool_call><function=missing><parameter=city>Paris</parameter></function></tool_call>',
+        '<tool_call><function=weather>' + 'x' * 270,
+        dsml, 'ordinary prose', '{"name":"weather","arguments":{}}',
+    ))
+    streams = []
+    for text in stream_texts:
+        for step in (1, 3, 17, len(text)):
+            streamer = ToolCallStreamer(tools)
+            frames = []
+            for end in list(range(step, len(text), step)) + [len(text)]:
+                deltas = streamer.feed(text[:end])
+                for delta in deltas:
+                    for call in delta["tool_calls"]:
+                        call.pop("id", None)
+                frames.append({"end": len(text[:end].encode()), "deltas": deltas})
+            streams.append({"text": text, "tools": tools, "frames": frames})
+    output.with_name("tool-stream.json").write_text(json.dumps(streams, ensure_ascii=False, separators=(",", ":")))
+    print(f"Saved {len(streams)} upstream incremental tool streams")
 
 
 def main():
