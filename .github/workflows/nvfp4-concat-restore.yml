@@ -1,0 +1,58 @@
+name: nvfp4-concat-restore
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/tensorfold/families/qwen4_exp/cuda/_nvfp4_tail_restore.txt"
+      - ".github/workflows/nvfp4-concat-restore.yml"
+jobs:
+  concat:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: nvfp4-flash-next
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Concatenate and commit full nvfp4.py
+        run: |
+          set -euo pipefail
+          HEAD="src/tensorfold/families/qwen4_exp/cuda/nvfp4.py"
+          TAIL="src/tensorfold/families/qwen4_exp/cuda/_nvfp4_tail_restore.txt"
+          test -f "$HEAD"
+          test -f "$TAIL"
+          if grep -q 'def make_fp4' "$HEAD"; then
+            echo "nvfp4.py already complete; removing tail staging file"
+            git rm -f "$TAIL" || rm -f "$TAIL"
+          else
+            cat "$HEAD" "$TAIL" > /tmp/nvfp4_full.py
+            # strip a leading blank line from tail if head already ends with newline
+            python3 - <<'PY'
+          from pathlib import Path
+          head = Path("src/tensorfold/families/qwen4_exp/cuda/nvfp4.py").read_text()
+          tail = Path("src/tensorfold/families/qwen4_exp/cuda/_nvfp4_tail_restore.txt").read_text()
+          full = head + tail
+          assert full.startswith('"""NVFP4'), full[:40]
+          assert "def make_fp4" in full and "def matmul" in full
+          assert "LOAD_FROM_" not in full
+          assert "* weight_scale_2)" in full
+          for line in full.splitlines():
+              if line.strip().startswith("W[n, k]"):
+                  assert "2**-7" not in line
+                  print("FORMULA", line.strip())
+          Path("src/tensorfold/families/qwen4_exp/cuda/nvfp4.py").write_text(full)
+          print("wrote", len(full))
+          PY
+            git rm -f "$TAIL"
+          fi
+          git rm -f .github/workflows/nvfp4-concat-restore.yml || rm -f .github/workflows/nvfp4-concat-restore.yml
+          git config user.name "nvfp4-concat-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          git commit -m "fix(nvfp4): complete ModelOpt dequant restore (full nvfp4.py)"
+          git push origin HEAD:nvfp4-flash-next
