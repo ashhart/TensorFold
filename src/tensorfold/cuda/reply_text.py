@@ -8,7 +8,7 @@ import uuid
 from typing import Any
 
 from tensorfold.server.stopping import StopPolicy
-from tensorfold.server.tools import parse_glm_tool_call_block
+from tensorfold.server.tools import parse_glm_tool_call_block, pass_unknown_tools
 from tensorfold.tool_parameters import decode_parameter, parameter_schemas
 
 _CALL_OPEN, _CALL_CLOSE = "<tool_call>", "</tool_call>"
@@ -104,6 +104,7 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
         return text, None
     known = {_tool_name(t).lower(): _tool_name(t) for t in tools}
     schemas = parameter_schemas(tools)
+    keep_unknown = pass_unknown_tools()
     calls: list[dict[str, Any]] = []
     residue: list[str] = []
     cursor = 0
@@ -137,7 +138,7 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
                 glm = parse_glm_tool_call_block(block, tools, complete=max_calls is not None)
                 if glm is not None:
                     name, args = glm
-        if not name or str(name).lower() not in known:
+        if not name or (str(name).lower() not in known and not (keep_unknown and isinstance(args, dict))):
             if max_calls is None:
                 residue.append(match.group(0))
             continue
@@ -149,7 +150,7 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
             except (ValueError, TypeError):
                 continue
         calls.append({"id": f"call_{uuid.uuid4().hex[:24]}", "type": "function",
-                      "function": {"name": known[str(name).lower()],
+                      "function": {"name": known.get(str(name).lower(), str(name)),
                                    "arguments": json.dumps(args, ensure_ascii=False, separators=(",", ":"))}})
     residue.append(text[cursor:])
     return "".join(residue).strip(), calls or None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from typing import Any
@@ -280,8 +281,23 @@ def _strip_json_fence(text: str) -> str:
     return match.group(1).strip()
 
 
-def _openai_tool_call(raw_name: str, arguments: dict[str, Any], known: dict[str, str]) -> dict[str, Any]:
+PASS_UNKNOWN_TOOLS_ENV = "TENSORFOLD_PASS_UNKNOWN_TOOLS"
+
+
+def pass_unknown_tools() -> bool:
+    """A well-formed call to a tool the request did not offer goes to the client when this is set.
+
+    The client answers "unknown tool" and the model corrects its name. Left as text, the same reply
+    ends the agent's turn: the harness sees prose and stops.
+    """
+
+    return os.environ.get(PASS_UNKNOWN_TOOLS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _openai_tool_call(raw_name: str, arguments: dict[str, Any], known: dict[str, str], *, keep_unknown: bool = False) -> dict[str, Any]:
     name = known.get(raw_name.lower())
+    if name is None and keep_unknown:
+        name = raw_name
     if name is None:
         raise ValueError(f"unknown tool '{raw_name}'")
     return {
@@ -351,6 +367,7 @@ def parse_tool_calls_from_content(
         return text, None
     known = {tool_spec_name(tool).lower(): tool_spec_name(tool) for tool in tools}
     schemas = parameter_schemas(tools)
+    keep_unknown = pass_unknown_tools()
     envelopes = _envelopes(text)
     if not envelopes:
         bare_calls = _parse_bare_json_tool_calls(text, known, max_calls=max_calls)
@@ -373,14 +390,15 @@ def parse_tool_calls_from_content(
                 parsed = None if one is None else [one]
         except (ValueError, TypeError):
             parsed = None
-        if not parsed or any(name.lower() not in known for name, _ in parsed):
-            # A malformed or unoffered call stays text: the reply is content, never an error or a client retry loop.
+        if not parsed or (not keep_unknown and any(name.lower() not in known for name, _ in parsed)):
+            # A malformed call stays text, and so does an unoffered one unless TENSORFOLD_PASS_UNKNOWN_TOOLS is set:
+            # the reply is content, never an error or a client retry loop.
             if max_calls is None:
                 residue_parts.append(text[start:end])
             continue
         for one in parsed:
             if max_calls is None or len(calls) < max_calls:
-                calls.append(_openai_tool_call(*one, known))
+                calls.append(_openai_tool_call(*one, known, keep_unknown=keep_unknown))
     residue_parts.append(text[cursor:])
     content = "".join(residue_parts).strip()
     return content, calls or None
