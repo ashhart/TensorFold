@@ -20,23 +20,13 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_experts_v6", sources=[str(here / "experts.cpp"), str(here / "experts.cu"),
-                                                        str(here / "experts_prefill.cu")],
+    return load(name="tensorfold_experts_v7", sources=[str(here / "experts.cpp"), str(here / "experts.cu"),
+                                                        str(here / "experts_prefill.cu"), str(here / "experts_pack.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
 
 
-def _nibbles(w: torch.Tensor) -> torch.Tensor:
-    """Nibbles to (i0, i2, i4, i6, i1, i3, i5, i7), so one shift and mask give two adjacent inputs as a bf16 pair."""
-
-    w = w.to(torch.int64) & 0xFFFFFFFF
-    out = torch.zeros_like(w)
-    for i in range(8):
-        out |= ((w >> (4 * i)) & 0xF) << (4 * (i // 2 + 4 * (i % 2)))
-    return torch.where(out >= 2 ** 31, out - 2 ** 32, out).to(torch.int32)
-
-
-def pack(words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, gs: int, chunk: int = 32) -> torch.Tensor:
-    """MLX words [E, N, K/8], scales and biases -> [E, N/32, K/gs, block]: B-fragments, then scales and biases."""
+def pack(words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, gs: int) -> torch.Tensor:
+    """MLX words [E, N, K/8], scales and biases -> [E, N/32, K/gs, block] in one kernel; nibbles (i0, i2, i4, i6, i1, i3, i5, i7), as ``unpack`` inverts."""
 
     if gs not in (32, 64):
         raise ValueError(f"groups of 32 or 64 inputs, not {gs}")
@@ -45,18 +35,8 @@ def pack(words: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, gs: in
     if n % COLS or k % gs or scales.shape != (e, n, k // gs) or biases.shape != scales.shape:
         raise ValueError(f"experts: shape {tuple(words.shape)} with scales {tuple(scales.shape)} does not pack")
     kg, nb, h = k // gs, n // COLS, gs // 32
-    wpl = NTW * h
-    out = torch.empty((e, nb, kg, 32 * wpl + 8 * NTW), dtype=torch.int32, device=words.device)
-    for e0 in range(0, e, chunk):
-        w = _nibbles(words[e0:e0 + chunk].view(torch.int32))
-        c = w.shape[0]
-        w = w.view(c, nb, NTW, 8, kg, 4, h).permute(0, 1, 4, 2, 6, 3, 5).reshape(c, nb, kg, wpl // 4, 4, 32)
-        out[e0:e0 + c, :, :, :32 * wpl] = w.permute(0, 1, 2, 3, 5, 4).reshape(c, nb, kg, 32 * wpl)
-        sb = []
-        for t in (scales, biases):
-            v = t[e0:e0 + c].reshape(c, nb, NTW, 4, 2, kg).permute(0, 1, 5, 3, 2, 4).contiguous()
-            sb.append(v.view(torch.int32).reshape(c, nb, kg, 4, NTW))
-        out[e0:e0 + c, :, :, 32 * wpl:] = torch.cat(sb, dim=-1).reshape(c, nb, kg, 8 * NTW)
+    out = torch.empty((e, nb, kg, 32 * NTW * h + 8 * NTW), dtype=torch.int32, device=words.device)
+    _ext().pack(words.contiguous(), scales.contiguous(), biases.contiguous(), gs, out)
     return out
 
 

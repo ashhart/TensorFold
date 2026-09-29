@@ -11,8 +11,8 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from safetensors import safe_open
 
+from tensorfold.cuda.direct_read import SafeTensors
 from tensorfold.engine.exact_sampling import Sampling
 
 from .draft_tree import best_first
@@ -204,14 +204,15 @@ class DFlash2:
         self.target_embed = target.embed
         self.device = target.norm.device
         self.weights: dict[str, torch.Tensor] = {}
-        with safe_open(str(path / "model.safetensors"), framework="pt", device="cpu") as f:
-            for name in f.keys():
-                tensor = f.get_tensor(name)
-                if name in ("candidate_selector.predecessor_codebook",
-                            "candidate_selector.successor_codebook"):
-                    self.weights[name] = tensor.float().numpy().copy()
-                else:
-                    self.weights[name] = tensor              # on the host until packed: no bf16 copy on the device
+        f = SafeTensors([path / "model.safetensors"])
+        for name in f.keys():
+            tensor = f.get(name)
+            if name in ("candidate_selector.predecessor_codebook",
+                        "candidate_selector.successor_codebook"):
+                self.weights[name] = tensor.float().numpy().copy()
+            else:
+                self.weights[name] = tensor                  # on the host until packed: no bf16 copy on the device
+        del f
         self.inv_freq = (1.0 / self.theta **
                          (torch.arange(self.head_dim // 2, device=self.device,
                                        dtype=torch.float32) * 2 / self.head_dim))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -264,7 +265,7 @@ def draft_token_ids(draft_vocab: int | str | None) -> np.ndarray | None:
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: tuple[int, int] | None = None,
-         draft_vocab: int | str | None = None, ple_on_ssd: bool = False) -> Weights:
+         draft_vocab: int | str | None = None, ple_on_ssd: bool = False, table_reads: list | None = None) -> Weights:
     """Load rank ``tp``'s head, expert-width and vocabulary shares while replicating other weights; ``draft_vocab`` restricts draft scoring to default/file ids or ids below N, with None using all ids."""
 
     import time
@@ -274,7 +275,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
 
     model_dir = Path(model_dir)
     if exl3.is_exl3(model_dir):                       # an EXL3 pack: its own loader, the same dataclasses
-        return exl3.load(model_dir, device, mtp=mtp, tp=tp, draft_vocab=draft_vocab)
+        return exl3.load(model_dir, device, mtp=mtp, tp=tp, draft_vocab=draft_vocab, table_reads=table_reads)
     full = Config.read(model_dir)
     rank, world = tp if tp is not None else (0, 1)
     cfg = full if world == 1 else replace(full, heads=full.heads // world, kv_heads=full.kv_heads // world,
@@ -517,6 +518,10 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         table = SSDTable(files) if ple_on_ssd else HostTable(files)
         if table.rows != ngram.rows:
             raise ValueError(f"n-gram tables hold {table.rows} rows, expected {ngram.rows}")
+        if table_reads is not None and not ple_on_ssd:     # its pages come in while the weights load
+            from tensorfold.cuda.direct_read import in_background
+
+            in_background(table.prefetch, table_reads)      # the caller waits for it (``wait_all``)
         conv = raw(name + ".conv1d.weight").reshape(cfg.streams * cfg.hidden, cfg.ple_kernel).to(torch.bfloat16)
         return PLEW(table, q4(name + ".key_proj"), q4(name + ".value_proj"),
                     cscale(name + ".norm_key.weight"), cscale(name + ".norm_query.weight"),
@@ -539,43 +544,65 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
     if cfg.quant not in ("mlx", "modelopt"):
         raise ValueError(f"Flash Next's CUDA engine reads MLX 4-bit (groups of 32) or NVFP4 (experts-only) "
                          f"checkpoints, not {cfg.quant}")
-    embed = ((raw(mbase + "embed_tokens.weight").to(torch.bfloat16).contiguous(),) if cfg.quant == "modelopt"
-             else triple("model.embed_tokens"))
-    loaded = []
-    for i in chosen:
-        loaded.append(layer(i, f"{mbase}layers.{i}", cfg.layer_types[i], True))
-        rd.release()
-        torch.cuda.empty_cache()
-    mixer = (hc_nvfp4 if cfg.quant == "modelopt" else hc)(mbase + "hyper_connection_mixer", False)
-    vl = full.vocab // world
-    if cfg.quant == "modelopt":
-        head = b16_rows(raw("lm_head.weight").to(torch.bfloat16)[rank * vl:(rank + 1) * vl])
-    else:
-        head_raw = triple("lm_head")
-        head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))
-        del head_raw
-    # NVFP4: the draft head is the bf16 lm_head's draft rows requantized 4-bit at load (drafts only)
-    draft_head, draft_ids = None, None
-    ids = draft_token_ids(draft_vocab)
-    if ids is not None:
-        ids = np.array_split(ids[ids < full.vocab], world)[rank]
-        ids = torch.from_numpy(ids).to(device)
-        draft_ids = ids
+    try:                                              # a failed load cancels the reads queued ahead
+        embed = ((raw(mbase + "embed_tokens.weight").to(torch.bfloat16).contiguous(),) if cfg.quant == "modelopt"
+                 else triple("model.embed_tokens"))
+        loaded = []
+        # each layer's tensors (not the n-gram shards: a memory map reads those) read ahead of the layer taking them
+        group_of = re.compile(re.escape(prefix) + r"(" + re.escape(mbase) + r"layers\.\d+\.|mtp\.)")
+        groups: dict[str, list[str]] = {}
+        for name in rd.where:
+            m = group_of.match(name)
+            if m and ".ngram_embedding." not in name:
+                groups.setdefault(m.group(0), []).append(name)
+        order = [f"{prefix}{mbase}layers.{i}." for i in chosen] + [f"{prefix}mtp."] * bool(mtp)
+        layer_events: list = []                           # each layer's event, recorded once its work is queued
+        for k, i in enumerate(chosen):
+            if len(layer_events) >= 2:                    # the GPU at most two layers behind, so reads and buffers
+                layer_events.pop(0).synchronize()         # queued ahead stay within two more
+            for ahead in order[k:k + 2]:                  # two layers in flight: reads overlap this one's packing
+                rd.queue(groups.get(ahead, []))
+            loaded.append(layer(i, f"{mbase}layers.{i}", cfg.layer_types[i], True))
+            layer_events.append(torch.cuda.Event())
+            layer_events[-1].record()
+            rd.drop(groups.get(order[k], []))            # what the layer never took
+            rd.release()
+            if i % 8 == 7:                        # each release waits for the device; a layer leaves few temporaries
+                torch.cuda.empty_cache()
+        mixer = (hc_nvfp4 if cfg.quant == "modelopt" else hc)(mbase + "hyper_connection_mixer", False)
+        vl = full.vocab // world
         if cfg.quant == "modelopt":
-            draft_head = quantize4(raw("lm_head.weight").index_select(0, ids).to(torch.bfloat16))
+            head = b16_rows(raw("lm_head.weight").to(torch.bfloat16)[rank * vl:(rank + 1) * vl])
         else:
-            draft_head = make_q4(*_rows_at(triple("lm_head"), ids))
-    inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (
-        -torch.arange(0, cfg.rotary_dim // 2, dtype=torch.float64) / (cfg.rotary_dim // 2))
-    w = Weights(cfg, embed, loaded, mixer, head, inv.to(torch.float32).to(device), around_one=around_one)
-    w.meta.update(rank=rank, world=world, vocab_offset=rank * vl, full=full)
-    w.draft_head, w.draft_ids = draft_head, draft_ids
-    if mtp and rd.has(prefix + "mtp.fc_embedding.weight"):
-        fc = b16 if cfg.quant == "modelopt" else q4
-        w.mtp = MTPW(cscale("mtp.pre_fc_norm_embedding.weight"), cscale("mtp.pre_fc_norm_hidden.weight"),
-                     fc("mtp.fc_embedding"), fc("mtp.fc_hidden"),
-                     layer(-1, "mtp.layers.0", "attention", False),
-                     (hc_nvfp4 if cfg.quant == "modelopt" else hc)("mtp.hyper_connection_mixer", False))
+            head_raw = triple("lm_head")
+            head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))
+            del head_raw
+        # NVFP4: the draft head is the bf16 lm_head's draft rows requantized 4-bit at load (drafts only)
+        draft_head, draft_ids = None, None
+        ids = draft_token_ids(draft_vocab)
+        if ids is not None:
+            ids = np.array_split(ids[ids < full.vocab], world)[rank]
+            ids = torch.from_numpy(ids).to(device)
+            draft_ids = ids
+            if cfg.quant == "modelopt":
+                draft_head = quantize4(raw("lm_head.weight").index_select(0, ids).to(torch.bfloat16))
+            else:
+                draft_head = make_q4(*_rows_at(triple("lm_head"), ids))
+        inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (
+            -torch.arange(0, cfg.rotary_dim // 2, dtype=torch.float64) / (cfg.rotary_dim // 2))
+        w = Weights(cfg, embed, loaded, mixer, head, inv.to(torch.float32).to(device), around_one=around_one)
+        w.meta.update(rank=rank, world=world, vocab_offset=rank * vl, full=full)
+        w.draft_head, w.draft_ids = draft_head, draft_ids
+        if mtp and rd.has(prefix + "mtp.fc_embedding.weight"):
+            fc = b16 if cfg.quant == "modelopt" else q4
+            w.mtp = MTPW(cscale("mtp.pre_fc_norm_embedding.weight"), cscale("mtp.pre_fc_norm_hidden.weight"),
+                         fc("mtp.fc_embedding"), fc("mtp.fc_hidden"),
+                         layer(-1, "mtp.layers.0", "attention", False),
+                         (hc_nvfp4 if cfg.quant == "modelopt" else hc)("mtp.hyper_connection_mixer", False))
+    except BaseException:
+        rd.close()
+        raise
+    rd.close()
     rd.release()
     torch.cuda.empty_cache()
     w.meta["load_seconds"] = time.time() - t0

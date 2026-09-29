@@ -316,6 +316,31 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
         gu = stack([p + "gate_proj", p + "up_proj"])
         return MLPW(gu, q4(p + "down_proj"), gu.n // 2)
 
+    def expert_names(i: int) -> list[str]:
+        """Layer ``i``'s expert tensors in the order ``moe`` reads them (none for a dense layer; ``cfg.layers``: MTP)."""
+
+        mtp = i == cfg.layers and cfg.mtp_layers
+        if not mtp and (i >= cfg.layers or cfg.mlp_kinds[i] != "moe"):
+            return []
+        p, parts = PREFIX + f"layers.{i}.mlp.", ("trellis", "suh", "svh") if exl3 else ("weight", "scales", "biases")
+        names = []
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            names += [p + f"experts.{e}.{proj}.{x}" for e in range(cfg.experts) for x in parts]
+            if not exl3:
+                names += [p + f"shared_experts.{proj}.{x}" for x in parts]
+        return names
+
+    def on_device(tensors: list[torch.Tensor]) -> torch.Tensor:
+        """``torch.stack(tensors).to(dev)`` without the host copy: one stack of tensors the reader uploaded, else each
+        host tensor copied into its slot on the device."""
+
+        if all(x.is_cuda for x in tensors):
+            return torch.stack(tensors)
+        out = torch.empty((len(tensors), *tensors[0].shape), dtype=tensors[0].dtype, device=dev)
+        for slot, x in zip(out, tensors):
+            slot.copy_(x)
+        return out
+
     def moe_exl3(p: str) -> Exl3Experts:
         parts = {}
         for proj in ("gate_proj", "up_proj", "down_proj"):
@@ -346,14 +371,22 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
             ws.append(as_i32(rd.get(PREFIX + p + f"shared_experts.{proj}.weight")))
             ss.append(rd.get(PREFIX + p + f"shared_experts.{proj}.scales"))
             bs.append(rd.get(PREFIX + p + f"shared_experts.{proj}.biases"))
-            parts[proj] = (torch.stack(ws).to(dev), torch.stack(ss).to(dev), torch.stack(bs).to(dev))
+            parts[proj] = (on_device(ws), on_device(ss), on_device(bs))
+            del ws, ss, bs
         ex = grouped.make([parts["gate_proj"], parts["up_proj"]], parts["down_proj"], 64, limit=cfg.limit)
         del parts
         return MoEW(router, bias, ex)
 
+    layer_events: list = []                              # each layer's event, recorded once its work is queued
+
     def layer(i: int, plain: bool = False) -> LayerW:
         kind = "dsa" if plain else cfg.kinds[i]
         mk = "moe" if plain else cfg.mlp_kinds[i]
+        if len(layer_events) >= 2:                       # the GPU at most two layers behind, so reads and buffers
+            layer_events.pop(0).synchronize()            # queued ahead stay within two more
+        up = None if exl3 else dev                       # MLX experts come uploaded (EXL3's are unpacked on the host)
+        rd.prefetch(expert_names(i), up)                 # already queued, except for the first layer
+        rd.prefetch(expert_names(i + 1), up)             # two layers in flight: reads overlap copies and packing
         lw = LayerW(i, kind, None if plain else hc(i, "attn"), None if plain else hc(i, "ffn"),
                     t(f"layers.{i}.input_layernorm.weight"), t(f"layers.{i}.post_attention_layernorm.weight"))
         if kind == "kda":
@@ -364,7 +397,10 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
             lw.mlp = mlp(f"layers.{i}.mlp.")
         else:
             lw.moe = moe(i)
-        torch.cuda.empty_cache()
+        if i % 8 == 7:                            # each release waits for the device; a layer leaves few temporaries
+            torch.cuda.empty_cache()
+        layer_events.append(torch.cuda.Event())
+        layer_events[-1].record()
         return lw
 
     if exl3:
@@ -372,23 +408,27 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
     else:
         embed = (as_i32(rd.get(PREFIX + "embed_tokens.weight")).to(dev), rd.get(PREFIX + "embed_tokens.scales").to(dev),
                  rd.get(PREFIX + "embed_tokens.biases").to(dev))
-    which = list(range(cfg.layers))
-    built = [layer(i) for i in which]
-    vl = cfg.vocab // world
-    draft_head = None
-    if exl3:
-        head = make_b16(rd.get("lm_head.weight")[rank * vl:(rank + 1) * vl].to(dev))
-        draft_head = quantize4(head.weight)        # Draft steps use the quantized head; verification keeps the original head.
-    else:
-        hw, hs, hb = (rd.get("lm_head." + x) for x in ("weight", "scales", "biases"))
-        head = make_q4(as_i32(hw[rank * vl:(rank + 1) * vl]).to(dev), hs[rank * vl:(rank + 1) * vl].to(dev),
-                       hb[rank * vl:(rank + 1) * vl].to(dev))
-    mtpw = None
-    if cfg.mtp_layers:
-        i = cfg.layers
-        mtpw = MTPW(t(f"layers.{i}.enorm.weight"), t(f"layers.{i}.hnorm.weight"), q4(f"layers.{i}.eh_proj"),
-                    t(f"layers.{i}.shared_head.norm.weight"), layer(i, plain=True))
-    w = Weights(cfg, embed, built, t("norm.weight"), head, mtpw, rank, world, dev, draft_head=draft_head)
-    w.meta.update(layers=which)
+    try:                                          # a failed load still cancels the reads queued ahead
+        which = list(range(cfg.layers))
+        built = [layer(i) for i in which]
+        vl = cfg.vocab // world
+        draft_head = None
+        if exl3:
+            head = make_b16(rd.get("lm_head.weight")[rank * vl:(rank + 1) * vl].to(dev))
+            # Draft steps use the quantized head; verification keeps the original head.
+            draft_head = quantize4(head.weight)
+        else:
+            hw, hs, hb = (rd.get("lm_head." + x) for x in ("weight", "scales", "biases"))
+            head = make_q4(as_i32(hw[rank * vl:(rank + 1) * vl]).to(dev), hs[rank * vl:(rank + 1) * vl].to(dev),
+                           hb[rank * vl:(rank + 1) * vl].to(dev))
+        mtpw = None
+        if cfg.mtp_layers:
+            i = cfg.layers
+            mtpw = MTPW(t(f"layers.{i}.enorm.weight"), t(f"layers.{i}.hnorm.weight"), q4(f"layers.{i}.eh_proj"),
+                        t(f"layers.{i}.shared_head.norm.weight"), layer(i, plain=True))
+        w = Weights(cfg, embed, built, t("norm.weight"), head, mtpw, rank, world, dev, draft_head=draft_head)
+        w.meta.update(layers=which)
+    finally:
+        rd.close()
     torch.cuda.empty_cache()
     return w

@@ -35,6 +35,9 @@ REP = (
     r"\.self_attn\.indexer\.", r"\.self_attn\.(q_a_proj|kv_a_proj_with_mqa)\.", r"\.self_attn\.(f_a|g_a)_proj\.",
     r"\.self_attn\.o_norm\.weight$", r"\.(eh_proj)\.", r"\.(enorm|hnorm)\.weight$", r"\.shared_head\.norm\.weight$",
 )
+RUN = 128 << 20          # most bytes one read of neighbouring tensors takes (``RankReader.prefetch``)
+GAP = 1 << 20            # most unused bytes such a read spans between two tensors (more reads other layers twice)
+READERS = 8              # reads in flight: past this the layers are built slower than they are read
 DTYPE_BYTES = {"U32": 4, "I32": 4, "F32": 4, "BF16": 2, "F16": 2, "I16": 2, "U16": 2, "U8": 1, "I8": 1, "I64": 8,
                "F64": 8}
 # the files a rank folder needs besides its weights (the tokenizer, chat template and configs)
@@ -98,6 +101,34 @@ def split_bytes(raw: np.ndarray, shape: list[int], itemsize: int, kind: str, ran
     raise ValueError(kind)
 
 
+def split_device(raw, shape: list[int], itemsize: int, kind: str, rank: int):
+    """``split_bytes`` for a uint8 tensor on the GPU: the rank's part (a new contiguous tensor) and its shape."""
+
+    if kind == "rep":
+        return raw.clone(), list(shape)
+    if kind == "row":
+        if shape[0] % 2:
+            raise ValueError(f"row split of odd leading dim {shape}")
+        per, half = raw.numel() // shape[0], shape[0] // 2
+        return raw[rank * half * per:(rank + 1) * half * per].clone(), [half] + list(shape[1:])
+    if kind in ("col", "dim1"):
+        if len(shape) < 2 or shape[1] % 2 or (kind == "col" and len(shape) != 2):
+            raise ValueError(f"{kind} split needs an even second dim, got {shape}")
+        inner = int(np.prod(shape[2:])) * itemsize
+        half = shape[1] // 2
+        part = raw.view(shape[0], shape[1] * inner)[:, rank * half * inner:(rank + 1) * half * inner]
+        return part.contiguous().reshape(-1), [shape[0], half] + list(shape[2:])
+    raise ValueError(kind)
+
+
+def torch_dtype(dtype: str):
+    import torch
+
+    return {"U32": torch.uint32, "I32": torch.int32, "F32": torch.float32, "BF16": torch.bfloat16, "F16": torch.float16,
+            "I16": torch.int16, "U16": torch.uint16, "U8": torch.uint8, "I8": torch.int8, "I64": torch.int64,
+            "F64": torch.float64}[dtype]
+
+
 def rank_files(model_dir: str | Path, rank: int) -> list[Path]:
     return sorted(Path(model_dir).glob(f"*.rank{rank}.safetensors"))
 
@@ -106,22 +137,19 @@ class RankReader:
     """Read stored-dtype CPU tensors for one rank from the full checkpoint or its pre-split folder."""
 
     def __init__(self, model_dir: str | Path, rank: int) -> None:
+        from tensorfold.cuda.direct_read import ReadAhead, Reader, SafeTensors
+
         self.dir, self.rank = Path(model_dir), rank
-        self.handles: dict[str, object] = {}
-        self.index: dict[str, object] = {}
+        self.io = Reader()                                # O_DIRECT reads where the file system allows them
+        self.reads = ReadAhead(self.io, READERS, RUN, GAP)
         mine, other = rank_files(self.dir, rank), rank_files(self.dir, 1 - rank)
         if other and not mine:
             raise ValueError(f"{self.dir} holds rank {1 - rank}'s share: give rank {rank} its own folder or the "
                              "full checkpoint")
         self.split = bool(mine)
         if self.split:
-            from safetensors import safe_open
-
-            for path in mine:
-                h = safe_open(str(path), framework="pt", device="cpu")
-                self.handles[str(path)] = h
-                for k in h.keys():
-                    self.index[k] = h
+            self.folder = SafeTensors(mine, self.io)
+            self.index = dict.fromkeys(self.folder.keys())
             return
         index = self.dir / "model.safetensors.index.json"
         if index.exists():
@@ -130,31 +158,74 @@ class RankReader:
             names = {k: p.name for p in sorted(self.dir.glob("*.safetensors")) for k in read_header(p)[0]
                      if k != "__metadata__"}
         self.files: dict[str, tuple[dict, int]] = {}
-        self.maps: dict[str, np.memmap] = {}
         self.index = dict(names)
 
-    def get(self, name: str):
-        import torch
+    def prefetch(self, names, device=None) -> None:
+        """Start reading ``names`` (a layer's hundreds of small expert tensors) in shared reads; with a CUDA ``device``, ``get`` returns them uploaded."""
 
-        if self.split:
-            return self.index[name].get_tensor(name)
+        items = []
+        for name in dict.fromkeys(names):
+            span = self._span(name)
+            items.append((name, span[0], span[1], span[2], span))
+        self.reads.queue(items, device, self._cut)
+
+    @property
+    def ahead(self) -> dict:
+        return self.reads.ahead
+
+    def get(self, name: str):
+        out = self.reads.take(name)
+        return out if out is not None else self._read(name)
+
+    def close(self) -> None:
+        self.reads.close()
+
+    def _span(self, name: str) -> tuple[str, int, int, str, list[int], str]:
+        """(file, first byte, end byte, split kind, shape, dtype) of the bytes this rank reads for ``name``."""
+
+        if self.split:                                    # a rank folder holds the rank's tensors as they are
+            path, begin, n, dtype, shape = self.folder.where[name]
+            return str(path), begin, begin + n, "rep", list(shape), dtype
         file = str(self.dir / self.index[name])
         if file not in self.files:
             self.files[file] = read_header(file)
-            self.maps[file] = np.memmap(file, dtype=np.uint8, mode="r")
         header, base = self.files[file]
         info = header[name]
         kind = rule(name)
         if kind == "drop":
             raise KeyError(f"{name} is not used by the engine")
         a, b = info["data_offsets"]
-        itemsize = DTYPE_BYTES[info["dtype"]]
-        data, shape = split_bytes(self.maps[file][base + a:base + b], info["shape"], itemsize, kind, self.rank)
-        dtype = {"U32": torch.uint32, "I32": torch.int32, "F32": torch.float32, "BF16": torch.bfloat16,
-                 "F16": torch.float16, "I16": torch.int16, "U16": torch.uint16, "U8": torch.uint8,
-                 "I8": torch.int8, "I64": torch.int64, "F64": torch.float64}[info["dtype"]]
-        return torch.from_numpy(np.array(data, copy=True)).view(dtype).reshape(shape)
+        shape = list(info["shape"])
+        if kind == "row" and shape and shape[0] % 2 == 0:   # the rank's rows are one run: read only those
+            per = (b - a) // shape[0] * (shape[0] // 2)
+            a, b, kind, shape = a + self.rank * per, a + (self.rank + 1) * per, "rep", [shape[0] // 2] + shape[1:]
+        return file, base + a, base + b, kind, shape, info["dtype"]
 
+    def _tensor(self, raw: np.ndarray, span: tuple, own: bool):
+        """The rank's tensor from the span's bytes; ``own``: never a view of ``raw`` (a shared read's buffer)."""
+
+        import torch
+
+        _, _, _, kind, shape, dtype = span
+        data, shape = split_bytes(raw, shape, DTYPE_BYTES[dtype], kind, self.rank)
+        if own and np.may_share_memory(data, raw):
+            data = data.copy()
+        return torch.from_numpy(data).view(torch_dtype(dtype)).reshape(shape)
+
+    def _read(self, name: str):
+        if self.split:
+            return self.folder.get(name)
+        span = self._span(name)
+        return self._tensor(self.io.read(span[0], span[1], span[2] - span[1]).numpy(), span, own=False)
+
+    def _cut(self, raw, span: tuple):
+        """The rank's tensor from its span's bytes, a view of a shared read (so copied), on the host or the device."""
+
+        if not raw.is_cuda:
+            return self._tensor(raw.numpy(), span, own=True)
+        _, _, _, kind, shape, dtype = span
+        data, shape = split_device(raw, shape, DTYPE_BYTES[dtype], kind, self.rank)
+        return data.view(torch_dtype(dtype)).reshape(shape)
 
 def write(path: str, tensors: list[tuple[str, str, list[int], np.ndarray]], metadata: dict | None) -> None:
     header: dict = {}

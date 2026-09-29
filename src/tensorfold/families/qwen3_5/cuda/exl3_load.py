@@ -50,43 +50,41 @@ def _where(model_dir: Path) -> dict[str, str]:
     return {name: path.name for path in sorted(model_dir.glob("*.safetensors")) for name in read_header(path)}
 
 
-def _read(model_dir: Path, where: dict[str, str], names: list[str], device: str) -> dict[str, torch.Tensor]:
-    from safetensors import safe_open
+def _files(model_dir: Path, where: dict[str, str]):
+    """Every file's tensors, read with O_DIRECT where allowed (one header parse for the plain tensors and the groups)."""
 
+    from tensorfold.cuda.direct_read import SafeTensors
+
+    return SafeTensors([model_dir / name for name in sorted(set(where.values()))])
+
+
+def _read(files, where: dict[str, str], names: list[str], device: str) -> dict[str, torch.Tensor]:
     by_file: dict[str, list[str]] = {}
     for name in names:
         by_file.setdefault(where[name], []).append(name)
     out: dict[str, torch.Tensor] = {}
-    for file, wanted in sorted(by_file.items()):
-        with safe_open(str(model_dir / file), framework="pt", device=device) as f:
-            for name in wanted:
-                out[name] = f.get_tensor(name)
+    for _, wanted in sorted(by_file.items()):
+        for name in sorted(wanted, key=lambda n: files.where[n][1]):        # in file order
+            out[name] = files.get(name, device)
     return out
 
 
-def _read_groups(model_dir: Path, where: dict[str, str], groups: dict, device: str, workspace=None) -> dict:
+def _read_groups(files, groups: dict, device: str, workspace=None) -> dict:
     """``Exl3`` layers for the groups, each part read from its own file; the stored trellis is dropped after the copy."""
-
-    from contextlib import ExitStack
-
-    from safetensors import safe_open
 
     from tensorfold.cuda.exl3.linear import Exl3Linear
 
     from .weights import Exl3
 
     out: dict = {}
-    with ExitStack() as stack:
-        files = {name: stack.enter_context(safe_open(str(model_dir / name), framework="pt", device=device))
-                 for name in sorted(set(where.values()))}
-        for prefix, meta in sorted(groups.items()):
-            parts = ["trellis", meta.in_scales, meta.out_scales] + (["bias"] if meta.bias else [])
-            t = {p: files[where[f"{prefix}.{p}"]].get_tensor(f"{prefix}.{p}") for p in parts}
-            layer = Exl3Linear.from_tensors(t["trellis"], t[meta.in_scales], t[meta.out_scales], meta.codebook,
-                                            t.get("bias"), device=device)
-            layer.split = PLANS.get((layer.bits, layer.k, layer.n), layer.split)
-            out[prefix] = Exl3(layer, workspace=workspace)
-            del t
+    for prefix, meta in sorted(groups.items()):
+        parts = ["trellis", meta.in_scales, meta.out_scales] + (["bias"] if meta.bias else [])
+        t = {p: files.get(f"{prefix}.{p}", device) for p in parts}
+        layer = Exl3Linear.from_tensors(t["trellis"], t[meta.in_scales], t[meta.out_scales], meta.codebook,
+                                        t.get("bias"), device=device)
+        layer.split = PLANS.get((layer.bits, layer.k, layer.n), layer.split)
+        out[prefix] = Exl3(layer, workspace=workspace)
+        del t
     return out
 
 
@@ -119,8 +117,10 @@ def load_exl3(model_dir: str | Path, device: str = "cuda"):
     if not groups:
         raise ValueError(f"{model_dir} has no EXL3 groups under {prefix!r}")
     where = _where(model_dir)
-    plain = _read(model_dir, where, [n for n in ckpt.plain if not foreign(n)], device)
-    exl3 = _read_groups(model_dir, where, groups, device, Workspace())
+    files = _files(model_dir, where)
+    plain = _read(files, where, [n for n in ckpt.plain if not foreign(n)], device)
+    exl3 = _read_groups(files, groups, device, Workspace())
+    del files                                        # the reader's pinned staging goes with it
 
     def group(name: str):
         key = prefix + name if not name.startswith("lm_head") else name

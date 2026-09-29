@@ -15,15 +15,38 @@ _DT = {"U32": torch.int32, "I32": torch.int32, "BF16": torch.bfloat16, "F16": to
 
 
 class _Reader:
-    """Read checkpoint shards sequentially and release each shard's cached pages."""
+    """Read checkpoint shards sequentially (O_DIRECT where allowed) and release each shard's cached pages."""
 
     def __init__(self, model_dir: Path, device: str) -> None:
+        from tensorfold.cuda.direct_read import ReadAhead, Reader
+
         index = json.loads((model_dir / "model.safetensors.index.json").read_text())
         self.where = index["weight_map"]
         self.dir = model_dir
         self.device = device
         self.headers: dict[str, tuple[int, dict]] = {}
         self.touched: set[str] = set()
+        self.io = Reader()
+        self.reads = ReadAhead(self.io)
+
+    def queue(self, names) -> None:
+        """Start reading ``names`` ahead (neighbours in shared reads, uploaded on a stream of their own): ``get`` takes
+        them, so the next layer's reads overlap this one's packing and the SSD's queue never drains."""
+
+        items = []
+        for name in names:
+            shard = self.where[name]
+            base, header = self._header(shard)
+            begin, end = header[name]["data_offsets"]
+            items.append((name, self.dir / shard, base + begin, base + end, None))
+            self.touched.add(shard)
+        self.reads.queue(items, self.device)
+
+    def drop(self, names) -> None:
+        self.reads.drop(names)
+
+    def close(self) -> None:
+        self.reads.close()
 
     def _header(self, shard: str) -> tuple[int, dict]:
         got = self.headers.get(shard)
@@ -41,19 +64,11 @@ class _Reader:
         base, header = self._header(shard)
         entry = header[name]
         begin, end = entry["data_offsets"]
-        raw = torch.empty((end - begin,), dtype=torch.uint8)
-        view = memoryview(raw.numpy())
-        with open(self.dir / shard, "rb", buffering=0) as f:
-            f.seek(base + begin)
-            at = 0
-            while at < len(view):
-                got = f.readinto(view[at:at + (64 << 20)])
-                if not got:
-                    raise IOError(f"short read of {name}")
-                at += got
+        raw = self.reads.take(name)
+        if raw is None:
+            raw = self.io.read(self.dir / shard, base + begin, end - begin, self.device)
         self.touched.add(shard)
-        dtype = _DT[entry["dtype"]]
-        return raw.view(dtype).reshape(entry["shape"]).to(self.device)
+        return raw.view(_DT[entry["dtype"]]).reshape(entry["shape"])
 
     def has(self, name: str) -> bool:
         return name in self.where

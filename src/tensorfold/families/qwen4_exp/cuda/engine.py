@@ -76,8 +76,22 @@ class FlashNextEngine:
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
             self._same_settings(torch, ids)
-        w = load(model_dir, mtp=self.depth > 0, tp=(rank, 2) if tp == 2 else None,
-                 draft_vocab=draft_vocab if self.depth > 0 else None, ple_on_ssd=ple_on_ssd)
+        from concurrent.futures import wait
+
+        from tensorfold.cuda.direct_read import wait_all
+
+        reads: list = []                              # the n-gram tables' pages, read while the weights load
+        try:
+            w = load(model_dir, mtp=self.depth > 0, tp=(rank, 2) if tp == 2 else None,
+                     draft_vocab=draft_vocab if self.depth > 0 else None, ple_on_ssd=ple_on_ssd,
+                     table_reads=reads if prefetch and not ple_on_ssd else None)
+        except BaseException:
+            wait(reads)                               # a failed load leaves no table read behind it
+            raise
+        tables_read = bool(reads)
+        waited = time.perf_counter()
+        wait_all(reads)                               # done by now (it takes about half the load); raises its error
+        waited = time.perf_counter() - waited
         w.comm = self.comm
         if self.depth > 0 and w.mtp is None:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
@@ -106,9 +120,9 @@ class FlashNextEngine:
             # pinned pages are no longer reclaimable: lock only what the startup budget leaves room for
             room = self.capacity_plan["budget_bytes"] - self.capacity_plan["total_bytes_estimate"]
             for table in tables.values():
+                if not tables_read:
+                    table.prefetch()                  # eight readers first: mlock alone faults the pages in one by one
                 locked = room >= size and table.lock()
-                if not locked:
-                    table.prefetch()
         read_s = time.perf_counter() - started
         captured = self.e.graphs.warm(self.depth + 1) if self.e is not None and self.e.graphs is not None else 0
         started = time.perf_counter()
@@ -129,8 +143,13 @@ class FlashNextEngine:
         where = (f"{streams} streams of {self.context_window} prompt/reply tokens "
                  f"({self.multi.slot_bytes / 2**20:.0f} MiB a stream), eager" if self.concurrent else
                  f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
-        how = ("read from SSD at each lookup" if ple_on_ssd else
-               f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s")
+        if ple_on_ssd:
+            how = "read from SSD at each lookup"
+        elif tables_read:                             # read during the load: the wait after it, then any lock
+            how = f"read alongside the weights ({waited:.1f}s after them)" + (
+                f", locked in memory in {read_s:.1f}s" if locked else "")
+        else:
+            how = f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s"
         kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
               f"decode graphs captured; prompt kernels warmed in {warm_s:.1f}s", flush=True)
