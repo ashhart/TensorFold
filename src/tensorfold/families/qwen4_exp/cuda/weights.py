@@ -404,17 +404,20 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         """RMS/HC gamma as the kernels expect it.
 
         NVFP4 Flash Next stores *layer* HC / QK / PLE norms centered (apply ``1 + w``), but the
-        final ``hyper_connection_mixer.hc_norm`` (and some MTP norms) ship absolute gammas. A
-        checkpoint-wide ``around_one`` flag alone then overshoots the mixer (``1 + 2.75``) and
-        collapses chat logits toward ``<|im_end|>`` / repetition.
+        final ``hyper_connection_mixer.hc_norm`` (and some MTP layer norms) ship absolute gammas.
+        Blind ``1 + w`` on those overshoots the readout and collapses chat to ``<|im_end|>`` / loops.
         """
 
         w = raw(name).float()
         if around_one:
             return w.contiguous()
-        mean = float(w.mean())
-        frac_neg = float((w < 0).float().mean())
-        if mean > 0.75 and frac_neg < 0.05:
+        # Name-scoped absolutes for this revision (avoid mean heuristics that catch late centered layers).
+        if name.endswith("hyper_connection_mixer.hc_norm.weight"):
+            return w.contiguous()
+        if name.startswith("mtp.") and (
+            name.endswith(".q_norm.weight") or name.endswith(".k_norm.weight")
+            or name.endswith("mlp_hyper_connection.hc_norm.weight")
+        ):
             return w.contiguous()
         return (1.0 + w).contiguous()
 
