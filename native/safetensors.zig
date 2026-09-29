@@ -149,6 +149,57 @@ pub fn validateFile(io: std.Io, path: []const u8) !void {
     defer file.deinit();
 }
 
+pub const Checkpoint = struct {
+    allocator: std.mem.Allocator,
+    files: std.ArrayList(File) = .empty,
+    tensors: std.StringHashMap(usize),
+
+    pub fn deinit(c: *Checkpoint) void {
+        c.tensors.deinit();
+        for (c.files.items) |*file| file.deinit();
+        c.files.deinit(c.allocator);
+    }
+    pub fn open(a: std.mem.Allocator, io: std.Io, path: []const u8) !Checkpoint {
+        var c = Checkpoint{ .allocator = a, .tensors = std.StringHashMap(usize).init(a) };
+        errdefer c.deinit();
+        var directory = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+        defer directory.close(io);
+        var names: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (names.items) |name| a.free(name);
+            names.deinit(a);
+        }
+        var iterator = directory.iterate();
+        while (try iterator.next(io)) |entry| {
+            if (!std.mem.startsWith(u8, entry.name, "model") or !std.mem.endsWith(u8, entry.name, ".safetensors")) continue;
+            const name = try a.dupe(u8, entry.name);
+            errdefer a.free(name);
+            try names.append(a, name);
+        }
+        std.mem.sort([]const u8, names.items, {}, struct {
+            fn less(_: void, x: []const u8, y: []const u8) bool {
+                return std.mem.lessThan(u8, x, y);
+            }
+        }.less);
+        if (names.items.len == 0) return error.MissingWeights;
+        var buffer: [4096]u8 = undefined;
+        for (names.items) |name| {
+            var file = try File.open(a, io, try std.fmt.bufPrint(&buffer, "{s}/{s}", .{ path, name }));
+            c.files.append(a, file) catch |err| {
+                file.deinit();
+                return err;
+            };
+            var keys = file.header.tensors.keyIterator();
+            while (keys.next()) |key| {
+                const entry = try c.tensors.getOrPut(key.*);
+                if (entry.found_existing) return error.DuplicateWeight;
+                entry.value_ptr.* = c.files.items.len - 1;
+            }
+        }
+        return c;
+    }
+};
+
 fn fixture(io: std.Io, path: []const u8, prefix: u64, json: []const u8, payload: []const u8) !void {
     const file = try std.Io.Dir.cwd().createFile(io, path, .{});
     defer file.close(io);
@@ -161,6 +212,12 @@ fn fixture(io: std.Io, path: []const u8, prefix: u64, json: []const u8, payload:
 fn openAllocated(a: std.mem.Allocator, io: std.Io, path: []const u8) !void {
     var file = try File.open(a, io, path);
     defer file.deinit();
+}
+fn openCheckpointAllocated(a: std.mem.Allocator, io: std.Io, path: []const u8) !void {
+    var checkpoint = try Checkpoint.open(a, io, path);
+    defer checkpoint.deinit();
+    try std.testing.expectEqual(@as(usize, 1), checkpoint.files.items.len);
+    try std.testing.expectEqual(@as(usize, 2), checkpoint.tensors.count());
 }
 pub fn checkFiles(io: std.Io, dir: []const u8) !void {
     try std.Io.Dir.cwd().createDirPath(io, dir);
@@ -207,6 +264,16 @@ pub fn checkFiles(io: std.Io, dir: []const u8) !void {
     try std.testing.expectError(error.TruncatedSafetensors, File.open(a, io, path));
     const missing = try std.fmt.bufPrint(&buffer, "{s}/missing.safetensors", .{dir});
     try std.testing.expectError(error.FileNotFound, File.open(a, io, missing));
+    const model = try std.fmt.allocPrint(a, "{s}/model.safetensors", .{dir});
+    defer a.free(model);
+    defer std.Io.Dir.cwd().deleteFile(io, model) catch {};
+    try fixture(io, model, valid.len, valid, payload);
+    try std.testing.checkAllAllocationFailures(a, openCheckpointAllocated, .{ io, dir });
+    const duplicate = try std.fmt.allocPrint(a, "{s}/model-duplicate.safetensors", .{dir});
+    defer a.free(duplicate);
+    defer std.Io.Dir.cwd().deleteFile(io, duplicate) catch {};
+    try fixture(io, duplicate, valid.len, valid, payload);
+    try std.testing.expectError(error.DuplicateWeight, Checkpoint.open(a, io, dir));
     std.debug.print("PASS: safetensors positional rows, missing/truncated files, oversized headers, invalid row sizes, and every open allocation failure\n", .{});
 }
 

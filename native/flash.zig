@@ -146,6 +146,7 @@ pub const Model = struct {
         const cfg = try std.json.parseFromSlice(std.json.Value, mx.allocator, bytes, .{});
         defer cfg.deinit();
         try @import("config.zig").flash(cfg.value);
+        m.weights.flash_drafts = drafts;
         try m.weights.load(io, dir, "language_model.");
         m.mtp = drafts;
         if (drafts and !m.weights.has("mtp.fc_hidden.weight")) return error.MissingDraftHead;

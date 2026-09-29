@@ -644,6 +644,108 @@ def bonsai_widening_fixture(directory, output):
     print('Saved Bonsai widening policy and bit-exact code conversion fixtures')
 
 
+def flash_checkpoint_fixture(output):
+    import mlx.core as mx
+    from tensorfold.families.qwen4_exp.model import sanitize
+    from tensorfold.families.qwen4_exp.mtp import sanitize as sanitize_mtp
+    from tensorfold.families.qwen4_exp.host_table import from_checkpoint
+
+    output.mkdir(parents=True, exist_ok=True)
+    root = "language_model.model.layers.1.ple.ple_embedding."
+    tables = []
+    ple = {}
+    for shard in range(128):
+        values = mx.sin(mx.arange(3 * 160, dtype=mx.float32) * .13 + shard).reshape(3, 160).astype(mx.bfloat16)
+        tensors = mx.quantize(values, group_size=32, bits=4)
+        tables.append(tensors)
+        rows = mx.arange(16) % 3
+        ple[f"ple-{shard}"] = mx.dequantize(*(t[rows] for t in tensors), group_size=32, bits=4)
+    cases = []
+    for style in ("shard_", "shards.", "mixed"):
+        for prefix in ("language_model.mtp.", "mtp."):
+            for indexed in (False, True):
+                name = f"{style}-{prefix}-{int(indexed)}"
+                folder = output / name
+                folder.mkdir(exist_ok=True)
+                for path in folder.glob("model*.safetensors"):
+                    path.unlink()
+                raw = {"language_model.model.norm.weight": mx.array([1, 2, 3, 4], mx.bfloat16),
+                       root + "layer_multipliers": mx.arange(16, dtype=mx.int64) + (1 << 60),
+                       root + "ngram_embedding.weight_scale": mx.ones((2,), mx.bfloat16),
+                       "visual.weight": mx.array([999]),
+                       "language_model.other.mtp.weight": mx.array([888]),
+                       prefix + "fc_hidden.weight": mx.array([[3, 4], [5, 6]], mx.bfloat16)}
+                for shard, tensors in enumerate(tables):
+                    spelling = ("shard_" if shard % 2 else "shards.") if style == "mixed" else style
+                    for suffix, value in zip(("weight", "scales", "biases"), tensors):
+                        raw[f"{root}ngram_embedding.{spelling}{shard}.{suffix}"] = value
+                main, extras = sanitize(raw)
+                expected = {key.replace(".ple_embedding.shards.", ".ple_embedding.ngram_embedding.shard_"): value
+                            for key, value in (main | extras).items()}
+                mx.save_safetensors(str(folder / "expected-0.safetensors"), expected)
+                expected.update({"mtp." + key: value for key, value in sanitize_mtp(raw).items()})
+                mx.save_safetensors(str(folder / "expected-1.safetensors"), expected)
+                weight_map = {}
+                for part in (0, 1):
+                    filename = f"model-{part + 1:05}-of-00002.safetensors" if indexed else f"model-{'mtp' if part else 'main'}.safetensors"
+                    weights = {key: value for key, value in raw.items() if key.startswith(prefix) == bool(part)}
+                    mx.save_safetensors(str(folder / filename), weights)
+                    weight_map.update({key: filename for key in weights})
+                index = folder / "model.safetensors.index.json"
+                if indexed:
+                    index.write_text(json.dumps({"weight_map": weight_map}))
+                else:
+                    index.unlink(missing_ok=True)
+                table = from_checkpoint(folder, root + "ngram_embedding", 128, ssd=True)
+                try:
+                    for shard in range(128):
+                        w, s, b = table.gather(shard * 3 + np.arange(16) % 3)
+                        gathered = mx.dequantize(mx.array(w), mx.array(s).view(mx.bfloat16), mx.array(b).view(mx.bfloat16), group_size=32, bits=4)
+                        assert mx.array_equal(gathered, ple[f"ple-{shard}"]).item()
+                finally:
+                    table.close()
+                mx.save_safetensors(str(folder / "ple.safetensors"), ple)
+                cases.append(dict(name=name, indexed=indexed))
+    for case in ("missing", "split", "duplicate"):
+        folder = output / ("ple-" + case)
+        folder.mkdir(exist_ok=True)
+        raw = {f"{root}ngram_embedding.shards.{shard}.{suffix}": value
+               for shard, tensors in enumerate(tables)
+               for suffix, value in zip(("weight", "scales", "biases"), tensors)}
+        key = root + "ngram_embedding.shards.127.scales"
+        second = {}
+        if case == "duplicate":
+            second[key] = raw[key]
+        else:
+            value = raw.pop(key)
+            if case == "split":
+                second[key] = value
+        mx.save_safetensors(str(folder / "model-00001-of-00002.safetensors"), raw)
+        mx.save_safetensors(str(folder / "model-00002-of-00002.safetensors"), second or {"unused": mx.array([0])})
+        try:
+            table = from_checkpoint(folder, root + "ngram_embedding", 128, ssd=True)
+        except ValueError:
+            pass
+        else:
+            table.close()
+            raise AssertionError(f"upstream accepted {case} PLE tensors")
+        cases.append(dict(name=folder.name, indexed=False, ple_error=case))
+    for name, value in (("zero-scale", 0.), ("nan-scale", float("nan")), ("inf-scale", float("inf"))):
+        folder = output / name
+        folder.mkdir(exist_ok=True)
+        raw = {root + "ngram_embedding.weight_scale": mx.array([1., value], mx.float32)}
+        try:
+            sanitize(raw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("upstream accepted a non-identity PLE scale")
+        mx.save_safetensors(str(folder / "model.safetensors"), raw)
+        cases.append(dict(name=name, indexed=False, scale_error=True))
+    (output / "cases.json").write_text(json.dumps(cases))
+    print(f"Exported {len(cases)} Flash checkpoint naming/scale fixtures")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
@@ -666,6 +768,7 @@ def main():
     p.add_argument("--synthetic-deepseek-packed", action="store_true")
     p.add_argument("--conversion-fixtures", action="store_true")
     p.add_argument("--bonsai-widening", action="store_true")
+    p.add_argument("--flash-checkpoint", action="store_true")
     p.add_argument("--synthetic-dspark", action="store_true")
     p.add_argument("--synthetic-dspark-sorted", action="store_true")
     p.add_argument("--synthetic-dspark-wide", action="store_true")
@@ -678,6 +781,9 @@ def main():
     p.add_argument("--trace-layers", action="store_true")
     p.add_argument("--state-directory", type=Path)
     args = p.parse_args()
+    if args.flash_checkpoint:
+        flash_checkpoint_fixture(args.output)
+        return
     if args.bonsai_widening:
         bonsai_widening_fixture(args.model, args.output)
         return

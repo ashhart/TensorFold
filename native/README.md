@@ -135,6 +135,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Checks | Arguments | Requirements |
 | --- | --- | --- |
 | Host unit and checkpoint-file checks | `test test-checkpoint-files -Doptimize=safe -j1` | Native libraries; no weights or GPU execution |
+| Flash checkpoint names and PLE loading | `test-flash-checkpoint -Doptimize=safe -j1` | Metal and Python; small synthetic PLE/MTP checkpoints |
 | Setup, sync and dependency guards | `test-setup test-sync-upstream test-dependencies test-upstream-coverage -j1` | Python for dependency tests; no models |
 | Runtime loading and hardware capabilities | `test-runtime -Doptimize=safe -j1` | CPU arithmetic always checked; unavailable Metal reported explicitly |
 | Hardware-selected Metal smoke suite | `test-metal-smoke -Doptimize=safe -j1` | Synthetic SIMD checks, plus tensor/GLM checks when supported; fails if Metal is unavailable |

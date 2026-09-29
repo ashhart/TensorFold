@@ -139,6 +139,12 @@ pub fn build(b: *std.Build) void {
     b.step("test-bonsai", "Compare rotated projection, inverse embedding and dense gate kernels with upstream").dependOn(&bonsai.step);
     metal_tests.dependOn(&bonsai.step);
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const flash_names_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", "build/native-checks/flash-checkpoint", "--flash-checkpoint", "--output", "build/native-checks/flash-checkpoint" });
+    const flash_names = b.addRunArtifact(exe);
+    flash_names.addArgs(&.{ "check-flash-checkpoint", "build/native-checks/flash-checkpoint" });
+    flash_names.step.dependOn(&flash_names_fixture.step);
+    b.step("test-flash-checkpoint", "Compare Flash PLE/MTP checkpoint names and table reads with upstream").dependOn(&flash_names.step);
+    metal_tests.dependOn(&flash_names.step);
     const bonsai_model = b.fmt("{s}/Ternary-Bonsai-2-27B-mlx-2bit", .{model_root});
     const bonsai_pack_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", bonsai_model, "--bonsai-widening", "--output", "build/native-checks/bonsai-pack" });
     const bonsai_pack = b.addRunArtifact(exe);

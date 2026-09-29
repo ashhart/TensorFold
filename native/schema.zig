@@ -110,13 +110,14 @@ pub fn checkCheckpoint(kind: Kind, io: std.Io, dir: []const u8) !void {
     const cfg: ?std.json.Value = if (config) |parsed| parsed.value else null;
     const index: ?std.json.Parsed(std.json.Value) = if (kind == .dflash) null else blk: {
         const bytes = @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/model.safetensors.index.json", .{dir})) catch |err| {
-            if ((kind == .qwen or kind == .gemma) and err == error.FileNotFound) break :blk null;
+            if ((kind == .qwen or kind == .gemma or kind == .flash) and err == error.FileNotFound) break :blk null;
             return err;
         };
         defer a.free(bytes);
         break :blk try std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always });
     };
     defer if (index) |parsed| parsed.deinit();
+    if (kind == .flash and index == null) return checkFlashCheckpoint(io, dir);
     var files: std.ArrayList(safe.File) = .empty;
     defer {
         for (files.items) |*file| file.deinit();
@@ -129,12 +130,14 @@ pub fn checkCheckpoint(kind: Kind, io: std.Io, dir: []const u8) !void {
         if (try adjusted(spec, cfg, &geometry, .BF16) == null) continue;
         var buffer: [512]u8 = undefined;
         const mtp = kind == .nemotron and std.mem.startsWith(u8, spec.name, "mtp.");
-        const key = if (mtp) spec.name[4..] else try std.fmt.bufPrint(&buffer, "{s}{s}", .{ if (kind == .qwen or kind == .flash or kind == .gemma) "language_model." else "", spec.name });
+        var key = if (mtp) spec.name[4..] else try std.fmt.bufPrint(&buffer, "{s}{s}", .{ if (kind == .qwen or kind == .flash or kind == .gemma) "language_model." else "", spec.name });
+        var alias: [512]u8 = undefined;
         const filename = if (mtp) "mtp-4bit.safetensors" else if (index == null) "model.safetensors" else blk: {
             const root = index.?.value;
             if (root != .object) return error.InvalidWeightIndex;
             const map = root.object.get("weight_map") orelse return error.InvalidWeightIndex;
             if (map != .object) return error.InvalidWeightIndex;
+            if (kind == .flash) key = try @import("flash_names.zig").resolve(map.object, &alias, key);
             const value = map.object.get(key) orelse return error.MissingWeight;
             if (value != .string) return error.InvalidWeightIndex;
             break :blk value.string;
@@ -158,6 +161,25 @@ pub fn checkCheckpoint(kind: Kind, io: std.Io, dir: []const u8) !void {
         };
     }
     std.debug.print("PASS: {s}: all {d} tensor names, shapes, dtypes and index references match the native recipe\n", .{ @tagName(kind), specs.value.len });
+}
+
+fn checkFlashCheckpoint(io: std.Io, dir: []const u8) !void {
+    var checkpoint = try @import("safetensors.zig").Checkpoint.open(mx.allocator, io, dir);
+    defer checkpoint.deinit();
+    const specs = try std.json.parseFromSlice([]const Spec, mx.allocator, source(.flash), .{});
+    defer specs.deinit();
+    for (specs.value) |spec| {
+        var name: [512]u8 = undefined;
+        var alias: [512]u8 = undefined;
+        const key = @import("flash_names.zig").resolve(checkpoint.tensors, &alias, try std.fmt.bufPrint(&name, "language_model.{s}", .{spec.name})) catch |err| {
+            if (err == error.MissingWeight and std.mem.startsWith(u8, spec.name, "mtp.")) return error.MissingDraftHead;
+            return err;
+        };
+        const file = checkpoint.tensors.get(key) orelse return error.MissingWeight;
+        const tensor = checkpoint.files.items[file].header.tensors.get(key) orelse return error.MissingWeight;
+        try check(spec, .{ .dtype = tensor.dtype, .shape = tensor.shape() });
+    }
+    std.debug.print("PASS: flash: all {d} tensor names, shapes and dtypes match the native recipe\n", .{specs.value.len});
 }
 test "mixed affine schema follows config and rejects malformed quantization tensors" {
     const config = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,

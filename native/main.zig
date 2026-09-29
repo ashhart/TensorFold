@@ -15,6 +15,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     @import("bonsai.zig").memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB");
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-checkpoint")) return @import("flash_names.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-bonsai-pack")) return @import("bonsai.zig").check(io, args[2], args[3]);
     if (args.len == 2 and std.mem.eql(u8, args[1], "check-request-state")) return @import("request_state_checks.zig").check();
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-session-images")) return @import("session_checks.zig").checkImages(io, args[2], args[3]);

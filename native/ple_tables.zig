@@ -2,7 +2,7 @@
 const std = @import("std");
 const mx = @import("mlx.zig");
 const safe = @import("safetensors.zig");
-const Ref = struct { file: usize, tensor: safe.Tensor };
+const Ref = struct { file: usize, tensor: safe.Tensor, name: []const u8 };
 pub const Tables = struct {
     resident: ?@import("ple_resident.zig").Resident = null,
     files: std.ArrayList(safe.File) = .empty,
@@ -18,48 +18,60 @@ pub const Tables = struct {
         t.resident = try @import("ple_resident.zig").Resident.init(t);
     }
     pub fn init(io: std.Io, dir: []const u8) !Tables {
-        var t = Tables{};
+        var t = try open(io, dir);
         errdefer t.deinit();
-        var path: [4096]u8 = undefined;
-        const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/model.safetensors.index.json", .{dir}));
-        defer mx.allocator.free(bytes);
-        const parsed = try std.json.parseFromSlice(std.json.Value, mx.allocator, bytes, .{});
-        defer parsed.deinit();
-        if (parsed.value != .object) return error.InvalidWeightIndex;
-        const index = parsed.value.object.get("weight_map") orelse return error.InvalidWeightIndex;
-        if (index != .object) return error.InvalidWeightIndex;
-        var files = std.StringHashMap(usize).init(mx.allocator);
-        defer files.deinit();
-        t.starts[0] = 0;
-        for (0..128) |shard| {
-            var name: [256]u8 = undefined;
-            inline for (.{ "weight", "scales", "biases" }, 0..) |suffix, part| {
-                const key = try std.fmt.bufPrint(&name, "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}.{s}", .{ shard, suffix });
-                const filename = index.object.get(key) orelse return error.MissingPLEWeight;
-                if (filename != .string) return error.InvalidWeightIndex;
-                try safe.shardName(filename.string);
-                const file_index = files.get(filename.string) orelse blk: {
-                    var file = try safe.File.open(mx.allocator, io, try std.fmt.bufPrint(&path, "{s}/{s}", .{ dir, filename.string }));
-                    t.files.append(mx.allocator, file) catch |err| {
-                        file.deinit();
-                        return err;
-                    };
-                    const number = t.files.items.len - 1;
-                    try files.put(filename.string, number);
-                    break :blk number;
-                };
-                const tensor = t.files.items[file_index].header.tensors.get(key) orelse return error.MissingPLEWeight;
-                if (tensor.rank != 2 or tensor.dims[0] <= 0 or tensor.dims[1] != (if (part == 0) @as(i32, 20) else 5)) return error.InvalidTensorShape;
-                if (tensor.dtype != (if (part == 0) safe.DType.U32 else safe.DType.BF16)) return error.InvalidTensorDType;
-                t.rows[shard][part] = .{ .file = file_index, .tensor = tensor };
-                if (part > 0 and tensor.dims[0] != t.rows[shard][0].tensor.dims[0]) return error.InvalidTensorShape;
-            }
-            t.starts[shard + 1] = t.starts[shard] + t.rows[shard][0].tensor.dims[0];
-        }
         const n = @import("ngram.zig").NGram.init();
         const total = std.mem.alignForward(i64, n.offsets[15] + n.sizes[15], 128);
         if (t.starts[128] != total) return error.InvalidTensorShape;
         return t;
+    }
+    fn open(io: std.Io, dir: []const u8) !Tables {
+        var t = Tables{};
+        errdefer t.deinit();
+        var checkpoint = try safe.Checkpoint.open(mx.allocator, io, dir);
+        defer checkpoint.deinit();
+        t.starts[0] = 0;
+        for (0..128) |shard| {
+            var name: [256]u8 = undefined;
+            var base_buffer: [256]u8 = undefined;
+            const base = try @import("flash_names.zig").pleBase(checkpoint.tensors, &base_buffer, shard);
+            inline for (.{ "weight", "scales", "biases" }, 0..) |suffix, part| {
+                const key = try std.fmt.bufPrint(&name, "{s}.{s}", .{ base, suffix });
+                const file_index = checkpoint.tensors.get(key) orelse return error.MissingPLEWeight;
+                if (part > 0 and file_index != t.rows[shard][0].file) return error.SplitPLEWeight;
+                const entry = checkpoint.files.items[file_index].header.tensors.getEntry(key) orelse return error.MissingPLEWeight;
+                const tensor = entry.value_ptr.*;
+                if (tensor.rank != 2 or tensor.dims[0] <= 0 or tensor.dims[1] != (if (part == 0) @as(i32, 20) else 5)) return error.InvalidTensorShape;
+                if (tensor.dtype != (if (part == 0) safe.DType.U32 else safe.DType.BF16)) return error.InvalidTensorDType;
+                t.rows[shard][part] = .{ .file = file_index, .tensor = tensor, .name = entry.key_ptr.* };
+                if (part > 0 and tensor.dims[0] != t.rows[shard][0].tensor.dims[0]) return error.InvalidTensorShape;
+            }
+            t.starts[shard + 1] = t.starts[shard] + t.rows[shard][0].tensor.dims[0];
+        }
+        t.files = checkpoint.files;
+        checkpoint.files = .empty;
+        return t;
+    }
+    pub fn checkAliases(io: std.Io, dir: []const u8, expected: *const @import("checkpoint.zig").Store) !void {
+        var t = try open(io, dir);
+        defer t.deinit();
+        var kernels = mx.Kernels.init();
+        defer kernels.deinit();
+        try t.makeResident();
+        for (0..128) |shard| {
+            var s = mx.Scope{};
+            defer s.deinit();
+            var ids: [16]i64 = undefined;
+            const size = t.starts[shard + 1] - t.starts[shard];
+            for (&ids, 0..) |*id, i| id.* = t.starts[shard] + @mod(@as(i64, @intCast(i)), size);
+            const bounded = try t.gather(&s, &ids);
+            const input = try s.cast(try s.data(&ids, &.{ 1, 16 }, mx.c.MLX_INT64), mx.c.MLX_UINT32);
+            const resident = try t.resident.?.gather(&kernels, &s, input);
+            var key: [64]u8 = undefined;
+            const oracle = expected.arrays.get(try std.fmt.bufPrint(&key, "ple-{d}", .{shard})) orelse return error.MissingWeight;
+            try @import("sampling_checks.zig").equal(&s, oracle, bounded);
+            try @import("sampling_checks.zig").equal(&s, try s.reshape(oracle, &.{ 1, 2560 }), resident);
+        }
     }
     pub fn locate(t: *const Tables, id: i64) !struct { shard: usize, row: usize } {
         if (id < 0 or id >= t.starts[128]) return error.InvalidToken;
@@ -104,8 +116,6 @@ pub const Tables = struct {
             defer oracle.deinit();
             // MLX independently parses/loads the complete packed tensor; it is freed
             // after this shard so this diagnostic also has a bounded working set.
-            var name: [256]u8 = undefined;
-            const key = try std.fmt.bufPrint(&name, "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shard_{d}", .{shard});
             var files: [3]usize = @splat(std.math.maxInt(usize));
             for (tables.rows[shard], 0..) |ref, part| {
                 if (std.mem.indexOfScalar(usize, files[0..part], ref.file) == null) try oracle.loadFile(io, tables.files.items[ref.file].path, "", "");
@@ -115,7 +125,10 @@ pub const Tables = struct {
             const rows = [_]i32{ 0, 1, @intCast(@divTrunc(end, 2)), @intCast(end - 2), @intCast(end - 1) };
             var ids: [5]i64 = undefined;
             for (rows, &ids) |row, *id| id.* = tables.starts[shard] + row;
-            try @import("sampling_checks.zig").equal(&scope, try oracle.embed(&scope, key, &rows), try tables.gather(&scope, &ids));
+            const ix = try scope.ints(&rows);
+            var selected: [3]mx.Array = undefined;
+            for (tables.rows[shard], &selected) |ref, *array| array.* = try scope.take(try oracle.get(ref.name), ix, 0);
+            try @import("sampling_checks.zig").equal(&scope, try cp.dequantize(&scope, selected, 32), try tables.gather(&scope, &ids));
         }
         std.debug.print("PASS: 640 PLE rows (first, last, adjacent and middle) across all 128 shards exactly match independent MLX reads/dequantization\n", .{});
     }

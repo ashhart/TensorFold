@@ -8,6 +8,7 @@ pub const Store = struct {
     arrays: std.StringHashMap(A),
     dense: std.StringHashMap(lanes.Linear),
     group: i32,
+    flash_drafts: ?bool = null,
     pub fn init(group: i32) Store {
         return .{ .arrays = std.StringHashMap(A).init(mx.allocator), .dense = std.StringHashMap(lanes.Linear).init(mx.allocator), .group = group };
     }
@@ -50,6 +51,9 @@ pub const Store = struct {
     pub fn has(w: *Store, key: []const u8) bool {
         return w.arrays.contains(key);
     }
+    fn accepts(w: *const Store, key: []const u8, strip: []const u8) bool {
+        return if (w.flash_drafts) |drafts| @import("flash_names.zig").accepts(key, drafts) else std.mem.startsWith(u8, key, strip);
+    }
     pub fn loadFile(w: *Store, io: std.Io, path: []const u8, prefix: []const u8, strip: []const u8) !void {
         try @import("safetensors.zig").validateFile(io, path);
         const z = try mx.allocator.dupeSentinel(u8, path, 0);
@@ -70,9 +74,18 @@ pub const Store = struct {
             defer mx.free(value);
             if (rc != 0 or key == null) break;
             const raw = std.mem.span(key);
-            if (!std.mem.startsWith(u8, raw, strip)) continue;
+            if (!w.accepts(raw, strip)) continue;
             var buf: [512]u8 = undefined;
-            const name = try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, raw[strip.len..] });
+            const name = if (w.flash_drafts != null) try @import("flash_names.zig").normalize(&buf, raw) else try std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, raw[strip.len..] });
+            if (w.flash_drafts != null and std.mem.endsWith(u8, name, "ngram_embedding.weight_scale")) {
+                var scope = mx.Scope{};
+                defer scope.deinit();
+                const scale = try scope.cast(value, mx.f32t);
+                try mx.eval(scale);
+                for (mx.c.mlx_array_data_float32(scale)[0..mx.c.mlx_array_size(scale)]) |v|
+                    if (v != 1.0) return error.UnsupportedPLEScale;
+                continue;
+            }
             if (w.has(name)) return error.DuplicateWeight;
             try w.put(name, value);
         }
@@ -95,7 +108,7 @@ pub const Store = struct {
         while (it.next()) |e| {
             if (e.value_ptr.* != .string) return error.InvalidWeightIndex;
             try @import("safetensors.zig").shardName(e.value_ptr.string);
-            if (std.mem.startsWith(u8, e.key_ptr.*, strip)) try shards.put(e.value_ptr.string, {});
+            if (w.accepts(e.key_ptr.*, strip)) try shards.put(e.value_ptr.string, {});
         }
         var files = shards.keyIterator();
         if (shards.count() == 0) return error.MissingWeights;
@@ -105,6 +118,12 @@ pub const Store = struct {
         }
     }
     fn loadUnindexed(w: *Store, io: std.Io, dir: []const u8, strip: []const u8) !void {
+        if (w.flash_drafts != null) {
+            var checkpoint = try @import("safetensors.zig").Checkpoint.open(mx.allocator, io, dir);
+            defer checkpoint.deinit();
+            for (checkpoint.files.items) |file| try w.loadFile(io, file.path, "", strip);
+            return;
+        }
         var directory = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
         defer directory.close(io);
         var it = directory.iterate();

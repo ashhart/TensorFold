@@ -104,7 +104,40 @@ def main():
                 raise AssertionError(f"{kind}/{case}: expected {expected}, got {result.returncode}\n{result.stderr}")
             count += 1
             print(f"PASS: {kind}/{case}: {expected}", flush=True)
-    print(f"PASS: {count} checkpoint metadata failure cases")
+        if kind == "flash":
+            for aliases, indexed in ((False, False), (True, False), (True, True)):
+                directory = args.output / kind / f"names-{int(aliases)}-index-{int(indexed)}"
+                directory.mkdir(parents=True, exist_ok=True)
+                for path in directory.iterdir():
+                    if path.is_symlink() or path.suffix in (".json", ".safetensors"):
+                        path.unlink()
+                def renamed(key):
+                    if not aliases:
+                        return key
+                    if key.startswith("language_model.mtp."):
+                        return key[len("language_model."):]
+                    return key.replace("ngram_embedding.shard_", "ngram_embedding.shards.")
+                for path in source.glob("model*.safetensors"):
+                    original = header(path)
+                    changed = {renamed(key): value for key, value in original.items()}
+                    target = directory / path.name
+                    if original == changed:
+                        target.symlink_to(path)
+                        continue
+                    encoded = json.dumps(changed, separators=(",", ":")).encode()
+                    payload_size = max(v["data_offsets"][1] for k, v in changed.items() if k != "__metadata__")
+                    with target.open("wb") as stream:
+                        stream.write(struct.pack("<Q", len(encoded)))
+                        stream.write(encoded)
+                        stream.truncate(8 + len(encoded) + payload_size)
+                if indexed:
+                    (directory / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {renamed(key): value for key, value in index["weight_map"].items()}}))
+                result = subprocess.run([str(args.executable.resolve()), "check-model-schema", kind, str(directory)], text=True, capture_output=True)
+                if result.returncode:
+                    raise AssertionError(f"Flash aliases={aliases} indexed={indexed}: {result.stderr}")
+                count += 1
+                print(f"PASS: flash/aliases={aliases}/indexed={indexed}", flush=True)
+    print(f"PASS: {count} checkpoint metadata rejection and alias cases")
 
 
 if __name__ == "__main__":
