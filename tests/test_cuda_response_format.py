@@ -307,11 +307,11 @@ class GrammarEngine:
         self.calls = []
 
     def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True, constraint=None):
-        import torch
-
         self.calls.append({"draft": draft, "constraint": constraint})
         for t in _ids(self.content) + [STOP]:
-            if constraint is not None:
+            if constraint is not None:                   # a plain request needs no PyTorch, as on a Mac
+                import torch
+
                 logits = torch.zeros(1, V)
                 logits[0, t] = 1.0
                 t = int(constraint.mask(logits).argmax())

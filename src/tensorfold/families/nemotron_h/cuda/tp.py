@@ -18,7 +18,7 @@ from .engine import Engine
 from .weights import MTP, Attention, Block, Mamba, MoE, Weights
 
 WORLD = 2
-CANDIDATES = 28      # vocabulary candidates a rank shares a row
+CANDIDATES = 28      # vocabulary candidates a rank shares a row at least (top_k + MARGIN when more)
 
 
 def _rows(q: QLinear, index: torch.Tensor) -> QLinear:
@@ -162,8 +162,6 @@ class TPEngine(Engine):
         self.full = w.extra["full_config"]
         self.rank = w.extra["rank"]
         self.local_head = w.extra["local_head"]
-        self.cand_vals = torch.zeros((self.max_rows, WORLD * CANDIDATES), dtype=torch.float32, device=self.device)
-        self.cand_ids = torch.zeros((self.max_rows, WORLD * CANDIDATES), dtype=torch.int64, device=self.device)
 
     def norm(self, x, delta, weight):
         if delta is None or delta[0] != "ranks":
@@ -216,14 +214,29 @@ class TPEngine(Engine):
         logits = G.prefill_dense(normed, self.local_head)
         if self.masked:
             logits = logits + self.bias[:1]
-        vals, ids = torch.topk(logits.float(), CANDIDATES, dim=-1)
+        self._sample_shards(logits, self._meta_at(self.pos - 1), self.p_sampled)
+
+    def _sample_shards(self, logits, meta, out) -> None:
+        """The draw one rank makes over the whole vocabulary, from each rank's shard of ``logits``: its top_k +
+        MARGIN best (the union holds the vocabulary's), or with top_k off its whole shard for the nucleus."""
+
+        s = self.params.sampling
+        rows = logits.shape[0]
+        top_k = CANDIDATES - S.MARGIN if s is None or s.temperature <= 0 else int(s.top_k)
+        if not top_k:
+            got = self.gather(logits.float().contiguous())                 # [2 * rows, n], rank 0's rows first
+            S.nucleus(torch.cat([got[:rows], got[rows:]], dim=1), meta, self.params, out)
+            return
+        if top_k + S.MARGIN > 256:
+            raise ValueError("the GPU sampler takes top_k + margin <= 256 candidates")
+        count = min(self.local_head.n, max(CANDIDATES, top_k + S.MARGIN))
+        vals, ids = torch.topk(logits.float(), count, dim=-1)
         ids = ids + self.rank * self.local_head.n
         both = self.gather(torch.cat([vals.view(torch.int32), ids.view(torch.int32)], dim=1)).view(
-            WORLD, 1, 3 * CANDIDATES)
-        v = both[:, :, :CANDIDATES].contiguous().view(torch.float32)
-        i = both[:, :, CANDIDATES:].contiguous().view(torch.int64)
-        S.sample_candidates(torch.cat([v[0], v[1]], dim=1), torch.cat([i[0], i[1]], dim=1),
-                            self._meta_at(self.pos - 1), self.params, self.p_sampled)
+            WORLD, rows, 3 * count)
+        v = both[:, :, :count].contiguous().view(torch.float32)
+        i = both[:, :, count:].contiguous().view(torch.int64)
+        S.sample_candidates(torch.cat([v[0], v[1]], dim=1), torch.cat([i[0], i[1]], dim=1), meta, self.params, out)
 
     def _forward(self, rows: int) -> None:
         w, c = self.w, self.c
@@ -245,15 +258,7 @@ class TPEngine(Engine):
         logits = G.dense(normed, self.local_head, xs)
         if self.masked:
             logits = logits + self.bias[:rows]
-        vals, ids = torch.topk(logits.float(), CANDIDATES, dim=-1)
-        ids = ids + self.rank * self.local_head.n
-        both = self.gather(torch.cat([vals.view(torch.int32), ids.view(torch.int32)], dim=1)).view(
-            WORLD, rows, 3 * CANDIDATES)
-        v = both[:, :, :CANDIDATES].contiguous().view(torch.float32)
-        i = both[:, :, CANDIDATES:].contiguous().view(torch.int64)
-        self.cand_vals[:rows].copy_(torch.cat([v[0], v[1]], dim=1))
-        self.cand_ids[:rows].copy_(torch.cat([i[0], i[1]], dim=1))
-        S.sample_candidates(self.cand_vals[:rows], self.cand_ids[:rows], self.meta, self.params, self.sampled[:rows])
+        self._sample_shards(logits, self.meta, self.sampled[:rows])
         self._host_sampled[:rows].copy_(self.sampled[:rows], non_blocking=True)
 
 

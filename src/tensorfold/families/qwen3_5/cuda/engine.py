@@ -173,8 +173,10 @@ class Qwen27Engine:
         return not (stops and len(prompt) - stops[-1] < MIN_GAP)
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
-                 draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None):
-        """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``: past end tokens (``ignore_eos``)."""
+                 draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
+        """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``:
+        past end tokens (``ignore_eos``); ``background``: under ``--parallel``, after the other requests and yielding a
+        lane to one that waits."""
 
         from .decode import draft_decode, prefill
 
@@ -186,6 +188,7 @@ class Qwen27Engine:
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         grammar = {} if constraint is None else {"constraint": constraint}     # a plain request calls as before
         if self.scheduler is not None:
+            grammar.update({"background": True} if background else {})
             if vision is None:
                 return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
                                              **grammar)
@@ -264,18 +267,18 @@ class Qwen27Engine:
             self.multi.follow()
             return
 
-        from .decode_tp import _share, decode_tp, prefill_tp, unpack_sampling
+        from .decode_tp import SAMPLING_WORDS as W, _share, decode_tp, prefill_tp, unpack_sampling
         from tensorfold.vision.qwen_cuda import broadcast_encoded
 
         dev = self.w.norm.device
         while True:
             header = _share(None, 1, dev)
             _, max_tokens, cached, draft = header[:4]
-            sampling = unpack_sampling(header[4:18])
+            sampling = unpack_sampling(header[4:4 + W])
             prompt = _share(None, 1, dev)
             vision = (broadcast_encoded(None, 1, dev, hidden=self.w.config.hidden, prompt_length=len(prompt))
-                      if len(header) > 18 and header[18] else None)
-            packed = header[19:]
+                      if len(header) > 4 + W and header[4 + W] else None)
+            packed = header[5 + W:]
             grammar = {}
             if packed:                                  # compiled here as on rank 0
                 from tensorfold.engine import grammar as g

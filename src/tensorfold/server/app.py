@@ -28,7 +28,7 @@ from tensorfold.server.text import (
     is_title_request,
     parse_harmony_output,
     render_prompt_ids,
-    split_thinking, think_markers,
+    reasoning_count, split_thinking, think_markers,
     streaming_visible_text,
     template_late_system,
     strip_trailing_stops,
@@ -315,7 +315,7 @@ class ChatApp(RequestOptions):
                 preparing.release()
 
     class _Preparing:
-        """A."""
+        """A user's request between arrival and submission: background requests wait for these."""
 
         def __init__(self, app: "ChatApp") -> None:
             self.app = app
@@ -518,6 +518,7 @@ class ChatApp(RequestOptions):
             "prompt_tokens": len(prompt_ids),
             "cached_tokens": int(job.cached_tokens),
             "completion_tokens": len(collected),
+            "reasoning_tokens": reasoning_count(collected, self._token_id(self.think_markers[1]) if thinking else -1),
             "seconds": seconds,
             "runtime": {
                 "enable_thinking": thinking,

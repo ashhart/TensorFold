@@ -1,6 +1,13 @@
-"""Prefill attention in 64-key tiles by absolute position, so chunking never changes bits; not decode's arithmetic."""
+"""Prefill attention in 64-key tiles by absolute position, so chunking never changes bits; not decode's arithmetic.
+
+``_attend`` (Triton) defines the bits; ``prefill_attention.cu`` computes the same bits with a KV group's query heads
+in one block, so each staged key and value serves all of them (checked equal in tests/cuda/test_prefill_attention.py).
+"""
 
 from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
 
 import torch
 import triton
@@ -60,12 +67,47 @@ def attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0:
     """q (W, H, D) bf16 at positions [p0, p0 + W); the caches must already hold every key through p0 + W - 1."""
 
     w, h, d = q.shape
+    hk = _check(q, k_cache, v_cache, p0)
+    out = torch.empty_like(q)
+    if d == 64:
+        return triton_attention(q, k_cache, v_cache, p0, scale=scale, out=out)
+    _ext().prefill_attention(q, k_cache, v_cache, out, p0, scale, heads_a_block(h // hk))
+    return out
+
+
+def triton_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0: int, *, scale: float,
+                     out: torch.Tensor | None = None) -> torch.Tensor:
+    """The same through ``_attend``: the bits' definition, one program a 64-row block and query head."""
+
+    w, h, d = q.shape
+    hk = _check(q, k_cache, v_cache, p0)
+    out = torch.empty_like(q) if out is None else out
+    _attend[(triton.cdiv(w, BM), h)](q, k_cache, v_cache, out, p0, w, H=h, HK=hk, D=d, BM=BM, BN=BN, SCALE=scale,
+                                     num_warps=8, num_stages=1 if d > 128 else 2)
+    return out
+
+
+def heads_a_block(group: int) -> int:
+    """Query heads of one KV head in a CUDA block of eight warps: the largest of 8, 4, 2, 1 dividing the group."""
+
+    return next(n for n in (8, 4, 2, 1) if group % n == 0)
+
+
+def _check(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0: int) -> int:
+    w, h, d = q.shape
     hk = k_cache.shape[1]
     if k_cache.shape[0] < p0 + w or v_cache.shape != k_cache.shape or h % hk or d not in (64, 128, 256):
         raise ValueError("prefill attention: caches must hold the chunk's keys; heads a multiple of kv heads")
     if not (q.is_contiguous() and k_cache.is_contiguous() and v_cache.is_contiguous()):
         raise ValueError("prefill attention takes contiguous tensors")
-    out = torch.empty_like(q)
-    _attend[(triton.cdiv(w, BM), h)](q, k_cache, v_cache, out, p0, w, H=h, HK=hk, D=d, BM=BM, BN=BN, SCALE=scale,
-                                     num_warps=8, num_stages=1 if d > 128 else 2)
-    return out
+    return hk
+
+
+@lru_cache(maxsize=1)
+def _ext():
+    from tensorfold.cuda.build import load
+
+    here = Path(__file__).parent
+    return load(name="tensorfold_prefill_attention_v1", sources=[str(here / "prefill_attention.cpp"),
+                                                                 str(here / "prefill_attention.cu")],
+                extra_cuda_cflags=["-O3", "--fmad=false"], verbose=False)

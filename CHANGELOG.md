@@ -3,6 +3,31 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.5.0 (29 Sep 2026)
+
+- **OpenAI's Responses API on both servers.** `/v1/responses` runs as a chat completion: every response has its chat
+  completion's token SHA and prompt tokens, and a tool round trip gives the same reply through `previous_response_id`,
+  the turn resent whole, or chat. A second turn resumes from the cache.
+- **Long context on Sparks, the same bits as 0.3.6.3.** The 27B's attention reads each key chunk once for a round's
+  rows, with 16-byte loads, and prompt attention runs in its own CUDA kernel. On one Spark (MLX 4-bit + DFlash2):
+  decode at 128k 18.4 -> 38.9 tok/s, at 96k 23.6 -> 45.9; cold prefill at 128k 860 -> 1,173 tok/s and at 255k
+  545 -> 809. On the same NVFP4 weights, prefill runs 1.16-1.27x vLLM at every depth from 32k to 255k.
+- **The CUDA server reads requests as the Mac server does.** `reasoning_effort` and `thinking_budget`, usage with the
+  cached prompt tokens in every reply (streamed ones too), typed tool arguments, `min_p` on both backends,
+  `ignore_eos` on Flash Next and Nemotron, and `top_k` 0 drawing the whole nucleus on two GPUs as on one. Thinking
+  uses the template's own default effort on both servers.
+- **`priority: background` on CUDA.** A background request yields to foreground ones and replays from its prompt,
+  so its reply still equals its solo run. Under `--parallel`, the 27B and Qwen3.6 prefill a background prompt 1,024
+  rows a step (measured waits in docs/api.md).
+- **Community pull requests.**
+  - Faster CUDA startup and model loading (#82). Thanks to @pmeenan.
+  - Qwen3.6-35B-A3B serves `--parallel N` on CUDA, each reply equal to its solo run (#84), and `response_format`
+    JSON schemas on the 27B, exact under drafts (#80). Thanks to @philip-pentatonic.
+  - `/health` publishes live token totals (#79). Thanks to @MiaAI-Lab.
+  - The 27B's concurrent drafter keeps no stale context after a prefill step (#92). Thanks to @nood-co1.
+  - Flash Next lists its sparse-attention blocks past 131,072 keys in tiles, the same lists (#93). Thanks to
+    @MovieMaker93.
+
 ## 0.4.0 (29 Sep 2026)
 
 - **oQ formats and MLX 8-bit at 4-bit speed on M1-M4.** 5-, 6- and 8-bit linears now run on the matrix units with the

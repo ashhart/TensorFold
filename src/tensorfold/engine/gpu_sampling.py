@@ -1,8 +1,10 @@
-"""Key GPU Gumbel draws by seed, absolute position, and token id so verified drafts match serial sampling with the same fp32 rule."""
+"""Key GPU Gumbel draws by seed, absolute position, and token id so verified drafts match serial sampling with the
+same fp32 rule (top_k, top_p, then min_p)."""
 
 from __future__ import annotations
 
 import hashlib
+import math
 from typing import Any, Sequence
 
 import mlx.core as mx
@@ -37,9 +39,10 @@ _SOURCE = r"""
   const uint sg = simdgroup_index_in_threadgroup;
   const size_t base = size_t(row) * V;
   // the row's settings, read once (device memory: the compiler cannot keep them across the loops' stores)
-  const float inv_t = cfg[3 * row];
-  const float top_p = cfg[3 * row + 1];
-  const float near = cfg[3 * row + 2];
+  const float inv_t = cfg[4 * row];
+  const float top_p = cfg[4 * row + 1];
+  const float near = cfg[4 * row + 2];
+  const float min_log = cfg[4 * row + 3];     // ln(min_p), -inf when off
   const uint kc = kcap[row];
   const uint cap = (kc == 0u || kc > C) ? C : kc;
   const ulong seed = ulong(seeds[2 * row]) | (ulong(seeds[2 * row + 1]) << 32);
@@ -226,6 +229,13 @@ _SOURCE = r"""
         if (cum >= top_p) { keep = j + 1; break; }
       }
     }
+    // min_p: the tokens within ln(min_p) of the top, a prefix of the order
+    if (min_log > -INFINITY) {
+      const float floor_p = m + min_log;
+      uint j = 0;
+      while (j < keep && tf_val(ck[j]) >= floor_p) j++;
+      keep = j;
+    }
     st[0] = keep;
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -301,7 +311,8 @@ def sample_rows(logits: mx.array, samplings: Sequence[Any], positions: Sequence[
     for s in samplings:
         seed = int(s.seed) & 0xFFFFFFFFFFFFFFFF if s is not None else 0
         seeds += [seed & 0xFFFFFFFF, seed >> 32]
-        cfg += ([1.0 / max(float(s.temperature), 1e-6), float(s.top_p), NEAR] if s is not None else [1.0, 1.0, NEAR])
+        cfg += ([1.0 / max(float(s.temperature), 1e-6), float(s.top_p), NEAR, getattr(s, "min_log", -math.inf)]
+                if s is not None else [1.0, 1.0, NEAR, -math.inf])
         caps.append(int(s.top_k or 0) if s is not None else 1)
     if isinstance(positions, mx.array):
         positions = padded(positions.astype(mx.uint32))
@@ -335,6 +346,8 @@ def reference(values: Any, sampling: Any, position: int) -> int:
         cum = np.cumsum((np.exp(v[top] - m) / norm).astype(np.float32), dtype=np.float32)
         hit = np.nonzero(cum >= np.float32(sampling.top_p))[0]
         keep = int(hit[0]) + 1 if len(hit) else len(top)
+    if getattr(sampling, "min_p", 0.0) > 0.0:
+        keep = int((v[top[:keep]] >= np.float32(m + np.float32(sampling.min_log))).sum())
     kept = top[:keep]
     mask = np.uint64(0xFFFFFFFFFFFFFFFF)
 

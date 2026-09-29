@@ -9,10 +9,10 @@ import torch
 from tensorfold.engine.grammar import GrammarError, pack
 from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.sampling import sample_streams
-from tensorfold.cuda.streams import PrefixCache, Stream, accept
+from tensorfold.cuda.streams import PrefixCache, Stream, accept, next_fill
 
 from .decode import CopyIndex, clone_state
-from .decode_tp import _sample_split, _share, first_token, pack_sampling, unpack_sampling
+from .decode_tp import SAMPLING_WORDS as W, _sample_split, _share, first_token, pack_sampling, unpack_sampling
 from .draft_tree import allocate
 from .engine import entry_end
 from .forward import State, _paths, commit_streams, multi_tree_forward, path_indices, reserve
@@ -146,12 +146,13 @@ class MultiDecoder:
         self.filling.append(s)
 
     def _fill(self) -> list[Stream]:
-        """One prefill step for the oldest queued prompt: to its next kept state, or STEP rows while others decode."""
+        """One prefill step for the oldest queued prompt (foreground first): to its next kept state, or STEP rows
+        while others decode."""
 
-        s = self.filling[0]
+        s = next_fill(self.filling)
         pos, n = s.st.pos, len(s.prompt)
         stop = next((p for p in s.stops if p > pos), n)
-        if any(not x.done for x in self.streams.values()):
+        if s.background or any(not x.done for x in self.streams.values()):   # a later foreground prompt waits one step
             stop = min(stop, pos + STEP)
         self._send([FILL, s.sid, stop])
         try:
@@ -208,7 +209,7 @@ class MultiDecoder:
 
     @torch.no_grad()
     def round(self) -> list[Stream]:
-        """A prefill step for the oldest queued prompt, then one round over the decoding streams; returns the finished."""
+        """A prefill step for the next queued prompt, then one round over the decoding streams; returns the finished."""
 
         self._check()
         done = self._fill() if self.filling else []
@@ -419,14 +420,15 @@ class MultiDecoder:
                 return
             if msg[0] == ADMIT:
                 sid, count, draft, cached = msg[1:5]
-                s = Stream(_share(None, 1, self.device), count, unpack_sampling(msg[5:19]), draft=bool(draft), sid=sid)
+                s = Stream(_share(None, 1, self.device), count, unpack_sampling(msg[5:5 + W]), draft=bool(draft),
+                           sid=sid)
                 vision = None
-                if len(msg) > 19 and msg[19]:
+                if len(msg) > 5 + W and msg[5 + W]:
                     from tensorfold.vision.qwen_cuda import broadcast_encoded
 
                     vision = broadcast_encoded(None, 1, self.device, hidden=self.w.config.hidden,
                                                prompt_length=len(s.prompt))
-                packed = msg[20:]
+                packed = msg[6 + W:]
                 if packed:                              # compiled here as on rank 0
                     from tensorfold.engine import grammar
 

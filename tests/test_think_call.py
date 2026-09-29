@@ -158,6 +158,9 @@ def test_the_cuda_server_returns_the_call(tmp_path):
             names = {v: k for k, v in special.items()}
             return "".join(names.get(i, "" if i == 0 else chr(i)) for i in ids)
 
+        def token_to_id(self, text):
+            return special.get(text)
+
     class Engine:
         eos = (0,)
 

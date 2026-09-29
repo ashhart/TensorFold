@@ -98,15 +98,16 @@ def chat(engine):
     tok = Tokenizer.from_file(str(Path(MODEL) / "tokenizer.json"))
     template = ChatTemplate(Path(MODEL))
     grammars = grammar.for_model(MODEL, grammar.vocab_size(MODEL), engine.eos)
-    compiled = {name: grammars.compile(grammar.Spec("json_schema", json.dumps(schema)))
-                for name, (schema, _) in CASES.items()}
+    specs = {name: grammar.Spec("json_schema", json.dumps(schema)) for name, (schema, _) in CASES.items()}
+    compiled = {name: grammars.compile(spec) for name, spec in specs.items()}
 
     def prompt(text: str, thinking: bool = False) -> list[int]:
         rendered = template.render([{"role": "user", "content": text}], tools=None, enable_thinking=thinking)
         return tok.encode(rendered, add_special_tokens=False).ids
 
-    def fresh(name: str, thinking: bool = False):
-        return grammars.constraint(compiled[name], think_end=tok.token_to_id("</think>") if thinking else None)
+    def fresh(name: str, thinking: bool = False):                # with its spec, as the server makes it
+        return grammars.constraint(compiled[name], think_end=tok.token_to_id("</think>") if thinking else None,
+                                   spec=specs[name])
 
     return type("Chat", (), {"prompt": staticmethod(prompt), "fresh": staticmethod(fresh), "tok": tok})
 

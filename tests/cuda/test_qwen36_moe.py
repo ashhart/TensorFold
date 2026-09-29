@@ -73,7 +73,7 @@ def _serial(w, prompt, sampling, count):
 
 
 PROMPTS = [[5, 6, 7, 8], [9, 10, 11, 12, 13, 14, 15, 16, 17], [3, 4, 5]]
-SAMPLINGS = [None, Sampling(1234, 1.0, 20, 0.95), Sampling(99, 0.8, 0, 1.0)]
+SAMPLINGS = [None, Sampling(1234, 1.0, 20, 0.95, 0.1), Sampling(99, 0.8, 0, 1.0)]      # min_p on the second
 
 
 @pytest.mark.parametrize("oracle", [False, True])

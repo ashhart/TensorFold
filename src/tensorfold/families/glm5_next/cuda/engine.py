@@ -437,7 +437,8 @@ class GlmEngine:
         header = [max_tokens, int(stop_eos), int(draft), len(hit.ids) if hit is not None else 0,
                   seed & 0x7FFFFFFF, (seed >> 31) & 0x7FFFFFFF, seed >> 62,
                   *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
-                  *_f64_ints(sampling.top_p if sampling else 1.0), int(constraint is not None)] + code
+                  *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
+                  int(constraint is not None)] + code
         from tensorfold.engine.grammar import pack
 
         self._share(header)
@@ -454,8 +455,8 @@ class GlmEngine:
         from tensorfold.engine.exact_sampling import Sampling
 
         while True:
-            max_tokens, stop_eos, draft, cached, s_lo, s_hi, s_top, t_lo, t_hi, top_k, p_lo, p_hi, shaped, *code = \
-                self._share(None)
+            (max_tokens, stop_eos, draft, cached, s_lo, s_hi, s_top, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi, shaped,
+             *code) = self._share(None)
             prompt = self._share(None)
             packed = self._share(None) if shaped else []
             constraint = None
@@ -465,7 +466,8 @@ class GlmEngine:
                 constraint = grammar.compiler(self, self.model_dir, self.eos).follow(packed)
             temperature = _ints_f64(t_lo, t_hi)
             seed = (s_top << 62) | (s_hi << 31) | s_lo
-            sampling = Sampling(seed, temperature, top_k, _ints_f64(p_lo, p_hi)) if temperature > 0 else None
+            sampling = (Sampling(seed, temperature, top_k, _ints_f64(p_lo, p_hi), _ints_f64(m_lo, m_hi))
+                        if temperature > 0 else None)
             hit = None
             if cached:
                 hit = next((c for c in self.cache if len(c.ids) == cached and prompt[:cached] == c.ids), None)

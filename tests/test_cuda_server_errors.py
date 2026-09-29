@@ -15,11 +15,12 @@ from tensorfold.cuda import server
 from tensorfold.engine.exact_sampling import Sampling, seed_for
 from tests.test_cuda_admission import http_server
 
-# a Qwen checkpoint template's own refusals: an unknown reasoning effort, a history without a user message
+# a Qwen checkpoint template's own refusals: an unknown reasoning effort or mode, a history without a user message
 TEMPLATE = (
     "{%- set effort = reasoning_effort|default('xhigh') %}"
     "{%- if effort not in ('xhigh', 'medium', 'low') %}"
     "{{ raise_exception('Unexpected reasoning effort ' ~ effort ~ '.') }}{% endif %}"
+    "{%- if mode is defined and mode != 'plain' %}{{ raise_exception('Unexpected mode ' ~ mode ~ '.') }}{% endif %}"
     "{%- set ns = namespace(user=false) %}"
     "{%- for m in messages %}{% if m.role == 'user' %}{% set ns.user = true %}{% endif %}{% endfor %}"
     "{%- if not ns.user %}{{ raise_exception('No user query found in messages.') }}{% endif %}"
@@ -110,8 +111,10 @@ def sampling_before(defaults, body, prompt):
 MALFORMED = {
     "template raises": ({"messages": [{"role": "tool", "content": "x"}]},
                         "the chat template rejected the request: No user query found in messages."),
-    "template raises on a kwarg": ({"messages": HI, "chat_template_kwargs": {"reasoning_effort": "high"}},
-                                   "the chat template rejected the request: Unexpected reasoning effort high."),
+    "template raises on a kwarg": ({"messages": HI, "chat_template_kwargs": {"mode": "fancy"}},
+                                   "the chat template rejected the request: Unexpected mode fancy."),
+    "an unknown effort": ({"messages": HI, "chat_template_kwargs": {"reasoning_effort": "extreme"}},
+                          "reasoning_effort must be none, minimal, low, medium, high or xhigh"),
     **{f"chat_template_kwargs {name}": ({"messages": HI, "chat_template_kwargs": value},
                                         "chat_template_kwargs must be a JSON object or null")
        for name, value in [("[]", []), ('""', ""), ("false", False), ("0", 0),              # falsy: not read as absent

@@ -13,7 +13,7 @@ from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
 from .decode import CopyIndex, DecodeResult, clone_state
 from .forward import State, _paths, commit, tree_forward
-from tensorfold.cuda.sampling import sample_rows
+from tensorfold.cuda.sampling import dist_gather, nucleus_rows, sample_rows
 from .weights import Weights
 
 
@@ -48,20 +48,25 @@ def _value(words: Sequence[int]) -> int:
     return sum(int(w) << (16 * i) for i, w in enumerate(words))
 
 
+SAMPLING_WORDS = 18          # pack_sampling's length: a header's fields after it start this far on
+
+
 def pack_sampling(sampling: Sampling | None) -> list[int]:
-    """14 ints for a share: the seed and the float settings cross as their exact bits (16-bit words)."""
+    """18 ints for a share: the seed and the float settings cross as their exact bits (16-bit words)."""
 
     if sampling is None:
-        return [0] * 14
-    bits = [struct.unpack("<Q", struct.pack("<d", float(x)))[0] for x in (sampling.temperature, sampling.top_p)]
-    return [1, int(sampling.top_k), *_words(int(sampling.seed)), *_words(bits[0]), *_words(bits[1])]
+        return [0] * SAMPLING_WORDS
+    bits = [struct.unpack("<Q", struct.pack("<d", float(x)))[0]
+            for x in (sampling.temperature, sampling.top_p, sampling.min_p)]
+    return [1, int(sampling.top_k), *_words(int(sampling.seed)), *(w for b in bits for w in _words(b))]
 
 
 def unpack_sampling(words: Sequence[int]) -> Sampling | None:
     if not words[0]:
         return None
-    temperature, top_p = (struct.unpack("<d", struct.pack("<Q", _value(words[i:i + 4])))[0] for i in (6, 10))
-    return Sampling(_value(words[2:6]), temperature, int(words[1]), top_p)
+    temperature, top_p, min_p = (struct.unpack("<d", struct.pack("<Q", _value(words[i:i + 4])))[0]
+                                 for i in (6, 10, 14))
+    return Sampling(_value(words[2:6]), temperature, int(words[1]), top_p, min_p)
 
 
 def split_candidates(logits: torch.Tensor, sampling: Sampling | None, offset: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -88,6 +93,9 @@ def _sample_split(logits: torch.Tensor, positions: Sequence[int], sampling: Samp
                   rank: int) -> list[int] | None:
     """Both ranks call this with their half of the logits; rank 0 returns the tokens, rank 1 None."""
 
+    if sampling is not None and sampling.temperature > 0 and not sampling.top_k:     # the shared nucleus rule
+        tokens = nucleus_rows(logits, positions, sampling, offset=rank * logits.shape[1], gather=dist_gather)
+        return tokens if rank == 0 else None
     values, ids = split_candidates(logits, sampling, rank * logits.shape[1])
     all_values = torch.empty((2, *values.shape), dtype=values.dtype, device=values.device)
     all_ids = torch.empty((2, *ids.shape), dtype=ids.dtype, device=ids.device)

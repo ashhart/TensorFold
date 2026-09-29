@@ -16,11 +16,11 @@ PREFILL_ROWS = 2048  # rows of a prompt chunk
 
 
 def sampling_mode(sampling) -> tuple:
-    """The part of a Sampling compiled into the graphs: greedy, or keyed with its top_k and top-p cut."""
+    """The part of a Sampling compiled into the graphs: greedy, or keyed with its top_k, top-p cut and min-p cut."""
 
     if sampling is None or sampling.temperature <= 0:
         return ("greedy",)
-    return ("keyed", int(sampling.top_k), 0.0 < float(sampling.top_p) < 1.0)
+    return ("keyed", int(sampling.top_k), 0.0 < float(sampling.top_p) < 1.0, float(sampling.min_p) > 0.0)
 
 
 class Engine:

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from tensorfold.server.messages import _normalize_tool_call_arguments, late_system_role, normalize_messages
+from tensorfold.server.request_options import effort_levels
 
 
 class ChatTemplate:
@@ -33,6 +34,7 @@ class ChatTemplate:
         env.globals["raise_exception"] = raise_exception
         env.globals["strftime_now"] = lambda fmt: datetime.now().strftime(fmt)
         self.template = env.from_string(source)
+        self.efforts = effort_levels(source)          # the reasoning efforts it names (the Mac reads the same ones)
         self.specials = {k: (v.get("content") if isinstance(v, dict) else v)
                          for k, v in cfg.items() if k in ("bos_token", "eos_token", "pad_token", "unk_token")}
         self.late_system = late_system_role(

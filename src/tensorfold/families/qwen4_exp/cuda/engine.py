@@ -179,16 +179,19 @@ class FlashNextEngine:
         if self.tp == 2 and self.rank == 0:
             self.comm.store.set(self._key(self.served), json.dumps({"stop": True}))
 
-    def _share(self, prompt: list[int], max_tokens: int, sampling, draft: bool, cached: int, constraint=None) -> tuple:
+    def _share(self, prompt: list[int], max_tokens: int, sampling, draft: bool, cached: int, constraint=None,
+               stop_eos: bool = True) -> tuple:
         from tensorfold.engine.grammar import pack
 
         body = {"prompt": prompt, "max_tokens": max_tokens, "draft": bool(draft), "cached": int(cached),
+                "stop_eos": bool(stop_eos),
                 "sampling": None if sampling is None else [int(sampling.seed), float(sampling.temperature),
-                                                           int(sampling.top_k), float(sampling.top_p)],
+                                                           int(sampling.top_k), float(sampling.top_p),
+                                                           float(sampling.min_p)],
                 "grammar": pack(constraint)}                 # rank 1 walks and masks the same rows
         text = json.dumps(body)
         self.comm.store.set(self._key(self.served), text)
-        return self._unpack(text)[:5]
+        return self._unpack(text)
 
     def _receive(self) -> tuple | None:
         from torch.distributed import DistNetworkError
@@ -215,8 +218,8 @@ class FlashNextEngine:
         if body.get("stop"):
             return None
         s = body["sampling"]
-        return (body["prompt"], body["max_tokens"], None if s is None else Sampling(s[0], s[1], s[2], s[3]),
-                body["draft"], body["cached"], body.get("grammar") or [])
+        return (body["prompt"], body["max_tokens"], None if s is None else Sampling(*s),
+                body["draft"], body["cached"], body.get("grammar") or [], body.get("stop_eos", True))
 
     @property
     def context_window(self) -> int:
@@ -251,7 +254,8 @@ class FlashNextEngine:
     def _remember(self, ids: list[int], snap: dict) -> None:
         self.cache = [c for c in self.cache if c[0] != ids][-1:] + [(ids, snap)]
 
-    def _serial(self, prompt: list[int], max_tokens: int, sampling, on_tokens, constraint=None) -> dict[str, Any]:
+    def _serial(self, prompt: list[int], max_tokens: int, sampling, on_tokens, constraint=None,
+                stop_eos: bool = True) -> dict[str, Any]:
         """One token a round from a fresh prefill in the serial engine's own state (no drafts, no kept states)."""
 
         import torch
@@ -264,14 +268,15 @@ class FlashNextEngine:
         first = prefill(self.serial, prompt, sampling, mtp=False, constraint=constraint)
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": 0, "drafts": False}
-        if (on_tokens is not None and on_tokens([first])) or first in self.eos or max_tokens <= 1:
+        if (on_tokens is not None and on_tokens([first])) or (stop_eos and first in self.eos) or max_tokens <= 1:
             return stats
-        res = serial_decode(self.serial, first, max_tokens, sampling, stop_eos=True, on_tokens=on_tokens,
+        res = serial_decode(self.serial, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,
                             constraint=constraint)
         stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, decode_tps=round(res.tokens_per_second, 2))
         return stats
 
-    def _decode(self, prompt: list[int], max_tokens: int, sampling, on_tokens, hit, constraint=None) -> dict[str, Any]:
+    def _decode(self, prompt: list[int], max_tokens: int, sampling, on_tokens, hit, constraint=None,
+                stop_eos: bool = True) -> dict[str, Any]:
         import torch
 
         from .decode import mtp_decode, prefill, serial_decode
@@ -285,36 +290,40 @@ class FlashNextEngine:
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                                  "drafts": True}
-        if (on_tokens is not None and on_tokens([first])) or first in self.eos or max_tokens <= 1:
+        if (on_tokens is not None and on_tokens([first])) or (stop_eos and first in self.eos) or max_tokens <= 1:
             return stats
         if self.depth > 0:
             res = mtp_decode(self.e, first, max_tokens, sampling, depth=self.depth, confidence=self.confidence,
-                             stop_eos=True, on_tokens=on_tokens, constraint=constraint)
+                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint)
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
-            res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=True, on_tokens=on_tokens,
+            res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,
                                 constraint=constraint)
         stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, decode_tps=round(res.tokens_per_second, 2))
         return stats
 
     def generate(self, prompt: list[int], max_tokens: int, sampling,
-                 on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None) -> dict[str, Any]:
-        """``draft=False``: one token a round with no MTP drafts, from a fresh prefill that leaves the kept states alone: the serial reference."""
+                 on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None,
+                 stop_eos: bool = True, background: bool = False) -> dict[str, Any]:
+        """``draft=False``: one token a round with no MTP drafts, from a fresh prefill that leaves the kept states
+        alone: the serial reference. ``stop_eos=False``: past end tokens (``ignore_eos``). ``background``: under
+        ``--parallel``, after the other requests and yielding a lane to one that waits."""
 
         max_tokens = self._limit(prompt, max_tokens)
         if self.scheduler is not None:
             grammar = {} if constraint is None else {"constraint": constraint}
-            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, **grammar)
+            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
+                                         **grammar, **({"background": True} if background else {}))
         hit = self._resume(prompt) if draft else None
         if self.tp == 2:                     # rank 0 decodes exactly what it hands rank 1
-            prompt, max_tokens, sampling, draft, _ = self._share(prompt, max_tokens, sampling, draft,
-                                                                 len(hit[0]) if hit else 0, constraint)
+            prompt, max_tokens, sampling, draft, _, _, stop_eos = self._share(
+                prompt, max_tokens, sampling, draft, len(hit[0]) if hit else 0, constraint, stop_eos)
             self.served += 1
             emit = on_tokens
             on_tokens = lambda new: (emit(new), False)[1]       # noqa: E731  both ranks decode to the end
         if not draft:
-            return self._serial(prompt, max_tokens, sampling, on_tokens, constraint)
-        return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint)
+            return self._serial(prompt, max_tokens, sampling, on_tokens, constraint, stop_eos)
+        return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos)
 
     def follow(self) -> None:
         """Rank 1: decode every request rank 0 serves, until rank 0 stops."""
@@ -323,7 +332,7 @@ class FlashNextEngine:
             request = self._receive()
             if request is None:
                 return
-            prompt, max_tokens, sampling, draft, cached, packed = request
+            prompt, max_tokens, sampling, draft, cached, packed, stop_eos = request
             constraint = None
             if packed:                                      # the request's grammar, compiled here as on rank 0
                 from tensorfold.engine import grammar
@@ -338,8 +347,8 @@ class FlashNextEngine:
                     raise RuntimeError(f"rank 1 has no kept state for the {cached} tokens rank 0 resumes from")
             try:
                 if draft:
-                    self._decode(prompt, max_tokens, sampling, None, hit, constraint)
+                    self._decode(prompt, max_tokens, sampling, None, hit, constraint, stop_eos)
                 else:
-                    self._serial(prompt, max_tokens, sampling, None, constraint)
+                    self._serial(prompt, max_tokens, sampling, None, constraint, stop_eos)
             except ValueError as exc:                       # rank 0 raised at the same point on the same input
                 print(f"[tensorfold] request {self.served} failed on both ranks: {exc}", flush=True)

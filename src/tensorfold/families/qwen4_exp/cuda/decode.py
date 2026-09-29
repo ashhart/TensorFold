@@ -9,7 +9,7 @@ from typing import Sequence
 import numpy as np
 import torch
 
-from tensorfold.cuda.sampling import sample_rows
+from tensorfold.cuda.sampling import comm_gather, nucleus_rows, sample_rows
 from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
 from . import CONFIDENCE, DEPTH
@@ -36,6 +36,11 @@ def tp_sample_rows(w: Weights, logits: torch.Tensor, positions: Sequence[int], s
 
     R = logits.shape[0]
     greedy = sampling is None or sampling.temperature <= 0
+    if not greedy and not sampling.top_k:           # top_k off: the shared nucleus rule over every rank's shard
+        probs: list[float] | None = [] if with_prob else None
+        chosen = nucleus_rows(logits, positions, sampling, offset=offset, id_map=id_map, gather=comm_gather(w.comm),
+                              probs=probs)
+        return (chosen, probs) if with_prob else chosen
     k = 1 if greedy else min(logits.shape[1], int(sampling.top_k) + MARGIN)
     if greedy:
         # argmax takes the first (lowest-id) maximum whatever the row count; topk promises no order among ties

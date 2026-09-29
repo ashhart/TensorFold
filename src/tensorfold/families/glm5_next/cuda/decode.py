@@ -9,6 +9,7 @@ from typing import Sequence
 import numpy as np
 import torch
 
+from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank
 from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
 from . import glue, prof, qmm
@@ -24,6 +25,9 @@ def sample_rows(w: Weights, logits: torch.Tensor, positions: Sequence[int], samp
 
     R = logits.shape[0]
     greedy = sampling is None or sampling.temperature <= 0
+    if not greedy and not sampling.top_k:           # top_k off: the shared nucleus rule over every rank's shard
+        return nucleus_rows(logits, positions, sampling, offset=w.vocab_offset if offset is None else offset,
+                            gather=one_rank if w.comm is None else comm_gather(w.comm), probs=probs)
     k = 1 if greedy else min(logits.shape[1], int(sampling.top_k) + MARGIN)
     if probs is not None and greedy:
         k = min(logits.shape[1], 20 + MARGIN)       # the draft's confidence needs its competitors too

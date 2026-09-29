@@ -7,6 +7,7 @@ MTP-drafted decoding emits serial decoding's tokens (greedy and sampled, full an
 rows give serial steps' bits; the two ranks' logits agree with the one-GPU model's to rounding.
 """
 
+import dataclasses
 import json
 import struct
 import threading
@@ -258,7 +259,9 @@ def test_tp_windows_match_serial_steps_and_prefix_commits_continue(models, kv_dt
 
 
 @pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
-@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95)])
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95),
+                                      Sampling(seed=1234, top_k=20, top_p=0.95, min_p=0.1),
+                                      Sampling(seed=1234, top_k=0, top_p=0.9, min_p=0.02)])
 def test_tp_mtp_drafts_give_serial_tokens_on_both_ranks(models, sampling, kv_dtype):
     _, ranks, drafts = models
 
@@ -447,6 +450,7 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
         stats = engines[0].generate(prompt, 20, samp, lambda new: got.extend(new), **kw)
         return got, stats
 
+    ends = tuple(engines[0].eos)                  # the checkpoint's end tokens, before the test sets its own
     with torch.no_grad():
         got, _ = ask(PROMPT, sampling)
         serial, serial_stats = ask(PROMPT, sampling, draft=False)      # one token a round on both ranks
@@ -454,15 +458,22 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
         warm, warm_stats = ask(prompt2, sampling)                      # resumes from the prompt on both ranks
         cold, _ = ask(prompt2, sampling, draft=False)
         greedy, _ = ask(PROMPT, None)
+        end = refs[0][5]                         # both ranks stop at this token now; ignore_eos decodes past it
+        for e in engines:
+            e.eos, e.w.cfg = (end,), dataclasses.replace(e.w.cfg, eos=(end,))
+        stopped, _ = ask(PROMPT, sampling)
+        free, _ = ask(PROMPT, sampling, stop_eos=False)
+        free_serial, _ = ask(PROMPT, sampling, draft=False, stop_eos=False)
     engines[0].shutdown()
     follower.join(timeout=120)
     assert not follower.is_alive() and not errors, errors
     ref = refs[0]
-    eos = [i for i, t in enumerate(ref) if t in engines[0].eos]
+    eos = [i for i, t in enumerate(ref) if t in ends]
     assert got == (ref[:eos[0] + 1] if eos else ref)
     assert serial == got and serial_stats["drafts"] is False
     assert warm_stats["cached"] == len(PROMPT) and warm == cold             # the reply prefills again
     assert len(greedy) >= 1
+    assert free == free_serial == ref and stopped == ref[:ref.index(end) + 1]     # rank 1 read ignore_eos
 
 
 @pytest.mark.parametrize("differ", ["depth", "kv_dtype"])

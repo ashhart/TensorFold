@@ -298,7 +298,9 @@ def test_prompt_chunks_leave_the_same_state(engine):
     assert float(torch.nn.functional.cosine_similarity(logits, last, dim=1)) > 0.999
 
 
-@pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
+@pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), Sampling(1234, 1.0, 20, 0.95, 0.1),
+                                      Sampling(1234, 1.0, 0, 0.9, 0.02), None],
+                         ids=["sampled", "min_p", "nucleus", "greedy"])
 def test_drafted_replies_equal_serial(engine, sampling):
     prompt = list(np.random.default_rng(5).integers(0, 1000, size=37))
     serial, stats = _generate(engine, prompt, sampling, draft=False)

@@ -129,7 +129,12 @@ class MultiDecoder:
                          self.confidence) if mtp and s.count > 1 else []
         s.prefill_s, s.started = time.perf_counter() - t0, time.perf_counter()
         self.streams[s.sid] = s
-        s.take([first], self.eos)
+        s.take([first], self._ends(s))
+
+    def _ends(self, s: Stream) -> tuple[int, ...]:
+        """The end tokens that end this stream: none when its request ignores them (``ignore_eos``)."""
+
+        return self.eos if s.stop_eos else ()
 
     @torch.no_grad()
     def round(self) -> list[Stream]:
@@ -163,7 +168,7 @@ class MultiDecoder:
         sampled = sample_streams(logits, starts, positions, [s.sampling for s in live])
         kept = []
         for s, (_, tokens), (st, a0, a1), rows in zip(live, windows, segs, sampled):
-            path, end = accept(tokens, list(range(-1, len(tokens) - 1)), rows, s.count - len(s.out), self.eos)
+            path, end = accept(tokens, list(range(-1, len(tokens) - 1)), rows, s.count - len(s.out), self._ends(s))
             commit(self.w, st, self.buf, a1 - a0, len(path), at=a0)
             s.committed.extend(tokens[:len(path)])
             s.counted(len(tokens))
@@ -173,14 +178,14 @@ class MultiDecoder:
                     s.constraint.advance(new)
                 except GrammarError as exc:
                     s.error = exc
-            last = s.error is not None or len(s.out) + len(new) >= s.count or end in self.eos
+            last = s.error is not None or len(s.out) + len(new) >= s.count or end in self._ends(s)
             kept.append((s, a0, rows[:len(path)], new, last))
         self._draft_all([(s, a0, keep) for s, a0, keep, _, last in kept if s.draft and not last])
         for s, _, _, new, _ in kept:
             if s.error is not None:
                 s.done = True
                 continue
-            s.take(new, self.eos)
+            s.take(new, self._ends(s))
         return failed + [s for s in live if s.done]
 
     def _draft_all(self, streams: list) -> None:

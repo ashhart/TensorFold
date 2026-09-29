@@ -9,7 +9,7 @@ import torch
 
 from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.sampling import sample_rows, sample_streams
-from tensorfold.cuda.streams import PrefixCache, Stream, accept
+from tensorfold.cuda.streams import PrefixCache, Stream, accept, next_fill
 from tensorfold.engine.grammar import GrammarError
 from tensorfold.families.qwen3_5.cuda.decode import CopyIndex
 from tensorfold.families.qwen3_5.cuda.forward import State, _mm, commit_streams, multi_tree_forward
@@ -87,12 +87,13 @@ class MultiDecoder:
         self.filling.append(s)
 
     def _fill(self) -> list[Stream]:
-        """One prefill step for the oldest queued prompt: to its next kept state, or STEP rows while others decode."""
+        """One prefill step for the oldest queued prompt (foreground first): to its next kept state, or STEP rows
+        while others decode."""
 
-        s = self.filling[0]
+        s = next_fill(self.filling)
         pos, n = s.st.pos, len(s.prompt)
         stop = next((p for p in s.stops if p > pos), n)
-        if any(not x.done for x in self.streams.values()):
+        if s.background or any(not x.done for x in self.streams.values()):   # a later foreground prompt waits one step
             stop = min(stop, pos + STEP)
         try:
             first = self._step(s, stop)
@@ -146,7 +147,7 @@ class MultiDecoder:
 
     @torch.no_grad()
     def round(self) -> list[Stream]:
-        """A prefill step for the oldest queued prompt, then one round over the decoding streams; returns the finished."""
+        """A prefill step for the next queued prompt, then one round over the decoding streams; returns the finished."""
 
         done = self._fill() if self.filling else []
         live = [s for s in self.streams.values() if not s.done]

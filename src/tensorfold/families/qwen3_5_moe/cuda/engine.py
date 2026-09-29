@@ -115,8 +115,10 @@ class Qwen36Engine:
         return best
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
-                 draft: bool = True, stop_eos: bool = True, constraint=None) -> dict[str, Any]:
-        """``draft=False``: serial decoding from a fresh prefill, no drafts or kept states; ``stop_eos=False``: past end tokens."""
+                 draft: bool = True, stop_eos: bool = True, constraint=None,
+                 background: bool = False) -> dict[str, Any]:
+        """``draft=False``: serial decoding from a fresh prefill, no drafts or kept states; ``stop_eos=False``: past end
+        tokens; ``background``: under ``--parallel``, after the other requests and yielding a lane to one that waits."""
 
         from tensorfold.families.qwen3_5.cuda.decode import draft_decode, prefill as serial_prefill
 
@@ -131,7 +133,7 @@ class Qwen36Engine:
         grammar = {} if constraint is None else {"constraint": constraint}     # a plain request calls as before
         if self.scheduler is not None:
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         **grammar)
+                                         **grammar, **({"background": True} if background else {}))
         t0 = time.perf_counter()
         if not draft or self.head is None:
             st, first = serial_prefill(self.w, prompt, sampling, **grammar)

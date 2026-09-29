@@ -98,10 +98,10 @@ def test_fast_forward_tracks_fp32_reference(tiny):
     assert agree >= 0.9 and rel < 0.05, (agree, rel)
 
 
-@pytest.mark.parametrize("greedy", [False, True])
-def test_drafted_decode_equals_serial(tiny, greedy):
+@pytest.mark.parametrize("greedy, min_p", [(False, 0.0), (True, 0.0), (False, 0.05), (False, 0.4)])
+def test_drafted_decode_equals_serial(tiny, greedy, min_p):
     prompt = _tokens(21, 6)
-    sampling = None if greedy else Sampling(1234, 1.0, 20, 0.95)
+    sampling = None if greedy else Sampling(1234, 1.0, 20, 0.95, min_p)
     eng = Engine(tiny, max_len=1024, graphs=True)
     eng.capture(range(1, 17), sampling)
     mtp = MTPHead(eng)
@@ -251,13 +251,15 @@ def test_gpu_sampler_matches_host_rule():
     out = torch.zeros(rows, dtype=torch.int32, device="cuda")
     agree = 0
     for seed in (1, 2, 3):
-        params = S.Params("cuda")
-        params.set(Sampling(seed * 7919, 1.0, 20, 0.95))
-        S.sample(logits, meta, params, out)
-        vals, ids = torch.topk(logits.float(), 28, dim=-1)
-        host = choose_rows(vals.cpu().numpy(), ids.cpu().numpy(), [1001 + r for r in range(rows)], params.sampling)
-        agree += sum(int(a == b) for a, b in zip(out.tolist(), host))
-    assert agree == 3 * rows, agree
+        for min_p in (0.0, 0.05, 0.5):
+            params = S.Params("cuda")
+            params.set(Sampling(seed * 7919, 1.0, 20, 0.95, min_p))
+            S.sample(logits, meta, params, out)
+            vals, ids = torch.topk(logits.float(), 28, dim=-1)
+            host = choose_rows(vals.cpu().numpy(), ids.cpu().numpy(), [1001 + r for r in range(rows)],
+                               params.sampling)
+            agree += sum(int(a == b) for a, b in zip(out.tolist(), host))
+    assert agree == 9 * rows, agree
 
 
 @pytest.mark.skipif(not Path(MODEL, "config.json").is_file(), reason="real checkpoint not mounted")

@@ -314,7 +314,8 @@ def _two_ranks(monkeypatch):
         raise AssertionError("a two-rank engine ran the one-GPU path")
 
     fake._share, fake.prefill_tp, fake.decode_tp = share, prefill_tp, decode_tp
-    fake.pack_sampling, fake.unpack_sampling = (lambda sampling: [0] * 14), (lambda words: None)
+    fake.SAMPLING_WORDS = 14                                 # pack_sampling's length: rank 1 reads the header by it
+    fake.pack_sampling, fake.unpack_sampling = (lambda sampling: [0] * fake.SAMPLING_WORDS), (lambda words: None)
     monkeypatch.setitem(sys.modules, PKG + ".decode_tp", fake)
     single = types.ModuleType(PKG + ".decode")              # generate imports it before choosing the path
     single.prefill = single.draft_decode = one_gpu_only

@@ -72,3 +72,32 @@ def test_app_answers_completion_and_chat(engine):
         res = app.run(body, chat, lambda d: deltas.append(d) or True)
         assert 1 <= res["completion_tokens"] <= 24
         assert res["finish"] in ("stop", "length")
+
+
+@pytest.mark.parametrize("greedy", [False, True])
+def test_ignore_eos_decodes_to_max_tokens_as_serial(engine, greedy):
+    """``stop_eos=False`` (ignore_eos) runs past end tokens to max_tokens, drafted as serial; with end tokens
+    counted, both stop at the first one."""
+
+    import dataclasses
+
+    from tensorfold.engine.exact_sampling import Sampling
+
+    prompt = _ids(RAW)
+    sampling = None if greedy else Sampling(99, 1.0, 20, 0.95)
+
+    def ask(**kw):
+        got: list[int] = []
+        engine.generate(prompt, 48, sampling, lambda new: got.extend(new), **kw)
+        return got
+
+    free = ask(draft=False, stop_eos=False)
+    end = next(t for i, t in enumerate(free) if i >= 3 and free.index(t) == i and i < len(free) - 1)
+    saved = engine.eos, engine.e.c, engine.serial.c
+    try:                                          # the end token becomes one this reply crosses
+        engine.eos = (end,)
+        engine.e.c, engine.serial.c = (dataclasses.replace(c, eos=(end,)) for c in (engine.e.c, engine.serial.c))
+        assert len(free) == 48 and ask(stop_eos=False) == free == ask(draft=False, stop_eos=False)
+        assert ask() == free[:free.index(end) + 1] == ask(draft=False)
+    finally:
+        engine.eos, engine.e.c, engine.serial.c = saved

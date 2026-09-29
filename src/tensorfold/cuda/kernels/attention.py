@@ -15,6 +15,7 @@ TILE = 64
 CHUNK = 512
 MAX_NODES = 128
 QUERY_TILE = 16
+MERGE_COLUMNS = 64      # output columns a merge program folds (the chunk fold is per column: more programs, same bits)
 
 
 @triton.jit
@@ -53,10 +54,10 @@ def _tile(q, k, v, m, l, o, valid, scale: tl.constexpr):
 @triton.jit
 def _shared(Q, KC, VC, OFF, STREAM, ITEMS, PO, PM, PL, W, H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr,
             G: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr):
-    """Item (stream, first pair, chunk): 16 (row, head) pairs of one stream against one chunk of committed keys."""
+    """(Item, KV head), heads fastest: 16 (row, head) pairs of one stream against one chunk of committed keys."""
 
-    item = tl.program_id(0)
-    hk = tl.program_id(1)
+    item = tl.program_id(0) // HK            # a chunk's heads and query tiles launch together: one DRAM read
+    hk = tl.program_id(0) % HK
     s = tl.load(ITEMS + item * 3)
     first = tl.load(ITEMS + item * 3 + 1)
     chunk = tl.load(ITEMS + item * 3 + 2)
@@ -64,8 +65,8 @@ def _shared(Q, KC, VC, OFF, STREAM, ITEMS, PO, PM, PL, W, H: tl.constexpr, HK: t
     rows = tl.load(STREAM + s * 4 + 1)
     p = tl.load(STREAM + s * 4 + 2)
     if (chunk + 1) * CH <= p:                 # a plan padded for a longer context (a graph's) skips missing chunks
-        koff = tl.load(OFF + s * 2)
-        voff = tl.load(OFF + s * 2 + 1)
+        koff = tl.multiple_of(tl.load(OFF + s * 2), 8)     # ``offsets`` checks 16 bytes: loads go 16 bytes wide
+        voff = tl.multiple_of(tl.load(OFF + s * 2 + 1), 8)
         rr = first + tl.arange(0, 16)
         ok = rr < rows * G
         node = start + rr // G
@@ -100,8 +101,8 @@ def _tail(Q, KN, VN, KC, VC, OFF, STREAM, ROWS, PATHS, DEPTHS, PO, PM, PL, W, H:
     nch = tl.load(STREAM + s * 4 + 3)
     chunk = p // CH + tl.program_id(2)
     if chunk < nch:
-        koff = tl.load(OFF + s * 2)
-        voff = tl.load(OFF + s * 2 + 1)
+        koff = tl.multiple_of(tl.load(OFF + s * 2), 8)
+        voff = tl.multiple_of(tl.load(OFF + s * 2 + 1), 8)
         gg = tl.arange(0, 16)
         d = tl.arange(0, D)
         q = tl.load(Q + (node * H + hk * G + gg[:, None]) * D + d[None, :], mask=gg[:, None] < G, other=0).to(tl.bfloat16)
@@ -130,16 +131,18 @@ def _tail(Q, KN, VN, KC, VC, OFF, STREAM, ROWS, PATHS, DEPTHS, PO, PM, PL, W, H:
 
 
 @triton.jit
-def _merge(PO, PM, PL, OUT, STREAM, ROWS, W, H: tl.constexpr, D: tl.constexpr, G: tl.constexpr):
+def _merge(PO, PM, PL, OUT, STREAM, ROWS, W, H: tl.constexpr, D: tl.constexpr, G: tl.constexpr, DS: tl.constexpr):
+    """Row, head group, DS output columns: each column's fold is its own, and every part recomputes m and l alike."""
+
     node = tl.program_id(0)
     hk = tl.program_id(1)
     nch = tl.load(STREAM + tl.load(ROWS + node) * 4 + 3)
     gg = tl.arange(0, 16)
-    d = tl.arange(0, D)
+    d = tl.program_id(2) * DS + tl.arange(0, DS)
     head = hk * G + gg
     m = tl.full((16,), float("-inf"), tl.float32)
     l = tl.zeros((16,), tl.float32)
-    o = tl.zeros((16, D), tl.float32)
+    o = tl.zeros((16, DS), tl.float32)
     for chunk in range(nch):
         base = (chunk * W + node) * H + head
         cm = tl.load(PM + base, mask=gg < G, other=float("-inf"))
@@ -162,7 +165,7 @@ class Plan:
 
     rows: torch.Tensor          # (W,) int32: each window row's stream
     streams: torch.Tensor       # (S, 4) int32: first row, rows, committed keys, chunks
-    items: torch.Tensor         # (items, 3) int32: (stream, first (row, head) pair, chunk) of committed keys
+    items: torch.Tensor         # (items, 3) int32: (stream, first (row, head) pair, chunk), chunk-major
     parents: torch.Tensor       # (W,) int32 window rows, -1 at a root
     paths: torch.Tensor         # (W, MAX_NODES) int32
     depths: torch.Tensor        # (W,) int32
@@ -184,8 +187,8 @@ def plan_host(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: i
         rows += [s] * w
         streams += [start, w, p, nch]
         glob += [-1 if x < 0 else x + start for x in local]
-        for first in range(0, w * group, QUERY_TILE):
-            for chunk in range(p // CHUNK):
+        for chunk in range(p // CHUNK):
+            for first in range(0, w * group, QUERY_TILE):
                 items += [s, first, chunk]
         start += w
     return rows + streams + items + glob, len(items) // 3, most
@@ -196,7 +199,7 @@ def padded_host(parents: Sequence[int], context: int, group: int) -> tuple[list[
 
     flat, _, _ = plan_host([parents], [0], group)            # rows, the stream's row (refreshed per replay), parents
     w = len(parents)
-    items = [x for first in range(0, w * group, QUERY_TILE) for chunk in range(context // CHUNK)
+    items = [x for chunk in range(context // CHUNK) for first in range(0, w * group, QUERY_TILE)
              for x in (0, first, chunk)]
     return flat[:w + 4] + items + flat[w + 4:], len(items) // 3, -(-(context + w) // CHUNK)
 
@@ -267,12 +270,13 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
     partial_m = torch.empty((p.chunks, w, h), dtype=torch.float32, device=q.device)
     partial_l = torch.empty_like(partial_m)
     if p.items.shape[0]:
-        _shared[(p.items.shape[0], hk)](q, origin, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l, w,
-                                        H=h, HK=hk, D=d, G=g, CH=CHUNK, SCALE=scale, num_warps=4, num_stages=1)
+        _shared[(p.items.shape[0] * hk,)](q, origin, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l,
+                                          w, H=h, HK=hk, D=d, G=g, CH=CHUNK, SCALE=scale, num_warps=4, num_stages=1)
     tails = 1 + -(-MAX_NODES // CHUNK)
     _tail[(w, hk, tails)](q, k_nodes, v_nodes, origin, origin, offs, p.streams, p.rows, p.paths, p.depths,
                           partial_o, partial_m, partial_l, w, H=h, HK=hk, D=d, G=g, CH=CHUNK, MAXD=MAX_NODES,
                           SCALE=scale, num_warps=4, num_stages=1)
     out = torch.empty_like(q)
-    _merge[(w, hk)](partial_o, partial_m, partial_l, out, p.streams, p.rows, w, H=h, D=d, G=g, num_warps=4)
+    _merge[(w, hk, d // MERGE_COLUMNS)](partial_o, partial_m, partial_l, out, p.streams, p.rows, w, H=h, D=d, G=g,
+                                        DS=MERGE_COLUMNS, num_warps=4)
     return out

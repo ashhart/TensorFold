@@ -44,7 +44,21 @@ def _worker(rank: int, port: int, out, split: bool, ids: bool, shaped: bool = Fa
     prompt = [(37 * i + 11) % 500 + 1 for i in range(21)]
     results = {}
     even = True
-    for name, sampling in (("keyed", Sampling(1234, 1.0, 20, 0.95)), ("greedy", None)):
+    samplings = (("keyed", Sampling(1234, 1.0, 20, 0.95)), ("min_p", Sampling(1234, 1.0, 20, 0.95, 0.1)),
+                 ("nucleus", Sampling(1234, 1.0, 0, 0.9, 0.02)), ("top_k 40", Sampling(1234, 1.0, 40, 0.95)),
+                 ("greedy", None))
+    from tensorfold.families.nemotron_h.cuda import sampler as S
+
+    g = torch.Generator(device="cuda").manual_seed(9)
+    whole = torch.randn(6, 512, generator=g, device="cuda") * 3                # both ranks: the same rows
+    meta = torch.tensor([50, 0, 0, 0], dtype=torch.int32, device="cuda")
+    for name, sampling in samplings:                  # a rank's shard draws what one rank draws from the whole row
+        eng.set_sampling(sampling)
+        one, two = (torch.zeros(6, dtype=torch.int32, device="cuda") for _ in range(2))
+        S.sample(whole, meta, eng.params, one)
+        eng._sample_shards(whole[:, rank * 256:(rank + 1) * 256].contiguous(), meta, two)
+        results[name + "-draw"] = (one.tolist(), [two.tolist()])
+    for name, sampling in samplings:
         pre = prefill(eng, mtp, prompt, sampling)
         serial = serial_decode(eng, pre, 40, sampling)
         drafted = []

@@ -26,7 +26,7 @@ def _mix(x, m1, m2):
 @triton.jit
 def _keyed(VALS, IDS, META, OUT, SEED, FP, PROB, c1, c2, m1, m2, offset,
            C: tl.constexpr, CP: tl.constexpr, K: tl.constexpr, CUT: tl.constexpr, GREEDY: tl.constexpr = False,
-           WRITE_PROB: tl.constexpr = False):
+           WRITE_PROB: tl.constexpr = False, MINP: tl.constexpr = False):
     r = tl.program_id(0)
     seed = tl.load(SEED)
     temp = tl.load(FP)
@@ -60,6 +60,9 @@ def _keyed(VALS, IDS, META, OUT, SEED, FP, PROB, c1, c2, m1, m2, offset,
             run += tl.sum(tl.where(rank == k, p, 0.0), axis=0) / total
             below += tl.where(run < top_p, 1, 0)
         limit = below + 1
+    if MINP:                               # the tokens within ln(min_p) of the top: a prefix of the rank order
+        floor = top + tl.load(FP + 2)
+        limit = tl.minimum(limit, tl.sum(tl.where(kept & (scaled >= floor), 1, 0), axis=0))
     pos = (tl.load(META) + r + 1 + offset).to(tl.uint64)
     x = _mix(seed.to(tl.uint64) + c1, m1, m2)
     x = _mix(x ^ (pos * c2), m1, m2)
@@ -76,19 +79,20 @@ def _keyed(VALS, IDS, META, OUT, SEED, FP, PROB, c1, c2, m1, m2, offset,
 
 
 class Params:
-    """Seed, temperature and top_p live on the device so captured graphs serve any request; top_k is compiled in."""
+    """Seed, temperature, top_p and ln(min_p) live on the device so captured graphs serve any request; top_k and
+    whether the cuts apply are compiled in."""
 
     def __init__(self, device):
         self.seed = torch.zeros(1, dtype=torch.int64, device=device)
-        self.fp = torch.zeros(2, dtype=torch.float64, device=device)
+        self.fp = torch.zeros(3, dtype=torch.float64, device=device)
         self.sampling: Sampling | None = None
 
     def set(self, sampling: Sampling | None) -> None:
         self.sampling = sampling
         if sampling is not None:
             self.seed.fill_(int(sampling.seed) & ((1 << 63) - 1))
-            self.fp.copy_(torch.tensor([max(float(sampling.temperature), 1e-6), float(sampling.top_p)],
-                                       dtype=torch.float64))
+            self.fp.copy_(torch.tensor([max(float(sampling.temperature), 1e-6), float(sampling.top_p),
+                                        sampling.min_log], dtype=torch.float64))
 
 
 def keyed(logits: torch.Tensor, meta: torch.Tensor, params: Params, out: torch.Tensor, *, offset: int = 0,
@@ -111,7 +115,7 @@ def keyed(logits: torch.Tensor, meta: torch.Tensor, params: Params, out: torch.T
     cut = (not greedy_mode) and 0.0 < float(s.top_p) < 1.0
     _keyed[(rows,)](vals, ids, meta, out, params.seed, params.fp, prob if prob is not None else out, C1, C2, M1, M2,
                     offset, C=count, CP=triton.next_power_of_2(count), K=k, CUT=cut, GREEDY=greedy_mode,
-                    WRITE_PROB=prob is not None, num_warps=1)
+                    WRITE_PROB=prob is not None, MINP=(not greedy_mode) and float(s.min_p) > 0.0, num_warps=1)
     return out
 
 
@@ -146,6 +150,8 @@ def nucleus(logits: torch.Tensor, meta: torch.Tensor, params: Params, out: torch
     p = torch.exp(ranked - ranked[:, :1])
     run = torch.cumsum(p, dim=-1) / p.sum(dim=-1, keepdim=True)
     limit = (run < top_p).sum(dim=-1, keepdim=True) + 1
+    if params.sampling is not None and params.sampling.min_p > 0.0:        # the kernel's min-p prefix
+        limit = torch.minimum(limit, (ranked >= ranked[:, :1] + params.fp[2]).sum(dim=-1, keepdim=True))
     pos = (meta[0].to(torch.int64) + torch.arange(rows, device=logits.device) + 1 + offset)[:, None]
     x = _mix_t(params.seed.to(torch.int64) + _signed(C1))
     x = _mix_t(x ^ (pos * _signed(C2)))
@@ -173,7 +179,7 @@ def sample_candidates(vals: torch.Tensor, ids: torch.Tensor, meta: torch.Tensor,
     cut = (not greedy_mode) and 0.0 < float(s.top_p) < 1.0
     _keyed[(rows,)](vals, ids, meta, out, params.seed, params.fp, prob if prob is not None else out, C1, C2, M1, M2,
                     offset, C=count, CP=triton.next_power_of_2(count), K=k, CUT=cut, GREEDY=greedy_mode,
-                    WRITE_PROB=prob is not None, num_warps=1)
+                    WRITE_PROB=prob is not None, MINP=(not greedy_mode) and float(s.min_p) > 0.0, num_warps=1)
     return out
 
 
