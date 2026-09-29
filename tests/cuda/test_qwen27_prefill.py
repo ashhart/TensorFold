@@ -245,6 +245,7 @@ def test_rocm_fp8_prefill_matmul_is_exact_on_its_inputs_and_chunk_invariant(n, k
         assert torch.equal(whole, torch.cat(parts)), size
 
 
+@pytest.mark.skipif(not hip(), reason="the group-major layout and its lane matmul serve ROCm only")
 def test_group_major_lane_matmul_gives_the_stored_layouts_bits():
     """The group-major lane matmul is the stored layout's arithmetic: the same bits at every row count."""
 
