@@ -170,6 +170,7 @@ pub const Model = struct {
             if (i == 0 or (i + 1) % 4 == 0) try mx.evalMany(&.{ h, pending.? }, true);
         }
         const normed = try lanes.norm(kernels, s, h, pending, try m.weights.get("model.norm.weight"));
+        try m.trace(s, m.position, 64, "decode-hidden", normed.x.x);
         p.logits = try (try m.weights.linear("lm_head")).apply(kernels, s, normed.x);
         try m.trace(s, m.position, 64, "decode-logits", p.logits);
         return p;

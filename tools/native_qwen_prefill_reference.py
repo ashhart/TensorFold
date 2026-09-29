@@ -44,8 +44,9 @@ def main():
         expected.update(f"{start}-3-{label}.npy" for start in report["starts"] for label in ("q", "attention"))
         if report.get("final_only"):
             expected = {name for name in expected if name.endswith(("-cache0.npy", "-cache1.npy", "-logits.npy"))}
-        expected.update(f"{len(report['tokens']) + step}-64-decode-logits.npy"
-                        for step in range(max(0, len(report.get("generated", [])) - 1)))
+        expected.update(f"{len(report['tokens']) + step}-64-decode-{label}.npy"
+                        for step in range(max(0, len(report.get("generated", [])) - 1))
+                        for label in ("hidden", "logits"))
         native_names = {x.name for x in args.compare.glob("*.npy")}
         if {x.name for x in args.directory.glob("*.npy")} != expected or not expected <= native_names or (not report.get("final_only") and native_names != expected):
             raise ValueError("Incomplete prefill trace")
@@ -172,8 +173,10 @@ def main():
     if args.generate:
         from tensorfold.engine.exact_sampling import Sampling
         settings = Sampling(5678, 0.7, 12, 0.8)
+        hidden = hidden[:, -1:]
         for step in range(args.generate):
-            logits = family.head(hidden[:, -1:])
+            # Preserve decode array identity so the head reuses norm_xs sums, as in FamilyRounds.
+            logits = family.head(hidden)
             token = int(family.sample(logits, settings, [len(tokens) + step])[0])
             generated.append(token)
             if token in (248044, 248046):
@@ -181,7 +184,8 @@ def main():
             if step + 1 < args.generate:
                 hidden = family.hidden(mx.array([[token]], dtype=mx.uint32), cache)
                 start = len(tokens) + step
-                save(64, "decode-logits", family.head(hidden[:, -1:]))
+                save(64, "decode-hidden", hidden)
+                save(64, "decode-logits", family.head(hidden))
         print("Continuation:", generated, flush=True)
     (args.directory / "report.json").write_text(json.dumps({"starts": starts, "tokens": tokens, "generated": generated, "versions": versions, "simd": args.simd, "final_only": args.final_only}) + "\n")
 
