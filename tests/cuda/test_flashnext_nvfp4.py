@@ -3,8 +3,8 @@
 
 The checkpoint's quantized tensors are the routed experts: per expert and projection, packed E2M1 nibbles
 (uint8 [N, K/2]), fp8e4m3 block scales ([N, K/16], groups of 16) and a second per-tensor scale (fp32 scalar).
-The dequantized weight is code * (2**-7 * scale_2 * fp32(block scale)), groups of 16 — the fp32 row scale
-the FP4 table stores, the E2M1 codes riding as exact bf16 operands.
+The dequantized weight is code * (scale_2 * fp32(block scale)), groups of 16 — ModelOpt's reference,
+the fp32 row scale the FP4 table stores, the E2M1 codes riding as exact bf16 operands.
 """
 
 from __future__ import annotations
