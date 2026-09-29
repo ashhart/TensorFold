@@ -12,7 +12,7 @@ import torch
 from tensorfold.cuda.sampling import sample_rows
 from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
-from . import CONFIDENCE, DEPTH
+from . import CONFIDENCE, DEPTH, draft_cap
 from .forward import commit, forward
 from .state import CAND, Buffers, State
 from .mtp import mtp_forward
@@ -361,9 +361,12 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     widths: list[int] = []
     pos0 = st.pos
     unabsorbed = None                                  # the last round's kept rows, not yet in the MTP cache
+    # start mid-cap: open-ended quality paths often accept << depth; full depth on round 0 wastes MoE rows
+    ema_accept = 0.5 * float(max(depth - 1, 0))
     torch.cuda.synchronize()
     start = time.perf_counter()
-    drafts = draft(e, e.last_streams, [pending], st.pos + 1, min(depth, count - len(out)), sampling, confidence)
+    n0 = draft_cap(depth, count - len(out), ema_accept)
+    drafts = draft(e, e.last_streams, [pending], st.pos + 1, n0, sampling, confidence) if n0 else []
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
         tokens = [out[-1]] + drafts
         R = len(tokens)
@@ -381,13 +384,14 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         accepted += keep - 1
         keeps.append(keep)
         widths.append(R)
+        ema_accept = 0.5 * ema_accept + 0.5 * float(keep - 1)
         new = sampled[:keep][:max(0, count - len(out))]
         out.extend(sampled[:keep])
         if on_tokens is not None and new and on_tokens(new):
             break
         if len(out) >= count or (stop_eos and out[-1] in w.cfg.eos):
             break
-        n = min(depth, count - len(out))
+        n = draft_cap(depth, count - len(out), ema_accept)
         drafts = []
         if n > 0:
             drafts = draft(e, b.streams[:keep], sampled[:keep], st.pos + 1, n, sampling, confidence)
