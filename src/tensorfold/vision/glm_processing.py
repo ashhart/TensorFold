@@ -35,6 +35,13 @@ class GLMImageProcessor:
         self.image_token_id = int(config["image_token_id"])
         if self.tokenizer.convert_tokens_to_ids(self.image_marker) != self.image_token_id:
             raise ValueError("The tokenizer image marker does not match the GLM vision configuration")
+        vision = config["vision_config"]
+        for key, expected in (("patch_size", vision["patch_size"]),
+                              ("temporal_patch_size", vision["temporal_patch_size"]),
+                              ("merge_size", vision["spatial_merge_size"])):
+            actual = getattr(processor.image_processor, key, None)
+            if actual is None or int(actual) != int(expected) or int(expected) < 1:
+                raise ValueError(f"Image processor {key} disagrees with the vision tower")
 
     @classmethod
     def from_directory(cls, model_dir: str | Path) -> "GLMImageProcessor":
@@ -64,7 +71,6 @@ class GLMImageProcessor:
         budget = max_visual_tokens // len(images)
         for image in images:
             cap = min(budget, 256) if getattr(image, "detail", "auto") == "low" else budget
-            cap = max(16, cap)
             processed = self.processor.image_processor([image.to_pil()], return_tensors="np",
                                                        min_image_tokens=min(16, cap), max_image_tokens=cap)
             pixels = np.asarray(processed["pixel_values"])
@@ -72,11 +78,15 @@ class GLMImageProcessor:
             if grid.shape != (1, 3) or pixels.ndim != 2:
                 raise ValueError("The GLM image processor returned an invalid patch or grid shape")
             vision = self.config["vision_config"]
+            t, h, w = (int(n) for n in grid[0])
+            merge = int(vision["spatial_merge_size"])
+            if t != 1 or min(h, w) <= 0 or h % merge or w % merge:
+                raise ValueError("An image grid must contain one frame and merge-aligned positive dimensions")
             width = (int(vision.get("in_channels", 3)) * int(vision["temporal_patch_size"])
                      * int(vision["patch_size"]) ** 2)
             if pixels.shape != (int(np.prod(grid[0])), width):
                 raise ValueError("The processed image patches do not match the GLM vision geometry")
-            count = int(np.prod(grid[0])) // int(self.processor.image_processor.merge_size) ** 2
+            count = h * w // merge**2
             if count < 1 or count > cap:
                 raise ValueError("The GLM processor exceeded the per-image visual-token budget")
             all_pixels.append(pixels)

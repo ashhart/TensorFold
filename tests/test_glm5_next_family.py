@@ -196,6 +196,63 @@ def test_mtp_drafts_change_speed_only(checkpoint):
     assert c.emitted == b.emitted
 
 
+@pytest.mark.parametrize(("device", "grid"), [("cpu", 8), ("gpu", 8), ("gpu", 32)])
+def test_image_prefill_across_chunks_and_mtp_matches_the_equivalent_embeddings(checkpoint, device, grid):
+    """An image crosses a chunk boundary; serial and MTP decode agree with a token-embedding reference."""
+    from types import SimpleNamespace
+
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.engine.prefill_plan import PrefillPlan
+    from tensorfold.families.glm5_next import engine_settings
+    from tensorfold.vision.glm_mlx import GLMVisionFrontend
+    from tensorfold.vision.glm_processing import PreparedGLMVisionPrompt
+
+    if device == "gpu":
+        if not mx.metal.is_available():
+            pytest.skip("needs Metal")
+        mx.set_default_device(mx.gpu)
+    model = backbone(checkpoint)
+    runtime = GLMFlash(model, glm_mtp.load(model), drafts=3)
+    if device == "cpu":
+        runtime.exact_width = runtime.batch_rows = min(runtime.exact_width, 7)
+    reference = tokens(70, seed=12)
+    begin, end = grid - 2, grid + 4
+    prompt = list(reference)
+    prompt[begin:end] = [10] * 6
+    features = model.embed_tokens(mx.array(reference[begin:end], dtype=mx.uint32))
+
+    class ImageTower:
+        patch_embed = SimpleNamespace(proj=SimpleNamespace(weight=mx.zeros((1,), dtype=mx.bfloat16)))
+
+        def __call__(self, pixels, image_grid):
+            return features
+
+    config = {"image_token_id": 10, "vision_config": {"patch_size": 14, "temporal_patch_size": 2,
+              "spatial_merge_size": 2, "out_hidden_size": TEXT["hidden_size"]}}
+    processor = SimpleNamespace(tokenizer=SimpleNamespace(convert_tokens_to_ids=lambda token: 10),
+                                image_processor=SimpleNamespace(patch_size=14, temporal_patch_size=2, merge_size=2))
+    runtime.vision = GLMVisionFrontend(config, model.embed_tokens, ImageTower(), processor, mx)
+    prepared = PreparedGLMVisionPrompt(tuple(prompt), np.zeros((24, 1176), dtype=np.float32),
+                                      np.asarray([[1, 4, 6]], dtype=np.int64), ((begin, end),), ("image",))
+
+    def run(ids, prompt_data=None, drafts=False):
+        engine = LaneEngine(runtime, **engine_settings(runtime))
+        engine.prefill_plan = PrefillPlan(grid)
+        stream = LaneStream(stream_id="image", prompt_ids=list(ids), prompt_data=prompt_data,
+                            max_new_tokens=20, drafts=drafts)
+        engine.add_stream(stream, checkpoints_at=(grid,))
+        while engine.active_count:
+            engine.step()
+        return stream, engine
+
+    expected, _ = run(reference)
+    serial, _ = run(prompt, prepared)
+    drafted, engine = run(prompt, prepared, drafts=True)
+    assert serial.emitted == drafted.emitted == expected.emitted
+    assert engine.drafted > 0 and engine.prefill_chunks > 1
+    assert not drafted.history_checkpoints
+
+
 @pytest.mark.parametrize(("grid", "length", "cut", "kept"), [(8, 30, 26, 24), (32, 100, 80, 64)])
 def test_lane_engine_resumes_from_a_chunk_start(checkpoint, tmp_path, grid, length, cut, kept):
     """A checkpoint at a chunk start, in memory or read back from disk, resumes exactly like a fresh prefill."""

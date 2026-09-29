@@ -44,6 +44,8 @@ class Processor:
 
 
 class ImageBatchProcessor:
+    patch_size = 14
+    temporal_patch_size = 2
     merge_size = 2
 
     def __init__(self, grids):
@@ -60,6 +62,40 @@ class ImageBatchProcessor:
 
 def image(content_hash="img", detail="auto"):
     return SimpleNamespace(content_hash=content_hash, detail=detail, to_pil=lambda: content_hash)
+
+
+CONFIG = {"model_type": "glm5_next", "image_token_id": 10,
+          "vision_config": {"out_hidden_size": 6, "patch_size": 14, "temporal_patch_size": 2,
+                            "spatial_merge_size": 2, "hidden_size": 4, "intermediate_size": 8, "depth": 2}}
+
+
+@pytest.mark.parametrize(("setting", "value"), [("patch_size", 7), ("temporal_patch_size", 1), ("merge_size", 4)])
+def test_glm_image_processor_rejects_geometry_that_disagrees_with_the_tower(setting, value):
+    processor = Processor([[1, 4, 4]])
+    setattr(processor.image_processor, setting, value)
+    with pytest.raises(ValueError, match="disagrees with the vision tower"):
+        GLMImageProcessor(CONFIG, processor)
+
+
+@pytest.mark.parametrize("grid", [[2, 4, 4], [1, 3, 4], [1, -4, -4]])
+def test_glm_image_prompt_rejects_non_image_or_unaligned_grids(grid):
+    front = GLMImageProcessor(CONFIG, Processor([grid]))
+    with pytest.raises(ValueError, match="one frame and merge-aligned positive dimensions"):
+        front.prepare("<|begin_of_image|><|image|><|end_of_image|>", [image()])
+
+
+@pytest.mark.parametrize("budget", [1, 4, 15])
+def test_glm_image_prompt_respects_budgets_smaller_than_sixteen(budget):
+    processing = pytest.importorskip("mlx_vlm.models.glm5_next.processing")
+    pil = pytest.importorskip("PIL.Image")
+    processor = SimpleNamespace(tokenizer=Tokenizer(), image_token="<|image|>",
+                                image_processor=processing.Glm5NextImageProcessor())
+    front = GLMImageProcessor(CONFIG, processor)
+    source = SimpleNamespace(content_hash="small-image", detail="auto",
+                             to_pil=lambda: pil.new("RGB", (28, 28)))
+    prepared = front.prepare("<|begin_of_image|><|image|><|end_of_image|>", [source],
+                             max_visual_tokens=budget)
+    assert 1 <= prepared.visual_tokens <= budget
 
 
 def test_glm_image_prompt_expands_patch_grid_and_limits_total_visual_tokens():
