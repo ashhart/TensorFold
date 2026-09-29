@@ -23,6 +23,37 @@ def _mm(x: torch.Tensor, w: QLinear, xs: torch.Tensor | None = None) -> torch.Te
     return matmul(x, w, xs)
 
 
+def _gdn_inputs(h: torch.Tensor, gdn, xs: torch.Tensor, c, W: int):
+    """A GDN layer's qkv, z, b and a rows; views into one or two outputs where projections are stacked (the kernels
+    take their row strides)."""
+
+    if gdn.proj is not None:
+        both = _mm(h, gdn.proj, xs)
+        qkv, zba = both[:, :gdn.qkv.n], both[:, gdn.qkv.n:]
+    else:
+        qkv = _mm(h, gdn.qkv, xs)
+        zba = _mm(h, gdn.zba, xs) if gdn.zba is not None else None
+    if zba is None:
+        return (qkv, _mm(h, gdn.z, xs).reshape(W, c.v_heads, c.dv), _mm(h, gdn.b, xs), _mm(h, gdn.a, xs))
+    vd = c.v_heads * c.dv
+    return qkv, zba[:, :vd].reshape(W, c.v_heads, c.dv), zba[:, vd:vd + c.v_heads], zba[:, vd + c.v_heads:]
+
+
+def _attn_inputs(h: torch.Tensor, attn, xs: torch.Tensor, c, W: int):
+    """An attention layer's [q | gate] rows, keys and values; views as in ``_gdn_inputs``."""
+
+    if attn.proj is not None:
+        both = _mm(h, attn.proj, xs)
+        qg, kv = both[:, :attn.q.n], both[:, attn.q.n:]
+    else:
+        qg = _mm(h, attn.q, xs)
+        kv = _mm(h, attn.kv, xs) if attn.kv is not None else None
+    if kv is None:
+        return qg, _mm(h, attn.k, xs), _mm(h, attn.v, xs).reshape(W, c.kv_heads, c.head_dim)
+    kd = c.kv_heads * c.head_dim
+    return qg, kv[:, :kd], kv[:, kd:].reshape(W, c.kv_heads, c.head_dim)
+
+
 def _row_mm(x: torch.Tensor, w: QLinear, tp: bool,
             xs: torch.Tensor | None = None) -> torch.Tensor:
     if not tp:
@@ -219,17 +250,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
         x, h, xs = glue.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
             gdn = layer.gdn
-            qkv = _mm(h, gdn.qkv, xs)
-            if gdn.zba is not None:
-                zba = _mm(h, gdn.zba, xs)
-                vd = c.v_heads * c.dv
-                z = zba[:, :vd].reshape(W, c.v_heads, c.dv)             # views: the kernels take their row strides
-                b = zba[:, vd:vd + c.v_heads]
-                a = zba[:, vd + c.v_heads:]
-            else:
-                z = _mm(h, gdn.z, xs).reshape(W, c.v_heads, c.dv)
-                b = _mm(h, gdn.b, xs)
-                a = _mm(h, gdn.a, xs)
+            qkv, z, b, a = _gdn_inputs(h, gdn, xs, c, W)
             q, k, v, g, beta = glue.gdn_pre(qkv, st.conv[i], gdn.conv, windows, a, b,
                                               gdn.A_log, gdn.dt_bias, kh=c.k_heads,
                                               vh=c.v_heads, dk=c.dk)
@@ -239,15 +260,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             record.append(GDNRecord(q, k, v, g, beta, qkv))
         else:
             attn = layer.attn
-            qg = _mm(h, attn.q, xs)
-            if attn.kv is not None:
-                kv = _mm(h, attn.kv, xs)
-                kd = c.kv_heads * c.head_dim
-                key = kv[:, :kd]                                        # views: the kernels take their row strides
-                value = kv[:, kd:].reshape(W, c.kv_heads, c.head_dim)
-            else:
-                key = _mm(h, attn.k, xs)
-                value = _mm(h, attn.v, xs).reshape(W, c.kv_heads, c.head_dim)
+            qg, key, value = _attn_inputs(h, attn, xs, c, W)
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos,
                                     w.inv_freq, c.eps, heads=c.heads, kv_heads=c.kv_heads,
                                     head_dim=c.head_dim)
@@ -328,17 +341,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
         x, h, xs = glue.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
             gdn = layer.gdn
-            qkv = _mm(h, gdn.qkv, xs)
-            if gdn.zba is not None:
-                zba = _mm(h, gdn.zba, xs)
-                vd = c.v_heads * c.dv
-                z = zba[:, :vd].reshape(W, c.v_heads, c.dv)             # views: the kernels take their row strides
-                b = zba[:, vd:vd + c.v_heads]
-                a = zba[:, vd + c.v_heads:]
-            else:
-                z = _mm(h, gdn.z, xs).reshape(W, c.v_heads, c.dv)
-                b = _mm(h, gdn.b, xs)
-                a = _mm(h, gdn.a, xs)
+            qkv, z, b, a = _gdn_inputs(h, gdn, xs, c, W)
             conv = states[0].conv[i] if S == 1 else torch.cat([st.conv[i] for st in states])
             q, k, v, g, beta = glue.gdn_pre(qkv, conv, gdn.conv, windows_t, a, b, gdn.A_log, gdn.dt_bias,
                                             kh=c.k_heads, vh=c.v_heads, dk=c.dk, stream_ids=sid_t, nkeep=keep)
@@ -348,15 +351,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             record.append(GDNRecord(q, k, v, g, beta, qkv))
         else:
             attn = layer.attn
-            qg = _mm(h, attn.q, xs)
-            if attn.kv is not None:
-                kv = _mm(h, attn.kv, xs)
-                kd = c.kv_heads * c.head_dim
-                key = kv[:, :kd]                                        # views: the kernels take their row strides
-                value = kv[:, kd:].reshape(W, c.kv_heads, c.head_dim)
-            else:
-                key = _mm(h, attn.k, xs)
-                value = _mm(h, attn.v, xs).reshape(W, c.kv_heads, c.head_dim)
+            qg, key, value = _attn_inputs(h, attn, xs, c, W)
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos,
                                     w.inv_freq, c.eps, heads=c.heads, kv_heads=c.kv_heads,
                                     head_dim=c.head_dim)

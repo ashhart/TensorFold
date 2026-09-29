@@ -108,6 +108,14 @@ def stack_small(layer) -> None:
     # ROCm: [gate | up] too, a larger call streaming nearer the bandwidth; its members become views, so no copy stays
     if hip() and layer.gate is not None and layer.gu is None and _stackable([layer.gate, layer.up]):
         layer.gu = stack([layer.gate, layer.up])
+    # ROCm: the input projections a layer's rows go through first, one call each (122 -> 95 us for a GDN layer's,
+    # 89 -> 75 for an attention layer's, 12 rows on an R9700)
+    if hip() and layer.gdn is not None and layer.gdn.proj is None and _stackable([layer.gdn.qkv, layer.gdn.z,
+                                                                                    layer.gdn.b, layer.gdn.a]):
+        layer.gdn.proj = stack([layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a])
+    if hip() and layer.attn is not None and layer.attn.proj is None and _stackable([layer.attn.q, layer.attn.k,
+                                                                                     layer.attn.v]):
+        layer.attn.proj = stack([layer.attn.q, layer.attn.k, layer.attn.v])
 
 
 def _members(stacked: QLinear, parts: list[QLinear]) -> list[QLinear] | None:
@@ -130,6 +138,20 @@ def prepare(w: Weights, *, fuse: bool = False) -> None:
     for layer in w.layers:
         if fuse:
             stack_small(layer)
+        if layer.gdn is not None and layer.gdn.proj is not None:
+            layer.gdn.proj = tile(layer.gdn.proj)
+            views = _members(layer.gdn.proj, [layer.gdn.qkv, layer.gdn.zba])
+            if views is not None:
+                layer.gdn.qkv, layer.gdn.zba = views
+            else:
+                layer.gdn.proj = None
+        if layer.attn is not None and layer.attn.proj is not None:
+            layer.attn.proj = tile(layer.attn.proj)
+            views = _members(layer.attn.proj, [layer.attn.q, layer.attn.kv])
+            if views is not None:
+                layer.attn.q, layer.attn.kv = views
+            else:
+                layer.attn.proj = None
         if layer.gdn is not None and layer.gdn.zba is not None:
             layer.gdn.zba = tile(layer.gdn.zba)
             views = _members(layer.gdn.zba, [layer.gdn.z, layer.gdn.b, layer.gdn.a])

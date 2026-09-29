@@ -251,7 +251,9 @@ tokens, greedy, thinking off, medians of 3 to 5; decode spreads are wide, 10-40%
 | Serial decode (`"draft": false`), short prompt | 11.8 tok/s | 32.0 tok/s |
 
 A drafted round on a code prompt (12 verify rows, 6.4 tokens a round) takes 37 ms: 29 ms of it the weights' reads
-(the decode matmuls stream at about 80% of the card's 639 GB/s). A 4,096-token prompt chunk takes 3.19 s at 64k
+(the decode matmuls stream at about 80% of the card's 639 GB/s). At 16k tokens of context a round takes 40 ms: 29 ms
+of matmuls (the drafter's included), 4 ms of tree attention, the rest the drafter, DeltaNet, commits and launches
+(943 a round). A 4,096-token prompt chunk takes 3.19 s at 64k
 tokens of context and 3.88 s at 96k, 46% and 55% of it prompt attention (about 75 TFLOPS) and 1.28 s the FP8 matmuls.
 
 `TF_ROCM_LANE` picks the decode matmul (`wmma`, default; `dot2`, fastest for one row but slower in draft windows;

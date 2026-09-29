@@ -41,7 +41,7 @@ def add_rmsnorm(x: torch.Tensor, r: torch.Tensor | None, w: torch.Tensor, eps: f
 
 
 @triton.jit
-def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID, AS, BS,
+def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID, AS, BS, QS,
              C: tl.constexpr, KH: tl.constexpr, VH: tl.constexpr, DK: tl.constexpr, NKEEP: tl.constexpr,
              MULTI: tl.constexpr):
     """Program (row, head): conv, SiLU, RMS-scaled q/k, plain v; ``MULTI``: row r's conv rows at CS[SID[r] * NKEEP]."""
@@ -55,7 +55,7 @@ def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID, AS, BS,
         src = tl.load(WIN + row * (NKEEP + 1) + j)
         from_state = src < NKEEP
         xs = tl.load(CS + (cs_row + src) * C + ch, mask=(ch < C) & from_state, other=0.0)
-        xw = tl.load(QKV + (src - NKEEP) * C + ch, mask=(ch < C) & (src >= NKEEP), other=0.0)
+        xw = tl.load(QKV + (src - NKEEP) * QS + ch, mask=(ch < C) & (src >= NKEEP), other=0.0)
         x = tl.where(from_state, xs, xw).to(tl.float32)
         w = tl.load(CW + ch * (NKEEP + 1) + j).to(tl.float32)
         acc = acc + x * w
@@ -85,9 +85,12 @@ def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID, AS, BS,
 def gdn_pre(qkv: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor, windows: torch.Tensor,
             a: torch.Tensor, b: torch.Tensor, A_log: torch.Tensor, dt_bias: torch.Tensor, *, kh: int, vh: int, dk: int,
             stream_ids: torch.Tensor | None = None, nkeep: int | None = None):
-    """windows (W, nkeep + 1) index [conv_state; qkv]; ``stream_ids``: per-stream state indices; a, b may stride."""
+    """windows (W, nkeep + 1) index [conv_state; qkv]; ``stream_ids``: per-stream state indices; qkv, a and b may
+    stride."""
 
     W, C = qkv.shape
+    if qkv.stride(1) != 1:
+        qkv = qkv.contiguous()
     nkeep = conv_state.shape[0] if nkeep is None else nkeep
     dev = qkv.device
     q = torch.empty((W, kh, dk), dtype=torch.bfloat16, device=dev)
@@ -97,8 +100,8 @@ def gdn_pre(qkv: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor, w
     beta = torch.empty((W, vh), dtype=torch.float32, device=dev)
     multi = stream_ids is not None
     _gdn_pre[(W, 2 * kh + vh)](qkv, conv_state, conv_w, windows, a, b, A_log, dt_bias, q, k, v, g, beta,
-                              stream_ids if multi else windows, a.stride(0), b.stride(0), C=C, KH=kh, VH=vh, DK=dk,
-                              NKEEP=nkeep, MULTI=multi, num_warps=2)
+                              stream_ids if multi else windows, a.stride(0), b.stride(0), qkv.stride(0), C=C, KH=kh,
+                              VH=vh, DK=dk, NKEEP=nkeep, MULTI=multi, num_warps=2)
     return q, k, v, g, beta
 
 
@@ -154,7 +157,7 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor):
 
 
 @triton.jit
-def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps, KS,
+def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps, KS, QS,
                H: tl.constexpr, HKV: tl.constexpr, D: tl.constexpr, HALF: tl.constexpr,
                MROPE: tl.constexpr, ROWS: tl.constexpr, HSEC: tl.constexpr, WSEC: tl.constexpr):
     """Program (row, head): heads 0..H-1 are queries (from [q | gate] rows), H..H+HKV-1 keys."""
@@ -164,7 +167,7 @@ def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps, KS,
     d = tl.arange(0, D)
     is_q = head < H
     if is_q:
-        x = tl.load(QG + (row * H + head) * 2 * D + d).to(tl.float32)
+        x = tl.load(QG + row * QS + head * 2 * D + d).to(tl.float32)
         w = tl.load(QN + d).to(tl.float32)
     else:
         x = tl.load(KV + row * KS + (head - H) * D + d).to(tl.float32)
@@ -199,7 +202,8 @@ def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps, KS,
 def attn_prep(qg: torch.Tensor, k: torch.Tensor, q_norm: torch.Tensor, k_norm: torch.Tensor,
               pos: torch.Tensor, inv_freq: torch.Tensor, eps: float, *, heads: int, kv_heads: int, head_dim: int,
               mrope_section: tuple[int, int, int] = (11, 11, 10)):
-    """qg (W, heads*2*D) [q_h | gate_h] rows, k (W, kv_heads*D) strided: normed, rotated q (W, H, D), k (W, HKV, D)."""
+    """qg (W, heads*2*D) [q_h | gate_h] rows and k (W, kv_heads*D), both may stride: normed, rotated q (W, H, D) and
+    k (W, HKV, D)."""
 
     W = qg.shape[0]
     multi = pos.ndim == 2
@@ -210,20 +214,20 @@ def attn_prep(qg: torch.Tensor, k: torch.Tensor, q_norm: torch.Tensor, k_norm: t
     pos = pos.contiguous()
     qo = torch.empty((W, heads, head_dim), dtype=torch.bfloat16, device=qg.device)
     ko = torch.empty((W, kv_heads, head_dim), dtype=torch.bfloat16, device=qg.device)
-    _attn_prep[(W, heads + kv_heads)](qg, k, q_norm, k_norm, pos, inv_freq, qo, ko, eps, k.stride(0), H=heads,
-                                      HKV=kv_heads, D=head_dim, HALF=inv_freq.numel(), MROPE=multi,
+    _attn_prep[(W, heads + kv_heads)](qg, k, q_norm, k_norm, pos, inv_freq, qo, ko, eps, k.stride(0), qg.stride(0),
+                                      H=heads, HKV=kv_heads, D=head_dim, HALF=inv_freq.numel(), MROPE=multi,
                                       ROWS=W if multi else 0, HSEC=mrope_section[1], WSEC=mrope_section[2],
                                       num_warps=2)
     return qo, ko
 
 
 @triton.jit
-def _gate_mul(O, QG, OUT, XS, H: tl.constexpr, D: tl.constexpr):
+def _gate_mul(O, QG, OUT, XS, QS, H: tl.constexpr, D: tl.constexpr):
     row = tl.program_id(0)
     h = tl.program_id(1)
     d = tl.arange(0, D)
     o = tl.load(O + (row * H + h) * D + d).to(tl.float32)
-    g = tl.load(QG + (row * H + h) * 2 * D + D + d).to(tl.float32)
+    g = tl.load(QG + row * QS + h * 2 * D + D + d).to(tl.float32)
     out = (o * tl.sigmoid(g)).to(tl.bfloat16)
     tl.store(OUT + (row * H + h) * D + d, out)
     og = tl.reshape(out.to(tl.float32), (D // 64, 64))
@@ -231,12 +235,13 @@ def _gate_mul(O, QG, OUT, XS, H: tl.constexpr, D: tl.constexpr):
 
 
 def gate_mul(o: torch.Tensor, qg: torch.Tensor, *, heads: int, head_dim: int):
-    """Attention output (W, H, D) times sigmoid(gate) from the [q | gate] rows -> (W, H*D) bf16 and group sums."""
+    """Attention output (W, H, D) times sigmoid(gate) from the [q | gate] rows (which may stride) -> (W, H*D) bf16 and
+    group sums."""
 
     W = o.shape[0]
     out = torch.empty((W, heads * head_dim), dtype=torch.bfloat16, device=o.device)
     xs = torch.empty((W, heads * head_dim // 64), dtype=torch.float32, device=o.device)
-    _gate_mul[(W, heads)](o, qg, out, xs, H=heads, D=head_dim, num_warps=2)
+    _gate_mul[(W, heads)](o, qg, out, xs, qg.stride(0), H=heads, D=head_dim, num_warps=2)
     return out, xs
 
 

@@ -239,9 +239,10 @@ def _counts(device: torch.device, n: int) -> torch.Tensor:
 
 @lru_cache(maxsize=1)
 def wmma_fill() -> int:
-    """Blocks a WMMA K split aims for (``TF_ROCM_WMMA_FILL``); the split is a function of the weight's shape only."""
+    """Blocks a WMMA K split aims for (``TF_ROCM_WMMA_FILL``); the split is a function of the weight's shape only.
+    64 read every 27B projection at 12 rows as fast as 128 or faster (its narrow ones 5-12% faster on an R9700)."""
 
-    return int(os.environ.get("TF_ROCM_WMMA_FILL", "128"))
+    return int(os.environ.get("TF_ROCM_WMMA_FILL", "64"))
 
 
 @lru_cache(maxsize=None)

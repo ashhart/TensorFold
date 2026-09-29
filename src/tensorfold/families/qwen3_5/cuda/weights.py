@@ -176,6 +176,7 @@ class GDN:
     dt_bias: torch.Tensor     # (Hv,) fp32
     norm: torch.Tensor        # (Dv,) bf16
     zba: QLinear | None = None  # [z | b | a] stacked into one projection (``qmm_fast.stack``)
+    proj: QLinear | None = None  # ROCm: [qkv | z | b | a] as one matmul (qkv and zba are then its views)
 
 
 @dataclass
@@ -187,6 +188,7 @@ class Attention:
     q_norm: torch.Tensor      # (head_dim,) bf16
     k_norm: torch.Tensor
     kv: QLinear | None = None   # [k | v] stacked
+    proj: QLinear | None = None  # ROCm: [q | k | v] as one matmul (q and kv are then its views)
 
 
 @dataclass
