@@ -58,6 +58,43 @@ pub const Reply = struct {
     }
 };
 
+pub const RequestGeneration = union(std.meta.Tag(Backend)) {
+    qwen: Generation(qwen.Model),
+    nemotron: Generation(@import("nemotron.zig").Model),
+    flash: Generation(@import("flash.zig").Model),
+    gemma: Generation(@import("gemma.zig").Model),
+    glm: Generation(@import("glm.zig").Model),
+    deepseek: Generation(@import("deepseek.zig").Model),
+
+    pub fn init(s: *Session, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink, image: ?*@import("vision.zig").Prompt) !RequestGeneration {
+        if (image != null and s.backend != .qwen) return error.UnsupportedModelImages;
+        switch (s.backend) {
+            inline else => |*m, tag| return @unionInit(RequestGeneration, @tagName(tag), try Generation(@TypeOf(m.*)).init(m, &s.tokenizer, a, prompt, options, sink, image)),
+        }
+    }
+
+    pub fn step(g: *RequestGeneration, s: *Session) !bool {
+        switch (g.*) {
+            inline else => |*request, tag| {
+                if (@as(std.meta.Tag(Backend), s.backend) != tag) return error.WrongGenerationModel;
+                return request.step(&@field(s.backend, @tagName(tag)));
+            },
+        }
+    }
+
+    pub fn takeReply(g: *RequestGeneration) !Reply {
+        switch (g.*) {
+            inline else => |*request| return request.takeReply(),
+        }
+    }
+
+    pub fn deinit(g: *RequestGeneration) void {
+        switch (g.*) {
+            inline else => |*request| request.deinit(),
+        }
+    }
+};
+
 pub const Session = struct {
     backend: Backend,
     tokenizer: tokenizer.Tokenizer,

@@ -308,6 +308,13 @@ pub fn build(b: *std.Build) void {
     lifecycle.addArtifactArg(exe);
     lifecycle.addArg(b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}));
     b.step("test-server-lifecycle", "Check request deadlines, stalled clients, cancellation recovery and clean SIGINT/SIGTERM shutdown with local Qwen").dependOn(&lifecycle.step);
+    const http_checks_module = b.createModule(.{ .root_source_file = b.path("tools/native_http_checks.zig"), .target = b.graph.host, .optimize = .safe });
+    const server_rounds = b.addRunArtifact(lifecycle.producer.?);
+    server_rounds.addArtifactArg(exe);
+    server_rounds.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "build/native-checks/session-image/image.png" });
+    server_rounds.addArtifactArg(b.addExecutable(.{ .name = "native-http-checks", .root_module = http_checks_module }));
+    server_rounds.step.dependOn(&session_image_fixture.step);
+    b.step("test-server-rounds", "Compare concurrent HTTP image/text requests with isolated outputs, streaming and cancellation").dependOn(&server_rounds.step);
     const chat_tests = b.step("test-chat", "Compare native Jinja prompts with upstream for all seven local tokenizers; no model weights loaded");
     const tool_fixtures = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", ".", "--tool-fixtures", "--output", "build/native-checks/tool-calls.json" });
     const tool_tests = b.addRunArtifact(exe);

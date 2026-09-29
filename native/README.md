@@ -190,6 +190,9 @@ apply a chat template. Use `--tokens ID,ID,...` for controlled comparisons.
 `tensorfold serve MODEL_DIR --host 127.0.0.1 --port 8080` exposes `/health`,
 `/v1/models`, `/v1/completions` and `/v1/chat/completions`, including SSE,
 seeded sampling, stop strings, reasoning content and disconnect cancellation.
+`--batch-streams N` controls active requests (default `4`, range `1`–`8`). One
+GPU worker interleaves their prefill chunks and decode steps with separate caches;
+GPU forwards are still per request. Up to eight further requests can queue.
 `--request-timeout-seconds N` sets an absolute deadline from connection acceptance
 through queuing and generation (default `0`, disabled). Cooperative cancellation
 returns HTTP 408 or an SSE error; stalled sockets close after a 250 ms allowance.
@@ -230,6 +233,8 @@ upstream URL/address policy checks.
 `.zig-toolchain/zig build test-server-lifecycle -Doptimize=safe -j1` tests deadlines,
 partial requests, cancellation recovery and signal shutdown using the existing
 Qwen checkpoint, with one model loaded at a time.
+`test-server-rounds` checks concurrent text/image requests against isolated
+outputs, JSON/SSE parity, tool streaming and cancellation on the same checkpoint.
 Use `--report build/native-checks/run.json` and
 `--dump-logits build/native-checks/logits.npy` for correctness evidence; create
 the output directory first.

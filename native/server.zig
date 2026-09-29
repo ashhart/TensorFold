@@ -13,6 +13,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var limit: usize = 0;
     var timeout_ms: i64 = 0;
     var shutdown_grace_ms: i64 = 5000;
+    var batch_streams: usize = 4;
     var name = std.fs.path.basename(args[2]);
     var defaults = try inference.Options.load(init.gpa, init.io, args[2]);
     defaults.max_tokens = 4096;
@@ -37,6 +38,11 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         const flag = args[i];
         const value = args[i + 1];
         i += 2;
+        if (std.mem.eql(u8, flag, "--batch-streams")) {
+            batch_streams = try std.fmt.parseInt(usize, value, 10);
+            if (batch_streams < 1 or batch_streams > 8) return error.InvalidBatchStreams;
+            continue;
+        }
         if (std.mem.eql(u8, flag, "--request-timeout-seconds")) timeout_ms = try control.seconds(value) else if (std.mem.eql(u8, flag, "--shutdown-grace-seconds")) shutdown_grace_ms = try control.seconds(value) else if (std.mem.eql(u8, flag, "--host")) host = value else if (std.mem.eql(u8, flag, "--port")) port = try std.fmt.parseInt(u16, value, 10) else if (std.mem.eql(u8, flag, "--served-model-name")) name = value else if (std.mem.eql(u8, flag, "--max-requests")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--reasoning-effort")) {
             if (!std.mem.eql(u8, value, "low") and !std.mem.eql(u8, value, "medium") and !std.mem.eql(u8, value, "xhigh")) return error.InvalidReasoningEffort;
             effort = value;
@@ -70,7 +76,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     defer parsed.deinit();
     if (parsed.value == .object) if (parsed.value.object.get("model_type")) |kind| if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) try @import("glm.zig").Model.prepareRuntime();
     var jobs: [8]*Job = undefined;
-    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry };
+    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     defer {
         worker.queue.close(init.io);
@@ -135,6 +141,7 @@ const Worker = struct {
     thinking: bool,
     effort: []const u8,
     vision_urls: bool,
+    batch_streams: usize,
     fn run(w: *Worker) void {
         w.loop() catch |err| {
             w.startup_error = err;
@@ -147,12 +154,46 @@ const Worker = struct {
         var session = try inference.Session.init(w.io, w.dir);
         defer session.deinit();
         w.ready.set(w.io);
-        while (w.queue.getOneUncancelable(w.io)) |job| {
-            complete(&session, job.a, job.request, job.model, job.sequence, job.created, job.client, job.body, job.is_chat, job.options, w.thinking, w.effort, w.vision_urls) catch |err| {
-                job.failure = err;
+        var active: [8]?*Pending = @splat(null);
+        var live: usize = 0;
+        var closed = false;
+        while (!closed or live > 0) {
+            if (!closed and live < w.batch_streams) {
+                var ready: [8]*Job = undefined;
+                const count = w.queue.getUncancelable(w.io, ready[0 .. w.batch_streams - live], if (live == 0) 1 else 0) catch blk: {
+                    closed = true;
+                    break :blk 0;
+                };
+                for (ready[0..count]) |job| {
+                    const pending = Pending.start(w, &session, job) catch |err| blk: {
+                        job.failure = err;
+                        break :blk null;
+                    };
+                    if (pending) |p| {
+                        for (&active) |*slot| if (slot.* == null) {
+                            slot.* = p;
+                            live += 1;
+                            break;
+                        };
+                    } else job.done.set(w.io);
+                }
+            }
+            for (&active) |*slot| if (slot.*) |pending| {
+                const done = pending.step(&session) catch |err| blk: {
+                    pending.reportError(err) catch |write_err| {
+                        pending.job.failure = write_err;
+                    };
+                    break :blk true;
+                };
+                if (done) {
+                    const job = pending.job;
+                    pending.deinit();
+                    slot.* = null;
+                    live -= 1;
+                    job.done.set(w.io);
+                }
             };
-            job.done.set(w.io);
-        } else |_| {}
+        }
     }
 };
 fn connectionTask(w: *Worker, a: std.mem.Allocator, stream: std.Io.net.Stream, name: []const u8, sequence: usize, client: *control.Client) void {
@@ -213,79 +254,124 @@ fn requestFailure(a: std.mem.Allocator, request: *Request, err: anyerror) !void 
     }, @errorName(err));
 }
 
-fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, created: i64, client: *control.Client, body: std.json.Value, is_chat: bool, requested: inference.Options, default_thinking: bool, default_effort: []const u8, vision_urls: bool) !void {
-    const cancellation = client.cancellation();
-    cancellation.check() catch |err| return requestFailure(a, request, err);
-    var options = requested;
-    var ids: std.ArrayList(i32) = .empty;
-    var raw_images = body.object.get("images") orelse .null;
-    var thinking = false;
-    var tools: std.json.Value = .null;
-    var max_calls: ?usize = null;
-    var gate: ?@import("call_gate.zig").Gate = null;
-    if (is_chat) {
-        tools = chat.activeTools(a, body) catch |err| return failure(a, request, .bad_request, @errorName(err));
-        if (body.object.get("parallel_tool_calls")) |parallel| if (parallel != .null) {
-            if (parallel != .bool) return failure(a, request, .bad_request, "parallel_tool_calls must be a boolean");
-            if (!parallel.bool) max_calls = 1;
+const Pending = struct {
+    job: *Job,
+    id: []const u8 = "",
+    thinking: bool = false,
+    tools: std.json.Value = .null,
+    max_calls: ?usize = null,
+    markers: reply_text.Markers = .{},
+    gate: ?@import("call_gate.zig").Gate = null,
+    image: ?@import("vision.zig").Prompt = null,
+    generation: ?inference.RequestGeneration = null,
+    response: ?std.http.BodyWriter = null,
+    stream: ?Stream = null,
+    buffer: [8192]u8 = undefined,
+
+    fn start(w: *Worker, session: *inference.Session, job: *Job) !?*Pending {
+        const p = try job.a.create(Pending);
+        p.* = .{ .job = job };
+        p.prepare(w, session) catch |err| {
+            defer p.deinit();
+            try p.reportError(err);
+            return null;
         };
-        const rendered = session.renderChat(a, body, default_thinking, default_effort) catch |err| return failure(a, request, .bad_request, @errorName(err));
-        try ids.appendSlice(a, try chat.encode(a, &session.tokenizer, rendered));
-        raw_images = rendered.images;
-        thinking = rendered.thinking;
-        if (chat.requiresCall(body)) {
-            const form = (try session.chat_template.?.callForm(a, &session.tokenizer)) orelse return failure(a, request, .bad_request, "This template cannot mark required tool calls");
-            var names: std.ArrayList([]const u8) = .empty;
-            if (tools == .array) for (tools.array.items) |spec| try names.append(a, try chat.toolName(spec));
-            gate = @import("call_gate.zig").Gate.init(a, &session.tokenizer, ids.items, form, names.items, session.backend == .gemma) catch |err| return failure(a, request, .bad_request, @errorName(err));
-        }
-    } else switch (body.object.get("prompt") orelse return failure(a, request, .bad_request, "Missing prompt")) {
-        .string => |value| {
-            for (try session.tokenizer.encode(a, value)) |id| try ids.append(a, @intCast(id));
-        },
-        .array => |values| for (values.items) |value| {
-            if (value != .integer or value.integer < 0 or value.integer > std.math.maxInt(i32)) return failure(a, request, .bad_request, "Invalid prompt token");
-            try ids.append(a, @intCast(value.integer));
-        },
-        else => return failure(a, request, .bad_request, "Prompt must be text or token IDs"),
+        return p;
     }
-    if (!thinking) options.thinking_budget = 0;
-    session.validate(ids.items, options) catch |err| return failure(a, request, .bad_request, @errorName(err));
-    if (raw_images == .array and raw_images.array.items.len > 0 and session.backend != .qwen) return failure(a, request, .bad_request, "This model does not support image inputs");
-    const images = @import("image_source.zig").loadWithCancellation(a, session.io, raw_images, vision_urls, cancellation) catch |err| return requestFailure(a, request, err);
-    const id = try std.fmt.allocPrint(a, "{s}cmpl-{d}-{d}", .{ if (is_chat) "chat" else "", created, sequence });
-    const markers: reply_text.Markers = if (session.backend == .gemma) reply_text.gemma_markers else .{};
-    cancellation.check() catch |err| return requestFailure(a, request, err);
-    if (options.stream) {
-        var buffer: [8192]u8 = undefined;
-        var response = try request.respondStreaming(&buffer, .{ .respond_options = .{ .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" } } } });
-        var state = Stream{ .a = a, .writer = &response.writer, .transport = request.server.out, .id = id, .model = model, .created = created, .is_chat = is_chat, .thinking = thinking, .markers = markers, .tools = tools, .max_calls = max_calls, .cancellation = cancellation };
-        if (is_chat) try state.chatChunk(.{ .role = "assistant", .content = "" }, null);
-        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &state, .emit = Stream.emit, .cancellation = cancellation, .gate = if (gate) |*g| g else null }, images) catch |err| {
-            const error_body = try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .message = @errorName(err) } }, .{});
-            try response.writer.print("data: {s}\n\ndata: [DONE]\n\n", .{error_body});
+
+    fn deinit(p: *Pending) void {
+        if (p.generation) |*generation| generation.deinit();
+        if (p.image) |*image| image.deinit();
+        p.job.a.destroy(p);
+    }
+
+    fn reportError(p: *Pending, err: anyerror) !void {
+        if (p.response) |*response| {
+            const body = try std.json.Stringify.valueAlloc(p.job.a, .{ .@"error" = .{ .message = @errorName(err) } }, .{});
+            try response.writer.print("data: {s}\n\ndata: [DONE]\n\n", .{body});
             try response.end();
-            return;
-        };
-        defer reply.deinit(mx.allocator);
-        if (is_chat) {
-            try state.chatText(true);
-            try state.chatChunk(std.json.Value{ .object = .empty }, if (state.calls_sent > 0) "tool_calls" else @tagName(reply.finish_reason));
-        } else try state.chunk("", @tagName(reply.finish_reason));
-        try response.writer.writeAll("data: [DONE]\n\n");
-        try response.end();
-    } else {
-        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .cancellation = cancellation, .gate = if (gate) |*g| g else null }, images) catch |err| return requestFailure(a, request, err);
-        defer reply.deinit(mx.allocator);
-        const usage = .{ .prompt_tokens = reply.prompt_tokens, .completion_tokens = reply.tokens.items.len, .total_tokens = reply.prompt_tokens + reply.tokens.items.len };
-        if (is_chat) {
-            const parts = if (thinking) reply_text.splitThinking(reply.content, true, markers) else reply_text.Parts{ .content = reply.content };
-            var parsed = try tool_calls.parse(a, parts.content, tools, max_calls, id);
-            if (max_calls != null and tools == .array and tools.array.items.len > 0) parsed.content = try tool_calls.singleContent(a, parsed.content);
-            try json(a, request, .ok, .{ .id = id, .object = "chat.completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .message = .{ .role = "assistant", .content = parsed.content, .reasoning_content = parts.reasoning, .tool_calls = parsed.calls }, .finish_reason = if (parsed.calls.len > 0) "tool_calls" else @tagName(reply.finish_reason) }}, .usage = usage });
-        } else try json(a, request, .ok, .{ .id = id, .object = "text_completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .text = reply.content, .finish_reason = @tagName(reply.finish_reason), .logprobs = @as(?u8, null) }}, .usage = usage });
+        } else try requestFailure(p.job.a, p.job.request, err);
     }
-}
+
+    fn prepare(p: *Pending, w: *Worker, session: *inference.Session) !void {
+        const a = p.job.a;
+        const body = p.job.body;
+        const cancellation = p.job.client.cancellation();
+        try cancellation.check();
+        var options = p.job.options;
+        var ids: std.ArrayList(i32) = .empty;
+        var raw_images = body.object.get("images") orelse .null;
+        if (p.job.is_chat) {
+            p.tools = try chat.activeTools(a, body);
+            if (body.object.get("parallel_tool_calls")) |parallel| if (parallel != .null) {
+                if (parallel != .bool) return error.InvalidParallelToolCalls;
+                if (!parallel.bool) p.max_calls = 1;
+            };
+            const rendered = try session.renderChat(a, body, w.thinking, w.effort);
+            try ids.appendSlice(a, try chat.encode(a, &session.tokenizer, rendered));
+            raw_images = rendered.images;
+            p.thinking = rendered.thinking;
+            if (chat.requiresCall(body)) {
+                const form = (try session.chat_template.?.callForm(a, &session.tokenizer)) orelse return error.UnsupportedRequiredToolCalls;
+                var names: std.ArrayList([]const u8) = .empty;
+                if (p.tools == .array) for (p.tools.array.items) |spec| try names.append(a, try chat.toolName(spec));
+                p.gate = try @import("call_gate.zig").Gate.init(a, &session.tokenizer, ids.items, form, names.items, session.backend == .gemma);
+            }
+        } else switch (body.object.get("prompt") orelse return error.MissingPrompt) {
+            .string => |value| {
+                for (try session.tokenizer.encode(a, value)) |id| try ids.append(a, @intCast(id));
+            },
+            .array => |values| for (values.items) |value| {
+                if (value != .integer or value.integer < 0 or value.integer > std.math.maxInt(i32)) return error.InvalidPromptToken;
+                try ids.append(a, @intCast(value.integer));
+            },
+            else => return error.InvalidPrompt,
+        }
+        if (!p.thinking) options.thinking_budget = 0;
+        try session.validate(ids.items, options);
+        if (raw_images == .array and raw_images.array.items.len > 0 and session.backend != .qwen) return error.UnsupportedModelImages;
+        const images = try @import("image_source.zig").loadWithCancellation(a, session.io, raw_images, w.vision_urls, cancellation);
+        p.id = try std.fmt.allocPrint(a, "{s}cmpl-{d}-{d}", .{ if (p.job.is_chat) "chat" else "", p.job.created, p.job.sequence });
+        p.markers = if (session.backend == .gemma) reply_text.gemma_markers else .{};
+        try cancellation.check();
+        if (images.len > 0) p.image = try @import("vision.zig").Prompt.prepareEncoded(session.io, session.directory, images, &ids, a, &session.backend.qwen.weights);
+        if (options.stream) {
+            p.response = try p.job.request.respondStreaming(&p.buffer, .{ .respond_options = .{ .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" } } } });
+            p.stream = .{ .a = a, .writer = &p.response.?.writer, .transport = p.job.request.server.out, .id = p.id, .model = p.job.model, .created = p.job.created, .is_chat = p.job.is_chat, .thinking = p.thinking, .markers = p.markers, .tools = p.tools, .max_calls = p.max_calls, .cancellation = cancellation };
+            if (p.job.is_chat) try p.stream.?.chatChunk(.{ .role = "assistant", .content = "" }, null);
+        }
+        p.generation = try inference.RequestGeneration.init(session, mx.allocator, ids.items, options, .{ .context = if (p.stream) |*stream| stream else null, .emit = if (p.stream != null) Stream.emit else null, .cancellation = cancellation, .gate = if (p.gate) |*gate| gate else null }, if (p.image) |*image| image else null);
+    }
+
+    fn step(p: *Pending, session: *inference.Session) !bool {
+        if (!try p.generation.?.step(session)) return false;
+        var reply = try p.generation.?.takeReply();
+        defer reply.deinit(mx.allocator);
+        const a = p.job.a;
+        const request = p.job.request;
+        const id = p.id;
+        const model = p.job.model;
+        const created = p.job.created;
+        if (p.response) |*response| {
+            const state = &p.stream.?;
+            if (p.job.is_chat) {
+                try state.chatText(true);
+                try state.chatChunk(std.json.Value{ .object = .empty }, if (state.calls_sent > 0) "tool_calls" else @tagName(reply.finish_reason));
+            } else try state.chunk("", @tagName(reply.finish_reason));
+            try response.writer.writeAll("data: [DONE]\n\n");
+            try response.end();
+        } else {
+            const usage = .{ .prompt_tokens = reply.prompt_tokens, .completion_tokens = reply.tokens.items.len, .total_tokens = reply.prompt_tokens + reply.tokens.items.len };
+            if (p.job.is_chat) {
+                const parts = if (p.thinking) reply_text.splitThinking(reply.content, true, p.markers) else reply_text.Parts{ .content = reply.content };
+                var parsed = try tool_calls.parse(a, parts.content, p.tools, p.max_calls, id);
+                if (p.max_calls != null and p.tools == .array and p.tools.array.items.len > 0) parsed.content = try tool_calls.singleContent(a, parsed.content);
+                try json(a, request, .ok, .{ .id = id, .object = "chat.completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .message = .{ .role = "assistant", .content = parsed.content, .reasoning_content = parts.reasoning, .tool_calls = parsed.calls }, .finish_reason = if (parsed.calls.len > 0) "tool_calls" else @tagName(reply.finish_reason) }}, .usage = usage });
+            } else try json(a, request, .ok, .{ .id = id, .object = "text_completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .text = reply.content, .finish_reason = @tagName(reply.finish_reason), .logprobs = @as(?u8, null) }}, .usage = usage });
+        }
+        return true;
+    }
+};
 
 const Stream = struct {
     a: std.mem.Allocator,
