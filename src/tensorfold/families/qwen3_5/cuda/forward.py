@@ -271,8 +271,9 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
 
 @torch.no_grad()
 def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequence[int], State]], *,
-                       full_logits: bool = True, tp: bool = False, capture_taps: bool = False):
-    """Several streams' windows in one forward, each row with the bits of its stream's own ``tree_forward``."""
+                       full_logits: bool = True, tp: bool = False, capture_taps: bool = False,
+                       hidden: bool = False):
+    """Several streams' windows in one forward, each row with the bits of its stream's own ``tree_forward`` (``hidden``: the rows' final normed states third)."""
 
     c = w.config
     device = w.norm.device
@@ -368,7 +369,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
         if len(taps) != 5:
             raise ValueError("DFlash2 taps require the complete 64-layer target")
         return logits, record, torch.cat(taps, dim=-1), starts
-    return logits, record, None, starts
+    return logits, record, h if hidden else None, starts
 
 
 @torch.no_grad()

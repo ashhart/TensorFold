@@ -59,7 +59,7 @@ foreground request needs its lane or memory, then restarts with already-delivere
 Session-title requests are also treated as background work.
 
 On CUDA, `--parallel auto` serves one request at a time. An explicit `--parallel N` above one shares rounds
-for Qwen3.8-27B on one or two ranks and for Flash Next on one rank; GLM, Nemotron and Qwen3.6 stay serialized.
+for Qwen3.8-27B on one or two ranks and for Flash Next and Qwen3.6 on one rank; GLM and Nemotron stay serialized.
 When a client disconnects, its CUDA request stops at the next round, and a request still waiting behind
 another in one-at-a-time serving does not start; two-rank Flash Next, Nemotron and GLM requests finish on
 both ranks.

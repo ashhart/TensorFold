@@ -83,8 +83,8 @@ row's arithmetic independent of the other rows in the call. Compare a request wi
 The MLX engine can share a round across requests. Each stream keeps its own state and sampling key, with
 concurrent output required to match its solo output. Load-time checks restrict window width and shared
 forwards where a family cannot reproduce its serial arithmetic. On CUDA, `--parallel N` with N greater
-than one enables shared rounds for Qwen3.8-27B on one or two ranks and Flash Next on one rank.
-Flash Next rejects concurrent two-rank execution. GLM and Nemotron CUDA serve one request at a time;
+than one enables shared rounds for Qwen3.8-27B on one or two ranks and for Flash Next and Qwen3.6-35B-A3B on
+one rank. Flash Next rejects concurrent two-rank execution. GLM and Nemotron CUDA serve one request at a time;
 CUDA `--parallel auto` also means one request at a time.
 
 Exactness is against the same engine, weights, runtime and settings. It does not imply identical output
