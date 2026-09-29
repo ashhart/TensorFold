@@ -37,7 +37,8 @@ class KDA:
         conv = mx.concatenate([t.reshape(t.shape[0], -1) for t in taps])  # [3 width, T]
         self.taps = int(conv.shape[1])
         self.conv_w = mx.contiguous(conv.T.astype(mx.float32))          # [T, 3 width]
-        self.A = mx.exp(w["A_log"].astype(mx.float32)).reshape(self.heads, 1)
+        A = w["A"].astype(mx.float32) if "A" in w else mx.exp(w["A_log"].astype(mx.float32))
+        self.A = A.reshape(self.heads, 1)
         self.dt_bias = w["dt_bias"].astype(mx.float32).reshape(self.heads, self.dim)
         self.o_norm = w["o_norm"].astype(mx.float32)
         # the fused decode kernel's inputs
@@ -52,7 +53,7 @@ class KDA:
         """f_b / g_b (128 inputs: MLX's one-row kernel for them is qmv_quad, which qmv_rows does not cover)."""
 
         rows = int(x.shape[0])
-        if row_kernel("kda_proj", rows, decode) and K.qmv_quad_rows_fits(q, rows):
+        if isinstance(q, Q) and row_kernel("kda_proj", rows, decode) and K.qmv_quad_rows_fits(q, rows):
             return K.qmv_quad_rows(x, q)
         return per_row(lambda r: q(r), x, decode)
 

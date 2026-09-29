@@ -69,14 +69,14 @@ class MLA:
 
         wk = self.wk
         return mx.quantized_matmul(q, wk.weight, wk.scales, wk.biases, transpose=self.wk_t, group_size=wk.group,
-                                   bits=wk.bits)
+                                   bits=wk.bits).astype(q.dtype)
 
     def unabsorb(self, out: mx.array) -> mx.array:
         """latent outputs [H, n, rank] -> values [H, n, v]."""
 
         wv = self.wv
         return mx.quantized_matmul(out, wv.weight, wv.scales, wv.biases, transpose=True, group_size=wv.group,
-                                   bits=wv.bits)
+                                   bits=wv.bits).astype(out.dtype)
 
     def index_scores(self, iq: mx.array, iw: mx.array, pool: mx.array) -> mx.array:
         """Block scores [n, P] = sum over indexer heads of w_h relu(q_h . pool) (iq [n, HI, DI], iw [n, HI])."""
@@ -131,7 +131,8 @@ class MLA:
         if batched:
             # the latent maps with the rows as a batch (each keeps its one-row bits), attention row by row
             ql = mx.quantized_matmul(q[:, :, None, :], self.wk.weight, self.wk.scales, self.wk.biases,
-                                     transpose=self.wk_t, group_size=self.wk.group, bits=self.wk.bits)  # [R, H, 1, rank]
+                                     transpose=self.wk_t, group_size=self.wk.group,
+                                     bits=self.wk.bits).astype(q.dtype)  # [R, H, 1, rank]
         outs, at = [], 0
         for cache, n in zip(caches, lengths):
             one = len(lengths) == 1
@@ -152,7 +153,7 @@ class MLA:
             att = outs[0] if len(outs) == 1 else mx.concatenate(outs)
             wv = self.wv
             out = mx.quantized_matmul(att, wv.weight, wv.scales, wv.biases, transpose=True, group_size=wv.group,
-                                      bits=wv.bits).reshape(rows, -1)
+                                      bits=wv.bits).astype(att.dtype).reshape(rows, -1)
         else:
             out = outs[0] if len(outs) == 1 else mx.concatenate(outs)
         return project(out, self.o_proj, rows_exact=decode)

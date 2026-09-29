@@ -161,6 +161,24 @@ conversions usually store per-tensor overrides: routed experts at 4 bits, attent
 windows keep one-row bits. On grant-ai's abliterated conversion, on a 256 GB M3 Ultra, the contributor measured
 46.3 tok/s drafted, equal to `"draft": false`.
 
+### 8-bit from a Q8_0 GGUF, without loss
+
+A Q8_0 block (32 int8 values, one fp16 scale d) is exactly MLX's affine 8-bit format in groups of 32 with
+q + 128, scale d and bias −128·d. `tools/glm5_q8_0_gguf_to_mlx.py` converts llama.cpp's `glm5next` Q8_0 GGUF this
+way; the tensors llama.cpp keeps unquantised (the indexer and KDA low-rank projections) stay unquantised, and the KDA
+decay rate is stored as `A`. The Mac engine reads the result: fp16 scales are widened to float32 once at load, and
+every projection returns its input's dtype.
+
+```bash
+python tools/glm5_q8_0_gguf_to_mlx.py --gguf 'GLM-5.3-Flash-Q8_0-*.gguf' \
+    --config zai-org-GLM-5.3-Flash/config.json --tokenizer-dir zai-org-GLM-5.3-Flash --out GLM-5.3-Flash-q8_0 --verify
+tensorfold serve GLM-5.3-Flash-q8_0
+```
+
+On a 512 GB M3 Ultra, a 310 GiB Q8_0 GGUF became 328.5 GiB in 85 shards in about six minutes; `--verify` found every
+one of its 1,383 tensors equal to the GGUF's values. The weights take 365 GiB resident; the GGUF has no MTP layer, so
+the model decodes without drafts. The group-32 8-bit layers run MLX's one-row calls, not the fused 4-bit kernels.
+
 ### Prefill
 
 Prompt chunks attend as decode does: each query reads its own selected keys from the latent cache, so prefill cost
