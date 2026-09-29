@@ -26,9 +26,10 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
         const count = @min(16, tokens.len - offset);
         var pass = try m.forward(tokens[offset..][0..count]);
         defer pass.deinit();
+        const draft_hidden = if (@hasDecl(M, "draftHidden")) M.draftHidden(&pass) else pass.hidden;
         if (comptime @hasDecl(M, "propose")) if (drafts > 0) {
             if (offset > 0) try absorb(m, hidden, tokens[offset..][0..1]);
-            if (count > 1) try absorb(m, try pass.scope.slice(pass.hidden, 0, 0, @intCast(count - 1)), tokens[offset + 1 ..][0 .. count - 1]);
+            if (count > 1) try absorb(m, try pass.scope.slice(draft_hidden, 0, 0, @intCast(count - 1)), tokens[offset + 1 ..][0 .. count - 1]);
         };
         const ids = try sampling.rows(&m.kernels, &pass.scope, try pass.scope.slice(pass.logits, 0, @intCast(count - 1), @intCast(count)), &.{@intCast(offset + count)}, settings);
         defer mx.allocator.free(ids);
@@ -40,7 +41,7 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
             try mx.eval(logits);
             try mx.check(mx.c.mlx_save(z, logits));
         };
-        const next = try mx.retain(try pass.scope.slice(pass.hidden, 0, @intCast(count - 1), @intCast(count)));
+        const next = try mx.retain(try pass.scope.slice(draft_hidden, 0, @intCast(count - 1), @intCast(count)));
         mx.free(hidden);
         hidden = next;
         try m.commit(&pass, count);
@@ -53,6 +54,7 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
         if (comptime @hasDecl(M, "propose")) if (drafts > 0) try m.propose(hidden, pending, proposed[0..count], settings);
         var pass = try m.forward(proposed[0..count]);
         defer pass.deinit();
+        const draft_hidden = if (@hasDecl(M, "draftHidden")) M.draftHidden(&pass) else pass.hidden;
         var positions: [16]i32 = undefined;
         for (positions[0..count], 0..) |*pos, j| pos.* = m.position + @as(i32, @intCast(j)) + 1;
         const targets = try sampling.rows(&m.kernels, &pass.scope, pass.logits, positions[0..count], settings);
@@ -68,10 +70,10 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
             if (stopped) break;
         }
         if (comptime @hasDecl(M, "propose")) if (drafts > 0) {
-            const rows = if (keep == 1) hidden else try pass.scope.cat(&.{ hidden, try pass.scope.slice(pass.hidden, 0, 0, @intCast(keep - 1)) }, 0);
+            const rows = if (keep == 1) hidden else try pass.scope.cat(&.{ hidden, try pass.scope.slice(draft_hidden, 0, 0, @intCast(keep - 1)) }, 0);
             try absorb(m, rows, proposed[0..keep]);
         };
-        const next = try mx.retain(try pass.scope.slice(pass.hidden, 0, @intCast(keep - 1), @intCast(keep)));
+        const next = try mx.retain(try pass.scope.slice(draft_hidden, 0, @intCast(keep - 1), @intCast(keep)));
         mx.free(hidden);
         hidden = next;
         try m.commit(&pass, keep);

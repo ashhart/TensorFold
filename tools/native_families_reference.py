@@ -9,6 +9,131 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
+def deepseek_fixture(directory, output, wide=False, packed=False):
+    import mlx.core as mx
+    if wide:
+        from tests import dsv4_fakes as fake
+        fake.D = 4096
+        fake.TEXT.update(hidden_size=4096, num_hidden_layers=3, num_attention_heads=64, head_dim=512,
+                         q_lora_rank=512, index_head_dim=128, n_routed_experts=16, moe_intermediate_size=512,
+                         compress_ratios=[0, 4, 128, 0])
+        if packed:
+            original_hc = fake._hc
+            def packed_hc(t, name, mixes):
+                original_hc(t, name, mixes)
+                t[f"{name}.fn"] = t[f"{name}.fn"].astype(mx.bfloat16)
+            fake._hc = packed_hc
+    from tests.dsv4_fakes import write_checkpoint, write_mtp
+    from tensorfold.families.deepseek_v4.weights import load_backbone
+    from tensorfold.families.deepseek_v4.model import Block
+    from tensorfold.families.glm5_next.model import hc_expand
+    write_checkpoint(directory)
+    write_mtp(directory)
+    (directory / "tokenizer.json").write_text(json.dumps({"model": {"type": "BPE", "vocab": {f"t{i}": i for i in range(256)}, "merges": []}, "pre_tokenizer": {"type": "ByteLevel"}, "decoder": {"type": "ByteLevel"}}))
+    output.mkdir(parents=True, exist_ok=True)
+    model = load_backbone(directory)
+    cache = model.make_cache()
+    from tensorfold.families.deepseek_v4.mtp import load as load_mtp, MTPCache
+    mtp = load_mtp(model, directory / "mtp.safetensors")
+    mtp_cache = MTPCache(model.args.sliding_window)
+    previous_streams = None
+    def save(name, value):
+        np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
+    for i, layer in enumerate(model.layers):
+        save(f"frequencies-{i}", layer.attn.inv_freq)
+    layer_ids = {id(layer): i for i, layer in enumerate(model.layers)}
+    if wide:
+        from tensorfold.families.deepseek_v4.attention import Attention
+        from tensorfold.families.deepseek_v4.moe import MoE
+        attn_ids = {id(layer.attn): i for i, layer in enumerate(model.layers)}
+        moe_ids = {id(layer.moe): i for i, layer in enumerate(model.layers)}
+        attn_call, moe_call = Attention.__call__, MoE.__call__
+        layer_positions = {}
+        def traced_attention(self, x, caches, lengths, decode, positions=None):
+            if id(self) in attn_ids:
+                layer = attn_ids[id(self)]
+                position = caches[0].offset
+                layer_positions[layer] = position
+                save(f"trace-{position}-{layer}-attn-input", x)
+            out = attn_call(self, x, caches, lengths, decode, positions)
+            if id(self) in attn_ids:
+                save(f"trace-{position}-{layer}-attn-output", out)
+            return out
+        def traced_moe(self, x, ids, decode):
+            if id(self) in moe_ids:
+                layer = moe_ids[id(self)]
+                position = layer_positions[layer]
+                save(f"trace-{position}-{layer}-ffn-input", x)
+            out = moe_call(self, x, ids, decode)
+            if id(self) in moe_ids:
+                save(f"trace-{position}-{layer}-ffn-output", out)
+            return out
+        Attention.__call__, MoE.__call__ = traced_attention, traced_moe
+    def traced(self, x, ids, caches, lengths, decode, positions=None):
+        if id(self) not in layer_ids:
+            return original(self, x, ids, caches, lengths, decode, positions)
+        layer = layer_ids[id(self)]
+        position = caches[0].offset
+        xc, post, comb = self.attn_hc.split(x, decode)
+        ax = mx.fast.rms_norm(xc, self.attn_norm, self.eps)
+        save(f"trace-{position}-{layer}-attn-input", ax)
+        branch = self.attn(ax, caches, lengths, decode, positions)
+        save(f"trace-{position}-{layer}-attn-output", branch)
+        x = hc_expand(branch, x, post, comb, decode)
+        xc, post, comb = self.ffn_hc.split(x, decode)
+        fx = mx.fast.rms_norm(xc, self.ffn_norm, self.eps)
+        save(f"trace-{position}-{layer}-ffn-input", fx)
+        branch = self.moe(fx, ids, decode)
+        save(f"trace-{position}-{layer}-ffn-output", branch)
+        x = hc_expand(branch, x, post, comb, decode)
+        save(f"trace-{position}-{layer}-streams", x)
+        return x
+    original = Block.__call__
+    Block.__call__ = traced
+    try:
+        for position in range(137):
+            hidden = model.hidden(mx.array([[position % 250 + 1]], dtype=mx.uint32), cache)
+            save(f"hidden-{position}", hidden[0])
+            save(f"logits-{position}", model.head(hidden)[0])
+            if previous_streams is not None:
+                drafted = mtp(model, previous_streams, mx.array([position % 250 + 1], dtype=mx.uint32), [mtp_cache], (1,), True)
+                save(f"mtp-streams-{position}", drafted)
+                save(f"mtp-logits-{position}", mtp.logits(model, drafted))
+            previous_streams = model.last_streams
+            end = position + 1
+            if end % 16 == 0 or end == 137:
+                for i, c in enumerate(cache):
+                    save(f"cache-{end}-{i}-keys", c.window_keys(position))
+                    ratio = model.args.ratio(i)
+                    if ratio:
+                        lo = max(0, end - ratio * (2 if ratio == 4 else 1))
+                        save(f"cache-{end}-{i}-proj", c.proj_rows(lo, end))
+                        if end // ratio:
+                            save(f"cache-{end}-{i}-pool", c.pool[:end // ratio])
+                            if ratio == 4:
+                                save(f"cache-{end}-{i}-ipool", c.ipool[:end // ratio])
+    finally:
+        Block.__call__ = original
+        if wide:
+            Attention.__call__, MoE.__call__ = attn_call, moe_call
+    from tensorfold.engine.exact_sampling import Sampling, sample_rows
+    for temperature in (0.0, 0.8):
+        settings = Sampling(seed=1234, temperature=temperature, top_k=20, top_p=0.95)
+        cache = model.make_cache()
+        prompt = [1, 2, 3, 4]
+        logits = model.head(model.hidden(mx.array([prompt], dtype=mx.uint32), cache))[0]
+        token = int(sample_rows(logits[-1:], [len(prompt)], settings)[0])
+        generated = []
+        for step in range(12):
+            generated.append(token)
+            if token in model.args.eos_token_id:
+                break
+            logits = model.head(model.hidden(mx.array([[token]], dtype=mx.uint32), cache))[0]
+            token = int(sample_rows(logits, [len(prompt) + step + 1], settings)[0])
+        save(f"generated-{int(temperature > 0)}", mx.array(generated, dtype=mx.int32))
+    print("Saved DeepSeek backbone oracle through 137 tokens", flush=True)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
@@ -24,6 +149,9 @@ def main():
     p.add_argument("--metal-sampling", action="store_true")
     p.add_argument("--simd", action="store_true")
     p.add_argument("--synthetic-glm", action="store_true")
+    p.add_argument("--synthetic-deepseek", action="store_true")
+    p.add_argument("--synthetic-deepseek-wide", action="store_true")
+    p.add_argument("--synthetic-deepseek-packed", action="store_true")
     p.add_argument("--synthetic-glm-layout", action="store_true")
     p.add_argument("--synthetic-glm-mixed", action="store_true")
     p.add_argument("--serial-rows", action="store_true")
@@ -32,6 +160,9 @@ def main():
     args = p.parse_args()
     import mlx.core as mx
     import mlx.nn as nn
+    if args.synthetic_deepseek or args.synthetic_deepseek_wide or args.synthetic_deepseek_packed:
+        deepseek_fixture(args.model, args.state_directory, args.synthetic_deepseek_wide or args.synthetic_deepseek_packed, args.synthetic_deepseek_packed)
+        return
     if args.synthetic_glm or args.synthetic_glm_mixed:
         from tests.glm5_fakes import write_checkpoint
         formats = {

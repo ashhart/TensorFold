@@ -2,9 +2,9 @@
 //! Compile the original operation graphs through MLX-C, just as mlx-lm does.
 const mx = @import("mlx.zig");
 const c = mx.c;
-pub const Kind = enum { silu, swiglu, gated, decay, gelu, gelu_tanh, geglu, softcap };
+pub const Kind = enum { silu, swiglu, gated, decay, gelu, gelu_tanh, geglu, softcap, clipped_swiglu, deepseek_head };
 pub const Ops = struct {
-    closures: [8]c.mlx_closure = @splat(.{ .ctx = null }),
+    closures: [10]c.mlx_closure = @splat(.{ .ctx = null }),
     pub fn deinit(o: *Ops) void {
         for (o.closures) |fun| if (fun.ctx != null) {
             _ = c.mlx_closure_free(fun);
@@ -20,9 +20,17 @@ pub const Ops = struct {
                 }
             }.apply);
             defer _ = c.mlx_closure_free(fun);
-            try mx.check(c.mlx_compile(slot, fun, true));
+            try mx.check(c.mlx_compile(slot, fun, kind != .deepseek_head));
         }
-        const ins = c.mlx_vector_array_new_data(args.ptr, args.len);
+        var prepared: [6]mx.Array = undefined;
+        const call_args = if (kind == .deepseek_head) blk: {
+            if (args.len != prepared.len) return error.InvalidGraphInputs;
+            @memcpy(&prepared, args);
+            // HeadHC converts stored parameters before constructing its compiled call.
+            for (1..4) |i| prepared[i] = try s.cast(args[i], mx.f32t);
+            break :blk prepared[0..];
+        } else args;
+        const ins = c.mlx_vector_array_new_data(call_args.ptr, call_args.len);
         defer _ = c.mlx_vector_array_free(ins);
         var outs = c.mlx_vector_array_new();
         defer _ = c.mlx_vector_array_free(outs);
@@ -35,11 +43,36 @@ pub const Ops = struct {
 fn graph(comptime kind: Kind, out: [*c]c.mlx_vector_array, ins: c.mlx_vector_array) !c_int {
     var s = mx.Scope{};
     defer s.deinit();
-    var args: [if (kind == .decay) 3 else if (kind == .silu or kind == .gelu or kind == .gelu_tanh) 1 else 2]mx.Array = undefined;
+    var args: [if (kind == .deepseek_head) 6 else if (kind == .decay or kind == .clipped_swiglu) 3 else if (kind == .silu or kind == .gelu or kind == .gelu_tanh) 1 else 2]mx.Array = undefined;
     for (&args, 0..) |*a, i| {
         var x = c.mlx_array_new();
         const rc = c.mlx_vector_array_get(&x, ins, i);
         a.* = try s.result(rc, x);
+    }
+    if (kind == .deepseek_head) {
+        const rows = mx.dim(args[0], 0);
+        const dims = mx.dim(args[0], 2);
+        const streams = try s.cast(args[0], mx.f32t);
+        const xf = try s.reshape(streams, &.{ rows, -1 });
+        var mean = c.mlx_array_new();
+        const rc = c.mlx_mean_axis(&mean, try s.binary(c.mlx_multiply, xf, xf), -1, true, mx.stream);
+        mean = try s.result(rc, mean);
+        const inv = try s.unary(c.mlx_rsqrt, try s.binary(c.mlx_add, mean, args[4]));
+        const mix = try s.binary(c.mlx_matmul, xf, try s.transpose(try s.cast(args[1], mx.f32t), &.{ 1, 0 }));
+        const scale = try s.slice(try s.cast(args[3], mx.f32t), 0, 0, 1);
+        const pre = try s.binary(c.mlx_add, try s.unary(c.mlx_sigmoid, try s.binary(c.mlx_add, try s.binary(c.mlx_multiply, try s.binary(c.mlx_multiply, mix, inv), scale), try s.cast(args[2], mx.f32t))), args[5]);
+        var y = try s.binary(c.mlx_multiply, try s.slice(pre, 1, 0, 1), try s.reshape(try s.slice(streams, 1, 0, 1), &.{ rows, dims }));
+        var j: i32 = 1;
+        while (j < 4) : (j += 1) y = try s.binary(c.mlx_add, y, try s.binary(c.mlx_multiply, try s.slice(pre, 1, j, j + 1), try s.reshape(try s.slice(streams, 1, j, j + 1), &.{ rows, dims })));
+        const result = try s.cast(y, mx.dtype(args[0]));
+        return c.mlx_vector_array_set_data(out, &result, 1);
+    }
+    if (kind == .clipped_swiglu) {
+        const limit = try s.cast(args[2], mx.dtype(args[0]));
+        const gate = try s.binary(c.mlx_minimum, args[0], limit);
+        const up = try s.binary(c.mlx_minimum, try s.binary(c.mlx_maximum, args[1], try s.unary(c.mlx_negative, limit)), limit);
+        const result = try s.binary(c.mlx_multiply, try s.binary(c.mlx_multiply, gate, try s.unary(c.mlx_sigmoid, gate)), up);
+        return c.mlx_vector_array_set_data(out, &result, 1);
     }
     if (kind == .softcap) {
         const cap = try s.cast(args[1], mx.dtype(args[0]));

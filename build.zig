@@ -142,6 +142,27 @@ pub fn build(b: *std.Build) void {
     ds_dense.step.dependOn(&ds_dense_fixture.step);
     b.step("test-deepseek-dense", "Compare calibrated DeepSeek SIMD dispatch and physical threadgroup variants").dependOn(&ds_dense.step);
     metal_tests.dependOn(&ds_dense.step);
+    const ds_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", "build/native-checks/deepseek-model", "--synthetic-deepseek", "--output", "build/native-checks/deepseek-model/oracle/logits.npy", "--state-directory", "build/native-checks/deepseek-model/oracle" });
+    const ds_model = b.addRunArtifact(exe);
+    ds_model.addArgs(&.{ "check-deepseek-model", "build/native-checks/deepseek-model", "build/native-checks/deepseek-model/native" });
+    ds_model.step.dependOn(&ds_oracle.step);
+    const ds_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", "build/native-checks/deepseek-model/oracle", "build/native-checks/deepseek-model/native" });
+    ds_compare.step.dependOn(&ds_model.step);
+    b.step("test-deepseek-model", "Compare synthetic DeepSeek backbone and compressed cache state with upstream").dependOn(&ds_compare.step);
+    const ds_wide_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", "build/native-checks/deepseek-wide", "--synthetic-deepseek-wide", "--output", "build/native-checks/deepseek-wide/oracle/logits.npy", "--state-directory", "build/native-checks/deepseek-wide/oracle" });
+    const ds_wide = b.addRunArtifact(exe);
+    ds_wide.addArgs(&.{ "check-deepseek-model", "build/native-checks/deepseek-wide", "build/native-checks/deepseek-wide/native" });
+    ds_wide.step.dependOn(&ds_wide_oracle.step);
+    const ds_wide_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", "build/native-checks/deepseek-wide/oracle", "build/native-checks/deepseek-wide/native" });
+    ds_wide_compare.step.dependOn(&ds_wide.step);
+    b.step("test-deepseek-wide", "Compare synthetic DeepSeek at production hidden/attention widths with fused HC and MoE").dependOn(&ds_wide_compare.step);
+    const ds_packed_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", "build/native-checks/deepseek-packed", "--synthetic-deepseek-packed", "--output", "build/native-checks/deepseek-packed/oracle/logits.npy", "--state-directory", "build/native-checks/deepseek-packed/oracle" });
+    const ds_packed = b.addRunArtifact(exe);
+    ds_packed.addArgs(&.{ "check-deepseek-model", "build/native-checks/deepseek-packed", "build/native-checks/deepseek-packed/native" });
+    ds_packed.step.dependOn(&ds_packed_oracle.step);
+    const ds_packed_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", "build/native-checks/deepseek-packed/oracle", "build/native-checks/deepseek-packed/native" });
+    ds_packed_compare.step.dependOn(&ds_packed.step);
+    b.step("test-deepseek-packed", "Compare DeepSeek production-width BF16 packed hyper-connection and head parameters").dependOn(&ds_packed_compare.step);
     const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
     var glm_previous: ?*std.Build.Step = null;
     for (0..3) |case| {

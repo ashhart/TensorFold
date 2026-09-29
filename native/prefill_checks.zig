@@ -18,9 +18,10 @@ pub fn check(io: std.Io, dir: []const u8) !void {
     defer compiled.deinit();
     // Reuse each cached compiled graph, including after its input shape changes.
     for (0..2) |_| for (cases.value) |case| {
+        errdefer std.debug.print("Prefill fixture {s}, {s}\n", .{ case.key, @tagName(case.kind) });
         var s = mx.Scope{};
         defer s.deinit();
-        var inputs: [3]mx.Array = undefined;
+        var inputs: [6]mx.Array = undefined;
         if (case.inputs > inputs.len) return error.InvalidFixture;
         for (0..case.inputs) |i| inputs[i] = try store.field(case.key, try std.fmt.bufPrint(&path, "input{d}", .{i}));
         const out = switch (case.kind) {

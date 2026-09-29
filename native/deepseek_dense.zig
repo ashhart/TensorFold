@@ -33,6 +33,16 @@ pub const Dense = struct {
             try d.checked.put(mx.allocator, p.key(), try calibrate(kernels, p));
         }
     }
+    pub fn prepareAdditional(d: *Dense, kernels: *mx.Kernels, projections: []const Projection) !void {
+        var additional = Dense{};
+        defer additional.deinit();
+        try additional.prepare(kernels, projections);
+        var it = additional.checked.iterator();
+        while (it.next()) |entry| {
+            const agrees = entry.value_ptr.* and (d.checked.get(entry.key_ptr.*) orelse true);
+            try d.checked.put(mx.allocator, entry.key_ptr.*, agrees);
+        }
+    }
     pub fn apply(d: *Dense, kernels: *mx.Kernels, s: *mx.Scope, x: A, p: Projection) !A {
         const scalar_ok = d.checked.get(p.key()) orelse return error.UncalibratedProjection;
         const rows = mx.dim(x, 0);

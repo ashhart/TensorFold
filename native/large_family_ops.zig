@@ -46,6 +46,24 @@ pub fn indexedAttention(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, indices: A,
     return (try k.run(s, src.glm_indexed_attention, &.{ q, keys, indices, try s.scalar(scale), try s.ints(&.{length}) }, &.{ ti("QK_DIM", dims), ti("TOPK", top), ti("HEADS", heads) }, .{ 1024, rows * heads, 1 }, .{ 1024, 1, 1 }, &.{.{ .shape = mx.shape(q) }}))[0];
 }
 
+pub fn hcStep(k: *mx.Kernels, s: *mx.Scope, streams: A, pending: ?[3]A, mix_weight: ?A, scale: A, base: A, norm: A, eps: f32, hc_eps: f32, iters: i32) ![4]A {
+    if (mx.shape(streams).len != 3 or mx.dim(streams, 1) != 4 or mx.dim(streams, 2) != 4096 or mx.dtype(streams) != mx.bf16) return error.UnsupportedHyperconnectionGeometry;
+    const rows = mx.dim(streams, 0);
+    if (rows < 1 or rows > 16 or iters < 1 or iters > 1024) return error.UnsupportedHyperconnectionGeometry;
+    const split = mix_weight != null;
+    const branch = if (pending) |p| p[0] else try s.reshape(try s.slice(streams, 1, 0, 1), &.{ rows, 4096 });
+    const post = if (pending) |p| p[1] else try s.zeros(&.{ rows, 4 }, mx.f32t);
+    const comb = if (pending) |p| p[2] else try s.zeros(&.{ rows, 4, 4 }, mx.f32t);
+    const epsilon = try s.scalar(eps);
+    const expanded = try k.run(s, src.glm_hc_expand, &.{ streams, branch, post, comb, epsilon }, &.{ ti("D", 4096), ti("EXPAND", @intFromBool(pending != null)), ti("SPLIT", @intFromBool(split)), ti("SQ_FMA", 0) }, .{ 1024 * rows, 1, 1 }, .{ 1024, 1, 1 }, &.{ .{ .shape = if (pending != null) mx.shape(streams) else &.{1} }, .{ .shape = &.{rows}, .dtype = mx.f32t } });
+    const x = if (pending != null) expanded[0] else streams;
+    const fnw = mix_weight orelse return .{ x, mx.empty, mx.empty, mx.empty };
+    const is_packed = mx.dtype(fnw) == mx.bf16;
+    const mixes = (try k.run(s, if (is_packed) src.glm_hc_mix_packed else src.glm_hc_mix, &.{ x, expanded[1], fnw }, if (is_packed) &.{ ti("D", 4096), ti("U", 8) } else &.{ti("D", 4096)}, .{ 1536, rows, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ rows, 24 }, .dtype = mx.f32t }}))[0];
+    const result = try k.run(s, src.glm_hc_split_norm, &.{ x, mixes, scale, base, norm, epsilon }, &.{ ti("D", 4096), ti("SQ_FMA", 0), ti("ITERS", iters), ti("HC_EPS_INT", @intFromFloat(@round(hc_eps / 1e-9))) }, .{ 1024 * rows, 1, 1 }, .{ 1024, 1, 1 }, &.{ .{ .shape = &.{ rows, 4096 } }, .{ .shape = &.{ rows, 4 }, .dtype = mx.f32t }, .{ .shape = &.{ rows, 4, 4 }, .dtype = mx.f32t } });
+    return .{ x, result[0], result[1], result[2] };
+}
+
 pub const Kda = struct {
     heads: i32,
     dims: i32,
