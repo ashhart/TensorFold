@@ -255,7 +255,7 @@ class _Tensors:
         return self.files.get(name, self.device)
 
     def close(self) -> None:
-        self.files = None                     # the reader's pinned staging goes with it
+        self.files.close()                    # the reader's pinned staging goes back to the system
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, mlp=None) -> Weights:

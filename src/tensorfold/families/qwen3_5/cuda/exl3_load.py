@@ -120,7 +120,7 @@ def load_exl3(model_dir: str | Path, device: str = "cuda"):
     files = _files(model_dir, where)
     plain = _read(files, where, [n for n in ckpt.plain if not foreign(n)], device)
     exl3 = _read_groups(files, groups, device, Workspace())
-    del files                                        # the reader's pinned staging goes with it
+    files.close()                                    # the reader's pinned staging goes back to the system
 
     def group(name: str):
         key = prefix + name if not name.startswith("lm_head") else name

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -30,8 +31,7 @@ class _Reader:
         self.reads = ReadAhead(self.io)
 
     def queue(self, names) -> None:
-        """Start reading ``names`` ahead (neighbours in shared reads, uploaded on a stream of their own): ``get`` takes
-        them, so the next layer's reads overlap this one's packing and the SSD's queue never drains."""
+        """Start reading ``names`` ahead (neighbours in shared reads, uploaded on a side stream) for ``get`` to take."""
 
         items = []
         for name in names:
@@ -45,8 +45,21 @@ class _Reader:
     def drop(self, names) -> None:
         self.reads.drop(names)
 
+    def layer_names(self, prefix: str, base: str, chosen: list[int], mtp: bool) -> list[list[str]]:
+        """Each chosen layer's tensor names, then the MTP layer's; the n-gram shards stay with their memory map."""
+
+        pattern = re.compile(re.escape(prefix) + "(" + re.escape(base) + r"layers\.\d+\.|mtp\.)")
+        groups: dict[str, list[str]] = {}
+        for name in self.where:
+            m = pattern.match(name)
+            if m and ".ngram_embedding." not in name:
+                groups.setdefault(m.group(0), []).append(name)
+        order = [f"{prefix}{base}layers.{i}." for i in chosen] + [f"{prefix}mtp."] * bool(mtp)
+        return [groups.get(key, []) for key in order]
+
     def close(self) -> None:
         self.reads.close()
+        self.io.close()
 
     def _header(self, shard: str) -> tuple[int, dict]:
         got = self.headers.get(shard)

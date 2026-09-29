@@ -90,7 +90,7 @@ class FlashNextEngine:
             raise
         tables_read = bool(reads)
         waited = time.perf_counter()
-        wait_all(reads)                               # done by now (it takes about half the load); raises its error
+        wait_all(reads)                               # raises a table read's error
         waited = time.perf_counter() - waited
         w.comm = self.comm
         if self.depth > 0 and w.mtp is None:

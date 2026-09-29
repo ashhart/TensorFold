@@ -175,6 +175,9 @@ class _Reader:
     def unused(self) -> list[str]:
         return sorted(set(self.files.keys()) - self.used)
 
+    def close(self) -> None:
+        self.files.close()
+
 
 def _words(w: torch.Tensor) -> torch.Tensor:
     return w.view(torch.int32) if w.dtype != torch.int32 else w
@@ -223,6 +226,7 @@ def load_mtp(path: Path, c: Config, device: str = "cuda") -> MTP:
               attn=_attention(r, "layers.0.mixer."), moe_norm=r.get("layers.1.norm.weight").contiguous(),
               moe=_moe(r, "layers.1.mixer.", c), final_norm=r.get("layers.1.final_layernorm.weight").contiguous())
     left = r.unused()
+    r.close()
     if left:
         raise ValueError(f"unused MTP tensors: {left[:5]}")
     return mtp
@@ -249,6 +253,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True) -> We
     w = Weights(config=c, embed=_qlinear(r, "backbone.embeddings"), blocks=blocks,
                 norm_f=r.get("backbone.norm_f.weight").contiguous(), head=tile(_qlinear(r, "lm_head")))
     left = r.unused()
+    r.close()
     if left:
         raise ValueError(f"unused checkpoint tensors: {left[:5]}")
     if mtp and (model_dir / MTP_FILE).is_file():

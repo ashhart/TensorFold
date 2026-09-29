@@ -54,8 +54,7 @@ void prefill(int64_t gs, int64_t epi, const at::Tensor& x, int64_t slots, const 
   experts_prefill_cuda(gs, epi, x, x.stride(0), slots, w, kg, nb, items, counts, members, out, n, limit, max_items);
 }
 
-// MLX words [E, N, K/8] (int32 or uint32), scales and biases [E, N, K/gs] (2-byte floats) -> blocks
-// [E, N/32, K/gs, 32 * gs / 8 + 32] int32
+// MLX words [E, N, K/8] (32-bit), scales and biases [E, N, K/gs] (2-byte) -> int32 blocks [E, N/32, K/gs, 32 * gs / 8 + 32]
 void pack(const at::Tensor& words, const at::Tensor& scales, const at::Tensor& biases, int64_t gs, at::Tensor out) {
   TORCH_CHECK(gs == 32 || gs == 64, "pack: groups of 32 or 64 inputs");
   TORCH_CHECK(words.is_cuda() && words.element_size() == 4 && words.dim() == 3 && words.is_contiguous(),

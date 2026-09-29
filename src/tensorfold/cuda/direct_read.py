@@ -1,4 +1,4 @@
-"""Checkpoint bytes read with O_DIRECT in 64 MiB spans: to the GPU through two pinned pieces, or into host memory."""
+"""Checkpoint bytes read with O_DIRECT in 64 MiB spans (many requests in flight), to the GPU or host; buffered where refused."""
 
 from __future__ import annotations
 
@@ -33,8 +33,7 @@ class Reader:
 
     def read(self, path: str | Path, offset: int, n: int, device: str | torch.device = "cpu", *,
              pinned: bool = False) -> torch.Tensor:
-        """Bytes [offset, offset + n) of ``path`` as a new uint8 tensor on ``device``; ``pinned``: in page-locked host
-        memory, for a caller's own asynchronous upload (a direct read only; the buffered fallback's are pageable)."""
+        """Bytes [offset, offset + n) of ``path`` as a new uint8 tensor on ``device`` (``pinned``: page-locked, direct reads only)."""
 
         cuda = torch.device(device).type == "cuda"
         if n > 0 and self.direct:
@@ -46,6 +45,16 @@ class Reader:
                 self.direct = False               # the file system refuses O_DIRECT, on the open or on a read
         raw = self._buffered(path, offset, n)
         return raw.to(device) if cuda else raw
+
+    def close(self) -> None:
+        """Give the pinned staging back to the system, not to the host allocator's cache."""
+
+        if self.staging:
+            for _, copied in self.staging:
+                if copied is not None:
+                    copied.synchronize()
+            self.staging.clear()
+            getattr(torch._C, "_host_emptyCache", lambda: None)()
 
     def _buffered(self, path, offset: int, n: int) -> torch.Tensor:
         raw = torch.empty((n,), dtype=torch.uint8)
@@ -157,6 +166,9 @@ class SafeTensors:
     def __contains__(self, name: str) -> bool:
         return name in self.where
 
+    def close(self) -> None:
+        self.reader.close()
+
     def get(self, name: str, device: str | torch.device = "cpu") -> torch.Tensor:
         path, begin, n, dtype, shape = self.where[name]
         if dtype not in DTYPES:
@@ -165,11 +177,7 @@ class SafeTensors:
 
 
 class ReadAhead:
-    """Tensors read ahead on ``threads`` threads: neighbouring byte ranges of a file come in one direct read of up to
-    ``run`` bytes (ranges ``gap`` or fewer bytes apart), cut into the tensors. With a CUDA device, each read goes up in
-    one asynchronous copy on a stream of its own and is cut there, so ``take`` returns device tensors whose reads and
-    uploads overlapped the caller's work. Many reads in flight keep the SSD's queue full: one at a time leaves it idle
-    between requests."""
+    """Tensors read ahead on threads, neighbours (``gap`` apart, ``run`` at most) in one read; a CUDA device gets one upload a read on a side stream."""
 
     def __init__(self, reader: Reader | None = None, threads: int = 8, run: int = 128 << 20,
                  gap: int = 1 << 20) -> None:
@@ -180,9 +188,7 @@ class ReadAhead:
         self.stream = None
 
     def queue(self, items, device=None, cut=None) -> None:
-        """Start reading ``items``, each (key, path, first byte, end byte, meta), those not queued yet. ``cut(raw,
-        meta)`` makes the tensor from its bytes (uint8, on the host or the device, a view of the shared read, so it
-        must copy); by default the bytes' own copy."""
+        """Start reading ``items`` (key, path, first byte, end byte, meta) not queued yet; ``cut(raw, meta)`` copies a tensor out of a shared read."""
 
         from concurrent.futures import ThreadPoolExecutor
 

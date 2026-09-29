@@ -1,6 +1,4 @@
-// The load-time repack of MLX 4-bit experts into the grouped kernels' blocks (experts.py's pack), fused: one pass that
-// reads each word, scale and bias once and writes its block slot, where the torch version made ~17 elementwise passes
-// over int32 words plus the permutes' copies.
+// experts.py's pack in one pass: each MLX word, scale and bias read once and written to its block slot
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -19,9 +17,7 @@ __device__ __forceinline__ uint32_t shuffle(uint32_t w) {
   return even | (odd << 16);
 }
 
-// One thread block a (group g, column block b, expert e); its threads fill that block's WORDS weight words, then its
-// 32 words of scale and bias pairs. Thread i of the weight part reads row i / (4H), word i % (4H) of the group:
-// consecutive threads read consecutive words of a row.
+// a thread block per (group, column block, expert): WORDS weight words (consecutive threads, consecutive words), then 32 scale/bias words
 template <int H>   // group size / 32
 __global__ void __launch_bounds__(32 * 4 * H + 32)
 pack_kernel(const uint32_t* __restrict__ words, const uint16_t* __restrict__ scales,

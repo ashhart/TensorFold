@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -548,24 +547,16 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         embed = ((raw(mbase + "embed_tokens.weight").to(torch.bfloat16).contiguous(),) if cfg.quant == "modelopt"
                  else triple("model.embed_tokens"))
         loaded = []
-        # each layer's tensors (not the n-gram shards: a memory map reads those) read ahead of the layer taking them
-        group_of = re.compile(re.escape(prefix) + r"(" + re.escape(mbase) + r"layers\.\d+\.|mtp\.)")
-        groups: dict[str, list[str]] = {}
-        for name in rd.where:
-            m = group_of.match(name)
-            if m and ".ngram_embedding." not in name:
-                groups.setdefault(m.group(0), []).append(name)
-        order = [f"{prefix}{mbase}layers.{i}." for i in chosen] + [f"{prefix}mtp."] * bool(mtp)
+        ahead = rd.layer_names(prefix, mbase, chosen, mtp)   # read ahead of the layer that takes them
         layer_events: list = []                           # each layer's event, recorded once its work is queued
         for k, i in enumerate(chosen):
-            if len(layer_events) >= 2:                    # the GPU at most two layers behind, so reads and buffers
-                layer_events.pop(0).synchronize()         # queued ahead stay within two more
-            for ahead in order[k:k + 2]:                  # two layers in flight: reads overlap this one's packing
-                rd.queue(groups.get(ahead, []))
+            if len(layer_events) >= 2:                    # at most two layers queued ahead of the GPU
+                layer_events.pop(0).synchronize()
+            for names in ahead[k:k + 2]:                  # two layers in flight: reads overlap this one's packing
+                rd.queue(names)
             loaded.append(layer(i, f"{mbase}layers.{i}", cfg.layer_types[i], True))
-            layer_events.append(torch.cuda.Event())
-            layer_events[-1].record()
-            rd.drop(groups.get(order[k], []))            # what the layer never took
+            layer_events.append(torch.cuda.current_stream().record_event())
+            rd.drop(ahead[k])                             # what the layer never took
             rd.release()
             if i % 8 == 7:                        # each release waits for the device; a layer leaves few temporaries
                 torch.cuda.empty_cache()

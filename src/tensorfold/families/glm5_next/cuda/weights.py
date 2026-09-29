@@ -331,8 +331,7 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
         return names
 
     def on_device(tensors: list[torch.Tensor]) -> torch.Tensor:
-        """``torch.stack(tensors).to(dev)`` without the host copy: one stack of tensors the reader uploaded, else each
-        host tensor copied into its slot on the device."""
+        """``torch.stack(tensors).to(dev)`` without a host copy: uploaded tensors stacked on the device, host ones copied into their slots."""
 
         if all(x.is_cuda for x in tensors):
             return torch.stack(tensors)
@@ -382,8 +381,8 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
     def layer(i: int, plain: bool = False) -> LayerW:
         kind = "dsa" if plain else cfg.kinds[i]
         mk = "moe" if plain else cfg.mlp_kinds[i]
-        if len(layer_events) >= 2:                       # the GPU at most two layers behind, so reads and buffers
-            layer_events.pop(0).synchronize()            # queued ahead stay within two more
+        if len(layer_events) >= 2:                       # at most two layers queued ahead of the GPU
+            layer_events.pop(0).synchronize()
         up = None if exl3 else dev                       # MLX experts come uploaded (EXL3's are unpacked on the host)
         rd.prefetch(expert_names(i), up)                 # already queued, except for the first layer
         rd.prefetch(expert_names(i + 1), up)             # two layers in flight: reads overlap copies and packing
@@ -399,8 +398,7 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
             lw.moe = moe(i)
         if i % 8 == 7:                            # each release waits for the device; a layer leaves few temporaries
             torch.cuda.empty_cache()
-        layer_events.append(torch.cuda.Event())
-        layer_events[-1].record()
+        layer_events.append(torch.cuda.current_stream().record_event())
         return lw
 
     if exl3:
