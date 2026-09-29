@@ -32,7 +32,7 @@ class Q:
 
     def __call__(self, x: mx.array) -> mx.array:
         return mx.quantized_matmul(x, self.weight, self.scales, self.biases, transpose=True, group_size=self.group,
-                                   bits=self.bits).astype(x.dtype)
+                                   bits=self.bits)
 
     @classmethod
     def stack(cls, parts: list["Q"]) -> "Q | QSplit":

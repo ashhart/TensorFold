@@ -457,7 +457,6 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
         prompt2 = PROMPT + got + [7, 8, 9]
         warm, warm_stats = ask(prompt2, sampling)                      # resumes from the prompt on both ranks
         cold, _ = ask(prompt2, sampling, draft=False)
-        same, same_stats = ask(prompt2, sampling)                      # the same prompt again, on both ranks
         greedy, _ = ask(PROMPT, None)
         end = refs[0][5]                         # both ranks stop at this token now; ignore_eos decodes past it
         for e in engines:
@@ -472,8 +471,7 @@ def test_tp_server_ranks_share_requests_and_stream_serial_tokens(checkpoint, mod
     eos = [i for i, t in enumerate(ref) if t in ends]
     assert got == (ref[:eos[0] + 1] if eos else ref)
     assert serial == got and serial_stats["drafts"] is False
-    assert warm_stats["cached"] == len(PROMPT) - 1 and warm == cold         # kept one token early
-    assert same_stats["cached"] == len(prompt2) - 1 and same == cold
+    assert warm_stats["cached"] == len(PROMPT) and warm == cold             # the reply prefills again
     assert len(greedy) >= 1
     assert free == free_serial == ref and stopped == ref[:ref.index(end) + 1]     # rank 1 read ignore_eos
 

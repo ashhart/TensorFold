@@ -11,12 +11,17 @@ tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 Use `http://127.0.0.1:8080/v1` as the client base URL and the model ID from `/v1/models`. Both backends serve chat
 completions, completions and OpenAI's Responses API (`/v1/responses`); see the [API reference](docs/api.md).
 Python 3.11 or newer is required, and MLX 0.32.2 or newer on a Mac (pip installs it). See the [runbook](RUNBOOK.md)
-for installation and a first request.
+for installation and a first request. On NVIDIA GPUs the CUDA kernels need compute capability 8.9 or newer: Ada (RTX 40
+series), Hopper and Blackwell, including the DGX Spark's GB10 and the RTX 50 series. NVFP4 and FP8 checkpoints need 9.0
+or newer, since their kernels use thread-block clusters. RTX 30 cards (8.6) aren't supported, and the server refuses a
+GPU below its checkpoint's floor at startup.
 
 ## Image input
 
-Install `pip install '.[vision]'` from this branch and start a supported GLM-5.3-Flash or Qwen3.5/3.8 dense checkpoint with `--vision` to accept image and text content parts through the same lane engine. GLM-5.3-Flash vision is MLX-only; Qwen support also includes CUDA.
-See [image input](docs/vision.md) for the API, checkpoint requirements, cache behavior and qualification status.
+Install the vision extra, `python -m pip install 'tensorfold[vision] @ git+https://github.com/ashhart/TensorFold.git'`,
+and start a supported GLM-5.3-Flash or Qwen3.5/3.8 dense checkpoint with `--vision` to accept image and text content
+parts through the same lane engine. GLM-5.3-Flash images run on MLX; Qwen's run on MLX and CUDA. See
+[image input](docs/vision.md) for the API, checkpoint requirements, cache behavior and qualification status.
 
 ## Models
 
@@ -43,8 +48,8 @@ tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit
 ```
 
 Qwen3.8-27B reads MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit checkpoints, including mixed layer formats.
-This branch adds packed row readers for groups of 32, 64 and 128 on Apple Silicon and CUDA, with hardware
-qualification still pending for the new paths. M5 keeps its native tensor-unit kernels for compatible formats,
+It reads packed rows in groups of 32, 64 and 128 on Apple Silicon and CUDA, with hardware qualification still
+pending for the newer paths. M5 keeps its native tensor-unit kernels for compatible formats,
 and other formats use the row decoder. See [quantized checkpoints](docs/quantization.md) for the exact scope.
 On CUDA, pull DFlash2 before serving; without it, explicitly choose `--no-drafts` for the serial reference.
 
@@ -112,17 +117,24 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--mtp-drafts N` | Family-specific cap on MTP drafts | Both |
 | `--kv-dtype bf16`, `int8`, `int4` | Flash Next: `int8` or `int4` stores keys and values with one fp16 scale per 32 values. Other families and the MLX path refuse it | CUDA |
 | `--mtp-confidence P` | Flash Next: stop a draft chain before a later draft under this probability, 0 to 1 (default 0.30) | CUDA |
-| `--tp 2 --rank R --master HOST` | Two-rank CUDA execution | CUDA |
-| `--decode-share F` | While a prompt prefills, running replies keep moving for this share of each chunk's time and later prompts start later (default 0.25; 0 prefills whole prompts first, as 0.3.6.2) | MLX |
-| `--prompt-cache-gib N` | Retained conversation-prefix budget; zero disables retention | MLX |
-| `--checkpoint-slots N` | Retained conversation prefixes (default 3 per lane, at least 8); long conversations hit this before the byte budget | MLX |
+| `--prefill-fp8` | Prompt matmuls take FP8 (e4m3) activations, one scale a row, where the checkpoint has an FP8 prompt kernel (Qwen3.8 27B and Qwen3.6 MLX 4-bit, FP8 and MXFP8 layers of NVFP4 checkpoints): faster prompts at lower precision ([measured](docs/recipes/cuda.md#prompt-precision)). Default: bf16 activations, as decode | CUDA |
+| `--tp 2 --rank R --master HOST` | Two-rank CUDA execution; `--master-port P` sets rank 0's rendezvous port (default 29551) | CUDA |
+| `--decode-share F` | While prompts prefill, running replies keep moving for this share of each chunk's time; a new prompt starts at the next chunk, the fewest tokens left first (default 0.25; 0 prefills whole prompts first, in order, as 0.3.6.2) | MLX |
+| `--prompt-cache-gib N` | Retained conversation-prefix budget; zero disables retention. Default: the memory the weights, a whole-window request and a shared round leave idle, at least an eighth of RAM up to 16 GiB, given back on demand | MLX |
+| `--prefill-pass N` | Plan chunks one forward takes while a prompt fills alone, for families with a prompt pass (default 8; 1 as 0.5.0) | MLX |
+| `--pass-cache-gib N` | Freed-buffer cache during such a pass where the memory budget has room, default 16 GiB | MLX |
+| `--checkpoint-slots N` | Retained conversation prefixes (default 3 per lane, at least 8); long conversations hit this before the byte budget. On CUDA, the prompt states Qwen3.8-27B keeps under `--parallel` 2 or more (default 3) | Both |
 | `--spill-gib N` | Write evicted conversation prefixes to disk (up to N GiB) and read them back instead of prefilling again; zero disables | MLX |
 | `--mlx-cache-gib N` | Reusable freed-buffer cache, default 8 GiB | MLX |
 | `--snapshot-dir DIR` | Persistent prefix snapshots; `none` disables them | MLX |
+| `--max-snapshots N` | System-block snapshots loaded at start, default 3 | MLX |
 | `--no-update-check` | Disable the startup release check | Both |
 
 The default sampling settings come from `generation_config.json`. Requests can override sampling and reply
 length. CUDA does not implement the MLX-only options above. See [API fields](docs/api.md) for request scope.
+
+In a terminal, `tensorfold serve` keeps one live throughput line under its log; it is off when output is
+redirected, and `TENSORFOLD_NO_LIVE=1` turns it off.
 
 <a id="memory"></a>
 
@@ -244,8 +256,8 @@ recipe keeps its own tables.
 
 ## Updating
 
-`tensorfold update --check` checks for a release; `tensorfold update` installs it, then the server must
-restart. A normal installation uses the same interpreter's pip. An editable clone must be clean and able
+`tensorfold update --check` checks for a release; `tensorfold update` installs it (`--force` reinstalls the newest
+release even when it is current), then the server must restart. A normal installation uses the same interpreter's pip. An editable clone must be clean and able
 to fast-forward to the release tag; afterwards run `python -m pip install -e .` in the checkout to refresh
 metadata and dependencies. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` disables startup checks.
 

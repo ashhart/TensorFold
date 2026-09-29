@@ -39,7 +39,6 @@ class GLMFlash:
     def __init__(self, model: GLM5, head: Any | None = None, *, drafts: int = 1, check: bool = True) -> None:
         self.model = model
         self.args = model.args
-        self.vision = None
         self.layer_count = len(model.layers)
         self.mtp = None
         self.drafts = int(drafts)
@@ -115,24 +114,6 @@ class GLMFlash:
 
     def head(self, hidden: mx.array) -> mx.array:
         return self.model.head(hidden)
-
-    def encode_vision(self, prepared: Any, cache: list[Any]) -> Any:
-        """Encode image patches once on the shared GLM vision tower before chunked language prefill."""
-
-        if self.vision is None:
-            raise ValueError("GLM image input requires a vision checkpoint served with --vision")
-        return self.vision.encode(prepared)
-
-    def prefill_vision(self, inputs: Any, cache: list[Any], encoded: Any, begin: int, end: int) -> mx.array:
-        """Prefill a visual prompt chunk with substituted embeddings; later decoding and MTP remain unchanged."""
-
-        tokens = inputs if isinstance(inputs, mx.array) else mx.array(np.asarray(inputs, dtype=np.int64))
-        tokens = tokens.reshape(-1).astype(mx.uint32)
-        embedded = encoded.inputs_embeds[:, begin:end]
-        self._rows = None
-        hidden = self.model.hidden(tokens, cache[:self.layer_count], inputs_embeds=embedded)
-        self._rows = self.draft_rows()
-        return hidden
 
     def __call__(self, inputs: Any, cache: list[Any]) -> mx.array:
         return self.head(self.hidden(inputs, cache))

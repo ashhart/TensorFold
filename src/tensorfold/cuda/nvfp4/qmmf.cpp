@@ -14,14 +14,13 @@ void qmmf(const at::Tensor& x, const at::Tensor& w, const c10::optional<at::Tens
           const c10::optional<at::Tensor>& part, int64_t mode, int64_t n, int64_t sk, int64_t npad, int64_t bm,
           bool f32) {
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.stride(1) == 1, "x: (M, K) bf16");
-    TORCH_CHECK(mode >= 0 && mode <= 3, "mode 0-3");
+    TORCH_CHECK(mode >= 0 && mode <= 2, "mode 0-2");
     const int64_t m = x.size(0), k = x.size(1);
     TORCH_CHECK(k % 64 == 0 && (k / 64) % sk == 0, "K in whole groups of 64, split evenly");
     TORCH_CHECK(w.is_cuda() && w.is_contiguous() && w.numel() * w.element_size() == npad * k / (mode == 0 ? 2 : 1),
                 "weight bytes do not match n and K");
     TORCH_CHECK(mode == 1 || (bs.has_value() && bs->is_contiguous() &&
-                              bs->numel() == (k / 64) * npad * (mode == 0 || mode == 3 ? 4 : 2)),
-                "block scales [npad/64, K/64, 64, 4|2] (mode 3: one fp32 a column and 64 inputs)");
+                              bs->numel() == (k / 64) * npad * (mode == 0 ? 4 : 2)), "block scales [npad/64, K/64, 64, 4|2]");
     TORCH_CHECK(out.is_cuda() && out.is_contiguous() && out.size(0) == m && out.size(1) == n &&
                 out.scalar_type() == (f32 ? at::kFloat : at::kBFloat16), "out: (M, n)");
     TORCH_CHECK(sk == 1 || (sk <= 8) || (part.has_value() && part->numel() >= sk * m * n), "part: (SK, M, n) fp32");

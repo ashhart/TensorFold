@@ -13,8 +13,6 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     if getattr(args, "vision_urls", False) and not getattr(args, "vision", False):
         raise ValueError("--vision-urls needs --vision")
     if getattr(args, "vision", False):             # only --vision reads the config here
-        if family.model_type == "glm5_next" and backend != "mlx":
-            raise ValueError("GLM-5.3-Flash image input is currently MLX-only")
         from tensorfold.families import read_config
         from tensorfold.vision.config import validate_vision_config
 

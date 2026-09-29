@@ -1,8 +1,4 @@
-"""Prefill attention in 64-key tiles by absolute position, so chunking never changes bits; not decode's arithmetic.
-
-``_attend`` (Triton) defines the bits; ``prefill_attention.cu`` computes the same bits with a KV group's query heads
-in one block, so each staged key and value serves all of them (checked equal in tests/cuda/test_prefill_attention.py).
-"""
+"""Prefill attention in 64-key tiles by absolute position, so chunking never changes bits."""
 
 from __future__ import annotations
 

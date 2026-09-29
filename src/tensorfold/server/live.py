@@ -1,8 +1,4 @@
-"""One live line under a Mac server in a terminal: open connections, decode and prefill tok/s, redrawn in place.
-
-Other output to stdout or stderr clears the line first; the next redraw puts it back under the newest log line. It
-stays off when stdout is not a terminal (a log file sees nothing new) or with TENSORFOLD_NO_LIVE=1.
-"""
+"""One live line under a Mac server in a terminal: open connections, decode and prefill."""
 
 from __future__ import annotations
 
@@ -57,7 +53,7 @@ class ChunkRate:
 
 
 def status(scheduler: Any) -> str:
-    """``[tensorfold] 3 connections (1 waiting) · decode 142 tok/s · prefill 1,210 tok/s``."""
+    """``[tensorfold] 3 connections (1 waiting) · decode 142."""
 
     waiting = scheduler.waiting
     open_ = scheduler.active + (scheduler.filling is not None) + waiting

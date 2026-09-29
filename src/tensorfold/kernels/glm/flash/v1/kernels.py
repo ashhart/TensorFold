@@ -441,7 +441,7 @@ def _gather_one_row(x: mx.array, ids: mx.array, weights: Any) -> mx.array:
     """One row's picks as the one-row decode path runs them: x [k or 1, 1, K], ids [1, k] -> [1, k, N]."""
 
     return mx.gather_qmm(x[None], weights.weight, weights.scales, weights.biases, rhs_indices=ids, transpose=True,
-                         group_size=weights.group, bits=weights.bits).astype(x.dtype).squeeze(-2)
+                         group_size=weights.group, bits=weights.bits).squeeze(-2)
 
 
 def expert_qmv(x: mx.array, idx: mx.array, group: tuple[mx.array, mx.array, mx.array] | None, weights: Any, *,

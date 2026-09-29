@@ -6,10 +6,10 @@ Video, audio and image generation are not supported by this adapter.
 
 ## Start a server
 
-Install this branch's optional image dependencies from its checkout:
+Install the optional image dependencies (from a checkout, `python -m pip install '.[vision]'`):
 
 ```bash
-python -m pip install '.[vision]'
+python -m pip install 'tensorfold[vision] @ git+https://github.com/ashhart/TensorFold.git'
 tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --vision
 tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --vision
 ```
@@ -83,4 +83,4 @@ Compare image requests with `draft: true` and `draft: false` at identical sampli
 Tests cover input validation, bounded fetching, expanded prompt accounting, cache isolation, memory admission, rotary metadata and distributed transport contracts.
 Hardware qualification is separate from these tests: each backend and chip needs real image understanding, drafted/serial equality, concurrency, chunked-prefill and memory checks before a release claim.
 Checkpoint metadata must describe the decoder separately from MTP: the `mlp_layer_types` list must match `num_hidden_layers` for Transformers validation. Preserve the separate MTP configuration and weights.
-This branch is experimental pending completion of the hardware matrix, and makes no vision throughput claim.
+Image input stays experimental until the hardware matrix is complete, and makes no throughput claim.

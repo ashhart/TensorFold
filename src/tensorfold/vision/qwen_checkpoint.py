@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-PREFIXES = ("model.language_model.visual.", "model.visual.", "vision_tower.", "vision_model.", "visual.")
+PREFIXES = ("model.language_model.visual.", "model.visual.", "vision_tower.", "visual.")
 DTYPES = {"F64": "<f8", "F32": "<f4", "F16": "<f2", "BF16": "<u2", "I64": "<i8", "I32": "<i4",
           "I16": "<i2", "I8": "i1", "U64": "<u8", "U32": "<u4", "U16": "<u2", "U8": "u1", "BOOL": "?"}
 

@@ -1,5 +1,4 @@
-"""Key Gumbel draws by seed, absolute position, and token id so verification matches serial top-k/top-p/min-p
-sampling."""
+"""Key Gumbel draws by seed, position and token id so verification matches serial top-k/top-p/min-p sampling."""
 
 from __future__ import annotations
 

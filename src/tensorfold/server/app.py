@@ -315,7 +315,7 @@ class ChatApp(RequestOptions):
                 preparing.release()
 
     class _Preparing:
-        """A user's request between arrival and submission: background requests wait for these."""
+        """A."""
 
         def __init__(self, app: "ChatApp") -> None:
             self.app = app

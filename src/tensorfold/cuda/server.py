@@ -17,7 +17,6 @@ from tensorfold.server.request_options import parse_numbers, thinking_fields
 from tensorfold.server.stopping import stop_options
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
-from tensorfold.engine.tool_draft import ToolCallStreamer
 from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
 from tensorfold.cuda import health
@@ -65,12 +64,14 @@ class App:
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
-                 context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0):
+                 context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0,
+                 aliases: tuple[str, ...] | list[str] = ()):
         from tokenizers import Tokenizer
 
         self.engine = engine
         self.vision = getattr(engine, "vision", None)
         self.served = served
+        self.aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
         self.model_dir = Path(model_dir)
         self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         self.template = ChatTemplate(model_dir)
@@ -83,6 +84,22 @@ class App:
         if self.context_window < 0:
             raise ValueError("context_window must be 0 or a positive token count")
         self.turns = Turns()                # one request at a time where the engine decodes one
+
+    @property
+    def model_ids(self) -> list[str]:
+        """The ids this endpoint answers to, as the MLX server lists them: ``--name`` first, then each ``--alias``."""
+
+        ids: list[str] = []
+        for model_id in (self.served, *getattr(self, "aliases", ())):
+            if model_id and model_id not in ids:
+                ids.append(model_id)
+        return ids
+
+    def reply_model(self, body: Any) -> str:
+        """The id a reply names: the one the request asked for when this endpoint answers to it, else ``--name``."""
+
+        asked = body.get("model") if isinstance(body, dict) else None
+        return asked if isinstance(asked, str) and asked in self.model_ids else self.served
 
     def _check_fields(self, body: dict[str, Any]) -> str | None:
         import inspect
@@ -274,11 +291,6 @@ class App:
         stopped = {"client": False, "stop": False}
         failed: list[Exception] = []
         stream = StreamDecoder(self.tok, ends)
-        # tool calls stream as JSON argument deltas while they are written (as server/app.py does), so a long
-        # call (a whole file) does not leave the stream silent until the reply ends; one-call requests keep the
-        # end parser, which picks their single call
-        calls_stream = ToolCallStreamer(tools) if tools and not policy.single else None
-        answer_raw = [""]
 
         def visible(finished: bool) -> tuple[str, str]:
             raw = stream.final() if finished else stream.text
@@ -288,7 +300,6 @@ class App:
                 reasoning, answer = split_thinking(raw, finished=finished)
             else:
                 reasoning, answer = "", raw
-            answer_raw[0] = answer
             if tools:
                 answer = (policy.content(answer, finished=finished) if policy.single
                           else hide_tool_calls(answer, finished=finished))
@@ -321,12 +332,7 @@ class App:
                     sent["content"] = len(answer)
                 if delta and not emit(delta):
                     stopped["client"] = True
-                if calls_stream is not None and not stopped["client"]:
-                    for call_delta in calls_stream.feed(answer_raw[0]):   # never the reasoning
-                        if not emit(call_delta):
-                            stopped["client"] = True
-                            break
-                if not stopped["client"] and cancelled is not None and cancelled():   # every round, text or not
+                elif cancelled is not None and cancelled():     # every round, with or without new text
                     stopped["client"] = True
             except Exception as exc:        # noqa: BLE001  raised after generate returns, never into the engine
                 failed.append(exc)
@@ -405,12 +411,10 @@ class App:
         finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
-        # the calls already sent as deltas; the handler sends the rest (a call the streamer could not follow)
-        streamed = calls_stream.index + 1 if calls_stream is not None and calls_stream.streamed else 0
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "cached_tokens": (cached or [0])[0],
                 "reasoning_tokens": reasoning_count(out, self.tok.token_to_id("</think>") if chat and thinking else None),
-                "stats": stats, "calls_streamed": streamed}
+                "stats": stats}
 
     def _turns(self) -> Turns:
         """The engine's turns (one request at a time, background ones last), made on first use."""

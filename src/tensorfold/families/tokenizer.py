@@ -1,10 +1,4 @@
-"""mlx_lm's tokenizer for a checkpoint whose per-layer lists also count its MTP layers.
-
-Some converters write ``mlp_layer_types`` (or another ``*layer_types`` list) with one entry per MTP layer after the
-decoder's, e.g. 46 entries for GLM-5.3's 45 layers. transformers' config classes refuse that, so the tokenizer
-(which reads config.json through transformers) does not load. The files stay as they are: the retry hands
-transformers a config with those lists cut to ``num_hidden_layers``.
-"""
+"""mlx_lm's tokenizer for checkpoints whose per-layer lists also count MTP layers (retry trims those lists)."""
 
 from __future__ import annotations
 

@@ -79,8 +79,7 @@ def _keyed(VALS, IDS, META, OUT, SEED, FP, PROB, c1, c2, m1, m2, offset,
 
 
 class Params:
-    """Seed, temperature, top_p and ln(min_p) live on the device so captured graphs serve any request; top_k and
-    whether the cuts apply are compiled in."""
+    """Sampling parameters live on the device so captured graphs serve any request; top_k is compiled in."""
 
     def __init__(self, device):
         self.seed = torch.zeros(1, dtype=torch.int64, device=device)

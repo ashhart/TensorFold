@@ -38,7 +38,14 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
 
-Unsupported generation features include multiple choices through `n` and `logprobs`.
+`n` must be 1; multiple choices receive HTTP 400.
+
+CUDA Flash Next on one GPU supports `logprobs: true` and `top_logprobs` from 0 through 20 for nonstreamed text chat
+with thinking off, without tools, stop strings or structured output. Each visible token has its `token`, `bytes`,
+`logprob` and requested `top_logprobs` in `choices[0].logprobs.content`. Probabilities describe the raw target-model
+distribution at temperature 1, before temperature, top-k or top-p sampling filters, including when generation is
+greedy. Alternatives are tokenizer tokens and may include leading spaces; `bytes` preserves partial UTF-8 sequences.
+Unsupported backends, engines and request modes return HTTP 400 when probabilities are requested.
 `ignore_eos: true` keeps user-supplied `stop` strings active, including when a stop string spans streamed chunks.
 Both backends reject a non-boolean `ignore_eos` or a malformed `stop` with HTTP 400 before a stream opens.
 Both backends reject malformed `temperature`, `top_p`, `top_k` and `seed` values with HTTP 400, whether or not
@@ -61,10 +68,13 @@ token or the reply limit; the server returns the reply only up to the match. Whe
 unless a stop string or a tool call ended the reply.
 
 On MLX, `--parallel auto` is the default: requests share rounds within the configured concurrency and memory
-budget. A new prompt prefills one chunk at a time, and running replies take rounds between its chunks for
-`--decode-share` of each chunk's time (default 0.25): they keep moving, and queued prompts' first tokens come later.
-`--decode-share 0` prefills each prompt whole first, as 0.3.6.2 did. Background work waits behind foreground requests. An active background request yields when a
-foreground request needs its lane or memory, then restarts with already-delivered tokens suppressed.
+budget. Every admitted prompt prefills a chunk at a time beside the others. Each chunk goes to a foreground prompt
+before a background one, then to the prompt with the fewest tokens left, and a prompt passed over for 8 chunks takes
+the next one: a short request starts at the next chunk, and a long prompt still finishes. Running replies take rounds
+between chunks for `--decode-share` of each chunk's time (default 0.25). `--decode-share 0` prefills each prompt whole
+first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
+request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
+suppressed.
 Session-title requests are also treated as background work.
 
 On CUDA, `--parallel auto` serves one request at a time. An explicit `--parallel N` above one shares rounds
@@ -99,7 +109,9 @@ A reply that is not a call returns as content, never an error: prose, JSON that 
 
 With `parallel_tool_calls: false`, the server buffers tool deltas until it can return the first valid
 completed call. Prose and reasoning can still stream. Usage counts the entire decoded reply, including
-additional calls omitted from the response.
+additional calls omitted from the response. Otherwise both servers stream each Qwen XML call as it is written: a
+delta with the call's id and name, then its arguments in pieces; a call the streamer can't follow arrives whole at
+the end.
 
 With `tool_choice: "required"`, or a function named in `tool_choice`, the reply's answer (after any think block
 or thought channel) opens a call to an offered tool. The server replaces the first answer token that isn't
@@ -134,8 +146,9 @@ requests go on.
 
 On both backends, `reasoning_effort: none` disables thinking; other effort values enable it and reach the chat
 template. The server also reads it from `chat_template_kwargs.reasoning_effort`, where vLLM's clients send it; the
-top-level field wins. `high` maps to `xhigh`, and `minimal` maps to `low`, unless the template names them itself
-(GLM-5.3's names `low` and `high`, so `high` renders High). An explicit `chat_template_kwargs.enable_thinking` takes
+top-level field wins. `high` maps to `xhigh`, and `minimal` maps to `low`, unless the template names them.
+GLM-5.3 lists `low` and `high`, so `medium` is heard as `high`. `xhigh` stays `xhigh`, and that template renders
+it as Max. An omitted effort stays the template's own Max. An explicit `chat_template_kwargs.enable_thinking` takes
 precedence. A request without an effort gets `--reasoning-effort` when the server was started with one; otherwise
 the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is `xhigh`, which adds an instruction
 to the system prompt; `medium` adds none). The template hears an effort only while thinking, and both backends render
@@ -160,6 +173,9 @@ or `max_completion_tokens` that would put prompt plus reply beyond the window is
 and fitting guidance before generation. MLX returns HTTP 400 for non-streamed requests or an
 `invalid_request_error` event after opening a stream. CUDA returns HTTP 400 before opening a stream.
 The 0.3.4.1 MLX server capped that explicit limit to the remaining context.
+A prompt that leaves no room for a reply is refused the same way, and on both backends every such refusal
+carries OpenAI's `context_length_exceeded` code and a message that starts "This server's maximum context length
+is N tokens", so clients that compact a conversation on that error do so.
 When the request omits the reply limit, the server still caps its configured default to the remaining context.
 CUDA returns HTTP 400 before generation when the chat template rejects the request or
 `chat_template_kwargs` is neither an object nor null. A generation error returns HTTP 500 for a
@@ -173,7 +189,10 @@ On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations co
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
 model's weights and cache nor keeps them from crowding other work on the machine. The server sizes its window from the
 host's `MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB); to leave room for other containers, start it
-with a smaller `--context` or `--parallel`.
+with a smaller `--context` or `--parallel`. `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB)
+when you know the machine's headroom: a larger one leaves more for other work, a smaller one more for KV caches. The
+reserve also carries CUDA context, NCCL and workspace memory the estimate does not count, and exhausting a unified
+GPU's memory can freeze the host, so lower it only with room to spare.
 
 ## Responses
 

@@ -23,6 +23,10 @@ DeltaNet 63 MB a stream.
 
 ## CUDA execution
 
+CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Prompts take bf16
+activations by default: 0.90-0.96x the FP8 prompt path from 2k to 128k, and 1.23-1.89x vLLM on NVIDIA's NVFP4 export
+from 2k to 64k. `--prefill-fp8` restores the FP8 path ([prompt precision](cuda.md#prompt-precision)).
+
 Verify windows run the 27B's shared kernels (4-bit matmul, DeltaNet tree and replay, tree attention) with
 routed experts from `tensorfold/cuda/experts.py`: the router's top 8 of 256 by fp32 logit (ties to the lower
 id), weights renormalized over the eight, the shared expert as expert 256 with a sigmoid gate, and the slots

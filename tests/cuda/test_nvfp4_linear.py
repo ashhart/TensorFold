@@ -12,7 +12,7 @@ if not torch.cuda.is_available():
 
 from tensorfold.cuda.kernels.qmm import quantize_rows
 from tensorfold.cuda.nvfp4 import format as fmt
-from tensorfold.cuda.nvfp4.linear import Concat, Fp4Linear, Fp8BlockLinear, Fp8Linear, Mx8Linear
+from tensorfold.cuda.nvfp4.linear import Fp4Linear, Fp8Linear, Mx8Linear
 
 
 def _fp4(n, k, seed):
@@ -101,44 +101,3 @@ def test_mxfp8_stack_keeps_each_projection():
     st = Mx8Linear.stack([a, b])
     x = (torch.randn((5, 256), generator=torch.Generator().manual_seed(7)) * 0.5).to(torch.bfloat16).cuda()
     assert st.n == 144 and torch.allclose(st(x).float(), torch.cat([a(x), b(x)], 1).float(), rtol=1e-2, atol=1e-2)
-
-
-def _fp8b(n, k, seed):
-    rng = np.random.default_rng(seed)
-    w = rng.integers(0, 256, size=(n, k), dtype=np.uint8)
-    w[(w & 0x7F) >= 0x70] = 0x30
-    s = (rng.random((-(-n // 128), k // 128)) * 1e-2 + 1e-4).astype(np.float32)   # arbitrary fp32 block scales
-    return w, s
-
-
-@pytest.mark.parametrize("n,k", [(128, 256), (200, 512), (320, 2560)])
-def test_block_fp8_decode_is_exact_and_prompts_track_it_in_any_chunk(n, k):
-    w, s = _fp8b(n, k, n)
-    lin = Fp8BlockLinear.from_checkpoint(torch.from_numpy(w).cuda().view(torch.float8_e4m3fn),
-                                         torch.from_numpy(s).cuda())
-    x = (torch.randn((16, k), generator=torch.Generator().manual_seed(8)) * 0.5).to(torch.bfloat16).cuda()
-    full = _check_rows(lin, x)
-    ref = x.double() @ torch.from_numpy(fmt.dequant("fp8block", w, s)).double().cuda().t()
-    assert ((full.double() - ref).abs() / (ref.abs() + ref.abs().mean())).max().item() < 1e-2
-    xp = (torch.randn((300, k), generator=torch.Generator().manual_seed(9)) * 0.5).to(torch.bfloat16).cuda()
-    want, got = lin(xp).float(), lin.prefill(xp)
-    assert float((got.float() - want).norm() / want.norm()) < 0.04
-    parts = [lin.prefill(xp[a:b].contiguous()) for a, b in ((0, 1), (1, 130), (130, 300))]
-    assert torch.equal(torch.cat(parts), got)
-
-
-def test_block_fp8_and_bf16_concat_keeps_each_projection():
-    from tensorfold.families.qwen4_exp.cuda.bf16 import b16_from_rows, matmul
-
-    w, s = _fp8b(200, 512, 3)
-    a = Fp8BlockLinear.from_checkpoint(torch.from_numpy(w).cuda().view(torch.float8_e4m3fn),
-                                       torch.from_numpy(s).cuda())
-    b = b16_from_rows((torch.randn((48, 512), generator=torch.Generator().manual_seed(4)) * 0.05)
-                      .to(torch.bfloat16).cuda())
-    st = Concat([a, b])
-    for m in (1, 5, 300):
-        x = (torch.randn((m, 512), generator=torch.Generator().manual_seed(m)) * 0.5).to(torch.bfloat16).cuda()
-        out = torch.empty((m, st.n), dtype=torch.bfloat16, device="cuda")
-        st(x, out)
-        assert torch.equal(out, torch.cat([a(x), matmul(x, b)], 1))
-        assert torch.equal(st.prefill(x), torch.cat([a.prefill(x), matmul(x, b)], 1))

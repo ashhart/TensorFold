@@ -155,25 +155,3 @@ def test_moe4_step_runs_each_row_through_its_expert_and_the_shared_one():
         assert torch.equal(y[r, 1], nvfp4.matmul(sa, ex.shared.down, f32=True)[0])
     alone = step(x[2:3].contiguous())[1]
     assert torch.equal(alone[0], y[2])
-
-
-def test_a_prompts_pairs_stay_inside_the_ceiling_for_their_item():
-    """A prompt's pairs over the whole stack group one expert's own pairs an item, and the count stays inside
-    ``max_items`` - the ceiling a plan may hold, which the plan then beats. Only the plan's count is traffic, and
-    the item's size is chosen by it: 16 pairs measured 14.09 ms for a prompt's 2275 rows against 21.00 ms for
-    64, the extra reads being L2 hits either way. This pins the item and the arithmetic behind it, since a
-    ceiling and a count are easy to confuse - one is a bound, the other is bytes."""
-
-    from tensorfold.cuda import experts as grouped
-    from tensorfold.cuda.experts import Plan, max_items, route
-
-    rows, slots, experts = 400, 10, 128            # pairs an expert: enough for a re-read at 16, not at 64
-    picks = torch.stack([torch.randperm(experts)[:slots] for _ in range(rows)]).to(torch.int32)
-    picks = torch.cat([picks, torch.full((rows, 1), experts, dtype=torch.int32)], dim=1)   # the shared expert
-
-    plan = Plan(rows, slots, experts + 1, DEV, prefill=True)
-    route(picks, plan)
-    items, distinct = int(plan.counts[0].item()), int(plan.counts[1].item())
-    assert grouped.PREFILL_TILE == grouped.TILE == 16, "the multi-row item is the decode one, measured"
-    assert distinct == experts + 1, "every expert's pair is present"
-    assert items <= max_items(rows * slots, experts + 1, grouped.PREFILL_TILE)

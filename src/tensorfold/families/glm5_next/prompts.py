@@ -1,5 +1,4 @@
-"""GLM-5.3's prompts with thinking off, the same on both servers: its checkpoint template writes a reasoning-effort
-line and opens a think block whatever ``enable_thinking`` says, and its thinking-off template writes neither."""
+"""GLM-5.3's prompts with thinking off, the same on both servers: no effort line, no opened think block."""
 
 from __future__ import annotations
 
@@ -10,8 +9,7 @@ OPENED = "<|assistant|><think>"
 
 
 def thinking_off(text: str) -> str:
-    """The checkpoint template's ``text`` as the thinking-off template renders it: no effort line, an empty think
-    block after a generation prompt."""
+    """The checkpoint text as the thinking-off template renders it: no effort line, an empty think block."""
 
     text = text.replace(EFFORT_LINE, "", 1)
     return text + "</think>" if text.endswith(OPENED) else text

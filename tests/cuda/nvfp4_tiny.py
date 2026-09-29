@@ -53,11 +53,9 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
           heads: int = 2, kv_heads: int = 2, hd: int = 64, nk: int = 8, nv: int = 24, dk: int = 128, dv: int = 128,
           moe_width: int = 128, shared_width: int = 64, streams: int = 4, low: int = 64,
           ple: bool = True, mtp: bool = True, seed: int = 0, prefix: str = "", ple_bf16: bool = False,
-          mxfp8: bool = False, ple_nvfp4: bool = False, centred: bool = False, fp8block: bool = False) -> Path:
+          mxfp8: bool = False, ple_nvfp4: bool = False, centred: bool = False) -> Path:
     """``mxfp8``: DeltaNet, attention and shared-expert linears in MXFP8 and ``ple_nvfp4``: NVFP4 n-gram rows, as
-    local-inference-lab's export stores them; ``centred``: RMSNorm weights stored around 0 (the model adds 1);
-    ``fp8block``: ModelOpt ``FP8_PB_WO`` (e4m3 with an fp32 ``weight_scale_inv`` per 128x128 block) for the DeltaNet
-    qkv/z/out and attention q/k/v/o projections and lm_head, the rest bf16 (so stacks mix block FP8 and bf16)."""
+    local-inference-lab's export stores them; ``centred``: RMSNorm weights stored around 0 (the model adds 1)."""
     dir.mkdir(parents=True, exist_ok=True)
     rng = torch.Generator().manual_seed(seed)
 
@@ -78,18 +76,9 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
                          "data_offsets": [0, 0]}                                      # patched on write
         blobs.append(t)
 
-    def linear(name: str, n: int, k: int, *, fp4: bool, mx: bool = False, blk: bool = False) -> None:
+    def linear(name: str, n: int, k: int, *, fp4: bool, mx: bool = False) -> None:
         w = rand(n, k)
-        if blk and fp8block:                               # e4m3 with an fp32 scale per 128x128 block
-            nb = -(-n // 128)
-            g = torch.zeros(nb * 128, k)
-            g[:n] = w.float()
-            g = g.view(nb, 128, k // 128, 128)
-            s = (g.abs().amax(dim=(1, 3)).clamp_min(1e-12) / 448.0)                 # [nb, K/128]
-            codes = (g / s[:, None, :, None]).view(nb * 128, k)[:n].to(torch.float8_e4m3fn)
-            add(name + ".weight", codes)
-            add(name + ".weight_scale_inv", s.float())
-        elif mx and mxfp8:                                   # e4m3 with a power-of-two scale every 32 inputs
+        if mx and mxfp8:                                   # e4m3 with a power-of-two scale every 32 inputs
             g = w.float().view(n, k // 32, 32)
             e = torch.ceil(torch.log2(g.abs().amax(-1).clamp_min(1e-30) / 448.0)).clamp(-127, 127)
             add(name + ".weight", (g / torch.pow(2.0, e)[..., None]).view(n, k).to(torch.float8_e4m3fn))
@@ -128,8 +117,7 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
                              ("in_proj_z", nv * dv, hidden),
                              ("in_proj_b", nv, hidden), ("in_proj_a", nv, hidden),
                              ("out_proj", hidden, nv * dv)):
-            linear(f"{b}.linear_attn.{proj}", n_, k_, fp4=False, mx=True, blk=proj in ("in_proj_qkv", "in_proj_z",
-                                                                                     "out_proj"))
+            linear(f"{b}.linear_attn.{proj}", n_, k_, fp4=False, mx=True)
         add(f"{b}.linear_attn.conv1d.weight", rand(2 * nk * dk + nv * dv, 4))
         add(f"{b}.linear_attn.A_log", rand(nv, dtype=torch.float32) - 4.0)
         add(f"{b}.linear_attn.dt_bias", rand(nv, dtype=torch.float32))
@@ -138,7 +126,7 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
                              ("v_proj", kv_heads * hd, hidden),
                              ("o_proj", hidden, heads * hd),
                              ("indexer.index_qk_proj", (4 + 1) * 128, hidden)):
-            linear(f"{b}.self_attn.{proj}", n_, k_, fp4=False, mx=True, blk=not proj.startswith("indexer"))
+            linear(f"{b}.self_attn.{proj}", n_, k_, fp4=False, mx=True)
         for nm, size in (("q_norm", hd), ("k_norm", hd), ("indexer.q_layernorm", 128), ("indexer.k_layernorm", 128)):
             add(f"{b}.self_attn.{nm}.weight", norm(size))
         if ple and i == 1:
@@ -176,7 +164,7 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
     linear("model.hyper_connection_mixer.input_mix_weight_down", low, streams * hidden, fp4=False)
     linear("model.hyper_connection_mixer.input_mix_weight_up", streams * hidden, low, fp4=False)
     add("model.hyper_connection_mixer.hc_norm.weight", norm(streams * hidden))
-    linear("lm_head", vocab, hidden, fp4=False, blk=True)
+    linear("lm_head", vocab, hidden, fp4=False)
     if mtp:
         add("mtp.pre_fc_norm_embedding.weight", norm(hidden))
         add("mtp.pre_fc_norm_hidden.weight", norm(streams * hidden))

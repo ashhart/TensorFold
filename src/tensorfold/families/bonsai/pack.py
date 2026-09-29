@@ -14,8 +14,7 @@ BLOCK = 1024
 PACKED = ("weight", "scales", "biases", "signs")
 # the pack's unquantized recurrent-layer gates: fp32 row-exact dense projections, never rotated
 GATES = ("in_proj_a", "in_proj_b")
-# how projections hold the codes: M5 lanes (2-bit, g64 pairs), before M5 widened to 4-bit or the pack's own 2-bit;
-# "widened:N" widens the first N decoder layers (a fixed mix: a snapshot's identity names it)
+# how projections hold codes: M5 2-bit lanes, widened 4-bit, or the pack's own 2-bit; "widened:N" widens N layers
 FORMS = ("lanes", "widened", "packed")
 ROOM = 12 << 30           # the drafter, one prompt chunk and caches beside the weights (the admission's measure)
 
@@ -107,8 +106,7 @@ def _layer(path: str) -> int | None:
 
 
 def widening(model_dir: str | Path) -> tuple[int, list[int], int]:
-    """(the language model's bytes, the bytes widening each decoder layer's projections to 4 bits adds, the rest's),
-    from the header alone."""
+    """(the language model's bytes, the widening bytes, the rest's), from the header alone."""
 
     config, _ = contract(model_dir)
     with open(Path(model_dir) / "model.safetensors", "rb") as f:
@@ -136,8 +134,7 @@ def sizes(model_dir: str | Path) -> tuple[int, int]:
 
 
 def pre_m5_form(model_dir: str | Path, budget: int) -> str:
-    """Before M5: codes widened to 4 bits (faster rows) where they fit ``budget`` with ROOM left: every projection,
-    else the first N decoder layers' ("widened:N"), else the pack's own."""
+    """Before M5: widen codes to 4 bits where the budget fits: all projections, N layers, or the pack's own."""
 
     model, layers, rest = widening(model_dir)
     room = budget - model - ROOM

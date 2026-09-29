@@ -75,19 +75,13 @@ if HAS_TRITON:
             tl.store(PART + (pid_s * M + rm[:, None]) * N + rn[None, :], acc, mask=out_mask)
 
     @triton.jit
-    def _reduce(PART, OUT, total, SK: tl.constexpr, BLOCK: tl.constexpr, F32: tl.constexpr):
-        """The K slices summed in slice order, one add a slice - in one launch, for either output face.
-
-        ``out += part[s]`` runs one elementwise launch a slice, which for the fp32 faces is the whole
-        reduce: two faces a layer, one elementwise launch a slice each.
-        """
-
+    def _reduce(PART, OUT, total, SK: tl.constexpr, BLOCK: tl.constexpr):
         offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         ok = offs < total
         acc = tl.load(PART + offs, mask=ok, other=0.0)
         for s in tl.static_range(1, SK):
             acc = acc + tl.load(PART + s * total + offs, mask=ok, other=0.0)
-        tl.store(OUT + offs, acc if F32 else acc.to(tl.bfloat16), mask=ok)
+        tl.store(OUT + offs, acc.to(tl.bfloat16), mask=ok)
 
 
 def matmul(x: torch.Tensor, b: B16, *, out: torch.Tensor | None = None, f32: bool = False,
@@ -114,8 +108,13 @@ def matmul(x: torch.Tensor, b: B16, *, out: torch.Tensor | None = None, f32: boo
     _b16mm[grid](x, b.weight, out, part, m, x.stride(0), N=b.n, K=k, SK=sk, BM=bm,
                  BLOCK_N=block_n, BK=bk, F32=f32, num_warps=num_warps, num_stages=num_stages)
     if sk > 1:
-        total = m * b.n
-        _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, F32=f32, num_warps=4)
+        if f32:
+            out.copy_(part[0])
+            for s in range(1, sk):
+                out += part[s]
+        else:
+            total = m * b.n
+            _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, num_warps=4)
     return out
 
 

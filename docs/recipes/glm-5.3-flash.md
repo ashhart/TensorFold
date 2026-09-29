@@ -7,6 +7,11 @@ Kimi delta attention, sparse MLA and MoE blocks mix four residual streams.
 
 ## CUDA
 
+On CUDA GLM-5.3-Flash runs on two ranks from Mia-AiLab's EXL3 checkpoint (`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw`,
+experimental; [EXL3](#exl3)) or from the MLX 4-bit checkpoint, the portable option that a 256 GB Mac serves too.
+No NVFP4 checkpoint of it is read. `tensorfold serve` loads the checkpoint you name; it picks none by itself. Prompt
+precision does not change here: neither checkpoint has an FP8 prompt kernel, so `--prefill-fp8` is refused.
+
 Use the [two-rank container setup](../../RUNBOOK.md#nvidia-gpus) and pull the same checkpoint on both ranks:
 
 ```bash
@@ -21,12 +26,31 @@ when those terms fit the intended use. The CLI uses it automatically once it has
 Without it, the engine uses MTP drafts; `--drafter none` explicitly selects MTP-only drafting.
 Give both ranks the same drafter setting. `--no-drafts` disables all drafting for the serial reference.
 A checkpoint with neither an MTP head nor a supplied DFlash2 model is refused unless drafts are disabled.
+`TF_GLM_MTP` decides whether the CUDA engine loads the MTP head: `1` (the default) keeps it beside DFlash2, so MTP
+policies and `auto`'s per-round choice stay available; `auto` leaves it out when DFlash2 is loaded or drafts are
+disabled; `0` leaves it out. Left out, it saves each rank the head's weights (about 2 GiB for this checkpoint), its
+cache rows and decode buffers, and prompts skip its absorb; MTP policies (and `--mtp-drafts N`) then draft with
+DFlash2. Replies are the same either way. On two GB10s with DFlash2, `auto` read prompts about 3% faster and decoded
+sampled code faster, but greedy chat about 4% slower, so the head stays by default. Give both ranks the same setting.
+
+### EXL3
+
+`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` is an experimental CUDA checkpoint. The reader supports 4-bit
+mcg-codebook routed experts with BF16 weights elsewhere, not arbitrary EXL3 layouts. Start it with the
+two-rank command above, substituting its checkpoint ID on both ranks. With DFlash2 available, the EXL3
+`auto` policy uses DFlash2; without it, MTP remains available.
+
+The expert decoder and BF16 target matmul keep row arithmetic fixed. A quantized copy of the head may
+propose drafts, but target verification retains the BF16 head. EXL3 speed, capacity and long-context
+qualification are TBD [release-0.3.5].
 
 ### Draft policies
 
-For the affine checkpoint, the default `auto` policy uses MTP for sampled requests. For greedy requests with DFlash2 available,
+For the affine checkpoint with its MTP head loaded, the default `auto` policy uses MTP for sampled requests.
+For greedy requests with DFlash2 loaded beside the head (`TF_GLM_MTP=1`, the default),
 it compares committed tokens per estimated round time and chooses a drafter. It periodically probes
 the other drafter and discards its old rate after switching away, so later probes can change the choice.
+Without the head (`TF_GLM_MTP=auto` beside DFlash2, or `0`), `auto` drafts with DFlash2.
 Every policy verifies against the same target, and `"draft": false` selects the serial reference.
 A request can select a policy after `@` in its model ID, such as `bench@c3:0.35`, or with `tf_policy`.
 `--mtp-drafts N` selects a fixed depth at startup. With DFlash2 available, `--mtp-drafts 0` selects
@@ -52,6 +76,13 @@ conversation takes the attention caches, a kept prompt's rows are saved. Kept st
 `TF_GLM_CACHE_GIB` (default 3), or less when the window leaves less memory on either Spark; the startup log says
 when it is less, and the memory estimate includes it. It serves one request at a time. Both ranks finish a started
 reply after a client disconnects.
+
+DFlash2 attends only its 2,048-row sliding window: a block pass reads only the window's tiles, and the drafter keeps
+its context in a ring of that window, its block and a tile (2,176 rows, 21 MiB a rank whatever the window, instead
+of 10 KiB a rank for every token of the window). A kept prompt DFlash2 can resume from holds a copy of the window
+(20 MiB a rank, within `TF_GLM_CACHE_GIB`). The drafts are the same bits. `TF_GLM_DRAFT_RING=0` keeps the
+whole-window buffer instead (give both ranks the same value). The memory estimate counts the draft model as it is
+held (4-bit copies and its selector's codebooks, 0.63 GiB a rank), not at 4 bytes a checkpoint value.
 
 ### Long contexts: the latent cache
 
@@ -87,17 +118,6 @@ Short prompts, with the recipe's default drafting (DFlash2, `auto`), decode at 5
 latent path rounds attention differently, so some replies differ from 0.3.6 (the greedy cells' texts, hence their
 speeds); `TF_GLM_LATENT=0` gives 0.3.6's replies exactly.
 
-### EXL3
-
-`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` is an experimental CUDA checkpoint. The reader supports 4-bit
-mcg-codebook routed experts with BF16 weights elsewhere, not arbitrary EXL3 layouts. Start it with the
-same two-rank command, substituting its checkpoint ID on both ranks. With DFlash2 available, the EXL3
-`auto` policy uses DFlash2; without it, MTP remains available.
-
-The expert decoder and BF16 target matmul keep row arithmetic fixed. A quantized copy of the head may
-propose drafts, but target verification retains the BF16 head. EXL3 speed, capacity and long-context
-qualification are TBD [release-0.3.5].
-
 ## Apple Silicon (MLX)
 
 On a Mac with 256 GB and MLX 0.32.2 or later (`serve` refuses an older MLX):
@@ -106,6 +126,10 @@ On a Mac with 256 GB and MLX 0.32.2 or later (`serve` refuses an older MLX):
 tensorfold pull Vontra/GLM-5.3-Flash-MLX-4bit-MTP
 tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP
 ```
+
+The chat template names `low` and `high`. GLM's default is Max, and `high` suits agent and coding work.
+`medium` is heard as `high`. `xhigh` stays `xhigh`, which this template renders as Max.
+`--reasoning-effort high` selects High, and `--reasoning-effort low` selects Low.
 
 The model decodes through the lane engine's family rounds with the checkpoint's MTP head. A round's drafted rows
 are verified in one forward, and every row of a window gets its one-row call's bits, so drafted replies equal
@@ -161,6 +185,31 @@ conversions usually store per-tensor overrides: routed experts at 4 bits, attent
 windows keep one-row bits. On grant-ai's abliterated conversion, on a 256 GB M3 Ultra, the contributor measured
 46.3 tok/s drafted, equal to `"draft": false`.
 
+### Float32 activations
+
+Set `"tensorfold_activation_dtype": "float32"` in a checkpoint's `config.json` to run the residual stream, the MLA
+latent and indexer caches and the KDA states in float32 instead of bf16. The hyper-connection split, the gated-delta
+recurrence and the templated one-row GEMVs (`matmul_rows`) run their Metal kernels in float32. Quantized `qmv_rows`
+stays on its bf16 kernel, so a float32 row uses MLX's one-row call. The fused KDA step, the sparse-decode attention
+and the fused bf16 matrix kernels step aside for their MLX-op paths. Rows keep their bits, so drafted replies still
+equal `"draft": false`, and without the key nothing changes (bf16 logits are byte-identical to before).
+
+On an M3 Ultra with the resident 4-bit checkpoint, float32 activations decode at about 6-9 tok/s against
+48-57 for bf16, and prefill is about 1.2-1.4x slower, so the mode is for quality work, not speed.
+
+Measured on a 512 GB M3 Ultra with GLM-5.3-Flash converted losslessly from a Q8_0 GGUF, against a float64
+reference of the same weights on 579 held-out items (MMLU-Pro 200, BBH 200, HumanEval 50, MBPP 129; per-item
+token-weighted RMS difference of mean NLL):
+
+| activations | BBH | HumanEval | MBPP | MMLU-Pro answers equal to the reference | prefill 4k / 32k tok/s | decode @32k tok/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| bf16 | 0.219 | 0.016 | 0.038 | 187 / 200 | 365 / 338 | 20.4 |
+| float32 | 0.011 | 0.002 | 0.003 | 199 / 200 | 371 / 312 | 19.6 |
+
+llama.cpp's Metal path on the same Q8_0 weights (F32 KV cache) measured 0.073 / 0.016 / 0.035 and 190 / 200.
+Memory: the caches double in size and admission counts them at 4 bytes a value; the weights are unchanged.
+The CUDA engine refuses the key. `--ssd-experts` stays on the bf16 expert kernels and refuses this mode.
+
 ### 8-bit from a Q8_0 GGUF, without loss
 
 A Q8_0 block (32 int8 values, one fp16 scale d) is exactly MLX's affine 8-bit format in groups of 32 with
@@ -184,6 +233,28 @@ the model decodes without drafts. The group-32 8-bit layers run MLX's one-row ca
 Prompt chunks attend as decode does: each query reads its own selected keys from the latent cache, so prefill cost
 and memory stay flat with context. The contributor measured 336 / 334 / 309 tok/s at 10k / 35k / 103k tokens on a
 256 GB M3 Ultra, against 331 / 260 / 143 for the previous prefill.
+
+### Scripts that load the backbone directly
+
+`tensorfold serve` wires the weights (`mx.set_wired_limit`, `server/residency.py`) and caps MLX's cache of freed
+buffers. A script that calls `families.glm5_next.weights.load_backbone` directly, such as a scorer reading logits
+or a profiler, should do the same: without wiring, macOS pages parts of a 170-365 GiB checkpoint out between steps, and
+on a 512 GB M3 Ultra each MoE layer then took about 0.1 s per call (4.3 s per decode step instead of 0.1 s); with the
+wired limit set to the whole working set and no cache cap, the cache of per-request buffers was wired too and grew
+past 440 GiB. Wire what is resident after loading, cap the cache, and clear it between requests:
+
+```python
+import mlx.core as mx
+from tensorfold.families.glm5_next.weights import load_backbone
+from tensorfold.server.residency import wire_resident
+
+info = mx.device_info()
+mx.set_wired_limit(int(info["max_recommended_working_set_size"]))   # as the family's load() does
+model = load_backbone(model_dir)
+wire_resident(mx, int(info["max_recommended_working_set_size"]))   # then only the weights stay wired
+mx.set_cache_limit(8 * 2**30)                                       # the server's --mlx-cache-gib default
+# ... per request: run, then mx.clear_cache()
+```
 
 ## Responses and exactness
 

@@ -11,7 +11,7 @@ from typing import Any, Callable
 from . import CONFIDENCE, DEPTH
 
 MAX_DEPTH = 15           # a verify window of at most 16 rows
-KEEP = 8                 # prompt states (one token before each end) a concurrent decoder keeps to resume from
+KEEP = 8                 # prompt ends a concurrent decoder keeps to resume from
 
 
 class FlashNextEngine:
@@ -279,14 +279,14 @@ class FlashNextEngine:
                 stop_eos: bool = True) -> dict[str, Any]:
         import torch
 
-        from .decode import entry_end, mtp_decode, prefill, serial_decode
+        from .decode import mtp_decode, prefill, serial_decode
 
         t0 = time.perf_counter()
         self._start_from(hit)
-        end = entry_end(prompt)
-        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint, keep_at=end)
-        # the state one token before the prompt's end, so the same prompt or a next turn resumes from it
-        self._remember(list(prompt[:end]), self.e.kept)
+        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint)
+        # the prompt's state: the MTP head has absorbed every position but the last, whose streams resume needs
+        self._remember(list(prompt), {"state": self.e.st.snapshot(),
+                                      "tail": self.e.last_streams.clone() if self.e.mbuf is not None else None})
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                                  "drafts": True}

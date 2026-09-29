@@ -88,7 +88,7 @@ class MoE:
                 y = PM.gather_sorted(inp.reshape(-1, inp.shape[-1]), q.weight, q.scales, q.biases, ids)
                 return y.reshape(*inp.shape[:-1], y.shape[-1])
             return mx.gather_qmm(inp, q.weight, q.scales, q.biases, rhs_indices=ids, transpose=True,
-                                 group_size=q.group, bits=q.bits, sorted_indices=do_sort).astype(inp.dtype)
+                                 group_size=q.group, bits=q.bits, sorted_indices=do_sort)
 
         gate, up, down = qs or (self.gate, self.up, self.down)
         act = swiglu(run(gate, h), run(up, h), self.cfg.swiglu_limit)

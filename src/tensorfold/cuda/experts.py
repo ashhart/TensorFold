@@ -11,9 +11,7 @@ import torch
 NTW = 4                  # n8 tiles a warp
 COLS = 8 * NTW           # output columns a warp
 TILE = 16                # pairs an item holds (decode form)
-PREFILL_TILE = 16        # pairs an item holds (prefill form): the kernel holds 16 or 64, and 16 measured
-                         # 14.09 ms against 21.00 ms for a prompt's 2275 rows (1788 items against 549) -
-                         # the fatter item's re-reads are L2 hits anyway, and 549 items starve the SMs.
+PREFILL_TILE = 64        # pairs an item holds (prefill form)
 SMALL = 1024             # pairs the one-block plan takes; wider plans rank in blocks of 1024 pairs
 
 

@@ -1,4 +1,4 @@
-"""The Mac server's live line: connections and decode/prefill tok/s on one terminal line, never inside a log line."""
+"""The Mac server's live line: connections and decode/prefill."""
 
 import io
 import sys

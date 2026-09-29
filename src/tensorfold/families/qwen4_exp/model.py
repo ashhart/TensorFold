@@ -110,8 +110,6 @@ class NGramEmbedding(nn.Module):
         # the shards' rows on the host instead (HostTable's memory map or SSDTable's reads), set by load()
         self.host = None
         self.quant_group, self.quant_bits = cfg.group_size, cfg.bits
-        # the checkpoint's table scale (oMLX stores the rows scaled up and this factor); applied to every looked-up row
-        self.table_scale = 1.0
 
     def ids(self, history: np.ndarray, tokens: np.ndarray) -> np.ndarray:
         """Row ids [B, L, heads] for ``tokens`` [B, L] after ``history`` [B, n-1] (EOS resets the n-grams)."""
@@ -146,7 +144,7 @@ class NGramEmbedding(nn.Module):
             words, scales, biases = self.host.gather(ids)
             rows = mx.dequantize(mx.array(words), mx.array(scales).view(mx.bfloat16),
                                  mx.array(biases).view(mx.bfloat16), group_size=self.quant_group, bits=self.quant_bits)
-            return embed.scaled_rows(rows, self.table_scale).reshape(*ids.shape[:-1], self.heads * self.dims)
+            return rows.reshape(*ids.shape[:-1], self.heads * self.dims)
         flat = ids.reshape(-1)
         shard = np.searchsorted(np.asarray(self.shard_starts), flat, side="right") - 1
         parts, order = [], []
@@ -158,7 +156,7 @@ class NGramEmbedding(nn.Module):
         rows = mx.concatenate(parts, axis=0) if len(parts) > 1 else parts[0]
         inverse = np.empty(len(flat), dtype=np.int32)
         inverse[np.concatenate(order)] = np.arange(len(flat), dtype=np.int32)
-        rows = embed.scaled_rows(rows[mx.array(inverse)], self.table_scale)
+        rows = rows[mx.array(inverse)]
         return rows.reshape(*ids.shape[:-1], self.heads * self.dims)
 
 
@@ -299,12 +297,8 @@ _PLE_CONSTANTS = {
 }
 
 
-def sanitize(weights: dict[str, mx.array], table_scales: dict[str, float] | None = None
-             ) -> tuple[dict[str, mx.array], dict[str, mx.array]]:
-    """Checkpoint names -> this module's; the n-gram hashing constants come back separately (not weights).
-
-    ``table_scales`` (when given) collects each n-gram table's ``weight_scale`` by embedding path: oMLX keeps the
-    table's rows scaled up and stores the factor (e.g. 0.0002), which the lookup then applies to every row."""
+def sanitize(weights: dict[str, mx.array]) -> tuple[dict[str, mx.array], dict[str, mx.array]]:
+    """Checkpoint names -> this module's; the n-gram hashing constants come back separately (not weights)."""
 
     out: dict[str, mx.array] = {}
     extras: dict[str, mx.array] = {}
@@ -315,14 +309,9 @@ def sanitize(weights: dict[str, mx.array], table_scales: dict[str, float] | None
         if key.rsplit(".", 1)[-1] in _PLE_CONSTANTS:
             extras[key] = value
             continue
-        if key.endswith("ngram_embedding.weight_scale"):       # the table's one scale: 1 on MLX conversions
-            if value.size != 1:
-                raise ValueError(f"{name}: expected one n-gram table scale, got shape {tuple(value.shape)}")
-            scale = float(value.astype(mx.float32).reshape(-1)[0].item())
-            if table_scales is not None:
-                table_scales[key[:-len(".ngram_embedding.weight_scale")]] = scale
-            elif scale != 1.0:
-                raise ValueError(f"{name}: an n-gram table scale other than 1 needs load()'s table_scales")
+        if key.endswith("ngram_embedding.weight_scale"):       # an FP8 conversion's table scale: 1 when quantized
+            if not bool(mx.all(value.astype(mx.float32) == 1.0).item()):
+                raise ValueError(f"{name}: an n-gram table scale other than 1 is not supported")
             continue
         key = key.replace("ngram_embedding.shard_", "shards.").replace("ngram_embedding.shards.", "shards.")
         out[key] = value
@@ -373,8 +362,7 @@ def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False,
     # Load on the CPU stream before GPU use so file reads cannot stall a GPU command buffer past its watchdog.
     for path in sorted(Path(model_dir).glob("model*.safetensors")):
         weights.update(mx.load(str(path), stream=mx.cpu))
-    table_scales: dict[str, float] = {}
-    weights, extras = sanitize(weights, table_scales)
+    weights, extras = sanitize(weights)
     quantized_paths = {k[:-len(".scales")] for k in weights if k.endswith(".scales")}
     if ssd_experts:
         from tensorfold.families.qwen4_exp import stream
@@ -384,11 +372,6 @@ def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False,
         spec = quant_params(config, f"{path}.shards.0")                     # every shard shares one format
         if spec:
             emb.quant_bits, emb.quant_group = spec["bits"], spec["group_size"]
-        emb.table_scale = float(table_scales.get(path, 1.0))
-    scaled = sorted({v for v in table_scales.values() if v != 1.0})
-    if scaled:
-        print(f"[tensorfold] n-gram tables scaled by {', '.join(f'{v:g}' for v in scaled)} at lookup "
-              f"({sum(v != 1.0 for v in table_scales.values())} tables)", flush=True)
     if on_host:
         from tensorfold.families.qwen4_exp import host_table
 
