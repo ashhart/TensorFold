@@ -119,6 +119,9 @@ def build_parser() -> argparse.ArgumentParser:
                            "fp16 scale per 32 values (Flash Next on CUDA); fp8 stores them as e4m3 with a "
                            "power-of-two scale per row, about half of bf16's bytes (Qwen3.8-27B on ROCm). Each "
                            "changes outputs slightly")
+    cuda.add_argument("--ram-tier-gib", type=float, default=0.0,
+                      help="Qwen3.8-27B on one GPU: keep prompt states the GPU prefix cache evicts in up to this many "
+                           "GiB of host RAM and copy them back instead of prefilling again (0: off; MLX: --spill-gib)")
     serve.set_defaults(func=cmd_serve)
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
@@ -367,6 +370,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         options["ple_on_ssd"] = True
     if getattr(args, "mtp_confidence", None) is not None:
         options["mtp_confidence"] = float(args.mtp_confidence)
+    if getattr(args, "ram_tier_gib", 0.0):
+        options["ram_tier_gib"] = float(args.ram_tier_gib)
     options["context"] = context if context is not None else args.context
     options["context_explicit"] = args.context is not None
     streams = 1 if str(args.parallel).strip().lower() == "auto" else _parallel(args.parallel)

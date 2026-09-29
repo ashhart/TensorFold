@@ -59,6 +59,36 @@ node's own path; recurrent commits replay that path. Two-rank reductions gather 
 rank order. Each rank count has its own serial reference. See the
 [CUDA kernel map](../../src/tensorfold/families/qwen3_5/cuda/README.md).
 
+### Host-RAM tier
+
+`--ram-tier-gib N` keeps prompt states in up to N GiB of host RAM. A state the GPU lets go (evicted, or dropped
+because another conversation resumed from a prefix they share) is copied there, oldest out first, and a prompt that
+extends one further than any state on the GPU copies it back instead of prefilling again. The copies are bytes: a
+restored state is the one that left, and replies are a fresh prefill's.
+
+On one stream the tier also changes where keys and values live: the GPU holds one window-sized attention buffer, used
+by the conversation being served; before another conversation takes it, the states on the GPU go to host RAM. The
+startup estimate then charges one buffer instead of two retained prefixes, the current state and a growth copy, so
+the window grows: on a 32 GB R9700, 126,553 tokens instead of 32,768 (221,382 with `--kv-dtype fp8`).
+
+In host RAM, keys and values (64 KiB a token, 34 KiB with `--kv-dtype fp8`) are stored once per token prefix: a turn's state reuses the rows its earlier turns left
+there and copies only its new ones, and a shorter state (a message start, the previous turn's end) copies none. Each
+state also holds about 190 MiB of DeltaNet and drafter state of its own. The budget is pinned at startup in 1 GiB
+slabs (24 GiB took about 7 s on the R9700's host) until the host refuses more (a locked-memory limit, `ulimit -l`,
+can cap it); the rest is pageable, with one warning. Startup refuses a budget above the host's available memory less a
+tenth. One rank only; refused on GPUs that share the host's memory (DGX Spark). With `--parallel` the tier keeps
+evicted states but the window stays as without it.
+
+Measured on the R9700 (PCIe copies at 12.9 GiB/s each way) with `tools/bench_conversations.py`: 8 conversations of
+24,000 tokens served round-robin, 4 turns each, 32-token greedy replies, repeat-turn TTFT median:
+
+| | Window | Cold TTFT | Repeat-turn TTFT |
+| --- | ---: | ---: | ---: |
+| No tier | 32,768 | 12.15 s | 12.21 s (every turn prefilled again) |
+| `--ram-tier-gib 24` | 126,553 | 12.27 s | 0.39 s |
+
+A state that is still on the GPU resumes in 0.25 s either way.
+
 ### EXL3 checkpoints (experimental)
 
 The CUDA engine also reads turboderp's EXL3 packs of the model (`turboderp/Qwen3.8-27B-exl3`, a branch per size,
@@ -235,7 +265,8 @@ What runs where:
 | Tree attention | `attention_rocm.cu`: WMMA for head size 256; a block per 512-key chunk and KV head stages each 16-key tile once for all of a window's (row, head) pairs, and each row's tail chunk (last committed keys and its own path) folds the same way; the Triton merge |
 
 Drafted replies equal `"draft": false` ones and any prompt chunking gives the same bits, as on NVIDIA; the bits are
-this engine's own. On 32 GB the startup estimate leaves a 32,768-token window beside the model and drafter.
+this engine's own. On 32 GB the startup estimate leaves a 32,768-token window beside the model and drafter, or
+126,553 tokens with the [host-RAM tier](#host-ram-tier), which also keeps prompt states the GPU has no room for.
 
 Measured on one R9700 through `tensorfold serve` with localeval's speed sweep (fresh-nonce prompts, 256 forced
 tokens, greedy, thinking off, medians of 3 to 5; decode spreads are wide, 10-40%, as acceptance varies by prompt):
@@ -249,6 +280,11 @@ tokens, greedy, thinking off, medians of 3 to 5; decode spreads are wide, 10-40%
 | Decode, 16k prompt | 41.7 tok/s | 100.1 tok/s |
 | Decode, 30k prompt | - | 92.7 tok/s |
 | Serial decode (`"draft": false`), short prompt | 11.8 tok/s | 32.0 tok/s |
+
+With `--ram-tier-gib 24` (a 126,553-token window; localeval sweep, one rep each): a 68,885-token prompt prefilled
+in 43.5 s (1,584 tok/s) and decoded at 92.0 tok/s; a 103,926-token prompt in 77.1 s (1,348 tok/s), decoding at
+101.5 tok/s (decode follows how many drafts a prompt accepts). On one fixed prompt a drafted round takes 40 ms at 3k
+tokens of context and 62 ms at 120k, where the decode matmuls take 30 ms and tree attention about 21.
 
 A drafted round on a code prompt (12 verify rows, 6.4 tokens a round) takes 37 ms: 29 ms of it the weights' reads
 (the decode matmuls stream at about 80% of the card's 639 GB/s). At 16k tokens of context a round takes 40 ms: 29 ms

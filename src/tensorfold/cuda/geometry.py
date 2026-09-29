@@ -139,8 +139,10 @@ def layer_counts(t: dict) -> tuple[int, int]:
 
 
 def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
-                 kv_bits: int = 16, kv8: bool = False) -> Geometry:
-    """``kv8``: the attention caches hold packed FP8 rows (the 27B's ``--kv-dtype fp8``), else bf16."""
+                 kv_bits: int = 16, kv8: bool = False, one_kv: bool = False) -> Geometry:
+    """``kv8``: the attention caches hold packed FP8 rows (the 27B's ``--kv-dtype fp8``), else bf16. ``one_kv``: the
+    attention caches are one window-sized buffer (retained prefixes live in host RAM and the buffer is allocated
+    whole), not two retained prefixes, the current state and a growth copy of a power-of-two size."""
 
     linear, attention = layer_counts(t)
     d, h = int(t["hidden_size"]), int(t["num_attention_heads"]) // world
@@ -179,6 +181,9 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
             blocks = (capacity + ratio - 1) // ratio
             scratch = (2 if mtp else 1) * rows * (h * (hd + 2) * chunks + blocks) * 4
             scratch += PREFILL_ATT_ROWS * (h * (hd + 2) * chunks + blocks) * 4
+        elif one_kv:
+            cache = attention * capacity * hk * 2 * (kv8_bytes(hd) if kv8 else kv_bytes(hd))
+            scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
         else:
             # Bound two retained prefixes, current KV state and a growth copy; speculative rows use separate workspace.
             rounded = 1 << (max(1024, capacity - reserve) - 1).bit_length()

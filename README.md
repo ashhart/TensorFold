@@ -112,6 +112,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--mtp-drafts N` | Family-specific cap on MTP drafts | Both |
 | `--kv-dtype bf16`, `int8`, `int4`, `fp8` | Flash Next: `int8` or `int4` stores keys and values with one fp16 scale per 32 values. Qwen3.8-27B on ROCm: `fp8` stores them as e4m3 with a power-of-two scale per row, about half of bf16's bytes, so the window grows. Both change outputs slightly; other families and the MLX path refuse them | CUDA |
 | `--mtp-confidence P` | Flash Next: stop a draft chain before a later draft under this probability, 0 to 1 (default 0.30) | CUDA |
+| `--ram-tier-gib N` | Qwen3.8-27B on one GPU: keep prompt states the GPU prefix cache lets go in up to N GiB of host RAM and copy them back instead of prefilling again; on one stream the GPU then holds one conversation's keys and values, so the window grows. Zero disables | CUDA |
 | `--tp 2 --rank R --master HOST` | Two-rank CUDA execution | CUDA |
 | `--decode-share F` | While a prompt prefills, running replies keep moving for this share of each chunk's time and later prompts start later (default 0.25; 0 prefills whole prompts first, as 0.3.6.2) | MLX |
 | `--prompt-cache-gib N` | Retained conversation-prefix budget; zero disables retention | MLX |

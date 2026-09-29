@@ -277,7 +277,8 @@ CUDA_AFFINE_GROUPS = (32, 64, 128)
 CUDA_KV_DTYPES = ("bf16", "fp8")
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
-                master_port: int = 29551, no_drafts: bool = False, kv_dtype: str = "bf16", **options: Any):
+                master_port: int = 29551, no_drafts: bool = False, kv_dtype: str = "bf16", ram_tier_gib: float = 0.0,
+                **options: Any):
     """The CUDA engine for ``tensorfold serve``; tp=2 adds fp32 partials in rank order and needs the drafter on both."""
 
     if kv_dtype not in CUDA_KV_DTYPES:       # refuse an unknown cache before any weight is read (no torch import)
@@ -298,4 +299,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
                         streams=streams, context=options.get("context"),
                         context_explicit=options.get("context_explicit"), vision=bool(options.get("vision", False)),
-                        vision_urls=bool(options.get("vision_urls", False)), kv_fp8=kv_dtype == "fp8")
+                        vision_urls=bool(options.get("vision_urls", False)), kv_fp8=kv_dtype == "fp8",
+                        ram_tier=int(float(ram_tier_gib) * 1024**3))

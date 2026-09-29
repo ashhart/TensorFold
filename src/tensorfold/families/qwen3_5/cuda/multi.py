@@ -73,8 +73,11 @@ def _unflatten(flat: list[int], pairs: bool) -> list:
 class MultiDecoder:
     """The ``Scheduler``'s decoder on one GPU or as ``rank`` of two; a stream's window holds at most 16 rows."""
 
+    tier = None                                               # a HostTier: entries the cache evicts, in host RAM
+
     def __init__(self, w: Weights, draft=None, *, max_rows: int = 16, allow_copy: bool = True, stop_eos: bool = True,
-                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None) -> None:
+                 keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None,
+                 tier=None) -> None:
         if not 1 <= max_rows <= 16:
             raise ValueError("a stream's window is 1 to 16 rows (the multi-stream GDN tree kernel's limit)")
         self.w, self.draft, self.max_rows, self.allow_copy = w, draft, max_rows, allow_copy
@@ -87,7 +90,8 @@ class MultiDecoder:
         self.streams: dict[int, Stream] = {}                  # decoding
         self.filling: list[Stream] = []                        # admitted, prompts still prefilling (oldest first)
         self.points = points                                  # a prompt's message starts to keep states at, or None
-        self.cache = PrefixCache(keep)
+        self.tier = tier
+        self.cache = PrefixCache(keep, on_evict=None if tier is None else tier.put)
         self.next_id = 0
         self.broken: Exception | None = None
         self.costs: list[tuple[int, float]] | None = None     # (rows, ms) of the forward: tree widths by the curve
@@ -120,6 +124,11 @@ class MultiDecoder:
             raise ValueError("image inputs require starting this engine with --vision")
         encoded = self.vision.encode(prepared, s.prompt) if prepared is not None else None
         hit = self.cache.longest(s.prompt) if s.draft and encoded is None else None
+        back = (self.tier.take(s.prompt, len(hit[0]) if hit else 0)
+                if self.tier is not None and s.draft and encoded is None else None)
+        if back is not None:                         # a longer match in host RAM: back in the cache, then resumed
+            self.cache.add(*back)
+            hit = self.cache.longest(s.prompt)
         s.sid, s.cached = self.next_id, len(hit[0]) if hit else 0
         self.next_id += 1
         # the request's grammar rides after the fields (rank 1 compiles the same): a plain ADMIT is unchanged

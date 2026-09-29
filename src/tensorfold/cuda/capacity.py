@@ -145,6 +145,13 @@ def _meminfo() -> dict | None:
     return memory if {"MemTotal", "MemAvailable"} <= memory.keys() else None
 
 
+def host_room() -> int | None:
+    """Host memory a process may still hold (MemAvailable less the reserve ``available_bytes`` keeps); None: unknown."""
+
+    memory = _meminfo()
+    return None if memory is None else max(0, memory["MemAvailable"] - max(4 * GIB, memory["MemTotal"] // 10))
+
+
 def unified(torch) -> bool:
     """A GPU on the host's memory (GB10): its free figure is MemFree, which counts the page cache as used."""
 
@@ -157,10 +164,9 @@ def unified(torch) -> bool:
 def available_bytes(torch) -> int:
     free, total = map(int, torch.cuda.mem_get_info())
     available = max(0, free - max(4 * GIB, math.ceil(total / 10)))
-    memory = _meminfo()
-    if memory is None:
+    host = host_room()
+    if host is None:
         return available
-    host = max(0, memory["MemAvailable"] - max(4 * GIB, memory["MemTotal"] // 10))
     # one pool on a unified GPU: reclaimable page cache is available; a discrete GPU is bounded by both
     return host if unified(torch) else min(available, host)
 

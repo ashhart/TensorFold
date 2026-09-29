@@ -108,10 +108,11 @@ def accept(tokens: Sequence[int], parents: Sequence[int], sampled: Sequence[int]
 class PrefixCache:
     """Private prompt-end states by ids (never decoded rows: prefill and decode bits differ), newest last."""
 
-    def __init__(self, keep: int = 8) -> None:
+    def __init__(self, keep: int = 8, on_evict: Callable[[list[int], Any, Any], Any] | None = None) -> None:
         self.keep = keep
         self.entries: list[tuple[list[int], Any, Any]] = []
         self.hit: set[tuple[int, ...]] = set()             # entries a later prompt resumed from
+        self.on_evict = on_evict                           # gets each entry that leaves, still intact (a host tier)
 
     def longest(self, prompt: Sequence[int]):
         """The longest entry the prompt strictly extends (one prompt token is always left to prefill), now newest."""
@@ -143,6 +144,25 @@ class PrefixCache:
         self.entries = [e for e in self.entries if e[0] != ids] + [(ids, state, snap)]
         while len(self.entries) > self.keep:
             cold = [e for e in self.entries[:-1] if tuple(e[0]) not in self.hit]
-            gone = cold[0] if cold else self.entries[0]
-            self.entries = [e for e in self.entries if e is not gone]
+            self._leave([cold[0] if cold else self.entries[0]])
         self.hit &= {tuple(e[0]) for e in self.entries}
+
+    def clear(self) -> None:
+        """Every entry leaves, longest first (a host tier then stores the shorter ones as the longer's rows)."""
+
+        self._leave(sorted(self.entries, key=lambda e: -len(e[0])))
+        self.hit = set()
+
+    def drop(self, ids: Sequence[int]) -> None:
+        """Drop the entries that extend ``ids``: a state resumed from ``ids`` writes rows into buffers they share."""
+
+        n, ids = len(ids), list(ids)
+        self._leave([e for e in self.entries if len(e[0]) > n and e[0][:n] == ids])
+
+    def _leave(self, gone: list) -> None:
+        """Remove entries and hand them, oldest first, to ``on_evict`` while their rows are still intact."""
+
+        self.entries = [e for e in self.entries if all(e is not g for g in gone)]
+        if self.on_evict is not None:
+            for entry in gone:
+                self.on_evict(*entry)

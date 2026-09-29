@@ -21,11 +21,14 @@ def entry_end(prompt: Sequence[int]) -> int:
 class Qwen27Engine:
     """Qwen3.8-27B on one GPU or two ranks (rank 0 here), DFlash2 drafting, prefix reuse."""
 
+    tier = None             # a HostTier: prompt states the GPU cache evicts, in host RAM (``--ram-tier-gib``)
+    window = None           # with the tier on one stream: the one attention buffer every state uses, per layer
+
     def __init__(self, model_dir: Path, draft_dir: Path | None, *, max_rows: int = 12, tp: int = 1,
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
                  tp_draft: bool = False, allow_copy: bool = True, streams: int = 1,
                  context: int | None = None, context_explicit: bool | None = None, vision: bool = False,
-                 vision_urls: bool = False, kv_fp8: bool = False):
+                 vision_urls: bool = False, kv_fp8: bool = False, ram_tier: int = 0):
         import torch
 
         from tensorfold.cuda.nvfp4.format import is_quantized
@@ -63,10 +66,20 @@ class Qwen27Engine:
             if dim != 256:
                 raise ValueError(f"--kv-dtype fp8 packs rows of 256 values for the WMMA kernels, not head size {dim}")
         from .weights import load
-        from tensorfold.cuda.capacity import admit, gather_ints
+        from tensorfold.cuda.capacity import GIB, admit, gather_ints, host_room, unified
         from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, stream_geometry
         from .affine_memory import draft_bytes, weight_transform
         from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
+
+        if ram_tier and tp != 1:
+            raise ValueError("--ram-tier-gib keeps prompt states in one host's RAM for one GPU: drop it with --tp 2")
+        if ram_tier and unified(torch):
+            raise ValueError("--ram-tier-gib: this GPU shares the host's memory, where its prefix cache already "
+                             "lives; drop it")
+        room = host_room() if ram_tier else None
+        if room is not None and ram_tier > room:
+            raise ValueError(f"--ram-tier-gib {ram_tier / GIB:.1f}: this host has {room / GIB:.1f} GiB to spare "
+                             "(available memory less a tenth of it or 4 GiB); ask for less")
 
         self.torch = torch
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
@@ -97,8 +110,10 @@ class Qwen27Engine:
         else:
             gather = None
         many = streams > 1
+        # one stream over the tier: one window-sized attention buffer, other conversations' states in host RAM
+        one_kv = bool(ram_tier) and not many
         geometry = ((lambda text: stream_geometry(text, tp, streams, KEEP, kv8=kv_fp8)) if many else
-                    (lambda text: gdn_geometry(text, tp, max_rows, kv8=kv_fp8)))
+                    (lambda text: gdn_geometry(text, tp, max_rows, kv8=kv_fp8, one_kv=one_kv)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir)
         if exl3:
@@ -156,6 +171,26 @@ class Qwen27Engine:
         self.cache = PrefixCache(KEEP_ONE)                  # (committed ids, state, drafter snapshot)
         # ``streams`` > 1: up to that many requests decoded together, their windows verified in one forward
         self.concurrent = streams > 1
+        if ram_tier:
+            from tensorfold.cuda.host_tier import HostTier
+
+            self.tier = HostTier(ram_tier, self.w.norm.device)
+            if not self.concurrent:
+                self.cache.on_evict = self.tier.put
+                c, rows = self.w.config, self.capacity_plan["cache_slots"]
+                from tensorfold.cuda.kernels import kv8
+
+                row, dtype = (kv8.ROW8, torch.uint8) if self.w.kv_fp8 else (c.head_dim, torch.bfloat16)
+                self.window = [None if layer.linear else
+                               tuple(torch.empty((rows, c.kv_heads, row), dtype=dtype, device=self.w.norm.device)
+                                     for _ in range(2))
+                               for layer in self.w.layers]
+            t0 = time.perf_counter()
+            pinned = self.tier.reserve()
+            print(f"[tensorfold] RAM tier: prompt states the GPU cache evicts go to up to {ram_tier / GIB:.1f} GiB "
+                  f"of host memory ({pinned / GIB:.1f} GiB pinned in {time.perf_counter() - t0:.1f}s) and come back "
+                  "over PCIe instead of prefilling again"
+                  + (", one conversation's keys and values on the GPU at a time" if self.window else ""), flush=True)
         self.multi = self.scheduler = None
         if self.concurrent:
             from tensorfold.cuda.scheduler import Scheduler
@@ -164,7 +199,7 @@ class Qwen27Engine:
 
             self.multi = MultiDecoder(self.w, self.draft, allow_copy=allow_copy, rank=rank, world=tp,
                                       context=self.capacity_plan["cache_slots"], keep=KEEP, points=self.points,
-                                      vision=self.vision)
+                                      vision=self.vision, tier=self.tier)
             self.multi.model_dir = self.model_dir             # rank 1 compiles a request's grammar from it
             self.multi.calibrate(streams)
             if rank == 0:
@@ -175,15 +210,44 @@ class Qwen27Engine:
 
     def _resume(self, prompt: list[int]):
         best = self.cache.longest(prompt)
-        if best is not None:
+        held = self.tier.longest(prompt, len(best[0]) if best else 0) if self.tier is not None else None
+        if self.window is not None and (held is not None or best is None):
+            self._vacate()                      # another conversation takes the window buffer
+            best = None
+        back = self.tier.take(prompt, len(best[0]) if best else 0, into=self.window) if held is not None else None
+        if back is not None:                    # a longer match in host RAM: back in the window buffer, or its own
+            self.cache.add(*back)
+            best = self.cache.longest(prompt)
+        elif best is not None:
             self._drop_extensions(best[0])
+        if self.tier is not None:
+            self.tier.fence()                   # the prefill may write rows a spill is still copying
         return best
+
+    def _vacate(self) -> None:
+        """Every state on the GPU to host RAM (longest first: shorter ones reuse its rows there), then later work on
+        this stream waits for those copies: the window buffer is about to hold another conversation's rows."""
+
+        self.cache.clear()
+        self.tier.fence()
+
+    def _fresh(self):
+        """With the window buffer, an empty state over it (whatever it held gone to host RAM first); else None."""
+
+        if self.window is None:
+            return None
+        from .forward import State
+
+        if self.cache.entries:
+            self._vacate()
+        st = State(self.w)
+        st.kv, st.limit = list(self.window), next(kv[0].shape[0] for kv in self.window if kv is not None)
+        return st
 
     def _drop_extensions(self, ids: list[int]) -> None:
         """Drop cached extensions before resuming a shorter prefix because cloned states share KV buffers and resumed writes overwrite longer prefixes."""
 
-        n = len(ids)
-        self.cache.entries = [c for c in self.cache.entries if len(c[0]) <= n or c[0][:n] != ids]
+        self.cache.drop(ids)
 
     def _remember(self, ids: list[int], st, snap) -> None:
         self.cache.add(ids, st, snap)
@@ -241,7 +305,7 @@ class Qwen27Engine:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
         stops, keep = self._stops(prompt, hit, draft) if vision is None else ((), None)
         end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
-        st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
+        st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else self._fresh(),
                                      limit=self.context_window, stops=stops, keep=keep, keep_at=end, vision=encoded,
                                      **grammar)
         if end is not None:

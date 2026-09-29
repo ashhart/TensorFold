@@ -8,7 +8,7 @@ from typing import Any
 
 
 def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any = None) -> None:
-    """Refuse a KV cache, draft rule, image or share option the backend or family can't serve, before any download."""
+    """Refuse a KV cache, draft rule, image, share or RAM tier option the backend or family lacks, before downloads."""
 
     if getattr(args, "vision_urls", False) and not getattr(args, "vision", False):
         raise ValueError("--vision-urls needs --vision")
@@ -29,10 +29,20 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     supported = getattr(family.package, "CUDA_KV_DTYPES", ("bf16",))
     if kv not in supported:
         raise ValueError(f"{family.title} on CUDA serves a {' or '.join(supported)} KV cache, not --kv-dtype {kv}")
+    tier = getattr(args, "ram_tier_gib", 0.0) or 0.0
+    if tier < 0:
+        raise ValueError(f"--ram-tier-gib is a GiB count (0: off), not {tier}")
+    if tier and backend != "cuda":
+        raise ValueError("--ram-tier-gib keeps evicted prompt states in host RAM beside a CUDA GPU; on MLX, "
+                         "--spill-gib writes them to disk")
+    engine = getattr(family.package, "cuda_engine", None) if backend == "cuda" else None
+    if tier and (engine is None or "ram_tier_gib" not in inspect.signature(engine).parameters):
+        raise ValueError(f"--ram-tier-gib: {family.title} on CUDA has no host RAM tier for its prompt states")
+    if tier and getattr(args, "tp", 1) != 1:
+        raise ValueError("--ram-tier-gib keeps prompt states in one host's RAM for one GPU: drop it with --tp 2")
     confidence = getattr(args, "mtp_confidence", None)
     if confidence is None:
         return
-    engine = getattr(family.package, "cuda_engine", None) if backend == "cuda" else None
     if engine is None or "mtp_confidence" not in inspect.signature(engine).parameters:
         raise ValueError(f"--mtp-confidence sets where a CUDA engine's MTP chains stop; {family.title} on "
                          f"{'CUDA' if backend == 'cuda' else 'MLX'} has no such rule")
