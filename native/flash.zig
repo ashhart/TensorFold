@@ -261,10 +261,8 @@ pub const Model = struct {
         const down = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.native_down", .{base}));
         const up = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_up", .{base}));
         const sc = try m.scale(s, base, "hc_norm.weight");
-        const r = mx.dim(h, 0);
-        const nd = if (inject) @as(i32, 324) else 320;
-        const part = (try m.kernels.run(s, src.q4_hc_down_split, &.{ h, ssp, sc, down[0], down[1], down[2], try s.scalar(1e-6), try s.ints(&.{r}) }, &.{ ti("S", 4), ti("D", 2560), ti("ND", nd) }, .{ @divTrunc(nd + 7, 8) * 256, 10, r }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ 10, r, nd }, .dtype = mx.f32t }}))[0];
-        return m.kernels.run(s, src.q4_hc_up2, &.{ h, ssp, part, up[0], up[1], up[2], sc, try s.scalar(1e-6), try s.ints(&.{r}) }, &.{ ti("S", 4), ti("D", 2560), ti("LOW", 320), ti("ND", nd), ti("KS", 10) }, .{ 320 * 320, r, 1 }, .{ 320, 1, 1 }, &.{ .{ .shape = &.{ r, 2560 } }, .{ .shape = &.{ r, 4 } } });
+        const out = try @import("flash_ops.zig").hyper(&m.kernels, s, h, ssp, .{ .arrays = down }, .{ .arrays = up }, sc, try s.scalar(1e-6), 4, 320, mx.gpu_generation);
+        return .{ out[0], out[1], mx.empty, mx.empty, mx.empty };
     }
     fn gdn(m: *Model, s: *mx.Scope, base: []const u8, x: A, cache: Cache, record: *Cache) !A {
         const r = mx.dim(x, 0);
@@ -353,10 +351,10 @@ pub const Model = struct {
         const up = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.up_proj", .{base}));
         const sg = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.shared_expert.gate_proj", .{base}));
         const su = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.shared_expert.up_proj", .{base}));
-        const act = try m.kernels.run(s, src.q4_expert_gateup, &.{ x, logits, gate[0], gate[1], gate[2], up[0], up[1], up[2], sg[0], sg[1], sg[2], su[0], su[1], su[2] }, &.{ ti("K", 2560), ti("N", 640), ti("TOPK", 10), ti("SHARED", 1), ti("NE", 512), ti("NL", 513), ti("RPS", 4), ti("SG", 2) }, .{ 64, 80, r * 11 }, .{ 64, 1, 1 }, &.{ .{ .shape = &.{ r, 11, 640 } }, .{ .shape = &.{ r, 10 }, .dtype = mx.c.MLX_UINT32 }, .{ .shape = &.{ r, 10 }, .dtype = mx.f32t } });
+        const act = try @import("flash_ops.zig").gateUp(&m.kernels, s, x, logits, .{ .arrays = gate }, .{ .arrays = up }, .{ .{ .arrays = sg }, .{ .arrays = su } }, 10, mx.gpu_generation, 4, 2);
         const down = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.down_proj", .{base}));
         const sd = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.shared_expert.down_proj", .{base}));
-        const y = (try m.kernels.run(s, src.q4_expert_down_y, &.{ act[0], act[1], down[0], down[1], down[2], sd[0], sd[1], sd[2], try s.ints(&.{r}) }, &.{ ti("NI", 640), ti("D", 2560), ti("TOPK", 10), ti("SG", 2) }, .{ 64, 320, @divTrunc(r * 11 + 1, 2) }, .{ 64, 1, 1 }, &.{.{ .shape = &.{ r, 11, 2560 } }}))[0];
+        const y = try @import("flash_ops.zig").expertDown(&m.kernels, s, act[0], act[1], .{ .arrays = down }, .{ .arrays = sd }, mx.gpu_generation, 2);
         return m.kernels.run(s, src.q4_hc_norm_grouped, &.{ h, inject, y, act[2], logits }, &.{ ti("S", 4), ti("D", 2560), ti("TOPK", 10), ti("NL", 513) }, .{ 2560, r, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 10240 } }, .{ .shape = &.{ r, 10, 4 }, .dtype = mx.f32t } });
     }
     fn ple(m: *Model, s: *mx.Scope, h: A, tokens: []const i32, cache: Cache, record: *Cache) !A {
@@ -381,22 +379,15 @@ pub const Model = struct {
     }
     fn pleEmbedding(m: *Model, s: *mx.Scope, h: A, emb: A, r: i32, cache: Cache, record: *Cache) !A {
         const base = "model.layers.1.ple";
-        const keys = try s.reshape(try m.pleNorm(s, try m.lin(s, base, "key_proj", emb), base ++ ".norm_key"), &.{ r, 4, 2560 });
-        const values = try s.reshape(try m.lin(s, base, "value_proj", emb), &.{ r, 1, 2560 });
-        const queries = try s.reshape(try m.pleNorm(s, h, base ++ ".norm_query"), &.{ r, 4, 2560 });
-        var sum = mx.c.mlx_array_new();
-        const rc = mx.c.mlx_sum_axis(&sum, try s.binary(mx.c.mlx_multiply, keys, queries), -1, true, mx.stream);
-        var gate = try s.binary(mx.c.mlx_divide, try s.result(rc, sum), try s.cast(try s.scalar(@sqrt(@as(f32, 2560))), mx.bf16));
-        gate = try s.binary(mx.c.mlx_multiply, try s.unary(mx.c.mlx_sign, gate), try s.unary(mx.c.mlx_sqrt, try s.binary(mx.c.mlx_maximum, try s.unary(mx.c.mlx_abs, gate), try s.cast(try s.scalar(1e-6), mx.bf16))));
-        const gated = try s.reshape(try s.binary(mx.c.mlx_multiply, try s.unary(mx.c.mlx_sigmoid, gate), values), &.{ r, 10240 });
-        const normed = try m.pleNorm(s, gated, base ++ ".norm_conv");
+        const kv_rows = try s.cat(&.{ try m.lin(s, base, "key_proj", emb), try m.lin(s, base, "value_proj", emb) }, -1);
+        const ops = @import("flash_ops.zig");
+        const out = try ops.pleGate(&m.kernels, s, kv_rows, h, .{ try m.scale(s, base ++ ".norm_key", "weight"), try m.scale(s, base ++ ".norm_query", "weight"), try m.scale(s, base ++ ".norm_conv", "weight") }, try s.scalar(1e-6), 4);
         const tail = if (cache.ple.ctx != null) cache.ple else try s.zeros(&.{ 9, 10240 }, mx.bf16);
-        const conv_in = try s.cat(&.{ tail, normed }, 0);
+        const conv_in = try s.cat(&.{ tail, out[1] }, 0);
         record.ple = conv_in;
-        var conv = mx.c.mlx_array_new();
-        const cr = mx.c.mlx_conv1d(&conv, try s.reshape(conv_in, &.{ 1, r + 9, 10240 }), try m.f(base, "conv1d.weight"), 1, 0, 3, 10240, mx.stream);
-        const cv = try s.reshape(try s.result(cr, conv), &.{ r, 10240 });
-        return s.binary(mx.c.mlx_add, h, try s.binary(mx.c.mlx_add, gated, try s.binary(mx.c.mlx_multiply, cv, try s.unary(mx.c.mlx_sigmoid, cv))));
+        const weight = try s.cast(try s.reshape(try m.f(base, "conv1d.weight"), &.{ 10240, 4 }), mx.f32t);
+        if (mx.dim(h, 0) != r) return error.InvalidTensorShape;
+        return ops.pleConv(&m.kernels, s, conv_in, weight, out[0], h, 4, 3);
     }
     fn layer(m: *Model, s: *mx.Scope, base: []const u8, h: A, cache: *Cache, record: *Cache, linear: bool) !A {
         var buf: [256]u8 = undefined;

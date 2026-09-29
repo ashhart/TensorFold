@@ -66,11 +66,12 @@ class Capture:
         self.cases = []
         self.seen = set()
         self.test = "manual"
+        self.extra = {}
         self.original = mx.fast.metal_kernel
         self.catalog = {}
         self.fingerprints = {}
         for path in sorted(Path("native/metal").glob("*.metal")):
-            if path.stem.startswith(("glm_", "ds4_", "gemma_", "affine_rows", "lane_qmm_", "prism_", "row_forward_", "row_attention_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
+            if path.stem.startswith(("flash_", "glm_", "ds4_", "gemma_", "affine_rows", "lane_qmm_", "prism_", "row_forward_", "row_attention_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
                 self.catalog[(fingerprint(path.read_text(), path.with_suffix(".h").read_text()),
                               path.stem.endswith("_dep"))] = path.stem
                 self.fingerprints[path.stem] = fingerprint(path.read_text(), path.with_suffix(".h").read_text())
@@ -127,6 +128,7 @@ class Capture:
             mx.eval(*call["inputs"], *out)
             name = f"case{len(self.cases):05}"
             arrays = {f"input{i}": before.get(i, x) for i, x in enumerate(call["inputs"])}
+            arrays.update(self.extra)
             arrays.update({f"mutation{i}": call["inputs"][i] for i in mutated})
             arrays.update({f"output{i}": x for i, x in enumerate(out)})
             mx.save_safetensors(str(self.directory / f"{name}.safetensors"), arrays)
@@ -552,6 +554,81 @@ def simd_bits_fixtures(directory):
     print(f"Saved {len(cases)} calibrated 5/6/8-bit SIMD shapes and affine fallback outputs", flush=True)
 
 
+def flash_affine_variants(capture):
+    from tensorfold.kernels.qwen.flash_next.v1 import base, rows, hc, experts, embed
+    from tests.test_flash_next_affine import quantized, bf16, same
+    rng = np.random.default_rng(91721)
+    for streams in (1, 4, 8):
+        for dims in (256, 2560):
+            wide = streams * dims
+            for count in (1, 4, 16):
+                capture.test = f"flash-ple-{streams}-{dims}-{count}"
+                h = bf16(rng, (count, wide))
+                kv = bf16(rng, (count, wide + dims))
+                scales = [mx.array(1 + .1 * rng.normal(size=wide), mx.float32) for _ in range(3)]
+                gated, normed = embed.ple_gate(kv, h, *scales, mx.array([1e-6], mx.float32), streams=streams)
+                for taps in (1, 4):
+                    for dilation in (1, 3):
+                        tail = bf16(rng, (dilation * (taps - 1), wide))
+                        weight = mx.array(.1 * rng.normal(size=(wide, taps)), mx.float32)
+                        mx.eval(embed.ple_conv(mx.concatenate([tail, normed]), weight, gated, h,
+                                              streams=streams, dilation=dilation))
+    generation = base._generation
+    try:
+        for gen in (13, 15, 17):
+            base._generation = lambda: gen
+            for fmt in ([(4, 32)] if gen != 17 else [(b, g) for b in (2, 3, 4, 5, 6, 8) for g in (32, 64, 128)]):
+                for n in ((320,) if fmt == (4, 32) else (320, 322, 321)):
+                    weight = quantized(rng, (n, 2560), *fmt)
+                    x = bf16(rng, (65, 2560))
+                    for count in (1, 2, 3, 16, 17, 32, 33, 65):
+                        capture.test = f"flash-affine-project-{gen}-{fmt}-{n}-{count}"
+                        result = rows.qmv_rows(x[:count], weight)
+                        one = rows.qmv_rows(x[:1], weight)
+                        assert same(result[:1], one)
+            for fmt, up_fmt in ([( (4, 32), (4, 32) )] if gen != 17 else [
+                ((b, g), (b, g)) for b in (2, 3, 4, 5, 6, 8) for g in (32, 64)
+            ] + [((5, 128), (6, 64)), ((4, 32), (8, 64))]):
+                for inject in (False, True):
+                    down = quantized(rng, (320 + (4 if inject else 0), 10240), *fmt, scale=.02)
+                    up = quantized(rng, (10240, 320), *up_fmt)
+                    scale = mx.array(1 + .1 * rng.normal(size=10240), mx.float32)
+                    eps = mx.array([1e-6], mx.float32)
+                    down_q = base.QWeights(down.weight, down.scales, down.biases, *fmt)
+                    up_q = base.QWeights(up.weight, up.scales, up.biases, *up_fmt)
+                    h, ssp = hc.hc_norm(bf16(rng, (16, 10240)), streams=4)
+                    capture.extra = {"down_weight": down.weight, "down_scales": down.scales, "down_biases": down.biases,
+                                     "down_format": mx.array(fmt, mx.int32)}
+                    for count in (1, 2, 3, 8, 16):
+                        capture.test = f"flash-affine-hc-{gen}-{fmt}-{up_fmt}-{inject}-{count}"
+                        mixed, inj = rows.hc_project(h[:count], ssp[:count], down_q, up_q, scale, eps=eps, streams=4, low=320)
+                        mx.eval(mixed)
+                        if inject:
+                            mx.eval(inj)
+                    capture.extra = {}
+            formats = [((4, 32), (4, 32))] if gen != 17 else [
+                ((b, g), (8 if b != 8 else 3, 128 if g != 128 else 32))
+                for b in (2, 3, 4, 5, 6, 8) for g in (32, 64, 128)]
+            for fmt, shared_fmt in formats:
+                e, k, n, top = 32, 512, 128, 4
+                gate, up = (quantized(rng, (e, n, k), *fmt) for _ in range(2))
+                down = quantized(rng, (e, k, n), *fmt)
+                sg, su = (quantized(rng, (n, k), *shared_fmt) for _ in range(2))
+                sd = quantized(rng, (k, n), *shared_fmt)
+                x = bf16(rng, (16, k))
+                logits = mx.array(rng.normal(size=(16, e + 1)), mx.float32)
+                for count in (1, 2, 3, 16):
+                    for shared in (None, (sg, su)):
+                        capture.test = f"flash-affine-experts-{gen}-{fmt}-{shared_fmt}-{count}-{shared is not None}"
+                        act, picks, weights = experts.expert_gateup(x[:count], logits[:count, :e + int(shared is not None)], top, e, gate, up, shared)
+                        mx.eval(act, picks, weights)
+                        if shared:
+                            mx.eval(experts.expert_down_y(act, picks, down, sd))
+    finally:
+        base._generation = generation
+        capture.extra = {}
+
+
 def main():
     require_mlx()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -564,6 +641,7 @@ def main():
     parser.add_argument("--row-attention", action="store_true")
     parser.add_argument("--simd-dense", action="store_true")
     parser.add_argument("--simd-bits", action="store_true")
+    parser.add_argument("--flash-affine", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     if args.simd_dense:
@@ -574,6 +652,18 @@ def main():
         return
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
+    if args.flash_affine:
+        try:
+            flash_affine_variants(capture)
+        finally:
+            mx.fast.metal_kernel = capture.original
+        required = {name for name in capture.fingerprints if name.startswith("flash_")}
+        missing = required - {case["kernel"] for case in capture.cases}
+        if missing:
+            raise RuntimeError(f"Missing Flash affine kernels: {sorted(missing)}")
+        (args.directory / "cases.json").write_text(json.dumps(capture.cases, indent=2) + "\n")
+        print(f"Saved {len(capture.cases)} Flash affine and architecture launches", flush=True)
+        return
     if args.row_attention:
         try:
             row_attention_variants(capture)

@@ -12,6 +12,7 @@ pub var stream: c.mlx_stream = .{ .ctx = null };
 pub var allocator: std.mem.Allocator = std.heap.c_allocator;
 pub var tensor_units = false;
 pub var force_simd = false;
+pub var gpu_generation: u32 = 0;
 // M1/M2 pipelines can have register-dependent limits. Eight physical groups
 // stay within their guaranteed limit without changing arithmetic chunk counts.
 pub var simd_groups: i32 = 8;
@@ -48,9 +49,9 @@ pub fn init() !void {
     if (std.mem.startsWith(u8, name, prefix)) {
         var end: usize = prefix.len;
         while (end < name.len and std.ascii.isDigit(name[end])) : (end += 1) {}
-        const generation = std.fmt.parseInt(u32, name[prefix.len..end], 10) catch 0;
-        simd_groups = if (generation >= 15) 16 else 8;
-        tensor_units = generation >= 17 and !force_simd;
+        gpu_generation = std.fmt.parseInt(u32, name[prefix.len..end], 10) catch 0;
+        simd_groups = if (gpu_generation >= 15) 16 else 8;
+        tensor_units = gpu_generation >= 17 and !force_simd;
     }
     std.debug.print("Metal: {s}, {s} backend\n", .{ name, if (tensor_units) "tensor" else "SIMD" });
     try check(c.mlx_get_default_stream(&stream, dev));
@@ -231,8 +232,11 @@ pub const Kernels = struct {
     }
     pub fn deinit(k: *Kernels) void {
         k.affine.deinit();
-        var it = k.items.valueIterator();
-        while (it.next()) |v| c.mlx_fast_metal_kernel_free(v.*);
+        var it = k.items.iterator();
+        while (it.next()) |entry| {
+            c.mlx_fast_metal_kernel_free(entry.value_ptr.*);
+            allocator.free(entry.key_ptr.*);
+        }
         k.items.deinit();
     }
     pub fn run(k: *Kernels, s: *Scope, spec: @import("kernel_sources.zig").Spec, inputs: []const Array, templates: []const Template, grid: [3]c_int, group: [3]c_int, outputs: []const Output) ![5]Array {
@@ -243,17 +247,53 @@ pub const Kernels = struct {
     }
     pub fn runInto(k: *Kernels, s: *Scope, spec: @import("kernel_sources.zig").Spec, inputs: []const Array, templates: []const Template, grid: [3]c_int, group: [3]c_int, outputs: []const Output, result_: []Array, init_value: ?f32) !void {
         if (result_.len != outputs.len or outputs.len != spec.outputs.len or inputs.len != spec.inputs.len) return error.InvalidKernelArity;
-        const entry = try k.items.getOrPut(spec.name);
+        if (group[0] < 1 or group[1] < 1 or group[2] < 1) return error.InvalidThreadgroup;
+        const threads = @as(i64, group[0]) * group[1] * group[2];
+        if (threads > 1024) return error.InvalidThreadgroup;
+        const reserve: i64 = if (spec.reserve > 0) spec.reserve else if (spec.reserve_launch and threads > 256) threads else 0;
+        const specialize = spec.reserve_launch or spec.reserve > 0;
+        var name: [2048]u8 = undefined;
+        const cache_name = if (specialize) blk: {
+            var used = (try std.fmt.bufPrint(&name, "{s}_r{d}", .{ spec.name, reserve })).len;
+            for (templates) |t| used += (try switch (t.value) {
+                .int => |v| std.fmt.bufPrint(name[used..], "_{s}_i{x}", .{ t.name, @as(u32, @bitCast(v)) }),
+                .boolean => |v| std.fmt.bufPrint(name[used..], "_{s}_b{d}", .{ t.name, @intFromBool(v) }),
+                .dtype => return error.UnsupportedReservedTemplate,
+            }).len;
+            if (used == name.len) return error.NoSpaceLeft;
+            name[used] = 0;
+            break :blk name[0..used :0];
+        } else spec.name;
+        const entry = try k.items.getOrPut(cache_name);
         if (!entry.found_existing) {
-            errdefer _ = k.items.remove(spec.name);
+            errdefer _ = k.items.remove(cache_name);
+            const owned_name = try allocator.dupe(u8, cache_name);
+            errdefer allocator.free(owned_name);
             const ins = c.mlx_vector_string_new();
             defer _ = c.mlx_vector_string_free(ins);
             const outs = c.mlx_vector_string_new();
             defer _ = c.mlx_vector_string_free(outs);
             for (spec.inputs) |n| try check(c.mlx_vector_string_append_value(ins, n));
             for (spec.outputs) |n| try check(c.mlx_vector_string_append_value(outs, n));
-            entry.value_ptr.* = c.mlx_fast_metal_kernel_new(spec.name, ins, outs, spec.source, spec.header, spec.contiguous, false);
+            const reserved = if (reserve > 0) try std.fmt.allocPrintSentinel(allocator, "{s}\n[[max_total_threads_per_threadgroup({d})]]\n", .{ spec.header, reserve }, 0) else null;
+            defer if (reserved) |text| allocator.free(text);
+            var body: std.ArrayList(u8) = .empty;
+            defer body.deinit(allocator);
+            if (specialize) {
+                // MLX-C inserts template declarations after the header, separating
+                // its threadgroup attribute from the function. Upstream bakes constants.
+                for (templates) |t| switch (t.value) {
+                    .int => |v| try body.print(allocator, "  constexpr int {s} = {d};\n", .{ t.name, v }),
+                    .boolean => |v| try body.print(allocator, "  constexpr bool {s} = {s};\n", .{ t.name, if (v) "true" else "false" }),
+                    .dtype => return error.UnsupportedReservedTemplate,
+                };
+                try body.appendSlice(allocator, spec.source);
+                try body.append(allocator, 0);
+            }
+            const source = if (specialize) body.items[0 .. body.items.len - 1 :0] else spec.source;
+            entry.value_ptr.* = c.mlx_fast_metal_kernel_new(cache_name, ins, outs, source, reserved orelse spec.header, spec.contiguous, false);
             if (entry.value_ptr.ctx == null) return error.MlxFailure;
+            entry.key_ptr.* = owned_name;
         }
         const cfg = c.mlx_fast_metal_kernel_config_new();
         if (cfg.ctx == null) return error.MlxFailure;
@@ -261,7 +301,7 @@ pub const Kernels = struct {
         if (init_value) |value| try check(c.mlx_fast_metal_kernel_config_set_init_value(cfg, value));
         try check(c.mlx_fast_metal_kernel_config_set_grid(cfg, grid[0], grid[1], grid[2]));
         try check(c.mlx_fast_metal_kernel_config_set_thread_group(cfg, group[0], group[1], group[2]));
-        for (templates) |t| try check(switch (t.value) {
+        if (!specialize) for (templates) |t| try check(switch (t.value) {
             .int => |v| c.mlx_fast_metal_kernel_config_add_template_arg_int(cfg, t.name, v),
             .dtype => |v| c.mlx_fast_metal_kernel_config_add_template_arg_dtype(cfg, t.name, v),
             .boolean => |v| c.mlx_fast_metal_kernel_config_add_template_arg_bool(cfg, t.name, v),

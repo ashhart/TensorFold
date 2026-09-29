@@ -100,6 +100,42 @@ pub fn check(io: std.Io, dir: []const u8) !void {
         }
         const gemma = @import("gemma_ops.zig");
         const large = @import("large_family_ops.zig");
+        if (std.mem.startsWith(u8, case.kernel, "flash_")) {
+            const flash = @import("flash_ops.zig");
+            const generation: u32 = if (std.mem.endsWith(u8, case.kernel, "_h")) 15 else if (std.mem.endsWith(u8, case.kernel, "_x")) 13 else 17;
+            const generic = std.mem.startsWith(u8, case.kernel, "flash_qa_");
+            if (std.mem.eql(u8, case.kernel, "flash_q4_ple_gate")) {
+                const actual = try flash.pleGate(&kernels, &scope, inputs[0], inputs[1], inputs[2..5].*, inputs[5], parameter(case, "S"));
+                for (actual, expected) |got, want| try equalBits(&scope, got, want);
+            } else if (std.mem.eql(u8, case.kernel, "flash_q4_ple_conv")) {
+                try equalBits(&scope, try flash.pleConv(&kernels, &scope, inputs[0], inputs[1], inputs[2], inputs[3], parameter(case, "S"), parameter(case, "DIL")), expected[0]);
+            } else if (std.mem.indexOf(u8, case.kernel, "qmv_rows") != null) {
+                const format = @import("quantization.zig").Spec{ .bits = if (generic) parameter(case, "BITS") else 4, .group_size = if (generic) parameter(case, "GS") else 32 };
+                const w = flash.Weight{ .arrays = .{ inputs[1], inputs[2], inputs[3] }, .format = format };
+                try equalBits(&scope, try flash.project(&kernels, &scope, inputs[0], w, generation, parameter(case, "RPS")), expected[0]);
+                const batch = try scope.stack(&.{ inputs[0], inputs[0] }, 0);
+                try equalBits(&scope, try flash.project(&kernels, &scope, batch, w, generation, parameter(case, "RPS")), try scope.stack(&.{ expected[0], expected[0] }, 0));
+            } else if (std.mem.indexOf(u8, case.kernel, "hc_up2") != null) {
+                const df = try weights.get("down_format");
+                try mx.eval(df);
+                const values = mx.c.mlx_array_data_int32(df)[0..2];
+                const down = flash.Weight{ .arrays = .{ try weights.get("down_weight"), try weights.get("down_scales"), try weights.get("down_biases") }, .format = .{ .bits = values[0], .group_size = values[1] } };
+                const up = flash.Weight{ .arrays = .{ inputs[3], inputs[4], inputs[5] }, .format = .{ .bits = if (generic) parameter(case, "BITS") else 4, .group_size = if (generic) parameter(case, "GS") else 32 } };
+                const actual = try flash.hyper(&kernels, &scope, inputs[0], inputs[1], down, up, inputs[6], inputs[7], parameter(case, "S"), parameter(case, "LOW"), generation);
+                try equalBits(&scope, actual[0], expected[0]);
+                if (parameter(case, "ND") > parameter(case, "LOW")) try equalBits(&scope, actual[1], try scope.slice(expected[1], 0, 0, mx.dim(inputs[0], 0)));
+            } else if (std.mem.indexOf(u8, case.kernel, "expert_") != null) {
+                const format = @import("quantization.zig").Spec{ .bits = if (generic) parameter(case, "WB") else 4, .group_size = if (generic) parameter(case, "WG") else 32 };
+                const shared_format = @import("quantization.zig").Spec{ .bits = if (generic) parameter(case, "SWB") else 4, .group_size = if (generic) parameter(case, "SWG") else 32 };
+                if (std.mem.indexOf(u8, case.kernel, "gateup") != null) {
+                    const gate = flash.Weight{ .arrays = inputs[2..5].*, .format = format };
+                    const up = flash.Weight{ .arrays = inputs[5..8].*, .format = format };
+                    const shared: ?[2]flash.Weight = if (parameter(case, "SHARED") == 0) null else .{ .{ .arrays = inputs[8..11].*, .format = shared_format }, .{ .arrays = inputs[11..14].*, .format = shared_format } };
+                    const actual = try flash.gateUp(&kernels, &scope, inputs[0], inputs[1], gate, up, shared, parameter(case, "TOPK"), generation, parameter(case, "RPS"), parameter(case, "SG"));
+                    for (actual, expected) |got, want| try equalBits(&scope, got, want);
+                } else try equalBits(&scope, try flash.expertDown(&kernels, &scope, inputs[0], inputs[1], .{ .arrays = inputs[2..5].*, .format = format }, .{ .arrays = inputs[5..8].*, .format = shared_format }, generation, parameter(case, "SG")), expected[0]);
+            }
+        }
         if (std.mem.eql(u8, case.kernel, "glm_qmv_rows64") or std.mem.eql(u8, case.kernel, "glm_qmv_rows_b") or std.mem.eql(u8, case.kernel, "ds4_qmv_rows_f32")) {
             const bits = if (std.mem.eql(u8, case.kernel, "glm_qmv_rows_b")) parameter(case, "BITS") else 4;
             try equalBits(&scope, try large.project(&kernels, &scope, inputs[0], .{ inputs[1], inputs[2], inputs[3] }, bits, std.mem.eql(u8, case.kernel, "ds4_qmv_rows_f32"), parameter(case, "RPS")), expected[0]);

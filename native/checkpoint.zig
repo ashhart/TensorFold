@@ -171,6 +171,7 @@ pub const Store = struct {
     }
     pub fn linear(w: *Store, k: *mx.Kernels, s: *mx.Scope, name: []const u8, x: A, exact: bool) !A {
         const t = try w.triple(name);
+        if (exact and w.flash_drafts != null) return @import("flash_ops.zig").project(k, s, x, .{ .arrays = t }, mx.gpu_generation, 4);
         const n = mx.dim(t[0], 0);
         const dims = mx.dim(x, -1);
         const rows: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(dims)));

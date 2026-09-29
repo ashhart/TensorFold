@@ -934,6 +934,25 @@ def main():
         flash_kernels.ple_lookup = lambda ids, tables: tables(ids)
         model, tokenizer = load(args.model, lazy=True)
         model.__dict__["fused"] = FusedDecode(model)
+        if args.trace_layers:
+            if args.state_directory is None:
+                raise ValueError("--trace-layers requires --state-directory")
+            trace_directory = args.state_directory / "layers"
+            trace_directory.mkdir(parents=True, exist_ok=True)
+            fused = model.fused
+            connections = {id(entry[key]): (i, key) for i, entry in enumerate(fused.layers)
+                           for key in ("attn_hc", "mlp_hc")}
+            original_hc = fused._hc
+            def traced_hc(h, pending, conn):
+                result = original_hc(h, pending, conn)
+                i, key = connections.get(id(conn), (len(model.layers) - 1, "head"))
+                values = (("input", result[0]), ("mixed", result[1])) if key == "attn_hc" else (
+                    (("branch", pending[1][0]), ("moe-input", result[1])) if key == "mlp_hc" else
+                    (("head-mixed", result[1]),))
+                for label, value in values:
+                    np.save(trace_directory / f"{i:02}-{label}.npy", np.asarray(value.astype(mx.float32)))
+                return result
+            fused._hc = traced_hc
         # The lookup adapter holds the original sharded embedding. Remove its
         # fused alias so calling it cannot recurse into this same adapter.
         for layer in model.layers:
@@ -983,6 +1002,8 @@ def main():
             mx.eval(mtp_hidden, mtp_logits)
         if start % 512 == 0:
             print(f"Prefill {start + len(chunk)}/{len(tokens)}", flush=True)
+    if kind == "qwen4_exp" and args.trace_layers:
+        model.fused._hc = original_hc
     if args.dump_logits:
         args.dump_logits.parent.mkdir(parents=True, exist_ok=True)
         np.save(args.dump_logits, np.asarray(logits.astype(mx.float32)).reshape(-1, logits.shape[-1]))
