@@ -183,6 +183,7 @@ class MultiDecoder:
             normed = out if end is None else out[0]
             if drafter is not None:
                 s.snap = drafter.snapshot()
+                drafter.skip(0)                  # no reference of its own: rounds read and replace s.snap's context
             if stop in s.stops:
                 self.cache.add(list(s.prompt[:stop]), kept(s.st), own(s.snap))
             first = None if stop < n else first_token(self.w, normed, n, s.sampling, self.rank, self.world,
