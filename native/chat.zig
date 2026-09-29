@@ -293,7 +293,7 @@ pub const Template = struct {
         const context = try asJson(a, extra);
         var len: usize = 0;
         const output = jinja_render_chat(t.source, msg, tool, context, @intFromBool(generation), &len) orelse {
-            if (report_error) if (jinja_last_error()) |message| std.debug.print("Chat template: {s}\n", .{message});
+            if (report_error) if (jinja_last_error()) |message| @import("server_live.zig").print("Chat template: {s}\n", .{message});
             return error.ChatTemplateFailed;
         };
         defer jinja_str_free(output);

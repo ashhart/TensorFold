@@ -94,6 +94,12 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
         }
     }
 
+    pub fn progress(g: *const RequestGeneration) struct { prefilled: usize, decoded: usize } {
+        return switch (g.*) {
+            inline else => |*request| .{ .prefilled = request.offset, .decoded = request.reply.tokens.items.len },
+        };
+    }
+
     pub fn memoryLengths(g: *const RequestGeneration) @import("memory_budget.zig").Live {
         switch (g.*) {
             inline else => |*request| return .{ .now = @intCast(request.state.position), .most = request.prompt.len + request.options.max_tokens },

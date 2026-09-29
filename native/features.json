@@ -28,9 +28,10 @@
     "limitation": "Folder validation, conversion and synthetic CLI inference are verified; full DeepSeek checkpoint inference remains unverified."
   },
   {
-    "id": "server-live-status", "state": "missing", "requirement": "Live server status with prefill/decode rates and waiting request counts",
+    "id": "server-live-status", "state": "present", "requirement": "Live server status with prefill/decode rates and waiting request counts",
     "upstream": ["src/tensorfold/server/live.py"],
-    "limitation": "Native health reports memory and waiting requests; upstream's terminal status display and rate meters are not ported."
+    "implementation": [{"path":"native/server_live.zig","symbol":"record"}, {"path":"native/server_live.zig","symbol":"start"}, {"path":"native/session.zig","symbol":"progress"}, {"path":"native/server.zig","symbol":"step"}],
+    "checks": [{"step":"test-server-live","driver":{"path":"native/server_live.zig","symbol":"check"},"scope":"host"}, {"step":"test-server-live-http","driver":{"path":"tools/native_server_checks.zig","symbol":"checkLive"},"scope":"checkpoint"}, {"step":"test-server-memory","driver":{"path":"tools/native_server_checks.zig","symbol":"checkMemory"},"scope":"checkpoint"}]
   },
   {
     "id": "python-frontends", "state": "excluded",

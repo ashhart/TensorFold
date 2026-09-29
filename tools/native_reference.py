@@ -256,6 +256,53 @@ def capture_fixtures(output):
     print(f'Saved {len(contexts)} upstream capture records, including every BF16 bit pattern')
 
 
+def server_live_fixtures(output):
+    import io
+    import random
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from tensorfold.server.live import Meter, ChunkRate, LiveLine, status
+    rng = random.Random(30751)
+    instant = 0.0
+    decoded, prefilled = Meter(clock=lambda: instant), ChunkRate(clock=lambda: instant)
+    events = []
+    samples = [(0, 1, 1, .5), (0, 2, 2469, 2), (2, 0, 0, 0),
+               (2.000001, 0, 0, 0), (3, 999999, 0, -1), (6, 0, 0, 0)]
+    for _ in range(1000):
+        instant += rng.choice([0, .125, .5, 2, 2.000001, 5])
+        samples.append((instant + 6, rng.randrange(5000), rng.randrange(65536), rng.choice([0, -1, .125, .5, 2])))
+    for instant, tokens, prefill, seconds in samples:
+        decoded.add(tokens)
+        prefilled.add(prefill, seconds)
+        scheduler = SimpleNamespace(active=rng.randrange(9), waiting=rng.randrange(9), filling=rng.choice([None, object()]), decoded=decoded, prefilled=prefilled)
+        events.append(dict(time=instant, tokens=tokens, seconds=seconds, prefill=prefill,
+                           connections=scheduler.active + (scheduler.filling is not None) + scheduler.waiting,
+                           waiting=scheduler.waiting, decode_rate=decoded.rate(), prefill_rate=prefilled.rate(), text=status(scheduler)))
+    out, err = io.StringIO(), io.StringIO()
+    text = ''
+    live = LiveLine(lambda: text, out)
+    lines = []
+    for action, text, columns in [
+            ('draw', events[1]['text'], 100), ('stderr', 'partial', 100),
+            ('draw', 'must not split a log line', 100), ('stdout', '', 100),
+            ('draw', 'still incomplete', 100), ('stderr', ' done\n', 100),
+            ('draw', events[0]['text'], 24), ('draw', 'é中 · ' * 40, 60),
+            ('stdout', 'stdout log\n', 100), ('draw', events[2]['text'], 10),
+            ('draw', events[2]['text'], 200), ('stop', '', 100), ('stop', '', 100)]:
+        if action == 'draw':
+            with patch('shutil.get_terminal_size', return_value=SimpleNamespace(columns=columns)):
+                live.draw()
+        elif action == 'stop':
+            live.stop()
+        else:
+            live.write(text, out if action == 'stdout' else err)
+        lines.append(dict(action=action, text=text, columns=columns, stdout=out.getvalue(), stderr=err.getvalue()))
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(events=events, lines=lines)))
+    print(f'Saved {len(events)} upstream live rate/status cases and {len(lines)} terminal cases')
+
+
 def prefill_plan_fixtures(output):
     import random
     from tensorfold.engine.prefill_plan import PrefillPlan
@@ -505,6 +552,7 @@ def main():
     parser.add_argument("--memory-fixtures", action="store_true")
     parser.add_argument("--prompt-cache-fixtures", action="store_true")
     parser.add_argument("--prefill-plan-fixtures", action="store_true")
+    parser.add_argument("--server-live-fixtures", action="store_true")
     parser.add_argument("--capture-fixtures", action="store_true")
     parser.add_argument("--verify-capture", nargs=2, metavar=('DRAFTER', 'REPORT'))
     parser.add_argument("--compare-calibration", nargs=2, type=Path)
@@ -521,6 +569,8 @@ def main():
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
+    if args.server_live_fixtures:
+        return server_live_fixtures(args.output)
     if args.prefill_plan_fixtures:
         return prefill_plan_fixtures(args.output)
     if args.prompt_cache_fixtures:

@@ -159,6 +159,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Prefix cache policy and restoration | `test-prompt-cache test-session-rounds -Doptimize=safe -j1` | Python policy oracle; exact Qwen/Gemma/Nemotron continuation after prefix reuse and eviction |
 | Adaptive prefill boundaries and markers | `test-prefill-plan test-chat -Doptimize=safe -j1` | Python plan oracle and all seven local tokenizers; no model weights loaded |
 | HTTP prefix reuse and eviction | `test-server-prefixes -Doptimize=safe -j1` | Local Qwen; JSON/SSE parity, cancellation, LRU eviction and disabled caching |
+| Live serving status | `test-server-live test-server-live-http -Doptimize=safe -j1` | Python rate/redraw oracle; local Qwen for request counters, prefix reuse, cancellation, queue overflow and terminal modes |
 | Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream policy comparisons and Qwen/Gemma/Nemotron cache growth |
 | Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
@@ -210,7 +211,12 @@ growth at startup, reserves active requests' remaining replies and image workspa
 and waits for memory before admitting another request. Requests that cannot fit
 alone are rejected. Retained text prefixes are evicted when doing so can make
 admission fit; background preemption remains incomplete. `/health` reports memory,
-waiting requests and prompt-cache counters.
+memory-waiting requests and prompt-cache counters. Its `inference` object reports
+all admitted/queued requests, waiting requests, token totals and rates. Interactive
+stdout shows the same status every half second; `TENSORFOLD_NO_LIVE=1` disables it.
+Redirected stdout receives no live display. Decode rates average the preceding
+two seconds; prefill shows the latest chunk's rate for two seconds and excludes
+reused prefix tokens.
 `--prompt-cache-gib N` sets the retention target (default RAM/8, capped at 16 GiB;
 `0` disables caching). As upstream, a newest prefix may exceed this target when
 the process memory budget permits it. `--checkpoint-slots N` bounds ordinary entries (default

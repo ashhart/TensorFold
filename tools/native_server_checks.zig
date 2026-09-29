@@ -1,4 +1,35 @@
 const std = @import("std");
+// Darwin sys/ttycom.h; this Zig nightly exposes only TIOCGWINSZ.
+const tiocswinsz: c_int = @bitCast(@as(u32, 0x80087467));
+extern "c" fn openpty(master: *c_int, slave: *c_int, name: ?[*]u8, term: ?*const std.c.termios, size: ?*const std.c.winsize) c_int;
+
+const Terminal = struct {
+    master: std.Io.File,
+    slave: std.Io.File,
+
+    fn init() !Terminal {
+        var master: c_int = undefined;
+        var slave: c_int = undefined;
+        const size = std.c.winsize{ .row = 24, .col = 120, .xpixel = 0, .ypixel = 0 };
+        if (openpty(&master, &slave, null, null, &size) != 0) return error.OpenTerminalFailed;
+        return .{ .master = .{ .handle = master, .flags = .{ .nonblocking = false } }, .slave = .{ .handle = slave, .flags = .{ .nonblocking = false } } };
+    }
+
+    fn read(t: Terminal, a: std.mem.Allocator) ![]const u8 {
+        var output: std.ArrayList(u8) = .empty;
+        var buffer: [8192]u8 = undefined;
+        while (true) {
+            var ready = [_]std.c.pollfd{.{ .fd = t.master.handle, .events = std.c.POLL.IN, .revents = 0 }};
+            const polled = std.c.poll(&ready, 1, 0);
+            if (polled < 0) return error.TerminalReadFailed;
+            if (polled == 0 or ready[0].revents & std.c.POLL.IN == 0) break;
+            const count = std.c.read(t.master.handle, &buffer, buffer.len);
+            if (count <= 0) return error.TerminalReadFailed;
+            try output.appendSlice(a, buffer[0..@intCast(count)]);
+        }
+        return output.items;
+    }
+};
 const long_request = "{\"prompt\":\"Count upwards, one number per line.\",\"max_tokens\":200000,\"ignore_eos\":true,\"temperature\":0,\"stream\":true}";
 
 fn connect(io: std.Io, port: u16) !std.Io.net.Stream {
@@ -154,10 +185,121 @@ const Scenario = struct {
     rounds: bool = false,
     memory: bool = false,
     prefixes: bool = false,
+    live: bool = false,
+    terminal: ?Terminal = null,
+    live_enabled: bool = false,
     cache_enabled: bool = true,
     cache_oversize: bool = false,
     image: []const u8 = "",
     http_checks: []const u8 = "",
+
+    fn liveSnapshot(s: *Scenario, port: u16) !std.json.Value {
+        return (try health(s.init.arena.allocator(), s.init.io, port)).object.get("inference").?;
+    }
+
+    fn waitForCounts(s: *Scenario, port: u16, connections: i64, waiting: i64) !std.json.Value {
+        for (0..1000) |_| {
+            const value = try s.liveSnapshot(port);
+            if (value.object.get("connections").?.integer == connections and value.object.get("waiting_requests").?.integer == waiting) return value;
+            try std.Io.sleep(s.init.io, .fromMilliseconds(25), .awake);
+        }
+        return error.IncorrectLiveRequestCounts;
+    }
+
+    fn waitTerminal(s: *Scenario, terminal: Terminal, suffix: []const u8) !void {
+        const a = s.init.arena.allocator();
+        var output: std.ArrayList(u8) = .empty;
+        for (0..30) |_| {
+            try output.appendSlice(a, try terminal.read(a));
+            if (std.mem.endsWith(u8, output.items, suffix)) return;
+            try std.Io.sleep(s.init.io, .fromMilliseconds(100), .awake);
+        }
+        std.debug.print("Terminal output: {f}\nExpected suffix: {f}\n", .{ std.json.fmt(output.items, .{}), std.json.fmt(suffix, .{}) });
+        return error.MissingTerminalStatus;
+    }
+
+    fn checkLive(s: *Scenario, port: u16) !void {
+        const a = s.init.arena.allocator();
+        const io = s.init.io;
+        _ = try s.waitForCounts(port, 0, 0);
+        const bad = try post(io, port, "{\"prompt\":[],\"max_tokens\":1}");
+        defer bad.close(io);
+        if (!std.mem.startsWith(u8, try readAll(a, io, bad), "HTTP/1.1 400")) return error.ExpectedInvalidPrompt;
+        _ = try s.waitForCounts(port, 0, 0);
+        const empty = try post(io, port, "{\"prompt\":[10],\"max_tokens\":0}");
+        defer empty.close(io);
+        _ = try Output.parse(a, try readAll(a, io, empty), false);
+        const untouched = try s.waitForCounts(port, 0, 0);
+        try std.testing.expectEqual(@as(i64, 0), untouched.object.get("prefilled_tokens").?.integer);
+        try std.testing.expectEqual(@as(i64, 0), untouched.object.get("decoded_tokens").?.integer);
+        var tokens: [2051]i32 = undefined;
+        for (&tokens, 0..) |*token, i| token.* = @intCast(10 + i % 93);
+        const body = try std.json.Stringify.valueAlloc(a, .{ .prompt = &tokens, .max_tokens = @as(usize, 8), .ignore_eos = true, .temperature = @as(f64, 0) }, .{});
+        var expected: ?Output = null;
+        for (0..2) |iteration| {
+            const socket = try post(io, port, body);
+            defer socket.close(io);
+            const result = try Output.parse(a, try readAll(a, io, socket), false);
+            if (expected) |value| try value.compare(result) else expected = result;
+            const metrics = try s.waitForCounts(port, 0, 0);
+            try std.testing.expectEqual(@as(i64, @intCast(2051 + 3 * iteration)), metrics.object.get("prefilled_tokens").?.integer);
+            try std.testing.expectEqual(@as(i64, @intCast(8 * (iteration + 1))), metrics.object.get("decoded_tokens").?.integer);
+            if (try rate(metrics, "decode_tokens_per_second") <= 0) return error.MissingDecodeRate;
+        }
+        const long = "{\"prompt\":[10,11],\"max_tokens\":4096,\"ignore_eos\":true,\"stream\":true}";
+        var sockets: [9]std.Io.net.Stream = undefined;
+        var opened: usize = 0;
+        defer for (sockets[0..opened]) |socket| socket.close(io);
+        sockets[0] = try post(io, port, long);
+        opened = 1;
+        try firstEvent(io, sockets[0]);
+        for (sockets[1..]) |*socket| {
+            socket.* = try post(io, port, long);
+            opened += 1;
+        }
+        _ = try s.waitForCounts(port, 9, 8);
+        const rejected = try post(io, port, long);
+        defer rejected.close(io);
+        if (!std.mem.startsWith(u8, try readAll(a, io, rejected), "HTTP/1.1 503")) return error.ExpectedFullQueue;
+        _ = try s.waitForCounts(port, 9, 8);
+        for (sockets) |socket| socket.close(io);
+        opened = 0;
+        _ = try s.waitForCounts(port, 0, 0);
+        try std.Io.sleep(io, .fromMilliseconds(2100), .awake);
+        const idle = try s.liveSnapshot(port);
+        try std.testing.expectEqual(@as(f64, 0), try rate(idle, "decode_tokens_per_second"));
+        try std.testing.expectEqual(@as(f64, 0), try rate(idle, "prefill_tokens_per_second"));
+        if (s.terminal) |terminal| {
+            if (s.live_enabled) {
+                try s.waitTerminal(terminal, "[tensorfold] 0 connections · decode 0 tok/s · prefill 0 tok/s");
+                const size = std.c.winsize{ .row = 24, .col = 24, .xpixel = 0, .ypixel = 0 };
+                if (std.c.ioctl(terminal.slave.handle, tiocswinsz, &size) != 0) return error.ResizeTerminalFailed;
+                try s.waitTerminal(terminal, "[tensorfold] 0 connections"[0..23]);
+            } else try std.testing.expectEqual(@as(usize, 0), (try terminal.read(a)).len);
+        }
+        try std.posix.kill(s.child.id.?, .TERM);
+        if (s.terminal == null) {
+            var buffer: [1024]u8 = undefined;
+            var reader = s.child.stdout.?.reader(io, &buffer);
+            try std.testing.expectEqual(@as(usize, 0), (try reader.interface.allocRemaining(a, .limited(65536))).len);
+        }
+        if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+        if (s.terminal) |terminal| {
+            const final = try terminal.read(a);
+            if (s.live_enabled) {
+                if (!std.mem.endsWith(u8, final, "\r\x1b[2K")) return error.MissingTerminalCleanup;
+            } else try std.testing.expectEqual(@as(usize, 0), final.len);
+        }
+        std.debug.print("PASS: live counts, queue overflow, cancellation, cached prefill, token totals, idle expiry and terminal mode={s}\n", .{if (s.live_enabled) "enabled" else if (s.terminal != null) "disabled" else "redirected"});
+    }
+
+    fn rate(value: std.json.Value, key: []const u8) !f64 {
+        return switch (value.object.get(key).?) {
+            .float => |v| v,
+            .integer => |v| @floatFromInt(v),
+            else => error.ExpectedRate,
+        };
+    }
 
     fn checkPrefixes(s: *Scenario, port: u16) !void {
         const a = s.init.arena.allocator();
@@ -259,13 +401,16 @@ const Scenario = struct {
         var cancelled_open = true;
         defer if (cancelled_open) cancelled.close(io);
         try waitForMemory(a, io, port, 1);
+        _ = try s.waitForCounts(port, 2, 1);
         cancelled.close(io);
         cancelled_open = false;
         try waitForMemory(a, io, port, 0);
+        _ = try s.waitForCounts(port, 1, 0);
         var next = try post(io, port, reserved);
         var next_open = true;
         defer if (next_open) next.close(io);
         try waitForMemory(a, io, port, 1);
+        _ = try s.waitForCounts(port, 2, 1);
         active.close(io);
         active_open = false;
         try firstEvent(io, next);
@@ -275,6 +420,7 @@ const Scenario = struct {
         const recovery = try post(io, port, short);
         defer recovery.close(io);
         try expected.compare(try Output.parse(a, try readAll(a, io, recovery), false));
+        _ = try s.waitForCounts(port, 0, 0);
         std.debug.print("PASS: memory-limited request waits for release; queued cancellation clears the wait; next request matches its isolated output\n", .{});
 
         var prefix: [2051]i32 = undefined;
@@ -398,6 +544,7 @@ const Scenario = struct {
             }
         };
         if (s.memory) return s.checkMemory(port);
+        if (s.live) return s.checkLive(port);
         if (s.prefixes) return s.checkPrefixes(port);
         if (s.rounds) return s.checkRounds(port);
         if (s.idle) {
@@ -470,11 +617,24 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 5) {
         const memory = std.mem.eql(u8, args[3], "--memory-only");
         const prefixes = std.mem.eql(u8, args[3], "--cache-only");
+        const live = std.mem.eql(u8, args[3], "--live-only");
+        const terminal = if (live and !std.mem.eql(u8, args[4], "redirected")) try Terminal.init() else null;
+        defer if (terminal) |t| {
+            t.master.close(init.io);
+            t.slave.close(init.io);
+        };
         var environment = try init.environ_map.clone(init.arena.allocator());
         defer environment.deinit();
         if (memory) try environment.put("TENSORFOLD_MEMORY_LIMIT_GB", "70");
-        var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory and !prefixes, .memory = memory, .prefixes = prefixes, .cache_enabled = !std.mem.eql(u8, args[4], "0"), .cache_oversize = std.mem.eql(u8, args[4], "0.000001"), .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" }, .environ_map = &environment, .stderr = .pipe }) };
-        defer scenario.child.kill(init.io);
+        if (live) {
+            try environment.put("TENSORFOLD_NO_LIVE", if (std.mem.eql(u8, args[4], "disabled")) "1" else "0");
+            try environment.put("COLUMNS", "0");
+        }
+        var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory and !prefixes and !live, .memory = memory, .prefixes = prefixes, .live = live, .terminal = terminal, .live_enabled = live and std.mem.eql(u8, args[4], "enabled"), .cache_enabled = !std.mem.eql(u8, args[4], "0"), .cache_oversize = std.mem.eql(u8, args[4], "0.000001"), .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", if (live) "1" else "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" }, .environ_map = &environment, .stdout = if (terminal) |t| .{ .file = t.slave } else if (live) .pipe else .inherit, .stderr = .pipe }) };
+        defer if (scenario.child.id) |id| {
+            std.posix.kill(id, .KILL) catch {};
+            scenario.child.kill(init.io);
+        };
         const Event = union(enum) { done: anyerror!void, timeout: std.Io.Cancelable!void };
         var events: [2]Event = undefined;
         var select = std.Io.Select(Event).init(init.io, &events);
@@ -498,7 +658,10 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("PASS: invalid/insufficient process budgets fail before model weights load\n", .{});
     for ([_]bool{ false, true }) |idle| {
         var scenario = Scenario{ .init = init, .idle = idle, .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--request-timeout-seconds", if (idle) "0" else "2", "--shutdown-grace-seconds", "1", "--no-thinking" }, .stderr = .pipe }) };
-        defer scenario.child.kill(init.io);
+        defer if (scenario.child.id) |id| {
+            std.posix.kill(id, .KILL) catch {};
+            scenario.child.kill(init.io);
+        };
         const Event = union(enum) { done: anyerror!void, timeout: std.Io.Cancelable!void };
         var events: [2]Event = undefined;
         var select = std.Io.Select(Event).init(init.io, &events);

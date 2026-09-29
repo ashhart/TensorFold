@@ -9,6 +9,7 @@ const control = @import("server_control.zig");
 const memory_policy = @import("memory_budget.zig");
 const memory_runtime = @import("memory_runtime.zig");
 const PrefixStore = @import("prompt_cache.zig").Store(inference.Snapshot);
+const live_status = @import("server_live.zig");
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var host: []const u8 = "127.0.0.1";
@@ -95,7 +96,10 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const is_flash = model_type == .string and std.mem.eql(u8, model_type.string, "qwen4_exp");
     if (is_glm) try @import("glm.zig").Model.prepareRuntime();
     var jobs: [8]*Job = undefined;
-    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams, .is_glm = is_glm, .is_flash = is_flash, .memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB") };
+    var stats = live_status.Stats{ .io = init.io, .allocator = init.gpa };
+    defer stats.deinit();
+    var display = live_status.Display{ .io = init.io, .stats = &stats };
+    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams, .is_glm = is_glm, .is_flash = is_flash, .memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB"), .stats = &stats, .display = &display };
     worker.checkpoint_slots = checkpoint_slots orelse @max(8, 3 * batch_streams);
     worker.prompt_cache_bytes = prompt_cache_bytes;
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
@@ -106,10 +110,12 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     worker.ready.waitUncancelable(init.io);
     if (worker.startup_error) |err| return err;
     if (registry.stopping.load(.acquire)) return;
+    display.start(init.environ_map.get("TENSORFOLD_NO_LIVE"), init.environ_map.get("COLUMNS"));
+    defer display.stop();
     var clients: std.Io.Group = .init;
     defer clients.await(init.io) catch clients.cancel(init.io);
     errdefer registry.stop();
-    std.debug.print("Native inference listening at http://{s}:{d} ({s})\n", .{ host, listener.socket.address.getPort(), name });
+    display.print("Native inference listening at http://{s}:{d} ({s})\n", .{ host, listener.socket.address.getPort(), name });
     const Event = union(enum) { accepted: anyerror!void, stopped: anyerror!void };
     var events: [2]Event = undefined;
     var select = std.Io.Select(Event).init(init.io, &events);
@@ -139,6 +145,8 @@ fn acceptRequests(worker: *Worker, listener: *std.Io.net.Server, clients: *std.I
 }
 
 const Job = struct {
+    stats: *live_status.Stats,
+    activated: bool = false,
     a: std.mem.Allocator,
     request: *Request,
     model: []const u8,
@@ -152,6 +160,8 @@ const Job = struct {
     failure: ?anyerror = null,
 };
 const Worker = struct {
+    stats: *live_status.Stats,
+    display: *live_status.Display,
     io: std.Io,
     dir: []const u8,
     queue: std.Io.Queue(*Job),
@@ -304,7 +314,7 @@ fn connectionTask(w: *Worker, a: std.mem.Allocator, stream: std.Io.net.Stream, n
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     handle(w, arena.allocator(), &request, name, sequence, client) catch |err| {
-        std.debug.print("HTTP request failed: {s}\n", .{@errorName(err)});
+        w.display.print("HTTP request failed: {s}\n", .{@errorName(err)});
     };
 }
 
@@ -320,7 +330,7 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
     if (std.mem.indexOfScalar(u8, route, '?')) |at| route = route[0..at];
     route = std.mem.trimEnd(u8, route, "/");
     if (request.head.method == .GET) {
-        if (route.len == 0 or std.mem.eql(u8, route, "/health")) return json(a, request, .ok, .{ .status = "ok", .model = model, .warming = false, .max_batch_size = worker.batch_streams, .memory = worker.memory_stats.snapshot(), .prompt_cache = worker.prefix_stats.snapshot() });
+        if (route.len == 0 or std.mem.eql(u8, route, "/health")) return json(a, request, .ok, .{ .status = "ok", .model = model, .warming = false, .max_batch_size = worker.batch_streams, .memory = worker.memory_stats.snapshot(), .prompt_cache = worker.prefix_stats.snapshot(), .inference = worker.stats.snapshot() });
         if (std.mem.eql(u8, route, "/v1/models") or std.mem.eql(u8, route, "/models")) return json(a, request, .ok, .{ .object = "list", .data = &.{.{ .id = model, .object = "model", .created = std.Io.Clock.real.now(worker.io).toSeconds(), .owned_by = "tensorfold" }} });
         return failure(a, request, .not_found, "Unknown route");
     }
@@ -336,7 +346,9 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
     const options = inference.Options.parseWithDefaults(a, body.value, worker.defaults) catch |err| return failure(a, request, .bad_request, @errorName(err));
     if (body.value.object.get("model")) |value| if (value != .string or !std.mem.eql(u8, value.string, model)) return failure(a, request, .not_found, "Unknown model");
     client.cancellation().check() catch |err| return requestFailure(a, request, err);
-    var job = Job{ .a = a, .request = request, .model = model, .sequence = sequence, .created = std.Io.Clock.real.now(worker.io).toSeconds(), .client = client, .body = body.value, .is_chat = is_chat, .options = options };
+    var job = Job{ .stats = worker.stats, .a = a, .request = request, .model = model, .sequence = sequence, .created = std.Io.Clock.real.now(worker.io).toSeconds(), .client = client, .body = body.value, .is_chat = is_chat, .options = options };
+    worker.stats.enqueue();
+    defer worker.stats.finish(job.activated);
     if (try worker.queue.putUncancelable(worker.io, &.{&job}, 0) == 0) return failure(a, request, .service_unavailable, "Inference queue is full");
     job.done.waitUncancelable(worker.io);
     if (job.failure) |err| return err;
@@ -449,6 +461,8 @@ const Pending = struct {
         const cancellation = p.job.client.cancellation();
         const options = p.options;
         try cancellation.check();
+        p.job.stats.activate();
+        p.job.activated = true;
         if (p.prepared_image) |*prepared| {
             p.image = try prepared.encode(session.io, session.directory, &session.backend.qwen.weights);
             prepared.deinit();
@@ -538,7 +552,13 @@ const Pending = struct {
     }
 
     fn step(p: *Pending, session: *inference.Session) !bool {
-        if (!try p.generation.?.step(session)) return false;
+        const before = p.generation.?.progress();
+        const started = live_status.now(session.io);
+        const done = try p.generation.?.step(session);
+        const ended = live_status.now(session.io);
+        const after = p.generation.?.progress();
+        p.job.stats.record(after.prefilled - before.prefilled, after.decoded - before.decoded, started, ended);
+        if (!done) return false;
         var reply = try p.generation.?.takeReply();
         defer reply.deinit(mx.allocator);
         const a = p.job.a;

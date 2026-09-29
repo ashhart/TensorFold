@@ -24,6 +24,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-memory-budget")) return @import("memory_budget.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-prompt-cache")) return @import("prompt_cache.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-prefill-plan")) return @import("prefill_plan.zig").check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-server-live")) return @import("server_live.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-memory-runtime")) return @import("memory_runtime.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-allocation")) return @import("draft_allocation.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-capture")) return @import("draft_capture.zig").check(io, args[2]);
@@ -450,6 +451,7 @@ test {
     _ = @import("thinking_budget.zig");
     _ = @import("image_http.zig");
     _ = @import("server_control.zig");
+    _ = @import("server_live.zig");
     _ = @import("reply_text.zig");
     _ = @import("vision_positions.zig");
     _ = @import("image_input.zig");

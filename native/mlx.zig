@@ -18,7 +18,7 @@ pub var gpu_generation: u32 = 0;
 pub var simd_groups: i32 = 8;
 
 fn onError(msg: [*c]const u8, _: ?*anyopaque) callconv(.c) void {
-    std.debug.print("MLX: {s}\n", .{msg});
+    @import("server_live.zig").print("MLX: {s}\n", .{msg});
 }
 pub fn check(rc: c_int) !void {
     if (rc != 0) return error.MlxFailure;

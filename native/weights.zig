@@ -36,7 +36,7 @@ pub const Weights = struct {
     }
     pub fn get(w: *const Weights, name: []const u8) !mx.Array {
         return w.arrays.get(name) orelse {
-            std.debug.print("Missing weight: {s}\n", .{name});
+            @import("server_live.zig").print("Missing weight: {s}\n", .{name});
             return error.MissingWeight;
         };
     }

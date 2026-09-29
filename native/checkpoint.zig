@@ -71,7 +71,7 @@ pub const Store = struct {
     }
     pub fn get(w: *Store, key: []const u8) !A {
         return w.arrays.get(key) orelse {
-            std.debug.print("Missing tensor: {s}\n", .{key});
+            @import("server_live.zig").print("Missing tensor: {s}\n", .{key});
             return error.MissingWeight;
         };
     }

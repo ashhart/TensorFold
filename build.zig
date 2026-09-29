@@ -366,10 +366,21 @@ pub fn build(b: *std.Build) void {
     session_images.step.dependOn(&session_image_fixture.step);
     b.step("test-session-images", "Interleave image/text generation and verify request-local multimodal positions").dependOn(&session_images.step);
     const lifecycle_module = b.createModule(.{ .root_source_file = b.path("tools/native_server_checks.zig"), .target = b.graph.host, .optimize = .safe });
+    lifecycle_module.link_libc = true;
     const lifecycle = b.addRunArtifact(b.addExecutable(.{ .name = "native-server-checks", .root_module = lifecycle_module }));
     lifecycle.addArtifactArg(exe);
     lifecycle.addArg(b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}));
     b.step("test-server-lifecycle", "Check request deadlines, stalled clients, cancellation recovery and clean SIGINT/SIGTERM shutdown with local Qwen").dependOn(&lifecycle.step);
+    const live_http = b.step("test-server-live-http", "Verify live counters, cached prefill, queue overflow, cancellation and terminal modes with local Qwen");
+    var live_previous: ?*std.Build.Step = null;
+    for ([_][]const u8{ "enabled", "disabled", "redirected" }) |mode| {
+        const live = b.addRunArtifact(lifecycle.producer.?);
+        live.addArtifactArg(exe);
+        live.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--live-only", mode });
+        if (live_previous) |previous| live.step.dependOn(previous);
+        live_previous = &live.step;
+    }
+    live_http.dependOn(live_previous.?);
     const http_checks_module = b.createModule(.{ .root_source_file = b.path("tools/native_http_checks.zig"), .target = b.graph.host, .optimize = .safe });
     const server_rounds = b.addRunArtifact(lifecycle.producer.?);
     server_rounds.addArtifactArg(exe);
@@ -424,6 +435,12 @@ pub fn build(b: *std.Build) void {
     prefill_plan_check.addArgs(&.{ "check-prefill-plan", prefill_plan_fixture });
     prefill_plan_check.step.dependOn(&prefill_plan_oracle.step);
     b.step("test-prefill-plan", "Compare adaptive chunk boundaries and resume points with upstream").dependOn(&prefill_plan_check.step);
+    const live_fixture = "build/native-checks/server-live.json";
+    const live_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--server-live-fixtures", "--output", live_fixture });
+    const live_check = b.addRunArtifact(exe);
+    live_check.addArgs(&.{ "check-server-live", live_fixture });
+    live_check.step.dependOn(&live_oracle.step);
+    b.step("test-server-live", "Compare live token meters, connection status and terminal redraws with upstream").dependOn(&live_check.step);
     const allocation_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--allocation-fixtures", "--output", draft_allocation_fixture });
     const allocation_check = b.addRunArtifact(exe);
     allocation_check.addArgs(&.{ "check-draft-allocation", draft_allocation_fixture });
