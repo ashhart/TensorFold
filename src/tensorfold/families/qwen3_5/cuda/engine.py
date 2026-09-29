@@ -185,8 +185,8 @@ class Qwen27Engine:
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         if constraint is not None and not self.structured_output:
             raise ValueError("structured output runs on one GPU")
+        extra = {} if constraint is None else {"constraint": constraint}     # plain requests: 0.3.6.3's calls
         if self.scheduler is not None:
-            extra = {} if constraint is None else {"constraint": constraint}
             if vision is None:
                 return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
                                              **extra)
@@ -206,7 +206,7 @@ class Qwen27Engine:
         end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
         st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
                                      limit=self.context_window, stops=stops, keep=keep, keep_at=end, vision=encoded,
-                                     constraint=constraint)
+                                     **extra)
         if end is not None:
             self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0
@@ -215,7 +215,7 @@ class Qwen27Engine:
         # the cache holds the state before the last prompt token, not ``st``: the decode may commit into it
         result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
                               max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
-                              on_tokens=on_tokens, inplace=True, constraint=constraint)
+                              on_tokens=on_tokens, inplace=True, **extra)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0)}
 
