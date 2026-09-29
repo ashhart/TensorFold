@@ -100,6 +100,25 @@ def test_prefill_path_agrees_with_decode_path(checkpoint, length):
         assert c1.offset == c2.offset == length
 
 
+def test_multimodal_embedding_prefill_matches_the_equivalent_token_embeddings(checkpoint):
+    model = backbone(checkpoint)
+    ids = mx.array([tokens(15, seed=12)], dtype=mx.uint32)
+    embeddings = model.embed_tokens(ids.reshape(-1))
+    token_cache, embedding_cache = model.make_cache(), model.make_cache()
+    token_hidden = model.hidden(ids, token_cache)
+    image_path_hidden = model.hidden(ids, embedding_cache, inputs_embeds=embeddings)
+    assert bool(mx.array_equal(token_hidden, image_path_hidden).item())
+    for left, right in zip(token_cache, embedding_cache):
+        assert left.offset == right.offset == 15
+
+
+def test_multimodal_embedding_prefill_rejects_wrong_shapes(checkpoint):
+    model = backbone(checkpoint)
+    ids = mx.array([tokens(3)], dtype=mx.uint32)
+    with pytest.raises(ValueError, match="match the prompt rows"):
+        model.hidden(ids, model.make_cache(), inputs_embeds=mx.zeros((2, TEXT["hidden_size"])))
+
+
 def test_sparse_attention_reads_a_subset_past_the_budget(checkpoint):
     model = backbone(checkpoint)
     mla = model.layers[3].attn
@@ -406,3 +425,62 @@ def test_real_weights_first_layers_rows_are_exact():
     engine_a, a = _run_engine(runtime, prompt, 16)
     _, b = _run_engine(GLMFlash(model, None, drafts=0), prompt, 16)
     assert engine_a.drafted > 0 and a.emitted == b.emitted
+
+
+def test_bf16_abliterated_output_projections_keep_prefill_and_mtp_working(tmp_path):
+    """A Vontra derivative keeps quantized inputs/experts but stores attention outputs, including MTP, in BF16."""
+    import json
+    from tensorfold.families import glm5_next
+
+    folder = write_checkpoint(tmp_path / 'bf16-output')
+    index = json.loads((folder / 'model.safetensors.index.json').read_text())['weight_map']
+    config = json.loads((folder / 'config.json').read_text())
+    for layer in (0, 3, TEXT['num_hidden_layers']):
+        prefix = f'model.language_model.layers.{layer}.self_attn.o_proj'
+        parts = {}
+        shards = {index[f'{prefix}.{suffix}'] for suffix in ('weight', 'scales', 'biases')}
+        for shard in shards:
+            parts.update(mx.load(str(folder / shard)))
+        dense = mx.dequantize(parts[prefix + '.weight'], parts[prefix + '.scales'],
+                              parts[prefix + '.biases'], bits=4, group_size=64).astype(mx.bfloat16)
+        for shard in shards:
+            tensors = mx.load(str(folder / shard))
+            for suffix in ('scales', 'biases'):
+                key = f'{prefix}.{suffix}'
+                tensors.pop(key, None)
+                index.pop(key, None)
+            if prefix + '.weight' in tensors:
+                tensors[prefix + '.weight'] = dense
+            mx.eval(tensors)
+            staged = folder / (shard + '.new.safetensors')
+            mx.save_safetensors(str(staged), tensors)
+            staged.replace(folder / shard)
+        config['quantization'][prefix] = False
+    (folder / 'config.json').write_text(json.dumps(config))
+    (folder / 'model.safetensors.index.json').write_text(json.dumps({'weight_map': index}))
+    glm5_next.check(folder)
+    model = backbone(folder)
+    head = glm_mtp.load(model)
+    assert isinstance(model.layers[0].attn.o_proj, linear.Dense)
+    assert isinstance(model.layers[3].attn.o_proj, linear.Dense)
+    assert isinstance(head.layer.attn.o_proj, linear.Dense)
+    ids = tokens(9)
+    a = model.head(model.hidden(mx.array([ids]), model.make_cache()))[0, -1]
+    cache = model.make_cache()
+    for token in ids:
+        h = model.hidden(mx.array([[token]]), cache)
+    b = model.head(h)[0, -1]
+    a, b = np.array(a.astype(mx.float32)), np.array(b.astype(mx.float32))
+    assert int(a.argmax()) == int(b.argmax())
+    assert np.max(np.abs(a - b)) < 0.05 * np.max(np.abs(b)) + 0.05
+    drafted = head(model, h.reshape(-1, TEXT['hidden_size']), mx.array([ids[-1]]),
+                   [head.make_cache()], (1,), True)
+    assert bool(mx.all(mx.isfinite(head.logits(model, drafted))).item())
+
+
+def test_unquantized_inputs_still_rejected(tmp_path):
+    from tensorfold.families import glm5_next
+    folder = write_checkpoint(tmp_path / 'unsupported', stated={
+        'model.language_model.layers.0.self_attn.q_proj': False})
+    with pytest.raises(ValueError, match='module'):
+        glm5_next.check(folder)

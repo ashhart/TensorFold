@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     endpoint.add_argument("--port", type=int, default=8080)
     endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
-    endpoint.add_argument("--vision", action="store_true", help="enable image input for Qwen3.5/3.8 dense vision checkpoints")
+    endpoint.add_argument("--vision", action="store_true", help="enable image input for supported GLM and Qwen vision checkpoints")
     endpoint.add_argument("--vision-urls", action="store_true",
                           help="with --vision, accept public HTTP(S) image URLs (default: data URLs only)")
 
