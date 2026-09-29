@@ -144,6 +144,12 @@ and `--max-num-seqs 16` serves 132.1 tok/s at 51.7 GiB on the same Spark. At 8 a
 serves 147.5 and 112.0 tok/s. `tools/shared_prefix_prompts.py` builds the workload and
 `tools/shared_prefix_load.py` sends it (`--concurrency`, `--mem` for the memory peak).
 
+### Structured output
+
+With `pip install 'tensorfold[grammar]'` (xgrammar), serving on one or two GPUs enforces `response_format` and the
+`guided_*` fields: drafts the grammar rejects are cut and rows are masked by their paths' grammar before sampling, so
+drafted, serial and concurrent replies stay equal. See [the API reference](../api.md#structured-output).
+
 ### Historical public-fixture results
 
 The earlier CUDA recipe reports these decode medians in NVIDIA's `pytorch:26.07-py3` container on GB10.

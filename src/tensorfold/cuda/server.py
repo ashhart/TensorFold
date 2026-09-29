@@ -8,7 +8,6 @@ import threading
 import time
 import traceback
 import uuid
-from datetime import datetime
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,55 +17,16 @@ from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.http import Server
 from tensorfold.server.stacks import Rearming
-from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
-                                        validate_modalities)
+from tensorfold.server.messages import validate_modalities
 from tensorfold.server.request_options import parse_numbers
 from tensorfold.server.stopping import stop_options
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, call_format, generate_gated
 from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
+from tensorfold.cuda.chat_template import ChatTemplate
 from tensorfold.cuda.reply_text import StopStrings, StreamDecoder, hide_tool_calls, parse_tool_calls
 from tensorfold.server.text import split_thinking
-
-
-class ChatTemplate:
-    """The model's own Jinja chat template, rendered the way Hugging Face's apply_chat_template does."""
-
-    def __init__(self, model_dir: Path):
-        import jinja2
-        import jinja2.ext
-        from jinja2.sandbox import ImmutableSandboxedEnvironment
-
-        cfg = json.loads((model_dir / "tokenizer_config.json").read_text())
-        source_path = model_dir / "chat_template.jinja"
-        source = source_path.read_text() if source_path.exists() else cfg["chat_template"]
-
-        def tojson(x, ensure_ascii=False, indent=None, separators=None, sort_keys=False):
-            return json.dumps(x, ensure_ascii=ensure_ascii, indent=indent, separators=separators, sort_keys=sort_keys)
-
-        def raise_exception(message):
-            raise jinja2.exceptions.TemplateError(message)
-
-        env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True,
-                                            extensions=[jinja2.ext.loopcontrols])
-        env.filters["tojson"] = tojson
-        env.globals["raise_exception"] = raise_exception
-        env.globals["strftime_now"] = lambda fmt: datetime.now().strftime(fmt)
-        self.template = env.from_string(source)
-        self.specials = {k: (v.get("content") if isinstance(v, dict) else v)
-                         for k, v in cfg.items() if k in ("bos_token", "eos_token", "pad_token", "unk_token")}
-        self.late_system = late_system_role(
-            lambda messages: self.template.render(**self.specials, messages=messages, add_generation_prompt=False))
-
-    def render(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None,
-               enable_thinking: bool, extra: dict[str, Any] | None = None, allow_images: bool = False) -> str:
-        messages = _normalize_tool_call_arguments(normalize_messages(messages, late_system=self.late_system,
-                                                                     allow_images=allow_images))
-        kwargs = dict(self.specials, messages=messages, tools=tools or None, add_generation_prompt=True,
-                      enable_thinking=enable_thinking)
-        kwargs.update(extra or {})
-        return self.template.render(**kwargs)
 
 
 # -- HTTP ------------------------------------------------------------------------------------

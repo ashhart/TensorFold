@@ -591,7 +591,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     signal.signal(signal.SIGTERM, _terminate)
     from tensorfold.server import live
 
-    line = live.start(app)      # connections and decode/prefill tok/s on one line, in a terminal only
+    line = live.start(app)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

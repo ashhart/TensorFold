@@ -8,7 +8,8 @@ python -m pip install git+https://github.com/ashhart/TensorFold.git
 tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
-Use `http://127.0.0.1:8080/v1` as the client base URL and the model ID from `/v1/models`.
+Use `http://127.0.0.1:8080/v1` as the client base URL and the model ID from `/v1/models`. Both backends serve chat
+completions, completions and OpenAI's Responses API (`/v1/responses`); see the [API reference](docs/api.md).
 Python 3.11 or newer is required, and MLX 0.32.2 or newer on a Mac (pip installs it). See the [runbook](RUNBOOK.md)
 for installation and a first request.
 
@@ -83,8 +84,8 @@ row's arithmetic independent of the other rows in the call. Compare a request wi
 The MLX engine can share a round across requests. Each stream keeps its own state and sampling key, with
 concurrent output required to match its solo output. Load-time checks restrict window width and shared
 forwards where a family cannot reproduce its serial arithmetic. On CUDA, `--parallel N` with N greater
-than one enables shared rounds for Qwen3.8-27B on one or two ranks and Flash Next on one rank.
-Flash Next rejects concurrent two-rank execution. GLM and Nemotron CUDA serve one request at a time;
+than one enables shared rounds for Qwen3.8-27B on one or two ranks and for Flash Next and Qwen3.6-35B-A3B on
+one rank. Flash Next rejects concurrent two-rank execution. GLM and Nemotron CUDA serve one request at a time;
 CUDA `--parallel auto` also means one request at a time.
 
 Exactness is against the same engine, weights, runtime and settings. It does not imply identical output
@@ -100,10 +101,10 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--alias` | Additional model IDs | MLX |
 | `--context N` | Prompt plus reply capacity | Both |
 | `--max-tokens N` | Default reply limit, 4096 | Both |
-| `--temperature`, `--top-p`, `--top-k` | Sampling defaults; temperature zero is greedy | Both |
+| `--temperature`, `--top-p`, `--top-k`, `--min-p` | Sampling defaults; temperature zero is greedy | Both |
 | `--thinking`, `--no-thinking` | Template thinking toggle | Both |
-| `--reasoning-effort` | Template effort, default `medium` | MLX |
-| `--thinking-budget N` | Token-count limit inside reasoning | MLX |
+| `--reasoning-effort` | Template effort when a request sets none; default: the template's own | Both |
+| `--thinking-budget N` | Token-count limit inside reasoning | Both |
 | `--backend auto`, `mlx`, `cuda` | Select backend; auto uses MLX on macOS | Both |
 | `--parallel N` | MLX `auto` admits up to 8 within budget; CUDA `auto` is 1, explicit N enables supported shared rounds | Both |
 | `--no-drafts` | Decode serially | Both |

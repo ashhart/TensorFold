@@ -158,7 +158,7 @@ class Scheduler(PromptFill):
         self.stall_s = 120.0            # no round, start or finish while requests wait: dump stacks
         self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
-        self.decoded, self.prefilled = Meter(), ChunkRate()       # the live line's decode and prefill tok/s
+        self.decoded, self.prefilled = Meter(), ChunkRate()
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:

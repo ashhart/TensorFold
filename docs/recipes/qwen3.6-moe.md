@@ -38,7 +38,36 @@ Prompts prefill in chunks; the head absorbs every prompt row but the last. State
 message's start, the last assistant turn's start and prompt ends, so a prompt sharing a system block or
 extending a conversation resumes there with a fresh prefill's bits.
 
-Requests take turns; concurrent rounds are not yet supported for this family.
+### Concurrent requests
+
+```bash
+tensorfold serve Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP --parallel 8 --name bench
+```
+
+`--parallel N` decodes up to N requests in shared rounds, and every reply equals the same request served alone
+and its `"draft": false` run. A round verifies every stream's MTP chain or copied continuation in one forward;
+the head absorbs every stream's kept rows in one call, then the chains advance a step at a time for all streams
+by the one-stream rule, so a stream drafts what it drafts alone. A new prompt prefills 1,024 tokens a round
+while the others decode, states are kept at message starts and prompt ends, and each stream's caches are sized
+once, at admission. Startup admits N full prompt/reply windows, three kept prompt ends and the graph buffers
+before loading; an explicit `--context` that does not fit is refused with the window that does. Rounds over
+several streams run eagerly, as the 27B's do; a stream decoding alone replays the one-stream CUDA graphs, so a
+lone request runs as fast as without `--parallel`.
+
+On one RTX PRO 6000 Blackwell Max-Q (NGC 26.07, torch 2.13, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`,
+checkpoint revision 81169a9), with 8 client threads over HTTP:
+
+| | `--parallel 1` | `--parallel 4` | `--parallel 8` |
+| --- | ---: | ---: | ---: |
+| Label JSON: 32 requests, public-domain passages, up to 1,410 tokens, default sampling | 904 tok/s | 1,255 tok/s | 1,476 tok/s |
+| p50 / p95 latency | 8.6 / 9.1 s | 5.9 / 8.1 s | 5.1 / 7.7 s |
+| Chat: 48 requests, up to 256 tokens, half greedy, half seeded | 427 tok/s | 859 tok/s | 1,094 tok/s |
+| p50 / p95 latency | 3.3 / 3.9 s | 1.6 / 2.5 s | 1.2 / 2.0 s |
+| Peak memory (nvidia-smi) | 22.3 GiB | 22.1 GiB | 22.9 GiB |
+
+Every reply's token SHA-256 is the same at each N and with `"draft": false`. The label replies repeat their JSON,
+so copied continuations keep 9.3 tokens a round per stream; chats keep 2.9. One client at a time gets 912 tok/s
+on the label requests at `--parallel 8`, as a lone stream replays the graphs.
 
 ## Measurements
 
