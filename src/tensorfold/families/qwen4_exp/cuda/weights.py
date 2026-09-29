@@ -664,7 +664,8 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         ids = torch.from_numpy(ids).to(device)
         draft_ids = ids
         if cfg.quant == "modelopt":
-            draft_head = quantize4(raw("lm_head.weight").to(torch.bfloat16).index_select(0, ids.cpu()))
+            lm = raw("lm_head.weight").to(torch.bfloat16)
+            draft_head = quantize4(lm.index_select(0, ids.to(device=lm.device, dtype=torch.long)))
         else:
             draft_head = make_q4(*_rows_at(triple("lm_head"), ids))
     inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (
