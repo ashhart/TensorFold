@@ -188,6 +188,12 @@ apply a chat template. Use `--tokens ID,ID,...` for controlled comparisons.
 `tensorfold serve MODEL_DIR --host 127.0.0.1 --port 8080` exposes `/health`,
 `/v1/models`, `/v1/completions` and `/v1/chat/completions`, including SSE,
 seeded sampling, stop strings, reasoning content and disconnect cancellation.
+`--request-timeout-seconds N` sets an absolute deadline from connection acceptance
+through queuing and generation (default `0`, disabled). Cooperative cancellation
+returns HTTP 408 or an SSE error; stalled sockets close after a 250 ms allowance.
+SIGINT/SIGTERM stop admission, cancel queued/active work and release the engine.
+`--shutdown-grace-seconds N` bounds stalled clients during shutdown (default `5`).
+In-progress GPU operations finish before their resources are released.
 Sampling defaults follow the model's `generation_config.json`; `--temperature`,
 `--top-k` and `--top-p` override them, then non-null request fields take precedence.
 Serving defaults to 4096 output tokens, thinking enabled and medium reasoning
@@ -216,6 +222,9 @@ With `--vision-urls` enabled, pass `HTTPS_IMAGE_URL LOCAL_COPY` after the chat
 endpoint to compare HTTPS/data-URL outputs, usage and streaming. Run
 `.zig-toolchain/zig build test-image-http -Doptimize=safe -j1` for offline
 upstream URL/address policy checks.
+`.zig-toolchain/zig build test-server-lifecycle -Doptimize=safe -j1` tests deadlines,
+partial requests, cancellation recovery and signal shutdown using the existing
+Qwen checkpoint, with one model loaded at a time.
 Use `--report build/native-checks/run.json` and
 `--dump-logits build/native-checks/logits.npy` for correctness evidence; create
 the output directory first.

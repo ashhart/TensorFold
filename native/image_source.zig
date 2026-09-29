@@ -6,6 +6,11 @@ pub fn sources(a: std.mem.Allocator, value: std.json.Value) ![]const EncodedImag
 }
 
 pub fn load(a: std.mem.Allocator, io: ?std.Io, value: std.json.Value, allow_urls: bool) ![]const EncodedImage {
+    return loadWithCancellation(a, io, value, allow_urls, .{});
+}
+
+pub fn loadWithCancellation(a: std.mem.Allocator, io: ?std.Io, value: std.json.Value, allow_urls: bool, cancellation: @import("cancellation.zig").Cancellation) ![]const EncodedImage {
+    try cancellation.check();
     if (value == .null) return &.{};
     if (value != .array or value.array.items.len > 4) return error.InvalidImageCount;
     const out = try a.alloc(EncodedImage, value.array.items.len);
@@ -18,6 +23,7 @@ pub fn load(a: std.mem.Allocator, io: ?std.Io, value: std.json.Value, allow_urls
     const http = @import("image_http.zig");
     const deadline = if (io) |clock| http.now(clock) + 30000 else 0;
     for (value.array.items, out) |item, *source| {
+        try cancellation.check();
         if (item != .object) return error.InvalidImageSource;
         const url = item.object.get("url") orelse return error.InvalidImageSource;
         if (url != .string) return error.InvalidImageSource;
@@ -31,11 +37,12 @@ pub fn load(a: std.mem.Allocator, io: ?std.Io, value: std.json.Value, allow_urls
             if (!std.mem.startsWith(u8, url.string, "https://")) return error.InvalidImageSource;
             if (!allow_urls) return error.ImageUrlsDisabled;
             const clock = io orelse return error.ImageUrlsDisabled;
-            break :blk try http.fetch(a, clock, url.string, remaining, @min(deadline, http.now(clock) + 10000));
+            break :blk try http.fetchWithCancellation(a, clock, url.string, remaining, @min(deadline, http.now(clock) + 10000), cancellation);
         };
         total += source.bytes.len;
         used += 1;
     }
+    try cancellation.check();
     return out;
 }
 

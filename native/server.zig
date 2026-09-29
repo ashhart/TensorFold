@@ -5,11 +5,14 @@ const chat = @import("chat.zig");
 const reply_text = @import("reply_text.zig");
 const tool_calls = @import("tool_calls.zig");
 const Request = std.http.Server.Request;
+const control = @import("server_control.zig");
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var host: []const u8 = "127.0.0.1";
     var port: u16 = 8080;
     var limit: usize = 0;
+    var timeout_ms: i64 = 0;
+    var shutdown_grace_ms: i64 = 5000;
     var name = std.fs.path.basename(args[2]);
     var defaults = try inference.Options.load(init.gpa, init.io, args[2]);
     defaults.max_tokens = 4096;
@@ -34,7 +37,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         const flag = args[i];
         const value = args[i + 1];
         i += 2;
-        if (std.mem.eql(u8, flag, "--host")) host = value else if (std.mem.eql(u8, flag, "--port")) port = try std.fmt.parseInt(u16, value, 10) else if (std.mem.eql(u8, flag, "--served-model-name")) name = value else if (std.mem.eql(u8, flag, "--max-requests")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--reasoning-effort")) {
+        if (std.mem.eql(u8, flag, "--request-timeout-seconds")) timeout_ms = try control.seconds(value) else if (std.mem.eql(u8, flag, "--shutdown-grace-seconds")) shutdown_grace_ms = try control.seconds(value) else if (std.mem.eql(u8, flag, "--host")) host = value else if (std.mem.eql(u8, flag, "--port")) port = try std.fmt.parseInt(u16, value, 10) else if (std.mem.eql(u8, flag, "--served-model-name")) name = value else if (std.mem.eql(u8, flag, "--max-requests")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--reasoning-effort")) {
             if (!std.mem.eql(u8, value, "low") and !std.mem.eql(u8, value, "medium") and !std.mem.eql(u8, value, "xhigh")) return error.InvalidReasoningEffort;
             effort = value;
         } else {
@@ -48,6 +51,14 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         }
     }
     defaults = try inference.Options.parseWithDefaults(init.gpa, overrides, defaults);
+    var signals = control.Signals.install();
+    defer signals.deinit();
+    var registry = control.Registry{ .io = init.io, .timeout_ms = timeout_ms, .shutdown_grace_ms = shutdown_grace_ms };
+    const monitor = try std.Thread.spawn(.{}, control.Registry.watch, .{&registry});
+    defer {
+        registry.finished.store(true, .release);
+        monitor.join();
+    }
     const address = try std.Io.net.IpAddress.parse(host, port);
     var listener = try address.listen(init.io, .{ .kernel_backlog = 128 });
     defer listener.deinit(init.io);
@@ -59,7 +70,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     defer parsed.deinit();
     if (parsed.value == .object) if (parsed.value.object.get("model_type")) |kind| if (kind == .string and std.mem.eql(u8, kind.string, "glm5_next")) try @import("glm.zig").Model.prepareRuntime();
     var jobs: [8]*Job = undefined;
-    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls };
+    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     defer {
         worker.queue.close(init.io);
@@ -67,20 +78,34 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     }
     worker.ready.waitUncancelable(init.io);
     if (worker.startup_error) |err| return err;
+    if (registry.stopping.load(.acquire)) return;
     var clients: std.Io.Group = .init;
     defer clients.await(init.io) catch clients.cancel(init.io);
-    std.debug.print("Native inference listening at http://{s}:{d} ({s})\n", .{ host, port, name });
+    errdefer registry.stop();
+    std.debug.print("Native inference listening at http://{s}:{d} ({s})\n", .{ host, listener.socket.address.getPort(), name });
+    const Event = union(enum) { accepted: anyerror!void, stopped: anyerror!void };
+    var events: [2]Event = undefined;
+    var select = std.Io.Select(Event).init(init.io, &events);
+    defer select.cancelDiscard();
+    try select.concurrent(.accepted, acceptRequests, .{ &worker, &listener, &clients, init.gpa, name, limit });
+    try select.concurrent(.stopped, control.Registry.waitStopped, .{&registry});
+    switch (try select.await()) {
+        inline else => |result| try result,
+    }
+}
+
+fn acceptRequests(worker: *Worker, listener: *std.Io.net.Server, clients: *std.Io.Group, a: std.mem.Allocator, name: []const u8, limit: usize) anyerror!void {
     var handled: usize = 0;
     while (limit == 0 or handled < limit) : (handled += 1) {
-        const stream = try listener.accept(init.io);
-        if (worker.connections.fetchAdd(1, .acq_rel) >= 32) {
-            _ = worker.connections.fetchSub(1, .acq_rel);
-            stream.close(init.io);
+        const stream = try listener.accept(worker.io);
+        const client = worker.control.acquire(stream.socket.handle) orelse {
+            stream.close(worker.io);
+            if (worker.control.stopping.load(.acquire)) return;
             continue;
-        }
-        clients.concurrent(init.io, connectionTask, .{ &worker, init.gpa, stream, name, handled }) catch |err| {
-            _ = worker.connections.fetchSub(1, .acq_rel);
-            stream.close(init.io);
+        };
+        clients.concurrent(worker.io, connectionTask, .{ worker, a, stream, name, handled, client }) catch |err| {
+            worker.control.release(client);
+            stream.close(worker.io);
             return err;
         };
     }
@@ -92,7 +117,7 @@ const Job = struct {
     model: []const u8,
     sequence: usize,
     created: i64,
-    socket: std.posix.fd_t,
+    client: *control.Client,
     body: std.json.Value,
     is_chat: bool,
     options: inference.Options,
@@ -105,7 +130,7 @@ const Worker = struct {
     queue: std.Io.Queue(*Job),
     ready: std.Io.Event = .unset,
     startup_error: ?anyerror = null,
-    connections: std.atomic.Value(usize) = .init(0),
+    control: *control.Registry,
     defaults: inference.Options,
     thinking: bool,
     effort: []const u8,
@@ -123,16 +148,16 @@ const Worker = struct {
         defer session.deinit();
         w.ready.set(w.io);
         while (w.queue.getOneUncancelable(w.io)) |job| {
-            complete(&session, job.a, job.request, job.model, job.sequence, job.created, job.socket, job.body, job.is_chat, job.options, w.thinking, w.effort, w.vision_urls) catch |err| {
+            complete(&session, job.a, job.request, job.model, job.sequence, job.created, job.client, job.body, job.is_chat, job.options, w.thinking, w.effort, w.vision_urls) catch |err| {
                 job.failure = err;
             };
             job.done.set(w.io);
         } else |_| {}
     }
 };
-fn connectionTask(w: *Worker, a: std.mem.Allocator, stream: std.Io.net.Stream, name: []const u8, sequence: usize) void {
-    defer _ = w.connections.fetchSub(1, .acq_rel);
+fn connectionTask(w: *Worker, a: std.mem.Allocator, stream: std.Io.net.Stream, name: []const u8, sequence: usize, client: *control.Client) void {
     defer stream.close(w.io);
+    defer w.control.release(client);
     var input: [65536]u8 = undefined;
     var output: [8192]u8 = undefined;
     var reader = stream.reader(w.io, &input);
@@ -141,7 +166,7 @@ fn connectionTask(w: *Worker, a: std.mem.Allocator, stream: std.Io.net.Stream, n
     var request = http.receiveHead() catch return;
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    handle(w, arena.allocator(), &request, name, sequence, stream.socket.handle) catch |err| {
+    handle(w, arena.allocator(), &request, name, sequence, client) catch |err| {
         std.debug.print("HTTP request failed: {s}\n", .{@errorName(err)});
     };
 }
@@ -153,7 +178,7 @@ fn json(a: std.mem.Allocator, request: *Request, status: std.http.Status, value:
 fn failure(a: std.mem.Allocator, request: *Request, status: std.http.Status, message: []const u8) !void {
     try json(a, request, status, .{ .@"error" = .{ .message = message, .type = "invalid_request_error" } });
 }
-fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, socket: std.posix.fd_t) !void {
+fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, client: *control.Client) !void {
     var route = request.head.target;
     if (std.mem.indexOfScalar(u8, route, '?')) |at| route = route[0..at];
     route = std.mem.trimEnd(u8, route, "/");
@@ -166,17 +191,31 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
     if (request.head.method != .POST or (!is_chat and !std.mem.eql(u8, route, "/v1/completions") and !std.mem.eql(u8, route, "/completions"))) return failure(a, request, .not_found, "Unknown route");
     var body_buffer: [8192]u8 = undefined;
     const body_reader = try request.readerExpectContinue(&body_buffer);
-    const bytes = body_reader.allocRemaining(a, .limited(32 * 1024 * 1024)) catch return failure(a, request, .bad_request, "Invalid or oversized request body");
+    const bytes = body_reader.allocRemaining(a, .limited(32 * 1024 * 1024)) catch {
+        client.cancellation().check() catch |err| return requestFailure(a, request, err);
+        return failure(a, request, .bad_request, "Invalid or oversized request body");
+    };
     const body = std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always }) catch return failure(a, request, .bad_request, "Invalid JSON");
     const options = inference.Options.parseWithDefaults(a, body.value, worker.defaults) catch |err| return failure(a, request, .bad_request, @errorName(err));
     if (body.value.object.get("model")) |value| if (value != .string or !std.mem.eql(u8, value.string, model)) return failure(a, request, .not_found, "Unknown model");
-    var job = Job{ .a = a, .request = request, .model = model, .sequence = sequence, .created = std.Io.Clock.real.now(worker.io).toSeconds(), .socket = socket, .body = body.value, .is_chat = is_chat, .options = options };
+    client.cancellation().check() catch |err| return requestFailure(a, request, err);
+    var job = Job{ .a = a, .request = request, .model = model, .sequence = sequence, .created = std.Io.Clock.real.now(worker.io).toSeconds(), .client = client, .body = body.value, .is_chat = is_chat, .options = options };
     if (try worker.queue.putUncancelable(worker.io, &.{&job}, 0) == 0) return failure(a, request, .service_unavailable, "Inference queue is full");
     job.done.waitUncancelable(worker.io);
     if (job.failure) |err| return err;
 }
 
-fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, created: i64, socket: std.posix.fd_t, body: std.json.Value, is_chat: bool, requested: inference.Options, default_thinking: bool, default_effort: []const u8, vision_urls: bool) !void {
+fn requestFailure(a: std.mem.Allocator, request: *Request, err: anyerror) !void {
+    return failure(a, request, switch (err) {
+        error.RequestTimedOut => .request_timeout,
+        error.ServerStopping => .service_unavailable,
+        else => .bad_request,
+    }, @errorName(err));
+}
+
+fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request, model: []const u8, sequence: usize, created: i64, client: *control.Client, body: std.json.Value, is_chat: bool, requested: inference.Options, default_thinking: bool, default_effort: []const u8, vision_urls: bool) !void {
+    const cancellation = client.cancellation();
+    cancellation.check() catch |err| return requestFailure(a, request, err);
     var options = requested;
     var ids: std.ArrayList(i32) = .empty;
     var raw_images = body.object.get("images") orelse .null;
@@ -213,16 +252,16 @@ fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request
     if (!thinking) options.thinking_budget = 0;
     session.validate(ids.items, options) catch |err| return failure(a, request, .bad_request, @errorName(err));
     if (raw_images == .array and raw_images.array.items.len > 0 and session.backend != .qwen) return failure(a, request, .bad_request, "This model does not support image inputs");
-    const images = @import("image_source.zig").load(a, session.io, raw_images, vision_urls) catch |err| return failure(a, request, .bad_request, @errorName(err));
+    const images = @import("image_source.zig").loadWithCancellation(a, session.io, raw_images, vision_urls, cancellation) catch |err| return requestFailure(a, request, err);
     const id = try std.fmt.allocPrint(a, "{s}cmpl-{d}-{d}", .{ if (is_chat) "chat" else "", created, sequence });
     const markers: reply_text.Markers = if (session.backend == .gemma) reply_text.gemma_markers else .{};
-    var connection = Connection{ .socket = socket };
+    cancellation.check() catch |err| return requestFailure(a, request, err);
     if (options.stream) {
         var buffer: [8192]u8 = undefined;
         var response = try request.respondStreaming(&buffer, .{ .respond_options = .{ .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" } } } });
-        var state = Stream{ .a = a, .writer = &response.writer, .transport = request.server.out, .id = id, .model = model, .created = created, .connection = connection, .is_chat = is_chat, .thinking = thinking, .markers = markers, .tools = tools, .max_calls = max_calls };
+        var state = Stream{ .a = a, .writer = &response.writer, .transport = request.server.out, .id = id, .model = model, .created = created, .is_chat = is_chat, .thinking = thinking, .markers = markers, .tools = tools, .max_calls = max_calls, .cancellation = cancellation };
         if (is_chat) try state.chatChunk(.{ .role = "assistant", .content = "" }, null);
-        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &state, .emit = Stream.emit, .cancelled = Stream.cancelled, .gate = if (gate) |*g| g else null }, images) catch |err| {
+        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &state, .emit = Stream.emit, .cancellation = cancellation, .gate = if (gate) |*g| g else null }, images) catch |err| {
             const error_body = try std.json.Stringify.valueAlloc(a, .{ .@"error" = .{ .message = @errorName(err) } }, .{});
             try response.writer.print("data: {s}\n\ndata: [DONE]\n\n", .{error_body});
             try response.end();
@@ -236,7 +275,7 @@ fn complete(session: *inference.Session, a: std.mem.Allocator, request: *Request
         try response.writer.writeAll("data: [DONE]\n\n");
         try response.end();
     } else {
-        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .context = &connection, .cancelled = Connection.cancelled, .gate = if (gate) |*g| g else null }, images) catch |err| return failure(a, request, .bad_request, @errorName(err));
+        var reply = session.generateImages(mx.allocator, ids.items, options, .{ .cancellation = cancellation, .gate = if (gate) |*g| g else null }, images) catch |err| return requestFailure(a, request, err);
         defer reply.deinit(mx.allocator);
         const usage = .{ .prompt_tokens = reply.prompt_tokens, .completion_tokens = reply.tokens.items.len, .total_tokens = reply.prompt_tokens + reply.tokens.items.len };
         if (is_chat) {
@@ -255,7 +294,7 @@ const Stream = struct {
     id: []const u8,
     model: []const u8,
     created: i64,
-    connection: Connection,
+    cancellation: @import("cancellation.zig").Cancellation,
     is_chat: bool = false,
     thinking: bool = false,
     markers: reply_text.Markers = .{},
@@ -265,10 +304,6 @@ const Stream = struct {
     tools: std.json.Value = .null,
     max_calls: ?usize = null,
     calls_sent: usize = 0,
-    fn cancelled(context: ?*anyopaque) bool {
-        const s: *Stream = @ptrCast(@alignCast(context.?));
-        return Connection.cancelled(&s.connection);
-    }
     fn chunk(s: *Stream, value: []const u8, finish: ?[]const u8) !void {
         const body = try std.json.Stringify.valueAlloc(s.a, .{ .id = s.id, .object = "text_completion", .created = s.created, .model = s.model, .choices = &.{.{ .index = @as(usize, 0), .text = value, .finish_reason = finish, .logprobs = @as(?u8, null) }} }, .{});
         try s.writer.print("data: {s}\n\n", .{body});
@@ -278,6 +313,7 @@ const Stream = struct {
     fn emit(context: ?*anyopaque, value: []const u8) !void {
         if (value.len == 0) return;
         const s: *Stream = @ptrCast(@alignCast(context.?));
+        try s.cancellation.check();
         if (!s.is_chat) return s.chunk(value, null);
         try s.accumulated.appendSlice(s.a, value);
         try s.chatText(false);
@@ -306,20 +342,5 @@ const Stream = struct {
             try s.chatChunk(.{ .tool_calls = &.{.{ .index = index, .function = .{ .arguments = call.function.arguments } }} }, null);
             s.calls_sent += 1;
         }
-    }
-};
-
-const Connection = struct {
-    socket: std.posix.fd_t,
-    fn cancelled(context: ?*anyopaque) bool {
-        const s: *Connection = @ptrCast(@alignCast(context.?));
-        var byte: [1]u8 = undefined;
-        const result = std.c.recv(s.socket, &byte, 1, std.posix.MSG.PEEK | std.posix.MSG.DONTWAIT);
-        if (result == 0) return true;
-        if (result > 0) return false;
-        return switch (std.posix.errno(result)) {
-            .AGAIN, .INTR => false,
-            else => true,
-        };
     }
 };

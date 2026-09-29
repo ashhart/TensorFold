@@ -276,6 +276,11 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const lifecycle_module = b.createModule(.{ .root_source_file = b.path("tools/native_server_checks.zig"), .target = b.graph.host, .optimize = .safe });
+    const lifecycle = b.addRunArtifact(b.addExecutable(.{ .name = "native-server-checks", .root_module = lifecycle_module }));
+    lifecycle.addArtifactArg(exe);
+    lifecycle.addArg(b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}));
+    b.step("test-server-lifecycle", "Check request deadlines, stalled clients, cancellation recovery and clean SIGINT/SIGTERM shutdown with local Qwen").dependOn(&lifecycle.step);
     const chat_tests = b.step("test-chat", "Compare native Jinja prompts with upstream for all seven local tokenizers; no model weights loaded");
     const tool_fixtures = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", ".", "--tool-fixtures", "--output", "build/native-checks/tool-calls.json" });
     const tool_tests = b.addRunArtifact(exe);

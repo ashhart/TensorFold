@@ -39,12 +39,12 @@ pub const Backend = union(enum) {
 };
 
 pub const Sink = struct {
+    cancellation: @import("cancellation.zig").Cancellation = .{},
     gate: ?*@import("call_gate.zig").Gate = null,
     context: ?*anyopaque = null,
     emit: ?*const fn (?*anyopaque, []const u8) anyerror!void = null,
-    cancelled: ?*const fn (?*anyopaque) bool = null,
     fn check(s: Sink) !void {
-        if (s.cancelled) |call| if (call(s.context)) return error.RequestCancelled;
+        try s.cancellation.check();
     }
 };
 pub const Reply = struct {

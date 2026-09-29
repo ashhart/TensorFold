@@ -1,5 +1,6 @@
 const std = @import("std");
 const Ip = std.Io.net.IpAddress;
+const Cancellation = @import("cancellation.zig").Cancellation;
 const Curl = opaque {};
 const List = opaque {};
 extern "c" fn curl_easy_init() ?*Curl;
@@ -153,10 +154,11 @@ fn addAddress(first: *?Ip, ip: Ip) !void {
     if (first.* == null) first.* = ip;
 }
 
-fn resolve(io: std.Io, host: [:0]const u8, deadline: i64) !Ip {
+fn resolve(io: std.Io, host: [:0]const u8, deadline: i64, cancellation: Cancellation) !Ip {
+    try cancellation.check();
     if (now(io) >= deadline) return error.ImageDownloadTimedOut;
     const d = try startDns(host);
-    return waitDns(io, d, deadline);
+    return waitDns(io, d, deadline, cancellation);
 }
 
 fn startDns(host: [:0]const u8) !*Dns {
@@ -174,12 +176,14 @@ fn startDns(host: [:0]const u8) !*Dns {
     return d;
 }
 
-fn waitDns(io: std.Io, d: *Dns, deadline: i64) !Ip {
+fn waitDns(io: std.Io, d: *Dns, deadline: i64, cancellation: Cancellation) !Ip {
     defer d.release();
     while (!d.done.load(.acquire)) {
+        try cancellation.check();
         if (now(io) >= deadline) return error.ImageDownloadTimedOut;
         try std.Io.sleep(io, .fromMilliseconds(5), .awake);
     }
+    try cancellation.check();
     if (now(io) >= deadline) return error.ImageDownloadTimedOut;
     return d.result;
 }
@@ -193,6 +197,16 @@ const Response = struct {
     header_bytes: usize = 0,
     body: std.ArrayList(u8) = .empty,
     failure: ?anyerror = null,
+    cancellation: Cancellation = .{},
+
+    fn progress(context: ?*anyopaque, _: i64, _: i64, _: i64, _: i64) callconv(.c) c_int {
+        const r: *Response = @ptrCast(@alignCast(context.?));
+        r.cancellation.check() catch |err| {
+            r.failure = err;
+            return 1;
+        };
+        return 0;
+    }
 
     fn redirect(r: *const Response) bool {
         return switch (r.status) {
@@ -267,12 +281,13 @@ fn set(curl: *Curl, option: c_int, value: anytype) !void {
     if (curl_easy_setopt(curl, option, value) != 0) return error.ImageTransportConfiguration;
 }
 
-fn request(a: std.mem.Allocator, io: std.Io, url: Url, ip: Ip, limit: usize, deadline: i64) !Response {
+fn request(a: std.mem.Allocator, io: std.Io, url: Url, ip: Ip, limit: usize, deadline: i64, cancellation: Cancellation) !Response {
+    try cancellation.check();
     const remaining = deadline - now(io);
     if (remaining <= 0) return error.ImageDownloadTimedOut;
     const curl = curl_easy_init() orelse return error.OutOfMemory;
     defer curl_easy_cleanup(curl);
-    var response = Response{ .a = a, .limit = limit };
+    var response = Response{ .a = a, .limit = limit, .cancellation = cancellation };
     errdefer response.body.deinit(a);
     const address = switch (ip) {
         .ip4 => |v| try std.fmt.allocPrint(a, "{d}.{d}.{d}.{d}", .{ v.bytes[0], v.bytes[1], v.bytes[2], v.bytes[3] }),
@@ -301,7 +316,11 @@ fn request(a: std.mem.Allocator, io: std.Io, url: Url, ip: Ip, limit: usize, dea
     try set(curl, 10001, &response);
     try set(curl, 20079, &Response.headerCallback);
     try set(curl, 10029, &response);
+    try set(curl, 43, @as(c_long, 0)); // CURLOPT_NOPROGRESS
+    try set(curl, 20219, &Response.progress); // CURLOPT_XFERINFOFUNCTION
+    try set(curl, 10057, &response); // CURLOPT_XFERINFODATA
     const result = curl_easy_perform(curl);
+    try cancellation.check();
     if (response.failure) |err| return err;
     if (result == 60) return error.ImageTlsVerificationFailed;
     if (now(io) >= deadline or result == 28) return error.ImageDownloadTimedOut;
@@ -314,14 +333,19 @@ fn request(a: std.mem.Allocator, io: std.Io, url: Url, ip: Ip, limit: usize, dea
 }
 
 pub fn fetch(a: std.mem.Allocator, io: std.Io, initial: []const u8, limit: usize, deadline: i64) ![]u8 {
+    return fetchWithCancellation(a, io, initial, limit, deadline, .{});
+}
+
+pub fn fetchWithCancellation(a: std.mem.Allocator, io: std.Io, initial: []const u8, limit: usize, deadline: i64, cancellation: Cancellation) ![]u8 {
+    try cancellation.check();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
     const scratch = arena.allocator();
     var current = initial;
     for (0..4) |hop| {
         const url = try parseUrl(scratch, current);
-        const ip = try resolve(io, url.host, deadline);
-        const response = try request(scratch, io, url, ip, limit, deadline);
+        const ip = try resolve(io, url.host, deadline, cancellation);
+        const response = try request(scratch, io, url, ip, limit, deadline, cancellation);
         if (!response.redirect()) return a.dupe(u8, response.body.items);
         if (hop == 3) return error.TooManyImageRedirects;
         current = try redirectUrl(scratch, url.base, response.location orelse return error.InvalidImageRedirect);
@@ -425,5 +449,17 @@ test "DNS capacity and expired deadlines reject without connecting" {
     defer dns_count.store(old, .release);
     try std.testing.expectError(error.ImageDnsBusy, startDns("example.com"));
     try std.testing.expectEqual(@as(usize, 4), dns_count.load(.acquire));
-    try std.testing.expectError(error.ImageDownloadTimedOut, resolve(std.testing.io, "example.com", now(std.testing.io) - 1));
+    try std.testing.expectError(error.ImageDownloadTimedOut, resolve(std.testing.io, "example.com", now(std.testing.io) - 1, .{}));
+}
+
+test "request cancellation reaches DNS admission and the TLS transfer callback" {
+    const cancelled = Cancellation{ .callback = struct {
+        fn check(_: ?*anyopaque) anyerror!void {
+            return error.ServerStopping;
+        }
+    }.check };
+    try std.testing.expectError(error.ServerStopping, fetchWithCancellation(std.testing.allocator, std.testing.io, "https://example.com/a.png", 100, now(std.testing.io) + 10000, cancelled));
+    var response = Response{ .a = std.testing.allocator, .limit = 100, .cancellation = cancelled };
+    try std.testing.expectEqual(@as(c_int, 1), Response.progress(&response, 100, 0, 0, 0));
+    try std.testing.expectEqual(error.ServerStopping, response.failure.?);
 }
