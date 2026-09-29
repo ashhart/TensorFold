@@ -70,6 +70,7 @@ pub const Model = struct {
         const powers = try s.binary(mx.c.mlx_power, try s.scalar(1000000), try s.data(&exponents, &.{64}, mx.f32t));
         const inverse = try s.binary(mx.c.mlx_divide, try s.scalar(1), powers);
         try m.weights.put("inv_global", try s.cat(&.{ inverse, try s.zeros(&.{192}, mx.f32t) }, 0));
+        try m.weights.put("freq_global", try s.cat(&.{ powers, try s.binary(mx.c.mlx_add, try s.zeros(&.{192}, mx.f32t), try s.scalar(std.math.inf(f32))) }, 0));
         try m.weights.put("eps", try s.scalar(1e-6));
         for (0..30) |i| {
             try m.stack(&s, i, "qkv", if (sliding(i)) &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" } else &.{ "self_attn.q_proj", "self_attn.k_proj" });
@@ -134,11 +135,11 @@ pub const Model = struct {
     fn sliding(i: usize) bool {
         return i % 6 != 5;
     }
-    fn weight(m: *Model, i: usize, suffix: []const u8) !A {
+    pub fn weight(m: *Model, i: usize, suffix: []const u8) !A {
         var buf: [256]u8 = undefined;
         return m.weights.get(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ i, suffix }));
     }
-    fn triple(m: *Model, i: usize, suffix: []const u8) ![3]A {
+    pub fn triple(m: *Model, i: usize, suffix: []const u8) ![3]A {
         var buf: [256]u8 = undefined;
         return m.weights.triple(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ i, suffix }));
     }
@@ -152,7 +153,7 @@ pub const Model = struct {
             try m.weights.put(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}.{s}", .{ i, name, suffix }), value);
         }
     }
-    fn project(m: *Model, s: *mx.Scope, x: A, weights: [3]A) !A {
+    pub fn project(m: *Model, s: *mx.Scope, x: A, weights: [3]A) !A {
         const rows = mx.dim(x, 0);
         const n = mx.dim(weights[0], 0);
         const width = mx.dim(x, 1);
@@ -206,6 +207,9 @@ pub const Model = struct {
         try mx.eval(p.logits);
         return p;
     }
+    pub fn prefill(m: *Model, tokens: []const i32) !Pass {
+        return @import("gemma_prefill.zig").forward(m, tokens);
+    }
     pub fn commit(m: *Model, p: *Pass, keep: usize) !void {
         if (p.position != m.position or p.generation != m.generation or keep == 0 or keep > p.rows) return error.InvalidCommit;
         var s = mx.Scope{};
@@ -218,10 +222,13 @@ pub const Model = struct {
                 const current = @field(old, field);
                 const value = if (sliding(i)) blk: {
                     const buffer = if (current.ctx != null) current else try s.zeros(&.{ 1, 8, 1152, 256 }, mx.bf16);
-                    const slot = @mod(m.position, 1152);
-                    const first = @min(@as(i32, @intCast(keep)), 1152 - slot);
-                    const front = try ringPut(&s, buffer, try s.slice(rows, 2, 0, first), slot);
-                    break :blk if (first < keep) try ringPut(&s, front, try s.slice(rows, 2, first, @intCast(keep)), 0) else front;
+                    const skipped: i32 = @intCast(keep - @min(keep, 1152));
+                    const retained = try s.slice(rows, 2, skipped, @intCast(keep));
+                    const count = mx.dim(retained, 2);
+                    const slot = @mod(m.position + skipped, 1152);
+                    const first = @min(count, 1152 - slot);
+                    const front = try ringPut(&s, buffer, try s.slice(retained, 2, 0, first), slot);
+                    break :blk if (first < count) try ringPut(&s, front, try s.slice(retained, 2, first, count), 0) else front;
                 } else if (current.ctx == null) rows else try s.cat(&.{ current, rows }, 2);
                 @field(target, field) = try mx.retain(value);
             }

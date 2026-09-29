@@ -17,9 +17,14 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var drafter_bits: i32 = 8;
     var exact = false;
     var long_cache = false;
+    var batched_prefill = true;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
         const key = args[i];
+        if (std.mem.eql(u8, key, "--lane-prefill")) {
+            batched_prefill = false;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--no-drafts")) {
             drafts = 0;
             continue;
@@ -100,7 +105,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     const vocab = if (@hasField(M, "vocab")) model.vocab else M.vocab;
     for (tokens.items) |id| if (id < 0 or id >= vocab) return error.InvalidToken;
     if (!seed_set) settings.seed = sampling.seedFor(tokens.items);
-    var generated = try @import("serial_generation.zig").generate(&model, tokens.items, max_tokens, settings, drafts, dump);
+    var generated = try @import("serial_generation.zig").generateWithPrefill(&model, tokens.items, max_tokens, settings, drafts, dump, batched_prefill);
     defer generated.deinit();
     const text = try tokenizer.decode(a, generated.tokens.items, false);
     defer a.free(text);

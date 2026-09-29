@@ -13,6 +13,10 @@ pub const Result = struct {
 };
 
 pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sampling.Sampling, drafts: usize, dump: ?[]const u8) !Result {
+    return generateWithPrefill(m, tokens, max_tokens, settings, drafts, dump, true);
+}
+
+pub fn generateWithPrefill(m: anytype, tokens: []const i32, max_tokens: usize, settings: sampling.Sampling, drafts: usize, dump: ?[]const u8, batched_prefill: bool) !Result {
     const M = @TypeOf(m.*);
     if (tokens.len == 0 or drafts > 15) return error.InvalidGeneration;
     if (drafts > 0 and !@hasDecl(M, "propose")) return error.UnsupportedDrafts;
@@ -25,15 +29,20 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
     var pending: i32 = 0;
     var offset: usize = 0;
     while (offset < tokens.len) {
-        const count = @min(16, tokens.len - offset);
-        var pass = try m.forward(tokens[offset..][0..count]);
+        const use_prefill = @hasDecl(M, "prefill") and batched_prefill;
+        const count = @min(if (use_prefill) @as(usize, 2048) else 16, tokens.len - offset);
+        var pass = if (@hasDecl(M, "prefill")) blk: {
+            if (use_prefill) break :blk try m.prefill(tokens[offset..][0..count]);
+            break :blk try m.forward(tokens[offset..][0..count]);
+        } else try m.forward(tokens[offset..][0..count]);
         defer pass.deinit();
         const draft_hidden = if (@hasDecl(M, "draftHidden")) M.draftHidden(&pass) else pass.hidden;
         if (comptime @hasDecl(M, "propose")) if (draft_budget > 0 and !absorb_on_commit) {
             if (offset > 0) try absorb(m, hidden, tokens[offset..][0..1]);
             if (count > 1) try absorb(m, try pass.scope.slice(draft_hidden, 0, 0, @intCast(count - 1)), tokens[offset + 1 ..][0 .. count - 1]);
         };
-        const ids = try sampling.rows(&m.kernels, &pass.scope, try pass.scope.slice(pass.logits, 0, @intCast(count - 1), @intCast(count)), &.{@intCast(offset + count)}, settings);
+        const logit_rows = mx.dim(pass.logits, 0);
+        const ids = try sampling.rows(&m.kernels, &pass.scope, try pass.scope.slice(pass.logits, 0, logit_rows - 1, logit_rows), &.{@intCast(offset + count)}, settings);
         defer mx.allocator.free(ids);
         pending = ids[0];
         if (dump) |file| if (offset + count == tokens.len) {

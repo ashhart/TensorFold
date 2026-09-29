@@ -14,6 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-gemma-prefill")) return @import("gemma_prefill.zig").check(io, args[2], args[3]);
     if (args.len == 5 and std.mem.eql(u8, args[1], "check-gemma-draft")) return @import("gemma.zig").checkDraft(io, args[2], args[3], args[4]);
     if (args.len == 5 and std.mem.eql(u8, args[1], "check-dflash")) return @import("dflash.zig").check(io, args[2], args[3], try std.fmt.parseInt(usize, args[4], 10));
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-dspark")) return @import("deepseek.zig").checkDspark(io, args[2], args[3]);
@@ -70,6 +71,7 @@ pub fn main(init: std.process.Init) !void {
     var token_list: ?[]const u8 = null;
     var dump: ?[]const u8 = null;
     var draft_dir: ?[]const u8 = null;
+    var drafts_enabled = true;
     var settings = sampling.Sampling{};
     var explicit_seed = false;
     var exact = false;
@@ -86,6 +88,10 @@ pub fn main(init: std.process.Init) !void {
     var report: ?[]const u8 = null;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--no-drafts")) {
+            drafts_enabled = false;
+            continue;
+        }
         if (std.mem.eql(u8, args[i], "--image")) {
             if (i + 1 >= args.len) return error.MissingArgument;
             try image_paths.append(allocator, args[i + 1]);
@@ -178,7 +184,7 @@ pub fn main(init: std.process.Init) !void {
         try @import("verification.zig").check(&m);
         return;
     }
-    var draft: ?Draft = if (draft_dir) |path| try Draft.init(io, path, &m) else null;
+    var draft: ?Draft = if (drafts_enabled) (if (draft_dir) |path| try Draft.init(io, path, &m) else null) else null;
     defer if (draft) |*d| d.deinit();
     const load_seconds = @as(f64, @floatFromInt(timer.read())) / 1e9;
     const warm_timer = Stopwatch.init(io);
@@ -366,6 +372,7 @@ test {
     _ = @import("deepseek_dspark.zig");
     _ = @import("draft_depth.zig");
     _ = @import("dflash.zig");
+    _ = @import("bonsai.zig");
     _ = @import("draft_vocab.zig");
     _ = @import("lanes.zig");
     _ = @import("sampling.zig");

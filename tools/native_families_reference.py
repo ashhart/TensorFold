@@ -274,6 +274,32 @@ def gemma_dflash_fixture(directory, draft_dir, output):
     print("Saved full Gemma target taps and synthetic DFlash proposals", flush=True)
 
 
+def gemma_prefill_fixture(directory, output):
+    import mlx.core as mx
+    from tensorfold.families.gemma4.model import load
+    model, _ = load(directory, backend="rows", check=False)
+    cache = model.make_cache()
+    output.mkdir(parents=True, exist_ok=True)
+    def save(name, value):
+        np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
+    position = 0
+    for step, count in enumerate((1, 7, 129, 1024, 2048, 3)):
+        tokens = mx.array([[1000 + (position + j) % 37 for j in range(count)]], dtype=mx.uint32)
+        hidden = model.prefill(tokens, cache)
+        save(f"hidden-{step}", hidden[0])
+        save(f"logits-{step}", model.head(hidden[:, -1:])[0])
+        position += count
+        for i, item in enumerate(cache):
+            keys, values = item.state
+            if not item.ring:
+                keys, values = keys[:, :, :position], values[:, :, :position]
+            save(f"keys-{step}-{i}", keys)
+            save(f"values-{step}-{i}", values)
+        print(f"Gemma prefill oracle at {position} tokens", flush=True)
+    for step in range(4):
+        save(f"continuation-{step}", model.head(model.hidden(mx.array([[2000 + step]], dtype=mx.uint32), cache))[0])
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
@@ -297,6 +323,7 @@ def main():
     p.add_argument("--synthetic-dspark-wide", action="store_true")
     p.add_argument("--synthetic-dflash", type=int)
     p.add_argument("--gemma-drafter", type=Path)
+    p.add_argument("--gemma-prefill", action="store_true")
     p.add_argument("--synthetic-glm-layout", action="store_true")
     p.add_argument("--synthetic-glm-mixed", action="store_true")
     p.add_argument("--serial-rows", action="store_true")
@@ -305,6 +332,9 @@ def main():
     args = p.parse_args()
     import mlx.core as mx
     import mlx.nn as nn
+    if args.gemma_prefill:
+        gemma_prefill_fixture(args.model, args.state_directory)
+        return
     if args.gemma_drafter:
         gemma_dflash_fixture(args.model, args.gemma_drafter, args.state_directory)
         return

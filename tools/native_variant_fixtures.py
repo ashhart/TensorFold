@@ -73,6 +73,7 @@ class Capture:
             # kernels are recorded by the individual tests with concrete arrays.
             if any(name in self.test for name in ("test_each_kernel_keeps_one_metal_signature", "test_each_fused_layer_is_mlx_lm_s_layer")):
                 return kernel(**call)
+            call["inputs"] = [x if isinstance(x, mx.array) else mx.array(x) for x in call["inputs"]]
             signature = repr((self.test, key, constants, call.get("template"),
                               [x.shape for x in call["inputs"]], call["grid"], call["threadgroup"]))
             if signature in self.seen:

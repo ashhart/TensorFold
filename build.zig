@@ -268,6 +268,13 @@ pub fn build(b: *std.Build) void {
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
     const gemma_model = b.fmt("{s}/gemma-4-26b-a4b-it-4bit", .{model_root});
+    const gemma_prefill_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", gemma_model, "--gemma-prefill", "--output", "build/native-checks/gemma-prefill/oracle/logits.npy", "--state-directory", "build/native-checks/gemma-prefill/oracle" });
+    const gemma_prefill = b.addRunArtifact(exe);
+    gemma_prefill.addArgs(&.{ "check-gemma-prefill", gemma_model, "build/native-checks/gemma-prefill/native" });
+    gemma_prefill.step.dependOn(&gemma_prefill_oracle.step);
+    const gemma_prefill_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", "build/native-checks/gemma-prefill/oracle", "build/native-checks/gemma-prefill/native" });
+    gemma_prefill_compare.step.dependOn(&gemma_prefill.step);
+    b.step("test-gemma-prefill", "Compare batched Gemma prompt arithmetic, ring wrap, caches and decode continuation").dependOn(&gemma_prefill_compare.step);
     const gemma_draft_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", gemma_model, "--gemma-drafter", "build/native-checks/dflash-3", "--output", "build/native-checks/gemma-draft/oracle/logits.npy", "--state-directory", "build/native-checks/gemma-draft/oracle" });
     gemma_draft_oracle.step.dependOn(dflash_previous.?);
     const gemma_draft = b.addRunArtifact(exe);
@@ -367,7 +374,9 @@ pub fn build(b: *std.Build) void {
     prefill_math.addArgs(&.{ "check-prefill-math", "build/native-checks/prefill-math" });
     prefill_math.step.dependOn(&prefill_fixture.step);
     b.step("test-prefill-math", "Exhaustive BF16 activation and mixed-precision decay parity with mlx-lm").dependOn(&prefill_math.step);
-    const prefill_tests = b.step("test-prefill", "Trace production Qwen prefill layers, caches and logits against Python");
+    const prefill_tests = b.step("test-prefill", "Trace production Qwen/Bonsai prefill layers, caches and logits against Python");
+    const prefill_family = b.option(usize, "prefill-family", "Select 0=Qwen or 1=Bonsai prefill reference") orelse 0;
+    if (prefill_family > 1) @panic("prefill-family must be 0 or 1");
     const prefill_size = b.option(usize, "prefill-tokens", "Override prefill length (0 uses the English prompt)");
     const prefill_backend = b.option(usize, "prefill-backend", "Restrict prefill checks to 0=tensor or 1=SIMD");
     if (prefill_backend != null and prefill_backend.? > 1) @panic("prefill-backend must be 0 or 1");
@@ -378,7 +387,7 @@ pub fn build(b: *std.Build) void {
         const length = prefill_size orelse default_length;
         for (0..2) |backend| {
             if (prefill_backend != null and prefill_backend.? != backend) continue;
-            const base = b.fmt("build/native-checks/prefill/{d}-{d}", .{ backend, length });
+            const base = b.fmt("build/native-checks/{s}/{d}-{d}", .{ if (prefill_family == 0) "prefill" else "bonsai-prefill", backend, length });
             const oracle_dir = b.fmt("{s}/python", .{base});
             const native_dir = b.fmt("{s}/native", .{base});
             const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", oracle_dir });
@@ -386,7 +395,7 @@ pub fn build(b: *std.Build) void {
             check.addArtifactArg(exe);
             for ([_]*std.Build.Step.Run{ oracle, check }) |step| {
                 step.addArgs(&.{ "--generate", "32" });
-                step.addArgs(&.{ "--model", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}) });
+                step.addArgs(&.{ "--model", b.fmt("{s}/{s}", .{ model_root, if (prefill_family == 0) "Qwen3.8-27B-MLX-4bit" else "Ternary-Bonsai-2-27B-mlx-2bit" }) });
                 if (length > 0) step.addArgs(&.{ "--length", b.fmt("{d}", .{length}) });
                 if (backend == 1) step.addArg("--simd");
             }
@@ -524,15 +533,16 @@ pub fn build(b: *std.Build) void {
     }
     model_tests.dependOn(previous.?);
     const draft_tests = b.step("test-drafts", "Serial/draft regression matrix for all models, samplers and SIMD paths");
-    const draft_family = b.option(usize, "draft-family", "Restrict draft regression to 0=Qwen, 1=Nemotron, 2=Flash");
+    const draft_family = b.option(usize, "draft-family", "Restrict draft regression to 0=Qwen, 1=Nemotron, 2=Flash, 3=Bonsai");
     const draft_scenario = b.option(usize, "draft-scenario", "Restrict draft regression to 0=greedy, 1=Metal, 2=CPU, 3=two-token CPU");
-    if (draft_family != null and draft_family.? > 2) @panic("draft-family must be 0, 1 or 2");
+    if (draft_family != null and draft_family.? > 3) @panic("draft-family must be 0, 1, 2 or 3");
     if (draft_scenario != null and draft_scenario.? > 3) @panic("draft-scenario must be 0, 1, 2 or 3");
     const directory = b.addSystemCommand(&.{ "mkdir", "-p", "build/native-checks/drafts" });
     var prior: *std.Build.Step = &directory.step;
-    for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP" }, 0..) |name, family| {
+    for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP", "Ternary-Bonsai-2-27B-mlx-2bit" }, 0..) |name, family| {
         if (draft_family != null and draft_family.? != family) continue;
-        for (0..if (family < 2) @as(usize, 2) else 1) |backend| {
+        const dflash_family = family == 0 or family == 3;
+        for (0..if (family != 2) @as(usize, 2) else 1) |backend| {
             for (0..4) |scenario| {
                 if (draft_scenario != null and draft_scenario.? != scenario) continue;
                 const count: []const u8 = if (scenario == 0) "17" else if (scenario == 3) "2" else "32";
@@ -540,19 +550,19 @@ pub fn build(b: *std.Build) void {
                 const serial_report = b.fmt("build/native-checks/drafts/{d}-{d}-{d}-serial.json", .{ family, backend, scenario });
                 const serial = b.addRunArtifact(exe);
                 serial.addArgs(common);
-                if (family != 0) serial.addArg("--no-drafts");
+                serial.addArg("--no-drafts");
                 if (backend == 1) serial.addArg("--metal-simd");
                 if (scenario == 1) serial.addArg("--metal-sampling");
                 serial.addArgs(&.{ "--report", serial_report });
                 serial.step.dependOn(prior);
                 prior = &serial.step;
                 for ([_][]const u8{ "1", "3", "15" }, 0..) |budget, index| {
-                    if (family == 0 and index != 0) continue;
+                    if (dflash_family and index != 0) continue;
                     const report = b.fmt("build/native-checks/drafts/{d}-{d}-{d}-{s}.json", .{ family, backend, scenario, budget });
                     const draft_run = b.addRunArtifact(exe);
                     draft_run.addArgs(common);
-                    if (family == 0) draft_run.addArgs(&.{ "--drafter", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}) }) else draft_run.addArgs(&.{ "--mtp-drafts", budget });
-                    if (family != 0) draft_run.addArg("--fixed-drafts");
+                    if (dflash_family) draft_run.addArgs(&.{ "--drafter", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}) }) else draft_run.addArgs(&.{ "--mtp-drafts", budget });
+                    if (!dflash_family) draft_run.addArg("--fixed-drafts");
                     if (backend == 1) draft_run.addArg("--metal-simd");
                     if (scenario == 1) draft_run.addArg("--metal-sampling");
                     draft_run.addArgs(&.{ "--report", report });

@@ -113,3 +113,43 @@ pub fn load(w: *weights.Weights, io: std.Io, dir: []const u8, config: std.json.V
         }
     }
 }
+
+test "Bonsai transform rejects incompatible transforms and malformed sign tables" {
+    const signs: [1024]f32 = @splat(1);
+    const base = Transform{
+        .@"prism.hadamard.version" = 1,
+        .@"prism.hadamard.block_size" = 1024,
+        .@"prism.hadamard.transform" = "normalized-sylvester-walsh-hadamard",
+        .@"prism.hadamard.axis" = "input-last-dimension",
+        .@"prism.hadamard.sign_mode" = "explicit",
+        .@"prism.hadamard.gdn_v_grouped" = true,
+        .@"prism.hadamard.sign_widths" = &.{1024},
+        .@"prism.hadamard.sign_values" = &signs,
+        .@"prism.hadamard.inverse_weight_names" = &.{"language_model.model.embed_tokens.weight"},
+    };
+    try base.validate();
+    try std.testing.expectEqualSlices(f32, &signs, try base.signs(1024));
+    try std.testing.expectError(error.InvalidHadamardSigns, base.signs(2048));
+    inline for (.{ .{ "prism.hadamard.version", 2 }, .{ "prism.hadamard.block_size", 512 }, .{ "prism.hadamard.transform", "other" }, .{ "prism.hadamard.axis", "output" }, .{ "prism.hadamard.sign_mode", "implicit" }, .{ "prism.hadamard.gdn_v_grouped", false } }) |field| {
+        var config = base;
+        @field(config, field[0]) = field[1];
+        try std.testing.expectError(error.UnsupportedHadamardTransform, config.validate());
+    }
+    for ([_][]const usize{ &.{0}, &.{512}, &.{2048}, &.{ 1024, 1024 }, &.{ std.math.maxInt(usize) - 1023, 1024 } }) |widths| {
+        var config = base;
+        config.@"prism.hadamard.sign_widths" = widths;
+        try std.testing.expectError(error.InvalidHadamardSigns, config.validate());
+    }
+    for ([_]f32{ 0, 0.5, std.math.nan(f32), std.math.inf(f32) }) |invalid| {
+        var bad = signs;
+        bad[511] = invalid;
+        var config = base;
+        config.@"prism.hadamard.sign_values" = &bad;
+        try std.testing.expectError(error.InvalidHadamardSigns, config.validate());
+    }
+    for ([_][]const []const u8{ &.{}, &.{"lm_head.weight"}, &.{ "language_model.model.embed_tokens.weight", "lm_head.weight" } }) |names| {
+        var config = base;
+        config.@"prism.hadamard.inverse_weight_names" = names;
+        try std.testing.expectError(error.UnsupportedHadamardTransform, config.validate());
+    }
+}

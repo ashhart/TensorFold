@@ -144,6 +144,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | GLM/DeepSeek kernel components | `test-large-family-kernels -Doptimize=safe -j1` | Synthetic shapes; includes hardware-specific paths |
 | Qwen, Nemotron and Flash model/cache parity | `test-models -Doptimize=safe -j1` | All three installed models; substantial unified memory |
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
+| Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
 | Checkpoint metadata rejection | `test-schema-failures -Doptimize=safe -j1` | Installed schema checkpoints; no GPU |
 
@@ -214,7 +215,7 @@ Checkpoint sizes below are approximate **weight disk space**, not peak RAM:
 | `z-lab/Qwen3.8-27B-DFlash2` | 3.6 GiB | Qwen draft model |
 | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | 17 GiB | Text/MTP full-model correctness |
 | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | 105 GiB | Text/MTP, resident/bounded PLE checks |
-| `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit` | 8 GiB | Text path and component checks; draft coverage incomplete |
+| `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit` | 8 GiB | Tensor/SIMD prefill through 4,225 tokens and greedy/seeded draft parity |
 | `mlx-community/gemma-4-26b-a4b-it-4bit` | 14 GiB | Text/cache correctness; no native image path |
 | `mlx-community/DeepSeek-V4-Flash-4bit` | 144 GiB | Synthetic backbone/MTP/DSpark/cache/generation; full checkpoint execution unverified; optimized prefill pending |
 | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | 173 GiB | Synthetic backbone/MTP/generation; full checkpoint execution unverified |
