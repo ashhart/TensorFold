@@ -196,7 +196,7 @@ def _rocm():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent                        # prompt and tree attention: one extension
-    return load(name="tensorfold_attention_rocm_v9",
+    return load(name="tensorfold_attention_rocm_v10",
                 sources=[str(here / "attention_rocm.cpp"), str(here / "attention_rocm.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
 
@@ -288,24 +288,26 @@ def _base(index: int) -> torch.Tensor:
 
 
 def offsets(caches: Sequence[tuple[torch.Tensor, torch.Tensor]], device) -> list[int]:
-    """Each stream's key and value cache as bf16 element offsets from ``base(device)``, in stream order."""
+    """Each stream's key and value cache as offsets from ``base(device)``, in stream order: bf16 elements, or bytes
+    for packed FP8 caches (uint8 rows of ``kv8.ROW8``; ROCm)."""
 
     origin = base(device).data_ptr()
     out = []
     for k, v in caches:
         for t in (k, v):
-            if t.dtype != torch.bfloat16 or not t.is_contiguous():
-                raise ValueError("caches: contiguous bf16 tensors")
+            if t.dtype not in (torch.bfloat16, torch.uint8) or not t.is_contiguous():
+                raise ValueError("caches: contiguous bf16 tensors, or packed FP8 rows (uint8)")
             delta = t.data_ptr() - origin
             if delta % 16:
                 raise ValueError("caches must be 16-byte aligned")
-            out.append(delta // 2)
+            out.append(delta // 2 if t.dtype == torch.bfloat16 else delta)
     return out
 
 
 def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, offs: torch.Tensor, p: Plan, *,
-              scale: float) -> torch.Tensor:
-    """Attend (W, H, D) queries to committed keys and own paths; ``offs`` holds ``offsets`` as device (S, 2) int64."""
+              scale: float, kv8: bool = False) -> torch.Tensor:
+    """Attend (W, H, D) queries to committed keys and own paths; ``offs`` holds ``offsets`` as device (S, 2) int64;
+    ``kv8``: the caches hold packed FP8 rows (ROCm's WMMA kernels only; the nodes are bf16, FP8-rounded)."""
 
     w, h, d = q.shape
     hk = k_nodes.shape[1]
@@ -326,9 +328,12 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
     if hip() and _rocm_kernel(h, hk, d):
         ext = _rocm()
         ext.shared(q, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l, hk,
-                   *rocm_launch(-(-w * g // QUERY_TILE), p.chunks), scale)
+                   *rocm_launch(-(-w * g // QUERY_TILE), p.chunks), scale, kv8)
         ext.tail(q, k_nodes, v_nodes, origin, offs, p.streams, p.rows, p.paths, p.depths, partial_o, partial_m,
-                 partial_l, tails, scale)
+                 partial_l, tails, scale, kv8)
+    elif kv8:
+        raise ValueError("packed FP8 key/value caches need ROCm's WMMA tree attention (head size 256, without "
+                         "TF_ROCM_TREE_KERNEL=triton)")
     else:
         kt, warps, stages = rocm_config() if hip() else (TILE, 4, 1)
         if p.items.shape[0]:

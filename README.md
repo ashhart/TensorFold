@@ -110,7 +110,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--no-drafts` | Decode serially | Both |
 | `--drafter auto`, `none`, or model ID | Select an optional draft model where the family supports it | Both |
 | `--mtp-drafts N` | Family-specific cap on MTP drafts | Both |
-| `--kv-dtype bf16`, `int8`, `int4` | Flash Next: `int8` or `int4` stores keys and values with one fp16 scale per 32 values. Other families and the MLX path refuse it | CUDA |
+| `--kv-dtype bf16`, `int8`, `int4`, `fp8` | Flash Next: `int8` or `int4` stores keys and values with one fp16 scale per 32 values. Qwen3.8-27B on ROCm: `fp8` stores them as e4m3 with a power-of-two scale per row, about half of bf16's bytes, so the window grows. Both change outputs slightly; other families and the MLX path refuse them | CUDA |
 | `--mtp-confidence P` | Flash Next: stop a draft chain before a later draft under this probability, 0 to 1 (default 0.30) | CUDA |
 | `--tp 2 --rank R --master HOST` | Two-rank CUDA execution | CUDA |
 | `--decode-share F` | While a prompt prefills, running replies keep moving for this share of each chunk's time and later prompts start later (default 0.25; 0 prefills whole prompts first, as 0.3.6.2) | MLX |
@@ -136,8 +136,8 @@ metadata cap; finite engine capacity and memory admission still apply. Use the r
 configuring client compaction.
 
 On CUDA, Qwen defaults to the affordable native capacity. GLM targets a dense 2,051-token window,
-and Nemotron targets 16,384 tokens; the capacity estimate can lower these defaults. Flash Next's `--kv-dtype int8` or `int4` counts
-its smaller cache, so the same memory admits a longer window. Explicit `--context 0` targets the affordable native capacity for every CUDA family.
+and Nemotron targets 16,384 tokens; the capacity estimate can lower these defaults. Flash Next's `--kv-dtype int8` or `int4` and
+Qwen3.8-27B's `fp8` (ROCm) count their smaller caches, so the same memory admits a longer window. Explicit `--context 0` targets the affordable native capacity for every CUDA family.
 A positive CUDA value must fit both the native window and the capacity estimate on every rank;
 otherwise startup refuses it with fitting guidance. Increasing GLM beyond its dense window enables
 its sparse-attention path. The startup report distinguishes native and allocated capacity.

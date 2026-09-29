@@ -343,3 +343,32 @@ def test_rocm_prompt_attention_rows_a_block_and_loaders_change_no_bits(monkeypat
                       float("-inf"))
     ref = (s.softmax(-1) @ vv).transpose(0, 1)
     assert ((outs[0][0].double() - ref).norm() / ref.norm()).item() < 1e-2
+
+
+
+@pytest.mark.skipif(not hip(), reason="ROCm's WMMA prompt attention reads packed FP8")
+@pytest.mark.parametrize("heads,kv_heads", [(24, 4), (8, 8), (32, 4)])
+def test_rocm_prompt_attention_reads_packed_fp8_caches_as_their_rounded_values(monkeypatch, heads, kv_heads):
+    """Packed FP8 caches give every row the bits of bf16 caches holding ``kv8.unpack``'s values, in every layout,
+    whole or in pieces."""
+
+    from tensorfold.cuda.kernels import kv8
+
+    gen = torch.Generator(device="cuda").manual_seed(6)
+    total, dim = 3000 + 301, 256
+    q = torch.randn(total, heads, dim, generator=gen, device="cuda").bfloat16()
+    k = torch.randn(total, kv_heads, dim, generator=gen, device="cuda").bfloat16()
+    v = torch.randn(total, kv_heads, dim, generator=gen, device="cuda").bfloat16()
+    pk, pv = kv8.reference_pack(k), kv8.reference_pack(v)
+    rk, rv = kv8.unpack(pk), kv8.unpack(pv)
+    scale = dim ** -0.5
+    for rb, pipe in [("1", "0"), ("1", "1"), ("2", "0"), ("2", "1")]:
+        monkeypatch.setenv("TF_ROCM_ATTN_RB", rb)
+        monkeypatch.setenv("TF_ROCM_ATTN_PIPE", pipe)
+        want = attention(q[3000:].contiguous(), rk, rv, 3000, scale=scale)
+        assert torch.equal(attention(q[3000:].contiguous(), pk, pv, 3000, scale=scale), want)
+        pieces = torch.cat([attention(q[3000 + a:3000 + a + 37].contiguous(), pk, pv, 3000 + a, scale=scale)
+                            for a in range(0, 301, 37)])
+        assert torch.equal(pieces, want)
+        assert torch.equal(attention(q[:45].contiguous(), pk, pv, 0, scale=scale),
+                           attention(q[:45].contiguous(), rk, rv, 0, scale=scale))

@@ -78,10 +78,13 @@ def attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0:
     w, h, d = q.shape
     hk = _check(q, k_cache, v_cache, p0)
     out = torch.empty_like(q)
+    if hip() and _rocm_kernel(h, hk, d):             # bf16 caches, or packed FP8 rows (uint8, ``kv8.ROW8``)
+        _rocm().attention(q, k_cache, v_cache, out, p0, scale, *rocm_rows(w))
+        return out
+    if k_cache.dtype == torch.uint8:
+        raise ValueError("packed FP8 key/value caches need ROCm's WMMA prompt attention (head size 256, without "
+                         "TF_ROCM_ATTN_KERNEL=triton)")
     if hip():
-        if _rocm_kernel(h, hk, d):
-            _rocm().attention(q, k_cache, v_cache, out, p0, scale, *rocm_rows(w))
-            return out
         return _rocm_attention(q, k_cache, v_cache, out, p0, scale)
     if d == 64:
         return triton_attention(q, k_cache, v_cache, p0, scale=scale, out=out)

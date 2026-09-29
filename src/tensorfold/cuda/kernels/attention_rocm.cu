@@ -21,6 +21,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <type_traits>
 
 namespace {
 
@@ -31,7 +32,6 @@ constexpr int D = 256;
 constexpr int CH = 512;                     // keys a chunk, at fixed absolute positions (attention.CHUNK)
 constexpr int MAXD = 128;                   // a path's most rows (attention.MAX_NODES)
 constexpr int KPAD = 8;                     // bf16 padding a K row: the 16 rows a step reads miss each other's banks
-constexpr int TILE = 16 * D / 8;            // 16-byte pieces of one 16-key tile of K (or V)
 constexpr float NEG = -__builtin_huge_valf();
 
 __device__ __forceinline__ unsigned short bf16_round(float f) {
@@ -50,15 +50,11 @@ __device__ __forceinline__ float8 wmma(uint4 a, uint4 b, float8 c) {
 
 constexpr int LOADERS = 4;                  // loader waves a block
 constexpr int NL = 32 * LOADERS;            // loader threads
-constexpr int PL = TILE / NL;               // pieces of K (and of V) a loader thread carries for a tile
+constexpr int ROW8 = D + 16;                // a packed FP8 row: 256 e4m3 bytes, the int8 exponent, padding
 
 struct Tile {
     unsigned short k[16][D + KPAD];         // keys by row
     unsigned short vt[D][16];               // values transposed: B operand rows are keys
-};
-
-struct Pieces {
-    uint4 k[PL], v[PL];
 };
 
 // Piece i of a tile into shared memory: K by rows (key i / 32), V keys first (key i % 16) so a wave's transposed
@@ -77,8 +73,174 @@ __device__ __forceinline__ void put_v(Tile& t, int i, uint4 x) {
     }
 }
 
+// A 16-value piece of a packed row as bf16: e4m3 to fp32, times 2^e (exact), the top 16 bits (exact: an e4m3
+// value has four significant bits). ``kv8.unpack`` in Python gives the same values.
+__device__ __forceinline__ void widen(uint4 raw, int e, uint4& lo, uint4& hi) {
+    const float sc = __builtin_ldexpf(1.0f, e);
+    const unsigned w[4] = {raw.x, raw.y, raw.z, raw.w};
+    unsigned out[8];
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const auto a = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(w[k]), false);
+        const auto b = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(w[k]), true);
+        out[2 * k] = (__float_as_uint(a[0] * sc) >> 16) | (__float_as_uint(a[1] * sc) & 0xFFFF0000u);
+        out[2 * k + 1] = (__float_as_uint(b[0] * sc) >> 16) | (__float_as_uint(b[1] * sc) & 0xFFFF0000u);
+    }
+    lo = make_uint4(out[0], out[1], out[2], out[3]);
+    hi = make_uint4(out[4], out[5], out[6], out[7]);
+}
+
+// A 16-value piece into the tile: K by rows (key i / 16), V keys first (key i % 16).
+__device__ __forceinline__ void put_k16(Tile& t, int i, uint4 lo, uint4 hi) {
+    uint4* row = reinterpret_cast<uint4*>(&t.k[i / 16][(i % 16) * 16]);
+    row[0] = lo;
+    row[1] = hi;
+}
+
+__device__ __forceinline__ void put_v16(Tile& t, int i, uint4 lo, uint4 hi) {
+    const int key = i % 16, col = (i / 16) * 16;
+    const unsigned e[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+#pragma unroll
+    for (int u = 0; u < 8; ++u) {
+        t.vt[col + 2 * u][key] = static_cast<unsigned short>(e[u]);
+        t.vt[col + 2 * u + 1][key] = static_cast<unsigned short>(e[u] >> 16);
+    }
+}
+
 __device__ __forceinline__ uint4 load(const unsigned short* p) {
     return p != nullptr ? *reinterpret_cast<const uint4*>(p) : make_uint4(0, 0, 0, 0);
+}
+
+struct Raw8 {                               // a packed piece in registers: its 16 bytes and its row's exponent
+    uint4 b;
+    int e;
+};
+
+__device__ __forceinline__ Raw8 load8(const unsigned char* row, int col) {
+    return row != nullptr ? Raw8{*reinterpret_cast<const uint4*>(row + col), static_cast<signed char>(row[D])}
+                          : Raw8{make_uint4(0, 0, 0, 0), 0};
+}
+
+struct Wide {                               // a 16-value piece already bf16
+    uint4 lo, hi;
+};
+
+// A stage names a tile's pieces (``P`` of K and as many of V), loads one into registers (``k``, ``v``) and puts it in
+// the bf16 tile (``put``); ``B`` pieces a thread load before any is put. The tile, and so every fold, is the same
+// whether the cache holds bf16 or packed FP8 rows of the same values.
+template <typename Src>
+struct Stage16 {                            // bf16 rows (``Src``: a key's row, or none), 8 values a piece
+    static constexpr int P = 16 * D / 8, B = 4;
+    using Raw = uint4;
+    Src src;
+    __device__ Raw k(int key0, int i) const {
+        const unsigned short* r = src.k(key0 + i / 32);
+        return load(r != nullptr ? r + (i % 32) * 8 : nullptr);
+    }
+    __device__ Raw v(int key0, int i) const {
+        const unsigned short* r = src.v(key0 + i % 16);
+        return load(r != nullptr ? r + (i / 16) * 8 : nullptr);
+    }
+    __device__ static void put(Tile& t, int i, const Raw& kr, const Raw& vr) {
+        put_k(t, i, kr);
+        put_v(t, i, vr);
+    }
+};
+
+template <typename Src>
+struct Stage8 {                             // packed FP8 rows (``Src``: a key's packed row, or none), 16 values a piece
+    static constexpr int P = 16 * D / 16, B = 2;
+    using Raw = Raw8;
+    Src src;
+    __device__ Raw k(int key0, int i) const { return load8(src.k(key0 + i / 16), (i % 16) * 16); }
+    __device__ Raw v(int key0, int i) const { return load8(src.v(key0 + i % 16), (i / 16) * 16); }
+    __device__ static void put(Tile& t, int i, const Raw& kr, const Raw& vr) {
+        uint4 lo, hi;
+        widen(kr.b, kr.e, lo, hi);
+        put_k16(t, i, lo, hi);
+        widen(vr.b, vr.e, lo, hi);
+        put_v16(t, i, lo, hi);
+    }
+};
+
+template <typename S>
+struct Pieces {                             // a loader thread's share of a tile
+    typename S::Raw k[S::P / NL], v[S::P / NL];
+};
+
+// Every thread of the block stages one tile, ``S::B`` pieces of K and of V loaded before any is put.
+template <typename S>
+__device__ __forceinline__ void stage(Tile& t, const S& s, int key0) {
+    for (int b = 0; b < S::P; b += S::B * static_cast<int>(blockDim.x)) {
+        typename S::Raw kr[S::B], vr[S::B];
+#pragma unroll
+        for (int j = 0; j < S::B; ++j) {
+            const int i = b + threadIdx.x + j * blockDim.x;
+            if (i < S::P) {
+                kr[j] = s.k(key0, i);
+                vr[j] = s.v(key0, i);
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < S::B; ++j) {
+            const int i = b + threadIdx.x + j * blockDim.x;
+            if (i < S::P) S::put(t, i, kr[j], vr[j]);
+        }
+    }
+}
+
+template <typename S>
+__device__ __forceinline__ void fetch(Pieces<S>& r, const S& s, int key0, int lt) {
+#pragma unroll
+    for (int j = 0; j < S::P / NL; ++j) {
+        r.k[j] = s.k(key0, lt + j * NL);
+        r.v[j] = s.v(key0, lt + j * NL);
+    }
+}
+
+template <typename S>
+__device__ __forceinline__ void place(Tile& t, const Pieces<S>& r, int lt) {
+#pragma unroll
+    for (int j = 0; j < S::P / NL; ++j) S::put(t, lt + j * NL, r.k[j], r.v[j]);
+}
+
+// ``nt`` tiles from ``key0`` through the double buffer: tile kt sits in buffer kt % 2 while the loaders place tile
+// kt + 1 in the other and fetch tile kt + 3 (tile kt + 2 is in flight), one barrier a tile. Loaders and compute
+// waves run separate loops with the same barriers (a wave's role is fixed; each loop's registers are its own).
+// Loader registers alternate in a two-tile unroll so their indices are fixed.
+template <typename S>
+__device__ __forceinline__ void load_tiles(Tile (&tb)[2], const S& s, int key0, int nt, int lt) {
+    Pieces<S> r0, r1;
+    fetch(r0, s, key0, lt);
+    if (nt > 1) fetch(r1, s, key0 + 16, lt);
+    place(tb[0], r0, lt);
+    if (nt > 2) fetch(r0, s, key0 + 32, lt);
+    __syncthreads();
+    for (int kt = 0; kt < nt; kt += 2) {
+        if (kt + 1 < nt) {
+            place(tb[1], r1, lt);
+            if (kt + 3 < nt) fetch(r1, s, key0 + 16 * (kt + 3), lt);
+        }
+        __syncthreads();
+        if (kt + 1 >= nt) break;
+        if (kt + 2 < nt) {
+            place(tb[0], r0, lt);
+            if (kt + 4 < nt) fetch(r0, s, key0 + 16 * (kt + 4), lt);
+        }
+        __syncthreads();
+    }
+}
+
+template <typename Fold>
+__device__ __forceinline__ void fold_tiles(const Tile (&tb)[2], int nt, Fold&& fold_tile) {
+    __syncthreads();
+    for (int kt = 0; kt < nt; kt += 2) {
+        fold_tile(tb[0], kt);
+        __syncthreads();
+        if (kt + 1 >= nt) break;
+        fold_tile(tb[1], kt + 1);
+        __syncthreads();
+    }
 }
 
 // This lane's query as the B operand of step t: dims 16 t + 8 half .. + 7 (zeros for no query).
@@ -152,75 +314,24 @@ __device__ __forceinline__ void store(const float8 (&o)[16], float m, float l, A
     }
 }
 
-// A loader thread's pieces of the tile at ``key0`` (``src.k``/``src.v``: a key's row, or none), then into shared
-// memory: K by rows (key i / 32), V keys first (key i % 16).
-template <typename Src>
-__device__ __forceinline__ void fetch(Pieces& r, const Src& src, int key0, int lt) {
-#pragma unroll
-    for (int j = 0; j < PL; ++j) {
-        const int i = lt + j * NL;
-        const unsigned short* kp = src.k(key0 + i / 32);
-        const unsigned short* vp = src.v(key0 + i % 16);
-        r.k[j] = load(kp != nullptr ? kp + (i % 32) * 8 : nullptr);
-        r.v[j] = load(vp != nullptr ? vp + (i / 16) * 8 : nullptr);
-    }
-}
-
-__device__ __forceinline__ void place(Tile& t, const Pieces& r, int lt) {
-#pragma unroll
-    for (int j = 0; j < PL; ++j) {
-        put_k(t, lt + j * NL, r.k[j]);
-        put_v(t, lt + j * NL, r.v[j]);
-    }
-}
-
-// ``nt`` tiles from ``key0`` through the double buffer: tile kt sits in buffer kt % 2 while the loaders place tile
-// kt + 1 in the other and fetch tile kt + 3 (tile kt + 2 is in flight), one barrier a tile. Loaders and compute
-// waves run separate loops with the same barriers (a wave's role is fixed; each loop's registers are its own).
-// Loader registers alternate in a two-tile unroll so their indices are fixed.
-template <typename Src>
-__device__ __forceinline__ void load_tiles(Tile (&tb)[2], const Src& src, int key0, int nt, int lt) {
-    Pieces r0, r1;
-    fetch(r0, src, key0, lt);
-    if (nt > 1) fetch(r1, src, key0 + 16, lt);
-    place(tb[0], r0, lt);
-    if (nt > 2) fetch(r0, src, key0 + 32, lt);
-    __syncthreads();
-    for (int kt = 0; kt < nt; kt += 2) {
-        if (kt + 1 < nt) {
-            place(tb[1], r1, lt);
-            if (kt + 3 < nt) fetch(r1, src, key0 + 16 * (kt + 3), lt);
-        }
-        __syncthreads();
-        if (kt + 1 >= nt) break;
-        if (kt + 2 < nt) {
-            place(tb[0], r0, lt);
-            if (kt + 4 < nt) fetch(r0, src, key0 + 16 * (kt + 4), lt);
-        }
-        __syncthreads();
-    }
-}
-
-template <typename Fold>
-__device__ __forceinline__ void fold_tiles(const Tile (&tb)[2], int nt, Fold&& fold_tile) {
-    __syncthreads();
-    for (int kt = 0; kt < nt; kt += 2) {
-        fold_tile(tb[0], kt);
-        __syncthreads();
-        if (kt + 1 >= nt) break;
-        fold_tile(tb[1], kt + 1);
-        __syncthreads();
-    }
-}
-
-struct Committed {                          // a full committed chunk: every key from the cache
-    const unsigned short *kc, *vc;
+template <typename T>
+struct Committed {                          // a full committed chunk: every key's row from the cache
+    const T *kc, *vc;
     size_t stride;
-    __device__ const unsigned short* k(int key) const { return kc + key * stride; }
-    __device__ const unsigned short* v(int key) const { return vc + key * stride; }
+    __device__ const T* k(int key) const { return kc + key * stride; }
+    __device__ const T* v(int key) const { return vc + key * stride; }
 };
 
-struct Tail {                               // keys [0, p) from the cache, [p, end) the row's path, none past it
+template <typename T>
+struct Bounded {                            // prompt keys: the cache's rows below ``keys``, none past them
+    const T *kc, *vc;
+    size_t stride;
+    int keys;
+    __device__ const T* k(int key) const { return key < keys ? kc + key * stride : nullptr; }
+    __device__ const T* v(int key) const { return key < keys ? vc + key * stride : nullptr; }
+};
+
+struct Tail16 {                             // keys [0, p) from the cache, [p, end) the row's path, none past it
     const unsigned short *kc, *vc, *kn, *vn;
     const int* path;
     size_t stride;
@@ -235,12 +346,59 @@ struct Tail {                               // keys [0, p) from the cache, [p, e
     }
 };
 
+// A tail over packed caches: committed keys' pieces widened from their rows, the path's own keys (the window's
+// FP8-rounded bf16 rows) read as they are.
+struct TailStage8 {
+    static constexpr int P = 16 * D / 16, B = 2;
+    using Raw = Wide;
+    const unsigned char *kc, *vc;
+    const unsigned short *kn, *vn;
+    const int* path;
+    size_t stride8, nstride;
+    int p, end, vs, hk;
+    __device__ Raw piece(const unsigned char* cache, const unsigned short* nodes, size_t row_stride, int key,
+                         int col) const {
+        Wide w{make_uint4(0, 0, 0, 0), make_uint4(0, 0, 0, 0)};
+        if (key < p) {
+            const Raw8 r = load8(cache + key * stride8, col);
+            widen(r.b, r.e, w.lo, w.hi);
+        } else if (key < end) {
+            const unsigned short* row = nodes + static_cast<size_t>(path[key - p]) * row_stride + hk * D + col;
+            w.lo = *reinterpret_cast<const uint4*>(row);
+            w.hi = *reinterpret_cast<const uint4*>(row + 8);
+        }
+        return w;
+    }
+    __device__ Raw k(int key0, int i) const { return piece(kc, kn, nstride, key0 + i / 16, (i % 16) * 16); }
+    __device__ Raw v(int key0, int i) const { return piece(vc, vn, vs, key0 + i % 16, (i / 16) * 16); }
+    __device__ static void put(Tile& t, int i, const Raw& kr, const Raw& vr) {
+        put_k16(t, i, kr.lo, kr.hi);
+        put_v16(t, i, vr.lo, vr.hi);
+    }
+};
+
+// The stage over one KV head's rows of a stream's caches, bf16 or packed: ``base`` plus ``offs`` counts bf16
+// elements for bf16 caches and bytes for packed ones (``attention.offsets``).
+template <bool KV8>
+__device__ __forceinline__ auto committed(const unsigned short* base, const int64_t* offs, int s, int hk,
+                                          int hk_count) {
+    if constexpr (KV8) {
+        const auto* b8 = reinterpret_cast<const unsigned char*>(base);
+        return Stage8<Committed<unsigned char>>{{b8 + offs[2 * s] + hk * ROW8, b8 + offs[2 * s + 1] + hk * ROW8,
+                                                 static_cast<size_t>(hk_count) * ROW8}};
+    } else {
+        return Stage16<Committed<unsigned short>>{{base + offs[2 * s] + hk * D, base + offs[2 * s + 1] + hk * D,
+                                                   static_cast<size_t>(hk_count) * D}};
+    }
+}
+
 // Item (stream, first pair, chunk) of full committed chunks, grid (KV heads, items): a block of CW compute waves
 // takes the items whose first pair starts a run of CW tiles (16 CW pairs), the rest return. Pair r of a stream is
 // row r / G, head hk G + r % G. KV heads fastest: a chunk's heads run together and read each key's 2 KiB at once.
 // PIPE: four more waves load through the double buffer (fastest with few chunks); else every wave loads each tile,
 // then the compute waves fold it (more blocks fit: fastest with many). Either way a pair folds the same tiles.
-template <bool PIPE>
+// KV8: the caches hold packed FP8 rows.
+template <bool PIPE, bool KV8>
 __global__ void __launch_bounds__(PIPE ? 384 : 256) shared_kernel(
         const unsigned short* __restrict__ q, const unsigned short* __restrict__ base,
         const int64_t* __restrict__ offs, const int* __restrict__ streams, const int* __restrict__ items,
@@ -256,8 +414,7 @@ __global__ void __launch_bounds__(PIPE ? 384 : 256) shared_kernel(
     const bool loader = wave >= cw;
     const int pairs = rows * g, first_pair = first + 16 * wave;
     const bool live = !loader && first_pair < pairs;           // wave-uniform
-    const size_t stride = static_cast<size_t>(hk_count) * D;
-    const Committed src{base + offs[2 * s] + hk * D, base + offs[2 * s + 1] + hk * D, stride};
+    const auto src = committed<KV8>(base, offs, s, hk, hk_count);
     if constexpr (PIPE) {
         if (loader) {
             load_tiles(tb, src, chunk * CH, CH / 16, threadIdx.x - 32 * cw);
@@ -279,23 +436,7 @@ __global__ void __launch_bounds__(PIPE ? 384 : 256) shared_kernel(
     } else {
         for (int kt = 0; kt < CH / 16; ++kt) {
             __syncthreads();                                    // the previous tile is consumed
-            for (int b = 0; b < TILE; b += 4 * blockDim.x) {    // every load of a batch before its stores
-                uint4 kr[4], vr[4];
-#pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    const int i = b + threadIdx.x + j * blockDim.x;
-                    kr[j] = load(i < TILE ? src.k(chunk * CH + 16 * kt + i / 32) + (i % 32) * 8 : nullptr);
-                    vr[j] = load(i < TILE ? src.v(chunk * CH + 16 * kt + i % 16) + (i / 16) * 8 : nullptr);
-                }
-#pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    const int i = b + threadIdx.x + j * blockDim.x;
-                    if (i < TILE) {
-                        put_k(tb[0], i, kr[j]);
-                        put_v(tb[0], i, vr[j]);
-                    }
-                }
-            }
+            stage(tb[0], src, chunk * CH + 16 * kt);
             __syncthreads();
             if (live) fold(tb[0], qb, o, m, l, 0xFFFFu, scale, c, half);
         }
@@ -312,6 +453,7 @@ __global__ void __launch_bounds__(PIPE ? 384 : 256) shared_kernel(
 // Row, KV head, tail chunk (grid (W, KV heads, tails)): keys from the chunk's start to the last committed one from
 // the cache, then the row's path from the window's own keys and values. Four waves load a tile in one batch, wave 0
 // folds it (the row's G heads are its queries). (A loader/compute split here spilled registers.)
+template <bool KV8>
 __global__ void __launch_bounds__(NL) tail_kernel(
         const unsigned short* __restrict__ q, const unsigned short* __restrict__ kn,
         const unsigned short* __restrict__ vn, const unsigned short* __restrict__ base,
@@ -328,9 +470,19 @@ __global__ void __launch_bounds__(NL) tail_kernel(
     const int end = p + depths[node];                           // keys [0, p) committed, [p, end) the row's path
     const int key0 = chunk * CH;
     const int nt = max(0, min(CH / 16, (end - key0 + 15) / 16));   // tiles past the row's keys fold nothing
-    const size_t stride = static_cast<size_t>(hk_count) * D;
-    const Tail src{base + offs[2 * s] + hk * D, base + offs[2 * s + 1] + hk * D, kn, vn,
-                   paths + static_cast<size_t>(node) * MAXD, stride, p, end, vs, hk};
+    const int* path = paths + static_cast<size_t>(node) * MAXD;
+    const auto src = [&] {
+        if constexpr (KV8) {
+            const auto* b8 = reinterpret_cast<const unsigned char*>(base);
+            return TailStage8{b8 + offs[2 * s] + hk * ROW8, b8 + offs[2 * s + 1] + hk * ROW8, kn, vn, path,
+                              static_cast<size_t>(hk_count) * ROW8, static_cast<size_t>(hk_count) * D, p, end, vs,
+                              hk};
+        } else {
+            const size_t stride = static_cast<size_t>(hk_count) * D;
+            return Stage16<Tail16>{{base + offs[2 * s] + hk * D, base + offs[2 * s + 1] + hk * D, kn, vn, path,
+                                    stride, p, end, vs, hk}};
+        }
+    }();
     uint4 qb[16];
     query(folds && c < g ? q + (static_cast<size_t>(node) * h + hk * g + c) * D : nullptr, half, qb);
     float8 o[16];
@@ -340,7 +492,7 @@ __global__ void __launch_bounds__(NL) tail_kernel(
     for (int kt = 0; kt < nt; ++kt) {
         const int k0 = key0 + 16 * kt;
         __syncthreads();                                        // the previous tile is consumed
-        Pieces r;
+        Pieces<std::remove_cv_t<decltype(src)>> r;
         fetch(r, src, k0, threadIdx.x);
         place(t, r, threadIdx.x);
         __syncthreads();
@@ -354,29 +506,32 @@ __global__ void __launch_bounds__(NL) tail_kernel(
     }
 }
 
-struct Bounded {                            // prompt keys: the cache's rows below ``keys``, none past them
-    const unsigned short *kc, *vc;
-    size_t stride;
-    int keys;
-    __device__ const unsigned short* k(int key) const { return key < keys ? kc + key * stride : nullptr; }
-    __device__ const unsigned short* v(int key) const { return key < keys ? vc + key * stride : nullptr; }
-};
-
 // Prompt attention: q (W, H, D), caches (T, HK, D) holding keys [0, p0 + W), out (W, H, D); G query heads a KV
 // head. A block per 16 RB query rows and KV head, a compute wave per 16 rows and query head; PIPE: four loader waves
-// through the double buffer, else every wave loads each tile. None of these change a row's bits.
-template <int G, int RB, bool PIPE>
+// through the double buffer, else every wave loads each tile; KV8: packed FP8 caches (T, HK, ROW8). None of these
+// change a row's bits.
+template <int G, int RB, bool PIPE, bool KV8>
 __global__ void __launch_bounds__(32 * (G * RB + (PIPE ? LOADERS : 0))) prompt_kernel(
-        const unsigned short* __restrict__ q, const unsigned short* __restrict__ kc,
-        const unsigned short* __restrict__ vc, unsigned short* __restrict__ out, int p0, int w, int h, int hk_count,
-        float scale) {
+        const unsigned short* __restrict__ q, const void* __restrict__ kc, const void* __restrict__ vc,
+        unsigned short* __restrict__ out, int p0, int w, int h, int hk_count, float scale) {
     constexpr int CW = G * RB;
     __shared__ __align__(16) Tile tb[PIPE ? 2 : 1];
     const int r0 = (gridDim.x - 1 - blockIdx.x) * 16 * RB;    // longest causal blocks first
     const int kvh = blockIdx.y, wave = threadIdx.x >> 5;
     const int tiles = (p0 + min(r0 + 16 * RB, w) - 1) / 16 + 1;
-    const size_t stride = static_cast<size_t>(hk_count) * D;
-    const Bounded src{kc + kvh * D, vc + kvh * D, stride, p0 + w};
+    const auto src = [&] {
+        if constexpr (KV8) {
+            const auto* k8 = static_cast<const unsigned char*>(kc);
+            const auto* v8 = static_cast<const unsigned char*>(vc);
+            return Stage8<Bounded<unsigned char>>{{k8 + kvh * ROW8, v8 + kvh * ROW8,
+                                                   static_cast<size_t>(hk_count) * ROW8, p0 + w}};
+        } else {
+            const auto* k16 = static_cast<const unsigned short*>(kc);
+            const auto* v16 = static_cast<const unsigned short*>(vc);
+            return Stage16<Bounded<unsigned short>>{{k16 + kvh * D, v16 + kvh * D,
+                                                     static_cast<size_t>(hk_count) * D, p0 + w}};
+        }
+    }();
     if constexpr (PIPE) {
         if (wave >= CW) {
             load_tiles(tb, src, 0, tiles, threadIdx.x - 32 * CW);
@@ -404,25 +559,7 @@ __global__ void __launch_bounds__(32 * (G * RB + (PIPE ? LOADERS : 0))) prompt_k
     } else {
         for (int kt = 0; kt < tiles; ++kt) {
             __syncthreads();                                    // the previous tile is consumed
-            for (int b = 0; b < TILE; b += 4 * blockDim.x) {
-                uint4 kr[4], vr[4];
-#pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    const int i = b + threadIdx.x + j * blockDim.x;
-                    const unsigned short* kp = i < TILE ? src.k(16 * kt + i / 32) : nullptr;
-                    const unsigned short* vp = i < TILE ? src.v(16 * kt + i % 16) : nullptr;
-                    kr[j] = load(kp != nullptr ? kp + (i % 32) * 8 : nullptr);
-                    vr[j] = load(vp != nullptr ? vp + (i / 16) * 8 : nullptr);
-                }
-#pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    const int i = b + threadIdx.x + j * blockDim.x;
-                    if (i < TILE) {
-                        put_k(tb[0], i, kr[j]);
-                        put_v(tb[0], i, vr[j]);
-                    }
-                }
-            }
+            stage(tb[0], src, 16 * kt);
             __syncthreads();
             if (live) fold(tb[0], qb, o, m, l, valid(16 * kt), scale, c, half);
         }
@@ -446,15 +583,17 @@ bool tree_supported(int heads, int kv_heads, int dim) {
     return dim == D && kv_heads > 0 && heads % kv_heads == 0 && heads / kv_heads <= 16;
 }
 
-// attention.py's ``_shared`` (committed chunks) and ``_tail`` on WMMA; tensors as ``attention`` passes them.
+// attention.py's ``_shared`` (committed chunks) and ``_tail`` on WMMA; tensors as ``attention`` passes them;
+// ``kv8``: the caches hold packed FP8 rows and ``offs`` counts bytes.
 void tree_shared(const at::Tensor& q, const at::Tensor& base, const at::Tensor& offs, const at::Tensor& streams,
                  const at::Tensor& items, at::Tensor& po, at::Tensor& pm, at::Tensor& pl, int hk, int cw, bool pipe,
-                 double scale) {
+                 double scale, bool kv8) {
     const int w = q.size(0), h = q.size(1), n = items.size(0);
     TORCH_CHECK(tree_supported(h, hk, q.size(2)) && 1 <= cw && cw <= 8, "ROCm tree attention: head size 256");
+    const auto kernel = pipe ? (kv8 ? shared_kernel<true, true> : shared_kernel<true, false>)
+                             : (kv8 ? shared_kernel<false, true> : shared_kernel<false, false>);
     for (int item0 = 0; item0 < n; item0 += 65535)             // a grid's y extent: 65,535 items a launch
-        hipLaunchKernelGGL(pipe ? shared_kernel<true> : shared_kernel<false>, dim3(hk, std::min(65535, n - item0)),
-                           dim3(32 * (cw + (pipe ? LOADERS : 0))), 0,
+        hipLaunchKernelGGL(kernel, dim3(hk, std::min(65535, n - item0)), dim3(32 * (cw + (pipe ? LOADERS : 0))), 0,
                            at::hip::getCurrentHIPStream(), reinterpret_cast<const unsigned short*>(q.data_ptr()),
                            reinterpret_cast<const unsigned short*>(base.data_ptr()), offs.data_ptr<int64_t>(),
                            streams.data_ptr<int>(), items.data_ptr<int>(), po.data_ptr<float>(),
@@ -464,11 +603,12 @@ void tree_shared(const at::Tensor& q, const at::Tensor& base, const at::Tensor& 
 
 void tree_tail(const at::Tensor& q, const at::Tensor& kn, const at::Tensor& vn, const at::Tensor& base,
                const at::Tensor& offs, const at::Tensor& streams, const at::Tensor& rows, const at::Tensor& paths,
-               const at::Tensor& depths, at::Tensor& po, at::Tensor& pm, at::Tensor& pl, int tails, double scale) {
+               const at::Tensor& depths, at::Tensor& po, at::Tensor& pm, at::Tensor& pl, int tails, double scale,
+               bool kv8) {
     const int w = q.size(0), h = q.size(1), hk = kn.size(1);
     TORCH_CHECK(tree_supported(h, hk, q.size(2)) && paths.size(1) == MAXD, "ROCm tree attention: head size 256");
-    hipLaunchKernelGGL(tail_kernel, dim3(w, hk, tails), dim3(NL), 0, at::hip::getCurrentHIPStream(),
-                       reinterpret_cast<const unsigned short*>(q.data_ptr()),
+    hipLaunchKernelGGL(kv8 ? tail_kernel<true> : tail_kernel<false>, dim3(w, hk, tails), dim3(NL), 0,
+                       at::hip::getCurrentHIPStream(), reinterpret_cast<const unsigned short*>(q.data_ptr()),
                        reinterpret_cast<const unsigned short*>(kn.data_ptr()),
                        reinterpret_cast<const unsigned short*>(vn.data_ptr()),
                        reinterpret_cast<const unsigned short*>(base.data_ptr()), offs.data_ptr<int64_t>(),
@@ -482,29 +622,33 @@ bool attention_supported(int heads, int kv_heads, int dim) {
     return dim == D && (g == 1 || g == 2 || g == 4 || g == 6 || g == 8);
 }
 
-// q (W, H, 256), k_cache and v_cache (T, HK, 256) holding keys through p0 + W - 1, out (W, H, 256); bf16, contiguous.
-// ``rb``: 16-row tiles a block (1 or 2), ``pipe``: loader waves.
+// q (W, H, 256), k_cache and v_cache (T, HK, 256) bf16 or (T, HK, 272) packed FP8 rows (uint8), holding keys through
+// p0 + W - 1, out (W, H, 256); contiguous. ``rb``: 16-row tiles a block (1 or 2), ``pipe``: loader waves.
 void prompt_attention(const at::Tensor& q, const at::Tensor& k_cache, const at::Tensor& v_cache, at::Tensor& out,
                       int p0, double scale, int rb, bool pipe) {
     const int w = q.size(0), h = q.size(1), hk = k_cache.size(1);
-    TORCH_CHECK(attention_supported(h, hk, q.size(2)) && (rb == 1 || rb == 2),
-                "ROCm prompt attention: head size 256, 1-8 heads a KV head");
+    const bool kv8 = k_cache.scalar_type() == at::kByte;
+    TORCH_CHECK(attention_supported(h, hk, q.size(2)) && (rb == 1 || rb == 2) &&
+                k_cache.size(2) == (kv8 ? ROW8 : D) && v_cache.scalar_type() == k_cache.scalar_type(),
+                "ROCm prompt attention: head size 256, 1-8 heads a KV head, bf16 or packed FP8 caches");
     if (w == 0) return;
     const dim3 grid((w + 16 * rb - 1) / (16 * rb), hk);
     auto stream = at::hip::getCurrentHIPStream();
     const auto* qp = reinterpret_cast<const unsigned short*>(q.data_ptr());
-    const auto* kp = reinterpret_cast<const unsigned short*>(k_cache.data_ptr());
-    const auto* vp = reinterpret_cast<const unsigned short*>(v_cache.data_ptr());
+    const void* kp = k_cache.data_ptr();
+    const void* vp = v_cache.data_ptr();
     auto* op = reinterpret_cast<unsigned short*>(out.data_ptr());
     const float sc = static_cast<float>(scale);
-#define LAUNCH(G, RB, PIPE) \
-    hipLaunchKernelGGL((prompt_kernel<G, RB, PIPE>), grid, dim3(32 * ((G) * (RB) + ((PIPE) ? LOADERS : 0))), 0, stream, \
-                       qp, kp, vp, op, p0, w, h, hk, sc)
+#define LAUNCH(G, RB, PIPE, KV8)                                                                                  \
+    hipLaunchKernelGGL((prompt_kernel<G, RB, PIPE, KV8>), grid, dim3(32 * ((G) * (RB) + ((PIPE) ? LOADERS : 0))), \
+                       0, stream, qp, kp, vp, op, p0, w, h, hk, sc)
+#define FORMAT(G, RB, PIPE)                                                                      \
+    if (kv8) LAUNCH(G, RB, PIPE, true); else LAUNCH(G, RB, PIPE, false);
 #define ROWS(G)                                                                                  \
     if (rb == 1) {                                                                               \
-        if (pipe) LAUNCH(G, 1, true); else LAUNCH(G, 1, false);                                  \
+        if (pipe) { FORMAT(G, 1, true) } else { FORMAT(G, 1, false) }                            \
     } else {                                                                                     \
-        if (pipe) LAUNCH(G, 2, true); else LAUNCH(G, 2, false);                                  \
+        if (pipe) { FORMAT(G, 2, true) } else { FORMAT(G, 2, false) }                            \
     }
     switch (h / hk) {
         case 1: ROWS(1); break;
@@ -514,5 +658,6 @@ void prompt_attention(const at::Tensor& q, const at::Tensor& k_cache, const at::
         default: ROWS(8); break;
     }
 #undef ROWS
+#undef FORMAT
 #undef LAUNCH
 }

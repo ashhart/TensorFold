@@ -148,9 +148,10 @@ def test_serve_parses_the_kv_cache_flag():
     assert plain.kv_dtype == "bf16"                        # the cache stays bf16 unless it is asked for
     assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "int8"]).kv_dtype == "int8"
     assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "int4"]).kv_dtype == "int4"
+    assert cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "fp8"]).kv_dtype == "fp8"
     assert cli.build_parser().parse_args(["serve", "owner/model", "--mtp-confidence", "0.6"]).mtp_confidence == 0.6
     with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "fp8"])
+        cli.build_parser().parse_args(["serve", "owner/model", "--kv-dtype", "fp16"])
 
 
 @pytest.mark.torch
@@ -184,6 +185,9 @@ def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatc
     (["--kv-dtype", "int8"], "mlx", "qwen4_exp", "MLX path caches keys and values as bf16"),
     (["--kv-dtype", "int4"], "cuda", "qwen3_5", "KV cache, not --kv-dtype int4"),
     (["--kv-dtype", "int8"], "cuda", "nemotron_h", "KV cache, not --kv-dtype int8"),
+    (["--kv-dtype", "fp8"], "mlx", "qwen3_5", "MLX path caches keys and values as bf16"),
+    (["--kv-dtype", "fp8"], "cuda", "qwen4_exp", "KV cache, not --kv-dtype fp8"),
+    (["--kv-dtype", "fp8"], "cuda", "glm5_next", "KV cache, not --kv-dtype fp8"),
     (["--mtp-confidence", "0.6"], "mlx", "qwen4_exp", "on MLX has no such rule"),
     (["--mtp-confidence", "0.6"], "cuda", "glm5_next", "on CUDA has no such rule"),
     (["--mtp-confidence", "0.6"], "cuda", "nemotron_h", "on CUDA has no such rule"),
@@ -219,6 +223,25 @@ def test_flash_next_on_cuda_takes_both_options(tmp_path, flags):
     args = cli.build_parser().parse_args(["serve", str(tmp_path)] + flags)
     family = SimpleNamespace(title=qwen4_exp.TITLE, package=qwen4_exp, model_type="qwen4_exp")
     assert cli._check_serve_options(args, family, "cuda") is None
+
+
+def test_the_27b_on_cuda_takes_fp8_keys_and_values_and_its_engine_gets_them(tmp_path, monkeypatch):
+    """The serve options pass ``--kv-dtype fp8`` for the 27B and the CLI hands it to the family's engine, which
+    refuses it itself where no kernel reads packed rows (NVIDIA, two ranks; ``test_cuda_kv8``)."""
+
+    from tensorfold.cuda import server
+    from tensorfold.families import qwen3_5
+
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--kv-dtype", "fp8", "--no-drafts"])
+    family = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
+    assert cli._check_serve_options(args, family, "cuda") is None
+    made = []
+    engine = lambda path, **options: made.append(options) or SimpleNamespace(context_window=4096)   # noqa: E731
+    monkeypatch.setattr(server, "App", lambda *a, **kw: SimpleNamespace(effective_context_window=4096))
+    monkeypatch.setattr(server, "serve", lambda *a: None)
+    cli._serve_cuda(args, SimpleNamespace(title=qwen3_5.TITLE, model_type="qwen3_5",
+                                          package=SimpleNamespace(cuda_engine=engine)), tmp_path, None)
+    assert made[0]["kv_dtype"] == "fp8"
 
 
 @pytest.mark.torch

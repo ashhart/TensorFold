@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Callable, Sequence
@@ -24,7 +25,7 @@ class Qwen27Engine:
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
                  tp_draft: bool = False, allow_copy: bool = True, streams: int = 1,
                  context: int | None = None, context_explicit: bool | None = None, vision: bool = False,
-                 vision_urls: bool = False):
+                 vision_urls: bool = False, kv_fp8: bool = False):
         import torch
 
         from tensorfold.cuda.nvfp4.format import is_quantized
@@ -46,6 +47,21 @@ class Qwen27Engine:
         if nvfp4 and vision:
             raise ValueError("image input on CUDA is tested on the MLX checkpoint only: drop --vision for an NVFP4 "
                              "checkpoint, or serve Vontra/Qwen3.8-27B-MLX-4bit")
+        if kv_fp8:                          # packed FP8 keys and values: only ROCm's WMMA attention reads them
+            if not hip():
+                raise ValueError("--kv-dtype fp8: FP8 keys and values run on ROCm's WMMA attention; NVIDIA serves "
+                                 "bf16")
+            if tp != 1:
+                raise ValueError("--kv-dtype fp8 runs on one GPU: drop --tp 2")
+            for name in ("TF_ROCM_ATTN_KERNEL", "TF_ROCM_TREE_KERNEL"):
+                if os.environ.get(name) == "triton":
+                    raise ValueError(f"--kv-dtype fp8: {name}=triton attention reads bf16 caches; unset it")
+            from tensorfold.cuda.capacity import config
+
+            text = config(model_dir)
+            dim = int(text.get("head_dim") or int(text["hidden_size"]) // int(text["num_attention_heads"]))
+            if dim != 256:
+                raise ValueError(f"--kv-dtype fp8 packs rows of 256 values for the WMMA kernels, not head size {dim}")
         from .weights import load
         from tensorfold.cuda.capacity import admit, gather_ints
         from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, stream_geometry
@@ -81,8 +97,8 @@ class Qwen27Engine:
         else:
             gather = None
         many = streams > 1
-        geometry = ((lambda text: stream_geometry(text, tp, streams, KEEP)) if many else
-                    (lambda text: gdn_geometry(text, tp, max_rows)))
+        geometry = ((lambda text: stream_geometry(text, tp, streams, KEEP, kv8=kv_fp8)) if many else
+                    (lambda text: gdn_geometry(text, tp, max_rows, kv8=kv_fp8)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir)
         if exl3:
@@ -115,6 +131,10 @@ class Qwen27Engine:
         else:
             full = load(model_dir, tiled=True)
             self.w = full
+        if kv_fp8:                                 # before any State: attention caches of packed rows (``kv8``)
+            self.w.kv_fp8 = True
+            print("[tensorfold] FP8 keys and values: e4m3 with a power-of-two scale per row, about half of bf16's "
+                  "cache bytes", flush=True)
         self.draft = None
         if draft_dir is not None and (rank == 0 or (tp == 2 and tp_draft)):
             from .dflash2 import DFlash2

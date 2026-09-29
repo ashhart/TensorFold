@@ -22,10 +22,10 @@ def _inputs(w: int, p: int, *, h: int = 24, hk: int = 4, d: int = 256, seed: int
     return q, kn, vn, kc, vc
 
 
-def _attend(q, kn, vn, caches, trees, lengths, scale):
+def _attend(q, kn, vn, caches, trees, lengths, scale, kv8=False):
     plan = shared.plan(trees, lengths, q.shape[1] // kn.shape[1], "cuda")
     offs = torch.tensor(shared.offsets(caches, "cuda"), dtype=torch.int64, device="cuda").view(-1, 2)
-    return shared.attention(q, kn, vn, offs, plan, scale=scale)
+    return shared.attention(q, kn, vn, offs, plan, scale=scale, kv8=kv8)
 
 
 def _path(parents, node):
@@ -152,3 +152,49 @@ def test_compute_waves_never_change_the_bits(monkeypatch, w, p):
         assert torch.equal(both[:w].view(torch.int16), alone.view(torch.int16))
         outs.append(both.view(torch.int16))
     assert all(torch.equal(outs[0], x) for x in outs[1:])
+
+
+
+def _fp8(inputs):
+    """The inputs as the FP8 cache's forward sees them: every key and value rounded (the window's own too), and the
+    caches also as packed rows (``kv8.ROW8`` bytes a row)."""
+
+    from tensorfold.cuda.kernels import kv8
+
+    q, kn, vn, kc, vc = inputs
+    packed = [kv8.reference_pack(t) for t in (kc, vc)]
+    rounded = [kv8.unpack(t) for t in packed]
+    kn, vn = (kv8.unpack(kv8.reference_pack(t)) for t in (kn, vn))
+    return (q, kn, vn, *rounded), (q, kn, vn, *packed)
+
+
+@pytest.mark.skipif(not getattr(torch.version, "hip", None), reason="ROCm's WMMA tree attention reads packed FP8")
+@pytest.mark.parametrize("pipe", ["0", "1"])
+@pytest.mark.parametrize("w,p", [(1, 0), (9, 13), (12, 511), (32, 1003), (128, 513), (12, 20501)])
+def test_packed_fp8_caches_give_their_rounded_values_bits(monkeypatch, w, p, pipe):
+    """Packed FP8 rows widen in shared memory to the bf16 values ``kv8.unpack`` gives, so a tree over packed caches
+    gets the bits it gets over bf16 caches holding those values, in either schedule; nodes still match serial."""
+
+    monkeypatch.setenv("TF_ROCM_TREE_PIPE", pipe)
+    rounded, packed = _fp8(_inputs(w, p))
+    parents = [-1] + [(i - 1) // 2 for i in range(1, w)]
+    want = _attend(*rounded[:3], [rounded[3:]], [parents], [p], 1 / 16)
+    got = _attend(*packed[:3], [packed[3:]], [parents], [p], 1 / 16, kv8=True)
+    assert torch.equal(got, want)
+    for node in {0, w // 2, w - 1}:
+        assert torch.equal(got[node], _serial(rounded, parents, p, node, 1 / 16)), f"node {node} differs"
+
+
+@pytest.mark.skipif(not getattr(torch.version, "hip", None), reason="ROCm's WMMA tree attention reads packed FP8")
+def test_packed_fp8_streams_in_one_launch_equal_each_alone():
+    rng = random.Random(9)
+    shapes = [(rng.randint(1, 16), rng.choice([0, 1, 100, 512, 513, 1300, 2600])) for _ in range(6)]
+    parts = [_fp8(_inputs(w, p, seed=i))[1] for i, (w, p) in enumerate(shapes)]
+    trees = [[-1] + [rng.randint(max(0, i - 4), i - 1) for i in range(1, w)] for w, _ in shapes]
+    q, kn, vn = (torch.cat([x[j] for x in parts]) for j in range(3))
+    together = _attend(q, kn, vn, [x[3:] for x in parts], trees, [p for _, p in shapes], 1 / 16, kv8=True)
+    base = 0
+    for i, ((w, p), part) in enumerate(zip(shapes, parts)):
+        alone = _attend(*part[:3], [part[3:]], [trees[i]], [p], 1 / 16, kv8=True)
+        assert torch.equal(together[base:base + w], alone), f"stream {i}"
+        base += w

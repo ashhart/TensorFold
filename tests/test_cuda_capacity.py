@@ -355,6 +355,27 @@ def test_speculative_reserve_does_not_double_committed_dynamic_kv():
     assert b - a > 16 * 1024**2
 
 
+@pytest.mark.parametrize("streams", [1, 4])
+def test_packed_fp8_caches_cost_272_of_bf16s_512_bytes_and_admit_a_longer_window(streams):
+    """The 27B's ``--kv-dtype fp8``: the startup estimate's cache term (what one KV head adds) shrinks to 272/512 of
+    bf16's in the one-stream and the concurrent geometry, and the same budget then fits a longer window."""
+
+    from tensorfold.cuda.capacity import Weights, choose, make_plan
+    from tensorfold.cuda.geometry import gdn_geometry, stream_geometry
+
+    def make(kv_heads, kv8):
+        text = dict(small_config(), head_dim=256, num_key_value_heads=kv_heads)
+        return gdn_geometry(text, 1, 12, kv8=kv8) if streams == 1 else stream_geometry(text, 1, streams, 3, kv8=kv8)
+
+    for slots in (2048, 30000, 65536):
+        bf16 = make(2, False).bytes_at(slots) - make(1, False).bytes_at(slots)
+        fp8 = make(2, True).bytes_at(slots) - make(1, True).bytes_at(slots)
+        assert bf16 > 0 and fp8 * 512 == bf16 * 272
+    budget = make(2, False).needed(12000) + 32768
+    windows = [choose(make_plan(65536, None, False, budget, Weights(0, 0), make(2, kv8))) for kv8 in (False, True)]
+    assert 0 < windows[0] < windows[1]
+
+
 def test_fp8_block_scales_are_sized(tmp_path):
     """The FP4 checkpoints store their block scales as ``F8_E4M3`` (the published Swift revision carries
     73,728 of them: the one dtype the startup estimate could not size), one byte a value like every fp8."""

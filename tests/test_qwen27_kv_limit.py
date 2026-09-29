@@ -21,7 +21,7 @@ def _weights(pattern):
 
     config = SimpleNamespace(k_heads=1, dk=2, v_heads=1, dv=2, conv_kernel=4, kv_heads=1, head_dim=2, vocab=8)
     return SimpleNamespace(config=config, layers=[SimpleNamespace(linear=x) for x in pattern],
-                           norm=torch.ones(1, dtype=torch.bfloat16), head=SimpleNamespace(n=8))
+                           norm=torch.ones(1, dtype=torch.bfloat16), head=SimpleNamespace(n=8), kv_fp8=False)
 
 
 def _host(monkeypatch, pattern=(True, False, True, False)):

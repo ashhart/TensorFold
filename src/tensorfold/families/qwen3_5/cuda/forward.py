@@ -11,6 +11,7 @@ import torch
 from tensorfold.cuda import moe
 from tensorfold.cuda.kernels import attention as tree_attention
 from tensorfold.cuda.kernels import gdn as deltanet
+from tensorfold.cuda.kernels import kv8
 
 from . import glue
 from .qmm_fast import matmul
@@ -104,6 +105,15 @@ def _cache_offsets(states: Sequence["State"], layers: Sequence[int], device) -> 
     return dict(zip(layers, dev))
 
 
+def _packed(states: Sequence["State"]) -> bool:
+    """Whether the states' attention caches hold packed FP8 rows (``kv8``); one forward reads one kind."""
+
+    kinds = {next((kv[0].dtype for kv in st.kv if kv is not None), None) == torch.uint8 for st in states}
+    if len(kinds) > 1:
+        raise ValueError("one forward reads bf16 or packed FP8 attention caches, not both")
+    return kinds == {True}
+
+
 def _conv_windows(parents: Sequence[int], keep: int) -> torch.Tensor:
     """Last ``keep`` inputs along each path, then the node's own QKV row."""
 
@@ -128,6 +138,8 @@ class GDNRecord:
 class AttentionRecord:
     k: torch.Tensor
     v: torch.Tensor
+    k8: torch.Tensor | None = None      # packed caches: the rows a commit copies (``k``/``v``: the values they hold)
+    v8: torch.Tensor | None = None
 
 
 Record = GDNRecord | AttentionRecord
@@ -155,8 +167,9 @@ class State:
             else:
                 self.conv.append(None)
                 self.rec.append(None)
-                self.kv.append((torch.empty((0, c.kv_heads, c.head_dim), device=device, dtype=torch.bfloat16),
-                                torch.empty((0, c.kv_heads, c.head_dim), device=device, dtype=torch.bfloat16)))
+                row, dtype = (kv8.ROW8, torch.uint8) if w.kv_fp8 else (c.head_dim, torch.bfloat16)
+                self.kv.append((torch.empty((0, c.kv_heads, row), device=device, dtype=dtype),
+                                torch.empty((0, c.kv_heads, row), device=device, dtype=dtype)))
 
 
 @dataclass
@@ -237,6 +250,7 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
         aplan = tree_attention.plan([parents], [st.pos], c.heads // c.kv_heads, tokens.device)
         aoffs = _cache_offsets([st], softmax, tokens.device)
         windows = _conv_windows(parents, c.conv_kernel - 1).to(tokens.device)
+    packed = _packed([st])
     if initial is None:
         x = glue.embedding(ids, w.embed)
         pending: torch.Tensor | None = None
@@ -264,10 +278,15 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos,
                                     w.inv_freq, c.eps, heads=c.heads, kv_heads=c.kv_heads,
                                     head_dim=c.head_dim)
-            out = tree_attention.attention(q, key, value, aoffs[i], aplan, scale=c.head_dim ** -0.5)
+            k8 = v8 = None
+            if packed:                              # the window's own keys and values: what its cache rows will hold
+                (key, k8), (value, v8) = kv8.pack(key), kv8.pack(value)
+            elif glue.kv_fp8():
+                key, value = glue.fp8_round(key), glue.fp8_round(value)
+            out = tree_attention.attention(q, key, value, aoffs[i], aplan, scale=c.head_dim ** -0.5, kv8=packed)
             gated, out_xs = glue.gate_mul(out, qg, heads=c.heads, head_dim=c.head_dim)
             r = _row_mm(gated, attn.o, tp, out_xs)
-            record.append(AttentionRecord(key, value))
+            record.append(AttentionRecord(key, value, k8, v8))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(layer, h, xs, tp)
         if capture_taps and i in (5, 19, 33, 47, 61):
@@ -322,6 +341,7 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
     ptrs = [p for i in linear for p in deltanet.pointers([st.rec[i] for st in states])]
     tables = dict(zip(linear, deltanet.to_device(ptrs, torch.int64, device).view(len(linear), len(states))))
     aoffs = _cache_offsets(states, softmax, device)
+    packed = _packed(states)
     S = len(states)
     attn_flat, attn_items, attn_chunks = tree_attention.plan_host(local, [st.pos for st in states],
                                                                   c.heads // c.kv_heads)
@@ -355,10 +375,15 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos,
                                     w.inv_freq, c.eps, heads=c.heads, kv_heads=c.kv_heads,
                                     head_dim=c.head_dim)
-            out = tree_attention.attention(q, key, value, aoffs[i], aplan, scale=c.head_dim ** -0.5)
+            k8 = v8 = None
+            if packed:                              # the window's own keys and values: what its cache rows will hold
+                (key, k8), (value, v8) = kv8.pack(key), kv8.pack(value)
+            elif glue.kv_fp8():
+                key, value = glue.fp8_round(key), glue.fp8_round(value)
+            out = tree_attention.attention(q, key, value, aoffs[i], aplan, scale=c.head_dim ** -0.5, kv8=packed)
             gated, out_xs = glue.gate_mul(out, qg, heads=c.heads, head_dim=c.head_dim)
             r = _row_mm(gated, attn.o, tp, out_xs)
-            record.append(AttentionRecord(key, value))
+            record.append(AttentionRecord(key, value, k8, v8))
         x, h, xs = glue.add_rmsnorm(x, r, layer.post_norm, c.eps)
         pending = _mlp(layer, h, xs, tp)
         if capture_taps and i in (5, 19, 33, 47, 61):
@@ -464,7 +489,8 @@ def _commit(states: Sequence[State], record: Sequence[Record], paths: Sequence[S
         take = takes[0] if len(takes) == 1 else torch.cat(list(takes))
         dst, src = [], []
         for i, item in att:
-            keys, values = item.k.index_select(0, take), item.v.index_select(0, take)
+            k, v = (item.k, item.v) if item.k8 is None else (item.k8, item.v8)      # packed caches take packed rows
+            keys, values = k.index_select(0, take), v.index_select(0, take)
             a0 = 0
             for st, path in zip(states, paths):
                 n = len(path)

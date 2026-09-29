@@ -124,6 +124,12 @@ def kv_bytes(head_dim: int, bits: int = 16) -> int:
     return head_dim * bits // 8 + head_dim // 32 * 2
 
 
+def kv8_bytes(head_dim: int) -> int:
+    """One position's keys (or values) for one KV head as packed FP8 rows (``kv8``: 272 bytes a 256 values)."""
+
+    return head_dim * 272 // 256
+
+
 def layer_counts(t: dict) -> tuple[int, int]:
     if "layer_types" in t:
         linear = sum(kind == "linear_attention" for kind in t["layer_types"])
@@ -133,7 +139,9 @@ def layer_counts(t: dict) -> tuple[int, int]:
 
 
 def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
-                 kv_bits: int = 16) -> Geometry:
+                 kv_bits: int = 16, kv8: bool = False) -> Geometry:
+    """``kv8``: the attention caches hold packed FP8 rows (the 27B's ``--kv-dtype fp8``), else bf16."""
+
     linear, attention = layer_counts(t)
     d, h = int(t["hidden_size"]), int(t["num_attention_heads"]) // world
     hk = int(t["num_key_value_heads"]) // world
@@ -174,7 +182,7 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
         else:
             # Bound two retained prefixes, current KV state and a growth copy; speculative rows use separate workspace.
             rounded = 1 << (max(1024, capacity - reserve) - 1).bit_length()
-            cache = 4 * attention * rounded * hk * hd * 4
+            cache = 4 * attention * rounded * hk * 2 * (kv8_bytes(hd) if kv8 else kv_bytes(hd))
             scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
         return fixed + cache + scratch
     return Geometry(bytes_at, reserve)
@@ -269,8 +277,9 @@ def _gdn_dims(t: dict, world: int) -> tuple:
             nk, nv, dk, dv, 2 * nk * dk + 2 * nv * dv + 2 * nv)
 
 
-def stream_geometry(t: dict, world: int, streams: int, keep: int) -> Geometry:
-    """The 27B's concurrent decoder: each live stream, ``keep`` cached prompt ends and rows for every window."""
+def stream_geometry(t: dict, world: int, streams: int, keep: int, *, kv8: bool = False) -> Geometry:
+    """The 27B's concurrent decoder: each live stream, ``keep`` cached prompt ends and rows for every window
+    (``kv8``: packed FP8 attention caches)."""
 
     linear, attention = layer_counts(t)
     d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, world)
@@ -283,7 +292,7 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int) -> Geometry:
     extent = d + int(t["vocab_size"]) // world + slots * (intermediate + d) + width + h * hd
     fixed += 16 * max(128, rows) * extent * 4 + 32 * rows * 2560 * 4
     def bytes_at(capacity: int) -> int:
-        kv = attention * capacity * hk * hd * 2 * 2
+        kv = attention * capacity * hk * 2 * (kv8_bytes(hd) if kv8 else kv_bytes(hd))
         scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
         return fixed + (streams + keep + 1) * kv + kv // max(1, attention) + scratch   # one layer's growth copy
     return Geometry(bytes_at, 1)

@@ -114,9 +114,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="with --tp 2: this machine's rank; rank 0 serves HTTP, rank 1 follows it")
     cuda.add_argument("--master", default="", help="with --tp 2: rank 0's address on the link between the machines")
     cuda.add_argument("--master-port", type=int, default=29551, help="with --tp 2: rank 0's rendezvous port")
-    cuda.add_argument("--kv-dtype", choices=("bf16", "int8", "int4"), default="bf16",
-                      help="KV cache: bf16 (the default), int8, or int4. Quantized keys and values use one "
-                           "fp16 scale per 32 values (changes the output; Flash Next on CUDA only)")
+    cuda.add_argument("--kv-dtype", choices=("bf16", "int8", "int4", "fp8"), default="bf16",
+                      help="KV cache: bf16 (the default), int8, int4 or fp8. int8 and int4 keys and values use one "
+                           "fp16 scale per 32 values (Flash Next on CUDA); fp8 stores them as e4m3 with a "
+                           "power-of-two scale per row, about half of bf16's bytes (Qwen3.8-27B on ROCm). Each "
+                           "changes outputs slightly")
     serve.set_defaults(func=cmd_serve)
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import os
+from functools import lru_cache
+
 import torch
 import triton
 import triton.language as tl
+
+from tensorfold.cuda.kernels import kv8
 
 
 @triton.jit
@@ -275,3 +280,19 @@ def embedding(ids: torch.Tensor, q) -> torch.Tensor:
     from tensorfold.cuda.kernels.affine import embed as affine_embed
 
     return affine_embed(ids, q)
+
+
+@lru_cache(maxsize=1)
+def kv_fp8() -> bool:
+    """``TF_KV_FP8=1`` (experimental): attention keys and values rounded to FP8 where they are made (``fp8_round``),
+    so bf16 caches, a verify window's own path and every later read see what a packed cache (``--kv-dtype fp8``)
+    would hold."""
+
+    return os.environ.get("TF_KV_FP8", "0") == "1"
+
+
+def fp8_round(x: torch.Tensor) -> torch.Tensor:
+    """(W, HK, 256) bf16 -> the bf16 values its packed FP8 rows hold (``kv8``'s one quantizer: a launch on a GPU, the
+    torch reference elsewhere). Row by row, so any launch, window or chunking gives a row the same values."""
+
+    return kv8.pack(x)[0] if x.is_cuda else kv8.unpack(kv8.reference_pack(x))

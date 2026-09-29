@@ -267,6 +267,23 @@ and `TF_ROCM_ATTN_PIPE` (prompt attention's 16-row tiles a block, and loader wav
 wrong sums: bf16 tiles at small K, and pipelined (`num_stages` 2 or 3) e4m3 tiles for calls of a few rows. The
 defaults avoid them, and `tests/cuda/test_qwen27_prefill.py` guards both prompt GEMMs at the model's shapes.
 
+`--kv-dtype fp8` (opt-in) stores the attention layers' keys and values packed: per token and KV head, the 256
+values as e4m3 codes of x * 2^-e, e the smallest exponent that puts the row's largest magnitude at or under 448, then e
+itself, in 272 bytes instead of bf16's 512 (`cuda/kernels/kv8.py`). Decode reads about half the cache bytes a round,
+and the startup estimate counts the smaller cache, so the same memory admits a longer window. The WMMA prompt and tree
+attention kernels widen each row to bf16 as they stage it (the codes times 2^e); a verify window's own keys and values
+are rounded to the same values before its attention, so every read of a row sees what its packed row returns.
+
+It changes outputs slightly. With the same rounding on bf16 caches (`TF_KV_FP8=1`, one quantizer): localeval mmlu
+0.860 -> 0.864 (228 questions, noise), ifeval 0.900 -> 0.900 (60), the judged core set 1.000 -> 0.990 (10); after
+4k, 16k and 32k tokens of code the next token's distribution kept bf16's top token 96.9%, 99.2% and 97.7% of the
+time, mean KL 0.007-0.012, NLL within +-0.013 nats. gsm8k could not be measured with thinking off. The packed
+caches give those logits exactly (at 4k and 32k tokens), and drafted replies still equal `"draft": false` ones. On
+the R9700 a drafted round on a code prompt took 48.7 ms with bf16 keys and values and 46.5 ms with fp8 at 64k tokens
+of context (tree attention 9.7 -> 7.3 ms), 40.1 and 39.6 ms at 16k. It needs ROCm,
+head size 256, one rank and the WMMA attention kernels: startup refuses it on NVIDIA (which serves bf16), with
+`--tp 2`, and with `TF_ROCM_ATTN_KERNEL=triton` or `TF_ROCM_TREE_KERNEL=triton`.
+
 Limits: one rank; other families and EXL3 packs are refused; `--parallel` is untested on ROCm beyond the
 multi-stream tests. Verify windows
 past 16 rows run the two-tile matmul, about a quarter slower than one tile: 16 rows helped code prompts (+13-19%)

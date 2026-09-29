@@ -933,7 +933,7 @@ def _cpu_kernels(torch, monkeypatch, prefill, forward):
         return rows(lambda a: (q.weight @ a.float()).bfloat16(), x)
 
     glue = SimpleNamespace(embedding=lambda ids, q: q.weight[ids.long()].bfloat16(),
-                           add_rmsnorm=glue_add_rmsnorm, gdn_pre=gdn_pre, attn_prep=attn_prep)
+                           add_rmsnorm=glue_add_rmsnorm, gdn_pre=gdn_pre, attn_prep=attn_prep, kv_fp8=lambda: False)
     pg = SimpleNamespace(add_rmsnorm=pg_add_rmsnorm, gated_norm=gated_norm, gate_mul=gate_mul, swiglu=swiglu)
     monkeypatch.setattr(prefill, "glue", glue)
     monkeypatch.setattr(prefill, "prefill_glue", pg)         # the MLX checkpoint's prompt glue (w.quant "mlx")
