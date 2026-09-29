@@ -23,7 +23,8 @@ classifiers = [
 ]
 # mlx-lm stays below its next minor (TensorFold builds on its models); CUDA uses the container's torch and triton.
 dependencies = [
-  "mlx>=0.32.2; sys_platform == 'darwin'",
+  # MLX 0.32.3 changed a gather kernel's arguments that the prompt kernels build on (#88)
+  "mlx>=0.32.2,<0.32.3; sys_platform == 'darwin'",
   "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin'",
   "numpy>=1.26",
   "huggingface-hub>=0.24",

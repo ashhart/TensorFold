@@ -144,6 +144,7 @@ class NgramTable:
         self.starts = np.array(starts, dtype=np.int64)
         self.rows = int(self.starts[-1])
         self.row_bytes = 2 * self.words_per_row
+        self.nbytes = sum(a.nbytes for a in self.words)      # what the startup prefetch sizes, as for every table
         self.head_bias = pk.get(base + "head_bias").to(torch.float16).to(device).contiguous()
         self.head_offsets = pk.get(base + "head_offsets").cpu().numpy()
         self.head_sizes = pk.get(base + "head_vocab_sizes").cpu().numpy()
