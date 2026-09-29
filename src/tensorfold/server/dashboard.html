@@ -1,0 +1,150 @@
+<!doctype html>
+<!-- TensorFold live dashboard: one file, no dependencies. Polls /stats once a second and draws the
+     decode/prefill dial and the five metric tiles. Dark theme follows the OS. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>TensorFold</title>
+<style>
+  :root {
+    --bg: #0d0f12; --panel: #15181d; --line: #232830; --text: #e6e9ee; --muted: #8a93a1;
+    --accent: #4cc38a; --cool: #5aa7e8; --warm: #e0b34c; --hot: #e06c5a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f5f7; --panel:#ffffff; --line:#e1e4e9; --text:#1b1f26; --muted:#5f6875; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.4 ui-sans-serif,-apple-system,"SF Pro Text",system-ui,sans-serif; }
+  header { display:flex; align-items:baseline; gap:12px; padding:14px 20px; border-bottom:1px solid var(--line); }
+  header b { font-size:15px; letter-spacing:.02em; }
+  header .state { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }
+  header .state.on { color:var(--accent); }
+  #stale { display:none; padding:6px 20px; background:var(--hot); color:#fff; font-size:12px; }
+  main { max-width:860px; margin:0 auto; padding:20px; }
+  .dial { display:flex; justify-content:center; padding:8px 0 4px; }
+  canvas { width:280px; height:280px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-top:16px; }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .tile .label { font-size:10px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); }
+  .tile .value { font-size:20px; font-weight:600; font-variant-numeric:tabular-nums; margin-top:4px; }
+  .tile .value small { font-size:12px; font-weight:400; color:var(--muted); }
+  .tile .cap { font-size:11px; color:var(--muted); margin-top:3px; }
+  .bar { height:4px; border-radius:2px; background:var(--line); margin-top:8px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--accent); transition:width .5s; }
+  .bar i.warm { background:var(--warm); } .bar i.hot { background:var(--hot); }
+  footer { text-align:center; color:var(--muted); font-size:11px; padding:12px 0 24px; }
+</style>
+</head>
+<body>
+<header><b>TensorFold</b><span class="state" id="model">—</span><span class="state" id="conns"></span></header>
+<div id="stale">no answer from the server — retrying</div>
+<main>
+  <div class="dial"><canvas id="gauge" width="560" height="560"></canvas></div>
+  <div class="tiles">
+    <div class="tile"><div class="label">Context</div><div class="value" id="ctx">—</div>
+      <div class="cap" id="ctxcap"></div><div class="bar"><i id="ctxbar"></i></div></div>
+    <div class="tile"><div class="label">Cached tokens</div><div class="value" id="cache">—</div>
+      <div class="cap">held by the live streams</div></div>
+    <div class="tile"><div class="label">Memory</div><div class="value" id="mem">—</div>
+      <div class="cap" id="memcap"></div></div>
+    <div class="tile"><div class="label">5-min gen rate</div><div class="value" id="gen5">—</div>
+      <div class="cap" id="gen5cap"></div></div>
+    <div class="tile"><div class="label">Avg prefill</div><div class="value" id="pavg">—</div>
+      <div class="cap" id="pavgcap"></div></div>
+  </div>
+</main>
+<footer>sampled once a second · decode/prefill are the same numbers the terminal's live line shows</footer>
+<script>
+"use strict";
+const nf = new Intl.NumberFormat();
+const el = id => document.getElementById(id);
+const fmt = v => v == null ? "—" : nf.format(Math.round(v));
+const GiB = v => v == null ? null : (v / 2**30).toFixed(1);
+
+// the page is served at /dashboard; a proxy that adds a prefix still reaches ../stats or /stats
+const STATS = location.pathname.replace(/\/(dashboard)?\/?$/, "") + "/stats";
+
+let shown = { decode: 0, prefill: 0 }, target = { decode: 0, prefill: 0 }, scaleMax = 80;
+let lastGood = 0;
+
+function band(v) { return v >= 60 ? css("--accent") : v >= 40 ? css("--cool") : v >= 20 ? css("--warm") : css("--hot"); }
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function arc(ctx, cx, cy, r, w, frac, color, alpha) {
+  const A0 = Math.PI * 0.75, SPAN = Math.PI * 1.5;
+  ctx.beginPath(); ctx.strokeStyle = color; ctx.globalAlpha = alpha; ctx.lineWidth = w; ctx.lineCap = "round";
+  ctx.arc(cx, cy, r, A0, A0 + SPAN * Math.min(1, Math.max(0, frac))); ctx.stroke(); ctx.globalAlpha = 1;
+}
+
+function draw() {
+  shown.decode += (target.decode - shown.decode) * 0.12;
+  shown.prefill += (target.prefill - shown.prefill) * 0.12;
+  scaleMax = Math.max(80, scaleMax * 0.999);                  // grows at once, deflates slowly
+  if (shown.decode > scaleMax * 0.95) scaleMax = shown.decode * 1.25;
+  const c = el("gauge"), x = c.getContext("2d"), S = 560;
+  x.clearRect(0, 0, S, S);
+  const cx = S / 2, cy = S / 2;
+  arc(x, cx, cy, 240, 26, 1, css("--line"), 1);               // tracks
+  arc(x, cx, cy, 196, 12, 1, css("--line"), 1);
+  arc(x, cx, cy, 240, 26, shown.decode / scaleMax, band(shown.decode), 1);
+  if (shown.prefill > 0.5) arc(x, cx, cy, 196, 12, Math.min(1, Math.log10(1 + shown.prefill) / 4), css("--cool"), 1);
+  x.textAlign = "center"; x.fillStyle = css("--text");
+  x.font = "600 88px ui-sans-serif,system-ui"; x.fillText(shown.decode.toFixed(1), cx, cy + 10);
+  x.font = "400 26px ui-sans-serif,system-ui"; x.fillStyle = css("--muted"); x.fillText("tok/s decode", cx, cy + 52);
+  x.font = "500 30px ui-sans-serif,system-ui"; x.fillStyle = css("--cool");
+  x.fillText(fmt(shown.prefill) + " tok/s prefill", cx, cy + 112);
+  x.fillStyle = css("--muted"); x.font = "400 22px ui-sans-serif,system-ui";
+  x.fillText("0", cx - 176, cy + 182); x.fillText(Math.round(scaleMax), cx + 158, cy + 182);
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+function apply(s) {
+  target.decode = s.live?.decode_tok_s ?? 0;
+  target.prefill = s.live?.prefill_tok_s ?? 0;
+  el("model").textContent = s.model + (s.warming ? " · warming" : "");
+  const cn = s.connections || {};
+  el("conns").textContent = ((cn.active || 0) + (cn.waiting || 0)) > 0
+    ? `${cn.active || 0} active${cn.waiting ? ` · ${cn.waiting} waiting` : ""}${cn.filling ? " · prefilling" : ""}`
+    : "idle";
+  el("conns").className = "state" + (((cn.active || 0) + (cn.waiting || 0)) ? " on" : "");
+
+  const ctxs = s.context || {};
+  const pct = ctxs.window_tokens ? Math.min(100, 100 * ctxs.used_tokens / ctxs.window_tokens) : 0;
+  el("ctx").innerHTML = `${fmt(ctxs.used_tokens)} <small>/ ${fmt(ctxs.window_tokens)}</small>`;
+  el("ctxcap").textContent = ctxs.window_tokens ? pct.toFixed(1) + "% of the window" : "no window set";
+  const bar = el("ctxbar");
+  bar.style.width = pct + "%"; bar.className = pct >= 95 ? "hot" : pct >= 75 ? "warm" : "";
+
+  el("cache").textContent = fmt(ctxs.cached_tokens);
+
+  const m = s.memory;
+  if (m) {
+    const used = GiB((m.active || 0) + (m.cache || 0));
+    el("mem").innerHTML = `${used} <small>/ ${GiB(m.budget ?? m.physical)} GiB</small>`;
+    el("memcap").textContent = `peak ${GiB(m.peak)} GiB · ${m.physical ? GiB(m.physical) + " GiB RAM" : ""}`;
+  }
+  const g = s.decode_5m || {};
+  el("gen5").innerHTML = g.min == null ? "—" :
+    `${fmt(g.min)} <small>min ·</small> ${fmt(g.max)} <small>tok/s max</small>`;
+  el("gen5cap").textContent = g.count ? `mean ${fmt(g.mean)} · ${g.count} samples` : "";
+  const p = s.prefill || {};
+  el("pavg").innerHTML = p.avg_tok_s == null ? "—" : `${fmt(p.avg_tok_s)} <small>tok/s</small>`;
+  el("pavgcap").textContent = p.count ? `${p.count} chunks · last ${fmt(p.last_tok_s)}` : "";
+}
+
+async function poll() {
+  if (document.hidden) return;
+  try {
+    const r = await fetch(STATS, { cache: "no-store" });
+    if (r.ok) { apply(await r.json()); lastGood = Date.now(); el("stale").style.display = "none"; }
+  } catch (e) { /* the stale banner below covers it */ }
+  if (lastGood && Date.now() - lastGood > 5000) el("stale").style.display = "block";
+}
+poll(); setInterval(poll, 1000);
+</script>
+</body>
+</html>

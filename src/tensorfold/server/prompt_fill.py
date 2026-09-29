@@ -52,6 +52,8 @@ class PromptFill:
         finally:
             self.engine.prefill_guard = None
         self.prefilled.add(getattr(self.engine, "prefill_tokens", 0) - fed, self.clock() - started)
+        if self.stats is not None:              # --dashboard: the same chunk feeds the page's average prefill rate
+            self.stats.record_prefill(getattr(self.engine, "prefill_tokens", 0) - fed, self.clock() - started)
         # a debt of the last round carries over, an unspent credit does not
         self._credit = min(self._credit, 0.0) + self.decode_share * (self.clock() - started)
         self._rounds_left = self.fill_rounds

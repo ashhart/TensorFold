@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import time
 import traceback
 import uuid
@@ -21,6 +22,7 @@ from tensorfold.server.stacks import Rearming
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
+_DASHBOARD_HTML = pathlib.Path(__file__).with_name("dashboard.html")
 
 
 def _memory(reset_peak: bool, *, admission: Any = None) -> dict[str, int]:
@@ -117,7 +119,29 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     }
                 )
                 return
+            if route in {"/stats", "/v1/stats"}:   # --dashboard: the page polls this, never the engine
+                stats = getattr(app, "stats", None)
+                if stats is not None:
+                    self._send_json(stats.snapshot())
+                    return
+            if route in {"/dashboard", "/v1/dashboard"}:
+                self._send_dashboard()
+                return
             self._send_json({"error": {"message": f"unknown path {self.path}"}}, status=404)
+
+        def _send_dashboard(self) -> None:
+            """The live page: one static file polling ``/stats``; the route only answers under ``--dashboard``."""
+
+            if getattr(app, "stats", None) is None:
+                self._send_json({"error": {"message": "this server runs without --dashboard"}}, status=404)
+                return
+            body = _DASHBOARD_HTML.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def _legacy_prompt_to_text(self, prompt: Any) -> str:
             if isinstance(prompt, str):

@@ -39,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     endpoint.add_argument("--vision", action="store_true", help="enable image input for Qwen3.5/3.8 dense vision checkpoints")
     endpoint.add_argument("--vision-urls", action="store_true",
                           help="with --vision, accept public HTTP(S) image URLs (default: data URLs only)")
+    endpoint.add_argument("--dashboard", action="store_true",
+                          help="serve a live stats page at /dashboard (prefill and decode tok/s, context, cache, "
+                               "memory) fed by /stats; off unless asked for")
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
     generation.add_argument("--context", type=int, default=None,
@@ -384,6 +387,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
           f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
+    if args.dashboard:
+        print("[tensorfold] --dashboard is not wired to the CUDA server yet", flush=True)
     serve(app, args.host, int(args.port))
     return 0
 
@@ -589,14 +594,21 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         raise KeyboardInterrupt      # the cleanup below runs (a plain SIGTERM would skip it)
 
     signal.signal(signal.SIGTERM, _terminate)
-    from tensorfold.server import live
+    from tensorfold.server import live, stats as stats_module
 
     line = live.start(app)      # connections and decode/prefill tok/s on one line, in a terminal only
+    collector = None
+    if args.dashboard:
+        collector = stats_module.StatsCollector(app).start()
+        print(f"[tensorfold] dashboard: http://{args.host}:{args.port}/dashboard "
+              f"(stats at /stats; sampled every {stats_module.EVERY:.0f}s)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if collector is not None:
+            collector.stop()
         if line is not None:
             line.stop()
         server.server_close()

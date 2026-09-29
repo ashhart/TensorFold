@@ -159,6 +159,7 @@ class Scheduler(PromptFill):
         self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
         self.decoded, self.prefilled = Meter(), ChunkRate()       # the live line's decode and prefill tok/s
+        self.stats: Any = None                                    # the --dashboard StatsCollector, once it starts
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:
@@ -249,6 +250,25 @@ class Scheduler(PromptFill):
 
         filling = self._filling
         return None if filling is None else filling.job
+
+    def context_snapshot(self) -> dict[str, int]:
+        """What the dashboard's context tile shows now: tokens the live streams hold, and the prefix hits among them.
+
+        Read-only over the scheduler's own dicts: a stream's ``cache_len`` only grows between the engine's
+        rounds, so a second stale is the page's own sample rate, never a torn read.
+        """
+
+        jobs = list(self._jobs.values()) + ([] if self._filling is None else [self._filling.job])
+        used = cached = 0
+        for job in jobs:
+            stream = job.stream
+            if stream is None:                      # admitted, its first round has not opened the stream
+                used += len(job.prompt_ids)
+                cached += int(job.cached_tokens)
+                continue
+            used += int(getattr(stream, "cache_len", 0) or len(job.prompt_ids) + len(getattr(stream, "emitted", ())))
+            cached += int(getattr(stream, "cached_tokens", 0) or job.cached_tokens)
+        return {"used_tokens": used, "cached_tokens": cached}
 
     @staticmethod
     def finish_job(job: ChatJob, reason: str = "stop") -> None:
