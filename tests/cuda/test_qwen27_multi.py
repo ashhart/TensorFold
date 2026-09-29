@@ -16,7 +16,7 @@ from tensorfold.families.qwen3_5.cuda.decode import prefill, serial_decode  # no
 from tensorfold.families.qwen3_5.cuda.forward import (State, commit, commit_streams, multi_tree_forward,  # noqa: E402
                                                         tree_forward)
 from tensorfold.families.qwen3_5.cuda.draft_tree import allocate  # noqa: E402
-from tensorfold.families.qwen3_5.cuda.multi import TREE, MultiDecoder, kept, private  # noqa: E402
+from tensorfold.families.qwen3_5.cuda.multi import TREE, MultiDecoder, private, viewed  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.weights import Attention, Config, GDN, Layer, QLinear, Weights  # noqa: E402
 
 V = 256
@@ -166,13 +166,14 @@ def test_scheduler_serves_concurrent_requests_exactly():
         t.join(timeout=120)
     assert {i: results[i][0] for i in results} == {i: refs[tuple(PROMPTS[i])] for i in range(len(PROMPTS))}
     assert all(stats["min_rows"] >= 2 for _, stats in results.values())
-    # a prompt extending a finished reply resumes from that request's prompt end and decodes a fresh prefill's tokens
+    # a prompt extending a finished reply resumes from that request's prompt entry (all but its last token) and
+    # decodes a fresh prefill's tokens
     longer = PROMPTS[1] + refs[tuple(PROMPTS[1])][:-1] + [42, 43]
     want = _serial(w, longer, SAMPLINGS[1], 12)
     sched.decoder.truth[tuple(longer)] = want
     got: list[int] = []
     stats = sched.submit(longer, 12, SAMPLINGS[1], draft=True, emit=lambda new: got.extend(new) or False)
-    assert got == want and stats["cached"] == len(PROMPTS[1]), stats
+    assert got == want and stats["cached"] == len(PROMPTS[1]) - 1, stats
     serial: list[int] = []
     stats = sched.submit(longer, 12, SAMPLINGS[1], draft=False, emit=lambda new: serial.extend(new) or False)
     assert serial == want and stats["cached"] == 0 and stats["min_rows"] == 1
@@ -185,12 +186,12 @@ def test_a_failed_prompt_end_copy_fails_only_its_request(monkeypatch):
     refs = {tuple(p): _serial(w, p, smp, 20) for p, smp in zip(PROMPTS, SAMPLINGS)}
     doomed = [2, 9, 4, 4, 1, 8, 8]                      # no other prompt has its length: only its copy fails
 
-    def failing(st):
-        if st.pos == len(doomed):
-            raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end copy)")
-        return kept(st)
+    def failing(st):                                    # the prompt-end entry sits one token before the end
+        if st.pos == len(doomed) - 1:
+            raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end entry)")
+        return viewed(st)
 
-    monkeypatch.setattr("tensorfold.families.qwen3_5.cuda.multi.kept", failing)
+    monkeypatch.setattr("tensorfold.families.qwen3_5.cuda.multi.viewed", failing)
     dec = _Oracle(w, refs, seed=5)
     sched = Scheduler(dec, max_streams=3)
     results: dict = {}

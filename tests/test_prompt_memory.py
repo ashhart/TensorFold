@@ -96,6 +96,157 @@ def test_checkpoint_copy_is_suppressed_before_allocation_when_it_exceeds_store_b
     assert not memory.allow_checkpoint(cache)
 
 
+def retained_prefix_memory(budget):
+    """An in-flight cache and an unrelated retained prefix compete for the same MLX budget."""
+
+    work = populated(64)
+    store = CheckpointStore(3, copier=lambda cache: cache, budget_bytes=1 << 20, sizer=cache_nbytes)
+    store.insert([1], populated(64), last_prompt=[1])
+    runtime = Runtime()
+    runtime.cache = 128
+    runtime.get_active_memory = lambda: runtime.resident + store.nbytes + cache_nbytes(work)
+    model = SimpleNamespace(args=SimpleNamespace(num_attention_heads=1, head_dim=128))
+    memory = PromptMemory(budget, model, runtime=runtime, store=store, overhead_bytes=0,
+                          bootstrap_bytes=0)
+    memory.begin(64, 0, admit=False)
+    memory.observe_cache(work, workspace=False)
+    return memory, runtime, store, work
+
+
+def test_impossible_checkpoint_copy_preserves_retained_prefixes():
+    memory, runtime, store, work = retained_prefix_memory(3200)
+    size = cache_nbytes(work)
+    assert memory.projected(64, current_cache=work, extra_bytes=size) - runtime.cache - store.nbytes > memory.budget
+
+    assert not memory.allow_checkpoint(work)
+    assert store.match([1, 2]) is not None
+    assert store.evictions == 0
+    assert runtime.cache == 128
+
+
+def test_impossible_snapshot_load_preserves_retained_prefixes():
+    memory, runtime, store, work = retained_prefix_memory(3500)
+    size = cache_nbytes(work)
+    assert memory.projected(64, extra_bytes=size) - runtime.cache - store.nbytes > memory.budget
+
+    assert not memory.allow_load(size)
+    assert store.match([1, 2]) is not None
+    assert store.evictions == 0
+    assert runtime.cache == 128
+
+
+@pytest.mark.parametrize("kind,budget", [("checkpoint", 3400), ("load", 3600)])
+def test_reclaim_still_admits_a_copy_that_can_fit(kind, budget):
+    memory, runtime, store, work = retained_prefix_memory(budget)
+    size = cache_nbytes(work)
+    assert memory.projected(64, current_cache=work if kind == "checkpoint" else None,
+                            extra_bytes=size) > memory.budget
+
+    allowed = memory.allow_checkpoint(work) if kind == "checkpoint" else memory.allow_load(size)
+    assert allowed
+    assert runtime.cache == 0
+    assert store.evictions == 1
+
+
+def shelf_memory(*, store=True, entries=(), cache=0):
+    """A 64-token working cache beside retained prefixes of ``entries`` tokens (oldest first) and ``cache`` freed bytes."""
+
+    work = populated(64)
+    shelf = CheckpointStore(8, copier=lambda c: c, budget_bytes=1 << 30, sizer=cache_nbytes) if store else None
+    for i, tokens in enumerate(entries):
+        shelf.insert([100 + i], populated(tokens), last_prompt=[100 + i])
+    runtime = Runtime()
+    runtime.cache = cache
+    runtime.get_active_memory = lambda: runtime.resident + (shelf.nbytes if shelf else 0) + cache_nbytes(work)
+    model = SimpleNamespace(args=SimpleNamespace(num_attention_heads=1, head_dim=128))
+    memory = PromptMemory(1 << 40, model, runtime=runtime, store=shelf, overhead_bytes=0, bootstrap_bytes=0)
+    memory.begin(64, 0, admit=False)
+    memory.observe_cache(work, workspace=False)
+    return memory, runtime, shelf, work
+
+
+def ask(memory, kind, work):
+    """The projected need of a checkpoint copy of ``work`` or a snapshot load of its size, and the call that asks for it."""
+
+    size = cache_nbytes(work)
+    if kind == "checkpoint":
+        return memory.projected(64, current_cache=work, extra_bytes=size), lambda: memory.allow_checkpoint(work)
+    return memory.projected(64, extra_bytes=size), lambda: memory.allow_load(size)
+
+
+@pytest.mark.parametrize("kind", ["checkpoint", "load"])
+def test_a_copy_or_load_exactly_at_the_budget_frees_nothing(kind):
+    memory, runtime, shelf, work = shelf_memory(entries=(128, 64), cache=100)
+    memory.budget, call = ask(memory, kind, work)
+    assert call() and runtime.cache == 100 and shelf.evictions == 0 and len(shelf) == 2
+
+
+@pytest.mark.parametrize("kind", ["checkpoint", "load"])
+def test_freed_buffers_go_before_any_prefix(kind):
+    memory, runtime, shelf, work = shelf_memory(entries=(128, 64), cache=100)
+    need, call = ask(memory, kind, work)
+    memory.budget = need - 100
+    assert call() and runtime.cache == 0 and shelf.evictions == 0 and len(shelf) == 2
+
+
+@pytest.mark.parametrize("kind", ["checkpoint", "load"])
+def test_without_freed_buffers_only_the_oldest_prefixes_needed_go(kind):
+    memory, runtime, shelf, work = shelf_memory(entries=(128, 96, 64))
+    oldest, middle = cache_nbytes(populated(128)), cache_nbytes(populated(96))
+    need, call = ask(memory, kind, work)
+    memory.budget = need - oldest
+    assert call() and shelf.evictions == 1 and [e.tokens for e in shelf._entries] == [[102], [101]]
+    memory, runtime, shelf, work = shelf_memory(entries=(128, 96, 64))
+    memory.budget = need - oldest - middle
+    assert ask(memory, kind, work)[1]() and shelf.evictions == 2 and [e.tokens for e in shelf._entries] == [[102]]
+
+
+@pytest.mark.parametrize("kind", ["checkpoint", "load"])
+@pytest.mark.parametrize("cache", [0, 100])
+def test_an_impossible_copy_or_load_keeps_every_prefix_and_freed_buffer(kind, cache):
+    memory, runtime, shelf, work = shelf_memory(entries=(128, 96, 64), cache=cache)
+    need, call = ask(memory, kind, work)
+    memory.budget = need - cache - shelf.nbytes - 1
+    assert not call() and runtime.cache == cache and shelf.evictions == 0 and len(shelf) == 3
+    memory.budget += 1                                            # everything freed is exactly enough
+    assert call() and runtime.cache == 0 and len(shelf) == 0
+
+
+@pytest.mark.parametrize("store", [False, True])
+def test_with_no_store_or_an_empty_one_only_freed_buffers_make_room(store):
+    memory, runtime, shelf, work = shelf_memory(store=store, cache=100)
+    if not store:
+        assert not memory.allow_checkpoint(work) and runtime.cache == 100    # nowhere to keep a copy
+    for kind in ["checkpoint", "load"] if store else ["load"]:
+        need, call = ask(memory, kind, work)
+        memory.budget = need - 101
+        assert not call() and runtime.cache == 100
+        memory.budget = need - 100
+        assert call() and runtime.cache == 0
+        runtime.cache = 100
+
+
+@pytest.mark.parametrize("kind", ["checkpoint", "load"])
+def test_an_eviction_that_frees_less_than_its_size_stops_the_reclaim(kind):
+    memory, runtime, shelf, work = shelf_memory(entries=(128, 96, 64))
+    oldest, active = shelf._entries[-1], runtime.get_active_memory        # first to go; something else holds its arrays
+    runtime.get_active_memory = lambda: active() + (0 if oldest in shelf._entries else cache_nbytes(oldest.cache))
+    need, call = ask(memory, kind, work)
+    memory.budget = need - shelf.nbytes                            # enough on paper, not once the oldest frees nothing
+    assert not call() and shelf.evictions == 1 and [e.tokens for e in shelf._entries] == [[102], [101]]
+
+
+@pytest.mark.parametrize("kind", ["checkpoint", "load"])
+def test_the_store_budget_refuses_an_oversized_copy_or_load_before_reclaiming(kind):
+    memory, runtime, shelf, work = shelf_memory(entries=(64,), cache=100)
+    shelf.budget_bytes = cache_nbytes(work) - 1
+    need, call = ask(memory, kind, work)
+    memory.budget = need - 100
+    assert not call() and runtime.cache == 100 and shelf.evictions == 0
+    shelf.admit_oversize = True                                    # a memory controller evicts on demand instead
+    assert call() and runtime.cache == 0
+
+
 def test_retained_prefixes_are_evicted_before_refusing_the_next_request():
     cache = populated()
     runtime = Runtime()
@@ -536,3 +687,57 @@ def test_the_engine_releases_rounds_only_with_no_stream_live():
     engine._live = [(SimpleNamespace(finished=False), [])]
     engine.release_rounds()
     assert calls == [1]
+
+
+def test_the_window_counts_a_live_streams_growth_beyond_its_cache():
+    memory = controller(budget=40_000_000, store=CheckpointStore(4, copier=lambda c: c, sizer=cache_nbytes))
+    memory.begin(256, 64, admit=False)
+    memory.observe_cache(populated(), workspace=False)
+    per = memory.profile.bytes_per_token
+    kept, alone = memory.largest_window(1 << 20, resumable=True), memory.largest_window(1 << 20)
+    memory.stream_per_token = per                                   # a stream that is only its cache: no change
+    assert memory.largest_window(1 << 20, resumable=True) == kept and memory.largest_window(1 << 20) == alone
+    memory.stream_per_token = 3 * per                               # twice as much again outside it, as measured
+    assert 0 < memory.largest_window(1 << 20, resumable=True) < kept
+    assert 0 < memory.largest_window(1 << 20) < alone
+
+
+def kv(tokens):
+    keys, values = Array((1, 1, tokens, 256)), Array((1, 1, tokens, 256))    # 1 KiB of keys and values a token
+    return [SimpleNamespace(keys=keys, values=values, state=(keys, values), offset=tokens)]
+
+
+@pytest.mark.parametrize("counted", [True, False])
+def test_a_growing_conversation_keeps_each_turns_prompt_up_to_the_fitted_window(counted):
+    """Bounded memory: a turn's cache, its stream's growth outside it and a kept copy fit, turn after turn."""
+
+    extra = 512                                                     # a stream's own growth a token (draft state)
+    store = CheckpointStore(4, copier=lambda c: c, budget_bytes=1 << 20, sizer=cache_nbytes)
+    store.admit_oversize = True
+    runtime, live = Runtime(resident=64 << 20), []
+    runtime.get_active_memory = lambda: (runtime.resident + store.nbytes
+                                         + sum(cache_nbytes(c) + extra * c[0].offset for c in live))
+    model = SimpleNamespace(args=SimpleNamespace(num_attention_heads=1, head_dim=128))
+    memory = PromptMemory(96 << 20, model, runtime=runtime, store=store, overhead_bytes=0, bootstrap_bytes=0,
+                          chunk_rows=256)
+    memory.observe_cache(kv(256), workspace=False)
+    memory.stream_per_token = memory.profile.bytes_per_token + (extra if counted else 0)   # the probe's reading
+    window, fitted = memory.fit_window(1 << 20, True)
+    assert fitted and 0 < window < 16_000
+    kept = []
+    for prompt in [*range(1_000, window - 64, 1_000), window - 64]:  # the last turn fills the window
+        memory.begin(prompt, 64, admit=False)
+        store.match(list(range(prompt)), take=True)                 # the last turn's prefix becomes this turn's cache
+        boundary = prompt // 256 * 256                              # the last chunk start: the copy happens here
+        live[:] = [kv(boundary)]
+        kept.append(memory.allow_checkpoint(live[0]))
+        assert memory.projected(prompt, current_cache=live[0], extra_bytes=cache_nbytes(live[0])) <= memory.budget \
+            or not kept[-1]
+        if kept[-1]:
+            store.insert(list(range(boundary)), kv(boundary), last_prompt=list(range(prompt)))
+        live[0] = kv(prompt + 64)                                   # the prompt and reply, then the turn ends
+        assert runtime.get_active_memory() <= memory.budget or not counted
+        live.clear()
+        memory.end()
+    assert len(kept) > 8
+    assert all(kept) if counted else not kept[-1]                   # uncounted, the window's top can't be kept

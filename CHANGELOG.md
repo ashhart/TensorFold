@@ -3,6 +3,56 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.3.6.3 (29 Sep 2026)
+
+- **Images in, on Macs and Sparks.** `--vision` lets Qwen3.8-27B read up to four images a request, as data URLs or,
+  with `--vision-urls`, HTTPS links. Image replies keep drafting and equal `"draft": false` ones (77.6 against 37.3
+  tok/s serial on an M3 Ultra), and the first token comes as fast as mlx-vlm's. Thanks to @di37 for HTTPS-only
+  fetching, bounded image preparation and redacted request logs (#64).
+- **DeepSeek-V4-Flash on a 256 GB Mac.** The new `deepseek_v4` family serves `mlx-community/DeepSeek-V4-Flash-4bit`
+  on the lane engine with DSpark or MTP drafts converted from DeepSeek's releases, and replies equal `"draft": false`
+  ones. On an M3 Ultra it decodes 1.7-3.1x and reads prompts 1.8-2.0x as fast as mlx-lm PR #1797's server. Thanks to
+  @jeffpeng3 (#14).
+- **NVFP4 checkpoints on CUDA, as published.** Flash Next's NVFP4 exports (local-inference-lab's and RadixArk's)
+  and NVIDIA's Qwen3.8-27B NVFP4 load through `tensorfold serve` and stay exact: drafted replies equal `"draft": false`
+  ones, resumed prompts equal fresh ones, and 84 of 84 concurrent streams equal their solo runs. The experts read
+  their routing on the GPU, so CUDA graphs replay any routing. On one Spark, Flash Next NVFP4 decodes 1.13-1.52x vLLM
+  on the same checkpoint. Two ranks, `--ple-on-ssd` and images on NVFP4 checkpoints stop at startup with a message
+  until they're qualified. Thanks to @tournierjc for the reader (#67).
+- **Ternary Bonsai 2 27B** (prism-ml's 2-bit pack) serves on the lane engine with Qwen3.8-27B's DFlash2 drafts,
+  exact. Against mlx_lm running the pack's own runtime on an M5 Max: decode 3.7-5.8x on code and 1.7-2.2x on chat,
+  prompts 1.4-1.7x. Thanks to @gprot42 (#18).
+- **CUDA server work from @nood-co1:** stop strings on every CUDA engine and `ignore_eos` on the 27B (#63);
+  malformed requests get a 400, and failed ones a 500 or a stream error event (#61); a silent start explains itself
+  with extension-build progress and stale-lock notes, and `kill -USR1 <pid>` prints every thread's stack, at start or
+  while serving (#62); the 27B keeps its prompt cache entry one token before the prompt's end, so the next chat turn
+  resumes from it (#65).
+- **Replies keep decoding while long prompts prefill on Macs.** A prompt now fills one planned chunk at a time and
+  running replies take rounds between its chunks, for `--decode-share` of each chunk's time (default 0.25, about a
+  fifth of the time; 0 prefills whole prompts first, as before); every reply still equals its solo run. On an M3
+  Ultra, a reply's longest pause while three 17K-token prompts arrive fell from 164 s to 7 s, and a request alone is
+  unchanged. Thanks to @benwilson (#72).
+- **Long conversations stay warm on Macs.** A checkpoint that can't fit no longer evicts the others first, a resumed
+  turn no longer holds the stored prefix it copied, and the 27B's DFlash2 prompt taps take 64 KB a token instead of
+  114. On a 64 GB budget (emulated on an M3 Ultra), one conversation grew to 143K tokens and each turn resumed in
+  38-46 s, where 0.3.6.2 prefilled every turn past about 100K from the start. Startup names the longest request
+  whose prompt is kept. Thanks to @sanjaibalajee (#74), and to @benwilson for the report and his
+  64 GB measurements, now in the README labelled 0.3.5.1 (#71, #70).
+- **Qwen3.6 on CUDA keeps serving past 8,192 rows** with expandable allocator segments: its graphs now capture into a
+  new pool after the buffers grow, where every later request failed. Thanks to @philip-pentatonic (#78).
+- **Typed tool arguments on CUDA:** a Qwen tool call's array, object, number and boolean parameters arrive as JSON
+  values, as on the Mac. Thanks to @MiaAI-Lab (#75).
+- **Flash Next reads a prompt chunk's n-gram rows on 16 threads,** same bytes, so prompt times vary less when the
+  tables are not all in the page cache. Thanks to @MovieMaker93 (#73).
+- **On M1-M4, the MoE prompt matmuls give each GPU tile one expert's rows,** the scheduling idea of MLX's gather_mm
+  change (ml-explore/mlx#4567), written for 4-bit gathers. Same bits. On an M3 Ultra, Flash Next's prompts run 2-4%
+  faster (1.02-1.20x oMLX's) and GLM-5.3's 3.4-3.8% faster (1.08-1.11x mlx-vlm's at 8k-32k).
+- **Flash Next prompts on M1-M4:** the block scores run as one batched matmul, the GQA kernel scores two query heads
+  a simdgroup and the top-512 selection finds its cuts with a simdgroup scan. Same bits, about 1% faster at 16k-64k;
+  on an M3 Ultra it is level with oMLX at 32k and 64k.
+- **MLX stays at 0.32.2 for now.** MLX 0.32.3 changed a kernel our prompt kernels build on, so fresh installs fell
+  back to slower prompts with one log line; the next release follows the new kernel. Thanks to @ecohash-co (#88).
+
 ## 0.3.6.2 (28 Sep 2026)
 
 - **EXL3 replies stop at the end of the turn.** Flash Next and 27B EXL3 packs list `<|im_end|>` only in

@@ -126,6 +126,7 @@ class Config:
     experts: int = 0          # routed experts a MoE layer picks from (0: dense MLPs)
     top_k: int = 0
     moe_width: int = 0
+    mrope_section: tuple[int, int, int] = (11, 11, 10)
 
     @classmethod
     def read(cls, model_dir: str | Path) -> "Config":
@@ -154,6 +155,7 @@ class Config:
             rope_theta=float(rope.get("rope_theta", t.get("rope_theta") or 10000000.0)),
             eos=eos, experts=int(t.get("num_experts", 0)), top_k=int(t.get("num_experts_per_tok", 0)),
             moe_width=int(t.get("moe_intermediate_size", 0)),
+            mrope_section=tuple(rope.get("mrope_section", (11, 11, 10))),
         )
 
     def is_linear(self, layer: int) -> bool:
@@ -204,14 +206,16 @@ class Weights:
     embed: QLinear | Plain
     layers: list[Layer]
     norm: torch.Tensor
-    head: QLinear | Exl3
+    head: Any                                        # QLinear, Exl3, or an NVFP4 checkpoint's linear
     inv_freq: torch.Tensor | None = None             # (rope_dims/2,) fp32
-    quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16)
+    quant: str = "mlx"                               # "exl3": an EXL3 pack (prompt glue then stays in bf16); "nvfp4"
 
     @cached_property
     def fast_prefill(self) -> bool:
         if self.quant == "exl3":                     # an EXL3 pack's prompt glue stays in bf16
             return False
+        if self.quant == "nvfp4":                    # NVFP4, FP8 and the gates' copies all take FP8 prompt rows
+            return True
         for layer in self.layers:
             modules = [m for m in (layer.gate, layer.up, layer.down) if m is not None]    # a MoE layer's are None
             modules += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []
@@ -233,16 +237,17 @@ class Weights:
 class _Tensors:
     """Checkpoint tensors read one at a time, so the weights never sit in device memory twice while they pack."""
 
-    def __init__(self, model_dir: Path, device: str) -> None:
+    def __init__(self, model_dir: Path, device: str, skip=None) -> None:
         from contextlib import ExitStack
 
         from safetensors import safe_open
 
+        skip = skip or (lambda name: name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp."))
         self.device, self.files, self.where = device, ExitStack(), {}
         for path in sorted(model_dir.glob("*.safetensors")):
             f = self.files.enter_context(safe_open(str(path), framework="pt", device="cpu"))
             for name in f.keys():
-                if not (name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp.")):
+                if not skip(name):
                     self.where[name] = f
 
     def __contains__(self, name: str) -> bool:
@@ -259,13 +264,16 @@ class _Tensors:
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, mlp=None) -> Weights:
-    """MLX affine 4-bit (``tiled``: projections packed as read; ``mlp(prefix, get, qlinear, cfg)``: a layer's MLP fields), or an EXL3 pack."""
+    """MLX affine 4-bit (``tiled``: projections packed as read; ``mlp(prefix, get, qlinear, cfg)``: a layer's MLP fields), an EXL3 pack, or NVFP4."""
 
     from .exl3_load import load_exl3, quant_config
+    from .nvfp4_load import load_nvfp4, quantized
 
     model_dir = Path(model_dir)
     if quant_config(model_dir) is not None:
         return load_exl3(model_dir, device)
+    if quantized(model_dir):
+        return load_nvfp4(model_dir, device)
     cfg = Config.read(model_dir)
     raw = json.loads((model_dir / "config.json").read_text())
     t = _Tensors(model_dir, device)

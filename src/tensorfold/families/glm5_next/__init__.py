@@ -12,6 +12,8 @@ LANES = True
 MODELS = ("Vontra/GLM-5.3-Flash-MLX-4bit-MTP", "Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw")
 DRAFTER = "incoai/GLM-5.3-Flash-DFlash2"   # the CUDA engine's optional draft model; the Mac engine drafts with MTP
 KERNEL_PACKAGE = "tensorfold.kernels.glm.flash.v1"
+# the prompt experts' sorted gather (Flash Next's prompt matmuls), hashed into snapshot keys
+KERNEL_DEPENDENCIES = ("tensorfold.kernels.qwen.flash_next.v1.prefill_mm",)
 KERNEL_VERSION = "v1"
 # the storage formats each engine reads: MLX affine on a Mac; that or EXL3 routed experts on CUDA
 QUANT_METHODS = {"mlx": ("mlx",), "cuda": ("mlx", "exl3")}
@@ -149,9 +151,11 @@ def kernel_version(model: Any) -> str:
     import mlx.core as mx
 
     digest = hashlib.sha256()
-    for module in (__name__, KERNEL_PACKAGE):
-        folder = Path(str(importlib.import_module(module).__file__)).parent
-        for path in sorted(folder.glob("*.py")):       # this folder only: the CUDA engine (cuda/) is not on this path
+    for module in (__name__, KERNEL_PACKAGE, *KERNEL_DEPENDENCIES):
+        source = Path(str(importlib.import_module(module).__file__))
+        folder = source.parent
+        # a package's folder only (the CUDA engine, cuda/, is not on this path); a module's own file
+        for path in sorted(folder.glob("*.py")) if source.name == "__init__.py" else [source]:
             digest.update(path.relative_to(folder).as_posix().encode())
             digest.update(path.read_bytes())
     digest.update(mx.__version__.encode())

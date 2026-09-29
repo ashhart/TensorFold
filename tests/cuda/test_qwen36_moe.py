@@ -21,7 +21,7 @@ from tensorfold.families.qwen3_5_moe.cuda.weights import MTP  # noqa: E402
 V, D, E, WIDTH, TOP = 256, 256, 16, 64, 4
 
 
-def _model(seed: int = 11):
+def _model(seed: int = 11, vocab: int = V):
     gen = torch.Generator(device="cuda").manual_seed(seed)
     dev = "cuda"
 
@@ -56,12 +56,12 @@ def _model(seed: int = 11):
 
     layers = [Layer(True, norm, norm, gdn, None, None, None, None, routed()),
               Layer(False, norm, norm, None, attn(), None, None, None, routed())]
-    config = Config(hidden=D, intermediate=0, layers=2, heads=2, kv_heads=1, head_dim=128, vocab=V, k_heads=1,
+    config = Config(hidden=D, intermediate=0, layers=2, heads=2, kv_heads=1, head_dim=128, vocab=vocab, k_heads=1,
                     v_heads=1, dk=128, dv=128, conv_kernel=4, interval=2, eps=1e-6, rope_dims=32,
                     rope_theta=10000000.0, eos=(0,), experts=E, top_k=TOP, moe_width=WIDTH)
-    s, b = affine(V, D // 64)
-    embed = QLinear(words(V, D // 8), s, b)
-    w = Weights(config, embed, layers, norm, qlinear(V, D), torch.ones(16, device=dev))
+    s, b = affine(vocab, D // 64)
+    embed = QLinear(words(vocab, D // 8), s, b)
+    w = Weights(config, embed, layers, norm, qlinear(vocab, D), torch.ones(16, device=dev))
     m = MTP(norm_e=norm, norm_h=norm, fc_e=qlinear(D, D), fc_h=qlinear(D, D), input_norm=norm, post_norm=norm,
             attn=attn(), moe=routed(), norm=norm)
     return w, Head(w, m)
@@ -154,6 +154,33 @@ def test_graph_replays_equal_eager_rounds(sampling):
     assert runner.target and runner.mtp                  # captured once, replayed by the later requests
 
 
+@pytest.mark.parametrize("expandable", [False, True])
+@pytest.mark.parametrize("sampling", [None, Sampling(1234, 1.0, 20, 0.95)])
+def test_graphs_recapture_after_the_buffers_grow(expandable, sampling):
+    """A request past the first buffers' rows grows them and recaptures (expandable segments leave the dropped
+    graphs' pool registered); drafted tokens stay serial before, across and after the growth."""
+
+    import os
+
+    from tensorfold.families.qwen3_5_moe.cuda.graphs import BUCKET, Graphs
+
+    w, head = _model(vocab=1 << 20)          # two chain widths' logits map the pool's expandable segment twice
+    runner = Graphs(w, head, 4 * BUCKET)
+    long = [3 + (i * 7) % 200 for i in range(BUCKET)]           # with its reply, past the first BUCKET rows
+    torch.cuda.memory._set_allocator_settings(f"expandable_segments:{expandable}")
+    try:
+        for prompt, depth, rows in ((PROMPTS[1], 3, BUCKET), (PROMPTS[0], 2, BUCKET), (long, 3, 2 * BUCKET),
+                                    (PROMPTS[2], 3, 2 * BUCKET)):
+            want = _serial(w, prompt, sampling, 24)
+            st, mc, first, carry = decode.prefill(w, head, prompt, sampling)
+            res = decode.mtp_decode(w, head, st, mc, carry, first, 24, sampling, depth=depth, confidence=0.0,
+                                    runner=runner)
+            assert res.tokens == want and runner.rows == rows
+    finally:
+        default = "expandable_segments:True" in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        torch.cuda.memory._set_allocator_settings(f"expandable_segments:{default}")
+
+
 def test_a_long_prompt_absorbs_through_the_prefill_kernel_and_decodes_serially():
     """Prompt chunks past the tree kernel's 128 rows absorb into the head with the prefill kernel; tokens stay serial."""
 
@@ -167,3 +194,22 @@ def test_a_long_prompt_absorbs_through_the_prefill_kernel_and_decodes_serially()
     res = decode.mtp_decode(w, head, st, mc, carry, first, 24, None, depth=3, confidence=0.0,
                             runner=Graphs(w, head, 400))
     assert res.tokens == want
+
+
+def test_ignore_eos_decodes_past_end_tokens_as_serial_does():
+    """``stop_eos=False`` (ignore_eos) runs drafted rounds through an end token to the count, as serial rounds do."""
+
+    from tensorfold.families.qwen3_5_moe.cuda.graphs import Graphs
+
+    w, head = _model()
+    prompt = PROMPTS[0]
+    st, first = serial_prefill(w, prompt, None)
+    free = draft_decode(w, st, prompt, first, 40, None, None, allow_copy=False, stop_eos=False).tokens
+    w.config.eos = (free[5],)                               # an end token inside the reply
+    runs = {}
+    for stop_eos in (False, True):
+        st, mc, first, carry = decode.prefill(w, head, prompt, None)
+        runs[stop_eos] = decode.mtp_decode(w, head, st, mc, carry, first, 40, None, depth=3, confidence=0.0,
+                                           stop_eos=stop_eos, runner=Graphs(w, head, 128)).tokens
+    assert runs[False] == free and len(free) == 40
+    assert runs[True] == free[:free.index(free[5]) + 1]

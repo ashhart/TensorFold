@@ -126,13 +126,15 @@ class DFlashHead:
             for item in proposer.cache:
                 item.offset = first
             proposer.context, proposer.ready = mx.contiguous(taps), True
-            return
-        proposer.absorb(taps)
-        held = int(proposer.context.shape[1])
-        if window and held > window:
-            proposer.context = proposer.context[:, held - window:]
-            for item in proposer.cache:
-                item.offset += held - window
+        else:
+            proposer.absorb(taps)
+            held = int(proposer.context.shape[1])
+            if window and held > window:
+                proposer.context = proposer.context[:, held - window:]
+                for item in proposer.cache:
+                    item.offset += held - window
+        # evaluated each chunk: a lazy context would hold every earlier chunk's taps until the first draft
+        mx.async_eval(proposer.context)
 
     def read(self, cache: list[Any], rows: Sequence[int], follow: Sequence[int], sampling: Any) -> None:
         """Absorb the stream's kept rows and committed follow tokens, with the new pending token last."""

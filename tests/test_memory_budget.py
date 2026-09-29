@@ -8,6 +8,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from tensorfold import cli, families, hub
+from tensorfold.server import memory_budget
 from tensorfold.server.memory_budget import (
     PROCESS_BYTES,
     CacheMemory,
@@ -30,6 +31,7 @@ def test_serve_limits_memory_before_loading_without_changing_residency(monkeypat
     core.set_memory_limit = lambda value: calls.append(("memory", value))
     core.device_info = lambda: {"max_recommended_working_set_size": 64 * GIB, "memory_size": 128 * GIB}
     core.metal = SimpleNamespace(is_available=lambda: metal)
+    monkeypatch.setattr(memory_budget, "physical_memory_bytes", lambda: 128 * GIB)     # the host's RAM plays no part
     core.set_wired_limit = lambda value: calls.append(("wired", value)) or 7 * GIB
     core.synchronize = lambda: calls.append(("sync", None))
     mlx = ModuleType("mlx")
@@ -247,6 +249,7 @@ def _serve_to_app(monkeypatch, tmp_path, argv, capsys):
     core.set_memory_limit = lambda value: None
     core.device_info = lambda: {"max_recommended_working_set_size": 64 * GIB, "memory_size": 128 * GIB}
     core.__version__ = "0.0"
+    monkeypatch.setattr(memory_budget, "physical_memory_bytes", lambda: 128 * GIB)     # the host's RAM plays no part
     core.synchronize = core.clear_cache = lambda: None               # the weights' wiring after load
     core.get_active_memory = lambda: 0
     core.set_wired_limit = lambda value: 0
@@ -275,6 +278,7 @@ def _serve_to_app(monkeypatch, tmp_path, argv, capsys):
             made.update(kwargs)
             self.context_window = 61440 if kwargs["fit_context"] else kwargs["context_window"]
             self.context_fitted = kwargs["fit_context"]
+            self.prompt_memory = SimpleNamespace(resumable=61440)
 
         def close(self):
             pass
@@ -308,7 +312,9 @@ def test_an_omitted_context_is_fitted_to_memory_and_the_banner_shows_the_window(
     assert "model's window is 262,144" in out
     made, out = _serve_to_app(monkeypatch, tmp_path, ["--context", "32768"], capsys)
     assert made["fit_context"] is False and made["context_window"] == 32768
-    assert "context: 32768" in out
+    assert "context: 32768" in out and "keep their prompt" not in out
+    made, out = _serve_to_app(monkeypatch, tmp_path, ["--context", "131072"], capsys)
+    assert "context: 131072" in out and "requests up to 61,440 tokens keep their prompt for the next turn" in out
 
 
 def test_weights_past_the_budget_are_refused_before_loading(monkeypatch, tmp_path):

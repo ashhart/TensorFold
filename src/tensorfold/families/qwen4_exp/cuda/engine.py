@@ -26,10 +26,12 @@ class FlashNextEngine:
 
         from .exl3_pack import admission, extra_files, is_exl3
 
+        from tensorfold.families import quant_method, read_config
+
         exl3 = is_exl3(model_dir)
-        if exl3 and tp != 1:
-            raise ValueError("EXL3 packs of Flash Next run on one GPU: drop --tp 2, or serve the MLX checkpoint "
-                             "(Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP) on two")
+        if (exl3 or quant_method(read_config(model_dir)) == "modelopt") and tp != 1:
+            raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Flash Next run on one GPU: drop --tp "
+                             "2, or serve the MLX checkpoint (Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP) on two")
         if exl3 and ple_on_ssd:
             raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram tables; an EXL3 pack maps its own table "
                              "from its file, so drop --ple-on-ssd")
@@ -100,7 +102,7 @@ class FlashNextEngine:
         locked = False
         if prefetch and not ple_on_ssd:               # the n-gram tables' pages, read now rather than by requests
             tables = {id(layer.ple.table): layer.ple.table for layer in w.layers if layer.ple is not None}
-            size = sum(a.nbytes for t in tables.values() for a in t.words + t.scales + t.biases)
+            size = sum(t.nbytes for t in tables.values())
             # pinned pages are no longer reclaimable: lock only what the startup budget leaves room for
             room = self.capacity_plan["budget_bytes"] - self.capacity_plan["total_bytes_estimate"]
             for table in tables.values():

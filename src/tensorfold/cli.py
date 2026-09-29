@@ -13,8 +13,9 @@ import time
 from typing import Any
 
 from tensorfold import __version__
+from tensorfold.server import stacks
 from tensorfold.server.memory_budget import MEMORY_FRACTION
-from tensorfold.serve_options import check as _check_serve_options
+from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
 COMMANDS = ("serve", "pull", "models", "info", "update")
 
@@ -35,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
     endpoint.add_argument("--port", type=int, default=8080)
     endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
+    endpoint.add_argument("--vision", action="store_true", help="enable image input for Qwen3.5/3.8 dense vision checkpoints")
+    endpoint.add_argument("--vision-urls", action="store_true",
+                          help="with --vision, accept public HTTP(S) image URLs (default: data URLs only)")
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
     generation.add_argument("--context", type=int, default=None,
@@ -82,6 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="requests decoded together, their windows sharing each round's forward: a number, or "
                             "auto (Mac: up to 8, each started only while the projected memory fits the budget; "
                             "CUDA: one at a time, the others waiting their turn)")
+    speed.add_argument("--decode-share", type=float, default=None, help="Mac: while a prompt prefills, running replies "
+                       "keep moving for this share of each chunk's time and later prompts start later (default 0.25; "
+                       "0: whole prompts first, as 0.3.6.2)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
     speed.add_argument("--ssd-experts", type=float, default=None, metavar="GIB",
                        help="stream routed experts from the checkpoint into a GPU pool of this many GiB, for models "
@@ -340,6 +347,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
     if getattr(args, "kv_dtype", "bf16") != "bf16":
         options["kv_dtype"] = args.kv_dtype
+    options.update(_vision_options(args))
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
     if args.ple_on_ssd:
@@ -355,6 +363,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
     engine = family.package.cuda_engine(model_dir, **options)
+    stacks.arm()            # its warmup may have loaded a compiler that took USR1
     if args.tp == 2 and args.rank == 1:
         print(f"[tensorfold] rank 1 ready in {time.perf_counter() - started:.1f}s, following rank 0", flush=True)
         engine.follow()
@@ -412,7 +421,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if args.ple_on_ssd and not hasattr(family.package, "ple_bytes"):
         raise ValueError(f"--ple-on-ssd: {family.title} has no n-gram (PLE) tables to read from SSD")
     backend = _backend(args.backend, family)
-    _check_serve_options(args, family, backend)
+    _check_serve_options(args, family, backend, config_dir)
     families.require_readable(family, families.read_config(config_dir), backend)
     _note_untested(family, args.model)
     required_files = getattr(family.package, "REQUIRED_FILES", {}).get(args.model, ())
@@ -430,15 +439,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     model_dir = hub.resolve(args.model, required_files=required_files)
     if needs_full_snapshot and check is not None:
         check(model_dir)                         # checks that need the complete index, such as an MTP head
+
+    stacks.start()          # `kill -USR1 <pid>` prints every thread's Python stack: where a silent server waits
     if backend == "cuda":
         return _serve_cuda(args, family, model_dir, context)
     for key, value in getattr(family.package, "MLX_ENV", {}).items():
         os.environ.setdefault(key, value)       # before MLX starts: it reads them once
-
-    # `kill -USR1 <pid>` prints every thread's Python stack: the way to see where a silent server waits
-    import faulthandler
-
-    faulthandler.register(signal.SIGUSR1, all_threads=True)
     import mlx.core as mx
 
     from tensorfold.server.memory_budget import PROCESS_BYTES, budget_ceiling, configure_mlx, model_fraction, raise_hint
@@ -482,6 +488,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     parallel = _parallel(args.parallel)
     options: dict[str, Any] = {"lane_kernels": args.lane_kernels, "drafter": drafter,
                                "drafter_bits": args.drafter_bits, "parallel": parallel}
+    options.update(_vision_options(args))
     if args.mtp_drafts is not None:
         options["mtp_drafts"] = int(args.mtp_drafts)
     if args.ple_on_ssd:
@@ -539,13 +546,10 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     app = ChatApp(
         model,
         tokenizer,
-        served_name=served,
-        model_aliases=list(args.alias),
-        engine_factory=engine_factory,
-        lanes=parallel,
+        served_name=served, model_aliases=list(args.alias),
+        engine_factory=engine_factory, lanes=parallel,
         memory_fraction=fraction if parallel > 1 else None,
-        max_rows=int(engine_kwargs.get("max_rows", 16)),
-        max_draft=int(engine_kwargs.get("max_draft", 32)),
+        max_rows=int(engine_kwargs.get("max_rows", 16)), max_draft=int(engine_kwargs.get("max_draft", 32)),
         default_max_tokens=int(args.max_tokens),
         context_window=context,
         enable_thinking=bool(args.thinking),
@@ -559,13 +563,18 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         memory_budget_bytes=memory_limit,
         fit_context=args.context is None,
         use_proposer=not args.no_drafts,
-        snapshot_dir=snapshot_dir,
-        model_id=model_id,
+        snapshot_dir=snapshot_dir, model_id=model_id,
+        decode_share=0.25 if args.decode_share is None else float(args.decode_share),
     )
     if app.context_fitted:
         print(f"[tensorfold] context window {app.context_window:,} tokens: the most one request can use in the "
-              f"{memory_limit / 1024**3:.1f} GiB memory budget (the model's window is {context:,}); have clients "
-              "compact before it", flush=True)
+              f"{memory_limit / 1024**3:.1f} GiB memory budget and still keep its prompt for the next turn (the "
+              f"model's window is {context:,}); have clients compact before it", flush=True)
+    kept = getattr(getattr(app, "prompt_memory", None), "resumable", None)
+    if kept is not None and not app.context_fitted and (not app.context_window or kept < app.context_window):
+        print(f"[tensorfold] requests up to {kept:,} tokens keep their prompt for the next turn in the "
+              f"{memory_limit / 1024**3:.1f} GiB memory budget; a longer one is served, and its next turn prefills "
+              "again", flush=True)
     hook = getattr(family.package, "setup", None)
     if hook is not None:
         hook(app, model, **options)

@@ -7,7 +7,9 @@ import re
 import uuid
 from typing import Any
 
+from tensorfold.server.stopping import StopPolicy
 from tensorfold.server.tools import parse_glm_tool_call_block
+from tensorfold.tool_parameters import decode_parameter, parameter_schemas
 
 _CALL_OPEN, _CALL_CLOSE = "<tool_call>", "</tool_call>"
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.IGNORECASE | re.DOTALL)
@@ -53,6 +55,27 @@ class StreamDecoder:
 
 
 
+class StopStrings:
+    """A request's ``stop`` strings, decided token by token, so a reply cuts at the same token however its tokens arrive."""
+
+    def __init__(self, strings: tuple[str, ...], tok, skip: tuple[int, ...] = ()):
+        self.strings, self.tok, self.skip = strings, tok, frozenset(skip)
+        # a new match lies in the last (its UTF-8 length) tokens, plus eight as the Mac's ``StopPolicy`` keeps
+        self.tail = max((len(s.encode()) for s in strings), default=0) + 8
+
+    def hit(self, tokens: list[int]) -> bool:
+        """Whether the text through the newest token holds a stop string (earlier tokens were checked already)."""
+
+        ids = [t for t in tokens[-self.tail:] if t not in self.skip]
+        text = self.tok.decode(ids, skip_special_tokens=False)
+        return any(stop in text for stop in self.strings)
+
+    def visible(self, text: str, *, partial: bool = False) -> str:
+        """The text before the first match; ``partial`` also holds back an end that may begin one (the Mac's rule)."""
+
+        return StopPolicy.visible(self, text, partial=partial)
+
+
 def hide_tool_calls(text: str, *, finished: bool) -> str:
     out: list[str] = []
     pos = 0
@@ -80,6 +103,7 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
     if not tools:
         return text, None
     known = {_tool_name(t).lower(): _tool_name(t) for t in tools}
+    schemas = parameter_schemas(tools)
     calls: list[dict[str, Any]] = []
     residue: list[str] = []
     cursor = 0
@@ -104,7 +128,11 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
                 if max_calls is not None and _TOOL_PARAMETER_BLOCK_RE.sub("", m.group(2)).strip():
                     continue
                 name = m.group(1).strip()
-                args = {p.group(1).strip(): p.group(2) for p in _TOOL_PARAMETER_BLOCK_RE.finditer(m.group(2))}
+                # typed parameters (array, object, number...) decode per the tool's schema, as the Mac server does
+                props = schemas.get(name.lower(), {})
+                args = {key: decode_parameter(value, props.get(key, {}))
+                        for key, value in ((p.group(1).strip(), p.group(2))
+                                           for p in _TOOL_PARAMETER_BLOCK_RE.finditer(m.group(2)))}
             else:
                 glm = parse_glm_tool_call_block(block, tools, complete=max_calls is not None)
                 if glm is not None:

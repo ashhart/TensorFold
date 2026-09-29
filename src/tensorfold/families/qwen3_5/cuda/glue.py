@@ -153,7 +153,8 @@ def swiglu(gate: torch.Tensor, up: torch.Tensor):
 
 @triton.jit
 def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps,
-               H: tl.constexpr, HKV: tl.constexpr, D: tl.constexpr, HALF: tl.constexpr):
+               H: tl.constexpr, HKV: tl.constexpr, D: tl.constexpr, HALF: tl.constexpr,
+               MROPE: tl.constexpr, ROWS: tl.constexpr, HSEC: tl.constexpr, WSEC: tl.constexpr):
     """Program (row, head): heads 0..H-1 are queries (from [q | gate] rows), H..H+HKV-1 keys."""
 
     row = tl.program_id(0)
@@ -167,8 +168,13 @@ def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps,
         x = tl.load(KV + (row * HKV + head - H) * D + d).to(tl.float32)
         w = tl.load(KN + d).to(tl.float32)
     xn = (x * (1.0 / tl.sqrt(tl.sum(x * x, axis=0) / D + eps)) * w).to(tl.bfloat16).to(tl.float32)
-    pos = tl.load(POS + row).to(tl.float32)
-    i = tl.where(d < HALF, d, tl.where(d < 2 * HALF, d - HALF, 0))
+    if MROPE:
+        i = tl.where(d < HALF, d, tl.where(d < 2 * HALF, d - HALF, 0))
+        axis = tl.where((i % 3 == 1) & (i < 3 * HSEC), 1, tl.where((i % 3 == 2) & (i < 3 * WSEC), 2, 0))
+        pos = tl.load(POS + axis * ROWS + row).to(tl.float32)
+    else:
+        pos = tl.load(POS + row).to(tl.float32)
+        i = tl.where(d < HALF, d, tl.where(d < 2 * HALF, d - HALF, 0))
     ang = pos * tl.load(INV + i)
     cos = tl.cos(ang)
     sin = tl.sin(ang)
@@ -189,14 +195,22 @@ def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps,
 
 
 def attn_prep(qg: torch.Tensor, k: torch.Tensor, q_norm: torch.Tensor, k_norm: torch.Tensor,
-              pos: torch.Tensor, inv_freq: torch.Tensor, eps: float, *, heads: int, kv_heads: int, head_dim: int):
+              pos: torch.Tensor, inv_freq: torch.Tensor, eps: float, *, heads: int, kv_heads: int, head_dim: int,
+              mrope_section: tuple[int, int, int] = (11, 11, 10)):
     """qg (W, heads*2*D) [q_h | gate_h] rows, k (W, kv_heads*D): normed and rotated q (W, H, D), k (W, HKV, D)."""
 
     W = qg.shape[0]
+    multi = pos.ndim == 2
+    if tuple(pos.shape) != ((3, W) if multi else (W,)):
+        raise ValueError("attention positions must be one or three coordinates per row")
+    if len(mrope_section) != 3 or any(not isinstance(v, int) or v < 0 for v in mrope_section):
+        raise ValueError("mrope_section requires three nonnegative integers")
+    pos = pos.contiguous()
     qo = torch.empty((W, heads, head_dim), dtype=torch.bfloat16, device=qg.device)
     ko = torch.empty((W, kv_heads, head_dim), dtype=torch.bfloat16, device=qg.device)
     _attn_prep[(W, heads + kv_heads)](qg, k, q_norm, k_norm, pos, inv_freq, qo, ko, eps, H=heads, HKV=kv_heads,
-                                      D=head_dim, HALF=inv_freq.numel(), num_warps=2)
+                                      D=head_dim, HALF=inv_freq.numel(), MROPE=multi, ROWS=W if multi else 0,
+                                      HSEC=mrope_section[1], WSEC=mrope_section[2], num_warps=2)
     return qo, ko
 
 

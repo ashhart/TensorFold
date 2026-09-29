@@ -45,6 +45,7 @@ def app_for(tmp_path, content="Hello"):
     app.max_tokens = 4096
     app.native_context_window = app.context_window = 0
     app.lock = threading.Lock()
+    app.vision = None                      # served without --vision
     return app
 
 
@@ -71,7 +72,7 @@ def test_cuda_image_refuses_before_headers_and_generate(tmp_path, stream):
             {"type": "image_url", "image_url": {"url": "https://example.com/picture.png"}}]}],
             "stream": stream}, True)
     assert status == 400 and app.engine.calls == []
-    assert "text" in json.loads(body)["error"]["message"].lower()
+    assert "--vision" in json.loads(body)["error"]["message"]
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -122,7 +123,7 @@ def test_cuda_single_call_skips_broken_parameters(tmp_path):
                                  "tools": TOOLS, "parallel_tool_calls": False}, True)
     assert status == 200
     arguments = json.loads(body)["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
-    assert json.loads(arguments) == {"value": "2"}
+    assert json.loads(arguments) == {"value": 2}
 
 
 @pytest.mark.parametrize("options", [{"images": ["https://example.com/picture.png"]}, {"modalities": ["audio"]}])
@@ -145,7 +146,7 @@ def test_cuda_single_call_skips_nonfinite_json_arguments(tmp_path, stream, argum
     assert status == 200
     calls = stream_calls(body) if stream else json.loads(body)["choices"][0]["message"]["tool_calls"]
     arguments = calls[0]["arguments"] if stream else calls[0]["function"]["arguments"]
-    assert len(calls) == 1 and json.loads(arguments) == {"value": "2"}
+    assert len(calls) == 1 and json.loads(arguments) == {"value": 2}
 
 
 @pytest.mark.parametrize("stream", [False, True])

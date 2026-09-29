@@ -110,7 +110,10 @@ def test_weights_that_leave_no_room_refuse_to_start():
 
 
 @pytest.mark.parametrize("ceiling_gib, raise_it", [(64, True), (1, False)])
-def test_the_refusal_names_the_budget_that_would_fit_and_this_macs_ceiling(ceiling_gib, raise_it):
+def test_the_refusal_names_the_budget_that_would_fit_and_this_macs_ceiling(ceiling_gib, raise_it, monkeypatch):
+    from tensorfold.server import memory_budget
+
+    monkeypatch.setattr(memory_budget, "physical_memory_bytes", lambda: 128 * 2**30)   # the host's RAM plays no part
     runtime = Runtime(2**30)
     runtime.device_info = lambda: {"max_recommended_working_set_size": ceiling_gib * 2**30}
     with pytest.raises(ValueError, match="no room") as error:

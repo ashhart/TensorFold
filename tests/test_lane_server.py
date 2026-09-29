@@ -102,6 +102,7 @@ def test_render_prompt_ids_passes_tools_and_thinking_and_normalizes_arguments() 
     ids = render_prompt_ids(tokenizer, messages, tools=[{"type": "function"}], enable_thinking=True)
     assert ids and tokenizer.template_calls[-1]["tools"] == [{"type": "function"}]
     assert tokenizer.template_calls[-1]["enable_thinking"] is True
+    assert tokenizer.template_calls[-1]["thinking_mode"] == "thinking"
     assert messages[0]["tool_calls"][0]["function"]["arguments"] == '{"a": 1}'  # caller's copy untouched
 
 
@@ -628,6 +629,8 @@ def test_a_job_that_would_not_fit_waits_for_a_live_stream_to_finish() -> None:
             job.stream, job.error = None, None
             scheduler.submit(job)
         scheduler._admit()
+        while scheduler._filling is not None:          # an admitted prompt waits a round (the loop's) to fill
+            scheduler._fill()
         return [s.stream_id for s in engine.streams], scheduler
 
     # the second: 1,000 in use, the first grown from 11 to its longest 50 tokens (39), itself at its longest (50 +

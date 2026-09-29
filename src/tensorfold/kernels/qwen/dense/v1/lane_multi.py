@@ -33,7 +33,9 @@ def _attention(attn: Any, x: mx.array, caches: Sequence[Any], positions: list[in
     queries = queries.transpose(0, 2, 1, 3)
     keys = keys.transpose(0, 2, 1, 3)
     values = values.transpose(0, 2, 1, 3)
-    pos = mx.array(positions, dtype=mx.int32)
+    from tensorfold.vision.rotary import decode_positions
+
+    pos = mx.array(decode_positions(positions, caches, widths), dtype=mx.int32)
     queries = attn.rope(queries.transpose(2, 1, 0, 3), offset=pos).transpose(2, 1, 0, 3)
     keys = attn.rope(keys.transpose(2, 1, 0, 3), offset=pos).transpose(2, 1, 0, 3)
     kv = []

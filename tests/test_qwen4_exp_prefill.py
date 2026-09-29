@@ -124,21 +124,28 @@ def test_mlx_matmuls_serve_when_the_tiles_step_aside(monkeypatch, why):
     assert bool(mx.array_equal(fast, moe(x)).item())
 
 
-def test_gather_sorted_is_mlx_bit_for_bit():
+@pytest.mark.parametrize("group", [32, 64])
+def test_gather_sorted_is_mlx_bit_for_bit(group):
+    """Every tile shape, skewed routes with empty experts and a part tile: MLX's sorted gather_qmm's bits."""
+
     from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
 
     if prefill_mm._tensor_units():
         pytest.skip("MLX's sorted expert matmul uses the tensor units here: the tiles do not serve")
     mx.random.seed(1)
     experts, k, n, m = 16, 512, 64, 400
-    idx = mx.array(np.sort(np.random.default_rng(2).integers(0, experts, size=m)).astype(np.uint32))
+    p = 1.0 / np.arange(1, experts + 1) ** 1.2
+    p[[3, 7]] = 0.0
+    idx = mx.array(np.sort(np.random.default_rng(2).choice(experts, size=m, p=p / p.sum())).astype(np.uint32))
     x = (mx.random.normal((m, k)) * 0.5).astype(mx.bfloat16)
     w = mx.random.randint(0, 2**31, (experts, n, k // 8), dtype=mx.uint32)
-    s = (mx.random.normal((experts, n, k // 32)) * 0.02).astype(mx.bfloat16)
-    b = (mx.random.normal((experts, n, k // 32)) * 0.02).astype(mx.bfloat16)
-    ref = mx.gather_qmm(x[:, None, :], w, s, b, rhs_indices=idx, transpose=True, group_size=32, bits=4,
+    s = (mx.random.normal((experts, n, k // group)) * 0.02).astype(mx.bfloat16)
+    b = (mx.random.normal((experts, n, k // group)) * 0.02).astype(mx.bfloat16)
+    ref = mx.gather_qmm(x[:, None, :], w, s, b, rhs_indices=idx, transpose=True, group_size=group, bits=4,
                         sorted_indices=True)[:, 0, :]
-    assert bool(mx.array_equal(prefill_mm.gather_sorted(x, w, s, b, idx), ref).item())
+    for shape in (None, *prefill_mm.SHAPES, (64, 64, 2, 2)):
+        got = prefill_mm.gather_sorted(x, w, s, b, idx, shape)
+        assert bool(mx.array_equal(got.view(mx.uint16), ref.view(mx.uint16)).item()), shape
 
 
 @pytest.mark.parametrize(("experts", "rows"), [(16, 128), (128, 64)])
@@ -458,3 +465,63 @@ def test_prefill_identity_is_fixed_before_snapshot_keys(monkeypatch):
     monkeypatch.setenv("TF_FLASH_PREFILL", "0")
     with pytest.raises(RuntimeError):
         runtime.prefill_key
+
+
+@pytest.mark.parametrize("rows,past", [(1, 60), (7, 33), (64, 0), (100, 150), (130, 1000)])
+def test_the_block_scores_kernel_matches_the_indexer(rows, past):
+    """One kernel's block scores equal Indexer.block_scores' up to fp32 summation order, at both tiles' edges."""
+
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill as P
+
+    mx.random.seed(rows + past)
+    attn = q4.SparseAttention(config())
+    attn.set_dtype(mx.bfloat16)
+    ix = attn.indexer
+    raw = mx.random.normal((1, past + rows, ix.dims)).astype(mx.bfloat16)
+    query = mx.random.normal((1, rows, ix.heads, ix.dims)).astype(mx.bfloat16)
+    want = ix.block_scores(query, raw, q4.AttentionCache(), past)
+    got = P.block_scores(ix, query, raw, q4.AttentionCache(), past)
+    assert got.shape == want.shape == (rows, (past + rows) // ix.ratio)
+    assert float(mx.abs(got - want).max()) <= 1e-5 * max(1.0, float(mx.abs(want).max()))
+
+
+@pytest.mark.parametrize("rows,past", [(1, 8191), (1, 32767), (2, 8190), (64, 4096), (2048, 6144), (4096, 28672)])
+def test_the_block_scores_keep_the_indexers_bits_where_they_pick_blocks(rows, past):
+    """Past 2,048 keys the scores choose the top 512 blocks: there the batched scores equal the indexer's bit for bit."""
+
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill as P
+
+    mx.random.seed(rows + past)
+    attn = q4.SparseAttention(config(indexer_n_heads=4, indexer_head_dim=128, indexer_budget=2048))
+    attn.set_dtype(mx.bfloat16)
+    ix = attn.indexer
+    raw = mx.random.normal((1, past + rows, ix.dims)).astype(mx.bfloat16)
+    query = mx.random.normal((1, rows, ix.heads, ix.dims)).astype(mx.bfloat16)
+    want = ix.block_scores(query, raw, q4.AttentionCache(), past)
+    got = P.block_scores(ix, query, raw, q4.AttentionCache(), past)
+    assert bool(mx.array_equal(got.view(mx.uint32), want.view(mx.uint32)).item())
+
+
+@pytest.mark.parametrize("keys", [700, 3000])
+def test_the_gqa_prompt_kernel_gives_each_head_the_same_bits_however_many_share_a_simdgroup(monkeypatch, keys):
+    """Two query heads a simdgroup run each head's sums as one head a simdgroup does: the same bits."""
+
+    from tensorfold.kernels.qwen.flash_next.v1 import attention as K
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill as P
+
+    mx.random.seed(keys)
+    rows, heads, kv_heads, top, ratio = 40, 8, 2, 64, 4
+    q = mx.random.normal((rows, heads, 256)).astype(mx.bfloat16)
+    k = mx.random.normal((1, kv_heads, keys, 256)).astype(mx.bfloat16)
+    v = mx.random.normal((1, kv_heads, keys, 256)).astype(mx.bfloat16)
+    ends = list(range(keys - rows + 1, keys + 1))
+    complete = [e // ratio for e in ends]
+    ids = K.select_blocks(mx.random.uniform(shape=(rows, keys // ratio)), complete, ends, top=top)
+    sparse = [c > top for c in complete]
+    counts = [ratio * (top - c) + e if s else e for e, c, s in zip(ends, complete, sparse)]
+    outs = []
+    for per in ((1,), (2, 1), (4, 2, 1)):
+        monkeypatch.setattr(P, "heads_a_simdgroup", lambda per=per: per)
+        outs.append(P.attention_rows_gqa(q, k, v, counts, ids, sparse, 256**-0.5, parts=P.PARTS))
+    mx.eval(outs)
+    assert all(bool(mx.array_equal(o.view(mx.uint16), outs[0].view(mx.uint16)).item()) for o in outs[1:])

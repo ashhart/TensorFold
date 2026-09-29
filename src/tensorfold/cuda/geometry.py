@@ -3,27 +3,27 @@
 from __future__ import annotations
 
 import math
-from .capacity import Geometry, SIZES
+from .capacity import Geometry, itemsize
 
 PREFILL_ROWS = 2048     # a prompt chunk's rows: Flash Next and GLM keep buffers of this many rows
 PREFILL_ATT_ROWS = 256  # Flash Next's prompt attention block
 
 
-def size(info: dict) -> int:
-    return math.prod(info["shape"]) * SIZES[info["dtype"]]
+def size(info: dict, name: str = "tensor") -> int:
+    return math.prod(info["shape"]) * itemsize(info, name)
 
 
-def padded(info: dict, shape: list[int], *, float32: bool = False) -> int:
+def padded(info: dict, shape: list[int], *, float32: bool = False, name: str = "tensor") -> int:
     dims = list(shape)
     if info["dtype"] in ("U32", "I32") and len(dims) >= 2:
         dims[-2] = ((dims[-2] + 63) // 64) * 64
-    return math.prod(dims) * (4 if float32 else SIZES[info["dtype"]])
+    return math.prod(dims) * (4 if float32 else itemsize(info, name))
 
 
 def linear_weights(name: str, info: dict) -> tuple[int, int]:
     if name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp."):
         return 0, 0
-    amount = padded(info, info["shape"], float32=name.endswith((".A_log", ".dt_bias")))
+    amount = padded(info, info["shape"], float32=name.endswith((".A_log", ".dt_bias")), name=name)
     return amount * (2 if "lm_head." in name else 1), 0
 
 
@@ -32,7 +32,7 @@ def exl3_weights(name: str, info: dict) -> tuple[int, int]:
 
     if ".visual." in name or name.startswith(("model.visual.", "vision_tower", "mtp.")) or ".mtp." in name:
         return 0, 0
-    amount = padded(info, info["shape"], float32=name.endswith((".A_log", ".dt_bias")))
+    amount = padded(info, info["shape"], float32=name.endswith((".A_log", ".dt_bias")), name=name)
     return (amount * 7 // 5 if name in ("lm_head.trellis", "lm_head.svh") else amount), 0
 
 
@@ -68,7 +68,7 @@ def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True):
         if "vision" in name or ".visual." in name or (not mtp and (name.startswith("mtp.") or ".mtp." in name)):
             return 0, 0
         if ".ngram_embedding.shard_" in name:          # host pages when mapped; none when read from SSD
-            return 0, size(info) if mapped_tables else 0
+            return 0, size(info, name) if mapped_tables else 0
         shape = list(info["shape"])
         if world > 1 and not info.get("split"):
             if ".switch_mlp." in name or ".shared_expert." in name:
@@ -85,7 +85,7 @@ def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True):
             elif name.endswith(("lm_head.weight", "lm_head.scales", "lm_head.biases")):
                 shape[0] //= world
         cast = name.endswith((".A_log", ".dt_bias", ".q_norm.weight", ".k_norm.weight", ".hc_norm.weight"))
-        amount = padded(info, shape, float32=cast)
+        amount = padded(info, shape, float32=cast, name=name)
         if mtp and "lm_head." in name:
             amount *= 2  # the additional vocabulary-subset draft head
         return amount, 0
@@ -107,7 +107,7 @@ def split_weights(rule, world: int = 2):
             shape[0] //= world
         cast = name.endswith((".A_log", ".dt_bias", ".hc_attn_base", ".hc_attn_scale", ".hc_ffn_base",
                               ".hc_ffn_scale", ".e_score_correction_bias"))
-        total = padded(info, shape, float32=cast)
+        total = padded(info, shape, float32=cast, name=name)
         if name == "lm_head.weight" and info["dtype"] in ("BF16", "F16", "F32"):
             total += math.prod(shape) * 9 // 16  # the additional 4-bit draft head
         return total, 0
@@ -372,8 +372,8 @@ def hybrid_weights(world: int):
             elif name.endswith((".A_log", ".D", ".dt_bias", ".mixer.norm.weight")):
                 shape[0] //= world
         cast = name.endswith((".A_log", ".D", ".dt_bias", ".e_score_correction_bias")) or ".conv1d." in name
-        amount = padded(info, shape, float32=cast)
+        amount = padded(info, shape, float32=cast, name=name)
         if world > 1 and name.startswith("layers.") and shape != list(info["shape"]):
-            amount += padded(info, list(info["shape"]), float32=cast)   # the MTP head is kept whole beside its split
+            amount += padded(info, list(info["shape"]), float32=cast, name=name)   # the MTP head is kept whole beside its split
         return amount, 0
     return transform

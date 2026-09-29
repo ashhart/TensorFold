@@ -20,6 +20,10 @@ __device__ __forceinline__ void cp16z(void* dst, const void* src, bool read) {
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(smem(dst)), "l"(src), "r"(read ? 16 : 0));
 }
 
+__device__ __forceinline__ void cp8(void* dst, const void* src) {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"(smem(dst)), "l"(src));
+}
+
 __device__ __forceinline__ void cp4(void* dst, const void* src) {
     asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(smem(dst)), "l"(src));
 }

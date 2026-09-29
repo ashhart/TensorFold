@@ -132,8 +132,8 @@ def first_token(w: Weights, normed: torch.Tensor, n: int, sampling: Sampling | N
 @torch.no_grad()
 def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, rank: int,
                draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
-               keep: Callable | None = None) -> tuple[State, int]:
-    """Both ranks prefill, from a kept ``state`` with a fresh prefill's bits; rank 0 shares the first token."""
+               keep: Callable | None = None, keep_at: int | None = None, vision=None):
+    """Both ranks prefill, from a kept ``state`` with a fresh prefill's bits; rank 0 shares the first token (``keep_at``: a third item, as ``decode.prefill``'s; the split chains are each rank's own)."""
 
     from .decode import prefill_stops
 
@@ -141,8 +141,10 @@ def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, ran
     if state is None:
         st.limit = limit                    # a fresh state's attention caches stop here; a resumed one keeps its own
     taps = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
-    normed = prefill_stops(w, prompt, st, draft if taps else None, stops=stops, keep=keep, tp=True)
-    return st, first_token(w, normed, len(prompt), sampling, rank, 2)
+    out = prefill_stops(w, prompt, st, draft if taps else None, stops=stops, keep=keep, tp=True, keep_at=keep_at,
+                        vision=vision)
+    first = first_token(w, out if keep_at is None else out[0], len(prompt), sampling, rank, 2)
+    return (st, first) if keep_at is None else (st, first, out[1])
 
 
 def _accept(tokens: list[int], parents: list[int], sampled: list[int], room: int,
@@ -167,12 +169,13 @@ def _accept(tokens: list[int], parents: list[int], sampled: list[int], room: int
 def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count: int,
               sampling: Sampling | None, rank: int, draft=None, *, max_rows: int = 16,
               allow_copy: bool = False, stop_eos: bool = True,
-              on_tokens: Callable[[list[int]], bool | None] | None = None) -> DecodeResult | None:
-    """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token."""
+              on_tokens: Callable[[list[int]], bool | None] | None = None,
+              inplace: bool = False) -> DecodeResult | None:
+    """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token (``inplace``: as ``draft_decode``'s)."""
 
     device = w.norm.device
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
-    st = clone_state(st)
+    st = st if inplace else clone_state(st)
     out = [pending]
     context = list(prompt) + out
     committed: list[int] = []

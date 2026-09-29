@@ -9,8 +9,10 @@ MODEL_TYPES = ("qwen4_exp",)
 TITLE = "Qwen3.8 Flash Next"
 LANES = True
 # 4-bit weights in groups of 32 (what the fused kernels read), with the checkpoint's MTP head kept
-MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3")
-QUANT_METHODS = {"cuda": ("mlx", "exl3")}      # the CUDA engine reads MLX affine 4-bit and EXL3 packs
+MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3",
+          "local-inference-lab/Qwen3.8-Flash-Next-NVFP4", "RadixArk/Qwen3.8-Flash-Next-NVFP4")
+NVFP4_MODELS = MODELS[2:]
+QUANT_METHODS = {"cuda": ("mlx", "exl3", "modelopt")}  # MLX affine 4-bit, EXL3 packs and NVFP4 (ModelOpt)
 EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
 KERNEL_VERSION = "v1"
@@ -30,13 +32,29 @@ def has_mtp(model_dir: Path) -> bool:
 
 
 def check(model_dir: Path) -> None:
-    from tensorfold.families import EXL3_QUANT, quant_method, quantization, read_config
+    from tensorfold.families import (EXL3_QUANT, OWN_MODEL_HELP, describe_quantization, quant_method,
+                                     quantization, read_config)
 
     config = read_config(model_dir)
     if quant_method(config) == EXL3_QUANT:
         # an EXL3 pack (the CUDA engine, any codebook and per-tensor width): only the MTP head to report
         if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
             print("[tensorfold] this EXL3 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
+        return
+    if quant_method(config) == "modelopt":
+        # the CUDA engine's NVFP4 route: NVFP4 experts in blocks of 16, other linears bf16, MXFP8 or NVFP4
+        found = config.get("quantization") or config.get("quantization_config") or {}
+        algo = str(found.get("quant_algo") or "NVFP4").upper()
+        layers = {str(v.get("quant_algo", "")).upper() for v in (found.get("quantized_layers") or {}).values()}
+        algos = layers if algo == "MIXED_PRECISION" else {algo}
+        weights = [g.get("weights") or {} for g in (found.get("config_groups") or {}).values()]
+        fp4 = {int(w.get("group_size", 16)) for w in weights if int(w.get("num_bits", 4)) == 4}
+        if not algos <= {"NVFP4", "W4A16_NVFP4", "MXFP8"} or fp4 - {16}:
+            raise ValueError(f"TensorFold's Flash Next kernels read NVFP4 (ModelOpt FP4) weights in blocks of 16, the "
+                             f"other linears bf16 or MXFP8 ({', '.join(NVFP4_MODELS)}); this checkpoint has "
+                             + describe_quantization(config) + f". {OWN_MODEL_HELP}")
+        if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
+            print("[tensorfold] this NVFP4 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
         return
     bits, group = quantization(config)
     if (bits, group) != (4, 32):
@@ -113,7 +131,7 @@ def kernel_version(model: Any) -> str:
     return f"{source}|prompt_attention={','.join(modes)}" + (f"|{prefill}" if prefill else "")
 
 
-# the CUDA engine's kernels read MLX affine weights of this (bits, group size)
+# the CUDA engine reads MLX affine weights of this (bits, group size), or NVFP4 (ModelOpt) routed experts
 CUDA_QUANTIZATION = (4, 32)
 # the KV cache dtypes the CUDA engine can allocate (``--kv-dtype``)
 CUDA_KV_DTYPES = ("bf16", "int8", "int4")

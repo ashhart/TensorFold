@@ -28,16 +28,16 @@ class AuditEngine(FakeEngine):
         self.release.set()
         self.audit = []
 
-    def add_stream(self, stream, **kwargs):
+    def begin_stream(self, stream, **kwargs):
         self.audit.append(stream)
-        return super().add_stream(stream, **kwargs)
+        return super().begin_stream(stream, **kwargs)
 
-    def _family_prefill(self, stream, **kwargs):
+    def _family_prefill_steps(self, stream, **kwargs):
         self.entered.set()
         assert self.release.wait(3)
         if self.prefill_guard is not None:
             self.prefill_guard.before_chunk([], len(stream.prompt_ids))
-        return super()._family_prefill(stream, **kwargs)
+        return (yield from super()._family_prefill_steps(stream, **kwargs))
 
     def step(self):
         time.sleep(.004)

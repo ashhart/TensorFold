@@ -23,6 +23,8 @@ class ThinkingOffTemplate:
 
 
 class GlmApp(App):
+    reads_ignore_eos = True             # ``run`` hands it to the engine's request
+
     def __init__(self, engine, model_dir, served: str, **kwargs: Any) -> None:
         super().__init__(engine, model_dir, served, **kwargs)
         self.template = ThinkingOffTemplate(self.template)

@@ -11,6 +11,7 @@ from tensorfold.families.glm5_next.config import Config, row_kernel
 from tensorfold.families.glm5_next.linear import Q, per_row, project, silu
 from tensorfold.kernels.glm.flash.v1 import moe as MK
 from tensorfold.kernels.glm.flash.v1 import kernels as K
+from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm as PM
 
 
 class DenseMLP:
@@ -83,6 +84,9 @@ class MoE:
             h, ids, order = _gather_sort(h, idx)
 
         def run(q: Q, inp: mx.array) -> mx.array:
+            if do_sort and PM.gather_fits(inp, q.weight, q.biases, q.bits, q.group):   # the same bits, fewer passes
+                y = PM.gather_sorted(inp.reshape(-1, inp.shape[-1]), q.weight, q.scales, q.biases, ids)
+                return y.reshape(*inp.shape[:-1], y.shape[-1])
             return mx.gather_qmm(inp, q.weight, q.scales, q.biases, rhs_indices=ids, transpose=True,
                                  group_size=q.group, bits=q.bits, sorted_indices=do_sort)
 

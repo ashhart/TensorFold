@@ -6,28 +6,32 @@ An engine with ``structured_output`` set takes ``constraint`` in ``generate`` an
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime
 from contextlib import nullcontext
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Callable
 
 from tensorfold.cuda import grammar
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.http import Server
+from tensorfold.server.stacks import Rearming
 from tensorfold.server.messages import (_normalize_tool_call_arguments, late_system_role, normalize_messages,
                                         validate_modalities)
+from tensorfold.server.request_options import parse_numbers
+from tensorfold.server.stopping import stop_options
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, call_format, generate_gated
 from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
-from tensorfold.cuda.reply_text import StreamDecoder, hide_tool_calls, parse_tool_calls
+from tensorfold.cuda.reply_text import StopStrings, StreamDecoder, hide_tool_calls, parse_tool_calls
 from tensorfold.server.text import split_thinking
 
 
@@ -61,8 +65,9 @@ class ChatTemplate:
             lambda messages: self.template.render(**self.specials, messages=messages, add_generation_prompt=False))
 
     def render(self, messages: list[dict[str, Any]], *, tools: list[dict[str, Any]] | None,
-               enable_thinking: bool, extra: dict[str, Any] | None = None) -> str:
-        messages = _normalize_tool_call_arguments(normalize_messages(messages, late_system=self.late_system))
+               enable_thinking: bool, extra: dict[str, Any] | None = None, allow_images: bool = False) -> str:
+        messages = _normalize_tool_call_arguments(normalize_messages(messages, late_system=self.late_system,
+                                                                     allow_images=allow_images))
         kwargs = dict(self.specials, messages=messages, tools=tools or None, add_generation_prompt=True,
                       enable_thinking=enable_thinking)
         kwargs.update(extra or {})
@@ -71,13 +76,20 @@ class ChatTemplate:
 
 # -- HTTP ------------------------------------------------------------------------------------
 
+_SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "seed")
+
+
 @dataclass(slots=True)
 class PreparedRequest:
     prompt: list[int]
     max_tokens: int
     tools: list[dict[str, Any]]
     thinking: bool
-    grammar: Any = None             # the compiled response_format, or None
+    sampling: Any          # the engine's ``Sampling``, or None for greedy decoding
+    ignore_eos: bool = False
+    stop: tuple[str, ...] = ()
+    vision: Any = None
+    grammar: Any = None    # the compiled response_format, or None
 
 
 def _native_context(model_dir: Path) -> int:
@@ -93,12 +105,15 @@ def _native_context(model_dir: Path) -> int:
 class App:
     """Serve one engine with sampling and reply-length defaults for requests that omit them."""
 
+    reads_ignore_eos = False            # True where the engine reads ``ignore_eos`` itself; a ``stop_eos`` engine is given it
+
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
                  context_window: int | None = None):
         from tokenizers import Tokenizer
 
         self.engine = engine
+        self.vision = getattr(engine, "vision", None)
         self.served = served
         self.model_dir = Path(model_dir)
         self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
@@ -143,6 +158,12 @@ class App:
             found = self.grammars = grammar.for_model(model_dir, vocab, tuple(self.engine.eos))
         return found
 
+    def _compiled(self, body: dict[str, Any]):
+        """The request's compiled response_format, None for plain text; RequestError when it cannot be enforced."""
+
+        spec = grammar.request_spec(body)
+        return self._grammars().compile(spec) if spec is not None else None
+
     def _engine_capacity(self) -> int | None:
         capacities = []
         for name in ("context_window", "limit"):
@@ -183,19 +204,43 @@ class App:
         return max(1, int(body.get("max_tokens") or body.get("max_completion_tokens") or self.max_tokens))
 
     def _prepare(self, body: dict[str, Any], chat: bool) -> PreparedRequest:
+        from jinja2.exceptions import TemplateError
+
         validate_modalities(body)
         ToolCallPolicy(body)
+        ignore_eos, stop = stop_options(body)
         max_tokens = self._requested_tokens(body)
         try:
             tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
         except ValueError as exc:
             raise RequestError(str(exc)) from None
-        kwargs = dict(body.get("chat_template_kwargs") or {})
+        kwargs = body.get("chat_template_kwargs")
+        if kwargs is None:                   # absent or null: the server's defaults
+            kwargs = {}
+        elif not isinstance(kwargs, dict):   # [], "", false and 0 included
+            raise RequestError("chat_template_kwargs must be a JSON object or null")
+        kwargs = dict(kwargs)
         thinking = bool(kwargs.pop("enable_thinking", self.default_thinking))
         if chat:
             if not isinstance(body.get("messages"), list):
                 raise RequestError("messages must be a list")
-            text = self.template.render(body["messages"], tools=tools, enable_thinking=thinking, extra=kwargs)
+            from tensorfold.server.prompts import has_images, prepare_images
+
+            def render(messages: list[dict[str, Any]], **images: bool) -> str:   # text renders as it always has
+                try:
+                    return self.template.render(messages, tools=tools, enable_thinking=thinking, extra=kwargs,
+                                                **images)
+                except TemplateError as exc:     # the checkpoint's template refuses the request (``raise_exception``)
+                    raise RequestError(f"the chat template rejected the request: {exc}") from exc
+
+            if has_images(body["messages"]):
+                rendered = prepare_images(self.vision, body["messages"],
+                                          lambda messages: render(messages, allow_images=True),
+                                          context_limit=self._context_limit())
+                return PreparedRequest(rendered.tokens, max_tokens, tools, thinking,
+                                       self.sampling_for(body, rendered.tokens), ignore_eos=ignore_eos, stop=stop,
+                                       vision=rendered.vision, grammar=self._compiled(body))
+            text = render(body["messages"])
         else:
             text = body.get("prompt")
             if not isinstance(text, str):
@@ -203,9 +248,9 @@ class App:
         prompt = self.tok.encode(text, add_special_tokens=False).ids
         if not prompt:
             raise RequestError("rendered prompt is empty")
-        spec = grammar.request_spec(body)
-        compiled = self._grammars().compile(spec) if spec is not None else None
-        return PreparedRequest(prompt, max_tokens, tools, thinking, compiled)
+        # sampling is resolved here, so a malformed control is refused before a stream opens
+        return PreparedRequest(prompt, max_tokens, tools, thinking, self.sampling_for(body, prompt),
+                               ignore_eos=ignore_eos, stop=stop, grammar=self._compiled(body))
 
     def check(self, body: dict[str, Any], *, prepared: PreparedRequest | None = None) -> str | None:
         """Why the request cannot run, or None; rendered before a stream's headers are sent."""
@@ -247,16 +292,17 @@ class App:
         return prepared
 
     def sampling_for(self, body: dict[str, Any], prompt: list[int]):
-        """Keyed sampling (the seed, else one drawn from the prompt), or None for greedy decoding."""
+        """Keyed sampling (the seed, else one drawn from the prompt), or None for greedy; RequestError if malformed."""
 
         from tensorfold.engine.exact_sampling import Sampling, seed_for
 
-        temp = float(body["temperature"] if body.get("temperature") is not None else self.sampling["temperature"])
+        fields = parse_numbers({k: body[k] for k in _SAMPLING_FIELDS if body.get(k) is not None})
+        temp = float(fields.get("temperature", self.sampling["temperature"]))
         if temp <= 0:
             return None
-        seed = body.get("seed")
-        top_k = body["top_k"] if body.get("top_k") is not None else self.sampling["top_k"]
-        top_p = body["top_p"] if body.get("top_p") is not None else self.sampling["top_p"]
+        seed = fields.get("seed")
+        top_k = fields.get("top_k", self.sampling["top_k"])
+        top_p = fields.get("top_p", self.sampling["top_p"])
         return Sampling(int(seed) if seed is not None else seed_for(prompt), temp, int(top_k), float(top_p))
 
     def run(self, body: dict[str, Any], chat: bool, emit: Callable[[dict[str, Any]], bool], *,
@@ -267,15 +313,21 @@ class App:
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
         tools, thinking = prepared.tools, prepared.thinking
         policy = ToolCallPolicy(body)
-        sampling = self.sampling_for(body, prompt)
+        sampling = prepared.sampling
+        # end tokens end the reply and stay out of its text, unless it asks ignore_eos of an engine that reads it
+        takes_stop_eos = "stop_eos" in inspect.signature(self.engine.generate).parameters
+        ends = () if prepared.ignore_eos and (self.reads_ignore_eos or takes_stop_eos) else tuple(self.engine.eos)
+        stops = StopStrings(prepared.stop, self.tok, ends)
         out: list[int] = []
         sent = {"reasoning": 0, "content": 0}
-        stopped = {"client": False}
+        stopped = {"client": False, "stop": False}
         failed: list[Exception] = []
-        stream = StreamDecoder(self.tok, tuple(self.engine.eos))
+        stream = StreamDecoder(self.tok, ends)
 
         def visible(finished: bool) -> tuple[str, str]:
             raw = stream.final() if finished else stream.text
+            # stop strings match the generated text, reasoning included, before it is split (as on the Mac)
+            raw = stops.visible(raw, partial=not finished) if stops.strings else raw
             if chat and thinking:
                 reasoning, answer = split_thinking(raw, finished=finished)
             else:
@@ -287,10 +339,20 @@ class App:
 
         def on_tokens(new: list[int]) -> bool:
             # True stops the engine after this round; engines that finish on both ranks keep calling and get True
-            if stopped["client"] or failed:
+            if stopped["client"] or stopped["stop"] or failed:
                 return True
             try:
-                out.extend(new)
+                if stops.strings:
+                    kept = []
+                    for token in new:             # token by token: the round's width cannot move the cut
+                        kept.append(token)
+                        out.append(token)
+                        if stops.hit(out):
+                            stopped["stop"] = True
+                            break
+                    new = kept
+                else:
+                    out.extend(new)
                 stream.add(new)
                 reasoning, answer = visible(False)
                 delta: dict[str, Any] = {}
@@ -307,14 +369,25 @@ class App:
             except Exception as exc:        # noqa: BLE001  raised after generate returns, never into the engine
                 failed.append(exc)
                 return True
-            return stopped["client"]
+            return stopped["client"] or stopped["stop"]
 
-        extra: dict[str, Any] = {} if body.get("draft", True) is not False else {"draft": False}
-        if prepared.grammar is not None:    # response_format: a fresh grammar state, after </think> when thinking
-            extra["constraint"] = self._grammars().constraint(prepared.grammar, after_think=chat and thinking)
+        draft = body.get("draft", True) is not False
         gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
 
+        options: dict[str, Any] = {} if draft else {"draft": False}
+        if takes_stop_eos:
+            options["stop_eos"] = not prepared.ignore_eos
+        if prepared.grammar is not None:    # response_format: a fresh grammar state, after </think> when thinking
+            options["constraint"] = self._grammars().constraint(prepared.grammar, after_think=chat and thinking)
+
         def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
+            extra = dict(options)
+            if prepared.vision is not None:          # a gate's continuation keeps the images, positions extended
+                from tensorfold.vision.qwen_processing import continued
+
+                same = list(ids) == list(prepared.vision.token_ids)
+                extra["vision"] = prepared.vision if same else continued(prepared.vision, ids,
+                                                                       self.vision.frontend.config)
             return self.engine.generate(ids, count, sampling, feed, **extra)
 
         # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
@@ -331,16 +404,14 @@ class App:
         final: dict[str, Any] = {}
         if len(reasoning) > sent["reasoning"]:
             final["reasoning_content"] = reasoning[sent["reasoning"]:]
-        raw_answer = split_thinking(self.tok.decode([t for t in out if t not in self.engine.eos],
-                                                    skip_special_tokens=False), finished=True)[1] \
-            if chat and thinking else self.tok.decode([t for t in out if t not in self.engine.eos],
-                                                      skip_special_tokens=False)
+        text = stops.visible(self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False))
+        raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
         content, calls = parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
         content = policy.content(content) if tools else content
         tail = content[sent["content"]:] if content.startswith(answer[:sent["content"]]) else ""
         if tail:
             final["content"] = tail
-        finish = "tool_calls" if calls else ("stop" if out and out[-1] in self.engine.eos else "length")
+        finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
@@ -383,8 +454,17 @@ def token_sha(tokens: list[int]) -> str:
     return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
 
 
+def _error_message(exc: BaseException) -> str:
+    return str(exc) or type(exc).__name__
+
+
+def _log_error(exc: BaseException) -> None:
+    print(f"[tensorfold] request error: {type(exc).__name__}: {exc}", flush=True)
+    traceback.print_exception(exc)
+
+
 def make_handler(app: App):
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(Rearming):              # USR1's stack dump armed again after each request
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt, *args):  # quiet
@@ -401,6 +481,16 @@ def make_handler(app: App):
             except (BrokenPipeError, ConnectionResetError):          # the client has gone
                 self.close_connection = True
 
+        def _stream_error(self, error: dict[str, Any]) -> None:
+            """End an open stream with an error event and ``[DONE]``, as the MLX server does."""
+
+            try:
+                self.wfile.write(f"data: {json.dumps({'error': error})}\n\ndata: [DONE]\n\n".encode())
+                self.wfile.flush()
+            except OSError:
+                pass
+            self.close_connection = True
+
         def do_GET(self):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [{"id": app.served, "object": "model", "owned_by": "tensorfold"}]})
@@ -414,13 +504,22 @@ def make_handler(app: App):
             if not chat and not self.path.rstrip("/").endswith("/completions"):
                 return self._json(404, {"error": "not found"})
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-            except json.JSONDecodeError:
+                length = int(self.headers.get("Content-Length", 0))
+                if not 0 <= length <= 32 * 1024**2:
+                    self.close_connection = True             # the unread body must not reach the next request
+                    return self._json(400, {"error": {"message": "request body exceeds the 32 MiB limit",
+                                                      "type": "invalid_request_error"}})
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 return self._json(400, {"error": {"message": "the request body is not JSON", "type": "invalid_request_error"}})
             try:
                 prepared = app.prepare(body, chat)
             except RequestError as exc:
-                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                return self._json(503 if isinstance(exc, CapacityError) else 400,
+                                  {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            except Exception as exc:        # any other failure to read the request is refused too, as on MLX
+                _log_error(exc)
+                return self._json(400, {"error": {"message": _error_message(exc)}})
             rid = f"chatcmpl-{uuid.uuid4().hex[:24]}" if chat else f"cmpl-{uuid.uuid4().hex[:24]}"
             created = int(time.time())
             stream = bool(body.get("stream"))
@@ -457,16 +556,11 @@ def make_handler(app: App):
                 except RequestCancelled:
                     self.close_connection = True
                     return
-                except (RequestError, grammar.GrammarError) as exc:
-                    kind = "server_error" if isinstance(exc, grammar.GrammarError) else "invalid_request_error"
-                    error = {"error": {"message": str(exc), "type": kind}}
-                    try:
-                        self.wfile.write(f"data: {json.dumps(error)}\n\ndata: [DONE]\n\n".encode())
-                        self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError):
-                        pass
-                    self.close_connection = True
-                    return
+                except RequestError as exc:
+                    return self._stream_error({"message": str(exc), "type": "invalid_request_error"})
+                except Exception as exc:
+                    _log_error(exc)
+                    return self._stream_error({"message": _error_message(exc), "type": "server_error"})
                 if result["final"]:
                     emit(result["final"])
                 if result["calls"]:
@@ -493,9 +587,18 @@ def make_handler(app: App):
                 self.close_connection = True
                 return
             except RequestError as exc:
-                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
-            except grammar.GrammarError as exc:           # this reply's grammar failed; the server goes on
-                return self._json(500, {"error": {"message": str(exc), "type": "server_error"}})
+                return self._json(503 if isinstance(exc, CapacityError) else 400,
+                                  {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            except Exception as exc:
+                _log_error(exc)
+                error = {"message": _error_message(exc)}
+                if isinstance(exc, grammar.GrammarError):     # this reply's grammar failed; the server goes on
+                    error["type"] = "server_error"
+                try:
+                    self._json(500, {"error": error})
+                except OSError:
+                    pass
+                return
             usage = {"prompt_tokens": result["prompt_tokens"], "completion_tokens": result["completion_tokens"],
                      "total_tokens": result["prompt_tokens"] + result["completion_tokens"]}
             if chat:

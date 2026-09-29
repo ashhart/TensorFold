@@ -12,11 +12,12 @@ from typing import Any
 
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.request_options import parse_numbers
 from tensorfold.server.messages import normalize_messages, validate_modalities
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
+from tensorfold.server.stacks import Rearming
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
@@ -44,6 +45,18 @@ class Server(ThreadingHTTPServer):
     request_queue_size = 128
 
 
+def redact_images(value: Any) -> Any:
+    """A request body for the request log: every image part's URL or data replaced, the rest kept."""
+
+    if isinstance(value, list):
+        return [redact_images(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if value.get("type") == "image_url":
+        return {**value, "image_url": {"url": "<redacted>"}}
+    return {key: redact_images(item) for key, item in value.items()}
+
+
 def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list[str]:
     """Return the OpenAI model ids this endpoint advertises."""
 
@@ -56,7 +69,7 @@ def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list
 
 
 def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(Rearming):              # USR1's stack dump armed again after each request
         protocol_version = "HTTP/1.1"
 
         def log_message(self, format: str, *args: Any) -> None:
@@ -145,17 +158,19 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
 
             try:
                 length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= 32 * 1024**2:
+                    raise RequestError("request body exceeds the 32 MiB limit")
                 body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
                 validate_modalities(body)
                 if _REQUEST_LOG and body.get("priority") != "background":   # batch jobs are not client traffic
                     with open(_REQUEST_LOG, "a") as handle:
-                        handle.write(json.dumps(body) + "\n")
+                        handle.write(json.dumps(redact_images(body)) + "\n")
                 raw_kw: dict[str, Any] = {}
                 if is_chat_completion:
-                    messages = normalize_messages(body.get("messages"))
+                    messages = normalize_messages(body.get("messages"), allow_images=getattr(app, "vision", None) is not None)
                     tools = active_tool_specs(body.get("tools"), body.get("tool_choice"))
                 elif isinstance(body.get("messages"), list) and body["messages"]:
-                    messages, tools = normalize_messages(body["messages"]), []    # a completion sent as a chat
+                    messages, tools = normalize_messages(body["messages"], allow_images=getattr(app, "vision", None) is not None), []
                 elif getattr(app, "accepts_raw_prompt", False):
                     # a text completion reads its prompt raw, as vLLM and mlx_lm do: no chat template, no think block
                     messages, tools = [], []
@@ -192,7 +207,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 stream = bool(body.get("stream", False))
                 tool_policy = ToolCallPolicy(body)
             except RequestError as exc:
-                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}},
+                                status=503 if isinstance(exc, CapacityError) else 400)
                 return
             except Exception as exc:
                 self._send_json({"error": {"message": str(exc)}}, status=400)

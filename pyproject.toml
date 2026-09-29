@@ -23,7 +23,8 @@ classifiers = [
 ]
 # mlx-lm stays below its next minor (TensorFold builds on its models); CUDA uses the container's torch and triton.
 dependencies = [
-  "mlx>=0.32.2; sys_platform == 'darwin'",
+  # MLX 0.32.3 changed a gather kernel's arguments that the prompt kernels build on (#88)
+  "mlx>=0.32.2,<0.32.3; sys_platform == 'darwin'",
   "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin'",
   "numpy>=1.26",
   "huggingface-hub>=0.24",
@@ -36,6 +37,7 @@ dependencies = [
 test = ["pytest>=8"]
 # --ssd-experts builds a small MLX extension on first use, with MLX's own nanobind
 ssd = ["cmake>=3.27; sys_platform == 'darwin'", "nanobind==2.15.0; sys_platform == 'darwin'"]
+vision = ["Pillow>=10", "transformers>=5.3,<6", "mlx-vlm>=0.7.3,<0.8; sys_platform == 'darwin'"]
 # response_format / guided_json on the CUDA server: JSON-schema constrained replies
 grammar = ["xgrammar>=0.2.8,<0.3; sys_platform != 'darwin'"]
 
@@ -59,6 +61,7 @@ where = ["src"]
 "tensorfold.families.glm5_next.cuda" = ["*.cu", "*.cpp"]
 "tensorfold.families.nemotron_h.cuda" = ["*.cu", "*.cpp"]
 "tensorfold.cuda.exl3" = ["*.cu", "*.cuh", "*.cpp"]
+"tensorfold.cuda.nvfp4" = ["*.cu", "*.cpp"]
 "tensorfold.streaming.hostsync" = ["*.cpp", "CMakeLists.txt"]
 
 [tool.pytest.ini_options]
@@ -67,6 +70,7 @@ pythonpath = ["src", "tests"]
 
 [tool.ruff]
 line-length = 120
+extend-exclude = ["src/tensorfold/families/deepseek_v4/vendor"]   # third-party code kept unmodified
 
 [tool.setuptools.dynamic]
 version = { attr = "tensorfold.__version__" }

@@ -24,6 +24,7 @@ class Qwen35Family:
     """Qwen3.8 dense on the lane kernels, as a family model."""
 
     lane_family = True
+    draft_reads_hidden = False      # the DFlash head drafts from the tapped layers, never the last hidden state
     speculate_early = False            # DFlash2 reads the kept rows' taps after a round is read
     batch_rows = 128                   # a shared forward's rows (the lane matmul's limit; the costs decide how many)
     max_streams = 64
@@ -99,6 +100,21 @@ class Qwen35Family:
         tokens, layers = _tokens(inputs), self._layers(cache)
         self._last = {id(cache): (None, len(tokens), self._position(layers), 0)}
         return self.core(mx.array([tokens], dtype=mx.uint32), cache=layers)
+
+    def encode_vision(self, prepared: Any, cache: list[Any]) -> Any:
+        encoded = self.vision.encode(prepared)
+        for item in self._layers(cache):
+            if hasattr(item, "keys"):
+                item.vision_rope_delta = int(encoded.rope_delta)
+        return encoded
+
+    def prefill_vision(self, inputs: Any, cache: list[Any], encoded: Any, begin: int, end: int) -> Any:
+        from tensorfold.vision.rotary import vision_positions
+
+        layers = self._layers(cache)
+        self._last = {id(cache): (None, end - begin, self._position(layers), 0)}
+        with vision_positions(encoded.position_ids[:, :, begin:end]):
+            return self.core(inputs, cache=layers, input_embeddings=encoded.inputs_embeds[:, begin:end])
 
     def _commit(self, layers: list[Any], record: Any, path: list[int], rows: int, start: int) -> None:
         if self.rows:

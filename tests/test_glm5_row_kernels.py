@@ -373,3 +373,23 @@ def test_kda_rows_with_8bit_f_b_g_b_is_row_by_row(gpu, tmp_path, monkeypatch):
         if not _same(st, st2):
             d = mx.abs(st - st2).max().item()
             print(f"rows {rows}: 8-bit kda_rows state vs ops max |diff| {d:.3g}")
+
+
+def test_prompt_experts_take_the_aligned_gather_with_mlx_bits(gpu, monkeypatch):
+    """Prompt rows (4+ routes an expert, no tensor units): the expert-aligned gather, mx.gather_qmm's bits."""
+
+    from types import SimpleNamespace
+
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
+    if prefill_mm._tensor_units():
+        pytest.skip("tensor units: MLX's sorted gather serves")
+    block = SimpleNamespace(gate=_experts(16, 128, 512, seed=4), up=_experts(16, 128, 512, seed=5),
+                            down=_experts(16, 512, 128, seed=6), cfg=SimpleNamespace(swiglu_limit=7.0))
+    idx = _picks(96, 4, 16, seed=7)
+    x = (0.5 * mx.random.normal((96, 512))).astype(mx.bfloat16)
+    calls, real = [], prefill_mm.gather_sorted
+    monkeypatch.setattr(prefill_mm, "gather_sorted", lambda *a, **k: calls.append(1) or real(*a, **k))
+    fast = mlp.MoE.experts(block, x, idx)
+    monkeypatch.setenv("TF_FLASH_PREFILL", "0")
+    assert len(calls) == 3 and _same(fast, mlp.MoE.experts(block, x, idx))

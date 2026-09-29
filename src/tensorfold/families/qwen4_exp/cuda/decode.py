@@ -125,7 +125,12 @@ class Engine:
         if graphs:
             from .graphs import Graphs
 
-            self.graphs = Graphs(self, max_rows=max_rows)
+            # experts that read their plan on the host (NVFP4) can't be captured: decline graphs before a capture fails
+            if any(getattr(layer.moe.experts, "capturable", True) is False for layer in w.layers):
+                print("[tensorfold] CUDA graphs off: this MoE reads its plan's item list on the host, which a "
+                      "capture rejects; decode runs eagerly (correct, slower)")
+            else:
+                self.graphs = Graphs(self, max_rows=max_rows)
 
     def reset(self) -> None:
         self.st.reset(self.w)
