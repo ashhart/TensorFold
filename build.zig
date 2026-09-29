@@ -173,6 +173,11 @@ pub fn build(b: *std.Build) void {
     ds_packed_compare.step.dependOn(&ds_packed.step);
     b.step("test-deepseek-packed", "Compare DeepSeek production-width BF16 packed hyper-connection and head parameters").dependOn(&ds_packed_compare.step);
     const dspark_tests = b.step("test-dspark", "Compare DSpark taps, context caches, noncausal attention, sorted experts and Markov sampling");
+    const conversion_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", "build/native-checks/conversion", "--conversion-fixtures", "--output", "build/native-checks/conversion" });
+    const conversion_test = b.addRunArtifact(exe);
+    conversion_test.addArgs(&.{ "check-drafter-conversion", "build/native-checks/conversion" });
+    conversion_test.step.dependOn(&conversion_fixture.step);
+    b.step("test-drafter-conversion", "Compare native FP8/FP4 MTP and DSpark conversion byte-for-byte with upstream").dependOn(&conversion_test.step);
     var dspark_previous: ?*std.Build.Step = null;
     for (0..3) |case| {
         const dir = b.fmt("build/native-checks/dspark-{d}", .{case});

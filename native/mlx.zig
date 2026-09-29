@@ -59,6 +59,7 @@ pub fn init() !void {
 }
 pub fn shutdown() void {
     _ = c.mlx_stream_free(stream);
+    stream = .{ .ctx = null };
 }
 pub fn free(a: Array) void {
     if (a.ctx != null) _ = c.mlx_array_free(a);

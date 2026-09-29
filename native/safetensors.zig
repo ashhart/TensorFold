@@ -14,9 +14,11 @@ pub const DType = enum {
     BF16,
     F32,
     F64,
+    F8_E4M3,
+    F8_E8M0,
     pub fn bytes(t: DType) u64 {
         return switch (t) {
-            .BOOL, .U8, .I8 => 1,
+            .BOOL, .U8, .I8, .F8_E4M3, .F8_E8M0 => 1,
             .U16, .I16, .F16, .BF16 => 2,
             .U32, .I32, .F32 => 4,
             .U64, .I64, .F64 => 8,
@@ -216,6 +218,13 @@ fn parseAllocated(a: std.mem.Allocator) !void {
 }
 test "safetensors parser cleans up at every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, parseAllocated, .{});
+}
+test "official FP8 weights and E8M0 scales retain their byte geometry" {
+    var header = try Header.parse(std.testing.allocator, "{\"w\":{\"dtype\":\"F8_E4M3\",\"shape\":[2,4],\"data_offsets\":[0,8]},\"s\":{\"dtype\":\"F8_E8M0\",\"shape\":[1,1],\"data_offsets\":[8,9]}}", 9);
+    defer header.deinit();
+    try std.testing.expectEqual(DType.F8_E4M3, header.tensors.get("w").?.dtype);
+    try std.testing.expectEqual(DType.F8_E8M0, header.tensors.get("s").?.dtype);
+    try std.testing.expectEqual(@as(usize, 4), try header.tensors.get("w").?.rowBytes());
 }
 test "safetensors reject malformed, overlapping, truncated and overflowing tensors" {
     const cases = .{

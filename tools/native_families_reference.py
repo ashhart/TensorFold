@@ -433,6 +433,72 @@ def tool_fixtures(output):
     print(f"Saved {len(streams)} upstream incremental tool streams")
 
 
+def conversion_fixture(directory):
+    import struct
+    import mlx.core as mx
+    from tests import dsv4_fakes as fake
+    from tensorfold.families.deepseek_v4.convert import convert_mtp, convert_dspark, fp8_block
+
+    raw = directory / "raw"
+    expected = directory / "expected"
+    raw.mkdir(parents=True, exist_ok=True)
+    expected.mkdir(parents=True, exist_ok=True)
+
+    def write(path, tensors, tagged=True):
+        mx.eval(*tensors.values())
+        mx.save_safetensors(str(path), tensors)
+        if not tagged:
+            return
+        data = path.read_bytes()
+        size, = struct.unpack("<Q", data[:8])
+        header = json.loads(data[8:8 + size])
+        for name, info in header.items():
+            if name == "__metadata__" or info["dtype"] != "U8":
+                continue
+            info["dtype"] = "F8_E8M0" if name.endswith(".scale") else "I8" if ".experts." in name else "F8_E4M3"
+        encoded = json.dumps(header, separators=(",", ":")).encode()
+        encoded += b" " * (-len(encoded) % 8)
+        path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + data[8 + size:])
+
+    mtp = fake.write_official_mtp(raw / "mtp.safetensors")
+    write(raw / "mtp.safetensors", mtp)
+    convert_mtp(raw / "mtp.safetensors", expected / "mtp.safetensors")
+    edge = {key.replace("mtp.0.", "mtp.3."): value for key, value in mtp.items()}
+    codes = np.arange(129 * 192, dtype=np.uint32).reshape(129, 192) % 256
+    codes = np.where((codes & 127) == 127, codes - 1, codes).astype(np.uint8)
+    edge["mtp.3.e_proj.weight"] = mx.array(codes)
+    edge["mtp.3.e_proj.scale"] = mx.array([[0, 1], [120, 128]], dtype=mx.uint8)
+    edge["model.layers.0.unrelated"] = mx.ones((1,))
+    write(raw / "layer3.safetensors", edge)
+    convert_mtp(raw / "layer3.safetensors", expected / "layer3.safetensors", layer=3)
+    shards = fake.write_official_dspark(raw)
+    for shard in shards:
+        write(shard, mx.load(str(shard)))
+    (raw / "config.json").write_text(json.dumps({**fake.DSPARK, "unrelated": "excluded"}))
+    convert_dspark(shards, expected / "dspark" / "dspark.safetensors")
+    # A block split between files exercises native multi-shard assembly against
+    # the same upstream conversion from the original complete blocks.
+    from tensorfold.families.deepseek_v4.convert import read_raw
+    merged = {}
+    for shard in shards:
+        merged.update(read_raw(shard, "mtp."))
+    for part in range(2):
+        write(raw / f"split-{part}.safetensors", {key: merged[key] for key in sorted(merged)[part::2]})
+    fp8 = mx.array(np.tile(np.arange(256, dtype=np.uint8), (256 * 128, 1)))
+    scales = mx.broadcast_to(mx.arange(256, dtype=mx.uint8)[:, None], (256, 2))
+    write(raw / "codes.safetensors", {"mtp.codes.weight": fp8, "mtp.codes.scale": scales})
+    mx.save_safetensors(str(expected / "codes.safetensors"), {"decoded": fp8_block(fp8, scales)})
+    # Invalid source geometry must fail without replacing an existing output.
+    malformed = dict(mtp)
+    malformed["mtp.0.e_proj.scale"] = mx.zeros((3, 1), dtype=mx.uint8)
+    write(raw / "bad-scale.safetensors", malformed)
+    malformed = dict(mtp)
+    del malformed["mtp.0.ffn.experts.3.w2.scale"]
+    write(raw / "missing-expert.safetensors", malformed)
+    fake.write_checkpoint(directory / "target")
+    print("Saved upstream MTP/DSpark conversion fixtures, split shards and exhaustive FP8/E8M0 codes")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
@@ -453,6 +519,7 @@ def main():
     p.add_argument("--synthetic-deepseek", action="store_true")
     p.add_argument("--synthetic-deepseek-wide", action="store_true")
     p.add_argument("--synthetic-deepseek-packed", action="store_true")
+    p.add_argument("--conversion-fixtures", action="store_true")
     p.add_argument("--synthetic-dspark", action="store_true")
     p.add_argument("--synthetic-dspark-sorted", action="store_true")
     p.add_argument("--synthetic-dspark-wide", action="store_true")
@@ -473,6 +540,9 @@ def main():
         return
     import mlx.core as mx
     import mlx.nn as nn
+    if args.conversion_fixtures:
+        conversion_fixture(args.model)
+        return
     if args.gemma_prefill:
         gemma_prefill_fixture(args.model, args.state_directory)
         return

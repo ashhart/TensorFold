@@ -14,6 +14,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "convert-drafter")) return @import("convert_drafter.zig").run(io, args[2..]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-drafter-conversion")) return @import("convert_drafter.zig").check(io, args[2]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "serve")) return @import("server.zig").run(init, args);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-chat")) return @import("chat.zig").check(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-tool-calls")) return @import("tool_calls.zig").check(io, args[2]);
@@ -49,6 +51,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-allocation-failures")) return @import("failure_checks.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-model-schema")) return @import("schema.zig").checkCheckpoint(std.meta.stringToEnum(@import("schema.zig").Kind, args[2]) orelse return error.UnsupportedModel, io, args[3]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
+        std.debug.print("Convert DeepSeek drafters: tensorfold convert-drafter mtp SHARD... OUT.safetensors [--layer 0]\n  tensorfold convert-drafter dspark SHARD... OUT.safetensors\n", .{});
         std.debug.print("HTTP: tensorfold serve MODEL_DIR [--host 127.0.0.1] [--port 8080] [--served-model-name NAME]\n  [--temperature T] [--top-k K] [--top-p P] [--max-tokens 4096]\n  [--thinking | --no-thinking] [--reasoning-effort medium] [--thinking-budget 0]\n  [--request-timeout-seconds 0] [--shutdown-grace-seconds 5]\n  [--vision-urls] Raw/chat completions with SSE; Qwen accepts data URLs and opt-in public HTTPS images.\n", .{});
         std.debug.print("Qwen images: --image LOCAL_FILE (up to four); optional explicit <|vision_start|><|image_pad|><|vision_end|> markers in --prompt.\n", .{});
         std.debug.print("Text families: Qwen/Bonsai, Nemotron, Flash Next, Gemma, GLM, DeepSeek.\nGLM/DeepSeek MTP: --mtp-drafts 0..15 or --no-drafts. DeepSeek: --drafter DIR with converted mtp.safetensors or dspark.safetensors. Gemma: --drafter DIR [--drafter-bits 8|4|0].\nNemotron/Flash MTP options: --full-draft-vocab, --no-queued-drafts, --no-early-mtp, --no-gpu-handoff, --fixed-drafts, --check-mtp-state\n", .{});

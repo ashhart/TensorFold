@@ -146,6 +146,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | DeepSeek calibrated dense arithmetic | `test-deepseek-dense -Doptimize=safe -j1` | Synthetic scalar/MMA calibration and physical threadgroup variants |
 | DSpark block drafting | `test-dspark -Doptimize=safe -j1` | Synthetic layer taps, context caches, sorted experts, Markov draws and generation; includes production widths |
 | Standard DFlash / Gemma drafting | `test-dflash` / `test-gemma-draft -Doptimize=safe -j1` | Float/quantized blocks and rotary layouts; full Gemma with synthetic drafter, taps, cache rollback and seeded generation |
+| DeepSeek drafter conversion | `test-drafter-conversion -Doptimize=safe -j1` | Synthetic official FP8/FP4 shards; exact upstream tensor bytes and native draft generation |
 | GLM/DeepSeek kernel components | `test-large-family-kernels -Doptimize=safe -j1` | Synthetic shapes; includes hardware-specific paths |
 | Qwen, Nemotron and Flash model/cache parity | `test-models -Doptimize=safe -j1` | All three installed models; substantial unified memory |
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
@@ -240,6 +241,13 @@ Gemma accepts a standard DFlash checkpoint through `--drafter DIR`, with
 `--drafter-bits 8` (default), `4`, or `0` to retain floating-point weights.
 DeepSeek accepts a converted `mtp.safetensors` beside its weights or in
 `--drafter DIR`, with the same `--mtp-drafts N` budget.
+Convert official local shards without Python using
+`zig-out/bin/tensorfold convert-drafter mtp SHARD... OUTPUT_DIR/mtp.safetensors`
+(optional `--layer N`, default `0`), or
+`zig-out/bin/tensorfold convert-drafter dspark SHARD... OUTPUT_DIR/dspark.safetensors`.
+DSpark copies the `dspark_*` config fields from the first shard's directory.
+Conversion uses pinned MLX arithmetic, supports blocks split across shards,
+and preserves packed FP4 expert bytes. It does not download weights.
 For DSpark, that directory contains `dspark.safetensors` and its `config.json`;
 the requested draft budget is capped at the checkpoint's block size.
 Use `--metal-simd` for the Qwen/Nemotron/Flash SIMD path and
