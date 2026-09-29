@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from tensorfold.cuda.build import hip
+
 
 @triton.jit
 def _block_attention(Q, KB, VB, TABLE, LENS, O, scale, window, R,
@@ -67,6 +69,98 @@ def _block_attention(Q, KB, VB, TABLE, LENS, O, scale, window, R,
     tl.store(O + qrow[:, None] * (G * HKV * D) + head[:, None] * D + d[None, :], out, mask=live[:, None])
 
 
+@triton.jit
+def _block_part(Q, KB, VB, TABLE, LENS, PO, PM, PL, scale, window, R, C,
+                G: tl.constexpr, HKV: tl.constexpr, L: tl.constexpr, LP: tl.constexpr, D: tl.constexpr,
+                BN: tl.constexpr, CS: tl.constexpr, CAUSAL: tl.constexpr):
+    """ROCm: program (stream j, query head h, part c): the head's L block rows against context keys [c CS, c CS + CS)
+    (c < C) or the block's own keys (c = C); an unnormalized partial and its max and sum for ``_block_merge``."""
+
+    j = tl.program_id(0)
+    h = tl.program_id(1)
+    c = tl.program_id(2)
+    g = h // G
+    r = tl.arange(0, LP)
+    live = r < L
+    d = tl.arange(0, D)
+    qrow = (j * L + r).to(tl.int64)
+    q = tl.load(Q + h.to(tl.int64) * R * D + qrow[:, None] * D + d[None, :], mask=live[:, None], other=0.0)
+    m_i = tl.full((LP,), float("-inf"), tl.float32)
+    l_i = tl.zeros((LP,), tl.float32)
+    acc = tl.zeros((LP, D), tl.float32)
+    if c < C:
+        s = tl.load(LENS + j)
+        kc = tl.load(TABLE + 2 * j).to(tl.pointer_type(tl.bfloat16)) + g.to(tl.int64) * s * D
+        vc = tl.load(TABLE + 2 * j + 1).to(tl.pointer_type(tl.bfloat16)) + g.to(tl.int64) * s * D
+        for n0 in range(c * CS, tl.minimum(c * CS + CS, s), BN):
+            kidx = n0 + tl.arange(0, BN)
+            inside = kidx < tl.minimum(c * CS + CS, s)
+            k = tl.load(kc + kidx[None, :] * D + d[:, None], mask=inside[None, :], other=0.0)
+            qk = tl.dot(q, k) * scale
+            seen = inside[None, :] & (s + r[:, None] - kidx[None, :] < window + 1)
+            qk = tl.where(seen, qk, float("-inf"))
+            m_new = tl.maximum(m_i, tl.max(qk, 1))
+            m_safe = tl.where(m_new == float("-inf"), 0.0, m_new)
+            p = tl.exp(qk - m_safe[:, None])
+            alpha = tl.exp(m_i - m_safe)
+            l_i = l_i * alpha + tl.sum(p, 1)
+            v = tl.load(vc + kidx[:, None] * D + d[None, :], mask=inside[:, None], other=0.0)
+            acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), v)
+            m_i = m_new
+    else:
+        cols = tl.arange(0, LP)
+        krow = (j * L + cols).to(tl.int64)
+        in_block = cols < L
+        kb = tl.load(KB + g.to(tl.int64) * R * D + krow[None, :] * D + d[:, None], mask=in_block[None, :], other=0.0)
+        qk = tl.dot(q, kb) * scale
+        seen = in_block[None, :]
+        if CAUSAL:
+            seen = seen & (cols[None, :] <= r[:, None])
+        qk = tl.where(seen, qk, float("-inf"))
+        m_i = tl.max(qk, 1)
+        m_safe = tl.where(m_i == float("-inf"), 0.0, m_i)
+        p = tl.exp(qk - m_safe[:, None])
+        l_i = tl.sum(p, 1)
+        vb = tl.load(VB + g.to(tl.int64) * R * D + krow[:, None] * D + d[None, :], mask=in_block[:, None], other=0.0)
+        acc = tl.dot(p.to(tl.bfloat16), vb)
+    base = ((j * G * HKV + h) * (C + 1) + c) * LP + r
+    tl.store(PO + base[:, None].to(tl.int64) * D + d[None, :], acc)
+    tl.store(PM + base, m_i)
+    tl.store(PL + base, l_i)
+
+
+@triton.jit
+def _block_merge(PO, PM, PL, O, C, G: tl.constexpr, HKV: tl.constexpr, L: tl.constexpr, LP: tl.constexpr,
+                 D: tl.constexpr):
+    """Program (stream j, query head h): the parts of ``_block_part`` in order, context first, then the block."""
+
+    j = tl.program_id(0)
+    h = tl.program_id(1)
+    r = tl.arange(0, LP)
+    d = tl.arange(0, D)
+    m = tl.full((LP,), float("-inf"), tl.float32)
+    l = tl.zeros((LP,), tl.float32)
+    o = tl.zeros((LP, D), tl.float32)
+    for c in range(0, C + 1):
+        base = ((j * G * HKV + h) * (C + 1) + c) * LP + r
+        cm = tl.load(PM + base)
+        cl = tl.load(PL + base)
+        co = tl.load(PO + base[:, None].to(tl.int64) * D + d[None, :])
+        active = cl > 0.0
+        nxt = tl.where(active, tl.maximum(m, cm), m)
+        a = tl.where(active, tl.where(m == float("-inf"), 0.0, tl.exp(m - nxt)), 1.0)
+        b = tl.where(active, tl.exp(cm - nxt), 0.0)
+        o = o * a[:, None] + co * b[:, None]
+        l = l * a + cl * b
+        m = nxt
+    qrow = (j * L + r).to(tl.int64)
+    tl.store(O + qrow[:, None] * (G * HKV * D) + h * D + d[None, :], (o / l[:, None]).to(tl.bfloat16),
+             mask=(r < L)[:, None])
+
+
+CONTEXT_PART = 512      # ROCm: context keys a ``_block_part`` program reads (at 8 programs a call it was 0.46 ms)
+
+
 def tables(keys: Sequence[Sequence[torch.Tensor]], values: Sequence[Sequence[torch.Tensor]], device) -> list[tuple]:
     """Every layer's (pointer table, key counts) for ``block_attention``, one pinned copy; ``keys[layer][stream]``."""
 
@@ -97,9 +191,20 @@ def block_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, keys: Seq
     table, lens = table if table is not None else tables([keys], [values], q.device)[0]
     out = torch.empty((rows, heads * dim), dtype=torch.bfloat16, device=q.device)
     group = heads // kv_heads
+    lp = max(16, triton.next_power_of_2(length))
+    if hip():                               # a program a query head and 512 context keys, then one merge
+        parts = -(-window // CONTEXT_PART)
+        po = torch.empty((streams * heads * (parts + 1) * lp, dim), dtype=torch.float32, device=q.device)
+        pm = torch.empty((streams * heads * (parts + 1) * lp,), dtype=torch.float32, device=q.device)
+        pl = torch.empty_like(pm)
+        _block_part[(streams, heads, parts + 1)](q, k, v, table, lens, po, pm, pl, scale, window, rows, parts, G=group,
+                                                 HKV=kv_heads, L=length, LP=lp, D=dim, BN=64, CS=CONTEXT_PART,
+                                                 CAUSAL=causal, num_warps=4, num_stages=1)
+        _block_merge[(streams, heads)](po, pm, pl, out, parts, G=group, HKV=kv_heads, L=length, LP=lp, D=dim,
+                                       num_warps=4)
+        return out
     _block_attention[(streams, kv_heads)](q, k, v, table, lens, out, scale, window, rows, G=group, HKV=kv_heads,
-                                          L=length, LP=max(16, triton.next_power_of_2(length)), D=dim,
-                                          BN=64, CAUSAL=causal, num_warps=4, num_stages=2)
+                                          L=length, LP=lp, D=dim, BN=64, CAUSAL=causal, num_warps=4, num_stages=2)
     return out
 
 
