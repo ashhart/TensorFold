@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -31,10 +32,12 @@ class Capture:
         self.test = "manual"
         self.original = mx.fast.metal_kernel
         self.catalog = {}
+        self.fingerprints = {}
         for path in sorted(Path("native/metal").glob("*.metal")):
-            if path.stem.startswith(("gemma_", "affine_rows", "lane_qmm_", "prism_", "row_forward_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
+            if path.stem.startswith(("glm_", "ds4_", "gemma_", "affine_rows", "lane_qmm_", "prism_", "row_forward_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
                 self.catalog[(fingerprint(path.read_text(), path.with_suffix(".h").read_text()),
                               path.stem.endswith("_dep"))] = path.stem
+                self.fingerprints[path.stem] = fingerprint(path.read_text(), path.with_suffix(".h").read_text())
 
     def pytest_runtest_setup(self, item):
         self.test = item.nodeid
@@ -57,6 +60,11 @@ class Capture:
         header = re.sub(r"\n\[\[max_total_threads_per_threadgroup\(\d+\)\]\]\n$", "", spec.get("header", ""))
         source_hash = fingerprint(source, header)
         key = self.catalog.get((source_hash, "DEP" in spec["input_names"]))
+        if spec["name"].startswith("tf_glm5_"):
+            alias = re.sub(r"^tf_glm5_(?:fused_)?", "", spec["name"]).rsplit("_", 1)[0]
+            alias = alias if alias.startswith("ds4_") else "glm_" + alias
+            if self.fingerprints.get(alias) == source_hash:
+                key = alias
         if key is None:
             return kernel
 
@@ -76,10 +84,13 @@ class Capture:
             # Some variants deliberately leave unused outputs unwritten (e.g. the
             # terminal recurrent state for a branched tree). Initialize both sides.
             call["init_value"] = 0
+            mutated = [1] if key in ("glm_moe_box", "glm_moe_present") else []
+            before = {i: mx.array(np.array(call["inputs"][i])) for i in mutated}
             out = kernel(**call)
             mx.eval(*call["inputs"], *out)
             name = f"case{len(self.cases):05}"
-            arrays = {f"input{i}": x for i, x in enumerate(call["inputs"])}
+            arrays = {f"input{i}": before.get(i, x) for i, x in enumerate(call["inputs"])}
+            arrays.update({f"mutation{i}": call["inputs"][i] for i in mutated})
             arrays.update({f"output{i}": x for i, x in enumerate(out)})
             mx.save_safetensors(str(self.directory / f"{name}.safetensors"), arrays)
             templates = []
@@ -92,9 +103,72 @@ class Capture:
                     templates.append(dict(name=label, dtype=str(value).split(".")[-1], kind="dtype"))
             self.cases.append(dict(name=name, kernel=key, source_sha256=source_hash,
                                    test=self.test, templates=templates, grid=call["grid"], group=call["threadgroup"],
-                                   input_count=len(call["inputs"]), output_count=len(out)))
+                                   input_count=len(call["inputs"]), output_count=len(out), mutated_inputs=mutated))
             return out
         return launch
+
+
+def large_family_variants(capture):
+    from tests.test_deepseek_v4_kernels import affine, fp4
+    from tests.test_glm5_row_kernels import _moe
+    from tensorfold.families.deepseek_v4 import moe as DM
+    from tensorfold.kernels.deepseek.v4 import rows as DR, moe as DK
+    from tensorfold.kernels.glm.flash.v1 import hc as HC, moe as MK, stream_moe as SM
+    from tensorfold.kernels.glm.flash.v1 import kernels as GK
+    from tensorfold.families.glm5_next import model as GM
+    from tensorfold.kernels import inputs
+    capture.test = "large_family_components"
+    mx.set_default_device(mx.gpu)
+    mx.random.seed(741)
+    q = affine(1024, 512)
+    rows = mx.random.normal((5, 512)).astype(mx.bfloat16)
+    assert mx.array_equal(GK.qmv_rows(rows, q), mx.concatenate([q(row[None]) for row in rows])).item()
+    x = mx.random.normal((5, 1024)).astype(mx.bfloat16)
+    grouped = DR.qmv_rows_grouped(x, q, 2)
+    reference = mx.concatenate([DR.grouped_one_row(x[r:r + 1], q, 2) for r in range(5)])
+    assert mx.array_equal(grouped, reference).item()
+    for hashed in (False, True):
+        gate, up, down = fp4(8, 512, 512), fp4(8, 512, 512), fp4(8, 512, 512)
+        shared = DM.Shared(affine(512, 512), affine(512, 512), affine(512, 512), 10.0)
+        table = mx.stack([mx.random.permutation(8)[:4] for _ in range(16)]) if hashed else None
+        moe = DM.MoE(mx.random.normal((8, 512)).astype(mx.bfloat16), mx.random.normal((8,)), table,
+                     gate, up, down, shared, SimpleNamespace(num_experts_per_tok=4, routed_scaling_factor=1.5, swiglu_limit=10.0))
+        for rows in (1, 5, 16):
+            x = mx.random.normal((rows, 512)).astype(mx.bfloat16)
+            ids = mx.arange(rows, dtype=mx.uint32)
+            logits = mx.concatenate([x[r:r + 1].astype(mx.float32) @ moe.router for r in range(rows)])
+            grouped = DK.route(logits, moe, ids)
+            routed = DK.routed(x, moe, *grouped)
+            shared_out = shared(x, True)
+            joint = DK.combine(routed, shared_out, moe.top)
+            serial = mx.concatenate([DK.combine(DK.routed(x[r:r + 1], moe, *DK.route(logits[r:r + 1], moe, ids[r:r + 1])),
+                                                shared_out[r:r + 1], moe.top) for r in range(rows)])
+            assert mx.array_equal(joint, serial).item()
+    cfg = SimpleNamespace(hc_mult=4, rms_norm_eps=1e-6, hc_sinkhorn_iters=20, hc_eps=1e-6)
+    hc = GM.HC(mx.random.normal((24, 16384)).astype(mx.bfloat16), mx.random.normal((24,)), mx.array([0.5]*3), cfg)
+    x = mx.random.normal((3, 4, 4096)).astype(mx.bfloat16)
+    norm = mx.ones((4096,), mx.bfloat16)
+    hc.fn_packed = None
+    want = HC.hc_step(x, None, hc, norm, 1e-6)
+    hc.fn_packed = HC.pack_hc_fn(hc.fn.astype(mx.bfloat16))
+    got = HC.hc_step(x, None, hc, norm, 1e-6)
+    assert all(mx.array_equal(a, b).item() for a, b in zip(got, want))
+    moe = _moe()
+    experts = moe.cfg.n_routed_experts
+    # Reverse physical slots to exercise indirection instead of identity addresses.
+    order = mx.arange(experts - 1, -1, -1, dtype=mx.int32)
+    pool = {name: SimpleNamespace(weight=q.weight[order], scales=q.scales[order], biases=q.biases[order])
+            for name, q in (("gate", moe.gate), ("up", moe.up), ("down", moe.down))}
+    streamer = SimpleNamespace(pool=pool, slot_of=order, layer_ids=[inputs.ints((0,))],
+                               box=mx.zeros((256,), mx.uint32), hold=lambda token, *args: token)
+    for rows in (1, 5, 16):
+        x = mx.random.normal((rows, 512)).astype(mx.bfloat16)
+        want = MK.moe_rows(moe, x)
+        got = SM.moe_rows(moe, x, streamer, 0)
+        assert mx.array_equal(got, want).item()
+    box = mx.zeros((256,), mx.uint32)
+    mx.eval(SM.present(mx.array([1, 3, 1, 6], dtype=mx.uint32), box, experts))
+    assert np.array_equal(np.asarray(box)[:experts], np.isin(np.arange(experts), [1, 3, 6]).astype(np.uint32)), np.asarray(box)[:experts]
 
 
 def extra_variants(capture):
@@ -351,10 +425,29 @@ def main():
     parser.add_argument("--tensor-quantization", action="store_true")
     parser.add_argument("--bonsai-only", action="store_true")
     parser.add_argument("--gemma-only", action="store_true")
+    parser.add_argument("--large-families", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
+    if args.large_families:
+        try:
+            code = pytest.main(["-q", "-rs", "--basetemp", str(args.directory / "pytest"),
+                                "tests/test_glm5_row_kernels.py", "tests/test_glm5_fused.py",
+                                "tests/test_glm5_ported_kernels.py", "tests/test_deepseek_v4_kernels.py",
+                                "-k", "not real_weights"], plugins=[capture])
+            if code:
+                raise SystemExit(code)
+            large_family_variants(capture)
+        finally:
+            mx.fast.metal_kernel = capture.original
+        (args.directory / "cases.json").write_text(json.dumps(capture.cases, indent=2) + "\n")
+        required = {name for name in capture.fingerprints if name.startswith(("glm_", "ds4_"))}
+        missing = required - {case["kernel"] for case in capture.cases}
+        print(f"Saved {len(capture.cases)} large-family launches; uncovered: {sorted(missing)}", flush=True)
+        if missing:
+            raise RuntimeError(f"Missing large-family kernels: {sorted(missing)}")
+        return
     if args.affine_only or args.tensor_quantization or args.bonsai_only or args.gemma_only:
         try:
             code = pytest.main(["-q", "-rs", "tests/test_gemma4_kernels.py" if args.gemma_only else "tests/test_bonsai.py" if args.bonsai_only else "tests/test_lane_qmm.py" if args.tensor_quantization else "tests/test_affine_rows_metal.py"], plugins=[capture])

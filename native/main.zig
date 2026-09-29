@@ -351,6 +351,7 @@ test {
     _ = @import("vision_positions.zig");
     _ = @import("image_input.zig");
     _ = @import("gemma_ops.zig");
+    _ = @import("large_family_ops.zig");
     _ = @import("draft_depth.zig");
     _ = @import("draft_vocab.zig");
     _ = @import("lanes.zig");

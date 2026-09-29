@@ -108,6 +108,12 @@ pub fn build(b: *std.Build) void {
     gemma.step.dependOn(&gemma_fixture.step);
     b.step("test-gemma", "Compare Gemma attention, projection, normalization and expert kernels against upstream").dependOn(&gemma.step);
     metal_tests.dependOn(&gemma.step);
+    const large_fixture = b.addSystemCommand(&.{ "env", "MLX_ENABLE_TF32=0", ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/large-families", "--large-families" });
+    const large_kernels = b.addRunArtifact(exe);
+    large_kernels.addArgs(&.{ "check-variants", "build/native-checks/large-families" });
+    large_kernels.step.dependOn(&large_fixture.step);
+    b.step("test-large-family-kernels", "Compare synthetic GLM/DeepSeek kernels and host dispatch; full models remain unverified").dependOn(&large_kernels.step);
+    metal_tests.dependOn(&large_kernels.step);
     const simd_attention_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_attention_fixtures.py", "build/native-checks/simd-attention", "--simd" });
     const simd_attention = b.addRunArtifact(exe);
     simd_attention.addArgs(&.{ "check-attention", "build/native-checks/simd-attention" });

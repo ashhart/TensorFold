@@ -19,6 +19,7 @@ const Case = struct {
     group: [3]i32,
     input_count: usize,
     output_count: usize,
+    mutated_inputs: []const usize = &.{},
 };
 fn find(name: []const u8) !src.Spec {
     inline for (comptime std.meta.declarations(src)) |decl| {
@@ -90,7 +91,28 @@ pub fn check(io: std.Io, dir: []const u8) !void {
             .dtype => mx.td(value.name, try dtype(value.dtype)),
         };
         try kernels.runInto(&scope, spec, inputs, params, case.grid, case.group, outputs, results, 0);
+        if (case.mutated_inputs.len > 0) {
+            try mx.evalMany(results, false);
+            for (case.mutated_inputs) |i| {
+                if (i >= inputs.len) return error.InvalidFixture;
+                try equalBits(&scope, inputs[i], try weights.get(try std.fmt.bufPrint(&path, "mutation{d}", .{i})));
+            }
+        }
         const gemma = @import("gemma_ops.zig");
+        const large = @import("large_family_ops.zig");
+        if (std.mem.eql(u8, case.kernel, "glm_qmv_rows64") or std.mem.eql(u8, case.kernel, "glm_qmv_rows_b") or std.mem.eql(u8, case.kernel, "ds4_qmv_rows_f32")) {
+            const bits = if (std.mem.eql(u8, case.kernel, "glm_qmv_rows_b")) parameter(case, "BITS") else 4;
+            try equalBits(&scope, try large.project(&kernels, &scope, inputs[0], .{ inputs[1], inputs[2], inputs[3] }, bits, std.mem.eql(u8, case.kernel, "ds4_qmv_rows_f32"), parameter(case, "RPS")), expected[0]);
+        }
+        if (std.mem.eql(u8, case.kernel, "ds4_norm_rope")) try equalBits(&scope, try large.normRope(&kernels, &scope, inputs[0], if (parameter(case, "WEIGHTED") == 1) inputs[1] else null, inputs[2], inputs[3], inputs[4], parameter(case, "NORM") == 1, parameter(case, "INVERSE") == 1), expected[0]);
+        if (std.mem.eql(u8, case.kernel, "glm_indexed_attention")) {
+            try mx.evalMany(inputs[3..5], false);
+            try equalBits(&scope, try large.indexedAttention(&kernels, &scope, inputs[0], inputs[1], inputs[2], mx.c.mlx_array_data_int32(inputs[4])[0], mx.c.mlx_array_data_float32(inputs[3])[0]), expected[0]);
+        }
+        if (std.mem.eql(u8, case.kernel, "glm_kda_rows")) {
+            const actual = try large.kda(&kernels, &scope, .{ .heads = parameter(case, "H"), .dims = parameter(case, "D"), .taps = parameter(case, "TAPS"), .f_bits = parameter(case, "FB"), .g_bits = parameter(case, "GB") }, inputs[0..15].*);
+            for (actual, expected) |got, want| try equalBits(&scope, got, want);
+        }
         if (std.mem.eql(u8, case.kernel, "gemma_qkv_rows") and parameter(case, "SG") == 32) {
             const geometry = gemma.Geometry{ .heads = parameter(case, "NQ"), .kv_heads = parameter(case, "NK"), .head_dim = parameter(case, "DH"), .values_are_keys = parameter(case, "VK") == 1 };
             const actual = try gemma.qkv(&kernels, &scope, geometry, inputs[0], .{ inputs[1], inputs[2], inputs[3] }, inputs[4], inputs[5], inputs[6], inputs[7], inputs[8], parameter(case, "GS"));
