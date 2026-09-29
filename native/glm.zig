@@ -497,14 +497,17 @@ pub const Model = struct {
         return s.result(rc, e);
     }
     pub fn forwardMtp(m: *Model, hidden: A, tokens: []const i32) !Pass {
+        return m.forwardMtpAt(hidden, tokens, m.mtp_cache, m.mtp_position);
+    }
+    fn forwardMtpAt(m: *Model, hidden: A, tokens: []const i32, entry: Cache, position: i32) !Pass {
         if (!m.has_mtp) return error.MissingDraftHead;
-        if (tokens.len == 0 or tokens.len > 16 or m.mtp_position > 1048576 - tokens.len) return error.ContextLimitExceeded;
+        if (tokens.len == 0 or tokens.len > 16 or position > 1048576 - tokens.len) return error.ContextLimitExceeded;
         if (!std.mem.eql(i32, mx.shape(hidden), &.{ @intCast(tokens.len), m.config.value.hidden_size }) or mx.dtype(hidden) != mx.bf16) return error.InvalidTensorShape;
         for (tokens) |token| if (token < 0 or token >= m.vocab) return error.InvalidToken;
-        var p = Pass{ .position = m.mtp_position, .generation = m.mtp_generation, .rows = tokens.len, .is_mtp = true };
+        var p = Pass{ .position = position, .generation = m.mtp_generation, .rows = tokens.len, .is_mtp = true };
         errdefer p.deinit();
         const s = &p.scope;
-        var cache = m.mtp_cache;
+        var cache = entry;
         const i = m.cache.len;
         const eps = m.config.value.rms_norm_eps;
         var logits: [16]A = undefined;
@@ -517,7 +520,7 @@ pub const Model = struct {
             joined[row] = try s.cat(&.{ e, h }, 1);
             var x = try m.project(s, i, "eh_proj", joined[row]);
             projected[row] = x;
-            x = try s.binary(c.mlx_add, x, try m.mla(s, i, try cp.norm(s, x, try m.weight(i, "input_layernorm.weight"), eps), &cache, m.mtp_position + @as(i32, @intCast(row))));
+            x = try s.binary(c.mlx_add, x, try m.mla(s, i, try cp.norm(s, x, try m.weight(i, "input_layernorm.weight"), eps), &cache, position + @as(i32, @intCast(row))));
             x = try s.binary(c.mlx_add, x, try m.mlp(s, i, try cp.norm(s, x, try m.weight(i, "post_attention_layernorm.weight"), eps)));
             states[row] = x;
             logits[row] = try m.qmm(s, try cp.norm(s, x, try m.weight(i, "shared_head.norm.weight"), eps), "lm_head", true, null);
@@ -529,6 +532,27 @@ pub const Model = struct {
         p.mtp_input = try s.cat(joined[0..tokens.len], 0);
         p.logits = try s.cat(logits[0..tokens.len], 0);
         return p;
+    }
+    pub fn propose(m: *Model, hidden: A, first: i32, tokens: []i32, settings: @import("sampling.zig").Sampling) !void {
+        if (tokens.len < 1 or tokens.len > 16 or m.mtp_position != m.position - 1) return error.InvalidDraftState;
+        tokens[0] = first;
+        var cache = try m.mtp_cache.clone();
+        defer cache.deinit();
+        var row = try mx.retain(hidden);
+        defer mx.free(row);
+        for (tokens[1..], 0..) |*token, j| {
+            var pass = try m.forwardMtpAt(row, tokens[j..][0..1], cache, m.mtp_position + @as(i32, @intCast(j)));
+            defer pass.deinit();
+            const sampled = try @import("sampling.zig").rows(&m.kernels, &pass.scope, pass.logits, &.{m.position + @as(i32, @intCast(j)) + 1}, settings);
+            defer mx.allocator.free(sampled);
+            token.* = sampled[0];
+            const next_cache = try pass.records[0][0].clone();
+            cache.deinit();
+            cache = next_cache;
+            const next_row = try mx.retain(pass.hidden);
+            mx.free(row);
+            row = next_row;
+        }
     }
     pub fn commitMtp(m: *Model, p: *Pass, keep: usize) !void {
         if (!p.is_mtp or keep == 0 or keep > p.rows or p.position != m.mtp_position or p.generation != m.mtp_generation or p.records[keep - 1].len != 1) return error.InvalidCommit;
@@ -707,6 +731,66 @@ pub const Model = struct {
         }
         std.debug.print("PASS: GLM MTP serial/chain, partial commit, stale passes and every cache.\n", .{});
     }
+    pub fn checkGeneration(m: *Model) !void {
+        if (!m.has_mtp) return;
+        defer m.reset();
+        const generation = @import("serial_generation.zig");
+        var prompt: [33]i32 = undefined;
+        for (&prompt, 0..) |*token, i| token.* = @intCast(i + 1);
+        for ([_]@import("sampling.zig").Sampling{ .{ .temperature = 0 }, .{ .seed = 456, .temperature = 0.7, .top_k = 20, .top_p = 0.95, .metal = true } }) |settings| {
+            m.reset();
+            var serial = try generation.generate(m, &prompt, 12, settings, 0, null);
+            defer serial.deinit();
+            const saved = try mx.allocator.alloc(Cache, m.cache.len);
+            @memset(saved, .{});
+            defer {
+                for (saved) |*cache| cache.deinit();
+                mx.allocator.free(saved);
+            }
+            for (m.cache, saved) |cache, *copy| copy.* = try cache.clone();
+            for ([_]usize{ 1, 3, 15 }) |depth| {
+                m.reset();
+                var drafted = try generation.generate(m, &prompt, 12, settings, depth, null);
+                defer drafted.deinit();
+                try std.testing.expectEqualSlices(u32, serial.tokens.items, drafted.tokens.items);
+                try std.testing.expect(drafted.drafted > 0);
+                var s = mx.Scope{};
+                defer s.deinit();
+                for (m.cache, saved) |actual, want| inline for (comptime std.meta.fieldNames(Cache)) |field| {
+                    const x = @field(actual, field);
+                    const y = @field(want, field);
+                    if ((x.ctx == null) != (y.ctx == null)) return error.CacheMismatch;
+                    if (x.ctx != null) try @import("sampling_checks.zig").equal(&s, x, y);
+                };
+                try std.testing.expectEqual(m.position - 1, m.mtp_position);
+            }
+        }
+        var s = mx.Scope{};
+        defer s.deinit();
+        var head = try m.weights.triple("lm_head");
+        for (&head) |*a| a.* = try s.own(try mx.retain(a.*));
+        defer {
+            m.weights.put("lm_head.scales", head[1]) catch unreachable;
+            m.weights.put("lm_head.biases", head[2]) catch unreachable;
+        }
+        try m.weights.put("lm_head.scales", try s.zeros(mx.shape(head[1]), mx.dtype(head[1])));
+        try m.weights.put("lm_head.biases", try s.zeros(mx.shape(head[2]), mx.dtype(head[2])));
+        for ([_]usize{ 0, 1, 2, 17 }) |limit| {
+            m.reset();
+            var result = try generation.generate(m, &prompt, limit, .{ .temperature = 0 }, 3, null);
+            defer result.deinit();
+            try std.testing.expectEqual(limit, result.tokens.items.len);
+            try std.testing.expectEqual(result.drafted, result.accepted);
+        }
+        const eos = m.config.value.eos_token_id;
+        defer m.config.value.eos_token_id = eos;
+        m.config.value.eos_token_id = &.{0};
+        m.reset();
+        var stopped = try generation.generate(m, &prompt, 12, .{ .temperature = 0 }, 3, null);
+        defer stopped.deinit();
+        try std.testing.expectEqualSlices(u32, &.{0}, stopped.tokens.items);
+        std.debug.print("PASS: GLM greedy/seeded MTP generation, depths 1/3/15, target cache parity, full acceptance, EOS and token budgets.\n", .{});
+    }
 };
 fn canonical(raw_name: []const u8, layers: usize) !?[]const u8 {
     const short = blk: {
@@ -782,6 +866,7 @@ pub fn checkModel(io: std.Io, dir: []const u8, out_dir: []const u8) !void {
     m.trace_dir = null;
     try m.checkExact(19);
     try m.checkMtp();
+    try m.checkGeneration();
 }
 fn save(s: *mx.Scope, path: []const u8, value: A) !void {
     const z = try mx.allocator.dupeSentinel(u8, path, 0);

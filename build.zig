@@ -128,6 +128,20 @@ pub fn build(b: *std.Build) void {
         const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", oracle_dir, native_dir });
         compare.step.dependOn(&native.step);
         glm_previous = &compare.step;
+        for (0..2) |mode| {
+            const model_dir = if (case == 1) b.fmt("{s}/mlxlm", .{fixture}) else fixture;
+            const reference_report = b.fmt("{s}/generation-{d}-oracle.json", .{ fixture, mode });
+            const native_report = b.fmt("{s}/generation-{d}-native.json", .{ fixture, mode });
+            const ids = "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33";
+            const reference = b.addSystemCommand(&.{ "env", "MLX_ENABLE_TF32=0", ".venv/bin/python", "tools/native_families_reference.py", model_dir, "--tokens", ids, "--generate", "12", "--temperature", if (mode == 0) "0" else "0.7", "--seed", "456", "--metal-sampling", "--output", reference_report });
+            reference.step.dependOn(glm_previous.?);
+            const completion = b.addRunArtifact(exe);
+            completion.addArgs(&.{ "run", model_dir, "--tokens", ids, "--max-tokens", "12", "--temperature", if (mode == 0) "0" else "0.7", "--seed", "456", "--metal-sampling", "--mtp-drafts", "3", "--report", native_report });
+            completion.step.dependOn(&reference.step);
+            const reports = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-reports", reference_report, native_report });
+            reports.step.dependOn(&completion.step);
+            glm_previous = &reports.step;
+        }
     }
     glm_models.dependOn(glm_previous.?);
     metal_tests.dependOn(glm_models);

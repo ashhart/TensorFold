@@ -54,6 +54,8 @@ def main():
         if not (args.model / "mlxlm/config.json").exists():
             write_mlxlm_checkpoint(args.model)
         args.model = args.model / "mlxlm"
+    if args.synthetic_glm or args.synthetic_glm_layout:
+        (args.model / "tokenizer.json").write_text(json.dumps({"model": {"type": "BPE", "vocab": {f"t{i}": i for i in range(256)}, "merges": []}, "pre_tokenizer": {"type": "ByteLevel"}, "decoder": {"type": "ByteLevel"}}))
     from tensorfold.engine.exact_sampling import Sampling, sample_rows
     kind = json.loads((args.model / "config.json").read_text())["model_type"]
     if kind == "glm5_next":
