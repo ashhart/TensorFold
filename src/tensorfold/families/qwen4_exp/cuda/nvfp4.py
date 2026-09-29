@@ -265,3 +265,255 @@ def _fp8_bytes(weight_scale: torch.Tensor) -> torch.Tensor:
     """The stored scale bytes as uint8 (a safetensors fp8e4m3 tensor arrives as fp8; the kernel reads bytes)."""
 
     return weight_scale.contiguous().view(torch.uint8)
+
+
+def make_fp4(words: torch.Tensor, weight_scale: torch.Tensor, weight_scale_2) -> FP4:
+    """One linear layer from the checkpoint's arrays: (N, K/2) uint8, (N, K/16) fp8e4m3, scalar -> FP4.
+
+    The stored bytes are kept as they ship; the kernel decodes them, so nothing is widened here."""
+
+    n, k2 = words.shape
+    factor = torch.full((n,), _tensor_scale(weight_scale_2), dtype=torch.float32, device=words.device)
+    return FP4(_tile_words(words), _fp8_bytes(weight_scale).t().contiguous(), n, k2 * 2,
+               scale2=factor, packed=True)
+
+
+def stacked_fp4(words: torch.Tensor, weight_scale: torch.Tensor, scale2) -> FP4:
+    """Stacked per-expert arrays (words [E, N, K/2] uint8, scales [E, N, K/16] fp8e4m3, scale2 [E] fp32) -> one
+    packed table with a leading expert axis (``n`` rows per expert; the kernels slice ``weight[e]``/``scale[e]``
+    and read ``scale2[e]``).
+
+    ``scale2`` is always materialised contiguous: an ``expand`` view (stride 0 on N) makes Triton's
+    ``S2 + e*N + rn`` walk off the underlying E-vector and illegal-memory-access on a near-full GB10."""
+
+    e, n, k2 = words.shape
+    factors = torch.as_tensor(scale2, dtype=torch.float32, device=words.device)
+    if factors.numel() == e:                        # one factor an expert: the same for its whole row block
+        factors = factors.reshape(e, 1).expand(e, n)
+    return FP4(_tile_words(words), _fp8_bytes(weight_scale).permute(0, 2, 1).contiguous(), n, k2 * 2,
+               scale2=factors.reshape(e, n).contiguous(), packed=True)
+
+
+def fp4_from_rows(weight_bits: torch.Tensor, scale: torch.Tensor) -> FP4:
+    """An FP4 from a bf16-pattern grid (uint16 [N, K]) and [N, K/16] fp32 row scales: the gate/up stack
+    (gate and up code grids joined, each projection's row scales its own) and any pre-decoded table. The
+    per-tensor factor is materialised here, not lazily: a table both the eager step and a CUDA graph capture
+    read must never allocate during capture."""
+
+    n, k = weight_bits.shape
+    return FP4(_tile_bits(weight_bits), scale.t().contiguous(), n, k)
+
+
+def fp4_from_bf16(rows: torch.Tensor) -> FP4:
+    """A BF16 matrix as an exact scale-1 FP4-style table (identity row scales): the shared expert riding
+    in the FP4 kernels, its bf16 values as the stored operand grid."""
+
+    n, k = rows.shape
+    scale = torch.ones((n, k // GS), dtype=torch.float32, device=rows.device)
+    return fp4_from_rows(rows.contiguous().view(torch.uint16), scale)
+
+
+def split_k(n: int, k: int, target: int = 160) -> int:
+    """K-slice count for an (n, k) weight: a function of the shape only (never the row count), a power of two,
+    at least 4 quantization blocks (64 inputs) a slice."""
+
+    tiles = -(-n // BN)
+    blocks = k // GS
+    sk = 1
+    while sk < 32 and tiles * sk < target and blocks % (sk * 2) == 0 and blocks // (sk * 2) >= 4:
+        sk *= 2
+    return sk
+
+
+def gpi_for(per: int, want: int) -> int:
+    for g in (want, 8, 4, 2, 1):
+        if g <= want and per % g == 0:
+            return g
+    return 1
+
+
+def bucket(m: int) -> int:
+    """Rows a program takes: 16 to 128, then tiles of 128 (a row's bits never depend on its tile)."""
+
+    for b in (16, 32, 64, 128):
+        if m <= b:
+            return b
+    return 128
+
+
+# -- the matmul kernel -------------------------------------------------------------------------------
+HAS_TRITON = True
+try:
+    import triton                             # noqa: E402
+    import triton.language as tl              # noqa: E402
+
+    @triton.jit
+    def _bf16_widen(bits):
+        return (bits.to(tl.int32) << 16).to(tl.float32, bitcast=True)
+
+    @triton.jit
+    def _e2m1_pattern(code):
+        """An E2M1 code (sign in bit 3, magnitude bits 0..2) as its bf16 bit pattern: the magnitudes 0, .5, 1,
+        1.5, 2, 3, 4, 6 — the same table ``e2m1_bits`` gathers, built from the code's fields."""
+
+        m = code & 0x7
+        pat = tl.where(m == 0, 0, ((126 + (m >> 1)) << 7) | (tl.where(m >= 2, m & 1, 0) << 6))
+        return (pat | ((code & 0x8) << 12)).to(tl.uint16)
+
+    @triton.jit
+    def _e4m3_value(byte):
+        """An fp8e4m3 byte as its exact fp32 value: the exponent rebases (bias 7 -> 127: +120), its subnormals
+        are values (m * 2**-9), its NaN codes stay NaN — the rules ``e4m3_bits`` follows."""
+
+        e = (byte >> 3) & 0xF
+        m = byte & 0x7
+        widened = ((((e + 120) << 7) | (m << 4)).to(tl.int32) << 16).to(tl.float32, bitcast=True)
+        value = tl.where(e == 0, m.to(tl.float32) * (2.0 ** -9), widened)
+        value = tl.where((e == 15) & (m == 7), float("nan"), value)
+        return tl.where((byte & 0x80) != 0, -value, value)
+
+    @triton.jit
+    def _fp4mm(X, W, S, S2, OUT, PART, M, x_stride,
+               N: tl.constexpr, K: tl.constexpr, SK: tl.constexpr, BM: tl.constexpr,
+               SBN: tl.constexpr, BLOCK_N: tl.constexpr, GPI: tl.constexpr, F32: tl.constexpr,
+               PACKED: tl.constexpr):
+        """x [M, K] bf16 @ FP4.T -> [M, N] bf16 (split-K: fp32 partials, reduced in slice order). One program:
+        a row tile x a column tile x one K slice; blocks in order, each block one tensor-core dot of the 16
+        bf16 inputs against the block's stored codes, times the block's scale: one fp32 rounding per block
+        product, the dequantize reference's order. ``SBN`` is the stored N tile (a constexpr: Triton reads
+        no globals) and ``BLOCK_N`` the program's slice of it.
+
+        ``PACKED`` reads the checkpoint's own bytes: the codes as stored nibbles (two a byte, the low nibble
+        the even input) and the scales as stored fp8e4m3, both decoded here — the device keeps the file's
+        bytes, a quarter of the widened grid. Otherwise the operand is a grid of bf16 patterns (an exact BF16
+        matrix riding these kernels) with fp32 scales. ``S2`` is the fp32 per-tensor scale the checkpoint
+        carries beside its block scales."""
+
+        PER: tl.constexpr = (K // 16) // SK             # quantization blocks per slice
+        SUB: tl.constexpr = SBN // BLOCK_N              # programs per stored N tile
+        pid_n = tl.program_id(1)
+        pid_s = tl.program_id(2)
+        rm = tl.program_id(0) * BM + tl.arange(0, BM)
+        rn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        r16 = tl.arange(0, 16)
+        m_ok = rm < M
+        n_ok = rn < N
+        # GB10 faults on out-of-range addresses even when the load/store is masked (near-full VRAM
+        # leaves no adjacent mapping to absorb the OOB). Clamp the index used for pointer math.
+        rm_a = tl.where(m_ok, rm, 0)
+        rn_a = tl.where(n_ok, rn, 0)
+        # a quantization block b lives in stored K block kb = b // 4, rows (b % 4) * 16 .. + 15 of
+        # [N/SBN, K/64, 64, SBN] — the packed form, 32 bytes a K block and 8 rows a quantization block
+        tile = W + (pid_n // SUB) * ((K // 64) * (32 if PACKED else 64) * SBN)
+        local = (pid_n % SUB) * BLOCK_N + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BM, BLOCK_N), dtype=tl.float32)
+        s2 = tl.load(S2 + rn_a, mask=n_ok, other=1.0)     # the per-tensor factor, one a row (a stacked table)
+        KT: tl.constexpr = K // 64
+        for i in range(PER // GPI):
+            for j in tl.static_range(GPI):
+                b = pid_s * PER + i * GPI + j
+                kb = b // 4
+                row0 = (b % 4) * 16
+                x = tl.load(X + rm_a[:, None] * x_stride + (b * 16 + r16)[None, :], mask=m_ok[:, None], other=0.0)
+                if PACKED:
+                    # a block's 16 values are its 8 stored bytes: read a byte a value (half the weight
+                    # traffic of the widened grid) and take the low nibble for the even input
+                    w8 = tl.load(tile + kb * (32 * SBN) + (row0 // 2 + r16 // 2)[:, None] * SBN + local[None, :])
+                    code = tl.where((r16 % 2)[:, None] == 0, w8 & 0xF, w8 >> 4).to(tl.int32)
+                    wv = _bf16_widen(_e2m1_pattern(code)).to(tl.bfloat16)
+                else:
+                    wbits = tl.load(tile + kb * (64 * SBN) + (row0 + r16)[:, None] * SBN + local[None, :])
+                    wv = _bf16_widen(wbits).to(tl.bfloat16)
+                p = tl.dot(x, wv)
+                if PACKED:
+                    s = _e4m3_value(tl.load(S + b * N + rn_a, mask=n_ok, other=0).to(tl.int32)) * s2
+                else:
+                    s = tl.load(S + b * N + rn_a, mask=n_ok, other=0.0)
+                acc += p * s[None, :]
+        out_mask = m_ok[:, None] & n_ok[None, :]
+        if SK == 1:
+            tl.store(OUT + rm_a[:, None] * N + rn_a[None, :], acc if F32 else acc.to(tl.bfloat16), mask=out_mask)
+        else:
+            tl.store(PART + (pid_s * M + rm_a[:, None]) * N + rn_a[None, :], acc, mask=out_mask)
+
+    @triton.jit
+    def _reduce(PART, OUT, total, SK: tl.constexpr, BLOCK: tl.constexpr):
+        offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        ok = offs < total
+        offs_a = tl.where(ok, offs, 0)
+        acc = tl.load(PART + offs_a, mask=ok, other=0.0)
+        for s in tl.static_range(1, SK):
+            acc = acc + tl.load(PART + s * total + offs_a, mask=ok, other=0.0)
+        tl.store(OUT + offs_a, acc.to(tl.bfloat16), mask=ok)
+except ModuleNotFoundError:                   # the CPU tests of the format import this module without Triton
+    HAS_TRITON = False
+
+
+# (blocks per unrolled step, warps, stages) by row bucket: every choice gives the same bits
+CONFIG = {16: (4, 4, 3), 32: (2, 4, 3), 64: (2, 4, 2), 128: (1, 8, 2)}
+
+# Per (N, K) at up to 16 rows: (K slices, blocks per step, warps, stages). The K slices set the sum order
+# (a per-shape constant); the rest never changes bits. Expert shapes of the NVFP4 Flash Next (D = 2560,
+# NI = 640): gate/up stacked (1280, 2560), gate and up (640, 2560), down (2560, 640).
+SHAPES16 = {
+    (640, 2560): (1, 4, 4, 3),
+    (1280, 2560): (1, 4, 4, 3),
+    (2560, 640): (8, 2, 4, 3),
+}
+
+
+def split_for(n: int, k: int) -> int:
+    got = SHAPES16.get((n, k))
+    return got[0] if got else split_k(n, k)
+
+
+def matmul(x: torch.Tensor, fp: FP4, *, out: torch.Tensor | None = None, f32: bool = False,
+           sk: int | None = None, part: torch.Tensor | None = None,
+           gpi: int | None = None, num_warps: int | None = None, num_stages: int | None = None,
+           block_n: int | None = None) -> torch.Tensor:
+    """x [M, K] bf16 (rows may be strided) @ fp.T -> [M, N] bf16 (or fp32 sums with ``f32``, as the MoE
+    buffers keep). Split-K sums in slice order (``_reduce``), the same rule as ``qmm.matmul``."""
+
+    if not HAS_TRITON:
+        raise RuntimeError("the NVFP4 matmul needs Triton (the CUDA engine's environment)")
+
+    m, k = x.shape
+    if k != fp.k or x.stride(1) != 1:
+        raise ValueError(f"fp4 matmul: x {tuple(x.shape)} does not match K={fp.k}")
+    if fp.n % BN:
+        raise ValueError(f"fp4 matmul: N {fp.n} is not a multiple of {BN}")
+    bm = bucket(m)
+    c_gpi, c_warps, c_stages = CONFIG[bm]
+    tuned = SHAPES16.get((fp.n, fp.k)) if bm == 16 else None
+    if tuned is not None:
+        _, c_gpi, c_warps, c_stages = tuned
+    sk = int(sk) if sk else split_for(fp.n, fp.k)
+    per = (k // GS) // sk
+    g = gpi_for(per, gpi or c_gpi)
+    if out is None:
+        out = torch.empty((m, fp.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
+    elif out.shape != (m, fp.n) or not out.is_contiguous():
+        raise ValueError(f"fp4 matmul: out {tuple(out.shape)} must be a contiguous ({m}, {fp.n})")
+    elif (out.dtype == torch.float32) != f32:
+        raise ValueError(f"fp4 matmul: out dtype {out.dtype} does not match f32={f32}")
+    if sk > 1 and part is None:
+        part = torch.empty((sk, m, fp.n), dtype=torch.float32, device=x.device)
+    bn = block_n or BN
+    if fp.scale2 is None:                        # a table built before the factor became mandatory
+        fp.scale2 = torch.ones(fp.n, dtype=torch.float32, device=x.device)
+    grid = (triton.cdiv(m, bm), fp.n // bn, sk)
+    _fp4mm[grid](x, fp.weight, fp.scale, fp.scale2, out, part if sk > 1 else out, m, x.stride(0),
+                 N=fp.n, K=k, SK=sk, BM=bm, SBN=BN, BLOCK_N=bn, GPI=g, F32=f32, PACKED=fp.packed,
+                 num_warps=num_warps or c_warps, num_stages=num_stages)
+    if sk > 1:
+        total = m * fp.n
+        if f32:
+            # the fp32 sums at the split: the caller's combine wants every slice's fp32 partial summed in
+            # slice order, so the reduce's own rounding is the final bf16 one — for f32 outputs, sum the
+            # slices here in slice order, one fp32 add per slice, no bf16 round
+            out.copy_(part[0])
+            for s in range(1, sk):
+                out += part[s]
+        else:
+            _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, num_warps=4)
+    return out
