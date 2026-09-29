@@ -132,7 +132,7 @@ class Qwen36Engine:
                              "shorten the prompt or reserve fewer reply tokens")
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         if self.scheduler is not None:
-            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens)
+            return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos)
         t0 = time.perf_counter()
         if not draft or self.head is None:
             st, first = serial_prefill(self.w, prompt, sampling)

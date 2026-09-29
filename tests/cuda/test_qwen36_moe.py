@@ -606,3 +606,22 @@ def test_a_stream_alone_grows_the_graph_buffers_while_others_run(expandable, sam
     assert runner.rows == 2 * BUCKET
     for s in (short, grown, joined, last):
         assert s.out == refs[tuple(s.prompt)], s.prompt
+
+
+def test_streams_ignoring_end_tokens_decode_past_them_beside_others():
+    """``stop_eos=False`` per request with --parallel: drafted and serial streams that ignore end tokens decode through
+    one to their count, beside a stream that stops there; each emits its serial tokens."""
+
+    w, head = _model()
+    prompt = PROMPTS[0]
+    st, first = serial_prefill(w, prompt, None)
+    free = draft_decode(w, st, prompt, first, 40, None, None, allow_copy=False, stop_eos=False).tokens
+    w.config.eos = (free[5],)                               # an end token inside the reply
+    dec = MultiDecoder(w, head, depth=3, confidence=0.0)
+    runs = [Stream(prompt, 40, None, stop_eos=False), Stream(prompt, 40, None),
+            Stream(prompt, 40, None, draft=False, stop_eos=False)]
+    for s in runs:
+        dec.admit(s)
+    _drain(dec)
+    assert runs[0].out == free == runs[2].out and len(free) == 40
+    assert runs[1].out == free[:free.index(free[5]) + 1]

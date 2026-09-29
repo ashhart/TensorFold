@@ -103,7 +103,7 @@ class MultiDecoder:
             return [s]
         if first is None:
             return []
-        s.take([first], self.eos)
+        s.take([first], self._ends(s))
         return [s] if s.done else []
 
     def _keep(self, ids: list[int], s: Stream) -> None:
@@ -156,7 +156,7 @@ class MultiDecoder:
             self.w, [(t, p, s.st) for t, p, s in zip(wins, chains, live)], hidden=True)
         positions = [[s.st.pos + 1 + i for i in range(len(t))] for s, t in zip(live, wins)]
         sampled = sample_streams(logits, starts, positions, [s.sampling for s in live])
-        kept_rows = [accept(t, p, rows, s.count - len(s.out), self.eos)
+        kept_rows = [accept(t, p, rows, s.count - len(s.out), self._ends(s))
                      for s, t, p, rows in zip(live, wins, chains, sampled)]
         commit_streams([s.st for s in live], record, [[starts[k] + r for r in path]
                                                       for k, (path, _) in enumerate(kept_rows)], in_place=True)
@@ -166,8 +166,13 @@ class MultiDecoder:
             s.counted(len(tokens))
             if s.snap is not None:                    # the kept rows' final states, for the head to absorb next
                 s.snap.carry = Carry(hidden[starts[k] + path[0]:starts[k] + path[-1] + 1], new)
-            s.take(new, self.eos)
+            s.take(new, self._ends(s))
         return done + [s for s in live if s.done]
+
+    def _ends(self, s: Stream) -> tuple[int, ...]:
+        """The end tokens that end this stream: none when its request ignores them (``stop_eos=False``)."""
+
+        return self.eos if s.stop_eos else ()
 
     def _fits(self, s: Stream) -> bool:
         """Whether a drafting stream's caches fit the graphs' buffers (else it decodes eagerly in its own)."""
@@ -185,11 +190,11 @@ class MultiDecoder:
             self.resident = s
         tokens, path, new, d.carry = mtp_round(s.st, d.cache, d.carry, s.out[-1], s.count - len(s.out), s.sampling,
                                                s.context, s.copies, depth=self.depth, confidence=self.confidence,
-                                               ids=self.head.ids, verify=g.verify, step=g.draft, eos=self.eos,
+                                               ids=self.head.ids, verify=g.verify, step=g.draft, eos=self._ends(s),
                                                in_place=True)
         s.committed.extend(tokens[r] for r in path)
         s.counted(len(tokens))
-        s.take(new, self.eos)
+        s.take(new, self._ends(s))
         return [s] if s.done else []
 
     def _propose(self, live: list[Stream]) -> None:
