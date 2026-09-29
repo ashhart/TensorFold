@@ -100,9 +100,11 @@
     "checks": [{"step":"test-dflash","driver":{"path":"native/dflash.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-drafts","driver":{"path":"native/main.zig","symbol":"main"},"scope":"checkpoint"}]
   },
   {
-    "id": "draft-calibration-capture", "state": "missing", "requirement": "DFlash calibration tables, proposal allocation probabilities and capture sidecars",
+    "id": "draft-calibration-capture", "state": "partial", "requirement": "DFlash calibration tables, proposal allocation probabilities and capture sidecars",
     "upstream": ["src/tensorfold/drafters/calibration.py", "src/tensorfold/drafters/dflash_capture.py", "src/tensorfold/families/qwen3_5/dflash2_calibration.json"],
-    "limitation": "Native drafter execution exists; upstream calibration fitting/loading and capture sidecars are not ported."
+    "implementation": [{"path":"native/draft_calibration.zig","symbol":"fit"}, {"path":"native/draft_calibration.zig","symbol":"rank"}, {"path":"native/drafter.zig","symbol":"propose"}],
+    "checks": [{"step":"test-draft-calibration","driver":{"path":"native/draft_calibration.zig","symbol":"check"},"scope":"host"}, {"step":"test-draft-calibration-model","driver":{"path":"native/main.zig","symbol":"main"},"scope":"checkpoint"}],
+    "limitation": "Calibration fitting/loading and calibrated tree ordering are implemented. Capture sidecars and allocation across shared requests remain missing."
   },
   {
     "id": "copy-drafts", "state": "present", "requirement": "Exact suffix/ngram copy proposals",

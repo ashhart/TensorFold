@@ -22,6 +22,8 @@ pub fn propose(context: []const i32, budget: usize) Proposal {
         for (0..result.len) |i| {
             result.tokens[i] = context[at + i];
             result.parents[i] = @as(i32, @intCast(i)) - 1;
+            result.scores[i] = -0.06 * @as(f64, @floatFromInt(i + 1));
+            result.probabilities[i] = @exp(result.scores[i]);
         }
     }
     return result;

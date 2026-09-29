@@ -64,6 +64,7 @@ pub fn build(b: *std.Build) void {
     const runtime_options = b.addOptions();
     runtime_options.addOption([]const u8, "mlx_version", dependency_pins.value.object.get("python").?.object.get("mlx").?.string);
     runtime_options.addOption(bool, "vision_legacy_pixel_limits", dependency_pins.value.object.get("vision_legacy_pixel_limits").?.bool);
+    runtime_options.addOption([]const u8, "dflash_calibration", @embedFile("src/tensorfold/families/qwen3_5/dflash2_calibration.json"));
     mod.addOptions("native_runtime", runtime_options);
     mod.linkFramework("ImageIO", .{});
     mod.linkFramework("CoreGraphics", .{});
@@ -301,6 +302,38 @@ pub fn build(b: *std.Build) void {
     tool_stream_tests.addArgs(&.{ "check-tool-stream", "build/native-checks/tool-stream.json" });
     tool_stream_tests.step.dependOn(&tool_fixtures.step);
     tool_step.dependOn(&tool_stream_tests.step);
+    const calibration_fixture = "build/native-checks/draft-calibration.json";
+    const calibration_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--calibration-fixtures", "--output", calibration_fixture });
+    const calibration_check = b.addRunArtifact(exe);
+    calibration_check.addArgs(&.{ "check-draft-calibration", calibration_fixture });
+    calibration_check.step.dependOn(&calibration_oracle.step);
+    const calibration_fit = b.addRunArtifact(exe);
+    calibration_fit.addArgs(&.{ "fit-draft-calibration", "build/native-checks/draft-calibration.samples.json", "build/native-checks/draft-calibration.fitted.json" });
+    calibration_fit.step.dependOn(&calibration_check.step);
+    const calibration_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-calibration", "build/native-checks/draft-calibration.samples.json", "build/native-checks/draft-calibration.fitted.json" });
+    calibration_compare.step.dependOn(&calibration_fit.step);
+    b.step("test-draft-calibration", "Compare calibration fits, bin boundaries and parent-preserving proposal ordering with upstream").dependOn(&calibration_compare.step);
+    const calibration_models = b.step("test-draft-calibration-model", "Verify fitted calibration overrides preserve Qwen and Bonsai generation without copy proposals");
+    var calibration_prior: *std.Build.Step = &calibration_compare.step;
+    for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "Ternary-Bonsai-2-27B-mlx-2bit" }, 0..) |name, family| {
+        for ([_][]const u8{ "0", "0.7" }, 0..) |temperature, regime| {
+            const common = &.{ "run", b.fmt("{s}/{s}", .{ model_root, name }), "--tokens", "1,2,3,4,5,6,7,8,41,42,43,1,2,3,4,5,6,7,8", "--max-tokens", "24", "--seed", "5678", "--temperature", temperature, "--top-k", "12", "--top-p", "0.8", "--metal-sampling" };
+            const serial_path = b.fmt("build/native-checks/calibrated-{d}-{d}-serial.json", .{ family, regime });
+            const draft_path = b.fmt("build/native-checks/calibrated-{d}-{d}-draft.json", .{ family, regime });
+            const serial = b.addRunArtifact(exe);
+            serial.addArgs(common);
+            serial.addArgs(&.{ "--no-drafts", "--report", serial_path });
+            serial.step.dependOn(calibration_prior);
+            const draft = b.addRunArtifact(exe);
+            draft.addArgs(common);
+            draft.addArgs(&.{ "--drafter", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}), "--no-copy", "--draft-calibration", "build/native-checks/draft-calibration.fitted.json", "--report", draft_path });
+            draft.step.dependOn(&serial.step);
+            const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--require-rounds", "--compare-reports", serial_path, draft_path });
+            compare.step.dependOn(&draft.step);
+            calibration_prior = &compare.step;
+        }
+    }
+    calibration_models.dependOn(calibration_prior);
     for ([_][]const u8{ "Qwen3.8-27B-MLX-4bit", "Ternary-Bonsai-2-27B-mlx-2bit", "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "Qwen3.8-Flash-Next-MLX-4bit-MTP", "gemma-4-26b-a4b-it-4bit", "GLM-5.3-Flash-MLX-4bit-MTP", "DeepSeek-V4-Flash-4bit" }, 0..) |name, index| {
         const dir = b.fmt("{s}/{s}", .{ model_root, name });
         const fixture = b.fmt("build/native-checks/chat/{d}.json", .{index});

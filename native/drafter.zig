@@ -5,9 +5,10 @@ const lanes = @import("lanes.zig");
 const model = @import("model.zig");
 const sampling = @import("sampling.zig");
 const weights = @import("weights.zig");
+const calibration = @import("draft_calibration.zig");
 const A = mx.Array;
 const conv_spec = @import("kernel_sources.zig").Spec{ .name = "dflash_dynamic_conv_v1", .inputs = &.{ "H", "DYNAMIC", "BASE", "dims" }, .outputs = &.{"OUT"}, .source = @embedFile("metal/dynamic_conv.metal"), .header = "", .contiguous = true };
-pub const Proposal = struct { tokens: [31]i32 = undefined, parents: [31]i32 = undefined, len: usize = 0 };
+pub const Proposal = struct { tokens: [31]i32 = undefined, parents: [31]i32 = undefined, scores: [31]f64 = undefined, probabilities: [31]f64 = undefined, len: usize = 0 };
 pub const Drafter = struct {
     weights: weights.Weights,
     cache: [5]model.Cache = @splat(.{}),
@@ -15,6 +16,7 @@ pub const Drafter = struct {
     head: lanes.Linear,
     pred: A,
     succ: A,
+    calibration_tables: std.json.Parsed(calibration.File),
     pub fn init(io: std.Io, dir: []const u8, target: *model.Model) !Drafter {
         var w = weights.Weights.init();
         errdefer w.deinit();
@@ -29,7 +31,9 @@ pub const Drafter = struct {
         try mx.evalMany(&.{ pred, succ }, false);
         const pown = try mx.retain(pred);
         errdefer mx.free(pown);
-        return .{ .weights = w, .head = selected, .pred = pown, .succ = try mx.retain(succ) };
+        const tables = try calibration.parse(mx.allocator, @import("native_runtime").dflash_calibration);
+        errdefer tables.deinit();
+        return .{ .weights = w, .head = selected, .pred = pown, .succ = try mx.retain(succ), .calibration_tables = tables };
     }
     pub fn reset(d: *Drafter) void {
         for (&d.cache) |*v| v.deinit();
@@ -41,6 +45,12 @@ pub const Drafter = struct {
         d.head.deinit();
         mx.free(d.pred);
         mx.free(d.succ);
+        d.calibration_tables.deinit();
+    }
+    pub fn loadCalibration(d: *Drafter, io: std.Io, path: []const u8) !void {
+        const tables = try calibration.load(mx.allocator, io, path);
+        d.calibration_tables.deinit();
+        d.calibration_tables = tables;
     }
     fn get(d: *Drafter, i: usize, suffix: []const u8) !A {
         var buf: [160]u8 = undefined;
@@ -159,7 +169,16 @@ pub const Drafter = struct {
                 candidates[row][j] = .{ .id = if (id < 98304) id else id - 98304 + 248032, .value = values[row * 16 + j] };
             }
         }
-        return d.search(candidates[0 .. n - 1], mx.c.mlx_array_data_float32(projection)[0 .. (n - 1) * 256], anchor, @min(budget, 15), settings);
+        var result = d.search(candidates[0 .. n - 1], mx.c.mlx_array_data_float32(projection)[0 .. (n - 1) * 256], anchor, @min(budget, 15), settings);
+        var arena = std.heap.ArenaAllocator.init(mx.allocator);
+        defer arena.deinit();
+        const table = d.calibration_tables.value.tables.map.get(if (settings.temperature > 0) "sampled" else "greedy");
+        const calibrated = try calibration.rank(arena.allocator(), result.tokens[0..result.len], result.parents[0..result.len], result.scores[0..result.len], table);
+        @memcpy(result.tokens[0..result.len], calibrated.tokens);
+        @memcpy(result.parents[0..result.len], calibrated.parents);
+        @memcpy(result.scores[0..result.len], calibrated.scores);
+        @memcpy(result.probabilities[0..result.len], calibrated.probabilities);
+        return result;
     }
     fn search(d: *Drafter, candidates: []const [16]sampling.Candidate, hproj: []const f32, anchor: i32, budget: usize, settings: sampling.Sampling) Proposal {
         const Node = struct { score: f64, depth: usize, token: i32, parent: i32 };
@@ -210,6 +229,7 @@ pub const Drafter = struct {
             queue[best] = queue[len];
             result.tokens[result.len] = node.token;
             result.parents[result.len] = node.parent;
+            result.scores[result.len] = node.score;
             parent = @intCast(result.len);
             predecessor = node.token;
             depth = node.depth + 1;

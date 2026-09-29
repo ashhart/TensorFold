@@ -235,6 +235,11 @@ the output directory first.
 
 To use an existing DFlash2 model, omit `--no-drafts` and add
 `--drafter "$HOME/.models/z-lab/Qwen3.8-27B-DFlash2"`.
+DFlash2 embeds upstream's greedy/sampled calibration tables; `--draft-calibration FILE`
+loads an override. `tensorfold fit-draft-calibration SAMPLES_JSON OUTPUT_JSON` fits
+tables from `{"source":{},"samples":{"sampled":[{"depth":0,"score":-1,"landed":true}]}}`;
+optional `depth_edges`/`score_edges` override upstream bins. Verify with
+`.zig-toolchain/zig build test-draft-calibration -Doptimize=safe -j1`.
 Nemotron, Flash Next and GLM use checkpoint MTP heads through `--mtp-drafts N`;
 `--no-drafts` selects serial decoding.
 Gemma accepts a standard DFlash checkpoint through `--drafter DIR`, with

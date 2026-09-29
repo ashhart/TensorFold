@@ -117,6 +117,57 @@ def image_http_fixtures(output):
     print(f"Saved {len(addresses)} upstream image address and {len(cases)} URL fixtures")
 
 
+def calibration_fixtures(output):
+    import math
+    import random
+    from tensorfold.drafters import calibration
+    from tensorfold.families.qwen3_5.dflash_head import by_chance
+    rng = random.Random(161803)
+    fits = []
+    tables = []
+    for depths, scores in [(calibration.DEPTH_EDGES, calibration.SCORE_EDGES), ((-1, 2, 7), (-3.0, -1.0, 0.0)), ((0,), ())]:
+        for count in (0, 1, 7, 83, 1000):
+            samples = [dict(depth=rng.randrange(-3, 24), score=rng.uniform(-10, 0), landed=rng.choice((True, False))) for _ in range(count)]
+            # Opposing adjacent bins force weighted pooling across empty bins as well.
+            if count > 1:
+                samples += [dict(depth=0, score=-9.0, landed=True)] * 19 + [dict(depth=0, score=-0.001, landed=False)] * 13
+            table = calibration.fit(((s['depth'], s['score'], s['landed']) for s in samples), depths, scores)
+            raw = dict(depth_edges=table.depth_edges, score_edges=table.score_edges, table=table.table)
+            queries = [dict(depth=d, score=s, expected=table.probability(d, s))
+                       for d in sorted({-10, 0, 99, *(int(e) + delta for e in depths for delta in (-1, 0, 1))})
+                       for s in sorted({-100.0, 0.0, 1.0, *(v for edge in scores for v in (math.nextafter(edge, -math.inf), edge, math.nextafter(edge, math.inf)))})]
+            fits.append(dict(samples=samples, expected=raw, serialized=table.as_dict(), queries=queries))
+            tables.append(raw)
+    shipped = json.loads(Path('src/tensorfold/families/qwen3_5/dflash2_calibration.json').read_text())
+    for count in range(65):
+        for hits in sorted({0, count // 3, count}):
+            samples = [dict(depth=0, score=-1.0, landed=i < hits) for i in range(count)]
+            table = calibration.fit(((s['depth'], s['score'], s['landed']) for s in samples), (0,), ())
+            raw = dict(depth_edges=table.depth_edges, score_edges=table.score_edges, table=table.table)
+            fits.append(dict(samples=samples, expected=raw, serialized=table.as_dict(), queries=[]))
+    trees = []
+    choices = [None, *tables, *shipped['tables'].values()]
+    for size in (0, 1, 2, 7, 15, 31, 63):
+        for table in choices:
+            for case in range(3):
+                parents = [rng.randrange(-1, i) if case == 0 else i - 1 if case == 1 else -1 for i in range(size)]
+                tokens = [rng.randrange(248320) for _ in parents]
+                scores = [rng.choice((-0.05, -0.5, -1.0, -3.5, -8.0)) for _ in parents]
+                chances = calibration.Calibration(**table).probabilities(parents, scores) if table else [math.exp(s) for s in scores]
+                ids, qs, ps = by_chance(tokens, parents, chances)
+                trees.append(dict(tokens=tokens, parents=parents, scores=scores, table=table, expected=dict(tokens=ids, parents=qs, probabilities=ps)))
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rounding = {0.0, 1.0, math.nextafter(0, 1), math.nextafter(1, 0)}
+    for i in range(10000):
+        midpoint = (i + 0.5) / 10000
+        rounding.update((math.nextafter(midpoint, -math.inf), midpoint, math.nextafter(midpoint, math.inf)))
+    path.write_text(json.dumps(dict(fits=fits, trees=trees, shipped=shipped, rounding=[dict(value=v, expected=round(v, 4)) for v in sorted(rounding)])))
+    samples = fits[3]
+    path.with_suffix('.samples.json').write_text(json.dumps(dict(source=dict(oracle='upstream'), depth_edges=samples['expected']['depth_edges'], score_edges=samples['expected']['score_edges'], samples=dict(sampled=samples['samples'], greedy=fits[4]['samples']))))
+    print(f"Saved {len(fits)} upstream calibration fits and {len(trees)} ranked trees")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="build/models/Qwen3.8-27B-MLX-4bit")
@@ -134,6 +185,8 @@ def main():
     parser.add_argument("--image-alpha", action="store_true")
     parser.add_argument("--image-only", action="store_true", help="Generate preprocessing oracle without loading the vision tower")
     parser.add_argument("--image-http-fixtures", action="store_true")
+    parser.add_argument("--calibration-fixtures", action="store_true")
+    parser.add_argument("--compare-calibration", nargs=2, type=Path)
     parser.add_argument("--image-mode", choices=("RGB", "RGBA", "L", "CMYK"))
     parser.add_argument("--image-orientation", type=int, choices=range(1, 9), default=1)
     parser.add_argument("--compare-vision", type=Path)
@@ -147,6 +200,17 @@ def main():
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
+    if args.calibration_fixtures:
+        return calibration_fixtures(args.output)
+    if args.compare_calibration:
+        from tensorfold.drafters import calibration
+        sample_path, output_path = args.compare_calibration
+        data = json.loads(sample_path.read_text())
+        actual = json.loads(output_path.read_text())
+        expected = {name: calibration.fit(((s['depth'], s['score'], s['landed']) for s in samples), data['depth_edges'], data['score_edges']).as_dict() for name, samples in data['samples'].items()}
+        assert actual == dict(source=data['source'], tables=expected), 'Native fitted calibration file differs from upstream'
+        print('PASS: native calibration CLI output reloads with exact upstream table values and source metadata')
+        return
     if args.image_http_fixtures:
         return image_http_fixtures(args.output)
     if args.vision_fixture:
