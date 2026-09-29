@@ -265,6 +265,52 @@ def test_qsa_selection_matches_a_plain_reference():
         assert scratch.ids[r, :2048:4].tolist() == [4 * b for b in sorted(order)], r
 
 
+@pytest.mark.parametrize("rows", [7, 256])
+def test_qsa_rows_past_the_register_width_list_the_same_blocks(rows):
+    """Past 32,768 blocks (131,072 keys) a row's scores stream through ``_select_tiles``: the lists ``_select`` makes at
+    full width, on real, tied and all-equal scores, for a decode window and a prompt's row block, and the plain
+    reference's (the 512 best blocks, lower ids among equal scores, in block order, then the tail)."""
+
+    import triton
+
+    from tensorfold.families.qwen4_exp.cuda import attention as att
+
+    torch.manual_seed(12)
+    cap, di, hi = 262151, 128, 4
+    scratch = att.AttnScratch(rows, 24, 256, cap, DEV)
+    pooled = (torch.randn((scratch.nb, di), device=DEV) * 0.5).to(torch.bfloat16)
+    iq = (torch.randn((rows, hi, di), device=DEV) * 0.5).to(torch.bfloat16)
+    pos = torch.zeros((1,), dtype=torch.int32, device=DEV)
+
+    def lists(select):
+        for t in (scratch.ids, scratch.nk, scratch.sparse):
+            t.zero_()
+        select()
+        return scratch.ids.clone(), scratch.nk.clone(), scratch.sparse.clone()
+
+    for end in (att.SELECT_REGS * 4 + rows // 2, 200_003, cap):         # rows straddling the width, mid, the end
+        pos.fill_(end - rows)
+        blocks = -(-end // 4)
+        assert triton.next_power_of_2(blocks) > att.SELECT_REGS
+        att.qsa_rows(iq, pooled, pos, scratch, rows, context=end)
+        real = scratch.scores.clone()
+        for name, scores in (("real", real), ("tied", torch.floor(real * 2) / 2), ("flat", torch.zeros_like(real))):
+            scratch.scores.copy_(scores)
+            got = lists(lambda: att._launch_select(scratch, pos, rows, blocks))
+            want = lists(lambda: att._select[(rows,)](scratch.scores, pos, scratch.ids, scratch.nk, scratch.sparse,
+                                                      scratch.nb, RATIO=4, TOP=512, IDW=scratch.idw,
+                                                      BLOCK=triton.next_power_of_2(blocks), num_warps=16))
+            assert all(torch.equal(a, b) for a, b in zip(got, want)), (end, name)
+            for r in (0, rows - 1):
+                e = end - rows + r + 1
+                c = e // 4
+                s = scratch.scores[r, :c].tolist()
+                order = sorted(range(c), key=lambda b: (-s[b], b))[:512]
+                ref = [4 * b + k for b in sorted(order) for k in range(4)] + list(range(4 * c, e))
+                assert int(got[2][r]) == 1 and int(got[1][r]) == len(ref), (end, name, r)
+                assert got[0][r, :len(ref)].tolist() == ref, (end, name, r)
+
+
 def test_gdn_at_a_tensor_parallel_ranks_head_counts():
     """8 key and 24 value heads (one of two ranks): a window's rows and a replayed prefix give serial bits."""
 
