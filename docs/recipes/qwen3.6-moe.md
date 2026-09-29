@@ -35,8 +35,8 @@ embedding, drafts with the target's keyed sampling rule over a draft vocabulary,
 draft it gives under 30%. Decoding runs in buffers the engine keeps between requests, so verify chains and
 head steps replay CUDA graphs captured once per width and context bucket.
 Prompts prefill in chunks; the head absorbs every prompt row but the last. States are kept at the second
-message's start and at prompt ends, so a prompt sharing a system block resumes there with a fresh prefill's
-bits.
+message's start, the last assistant turn's start and prompt ends, so a prompt sharing a system block or
+extending a conversation resumes there with a fresh prefill's bits.
 
 Requests take turns; concurrent rounds are not yet supported for this family.
 
