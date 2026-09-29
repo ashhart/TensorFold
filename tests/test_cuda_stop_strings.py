@@ -125,15 +125,16 @@ def reply(port, chat, stream, **fields):
                 payload["usage"]["completion_tokens"], payload["tensorfold"]["token_sha"], calls)
     chunks = events(text)
     assert all("error" not in c for c in chunks) and text.count("data: [DONE]") == 1
-    shown, reasoning, calls = "", "", []
+    shown, reasoning, calls = "", "", {}
     for c in chunks[:-1]:
         piece = c["choices"][0].get("delta", {}).get("content") if chat else c["choices"][0].get("text")
         shown += piece or ""
         reasoning += c["choices"][0].get("delta", {}).get("reasoning_content") or "" if chat else ""
-        calls += [t["function"]["arguments"] for t in c["choices"][0].get("delta", {}).get("tool_calls", [])]
+        for t in c["choices"][0].get("delta", {}).get("tool_calls", []):     # arguments stream as deltas per index
+            calls[t["index"]] = calls.get(t["index"], "") + t["function"]["arguments"]
     end = chunks[-1]
     return (shown, reasoning, end["choices"][0]["finish_reason"], end["usage"]["completion_tokens"],
-            end["tensorfold"]["token_sha"], calls)
+            end["tensorfold"]["token_sha"], [calls[i] for i in sorted(calls)])
 
 
 def delivered_through(engine_call) -> int:
