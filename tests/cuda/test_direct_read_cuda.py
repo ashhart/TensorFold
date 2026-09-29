@@ -41,6 +41,8 @@ def _pack_reference(words: torch.Tensor, scales: torch.Tensor, biases: torch.Ten
     return out
 
 
+@pytest.mark.skipif(bool(getattr(torch.version, "hip", None)),
+                    reason="the MoE experts kernels are NVIDIA's (ROCm serves Qwen3.8-27B only)")
 @pytest.mark.parametrize("gs", [32, 64])
 @pytest.mark.parametrize("e,n,k", [(3, 64, 256), (37, 96, 512)])       # 37: more than one of the reference's chunks
 def test_fused_pack_gives_the_torch_packs_bits(gs, e, n, k):
@@ -55,6 +57,8 @@ def test_fused_pack_gives_the_torch_packs_bits(gs, e, n, k):
                        _pack_reference(w[:, half].contiguous(), s[:, half].contiguous(), b[:, half].contiguous(), gs))
 
 
+@pytest.mark.skipif(bool(getattr(torch.version, "hip", None)),
+                    reason="the MoE experts kernels are NVIDIA's (ROCm serves Qwen3.8-27B only)")
 @pytest.mark.parametrize("gs", [32, 64])
 def test_pack_round_trips(gs):
     g = torch.Generator(device=DEV).manual_seed(4)

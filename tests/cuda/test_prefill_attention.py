@@ -19,6 +19,8 @@ def _caches(gen, keys, kv_heads, dim):
     return k, v
 
 
+@pytest.mark.skipif(bool(getattr(torch.version, "hip", None)),
+                    reason="ROCm runs its own prompt attention (WMMA, or Triton with its own tiles): its own bits")
 @pytest.mark.parametrize("heads,kv_heads,dim", SHAPES)
 def test_cuda_prompt_attention_has_the_triton_bits(heads, kv_heads, dim):
     gen = torch.Generator(device="cuda").manual_seed(heads * dim + kv_heads)
