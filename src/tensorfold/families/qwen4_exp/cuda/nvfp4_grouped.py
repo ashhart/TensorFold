@@ -74,7 +74,7 @@ def _kpass(X, src, rows_ok, x_stride, tile, S, s2, N: tl.constexpr, PER: tl.cons
             wv = _bf16_widen(wbits).to(tl.bfloat16)
         p = tl.dot(x, wv)
         if packed:
-            s = _e4m3_value(tl.load(S + b * N + soff, mask=n_ok, other=0).to(tl.int32)) * (s2 * 0.0078125)
+            s = _e4m3_value(tl.load(S + b * N + soff, mask=n_ok, other=0).to(tl.int32)) * s2
         else:
             s = tl.load(S + b * N + soff, mask=n_ok, other=0.0)
         acc += p * s[None, :]
