@@ -554,10 +554,57 @@ def simd_bits_fixtures(directory):
     print(f"Saved {len(cases)} calibrated 5/6/8-bit SIMD shapes and affine fallback outputs", flush=True)
 
 
+def flash_weight_fixtures(directory):
+    from types import SimpleNamespace
+    from tensorfold.kernels.qwen.flash_next.v1 import base, rows
+    from tests.test_flash_next_affine import quantized, bf16
+    rng = np.random.default_rng(96173)
+    cases = []
+    formats = [(b, g) for b in (2, 3, 4, 5, 6, 8) for g in (32, 64, 128)]
+    for a_fmt in formats:
+        for b_fmt in formats:
+            folder = directory / f"case{len(cases):04}"
+            folder.mkdir(parents=True, exist_ok=True)
+            a = quantized(rng, (8, 512), *a_fmt)
+            b = quantized(rng, (4, 512), *b_fmt)
+            weights = {f"language_model.model.{name}.{suffix}": getattr(part, suffix)
+                       for name, part in (("a", a), ("b", b)) for suffix in ("weight", "scales", "biases")}
+            dense = bf16(rng, (4, 512))
+            weights["language_model.model.dense.weight"] = dense
+            mx.save_safetensors(str(folder / "model.safetensors"), weights)
+            config = {"quantization": {"bits": a_fmt[0], "group_size": a_fmt[1],
+                                       "language_model.model.b": {"bits": b_fmt[0], "group_size": b_fmt[1]},
+                                       "model.dense": False}}
+            (folder / "config.json").write_text(json.dumps(config))
+            combined = base.QWeights.of(a, b)
+            stacked = SimpleNamespace(weight=combined.weight, scales=combined.scales, biases=combined.biases,
+                                      bits=combined.bits, group_size=combined.group)
+            x = bf16(rng, (3, 512))
+            expected = {"input": x, "format": mx.array([combined.bits, combined.group], mx.int32),
+                        "a.dequant": mx.dequantize(a.weight, a.scales, a.biases, bits=a_fmt[0], group_size=a_fmt[1]),
+                        "a.embed": mx.dequantize(a.weight[[0, 7]], a.scales[[0, 7]], a.biases[[0, 7]], bits=a_fmt[0], group_size=a_fmt[1]),
+                        "b.projection": rows.qmv_rows(x, b), "stack.projection": rows.qmv_rows(x, stacked),
+                        "b.matmul": mx.quantized_matmul(x, b.weight, b.scales, b.biases, transpose=True, bits=b_fmt[0], group_size=b_fmt[1]),
+                        "dense.projection": x @ dense.T}
+            expected.update({f"stack.{key}": getattr(combined, key) for key in ("weight", "scales", "biases")})
+            mx.save_safetensors(str(folder / "expected.safetensors"), expected)
+            cases.append(folder.name)
+    (directory / "weights.json").write_text(json.dumps(cases))
+    print(f"Saved {len(cases)} mixed-format Flash checkpoint and exact-widening cases", flush=True)
+
+
 def flash_affine_variants(capture):
     from tensorfold.kernels.qwen.flash_next.v1 import base, rows, hc, experts, embed
     from tests.test_flash_next_affine import quantized, bf16, same
     rng = np.random.default_rng(91721)
+    from types import SimpleNamespace
+    for bits in (2, 3, 5, 6, 8):
+        parts = [quantized(rng, (3, 160), bits, 32) for _ in range(8)]
+        table = SimpleNamespace(host=None, bits=bits, group=32, dims=160,
+                                starts=mx.arange(8, dtype=mx.uint32) * 3,
+                                weights=[p.weight for p in parts], scales=[p.scales for p in parts], biases=[p.biases for p in parts])
+        capture.test = f"flash-ple-lookup-{bits}"
+        mx.eval(embed.ple_lookup(np.arange(48).reshape(3, 16) % 24, table))
     for streams in (1, 4, 8):
         for dims in (256, 2560):
             wide = streams * dims
@@ -642,8 +689,12 @@ def main():
     parser.add_argument("--simd-dense", action="store_true")
     parser.add_argument("--simd-bits", action="store_true")
     parser.add_argument("--flash-affine", action="store_true")
+    parser.add_argument("--flash-weights", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.flash_weights:
+        flash_weight_fixtures(args.directory)
+        return
     if args.simd_dense:
         simd_dense_fixtures(args.directory)
         return

@@ -52,7 +52,7 @@ pub fn check(io: std.Io, dir: []const u8) !void {
         var folder_buffer: [4096]u8 = undefined;
         const folder = try std.fmt.bufPrint(&folder_buffer, "{s}/{s}", .{ dir, case.name });
         if (case.ple_error) |name| {
-            const expected_error: anyerror = if (std.mem.eql(u8, name, "missing")) error.MissingPLEWeight else if (std.mem.eql(u8, name, "split")) error.SplitPLEWeight else error.DuplicateWeight;
+            const expected_error: anyerror = if (std.mem.eql(u8, name, "missing")) error.MissingPLEWeight else if (std.mem.eql(u8, name, "split")) error.SplitPLEWeight else if (std.mem.eql(u8, name, "format")) error.MixedPLEFormats else error.DuplicateWeight;
             var empty = cp.Store.init(32);
             defer empty.deinit();
             try std.testing.expectError(expected_error, @import("ple_tables.zig").Tables.checkAliases(io, folder, &empty));

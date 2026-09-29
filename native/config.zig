@@ -140,10 +140,7 @@ pub fn flash(value: std.json.Value) !void {
     try integer(mtp, "num_hidden_layers", 1);
     try number(mtp, "rope_theta", 10000000);
     try repeatedStrings(mtp, "layer_types", 1, "full_attention");
-    const quant = try object(root.get("quantization") orelse return error.UnsupportedModel);
-    try integer(quant, "bits", 4);
-    try integer(quant, "group_size", 32);
-    try string(quant, "mode", "affine");
+    _ = (try @import("quantization.zig").resolve(value, null)) orelse return error.UnsupportedQuantization;
     const rope = try object(t.get("rope_parameters") orelse return error.UnsupportedModel);
     try number(rope, "rope_theta", 10000000);
     try number(rope, "partial_rotary_factor", 0.25);
@@ -174,7 +171,7 @@ test "supported checkpoint configs and adversarial recipe mutations" {
         .{ @embedFile("fixtures/configs/qwen.json"), target, &[_][]const u8{ "text_config.hidden_size", "text_config.num_hidden_layers", "text_config.attention_bias", "text_config.tie_word_embeddings", "text_config.attn_output_gate", "text_config.mamba_ssm_dtype", "text_config.layer_types", "text_config.rope_parameters" } },
         .{ @embedFile("fixtures/configs/dflash.json"), draft, &[_][]const u8{ "hidden_size", "is_causal", "use_sliding_window", "layer_types", "attention_bias", "dflash_config.block_size", "dflash_config.target_layer_ids", "dflash_config.selector_top_k", "sliding_window" } },
         .{ @embedFile("fixtures/configs/nemotron.json"), nemotron, &[_][]const u8{ "hidden_size", "n_shared_experts", "mamba_hidden_act", "mlp_hidden_act", "mamba_ssm_cache_dtype", "mamba_proj_bias", "norm_topk_prob", "residual_in_fp32", "use_conv_bias", "layers_block_type", "mtp_layers_block_type", "quantization" } },
-        .{ @embedFile("fixtures/configs/flash.json"), flash, &[_][]const u8{ "text_config.hidden_size", "text_config.indexer_kv_heads", "text_config.make_ngram_vocab_size_divisible_by", "text_config.mtp_num_hidden_layers", "text_config.mtp_use_dedicated_embeddings", "text_config.mtp.layer_types", "text_config.mtp.rope_theta", "text_config.hidden_act", "text_config.mamba_ssm_dtype", "text_config.attention_bias", "text_config.ple_layer_ids", "text_config.rope_parameters.type", "quantization" } },
+        .{ @embedFile("fixtures/configs/flash.json"), flash, &[_][]const u8{ "text_config.hidden_size", "text_config.indexer_kv_heads", "text_config.make_ngram_vocab_size_divisible_by", "text_config.mtp_num_hidden_layers", "text_config.mtp_use_dedicated_embeddings", "text_config.mtp.layer_types", "text_config.mtp.rope_theta", "text_config.hidden_act", "text_config.mamba_ssm_dtype", "text_config.attention_bias", "text_config.ple_layer_ids", "text_config.rope_parameters.type" } },
     };
     inline for (recipes) |recipe| {
         var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, recipe[0], .{});
@@ -200,4 +197,20 @@ test "supported checkpoint configs and adversarial recipe mutations" {
         }
         try recipe[1](parsed.value);
     }
+}
+
+test "Flash config accepts upstream affine widths and rejects invalid formats" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("fixtures/configs/flash.json"), .{});
+    defer parsed.deinit();
+    const quant = parsed.value.object.getPtr("quantization").?;
+    for ([_]i32{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]i32{ 32, 64, 128 }) |group| {
+        quant.object.getPtr("bits").?.* = .{ .integer = bits };
+        quant.object.getPtr("group_size").?.* = .{ .integer = group };
+        try flash(parsed.value);
+    };
+    quant.object.getPtr("bits").?.* = .{ .integer = 7 };
+    try std.testing.expectError(error.UnsupportedQuantization, flash(parsed.value));
+    quant.object.getPtr("bits").?.* = .{ .integer = 4 };
+    quant.object.getPtr("group_size").?.* = .{ .integer = 16 };
+    try std.testing.expectError(error.UnsupportedQuantization, flash(parsed.value));
 }

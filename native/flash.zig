@@ -147,10 +147,11 @@ pub const Model = struct {
         defer cfg.deinit();
         try @import("config.zig").flash(cfg.value);
         m.weights.flash_drafts = drafts;
+        try m.weights.configure(bytes);
         try m.weights.load(io, dir, "language_model.");
         m.mtp = drafts;
         if (drafts and !m.weights.has("mtp.fc_hidden.weight")) return error.MissingDraftHead;
-        try @import("schema.zig").validate(.flash, &m.weights.arrays, drafts);
+        try @import("schema.zig").validateConfig(.flash, &m.weights.arrays, drafts, cfg.value);
         // Match the Python loader's storage-convention check on all 48 HC anchors.
         var means: [48]f64 = undefined;
         var above: usize = 0;
@@ -249,19 +250,18 @@ pub const Model = struct {
         var buf: [256]u8 = undefined;
         const stacked = try std.fmt.bufPrint(&buf, "{s}.native_down", .{base});
         if (!m.weights.has(stacked)) {
-            const down = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_down", .{base}));
-            const inj = if (inject) try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.block_inject_weight", .{base})) else down;
-            inline for (.{ "weight", "scales", "biases" }, 0..) |field, j| {
-                const value = if (inject) try s.cat(&.{ down[j], inj[j] }, 0) else down[j];
-                try mx.eval(value);
-                try m.weights.put(try std.fmt.bufPrint(&buf, "{s}.native_down.{s}", .{ base, field }), value);
-            }
-            try m.weights.put(try std.fmt.bufPrint(&buf, "{s}.native_down", .{base}), down[0]);
+            const down = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_down", .{base}));
+            const inj = if (inject) try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.block_inject_weight", .{base})) else down;
+            const parts = [_]@import("flash_ops.zig").Weight{ down, inj };
+            const combined = try @import("flash_ops.zig").stack(s, parts[0..if (inject) @as(usize, 2) else 1]);
+            try mx.evalMany(&combined.arrays, false);
+            try m.weights.putAffine(try std.fmt.bufPrint(&buf, "{s}.native_down", .{base}), combined);
+            try m.weights.put(try std.fmt.bufPrint(&buf, "{s}.native_down", .{base}), combined.arrays[0]);
         }
-        const down = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.native_down", .{base}));
-        const up = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_up", .{base}));
+        const down = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.native_down", .{base}));
+        const up = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_up", .{base}));
         const sc = try m.scale(s, base, "hc_norm.weight");
-        const out = try @import("flash_ops.zig").hyper(&m.kernels, s, h, ssp, .{ .arrays = down }, .{ .arrays = up }, sc, try s.scalar(1e-6), 4, 320, mx.gpu_generation);
+        const out = try @import("flash_ops.zig").hyper(&m.kernels, s, h, ssp, down, up, sc, try s.scalar(1e-6), 4, 320, mx.gpu_generation);
         return .{ out[0], out[1], mx.empty, mx.empty, mx.empty };
     }
     fn gdn(m: *Model, s: *mx.Scope, base: []const u8, x: A, cache: Cache, record: *Cache) !A {
@@ -347,14 +347,14 @@ pub const Model = struct {
             try m.weights.put(router_key, router);
         }
         const logits = (try m.kernels.run(s, src.q4_router_float, &.{ x, try m.weights.get(router_key), try s.ints(&.{r}) }, &.{ ti("D", 2560), ti("NE", 513), ti("T", 256), ti("MAXR", 16) }, .{ @divTrunc(513 + 7, 8) * 256, 1, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ r, 513 }, .dtype = mx.f32t }}))[0];
-        const gate = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.gate_proj", .{base}));
-        const up = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.up_proj", .{base}));
-        const sg = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.shared_expert.gate_proj", .{base}));
-        const su = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.shared_expert.up_proj", .{base}));
-        const act = try @import("flash_ops.zig").gateUp(&m.kernels, s, x, logits, .{ .arrays = gate }, .{ .arrays = up }, .{ .{ .arrays = sg }, .{ .arrays = su } }, 10, mx.gpu_generation, 4, 2);
-        const down = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.down_proj", .{base}));
-        const sd = try m.weights.triple(try std.fmt.bufPrint(&buf, "{s}.shared_expert.down_proj", .{base}));
-        const y = try @import("flash_ops.zig").expertDown(&m.kernels, s, act[0], act[1], .{ .arrays = down }, .{ .arrays = sd }, mx.gpu_generation, 2);
+        const gate = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.gate_proj", .{base}));
+        const up = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.up_proj", .{base}));
+        const sg = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.shared_expert.gate_proj", .{base}));
+        const su = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.shared_expert.up_proj", .{base}));
+        const act = try @import("flash_ops.zig").gateUp(&m.kernels, s, x, logits, gate, up, .{ sg, su }, 10, mx.gpu_generation, 4, 2);
+        const down = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.switch_mlp.down_proj", .{base}));
+        const sd = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.shared_expert.down_proj", .{base}));
+        const y = try @import("flash_ops.zig").expertDown(&m.kernels, s, act[0], act[1], down, sd, mx.gpu_generation, 2);
         return m.kernels.run(s, src.q4_hc_norm_grouped, &.{ h, inject, y, act[2], logits }, &.{ ti("S", 4), ti("D", 2560), ti("TOPK", 10), ti("NL", 513) }, .{ 2560, r, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 10240 } }, .{ .shape = &.{ r, 10, 4 }, .dtype = mx.f32t } });
     }
     fn ple(m: *Model, s: *mx.Scope, h: A, tokens: []const i32, cache: Cache, record: *Cache) !A {

@@ -21,7 +21,70 @@ pub const Weight = struct {
     fn q4(w: Weight) bool {
         return w.format.bits == 4 and w.format.group_size == 32;
     }
+
+    pub fn widened(w: Weight, s: *mx.Scope, format: Quant) !Weight {
+        const dims = try w.geometry(2);
+        try format.validate();
+        if (format.bits < w.format.bits or format.group_size > w.format.group_size or @mod(w.format.group_size, format.group_size) != 0) return error.UnsupportedQuantization;
+        var arrays = w.arrays;
+        if (format.bits != w.format.bits) {
+            try mx.eval(w.arrays[0]);
+            const input = mx.c.mlx_array_data_uint32(w.arrays[0])[0..mx.c.mlx_array_size(w.arrays[0])];
+            const words: usize = @intCast(@divExact(dims.k * format.bits, 32));
+            const output = try mx.allocator.alloc(u32, @as(usize, @intCast(dims.n)) * words);
+            defer mx.allocator.free(output);
+            try repack(input, output, @intCast(dims.n), @intCast(dims.k), @intCast(w.format.bits), @intCast(format.bits));
+            arrays[0] = try s.data(output.ptr, &.{ dims.n, @intCast(words) }, mx.c.MLX_UINT32);
+        }
+        if (format.group_size != w.format.group_size) for (1..3) |i| {
+            var out = mx.c.mlx_array_new();
+            const rc = mx.c.mlx_repeat_axis(&out, arrays[i], @intCast(@divExact(w.format.group_size, format.group_size)), -1, mx.stream);
+            arrays[i] = try s.result(rc, out);
+        };
+        return .{ .arrays = arrays, .format = format };
+    }
 };
+
+pub fn repack(input: []const u32, output: []u32, rows: usize, columns: usize, bits: u6, wider: u6) !void {
+    try (Quant{ .bits = bits }).validate();
+    try (Quant{ .bits = wider }).validate();
+    if (wider < bits or columns % 32 != 0 or rows == 0 or columns == 0 or input.len != rows * (columns / 32 * bits) or output.len != rows * (columns / 32 * wider)) return error.InvalidTensorShape;
+    @memset(output, 0);
+    const mask = (@as(u64, 1) << bits) - 1;
+    for (0..rows) |row| for (0..columns) |col| {
+        const at = col * bits;
+        const wi = row * (columns / 32 * bits) + at / 32;
+        var code = @as(u64, input[wi]) >> @intCast(at % 32);
+        if (at % 32 + bits > 32) code |= @as(u64, input[wi + 1]) << @intCast(32 - at % 32);
+        const dest = col * wider;
+        const di = row * (columns / 32 * wider) + dest / 32;
+        const shifted = (code & mask) << @intCast(dest % 32);
+        output[di] |= @truncate(shifted);
+        if (dest % 32 + wider > 32) output[di + 1] |= @intCast(shifted >> 32);
+    };
+}
+
+pub fn stack(s: *mx.Scope, parts: []const Weight) !Weight {
+    if (parts.len == 0) return error.InvalidTensorShape;
+    var format = parts[0].format;
+    const first = try parts[0].geometry(2);
+    for (parts) |part| {
+        if ((try part.geometry(2)).k != first.k) return error.InvalidTensorShape;
+        format.bits = @max(format.bits, part.format.bits);
+        format.group_size = @min(format.group_size, part.format.group_size);
+    }
+    const widened = try mx.allocator.alloc(Weight, parts.len);
+    defer mx.allocator.free(widened);
+    for (parts, widened) |part, *out| out.* = try part.widened(s, format);
+    const arrays = try mx.allocator.alloc(A, parts.len);
+    defer mx.allocator.free(arrays);
+    var result: Weight = .{ .arrays = undefined, .format = format };
+    for (0..3) |i| {
+        for (widened, arrays) |part, *array| array.* = part.arrays[i];
+        result.arrays[i] = if (parts.len == 1) arrays[0] else try s.cat(arrays, 0);
+    }
+    return result;
+}
 
 pub const Kind = enum { qmv, hc_down, hc_up, expert_gateup, expert_down };
 
@@ -148,4 +211,55 @@ test "Flash nibble dispatch follows GPU generation and total row count" {
             } else try std.testing.expect(std.mem.endsWith(u8, name, if (generation == 15 or generation == 16) "_h" else "_x"));
         };
     }
+}
+
+pub fn checkWeights(io: std.Io, dir: []const u8) !void {
+    try mx.init();
+    defer mx.shutdown();
+    const cp = @import("checkpoint.zig");
+    var kernels = mx.Kernels.init();
+    defer kernels.deinit();
+    var path: [4096]u8 = undefined;
+    const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/weights.json", .{dir}));
+    defer mx.allocator.free(bytes);
+    const cases = try std.json.parseFromSlice([]const []const u8, mx.allocator, bytes, .{});
+    defer cases.deinit();
+    if (cases.value.len == 0) return error.EmptyFixtures;
+    for (cases.value) |name| {
+        errdefer std.debug.print("Flash weight case failed: {s}\n", .{name});
+        var s = mx.Scope{};
+        defer s.deinit();
+        var weights = cp.Store.init(32);
+        defer weights.deinit();
+        weights.flash_drafts = false;
+        const config = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/{s}/config.json", .{ dir, name }));
+        defer mx.allocator.free(config);
+        try weights.configure(config);
+        try weights.load(io, try std.fmt.bufPrint(&path, "{s}/{s}", .{ dir, name }), "language_model.");
+        var expected = cp.Store.init(32);
+        defer expected.deinit();
+        try expected.loadFile(io, try std.fmt.bufPrint(&path, "{s}/{s}/expected.safetensors", .{ dir, name }), "", "");
+        const combined = try stack(&s, &.{ try weights.affine("model.a"), try weights.affine("model.b") });
+        const fmt = try expected.get("format");
+        try mx.eval(fmt);
+        const format = mx.c.mlx_array_data_int32(fmt)[0..2];
+        try std.testing.expectEqual(Quant{ .bits = format[0], .group_size = format[1] }, combined.format);
+        inline for (.{ "weight", "scales", "biases" }, 0..) |suffix, i| {
+            const want = try expected.get("stack." ++ suffix);
+            if (i == 0) {
+                try mx.evalMany(&.{ combined.arrays[0], want }, false);
+                try std.testing.expectEqualSlices(u32, mx.c.mlx_array_data_uint32(want)[0..mx.c.mlx_array_size(want)], mx.c.mlx_array_data_uint32(combined.arrays[0])[0..mx.c.mlx_array_size(combined.arrays[0])]);
+            } else try @import("sampling_checks.zig").equal(&s, combined.arrays[i], want);
+        }
+        try weights.putAffine("native_stack", combined);
+        const x = try expected.get("input");
+        const equal = @import("sampling_checks.zig").equal;
+        try equal(&s, try weights.dequant(&s, "model.a"), try expected.get("a.dequant"));
+        try equal(&s, try weights.embed(&s, "model.a", &.{ 0, 7 }), try expected.get("a.embed"));
+        try equal(&s, try weights.linear(&kernels, &s, "model.b", x, true), try expected.get("b.projection"));
+        try equal(&s, try weights.linear(&kernels, &s, "model.b", x, false), try expected.get("b.matmul"));
+        try equal(&s, try weights.linear(&kernels, &s, "native_stack", x, true), try expected.get("stack.projection"));
+        try equal(&s, try weights.linear(&kernels, &s, "model.dense", x, true), try expected.get("dense.projection"));
+    }
+    std.debug.print("PASS: {d} mixed Flash checkpoint formats, exact packed widening, regrouping, embeddings and projections match upstream\n", .{cases.value.len});
 }

@@ -661,10 +661,18 @@ def flash_checkpoint_fixture(output):
         rows = mx.arange(16) % 3
         ple[f"ple-{shard}"] = mx.dequantize(*(t[rows] for t in tensors), group_size=32, bits=4)
     cases = []
-    for style in ("shard_", "shards.", "mixed"):
+    q4_tables = tables
+    for bits, style in [(4, s) for s in ("shard_", "shards.", "mixed")] + [(b, "shards.") for b in (2, 3, 5, 6, 8)]:
+        tables, ple = [], {}
+        for shard in range(128):
+            values = mx.sin(mx.arange(3 * 160, dtype=mx.float32) * .13 + shard).reshape(3, 160).astype(mx.bfloat16)
+            tensors = mx.quantize(values, group_size=32, bits=bits)
+            tables.append(tensors)
+            rows = mx.arange(16) % 3
+            ple[f"ple-{shard}"] = mx.dequantize(*(t[rows] for t in tensors), group_size=32, bits=bits)
         for prefix in ("language_model.mtp.", "mtp."):
             for indexed in (False, True):
-                name = f"{style}-{prefix}-{int(indexed)}"
+                name = f"bits{bits}-{style}-{prefix}-{int(indexed)}"
                 folder = output / name
                 folder.mkdir(exist_ok=True)
                 for path in folder.glob("model*.safetensors"):
@@ -696,17 +704,21 @@ def flash_checkpoint_fixture(output):
                     index.write_text(json.dumps({"weight_map": weight_map}))
                 else:
                     index.unlink(missing_ok=True)
-                table = from_checkpoint(folder, root + "ngram_embedding", 128, ssd=True)
+                table = from_checkpoint(folder, root + "ngram_embedding", 128, ssd=bits == 4)
                 try:
                     for shard in range(128):
                         w, s, b = table.gather(shard * 3 + np.arange(16) % 3)
-                        gathered = mx.dequantize(mx.array(w), mx.array(s).view(mx.bfloat16), mx.array(b).view(mx.bfloat16), group_size=32, bits=4)
+                        gathered = mx.dequantize(mx.array(w), mx.array(s).view(mx.bfloat16), mx.array(b).view(mx.bfloat16), group_size=32, bits=bits)
                         assert mx.array_equal(gathered, ple[f"ple-{shard}"]).item()
                 finally:
-                    table.close()
+                    if bits == 4:
+                        table.close()
+                    else:
+                        table._pool.shutdown(wait=True)
                 mx.save_safetensors(str(folder / "ple.safetensors"), ple)
                 cases.append(dict(name=name, indexed=indexed))
-    for case in ("missing", "split", "duplicate"):
+    tables = q4_tables
+    for case in ("missing", "split", "duplicate", "format"):
         folder = output / ("ple-" + case)
         folder.mkdir(exist_ok=True)
         raw = {f"{root}ngram_embedding.shards.{shard}.{suffix}": value
@@ -714,7 +726,11 @@ def flash_checkpoint_fixture(output):
                for suffix, value in zip(("weight", "scales", "biases"), tensors)}
         key = root + "ngram_embedding.shards.127.scales"
         second = {}
-        if case == "duplicate":
+        if case == "format":
+            changed = mx.quantize(mx.ones((3, 160), mx.bfloat16), group_size=32, bits=8)
+            for suffix, value in zip(("weight", "scales", "biases"), changed):
+                raw[root + "ngram_embedding.shards.127." + suffix] = value
+        elif case == "duplicate":
             second[key] = raw[key]
         else:
             value = raw.pop(key)

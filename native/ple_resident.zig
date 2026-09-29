@@ -4,6 +4,7 @@ const std = @import("std");
 const mx = @import("mlx.zig");
 const src = @import("kernel_sources.zig");
 pub const Resident = struct {
+    format: @import("quantization.zig").Spec = .{ .bits = 4, .group_size = 32 },
     groups: [8][3]mx.Array = @splat(@splat(mx.empty)),
     starts: mx.Array = mx.empty,
     writes: usize = 0,
@@ -12,10 +13,10 @@ pub const Resident = struct {
         mx.free(r.starts);
         r.* = .{};
     }
-    fn storage(rows: i32, part: usize) !mx.Array {
+    fn storage(rows: i32, part: usize, format: @import("quantization.zig").Spec) !mx.Array {
         var s = mx.Scope{};
         defer s.deinit();
-        const array = try s.zeros(&.{ rows, if (part == 0) 20 else 5 }, if (part == 0) mx.c.MLX_UINT32 else mx.bf16);
+        const array = try s.zeros(&.{ rows, if (part == 0) @divExact(160 * format.bits, 32) else @divExact(160, format.group_size) }, if (part == 0) mx.c.MLX_UINT32 else mx.bf16);
         try mx.eval(array);
         try mx.check(mx.c.mlx_synchronize(mx.stream));
         return mx.retain(array);
@@ -50,7 +51,7 @@ pub const Resident = struct {
         defer mx.allocator.free(staging);
         for (0..3) |part| {
             @memset(staging, if (part == 0) 1 else 0x3f803f80);
-            r.groups[0][part] = try storage(4, part);
+            r.groups[0][part] = try storage(4, part, r.format);
             var s = mx.Scope{};
             defer s.deinit();
             const added = try s.data(staging.ptr, &.{ 2, if (part == 0) 20 else 5 }, if (part == 0) mx.c.MLX_UINT32 else mx.bf16);
@@ -60,11 +61,13 @@ pub const Resident = struct {
         }
     }
     pub fn init(tables: *const @import("ple_tables.zig").Tables) !Resident {
-        var r = Resident{};
+        var r = Resident{ .format = tables.format };
         errdefer r.deinit();
-        // At most 5 MiB of host payload, plus one MLX input copy per update.
+        // At most 10 MiB of host payload, plus one MLX input copy per update.
         const chunk_rows = 65536;
-        const buffer = try mx.allocator.alloc(u32, chunk_rows * 20);
+        const words: usize = @intCast(@divExact(160 * r.format.bits, 32));
+        const groups: usize = @intCast(@divExact(160, r.format.group_size));
+        const buffer = try mx.allocator.alloc(u32, chunk_rows * words);
         defer mx.allocator.free(buffer);
         var starts: [8]u32 = undefined;
         for (0..8) |group| {
@@ -72,7 +75,7 @@ pub const Resident = struct {
             starts[group] = @intCast(tables.starts[first]);
             const rows: i32 = @intCast(tables.starts[first + 16] - tables.starts[first]);
             for (0..3) |part| {
-                r.groups[group][part] = try storage(rows, part);
+                r.groups[group][part] = try storage(rows, part, r.format);
                 for (first..first + 16) |shard| {
                     const ref = tables.rows[shard][part];
                     const width = try ref.tensor.rowBytes();
@@ -83,7 +86,7 @@ pub const Resident = struct {
                         try tables.files.items[ref.file].readRows(ref.tensor, row, count, bytes);
                         var s = mx.Scope{};
                         defer s.deinit();
-                        const added = try s.data(bytes.ptr, &.{ @intCast(count), if (part == 0) 20 else 5 }, if (part == 0) mx.c.MLX_UINT32 else mx.bf16);
+                        const added = try s.data(bytes.ptr, &.{ @intCast(count), @intCast(if (part == 0) words else groups) }, if (part == 0) mx.c.MLX_UINT32 else mx.bf16);
                         try update(&r.groups[group][part], added, @intCast(tables.starts[shard] - tables.starts[first] + @as(i64, @intCast(row))));
                         r.writes += 1;
                         row += count;
@@ -95,7 +98,7 @@ pub const Resident = struct {
         var s = mx.Scope{};
         defer s.deinit();
         r.starts = try mx.retain(try s.data(&starts, &.{8}, mx.c.MLX_UINT32));
-        std.debug.print("Resident PLE: {d} exact allocation donations, {d} packed bytes\n", .{ r.writes, tables.starts[128] * 100 });
+        std.debug.print("Resident PLE: {d} exact allocation donations, {d} packed bytes\n", .{ r.writes, tables.starts[128] * @as(i64, @intCast(4 * (words + groups))) });
         return r;
     }
     pub fn gather(r: *const Resident, kernels: *mx.Kernels, s: *mx.Scope, ids: mx.Array) !mx.Array {
@@ -105,6 +108,8 @@ pub const Resident = struct {
         inputs[0] = ids;
         inputs[1] = r.starts;
         for (r.groups, 0..) |group, i| @memcpy(inputs[2 + 3 * i ..][0..3], &group);
-        return (try kernels.run(s, src.q4_ple_lookup, &inputs, &.{ mx.ti("H", 16), mx.ti("DIMS", 160) }, .{ 160, 16, rows }, .{ 160, 1, 1 }, &.{.{ .shape = &.{ rows, 2560 } }}))[0];
+        const q4 = r.format.bits == 4 and r.format.group_size == 32;
+        const params = [_]mx.Template{ mx.ti("H", 16), mx.ti("DIMS", 160), mx.ti("BITS", r.format.bits), mx.ti("GS", r.format.group_size) };
+        return (try kernels.run(s, if (q4) src.q4_ple_lookup else src.flash_qa_ple_lookup, &inputs, params[0..if (q4) @as(usize, 2) else 4], .{ 160, 16, rows }, .{ 160, 1, 1 }, &.{.{ .shape = &.{ rows, 2560 } }}))[0];
     }
 };

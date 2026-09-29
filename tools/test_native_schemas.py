@@ -111,6 +111,7 @@ def main():
                 for path in directory.iterdir():
                     if path.is_symlink() or path.suffix in (".json", ".safetensors"):
                         path.unlink()
+                (directory / "config.json").write_bytes((source / "config.json").read_bytes())
                 def renamed(key):
                     if not aliases:
                         return key
@@ -137,6 +138,52 @@ def main():
                     raise AssertionError(f"Flash aliases={aliases} indexed={indexed}: {result.stderr}")
                 count += 1
                 print(f"PASS: flash/aliases={aliases}/indexed={indexed}", flush=True)
+            from tensorfold.quantization import resolve_affine
+            directory = args.output / kind / "mixed-affine"
+            directory.mkdir(parents=True, exist_ok=True)
+            config = json.loads((source / "config.json").read_text())
+            config["quantization"] = {"bits": 5, "group_size": 32, "mode": "affine", "model.embed_tokens": False,
+                                      "lm_head": {"bits": 8, "group_size": 64},
+                                      "model.layers.0.attn_hyper_connection.input_mix_weight_down": {"bits": 3, "group_size": 128},
+                                      "model.layers.0.attn_hyper_connection.block_inject_weight": {"bits": 6, "group_size": 64},
+                                      "model.layers.0.attn_hyper_connection.input_mix_weight_up": {"bits": 2, "group_size": 64}}
+            metadata, offset = {}, 0
+            for spec in specs:
+                shape, dtype = list(spec["shape"]), spec["dtype"]
+                suffix = spec["name"].rsplit(".", 1)[-1]
+                if dtype == "U32" or suffix in ("scales", "biases"):
+                    module = spec["name"].rsplit(".", 1)[0].replace("ngram_embedding.shard_", "ngram_embedding.shards.")
+                    fmt = resolve_affine(config, module)
+                    width = shape[-1] * (8 if dtype == "U32" else 32)
+                    if fmt is None:
+                        if suffix != "weight":
+                            continue
+                        shape[-1], dtype = width, "BF16"
+                    else:
+                        shape[-1] = width * fmt.bits // 32 if dtype == "U32" else width // fmt.group_size
+                size = {"U32": 4, "I32": 4, "I64": 8, "F32": 4, "BF16": 2}[dtype]
+                for dimension in shape:
+                    size *= dimension
+                name = renamed(prefix + spec["name"])
+                metadata[name] = dict(dtype=dtype, shape=shape, data_offsets=[offset, offset + size])
+                offset += size
+            encoded = json.dumps(metadata, separators=(",", ":")).encode()
+            with (directory / "model.safetensors").open("wb") as stream:
+                stream.write(struct.pack("<Q", len(encoded)))
+                stream.write(encoded)
+                stream.truncate(8 + len(encoded) + offset)
+            (directory / "config.json").write_text(json.dumps(config))
+            index_file = directory / "model.safetensors.index.json"
+            for indexed in (False, True):
+                if indexed:
+                    index_file.write_text(json.dumps({"weight_map": {name: "model.safetensors" for name in metadata}}))
+                else:
+                    index_file.unlink(missing_ok=True)
+                result = subprocess.run([str(args.executable.resolve()), "check-model-schema", kind, str(directory)], text=True, capture_output=True)
+                if result.returncode:
+                    raise AssertionError(f"Flash mixed affine indexed={indexed}: {result.stderr}")
+                count += 1
+                print(f"PASS: flash/mixed-affine/indexed={indexed}", flush=True)
     print(f"PASS: {count} checkpoint metadata rejection and alias cases")
 
 

@@ -4,6 +4,7 @@ const mx = @import("mlx.zig");
 const safe = @import("safetensors.zig");
 const Ref = struct { file: usize, tensor: safe.Tensor, name: []const u8 };
 pub const Tables = struct {
+    format: @import("quantization.zig").Spec = .{ .bits = 4, .group_size = 32 },
     resident: ?@import("ple_resident.zig").Resident = null,
     files: std.ArrayList(safe.File) = .empty,
     rows: [128][3]Ref = undefined,
@@ -41,11 +42,18 @@ pub const Tables = struct {
                 if (part > 0 and file_index != t.rows[shard][0].file) return error.SplitPLEWeight;
                 const entry = checkpoint.files.items[file_index].header.tensors.getEntry(key) orelse return error.MissingPLEWeight;
                 const tensor = entry.value_ptr.*;
-                if (tensor.rank != 2 or tensor.dims[0] <= 0 or tensor.dims[1] != (if (part == 0) @as(i32, 20) else 5)) return error.InvalidTensorShape;
+                if (tensor.rank != 2 or tensor.dims[0] <= 0 or tensor.dims[1] <= 0) return error.InvalidTensorShape;
                 if (tensor.dtype != (if (part == 0) safe.DType.U32 else safe.DType.BF16)) return error.InvalidTensorDType;
                 t.rows[shard][part] = .{ .file = file_index, .tensor = tensor, .name = entry.key_ptr.* };
                 if (part > 0 and tensor.dims[0] != t.rows[shard][0].tensor.dims[0]) return error.InvalidTensorShape;
             }
+            const w = t.rows[shard][0].tensor.shape();
+            const sc = t.rows[shard][1].tensor.shape();
+            const bi = t.rows[shard][2].tensor.shape();
+            if (@mod(@as(i64, w[1]) * 32, 160) != 0 or @mod(160, sc[1]) != 0) return error.InvalidTensorShape;
+            const format = @import("quantization.zig").Spec{ .bits = @intCast(@divExact(@as(i64, w[1]) * 32, 160)), .group_size = @divExact(160, sc[1]) };
+            _ = try format.shape(w, sc, bi);
+            if (shard == 0) t.format = format else if (!std.meta.eql(t.format, format)) return error.MixedPLEFormats;
             t.starts[shard + 1] = t.starts[shard] + t.rows[shard][0].tensor.dims[0];
         }
         t.files = checkpoint.files;
@@ -85,23 +93,25 @@ pub const Tables = struct {
     }
     pub fn gather(t: *const Tables, s: *mx.Scope, ids: []const i64) !mx.Array {
         if (ids.len == 0 or ids.len > 16 * 16) return error.InvalidLaneWidth;
-        var weights: [16 * 16 * 20]u32 = undefined;
+        const words: usize = @intCast(@divExact(160 * t.format.bits, 32));
+        const groups: usize = @intCast(@divExact(160, t.format.group_size));
+        var weights: [16 * 16 * 40]u32 = undefined;
         var scales: [16 * 16 * 5]u16 = undefined;
         var biases: [16 * 16 * 5]u16 = undefined;
         for (ids, 0..) |id, i| {
             const loc = try t.locate(id);
             const refs = t.rows[loc.shard];
             inline for (.{ &weights, &scales, &biases }, 0..) |buffer, part| {
-                const width = if (part == 0) 20 else 5;
+                const width = if (part == 0) words else groups;
                 try t.files.items[refs[part].file].readRow(refs[part].tensor, loc.row, std.mem.sliceAsBytes(buffer[i * width ..][0..width]));
             }
         }
         const count: i32 = @intCast(ids.len);
-        return @import("checkpoint.zig").dequantize(s, .{
-            try s.data(&weights, &.{ count, 20 }, mx.c.MLX_UINT32),
-            try s.data(&scales, &.{ count, 5 }, mx.bf16),
-            try s.data(&biases, &.{ count, 5 }, mx.bf16),
-        }, 32);
+        return @import("checkpoint.zig").dequantizeFormat(s, .{
+            try s.data(&weights, &.{ count, @intCast(words) }, mx.c.MLX_UINT32),
+            try s.data(&scales, &.{ count, @intCast(groups) }, mx.bf16),
+            try s.data(&biases, &.{ count, @intCast(groups) }, mx.bf16),
+        }, t.format);
     }
     pub fn check(io: std.Io, dir: []const u8) !void {
         try mx.init();
@@ -128,7 +138,7 @@ pub const Tables = struct {
             const ix = try scope.ints(&rows);
             var selected: [3]mx.Array = undefined;
             for (tables.rows[shard], &selected) |ref, *array| array.* = try scope.take(try oracle.get(ref.name), ix, 0);
-            try @import("sampling_checks.zig").equal(&scope, try cp.dequantize(&scope, selected, 32), try tables.gather(&scope, &ids));
+            try @import("sampling_checks.zig").equal(&scope, try cp.dequantizeFormat(&scope, selected, tables.format), try tables.gather(&scope, &ids));
         }
         std.debug.print("PASS: 640 PLE rows (first, last, adjacent and middle) across all 128 shards exactly match independent MLX reads/dequantization\n", .{});
     }
@@ -155,7 +165,7 @@ pub const Tables = struct {
             }
             var peak: usize = 0;
             try mx.check(mx.c.mlx_get_peak_memory(&peak));
-            const packed_bytes: usize = @intCast(tables.starts[128] * 100);
+            const packed_bytes: usize = @intCast(tables.starts[128] * (20 * tables.format.bits + @divExact(@as(i64, 640), tables.format.group_size)));
             if (peak > packed_bytes + 32 * 1024 * 1024) return error.ResidentLoadingPeakExceeded;
             std.debug.print("PASS: resident/bounded PLE at 640 shard boundary/interior rows; peak MLX bytes {d}, packed bytes {d}\n", .{ peak, packed_bytes });
         }

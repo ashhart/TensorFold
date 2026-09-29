@@ -104,6 +104,14 @@ pub fn nativeLanes(config: std.json.Value) !bool {
     }
     return true;
 }
+
+pub fn resolveFlash(config: std.json.Value, path: []const u8) !?Spec {
+    var buffer: [512]u8 = undefined;
+    const old = ".ngram_embedding.shard_";
+    if (std.mem.indexOf(u8, path, old)) |at|
+        return resolve(config, try std.fmt.bufPrint(&buffer, "{s}.ngram_embedding.shards.{s}", .{ path[0..at], path[at + old.len ..] }));
+    return resolve(config, if (std.mem.eql(u8, path, "draft_lm_head")) "lm_head" else path);
+}
 fn tensorFormat(s: Spec) bool {
     return s.group_size == 64 or (s.bits == 4 and s.group_size == 32);
 }

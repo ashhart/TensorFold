@@ -4,13 +4,16 @@ const mx = @import("mlx.zig");
 const lanes = @import("lanes.zig");
 const src = @import("kernel_sources.zig");
 const A = mx.Array;
+const Quant = @import("quantization.zig");
 pub const Store = struct {
     arrays: std.StringHashMap(A),
     dense: std.StringHashMap(lanes.Linear),
     group: i32,
     flash_drafts: ?bool = null,
+    quant_config: ?std.json.Parsed(std.json.Value) = null,
+    formats: std.StringHashMap(Quant.Spec),
     pub fn init(group: i32) Store {
-        return .{ .arrays = std.StringHashMap(A).init(mx.allocator), .dense = std.StringHashMap(lanes.Linear).init(mx.allocator), .group = group };
+        return .{ .arrays = std.StringHashMap(A).init(mx.allocator), .dense = std.StringHashMap(lanes.Linear).init(mx.allocator), .formats = std.StringHashMap(Quant.Spec).init(mx.allocator), .group = group };
     }
     pub fn deinit(w: *Store) void {
         var it = w.arrays.iterator();
@@ -25,6 +28,34 @@ pub const Store = struct {
             mx.allocator.free(e.key_ptr.*);
         }
         w.dense.deinit();
+        var formats = w.formats.keyIterator();
+        while (formats.next()) |key| mx.allocator.free(key.*);
+        w.formats.deinit();
+        if (w.quant_config) |cfg| cfg.deinit();
+    }
+    pub fn configure(w: *Store, bytes: []const u8) !void {
+        const cfg = try std.json.parseFromSlice(std.json.Value, mx.allocator, bytes, .{ .allocate = .alloc_always });
+        errdefer cfg.deinit();
+        _ = try Quant.resolve(cfg.value, null);
+        if (w.quant_config) |old| old.deinit();
+        w.quant_config = cfg;
+    }
+    pub fn format(w: *const Store, name: []const u8) !?Quant.Spec {
+        if (w.formats.get(name)) |value| return value;
+        if (w.quant_config) |cfg| return if (w.flash_drafts != null) Quant.resolveFlash(cfg.value, name) else Quant.resolve(cfg.value, name);
+        return Quant.Spec{ .bits = 4, .group_size = w.group };
+    }
+    pub fn affine(w: *Store, name: []const u8) !@import("flash_ops.zig").Weight {
+        return .{ .arrays = try w.triple(name), .format = (try w.format(name)) orelse return error.UnsupportedQuantization };
+    }
+    pub fn putAffine(w: *Store, name: []const u8, value: @import("flash_ops.zig").Weight) !void {
+        var buffer: [512]u8 = undefined;
+        inline for (.{ "weight", "scales", "biases" }, 0..) |suffix, i| try w.put(try std.fmt.bufPrint(&buffer, "{s}.{s}", .{ name, suffix }), value.arrays[i]);
+        if (w.formats.getPtr(name)) |f| f.* = value.format else {
+            const key = try mx.allocator.dupe(u8, name);
+            errdefer mx.allocator.free(key);
+            try w.formats.put(key, value.format);
+        }
     }
     pub fn put(w: *Store, key: []const u8, value: A) !void {
         const own = try mx.retain(value);
@@ -159,23 +190,29 @@ pub const Store = struct {
         return .{ try w.field(name, "weight"), try w.field(name, "scales"), try w.field(name, "biases") };
     }
     pub fn dequant(w: *Store, s: *mx.Scope, name: []const u8) !A {
+        const fmt = (try w.format(name)) orelse return w.field(name, "weight");
         const t = try w.triple(name);
-        return dequantize(s, t, w.group);
+        return dequantizeFormat(s, t, fmt);
     }
     pub fn embed(w: *Store, s: *mx.Scope, name: []const u8, ids: []const i32) !A {
         return w.embedArray(s, name, try s.ints(ids));
     }
     pub fn embedArray(w: *Store, s: *mx.Scope, name: []const u8, ix: A) !A {
+        const fmt = (try w.format(name)) orelse return s.take(try w.field(name, "weight"), ix, 0);
         const t = try w.triple(name);
-        return dequantize(s, .{ try s.take(t[0], ix, 0), try s.take(t[1], ix, 0), try s.take(t[2], ix, 0) }, w.group);
+        return dequantizeFormat(s, .{ try s.take(t[0], ix, 0), try s.take(t[1], ix, 0), try s.take(t[2], ix, 0) }, fmt);
     }
     pub fn linear(w: *Store, k: *mx.Kernels, s: *mx.Scope, name: []const u8, x: A, exact: bool) !A {
+        const fmt = (try w.format(name)) orelse {
+            const weight = try w.field(name, "weight");
+            return s.binary(mx.c.mlx_matmul, x, try s.transpose(weight, &.{ 1, 0 }));
+        };
         const t = try w.triple(name);
-        if (exact and w.flash_drafts != null) return @import("flash_ops.zig").project(k, s, x, .{ .arrays = t }, mx.gpu_generation, 4);
+        if (exact and w.flash_drafts != null) return @import("flash_ops.zig").project(k, s, x, .{ .arrays = t, .format = fmt }, mx.gpu_generation, 4);
         const n = mx.dim(t[0], 0);
         const dims = mx.dim(x, -1);
         const rows: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(dims)));
-        if (exact and w.group == 64 and mx.tensor_units and @mod(n, 32) == 0) {
+        if (exact and fmt.bits == 4 and fmt.group_size == 64 and mx.tensor_units and @mod(n, 32) == 0) {
             if (!w.dense.contains(name)) {
                 var linear_ = try lanes.Linear.init(s, t[0], t[1], t[2]);
                 errdefer linear_.deinit();
@@ -185,17 +222,21 @@ pub const Store = struct {
             }
             return s.reshape(try w.dense.get(name).?.apply(k, s, .{ .x = x }), &.{ rows, n });
         }
-        if (exact and rows <= 16 and @mod(n, 8) == 0 and @mod(dims, 64) == 0) {
-            return (try k.run(s, src.nemotron_rows_qmv, &.{ try s.reshape(x, &.{ rows, dims }), t[0], t[1], t[2] }, &.{ mx.ti("K", dims), mx.ti("N", n), mx.ti("GS", w.group), mx.ti("RPS", 4) }, .{ 32 * rows, @divExact(n, 4), 1 }, .{ 32 * rows, if (rows <= 8) 2 else 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
+        if (exact and fmt.bits == 4 and rows <= 16 and @mod(n, 8) == 0 and @mod(dims, 64) == 0) {
+            return (try k.run(s, src.nemotron_rows_qmv, &.{ try s.reshape(x, &.{ rows, dims }), t[0], t[1], t[2] }, &.{ mx.ti("K", dims), mx.ti("N", n), mx.ti("GS", fmt.group_size), mx.ti("RPS", 4) }, .{ 32 * rows, @divExact(n, 4), 1 }, .{ 32 * rows, if (rows <= 8) 2 else 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
         }
         var out = mx.c.mlx_array_new();
-        const rc = mx.c.mlx_quantized_matmul(&out, x, t[0], t[1], t[2], true, mx.opt(w.group), mx.opt(4), "affine", mx.stream);
+        const rc = mx.c.mlx_quantized_matmul(&out, x, t[0], t[1], t[2], true, mx.opt(fmt.group_size), mx.opt(fmt.bits), "affine", mx.stream);
         return s.result(rc, out);
     }
 };
 pub fn dequantize(s: *mx.Scope, t: [3]A, group: i32) !A {
+    return dequantizeFormat(s, t, .{ .bits = 4, .group_size = group });
+}
+pub fn dequantizeFormat(s: *mx.Scope, t: [3]A, format: Quant.Spec) !A {
+    try format.validate();
     var out = mx.c.mlx_array_new();
-    const rc = mx.c.mlx_dequantize(&out, t[0], t[1], t[2], mx.opt(group), mx.opt(4), "affine", mx.empty, .{ .value = mx.bf16, .has_value = true }, mx.stream);
+    const rc = mx.c.mlx_dequantize(&out, t[0], t[1], t[2], mx.opt(format.group_size), mx.opt(format.bits), "affine", mx.empty, .{ .value = mx.bf16, .has_value = true }, mx.stream);
     return s.result(rc, out);
 }
 pub fn norm(s: *mx.Scope, x: A, w: A, eps: f32) !A {

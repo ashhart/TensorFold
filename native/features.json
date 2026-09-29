@@ -7,11 +7,11 @@
     "limitation": "Synthetic checks include production projection dimensions, stacked reductions and forced affine fallback on M5; physical M1–M4 execution is unverified."
   },
   {
-    "id": "flash-affine-layouts", "state": "partial", "requirement": "Flash Next mixed affine formats, alternate PLE/MTP names and pre-M5 row kernel selection",
+    "id": "flash-affine-layouts", "state": "present", "requirement": "Flash Next mixed affine formats, alternate PLE/MTP names and pre-M5 row kernel selection",
     "upstream": ["src/tensorfold/families/qwen4_exp/model.py", "src/tensorfold/families/qwen4_exp/mtp.py", "src/tensorfold/families/qwen4_exp/decode.py", "src/tensorfold/kernels/qwen/flash_next/v1/base.py", "src/tensorfold/kernels/qwen/flash_next/v1/embed.py", "src/tensorfold/kernels/qwen/flash_next/v1/experts.py", "src/tensorfold/kernels/qwen/flash_next/v1/hc.py", "src/tensorfold/kernels/qwen/flash_next/v1/rows.py"],
     "implementation": [{"path":"native/flash_names.zig","symbol":"normalize"}, {"path":"native/ple_tables.zig","symbol":"open"}, {"path":"native/checkpoint.zig","symbol":"loadFile"}, {"path":"native/flash_ops.zig","symbol":"project"}, {"path":"native/flash_ops.zig","symbol":"hyper"}, {"path":"native/flash_ops.zig","symbol":"gateUp"}, {"path":"native/flash_ops.zig","symbol":"expertDown"}, {"path":"native/flash_ops.zig","symbol":"pleGate"}, {"path":"native/flash_ops.zig","symbol":"pleConv"}],
-    "checks": [{"step":"test-flash-checkpoint","driver":{"path":"native/flash_names.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-flash-affine","driver":{"path":"native/variant_checks.zig","symbol":"check"},"scope":"synthetic"}],
-    "limitation": "PLE/MTP names and row operators cover upstream affine formats and generation-selected nibble kernels. Mixed-format checkpoint loading/PLE and optimized M5 prefill remain incomplete. Physical M1–M4 execution is unverified."
+    "checks": [{"step":"test-flash-checkpoint","driver":{"path":"native/flash_names.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-flash-affine","driver":{"path":"native/variant_checks.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-flash-weights","driver":{"path":"native/flash_ops.zig","symbol":"checkWeights"},"scope":"synthetic"}],
+    "limitation": "Mixed formats, packed widening and PLE are verified with synthetic checkpoints and upstream operators; full-model checks use the installed 4-bit checkpoint. Physical M1–M4 execution is unverified. Optimized prefill remains tracked separately."
   },
   {
     "id": "bonsai-partial-widening", "state": "present", "requirement": "Choose and widen only the Bonsai decoder layers that fit pre-M5 memory budgets",

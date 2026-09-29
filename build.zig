@@ -151,6 +151,12 @@ pub fn build(b: *std.Build) void {
     flash_affine.step.dependOn(&flash_affine_fixture.step);
     b.step("test-flash-affine", "Compare Flash affine row operators and pre-M5 nibble dispatch against upstream").dependOn(&flash_affine.step);
     metal_tests.dependOn(&flash_affine.step);
+    const flash_weight_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/flash-weights", "--flash-weights" });
+    const flash_weights = b.addRunArtifact(exe);
+    flash_weights.addArgs(&.{ "check-flash-weights", "build/native-checks/flash-weights" });
+    flash_weights.step.dependOn(&flash_weight_fixture.step);
+    b.step("test-flash-weights", "Compare mixed Flash checkpoint formats and exact packed widening with upstream").dependOn(&flash_weights.step);
+    metal_tests.dependOn(&flash_weights.step);
     const bonsai_model = b.fmt("{s}/Ternary-Bonsai-2-27B-mlx-2bit", .{model_root});
     const bonsai_pack_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", bonsai_model, "--bonsai-widening", "--output", "build/native-checks/bonsai-pack" });
     const bonsai_pack = b.addRunArtifact(exe);
