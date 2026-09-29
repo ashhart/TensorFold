@@ -52,14 +52,15 @@ pub const Model = struct {
         try config(parsed.value);
         try @import("schema.zig").checkCheckpoint(.gemma, io, dir);
         try m.weights.load(io, dir, "language_model.");
-        try @import("schema.zig").validate(.gemma, &m.weights.arrays, false);
+        try @import("schema.zig").validateConfig(.gemma, &m.weights.arrays, false, parsed.value);
         var entries = m.weights.arrays.iterator();
         while (entries.next()) |entry| {
             if (mx.dtype(entry.value_ptr.*) != mx.c.MLX_UINT32) continue;
             const spec = (try @import("quantization.zig").resolve(parsed.value, entry.key_ptr.*)) orelse return error.UnsupportedQuantization;
             const bits: i32 = if (std.mem.endsWith(u8, entry.key_ptr.*, ".router.proj.weight")) 8 else 4;
-            if (spec.bits != bits or spec.group_size != 64) return error.UnsupportedQuantization;
+            if (spec.bits != bits) return error.UnsupportedQuantization;
         }
+        m.weights.group = (try @import("quantization.zig").resolve(parsed.value, "model.embed_tokens")).?.group_size;
         var s = mx.Scope{};
         defer s.deinit();
         var local: [128]f32 = undefined;
@@ -143,6 +144,10 @@ pub const Model = struct {
         var buf: [256]u8 = undefined;
         return m.weights.triple(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ i, suffix }));
     }
+    fn group(m: *Model, i: usize, suffix: []const u8, bits: i32) !i32 {
+        const t = try m.triple(i, suffix);
+        return @divExact(mx.dim(t[0], -1) * @divExact(32, bits), mx.dim(t[1], -1));
+    }
     fn stack(m: *Model, s: *mx.Scope, i: usize, name: []const u8, members: []const []const u8) !void {
         for ([_][]const u8{ "weight", "scales", "biases" }) |suffix| {
             var arrays: [3]A = undefined;
@@ -158,7 +163,8 @@ pub const Model = struct {
         const n = mx.dim(weights[0], 0);
         const width = mx.dim(x, 1);
         if (rows < 1 or rows > 16 or @mod(n, 8) != 0 or @mod(width, 64) != 0) return error.InvalidGemmaProjection;
-        return (try m.kernels.run(s, src.nemotron_rows_qmv, &.{ x, weights[0], weights[1], weights[2] }, &.{ ti("K", width), ti("N", n), ti("GS", 64), ti("RPS", 4) }, .{ 32 * rows, @divExact(n, 4), 1 }, .{ 32 * rows, if (rows <= 8) 2 else 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
+        const gs = @divExact(width, mx.dim(weights[1], -1));
+        return (try m.kernels.run(s, src.nemotron_rows_qmv, &.{ x, weights[0], weights[1], weights[2] }, &.{ ti("K", width), ti("N", n), ti("GS", gs), ti("RPS", 4) }, .{ 32 * rows, @divExact(n, 4), 1 }, .{ 32 * rows, if (rows <= 8) 2 else 1, 1 }, &.{.{ .shape = &.{ rows, n } }}))[0];
     }
     pub fn forward(m: *Model, tokens: []const i32) !Pass {
         if (tokens.len == 0 or tokens.len > 16 or m.position > 262144 - tokens.len) return error.ContextLimitExceeded;
@@ -178,7 +184,7 @@ pub const Model = struct {
         for (0..30) |i| {
             const local = sliding(i);
             const g = ops.Geometry{ .heads = 16, .kv_heads = if (local) 8 else 2, .head_dim = if (local) 256 else 512, .values_are_keys = !local };
-            const qkv = try ops.qkv(&m.kernels, s, g, normed, try m.triple(i, "qkv"), try m.weight(i, "self_attn.q_norm.weight"), try m.weight(i, "self_attn.k_norm.weight"), try m.weights.get(if (local) "inv_local" else "inv_global"), at, eps, 64);
+            const qkv = try ops.qkv(&m.kernels, s, g, normed, try m.triple(i, "qkv"), try m.weight(i, "self_attn.q_norm.weight"), try m.weight(i, "self_attn.k_norm.weight"), try m.weights.get(if (local) "inv_local" else "inv_global"), at, eps, try m.group(i, "qkv", 4));
             const keys = if (m.cache[i].keys.ctx != null) m.cache[i].keys else try s.zeros(&.{ 1, g.kv_heads, if (local) 1152 else 1, g.head_dim }, mx.bf16);
             const values = if (m.cache[i].values.ctx != null) m.cache[i].values else try s.zeros(mx.shape(keys), mx.bf16);
             p.records[i] = .{ .keys = try s.reshape(qkv[1], &.{ 1, g.kv_heads, rows, g.head_dim }), .values = try s.reshape(qkv[2], &.{ 1, g.kv_heads, rows, g.head_dim }) };
@@ -188,9 +194,9 @@ pub const Model = struct {
             const gu = try m.project(s, tail[1], try m.triple(i, "gate_up"));
             const activated = try m.activations.call(s, .geglu, &.{ try s.slice(gu, 1, 0, 2112), try s.slice(gu, 1, 2112, 4224) });
             const dense = try m.project(s, activated, try m.triple(i, "mlp.down_proj"));
-            const routes = try ops.route(&m.kernels, s, try ops.router(&m.kernels, s, tail[3], try m.triple(i, "router.proj"), 64), try m.weight(i, "router.per_expert_scale"), 8);
-            const expert_act = try ops.gateUp(&m.kernels, s, tail[2], routes[0], 8, try m.triple(i, "experts.switch_glu.gate_proj"), try m.triple(i, "experts.switch_glu.up_proj"), 64);
-            const expert = try ops.down(&m.kernels, s, expert_act, routes[0], routes[1], 8, try m.triple(i, "experts.switch_glu.down_proj"), 64);
+            const routes = try ops.route(&m.kernels, s, try ops.router(&m.kernels, s, tail[3], try m.triple(i, "router.proj"), try m.group(i, "router.proj", 8)), try m.weight(i, "router.per_expert_scale"), 8);
+            const expert_act = try ops.gateUp(&m.kernels, s, tail[2], routes[0], 8, try m.triple(i, "experts.switch_glu.gate_proj"), try m.triple(i, "experts.switch_glu.up_proj"), try m.group(i, "experts.switch_glu.gate_proj", 4));
+            const expert = try ops.down(&m.kernels, s, expert_act, routes[0], routes[1], 8, try m.triple(i, "experts.switch_glu.down_proj"), try m.group(i, "experts.switch_glu.down_proj", 4));
             const next_weight = if (i < 29) try m.weight(i + 1, "input_layernorm.weight") else try m.weights.get("model.norm.weight");
             const end = try m.kernels.run(s, src.gemma_moe_tail, &.{ tail[0], dense, expert, try m.weight(i, "post_feedforward_layernorm_1.weight"), try m.weight(i, "post_feedforward_layernorm_2.weight"), try m.weight(i, "post_feedforward_layernorm.weight"), try m.weight(i, "layer_scalar"), next_weight, eps }, &.{ ti("D", 2816), ti("T", 256) }, .{ 256 * rows, 1, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ rows, 2816 } }, .{ .shape = &.{ rows, 2816 } } });
             h = end[0];

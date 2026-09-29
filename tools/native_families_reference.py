@@ -419,8 +419,8 @@ def main():
             mtp_cache = mtp.make_cache()
         forward = lambda ids: model.head(model.hidden(mx.array([ids], dtype=mx.uint32), cache))
     elif kind in ("gemma4", "gemma4_text"):
-        from tensorfold.families.gemma4 import load
-        model, tokenizer = load(args.model, lane_kernels="off")
+        from tensorfold.families.gemma4.model import load
+        model, tokenizer = load(args.model, backend="rows", check=False)
         cache = model.make_cache()
         forward = lambda ids: model.head(model.hidden(mx.array([ids], dtype=mx.uint32), cache))
     elif kind == "nemotron_h":
@@ -482,10 +482,12 @@ def main():
         raise ValueError(kind)
     tokens = ([int(x) for x in args.tokens.split(",")] if args.tokens else list(range(1, 41)) if args.synthetic_glm or args.synthetic_glm_layout else
               tokenizer.encode(args.prompt, add_special_tokens=False) if args.generate else [1, 2, 3, 4])
-    # Native and oracle prefill on the same fixed 16-token grid.
-    for start in range(0, len(tokens), 16):
-        chunk = tokens[start:start + 16]
-        if kind == "glm5_next" and args.serial_rows:
+    prompt_chunk = 2048 if kind in ("gemma4", "gemma4_text") else 16
+    for start in range(0, len(tokens), prompt_chunk):
+        chunk = tokens[start:start + prompt_chunk]
+        if kind in ("gemma4", "gemma4_text"):
+            logits = model.head(model.prefill(mx.array([chunk], dtype=mx.uint32), cache)[:, -1:])
+        elif kind == "glm5_next" and args.serial_rows:
             hidden_rows = []
             logit_rows = []
             for token in chunk:
@@ -514,7 +516,7 @@ def main():
                 np.save(args.state_directory / f"logits-{start // 16}.npy", np.asarray(logits.astype(mx.float32)).reshape(-1, logits.shape[-1]))
             mx.eval(mtp_hidden, mtp_logits)
         if start % 512 == 0:
-            print(f"Prefill {start + min(16, len(tokens) - start)}/{len(tokens)}", flush=True)
+            print(f"Prefill {start + len(chunk)}/{len(tokens)}", flush=True)
     if args.dump_logits:
         args.dump_logits.parent.mkdir(parents=True, exist_ok=True)
         np.save(args.dump_logits, np.asarray(logits.astype(mx.float32)).reshape(-1, logits.shape[-1]))

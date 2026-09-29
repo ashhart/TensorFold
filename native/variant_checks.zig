@@ -120,7 +120,8 @@ pub fn check(io: std.Io, dir: []const u8) !void {
         }
         if (std.mem.eql(u8, case.kernel, "gemma_route")) {
             const actual = try gemma.route(&kernels, &scope, inputs[0], inputs[1], parameter(case, "K"));
-            for (actual, expected) |got, want| try equalBits(&scope, got, want);
+            const logical = mx.dim(inputs[0], 0) * parameter(case, "K");
+            for (actual, expected) |got, want| try equalBits(&scope, try scope.slice(got, 0, 0, logical), try scope.slice(want, 0, 0, logical));
         }
         if (std.mem.eql(u8, case.kernel, "gemma_router")) try equalBits(&scope, try gemma.router(&kernels, &scope, inputs[0], .{ inputs[1], inputs[2], inputs[3] }, parameter(case, "GS")), expected[0]);
         if (std.mem.eql(u8, case.kernel, "gemma_expert_gateup")) try equalBits(&scope, try gemma.gateUp(&kernels, &scope, inputs[0], inputs[1], parameter(case, "TOPK"), .{ inputs[2], inputs[3], inputs[4] }, .{ inputs[5], inputs[6], inputs[7] }, parameter(case, "GS")), expected[0]);

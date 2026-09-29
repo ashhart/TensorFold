@@ -20,6 +20,42 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.native_runtime import require_mlx
 
+def gemma_quantization_variants(capture):
+    from tensorfold.kernels.gemma.v1 import glue, moe
+    from tensorfold.kernels.nemotron.lightning.v1 import rows as row_kernels
+
+    def quantized(shape, group, bits, seed):
+        w = (mx.random.normal(shape, key=mx.random.key(seed)) * .05).astype(mx.bfloat16)
+        q, s, b = mx.quantize(w, group_size=group, bits=bits)
+        return SimpleNamespace(weight=q, scales=s, biases=b, group_size=group, bits=bits)
+
+    for group in (32, 64, 128):
+        router = quantized((32, 512), group, 8, 1)
+        gate = quantized((32, 512, 512), group, 4, 2)
+        up = quantized((32, 512, 512), group, 4, 3)
+        down = quantized((32, 512, 512), group, 4, 4)
+        qkv = quantized((1024, 512), group, 4, 5)
+        for rows in (1, 7, 16):
+            capture.test = f"gemma-groups-{group}-rows-{rows}"
+            x = (mx.random.normal((rows, 512), key=mx.random.key(6)) * .1).astype(mx.bfloat16)
+            logits = moe.router_logits(x, router)
+            ids, probabilities = moe.route(logits, mx.ones((32,), mx.bfloat16), 4)
+            act = moe.expert_gateup(x, ids, 4, gate, up)
+            y = moe.expert_down(act, ids, probabilities, 4, down)
+            for r in range(rows):
+                serial = moe.expert_gateup(x[r:r + 1], ids[r * 4:(r + 1) * 4], 4, gate, up)
+                expected = moe.expert_down(serial, ids[r * 4:(r + 1) * 4], probabilities[r * 4:(r + 1) * 4], 4, down)
+                assert mx.array_equal(y[r:r + 1], expected).item()
+            positions = mx.array(list(range(rows)) + [0] * max(0, 8 - rows), mx.int32)
+            norm = mx.ones((256,), mx.bfloat16)
+            inverse = mx.ones((128,), mx.float32)
+            eps = mx.array([1e-6] * 8)
+            geometry = dict(heads=2, kv_heads=1, head_dim=256, values_are_keys=False)
+            fused = glue.qkv_rows(x, qkv.weight, qkv.scales, qkv.biases, group, norm, norm, inverse, positions, eps, **geometry)
+            apart = glue.qkv_prep(row_kernels.qmv(x, qkv.weight, qkv.scales, qkv.biases, group), norm, norm, inverse, positions, eps, **geometry)
+            assert all(mx.array_equal(a, b).item() for a, b in zip(fused, apart))
+
+
 def fingerprint(source, header):
     return hashlib.sha256((header + "\0" + source).encode()).hexdigest()
 
@@ -511,6 +547,8 @@ def main():
             code = pytest.main(["-q", "-rs", "tests/test_gemma4_kernels.py" if args.gemma_only else "tests/test_bonsai.py" if args.bonsai_only else "tests/test_lane_qmm.py" if args.tensor_quantization else "tests/test_affine_rows_metal.py"], plugins=[capture])
             if code:
                 raise SystemExit(code)
+            if args.gemma_only:
+                gemma_quantization_variants(capture)
         finally:
             mx.fast.metal_kernel = capture.original
         if not capture.cases:
