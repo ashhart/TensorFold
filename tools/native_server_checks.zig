@@ -41,9 +41,43 @@ fn readAll(a: std.mem.Allocator, io: std.Io, socket: std.Io.net.Stream) ![]u8 {
     return reader.interface.allocRemaining(a, .limited(4 * 1024 * 1024));
 }
 
+fn memoryWaiting(a: std.mem.Allocator, io: std.Io, port: u16) !i64 {
+    const socket = try connect(io, port);
+    defer socket.close(io);
+    try write(io, socket, "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    const response = try readAll(a, io, socket);
+    const start = (std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.MissingHttpBody) + 4;
+    const body = try std.json.parseFromSlice(std.json.Value, a, response[start..], .{});
+    return body.value.object.get("memory").?.object.get("waiting_requests").?.integer;
+}
+
+fn waitForMemory(a: std.mem.Allocator, io: std.Io, port: u16, expected: i64) !void {
+    for (0..1000) |_| {
+        if (try memoryWaiting(a, io, port) == expected) return;
+        try std.Io.sleep(io, .fromMilliseconds(25), .awake);
+    }
+    return error.MissingMemoryWaitState;
+}
+
+fn firstEvent(io: std.Io, socket: std.Io.net.Stream) !void {
+    var buffer: [8192]u8 = undefined;
+    var reader = socket.reader(io, &buffer);
+    if (!std.mem.startsWith(u8, try reader.interface.takeSentinel('\n'), "HTTP/1.1 200")) return error.ExpectedStreamingResponse;
+    while (true) {
+        const line = try reader.interface.takeSentinel('\n');
+        if (std.mem.startsWith(u8, line, "data: ")) {
+            if (std.mem.indexOf(u8, line, "\"error\"") != null or std.mem.indexOf(u8, line, "[DONE]") != null) return error.ExpectedGeneratedToken;
+            return;
+        }
+    }
+}
+
 fn assertCancelled(bytes: []const u8) !void {
     if (std.mem.indexOf(u8, bytes, "\"finish_reason\":\"length\"") != null or std.mem.indexOf(u8, bytes, "\"finish_reason\":\"stop\"") != null) return error.CancelledRequestCompleted;
-    if (bytes.len != 0 and std.mem.indexOf(u8, bytes, "RequestTimedOut") == null and std.mem.indexOf(u8, bytes, "ServerStopping") == null and std.mem.indexOf(u8, bytes, "data: ") == null) return error.MissingCancellation;
+    if (bytes.len != 0 and std.mem.indexOf(u8, bytes, "RequestTimedOut") == null and std.mem.indexOf(u8, bytes, "ServerStopping") == null and std.mem.indexOf(u8, bytes, "data: ") == null) {
+        std.debug.print("Unexpected cancellation response: {s}\n", .{bytes});
+        return error.MissingCancellation;
+    }
 }
 
 const Output = struct {
@@ -100,8 +134,67 @@ const Scenario = struct {
     child: std.process.Child,
     idle: bool,
     rounds: bool = false,
+    memory: bool = false,
     image: []const u8 = "",
     http_checks: []const u8 = "",
+
+    fn checkMemory(s: *Scenario, port: u16) !void {
+        const a = s.init.arena.allocator();
+        const io = s.init.io;
+        const short = "{\"prompt\":\"Hello\",\"max_tokens\":12,\"temperature\":0}";
+        const baseline = try post(io, port, short);
+        defer baseline.close(io);
+        const expected = try Output.parse(a, try readAll(a, io, baseline), false);
+        const reserved = "{\"prompt\":\"Count upwards.\",\"max_tokens\":260000,\"ignore_eos\":true,\"temperature\":0,\"stream\":true}";
+        var active = try post(io, port, reserved);
+        var active_open = true;
+        defer if (active_open) active.close(io);
+        try firstEvent(io, active);
+        const cancelled = try post(io, port, reserved);
+        var cancelled_open = true;
+        defer if (cancelled_open) cancelled.close(io);
+        try waitForMemory(a, io, port, 1);
+        cancelled.close(io);
+        cancelled_open = false;
+        try waitForMemory(a, io, port, 0);
+        var next = try post(io, port, reserved);
+        var next_open = true;
+        defer if (next_open) next.close(io);
+        try waitForMemory(a, io, port, 1);
+        active.close(io);
+        active_open = false;
+        try firstEvent(io, next);
+        try waitForMemory(a, io, port, 0);
+        next.close(io);
+        next_open = false;
+        const recovery = try post(io, port, short);
+        defer recovery.close(io);
+        try expected.compare(try Output.parse(a, try readAll(a, io, recovery), false));
+        std.debug.print("PASS: memory-limited request waits for release; queued cancellation clears the wait; next request matches its isolated output\n", .{});
+
+        const tokens = try a.alloc(i32, 262000);
+        @memset(tokens, 1001);
+        const oversized = try std.json.Stringify.valueAlloc(a, .{ .prompt = tokens, .max_tokens = @as(usize, 1) }, .{});
+        const too_long = try post(io, port, oversized);
+        defer too_long.close(io);
+        const refusal = try readAll(a, io, too_long);
+        if (std.mem.indexOf(u8, refusal, "RequestExceedsMemoryBudget") == null) return error.MissingPromptMemoryRefusal;
+        const image = try std.Io.Dir.cwd().readFileAlloc(io, s.image, a, .limited(10 * 1024 * 1024));
+        const encoded = try a.alloc(u8, std.base64.standard.Encoder.calcSize(image.len));
+        _ = std.base64.standard.Encoder.encode(encoded, image);
+        const url = try std.mem.concat(a, u8, &.{ "data:image/jpeg;base64,", encoded });
+        const image_body = try std.json.Stringify.valueAlloc(a, .{ .messages = &.{.{ .role = "user", .content = .{ .{ .type = "text", .text = "Describe this image." }, .{ .type = "image_url", .image_url = .{ .url = url, .detail = "high" } } } }}, .max_tokens = @as(usize, 1) }, .{});
+        const too_large = try postRoute(io, port, "/v1/chat/completions", image_body);
+        defer too_large.close(io);
+        const image_refusal = try readAll(a, io, too_large);
+        if (std.mem.indexOf(u8, image_refusal, "RequestExceedsMemoryBudget") == null) return error.MissingImageMemoryRefusal;
+        const final = try post(io, port, short);
+        defer final.close(io);
+        try expected.compare(try Output.parse(a, try readAll(a, io, final), false));
+        std.debug.print("PASS: oversized prompt and image workspace refused before inference; server recovers unchanged\n", .{});
+        try std.posix.kill(s.child.id.?, .TERM);
+        if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+    }
 
     fn checkRounds(s: *Scenario, port: u16) !void {
         const a = s.init.arena.allocator();
@@ -174,12 +267,14 @@ const Scenario = struct {
         const prefix = "Native inference listening at http://127.0.0.1:";
         const port = while (true) {
             const line = try stderr.interface.takeSentinel('\n');
+            if (std.mem.startsWith(u8, line, "Native memory admission:")) std.debug.print("{s}\n", .{line});
             if (std.mem.indexOf(u8, line, prefix)) |start| {
                 const value = line[start + prefix.len ..];
                 const end = std.mem.indexOfScalar(u8, value, ' ') orelse return error.InvalidListenAddress;
                 break try std.fmt.parseInt(u16, value[0..end], 10);
             }
         };
+        if (s.memory) return s.checkMemory(port);
         if (s.rounds) return s.checkRounds(port);
         if (s.idle) {
             try std.posix.kill(s.child.id.?, .INT);
@@ -249,7 +344,11 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 3 and args.len != 5) return error.ExpectedExecutableAndModel;
     if (args.len == 5) {
-        var scenario = Scenario{ .init = init, .idle = false, .rounds = true, .image = args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", "4", "--shutdown-grace-seconds", "1" }, .stderr = .pipe }) };
+        const memory = std.mem.eql(u8, args[3], "--memory-only");
+        var environment = try init.environ_map.clone(init.arena.allocator());
+        defer environment.deinit();
+        if (memory) try environment.put("TENSORFOLD_MEMORY_LIMIT_GB", "70");
+        var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory, .memory = memory, .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", "4", "--shutdown-grace-seconds", "1" }, .environ_map = &environment, .stderr = .pipe }) };
         defer scenario.child.kill(init.io);
         const Event = union(enum) { done: anyerror!void, timeout: std.Io.Cancelable!void };
         var events: [2]Event = undefined;

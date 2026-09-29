@@ -6,6 +6,8 @@ const reply_text = @import("reply_text.zig");
 const tool_calls = @import("tool_calls.zig");
 const Request = std.http.Server.Request;
 const control = @import("server_control.zig");
+const memory_policy = @import("memory_budget.zig");
+const memory_runtime = @import("memory_runtime.zig");
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var host: []const u8 = "127.0.0.1";
@@ -148,6 +150,7 @@ const Worker = struct {
     is_glm: bool,
     is_flash: bool,
     memory_limit: ?[]const u8,
+    memory_stats: MemoryStats = .{},
     fn run(w: *Worker) void {
         w.loop() catch |err| {
             w.startup_error = err;
@@ -157,12 +160,19 @@ const Worker = struct {
     fn loop(w: *Worker) !void {
         try mx.init();
         defer mx.shutdown();
-        var memory = try @import("memory_runtime.zig").Runtime.init(w.memory_limit, w.is_glm);
+        var memory = try memory_runtime.Runtime.init(w.memory_limit, w.is_glm);
         defer memory.deinit();
         try memory.checkWeights(w.io, w.dir, w.is_flash);
         var session = try inference.Session.init(w.io, w.dir);
         defer session.deinit();
+        const profile = try memory_runtime.measure(&session);
         try memory.wire();
+        var admission = memory_policy.Admission{ .budget = try memory.admissionBudget(w.io), .memory = profile };
+        w.memory_stats.budget = memory.budget;
+        w.memory_stats.mlx_budget = memory.share;
+        w.memory_stats.admission_budget = admission.budget;
+        w.memory_stats.update(0);
+        std.debug.print("Native memory admission: {d} bytes available, {d} resident, {d} bytes per token\n", .{ admission.budget, try memory_runtime.activeBytes(), profile.per_token });
         w.ready.set(w.io);
         var active: [8]?*Pending = @splat(null);
         var live: usize = 0;
@@ -189,7 +199,7 @@ const Worker = struct {
                 }
             }
             for (&active) |*slot| if (slot.*) |pending| {
-                const done = pending.step(&session) catch |err| blk: {
+                const done = pending.advance(&session, &admission, &active) catch |err| blk: {
                     pending.reportError(err) catch |write_err| {
                         pending.job.failure = write_err;
                     };
@@ -203,7 +213,34 @@ const Worker = struct {
                     job.done.set(w.io);
                 }
             };
+            var waiting: u64 = 0;
+            for (active) |slot| if (slot) |pending| {
+                if (pending.generation == null) waiting += 1;
+            };
+            w.memory_stats.update(waiting);
         }
+    }
+};
+
+const MemoryStats = struct {
+    budget: u64 = 0,
+    mlx_budget: u64 = 0,
+    admission_budget: u64 = 0,
+    active: std.atomic.Value(usize) = .init(0),
+    cache: std.atomic.Value(usize) = .init(0),
+    peak: std.atomic.Value(usize) = .init(0),
+    waiting: std.atomic.Value(u64) = .init(0),
+
+    fn update(stats: *MemoryStats, waiting: u64) void {
+        var value: usize = 0;
+        if (mx.c.mlx_get_active_memory(&value) == 0) stats.active.store(value, .release);
+        if (mx.c.mlx_get_cache_memory(&value) == 0) stats.cache.store(value, .release);
+        if (mx.c.mlx_get_peak_memory(&value) == 0) stats.peak.store(value, .release);
+        stats.waiting.store(waiting, .release);
+    }
+
+    fn snapshot(stats: *const MemoryStats) struct { budget: u64, mlx_budget: u64, admission_budget: u64, active: usize, cache: usize, peak: usize, waiting_requests: u64 } {
+        return .{ .budget = stats.budget, .mlx_budget = stats.mlx_budget, .admission_budget = stats.admission_budget, .active = stats.active.load(.acquire), .cache = stats.cache.load(.acquire), .peak = stats.peak.load(.acquire), .waiting_requests = stats.waiting.load(.acquire) };
     }
 };
 fn connectionTask(w: *Worker, a: std.mem.Allocator, stream: std.Io.net.Stream, name: []const u8, sequence: usize, client: *control.Client) void {
@@ -234,7 +271,7 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
     if (std.mem.indexOfScalar(u8, route, '?')) |at| route = route[0..at];
     route = std.mem.trimEnd(u8, route, "/");
     if (request.head.method == .GET) {
-        if (route.len == 0 or std.mem.eql(u8, route, "/health")) return json(a, request, .ok, .{ .status = "ok", .model = model, .warming = false });
+        if (route.len == 0 or std.mem.eql(u8, route, "/health")) return json(a, request, .ok, .{ .status = "ok", .model = model, .warming = false, .max_batch_size = worker.batch_streams, .memory = worker.memory_stats.snapshot() });
         if (std.mem.eql(u8, route, "/v1/models") or std.mem.eql(u8, route, "/models")) return json(a, request, .ok, .{ .object = "list", .data = &.{.{ .id = model, .object = "model", .created = std.Io.Clock.real.now(worker.io).toSeconds(), .owned_by = "tensorfold" }} });
         return failure(a, request, .not_found, "Unknown route");
     }
@@ -272,6 +309,9 @@ const Pending = struct {
     max_calls: ?usize = null,
     markers: reply_text.Markers = .{},
     gate: ?@import("call_gate.zig").Gate = null,
+    prepared_image: ?@import("vision.zig").Prepared = null,
+    ids: []const i32 = &.{},
+    options: inference.Options = .{},
     image: ?@import("vision.zig").Prompt = null,
     generation: ?inference.RequestGeneration = null,
     response: ?std.http.BodyWriter = null,
@@ -292,6 +332,7 @@ const Pending = struct {
     fn deinit(p: *Pending) void {
         if (p.generation) |*generation| generation.deinit();
         if (p.image) |*image| image.deinit();
+        if (p.prepared_image) |*image| image.deinit();
         p.job.a.destroy(p);
     }
 
@@ -344,13 +385,52 @@ const Pending = struct {
         p.id = try std.fmt.allocPrint(a, "{s}cmpl-{d}-{d}", .{ if (p.job.is_chat) "chat" else "", p.job.created, p.job.sequence });
         p.markers = if (session.backend == .gemma) reply_text.gemma_markers else .{};
         try cancellation.check();
-        if (images.len > 0) p.image = try @import("vision.zig").Prompt.prepareEncoded(session.io, session.directory, images, &ids, a, &session.backend.qwen.weights);
+        if (images.len > 0) {
+            p.prepared_image = try @import("vision.zig").Prepared.init(session.io, session.directory, images, ids.items);
+            p.ids = try a.dupe(i32, p.prepared_image.?.tokens.items);
+        } else p.ids = ids.items;
+        try session.validate(p.ids, options);
+        p.options = options;
+    }
+
+    fn activate(p: *Pending, session: *inference.Session) !void {
+        const a = p.job.a;
+        const cancellation = p.job.client.cancellation();
+        const options = p.options;
+        try cancellation.check();
+        if (p.prepared_image) |*prepared| {
+            p.image = try prepared.encode(session.io, session.directory, &session.backend.qwen.weights);
+            prepared.deinit();
+            p.prepared_image = null;
+        }
         if (options.stream) {
             p.response = try p.job.request.respondStreaming(&p.buffer, .{ .respond_options = .{ .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" } } } });
             p.stream = .{ .a = a, .writer = &p.response.?.writer, .transport = p.job.request.server.out, .id = p.id, .model = p.job.model, .created = p.job.created, .is_chat = p.job.is_chat, .thinking = p.thinking, .markers = p.markers, .tools = p.tools, .max_calls = p.max_calls, .cancellation = cancellation };
             if (p.job.is_chat) try p.stream.?.chatChunk(.{ .role = "assistant", .content = "" }, null);
         }
-        p.generation = try inference.RequestGeneration.init(session, mx.allocator, ids.items, options, .{ .context = if (p.stream) |*stream| stream else null, .emit = if (p.stream != null) Stream.emit else null, .cancellation = cancellation, .gate = if (p.gate) |*gate| gate else null }, if (p.image) |*image| image else null);
+        p.generation = try inference.RequestGeneration.init(session, mx.allocator, p.ids, options, .{ .context = if (p.stream) |*stream| stream else null, .emit = if (p.stream != null) Stream.emit else null, .cancellation = cancellation, .gate = if (p.gate) |*gate| gate else null }, if (p.image) |*image| image else null);
+    }
+
+    fn advance(p: *Pending, session: *inference.Session, admission: *memory_policy.Admission, active: []const ?*Pending) !bool {
+        try p.job.client.cancellation().check();
+        if (p.generation == null) {
+            var live: [8]memory_policy.Live = undefined;
+            var count: usize = 0;
+            for (active) |slot| if (slot) |other| if (other.generation) |*generation| {
+                live[count] = generation.memoryLengths();
+                count += 1;
+            };
+            const workspace = if (p.prepared_image) |*prepared| prepared.workspaceBytes() else 0;
+            const projected = try admission.projected(try memory_runtime.activeBytes(), p.ids.len, p.ids.len + p.options.max_tokens, live[0..count]);
+            if ((p.options.max_tokens > 0 or workspace > 0) and projected +| workspace > admission.budget) {
+                admission.refused +|= 1;
+                if (count == 0) return error.RequestExceedsMemoryBudget;
+                return false;
+            }
+            try mx.check(mx.c.mlx_clear_cache());
+            try p.activate(session);
+        }
+        return p.step(session);
     }
 
     fn step(p: *Pending, session: *inference.Session) !bool {

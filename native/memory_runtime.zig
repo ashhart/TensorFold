@@ -175,7 +175,7 @@ fn measureModel(m: anytype, tokenizer: *@import("vendor/tokenizer.zig").Tokenize
         try mx.check(mx.c.mlx_clear_cache());
         const before = try activeBytes();
         try mx.check(mx.c.mlx_reset_peak_memory());
-        generation.* = try G.init(m, tokenizer, mx.allocator, tokens[0..count], .{ .max_tokens = 1 }, .{}, null);
+        generation.* = try G.init(m, tokenizer, mx.allocator, tokens[0..count], .{ .max_tokens = 2, .ignore_eos = true }, .{}, null);
         initialized += 1;
         while (generation.phase == .prefill) _ = try generation.step(m);
         try mx.check(mx.c.mlx_synchronize(mx.stream));
@@ -190,7 +190,13 @@ fn measureModel(m: anytype, tokenizer: *@import("vendor/tokenizer.zig").Tokenize
     const spare: u64 = @intFromFloat(floor.spare * 2048);
     const b = @max(0, (@as(f64, @floatFromInt(peaks[2])) - @as(f64, @floatFromInt(peaks[1]))) / (chunk * chunk));
     const a = @max(0, @as(f64, @floatFromInt(peaks[1])) / chunk - b * chunk);
-    return .{ .short_tokens = probes[0], .short = sizes[0] + spare, .long_tokens = probes[1], .long = @max(sizes[0], sizes[1]) + spare, .per_token = per_token, .prefill_a = a, .prefill_b = b, .round_bytes = @max(peaks[0], @max(peaks[1], peaks[2])), .chunk = chunk };
+    const before_decode = try activeBytes();
+    try mx.check(mx.c.mlx_reset_peak_memory());
+    _ = try held[2].step(m);
+    try mx.check(mx.c.mlx_synchronize(mx.stream));
+    var decode_peak: usize = 0;
+    try mx.check(mx.c.mlx_get_peak_memory(&decode_peak));
+    return .{ .short_tokens = probes[0], .short = sizes[0] + spare, .long_tokens = probes[1], .long = @max(sizes[0], sizes[1]) + spare, .per_token = per_token, .prefill_a = a, .prefill_b = b, .round_bytes = decode_peak -| before_decode, .chunk = chunk };
 }
 
 pub fn check(io: std.Io, directory: []const u8) !void {
@@ -203,7 +209,7 @@ pub fn check(io: std.Io, directory: []const u8) !void {
     const profile = try measure(&model);
     try profile.validate();
     try runtime.wire();
-    std.debug.print("Memory profile: {d} bytes/token, short={d}, long={d}, chunk={d}\n", .{ profile.per_token, profile.short, profile.long, profile.chunk });
+    std.debug.print("Memory profile: {d} bytes/token, short={d}, long={d}, chunk={d}, decode={d}, prefill a={d}, b={d}\n", .{ profile.per_token, profile.short, profile.long, profile.chunk, profile.round_bytes, profile.prefill_a, profile.prefill_b });
     switch (model.backend) {
         inline else => |*m| {
             const M = @TypeOf(m.*);

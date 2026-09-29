@@ -29,14 +29,44 @@ pub const Prompt = struct {
         return prepareEncoded(io, dir, sources[0..loaded], tokens, allocator, weights);
     }
     pub fn prepareEncoded(io: std.Io, dir: []const u8, sources: []const EncodedImage, tokens: *std.ArrayList(i32), allocator: std.mem.Allocator, weights: *@import("weights.zig").Weights) !Prompt {
+        var prepared = try Prepared.init(io, dir, sources, tokens.items);
+        defer prepared.deinit();
+        var expanded: std.ArrayList(i32) = .empty;
+        defer expanded.deinit(allocator);
+        try expanded.appendSlice(allocator, prepared.tokens.items);
+        const result = try prepared.encode(io, dir, weights);
+        std.mem.swap(std.ArrayList(i32), tokens, &expanded);
+        return result;
+    }
+};
+
+/// CPU-owned image inputs and expanded tokens, prepared before GPU admission.
+pub const Prepared = struct {
+    pixels: [4][]f32 = @splat(&.{}),
+    grids: [4]Grid = undefined,
+    count: usize = 0,
+    tokens: std.ArrayList(i32) = .empty,
+    positions: ?vp.Positions = null,
+    weight_bytes: u64 = 0,
+
+    pub fn deinit(p: *Prepared) void {
+        for (p.pixels) |pixels| mx.allocator.free(pixels);
+        p.tokens.deinit(mx.allocator);
+        if (p.positions) |positions| positions.deinit(mx.allocator);
+        p.* = .{};
+    }
+
+    pub fn init(io: std.Io, dir: []const u8, sources: []const EncodedImage, tokens: []const i32) !Prepared {
         if (sources.len == 0 or sources.len > 4) return error.InvalidImageCount;
-        var tower = try Tower.init(io, dir);
-        defer tower.deinit();
-        var grids: [4]Grid = undefined;
-        var features: [4]A = undefined;
-        var scope = mx.Scope{};
-        errdefer scope.deinit();
-        const ids = try tower.tokenIds();
+        var p = Prepared{ .count = sources.len };
+        errdefer p.deinit();
+        const path = try std.fs.path.join(mx.allocator, &.{ dir, "config.json" });
+        defer mx.allocator.free(path);
+        const bytes = try @import("weights.zig").readFile(io, path);
+        defer mx.allocator.free(bytes);
+        const config = try std.json.parseFromSlice(std.json.Value, mx.allocator, bytes, .{});
+        defer config.deinit();
+        const ids = try tokenIdsFromConfig(config.value);
         const limits = try processorLimits(io, dir);
         var decoded_pixels: usize = 0;
         var encoded_bytes: usize = 0;
@@ -48,43 +78,61 @@ pub const Prompt = struct {
             decoded_pixels += image.width * image.height;
             if (decoded_pixels > 32 * 1024 * 1024) return error.ImagePixelLimitExceeded;
             const cap = @min(@min(limits.max, 4096 / sources.len * 1024), if (source.detail == .low) @as(usize, 256 * 1024) else 4096 * 1024);
-            grids[i] = try input.resizeGrid(image.height, image.width, @min(limits.min, cap), cap);
-            const pixels = try input.patches(image, grids[i]);
-            defer mx.allocator.free(pixels);
-            var image_scope = mx.Scope{};
-            defer image_scope.deinit();
-            const array = try image_scope.data(pixels.ptr, &.{ @intCast(pixels.len / 1536), 1536 }, mx.f32t);
-            features[i] = try scope.own(try mx.retain(try tower.encode(&image_scope, array, grids[i])));
+            p.grids[i] = try input.resizeGrid(image.height, image.width, @min(limits.min, cap), cap);
+            p.pixels[i] = try input.patches(image, p.grids[i]);
         }
-        var expanded: std.ArrayList(i32) = .empty;
-        defer expanded.deinit(allocator);
-        if (std.mem.indexOfScalar(i32, tokens.items, ids.image) == null) {
-            for (grids[0..sources.len]) |grid| {
-                try expanded.append(allocator, ids.start);
-                try expanded.appendNTimes(allocator, ids.image, try grid.count());
-                try expanded.append(allocator, ids.end);
+        if (std.mem.indexOfScalar(i32, tokens, ids.image) == null) {
+            for (p.grids[0..sources.len]) |grid| {
+                try p.tokens.append(mx.allocator, ids.start);
+                try p.tokens.appendNTimes(mx.allocator, ids.image, try grid.count());
+                try p.tokens.append(mx.allocator, ids.end);
             }
-            try expanded.appendSlice(allocator, tokens.items);
+            try p.tokens.appendSlice(mx.allocator, tokens);
         }
         var index: usize = 0;
-        if (expanded.items.len == 0) {
-            for (tokens.items) |token| {
+        if (p.tokens.items.len == 0) {
+            for (tokens) |token| {
                 if (token == ids.image) {
                     if (index >= sources.len) return error.UnmatchedImageTokens;
-                    const count = try grids[index].count();
-                    try expanded.appendNTimes(allocator, token, count);
+                    const count = try p.grids[index].count();
+                    try p.tokens.appendNTimes(mx.allocator, token, count);
                     index += 1;
-                } else try expanded.append(allocator, token);
+                } else try p.tokens.append(mx.allocator, token);
             }
         } else index = sources.len;
         if (index != sources.len) return error.MissingImageTokens;
-        const positions = try vp.Positions.init(mx.allocator, expanded.items, grids[0..sources.len], ids);
-        errdefer positions.deinit(mx.allocator);
-        const text = try weights.embed(&scope, expanded.items);
+        p.positions = try vp.Positions.init(mx.allocator, p.tokens.items, p.grids[0..sources.len], ids);
+        p.weight_bytes = try visionWeightBytes(io, dir);
+        return p;
+    }
+
+    pub fn workspaceBytes(p: *const Prepared) u64 {
+        var pixels: u64 = 0;
+        for (p.pixels[0..p.count]) |values| pixels += values.len * @sizeOf(f32);
+        const patches = pixels / (1536 * @sizeOf(f32));
+        // Upstream's unmeasured-tower fallback, plus this loader's weight copies.
+        const queued = patches * (12 * 1152 + 4 * 4304) * 4 * 27;
+        return 2 * p.weight_bytes + 2 * pixels + queued + p.tokens.items.len * (5120 * 8 + 3 * 8);
+    }
+
+    pub fn encode(p: *Prepared, io: std.Io, dir: []const u8, weights: *@import("weights.zig").Weights) !Prompt {
+        const positions = p.positions orelse return error.ImagesAlreadyEncoded;
+        var tower = try Tower.init(io, dir);
+        defer tower.deinit();
+        var features: [4]A = undefined;
+        var scope = mx.Scope{};
+        errdefer scope.deinit();
+        for (p.pixels[0..p.count], p.grids[0..p.count], features[0..p.count]) |pixels, grid, *feature| {
+            var image_scope = mx.Scope{};
+            defer image_scope.deinit();
+            const array = try image_scope.data(pixels.ptr, &.{ @intCast(pixels.len / 1536), 1536 }, mx.f32t);
+            feature.* = try scope.own(try mx.retain(try tower.encode(&image_scope, array, grid)));
+        }
+        const text = try weights.embed(&scope, p.tokens.items);
         var parts: [9]A = undefined;
         var length: usize = 0;
         var cursor: usize = 0;
-        for (positions.spans, features[0..sources.len]) |span, feature| {
+        for (positions.spans, features[0..p.count]) |span, feature| {
             if (span.begin > cursor) {
                 parts[length] = try scope.slice(text, 1, @intCast(cursor), @intCast(span.begin));
                 length += 1;
@@ -93,16 +141,55 @@ pub const Prompt = struct {
             length += 1;
             cursor = span.end;
         }
-        if (cursor < expanded.items.len) {
-            parts[length] = try scope.slice(text, 1, @intCast(cursor), @intCast(expanded.items.len));
+        if (cursor < p.tokens.items.len) {
+            parts[length] = try scope.slice(text, 1, @intCast(cursor), @intCast(p.tokens.items.len));
             length += 1;
         }
         const embeddings = try scope.cat(parts[0..length], 1);
         try mx.eval(embeddings);
-        std.mem.swap(std.ArrayList(i32), tokens, &expanded);
+        p.positions = null;
         return .{ .scope = scope, .embeddings = embeddings, .positions = positions };
     }
 };
+
+const vision_prefixes = [_][]const u8{ "model.language_model.visual.", "model.visual.", "vision_tower.", "visual." };
+
+fn visionWeightBytes(io: std.Io, directory: []const u8) !u64 {
+    var dir = try std.Io.Dir.cwd().openDir(io, directory, .{ .iterate = true });
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    var size: u64 = 0;
+    while (try iterator.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".safetensors")) continue;
+        const path = try std.fs.path.join(mx.allocator, &.{ directory, entry.name });
+        defer mx.allocator.free(path);
+        var file = try @import("safetensors.zig").File.open(mx.allocator, io, path);
+        defer file.deinit();
+        var tensors = file.header.tensors.iterator();
+        while (tensors.next()) |tensor| for (vision_prefixes) |prefix| {
+            if (std.mem.startsWith(u8, tensor.key_ptr.*, prefix)) {
+                size = try std.math.add(u64, size, tensor.value_ptr.len);
+                break;
+            }
+        };
+    }
+    if (size == 0) return error.MissingVisionWeights;
+    return size;
+}
+
+fn tokenIdsFromConfig(config: std.json.Value) !vp.Tokens {
+    if (config != .object) return error.InvalidVisionConfig;
+    var out: vp.Tokens = undefined;
+    inline for (.{ .{ "image", "image_token_id" }, .{ "start", "vision_start_token_id" }, .{ "end", "vision_end_token_id" }, .{ "video", "video_token_id" } }) |field| {
+        const value = config.object.get(field[1]) orelse return error.InvalidVisionConfig;
+        if (value != .integer) return error.InvalidVisionConfig;
+        @field(out, field[0]) = std.math.cast(i32, value.integer) orelse return error.InvalidVisionConfig;
+        if (@field(out, field[0]) < 0 or @field(out, field[0]) >= 248320) return error.InvalidVisionConfig;
+    }
+    const values = [_]i32{ out.image, out.start, out.end, out.video };
+    for (values, 0..) |value, i| for (values[i + 1 ..]) |other| if (value == other) return error.InvalidVisionConfig;
+    return out;
+}
 
 const Limits = struct { min: usize, max: usize };
 fn processorLimits(io: std.Io, dir: []const u8) !Limits {
@@ -225,8 +312,7 @@ pub const Tower = struct {
         if (vision.object.get("deepstack_visual_indexes")) |value| if (value != .array or value.array.items.len != 0) return error.UnsupportedVisionDeepstack;
         var weights = Store.init(64);
         errdefer weights.deinit();
-        const prefixes = [_][]const u8{ "model.language_model.visual.", "model.visual.", "vision_tower.", "visual." };
-        for (prefixes) |prefix| {
+        for (vision_prefixes) |prefix| {
             weights.load(io, dir, prefix) catch |err| {
                 if (err == error.MissingWeights) continue;
                 return err;
@@ -241,16 +327,7 @@ pub const Tower = struct {
         t.ops.deinit();
     }
     pub fn tokenIds(t: *Tower) !vp.Tokens {
-        var out: vp.Tokens = undefined;
-        inline for (.{ .{ "image", "image_token_id" }, .{ "start", "vision_start_token_id" }, .{ "end", "vision_end_token_id" }, .{ "video", "video_token_id" } }) |field| {
-            const value = t.config.value.object.get(field[1]) orelse return error.InvalidVisionConfig;
-            if (value != .integer) return error.InvalidVisionConfig;
-            @field(out, field[0]) = std.math.cast(i32, value.integer) orelse return error.InvalidVisionConfig;
-            if (@field(out, field[0]) < 0 or @field(out, field[0]) >= 248320) return error.InvalidVisionConfig;
-        }
-        const values = [_]i32{ out.image, out.start, out.end, out.video };
-        for (values, 0..) |value, i| for (values[i + 1 ..]) |other| if (value == other) return error.InvalidVisionConfig;
-        return out;
+        return tokenIdsFromConfig(t.config.value);
     }
     fn format(t: *Tower, name: []const u8) !?quant.Spec {
         var buf: [256]u8 = undefined;

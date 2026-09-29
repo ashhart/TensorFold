@@ -324,6 +324,12 @@ pub fn build(b: *std.Build) void {
     server_rounds.addArtifactArg(b.addExecutable(.{ .name = "native-http-checks", .root_module = http_checks_module }));
     server_rounds.step.dependOn(&session_image_fixture.step);
     b.step("test-server-rounds", "Compare concurrent HTTP image/text requests with isolated outputs, streaming and cancellation").dependOn(&server_rounds.step);
+    const memory_image = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--model", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--vision-fixture", "1870", "3110", "--image-fixture", "--image-format", "JPEG", "--image-only", "--output", "build/native-checks/memory-image" });
+    const server_memory = b.addRunArtifact(lifecycle.producer.?);
+    server_memory.addArtifactArg(exe);
+    server_memory.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--memory-only", "build/native-checks/memory-image/image.jpeg" });
+    server_memory.step.dependOn(&memory_image.step);
+    b.step("test-server-memory", "Verify request admission waits, memory refusal, image reservation and cancellation recovery").dependOn(&server_memory.step);
     const chat_tests = b.step("test-chat", "Compare native Jinja prompts with upstream for all seven local tokenizers; no model weights loaded");
     const tool_fixtures = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", ".", "--tool-fixtures", "--output", "build/native-checks/tool-calls.json" });
     const tool_tests = b.addRunArtifact(exe);

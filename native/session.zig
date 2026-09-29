@@ -88,6 +88,12 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
         }
     }
 
+    pub fn memoryLengths(g: *const RequestGeneration) @import("memory_budget.zig").Live {
+        switch (g.*) {
+            inline else => |*request| return .{ .now = @intCast(request.state.position), .most = request.prompt.len + request.options.max_tokens },
+        }
+    }
+
     pub fn deinit(g: *RequestGeneration) void {
         switch (g.*) {
             inline else => |*request| request.deinit(),
