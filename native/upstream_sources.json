@@ -1,7 +1,7 @@
 [
   {
     "path": "src/tensorfold/__init__.py",
-    "sha256": "5323651d400fa3ea34844fe84c35b67e9386f7dd6dc39f7aa938036e2f2ad027"
+    "sha256": "2cb66559951f9734bf4ab43fca4b3eb620067889c90ab9797b7e4164b7366711"
   },
   {
     "path": "src/tensorfold/__main__.py",
@@ -293,7 +293,7 @@
   },
   {
     "path": "src/tensorfold/families/nemotron_h/model.py",
-    "sha256": "eed47a2abd3aa3a9312437b27bed135db99a87656a02d02b3b55946cedccd8c2"
+    "sha256": "416cb7ebb33a4b58c6209be1a6c75291570972678a6325c046a20655ffe9e5a2"
   },
   {
     "path": "src/tensorfold/families/nemotron_h/mtp.py",
@@ -581,7 +581,7 @@
   },
   {
     "path": "src/tensorfold/kernels/qwen/dense/v1/row_streams.py",
-    "sha256": "f3d1fd235cc957eff40be10905b42293dc9218613c7649bb9d270fb522c8d903"
+    "sha256": "525d5277ea9a28f5c4ad8b5d1393e396651fad7e80dc7a45e9b6b664bef8fd38"
   },
   {
     "path": "src/tensorfold/kernels/qwen/dense/v1/simd_qmm.py",
