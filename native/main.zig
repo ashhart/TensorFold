@@ -14,6 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-capture")) return @import("draft_capture.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "fit-draft-calibration")) return @import("draft_calibration.zig").fitFile(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-calibration")) return @import("draft_calibration.zig").check(io, args[2]);
     if (args.len >= 2 and std.mem.eql(u8, args[1], "convert-drafter")) return @import("convert_drafter.zig").run(io, args[2..]);
@@ -85,6 +86,8 @@ pub fn main(init: std.process.Init) !void {
     var dump: ?[]const u8 = null;
     var draft_dir: ?[]const u8 = null;
     var calibration_path: ?[]const u8 = null;
+    var capture_dir: ?[]const u8 = init.environ_map.get("TF_DRAFT_CAPTURE");
+    if (capture_dir != null and capture_dir.?.len == 0) capture_dir = null;
     var drafts_enabled = true;
     var settings = sampling.Sampling{};
     var explicit_seed = false;
@@ -182,6 +185,12 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             continue;
         }
+        if (std.mem.eql(u8, args[i], "--draft-capture")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            capture_dir = args[i + 1];
+            i += 1;
+            continue;
+        }
         if (i + 1 >= args.len) return error.MissingArgument;
         if (std.mem.eql(u8, args[i], "--seed")) explicit_seed = true;
         if (std.mem.eql(u8, args[i], "--prompt")) prompt = args[i + 1] else if (std.mem.eql(u8, args[i], "--max-tokens")) max_tokens = try std.fmt.parseInt(usize, args[i + 1], 10) else if (std.mem.eql(u8, args[i], "--tokens")) token_list = args[i + 1] else if (std.mem.eql(u8, args[i], "--dump-logits")) dump = args[i + 1] else if (std.mem.eql(u8, args[i], "--drafter")) draft_dir = args[i + 1] else if (std.mem.eql(u8, args[i], "--temperature")) settings.temperature = try std.fmt.parseFloat(f64, args[i + 1]) else if (std.mem.eql(u8, args[i], "--seed")) settings.seed = try std.fmt.parseInt(u64, args[i + 1], 10) else if (std.mem.eql(u8, args[i], "--top-k")) settings.top_k = try std.fmt.parseInt(usize, args[i + 1], 10) else if (std.mem.eql(u8, args[i], "--top-p")) settings.top_p = try std.fmt.parseFloat(f64, args[i + 1]) else return error.UnknownArgument;
@@ -221,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
             defer p.deinit();
             try m.commit(&p, &.{0});
             if (draft) |*d| {
-                try d.absorb(&m, &p, &.{0});
+                try d.absorb(&m, &p, &.{0}, fake[0..n]);
                 _ = try d.propose(&m, 42, 15, settings);
             }
         }
@@ -253,6 +262,15 @@ pub fn main(init: std.process.Init) !void {
     if (tokens.items.len > 262144 or max_tokens > 262144 - tokens.items.len) return error.ContextLimitExceeded;
     for (tokens.items) |id| if (id < 0 or id >= 248320) return error.InvalidToken;
     if (!explicit_seed) settings.seed = sampling.seedFor(tokens.items);
+    if (capture_dir) |folder| {
+        if (draft) |*d| {
+            d.capture = @import("draft_capture.zig").Writer.init(mx.allocator, io, folder, settings, 0, 5120) catch |err| blk: {
+                std.debug.print("DFlash capture disabled: {s}\n", .{@errorName(err)});
+                break :blk null;
+            };
+            if (d.capture) |writer| std.debug.print("DFlash capture: {s}\n", .{writer.base});
+        } else return error.CaptureRequiresDrafter;
+    }
     const startup_seconds = @as(f64, @floatFromInt(startup_timer.read())) / 1e9;
     std.debug.print("Loaded and prepared target in {d:.2}s; prompt {d} tokens\n", .{ startup_seconds, tokens.items.len });
     timer.reset();
@@ -290,8 +308,16 @@ pub fn main(init: std.process.Init) !void {
             var begin: usize = 0;
             while (begin < n) {
                 const end = @min(begin + 128, n);
-                try d.absorb(&m, &p, rows[begin..end]);
+                try d.absorb(&m, &p, rows[begin..end], tokens.items[off..][0..n]);
                 begin = end;
+            }
+            if (off + n == tokens.items.len and max_tokens > 0) {
+                if (mx.dim(p.logits, 1) == 1) {
+                    d.captureTarget(&m, &p, &.{0}, &.{m.position});
+                } else {
+                    for (0..n) |j| parents[j] = p.start + @as(i32, @intCast(j)) + 1;
+                    d.captureTarget(&m, &p, &.{@intCast(n - 1)}, parents[0..n]);
+                }
             }
         }
         off += n;
@@ -349,12 +375,16 @@ pub fn main(init: std.process.Init) !void {
         accepted += result.accepted;
         pending = result.pending;
         try m.commit(&p, result.path[0..result.kept]);
-        if (draft) |*d| try d.absorb(&m, &p, result.path[0..result.kept]);
+        if (draft) |*d| {
+            d.captureTarget(&m, &p, result.path[0..result.count], positions[0..n]);
+            try d.absorb(&m, &p, result.path[0..result.kept], window[0..n]);
+        }
         commit_ns += stage.read();
         rounds += 1;
         if (result.stop) break;
     }
     const seconds = @as(f64, @floatFromInt(timer.read())) / 1e9;
+    const capture_base: ?[]const u8 = if (draft) |d| (if (d.capture) |writer| writer.base else null) else null;
     const text = try tok.decode(allocator, generated.items, false);
     defer allocator.free(text);
     var outbuf: [4096]u8 = undefined;
@@ -377,7 +407,7 @@ pub fn main(init: std.process.Init) !void {
         var active: usize = 0;
         try mx.check(mx.c.mlx_get_peak_memory(&peak));
         try mx.check(mx.c.mlx_get_active_memory(&active));
-        const content = try std.json.Stringify.valueAlloc(allocator, .{ .mlx_version = std.mem.span(mx.c.mlx_string_data(version)), .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .serial_pipeline = use_serial_pipeline, .kv_buffers = @import("kv_buffer.zig").enabled, .queued_serial_steps = queued_serial_steps, .load_seconds = load_seconds, .warmup_seconds = warmup_seconds, .startup_seconds = startup_seconds, .calibration_seconds = @as(f64, 0), .prefill_mode = if (lane_prefill) "lane" else "regular", .metal_backend = if (mx.tensor_units) "tensor" else "simd", .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        const content = try std.json.Stringify.valueAlloc(allocator, .{ .mlx_version = std.mem.span(mx.c.mlx_string_data(version)), .prompt_tokens = tokens.items, .tokens = generated.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .context_copy = copy_enabled, .draft_capture = capture_base, .serial_pipeline = use_serial_pipeline, .kv_buffers = @import("kv_buffer.zig").enabled, .queued_serial_steps = queued_serial_steps, .load_seconds = load_seconds, .warmup_seconds = warmup_seconds, .startup_seconds = startup_seconds, .calibration_seconds = @as(f64, 0), .prefill_mode = if (lane_prefill) "lane" else "regular", .metal_backend = if (mx.tensor_units) "tensor" else "simd", .prefill_seconds = prefill_seconds, .decode_seconds = seconds, .rounds = rounds, .accepted_drafts = accepted, .warmed = warmup, .peak_mlx_bytes = peak, .active_mlx_bytes = active, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
         defer allocator.free(content);
         const f = try std.Io.Dir.cwd().createFile(io, path, .{});
         defer f.close(io);
@@ -386,6 +416,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("draft_capture.zig");
     _ = @import("draft_calibration.zig");
     _ = @import("tool_stream.zig");
     _ = @import("tool_calls.zig");

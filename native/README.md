@@ -240,6 +240,10 @@ loads an override. `tensorfold fit-draft-calibration SAMPLES_JSON OUTPUT_JSON` f
 tables from `{"source":{},"samples":{"sampled":[{"depth":0,"score":-1,"landed":true}]}}`;
 optional `depth_edges`/`score_edges` override upstream bins. Verify with
 `.zig-toolchain/zig build test-draft-calibration -Doptimize=safe -j1`.
+`--draft-capture DIR` (or `TF_DRAFT_CAPTURE`) writes upstream-compatible `.bin`
+context features, `.logits` target candidates and `.json` sampling metadata through
+a bounded background queue. `test-draft-capture` checks the format and writer;
+`test-draft-capture-model` checks real Qwen captures against upstream replay.
 Nemotron, Flash Next and GLM use checkpoint MTP heads through `--mtp-drafts N`;
 `--no-drafts` selects serial decoding.
 Gemma accepts a standard DFlash checkpoint through `--drafter DIR`, with

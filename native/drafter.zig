@@ -17,6 +17,7 @@ pub const Drafter = struct {
     pred: A,
     succ: A,
     calibration_tables: std.json.Parsed(calibration.File),
+    capture: ?*@import("draft_capture.zig").Writer = null,
     pub fn init(io: std.Io, dir: []const u8, target: *model.Model) !Drafter {
         var w = weights.Weights.init();
         errdefer w.deinit();
@@ -36,6 +37,8 @@ pub const Drafter = struct {
         return .{ .weights = w, .head = selected, .pred = pown, .succ = try mx.retain(succ), .calibration_tables = tables };
     }
     pub fn reset(d: *Drafter) void {
+        if (d.capture) |writer| writer.deinit();
+        d.capture = null;
         for (&d.cache) |*v| v.deinit();
         d.offset = 0;
     }
@@ -61,7 +64,7 @@ pub const Drafter = struct {
         return (try d.weights.linear(try std.fmt.bufPrint(&buf, "layers.{d}.{s}", .{ i, suffix }))).apply(k, s, .{ .x = x });
     }
     /// Only committed target rows enter the drafter cache; rejected siblings never do.
-    pub fn absorb(d: *Drafter, target: *model.Model, p: *model.Pass, rows: []const i32) !void {
+    pub fn absorb(d: *Drafter, target: *model.Model, p: *model.Pass, rows: []const i32, tokens: []const i32) !void {
         const s = &p.scope;
         const k = &target.kernels;
         const ids = try s.ints(rows);
@@ -98,7 +101,44 @@ pub const Drafter = struct {
         try mx.evalMany(&arrays, false);
         for (&d.cache) |*v| v.deinit();
         d.cache = next;
+        if (d.capture) |writer| if (!writer.failed.load(.acquire)) {
+            d.captureContext(s, ctx, rows, tokens) catch |err| writer.disable(err);
+        };
         d.offset += count;
+    }
+    fn captureContext(d: *Drafter, s: *mx.Scope, ctx: A, rows: []const i32, tokens: []const i32) !void {
+        var selected: [128]i32 = undefined;
+        if (rows.len > selected.len) return error.InvalidCaptureShape;
+        for (rows, 0..) |row, i| {
+            if (row < 0 or row >= tokens.len) return error.InvalidCaptureShape;
+            selected[i] = tokens[@intCast(row)];
+        }
+        const x = try s.contiguous(try s.cast(ctx, mx.bf16));
+        var view = mx.c.mlx_array_new();
+        const rc = mx.c.mlx_view(&view, x, mx.c.MLX_UINT16, mx.stream);
+        view = try s.result(rc, view);
+        try mx.eval(view);
+        const width: usize = @intCast(mx.dim(ctx, -1));
+        try d.capture.?.recordContext(d.offset, width, selected[0..rows.len], mx.c.mlx_array_data_uint16(view)[0 .. rows.len * width]);
+    }
+    pub fn captureTarget(d: *Drafter, target: *model.Model, p: *model.Pass, rows: []const i32, positions: []const i32) void {
+        const writer = d.capture orelse return;
+        if (writer.failed.load(.acquire)) return;
+        d.captureTargetRows(target, p, rows, positions) catch |err| writer.disable(err);
+    }
+    fn captureTargetRows(d: *Drafter, target: *model.Model, p: *model.Pass, rows: []const i32, positions: []const i32) !void {
+        if (rows.len == 0) return;
+        var selected: [32]i64 = undefined;
+        if (rows.len > selected.len) return error.InvalidCaptureShape;
+        for (rows, 0..) |row, i| {
+            if (row < 0 or row >= positions.len) return error.InvalidCaptureShape;
+            selected[i] = positions[@intCast(row)];
+        }
+        const s = &p.scope;
+        const logits = try s.take(p.logits, try s.ints(rows), 1);
+        const ranked = try @import("gpu_sampling.zig").topk(&target.kernels, s, logits, 16);
+        try mx.evalMany(&ranked, false);
+        try d.capture.?.recordTarget(selected[0..rows.len], 16, mx.c.mlx_array_data_int32(ranked[0])[0 .. rows.len * 16], mx.c.mlx_array_data_float32(ranked[1])[0 .. rows.len * 16]);
     }
     fn convolve(d: *Drafter, k: *mx.Kernels, s: *mx.Scope, i: usize, prefix: []const u8, h: A, dynamic: A, part: i32) !A {
         var buf: [160]u8 = undefined;

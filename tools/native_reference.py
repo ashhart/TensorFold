@@ -117,6 +117,145 @@ def image_http_fixtures(output):
     print(f"Saved {len(addresses)} upstream image address and {len(cases)} URL fixtures")
 
 
+def verify_capture(model_dir, draft_dir, report_path):
+    import struct
+    import mlx.core as mx
+    from mlx_lm.models.cache import make_prompt_cache
+    from tensorfold.families.qwen3_5 import load_lane_model
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree
+    from tensorfold.engine.topk import topk_rows
+    from tensorfold.drafters.dflash_drafter import DFlashDrafter
+    report = json.loads(Path(report_path).read_text())
+    base = Path(report['draft_capture'])
+    history = report['prompt_tokens'] + report['tokens']
+    meta = json.loads(base.with_suffix('.json').read_text())
+    for key in ('seed', 'temperature', 'top_k', 'top_p'):
+        assert meta[key] == (report[key] if report['temperature'] else None), (key, meta[key])
+    assert meta['first_position'] == 0 and meta['width'] == 5120
+    targets = {}
+    data = base.with_suffix('.logits').read_bytes()
+    at = 0
+    while at < len(data):
+        count, k = struct.unpack_from('<ii', data, at)
+        at += 8
+        positions = np.frombuffer(data, '<i8', count=count, offset=at)
+        at += count * 8
+        ids = np.frombuffer(data, '<i4', count=count * k, offset=at).reshape(count, k)
+        at += count * k * 4
+        vals = np.frombuffer(data, '<f4', count=count * k, offset=at).reshape(count, k)
+        at += count * k * 4
+        for position, ids_row, vals_row in zip(positions, ids, vals):
+            assert int(position) not in targets, 'Duplicate target capture position'
+            targets[int(position)] = ids_row, vals_row
+    assert at == len(data)
+    assert sorted(targets) == list(range(len(report['prompt_tokens']), len(history))), 'Missing or uncommitted target capture positions'
+    contexts = []
+    data = base.with_suffix('.bin').read_bytes()
+    at, end = 0, 0
+    while at < len(data):
+        start, rows, width = struct.unpack_from('<qii', data, at)
+        at += 16
+        bits = np.frombuffer(data, '<u2', count=rows * width, offset=at).reshape(rows, width)
+        at += rows * width * 2
+        tokens = np.frombuffer(data, '<i4', count=rows, offset=at).tolist()
+        at += rows * 4
+        assert start == end and width == meta['width'] and rows > 0
+        assert tokens == history[start:start + rows], 'Rejected tree row entered capture'
+        contexts.append((start, tokens, bits))
+        end += rows
+    assert at == len(data) and len(history) - 1 <= end <= len(history)
+    regular = report['prefill_mode'] == 'regular'
+    if regular:
+        from tensorfold.families.qwen3_5 import load
+        family, _ = load(Path(model_dir), lane_kernels='on')
+        model = family.inner
+    else:
+        model, _ = load_lane_model(Path(model_dir))
+        lane_qmm.install(model, rows=128, tile=True, wide=True)
+    drafter = DFlashDrafter(model, str(draft_dir), bits=4)
+    lane_qmm.install(drafter.model, rows=128, tile=True, wide=True)
+    cache = make_prompt_cache(model)
+    core, head = model.language_model.model, model.language_model.lm_head
+    checked, prefill_start = 0, -1
+    for start, tokens, bits in contexts:
+        prompt_chunk = regular and start < len(report['prompt_tokens'])
+        if prompt_chunk:
+            chunk_start = start // 2048 * 2048
+            if prefill_start != chunk_start:
+                inputs = report['prompt_tokens'][chunk_start:chunk_start + 2048]
+                hidden = family.prefill(mx.array([inputs], dtype=mx.uint32), cache)
+                prefill_logits, prefill_taps = family.head(hidden[:, -1:]), drafter.taps()
+                mx.eval(prefill_logits, prefill_taps)
+                prefill_start = chunk_start
+            logits = prefill_logits
+            taps = prefill_taps[:, start - chunk_start:start - chunk_start + len(tokens)]
+        else:
+            logits, record = lane_tree.tree_forward(core, head, tokens, list(range(-1, len(tokens) - 1)), cache, start)
+            taps = drafter.taps()
+        projected = drafter.model.hidden_norm(drafter.model.fc(taps))
+        mx.eval(logits, projected)
+        actual = np.array(projected[0].view(mx.uint16))
+        assert np.array_equal(bits, actual), f'Projected capture features differ at {start}: {np.count_nonzero(bits != actual)} BF16 values'
+        for row in range(len(tokens)):
+            position = start + row + 1
+            if position not in targets:
+                continue
+            ids, vals = topk_rows(logits[:, -1:] if prompt_chunk else logits[:, row:row + 1], len(targets[position][0]))
+            mx.eval(ids, vals)
+            assert np.array_equal(np.array(ids)[0], targets[position][0]), f'Target candidate IDs differ at {position}'
+            assert np.array_equal(np.array(vals)[0], targets[position][1]), f'Target logits differ at {position}'
+            checked += 1
+        if not prompt_chunk:
+            lane_tree.commit_tree(cache, record, list(range(len(tokens))), len(tokens), start)
+    assert checked == len(targets)
+    print(f'PASS: {end} committed context rows and {checked} target distributions match upstream exactly; capture positions and metadata agree with generation')
+
+
+def capture_fixtures(output):
+    from types import SimpleNamespace
+    from tensorfold.drafters import dflash_proposer
+    from tensorfold.drafters.dflash_proposer import DFlashProposer
+    folder = Path(output)
+    folder.mkdir(parents=True, exist_ok=True)
+    records = {'.bin': bytearray(), '.logits': bytearray()}
+    class Recorder:
+        def put(self, item):
+            path, record = item
+            records[path.suffix] += record
+    original = dflash_proposer._capture_writer
+    dflash_proposer._capture_writer = lambda: Recorder()
+    settings = dict(seed=5678, temperature=0.7, top_k=12, top_p=0.8)
+    proposer = DFlashProposer.__new__(DFlashProposer)
+    proposer.sampling = SimpleNamespace(**settings)
+    proposer.capture_dir = str(folder)
+    contexts, targets = [], []
+    start = 0
+    try:
+        for case in range(17):
+            count, width = (128 if case == 0 else case + 1), 512
+            bits = (np.arange(count * width, dtype=np.uint32) + case * 4093).astype(np.uint16).reshape(count, width)
+            tokens = [i * 37 % 248320 for i in range(start, start + count)]
+            proposer._captured = start, bits
+            proposer._write_capture([0] * start + tokens)
+            contexts.append(dict(start=start, width=width, tokens=tokens, bits=bits.ravel().tolist()))
+            k = case % 16 + 1
+            positions = [0x100000007 + start + i for i in range(case + 1)]
+            ids = np.arange(len(positions) * k, dtype=np.int32).reshape(len(positions), k)
+            logits = (ids.astype(np.float32) - 100) / 8
+            if case == 0:
+                logits[0, 0] = -0.0
+            proposer.capture_target(positions, ids, logits)
+            targets.append(dict(positions=positions, k=k, ids=ids.ravel().tolist(), logits=logits.ravel().tolist()))
+            start += count
+        metadata = json.loads(proposer._capture_file.with_suffix('.json').read_text())
+    finally:
+        dflash_proposer._capture_writer = original
+    for suffix, data in records.items():
+        (folder / ('expected' + suffix)).write_bytes(data)
+    (folder / 'fixture.json').write_text(json.dumps(dict(settings=settings, contexts=contexts, targets=targets, metadata=metadata)))
+    print(f'Saved {len(contexts)} upstream capture records, including every BF16 bit pattern')
+
+
 def calibration_fixtures(output):
     import math
     import random
@@ -186,6 +325,8 @@ def main():
     parser.add_argument("--image-only", action="store_true", help="Generate preprocessing oracle without loading the vision tower")
     parser.add_argument("--image-http-fixtures", action="store_true")
     parser.add_argument("--calibration-fixtures", action="store_true")
+    parser.add_argument("--capture-fixtures", action="store_true")
+    parser.add_argument("--verify-capture", nargs=2, metavar=('DRAFTER', 'REPORT'))
     parser.add_argument("--compare-calibration", nargs=2, type=Path)
     parser.add_argument("--image-mode", choices=("RGB", "RGBA", "L", "CMYK"))
     parser.add_argument("--image-orientation", type=int, choices=range(1, 9), default=1)
@@ -200,6 +341,10 @@ def main():
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
+    if args.capture_fixtures:
+        return capture_fixtures(args.output)
+    if args.verify_capture:
+        return verify_capture(args.model, *args.verify_capture)
     if args.calibration_fixtures:
         return calibration_fixtures(args.output)
     if args.compare_calibration:

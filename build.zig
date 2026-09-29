@@ -303,6 +303,48 @@ pub fn build(b: *std.Build) void {
     tool_stream_tests.step.dependOn(&tool_fixtures.step);
     tool_step.dependOn(&tool_stream_tests.step);
     const calibration_fixture = "build/native-checks/draft-calibration.json";
+    const capture_folder = "build/native-checks/draft-capture";
+    const capture_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--capture-fixtures", "--output", capture_folder });
+    const capture_check = b.addRunArtifact(exe);
+    capture_check.addArgs(&.{ "check-draft-capture", capture_folder });
+    capture_check.step.dependOn(&capture_oracle.step);
+    b.step("test-draft-capture", "Compare native capture records with upstream and verify ordered drain and write failure handling").dependOn(&capture_check.step);
+    const capture_models = b.step("test-draft-capture-model", "Verify captured committed features and target logits against upstream replay without changing generated tokens");
+    var capture_prior: *std.Build.Step = &capture_check.step;
+    for ([_][]const u8{ "0", "0.7", "0.7" }, 0..) |temperature, regime| {
+        const prompt_ids = b.allocator.alloc([]const u8, if (regime == 1) 19 else 137) catch @panic("OOM");
+        for (prompt_ids, 0..) |*id, i| id.* = b.fmt("{d}", .{1 + i % 8});
+        const common = &.{ "run", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--tokens", std.mem.join(b.allocator, ",", prompt_ids) catch @panic("OOM"), "--max-tokens", "32", "--seed", "5678", "--temperature", temperature, "--top-k", "12", "--top-p", "0.8", "--metal-sampling", "--no-copy", "--drafter", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}) };
+        const plain_report = b.fmt("{s}/plain-{d}.json", .{ capture_folder, regime });
+        const capture_report = b.fmt("{s}/captured-{d}.json", .{ capture_folder, regime });
+        const plain = b.addRunArtifact(exe);
+        plain.addArgs(common);
+        if (regime != 2) plain.addArg("--lane-prefill");
+        plain.addArgs(&.{ "--report", plain_report });
+        plain.step.dependOn(capture_prior);
+        const captured = b.addRunArtifact(exe);
+        captured.addArgs(common);
+        if (regime != 2) captured.addArg("--lane-prefill");
+        captured.addArgs(&.{ "--draft-capture", b.fmt("{s}/model", .{capture_folder}), "--report", capture_report });
+        captured.step.dependOn(&plain.step);
+        const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--require-rounds", "--compare-reports", plain_report, capture_report });
+        compare.step.dependOn(&captured.step);
+        const replay = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--model", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--verify-capture", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}), capture_report });
+        replay.step.dependOn(&compare.step);
+        capture_prior = &replay.step;
+        if (regime == 1) {
+            const failed_report = b.fmt("{s}/failed-{d}.json", .{ capture_folder, regime });
+            const failed = b.addRunArtifact(exe);
+            failed.addArgs(common);
+            failed.addArg("--lane-prefill");
+            failed.addArgs(&.{ "--draft-capture", b.fmt("{s}/fixture.json/blocked", .{capture_folder}), "--report", failed_report });
+            failed.step.dependOn(capture_prior);
+            const failure_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--require-rounds", "--compare-reports", plain_report, failed_report });
+            failure_compare.step.dependOn(&failed.step);
+            capture_prior = &failure_compare.step;
+        }
+    }
+    capture_models.dependOn(capture_prior);
     const calibration_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--calibration-fixtures", "--output", calibration_fixture });
     const calibration_check = b.addRunArtifact(exe);
     calibration_check.addArgs(&.{ "check-draft-calibration", calibration_fixture });
