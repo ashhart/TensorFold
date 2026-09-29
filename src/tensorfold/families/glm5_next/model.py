@@ -98,7 +98,10 @@ class GLM5:
     def embed_tokens(self, tokens: mx.array) -> mx.array:
         e = self.embed
         ids = tokens.reshape(-1)
-        return mx.dequantize(e.weight[ids], e.scales[ids], e.biases[ids], group_size=e.group, bits=e.bits)
+        if e.scales.dtype == mx.bfloat16:
+            return mx.dequantize(e.weight[ids], e.scales[ids], e.biases[ids], group_size=e.group, bits=e.bits)
+        return mx.dequantize(e.weight[ids], e.scales[ids].astype(mx.float32), e.biases[ids].astype(mx.float32),
+                             group_size=e.group, bits=e.bits).astype(mx.bfloat16)
 
     def hidden(self, tokens: Any, cache: list[Any]) -> mx.array:
         """One stream's R consecutive tokens: final-normed hidden states [1, R, D]."""
