@@ -450,6 +450,93 @@ def deepseek_chat_cases(tokenizer, tool):
     return cases
 
 
+def tool_draft_fixtures(directory, output):
+    import random
+    from transformers import AutoTokenizer
+    from tensorfold.engine.tool_draft import ToolCallProposer
+    from tensorfold.engine.lane_engine import SuffixLookupProposer
+    tokenizer = AutoTokenizer.from_pretrained(str(directory), local_files_only=True)
+    rng = random.Random(51713)
+    tools = [{'type': 'function', 'function': {'name': 'read_file', 'parameters': {
+        'properties': {'offset': {}, 'path': {}, 'limit': {}, 'body': {}}, 'required': ['path', 'missing', 'path']}}},
+        {'name': 'read_dir', 'input_schema': {'properties': {'directory': {}, 'file_id': {}}}},
+        {'name': 'empty'}, {'name': 'empty', 'parameters': {}}]
+    scripts = [
+        '<tool_call>\n<function=read_file>\n<parameter=path>\n/tmp/a\n</parameter>\n<parameter=offset>\n3\n</parameter>\n</function>\n</tool_call>\n',
+        '<tool_call><function=empty></function></tool_call>',
+        '<tool_call>\n<function=unknown>\n<parameter=path>\na\n',
+        '<tool_call><function=read_dir><parameter=directory>\n/a\n<parameter=file_id>\nb\n',
+        '<tool_call><function=read_file>\n<parameter=body>\nmulti\nline\n',
+        'Some prose.\n<tool_call>\n<function=read_file>\n<parameter=path>\nfile\n',
+    ]
+    texts = ['', ' \n\t', '\u2003\u0085', 'plain prose', '<tool_call>\n<function=read_\n',
+             '<tool_call>\n<function=read_file>\n<parameter=pa\n',
+             '<tool_call></tool_call> </tool_call>', '<tool_call></tool_call> trailing',
+             '<tool_call><function=read_file><parameter=fİle>\nx\n',
+             '<tool_call><function=read_file><parameter=offset>\n\n',
+             '<tool_call><function=read_file><parameter=x<parameter=pa',
+             '<tool_call><function=read_file><parameter=>\n<parameter=pa',
+             scripts[0] + scripts[1]]
+    for script in scripts:
+        texts.extend(script[:i] for i in range(len(script) + 1))
+    structures = []
+    for specs in (None, tools, [{'name': 'read_file', 'input_schema': {'properties': {'file': {}}}}]):
+        for opening in (False, True):
+            proposer = ToolCallProposer(tokenizer, specs, 0, open_at_start=opening)
+            for ending in (False, True):
+                proposer.end_text = ending
+                structures.extend(dict(tools=specs, text=text, open_at_start=opening,
+                                       end_text=ending, expected=proposer.structure(text)) for text in texts)
+    streams = []
+    prompt = tokenizer.encode('Read a file.\n/tmp/a\nRead a file.\n/tmp/a\n', add_special_tokens=False)
+    for fallback in (False, True):
+        for opening in (False, True):
+            for script in scripts[:3] + ['Read a file.\n/tmp/a\n' * 3]:
+                proposer = ToolCallProposer(tokenizer, tools, len(prompt),
+                    fallback=SuffixLookupProposer(min_match=4) if fallback else None, open_at_start=opening)
+                emitted = tokenizer.encode(script, add_special_tokens=False)
+                events = []
+                offsets = list(range(len(emitted) + 1)) + [0, len(emitted) // 2, len(emitted)]
+                for n in offsets:
+                    context = prompt + emitted[:n]
+                    budget = rng.choice([0, 1, 3, 15, 31])
+                    tree = rng.choice([False, True])
+                    if tree:
+                        tokens, parents = proposer.propose_tree(context, budget)
+                    else:
+                        tokens = proposer.propose(context, budget)
+                        parents = list(range(-1, len(tokens) - 1))
+                    confident, match = proposer.last_confident, proposer.last_match
+                    accepted = rng.randrange(len(tokens) + 1)
+                    proposer.observe(len(tokens), accepted)
+                    events.append(dict(context=context, max_draft=budget, tree=tree, accepted=accepted,
+                                       tokens=tokens, parents=parents, confident=confident, match=match, telemetry=proposer.telemetry()))
+                streams.append(dict(tools=tools, prompt_len=len(prompt), open_at_start=opening, fallback=fallback, events=events))
+    copies = []
+    for _ in range(20):
+        proposer = SuffixLookupProposer(min_match=4)
+        context = list(range(32)) * 3
+        events = []
+        for i in range(80):
+            if i == 40:
+                context = context[:36]
+            elif i == 60:
+                context = [100] * 72
+            elif i > 20:
+                context.append(rng.randrange(8))
+            budget = rng.choice([0, 1, 15, 31])
+            tokens = proposer.propose(context, budget)
+            confident, match = proposer.last_confident, proposer.last_match
+            accepted = 0 if i < 20 else rng.randrange(len(tokens) + 1)
+            proposer.observe(len(tokens), accepted)
+            events.append(dict(context=context.copy(), max_draft=budget, accepted=accepted, tokens=tokens,
+                               confident=confident, match=match, silent_for=proposer._silent_for))
+        copies.append(events)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(dict(structures=structures, streams=streams, copies=copies), ensure_ascii=False))
+    print(f'Saved {len(structures)} tool structure cases, {len(streams)} token streams and {len(copies)} copy sequences')
+
+
 def tool_fixtures(output):
     from tensorfold.server.tools import parse_tool_calls_from_content
     from tensorfold.server.tool_policy import ToolCallPolicy
@@ -768,6 +855,7 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--chat-fixtures", action="store_true")
     p.add_argument("--tool-fixtures", action="store_true")
+    p.add_argument("--tool-draft-fixtures", action="store_true")
     p.add_argument("--tokens", help="Explicit prompt IDs, including for generation")
     p.add_argument("--dump-logits", type=Path)
     p.add_argument("--generate", type=int, default=0)
@@ -805,6 +893,9 @@ def main():
         return
     if args.tool_fixtures:
         tool_fixtures(args.output)
+        return
+    if args.tool_draft_fixtures:
+        tool_draft_fixtures(args.model, args.output)
         return
     if args.chat_fixtures:
         chat_fixture(args.model, args.output)

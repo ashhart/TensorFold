@@ -9,6 +9,7 @@ pub const Options = struct {
     stream: bool = false,
     stops: []const []const u8 = &.{},
     thinking_budget: i64 = 0,
+    draft: bool = true,
 
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8) !Options {
         const path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
@@ -47,6 +48,7 @@ pub const Options = struct {
     pub fn parseWithDefaults(a: std.mem.Allocator, body: std.json.Value, defaults: Options) !Options {
         if (body != .object) return error.InvalidRequest;
         var out = defaults;
+        if (body.object.get("draft")) |value| out.draft = value != .bool or value.bool;
         out.stops = &.{};
         inline for (.{ "ignore_eos", "stream" }) |name| if (body.object.get(name)) |v| {
             if (v != .bool) return error.InvalidBoolean;
@@ -122,6 +124,17 @@ test "request defaults, explicit zero, numeric strings and stop validation" {
         const bad = try std.json.parseFromSlice(std.json.Value, a, json, .{});
         defer bad.deinit();
         try std.testing.expectError(expected, Options.parse(a, bad.value));
+    }
+}
+
+test "only explicit false disables request drafting" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "{}", "{\"draft\":true}", "{\"draft\":null}", "{\"draft\":0}", "{\"draft\":false}" }, 0..) |source, index| {
+        const request = try std.json.parseFromSlice(std.json.Value, a, source, .{});
+        defer request.deinit();
+        const options = try Options.parse(a, request.value);
+        defer a.free(options.stops);
+        try std.testing.expectEqual(index != 4, options.draft);
     }
 }
 

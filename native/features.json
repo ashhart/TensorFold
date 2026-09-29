@@ -199,9 +199,11 @@
     "checks": [{"step":"test-tool-calls","driver":{"path":"native/tool_calls.zig","symbol":"check"},"scope":"host"}, {"step":"test-tool-calls","driver":{"path":"native/tool_stream.zig","symbol":"check"},"scope":"host"}]
   },
   {
-    "id": "tool-structure-drafts", "state": "missing", "requirement": "Schema-derived tool-call structure proposals with target verification and fallback copies",
+    "id": "tool-structure-drafts", "state": "present", "requirement": "Schema-derived tool-call structure proposals with target verification and fallback copies",
     "upstream": ["src/tensorfold/engine/tool_draft.py"],
-    "limitation": "Tool parsing and required-call gates are implemented; ToolCallProposer structure drafting is not."
+    "implementation": [{"path":"native/tool_draft.zig","symbol":"structure"}, {"path":"native/tool_draft.zig","symbol":"proposeMode"}, {"path":"native/suffix_lookup.zig","symbol":"propose"}, {"path":"native/session.zig","symbol":"decode"}],
+    "checks": [{"step":"test-tool-drafts","driver":{"path":"native/tool_draft_checks.zig","symbol":"check"},"scope":"checkpoint"}, {"step":"test-server-tool-drafts","driver":{"path":"tools/native_server_checks.zig","symbol":"checkDrafts"},"scope":"checkpoint"}, {"step":"test-session-rounds","driver":{"path":"native/session_checks.zig","symbol":"verifiedCopies"},"scope":"checkpoint"}],
+    "limitation": "Tokenizer/proposer parity covers all seven checkpoints; HTTP structure verification uses Qwen and copy-block cache checks use Qwen/Gemma/Nemotron. Full GLM/DeepSeek inference remains unverified. Neural drafter integration is tracked under http-speculation."
   },
   {
     "id": "request-controls", "state": "present", "requirement": "Sampling defaults, thinking budgets, required-call gates, stop strings and reasoning separation",
@@ -219,7 +221,7 @@
   {
     "id": "http-speculation", "state": "missing", "requirement": "Use DFlash, MTP and DSpark through native HTTP serving with streaming and cancellation",
     "upstream": ["src/tensorfold/server/app.py"],
-    "limitation": "CLI speculative decoding exists; HTTP generation is target-only."
+    "limitation": "HTTP verifies tool structure and copy-span proposals. DFlash, MTP and DSpark remain available only through CLI decoding."
   },
   {
     "id": "compiled-host-device-streams", "state": "partial", "requirement": "Compiled streaming graphs and host/device event overlap without per-round MLX evaluation",

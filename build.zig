@@ -382,10 +382,16 @@ pub fn build(b: *std.Build) void {
     }
     live_http.dependOn(live_previous.?);
     const http_checks_module = b.createModule(.{ .root_source_file = b.path("tools/native_http_checks.zig"), .target = b.graph.host, .optimize = .safe });
+    const http_checks = b.addExecutable(.{ .name = "native-http-checks", .root_module = http_checks_module });
+    const server_drafts = b.addRunArtifact(lifecycle.producer.?);
+    server_drafts.addArtifactArg(exe);
+    server_drafts.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--drafts-only" });
+    server_drafts.addArtifactArg(http_checks);
+    b.step("test-server-tool-drafts", "Verify target-accepted tool/copy proposals, serial parity, sampling and forced controls over HTTP").dependOn(&server_drafts.step);
     const server_rounds = b.addRunArtifact(lifecycle.producer.?);
     server_rounds.addArtifactArg(exe);
     server_rounds.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "build/native-checks/session-image/image.png" });
-    server_rounds.addArtifactArg(b.addExecutable(.{ .name = "native-http-checks", .root_module = http_checks_module }));
+    server_rounds.addArtifactArg(http_checks);
     server_rounds.step.dependOn(&session_image_fixture.step);
     b.step("test-server-rounds", "Compare concurrent HTTP image/text requests with isolated outputs, streaming and cancellation").dependOn(&server_rounds.step);
     const server_prefixes = b.step("test-server-prefixes", "Verify HTTP prefix reuse, eviction, cancellation and disabled caching");
@@ -405,6 +411,7 @@ pub fn build(b: *std.Build) void {
     server_memory.step.dependOn(&memory_image.step);
     b.step("test-server-memory", "Verify request admission waits, memory refusal, image reservation and cancellation recovery").dependOn(&server_memory.step);
     const chat_tests = b.step("test-chat", "Compare native chat prompts with upstream for all seven local tokenizers; no model weights loaded");
+    const tool_drafts = b.step("test-tool-drafts", "Compare schema proposals, stateful tokenization and copy fallback with upstream across all local tokenizers");
     const tool_fixtures = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", ".", "--tool-fixtures", "--output", "build/native-checks/tool-calls.json" });
     const tool_tests = b.addRunArtifact(exe);
     tool_tests.addArgs(&.{ "check-tool-calls", "build/native-checks/tool-calls.json" });
@@ -527,6 +534,12 @@ pub fn build(b: *std.Build) void {
         check.addArgs(&.{ "check-chat", dir, fixture });
         check.step.dependOn(&oracle.step);
         chat_tests.dependOn(&check.step);
+        const draft_fixture = b.fmt("build/native-checks/tool-drafts/{d}.json", .{index});
+        const draft_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", dir, "--tool-draft-fixtures", "--output", draft_fixture });
+        const draft_check = b.addRunArtifact(exe);
+        draft_check.addArgs(&.{ "check-tool-drafts", dir, draft_fixture });
+        draft_check.step.dependOn(&draft_oracle.step);
+        tool_drafts.dependOn(&draft_check.step);
     }
     const gemma_model = b.fmt("{s}/gemma-4-26b-a4b-it-4bit", .{model_root});
     const gemma_prefill_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", gemma_model, "--gemma-prefill", "--output", "build/native-checks/gemma-prefill/oracle/logits.npy", "--state-directory", "build/native-checks/gemma-prefill/oracle" });

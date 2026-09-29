@@ -186,6 +186,7 @@ const Scenario = struct {
     memory: bool = false,
     prefixes: bool = false,
     live: bool = false,
+    drafts: bool = false,
     terminal: ?Terminal = null,
     live_enabled: bool = false,
     cache_enabled: bool = true,
@@ -195,6 +196,59 @@ const Scenario = struct {
 
     fn liveSnapshot(s: *Scenario, port: u16) !std.json.Value {
         return (try health(s.init.arena.allocator(), s.init.io, port)).object.get("inference").?;
+    }
+
+    fn callFunctions(a: std.mem.Allocator, response: []const u8) ![]const u8 {
+        const start = (std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.MissingHttpBody) + 4;
+        const body = try std.json.parseFromSlice(std.json.Value, a, response[start..], .{});
+        const calls = body.value.object.get("choices").?.array.items[0].object.get("message").?.object.get("tool_calls").?;
+        var functions: std.ArrayList(std.json.Value) = .empty;
+        for (calls.array.items) |call| try functions.append(a, call.object.get("function").?);
+        if (functions.items.len == 0) return error.MissingToolCall;
+        return std.json.Stringify.valueAlloc(a, functions.items, .{});
+    }
+
+    fn checkDrafts(s: *Scenario, port: u16) !void {
+        const a = s.init.arena.allocator();
+        const io = s.init.io;
+        const request =
+            \\{"messages":[{"role":"user","content":"Call read_file with path /tmp/report.txt and offset 3."}],"tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"}},"required":["path","offset"]}}}],"tool_choice":{"type":"function","function":{"name":"read_file"}},"reasoning_effort":"none","max_tokens":160,"temperature":0,"seed":913}
+        ;
+        var body = try std.json.parseFromSlice(std.json.Value, a, request, .{});
+        for ([_]f64{ 0, 0.7 }) |temperature| {
+            try body.value.object.put(a, "temperature", .{ .float = temperature });
+            var expected: ?Output = null;
+            var functions: ?[]const u8 = null;
+            for ([_]bool{ false, true }) |drafting| {
+                try body.value.object.put(a, "draft", .{ .bool = drafting });
+                const socket = try postRoute(io, port, "/v1/chat/completions", try std.json.Stringify.valueAlloc(a, body.value, .{}));
+                defer socket.close(io);
+                const response = try readAll(a, io, socket);
+                const actual = try Output.parse(a, response, false);
+                const calls = try callFunctions(a, response);
+                if (expected) |value| {
+                    try value.compare(actual);
+                    try std.testing.expectEqualStrings(functions.?, calls);
+                } else {
+                    expected = actual;
+                    functions = calls;
+                }
+                _ = try s.waitForCounts(port, 0, 0);
+            }
+        }
+        const stats = try s.liveSnapshot(port);
+        const proposed = stats.object.get("structural_proposed").?.integer;
+        const accepted = stats.object.get("structural_accepted").?.integer;
+        if (accepted <= 0 or proposed <= accepted) return error.MissingStructuralAcceptanceAndRejection;
+        const url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}/v1/chat/completions", .{port});
+        for ([_][]const u8{ "--tools-only", "--tool-stream-only", "--controls-only" }) |mode| {
+            const result = try std.process.run(a, io, .{ .argv = &.{ s.http_checks, url, mode }, .stderr_limit = .limited(4 * 1024 * 1024) });
+            std.debug.print("{s}", .{result.stderr});
+            if (!result.term.success()) return error.HttpDraftCompatibilityFailed;
+        }
+        try std.posix.kill(s.child.id.?, .TERM);
+        if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+        std.debug.print("PASS: greedy/sampled tool drafts match serial calls and usage; {d}/{d} structural tokens accepted, including rejections; SSE and forced controls verified\n", .{ accepted, proposed });
     }
 
     fn waitForCounts(s: *Scenario, port: u16, connections: i64, waiting: i64) !std.json.Value {
@@ -544,6 +598,7 @@ const Scenario = struct {
             }
         };
         if (s.memory) return s.checkMemory(port);
+        if (s.drafts) return s.checkDrafts(port);
         if (s.live) return s.checkLive(port);
         if (s.prefixes) return s.checkPrefixes(port);
         if (s.rounds) return s.checkRounds(port);
@@ -618,6 +673,7 @@ pub fn main(init: std.process.Init) !void {
         const memory = std.mem.eql(u8, args[3], "--memory-only");
         const prefixes = std.mem.eql(u8, args[3], "--cache-only");
         const live = std.mem.eql(u8, args[3], "--live-only");
+        const drafts = std.mem.eql(u8, args[3], "--drafts-only");
         const terminal = if (live and !std.mem.eql(u8, args[4], "redirected")) try Terminal.init() else null;
         defer if (terminal) |t| {
             t.master.close(init.io);
@@ -631,6 +687,7 @@ pub fn main(init: std.process.Init) !void {
             try environment.put("COLUMNS", "0");
         }
         var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory and !prefixes and !live, .memory = memory, .prefixes = prefixes, .live = live, .terminal = terminal, .live_enabled = live and std.mem.eql(u8, args[4], "enabled"), .cache_enabled = !std.mem.eql(u8, args[4], "0"), .cache_oversize = std.mem.eql(u8, args[4], "0.000001"), .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", if (live) "1" else "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" }, .environ_map = &environment, .stdout = if (terminal) |t| .{ .file = t.slave } else if (live) .pipe else .inherit, .stderr = .pipe }) };
+        scenario.drafts = drafts;
         defer if (scenario.child.id) |id| {
             std.posix.kill(id, .KILL) catch {};
             scenario.child.kill(init.io);

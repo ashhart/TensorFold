@@ -40,6 +40,7 @@ pub const Backend = union(enum) {
 };
 
 pub const Sink = struct {
+    tools: std.json.Value = .null,
     cancellation: @import("cancellation.zig").Cancellation = .{},
     gate: ?*@import("call_gate.zig").Gate = null,
     context: ?*anyopaque = null,
@@ -94,9 +95,9 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
         }
     }
 
-    pub fn progress(g: *const RequestGeneration) struct { prefilled: usize, decoded: usize } {
+    pub fn progress(g: *const RequestGeneration) struct { prefilled: usize, decoded: usize, proposed: usize, accepted: usize, structural_proposed: usize, structural_accepted: usize } {
         return switch (g.*) {
-            inline else => |*request| .{ .prefilled = request.offset, .decoded = request.reply.tokens.items.len },
+            inline else => |*request| .{ .prefilled = request.offset, .decoded = request.reply.tokens.items.len, .proposed = request.proposed, .accepted = request.accepted, .structural_proposed = if (request.proposer) |p| p.structural_tokens else 0, .structural_accepted = if (request.proposer) |p| p.structural_accepted else 0 },
         };
     }
 
@@ -270,6 +271,11 @@ pub fn Generation(comptime M: type) type {
         next: i32 = 0,
         sent: usize = 0,
         phase: enum { prefill, decode, finished, failed } = .prefill,
+        proposer: ?@import("tool_draft.zig").Proposer = null,
+        context: std.ArrayList(i32) = .empty,
+        next_adjusted: bool = false,
+        proposed: usize = 0,
+        accepted: usize = 0,
 
         pub fn init(m: *M, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink, image: ?*@import("vision.zig").Prompt) !Self {
             const vocab: i32 = if (M == qwen.Model) 248320 else if (@hasField(M, "vocab")) m.vocab else M.vocab;
@@ -284,10 +290,17 @@ pub fn Generation(comptime M: type) type {
             settings.seed = options.seed orelse sampling.seedFor(prompt);
             const chunks = try (prefill_plan.Plan{ .step = chunk_size }).chunks(a, prompt);
             errdefer chunks.deinit(a);
-            return .{ .model = m, .a = a, .tokenizer = tok, .prompt = prompt, .options = options, .sink = sink, .image = image, .state = try @import("request_state.zig").State(M).init(m), .chunks = chunks, .reply = .{ .prompt_tokens = prompt.len }, .budget_arena = arena, .budget = budget, .settings = settings, .phase = if (options.max_tokens == 0) .finished else .prefill };
+            var proposer: ?@import("tool_draft.zig").Proposer = if (options.draft) try @import("tool_draft.zig").Proposer.init(a, tok, sink.tools, prompt.len) else null;
+            errdefer if (proposer) |*value| value.deinit();
+            var context: std.ArrayList(i32) = .empty;
+            errdefer context.deinit(a);
+            if (proposer != null) try context.appendSlice(a, prompt);
+            return .{ .model = m, .a = a, .tokenizer = tok, .prompt = prompt, .options = options, .sink = sink, .image = image, .state = try @import("request_state.zig").State(M).init(m), .chunks = chunks, .reply = .{ .prompt_tokens = prompt.len }, .budget_arena = arena, .budget = budget, .settings = settings, .phase = if (options.max_tokens == 0) .finished else .prefill, .proposer = proposer, .context = context };
         }
 
         pub fn deinit(g: *Self) void {
+            if (g.proposer) |*proposer| proposer.deinit();
+            g.context.deinit(g.a);
             g.state.deinit();
             g.chunks.deinit(g.a);
             g.reply.deinit(g.a);
@@ -320,7 +333,7 @@ pub fn Generation(comptime M: type) type {
             g.chunks = chunks;
         }
 
-        /// One prefill chunk or one decoded token; no model pass survives the call.
+        /// One prefill chunk or verified decode block; no model pass survives the call.
         pub fn step(g: *Self, m: *M) !bool {
             if (m != g.model) return error.WrongGenerationModel;
             if (g.phase == .finished) return true;
@@ -363,7 +376,54 @@ pub fn Generation(comptime M: type) type {
         }
 
         fn decode(g: *Self, m: *M) !void {
-            g.next = try g.budget.next(g.sink.gate, g.reply.tokens.items.len, g.next, eos(m, g.next));
+            if (!g.next_adjusted) g.next = try g.budget.next(g.sink.gate, g.reply.tokens.items.len, g.next, eos(m, g.next));
+            g.next_adjusted = false;
+            try g.emitToken(m);
+            if (g.phase == .finished) return;
+            var window: [16]i32 = undefined;
+            var parents: [16]i32 = undefined;
+            var positions: [16]i32 = undefined;
+            window[0] = g.next;
+            var proposed: usize = 0;
+            if (g.proposer) |*proposer| {
+                const draft = try proposer.propose(g.a, g.context.items, @min(15, g.options.max_tokens - g.reply.tokens.items.len));
+                proposed = draft.len;
+                @memcpy(window[1..][0..proposed], draft.tokens[0..proposed]);
+            }
+            const count = proposed + 1;
+            for (0..count) |i| {
+                parents[i] = @as(i32, @intCast(i)) - 1;
+                positions[i] = m.position + @as(i32, @intCast(i)) + 1;
+            }
+            var pass = if (M == qwen.Model) try m.forward(window[0..count], parents[0..count]) else try m.forward(window[0..count]);
+            defer pass.deinit();
+            const ids = try sampling.rows(&m.kernels, &pass.scope, pass.logits, positions[0..count], g.settings);
+            defer mx.allocator.free(ids);
+            var keep: usize = 1;
+            var accepted: usize = 0;
+            for (0..proposed) |i| {
+                try g.sink.check();
+                g.next = try g.budget.next(g.sink.gate, g.reply.tokens.items.len, ids[i], eos(m, ids[i]));
+                if (g.next != window[i + 1]) {
+                    g.next_adjusted = true;
+                    break;
+                }
+                accepted += 1;
+                try g.emitToken(m);
+                if (g.phase == .finished) break;
+                keep += 1;
+            }
+            if (keep == count and g.phase != .finished) g.next = ids[count - 1];
+            if (M == qwen.Model) {
+                for (parents[0..keep], 0..) |*row, i| row.* = @intCast(i);
+                try m.commit(&pass, parents[0..keep]);
+            } else try m.commit(&pass, keep);
+            g.proposed += proposed;
+            g.accepted += accepted;
+            if (g.proposer) |*proposer| proposer.observe(proposed, accepted);
+        }
+
+        fn emitToken(g: *Self, m: *M) !void {
             if (eos(m, g.next) and !g.options.ignore_eos) {
                 const ending = try g.tokenizer.decode(g.a, &.{@intCast(g.next)}, false);
                 defer g.a.free(ending);
@@ -375,6 +435,7 @@ pub fn Generation(comptime M: type) type {
                 return g.finish();
             }
             try g.reply.tokens.append(g.a, @intCast(g.next));
+            if (g.proposer != null) try g.context.append(g.a, g.next);
             const decoded = try g.tokenizer.decode(g.a, g.reply.tokens.items, false);
             defer g.a.free(decoded);
             const stopped = text.stopAt(decoded, g.options.stops) != null;
@@ -385,12 +446,6 @@ pub fn Generation(comptime M: type) type {
             }
             if (stopped) g.reply.finish_reason = .stop;
             if (stopped or g.reply.tokens.items.len == g.options.max_tokens) return g.finish();
-            var pass = if (M == qwen.Model) try m.forward(&.{g.next}, &.{-1}) else try m.forward(&.{g.next});
-            defer pass.deinit();
-            const ids = try sampling.rows(&m.kernels, &pass.scope, pass.logits, &.{m.position + 1}, g.settings);
-            defer mx.allocator.free(ids);
-            g.next = ids[0];
-            if (M == qwen.Model) try m.commit(&pass, &.{0}) else try m.commit(&pass, 1);
         }
 
         fn finish(g: *Self) !void {

@@ -25,11 +25,17 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     defaults.max_tokens = 4096;
     var thinking = true;
     var vision_urls = false;
+    var drafts = true;
     var effort: []const u8 = "medium";
     var overrides = std.json.Value{ .object = .empty };
     defer overrides.object.deinit(init.gpa);
     var i: usize = 3;
     while (i < args.len) {
+        if (std.mem.eql(u8, args[i], "--no-drafts")) {
+            drafts = false;
+            i += 1;
+            continue;
+        }
         if (std.mem.eql(u8, args[i], "--vision-urls") or std.mem.eql(u8, args[i], "--no-vision-urls")) {
             vision_urls = std.mem.eql(u8, args[i], "--vision-urls");
             i += 1;
@@ -102,6 +108,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams, .is_glm = is_glm, .is_flash = is_flash, .memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB"), .stats = &stats, .display = &display };
     worker.checkpoint_slots = checkpoint_slots orelse @max(8, 3 * batch_streams);
     worker.prompt_cache_bytes = prompt_cache_bytes;
+    worker.drafts = drafts;
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     defer {
         worker.queue.close(init.io);
@@ -160,6 +167,7 @@ const Job = struct {
     failure: ?anyerror = null,
 };
 const Worker = struct {
+    drafts: bool = true,
     stats: *live_status.Stats,
     display: *live_status.Display,
     io: std.Io,
@@ -413,6 +421,7 @@ const Pending = struct {
         const cancellation = p.job.client.cancellation();
         try cancellation.check();
         var options = p.job.options;
+        if (!w.drafts) options.draft = false;
         var ids: std.ArrayList(i32) = .empty;
         var raw_images = body.object.get("images") orelse .null;
         if (p.job.is_chat) {
@@ -473,7 +482,7 @@ const Pending = struct {
             p.stream = .{ .a = a, .writer = &p.response.?.writer, .transport = p.job.request.server.out, .id = p.id, .model = p.job.model, .created = p.job.created, .is_chat = p.job.is_chat, .thinking = p.thinking, .markers = p.markers, .tools = p.tools, .max_calls = p.max_calls, .cancellation = cancellation };
             if (p.job.is_chat) try p.stream.?.chatChunk(.{ .role = "assistant", .content = "" }, null);
         }
-        p.generation = try inference.RequestGeneration.init(session, mx.allocator, p.ids, options, .{ .context = if (p.stream) |*stream| stream else null, .emit = if (p.stream != null) Stream.emit else null, .cancellation = cancellation, .gate = if (p.gate) |*gate| gate else null }, if (p.image) |*image| image else null);
+        p.generation = try inference.RequestGeneration.init(session, mx.allocator, p.ids, options, .{ .tools = p.tools, .context = if (p.stream) |*stream| stream else null, .emit = if (p.stream != null) Stream.emit else null, .cancellation = cancellation, .gate = if (p.gate) |*gate| gate else null }, if (p.image) |*image| image else null);
     }
 
     fn advance(p: *Pending, session: *inference.Session, admission: *memory_policy.Admission, active: []const ?*Pending, prefixes: ?*PrefixStore) !bool {
@@ -558,6 +567,7 @@ const Pending = struct {
         const ended = live_status.now(session.io);
         const after = p.generation.?.progress();
         p.job.stats.record(after.prefilled - before.prefilled, after.decoded - before.decoded, started, ended);
+        p.job.stats.recordDrafts(after.proposed - before.proposed, after.accepted - before.accepted, after.structural_proposed - before.structural_proposed, after.structural_accepted - before.structural_accepted);
         if (!done) return false;
         var reply = try p.generation.?.takeReply();
         defer reply.deinit(mx.allocator);

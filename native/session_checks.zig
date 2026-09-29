@@ -33,6 +33,33 @@ fn same(expected: session.Reply, actual: session.Reply, before: Capture, after: 
     try std.testing.expectEqualSlices(usize, before.chunks.items, after.chunks.items);
 }
 
+fn verifiedCopies(m: anytype, tok: *@import("vendor/tokenizer.zig").Tokenizer, prompt: []const i32, options: session.Options, expected: session.Reply, baseline: Capture) !void {
+    const a = mx.allocator;
+    for ([_]bool{ false, true }) |reject| {
+        var capture = Capture{};
+        defer capture.deinit();
+        var g = try session.Generation(@TypeOf(m.*)).init(m, tok, a, prompt, options, capture.sink(), null);
+        defer g.deinit();
+        errdefer std.debug.print("Copy verification {s}: reject={any}, proposed={d}, accepted={d}, expected={any}, actual={any}\n", .{ @typeName(@TypeOf(m.*)), reject, g.proposed, g.accepted, expected.tokens.items, g.reply.tokens.items });
+        // Proposals may be arbitrary: seed the lookup with a known continuation to
+        // exercise full acceptance and a rejected suffix regardless of model prose.
+        g.context.clearRetainingCapacity();
+        try g.context.appendSlice(a, prompt);
+        for (expected.tokens.items, 0..) |token, i| try g.context.append(a, @intCast(if (reject and i == 7) token ^ 1 else token));
+        try g.context.appendSlice(a, prompt);
+        g.proposer.?.prompt_len = g.context.items.len;
+        while (!try g.step(m)) {}
+        try std.testing.expect(g.proposed > 0);
+        try std.testing.expect(g.accepted > 0);
+        if (reject) try std.testing.expect(g.proposed > g.accepted);
+        try std.testing.expectEqual(prompt.len + expected.tokens.items.len - 1, @as(usize, @intCast(g.state.position)));
+        try std.testing.expectEqual(@as(i32, 0), m.position);
+        var reply = try g.takeReply();
+        defer reply.deinit(a);
+        try same(expected, reply, baseline, capture);
+    }
+}
+
 fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Options, expected: session.Reply, baseline: Capture) !void {
     const a = mx.allocator;
     const Store = @import("prompt_cache.zig").Store(session.Snapshot);
@@ -110,13 +137,16 @@ fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.
     var completed: usize = 0;
     defer for (expected[0..completed]) |*reply| reply.deinit(a);
     for (prompts, options, &baseline, &expected) |prompt, opt, *capture, *reply| {
-        var g = try G.init(m, tok, a, prompt, opt, capture.sink(), null);
+        var serial = opt;
+        serial.draft = false;
+        var g = try G.init(m, tok, a, prompt, serial, capture.sink(), null);
         defer g.deinit();
         while (!try g.step(m)) {}
         reply.* = try g.takeReply();
         completed += 1;
     }
     try prefixReuse(s, prompts[1], options[1], expected[1], baseline[1]);
+    for (prompts[0..2], options[0..2], expected[0..2], baseline[0..2]) |prompt, opt, reply, capture| try verifiedCopies(m, tok, prompt, opt, reply, capture);
     if (s.prefillStep() > 256) {
         const plan = try s.prefillPlan();
         if (plan.assistant.len == 0) return error.MissingAssistantPrefillMarker;
@@ -244,7 +274,9 @@ pub fn checkImages(io: std.Io, dir: []const u8, path: []const u8) !void {
         var finished: usize = 0;
         defer for (expected[0..finished]) |*reply| reply.deinit(a);
         for (prompts, images, &reference, &expected) |prompt, image, *output, *reply| {
-            var g = try G.init(&s.backend.qwen, &s.tokenizer, a, prompt, options, output.sink(), image);
+            var serial = options;
+            serial.draft = false;
+            var g = try G.init(&s.backend.qwen, &s.tokenizer, a, prompt, serial, output.sink(), image);
             defer g.deinit();
             while (!try g.step(&s.backend.qwen)) {}
             reply.* = try g.takeReply();

@@ -165,6 +165,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
 | Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven tokenizers, including DeepSeek's official encoder and upstream's rejection of required DeepSeek tool calls; no weights loaded |
+| Tool structure and copy proposals | `test-tool-drafts test-server-tool-drafts -Doptimize=safe -j1` | Seven-tokenizer upstream oracle; Qwen HTTP acceptance/rejection, serial parity, sampling and streaming |
 | Checkpoint metadata rejection | `test-schema-failures -Doptimize=safe -j1` | Installed schema checkpoints; no GPU |
 
 Start GPU verification with:
@@ -248,7 +249,10 @@ Qwen, Gemma, GLM and DeepSeek formats, named/required choice, typed arguments
 and `parallel_tool_calls: false`. Qwen XML arguments stream incrementally;
 typed values wait for their closing tag. Other call formats and single-call
 mode use the final parser, matching upstream. Prose streams as its interpretation
-becomes unambiguous. Speculative serving is still pending.
+becomes unambiguous. Serving verifies schema-derived tool structure and copy-span
+drafts against the target model. Use request `"draft": false` or server
+`--no-drafts` for serial decoding. `/health.inference` includes proposed/accepted
+token totals and structural-token totals. Neural speculative serving remains pending.
 One inference worker owns the model; its queue holds eight requests.
 Against a running Qwen server, compare JSON/SSE text, reasoning and images with
 `.zig-toolchain/zig run tools/native_http_checks.zig -- http://127.0.0.1:8080/v1/chat/completions /path/to/image.png`.

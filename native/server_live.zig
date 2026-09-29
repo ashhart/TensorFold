@@ -50,6 +50,10 @@ const ChunkRate = struct {
 };
 
 pub const Snapshot = struct {
+    proposed_tokens: u64 = 0,
+    accepted_tokens: u64 = 0,
+    structural_proposed: u64 = 0,
+    structural_accepted: u64 = 0,
     connections: usize,
     waiting_requests: usize,
     decode_tokens_per_second: f64,
@@ -92,6 +96,10 @@ fn number(out: *std.Io.Writer, rate: f64) !void {
 }
 
 pub const Stats = struct {
+    proposed_tokens: u64 = 0,
+    accepted_tokens: u64 = 0,
+    structural_proposed: u64 = 0,
+    structural_accepted: u64 = 0,
     io: std.Io,
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
@@ -142,7 +150,16 @@ pub const Stats = struct {
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);
         const instant = now(s.io);
-        return .{ .connections = s.connections, .waiting_requests = s.waiting, .decode_tokens_per_second = s.decoded.rate(instant), .prefill_tokens_per_second = s.prefilled.rate(instant), .decoded_tokens = s.decoded_tokens, .prefilled_tokens = s.prefilled_tokens, .available = s.available };
+        return .{ .connections = s.connections, .waiting_requests = s.waiting, .decode_tokens_per_second = s.decoded.rate(instant), .prefill_tokens_per_second = s.prefilled.rate(instant), .decoded_tokens = s.decoded_tokens, .prefilled_tokens = s.prefilled_tokens, .available = s.available, .proposed_tokens = s.proposed_tokens, .accepted_tokens = s.accepted_tokens, .structural_proposed = s.structural_proposed, .structural_accepted = s.structural_accepted };
+    }
+
+    pub fn recordDrafts(s: *Stats, proposed: usize, accepted: usize, structural_proposed: usize, structural_accepted: usize) void {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        s.proposed_tokens +|= proposed;
+        s.accepted_tokens +|= accepted;
+        s.structural_proposed +|= structural_proposed;
+        s.structural_accepted +|= structural_accepted;
     }
 };
 
