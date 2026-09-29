@@ -231,7 +231,8 @@ What runs where:
 | Decode and verify matmuls | `qmm_rocm.cu`: WMMA on weights repacked at load into 16-output tiles (`qmm_groups.py`); persistent blocks, K split by weight shape and reduced in-kernel; up to 32 rows a weight read; `[gate \| up]`, `[z \| b \| a]` and `[k \| v]` fused |
 | Prompt matmuls | the FP8 prompt arithmetic NVIDIA uses (`prefill_glue`'s e4m3 rows, the 4-bit codes exact in e4m3, per-group scales): codes widened once per chunk, then a fixed-tile Triton e4m3 GEMM (`qmm_groups.prefill_matmul8`) |
 | DeltaNet | `gdn.cu` and `gdn_prefill.cu`, built with hipcc; 4 rows a warp for verify chains, 64 rows a block for prompts |
-| Attention | the Triton kernels, with 16-key tiles on ROCm |
+| Prompt attention | `attention_rocm.cu`: flash attention on WMMA for head size 256, a wave per query head sharing each 16-key K/V tile (Triton for other sizes) |
+| Tree attention | the Triton kernel, with 16-key tiles on ROCm |
 
 Drafted replies equal `"draft": false` ones and any prompt chunking gives the same bits, as on NVIDIA; the bits are
 this engine's own. On 32 GB the startup estimate leaves a 32,768-token window beside the model and drafter.
@@ -241,22 +242,23 @@ tokens, greedy, thinking off, medians of 3 to 5; decode spreads are wide, 10-40%
 
 | | First ROCm build | This branch |
 | --- | ---: | ---: |
-| Prefill, 4k prompt (marginal) | 661 tok/s | 2,326 tok/s |
-| Prefill, 16k prompt (marginal) | 617 tok/s | 1,849 tok/s |
-| Prefill, 30k prompt (marginal) | - | 1,582 tok/s |
-| Decode, 4k prompt | 44.2 tok/s | 112.4 tok/s |
-| Decode, 16k prompt | 41.7 tok/s | 130.4 tok/s |
-| Decode, 30k prompt | - | 95.0 tok/s |
+| Prefill, 4k prompt (marginal) | 661 tok/s | 2,360 tok/s |
+| Prefill, 16k prompt (marginal) | 617 tok/s | 1,974 tok/s |
+| Prefill, 30k prompt (marginal) | - | 1,784 tok/s |
+| Decode, 4k prompt | 44.2 tok/s | 106.2 tok/s |
+| Decode, 16k prompt | 41.7 tok/s | 100.1 tok/s |
+| Decode, 30k prompt | - | 92.7 tok/s |
 | Serial decode (`"draft": false`), short prompt | 11.8 tok/s | 32.0 tok/s |
 
 A drafted round on a code prompt (12 verify rows, 6.4 tokens a round) takes 37 ms: 29 ms of it the weights' reads
 (the decode matmuls stream at about 80% of the card's 639 GB/s). At 28k-32k context a 4,096-token prompt chunk
-spends 48% of its GPU time in matmuls and 36% in attention.
+spends 52% of its GPU time in matmuls and 30% in attention.
 
 `TF_ROCM_LANE` picks the decode matmul (`wmma`, default; `dot2`, fastest for one row but slower in draft windows;
 `triton`). Tuning knobs, each changing bits for every call alike and never with the row count or chunking:
 `TF_ROCM_WMMA_FILL` (K split target), `TF_ROCM_PREFILL8` and `TF_ROCM_PREFILL` (prompt GEMM tiles),
-`TF_ROCM_ATTN` and `TF_ROCM_TREE_ATTN` (attention tiles). Scheduling only, bits unchanged: `TF_ROCM_WMMA_GRID`,
+`TF_ROCM_ATTN` and `TF_ROCM_TREE_ATTN` (Triton attention tiles), `TF_ROCM_ATTN_KERNEL=triton` (prompt attention on
+the Triton kernel instead of WMMA). Scheduling only, bits unchanged: `TF_ROCM_WMMA_GRID`,
 `TF_ROCM_PREFILL8_GROUP`, `TF_ROCM_CHAIN_ROWS`, `TF_ROCM_TREE_R`. With Triton 3.6 on gfx1201 some GEMM tiles give
 wrong sums: bf16 tiles at small K, and pipelined (`num_stages` 2 or 3) e4m3 tiles for calls of a few rows. The
 defaults avoid them, and `tests/cuda/test_qwen27_prefill.py` guards both prompt GEMMs at the model's shapes.

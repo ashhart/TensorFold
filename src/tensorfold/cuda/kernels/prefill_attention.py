@@ -78,6 +78,9 @@ def attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, p0:
     hk = _check(q, k_cache, v_cache, p0)
     out = torch.empty_like(q)
     if hip():
+        if _rocm_kernel(h, hk, d):
+            _rocm().attention(q, k_cache, v_cache, out, p0, scale)
+            return out
         return _rocm_attention(q, k_cache, v_cache, out, p0, scale)
     if d == 64:
         return triton_attention(q, k_cache, v_cache, p0, scale=scale, out=out)
@@ -145,3 +148,22 @@ def rocm_config() -> tuple[int, int, int, int, int]:
     if len(values) != 5 or min(values[:4]) < 1:
         raise ValueError("TF_ROCM_ATTN: BM,BN,warps,stages,heads_first")
     return values
+
+
+@lru_cache(maxsize=1)
+def _rocm():
+    from tensorfold.cuda.build import load
+
+    here = Path(__file__).parent
+    return load(name="tensorfold_attention_rocm_v8",
+                sources=[str(here / "attention_rocm.cpp"), str(here / "attention_rocm.cu")],
+                extra_cuda_cflags=["-O3"], verbose=False)
+
+
+def _rocm_kernel(heads: int, kv_heads: int, dim: int) -> bool:
+    """ROCm's WMMA prompt attention (``attention_rocm.cu``) where it applies, unless ``TF_ROCM_ATTN_KERNEL=triton``;
+    the two give different bits, so a process uses one."""
+
+    import os
+
+    return os.environ.get("TF_ROCM_ATTN_KERNEL", "wmma") != "triton" and _rocm().supported(heads, kv_heads, dim)
