@@ -1,0 +1,134 @@
+experts (excluded)
+            gu = raw(name + ".experts.gate_up_proj").to(torch.bfloat16)          # [E, 2*NI, D]
+            dn = raw(name + ".experts.down_proj").to(torch.bfloat16)             # [E, D, NI]
+            if world > 1:
+                gu, dn = gu[:, lo:hi], dn[:, :, dlo * gs:dhi * gs]
+            moe4 = nvfp4_moe.moe4_from_bf16(gu, dn, shared)
+        return MoEW(router, moe4)
+
+    def attention(name: str) -> AttnW:
+        hd = full.head_dim
+        hl, kl = full.heads // world, full.kv_heads // world
+        q = _rows(triple(name + ".q_proj"), rank * hl * 2 * hd, (rank + 1) * hl * 2 * hd)
+        k = _rows(triple(name + ".k_proj"), rank * kl * hd, (rank + 1) * kl * hd)
+        v = _rows(triple(name + ".v_proj"), rank * kl * hd, (rank + 1) * kl * hd)
+        proj = stack_q4([q, k, v, triple(name + ".indexer.index_qk_proj")])          # the indexer: every rank
+        o = _groups(triple(name + ".o_proj"), rank * hl * hd // 32, (rank + 1) * hl * hd // 32)
+        return AttnW(proj, cscale(name + ".q_norm.weight"), cscale(name + ".k_norm.weight"),
+                     cscale(name + ".indexer.q_layernorm.weight"), cscale(name + ".indexer.k_layernorm.weight"),
+                     make_q4(*o))
+
+    def gdn(name: str) -> GDNW:
+        kl, vl = full.nk // world, full.nv // world
+        dk, dv = full.dk, full.dv
+        q_rows = torch.arange(rank * kl * dk, (rank + 1) * kl * dk, device=device)
+        v_rows = 2 * full.nk * dk + torch.arange(rank * vl * dv, (rank + 1) * vl * dv, device=device)
+        channels = torch.cat([q_rows, full.nk * dk + q_rows, v_rows])
+        qkv = _rows_at(triple(name + ".in_proj_qkv"), channels)
+        z = _rows(triple(name + ".in_proj_z"), rank * vl * dv, (rank + 1) * vl * dv)
+        bb = _rows(triple(name + ".in_proj_b"), rank * vl, (rank + 1) * vl)
+        aa = _rows(triple(name + ".in_proj_a"), rank * vl, (rank + 1) * vl)
+        proj = stack_q4([qkv, z, bb, aa])
+        conv = raw(name + ".conv1d.weight").reshape(full.conv_dim, full.conv_kernel).to(torch.bfloat16)
+        conv = conv.index_select(0, channels).contiguous()
+        out = _groups(triple(name + ".out_proj"), rank * vl * dv // 32, (rank + 1) * vl * dv // 32)
+        return GDNW(proj, conv, raw(name + ".A_log").float()[rank * vl:(rank + 1) * vl].contiguous(),
+                    raw(name + ".dt_bias").float()[rank * vl:(rank + 1) * vl].contiguous(),
+                    raw(name + ".norm.weight").to(torch.bfloat16).contiguous(), make_q4(*out))
+
+    def ple_layer(name: str, ple_index: int) -> PLEW:
+        ngram = cfg.ngram(ple_index)
+        base = name + ".ple_embedding."
+        ngram.check(raw(base + "layer_multipliers").cpu().numpy(), raw(base + "ngram_heads_offsets").cpu().numpy(),
+                    raw(base + "ngram_heads_vocab_sizes").cpu().numpy())
+        files = []
+        headers: dict[str, dict] = {}
+        for i in range(cfg.ngram_shards):
+            stem = stored(base + f"ngram_embedding.shard_{i}")
+            shard = rd.where[stem + ".weight"]
+            if shard not in headers:
+                headers[shard] = _header(model_dir / shard)
+            h = headers[shard]
+            files.append((model_dir / shard, h[stem + ".weight"], h[stem + ".scales"], h[stem + ".biases"]))
+        table = SSDTable(files) if ple_on_ssd else HostTable(files)
+        if table.rows != ngram.rows:
+            raise ValueError(f"n-gram tables hold {table.rows} rows, expected {ngram.rows}")
+        conv = raw(name + ".conv1d.weight").reshape(cfg.streams * cfg.hidden, cfg.ple_kernel).to(torch.bfloat16)
+        return PLEW(table, q4(name + ".key_proj"), q4(name + ".value_proj"),
+                    cscale(name + ".norm_key.weight"), cscale(name + ".norm_query.weight"),
+                    cscale(name + ".norm_conv.weight"), conv.contiguous(), ngram)
+
+    def layer(i: int, base: str, kind: str, with_ple: bool) -> LayerW:
+        linear = kind == "linear"
+        nvfp4 = cfg.quant == "modelopt"                 # NVFP4: routed experts FP4, every other linear BF16
+        entry = LayerW(i, linear,
+                       (hc_nvfp4 if nvfp4 else hc)(base + ".attn_hyper_connection", True),
+                       (hc_nvfp4 if nvfp4 else hc)(base + ".mlp_hyper_connection", True),
+                       (gdn_nvfp4 if nvfp4 else gdn)(base + ".linear_attn") if linear else None,
+                       None if linear else (attention_nvfp4 if nvfp4 else attention)(base + ".self_attn"),
+                       (moe_nvfp4 if nvfp4 else moe)(base + ".mlp"))
+        if with_ple and i in cfg.ple_layers:
+            entry.ple = (ple_nvfp4 if nvfp4 else ple_layer)(base + ".ple", cfg.ple_layers.index(i))
+        return entry
+
+    t0 = time.time()
+    if cfg.quant not in ("mlx", "modelopt"):
+        raise ValueError(f"Flash Next's CUDA engine reads MLX 4-bit (groups of 32) or NVFP4 (experts-only) "
+                         f"checkpoints, not {cfg.quant}")
+    embed = (make_b16(raw("model.embed_tokens.weight")) if cfg.quant == "modelopt"
+             else triple("model.embed_tokens"))
+    loaded = []
+    for i in chosen:
+        loaded.append(layer(i, f"model.layers.{i}", cfg.layer_types[i], True))
+        rd.release()
+        torch.cuda.empty_cache()
+    mixer = (hc_nvfp4 if cfg.quant == "modelopt" else hc)("model.hyper_connection_mixer", False)
+    vl = full.vocab // world
+    if cfg.quant == "modelopt":
+        head = b16_rows(raw("lm_head.weight").to(torch.bfloat16)[rank * vl:(rank + 1) * vl])
+    else:
+        head_raw = triple("lm_head")
+        head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))
+        del head_raw
+    # Draft head scores the draft vocabulary only (same as the MLX / EXL3 path): column j scores
+    # ``draft_ids[j]``, and the sampler maps those columns back to token ids. Quantizing the full
+    # lm_head left logits over the full vocabulary while ``draft_ids`` stayed a ~80k subset —
+    # ``_draft_host[cols]`` then IndexError'd on Spark.
+    #
+    # NVFP4 default: keep the draft-vocab rows in BF16 (same dtype as verify's lm_head) so open-ended
+    # accept rates are not kneecapped by a 4-bit requant mismatch. ``TENSORFOLD_NVFP4_DRAFT_HEAD=q4``
+    # restores the smaller ~0.3 GB 4-bit copy for A/B. Drafts still change speed only — verify uses
+    # the full BF16 head either way.
+    draft_head, draft_ids = None, None
+    ids = draft_token_ids(draft_vocab)
+    if ids is not None:
+        ids = np.array_split(ids[ids < full.vocab], world)[rank]
+        ids = torch.from_numpy(ids).to(device)
+        draft_ids = ids
+        if cfg.quant == "modelopt":
+            lm = raw("lm_head.weight").to(torch.bfloat16)
+            rows = lm.index_select(0, ids.to(device=lm.device, dtype=torch.long))
+            mode = os.environ.get("TENSORFOLD_NVFP4_DRAFT_HEAD", "bf16").strip().lower()
+            if mode in ("q4", "int4", "4bit"):
+                draft_head = quantize4(rows)
+            else:
+                draft_head = b16_from_rows(rows)
+        else:
+            draft_head = make_q4(*_rows_at(triple("lm_head"), ids))
+    inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (
+        -torch.arange(0, cfg.rotary_dim // 2, dtype=torch.float64) / (cfg.rotary_dim // 2))
+    w = Weights(cfg, embed, loaded, mixer, head, inv.to(torch.float32).to(device), around_one=around_one)
+    w.meta.update(rank=rank, world=world, vocab_offset=rank * vl, full=full)
+    w.draft_head, w.draft_ids = draft_head, draft_ids
+    if draft_head is not None and cfg.quant == "modelopt":
+        w.meta["nvfp4_draft_head"] = "b16" if getattr(draft_head, "kernel", "") == "b16" else "q4"
+    if mtp and rd.has(stored("mtp.fc_embedding.weight")):
+        fc = b16 if cfg.quant == "modelopt" else q4
+        w.mtp = MTPW(cscale("mtp.pre_fc_norm_embedding.weight"), cscale("mtp.pre_fc_norm_hidden.weight"),
+                     fc("mtp.fc_embedding"), fc("mtp.fc_hidden"),
+                     layer(-1, "mtp.layers.0", "attention", False),
+                     (hc_nvfp4 if cfg.quant == "modelopt" else hc)("mtp.hyper_connection_mixer", False))
+    rd.release()
+    torch.cuda.empty_cache()
+    w.meta["load_seconds"] = time.time() - t0
+    return w
