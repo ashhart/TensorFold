@@ -256,6 +256,41 @@ def capture_fixtures(output):
     print(f'Saved {len(contexts)} upstream capture records, including every BF16 bit pattern')
 
 
+def prefill_plan_fixtures(output):
+    import random
+    from tensorfold.engine.prefill_plan import PrefillPlan
+    rng = random.Random(61749)
+    cases = []
+    for _ in range(1600):
+        step = rng.choice((0, 1, 16, 256, 2048))
+        minimum = rng.choice((0, 1, 2, 16, 256))
+        openers = rng.choice(([], [91], [92, 91, 92]))
+        assistant = rng.choice(([], [91], [91, 92], [92, 93, 94]))
+        tokens = [rng.randrange(89, 96) for _ in range(rng.choice((0, 1, 15, 16, 17, 255, 256, 257, 2049, 4099)))]
+        case = dict(plan=dict(step=step, min_chunk=minimum, openers=openers, assistant=assistant), tokens=tokens,
+                    name=None, points=[], starts=[], positions=[], spans=[])
+        try:
+            plan = PrefillPlan(step, openers, minimum, assistant)
+        except ValueError:
+            cases.append(case)
+            continue
+        chunks = plan.chunks(tokens)
+        case.update(name=plan.name, points=plan.points(np.asarray(tokens)), starts=chunks.starts)
+        positions = {0, 1, len(tokens), len(tokens) + 1, *chunks.starts}
+        positions.update(max(0, p - 1) for p in chunks.starts)
+        positions.update(p + 1 for p in chunks.starts)
+        case['positions'] = [dict(position=p, contains=p in chunks, floor=chunks.floor(p)) for p in sorted(positions)]
+        for _ in range(4):
+            begin = rng.choice(chunks.starts)
+            end = rng.choice([p for p in [*chunks.starts, len(tokens)] if p >= begin])
+            case['spans'].append(dict(begin=begin, end=end, chunks=chunks.between(begin, end)))
+        cases.append(case)
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(cases))
+    print(f'Saved {len(cases)} upstream adaptive prefill plans')
+
+
 def prompt_cache_fixtures(output):
     import random
     from tensorfold.server.checkpoints import CheckpointStore, choose_checkpoints
@@ -469,6 +504,7 @@ def main():
     parser.add_argument("--allocation-fixtures", action="store_true")
     parser.add_argument("--memory-fixtures", action="store_true")
     parser.add_argument("--prompt-cache-fixtures", action="store_true")
+    parser.add_argument("--prefill-plan-fixtures", action="store_true")
     parser.add_argument("--capture-fixtures", action="store_true")
     parser.add_argument("--verify-capture", nargs=2, metavar=('DRAFTER', 'REPORT'))
     parser.add_argument("--compare-calibration", nargs=2, type=Path)
@@ -485,6 +521,8 @@ def main():
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
+    if args.prefill_plan_fixtures:
+        return prefill_plan_fixtures(args.output)
     if args.prompt_cache_fixtures:
         return prompt_cache_fixtures(args.output)
     if args.memory_fixtures:

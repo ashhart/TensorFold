@@ -221,7 +221,24 @@ const Scenario = struct {
         try expected.compare(try Output.parse(a, try readAll(a, io, recovery), false));
         counts = try CacheCounts.read(a, io, port);
         try std.testing.expectEqual(@as(u64, if (s.cache_enabled) 7 else 0), counts.hits);
+        const system = try a.alloc(u8, 5 * 320);
+        for (0..320) |i| @memcpy(system[i * 5 ..][0..5], "word ");
+        const conversation = try std.json.Stringify.valueAlloc(a, .{ .messages = &.{ .{ .role = "system", .content = system }, .{ .role = "user", .content = "Reply briefly." } }, .reasoning_effort = "none", .max_tokens = @as(usize, 16), .ignore_eos = true, .temperature = @as(f64, 0.7), .top_k = @as(usize, 12), .top_p = @as(f64, 0.8), .seed = @as(usize, 21) }, .{});
+        const cold_chat = try postRoute(io, port, "/v1/chat/completions", conversation);
+        defer cold_chat.close(io);
+        const expected_chat = try Output.parse(a, try readAll(a, io, cold_chat), false);
+        const usage = try std.json.parseFromSlice(std.json.Value, a, expected_chat.usage.?, .{});
+        const prompt_tokens = usage.value.object.get("prompt_tokens").?.integer;
+        try std.testing.expect(prompt_tokens > 256 and prompt_tokens < 2048);
+        var chat = try std.json.parseFromSlice(std.json.Value, a, conversation, .{});
+        try chat.value.object.put(a, "stream", .{ .bool = true });
+        const cached_chat = try postRoute(io, port, "/v1/chat/completions", try std.json.Stringify.valueAlloc(a, chat.value, .{}));
+        defer cached_chat.close(io);
+        try expected_chat.compare(try Output.parse(a, try readAll(a, io, cached_chat), true));
+        counts = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(@as(u64, if (s.cache_enabled) 8 else 0), counts.hits);
         std.debug.print("PASS: HTTP prefix cache enabled={any}: cold/reused/concurrent JSON/SSE agree; eviction, cache counters and cancellation match policy\n", .{s.cache_enabled});
+        std.debug.print("PASS: {d}-token adaptive chat JSON/SSE agree, cache enabled={any}\n", .{ prompt_tokens, s.cache_enabled });
         try std.posix.kill(s.child.id.?, .TERM);
         if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
     }

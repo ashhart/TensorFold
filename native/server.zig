@@ -490,7 +490,7 @@ const Pending = struct {
             try mx.check(mx.c.mlx_clear_cache());
             try p.activate(session);
             if (p.image == null and p.options.max_tokens > 0) if (prefixes) |store| {
-                var hit = store.match(p.ids, .{ .step = session.prefillStep() }, false) catch null;
+                var hit = store.match(p.ids, p.generation.?.boundary(), false) catch null;
                 if (hit) |*value| {
                     defer value.deinit(mx.allocator);
                     p.generation.?.restorePrefix(&value.cache) catch return p.step(session);

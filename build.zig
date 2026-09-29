@@ -365,6 +365,12 @@ pub fn build(b: *std.Build) void {
     prompt_cache_check.addArgs(&.{ "check-prompt-cache", prompt_cache_fixture });
     prompt_cache_check.step.dependOn(&prompt_cache_oracle.step);
     b.step("test-prompt-cache", "Compare prefix matching, ownership transfer, pinning and eviction with upstream").dependOn(&prompt_cache_check.step);
+    const prefill_plan_fixture = "build/native-checks/prefill-plan.json";
+    const prefill_plan_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--prefill-plan-fixtures", "--output", prefill_plan_fixture });
+    const prefill_plan_check = b.addRunArtifact(exe);
+    prefill_plan_check.addArgs(&.{ "check-prefill-plan", prefill_plan_fixture });
+    prefill_plan_check.step.dependOn(&prefill_plan_oracle.step);
+    b.step("test-prefill-plan", "Compare adaptive chunk boundaries and resume points with upstream").dependOn(&prefill_plan_check.step);
     const allocation_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--allocation-fixtures", "--output", draft_allocation_fixture });
     const allocation_check = b.addRunArtifact(exe);
     allocation_check.addArgs(&.{ "check-draft-allocation", draft_allocation_fixture });

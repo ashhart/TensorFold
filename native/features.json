@@ -166,9 +166,9 @@
   {
     "id": "prompt-cache-checkpoints", "state": "partial", "requirement": "Cross-request prompt reuse, prefix snapshots, checkpoint persistence and disk spill",
     "upstream": ["src/tensorfold/engine/prefix_snapshots.py", "src/tensorfold/server/checkpoints.py", "src/tensorfold/server/prompt_fill.py", "src/tensorfold/server/prompt_memory.py", "src/tensorfold/server/stacks.py", "src/tensorfold/streaming/checkpoint.py"],
-    "implementation": [{"path":"native/prompt_cache.zig","symbol":"Store"}, {"path":"native/prompt_cache.zig","symbol":"checkpoints"}, {"path":"native/session.zig","symbol":"restorePrefix"}, {"path":"native/server.zig","symbol":"savePrefix"}],
-    "checks": [{"step":"test-prompt-cache","driver":{"path":"native/prompt_cache.zig","symbol":"check"},"scope":"host"}, {"step":"test-request-state","driver":{"path":"native/request_state_checks.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-session-rounds","driver":{"path":"native/session_checks.zig","symbol":"check"},"scope":"checkpoint"}, {"step":"test-server-prefixes","driver":{"path":"tools/native_server_checks.zig","symbol":"checkPrefixes"},"scope":"checkpoint"}],
-    "limitation": "HTTP text requests reuse complete prefill-chunk prefixes with memory-bounded LRU eviction. Adaptive message boundaries, persistence and disk spill remain missing."
+    "implementation": [{"path":"native/prompt_cache.zig","symbol":"Store"}, {"path":"native/prompt_cache.zig","symbol":"checkpoints"}, {"path":"native/prefill_plan.zig","symbol":"chunks"}, {"path":"native/chat.zig","symbol":"messageMarkers"}, {"path":"native/session.zig","symbol":"restorePrefix"}, {"path":"native/server.zig","symbol":"savePrefix"}],
+    "checks": [{"step":"test-prompt-cache","driver":{"path":"native/prompt_cache.zig","symbol":"check"},"scope":"host"}, {"step":"test-prefill-plan","driver":{"path":"native/prefill_plan.zig","symbol":"check"},"scope":"host"}, {"step":"test-request-state","driver":{"path":"native/request_state_checks.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-session-rounds","driver":{"path":"native/session_checks.zig","symbol":"check"},"scope":"checkpoint"}, {"step":"test-server-prefixes","driver":{"path":"tools/native_server_checks.zig","symbol":"checkPrefixes"},"scope":"checkpoint"}],
+    "limitation": "HTTP text requests reuse adaptive prefill boundaries with memory-bounded LRU eviction. History/stable checkpoint selection, persistence and disk spill remain missing."
   },
   {
     "id": "cache-buffers", "state": "present", "requirement": "KV buffer reuse without corrupting snapshots or retained prefixes",
@@ -177,10 +177,11 @@
     "checks": [{"step":"test-kv-buffers","driver":{"path":"native/kv_buffer_checks.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-kv-runtime","driver":{"path":"native/main.zig","symbol":"main"},"scope":"checkpoint"}]
   },
   {
-    "id": "chat-templates", "state": "present", "requirement": "Native tokenization and upstream chat templates for all seven checkpoints",
+    "id": "chat-templates", "state": "partial", "requirement": "Native tokenization and upstream chat templates for all seven checkpoints",
     "upstream": ["src/tensorfold/server/messages.py", "src/tensorfold/server/prompts.py", "src/tensorfold/families/tokenizer.py", "src/tensorfold/families/deepseek_v4/prompts.py", "src/tensorfold/families/deepseek_v4/vendor/__init__.py", "src/tensorfold/families/deepseek_v4/vendor/encoding_dsv4.py"],
     "implementation": [{"path":"native/chat.zig","symbol":"renderWithDefaults"}, {"path":"native/chat.zig","symbol":"encode"}],
-    "checks": [{"step":"test-chat","driver":{"path":"native/chat.zig","symbol":"check"},"scope":"checkpoint"}]
+    "checks": [{"step":"test-chat","driver":{"path":"native/chat.zig","symbol":"check"},"scope":"checkpoint"}],
+    "limitation": "Message markers match all seven upstream tokenizers. DeepSeek chat rendering still uses its checkpoint Jinja template; upstream's official encoder, including tool rendering and think-block handling, is not ported."
   },
   {
     "id": "tool-parsing-streaming", "state": "present", "requirement": "Qwen/Gemma/GLM/DeepSeek tool grammars, typed arguments, policy and incremental Qwen deltas",

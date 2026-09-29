@@ -366,6 +366,14 @@ def chat_fixture(directory, output):
             ids = render_prompt_ids(tokenizer, messages, tools=tools, enable_thinking=thinking, reasoning_effort=effort)
             cases.append({"body": body, "tokens": ids, "gates": gate_cases(ids)})
     output.parent.mkdir(parents=True, exist_ok=True)
+    from tensorfold.engine.prefill_plan import message_markers
+    deepseek = json.loads((directory / 'config.json').read_text()).get('model_type') == 'deepseek_v4'
+    marker_tokenizer = tokenizer
+    if deepseek:
+        from tensorfold.families.deepseek_v4.prompts import DeepSeekTokenizer
+        marker_tokenizer = DeepSeekTokenizer(tokenizer)
+    marks, assistant = message_markers(marker_tokenizer)
+    cases[0]['markers'] = dict(openers=marks, assistant=assistant, deepseek=deepseek)
     output.write_text(json.dumps(cases, ensure_ascii=False))
     print(f"Saved {len(cases)} upstream chat fixtures for {directory.name}")
 

@@ -38,6 +38,14 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, fixture, a, .limited(16 * 1024 * 1024));
     const cases = try std.json.parseFromSlice(V, a, bytes, .{});
     for (cases.value.array.items, 0..) |case, index| {
+        if (case.object.get("markers")) |expected| {
+            const markers = try template.messageMarkers(a, &tokenizer, expected.object.get("deepseek").?.bool);
+            for ([_][]const i32{ markers.openers, markers.assistant }, [_][]const u8{ "openers", "assistant" }) |ids, key| {
+                const wanted = expected.object.get(key).?.array.items;
+                try std.testing.expectEqual(wanted.len, ids.len);
+                for (ids, wanted) |id, value| try std.testing.expectEqual(value.integer, id);
+            }
+        }
         const rendered = try template.render(a, case.object.get("body").?);
         const ids = try encode(a, &tokenizer, rendered);
         const expected = case.object.get("tokens").?.array.items;
@@ -67,7 +75,8 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
             }
         };
     }
-    std.debug.print("PASS: {d} chat prompts, thinking budgets and required-call gates match upstream token IDs\n", .{cases.value.array.items.len});
+    const deepseek = if (cases.value.array.items[0].object.get("markers")) |markers| markers.object.get("deepseek").?.bool else false;
+    std.debug.print("PASS: {d} chat prompts, thinking budgets and required-call gates match {s} token IDs; adaptive markers match upstream\n", .{ cases.value.array.items.len, if (deepseek) "DeepSeek checkpoint-template" else "upstream" });
 }
 pub const Template = struct {
     arena: std.heap.ArenaAllocator,
@@ -108,6 +117,118 @@ pub const Template = struct {
     }
     pub fn deinit(t: *Template) void {
         t.arena.deinit();
+    }
+    pub fn messageMarkers(t: *const Template, a: std.mem.Allocator, tokenizer: *Tokenizer, deepseek: bool) !@import("prefill_plan.zig").Markers {
+        var scratch = std.heap.ArenaAllocator.init(a);
+        defer scratch.deinit();
+        const temp = scratch.allocator();
+        if (deepseek) {
+            const encoded = try tokenizer.encode(temp, "<｜Assistant｜>");
+            const assistant = try a.alloc(i32, encoded.len);
+            for (assistant, encoded) |*id, value| id.* = @intCast(value);
+            return .{ .assistant = assistant };
+        }
+        const Pair = struct { before: []const i32, after: []const i32, role: usize };
+        var pieces: [2]std.ArrayList([]const i32) = @splat(.empty);
+        var parted: std.ArrayList(Pair) = .empty;
+        for ([_][4][]const u8{ .{ "Alpha", "Beta", "Gamma", "Delta" }, .{ "one two", "three four", "five six", "seven eight" } }) |words| {
+            var talk = V{ .array = std.json.Array.init(temp) };
+            for (words, 0..) |word, i| {
+                var message = V{ .object = .empty };
+                try message.object.put(temp, "role", .{ .string = if (i % 2 == 0) "user" else "assistant" });
+                try message.object.put(temp, "content", .{ .string = word });
+                try talk.array.append(message);
+            }
+            for ([_]bool{ false, true }) |thinking| {
+                var renders: [4][]const i32 = undefined;
+                for (&renders, 1..) |*rendered, k| {
+                    rendered.* = t.markerTokens(temp, tokenizer, talk.array.items[0..k], thinking, false) catch |err| {
+                        if (err == error.OutOfMemory) return err;
+                        return .{};
+                    };
+                }
+                var generated: [2][]const i32 = undefined;
+                for (&generated, [_]usize{ 1, 3 }) |*rendered, k| {
+                    rendered.* = t.markerTokens(temp, tokenizer, talk.array.items[0..k], thinking, true) catch |err| {
+                        if (err == error.OutOfMemory) return err;
+                        return .{};
+                    };
+                }
+                const pairs = [_]Pair{
+                    .{ .before = renders[0], .after = renders[1], .role = 1 },
+                    .{ .before = renders[1], .after = renders[2], .role = 0 },
+                    .{ .before = renders[2], .after = renders[3], .role = 1 },
+                    .{ .before = renders[0], .after = generated[0], .role = 1 },
+                    .{ .before = renders[2], .after = generated[1], .role = 1 },
+                };
+                for (pairs) |pair| {
+                    if (pair.after.len > pair.before.len and std.mem.eql(i32, pair.before, pair.after[0..pair.before.len])) {
+                        try pieces[pair.role].append(temp, pair.after[pair.before.len..]);
+                    } else try parted.append(temp, pair);
+                }
+            }
+        }
+        const first_openers = try t.markerOpeners(temp, tokenizer, pieces);
+        for (parted.items) |pair| {
+            const split = @import("prompt_cache.zig").commonPrefix(pair.before, pair.after);
+            var start: ?usize = null;
+            var count: usize = 0;
+            for (pair.after[split..], split..) |id, i| if (std.mem.indexOfScalar(i32, first_openers, id) != null) {
+                start = i;
+                count += 1;
+            };
+            if (count == 1) try pieces[pair.role].append(temp, pair.after[start.?..]);
+        }
+        if (pieces[0].items.len == 0 or pieces[1].items.len == 0) return .{};
+        const openers = try t.markerOpeners(a, tokenizer, pieces);
+        errdefer a.free(openers);
+        const header = commonPieces(pieces[1].items);
+        const user = commonPieces(pieces[0].items);
+        const shared = @import("prompt_cache.zig").commonPrefix(header, user);
+        const assistant = if (shared < header.len and t.isSpecial(tokenizer, header[0])) try a.dupe(i32, header[0 .. shared + 1]) else &.{};
+        return .{ .openers = openers, .assistant = assistant };
+    }
+
+    fn markerTokens(t: *const Template, a: std.mem.Allocator, tokenizer: *Tokenizer, messages: []V, thinking: bool, generation: bool) ![]i32 {
+        var talk = V{ .array = std.json.Array.init(a) };
+        try talk.array.appendSlice(messages);
+        var context = V{ .object = try t.context.object.clone(a) };
+        try context.object.put(a, "enable_thinking", .{ .bool = thinking });
+        try context.object.put(a, "thinking_mode", .{ .string = if (thinking) "thinking" else "chat" });
+        return encode(a, tokenizer, .{ .text = try t.raw(a, talk, .null, context, generation, false), .images = .null, .thinking = thinking or !generation });
+    }
+
+    fn isSpecial(t: *const Template, tokenizer: *const Tokenizer, id: i32) bool {
+        for (tokenizer.flagged_specials) |special| if (special.id == id) return true;
+        var entries = t.context.object.iterator();
+        while (entries.next()) |entry| if (entry.value_ptr.* == .string) {
+            if (tokenizer.specialTokenId(entry.value_ptr.string)) |special| if (special == id) return true;
+        };
+        return false;
+    }
+
+    fn markerOpeners(t: *const Template, a: std.mem.Allocator, tokenizer: *const Tokenizer, pieces: [2]std.ArrayList([]const i32)) ![]i32 {
+        var found: std.ArrayList(i32) = .empty;
+        errdefer found.deinit(a);
+        for (pieces) |group| {
+            if (group.items.len == 0 or group.items[0].len == 0) continue;
+            const first = group.items[0][0];
+            if (!t.isSpecial(tokenizer, first)) continue;
+            var same = true;
+            for (group.items) |piece| if (piece.len == 0 or piece[0] != first) {
+                same = false;
+                break;
+            };
+            if (same and std.mem.indexOfScalar(i32, found.items, first) == null) try found.append(a, first);
+        }
+        std.mem.sort(i32, found.items, {}, std.sort.asc(i32));
+        return found.toOwnedSlice(a);
+    }
+
+    fn commonPieces(pieces: []const []const i32) []const i32 {
+        var common = pieces[0];
+        for (pieces[1..]) |piece| common = common[0..@import("prompt_cache.zig").commonPrefix(common, piece)];
+        return common;
     }
     pub fn callForm(t: *const Template, a: std.mem.Allocator, tokenizer: *Tokenizer) !?CallForm {
         const probe = try std.json.parseFromSlice(V, a,

@@ -152,12 +152,13 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
 | Request state and interleaved generation | `test-request-state test-session-rounds test-session-images -Doptimize=safe -j1` | Synthetic ownership for all backends; Qwen/Gemma/Nemotron checkpoints and Qwen image inputs |
 | Prefix cache policy and restoration | `test-prompt-cache test-session-rounds -Doptimize=safe -j1` | Python policy oracle; exact Qwen/Gemma/Nemotron continuation after prefix reuse and eviction |
+| Adaptive prefill boundaries and markers | `test-prefill-plan test-chat -Doptimize=safe -j1` | Python plan oracle and all seven local tokenizers; no model weights loaded |
 | HTTP prefix reuse and eviction | `test-server-prefixes -Doptimize=safe -j1` | Local Qwen; JSON/SSE parity, cancellation, LRU eviction and disabled caching |
 | Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream policy comparisons and Qwen/Gemma/Nemotron cache growth |
 | Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
-| Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven local tokenizers; no model weights loaded |
+| Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven tokenizers; DeepSeek's official chat encoder remains unported; no weights loaded |
 | Checkpoint metadata rejection | `test-schema-failures -Doptimize=safe -j1` | Installed schema checkpoints; no GPU |
 
 Start GPU verification with:
@@ -208,8 +209,9 @@ waiting requests and prompt-cache counters.
 `--prompt-cache-gib N` sets the retention target (default RAM/8, capped at 16 GiB;
 `0` disables caching). As upstream, a newest prefix may exceed this target when
 the process memory budget permits it. `--checkpoint-slots N` bounds ordinary entries (default
-`max(8, 3 * batch-streams)`). Reuse currently requires a complete prefill-chunk
-boundary and excludes image requests. Persistence and disk spill remain pending.
+`max(8, 3 * batch-streams)`). Text chunks follow upstream's adaptive message
+boundaries; reuse requires the same boundary in the new prompt. Image requests
+retain fixed chunks and bypass this cache. Persistence and disk spill remain pending.
 `--request-timeout-seconds N` sets an absolute deadline from connection acceptance
 through queuing and generation (default `0`, disabled). Cooperative cancellation
 returns HTTP 408 or an SSE error; stalled sockets close after a 250 ms allowance.

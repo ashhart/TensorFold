@@ -38,8 +38,10 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
     const Store = @import("prompt_cache.zig").Store(session.Snapshot);
     var store = try Store.init(a, 2, null);
     defer store.deinit();
-    const count = s.prefillStep();
-    const boundary = @import("prompt_cache.zig").Boundary{ .step = count };
+    const chunks = try (try s.prefillPlan()).chunks(a, prompt);
+    defer chunks.deinit(a);
+    const count = chunks.next(0);
+    const boundary = @import("prompt_cache.zig").Boundary{ .starts = chunks.starts };
     {
         var donor = try session.RequestGeneration.init(s, a, prompt, options, .{}, null);
         defer donor.deinit();
@@ -61,6 +63,12 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
         initialized += 1;
         var hit = (try store.match(prompt, boundary, false)) orelse return error.MissingPrefixHit;
         defer hit.deinit(a);
+        var invalid = try hit.cache.clone();
+        defer invalid.deinit();
+        switch (invalid) {
+            inline else => |*state| state.position += 1,
+        }
+        try std.testing.expectError(error.IncompatibleSnapshotBoundary, request.restorePrefix(&invalid));
         try request.restorePrefix(&hit.cache);
         try std.testing.expectEqual(count, request.memoryLengths().now);
         try std.testing.expectError(error.InvalidSnapshotState, request.restorePrefix(&hit.cache));
@@ -109,6 +117,23 @@ fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.
         completed += 1;
     }
     try prefixReuse(s, prompts[1], options[1], expected[1], baseline[1]);
+    if (s.prefillStep() > 256) {
+        const plan = try s.prefillPlan();
+        if (plan.assistant.len == 0) return error.MissingAssistantPrefillMarker;
+        const adaptive_prompt = try a.dupe(i32, prompts[1]);
+        defer a.free(adaptive_prompt);
+        for ([_]usize{ 320, 640 }) |at| @memcpy(adaptive_prompt[at..][0..plan.assistant.len], plan.assistant);
+        var adaptive_capture = Capture{};
+        defer adaptive_capture.deinit();
+        var cold = try G.init(m, tok, a, adaptive_prompt, options[1], adaptive_capture.sink(), null);
+        defer cold.deinit();
+        try cold.setPlan(plan);
+        try std.testing.expectEqual(@as(usize, 320), cold.chunks.next(0));
+        while (!try cold.step(m)) {}
+        var reference = try cold.takeReply();
+        defer reference.deinit(a);
+        try prefixReuse(s, adaptive_prompt, options[1], reference, adaptive_capture);
+    }
     var captured: [3]Capture = @splat(.{});
     defer for (&captured) |*capture| capture.deinit();
     var active: [3]G = undefined;

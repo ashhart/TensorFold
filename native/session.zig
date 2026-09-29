@@ -4,6 +4,7 @@ const tokenizer = @import("vendor/tokenizer.zig");
 const qwen = @import("model.zig");
 const sampling = @import("sampling.zig");
 const text = @import("reply_text.zig");
+const prefill_plan = @import("prefill_plan.zig");
 pub const Options = @import("request_options.zig").Options;
 
 pub const Backend = union(enum) {
@@ -69,7 +70,12 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
     pub fn init(s: *Session, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink, image: ?*@import("vision.zig").Prompt) !RequestGeneration {
         if (image != null and s.backend != .qwen) return error.UnsupportedModelImages;
         switch (s.backend) {
-            inline else => |*m, tag| return @unionInit(RequestGeneration, @tagName(tag), try Generation(@TypeOf(m.*)).init(m, &s.tokenizer, a, prompt, options, sink, image)),
+            inline else => |*m, tag| {
+                var request = try Generation(@TypeOf(m.*)).init(m, &s.tokenizer, a, prompt, options, sink, image);
+                errdefer request.deinit();
+                if (image == null) try request.setPlan(try s.prefillPlan());
+                return @unionInit(RequestGeneration, @tagName(tag), request);
+            },
         }
     }
 
@@ -97,9 +103,15 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
     pub fn snapshot(g: *const RequestGeneration) !?Snapshot {
         switch (g.*) {
             inline else => |*request, tag| {
-                if (request.image != null or request.reply.tokens.items.len != 0 or (request.phase != .prefill and request.phase != .decode) or request.offset == 0 or request.offset % @TypeOf(request.*).chunk_size != 0) return null;
+                if (request.image != null or request.reply.tokens.items.len != 0 or (request.phase != .prefill and request.phase != .decode) or !request.chunks.contains(request.offset)) return null;
                 return @unionInit(Snapshot, @tagName(tag), try request.state.clone());
             },
+        }
+    }
+
+    pub fn boundary(g: *const RequestGeneration) @import("prompt_cache.zig").Boundary {
+        switch (g.*) {
+            inline else => |*request| return .{ .starts = request.chunks.starts },
         }
     }
 
@@ -155,10 +167,28 @@ pub const Session = struct {
     io: std.Io,
     directory: []u8,
     chat_template: ?@import("chat.zig").Template = null,
+    prefill_plan: ?prefill_plan.Plan = null,
     pub fn prefillStep(s: *const Session) usize {
         switch (s.backend) {
             inline else => |m| return Generation(@TypeOf(m)).chunk_size,
         }
+    }
+    pub fn prefillPlan(s: *Session) !prefill_plan.Plan {
+        if (s.prefill_plan) |plan| return plan;
+        const step = s.prefillStep();
+        var plan = prefill_plan.Plan{ .step = step, .min_chunk = @min(256, step) };
+        if (s.chat_template == null) s.chat_template = @import("chat.zig").Template.load(mx.allocator, s.io, s.directory) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            s.prefill_plan = plan;
+            return plan;
+        };
+        const template = &s.chat_template.?;
+        const markers = try template.messageMarkers(template.arena.allocator(), &s.tokenizer, s.backend == .deepseek);
+        plan.openers = markers.openers;
+        plan.assistant = markers.assistant;
+        try plan.validate();
+        s.prefill_plan = plan;
+        return plan;
     }
     pub fn init(io: std.Io, dir: []const u8) !Session {
         var backend = try Backend.init(io, dir);
@@ -178,9 +208,10 @@ pub const Session = struct {
         return s.chat_template.?.renderWithDefaults(a, body, thinking, effort);
     }
     pub fn generate(s: *Session, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink) !Reply {
-        switch (s.backend) {
-            inline else => |*m| return generateModel(m, &s.tokenizer, a, prompt, options, sink, null),
-        }
+        var generation = try RequestGeneration.init(s, a, prompt, options, sink, null);
+        defer generation.deinit();
+        while (!try generation.step(s)) {}
+        return generation.takeReply();
     }
     pub fn generateImages(s: *Session, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink, images: []const @import("vision.zig").EncodedImage) !Reply {
         if (images.len == 0) return s.generate(a, prompt, options, sink);
@@ -224,6 +255,7 @@ pub fn Generation(comptime M: type) type {
         sink: Sink,
         image: ?*@import("vision.zig").Prompt,
         state: @import("request_state.zig").State(M),
+        chunks: prefill_plan.Chunks,
         reply: Reply,
         budget_arena: std.heap.ArenaAllocator,
         budget: @import("thinking_budget.zig").Budget,
@@ -244,11 +276,14 @@ pub fn Generation(comptime M: type) type {
             const budget = if (options.max_tokens == 0) @import("thinking_budget.zig").Budget{} else try @import("thinking_budget.zig").Budget.init(arena.allocator(), tok, options.thinking_budget);
             var settings = options.sampling;
             settings.seed = options.seed orelse sampling.seedFor(prompt);
-            return .{ .model = m, .a = a, .tokenizer = tok, .prompt = prompt, .options = options, .sink = sink, .image = image, .state = try @import("request_state.zig").State(M).init(m), .reply = .{ .prompt_tokens = prompt.len }, .budget_arena = arena, .budget = budget, .settings = settings, .phase = if (options.max_tokens == 0) .finished else .prefill };
+            const chunks = try (prefill_plan.Plan{ .step = chunk_size }).chunks(a, prompt);
+            errdefer chunks.deinit(a);
+            return .{ .model = m, .a = a, .tokenizer = tok, .prompt = prompt, .options = options, .sink = sink, .image = image, .state = try @import("request_state.zig").State(M).init(m), .chunks = chunks, .reply = .{ .prompt_tokens = prompt.len }, .budget_arena = arena, .budget = budget, .settings = settings, .phase = if (options.max_tokens == 0) .finished else .prefill };
         }
 
         pub fn deinit(g: *Self) void {
             g.state.deinit();
+            g.chunks.deinit(g.a);
             g.reply.deinit(g.a);
             g.budget_arena.deinit();
             g.* = undefined;
@@ -264,11 +299,19 @@ pub fn Generation(comptime M: type) type {
         pub fn restorePrefix(g: *Self, saved: *const @import("request_state.zig").State(M)) !void {
             if (g.phase != .prefill or g.offset != 0 or g.image != null or saved.rope_delta != 0 or saved.position <= 0) return error.InvalidSnapshotState;
             const offset: usize = @intCast(saved.position);
-            if (offset >= g.prompt.len or offset % chunk_size != 0 or saved.cache.len != g.state.cache.len) return error.IncompatibleSnapshotBoundary;
+            if (!g.chunks.contains(offset) or saved.cache.len != g.state.cache.len) return error.IncompatibleSnapshotBoundary;
             const copy = try saved.clone();
             g.state.deinit();
             g.state = copy;
             g.offset = offset;
+        }
+
+        pub fn setPlan(g: *Self, plan: prefill_plan.Plan) !void {
+            if (g.offset != 0 or g.image != null) return error.InvalidSnapshotState;
+            if (plan.step > chunk_size) return error.UnsupportedPrefillChunk;
+            const chunks = try plan.chunks(g.a, g.prompt);
+            g.chunks.deinit(g.a);
+            g.chunks = chunks;
         }
 
         /// One prefill chunk or one decoded token; no model pass survives the call.
@@ -285,7 +328,7 @@ pub fn Generation(comptime M: type) type {
         }
 
         fn prefill(g: *Self, m: *M) !void {
-            const count = @min(chunk_size, g.prompt.len - g.offset);
+            const count = g.chunks.next(g.offset) - g.offset;
             const tokens = g.prompt[g.offset..][0..count];
             var image_scope = mx.Scope{};
             defer image_scope.deinit();
