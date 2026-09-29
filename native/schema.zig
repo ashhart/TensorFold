@@ -2,7 +2,7 @@
 const std = @import("std");
 const mx = @import("mlx.zig");
 const DType = @import("safetensors.zig").DType;
-pub const Kind = enum { qwen, dflash, nemotron, flash, gemma, deepseek };
+pub const Kind = enum { qwen, dflash, nemotron, flash, gemma, deepseek, glm };
 const Spec = struct { name: []const u8, dtype: DType, shape: []const i32 };
 const Metadata = struct { dtype: DType, shape: []const i32 };
 fn source(kind: Kind) []const u8 {
@@ -13,6 +13,7 @@ fn source(kind: Kind) []const u8 {
         .flash => @embedFile("schemas/flash.json"),
         .gemma => @embedFile("schemas/gemma.json"),
         .deepseek => @embedFile("schemas/deepseek.json"),
+        .glm => @embedFile("schemas/glm.json"),
     };
 }
 fn check(spec: Spec, actual: ?Metadata) !void {
@@ -173,7 +174,7 @@ test "mixed affine schema follows config and rejects malformed quantization tens
     try std.testing.expectEqual(@as(?Spec, null), try adjusted(dense_scale, config.value, &shape, null));
 }
 test "checkpoint schemas are complete metadata sets with unique tensor names" {
-    const counts = [_]usize{ 1847, 81, 763, 3414, 1339, 2481 };
+    const counts = [_]usize{ 1847, 81, 763, 3414, 1339, 2481, 114160 };
     for (std.enums.values(Kind), counts) |kind, count| {
         const specs = try std.json.parseFromSlice([]const Spec, std.testing.allocator, source(kind), .{});
         defer specs.deinit();

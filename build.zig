@@ -114,6 +114,23 @@ pub fn build(b: *std.Build) void {
     large_kernels.step.dependOn(&large_fixture.step);
     b.step("test-large-family-kernels", "Compare synthetic GLM/DeepSeek kernels and host dispatch; full models remain unverified").dependOn(&large_kernels.step);
     metal_tests.dependOn(&large_kernels.step);
+    const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
+    var glm_previous: ?*std.Build.Step = null;
+    for (0..3) |case| {
+        const fixture = b.fmt("build/native-checks/glm-model-{d}", .{case});
+        const oracle_dir = b.fmt("{s}/oracle", .{fixture});
+        const native_dir = b.fmt("{s}/native", .{fixture});
+        const oracle = b.addSystemCommand(&.{ "env", "MLX_ENABLE_TF32=0", ".venv/bin/python", "tools/native_families_reference.py", fixture, if (case == 0) "--synthetic-glm" else if (case == 1) "--synthetic-glm-layout" else "--synthetic-glm-mixed", "--trace-layers", "--output", b.fmt("{s}/logits.npy", .{oracle_dir}), "--state-directory", oracle_dir });
+        if (glm_previous) |previous| oracle.step.dependOn(previous);
+        const native = b.addRunArtifact(exe);
+        native.addArgs(&.{ "check-glm-model", if (case == 1) b.fmt("{s}/mlxlm", .{fixture}) else fixture, native_dir });
+        native.step.dependOn(&oracle.step);
+        const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", oracle_dir, native_dir });
+        compare.step.dependOn(&native.step);
+        glm_previous = &compare.step;
+    }
+    glm_models.dependOn(glm_previous.?);
+    metal_tests.dependOn(glm_models);
     const simd_attention_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_attention_fixtures.py", "build/native-checks/simd-attention", "--simd" });
     const simd_attention = b.addRunArtifact(exe);
     simd_attention.addArgs(&.{ "check-attention", "build/native-checks/simd-attention" });

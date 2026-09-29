@@ -41,6 +41,7 @@ def main():
                     path.unlink()
             for path in source.glob("*.safetensors"):
                 (directory / path.name).symlink_to(path)
+            (directory / "config.json").write_bytes((source / "config.json").read_bytes())
             changed = copy.deepcopy(index)
             expected = "MissingWeight"
             target = directory / filename
@@ -75,7 +76,7 @@ def main():
                         metadata["unused.removed_tensor"] = metadata.pop(key)
                     elif case == "dtype":
                         dtype = metadata[key]["dtype"]
-                        metadata[key]["dtype"] = {"U32": "F32", "BF16": "F16", "F32": "U32", "I64": "F64"}[dtype]
+                        metadata[key]["dtype"] = {"U32": "F32", "BF16": "I16", "F32": "U32", "I64": "F64"}[dtype]
                         expected = "InvalidTensorDType"
                     elif case == "rank":
                         metadata[key]["shape"].insert(0, 1)

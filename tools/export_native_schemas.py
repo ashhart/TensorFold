@@ -16,6 +16,7 @@ RECIPES = (
     ("flash", "Qwen3.8-Flash-Next-MLX-4bit-MTP", "language_model."),
     ("gemma", "gemma-4-26b-a4b-it-4bit", "language_model."),
     ("deepseek", "DeepSeek-V4-Flash-4bit", ""),
+    ("glm", "GLM-5.3-Flash-MLX-4bit-MTP", ""),
 )
 
 

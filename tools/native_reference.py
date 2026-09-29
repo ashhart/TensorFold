@@ -88,6 +88,7 @@ def main():
     parser.add_argument("--image-mode", choices=("RGB", "RGBA", "L", "CMYK"))
     parser.add_argument("--image-orientation", type=int, choices=range(1, 9), default=1)
     parser.add_argument("--compare-vision", type=Path)
+    parser.add_argument("--compare-arrays", nargs=2, type=Path)
     parser.add_argument("--compare-reports", nargs="+")
     parser.add_argument("--require-rounds", action="store_true", help="Reject trivial EOS-before-decode parity runs")
     parser.add_argument("--generate", type=int, default=0)
@@ -99,19 +100,22 @@ def main():
     args = parser.parse_args()
     if args.vision_fixture:
         return vision_fixture(args.model, args.output, *args.vision_fixture, args.image_fixture, args.image_format, args.image_alpha, args.image_orientation, args.image_only, args.image_mode)
-    if args.compare_vision:
-        files = sorted((args.compare_vision / "python").glob("*.npy"))
-        assert files, "No vision oracle arrays"
+    if args.compare_vision or args.compare_arrays:
+        reference, actual = args.compare_arrays or (args.compare_vision / "python", args.compare_vision / "native")
+        files = sorted(reference.glob("*.npy"))
+        assert files, "No oracle arrays"
         failed = []
         for path in files:
             a = np.load(path)
-            b = np.load(args.compare_vision / "native" / path.name)
+            b = np.load(actual / path.name)
             equal = a.shape == b.shape and np.array_equal(a, b)
-            print(f"{path.stem}: {'PASS' if equal else 'FAIL'}, max difference {np.max(np.abs(a - b))}")
+            if not equal or len(files) <= 64:
+                difference = np.max(np.abs(a - b)) if a.shape == b.shape else "shape mismatch"
+                print(f"{path.stem}: {'PASS' if equal else 'FAIL'}, max difference {difference}")
             if not equal:
                 failed.append(path.stem)
         assert not failed, failed
-        print(f"PASS: {len(files)} vision arrays bit-exact")
+        print(f"PASS: {len(files)} arrays bit-exact")
         return
     if args.compare_reports:
         reports = [json.loads(Path(p).read_text()) for p in args.compare_reports]

@@ -43,6 +43,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         i += 1;
     }
     try settings.validate();
+    if (@hasDecl(M, "prepareRuntime")) try M.prepareRuntime();
     try mx.init();
     defer mx.shutdown();
     var model = try M.init(io, args[2]);
@@ -68,7 +69,8 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     }
     if (tokens.items.len == 0) return error.EmptyPrompt;
     if (tokens.items.len > 262144 or max_tokens > 262144 - tokens.items.len) return error.ContextLimitExceeded;
-    for (tokens.items) |id| if (id < 0 or id >= M.vocab) return error.InvalidToken;
+    const vocab = if (@hasField(M, "vocab")) model.vocab else M.vocab;
+    for (tokens.items) |id| if (id < 0 or id >= vocab) return error.InvalidToken;
     if (!seed_set) settings.seed = sampling.seedFor(tokens.items);
     var pending: i32 = 0;
     var offset: usize = 0;
@@ -93,7 +95,8 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     defer generated.deinit(a);
     while (generated.items.len < max_tokens) {
         try generated.append(a, @intCast(pending));
-        if (M.eos(pending) or generated.items.len == max_tokens) break;
+        const eos = if (@hasDecl(M, "isEos")) model.isEos(pending) else M.eos(pending);
+        if (eos or generated.items.len == max_tokens) break;
         var pass = try model.forward(&.{pending});
         defer pass.deinit();
         const ids = try sampling.rows(&model.kernels, &pass.scope, pass.logits, &.{model.position + 1}, settings);
