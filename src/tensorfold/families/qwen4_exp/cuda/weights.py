@@ -401,8 +401,22 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return make_q4(*triple(name))
 
     def cscale(name: str) -> torch.Tensor:
+        """RMS/HC gamma as the kernels expect it.
+
+        NVFP4 Flash Next stores *layer* HC / QK / PLE norms centered (apply ``1 + w``), but the
+        final ``hyper_connection_mixer.hc_norm`` (and some MTP norms) ship absolute gammas. A
+        checkpoint-wide ``around_one`` flag alone then overshoots the mixer (``1 + 2.75``) and
+        collapses chat logits toward ``<|im_end|>`` / repetition.
+        """
+
         w = raw(name).float()
-        return (w if around_one else 1.0 + w).contiguous()
+        if around_one:
+            return w.contiguous()
+        mean = float(w.mean())
+        frac_neg = float((w < 0).float().mean())
+        if mean > 0.75 and frac_neg < 0.05:
+            return w.contiguous()
+        return (1.0 + w).contiguous()
 
     def hc(name: str, inject: bool) -> HC:
         parts = [triple(name + ".input_mix_weight_down")]
