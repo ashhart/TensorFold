@@ -13,7 +13,7 @@ GROUP = 8          # streams a launch binds: Metal allows 31 buffers a kernel
 
 
 def _select(prefix: str, count: int) -> str:
-    return " : ".join(f"sg == {s} ? {prefix}{s}" for s in range(count - 1)) + f" : {prefix}{count - 1}"
+    return "".join(f"sg == {s} ? {prefix}{s} : " for s in range(count - 1)) + f"{prefix}{count - 1}"   # 1: CS0
 
 
 def _once(source: str, old: str, new: str, times: int = 1) -> str:

@@ -270,7 +270,9 @@ def test_streams_in_one_forward_equal_each_alone(tiny):
 
     model, _, _ = tiny
     # (40, 2, 1): a prompt chunk riding with two streams' decode windows
-    mixes = [(1, 1), (1, 4), (3, 1, 2, 2), (8, 8), (3, 1, 8, 5), (16, 2), (1, 2, 3, 1, 1, 2, 1, 1, 3, 1, 2), (40, 2, 1)]
+    # (2, 1, ..., 3): nine streams, a launch of eight and a launch of one
+    mixes = [(1, 1), (1, 4), (3, 1, 2, 2), (8, 8), (3, 1, 8, 5), (16, 2), (1, 2, 3, 1, 1, 2, 1, 1, 3, 1, 2), (40, 2, 1),
+             (2, 1, 1, 4, 1, 1, 2, 1, 3)]
     ok, failures = row_forward.check_streams(model.model, model.lm_head, model.make_cache, LaneEngine.copy_single_cache,
                                              mixes=mixes)
     assert ok, failures

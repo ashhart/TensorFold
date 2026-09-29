@@ -33,7 +33,6 @@ class NemotronH:
         self.args = model.args
         self.fused = None
         self._last_hidden: Any = None
-        self._spec: tuple[Any, int] | None = None
         if fused:
             from tensorfold.kernels.nemotron.lightning.v1 import rows
             from tensorfold.kernels.nemotron.lightning.v1.kernels import FusedDecode, tensor_units
@@ -469,7 +468,7 @@ class NemotronH:
         hidden = self._last_hidden[:, start:start + count]
         out = self._head_step(hidden, self.model.backbone.embeddings(tokens.reshape(1, -1)), mcache,
                               1 if last_only else None)
-        self._spec = (out, count, last_only)
+        mcache.speculation = (out, count, last_only)     # the stream's own: streams may speculate in turn
         logits = self._draft_logits(out)
         drafted = [position + 1 + count] if last_only else [position + 2 + i for i in range(count)]
         return gpu_sample(logits.reshape(logits.shape[1:]), sampling, drafted, ids=self._draft_ids)
@@ -482,8 +481,8 @@ class NemotronH:
         from tensorfold.engine.gpu_sampling import sample as gpu_sample
 
         mcache = cache[-1]
-        out, rows, last_only = self._spec
-        self._spec = None
+        out, rows, last_only = mcache.speculation
+        mcache.speculation = None
         if rows > keep:
             mcache.trim(rows - keep)
         if count <= 0:
@@ -504,9 +503,10 @@ class NemotronH:
     def unspeculate(self, cache: list[Any]) -> None:
         """Undo ``speculate`` entirely (the round's rows are absorbed another way)."""
 
-        if self._spec is not None:
-            cache[-1].trim(self._spec[1])
-            self._spec = None
+        spec = getattr(cache[-1], "speculation", None)
+        if spec is not None:
+            cache[-1].trim(spec[1])
+            cache[-1].speculation = None
 
 
 def _plain_matmuls(module: Any) -> None:

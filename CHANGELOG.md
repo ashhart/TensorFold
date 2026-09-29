@@ -3,6 +3,16 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.3.7 (29 Sep 2026)
+
+- **Nemotron on Macs serves concurrent requests again.** 0.3.6.3 kept one draft slot for all of a server's streams,
+  so several Nemotron requests at once could fail with HTTP 500 (5 of 6 in our test on an M3 Ultra). Each stream now
+  keeps its own: six requests at once all finish, and each reply equals the same request sent alone.
+- **Qwen3.8-27B on M1-M4 serves 9, 17 or 25 streams at once.** A round whose last group of recurrent streams held
+  one stream built a kernel Metal refused, and every stream in that round failed. That group now builds like the
+  others; rounds of 2-8 streams run the same kernels as before.
+- Versions have three parts from here on.
+
 ## 0.3.6.3 (29 Sep 2026)
 
 - **Images in, on Macs and Sparks.** `--vision` lets Qwen3.8-27B read up to four images a request, as data URLs or,
