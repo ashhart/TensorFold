@@ -143,6 +143,15 @@ TENSORFOLD_MEMORY_LIMIT_GB=110 tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4b
 On a 128 GiB M4 Max this gives 110 GiB to the process and 107 GiB to MLX after the 3 GiB reserve.
 The same budget reaches concurrent admission; context and request memory checks still apply.
 
+On CUDA, the admission budget is the GPU's free memory, bounded by available host RAM. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB`
+caps that grant from above in GiB, an absolute budget like the MLX one; free memory still caps it:
+
+```bash
+TENSORFOLD_CUDA_MEMORY_LIMIT_GB=31 tensorfold serve nvidia/Qwen3.8-27B-NVFP4
+```
+
+There is no reserve: a budget close to the card's total can end requests with CUDA errors mid-reply, and a
+limit you choose takes that risk knowingly.
 Requested replies need cache space too. Reduce context, reply length, retained prefixes on MLX, or
 checkpoint size after a memory refusal. The MLX process budget reserves 3 GiB outside the allocator.
 Release-qualified memory and speed results are TBD [release-0.3.5]; see the

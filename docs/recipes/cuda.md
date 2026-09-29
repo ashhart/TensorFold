@@ -197,6 +197,10 @@ extend a conversation resume there with a fresh prefill's bits.
 
 Cache capacity is fixed at startup and bounds prompt plus reply.
 A positive context that exceeds the startup budget is refused; automatic capacity is an estimate.
+The budget grants the GPU's free memory, bounded by available host RAM. `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` caps
+that grant from above in GiB, an absolute budget like the MLX one; free memory still caps it. There is no
+reserve: a budget close to the card's total can end requests with CUDA errors mid-reply (`PYTORCH_CUDA_ALLOC_CONF`
+`=` `expandable_segments:True` reduces fragmentation near the cap).
 Unified-memory GPUs share physical RAM with host buffers and file-backed model data. Admission uses
 available host memory, including reclaimable page cache, and considers mapped-table residency when sizing
 an automatic window. It accounts for stream count and retained caches where concurrency is enabled.

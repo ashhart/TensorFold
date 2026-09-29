@@ -9,12 +9,13 @@ import os
 from pathlib import Path
 import re
 import struct
-from typing import Callable
+from typing import Callable, Mapping
 
 GIB = 1024**3
 # safetensors dtype names -> bytes a value (FP8: the FP4 checkpoints' block scales)
 SIZES = {"U8": 1, "I8": 1, "BOOL": 1, "F8_E4M3": 1, "F8_E5M2": 1, "F8_E8M0": 1,
          "BF16": 2, "F16": 2, "I16": 2, "U16": 2, "U32": 4, "I32": 4, "F32": 4, "I64": 8, "U64": 8, "F64": 8}
+LIMIT_ENV = "TENSORFOLD_CUDA_MEMORY_LIMIT_GB"
 
 
 def itemsize(info: dict, name: str) -> int:
@@ -182,17 +183,41 @@ def host_stream_bytes() -> int | None:
     return max(0, memory["MemAvailable"] - reserve)
 
 
-def available_bytes(torch) -> int:
-    """The original unified-memory budget, or a discrete GPU's own budget; host staging is checked separately."""
+def memory_limit_bytes(environ: Mapping[str, str] | None = None) -> int | None:
+    """The admission budget's explicit GiB cap in bytes, or None when unset.
 
-    free, total = map(int, torch.cuda.mem_get_info())
-    available = max(0, free - reserve_bytes(total))
+    ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB`` caps the grant the same absolute way ``TENSORFOLD_MEMORY_LIMIT_GB``
+    caps the MLX budget. ValueError, naming the variable, for a nonpositive, non-finite, or non-numeric value.
+    """
+
+    value = (os.environ if environ is None else environ).get(LIMIT_ENV)
+    if value is None:
+        return None
+    try:
+        gib = float(value)
+    except ValueError:
+        raise ValueError(f"{LIMIT_ENV} must be a positive number in GiB") from None
+    if not math.isfinite(gib) or gib <= 0:
+        raise ValueError(f"{LIMIT_ENV} must be a positive number in GiB")
+    return int(gib * GIB)
+
+
+def available_bytes(torch) -> int:
+    """Free memory admission grants: GPU free memory, bounded by host memory on a discrete GPU.
+
+    One pool on a unified GPU: reclaimable page cache is available. ``TENSORFOLD_CUDA_MEMORY_LIMIT_GB``
+    caps the grant from above in GiB, an absolute budget like the MLX one; free memory still caps it.
+    There is no reserve: a budget close to the card's total can end requests with CUDA errors mid-reply.
+    """
+
+    free, _total = map(int, torch.cuda.mem_get_info())
     memory = _meminfo()
     if memory is None:
-        return available
-    if unified(torch):
-        return max(0, memory["MemAvailable"] - reserve_bytes(memory["MemTotal"], host=True))
-    return available
+        granted = free
+    else:
+        granted = memory["MemAvailable"] if unified(torch) else min(free, memory["MemAvailable"])
+    limit = memory_limit_bytes()
+    return max(0, min(granted, limit)) if limit is not None else max(0, granted)
 
 
 def total_bytes(torch) -> int:
@@ -231,7 +256,7 @@ def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
 
     fitting, keeps, resident = fit(budget), None, 0
     if weights.mapped and room is not None:
-        # windows up to ``resident`` keep mapped tables in the page cache, like the reserve; past it they page
+        # windows up to ``resident`` keep mapped tables in the page cache; past it they page
         resident = fit(min(budget, room - weights.mapped))
         if explicit:
             keeps = 0 < resident >= upper

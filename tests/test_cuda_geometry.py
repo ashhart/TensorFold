@@ -226,12 +226,12 @@ def test_weight_partition_rounding_and_float_casts():
     assert transform("model.visual.weight", info) == (0, 0)
 
 
-def test_unified_available_memory_uses_reclaimable_host_pages(monkeypatch):
+def test_gpu_and_host_available_memory_bound_the_grant(monkeypatch):
     from pathlib import Path
     fake = SimpleNamespace(cuda=SimpleNamespace(mem_get_info=lambda: (100 * capacity.GIB, 128 * capacity.GIB)))
     monkeypatch.setattr(Path, "read_text", lambda *a: "MemTotal: 134217728 kB\nMemAvailable: 62914560 kB\n")
     monkeypatch.setattr(capacity, "unified", lambda torch: True)
-    assert capacity.available_bytes(fake) == 60 * capacity.GIB - 128 * capacity.GIB // 10
+    assert capacity.available_bytes(fake) == 60 * capacity.GIB
 
 
 @pytest.mark.torch
