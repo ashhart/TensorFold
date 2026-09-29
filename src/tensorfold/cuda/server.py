@@ -1,8 +1,4 @@
-"""OpenAI server for the CUDA engines: a family's ``cuda_engine`` gives ``eos``, ``generate`` and ``follow``.
-
-An engine with ``structured_output`` set takes ``constraint`` in ``generate`` and enforces ``response_format``
-(``tensorfold.cuda.grammar``); other engines refuse it with a 400 rather than reply unconstrained.
-"""
+"""OpenAI server for the CUDA engines: a family's ``cuda_engine`` gives ``eos``, ``generate`` and ``follow``."""
 from __future__ import annotations
 
 import hashlib
@@ -17,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from tensorfold.cuda import grammar
+from tensorfold.engine import grammar
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.http import Server
@@ -50,7 +46,7 @@ class PreparedRequest:
     ignore_eos: bool = False
     stop: tuple[str, ...] = ()
     vision: Any = None
-    grammar: Any = None     # the compiled response_format, or None
+    grammar: Any = None     # (spec, compiled grammar) of the request's response_format, or None
 
 
 def _native_context(model_dir: Path) -> int:
@@ -97,27 +93,14 @@ class App:
             return "this model's CUDA engine has no serial switch (\"draft\": false)"
         if not isinstance(body.get("messages", []), list):
             return "messages must be a list"
-        try:
-            spec = grammar.request_spec(body)
-        except RequestError as exc:
-            return str(exc)
-        if spec is not None and not getattr(self.engine, "structured_output", False):
-            return f"{spec.field}: this model's CUDA engine does not enforce structured output"
-        if spec is not None and body.get("tools") and tool_choice_requires_call(body.get("tool_choice")):
-            return f'{spec.field} cannot be combined with tool_choice "required" or a named function: send one'
-        return None
+        problem = grammar.refusal(body)                 # a malformed grammar field, or one beside a required call
+        if problem is None and grammar.request_spec(body) and "constraint" not in inspect.signature(
+                self.engine.generate).parameters:
+            problem = "this model's engine does not enforce structured output"
+        return problem
 
     def _grammars(self) -> grammar.Grammars:
-        """The tokenizer's grammar compiler, built on the first structured request."""
-
-        found = getattr(self, "grammars", None)
-        if found is None:
-            model_dir = getattr(self, "model_dir", None)
-            vocab = grammar.vocab_size(model_dir) if model_dir is not None else None
-            if vocab is None:
-                raise RequestError("structured output needs the checkpoint's config.json vocab_size")
-            found = self.grammars = grammar.for_model(model_dir, vocab, tuple(self.engine.eos))
-        return found
+        return grammar.compiler(self, getattr(self, "model_dir", None), self.engine.eos)
 
     def _engine_capacity(self) -> int | None:
         capacities = []
@@ -177,7 +160,7 @@ class App:
         kwargs = dict(kwargs)
         thinking = bool(kwargs.pop("enable_thinking", self.default_thinking))
         spec = grammar.request_spec(body)
-        compiled = self._grammars().compile(spec) if spec is not None else None
+        compiled = (spec, self._grammars().compile(spec)) if spec is not None else None
         if chat:
             if not isinstance(body.get("messages"), list):
                 raise RequestError("messages must be a list")
@@ -335,7 +318,9 @@ class App:
         if takes_stop_eos:
             options["stop_eos"] = not prepared.ignore_eos
         if prepared.grammar is not None:    # response_format: a fresh grammar state, after </think> when thinking
-            options["constraint"] = self._grammars().constraint(prepared.grammar, after_think=chat and thinking)
+            spec, compiled = prepared.grammar
+            end = self.tok.token_to_id("</think>") if chat and thinking else None
+            options["constraint"] = self._grammars().constraint(compiled, think_end=end, spec=spec)
 
         def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
             extra = dict(options)

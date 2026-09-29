@@ -1,4 +1,5 @@
-"""response_format on the CUDA server: parsing, schemas compiled or refused, the grammar's windows (no GPU)."""
+"""Structured output: request parsing, grammars compiled or refused, the grammar's windows and masks (engine.grammar),
+and the CUDA server's requests (no GPU)."""
 
 import json
 import random
@@ -7,7 +8,8 @@ import threading
 
 import pytest
 
-from tensorfold.cuda import grammar, server
+from tensorfold.cuda import server
+from tensorfold.engine import grammar
 from tensorfold.server.errors import RequestError
 from tests.test_cuda_admission import http_server, post
 from tests.test_cuda_request_policy import TextTokenizer
@@ -30,6 +32,11 @@ SCHEMA = {"type": "object", "properties": {"k": {"type": "integer"}, "tag": {"ty
     ({"structured_outputs": {"json": SCHEMA}}, grammar.Spec("json_schema", json.dumps(SCHEMA), "structured_outputs")),
     ({"structured_outputs": {"json_object": True}}, grammar.Spec("json", field="structured_outputs")),
     ({"structured_outputs": {"json": None, "regex": None}}, None),
+    ({"guided_regex": "[a-z]+"}, grammar.Spec("regex", "[a-z]+", "guided_regex")),
+    ({"guided_choice": ["a", "b c"]}, grammar.Spec("choice", '["a", "b c"]', "guided_choice")),
+    ({"guided_grammar": 'root ::= "a"'}, grammar.Spec("grammar", 'root ::= "a"', "guided_grammar")),
+    ({"structured_outputs": {"regex": "[a-z]+"}}, grammar.Spec("regex", "[a-z]+", "structured_outputs")),
+    ({"structured_outputs": {"choice": ["x"]}}, grammar.Spec("choice", '["x"]', "structured_outputs")),
 ])
 def test_request_spec_reads_openai_and_vllm_fields(body, want):
     assert grammar.request_spec(body) == want
@@ -42,10 +49,10 @@ def test_request_spec_reads_openai_and_vllm_fields(body, want):
     ({"response_format": {"type": "json_schema", "json_schema": {"name": "v"}}}, "needs json_schema.schema"),
     ({"response_format": {"type": "json_schema", "json_schema": {"schema": "{nope"}}}, "not valid JSON"),
     ({"response_format": {"type": "json_schema", "json_schema": {"schema": [1, 2]}}}, "JSON schema object"),
-    ({"guided_regex": "[a-z]+"}, "guided_regex is not supported"),
-    ({"guided_choice": ["a", "b"]}, "guided_choice is not supported"),
-    ({"guided_grammar": "root ::= 'a'"}, "guided_grammar is not supported"),
-    ({"structured_outputs": {"regex": "[a-z]+"}}, "structured_outputs regex is not supported"),
+    ({"guided_regex": ""}, "guided_regex must be a non-empty string"),
+    ({"guided_choice": "a"}, "guided_choice must be a non-empty list"),
+    ({"guided_grammar": 3}, "guided_grammar must be a non-empty string"),
+    ({"structured_outputs": {"xml": "<a/>"}}, "structured_outputs xml is not supported"),
     ({"structured_outputs": "json"}, "must be an object"),
 ])
 def test_request_spec_refuses_malformed_or_unsupported_requests(body, words):
@@ -67,7 +74,7 @@ def grammars():
     pytest.importorskip("torch")
     vocab = [""] + [chr(t) for t in range(1, V)]
     info = xgr.TokenizerInfo(vocab, xgr.VocabType.RAW, vocab_size=V, stop_token_ids=[STOP])
-    return grammar.Grammars(info, think_end=THINK_END)
+    return grammar.Grammars(info)
 
 
 def _ids(text: str) -> list[int]:
@@ -109,10 +116,22 @@ def test_schemas_compile_or_are_refused_with_the_reason(grammars):
     for bad, words in (({"type": "nonsense"}, 'Unsupported type "nonsense"'),
                        ({"$ref": "#/definitions/missing"}, "definitions/missing"),
                        ({"type": "string", "pattern": "("}, "parenthesis")):
-        with pytest.raises(RequestError, match="the JSON schema cannot be enforced") as err:
+        with pytest.raises(RequestError, match="the grammar cannot be enforced") as err:
             grammars.compile(grammar.Spec("json_schema", json.dumps(bad), "guided_json"))
         message = str(err.value)
         assert message.startswith("guided_json: ") and words in message and ".cc:" not in message, message
+
+
+def test_json_allows_pretty_printing_but_not_endless_blanks(grammars):
+    c = _schema(grammars)
+    c.advance(_ids('{"k":1') + [ord(" ")] * grammar.BLANKS)
+    with pytest.raises(grammar.GrammarError, match="rejected chosen token"):
+        c.advance([ord(" ")])
+    c = _schema(grammars)
+    c.advance(_ids('{\n  "k": 1,\n  "tag": "a"\n}'))                 # newlines and indents: pretty-printed JSON
+    assert not c.finished
+    c.advance([STOP])
+    assert c.finished
 
 
 def test_a_window_keeps_the_rows_a_path_can_hold_and_masks_each_by_its_path(grammars):
@@ -136,10 +155,10 @@ def test_a_window_keeps_the_rows_a_path_can_hold_and_masks_each_by_its_path(gram
     assert _allowed(masked, 3) == {STOP}                                            # the grammar ends the reply
     # the matcher is back at the chosen tokens: the same window again, then a partial keep
     again = c.window(tokens, parents)
-    assert again.tokens == window.tokens and torch.equal(again.bits, window.bits)
+    assert again.tokens == window.tokens and (again.bits == window.bits).all()
     c.advance(_ids("1"))
     later = c.window(_ids("1}") + [STOP], [-1, 0, 1])
-    assert later.tokens == _ids("1}") and torch.equal(later.bits, window.bits[[1, 3]])
+    assert later.tokens == _ids("1}") and (later.bits == window.bits[[1, 3]]).all()
 
 
 def test_a_chain_stops_at_the_first_draft_the_grammar_rejects(grammars):
@@ -165,7 +184,7 @@ def test_the_grammar_follows_chosen_tokens_and_ends_with_the_stop_token(grammars
 def test_with_thinking_the_grammar_starts_after_think_end(grammars):
     import torch
 
-    c = _schema(grammars, after_think=True)
+    c = _schema(grammars, think_end=THINK_END)
     logits = torch.randn(4, V)
     window = c.window(_ids("abc"), [-1, 0, 1])
     assert window.tokens == _ids("abc") and window.rows == [] and torch.equal(c.mask(logits.clone(), window), logits)
@@ -282,7 +301,6 @@ class GrammarEngine:
     """Replies with ``content`` through the constraint's mask (any disallowed token would fail the reply)."""
 
     eos = (STOP,)
-    structured_output = True
 
     def __init__(self, content: str) -> None:
         self.content = content
@@ -304,7 +322,7 @@ class GrammarEngine:
 
 
 class PlainEngine:
-    """An engine as before this change: no ``constraint``, no ``structured_output``."""
+    """An engine without a ``constraint`` argument, as every engine was before structured output."""
 
     eos = (STOP,)
 
@@ -400,7 +418,7 @@ def test_bad_schemas_and_engines_without_grammars_are_refused_before_generating(
     with http_server(app) as port:
         for body, words in ((_body(stream, response_format=bad), 'Unsupported type "nonsense"'),
                             (_body(stream, response_format={"type": "xml"}), "text, json_object or json_schema"),
-                            (_body(stream, guided_regex="a+"), "guided_regex is not supported"),
+                            (_body(stream, guided_regex="("), "the grammar cannot be enforced"),
                             (_body(stream, response_format={"type": "json_object"}, tools=[tool],
                                    tool_choice="required"), 'cannot be combined with tool_choice "required"')):
             status, text = post(port, body, True)
@@ -437,8 +455,8 @@ def test_a_failed_grammar_ends_its_request_only(tmp_path, grammars, stream):
             assert status == 200 and events[-1]["error"]["type"] == "server_error"
             assert "rejected chosen token" in events[-1]["error"]["message"]
         else:
-            error = json.loads(text)["error"]
-            assert status == 500 and error["type"] == "server_error" and "rejected chosen token" in error["message"]
+            error = json.loads(text)["error"]                 # the server's 500 body, as for any failed reply
+            assert status == 500 and "rejected chosen token" in error["message"]
         status, text = post(port, _body(stream, response_format={"type": "json_object"}), True)
         assert status == 200 and json.loads(_content(stream, text)) == {"k": 7}
 

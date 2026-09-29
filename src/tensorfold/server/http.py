@@ -10,6 +10,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from tensorfold.engine import grammar
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
 from tensorfold.server.errors import CapacityError, RequestError
@@ -182,8 +183,11 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 temperature = float(body.get("temperature") or 0.0)
                 # Preserve raw sampling and scheduling options; an absent temperature differs from temperature zero.
                 sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "seed", "priority", "draft",
-                                                        "thinking_budget", "ignore_eos", "stop")
+                                                        "thinking_budget", "ignore_eos", "stop", *grammar.FIELDS)
                                    if k in body}
+                problem = grammar.refusal(body, app)        # compiled before a stream's headers: a bad grammar is a 400
+                if problem:
+                    raise RequestError(problem)
                 if tools and tool_choice_requires_call(body.get("tool_choice")):
                     sampling_fields["tool_call_required"] = True     # the engine opens the answer with a call
                 template_kwargs = body.get("chat_template_kwargs") or {}

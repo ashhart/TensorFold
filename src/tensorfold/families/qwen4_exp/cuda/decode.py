@@ -152,13 +152,13 @@ class Engine:
         return forward(self.w, self.st, self.buf, tokens)
 
     def sample(self, logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None, *,
-               draft: bool = False) -> list[int]:
-        """Rows of logits at their positions -> tokens (``draft``: logits of the MTP's draft head)."""
+               draft: bool = False, gathered: bool = True) -> list[int]:
+        """Rows of logits at their positions -> tokens (``draft``: the MTP head's; ``gathered``: own candidates)."""
 
         mapped = draft and self.w.draft_ids is not None
         if self.w.comm is not None:
             b = self.mbuf if draft else self.buf
-            if logits.data_ptr() == b.logits.data_ptr() and _gathered_fits(sampling):
+            if gathered and logits.data_ptr() == b.logits.data_ptr() and _gathered_fits(sampling):
                 return choose_gathered(self.w, b.cand_all, logits.shape[0], positions, sampling)
             return tp_sample_rows(self.w, logits, positions, sampling, offset=self.w.meta["vocab_offset"],
                                   id_map=self.w.draft_ids if mapped else None)
@@ -245,7 +245,7 @@ def draft(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int], position
 
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True,
-            resume: dict | None = None) -> int:
+            resume: dict | None = None, constraint=None) -> int:
     """Commit the prompt in chunks, sample the first token; rows ignore chunking, so ``resume`` equals a fresh run."""
 
     if not prompt:
@@ -279,7 +279,11 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
                 mtp_forward(w, st, pb, nxt, pb.streams[:len(nxt)])
                 st.set_mtp_len(st.mtp_len + len(nxt))
         commit(w, st, pb, R, R)
+    if constraint is not None:                           # a reply's grammar: this rank's vocabulary columns
+        last = constraint.mask(last, None, e.w.meta.get("vocab_offset", 0))
     first = e.sample(last, [len(prompt)], sampling)[0]
+    if constraint is not None:
+        constraint.advance([first])
     e.last_streams = streams_last
     e.first = first
     return first
@@ -314,7 +318,7 @@ class DecodeResult:
 
 @torch.no_grad()
 def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, stop_eos: bool = False,
-                  on_tokens=None) -> DecodeResult:
+                  on_tokens=None, constraint=None) -> DecodeResult:
     """One token a step through the same kernels and sampler; ``pending`` is the first sampled token. ``on_tokens(new)`` hears each step's token; it returns True to stop early."""
 
     w, st, b = e.w, e.st, e.buf
@@ -323,9 +327,13 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
     start = time.perf_counter()
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
         logits = e.forward([out[-1]])
-        tok = e.sample(logits[:1], [st.pos + 1], sampling)[0]
+        if constraint is not None:
+            constraint.mask(logits[:1], None, w.meta.get("vocab_offset", 0))
+        tok = e.sample(logits[:1], [st.pos + 1], sampling, gathered=constraint is None)[0]
         commit(w, st, b, 1, 1)
         out.append(tok)
+        if constraint is not None:
+            constraint.advance([tok])
         if on_tokens is not None and on_tokens([tok]):
             break
     torch.cuda.synchronize()
@@ -334,7 +342,7 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
 
 @torch.no_grad()
 def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, depth: int = DEPTH,
-               confidence: float = CONFIDENCE, stop_eos: bool = False, on_tokens=None) -> DecodeResult:
+               confidence: float = CONFIDENCE, stop_eos: bool = False, on_tokens=None, constraint=None) -> DecodeResult:
     """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True."""
 
     w, st, b = e.w, e.st, e.buf
@@ -349,9 +357,14 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     drafts = draft(e, e.last_streams, [pending], st.pos + 1, min(depth, count - len(out)), sampling, confidence)
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
         tokens = [out[-1]] + drafts
+        window = constraint.window(tokens, list(range(-1, len(tokens) - 1))) if constraint is not None else None
+        if window is not None:                           # the drafts no accepted path can hold are cut first
+            tokens, drafts = window.tokens, window.tokens[1:]
         R = len(tokens)
         logits = e.forward(tokens)
-        sampled = e.sample(logits[:R], [st.pos + 1 + r for r in range(R)], sampling)
+        if window is not None:
+            constraint.mask(logits[:R], window, w.meta.get("vocab_offset", 0))
+        sampled = e.sample(logits[:R], [st.pos + 1 + r for r in range(R)], sampling, gathered=window is None)
         keep = 1
         for i, d in enumerate(drafts):
             if sampled[i] != d or (stop_eos and sampled[i] in w.cfg.eos):
@@ -365,6 +378,8 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         keeps.append(keep)
         widths.append(R)
         new = sampled[:keep][:max(0, count - len(out))]
+        if constraint is not None:
+            constraint.advance(sampled[:keep])
         out.extend(sampled[:keep])
         if on_tokens is not None and new and on_tokens(new):
             break

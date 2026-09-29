@@ -10,6 +10,7 @@ import torch
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import Stream, accept
 from tensorfold.engine.exact_sampling import MARGIN, choose_rows
+from tensorfold.engine.grammar import GrammarError
 
 from .decode import PREFILL_ROWS, WARM_TAIL, Engine, draft, prefill
 from .forward import commit, compute, stage
@@ -114,7 +115,8 @@ class MultiDecoder:
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity)
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
         try:
-            first = prefill(e, s.prompt, s.sampling, mtp=mtp, resume=resume)
+            first = prefill(e, s.prompt, s.sampling, mtp=mtp, resume=resume,
+                            **({} if s.constraint is None else {"constraint": s.constraint}))
         except Exception:
             self.free.append(st)
             raise
@@ -136,10 +138,27 @@ class MultiDecoder:
         live = [s for s in self.streams.values() if not s.done]
         if not live:
             return []
+        grammars, failed = {}, []
+        for s in live:                                   # a grammar cuts the drafts no accepted path can hold
+            if s.constraint is not None:
+                tokens = [s.out[-1]] + list(s.drafts)
+                try:
+                    grammars[s.sid] = s.constraint.window(tokens, list(range(-1, len(tokens) - 1)))
+                except GrammarError as exc:              # this request ends with its error, the others go on
+                    s.error, s.done = exc, True
+                    failed.append(s)
+                    continue
+                s.drafts = grammars[s.sid].tokens[1:]
+        live = [s for s in live if not s.done]
+        if not live:
+            return failed
         windows = [(s.st, [s.out[-1]] + list(s.drafts)) for s in live]
         segs = stage(self.w, self.buf, windows)
         logits = compute(self.w, segs, self.buf)
         starts = [a0 for _, a0, _ in segs] + [segs[-1][2]]
+        for s, (_, a0, a1) in zip(live, segs):
+            if s.sid in grammars:
+                s.constraint.mask(logits[a0:a1], grammars[s.sid])
         positions = [[st.pos + 1 + r for r in range(a1 - a0)] for st, a0, a1 in segs]
         sampled = sample_streams(logits, starts, positions, [s.sampling for s in live])
         kept = []
@@ -149,12 +168,20 @@ class MultiDecoder:
             s.committed.extend(tokens[:len(path)])
             s.counted(len(tokens))
             new = [tokens[r] for r in path[1:]] + [end]
-            last = len(s.out) + len(new) >= s.count or end in self.eos
+            if s.constraint is not None:
+                try:
+                    s.constraint.advance(new)
+                except GrammarError as exc:
+                    s.error = exc
+            last = s.error is not None or len(s.out) + len(new) >= s.count or end in self.eos
             kept.append((s, a0, rows[:len(path)], new, last))
         self._draft_all([(s, a0, keep) for s, a0, keep, _, last in kept if s.draft and not last])
         for s, _, _, new, _ in kept:
+            if s.error is not None:
+                s.done = True
+                continue
             s.take(new, self.eos)
-        return [s for s in live if s.done]
+        return failed + [s for s in live if s.done]
 
     def _draft_all(self, streams: list) -> None:
         """Every drafting stream absorbs its kept rows and chains drafts, all streams in one step a depth."""

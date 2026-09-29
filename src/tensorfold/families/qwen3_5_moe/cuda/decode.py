@@ -57,7 +57,8 @@ def draft(logits: torch.Tensor, position: int, sampling: Sampling | None,
 @torch.no_grad()
 def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | None, *,
             state: State | None = None, cache: Cache | None = None, held: torch.Tensor | None = None,
-            stops: Sequence[int] = (), keep: Callable | None = None) -> tuple[State, Cache | None, int, Carry | None]:
+            stops: Sequence[int] = (), keep: Callable | None = None,
+            constraint=None) -> tuple[State, Cache | None, int, Carry | None]:
     """Commit the prompt, sample its next token, absorb all prompt rows but the last into the head; ``keep(p, ...)`` gets each stop's state."""
 
     st = clone_state(state) if state is not None else State(w)
@@ -83,7 +84,12 @@ def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | No
             held = rows[-1:]
         if end < len(prompt):
             keep(end, clone_state(st), mc.view() if mc is not None else None, held)
-    first = sample_rows(_mm(normed[-1:], w.head), [len(prompt)], sampling)[0]
+    logits = _mm(normed[-1:], w.head)
+    if constraint is not None:                           # a reply's grammar (tensorfold.engine.grammar)
+        logits = constraint.mask(logits)
+    first = sample_rows(logits, [len(prompt)], sampling)[0]
+    if constraint is not None:
+        constraint.advance([first])
     carry = Carry(held, [first]) if head is not None else None
     return st, mc, first, carry
 
@@ -95,7 +101,7 @@ COPY_ROWS = 16       # a copied continuation's verify window
 def mtp_decode(w, head: Head, st: State, mc: Cache, carry: Carry, pending: int, count: int,
                sampling: Sampling | None, *, depth: int, confidence: float, stop_eos: bool = True,
                on_tokens: Callable[[list[int]], bool | None] | None = None, runner=None,
-               prompt: Sequence[int] = ()) -> Result:
+               prompt: Sequence[int] = (), constraint=None) -> Result:
     """Each round: absorb the carry (its last row drafts first), then verify a copied continuation from the context or a chain of up to ``depth`` MTP drafts, and keep a path; ``runner``: a ``graphs.Graphs`` to decode in and replay."""
 
     if runner is not None:                               # copied into its fixed buffers; commits write in place
@@ -127,16 +133,23 @@ def mtp_decode(w, head: Head, st: State, mc: Cache, carry: Carry, pending: int, 
                 token, prob = draft(logits, n + 1 + len(guesses), sampling, head.ids)
                 guesses.append(token)
         tokens = [out[-1]] + guesses
+        window = constraint.window(tokens, list(range(-1, len(tokens) - 1))) if constraint is not None else None
+        if window is not None:                           # the drafts no accepted path can hold are cut first
+            tokens = window.tokens
         parents = list(range(-1, len(tokens) - 1))
         logits, record, states = verify(tokens)
+        if window is not None:
+            logits = constraint.mask(logits, window)
         sampled = sample_rows(logits, [n + 1 + i for i in range(len(tokens))], sampling)
         path, terminal = accept(tokens, parents, sampled, count - len(out), w.config.eos if stop_eos else ())
         commit(st, record, path, in_place=runner is not None)
         new = [tokens[r] for r in path[1:]] + [terminal]
+        if constraint is not None:
+            constraint.advance(new)
         carry = Carry(states[path[0]:path[-1] + 1], new)
         out.extend(new)
         context.extend(new)
-        rounds, drafted, kept = rounds + 1, drafted + len(guesses), kept + len(path) - 1
+        rounds, drafted, kept = rounds + 1, drafted + len(tokens) - 1, kept + len(path) - 1
         widths.append(len(tokens))
         if on_tokens is not None and on_tokens(new):
             break

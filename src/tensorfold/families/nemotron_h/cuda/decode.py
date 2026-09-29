@@ -39,7 +39,7 @@ class DecodeResult:
 
 @torch.no_grad()
 def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: Sampling | None, *,
-            resume: tuple | None = None) -> Prefilled:
+            resume: tuple | None = None, constraint=None) -> Prefilled:
     """``resume`` = (engine snapshot, head snapshot, kept length, the last hidden state the head has not absorbed)."""
 
     prompt = [int(t) for t in prompt]
@@ -60,6 +60,8 @@ def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: S
         if mtp is not None and resume[3] is not None:
             mtp.absorb_rows(resume[3], [prompt[begin]])
     eng.set_sampling(sampling)
+    if constraint is not None:                           # a reply's grammar masks the first token's row
+        eng.mask(constraint, constraint.window([0], [-1]))
     step = eng.prefill_rows
     last = None
     for s in range(begin, len(prompt), step):
@@ -72,13 +74,16 @@ def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: S
         last = len(chunk) - 1
     last_hidden = eng.p_hidden[last:last + 1].clone()
     pending = eng.prefill_token()
+    if constraint is not None:
+        eng.mask(None, None)
+        constraint.advance([pending])
     torch.cuda.synchronize()
     return Prefilled(prompt, pending, last_hidden, eng.snapshot(), mtp.snapshot() if mtp is not None else None)
 
 
 @torch.no_grad()
 def serial_decode(eng: Engine, pre: Prefilled, count: int, sampling: Sampling | None, *, stop_eos: bool = False,
-                  on_tokens: Callable[[list[int]], bool | None] | None = None) -> DecodeResult:
+                  on_tokens: Callable[[list[int]], bool | None] | None = None, constraint=None) -> DecodeResult:
     """``count`` tokens (the first is ``pre.pending``), one window of one row a token: the reference."""
 
     eng.restore(pre.engine)
@@ -87,13 +92,20 @@ def serial_decode(eng: Engine, pre: Prefilled, count: int, sampling: Sampling | 
     eos = set(eng.c.eos)
     torch.cuda.synchronize()
     start = time.perf_counter()
-    while len(out) < count and not (stop_eos and out[-1] in eos):
-        eng.forward([out[-1]])
-        tok = eng.tokens()[0]
-        eng.commit(1)
-        out.append(tok)
-        if on_tokens is not None and on_tokens([tok]):
-            break
+    try:
+        while len(out) < count and not (stop_eos and out[-1] in eos):
+            if constraint is not None:
+                eng.mask(constraint, constraint.window([out[-1]], [-1]))
+            eng.forward([out[-1]])
+            tok = eng.tokens()[0]
+            eng.commit(1)
+            out.append(tok)
+            if constraint is not None:
+                constraint.advance([tok])
+            if on_tokens is not None and on_tokens([tok]):
+                break
+    finally:
+        eng.mask(None, None)
     torch.cuda.synchronize()
     return DecodeResult(out, time.perf_counter() - start, len(out) - 1, widths=[1] * (len(out) - 1))
 
@@ -133,7 +145,7 @@ class CopyIndex:
 @torch.no_grad()
 def draft_decode(eng: Engine, mtp: MTPHead, pre: Prefilled, count: int, sampling: Sampling | None, *,
                  drafts: int = 3, confidence: float = 0.0, copy: bool = True, stop_eos: bool = False,
-                 on_tokens: Callable[[list[int]], bool | None] | None = None) -> DecodeResult:
+                 on_tokens: Callable[[list[int]], bool | None] | None = None, constraint=None) -> DecodeResult:
     """``confidence`` verifies the first draft, then more while the running confidence product stays at or above it."""
 
     if not 1 <= drafts <= min(eng.max_rows - 1, 8):
@@ -154,22 +166,31 @@ def draft_decode(eng: Engine, mtp: MTPHead, pre: Prefilled, count: int, sampling
     mtp.round(1, 0 if copied else drafts)
     while len(out) < count and not (stop_eos and out[-1] in eos):
         if copied:
-            eng.forward([out[-1]] + copied)
             proposal = copied
         else:
             n = mtp._count
-            if confidence > 0.0:
+            if confidence > 0.0 or constraint is not None:
                 mtp._copied.synchronize()
                 torch.cuda.current_stream().synchronize()
+            if confidence > 0.0:
                 run, n = 1.0, 0
                 for pr in mtp.confidences():
                     run *= pr
                     if n > 0 and run < confidence:
                         break
                     n += 1
+            proposal = mtp.drafts()[:n] if constraint is not None else None
+        if constraint is not None:                       # the grammar cuts the chain at its first rejected draft
+            window = constraint.window([out[-1]] + proposal, list(range(-1, len(proposal))))
+            proposal = window.tokens[1:]
+            n = len(proposal)
+            eng.mask(constraint, window)
+        if copied:
+            eng.forward([out[-1]] + proposal)
+        else:
             eng.forward([out[-1]], rows=1 + n)
         sampled = eng.tokens()
-        if not copied:
+        if not copied and constraint is None:
             proposal = mtp.drafts()[:n]
         accepted = 0
         while accepted < len(proposal) and proposal[accepted] == sampled[accepted]:
@@ -183,6 +204,8 @@ def draft_decode(eng: Engine, mtp: MTPHead, pre: Prefilled, count: int, sampling
         keep = accepted + 1
         eng.commit(keep)
         new = sampled[:keep]
+        if constraint is not None:
+            constraint.advance(new)
         out.extend(new)
         if index is not None:
             index.extend(new)
@@ -196,6 +219,7 @@ def draft_decode(eng: Engine, mtp: MTPHead, pre: Prefilled, count: int, sampling
             mtp.round(keep, 0 if copied else drafts)
         if on_tokens is not None and on_tokens(new):
             break
+    eng.mask(None, None)
     if mtp.pos < eng.pos:                   # the last round's kept rows, so the head covers every committed position
         mtp.round(eng.pos - mtp.pos, 0)
     torch.cuda.synchronize()

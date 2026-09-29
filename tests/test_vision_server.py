@@ -220,7 +220,7 @@ def fake_decode(monkeypatch):
         return (st, 65) if keep_at is None else (st, 65, (NS(pos=keep_at), None))
 
     module.prefill = prefill
-    module.draft_decode = lambda *args, **kwargs: NS(seconds=0, rounds=1, widths=[2])
+    module.draft_decode = lambda *args, **kwargs: NS(seconds=0, rounds=1, widths=[2], drafted_rows=1, accepted_drafts=0)
     monkeypatch.setitem(sys.modules, module.__name__, module)
     engine = Qwen27Engine.__new__(Qwen27Engine)
     engine.context_window, engine.scheduler, engine.tp = 32, None, 1

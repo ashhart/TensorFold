@@ -287,6 +287,35 @@ def test_tp_mtp_drafts_give_serial_tokens_on_both_ranks(models, sampling, kv_dty
         assert a["d5c_drafted"] <= a["d5_drafted"] and a["d7c90_drafted"] == a["d7c90_rounds"]
 
 
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95)])
+def test_tp_grammar_drafts_give_serial_tokens_on_both_ranks(models, sampling):
+    """A grammar on two ranks: each masks its own vocabulary columns and samples them without the step's gathered
+    candidates (they predate the mask); drafted == serial on both ranks, and the grammar takes every token."""
+
+    pytest.importorskip("xgrammar")
+    from toy_grammar import toy
+
+    grammars, compiled = toy(V)
+    _, ranks, _ = models
+
+    def body(r, e):
+        c = grammars.constraint(compiled)
+        first = prefill(e, PROMPT, sampling, constraint=c)
+        out = {"serial": serial_decode(e, first, 24, sampling, constraint=c).tokens}
+        for depth in (1, 3, 5):
+            c = grammars.constraint(compiled)
+            first = prefill(e, PROMPT, sampling, constraint=c)
+            out[depth] = mtp_decode(e, first, 24, sampling, depth=depth, confidence=0.0, constraint=c).tokens
+        return out
+
+    engines = [Engine(w, capacity=1024, max_rows=8, prefill_rows=16) for w in ranks]
+    a, b = _run_ranks(body, engines)
+    assert a == b and all(a[d] == a["serial"] for d in (1, 3, 5))
+    serial = a["serial"][:a["serial"].index(0) + 1] if 0 in a["serial"] else a["serial"]   # nothing after the end
+    m = grammars.xgr.GrammarMatcher(compiled)
+    assert all(m.accept_token(t) for t in serial)
+
+
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=77, top_k=20, top_p=0.95)])
 def test_tp_kept_drafts_give_serial_tokens(models, sampling, monkeypatch):
     """The random MTP head's drafts all miss, so rounds here draft serial decoding's own tokens with every fifth

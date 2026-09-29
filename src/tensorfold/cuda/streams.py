@@ -27,7 +27,7 @@ class Stream:
     committed: list[int] = field(default_factory=list)     # tokens committed after the prompt, on every rank
     drafts: list[int] = field(default_factory=list)       # an MTP family's drafts for the next round
     stops: list[int] = field(default_factory=list)        # prompt positions whose states the prefill keeps
-    constraint: Any = None                                # the reply's grammar (tensorfold.cuda.grammar), or None
+    constraint: Any = None                                # the reply's grammar (tensorfold.engine.grammar), or None
     error: Exception | None = None                        # why a stream ended without finishing
     done: bool = False
     rounds: int = 0

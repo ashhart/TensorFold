@@ -10,6 +10,7 @@ from typing import Any, Callable
 import uuid
 
 from tensorfold.engine.lane_engine import LaneEngine, SuffixLookupProposer
+from tensorfold.engine import grammar
 from tensorfold.server.admission import concurrency
 from tensorfold.server.checkpoints import (CheckpointStore, longest_common_prefix, prune_conversations,
                                            save_conversations, spill_conversation)
@@ -87,6 +88,7 @@ class ChatApp(RequestOptions):
         use_proposer: bool = True,
         snapshot_dir: Path | None = None,
         model_id: str = "",
+        model_dir: Path | None = None,
         memory_fraction: float | None = None,
         memory_overhead_bytes: int | None = None,
         fit_context: bool = False,
@@ -121,6 +123,7 @@ class ChatApp(RequestOptions):
             "note": "every token is the model's own sample at its position; drafts only change speed",
         }
         self.stop_ids = eos_ids_of(tokenizer)
+        self.model_dir = model_dir                    # response_format's grammar compiler reads its tokenizer
         self.late_system = template_late_system(tokenizer)
         self.engine = factory(model, max_rows=int(max_rows), max_draft=int(max_draft),
                               retain_finished_caches=int(checkpoint_slots) > 0)
@@ -376,6 +379,8 @@ class ChatApp(RequestOptions):
         system_len = 0 if prompt is not None or rendered.vision is not None else self.system_prefix_len(messages, tools, prompt_ids, thinking=thinking)
         spec = self._resolve_sampling(fields, temperature, prompt_ids)
         drafts = self.use_proposer and fields.get("draft", True) is not False
+        shaped = thinking and any(fields.get(k) is not None for k in grammar.FIELDS)
+        think_end = self._token_id(self.think_markers[1]) if shaped else -1     # a grammar starts after it
 
         def make_job() -> ChatJob:
             job = ChatJob(
@@ -392,6 +397,7 @@ class ChatApp(RequestOptions):
                 drafts=drafts,
                 ignore_eos=stops.ignore_eos, stop_check=stops if stops.strings else None,
                 cancellation=cancellation, call_gate=self._call_gate(fields, prompt_ids, tools),
+                constraint=grammar.request_constraint(self, fields, think_end if think_end >= 0 else None),
                 vision=rendered.vision,
             )
             budget = int(fields.get("thinking_budget") or self.thinking_budget) if thinking else 0

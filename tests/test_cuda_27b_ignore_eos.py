@@ -164,7 +164,7 @@ def test_the_engine_passes_stop_eos_to_the_one_gpu_decode(monkeypatch, allocatio
     monkeypatch.setattr(decode, "prefill", lambda w, prompt, sampling, drafter, state=None, keep_at=None, **kw:
                         (SimpleNamespace(pos=0), 5, (SimpleNamespace(pos=keep_at), None)))
     monkeypatch.setattr(decode, "draft_decode", lambda *a, **kw: seen.update(kw) or SimpleNamespace(
-        seconds=0.0, rounds=0, widths=[]))
+        seconds=0.0, rounds=0, widths=[], drafted_rows=0, accepted_drafts=0))
     eng = bare_engine(engine_mod)
     kw = {} if stop_eos is None else {"stop_eos": stop_eos}
     eng.generate([1, 2, 3], 8, None, lambda new: False, draft=draft, **kw)

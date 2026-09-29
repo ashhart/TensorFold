@@ -103,7 +103,8 @@ class Recorder:
     def decode(st, prompt, pending, max_tokens):
         assert st.ids == list(prompt)
         tokens = ([pending] + _reply(prompt)[1:])[:max(1, max_tokens)]
-        return SimpleNamespace(tokens=tokens, seconds=0.1, rounds=len(tokens), widths=[1] * len(tokens))
+        return SimpleNamespace(tokens=tokens, seconds=0.1, rounds=len(tokens), widths=[1] * len(tokens), drafted_rows=0,
+                               accepted_drafts=0)
 
 
 def _bare_engine(tp=1, rank=0, drafter=None):

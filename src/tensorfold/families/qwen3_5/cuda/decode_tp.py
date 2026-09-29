@@ -112,27 +112,30 @@ def first_token(w: Weights, normed: torch.Tensor, n: int, sampling: Sampling | N
 
     if world == 1:
         logits = _mm(normed, w.head)
-        if constraint is not None:              # a reply's grammar (tensorfold.cuda.grammar): masked, then followed
+        if constraint is not None:              # a reply's grammar (tensorfold.engine.grammar): masked, then followed
             constraint.mask(logits)
         first = sample_rows(logits, [n], sampling)[0]
         if constraint is not None:
             constraint.advance([first])
         return first
-    if constraint is not None:
-        raise ValueError("structured output runs on one GPU")
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
     last = _mm(normed, w.head) if split or rank == 0 else None
+    if constraint is not None and last is not None:  # each rank masks the vocabulary columns it holds
+        constraint.mask(last, None, rank * w.head.n if split else 0)
     if split:
         first = _sample_split(last, [n], sampling, rank)
     else:
         first = [sample_rows(last, [n], sampling)[0]] if rank == 0 else None
-    return _share(first, rank, w.norm.device)[0]
+    first = _share(first, rank, w.norm.device)[0]
+    if constraint is not None:
+        constraint.advance([first])
+    return first
 
 
 @torch.no_grad()
 def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, rank: int,
                draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
-               keep: Callable | None = None, keep_at: int | None = None, vision=None):
+               keep: Callable | None = None, keep_at: int | None = None, vision=None, constraint=None):
     """Both ranks prefill, from a kept ``state`` with a fresh prefill's bits; rank 0 shares the first token (``keep_at``: a third item, as ``decode.prefill``'s; the split chains are each rank's own)."""
 
     from .decode import prefill_stops
@@ -143,7 +146,7 @@ def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, ran
     taps = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
     out = prefill_stops(w, prompt, st, draft if taps else None, stops=stops, keep=keep, tp=True, keep_at=keep_at,
                         vision=vision)
-    first = first_token(w, out if keep_at is None else out[0], len(prompt), sampling, rank, 2)
+    first = first_token(w, out if keep_at is None else out[0], len(prompt), sampling, rank, 2, constraint)
     return (st, first) if keep_at is None else (st, first, out[1])
 
 
@@ -170,7 +173,7 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
               sampling: Sampling | None, rank: int, draft=None, *, max_rows: int = 16,
               allow_copy: bool = False, stop_eos: bool = True,
               on_tokens: Callable[[list[int]], bool | None] | None = None,
-              inplace: bool = False) -> DecodeResult | None:
+              inplace: bool = False, constraint=None) -> DecodeResult | None:
     """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token (``inplace``: as ``draft_decode``'s)."""
 
     device = w.norm.device
@@ -190,6 +193,8 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
     start = time.perf_counter()
     eos = tuple(w.config.eos)
     stopped = False
+    behind = False                  # rank 1 learns a round's last token as the next window's first
+    kept = None
     while True:
         stage = time.perf_counter()
         window: list[int] | None = None
@@ -209,6 +214,9 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
                         guesses, gparents = draft.propose_tree(out[-1], len(context), max_rows - 1, sampling)
                 window = [out[-1]] + list(guesses)
                 parents = [-1] + [0 if p < 0 else p + 1 for p in gparents]
+                if constraint is not None:          # the drafts no accepted path can hold are cut before the share
+                    kept = constraint.window(window, parents)
+                    window, parents = kept.tokens, kept.parents
             if tp_draft and not window:
                 _share([2, 0, 0], rank, device)                     # stop
         elif tp_draft:
@@ -219,6 +227,10 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
         if not packed:
             break
         window, parents = packed[:len(packed) // 2], packed[len(packed) // 2:]
+        if constraint is not None and rank != 0 and behind:
+            constraint.advance(window[:1])
+        masks = (kept if rank == 0 else constraint.window(window, parents)) if constraint is not None and (
+            split or rank == 0) else None
         stages["draft"] += time.perf_counter() - stage
         stage = time.perf_counter()
         taps_wanted = draft is not None and (rank == 0 or tp_draft)
@@ -230,6 +242,8 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
             logits, record = result
         path: list[int] | None = None
         terminal = -1
+        if masks is not None:                       # each rank masks the vocabulary columns it holds
+            constraint.mask(logits, masks, rank * w.head.n if split else 0)
         depths, _ = _paths(parents)
         positions = [st.pos + d + 1 for d in depths]
         sampled = _sample_split(logits, positions, sampling, rank) if split else None
@@ -243,6 +257,9 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
             stages["sample"] += time.perf_counter() - stage
             stage = time.perf_counter()
         path = _share(path, rank, device)
+        if constraint is not None:                  # rank 1 knows the kept drafts now, the last token next round
+            constraint.advance([window[r] for r in path[1:]] + ([terminal] if rank == 0 else []))
+            behind = rank != 0
         commit(st, record, path)
         committed.extend(window[row] for row in path)
         if taps_wanted:

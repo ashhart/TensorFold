@@ -208,8 +208,14 @@ class TPEngine(Engine):
     def prefill_moe(self, moe, normed, rows: int):
         return self.moe_tp(moe, normed, rows, prefill=True)
 
+    @property
+    def head_width(self) -> tuple[int, int]:
+        return self.local_head.n, self.rank * self.local_head.n
+
     def sample_last(self, normed, xs) -> None:
         logits = G.prefill_dense(normed, self.local_head)
+        if self.masked:
+            logits = logits + self.bias[:1]
         vals, ids = torch.topk(logits.float(), CANDIDATES, dim=-1)
         ids = ids + self.rank * self.local_head.n
         both = self.gather(torch.cat([vals.view(torch.int32), ids.view(torch.int32)], dim=1)).view(
@@ -237,6 +243,8 @@ class TPEngine(Engine):
         _, normed, xs = self.norm(x, delta, w.norm_f)
         self.hidden[:rows].copy_(normed)
         logits = G.dense(normed, self.local_head, xs)
+        if self.masked:
+            logits = logits + self.bias[:rows]
         vals, ids = torch.topk(logits.float(), CANDIDATES, dim=-1)
         ids = ids + self.rank * self.local_head.n
         both = self.gather(torch.cat([vals.view(torch.int32), ids.view(torch.int32)], dim=1)).view(

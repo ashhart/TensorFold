@@ -55,6 +55,7 @@ class ChatJob:
     ignore_eos: bool = False
     stop_check: Callable[[list[int]], bool] | None = None
     call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
+    constraint: Any = None                  # response_format's grammar (engine.grammar.Constraint), or None
     vision: Any = None
 
 
@@ -158,7 +159,7 @@ class Scheduler(PromptFill):
         self.stall_s = 120.0            # no round, start or finish while requests wait: dump stacks
         self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
-        self.decoded, self.prefilled = Meter(), ChunkRate()
+        self.decoded, self.prefilled = Meter(), ChunkRate()       # the live line's decode and prefill tok/s
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:
@@ -540,6 +541,7 @@ class Scheduler(PromptFill):
                 think_end=int(job.think_end),
                 think_open=bool(job.think_budget),
                 call_gate=job.call_gate,
+                constraint=job.constraint,
                 prompt_data=job.vision,
                 retain=job.vision is None,
             )
@@ -582,6 +584,8 @@ class Scheduler(PromptFill):
             self._discard_job(job)
             return
         stream = job.stream
+        if stream is not None and getattr(stream, "error", None) is not None and job.error is None:
+            job.error = stream.error                  # its grammar failed: this request alone answers with the error
         retained = self.engine.finished_caches.pop(job.job_id, None)
         if retained is not None and self.checkpoints is not None and job.vision is None:
             tokens, cache = retained

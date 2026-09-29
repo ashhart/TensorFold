@@ -19,7 +19,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 pytest.importorskip("xgrammar")
 
-from tensorfold.cuda import grammar  # noqa: E402
+from tensorfold.engine import grammar  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 
 MODEL = os.environ.get("TENSORFOLD_MLX_MODEL", "")
@@ -106,7 +106,7 @@ def chat(engine):
         return tok.encode(rendered, add_special_tokens=False).ids
 
     def fresh(name: str, thinking: bool = False):
-        return grammars.constraint(compiled[name], after_think=thinking)
+        return grammars.constraint(compiled[name], think_end=tok.token_to_id("</think>") if thinking else None)
 
     return type("Chat", (), {"prompt": staticmethod(prompt), "fresh": staticmethod(fresh), "tok": tok})
 

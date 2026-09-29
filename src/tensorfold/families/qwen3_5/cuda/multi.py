@@ -6,7 +6,7 @@ import time
 
 import torch
 
-from tensorfold.cuda.grammar import GrammarError
+from tensorfold.engine.grammar import GrammarError, pack
 from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import PrefixCache, Stream, accept
@@ -122,8 +122,9 @@ class MultiDecoder:
         hit = self.cache.longest(s.prompt) if s.draft and encoded is None else None
         s.sid, s.cached = self.next_id, len(hit[0]) if hit else 0
         self.next_id += 1
+        # the request's grammar rides after the fields (rank 1 compiles the same): a plain ADMIT is unchanged
         self._send([ADMIT, s.sid, s.count, int(s.draft), s.cached, *pack_sampling(s.sampling),
-                    int(encoded is not None)])
+                    int(encoded is not None), *pack(s.constraint)])
         self._send(list(s.prompt))
         if self.world == 2 and encoded is not None:     # rank 1 takes the image rows as rank 0 encoded them
             from tensorfold.vision.qwen_cuda import broadcast_encoded
@@ -321,13 +322,15 @@ class MultiDecoder:
             self._send([x for tokens, parents in wins for x in (len(tokens), *tokens, *parents)])
         else:
             wins = _unflatten(_share(None, 1, self.device), pairs=True)
+            grammars = self._masks(plan, wins) if self.split else {}
         states = [self.streams[item[0]].st for item in plan]
         taps_wanted = self.drafts and any(self.streams[item[0]].draft for item in plan)
         logits, record, taps, starts = multi_tree_forward(
             self.w, [(t, p, st) for (t, p), st in zip(wins, states)],
             full_logits=self.split or self.rank == 0, tp=self.world == 2, capture_taps=taps_wanted)
         for k, window in grammars.items():          # a constrained stream's rows, each masked by its path
-            self.streams[plan[k][0]].constraint.mask(logits[starts[k]:starts[k + 1]], window)
+            self.streams[plan[k][0]].constraint.mask(logits[starts[k]:starts[k + 1]], window,
+                                                     self.rank * self.w.head.n if self.split else 0)
         positions = [[st.pos + d + 1 for d in _paths(parents)[0]] for (_, parents), st in zip(wins, states)]
         samplings = [self.streams[item[0]].sampling for item in plan]
         if self.split:                                # both ranks gather their halves' candidates
@@ -352,6 +355,18 @@ class MultiDecoder:
                 continue
             wins[k] = (window.tokens, window.parents)
             grammars[k] = window
+        return grammars
+
+    def _masks(self, plan, wins) -> dict:
+        """Rank 1 of a split head: each constrained stream's rows masked as rank 0 masks them (it sent the windows)."""
+
+        grammars = {}
+        for k, (sid, *_) in enumerate(plan):
+            s = self.streams[sid]
+            if s.constraint is not None:
+                if getattr(s, "behind", False):         # the last round's final token is this window's first
+                    s.constraint.advance(wins[k][0][:1])
+                grammars[k] = s.constraint.window(*wins[k])
         return grammars
 
     def _commit(self, plan, wins, record, taps, starts, paths) -> None:
@@ -410,6 +425,11 @@ class MultiDecoder:
 
                     vision = broadcast_encoded(None, 1, self.device, hidden=self.w.config.hidden,
                                                prompt_length=len(s.prompt))
+                packed = msg[20:]
+                if packed:                              # compiled here as on rank 0
+                    from tensorfold.engine import grammar
+
+                    s.constraint = grammar.compiler(self, self.model_dir, self.eos).follow(packed)
                 hit = self.cache.named(s.prompt, cached) if cached else None
                 if cached and hit is None:
                     raise RuntimeError(f"rank 1 has no cached state for the {cached} tokens rank 0 resumes from")
@@ -423,6 +443,11 @@ class MultiDecoder:
                 wins, record, taps, starts, _ = self._verify(plan)
                 paths = _unflatten(_share(None, 1, self.device), pairs=False)
                 self._commit(plan, wins, record, taps, starts, paths)
+                for (sid, *_), (tokens, _), path in zip(plan, wins, paths):
+                    s = self.streams[sid]
+                    if s.constraint is not None and self.split:     # the kept drafts now, the last token next round
+                        s.constraint.advance([tokens[r] for r in path[1:]])
+                        s.behind = True
             elif msg[0] == DONE:
                 for sid in msg[2:2 + msg[1]]:
                     self._finish(sid)

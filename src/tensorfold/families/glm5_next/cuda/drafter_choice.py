@@ -108,7 +108,8 @@ def auto_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampling
             drafts = drafter.propose(out[-1], depth, sampling, f_policy.confidence)
             steps = 0
         t1 = time.perf_counter()
-        tokens = [out[-1]] + drafts
+        tokens = e.verify_window([out[-1]] + drafts)
+        drafts = tokens[1:]
         R = len(tokens)
         logits = e.forward(tokens)
         torch.cuda.synchronize()
@@ -144,6 +145,7 @@ def auto_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampling
         depths.append(len(drafts))
         keeps.append(keep)
         arms.append(arm)
+        e.follow(sampled[:keep])
         out.extend(sampled[:keep])
         if on_tokens is not None:
             on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])

@@ -16,7 +16,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _worker(rank: int, port: int, out, split: bool, ids: bool):
+def _worker(rank: int, port: int, out, split: bool, ids: bool, shaped: bool = False):
     import sys
 
     import torch.distributed as dist
@@ -52,18 +52,30 @@ def _worker(rank: int, port: int, out, split: bool, ids: bool):
             drafted.append(draft_decode(eng, mtp, pre, 40, sampling, drafts=d, copy=False).tokens)
             even = even and all(t % 2 == 0 for t in mtp.drafts())
         results[name] = (serial.tokens, drafted)
+        if shaped:                            # each rank masks its own head columns by the same grammar state
+            from toy_grammar import toy
+
+            grammars, compiled = toy(512)
+            c = grammars.constraint(compiled)
+            serial = serial_decode(eng, prefill(eng, mtp, prompt, sampling, constraint=c), 40, sampling, constraint=c)
+            drafted = []
+            for d in (1, 3):
+                c = grammars.constraint(compiled)
+                drafted.append(draft_decode(eng, mtp, prefill(eng, mtp, prompt, sampling, constraint=c), 40, sampling,
+                                            drafts=d, copy=False, constraint=c).tokens)
+            results[name + "-grammar"] = (serial.tokens, drafted)
     out.put((rank, results, even))
     dist.barrier()
     dist.destroy_process_group()
 
 
-def _run_pair(split: bool = False, ids: bool = False):
+def _run_pair(split: bool = False, ids: bool = False, shaped: bool = False):
     import torch.multiprocessing as mp
 
     ctx = mp.get_context("spawn")
     out = ctx.Queue()
     port = _free_port()
-    procs = [ctx.Process(target=_worker, args=(r, port, out, split, ids)) for r in (0, 1)]
+    procs = [ctx.Process(target=_worker, args=(r, port, out, split, ids, shaped)) for r in (0, 1)]
     for p in procs:
         p.start()
     items = [out.get(timeout=600) for _ in procs]
@@ -86,3 +98,12 @@ def test_two_rank_drafted_equals_serial():
     split_ids = _run_pair(split=True, ids=True)               # same verified tokens
     for name in whole:
         assert split[name][0] == whole[name][0] and split_ids[name][0] == whole[name][0]
+
+
+def test_two_rank_grammar_drafted_equals_serial():
+    """A grammar on two ranks: each masks its half of the head, both follow the same tokens, drafted == serial."""
+
+    pytest.importorskip("xgrammar")
+    split = _run_pair(split=True, shaped=True)
+    for name in ("keyed", "greedy"):
+        assert split[name + "-grammar"][0] != split[name][0]              # the grammar changed the reply

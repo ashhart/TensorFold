@@ -82,6 +82,7 @@ class NemotronEngine:
             if self.mtp is not None:
                 self.mtp.capture(range(1, self.e.max_rows + 1), (0, self.drafts))
         self.eos = tuple(self.e.c.eos)
+        self.model_dir = Path(model_dir)
         self.served = 0
         self.cache: list[tuple[list[int], dict]] = []       # (committed ids, what resuming from them needs)
         self.serial = None                                    # the serial requests' engine, made on first use
@@ -122,13 +123,16 @@ class NemotronEngine:
         if self.tp == 2 and self.rank == 0:
             self.comm.store.set(self._key(self.served), json.dumps({"stop": True}))
 
-    def _share(self, prompt: list[int], max_tokens: int, sampling, draft: bool, cached: int) -> tuple:
+    def _share(self, prompt: list[int], max_tokens: int, sampling, draft: bool, cached: int, constraint=None) -> tuple:
+        from tensorfold.engine.grammar import pack
+
         body = {"prompt": prompt, "max_tokens": max_tokens, "draft": bool(draft), "cached": int(cached),
                 "sampling": None if sampling is None else [int(sampling.seed), float(sampling.temperature),
-                                                           int(sampling.top_k), float(sampling.top_p)]}
+                                                           int(sampling.top_k), float(sampling.top_p)],
+                "grammar": pack(constraint)}                 # rank 1 walks and masks the same rows
         text = json.dumps(body)
         self.comm.store.set(self._key(self.served), text)
-        return _unpack(text)
+        return _unpack(text)[:5]
 
     def _receive(self) -> tuple | None:
         from torch.distributed import DistNetworkError
@@ -173,7 +177,7 @@ class NemotronEngine:
             raise ValueError(f"a prompt of {len(prompt)} tokens leaves no room in the {self.max_len}-token context")
         return max(1, min(max_tokens, room))
 
-    def _serial(self, prompt: list[int], max_tokens: int, sampling, on_tokens) -> dict[str, Any]:
+    def _serial(self, prompt: list[int], max_tokens: int, sampling, on_tokens, constraint=None) -> dict[str, Any]:
         """One token a round from a fresh prefill in the serial engine's own state (no drafts, no kept states)."""
 
         from .decode import prefill, serial_decode
@@ -183,15 +187,16 @@ class NemotronEngine:
             for mode in (_default_sampling(), None):
                 self.serial.capture([1], mode)
         t0 = time.perf_counter()
-        pre = prefill(self.serial, None, prompt, sampling)
+        pre = prefill(self.serial, None, prompt, sampling, constraint=constraint)
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": 0, "drafts": False}
         if (on_tokens is not None and on_tokens([pre.pending])) or pre.pending in self.eos or max_tokens <= 1:
             return stats
-        res = serial_decode(self.serial, pre, max_tokens, sampling, stop_eos=True, on_tokens=on_tokens)
+        res = serial_decode(self.serial, pre, max_tokens, sampling, stop_eos=True, on_tokens=on_tokens,
+                            constraint=constraint)
         stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, decode_tps=round(res.tokens_per_second, 2))
         return stats
 
-    def _decode(self, prompt: list[int], max_tokens: int, sampling, on_tokens, hit) -> dict[str, Any]:
+    def _decode(self, prompt: list[int], max_tokens: int, sampling, on_tokens, hit, constraint=None) -> dict[str, Any]:
         from .decode import draft_decode, prefill, serial_decode
 
         t0 = time.perf_counter()
@@ -201,7 +206,7 @@ class NemotronEngine:
             n = len(hit[0])
             self.cache = [c for c in self.cache if len(c[0]) <= n or c[0][:n] != hit[0]]
         resume = None if hit is None else (hit[1]["engine"], hit[1]["mtp"], len(hit[0]), hit[1]["tail"])
-        pre = prefill(self.e, self.mtp, prompt, sampling, resume=resume)
+        pre = prefill(self.e, self.mtp, prompt, sampling, resume=resume, constraint=constraint)
         # the prompt's state: the head has absorbed every position but the last, whose hidden state resume needs
         self._remember(list(prompt), {"engine": pre.engine, "mtp": pre.mtp, "tail": pre.last_hidden})
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
@@ -210,28 +215,29 @@ class NemotronEngine:
             return stats
         if self.mtp is not None:
             res = draft_decode(self.e, self.mtp, pre, max_tokens, sampling, drafts=self.drafts,
-                               confidence=self.confidence, stop_eos=True, on_tokens=on_tokens)
+                               confidence=self.confidence, stop_eos=True, on_tokens=on_tokens, constraint=constraint)
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
-            res = serial_decode(self.e, pre, max_tokens, sampling, stop_eos=True, on_tokens=on_tokens)
+            res = serial_decode(self.e, pre, max_tokens, sampling, stop_eos=True, on_tokens=on_tokens,
+                                constraint=constraint)
         stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, decode_tps=round(res.tokens_per_second, 2))
         return stats
 
     def generate(self, prompt: list[int], max_tokens: int, sampling,
-                 on_tokens: Callable[[list[int]], bool | None], draft: bool = True) -> dict[str, Any]:
+                 on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None) -> dict[str, Any]:
         """``draft=False``: the serial reference, one token a round from a fresh prefill in the twin engine."""
 
         max_tokens = self._limit(prompt, max_tokens)
         hit = self._resume(prompt) if draft else None
         if self.tp == 2:                     # rank 0 decodes exactly what it hands rank 1
             prompt, max_tokens, sampling, draft, _ = self._share(prompt, max_tokens, sampling, draft,
-                                                                 len(hit[0]) if hit else 0)
+                                                                 len(hit[0]) if hit else 0, constraint)
             self.served += 1
             emit = on_tokens
             on_tokens = lambda new: (emit(new), False)[1]       # noqa: E731  both ranks decode to the end
         if not draft:
-            return self._serial(prompt, max_tokens, sampling, on_tokens)
-        return self._decode(prompt, max_tokens, sampling, on_tokens, hit)
+            return self._serial(prompt, max_tokens, sampling, on_tokens, constraint)
+        return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint)
 
     def follow(self) -> None:
         """Rank 1: decode every request rank 0 serves, until rank 0 stops."""
@@ -240,7 +246,12 @@ class NemotronEngine:
             request = self._receive()
             if request is None:
                 return
-            prompt, max_tokens, sampling, draft, cached = request
+            prompt, max_tokens, sampling, draft, cached, packed = request
+            constraint = None
+            if packed:                                      # the request's grammar, compiled here as on rank 0
+                from tensorfold.engine import grammar
+
+                constraint = grammar.compiler(self, self.model_dir, self.eos).follow(packed)
             self.served += 1
             hit = None
             if draft and cached:
@@ -250,9 +261,9 @@ class NemotronEngine:
                     raise RuntimeError(f"rank 1 has no kept state for the {cached} tokens rank 0 resumes from")
             try:
                 if draft:
-                    self._decode(prompt, max_tokens, sampling, None, hit)
+                    self._decode(prompt, max_tokens, sampling, None, hit, constraint)
                 else:
-                    self._serial(prompt, max_tokens, sampling, None)
+                    self._serial(prompt, max_tokens, sampling, None, constraint)
             except ValueError as exc:                       # rank 0 raised at the same point on the same input
                 print(f"[tensorfold] request {self.served} failed on both ranks: {exc}", flush=True)
 
@@ -271,4 +282,4 @@ def _unpack(text: str) -> tuple | None:
         return None
     s = body["sampling"]
     return (body["prompt"], body["max_tokens"], None if s is None else Sampling(s[0], s[1], s[2], s[3]), body["draft"],
-            body["cached"])
+            body["cached"], body.get("grammar") or [])

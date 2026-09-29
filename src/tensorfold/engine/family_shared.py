@@ -79,6 +79,9 @@ class SharedRounds:
             plans.append([stream, cache, stream.cache_len, kind, drafts, forced, parents])
 
         self._allocate(plans)
+        for plan in plans:                                   # after the rows are allocated: the windows verified
+            if plan[0].constraint is not None:
+                plan[3], plan[4], plan[5], plan[6] = self._constrained(plan[0], *plan[3:7])
         windows = [self._window_tokens(p[0], p[4]) for p in plans]
         lengths = [int(w.shape[0]) for w in windows]
         rows_parents = [self._row_parents(n, p[6]) for p, n in zip(plans, lengths)]
@@ -89,6 +92,11 @@ class SharedRounds:
         logits = logits.reshape(logits.shape[1:])
         offsets = [sum(lengths[:k]) for k in range(len(plans))]
         positions = [[plan[2] + 1 + d for d in tree_paths(rp)[0]] for plan, rp in zip(plans, rows_parents)]
+        kept = [self._grammar_window.pop(plan[0].stream_id, None) for plan in plans]
+        if any(w is not None for w in kept):                 # a constrained stream's rows, masked by their paths
+            logits = mx.concatenate([
+                plan[0].constraint.mask(logits[at:at + n], w) if w is not None else logits[at:at + n]
+                for plan, w, at, n in zip(plans, kept, offsets, lengths)])
         parts = [self._draw_streams(logits, [(plan[0].sampling, at) for plan, at in zip(plans, positions)])]
         for plan in plans:
             if isinstance(plan[4], mx.array) and int(plan[4].shape[0]):

@@ -38,8 +38,8 @@ test = ["pytest>=8"]
 # --ssd-experts builds a small MLX extension on first use with MLX's own nanobind (MLX 0.32.2 takes 2.15.0)
 ssd = ["cmake>=3.27; sys_platform == 'darwin'", "nanobind==3.0.1; sys_platform == 'darwin'"]
 vision = ["Pillow>=10", "transformers>=5.3,<6", "mlx-vlm>=0.7.3,<0.8; sys_platform == 'darwin'"]
-# response_format / guided_json on the CUDA server: JSON-schema constrained replies
-grammar = ["xgrammar>=0.2.8,<0.3; sys_platform != 'darwin'"]
+# response_format, guided_* and structured_outputs on every server: grammar-shaped replies (xgrammar brings torch)
+grammar = ["xgrammar>=0.2.8,<0.3"]
 
 [project.scripts]
 tensorfold = "tensorfold.cli:main"

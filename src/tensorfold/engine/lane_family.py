@@ -60,6 +60,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         # heads that give each drafted node's chance of landing draft a budget first; rows are allocated after
         self.node_probabilities = callable(getattr(model, "draft_probabilities", None))
         self._granted: dict[str, int] = {}           # stream id -> drafts its last shared round kept
+        self._grammar_window: dict[str, Any] = {}    # stream id -> the window its grammar kept, masked at the draw
 
     def _draw(self, logits: Any, sampling: Any, positions: Any) -> Any:
         """Use the same model sampler or GPU sampler for every draw so streams match their own serial runs."""
@@ -96,7 +97,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         else:
             for stream, cache in live:
                 started = time.perf_counter()
-                if (self.family_mtp and stream.drafts) or not self.pipelined:
+                if (self.family_mtp and stream.drafts) or not self.pipelined or stream.constraint is not None:
                     got, rows, keep = self._family_round(stream, cache)
                 else:
                     got, rows, keep = self._pipelined_round(stream, cache)
@@ -215,6 +216,28 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
                 return "head", queued, forced, parents
         return "none", [], forced, None
 
+    def _constrained(self, stream: Any, kind: str, drafts: Any, forced: list[int], parents: list[int] | None
+                     ) -> tuple[str, Any, list[int], list[int] | None]:
+        """The window a reply's grammar keeps (drafts it rejects are cut) and each row's mask, kept for the draw."""
+
+        import mlx.core as mx
+
+        from tensorfold.engine.grammar import GrammarError
+
+        tokens = [int(t) for t in (drafts.tolist() if isinstance(drafts, mx.array) else drafts)]
+        rows = self._row_parents(1 + len(tokens), parents)
+        try:
+            window = stream.constraint.window([int(stream.pending[-1]), *tokens], rows)
+            if kind == "forced" and len(window.tokens) != len(rows):
+                raise GrammarError("the reply's grammar rejects a forced token")
+        except GrammarError as exc:                          # this stream ends; its one row lands nothing
+            stream.fail(exc)
+            return "none", [], [], None
+        self._grammar_window[stream.stream_id] = window
+        kept = [q - 1 if q > 0 else -1 for q in window.parents[1:]]
+        tree = None if parents is None else kept
+        return kind, window.tokens[1:], forced if kind != "forced" else window.tokens[1:], tree
+
     @staticmethod
     def _window_tokens(stream: Any, drafts: Any) -> Any:
         """The window's input tokens [rows] (uint32): the pending token, then the drafts."""
@@ -328,6 +351,8 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
             plan = [stream, cache, position, kind, drafts, forced, parents]
             self._allocate([plan])
             kind, drafts, parents = plan[3], plan[4], plan[6]
+        if stream.constraint is not None:                    # after the rows are allocated: the window verified
+            kind, drafts, forced, parents = self._constrained(stream, kind, drafts, forced, parents)
         inputs = self._window_tokens(stream, drafts)
         rows = int(inputs.shape[0])
         rows_parents = self._row_parents(rows, parents)
@@ -336,6 +361,9 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         hidden = model.hidden(inputs.reshape(1, rows), cache, **tree)
         logits = model.head(hidden)
         logits = logits.reshape(logits.shape[1:])            # [R, V] as a view (MLX's [0] is a gather)
+        window = self._grammar_window.pop(stream.stream_id, None)
+        if window is not None:                               # each row masked along its own path
+            logits = stream.constraint.mask(logits, window)
         tokens = self._draw(logits, stream.sampling, [position + 1 + d for d in depths])
         speculate = (self.family_mtp and stream.drafts and kind != "forced" and self.speculate_early
                      and parents is None)
@@ -392,7 +420,8 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
             self._prof = [0, 0.0, 0.0, 0.0, 0.0]
 
     def _release_stream_state(self, stream_id: str) -> None:
-        for table in (self._inflight, self._next, self._mode, self._depth_state, self._served, self._granted):
+        for table in (self._inflight, self._next, self._mode, self._depth_state, self._served, self._granted,
+                      self._grammar_window):
             table.pop(stream_id, None)
 
     def _family_reset(self) -> None:
@@ -403,6 +432,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         self._depth_state = {}
         self._served = {}
         self._granted = {}
+        self._grammar_window = {}
 
     def _family_summary(self) -> dict[str, Any]:
         return {"engine": "lanes", "family": True, "rounds": len(self.round_stats), "streams": len(self.streams),
