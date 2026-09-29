@@ -17,6 +17,7 @@ from tensorfold.server.request_options import parse_numbers, thinking_fields
 from tensorfold.server.stopping import stop_options
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
+from tensorfold.engine.tool_draft import ToolCallStreamer
 from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
 from tensorfold.cuda import health
@@ -273,6 +274,11 @@ class App:
         stopped = {"client": False, "stop": False}
         failed: list[Exception] = []
         stream = StreamDecoder(self.tok, ends)
+        # tool calls stream as JSON argument deltas while they are written (as server/app.py does), so a long
+        # call (a whole file) does not leave the stream silent until the reply ends; one-call requests keep the
+        # end parser, which picks their single call
+        calls_stream = ToolCallStreamer(tools) if tools and not policy.single else None
+        answer_raw = [""]
 
         def visible(finished: bool) -> tuple[str, str]:
             raw = stream.final() if finished else stream.text
@@ -282,6 +288,7 @@ class App:
                 reasoning, answer = split_thinking(raw, finished=finished)
             else:
                 reasoning, answer = "", raw
+            answer_raw[0] = answer
             if tools:
                 answer = (policy.content(answer, finished=finished) if policy.single
                           else hide_tool_calls(answer, finished=finished))
@@ -314,7 +321,12 @@ class App:
                     sent["content"] = len(answer)
                 if delta and not emit(delta):
                     stopped["client"] = True
-                elif cancelled is not None and cancelled():     # every round, with or without new text
+                if calls_stream is not None and not stopped["client"]:
+                    for call_delta in calls_stream.feed(answer_raw[0]):   # never the reasoning
+                        if not emit(call_delta):
+                            stopped["client"] = True
+                            break
+                if not stopped["client"] and cancelled is not None and cancelled():   # every round, text or not
                     stopped["client"] = True
             except Exception as exc:        # noqa: BLE001  raised after generate returns, never into the engine
                 failed.append(exc)
@@ -393,10 +405,12 @@ class App:
         finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
+        # the calls already sent as deltas; the handler sends the rest (a call the streamer could not follow)
+        streamed = calls_stream.index + 1 if calls_stream is not None and calls_stream.streamed else 0
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "cached_tokens": (cached or [0])[0],
                 "reasoning_tokens": reasoning_count(out, self.tok.token_to_id("</think>") if chat and thinking else None),
-                "stats": stats}
+                "stats": stats, "calls_streamed": streamed}
 
     def _turns(self) -> Turns:
         """The engine's turns (one request at a time, background ones last), made on first use."""
