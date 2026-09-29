@@ -235,6 +235,15 @@ For two ranks, see the [CUDA runbook](RUNBOOK.md#nvidia-gpus). Each rank needs i
 optional drafter. Rank 0 serves HTTP. Unified GPU/host memory also holds runtime buffers and file-backed
 model data; the startup estimate is not a measured maximum capacity.
 
+<a id="amd-gpus"></a>
+
+## AMD GPUs (experimental)
+
+On ROCm the same backend serves Qwen3.8-27B's MLX checkpoint on one GPU, with DFlash2 drafts: kernels build with
+hipcc for the GPU present, and the 4-bit matmuls take ROCm kernels of their own. Other families, EXL3 packs and
+two ranks are refused at startup. See [the recipe](docs/recipes/qwen3.8-27b.md#amd-gpus-rocm-experimental) for the
+setup, measurements and limits.
+
 ## Measurements
 
 Each release's notes give its measured decode, prompt and concurrency numbers against the previous release and the

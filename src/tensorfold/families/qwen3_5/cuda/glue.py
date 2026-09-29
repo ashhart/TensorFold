@@ -41,7 +41,7 @@ def add_rmsnorm(x: torch.Tensor, r: torch.Tensor | None, w: torch.Tensor, eps: f
 
 
 @triton.jit
-def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID,
+def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID, AS, BS,
              C: tl.constexpr, KH: tl.constexpr, VH: tl.constexpr, DK: tl.constexpr, NKEEP: tl.constexpr,
              MULTI: tl.constexpr):
     """Program (row, head): conv, SiLU, RMS-scaled q/k, plain v; ``MULTI``: row r's conv rows at CS[SID[r] * NKEEP]."""
@@ -74,10 +74,10 @@ def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID,
     else:
         hv = head - 2 * KH
         tl.store(V + (row * VH + hv) * DK + tl.arange(0, DK), c.to(tl.bfloat16))
-        a = tl.load(A + row * VH + hv).to(tl.float32) + tl.load(DTB + hv)
+        a = tl.load(A + row * AS + hv).to(tl.float32) + tl.load(DTB + hv)
         sp = tl.where(a > 20.0, a, tl.log(1.0 + tl.exp(a)))
         g = tl.exp(-tl.exp(tl.load(ALOG + hv)) * sp)
-        b = tl.load(B + row * VH + hv).to(tl.float32)
+        b = tl.load(B + row * BS + hv).to(tl.float32)
         tl.store(G + row * VH + hv, g)
         tl.store(BETA + row * VH + hv, tl.sigmoid(b))
 
@@ -85,7 +85,7 @@ def _gdn_pre(QKV, CS, CW, WIN, A, B, ALOG, DTB, Q, K, V, G, BETA, SID,
 def gdn_pre(qkv: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor, windows: torch.Tensor,
             a: torch.Tensor, b: torch.Tensor, A_log: torch.Tensor, dt_bias: torch.Tensor, *, kh: int, vh: int, dk: int,
             stream_ids: torch.Tensor | None = None, nkeep: int | None = None):
-    """windows (W, nkeep + 1) index [conv_state; qkv]; given ``stream_ids``, state indices are per stream."""
+    """windows (W, nkeep + 1) index [conv_state; qkv]; ``stream_ids``: per-stream state indices; a, b may stride."""
 
     W, C = qkv.shape
     nkeep = conv_state.shape[0] if nkeep is None else nkeep
@@ -97,18 +97,18 @@ def gdn_pre(qkv: torch.Tensor, conv_state: torch.Tensor, conv_w: torch.Tensor, w
     beta = torch.empty((W, vh), dtype=torch.float32, device=dev)
     multi = stream_ids is not None
     _gdn_pre[(W, 2 * kh + vh)](qkv, conv_state, conv_w, windows, a, b, A_log, dt_bias, q, k, v, g, beta,
-                              stream_ids if multi else windows, C=C, KH=kh, VH=vh, DK=dk, NKEEP=nkeep, MULTI=multi,
-                              num_warps=2)
+                              stream_ids if multi else windows, a.stride(0), b.stride(0), C=C, KH=kh, VH=vh, DK=dk,
+                              NKEEP=nkeep, MULTI=multi, num_warps=2)
     return q, k, v, g, beta
 
 
 @triton.jit
-def _gated_norm(Yr, Z, W, OUT, XS, eps, VH: tl.constexpr, DV: tl.constexpr):
+def _gated_norm(Yr, Z, W, OUT, XS, eps, ZS, VH: tl.constexpr, DV: tl.constexpr):
     row = tl.program_id(0)
     h = tl.program_id(1)
     offs = (row * VH + h) * DV + tl.arange(0, DV)
     y = tl.load(Yr + offs).to(tl.float32)
-    z = tl.load(Z + offs).to(tl.float32)
+    z = tl.load(Z + row * ZS + h * DV + tl.arange(0, DV)).to(tl.float32)
     w = tl.load(W + tl.arange(0, DV)).to(tl.float32)
     yn = y * (1.0 / tl.sqrt(tl.sum(y * y, axis=0) / DV + eps)) * w
     out = (z * tl.sigmoid(z) * yn).to(tl.bfloat16)
@@ -118,23 +118,23 @@ def _gated_norm(Yr, Z, W, OUT, XS, eps, VH: tl.constexpr, DV: tl.constexpr):
 
 
 def gated_norm(y: torch.Tensor, z: torch.Tensor, w: torch.Tensor, eps: float):
-    """y, z (W, VH, DV) bf16 -> silu(z) * rmsnorm(y) * w as (W, VH*DV) bf16, plus its group sums."""
+    """y, z (W, VH, DV) bf16 (z rows may stride) -> silu(z) * rmsnorm(y) * w as (W, VH*DV) bf16, plus its group sums."""
 
     W, vh, dv = y.shape
     out = torch.empty((W, vh * dv), dtype=torch.bfloat16, device=y.device)
     xs = torch.empty((W, vh * dv // 64), dtype=torch.float32, device=y.device)
-    _gated_norm[(W, vh)](y, z, w, out, xs, eps, VH=vh, DV=dv, num_warps=1)
+    _gated_norm[(W, vh)](y, z, w, out, xs, eps, z.stride(0), VH=vh, DV=dv, num_warps=1)
     return out, xs
 
 
 @triton.jit
-def _swiglu(GATE, UP, OUT, XS, N: tl.constexpr, BLOCK: tl.constexpr):
+def _swiglu(GATE, UP, OUT, XS, GS, US, N: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     blk = tl.program_id(1)
     offs = blk * BLOCK + tl.arange(0, BLOCK)
     ok = offs < N
-    g = tl.load(GATE + row * N + offs, mask=ok, other=0.0).to(tl.float32)
-    u = tl.load(UP + row * N + offs, mask=ok, other=0.0).to(tl.float32)
+    g = tl.load(GATE + row * GS + offs, mask=ok, other=0.0).to(tl.float32)
+    u = tl.load(UP + row * US + offs, mask=ok, other=0.0).to(tl.float32)
     a = (g * tl.sigmoid(g) * u).to(tl.bfloat16)
     tl.store(OUT + row * N + offs, a, mask=ok)
     ag = tl.reshape(a.to(tl.float32), (BLOCK // 64, 64))
@@ -143,16 +143,18 @@ def _swiglu(GATE, UP, OUT, XS, N: tl.constexpr, BLOCK: tl.constexpr):
 
 
 def swiglu(gate: torch.Tensor, up: torch.Tensor):
+    """silu(gate) * up and its group sums; gate and up rows may stride (views of one [gate | up] matmul)."""
+
     W, n = gate.shape
-    out = torch.empty_like(gate)
+    out = torch.empty((W, n), dtype=gate.dtype, device=gate.device)
     xs = torch.empty((W, n // 64), dtype=torch.float32, device=gate.device)
     block = 1024
-    _swiglu[(W, triton.cdiv(n, block))](gate, up, out, xs, N=n, BLOCK=block, num_warps=4)
+    _swiglu[(W, triton.cdiv(n, block))](gate, up, out, xs, gate.stride(0), up.stride(0), N=n, BLOCK=block, num_warps=4)
     return out, xs
 
 
 @triton.jit
-def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps,
+def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps, KS,
                H: tl.constexpr, HKV: tl.constexpr, D: tl.constexpr, HALF: tl.constexpr,
                MROPE: tl.constexpr, ROWS: tl.constexpr, HSEC: tl.constexpr, WSEC: tl.constexpr):
     """Program (row, head): heads 0..H-1 are queries (from [q | gate] rows), H..H+HKV-1 keys."""
@@ -165,7 +167,7 @@ def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps,
         x = tl.load(QG + (row * H + head) * 2 * D + d).to(tl.float32)
         w = tl.load(QN + d).to(tl.float32)
     else:
-        x = tl.load(KV + (row * HKV + head - H) * D + d).to(tl.float32)
+        x = tl.load(KV + row * KS + (head - H) * D + d).to(tl.float32)
         w = tl.load(KN + d).to(tl.float32)
     xn = (x * (1.0 / tl.sqrt(tl.sum(x * x, axis=0) / D + eps)) * w).to(tl.bfloat16).to(tl.float32)
     if MROPE:
@@ -183,7 +185,7 @@ def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps,
     if is_q:
         xp = tl.load(QG + (row * H + head) * 2 * D + partner).to(tl.float32)
     else:
-        xp = tl.load(KV + (row * HKV + head - H) * D + partner).to(tl.float32)
+        xp = tl.load(KV + row * KS + (head - H) * D + partner).to(tl.float32)
     wp = tl.load((QN if is_q else KN) + partner).to(tl.float32)
     xpn = (xp * (1.0 / tl.sqrt(tl.sum(x * x, axis=0) / D + eps)) * wp).to(tl.bfloat16).to(tl.float32)
     rot = tl.where(d < HALF, xn * cos - xpn * sin, tl.where(d < 2 * HALF, xn * cos + xpn * sin, xn))
@@ -197,7 +199,7 @@ def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps,
 def attn_prep(qg: torch.Tensor, k: torch.Tensor, q_norm: torch.Tensor, k_norm: torch.Tensor,
               pos: torch.Tensor, inv_freq: torch.Tensor, eps: float, *, heads: int, kv_heads: int, head_dim: int,
               mrope_section: tuple[int, int, int] = (11, 11, 10)):
-    """qg (W, heads*2*D) [q_h | gate_h] rows, k (W, kv_heads*D): normed and rotated q (W, H, D), k (W, HKV, D)."""
+    """qg (W, heads*2*D) [q_h | gate_h] rows, k (W, kv_heads*D) strided: normed, rotated q (W, H, D), k (W, HKV, D)."""
 
     W = qg.shape[0]
     multi = pos.ndim == 2
@@ -208,9 +210,10 @@ def attn_prep(qg: torch.Tensor, k: torch.Tensor, q_norm: torch.Tensor, k_norm: t
     pos = pos.contiguous()
     qo = torch.empty((W, heads, head_dim), dtype=torch.bfloat16, device=qg.device)
     ko = torch.empty((W, kv_heads, head_dim), dtype=torch.bfloat16, device=qg.device)
-    _attn_prep[(W, heads + kv_heads)](qg, k, q_norm, k_norm, pos, inv_freq, qo, ko, eps, H=heads, HKV=kv_heads,
-                                      D=head_dim, HALF=inv_freq.numel(), MROPE=multi, ROWS=W if multi else 0,
-                                      HSEC=mrope_section[1], WSEC=mrope_section[2], num_warps=2)
+    _attn_prep[(W, heads + kv_heads)](qg, k, q_norm, k_norm, pos, inv_freq, qo, ko, eps, k.stride(0), H=heads,
+                                      HKV=kv_heads, D=head_dim, HALF=inv_freq.numel(), MROPE=multi,
+                                      ROWS=W if multi else 0, HSEC=mrope_section[1], WSEC=mrope_section[2],
+                                      num_warps=2)
     return qo, ko
 
 

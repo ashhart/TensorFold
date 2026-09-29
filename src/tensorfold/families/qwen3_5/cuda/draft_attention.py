@@ -67,10 +67,23 @@ def _block_attention(Q, KB, VB, TABLE, LENS, O, scale, window, R,
     tl.store(O + qrow[:, None] * (G * HKV * D) + head[:, None] * D + d[None, :], out, mask=live[:, None])
 
 
+def tables(keys: Sequence[Sequence[torch.Tensor]], values: Sequence[Sequence[torch.Tensor]], device) -> list[tuple]:
+    """Every layer's (pointer table, key counts) for ``block_attention``, one pinned copy; ``keys[layer][stream]``."""
+
+    layers, streams = len(keys), len(keys[0])
+    pad = -(-streams // 4) * 4                   # a layer's counts start on 16 bytes, as a fresh tensor's do
+    host = [p for kl, vl in zip(keys, values) for kc, vc in zip(kl, vl) for p in (kc.data_ptr(), vc.data_ptr())]
+    host += [n for kl in keys for n in [kc.shape[1] for kc in kl] + [0] * (pad - streams)]
+    dev = torch.tensor(host, dtype=torch.int64).pin_memory().to(device, non_blocking=True)
+    lens = dev[2 * streams * layers:].to(torch.int32)
+    return [(dev[2 * streams * i:2 * streams * (i + 1)], lens[pad * i:pad * i + streams]) for i in range(layers)]
+
+
 def block_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, keys: Sequence[torch.Tensor],
                     values: Sequence[torch.Tensor], length: int, window: int, scale: float,
-                    causal: bool = False) -> torch.Tensor:
-    """q [H, S*L, D], k and v [Hkv, S*L, D] (S streams' blocks of ``length`` rows), stream s's context [Hkv, n_s, D] -> [S*L, H*D] bf16."""
+                    causal: bool = False, table: tuple | None = None) -> torch.Tensor:
+    """q [H, S*L, D], k and v [Hkv, S*L, D] (S streams' blocks of ``length`` rows), stream s's context [Hkv, n_s, D] ->
+    [S*L, H*D] bf16; ``table``: this layer's ``tables`` entry, else built here."""
 
     heads, rows, dim = q.shape
     kv_heads = k.shape[0]
@@ -81,10 +94,7 @@ def block_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, keys: Seq
         if kc.shape != vc.shape or kc.shape[0] != kv_heads or kc.shape[2] != dim or not kc.is_contiguous() \
                 or not vc.is_contiguous() or kc.dtype != torch.bfloat16 or (kc.data_ptr() | vc.data_ptr()) % 16:
             raise ValueError("contexts are contiguous, 16-byte aligned bf16 [Hkv, n, D] keys and values")
-    host = torch.tensor([p for kc, vc in zip(keys, values) for p in (kc.data_ptr(), vc.data_ptr())] +
-                        [kc.shape[1] for kc in keys], dtype=torch.int64).pin_memory()
-    dev = host.to(q.device, non_blocking=True)
-    table, lens = dev[:2 * streams], dev[2 * streams:].to(torch.int32)
+    table, lens = table if table is not None else tables([keys], [values], q.device)[0]
     out = torch.empty((rows, heads * dim), dtype=torch.bfloat16, device=q.device)
     group = heads // kv_heads
     _block_attention[(streams, kv_heads)](q, k, v, table, lens, out, scale, window, rows, G=group, HKV=kv_heads,

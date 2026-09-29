@@ -7,8 +7,10 @@ from typing import Sequence
 import torch
 
 from tensorfold.cuda import moe
+from tensorfold.cuda.build import hip
 from tensorfold.cuda.kernels import gdn as deltanet
 from tensorfold.cuda.kernels import qmm as shared
+from tensorfold.cuda.kernels import qmm_groups as groups
 from tensorfold.cuda.kernels.prefill_attention import attention
 
 from . import glue
@@ -28,7 +30,13 @@ def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
     if not isinstance(w, QLinear):
         return w.prefill(x)                               # an EXL3 pack's projection
     if isinstance(x, tuple):
+        if hip():                                         # ROCm: the codes as e4m3 once, then a fixed-tile GEMM
+            g = tile(w)
+            return groups.prefill_matmul8(x, g.weight, g.scales, g.biases, g.n, f32=f32)
         return shared.prefill_matmul8(x, tile(w), f32=f32)
+    if hip() and w.fast:                                  # ROCm: weights rounded once to bf16, fixed-tile GEMM
+        g = tile(w)
+        return groups.prefill_matmul(x, g.weight, g.scales, g.biases, g.n, f32=f32)
     packed = tile(w)                                      # an affine format past the FP8 four-bit path
     return matmul_partial(x, packed) if f32 else matmul(x, packed)
 

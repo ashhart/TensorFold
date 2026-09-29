@@ -19,8 +19,17 @@ SM121 = "-gencode=arch=compute_121,code=sm_121"
 def _gpu(monkeypatch, capability, name="GPU"):
     import torch
 
+    monkeypatch.setattr(build, "hip", lambda: False)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a: capability)
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda *a: name)
+
+
+def _amd(monkeypatch, arch="gfx1201:sramecc-:xnack-"):
+    import torch
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda *a: type("P", (), {"gcnArchName": arch})())
 
 
 def test_every_extension_builds_through_the_helper():
@@ -232,3 +241,31 @@ def test_the_lock_named_is_the_one_torch_waits_on(tmp_path, monkeypatch):
     lock.unlink()
     thread.join(10)
     assert not thread.is_alive() and len(ended) == 1
+
+
+@pytest.mark.torch
+def test_rocm_builds_for_the_amd_gpu_present(monkeypatch):
+    _amd(monkeypatch)
+    assert build.arch_flags() == ["--offload-arch=gfx1201"]
+
+
+@pytest.mark.torch
+def test_rocm_takes_hipcc_equivalents_of_nvcc_flags(monkeypatch, tmp_path):
+    import torch.utils.cpp_extension as ext
+
+    _amd(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(ext, "load", lambda **kw: seen.update(kw) or "module")
+    monkeypatch.setenv("TORCH_EXTENSIONS_DIR", str(tmp_path))     # load looks up the build directory
+    build.load(name="x", sources=[], extra_cuda_cflags=["-O3", "--fmad=false", "--expt-relaxed-constexpr", "-lineinfo"])
+    assert seen["extra_cuda_cflags"] == ["-O3", "-ffp-contract=off", "--offload-arch=gfx1201"]
+
+
+@pytest.mark.torch
+def test_a_build_only_rocm_host_names_its_target(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setenv("PYTORCH_ROCM_ARCH", "gfx1201;gfx942")
+    assert build.arch_flags() == ["--offload-arch=gfx1201"]

@@ -67,3 +67,37 @@ def test_gdn_pre_matches_torch():
     gr = torch.exp(-torch.exp(alog) * torch.nn.functional.softplus(a.float() + dtb))
     assert torch.allclose(g, gr, rtol=1e-5, atol=1e-6)
     assert torch.allclose(beta, torch.sigmoid(b.float()), atol=1e-6)
+
+
+def test_strided_projection_slices_equal_their_copies():
+    """Slices of the fused [z | b | a] and [k | v] projections, read in place, give the bits of contiguous copies."""
+
+    W, C, vh, dv, kvh, hd = 6, 10240, 48, 128, 4, 256
+    zba = torch.randn(W, vh * dv + 2 * vh, device=dev).bfloat16()
+    z, b, a = zba[:, :vh * dv].reshape(W, vh, dv), zba[:, vh * dv:vh * dv + vh], zba[:, vh * dv + vh:]
+    assert not (z.is_contiguous() or b.is_contiguous() or a.is_contiguous())
+    qkv = torch.randn(W, C, device=dev).bfloat16()
+    cs = torch.randn(3, C, device=dev).bfloat16()
+    cw = torch.randn(C, 4, device=dev).bfloat16()
+    win = torch.tensor([[0, 1, 2, 3] if i == 0 else [1, 2, 3, 3 + i] for i in range(W)], device=dev, dtype=torch.int32)
+    alog, dtb = torch.randn(vh, device=dev), torch.randn(vh, device=dev)
+
+    def pre(a, b):
+        return glue.gdn_pre(qkv, cs, cw, win, a, b, alog, dtb, kh=16, vh=vh, dk=128)
+
+    assert all(torch.equal(x, y) for x, y in zip(pre(a, b), pre(a.contiguous(), b.contiguous())))
+    yr = torch.randn(W, vh, dv, device=dev).bfloat16()
+    norm = (torch.rand(dv, device=dev) + 0.5).bfloat16()
+    assert all(torch.equal(x, y) for x, y in zip(glue.gated_norm(yr, z, norm, 1e-6),
+                                                 glue.gated_norm(yr, z.contiguous(), norm, 1e-6)))
+    kv = torch.randn(W, 2 * kvh * hd, device=dev).bfloat16()
+    qg = torch.randn(W, 24 * 2 * hd, device=dev).bfloat16()
+    qn, kn = (torch.rand(hd, device=dev) + 0.5).bfloat16(), (torch.rand(hd, device=dev) + 0.5).bfloat16()
+    pos, inv = torch.arange(W, device=dev, dtype=torch.int32), torch.rand(hd // 8, device=dev)
+
+    def prep(k):
+        return glue.attn_prep(qg, k, qn, kn, pos, inv, 1e-6, heads=24, kv_heads=kvh, head_dim=hd)
+
+    key = kv[:, :kvh * hd]
+    assert not key.is_contiguous()
+    assert all(torch.equal(x, y) for x, y in zip(prep(key), prep(key.contiguous())))

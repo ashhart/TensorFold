@@ -7,6 +7,7 @@ cuda = pytest.importorskip("torch").cuda
 if not cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
+from tensorfold.cuda.build import hip  # noqa: E402
 from tensorfold.families.qwen3_5.cuda import qmm  # noqa: E402
 
 SHAPES = [(48, 5120), (1024, 5120), (5120, 6144), (10240, 5120), (5120, 17408)]
@@ -65,10 +66,15 @@ def test_tiled_layout_gives_the_same_bits(n, k):
     back = qmm_fast.untile(t)
     assert torch.equal(back.weight, weight) and torch.equal(back.scales, scales)
     x = torch.randn((384, k), device="cuda").to(torch.bfloat16)
+    whole = qmm_fast.matmul(x, t)
     for m in (1, 7, 16, 17, 32, 33, 64, 100, 128, 129, 384):
-        assert torch.equal(qmm_fast.matmul(x[:m], t), qmm.lane_matmul(x[:m], weight, scales, biases)), (n, k, m)
+        got = qmm_fast.matmul(x[:m], t)
+        # ROCm's stored layout runs the same lane kernel as its tiles; NVIDIA's is the Triton reference
+        want = qmm_fast.matmul(x[:m], q) if hip() else qmm.lane_matmul(x[:m], weight, scales, biases)
+        assert torch.equal(got, want) and torch.equal(got, whole[:m]), (n, k, m)
 
 
+@pytest.mark.skipif(hip(), reason="NVIDIA tensor-core layout; ROCm keeps the stored words")
 @pytest.mark.parametrize("m", [1, 16, 37, 256])
 def test_head_row_views_give_the_stacked_copy_bits(m):
     """The drafter's rows of the head as views (plus a small copy off a tile edge) equal a stacked copy's matmul."""

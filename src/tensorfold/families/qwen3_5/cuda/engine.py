@@ -31,8 +31,15 @@ class Qwen27Engine:
 
         from .exl3_load import admission, quant_config
 
+        from tensorfold.cuda.build import hip
+
         exl3 = quant_config(Path(model_dir)) is not None
         nvfp4 = not exl3 and is_quantized(Path(model_dir))
+        if (exl3 or nvfp4) and hip():
+            raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} decode with NVIDIA tensor-core kernels; "
+                             "on AMD GPUs serve the MLX checkpoint (Vontra/Qwen3.8-27B-MLX-4bit)")
+        if vision and hip():
+            raise ValueError("image input is untested on AMD GPUs: drop --vision there")
         if (exl3 or nvfp4) and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Qwen3.8-27B run on one GPU: drop "
                              "--tp 2, or serve the MLX checkpoint (Vontra/Qwen3.8-27B-MLX-4bit) on two")
@@ -42,7 +49,7 @@ class Qwen27Engine:
         from .weights import load
         from tensorfold.cuda.capacity import admit, gather_ints
         from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, stream_geometry
-        from .affine_memory import weight_transform
+        from .affine_memory import draft_bytes, weight_transform
         from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
 
         self.torch = torch
@@ -90,6 +97,7 @@ class Qwen27Engine:
                                    vision_weights(tensor_bytes, vision, rank),
                                    rank=rank, world=tp, gather=gather,
                                    draft_dir=draft_dir if rank == 0 or tp_draft else None,
+                                   draft_transform=draft_bytes,
                                    draft_geometry=lambda text: draft_geometry(text, tp if tp_draft else 1, max_rows,
                                                                               bounded=True, streams=streams,
                                                                               kept=KEEP + 1 if many else 0),
@@ -98,6 +106,12 @@ class Qwen27Engine:
         if tp == 2:
             full = load(model_dir)
             self.w = split_weights(full, rank, tiled=True, split_head=split_head)
+        elif hip():                                # ROCm: [gate|up], [z|b|a] and [k|v] fused, members as views
+            from .qmm_fast import prepare
+
+            full = load(model_dir)
+            prepare(full, fuse=True)
+            self.w = full
         else:
             full = load(model_dir, tiled=True)
             self.w = full

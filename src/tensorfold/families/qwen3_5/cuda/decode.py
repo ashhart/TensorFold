@@ -79,6 +79,7 @@ class DecodeResult:
     rounds: int
     drafted_rows: int
     accepted_drafts: int
+    # stage times: host-side, or each stage's own GPU time when ``draft_decode(trace=...)`` waits for it
     draft_seconds: float = 0.0
     verify_seconds: float = 0.0
     sample_seconds: float = 0.0
@@ -164,6 +165,13 @@ def copy_chain(context: Sequence[int], max_nodes: int = 127,
     return best if len(best) >= min_match else []
 
 
+def _wait(trace: list | None) -> None:
+    """A traced round waits out the GPU at each stage's end, timing the stage alone; an untraced one runs on."""
+
+    if trace is not None:
+        torch.cuda.synchronize()
+
+
 @torch.no_grad()
 def _round_record(tokens: list[int], parents: list[int], depths: list[int], path: list[int], terminal: int,
                   stop: str, source: str, draft, spent: dict[str, float]) -> dict:
@@ -228,13 +236,13 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
         if constraint is not None:           # a grammar drops drafts no path can keep, then masks each row by its path
             window = constraint.window(tokens, tree_parents)
             tokens, tree_parents = window.tokens, window.parents
-        torch.cuda.synchronize()
+        _wait(trace)
         spent = {"draft": time.perf_counter() - stage}
         stages["draft"] += spent["draft"]
         stage = time.perf_counter()
         logits, record, *tapped = tree_forward(
             w, _tokens(tokens, w.norm.device), tree_parents, st, capture_taps=draft is not None)
-        torch.cuda.synchronize()
+        _wait(trace)
         spent["verify"] = time.perf_counter() - stage
         stages["verify"] += spent["verify"]
         stage = time.perf_counter()
@@ -273,7 +281,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
         out.append(terminal)
         context.extend(tokens[row] for row in path[1:])
         context.append(terminal)
-        torch.cuda.synchronize()
+        _wait(trace)
         stages["commit"] += time.perf_counter() - stage
         if trace is not None:
             trace[-1]["commit_ms"] = round(1000 * (time.perf_counter() - stage), 3)
@@ -283,6 +291,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
         widths.append(len(tokens))
         if on_tokens is not None:
             stopped = bool(on_tokens([tokens[row] for row in path[1:]] + [terminal]))
+    torch.cuda.synchronize()                 # the last round's commit is still in flight
     return DecodeResult(out, time.perf_counter() - start, rounds, drafted_rows,
                         accepted_drafts, stages["draft"], stages["verify"],
                         stages["sample"], stages["commit"], widths)

@@ -115,3 +115,17 @@ def test_a_padded_plan_gives_the_exact_plans_bits(w, p, context):
     plan = shared.from_packed(torch.tensor(flat, dtype=torch.int32, device="cuda"), 1, w, items, chunks)
     offs = torch.tensor(shared.offsets([(kc, vc)], "cuda"), dtype=torch.int64, device="cuda").view(-1, 2)
     assert torch.equal(shared.attention(q, kn, vn, offs, plan, scale=1 / 16), want)
+
+
+def test_strided_node_values_equal_contiguous_ones():
+    """A fused [k | v] projection's value half, read in place, gives the bits of its contiguous copy."""
+
+    w, p, hk, d = 9, 513, 4, 256
+    q, kn, vn, kc, vc = _inputs(w, p)
+    parents = [-1] + [(i - 1) // 2 for i in range(1, w)]
+    kv = torch.zeros((w, 2 * hk * d), device="cuda", dtype=torch.bfloat16)
+    kv[:, hk * d:] = vn.reshape(w, hk * d)
+    view = kv[:, hk * d:].reshape(w, hk, d)
+    assert not view.is_contiguous()
+    assert torch.equal(_attend(q, kn, view, [(kc, vc)], [parents], [p], 1 / 16),
+                       _attend(q, kn, vn, [(kc, vc)], [parents], [p], 1 / 16))

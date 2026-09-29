@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import torch
 
+from tensorfold.cuda.build import hip
 from tensorfold.cuda.kernels import qmm as shared
+from tensorfold.cuda.kernels import qmm_groups as groups
 
 from .qmm import lane_matmul
 from .weights import QLinear, Weights
 
 
 def tile(q: QLinear) -> QLinear:
-    if q.layout == "tiled" or not q.fast:
+    """The packed decode layout: tensor-core fragments on NVIDIA, 16-output tiles on ROCm (``qmm_groups``)."""
+
+    if q.layout in ("tiled", "groups") or not q.fast:
         return q
+    if hip():
+        return QLinear(*groups.to_groups(q.weight, q.scales, q.biases), layout="groups", rows=q.n)
     p = shared.pack(q.weight, q.scales, q.biases, 64)
     return QLinear(p.weight, p.scales, p.biases, layout="tiled", rows=q.n)
 
@@ -20,6 +26,8 @@ def tile(q: QLinear) -> QLinear:
 def untile(q: QLinear) -> QLinear:
     """The stored MLX layout again (for the fp32 reference, TP sharding or slicing rows)."""
 
+    if q.layout == "groups":
+        return QLinear(*groups.from_groups(q.weight, q.scales, q.biases, q.n))
     if q.layout != "tiled":
         return q
     return QLinear(*shared.unpack(shared.Q4(q.weight, q.scales, q.biases, q.n, q.k, 64)))
@@ -55,6 +63,10 @@ def matmul(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch
         return affine_matmul(x, q)
     if q.layout == "tiled":
         return shared.matmul(x, q, xs)
+    if q.layout == "groups":
+        return groups.matmul(x, q.weight, q.scales, q.biases, q.n, xs)
+    if hip():                                             # one ROCm kernel for either layout, so they share bits
+        return groups.matmul(x, *groups.to_groups(q.weight, q.scales, q.biases), q.n, xs)
     return lane_matmul(x, q.weight, q.scales, q.biases, xs=xs)
 
 
@@ -93,6 +105,23 @@ def stack_small(layer) -> None:
         layer.gdn.zba = stack([layer.gdn.z, layer.gdn.b, layer.gdn.a])
     if layer.attn is not None and layer.attn.kv is None and _stackable([layer.attn.k, layer.attn.v]):
         layer.attn.kv = stack([layer.attn.k, layer.attn.v])
+    # ROCm: [gate | up] too, a larger call streaming nearer the bandwidth; its members become views, so no copy stays
+    if hip() and layer.gate is not None and layer.gu is None and _stackable([layer.gate, layer.up]):
+        layer.gu = stack([layer.gate, layer.up])
+
+
+def _members(stacked: QLinear, parts: list[QLinear]) -> list[QLinear] | None:
+    """ROCm: the stacked tiles' rows as each member's weight (views, no copy) when every member fills whole tiles."""
+
+    if stacked.layout != "groups" or any(q.n % 16 for q in parts):
+        return None
+    out, t0 = [], 0
+    for q in parts:
+        t1 = t0 + q.n // 16
+        out.append(QLinear(stacked.weight[t0:t1], stacked.scales[t0:t1], stacked.biases[t0:t1], layout="groups",
+                           rows=q.n))
+        t0 = t1
+    return out
 
 
 def prepare(w: Weights, *, fuse: bool = False) -> None:
@@ -101,15 +130,26 @@ def prepare(w: Weights, *, fuse: bool = False) -> None:
     for layer in w.layers:
         if fuse:
             stack_small(layer)
+        if layer.gdn is not None and layer.gdn.zba is not None:
+            layer.gdn.zba = tile(layer.gdn.zba)
+            views = _members(layer.gdn.zba, [layer.gdn.z, layer.gdn.b, layer.gdn.a])
+            if views is not None:
+                layer.gdn.z, layer.gdn.b, layer.gdn.a = views
+        if layer.attn is not None and layer.attn.kv is not None:
+            layer.attn.kv = tile(layer.attn.kv)
+            views = _members(layer.attn.kv, [layer.attn.k, layer.attn.v])
+            if views is not None:
+                layer.attn.k, layer.attn.v = views
+        if layer.gu is not None:
+            layer.gu = tile(layer.gu)
+            views = _members(layer.gu, [layer.gate, layer.up])
+            if views is not None:
+                layer.gate, layer.up = views
         for owner, names in ((layer, ("gate", "up", "down")), (layer.gdn, ("qkv", "z", "b", "a", "out")),
                              (layer.attn, ("q", "k", "v", "o"))):
             if owner is None:
                 continue
             for name in names:
                 setattr(owner, name, tile(getattr(owner, name)))
-        if layer.gdn is not None and layer.gdn.zba is not None:
-            layer.gdn.zba = tile(layer.gdn.zba)
-        if layer.attn is not None and layer.attn.kv is not None:
-            layer.attn.kv = tile(layer.attn.kv)
     w.head = tile(w.head)
     torch.cuda.empty_cache()

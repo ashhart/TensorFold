@@ -11,6 +11,24 @@ from tensorfold import cli
 from tensorfold.families.glm5_next.cuda import LATENT
 
 
+@pytest.fixture(autouse=True)
+def _nvidia_host(monkeypatch):
+    """These checks describe NVIDIA's path on any host; ROCm's own refusals and layouts are tested on their own."""
+
+    from tensorfold.cuda import build
+
+    try:
+        import torch
+    except ImportError:
+        yield
+        return
+    real = build.hip
+    monkeypatch.setattr(torch.version, "hip", None)
+    real.cache_clear()
+    yield
+    real.cache_clear()                               # recomputed for later tests once monkeypatch restores torch
+
+
 def checkpoint(path, config, tensors):
     (path / "config.json").write_text(json.dumps(config))
     entries = {}

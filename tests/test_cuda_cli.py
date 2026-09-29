@@ -8,6 +8,24 @@ import pytest
 from tensorfold import cli
 
 
+@pytest.fixture(autouse=True)
+def _nvidia_host(monkeypatch):
+    """These checks describe NVIDIA's path on any host; ROCm's own refusals and layouts are tested on their own."""
+
+    from tensorfold.cuda import build
+
+    try:
+        import torch
+    except ImportError:
+        yield
+        return
+    real = build.hip
+    monkeypatch.setattr(torch.version, "hip", None)
+    real.cache_clear()
+    yield
+    real.cache_clear()                               # recomputed for later tests once monkeypatch restores torch
+
+
 def _family(**members):
     return SimpleNamespace(title="Test family", package=SimpleNamespace(**members))
 
@@ -36,6 +54,24 @@ def test_two_gpus_need_a_master_before_anything_loads(tmp_path):
         cli._serve_cuda(args, family, tmp_path)
     args.tp, args.rank = 1, 1
     with pytest.raises(ValueError, match="--rank 1 needs --tp 2"):
+        cli._serve_cuda(args, family, tmp_path)
+    assert not called
+
+
+def test_rocm_serves_only_the_ported_family_on_one_rank(tmp_path, monkeypatch):
+    from tensorfold.cuda import build
+
+    monkeypatch.setattr(build, "hip", lambda: True)
+    called = []
+    family = _family(cuda_engine=lambda *a, **k: called.append(k))
+    family.model_type = "nemotron_h"
+    args = argparse.Namespace(tp=1, rank=0, master="", master_port=29551, no_drafts=True, drafter="none",
+                              mtp_drafts=None, name="", model=str(tmp_path))
+    with pytest.raises(ValueError, match="no ROCm kernels yet"):
+        cli._serve_cuda(args, family, tmp_path)
+    family.model_type = "qwen3_5"
+    args.tp, args.master = 2, "192.0.2.11"
+    with pytest.raises(ValueError, match="one rank"):
         cli._serve_cuda(args, family, tmp_path)
     assert not called
 

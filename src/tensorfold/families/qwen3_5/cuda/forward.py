@@ -39,7 +39,12 @@ def _mlp(layer, h: torch.Tensor, xs: torch.Tensor, tp: bool) -> torch.Tensor:
         if tp:
             raise ValueError("routed experts run on one GPU")
         return moe.run(h, layer.moe)
-    act, act_xs = glue.swiglu(_mm(h, layer.gate, xs), _mm(h, layer.up, xs))
+    if layer.gu is not None:
+        gu = _mm(h, layer.gu, xs)
+        n = layer.gate.n
+        act, act_xs = glue.swiglu(gu[:, :n], gu[:, n:])          # views: the kernel takes their row strides
+    else:
+        act, act_xs = glue.swiglu(_mm(h, layer.gate, xs), _mm(h, layer.up, xs))
     return _row_mm(act, layer.down, tp, act_xs)
 
 
@@ -218,9 +223,9 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             if gdn.zba is not None:
                 zba = _mm(h, gdn.zba, xs)
                 vd = c.v_heads * c.dv
-                z = zba[:, :vd].contiguous().reshape(W, c.v_heads, c.dv)
-                b = zba[:, vd:vd + c.v_heads].contiguous()
-                a = zba[:, vd + c.v_heads:].contiguous()
+                z = zba[:, :vd].reshape(W, c.v_heads, c.dv)             # views: the kernels take their row strides
+                b = zba[:, vd:vd + c.v_heads]
+                a = zba[:, vd + c.v_heads:]
             else:
                 z = _mm(h, gdn.z, xs).reshape(W, c.v_heads, c.dv)
                 b = _mm(h, gdn.b, xs)
@@ -238,8 +243,8 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             if attn.kv is not None:
                 kv = _mm(h, attn.kv, xs)
                 kd = c.kv_heads * c.head_dim
-                key = kv[:, :kd].contiguous()
-                value = kv[:, kd:].contiguous().reshape(W, c.kv_heads, c.head_dim)
+                key = kv[:, :kd]                                        # views: the kernels take their row strides
+                value = kv[:, kd:].reshape(W, c.kv_heads, c.head_dim)
             else:
                 key = _mm(h, attn.k, xs)
                 value = _mm(h, attn.v, xs).reshape(W, c.kv_heads, c.head_dim)
@@ -327,9 +332,9 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             if gdn.zba is not None:
                 zba = _mm(h, gdn.zba, xs)
                 vd = c.v_heads * c.dv
-                z = zba[:, :vd].contiguous().reshape(W, c.v_heads, c.dv)
-                b = zba[:, vd:vd + c.v_heads].contiguous()
-                a = zba[:, vd + c.v_heads:].contiguous()
+                z = zba[:, :vd].reshape(W, c.v_heads, c.dv)             # views: the kernels take their row strides
+                b = zba[:, vd:vd + c.v_heads]
+                a = zba[:, vd + c.v_heads:]
             else:
                 z = _mm(h, gdn.z, xs).reshape(W, c.v_heads, c.dv)
                 b = _mm(h, gdn.b, xs)
@@ -347,8 +352,8 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             if attn.kv is not None:
                 kv = _mm(h, attn.kv, xs)
                 kd = c.kv_heads * c.head_dim
-                key = kv[:, :kd].contiguous()
-                value = kv[:, kd:].contiguous().reshape(W, c.kv_heads, c.head_dim)
+                key = kv[:, :kd]                                        # views: the kernels take their row strides
+                value = kv[:, kd:].reshape(W, c.kv_heads, c.head_dim)
             else:
                 key = _mm(h, attn.k, xs)
                 value = _mm(h, attn.v, xs).reshape(W, c.kv_heads, c.head_dim)

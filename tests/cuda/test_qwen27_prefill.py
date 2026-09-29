@@ -6,6 +6,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
+from tensorfold.cuda.build import hip  # noqa: E402
 from tensorfold.cuda.kernels import qmm as shared  # noqa: E402
 from tensorfold.cuda.kernels.prefill_attention import attention  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.decode import clone_state, draft_decode, prefill, serial_decode  # noqa: E402
@@ -137,6 +138,7 @@ def test_a_cache_limit_changes_no_bits(length, limit):
     assert max(kv[0].shape[0] for kv in replied[1].kv if kv is not None) <= limit
 
 
+@pytest.mark.skipif(hip(), reason="NVIDIA tensor-core layout; ROCm keeps the stored words")
 def test_prefill_matmul_rows_do_not_depend_on_chunking():
     gen = torch.Generator(device="cuda").manual_seed(3)
     n, k = 1000, 1024
@@ -155,6 +157,113 @@ def test_prefill_matmul_rows_do_not_depend_on_chunking():
     dense = q_ * scales.double().repeat_interleave(64, 1) + biases.double().repeat_interleave(64, 1)
     ref = x.double() @ dense.t()
     assert ((whole.double() - ref).norm() / ref.norm()).item() < 4e-3
+
+
+def test_group_major_prefill_matmul_rows_do_not_depend_on_chunking():
+    """ROCm's prompt matmul (group-major words, weights rounded once to bf16): any chunking, the same row bits."""
+
+    from tensorfold.cuda.kernels import qmm_groups
+    from tensorfold.families.qwen3_5.cuda.qmm import dequantize
+
+    gen = torch.Generator(device="cuda").manual_seed(9)
+    n, k = 1000, 1024
+    words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen, device="cuda", dtype=torch.int64)
+    words = words.to(torch.int32)
+    scales = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.01 + 0.001).bfloat16()
+    biases = (torch.randn(n, k // 64, generator=gen, device="cuda") * 0.02).bfloat16()
+    g = qmm_groups.to_groups(words, scales, biases)
+    assert all(torch.equal(a, b) for a, b in zip(qmm_groups.from_groups(*g, n), (words, scales, biases)))
+    x = torch.randn(333, k, generator=gen, device="cuda").bfloat16()
+    whole = qmm_groups.prefill_matmul(x, *g, n, f32=True)
+    for size in (1, 7, 16, 64, 128, 256):
+        parts = [qmm_groups.prefill_matmul(x[a:a + size].contiguous(), *g, n, f32=True) for a in range(0, 333, size)]
+        assert torch.equal(whole, torch.cat(parts)), size
+    ref = x.double() @ dequantize(words, scales, biases).double().t()
+    assert ((whole.double() - ref).norm() / ref.norm()).item() < 4e-3
+
+
+@pytest.mark.parametrize("n,k", [(1, 128), (256, 128), (384, 128), (48, 5120), (1024, 5120), (10240, 5120),
+                                 (17408, 5120), (5120, 17408), (5120, 6144)])
+def test_group_major_prefill_matmul_is_accurate_at_model_shapes(n, k):
+    """Guards the prompt GEMM's tile against wrong sums (some tiles miscompile at small K on gfx1201)."""
+
+    from tensorfold.cuda.kernels import qmm_groups
+    from tensorfold.families.qwen3_5.cuda.qmm import dequantize
+
+    gen = torch.Generator(device="cuda").manual_seed(n + k)
+    words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen, device="cuda", dtype=torch.int64)
+    words = words.to(torch.int32)
+    scales = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.003 + 0.001).bfloat16()
+    biases = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.003 - 0.0015).bfloat16()
+    x = torch.randn(200, k, generator=gen, device="cuda").bfloat16()
+    out = qmm_groups.prefill_matmul(x, *qmm_groups.to_groups(words, scales, biases), n)
+    ref = x.double() @ dequantize(words, scales, biases).double().t()
+    assert ((out.double() - ref).norm() / ref.norm()).item() < 1e-2
+
+
+def _e4m3_rows(x: torch.Tensor):
+    """``prefill_glue``'s FP8 inputs for bf16 rows ``x``, and the values they stand for (row scale applied)."""
+
+    m, k = x.shape
+    src = torch.tensor([(i // 32) * 32 + ((i % 32) // 16) * 16 + ((i % 16) // 4) * 2 + (i % 4 % 2) + (i % 4 // 2) * 8
+                        for i in range(k)], device=x.device)
+    xf = x.float()
+    a = xf.abs().amax(1).clamp_min(1e-30) / 448.0
+    x8 = (xf[:, src] / a[:, None]).to(torch.float8_e4m3fn)
+    xs = (xf.view(m, k // 64, 64).sum(2) / a[:, None]).bfloat16()
+    values = torch.empty_like(xf)
+    values[:, src] = x8.float() * a[:, None]
+    return (x8.view(torch.uint8).contiguous(), xs, a.contiguous()), values, xs.double() * a.double()[:, None]
+
+
+@pytest.mark.skipif(not hip(), reason="ROCm's FP8 prompt matmul")
+@pytest.mark.parametrize("n,k", [(1, 128), (256, 128), (384, 128), (48, 5120), (1024, 5120), (17408, 5120),
+                                 (5120, 17408), (5120, 6144), (1024, 6144)])
+def test_rocm_fp8_prefill_matmul_is_exact_on_its_inputs_and_chunk_invariant(n, k):
+    """The e4m3 codes times the e4m3 rows, scaled per group, plus the bias on the group sums: float64's answer on
+    the same inputs, and the same bits at any chunking."""
+
+    from tensorfold.cuda.kernels import qmm_groups
+
+    gen = torch.Generator(device="cuda").manual_seed(n + 3 * k)
+    words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen, device="cuda", dtype=torch.int64)
+    words = words.to(torch.int32)
+    scales = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.003 + 0.001).bfloat16()
+    biases = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.003 - 0.0015).bfloat16()
+    g = qmm_groups.to_groups(words, scales, biases)
+    x = torch.randn(300, k, generator=gen, device="cuda").bfloat16()
+    rows, values, sums = _e4m3_rows(x)
+    whole = qmm_groups.prefill_matmul8(rows, *g, n, f32=True)
+    q = torch.stack([(words.view(n, k // 8, 1) >> (4 * i)) & 0xF for i in range(8)], -1).reshape(n, k).double()
+    ref = sums @ biases.double().t()
+    for j in range(k // 64):                                  # one group's dots at a time: (300, n) float64
+        ref += (values.double()[:, 64 * j:64 * j + 64] @ q[:, 64 * j:64 * j + 64].t()) * scales.double()[:, j]
+    assert ((whole.double() - ref).norm() / ref.norm()).item() < 1e-5
+    for size in (1, 2, 5, 7, 64, 256):                       # few-row calls: pipelined tiles miscompile there
+        parts = [qmm_groups.prefill_matmul8(tuple(t[a:a + size].contiguous() for t in rows), *g, n, f32=True)
+                 for a in range(0, 300, size)]
+        assert torch.equal(whole, torch.cat(parts)), size
+
+
+def test_group_major_lane_matmul_gives_the_stored_layouts_bits():
+    """The group-major lane matmul is the stored layout's arithmetic: the same bits at every row count."""
+
+    from tensorfold.cuda.kernels import qmm_groups
+    from tensorfold.families.qwen3_5.cuda.qmm import lane_matmul, split_k
+
+    gen = torch.Generator(device="cuda").manual_seed(10)
+    for n, k in ((1000, 1024), (48, 5120), (5120, 17408), (1, 128)):
+        words = torch.randint(-(2**31), 2**31 - 1, (n, k // 8), generator=gen, device="cuda", dtype=torch.int64)
+        words = words.to(torch.int32)
+        scales = (torch.rand(n, k // 64, generator=gen, device="cuda") * 0.01 + 0.001).bfloat16()
+        biases = (torch.randn(n, k // 64, generator=gen, device="cuda") * 0.02).bfloat16()
+        g = qmm_groups.to_groups(words, scales, biases)
+        x = torch.randn(40, k, generator=gen, device="cuda").bfloat16()
+        whole = qmm_groups.matmul(x, *g, n)
+        for m in (1, 12, 16, 33):
+            assert torch.equal(qmm_groups.matmul(x[:m].contiguous(), *g, n), whole[:m]), (n, k, m)
+        if qmm_groups.lane_kernel() == "triton" and qmm_groups.split_k(n, k) == split_k(n, k):   # the same slices
+            assert torch.equal(whole, lane_matmul(x, words, scales, biases)), (n, k)
 
 
 @pytest.mark.parametrize("heads,kv_heads,dim", [(24, 4, 256), (8, 2, 128)])
@@ -178,6 +287,7 @@ def test_prefill_attention_rows_do_not_depend_on_chunking(heads, kv_heads, dim):
     assert ((whole.float() - ref).norm() / ref.norm()).item() < 1e-2
 
 
+@pytest.mark.skipif(hip(), reason="NVIDIA tensor-core layout; ROCm keeps the stored words")
 @pytest.mark.parametrize("gs", [64, 32])
 def test_fp8_prefill_matmul_rows_do_not_depend_on_chunking(gs):
     gen = torch.Generator(device="cuda").manual_seed(8)

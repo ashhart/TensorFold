@@ -15,9 +15,10 @@ import triton.language as tl
 from tensorfold.cuda.direct_read import SafeTensors
 from tensorfold.engine.exact_sampling import Sampling
 
+from .affine_memory import packed_draft as _packed
 from .draft_tree import best_first
 from .glue import embedding, swiglu
-from .draft_attention import append, block_attention
+from .draft_attention import append, block_attention, tables
 from .qmm import group_sums
 from .qmm_fast import matmul, matmul_rows, rows, tile, untile
 from .weights import Exl3, Plain, QLinear, Weights
@@ -248,7 +249,7 @@ class DFlash2:
             self.sub_head = QLinear(*[None if t is None else t[lo:hi].contiguous()
                                       for t in (sub.weight, sub.scales, sub.biases)],
                                     layout=sub.layout, gs=sub.gs, bits=sub.bits)
-        if isinstance(target.head, QLinear) and target.head.layout == "tiled" and self.sub_rows is None:
+        if isinstance(target.head, QLinear) and target.head.layout in ("tiled", "groups") and self.sub_rows is None:
             self.sub_head = tile(self.sub_head)
         # Quantized draft projections can change acceptance but never target output.
         self.q4: dict[str, QLinear] = {}
@@ -282,8 +283,7 @@ class DFlash2:
         if bits == 4:
             for name in list(self.weights):
                 t = self.weights[name]
-                if (isinstance(t, torch.Tensor) and t.ndim == 2 and name.endswith(".weight")
-                        and t.shape[0] % 64 == 0 and t.shape[1] % 64 == 0 and t.numel() >= 1 << 20):
+                if isinstance(t, torch.Tensor) and _packed(name, t.shape):
                     self.q4[name] = tile(quantize4(t.to(self.device, torch.bfloat16)))
                     del self.weights[name]
         for name, t in self.weights.items():
@@ -296,11 +296,25 @@ class DFlash2:
         self.context_len = 0
         self.context_end = 0
 
-    def _lin(self, x: torch.Tensor, name: str) -> torch.Tensor:
+    def _lin(self, x: torch.Tensor, name: str, xs: torch.Tensor | None = None) -> torch.Tensor:
+        """A projection of ``x``; ``xs``: its group sums, when several packed projections share the input."""
+
         q = self.q4.get(name)
         if q is None:
             return F.linear(x, self.weights[name])
-        return matmul(x.to(torch.bfloat16).contiguous(), q)
+        return matmul(x.to(torch.bfloat16).contiguous(), q, xs)
+
+    def _kv_sums(self, projected: torch.Tensor) -> torch.Tensor | None:
+        """The group sums every layer's packed [k | v] matmul of ``projected`` needs, computed once."""
+
+        return group_sums(projected) if "layers.0.self_attn.kv.weight" in self.q4 else None
+
+    def _keep(self, old: torch.Tensor | None, new: torch.Tensor) -> torch.Tensor:
+        """The last ``window`` rows of [old | new] as one contiguous copy, only the kept rows of ``old`` moving."""
+
+        if old is None or new.shape[1] >= self.window:
+            return new[:, -self.window:].contiguous()
+        return torch.cat((old[:, max(0, old.shape[1] + new.shape[1] - self.window):], new), dim=1)
 
     def snapshot(self):
         return (list(self.kc), list(self.vc), self.context_len, self.context_end)
@@ -323,13 +337,11 @@ class DFlash2:
         n = projected.shape[0]
         if self.fast:
             cos, sin = self._rotary(self.context_end, n)
+            xs = self._kv_sums(projected)
             for layer in range(self.layers):
-                _, k, v = self._prep(self._lin(projected, f"layers.{layer}.self_attn.kv.weight"), layer, cos, sin, 0)
-                kc, vc = self.kc[layer], self.vc[layer]
-                kc = k if kc is None else torch.cat((kc, k), dim=1)
-                vc = v if vc is None else torch.cat((vc, v), dim=1)
-                self.kc[layer] = kc[:, -self.window:].contiguous()
-                self.vc[layer] = vc[:, -self.window:].contiguous()
+                kv = self._lin(projected, f"layers.{layer}.self_attn.kv.weight", xs)
+                _, k, v = self._prep(kv, layer, cos, sin, 0)
+                self.kc[layer], self.vc[layer] = self._keep(self.kc[layer], k), self._keep(self.vc[layer], v)
             self.context_len = min(self.window, self.context_len + n)
             self.context_end += n
             return
@@ -367,8 +379,9 @@ class DFlash2:
         phase = pos[:, None] * self.inv_freq[None, :]
         cos, sin = phase.cos().contiguous(), phase.sin().contiguous()
         kcs, vcs = [snap[0] for snap in snaps], [snap[1] for snap in snaps]
+        xs = self._kv_sums(projected)
         for layer in range(self.layers):
-            _, k, v = self._prep(self._lin(projected, f"layers.{layer}.self_attn.kv.weight"), layer, cos, sin, 0)
+            _, k, v = self._prep(self._lin(projected, f"layers.{layer}.self_attn.kv.weight", xs), layer, cos, sin, 0)
             for cache, fresh in ((kcs, k), (vcs, v)):        # every stream's window in one copy a tensor
                 for c, out in zip(cache, append(fresh, [c[layer] for c in cache], sizes, self.window)):
                     c[layer] = out
@@ -444,8 +457,8 @@ class DFlash2:
                                                         HALF=d // 2, num_warps=1)
         return q, k, v
 
-    def _layer_fast(self, i: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, ctx: list,
-                    length: int) -> torch.Tensor:
+    def _layer_fast(self, i: int, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, ctx: list, length: int,
+                    table: tuple | None = None) -> torch.Tensor:
         """One layer over several streams' blocks (``length`` rows each); each block attends its own context."""
 
         w = self.weights
@@ -456,7 +469,7 @@ class DFlash2:
         q, k, v = self._prep(self._lin(_dconv(normed, dyn, conv, 0, self.group_size, seg=length),
                                        base + "self_attn.qkv.weight"), i, cos, sin, self.heads_local)
         out = block_attention(q, k, v, [snap[0][i] for snap in ctx], [snap[1][i] for snap in ctx], length,
-                              self.window, self.head_dim ** -0.5, self.is_causal)
+                              self.window, self.head_dim ** -0.5, self.is_causal, table)
         x = _dconv(self._row(out, base + "self_attn.o_proj.weight"), dyn, conv, 1, self.group_size, x, seg=length)
         normed = F.rms_norm(x, (self.hidden,), w[base + "post_attention_layernorm.weight"], self.eps)
         dyn = self._lin(normed, base + "mlp_conv.kernel_projection.weight")
@@ -503,9 +516,11 @@ class DFlash2:
         if self.fast:
             ctx = [snaps[i] for i in live]
             rot = [self._rotary(snap[3], length) for snap in ctx]
-            cos, sin = torch.cat([c for c, _ in rot]), torch.cat([s for _, s in rot])
+            cos, sin = rot[0] if len(rot) == 1 else (torch.cat([c for c, _ in rot]), torch.cat([s for _, s in rot]))
+            layer_tables = tables([[snap[0][i] for snap in ctx] for i in range(self.layers)],
+                                  [[snap[1][i] for snap in ctx] for i in range(self.layers)], self.device)
             for layer in range(self.layers):
-                x = self._layer_fast(layer, x, cos, sin, ctx, length)
+                x = self._layer_fast(layer, x, cos, sin, ctx, length, layer_tables[layer])
             h = F.rms_norm(x.view(len(live), length, -1)[:, 1:].reshape(-1, self.hidden), (self.hidden,),
                            self.weights["norm.weight"], self.eps)
         else:                                    # the reference path, one stream at a time

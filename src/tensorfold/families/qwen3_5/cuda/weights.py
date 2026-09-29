@@ -16,20 +16,22 @@ class QLinear:
     weight: torch.Tensor      # original MLX words, or the optimized four-bit tile layout
     scales: torch.Tensor | None
     biases: torch.Tensor | None
-    layout: str = "mlx"       # "mlx" as stored, or "tiled" (``qmm_fast.tile``)
-    rows: int = 0             # N when tiled (the tiled words are padded to 64 columns)
+    layout: str = "mlx"       # "mlx" as stored, "tiled" (``qmm_fast.tile``) or "groups" (its ROCm form)
+    rows: int = 0             # N when tiled or grouped (their words are padded to 64 or 16 outputs)
     gs: int = 64              # inputs per quantization group
     bits: int = 4
 
     @property
     def n(self) -> int:
-        return self.rows if self.layout == "tiled" else int(self.weight.shape[0])
+        return self.rows if self.layout in ("tiled", "groups") else int(self.weight.shape[0])
 
     @property
     def k(self) -> int:
         if self.layout == "dense":
             return int(self.weight.shape[1])
-        return int(self.weight.shape[1]) * 64 if self.layout == "tiled" else int(self.scales.shape[1]) * self.gs
+        if self.layout in ("tiled", "groups"):
+            return int(self.weight.shape[1]) * 64
+        return int(self.scales.shape[1]) * self.gs
 
     def nbytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in (self.weight, self.scales, self.biases) if t is not None)
@@ -198,6 +200,7 @@ class Layer:
     up: QLinear | None
     down: QLinear | None
     moe: Any = None           # routed experts and a shared expert (``tensorfold.cuda.moe``) instead of gate/up/down
+    gu: QLinear | None = None  # [gate | up] as one matmul (ROCm; gate and up are then its views)
 
 
 @dataclass

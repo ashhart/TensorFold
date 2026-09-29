@@ -209,6 +209,63 @@ serial, resumed against fresh, by `token_sha`) matched on 8 of 8 short-prompt ce
 tokens with a real resume, and replays after a restart matched too. A conversation grown by 6,144 tokens a turn
 to the 140,288 window kept swap at 653 to 656 MB, with a 43.57 GiB peak footprint.
 
+## AMD GPUs (ROCm, experimental)
+
+The CUDA engine runs under ROCm's PyTorch on one GPU with the MLX 4-bit checkpoint and DFlash2. Use an image that
+ships ROCm's torch, Triton and hipcc; the extensions build for the GPU present (`--offload-arch`), or for the first
+entry of `PYTORCH_ROCM_ARCH` on a host without one. Tested with torch 2.11.0+rocm7.14 and Triton 3.6 on a Radeon AI
+PRO R9700 (gfx1201, 32 GB):
+
+```bash
+docker run -it --device /dev/kfd --device /dev/dri --ipc=host --network host \
+  --group-add video --group-add "$(getent group render | cut -d: -f3)" IMAGE
+python -m pip install git+https://github.com/ashhart/TensorFold.git
+tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --host 0.0.0.0
+```
+
+What runs where:
+
+| Piece | ROCm kernel |
+| --- | --- |
+| Decode and verify matmuls | `qmm_rocm.cu`: WMMA on weights repacked at load into 16-output tiles (`qmm_groups.py`); persistent blocks, K split by weight shape and reduced in-kernel; up to 32 rows a weight read; `[gate \| up]`, `[z \| b \| a]` and `[k \| v]` fused |
+| Prompt matmuls | the FP8 prompt arithmetic NVIDIA uses (`prefill_glue`'s e4m3 rows, the 4-bit codes exact in e4m3, per-group scales): codes widened once per chunk, then a fixed-tile Triton e4m3 GEMM (`qmm_groups.prefill_matmul8`) |
+| DeltaNet | `gdn.cu` and `gdn_prefill.cu`, built with hipcc; 4 rows a warp for verify chains, 64 rows a block for prompts |
+| Attention | the Triton kernels, with 16-key tiles on ROCm |
+
+Drafted replies equal `"draft": false` ones and any prompt chunking gives the same bits, as on NVIDIA; the bits are
+this engine's own. On 32 GB the startup estimate leaves a 32,768-token window beside the model and drafter.
+
+Measured on one R9700 through `tensorfold serve` with localeval's speed sweep (fresh-nonce prompts, 256 forced
+tokens, greedy, thinking off, medians of 3 to 5; decode spreads are wide, 10-40%, as acceptance varies by prompt):
+
+| | First ROCm build | This branch |
+| --- | ---: | ---: |
+| Prefill, 4k prompt (marginal) | 661 tok/s | 2,326 tok/s |
+| Prefill, 16k prompt (marginal) | 617 tok/s | 1,849 tok/s |
+| Prefill, 30k prompt (marginal) | - | 1,582 tok/s |
+| Decode, 4k prompt | 44.2 tok/s | 112.4 tok/s |
+| Decode, 16k prompt | 41.7 tok/s | 130.4 tok/s |
+| Decode, 30k prompt | - | 95.0 tok/s |
+| Serial decode (`"draft": false`), short prompt | 11.8 tok/s | 32.0 tok/s |
+
+A drafted round on a code prompt (12 verify rows, 6.4 tokens a round) takes 37 ms: 29 ms of it the weights' reads
+(the decode matmuls stream at about 80% of the card's 639 GB/s). At 28k-32k context a 4,096-token prompt chunk
+spends 48% of its GPU time in matmuls and 36% in attention.
+
+`TF_ROCM_LANE` picks the decode matmul (`wmma`, default; `dot2`, fastest for one row but slower in draft windows;
+`triton`). Tuning knobs, each changing bits for every call alike and never with the row count or chunking:
+`TF_ROCM_WMMA_FILL` (K split target), `TF_ROCM_PREFILL8` and `TF_ROCM_PREFILL` (prompt GEMM tiles),
+`TF_ROCM_ATTN` and `TF_ROCM_TREE_ATTN` (attention tiles). Scheduling only, bits unchanged: `TF_ROCM_WMMA_GRID`,
+`TF_ROCM_PREFILL8_GROUP`, `TF_ROCM_CHAIN_ROWS`, `TF_ROCM_TREE_R`. With Triton 3.6 on gfx1201 some GEMM tiles give
+wrong sums: bf16 tiles at small K, and pipelined (`num_stages` 2 or 3) e4m3 tiles for calls of a few rows. The
+defaults avoid them, and `tests/cuda/test_qwen27_prefill.py` guards both prompt GEMMs at the model's shapes.
+
+Limits: one rank; other families and EXL3 packs are refused; `--parallel` is untested on ROCm, and there a stream's
+draft proposals can differ from its solo run's (replies are unaffected: every token is verified). Verify windows
+past 16 rows run the two-tile matmul, about a quarter slower than one tile: 16 rows helped code prompts (+13-19%)
+and hurt prose (-9%) in one test each, so `max_rows` stays 12.
+
 ## Calibration and checks
 
 The draft calibration metadata names public prompts. When regenerating it, start its server with

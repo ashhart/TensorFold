@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+from functools import lru_cache
 from typing import Any
 
 MIN_CAPABILITY = (9, 0)         # the kernels use thread-block clusters and FP8 MMA
@@ -11,12 +12,39 @@ MIN_CAPABILITY = (9, 0)         # the kernels use thread-block clusters and FP8 
 HINT = "if no other build is running, a killed build left it: stop this start, delete the lock and start again"
 LOCK_WAIT_SECONDS = 60.0        # a start still waiting on the same lock this long says so again
 
+# nvcc flags and their clang (hipcc) counterparts; None drops a flag that has no HIP meaning
+_HIP_FLAGS = {"--fmad=false": "-ffp-contract=off", "--expt-relaxed-constexpr": None, "-lineinfo": None}
 
-def arch_flags() -> list[str]:
-    """nvcc flags for the current GPU alone; a GPU older than the kernels need is refused by name."""
+
+@lru_cache(maxsize=1)
+def hip() -> bool:
+    """Whether torch runs on ROCm: its ``torch.cuda`` then drives an AMD GPU and extensions build with hipcc."""
+
+    try:
+        import torch
+    except ImportError:
+        return False
+    return getattr(torch.version, "hip", None) is not None
+
+
+def hip_arch() -> str:
+    """The AMD GPU's architecture as hipcc names it, e.g. ``gfx1201`` (feature suffixes dropped); without a visible
+    GPU, the first of ``PYTORCH_ROCM_ARCH`` (a build-only host)."""
 
     import torch
 
+    if not torch.cuda.is_available() and os.environ.get("PYTORCH_ROCM_ARCH"):
+        return os.environ["PYTORCH_ROCM_ARCH"].replace(",", ";").split(";")[0].strip()
+    return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+
+
+def arch_flags() -> list[str]:
+    """Compiler flags for the current GPU alone; an NVIDIA GPU older than the kernels need is refused by name."""
+
+    import torch
+
+    if hip():
+        return [f"--offload-arch={hip_arch()}"]
     major, minor = torch.cuda.get_device_capability()
     if (major, minor) < MIN_CAPABILITY:
         raise RuntimeError(f"TensorFold's CUDA kernels need compute capability {MIN_CAPABILITY[0]}.{MIN_CAPABILITY[1]} "
@@ -25,12 +53,20 @@ def arch_flags() -> list[str]:
     return [f"-gencode=arch=compute_{major}{minor},code=sm_{major}{minor}"]
 
 
+def device_flags(flags: list[str]) -> list[str]:
+    """``flags`` as the device compiler takes them: nvcc's as given, or their hipcc equivalents on ROCm."""
+
+    if not hip():
+        return list(flags)
+    return [_HIP_FLAGS.get(f, f) for f in flags if _HIP_FLAGS.get(f, f) is not None]
+
+
 def load(name: str, sources: str | list[str], **kwargs: Any) -> Any:
     """torch's JIT ``load`` for this GPU only (NVIDIA's containers list every architecture back to sm_80), with a line when it compiles or waits on a lock."""
 
     from torch.utils import cpp_extension
 
-    kwargs["extra_cuda_cflags"] = [*kwargs.get("extra_cuda_cflags", []), *arch_flags()]
+    kwargs["extra_cuda_cflags"] = [*device_flags(kwargs.get("extra_cuda_cflags", [])), *arch_flags()]
     held = _announce(cpp_extension, name, sources, kwargs.get("build_directory"))
     timer = None
     if held is not None:
@@ -98,4 +134,4 @@ def _say(text: str) -> None:
     print(f"[tensorfold] {text}", flush=True)
 
 
-__all__ = ["MIN_CAPABILITY", "arch_flags", "load"]
+__all__ = ["MIN_CAPABILITY", "arch_flags", "device_flags", "hip", "hip_arch", "load"]

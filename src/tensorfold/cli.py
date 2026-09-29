@@ -345,6 +345,13 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         raise ValueError("--tp 2 needs --master: rank 0's address on the link between the two machines")
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2")
+    from tensorfold.cuda.build import hip
+
+    if hip() and family.model_type != "qwen3_5":
+        raise ValueError(f"{family.title} has no ROCm kernels yet (its CUDA kernels use NVIDIA tensor-core "
+                         "instructions); on AMD GPUs TensorFold serves Qwen3.8-27B's MLX checkpoint")
+    if hip() and args.tp != 1:
+        raise ValueError("two-rank serving exchanges partials over NCCL; on AMD GPUs serve one rank")
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,

@@ -5,13 +5,22 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+#include <cstdlib>
+
+#ifdef __HIPCC__
+#define TF_WARP_MASK 0xffffffffffffffffull      // ROCm's *_sync shuffles take a 64-bit lane mask
+#define __float2bfloat16_rn __float2bfloat16    // ROCm's conversion already rounds to nearest even
+#else
+#define TF_WARP_MASK 0xffffffffu
+#endif
+
 namespace {
 
 constexpr int DK = 128;
 
 __device__ __forceinline__ float warp_sum(float x) {
 #pragma unroll
-    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(0xffffffffu, x, m);
+    for (int m = 16; m; m >>= 1) x += __shfl_xor_sync(TF_WARP_MASK, x, m);
     return x;
 }
 
@@ -171,8 +180,8 @@ __global__ void __launch_bounds__(32 * WARPS) tree_kernel(
         for (int m = 16; m; m >>= 1) {
 #pragma unroll
             for (int r = 0; r < R; ++r) {
-                mem[r] += __shfl_xor_sync(0xffffffffu, mem[r], m);
-                if (pend_node >= 0) pend[r] += __shfl_xor_sync(0xffffffffu, pend[r], m);
+                mem[r] += __shfl_xor_sync(TF_WARP_MASK, mem[r], m);
+                if (pend_node >= 0) pend[r] += __shfl_xor_sync(TF_WARP_MASK, pend[r], m);
             }
         }
         if (pend_node >= 0) store_y(y, pend, pend_node, head, value0, hv, dv, lane);
@@ -259,7 +268,9 @@ void launch_tree(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, 
     const dim3 grid((dv + R * WARPS - 1) / (R * WARPS), hv, streams);
     const size_t shared = sizeof(float4) * WARPS * SLOTS * R * 32 + (CHAIN ? 0 : sizeof(int) * 3 * max_rows);
     auto kernel = tree_kernel<QK, SLOTS, R, WARPS, CHAIN>;
-    if (shared > 48 * 1024) cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
+    if (shared > 48 * 1024)
+        cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel), cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             shared);
     kernel<<<grid, 32 * WARPS, shared, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<const QK*>(q.data_ptr()), reinterpret_cast<const QK*>(k.data_ptr()),
         reinterpret_cast<const __nv_bfloat16*>(v.data_ptr()), g.data_ptr<float>(), beta.data_ptr<float>(),
@@ -286,7 +297,20 @@ void dispatch_tree(int slots, const at::Tensor& q, const at::Tensor& k, const at
 #define TREE(S, R, W, C) launch_tree<QK, S, R, W, C>(q, k, v, g, beta, state, table, starts, plan, nodes, streams, \
                                                      max_rows, y, pend, final_state, final_table)
 #define TREE_(S, R, W) TREE(S, R, W, false)
+#ifdef __HIPCC__
+    // ROCm: a chain's value rows a warp from TF_ROCM_TREE_R (2, 4 or 8; 4 halved the R9700's verify chain against 8);
+    // a row's arithmetic is the same at any
+    static const int chain_rows = [] {
+        const char* env = std::getenv("TF_ROCM_TREE_R");
+        const int r = env != nullptr ? std::atoi(env) : 4;
+        return r == 2 || r == 8 ? r : 4;
+    }();
+    if (slots == 0 && chain_rows == 2) TREE(0, 2, 4, true);
+    else if (slots == 0 && chain_rows == 4) TREE(0, 4, 4, true);
+    else if (slots == 0) TREE(0, 8, 4, true);
+#else
     if (slots == 0) TREE(0, 8, 4, true);
+#endif
     else if (slots <= 2) TREE_(2, 4, 4);
     else if (slots <= 4) TREE_(4, 2, 4);
     else if (slots <= 8) TREE_(8, 2, 4);
