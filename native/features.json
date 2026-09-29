@@ -104,7 +104,7 @@
     "upstream": ["src/tensorfold/drafters/calibration.py", "src/tensorfold/drafters/dflash_capture.py", "src/tensorfold/families/qwen3_5/dflash2_calibration.json"],
     "implementation": [{"path":"native/draft_calibration.zig","symbol":"fit"}, {"path":"native/draft_calibration.zig","symbol":"rank"}, {"path":"native/drafter.zig","symbol":"propose"}, {"path":"native/draft_capture.zig","symbol":"recordContext"}, {"path":"native/draft_capture.zig","symbol":"recordTarget"}],
     "checks": [{"step":"test-draft-calibration","driver":{"path":"native/draft_calibration.zig","symbol":"check"},"scope":"host"}, {"step":"test-draft-calibration-model","driver":{"path":"native/main.zig","symbol":"main"},"scope":"checkpoint"}, {"step":"test-draft-capture","driver":{"path":"native/draft_capture.zig","symbol":"check"},"scope":"host"}, {"step":"test-draft-capture-model","driver":{"path":"native/main.zig","symbol":"main"},"scope":"checkpoint"}],
-    "limitation": "Calibration fitting/loading, calibrated tree ordering and capture sidecars are implemented. Probability-based allocation across shared requests remains missing."
+    "limitation": "Calibration fitting/loading, calibrated tree ordering, capture sidecars and the shared allocation policy are implemented. Applying that policy to shared request rounds remains missing."
   },
   {
     "id": "copy-drafts", "state": "present", "requirement": "Exact suffix/ngram copy proposals",
@@ -125,9 +125,11 @@
     "checks": [{"step":"test-serial-runtime","driver":{"path":"native/family_runtime.zig","symbol":"run"},"scope":"checkpoint"}, {"step":"test-kv-runtime","driver":{"path":"native/main.zig","symbol":"main"},"scope":"checkpoint"}]
   },
   {
-    "id": "continuous-batching", "state": "missing", "requirement": "Shared model rounds with independent per-request caches, fair scheduling and row allocation",
+    "id": "continuous-batching", "state": "partial", "requirement": "Shared model rounds with independent per-request caches, fair scheduling and row allocation",
     "upstream": ["src/tensorfold/drafters/dflash_batch.py", "src/tensorfold/engine/allocate.py", "src/tensorfold/engine/family_shared.py", "src/tensorfold/server/scheduler.py"],
-    "limitation": "Native serving has one active inference worker; continuous batching and shared draft rounds are missing."
+    "implementation": [{"path":"native/draft_allocation.zig","symbol":"allocate"}, {"path":"native/draft_allocation.zig","symbol":"chainProbabilities"}],
+    "checks": [{"step":"test-draft-allocation","driver":{"path":"native/draft_allocation.zig","symbol":"check"},"scope":"host"}],
+    "limitation": "Shared row allocation and acceptance chains are implemented. Native serving still has one active request; shared model rounds and independent request caches remain missing."
   },
   {
     "id": "memory-admission", "state": "missing", "requirement": "Inference working-set budgets, residency, eviction and preemption",

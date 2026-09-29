@@ -14,6 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-allocation")) return @import("draft_allocation.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-capture")) return @import("draft_capture.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "fit-draft-calibration")) return @import("draft_calibration.zig").fitFile(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-calibration")) return @import("draft_calibration.zig").check(io, args[2]);
@@ -416,6 +417,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("draft_allocation.zig");
     _ = @import("draft_capture.zig");
     _ = @import("draft_calibration.zig");
     _ = @import("tool_stream.zig");

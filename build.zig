@@ -303,6 +303,12 @@ pub fn build(b: *std.Build) void {
     tool_stream_tests.step.dependOn(&tool_fixtures.step);
     tool_step.dependOn(&tool_stream_tests.step);
     const calibration_fixture = "build/native-checks/draft-calibration.json";
+    const draft_allocation_fixture = "build/native-checks/draft-allocation.json";
+    const allocation_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--allocation-fixtures", "--output", draft_allocation_fixture });
+    const allocation_check = b.addRunArtifact(exe);
+    allocation_check.addArgs(&.{ "check-draft-allocation", draft_allocation_fixture });
+    allocation_check.step.dependOn(&allocation_oracle.step);
+    b.step("test-draft-allocation", "Compare shared draft budgets and acceptance chains with upstream").dependOn(&allocation_check.step);
     const capture_folder = "build/native-checks/draft-capture";
     const capture_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--capture-fixtures", "--output", capture_folder });
     const capture_check = b.addRunArtifact(exe);

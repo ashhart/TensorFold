@@ -256,6 +256,35 @@ def capture_fixtures(output):
     print(f'Saved {len(contexts)} upstream capture records, including every BF16 bit pattern')
 
 
+def allocation_fixtures(output):
+    import random
+    from tensorfold.engine.allocate import allocate, chain_probabilities
+    rng = random.Random(271828)
+    cases, chains = [], []
+    for streams in (0, 1, 2, 3, 8, 32):
+        for repeat in range(80):
+            fixed = [rng.randrange(1, 9) for _ in range(streams)]
+            probabilities = [[rng.choice((0.0, 0.25, 0.5, 0.94, 1.0, rng.random())) for _ in range(rng.randrange(17))] for _ in fixed]
+            if repeat % 2:
+                probabilities = [sorted(p, reverse=True) for p in probabilities]
+            costs = {} if repeat % 4 == 0 else {r: rng.uniform(0.1, 20) for r in range(sum(fixed) + sum(map(len, probabilities)) + 1) if rng.random() < 0.7}
+            overhead = rng.choice((0.0, 8.0, 100.0))
+            max_rows = rng.randrange(sum(fixed) + sum(map(len, probabilities)) + 1)
+            cases.append(dict(fixed=fixed, probabilities=probabilities, costs=[dict(rows=r, ms=ms) for r, ms in costs.items()], overhead=overhead, max_rows=max_rows, expected=allocate(fixed, probabilities, costs, overhead, max_rows)))
+    for probabilities in ([[], []], [[0.0, 0.0], [0.0]], [[0.5] * 8, [0.5] * 8], [[0.0, 1.0], [0.0, 1.0]], [[1.0] * 15] * 32):
+        fixed = [1] * len(probabilities)
+        for max_rows in range(sum(fixed) + sum(map(len, probabilities)) + 2):
+            for costs in ({}, {r: float(r) for r in range(1, max_rows + 1)}):
+                cases.append(dict(fixed=fixed, probabilities=probabilities, costs=[dict(rows=r, ms=ms) for r, ms in costs.items()], overhead=0.0, max_rows=max_rows, expected=allocate(fixed, probabilities, costs, 0.0, max_rows)))
+    for rates in ([], [0.0], [1.0], [0.94], [0.85, 0.75, 0.7, 0.65], [rng.random() for _ in range(19)]):
+        for count in ((0,) if not rates else (0, 1, 3, 15, 32, 128)):
+            chains.append(dict(rates=rates, expected=chain_probabilities(rates, count)))
+    path = Path(output)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(cases=cases, chains=chains)))
+    print(f'Saved {len(cases)} upstream shared allocations and {len(chains)} acceptance chains')
+
+
 def calibration_fixtures(output):
     import math
     import random
@@ -325,6 +354,7 @@ def main():
     parser.add_argument("--image-only", action="store_true", help="Generate preprocessing oracle without loading the vision tower")
     parser.add_argument("--image-http-fixtures", action="store_true")
     parser.add_argument("--calibration-fixtures", action="store_true")
+    parser.add_argument("--allocation-fixtures", action="store_true")
     parser.add_argument("--capture-fixtures", action="store_true")
     parser.add_argument("--verify-capture", nargs=2, metavar=('DRAFTER', 'REPORT'))
     parser.add_argument("--compare-calibration", nargs=2, type=Path)
@@ -341,6 +371,8 @@ def main():
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
+    if args.allocation_fixtures:
+        return allocation_fixtures(args.output)
     if args.capture_fixtures:
         return capture_fixtures(args.output)
     if args.verify_capture:
