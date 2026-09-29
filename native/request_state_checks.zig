@@ -90,6 +90,28 @@ fn checkModel(comptime M: type) !void {
     try std.testing.expectEqual(@as(i32, 91), saved.position);
     for (m.cache) |cache| try equal(cache, original);
     for (saved.cache) |cache| try equal(cache, other);
+    var snapshot = try saved.clone();
+    defer snapshot.deinit();
+    try std.testing.expectEqual(saved.position, snapshot.position);
+    try std.testing.expectEqual(saved.nbytes(), snapshot.nbytes());
+    try std.testing.expect(snapshot.nbytes() > 0);
+    for (saved.cache) |*cache| {
+        cache.deinit();
+        try fill(cache, original);
+    }
+    for (snapshot.cache) |cache| try equal(cache, other);
+    // Clone the populated attached draft state as well, after swapping it out.
+    saved.swap(&m);
+    var full = try saved.clone();
+    defer full.deinit();
+    try std.testing.expectEqual(saved.nbytes(), full.nbytes());
+    if (@hasField(M, "mtp_cache")) try equal(full.mtp_cache, original);
+    if (full.draft) |draft| {
+        try equalArray(draft.pending, original);
+        for (draft.cache) |cache| try equal(cache, original);
+    }
+    if (full.dspark) |draft| for (draft.keys) |key| try equalArray(key, original);
+    saved.swap(&m);
     inline for (.{ "rope_delta", "generation", "mtp_position", "mtp_generation" }) |field| if (@hasField(M, field)) {
         try std.testing.expectEqual(19, @field(m, field));
     };

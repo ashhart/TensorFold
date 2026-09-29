@@ -256,6 +256,59 @@ def capture_fixtures(output):
     print(f'Saved {len(contexts)} upstream capture records, including every BF16 bit pattern')
 
 
+def prompt_cache_fixtures(output):
+    import random
+    from tensorfold.server.checkpoints import CheckpointStore, choose_checkpoints
+
+    rng = random.Random(418137)
+    result = dict(stores=[], checkpoints=[])
+    prompts = [list(range(n)) for n in range(25)]
+    prompts += [list(range(n)) + [91, 92, 93] for n in range(20)]
+    for slots in (1, 3, 8):
+        for budget in (None, 1, 120, 1024):
+            for pinned_slots in (0, 1, 3):
+                store = CheckpointStore(slots, dict, budget_bytes=budget,
+                                        sizer=lambda payload: payload['size'], pinned_slots=pinned_slots)
+                case = dict(slots=slots, budget=budget, pinned_slots=pinned_slots, operations=[])
+                for ident in range(250):
+                    prompt = rng.choice(prompts)
+                    boundary = dict(step=rng.choice((1, 2, 4, 8)),
+                                    starts=rng.choice((None, [1, 3, 8, 16])))
+                    usable = lambda n: n in boundary['starts'] if boundary['starts'] is not None else n % boundary['step'] == 0
+                    kind = rng.choice(('insert', 'insert', 'insert', 'match', 'match', 'longest', 'evict'))
+                    op = dict(kind=kind, prompt=prompt, boundary=boundary)
+                    if kind == 'insert':
+                        payload = dict(id=ident, size=rng.choice((0, 1, 16, 60, 120, 2048)))
+                        previous = prompt + [rng.randrange(100, 110)]
+                        pinned = rng.choice((False, False, True))
+                        store.admit_oversize = rng.choice((False, True))
+                        op.update(payload=payload, previous=previous, pinned=pinned, oversize=store.admit_oversize)
+                        store.insert(prompt, payload, last_prompt=previous, pinned=pinned)
+                    elif kind == 'match':
+                        take = rng.choice((False, False, True))
+                        hit = store.match(prompt, usable, take=take)
+                        op.update(take=take, hit=None if hit is None else dict(count=hit[0], payload=hit[1], previous=hit[2]))
+                    elif kind == 'longest':
+                        op['longest'] = store.longest(prompt, usable)
+                    else:
+                        keep = rng.choice([None, *store._entries])
+                        op.update(keep=None if keep is None else keep.tokens, evicted=store.evict_one(keep))
+                    op.update(entries=[dict(tokens=e.tokens, payload=e.cache, previous=e.last_prompt, pinned=e.pinned) for e in store._entries],
+                              nbytes=store.nbytes, hits=store.hits, misses=store.misses, evictions=store.evictions)
+                    case['operations'].append(op)
+                result['stores'].append(case)
+    for _ in range(1000):
+        prompt = rng.choice(prompts)
+        previous = rng.choice([None, *prompts])
+        history, cached = rng.randrange(30), rng.randrange(30)
+        result['checkpoints'].append(dict(prompt=prompt, previous=previous, history=history, cached=cached,
+                                          expected=choose_checkpoints(history, cached, previous, prompt)))
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result))
+    print('Saved 9000 upstream prompt-cache operations and 1000 checkpoint selections')
+
+
 def memory_fixtures(output):
     from dataclasses import asdict
     import random
@@ -415,6 +468,7 @@ def main():
     parser.add_argument("--calibration-fixtures", action="store_true")
     parser.add_argument("--allocation-fixtures", action="store_true")
     parser.add_argument("--memory-fixtures", action="store_true")
+    parser.add_argument("--prompt-cache-fixtures", action="store_true")
     parser.add_argument("--capture-fixtures", action="store_true")
     parser.add_argument("--verify-capture", nargs=2, metavar=('DRAFTER', 'REPORT'))
     parser.add_argument("--compare-calibration", nargs=2, type=Path)
@@ -431,6 +485,8 @@ def main():
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
+    if args.prompt_cache_fixtures:
+        return prompt_cache_fixtures(args.output)
     if args.memory_fixtures:
         return memory_fixtures(args.output)
     if args.allocation_fixtures:

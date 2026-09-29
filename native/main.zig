@@ -18,6 +18,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-session-images")) return @import("session_checks.zig").checkImages(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-session-rounds")) return @import("session_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-memory-budget")) return @import("memory_budget.zig").check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-prompt-cache")) return @import("prompt_cache.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-memory-runtime")) return @import("memory_runtime.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-allocation")) return @import("draft_allocation.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-capture")) return @import("draft_capture.zig").check(io, args[2]);
@@ -424,6 +425,7 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = @import("draft_allocation.zig");
     _ = @import("memory_budget.zig");
+    _ = @import("prompt_cache.zig");
     _ = @import("draft_capture.zig");
     _ = @import("draft_calibration.zig");
     _ = @import("tool_stream.zig");

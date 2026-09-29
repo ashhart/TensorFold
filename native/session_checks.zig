@@ -33,7 +33,56 @@ fn same(expected: session.Reply, actual: session.Reply, before: Capture, after: 
     try std.testing.expectEqualSlices(usize, before.chunks.items, after.chunks.items);
 }
 
-fn interleaved(m: anytype, tok: *@import("vendor/tokenizer.zig").Tokenizer) !void {
+fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Options, expected: session.Reply, baseline: Capture) !void {
+    const a = mx.allocator;
+    const Store = @import("prompt_cache.zig").Store(session.Snapshot);
+    var store = try Store.init(a, 2, null);
+    defer store.deinit();
+    const count = s.prefillStep();
+    const boundary = @import("prompt_cache.zig").Boundary{ .step = count };
+    {
+        var donor = try session.RequestGeneration.init(s, a, prompt, options, .{}, null);
+        defer donor.deinit();
+        try std.testing.expectEqual(null, try donor.snapshot());
+        try std.testing.expect(!try donor.step(s));
+        const saved = (try donor.snapshot()) orelse return error.MissingPrefixSnapshot;
+        try std.testing.expectEqual(count, saved.position());
+        try std.testing.expect(saved.nbytes() > 0);
+        try store.insertOwned(prompt[0..count], saved, prompt, false);
+    }
+    try std.testing.expectEqual(@as(usize, 0), store.longest(prompt[0..count], boundary));
+    var captures: [2]Capture = @splat(.{});
+    defer for (&captures) |*capture| capture.deinit();
+    var requests: [2]session.RequestGeneration = undefined;
+    var initialized: usize = 0;
+    defer for (requests[0..initialized]) |*request| request.deinit();
+    for (&requests, &captures) |*request, *capture| {
+        request.* = try session.RequestGeneration.init(s, a, prompt, options, capture.sink(), null);
+        initialized += 1;
+        var hit = (try store.match(prompt, boundary, false)) orelse return error.MissingPrefixHit;
+        defer hit.deinit(a);
+        try request.restorePrefix(&hit.cache);
+        try std.testing.expectEqual(count, request.memoryLengths().now);
+        try std.testing.expectError(error.InvalidSnapshotState, request.restorePrefix(&hit.cache));
+    }
+    // Both requests must retain independent state after the stored owner is evicted.
+    try std.testing.expect(store.evictOne(null));
+    try std.testing.expectEqual(@as(u64, 0), store.nbytes());
+    var finished = [_]bool{ false, false };
+    while (!std.mem.allEqual(bool, &finished, true)) {
+        for (&requests, &finished) |*request, *done| if (!done.*) {
+            done.* = try request.step(s);
+        };
+    }
+    for (&requests, captures) |*request, capture| {
+        var actual = try request.takeReply();
+        defer actual.deinit(a);
+        try same(expected, actual, baseline, capture);
+        try std.testing.expectEqual(null, try request.snapshot());
+    }
+}
+
+fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.zig").Tokenizer) !void {
     const M = @TypeOf(m.*);
     const G = session.Generation(M);
     const a = mx.allocator;
@@ -59,6 +108,7 @@ fn interleaved(m: anytype, tok: *@import("vendor/tokenizer.zig").Tokenizer) !voi
         reply.* = try g.takeReply();
         completed += 1;
     }
+    try prefixReuse(s, prompts[1], options[1], expected[1], baseline[1]);
     var captured: [3]Capture = @splat(.{});
     defer for (&captured) |*capture| capture.deinit();
     var active: [3]G = undefined;
@@ -112,7 +162,7 @@ fn interleaved(m: anytype, tok: *@import("vendor/tokenizer.zig").Tokenizer) !voi
     var empty = try zero.takeReply();
     defer empty.deinit(a);
     try std.testing.expectEqual(@as(usize, 0), empty.tokens.items.len);
-    std.debug.print("PASS: {s} isolated/interleaved prompts, sampling seeds, streaming chunks, thinking budget, cancellation, stop strings and zero-token requests\n", .{@typeName(M)});
+    std.debug.print("PASS: {s} isolated/interleaved prompts, reusable prefix snapshots, sampling seeds, streaming chunks, thinking budget, cancellation, stop strings and zero-token requests\n", .{@typeName(M)});
 }
 
 pub fn check(io: std.Io, dir: []const u8) !void {
@@ -122,7 +172,7 @@ pub fn check(io: std.Io, dir: []const u8) !void {
         var s = try session.Session.init(io, dir);
         defer s.deinit();
         switch (s.backend) {
-            inline else => |*m| try interleaved(m, &s.tokenizer),
+            inline else => |*m| try interleaved(&s, m, &s.tokenizer),
         }
     }
     try mx.check(mx.c.mlx_synchronize(mx.stream));

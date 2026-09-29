@@ -151,6 +151,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Qwen, Nemotron and Flash model/cache parity | `test-models -Doptimize=safe -j1` | All three installed models; substantial unified memory |
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
 | Request state and interleaved generation | `test-request-state test-session-rounds test-session-images -Doptimize=safe -j1` | Synthetic ownership for all backends; Qwen/Gemma/Nemotron checkpoints and Qwen image inputs |
+| Prefix cache policy and restoration | `test-prompt-cache test-session-rounds -Doptimize=safe -j1` | Python policy oracle; exact Qwen/Gemma/Nemotron continuation after prefix reuse and eviction |
 | Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream policy comparisons and Qwen/Gemma/Nemotron cache growth |
 | Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |

@@ -349,6 +349,12 @@ pub fn build(b: *std.Build) void {
     memory_check.addArgs(&.{ "check-memory-budget", memory_fixture });
     memory_check.step.dependOn(&memory_oracle.step);
     b.step("test-memory-budget", "Compare memory limits, cache projections and concurrent admission with upstream").dependOn(&memory_check.step);
+    const prompt_cache_fixture = "build/native-checks/prompt-cache.json";
+    const prompt_cache_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--prompt-cache-fixtures", "--output", prompt_cache_fixture });
+    const prompt_cache_check = b.addRunArtifact(exe);
+    prompt_cache_check.addArgs(&.{ "check-prompt-cache", prompt_cache_fixture });
+    prompt_cache_check.step.dependOn(&prompt_cache_oracle.step);
+    b.step("test-prompt-cache", "Compare prefix matching, ownership transfer, pinning and eviction with upstream").dependOn(&prompt_cache_check.step);
     const allocation_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--allocation-fixtures", "--output", draft_allocation_fixture });
     const allocation_check = b.addRunArtifact(exe);
     allocation_check.addArgs(&.{ "check-draft-allocation", draft_allocation_fixture });

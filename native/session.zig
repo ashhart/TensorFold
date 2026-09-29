@@ -94,9 +94,57 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
         }
     }
 
+    pub fn snapshot(g: *const RequestGeneration) !?Snapshot {
+        switch (g.*) {
+            inline else => |*request, tag| {
+                if (request.image != null or request.reply.tokens.items.len != 0 or (request.phase != .prefill and request.phase != .decode) or request.offset == 0 or request.offset % @TypeOf(request.*).chunk_size != 0) return null;
+                return @unionInit(Snapshot, @tagName(tag), try request.state.clone());
+            },
+        }
+    }
+
+    pub fn restorePrefix(g: *RequestGeneration, snapshot_value: *const Snapshot) !void {
+        switch (g.*) {
+            inline else => |*request, tag| {
+                if (@as(std.meta.Tag(Backend), snapshot_value.*) != tag) return error.WrongSnapshotModel;
+                try request.restorePrefix(&@field(snapshot_value.*, @tagName(tag)));
+            },
+        }
+    }
+
     pub fn deinit(g: *RequestGeneration) void {
         switch (g.*) {
             inline else => |*request| request.deinit(),
+        }
+    }
+};
+
+pub const Snapshot = union(std.meta.Tag(Backend)) {
+    qwen: @import("request_state.zig").State(qwen.Model),
+    nemotron: @import("request_state.zig").State(@import("nemotron.zig").Model),
+    flash: @import("request_state.zig").State(@import("flash.zig").Model),
+    gemma: @import("request_state.zig").State(@import("gemma.zig").Model),
+    glm: @import("request_state.zig").State(@import("glm.zig").Model),
+    deepseek: @import("request_state.zig").State(@import("deepseek.zig").Model),
+
+    pub fn clone(s: *const Snapshot) !Snapshot {
+        switch (s.*) {
+            inline else => |*state, tag| return @unionInit(Snapshot, @tagName(tag), try state.clone()),
+        }
+    }
+    pub fn deinit(s: *Snapshot) void {
+        switch (s.*) {
+            inline else => |*state| state.deinit(),
+        }
+    }
+    pub fn nbytes(s: *const Snapshot) u64 {
+        switch (s.*) {
+            inline else => |*state| return state.nbytes(),
+        }
+    }
+    pub fn position(s: *const Snapshot) usize {
+        switch (s.*) {
+            inline else => |*state| return @intCast(state.position),
         }
     }
 };
@@ -107,6 +155,11 @@ pub const Session = struct {
     io: std.Io,
     directory: []u8,
     chat_template: ?@import("chat.zig").Template = null,
+    pub fn prefillStep(s: *const Session) usize {
+        switch (s.backend) {
+            inline else => |m| return Generation(@TypeOf(m)).chunk_size,
+        }
+    }
     pub fn init(io: std.Io, dir: []const u8) !Session {
         var backend = try Backend.init(io, dir);
         errdefer backend.deinit();
@@ -162,6 +215,7 @@ fn generateModel(m: anytype, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, pr
 pub fn Generation(comptime M: type) type {
     return struct {
         const Self = @This();
+        pub const chunk_size: usize = if (@hasDecl(M, "prefill")) 2048 else 16;
         model: *M,
         a: std.mem.Allocator,
         tokenizer: *tokenizer.Tokenizer,
@@ -207,6 +261,16 @@ pub fn Generation(comptime M: type) type {
             return reply;
         }
 
+        pub fn restorePrefix(g: *Self, saved: *const @import("request_state.zig").State(M)) !void {
+            if (g.phase != .prefill or g.offset != 0 or g.image != null or saved.rope_delta != 0 or saved.position <= 0) return error.InvalidSnapshotState;
+            const offset: usize = @intCast(saved.position);
+            if (offset >= g.prompt.len or offset % chunk_size != 0 or saved.cache.len != g.state.cache.len) return error.IncompatibleSnapshotBoundary;
+            const copy = try saved.clone();
+            g.state.deinit();
+            g.state = copy;
+            g.offset = offset;
+        }
+
         /// One prefill chunk or one decoded token; no model pass survives the call.
         pub fn step(g: *Self, m: *M) !bool {
             if (m != g.model) return error.WrongGenerationModel;
@@ -221,7 +285,7 @@ pub fn Generation(comptime M: type) type {
         }
 
         fn prefill(g: *Self, m: *M) !void {
-            const count = @min(if (@hasDecl(M, "prefill")) @as(usize, 2048) else 16, g.prompt.len - g.offset);
+            const count = @min(chunk_size, g.prompt.len - g.offset);
             const tokens = g.prompt[g.offset..][0..count];
             var image_scope = mx.Scope{};
             defer image_scope.deinit();

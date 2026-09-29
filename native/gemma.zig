@@ -9,6 +9,13 @@ const ti = mx.ti;
 const Cache = struct {
     keys: A = mx.empty,
     values: A = mx.empty,
+    pub fn clone(c: Cache) !Cache {
+        var out = Cache{};
+        errdefer out.deinit();
+        if (c.keys.ctx != null) out.keys = try mx.retain(c.keys);
+        if (c.values.ctx != null) out.values = try mx.retain(c.values);
+        return out;
+    }
     pub fn deinit(c: *Cache) void {
         mx.free(c.keys);
         mx.free(c.values);

@@ -62,7 +62,7 @@ const Cache = struct {
         inline for (comptime std.meta.fieldNames(Cache)) |field| mx.free(@field(cache, field));
         cache.* = .{};
     }
-    fn clone(cache: Cache) !Cache {
+    pub fn clone(cache: Cache) !Cache {
         var out = Cache{};
         errdefer out.deinit();
         inline for (comptime std.meta.fieldNames(Cache)) |field| if (@field(cache, field).ctx != null) {

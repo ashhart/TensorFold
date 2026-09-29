@@ -164,9 +164,11 @@
     "limitation": "Serving reserves full live reply growth and image workspace before admission. Cache eviction, background preemption, repeated startup probes and upstream's dynamic stream-growth gate remain missing; full GLM/DeepSeek memory profiles are unverified."
   },
   {
-    "id": "prompt-cache-checkpoints", "state": "missing", "requirement": "Cross-request prompt reuse, prefix snapshots, checkpoint persistence and disk spill",
+    "id": "prompt-cache-checkpoints", "state": "partial", "requirement": "Cross-request prompt reuse, prefix snapshots, checkpoint persistence and disk spill",
     "upstream": ["src/tensorfold/engine/prefix_snapshots.py", "src/tensorfold/server/checkpoints.py", "src/tensorfold/server/prompt_fill.py", "src/tensorfold/server/prompt_memory.py", "src/tensorfold/server/stacks.py", "src/tensorfold/streaming/checkpoint.py"],
-    "limitation": "Native serving resets state per request and has no persistent prompt cache or disk spill."
+    "implementation": [{"path":"native/prompt_cache.zig","symbol":"Store"}, {"path":"native/prompt_cache.zig","symbol":"checkpoints"}, {"path":"native/session.zig","symbol":"restorePrefix"}],
+    "checks": [{"step":"test-prompt-cache","driver":{"path":"native/prompt_cache.zig","symbol":"check"},"scope":"host"}, {"step":"test-request-state","driver":{"path":"native/request_state_checks.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-session-rounds","driver":{"path":"native/session_checks.zig","symbol":"check"},"scope":"checkpoint"}],
+    "limitation": "Owned snapshots, strict-prefix matching, pinning, LRU eviction and resumed generation are implemented. HTTP cache integration, adaptive message boundaries, persistence and disk spill remain missing."
   },
   {
     "id": "cache-buffers", "state": "present", "requirement": "KV buffer reuse without corrupting snapshots or retained prefixes",
