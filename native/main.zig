@@ -433,6 +433,7 @@ test {
     _ = @import("tool_stream.zig");
     _ = @import("tool_calls.zig");
     _ = @import("chat.zig");
+    _ = @import("deepseek_prompts.zig");
     _ = @import("image_source.zig");
     _ = @import("request_options.zig");
     _ = @import("thinking_budget.zig");

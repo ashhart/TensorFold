@@ -310,6 +310,10 @@ def chat_fixture(directory, output):
     from tensorfold.server.request_options import RequestOptions
     from threading import Lock
     tokenizer = TokenizerWrapper(AutoTokenizer.from_pretrained(str(directory), local_files_only=True))
+    deepseek = json.loads((directory / 'config.json').read_text()).get('model_type') == 'deepseek_v4'
+    if deepseek:
+        from tensorfold.families.deepseek_v4.prompts import DeepSeekTokenizer
+        tokenizer = DeepSeekTokenizer(tokenizer)
     openers = ("<tool_call>", "<|tool_call>", "<｜DSML｜tool_calls>")
     probe = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "tfprobe_fn", "arguments": {}}}]}]
     form = call_format(tokenizer.decode(render_prompt_ids(tokenizer, probe, add_generation_prompt=False)), "tfprobe_fn", openers)
@@ -338,6 +342,8 @@ def chat_fixture(directory, output):
             proposed = ([eos] + encode(script)) * 3
             for budget in (-1, 0, 1, 2, 5, 10):
                 for required in (False, True):
+                    if required and token_id(form[0]) < 0:
+                        continue
                     gate = CallGate.after_prompt(prompt, token_id(form[0]), lambda token: token != eos and not decode(token).strip(), think_open=think_open, think_end=think_end, text=decode, encode=encode, lead=form[1] or "", names=names if form[1] is not None else (), tail=form[2] or "") if required else None
                     stream = LaneStream("fixture", prompt, len(proposed), call_gate=gate, think_budget=budget, think_end=budget_end, think_close=budget_close, think_open=budget > 0 and budget_end >= 0)
                     for token in proposed:
@@ -367,15 +373,81 @@ def chat_fixture(directory, output):
             cases.append({"body": body, "tokens": ids, "gates": gate_cases(ids)})
     output.parent.mkdir(parents=True, exist_ok=True)
     from tensorfold.engine.prefill_plan import message_markers
-    deepseek = json.loads((directory / 'config.json').read_text()).get('model_type') == 'deepseek_v4'
-    marker_tokenizer = tokenizer
-    if deepseek:
-        from tensorfold.families.deepseek_v4.prompts import DeepSeekTokenizer
-        marker_tokenizer = DeepSeekTokenizer(tokenizer)
-    marks, assistant = message_markers(marker_tokenizer)
+    marks, assistant = message_markers(tokenizer)
     cases[0]['markers'] = dict(openers=marks, assistant=assistant, deepseek=deepseek)
+    cases[0]['call_form'] = form
+    cases[0]['required_supported'] = form is not None and token_id(form[0]) >= 0
+    if not cases[0]['required_supported']:
+        from tensorfold.server.errors import RequestError
+        try:
+            options._call_gate({'tool_call_required': True}, cases[0]['tokens'], [tool])
+        except RequestError:
+            pass
+        else:
+            raise AssertionError('Expected upstream to reject an unsupported required call')
+    if deepseek:
+        cases.extend(deepseek_chat_cases(tokenizer, tool))
     output.write_text(json.dumps(cases, ensure_ascii=False))
     print(f"Saved {len(cases)} upstream chat fixtures for {directory.name}")
+
+
+def deepseek_chat_cases(tokenizer, tool):
+    import copy
+    import random
+
+    calls = [{"id": f"call_{i}", "type": "function", "function": {"name": "weather", "arguments": json.dumps(args, ensure_ascii=False)}} for i, args in enumerate([
+        {"city": "æøå 世界\u0000\n\"", "values": [True, False, None, 1, -7, 1.0, -0.0, 1e-5, 1e-4, 1e15, 1e16], "object": {"a": 2}},
+        {"city": "Copenhagen"},
+        {},
+    ])]
+    history = [
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "content": None, "reasoning_content": "Earlier reasoning", "tool_calls": calls},
+        {"role": "tool", "tool_call_id": "call_2", "content": "Third"},
+        {"role": "user", "content": "Interleaved user"},
+        {"role": "tool", "tool_call_id": "call_0", "content": [{"type": "text", "text": "First"}, {"type": "image"}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": "Second"},
+        {"role": "assistant", "content": "Answer", "reasoning_content": "Latest reasoning"},
+    ]
+    conversations = [
+        [], [{"role": "system", "content": "Only system"}],
+        [{"role": "assistant", "content": None}],
+        [{"role": "user", "content": "First"}, {"role": "user", "content": "Second"}],
+        history, history[:-1], history + [{"role": "user", "content": "Next turn"}],
+        [{"role": "developer", "content": "Old instruction"}, {"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello", "reasoning_content": "Discard me"}, {"role": "developer", "content": "Latest instruction"}],
+        [{"role": "system", "content": "Schema", "response_format": {"type": "json", "schema": {"type": "object", "enum": ["æøå", 1.0]}}}, {"role": "user", "content": "Hi"}],
+        [{"role": "developer", "content": "Schema", "tools": [tool], "response_format": {"type": "object"}}, {"role": "assistant", "content": "Result", "reasoning_content": "Reason"}],
+        [{"role": "user", "content": "Hi"}, {"role": "latest_reminder", "content": "Remember"}, {"role": "assistant", "content": "Partial", "wo_eos": True}],
+    ]
+    for args in ("not JSON", {"nested": [True, 0.00001, "世界"]}, None):
+        conversations.append([{"role": "user", "content": "Call"}, {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "weather", "arguments": args}}]}])
+    for task in ("action", "query", "authority", "domain", "title", "read_url"):
+        messages = [{"role": "user", "content": "Classify", "task": task}]
+        conversations.extend([messages, messages + [{"role": "assistant", "content": "Result", "reasoning_content": "No thinking for task"}]])
+    cases = []
+    def add(messages, tools, kwargs, generation):
+        before = copy.deepcopy(messages)
+        text = tokenizer.apply_chat_template(messages, tools=tools, tokenize=False, add_generation_prompt=generation, **kwargs)
+        assert messages == before
+        cases.append({"raw": True, "body": {"messages": messages, "tools": tools, "chat_template_kwargs": kwargs, "add_generation_prompt": generation}, "text": text, "tokens": tokenizer.encode(text, add_special_tokens=False)})
+    for messages in conversations:
+        for thinking, effort in ((False, None), (True, None), (True, "high"), (True, "xhigh"), (True, "max")):
+            for tools in (None, [tool], [tool["function"]]):
+                for generation in (False, True):
+                    add(messages, tools, {"enable_thinking": thinking, "reasoning_effort": effort}, generation)
+    rng = random.Random(8172)
+    for _ in range(100):
+        messages = copy.deepcopy(history)
+        rng.shuffle(messages[1]["tool_calls"])
+        for call in messages[1]["tool_calls"]:
+            if rng.randrange(2):
+                call["function"]["id"] = call.pop("id")
+        messages[2]["tool_call_id"] = rng.choice(["call_0", "call_1", "call_2", "unknown"])
+        messages[4]["tool_call_id"] = messages[2]["tool_call_id"]
+        messages = messages[:rng.randrange(1, len(messages) + 1)]
+        mode = rng.choice(["chat", "thinking"])
+        add(messages, rng.choice([None, [tool]]), {"enable_thinking": mode != "thinking", "thinking_mode": mode, "reasoning_effort": rng.choice([None, "low", "xhigh"])}, bool(rng.randrange(2)))
+    return cases
 
 
 def tool_fixtures(output):

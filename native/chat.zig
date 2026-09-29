@@ -46,8 +46,28 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
                 for (ids, wanted) |id, value| try std.testing.expectEqual(value.integer, id);
             }
         }
-        const rendered = try template.render(a, case.object.get("body").?);
+        const body = case.object.get("body").?;
+        const rendered = if (case.object.get("raw")) |_| Rendered{
+            .text = try template.raw(a, body.object.get("messages").?, body.object.get("tools") orelse .null, body.object.get("chat_template_kwargs").?, body.object.get("add_generation_prompt").?.bool, true),
+            .images = .null,
+            .thinking = true,
+        } else try template.render(a, body);
+        if (case.object.get("text")) |expected_text| try std.testing.expectEqualStrings(expected_text.string, rendered.text);
         const ids = try encode(a, &tokenizer, rendered);
+        if (case.object.get("call_form")) |expected_form| {
+            const form = try template.callForm(a, &tokenizer);
+            if (expected_form == .null) {
+                try std.testing.expect(form == null);
+            } else {
+                const actual = form orelse return error.MissingCallForm;
+                try std.testing.expectEqualStrings(expected_form.array.items[0].string, actual.opener);
+                const lead = expected_form.array.items[1];
+                try std.testing.expectEqualStrings(if (lead == .string) lead.string else "", actual.lead orelse "");
+                const tail = expected_form.array.items[2];
+                try std.testing.expectEqualStrings(if (tail == .string) tail.string else "", actual.tail);
+                if (!case.object.get("required_supported").?.bool) try std.testing.expectError(error.UnsupportedRequiredToolCall, @import("call_gate.zig").Gate.init(a, &tokenizer, ids, actual, &.{"weather"}, false));
+            }
+        }
         const expected = case.object.get("tokens").?.array.items;
         var same = ids.len == expected.len;
         for (ids[0..@min(ids.len, expected.len)], expected[0..@min(ids.len, expected.len)], 0..) |id, want, at| if (id != want.integer) {
@@ -63,11 +83,11 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
             const form = (try template.callForm(a, &tokenizer)) orelse return error.MissingCallForm;
             var names: std.ArrayList([]const u8) = .empty;
             for (fixture_gate.object.get("names").?.array.items) |name| try names.append(a, name.string);
-            var gate = try @import("call_gate.zig").Gate.init(a, &tokenizer, ids, form, names.items, std.mem.indexOf(u8, directory, "gemma") != null);
-            var budget = try @import("thinking_budget.zig").Budget.init(a, &tokenizer, if (fixture_gate.object.get("budget")) |v| v.integer else 0);
             const required = if (fixture_gate.object.get("required")) |v| v.bool else true;
+            var gate: ?@import("call_gate.zig").Gate = if (required) try @import("call_gate.zig").Gate.init(a, &tokenizer, ids, form, names.items, std.mem.indexOf(u8, directory, "gemma") != null) else null;
+            var budget = try @import("thinking_budget.zig").Budget.init(a, &tokenizer, if (fixture_gate.object.get("budget")) |v| v.integer else 0);
             for (fixture_gate.object.get("proposed").?.array.items, fixture_gate.object.get("expected").?.array.items, 0..) |proposed, expected_token, token_index| {
-                const got = try budget.next(if (required) &gate else null, token_index, @intCast(proposed.integer), proposed.integer == fixture_gate.object.get("eos").?.integer);
+                const got = try budget.next(if (gate) |*g| g else null, token_index, @intCast(proposed.integer), proposed.integer == fixture_gate.object.get("eos").?.integer);
                 if (got != expected_token.integer) {
                     std.debug.print("Call gate fixture {d}, token {d}: native {d}, upstream {d}\n", .{ index, token_index, got, expected_token.integer });
                     return error.CallGateMismatch;
@@ -75,14 +95,14 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
             }
         };
     }
-    const deepseek = if (cases.value.array.items[0].object.get("markers")) |markers| markers.object.get("deepseek").?.bool else false;
-    std.debug.print("PASS: {d} chat prompts, thinking budgets and required-call gates match {s} token IDs; adaptive markers match upstream\n", .{ cases.value.array.items.len, if (deepseek) "DeepSeek checkpoint-template" else "upstream" });
+    std.debug.print("PASS: {d} chat prompts, thinking budgets and required-call gates match upstream token IDs; adaptive markers match upstream\n", .{cases.value.array.items.len});
 }
 pub const Template = struct {
     arena: std.heap.ArenaAllocator,
     source: [:0]const u8,
     context: V,
     late_system: []const u8 = "system",
+    deepseek: bool = false,
 
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8) !Template {
         var arena = std.heap.ArenaAllocator.init(a);
@@ -101,12 +121,17 @@ pub const Template = struct {
                 if (value.object.get("content")) |content| if (content == .string) try context.object.put(owned, entry.key_ptr.*, content);
             }
         }
+        const model_path = try std.fmt.allocPrint(owned, "{s}/config.json", .{dir});
+        const model_bytes = std.Io.Dir.cwd().readFileAlloc(io, model_path, owned, .limited(16 * 1024 * 1024)) catch |err| if (err == error.FileNotFound) "{}" else return err;
+        const model = (try std.json.parseFromSlice(V, owned, model_bytes, .{})).value;
+        const model_type = if (model == .object) model.object.get("model_type") orelse .null else .null;
+        const deepseek = model_type == .string and std.mem.eql(u8, model_type.string, "deepseek_v4");
         const file = try std.fmt.allocPrint(owned, "{s}/chat_template.jinja", .{dir});
-        const source = std.Io.Dir.cwd().readFileAlloc(io, file, owned, .limited(1024 * 1024)) catch |err| blk: {
+        const source = if (deepseek) "" else std.Io.Dir.cwd().readFileAlloc(io, file, owned, .limited(1024 * 1024)) catch |err| blk: {
             if (err != error.FileNotFound) return err;
             break :blk try templateSource(config.value.object.get("chat_template") orelse return error.MissingChatTemplate);
         };
-        var result = Template{ .arena = undefined, .source = try numericMembers(owned, source), .context = context };
+        var result = Template{ .arena = undefined, .source = try numericMembers(owned, source), .context = context, .deepseek = deepseek };
         const probe = try std.json.parseFromSlice(V, owned,
             \\[{"role":"system","content":"s"},{"role":"user","content":"u"},{"role":"assistant","content":"a"},{"role":"system","content":"tensorfold-late-system-probe"},{"role":"user","content":"v"}]
         , .{});
@@ -256,6 +281,13 @@ pub const Template = struct {
         return null;
     }
     fn raw(t: *const Template, a: std.mem.Allocator, messages: V, tools: V, extra: V, generation: bool, report_error: bool) ![]u8 {
+        if (t.deepseek) {
+            const mode = extra.object.get("thinking_mode") orelse .null;
+            const enabled: V = extra.object.get("enable_thinking") orelse .{ .bool = false };
+            const thinking = if (mode != .null) mode == .string and std.mem.eql(u8, mode.string, "thinking") else enabled == .bool and enabled.bool;
+            const effort = extra.object.get("reasoning_effort") orelse .null;
+            return @import("deepseek_prompts.zig").render(a, messages, tools, thinking, if (effort == .string) effort.string else null, generation);
+        }
         const msg = try asJson(a, messages);
         const tool: ?[*:0]const u8 = if (tools == .null) null else (try asJson(a, tools)).ptr;
         const context = try asJson(a, extra);

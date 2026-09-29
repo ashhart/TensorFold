@@ -340,7 +340,7 @@ pub fn build(b: *std.Build) void {
     server_memory.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--memory-only", "build/native-checks/memory-image/image.jpeg" });
     server_memory.step.dependOn(&memory_image.step);
     b.step("test-server-memory", "Verify request admission waits, memory refusal, image reservation and cancellation recovery").dependOn(&server_memory.step);
-    const chat_tests = b.step("test-chat", "Compare native Jinja prompts with upstream for all seven local tokenizers; no model weights loaded");
+    const chat_tests = b.step("test-chat", "Compare native chat prompts with upstream for all seven local tokenizers; no model weights loaded");
     const tool_fixtures = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", ".", "--tool-fixtures", "--output", "build/native-checks/tool-calls.json" });
     const tool_tests = b.addRunArtifact(exe);
     tool_tests.addArgs(&.{ "check-tool-calls", "build/native-checks/tool-calls.json" });
