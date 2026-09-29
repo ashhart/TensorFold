@@ -24,9 +24,11 @@ class Tower:
 @pytest.mark.parametrize("flat_embeddings", [False, True])
 def test_glm_vision_encode_replaces_only_image_token_embeddings(flat_embeddings):
     config = {"model_type": "glm5_next", "image_token_id": 10,
-              "vision_config": {"out_hidden_size": 4}}
+              "vision_config": {"out_hidden_size": 4, "patch_size": 14,
+                                "temporal_patch_size": 2, "spatial_merge_size": 2}}
     processor = SimpleNamespace(tokenizer=SimpleNamespace(convert_tokens_to_ids=lambda token: 10),
-                                image_token="<|image|>", image_processor=SimpleNamespace(merge_size=2))
+                                image_token="<|image|>", image_processor=SimpleNamespace(
+                                    patch_size=14, temporal_patch_size=2, merge_size=2))
     embeddings = mx.arange(16, dtype=mx.float32).reshape(1, 4, 4)
     embed = lambda tokens: embeddings.reshape(-1, 4) if flat_embeddings else embeddings
     front = GLMVisionFrontend(config, embed, Tower(), processor, mx)
