@@ -101,3 +101,28 @@ def test_mxfp8_stack_keeps_each_projection():
     st = Mx8Linear.stack([a, b])
     x = (torch.randn((5, 256), generator=torch.Generator().manual_seed(7)) * 0.5).to(torch.bfloat16).cuda()
     assert st.n == 144 and torch.allclose(st(x).float(), torch.cat([a(x), b(x)], 1).float(), rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("n,k", [(128, 256), (640, 2560), (1024, 5120)])
+def test_mxfp8_from_bf16_tracks_the_rows_it_came_from(n, k):
+    """A bf16 weight as a face to decode with: e4m3 codes, a power-of-two scale a 32 inputs, half the bytes.
+
+    The scale is a 32 inputs, so a row whose groups differ by orders of magnitude keeps its small groups: one
+    group's exponent must not decide another's reading.
+    """
+
+    gen = torch.Generator().manual_seed(8)
+    w = (torch.randn((n, k), generator=gen) * 0.05).to(torch.bfloat16).cuda()
+    x = (torch.randn((16, k), generator=torch.Generator().manual_seed(9)) * 0.5).to(torch.bfloat16).cuda()
+    lin = Mx8Linear.from_bf16(w)
+    full = _check_rows(lin, x)
+    ref = x.double() @ w.double().t()
+    assert float((full.double() - ref).norm() / ref.norm()) < 5e-2      # an unscaled read would be ~1.0
+    assert lin.nbytes() < w.numel() * 2, "an 8-bit face must cost less than the rows it was made from"
+    assert lin.bs.dtype == torch.uint8 and lin.bs.shape == (lin.npad // 64, k // 64, 64, 2)
+    wide = w.clone()
+    wide[:, k // 2:] *= 512                                  # the second half's groups are 512x larger
+    got = Mx8Linear.from_bf16(wide)(x)
+    want = x.double() @ wide.double().t()
+    assert float((got.double() - want).norm() / want.norm()) < 5e-2     # one group's exponent, one group
+

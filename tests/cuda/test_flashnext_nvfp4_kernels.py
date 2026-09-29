@@ -15,6 +15,24 @@ from tensorfold.families.qwen4_exp.cuda import bf16, nvfp4, nvfp4_moe  # noqa: E
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_the_faces_a_load_copies_follow_the_environment(monkeypatch) -> None:
+    """A face is eligible and the environment chooses: a load that never sets the value pays for no copy, and a
+    value that is not one of the two names means none either. The loader used to mark its faces ``copy=True``, so
+    they were built whether or not anything would read them."""
+
+    torch.manual_seed(6)
+    w = (torch.randn(320, 10240, device="cuda") * 0.02).to(torch.bfloat16)
+    monkeypatch.delenv("TENSORFOLD_FACES_FP8", raising=False)
+    assert bf16.make_b16(w).rows8 is None
+    monkeypatch.setenv("TENSORFOLD_FACES_FP8", "1")
+    assert bf16.make_b16(w).rows8 is not None
+    monkeypatch.setenv("TENSORFOLD_FACES_FP8", "all")
+    assert bf16.make_b16(w).rows8 is not None
+    monkeypatch.setenv("TENSORFOLD_FACES_FP8", "yes")         # malformed means none
+    assert bf16.make_b16(w).rows8 is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 def test_b16_matmul_is_row_invariant():
     """A BF16 row's bits depend only on its own input: the same row in a 1-row window and a 16-row window
     gives the same bits (the split is set by the shape, the reduce's order fixed)."""
@@ -155,3 +173,28 @@ def test_moe4_step_runs_each_row_through_its_expert_and_the_shared_one():
         assert torch.equal(y[r, 1], nvfp4.matmul(sa, ex.shared.down, f32=True)[0])
     alone = step(x[2:3].contiguous())[1]
     assert torch.equal(alone[0], y[2])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_a_face_with_an_8bit_copy_reads_it_for_a_round_and_its_rows_for_a_prompt(monkeypatch):
+    """A round verifies a handful of rows, so its dense faces cost their bytes: with a copy, decode reads the
+    e4m3 half and a prompt the stored rows - the reading the copy is honest about, since it is coarser."""
+
+    monkeypatch.delenv("TENSORFOLD_FACES_FP8", raising=False)
+    monkeypatch.setattr(bf16, "DECODE_FP8", True)
+    torch.manual_seed(3)
+    dev = "cuda"
+    w = (torch.randn(640, 2560, device=dev) * 0.04).to(torch.bfloat16)
+    x = (torch.randn(7, 2560, device=dev) * 0.5).to(torch.bfloat16)
+    face = bf16.make_b16(w, copy=True)
+    assert face.rows8 is not None
+    assert face.rows8.nbytes() < w.numel() * 2               # the copy costs less than the rows it copies
+    want = x.to(torch.float32) @ w.to(torch.float32).T
+    stored = bf16.matmul(x, face, prefill=True)               # a prompt keeps the stored rows
+    assert (stored.to(torch.float32) - want).abs().max().item() < 2e-2
+    decode = bf16.matmul(x, face, prefill=False)             # a round reads the copy
+    rel = float((decode.float() - want).norm() / want.norm())
+    assert rel < 5e-2, rel                                   # coarser, and nowhere near an unscaled read
+    assert not torch.equal(stored, decode)
+    assert bf16.make_b16(w).rows8 is None                    # off unless the load asks for it
+    assert bf16.make_b16(w, copy=False).rows8 is None

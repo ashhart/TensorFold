@@ -331,7 +331,9 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
 
         got = [dense(*p) for p in parts]
         if all(s is None for _, s in got):
-            faces = [b16_rows(w.to(torch.bfloat16)) for w, _ in got]
+            # Eligible, not chosen: ``make_b16`` reads TENSORFOLD_FACES_FP8, so a load without it keeps the
+            # stored rows and does not pay for copies nothing would read.
+            faces = [b16_rows(w.to(torch.bfloat16), copy=None) for w, _ in got]
             return faces[0] if len(faces) == 1 else stack_b16(faces)
         if all(s is not None for _, s in got):
             from tensorfold.cuda.nvfp4.linear import Mx8Linear
@@ -402,8 +404,8 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                     cscale(name + ".norm_key.weight"), cscale(name + ".norm_query.weight"),
                     cscale(name + ".norm_conv.weight"), conv.contiguous(), ngram)
 
-    def b16_rows(t: torch.Tensor):
-        return b16_from_rows(t.to(torch.bfloat16).contiguous())
+    def b16_rows(t: torch.Tensor, *, copy: bool | None = None):
+        return b16_from_rows(t.to(torch.bfloat16).contiguous(), copy=copy)
 
     def moe(name: str) -> MoEW:
         gate_rows = raw(name + ".gate.weight").to(torch.bfloat16)
@@ -563,7 +565,9 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         mixer = (hc_nvfp4 if cfg.quant == "modelopt" else hc)(mbase + "hyper_connection_mixer", False)
         vl = full.vocab // world
         if cfg.quant == "modelopt":
-            head = b16_rows(raw("lm_head.weight").to(torch.bfloat16)[rank * vl:(rank + 1) * vl])
+            # No e4m3 copy for the head: the drafts' head below is a quantized copy of these very rows, so a
+            # coarser copy here would have the model and its drafts scoring different weights.
+            head = b16_rows(raw("lm_head.weight").to(torch.bfloat16)[rank * vl:(rank + 1) * vl], copy=False)
         else:
             head_raw = triple("lm_head")
             head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))

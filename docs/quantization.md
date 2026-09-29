@@ -41,6 +41,13 @@ A nonempty per-module mapping uses that mapping's own defaults, so `{"bits": 8}`
 Boolean `true` inherits global settings; `false` and an empty mapping disable quantization for that module where the family supports its resulting unquantized projection.
 Conflicting aliases and packed shapes that disagree with the declared bit width or group size are refused.
 
+A CUDA checkpoint may quantize only its routed experts, leaving the dense projections in BF16 that a decoding
+round re-reads whole however few rows it verifies. `TENSORFOLD_FACES_FP8` loads those projections with an e4m3
+copy a round reads instead of the stored rows: `1` for the DeltaNet and attention linears a round re-reads most,
+`all` for every BF16 face, and unset or any unrecognized value for none. A prompt keeps the stored rows - the
+copy is a decode lane - and rows a draft chain is compared against, such as the lm_head's, are never copied,
+since a coarser copy there costs the drafts more than the round saves.
+
 Fused stacks combine projections only when bit width, group size, input width and metadata dtypes agree.
 Otherwise the model computes those projections separately with their declared formats.
 CUDA tensor-parallel splits retain complete groups and packed-word boundaries, and memory admission counts the actual packed precision.

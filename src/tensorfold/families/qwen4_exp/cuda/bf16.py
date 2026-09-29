@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -20,19 +21,56 @@ GS = 32                     # the MLX group size this module's quantize4 emits
 
 @dataclass
 class B16:
-    """A BF16 matrix [n, k] as the checkpoint stores it."""
+    """A BF16 matrix [n, k] as the checkpoint stores it, with an e4m3 copy decode can read instead.
+
+    A round verifies a handful of rows, so a dense face's cost is its bytes: every layer of a checkpoint whose
+    non-expert linears are stored bf16 re-reads them whole however few rows the round checks. Half the bytes
+    and the lane matmul's own tiles make the e4m3 copy of the same weight several times faster at those row
+    counts, which is why ``make_b16`` can build one (``TENSORFOLD_FACES_FP8=1``) and ``matmul`` prefers it for
+    decode-sized calls. Prompts keep the stored rows: they are the shape ``Fp8Linear`` is a copy *for*, and a
+    row's bits must not depend on how the work was scheduled.
+    """
 
     weight: torch.Tensor      # [n, k] bf16, contiguous
     n: int
     k: int
+    rows8: object = None      # tensorfold.cuda.nvfp4.linear.Fp8Linear, or None
 
     def nbytes(self) -> int:
-        return self.weight.numel() * self.weight.element_size()
+        return self.weight.numel() * self.weight.element_size() + (self.rows8.nbytes() if self.rows8 else 0)
 
 
-def make_b16(weight: torch.Tensor) -> B16:
+def faces_8bit() -> str:
+    """Which BF16 faces also get an 8-bit copy, from ``TENSORFOLD_FACES_FP8`` across a load.
+
+    ``""``: none. ``"1"``: the projections ``weights.face`` builds - the DeltaNet and attention linears, which
+    are 110 of a layer's 147.6 MiB. ``"all"``: every BF16 face too (router, hyper-connections, shared expert),
+    which measured a 28% cheaper round but 48% of drafts accepted against 64%: those small faces steer which
+    experts run and how the streams mix, so a coarser copy of them costs the MTP head more than it saves.
+    """
+
+    return os.environ.get("TENSORFOLD_FACES_FP8", "").strip().lower()
+
+
+DECODE_FP8 = True             # whether a round reads that copy; a probe flips it, a server leaves it on
+
+
+def make_b16(weight: torch.Tensor, *, copy: bool | None = None) -> B16:
+    """A B16 face, with an e4m3 copy when ``copy`` says so (None: when ``TENSORFOLD_FACES_FP8`` is set).
+
+    ``copy=True`` marks a face whose stored rows are pure weight traffic (``weights.face``: the DeltaNet and
+    attention linears, 74% of a round's BF16 bytes). ``copy=False`` marks the rows a draft chain is *compared
+    against*: the MTP drafts' head is a copy of the lm_head's own rows, so a coarser copy of them here would
+    leave the two paths scoring different weights and the chain would accept nothing.
+    """
+
     w = weight.to(torch.bfloat16).contiguous()
-    return B16(w, int(w.shape[0]), int(w.shape[1]))
+    rows8 = None
+    if (faces_8bit() == "all") if copy is None else copy:
+        from tensorfold.cuda.nvfp4.linear import Mx8Linear      # the lane matmul's own 8-bit face
+
+        rows8 = Mx8Linear.from_bf16(w)
+    return B16(w, int(w.shape[0]), int(w.shape[1]), rows8)
 
 
 def split_k(n: int, k: int, target: int = 160, bk: int = BK) -> int:
@@ -86,8 +124,14 @@ if HAS_TRITON:
 
 def matmul(x: torch.Tensor, b: B16, *, out: torch.Tensor | None = None, f32: bool = False,
            sk: int | None = None, num_warps: int = 4, num_stages: int = 3,
-           block_n: int = BN, bk: int = BK) -> torch.Tensor:
-    """x [M, K] bf16 @ b.T -> [M, N] bf16 (or fp32 sums), K slices summed in slice order."""
+           block_n: int = BN, bk: int = BK, prefill: bool = True) -> torch.Tensor:
+    """x [M, K] bf16 @ b.T -> [M, N] bf16 (or fp32 sums), K slices summed in slice order.
+
+    ``prefill`` says which step is asking, because that is what decides whether a face with an e4m3 copy reads
+    it: a round verifies a handful of rows, so its reads are the weight's bytes, while a prompt's rows are many
+    and the stored rows stay the cheaper read. Row count would be the wrong test - a prompt arrives in chunks,
+    and a row's bits must not depend on how the work was scheduled.
+    """
 
     if not HAS_TRITON:
         raise RuntimeError("the BF16 matmul needs Triton (the CUDA engine's environment)")
@@ -96,6 +140,10 @@ def matmul(x: torch.Tensor, b: B16, *, out: torch.Tensor | None = None, f32: boo
         raise ValueError(f"b16 matmul: x {tuple(x.shape)} does not match K={b.k}")
     if k % bk:
         raise ValueError(f"b16 matmul: K {k} is not a multiple of the K block {bk}")
+    if DECODE_FP8 and b.rows8 is not None and not f32 and not prefill:
+        # Decode: the e4m3 copy of this weight, half the bytes and the lane matmul's tiles. An fp32 face keeps
+        # the row-invariant path (its whole point is slice-order sums in fp32), and so does a prompt.
+        return b.rows8(x, out=out)
     sk = int(sk) if sk else split_k(b.n, b.k, bk=bk)
     if out is None:
         out = torch.empty((m, b.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
@@ -139,10 +187,10 @@ def quantize4(w: torch.Tensor, chunk: int = 8192, out: str = "q4"):
     return qmm.make_q4(torch.cat(words), torch.cat(scales), torch.cat(biases))
 
 
-def b16_from_rows(rows: torch.Tensor) -> "_Routed":
+def b16_from_rows(rows: torch.Tensor, *, copy: bool | None = None) -> "_Routed":
     """A [n, k] bf16 matrix with the ``qmm.matmul`` face (a ``kernel`` tag)."""
 
-    b = make_b16(rows)
+    b = make_b16(rows, copy=copy)
     return _Routed(b)
 
 
@@ -158,6 +206,12 @@ class _Routed:
     @property
     def weight(self) -> torch.Tensor:
         return self.b.weight
+
+    @property
+    def rows8(self):
+        """The e4m3 copy of the stored rows, when the face has one (``TENSORFOLD_FACES_FP8``)."""
+
+        return self.b.rows8
 
     def nbytes(self) -> int:
         return self.b.nbytes()
