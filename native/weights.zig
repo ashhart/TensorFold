@@ -11,10 +11,15 @@ pub fn readFile(io: std.Io, path: []const u8) ![]u8 {
 pub const Weights = struct {
     arrays: std.StringHashMap(mx.Array),
     linears: std.StringHashMap(lanes.Linear),
+    embedding_format: ?@import("quantization.zig").Spec = .{},
+    embedding_signs: mx.Array = mx.empty,
+    embedding_kernels: mx.Kernels,
     pub fn init() Weights {
-        return .{ .arrays = std.StringHashMap(mx.Array).init(mx.allocator), .linears = std.StringHashMap(lanes.Linear).init(mx.allocator) };
+        return .{ .arrays = std.StringHashMap(mx.Array).init(mx.allocator), .linears = std.StringHashMap(lanes.Linear).init(mx.allocator), .embedding_kernels = mx.Kernels.init() };
     }
     pub fn deinit(w: *Weights) void {
+        mx.free(w.embedding_signs);
+        w.embedding_kernels.deinit();
         var ls = w.linears.iterator();
         while (ls.next()) |e| {
             e.value_ptr.deinit();
@@ -38,14 +43,14 @@ pub const Weights = struct {
         return w.linears.get(name) orelse error.MissingLinear;
     }
     // Both helpers take ownership, including when map insertion fails.
-    fn putArray(w: *Weights, name: []const u8, value: mx.Array) !void {
+    pub fn putArray(w: *Weights, name: []const u8, value: mx.Array) !void {
         errdefer mx.free(value);
         if (w.arrays.contains(name)) return error.DuplicateWeight;
         const key = try mx.allocator.dupe(u8, name);
         errdefer mx.allocator.free(key);
         try w.arrays.put(key, value);
     }
-    fn putLinear(w: *Weights, name: []const u8, value: lanes.Linear) !void {
+    pub fn putLinear(w: *Weights, name: []const u8, value: lanes.Linear) !void {
         var owned = value;
         errdefer owned.deinit();
         if (w.linears.contains(name)) return error.DuplicateWeight;
@@ -53,7 +58,7 @@ pub const Weights = struct {
         errdefer mx.allocator.free(key);
         try w.linears.put(key, owned);
     }
-    fn releaseLinearSources(w: *Weights) !void {
+    pub fn releaseLinearSources(w: *Weights) !void {
         var it = w.linears.keyIterator();
         var buffer: [256]u8 = undefined;
         while (it.next()) |name| {
@@ -123,6 +128,11 @@ pub const Weights = struct {
         const cfg = try std.json.parseFromSlice(std.json.Value, mx.allocator, config, .{});
         defer cfg.deinit();
         try @import("config.zig").target(cfg.value);
+        if (std.mem.eql(u8, cfg.value.object.get("model_type").?.string, "prism_hadamard_qwen35")) return @import("bonsai.zig").load(w, io, dir, cfg.value);
+        if (mx.tensor_units and !try @import("quantization.zig").nativeLanes(cfg.value)) {
+            mx.tensor_units = false;
+            std.debug.print("Checkpoint quantization selects the upstream SIMD backend.\n", .{});
+        }
         const index = try readFile(io, try std.fmt.bufPrint(&pathbuf, "{s}/model.safetensors.index.json", .{dir}));
         defer mx.allocator.free(index);
         const parsed = try std.json.parseFromSlice(std.json.Value, mx.allocator, index, .{});
@@ -169,28 +179,41 @@ pub const Weights = struct {
                 try w.putArray(n[15..], value);
             }
         }
-        try @import("schema.zig").validate(.qwen, &w.arrays, false);
+        try @import("schema.zig").validateConfig(.qwen, &w.arrays, false, cfg.value);
+        w.embedding_format = try @import("quantization.zig").resolve(cfg.value, "model.embed_tokens");
+        if (w.embedding_format != null and mx.dtype(try w.get("model.embed_tokens.scales")) != mx.dtype(try w.get("model.embed_tokens.biases"))) return error.InvalidTensorDType;
         // MLX-format checkpoints already carry shifted RMS weights and [C,4,1] convs.
         // Refuse raw HF tensors rather than silently applying the wrong normalization.
         if (mx.dim(try w.get("model.layers.0.linear_attn.conv1d.weight"), -1) != 1) return error.UnsanitizedCheckpoint;
         var entries = w.arrays.iterator();
         while (entries.next()) |e| {
-            if (!std.mem.endsWith(u8, e.key_ptr.*, ".scales") or std.mem.indexOf(u8, e.key_ptr.*, "embed_tokens") != null) continue;
+            if (!std.mem.endsWith(u8, e.key_ptr.*, ".weight") or mx.shape(e.value_ptr.*).len != 2 or std.mem.indexOf(u8, e.key_ptr.*, "embed_tokens") != null) continue;
             const name = e.key_ptr.*[0 .. e.key_ptr.len - 7];
             var s = mx.Scope{};
             defer s.deinit();
             const weight = try w.get(try std.fmt.bufPrint(&pathbuf, "{s}.weight", .{name}));
-            const biases = try w.get(try std.fmt.bufPrint(&pathbuf, "{s}.biases", .{name}));
-            const linear_ = try lanes.Linear.init(&s, weight, e.value_ptr.*, biases);
+            const format = try @import("quantization.zig").resolve(cfg.value, name);
+            const scales = if (format != null) try w.get(try std.fmt.bufPrint(&pathbuf, "{s}.scales", .{name})) else mx.empty;
+            const biases = if (format != null) try w.get(try std.fmt.bufPrint(&pathbuf, "{s}.biases", .{name})) else mx.empty;
+            const linear_ = try lanes.Linear.initFormat(&s, weight, scales, biases, format);
             try w.putLinear(name, linear_);
         }
         try w.releaseLinearSources();
     }
-    pub fn embed(w: *const Weights, s: *mx.Scope, tokens: []const i32) !mx.Array {
+    pub fn embed(w: *Weights, s: *mx.Scope, tokens: []const i32) !mx.Array {
         return w.embedArray(s, try s.ints(tokens));
     }
-    pub fn embedArray(w: *const Weights, s: *mx.Scope, ids: mx.Array) !mx.Array {
-        const out = try s.dequant(try s.take(try w.get("model.embed_tokens.weight"), ids, 0), try s.take(try w.get("model.embed_tokens.scales"), ids, 0), try s.take(try w.get("model.embed_tokens.biases"), ids, 0));
+    pub fn embedArray(w: *Weights, s: *mx.Scope, ids: mx.Array) !mx.Array {
+        if (w.embedding_signs.ctx != null) {
+            const count: i32 = @intCast(mx.c.mlx_array_size(ids));
+            return (try w.embedding_kernels.run(s, @import("kernel_sources.zig").prism_embed, &.{ try s.cast(try s.reshape(ids, &.{count}), mx.c.MLX_UINT32), try w.get("model.embed_tokens.weight"), try w.get("model.embed_tokens.scales"), try w.get("model.embed_tokens.biases"), w.embedding_signs }, &.{ mx.ti("K", 5120), mx.ti("G", 128) }, .{ 512 * 5, count, 1 }, .{ 512, 1, 1 }, &.{.{ .shape = &.{ 1, count, 5120 } }}))[0];
+        }
+        const weight = try s.take(try w.get("model.embed_tokens.weight"), ids, 0);
+        const out = if (w.embedding_format) |format| blk: {
+            var result = mx.c.mlx_array_new();
+            const rc = mx.c.mlx_dequantize(&result, weight, try s.take(try w.get("model.embed_tokens.scales"), ids, 0), try s.take(try w.get("model.embed_tokens.biases"), ids, 0), mx.opt(format.group_size), mx.opt(format.bits), "affine", mx.empty, .{ .value = mx.bf16, .has_value = true }, mx.stream);
+            break :blk try s.result(rc, result);
+        } else weight;
         return s.reshape(out, &.{ 1, @intCast(mx.c.mlx_array_size(ids)), 5120 });
     }
     /// Exercise the owning insertion helpers under the allocation diagnostic.

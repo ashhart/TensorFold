@@ -15,6 +15,29 @@ pub const Linear = struct {
     tiled: bool,
     scales: A = mx.empty,
     biases: A = mx.empty,
+    format: ?@import("quantization.zig").Spec = .{},
+    generic: bool = false,
+    signs: A = mx.empty,
+    prism_dense: bool = false,
+    pub fn initFormat(s: *mx.Scope, weight: A, scales: A, biases: A, format: ?@import("quantization.zig").Spec) !Linear {
+        const f = format orelse {
+            if (mx.shape(weight).len != 2 or mx.dim(weight, 0) < 1 or mx.dim(weight, 1) < 1) return error.InvalidTensorShape;
+            if (mx.dtype(weight) != mx.bf16 and mx.dtype(weight) != mx.f32t and mx.dtype(weight) != mx.c.MLX_FLOAT16) return error.InvalidTensorDType;
+            return .{ .weight = try mx.retain(weight), .sb = mx.empty, .n = mx.dim(weight, 0), .k = mx.dim(weight, 1), .tiled = false, .format = null, .generic = true };
+        };
+        const shape = try f.shape(mx.shape(weight), mx.shape(scales), mx.shape(biases));
+        if (mx.dtype(weight) != mx.c.MLX_UINT32 or mx.dtype(scales) != mx.dtype(biases)) return error.InvalidTensorDType;
+        if (mx.dtype(scales) != mx.bf16 and mx.dtype(scales) != mx.f32t and mx.dtype(scales) != mx.c.MLX_FLOAT16) return error.InvalidTensorDType;
+        if (f.bits == 4 and f.group_size == 64 and mx.dtype(scales) == mx.bf16 and @mod(shape.n, if (mx.tensor_units) @as(i32, 4) else 8) == 0 and @mod(shape.k, 64) == 0) return init(s, weight, scales, biases);
+        const w = try mx.retain(weight);
+        errdefer mx.free(w);
+        const sc = try mx.retain(scales);
+        errdefer mx.free(sc);
+        const tensor = mx.tensor_units and mx.dtype(scales) == mx.bf16 and @mod(shape.n, 4) == 0 and @mod(shape.k, 64) == 0 and (f.group_size == 64 or (f.bits == 4 and f.group_size == 32));
+        const pairs = if (tensor) try mx.retain(try s.cast(try s.stack(&.{ try s.transpose(scales, &.{ 1, 0 }), try s.transpose(biases, &.{ 1, 0 }) }, -1), mx.bf16)) else mx.empty;
+        errdefer mx.free(pairs);
+        return .{ .weight = w, .scales = sc, .biases = try mx.retain(biases), .sb = pairs, .n = shape.n, .k = shape.k, .tiled = false, .format = f, .generic = true };
+    }
     pub fn init(s: *mx.Scope, weight: A, scales: A, biases: A) !Linear {
         const n = mx.dim(weight, 0);
         const k = mx.dim(weight, 1) * 8;
@@ -35,22 +58,23 @@ pub const Linear = struct {
         mx.free(l.sb);
         mx.free(l.scales);
         mx.free(l.biases);
+        mx.free(l.signs);
     }
     pub fn apply(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: Act) !A {
         return l.applyWithReduction(kernels, s, x, null);
     }
     /// Match a stacked projection's SIMD reduction without duplicating its weights.
-    pub fn applyWithReduction(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: Act, reduction: ?i32) !A {
+    pub fn applyWithReduction(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, input: Act, reduction: ?i32) !A {
+        const x = if (l.signs.ctx != null) Act{ .x = try l.rotate(kernels, s, input.x) } else input;
         const m: i32 = @intCast(mx.c.mlx_array_size(x.x) / @as(usize, @intCast(l.k)));
         if (m < 1 or m > 128) return error.InvalidLaneWidth;
-        if (!mx.tensor_units) {
-            const split: i32 = reduction orelse (if (l.n <= 64) @as(i32, 32) else if (l.n <= 6144) 16 else 8);
-            const rt = @min(2, @divTrunc(m + 7, 8));
-            var nt: i32 = if (@mod(l.n, 32) == 0) 4 else if (@mod(l.n, 16) == 0) 2 else 1;
-            while (nt > 1 and split * rt * nt * 64 * 4 > 16384) nt = @divExact(nt, 2);
-            const out = (try kernels.run(s, src.simd_qmm_mma, &.{ try s.reshape(x.x, &.{ m, l.k }), l.weight, l.scales, l.biases, try s.scalar(1) }, &.{ ti("K", l.k), ti("N", l.n), ti("S", split), ti("GS", 64), ti("SGS", split), ti("NT", nt), ti("RT", rt) }, .{ @divTrunc(l.n + 8 * nt - 1, 8 * nt) * split * 32, @divTrunc(m + 8 * rt - 1, 8 * rt), 1 }, .{ split * 32, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0];
-            return s.reshape(out, &.{ 1, m, l.n });
+        if (l.prism_dense) return (try kernels.run(s, src.prism_dense, &.{ try s.reshape(x.x, &.{ m, l.k }), l.weight }, &.{ ti("K", l.k), ti("N", l.n) }, .{ 256 * @divTrunc(l.n + 7, 8), m, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ 1, m, l.n } }}))[0];
+        if (l.generic) {
+            if (l.sb.ctx != null) return l.tensorRows(kernels, s, x);
+            if (!mx.tensor_units and l.format != null and l.format.?.bits == 4 and (l.format.?.group_size == 32 or l.format.?.group_size == 64) and mx.dtype(l.scales) == mx.bf16 and @mod(l.n, 8) == 0 and @mod(l.k, 64) == 0) return l.simdRows(kernels, s, x.x, reduction, l.format.?.group_size);
+            return l.rows(kernels, s, x.x);
         }
+        if (!mx.tensor_units) return l.simdRows(kernels, s, x.x, reduction, 64);
         const mp = @divTrunc(m + 15, 16) * 16;
         const dims = try s.ints(&.{ m, mp });
         const x2 = try s.reshape(x.x, &.{ m, l.k });
@@ -62,8 +86,23 @@ pub const Linear = struct {
         const out = (try kernels.run(s, if (l.tiled) src.lane_qmm_main_tiled else src.lane_qmm_main, &.{ x2, sums, l.weight, l.sb, dims }, &.{ ti("TMR", @divExact(block, 16)), ti("N", l.n), ti("K", l.k), ti("NT", 32), ti("SK", sk), ti("GS", 64), ti("EDGE", @intFromBool(@mod(mp, block) != 0)) }, .{ tiles * 32 * sk, @divTrunc(mp + block - 1, block), 1 }, .{ 32 * sk, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0];
         return s.reshape(out, &.{ 1, m, l.n });
     }
+    fn simdRows(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: A, reduction: ?i32, group: i32) !A {
+        const m: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(l.k)));
+        const split: i32 = reduction orelse (if (l.n <= 64) @as(i32, 32) else if (l.n <= 6144) 16 else 8);
+        const rt = @min(2, @divTrunc(m + 7, 8));
+        var nt: i32 = if (@mod(l.n, 32) == 0) 4 else if (@mod(l.n, 16) == 0) 2 else 1;
+        while (nt > 1 and split * rt * nt * 64 * 4 > 16384) nt = @divExact(nt, 2);
+        const out = (try kernels.run(s, src.simd_qmm_mma, &.{ try s.reshape(x, &.{ m, l.k }), l.weight, l.scales, l.biases, try s.scalar(1) }, &.{ ti("K", l.k), ti("N", l.n), ti("S", split), ti("GS", group), ti("SGS", split), ti("NT", nt), ti("RT", rt) }, .{ @divTrunc(l.n + 8 * nt - 1, 8 * nt) * split * 32, @divTrunc(m + 8 * rt - 1, 8 * rt), 1 }, .{ split * 32, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0];
+        return s.reshape(out, &.{ 1, m, l.n });
+    }
     /// Python's installed lane linear falls back to MLX above 128 prompt rows.
-    pub fn prefill(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: A) !A {
+    pub fn prefill(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, input: A) !A {
+        if (l.prism_dense and mx.dim(input, 1) <= 128) return l.apply(kernels, s, .{ .x = input });
+        const x = if (l.signs.ctx != null) try l.rotate(kernels, s, input) else input;
+        if (l.generic) {
+            if (l.sb.ctx != null and mx.dim(x, 1) <= 128) return l.tensorRows(kernels, s, .{ .x = x });
+            return s.cast(try l.stock(s, x), mx.bf16);
+        }
         if (mx.tensor_units and mx.dim(x, 1) <= 128) return l.apply(kernels, s, .{ .x = x });
         const w = if (l.tiled) try s.contiguous(try s.reshape(try s.transpose(try s.reshape(l.weight, &.{ @divExact(l.n, 32), @divExact(l.k, 64), 32, 8 }), &.{ 0, 2, 1, 3 }), &.{ l.n, @divExact(l.k, 8) })) else l.weight;
         const sb = try s.transpose(l.sb, &.{ 1, 0, 2 });
@@ -73,7 +112,90 @@ pub const Linear = struct {
         const rc = mx.c.mlx_quantized_matmul(&result, x, w, sc, bs, true, mx.opt(64), mx.opt(4), "affine", mx.stream);
         return s.result(rc, result);
     }
+
+    fn stock(l: Linear, s: *mx.Scope, x: A) !A {
+        var result = mx.c.mlx_array_new();
+        const rc = if (l.format) |f|
+            mx.c.mlx_quantized_matmul(&result, x, l.weight, l.scales, l.biases, true, mx.opt(f.group_size), mx.opt(f.bits), "affine", mx.stream)
+        else
+            mx.c.mlx_matmul(&result, x, try s.transpose(l.weight, &.{ 1, 0 }), mx.stream);
+        return s.result(rc, result);
+    }
+
+    fn rotate(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: A) !A {
+        if (@mod(l.k, 1024) != 0 or mx.c.mlx_array_size(l.signs) != l.k) return error.InvalidHadamardSigns;
+        const count: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(l.k)));
+        return (try kernels.run(s, src.prism_rotate, &.{ try s.reshape(x, &.{ count, l.k }), l.signs }, &.{ti("K", l.k)}, .{ 512 * @divExact(l.k, 1024), count, 1 }, .{ 512, 1, 1 }, &.{.{ .shape = mx.shape(x) }}))[0];
+    }
+
+    fn tensorRows(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, input: Act) !A {
+        const x = input.x;
+        const f = l.format.?;
+        const m: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(l.k)));
+        const mp = @divTrunc(m + 15, 16) * 16;
+        const dims = try s.ints(&.{ m, mp });
+        const x2 = try s.reshape(x, &.{ m, l.k });
+        const kg = @divExact(l.k, f.group_size);
+        const sums = (if (f.group_size == 64) input.sums else null) orelse (try kernels.run(s, src.lane_qmm_xsum, &.{ x2, dims }, &.{ ti("K", l.k), ti("GS", f.group_size) }, .{ kg, mp, 1 }, .{ @min(kg, 256), 1, 1 }, &.{.{ .shape = &.{ kg, mp }, .dtype = mx.f32t }}))[0];
+        const tiles = @divTrunc(l.n + 31, 32);
+        var sk: i32 = 1;
+        while (sk < 8 and tiles * sk < 1024 and @divTrunc(@divExact(l.k, 64), sk * 2) >= 8) sk *= 2;
+        const block = @min(mp, 32);
+        const args = [_]mx.Template{ ti("TMR", @divExact(block, 16)), ti("N", l.n), ti("K", l.k), ti("NT", 32), ti("SK", sk), ti(if (f.bits == 4) "GS" else "BITS", if (f.bits == 4) f.group_size else f.bits), ti(if (f.bits == 4) "EDGE" else "TILED", if (f.bits == 4) @intFromBool(@mod(mp, block) != 0) else 0) };
+        const spec = if (f.bits == 4) src.lane_qmm_main else if (f.bits < 4) src.lane_qmm_lowbit else src.lane_qmm_bytes;
+        return s.reshape((try kernels.run(s, spec, &.{ x2, sums, l.weight, l.sb, dims }, &args, .{ tiles * 32 * sk, @divTrunc(mp + block - 1, block), 1 }, .{ 32 * sk, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0], &.{ 1, m, l.n });
+    }
+
+    pub fn rows(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: A) !A {
+        if (mx.dim(x, -1) != l.k or mx.dtype(x) != mx.bf16) return error.InvalidProjectionInput;
+        const rows_: i32 = @intCast(mx.c.mlx_array_size(x) / @as(usize, @intCast(l.k)));
+        if (rows_ < 1 or rows_ > 65536) return error.InvalidLaneWidth;
+        const f = l.format orelse {
+            const inputs = try s.reshape(x, &.{ rows_, l.k });
+            const outputs = try mx.allocator.alloc(A, @intCast(rows_));
+            defer mx.allocator.free(outputs);
+            for (outputs, 0..) |*out, i| out.* = try l.stock(s, try s.slice(inputs, 0, @intCast(i), @intCast(i + 1)));
+            return s.reshape(try s.cat(outputs, 0), &.{ 1, rows_, l.n });
+        };
+        const rt: i32 = if (rows_ == 1) 1 else if (rows_ == 2) 2 else if (rows_ <= 4) 4 else 8;
+        const out = (try kernels.run(s, src.affine_rows, &.{ try s.contiguous(try s.reshape(x, &.{ rows_, l.k })), try padded(s, l.weight), try padded(s, l.scales), try padded(s, l.biases) }, &.{ ti("K", l.k), ti("N", l.n), ti("BITS", f.bits), ti("GS", f.group_size), ti("OPS", 2), ti("RT", rt), ti("SG", 8) }, .{ @divTrunc(l.n + 15, 16) * 256, @divTrunc(rows_ + rt - 1, rt), 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ 1, rows_, l.n } }}))[0];
+        return out;
+    }
+
+    pub fn selectRanges(l: Linear, s: *mx.Scope, ranges: []const [2]i32) !Linear {
+        const weight = if (l.tiled) try s.contiguous(try s.reshape(try s.transpose(try s.reshape(l.weight, &.{ @divExact(l.n, 32), @divExact(l.k, 64), 32, 8 }), &.{ 0, 2, 1, 3 }), &.{ l.n, @divExact(l.k, 8) })) else l.weight;
+        var scales = l.scales;
+        var biases = l.biases;
+        if (!l.generic) {
+            const sb = try s.transpose(l.sb, &.{ 1, 0, 2 });
+            scales = try s.reshape(try s.slice(sb, 2, 0, 1), &.{ l.n, @divExact(l.k, 64) });
+            biases = try s.reshape(try s.slice(sb, 2, 1, 2), &.{ l.n, @divExact(l.k, 64) });
+        }
+        if (ranges.len == 0 or ranges.len > 16) return error.InvalidProjectionRange;
+        var ws: [16]A = undefined;
+        var ss: [16]A = undefined;
+        var bs: [16]A = undefined;
+        for (ranges, 0..) |range, i| {
+            if (range[0] < 0 or range[1] > l.n or range[0] >= range[1]) return error.InvalidProjectionRange;
+            ws[i] = try s.slice(weight, 0, range[0], range[1]);
+            if (l.format != null) {
+                ss[i] = try s.slice(scales, 0, range[0], range[1]);
+                bs[i] = try s.slice(biases, 0, range[0], range[1]);
+            }
+        }
+        var selected = try initFormat(s, try s.cat(ws[0..ranges.len], 0), if (l.format != null) try s.cat(ss[0..ranges.len], 0) else mx.empty, if (l.format != null) try s.cat(bs[0..ranges.len], 0) else mx.empty, l.format);
+        errdefer selected.deinit();
+        if (l.signs.ctx != null) selected.signs = try mx.retain(l.signs);
+        selected.prism_dense = l.prism_dense;
+        return selected;
+    }
 };
+
+fn padded(s: *mx.Scope, a: A) !A {
+    const count: i32 = @intCast(mx.c.mlx_array_size(a));
+    if (count >= 8) return a;
+    return s.cat(&.{ try s.reshape(a, &.{count}), try s.zeros(&.{8 - count}, mx.dtype(a)) }, 0);
+}
 
 pub fn norm(k: *mx.Kernels, s: *mx.Scope, h: A, r: ?A, w: A) !struct { h: A, x: Act } {
     const width = mx.dim(h, -1);

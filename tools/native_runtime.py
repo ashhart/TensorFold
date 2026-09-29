@@ -27,7 +27,7 @@ def check_requirements(project, installed, pins):
     installed = {canonicalize_name(name): version for name, version in installed.items()}
     pins = {canonicalize_name(name): version for name, version in pins.items()}
     failures = []
-    for entry in project["project"]["dependencies"]:
+    for entry in runtime_requirements(project):
         req = Requirement(entry)
         if req.marker and not req.marker.evaluate():
             continue
@@ -44,6 +44,25 @@ def check_requirements(project, installed, pins):
                             "upstream requirements and rebuild the native pairing")
     if failures:
         raise RuntimeError("Dependency sync required:\n" + "\n".join(failures))
+
+
+def runtime_requirements(project):
+    return (project["project"]["dependencies"] +
+            project["project"].get("optional-dependencies", {}).get("vision", []))
+
+
+def vision_legacy_pixel_limits():
+    from transformers import Qwen2VLImageProcessor
+    processor = Qwen2VLImageProcessor(min_pixels=65536, max_pixels=16777216, patch_size=16, merge_size=2)
+    return hasattr(processor, "min_pixels") and hasattr(processor, "max_pixels")
+
+
+def jpeg_version():
+    from PIL import features
+    version = features.version_feature("libjpeg_turbo")
+    if not version:
+        raise RuntimeError("Native JPEG parity requires Pillow built with libjpeg-turbo")
+    return version
 
 
 def resolved_dependencies(previous, versions, native_version):
@@ -65,6 +84,7 @@ def main():
     parser = argparse.ArgumentParser(description="Check native pins, installed packages and upstream dependency constraints without loading models")
     parser.add_argument("--upstream-ref")
     parser.add_argument("--mlx-prefix", type=Path, default=ROOT / "build/mlx")
+    parser.add_argument("--jpeg-prefix", type=Path, default=ROOT / "build/jpeg")
     parser.add_argument("--resolve", action="store_true", help="Install upstream requirements and prepare the matching native dependency record")
     args = parser.parse_args()
     if args.upstream_ref:
@@ -75,15 +95,15 @@ def main():
     from packaging.requirements import Requirement
     import sys
     if args.resolve:
-        requirements = project["project"]["dependencies"] + project.get("project", {}).get("optional-dependencies", {}).get("test", [])
+        requirements = runtime_requirements(project) + project.get("project", {}).get("optional-dependencies", {}).get("test", [])
         if any(Requirement(entry).url for entry in requirements):
             raise RuntimeError("Direct-source upstream dependencies require explicit review")
-        subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "--editable", f"{ROOT}[test]", *requirements], check=True)
-        versions = {name: importlib.metadata.version(name) for name in ("mlx", "mlx-metal", "mlx-lm")}
+        subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "--editable", f"{ROOT}[test,vision]", *requirements], check=True)
+        versions = {name: importlib.metadata.version(name) for name in ("mlx", "mlx-metal", "mlx-lm", "mlx-vlm", "transformers", "Pillow")}
     else:
         versions = require_mlx()
     installed = {}
-    for entry in project["project"]["dependencies"]:
+    for entry in runtime_requirements(project):
         name = Requirement(entry).name
         try:
             installed[name] = importlib.metadata.version(name)
@@ -93,14 +113,24 @@ def main():
     subprocess.run([sys.executable, "-m", "pip", "check"], check=True)
     config = args.mlx_prefix / "share/cmake/MLX/MLXConfigVersion.cmake"
     match = re.search(r'set\(PACKAGE_VERSION "([^"]+)"\)', config.read_text()) if config.exists() else None
+    jpeg_config = args.jpeg_prefix / "lib/pkgconfig/libturbojpeg.pc"
+    jpeg_match = re.search(r"^Version: (.+)$", jpeg_config.read_text(), re.M) if jpeg_config.exists() else None
+    jpeg = jpeg_version()
     if args.resolve:
         resolved = resolved_dependencies(dependencies(), versions, match[1] if match else None)
+        resolved["vision_legacy_pixel_limits"] = vision_legacy_pixel_limits()
+        resolved["jpeg_version"] = jpeg
+        resolved["rebuild_jpeg"] = not jpeg_match or jpeg_match[1] != jpeg or not (args.jpeg_prefix / "lib/libturbojpeg.a").is_file()
         resolved["rebuild_mlx"] |= not (args.mlx_prefix / "share/cmake/MLXC/MLXCConfigVersion.cmake").is_file()
         (ROOT / "build/native-dependencies-resolved.json").write_text(json.dumps(resolved, indent=2) + "\n")
         print(f"Resolved upstream requirements: {versions}")
         return
     if not match or match[1] != versions["mlx"]:
         raise RuntimeError(f"Rebuild native MLX at {dependencies()['mlx_revision']}: {config} must report {versions['mlx']}")
+    if vision_legacy_pixel_limits() != dependencies()["vision_legacy_pixel_limits"]:
+        raise RuntimeError("Vision processor behavior differs from the native dependency record; sync dependencies")
+    if not jpeg_match or jpeg_match[1] != jpeg or dependencies().get("jpeg_version") != jpeg:
+        raise RuntimeError(f"Rebuild native libjpeg-turbo at {jpeg}: decoder must match upstream Pillow")
     print(f"PASS: native MLX, Python pins and {'upstream' if args.upstream_ref else 'checkout'} requirements agree: {versions}")
 
 

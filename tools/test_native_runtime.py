@@ -31,6 +31,14 @@ def test_new_dependency_and_inactive_marker():
         check_requirements(project("new-dependency>=1"), {}, {})
 
 
+def test_vision_dependency_changes_follow_upstream():
+    upstream = project("mlx>=0.32.2")
+    upstream["project"]["optional-dependencies"] = {"vision": ["mlx-vlm>=0.7.5,<0.8", "transformers>=5.18,<6"]}
+    with pytest.raises(RuntimeError, match="mlx-vlm>=0.7.5"):
+        check_requirements(upstream, {"mlx": "0.32.2", "mlx-vlm": "0.7.4", "transformers": "5.17.0"}, {})
+    check_requirements(upstream, {"mlx": "0.32.2", "mlx-vlm": "0.7.5", "transformers": "5.18.0"}, {})
+
+
 def test_direct_source_requirement_needs_review():
     with pytest.raises(RuntimeError, match="direct-source dependencies"):
         check_requirements(project("mlx @ https://example.invalid/mlx.whl"), {"mlx": "0.32.2"}, {"mlx": "0.32.2"})

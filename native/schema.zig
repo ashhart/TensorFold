@@ -22,6 +22,43 @@ fn required(spec: Spec, drafts: bool) bool {
     return drafts or !std.mem.startsWith(u8, spec.name, "mtp.");
 }
 pub fn validate(kind: Kind, arrays: *const std.StringHashMap(mx.Array), drafts: bool) !void {
+    return validateConfig(kind, arrays, drafts, null);
+}
+fn adjusted(spec: Spec, config: ?std.json.Value, shape: *[2]i32, actual_dtype: ?DType) !?Spec {
+    const cfg = config orelse return spec;
+    const scale = std.mem.endsWith(u8, spec.name, ".scales");
+    const bias = std.mem.endsWith(u8, spec.name, ".biases");
+    const kind = cfg.object.get("model_type");
+    const bonsai = kind != null and kind.? == .string and std.mem.eql(u8, kind.?.string, "prism_hadamard_qwen35");
+    if (spec.dtype != .U32 and !scale and !bias) {
+        var result = spec;
+        if (bonsai) result.dtype = try floating(actual_dtype);
+        return result;
+    }
+    const name = spec.name[0 .. spec.name.len - 7];
+    const format = if (bonsai and (std.mem.endsWith(u8, name, ".in_proj_a") or std.mem.endsWith(u8, name, ".in_proj_b"))) null else try @import("quantization.zig").resolve(cfg, name);
+    shape.* = .{ spec.shape[0], spec.shape[1] };
+    var result = spec;
+    if (format) |f| {
+        const width = @as(i64, spec.shape[1]) * (if (scale or bias) @as(i64, 64) else 8);
+        const elements = if (scale or bias) @divExact(width, f.group_size) else @divExact(width * f.bits, 32);
+        shape[1] = std.math.cast(i32, elements) orelse return error.InvalidTensorShape;
+        if (scale or bias) result.dtype = try floating(actual_dtype);
+    } else {
+        if (scale or bias) return null;
+        shape[1] = std.math.mul(i32, shape[1], 8) catch return error.InvalidTensorShape;
+        result.dtype = try floating(actual_dtype);
+    }
+    result.shape = shape;
+    return result;
+}
+fn floating(dtype: ?DType) !DType {
+    return switch (dtype orelse return error.MissingWeight) {
+        .BF16, .F16, .F32 => dtype.?,
+        else => error.InvalidTensorDType,
+    };
+}
+pub fn validateConfig(kind: Kind, arrays: *const std.StringHashMap(mx.Array), drafts: bool, config: ?std.json.Value) !void {
     const specs = try std.json.parseFromSlice([]const Spec, mx.allocator, source(kind), .{});
     defer specs.deinit();
     for (specs.value) |spec| {
@@ -30,6 +67,7 @@ pub fn validate(kind: Kind, arrays: *const std.StringHashMap(mx.Array), drafts: 
         const actual: ?Metadata = if (array) |a| .{
             .dtype = switch (mx.dtype(a)) {
                 mx.c.MLX_BFLOAT16 => .BF16,
+                mx.c.MLX_FLOAT16 => .F16,
                 mx.c.MLX_FLOAT32 => .F32,
                 mx.c.MLX_UINT32 => .U32,
                 mx.c.MLX_INT64 => .I64,
@@ -37,7 +75,9 @@ pub fn validate(kind: Kind, arrays: *const std.StringHashMap(mx.Array), drafts: 
             },
             .shape = mx.shape(a),
         } else null;
-        check(spec, actual) catch |err| {
+        var shape: [2]i32 = undefined;
+        const expected = (try adjusted(spec, config, &shape, if (actual) |v| v.dtype else null)) orelse continue;
+        check(expected, actual) catch |err| {
             std.debug.print("Checkpoint schema: {s}: {s}; expected {s} {any}\n", .{ spec.name, @errorName(err), @tagName(spec.dtype), spec.shape });
             return err;
         };
@@ -49,8 +89,21 @@ pub fn checkCheckpoint(kind: Kind, io: std.Io, dir: []const u8) !void {
     const specs = try std.json.parseFromSlice([]const Spec, a, source(kind), .{});
     defer specs.deinit();
     var path: [4096]u8 = undefined;
+    const config: ?std.json.Parsed(std.json.Value) = if (kind == .qwen) blk: {
+        const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/config.json", .{dir}));
+        defer a.free(bytes);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always });
+        errdefer parsed.deinit();
+        try @import("config.zig").target(parsed.value);
+        break :blk parsed;
+    } else null;
+    defer if (config) |parsed| parsed.deinit();
+    const cfg: ?std.json.Value = if (config) |parsed| parsed.value else null;
     const index: ?std.json.Parsed(std.json.Value) = if (kind == .dflash) null else blk: {
-        const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/model.safetensors.index.json", .{dir}));
+        const bytes = @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/model.safetensors.index.json", .{dir})) catch |err| {
+            if (kind == .qwen and err == error.FileNotFound) break :blk null;
+            return err;
+        };
         defer a.free(bytes);
         break :blk try std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always });
     };
@@ -63,10 +116,12 @@ pub fn checkCheckpoint(kind: Kind, io: std.Io, dir: []const u8) !void {
     var names = std.StringHashMap(usize).init(a);
     defer names.deinit();
     for (specs.value) |spec| {
+        var geometry: [2]i32 = undefined;
+        if (try adjusted(spec, cfg, &geometry, .BF16) == null) continue;
         var buffer: [512]u8 = undefined;
         const mtp = kind == .nemotron and std.mem.startsWith(u8, spec.name, "mtp.");
         const key = if (mtp) spec.name[4..] else try std.fmt.bufPrint(&buffer, "{s}{s}", .{ if (kind == .qwen or kind == .flash) "language_model." else "", spec.name });
-        const filename = if (mtp) "mtp-4bit.safetensors" else if (kind == .dflash) "model.safetensors" else blk: {
+        const filename = if (mtp) "mtp-4bit.safetensors" else if (index == null) "model.safetensors" else blk: {
             const root = index.?.value;
             if (root != .object) return error.InvalidWeightIndex;
             const map = root.object.get("weight_map") orelse return error.InvalidWeightIndex;
@@ -87,12 +142,31 @@ pub fn checkCheckpoint(kind: Kind, io: std.Io, dir: []const u8) !void {
             break :blk id;
         };
         const tensor = files.items[number].header.tensors.get(key);
-        check(spec, if (tensor) |*t| .{ .dtype = t.dtype, .shape = t.shape() } else null) catch |err| {
+        const expected = (try adjusted(spec, cfg, &geometry, if (tensor) |t| t.dtype else null)).?;
+        check(expected, if (tensor) |*t| .{ .dtype = t.dtype, .shape = t.shape() } else null) catch |err| {
             std.debug.print("Checkpoint schema: {s}: {s}\n", .{ spec.name, @errorName(err) });
             return err;
         };
     }
     std.debug.print("PASS: {s}: all {d} tensor names, shapes, dtypes and index references match the native recipe\n", .{ @tagName(kind), specs.value.len });
+}
+test "mixed affine schema follows config and rejects malformed quantization tensors" {
+    const config = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"model_type":"qwen3_5","quantization":{"bits":3,"group_size":128,"model.layers.0.q":false}}
+    , .{});
+    defer config.deinit();
+    var shape: [2]i32 = undefined;
+    const weight = Spec{ .name = "model.embed_tokens.weight", .dtype = .U32, .shape = &.{ 248320, 640 } };
+    const adjusted_weight = (try adjusted(weight, config.value, &shape, .U32)).?;
+    try check(adjusted_weight, .{ .dtype = .U32, .shape = &.{ 248320, 480 } });
+    try std.testing.expectError(error.InvalidTensorShape, check(adjusted_weight, .{ .dtype = .U32, .shape = weight.shape }));
+    const scale = Spec{ .name = "model.embed_tokens.scales", .dtype = .BF16, .shape = &.{ 248320, 80 } };
+    try check((try adjusted(scale, config.value, &shape, .F16)).?, .{ .dtype = .F16, .shape = &.{ 248320, 40 } });
+    try std.testing.expectError(error.InvalidTensorDType, adjusted(scale, config.value, &shape, .U32));
+    const dense = Spec{ .name = "model.layers.0.q.weight", .dtype = .U32, .shape = &.{ 48, 640 } };
+    try check((try adjusted(dense, config.value, &shape, .F32)).?, .{ .dtype = .F32, .shape = &.{ 48, 5120 } });
+    const dense_scale = Spec{ .name = "model.layers.0.q.scales", .dtype = .BF16, .shape = &.{ 48, 80 } };
+    try std.testing.expectEqual(@as(?Spec, null), try adjusted(dense_scale, config.value, &shape, null));
 }
 test "checkpoint schemas are complete metadata sets with unique tensor names" {
     const counts = [_]usize{ 1847, 81, 763, 3414 };

@@ -40,6 +40,7 @@ pub const Pass = struct {
     parents: [2048]i32 = undefined,
     count: usize = 0,
     start: i32 = 0,
+    vision_delta: ?i32 = null,
     pub fn deinit(p: *Pass) void {
         p.scope.deinit();
     }
@@ -50,6 +51,7 @@ pub const Model = struct {
     kernels: mx.Kernels,
     cache: [64]Cache = @splat(.{}),
     position: i32 = 0,
+    rope_delta: i32 = 0,
     prefill_ops: @import("prefill_ops.zig").Ops = .{},
     trace_dir: ?[]const u8 = null,
     pub fn init(io: std.Io, dir: []const u8) !Model {
@@ -61,6 +63,7 @@ pub const Model = struct {
     pub fn reset(m: *Model) void {
         for (&m.cache) |*c| c.deinit();
         m.position = 0;
+        m.rope_delta = 0;
     }
     pub fn deinit(m: *Model) void {
         m.reset();
@@ -75,12 +78,27 @@ pub const Model = struct {
     fn project(m: *Model, s: *mx.Scope, index: usize, suffix: []const u8, x: lanes.Act) !A {
         var buf: [192]u8 = undefined;
         const l = try m.weights.linear(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ index, suffix }));
-        // Python's SIMD decoder stacks [qkv,z,b,a] and [q, k, v]. The combined
-        // output widths select eight reduction chunks, including the small heads.
-        if (!mx.tensor_units) {
-            for ([_][]const u8{ "linear_attn.in_proj_z", "linear_attn.in_proj_b", "linear_attn.in_proj_a", "self_attn.k_proj", "self_attn.v_proj" }) |stacked|
-                if (std.mem.eql(u8, suffix, stacked)) return l.applyWithReduction(&m.kernels, s, x, 8);
-        }
+        // Only format-compatible projections share the upstream SIMD reduction.
+        if (!mx.tensor_units and l.format != null) inline for (.{
+            .{ "linear_attn.in_proj_qkv", "linear_attn.in_proj_z", "linear_attn.in_proj_b", "linear_attn.in_proj_a" },
+            .{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" },
+            .{ "mlp.gate_proj", "mlp.up_proj" },
+        }) |group| {
+            var member = false;
+            inline for (group) |name| if (std.mem.eql(u8, suffix, name)) {
+                member = true;
+            };
+            if (member) {
+                var compatible = true;
+                var width: i32 = 0;
+                inline for (group) |name| {
+                    const other = try m.weights.linear(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ index, name }));
+                    if (!std.meta.eql(l.format, other.format) or l.k != other.k or other.scales.ctx == null or mx.dtype(l.scales) != mx.dtype(other.scales)) compatible = false;
+                    width += other.n;
+                }
+                if (compatible) return l.applyWithReduction(&m.kernels, s, x, if (width <= 64) 32 else if (width <= 6144) 16 else 8);
+            }
+        };
         return l.apply(&m.kernels, s, x);
     }
     pub fn prefillProject(m: *Model, s: *mx.Scope, index: usize, suffix: []const u8, x: A) !A {
@@ -90,6 +108,9 @@ pub const Model = struct {
     }
     pub fn prefill(m: *Model, tokens: []const i32) !Pass {
         return @import("qwen_prefill.zig").forward(m, tokens);
+    }
+    pub fn prefillImage(m: *Model, tokens: []const i32, embeddings: A, positions: A, delta: i32) !Pass {
+        return @import("qwen_prefill.zig").forwardImage(m, tokens, embeddings, positions, delta);
     }
     pub fn trace(m: *Model, s: *mx.Scope, position: i32, layer: usize, label: []const u8, value: A) !void {
         const dir = m.trace_dir orelse return;
@@ -132,7 +153,7 @@ pub const Model = struct {
         var h = try m.weights.embedArray(s, tokens);
         var pending: ?A = null;
         var positions: [128]i32 = undefined;
-        for (0..parents.len) |i| positions[i] = m.position + tree.depths[i];
+        for (0..parents.len) |i| positions[i] = m.position + m.rope_delta + tree.depths[i];
         const pos = try s.ints(positions[0..parents.len]);
         for (0..64) |i| {
             const inorm = try lanes.norm(kernels, s, h, pending, try m.weight(i, "input_layernorm.weight"));
@@ -206,6 +227,7 @@ pub const Model = struct {
     fn commitImpl(m: *Model, p: *Pass, rows: []const i32, evaluate: bool) !void {
         if (rows.len == 0) return error.EmptyCommit;
         if (m.position != p.start or rows.len > p.count or rows[0] != 0) return error.InvalidCommit;
+        if (p.vision_delta != null and rows.len != p.count) return error.PartialImagePrefillCommit;
         for (rows, 0..) |row, i| {
             if (row < 0 or row >= p.count or p.parents[@intCast(row)] != (if (i == 0) @as(i32, -1) else rows[i - 1])) return error.InvalidCommit;
         }
@@ -271,5 +293,6 @@ pub const Model = struct {
         for (&m.cache) |*c| c.deinit();
         m.cache = next;
         m.position += @intCast(rows.len);
+        if (p.vision_delta) |delta| m.rope_delta = delta;
     }
 };

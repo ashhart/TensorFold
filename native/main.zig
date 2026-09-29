@@ -14,6 +14,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-vision")) return @import("vision.zig").check(io, args[2], args[3]);
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-image")) return @import("vision.zig").checkImage(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-prefill-math")) return @import("prefill_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-sampling")) return @import("sampling_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-vocab")) return @import("draft_vocab_checks.zig").check(io, args[2]);
@@ -32,6 +34,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-allocation-failures")) return @import("failure_checks.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-model-schema")) return @import("schema.zig").checkCheckpoint(std.meta.stringToEnum(@import("schema.zig").Kind, args[2]) orelse return error.UnsupportedModel, io, args[3]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
+        std.debug.print("Qwen images: --image LOCAL_FILE (up to four); optional explicit <|vision_start|><|image_pad|><|vision_end|> markers in --prompt.\n", .{});
         std.debug.print("Nemotron/Flash MTP options: --full-draft-vocab, --no-queued-drafts, --no-early-mtp, --no-gpu-handoff, --fixed-drafts, --check-mtp-state\n", .{});
         std.debug.print("Flash resident PLE: --resident-ple [--no-ple-wiring], --check-ple-state [--check-long-cache]\nDiagnostics: tensorfold check-ngram-gpu; tensorfold check-ple-resident MODEL_DIR\n", .{});
         std.debug.print("Qwen prefill: regular 2048-token chunks; --lane-prefill selects the 128-row diagnostic.\nQwen/Flash traces: --trace-dir EXISTING_DIR. Math oracle: tensorfold check-prefill-math FIXTURE_DIR\n", .{});
@@ -50,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
         };
     }
     var prompt: []const u8 = "Write a short Python function that computes the Fibonacci sequence.";
+    var image_paths: std.ArrayList([]const u8) = .empty;
+    defer image_paths.deinit(allocator);
     var max_tokens: usize = 32;
     var token_list: ?[]const u8 = null;
     var dump: ?[]const u8 = null;
@@ -70,6 +75,12 @@ pub fn main(init: std.process.Init) !void {
     var report: ?[]const u8 = null;
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--image")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            try image_paths.append(allocator, args[i + 1]);
+            i += 1;
+            continue;
+        }
         if (std.mem.eql(u8, args[i], "--lane-prefill")) {
             lane_prefill = true;
             continue;
@@ -194,6 +205,11 @@ pub fn main(init: std.process.Init) !void {
         for (ids) |id| try tokens.append(allocator, @intCast(id));
     }
     if (tokens.items.len == 0) return error.EmptyPrompt;
+    if (tokens.items.len > 262144) return error.ContextLimitExceeded;
+    for (tokens.items) |id| if (id < 0 or id >= 248320) return error.InvalidToken;
+    if (image_paths.items.len > 0 and lane_prefill) return error.ImageRequiresRegularPrefill;
+    var image_prompt: ?@import("vision.zig").Prompt = if (image_paths.items.len > 0) try @import("vision.zig").Prompt.prepare(io, args[2], image_paths.items, &tokens, allocator, &m.weights) else null;
+    defer if (image_prompt) |*p| p.deinit();
     if (tokens.items.len > 262144 or max_tokens > 262144 - tokens.items.len) return error.ContextLimitExceeded;
     for (tokens.items) |id| if (id < 0 or id >= 248320) return error.InvalidToken;
     if (!explicit_seed) settings.seed = sampling.seedFor(tokens.items);
@@ -210,7 +226,9 @@ pub fn main(init: std.process.Init) !void {
             parents[j] = @as(i32, @intCast(j)) - 1;
             rows[j] = @intCast(j);
         }
-        var p = if (lane_prefill) try m.forward(tokens.items[off..][0..n], parents[0..n]) else try m.prefill(tokens.items[off..][0..n]);
+        var image_scope = mx.Scope{};
+        defer image_scope.deinit();
+        var p = if (image_prompt) |*image| try m.prefillImage(tokens.items[off..][0..n], try image_scope.slice(image.embeddings, 1, @intCast(off), @intCast(off + n)), try image.positions.chunk(&image_scope, off, off + n), image.positions.delta) else if (lane_prefill) try m.forward(tokens.items[off..][0..n], parents[0..n]) else try m.prefill(tokens.items[off..][0..n]);
         defer p.deinit();
         const last_logits = try p.scope.slice(p.logits, 1, mx.dim(p.logits, 1) - 1, mx.dim(p.logits, 1));
         const ids = try sampling.rows(&m.kernels, &p.scope, last_logits, &.{m.position + @as(i32, @intCast(n))}, settings);
@@ -328,6 +346,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("vision_positions.zig");
+    _ = @import("image_input.zig");
     _ = @import("draft_depth.zig");
     _ = @import("draft_vocab.zig");
     _ = @import("lanes.zig");

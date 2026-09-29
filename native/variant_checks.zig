@@ -90,6 +90,55 @@ pub fn check(io: std.Io, dir: []const u8) !void {
             .dtype => mx.td(value.name, try dtype(value.dtype)),
         };
         try kernels.runInto(&scope, spec, inputs, params, case.grid, case.group, outputs, results, 0);
+        if (std.mem.eql(u8, case.kernel, "lane_qmm_lowbit") or std.mem.eql(u8, case.kernel, "lane_qmm_bytes")) {
+            const n = parameter(case, "N");
+            const width = parameter(case, "K");
+            const bits = parameter(case, "BITS");
+            const groups = @divExact(width, 64);
+            const words = @divExact(64 * bits, 32);
+            const w = if (parameter(case, "TILED") == 1) try scope.contiguous(try scope.reshape(try scope.transpose(try scope.reshape(inputs[2], &.{ @divExact(n, 32), groups, 32, words }), &.{ 0, 2, 1, 3 }), &.{ n, groups * words })) else inputs[2];
+            const sb = try scope.transpose(inputs[3], &.{ 1, 0, 2 });
+            const sc = try scope.reshape(try scope.slice(sb, 2, 0, 1), &.{ n, groups });
+            const bs = try scope.reshape(try scope.slice(sb, 2, 1, 2), &.{ n, groups });
+            var linear = try @import("lanes.zig").Linear.initFormat(&scope, w, sc, bs, .{ .bits = bits });
+            defer linear.deinit();
+            // Only default launch reductions are the production dispatch contract.
+            var split: i32 = 1;
+            while (split < 8 and @divTrunc(n + 31, 32) * split < 1024 and @divTrunc(groups, split * 2) >= 8) split *= 2;
+            if (split == parameter(case, "SK")) try equalBits(&scope, try linear.apply(&kernels, &scope, .{ .x = inputs[0], .sums = inputs[1] }), expected[0]);
+        }
+        if (std.mem.eql(u8, case.kernel, "simd_qmm_mma")) {
+            const n = parameter(case, "N");
+            const width = parameter(case, "K");
+            const group = parameter(case, "GS");
+            const split: i32 = if (n <= 64) 32 else if (n <= 6144) 16 else 8;
+            if (parameter(case, "S") == split and mx.dim(inputs[0], 0) <= 128) {
+                const was_tensor = mx.tensor_units;
+                mx.tensor_units = false;
+                defer mx.tensor_units = was_tensor;
+                var linear = try @import("lanes.zig").Linear.initFormat(&scope, try matrix(&scope, inputs[1], n, @divExact(width, 8)), try matrix(&scope, inputs[2], n, @divExact(width, group)), try matrix(&scope, inputs[3], n, @divExact(width, group)), .{ .bits = 4, .group_size = group });
+                defer linear.deinit();
+                try equalBits(&scope, try linear.apply(&kernels, &scope, .{ .x = inputs[0] }), expected[0]);
+            }
+        }
+        if (std.mem.eql(u8, case.kernel, "affine_rows")) {
+            const n = parameter(case, "N");
+            const width = parameter(case, "K");
+            const format = @import("quantization.zig").Spec{ .bits = parameter(case, "BITS"), .group_size = parameter(case, "GS") };
+            const w = try matrix(&scope, inputs[1], n, @divExact(width * format.bits, 32));
+            const sc = try matrix(&scope, inputs[2], n, @divExact(width, format.group_size));
+            const bs = try matrix(&scope, inputs[3], n, @divExact(width, format.group_size));
+            var linear = try @import("lanes.zig").Linear.initFormat(&scope, w, sc, bs, format);
+            defer linear.deinit();
+            // The pre-existing 4/64 path has its own lane/SIMD arithmetic.
+            if (linear.generic) {
+                const projected = try linear.apply(&kernels, &scope, .{ .x = inputs[0] });
+                try equalBits(&scope, projected, expected[0]);
+                var selected = try linear.selectRanges(&scope, &.{.{ 0, @min(n, 3) }});
+                defer selected.deinit();
+                try equalBits(&scope, try selected.apply(&kernels, &scope, .{ .x = inputs[0] }), try scope.slice(expected[0], 1, 0, @min(n, 3)));
+            }
+        }
         for (results, expected, 0..) |result, want, i| {
             const a = try raw(&scope, result);
             const b = try raw(&scope, want);
@@ -107,4 +156,19 @@ pub fn check(io: std.Io, dir: []const u8) !void {
     var it = covered.iterator();
     while (it.next()) |entry| std.debug.print("PASS: {s}: {d} launches, every output bit exact\n", .{ entry.key_ptr.*, entry.value_ptr.* });
     std.debug.print("PASS: {d} native launches across {d} embedded Metal variants\n", .{ cases.value.len, covered.count() });
+}
+
+fn parameter(case: Case, name: []const u8) i32 {
+    for (case.templates) |p| if (std.mem.eql(u8, p.name, name)) return p.integer;
+    unreachable;
+}
+fn matrix(s: *mx.Scope, a: mx.Array, n: i32, width: i32) !mx.Array {
+    return s.reshape(try s.slice(try s.reshape(a, &.{-1}), 0, 0, n * width), &.{ n, width });
+}
+fn equalBits(s: *mx.Scope, a: mx.Array, b: mx.Array) !void {
+    const x = try raw(s, a);
+    const y = try raw(s, b);
+    try mx.evalMany(&.{ x, y }, false);
+    const count = mx.c.mlx_array_size(x);
+    if (count != mx.c.mlx_array_size(y) or !std.mem.eql(u8, mx.c.mlx_array_data_uint8(x)[0..count], mx.c.mlx_array_data_uint8(y)[0..count])) return error.NativeAffineMismatch;
 }

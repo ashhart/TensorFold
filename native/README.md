@@ -29,6 +29,10 @@ From the repository root, using the already-built libraries in `../mlx-serve`:
 mkdir -p build
 cp -R ../mlx-serve/lib/mlx build/mlx
 bash scripts/fetch-zig.sh
+git clone --depth 1 --branch 3.1.4.1 git@github.com:libjpeg-turbo/libjpeg-turbo.git build/deps/libjpeg-turbo
+cmake -S build/deps/libjpeg-turbo -B build/jpeg-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/build/jpeg" -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TOOLS=OFF -DWITH_TESTS=OFF
+cmake --build build/jpeg-build --parallel 4
+cmake --install build/jpeg-build
 .zig-toolchain/zig build
 .zig-toolchain/zig build test
 zig-out/bin/tensorfold run build/models/Qwen3.8-27B-MLX-4bit \
@@ -42,6 +46,7 @@ staged in this checkout. The target and drafter have also been downloaded to the
 above. These are ignored build artifacts, not committed dependencies or weights.
 
 Use `-Dmlx-prefix=/absolute/install/prefix` to link another compatible installation.
+JPEG decoding links `build/jpeg/lib/libturbojpeg.a` (`-Djpeg-prefix` overrides the prefix); its version follows upstream Pillow through the manual dependency sync.
 The runtime needs `libmlx.dylib`, `libmlxc.dylib`, and `mlx.metallib` together in that
 prefix's `lib` directory. Rebuild if the prefix moves; its path is embedded as an rpath.
 `.zig-toolchain/zig build -Doptimize=safe` enables runtime safety checks; the default is `fast`.

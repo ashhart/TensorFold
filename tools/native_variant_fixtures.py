@@ -31,7 +31,7 @@ class Capture:
         self.original = mx.fast.metal_kernel
         self.catalog = {}
         for path in sorted(Path("native/metal").glob("*.metal")):
-            if path.stem.startswith(("row_forward_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
+            if path.stem.startswith(("affine_rows", "lane_qmm_", "prism_", "row_forward_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
                 self.catalog[(fingerprint(path.read_text(), path.with_suffix(".h").read_text()),
                               path.stem.endswith("_dep"))] = path.stem
 
@@ -336,10 +336,25 @@ def main():
     require_mlx()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--affine-only", action="store_true")
+    parser.add_argument("--tensor-quantization", action="store_true")
+    parser.add_argument("--bonsai-only", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
+    if args.affine_only or args.tensor_quantization or args.bonsai_only:
+        try:
+            code = pytest.main(["-q", "-rs", "tests/test_bonsai.py" if args.bonsai_only else "tests/test_lane_qmm.py" if args.tensor_quantization else "tests/test_affine_rows_metal.py"], plugins=[capture])
+            if code:
+                raise SystemExit(code)
+        finally:
+            mx.fast.metal_kernel = capture.original
+        if not capture.cases:
+            raise RuntimeError("No affine launches captured")
+        (args.directory / "cases.json").write_text(json.dumps(capture.cases, indent=2) + "\n")
+        print(f"Saved {len(capture.cases)} affine launches", flush=True)
+        return
     try:
         code = pytest.main(["-q", "-rs", "--disable-warnings", "tests/test_lane_fuse.py",
                             "tests/test_lane_gdn.py", "tests/test_row_forward.py",

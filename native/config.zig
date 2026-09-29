@@ -42,7 +42,18 @@ fn mathConfig(o: std.json.ObjectMap) !void {
 }
 pub fn target(value: std.json.Value) !void {
     const root = try object(value);
-    try string(root, "model_type", "qwen3_5");
+    const kind = root.get("model_type") orelse return error.UnsupportedModel;
+    if (kind == .string and std.mem.eql(u8, kind.string, "prism_hadamard_qwen35")) {
+        try string(root, "base_model_type", "qwen3_5");
+        const version = root.get("schema_version") orelse return error.UnsupportedModel;
+        if (version != .integer or (version.integer != 1 and version.integer != 2)) return error.UnsupportedModel;
+        try string(root, "hadamard_config", "hadamard.json");
+        try string(root, "gdn_activation_layout", "grouped");
+        const q = try object(root.get("quantization") orelse return error.UnsupportedModel);
+        try integer(q, "bits", 2);
+        try integer(q, "group_size", 128);
+        try boolean(try object(root.get("components") orelse return error.UnsupportedModel), "mtp", false);
+    } else try string(root, "model_type", "qwen3_5");
     const text = try object(root.get("text_config") orelse return error.UnsupportedModel);
     try mathConfig(text);
     try boolean(text, "attention_bias", false);
@@ -53,10 +64,7 @@ pub fn target(value: std.json.Value) !void {
     try string(text, "output_gate_type", "swish");
     const fields = .{ .{ "num_hidden_layers", 64 }, .{ "hidden_size", 5120 }, .{ "num_attention_heads", 24 }, .{ "num_key_value_heads", 4 }, .{ "head_dim", 256 }, .{ "intermediate_size", 17408 }, .{ "vocab_size", 248320 }, .{ "full_attention_interval", 4 }, .{ "linear_num_key_heads", 16 }, .{ "linear_num_value_heads", 48 }, .{ "linear_key_head_dim", 128 }, .{ "linear_value_head_dim", 128 }, .{ "linear_conv_kernel_dim", 4 } };
     inline for (fields) |f| try integer(text, f[0], f[1]);
-    const quant = try object(root.get("quantization") orelse return error.UnsupportedModel);
-    try integer(quant, "bits", 4);
-    try integer(quant, "group_size", 64);
-    try string(quant, "mode", "affine");
+    _ = (@import("quantization.zig").resolve(value, null) catch return error.UnsupportedModel) orelse return error.UnsupportedModel;
     const types = text.get("layer_types") orelse return error.UnsupportedModel;
     if (types != .array or types.array.items.len != 64) return error.UnsupportedModel;
     for (types.array.items, 0..) |v, i| if (v != .string or !std.mem.eql(u8, v.string, if (i % 4 == 3) "full_attention" else "linear_attention")) {
@@ -163,7 +171,7 @@ test "malformed and wrong-family checkpoints fail before weight loading" {
 // neither model weights nor a GPU, and catch unsupported math before weight loading.
 test "supported checkpoint configs and adversarial recipe mutations" {
     const recipes = .{
-        .{ @embedFile("fixtures/configs/qwen.json"), target, &[_][]const u8{ "text_config.hidden_size", "text_config.num_hidden_layers", "text_config.attention_bias", "text_config.tie_word_embeddings", "text_config.attn_output_gate", "text_config.mamba_ssm_dtype", "text_config.layer_types", "text_config.rope_parameters", "quantization" } },
+        .{ @embedFile("fixtures/configs/qwen.json"), target, &[_][]const u8{ "text_config.hidden_size", "text_config.num_hidden_layers", "text_config.attention_bias", "text_config.tie_word_embeddings", "text_config.attn_output_gate", "text_config.mamba_ssm_dtype", "text_config.layer_types", "text_config.rope_parameters" } },
         .{ @embedFile("fixtures/configs/dflash.json"), draft, &[_][]const u8{ "hidden_size", "is_causal", "use_sliding_window", "layer_types", "attention_bias", "dflash_config.block_size", "dflash_config.target_layer_ids", "dflash_config.selector_top_k", "sliding_window" } },
         .{ @embedFile("fixtures/configs/nemotron.json"), nemotron, &[_][]const u8{ "hidden_size", "n_shared_experts", "mamba_hidden_act", "mlp_hidden_act", "mamba_ssm_cache_dtype", "mamba_proj_bias", "norm_topk_prob", "residual_in_fp32", "use_conv_bias", "layers_block_type", "mtp_layers_block_type", "quantization" } },
         .{ @embedFile("fixtures/configs/flash.json"), flash, &[_][]const u8{ "text_config.hidden_size", "text_config.indexer_kv_heads", "text_config.make_ngram_vocab_size_divisible_by", "text_config.mtp_num_hidden_layers", "text_config.mtp_use_dedicated_embeddings", "text_config.mtp.layer_types", "text_config.mtp.rope_theta", "text_config.hidden_act", "text_config.mamba_ssm_dtype", "text_config.attention_bias", "text_config.ple_layer_ids", "text_config.rope_parameters.type", "quantization" } },

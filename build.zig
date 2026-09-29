@@ -9,6 +9,17 @@ comptime {
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    const coverage_module = b.createModule(.{ .root_source_file = b.path("tools/upstream_coverage.zig"), .target = b.graph.host, .optimize = .safe });
+    const coverage_exe = b.addExecutable(.{ .name = "upstream-coverage", .root_module = coverage_module });
+    const coverage = b.addRunArtifact(coverage_exe);
+    coverage.has_side_effects = true;
+    b.step("check-upstream-coverage", "Reject unreviewed Mac source additions, changes and removals").dependOn(&coverage.step);
+    const coverage_record = b.addRunArtifact(coverage_exe);
+    coverage_record.addArg("--record-reviewed");
+    coverage_record.has_side_effects = true;
+    b.step("record-upstream-coverage", "Explicitly acknowledge reviewed source changes without claiming native support").dependOn(&coverage_record.step);
+    const coverage_tests = b.addRunArtifact(b.addTest(.{ .root_module = coverage_module }));
+    b.step("test-upstream-coverage", "Verify drift detection for new families, changed kernels and removed paths").dependOn(&coverage_tests.step);
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode: debug, safe, fast, small") orelse .fast;
     const sync_module = b.createModule(.{
         .root_source_file = b.path("tools/sync_upstream.zig"),
@@ -41,8 +52,14 @@ pub fn build(b: *std.Build) void {
     const dependency_pins = std.json.parseFromSlice(std.json.Value, b.allocator, @embedFile("native/dependencies.json"), .{}) catch @panic("Invalid native dependency pins");
     const runtime_options = b.addOptions();
     runtime_options.addOption([]const u8, "mlx_version", dependency_pins.value.object.get("python").?.object.get("mlx").?.string);
+    runtime_options.addOption(bool, "vision_legacy_pixel_limits", dependency_pins.value.object.get("vision_legacy_pixel_limits").?.bool);
     mod.addOptions("native_runtime", runtime_options);
-    const dependency_check = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_runtime.py", "--mlx-prefix", prefix });
+    mod.linkFramework("ImageIO", .{});
+    mod.linkFramework("CoreGraphics", .{});
+    mod.linkFramework("CoreFoundation", .{});
+    const jpeg_prefix = b.option([]const u8, "jpeg-prefix", "Pillow-matched libjpeg-turbo install prefix") orelse "build/jpeg";
+    mod.addObjectFile(b.path(b.fmt("{s}/lib/libturbojpeg.a", .{jpeg_prefix})));
+    const dependency_check = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_runtime.py", "--mlx-prefix", prefix, "--jpeg-prefix", jpeg_prefix });
     b.step("check-dependencies", "Verify installed native/Python MLX and pinned packages against project constraints").dependOn(&dependency_check.step);
     const dependency_tests = b.addSystemCommand(&.{ ".venv/bin/python", "-m", "pytest", "-q", "tools/test_native_runtime.py" });
     b.step("test-dependencies", "Check upstream constraint changes and native dependency drift detection").dependOn(&dependency_tests.step);
@@ -68,6 +85,23 @@ pub fn build(b: *std.Build) void {
     file_tests.addArgs(&.{ "check-checkpoint-files", "build/native-checks/files" });
     b.step("test-checkpoint-files", "Exercise positional reads, corrupt checkpoints and allocation failures without a GPU").dependOn(&file_tests.step);
     const metal_tests = b.step("test-metal", "Generate Python oracles and compare native Metal kernels (requires .venv)");
+    const affine_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/affine", "--affine-only" });
+    const affine = b.addRunArtifact(exe);
+    affine.addArgs(&.{ "check-variants", "build/native-checks/affine" });
+    affine.step.dependOn(&affine_fixture.step);
+    b.step("test-affine", "Check all packed affine formats against upstream Metal and native dispatch").dependOn(&affine.step);
+    metal_tests.dependOn(&affine.step);
+    const tensor_quant_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/tensor-quantization", "--tensor-quantization" });
+    const tensor_quant = b.addRunArtifact(exe);
+    tensor_quant.addArgs(&.{ "check-variants", "build/native-checks/tensor-quantization" });
+    tensor_quant.step.dependOn(&tensor_quant_fixture.step);
+    b.step("test-tensor-quantization", "Compare tensor-unit low-bit and byte projections with upstream and native dispatch").dependOn(&tensor_quant.step);
+    const bonsai_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/bonsai", "--bonsai-only" });
+    const bonsai = b.addRunArtifact(exe);
+    bonsai.addArgs(&.{ "check-variants", "build/native-checks/bonsai" });
+    bonsai.step.dependOn(&bonsai_fixture.step);
+    b.step("test-bonsai", "Compare rotated projection, inverse embedding and dense gate kernels with upstream").dependOn(&bonsai.step);
+    metal_tests.dependOn(&bonsai.step);
     const simd_attention_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_attention_fixtures.py", "build/native-checks/simd-attention", "--simd" });
     const simd_attention = b.addRunArtifact(exe);
     simd_attention.addArgs(&.{ "check-attention", "build/native-checks/simd-attention" });
@@ -75,6 +109,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-simd-attention", "Compare SIMD chains and branches with serial MLX attention across dispatch boundaries").dependOn(&simd_attention.step);
     metal_tests.dependOn(&simd_attention.step);
     const tensor_tests = b.option(bool, "metal-tensors", "Include M5 tensor attention fixtures in test-metal") orelse false;
+    if (tensor_tests) metal_tests.dependOn(&tensor_quant.step);
     const variants_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/variants" });
     const variants = b.addRunArtifact(exe);
     variants.addArgs(&.{ "check-variants", "build/native-checks/variants" });
@@ -112,6 +147,59 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const vision_model = b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root});
+    const image_tests = b.step("test-images", "Compare PNG/JPEG/WebP preprocessing, alpha, grayscale, CMYK and every EXIF orientation");
+    var image_previous: ?*std.Build.Step = null;
+    for ([_][]const u8{ "PNG", "JPEG", "WEBP" }) |format| {
+        for (1..9) |orientation| {
+            const dir = b.fmt("build/native-checks/images/{s}-{d}", .{ format, orientation });
+            const extension = if (std.mem.eql(u8, format, "PNG")) "png" else if (std.mem.eql(u8, format, "JPEG")) "jpeg" else "webp";
+            const fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--model", vision_model, "--vision-fixture", "187", "311", "--image-fixture", "--image-only", "--image-format", format, "--image-orientation", b.fmt("{d}", .{orientation}), "--output", dir });
+            if (std.mem.eql(u8, format, "JPEG")) {
+                if (orientation == 2) fixture.addArgs(&.{ "--image-mode", "CMYK" });
+                if (orientation == 3) fixture.addArgs(&.{ "--image-mode", "L" });
+            } else if (orientation % 2 == 0) fixture.addArg("--image-alpha");
+            if (image_previous) |prior| fixture.step.dependOn(prior);
+            const decode = b.addRunArtifact(exe);
+            decode.addArgs(&.{ "check-image", b.fmt("{s}/image.{s}", .{ dir, extension }), dir });
+            decode.step.dependOn(&fixture.step);
+            const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare", b.fmt("{s}/pixels.npy", .{dir}), b.fmt("{s}/pixels-native.npy", .{dir}) });
+            compare.step.dependOn(&decode.step);
+            image_previous = &compare.step;
+        }
+    }
+    image_tests.dependOn(image_previous.?);
+    const vision_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--model", vision_model, "--vision-fixture", "187", "311", "--image-fixture", "--output", "build/native-checks/vision" });
+    const vision_decode = b.addRunArtifact(exe);
+    vision_decode.addArgs(&.{ "check-image", "build/native-checks/vision/image.png", "build/native-checks/vision" });
+    vision_decode.step.dependOn(&vision_fixture.step);
+    vision_fixture.step.dependOn(image_tests);
+    const vision_pixels = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare", "build/native-checks/vision/pixels.npy", "build/native-checks/vision/pixels-native.npy" });
+    vision_pixels.step.dependOn(&vision_decode.step);
+    const vision_encode = b.addRunArtifact(exe);
+    vision_encode.addArgs(&.{ "check-vision", vision_model, "build/native-checks/vision" });
+    vision_encode.step.dependOn(&vision_pixels.step);
+    const vision_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-vision", "build/native-checks/vision" });
+    vision_compare.step.dependOn(&vision_encode.step);
+    b.step("test-vision-encoder", "Compare PNG preprocessing and every Qwen vision encoder stage with upstream").dependOn(&vision_compare.step);
+    var vision_previous: *std.Build.Step = &vision_compare.step;
+    for (0..2) |backend| {
+        const python_dir = b.fmt("build/native-checks/vision-prefill/{d}/python", .{backend});
+        const native_dir = b.fmt("build/native-checks/vision-prefill/{d}/native", .{backend});
+        const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", python_dir, "--model", vision_model, "--image", "build/native-checks/vision/image.png", "--generate", "4" });
+        oracle.step.dependOn(vision_previous);
+        const check = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", native_dir, "--model", vision_model, "--image", "build/native-checks/vision/image.png", "--generate", "4", "--native" });
+        check.addArtifactArg(exe);
+        check.step.dependOn(&oracle.step);
+        if (backend == 1) {
+            oracle.addArg("--simd");
+            check.addArg("--simd");
+        }
+        const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", python_dir, "--compare", native_dir });
+        compare.step.dependOn(&check.step);
+        vision_previous = &compare.step;
+    }
+    b.step("test-vision", "Compare image-conditioned prefill, caches and continuation on tensor and SIMD backends").dependOn(vision_previous);
     const prefill_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_prefill_math.py", "build/native-checks/prefill-math" });
     const prefill_math = b.addRunArtifact(exe);
     prefill_math.addArgs(&.{ "check-prefill-math", "build/native-checks/prefill-math" });

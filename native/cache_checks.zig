@@ -19,8 +19,10 @@ fn Snapshot(comptime M: type) type {
         const Self = @This();
         cache: @TypeOf(@as(M, undefined).cache) = @splat(.{}),
         position: i32 = 0,
+        rope_delta: i32 = 0,
         fn capture(m: *M) !Self {
             var out = Self{ .position = m.position };
+            if (@hasField(M, "rope_delta")) out.rope_delta = m.rope_delta;
             errdefer out.deinit();
             for (m.cache, &out.cache) |c, *saved| saved.* = try c.clone();
             return out;
@@ -35,9 +37,11 @@ fn Snapshot(comptime M: type) type {
             m.reset();
             m.cache = next;
             m.position = s.position;
+            if (@hasField(M, "rope_delta")) m.rope_delta = s.rope_delta;
         }
         fn compare(s: *const Self, m: *M, scope: *mx.Scope) !void {
             if (s.position != m.position) return error.CachePositionMismatch;
+            if (@hasField(M, "rope_delta")) if (s.rope_delta != m.rope_delta) return error.CachePositionMismatch;
             for (s.cache, m.cache) |expected, actual| {
                 inline for (.{ "a", "b", "raw", "pooled", "ple" }) |field| {
                     if (@hasField(@TypeOf(actual), field)) {

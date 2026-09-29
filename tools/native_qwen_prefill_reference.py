@@ -16,6 +16,8 @@ def main():
     parser.add_argument("--native", type=Path)
     parser.add_argument("--simd", action="store_true")
     parser.add_argument("--final-only", action="store_true", help="Do not hook/evaluate intermediate layers")
+    parser.add_argument("--image", action="append", type=Path, default=[])
+    parser.add_argument("--prompt", default="Write a short Python function that computes the Fibonacci sequence.")
     parser.add_argument("--generate", type=int, default=0, help="Check serial continuation with seed 5678, temperature 0.7, top-k 12, top-p 0.8")
     args = parser.parse_args()
     if args.length is not None and not 1 <= args.length <= 262144:
@@ -63,7 +65,7 @@ def main():
               f"{len(native['tokens'])} continuation tokens {'match' if continuation_matches else 'DIFFER'}")
         raise SystemExit(bool(failures) or not continuation_matches)
     args.directory.mkdir(parents=True, exist_ok=True)
-    prompt = "Write a short Python function that computes the Fibonacci sequence."
+    prompt = args.prompt
     if args.native:
         import subprocess
         run = args.directory / "run.json"
@@ -74,15 +76,34 @@ def main():
                     if args.length else ["--prompt", prompt])
         if args.simd:
             command.append("--metal-simd")
+        for image in args.image:
+            command.extend(["--image", str(image)])
         subprocess.run(command, check=True)
         return
     import mlx.core as mx
     (args.directory / "report.json").unlink(missing_ok=True)
     from tensorfold.families.qwen3_5 import load
-    family, tokenizer = load(args.model, lane_kernels="off" if args.simd else "on")
+    if json.loads((args.model / "config.json").read_text()).get("model_type") == "prism_hadamard_qwen35":
+        from tensorfold.families.bonsai import pack
+        from tensorfold.families.qwen3_5 import lane_family
+        from mlx_lm.utils import load_tokenizer
+        model = pack.build(args.model, form="packed" if args.simd else "lanes")
+        family = lane_family(model, lanes=not args.simd, drafter="", drafter_bits=4, title="Ternary Bonsai 2", use=str(args.model))
+        tokenizer = load_tokenizer(args.model)
+    else:
+        family, tokenizer = load(args.model, lane_kernels="off" if args.simd else "on", vision=bool(args.image))
     tokens = ([1000 + (i % 4) * 37 for i in range(args.length)] if args.length else
               tokenizer.encode(prompt, add_special_tokens=False))
     cache = family.make_cache()
+    encoded = None
+    if args.image:
+        from tensorfold.vision.images import ImageSource, load_images
+        import base64
+        images = load_images([ImageSource("data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()) for path in args.image])
+        rendered = "<|vision_start|><|image_pad|><|vision_end|>" * len(images) + prompt
+        prepared = family.vision.prepare(rendered, images)
+        tokens = list(prepared.token_ids)
+        encoded = family.encode_vision(prepared, cache)
     layers = family.core.layers
     indices = {id(layer): i for i, layer in enumerate(layers)}
     cls = type(layers[0])
@@ -133,7 +154,9 @@ def main():
     starts = list(range(0, len(tokens), 2048))
     try:
         for start in starts:
-            hidden = family.prefill(mx.array([tokens[start:start+2048]], dtype=mx.uint32), cache)
+            inputs = mx.array([tokens[start:start+2048]], dtype=mx.uint32)
+            hidden = (family.prefill_vision(inputs, cache, encoded, start, min(start+2048, len(tokens)))
+                      if encoded is not None else family.prefill(inputs, cache))
             save(64, "logits", family.head(hidden[:, -1:]))
             for i, item in enumerate(cache):
                 for j, value in enumerate(item.state):

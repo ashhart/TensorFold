@@ -22,22 +22,14 @@ pub const Drafter = struct {
         var s = mx.Scope{};
         defer s.deinit();
         const head = try target.weights.linear("lm_head");
-        const q = try s.cat(&.{ try s.slice(head.weight, 0, 0, 98304), try s.slice(head.weight, 0, 248032, 248320) }, 0);
-        const sb = try s.cat(&.{ try s.slice(head.sb, 1, 0, 98304), try s.slice(head.sb, 1, 248032, 248320) }, 1);
+        var selected = try head.selectRanges(&s, &.{ .{ 0, 98304 }, .{ 248032, 248320 } });
+        errdefer selected.deinit();
         const pred = try s.cast(try w.get("candidate_selector.predecessor_codebook"), mx.f32t);
         const succ = try s.cast(try w.get("candidate_selector.successor_codebook"), mx.f32t);
-        try mx.evalMany(&.{ q, sb, pred, succ }, false);
-        const qown = try mx.retain(q);
-        errdefer mx.free(qown);
-        const sbown = try mx.retain(sb);
-        errdefer mx.free(sbown);
+        try mx.evalMany(&.{ pred, succ }, false);
         const pown = try mx.retain(pred);
         errdefer mx.free(pown);
-        const sc = if (mx.tensor_units) mx.empty else try mx.retain(try s.cat(&.{ try s.slice(head.scales, 0, 0, 98304), try s.slice(head.scales, 0, 248032, 248320) }, 0));
-        errdefer mx.free(sc);
-        const bi = if (mx.tensor_units) mx.empty else try mx.retain(try s.cat(&.{ try s.slice(head.biases, 0, 0, 98304), try s.slice(head.biases, 0, 248032, 248320) }, 0));
-        errdefer mx.free(bi);
-        return .{ .weights = w, .head = .{ .weight = qown, .sb = sbown, .n = 98592, .k = 5120, .tiled = mx.tensor_units, .scales = sc, .biases = bi }, .pred = pown, .succ = try mx.retain(succ) };
+        return .{ .weights = w, .head = selected, .pred = pown, .succ = try mx.retain(succ) };
     }
     pub fn reset(d: *Drafter) void {
         for (&d.cache) |*v| v.deinit();

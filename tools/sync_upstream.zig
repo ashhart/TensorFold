@@ -79,6 +79,16 @@ fn alignDependencies(git: Git, tip: []const u8) !void {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(git.io, "build/native-dependencies-resolved.json", git.allocator, .limited(16384));
     const parsed = try std.json.parseFromSlice(std.json.Value, git.allocator, bytes, .{});
     var record = parsed.value;
+    if (record.object.get("rebuild_jpeg").?.bool) {
+        try std.Io.Dir.cwd().createDirPath(git.io, "build/deps");
+        _ = try source(git, "build/deps/libjpeg-turbo", "git@github.com:libjpeg-turbo/libjpeg-turbo.git", record.object.get("jpeg_version").?.string);
+        const root = try std.process.currentPathAlloc(git.io, git.allocator);
+        const prefix = try std.fmt.allocPrint(git.allocator, "-DCMAKE_INSTALL_PREFIX={s}/build/jpeg", .{root});
+        try command(git.io, &.{ "cmake", "-S", "build/deps/libjpeg-turbo", "-B", "build/jpeg-build", "-DCMAKE_BUILD_TYPE=Release", "-DENABLE_SHARED=OFF", "-DENABLE_STATIC=ON", "-DWITH_TOOLS=OFF", "-DWITH_TESTS=OFF", prefix });
+        try command(git.io, &.{ "cmake", "--build", "build/jpeg-build", "--parallel", "4" });
+        try command(git.io, &.{ "cmake", "--install", "build/jpeg-build" });
+    }
+    _ = record.object.swapRemove("rebuild_jpeg");
     if (record.object.get("rebuild_mlx").?.bool) {
         try std.Io.Dir.cwd().createDirPath(git.io, "build/deps");
         const revision = try source(git, "build/deps/mlx", "git@github.com:ml-explore/mlx.git", record.object.get("mlx_revision").?.string);
@@ -104,7 +114,7 @@ fn alignDependencies(git: Git, tip: []const u8) !void {
     try file.writeStreamingAll(git.io, "\n");
     try command(git.io, &.{ ".venv/bin/python", "tools/native_runtime.py" });
     try command(git.io, &.{ ".venv/bin/python", "tools/export_native_kernels.py" });
-    try command(git.io, &.{ ".zig-toolchain/zig", "build", "test", "test-prefill", "test-variants", "test-metal", "test-models", "-Doptimize=safe", "-j1" });
+    try command(git.io, &.{ ".zig-toolchain/zig", "build", "test", "test-prefill", "test-variants", "test-metal", "test-models", "test-vision", "-Doptimize=safe", "-j1" });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -151,6 +161,7 @@ pub fn main(init: std.process.Init) !void {
             return err;
         };
     }
+    try command(init.io, &.{ ".zig-toolchain/zig", "build", "check-upstream-coverage", "-j1" });
     try alignDependencies(git, tip);
     const refspec = try std.fmt.allocPrint(allocator, "{s}:refs/heads/main", .{tip});
     // A concurrent or divergent update is rejected by this ordinary push.

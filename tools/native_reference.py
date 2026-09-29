@@ -10,6 +10,65 @@ from pathlib import Path
 import numpy as np
 
 
+def vision_fixture(model_dir, output, height, width, image_fixture=False, image_format="PNG", image_alpha=False, image_orientation=1, image_only=False, image_mode=None):
+    from native_runtime import require_mlx
+    require_mlx()
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx_vlm.models.qwen3_5.config import VisionConfig
+    from mlx_vlm.models.qwen3_5.vision import VisionModel
+    from tensorfold.vision.qwen_checkpoint import load_vision_weights, quantization_predicate, vision_tensors
+    config = json.loads((Path(model_dir) / "config.json").read_text())
+    out = Path(output)
+    (out / "python").mkdir(parents=True, exist_ok=True)
+    if image_fixture:
+        from PIL import Image
+        from tensorfold.vision.qwen_processing import QwenImageProcessor
+        import base64
+        from tensorfold.vision.images import ImageSource, load_images
+        image = Image.fromarray(np.random.default_rng(314159).integers(0, 256, (height, width, 4 if image_alpha else 3), dtype=np.uint8))
+        if image_mode:
+            image = image.convert(image_mode)
+        exif = Image.Exif()
+        exif[274] = image_orientation
+        image_path = out / ("image." + image_format.lower())
+        image.save(image_path, format=image_format, exif=exif)
+        image = load_images([ImageSource("data:image/" + image_format.lower() + ";base64," + base64.b64encode(image_path.read_bytes()).decode())])[0].to_pil()
+        processor = QwenImageProcessor.from_directory(model_dir).processor
+        processed = processor(images=[image], max_pixels=4096 * 1024, min_pixels=65536)
+        pixels = np.asarray(processed["pixel_values"], dtype=np.float32)
+        _, height, width = map(int, processed["image_grid_thw"][0])
+    else:
+        pixels = np.random.default_rng(314159).uniform(-1, 1, (height * width, 1536)).astype(np.float32)
+    np.save(out / "pixels.npy", pixels)
+    (out / "grid.json").write_text(json.dumps(dict(height=height, width=width)))
+    if image_only:
+        print(f"Saved upstream image preprocessing in {out}")
+        return
+    tower = VisionModel(VisionConfig.from_dict(config["vision_config"]))
+    weights = tower.sanitize(load_vision_weights(vision_tensors(Path(model_dir)), mx))
+    nn.quantize(tower, class_predicate=quantization_predicate(config, weights))
+    tower.load_weights(list(weights.items()), strict=True)
+    tower.eval()
+    def save(name, x):
+        mx.eval(x)
+        np.save(out / "python" / f"{name}.npy", np.array(x.astype(mx.float32)))
+    grid = mx.array([[1, height, width]], dtype=mx.int32)
+    h = tower.patch_embed(mx.array(pixels).astype(tower.patch_embed.proj.weight.dtype))
+    save("patch", h)
+    position = tower.fast_pos_embed_interpolate(grid)
+    save("position", position)
+    h = h + position
+    freq = tower.rot_pos_emb(grid)
+    save("frequencies", mx.concatenate([freq, freq], -1).reshape(1, height * width, 1, 72))
+    cu = mx.array([0, height * width], dtype=mx.int32)
+    for i, block in enumerate(tower.blocks):
+        h = block(h, cu, freq)
+        save(f"block-{i}", h)
+    save("embeddings", tower.merger(h))
+    print(f"Saved upstream vision stages in {out}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="build/models/Qwen3.8-27B-MLX-4bit")
@@ -21,6 +80,14 @@ def main():
     parser.add_argument("--disable-fusion", action="store_true", help="Diagnostic: turn off stacked consumers after the production load")
     parser.add_argument("--output", default="build/native-checks/reference.npy")
     parser.add_argument("--compare", nargs=2)
+    parser.add_argument("--vision-fixture", nargs=2, type=int, metavar=("GRID_HEIGHT", "GRID_WIDTH"))
+    parser.add_argument("--image-fixture", action="store_true", help="Vision fixture dimensions describe a generated RGB PNG before preprocessing")
+    parser.add_argument("--image-format", choices=("PNG", "JPEG", "WEBP"), default="PNG")
+    parser.add_argument("--image-alpha", action="store_true")
+    parser.add_argument("--image-only", action="store_true", help="Generate preprocessing oracle without loading the vision tower")
+    parser.add_argument("--image-mode", choices=("RGB", "RGBA", "L", "CMYK"))
+    parser.add_argument("--image-orientation", type=int, choices=range(1, 9), default=1)
+    parser.add_argument("--compare-vision", type=Path)
     parser.add_argument("--compare-reports", nargs="+")
     parser.add_argument("--require-rounds", action="store_true", help="Reject trivial EOS-before-decode parity runs")
     parser.add_argument("--generate", type=int, default=0)
@@ -30,6 +97,22 @@ def main():
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--top-p", type=float, default=0.95)
     args = parser.parse_args()
+    if args.vision_fixture:
+        return vision_fixture(args.model, args.output, *args.vision_fixture, args.image_fixture, args.image_format, args.image_alpha, args.image_orientation, args.image_only, args.image_mode)
+    if args.compare_vision:
+        files = sorted((args.compare_vision / "python").glob("*.npy"))
+        assert files, "No vision oracle arrays"
+        failed = []
+        for path in files:
+            a = np.load(path)
+            b = np.load(args.compare_vision / "native" / path.name)
+            equal = a.shape == b.shape and np.array_equal(a, b)
+            print(f"{path.stem}: {'PASS' if equal else 'FAIL'}, max difference {np.max(np.abs(a - b))}")
+            if not equal:
+                failed.append(path.stem)
+        assert not failed, failed
+        print(f"PASS: {len(files)} vision arrays bit-exact")
+        return
     if args.compare_reports:
         reports = [json.loads(Path(p).read_text()) for p in args.compare_reports]
         if args.require_rounds:
@@ -47,8 +130,9 @@ def main():
         print(f"shapes: {a.shape} / {b.shape}")
         print(f"equal elements: {np.count_nonzero(a == b)}/{a.size}")
         print(f"max absolute difference: {np.max(np.abs(a - b))}")
-        print(f"argmax reference: {a.argmax(axis=-1).tolist()}")
-        print(f"argmax native: {b.argmax(axis=-1).tolist()}")
+        if a.size // a.shape[-1] <= 32:
+            print(f"argmax reference: {a.argmax(axis=-1).tolist()}")
+            print(f"argmax native: {b.argmax(axis=-1).tolist()}")
         if not np.array_equal(a, b):
             raise SystemExit(1)
         return
@@ -57,7 +141,19 @@ def main():
     from tensorfold.families.qwen3_5 import load_lane_model
     from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree
 
-    if args.simd:
+    bonsai = json.loads((Path(args.model) / "config.json").read_text()).get("model_type") == "prism_hadamard_qwen35"
+    if bonsai:
+        from tensorfold.families.bonsai import pack
+        from mlx_lm.utils import load_tokenizer
+        model = pack.build(Path(args.model), form="packed" if args.simd else "lanes")
+        tokenizer = load_tokenizer(Path(args.model))
+        if args.simd:
+            from tensorfold.kernels.qwen.dense.v1 import row_forward
+            from tensorfold.families.qwen3_5 import install_row_decoder
+            if not install_row_decoder(model):
+                raise ValueError("Bonsai row decoder rejected this checkpoint")
+            tree_forward, commit_tree = row_forward.forward, row_forward.commit
+    elif args.simd:
         if args.production_kernels or args.disable_fusion:
             parser.error("--simd uses the production decoder without fusion overrides")
         from tensorfold.families.qwen3_5 import load

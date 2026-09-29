@@ -7,16 +7,24 @@ const A = mx.Array;
 const c = mx.c;
 
 pub fn forward(m: *model.Model, tokens: []const i32) !model.Pass {
+    return forwardImage(m, tokens, mx.empty, mx.empty, m.rope_delta);
+}
+
+pub fn forwardImage(m: *model.Model, tokens: []const i32, embeddings: A, positions: A, delta: i32) !model.Pass {
     if (tokens.len == 0 or tokens.len > 2048) return error.InvalidPrefillWidth;
     var p = model.Pass{ .count = tokens.len, .start = m.position };
+    if (embeddings.ctx != null) {
+        if (!@import("std").mem.eql(i32, mx.shape(embeddings), &.{ 1, @intCast(tokens.len), 5120 }) or !@import("std").mem.eql(i32, mx.shape(positions), &.{ 3, @intCast(tokens.len) })) return error.InvalidImageEmbeddings;
+        p.vision_delta = delta;
+    } else if (positions.ctx != null) return error.InvalidImageEmbeddings;
     errdefer p.deinit();
     const s = &p.scope;
     for (0..tokens.len) |i| p.parents[i] = @as(i32, @intCast(i)) - 1;
-    var h = try m.weights.embedArray(s, try s.ints(tokens));
+    var h = if (embeddings.ctx != null) embeddings else try m.weights.embedArray(s, try s.ints(tokens));
     for (0..64) |i| {
         const x = try s.rms(h, try m.weight(i, "input_layernorm.weight"));
-        const delta = if (i % 4 == 3) try attention(m, s, i, x, &p.records[i]) else try gdn(m, s, i, x, &p);
-        h = try s.binary(c.mlx_add, h, delta);
+        const residual = if (i % 4 == 3) try attention(m, s, i, x, positions, &p.records[i]) else try gdn(m, s, i, x, &p);
+        h = try s.binary(c.mlx_add, h, residual);
         const norm = try s.rms(h, try m.weight(i, "post_attention_layernorm.weight"));
         const gate = try m.prefillProject(s, i, "mlp.gate_proj", norm);
         const up = try m.prefillProject(s, i, "mlp.up_proj", norm);
@@ -68,7 +76,7 @@ fn gdn(m: *model.Model, s: *mx.Scope, i: usize, x: A, p: *model.Pass) !A {
     return m.prefillProject(s, i, "linear_attn.out_proj", try s.reshape(gated, &.{ 1, n, 6144 }));
 }
 
-fn attention(m: *model.Model, s: *mx.Scope, i: usize, x: A, rec: *model.Record) !A {
+fn attention(m: *model.Model, s: *mx.Scope, i: usize, x: A, positions: A, rec: *model.Record) !A {
     const n = mx.dim(x, 1);
     const qg = try s.reshape(try m.prefillProject(s, i, "self_attn.q_proj", x), &.{ 1, n, 24, 512 });
     var q = try s.rms(try s.slice(qg, 3, 0, 256), try m.weight(i, "self_attn.q_norm.weight"));
@@ -76,8 +84,15 @@ fn attention(m: *model.Model, s: *mx.Scope, i: usize, x: A, rec: *model.Record) 
     var k = try s.rms(try s.reshape(try m.prefillProject(s, i, "self_attn.k_proj", x), &.{ 1, n, 4, 256 }), try m.weight(i, "self_attn.k_norm.weight"));
     var v = try s.transpose(try s.reshape(try m.prefillProject(s, i, "self_attn.v_proj", x), &.{ 1, n, 4, 256 }), &.{ 0, 2, 1, 3 });
     // Regular MLX RoPE uses a scalar cache offset on the sequence axis.
-    q = try s.rope(try s.transpose(q, &.{ 0, 2, 1, 3 }), try s.ints(&.{m.position}), 64);
-    k = try s.rope(try s.transpose(k, &.{ 0, 2, 1, 3 }), try s.ints(&.{m.position}), 64);
+    q = try s.transpose(q, &.{ 0, 2, 1, 3 });
+    k = try s.transpose(k, &.{ 0, 2, 1, 3 });
+    if (positions.ctx != null) {
+        q = try @import("vision_positions.zig").rope(s, q, positions);
+        k = try @import("vision_positions.zig").rope(s, k, positions);
+    } else {
+        q = try s.rope(q, try s.ints(&.{m.position + m.rope_delta}), 64);
+        k = try s.rope(k, try s.ints(&.{m.position + m.rope_delta}), 64);
+    }
     rec.values[0] = k;
     rec.values[1] = v;
     if (m.cache[i].a.ctx != null) {
