@@ -103,12 +103,13 @@ class App:
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
-                 context_window: int | None = None):
+                 context_window: int | None = None, aliases: tuple[str, ...] | list[str] = ()):
         from tokenizers import Tokenizer
 
         self.engine = engine
         self.vision = getattr(engine, "vision", None)
         self.served = served
+        self.aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
         self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         self.template = ChatTemplate(model_dir)
         self.default_thinking = default_thinking
@@ -119,6 +120,22 @@ class App:
         if self.context_window < 0:
             raise ValueError("context_window must be 0 or a positive token count")
         self.lock = threading.Lock()
+
+    @property
+    def model_ids(self) -> list[str]:
+        """The ids this endpoint answers to, as the MLX server lists them: ``--name`` first, then each ``--alias``."""
+
+        ids: list[str] = []
+        for model_id in (self.served, *getattr(self, "aliases", ())):
+            if model_id and model_id not in ids:
+                ids.append(model_id)
+        return ids
+
+    def reply_model(self, body: Any) -> str:
+        """The id a reply names: the one the request asked for when this endpoint answers to it, else ``--name``."""
+
+        asked = body.get("model") if isinstance(body, dict) else None
+        return asked if isinstance(asked, str) and asked in self.model_ids else self.served
 
     def _check_fields(self, body: dict[str, Any]) -> str | None:
         import inspect
@@ -458,7 +475,8 @@ def make_handler(app: App):
 
         def do_GET(self):
             if self.path.rstrip("/") in ("/v1/models", "/models"):
-                self._json(200, {"object": "list", "data": [{"id": app.served, "object": "model", "owned_by": "tensorfold"}]})
+                self._json(200, {"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "tensorfold"}
+                                                            for model_id in app.model_ids]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
                 self._json(200, {"ok": True})
             else:
@@ -487,6 +505,7 @@ def make_handler(app: App):
                 return self._json(400, {"error": {"message": _error_message(exc)}})
             rid = f"chatcmpl-{uuid.uuid4().hex[:24]}" if chat else f"cmpl-{uuid.uuid4().hex[:24]}"
             created = int(time.time())
+            model = app.reply_model(body)
             stream = bool(body.get("stream"))
             kind = "chat.completion.chunk" if chat else "text_completion"
             gone = socket_cancellation(self.connection)          # the Mac server's check: the client has closed
@@ -494,9 +513,9 @@ def make_handler(app: App):
 
             def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
                 if chat:
-                    return {"id": rid, "object": kind, "created": created, "model": app.served,
+                    return {"id": rid, "object": kind, "created": created, "model": model,
                             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
-                return {"id": rid, "object": kind, "created": created, "model": app.served,
+                return {"id": rid, "object": kind, "created": created, "model": model,
                         "choices": [{"index": 0, "text": delta.get("content", ""), "finish_reason": finish}]}
 
             if stream:
@@ -569,11 +588,11 @@ def make_handler(app: App):
                     message["reasoning_content"] = result["reasoning"]
                 if result["calls"]:
                     message["tool_calls"] = result["calls"]
-                payload = {"id": rid, "object": "chat.completion", "created": created, "model": app.served,
+                payload = {"id": rid, "object": "chat.completion", "created": created, "model": model,
                            "choices": [{"index": 0, "message": message, "finish_reason": result["finish"]}],
                            "usage": usage, "tensorfold": result["stats"]}
             else:
-                payload = {"id": rid, "object": "text_completion", "created": created, "model": app.served,
+                payload = {"id": rid, "object": "text_completion", "created": created, "model": model,
                            "choices": [{"index": 0, "text": result["content"], "finish_reason": result["finish"]}],
                            "usage": usage, "tensorfold": result["stats"]}
             self._json(200, payload)
