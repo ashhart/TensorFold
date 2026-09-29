@@ -13,15 +13,15 @@ inline float qgroup_dot(const device uint32_t* w, float scale, float bias, const
   return fma(scale, dq, bias * dx);
 }
 // Elementwise ops as the checkpoint's training framework does them on bf16 tensors: fp32 math, one rounding.
-inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::precise::exp(-x)))); }
-inline float bsilu(float x) { return float(bfloat(x / (1.0f + metal::precise::exp(-x)))); }
-inline float fsig(float x) { return 1.0f / (1.0f + metal::precise::exp(-x)); }
+inline float bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))); }
+inline float bsilu(float x) { return float(bfloat(x / (1.0f + metal::exp(-x)))); }
+inline float fsig(float x) { return 1.0f / (1.0f + metal::exp(-x)); }
 inline float log1p_(float x) {
   const float u = 1.0f + x;
-  return u == 1.0f ? x : x * (metal::precise::log(u) / (u - 1.0f));
+  return u == 1.0f ? x : x * (metal::log(u) / (u - 1.0f));
 }
 // softplus in fp32 (threshold 20, as torch.nn.functional.softplus)
-inline float fsoftplus(float x) { return x > 20.0f ? x : log1p_(metal::precise::exp(x)); }
+inline float fsoftplus(float x) { return x > 20.0f ? x : log1p_(metal::exp(x)); }
 
 
 // Rank-k expert of a row inside one simdgroup: lane l holds logits l, l + 32, ...; rounds of (largest logit,
@@ -104,5 +104,5 @@ inline float qdot16(const device uint8_t* w, const thread float* xt, float scale
 inline float stream_rinv(const device float* ssp, int r, int s, int nt, int streams, int dims, float eps) {
   float total = 0.0f;
   for (int j = 0; j < nt; j++) total += ssp[(r * nt + j) * streams + s];
-  return metal::precise::rsqrt(total / float(dims) + eps);
+  return metal::rsqrt(total / float(dims) + eps);
 }

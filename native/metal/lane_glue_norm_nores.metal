@@ -27,7 +27,7 @@
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float total = 0.0f;
   for (int i = 0; i < TPG / 32; i++) total += red[i];
-  const float inv = metal::precise::rsqrt(total / float(K) + eps[0]);
+  const float inv = metal::rsqrt(total / float(K) + eps[0]);
   float gs = 0.0f;
   for (int i = 0; i < E; i++) {
     const bfloat x = bfloat(float(Wt[int(t) * E + i]) * (hv[i] * inv));

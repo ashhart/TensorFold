@@ -6,7 +6,7 @@
   for (int j = 0; j < NE / 32; j++) {
     const int e = int(lane) + 32 * j;
     const float g = float(G[int(r) * NE + e]);
-    prob[j] = 1.0f / (1.0f + metal::precise::exp(-g));
+    prob[j] = 1.0f / (1.0f + metal::exp(-g));
     sel[j] = prob[j] + bias[e];
   }
   float total = 0.0f;

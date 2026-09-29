@@ -37,10 +37,14 @@ pub const Linear = struct {
         mx.free(l.biases);
     }
     pub fn apply(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: Act) !A {
+        return l.applyWithReduction(kernels, s, x, null);
+    }
+    /// Match a stacked projection's SIMD reduction without duplicating its weights.
+    pub fn applyWithReduction(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: Act, reduction: ?i32) !A {
         const m: i32 = @intCast(mx.c.mlx_array_size(x.x) / @as(usize, @intCast(l.k)));
         if (m < 1 or m > 128) return error.InvalidLaneWidth;
         if (!mx.tensor_units) {
-            const split: i32 = if (l.n <= 64) 32 else if (l.n <= 6144) 16 else 8;
+            const split: i32 = reduction orelse (if (l.n <= 64) @as(i32, 32) else if (l.n <= 6144) 16 else 8);
             const rt = @min(2, @divTrunc(m + 7, 8));
             var nt: i32 = if (@mod(l.n, 32) == 0) 4 else if (@mod(l.n, 16) == 0) 2 else 1;
             while (nt > 1 and split * rt * nt * 64 * 4 > 16384) nt = @divExact(nt, 2);
@@ -57,6 +61,17 @@ pub const Linear = struct {
         const block = @min(mp, 32);
         const out = (try kernels.run(s, if (l.tiled) src.lane_qmm_main_tiled else src.lane_qmm_main, &.{ x2, sums, l.weight, l.sb, dims }, &.{ ti("TMR", @divExact(block, 16)), ti("N", l.n), ti("K", l.k), ti("NT", 32), ti("SK", sk), ti("GS", 64), ti("EDGE", @intFromBool(@mod(mp, block) != 0)) }, .{ tiles * 32 * sk, @divTrunc(mp + block - 1, block), 1 }, .{ 32 * sk, 1, 1 }, &.{.{ .shape = &.{ m, l.n } }}))[0];
         return s.reshape(out, &.{ 1, m, l.n });
+    }
+    /// Python's installed lane linear falls back to MLX above 128 prompt rows.
+    pub fn prefill(l: Linear, kernels: *mx.Kernels, s: *mx.Scope, x: A) !A {
+        if (mx.tensor_units and mx.dim(x, 1) <= 128) return l.apply(kernels, s, .{ .x = x });
+        const w = if (l.tiled) try s.contiguous(try s.reshape(try s.transpose(try s.reshape(l.weight, &.{ @divExact(l.n, 32), @divExact(l.k, 64), 32, 8 }), &.{ 0, 2, 1, 3 }), &.{ l.n, @divExact(l.k, 8) })) else l.weight;
+        const sb = try s.transpose(l.sb, &.{ 1, 0, 2 });
+        const sc = try s.contiguous(try s.reshape(try s.slice(sb, 2, 0, 1), &.{ l.n, @divExact(l.k, 64) }));
+        const bs = try s.contiguous(try s.reshape(try s.slice(sb, 2, 1, 2), &.{ l.n, @divExact(l.k, 64) }));
+        var result = mx.c.mlx_array_new();
+        const rc = mx.c.mlx_quantized_matmul(&result, x, w, sc, bs, true, mx.opt(64), mx.opt(4), "affine", mx.stream);
+        return s.result(rc, result);
     }
 };
 

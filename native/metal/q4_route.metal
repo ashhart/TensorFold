@@ -16,7 +16,7 @@
   m = red[0];
   for (int k = 1; k < NE / 32; k++) m = metal::max(m, red[k]);
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float x = metal::precise::exp(logit - m);
+  const float x = metal::exp(logit - m);
   const float zs = simd_sum(x);
   if (lane == 0) red[g] = zs;
   threadgroup_barrier(mem_flags::mem_threadgroup);

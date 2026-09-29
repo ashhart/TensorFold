@@ -17,16 +17,16 @@
       acc += float(CW[c * TAPS + tap]) * xv;
     }
     const float conv = float(bfloat(acc));
-    const float sig = float(bfloat(1.0f / (1.0f + metal::precise::exp(-conv))));
+    const float sig = float(bfloat(1.0f / (1.0f + metal::exp(-conv))));
     vals[j] = float(bfloat(conv * sig));                // SiLU, bf16 like mlx_lm's two ops
   }
   if (isq || isk) {
     float ss = 0.0f;
     for (int j = 0; j < PER; j++) ss += vals[j] * vals[j];
     ss = simd_sum(ss);
-    const float inv = metal::precise::rsqrt(ss / float(DK) + 1e-6f);
+    const float inv = metal::rsqrt(ss / float(DK) + 1e-6f);
     // mlx_lm: q = (DK^-0.5)^2 * rms_norm(q), k = DK^-0.5 * rms_norm(k), scales rounded to bf16
-    const float scale = isq ? float(bfloat(1.0f / float(DK))) : float(bfloat(metal::precise::rsqrt(float(DK))));
+    const float scale = isq ? float(bfloat(1.0f / float(DK))) : float(bfloat(metal::rsqrt(float(DK))));
     for (int j = 0; j < PER; j++) {
       const bfloat out = bfloat(scale * float(bfloat(vals[j] * inv)));
       if (isq) Q[(w * NK + head) * DK + lane * PER + j] = out;
@@ -38,8 +38,8 @@
     if (lane == 0) {
       // g = exp(-exp(A_log) * softplus(a + dt_bias)), beta = sigmoid(b) (mlx_lm's compute_g, sigmoid)
       const float s = float(bfloat(float(Ain[w * ZS + AO + hv]) + float(DT[hv])));
-      const float sp = float(bfloat(metal::max(s, 0.0f) + metal::precise::log(1.0f + metal::precise::exp(-metal::abs(s)))));
-      G[w * NV + hv] = metal::precise::exp(-metal::precise::exp(float(ALOG[hv])) * sp);
-      BETA[w * NV + hv] = bfloat(1.0f / (1.0f + metal::precise::exp(-float(Bin[w * ZS + BO + hv]))));
+      const float sp = float(bfloat(metal::max(s, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(s)))));
+      G[w * NV + hv] = metal::exp(-metal::exp(float(ALOG[hv])) * sp);
+      BETA[w * NV + hv] = bfloat(1.0f / (1.0f + metal::exp(-float(Bin[w * ZS + BO + hv]))));
     }
   }

@@ -55,7 +55,7 @@
         const int i = e % t;
         const uint hh = hk * R + uint(rr);
         const float lgr = log_prev[n * HV + hh] + log_g[n * HV + hh];
-        const float w = metal::precise::exp(lgr - lg_hist[(n * HV + hh) * CAP + i]);
+        const float w = metal::exp(lgr - lg_hist[(n * HV + hh) * CAP + i]);
         aw[rr * CAP + i] = w * dk[i];
         cw[rr * CAP + i] = w * dq[i];
     }
@@ -66,7 +66,7 @@
     }
 
     const float lg = log_prev[n * HV + h] + log_g[n * HV + h];
-    const float decay = metal::precise::exp(lg);
+    const float decay = metal::exp(lg);
     const float s0k = s0kq[((h * lanes + n) * 2 + 0) * DV + dv];
     const float s0q = s0kq[((h * lanes + n) * 2 + 1) * DV + dv];
     const device HistT* dcol = d_hist + (n * HV + h) * CAP * DV + dv;

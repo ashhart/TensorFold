@@ -21,7 +21,7 @@ rather than this optional-variant replay suite. Diagnostic entries are not produ
 | `lane_glue_gdn_pre` | `model.zig` | 0 |
 | `lane_glue_gdn_post` | `model.zig` | 0 |
 | `lane_glue_mlp_act` | `lanes.zig` | 0 |
-| `lane_tree_tree` | `model.zig` | 0 |
+| `lane_tree_tree` | `model.zig`, `qwen_prefill.zig` | 0 |
 | `lane_tree_replay` | `model.zig` | 0 |
 | `lane_attention_partial` | Diagnostic only | 6 |
 | `lane_attention_partial_direct` | `lanes.zig` | 216 |

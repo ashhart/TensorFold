@@ -24,12 +24,13 @@ from tools.native_legacy import nemotron_rows
 from tools.native_legacy import flash
 from tensorfold.kernels.qwen.flash_next.v1 import attention, base
 from tensorfold.engine import gpu_sampling, topk
-from tools.native_kernel_math import explicit_math
+from tools.native_runtime import require_mlx
 
 OUT = ROOT / "native" / "metal"
 
 
 def main():
+    require_mlx()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Fail if committed sources differ from Python")
     args = parser.parse_args()
@@ -62,8 +63,6 @@ def main():
         spec = dict(spec)
         spec["source"] = re.sub(r"\A(?:  constexpr int \w+ = -?\d+;\n)+", "", spec["source"])
         spec["header"] = re.sub(r"\n\[\[max_total_threads_per_threadgroup\(\d+\)\]\]\n$", "", spec.get("header", ""))
-        spec["source"] = explicit_math(spec["source"])
-        spec["header"] = explicit_math(spec["header"])
         emit(OUT / f"{key}.metal", spec["source"])
         emit(OUT / f"{key}.h", spec.get("header", ""))
         ins = ", ".join(json.dumps(x) for x in spec["input_names"])

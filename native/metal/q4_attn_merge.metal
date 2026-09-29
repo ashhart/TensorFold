@@ -9,7 +9,7 @@
   float total = 0.0f, acc = 0.0f;
   for (int k = 0; k < P; k++) {
     const float mk = PM[(at + k) * 2];
-    const float w = mk == -INFINITY ? 0.0f : metal::precise::exp(mk - top);
+    const float w = mk == -INFINITY ? 0.0f : metal::exp(mk - top);
     total = fma(PM[(at + k) * 2 + 1], w, total);
     acc = fma(PO[(at + k) * D + d], w, acc);
   }

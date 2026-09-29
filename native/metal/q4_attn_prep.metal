@@ -22,7 +22,7 @@
   threadgroup_barrier(mem_flags::mem_threadgroup);
   float total = 0.0f;
   for (int k = 0; k < width / 32; k++) total += part[k];
-  const float inv = metal::precise::rsqrt(total / float(width) + eps[0]);
+  const float inv = metal::rsqrt(total / float(width) + eps[0]);
   const float nw = live ? (isq ? QW[d] : (isi ? IW[d] : KW[d])) : 0.0f;
   normed[d] = float(bfloat((x * inv) * nw));
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -32,7 +32,7 @@
     const int hr = RD / 2;
     const int i = d % hr;
     // as mx.fast.rope: inv_freq = exp2(-(i / half) * log2(base)), fast cos/sin of position * inv_freq
-    const float freq = metal::precise::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
+    const float freq = metal::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
     const float angle = float(POS[r]) * freq;
     const float c = metal::fast::cos(angle), s = metal::fast::sin(angle);
     out = d < hr ? normed[d] * c - normed[d + hr] * s : normed[d - hr] * s + normed[d] * c;

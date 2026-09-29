@@ -16,7 +16,7 @@ import mlx.core as mx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from tools.native_kernel_math import explicit_math
+from tools.native_runtime import require_mlx
 
 def fingerprint(source, header):
     return hashlib.sha256((header + "\0" + source).encode()).hexdigest()
@@ -48,7 +48,7 @@ class Capture:
             constants.append((match[1], int(match[2])))
             source = source[match.end():]
         header = re.sub(r"\n\[\[max_total_threads_per_threadgroup\(\d+\)\]\]\n$", "", spec.get("header", ""))
-        source_hash = fingerprint(explicit_math(source), explicit_math(header))
+        source_hash = fingerprint(source, header)
         key = self.catalog.get((source_hash, "DEP" in spec["input_names"]))
         if key is None:
             return kernel
@@ -333,6 +333,7 @@ def attention_and_ple_variants(capture):
 
 
 def main():
+    require_mlx()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()

@@ -18,7 +18,7 @@
   for (int r = 0; r < R; r++) {
     float part_sum = 0.0f;
     for (int t = int(lane); t < T; t += 32) part_sum += PART[r * T + t];
-    inv[r] = metal::precise::rsqrt(simd_sum(part_sum) / float(K) + eps[0]);
+    inv[r] = metal::rsqrt(simd_sum(part_sum) / float(K) + eps[0]);
   }
   if (R == 1) {
     for (int k0 = 0; k0 < K; k0 += 512) {

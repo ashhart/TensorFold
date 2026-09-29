@@ -39,7 +39,7 @@
   uint near_count[3] = {0u, 0u, 0u};
   for (uint i = t; i < V; i += TG) {
     const float v = float(L[base + i]) * inv_t;
-    const float e = metal::precise::exp(v - m);
+    const float e = metal::exp(v - m);
     ls += e;
     for (int w = 0; w < 3; w++) {
       if (v >= m - near / float(1 << w)) { lnear[w] += e; near_count[w]++; }
@@ -186,13 +186,13 @@
     float norm = z;
     if (kc != 0u) {
       norm = 0.0f;
-      for (uint j = 0; j < n; j++) norm += metal::precise::exp(tf_val(ck[j]) - m);
+      for (uint j = 0; j < n; j++) norm += metal::exp(tf_val(ck[j]) - m);
     }
     uint keep = n;
     if (top_p > 0.0f && top_p < 1.0f) {
       float cum = 0.0f;
       for (uint j = 0; j < n; j++) {
-        cum += metal::precise::exp(tf_val(ck[j]) - m) / norm;
+        cum += metal::exp(tf_val(ck[j]) - m) / norm;
         if (cum >= top_p) { keep = j + 1; break; }
       }
     }
@@ -205,7 +205,7 @@
   float score = -INFINITY;
   uint best = 0xFFFFFFFFu;
   if (t < keep) {
-    score = tf_val(ck[t]) - metal::precise::log(-metal::precise::log(tf_uniform(seed, position, ci[t])));
+    score = tf_val(ck[t]) - metal::log(-metal::log(tf_uniform(seed, position, ci[t])));
     best = t;
   }
   const float sm = simd_max(score);

@@ -83,6 +83,42 @@ pub fn build(b: *std.Build) void {
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
+    const prefill_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_prefill_math.py", "build/native-checks/prefill-math" });
+    const prefill_math = b.addRunArtifact(exe);
+    prefill_math.addArgs(&.{ "check-prefill-math", "build/native-checks/prefill-math" });
+    prefill_math.step.dependOn(&prefill_fixture.step);
+    b.step("test-prefill-math", "Exhaustive BF16 activation and mixed-precision decay parity with mlx-lm").dependOn(&prefill_math.step);
+    const prefill_tests = b.step("test-prefill", "Trace production Qwen prefill layers, caches and logits against Python");
+    const prefill_size = b.option(usize, "prefill-tokens", "Override prefill length (0 uses the English prompt)");
+    const prefill_backend = b.option(usize, "prefill-backend", "Restrict prefill checks to 0=tensor or 1=SIMD");
+    if (prefill_backend != null and prefill_backend.? > 1) @panic("prefill-backend must be 0 or 1");
+    if (prefill_size != null and prefill_size.? > 262144) @panic("prefill-tokens must be 0..262144");
+    var prefill_previous: *std.Build.Step = &prefill_math.step;
+    for ([_]usize{ 0, 129, 2049, 4225 }, 0..) |default_length, case| {
+        if (prefill_size != null and case > 0) continue;
+        const length = prefill_size orelse default_length;
+        for (0..2) |backend| {
+            if (prefill_backend != null and prefill_backend.? != backend) continue;
+            const base = b.fmt("build/native-checks/prefill/{d}-{d}", .{ backend, length });
+            const oracle_dir = b.fmt("{s}/python", .{base});
+            const native_dir = b.fmt("{s}/native", .{base});
+            const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", oracle_dir });
+            const check = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", native_dir, "--native" });
+            check.addArtifactArg(exe);
+            for ([_]*std.Build.Step.Run{ oracle, check }) |step| {
+                step.addArgs(&.{ "--generate", "32" });
+                step.addArgs(&.{ "--model", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}) });
+                if (length > 0) step.addArgs(&.{ "--length", b.fmt("{d}", .{length}) });
+                if (backend == 1) step.addArg("--simd");
+            }
+            oracle.step.dependOn(prefill_previous);
+            check.step.dependOn(&oracle.step);
+            const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_qwen_prefill_reference.py", oracle_dir, "--compare", native_dir });
+            compare.step.dependOn(&check.step);
+            prefill_previous = &compare.step;
+        }
+    }
+    prefill_tests.dependOn(prefill_previous);
     const ngram_checks = b.addRunArtifact(exe);
     ngram_checks.addArg("check-ngram-gpu");
     b.step("test-ngram-gpu", "Compare GPU n-gram IDs with exact CPU integer hashing").dependOn(&ngram_checks.step);
@@ -313,6 +349,7 @@ pub fn build(b: *std.Build) void {
                     const check = b.addRunArtifact(exe);
                     check.addArgs(&.{ "run", dir });
                     check.addArgs(common);
+                    if (family == 0) check.addArg("--lane-prefill");
                     check.addArgs(&.{ "--max-tokens", "16", "--dump-logits", b.fmt("{s}-{s}.npy", .{ base, suffix }), "--report", b.fmt("{s}-{s}.json", .{ base, suffix }) });
                     if (backend == 1) check.addArg("--metal-simd");
                     if (drafts == 1) check.addArg("--no-copy");

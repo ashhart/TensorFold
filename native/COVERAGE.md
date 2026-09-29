@@ -5,6 +5,8 @@ kernels. MLX-C supplies arrays, scheduling, safetensors, and general operations.
 This matrix distinguishes exercised behavior from physical-device validation.
 
 For the current upstream 0.3.6.1 rebase, see [REBASE_VALIDATION.md](REBASE_VALIDATION.md).
+The subsequent regular-Qwen-prefill repair and its full-model oracle matrix are in
+[PREFILL_VALIDATION.md](PREFILL_VALIDATION.md).
 The detailed measurements below also include earlier milestones; they are not all
 fresh runs after this rebase. The current variant inventory records 2,190 passing
 launches across 54 variants and all 86 embedded kernels.

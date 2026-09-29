@@ -11,7 +11,7 @@
   }
   const int e = int(m) * N + int(g) * 64 + int(t);
   const float gf = float(GATE[e + int(m) * N]);
-  const bfloat h = bfloat(gf / (1.0f + metal::precise::exp(-gf)) * float(UP[e + int(m) * N + N]));
+  const bfloat h = bfloat(gf / (1.0f + metal::exp(-gf)) * float(UP[e + int(m) * N + N]));
   HOUT[e] = h;
   hb[t] = h;
   threadgroup_barrier(mem_flags::mem_threadgroup);

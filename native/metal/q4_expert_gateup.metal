@@ -18,7 +18,7 @@
     if (slot == TOPK - 1) {
       float total = 0.0f;
       float ex[TOPK];
-      for (int kk = 0; kk < TOPK; kk++) { ex[kk] = metal::precise::exp(picked[kk] - picked[0]); total += ex[kk]; }
+      for (int kk = 0; kk < TOPK; kk++) { ex[kk] = metal::exp(picked[kk] - picked[0]); total += ex[kk]; }
       for (int kk = 0; kk < TOPK; kk++) WTS[r * TOPK + kk] = float(bfloat(ex[kk] / total));
     }
   }

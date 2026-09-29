@@ -37,7 +37,7 @@ pub const Pass = struct {
     logits: A = mx.empty,
     records: [64]Record = @splat(.{}),
     taps: [5]A = @splat(mx.empty),
-    parents: [128]i32 = undefined,
+    parents: [2048]i32 = undefined,
     count: usize = 0,
     start: i32 = 0,
     pub fn deinit(p: *Pass) void {
@@ -50,6 +50,8 @@ pub const Model = struct {
     kernels: mx.Kernels,
     cache: [64]Cache = @splat(.{}),
     position: i32 = 0,
+    prefill_ops: @import("prefill_ops.zig").Ops = .{},
+    trace_dir: ?[]const u8 = null,
     pub fn init(io: std.Io, dir: []const u8) !Model {
         var m = Model{ .weights = Weights.init(), .kernels = mx.Kernels.init() };
         errdefer m.deinit();
@@ -64,15 +66,38 @@ pub const Model = struct {
         m.reset();
         m.weights.deinit();
         m.kernels.deinit();
+        m.prefill_ops.deinit();
     }
-    fn weight(m: *Model, index: usize, suffix: []const u8) !A {
+    pub fn weight(m: *Model, index: usize, suffix: []const u8) !A {
         var buf: [192]u8 = undefined;
         return m.weights.get(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ index, suffix }));
     }
     fn project(m: *Model, s: *mx.Scope, index: usize, suffix: []const u8, x: lanes.Act) !A {
         var buf: [192]u8 = undefined;
         const l = try m.weights.linear(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ index, suffix }));
+        // Python's SIMD decoder stacks [qkv,z,b,a] and [q, k, v]. The combined
+        // output widths select eight reduction chunks, including the small heads.
+        if (!mx.tensor_units) {
+            for ([_][]const u8{ "linear_attn.in_proj_z", "linear_attn.in_proj_b", "linear_attn.in_proj_a", "self_attn.k_proj", "self_attn.v_proj" }) |stacked|
+                if (std.mem.eql(u8, suffix, stacked)) return l.applyWithReduction(&m.kernels, s, x, 8);
+        }
         return l.apply(&m.kernels, s, x);
+    }
+    pub fn prefillProject(m: *Model, s: *mx.Scope, index: usize, suffix: []const u8, x: A) !A {
+        var buf: [192]u8 = undefined;
+        const l = try m.weights.linear(try std.fmt.bufPrint(&buf, "model.layers.{d}.{s}", .{ index, suffix }));
+        return l.prefill(&m.kernels, s, x);
+    }
+    pub fn prefill(m: *Model, tokens: []const i32) !Pass {
+        return @import("qwen_prefill.zig").forward(m, tokens);
+    }
+    pub fn trace(m: *Model, s: *mx.Scope, position: i32, layer: usize, label: []const u8, value: A) !void {
+        const dir = m.trace_dir orelse return;
+        var buf: [4096]u8 = undefined;
+        const path = try std.fmt.bufPrintSentinel(&buf, "{s}/{d}-{d}-{s}.npy", .{ dir, position, layer, label }, 0);
+        const out = try s.cast(value, mx.f32t);
+        try mx.eval(out);
+        try mx.check(mx.c.mlx_save(path, out));
     }
     pub fn forward(m: *Model, tokens: []const i32, parents: []const i32) !Pass {
         if (tokens.len != parents.len) return error.InvalidTree;

@@ -30,6 +30,8 @@ RUNTIME_ENV = ("TF_LANE_TILE", "TF_FLASH_MTP", "TF_FLASH_DRAFT_VOCAB", "TF_FLASH
 
 
 def python_worker(args):
+    from native_runtime import require_mlx
+    require_mlx()
     started = time.perf_counter()
     import mlx.core as mx
     from tensorfold import __version__
@@ -76,7 +78,8 @@ def python_worker(args):
     mx.synchronize()
     load_seconds = time.perf_counter() - load_started
     sampling = Sampling(args.seed, args.temperature, args.top_k, args.top_p) if args.temperature else None
-    prompt = tokenizer.encode(args.prompt, add_special_tokens=False)
+    prompt = ([1000 + (i % 4) * 37 for i in range(args.prompt_tokens)] if args.prompt_tokens else
+              tokenizer.encode(args.prompt, add_special_tokens=False))
     eos = getattr(tokenizer, "eos_token_ids", None)
     if eos is None:
         eos = [tokenizer.eos_token_id]
@@ -116,7 +119,7 @@ def python_worker(args):
         "python_version": platform.python_version(),
         "tensorfold_version": __version__,
         "installed_tensorfold_version": importlib.metadata.version("tensorfold"),
-        "prefill_method": "production family prefill; native uses fixed row-exact chunks",
+        "prefill_method": "production family prefill",
     }
     args.output.write_text(json.dumps(result, indent=2) + "\n")
 
@@ -130,6 +133,8 @@ def main():
     parser.add_argument("--binary", type=Path, default=Path("zig-out/bin/tensorfold"))
     parser.add_argument("--model-root", type=Path, default=Path("build/models"))
     parser.add_argument("--prompt", default=PROMPT)
+    parser.add_argument("--prompt-tokens", type=int, default=0,
+                        help="Use a repeating four-token prompt of this length (0 uses --prompt)")
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--seed", type=int, default=5678)
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -146,6 +151,8 @@ def main():
         parser.error("Qwen uses the original 15-node DFlash2 configuration")
     if args.repetitions < 1 or args.max_tokens < 2:
         parser.error("positive repetitions and at least two output tokens required")
+    if not 0 <= args.prompt_tokens <= 32768:
+        parser.error("--prompt-tokens must be 0..32768")
     if args.worker:
         return python_worker(args)
     args.output.mkdir(parents=True, exist_ok=True)
@@ -159,10 +166,13 @@ def main():
         if args.engine == "python":
             command = [sys.executable, str(Path(__file__).resolve()), "--worker", "--engine", "python",
                        "--family", args.family, "--drafts", str(args.drafts),
-                       "--model-root", str(args.model_root), "--output", str(report), *shared]
+                       "--model-root", str(args.model_root), "--output", str(report),
+                       "--prompt-tokens", str(args.prompt_tokens), *shared]
         else:
             command = [str(args.binary.resolve()), "run", str(args.model_root / MODELS[args.family]),
                        *shared, "--no-copy", "--warmup", "--report", str(report)]
+            if args.prompt_tokens:
+                command += ["--tokens", ",".join(str(1000 + (i % 4) * 37) for i in range(args.prompt_tokens))]
             # The production Qwen LaneEngine uses exact_sampling (CPU f64).
             # FamilyRounds uses the fp32 GPU sampler for Nemotron and Flash.
             if args.family != "qwen":

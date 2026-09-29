@@ -54,13 +54,13 @@
         ss = fma(v, v, ss);
       }
       ss = simd_sum(ss);
-      const float inv = metal::precise::rsqrt(ss + 1e-6f) * (sg == 0 ? metal::precise::rsqrt(float(DK)) : 1.0f);
+      const float inv = metal::rsqrt(ss + 1e-6f) * (sg == 0 ? metal::rsqrt(float(DK)) : 1.0f);
       for (int i = 0; i < DK / 32; i++) x[lane * (DK / 32) + i] *= inv;
     } else if (sg == 2 && lane == 0) {
       // g = exp(-exp(A_log) * softplus(a + dt_bias)) in fp32, beta = sigmoid(b) as bf16
       const float b = float(P[r * PW + C + NV * DV + hv]);
       const float a = float(P[r * PW + C + NV * DV + NV + hv]);
-      gates[0] = metal::precise::exp(-metal::precise::exp(float(ALOG[hv])) * fsoftplus(a + float(DT[hv])));
+      gates[0] = metal::exp(-metal::exp(float(ALOG[hv])) * fsoftplus(a + float(DT[hv])));
       gates[1] = bsig(b);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -90,7 +90,7 @@
       float ss = 0.0f;
       for (int i = 0; i < DV / 32; i++) { const float v = ys[lane * (DV / 32) + i]; ss = fma(v, v, ss); }
       ss = simd_sum(ss);
-      if (lane == 0) red[0][0] = metal::precise::rsqrt(ss / float(DV) + eps[0]);
+      if (lane == 0) red[0][0] = metal::rsqrt(ss / float(DV) + eps[0]);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (int(t) < DV) {

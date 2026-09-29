@@ -13,7 +13,7 @@
   float st[NS];
   const int sbase = (cx * DS) + int(lane) * NS;
   for (int i = 0; i < NS; i++) st[i] = float(S_IN[sbase + i]);
-  const float A = -metal::precise::exp(float(A_LOG[h]));
+  const float A = -metal::exp(float(A_LOG[h]));
   const float dskip = float(bfloat(float(DSKIP[h])));
   const float dtb = float(DT_BIAS[h]);
 
@@ -23,7 +23,7 @@
       float a_ = float(CB[ch]); \
       for (int k_ = 0; k_ < KC; k_++) a_ = fma(CW[k_ * CD + (ch)], TAP(ch, (rr) - (KC - 1) + k_), a_); \
       const float cv_ = float(bfloat(a_)); \
-      out = float(bfloat(cv_ / (1.0f + metal::precise::exp(-cv_)))); }
+      out = float(bfloat(cv_ / (1.0f + metal::exp(-cv_)))); }
 
   // B and C of this head's group, every row, computed once per threadgroup (thread tid owns one of 2 DS channels)
   threadgroup float bc[MAXR * 2 * DS];
@@ -47,9 +47,9 @@
       cvv[i] = bc[rr * 2 * DS + DS + int(lane) * NS + i];
     }
     float dt = float(P[rr * PROJ + DTOFF + int(h)]) + dtb;
-    dt = metal::max(dt, 0.0f) + metal::precise::log(1.0f + metal::precise::exp(-metal::abs(dt)));   // softplus (logaddexp(x, 0))
+    dt = metal::max(dt, 0.0f) + metal::log(1.0f + metal::exp(-metal::abs(dt)));   // softplus (logaddexp(x, 0))
     dt = metal::clamp(dt, limits[0], limits[1]);
-    const float dA = metal::precise::exp(A * dt);
+    const float dA = metal::exp(A * dt);
     const float xdt = xv * dt;
     float acc = 0.0f;
     for (int i = 0; i < NS; i++) {
@@ -61,7 +61,7 @@
     if (lane == 0) {
       const float y = float(bfloat(acc + xv * dskip));
       const float z = float(P[rr * PROJ + cx]);
-      const float sz = float(bfloat(z / (1.0f + metal::precise::exp(-z))));
+      const float sz = float(bfloat(z / (1.0f + metal::exp(-z))));
       Y[rr * XD + cx] = bfloat(sz * y);
     }
     // the SSM state after this row (a verify window keeps the state of its last accepted row)

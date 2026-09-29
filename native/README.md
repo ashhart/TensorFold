@@ -12,7 +12,8 @@ reimplement Apple's GPU runtime.
 
 After rebasing onto upstream 0.3.6.1, native builds, Metal oracles, variant replay
 and real-model checks pass. See [rebase verification](REBASE_VALIDATION.md) for the
-current results and scope; older performance measurements below are historical.
+rebase results and scope; [prefill validation](PREFILL_VALIDATION.md) records the
+subsequent production-prefill repair. Older performance measurements below are historical.
 
 ## Build and run
 
@@ -76,17 +77,18 @@ weights are quantized to 4-bit at load. The native loader validates the model re
 | `--warmup` | Compile common Metal variants before timing prompt/decode |
 | `--report FILE` | Write prompt/output IDs, decoded text, timing, and token hash as JSON |
 | `--dump-logits FILE.npy` | Save float32 logits from the final prompt block |
+| `--lane-prefill` | Qwen only: use the old 128-row lane oracle arithmetic for diagnostics |
 | `--check-exact` | Run the family's GPU verification/partial-commit parity check and exit |
 | `--check-cache-stress` | Check every accepted prefix, cache snapshots, rejection, reset and memory cycles |
 | `--check-long-cache` | Repeat cache/rollback checks after random 10K-token or sparse-attention prefixes |
 | `--check-mtp-state` | Nemotron/Flash: compare batched MTP with serial, all retained prefixes and continuations through 10K |
 | `--check-serial-state` | Qwen/Nemotron/resident Flash: compare pipelined/synchronous tokens, every cache and continuation; add `--check-long-cache` for attention thresholds |
 | `--check-ple-state` | Flash: compare resident/bounded PLE logits, all retained prefixes, history and continuation; add `--check-long-cache` for sparse thresholds |
-| `--trace-dir DIR` | Flash: save the final prefill block's layer intermediates in an existing directory |
-| `--trace-gdn N` | With `--trace-dir`: trace recurrent layer N's input/output across all prefill blocks |
+| `--trace-dir DIR` | Qwen: save every prompt block's layer outputs, caches and final logits; Flash: final-block intermediates |
+| `--trace-gdn N` | Flash only, with `--trace-dir`: trace recurrent layer N across all prefill blocks |
 
 Text goes to stdout when decoding finishes; diagnostics go to stderr. Report parent
-directories must already exist. Dense Qwen prefills in 128-token chunks; Nemotron and
+directories must already exist. Dense Qwen uses regular model prefill in 2,048-token chunks; Nemotron and
 Flash Next use 16-token chunks. Prompt plus
 requested output is bounded to 262,144 tokens; actual memory requirements grow with context.
 
@@ -104,10 +106,17 @@ flowchart LR
 ```
 
 The 64 target layers alternate three gated DeltaNet layers with one full-attention
-layer. All packed projections use the original Metal lane arithmetic. A verified row
+layer. Decode and verification use the original Metal lane arithmetic. A verified row
 has the same arithmetic regardless of the other rows in its batch. Sampling uses the
 same seed/absolute-position/token hash as Python, so a draft token is accepted only when
 it matches what serial decoding would select. Rejected branches never enter the cache.
+
+Qwen prompt prefill follows the upstream regular model forward, including its BF16
+rounding, compiled activation graphs, convolution, GDN and causal attention. It uses
+lane projections through 128 rows on the tensor backend and stock MLX projections
+for wider chunks; the SIMD prefill uses stock MLX projections. Only the last hidden
+row is projected to vocabulary logits. Decoding then resumes from the committed
+regular-prefill caches. Reports identify `prefill_mode` and `metal_backend`.
 
 DFlash2 reads five target hidden-state taps and proposes a tree of up to 15 tokens.
 Eight-token suffix matches can instead propose copied continuations of up to 31 tokens.
@@ -120,6 +129,8 @@ path; attention layers gather only its K/V rows.
 | `weights.zig`, `config.zig` | Checkpoint validation/loading and packed weight preparation |
 | `lanes.zig`, `metal/` | Exact quantized projections, normalization, tree metadata and attention |
 | `model.zig` | Complete target forward, caches, accepted-path commit |
+| `qwen_prefill.zig`, `prefill_ops.zig` | Regular Qwen prompt arithmetic and compiled mlx-lm activation graphs |
+| `prefill_checks.zig` | Exhaustive BF16 activation and mixed-precision decay oracle checks |
 | `checkpoint.zig` | Shared safetensors reader and affine quantized projections |
 | `safetensors.zig`, `ple_tables.zig`, `ple_resident.zig` | Validated checkpoint headers, bounded positional PLE reads and optional resident packed tables |
 | `schema.zig`, `schemas/` | Required tensor names, shapes and dtypes for all four fixed checkpoint recipes |
@@ -237,7 +248,7 @@ mkdir -p build/native-checks
 .venv/bin/python tools/export_native_kernels.py --check
 .venv/bin/python tools/native_reference.py
 zig-out/bin/tensorfold run build/models/Qwen3.8-27B-MLX-4bit \
-  --tokens 1,2,3,4 --max-tokens 0 --dump-logits build/native-checks/native.npy
+  --tokens 1,2,3,4 --lane-prefill --max-tokens 0 --dump-logits build/native-checks/native.npy
 .venv/bin/python tools/native_reference.py \
   --compare build/native-checks/reference.npy build/native-checks/native.npy
 ```
@@ -267,6 +278,8 @@ The build exposes reproducible coverage targets:
 
 ```sh
 .zig-toolchain/zig build test -Doptimize=safe
+.zig-toolchain/zig build test-prefill -Doptimize=safe -j1
+.zig-toolchain/zig build test-prefill-math -Doptimize=safe -j1
 .zig-toolchain/zig build test-metal -Doptimize=safe -Dmetal-tensors=true
 .zig-toolchain/zig build test-variants -Doptimize=safe
 .zig-toolchain/zig build test-allocation-failures -Doptimize=safe
@@ -294,6 +307,18 @@ The build exposes reproducible coverage targets:
 .zig-toolchain/zig build test-ple-state -Doptimize=safe -Dple-long=true
 .zig-toolchain/zig build test-ple-runtime -Doptimize=safe
 ```
+
+`test-prefill` compares all 64 hidden states, both cache arrays per layer, selected
+GDN/attention intermediates and final logits with the actual upstream family prefill,
+then compares 32 sampled continuation tokens.
+It covers English, 129, 2,049 and 4,225-token prompts on tensor and forced SIMD paths.
+Use `-Dprefill-tokens=N` (zero selects English) and `-Dprefill-backend=0|1` to focus a case.
+The reference requires MLX/MLX-Metal 0.32.2 and records its versions to reject stale
+traces. MLX 0.31.2 selects different wide-attention arithmetic and is not a valid
+oracle for this checkout. Trace artifacts consume several GB under `build/native-checks/prefill`.
+`test-prefill-math` covers all 65,280 finite BF16 inputs, including signed zero, for
+SiLU/SwiGLU/gated normalization, plus mixed-precision decay at three prompt widths.
+The older `test-long-context` Qwen oracle explicitly uses `--lane-prefill`.
 
 `test-metal` generates independent oracles through the original Python implementation
 and runs native comparisons: 76 CPU/Metal sampling/top-k cases, three sparse-attention threshold
@@ -374,11 +399,14 @@ sparse-attention threshold. See [COVERAGE.md](COVERAGE.md) for current execution
 completion report for the default prompt and seed 1234. Use native `--seed 1234 --report`
 and compare with `tools/native_reference.py --compare-reports PYTHON SERIAL DRAFT`.
 Use the same prompt, seed, sampling settings, and token budget in every run.
+The lane-tree diagnostic oracle requires native `--lane-prefill`. For production
+comparisons use `tools/native_engine_bench.py --family qwen --engine python|zig`;
+`--prompt-tokens N` exercises a repeatable long prompt, and `--drafts 15` enables DFlash2.
 
 The Metal sources are checked in and generated from Python kernel modules. The exporter
-turns launch-specific constants into templates and makes transcendental precision explicit
-to match the Python MLX wheel across native MLX builds. Deliberate `fast::` calls remain
-fast. Retired interfaces retain independent, versioned references in
+turns launch-specific constants into templates and preserves the original math calls.
+Its Python oracle must use MLX/MLX-Metal 0.32.2; substituting precise functions to
+match the older 0.31.2 wheel changes decode arithmetic. Retired interfaces retain independent, versioned references in
 [`tools/native_legacy`](../tools/native_legacy/README.md), preserving diagnostic coverage.
 After kernel edits, run `tools/export_native_kernels.py` and repeat the parity checks.
 Python is only needed for these development checks and regeneration.

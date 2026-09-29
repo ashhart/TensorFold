@@ -41,12 +41,12 @@
         if (rows[j] >= 0) bm = metal::max(bm, sc[j]);
       }
       const float mn = metal::max(m, bm);
-      const float a = metal::precise::exp(m - mn);
+      const float a = metal::exp(m - mn);
       l *= a;
       for (int i = 0; i < DPL; i++) o[i] *= a;
       for (int j = 0; j < BLK; j++) {
         if (rows[j] < 0) continue;
-        const float b = metal::precise::exp(sc[j] - mn);
+        const float b = metal::exp(sc[j] - mn);
         l += b;
         const device bfloat* vr = V + (size_t(h) * CAP + rows[j]) * D + int(lane) * DPL;
         for (int i = 0; i < DPL; i++) o[i] = fma(b, float(vr[i]), o[i]);
@@ -63,7 +63,7 @@
       float lsum = 0.0f, acc[DPL];
       for (int i = 0; i < DPL; i++) acc[i] = 0.0f;
       for (int t = 0; t < SPLIT; t++) {
-        const float e = sl[g * SPLIT + t] > 0.0f ? metal::precise::exp(sm[g * SPLIT + t] - mx_) : 0.0f;
+        const float e = sl[g * SPLIT + t] > 0.0f ? metal::exp(sm[g * SPLIT + t] - mx_) : 0.0f;
         lsum = fma(sl[g * SPLIT + t], e, lsum);
         for (int i = 0; i < DPL; i++) acc[i] = fma(so[g * SPLIT + t][int(lane) * DPL + i], e, acc[i]);
       }

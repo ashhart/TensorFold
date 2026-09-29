@@ -1,5 +1,10 @@
 # Rebase verification — 2026-09-28
 
+Historical milestone `b9a9fc8`. Subsequent investigation found MLX 0.31.2 in the
+Python environment, below the repository's 0.32.2 requirement. The version attribution,
+precision workaround and remaining Qwen prefill limitation below are superseded by
+[PREFILL_VALIDATION.md](PREFILL_VALIDATION.md), which records fresh version-checked runs.
+
 Base: upstream `34bae79` (TensorFold 0.3.6.1), rebased native branch `806291f`,
 plus the uncommitted changes described below. Machine: M5 Max, 128 GiB unified
 memory. Zig: 0.17.0-dev.2248+3f6a02acd. MLX Python: 0.32.2; mlx-lm: 0.31.3.

@@ -55,5 +55,5 @@
     for (int r = 0; r < R; r++)
       for (int j = 0; j < RPS; j++) {
         const float gf = float(bfloat(acc[r][j]));
-        OUT[r * NH + row0 + j] = bfloat(gf / (1.0f + metal::precise::exp(-gf)) * ups[r][j]);
+        OUT[r * NH + row0 + j] = bfloat(gf / (1.0f + metal::exp(-gf)) * ups[r][j]);
       }
