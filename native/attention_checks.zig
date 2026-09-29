@@ -3,7 +3,6 @@ const mx = @import("mlx.zig");
 pub fn check(io: std.Io, dir: []const u8) !void {
     try mx.init();
     defer mx.shutdown();
-    if (!mx.tensor_units) return error.TensorHardwareRequired;
     var kernels = mx.Kernels.init();
     defer kernels.deinit();
     var store = @import("checkpoint.zig").Store.init(64);
@@ -12,7 +11,7 @@ pub fn check(io: std.Io, dir: []const u8) !void {
     try store.loadFile(io, try std.fmt.bufPrint(&path, "{s}/arrays.safetensors", .{dir}), "", "");
     const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/cases.json", .{dir}));
     defer mx.allocator.free(bytes);
-    const Case = struct { key: []const u8, length: i32, scale: f32 };
+    const Case = struct { key: []const u8, length: i32, scale: f32, parents: ?[]const i32 = null };
     const cases = try std.json.parseFromSlice([]const Case, mx.allocator, bytes, .{});
     defer cases.deinit();
     const equal = @import("sampling_checks.zig").equal;
@@ -20,6 +19,17 @@ pub fn check(io: std.Io, dir: []const u8) !void {
         var s = mx.Scope{};
         defer s.deinit();
         const q = try store.field(case.key, "q");
+        if (case.parents) |parents| {
+            const tensor_units = mx.tensor_units;
+            mx.tensor_units = false;
+            defer mx.tensor_units = tensor_units;
+            const lanes = @import("lanes.zig");
+            const tree = try lanes.Tree.init(parents);
+            const out = try lanes.attentionCapacity(&kernels, &s, q, try store.field(case.key, "k"), try store.field(case.key, "v"), &tree, case.length);
+            try equal(&s, out, try store.field(case.key, "expected"));
+            continue;
+        }
+        if (!mx.tensor_units) return error.TensorHardwareRequired;
         const k = try s.slice(try store.field(case.key, "k"), 2, 0, case.length);
         const v = try s.slice(try store.field(case.key, "v"), 2, 0, case.length);
         const out = try @import("lanes.zig").sdpa(&kernels, &s, q, k, v, case.scale);
@@ -32,5 +42,5 @@ pub fn check(io: std.Io, dir: []const u8) !void {
             try equal(&s, single, try s.slice(out, 2, j, j + 1));
         }
     }
-    std.debug.print("PASS: {d} long-context tensor attention fixtures and all serial rows match bit for bit.\n", .{cases.value.len});
+    std.debug.print("PASS: {d} attention fixtures match their serial arithmetic bit for bit.\n", .{cases.value.len});
 }

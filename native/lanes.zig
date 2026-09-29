@@ -128,7 +128,7 @@ pub fn attention(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *con
 }
 pub fn attentionCapacity(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *const Tree, used: i32) !A {
     if (used > mx.dim(keys, 2) or used < t.parents.len) return error.InvalidAttentionShape;
-    if (!mx.tensor_units) return rowAttention(k, s, q, keys, values, t, used);
+    if (!mx.tensor_units) return serialAttention(s, q, keys, values, t, used);
     const w: i32 = @intCast(t.parents.len);
     const h = mx.dim(q, 1);
     const d = mx.dim(q, 3);
@@ -179,21 +179,28 @@ pub fn sdpa(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, scale: f32) 
     return (try k.run(s, src.lane_attention_merge, &.{ part[0], part[1], part[2], dims }, &.{ ti("G", g), ti("D", d) }, .{ hkv * 32, r, 1 }, .{ 32, 1, 1 }, &.{.{ .shape = &.{ 1, h, w, d } }}))[0];
 }
 
-fn rowAttention(k: *mx.Kernels, s: *mx.Scope, q: A, keys: A, values: A, t: *const Tree, used: i32) !A {
-    const w: i32 = @intCast(t.parents.len);
-    const h = mx.dim(q, 1);
-    const d = mx.dim(q, 3);
-    const hkv = mx.dim(keys, 1);
-    const g = @divExact(h, hkv);
-    const cap = mx.dim(keys, 2);
-    const start = used - w;
-    const maxd = t.max_depth + 1;
-    const nch = @divTrunc(start + maxd + 127, 128);
-    var paths: [128 * 128]i32 = undefined;
-    for (0..t.parents.len) |i| @memcpy(paths[i * @as(usize, @intCast(maxd)) ..][0..@intCast(maxd)], t.paths[i * 128 ..][0..@intCast(maxd)]);
-    const dims = try s.ints(&.{ start, w, cap, nch, maxd });
-    const out = try k.run(s, src.row_attention_partial, &.{ try s.contiguous(q), try s.contiguous(keys), try s.contiguous(values), try s.ints(t.depths[0..t.parents.len]), try s.ints(paths[0 .. t.parents.len * @as(usize, @intCast(maxd))]), try s.scalar(0.0625), dims }, &.{ ti("D", d), ti("G", g), ti("CK", 128), ti("SPLIT", 4), ti("BLK", 4) }, .{ 32 * g * 4, nch, hkv * w }, .{ 32 * g * 4, 1, 1 }, &.{ .{ .shape = &.{h * w * nch}, .dtype = mx.f32t }, .{ .shape = &.{h * w * nch}, .dtype = mx.f32t }, .{ .shape = &.{ h * w * nch, d }, .dtype = mx.f32t } });
-    return (try k.run(s, src.row_attention_merge, &.{ out[0], out[1], out[2], dims }, &.{ti("D", d)}, .{ 32, h, w }, .{ 32, 1, 1 }, &.{.{ .shape = &.{ 1, h, w, d } }}))[0];
+// Production SIMD uses MLX's single-query attention arithmetic. A tree node
+// must see its ancestors in serial order, without unused buffer capacity.
+fn serialAttention(s: *mx.Scope, q: A, keys: A, values: A, t: *const Tree, used: i32) !A {
+    const start = used - @as(i32, @intCast(t.parents.len));
+    var outputs: [128]A = undefined;
+    for (0..t.parents.len) |row| {
+        const r: i32 = @intCast(row);
+        var k: A = undefined;
+        var v: A = undefined;
+        if (t.chain) {
+            k = try s.slice(keys, 2, 0, start + r + 1);
+            v = try s.slice(values, 2, 0, start + r + 1);
+        } else {
+            const ids = try s.ints(t.paths[row * 128 ..][0..@intCast(t.depths[row] + 1)]);
+            k = try s.cat(&.{ try s.slice(keys, 2, 0, start), try s.take(try s.slice(keys, 2, start, used), ids, 2) }, 2);
+            v = try s.cat(&.{ try s.slice(values, 2, 0, start), try s.take(try s.slice(values, 2, start, used), ids, 2) }, 2);
+        }
+        var out = mx.c.mlx_array_new();
+        const rc = mx.c.mlx_fast_scaled_dot_product_attention(&out, try s.slice(q, 2, r, r + 1), k, v, 0.0625, "", mx.empty, mx.empty, false, mx.stream);
+        outputs[row] = try s.result(rc, out);
+    }
+    return if (t.parents.len == 1) outputs[0] else s.cat(outputs[0..t.parents.len], 2);
 }
 
 test "tree ancestry, convolution windows, and invalid parents" {

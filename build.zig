@@ -10,6 +10,21 @@ comptime {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode: debug, safe, fast, small") orelse .fast;
+    const sync_module = b.createModule(.{
+        .root_source_file = b.path("tools/sync_upstream.zig"),
+        .target = b.graph.host,
+        .optimize = .safe,
+    });
+    const sync_exe = b.addExecutable(.{ .name = "sync-upstream", .root_module = sync_module });
+    const sync = b.addRunArtifact(sync_exe);
+    sync.has_side_effects = true;
+    b.step("sync-upstream", "Manually fast-forward fork main from upstream and rebase the clean current branch (SSH)").dependOn(&sync.step);
+    const freshness = b.addRunArtifact(sync_exe);
+    freshness.addArg("--check");
+    freshness.has_side_effects = true;
+    b.step("check-upstream", "Fetch upstream and report commits missing from fork main and the current branch").dependOn(&freshness.step);
+    const sync_tests = b.addRunArtifact(b.addTest(.{ .root_module = sync_module }));
+    b.step("test-sync-upstream", "Check sync worktree and remote guards without network access").dependOn(&sync_tests.step);
     const prefix = b.option([]const u8, "mlx-prefix", "MLX and mlx-c install prefix") orelse "build/mlx";
     const bindings = b.addTranslateC(.{
         .root_source_file = b.path(b.fmt("{s}/include/mlx/c/mlx.h", .{prefix})),
@@ -23,6 +38,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const dependency_pins = std.json.parseFromSlice(std.json.Value, b.allocator, @embedFile("native/dependencies.json"), .{}) catch @panic("Invalid native dependency pins");
+    const runtime_options = b.addOptions();
+    runtime_options.addOption([]const u8, "mlx_version", dependency_pins.value.object.get("python").?.object.get("mlx").?.string);
+    mod.addOptions("native_runtime", runtime_options);
+    const dependency_check = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_runtime.py", "--mlx-prefix", prefix });
+    b.step("check-dependencies", "Verify installed native/Python MLX and pinned packages against project constraints").dependOn(&dependency_check.step);
+    const dependency_tests = b.addSystemCommand(&.{ ".venv/bin/python", "-m", "pytest", "-q", "tools/test_native_runtime.py" });
+    b.step("test-dependencies", "Check upstream constraint changes and native dependency drift detection").dependOn(&dependency_tests.step);
     mod.addImport("mlx_c", bindings.createModule());
     const draft_vocab = b.addOptions();
     draft_vocab.addOption([]const u8, "nemotron", @embedFile("src/tensorfold/families/nemotron_h/draft_ids.txt"));
@@ -45,6 +68,12 @@ pub fn build(b: *std.Build) void {
     file_tests.addArgs(&.{ "check-checkpoint-files", "build/native-checks/files" });
     b.step("test-checkpoint-files", "Exercise positional reads, corrupt checkpoints and allocation failures without a GPU").dependOn(&file_tests.step);
     const metal_tests = b.step("test-metal", "Generate Python oracles and compare native Metal kernels (requires .venv)");
+    const simd_attention_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_attention_fixtures.py", "build/native-checks/simd-attention", "--simd" });
+    const simd_attention = b.addRunArtifact(exe);
+    simd_attention.addArgs(&.{ "check-attention", "build/native-checks/simd-attention" });
+    simd_attention.step.dependOn(&simd_attention_fixture.step);
+    b.step("test-simd-attention", "Compare SIMD chains and branches with serial MLX attention across dispatch boundaries").dependOn(&simd_attention.step);
+    metal_tests.dependOn(&simd_attention.step);
     const tensor_tests = b.option(bool, "metal-tensors", "Include M5 tensor attention fixtures in test-metal") orelse false;
     const variants_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/variants" });
     const variants = b.addRunArtifact(exe);

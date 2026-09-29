@@ -1,5 +1,7 @@
 > **Experimental fork:** This repository is a fork of [ashhart/TensorFold](https://github.com/ashhart/TensorFold), exploring native Zig inference on macOS based on the original author's work. The original TensorFold implementation and Metal kernels are credited to the upstream author; the native Zig port is an experiment developed in this fork.
 
+Upstream sync is manual: `.zig-toolchain/zig build check-upstream` fetches and reports missing commits and dependency drift; `.zig-toolchain/zig build sync-upstream` requires a clean checkout, rebases the current branch, installs upstream's declared dependencies, rebuilds native MLX/MLX-C when the resolved MLX version changes, regenerates Metal sources and runs correctness checks before updating remote `main`. Git uses SSH. `native/dependencies.json` records the resolved pairing, not an independent dependency policy. Conflicts, divergent main branches or failed checks stop sync; review generated changes and push the feature branch explicitly. Nothing runs on a schedule. `.zig-toolchain/zig build check-dependencies` checks the current checkout without fetching.
+
 # TensorFold
 
 TensorFold serves language models on Apple Silicon and NVIDIA GPUs through an OpenAI-compatible API.

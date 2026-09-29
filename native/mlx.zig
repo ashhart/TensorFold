@@ -20,6 +20,15 @@ pub fn check(rc: c_int) !void {
     if (rc != 0) return error.MlxFailure;
 }
 pub fn init() !void {
+    var version_string = c.mlx_string_new();
+    defer _ = c.mlx_string_free(version_string);
+    try check(c.mlx_version(&version_string));
+    const version = std.mem.span(c.mlx_string_data(version_string));
+    const expected = @import("native_runtime").mlx_version;
+    if (!std.mem.eql(u8, version, expected)) {
+        std.debug.print("Native MLX version {s} differs from pin {s}; rebuild the MLX prefix from native/dependencies.json.\n", .{ version, expected });
+        return error.MlxVersionMismatch;
+    }
     c.mlx_set_error_handler(onError, null, null);
     const dev = c.mlx_device_new_type(c.MLX_GPU, 0);
     defer _ = c.mlx_device_free(dev);

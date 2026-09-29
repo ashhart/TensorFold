@@ -34,8 +34,7 @@ def main():
             raise ValueError("Trace backend or prefill mode mismatch")
         if native.get("mlx_version") != versions["mlx"]:
             raise ValueError("Native and Python MLX versions differ")
-        if native["tokens"] != report.get("generated", []):
-            raise ValueError("Serial continuation mismatch")
+        continuation_matches = native["tokens"] == report.get("generated", [])
         expected = {f"{start}-{layer}-{label}.npy" for start in report["starts"]
                     for layer in range(64) for label in ("hidden", "cache0", "cache1")}
         expected.update(f"{start}-64-logits.npy" for start in report["starts"])
@@ -43,6 +42,8 @@ def main():
         expected.update(f"{start}-3-{label}.npy" for start in report["starts"] for label in ("q", "attention"))
         if report.get("final_only"):
             expected = {name for name in expected if name.endswith(("-cache0.npy", "-cache1.npy", "-logits.npy"))}
+        expected.update(f"{len(report['tokens']) + step}-64-decode-logits.npy"
+                        for step in range(max(0, len(report.get("generated", [])) - 1)))
         native_names = {x.name for x in args.compare.glob("*.npy")}
         if {x.name for x in args.directory.glob("*.npy")} != expected or not expected <= native_names or (not report.get("final_only") and native_names != expected):
             raise ValueError("Incomplete prefill trace")
@@ -58,8 +59,9 @@ def main():
                 if len(failures) <= 12 and a.shape == b.shape and np.count_nonzero(a != b) < 10:
                     at = np.flatnonzero(a != b)
                     print("  indices", at.tolist(), "python", a.flat[at].tolist(), "native", b.flat[at].tolist())
-        print(f"Compared {len(expected)} prefill arrays; {len(failures)} differ; {len(native['tokens'])} continuation tokens match")
-        raise SystemExit(bool(failures))
+        print(f"Compared {len(expected)} prefill/decode arrays; {len(failures)} differ; "
+              f"{len(native['tokens'])} continuation tokens {'match' if continuation_matches else 'DIFFER'}")
+        raise SystemExit(bool(failures) or not continuation_matches)
     args.directory.mkdir(parents=True, exist_ok=True)
     prompt = "Write a short Python function that computes the Fibonacci sequence."
     if args.native:
@@ -155,6 +157,8 @@ def main():
                 break
             if step + 1 < args.generate:
                 hidden = family.hidden(mx.array([[token]], dtype=mx.uint32), cache)
+                start = len(tokens) + step
+                save(64, "decode-logits", family.head(hidden[:, -1:]))
         print("Continuation:", generated, flush=True)
     (args.directory / "report.json").write_text(json.dumps({"starts": starts, "tokens": tokens, "generated": generated, "versions": versions, "simd": args.simd, "final_only": args.final_only}) + "\n")
 

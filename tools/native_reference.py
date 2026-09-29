@@ -16,7 +16,7 @@ def main():
     parser.add_argument("--tokens", help="Exact prompt IDs, also honored during generation")
     parser.add_argument("--dump-logits", type=Path, help="Save the final prefill block before generation")
     parser.add_argument("--metal-sampling", action="store_true")
-    parser.add_argument("--simd", action="store_true", help="Use original SIMD projections and row attention, without stacked projections")
+    parser.add_argument("--simd", action="store_true", help="Use the production SIMD decoder and its MLX attention arithmetic")
     parser.add_argument("--production-kernels", action="store_true", help="Diagnostic: use production loading/fusion with lane-tree prefill (not the serving engine's prefill)")
     parser.add_argument("--disable-fusion", action="store_true", help="Diagnostic: turn off stacked consumers after the production load")
     parser.add_argument("--output", default="build/native-checks/reference.npy")
@@ -55,11 +55,17 @@ def main():
     import mlx.core as mx
     from mlx_lm.models.cache import make_prompt_cache
     from tensorfold.families.qwen3_5 import load_lane_model
-    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree, row_attention, simd_qmm
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, lane_tree
 
-    if args.production_kernels:
-        if args.simd:
-            parser.error("--production-kernels cannot be combined with --simd")
+    if args.simd:
+        if args.production_kernels or args.disable_fusion:
+            parser.error("--simd uses the production decoder without fusion overrides")
+        from tensorfold.families.qwen3_5 import load
+        from tensorfold.kernels.qwen.dense.v1 import row_forward
+        family, tokenizer = load(Path(args.model), lane_kernels="off")
+        model = family.inner
+        tree_forward, commit_tree = row_forward.forward, row_forward.commit
+    elif args.production_kernels:
         from tensorfold.families.qwen3_5 import load
         family, tokenizer = load(Path(args.model))
         model = family.inner
@@ -70,26 +76,10 @@ def main():
         if args.disable_fusion:
             parser.error("--disable-fusion requires --production-kernels")
         model, tokenizer = load_lane_model(Path(args.model))
-    if args.simd:
-        # Native keeps the individual checkpoint projections. row_forward.install
-        # stacks GDN projections, changing simd_qmm's shape-dependent split sums.
-        # Compose the original unstacked lane host with the original SIMD kernels.
-        simd_qmm.install(model)
-        # tree_forward now delegates to lane_multi. Replace its attention entry
-        # point, rather than setting the removed lane_attention.lane_tree_sdpa.
-        from types import SimpleNamespace
-        from tensorfold.kernels.qwen.dense.v1 import stream_attention
-        def plan(parents, starts, heads, kv_heads):
-            if len(parents) != 1 or len(starts) != 1:
-                raise ValueError("The native SIMD oracle supports one stream")
-            return SimpleNamespace(streams=1, rows=len(parents[0]), parents=parents[0], start=starts[0])
-        def attention(q, kv, scale, layout):
-            k, v = kv[0]
-            return row_attention.row_sdpa(q, k, v, scale, layout.start, layout.parents)
-        stream_attention.Plan = plan
-        stream_attention.tree_sdpa = attention
-    elif not args.production_kernels:
-        lane_qmm.install(model, rows=128, tile=True, wide=True)
+    if not args.simd:
+        tree_forward, commit_tree = lane_tree.tree_forward, lane_tree.commit_tree
+        if not args.production_kernels:
+            lane_qmm.install(model, rows=128, tile=True, wide=True)
     core = model.language_model.model
     head = model.language_model.lm_head
     tokens = ([int(x) for x in args.tokens.split(",")] if args.tokens else
@@ -100,9 +90,21 @@ def main():
     # Same 128-row grid as the native CLI; commit the whole prompt before decoding.
     for start in range(0, len(tokens), 128):
         block = tokens[start:start + 128]
-        logits, record = lane_tree.tree_forward(core, head, block, list(range(-1, len(block)-1)), cache, start)
-        mx.eval(logits)
-        lane_tree.commit_tree(cache, record, list(range(len(block))), len(block), start)
+        if args.simd:
+            # Production SIMD verification uses windows of at most 16 rows;
+            # wider calls switch to regular prompt attention arithmetic.
+            parts = []
+            for offset in range(0, len(block), 16):
+                rows = block[offset:offset+16]
+                part, record = tree_forward(core, head, rows, list(range(-1, len(rows)-1)), cache, start + offset)
+                mx.eval(part)
+                commit_tree(cache, record, list(range(len(rows))), len(rows), start + offset)
+                parts.append(part)
+            logits = mx.concatenate(parts, axis=1)
+        else:
+            logits, record = tree_forward(core, head, block, list(range(-1, len(block)-1)), cache, start)
+            mx.eval(logits)
+            commit_tree(cache, record, list(range(len(block))), len(block), start)
         if start % 1024 == 0:
             print(f"Prefill {start + len(block)}/{len(tokens)}", flush=True)
     if args.dump_logits:
@@ -121,8 +123,8 @@ def main():
         pending = select(logits, position)
         generated = [pending]
         while len(generated) < args.generate and pending not in (248044, 248046):
-            logits, record = lane_tree.tree_forward(core, head, [pending], [-1], cache, position)
-            lane_tree.commit_tree(cache, record, [0], 1, position)
+            logits, record = tree_forward(core, head, [pending], [-1], cache, position)
+            commit_tree(cache, record, [0], 1, position)
             position += 1
             pending = select(logits, position)
             generated.append(pending)

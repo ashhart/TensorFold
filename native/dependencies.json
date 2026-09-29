@@ -1,0 +1,9 @@
+{
+  "python": {
+    "mlx": "0.32.2",
+    "mlx-metal": "0.32.2",
+    "mlx-lm": "0.31.3"
+  },
+  "mlx_revision": "1f8e74e3f12f31365464a6867c6579f0e9b29d85",
+  "mlx_c_revision": "56b2d39fc831f2c0eb5bb94d82ef7191f7b31fa6"
+}

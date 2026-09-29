@@ -150,6 +150,7 @@ pub const Model = struct {
         }
         const normed = try lanes.norm(kernels, s, h, pending, try m.weights.get("model.norm.weight"));
         p.logits = try (try m.weights.linear("lm_head")).apply(kernels, s, normed.x);
+        try m.trace(s, m.position, 64, "decode-logits", p.logits);
         return p;
     }
     fn attn(m: *Model, s: *mx.Scope, i: usize, x: lanes.Act, t: *const lanes.Tree, pos: A, rec: *Record) !A {
