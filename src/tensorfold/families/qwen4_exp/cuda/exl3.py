@@ -122,8 +122,10 @@ def requant_rows(head, ids: torch.Tensor, device) -> tuple[torch.Tensor, torch.T
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: tuple[int, int] | None = None,
-         draft_vocab: int | str | None = None):
+         draft_vocab: int | str | None = None, table_reads: list | None = None):
     from .qmm import make_q4
+    from tensorfold.cuda.direct_read import in_background
+
     from .weights import GDNW, HC, AttnW, Config, LayerW, MoEW, MTPW, PLEW, Weights, draft_token_ids
 
     if tp is not None and tp[1] > 1:
@@ -177,6 +179,8 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         if table.rows != ngram.rows or table.dh != ngram.dims:
             raise ValueError(f"n-gram tables of {table.rows} rows of {table.dh} values; the config gives "
                              f"{ngram.rows} of {ngram.dims}")
+        if table_reads is not None:                   # its pages come in while the weights load
+            in_background(table.prefetch, table_reads)    # the caller waits for it (``wait_all``)
         conv = plain(name + ".conv1d.weight").reshape(cfg.streams * cfg.hidden, cfg.ple_kernel).to(torch.bfloat16)
         return PLEW(table, f16(sc, [pk.get(name + ".key_proj.weight")], device),
                     f16(sc, [pk.get(name + ".value_proj.weight")], device), centred(name + ".norm_key.weight"),
@@ -198,7 +202,8 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
     for i in range(cfg.layers):
         loaded.append(layer(i, f"{T}layers.{i}", cfg.layer_types[i], True))
         pk.release()
-        torch.cuda.empty_cache()
+        if i % 8 == 7:                            # each release waits for the device; a layer leaves few temporaries
+            torch.cuda.empty_cache()
     mixer = hc(T + "hyper_connection_mixer", False)
     head = x3(sc, pk, "lm_head", device, head=True)
     inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (

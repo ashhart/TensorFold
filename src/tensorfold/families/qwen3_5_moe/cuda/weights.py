@@ -71,7 +71,7 @@ class MTP:
 def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
     """The MTP layer's MLX tensors (named ``mtp.*``) from the checkpoint or its side file, or None without one."""
 
-    from safetensors import safe_open
+    from tensorfold.cuda.direct_read import SafeTensors
 
     model_dir = Path(model_dir)
     files = [model_dir / MTP_FILE] if (model_dir / MTP_FILE).is_file() else []
@@ -81,10 +81,10 @@ def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
         files = sorted({model_dir / f for n, f in names.items() if n.startswith("mtp.") or ".mtp." in n})
     out: dict[str, torch.Tensor] = {}
     for path in files:
-        with safe_open(str(path), framework="pt", device="cpu") as f:
-            for name in f.keys():
-                if name.startswith("mtp.") or ".mtp." in name:
-                    out["mtp." + name.split("mtp.", 1)[1]] = f.get_tensor(name)
+        f = SafeTensors([path])
+        for name in f.keys():
+            if name.startswith("mtp.") or ".mtp." in name:
+                out["mtp." + name.split("mtp.", 1)[1]] = f.get(name)
     return out or None
 
 

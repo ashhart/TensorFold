@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -241,15 +242,38 @@ _DT = {"U32": torch.int32, "I32": torch.int32, "BF16": torch.bfloat16, "F16": to
 
 
 class _Reader:
-    """Read checkpoint shards sequentially and release each shard's cached pages."""
+    """Read checkpoint shards sequentially (O_DIRECT where allowed) and release each shard's cached pages."""
 
     def __init__(self, model_dir: Path, device: str) -> None:
+        from tensorfold.cuda.direct_read import ReadAhead, Reader
+
         index = json.loads((model_dir / "model.safetensors.index.json").read_text())
         self.where = index["weight_map"]
         self.dir = model_dir
         self.device = device
         self.headers: dict[str, tuple[int, dict]] = {}
         self.touched: set[str] = set()
+        self.io = Reader()
+        self.reads = ReadAhead(self.io)
+
+    def queue(self, names) -> None:
+        """Start reading ``names`` ahead (neighbours in shared reads, uploaded on a stream of their own): ``get`` takes
+        them, so the next layer's reads overlap this one's packing and the SSD's queue never drains."""
+
+        items = []
+        for name in names:
+            shard = self.where[name]
+            base, header = self._header(shard)
+            begin, end = header[name]["data_offsets"]
+            items.append((name, self.dir / shard, base + begin, base + end, None))
+            self.touched.add(shard)
+        self.reads.queue(items, self.device)
+
+    def drop(self, names) -> None:
+        self.reads.drop(names)
+
+    def close(self) -> None:
+        self.reads.close()
 
     def _header(self, shard: str) -> tuple[int, dict]:
         got = self.headers.get(shard)
@@ -267,19 +291,11 @@ class _Reader:
         base, header = self._header(shard)
         entry = header[name]
         begin, end = entry["data_offsets"]
-        raw = torch.empty((end - begin,), dtype=torch.uint8)
-        view = memoryview(raw.numpy())
-        with open(self.dir / shard, "rb", buffering=0) as f:
-            f.seek(base + begin)
-            at = 0
-            while at < len(view):
-                got = f.readinto(view[at:at + (64 << 20)])
-                if not got:
-                    raise IOError(f"short read of {name}")
-                at += got
+        raw = self.reads.take(name)
+        if raw is None:
+            raw = self.io.read(self.dir / shard, base + begin, end - begin, self.device)
         self.touched.add(shard)
-        dtype = _DT[entry["dtype"]]
-        return raw.view(dtype).reshape(entry["shape"]).to(self.device)
+        return raw.view(_DT[entry["dtype"]]).reshape(entry["shape"])
 
     def has(self, name: str) -> bool:
         return name in self.where
@@ -342,7 +358,7 @@ def draft_token_ids(draft_vocab: int | str | None) -> np.ndarray | None:
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: tuple[int, int] | None = None,
-         draft_vocab: int | str | None = None, ple_on_ssd: bool = False) -> Weights:
+         draft_vocab: int | str | None = None, ple_on_ssd: bool = False, table_reads: list | None = None) -> Weights:
     """Load rank ``tp``'s head, expert-width and vocabulary shares while replicating other weights; ``draft_vocab`` restricts draft scoring to default/file ids or ids below N, with None using all ids."""
 
     import time
@@ -352,7 +368,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
 
     model_dir = Path(model_dir)
     if exl3.is_exl3(model_dir):                       # an EXL3 pack: its own loader, the same dataclasses
-        return exl3.load(model_dir, device, mtp=mtp, tp=tp, draft_vocab=draft_vocab)
+        return exl3.load(model_dir, device, mtp=mtp, tp=tp, draft_vocab=draft_vocab, table_reads=table_reads)
     full = Config.read(model_dir)
     rank, world = tp if tp is not None else (0, 1)
     cfg = full if world == 1 else replace(full, heads=full.heads // world, kv_heads=full.kv_heads // world,
@@ -452,6 +468,10 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         table = SSDTable(files) if ple_on_ssd else HostTable(files)
         if table.rows != ngram.rows:
             raise ValueError(f"n-gram tables hold {table.rows} rows, expected {ngram.rows}")
+        if table_reads is not None and not ple_on_ssd:     # its pages come in while the weights load
+            from tensorfold.cuda.direct_read import in_background
+
+            in_background(table.prefetch, table_reads)      # the caller waits for it (``wait_all``)
         conv = raw(name + ".conv1d.weight").reshape(cfg.streams * cfg.hidden, cfg.ple_kernel).to(torch.bfloat16)
         return PLEW(table, q4(name + ".key_proj"), q4(name + ".value_proj"),
                     cscale(name + ".norm_key.weight"), cscale(name + ".norm_query.weight"),
@@ -467,32 +487,54 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return entry
 
     t0 = time.time()
-    embed = triple("model.embed_tokens")
-    loaded = []
-    for i in chosen:
-        loaded.append(layer(i, f"model.layers.{i}", cfg.layer_types[i], True))
-        rd.release()
-        torch.cuda.empty_cache()
-    mixer = hc("model.hyper_connection_mixer", False)
-    vl = full.vocab // world
-    head_raw = triple("lm_head")
-    head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))
-    draft_head, draft_ids = None, None
-    ids = draft_token_ids(draft_vocab)
-    if ids is not None:
-        ids = np.array_split(ids[ids < full.vocab], world)[rank]
-        draft_ids = torch.from_numpy(ids).to(device)
-        draft_head = make_q4(*_rows_at(head_raw, draft_ids))
-    del head_raw
-    inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (
-        -torch.arange(0, cfg.rotary_dim // 2, dtype=torch.float64) / (cfg.rotary_dim // 2))
-    w = Weights(cfg, embed, loaded, mixer, head, inv.to(torch.float32).to(device), around_one=around_one)
-    w.meta.update(rank=rank, world=world, vocab_offset=rank * vl, full=full)
-    w.draft_head, w.draft_ids = draft_head, draft_ids
-    if mtp and rd.has(prefix + "mtp.fc_embedding.weight"):
-        w.mtp = MTPW(cscale("mtp.pre_fc_norm_embedding.weight"), cscale("mtp.pre_fc_norm_hidden.weight"),
-                     q4("mtp.fc_embedding"), q4("mtp.fc_hidden"),
-                     layer(-1, "mtp.layers.0", "attention", False), hc("mtp.hyper_connection_mixer", False))
+    try:                                              # a failed load cancels the reads queued ahead
+        embed = triple("model.embed_tokens")
+        loaded = []
+        # each layer's tensors (not the n-gram shards: a memory map reads those) read ahead of the layer taking them
+        group_of = re.compile(re.escape(prefix) + r"(model\.layers\.\d+\.|mtp\.)")
+        groups: dict[str, list[str]] = {}
+        for name in rd.where:
+            m = group_of.match(name)
+            if m and ".ngram_embedding." not in name:
+                groups.setdefault(m.group(0), []).append(name)
+        order = [f"{prefix}model.layers.{i}." for i in chosen] + [f"{prefix}mtp."] * bool(mtp)
+        layer_events: list = []                           # each layer's event, recorded once its work is queued
+        for k, i in enumerate(chosen):
+            if len(layer_events) >= 2:                    # the GPU at most two layers behind, so reads and buffers
+                layer_events.pop(0).synchronize()         # queued ahead stay within two more
+            for ahead in order[k:k + 2]:                  # two layers in flight: reads overlap this one's packing
+                rd.queue(groups.get(ahead, []))
+            loaded.append(layer(i, f"model.layers.{i}", cfg.layer_types[i], True))
+            layer_events.append(torch.cuda.Event())
+            layer_events[-1].record()
+            rd.drop(groups.get(order[k], []))            # what the layer never took
+            rd.release()
+            if i % 8 == 7:                        # each release waits for the device; a layer leaves few temporaries
+                torch.cuda.empty_cache()
+        mixer = hc("model.hyper_connection_mixer", False)
+        vl = full.vocab // world
+        head_raw = triple("lm_head")
+        head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))
+        draft_head, draft_ids = None, None
+        ids = draft_token_ids(draft_vocab)
+        if ids is not None:
+            ids = np.array_split(ids[ids < full.vocab], world)[rank]
+            draft_ids = torch.from_numpy(ids).to(device)
+            draft_head = make_q4(*_rows_at(head_raw, draft_ids))
+        del head_raw
+        inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (
+            -torch.arange(0, cfg.rotary_dim // 2, dtype=torch.float64) / (cfg.rotary_dim // 2))
+        w = Weights(cfg, embed, loaded, mixer, head, inv.to(torch.float32).to(device), around_one=around_one)
+        w.meta.update(rank=rank, world=world, vocab_offset=rank * vl, full=full)
+        w.draft_head, w.draft_ids = draft_head, draft_ids
+        if mtp and rd.has(prefix + "mtp.fc_embedding.weight"):
+            w.mtp = MTPW(cscale("mtp.pre_fc_norm_embedding.weight"), cscale("mtp.pre_fc_norm_hidden.weight"),
+                         q4("mtp.fc_embedding"), q4("mtp.fc_hidden"),
+                         layer(-1, "mtp.layers.0", "attention", False), hc("mtp.hyper_connection_mixer", False))
+    except BaseException:
+        rd.close()
+        raise
+    rd.close()
     rd.release()
     torch.cuda.empty_cache()
     w.meta["load_seconds"] = time.time() - t0

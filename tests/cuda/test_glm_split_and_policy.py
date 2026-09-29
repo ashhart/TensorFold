@@ -75,8 +75,9 @@ def test_rank_shares_read_in_place_and_after_a_split_agree(tmp_path):
                 continue
             a, b = full.get(name), folder.get(name)
             assert a.dtype == b.dtype and a.shape == b.shape and torch.equal(a.view(torch.uint8), b.view(torch.uint8))
-    # the two ranks' parts put back together are the checkpoint's tensor
+    # the two ranks' parts put back together are the checkpoint's tensor (rank 1's read ahead on threads)
     r0, r1 = split.RankReader(tmp_path / "ckpt", 0), split.RankReader(tmp_path / "ckpt", 1)
+    r1.prefetch([name for name in TENSORS if KINDS[name] != "drop"])
     for name, (dtype, shape) in TENSORS.items():
         kind = KINDS[name]
         if kind == "drop":
@@ -88,8 +89,80 @@ def test_rank_shares_read_in_place_and_after_a_split_agree(tmp_path):
             continue
         joined = torch.cat([a.view(torch.uint8), b.view(torch.uint8)], dim=0 if kind == "row" else 1)
         assert torch.equal(joined, whole.view(torch.uint8)), name
+    assert not r1.ahead
+    r1.close()
     with pytest.raises(ValueError):
         split.RankReader(tmp_path / "rank0", 1)      # rank 0's folder given to rank 1
+
+
+def test_reads_ahead_in_runs_of_neighbouring_tensors(tmp_path, monkeypatch):
+    _checkpoint(tmp_path / "ckpt")
+    names = [name for name in TENSORS if KINDS[name] != "drop"]
+    for run, gap in ((1 << 20, 1 << 20), (100, 0)):                # one run a file, then about one a tensor
+        monkeypatch.setattr(split, "RUN", run)
+        monkeypatch.setattr(split, "GAP", gap)
+        for rank in (0, 1):
+            ahead, alone = split.RankReader(tmp_path / "ckpt", rank), split.RankReader(tmp_path / "ckpt", rank)
+            ahead.prefetch(names)
+            reads = len({id(f) for f in ahead.ahead.values()})
+            assert reads == 2 if run > 100 else reads > 2              # the checkpoint has two files
+            for name in names:
+                a, b = ahead.get(name), alone.get(name)
+                assert a.dtype == b.dtype and a.shape == b.shape and torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+            assert not ahead.ahead
+            ahead.close()
+
+
+def test_reads_ahead_uploaded_to_the_gpu_match_the_host_reads(tmp_path, monkeypatch):
+    _checkpoint(tmp_path / "ckpt")
+    names = [name for name in TENSORS if KINDS[name] != "drop"]
+    for run, gap in ((1 << 20, 1 << 20), (100, 0)):
+        monkeypatch.setattr(split, "RUN", run)
+        monkeypatch.setattr(split, "GAP", gap)
+        for rank in (0, 1):
+            ahead, alone = split.RankReader(tmp_path / "ckpt", rank), split.RankReader(tmp_path / "ckpt", rank)
+            ahead.prefetch(names, "cuda")
+            for name in names:
+                a, b = ahead.get(name), alone.get(name)
+                assert a.is_cuda and a.dtype == b.dtype and a.shape == b.shape, name
+                assert torch.equal(a.view(torch.uint8).cpu(), b.view(torch.uint8)), name
+            ahead.close()
+
+
+
+def test_rank_folders_read_ahead_like_the_checkpoint(tmp_path):
+    _checkpoint(tmp_path / "ckpt")
+    names = [name for name in TENSORS if KINDS[name] != "drop"]
+    for rank in (0, 1):
+        out = tmp_path / f"rank{rank}"
+        split.main([str(tmp_path / "ckpt"), "--rank", str(rank), str(out)])
+        for device in (None, "cuda"):
+            ahead, alone = split.RankReader(out, rank), split.RankReader(out, rank)
+            ahead.prefetch(names, device)
+            for name in names:
+                a, b = ahead.get(name), alone.get(name)
+                assert a.is_cuda == (device is not None) and a.dtype == b.dtype and a.shape == b.shape, name
+                assert torch.equal(a.view(torch.uint8).cpu(), b.view(torch.uint8)), name
+            ahead.close()
+
+
+def test_uploads_queued_without_waits_match_the_host_reads(tmp_path, monkeypatch):
+    """Each uploaded tensor cloned on the current stream and dropped at once, with no synchronization until the end:
+    runs of about one tensor, so upload buffers are freed and reused while earlier clones may still read them."""
+
+    _checkpoint(tmp_path / "ckpt")
+    monkeypatch.setattr(split, "RUN", 100)
+    monkeypatch.setattr(split, "GAP", 0)
+    names = [name for name in TENSORS if KINDS[name] != "drop"]
+    for rank in (0, 1):
+        ahead, alone = split.RankReader(tmp_path / "ckpt", rank), split.RankReader(tmp_path / "ckpt", rank)
+        ahead.prefetch(names, "cuda")
+        taken = [ahead.get(name).clone() for name in names]
+        torch.cuda.synchronize()
+        for name, a in zip(names, taken):
+            b = alone.get(name)
+            assert a.dtype == b.dtype and a.shape == b.shape and torch.equal(a.view(torch.uint8).cpu(), b.view(torch.uint8))
+        ahead.close()
 
 
 def test_policies_and_the_request_header():

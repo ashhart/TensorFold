@@ -234,16 +234,11 @@ class _Tensors:
     """Checkpoint tensors read one at a time, so the weights never sit in device memory twice while they pack."""
 
     def __init__(self, model_dir: Path, device: str) -> None:
-        from contextlib import ExitStack
+        from tensorfold.cuda.direct_read import SafeTensors
 
-        from safetensors import safe_open
-
-        self.device, self.files, self.where = device, ExitStack(), {}
-        for path in sorted(model_dir.glob("*.safetensors")):
-            f = self.files.enter_context(safe_open(str(path), framework="pt", device="cpu"))
-            for name in f.keys():
-                if not (name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp.")):
-                    self.where[name] = f
+        self.device, self.files = device, SafeTensors(sorted(model_dir.glob("*.safetensors")))
+        self.where = {name: None for name in self.files.keys()
+                      if not (name.startswith("vision_tower") or ".mtp." in name or name.startswith("mtp."))}
 
     def __contains__(self, name: str) -> bool:
         return name in self.where
@@ -252,10 +247,11 @@ class _Tensors:
         return iter(list(self.where))
 
     def pop(self, name: str) -> torch.Tensor:
-        return self.where.pop(name).get_tensor(name).to(self.device)
+        del self.where[name]
+        return self.files.get(name, self.device)
 
     def close(self) -> None:
-        self.files.close()
+        self.files = None                     # the reader's pinned staging goes with it
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, tiled: bool = False, mlp=None) -> Weights:

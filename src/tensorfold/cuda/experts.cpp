@@ -10,6 +10,9 @@ void experts_prefill_cuda(int64_t gs, int64_t epi, const at::Tensor& x, int64_t 
                           const at::Tensor& counts, const at::Tensor& members, at::Tensor& out, int64_t n,
                           double limit, int64_t max_items);
 
+void experts_pack_cuda(const at::Tensor& words, const at::Tensor& scales, const at::Tensor& biases, int64_t gs,
+                       at::Tensor& out);
+
 static void check(const at::Tensor& t, const char* name, at::ScalarType dtype) {
   TORCH_CHECK(t.is_cuda() && t.scalar_type() == dtype, name, ": expected a CUDA tensor of the right dtype");
 }
@@ -51,7 +54,29 @@ void prefill(int64_t gs, int64_t epi, const at::Tensor& x, int64_t slots, const 
   experts_prefill_cuda(gs, epi, x, x.stride(0), slots, w, kg, nb, items, counts, members, out, n, limit, max_items);
 }
 
+// MLX words [E, N, K/8] (int32 or uint32), scales and biases [E, N, K/gs] (2-byte floats) -> blocks
+// [E, N/32, K/gs, 32 * gs / 8 + 32] int32
+void pack(const at::Tensor& words, const at::Tensor& scales, const at::Tensor& biases, int64_t gs, at::Tensor out) {
+  TORCH_CHECK(gs == 32 || gs == 64, "pack: groups of 32 or 64 inputs");
+  TORCH_CHECK(words.is_cuda() && words.element_size() == 4 && words.dim() == 3 && words.is_contiguous(),
+              "pack: words must be contiguous 32-bit CUDA [E, N, K/8]");
+  const int64_t e = words.size(0), n = words.size(1), k = words.size(2) * 8, kg = k / gs;
+  TORCH_CHECK(n % 32 == 0 && k % gs == 0, "pack: N must be a multiple of 32 and K of the group size");
+  for (const auto* t : {&scales, &biases})
+    TORCH_CHECK(t->is_cuda() && t->element_size() == 2 && t->is_contiguous() && t->dim() == 3 && t->size(0) == e &&
+                    t->size(1) == n && t->size(2) == kg,
+                "pack: scales and biases must be contiguous 2-byte CUDA [E, N, K/gs]");
+  for (const at::Tensor* t : std::initializer_list<const at::Tensor*>{&scales, &biases, &out})
+    TORCH_CHECK(t->device() == words.device(), "pack: words, scales, biases and out must be on one GPU");
+  TORCH_CHECK(out.is_cuda() && out.scalar_type() == at::kInt && out.is_contiguous() &&
+                  out.numel() == e * (n / 32) * kg * (32 * gs / 8 + 32),
+              "pack: out must be contiguous int32 [E, N/32, K/gs, block]");
+  TORCH_CHECK(e <= 65535 && n / 32 <= 65535, "pack: at most 65535 experts and 65535 column blocks");
+  experts_pack_cuda(words, scales, biases, gs, out);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("pack", &pack, "repack MLX 4-bit experts into the grouped kernels' blocks, in one pass");
   m.def("plan", &plan, "group a layer's (row, slot) pairs by expert into items of at most tile pairs");
   m.def("run", &run, "grouped 4-bit expert matmul, decode form (epilogue 0: fp32, 1: relu^2, 2: SwiGLU)");
   m.def("prefill", &prefill, "grouped 4-bit expert matmul, prefill form (3: bf16 out)");
