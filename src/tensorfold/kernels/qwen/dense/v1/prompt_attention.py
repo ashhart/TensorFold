@@ -17,7 +17,10 @@ def attend(queries: mx.array, keys: mx.array, values: mx.array, scale: float) ->
         return mx.fast.scaled_dot_product_attention(queries, keys, values, scale=scale, mask="causal")
     from tensorfold.families.qwen3_5 import tensor_units
 
-    block = 1 if tensor_units() else KEY_BLOCK
+    if tensor_units():
+        # M5's fused kernel takes head size 256 in flat memory: one call, 1.4x the parts at 6k-32k keys on an M5 Max
+        return mx.fast.scaled_dot_product_attention(queries, keys, values, scale=scale, mask="causal")
+    block = KEY_BLOCK
     outs: list[mx.array] = []
     begin = 0
     while begin < rows:
