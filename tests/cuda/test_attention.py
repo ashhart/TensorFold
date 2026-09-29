@@ -129,3 +129,26 @@ def test_strided_node_values_equal_contiguous_ones():
     assert not view.is_contiguous()
     assert torch.equal(_attend(q, kn, view, [(kc, vc)], [parents], [p], 1 / 16),
                        _attend(q, kn, vn, [(kc, vc)], [parents], [p], 1 / 16))
+
+
+@pytest.mark.skipif(not getattr(torch.version, "hip", None), reason="ROCm's WMMA tree attention")
+@pytest.mark.parametrize("w,p", [(12, 20501), (128, 1300), (1, 3000)])
+def test_compute_waves_never_change_the_bits(monkeypatch, w, p):
+    """A block of 1, 2, 5 or 8 compute waves (``TF_ROCM_TREE_CW``), with loader waves or without
+    (``TF_ROCM_TREE_PIPE``), gives every pair the same bits, alone or in a launch of several streams."""
+
+    inputs = _inputs(w, p)
+    other = _inputs(3, 700, seed=1)
+    parents = [-1] + list(range(w - 1))
+    scale = 1 / math.sqrt(256)
+    outs = []
+    for cw, pipe in [(cw, pipe) for cw in ("1", "2", "5", "8") for pipe in ("0", "1")]:
+        monkeypatch.setenv("TF_ROCM_TREE_CW", cw)
+        monkeypatch.setenv("TF_ROCM_TREE_PIPE", pipe)
+        alone = _attend(*inputs[:3], [inputs[3:]], [parents], [p], scale)
+        both = _attend(torch.cat((inputs[0], other[0])), torch.cat((inputs[1], other[1])),
+                       torch.cat((inputs[2], other[2])), [inputs[3:], other[3:]], [parents, [-1, 0, 1]], [p, 700],
+                       scale)
+        assert torch.equal(both[:w].view(torch.int16), alone.view(torch.int16))
+        outs.append(both.view(torch.int16))
+    assert all(torch.equal(outs[0], x) for x in outs[1:])

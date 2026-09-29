@@ -18,6 +18,7 @@ CHUNK = 512
 MAX_NODES = 128
 QUERY_TILE = 16
 MERGE_COLUMNS = 64      # output columns a merge program folds (the chunk fold is per column: more programs, same bits)
+LONG_CHUNKS = 64          # ROCm: from this many chunks the shared kernel's waves all load, then fold
 
 
 @triton.jit
@@ -188,6 +189,42 @@ def rocm_config() -> tuple[int, int, int]:
     return values
 
 
+@lru_cache(maxsize=1)
+def _rocm():
+    from pathlib import Path
+
+    from tensorfold.cuda.build import load
+
+    here = Path(__file__).parent
+    return load(name="tensorfold_tree_attention_rocm_v1",
+                sources=[str(here / "tree_attention_rocm.cpp"), str(here / "tree_attention_rocm.cu")],
+                extra_cuda_cflags=["-O3"], verbose=False)
+
+
+def rocm_launch(tiles: int, chunks: int) -> tuple[int, bool]:
+    """(compute waves, loader waves or not) for ``tree_attention_rocm.cu``'s shared kernel. A compute wave takes 16
+    (row, head) pairs and a block all of a stream's ``tiles`` (up to 8), so a chunk is read once (a wave a block,
+    re-reading from cache, measured slower at every length). Loader waves feeding a double buffer are fastest up to
+    ``LONG_CHUNKS`` chunks, every wave loading then folding past it (more blocks fit). Never a row's bits;
+    ``TF_ROCM_TREE_CW`` and ``TF_ROCM_TREE_PIPE`` override them for tuning."""
+
+    import os
+
+    cw = int(os.environ.get("TF_ROCM_TREE_CW") or max(1, min(8, tiles)))
+    pipe = os.environ.get("TF_ROCM_TREE_PIPE")
+    cw = max(1, min(8, cw))
+    return cw, (chunks < LONG_CHUNKS or cw < 4) if not pipe else pipe == "1"     # under 4 waves loading is slow
+
+
+def _rocm_kernel(heads: int, kv_heads: int, dim: int) -> bool:
+    """ROCm's WMMA tree attention (``tree_attention_rocm.cu``) where it applies, unless ``TF_ROCM_TREE_KERNEL=triton``;
+    the two give different bits, so a process uses one."""
+
+    import os
+
+    return os.environ.get("TF_ROCM_TREE_KERNEL", "wmma") != "triton" and _rocm().supported(heads, kv_heads, dim)
+
+
 def plan_host(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: int) -> tuple[list[int], int, int]:
     """Host half of ``plan`` from window-local parents, committed key counts and ``group`` query heads a key head."""
 
@@ -285,15 +322,22 @@ def attention(q: torch.Tensor, k_nodes: torch.Tensor, v_nodes: torch.Tensor, off
     partial_o = torch.empty((p.chunks, w, h, d), dtype=torch.float32, device=q.device)
     partial_m = torch.empty((p.chunks, w, h), dtype=torch.float32, device=q.device)
     partial_l = torch.empty_like(partial_m)
-    kt, warps, stages = rocm_config() if hip() else (TILE, 4, 1)
-    if p.items.shape[0]:
-        _shared[(p.items.shape[0] * hk,)](q, origin, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l,
-                                          w, H=h, HK=hk, D=d, G=g, CH=CHUNK, SCALE=scale, KT=kt, num_warps=warps,
-                                          num_stages=stages)
     tails = 1 + -(-MAX_NODES // CHUNK)
-    _tail[(w, hk, tails)](q, k_nodes, v_nodes, origin, origin, offs, p.streams, p.rows, p.paths, p.depths,
-                          partial_o, partial_m, partial_l, w, v_nodes.stride(0), H=h, HK=hk, D=d, G=g, CH=CHUNK,
-                          MAXD=MAX_NODES, SCALE=scale, KT=kt, num_warps=warps, num_stages=stages)
+    if hip() and _rocm_kernel(h, hk, d):
+        ext = _rocm()
+        ext.shared(q, origin, offs, p.streams, p.items, partial_o, partial_m, partial_l, hk,
+                   *rocm_launch(-(-w * g // QUERY_TILE), p.chunks), scale)
+        ext.tail(q, k_nodes, v_nodes, origin, offs, p.streams, p.rows, p.paths, p.depths, partial_o, partial_m,
+                 partial_l, tails, scale)
+    else:
+        kt, warps, stages = rocm_config() if hip() else (TILE, 4, 1)
+        if p.items.shape[0]:
+            _shared[(p.items.shape[0] * hk,)](q, origin, origin, offs, p.streams, p.items, partial_o, partial_m,
+                                              partial_l, w, H=h, HK=hk, D=d, G=g, CH=CHUNK, SCALE=scale, KT=kt,
+                                              num_warps=warps, num_stages=stages)
+        _tail[(w, hk, tails)](q, k_nodes, v_nodes, origin, origin, offs, p.streams, p.rows, p.paths, p.depths,
+                              partial_o, partial_m, partial_l, w, v_nodes.stride(0), H=h, HK=hk, D=d, G=g, CH=CHUNK,
+                              MAXD=MAX_NODES, SCALE=scale, KT=kt, num_warps=warps, num_stages=stages)
     out = torch.empty_like(q)
     _merge[(w, hk, d // MERGE_COLUMNS)](partial_o, partial_m, partial_l, out, p.streams, p.rows, w, H=h, D=d, G=g,
                                         DS=MERGE_COLUMNS, num_warps=4)
