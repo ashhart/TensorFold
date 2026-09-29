@@ -120,6 +120,13 @@ families refuse `--kv-dtype` before any download.
 
 `--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
 default is 0.30. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
+Single-request CUDA also adapts how many drafts it proposes each round from a recent accept EMA (still capped
+by `--mtp-drafts`), so open-ended prompts do not pay for a full-depth verify window when recent rounds kept
+one token. Emitted tokens are unchanged: verify still exact-matches whatever was proposed.
+
+On NVFP4 (ModelOpt) checkpoints the MTP draft head defaults to the draft-vocabulary rows of `lm_head` in
+BF16 (same dtype as verify). Set `TENSORFOLD_NVFP4_DRAFT_HEAD=q4` to use the smaller 4-bit requant copy for
+A/B; drafts still never change bits either way.
 
 ### EXL3 checkpoints (experimental)
 
