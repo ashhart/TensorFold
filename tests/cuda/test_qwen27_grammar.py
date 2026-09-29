@@ -200,3 +200,67 @@ def test_concurrent_constrained_replies_equal_their_solo_runs(engine, chat):
         assert _sha(solo) == _sha(serial), request
         if name is not None and got[-1] in engine.eos:
             assert valid(json.loads(_answer(chat, got, engine)), CASES[name][0]), request
+
+
+def test_a_constrained_prompt_filled_between_rounds_equals_its_solo_and_serial_runs(engine, chat):
+    """A prompt longer than a fill step prefills a step at a time between the decoding streams' rounds, and its first
+    token is chosen at the last step, under its grammar; beside it a plain stream ignores end tokens. Each reply equals
+    its solo run and its serial reply."""
+
+    import time
+
+    from tensorfold.cuda.scheduler import Scheduler
+    from tensorfold.families.qwen3_5.cuda.engine import KEEP
+    from tensorfold.families.qwen3_5.cuda.multi import STEP, MultiDecoder
+
+    multi = MultiDecoder(engine.w, engine.draft, allow_copy=True, context=6144, keep=KEEP, points=engine.points)
+    multi.calibrate(4)
+    scheduler = Scheduler(multi, max_streams=4)
+    log = " ".join(f"Day {d}: Lisbon {12 + d % 9} C, wind {5 + d % 17} km/h, {('sunny', 'cloudy', 'rain')[d % 3]}."
+                   for d in range(1, 181))
+    long_text = f"Here is a made-up weather log.\n{log}\nSummarise the last day as a JSON weather report."
+    assert len(chat.prompt(long_text)) > 2 * STEP
+    requests = [("person", "greedy", True, True, CASES["person"][1]),
+                (None, "seed7", True, False, CASES["recipe"][1]),              # plain, past its end tokens
+                ("weather", "seed7", True, True, long_text)]
+
+    def submit(request, started=None):
+        name, sampling, draft, stop_eos, text = request
+        out: list[int] = []
+
+        def emit(new):
+            out.extend(new)
+            if started is not None:
+                started.set()
+            return False
+
+        scheduler.submit(chat.prompt(text), 200, SAMPLINGS[sampling], draft, emit, stop_eos,
+                         constraint=chat.fresh(name) if name else None)
+        return out
+
+    together: list = [None] * len(requests)
+    decoding = threading.Event()
+
+    def worker(i):
+        together[i] = submit(requests[i], decoding if i == 0 else None)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    assert decoding.wait(120)
+    time.sleep(0.2)                              # the first two decode while the long prompt fills
+    threads.append(threading.Thread(target=worker, args=(2,)))
+    threads[-1].start()
+    for t in threads:
+        t.join()
+    assert len(together[1]) == 200                # ignore_eos: to its count
+    for request, got in zip(requests, together):
+        name, sampling, _, stop_eos, text = request
+        solo = submit(request)
+        assert _sha(got) == _sha(solo), request[:4]
+        out: list[int] = []
+        engine.generate(chat.prompt(text), 200, SAMPLINGS[sampling], lambda new: out.extend(new) and False,
+                        draft=False, stop_eos=stop_eos, **({"constraint": chat.fresh(name)} if name else {}))
+        assert _sha(solo) == _sha(out), request[:4]
+        if name is not None and got[-1] in engine.eos:
+            assert valid(json.loads(_answer(chat, got, engine)), CASES[name][0]), request[:4]
