@@ -1,0 +1,36 @@
+name: assemble-docs-restore
+on:
+  push:
+    branches: [nvfp4-flash-next]
+    paths:
+      - '.tensorfold-restore/**'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: nvfp4-flash-next
+      - name: Assemble docs
+        run: |
+          set -euo pipefail
+          cat .tensorfold-restore/docs.part0 .tensorfold-restore/docs.part1 .tensorfold-restore/docs.part2 > docs/recipes/qwen3.8-flash-next.md
+          python3 - <<'PY'
+          import hashlib
+          c=open("docs/recipes/qwen3.8-flash-next.md").read()
+          assert len(c)==24900, len(c)
+          assert hashlib.sha256(c.encode()).hexdigest().startswith("c93872c28fe85825")
+          assert "TENSORFOLD_NVFP4_DRAFT_HEAD" in c
+          assert "LOAD_FROM_" not in c
+          print("OK", len(c))
+          PY
+          rm -rf .tensorfold-restore
+          rm -f .github/workflows/assemble-docs-restore.yml
+          git config user.name "tournierjc"
+          git config user.email "mail@tournierjc.fr"
+          git add -A
+          git commit -m "docs(nvfp4): adaptive MTP + BF16 draft head recipe notes"
+          git push
