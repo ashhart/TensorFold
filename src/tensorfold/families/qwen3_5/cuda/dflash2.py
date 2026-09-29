@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from tensorfold.cuda.build import hip
 from tensorfold.cuda.direct_read import SafeTensors
 from tensorfold.engine.exact_sampling import Sampling
 
@@ -103,6 +104,19 @@ def _norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     xf = x.float()
     return (xf * torch.rsqrt((xf * xf).mean(dim=-1, keepdim=True) + eps)
             * weight.float()).to(torch.bfloat16)
+
+
+def _top16(logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """A row's 16 largest fp32 logits and their columns. ROCm's unsorted top-k returns tied values in a varying order
+    and set (the tree policy breaks ties by position), so there a tie goes to the lower column, in a fixed order."""
+
+    if not hip():
+        return torch.topk(logits, k=16, dim=-1, sorted=False)
+    bits = logits.view(torch.int32).to(torch.int64)
+    key = torch.where(bits >= 0, bits, bits ^ 0x7FFFFFFF)          # the floats' order, as integers
+    cols = torch.arange(logits.shape[1], device=logits.device)
+    local = torch.topk((key << 32) - cols, k=16, dim=-1).indices
+    return logits.gather(1, local), local
 
 
 def _conv(x: torch.Tensor, dynamic: torch.Tensor, base: torch.Tensor,
@@ -542,7 +556,7 @@ class DFlash2:
             logits = matmul_rows(h, self.sub_rows)
         else:
             logits = matmul(h, self.sub_head)
-        values, local_ids = torch.topk(logits.float(), k=16, dim=-1, sorted=False)
+        values, local_ids = _top16(logits.float())
         global_ids = self.head_ids[local_ids]
         if self.world == 2:
             import torch.distributed as dist
