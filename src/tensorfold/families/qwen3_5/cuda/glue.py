@@ -186,7 +186,7 @@ def _attn_prep(QG, KV, QN, KN, POS, INV, QOUT, KOUT, eps, KS, QS,
     # partner element for rotate-half: d < HALF pairs with d + HALF and back
     partner = tl.where(d < HALF, d + HALF, tl.where(d < 2 * HALF, d - HALF, d))
     if is_q:
-        xp = tl.load(QG + (row * H + head) * 2 * D + partner).to(tl.float32)
+        xp = tl.load(QG + row * QS + head * 2 * D + partner).to(tl.float32)
     else:
         xp = tl.load(KV + row * KS + (head - H) * D + partner).to(tl.float32)
     wp = tl.load((QN if is_q else KN) + partner).to(tl.float32)

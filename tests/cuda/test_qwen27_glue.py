@@ -70,34 +70,39 @@ def test_gdn_pre_matches_torch():
 
 
 def test_strided_projection_slices_equal_their_copies():
-    """Slices of the fused [z | b | a] and [k | v] projections, read in place, give the bits of contiguous copies."""
+    """Slices of the stacked [qkv | z | b | a] and [q | k | v] projections (one matmul each on ROCm), read in place by
+    gdn_pre, gated_norm, attn_prep and gate_mul, give the bits of contiguous copies in every row (a row past the
+    first read with the wrong stride would change a verify window, never a lone row)."""
 
-    W, C, vh, dv, kvh, hd = 6, 10240, 48, 128, 4, 256
-    zba = torch.randn(W, vh * dv + 2 * vh, device=dev).bfloat16()
+    W, C, vh, dv, kvh, hd, heads = 6, 10240, 48, 128, 4, 256, 24
+    proj = torch.randn(W, C + vh * dv + 2 * vh, device=dev).bfloat16()
+    qkv, zba = proj[:, :C], proj[:, C:]
     z, b, a = zba[:, :vh * dv].reshape(W, vh, dv), zba[:, vh * dv:vh * dv + vh], zba[:, vh * dv + vh:]
-    assert not (z.is_contiguous() or b.is_contiguous() or a.is_contiguous())
-    qkv = torch.randn(W, C, device=dev).bfloat16()
+    assert not any(t.is_contiguous() for t in (qkv, z, b, a))
     cs = torch.randn(3, C, device=dev).bfloat16()
     cw = torch.randn(C, 4, device=dev).bfloat16()
     win = torch.tensor([[0, 1, 2, 3] if i == 0 else [1, 2, 3, 3 + i] for i in range(W)], device=dev, dtype=torch.int32)
     alog, dtb = torch.randn(vh, device=dev), torch.randn(vh, device=dev)
 
-    def pre(a, b):
+    def pre(qkv, a, b):
         return glue.gdn_pre(qkv, cs, cw, win, a, b, alog, dtb, kh=16, vh=vh, dk=128)
 
-    assert all(torch.equal(x, y) for x, y in zip(pre(a, b), pre(a.contiguous(), b.contiguous())))
+    assert all(torch.equal(x, y) for x, y in zip(pre(qkv, a, b), pre(qkv.contiguous(), a.contiguous(),
+                                                                      b.contiguous())))
     yr = torch.randn(W, vh, dv, device=dev).bfloat16()
     norm = (torch.rand(dv, device=dev) + 0.5).bfloat16()
     assert all(torch.equal(x, y) for x, y in zip(glue.gated_norm(yr, z, norm, 1e-6),
                                                  glue.gated_norm(yr, z.contiguous(), norm, 1e-6)))
-    kv = torch.randn(W, 2 * kvh * hd, device=dev).bfloat16()
-    qg = torch.randn(W, 24 * 2 * hd, device=dev).bfloat16()
+    both = torch.randn(W, heads * 2 * hd + 2 * kvh * hd, device=dev).bfloat16()
+    qg, key = both[:, :heads * 2 * hd], both[:, heads * 2 * hd:heads * 2 * hd + kvh * hd]
+    assert not (qg.is_contiguous() or key.is_contiguous())
     qn, kn = (torch.rand(hd, device=dev) + 0.5).bfloat16(), (torch.rand(hd, device=dev) + 0.5).bfloat16()
     pos, inv = torch.arange(W, device=dev, dtype=torch.int32), torch.rand(hd // 8, device=dev)
 
-    def prep(k):
-        return glue.attn_prep(qg, k, qn, kn, pos, inv, 1e-6, heads=24, kv_heads=kvh, head_dim=hd)
+    def prep(qg, k):
+        return glue.attn_prep(qg, k, qn, kn, pos, inv, 1e-6, heads=heads, kv_heads=kvh, head_dim=hd)
 
-    key = kv[:, :kvh * hd]
-    assert not key.is_contiguous()
-    assert all(torch.equal(x, y) for x, y in zip(prep(key), prep(key.contiguous())))
+    assert all(torch.equal(x, y) for x, y in zip(prep(qg, key), prep(qg.contiguous(), key.contiguous())))
+    o = torch.randn(W, heads, hd, device=dev).bfloat16()
+    assert all(torch.equal(x, y) for x, y in zip(glue.gate_mul(o, qg, heads=heads, head_dim=hd),
+                                                 glue.gate_mul(o, qg.contiguous(), heads=heads, head_dim=hd)))
