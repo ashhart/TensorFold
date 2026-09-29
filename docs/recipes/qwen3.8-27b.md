@@ -231,8 +231,8 @@ What runs where:
 | Decode and verify matmuls | `qmm_rocm.cu`: WMMA on weights repacked at load into 16-output tiles (`qmm_groups.py`); persistent blocks, K split by weight shape and reduced in-kernel; up to 32 rows a weight read; `[gate \| up]`, `[z \| b \| a]` and `[k \| v]` fused |
 | Prompt matmuls | the FP8 prompt arithmetic NVIDIA uses (`prefill_glue`'s e4m3 rows, the 4-bit codes exact in e4m3, per-group scales): codes widened once per chunk, then a fixed-tile Triton e4m3 GEMM (`qmm_groups.prefill_matmul8`) |
 | DeltaNet | `gdn.cu` and `gdn_prefill.cu`, built with hipcc; 4 rows a warp for verify chains, 64 rows a block for prompts |
-| Prompt attention | `attention_rocm.cu`: flash attention on WMMA for head size 256, a wave per query head sharing each 16-key K/V tile (Triton for other sizes) |
-| Tree attention | `tree_attention_rocm.cu`: WMMA for head size 256; a block per 512-key chunk and KV head stages each 16-key tile once for all of a window's (row, head) pairs, and each row's tail chunk (last committed keys and its own path) folds the same way; the Triton merge |
+| Prompt attention | `attention_rocm.cu`: flash attention on WMMA for head size 256; a block per 32 prompt rows (16 below 192 rows) and KV head, a wave per 16 rows and query head, four loader waves keeping each 16-key K/V tile's successors in flight (Triton for other sizes) |
+| Tree attention | `attention_rocm.cu`: WMMA for head size 256; a block per 512-key chunk and KV head stages each 16-key tile once for all of a window's (row, head) pairs, and each row's tail chunk (last committed keys and its own path) folds the same way; the Triton merge |
 
 Drafted replies equal `"draft": false` ones and any prompt chunking gives the same bits, as on NVIDIA; the bits are
 this engine's own. On 32 GB the startup estimate leaves a 32,768-token window beside the model and drafter.
@@ -251,16 +251,17 @@ tokens, greedy, thinking off, medians of 3 to 5; decode spreads are wide, 10-40%
 | Serial decode (`"draft": false`), short prompt | 11.8 tok/s | 32.0 tok/s |
 
 A drafted round on a code prompt (12 verify rows, 6.4 tokens a round) takes 37 ms: 29 ms of it the weights' reads
-(the decode matmuls stream at about 80% of the card's 639 GB/s). At 28k-32k context a 4,096-token prompt chunk
-spends 52% of its GPU time in matmuls and 30% in attention.
+(the decode matmuls stream at about 80% of the card's 639 GB/s). A 4,096-token prompt chunk takes 3.19 s at 64k
+tokens of context and 3.88 s at 96k, 46% and 55% of it prompt attention (about 75 TFLOPS) and 1.28 s the FP8 matmuls.
 
 `TF_ROCM_LANE` picks the decode matmul (`wmma`, default; `dot2`, fastest for one row but slower in draft windows;
 `triton`). Tuning knobs, each changing bits for every call alike and never with the row count or chunking:
 `TF_ROCM_WMMA_FILL` (K split target), `TF_ROCM_PREFILL8` and `TF_ROCM_PREFILL` (prompt GEMM tiles),
 `TF_ROCM_ATTN` and `TF_ROCM_TREE_ATTN` (Triton attention tiles), `TF_ROCM_ATTN_KERNEL=triton` and
 `TF_ROCM_TREE_KERNEL=triton` (prompt and tree attention on the Triton kernels instead of WMMA). Scheduling only, bits
-unchanged: `TF_ROCM_WMMA_GRID`, `TF_ROCM_PREFILL8_GROUP`, `TF_ROCM_CHAIN_ROWS`, `TF_ROCM_TREE_R`, `TF_ROCM_TREE_CW`
-and `TF_ROCM_TREE_PIPE` (tree attention's compute waves a block, and loader waves or not). With Triton 3.6 on gfx1201 some GEMM tiles give
+unchanged: `TF_ROCM_WMMA_GRID`, `TF_ROCM_PREFILL8_GROUP`, `TF_ROCM_CHAIN_ROWS`, `TF_ROCM_TREE_R`, `TF_ROCM_ATTN_RB`
+and `TF_ROCM_ATTN_PIPE` (prompt attention's 16-row tiles a block, and loader waves or not), `TF_ROCM_TREE_CW` and
+`TF_ROCM_TREE_PIPE` (tree attention's compute waves a block, and loader waves or not). With Triton 3.6 on gfx1201 some GEMM tiles give
 wrong sums: bf16 tiles at small K, and pipelined (`num_stages` 2 or 3) e4m3 tiles for calls of a few rows. The
 defaults avoid them, and `tests/cuda/test_qwen27_prefill.py` guards both prompt GEMMs at the model's shapes.
 

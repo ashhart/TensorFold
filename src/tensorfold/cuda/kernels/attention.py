@@ -195,14 +195,14 @@ def _rocm():
 
     from tensorfold.cuda.build import load
 
-    here = Path(__file__).parent
-    return load(name="tensorfold_tree_attention_rocm_v1",
-                sources=[str(here / "tree_attention_rocm.cpp"), str(here / "tree_attention_rocm.cu")],
+    here = Path(__file__).parent                        # prompt and tree attention: one extension
+    return load(name="tensorfold_attention_rocm_v9",
+                sources=[str(here / "attention_rocm.cpp"), str(here / "attention_rocm.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
 
 
 def rocm_launch(tiles: int, chunks: int) -> tuple[int, bool]:
-    """(compute waves, loader waves or not) for ``tree_attention_rocm.cu``'s shared kernel. A compute wave takes 16
+    """(compute waves, loader waves or not) for ``attention_rocm.cu``'s shared kernel. A compute wave takes 16
     (row, head) pairs and a block all of a stream's ``tiles`` (up to 8), so a chunk is read once (a wave a block,
     re-reading from cache, measured slower at every length). Loader waves feeding a double buffer are fastest up to
     ``LONG_CHUNKS`` chunks, every wave loading then folding past it (more blocks fit). Never a row's bits;
@@ -217,12 +217,12 @@ def rocm_launch(tiles: int, chunks: int) -> tuple[int, bool]:
 
 
 def _rocm_kernel(heads: int, kv_heads: int, dim: int) -> bool:
-    """ROCm's WMMA tree attention (``tree_attention_rocm.cu``) where it applies, unless ``TF_ROCM_TREE_KERNEL=triton``;
+    """ROCm's WMMA tree attention (``attention_rocm.cu``) where it applies, unless ``TF_ROCM_TREE_KERNEL=triton``;
     the two give different bits, so a process uses one."""
 
     import os
 
-    return os.environ.get("TF_ROCM_TREE_KERNEL", "wmma") != "triton" and _rocm().supported(heads, kv_heads, dim)
+    return os.environ.get("TF_ROCM_TREE_KERNEL", "wmma") != "triton" and _rocm().tree_supported(heads, kv_heads, dim)
 
 
 def plan_host(parents: Sequence[Sequence[int]], lengths: Sequence[int], group: int) -> tuple[list[int], int, int]:

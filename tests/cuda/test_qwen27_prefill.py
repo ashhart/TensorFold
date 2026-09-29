@@ -309,3 +309,37 @@ def test_fp8_prefill_matmul_rows_do_not_depend_on_chunking(gs):
     dense = q_ * scales.double().repeat_interleave(gs, 1) + biases.double().repeat_interleave(gs, 1)
     ref = x.double() @ dense.t()
     assert ((whole.double() - ref).norm() / ref.norm()).item() < 5e-2
+
+
+@pytest.mark.skipif(not hip(), reason="ROCm's WMMA prompt attention")
+@pytest.mark.parametrize("heads,kv_heads", [(24, 4), (8, 8), (16, 8), (16, 4), (32, 4)])
+def test_rocm_prompt_attention_rows_a_block_and_loaders_change_no_bits(monkeypatch, heads, kv_heads):
+    """One or two 16-row tiles a block, with loader waves or without, give every row the same bits, from an empty
+    cache or after 3,000 cached keys, whole or in pieces of odd sizes; and the rows match float64 attention."""
+
+    gen = torch.Generator(device="cuda").manual_seed(5)
+    total, dim = 3000 + 301, 256
+    q = torch.randn(total, heads, dim, generator=gen, device="cuda").bfloat16()
+    k = torch.randn(total, kv_heads, dim, generator=gen, device="cuda").bfloat16()
+    v = torch.randn(total, kv_heads, dim, generator=gen, device="cuda").bfloat16()
+    scale = dim ** -0.5
+    outs = []
+    for rb, pipe in [("1", "0"), ("1", "1"), ("2", "0"), ("2", "1")]:
+        monkeypatch.setenv("TF_ROCM_ATTN_RB", rb)
+        monkeypatch.setenv("TF_ROCM_ATTN_PIPE", pipe)
+        late = attention(q[3000:].contiguous(), k, v, 3000, scale=scale)
+        pieces = torch.cat([attention(q[3000 + a:3000 + a + 37].contiguous(), k, v, 3000 + a, scale=scale)
+                            for a in range(0, 301, 37)])
+        early = attention(q[:45].contiguous(), k, v, 0, scale=scale)
+        assert torch.equal(late, pieces)
+        outs.append((late, early))
+    assert all(torch.equal(outs[0][0], a) and torch.equal(outs[0][1], b) for a, b in outs[1:])
+    g = heads // kv_heads
+    kk = k.double().repeat_interleave(g, 1).transpose(0, 1)
+    vv = v.double().repeat_interleave(g, 1).transpose(0, 1)
+    qq = q[3000:].double().transpose(0, 1)
+    s = qq @ kk.transpose(1, 2) * scale
+    s = s.masked_fill(torch.arange(total, device="cuda")[None, :] > 3000 + torch.arange(301, device="cuda")[:, None],
+                      float("-inf"))
+    ref = (s.softmax(-1) @ vv).transpose(0, 1)
+    assert ((outs[0][0].double() - ref).norm() / ref.norm()).item() < 1e-2
