@@ -142,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
     try sync.command(init.io, &.{ ".venv/bin/python", "tools/native_runtime.py" });
     try sync.command(init.io, &.{ ".venv/bin/python", "tools/export_native_kernels.py", "--check" });
     try sync.command(init.io, &.{ ".zig-toolchain/zig", "build", "-Doptimize=safe", "-j1" });
-    try sync.command(init.io, &.{ ".zig-toolchain/zig", "build", "test", "test-checkpoint-files", "test-setup", "test-sync-upstream", "-Doptimize=safe", "-j1" });
+    try sync.command(init.io, &.{ ".zig-toolchain/zig", "build", "test", "test-checkpoint-files", "test-setup", "test-sync-upstream", "test-upstream-coverage", "check-upstream-coverage", "-Doptimize=safe", "-j1" });
     std.debug.print("Setup passed. Native CLI: zig-out/bin/tensorfold\nNext: native/README.md for Metal tests and existing model paths.\n", .{});
 }
 

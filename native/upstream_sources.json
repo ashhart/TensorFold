@@ -288,6 +288,10 @@
     "sha256": "49460414f6641e8ada689071dd5eb8d904efb3f2a30f478401fd9a0ed9310cb2"
   },
   {
+    "path": "src/tensorfold/families/nemotron_h/draft_ids.txt",
+    "sha256": "436840405e3507339efe85c410bb87a927ede7eb44eae620c0dda225c392d45f"
+  },
+  {
     "path": "src/tensorfold/families/nemotron_h/model.py",
     "sha256": "eed47a2abd3aa3a9312437b27bed135db99a87656a02d02b3b55946cedccd8c2"
   },
@@ -304,6 +308,10 @@
     "sha256": "8ed97865917aa468b2ac72992d5a0eaa7edc012eb6131f8791d636b26092acaa"
   },
   {
+    "path": "src/tensorfold/families/qwen3_5/dflash2_calibration.json",
+    "sha256": "b6542f456c37f2e986e82e2d595f84f21125f8e4e8db382e8d5f20d80b364915"
+  },
+  {
     "path": "src/tensorfold/families/qwen3_5/dflash_head.py",
     "sha256": "f08fe2c3af9034ca5af8d17a7bd8fe25a7c8a69ad80e77a1f47e59fd79c16763"
   },
@@ -318,6 +326,10 @@
   {
     "path": "src/tensorfold/families/qwen4_exp/__init__.py",
     "sha256": "5bb882218459399b66b14139f7f493aa989ff0a3bcc929cb9e6daf309fc6eb22"
+  },
+  {
+    "path": "src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt",
+    "sha256": "88d5b483a849ae9245b78b69f41f11cdfc8b5c024f0786c1c8196263857cc93e"
   },
   {
     "path": "src/tensorfold/families/qwen4_exp/decode.py",
@@ -752,8 +764,16 @@
     "sha256": "3e5c477d0947ca8c90196224ce825b2ea4e77e9900f8ab2af3976505f925cb02"
   },
   {
+    "path": "src/tensorfold/streaming/hostsync/CMakeLists.txt",
+    "sha256": "a4778fed8d32db483f3c0660ff90966c70d2dd17332412b5045fcb5f7d39d307"
+  },
+  {
     "path": "src/tensorfold/streaming/hostsync/__init__.py",
     "sha256": "024fdb0ca48d0b311b1def6526e6081cf00f55ea2e82ca9a896b256f12ff1cc1"
+  },
+  {
+    "path": "src/tensorfold/streaming/hostsync/hostsync.cpp",
+    "sha256": "748078eb3d7d24ef5cc394058b772f19c795941b8fb81a48225a92807d532fe2"
   },
   {
     "path": "src/tensorfold/streaming/pool.py",

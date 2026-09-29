@@ -17,6 +17,10 @@ pub fn build(b: *std.Build) void {
     const coverage_record = b.addRunArtifact(coverage_exe);
     coverage_record.addArg("--record-reviewed");
     coverage_record.has_side_effects = true;
+    const coverage_complete = b.addRunArtifact(coverage_exe);
+    coverage_complete.addArg("--require-complete");
+    coverage_complete.has_side_effects = true;
+    b.step("audit-native-parity", "Reject incomplete native features as well as stale implementation/test bindings").dependOn(&coverage_complete.step);
     b.step("record-upstream-coverage", "Explicitly acknowledge reviewed source changes without claiming native support").dependOn(&coverage_record.step);
     const coverage_tests = b.addRunArtifact(b.addTest(.{ .root_module = coverage_module }));
     b.step("test-upstream-coverage", "Verify drift detection for new families, changed kernels and removed paths").dependOn(&coverage_tests.step);
@@ -702,4 +706,14 @@ pub fn build(b: *std.Build) void {
         }
     }
     long_tests.dependOn(long_prior);
+    for (b.top_level_steps.keys(), b.top_level_steps.values()) |name, step| {
+        if (!std.mem.startsWith(u8, name, "test") or !hasExecutableCheck(&step.step)) continue;
+        for ([_]*std.Build.Step.Run{ coverage, coverage_record, coverage_complete }) |check| check.addArgs(&.{ "--test-step", name });
+    }
+}
+
+fn hasExecutableCheck(step: *std.Build.Step) bool {
+    if (step.tag == .run) return true;
+    for (step.dependencies.items) |dependency| if (hasExecutableCheck(dependency)) return true;
+    return false;
 }

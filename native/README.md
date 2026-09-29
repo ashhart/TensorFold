@@ -325,6 +325,13 @@ local models, then pushes fork `main`. Conflicts or failed checks stop it.
 Nothing is scheduled. Contributors should pull/rebase through their normal Git
 workflow and use setup to reproduce the resulting checked-in pins.
 
+`check-upstream-coverage` validates source hashes and the feature-to-declaration/test
+bindings in `native/features.json`; setup, CI and manual sync run it. New sources
+need an explicit mapping before `record-upstream-coverage` can acknowledge them.
+`audit-native-parity` additionally fails for every missing or partial feature.
+These checks report declared test scope and limitations; they do not replace
+running the mapped correctness tests or establish full-model/hardware verification.
+
 | Symptom | Next step |
 | --- | --- |
 | Zig compiler/API errors | Compare `.zig-toolchain/zig version` with `.zig-version`; use the staged compiler. |

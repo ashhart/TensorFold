@@ -3,10 +3,11 @@ const Snapshot = struct { path: []const u8, sha256: []const u8 };
 const manifest = "native/upstream_sources.json";
 
 fn watched(path: []const u8) bool {
-    return std.mem.startsWith(u8, path, "src/tensorfold/") and
-        std.mem.endsWith(u8, path, ".py") and
-        std.mem.indexOf(u8, path, "/cuda/") == null and
-        !std.mem.endsWith(u8, path, "_cuda.py");
+    // This CUDA-directory data file is embedded by the native Flash MTP head.
+    if (std.mem.eql(u8, path, "src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt")) return true;
+    if (!std.mem.startsWith(u8, path, "src/tensorfold/") or std.mem.indexOf(u8, path, "/cuda/") != null or std.mem.endsWith(u8, path, "_cuda.py")) return false;
+    for ([_][]const u8{ ".py", ".cpp", ".c", ".cc", ".h", ".hpp", ".mm", ".metal", ".json", ".txt", ".jinja" }) |extension| if (std.mem.endsWith(u8, path, extension)) return true;
+    return false;
 }
 
 fn compare(before: []const Snapshot, after: []const Snapshot, report: bool) usize {
@@ -42,13 +43,30 @@ fn compare(before: []const Snapshot, after: []const Snapshot, report: bool) usiz
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
-    const record = args.len == 2 and std.mem.eql(u8, args[1], "--record-reviewed");
-    if (args.len > 1 and !record) return error.InvalidArguments;
-    const listed = try std.process.run(a, init.io, .{ .argv = &.{ "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "src/tensorfold" } });
-    if (!listed.term.success()) return error.GitCommandFailed;
-    var paths = std.mem.splitScalar(u8, listed.stdout, 0);
+    var record = false;
+    var complete = false;
+    var steps: std.ArrayList([]const u8) = .empty;
+    var arg: usize = 1;
+    while (arg < args.len) : (arg += 1) {
+        if (std.mem.eql(u8, args[arg], "--record-reviewed")) {
+            record = true;
+        } else if (std.mem.eql(u8, args[arg], "--require-complete")) {
+            complete = true;
+        } else if (std.mem.eql(u8, args[arg], "--test-step") and arg + 1 < args.len) {
+            arg += 1;
+            try steps.append(a, args[arg]);
+        } else return error.InvalidArguments;
+    }
+    if (steps.items.len == 0) return error.UseRegisteredCoverageBuildStep;
+    if (record and complete) return error.InvalidArguments;
+    const source_dir = try std.Io.Dir.cwd().openDir(init.io, "src/tensorfold", .{ .iterate = true });
+    defer source_dir.close(init.io);
+    var walker = try source_dir.walk(a);
+    defer walker.deinit();
     var snapshots: std.ArrayList(Snapshot) = .empty;
-    while (paths.next()) |path| {
+    while (try walker.next(init.io)) |entry| {
+        if (entry.kind != .file) continue;
+        const path = try std.fmt.allocPrint(a, "src/tensorfold/{s}", .{entry.path});
         if (!watched(path)) continue;
         const bytes = std.Io.Dir.cwd().readFileAlloc(init.io, path, a, .limited(16 * 1024 * 1024)) catch |err| switch (err) {
             error.FileNotFound => continue,
@@ -64,6 +82,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }.less);
     if (snapshots.items.len == 0) return error.NoUpstreamSources;
+    const source_paths = try a.alloc([]const u8, snapshots.items.len);
+    for (source_paths, snapshots.items) |*path, snapshot| path.* = snapshot.path;
+    try @import("feature_coverage.zig").check(a, init.io, source_paths, steps.items, complete);
     if (record) {
         const bytes = try std.json.Stringify.valueAlloc(a, snapshots.items, .{ .whitespace = .indent_2 });
         const file = try std.Io.Dir.cwd().createFile(init.io, manifest, .{});
@@ -82,6 +103,10 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("PASS: {d} upstream Mac source identities reviewed (not a claim of complete native feature coverage).\n", .{snapshots.items.len});
 }
 
+test {
+    _ = @import("feature_coverage.zig");
+}
+
 test "new families, changed kernels and deleted execution paths all require review" {
     const before = [_]Snapshot{ .{ .path = "a", .sha256 = "1" }, .{ .path = "b", .sha256 = "2" } };
     try std.testing.expectEqual(@as(usize, 0), compare(&before, &before, false));
@@ -91,4 +116,8 @@ test "new families, changed kernels and deleted execution paths all require revi
     try std.testing.expect(watched("src/tensorfold/kernels/new_model/attention.py"));
     try std.testing.expect(watched("src/tensorfold/server/prompt_fill.py"));
     try std.testing.expect(!watched("src/tensorfold/families/qwen3_5/cuda/decode.py"));
+    try std.testing.expect(watched("src/tensorfold/streaming/hostsync/hostsync.cpp"));
+    try std.testing.expect(watched("src/tensorfold/families/qwen3_5/dflash2_calibration.json"));
+    try std.testing.expect(watched("src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt"));
+    try std.testing.expect(!watched("src/tensorfold/cuda/bridge.cpp"));
 }

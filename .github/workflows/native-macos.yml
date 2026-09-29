@@ -34,4 +34,4 @@ jobs:
       - name: Verify incremental setup
         run: .zig-toolchain/zig run tools/setup_native.zig -- --source-archives --jobs 2
       - name: Verify CPU runtime and report Metal availability
-        run: .zig-toolchain/zig build test-runtime test-dependencies test-image-http -Doptimize=safe -j1 --summary all
+        run: .zig-toolchain/zig build test-runtime test-dependencies test-image-http test-upstream-coverage check-upstream-coverage -Doptimize=safe -j1 --summary all
