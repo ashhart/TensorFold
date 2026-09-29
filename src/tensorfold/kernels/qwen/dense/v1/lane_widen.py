@@ -138,8 +138,47 @@ def _bytes(source: str) -> str:
 BYTES = _bytes(NIBBLES)
 
 
+def grouped(source: str) -> str:
+    """A widening kernel for groups of GS values (32 or 64) instead of 64; the group-64 kernels keep their source."""
+
+    for old, new in (
+        ("  constexpr int KG = K / 64;\n", "  constexpr int KG = K / GS;\n"),
+        ("  constexpr int WPG = 2 * BITS;                          // words per column per group: 64 values x BITS bits\n",
+         "  constexpr int WPG = GS * BITS / 32;                    // words per column per group: GS values x BITS bits\n"),
+        ("matmul2d_descriptor(16 * TMR, NT, 64,", "matmul2d_descriptor(16 * TMR, NT, GS,"),
+        ("stage_all[SK * NT * 8];               // per K slice: NT columns x 64 nibbles",
+         "stage_all[SK * NT * (GS / 8)];        // per K slice: NT columns x GS nibbles"),
+        ("stage_all[SK * NT * 16];              // per K slice: NT columns x 64 bytes",
+         "stage_all[SK * NT * (GS / 4)];        // per K slice: NT columns x GS bytes"),
+        ("stage_all + sg * NT * 8;", "stage_all + sg * NT * (GS / 8);"),
+        ("stage_all + sg * NT * 16;", "stage_all + sg * NT * (GS / 4);"),
+        ("dextents<int32_t, 2>(64, NT));", "dextents<int32_t, 2>(GS, NT));"),
+        ("    auto a = tA.slice(g * 64, 0);\n", "    auto a = tA.slice(g * GS, 0);\n"),
+    ):
+        if old in source:
+            source = source.replace(old, new)
+    for old, new in (("for (int c = 0; c < 8; c++) {\n        const int bit = 24 * c,",
+                      "for (int c = 0; c < GS / 8; c++) {\n        const int bit = 24 * c,"),
+                     ("stage[lane * 8 + c] = nib;", "stage[lane * (GS / 8) + c] = nib;"),
+                     ("for (int c = 0; c < 8; c++) {                     // word c/2's half",
+                      "for (int c = 0; c < GS / 8; c++) {                // word c/2's half"),
+                     ("stage[lane * 8 + c] = v;", "stage[lane * (GS / 8) + c] = v;"),
+                     ("for (int c = 0; c < 16; c++) {\n      const int bit = 4 * BITS * c,",
+                      "for (int c = 0; c < GS / 4; c++) {\n      const int bit = 4 * BITS * c,"),
+                     ("stage[lane * 16 + c] = word;", "stage[lane * (GS / 4) + c] = word;")):
+        if source.count(old) > 1:
+            raise AssertionError(f"lane_widen: ambiguous edit ({old[:50]!r})")
+        source = source.replace(old, new)
+    if "64" in source.replace("int64_t", "").replace("uint64", ""):
+        raise AssertionError("lane_widen: a group-64 constant is left in the grouped kernel")
+    return source
+
+
+NIBBLES_GROUPED, BYTES_GROUPED = grouped(NIBBLES), grouped(BYTES)
+
+
 def sources() -> dict[str, str]:
-    return {"nibbles": NIBBLES, "bytes": BYTES}
+    return {"nibbles": NIBBLES, "bytes": BYTES, "nibbles_grouped": NIBBLES_GROUPED, "bytes_grouped": BYTES_GROUPED}
 
 
-__all__ = ["BYTES", "NIBBLES", "sources"]
+__all__ = ["BYTES", "BYTES_GROUPED", "NIBBLES", "NIBBLES_GROUPED", "grouped", "sources"]

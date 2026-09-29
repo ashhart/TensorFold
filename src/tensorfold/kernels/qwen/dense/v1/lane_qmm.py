@@ -192,7 +192,8 @@ def _kernel(name: str) -> Any:
             from tensorfold.kernels.qwen.dense.v1 import lane_widen
 
             source = {"coop": _COOP, "main_tiled": _MAIN_TILED, "main": _MAIN, "lowbit": lane_widen.NIBBLES,
-                      "bytes": lane_widen.BYTES}[name]
+                      "bytes": lane_widen.BYTES, "lowbit_grouped": lane_widen.NIBBLES_GROUPED,
+                      "bytes_grouped": lane_widen.BYTES_GROUPED}[name]
             _kernels[name] = _Baked("lane_qmm_" + name, source, ["X", "XS", "Wq", "SBt", "mdims"], ["Y"])
     return _kernels[name]
 
@@ -254,6 +255,12 @@ def readable(bits: int, group_size: int, mode: str = "affine") -> bool:
     return mode == "affine" and bits in BITS and group_size in ((32, 64) if bits == 4 else (64,))
 
 
+def reads(bits: int, group_size: int) -> bool:
+    """Whether lane_matmul's kernels take this width and group (every width in groups of 32 or 64): a family opts in."""
+
+    return bits in BITS and group_size in (32, 64)
+
+
 def supports(weight: mx.array, scales: mx.array, x: mx.array, bits: int, group_size: int, mode: str) -> bool:
     if not readable(bits, group_size, mode):
         return False
@@ -276,8 +283,8 @@ def lane_matmul(x: mx.array, weight: mx.array, sbt: mx.array, *, tiled: bool = F
     if M > MAX_ROWS:
         raise ValueError(f"lane_matmul takes at most {MAX_ROWS} rows, got {M}")
     bits = weight_bits(weight, K)
-    if not readable(bits, group):
-        raise ValueError(f"lane_matmul takes {'/'.join(map(str, BITS))}-bit weights in groups of 64 (4-bit also 32), "
+    if not reads(bits, group):
+        raise ValueError(f"lane_matmul takes {'/'.join(map(str, BITS))}-bit weights in groups of 32 or 64, "
                          f"got {bits}-bit in groups of {group}")
     if bits != 4:
         if K % 64 or N % 4:
@@ -308,9 +315,11 @@ def lane_matmul(x: mx.array, weight: mx.array, sbt: mx.array, *, tiled: bool = F
     if bits != 4:
         if tiled and N % NT:
             raise ValueError(f"tiled weights need N to be a multiple of {NT}, got {N}")
-        y = _kernel("lowbit" if bits < 4 else "bytes")(inputs=[x2, xs, weight, sbt, mdims],
+        grouped = [("GS", group)] if group != 64 else []    # groups of 64 keep the original kernels' source
+        y = _kernel(("lowbit" if bits < 4 else "bytes") + ("_grouped" if grouped else ""))(
+                              inputs=[x2, xs, weight, sbt, mdims],
                               template=[("TMR", block // 16), ("N", N), ("K", K), ("NT", NT), ("SK", sk),
-                                        ("BITS", bits), ("TILED", int(bool(tiled)))],
+                                        ("BITS", bits), ("TILED", int(bool(tiled))), *grouped],
                               grid=(-(-N // NT) * 32 * sk, -(-MP // block), 1), threadgroup=(32 * sk, 1, 1),
                               output_shapes=[(M, N)], output_dtypes=[mx.bfloat16])[0]
         return y.reshape(*lead, N)
@@ -483,5 +492,5 @@ def uninstall() -> None:
         nn.QuantizedLinear.__call__ = _ORIG
 
 
-__all__ = ["BITS", "MAX_ROWS", "install", "lane_matmul", "pack_scales", "readable", "split_k", "supports", "takes",
+__all__ = ["BITS", "MAX_ROWS", "install", "lane_matmul", "pack_scales", "readable", "reads", "split_k", "supports", "takes",
            "tile_weight", "uncovered", "uninstall", "untile_weight", "warm", "weight_bits"]

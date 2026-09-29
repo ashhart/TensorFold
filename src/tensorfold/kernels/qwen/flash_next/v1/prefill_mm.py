@@ -307,13 +307,14 @@ def qmm(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array) -> mx.arra
                 output_shapes=[(m, n)], output_dtypes=[mx.bfloat16])[0]
 
 
-def matmul(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array) -> mx.array:
-    """mx.quantized_matmul(x, w, scales, biases) for 4-bit group-32 weights: ``qmm`` where it gives the same bits."""
+def matmul(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, *, group: int = 32,
+           bits: int = 4) -> mx.array:
+    """mx.quantized_matmul(x, w, scales, biases): for 4-bit group-32 weights ``qmm`` where it gives the same bits."""
 
     m, k = x.shape
-    if active(m) and not _mlx_splits_k(m, int(w.shape[0]), k) and tiles():
+    if (bits, group) == (4, 32) and active(m) and not _mlx_splits_k(m, int(w.shape[0]), k) and tiles():
         return qmm(x, w, scales, biases)
-    return mx.quantized_matmul(x, w, scales, biases, transpose=True, group_size=32, bits=4)
+    return mx.quantized_matmul(x, w, scales, biases, transpose=True, group_size=group, bits=bits)
 
 
 def linear(layer: Any, x: mx.array) -> mx.array:

@@ -188,7 +188,7 @@ def load_backbone(model_dir: Path, *, layers: int | None = None, stream: bool = 
 def load(model_dir: Path, *, ssd_experts: float | None = None) -> tuple[GLM5, Any]:
     """The backbone and tokenizer; ``ssd_experts``: stream routed experts into a GPU pool of that many GiB."""
 
-    from mlx_lm.utils import load_tokenizer
+    from tensorfold.families.tokenizer import load_tokenizer
 
     model = load_backbone(Path(model_dir), stream=bool(ssd_experts))
     if ssd_experts:

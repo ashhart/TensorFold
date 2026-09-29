@@ -44,32 +44,40 @@ class FlashMTP(nn.Module):
         return self.hyper_connection_mixer(x), x
 
 
+PREFIXES = ("language_model.mtp.", "mtp.")          # where checkpoints keep the head (mlx-lm, oMLX conversions)
+
+
 def sanitize(weights: dict[str, mx.array]) -> dict[str, mx.array]:
-    """The checkpoint's ``language_model.mtp.*`` tensors under this module's names."""
+    """The checkpoint's MTP tensors under this module's names."""
 
     out = {}
     for name, value in weights.items():
-        if name.startswith("language_model.mtp."):
-            out[name[len("language_model.mtp."):]] = value
+        for prefix in PREFIXES:
+            if name.startswith(prefix):
+                out[name[len(prefix):]] = value
     return out
 
 
 def load(model_dir, cfg: Config) -> FlashMTP:
-    """The MTP head from the checkpoint's shards (4-bit like the main model, its router bf16)."""
+    """The MTP head from the checkpoint's shards (each module in its config.json format, its router bf16)."""
 
     from pathlib import Path
 
-    from tensorfold.families.qwen4_exp.model import norms_stored_around_one
+    import json
 
+    from tensorfold.families.qwen4_exp.model import norms_stored_around_one, quant_params
+
+    config = json.loads((Path(model_dir) / "config.json").read_text())
     weights: dict[str, mx.array] = {}
     for path in sorted(Path(model_dir).glob("model*.safetensors")):
-        found = {k: v for k, v in mx.load(str(path), stream=mx.cpu).items() if k.startswith("language_model.mtp.")}
+        found = {k: v for k, v in mx.load(str(path), stream=mx.cpu).items() if k.startswith(PREFIXES)}
         weights.update(found)
     weights = sanitize(weights)
     mx.eval(list(weights.values()))          # read before any GPU work uses them (see model.load)
     head = FlashMTP(cfg)
     nn.quantize(head, group_size=cfg.group_size, bits=cfg.bits,
-                class_predicate=lambda p, m: hasattr(m, "to_quantized") and f"{p}.scales" in weights)
+                class_predicate=lambda p, m: (hasattr(m, "to_quantized") and f"{p}.scales" in weights
+                                              and quant_params(config, f"mtp.{p}")))
     # the same storage convention as the main model's centred norms (checked on its hc_norm anchors)
     main = {}
     for path in sorted(Path(model_dir).glob("model*.safetensors")):

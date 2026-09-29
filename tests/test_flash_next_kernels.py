@@ -145,10 +145,15 @@ def test_hyper_connection_scalar_rows_equal_the_mma_path(inject, monkeypatch):
             assert mx.array_equal(scalar[1][:rows], mma[1][:rows]).item(), rows
 
 
-def test_per_row_projections_do_not_depend_on_the_row_count():
-    """rows.qmv_rows and rows.hc_project: every row of a call equals that row's one-row call, bit for bit."""
+@pytest.mark.parametrize("nib, half", [(0, False), (2, False), (2, True)])
+def test_per_row_projections_do_not_depend_on_the_row_count(nib, half, monkeypatch):
+    """rows.qmv_rows and rows.hc_project: every row of a call equals that row's one-row call, bit for bit, with the
+    multi-row calls' dots on the convert (nib 0), or from two rows on nib or on half nibbles."""
 
     from tensorfold.kernels.qwen.flash_next.v1 import rows
+
+    monkeypatch.setattr(base, "nib_rows", lambda: nib)
+    monkeypatch.setattr(base, "half_nibs", lambda: half)
 
     S, D, LOW = 4, 2560, 320
     rng = np.random.default_rng(51)

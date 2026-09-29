@@ -657,6 +657,11 @@ def test_admission_projects_growth_prefill_and_rounds() -> None:
     assert Admission(expected, memory, used=lambda: 20_000).admits(100, 500, [(300, 1_000)])
     assert not Admission(expected - 1, memory, used=lambda: 20_000).admits(100, 500, [(300, 1_000)])
     assert Admission(40_000, memory, used=lambda: 20_000).fitting(500) == 1          # 7,920 a stream in 15,000
+    # measured at 4 streams, a round of 2 needs half: two 7,920-byte streams and 2,500 fit in 20,000
+    four = Admission(40_000, memory, used=lambda: 20_000, lanes=4)
+    assert four.round_bytes(1) == 1_250 and four.round_bytes(2) == 2_500 and four.round_bytes(9) == 5_000
+    assert four.fitting(500) == 2
+    assert four.projected(100, 500, [(300, 1_000)]) == expected - 5_000 + 2_500
 
 
 def test_the_app_measures_a_streams_memory_and_prints_its_admission(capsys) -> None:

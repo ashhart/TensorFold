@@ -63,17 +63,24 @@ class StreamMemory:
 class Admission:
     """Budget current memory, live and new streams at their longest replies, and the larger of prefill and shared-round working memory."""
 
-    def __init__(self, budget: int, memory: StreamMemory, used: Callable[[], int] | None = None) -> None:
+    def __init__(self, budget: int, memory: StreamMemory, used: Callable[[], int] | None = None,
+                 lanes: int = 1) -> None:
         self.budget = int(budget)
         self.memory = memory
         self.used = used or _mlx_used
+        self.lanes = max(1, int(lanes))      # the streams ``round_bytes`` was measured at
         self.refused = 0
+
+    def round_bytes(self, streams: int) -> int:
+        """A shared round's working memory at ``streams`` streams: the measured round's (at ``lanes``), its share."""
+
+        return -(-self.memory.round_bytes * min(max(1, int(streams)), self.lanes) // self.lanes)
 
     def projected(self, prompt: int, longest: int, live: Sequence[tuple[int, int]]) -> int:
         """Project the new stream from ``prompt`` to ``longest`` tokens and every live stream from its current to longest length."""
 
         grow = sum(max(0, most - now) for now, most in live) * self.memory.per_token
-        work = max(self.memory.round_bytes, self.memory.prefill_bytes(prompt))
+        work = max(self.round_bytes(len(live) + 1), self.memory.prefill_bytes(prompt))
         return int(self.used() + grow + self.memory.stream_bytes(longest) + work)
 
     def admits(self, prompt: int, longest: int, live: Sequence[tuple[int, int]]) -> bool:
@@ -84,9 +91,12 @@ class Admission:
     def fitting(self, tokens: int) -> int:
         """How many streams of ``tokens`` tokens fit the budget beside what is resident now (at most 64)."""
 
-        room = self.budget - self.used() - max(self.memory.round_bytes, self.memory.prefill_bytes(tokens))
-        each = self.memory.stream_bytes(tokens)
-        return 64 if each <= 0 else max(0, min(64, int(room // each)))
+        room, each = self.budget - self.used(), self.memory.stream_bytes(tokens)
+        prefill = self.memory.prefill_bytes(tokens)
+        count = 0
+        while count < 64 and (count + 1) * each + max(self.round_bytes(count + 1), prefill) <= room:
+            count += 1
+        return count
 
 
 def _mlx_used() -> int:

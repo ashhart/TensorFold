@@ -88,12 +88,27 @@ def test_moe_families_still_refuse_other_bit_widths_on_cuda(package, group, bits
         families.require_readable(family, configuration(bits, group), "cuda")
 
 
-@pytest.mark.parametrize("package,group", [(nemotron_h, 64), (qwen4_exp, 32)])
 @pytest.mark.parametrize("bits", [2, 3, 5, 6, 8])
-def test_moe_family_metal_preflight_still_refuses_other_widths(tmp_path, package, group, bits):
-    (tmp_path / "config.json").write_text(json.dumps(configuration(bits, group)))
+def test_moe_family_metal_preflight_still_refuses_other_widths(tmp_path, bits):
+    (tmp_path / "config.json").write_text(json.dumps(configuration(bits, 64)))
     with pytest.raises(ValueError, match="4-bit"):
-        package.check(tmp_path)
+        nemotron_h.check(tmp_path)
+
+
+@pytest.mark.parametrize("bits", [2, 3, 4, 5, 6, 8])
+@pytest.mark.parametrize("group", [32, 64, 128])
+def test_flash_next_metal_preflight_takes_every_affine_width(tmp_path, bits, group):
+    config = configuration(bits, group)
+    config["quantization"]["language_model.model.layers.0.mlp.shared_expert.gate_proj"] = {"bits": 8, "group_size": 128}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    qwen4_exp.check(tmp_path)
+
+
+def test_flash_next_refuses_unquantized_and_non_affine_checkpoints(tmp_path):
+    for config in ({"model_type": "qwen4_exp"}, configuration(4, 32) | {"quantization": {"bits": 4, "group_size": 16}}):
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        with pytest.raises(ValueError):
+            qwen4_exp.check(tmp_path)
 
 
 @pytest.mark.parametrize("lane_kernels", ["auto", "on", "off"])

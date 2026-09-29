@@ -589,11 +589,16 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         raise KeyboardInterrupt      # the cleanup below runs (a plain SIGTERM would skip it)
 
     signal.signal(signal.SIGTERM, _terminate)
+    from tensorfold.server import live
+
+    line = live.start(app)      # connections and decode/prefill tok/s on one line, in a terminal only
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if line is not None:
+            line.stop()
         server.server_close()
         app.close()        # the engine thread saves the newest conversations as it stops
         unwire(mx)

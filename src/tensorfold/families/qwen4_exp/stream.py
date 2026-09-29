@@ -43,6 +43,10 @@ def attach(model: Any, model_dir: Path, gib: float) -> Streamer:
     from tensorfold.streaming.build import load as hostsync
 
     cfg = model.args
+    formats = {(int(l.mlp.switch_mlp.gate_proj.bits), int(l.mlp.switch_mlp.gate_proj.group_size)) for l in model.layers}
+    if formats != {(4, 32)}:                     # the slot kernels read the resident 4-bit group-32 layout
+        raise ValueError(f"--ssd-experts streams 4-bit experts in groups of 32; this checkpoint's routed experts are "
+                         f"{', '.join(f'{b}-bit g{g}' for b, g in sorted(formats))}")
     found, shapes = sources(model_dir, expert_names(cfg.num_hidden_layers))
     slots = int(gib * 2**30) // expert_nbytes(found, 0)
     streamer = Streamer(found, shapes, layers=cfg.num_hidden_layers, experts=cfg.num_experts,

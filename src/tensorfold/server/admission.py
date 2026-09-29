@@ -11,6 +11,7 @@ def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, re
     from tensorfold.engine import memory
 
     stream = memory.measure(engine)
+    getattr(engine, "release_rounds", lambda: None)()     # the probe round's rollback rows: no stream's
     used = memory._mlx_used()
     ram = memory.ram_bytes()
     elsewhere = memory.used_elsewhere(used)
@@ -19,7 +20,7 @@ def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, re
     if prompt_memory is not None:
         allowance = max(allowance, prompt_memory.process_budget)
     admission = memory.Admission(min(allowance - elsewhere, share), stream,
-                                 used=None if prompt_memory is None else prompt_memory.held)
+                                 used=None if prompt_memory is None else prompt_memory.held, lanes=lanes)
     tokens = reply_tokens + 4096
     gib, mib = 1024**3, 1024**2
     print(f"[tensorfold] concurrency: up to {lanes} requests share each round; memory budget "
@@ -27,7 +28,8 @@ def concurrency(engine: Any, prompt_memory: Any, fraction: float, lanes: int, re
           f"{ram / gib:.0f} GB less {elsewhere / gib:.1f} GB in use elsewhere); a stream "
           f"{stream.short / mib:.0f} MB at {stream.short_tokens} tokens, "
           f"{stream.long / mib:.0f} MB at {stream.long_tokens:,}, then {stream.per_token / 1024:.1f} KB a token; "
-          f"a shared round up to {stream.round_bytes / gib:.2f} GB; {admission.fitting(tokens)} streams of "
+          f"a shared round up to {stream.round_bytes / gib:.2f} GB at {lanes} streams; {admission.fitting(tokens)} "
+          f"streams of "
           f"{tokens:,} tokens fit now (more wait their turn)", flush=True)
     return admission
 

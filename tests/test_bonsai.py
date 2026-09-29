@@ -121,6 +121,30 @@ def test_widened_codes_are_chosen_only_where_they_fit(tmp_path):
     assert pack.pre_m5_form(tmp_path, 2599 + pack.ROOM) == "packed"
 
 
+def test_as_many_layers_widen_as_the_budget_fits(tmp_path):
+    import struct
+
+    paths = ["lm_head", "model.layers.0.mlp.up_proj", "model.layers.1.mlp.up_proj", "model.layers.2.mlp.up_proj"]
+    (tmp_path / "config.json").write_text(json.dumps(config(modules=[
+        {"path": path, "block": 1024, "embedding": False, "dtype": "float16"} for path in paths])))
+    (tmp_path / "hadamard.json").write_text(json.dumps(hadamard()))
+    header, at = {}, 0
+    for path, size in zip(paths, (1000, 300, 300, 300)):          # weight, scales and biases a projection
+        for part, n in (("weight", size - 200), ("scales", 100), ("biases", 100), ("signs", 100)):
+            header[f"language_model.{path}.{part}"] = {"dtype": "U8", "shape": [n], "data_offsets": [at, at + n]}
+            at += n
+    raw = json.dumps(header).encode()
+    (tmp_path / "model.safetensors").write_bytes(struct.pack("<Q", len(raw)) + raw)
+    model, layers, rest = pack.widening(tmp_path)
+    assert (model, layers, rest) == (at, [300, 300, 300], 1000)
+    assert pack.pre_m5_form(tmp_path, model + 1900 + pack.ROOM) == "widened"
+    assert pack.pre_m5_form(tmp_path, model + 1899 + pack.ROOM) == "widened:3"      # every layer, not the head
+    assert pack.pre_m5_form(tmp_path, model + 650 + pack.ROOM) == "widened:2"
+    assert pack.pre_m5_form(tmp_path, model + 299 + pack.ROOM) == "packed"
+    assert [pack.module_form("widened:2", path) for path in paths] == ["packed", "widened", "widened", "packed"]
+    assert pack.module_form("widened", paths[3]) == "widened" and pack.module_form("packed", paths[1]) == "packed"
+
+
 def fwht_ref(x: np.ndarray) -> np.ndarray:
     """Sylvester-order Walsh-Hadamard over 1024-blocks in float64, normalized."""
 

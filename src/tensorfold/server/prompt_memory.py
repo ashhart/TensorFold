@@ -7,8 +7,8 @@ from threading import RLock
 from typing import Any
 
 from tensorfold.server.errors import RequestError
-from tensorfold.server.memory_budget import (PROCESS_BYTES, CacheMemory, GIB, budget_ceiling, cache_nbytes,
-                                             process_footprint, raise_hint)
+from tensorfold.server.memory_budget import (PROBE_REPEATS, PROCESS_BYTES, CacheMemory, GIB, budget_ceiling,
+                                             cache_nbytes, process_footprint, raise_hint)
 
 
 def attention_geometry(model: Any) -> tuple[int, int]:
@@ -255,10 +255,14 @@ class PromptMemory:
         text = [int(t) for t in tokens or ()] or [1000 + i for i in range(self.chunk_rows + 64)]
         probe = (text * (-(-(self.chunk_rows + 64) // len(text))))[:self.chunk_rows + 64]
         previous, engine.prefill_guard = engine.prefill_guard, PrefillGuard(Cancellation(), self)
-        self.runtime.clear_cache()
-        self._probe_base, self.workspace_profiled = int(self.runtime.get_active_memory()), False
+        works = []
         try:
-            engine.prefill_prefix(probe, cache=None, cached_tokens=0)
+            for _ in range(PROBE_REPEATS):         # the worst of a few (memory_budget.PROBE_REPEATS)
+                self.runtime.clear_cache()
+                self._probe_base, self.workspace_profiled = int(self.runtime.get_active_memory()), False
+                engine.prefill_prefix(probe, cache=None, cached_tokens=0)
+                works.append(self.observed_work)
+            self.observed_work = max(works)
         finally:
             engine.prefill_guard, self._probe_base = previous, None
             self.runtime.clear_cache()

@@ -23,6 +23,8 @@ def drain(steps: Iterator[Any]) -> Any:
 class FamilyPrefill:
     """Prefill for ``FamilyRounds``."""
 
+    prefill_tokens = 0          # prompt tokens fed, for the server's live line
+
     _prefill_at: int | None = None                     # the prompt position the working cache holds whole
 
     def _family_feed(self, tokens: Sequence[int], cache: list[Any], chunks: Sequence[tuple[int, int]],
@@ -58,6 +60,7 @@ class FamilyPrefill:
                       if prompt_data is not None else feed(inputs, cache))
             self._fed_rows = len(chunk)
             self.prefill_chunks += 1
+            self.prefill_tokens += len(chunk)
             last = hidden[:, -1:, :]
             drafting = getattr(self.model, "mtp", None) is not None
             if drafting:

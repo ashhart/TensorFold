@@ -99,7 +99,8 @@ def test_linears_the_lane_matmul_cannot_read_are_named():
     model.layers[-2].mode = "mxfp4"
     head = nn.Module()
     head.fc = _linear(256, 64, 8, 32)
-    want = {"8-bit g32": 2, "4-bit g32 mxfp4": 1}              # a one-row gate is read; a float linear is MLX's
+    head.fc.mode = "mxfp4"
+    want = {"8-bit g32 mxfp4": 1, "4-bit g32 mxfp4": 1}      # every affine width reads; a float linear is MLX's
     assert decode.unreadable(model, head, None) == want
 
 
@@ -109,11 +110,12 @@ def test_flash_next_refuses_them_before_building(monkeypatch):
 
     fake = nn.Module()
     fake.layers = [_linear(256, 64, 8, 32)]
+    fake.layers[0].mode = "mxfp4"
     seen = []
     monkeypatch.setattr(q4, "load", lambda path, **k: seen.append(k) or (fake, "tokenizer"))
     monkeypatch.setattr(decode, "DENSE", "lane")
     monkeypatch.setattr(runtime, "FlashNext", lambda *a, **k: pytest.fail("built before refusing"))
-    with pytest.raises(SystemExit, match="1 8-bit g32 linears"):
+    with pytest.raises(SystemExit, match="1 8-bit g32 mxfp4 linears"):
         runtime.load("unused", drafts=0)
     monkeypatch.setattr(decode, "DENSE", "simd")
     monkeypatch.setattr(runtime, "FlashNext", lambda *a, **k: "built")

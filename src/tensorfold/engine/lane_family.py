@@ -20,6 +20,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
     def _family_setup(self) -> None:
         model = self.model
         self._live: list[tuple[Any, list[Any]]] = []
+        self.paused: set[str] = set()                # held back from rounds for memory; their state untouched
         self._inflight: dict[str, Any] = {}          # stream id -> next token (GPU array), already queued
         self._next: dict[str, Any] = {}              # stream id -> the head's drafts for the next round
         self._mode: dict[str, str] = {}              # stream id -> "pipe" | "drain" | "verify" | "exit"
@@ -78,7 +79,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         for stream_id, queued in list(self._next.items()):
             if callable(queued):                  # a new stream's first drafts, settled before anything reads them
                 self._next[stream_id] = queued()
-        live = [(s, c) for s, c in self._live if not s.finished]
+        live = [(s, c) for s, c in self._live if not s.finished and s.stream_id not in self.paused]
         if len(live) > 1 and self.family_streams:
             # a shared round is synchronous: a stream that ran a step ahead lands its queued token first
             for stream, _ in live:

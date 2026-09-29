@@ -14,7 +14,8 @@ BLOCK = 1024
 PACKED = ("weight", "scales", "biases", "signs")
 # the pack's unquantized recurrent-layer gates: fp32 row-exact dense projections, never rotated
 GATES = ("in_proj_a", "in_proj_b")
-# how projections hold the codes: M5 lanes (2-bit, g64 pairs), before M5 widened to 4-bit or the pack's own 2-bit
+# how projections hold the codes: M5 lanes (2-bit, g64 pairs), before M5 widened to 4-bit or the pack's own 2-bit;
+# "widened:N" widens the first N decoder layers (a fixed mix: a snapshot's identity names it)
 FORMS = ("lanes", "widened", "packed")
 ROOM = 12 << 30           # the drafter, one prompt chunk and caches beside the weights (the admission's measure)
 
@@ -100,23 +101,62 @@ def fingerprint(model_dir: str | Path) -> str:
     return digest.hexdigest()[:12]
 
 
-def sizes(model_dir: str | Path) -> tuple[int, int]:
-    """(the language model's bytes, the bytes widening its projections to 4 bits adds), from the header alone."""
+def _layer(path: str) -> int | None:
+    parts = path.split(".")
+    return int(parts[2]) if parts[:2] == ["model", "layers"] and parts[2].isdigit() else None
+
+
+def widening(model_dir: str | Path) -> tuple[int, list[int], int]:
+    """(the language model's bytes, the bytes widening each decoder layer's projections to 4 bits adds, the rest's),
+    from the header alone."""
 
     config, _ = contract(model_dir)
     with open(Path(model_dir) / "model.safetensors", "rb") as f:
         header = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
     size = {k: v["data_offsets"][1] - v["data_offsets"][0] for k, v in header.items() if k != "__metadata__"}
-    projections = [r["path"] for r in config["modules"] if not r["embedding"]]
-    return (sum(v for k, v in size.items() if k.startswith(PREFIX)),
-            sum(size[f"{PREFIX}{path}.{part}"] for path in projections for part in PACKED[:3]))
+    layers: dict[int, int] = {}
+    rest = 0
+    for record in config["modules"]:
+        if record["embedding"]:
+            continue
+        added = sum(size[f"{PREFIX}{record['path']}.{part}"] for part in PACKED[:3])
+        index = _layer(record["path"])
+        if index is None:
+            rest += added
+        else:
+            layers[index] = layers.get(index, 0) + added
+    return sum(v for k, v in size.items() if k.startswith(PREFIX)), [layers[i] for i in sorted(layers)], rest
+
+
+def sizes(model_dir: str | Path) -> tuple[int, int]:
+    """(the language model's bytes, the bytes widening its projections to 4 bits adds), from the header alone."""
+
+    model, layers, rest = widening(model_dir)
+    return model, sum(layers) + rest
 
 
 def pre_m5_form(model_dir: str | Path, budget: int) -> str:
-    """Before M5: codes widened to 4 bits (faster rows) where they fit ``budget`` with ROOM left, else the pack's own."""
+    """Before M5: codes widened to 4 bits (faster rows) where they fit ``budget`` with ROOM left: every projection,
+    else the first N decoder layers' ("widened:N"), else the pack's own."""
 
-    model, added = sizes(model_dir)
-    return "widened" if model + added + ROOM <= budget else "packed"
+    model, layers, rest = widening(model_dir)
+    room = budget - model - ROOM
+    if sum(layers) + rest <= room:
+        return "widened"
+    count = 0
+    while count < len(layers) and layers[count] <= room:
+        room -= layers[count]
+        count += 1
+    return f"widened:{count}" if count else "packed"
+
+
+def module_form(form: str, path: str) -> str:
+    """A projection's own form: "widened:N" widens the first N decoder layers, the rest stay packed."""
+
+    if not form.startswith("widened:"):
+        return form
+    index = _layer(path)
+    return "widened" if index is not None and index < int(form.split(":")[1]) else "packed"
 
 
 def build(model_dir: str | Path, *, form: str) -> Any:
@@ -128,8 +168,8 @@ def build(model_dir: str | Path, *, form: str) -> Any:
 
     from tensorfold.families.bonsai.modules import RotatedEmbedding, RotatedLinear, RowDense
 
-    if form not in FORMS:
-        raise ValueError(f"Ternary Bonsai: projections are {', '.join(FORMS)}, not {form!r}")
+    if form not in FORMS and not (form.startswith("widened:") and form.split(":")[1].isdigit()):
+        raise ValueError(f"Ternary Bonsai: projections are {', '.join(FORMS)} or widened:N, not {form!r}")
     config, hadamard = contract(model_dir)
     if not hadamard:
         raise ValueError("Ternary Bonsai needs hadamard.json beside the weights")
@@ -150,7 +190,7 @@ def build(model_dir: str | Path, *, form: str) -> Any:
         if record["embedding"]:
             module: Any = RotatedEmbedding(weight, scales, biases, signs[width], 128)
         else:
-            module = RotatedLinear(_linear(weight, scales, biases, form), signs[width])
+            module = RotatedLinear(_linear(weight, scales, biases, module_form(form, path)), signs[width])
         setattr(parent, leaf, module)
     for index, layer in enumerate(lm.model.layers):
         if layer.is_linear:
@@ -233,5 +273,5 @@ def _module_keys(lm: Any) -> set[str]:
     return keys
 
 
-__all__ = ["BLOCK", "FORMS", "MODEL_TYPE", "ROOM", "build", "contract", "fingerprint", "pre_m5_form", "refusal",
-           "sizes", "transform_refusal", "widen"]
+__all__ = ["BLOCK", "FORMS", "MODEL_TYPE", "ROOM", "build", "contract", "fingerprint", "module_form", "pre_m5_form",
+           "refusal", "sizes", "transform_refusal", "widen", "widening"]

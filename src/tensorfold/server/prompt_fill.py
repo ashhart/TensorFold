@@ -38,6 +38,7 @@ class PromptFill:
 
         filling = self._filling
         started = self.clock()
+        fed = getattr(self.engine, "prefill_tokens", 0)
         self.engine.prefill_guard = PrefillGuard(filling.job.cancellation, self.prompt_memory)
         try:
             if abort is None:
@@ -50,6 +51,7 @@ class PromptFill:
             self._end_fill(filling.job, filling.shared_at, exc)
         finally:
             self.engine.prefill_guard = None
+        self.prefilled.add(getattr(self.engine, "prefill_tokens", 0) - fed, self.clock() - started)
         # a debt of the last round carries over, an unspent credit does not
         self._credit = min(self._credit, 0.0) + self.decode_share * (self.clock() - started)
         self._rounds_left = self.fill_rounds

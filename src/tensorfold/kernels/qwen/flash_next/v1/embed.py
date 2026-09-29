@@ -6,7 +6,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from tensorfold.kernels.qwen.flash_next.v1.base import kernel, padded
+from tensorfold.kernels.qwen.flash_next.v1.base import AFFINE_HEADER, QDOT_HEADER, edited, kernel, padded
 
 _PLE_LOOKUP = r"""
   // Thread (d, h, r): dim d of head h of row r. Row id IDS[r][h] lies in one of 8 table groups (row starts GSTART);
@@ -155,6 +155,32 @@ _PLE_CONV = r"""
   HOUT[at] = bfloat(float(H[at]) + float(bfloat(float(GATED[at]) + silu)));
 """
 
+# The lookups for any MLX affine width: value d of a row's bit stream, its group's scale and bias.
+_CODE = ("const bfloat q = bfloat(float((word >> (4 * (d % 8))) & 0xFu));",
+         "const bfloat q = bfloat(float(code_at<BITS>(W + ROW * (DIMS * BITS / 32), d)));")
+_PLE_LOOKUP_Q = edited(_PLE_LOOKUP, [("  const uint word = W[row * (DIMS / 8) + d / 8];\n", ""),
+                                     (_CODE[0], _CODE[1].replace("ROW", "row")), (
+    "const bfloat sc = SC[row * (DIMS / 32) + d / 32], bi = BI[row * (DIMS / 32) + d / 32];",
+    "const bfloat sc = SC[row * (DIMS / GS) + d / GS], bi = BI[row * (DIMS / GS) + d / GS];")])
+_PLE_ROWS_Q = edited(_PLE_ROWS, [("  const uint word = W[i * (DIMS / 8) + d / 8];\n", ""),
+                                 (_CODE[0], _CODE[1].replace("ROW", "i")), (
+    "const bfloat sc = SC[i * (DIMS / 32) + d / 32], bi = BI[i * (DIMS / 32) + d / 32];",
+    "const bfloat sc = SC[i * (DIMS / GS) + d / GS], bi = BI[i * (DIMS / GS) + d / GS];")])
+_EMBED_ROWS_Q = edited(_EMBED_ROWS, [("  const uint word = W[row * (DIMS / 8) + d / 8];\n", ""),
+                                     (_CODE[0], _CODE[1].replace("ROW", "row")), (
+    "const bfloat v = SC[row * (DIMS / 32) + d / 32] * q + BI[row * (DIMS / 32) + d / 32];",
+    "const bfloat v = SC[row * (DIMS / GS) + d / GS] * q + BI[row * (DIMS / GS) + d / GS];")])
+
+
+def _lookup(name: str, q4: Any, generic: Any, inputs: list[str], bits: int, group: int) -> tuple[Any, list]:
+    """The 4-bit group-32 kernel, or the any-width one with its format as template constants."""
+
+    if (bits, group) == (4, 32):
+        return kernel(f"q4_{name}", q4, inputs, ["OUT"]), []
+    return (kernel(f"qa_{name}", generic, inputs, ["OUT"], header=QDOT_HEADER + AFFINE_HEADER),
+            [("BITS", bits), ("GS", group)])
+
+
 class PleTables:
     """Keep n-gram shards as views into eight GPU groups, or use the host table with its checkpoint memory-mapped."""
 
@@ -162,10 +188,13 @@ class PleTables:
 
     def __init__(self, emb: Any) -> None:
         self.dims = int(emb.dims)
+        self.bits, self.group = int(getattr(emb, "quant_bits", 4)), int(getattr(emb, "quant_group", 32))
         self.host = getattr(emb, "host", None)
         if self.host is not None:
             return
         shards = emb.shards
+        if any((int(sh.bits), int(sh.group_size)) != (self.bits, self.group) for sh in shards):
+            raise ValueError("the n-gram shards must share one quantization format")
         per = -(-len(shards) // self.groups)
         self.weights, self.scales, self.biases, starts = [], [], [], [0]
         for g in range(self.groups):
@@ -197,17 +226,17 @@ def ple_lookup(ids: Any, tables: PleTables) -> mx.array:
     rows, heads = ids.shape
     if tables.host is not None:
         words, scales, biases = tables.host.gather(ids)
-        run = kernel("q4_ple_rows", _PLE_ROWS, ["W", "SC", "BI"], ["OUT"])
+        run, fmt = _lookup("ple_rows", _PLE_ROWS, _PLE_ROWS_Q, ["W", "SC", "BI"], tables.bits, tables.group)
         return run(inputs=[mx.array(words), mx.array(scales).view(mx.bfloat16), mx.array(biases).view(mx.bfloat16)],
-                   template=[("DIMS", tables.dims)], grid=(tables.dims, rows * heads, 1),
+                   template=[("DIMS", tables.dims), *fmt], grid=(tables.dims, rows * heads, 1),
                    threadgroup=(tables.dims, 1, 1), output_shapes=[(rows, heads * tables.dims)],
                    output_dtypes=[mx.bfloat16])[0]
     names = ["IDS", "GSTART"] + [f"{k}{g}" for g in range(8) for k in ("W", "S", "B")]
-    run = kernel("q4_ple_lookup", _PLE_LOOKUP, names, ["OUT"])
+    run, fmt = _lookup("ple_lookup", _PLE_LOOKUP, _PLE_LOOKUP_Q, names, tables.bits, tables.group)
     arrays = [mx.array(ids.astype(np.uint32)), tables.starts]
     for g in range(8):
         arrays += [tables.weights[g], tables.scales[g], tables.biases[g]]
-    return run(inputs=arrays, template=[("H", heads), ("DIMS", tables.dims)],
+    return run(inputs=arrays, template=[("H", heads), ("DIMS", tables.dims), *fmt],
                   grid=(tables.dims, heads, rows), threadgroup=(tables.dims, 1, 1),
                   output_shapes=[(rows, heads * tables.dims)], output_dtypes=[mx.bfloat16])[0]
 
@@ -219,10 +248,12 @@ def embed_rows(ids: Any, embedding: Any, *, tile: int = 1) -> mx.array:
     if not isinstance(ids, mx.array):
         ids = mx.array(np.asarray(ids, dtype=np.uint32).reshape(-1))
     rows = int(ids.size)
-    dims = int(embedding.weight.shape[1]) * 8
-    run = kernel("q4_embed_rows", _EMBED_ROWS, ["IDS", "W", "SC", "BI"], ["OUT"])
+    bits, group = int(getattr(embedding, "bits", 4)), int(getattr(embedding, "group_size", 32))
+    dims = int(embedding.weight.shape[1]) * 32 // bits
+    run, fmt = _lookup("embed_rows", _EMBED_ROWS, _EMBED_ROWS_Q, ["IDS", "W", "SC", "BI"], bits, group)
     return run(inputs=[padded(ids.reshape(-1).astype(mx.uint32)), embedding.weight, embedding.scales, embedding.biases],
-                  template=[("DIMS", dims), ("TILE", tile)], grid=(dims, rows, 1), threadgroup=(min(dims, 256), 1, 1),
+                  template=[("DIMS", dims), ("TILE", tile), *fmt], grid=(dims, rows, 1),
+                  threadgroup=(min(dims, 256), 1, 1),
                   output_shapes=[(rows, tile * dims)], output_dtypes=[mx.bfloat16])[0]
 
 def rms_norm_rows(x: mx.array, scale: mx.array, eps: mx.array, *, group: int | None = None) -> mx.array:

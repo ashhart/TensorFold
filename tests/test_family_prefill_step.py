@@ -88,6 +88,35 @@ def test_the_largest_step_that_leaves_the_context_floor_is_chosen(monkeypatch):
     assert prefill_step.choose(make, (8192, 4096, 2048), 0, []) == 2048 and Engine.model.tightened == 2
 
 
+@pytest.mark.parametrize("noise", [(0, 0, 2), (2, 0, 0), (0, 2, 0)])
+def test_a_probe_whose_peak_varies_run_to_run_gives_the_same_step(monkeypatch, noise):
+    """#95: a streamed-expert probe's peak moves between runs; the worst of three decides, wherever the high one falls."""
+
+    import mlx.core as mx
+    from mlx_lm.models.cache import KVCache
+
+    from tensorfold.engine import prefill_step
+
+    class Engine:
+        model = SimpleNamespace()
+
+        def prefill_prefix(self, tokens, cache=None, cached_tokens=0):
+            kv = KVCache()
+            kv.update_and_fetch(mx.zeros((1, 1, len(tokens), 8)), mx.zeros((1, 1, len(tokens), 8)))
+            return [kv]
+
+    runs = []
+    mib = 1 << 20
+    monkeypatch.setattr(prefill_step, "CONTEXT_FLOOR", 1000)
+    monkeypatch.setattr(mx, "get_active_memory", lambda: 1 << 30)
+    monkeypatch.setattr(mx, "reset_peak_memory", lambda: runs.append(len(runs)))
+    monkeypatch.setattr(mx, "get_peak_memory", lambda: (1 << 30) + (1 + noise[runs[-1]]) * mib)
+    # 8,192 rows take 4x the 2,048-row probe's work: 12 MiB at the high peak, 4 at the low; 4,096 take 6 or 2
+    budget = (1 << 30) + 7 * mib + 1000 * 32
+    assert prefill_step.choose(lambda grid: Engine(), (8192, 4096, 2048), budget, list(range(50))) == 4096
+    assert len(runs) == 3
+
+
 def test_nemotron_offers_8192_token_prompt_chunks_with_tensor_units(monkeypatch):
     from tensorfold.families import nemotron_h, qwen3_5
 

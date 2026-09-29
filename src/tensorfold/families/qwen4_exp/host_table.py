@@ -408,7 +408,8 @@ def from_checkpoint(model_dir: Path, name: str, count: int, *, ssd: bool = False
     headers = {path: read_header(path) for path in sorted(Path(model_dir).glob("model*.safetensors"))}
     files = []
     for i in range(count):
-        key = f"{name}.shard_{i}"
+        key = next((k for k in (f"{name}.shard_{i}", f"{name}.shards.{i}")      # mlx-lm and oMLX names
+                    if any(f"{k}.weight" in h for h in headers.values())), f"{name}.shard_{i}")
         found = [(path, h) for path, h in headers.items() if any(f"{key}.{part}" in h for part in _PARTS)]
         if len(found) != 1 or not all(f"{key}.{part}" in found[0][1] for part in _PARTS):
             raise ValueError(f"{key}: expected its weight, scales and biases together in one checkpoint file")

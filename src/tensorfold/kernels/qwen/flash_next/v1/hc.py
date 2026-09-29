@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from tensorfold.kernels.qwen.flash_next.v1.base import MMA_HEADER, QDOT_HEADER, QWeights, count, kernel
+from tensorfold.kernels.qwen.flash_next.v1.base import (AFFINE_HEADER, AFFINE_MMA_HEADER, MMA_HEADER,
+                                                        QDOT_HEADER, QWeights, count, edited, kernel)
 
 _WRITEBACK = "hv = float(bfloat(hv + float(bfloat(branch * float(INJ[r * S + s])))));"
 
@@ -304,6 +305,43 @@ _UP_ROW = r"""
   }
 """
 
+_W_DOWN = ("constexpr int W = S * D, G = W / 32;", "constexpr int W = S * D, G = W / GS;")
+_DOWN_MMA_Q = edited(_DOWN_MMA, [_W_DOWN, (
+    "const device uint* wq = QW + size_t(o) * (W / 8) + fn / 2;",
+    "const device uint* wq = QW + size_t(o) * (W * BITS / 32);"), (
+    "mma_group(wq[4 * g], xa, xc, fm, float(QS[size_t(o) * G + g]), float(QB[size_t(o) * G + g]), acc0, acc1);",
+    "mma_chunk<BITS>(wq + g * BITS, xa, xc, fm, fn, float(QS[size_t(o) * G + g * 32 / GS]),\n"
+    "                    float(QB[size_t(o) * G + g * 32 / GS]), acc0, acc1);")])
+_UP_MMA_Q = edited(_UP_MMA, [(
+    "const device uint* wq = QW + size_t(o) * (LOW / 8) + fn / 2;",
+    "const device uint* wq = QW + size_t(o) * (LOW * BITS / 32);"), (
+    "mma_group(wq[4 * g], xa, xc, fm, float(QS[size_t(o) * GL + g]), float(QB[size_t(o) * GL + g]), acc0, acc1);",
+    "mma_chunk<BITS>(wq + g * BITS, xa, xc, fm, fn, float(QS[size_t(o) * (LOW / GS) + g * 32 / GS]),\n"
+    "                      float(QB[size_t(o) * (LOW / GS) + g * 32 / GS]), acc0, acc1);")])
+_DOWN_ROW_Q = edited(_DOWN_ROW, [_W_DOWN, (
+    "ps[gl][ol] = scalar_group(QW + size_t(o) * (W / 8) + 4 * (32 * k + gl), xs + 32 * gl);",
+    "ps[gl][ol] = scalar_chunk<BITS>(QW + size_t(o) * (W * BITS / 32) + (32 * k + gl) * BITS, xs + 32 * gl);"), (
+    "acc = fma(float(QB[size_t(o) * G + g]), vs[4 * c + j],\n                fma(float(QS[size_t(o) * G + g]),",
+    "acc = fma(float(QB[size_t(o) * G + g * 32 / GS]), vs[4 * c + j],\n"
+    "                fma(float(QS[size_t(o) * G + g * 32 / GS]),")])
+_UP_ROW_Q = edited(_UP_ROW, [(
+    "ps[g][n] = scalar_group(QW + size_t(o) * (LOW / 8) + 4 * g, act + 32 * g);",
+    "ps[g][n] = scalar_chunk<BITS>(QW + size_t(o) * (LOW * BITS / 32) + g * BITS, act + 32 * g);"), (
+    "acc = fma(float(QB[size_t(o) * GL + gg]), vs[gg], fma(float(QS[size_t(o) * GL + gg]), ps[gg][n], acc));",
+    "acc = fma(float(QB[size_t(o) * (LOW / GS) + gg * 32 / GS]), vs[gg],\n"
+    "                fma(float(QS[size_t(o) * (LOW / GS) + gg * 32 / GS]), ps[gg][n], acc));")])
+_AFFINE_HEADERS = QDOT_HEADER + RINV + MMA_HEADER + AFFINE_HEADER + AFFINE_MMA_HEADER
+
+
+def _names(down: QWeights, up: QWeights, base: str) -> tuple[tuple, tuple, str, str]:
+    """(down template, up template, down kernel name, up kernel name): the original kernels for 4-bit group 32."""
+
+    if down.q4 and up.q4:
+        return (), (), f"q4_hc_down_{base}", f"q4_hc_up_{base}"
+    return ((("BITS", down.bits), ("GS", down.group)), (("BITS", up.bits), ("GS", up.group)),
+            f"qa_hc_down_{base}", f"qa_hc_up_{base}")
+
+
 def hc_project(h_new: mx.array, ssp: mx.array, down: QWeights, up: QWeights, norm_scale: mx.array, *,
                eps: mx.array, streams: int, low: int, dims_a_group: int = 0) -> tuple[mx.array, mx.array]:
     """Return mixed rows and inject gates with padding unset; dims_a_group changes performance without changing results."""
@@ -319,16 +357,19 @@ def hc_project(h_new: mx.array, ssp: mx.array, down: QWeights, up: QWeights, nor
     if rows <= SCALAR_ROWS:
         return _project_rows(h_new, ssp, down, up, norm_scale, eps=eps, streams=streams, low=low)
     tiles = -(-rows // 8)
-    run = kernel("q4_hc_down_mma", _DOWN_MMA, ["HN", "SSP", "NW", "QW", "QS", "QB", "eps", "rows"], ["PART"],
-                 header=QDOT_HEADER + RINV + MMA_HEADER)
+    dq, uq, dname, uname = _names(down, up, "mma")
+    generic = bool(dq or uq)
+    run = kernel(dname, _DOWN_MMA_Q if generic else _DOWN_MMA, ["HN", "SSP", "NW", "QW", "QS", "QB", "eps", "rows"],
+                 ["PART"], header=_AFFINE_HEADERS if generic else QDOT_HEADER + RINV + MMA_HEADER)
     part = run(inputs=[h_new, ssp, norm_scale, down.weight, down.scales, down.biases, eps, count(rows)],
-               template=[("S", streams), ("D", dims), ("ND", nd)],
+               template=[("S", streams), ("D", dims), ("ND", nd), *dq],
                grid=(-(-nd // 8) * 256, splits, tiles), threadgroup=(256, 1, 1),
                output_shapes=[(splits, rows, nd)], output_dtypes=[mx.float32])[0]
-    run = kernel("q4_hc_up_mma", _UP_MMA, ["HN", "SSP", "NW", "PART", "QW", "QS", "QB", "eps", "rows"],
-                 ["MIXED", "INJOUT"], header=QDOT_HEADER + RINV + MMA_HEADER)
+    run = kernel(uname, _UP_MMA_Q if generic else _UP_MMA, ["HN", "SSP", "NW", "PART", "QW", "QS", "QB", "eps", "rows"],
+                 ["MIXED", "INJOUT"], header=_AFFINE_HEADERS if generic else QDOT_HEADER + RINV + MMA_HEADER)
     mixed, inject = run(inputs=[h_new, ssp, norm_scale, part, up.weight, up.scales, up.biases, eps, count(rows)],
-                        template=[("S", streams), ("D", dims), ("LOW", low), ("ND", nd), ("KS", splits), ("DT", dt)],
+                        template=[("S", streams), ("D", dims), ("LOW", low), ("ND", nd), ("KS", splits), ("DT", dt),
+                                  *uq],
                         grid=(dims // dt * 32 * streams, tiles, 1), threadgroup=(32 * streams, 1, 1),
                         output_shapes=[(rows, dims), (max(rows, 2), streams)],
                         output_dtypes=[mx.bfloat16, mx.bfloat16])
@@ -349,17 +390,19 @@ def _project_rows(h_new: mx.array, ssp: mx.array, down: QWeights, up: QWeights, 
     nd = down.rows
     if dims % 8 or wide % 1024 or 8 * streams * (low // 32) > 1024:
         raise ValueError("hc_project: the scalar path takes D a multiple of 8, S * D of 1024, 8 S LOW / 32 <= 1024")
-    header = QDOT_HEADER + RINV + MMA_HEADER + _SCALAR_HEADER
-    run = kernel("q4_hc_down_row", _DOWN_ROW, ["HN", "SSP", "NW", "QW", "QS", "QB", "eps", "rows"], ["PART"],
-                 header=header)
+    dq, uq, dname, uname = _names(down, up, "row")
+    generic = bool(dq or uq)
+    header = (_AFFINE_HEADERS if generic else QDOT_HEADER + RINV + MMA_HEADER) + _SCALAR_HEADER
+    run = kernel(dname, _DOWN_ROW_Q if generic else _DOWN_ROW, ["HN", "SSP", "NW", "QW", "QS", "QB", "eps", "rows"],
+                 ["PART"], header=header)
     part = run(inputs=[h_new, ssp, norm_scale, down.weight, down.scales, down.biases, eps, count(rows)],
-               template=[("S", streams), ("D", dims), ("ND", nd)],
+               template=[("S", streams), ("D", dims), ("ND", nd), *dq],
                grid=(-(-nd // 32) * 1024, splits, rows), threadgroup=(1024, 1, 1),
                output_shapes=[(splits, rows, nd)], output_dtypes=[mx.float32])[0]
-    run = kernel("q4_hc_up_row", _UP_ROW, ["HN", "SSP", "NW", "PART", "QW", "QS", "QB", "eps", "rows"],
+    run = kernel(uname, _UP_ROW_Q if generic else _UP_ROW, ["HN", "SSP", "NW", "PART", "QW", "QS", "QB", "eps", "rows"],
                  ["MIXED", "INJOUT"], header=header)
     return tuple(run(inputs=[h_new, ssp, norm_scale, part, up.weight, up.scales, up.biases, eps, count(rows)],
-                     template=[("S", streams), ("D", dims), ("LOW", low), ("ND", nd), ("KS", splits)],
+                     template=[("S", streams), ("D", dims), ("LOW", low), ("ND", nd), ("KS", splits), *uq],
                      grid=(dims // 8 * 8 * streams * (low // 32), 1, rows),
                      threadgroup=(8 * streams * (low // 32), 1, 1),
                      output_shapes=[(rows, dims), (max(rows, 2), streams)],

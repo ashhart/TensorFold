@@ -309,9 +309,22 @@ def sanitize(weights: dict[str, mx.array]) -> tuple[dict[str, mx.array], dict[st
         if key.rsplit(".", 1)[-1] in _PLE_CONSTANTS:
             extras[key] = value
             continue
-        key = key.replace("ngram_embedding.shard_", "shards.")
+        if key.endswith("ngram_embedding.weight_scale"):       # an FP8 conversion's table scale: 1 when quantized
+            if not bool(mx.all(value.astype(mx.float32) == 1.0).item()):
+                raise ValueError(f"{name}: an n-gram table scale other than 1 is not supported")
+            continue
+        key = key.replace("ngram_embedding.shard_", "shards.").replace("ngram_embedding.shards.", "shards.")
         out[key] = value
     return out, extras
+
+
+def quant_params(config: dict[str, Any], path: str) -> dict[str, Any] | bool:
+    """nn.quantize's parameters for the module at ``path`` from config.json's per-module entries (MLX's rules)."""
+
+    from tensorfold.quantization import resolve_affine
+
+    spec = resolve_affine(config, path.replace(".ple_embedding.shards.", ".ple_embedding.ngram_embedding.shards."))
+    return False if spec is None else {"group_size": spec.group_size, "bits": spec.bits, "mode": spec.mode}
 
 
 def norms_stored_around_one(weights: dict[str, mx.array]) -> bool:
@@ -339,7 +352,7 @@ def prefetch_ngrams(model: Qwen4Exp) -> None:
 
 def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False,
          ssd_experts: float | None = None) -> tuple[Qwen4Exp, Any]:
-    from mlx_lm.utils import load_tokenizer
+    from tensorfold.families.tokenizer import load_tokenizer
 
     on_host = ngrams_on_host(model_dir, ple_on_ssd)
     config = json.loads((Path(model_dir) / "config.json").read_text())
@@ -355,6 +368,10 @@ def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False,
         from tensorfold.families.qwen4_exp import stream
 
         weights = {k: v for k, v in weights.items() if not stream.switch_keys(k)}    # read into the pool instead
+    for path, emb in [(p, m) for p, m in model.named_modules() if isinstance(m, NGramEmbedding)]:
+        spec = quant_params(config, f"{path}.shards.0")                     # every shard shares one format
+        if spec:
+            emb.quant_bits, emb.quant_group = spec["bits"], spec["group_size"]
     if on_host:
         from tensorfold.families.qwen4_exp import host_table
 
@@ -368,8 +385,8 @@ def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False,
     if not lazy:
         mx.eval(list(weights.values()))
 
-    def quantized(path: str, module: nn.Module) -> bool:
-        return hasattr(module, "to_quantized") and path in quantized_paths
+    def quantized(path: str, module: nn.Module) -> dict[str, Any] | bool:
+        return hasattr(module, "to_quantized") and path in quantized_paths and quant_params(config, path)
 
     nn.quantize(model, group_size=cfg.group_size, bits=cfg.bits, class_predicate=quantized)
     if norms_stored_around_one(weights):

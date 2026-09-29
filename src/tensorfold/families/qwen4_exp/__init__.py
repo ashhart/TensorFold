@@ -8,7 +8,7 @@ from typing import Any
 MODEL_TYPES = ("qwen4_exp",)
 TITLE = "Qwen3.8 Flash Next"
 LANES = True
-# 4-bit weights in groups of 32 (what the fused kernels read), with the checkpoint's MTP head kept
+# with their MTP head: MLX affine (4-bit the default; oQ4e, oQ5e, 6- and 8-bit read too), EXL3 and NVFP4
 MODELS = ("Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP", "turboderp/Qwen3.8-Flash-Next-exl3",
           "local-inference-lab/Qwen3.8-Flash-Next-NVFP4", "RadixArk/Qwen3.8-Flash-Next-NVFP4")
 NVFP4_MODELS = MODELS[2:]
@@ -31,9 +31,23 @@ def has_mtp(model_dir: Path) -> bool:
     return any(".mtp." in name or name.startswith("mtp.") for name in json.loads(index.read_text())["weight_map"])
 
 
+def check_quantization(config: dict[str, Any], backend: str) -> None:
+    """Refuse from config.json alone an MLX format the kernels do not read: affine 2-8 bits in groups of 32-128."""
+
+    from tensorfold.quantization import checkpoint_specs
+
+    specs = [spec for spec in checkpoint_specs(config).values() if spec is not None]
+    if not specs:
+        raise ValueError(f"{TITLE} reads MLX affine-quantized weights; this checkpoint has none. Use {MODELS[0]}.")
+    formats = {(spec.bits, spec.group_size) for spec in specs}
+    if backend == "cuda" and formats != {CUDA_QUANTIZATION}:
+        bits, group = CUDA_QUANTIZATION
+        raise ValueError(f"{TITLE}'s CUDA kernels read {bits}-bit weights in groups of {group}; this checkpoint has "
+                         f"{', '.join(f'{b}-bit g{g}' for b, g in sorted(formats))}. Use {MODELS[0]}.")
+
+
 def check(model_dir: Path) -> None:
-    from tensorfold.families import (EXL3_QUANT, OWN_MODEL_HELP, describe_quantization, quant_method,
-                                     quantization, read_config)
+    from tensorfold.families import EXL3_QUANT, OWN_MODEL_HELP, describe_quantization, quant_method, read_config
 
     config = read_config(model_dir)
     if quant_method(config) == EXL3_QUANT:
@@ -56,10 +70,7 @@ def check(model_dir: Path) -> None:
         if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
             print("[tensorfold] this NVFP4 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
         return
-    bits, group = quantization(config)
-    if (bits, group) != (4, 32):
-        raise ValueError(f"TensorFold's Flash Next kernels read 4-bit weights in groups of 32; this checkpoint has "
-                         f"{bits}-bit weights in groups of {group}. Use {MODELS[0]}.")
+    check_quantization(config, "mlx")
     # Config-only preflight cannot establish whether the MTP head is missing; wait for weights or their index.
     if ((Path(model_dir) / "model.safetensors.index.json").is_file()
             or any(Path(model_dir).glob("model*.safetensors"))) and not has_mtp(model_dir):

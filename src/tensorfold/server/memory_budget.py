@@ -12,6 +12,9 @@ MEMORY_FRACTION = 0.70
 LIMIT_ENV = "TENSORFOLD_MEMORY_LIMIT_GB"
 # the process's memory outside MLX's buffers and Metal's late returns
 PROCESS_BYTES = 3 * GIB
+# a startup probe's peak moves run to run (streamed experts: how far MLX encodes ahead of each layer's SSD reads), so
+# the worst of PROBE_REPEATS sizes the prompt chunk and the window: the same flags then give the same window each start
+PROBE_REPEATS = 3
 
 
 def physical_memory_bytes() -> int:
@@ -218,6 +221,6 @@ def largest_context(memory: CacheMemory, window_tokens: int, *, budget_bytes: in
     return lo
 
 
-__all__ = ["PROCESS_BYTES", "CacheMemory", "budget_ceiling", "cache_nbytes", "configure_mlx", "fits",
+__all__ = ["PROBE_REPEATS", "PROCESS_BYTES", "CacheMemory", "budget_ceiling", "cache_nbytes", "configure_mlx", "fits",
            "largest_context", "memory_limit_bytes", "model_fraction", "needed_bytes", "process_footprint",
            "raise_hint"]

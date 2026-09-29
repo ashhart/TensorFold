@@ -354,8 +354,6 @@ def tiles(n: int, rows: int, s: int) -> int:
     """Choose output tiles within the split reduction's 16 KB threadgroup limit without changing arithmetic."""
 
     nt = 4 if n % 32 == 0 else (2 if n % 16 == 0 else 1)
-    if rows > 16:
-        nt = min(nt, 2)                 # 3-4 row tiles: 2 output tiles keep the registers in bounds
     while nt > 1 and s * ((rows + 7) // 8) * nt * 64 * 4 > 16384:
         nt //= 2
     return nt
@@ -399,9 +397,7 @@ def _launch(kind: str, rows: int, n: int, dims: int, group: int = GROUP, most: i
         per = sgs * (32 // s) * nr
         consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NR", nr), ("XB", xb), ("GS", group), ("RS", rows))
         return consts, (-(-n // per) * sgs * 32, 1, 1), (sgs * 32, 1, 1), [(rows, n)]
-    rt = min(RT_MAX, (rows + 7) // 8)
-    if 16 < rows <= 24:                # Use one threadgroup of three row tiles with two output tiles to avoid padding a partial row tile.
-        rt = 3
+    rt = min(RT_MAX, (rows + 7) // 8)          # past 16 rows the grid's y axis takes more threadgroups of two tiles
     nt = tiles(n, rt * 8, s)
     sgs = min(s, most)
     consts = (("K", dims), ("N", n), ("S", s), ("SGS", sgs), ("NT", nt), ("RT", rt), ("GS", group))

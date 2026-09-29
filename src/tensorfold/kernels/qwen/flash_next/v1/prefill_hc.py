@@ -47,7 +47,7 @@ _HEADER = base.QDOT_HEADER + RINV
 def _qmm(x: mx.array, w: Any) -> mx.array:
     from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
 
-    return prefill_mm.matmul(x, w.weight, w.scales, w.biases)
+    return prefill_mm.matmul(x, w.weight, w.scales, w.biases, group=w.group, bits=w.bits)
 
 
 def hyper_connection(hc: Any, h: mx.array, pending: tuple[mx.array, mx.array] | None, *, streams: int,

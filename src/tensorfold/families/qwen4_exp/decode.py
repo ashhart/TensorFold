@@ -14,27 +14,63 @@ from tensorfold.kernels.qwen.dense.v1 import lane_qmm, simd_qmm
 from tensorfold.kernels.qwen.flash_next.v1 import attention, base, embed, experts, gdn, hc, rows
 
 
-def _stacked(linears: list[Any]) -> tuple[nn.QuantizedLinear, list[int]]:
-    """One quantized linear for projections of the same input; each original keeps a row view of it."""
+class _Split:
+    """Projections of one input kept in stacks of one bit width each; outputs come back in member order."""
 
+    def __init__(self, parts: list[tuple[Any, list[int]]]) -> None:
+        self.parts = parts
+
+    def __call__(self, x: mx.array) -> mx.array:
+        outs: dict[int, mx.array] = {}
+        for linear, members in self.parts:
+            y = project(x, linear)
+            sizes = [int(s) for s in linear.__dict__["member_rows"]]
+            cuts = list(np.cumsum(sizes)[:-1])
+            for m, part in zip(members, mx.split(y, cuts, axis=-1) if cuts else [y]):
+                outs[m] = part
+        return mx.concatenate([outs[m] for m in sorted(outs)], axis=-1)
+
+
+def _stacked(linears: list[Any]) -> tuple[Any, list[int]]:
+    """One quantized linear for projections of the same input (one per bit width, groups made equal exactly)."""
+
+    by_bits: dict[int, list[int]] = {}
+    for i, l in enumerate(linears):
+        by_bits.setdefault(int(l.bits), []).append(i)
+    if len(by_bits) > 1:
+        return _Split([(_stacked([linears[i] for i in members])[0], members) for members in by_bits.values()]), []
+    group = min(int(l.group_size) for l in linears)
+    parts = [base.QWeights(l.weight, l.scales, l.biases, l.bits, l.group_size).widened(int(l.bits), group)
+             for l in linears]
     first = linears[0]
-    rows = sum(int(l.weight.shape[0]) for l in linears)
+    rows = sum(p.rows for p in parts)
     stacked = nn.QuantizedLinear(int(first.weight.shape[1]) * 32 // first.bits, rows, bias=False,
-                                 group_size=first.group_size, bits=first.bits)
-    stacked.weight = mx.concatenate([l.weight for l in linears])
-    stacked.scales = mx.concatenate([l.scales for l in linears])
-    stacked.biases = mx.concatenate([l.biases for l in linears])
+                                 group_size=group, bits=first.bits)
+    stacked.weight = mx.concatenate([p.weight for p in parts])
+    stacked.scales = mx.concatenate([p.scales for p in parts])
+    stacked.biases = mx.concatenate([p.biases for p in parts])
+    stacked.__dict__["member_rows"] = [p.rows for p in parts]
     mx.eval(stacked.weight, stacked.scales, stacked.biases)
     cuts, at = [], 0
     for l in linears:
         n = int(l.weight.shape[0])
-        l.weight, l.scales, l.biases = (stacked.weight[at:at + n], stacked.scales[at:at + n],
-                                        stacked.biases[at:at + n])
-        # Evaluate stacked-buffer views on this thread so the scheduler thread needs no lazy-op stream.
-        mx.eval(l.weight, l.scales, l.biases)
+        if int(l.group_size) == group:            # a regrouped member keeps its own arrays (its format is its own)
+            l.weight, l.scales, l.biases = (stacked.weight[at:at + n], stacked.scales[at:at + n],
+                                            stacked.biases[at:at + n])
+            # Evaluate stacked-buffer views on this thread so the scheduler thread needs no lazy-op stream.
+            mx.eval(l.weight, l.scales, l.biases)
         at += n
         cuts.append(at)
     return stacked, cuts[:-1]
+
+
+def _dense_rows(linear: Any) -> mx.array:
+    """A router linear's rows in bf16 (a quantized one dequantized): one matvec takes them all."""
+
+    if isinstance(linear, nn.QuantizedLinear):
+        return mx.dequantize(linear.weight, linear.scales, linear.biases, group_size=linear.group_size,
+                             bits=linear.bits).astype(mx.bfloat16)
+    return linear.weight.astype(mx.bfloat16)
 
 
 def first(a: mx.array) -> mx.array:
@@ -55,16 +91,19 @@ def _lane_project(x: mx.array, linear: Any) -> mx.array:
     weight = linear.weight
     hit = _lane.get(id(linear))
     if hit is None or hit[0] is not weight:
-        n = int(weight.shape[0])
-        nt = 64 if (linear.bits == 4 and n % 64 == 0) else 32 if n % 32 == 0 else 0   # other widths: 32 wide
-        tiled = lane_qmm.tile_weight(weight, nt, linear.group_size, bits=linear.bits) if nt else weight
-        sbt = lane_qmm.pack_scales(linear.scales, linear.biases)
+        n, bits, group = int(weight.shape[0]), int(linear.bits), int(linear.group_size)
+        scales, biases = linear.scales, linear.biases
+        if group == 128:              # two groups of 64 with the group's scale and bias: the same weights
+            scales, biases, group = mx.repeat(scales, 2, axis=1), mx.repeat(biases, 2, axis=1), 64
+        nt = 64 if (bits == 4 and n % 64 == 0) else 32 if n % 32 == 0 else 0   # other widths: 32 wide
+        tiled = lane_qmm.tile_weight(weight, nt, group, bits=bits) if nt else weight
+        sbt = lane_qmm.pack_scales(scales, biases)
         mx.eval(tiled, sbt)
-        hit = _lane[id(linear)] = (weight, tiled, sbt, nt)
-    _, tiled, sbt, nt = hit
+        hit = _lane[id(linear)] = (weight, tiled, sbt, nt, group)
+    _, tiled, sbt, nt, group = hit
     k = int(x.shape[-1])
     rows = x.size // k
-    kwargs = {"tiled": bool(nt), "nt": nt or lane_qmm.NT, "group": linear.group_size}
+    kwargs = {"tiled": bool(nt), "nt": nt or lane_qmm.NT, "group": group}
     if rows <= lane_qmm.MAX_ROWS:
         return lane_qmm.lane_matmul(x, tiled, sbt, **kwargs)
     flat = x.reshape(rows, k)
@@ -80,19 +119,22 @@ def unreadable(*models: Any) -> dict[str, int]:
     for model in (x for x in models if x is not None):
         for _, m in model.named_modules():
             mode = getattr(m, "mode", "affine")
-            if isinstance(m, nn.QuantizedLinear) and not lane_qmm.readable(m.bits, m.group_size, mode):
+            group = 64 if getattr(m, "group_size", 0) == 128 else getattr(m, "group_size", 0)   # split as 2 x 64
+            if isinstance(m, nn.QuantizedLinear) and (mode != "affine" or not lane_qmm.reads(m.bits, group)):
                 kind = f"{m.bits}-bit g{m.group_size}" + ("" if mode == "affine" else f" {mode}")
                 counts[kind] = counts.get(kind, 0) + 1
     return counts
 
 
 def project(x: mx.array, linear: Any) -> mx.array:
-    """x [..., R, K] through a 4-bit linear, a row's bits independent of R: per-row kernels before M5, lane_qmm on M5."""
+    """x [..., R, K] through an affine linear, a row's bits independent of R: per-row kernels before M5, lane_qmm on M5."""
 
     if not isinstance(linear, nn.QuantizedLinear):
         return linear(x)
     if DENSE == "lane":
         return _lane_project(x, linear)
+    if (linear.bits, linear.group_size) != (4, 32):         # other widths before M5: every row alone, at any count
+        return rows.qmv_rows(x, linear)
     if DENSE == "rows":
         return linear(x) if x.size // x.shape[-1] == 1 else rows.qmv_rows(x, linear)
     weight = linear.weight
@@ -116,7 +158,8 @@ class _HC:
         parts = [conn.input_mix_weight_down] + ([conn.block_inject_weight] if inject else [])
         self.down = base.QWeights.of(*parts)
         mx.eval(self.down.weight, self.down.scales, self.down.biases)
-        if len(parts) > 1:
+        same = all((int(l.bits), int(l.group_size)) == (self.down.bits, self.down.group) for l in parts)
+        if len(parts) > 1 and same:
             # keep the modules' own weights as views of the stacked matrix
             at = 0
             for lin in parts:
@@ -149,7 +192,8 @@ class FusedDecode:
             if layer.is_linear:
                 g = layer.linear_attn
                 proj, _ = _stacked([g.in_proj_qkv, g.in_proj_z, g.in_proj_b, g.in_proj_a])
-                g.__dict__["stacked"] = proj            # prefill chunks project through it too (GatedDeltaNet)
+                # prefill chunks project through one stack too (GatedDeltaNet); split widths go one by one
+                g.__dict__["stacked"] = proj if isinstance(proj, nn.QuantizedLinear) else None
                 conv_w = mx.contiguous(g.conv1d.weight[:, :, 0])
                 mx.eval(conv_w)
                 entry["gdn"] = (proj, conv_w, g)
@@ -162,10 +206,7 @@ class FusedDecode:
                 entry["attn"] = (proj, *scales, a)
             moe = layer.mlp
             # the router's bf16 rows and the shared expert's gate row (dequantized): one matvec
-            sgate = moe.shared_expert_gate
-            sgate_row = mx.dequantize(sgate.weight, sgate.scales, sgate.biases, group_size=sgate.group_size,
-                                      bits=sgate.bits).astype(moe.gate.weight.dtype)
-            router_rows = mx.concatenate([moe.gate.weight, sgate_row])
+            router_rows = mx.concatenate([_dense_rows(moe.gate), _dense_rows(moe.shared_expert_gate)])
             mx.eval(router_rows)
             entry["moe"] = (moe, router_rows)
             self.layers.append(entry)

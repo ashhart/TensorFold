@@ -166,14 +166,13 @@ def write_checkpoint(folder: Path, bits: int, group: int, mtp: bool) -> Path:
     return folder
 
 
-def test_flash_next_refuses_other_quantizations_and_notes_a_missing_mtp_head(tmp_path, capsys):
+def test_flash_next_reads_affine_widths_and_notes_a_missing_mtp_head(tmp_path, capsys):
     from tensorfold.families import qwen4_exp
 
     good = write_checkpoint(tmp_path / "good", 4, 32, mtp=True)
     qwen4_exp.check(good)
     assert qwen4_exp.has_mtp(good)
-    with pytest.raises(ValueError, match="Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP"):
-        qwen4_exp.check(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))
+    qwen4_exp.check(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))          # every MLX affine width reads
     plain = write_checkpoint(tmp_path / "plain", 4, 32, mtp=False)
     qwen4_exp.check(plain)
     assert not qwen4_exp.has_mtp(plain) and "no MTP head" in capsys.readouterr().out
@@ -247,7 +246,7 @@ def test_info_reads_a_local_config(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Qwen3.8 Flash Next" in out
     assert "kernels      qwen/flash_next/v1" in out
-    assert main(["info", str(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))]) == 1
+    assert main(["info", str(write_checkpoint(tmp_path / "eight", 8, 64, mtp=True))]) == 0
 
 
 def test_serve_finishes_a_config_only_cache_before_loading(tmp_path, monkeypatch, capfd):

@@ -14,7 +14,7 @@ def choose(make_engine: Any, steps: Sequence[int], budget: int, tokens: Sequence
     import mlx.core as mx
 
     from tensorfold.engine.family_common import cache_arrays
-    from tensorfold.server.memory_budget import CacheMemory
+    from tensorfold.server.memory_budget import PROBE_REPEATS, CacheMemory
 
     steps = sorted({int(s) for s in steps}, reverse=True)
     small = steps[-1]
@@ -25,17 +25,20 @@ def choose(make_engine: Any, steps: Sequence[int], budget: int, tokens: Sequence
     probe = (text * (-(-(small + 64) // len(text))))[:small + 64]
     tighten = getattr(engine.model, "tighten_prefill", None)
     while True:
-        mx.synchronize()
-        mx.clear_cache()
-        held = int(mx.get_active_memory())
-        mx.reset_peak_memory()
-        cache = engine.prefill_prefix(probe, cache=None, cached_tokens=0)
-        mx.eval(*cache_arrays(cache))
-        work = max(0, int(mx.get_peak_memory()) - int(mx.get_active_memory()))
-        per_token = CacheMemory.from_cache(cache).bytes_per_token
-        del cache
-        getattr(engine, "release_rounds", lambda: None)()
-        mx.clear_cache()
+        helds, works = [], []
+        for _ in range(PROBE_REPEATS):             # the worst of a few: one probe's run-to-run noise can't move it
+            mx.synchronize()
+            mx.clear_cache()
+            helds.append(int(mx.get_active_memory()))
+            mx.reset_peak_memory()
+            cache = engine.prefill_prefix(probe, cache=None, cached_tokens=0)
+            mx.eval(*cache_arrays(cache))
+            works.append(max(0, int(mx.get_peak_memory()) - int(mx.get_active_memory())))
+            per_token = CacheMemory.from_cache(cache).bytes_per_token
+            del cache
+            getattr(engine, "release_rounds", lambda: None)()
+            mx.clear_cache()
+        held, work = max(helds), max(works)
         context = min(int(window) or CONTEXT_FLOOR, CONTEXT_FLOOR) * per_token
         for step in steps:
             if held + work * step // small + context <= int(budget):

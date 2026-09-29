@@ -27,9 +27,9 @@ class Backend:
 
 
 def simd_qmm_backend() -> Backend:
-    """``simd_qmm``, its one-row calls through the MMA kernel for any shape whose scalar kernel's bits differ here."""
+    """``simd_qmm`` (4-bit) and ``simd_qmm_bits`` (5/6/8-bit, groups of 64), else affine_rows; checked per shape."""
 
-    from tensorfold.kernels.qwen.dense.v1 import affine_rows, simd_qmm
+    from tensorfold.kernels.qwen.dense.v1 import affine_rows, simd_qmm, simd_qmm_bits
 
     def prepare(weights: list[tuple[mx.array, mx.array, mx.array, int, int]]) -> None:
         seen: set[tuple[Any, ...]] = set()
@@ -41,6 +41,9 @@ def simd_qmm_backend() -> Backend:
                 if fast(w, s, b, gs, bits):
                     if not simd_qmm.check(w, s, b, group_size=gs):
                         simd_qmm.mma_one_row.add(shape)
+                elif simd_qmm_bits.fits(w, s, b, gs, bits):
+                    if not simd_qmm_bits.check(w, s, b, bits):
+                        simd_qmm_bits.fallback.add((shape[0], shape[1], bits))
                 else:
                     mx.eval(affine_rows.qmm(mx.zeros((1, shape[1]), dtype=mx.bfloat16), w, s, b, gs, bits))
 
@@ -50,6 +53,8 @@ def simd_qmm_backend() -> Backend:
 
     def qmm(x: mx.array, w: mx.array, s: mx.array, b: mx.array, gs: int, bits: int = 4) -> mx.array:
         if not fast(w, s, b, gs, bits):
+            if simd_qmm_bits.fits(w, s, b, gs, bits):
+                return simd_qmm_bits.qmm(x, w, s, b, bits)
             return affine_rows.qmm(x, w, s, b, gs, bits)
         rows = x.size // int(x.shape[-1])
         if 2 <= rows <= FRAGMENT_ROWS and gs == simd_qmm.GROUP:   # same bits as simd_qmm.qmm(x), less input work

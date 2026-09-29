@@ -15,8 +15,10 @@ from typing import Any, Callable
 from tensorfold.engine.lane_engine import LaneStream
 from tensorfold.server.cancellation import Cancellation, RequestCancelled
 from tensorfold.server.checkpoints import CheckpointStore, choose_checkpoints
-from tensorfold.server.errors import RoundError
+from tensorfold.server.errors import RequestError, RoundError
+from tensorfold.server.live import ChunkRate, Meter
 from tensorfold.server.prompt_fill import Filling, PromptFill
+from tensorfold.server.stream_gate import StreamGate
 
 @dataclass
 class ChatJob:
@@ -149,9 +151,14 @@ class Scheduler(PromptFill):
         self._released_at = 0            # ``starts`` when MLX's freed buffers were last handed back
         # Evaluate and save cache arrays on the scheduler thread that owns their streams during shutdown.
         self.on_stop: Callable[[], Any] | None = None
+        # streams take memory as they grow: the newest waits, or ends, when the next round's growth can't fit
+        self.gate = (StreamGate(prompt_memory, admission.memory.per_token, admission.memory.round_bytes,
+                                admission.budget, lanes=self.lanes)
+                     if admission is not None and prompt_memory is not None and self.lanes > 1 else None)
         self.stall_s = 120.0            # no round, start or finish while requests wait: dump stacks
         self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
+        self.decoded, self.prefilled = Meter(), ChunkRate()       # the live line's decode and prefill tok/s
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:
@@ -230,6 +237,19 @@ class Scheduler(PromptFill):
     def active(self) -> int:
         return len(self._jobs)
 
+    @property
+    def waiting(self) -> int:
+        """Requests not started yet: queued, or held until they fit."""
+
+        return self._queue.qsize() + (self._held is not None)
+
+    @property
+    def filling(self) -> Any:
+        """The job whose prompt is prefilling, or None."""
+
+        filling = self._filling
+        return None if filling is None else filling.job
+
     @staticmethod
     def finish_job(job: ChatJob, reason: str = "stop") -> None:
         """Ask the engine to stop a stream at the next round (safe from any thread)."""
@@ -273,6 +293,8 @@ class Scheduler(PromptFill):
                 continue  # _admit starts it
             if self._filling is None:
                 self._credit, self._rounds_left = 0.0, 0     # no prompt waits: rounds owe nothing
+            if self.gate is not None:
+                self._gate_round()
             started = self.clock()
             try:
                 landed = self.engine.step()
@@ -296,6 +318,7 @@ class Scheduler(PromptFill):
                 continue
             self.rounds += 1
             self._spend_round(self.clock() - started)
+            self.decoded.add(sum(len(t) for t in landed.values()))
             self._cancel_active()
             if self.engine.round_stats:
                 last = self.engine.round_stats[-1]
@@ -320,6 +343,7 @@ class Scheduler(PromptFill):
 
         if self.prompt_memory is not None and self._released_at != self.starts and self._queue.empty():
             self._released_at = self.starts
+            getattr(self.engine, "release_rounds", lambda: None)()
             self.prompt_memory.release_freed()
 
     def _preempt_background(self) -> None:
@@ -380,14 +404,46 @@ class Scheduler(PromptFill):
 
         if self.engine.active_count == 0:
             return True
+        reply = self._reserved(int(job.max_tokens))
         memory = self.prompt_memory
-        if memory is not None and not memory.would_fit(len(job.prompt_ids), int(job.max_tokens)):
+        if memory is not None and not memory.would_fit(len(job.prompt_ids), reply):
             return False
         if self.admission is None:
             return True
-        live = [(len(j.stream.context), len(j.prompt_ids) + int(j.max_tokens)) for j in self._jobs.values()
-                if j.stream is not None and not j.stream.finished]
-        return self.admission.admits(len(job.prompt_ids), len(job.prompt_ids) + int(job.max_tokens), live)
+        live = [(n, min(len(j.prompt_ids) + int(j.max_tokens), n + self._reserved(int(j.max_tokens))))
+                for j in self._jobs.values() if j.stream is not None and not j.stream.finished
+                for n in [len(j.stream.context)]]
+        return self.admission.admits(len(job.prompt_ids), len(job.prompt_ids) + reply, live)
+
+    def _reserved(self, reply: int) -> int:
+        """The reply tokens a stream holds memory for ahead of its length: the gate's horizon when it guards rounds."""
+
+        return reply if self.gate is None else min(reply, self.gate.horizon)
+
+    def _gate_round(self) -> None:
+        """Hold back the newest streams whose growth can't fit, or end the newest when even the oldest can't grow."""
+
+        live = sorted((j for j in self._jobs.values() if j.stream is not None and not j.stream.finished),
+                      key=lambda j: j.started_at)
+        plan = self.gate.plan([(j.stream.stream_id, len(j.stream.context), len(j.prompt_ids) + int(j.max_tokens))
+                               for j in live])
+        if set(plan.paused) != self.engine.paused:
+            print(f"[tensorfold] memory: {len(plan.paused)} of {len(live)} streams wait for room (newest first)",
+                  flush=True)
+        self.engine.paused = set(plan.paused)
+        for job in (j for j in live if j.stream.stream_id in plan.ended):
+            job.error = RequestError(
+                f"This server ran out of memory with {len(live)} streams decoding, so the newest (this request, "
+                f"after {len(job.stream.emitted)} tokens) was stopped for the older ones to finish. Retry it, "
+                "shorten the prompt or max_tokens, or start the server with a smaller --parallel.")
+            print(f"[tensorfold] memory: ended {job.job_id}, the newest of {len(live)} streams", flush=True)
+            self.engine.discard_stream(job.stream)
+            job.stream.finish_reason = "error"
+            job.stream.history_checkpoints = []
+            del self._jobs[job.stream.stream_id]
+            self._finish(job)
+            if self.prompt_memory is not None:
+                self.prompt_memory.release_freed()      # its arrays are free now: the next plan sees the room
 
     def _read_disk_block(self, prompt: list[int], usable: Any = None) -> None:
         """Put the longest stored prefix ``usable`` accepts (system blocks, saved conversations) in the store."""
@@ -437,7 +493,9 @@ class Scheduler(PromptFill):
             job.cancellation.check()
             memory = self.prompt_memory
             if memory is not None:
-                memory.begin(len(job.prompt_ids), int(job.max_tokens), admit=self.checkpoints is None or job.vision is not None)
+                getattr(self.engine, "release_rounds", lambda: None)()     # no stream live: rows are nobody's (#95)
+                memory.begin(len(job.prompt_ids), self._reserved(int(job.max_tokens)),
+                             admit=self.checkpoints is None or job.vision is not None)
                 if job.vision is not None:
                     memory.require_workspace(self.engine.model.vision.estimate_workspace_bytes(job.vision))
             cache = None

@@ -27,10 +27,11 @@ def check(model_dir: str | Path) -> None:
 
 def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", drafter_bits: int = 4,
          **_: Any) -> tuple[Any, Any]:
-    """2-bit lanes with tensor units; before M5 codes widened to 4 bits, or the pack's 2-bit rows where those don't fit."""
+    """2-bit lanes with tensor units; before M5 as many layers' codes widened to 4 bits as the budget fits, the rest
+    read as the pack's 2-bit rows."""
 
     import mlx.core as mx
-    from mlx_lm.utils import load_tokenizer
+    from tensorfold.families.tokenizer import load_tokenizer
 
     from tensorfold.families.bonsai import pack
     from tensorfold.families.qwen3_5 import lane_family, tensor_units
@@ -39,10 +40,14 @@ def load(model_dir: Path, *, lane_kernels: str = "auto", drafter: str = "", draf
     if lane_kernels == "on" and not tensor_units():
         raise SystemExit(f"[tensorfold] {TITLE}: --lane-kernels on needs Metal 4 tensor units (an M5-generation GPU)")
     lanes = lane_kernels == "on" or (lane_kernels == "auto" and tensor_units())
-    form = "lanes" if lanes else pack.pre_m5_form(model_dir, memory_limit_bytes(mx))
+    budget = memory_limit_bytes(mx)
+    form = "lanes" if lanes else pack.pre_m5_form(model_dir, budget)
     if form == "packed":
         print(f"[tensorfold] {TITLE}: the codes widened to 4 bits would leave too little of this Mac's memory "
               "budget, so the row decoder reads the pack's 2-bit weights as stored (slower rows)", flush=True)
+    elif form.startswith("widened:"):
+        print(f"[tensorfold] {TITLE}: {form.split(':')[1]} of {len(pack.widening(model_dir)[1])} layers widened for "
+              f"speed (budget {budget / 2**30:.1f} GiB); the rest read the pack's 2-bit weights as stored", flush=True)
     model = pack.build(model_dir, form=form)
     eos = json.loads((Path(model_dir) / "generation_config.json").read_text()).get("eos_token_id")
     tokenizer = load_tokenizer(Path(model_dir), eos_token_ids=eos if isinstance(eos, list) else None)

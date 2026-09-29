@@ -109,12 +109,13 @@ def test_other_widths_are_refused():
         assert not lane_qmm.supports(w, s, x, bits, 64, "affine")
         with pytest.raises(ValueError):
             lane_qmm.lane_matmul(x, w, lane_qmm.pack_scales(s, s))
-    for bits in (2, 3, 5, 6, 8):                                   # groups of 32 are 4-bit only
+    for bits in (2, 3, 5, 6, 8):              # install() routes groups of 32 at 4 bits only; the kernels read them all
         w = mx.zeros((32, 128 * bits // 32), dtype=mx.uint32)
         assert not lane_qmm.supports(w, mx.ones((32, 4), dtype=mx.bfloat16), x, bits, 32, "affine")
         assert not lane_qmm.supports(w, s, x, bits, 64, "mxfp4")
+        assert lane_qmm.reads(bits, 32) and not lane_qmm.reads(bits, 128)
         with pytest.raises(ValueError):
-            lane_qmm.lane_matmul(x, w, lane_qmm.pack_scales(s, s), group=32)
+            lane_qmm.lane_matmul(x, w, lane_qmm.pack_scales(s, s), group=128)
     w3 = mx.zeros((64, 12), dtype=mx.uint32)
     assert lane_qmm.supports(w3, mx.ones((64, 2), dtype=mx.bfloat16), x, 3, 64, "affine")
     assert not lane_qmm.supports(w3, mx.ones((64, 2), dtype=mx.bfloat16), x, 3, 32, "affine")

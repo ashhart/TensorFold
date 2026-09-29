@@ -6,7 +6,8 @@ from typing import Any
 
 import mlx.core as mx
 
-from tensorfold.kernels.qwen.flash_next.v1.base import QDOT_HEADER, QWeights, count, kernel
+from tensorfold.kernels.qwen.flash_next.v1.base import (AFFINE_HEADER, LANE_CODES, QDOT_HEADER, QWeights, by_rows,
+                                                        count, edited, kernel)
 from tensorfold.kernels.qwen.flash_next.v1.hc import RINV
 
 _QMV_ROWS = r"""
@@ -110,25 +111,73 @@ _HC_UP2 = r"""
   }
 """
 
+_HC_DOWN_SPLIT_Q = edited(_HC_DOWN_SPLIT, [(
+    "float acc = qgroup_dot(QW + (size_t(o) * GROUPS + grp) * 4, float(QS[o * GROUPS + grp]), float(QB[o * GROUPS + grp]), x);",
+    "float acc = qchunk_dot<BITS>(QW + size_t(o) * (W * BITS / 32) + grp * BITS, float(QS[o * (W / GS) + grp * 32 / GS]),\n"
+    "                                float(QB[o * (W / GS) + grp * 32 / GS]), x);")])
+_HC_UP2_Q = edited(_HC_UP2, [(
+    "part[i][q] = qgroup_dot(QW + (size_t(row) * GPR + q) * 4, float(QS[row * GPR + q]), float(QB[row * GPR + q]), x);",
+    "part[i][q] = qchunk_dot<BITS>(QW + size_t(row) * (LOW * BITS / 32) + q * BITS, float(QS[row * (LOW / GS) + q * 32 / GS]),\n"
+    "                                  float(QB[row * (LOW / GS) + q * 32 / GS]), x);")])
+
+_QMV_ROWS_Q = r"""
+  // qmv_rows for any width: simdgroup r runs the qmv_fast loop (VPT codes a lane a step) for input row r
+  const uint lane = thread_index_in_simdgroup;
+  const int r = int(simdgroup_index_in_threadgroup);
+  const int row0 = int(threadgroup_position_in_grid.y) * RPS;
+  constexpr int VPT = lane_values(BITS), RB = K * BITS / 8, KG = K / GS;
+  const device uint8_t* w = (const device uint8_t*)W + size_t(row0) * RB;
+  const device bfloat* x = X + r * K;
+  float acc[RPS];
+  for (int j = 0; j < RPS; j++) acc[j] = 0.0f;
+  for (int v0 = int(lane) * VPT; v0 < K; v0 += 32 * VPT) {
+    float xv[VPT], sum = 0.0f;
+    for (int i = 0; i < VPT; i++) { xv[i] = float(x[v0 + i]); sum += xv[i]; }
+    for (int j = 0; j < RPS; j++) {
+      float q[VPT];
+      lane_codes<BITS, VPT>(w + j * RB, v0, q);
+      float d = 0.0f;
+      for (int i = 0; i < VPT; i++) d = fma(q[i], xv[i], d);
+      const size_t at = size_t(row0 + j) * KG + v0 / GS;
+      acc[j] += fma(float(S[at]), d, float(B[at]) * sum);
+    }
+  }
+  for (int j = 0; j < RPS; j++) {
+    const float v = simd_sum(acc[j]);
+    if (lane == 0) OUT[r * N + row0 + j] = bfloat(v);
+  }
+"""
+
 ROWS_A_CALL = 32     # simdgroups a qmv_rows threadgroup: one an input row
 
 
 def qmv_rows(x: mx.array, weights: Any, *, rows_per_simdgroup: int = 4) -> mx.array:
-    """x [..., K] @ W.T for 4-bit groups of 32: every row MLX's one-row bits, whatever the row count."""
+    """x [..., K] @ W.T, each row alone in a simdgroup: 4-bit group 32 with MLX's one-row bits, other widths alike."""
 
     shape = x.shape
     x2 = x.reshape(-1, shape[-1])
     rows, dims = int(x2.shape[0]), int(x2.shape[1])
     n = int(weights.weight.shape[0])
-    if dims % 512 or n % rows_per_simdgroup:
-        raise ValueError(f"qmv_rows: needs K % 512 == 0 and N % {rows_per_simdgroup} == 0")
-    run = kernel("q4_qmv_rows", _QMV_ROWS, ["X", "W", "S", "B"], ["OUT"], reserve=32 * ROWS_A_CALL)
+    bits, group = int(getattr(weights, "bits", 4)), int(getattr(weights, "group_size", 32))
+    if (bits, group) == (4, 32):
+        if dims % 512 or n % rows_per_simdgroup:
+            raise ValueError(f"qmv_rows: needs K % 512 == 0 and N % {rows_per_simdgroup} == 0")
+        run = kernel(*by_rows("q4_qmv_rows", _QMV_ROWS, rows), ["X", "W", "S", "B"], ["OUT"],
+                     reserve=32 * ROWS_A_CALL)
+        fmt = []
+    else:
+        if dims % 16:
+            raise ValueError("qmv_rows: needs K % 16 == 0")
+        rows_per_simdgroup = next(c for c in (rows_per_simdgroup, 2, 1) if n % c == 0)   # a row's bits never depend on it
+        run = kernel("qa_qmv_rows", _QMV_ROWS_Q, ["X", "W", "S", "B"], ["OUT"], header=QDOT_HEADER + LANE_CODES,
+                     reserve=32 * ROWS_A_CALL)
+        fmt = [("BITS", bits), ("GS", group)]
     parts = []
     for lo in range(0, rows, ROWS_A_CALL):
         part = x2[lo:lo + ROWS_A_CALL]
         m = int(part.shape[0])
         parts.append(run(inputs=[part, weights.weight, weights.scales, weights.biases],
-                         template=[("K", dims), ("N", n), ("RPS", rows_per_simdgroup)],
+                         template=[("K", dims), ("N", n), ("RPS", rows_per_simdgroup), *fmt],
                          grid=(32 * m, n // rows_per_simdgroup, 1), threadgroup=(32 * m, 1, 1),
                          output_shapes=[(m, n)], output_dtypes=[mx.bfloat16])[0])
     out = parts[0] if len(parts) == 1 else mx.concatenate(parts)
@@ -145,17 +194,28 @@ def hc_project(h_new: mx.array, ssp: mx.array, down: QWeights, up: QWeights, nor
     splits = groups // 32
     if groups % 32:
         raise ValueError("hc_project: S * D must be a multiple of 1024")
-    down_run = kernel("q4_hc_down_split", _HC_DOWN_SPLIT, ["HN", "SSP", "NW", "QW", "QS", "QB", "eps", "rows"],
-                      ["PART"], header=QDOT_HEADER + RINV)
+    generic = not (down.q4 and up.q4)
+    dq = [("BITS", down.bits), ("GS", down.group)] if generic else []
+    uq = [("BITS", up.bits), ("GS", up.group)] if generic else []
+    if generic:
+        down_run = kernel("qa_hc_down_split", _HC_DOWN_SPLIT_Q, ["HN", "SSP", "NW", "QW", "QS", "QB", "eps", "rows"],
+                          ["PART"], header=QDOT_HEADER + RINV + AFFINE_HEADER)
+    else:
+        down_run = kernel(*by_rows("q4_hc_down_split", _HC_DOWN_SPLIT, rows),
+                          ["HN", "SSP", "NW", "QW", "QS", "QB", "eps", "rows"], ["PART"], header=QDOT_HEADER + RINV)
     part = down_run(inputs=[h_new, ssp, norm_scale, down.weight, down.scales, down.biases, eps, count(rows)],
-                    template=[("S", streams), ("D", dims), ("ND", down.rows)],
+                    template=[("S", streams), ("D", dims), ("ND", down.rows), *dq],
                     grid=(-(-down.rows // 8) * 256, splits, rows), threadgroup=(256, 1, 1),
                     output_shapes=[(splits, rows, down.rows)], output_dtypes=[mx.float32])[0]
     threads = streams * 8 * (low // 32)
-    up_run = kernel("q4_hc_up2", _HC_UP2, ["HN", "SSP", "PART", "QW", "QS", "QB", "NW", "eps", "rows"],
-                    ["MIXED", "INJOUT"], header=QDOT_HEADER + RINV)
+    names = ["HN", "SSP", "PART", "QW", "QS", "QB", "NW", "eps", "rows"]
+    if generic:
+        up_run = kernel("qa_hc_up2", _HC_UP2_Q, names, ["MIXED", "INJOUT"], header=QDOT_HEADER + RINV + AFFINE_HEADER)
+    else:
+        up_run = kernel(*by_rows("q4_hc_up2", _HC_UP2, rows), names, ["MIXED", "INJOUT"], header=QDOT_HEADER + RINV)
     mixed, inject = up_run(inputs=[h_new, ssp, part, up.weight, up.scales, up.biases, norm_scale, eps, count(rows)],
-                           template=[("S", streams), ("D", dims), ("LOW", low), ("ND", down.rows), ("KS", splits)],
+                           template=[("S", streams), ("D", dims), ("LOW", low), ("ND", down.rows), ("KS", splits),
+                                     *uq],
                            grid=(dims // 8 * threads, rows, 1), threadgroup=(threads, 1, 1),
                            output_shapes=[(rows, dims), (max(rows, 2), streams)],
                            output_dtypes=[mx.bfloat16, mx.bfloat16])

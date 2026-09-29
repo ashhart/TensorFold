@@ -515,7 +515,7 @@ def test_profile_probe_sizes_a_full_chunk_before_any_request_and_releases_it():
     memory = controller(runtime=runtime)
     engine = ProbeEngine(runtime)
     memory.profile_probe(engine)
-    assert engine.probes == [256 + 64]
+    assert engine.probes == [256 + 64] * 3                  # the worst of three probes (their peaks vary run to run)
     assert memory.workspace_profiled and memory.observed_work == 400
     assert memory.profile.bytes_per_token == 4 and memory.profile.step == 256
     assert engine.prefill_guard is None and runtime.cache == 0
@@ -663,7 +663,7 @@ def test_sizing_releases_the_probes_last_round_before_measuring_the_model():
     original = engine.prefill_prefix
     engine.prefill_prefix = lambda *a, **k: order.append("prompt") or original(*a, **k)
     assert memory.sized(engine, probes) == "admission"
-    assert order == ["concurrency", "release", "prompt"]
+    assert order == ["concurrency", "release", "prompt", "prompt", "prompt"]     # three probes, their worst kept
     assert memory.largest_window(8192) > 0
 
 

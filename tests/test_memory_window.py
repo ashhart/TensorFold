@@ -132,3 +132,36 @@ def test_without_prompt_retention_the_default_window_reserves_no_retained_copy()
         assert served.context_window == memory.affordable // 1024 * 1024 > 60_000
     finally:
         served.close()
+
+
+class Rows:
+    """The last round's rollback rows (a wide window's recurrent states), kept until ``release_rounds``."""
+
+    def __init__(self, positions: int) -> None:
+        self.keys = self.values = Array((1, 1, positions, 256))
+        LIVE.add(self)
+
+
+def test_a_finished_rounds_rollback_rows_go_before_the_next_prompt_is_sized():
+    """#95: what the engine keeps from its last round belongs to no live stream once the reply ends. The next prompt
+    near the promised window is admitted and kept (the startup promise) only if those rows go first."""
+
+    served = app(int(1.375 * 2**30), context_window=262144, fit_context=True)
+    try:
+        engine, model = served.scheduler.engine, served.scheduler.engine.model
+        step = engine.step
+
+        def round_keeping_rows():
+            got = step()
+            model.rows = Rows(64 * 1024)               # 64 MiB, as a wide window's DeltaNet states would be
+            return got
+
+        engine.step = round_keeping_rows
+        model.release_rounds = lambda: setattr(model, "rows", None)
+        served.chat([{"role": "user", "content": "hello there"}], max_tokens=4)
+        long = "notes " * int(served.context_window * 0.9 / 6)
+        served.chat([{"role": "user", "content": long}], max_tokens=4)
+        kept = max((len(entry.tokens) for entry in served.checkpoints._entries), default=0)
+        assert kept >= len(long) - 8                    # its prompt is kept for the next turn
+    finally:
+        served.close()

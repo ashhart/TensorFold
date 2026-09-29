@@ -190,7 +190,7 @@ def load(model_dir: Path, *, drafter: str = "", mtp_drafts: int | None = None, c
          **_: Any) -> tuple[DeepSeekFlash, Any]:
     """The runtime and tokenizer; ``drafter`` is a DSpark or MTP head folder (default 3 MTP drafts, 0: none)."""
 
-    from mlx_lm.utils import load_tokenizer
+    from tensorfold.families.tokenizer import load_tokenizer
 
     from tensorfold.families.deepseek_v4 import dspark as dspark_module
     from tensorfold.families.deepseek_v4 import mtp as mtp_module

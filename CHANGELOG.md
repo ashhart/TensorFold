@@ -3,6 +3,58 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.4.0 (29 Sep 2026)
+
+- **oQ formats and MLX 8-bit at 4-bit speed on M1-M4.** 5-, 6- and 8-bit linears now run on the matrix units with the
+  same exactness. Qwen3.8-27B at oQ4e has half the KL against bf16 of MLX's 4-bit for 6% more bytes. On an M3 Ultra
+  it now verifies 8-row windows in 31.9 ms instead of 40.8, within 1-5% of the 4-bit at every width. Served with
+  DFlash2 drafts, sampled code runs 14% faster, chat 5-7%, and greedy code is level. The 5- and 6-bit layers use the
+  matrix chain's arithmetic now, so replies can differ from 0.3.x's by a token here and there, and still equal their
+  own `"draft": false` replies.
+- **More streams on Macs.** A stream holds memory for its next 2,048 tokens, not its whole reply. A shared round's
+  working memory is charged to the streams that share it. On a 64 GB Mac the 27B serves 16 streams at 32k contexts,
+  where 0.3.x served 4-9. When memory runs short, kept prompts go first, then the newest streams wait, then the
+  newest ends with an error that names `--parallel`.
+- **Prompts inside the promised window are admitted and kept (#95).**
+  - A finished request's rollback rows are released before the next prompt is sized.
+  - The startup line counts the probe round once: "0 streams of 8,192 tokens fit" became 13 with the reporter's
+    flags.
+  - The same flags give the same window on every start.
+
+  Thanks to @benwilson.
+- **Bonsai on Macs short of memory for the full widening** now widens as many layers as fit (60 of 64 at 25.2 GiB).
+  Code runs 55 -> 78 tok/s on an M3 Ultra at the #94 reporter's budget. Thanks to @MESevenJourney.
+- **Flash Next on M1-M4** runs 2-7% faster, drafted and serial, on an M3 Ultra.
+  - The attention gate runs in the merge kernel, the PLE layer and router are fused, and chained drafts queue as
+    they're built.
+  - From two rows, the 4-bit dots skip the int-to-float convert (on M3 and M4 through half-precision nibbles), so
+    windows of 3-16 rows cost 3-4% less with the same bits.
+- **Flash Next's 2-8-bit and mixed checkpoints on Macs.** oQ4, oQ4e and oQ5e, and MLX 6- and 8-bit checkpoints,
+  load and serve, each module in its checkpoint's own format. Before, a mixed checkpoint with a 4-bit base passed
+  `tensorfold info` and then failed to load. 4-bit weights in groups of 32 keep their kernels. Other widths run new
+  kernels whose rows keep their bits at any row count, so drafted replies still equal `"draft": false`.
+- **GLM-5.3 oQ4 loads as downloaded.** Its config lists 46 `mlp_layer_types` for 45 layers (the MTP layer too), and
+  transformers refused it, so the tokenizer didn't load. TensorFold now reads it as is.
+- **A live line under `tensorfold serve` on Macs.** In a terminal, one line under the log shows open connections and
+  decode and prefill tok/s, redrawn in place. Log files see nothing new, and `TENSORFOLD_NO_LIVE=1` turns it off.
+- **MLX 0.32.3 (#88).**
+  - TensorFold runs on MLX 0.32.2 and 0.32.3, and a fresh install gets 0.32.3. Output is the same bit for bit on
+    both.
+  - SSD expert streaming builds its extension with the nanobind each MLX was built with (the `ssd` extra brings it).
+  - A prompt kernel that doesn't build prints a warning naming the MLX version and the fix, and
+    `TF_REQUIRE_KERNELS=1` stops at startup instead.
+- **DeepSeek-V4-Flash draft heads on Hugging Face.** `Vontra/DeepSeek-V4-Flash-DSpark-MLX` (the default once pulled)
+  and `Vontra/DeepSeek-V4-Flash-MTP-MLX`, converted from DeepSeek's MIT releases. A head is a folder holding
+  `model.safetensors` and a `config.json` that names it.
+- **Fixes.**
+  - Object and array tool arguments that the model leaves one closing bracket short are closed, and kept if they
+    then match the schema (#87).
+  - Qwen3.5 and Qwen3.6 chat templates get the same resume points as Qwen3.8, so a second turn reuses the first
+    (#83). Thanks to @philip-pentatonic.
+  - A prompt or image that can't fit even alone no longer evicts kept prompts first.
+- **Correction to 0.3.6.3's notes.** Nemotron's chat decode on the M3 Ultra wasn't 2% slower. It spreads about
+  ±2.5% between server starts, even at a fixed draft depth.
+
 ## 0.3.7 (29 Sep 2026)
 
 - **Nemotron on Macs serves concurrent requests again.** 0.3.6.3 kept one draft slot for all of a server's streams,
