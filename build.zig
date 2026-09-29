@@ -38,7 +38,11 @@ pub fn build(b: *std.Build) void {
     b.step("test-sync-upstream", "Check sync worktree and remote guards without network access").dependOn(&sync_tests.step);
     const setup_module = b.createModule(.{ .root_source_file = b.path("tools/setup_native.zig"), .target = b.graph.host, .optimize = .safe });
     const setup_tests = b.addRunArtifact(b.addTest(.{ .root_module = setup_module }));
-    b.step("test-setup", "Check setup options and prerequisite version handling without network access").dependOn(&setup_tests.step);
+    const setup_step = b.step("test-setup", "Check setup options, installed artifacts and prerequisite versions without network access");
+    setup_step.dependOn(&setup_tests.step);
+    const install_module = b.createModule(.{ .root_source_file = b.path("tools/native_install.zig"), .target = b.graph.host, .optimize = .safe });
+    const install_tests = b.addRunArtifact(b.addTest(.{ .root_module = install_module }));
+    setup_step.dependOn(&install_tests.step);
     const prefix = b.option([]const u8, "mlx-prefix", "MLX and mlx-c install prefix") orelse "build/mlx";
     const bindings = b.addTranslateC(.{
         .root_source_file = b.path(b.fmt("{s}/include/mlx/c/mlx.h", .{prefix})),
@@ -84,6 +88,15 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = mod });
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Run native host-side unit tests (GPU parity: run --check-exact)").dependOn(&run_tests.step);
+    const runtime_check = b.addRunArtifact(exe);
+    runtime_check.addArgs(&.{ "check-runtime", "build/native-checks/runtime.json" });
+    b.step("test-runtime", "Verify loaded MLX-C CPU/GPU arithmetic and record hardware capabilities").dependOn(&runtime_check.step);
+    const smoke_module = b.createModule(.{ .root_source_file = b.path("tools/smoke_native.zig"), .target = b.graph.host, .optimize = .safe });
+    const smoke = b.addRunArtifact(b.addExecutable(.{ .name = "metal-smoke", .root_module = smoke_module }));
+    smoke.addArg("build/native-checks/runtime.json");
+    smoke.step.dependOn(&runtime_check.step);
+    b.step("test-metal-smoke", "Run model-free parity checks selected for the detected Metal GPU").dependOn(&smoke.step);
+    setup_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = smoke_module })).step);
     const file_tests = b.addRunArtifact(exe);
     file_tests.addArgs(&.{ "check-checkpoint-files", "build/native-checks/files" });
     b.step("test-checkpoint-files", "Exercise positional reads, corrupt checkpoints and allocation failures without a GPU").dependOn(&file_tests.step);
@@ -94,6 +107,12 @@ pub fn build(b: *std.Build) void {
     affine.step.dependOn(&affine_fixture.step);
     b.step("test-affine", "Check all packed affine formats against upstream Metal and native dispatch").dependOn(&affine.step);
     metal_tests.dependOn(&affine.step);
+    const row_attention_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/row-attention", "--row-attention" });
+    const row_attention = b.addRunArtifact(exe);
+    row_attention.addArgs(&.{ "check-variants", "build/native-checks/row-attention" });
+    row_attention.step.dependOn(&row_attention_fixture.step);
+    b.step("test-row-attention", "Compare absolute-position row/tree attention at chunk boundaries with upstream").dependOn(&row_attention.step);
+    metal_tests.dependOn(&row_attention.step);
     const tensor_quant_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/tensor-quantization", "--tensor-quantization" });
     const tensor_quant = b.addRunArtifact(exe);
     tensor_quant.addArgs(&.{ "check-variants", "build/native-checks/tensor-quantization" });

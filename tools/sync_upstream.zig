@@ -6,6 +6,7 @@ const origin_url = "git@github.com:CerebralCoding/TensorFold.git";
 pub const Git = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    archive_sources: bool = false,
 
     fn run(g: Git, args: []const []const u8) !std.process.RunResult {
         const argv = try g.allocator.alloc([]const u8, args.len + 1);
@@ -67,6 +68,23 @@ fn source(git: Git, dir: []const u8, url: []const u8, revision: []const u8) ![]c
         error.FileNotFound => false,
         else => return err,
     };
+    if (git.archive_sources) {
+        const marker = try std.fmt.allocPrint(git.allocator, "{s}/.git", .{dir});
+        if (std.Io.Dir.cwd().access(git.io, marker, .{})) return error.ExistingGitCheckout else |err| if (err != error.FileNotFound) return err;
+        const identity = try std.fmt.allocPrint(git.allocator, "{s}#{s}", .{ url, revision });
+        if (exists) {
+            try @import("native_install.zig").verify(git.allocator, git.io, dir, .source, identity, null);
+            return revision;
+        }
+        if (!std.mem.startsWith(u8, url, "git@github.com:") or !std.mem.endsWith(u8, url, ".git")) return error.UnexpectedRemote;
+        const archive_url = try std.fmt.allocPrint(git.allocator, "https://codeload.github.com/{s}/tar.gz/{s}", .{ url[15 .. url.len - 4], revision });
+        const archive = try std.fmt.allocPrint(git.allocator, "{s}.tar.gz", .{dir});
+        try command(git.io, &.{ "curl", "--fail", "--location", "--retry", "3", archive_url, "--output", archive });
+        try std.Io.Dir.cwd().createDirPath(git.io, dir);
+        try command(git.io, &.{ "tar", "-xzf", archive, "--strip-components=1", "-C", dir });
+        try @import("native_install.zig").record(git.allocator, git.io, dir, .source, identity, null);
+        return revision;
+    }
     if (!exists) _ = try git.output(&.{ "clone", "--no-checkout", url, dir });
     try validateRemote(try git.output(&.{ "-C", dir, "remote", "get-url", "origin" }), url);
     if (exists and (try git.output(&.{ "-C", dir, "status", "--porcelain" })).len != 0) return error.DependencySourceDirty;
@@ -76,31 +94,42 @@ fn source(git: Git, dir: []const u8, url: []const u8, revision: []const u8) ![]c
 }
 
 pub fn buildDependencies(git: Git, record: *std.json.Value, jpeg: bool, mlx: bool, jobs: []const u8) !void {
+    const deps = if (git.archive_sources) "build/deps-archives" else "build/deps";
+    const jpeg_source = try std.fmt.allocPrint(git.allocator, "{s}/libjpeg-turbo", .{deps});
+    const mlx_source = try std.fmt.allocPrint(git.allocator, "{s}/mlx", .{deps});
+    const bridge_source = try std.fmt.allocPrint(git.allocator, "{s}/mlx-c", .{deps});
+    const fmt_source = try std.fmt.allocPrint(git.allocator, "{s}/fmt", .{deps});
+    const jpeg_build = if (git.archive_sources) "build/jpeg-archive-build" else "build/jpeg-build";
+    const mlx_build = if (git.archive_sources) "build/mlx-archive-build" else "build/mlx-build";
+    const bridge_build = if (git.archive_sources) "build/mlxc-archive-build" else "build/mlxc-build";
     if (jpeg) {
-        try std.Io.Dir.cwd().createDirPath(git.io, "build/deps");
-        _ = try source(git, "build/deps/libjpeg-turbo", "git@github.com:libjpeg-turbo/libjpeg-turbo.git", record.object.get("jpeg_version").?.string);
+        try std.Io.Dir.cwd().createDirPath(git.io, deps);
+        _ = try source(git, jpeg_source, "git@github.com:libjpeg-turbo/libjpeg-turbo.git", record.object.get("jpeg_version").?.string);
         const root = try std.process.currentPathAlloc(git.io, git.allocator);
         const prefix = try std.fmt.allocPrint(git.allocator, "-DCMAKE_INSTALL_PREFIX={s}/build/jpeg", .{root});
-        try command(git.io, &.{ "cmake", "-S", "build/deps/libjpeg-turbo", "-B", "build/jpeg-build", "-DCMAKE_BUILD_TYPE=Release", "-DENABLE_SHARED=OFF", "-DENABLE_STATIC=ON", "-DWITH_TOOLS=OFF", "-DWITH_TESTS=OFF", prefix });
-        try command(git.io, &.{ "cmake", "--build", "build/jpeg-build", "--parallel", jobs });
-        try command(git.io, &.{ "cmake", "--install", "build/jpeg-build" });
+        try command(git.io, &.{ "cmake", "-S", jpeg_source, "-B", jpeg_build, "-DCMAKE_BUILD_TYPE=Release", "-DENABLE_SHARED=OFF", "-DENABLE_STATIC=ON", "-DWITH_TOOLS=OFF", "-DWITH_TESTS=OFF", prefix });
+        try command(git.io, &.{ "cmake", "--build", jpeg_build, "--parallel", jobs });
+        try command(git.io, &.{ "cmake", "--install", jpeg_build });
+        try @import("native_install.zig").record(git.allocator, git.io, "build/jpeg", .jpeg, record.object.get("jpeg_version").?.string, null);
     }
     if (mlx) {
-        try std.Io.Dir.cwd().createDirPath(git.io, "build/deps");
-        const revision = try source(git, "build/deps/mlx", "git@github.com:ml-explore/mlx.git", record.object.get("mlx_revision").?.string);
-        _ = try source(git, "build/deps/mlx-c", "git@github.com:ml-explore/mlx-c.git", record.object.get("mlx_c_revision").?.string);
-        _ = try source(git, "build/deps/fmt", "git@github.com:fmtlib/fmt.git", "12.1.0");
+        try std.Io.Dir.cwd().createDirPath(git.io, deps);
+        const revision = try source(git, mlx_source, "git@github.com:ml-explore/mlx.git", record.object.get("mlx_revision").?.string);
+        const bridge_revision = try source(git, bridge_source, "git@github.com:ml-explore/mlx-c.git", record.object.get("mlx_c_revision").?.string);
+        _ = try source(git, fmt_source, "git@github.com:fmtlib/fmt.git", "12.1.0");
         const root = try std.process.currentPathAlloc(git.io, git.allocator);
         const prefix = try std.fmt.allocPrint(git.allocator, "-DCMAKE_INSTALL_PREFIX={s}/build/mlx", .{root});
         const mlx_prefix = try std.fmt.allocPrint(git.allocator, "-DCMAKE_PREFIX_PATH={s}/build/mlx", .{root});
-        const fmt = try std.fmt.allocPrint(git.allocator, "-DFETCHCONTENT_SOURCE_DIR_FMT={s}/build/deps/fmt", .{root});
-        try command(git.io, &.{ "cmake", "-S", "build/deps/mlx", "-B", "build/mlx-build", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=@loader_path", "-DBUILD_SHARED_LIBS=ON", "-DMLX_BUILD_TESTS=OFF", "-DMLX_BUILD_EXAMPLES=OFF", prefix, fmt });
-        try command(git.io, &.{ "cmake", "--build", "build/mlx-build", "--parallel", jobs });
-        try command(git.io, &.{ "cmake", "--install", "build/mlx-build" });
-        try command(git.io, &.{ "cmake", "-S", "build/deps/mlx-c", "-B", "build/mlxc-build", "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=@loader_path", "-DBUILD_SHARED_LIBS=ON", "-DMLX_C_USE_SYSTEM_MLX=ON", "-DMLX_C_BUILD_EXAMPLES=OFF", prefix, mlx_prefix });
-        try command(git.io, &.{ "cmake", "--build", "build/mlxc-build", "--parallel", jobs });
-        try command(git.io, &.{ "cmake", "--install", "build/mlxc-build" });
+        const fmt = try std.fmt.allocPrint(git.allocator, "-DFETCHCONTENT_SOURCE_DIR_FMT={s}/{s}", .{ root, fmt_source });
+        try command(git.io, &.{ "cmake", "-S", mlx_source, "-B", mlx_build, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=@loader_path", "-DBUILD_SHARED_LIBS=ON", "-DMLX_BUILD_TESTS=OFF", "-DMLX_BUILD_EXAMPLES=OFF", prefix, fmt });
+        try command(git.io, &.{ "cmake", "--build", mlx_build, "--parallel", jobs });
+        try command(git.io, &.{ "cmake", "--install", mlx_build });
+        try command(git.io, &.{ "cmake", "-S", bridge_source, "-B", bridge_build, "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_OSX_DEPLOYMENT_TARGET=26.2", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON", "-DCMAKE_INSTALL_RPATH=@loader_path", "-DBUILD_SHARED_LIBS=ON", "-DMLX_C_USE_SYSTEM_MLX=ON", "-DMLX_C_BUILD_EXAMPLES=OFF", prefix, mlx_prefix });
+        try command(git.io, &.{ "cmake", "--build", bridge_build, "--parallel", jobs });
+        try command(git.io, &.{ "cmake", "--install", bridge_build });
         try record.object.put(git.allocator, "mlx_revision", .{ .string = revision });
+        try record.object.put(git.allocator, "mlx_c_revision", .{ .string = bridge_revision });
+        try @import("native_install.zig").record(git.allocator, git.io, "build/mlx", .mlx, revision, bridge_revision);
     }
 }
 

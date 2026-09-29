@@ -14,6 +14,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-runtime")) return @import("runtime_checks.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-glm-model")) return @import("glm.zig").checkModel(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-gemma-model")) return @import("gemma.zig").checkModel(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-vision")) return @import("vision.zig").check(io, args[2], args[3]);
@@ -37,10 +38,10 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-model-schema")) return @import("schema.zig").checkCheckpoint(std.meta.stringToEnum(@import("schema.zig").Kind, args[2]) orelse return error.UnsupportedModel, io, args[3]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
         std.debug.print("Qwen images: --image LOCAL_FILE (up to four); optional explicit <|vision_start|><|image_pad|><|vision_end|> markers in --prompt.\n", .{});
-        std.debug.print("Nemotron/Flash MTP options: --full-draft-vocab, --no-queued-drafts, --no-early-mtp, --no-gpu-handoff, --fixed-drafts, --check-mtp-state\n", .{});
+        std.debug.print("Text families: Qwen/Bonsai, Nemotron, Flash Next, Gemma, GLM. DeepSeek: metadata/kernel checks only.\nGLM MTP: --mtp-drafts 0..15 or --no-drafts. Gemma: serial text only.\nNemotron/Flash MTP options: --full-draft-vocab, --no-queued-drafts, --no-early-mtp, --no-gpu-handoff, --fixed-drafts, --check-mtp-state\n", .{});
         std.debug.print("Flash resident PLE: --resident-ple [--no-ple-wiring], --check-ple-state [--check-long-cache]\nDiagnostics: tensorfold check-ngram-gpu; tensorfold check-ple-resident MODEL_DIR\n", .{});
         std.debug.print("Qwen prefill: regular 2048-token chunks; --lane-prefill selects the 128-row diagnostic.\nQwen/Flash traces: --trace-dir EXISTING_DIR. Math oracle: tensorfold check-prefill-math FIXTURE_DIR\n", .{});
-        std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--no-copy] [--metal-simd] [--metal-sampling]\n  [--no-serial-pipeline] [--check-serial-state] [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--no-kv-buffers] [--check-kv-buffers] [--check-kv-reuse]\n  [--report PATH] [--dump-logits PATH] [--check-exact] [--check-cache-stress] [--check-long-cache]\n  [--trace-dir EXISTING_DIR (Qwen/Flash)]\n  tensorfold check-kv-buffer\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n  tensorfold check-model-schema qwen|dflash|nemotron|flash MODEL_DIR\n", .{});
+        std.debug.print("Usage: tensorfold run MODEL_DIR [--prompt TEXT] [--tokens ID,ID,...] [--max-tokens N]\n  [--drafter DIR] [--mtp-drafts N] [--no-drafts] [--no-copy] [--metal-simd] [--metal-sampling]\n  [--no-serial-pipeline] [--check-serial-state] [--temperature T] [--seed N] [--top-k N] [--top-p P] [--warmup]\n  [--no-kv-buffers] [--check-kv-buffers] [--check-kv-reuse]\n  [--report PATH] [--dump-logits PATH] [--check-exact] [--check-cache-stress] [--check-long-cache]\n  [--trace-dir EXISTING_DIR (Qwen/Flash)]\n  tensorfold check-kv-buffer\n  tensorfold check-sampling|check-sparse|check-attention FIXTURE_DIR\n  tensorfold check-model-schema qwen|dflash|nemotron|flash|gemma|glm|deepseek MODEL_DIR\n", .{});
         return;
     }
     {

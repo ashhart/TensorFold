@@ -19,7 +19,7 @@ fn onError(msg: [*c]const u8, _: ?*anyopaque) callconv(.c) void {
 pub fn check(rc: c_int) !void {
     if (rc != 0) return error.MlxFailure;
 }
-pub fn init() !void {
+pub fn checkVersion() !void {
     var version_string = c.mlx_string_new();
     defer _ = c.mlx_string_free(version_string);
     try check(c.mlx_version(&version_string));
@@ -29,6 +29,9 @@ pub fn init() !void {
         std.debug.print("Native MLX version {s} differs from pin {s}; rebuild the MLX prefix from native/dependencies.json.\n", .{ version, expected });
         return error.MlxVersionMismatch;
     }
+}
+pub fn init() !void {
+    try checkVersion();
     c.mlx_set_error_handler(onError, null, null);
     const dev = c.mlx_device_new_type(c.MLX_GPU, 0);
     defer _ = c.mlx_device_free(dev);

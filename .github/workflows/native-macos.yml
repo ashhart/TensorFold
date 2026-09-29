@@ -1,0 +1,37 @@
+name: Native macOS bootstrap
+
+on:
+  push:
+    branches: [feat/zig]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bootstrap:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      SOURCE_REPOSITORY: ${{ github.repository }}
+      SOURCE_REVISION: ${{ github.sha }}
+    steps:
+      - name: Download source archive without Git credentials
+        run: curl --fail --location --retry 3 "https://codeload.github.com/${SOURCE_REPOSITORY}/tar.gz/${SOURCE_REVISION}" --output source.tar.gz
+      - name: Extract checkout
+        run: tar -xzf source.tar.gz --strip-components=1
+      - name: Stage checksum-verified Zig
+        run: bash scripts/fetch-zig.sh
+      - name: Build pinned dependencies and run host checks from a clean environment
+        run: .zig-toolchain/zig run tools/setup_native.zig -- --source-archives --jobs 2
+      - name: Verify installed artifacts and runtime loading
+        run: .zig-toolchain/zig run tools/setup_native.zig -- --check
+      - name: Verify incremental setup
+        run: .zig-toolchain/zig run tools/setup_native.zig -- --source-archives --jobs 2
+      - name: Verify CPU runtime and report Metal availability
+        run: .zig-toolchain/zig build test-runtime test-dependencies -Doptimize=safe -j1 --summary all

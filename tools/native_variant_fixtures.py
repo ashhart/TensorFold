@@ -34,7 +34,7 @@ class Capture:
         self.catalog = {}
         self.fingerprints = {}
         for path in sorted(Path("native/metal").glob("*.metal")):
-            if path.stem.startswith(("glm_", "ds4_", "gemma_", "affine_rows", "lane_qmm_", "prism_", "row_forward_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
+            if path.stem.startswith(("glm_", "ds4_", "gemma_", "affine_rows", "lane_qmm_", "prism_", "row_forward_", "row_attention_", "row_qmv", "lane_fuse_", "lane_gdn_", "lane_attention_", "simd_qmm_", "q4_", "nemotron_")):
                 self.catalog[(fingerprint(path.read_text(), path.with_suffix(".h").read_text()),
                               path.stem.endswith("_dep"))] = path.stem
                 self.fingerprints[path.stem] = fingerprint(path.read_text(), path.with_suffix(".h").read_text())
@@ -356,6 +356,24 @@ def nemotron_variants(capture):
                     assert bool(mx.array_equal(a, b).item())
 
 
+def row_attention_variants(capture):
+    from tensorfold.kernels.qwen.dense.v1.row_attention import row_sdpa, paths_of
+    for dims, group in ((32, 8), (128, 4), (256, 1), (256, 6)):
+        for prefix in (0, 127, 128, 129, 4095):
+            for parents in ((-1, 0, 1, 2, 3), (-1, 0, 0, 1, 2)):
+                capture.test = f"row-attention-{dims}-{group}-{prefix}-{parents}"
+                q = mx.random.normal((1, 2 * group, len(parents), dims), key=mx.random.key(21)).astype(mx.bfloat16)
+                k = mx.random.normal((1, 2, prefix + len(parents) + 17, dims), key=mx.random.key(22)).astype(mx.bfloat16)
+                v = mx.random.normal(k.shape, key=mx.random.key(23)).astype(mx.bfloat16)
+                actual = row_sdpa(q, k, v, dims ** -.5, prefix, parents)
+                _, paths = paths_of(parents)
+                for node, path in enumerate(paths):
+                    ids = mx.array(list(range(prefix)) + [prefix + row for row in path], dtype=mx.int32)
+                    expected = row_sdpa(q[:, :, node:node + 1], mx.take(k, ids, axis=2), mx.take(v, ids, axis=2),
+                                        dims ** -.5, prefix + len(path) - 1, (-1,))
+                    assert bool(mx.array_equal(actual[:, :, node:node + 1], expected).item())
+
+
 def attention_and_ple_variants(capture):
     from tensorfold.kernels.qwen.dense.v1 import lane_attention
     from tools.native_legacy import flash
@@ -426,10 +444,22 @@ def main():
     parser.add_argument("--bonsai-only", action="store_true")
     parser.add_argument("--gemma-only", action="store_true")
     parser.add_argument("--large-families", action="store_true")
+    parser.add_argument("--row-attention", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
+    if args.row_attention:
+        try:
+            row_attention_variants(capture)
+        finally:
+            mx.fast.metal_kernel = capture.original
+        required = {"row_attention_partial", "row_attention_merge"}
+        if required - {case["kernel"] for case in capture.cases}:
+            raise RuntimeError("Row attention launches were not captured")
+        (args.directory / "cases.json").write_text(json.dumps(capture.cases, indent=2) + "\n")
+        print(f"Saved {len(capture.cases)} row attention launches", flush=True)
+        return
     if args.large_families:
         try:
             code = pytest.main(["-q", "-rs", "--basetemp", str(args.directory / "pytest"),
@@ -477,6 +507,7 @@ def main():
         flash_variants(capture)
         nemotron_variants(capture)
         attention_and_ple_variants(capture)
+        row_attention_variants(capture)
     finally:
         mx.fast.metal_kernel = capture.original
     if not capture.cases:
@@ -494,6 +525,7 @@ def main():
         "grouped_gateup", "expert_down_y", "grouped_down", "expert_down"))
     required.update(("q4_ple_lookup", "q4_router_float", "q4_router_bfloat", "lane_attention_partial", "lane_attention_partial_128"))
     required.update(("lane_attention_tail", "lane_attention_tree_merge"))
+    required.update(("row_attention_partial", "row_attention_merge"))
     if missing := required - counts.keys():
         raise RuntimeError(f"Required native variant coverage missing: {sorted(missing)}")
     print(json.dumps(counts, indent=2), flush=True)

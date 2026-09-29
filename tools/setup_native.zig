@@ -9,6 +9,7 @@ const usage =
     \\then builds the native executable and runs host checks. No model downloads.
     \\  --python PATH  Python 3.11+ used when creating .venv (default: python3)
     \\  --jobs N       Parallel CMake jobs (default: 4; Zig builds use -j1)
+    \\  --source-archives  Use HTTPS source archives instead of Git (credential-free CI)
     \\  --check        Check prerequisites and installed dependencies without installing
     \\  --dry-run      Print the setup plan without running commands
     \\  --help         Show this help
@@ -23,6 +24,7 @@ const Options = struct {
     check: bool = false,
     dry_run: bool = false,
     help: bool = false,
+    archive_sources: bool = false,
 
     fn parse(args: []const []const u8) !Options {
         var result: Options = .{};
@@ -35,6 +37,8 @@ const Options = struct {
                 result.check = true;
             } else if (std.mem.eql(u8, arg, "--dry-run")) {
                 result.dry_run = true;
+            } else if (std.mem.eql(u8, arg, "--source-archives")) {
+                result.archive_sources = true;
             } else if (std.mem.eql(u8, arg, "--python") or std.mem.eql(u8, arg, "--jobs")) {
                 i += 1;
                 if (i == args.len or args[i].len == 0) return error.MissingOptionValue;
@@ -116,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("Check Apple Silicon, macOS/SDK >=26.2, Metal compiler, CMake >=3.25, Git, Python >=3.11 and pinned Zig.\nCreate .venv using {s} if absent; install editable .[test,vision] with:\n", .{options.python});
         var entries = pins.iterator();
         while (entries.next()) |entry| std.debug.print("  {s}=={s}\n", .{ entry.key_ptr.*, entry.value_ptr.string });
-        std.debug.print("Build via SSH checkouts, CMake Release, {s} jobs:\n  MLX {s}\n  MLX-C {s}\n  fmt 12.1.0\n  libjpeg-turbo {s}\nInstall into build/mlx and build/jpeg.\nCheck dependency and exported kernel parity.\nBuild ReleaseSafe (-j1), then run host, checkpoint-file and setup/sync guard tests.\nNo model downloads, Git branch changes, pushes or system installs.\n", .{ options.jobs, record.object.get("mlx_revision").?.string, record.object.get("mlx_c_revision").?.string, record.object.get("jpeg_version").?.string });
+        std.debug.print("Build via {s}, CMake Release, {s} jobs:\n  MLX {s}\n  MLX-C {s}\n  fmt 12.1.0\n  libjpeg-turbo {s}\nInstall into build/mlx and build/jpeg.\nCheck dependency and exported kernel parity.\nBuild ReleaseSafe (-j1), then run host, checkpoint-file and setup/sync guard tests.\nNo model downloads, Git branch changes, pushes or system installs.\n", .{ if (options.archive_sources) "HTTPS source archives (no Git)" else "SSH checkouts", options.jobs, record.object.get("mlx_revision").?.string, record.object.get("mlx_c_revision").?.string, record.object.get("jpeg_version").?.string });
         return;
     }
     try prerequisites(init, options);
@@ -134,7 +138,7 @@ pub fn main(init: std.process.Init) !void {
     var entries = pins.iterator();
     while (entries.next()) |entry| try pip.append(try std.fmt.allocPrint(allocator, "{s}=={s}", .{ entry.key_ptr.*, entry.value_ptr.string }));
     try sync.command(init.io, pip.items);
-    try sync.buildDependencies(.{ .allocator = allocator, .io = init.io }, &record, true, true, options.jobs);
+    try sync.buildDependencies(.{ .allocator = allocator, .io = init.io, .archive_sources = options.archive_sources }, &record, true, true, options.jobs);
     try sync.command(init.io, &.{ ".venv/bin/python", "tools/native_runtime.py" });
     try sync.command(init.io, &.{ ".venv/bin/python", "tools/export_native_kernels.py", "--check" });
     try sync.command(init.io, &.{ ".zig-toolchain/zig", "build", "-Doptimize=safe", "-j1" });

@@ -65,6 +65,28 @@ def jpeg_version():
     return version
 
 
+def native_library_version(prefix):
+    import ctypes
+
+    class String(ctypes.Structure):
+        _fields_ = [("ctx", ctypes.c_void_p)]
+
+    library = ctypes.CDLL(str((prefix / "lib/libmlxc.dylib").resolve()))
+    library.mlx_string_new.restype = String
+    library.mlx_string_free.argtypes = [String]
+    library.mlx_version.argtypes = [ctypes.POINTER(String)]
+    library.mlx_version.restype = ctypes.c_int
+    library.mlx_string_data.argtypes = [String]
+    library.mlx_string_data.restype = ctypes.c_char_p
+    value = library.mlx_string_new()
+    try:
+        if library.mlx_version(ctypes.byref(value)) != 0:
+            raise RuntimeError("Installed MLX-C could not query its linked MLX runtime")
+        return library.mlx_string_data(value).decode()
+    finally:
+        library.mlx_string_free(value)
+
+
 def resolved_dependencies(previous, versions, native_version):
     if versions["mlx"] != versions["mlx-metal"]:
         raise RuntimeError(f"The resolved MLX/Metal versions disagree: {versions}")
@@ -116,15 +138,28 @@ def main():
     jpeg_config = args.jpeg_prefix / "lib/pkgconfig/libturbojpeg.pc"
     jpeg_match = re.search(r"^Version: (.+)$", jpeg_config.read_text(), re.M) if jpeg_config.exists() else None
     jpeg = jpeg_version()
+    receipt = subprocess.run([str(ROOT / ".zig-toolchain/zig"), "run", "tools/native_install.zig",
+                              "--global-cache-dir", str(ROOT / ".zig-cache/global"), "--",
+                              "--mlx-prefix", str(args.mlx_prefix), "--jpeg-prefix", str(args.jpeg_prefix)],
+                             cwd=ROOT, text=True, capture_output=True)
     if args.resolve:
         resolved = resolved_dependencies(dependencies(), versions, match[1] if match else None)
         resolved["vision_legacy_pixel_limits"] = vision_legacy_pixel_limits()
         resolved["jpeg_version"] = jpeg
         resolved["rebuild_jpeg"] = not jpeg_match or jpeg_match[1] != jpeg or not (args.jpeg_prefix / "lib/libturbojpeg.a").is_file()
         resolved["rebuild_mlx"] |= not (args.mlx_prefix / "share/cmake/MLXC/MLXCConfigVersion.cmake").is_file()
+        if receipt.returncode:
+            print("Native installation needs rebuilding: " + receipt.stderr)
+            resolved["rebuild_mlx"] = resolved["rebuild_jpeg"] = True
         (ROOT / "build/native-dependencies-resolved.json").write_text(json.dumps(resolved, indent=2) + "\n")
         print(f"Resolved upstream requirements: {versions}")
         return
+    if receipt.returncode:
+        raise RuntimeError("Native install verification failed; rerun setup:\n" + receipt.stderr)
+    print(receipt.stderr, end="")
+    actual_version = native_library_version(args.mlx_prefix)
+    if actual_version != versions["mlx"]:
+        raise RuntimeError(f"Loaded native MLX reports {actual_version}, expected {versions['mlx']}")
     if not match or match[1] != versions["mlx"]:
         raise RuntimeError(f"Rebuild native MLX at {dependencies()['mlx_revision']}: {config} must report {versions['mlx']}")
     if vision_legacy_pixel_limits() != dependencies()["vision_legacy_pixel_limits"]:

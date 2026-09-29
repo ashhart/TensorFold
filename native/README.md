@@ -16,9 +16,10 @@ The OpenAI-compatible HTTP server remains in the upstream Python code.
 - **CMake 3.25+**, **Python 3.11+** with `venv` and `pip`, and Git on `PATH`.
   Python 3.14 is used on the development machine. The pinned packages must have
   wheels compatible with your Python/macOS combination.
-- GitHub **SSH access** for dependency repositories. Setup does not configure
-  credentials. HTTPS access is also needed for Python wheels, Zig's archive
-  and CMake's source archives.
+- GitHub **SSH access** for the default dependency checkout mode. For environments
+  without credentials, use `--source-archives` to download pinned source archives
+  over HTTPS without Git operations. Existing Git remotes always remain SSH.
+  HTTPS is also needed for Python wheels, Zig and CMake source archives.
 - Free disk space for sources, native builds, Python packages and Zig, plus
   separate space for any models or test traces you choose to use.
 
@@ -53,7 +54,8 @@ zig-out/bin/tensorfold --help
 ```
 
 The initial build can take several minutes. `fetch-zig.sh` stages the exact
-nightly in [`.zig-version`](../.zig-version), matching the pin used by
+nightly in [`.zig-version`](../.zig-version), verified before extraction against
+[`.zig-archive.sha256`](../.zig-archive.sha256), matching the pin used by
 `mlx-serve). It refuses to silently replace an incompatible `.zig-toolchain`.
 Use the staged compiler; a global stable Zig is not compatible.
 **No neighboring repository or model download is required.**
@@ -68,7 +70,9 @@ The [setup tool](../tools/setup_native.zig):
    `build/deps`. Existing checkouts must be clean and use the expected remote.
 4. Builds MLX/MLX-C into `build/mlx` and static JPEG into `build/jpeg`, using
    the same CMake recipes as manual upstream sync.
-5. Checks Python/native dependency parity and committed Metal kernel exports.
+5. Records source revisions and SHA-256 hashes for installed artifacts, verifies
+   those receipts, loads MLX-C to check the linked runtime version, and checks
+   Python/native dependency parity and committed Metal kernel exports.
 6. Builds the executable with safety checks, then runs host unit tests,
    checkpoint-file corruption/allocation tests and setup/sync guard tests.
 
@@ -81,12 +85,16 @@ pins. It may install or downgrade packages inside `.venv` to match those pins.
 .zig-toolchain/zig run tools/setup_native.zig -- --help
 .zig-toolchain/zig run tools/setup_native.zig -- --python /path/to/python3 --jobs 2
 .zig-toolchain/zig run tools/setup_native.zig -- --check
+.zig-toolchain/zig run tools/setup_native.zig -- --source-archives
 ```
 
 `--python` selects the interpreter only when creating `.venv`. `--jobs`
 controls CMake parallelism (default 4); Zig uses `-j1`.
-`--check` validates prerequisites and installed dependency versions without
-installing. `--dry-run` prints the plan without running setup commands.
+`--check` validates prerequisites, installed artifact hashes, source revisions and
+runtime loading without installing. `--source-archives` uses separate
+`build/deps-archives` and `build/*-archive-build` directories; it verifies source
+file receipts before reusing an archive checkout and refuses modified sources.
+`--dry-run` prints the plan without running setup commands.
 Invoking `zig run` itself may populate Zig's compilation cache.
 
 ## Build and edit cycle
@@ -123,6 +131,8 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | --- | --- | --- |
 | Host unit and checkpoint-file checks | `test test-checkpoint-files -Doptimize=safe -j1` | Native libraries; no weights or GPU execution |
 | Setup, sync and dependency guards | `test-setup test-sync-upstream test-dependencies test-upstream-coverage -j1` | Python for dependency tests; no models |
+| Runtime loading and hardware capabilities | `test-runtime -Doptimize=safe -j1` | CPU arithmetic always checked; unavailable Metal reported explicitly |
+| Hardware-selected Metal smoke suite | `test-metal-smoke -Doptimize=safe -j1` | Synthetic SIMD checks, plus tensor/GLM checks when supported; fails if Metal is unavailable |
 | SIMD attention parity | `test-simd-attention -Doptimize=safe -j1` | Metal and Python; synthetic data |
 | Full synthetic Metal matrix | `test-metal -Doptimize=safe -j1` | Metal and Python; includes M5-specific paths |
 | Additional M5 tensor-attention fixtures | `test-metal -Dmetal-tensors=true -Doptimize=safe -j1` | M5 Metal tensor support |
@@ -136,13 +146,18 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 Start GPU verification with:
 
 ```sh
-.zig-toolchain/zig build test-simd-attention -Doptimize=safe -j1
+.zig-toolchain/zig build test-metal-smoke -Doptimize=safe -j1
 ```
 
 Fixtures and oracle outputs go under `build/native-checks`. Long-context/layer
 traces can consume tens or hundreds of GiB. Tests do not download missing models.
 Metadata checks read safetensors headers and file lengths; they do not establish
 that a model fits in memory or generates correct output.
+
+The `Native macOS bootstrap` GitHub workflow starts with fresh sources and a fresh
+Python environment, builds dependencies from archives, checks the installation,
+repeats setup and probes runtime arithmetic. It has no SSH secrets or model
+downloads. Hosted-runner CPU results do not count as physical GPU qualification.
 
 Development verification uses an M5 Max with 128 GiB unified memory. Other physical
 hardware is unverified. `--metal-simd` exercises a fallback on the current machine,
@@ -248,6 +263,7 @@ workflow and use setup to reproduce the resulting checked-in pins.
 | Metal compiler/SDK missing | Check Xcode's active developer directory and Metal toolchain; complete Xcode setup manually. |
 | No Metal device in a sandbox/CI | Run GPU checks with GPU access; host checks do not substitute for GPU verification. |
 | Missing `mlx/c/mlx.h`, `libmlxc` or JPEG | Rerun setup; the Python MLX wheel alone does not provide the native C development prefix. |
+| Missing receipt or changed artifact hash | Rerun setup to rebuild the pinned installation; do not edit receipts to conceal drift. |
 | `dyld` failure after moving the checkout | Reconfigure dependencies and rebuild in the new location; preserve the local library prefix. |
 | Dirty dependency source or unexpected remote | Inspect the checkout in `build/deps`; preserve edits and verify its SSH remote before retrying. |
 | Python pin conflict | Check interpreter compatibility and `check-dependencies`; do not loosen MLX pins independently. |
