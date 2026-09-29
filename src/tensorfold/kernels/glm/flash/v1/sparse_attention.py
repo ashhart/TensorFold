@@ -120,5 +120,5 @@ def indexed_attention_ops(queries: mx.array, keys: mx.array, indices: mx.array, 
         s = (queries[r].astype(mx.float32) * scale) @ k.T                                 # [H, T]
         s = mx.where(valid[None], s, -mx.inf)
         p = mx.softmax(s, axis=-1)
-        outs.append((p @ k).astype(mx.bfloat16)[None])
+        outs.append((p @ k).astype(queries.dtype)[None])
     return mx.concatenate(outs)

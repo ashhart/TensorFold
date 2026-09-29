@@ -341,12 +341,12 @@ def kda_rows_ops(kda: Any, proj: mx.array, conv: mx.array, state: mx.array) -> t
         acc = ci[r:r + 1].astype(mx.float32) * kda.conv_w[0]
         for t in range(1, taps):
             acc = acc + ci[r + t:r + t + 1].astype(mx.float32) * kda.conv_w[t]
-        xb = acc.astype(mx.bfloat16)
+        xb = acc.astype(proj.dtype)
         co = xb * mx.sigmoid(xb)
         q, k, v = (co[:, i * width:(i + 1) * width].reshape(1, 1, h, d) for i in range(3))
         qf, kf = q.astype(mx.float32), k.astype(mx.float32)
-        q = ((qf * mx.rsqrt((qf * qf).sum(-1, keepdims=True) + 1e-6)) * (d ** -0.5)).astype(mx.bfloat16)
-        k = (kf * mx.rsqrt((kf * kf).sum(-1, keepdims=True) + 1e-6)).astype(mx.bfloat16)
+        q = ((qf * mx.rsqrt((qf * qf).sum(-1, keepdims=True) + 1e-6)) * (d ** -0.5)).astype(proj.dtype)
+        k = (kf * mx.rsqrt((kf * kf).sum(-1, keepdims=True) + 1e-6)).astype(proj.dtype)
         g = mx.exp(kda.cfg.linear_lower_bound
                    * mx.sigmoid(kda.A * (a.astype(mx.float32).reshape(1, 1, h, d) + kda.dt_bias)))
         beta = mx.sigmoid(row[:, c3 + 2 * d:]).reshape(1, 1, h)
@@ -354,6 +354,6 @@ def kda_rows_ops(kda: Any, proj: mx.array, conv: mx.array, state: mx.array) -> t
         yf = y.reshape(h, d).astype(mx.float32)
         o = yf * mx.rsqrt((yf * yf).mean(-1, keepdims=True) + kda.cfg.rms_norm_eps) * kda.o_norm
         o = o * mx.sigmoid(gate.reshape(h, d).astype(mx.float32))
-        ys.append(o.astype(mx.bfloat16).reshape(1, width))
+        ys.append(o.astype(proj.dtype).reshape(1, width))
     rows = int(proj.shape[0])
     return mx.concatenate(ys), state, mx.contiguous(ci[rows:])

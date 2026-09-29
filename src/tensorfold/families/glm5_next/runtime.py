@@ -88,7 +88,9 @@ class GLMFlash:
         return self.model.last_normed
 
     def blank_draft_rows(self) -> mx.array:
-        return mx.zeros((1, int(self.args.hidden_size)), dtype=mx.bfloat16)
+        from tensorfold.families.glm5_next import config as C
+
+        return mx.zeros((1, int(self.args.hidden_size)), dtype=C.act())
 
     def hidden(self, inputs: Any, cache: list[Any], parents: Any = None) -> mx.array:
         """Hidden states [1, R, D] of R tokens (maybe unread on the GPU): up to ``fused_rows`` decode, else prefill."""
