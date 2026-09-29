@@ -167,6 +167,28 @@ Prompt chunks attend as decode does: each query reads its own selected keys from
 and memory stay flat with context. The contributor measured 336 / 334 / 309 tok/s at 10k / 35k / 103k tokens on a
 256 GB M3 Ultra, against 331 / 260 / 143 for the previous prefill.
 
+### Scripts that load the backbone directly
+
+`tensorfold serve` wires the weights (`mx.set_wired_limit`, `server/residency.py`) and caps MLX's cache of freed
+buffers. A script that calls `families.glm5_next.weights.load_backbone` directly — a scorer reading logits, a
+profiler — should do the same: without wiring, macOS pages parts of a 170-365 GiB checkpoint out between steps, and
+on a 512 GB M3 Ultra each MoE layer then took about 0.1 s per call (4.3 s per decode step instead of 0.1 s); with the
+wired limit set to the whole working set and no cache cap, the cache of per-request buffers was wired too and grew
+past 440 GiB. Wire what is resident after loading, cap the cache, and clear it between requests:
+
+```python
+import mlx.core as mx
+from tensorfold.families.glm5_next.weights import load_backbone
+from tensorfold.server.residency import wire_resident
+
+info = mx.device_info()
+mx.set_wired_limit(int(info["max_recommended_working_set_size"]))   # as the family's load() does
+model = load_backbone(model_dir)
+wire_resident(mx, int(info["max_recommended_working_set_size"]))   # then only the weights stay wired
+mx.set_cache_limit(8 * 2**30)                                       # the server's --mlx-cache-gib default
+# ... per request: run, then mx.clear_cache()
+```
+
 ## Responses and exactness
 
 When thinking is disabled, the server closes the template's open think block so the response reaches
