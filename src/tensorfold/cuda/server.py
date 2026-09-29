@@ -72,6 +72,8 @@ class ChatTemplate:
 # -- HTTP ------------------------------------------------------------------------------------
 
 _SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "seed")
+# a long tool call streams nothing until it closes; an empty delta this often keeps a client's read timeout away
+KEEPALIVE_SECONDS = 15.0
 
 
 @dataclass(slots=True)
@@ -286,7 +288,7 @@ class App:
         ends = () if prepared.ignore_eos and (self.reads_ignore_eos or takes_stop_eos) else tuple(self.engine.eos)
         stops = StopStrings(prepared.stop, self.tok, ends)
         out: list[int] = []
-        sent = {"reasoning": 0, "content": 0}
+        sent = {"reasoning": 0, "content": 0, "at": time.monotonic()}
         stopped = {"client": False, "stop": False}
         failed: list[Exception] = []
         stream = StreamDecoder(self.tok, ends)
@@ -329,9 +331,11 @@ class App:
                 if len(answer) > sent["content"]:
                     delta["content"] = answer[sent["content"]:]
                     sent["content"] = len(answer)
-                if delta and not emit(delta):
-                    stopped["client"] = True
-                elif cancelled is not None and cancelled():     # every round, with or without new text
+                if delta or time.monotonic() - sent["at"] >= KEEPALIVE_SECONDS:
+                    sent["at"] = time.monotonic()
+                    if not emit(delta):
+                        stopped["client"] = True
+                if not stopped["client"] and cancelled is not None and cancelled():     # every round
                     stopped["client"] = True
             except Exception as exc:        # noqa: BLE001  raised after generate returns, never into the engine
                 failed.append(exc)
