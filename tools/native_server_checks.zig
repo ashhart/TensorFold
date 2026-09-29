@@ -42,14 +42,32 @@ fn readAll(a: std.mem.Allocator, io: std.Io, socket: std.Io.net.Stream) ![]u8 {
 }
 
 fn memoryWaiting(a: std.mem.Allocator, io: std.Io, port: u16) !i64 {
+    return (try health(a, io, port)).object.get("memory").?.object.get("waiting_requests").?.integer;
+}
+
+fn health(a: std.mem.Allocator, io: std.Io, port: u16) !std.json.Value {
     const socket = try connect(io, port);
     defer socket.close(io);
     try write(io, socket, "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     const response = try readAll(a, io, socket);
     const start = (std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.MissingHttpBody) + 4;
     const body = try std.json.parseFromSlice(std.json.Value, a, response[start..], .{});
-    return body.value.object.get("memory").?.object.get("waiting_requests").?.integer;
+    return body.value;
 }
+
+const CacheCounts = struct {
+    enabled: bool,
+    bytes: u64,
+    entries: usize,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+
+    fn read(a: std.mem.Allocator, io: std.Io, port: u16) !CacheCounts {
+        const result = try std.json.parseFromValue(CacheCounts, a, (try health(a, io, port)).object.get("prompt_cache").?, .{});
+        return result.value;
+    }
+};
 
 fn waitForMemory(a: std.mem.Allocator, io: std.Io, port: u16, expected: i64) !void {
     for (0..1000) |_| {
@@ -135,8 +153,78 @@ const Scenario = struct {
     idle: bool,
     rounds: bool = false,
     memory: bool = false,
+    prefixes: bool = false,
+    cache_enabled: bool = true,
+    cache_oversize: bool = false,
     image: []const u8 = "",
     http_checks: []const u8 = "",
+
+    fn checkPrefixes(s: *Scenario, port: u16) !void {
+        const a = s.init.arena.allocator();
+        const io = s.init.io;
+        var tokens: [2051]i32 = undefined;
+        for (&tokens, 0..) |*id, i| id.* = @intCast(10 + i % 93);
+        const body = try std.json.Stringify.valueAlloc(a, .{ .prompt = &tokens, .max_tokens = @as(usize, 16), .ignore_eos = true, .temperature = @as(f64, 0.7), .top_k = @as(usize, 12), .top_p = @as(f64, 0.8), .seed = @as(usize, 123) }, .{});
+        const cold = try post(io, port, body);
+        defer cold.close(io);
+        const expected = try Output.parse(a, try readAll(a, io, cold), false);
+        var counts = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(s.cache_enabled, counts.enabled);
+        try std.testing.expectEqual(@as(u64, 0), counts.hits);
+        try std.testing.expectEqual(@as(usize, @intFromBool(s.cache_enabled)), counts.entries);
+        if (s.cache_enabled) try std.testing.expect(counts.bytes > 0);
+        if (s.cache_oversize) try std.testing.expect(counts.bytes > 1074);
+        for ([_]bool{ false, true }) |stream| {
+            var request = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+            try request.value.object.put(a, "stream", .{ .bool = stream });
+            const repeated = try post(io, port, try std.json.Stringify.valueAlloc(a, request.value, .{}));
+            defer repeated.close(io);
+            try expected.compare(try Output.parse(a, try readAll(a, io, repeated), stream));
+        }
+        counts = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(@as(u64, if (s.cache_enabled) 2 else 0), counts.hits);
+        {
+            var sockets: [3]std.Io.net.Stream = undefined;
+            var opened: usize = 0;
+            defer for (sockets[0..opened]) |socket| socket.close(io);
+            for (&sockets) |*socket| {
+                socket.* = try post(io, port, body);
+                opened += 1;
+            }
+            for (sockets) |socket| try expected.compare(try Output.parse(a, try readAll(a, io, socket), false));
+        }
+        counts = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(@as(u64, if (s.cache_enabled) 5 else 0), counts.hits);
+        tokens[0] = 101;
+        const changed = try std.json.Stringify.valueAlloc(a, .{ .prompt = &tokens, .max_tokens = @as(usize, 1), .ignore_eos = true }, .{});
+        const different = try post(io, port, changed);
+        defer different.close(io);
+        _ = try Output.parse(a, try readAll(a, io, different), false);
+        counts = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(@as(u64, if (s.cache_enabled) 1 else 0), counts.evictions);
+        const restored = try post(io, port, body);
+        defer restored.close(io);
+        try expected.compare(try Output.parse(a, try readAll(a, io, restored), false));
+        counts = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(@as(u64, if (s.cache_enabled) 3 else 0), counts.misses);
+        var ongoing = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+        try ongoing.value.object.put(a, "stream", .{ .bool = true });
+        try ongoing.value.object.put(a, "max_tokens", .{ .integer = 10000 });
+        const cancelled = try post(io, port, try std.json.Stringify.valueAlloc(a, ongoing.value, .{}));
+        var open = true;
+        defer if (open) cancelled.close(io);
+        try firstEvent(io, cancelled);
+        cancelled.close(io);
+        open = false;
+        const recovery = try post(io, port, body);
+        defer recovery.close(io);
+        try expected.compare(try Output.parse(a, try readAll(a, io, recovery), false));
+        counts = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(@as(u64, if (s.cache_enabled) 7 else 0), counts.hits);
+        std.debug.print("PASS: HTTP prefix cache enabled={any}: cold/reused/concurrent JSON/SSE agree; eviction, cache counters and cancellation match policy\n", .{s.cache_enabled});
+        try std.posix.kill(s.child.id.?, .TERM);
+        if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+    }
 
     fn checkMemory(s: *Scenario, port: u16) !void {
         const a = s.init.arena.allocator();
@@ -172,6 +260,14 @@ const Scenario = struct {
         try expected.compare(try Output.parse(a, try readAll(a, io, recovery), false));
         std.debug.print("PASS: memory-limited request waits for release; queued cancellation clears the wait; next request matches its isolated output\n", .{});
 
+        var prefix: [2051]i32 = undefined;
+        for (&prefix, 0..) |*id, i| id.* = @intCast(10 + i % 93);
+        const warm_body = try std.json.Stringify.valueAlloc(a, .{ .prompt = &prefix, .max_tokens = @as(usize, 1), .ignore_eos = true }, .{});
+        const warm = try post(io, port, warm_body);
+        defer warm.close(io);
+        _ = try Output.parse(a, try readAll(a, io, warm), false);
+        const retained = try CacheCounts.read(a, io, port);
+        try std.testing.expect(retained.entries > 0 and retained.bytes > 0);
         const tokens = try a.alloc(i32, 262000);
         @memset(tokens, 1001);
         const oversized = try std.json.Stringify.valueAlloc(a, .{ .prompt = tokens, .max_tokens = @as(usize, 1) }, .{});
@@ -179,6 +275,9 @@ const Scenario = struct {
         defer too_long.close(io);
         const refusal = try readAll(a, io, too_long);
         if (std.mem.indexOf(u8, refusal, "RequestExceedsMemoryBudget") == null) return error.MissingPromptMemoryRefusal;
+        const after_refusal = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(retained.evictions, after_refusal.evictions);
+        try std.testing.expectEqual(retained.bytes, after_refusal.bytes);
         const image = try std.Io.Dir.cwd().readFileAlloc(io, s.image, a, .limited(10 * 1024 * 1024));
         const encoded = try a.alloc(u8, std.base64.standard.Encoder.calcSize(image.len));
         _ = std.base64.standard.Encoder.encode(encoded, image);
@@ -211,9 +310,16 @@ const Scenario = struct {
         };
         var expected: [cases.len]Output = undefined;
         for (cases, &expected) |case, *value| {
+            const before = try CacheCounts.read(a, io, port);
             const socket = try postRoute(io, port, case.route, case.body);
             defer socket.close(io);
             value.* = try Output.parse(a, try readAll(a, io, socket), false);
+            if (std.mem.eql(u8, case.route, "/v1/chat/completions")) {
+                const after = try CacheCounts.read(a, io, port);
+                try std.testing.expectEqual(before.hits, after.hits);
+                try std.testing.expectEqual(before.misses, after.misses);
+                try std.testing.expectEqual(before.entries, after.entries);
+            }
         }
         for ([_]bool{ false, true }) |stream| {
             const background = try post(io, port, long_request);
@@ -275,6 +381,7 @@ const Scenario = struct {
             }
         };
         if (s.memory) return s.checkMemory(port);
+        if (s.prefixes) return s.checkPrefixes(port);
         if (s.rounds) return s.checkRounds(port);
         if (s.idle) {
             try std.posix.kill(s.child.id.?, .INT);
@@ -345,10 +452,11 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 3 and args.len != 5) return error.ExpectedExecutableAndModel;
     if (args.len == 5) {
         const memory = std.mem.eql(u8, args[3], "--memory-only");
+        const prefixes = std.mem.eql(u8, args[3], "--cache-only");
         var environment = try init.environ_map.clone(init.arena.allocator());
         defer environment.deinit();
         if (memory) try environment.put("TENSORFOLD_MEMORY_LIMIT_GB", "70");
-        var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory, .memory = memory, .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", "4", "--shutdown-grace-seconds", "1" }, .environ_map = &environment, .stderr = .pipe }) };
+        var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory and !prefixes, .memory = memory, .prefixes = prefixes, .cache_enabled = !std.mem.eql(u8, args[4], "0"), .cache_oversize = std.mem.eql(u8, args[4], "0.000001"), .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" }, .environ_map = &environment, .stderr = .pipe }) };
         defer scenario.child.kill(init.io);
         const Event = union(enum) { done: anyerror!void, timeout: std.Io.Cancelable!void };
         var events: [2]Event = undefined;

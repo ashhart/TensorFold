@@ -324,6 +324,16 @@ pub fn build(b: *std.Build) void {
     server_rounds.addArtifactArg(b.addExecutable(.{ .name = "native-http-checks", .root_module = http_checks_module }));
     server_rounds.step.dependOn(&session_image_fixture.step);
     b.step("test-server-rounds", "Compare concurrent HTTP image/text requests with isolated outputs, streaming and cancellation").dependOn(&server_rounds.step);
+    const server_prefixes = b.step("test-server-prefixes", "Verify HTTP prefix reuse, eviction, cancellation and disabled caching");
+    var prefix_previous: ?*std.Build.Step = null;
+    for ([_][]const u8{ "1", "0", "0.000001" }) |budget| {
+        const check_prefixes = b.addRunArtifact(lifecycle.producer.?);
+        check_prefixes.addArtifactArg(exe);
+        check_prefixes.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--cache-only", budget });
+        if (prefix_previous) |previous| check_prefixes.step.dependOn(previous);
+        prefix_previous = &check_prefixes.step;
+    }
+    server_prefixes.dependOn(prefix_previous.?);
     const memory_image = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--model", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--vision-fixture", "1870", "3110", "--image-fixture", "--image-format", "JPEG", "--image-only", "--output", "build/native-checks/memory-image" });
     const server_memory = b.addRunArtifact(lifecycle.producer.?);
     server_memory.addArtifactArg(exe);

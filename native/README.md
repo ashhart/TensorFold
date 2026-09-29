@@ -152,6 +152,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
 | Request state and interleaved generation | `test-request-state test-session-rounds test-session-images -Doptimize=safe -j1` | Synthetic ownership for all backends; Qwen/Gemma/Nemotron checkpoints and Qwen image inputs |
 | Prefix cache policy and restoration | `test-prompt-cache test-session-rounds -Doptimize=safe -j1` | Python policy oracle; exact Qwen/Gemma/Nemotron continuation after prefix reuse and eviction |
+| HTTP prefix reuse and eviction | `test-server-prefixes -Doptimize=safe -j1` | Local Qwen; JSON/SSE parity, cancellation, LRU eviction and disabled caching |
 | Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream policy comparisons and Qwen/Gemma/Nemotron cache growth |
 | Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
@@ -201,8 +202,14 @@ by Metal's recommended working set, with 3 GiB reserved outside MLX. Checkpoints
 that exceed the buffer budget are rejected before loading. Serving measures cache
 growth at startup, reserves active requests' remaining replies and image workspace,
 and waits for memory before admitting another request. Requests that cannot fit
-alone are rejected. `/health` reports memory counters and waiting requests.
-Cache eviction and background preemption remain incomplete.
+alone are rejected. Retained text prefixes are evicted when doing so can make
+admission fit; background preemption remains incomplete. `/health` reports memory,
+waiting requests and prompt-cache counters.
+`--prompt-cache-gib N` sets the retention target (default RAM/8, capped at 16 GiB;
+`0` disables caching). As upstream, a newest prefix may exceed this target when
+the process memory budget permits it. `--checkpoint-slots N` bounds ordinary entries (default
+`max(8, 3 * batch-streams)`). Reuse currently requires a complete prefill-chunk
+boundary and excludes image requests. Persistence and disk spill remain pending.
 `--request-timeout-seconds N` sets an absolute deadline from connection acceptance
 through queuing and generation (default `0`, disabled). Cooperative cancellation
 returns HTTP 408 or an SSE error; stalled sockets close after a 250 ms allowance.

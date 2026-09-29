@@ -8,6 +8,7 @@ const Request = std.http.Server.Request;
 const control = @import("server_control.zig");
 const memory_policy = @import("memory_budget.zig");
 const memory_runtime = @import("memory_runtime.zig");
+const PrefixStore = @import("prompt_cache.zig").Store(inference.Snapshot);
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var host: []const u8 = "127.0.0.1";
@@ -16,6 +17,8 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var timeout_ms: i64 = 0;
     var shutdown_grace_ms: i64 = 5000;
     var batch_streams: usize = 4;
+    var checkpoint_slots: ?usize = null;
+    var prompt_cache_bytes: ?u64 = null;
     var name = std.fs.path.basename(args[2]);
     var defaults = try inference.Options.load(init.gpa, init.io, args[2]);
     defaults.max_tokens = 4096;
@@ -43,6 +46,17 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         if (std.mem.eql(u8, flag, "--batch-streams")) {
             batch_streams = try std.fmt.parseInt(usize, value, 10);
             if (batch_streams < 1 or batch_streams > 8) return error.InvalidBatchStreams;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--checkpoint-slots")) {
+            checkpoint_slots = try std.fmt.parseInt(usize, value, 10);
+            if (checkpoint_slots.? == 0) return error.InvalidPromptCacheBudget;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--prompt-cache-gib")) {
+            const size = try std.fmt.parseFloat(f64, value);
+            if (!std.math.isFinite(size) or size < 0 or size >= 17179869184) return error.InvalidPromptCacheBudget;
+            prompt_cache_bytes = @intFromFloat(size * memory_policy.gib);
             continue;
         }
         if (std.mem.eql(u8, flag, "--request-timeout-seconds")) timeout_ms = try control.seconds(value) else if (std.mem.eql(u8, flag, "--shutdown-grace-seconds")) shutdown_grace_ms = try control.seconds(value) else if (std.mem.eql(u8, flag, "--host")) host = value else if (std.mem.eql(u8, flag, "--port")) port = try std.fmt.parseInt(u16, value, 10) else if (std.mem.eql(u8, flag, "--served-model-name")) name = value else if (std.mem.eql(u8, flag, "--max-requests")) limit = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, flag, "--reasoning-effort")) {
@@ -82,6 +96,8 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     if (is_glm) try @import("glm.zig").Model.prepareRuntime();
     var jobs: [8]*Job = undefined;
     var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams, .is_glm = is_glm, .is_flash = is_flash, .memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB") };
+    worker.checkpoint_slots = checkpoint_slots orelse @max(8, 3 * batch_streams);
+    worker.prompt_cache_bytes = prompt_cache_bytes;
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     defer {
         worker.queue.close(init.io);
@@ -151,6 +167,9 @@ const Worker = struct {
     is_flash: bool,
     memory_limit: ?[]const u8,
     memory_stats: MemoryStats = .{},
+    checkpoint_slots: usize = 8,
+    prompt_cache_bytes: ?u64 = null,
+    prefix_stats: PrefixStats = .{},
     fn run(w: *Worker) void {
         w.loop() catch |err| {
             w.startup_error = err;
@@ -168,6 +187,11 @@ const Worker = struct {
         const profile = try memory_runtime.measure(&session);
         try memory.wire();
         var admission = memory_policy.Admission{ .budget = try memory.admissionBudget(w.io), .memory = profile };
+        const prefix_budget = w.prompt_cache_bytes orelse @min(memory.ram / 8, 16 * memory_policy.gib);
+        var prefixes: ?PrefixStore = if (prefix_budget == 0) null else try PrefixStore.init(mx.allocator, w.checkpoint_slots, prefix_budget);
+        defer if (prefixes) |*store| store.deinit();
+        if (prefixes) |*store| store.admit_oversize = true;
+        w.prefix_stats.update(if (prefixes) |*store| store else null);
         w.memory_stats.budget = memory.budget;
         w.memory_stats.mlx_budget = memory.share;
         w.memory_stats.admission_budget = admission.budget;
@@ -199,12 +223,13 @@ const Worker = struct {
                 }
             }
             for (&active) |*slot| if (slot.*) |pending| {
-                const done = pending.advance(&session, &admission, &active) catch |err| blk: {
+                const done = pending.advance(&session, &admission, &active, if (prefixes) |*store| store else null) catch |err| blk: {
                     pending.reportError(err) catch |write_err| {
                         pending.job.failure = write_err;
                     };
                     break :blk true;
                 };
+                w.prefix_stats.update(if (prefixes) |*store| store else null);
                 if (done) {
                     const job = pending.job;
                     pending.deinit();
@@ -219,6 +244,30 @@ const Worker = struct {
             };
             w.memory_stats.update(waiting);
         }
+    }
+};
+
+const PrefixStats = struct {
+    enabled: std.atomic.Value(bool) = .init(false),
+    bytes: std.atomic.Value(u64) = .init(0),
+    entries: std.atomic.Value(usize) = .init(0),
+    hits: std.atomic.Value(u64) = .init(0),
+    misses: std.atomic.Value(u64) = .init(0),
+    evictions: std.atomic.Value(u64) = .init(0),
+
+    fn update(s: *PrefixStats, store: ?*const PrefixStore) void {
+        if (store) |p| {
+            s.enabled.store(true, .release);
+            s.bytes.store(p.nbytes(), .release);
+            s.entries.store(p.entries.items.len, .release);
+            s.hits.store(p.hits, .release);
+            s.misses.store(p.misses, .release);
+            s.evictions.store(p.evictions, .release);
+        }
+    }
+
+    fn snapshot(s: *const PrefixStats) struct { enabled: bool, bytes: u64, entries: usize, hits: u64, misses: u64, evictions: u64 } {
+        return .{ .enabled = s.enabled.load(.acquire), .bytes = s.bytes.load(.acquire), .entries = s.entries.load(.acquire), .hits = s.hits.load(.acquire), .misses = s.misses.load(.acquire), .evictions = s.evictions.load(.acquire) };
     }
 };
 
@@ -271,7 +320,7 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
     if (std.mem.indexOfScalar(u8, route, '?')) |at| route = route[0..at];
     route = std.mem.trimEnd(u8, route, "/");
     if (request.head.method == .GET) {
-        if (route.len == 0 or std.mem.eql(u8, route, "/health")) return json(a, request, .ok, .{ .status = "ok", .model = model, .warming = false, .max_batch_size = worker.batch_streams, .memory = worker.memory_stats.snapshot() });
+        if (route.len == 0 or std.mem.eql(u8, route, "/health")) return json(a, request, .ok, .{ .status = "ok", .model = model, .warming = false, .max_batch_size = worker.batch_streams, .memory = worker.memory_stats.snapshot(), .prompt_cache = worker.prefix_stats.snapshot() });
         if (std.mem.eql(u8, route, "/v1/models") or std.mem.eql(u8, route, "/models")) return json(a, request, .ok, .{ .object = "list", .data = &.{.{ .id = model, .object = "model", .created = std.Io.Clock.real.now(worker.io).toSeconds(), .owned_by = "tensorfold" }} });
         return failure(a, request, .not_found, "Unknown route");
     }
@@ -317,6 +366,8 @@ const Pending = struct {
     response: ?std.http.BodyWriter = null,
     stream: ?Stream = null,
     buffer: [8192]u8 = undefined,
+    saved_position: usize = 0,
+    prefix_reserve: u64 = 0,
 
     fn start(w: *Worker, session: *inference.Session, job: *Job) !?*Pending {
         const p = try job.a.create(Pending);
@@ -411,17 +462,26 @@ const Pending = struct {
         p.generation = try inference.RequestGeneration.init(session, mx.allocator, p.ids, options, .{ .context = if (p.stream) |*stream| stream else null, .emit = if (p.stream != null) Stream.emit else null, .cancellation = cancellation, .gate = if (p.gate) |*gate| gate else null }, if (p.image) |*image| image else null);
     }
 
-    fn advance(p: *Pending, session: *inference.Session, admission: *memory_policy.Admission, active: []const ?*Pending) !bool {
+    fn advance(p: *Pending, session: *inference.Session, admission: *memory_policy.Admission, active: []const ?*Pending, prefixes: ?*PrefixStore) !bool {
         try p.job.client.cancellation().check();
         if (p.generation == null) {
             var live: [8]memory_policy.Live = undefined;
             var count: usize = 0;
+            var copies: u64 = 0;
             for (active) |slot| if (slot) |other| if (other.generation) |*generation| {
                 live[count] = generation.memoryLengths();
                 count += 1;
+                copies +|= other.prefix_reserve;
             };
             const workspace = if (p.prepared_image) |*prepared| prepared.workspaceBytes() else 0;
-            const projected = try admission.projected(try memory_runtime.activeBytes(), p.ids.len, p.ids.len + p.options.max_tokens, live[0..count]);
+            var projected = (try admission.projected(try memory_runtime.activeBytes(), p.ids.len, p.ids.len + p.options.max_tokens, live[0..count])) +| copies;
+            while ((p.options.max_tokens > 0 or workspace > 0) and projected +| workspace > admission.budget) {
+                const store = prefixes orelse break;
+                // Shared arrays may outlive an eviction; remeasure after every release.
+                if ((projected +| workspace) -| store.nbytes() > admission.budget or !store.evictOne(null)) break;
+                try mx.check(mx.c.mlx_clear_cache());
+                projected = (try admission.projected(try memory_runtime.activeBytes(), p.ids.len, p.ids.len + p.options.max_tokens, live[0..count])) +| copies;
+            }
             if ((p.options.max_tokens > 0 or workspace > 0) and projected +| workspace > admission.budget) {
                 admission.refused +|= 1;
                 if (count == 0) return error.RequestExceedsMemoryBudget;
@@ -429,8 +489,52 @@ const Pending = struct {
             }
             try mx.check(mx.c.mlx_clear_cache());
             try p.activate(session);
+            if (p.image == null and p.options.max_tokens > 0) if (prefixes) |store| {
+                var hit = store.match(p.ids, .{ .step = session.prefillStep() }, false) catch null;
+                if (hit) |*value| {
+                    defer value.deinit(mx.allocator);
+                    p.generation.?.restorePrefix(&value.cache) catch return p.step(session);
+                    p.saved_position = value.count;
+                    p.prefix_reserve = value.cache.nbytes();
+                }
+            };
         }
-        return p.step(session);
+        const done = try p.step(session);
+        if (!done) if (prefixes) |store| p.savePrefix(store, admission.*, active) catch {};
+        return done;
+    }
+
+    fn savePrefix(p: *Pending, store: *PrefixStore, admission: memory_policy.Admission, active: []const ?*Pending) !void {
+        const generation = &p.generation.?;
+        if (generation.memoryLengths().now <= p.saved_position) return;
+        var snapshot = (try generation.snapshot()) orelse return;
+        var adopted = false;
+        defer if (!adopted) snapshot.deinit();
+        const size = snapshot.nbytes();
+        if (store.budget_bytes) |budget| if (size > budget and !store.admit_oversize) return;
+        var live: [8]memory_policy.Live = undefined;
+        var count: usize = 0;
+        var prompt: usize = 0;
+        var copies: u64 = 0;
+        for (active) |slot| if (slot) |other| if (other.generation) |*request| {
+            live[count] = request.memoryLengths();
+            count += 1;
+            prompt = @max(prompt, other.ids.len);
+            copies +|= other.prefix_reserve;
+        };
+        // Each live request can copy the retained buffers independently as it advances.
+        const reserved = (copies -| p.prefix_reserve) +| @max(p.prefix_reserve, size);
+        var projected = try admission.projected(try memory_runtime.activeBytes(), prompt, 0, live[0..count]);
+        while (projected +| reserved > admission.budget) {
+            if ((projected +| reserved) -| store.nbytes() > admission.budget or !store.evictOne(null)) return;
+            try mx.check(mx.c.mlx_clear_cache());
+            projected = try admission.projected(try memory_runtime.activeBytes(), prompt, 0, live[0..count]);
+        }
+        const position = snapshot.position();
+        adopted = true;
+        try store.insertOwned(p.ids[0..position], snapshot, p.ids, false);
+        p.saved_position = position;
+        p.prefix_reserve = @max(p.prefix_reserve, size);
     }
 
     fn step(p: *Pending, session: *inference.Session) !bool {
