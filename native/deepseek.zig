@@ -58,7 +58,7 @@ const Cache = struct {
     proj: A = mx.empty,
     pool: A = mx.empty,
     ipool: A = mx.empty,
-    fn deinit(cache: *Cache) void {
+    pub fn deinit(cache: *Cache) void {
         inline for (comptime std.meta.fieldNames(Cache)) |field| mx.free(@field(cache, field));
         cache.* = .{};
     }

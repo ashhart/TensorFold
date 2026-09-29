@@ -150,6 +150,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | GLM/DeepSeek kernel components | `test-large-family-kernels -Doptimize=safe -j1` | Synthetic shapes; includes hardware-specific paths |
 | Qwen, Nemotron and Flash model/cache parity | `test-models -Doptimize=safe -j1` | All three installed models; substantial unified memory |
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
+| Request state and interleaved generation | `test-request-state test-session-rounds test-session-images -Doptimize=safe -j1` | Synthetic ownership for all backends; Qwen/Gemma/Nemotron checkpoints and Qwen image inputs |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
 | Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven local tokenizers; no model weights loaded |

@@ -9,7 +9,7 @@ const ti = mx.ti;
 const Cache = struct {
     keys: A = mx.empty,
     values: A = mx.empty,
-    fn deinit(c: *Cache) void {
+    pub fn deinit(c: *Cache) void {
         mx.free(c.keys);
         mx.free(c.values);
         c.* = .{};

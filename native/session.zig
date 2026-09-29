@@ -110,86 +110,139 @@ pub const Session = struct {
 };
 
 fn generateModel(m: anytype, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink, image: ?*@import("vision.zig").Prompt) !Reply {
-    const M = @TypeOf(m.*);
-    const vocab: i32 = if (M == qwen.Model) 248320 else if (@hasField(M, "vocab")) m.vocab else M.vocab;
-    if (prompt.len == 0) return error.EmptyPrompt;
-    if (prompt.len > 262144 or options.max_tokens > 262144 - prompt.len) return error.ContextLimitExceeded;
-    for (prompt) |id| if (id < 0 or id >= vocab) return error.InvalidToken;
-    try options.sampling.validate();
-    m.reset();
-    defer m.reset();
-    var reply = Reply{ .prompt_tokens = prompt.len };
-    errdefer reply.deinit(a);
-    if (options.max_tokens == 0) return reply;
-    var budget_arena = std.heap.ArenaAllocator.init(a);
-    defer budget_arena.deinit();
-    var budget = try @import("thinking_budget.zig").Budget.init(budget_arena.allocator(), tok, options.thinking_budget);
-    var settings = options.sampling;
-    settings.seed = options.seed orelse sampling.seedFor(prompt);
-    var next: i32 = 0;
-    var offset: usize = 0;
-    while (offset < prompt.len) {
-        try sink.check();
-        const count = @min(if (@hasDecl(M, "prefill")) @as(usize, 2048) else 16, prompt.len - offset);
-        var image_scope = mx.Scope{};
-        defer image_scope.deinit();
-        var pass = if (M == qwen.Model) blk: {
-            if (image) |p| break :blk try m.prefillImage(prompt[offset..][0..count], try image_scope.slice(p.embeddings, 1, @intCast(offset), @intCast(offset + count)), try p.positions.chunk(&image_scope, offset, offset + count), p.positions.delta);
-            break :blk try m.prefill(prompt[offset..][0..count]);
-        } else if (@hasDecl(M, "prefill")) try m.prefill(prompt[offset..][0..count]) else try m.forward(prompt[offset..][0..count]);
-        defer pass.deinit();
-        const logits = try pass.scope.reshape(pass.logits, &.{ -1, vocab });
-        const rows = mx.dim(logits, 0);
-        const ids = try sampling.rows(&m.kernels, &pass.scope, try pass.scope.slice(logits, 0, rows - 1, rows), &.{@intCast(offset + count)}, settings);
-        defer mx.allocator.free(ids);
-        next = ids[0];
-        if (M == qwen.Model) {
-            var kept: [2048]i32 = undefined;
-            for (kept[0..count], 0..) |*row, j| row.* = @intCast(j);
-            try m.commit(&pass, kept[0..count]);
-        } else try m.commit(&pass, count);
-        offset += count;
-    }
-    var sent: usize = 0;
-    while (reply.tokens.items.len < options.max_tokens) {
-        try sink.check();
-        const proposed_eos = if (M == qwen.Model) next == 248044 or next == 248046 else if (@hasDecl(M, "isEos")) m.isEos(next) else M.eos(next);
-        next = try budget.next(sink.gate, reply.tokens.items.len, next, proposed_eos);
-        const eos = if (M == qwen.Model) next == 248044 or next == 248046 else if (@hasDecl(M, "isEos")) m.isEos(next) else M.eos(next);
-        if (eos and !options.ignore_eos) {
-            const ending = try tok.decode(a, &.{@intCast(next)}, false);
-            defer a.free(ending);
-            for ([_][]const u8{ "</tool_call>", "<tool_call|>", "</｜DSML｜tool_calls>" }) |close| if (std.mem.eql(u8, ending, close)) {
-                try reply.tokens.append(a, @intCast(next));
-                break;
-            };
-            reply.finish_reason = .stop;
-            break;
+    var generation = try Generation(@TypeOf(m.*)).init(m, tok, a, prompt, options, sink, image);
+    defer generation.deinit();
+    while (!try generation.step(m)) {}
+    return generation.takeReply();
+}
+
+pub fn Generation(comptime M: type) type {
+    return struct {
+        const Self = @This();
+        model: *M,
+        a: std.mem.Allocator,
+        tokenizer: *tokenizer.Tokenizer,
+        prompt: []const i32,
+        options: Options,
+        sink: Sink,
+        image: ?*@import("vision.zig").Prompt,
+        state: @import("request_state.zig").State(M),
+        reply: Reply,
+        budget_arena: std.heap.ArenaAllocator,
+        budget: @import("thinking_budget.zig").Budget,
+        settings: sampling.Sampling,
+        offset: usize = 0,
+        next: i32 = 0,
+        sent: usize = 0,
+        phase: enum { prefill, decode, finished, failed } = .prefill,
+
+        pub fn init(m: *M, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink, image: ?*@import("vision.zig").Prompt) !Self {
+            const vocab: i32 = if (M == qwen.Model) 248320 else if (@hasField(M, "vocab")) m.vocab else M.vocab;
+            if (prompt.len == 0) return error.EmptyPrompt;
+            if (prompt.len > 262144 or options.max_tokens > 262144 - prompt.len) return error.ContextLimitExceeded;
+            for (prompt) |id| if (id < 0 or id >= vocab) return error.InvalidToken;
+            try options.sampling.validate();
+            var arena = std.heap.ArenaAllocator.init(a);
+            errdefer arena.deinit();
+            const budget = if (options.max_tokens == 0) @import("thinking_budget.zig").Budget{} else try @import("thinking_budget.zig").Budget.init(arena.allocator(), tok, options.thinking_budget);
+            var settings = options.sampling;
+            settings.seed = options.seed orelse sampling.seedFor(prompt);
+            return .{ .model = m, .a = a, .tokenizer = tok, .prompt = prompt, .options = options, .sink = sink, .image = image, .state = try @import("request_state.zig").State(M).init(m), .reply = .{ .prompt_tokens = prompt.len }, .budget_arena = arena, .budget = budget, .settings = settings, .phase = if (options.max_tokens == 0) .finished else .prefill };
         }
-        try reply.tokens.append(a, @intCast(next));
-        const decoded = try tok.decode(a, reply.tokens.items, false);
-        defer a.free(decoded);
-        const stopped = text.stopAt(decoded, options.stops) != null;
-        const shown = text.visible(decoded, options.stops, !stopped);
-        if (shown.len >= sent and std.unicode.utf8ValidateSlice(shown) and !std.mem.endsWith(u8, shown, "�")) {
-            if (sink.emit) |emit| try emit(sink.context, shown[sent..]);
-            sent = shown.len;
+
+        pub fn deinit(g: *Self) void {
+            g.state.deinit();
+            g.reply.deinit(g.a);
+            g.budget_arena.deinit();
+            g.* = undefined;
         }
-        if (stopped) {
-            reply.finish_reason = .stop;
-            break;
+
+        pub fn takeReply(g: *Self) !Reply {
+            if (g.phase != .finished) return error.IncompleteGeneration;
+            const reply = g.reply;
+            g.reply = .{};
+            return reply;
         }
-        if (reply.tokens.items.len == options.max_tokens) break;
-        var pass = if (M == qwen.Model) try m.forward(&.{next}, &.{-1}) else try m.forward(&.{next});
-        defer pass.deinit();
-        const ids = try sampling.rows(&m.kernels, &pass.scope, pass.logits, &.{m.position + 1}, settings);
-        defer mx.allocator.free(ids);
-        next = ids[0];
-        if (M == qwen.Model) try m.commit(&pass, &.{0}) else try m.commit(&pass, 1);
-    }
-    const decoded = try tok.decode(a, reply.tokens.items, false);
-    defer a.free(decoded);
-    reply.content = try a.dupe(u8, text.visible(decoded, options.stops, false));
-    if (sink.emit) |emit| if (reply.content.len > sent) try emit(sink.context, reply.content[sent..]);
-    return reply;
+
+        /// One prefill chunk or one decoded token; no model pass survives the call.
+        pub fn step(g: *Self, m: *M) !bool {
+            if (m != g.model) return error.WrongGenerationModel;
+            if (g.phase == .finished) return true;
+            if (g.phase == .failed) return error.FailedGeneration;
+            errdefer g.phase = .failed;
+            try g.sink.check();
+            g.state.swap(m);
+            defer g.state.swap(m);
+            if (g.phase == .prefill) try g.prefill(m) else try g.decode(m);
+            return g.phase == .finished;
+        }
+
+        fn prefill(g: *Self, m: *M) !void {
+            const count = @min(if (@hasDecl(M, "prefill")) @as(usize, 2048) else 16, g.prompt.len - g.offset);
+            const tokens = g.prompt[g.offset..][0..count];
+            var image_scope = mx.Scope{};
+            defer image_scope.deinit();
+            var pass = if (M == qwen.Model) blk: {
+                if (g.image) |p| break :blk try m.prefillImage(tokens, try image_scope.slice(p.embeddings, 1, @intCast(g.offset), @intCast(g.offset + count)), try p.positions.chunk(&image_scope, g.offset, g.offset + count), p.positions.delta);
+                break :blk try m.prefill(tokens);
+            } else if (@hasDecl(M, "prefill")) try m.prefill(tokens) else try m.forward(tokens);
+            defer pass.deinit();
+            const vocab: i32 = if (M == qwen.Model) 248320 else if (@hasField(M, "vocab")) m.vocab else M.vocab;
+            const logits = try pass.scope.reshape(pass.logits, &.{ -1, vocab });
+            const rows = mx.dim(logits, 0);
+            const ids = try sampling.rows(&m.kernels, &pass.scope, try pass.scope.slice(logits, 0, rows - 1, rows), &.{@intCast(g.offset + count)}, g.settings);
+            defer mx.allocator.free(ids);
+            g.next = ids[0];
+            if (M == qwen.Model) {
+                var kept: [2048]i32 = undefined;
+                for (kept[0..count], 0..) |*row, j| row.* = @intCast(j);
+                try m.commit(&pass, kept[0..count]);
+            } else try m.commit(&pass, count);
+            g.offset += count;
+            if (g.offset == g.prompt.len) g.phase = .decode;
+        }
+
+        fn eos(m: *M, id: i32) bool {
+            return if (M == qwen.Model) id == 248044 or id == 248046 else if (@hasDecl(M, "isEos")) m.isEos(id) else M.eos(id);
+        }
+
+        fn decode(g: *Self, m: *M) !void {
+            g.next = try g.budget.next(g.sink.gate, g.reply.tokens.items.len, g.next, eos(m, g.next));
+            if (eos(m, g.next) and !g.options.ignore_eos) {
+                const ending = try g.tokenizer.decode(g.a, &.{@intCast(g.next)}, false);
+                defer g.a.free(ending);
+                for ([_][]const u8{ "</tool_call>", "<tool_call|>", "</｜DSML｜tool_calls>" }) |close| if (std.mem.eql(u8, ending, close)) {
+                    try g.reply.tokens.append(g.a, @intCast(g.next));
+                    break;
+                };
+                g.reply.finish_reason = .stop;
+                return g.finish();
+            }
+            try g.reply.tokens.append(g.a, @intCast(g.next));
+            const decoded = try g.tokenizer.decode(g.a, g.reply.tokens.items, false);
+            defer g.a.free(decoded);
+            const stopped = text.stopAt(decoded, g.options.stops) != null;
+            const shown = text.visible(decoded, g.options.stops, !stopped);
+            if (shown.len >= g.sent and std.unicode.utf8ValidateSlice(shown) and !std.mem.endsWith(u8, shown, "�")) {
+                if (g.sink.emit) |emit| try emit(g.sink.context, shown[g.sent..]);
+                g.sent = shown.len;
+            }
+            if (stopped) g.reply.finish_reason = .stop;
+            if (stopped or g.reply.tokens.items.len == g.options.max_tokens) return g.finish();
+            var pass = if (M == qwen.Model) try m.forward(&.{g.next}, &.{-1}) else try m.forward(&.{g.next});
+            defer pass.deinit();
+            const ids = try sampling.rows(&m.kernels, &pass.scope, pass.logits, &.{m.position + 1}, g.settings);
+            defer mx.allocator.free(ids);
+            g.next = ids[0];
+            if (M == qwen.Model) try m.commit(&pass, &.{0}) else try m.commit(&pass, 1);
+        }
+
+        fn finish(g: *Self) !void {
+            const decoded = try g.tokenizer.decode(g.a, g.reply.tokens.items, false);
+            defer g.a.free(decoded);
+            g.reply.content = try g.a.dupe(u8, text.visible(decoded, g.options.stops, false));
+            if (g.sink.emit) |emit| if (g.reply.content.len > g.sent) try emit(g.sink.context, g.reply.content[g.sent..]);
+            g.phase = .finished;
+        }
+    };
 }
