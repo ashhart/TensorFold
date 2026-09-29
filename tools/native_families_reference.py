@@ -180,6 +180,100 @@ def deepseek_dspark_fixture(directory, output, sorted_experts=False, wide=False)
     print("Saved DSpark target taps, context rings, block logits and Markov draws", flush=True)
 
 
+def dflash_fixture(directory, output, case):
+    import mlx.core as mx
+    import mlx.nn as nn
+    from mlx.utils import tree_flatten
+    from tensorfold.drafters.dflash_drafter import _vendor
+    from tensorfold.drafters.dflash_attention import _dflash_attend, concat_updates
+    from tensorfold.drafters.dflash_block import _parts
+    from types import SimpleNamespace
+    vendor = _vendor()
+    directory.mkdir(parents=True, exist_ok=True)
+    output.mkdir(parents=True, exist_ok=True)
+    mx.random.seed(421 + case)
+    width, vocab = (2816, 262144) if case == 3 else (128, 256)
+    bits = (8, 0, 4, 8)[case]
+    rope = dict(rope_type="proportional", partial_rotary_factor=.5, factor=2.) if case == 1 else dict(rope_type="linear", factor=2.) if case == 2 else None
+    config = dict(hidden_size=width, num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+                  head_dim=64, intermediate_size=256, vocab_size=vocab, rms_norm_eps=1e-6,
+                  rope_theta=10000., max_position_embeddings=262144, num_target_layers=30,
+                  layer_types=["sliding_attention", "full_attention"], sliding_window=17,
+                  is_causal=case == 2, rope_scaling=rope,
+                  dflash_config=dict(block_size=16, target_layer_ids=[4, 14, 24], mask_token_id=100,
+                                     input_embedding_scale=.5, output_multiplier=.75, final_logit_softcapping=30.))
+    dc = vendor.DFlashConfig(**{k: v for k, v in config.items() if k != "dflash_config"},
+                             **config["dflash_config"])
+    model = vendor.DFlashDraftModel(dc)
+    model.set_dtype(mx.bfloat16)
+    raw = dict(tree_flatten(model.parameters()))
+    mx.eval(raw)
+    if case != 2:
+        mx.save_safetensors(str(directory / "model.safetensors"), raw)
+    if bits:
+        nn.quantize(model, group_size=64, bits=bits, class_predicate=lambda _, m: isinstance(m, nn.Linear) and m.weight.shape[-1] % 64 == 0)
+    mx.eval(model.parameters())
+    if case == 2:
+        mx.save_safetensors(str(directory / "model.safetensors"), dict(tree_flatten(model.parameters())))
+        config["quantization"] = dict(bits=bits, group_size=64)
+    (directory / "config.json").write_text(json.dumps(config))
+    inputs = {}
+    cache = concat_updates(model.make_cache())
+    draft = SimpleNamespace(model=model)
+    def save(name, value):
+        np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
+    for step, count in enumerate((3, 5, 23, 1, 16)):
+        taps = (mx.random.normal((1, count, 3 * width)) * .3).astype(mx.bfloat16)
+        embeddings = (mx.random.normal((1, 16, width)) * .2).astype(mx.bfloat16)
+        mx.eval(taps, embeddings)
+        inputs[f"taps-{step}"] = taps[0]
+        inputs[f"embeddings-{step}"] = embeddings
+        context = model.hidden_norm(model.fc(taps))
+        h = embeddings
+        for (pre, post), layer, item in zip(_parts(draft), model.layers, cache):
+            h = post(h, _dflash_attend(layer.self_attn, pre(h), context, model.rope, item, {}))
+        save(f"hidden-{step}", model.norm(h[:, 1:]))
+        for i, item in enumerate(cache):
+            keys, values = item.state
+            save(f"keys-{step}-{i}", keys)
+            save(f"values-{step}-{i}", values)
+    (directory / "fixtures").mkdir(exist_ok=True)
+    (directory / "inputs.safetensors").unlink(missing_ok=True)
+    mx.save_safetensors(str(directory / "fixtures/inputs.safetensors"), inputs)
+    print(f"Saved DFlash case {case}: float/quantized blocks and sliding/full caches", flush=True)
+
+
+def gemma_dflash_fixture(directory, draft_dir, output):
+    import mlx.core as mx
+    from tensorfold.families.gemma4.model import load
+    from tensorfold.families.qwen3_5.dflash_head import _Context
+    model, _ = load(directory, backend="rows", check=False, drafter=str(draft_dir))
+    cache = model.make_cache()
+    draft = model.mtp
+    proposer = draft.proposer(sampling=None)
+    output.mkdir(parents=True, exist_ok=True)
+    def save(name, value):
+        np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
+    position = 0
+    for step, (count, budget) in enumerate(zip((3, 5, 16, 1, 16), (3, 15, 1, 7, 15))):
+        ids = mx.array([[1000 + position + j for j in range(count)]], dtype=mx.uint32)
+        hidden = model.hidden(ids, cache)
+        save(f"target-{step}", model.head(hidden)[0])
+        taps = draft.taps()
+        save(f"taps-{step}", taps[0])
+        position += count
+        if not proposer.ready:
+            proposer.prefill_taps(position, taps)
+        else:
+            proposer.absorb(taps)
+        proposal = proposer.propose(_Context(position + 1, 42), budget)
+        save(f"proposal-{step}", mx.array([42] + proposal))
+        for i, item in enumerate(proposer.cache):
+            save(f"keys-{step}-{i}", item.state[0])
+            save(f"values-{step}-{i}", item.state[1])
+    print("Saved full Gemma target taps and synthetic DFlash proposals", flush=True)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
@@ -201,6 +295,8 @@ def main():
     p.add_argument("--synthetic-dspark", action="store_true")
     p.add_argument("--synthetic-dspark-sorted", action="store_true")
     p.add_argument("--synthetic-dspark-wide", action="store_true")
+    p.add_argument("--synthetic-dflash", type=int)
+    p.add_argument("--gemma-drafter", type=Path)
     p.add_argument("--synthetic-glm-layout", action="store_true")
     p.add_argument("--synthetic-glm-mixed", action="store_true")
     p.add_argument("--serial-rows", action="store_true")
@@ -209,6 +305,12 @@ def main():
     args = p.parse_args()
     import mlx.core as mx
     import mlx.nn as nn
+    if args.gemma_drafter:
+        gemma_dflash_fixture(args.model, args.gemma_drafter, args.state_directory)
+        return
+    if args.synthetic_dflash is not None:
+        dflash_fixture(args.model, args.state_directory, args.synthetic_dflash)
+        return
     if args.synthetic_dspark or args.synthetic_dspark_sorted or args.synthetic_dspark_wide:
         deepseek_dspark_fixture(args.model, args.state_directory, args.synthetic_dspark_sorted, args.synthetic_dspark_wide)
         return

@@ -140,6 +140,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | DeepSeek backbone/MTP/cache/generation | `test-deepseek-model test-deepseek-wide test-deepseek-packed -Doptimize=safe -j1` | Synthetic checkpoints, including production hidden/attention widths and BF16 packed hyper-connections |
 | DeepSeek calibrated dense arithmetic | `test-deepseek-dense -Doptimize=safe -j1` | Synthetic scalar/MMA calibration and physical threadgroup variants |
 | DSpark block drafting | `test-dspark -Doptimize=safe -j1` | Synthetic layer taps, context caches, sorted experts, Markov draws and generation; includes production widths |
+| Standard DFlash / Gemma drafting | `test-dflash` / `test-gemma-draft -Doptimize=safe -j1` | Float/quantized blocks and rotary layouts; full Gemma with synthetic drafter, taps, cache rollback and seeded generation |
 | GLM/DeepSeek kernel components | `test-large-family-kernels -Doptimize=safe -j1` | Synthetic shapes; includes hardware-specific paths |
 | Qwen, Nemotron and Flash model/cache parity | `test-models -Doptimize=safe -j1` | All three installed models; substantial unified memory |
 | Gemma text/cache parity | `test-gemma-model -Doptimize=safe -j1` | Installed Gemma checkpoint |
@@ -185,6 +186,8 @@ To use an existing DFlash2 model, omit `--no-drafts` and add
 `--drafter "$HOME/.models/z-lab/Qwen3.8-27B-DFlash2"`.
 Nemotron, Flash Next and GLM use checkpoint MTP heads through `--mtp-drafts N`;
 `--no-drafts` selects serial decoding.
+Gemma accepts a standard DFlash checkpoint through `--drafter DIR`, with
+`--drafter-bits 8` (default), `4`, or `0` to retain floating-point weights.
 DeepSeek accepts a converted `mtp.safetensors` beside its weights or in
 `--drafter DIR`, with the same `--mtp-drafts N` budget.
 For DSpark, that directory contains `dspark.safetensors` and its `config.json`;

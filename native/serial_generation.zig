@@ -89,6 +89,7 @@ pub fn generate(m: anytype, tokens: []const i32, max_tokens: usize, settings: sa
 }
 
 fn absorb(m: anytype, hidden: mx.Array, tokens: []const i32) !void {
+    if (comptime !@hasDecl(@TypeOf(m.*), "forwardMtp")) return error.UnsupportedDrafts;
     var pass = try m.forwardMtp(hidden, tokens);
     defer pass.deinit();
     try m.commitMtp(&pass, tokens.len);

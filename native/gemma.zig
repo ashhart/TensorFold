@@ -19,6 +19,7 @@ pub const Pass = struct {
     scope: mx.Scope = .{},
     logits: A = mx.empty,
     hidden: A = mx.empty,
+    taps: A = mx.empty,
     records: [30]Cache = @splat(.{}),
     position: i32,
     generation: u64,
@@ -34,6 +35,8 @@ pub const Model = struct {
     cache: [30]Cache = @splat(.{}),
     position: i32 = 0,
     generation: u64 = 0,
+    draft: ?@import("dflash.zig").Draft = null,
+    has_mtp: bool = false,
     pub const vocab = 262144;
     pub fn eos(id: i32) bool {
         return id == 1 or id == 106 or id == 50;
@@ -79,14 +82,54 @@ pub const Model = struct {
     }
     pub fn deinit(m: *Model) void {
         m.reset();
+        if (m.draft) |*d| d.deinit();
         m.activations.deinit();
         m.kernels.deinit();
         m.weights.deinit();
     }
     pub fn reset(m: *Model) void {
         for (&m.cache) |*cache| cache.deinit();
+        if (m.draft) |*d| d.reset();
         m.position = 0;
         m.generation +%= 1;
+    }
+    pub fn loadDraft(m: *Model, io: std.Io, dir: []const u8) !void {
+        return m.loadDraftBits(io, dir, 8);
+    }
+    pub fn loadDraftBits(m: *Model, io: std.Io, dir: []const u8, bits: i32) !void {
+        if (m.position != 0) return error.DraftRequiresEmptyCache;
+        const d = try @import("dflash.zig").Draft.init(io, dir, 2816, vocab, 30, bits);
+        if (m.draft) |*old| old.deinit();
+        m.draft = d;
+        m.has_mtp = true;
+    }
+    pub fn draftAbsorbsOnCommit(_: *Model) bool {
+        return true;
+    }
+    pub fn maxDrafts(m: *Model) usize {
+        return if (m.draft) |d| @intCast(d.parsed.value.dflash_config.block_size - 1) else 0;
+    }
+    pub fn propose(m: *Model, _: A, anchor: i32, output: []i32, _: @import("sampling.zig").Sampling) !void {
+        output[0] = anchor;
+        if (output.len <= 1) return;
+        const d = if (m.draft) |*value| value else return error.MissingDraft;
+        if (d.position != m.position or output.len - 1 > m.maxDrafts()) return error.InvalidDraftBlock;
+        var s = mx.Scope{};
+        defer s.deinit();
+        const cfg = d.parsed.value.dflash_config;
+        var ids: [128]i32 = @splat(cfg.mask_token_id);
+        ids[0] = anchor;
+        const embeddings = try s.reshape(try s.binary(mx.c.mlx_multiply, try m.weights.embed(&s, "model.embed_tokens", ids[0..output.len]), try s.cast(try s.scalar(@floatCast(@sqrt(@as(f64, 2816)) * cfg.input_embedding_scale)), mx.bf16)), &.{ 1, @intCast(output.len), 2816 });
+        const hidden = try d.forward(&s, embeddings);
+        var logits = try s.binary(mx.c.mlx_multiply, try m.weights.linear(&m.kernels, &s, "model.embed_tokens", hidden, false), try s.cast(try s.scalar(cfg.output_multiplier), mx.bf16));
+        if (cfg.final_logit_softcapping orelse d.parsed.value.final_logit_softcapping) |cap| if (cap > 0) {
+            logits = try @import("prefill_ops.zig").uncompiled(&s, .softcap, &.{ logits, try s.scalar(cap) });
+        };
+        var selected = mx.c.mlx_array_new();
+        const rc = mx.c.mlx_argmax_axis(&selected, logits, -1, false, mx.stream);
+        selected = try s.cast(try s.result(rc, selected), mx.c.MLX_INT32);
+        try mx.eval(selected);
+        @memcpy(output[1..], mx.c.mlx_array_data_int32(selected)[0 .. output.len - 1]);
     }
     fn sliding(i: usize) bool {
         return i % 6 != 5;
@@ -129,6 +172,8 @@ pub const Model = struct {
         const eps = try m.weights.get("eps");
         var h = try s.binary(mx.c.mlx_multiply, try m.weights.embed(s, "model.embed_tokens", tokens), try s.cast(try s.scalar(@floatCast(@sqrt(@as(f64, 2816)))), mx.bf16));
         var normed = try s.rms(h, try m.weight(0, "input_layernorm.weight"));
+        var taps: [32]A = undefined;
+        var tap_count: usize = 0;
         for (0..30) |i| {
             const local = sliding(i);
             const g = ops.Geometry{ .heads = 16, .kv_heads = if (local) 8 else 2, .head_dim = if (local) 256 else 512, .values_are_keys = !local };
@@ -149,9 +194,14 @@ pub const Model = struct {
             const end = try m.kernels.run(s, src.gemma_moe_tail, &.{ tail[0], dense, expert, try m.weight(i, "post_feedforward_layernorm_1.weight"), try m.weight(i, "post_feedforward_layernorm_2.weight"), try m.weight(i, "post_feedforward_layernorm.weight"), try m.weight(i, "layer_scalar"), next_weight, eps }, &.{ ti("D", 2816), ti("T", 256) }, .{ 256 * rows, 1, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ rows, 2816 } }, .{ .shape = &.{ rows, 2816 } } });
             h = end[0];
             normed = end[1];
+            if (m.draft) |d| for (d.parsed.value.dflash_config.target_layer_ids) |id| if (id == i) {
+                taps[tap_count] = h;
+                tap_count += 1;
+            };
             if ((i + 1) % 8 == 0) try mx.evalMany(&.{normed}, true);
         }
         p.hidden = normed;
+        if (tap_count > 0) p.taps = try s.cat(taps[0..tap_count], -1);
         p.logits = try m.activations.call(s, .softcap, &.{ try m.project(s, normed, try m.weights.triple("model.embed_tokens")), try s.scalar(30) });
         try mx.eval(p.logits);
         return p;
@@ -177,6 +227,10 @@ pub const Model = struct {
             }
         }
         for (next) |cache| try mx.evalMany(&.{ cache.keys, cache.values }, false);
+        if (m.draft) |*d| {
+            if (d.position != m.position or p.taps.ctx == null) return error.InvalidDraftContext;
+            try d.absorb(try s.slice(p.taps, 0, 0, @intCast(keep)));
+        }
         for (&m.cache) |*cache| cache.deinit();
         m.cache = next;
         m.position += @intCast(keep);
@@ -319,4 +373,52 @@ fn equal(s: *mx.Scope, a: A, b: A) !void {
     try mx.evalMany(&.{ x, y }, false);
     const count = mx.c.mlx_array_size(x);
     if (count != mx.c.mlx_array_size(y) or !std.mem.eql(u8, std.mem.sliceAsBytes(mx.c.mlx_array_data_float32(x)[0..count]), std.mem.sliceAsBytes(mx.c.mlx_array_data_float32(y)[0..count]))) return error.GemmaExactnessMismatch;
+}
+
+pub fn checkDraft(io: std.Io, dir: []const u8, drafter: []const u8, output: []const u8) !void {
+    try mx.init();
+    defer mx.shutdown();
+    var m = try Model.init(io, dir);
+    defer m.deinit();
+    try m.loadDraft(io, drafter);
+    try std.Io.Dir.cwd().createDirPath(io, output);
+    var buf: [256]u8 = undefined;
+    for ([_]usize{ 3, 5, 16, 1, 16 }, [_]usize{ 3, 15, 1, 7, 15 }, 0..) |count, budget, step| {
+        var tokens: [16]i32 = undefined;
+        const attempted = @min(16, count + 2);
+        for (tokens[0..attempted], 0..) |*token, j| token.* = 1000 + m.position + @as(i32, @intCast(j));
+        var pass = try m.forward(tokens[0..attempted]);
+        defer pass.deinit();
+        try saveDraft(&pass.scope, output, try std.fmt.bufPrint(&buf, "target-{d}", .{step}), try pass.scope.slice(pass.logits, 0, 0, @intCast(count)));
+        try saveDraft(&pass.scope, output, try std.fmt.bufPrint(&buf, "taps-{d}", .{step}), try pass.scope.slice(pass.taps, 0, 0, @intCast(count)));
+        try m.commit(&pass, count);
+        try std.testing.expectError(error.InvalidCommit, m.commit(&pass, 1));
+        var proposed: [16]i32 = undefined;
+        try m.propose(mx.empty, 42, proposed[0 .. budget + 1], .{});
+        try saveDraft(&pass.scope, output, try std.fmt.bufPrint(&buf, "proposal-{d}", .{step}), try pass.scope.ints(proposed[0 .. budget + 1]));
+        for (m.draft.?.cache, 0..) |cache, i| {
+            try saveDraft(&pass.scope, output, try std.fmt.bufPrint(&buf, "keys-{d}-{d}", .{ step, i }), cache.keys);
+            try saveDraft(&pass.scope, output, try std.fmt.bufPrint(&buf, "values-{d}-{d}", .{ step, i }), cache.values);
+        }
+    }
+    for ([_]f64{ 0, 0.8 }) |temperature| {
+        const settings = @import("sampling.zig").Sampling{ .temperature = temperature, .seed = 1234, .metal = true };
+        m.reset();
+        var serial = try @import("serial_generation.zig").generate(&m, &.{ 1000, 1001, 1002, 1003 }, 12, settings, 0, null);
+        defer serial.deinit();
+        for ([_]usize{ 1, 3, 15 }) |budget| {
+            m.reset();
+            var drafted = try @import("serial_generation.zig").generate(&m, &.{ 1000, 1001, 1002, 1003 }, 12, settings, budget, null);
+            defer drafted.deinit();
+            try std.testing.expectEqualSlices(u32, serial.tokens.items, drafted.tokens.items);
+        }
+    }
+    std.debug.print("PASS: Gemma DFlash partial target commits and greedy/seeded generation at budgets 1, 3 and 15.\n", .{});
+}
+fn saveDraft(s: *mx.Scope, dir: []const u8, name: []const u8, value: A) !void {
+    const path = try std.fmt.allocPrintSentinel(mx.allocator, "{s}/{s}.npy", .{ dir, name }, 0);
+    defer mx.allocator.free(path);
+    const out = try s.cast(value, mx.f32t);
+    try mx.eval(out);
+    try mx.check(mx.c.mlx_save(path, out));
 }

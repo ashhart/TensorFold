@@ -14,6 +14,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var report: ?[]const u8 = null;
     var dump: ?[]const u8 = null;
     var drafter: ?[]const u8 = null;
+    var drafter_bits: i32 = 8;
     var exact = false;
     var long_cache = false;
     var i: usize = 3;
@@ -41,6 +42,11 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         }
         if (i + 1 >= args.len) return error.MissingArgument;
         const value = args[i + 1];
+        if (std.mem.eql(u8, key, "--drafter-bits")) {
+            drafter_bits = try std.fmt.parseInt(i32, value, 10);
+            i += 1;
+            continue;
+        }
         if (std.mem.eql(u8, key, "--drafter")) {
             drafter = value;
             i += 1;
@@ -65,7 +71,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var model = try M.init(io, args[2]);
     defer model.deinit();
     if (drafter) |dir| {
-        if (@hasDecl(M, "loadDraft")) try model.loadDraft(io, dir) else return error.UnsupportedDrafts;
+        if (@hasDecl(M, "loadDraftBits")) try model.loadDraftBits(io, dir, drafter_bits) else if (@hasDecl(M, "loadDraft")) try model.loadDraft(io, dir) else return error.UnsupportedDrafts;
     }
     if (@hasField(M, "has_mtp")) if (!model.has_mtp) {
         drafts = 0;

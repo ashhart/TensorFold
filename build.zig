@@ -177,6 +177,20 @@ pub fn build(b: *std.Build) void {
         dspark_previous = &compare.step;
     }
     dspark_tests.dependOn(dspark_previous.?);
+    const dflash_tests = b.step("test-dflash", "Compare standard DFlash blocks, quantization, rotary layouts and context caches");
+    var dflash_previous: ?*std.Build.Step = null;
+    for (0..4) |case| {
+        const dir = b.fmt("build/native-checks/dflash-{d}", .{case});
+        const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", dir, "--synthetic-dflash", b.fmt("{d}", .{case}), "--output", b.fmt("{s}/oracle/logits.npy", .{dir}), "--state-directory", b.fmt("{s}/oracle", .{dir}) });
+        if (dflash_previous) |previous| oracle.step.dependOn(previous);
+        const native = b.addRunArtifact(exe);
+        native.addArgs(&.{ "check-dflash", dir, b.fmt("{s}/native", .{dir}), b.fmt("{d}", .{case}) });
+        native.step.dependOn(&oracle.step);
+        const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", b.fmt("{s}/oracle", .{dir}), b.fmt("{s}/native", .{dir}) });
+        compare.step.dependOn(&native.step);
+        dflash_previous = &compare.step;
+    }
+    dflash_tests.dependOn(dflash_previous.?);
     const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
     var glm_previous: ?*std.Build.Step = null;
     for (0..3) |case| {
@@ -254,6 +268,14 @@ pub fn build(b: *std.Build) void {
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");
     const model_root = b.option([]const u8, "model-root", "Downloaded checkpoint directory for test-models") orelse "build/models";
     const gemma_model = b.fmt("{s}/gemma-4-26b-a4b-it-4bit", .{model_root});
+    const gemma_draft_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", gemma_model, "--gemma-drafter", "build/native-checks/dflash-3", "--output", "build/native-checks/gemma-draft/oracle/logits.npy", "--state-directory", "build/native-checks/gemma-draft/oracle" });
+    gemma_draft_oracle.step.dependOn(dflash_previous.?);
+    const gemma_draft = b.addRunArtifact(exe);
+    gemma_draft.addArgs(&.{ "check-gemma-draft", gemma_model, "build/native-checks/dflash-3", "build/native-checks/gemma-draft/native" });
+    gemma_draft.step.dependOn(&gemma_draft_oracle.step);
+    const gemma_draft_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", "build/native-checks/gemma-draft/oracle", "build/native-checks/gemma-draft/native" });
+    gemma_draft_compare.step.dependOn(&gemma_draft.step);
+    b.step("test-gemma-draft", "Compare full Gemma taps and synthetic DFlash proposals, caches and generation").dependOn(&gemma_draft_compare.step);
     const gemma_cache = b.addRunArtifact(exe);
     gemma_cache.addArgs(&.{ "run", gemma_model, "--check-long-cache" });
     gemma_cache.step.dependOn(&gemma.step);
