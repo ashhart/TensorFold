@@ -23,6 +23,7 @@ from tensorfold.server.stacks import Rearming
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
 _REQUEST_LOG = os.environ.get("TENSORFOLD_REQUEST_LOG", "")
 _DASHBOARD_HTML = pathlib.Path(__file__).with_name("dashboard.html")
+_QUIET_ROUTES = {"/stats", "/v1/stats", "/dashboard", "/v1/dashboard"}   # the page's own poll, not events
 
 
 def _memory(reset_peak: bool, *, admission: Any = None) -> dict[str, int]:
@@ -75,6 +76,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
         protocol_version = "HTTP/1.1"
 
         def log_message(self, format: str, *args: Any) -> None:
+            if self.path.split("?", 1)[0].rstrip("/") in _QUIET_ROUTES:
+                return                  # a 1 Hz dashboard poll would drown the terminal in its own heartbeat
             print(f"[tensorfold] {self.address_string()} {format % args}")
 
         def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:

@@ -139,3 +139,19 @@ def test_a_recorded_prefill_chunk_lands_in_the_average():
         collector.stop()
         app.scheduler.stats = None
         app.close()
+
+
+def test_the_dashboards_own_polls_stay_out_of_the_access_log(capsys):
+    # one poll a second would drown the terminal in ``GET /stats 200`` lines; chat traffic still logs
+    app = make_app()
+    collector = StatsCollector(app).start()
+    try:
+        get(app, "/stats")
+        get(app, "/dashboard")
+        assert capsys.readouterr().out == ""
+        get(app, "/v1/models")
+        assert "GET /v1/models" in capsys.readouterr().out
+    finally:
+        collector.stop()
+        app.scheduler.stats = None
+        app.close()
