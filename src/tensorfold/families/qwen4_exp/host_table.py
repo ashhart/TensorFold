@@ -331,17 +331,23 @@ class ReadAhead:
 
 
 def _copy_rows(pool: ThreadPoolExecutor, shard: np.ndarray, copy) -> None:
-    """``copy(f, at)`` for each shard's rows; a prompt chunk's (2 GATHER_SPLIT rows or more) split over the pool."""
+    """``copy(f, at)`` for each shard's rows; a prompt chunk's (2 GATHER_SPLIT rows or more) split over the pool,
+    and a round's handful split by file - those rows are few but they come from as many files, and reading the
+    files one after another paid each one's latency in turn, which is what a decoding round was spending its
+    host side on."""
 
-    if GATHER_THREADS > 1 and shard.size >= 2 * GATHER_SPLIT:
+    files = np.unique(shard)
+    if GATHER_THREADS > 1 and shard.size >= 2 * GATHER_SPLIT:      # a prompt chunk: split by the row
         jobs = []
-        for f in np.unique(shard):
+        for f in files:
             at = np.nonzero(shard == f)[0]
             parts = max(1, min(GATHER_THREADS, len(at) // GATHER_SPLIT))
             jobs += [(f, piece) for piece in np.array_split(at, parts)]
         list(pool.map(lambda job: copy(*job), jobs))
+    elif GATHER_THREADS > 1 and files.size > 1:                    # a round: split by the file
+        list(pool.map(lambda f: copy(f, np.nonzero(shard == f)[0]), files))
     else:
-        for f in np.unique(shard):
+        for f in files:
             copy(f, np.nonzero(shard == f)[0])
 
 

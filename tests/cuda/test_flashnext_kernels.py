@@ -439,3 +439,56 @@ def test_the_packaged_draft_vocabulary():
     assert np.all(np.diff(ids) > 0) and ids[0] == 0 and ids[-1] < 248_320 and 65_536 < len(ids) < 100_000
     assert np.array_equal(ids[:65_536], np.arange(65_536))
     assert {248_044, 248_045, 248_046, 248_068, 248_069} <= set(ids.tolist())     # end of text, im, think tags
+
+
+def test_a_rounds_rows_are_read_by_the_file_not_one_after_another():
+    """A decoding round asks for a handful of rows spread over many shards, and reading the files one after
+    another paid each one's latency in turn - what the round's host side was spending. Every copy waits at a
+    barrier holding one party per file, so a serial loop raises BrokenBarrierError rather than merely being
+    slower, and the call still arrives once a file with its own rows."""
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import numpy as np
+
+    from tensorfold.families.qwen4_exp.host_table import GATHER_SPLIT, GATHER_THREADS, _copy_rows
+
+    shard = np.array([0, 1, 2, 3, 0, 1], dtype=np.int64)      # six rows: fewer than 2 * GATHER_SPLIT, so this
+    assert shard.size < 2 * GATHER_SPLIT                      # is the branch a round takes, not a prompt's
+    files = int(np.unique(shard).size)
+    pool = ThreadPoolExecutor(GATHER_THREADS, thread_name_prefix="test-copy")
+    barrier = threading.Barrier(files, timeout=5.0)
+    seen: list[tuple[int, tuple[int, ...]]] = []
+
+    def copy(f, at):
+        seen.append((int(f), tuple(int(i) for i in at)))
+        barrier.wait()
+
+    try:
+        _copy_rows(pool, shard, copy)
+    finally:
+        pool.shutdown()
+    assert sorted(seen) == [(0, (0, 4)), (1, (1, 5)), (2, (2,)), (3, (3,))]
+
+
+def test_a_round_of_rows_from_one_file_reads_them_itself():
+    """With every row in one file there is nothing to overlap: the copy runs on the calling thread, so a
+    one-file gather costs no thread hand-off."""
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import numpy as np
+
+    from tensorfold.families.qwen4_exp.host_table import _copy_rows
+
+    seen: list[tuple[int, tuple[int, ...], bool]] = []
+    pool = ThreadPoolExecutor(1, thread_name_prefix="test-copy")
+    try:
+        _copy_rows(pool, np.array([2, 2, 2], dtype=np.int64),
+                   lambda f, at: seen.append((int(f), tuple(int(i) for i in at),
+                                              threading.current_thread() is threading.main_thread())))
+    finally:
+        pool.shutdown()
+    assert seen == [(2, (0, 1, 2), True)]
