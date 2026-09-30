@@ -78,8 +78,7 @@ def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, wscale, H: tl.constexpr
     pb = tl.program_id(1)
     P = tl.load(POS)
     p = pb * BP + tl.arange(0, BP)
-    # Keep bucket-sized allocations for graph reuse, but do no dot products
-    # for tiles beyond this row block's last visible complete pool.
+    # tiles past this row block's last visible complete pool store -inf without dot products (the same allocations)
     visible = (P + tl.minimum((rb + 1) * RB, R)) // 4
     if pb * BP >= visible:
         for i in tl.static_range(RB):
@@ -124,20 +123,21 @@ def _order_key(s):
 
 
 @triton.jit
-def _select_rows(S, OUT, NP, K: tl.constexpr, BLOCK: tl.constexpr):
+def _select_rows(S, OUT, NP, POS, K: tl.constexpr, BLOCK: tl.constexpr, VISIBLE: tl.constexpr):
     """Program r: a radix select (8 bits a pass) finds the K-th best score, then one pass in pool order writes the pools above it and the lowest ties."""
 
     r = tl.program_id(0).to(tl.int64)
     row = S + r * NP
+    limit = tl.minimum(NP, tl.maximum(K, (tl.load(POS) + r + 1) // 4)) if VISIBLE else NP
     bins = tl.arange(0, 256)
     prefix = tl.zeros((), dtype=tl.uint32)
     fixed = tl.zeros((), dtype=tl.uint32)
     need = K
     for p in tl.static_range(4):
         hist = tl.zeros((256,), dtype=tl.int32)
-        for c in range(0, NP, BLOCK):
+        for c in range(0, limit, BLOCK):
             i = c + tl.arange(0, BLOCK)
-            ok = i < NP
+            ok = i < limit
             u = _order_key(tl.load(row + i, mask=ok, other=0.0))
             match = ok & ((u & fixed) == prefix)
             hist += tl.histogram(((u >> (24 - 8 * p)) & 0xFF).to(tl.int32), 256, mask=match)
@@ -148,9 +148,9 @@ def _select_rows(S, OUT, NP, K: tl.constexpr, BLOCK: tl.constexpr):
         fixed = fixed | (tl.full((), 0xFF, tl.uint32) << (24 - 8 * p))
     written = 0
     equal_seen = 0
-    for c in range(0, NP, BLOCK):
+    for c in range(0, limit, BLOCK):
         i = c + tl.arange(0, BLOCK)
-        ok = i < NP
+        ok = i < limit
         u = _order_key(tl.load(row + i, mask=ok, other=0.0))
         eq = (ok & (u == prefix)).to(tl.int32)
         take = (ok & (u > prefix)) | ((eq == 1) & (tl.cumsum(eq, 0) - eq + equal_seen < need))
@@ -160,13 +160,14 @@ def _select_rows(S, OUT, NP, K: tl.constexpr, BLOCK: tl.constexpr):
         equal_seen += tl.sum(eq, 0)
 
 
-def top_pools(scores: torch.Tensor, k: int) -> torch.Tensor:
+def top_pools(scores: torch.Tensor, k: int, pos_dev: torch.Tensor | None = None) -> torch.Tensor:
     """``_top_pools``'s pools in one kernel, ascending, without int64 keys, top-k or sort."""
     R, NP = scores.shape
     if NP < k or not scores.is_contiguous():
         return _top_pools(scores, k)
     out = torch.empty((R, k), dtype=torch.int64, device=scores.device)
-    _select_rows[(R,)](scores, out, NP, K=k, BLOCK=1024, num_warps=4)
+    _select_rows[(R,)](scores, out, NP, pos_dev if pos_dev is not None else scores,
+                       K=k, BLOCK=1024, VISIBLE=pos_dev is not None, num_warps=4)
     return out
 
 
@@ -198,7 +199,7 @@ def select_tokens(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: in
         _scores[(n, triton.cdiv(np_max, 64))](qi[a:a + n], wts[a:a + n], wts.stride(0), pk, scores, at, n, np_max,
                                              D ** -0.5, wscale, H=H, HP=max(16, triton.next_power_of_2(H)), D=D,
                                              BP=64, RB=1, num_warps=4)
-        blocks.append(top_pools(scores[:n], TOPK_POOLS))                               # ascending pool index
+        blocks.append(top_pools(scores[:n], TOPK_POOLS, at))                           # ascending pool index
     del scores
     pools = blocks[0] if len(blocks) == 1 else torch.cat(blocks)
     dev = qi.device
