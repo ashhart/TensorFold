@@ -105,6 +105,7 @@ class Buffers:
 
             sl = c.shared_width // w.world
             self.exl3 = Scratch(rows, slots, D, ml, dev)
+            self.exl3_rows = rows
             self.sgu = torch.empty((rows, 2 * sl), dtype=bf, device=dev)
             self.sact = torch.empty((rows, sl), dtype=bf, device=dev)
             self.sxs = torch.empty((rows, sl // 64), dtype=f32, device=dev)
@@ -398,7 +399,9 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> torch.Tensor:
         # EXL3: the routed slots through the trellis kernels, the shared expert (last slot) through BF16 matmuls
         from . import exl3_mm
 
-        exl3_mm.routed(b.normed[:R], b.pick, b.plan, m.experts, b.exl3, b.ey.view(-1, c.hidden), R, c.limit)
+        from . import exl3_generic
+        ey_flat = exl3_generic.routed(b.normed[:R], b.pick, m.experts, b.exl3.rows, c.limit)
+        b.ey.view(-1, c.hidden)[:ey_flat.shape[0]].copy_(ey_flat)
         s = m.shared
         mm(b, b.normed[:R], s.gu, b.xs[:R], b.sgu[:R])
         glue.swiglu(b.sgu[:R], b.sact[:R], b.sxs[:R], c.limit)
