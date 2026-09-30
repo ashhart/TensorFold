@@ -192,11 +192,11 @@ def _histogram(lines: list[str], name: str, help_text: str, hist: Histogram) -> 
 
 
 def _requests(app: Any) -> tuple[int, int]:
-    """(running, waiting). A prefilling Mac prompt is running and not yet in the active set."""
+    """(running, waiting). Prefilling Mac prompts are running and not yet in the active set."""
 
     scheduler = getattr(app, "scheduler", None)
     if scheduler is not None and hasattr(scheduler, "active") and hasattr(scheduler, "waiting"):
-        filling = 1 if getattr(scheduler, "filling", None) is not None else 0
+        filling = len(getattr(scheduler, "filling", None) or ())
         return int(scheduler.active) + filling, int(scheduler.waiting)
     engine = getattr(app, "engine", None)
     sched = getattr(engine, "scheduler", None) if engine is not None else None

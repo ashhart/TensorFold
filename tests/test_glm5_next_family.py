@@ -100,6 +100,25 @@ def test_prefill_path_agrees_with_decode_path(checkpoint, length):
         assert c1.offset == c2.offset == length
 
 
+def test_multimodal_embedding_prefill_matches_the_equivalent_token_embeddings(checkpoint):
+    model = backbone(checkpoint)
+    ids = mx.array([tokens(15, seed=12)], dtype=mx.uint32)
+    embeddings = model.embed_tokens(ids.reshape(-1))
+    token_cache, embedding_cache = model.make_cache(), model.make_cache()
+    token_hidden = model.hidden(ids, token_cache)
+    image_path_hidden = model.hidden(ids, embedding_cache, inputs_embeds=embeddings)
+    assert bool(mx.array_equal(token_hidden, image_path_hidden).item())
+    for left, right in zip(token_cache, embedding_cache):
+        assert left.offset == right.offset == 15
+
+
+def test_multimodal_embedding_prefill_rejects_wrong_shapes(checkpoint):
+    model = backbone(checkpoint)
+    ids = mx.array([tokens(3)], dtype=mx.uint32)
+    with pytest.raises(ValueError, match="match the prompt rows"):
+        model.hidden(ids, model.make_cache(), inputs_embeds=mx.zeros((2, TEXT["hidden_size"])))
+
+
 def test_sparse_attention_reads_a_subset_past_the_budget(checkpoint):
     model = backbone(checkpoint)
     mla = model.layers[3].attn
@@ -175,6 +194,94 @@ def test_mtp_drafts_change_speed_only(checkpoint):
     # the same model with drafts off for the request: the serial reference through the one-step-ahead rounds
     _, c = _run_engine(drafted, prompt, 24, drafts=False)
     assert c.emitted == b.emitted
+
+
+@pytest.mark.parametrize(("device", "grid"), [("cpu", 8), ("gpu", 8), ("gpu", 32)])
+def test_image_prefill_across_chunks_and_mtp_matches_the_equivalent_embeddings(checkpoint, device, grid):
+    """An image crosses a chunk boundary; serial and MTP decode agree with a token-embedding reference."""
+    from types import SimpleNamespace
+
+    from tensorfold.engine.lane_engine import LaneEngine, LaneStream
+    from tensorfold.engine.prefill_plan import PrefillPlan
+    from tensorfold.families.glm5_next import engine_settings
+    from tensorfold.vision.glm_mlx import GLMVisionFrontend
+    from tensorfold.vision.glm_processing import PreparedGLMVisionPrompt
+
+    if device == "gpu":
+        if not mx.metal.is_available():
+            pytest.skip("needs Metal")
+        mx.set_default_device(mx.gpu)
+    model = backbone(checkpoint)
+    runtime = GLMFlash(model, glm_mtp.load(model), drafts=3)
+    if device == "cpu":
+        runtime.exact_width = runtime.batch_rows = min(runtime.exact_width, 7)
+    reference = tokens(70, seed=12)
+    begin, end = grid - 2, grid + 4
+    prompt = list(reference)
+    prompt[begin:end] = [10] * 6
+    features = model.embed_tokens(mx.array(reference[begin:end], dtype=mx.uint32))
+
+    class ImageTower:
+        patch_embed = SimpleNamespace(proj=SimpleNamespace(weight=mx.zeros((1,), dtype=mx.bfloat16)))
+
+        def __call__(self, pixels, image_grid):
+            return features
+
+    config = {"image_token_id": 10, "vision_config": {"patch_size": 14, "temporal_patch_size": 2,
+              "spatial_merge_size": 2, "out_hidden_size": TEXT["hidden_size"]}}
+    processor = SimpleNamespace(tokenizer=SimpleNamespace(convert_tokens_to_ids=lambda token: 10),
+                                image_processor=SimpleNamespace(patch_size=14, temporal_patch_size=2, merge_size=2))
+    runtime.vision = GLMVisionFrontend(config, model.embed_tokens, ImageTower(), processor, mx)
+    prepared = PreparedGLMVisionPrompt(tuple(prompt), np.zeros((24, 1176), dtype=np.float32),
+                                      np.asarray([[1, 4, 6]], dtype=np.int64), ((begin, end),), ("image",))
+
+    def run(ids, prompt_data=None, drafts=False):
+        engine = LaneEngine(runtime, **engine_settings(runtime))
+        engine.prefill_plan = PrefillPlan(grid)
+        stream = LaneStream(stream_id="image", prompt_ids=list(ids), prompt_data=prompt_data,
+                            max_new_tokens=20, drafts=drafts)
+        engine.add_stream(stream, checkpoints_at=(grid,))
+        while engine.active_count:
+            engine.step()
+        return stream, engine
+
+    expected, _ = run(reference)
+    serial, _ = run(prompt, prepared)
+    drafted, engine = run(prompt, prepared, drafts=True)
+    assert serial.emitted == drafted.emitted == expected.emitted
+    assert engine.drafted > 0 and engine.prefill_chunks > 1
+    assert not drafted.history_checkpoints
+
+
+def test_draft_head_absorbs_vision_rows_instead_of_placeholder_ids(checkpoint):
+    """Prompt absorb has to hand the draft head the vision rows, not embed(image token)."""
+    from types import SimpleNamespace
+
+    model = backbone(checkpoint)
+    runtime = GLMFlash(model, glm_mtp.load(model), drafts=1)
+    ids = mx.array([1, 10, 10, 2], dtype=mx.uint32)
+    base = model.embed_tokens(ids)
+    vision_rows = mx.ones((2, TEXT["hidden_size"]), dtype=base.dtype)
+    embeds = mx.concatenate([base[:1], vision_rows, base[3:]], axis=0)
+    cache = runtime.make_cache()
+    runtime.prefill_vision(ids, cache, SimpleNamespace(inputs_embeds=embeds[None]), 0, 4)
+    seen = {}
+    real = runtime.mtp
+
+    def wrapped(model, h, tokens, caches, lengths, decode, embeddings=None):
+        seen["embeddings"] = embeddings
+        return real(model, h, tokens, caches, lengths, decode, embeddings=embeddings)
+
+    runtime.mtp = wrapped
+    hidden = mx.zeros((1, 3, TEXT["hidden_size"]), dtype=base.dtype)
+    runtime.absorb_draft_context(hidden, mx.array([10, 10, 2], dtype=mx.uint32), cache)
+    got = seen["embeddings"]
+    assert got is not None and bool(mx.array_equal(got, embeds[1:4]).item())
+    placeholder = model.embed_tokens(mx.array([10, 10, 2], dtype=mx.uint32))
+    assert not bool(mx.array_equal(got, placeholder).item())
+    seen.clear()
+    runtime.absorb_draft_context(hidden, mx.array([4, 5, 6], dtype=mx.uint32), cache)
+    assert seen["embeddings"] is None
 
 
 @pytest.mark.parametrize(("grid", "length", "cut", "kept"), [(8, 30, 26, 24), (32, 100, 80, 64)])
@@ -406,3 +513,62 @@ def test_real_weights_first_layers_rows_are_exact():
     engine_a, a = _run_engine(runtime, prompt, 16)
     _, b = _run_engine(GLMFlash(model, None, drafts=0), prompt, 16)
     assert engine_a.drafted > 0 and a.emitted == b.emitted
+
+
+def test_bf16_abliterated_output_projections_keep_prefill_and_mtp_working(tmp_path):
+    """A Vontra derivative keeps quantized inputs/experts but stores attention outputs, including MTP, in BF16."""
+    import json
+    from tensorfold.families import glm5_next
+
+    folder = write_checkpoint(tmp_path / 'bf16-output')
+    index = json.loads((folder / 'model.safetensors.index.json').read_text())['weight_map']
+    config = json.loads((folder / 'config.json').read_text())
+    for layer in (0, 3, TEXT['num_hidden_layers']):
+        prefix = f'model.language_model.layers.{layer}.self_attn.o_proj'
+        parts = {}
+        shards = {index[f'{prefix}.{suffix}'] for suffix in ('weight', 'scales', 'biases')}
+        for shard in shards:
+            parts.update(mx.load(str(folder / shard)))
+        dense = mx.dequantize(parts[prefix + '.weight'], parts[prefix + '.scales'],
+                              parts[prefix + '.biases'], bits=4, group_size=64).astype(mx.bfloat16)
+        for shard in shards:
+            tensors = mx.load(str(folder / shard))
+            for suffix in ('scales', 'biases'):
+                key = f'{prefix}.{suffix}'
+                tensors.pop(key, None)
+                index.pop(key, None)
+            if prefix + '.weight' in tensors:
+                tensors[prefix + '.weight'] = dense
+            mx.eval(tensors)
+            staged = folder / (shard + '.new.safetensors')
+            mx.save_safetensors(str(staged), tensors)
+            staged.replace(folder / shard)
+        config['quantization'][prefix] = False
+    (folder / 'config.json').write_text(json.dumps(config))
+    (folder / 'model.safetensors.index.json').write_text(json.dumps({'weight_map': index}))
+    glm5_next.check(folder)
+    model = backbone(folder)
+    head = glm_mtp.load(model)
+    assert isinstance(model.layers[0].attn.o_proj, linear.Dense)
+    assert isinstance(model.layers[3].attn.o_proj, linear.Dense)
+    assert isinstance(head.layer.attn.o_proj, linear.Dense)
+    ids = tokens(9)
+    a = model.head(model.hidden(mx.array([ids]), model.make_cache()))[0, -1]
+    cache = model.make_cache()
+    for token in ids:
+        h = model.hidden(mx.array([[token]]), cache)
+    b = model.head(h)[0, -1]
+    a, b = np.array(a.astype(mx.float32)), np.array(b.astype(mx.float32))
+    assert int(a.argmax()) == int(b.argmax())
+    assert np.max(np.abs(a - b)) < 0.05 * np.max(np.abs(b)) + 0.05
+    drafted = head(model, h.reshape(-1, TEXT['hidden_size']), mx.array([ids[-1]]),
+                   [head.make_cache()], (1,), True)
+    assert bool(mx.all(mx.isfinite(head.logits(model, drafted))).item())
+
+
+def test_unquantized_inputs_still_rejected(tmp_path):
+    from tensorfold.families import glm5_next
+    folder = write_checkpoint(tmp_path / 'unsupported', stated={
+        'model.language_model.layers.0.self_attn.q_proj': False})
+    with pytest.raises(ValueError, match='module'):
+        glm5_next.check(folder)

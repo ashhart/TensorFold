@@ -18,14 +18,16 @@ _HC_COMMON = r"""
 
 # write-back, stream RMS, mix, sinkhorn split and RMSNorm, each in the row-by-row path's MLX partition and order
 _HC_EXPAND = _HC_COMMON + r"""
-  // Threadgroup r (1024 threads): the pending write-back (EXPAND) and the streams' RMS scale (SPLIT).
+  // Threadgroup r (1024 threads): the pending write-back, the streams' RMS scale, a prompt's scaled streams (ZOUT)
   const int r = int(threadgroup_position_in_grid.x);
   const uint t = thread_position_in_threadgroup.x;
   const uint lane = thread_index_in_simdgroup, sg = simdgroup_index_in_threadgroup;
   threadgroup float red[32];
+  threadgroup float inv_s[1];
   device const bfloat* xo = XOLD + size_t(r) * F;
   device bfloat* xn = XNEW + size_t(r) * F;
   float ss = 0.0f;
+  float vals[F / 1024];
   for (int k = 0; k < F / 4096; ++k) {
     for (int i = 0; i < 4; ++i) {
       const int f = int(t) * 4 + 4096 * k + i;
@@ -44,6 +46,7 @@ _HC_EXPAND = _HC_COMMON + r"""
       } else {
         v = float(xo[f]);
       }
+      vals[k * 4 + i] = v;
       ss = sq_acc<SQ_FMA>(ss, v);
     }
   }
@@ -55,8 +58,18 @@ _HC_EXPAND = _HC_COMMON + r"""
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (sg == 0) {
     const float a = simd_sum(red[lane]);
-    if (lane == 0) INV[r] = metal::precise::rsqrt(a / float(F) + EPS[0]);
+    if (lane == 0) {
+      const float inv = metal::precise::rsqrt(a / float(F) + EPS[0]);
+      INV[r] = inv;
+      inv_s[0] = inv;
+    }
   }
+  if (!ZOUT) return;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  const float inv = inv_s[0];
+  device float* z = Z + size_t(r) * F;
+  for (int k = 0; k < F / 4096; ++k)
+    for (int i = 0; i < 4; ++i) z[int(t) * 4 + 4096 * k + i] = vals[k * 4 + i] * inv;
 """
 
 _HC_MIX = _HC_COMMON + r"""
@@ -205,25 +218,30 @@ def hc_fits(hc: Any, dims: int) -> bool:
 
 
 def hc_step(x: mx.array, pending: tuple[mx.array, mx.array, mx.array] | None, hc: Any | None, norm_w: mx.array | None,
-            eps: float) -> tuple[mx.array, mx.array | None, mx.array | None, mx.array | None]:
-    """A block boundary on streams [R, 4, D]: the pending write-back, then the next block's split and RMSNorm."""
+            eps: float, prompt: bool = False) -> tuple[mx.array, mx.array | None, mx.array | None, mx.array | None]:
+    """A block boundary on streams [R, 4, D]: write-back, then split and RMSNorm (prompt: mixes by MLX's GEMM)."""
 
     rows, streams, dims = x.shape
     expand, split = pending is not None, hc is not None
+    zout = prompt and split
     if expand or split:
         branch, post, comb = pending if expand else (x[:, 0], mx.zeros((rows, 4), mx.float32),
                                                        mx.zeros((rows, 4, 4), mx.float32))
         eps_arr = mx.array([hc.cfg.rms_norm_eps if split else eps], dtype=mx.float32)
-        k1 = _kernel("hc_expand", _HC_EXPAND, ["XOLD", "BRANCH", "POST", "COMB", "EPS"], ["XNEW", "INV"])
-        xn, inv = k1(inputs=[x, branch, post, comb, eps_arr],
-                     template=[("D", dims), ("EXPAND", int(expand)), ("SPLIT", int(split)), ("SQ_FMA", SQ_FMA)],
-                     grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
-                     output_shapes=[x.shape if expand else (1,), (rows,)], output_dtypes=[mx.bfloat16, mx.float32])
+        k1 = _kernel("hc_expand", _HC_EXPAND, ["XOLD", "BRANCH", "POST", "COMB", "EPS"], ["XNEW", "INV", "Z"])
+        xn, inv, z = k1(inputs=[x, branch, post, comb, eps_arr],
+                        template=[("D", dims), ("EXPAND", int(expand)), ("SPLIT", int(split)), ("ZOUT", int(zout)),
+                                  ("SQ_FMA", SQ_FMA)],
+                        grid=(1024 * rows, 1, 1), threadgroup=(1024, 1, 1),
+                        output_shapes=[x.shape if expand else (1,), (rows,), (rows, streams * dims) if zout else (1,)],
+                        output_dtypes=[mx.bfloat16, mx.float32, mx.float32])
         if expand:
             x = xn
     if not split:
         return x, None, None, None
-    if hc.fn_packed is not None:
+    if zout:
+        mixes = z @ hc.fn.T
+    elif hc.fn_packed is not None:
         k2 = _kernel("hc_mix_packed", _HC_MIX_PACKED, ["X", "INV", "FNP"], ["MIXES"])
         mixes = k2(inputs=[x, inv, hc.fn_packed], template=[("D", dims), ("U", HC_MIX_U)], grid=(6 * 256, rows, 1),
                    threadgroup=(256, 1, 1), output_shapes=[(rows, 24)], output_dtypes=[mx.float32])[0]

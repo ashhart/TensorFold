@@ -59,6 +59,11 @@ class Config:
     @classmethod
     def read(cls, model_dir: str | Path) -> "Config":
         raw = json.loads((Path(model_dir) / "config.json").read_text())
+        want = raw.get("tensorfold_activation_dtype")
+        if want not in (None, "bfloat16", "float32"):
+            raise ValueError(f"tensorfold_activation_dtype {want!r}: bfloat16 or float32")
+        if want == "float32":
+            raise ValueError("tensorfold_activation_dtype float32 is the Mac engine; the CUDA engine stays bf16")
         t = dict(raw.get("text_config") or raw)
         lin = dict(t.get("linear_attn_config") or {})
         quant = raw.get("quantization") or raw.get("quantization_config") or {}

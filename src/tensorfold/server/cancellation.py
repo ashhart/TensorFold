@@ -47,8 +47,21 @@ def socket_cancellation(connection: socket.socket) -> Cancellation:
 
 
 class PrefillGuard:
-    def __init__(self, cancellation: Cancellation, memory: Any = None):
+    def __init__(self, cancellation: Cancellation, memory: Any = None, *, wide: bool = True):
         self.cancellation, self.memory = cancellation, memory
+        self.wide = bool(wide)          # whether this fill step may take several plan chunks in one forward
+
+    def pass_width(self, cache: Any, sizes: list[int]) -> int:
+        """How many of these consecutive plan chunks one forward may take: 1 unless wide, then what memory fits."""
+
+        if not self.wide:
+            return 1
+        return len(sizes) if self.memory is None else self.memory.pass_width(cache, sizes)
+
+    def pass_room(self, cache: Any, sizes: list[int], extra: int) -> bool:
+        """Whether this pass fits with ``extra`` bytes more beside it (no memory accounting here: yes)."""
+
+        return self.memory is None or self.memory.pass_room(cache, sizes, extra)
 
     def before_chunk(self, cache: Any, tokens: int) -> None:
         self.cancellation.check()

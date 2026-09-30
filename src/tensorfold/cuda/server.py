@@ -12,8 +12,9 @@ from typing import Any, Callable
 
 from tensorfold.engine import grammar
 from tensorfold.server.cancellation import RequestCancelled
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CONTEXT_LIMIT, RequestError, refusal
 from tensorfold.server.messages import validate_modalities
+from tensorfold.server.probabilities import TokenBytes, probability_options
 from tensorfold.server.request_options import heard_effort, parse_numbers, thinking_fields
 from tensorfold.server.stopping import stop_options
 from tensorfold.server.tool_policy import ToolCallPolicy
@@ -107,6 +108,10 @@ class App:
 
         if not isinstance(body, dict):
             return "the request body must be a JSON object"
+        try:
+            probability_options(body, supported=bool(getattr(self.engine, "supports_logprobs", False)))
+        except RequestError as exc:
+            return str(exc)
         if body.get("draft", True) is False and "draft" not in inspect.signature(self.engine.generate).parameters:
             return "this model's CUDA engine has no serial switch (\"draft\": false)"
         if not isinstance(body.get("messages", []), list):
@@ -188,6 +193,13 @@ class App:
         budget = parse_numbers({"thinking_budget": body.get("thinking_budget")})["thinking_budget"]
         budget = int(budget or getattr(self, "thinking_budget", 0)) if chat and thinking else 0     # 0: the default
         spec = grammar.request_spec(body)
+        top = probability_options(body, supported=bool(getattr(self.engine, "supports_logprobs", False)))
+        if top is not None:
+            if not chat or body.get("stream") or thinking or tools or stop or spec is not None or budget:
+                raise RequestError("logprobs support nonstreamed text chat with thinking off, without tools, "
+                                   "stop strings or structured output")
+            if not hasattr(self, "_probability_decoder"):
+                self._probability_decoder = TokenBytes(self.tok)
         compiled = (spec, self._grammars().compile(spec)) if spec is not None else None
         if chat:
             if not isinstance(body.get("messages"), list):
@@ -235,25 +247,27 @@ class App:
         if limit is not None and len(prepared.prompt) >= limit:
             kind = "safe cache capacity" if limit == self._engine_capacity() else "context window"
             native = f" (model window: {self.native_context_window} tokens)" if self.native_context_window else ""
-            return (f"the rendered prompt has {len(prepared.prompt)} tokens and leaves no room for a reply in "
-                    f"the server's {limit}-token {kind}{native}; shorten the prompt"
+            return (f"{CONTEXT_LIMIT} {limit} tokens: the rendered prompt has {len(prepared.prompt)} tokens and leaves "
+                    f"no room for a reply in the server's {limit}-token {kind}{native}, which exceeds the context "
+                    f"window; shorten the prompt"
                     f"{self._restart(len(prepared.prompt) + 1)}")
         asked = body.get("max_tokens") or body.get("max_completion_tokens")
         if limit is not None and asked and len(prepared.prompt) + prepared.max_tokens > limit:
             kind = "safe cache capacity" if limit == self._engine_capacity() else "context window"
-            return (f"the rendered prompt has {len(prepared.prompt)} tokens and requests {prepared.max_tokens} "
-                    f"reply tokens, exceeding the server's {limit}-token {kind}; reduce the prompt or reply "
-                    f"length{self._restart(len(prepared.prompt) + prepared.max_tokens)}")
+            return (f"{CONTEXT_LIMIT} {limit} tokens: the rendered prompt has {len(prepared.prompt)} tokens and "
+                    f"requests {prepared.max_tokens} reply tokens, which exceeds the context window (the server's "
+                    f"{limit}-token {kind}); reduce the prompt or reply length"
+                    f"{self._restart(len(prepared.prompt) + prepared.max_tokens)}")
         return None
 
     def prepare(self, body: dict[str, Any], chat: bool) -> PreparedRequest:
         problem = self._check_fields(body)
         if problem:
-            raise RequestError(problem)
+            raise refusal(problem)
         prepared = self._prepare(body, chat)
         problem = self.check(body, prepared=prepared)
         if problem:
-            raise RequestError(problem)
+            raise refusal(problem)
         limit = self._context_limit()
         if limit is not None:
             prepared.max_tokens = min(prepared.max_tokens, limit - len(prepared.prompt))
@@ -350,6 +364,12 @@ class App:
         gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
 
         options: dict[str, Any] = {} if draft else {"draft": False}
+        probabilities = None
+        if body.get("logprobs"):
+            from tensorfold.engine.probabilities import Probabilities
+
+            probabilities = Probabilities(body.get("top_logprobs") or 0, len(prompt), max_tokens)
+            options["probabilities"] = probabilities
         if takes_stop_eos:
             options["stop_eos"] = not prepared.ignore_eos
         shaped = prepared.grammar is not None or prepared.think_budget > 0
@@ -422,7 +442,10 @@ class App:
         finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
+        logprobs = (self._probability_decoder.format(probabilities.emitted(out), ends)
+                    if probabilities is not None else None)
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
+                **({"logprobs": logprobs} if logprobs is not None else {}),
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "cached_tokens": (cached or [0])[0],
                 "reasoning_tokens": reasoning_count(out, self.tok.token_to_id("</think>") if chat and thinking else None),
                 "stats": stats}

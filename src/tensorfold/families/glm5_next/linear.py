@@ -9,6 +9,7 @@ import mlx.nn as nn
 
 from tensorfold.families.glm5_next.config import BITS, GROUPS
 from tensorfold.kernels.glm.flash.v1 import kernels as K
+from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm as PM
 
 
 class Q:
@@ -31,8 +32,10 @@ class Q:
         return [self.weight, self.scales, self.biases]
 
     def __call__(self, x: mx.array) -> mx.array:
+        if x.ndim == 2:                                     # prompt rows take MLX's qmm with wider tiles: its bits
+            return PM.matmul(x, self.weight, self.scales, self.biases, group=self.group, bits=self.bits).astype(x.dtype)
         return mx.quantized_matmul(x, self.weight, self.scales, self.biases, transpose=True, group_size=self.group,
-                                   bits=self.bits)
+                                   bits=self.bits).astype(x.dtype)
 
     @classmethod
     def stack(cls, parts: list["Q"]) -> "Q | QSplit":
@@ -104,6 +107,12 @@ class Dense:
         return mx.matmul(x, self.weight.T)
 
 
+def kernel_q(*qs: Any) -> bool:
+    """Weights the prompt kernels were proven on: ``Q``s of 4 or 8 bits with bf16 scales and biases (not Dense)."""
+
+    return all(isinstance(q, Q) and q.bits in (4, 8) and q.scales.dtype == q.biases.dtype == mx.bfloat16 for q in qs)
+
+
 def one_format(parts: list[Q]) -> tuple[int, int]:
     """The (bits, group) of linears stacked into one matrix, which must share it."""
 
@@ -155,4 +164,17 @@ def per_row(fn: Any, x: mx.array, rows_exact: bool) -> mx.array:
 
 def silu(x: mx.array) -> mx.array:
     return nn.silu(x)
+
+
+class ChunkQueue:
+    """A prompt pass's chunks two at a time: queue one, wait for the one before, so its buffers serve the next."""
+
+    def __init__(self) -> None:
+        self.last: tuple[mx.array, ...] | None = None
+
+    def push(self, *arrays: mx.array) -> None:
+        mx.async_eval(*arrays)
+        if self.last is not None:
+            mx.eval(*self.last)
+        self.last = arrays
 

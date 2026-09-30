@@ -188,3 +188,18 @@ def test_every_prompt_inside_the_advertised_window_is_admitted_and_a_refusal_cou
         memory.end()
     finally:
         served.close()
+
+
+def test_the_default_prompt_cache_takes_what_a_whole_window_request_leaves_idle():
+    served = app(2**31, context_window=65536, checkpoint_budget_bytes=2**20, grow_checkpoints=True)   # 0.625 GiB idle
+    try:
+        memory, store = served.prompt_memory, served.checkpoints
+        spare = memory.spare(served.context_window)
+        assert store.budget_bytes == spare == 2**31 - memory.need(served.context_window, memory.held()) > 2**20
+    finally:
+        served.close()
+    fixed = app(2**31, context_window=65536, checkpoint_budget_bytes=2**20)
+    try:
+        assert fixed.checkpoints.budget_bytes == 2**20                   # an explicit --prompt-cache-gib stays
+    finally:
+        fixed.close()

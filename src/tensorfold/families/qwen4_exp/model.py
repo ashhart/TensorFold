@@ -282,6 +282,16 @@ class Qwen4Exp(nn.Module):
         self.__dict__["last_streams"] = h[0]          # [L, S*D]: the residual streams before the final mixer
         return self.model.hyper_connection_mixer(h)
 
+    def hidden_pass(self, inputs: Any, cache: list[Any], sizes: Any) -> mx.array:
+        """Consecutive prompt chunks (``sizes`` rows each) in one forward, every chunk with its own forward's bits."""
+
+        tokens = np.asarray(inputs, dtype=np.int64)
+        if tokens.ndim == 1:
+            tokens = tokens[None]
+        if len(tuple(sizes)) == 1 or self.__dict__.get("fused") is None or not prefill_mm.fast_prefill():
+            raise ValueError("hidden_pass: several chunks on the prefill path (fused model, Metal) only")
+        return prefill_hc.hidden_pass(self, tokens, cache, sizes)
+
     def head(self, hidden: mx.array) -> mx.array:
         return self.lm_head(hidden)
 

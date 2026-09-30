@@ -160,6 +160,10 @@ class LaneStream:
     retain: bool = True
     # Capture (tokens, single-row cache copy) at prefill boundaries the next turn can match.
     history_checkpoints: list[tuple[list[int], list[Any]]] = field(default_factory=list)
+    # plan chunks each prefill forward took (1s: a chunk a forward; more: a prompt pass)
+    prefill_widths: list[int] = field(default_factory=list)
+    # the forwards whose freed buffers MLX kept in the raised pass cache (the budget had room for it)
+    prefill_raised: list[bool] = field(default_factory=list)
     # Key sampling by each row's logits and position so drafts verify identically; None means greedy.
     sampling: Any = None
     # False: one token a round, no drafts of any kind (the serial reference drafted output is checked against)
@@ -296,7 +300,8 @@ class LaneEngine(FamilyRounds):
     prefill_chunks = 0
 
     def __init__(self, model: Any, *, max_rows: int = 128, max_draft: int = 32,
-                 retain_finished_caches: bool = False, prefill_plan: Any = None) -> None:
+                 retain_finished_caches: bool = False, prefill_plan: Any = None,
+                 prefill_pass: int | None = None, pass_cache: int | None = None) -> None:
         if not getattr(model, "lane_family", False):
             raise TypeError(f"{type(model).__name__} is not a lane-engine family (engine.lane_family)")
         if max_rows < 1 or max_draft < 0:
@@ -308,6 +313,10 @@ class LaneEngine(FamilyRounds):
         self.retain_finished_caches = bool(retain_finished_caches)
         if prefill_plan is not None:
             self.prefill_plan = prefill_plan
+        if prefill_pass is not None:
+            self.prefill_pass = max(1, int(prefill_pass))
+        if pass_cache is not None:
+            self.pass_cache = max(0, int(pass_cache))
         self.finished_caches: dict[str, tuple[list[int], list[Any]]] = {}
         self.streams: list[LaneStream] = []
         self.round_stats: list[RoundStats] = []

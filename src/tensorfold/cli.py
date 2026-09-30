@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     endpoint.add_argument("--port", type=int, default=8080)
     endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
-    endpoint.add_argument("--vision", action="store_true", help="enable image input for Qwen3.5/3.8 dense vision checkpoints")
+    endpoint.add_argument("--vision", action="store_true", help="enable image input for supported GLM and Qwen vision checkpoints")
     endpoint.add_argument("--vision-urls", action="store_true",
                           help="with --vision, accept public HTTP(S) image URLs (default: data URLs only)")
 
@@ -76,7 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
-                       help="memory for cached conversation prefixes (0: off; default: an eighth of RAM, at most 16)")
+                       help="memory for cached conversation prefixes (0: off; default on a Mac: what the weights, a "
+                            "whole-window request and a shared round leave idle, at least an eighth of RAM up to 16)")
     speed.add_argument("--checkpoint-slots", type=int, default=None,
                        help="cached conversation prefixes kept in memory (default: 3 per parallel lane, at least 8); "
                             "with long conversations this, not --prompt-cache-gib, is usually the limit")
@@ -90,10 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
                        help="requests decoded together, their windows sharing each round's forward: a number, or "
                             "auto (Mac: up to 8, each started only while the projected memory fits the budget; "
                             "CUDA: one at a time, the others waiting their turn)")
-    speed.add_argument("--decode-share", type=float, default=None, help="Mac: while a prompt prefills, running replies "
-                       "keep moving for this share of each chunk's time and later prompts start later (default 0.25; "
-                       "0: whole prompts first, as 0.3.6.2). CUDA Flash Next --parallel: replies decode inside each "
-                       "prompt pass; a share sizes the passes so a round's decoding takes it (default 0: whole passes)")
+    speed.add_argument("--decode-share", type=float, default=None, help="Mac: while prompts prefill, running replies "
+                       "keep moving for this share of each chunk's time, and a new prompt starts at the next chunk "
+                       "(default 0.25; 0: whole prompts first, in order, as 0.3.6.2). CUDA Flash Next --parallel: "
+                       "replies decode inside each prompt pass; a share sizes the passes so a round's decoding takes "
+                       "it (default 0: whole passes)")
+    speed.add_argument("--prefill-pass", type=int, default=8, help="Mac: prompt chunks one forward takes while a "
+                       "prompt fills alone, for models with a prompt pass (1: one chunk a forward, as 0.5.0)")
+    speed.add_argument("--pass-cache-gib", type=float, default=16.0, help="Mac: MLX's cache of freed buffers during "
+                       "such a pass, where the memory budget has room (at most --mlx-cache-gib: no change)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
     speed.add_argument("--ssd-experts", type=float, default=None, metavar="GIB",
                        help="stream routed experts from the checkpoint into a GPU pool of this many GiB, for models "
@@ -533,7 +539,9 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     from tensorfold.server.app import ChatApp
     from tensorfold.server.http import Server, make_handler
 
-    engine_factory = functools.partial(LaneEngine, prefill_plan=plan)      # every family decodes through lanes
+    engine_factory = functools.partial(LaneEngine, prefill_plan=plan,        # every family decodes through lanes
+                                       prefill_pass=max(1, int(args.prefill_pass)),
+                                       pass_cache=int(float(args.pass_cache_gib) * 1024**3))
     sampling = _generation_config(model_dir)
     for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k),
                        ("min_p", args.min_p)):
@@ -576,6 +584,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         use_proposer=not args.no_drafts,
         snapshot_dir=snapshot_dir, model_id=model_id, model_dir=model_dir,
         decode_share=0.25 if args.decode_share is None else float(args.decode_share),
+        grow_checkpoints=args.prompt_cache_gib is None,
     )
     if app.context_fitted:
         print(f"[tensorfold] context window {app.context_window:,} tokens: the most one request can use in the "

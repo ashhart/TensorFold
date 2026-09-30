@@ -236,8 +236,9 @@ def test_every_family_names_an_importable_kernel_version():
         if family.model_type == "qwen3_5":
             model = SimpleNamespace(_tensorfold_lanes=True)
             assert families.kernel_version(family, model).startswith(("qwen-dense-v1-", f"{family.model_type}-v1-"))
-        else:
-            assert families.kernel_version(family, None).startswith(f"{family.model_type}-v1-")
+        else:                               # an alias model_type (a newer export's name) keeps the package's own
+            names = getattr(package, "MODEL_TYPES", (family.model_type,))
+            assert families.kernel_version(family, None).startswith(tuple(f"{name}-v1-" for name in names))
 
 
 def test_info_reads_a_local_config(tmp_path, capsys):

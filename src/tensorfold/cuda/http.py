@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from tensorfold.cuda import health
 from tensorfold.server import metrics, responses
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
-from tensorfold.server.errors import CapacityError, RequestError
+from tensorfold.server.errors import CapacityError, RequestError, error_body
 from tensorfold.server.http import Server
 from tensorfold.server.stacks import Rearming
 
@@ -100,7 +100,7 @@ def make_handler(app: App):
                 prepared = app.prepare(body, chat)
             except RequestError as exc:
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
-                                  {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                                  {"error": error_body(exc)})
             except Exception as exc:        # any other failure to read the request is refused too, as on MLX
                 _log_error(exc)
                 return self._json(400, {"error": {"message": _error_message(exc)}})
@@ -142,7 +142,7 @@ def make_handler(app: App):
                     self.close_connection = True
                     return
                 except RequestError as exc:
-                    return self._stream_error({"message": str(exc), "type": "invalid_request_error"})
+                    return self._stream_error(error_body(exc))
                 except Exception as exc:
                     _log_error(exc)
                     return self._stream_error({"message": _error_message(exc), "type": "server_error"})
@@ -170,7 +170,7 @@ def make_handler(app: App):
                 return
             except RequestError as exc:
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
-                                  {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                                  {"error": error_body(exc)})
             except Exception as exc:
                 _log_error(exc)
                 try:
@@ -188,6 +188,8 @@ def make_handler(app: App):
                 payload = {"id": rid, "object": "chat.completion", "created": created, "model": model,
                            "choices": [{"index": 0, "message": message, "finish_reason": result["finish"]}],
                            "usage": usage, "tensorfold": result["stats"]}
+                if result.get("logprobs") is not None:
+                    payload["choices"][0]["logprobs"] = result["logprobs"]
             else:
                 payload = {"id": rid, "object": "text_completion", "created": created, "model": model,
                            "choices": [{"index": 0, "text": result["content"], "finish_reason": result["finish"]}],

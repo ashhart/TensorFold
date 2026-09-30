@@ -63,8 +63,10 @@ class Weights:
             raise ValueError(f"{prefix}: stored {stored}; GLM-5.3-Flash's Mac engine reads MLX affine weights of "
                              f"{', '.join(map(str, BITS))} bits in groups of {', '.join(map(str, GROUPS))}")
         try:
-            return Q(self.get(f"{prefix}.weight"), self.get(f"{prefix}.scales"), self.get(f"{prefix}.biases"),
-                     bits=fmt[0], group=fmt[1])
+            s, b = self.get(f"{prefix}.scales"), self.get(f"{prefix}.biases")
+            if s.dtype == mx.float16:                      # exact in fp32; MLX would promote them on every call
+                s, b = s.astype(mx.float32), b.astype(mx.float32)
+            return Q(self.get(f"{prefix}.weight"), s, b, bits=fmt[0], group=fmt[1])
         except ValueError as exc:
             raise ValueError(f"{prefix}: {exc}") from None
 
@@ -102,7 +104,10 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False, stream: 
                  "indexer.weights_proj"]
         # kv_b_proj as stored (vontra), or the absorbed pair the mlxlm layout keeps instead
         names += ["kv_b_proj"] if w.has(f"{attn_prefix}.kv_b_proj.weight") else ["embed_q", "unembed_out"]
-        aw: dict[str, Any] = {n: w.q(f"{attn_prefix}.{n}") for n in names}
+        # indexer projections and o_proj as stored: quantised, or dense when the checkpoint keeps no scales
+        aw: dict[str, Any] = {
+            n: (w.linear if n.startswith("indexer.") or n == "o_proj" else w.q)(f"{attn_prefix}.{n}")
+            for n in names}
         for n in ("q_a_layernorm", "kv_a_layernorm"):
             aw[n] = w.get(f"{attn_prefix}.{n}.weight")
         for n in ("indexer.k_norm.weight", "indexer.k_norm.bias", "indexer.index_kpool_compress_ape",
@@ -114,14 +119,19 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False, stream: 
                      attn.q_norm, attn.kv_norm, attn.ik_norm_w, attn.ik_norm_b, attn.ape, attn.igate)
     else:
         names = ["q_proj", "k_proj", "v_proj", "f_a_proj", "f_b_proj", "g_a_proj", "g_b_proj", "b_proj", "o_proj"]
-        aw = {n: w.q(f"{attn_prefix}.{n}") for n in names}
+        # low-rank gates, beta and o_proj as stored: quantised, or dense when the checkpoint keeps no scales
+        aw = {n: (w.q if n in ("q_proj", "k_proj", "v_proj") else w.linear)(f"{attn_prefix}.{n}")
+              for n in names}
         aw["o_norm"] = w.get(f"{attn_prefix}.o_norm.weight")
         if w.has(f"{attn_prefix}.conv1d.weight"):                        # mlxlm: one conv over q | k | v
             aw["conv1d"] = w.get(f"{attn_prefix}.conv1d.weight")
         else:
             for n in ("q_conv1d", "k_conv1d", "v_conv1d"):
                 aw[n] = w.get(f"{attn_prefix}.{n}.weight")
-        aw["A_log"] = w.get(f"{attn_prefix}.A_log")
+        if w.has(f"{attn_prefix}.A"):                                    # exp(A_log) as stored, exact
+            aw["A"] = w.get(f"{attn_prefix}.A")
+        else:
+            aw["A_log"] = w.get(f"{attn_prefix}.A_log")
         aw["dt_bias"] = w.get(f"{attn_prefix}.dt_bias")
         attn = KDA(aw, cfg)
         _materialize(attn.in_proj, attn.f_b, attn.g_b, attn.o_proj, attn.conv_w, attn.A, attn.dt_bias, attn.o_norm)
@@ -167,24 +177,15 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False, stream: 
     return Layer(attn, mlp, in_norm, post_norm, attn_hc, ffn_hc, cfg)
 
 
-_METAL: dict = {}                                                    # the kernel modules' own metal()
-
-
 def set_activation(config: dict) -> None:
-    """The activation dtype the checkpoint asks for; float32 leaves the bf16-only kernels to their MLX-op paths."""
+    """bf16, or float32 when the checkpoint asks; the bf16-only kernels take MLX's ops for float32 inputs."""
 
     from tensorfold.families.glm5_next import config as C
-    from tensorfold.kernels.glm.flash.v1 import fused, kda as kda_k, sparse_attention
 
     want = str(config.get("tensorfold_activation_dtype") or "bfloat16")
     if want not in ("bfloat16", "float32"):
         raise ValueError(f"tensorfold_activation_dtype {want!r}: bfloat16 or float32")
     C.ACT = mx.float32 if want == "float32" else mx.bfloat16
-    # the fused KDA step, the sparse-decode attention and fused.py are bf16-only; kernels.py's HC split,
-    # gated-delta recurrence and one-row GEMVs take float32 as they are, its bf16-only kernels check the dtype
-    for mod in (fused, kda_k, sparse_attention):
-        _METAL.setdefault(mod.__name__, mod.metal)
-        mod.metal = (lambda: False) if want == "float32" else _METAL[mod.__name__]
     if want == "float32":
         print("[glm5] float32 activations", flush=True)
 

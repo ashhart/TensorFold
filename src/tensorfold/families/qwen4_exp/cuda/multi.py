@@ -7,6 +7,8 @@ import time
 import numpy as np
 import torch
 
+from tensorfold.cuda.logprobs import capture
+
 from tensorfold.cuda.capacity import available_bytes
 from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
 from tensorfold.cuda.sampling import sample_streams
@@ -328,6 +330,8 @@ class MultiDecoder:
             if s.constraint is not None:                 # a reply's grammar: the first token too
                 logits = s.constraint.mask(logits, None, self.w.meta.get("vocab_offset", 0))
             first = e.sample(logits, [len(s.prompt)], s.sampling)[0]
+            if s.probabilities is not None:
+                capture(logits, [first], [len(s.prompt)], s.probabilities)
             if s.constraint is not None:
                 s.constraint.advance([first])
             head += 1
@@ -378,7 +382,8 @@ class MultiDecoder:
         t0 = time.perf_counter()
         windows = [(s.st, [s.out[-1]] + list(s.drafts)) for s in live]
         segs = stage(self.w, self.buf, windows)
-        pieces, psegs = (self._pieces(self._pass_rows()) if self.filling else []), None
+        # a pass shares the round's forward only where their experts share a launch; else _fill ran it between rounds
+        pieces, psegs = (self._pieces(self._pass_rows()) if self.filling and self.converged else []), None
         if pieces:
             try:
                 psegs = stage(self.w, self.pbuf, [(s.st, s.prompt[a:a + n]) for s, a, n in pieces])
@@ -406,6 +411,10 @@ class MultiDecoder:
         sampled = sample_streams(logits, starts, positions, [s.sampling for s in live])
         paths = [accept(tokens, list(range(-1, len(tokens) - 1)), rows, s.count - len(s.out), self._ends(s))
                  for s, (_, tokens), rows in zip(live, windows, sampled)]
+        for s, (_, tokens), (_, a0, _), (path, end), pos in zip(live, windows, segs, paths, positions):
+            if s.probabilities is not None:
+                capture(logits, [tokens[r] for r in path[1:]] + [end], [pos[r] for r in path],
+                        s.probabilities, rows=[a0 + r for r in path])
         for s, rows in zip(live, gdn_multi.keep(tables, [len(path) for path, _ in paths])):
             self.held[s.sid] = rows                      # the next round's trees fold these rows in first
         kept = []

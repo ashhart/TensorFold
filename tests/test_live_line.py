@@ -1,4 +1,4 @@
-"""The Mac server's live line: connections and decode/prefill."""
+"""The Mac server's live line: connections and decode/prefill tok/s on one terminal line, never inside a log line."""
 
 import io
 import sys
@@ -43,10 +43,10 @@ def test_status_counts_running_prefilling_and_waiting_requests():
     decoded, prefilled = Meter(clock=clock), ChunkRate(clock=clock)
     decoded.add(284)
     prefilled.add(2420, 2.0)
-    sched = SimpleNamespace(active=2, filling=object(), waiting=1, decoded=decoded,
+    sched = SimpleNamespace(active=2, filling=[object(), object()], waiting=1, decoded=decoded,
                             prefilled=prefilled)
-    assert status(sched) == "[tensorfold] 4 connections (1 waiting) · decode 142 tok/s · prefill 1,210 tok/s"
-    idle = SimpleNamespace(active=1, filling=None, waiting=0, decoded=Meter(),
+    assert status(sched) == "[tensorfold] 5 connections (1 waiting) · decode 142 tok/s · prefill 1,210 tok/s"
+    idle = SimpleNamespace(active=1, filling=[], waiting=0, decoded=Meter(),
                            prefilled=ChunkRate())
     assert status(idle) == "[tensorfold] 1 connection · decode 0 tok/s · prefill 0 tok/s"
 

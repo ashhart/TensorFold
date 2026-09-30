@@ -262,7 +262,7 @@ class Checkpoints:
 
     def peek(self, *args, **kwargs):
         self.calls.append("peek")
-        return NS(cache=self.cache)
+        return NS(cache=self.cache, tokens=[1, 2])
 
     def match(self, prompt, **kwargs):
         self.calls.append("match")
@@ -314,7 +314,7 @@ def test_scheduler_text_jobs_keep_checkpoint_reuse_and_storage():
     stream, options = calls[-1]
     assert job.error is None and stream.prompt_data is None and stream.retain
     assert options["cache"] is checkpoints.cache and job.cached_tokens == 2
-    assert checkpoints.calls == ["disk", "peek", "match", "insert"]
+    assert checkpoints.calls == ["disk", "peek", "peek", "match", "insert"]     # at its admission, then its start
     scheduler.engine.finished_caches[job.job_id] = ([1, 2, 3, 4, 5], [object()])
     scheduler._retire(job)
     assert checkpoints.calls[-1] == "insert" and checkpoints.calls.count("insert") == 2
@@ -334,12 +334,12 @@ def test_scheduler_workspace_refusal_never_starts_image_prefill():
         raise RequestError("image workspace does not fit")
 
     ended = []
-    memory = NS(begin=lambda *args, **kwargs: None, end=lambda: ended.append(True), require_workspace=refuse)
+    memory = NS(begin=lambda *args, **kwargs: "held", end=ended.append, require_workspace=refuse)
     scheduler, calls, checkpoints = scheduler_fixture(memory)
     job = ChatJob("image", [1, 2, 3, 4], 2, 0, vision=object())
     scheduler._start_job(job)
     assert isinstance(job.error, RequestError) and "workspace" in str(job.error)
-    assert job.done.is_set() and ended == [True] and not calls and not checkpoints.calls
+    assert job.done.is_set() and ended == ["held"] and not calls and not checkpoints.calls
 
 
 @pytest.fixture

@@ -12,6 +12,7 @@ from tensorfold.cuda.sampling import sample_rows, sample_streams
 from tensorfold.cuda.streams import PrefixCache, Stream, accept, next_fill
 from tensorfold.engine.grammar import GrammarError
 from tensorfold.families.qwen3_5.cuda.decode import CopyIndex
+from tensorfold.families.qwen3_5.cuda.engine import entry_end
 from tensorfold.families.qwen3_5.cuda.forward import State, _mm, commit_streams, multi_tree_forward
 from tensorfold.families.qwen3_5.cuda.multi import kept, private
 
@@ -87,8 +88,7 @@ class MultiDecoder:
         self.filling.append(s)
 
     def _fill(self) -> list[Stream]:
-        """One prefill step for the oldest queued prompt (foreground first): to its next kept state, or STEP rows
-        while others decode."""
+        """Prefill the oldest queued prompt a step: to its next kept state, or STEP rows while others decode."""
 
         s = next_fill(self.filling)
         pos, n = s.st.pos, len(s.prompt)
@@ -115,9 +115,16 @@ class MultiDecoder:
 
         t0 = time.perf_counter()
         d: Drafts | None = s.snap
+        end = (entry_end(s.prompt) if d is not None and not
+               (s.stops and len(s.prompt) - s.stops[-1] < MIN_GAP) else None)
+
+        def keep(point, state, cache, held):
+            self.cache.add(list(s.prompt[:point]), kept(state), (cache.view(), held.clone()))
+
         try:
             normed, held = extend(self.w, self.head if d is not None else None, s.prompt, s.st,
-                                  d.cache if d is not None else None, d.carry.states if d is not None else None, stop)
+                                  d.cache if d is not None else None, d.carry.states if d is not None else None, stop,
+                                  keep_at=end, keep=keep if end is not None else None)
             if d is not None:
                 d.carry = Carry(held, [])
             if stop in s.stops:
@@ -130,8 +137,6 @@ class MultiDecoder:
                 first = sample_rows(logits, [len(s.prompt)], s.sampling)[0]
                 if s.constraint is not None:
                     s.constraint.advance([first])
-            if first is not None and d is not None and not (s.stops and len(s.prompt) - s.stops[-1] < MIN_GAP):
-                self._keep(list(s.prompt), s)         # a message start just before the end covers it
         finally:
             s.prefill_s += time.perf_counter() - t0
         if first is None:

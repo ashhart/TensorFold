@@ -1,4 +1,4 @@
-"""One live line under a Mac server in a terminal: open connections, decode and prefill."""
+"""One redrawn live throughput line, cleared by other output, off unless stdout is a terminal."""
 
 from __future__ import annotations
 
@@ -53,10 +53,10 @@ class ChunkRate:
 
 
 def status(scheduler: Any) -> str:
-    """``[tensorfold] 3 connections (1 waiting) · decode 142."""
+    """``[tensorfold] 3 connections (1 waiting) · decode 142 tok/s · prefill 1,210 tok/s``."""
 
     waiting = scheduler.waiting
-    open_ = scheduler.active + (scheduler.filling is not None) + waiting
+    open_ = scheduler.active + len(scheduler.filling) + waiting
     line = f"[tensorfold] {open_} connection{'' if open_ == 1 else 's'}"
     if waiting:
         line += f" ({waiting} waiting)"

@@ -254,6 +254,31 @@ def test_prompts_fill_between_rounds_while_streams_decode(kv_dtype):
     assert [s.out for s in [first, *rest]] == refs
 
 
+def test_prompts_fill_between_rounds_where_experts_cannot_share_a_launch(monkeypatch):
+    """Experts that share no launch (NVFP4, EXL3): a long prompt fills between rounds beside a decoding stream."""
+
+    from tensorfold.families.qwen4_exp.cuda import multi
+
+    monkeypatch.setattr(multi, "converges", lambda w: False)
+    w = _model()
+    g = torch.Generator().manual_seed(11)
+    prompts = [PROMPTS[0], torch.randint(1, V, (70,), generator=g).tolist()]          # the second: five passes
+    samplings = [Sampling(seed=3, top_k=20, top_p=0.95), None]
+    refs = []
+    for prompt, sampling in zip(prompts, samplings):
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+        refs.append(serial_decode(e, prefill(e, prompt, sampling), 24, sampling).tokens)
+    dec = MultiDecoder(w, slots=2, capacity=1024, depth=3, confidence=0.3, prefill_rows=16)
+    assert not dec.converged and dec.pbuf.rows == 16
+    streams = [Stream(p, 24, smp) for p, smp in zip(prompts, samplings)]
+    dec.admit(streams[0])
+    dec.finish(dec.round())
+    dec.admit(streams[1])
+    while dec.live():
+        dec.finish(dec.round())
+    assert [s.out for s in streams] == refs
+
+
 @pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
 @pytest.mark.parametrize("decoding", [False, True])
 def test_packed_prompt_passes_keep_each_prompt_its_solo_run(kv_dtype, decoding):

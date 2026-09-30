@@ -214,9 +214,11 @@ class NemotronEngine:
             n = len(hit[0])
             self.cache = [c for c in self.cache if len(c[0]) <= n or c[0][:n] != hit[0]]
         resume = None if hit is None else (hit[1]["engine"], hit[1]["mtp"], len(hit[0]), hit[1]["tail"])
-        pre = prefill(self.e, self.mtp, prompt, sampling, resume=resume, constraint=constraint)
-        # the prompt's state: the head has absorbed every position but the last, whose hidden state resume needs
-        self._remember(list(prompt), {"engine": pre.engine, "mtp": pre.mtp, "tail": pre.last_hidden})
+        end = max(1, len(prompt) - 1)
+        pre = prefill(self.e, self.mtp, prompt, sampling, resume=resume, constraint=constraint, keep_at=end)
+        if pre.kept is None:
+            raise RuntimeError(f"prefill did not retain the required {end}-token prefix of the {len(prompt)}-token prompt")
+        self._remember(list(prompt[:end]), pre.kept)
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                                  "drafts": True}
         if (on_tokens is not None and on_tokens([pre.pending])) or (stop_eos and pre.pending in self.eos) or \

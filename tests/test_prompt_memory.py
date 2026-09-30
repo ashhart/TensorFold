@@ -778,3 +778,40 @@ def test_a_growing_conversation_keeps_each_turns_prompt_up_to_the_fitted_window(
         memory.end()
     assert len(kept) > 8
     assert all(kept) if counted else not kept[-1]                   # uncounted, the window's top can't be kept
+
+
+def test_each_open_prompt_counts_the_others_at_their_full_size_and_a_new_one_counts_them_all():
+    runtime = Runtime()
+    memory = controller(runtime=runtime)
+    memory.observe_cache(populated(), workspace=False)
+    first = memory.begin(512, 0, admit=False)
+    alone = memory.projected(512)
+    second = memory.begin(256, 0, admit=False)                     # focused now
+    both = memory.projected(256)
+    memory.focus(first)
+    assert memory.projected(512) == both > alone                   # every open prompt's check sees one total
+    cache = populated(128)
+    runtime.caches.append(cache)
+    memory.before_chunk(cache, 128)                                # first holds 128 rows now
+    memory.focus(second)
+    assert memory.projected(256) == both                           # at its full size, whatever it holds so far
+    memory.budget = both
+    assert not memory.would_fit(64, 0)                             # a third prompt beside both
+    memory.end(first)
+    memory.end(second)
+    runtime.caches.clear()
+    assert memory.would_fit(64, 0) and not memory.open and memory.current is None
+
+
+def test_a_refusal_beside_an_open_prompt_names_a_prompt_that_is_admitted_beside_it():
+    memory = controller(budget=400_000)
+    memory.observe_cache(populated(), workspace=False)
+    other = memory.begin(512, 0, admit=False)
+    with pytest.raises(RequestError, match="fits up to") as refused:
+        memory.begin(4096, 0)
+    fits = int(str(refused.value).split("fits up to ")[1].split(" tokens")[0].replace(",", ""))
+    assert 0 < fits < 4096 and memory.open == [other]              # the refused prompt closed again
+    memory.begin(fits, 0)
+    memory.end()
+    memory.end(other)
+    assert not memory.open

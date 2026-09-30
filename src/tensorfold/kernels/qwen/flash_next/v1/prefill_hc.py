@@ -117,3 +117,56 @@ def hidden(model: Any, tokens: np.ndarray, cache: list[Any]) -> mx.array:
     h, mixed, _ = hyper_connection(fused.mixer, h, pending, streams=streams, eps=eps)
     model.__dict__["last_streams"] = h                                  # [L, S*D]: the streams before the mixer
     return mixed[None]
+
+
+def hidden_pass(model: Any, tokens: np.ndarray, cache: list[Any], sizes: Any) -> mx.array:
+    """``hidden`` for consecutive prompt chunks in one forward, each with its own forward's bits."""
+
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+
+    sizes = tuple(int(n) for n in sizes)
+    if len(sizes) == 1:
+        return hidden(model, tokens, cache)
+    if sum(sizes) != int(tokens.shape[1]) or tokens.shape[0] != 1:
+        raise ValueError(f"hidden_pass: chunks of {sizes} rows for {tokens.shape} tokens")
+    if any("streamer" in layer.mlp.__dict__ for layer in model.layers):
+        raise ValueError("hidden_pass: experts streamed from SSD take each chunk alone")
+    fused = model.__dict__["fused"]
+    streams = model.args.hc_count
+    eps = fused.eps
+    starts = [sum(sizes[:j]) for j in range(len(sizes))]
+    h = model.model.embed_tokens(mx.array(tokens.astype(np.int32)))[0]
+    h = mx.tile(h, (1, streams))                                        # [L, S*D]
+    pending = None
+    queued = None
+    depth = model.__dict__.get("prefill_queue", QUEUE_LAYERS)
+    states: list[mx.array] = []
+    with prefill_mm.prompt_pass(sizes):
+        for i, (layer, c) in enumerate(zip(model.layers, cache)):
+            entry = fused.layers[i]
+            if "ple" in layer:
+                if pending is not None:
+                    h = hc_norm(h, streams=streams, write_back="plain", branch=(pending[0],), inject=pending[1])[0]
+                    pending = None
+                h = h + mx.concatenate([layer.ple(h[a:a + n][None], tokens[:, a:a + n], c)[0]
+                                        for a, n in zip(starts, sizes)])
+            h, mixed, inj = hyper_connection(entry["attn_hc"], h, pending, streams=streams, eps=eps)
+            mixer = layer.linear_attn if layer.is_linear else layer.self_attn
+            branch = mx.concatenate([mixer(mixed[a:a + n][None], c)[0] for a, n in zip(starts, sizes)])
+            h, mixed, inj2 = hyper_connection(entry["mlp_hc"], h, (branch, inj), streams=streams, eps=eps)
+            if prefill_mm.moe_applies(layer.mlp, mixed[None]):
+                routed = layer.mlp(mixed[None])[0]                      # routed chunk by chunk, experts at once
+            else:                                                       # other expert formats: each chunk alone
+                routed = mx.concatenate([layer.mlp(mixed[a:a + n][None])[0] for a, n in zip(starts, sizes)])
+            pending = (routed, inj2)
+            states += c.state
+            if depth and (i + 1) % depth == 0:
+                step = (h, *pending, *states)
+                states = []
+                mx.async_eval(*step)
+                if queued is not None:
+                    mx.eval(*queued)
+                queued = step
+        h, mixed, _ = hyper_connection(fused.mixer, h, pending, streams=streams, eps=eps)
+    model.__dict__["last_streams"] = h                                  # [L, S*D]: the streams before the mixer
+    return mixed[None]

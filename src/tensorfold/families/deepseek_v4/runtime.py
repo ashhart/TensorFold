@@ -18,6 +18,7 @@ class DeepSeekFlash(GLMFlash):
     """The backbone behind the lane protocol; the MTP head reads the 4 streams of the rows it drafts from."""
 
     tag = "deepseek_v4"
+    hidden_pass = None                  # V4's backbone has no prompt pass: the engine feeds a chunk a forward
 
     def new_mtp_cache(self) -> Any:
         return MTPCache(self.args.sliding_window)

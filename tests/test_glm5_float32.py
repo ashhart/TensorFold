@@ -43,7 +43,7 @@ def checkpoint32(tmp_path_factory):
 
 def test_float32_activations_and_caches(checkpoint32):
     model = weights.load_backbone(checkpoint32)
-    assert C.act() == mx.float32 and not sparse_attention.metal()
+    assert C.act() == mx.float32
     cache = model.make_cache()
     hidden = model.hidden(mx.array([tokens(40)]), cache)
     assert hidden.dtype == mx.float32
@@ -51,11 +51,16 @@ def test_float32_activations_and_caches(checkpoint32):
     assert model.head(hidden).dtype == mx.float32
 
 
-def test_the_default_stays_bf16_and_restores_the_kernels(checkpoint32):
+def test_the_default_stays_bf16(checkpoint32):
     weights.load_backbone(checkpoint32)
     weights.set_activation({})
     assert C.act() == mx.bfloat16
-    assert sparse_attention.metal is weights._METAL[sparse_attention.__name__]   # the module's own function again
+
+
+def test_bf16_only_kernels_take_mlx_ops_for_float32_inputs():
+    queries, keys = mx.ones((2, 3, 512), dtype=mx.float32), mx.ones((8, 512), dtype=mx.float32)
+    got = sparse_attention.indexed_attention(queries, keys, mx.zeros((2, 4), dtype=mx.int32), 8, 0.1)
+    assert got.dtype == mx.float32 and got.shape == (2, 3, 512)      # the bf16 kernel would return bf16
 
 
 def test_unknown_activation_dtype_is_refused():
@@ -84,6 +89,41 @@ def test_float32_rows_are_exact_and_drafts_change_speed_only(checkpoint32):
     engine_a, a = _run_engine(runtime, prompt, 24)
     _, b = _run_engine(GLMFlash(model, None, drafts=0), prompt, 24)
     assert engine_a.drafted > 0 and a.emitted == b.emitted
+
+
+def test_float32_cache_bytes_and_prefill_workspace(checkpoint32):
+    from tensorfold.families.glm5_next.caches import MLACache
+    from tensorfold.families.glm5_next.mla import PREFILL_QUERIES
+
+    model = weights.load_backbone(checkpoint32)
+    cache = MLACache()
+    ape = mx.zeros((4, 128), dtype=mx.float32)
+    cache.append(mx.zeros((300, 512), dtype=mx.float32), mx.zeros((300, 128), dtype=mx.float32),
+                 mx.zeros((300, 128), dtype=mx.float32), ape, 4)
+    assert cache.keys.dtype == mx.float32
+    assert cache.memory_growth() == (0, 4 * (512 + 128 + 128 + 128 // 4))
+    runtime = GLMFlash(model, check=False)
+    a = runtime.args
+    assert runtime.prefill_workspace_per_token == PREFILL_QUERIES * (2 * a.index_n_heads * 4 + 10) // a.index_kpool
+
+
+def test_float32_refuses_streamed_experts(checkpoint32):
+    from tensorfold.families.glm5_next import stream
+
+    model = weights.load_backbone(checkpoint32)
+    with pytest.raises(ValueError, match="bf16 kernels"):
+        stream.attach(model, checkpoint32, 1.0)
+
+
+def test_cuda_refuses_float32_activations(checkpoint32, monkeypatch):
+    import sys
+
+    from tensorfold.families import glm5_next
+
+    glm5_next.check(checkpoint32)
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(ValueError, match="CUDA engine stays bf16"):
+        glm5_next.check(checkpoint32)
 
 
 def test_on_metal_float32_rows_are_exact_and_drafts_change_speed_only(checkpoint32):

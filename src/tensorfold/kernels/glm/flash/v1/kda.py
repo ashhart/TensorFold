@@ -311,7 +311,7 @@ def kda_rows(kda: Any, proj: mx.array, conv: mx.array, state: mx.array) -> tuple
     """R rows of a KDA step from its conv window and fp32 state: (y for o_proj, the last row's state, the window)."""
 
     rows = int(proj.shape[0])
-    if not metal():
+    if not metal() or proj.dtype != mx.bfloat16 or conv.dtype != mx.bfloat16:     # the kernel is bf16-only
         return kda_rows_ops(kda, proj, conv, state)
     h, d = kda.heads, kda.dim
     fb, gb = kda.f_b, kda.g_b

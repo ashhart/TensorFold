@@ -14,8 +14,8 @@ ENABLED = frozenset(ROW_KERNELS)
 # the KDA step in one launch and sparse MLA reading its chosen keys by index: these set the decode arithmetic
 FUSED_KDA = True
 SPARSE_KERNEL = True
-# the MoE block and each hyper-connection boundary as fused kernels (moe.py, hc.py), each with the row-by-row bits
-FUSED_KERNELS = ("moe", "hc")
+# fused kernels with their reference ops' bits: MoE, HC boundaries, a prompt's KDA glue and DSA index scores
+FUSED_KERNELS = ("moe", "hc", "kda", "dsa")
 FUSED = frozenset(FUSED_KERNELS)
 # the decode graph goes to the GPU every this many layers, so the GPU starts while Python builds the rest
 EVAL_EVERY = 2

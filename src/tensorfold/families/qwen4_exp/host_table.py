@@ -372,21 +372,34 @@ def _random_access(array: np.ndarray) -> None:
         pass
 
 
+PREFETCH_READ = 16 << 20        # bytes a prefetch read: a page fault under MADV_RANDOM reads one page, a read the span
+
+
 def _prefetch(arrays: list[np.ndarray], workers: int = 8) -> float:
-    """Read each array once so the lookups hit the page cache (seconds taken); the pages stay evictable."""
+    """Read every array's file bytes once, in PREFETCH_READ spans over ``workers`` threads, so lookups hit the page cache (seconds taken); the pages stay evictable."""
 
+    import threading
     import time
-    from concurrent.futures import ThreadPoolExecutor
 
-    def touch(arr) -> None:
-        flat = arr.reshape(-1).view(np.uint8)
-        step = 64 << 20
-        for i in range(0, flat.size, step):
-            np.asarray(flat[i:i + step]).sum(dtype=np.uint64)
+    spans = [(arr, at) for arr in arrays for at in range(0, arr.nbytes, PREFETCH_READ)]
+    local = threading.local()
+
+    def read(span) -> None:
+        arr, at = span
+        n = min(PREFETCH_READ, arr.nbytes - at)
+        path, offset = getattr(arr, "filename", None), getattr(arr, "offset", None)
+        if path is None or offset is None:             # not a file's map: fault its pages in
+            np.asarray(arr.reshape(-1).view(np.uint8)[at:at + n]).sum(dtype=np.uint64)
+            return
+        if getattr(local, "buf", None) is None:
+            local.buf = memoryview(bytearray(PREFETCH_READ))
+        with open(path, "rb", buffering=0) as f:     # portable (Linux and macOS): seek, then one read into the buffer
+            f.seek(offset + at)
+            f.readinto(local.buf[:n])
 
     t0 = time.time()
     with ThreadPoolExecutor(workers) as pool:
-        list(pool.map(touch, arrays))
+        list(pool.map(read, spans))
     return time.time() - t0
 
 

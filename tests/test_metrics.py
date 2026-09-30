@@ -91,7 +91,7 @@ def test_histogram_buckets_are_cumulative_and_a_missing_first_token_is_not_count
 
 def test_mac_running_includes_the_prefill_and_kv_uses_the_window():
     app = SimpleNamespace(
-        scheduler=SimpleNamespace(active=1, waiting=2, filling=object()),
+        scheduler=SimpleNamespace(active=1, waiting=2, filling=[object()]),
         context_window=80,
         engine=SimpleNamespace(_live=[(SimpleNamespace(cache_len=40, finished=False), None),
                                       (SimpleNamespace(cache_len=8, finished=True), None)],

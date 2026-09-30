@@ -113,7 +113,8 @@ class MLACache:
 
         widths = [int(a.shape[1]) if a is not None else w for a, w in ((self.keys, 512), (self.ik, 128), (self.ig, 128))]
         pool = int(self.pool.shape[1]) if self.pool is not None else 128
-        return 0, 2 * (sum(widths) + pool // 4)
+        item = int(self.keys.itemsize) if self.keys is not None else (4 if _act() == mx.float32 else 2)
+        return 0, item * (sum(widths) + pool // 4)
 
 
 def pool_blocks(keys: mx.array, gates: mx.array, ape: mx.array, kpool: int) -> mx.array:

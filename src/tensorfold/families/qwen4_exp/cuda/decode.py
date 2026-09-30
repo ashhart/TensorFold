@@ -9,6 +9,8 @@ from typing import Sequence
 import numpy as np
 import torch
 
+from tensorfold.cuda.logprobs import capture
+
 from tensorfold.cuda.sampling import comm_gather, nucleus_rows, sample_rows
 from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
@@ -294,7 +296,7 @@ def prefill_chunk(e: Engine, prompt: Sequence[int], start: int, *, mtp: bool = T
 
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True,
-            resume: dict | None = None, constraint=None) -> int:
+            resume: dict | None = None, constraint=None, probabilities=None) -> int:
     """Commit the prompt in chunks, sample the first token; rows ignore chunking, so ``resume`` equals a fresh run."""
 
     start, last = prefill_begin(e, prompt, mtp=mtp, resume=resume), None
@@ -304,6 +306,8 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
     if constraint is not None:                           # a reply's grammar: this rank's vocabulary columns
         last = constraint.mask(last, None, e.w.meta.get("vocab_offset", 0))
     first = e.sample(last, [len(prompt)], sampling)[0]
+    if probabilities is not None:
+        capture(last, [first], [len(prompt)], probabilities)
     if constraint is not None:
         constraint.advance([first])
     e.first = first
@@ -339,7 +343,7 @@ class DecodeResult:
 
 @torch.no_grad()
 def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, stop_eos: bool = False,
-                  on_tokens=None, constraint=None) -> DecodeResult:
+                  on_tokens=None, constraint=None, probabilities=None) -> DecodeResult:
     """One token a step through the same kernels and sampler; ``pending`` is the first sampled token. ``on_tokens(new)`` hears each step's token; it returns True to stop early."""
 
     w, st, b = e.w, e.st, e.buf
@@ -351,6 +355,8 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
         if constraint is not None:
             constraint.mask(logits[:1], None, w.meta.get("vocab_offset", 0))
         tok = e.sample(logits[:1], [st.pos + 1], sampling, gathered=constraint is None)[0]
+        if probabilities is not None:
+            capture(logits[:1], [tok], [st.pos + 1], probabilities)
         commit(w, st, b, 1, 1)
         out.append(tok)
         if constraint is not None:
@@ -363,7 +369,8 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
 
 @torch.no_grad()
 def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *, depth: int = DEPTH,
-               confidence: float = CONFIDENCE, stop_eos: bool = False, on_tokens=None, constraint=None) -> DecodeResult:
+               confidence: float = CONFIDENCE, stop_eos: bool = False, on_tokens=None, constraint=None,
+               probabilities=None) -> DecodeResult:
     """Verify pending and drafted tokens from the prefill state, commit rows before the first mismatched draft, and call ``on_tokens(new)`` with kept tokens after pending, stopping on True."""
 
     w, st, b = e.w, e.st, e.buf
@@ -391,6 +398,9 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
             if sampled[i] != d or (stop_eos and sampled[i] in w.cfg.eos):
                 break
             keep += 1
+        if probabilities is not None:
+            n = min(keep, count - len(out))
+            capture(logits[:n], sampled[:n], list(range(st.pos + 1, st.pos + 1 + n)), probabilities)
         commit(w, st, b, R, keep)
         unabsorbed = (keep, sampled[:keep])
         rounds += 1

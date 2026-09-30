@@ -21,6 +21,7 @@ class Prefilled:
     last_hidden: torch.Tensor          # the prompt's last row's final hidden state (1, D)
     engine: dict                       # engine snapshot after the prompt
     mtp: dict | None                   # head snapshot: every prompt position but the last absorbed
+    kept: dict | None = None
 
 
 @dataclass
@@ -39,7 +40,7 @@ class DecodeResult:
 
 @torch.no_grad()
 def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: Sampling | None, *,
-            resume: tuple | None = None, constraint=None) -> Prefilled:
+            resume: tuple | None = None, constraint=None, keep_at: int | None = None) -> Prefilled:
     """``resume`` = (engine snapshot, head snapshot, kept length, the last hidden state the head has not absorbed)."""
 
     prompt = [int(t) for t in prompt]
@@ -59,6 +60,11 @@ def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: S
             raise ValueError("a resumed prompt must extend the kept tokens")
         if mtp is not None and resume[3] is not None:
             mtp.absorb_rows(resume[3], [prompt[begin]])
+    if keep_at is not None and not begin <= keep_at <= len(prompt):
+        raise ValueError("the kept prefix must lie in the prompt's prefill")
+    partial = tail = None
+    if keep_at == begin and resume is not None:
+        partial, tail = resume[0], resume[3]
     eng.set_sampling(sampling)
     if constraint is not None:                           # a reply's grammar masks the first token's row
         eng.mask(constraint, constraint.window([0], [-1]))
@@ -66,7 +72,14 @@ def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: S
     last = None
     for s in range(begin, len(prompt), step):
         chunk = prompt[s:s + step]
-        eng.prefill_chunk(chunk)
+        cut = keep_at - s if keep_at is not None and s < keep_at < s + len(chunk) else 0
+        mid = eng.prefill_chunk(chunk, cut=cut)
+        if keep_at is not None and s < keep_at <= s + len(chunk):
+            partial = mid if mid is not None else {
+                "ssm": eng.ssm.clone(), "conv_base": eng.conv_base.clone(),
+                "host": (eng.pos, eng.parity, eng.prev_keep)}
+            row = keep_at - s - 1
+            tail = eng.p_hidden[row:row + 1].clone()
         if mtp is not None:
             known = min(len(chunk), len(prompt) - 1 - s)          # rows whose next token is in the prompt
             if known > 0:
@@ -78,7 +91,12 @@ def prefill(eng: Engine, mtp: MTPHead | None, prompt: Sequence[int], sampling: S
         eng.mask(None, None)
         constraint.advance([pending])
     torch.cuda.synchronize()
-    return Prefilled(prompt, pending, last_hidden, eng.snapshot(), mtp.snapshot() if mtp is not None else None)
+    state, head = eng.snapshot(), mtp.snapshot() if mtp is not None else None
+    kept = None
+    if partial is not None:
+        kept = {"engine": {**state, **partial}, "mtp": {**head, "pos": keep_at - 1} if head else None,
+                "tail": tail}
+    return Prefilled(prompt, pending, last_hidden, state, head, kept)
 
 
 @torch.no_grad()

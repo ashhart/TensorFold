@@ -15,7 +15,7 @@ from tensorfold.server.admission import concurrency
 from tensorfold.server.checkpoints import (CheckpointStore, longest_common_prefix, prune_conversations,
                                            save_conversations, spill_conversation)
 from tensorfold.server.cancellation import Cancellation
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CONTEXT_LIMIT, ContextLengthError, RequestError
 from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
 from tensorfold.server import metrics
@@ -94,6 +94,7 @@ class ChatApp(RequestOptions):
         memory_overhead_bytes: int | None = None,
         fit_context: bool = False,
         decode_share: float = 0.25,
+        grow_checkpoints: bool = False,
     ) -> None:
         # three candidate entries per conversation (history boundary, stable prefix, reply end)
         if checkpoint_slots is None:
@@ -164,6 +165,8 @@ class ChatApp(RequestOptions):
             self.engine, measure, probe_tokens(tokenizer))
         if self.prompt_memory is not None:
             self.context_window, self.context_fitted = self.prompt_memory.fit_window(self.context_window, fit_context)
+            if grow_checkpoints and self.checkpoints is not None and self.checkpoints.budget_bytes is not None:
+                self._grow_checkpoints(admission.round_bytes(int(lanes)) if admission is not None else 0)
         self.scheduler = Scheduler(
             self.engine,
             lanes=int(lanes),
@@ -201,6 +204,17 @@ class ChatApp(RequestOptions):
         if snapshot_dir is not None and self.checkpoints is not None and not loaded_count:
             # only when these kernels have no block yet: a warmed block is pinned after the loaded ones
             self._warm_known_blocks(snapshot_dir, model_id)
+
+    def _grow_checkpoints(self, work: int) -> None:
+        """The default prompt cache takes what the weights, a whole-window request and a shared round leave idle."""
+
+        window = self.context_window or int(self.prompt_memory.affordable or 0)       # 0: no limit, the largest fits
+        spare = self.prompt_memory.spare(window, work)
+        if spare > self.checkpoints.budget_bytes:
+            self.checkpoints.budget_bytes = spare
+            print(f"[tensorfold] prompt cache up to {spare / 1024**3:.1f} GiB: the memory the weights, a "
+                  f"{window:,}-token request and a shared round leave idle, freed whenever a request needs it",
+                  flush=True)
 
     def render(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
@@ -367,15 +381,15 @@ class ChatApp(RequestOptions):
             room = self.context_window - len(prompt_ids)
             if room < 1:
                 why = ", the most this server's memory budget fits" if self.context_fitted else ""
-                raise RequestError(f"This server's maximum context length is {self.context_window:,} tokens{why}, "
-                                   f"but the rendered prompt has {len(prompt_ids):,} tokens and leaves no room for a "
-                                   "reply. Compact or shorten the conversation.")
+                raise ContextLengthError(f"{CONTEXT_LIMIT} {self.context_window} tokens{why}, but the rendered prompt "
+                                         f"has {len(prompt_ids)} tokens and leaves no room for a reply, which exceeds "
+                                         "the context window. Compact or shorten the conversation.")
             if reply_limit_explicit and limit > room:
-                raise RequestError(
-                    f"the rendered prompt has {len(prompt_ids)} tokens and requests {limit} reply tokens; "
-                    f"this server's context window is {self.context_window}. Reduce the prompt to at most "
-                    f"{max(0, self.context_window - limit)} prompt tokens or request at most {room} reply tokens, "
-                    "including chat template and thinking tokens."
+                raise ContextLengthError(
+                    f"{CONTEXT_LIMIT} {self.context_window} tokens, but the rendered prompt has {len(prompt_ids)} "
+                    f"tokens and requests {limit} reply tokens, which exceeds the context window. Reduce the prompt "
+                    f"to at most {max(0, self.context_window - limit)} prompt tokens or request at most {room} reply "
+                    "tokens, including chat template and thinking tokens."
                 )
             limit = min(limit, room)
         system_len = 0 if prompt is not None or rendered.vision is not None else self.system_prefix_len(messages, tools, prompt_ids, thinking=thinking)
@@ -533,6 +547,10 @@ class ChatApp(RequestOptions):
                 "tokens_per_second": (decode_tokens / decode_seconds) if decode_seconds > 0 else 0.0,
                 "seconds": seconds,
                 "prefill_seconds": max(0.0, job.prefilled_at - job.submitted_at) if job.prefilled_at else None,
+                # plan chunks each prompt forward took (a prompt pass takes several while it fills alone)
+                "prefill_widths": list(getattr(stream, "prefill_widths", None) or []),
+                # whether each of those forwards kept its freed buffers in the raised pass cache
+                "prefill_raised": list(getattr(stream, "prefill_raised", None) or []),
                 "time_to_first_token": (first_token_at - received_at) if first_token_at else None,
                 "sampling": "exact" if spec is not None else "greedy",
                 "drafts": bool(job.drafts),

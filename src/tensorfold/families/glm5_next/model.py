@@ -10,9 +10,10 @@ from tensorfold.families.glm5_next import config as C
 from tensorfold.families.glm5_next.caches import KDACache, MLACache
 from tensorfold.families.glm5_next.config import Config, row_kernel
 from tensorfold.families.glm5_next.kda import KDA
-from tensorfold.families.glm5_next.linear import Q, per_row, project
+from tensorfold.families.glm5_next.linear import ChunkQueue, Q, per_row, project
 from tensorfold.kernels.glm.flash.v1 import hc as HCK
 from tensorfold.kernels.glm.flash.v1 import kernels as K
+from tensorfold.kernels.glm.flash.v1 import prompt as PK
 
 
 class HC:
@@ -60,16 +61,10 @@ class Layer:
         self.eps = cfg.rms_norm_eps
 
     def __call__(self, x: mx.array, caches: list[Any], lengths: tuple[int, ...], decode: bool) -> mx.array:
-        """x [R, S, D] streams (or [R, D] for the plain MTP layer), rows of consecutive request streams."""
+        """The plain MTP block: pre-norm residual attention and MLP over rows x [R, D] (backbone layers: boundary)."""
 
-        if self.attn_hc is None:                                        # plain pre-norm residual block
-            x = x + self.attn(mx.fast.rms_norm(x, self.in_norm, self.eps), caches, lengths, decode)
-            return x + self.mlp(mx.fast.rms_norm(x, self.post_norm, self.eps), decode)
-        xc, post, comb = self.attn_hc.split(x, decode)
-        x = hc_expand(self.attn(mx.fast.rms_norm(xc, self.in_norm, self.eps), caches, lengths, decode), x, post, comb,
-                      decode)
-        xc, post, comb = self.ffn_hc.split(x, decode)
-        return hc_expand(self.mlp(mx.fast.rms_norm(xc, self.post_norm, self.eps), decode), x, post, comb, decode)
+        x = x + self.attn(mx.fast.rms_norm(x, self.in_norm, self.eps), caches, lengths, decode)
+        return x + self.mlp(mx.fast.rms_norm(x, self.post_norm, self.eps), decode)
 
 
 class GLM5:
@@ -98,15 +93,19 @@ class GLM5:
     def embed_tokens(self, tokens: mx.array) -> mx.array:
         e = self.embed
         ids = tokens.reshape(-1)
-        return mx.dequantize(e.weight[ids], e.scales[ids], e.biases[ids], group_size=e.group,
-                             bits=e.bits).astype(C.act())
+        if e.scales.dtype == mx.bfloat16:
+            return mx.dequantize(e.weight[ids], e.scales[ids], e.biases[ids], group_size=e.group,
+                                 bits=e.bits).astype(C.act())
+        return mx.dequantize(e.weight[ids], e.scales[ids].astype(mx.float32), e.biases[ids].astype(mx.float32),
+                             group_size=e.group, bits=e.bits).astype(C.act())
 
-    def hidden(self, tokens: Any, cache: list[Any]) -> mx.array:
+    def hidden(self, tokens: Any, cache: list[Any], *, inputs_embeds: mx.array | None = None) -> mx.array:
         """One stream's R consecutive tokens: final-normed hidden states [1, R, D]."""
 
-        return self.hidden_rows(tokens, [cache])
+        return self.hidden_rows(tokens, [cache], inputs_embeds=inputs_embeds)
 
-    def hidden_rows(self, tokens: Any, caches: list[list[Any]], lengths: Any = None) -> mx.array:
+    def hidden_rows(self, tokens: Any, caches: list[list[Any]], lengths: Any = None,
+                    inputs_embeds: mx.array | None = None) -> mx.array:
         """Several streams' rows in one forward, each with its own call's bits; a prompt chunk is one stream's."""
 
         ids = mx.array(tokens).reshape(-1).astype(mx.uint32)
@@ -116,33 +115,88 @@ class GLM5:
         if sum(lengths) != rows or len(lengths) != len(caches) or (len(lengths) > 1 and not decode):
             raise ValueError(f"hidden_rows: {len(caches)} streams of {lengths} rows for {rows} tokens (at most "
                              f"{C.DECODE_ROWS} rows when shared)")
-        h = self.embed_tokens(ids)                                       # [R, D]
-        x = mx.contiguous(mx.broadcast_to(h[:, None, :], (rows, self.args.hc_mult, h.shape[-1])))
-        if decode and "hc" in C.FUSED and self.hc_fused_ok():
-            # each block boundary in one fused step: the previous block's write-back, the next block's split + norm
-            eps = self.args.rms_norm_eps
-            pending = None
-            for i, layer in enumerate(self.layers):
-                layer_caches = [c[i] for c in caches]
-                x, normed, post, comb = HCK.hc_step(x, pending, layer.attn_hc, layer.in_norm, eps)
-                pending = (layer.attn(normed, layer_caches, lengths, decode), post, comb)
-                x, normed, post, comb = HCK.hc_step(x, pending, layer.ffn_hc, layer.post_norm, eps)
-                pending = (layer.mlp(normed, decode), post, comb)
-                if C.EVAL_EVERY and (i + 1) % C.EVAL_EVERY == 0 and i + 1 < len(self.layers):
-                    mx.async_eval(x, *pending)
-            x = HCK.hc_step(x, pending, None, None, eps)[0]
+        if inputs_embeds is None:
+            h = self.embed_tokens(ids)                                   # [R, D]
         else:
-            for i, layer in enumerate(self.layers):
-                x = layer(x, [c[i] for c in caches], lengths, decode)
-                if decode and C.EVAL_EVERY and (i + 1) % C.EVAL_EVERY == 0 and i + 1 < len(self.layers):
-                    mx.async_eval(x)
+            if len(caches) != 1:
+                raise ValueError("GLM multimodal embeddings are accepted for one prefill stream at a time")
+            h = inputs_embeds
+            if h.ndim == 3:
+                if int(h.shape[0]) != 1:
+                    raise ValueError("GLM multimodal embeddings must have batch size one")
+                h = h[0]
+            if h.ndim != 2 or tuple(h.shape) != (rows, int(self.args.hidden_size)):
+                raise ValueError("GLM multimodal embeddings must match the prompt rows and hidden size")
+        x = mx.contiguous(mx.broadcast_to(h[:, None, :], (rows, self.args.hc_mult, h.shape[-1])))
+        pending = None
+        for i, layer in enumerate(self.layers):
+            layer_caches = [c[i] for c in caches]
+            x, normed, post, comb = self.boundary(x, pending, layer.attn_hc, layer.in_norm, decode)
+            pending = (layer.attn(normed, layer_caches, lengths, decode), post, comb)
+            x, normed, post, comb = self.boundary(x, pending, layer.ffn_hc, layer.post_norm, decode)
+            pending = (layer.mlp(normed, decode), post, comb)
+            if decode and C.EVAL_EVERY and (i + 1) % C.EVAL_EVERY == 0 and i + 1 < len(self.layers):
+                mx.async_eval(x, *pending)
+        self.last_normed = self.final_norm(self.boundary(x, pending, None, None, decode)[0])
+        return self.last_normed[None]
+
+    def boundary(self, x: mx.array, pending: Any, hc: HC | None, norm: mx.array | None,
+                 decode: bool) -> tuple[mx.array, Any, Any, Any]:
+        """The pending block's write-back, then the next block's split and RMSNorm (no ``hc``: the write-back only)."""
+
+        prompt_ok = PK.proven() and (pending is None or pending[0].dtype == mx.bfloat16)
+        if "hc" in C.FUSED and self.hc_fused_ok() and (decode or prompt_ok):
+            # the boundary in fused kernels, each with the row-by-row path's (or, on M1-M4, a bf16 prompt chunk's) bits
+            return HCK.hc_step(x, pending, hc, norm, self.args.rms_norm_eps, not decode)
+        if pending is not None:
+            x = hc_expand(pending[0], x, pending[1], pending[2], decode)
+        if hc is None:
+            return x, None, None, None
+        xc, post, comb = hc.split(x, decode)
+        return x, mx.fast.rms_norm(xc, norm, self.args.rms_norm_eps), post, comb
+
+    def final_norm(self, x: mx.array) -> mx.array:
+        """The streams' fp32 mean, then the final RMSNorm: the rows the LM and MTP heads read."""
+
         xs = x.astype(mx.float32)
         raw = xs[:, 0]
         for s in range(1, int(x.shape[1])):
             raw = raw + xs[:, s]
         raw = (raw * (1.0 / int(x.shape[1]))).astype(x.dtype)
         # the MTP head reads the row the LM head reads: its drafts land more often than from the streams' mean
-        self.last_normed = mx.fast.rms_norm(raw, self.norm, self.args.rms_norm_eps)
+        return mx.fast.rms_norm(raw, self.norm, self.args.rms_norm_eps)
+
+    def hidden_pass(self, tokens: Any, cache: list[Any], sizes: Any) -> mx.array:
+        """Prompt chunks, each by its own forward's calls, two in flight; routed experts take them all at once."""
+
+        sizes = tuple(int(n) for n in sizes)
+        if len(sizes) == 1:
+            return self.hidden(tokens, cache)
+        ids = mx.array(tokens).reshape(-1).astype(mx.uint32)
+        rows = int(ids.shape[0])
+        if sum(sizes) != rows or min(sizes) <= C.DECODE_ROWS:
+            raise ValueError(f"hidden_pass: chunks of {sizes} rows for {rows} tokens (each over {C.DECODE_ROWS})")
+        if any("streamer" in vars(layer.mlp) or layer.attn_hc is None for layer in self.layers):
+            raise ValueError("hidden_pass: experts streamed from SSD and plain blocks take each chunk alone")
+        h = self.embed_tokens(ids)
+        streams, width = self.args.hc_mult, int(h.shape[-1])
+        starts = [sum(sizes[:j]) for j in range(len(sizes))]
+        xs = [mx.contiguous(mx.broadcast_to(h[a:a + n, None, :], (n, streams, width))) for a, n in zip(starts, sizes)]
+        pend: list[Any] = [None] * len(xs)
+        queue = ChunkQueue()
+        for layer, c in zip(self.layers, cache):
+            mixes = []
+            for j, x in enumerate(xs):
+                x, normed, post, comb = self.boundary(x, pend[j], layer.attn_hc, layer.in_norm, False)
+                att = layer.attn(normed, [c], (int(x.shape[0]),), False)
+                xs[j], normed, post, comb = self.boundary(x, (att, post, comb), layer.ffn_hc, layer.post_norm, False)
+                mixes.append((normed, post, comb))
+                queue.push(xs[j], normed, post, comb, *c.state)
+            together = getattr(layer.mlp, "pass_chunks", None)
+            ys = together([m[0] for m in mixes], queue) if together else [layer.mlp(m[0], False) for m in mixes]
+            pend = [(y, post, comb) for y, (_, post, comb) in zip(ys, mixes)]
+        self.last_normed = mx.concatenate([self.final_norm(self.boundary(x, p, None, None, False)[0])
+                                           for x, p in zip(xs, pend)])
         return self.last_normed[None]
 
     def head(self, hidden: mx.array) -> mx.array:
