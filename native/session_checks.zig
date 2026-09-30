@@ -68,6 +68,7 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
     const chunks = try (try s.prefillPlan()).chunks(a, prompt);
     defer chunks.deinit(a);
     const count = chunks.next(0);
+    const disk_path = "build/native-checks/session-prefix.safetensors";
     const boundary = @import("prompt_cache.zig").Boundary{ .starts = chunks.starts };
     {
         var donor = try session.RequestGeneration.init(s, a, prompt, options, .{}, null);
@@ -75,19 +76,31 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
         try std.testing.expectEqual(null, try donor.snapshot());
         try std.testing.expect(!try donor.step(s));
         const saved = (try donor.snapshot()) orelse return error.MissingPrefixSnapshot;
+        saved.save(s.io, disk_path, s.directory, prompt[0..count]) catch |err| {
+            var owned = saved;
+            owned.deinit();
+            return err;
+        };
         try std.testing.expectEqual(count, saved.position());
         try std.testing.expect(saved.nbytes() > 0);
         try store.insertOwned(prompt[0..count], saved, prompt, false);
     }
     try std.testing.expectEqual(@as(usize, 0), store.longest(prompt[0..count], boundary));
-    var captures: [3]Capture = @splat(.{});
+    var captures: [4]Capture = @splat(.{});
     defer for (&captures) |*capture| capture.deinit();
-    var requests: [3]session.RequestGeneration = undefined;
+    var requests: [4]session.RequestGeneration = undefined;
     var initialized: usize = 0;
     defer for (requests[0..initialized]) |*request| request.deinit();
     for (&requests, &captures, 0..) |*request, *capture, index| {
         request.* = try session.RequestGeneration.init(s, a, prompt, options, capture.sink(), null);
         initialized += 1;
+        if (index == 3) {
+            var loaded = try session.Snapshot.load(s.io, disk_path, s.directory, prompt[0..count], @as(std.meta.Tag(session.Backend), s.backend));
+            defer loaded.deinit();
+            try request.restoreOwnedPrefix(&loaded);
+            try std.testing.expectEqual(count, request.memoryLengths().now);
+            continue;
+        }
         var hit = (try store.match(prompt, boundary, index == 2)) orelse return error.MissingPrefixHit;
         defer hit.deinit(a);
         var invalid = try hit.cache.clone();
@@ -117,7 +130,7 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
     // Copied requests remain independent after the final request takes the stored owner.
     try std.testing.expectEqual(@as(usize, 0), store.entries.items.len);
     try std.testing.expectEqual(@as(u64, 0), store.nbytes());
-    var finished = [_]bool{ false, false, false };
+    var finished = [_]bool{ false, false, false, false };
     while (!std.mem.allEqual(bool, &finished, true)) {
         for (&requests, &finished) |*request, *done| if (!done.*) {
             done.* = try request.step(s);
@@ -129,6 +142,7 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
         try same(expected, actual, baseline, capture);
         try std.testing.expectEqual(null, try request.snapshot());
     }
+    std.debug.print("PASS: persisted {s} prefix resumes identical tokens and streaming at boundary {d}\n", .{ @tagName(s.backend), count });
 }
 
 fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.zig").Tokenizer) !void {
@@ -343,7 +357,7 @@ fn checkImagesWithDraft(io: std.Io, dir: []const u8, path: []const u8, draft_opt
     std.debug.print("PASS: interleaved image/text requests preserve tokens, streaming and independent multimodal positions\n", .{});
 }
 
-pub fn checkSyntheticNeural(m: anytype) !void {
+pub fn checkSyntheticNeural(m: anytype, io: std.Io) !void {
     const M = @TypeOf(m.*);
     const G = session.Generation(M);
     const a = mx.allocator;
@@ -368,9 +382,9 @@ pub fn checkSyntheticNeural(m: anytype) !void {
         defer baseline.deinit();
         while (!try baseline.step(m)) {}
         for ([_]usize{ 1, 3, 15 }) |depth| {
-            var captures: [2]Capture = @splat(.{});
+            var captures: [3]Capture = @splat(.{});
             defer for (&captures) |*capture| capture.deinit();
-            var generations: [2]G = undefined;
+            var generations: [3]G = undefined;
             var initialized: usize = 0;
             defer for (generations[0..initialized]) |*g| g.deinit();
             for (&generations, &captures) |*g, *capture| {
@@ -387,7 +401,15 @@ pub fn checkSyntheticNeural(m: anytype) !void {
             try generations[1].restoreOwnedPrefix(&owned);
             try std.testing.expectEqual(pointer, generations[1].state.cache.ptr);
             try std.testing.expectEqual(@as(i32, 0), owned.position);
-            var done = [_]bool{ false, false };
+            const disk = @import("snapshot_file.zig");
+            const disk_path = "build/native-checks/synthetic-prefix.safetensors";
+            try disk.save(io, disk_path, @typeName(M), prompt[0..generations[0].offset], generations[0].state);
+            var reader = try disk.Reader.open(io, disk_path, @typeName(M));
+            defer reader.deinit();
+            var restored = try reader.load(@TypeOf(generations[0].state));
+            defer restored.deinit();
+            try generations[2].restoreOwnedPrefix(&restored);
+            var done = [_]bool{ false, false, false };
             while (!std.mem.allEqual(bool, &done, true)) {
                 for (&generations, &done) |*g, *ended| if (!ended.*) {
                     ended.* = try g.step(m);
@@ -411,5 +433,5 @@ pub fn checkSyntheticNeural(m: anytype) !void {
             }
         }
     }
-    std.debug.print("PASS: synthetic {s} request-local neural depths 1/3/15, serial cache/output parity, sampling and prefix restoration\n", .{@typeName(M)});
+    std.debug.print("PASS: synthetic {s} request-local neural depths 1/3/15, serial cache/output parity, sampling and in-memory/disk prefix restoration\n", .{@typeName(M)});
 }

@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-checkpoint")) return @import("flash_names.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-weights")) return @import("flash_ops.zig").checkWeights(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-bonsai-pack")) return @import("bonsai.zig").check(io, args[2], args[3]);
-    if (args.len == 2 and std.mem.eql(u8, args[1], "check-request-state")) return @import("request_state_checks.zig").check();
+    if (args.len == 2 and std.mem.eql(u8, args[1], "check-request-state")) return @import("request_state_checks.zig").check(io);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-session-images")) return @import("session_checks.zig").checkImages(io, args[2], args[3]);
     if (args.len == 5 and std.mem.eql(u8, args[1], "check-session-neural-images")) return @import("session_checks.zig").checkNeuralImages(io, args[2], args[3], args[4]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-session-rounds")) return @import("session_checks.zig").check(io, args[2]);

@@ -20,7 +20,7 @@ fn equalArray(actual: mx.Array, expected: mx.Array) !void {
     try std.testing.expectEqualSlices(i32, mx.c.mlx_array_data_int32(expected)[0..2], mx.c.mlx_array_data_int32(actual)[0..2]);
 }
 
-fn checkModel(comptime M: type) !void {
+fn checkModel(comptime M: type, io: std.Io) !void {
     var scope = mx.Scope{};
     defer scope.deinit();
     const original = try scope.ints(&.{ 17, 31 });
@@ -130,6 +130,30 @@ fn checkModel(comptime M: type) !void {
         for (draft.cache) |cache| try equal(cache, original);
     }
     if (full.dspark) |draft| for (draft.keys) |key| try equalArray(key, original);
+    const disk = @import("snapshot_file.zig");
+    const path = "build/native-checks/request-state.safetensors";
+    try disk.save(io, path, "request-state-fixture", &.{ 17, 31 }, full);
+    try std.testing.expectError(error.IncompatibleSnapshot, disk.Reader.open(io, path, "different-model"));
+    var reader = try disk.Reader.open(io, path, "request-state-fixture");
+    defer reader.deinit();
+    try std.testing.expectEqualSlices(i32, &.{ 17, 31 }, reader.metadata.value.tokens);
+    var restored = try reader.load(@TypeOf(full));
+    defer restored.deinit();
+    try std.testing.expectEqual(full.position, restored.position);
+    inline for (.{ "rope_delta", "generation", "mtp_position", "mtp_generation", "dflash_offset" }) |field| try std.testing.expectEqual(@field(full, field), @field(restored, field));
+    for (restored.cache) |cache| try equal(cache, original);
+    if (@hasField(M, "mtp_cache")) try equal(restored.mtp_cache, original);
+    if (restored.draft) |draft| {
+        try equalArray(draft.pending, original);
+        for (draft.cache) |cache| try equal(cache, original);
+        try std.testing.expectEqual(full.draft.?.position, draft.position);
+        try std.testing.expectEqual(full.draft.?.projected_position, draft.projected_position);
+        try std.testing.expectEqual(full.draft.?.started, draft.started);
+    }
+    if (restored.dspark) |draft| {
+        for (draft.keys) |key| try equalArray(key, original);
+        try std.testing.expectEqual(full.dspark.?.position, draft.position);
+    }
     saved.swap(&m);
     inline for (.{ "rope_delta", "generation", "mtp_position", "mtp_generation" }) |field| if (@hasField(M, field)) {
         try std.testing.expectEqual(19, @field(m, field));
@@ -148,13 +172,15 @@ fn checkModel(comptime M: type) !void {
     }
 }
 
-pub fn check() !void {
+pub fn check(io: std.Io) !void {
     try mx.init();
     defer mx.shutdown();
-    inline for (.{ @import("model.zig").Model, @import("gemma.zig").Model, @import("nemotron.zig").Model, @import("flash.zig").Model, @import("glm.zig").Model, @import("deepseek.zig").Model }) |M| try checkModel(M);
+    try @import("snapshot_file.zig").check(io);
+    inline for (.{ @import("model.zig").Model, @import("gemma.zig").Model, @import("nemotron.zig").Model, @import("flash.zig").Model, @import("glm.zig").Model, @import("deepseek.zig").Model }) |M| try checkModel(M, io);
     try mx.check(mx.c.mlx_synchronize(mx.stream));
     var active: usize = 0;
     try mx.check(mx.c.mlx_get_active_memory(&active));
     try std.testing.expectEqual(@as(usize, 0), active);
     std.debug.print("PASS: all six backend cache layouts, MTP, DFlash and DSpark state preserve ownership across request switches\n", .{});
+    std.debug.print("PASS: all six backend snapshots and attached drafter state round-trip through native safetensors\n", .{});
 }

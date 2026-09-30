@@ -170,6 +170,29 @@ pub const Snapshot = union(std.meta.Tag(Backend)) {
     glm: @import("request_state.zig").State(@import("glm.zig").Model),
     deepseek: @import("request_state.zig").State(@import("deepseek.zig").Model),
 
+    pub fn save(s: *const Snapshot, io: std.Io, path: []const u8, identity: []const u8, tokens: []const i32) !void {
+        switch (s.*) {
+            inline else => |state| {
+                if (state.position <= 0 or state.position != tokens.len or state.rope_delta != 0) return error.InvalidSnapshotState;
+                try @import("snapshot_file.zig").save(io, path, identity, tokens, state);
+            },
+        }
+    }
+
+    pub fn load(io: std.Io, path: []const u8, identity: []const u8, tokens: []const i32, tag: std.meta.Tag(Backend)) !Snapshot {
+        var reader = try @import("snapshot_file.zig").Reader.open(io, path, identity);
+        defer reader.deinit();
+        if (!std.mem.eql(i32, tokens, reader.metadata.value.tokens)) return error.IncompatibleSnapshot;
+        switch (tag) {
+            inline else => |kind| {
+                var state = try reader.load(@FieldType(Snapshot, @tagName(kind)));
+                errdefer state.deinit();
+                if (state.position <= 0 or state.position != tokens.len or state.rope_delta != 0) return error.InvalidSnapshotState;
+                return @unionInit(Snapshot, @tagName(kind), state);
+            },
+        }
+    }
+
     pub fn clone(s: *const Snapshot) !Snapshot {
         switch (s.*) {
             inline else => |*state, tag| return @unionInit(Snapshot, @tagName(tag), try state.clone()),
