@@ -1,0 +1,157 @@
+{
+  "schema_version": "1.0",
+  "manifest_id": "deepseek-v4-t01-evidence",
+  "captured_at": "2026-09-30T03:26:33Z",
+  "audit": {
+    "task": "t_79b60cb5",
+    "scope_ref": "docs/recipes/deepseek-v4-t01-scope.md",
+    "tests": [
+      "tests/test_deepseek_v4_unsupported_options.py",
+      "tests/test_deepseek_v4_donor_pins.py"
+    ]
+  },
+  "sources": {
+    "tensorfold_local": {
+      "path": "/home/josh/Documents/Projects/TensorFold-deepseek-cuda",
+      "revision": "e65c8d9fb2ef1308b5bc44164a4dd6629dc3d232",
+      "remote": null,
+      "license": "MIT",
+      "role": "audit checkout; discovery/backend-option API lives here",
+      "modules": [
+        "src/tensorfold/families/__init__.py",
+        "src/tensorfold/families/families.py",
+        "src/tensorfold/families/deepseek_v4/__init__.py"
+      ]
+    },
+    "tensorfold_upstream_main": {
+      "repo": "github.com/ashhart/TensorFold",
+      "revision_at_issue14_close": "ac3de87c83bcb1018a7bb328a8b046a93eb6ed83",
+      "license": "MIT",
+      "role": "upstream main; issue #14 Mac support shipped here"
+    },
+    "pr119": {
+      "repo": "github.com/ashhart/TensorFold",
+      "number": 119,
+      "state": "open",
+      "merged": false,
+      "base_sha": "9cd52ab4daba68ddd09be89be8f23ad43175e821",
+      "head": "feni6:glm-8bit-q8_0",
+      "title": "glm5_next: 8-bit / group-32 checkpoints on Macs + lossless Q8_0 GGUF converter",
+      "proposed_modules": [
+        "tools/glm5_q8_0_gguf_to_mlx.py",
+        "src/tensorfold/families/glm5_next/kda.py",
+        "src/tensorfold/families/glm5_next/mla.py",
+        "src/tensorfold/families/glm5_next/linear.py",
+        "src/tensorfold/families/glm5_next/mlp.py",
+        "src/tensorfold/families/glm5_next/model.py",
+        "src/tensorfold/families/glm5_next/weights.py",
+        "src/tensorfold/kernels/glm/flash/v1/kernels.py"
+      ],
+      "scope": "GLM-5.3-Flash Q8_0 GGUF reader; NOT a DeepSeek CUDA implementation"
+    },
+    "donor_ds4_c_engine": {
+      "path": "/home/josh/code/ds4",
+      "repo": "github.com/Entrpi/ds4 (DwarfStar 4 fork)",
+      "revision": "d183482b413ecd2e3b540b290e6497437e9fbb73",
+      "license": "MIT (ggml authors)",
+      "role": "already-working GGUF reader + CUDA kernels for DeepSeek-V4-Flash-0731",
+      "coverage": {
+        "arch": "DeepSeek-V4-Flash-0731",
+        "quant": ["IQ2_XXS", "Q2_K", "Q8_0", "F16", "F32"]
+      },
+      "modules": [
+        "ds4.c", "ds4.h",
+        "ds4_cuda.cu", "ds4_gpu.h",
+        "gguf-tools/quants.h", "gguf-tools/quants.c",
+        "gguf-tools/deepseek4-quantize.c",
+        "cuda/mmq/ds4_mmq.cu", "cuda/mmq/ds4_mmq.h",
+        "cuda/mmq/ds4_repack.cu", "cuda/mmq/ds4_repack.h",
+        "cuda/mmq/mmvq.cu", "cuda/mmq/mmvq.cuh",
+        "cuda/mmq/quantize.cu", "cuda/mmq/quantize.cuh",
+        "cuda/mmq/mmid.cu", "cuda/mmq/mmid.cuh",
+        "cuda/mmq/mmq.cuh", "cuda/mmq/vecdotq.cuh",
+        "cuda/mmq/mma.cuh", "cuda/mmq/common.cuh",
+        "cuda/mmq/ds4_ggml_stubs.*"
+      ]
+    },
+    "donor_ds4_on_spark": {
+      "path": "/home/josh/Documents/Projects/ds4",
+      "revision": "4cb79fdf5574f0cacddc14c41bfcf0c0912a7f99",
+      "license": "MIT",
+      "role": "installer/launcher scripts for the ds4 C engine",
+      "modules": [
+        "install.sh",
+        "scripts/*.sh"
+      ]
+    }
+  },
+  "unsupported_options_discovered": [
+    {
+      "option": "cuda_engine backend in tensorfold/families",
+      "status": "unsupported",
+      "test": "test_deepseek_v4_unsupported_options.py::test_deepseek_v4_has_no_cuda_backend",
+      "note": "deepseek_v4 registers only the mlx backend; a native CUDA engine must be added by the port."
+    },
+    {
+      "option": "GGUF mixed-quant read (IQ2_XXS / Q2_K / Q8_0 / F16 / F32) via families.require_readable",
+      "status": "unsupported",
+      "test": "test_deepseek_v4_unsupported_options.py::test_gguf_quant_refused_on_cuda / test_gguf_quant_refused_on_mlx",
+      "note": "require_readable refuses any quant_method != mlx today; the 0731 GGUF path is not wired."
+    },
+    {
+      "option": "deepseek_v4.check() refusing GGUF config",
+      "status": "intended-failing RED (needs MLX-capable env)",
+      "test": "test_deepseek_v4_unsupported_options.py::test_intended_fail_check_refuses_gguf_is_red",
+      "note": "documented as xfail; exercises the config-refusal contract the port must keep."
+    },
+    {
+      "option": "deepseek_v4_vision_exp family",
+      "status": "unsupported",
+      "test": "test_deepseek_v4_unsupported_options.py::test_no_vision_or_pro_family_registered",
+      "note": "families() registers only deepseek_v4 today."
+    },
+    {
+      "option": "deepseek_v4_pro family",
+      "status": "unsupported",
+      "test": "test_deepseek_v4_unsupported_options.py::test_no_vision_or_pro_family_registered",
+      "note": "not registered in families() today."
+    },
+    {
+      "option": "glm5 Q8_0 GGUF reader (PR #119 tools/glm5_q8_0_gguf_to_mlx.py)",
+      "status": "not present upstream (PR open, unmerged)",
+      "test": "test_deepseek_v4_unsupported_options.py::test_pr119_q8_0_gguf_reader_is_not_present_upstream",
+      "note": "PR #119 is GLM-5.3-Flash-only; not a DeepSeek CUDA implementation and not merged into main."
+    }
+  ],
+  "unresolved_upstream_decisions": [
+    {
+      "id": "U1",
+      "decision": "Does the TensorFold maintainer have unpublished CUDA/DeepSeek work?",
+      "evidence": "issue #14 closed 2026-09-29 by ac3de87c83bcb1018a7bb328a8b046a93eb6ed83 (Mac support shipped); comment says CUDA 'still to come'.",
+      "status": "UNRESOLVED — confirm before porting CUDA from the donor."
+    },
+    {
+      "id": "U2",
+      "decision": "Adopt PR #119's numpy/mmap GGUF-reader pattern for DeepSeek 0731?",
+      "evidence": "PR #119 open, unmerged; its converter is glm5-specific Q8_0.",
+      "status": "UNRESOLVED — decide whether to reuse the mmap pattern or port the donor C gguf reader."
+    },
+    {
+      "id": "U3",
+      "decision": "Which donor kernel set to adopt (cuda/mmq vs gguf-tools/quants)?",
+      "evidence": "Entrpi/ds4 d183482 ships both a narrow quant API and mmq kernels for 0731.",
+      "status": "UNRESOLVED — needs a licensing/scope review before import."
+    },
+    {
+      "id": "U4",
+      "decision": "License/attribution boundary for donor C modules under TensorFold's MIT tree.",
+      "evidence": "donor ds4 LICENSE is MIT (ggml authors); mmq headers carry ggml lineage.",
+      "status": "UNRESOLVED — record notices before merging donor files."
+    }
+  ],
+  "notes": [
+    "Captured from a CPU-only audit checkout; no mlx/torch imported by the tests.",
+    "No launcher modified; donor repos untouched (read-only inspection).",
+    "Pinned by tests/test_deepseek_v4_donor_pins.py so revisions/license strings are reproducible."
+  ]
+}
