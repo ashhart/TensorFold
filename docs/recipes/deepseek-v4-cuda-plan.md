@@ -5,6 +5,11 @@ TensorFold configuration. The target is one NVIDIA GB10 DGX Spark with 128 GB
 nominal unified memory, sharing the machine with a loaded Hunyuan3D-2.1 shape
 pipeline and CUDA image moderation. Two-rank execution is outside this proposal.
 
+Development must keep the existing DeepSeek endpoint and its loaded model
+available. The deliverable is a separately built TensorFold backend that can
+later serve the same unchanged GGUF; developing it must not require replacing
+the active ds4 installation or restarting the live stack.
+
 ## Target checkpoint and baseline
 
 The target file is
@@ -106,6 +111,89 @@ BF16 nor requiring that conversion meets this target.
    accepted-prefix commits and rollback of both target and drafter state.
    Keep drafting disabled if exactness or the companion memory budget fails.
 
+7. **Build and launch handoff.** Deliver a documented build helper and an
+   ordinary `tensorfold serve` invocation for this checkpoint. Package the
+   CUDA sources, model-directory metadata adapter, and required dependencies;
+   prebuild the extensions that can be compiled without loading the model.
+   Document any remaining Triton specialization or graph capture performed on
+   first launch. Installation, build and launch must not manage the existing
+   DeepSeek/Hunyuan services or modify client routing.
+
+## Development with DeepSeek still running
+
+Keep this work in a separate checkout and virtual environment or container,
+with its own build, extension and model-state caches. Read the GGUF in place;
+write generated config/tokenizer metadata into a candidate model directory.
+Treat the live ds4 binary, installed launcher, service units and checkpoint
+files as read-only inputs. Do not rebuild into the live binary directory,
+install into its environment, bind its port, or invoke stack stop/restart
+targets. Failed builds and tests must leave the existing service usable.
+
+Use these stages in order:
+
+1. **Inspect and build without loading the full model.** Read GGUF headers and
+   selected quant blocks, generate metadata, run CPU fixtures, build the wheel
+   and compile CUDA extensions in the candidate environment. Bound compiler
+   parallelism and host-memory use. A large file hash or scan also competes for
+   storage bandwidth; perform those deliberately rather than on every edit.
+
+2. **Run bounded CUDA tests.** Reuse tiny synthetic DeepSeek fixtures and small
+   quant blocks, with an explicit allocation ceiling and one GPU test worker.
+   Check the available-memory budget before starting. Tests must skip with a
+   clear reason if the live workload leaves insufficient headroom. Compilation
+   or a small kernel test can still contend for CPU/GPU time; keeping the live
+   model loaded does not imply zero latency impact.
+
+3. **Validate the candidate launch without allocation.** Provide a helper
+   preflight mode that validates the GGUF/sidecars and reports packed weight,
+   staging, cache/workspace and companion-reservation estimates. It must not
+   load weights, allocate a full cache, evict live resources or start a server.
+   Record build/runtime pins and the model identity with the candidate artifact.
+
+4. **Attempt a separate full-model test only if the budget permits.** Use a
+   loopback candidate port such as 18000. Count the live DeepSeek, Hunyuan and
+   moderation footprint as occupied memory. Sharing a pathname or file-backed
+   pages does not establish sharing of CUDA allocations, registered pages,
+   graphs or caches. Refuse candidate startup before major allocation if it
+   cannot fit alongside them; never stop the live service to make a test fit.
+   An estimate is not a hard resource limit: retain headroom, use bounded
+   allocations, and abort candidate loading if pressure rises.
+
+5. **Keep full-model qualification pending when it cannot fit.** CPU and tiny
+   GPU tests can make an implementation ready for launch, but cannot prove
+   full-model quality, long-context capacity or production coexistence.
+   Complete those measurements in a separately arranged final validation
+   window. Any replacement of the live service is a distinct operator action
+   after development, not a prerequisite or an automatic build/test step.
+
+## Intended build and run interface
+
+The following is the interface the implementation should deliver. The build
+helper and GGUF adapter do not exist yet; these are acceptance targets, not
+commands supported by the current branch. Run the build in the isolated,
+documented NVIDIA toolchain environment:
+
+```bash
+# Build/install the candidate, prepare sidecars, and inspect the launch budget.
+# The helper reads the existing GGUF and does not start or stop any service.
+python tools/build_deepseek_v4_cuda.py \
+  --gguf "$HOME/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf" \
+  --model-dir ./candidate-model --jobs 2
+
+# Launch the completed backend separately; refuse before loading if it cannot fit.
+tensorfold serve ./candidate-model \
+  --backend cuda --tp 1 --parallel 1 --no-drafts \
+  --context 262144 --name deepseek-v4-flash \
+  --host 127.0.0.1 --port 18000
+```
+
+The helper must also offer `--preflight-only` for stage 3. Select and record the
+companion reservation in candidate metadata or a maintainer-approved shared
+budget option, then require the loader to enforce that setting. The live
+service remains on its original endpoint throughout development. The candidate
+port does not trigger a production cutover, and a refused launch does not
+change the active stack.
+
 ## Reuse map and remaining work
 
 Paths below are relative to `src/tensorfold/`; candidates need compatibility
@@ -131,6 +219,10 @@ justifies them, and avoid copying a complete GLM engine into a new family.
 
 - CPU tests cover metadata, malformed files, quant decoding against known
   fixtures, format rejection and architecture/head compatibility.
+- Build and preflight work with the live stack running. Candidate tests use
+  separate paths and endpoints; a failed build, insufficient-memory refusal
+  or candidate exit leaves live DeepSeek serving requests. Confirm this with
+  lightweight health/chat probes around bounded tests, and record any impact.
 - GPU tests cover real head dimensions, compression boundaries, the 2,048-token
   sparse-selection transition, cache wrapping, partial keeps, and eager versus
   graph execution. Quality comparisons use a trusted forward on the same GGUF;
