@@ -8,6 +8,8 @@ on the shapes, so a row's bits never depend on how many rows share the call.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
 import triton
 import triton.language as tl
@@ -120,8 +122,9 @@ def _pre_finish(X, PART, BASE, SCALE, PRE_IN, NW, OUT, PRE, POST, COMB, eps_norm
 
 
 @triton.jit
-def _post(B, X, POST, COMB, Y, parts, part_stride, D: tl.constexpr, CH: tl.constexpr):
-    """B holds ``parts`` rank partials (fp32, rank order, part_stride apart) or one bf16 branch (parts 0)."""
+def _post(B, X, POST, COMB, Y, parts, R, split, D: tl.constexpr, CH: tl.constexpr):
+    """B holds ``parts`` rank partials (fp32 or bf16, rank order) or one bf16 branch (parts 0). Partials of rows below
+    ``split`` are laid out [parts, split, D], then those of the rest [parts, R - split, D] (split R: one block)."""
 
     r = tl.program_id(0)
     c = tl.program_id(1)
@@ -129,9 +132,15 @@ def _post(B, X, POST, COMB, Y, parts, part_stride, D: tl.constexpr, CH: tl.const
     if parts == 0:
         b = tl.load(B + r * D + o).to(tl.float32)
     else:
-        b = tl.load(B + r * D + o).to(tl.float32)
+        if r < split:
+            base = r * D
+            stride = split * D
+        else:
+            base = parts * split * D + (r - split) * D
+            stride = (R - split) * D
+        b = tl.load(B + base + o).to(tl.float32)
         for k in range(1, parts):
-            b = b + tl.load(B + k * part_stride + r * D + o).to(tl.float32)
+            b = b + tl.load(B + base + k * stride + o).to(tl.float32)
         b = b.to(tl.bfloat16).to(tl.float32)
     x0 = tl.load(X + r * (4 * D) + o).to(tl.float32)
     x1 = tl.load(X + r * (4 * D) + D + o).to(tl.float32)
@@ -177,13 +186,24 @@ def pre(X: torch.Tensor, fn: torch.Tensor, base: torch.Tensor, scale: torch.Tens
     return post, comb, x_in, pre_out
 
 
-def post(b: torch.Tensor, X: torch.Tensor, post_w: torch.Tensor, comb: torch.Tensor) -> torch.Tensor:
+class SplitPartials(NamedTuple):
+    """Rank partials gathered in two row blocks: ``buf`` holds [parts, split, D] then [parts, R - split, D]."""
+
+    buf: torch.Tensor
+    parts: int
+    split: int
+
+
+def post(b, X: torch.Tensor, post_w: torch.Tensor, comb: torch.Tensor) -> torch.Tensor:
     """New streams; ``b`` is the bf16 branch [R, D] or the ranks' fp32 partials [world, R, D] (summed in rank order,
     rounded to bf16 like the branch)."""
 
     R, _, D = X.shape
     Y = torch.empty_like(X)
-    b = b.contiguous()
-    parts = b.shape[0] if b.dim() == 3 else 0
-    _post[(R, D // CHUNK)](b, X, post_w, comb, Y, parts, R * D, D=D, CH=CHUNK, num_warps=4)
+    if isinstance(b, SplitPartials):
+        parts, split, b = b.parts, b.split, b.buf
+    else:
+        b = b.contiguous()
+        parts, split = (b.shape[0] if b.dim() == 3 else 0), R
+    _post[(R, D // CHUNK)](b, X, post_w, comb, Y, parts, R, split, D=D, CH=CHUNK, num_warps=4)
     return Y

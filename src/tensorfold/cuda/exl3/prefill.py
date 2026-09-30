@@ -57,12 +57,15 @@ class Workspace:
         self.w: torch.Tensor | None = None
         self.xh: torch.Tensor | None = None
         self.h: torch.Tensor | None = None
+        self.held = None                      # the layer whose W_q ``w`` holds (row blocks of one call reuse it)
 
     def _grow(self, name: str, numel: int, device) -> torch.Tensor:
         t = getattr(self, name)
         if t is None or t.numel() < numel:
             t = torch.empty((numel,), dtype=torch.float16, device=device)
             setattr(self, name, t)
+            if name == "w":
+                self.held = None
         return t
 
     def hadamard(self, device) -> torch.Tensor:
@@ -86,7 +89,9 @@ def matmul(layer: Exl3Linear, x: torch.Tensor, out: torch.Tensor, ws: Workspace)
     xh = ws._grow("xh", m * k, x.device)[:m * k].view(m, k)
     ext.rot_in(x.contiguous(), layer.suh, xh)
     wq = ws._grow("w", k * n, x.device)[:k * n].view(k, n)
-    ext.unpack(layer.words, wq, *layer.strides, layer.k2, CODEBOOK_IDS[layer.codebook])
+    if ws.held is not layer:
+        ext.unpack(layer.words, wq, *layer.strides, layer.k2, CODEBOOK_IDS[layer.codebook])
+        ws.held = layer
     bm, bk, warps, stages, group = tiles(k, n)
     bias = layer.bias if layer.bias is not None else layer.svh
     _gemm[(triton.cdiv(m, bm) * (n // BN),)](xh, wq, ws.hadamard(x.device), layer.svh, bias, out, m, out.stride(0),

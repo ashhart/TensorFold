@@ -35,6 +35,7 @@ class Comm:
     def __init__(self, nccl=None) -> None:
         self.nccl = nccl
         self.world = nccl.world if nccl is not None else 1
+        self.side = None
 
     def sum(self, partial: torch.Tensor) -> torch.Tensor:
         if self.world == 1:
@@ -57,6 +58,30 @@ class Comm:
         recv = torch.empty((self.world, *send.shape), dtype=send.dtype, device=send.device)
         self.nccl.all_gather(send.view(-1), recv.view(-1))
         return recv
+
+    def partials_rows(self, make, R: int):
+        """``partials`` of the rows ``make(r0, r1)`` computes, in two row blocks for prompt chunks: the first block's
+        all-gather runs on a side stream while the second block computes (post() reads the two-block layout)."""
+
+        if R <= PROMPT_ROWS or self.world == 1 or not PROMPT_OVERLAP:
+            return self.partials(make(0, R))
+        h = (R // 2 + 15) // 16 * 16
+        main = torch.cuda.current_stream()
+        if self.side is None:
+            self.side = torch.cuda.Stream()
+        buf = None
+        for r0, r1 in ((0, h), (h, R)):
+            send = make(r0, r1).to(BF).contiguous()
+            if buf is None:
+                buf = torch.empty((self.world * R * send.shape[1],), dtype=BF, device=send.device)
+            at = self.world * r0 * send.shape[1]
+            self.side.wait_stream(main)
+            with torch.cuda.stream(self.side):
+                self.nccl.all_gather(send.view(-1), buf[at:at + self.world * send.numel()])
+            send.record_stream(self.side)
+        main.wait_stream(self.side)
+        buf.record_stream(self.side)
+        return hcf.SplitPartials(buf, self.world, h)
 
     def gather_last(self, part: torch.Tensor) -> torch.Tensor:
         """Concatenate each rank's slice of the last axis in rank order."""
@@ -81,12 +106,16 @@ class Caches:
     ids: list[int] = field(default_factory=list)
 
 
+PROMPT_ZB = (103, 103)       # v4 with bf16 Z (gate/up config, down config); None: fp32 Z (PROMPT_V3)
+PROMPT_ZDT = torch.float16   # Z element type (fp16 stores acc / 64; bf16 also works)
+PROMPT_OVERLAP = True        # prompt chunks: all-gather the first row block while the second computes
 PROMPT_V3 = 103                # v3 config (experts_prompt.cu grouped_prompt3); None: v2
 PROMPT_V2 = True             # smem-staged activations, K sliced (experts_prompt.cu grouped_prompt2_kernel)
 PROMPT_KC = [80, 72]         # k tiles a slice for gate/up (K 5120) and down (K 1152)
 PROMPT_WARPS = 8
 PROMPT_MTP = [2, 2]          # 16-row member tiles sharing one weight decode
 _Z2 = None
+_ZB = None
 PROMPT_CFG = [1, 1]          # prompt expert kernel config for gate/up and down (experts_prompt.cu)
 PROMPT_ROWS = 16             # above this, expert calls size their member table to the busiest expert (host sync)
 
@@ -129,6 +158,19 @@ def routed_prompt(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ex, s,
     from .experts_prompt import ext as prompt_ext
 
     pe = prompt_ext()
+    if PROMPT_ZB is not None:
+        global _ZB
+        need = 2 * P * max(I, D)
+        if _ZB is None or _ZB.numel() < need or _ZB.dtype != PROMPT_ZDT:
+            _ZB = torch.empty((need,), dtype=PROMPT_ZDT, device=x.device)
+        pe.grouped_prompt4(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, _ZB, 2, D,
+                           I, P, slots, ex.cb, PROMPT_ZB[0])
+        pe.gateup_epilogue_b(_ZB, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, P, I, E, float(limit))
+        pe.grouped_prompt4(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, _ZB, 1,
+                           I, D, P, slots, ex.cb, PROMPT_ZB[1])
+        out = torch.empty((R, D), dtype=torch.float32, device=x.device)
+        pe.down_combine_b(_ZB, pick, ex.svh_d, wts, out, R, D, slots, E)
+        return out
     if PROMPT_V3 is not None:
         global _Z2
         need = 2 * P * max(I, D)
@@ -367,7 +409,7 @@ class SerialEngine:
             post, comb, x, pre = self.hc(layer.hc_ffn, X, pre_a)
             f = self.moe(layer, x, x.shape[0])
             if self.debug is not None:
-                self.debug.append({"attn_in": x.clone(), "X": X.clone(), "f": f.clone()})
+                self.debug.append({"attn_in": x.clone(), "X": X.clone(), "f": f.clone() if torch.is_tensor(f) else f})
         return X, pre, f, post, comb
 
     # -- decode graphs ----------------------------------------------------------------------------------------
@@ -534,7 +576,7 @@ class SerialEngine:
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
         z = torch.cat([wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)], dim=1)
-        return self.comm.partials(a.wo_b(z, out_dtype=F32))
+        return self.comm.partials_rows(lambda r0, r1: a.wo_b(z[r0:r1], out_dtype=F32), R)
 
     def select(self, layer: LayerW, qr: torch.Tensor, x: torch.Tensor, pos: torch.Tensor,
                static: bool = True) -> torch.Tensor:
@@ -600,11 +642,15 @@ class SerialEngine:
             routed = routed_prompt(x.contiguous(), pick, w, m.experts, scratch, R, limit)
         else:
             routed = ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit)
+
         g = m.shared[0](x, out_dtype=F32)
         u = m.shared[1](x, out_dtype=F32)
         act = (torch.nn.functional.silu(g.clamp(max=limit)) * u.clamp(-limit, limit)).to(BF)
-        shared = m.shared[2](act, out_dtype=F32)
-        return self.comm.partials(routed + shared)
+
+        def block(r0: int, r1: int) -> torch.Tensor:
+            return routed[r0:r1] + m.shared[2](act[r0:r1], out_dtype=F32)
+
+        return self.comm.partials_rows(block, R)
 
     def engram(self, layer: LayerW, X: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
         R = X.shape[0]

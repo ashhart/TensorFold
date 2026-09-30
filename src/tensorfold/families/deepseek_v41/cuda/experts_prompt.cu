@@ -479,12 +479,21 @@ __device__ __forceinline__ void prompt4_body(const uint32_t* __restrict__ T, int
     }
 }
 
-template <int CB, int NT, int W, int MTP, int KC, int PF>
+__device__ __forceinline__ void store2(float* z, float a, float b) { *reinterpret_cast<float2*>(z) = make_float2(a, b); }
+__device__ __forceinline__ void store2(__nv_bfloat16* z, float a, float b) {
+    *reinterpret_cast<__nv_bfloat162*>(z) = __floats2bfloat162_rn(a, b);
+}
+constexpr float ZH_SCALE = 1.f / 64.f;                   // fp16 Z holds acc / 64: range to 4M, 11-bit mantissa
+__device__ __forceinline__ void store2(half* z, float a, float b) {
+    *reinterpret_cast<half2*>(z) = __floats2half2_rn(a * ZH_SCALE, b * ZH_SCALE);
+}
+
+template <int CB, int NT, int W, int MTP, int KC, int PF, typename ZT>
 __global__ void __launch_bounds__(W * 32) grouped_prompt4_kernel(
     const half* __restrict__ X0, const half* __restrict__ X1, const int64_t* __restrict__ TP0,
     const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
     const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
-    float* __restrict__ Z, int K, int N, int P, int maxm, int slots) {
+    ZT* __restrict__ Z, int K, int N, int P, int maxm, int slots) {
     constexpr int ROWS = 16 * MTP, STRIDE = KC * 16 + 8;
     __shared__ __align__(16) half xs[2][ROWS * STRIDE];
     __shared__ int rows_sh[ROWS];
@@ -529,7 +538,7 @@ __global__ void __launch_bounds__(W * 32) grouped_prompt4_kernel(
         default: __trap();
     }
     if (!active) return;
-    float* zbase = Z + (size_t)mat * P * N;
+    ZT* zbase = Z + (size_t)mat * P * N;
 #pragma unroll
     for (int m = 0; m < MTP; ++m) {
         const int ra = rows_sh[m * 16 + g], rb = rows_sh[m * 16 + g + 8];
@@ -538,12 +547,103 @@ __global__ void __launch_bounds__(W * 32) grouped_prompt4_kernel(
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const int col = (nt0 + i) * 16 + h * 8 + 2 * t;
-                if (ra >= 0)
-                    *reinterpret_cast<float2*>(zbase + (size_t)ra * N + col) = make_float2(acc[m][i][h][0], acc[m][i][h][1]);
-                if (rb >= 0)
-                    *reinterpret_cast<float2*>(zbase + (size_t)rb * N + col) = make_float2(acc[m][i][h][2], acc[m][i][h][3]);
+                if (ra >= 0) store2(zbase + (size_t)ra * N + col, acc[m][i][h][0], acc[m][i][h][1]);
+                if (rb >= 0) store2(zbase + (size_t)rb * N + col, acc[m][i][h][2], acc[m][i][h][3]);
             }
     }
+}
+
+
+// Prompt epilogues over bf16 Z (one K pass): the act of gate and up into the down input, and the down rows rotated,
+// scaled and combined in slot order (no per-member copy is kept).
+constexpr float HAD_SCALE = 0.08838834764831845f;   // 1 / sqrt(128)
+
+__device__ __forceinline__ void fwht128(float (&v)[4], int lane) {
+    float a = v[0] + v[1], b = v[0] - v[1], c = v[2] + v[3], d = v[2] - v[3];
+    v[0] = a + c; v[1] = b + d; v[2] = a - c; v[3] = b - d;
+#pragma unroll
+    for (int m = 1; m < 32; m <<= 1) {
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            float o = __shfl_xor_sync(0xffffffffu, v[j], m);
+            v[j] = (lane & m) ? o - v[j] : v[j] + o;
+        }
+    }
+}
+
+__device__ __forceinline__ void load4(const half* z, float (&v)[4]) {
+    const uint2 raw = *reinterpret_cast<const uint2*>(z);
+    const float2 lo = __half22float2(*reinterpret_cast<const half2*>(&raw.x));
+    const float2 hi = __half22float2(*reinterpret_cast<const half2*>(&raw.y));
+    v[0] = lo.x * 64.f; v[1] = lo.y * 64.f; v[2] = hi.x * 64.f; v[3] = hi.y * 64.f;
+}
+
+__device__ __forceinline__ void load4(const __nv_bfloat16* z, float (&v)[4]) {
+    const uint2 raw = *reinterpret_cast<const uint2*>(z);
+    const float2 lo = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.x));
+    const float2 hi = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&raw.y));
+    v[0] = lo.x; v[1] = lo.y; v[2] = hi.x; v[3] = hi.y;
+}
+
+template <typename ZT>
+__global__ void gateup_epilogue_b_kernel(const ZT* __restrict__ Z, const int* __restrict__ pick,
+                                         const half* __restrict__ svh_g, const half* __restrict__ svh_u,
+                                         const half* __restrict__ suh_d, half* __restrict__ xd, int P, int N, int E,
+                                         float limit) {
+    const int p = blockIdx.x, blk = blockIdx.y;
+    const int e = pick[p];
+    if (e < 0 || e >= E) return;
+    const int lane = threadIdx.x;
+    const int n = blk * 128 + 4 * lane;
+    float gv[4], uv[4];
+    load4(Z + (size_t)p * N + n, gv);
+    load4(Z + ((size_t)P + p) * N + n, uv);
+    fwht128(gv, lane);
+    fwht128(uv, lane);
+    float v[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const float gg = fminf(gv[j] * HAD_SCALE * __half2float(svh_g[(size_t)e * N + n + j]), limit);
+        const float uu = fminf(fmaxf(uv[j] * HAD_SCALE * __half2float(svh_u[(size_t)e * N + n + j]), -limit), limit);
+        v[j] = gg / (1.f + expf(-gg)) * uu * __half2float(suh_d[(size_t)e * N + n + j]);
+    }
+    fwht128(v, lane);
+    half* o = xd + (size_t)p * N + n;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
+}
+
+template <typename ZT>
+__global__ void down_combine_b_kernel(const ZT* __restrict__ Z, const int* __restrict__ pick,
+                                      const half* __restrict__ svh_d, const float* __restrict__ wts,
+                                      float* __restrict__ out, int D, int E, int slots) {
+    __shared__ float4 part[32][32];
+    const int r = blockIdx.x, blk = blockIdx.y;
+    const int k = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int n = blk * 128 + 4 * lane;
+    const int p = r * slots + k;
+    const int e = pick[p];
+    float o[4] = {0.f, 0.f, 0.f, 0.f};
+    if (e >= 0 && e < E) {
+        float v[4];
+        load4(Z + (size_t)p * D + n, v);
+        fwht128(v, lane);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) o[j] = v[j] * HAD_SCALE * __half2float(svh_d[(size_t)e * D + n + j]);
+    }
+    part[k][lane] = make_float4(o[0], o[1], o[2], o[3]);
+    __syncthreads();
+    if (k != 0) return;
+    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+    for (int q = 0; q < slots; ++q) {
+        const float w = wts[r * slots + q];
+        const float4 u = part[q][lane];
+        acc[0] = fmaf(w, u.x, acc[0]);
+        acc[1] = fmaf(w, u.y, acc[1]);
+        acc[2] = fmaf(w, u.z, acc[2]);
+        acc[3] = fmaf(w, u.w, acc[3]);
+    }
+    *reinterpret_cast<float4*>(out + (size_t)r * D + n) = make_float4(acc[0], acc[1], acc[2], acc[3]);
 }
 
 }  // namespace tf_exl3x
@@ -643,7 +743,7 @@ void grouped_prompt3(const at::Tensor& X0, const at::Tensor& X1, const at::Tenso
         const int MG = (maxm + 16 * MTP_ - 1) / (16 * MTP_);                                                        \
         const int ngroups = (int)((N / 16 + NT_ * W_ - 1) / (NT_ * W_));                                            \
         dim3 grid((unsigned)uids.numel(), (unsigned)ngroups, (unsigned)(mats * MG));                                \
-        tf_exl3x::grouped_prompt4_kernel<2, NT_, W_, MTP_, KC_, PF_><<<grid, W_ * 32, 0,                            \
+        tf_exl3x::grouped_prompt4_kernel<2, NT_, W_, MTP_, KC_, PF_, float><<<grid, W_ * 32, 0,                            \
                                                                       at::cuda::getCurrentCUDAStream()>>>(          \
             reinterpret_cast<const half*>(X0.data_ptr()), reinterpret_cast<const half*>(X1.data_ptr()),             \
             TP0.data_ptr<int64_t>(), TP1.data_ptr<int64_t>(), K2_0.data_ptr<int>(), K2_1.data_ptr<int>(),           \
@@ -685,7 +785,83 @@ void grouped_prompt3(const at::Tensor& X0, const at::Tensor& X1, const at::Tenso
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// v4 with fp16 (scaled) or bf16 Z (configs as grouped_prompt3's 100..) and its epilogues.
+void grouped_prompt4(const at::Tensor& X0, const at::Tensor& X1, const at::Tensor& TP0, const at::Tensor& TP1,
+                     const at::Tensor& K2_0, const at::Tensor& K2_1, const at::Tensor& uids, const at::Tensor& ucount,
+                     const at::Tensor& members, at::Tensor& Z, int64_t mats, int64_t K, int64_t N, int64_t P,
+                     int64_t slots, int64_t cb, int64_t config) {
+    TORCH_CHECK(cb == 2, "prompt expert kernel: mul1 codebook only");
+    TORCH_CHECK((K / 16) % 8 == 0, "prompt expert kernel v4: K/16 must be a multiple of 8");
+    TORCH_CHECK(Z.numel() >= mats * P * N, "Z: mats x P x N");
+    const bool zh = Z.scalar_type() == at::kHalf;
+    TORCH_CHECK(zh || Z.scalar_type() == at::kBFloat16, "Z: fp16 or bf16");
+    const int maxm = (int)members.size(1);
+#define TF_V4B_LAUNCH(ZT_, NT_, W_, MTP_, KC_, PF_, grid)                                                             \
+    tf_exl3x::grouped_prompt4_kernel<2, NT_, W_, MTP_, KC_, PF_, ZT_><<<grid, W_ * 32, 0,                          \
+                                                                        at::cuda::getCurrentCUDAStream()>>>(        \
+        reinterpret_cast<const half*>(X0.data_ptr()), reinterpret_cast<const half*>(X1.data_ptr()),                 \
+        TP0.data_ptr<int64_t>(), TP1.data_ptr<int64_t>(), K2_0.data_ptr<int>(), K2_1.data_ptr<int>(),               \
+        uids.data_ptr<int>(), ucount.data_ptr<int>(), members.data_ptr<int>(), reinterpret_cast<ZT_*>(Z.data_ptr()), \
+        (int)K, (int)N, (int)P, maxm, (int)slots)
+#define TF_V4B(ID, NT_, W_, MTP_, KC_, PF_)                                                                        \
+    case ID: {                                                                                                     \
+        const int MG = (maxm + 16 * MTP_ - 1) / (16 * MTP_);                                                        \
+        const int ngroups = (int)((N / 16 + NT_ * W_ - 1) / (NT_ * W_));                                            \
+        dim3 grid((unsigned)uids.numel(), (unsigned)ngroups, (unsigned)(mats * MG));                                \
+        if (zh)                                                                                                    \
+            TF_V4B_LAUNCH(half, NT_, W_, MTP_, KC_, PF_, grid);                                                    \
+        else                                                                                                       \
+            TF_V4B_LAUNCH(__nv_bfloat16, NT_, W_, MTP_, KC_, PF_, grid);                                           \
+        break;                                                                                                     \
+    }
+    switch (config) {
+        TF_V4B(102, 2, 16, 4, 8, 2)
+        TF_V4B(103, 2, 16, 4, 8, 4)
+        TF_V4B(108, 2, 12, 4, 8, 4)
+        TF_V4B(112, 2, 16, 4, 8, 8)
+        default: TORCH_CHECK(false, "unknown v4 config");
+    }
+#undef TF_V4B
+#undef TF_V4B_LAUNCH
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void gateup_epilogue_b(const at::Tensor& Z, const at::Tensor& pick, const at::Tensor& svh_g, const at::Tensor& svh_u,
+                       const at::Tensor& suh_d, at::Tensor& xd, int64_t P, int64_t N, int64_t E, double limit) {
+    dim3 grid((unsigned)P, (unsigned)(N / 128));
+    auto run = [&](auto* z) {
+        tf_exl3x::gateup_epilogue_b_kernel<<<grid, 32, 0, at::cuda::getCurrentCUDAStream()>>>(
+            z, pick.data_ptr<int>(), reinterpret_cast<const half*>(svh_g.data_ptr()),
+            reinterpret_cast<const half*>(svh_u.data_ptr()), reinterpret_cast<const half*>(suh_d.data_ptr()),
+            reinterpret_cast<half*>(xd.data_ptr()), (int)P, (int)N, (int)E, (float)limit);
+    };
+    if (Z.scalar_type() == at::kHalf)
+        run(reinterpret_cast<const half*>(Z.data_ptr()));
+    else
+        run(reinterpret_cast<const __nv_bfloat16*>(Z.data_ptr()));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void down_combine_b(const at::Tensor& Z, const at::Tensor& pick, const at::Tensor& svh_d, const at::Tensor& wts,
+                    at::Tensor& out, int64_t rows, int64_t D, int64_t slots, int64_t E) {
+    TORCH_CHECK(slots <= 32, "at most 32 slots a row");
+    dim3 grid((unsigned)rows, (unsigned)(D / 128));
+    auto run = [&](auto* z) {
+        tf_exl3x::down_combine_b_kernel<<<grid, (unsigned)(32 * slots), 0, at::cuda::getCurrentCUDAStream()>>>(
+            z, pick.data_ptr<int>(), reinterpret_cast<const half*>(svh_d.data_ptr()), wts.data_ptr<float>(),
+            out.data_ptr<float>(), (int)D, (int)E, (int)slots);
+    };
+    if (Z.scalar_type() == at::kHalf)
+        run(reinterpret_cast<const half*>(Z.data_ptr()));
+    else
+        run(reinterpret_cast<const __nv_bfloat16*>(Z.data_ptr()));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("grouped_prompt4", &grouped_prompt4);
+    m.def("gateup_epilogue_b", &gateup_epilogue_b);
+    m.def("down_combine_b", &down_combine_b);
     m.def("grouped_prompt3", &grouped_prompt3);
     m.def("grouped_prompt", &grouped_prompt);
     m.def("grouped_prompt2", &grouped_prompt2);
