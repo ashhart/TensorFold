@@ -711,3 +711,47 @@ def test_reserve_carves_the_budget_into_free_chunks_up_front():
         torch.empty = real_empty
     assert sizes == [128, 128, 64, 32] and tier.held == tier.capacity == 11 and len(tier.free) == 11
     assert all(c.numel() == 32 for c in tier.free) and tier.used == 0
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("budget, refused, kept, alive", [
+    (8 * 1024, 3, 8, [True, True, False]),               # the last 1 KiB slab goes back
+    (2 * 1024 + 512 + 256, 3, 4, [True, False, False]),  # a 512-byte tail slab is not a slab's worth: one more goes
+    (8 * 1024, 0, 0, None),                              # the first slab refused: nothing to give back
+])
+def test_a_refused_reserve_gives_a_slab_back_for_other_pinned_buffers(monkeypatch, capsys, budget, refused, kept,
+                                                                      alive):
+    """When the host refuses a slab, ``reserve`` unpins at least a slab's worth of the last ones (the decode path pins
+    staging buffers every round), no chunk of them left anywhere when the host cache empties; puts fill the rest of
+    the budget with pageable chunks."""
+
+    import weakref
+
+    import torch
+
+    from tensorfold.cuda import host_tier
+
+    real_empty, slabs, pageable, emptied = torch.empty, [], [], []
+
+    def empty(size, **kwargs):
+        if not kwargs.get("pin_memory"):
+            pageable.append(size)
+        elif len(slabs) == refused:
+            raise RuntimeError("CUDA error: out of memory\nCUDA kernel errors might be asynchronously reported")
+        block = real_empty(size, dtype=kwargs["dtype"])      # CPU tensors: no pinning in a unit test
+        if kwargs.get("pin_memory"):
+            slabs.append(weakref.ref(block))
+        return block
+
+    monkeypatch.setattr(torch, "empty", empty)
+    monkeypatch.setattr(host_tier, "_empty_host_cache", lambda: emptied.append([s() is not None for s in slabs]))
+    tier = _tier(budget, 256, pin=True)
+    assert tier.reserve(slab=1024) == kept * 256
+    assert tier.held == len(tier.free) == kept and not tier.pin
+    assert emptied == ([] if alive is None else [alive])
+    out = capsys.readouterr().out
+    assert out.count("[tensorfold] RAM tier") == 1 and "refused more (CUDA error: out of memory)" in out
+    assert ("goes back for other pinned buffers" in out) is (alive is not None)
+    for i in range(tier.capacity):                       # one 256-byte chunk an entry: the whole budget
+        assert tier.put([i + 1], _small(torch, [i + 1], 256), None)
+    assert tier.held == tier.capacity and pageable == [256] * (tier.capacity - kept)

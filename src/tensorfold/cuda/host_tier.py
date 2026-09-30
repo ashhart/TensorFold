@@ -130,6 +130,16 @@ def _common(a: Sequence[int], b: Sequence[int], n: int) -> int:
     return lo
 
 
+def _empty_host_cache() -> None:
+    """Pinned blocks no tensor holds, back to the driver (``torch.accelerator.empty_host_cache``, or older builds'
+    ``torch._C._host_emptyCache``; without either the caching allocator keeps them for reuse)."""
+
+    empty = (getattr(getattr(torch, "accelerator", None), "empty_host_cache", None)
+             or getattr(torch._C, "_host_emptyCache", None))
+    if empty is not None:
+        empty()
+
+
 class HostTier:
     """Evicted prompt-end states in at most ``budget`` bytes of host chunks, the oldest out first, taken back whole.
 
@@ -369,11 +379,13 @@ class HostTier:
     def reserve(self, slab: int = GIB) -> int:
         """Pin the whole budget now, in slabs of power-of-two sizes (the pinned allocator rounds a size up to one)
         carved into chunks: pinning 16 MiB at a time ran at 1.5 GiB/s on an R9700 host, 1 GiB at a time at 3.6, and a
-        request should not wait for either. Returns the bytes pinned; the rest stays for ``_chunk`` (pageable)."""
+        request should not wait for either. When the host refuses a slab, at least ``slab`` bytes of the last ones go
+        back to it: the decode path pins small staging buffers of its own every round. Returns the bytes pinned; the
+        rest stays for ``_chunk`` (pageable)."""
 
         if not self.pin:
             return 0
-        start = self.held
+        start, slabs = self.held, []                            # chunks of each slab pinned, in order
         while self.pin and self.held < self.capacity:
             size = min(slab, 1 << ((self.capacity - self.held) * self.chunk).bit_length() - 1)
             if size < self.chunk:
@@ -381,12 +393,29 @@ class HostTier:
             try:
                 block = torch.empty(size, dtype=torch.uint8, pin_memory=True)
             except RuntimeError as exc:
-                self._refused(exc)
+                self._refused(exc, self._give_back(slabs, slab))
                 break
             pieces = [c for c in block.split(self.chunk) if c.numel() == self.chunk]
             self.free += pieces
             self.held += len(pieces)
+            slabs.append(len(pieces))
+            del block, pieces                                   # the free chunks alone hold a slab
         return (self.held - start) * self.chunk
+
+    def _give_back(self, slabs: list[int], least: int) -> int:
+        """Unpin the last slabs ``reserve`` pinned, at least ``least`` bytes of them while any are left: their chunks
+        leave ``free`` and ``held`` (``_chunk`` makes them pageable), and the host cache returns their memory to the
+        driver. Returns the bytes given back."""
+
+        gone = 0
+        while slabs and gone < least:
+            n = slabs.pop()
+            del self.free[-n:]
+            self.held -= n
+            gone += n * self.chunk
+        if gone:
+            _empty_host_cache()
+        return gone
 
     def _chunk(self) -> torch.Tensor:
         """A free chunk, else a new one: pinned until the host first refuses, pageable from then on."""
@@ -404,11 +433,12 @@ class HostTier:
         self.held += 1
         return self._alloc(False)
 
-    def _refused(self, exc: RuntimeError) -> None:
+    def _refused(self, exc: RuntimeError, back: int = 0) -> None:
         self.pin = False
         reason = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
-        print(f"[tensorfold] RAM tier: the host pinned {self.held * self.chunk / GIB:.1f} GiB, then refused more "
-              f"({reason}); the rest is pageable, its copies synchronous (`ulimit -l` may be the cap)", flush=True)
+        print(f"[tensorfold] RAM tier: the host pinned {(self.held * self.chunk + back) / GIB:.1f} GiB, then refused "
+              f"more ({reason})" + (f"; {back / GIB:.1f} GiB of it goes back for other pinned buffers" if back else "")
+              + "; the rest is pageable, its copies synchronous (`ulimit -l` may be the cap)", flush=True)
 
     def _alloc(self, pinned: bool) -> torch.Tensor:
         return torch.empty(self.chunk, dtype=torch.uint8, pin_memory=pinned)

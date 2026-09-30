@@ -75,7 +75,8 @@ In host RAM, keys and values (64 KiB a token, 34 KiB with `--kv-dtype fp8`) are 
 there and copies only its new ones, and a shorter state (a message start, the previous turn's end) copies none. Each
 state also holds about 190 MiB of DeltaNet and drafter state of its own. The budget is pinned at startup in 1 GiB
 slabs (24 GiB took about 7 s on the R9700's host) until the host refuses more (a locked-memory limit, `ulimit -l`,
-can cap it); the rest is pageable, with one warning. Startup refuses a budget above the host's available memory less a
+can cap it); then the last slab goes back, so the decode path's own pinned buffers still fit, and the rest is pageable,
+with one warning. Startup refuses a budget above the host's available memory less a
 tenth. One rank only; refused on GPUs that share the host's memory (DGX Spark). With `--parallel` the tier keeps
 evicted states but the window stays as without it.
 
