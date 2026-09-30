@@ -69,7 +69,10 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [ ] Engine vs reference agreement should be ~99%: layer-diff the engine against reference dumps
 - [x] Fused HC pre/post Triton kernels (`cuda/hc.py`, tests/cuda/test_dsv41_hc.py) + one-row decode CUDA graph:
       decode 7.3 → 18.4 tok/s; profile 38 ms GPU/step: weights ~22, small torch ops ~7, NCCL 2.7, HC 1.7, host ~5
-- [ ] Precomputed RoPE tables, fused attention kernel, fused norms; overlap Engram host reads (target ≤ 26 ms)
+- [x] Fused MQA attention / table RoPE / RMSNorm kernels (`cuda/kernels.py`, tests/cuda/test_dsv41_kernels.py)
+- [x] Concurrent Engram preads + GPU dequant: decode **26.9 tok/s** serial (vLLM serial 23) — BENCH.md
+- [ ] Native Engram reader (io_uring/pthreads) and overlap with the graph (split after layer 0)
+- [ ] Argmax inside the graph; fewer NCCL calls (fuse wo_b/MoE partial sums with HC post)
 - [ ] **Go/no-go**: serial decode must clearly beat 23 tok/s (target ≥ 40) at matching quality
 
 ## Phase 3 — drafting, long context, prefill

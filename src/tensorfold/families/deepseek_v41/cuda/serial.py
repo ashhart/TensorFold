@@ -18,8 +18,9 @@ import torch
 from tensorfold.cuda.exl3 import experts as ex3
 
 from .. import engram as E
-from ..reference import inv_freq, rms, rope
+from ..reference import inv_freq, rms
 from . import hc as hcf
+from . import kernels as K
 from .weights import HCW, LayerW, Weights
 
 BF, F32 = torch.bfloat16, torch.float32
@@ -78,6 +79,9 @@ class SerialEngine:
         self.tables = E.Tables(engram_dir, c.engram_layer_ids)
         self.scratch = [ex3.Scratch(layer.moe.experts, MAX_ROWS, c.num_experts_per_tok) for layer in w.layers]
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
+        self.tables_rope = {r: K.rope_tables(f, cap) for r, f in self.freqs.items()}
+        self.attnbuf = K.AttnBuffers(MAX_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,
+                                     cap + 1 + c.sliding_window, device=self.dev)
         self.graph = None
         self.cap = cap
         self.reset()
@@ -129,8 +133,11 @@ class SerialEngine:
         st.ids.extend(tokens)
         start = max(0, p0 - (c.engram_max_ngram_size - 1))        # the n-gram history of the first new row
         hashes = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[p0 - start:]
-        return torch.stack([self.tables.rows(ell, hashes[:, ell, :]) for ell in range(len(c.engram_layer_ids))]
-                           ).to(self.dev, non_blocking=True)
+        got = self.tables.raw([(ell, hashes[:, ell, :]) for ell in range(len(c.engram_layer_ids))])
+        R = len(tokens)
+        w = torch.from_numpy(np.stack([g[0] for g in got])).to(self.dev).view(len(got), R, -1, c.engram_head_dim)
+        sc = torch.from_numpy(np.stack([g[1] for g in got])).to(self.dev).view(len(got), R, w.shape[2], -1)
+        return E.dequant(w, sc)
 
     def core(self, ids: torch.Tensor, pos: torch.Tensor, rows: torch.Tensor, *, static: bool) -> torch.Tensor:
         """The device-only forward (capturable when ``static``: fixed shapes, positions read on the device)."""
@@ -198,54 +205,35 @@ class SerialEngine:
         c, st, a = self.c, self.state, layer.attn
         L, R = layer.index, x.shape[0]
         Dh, W = c.head_dim, c.sliding_window
-        freqs = self.freqs[a.ratio]
+        cos, sin = self.tables_rope[a.ratio]
         eps = c.rms_norm_eps
-        qr = rms(a.wq_a(x), a.q_norm, eps).to(BF)
-        kv = rms(a.wkv(x), a.kv_norm, eps).to(BF)
+        qr = K.rmsnorm(a.wq_a(x), a.q_norm, eps)
+        kv = K.rmsnorm(a.wkv(x), a.kv_norm, eps)
         H = a.wq_b.n // Dh
-        q = rope(a.wq_b(qr).view(R, H, Dh), pos, freqs)                 # fp32, this rank's heads
-        kv = rope(kv, pos, freqs).to(BF)
-        st.swa[L].index_copy_(0, pos, kv)
+        q = K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin)          # bf16, this rank's heads
+        st.swa[L].index_copy_(0, pos, K.rope(kv, pos, cos, sin))
         if a.compressor is not None:
-            self.compress(layer, x, pos, freqs, static)
-
-        t = pos[:, None]
-        if static:                                                      # one row: the last W slots by position
-            idx = pos[0] - (W - 1) + torch.arange(W, device=self.dev)
-            win = st.swa[L][idx.clamp(min=0)].float()
-            mask = (idx >= 0)[None, :]
-        else:
-            p0, p1 = int(pos[0]), int(pos[-1]) + 1
-            lo = max(0, p0 - (W - 1))
-            win = st.swa[L][lo:p1].float()
-            s_idx = torch.arange(lo, p1, device=self.dev)[None, :]
-            mask = (s_idx <= t) & (s_idx >= t - (W - 1))
-        keys = win
+            self.compress(layer, x, pos, static)
+        comp, n = None, 0
         if a.ratio > 0:
-            src = max(s for s in c.kv_source_layer_ids if s <= L)
-            n = st.comp[src].shape[0] if static else (int(pos[-1]) + 1) // a.ratio
-            if n:
-                vis = torch.arange(n, device=self.dev)[None, :] < ((t + 1) // a.ratio)
-                keys = torch.cat([st.comp[src][:n], win])
-                mask = torch.cat([vis, mask.expand(R, -1)], dim=1)
-        scores = torch.einsum("thd,sd->ths", q, keys) * Dh ** -0.5
-        scores = scores.masked_fill(~mask[:, None, :], float("-inf"))
-        full = torch.cat([scores, a.sink.view(1, H, 1).expand(R, H, 1)], dim=-1)
-        o = torch.einsum("ths,sd->thd", torch.softmax(full, dim=-1)[..., :-1], keys)
-        o = rope(o, pos, freqs, inverse=True).to(BF)
+            comp = st.comp[max(s for s in c.kv_source_layer_ids if s <= L)]
+            n = comp.shape[0] if static else (int(pos[-1]) + 1) // a.ratio
+        o = K.mqa(q, comp, n, a.ratio, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5)
+        o = K.rope(o, pos, cos, sin, inverse=True, out_dtype=BF)
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
         z = torch.cat([wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)], dim=1)
         return self.comm.sum(a.wo_b(z, out_dtype=F32)).to(BF)
 
-    def compress(self, layer: LayerW, x: torch.Tensor, pos: torch.Tensor, freqs: torch.Tensor, static: bool) -> None:
+    def compress(self, layer: LayerW, x: torch.Tensor, pos: torch.Tensor, static: bool) -> None:
         c, st, a = self.c, self.state, layer.attn
         L, r = layer.index, a.ratio
+        cos, sin = self.tables_rope[r]
         cw = a.compressor
         kv = cw.wkv(x, out_dtype=F32)
         if r == 1:
-            latent = rms(kv, cw.norm, c.rms_norm_eps).to(BF)
-            st.comp[L].index_copy_(0, pos, rope(latent, pos, freqs).to(BF).float())
+            latent = K.rmsnorm(kv, cw.norm, c.rms_norm_eps)
+            st.comp[L].index_copy_(0, pos, K.rope(latent, pos, cos, sin).float())
             return
         gate = cw.wgate(x, out_dtype=F32)
         raw = st.raw[L]
@@ -259,9 +247,8 @@ class SerialEngine:
             ends = torch.tensor(closing, device=self.dev)
         pair = torch.stack([raw[(ends - 1).clamp(min=0)], raw[ends]], dim=1)   # [G, 2, 1024]
         wts = torch.softmax(pair[..., c.head_dim:], dim=1)
-        latent = rms((wts * pair[..., :c.head_dim]).sum(1), cw.norm, c.rms_norm_eps).to(BF)
-        start = (ends // 2) * 2
-        row = rope(latent, start, freqs).to(BF).float()
+        latent = K.rmsnorm((wts * pair[..., :c.head_dim]).sum(1), cw.norm, c.rms_norm_eps)
+        row = K.rope(latent, (ends // 2) * 2, cos, sin).float()
         if static:
             closes = ((ends + 1) % 2 == 0)[:, None]
             row = torch.where(closes, row, st.comp[L][ends // 2])

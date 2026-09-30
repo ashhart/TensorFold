@@ -125,10 +125,15 @@ def hashes(ids: np.ndarray, tmap: np.ndarray, layout: Layout, pad_token: int) ->
 class Tables:
     """Row reads from the original FP8 shards: ``layers.{L}.engram.embed.weight`` e4m3 and ``.scale`` UE8M0 per 32."""
 
-    def __init__(self, directory: str | Path, layer_ids: tuple[int, ...]) -> None:
+    def __init__(self, directory: str | Path, layer_ids: tuple[int, ...], workers: int = 96) -> None:
+        import os
+        from concurrent.futures import ThreadPoolExecutor
+
         root = Path(directory)
         index = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
         self.maps = []
+        self.spans = []                      # per layer: (fd, weight offset, scale offset, width, scale width)
+        self.pool = ThreadPoolExecutor(max_workers=workers)
         for layer in layer_ids:
             w_name, s_name = f"layers.{layer}.engram.embed.weight", f"layers.{layer}.engram.embed.scale"
             path = root / index[w_name]
@@ -139,6 +144,26 @@ class Tables:
             weight = np.memmap(path, dtype=np.uint8, mode="r", offset=base + w0, shape=(rows, width))
             scale = np.memmap(path, dtype=np.uint8, mode="r", offset=base + s0, shape=(rows, width // 32))
             self.maps.append((weight, scale))
+            fd = os.open(path, os.O_RDONLY)
+            self.spans.append((fd, base + w0, base + s0, width, width // 32))
+
+    def raw(self, requests: list[tuple[int, np.ndarray]]) -> list[tuple[np.ndarray, np.ndarray]]:
+        """For each (layer, row ids) the stored bytes (uint8 [n, 256], [n, 8]): every row read concurrently."""
+
+        import os
+
+        jobs = []
+        for ell, idx in requests:
+            fd, w_off, s_off, width, sw = self.spans[ell]
+            flat = np.asarray(idx, dtype=np.int64).reshape(-1)
+            jobs.append((flat, [self.pool.submit(os.pread, fd, width, w_off + int(r) * width) for r in flat],
+                         [self.pool.submit(os.pread, fd, sw, s_off + int(r) * sw) for r in flat]))
+        out = []
+        for flat, wf, sf in jobs:
+            w = np.frombuffer(b"".join(f.result() for f in wf), dtype=np.uint8).reshape(len(flat), -1)
+            s = np.frombuffer(b"".join(f.result() for f in sf), dtype=np.uint8).reshape(len(flat), -1)
+            out.append((w, s))
+        return out
 
     def rows(self, ell: int, idx: np.ndarray):
         """float32 torch [*, 256] of the rows ``idx`` of Engram layer ``ell``, dequantized (fp8 * 2^(e - 127))."""
@@ -165,3 +190,13 @@ def _header(path: Path) -> dict:
         header = json.loads(f.read(n))
     header["__len__"] = n
     return header
+
+
+def dequant(w, s):
+    """Stored e4m3 rows and UE8M0 scales (torch uint8 [..., 256], [..., 8], any device) -> fp32 [..., 256]."""
+
+    import torch
+
+    vals = w.view(torch.float8_e4m3fn).float()
+    exps = (s.to(torch.int32) << 23).view(torch.float32)
+    return (vals.view(*w.shape[:-1], -1, 32) * exps[..., None]).view(*w.shape)

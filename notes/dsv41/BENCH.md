@@ -32,3 +32,15 @@ Weights only — no attention math, norms, router, hyper-connections, Engram or 
 - 4-row verify window with random picks (worst case, up to 24 distinct experts): 40.5 ms/round; at vLLM's
   measured 3.19 tokens/round that bounds drafted decode near 79 tok/s (real windows share experts, so better).
 - Routed experts dominate multi-row cost: expert overlap across draft rows is the lever for DSpark rounds.
+
+## 2026-09-30 — serial TP=2 engine, decode progression (365-token prompt, greedy, `tools/dsv41_run2.sh`)
+
+| step | decode tok/s | note |
+|---|---:|---|
+| eager PyTorch | 7.3 | 81 NCCL waits ~20 ms (ranks drift), ~3k tiny Sinkhorn/elementwise kernels |
+| + fused HC Triton kernels + one-row CUDA graph | 18.4 | GPU 38 ms/step |
+| + fused MQA attention, table RoPE, RMSNorm kernels | 19.7 | GPU 32 ms/step; host ~15 ms/token (Engram reads) |
+| + concurrent Engram preads, dequant on GPU | **26.9** | cold row fetch 20–25 ms → 2–7 ms |
+
+vLLM on the same pair: 23 tok/s serial, 31.6 with DSpark k=3. GPU/step now ~32 ms: EXL3 weights ~22,
+NCCL 2.6 (81 × 32 µs), HC 1.6, attention 1.1, rot_in 0.6, rest small. Parity vs reference 95.1% top-1.
