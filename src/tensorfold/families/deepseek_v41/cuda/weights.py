@@ -58,7 +58,7 @@ class AttnW:
 
 @dataclass
 class MoEW:
-    gate: torch.Tensor        # fp32 [E, D] (stored fp16)
+    gate: torch.Tensor        # fp16 [E, D]
     bias: torch.Tensor        # fp32 [E]
     experts: ex3.Exl3RoutedExperts
     shared: tuple[Exl3Linear, Exl3Linear, Exl3Linear]   # w1, w3 (this rank's columns), w2 (rows)
@@ -149,8 +149,7 @@ def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, d
         down = [triple(e, "w2") for e in range(cfg.n_routed_experts)]
         experts = ex3.prepare(gate, up, down, "mul1", device=dev)
         shared = (lin(p + "shared_experts.w1"), lin(p + "shared_experts.w3"), lin(p + "shared_experts.w2"))
-        # the router multiplies in fp32: keep an fp32 copy (converting 384 x 5120 every step cost ~10 us a layer)
-        return MoEW(t(p + "gate.weight", torch.float32), t(p + "gate.bias", torch.float32), experts, shared)
+        return MoEW(t(p + "gate.weight"), t(p + "gate.bias", torch.float32), experts, shared)
 
     def engram(i: int) -> EngramW | None:
         if i not in cfg.engram_layer_ids:

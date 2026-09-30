@@ -156,13 +156,21 @@ class SerialEngine:
     def part_a(self, ids: torch.Tensor, pos: torch.Tensor, rows1: torch.Tensor, *, static: bool) -> tuple:
         """Embedding and the layers before the second Engram layer."""
 
+        return self.part_a1(self.part_a0(ids, pos, static=static), pos, rows1, static=static)
+
+    def part_a0(self, ids: torch.Tensor, pos: torch.Tensor, *, static: bool) -> tuple:
+        """Embedding and the layers before the first Engram layer (no table rows needed)."""
+
         c = self.c
         R = ids.shape[0]
         X = self.w.embed[ids][:, None, :].expand(R, c.hc_mult, c.hidden_size).contiguous()
         pre = torch.zeros((R, c.hc_mult), dtype=F32, device=self.dev)
         pre[:, 0] = 1.0
-        carry = (X, pre, None, None, None)
-        return self.layers(carry, pos, {c.engram_layer_ids[0]: rows1}, 0, self.split, static)
+        return self.layers((X, pre, None, None, None), pos, {}, 0, c.engram_layer_ids[0], static)
+
+    def part_a1(self, carry: tuple, pos: torch.Tensor, rows1: torch.Tensor, *, static: bool) -> tuple:
+        c = self.c
+        return self.layers(carry, pos, {c.engram_layer_ids[0]: rows1}, c.engram_layer_ids[0], self.split, static)
 
     def part_b(self, carry: tuple, pos: torch.Tensor, rows14: torch.Tensor, *, static: bool) -> torch.Tensor:
         """The remaining layers and the vocabulary head."""
@@ -210,9 +218,11 @@ class SerialEngine:
             raw = self.g_raw[k]
             return E.dequant(raw[..., :hd], raw[..., hd:])
 
-        def run_a():
-            carry = self.part_a(self.g_tok, self.g_pos, rows(0), static=True)
-            return carry
+        def run_a0():
+            return self.part_a0(self.g_tok, self.g_pos, static=True)
+
+        def run_a1(carry):
+            return self.part_a1(carry, self.g_pos, rows(0), static=True)
 
         def run_b(carry):
             logits = self.part_b(carry, self.g_pos, rows(1), static=True)
@@ -222,12 +232,14 @@ class SerialEngine:
         side.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(side):
             for _ in range(2):
-                run_b(run_a())
+                run_b(run_a1(run_a0()))
         torch.cuda.current_stream().wait_stream(side)
-        self.graph_a, self.graph_b = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph_a):
-            self.g_carry = run_a()
-        with torch.cuda.graph(self.graph_b, pool=self.graph_a.pool()):
+        self.graph_a0, self.graph_a, self.graph_b = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph_a0):
+            self.g_carry0 = run_a0()
+        with torch.cuda.graph(self.graph_a, pool=self.graph_a0.pool()):
+            self.g_carry = run_a1(self.g_carry0)
+        with torch.cuda.graph(self.graph_b, pool=self.graph_a0.pool()):
             self.g_logits, self.g_next = run_b(self.g_carry)
         torch.cuda.synchronize()
         for dst, src in zip(self.state.swa, saved[0]):
@@ -247,11 +259,12 @@ class SerialEngine:
             raise ValueError(f"context {p0 + 1} beyond {min(st.cap, SHORT_CONTEXT)} (indexer not implemented yet)")
         st.ids.append(token)
         start = max(0, p0 - (c.engram_max_ngram_size - 1))
-        h = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[-1]   # [layers, 24]
-        self.tables.gather(h[:1], out=self.h_raw[:1], layers=[0])
-        self.g_raw[0].copy_(self.h_raw[:1], non_blocking=True)
         self.g_tok.fill_(token)
         self.g_pos.fill_(p0)
+        self.graph_a0.replay()                                          # layer 0 needs no table rows
+        h = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[-1]   # [layers, 24]
+        self.tables.gather(h[:1], out=self.h_raw[:1], layers=[0])      # overlaps layer 0
+        self.g_raw[0].copy_(self.h_raw[:1], non_blocking=True)
         self.graph_a.replay()
         self.tables.gather(h[1:], out=self.h_raw[1:], layers=[1])      # overlaps graph A on the GPU
         self.g_raw[1].copy_(self.h_raw[1:], non_blocking=True)
@@ -322,7 +335,9 @@ class SerialEngine:
     def moe(self, layer: LayerW, x: torch.Tensor, R: int) -> torch.Tensor:
         c, m = self.c, layer.moe
         limit = c.swiglu_limit
-        pick, w = K.route(x.float() @ m.gate.T, m.bias, c.num_experts_per_tok, c.routed_scaling_factor)
+        # fp16 inputs (bf16 -> fp16 is exact for normed rows), fp32 accumulation and output: no TF32, half the bytes
+        logits = torch.mm(x.half(), m.gate.T, out_dtype=F32)
+        pick, w = K.route(logits, m.bias, c.num_experts_per_tok, c.routed_scaling_factor)
         routed = ex3.routed(x.contiguous(), pick, w, m.experts, self.scratch[layer.index], None, R, limit=limit)
         g = m.shared[0](x, out_dtype=F32)
         u = m.shared[1](x, out_dtype=F32)

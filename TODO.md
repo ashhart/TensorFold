@@ -71,8 +71,10 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
       decode 7.3 → 18.4 tok/s; profile 38 ms GPU/step: weights ~22, small torch ops ~7, NCCL 2.7, HC 1.7, host ~5
 - [x] Fused MQA attention / table RoPE / RMSNorm kernels (`cuda/kernels.py`, tests/cuda/test_dsv41_kernels.py)
 - [x] Concurrent Engram preads + GPU dequant: decode **26.9 tok/s** serial (vLLM serial 23) — BENCH.md
-- [ ] Native Engram reader (io_uring/pthreads) and overlap with the graph (split after layer 0)
-- [ ] Argmax inside the graph; fewer NCCL calls (fuse wo_b/MoE partial sums with HC post)
+- [x] Native Engram reader (pthreads pread), 3 decode graphs with overlapped reads, argmax in graph,
+      rank-order partial sums fused into HC post, fused router (fp16 mm → fp32, no TF32), attention chunk skip,
+      Engram wkv split: **33.5 tok/s** serial (vLLM 23 serial / 31.6 DSpark)
+- [ ] Later: shared expert folded into the grouped expert call; batched small linears (wo_a ×4, wq_a+wkv)
 - [ ] **Go/no-go**: serial decode must clearly beat 23 tok/s (target ≥ 40) at matching quality
 
 ## Phase 3 — drafting, long context, prefill

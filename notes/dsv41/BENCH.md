@@ -44,3 +44,11 @@ Weights only — no attention math, norms, router, hyper-connections, Engram or 
 
 vLLM on the same pair: 23 tok/s serial, 31.6 with DSpark k=3. GPU/step now ~32 ms: EXL3 weights ~22,
 NCCL 2.6 (81 × 32 µs), HC 1.6, attention 1.1, rot_in 0.6, rest small. Parity vs reference 95.1% top-1.
+| + split decode graphs (layer 0 / layers 1–13 / 14–39+head), Engram reads overlapped, native row reader | 29.9 | |
+| + rank-order sums fused in HC post, fused router, attention chunk skip, split Engram wkv | 32.3 | |
+| + fp16 router matmul with fp32 output (no TF32; parity 95.6%, mean \|Δlogprob\| 0.079) | 32.4 | |
+| + layer-1 Engram read hidden behind layer 0 | **33.5** (157 tokens, story prompt) | ~29.8 ms/token |
+
+Remaining per token (~29.8 ms): EXL3 weights ~20.5 ms (floor), NCCL ~2 ms (83 calls), HC 1.6 ms
+(2 MB fp32 mix matrix per sublayer), attention 0.8, rot_in 0.6, small kernels ~1.5, host ~1–2 ms.
+Next levers are structural (shared expert folded into the grouped expert call, batched small linears).
