@@ -80,7 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "whole-window request and a shared round leave idle, at least an eighth of RAM up to 16)")
     speed.add_argument("--checkpoint-slots", type=int, default=None,
                        help="cached conversation prefixes kept in memory (default: 3 per parallel lane, at least 8); "
-                            "with long conversations this, not --prompt-cache-gib, is usually the limit")
+                            "with long conversations this, not --prompt-cache-gib, is usually the limit. Qwen3.8-27B "
+                            "on CUDA with --parallel 2 or more: the prompt states its concurrent decoder keeps "
+                            "(default 3; each is held against the window in the startup estimate)")
     speed.add_argument("--spill-gib", type=float, default=0.0,
                        help="write evicted conversation prefixes to disk, up to this many GiB, and read them back on "
                             "demand instead of prefilling again (0: off; needs --snapshot-dir)")
@@ -372,6 +374,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     streams = 1 if str(args.parallel).strip().lower() == "auto" else _parallel(args.parallel)
     if streams > 1:
         options["parallel"] = streams
+    if getattr(args, "checkpoint_slots", None) is not None and getattr(family.package, "CUDA_CHECKPOINT_SLOTS", False):
+        options["checkpoint_slots"] = int(args.checkpoint_slots)
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)

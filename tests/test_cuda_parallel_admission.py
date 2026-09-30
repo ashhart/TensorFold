@@ -131,7 +131,8 @@ def handshake(monkeypatch, path, rank, **kw):
 
 
 @pytest.mark.torch
-@pytest.mark.parametrize("peer", [dict(streams=4), dict(streams=2, context=8192, context_explicit=True)])
+@pytest.mark.parametrize("peer", [dict(streams=4), dict(streams=2, context=8192, context_explicit=True),
+                                  dict(streams=2, keep=6)])
 def test_two_ranks_with_different_streams_or_context_refuse_to_start(tmp_path, monkeypatch, fake_runtime,
                                                                      peer):  # noqa: F811
     import torch

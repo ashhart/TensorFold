@@ -8,7 +8,8 @@ from typing import Any
 
 
 def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any = None) -> None:
-    """Refuse a KV cache, draft rule, image or share option the backend or family can't serve, before any download."""
+    """Refuse a KV cache, draft rule, image, share or checkpoint-slot option the backend or family can't serve, before
+    any download."""
 
     if getattr(args, "vision_urls", False) and not getattr(args, "vision", False):
         raise ValueError("--vision-urls needs --vision")
@@ -31,6 +32,13 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     supported = getattr(family.package, "CUDA_KV_DTYPES", ("bf16",))
     if kv not in supported:
         raise ValueError(f"{family.title} on CUDA serves a {' or '.join(supported)} KV cache, not --kv-dtype {kv}")
+    slots = getattr(args, "checkpoint_slots", None)
+    if slots is not None and backend == "cuda" and getattr(family.package, "CUDA_CHECKPOINT_SLOTS", False):
+        if slots < 1:
+            raise ValueError(f"--checkpoint-slots is 1 or more, not {slots}")
+        if _cuda_streams(getattr(args, "parallel", "auto")) < 2:
+            raise ValueError(f"--checkpoint-slots sets the prompt states {family.title}'s concurrent decoder keeps on "
+                             "CUDA (--parallel 2 or more); one stream keeps 4, which share its attention buffer")
     confidence = getattr(args, "mtp_confidence", None)
     if confidence is None:
         return
@@ -40,6 +48,19 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
                          f"{'CUDA' if backend == 'cuda' else 'MLX'} has no such rule")
     if not 0.0 <= confidence <= 1.0:
         raise ValueError(f"--mtp-confidence is a probability from 0 to 1, not {confidence}")
+
+
+def _cuda_streams(value: Any) -> int:
+    """The streams a CUDA engine serves for ``--parallel`` (auto is one request at a time; a number, at least one), or
+    2 for a value the serve command refuses on its own."""
+
+    text = str(value).strip().lower()
+    if text == "auto":
+        return 1
+    try:
+        return max(1, int(text))
+    except ValueError:
+        return 2
 
 
 def vision_options(args: argparse.Namespace) -> dict[str, Any]:

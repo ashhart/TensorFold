@@ -26,7 +26,7 @@ class Qwen27Engine:
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
                  tp_draft: bool = False, allow_copy: bool = True, streams: int = 1,
                  context: int | None = None, context_explicit: bool | None = None, vision: bool = False,
-                 vision_urls: bool = False, tree_rows: int | None = None):
+                 vision_urls: bool = False, tree_rows: int | None = None, keep: int | None = None):
         import torch
 
         from tensorfold.cuda.nvfp4.format import is_quantized
@@ -55,6 +55,7 @@ class Qwen27Engine:
         torch.cuda.set_device(0)
         if streams > 1 and tp == 1:          # streams' caches of many sizes come and go: growable segments, less slack
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        keep = KEEP if keep is None else int(keep)         # --checkpoint-slots: each kept state is in the estimate
         if tp == 2:
             import torch.distributed as dist
 
@@ -64,20 +65,21 @@ class Qwen27Engine:
             # both ranks must run the same calls: refuse to start when they were given different settings
             flags = torch.tensor([int(draft_dir is not None and tp_draft), max_rows, int(split_head), int(allow_copy),
                                   streams, -1 if context is None else int(context), int(bool(context_explicit)),
-                                  int(vision)],
+                                  int(vision), keep],
                                  dtype=torch.int64, device="cuda")
             both = torch.empty((2, flags.numel()), dtype=torch.int64, device="cuda")
             dist.all_gather_into_tensor(both, flags)
             if not torch.equal(both[0], both[1]):
                 raise RuntimeError("the two ranks were started with different settings (two-rank drafter, rows, "
-                                   f"head split, copies, --parallel, --context): rank 0 {both[0].tolist()}, rank 1 "
-                                   f"{both[1].tolist()}; pull the draft model on both machines, and pass the same "
-                                   "--no-drafts, --parallel and --context to both")
+                                   f"head split, copies, --parallel, --context, --checkpoint-slots): rank 0 "
+                                   f"{both[0].tolist()}, rank 1 {both[1].tolist()}; pull the draft model on both "
+                                   "machines, and pass the same --no-drafts, --parallel, --context and "
+                                   "--checkpoint-slots to both")
             gather = lambda values: gather_ints(torch, lambda send, recv: dist.all_gather_into_tensor(recv, send), values)
         else:
             gather = None
         many = streams > 1
-        geometry = ((lambda text: stream_geometry(text, tp, streams, KEEP, first=256 if tp == 1 else None)) if many
+        geometry = ((lambda text: stream_geometry(text, tp, streams, keep, first=256 if tp == 1 else None)) if many
                     else (lambda text: gdn_geometry(text, tp, max_rows)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir)
@@ -96,7 +98,7 @@ class Qwen27Engine:
                                    draft_transform=draft_bytes,
                                    draft_geometry=lambda text: draft_geometry(text, tp if tp_draft else 1, max_rows,
                                                                               bounded=True, streams=streams,
-                                                                              kept=KEEP + 1 if many else 0),
+                                                                              kept=keep + 1 if many else 0),
                                    startup_copies=int(tp == 2))
         self.context_window = self.capacity_plan["context_window"]
         if tp == 2:
@@ -133,14 +135,15 @@ class Qwen27Engine:
             from .multi import MultiDecoder
 
             self.multi = MultiDecoder(self.w, self.draft, allow_copy=allow_copy, rank=rank, world=tp,
-                                      context=self.capacity_plan["cache_slots"], keep=KEEP, points=self.points,
+                                      context=self.capacity_plan["cache_slots"], keep=keep, points=self.points,
                                       vision=self.vision)
             self.multi.model_dir = self.model_dir             # rank 1 compiles a request's grammar from it
             self.multi.calibrate(streams)
             if rank == 0:
-                print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens" if tp == 2 else
+                print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens, {keep} prompt "
+                      "states kept" if tp == 2 else
                       f"[tensorfold] up to {streams} streams, each growing to {self.context_window} prompt/reply "
-                      "tokens while memory lasts", flush=True)
+                      f"tokens while memory lasts, {keep} prompt states kept", flush=True)
                 curve = ", ".join(f"{r}: {ms:.1f}" for r, ms in self.multi.costs)
                 print(f"[tensorfold] verify ms by rows (tree widths follow it): {curve}", flush=True)
                 self.scheduler = Scheduler(self.multi, max_streams=streams)

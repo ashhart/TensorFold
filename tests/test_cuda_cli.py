@@ -273,3 +273,67 @@ def test_gb10_reads_the_devices_capability_or_name(monkeypatch, available, capab
                                  get_device_name=lambda i: name)
     monkeypatch.setitem(sys.modules, "torch", torch)
     assert qwen3_5.gb10() is expected
+
+
+@pytest.mark.parametrize("declares, expected", [(True, 6), (False, None)])
+def test_checkpoint_slots_reach_a_cuda_engine_only_when_its_family_declares_them(tmp_path, monkeypatch, declares,
+                                                                                    expected):
+    import tensorfold.cuda.server as server
+
+    made = []
+    engine = SimpleNamespace(context_window=4096)
+    family = _family(cuda_engine=lambda *a, **k: made.append(k) or engine,
+                     **({"CUDA_CHECKPOINT_SLOTS": True} if declares else {}))
+    family.model_type = "test"
+    monkeypatch.setattr(server, "App", lambda *a, **k: SimpleNamespace(effective_context_window=4096))
+    monkeypatch.setattr(server, "serve", lambda *a: None)
+    command = ["serve", str(tmp_path), "--backend", "cuda", "--no-drafts", "--parallel", "2", "--checkpoint-slots", "6"]
+    assert cli._serve_cuda(cli.build_parser().parse_args(command), family, tmp_path, 4096) == 0
+    assert made[0].get("checkpoint_slots") == expected
+
+
+@pytest.mark.parametrize("flags, message", [
+    (["--checkpoint-slots", "6"], "one stream keeps 4"),
+    (["--checkpoint-slots", "6", "--parallel", "1"], "one stream keeps 4"),
+    (["--checkpoint-slots", "6", "--parallel", "01"], "one stream keeps 4"),
+    (["--checkpoint-slots", "6", "--parallel", "+1"], "one stream keeps 4"),
+    (["--checkpoint-slots", "6", "--parallel", "0"], "one stream keeps 4"),
+    (["--checkpoint-slots", "6", "--parallel", "-1"], "one stream keeps 4"),
+    (["--checkpoint-slots", "0", "--parallel", "2"], "1 or more, not 0"),
+])
+def test_27b_checkpoint_slots_are_refused_before_any_download_where_they_would_not_act(tmp_path, monkeypatch, flags,
+                                                                                         message):
+    from tensorfold import families, hub
+    from tensorfold.families import qwen3_5
+
+    found = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
+    monkeypatch.setattr(families, "detect", lambda path: found)
+    monkeypatch.setattr(cli, "_backend", lambda choice, fam: "cuda")
+    monkeypatch.setattr(hub, "resolve", lambda *a, **k: pytest.fail("weights were fetched before the refusal"))
+    monkeypatch.setattr(families, "require_readable",
+                        lambda *a: pytest.fail("the checkpoint was read before the refusal"))
+    with pytest.raises(ValueError, match=message):
+        cli.cmd_serve(cli.build_parser().parse_args(["serve", str(tmp_path), "--no-update-check"] + flags))
+
+
+@pytest.mark.parametrize("backend, flags", [("cuda", ["--parallel", "2", "--checkpoint-slots", "6"]),
+                                            ("mlx", ["--checkpoint-slots", "6"])])
+def test_27b_checkpoint_slots_pass_with_parallel_streams_and_on_mlx(tmp_path, backend, flags):
+    from tensorfold.families import qwen3_5
+
+    args = cli.build_parser().parse_args(["serve", str(tmp_path)] + flags)
+    family = SimpleNamespace(title=qwen3_5.TITLE, package=qwen3_5, model_type="qwen3_5")
+    assert cli._check_serve_options(args, family, backend) is None
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("slots, keep", [(None, None), (6, 6)])
+def test_27b_cuda_engine_takes_the_checkpoint_slots_as_its_kept_states(tmp_path, monkeypatch, slots, keep):
+    from tensorfold.families import qwen3_5
+    from tensorfold.families.qwen3_5.cuda import engine as qwen27
+
+    made = []
+    monkeypatch.setattr(qwen27, "Qwen27Engine", lambda *a, **k: made.append(k) or SimpleNamespace(**k))
+    options = {"parallel": 2} | ({"checkpoint_slots": slots} if slots is not None else {})
+    qwen3_5.cuda_engine(tmp_path, drafter=str(tmp_path), **options)
+    assert made[-1]["keep"] == keep and made[-1]["streams"] == 2
