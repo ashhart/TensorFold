@@ -87,7 +87,7 @@ def rendered(engine):
     ({"reasoning_effort": "high"}, GLM, "effort=high;assistant:<think>"),     # a template's own "high" is kept
     ({"reasoning_effort": "minimal"}, GLM, "effort=low;assistant:<think>"),
     ({"reasoning_effort": "low"}, GLM, "effort=low;assistant:<think>"),
-    ({"reasoning_effort": "medium"}, GLM, "effort=high;assistant:<think>"),   # not Max: medium is not a GLM name
+    ({"reasoning_effort": "medium"}, GLM, "effort=high;assistant:<think>"),   # medium maps to the nearer named level
     ({"reasoning_effort": "xhigh"}, GLM, "effort=xhigh;assistant:<think>"),  # GLM's template renders this as Max
     ({"reasoning_effort": "none"}, GLM, "assistant:"),
     ({}, GLM, "effort=high;assistant:<think>"),                                # server default medium, heard as high
