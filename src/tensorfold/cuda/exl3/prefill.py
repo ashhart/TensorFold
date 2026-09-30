@@ -44,10 +44,13 @@ def _gemm(X, W, H, SVH, BIAS, OUT, M, o_stride, K: tl.constexpr, N: tl.constexpr
     tl.store(OUT + rm[:, None] * o_stride + rn[None, :], y.to(OUT.dtype.element_ty), mask=ok[:, None])
 
 
+TILES = (128, 32, 8, 4, 8)                # a family may set its own (one model a process)
+
+
 def tiles(k: int, n: int) -> tuple[int, int, int, int, int]:
     """(rows a program, K step, warps, stages, row blocks a raster group): the shape's alone, so a row never depends on its chunk."""
 
-    return 128, 32, 8, 4, 8
+    return TILES
 
 
 class Workspace:

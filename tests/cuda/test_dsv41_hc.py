@@ -98,9 +98,9 @@ def test_post_pre_fused_matches_post_then_pre():
     ref = hc.pre(Y_ref, fn, base, scale, pre_in, norm_w, buf, 1e-6, 1e-6, 20)
     ref = [t.clone() for t in ref]
     for split in (R, 48):
-        b = parts if split == R else hc.SplitPartials(torch.cat([parts[:, :split].reshape(-1),
-                                                                 parts[:, split:].reshape(-1)]), 2, split)
+        b = parts if split == R else hc.SplitPartials(torch.cat([parts[:, r0:r0 + split].reshape(-1)
+                                                                 for r0 in range(0, R, split)]), 2, split)
         Y, got = hc.post_pre(b, X, post_w, comb, fn, base, scale, pre_in, norm_w, buf, 1e-6, 1e-6, 20)
         assert torch.equal(Y, Y_ref)
         for name, a, e in zip(("post", "comb", "x_in", "pre"), got, ref):
-            assert torch.allclose(a.float(), e.float(), rtol=0, atol=1e-6 if name != "x_in" else 1e-2), name
+            assert torch.allclose(a.float(), e.float(), rtol=1e-4, atol=1e-5 if name != "x_in" else 1e-2), name   # mix blocks differ

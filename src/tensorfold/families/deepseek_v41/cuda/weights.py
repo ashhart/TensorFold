@@ -21,6 +21,9 @@ WORLD = 2
 _WORKSPACE = None
 
 
+PROMPT_TILES = (64, 64, 4, 4, 8)     # the prompt GEMM's (rows, K step, warps, stages, raster group) on GB10
+
+
 class Linear(Exl3Linear):
     """An EXL3 linear for any row count. Up to 128 rows (decode and verify windows): the row-invariant decode
     kernel. Prompt chunks: the prompt GEMM (W decoded to fp16 once a call, tensor-core matmul) for matrices up to
@@ -39,6 +42,7 @@ class Linear(Exl3Linear):
 
             if _WORKSPACE is None:
                 _WORKSPACE = prefill.Workspace()
+                prefill.TILES = PROMPT_TILES
             y = torch.empty((x.shape[0], self.n), dtype=out_dtype or x.dtype, device=x.device)
             return prefill.matmul(self, x, y, _WORKSPACE)
         return torch.cat([super(Linear, self).__call__(x[i:i + self.PIECE].contiguous(), out_dtype=out_dtype)

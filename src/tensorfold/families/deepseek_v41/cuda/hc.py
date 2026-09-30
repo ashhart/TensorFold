@@ -131,8 +131,8 @@ def _pre_finish(X, PART, BASE, SCALE, PRE_IN, NW, OUT, PRE, POST, COMB, eps_norm
 
 @triton.jit
 def _post(B, X, POST, COMB, Y, parts, R, split, D: tl.constexpr, CH: tl.constexpr):
-    """B holds ``parts`` rank partials (fp32 or bf16, rank order) or one bf16 branch (parts 0). Partials of rows below
-    ``split`` are laid out [parts, split, D], then those of the rest [parts, R - split, D] (split R: one block)."""
+    """B holds ``parts`` rank partials (fp32 or bf16, rank order) or one bf16 branch (parts 0), in row blocks of
+    ``split`` rows, each [parts, rows, D] (split R: one block)."""
 
     r = tl.program_id(0)
     c = tl.program_id(1)
@@ -140,12 +140,9 @@ def _post(B, X, POST, COMB, Y, parts, R, split, D: tl.constexpr, CH: tl.constexp
     if parts == 0:
         b = tl.load(B + r * D + o).to(tl.float32)
     else:
-        if r < split:
-            base = r * D
-            stride = split * D
-        else:
-            base = parts * split * D + (r - split) * D
-            stride = (R - split) * D
+        blk = r // split                                   # row blocks of ``split`` rows (the last may be short)
+        base = blk * parts * split * D + (r - blk * split) * D
+        stride = tl.minimum(split, R - blk * split) * D
         b = tl.load(B + base + o).to(tl.float32)
         for k in range(1, parts):
             b = b + tl.load(B + base + k * stride + o).to(tl.float32)
@@ -195,9 +192,9 @@ def _post_mix_rows(B, X, POST, COMB, Y, PRE_IN, V, FN, PART, parts, R, split, D:
     ok = r < R
     m = tl.arange(0, 32)
     k = tl.arange(0, SUBK)
-    lo = r < split
-    base_b = tl.where(lo, r * D, parts * split * D + (r - split) * D)
-    stride_b = tl.where(lo, split * D, (R - split) * D)
+    blk = r // split                                   # row blocks of ``split`` rows (the last may be short)
+    base_b = blk * parts * split * D + (r - blk * split) * D
+    stride_b = tl.minimum(split, R - blk * split) * D
     p0 = tl.load(POST + r * 4 + 0, mask=ok, other=0.0)
     p1 = tl.load(POST + r * 4 + 1, mask=ok, other=0.0)
     p2 = tl.load(POST + r * 4 + 2, mask=ok, other=0.0)
@@ -274,7 +271,7 @@ def pre(X: torch.Tensor, fn: torch.Tensor, base: torch.Tensor, scale: torch.Tens
 
 
 class SplitPartials(NamedTuple):
-    """Rank partials gathered in two row blocks: ``buf`` holds [parts, split, D] then [parts, R - split, D]."""
+    """Rank partials gathered in row blocks of ``split`` rows (the last may be short), each [parts, rows, D]."""
 
     buf: torch.Tensor
     parts: int

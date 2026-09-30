@@ -402,10 +402,25 @@ __device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commi
 template <int N_>
 __device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N_)); }
 
-template <int CB, int K2, int NT, int MTP, int KC, int PF>
+// the 128-point Walsh-Hadamard butterfly of ExLlamaV3's rot_in (same order, so the same bits)
+__device__ __forceinline__ void fwht128_s(float (&v)[4], int lane) {
+    float a = v[0] + v[1], b = v[0] - v[1], c = v[2] + v[3], d = v[2] - v[3];
+    v[0] = a + c; v[1] = b + d; v[2] = a - c; v[3] = b - d;
+#pragma unroll
+    for (int m = 1; m < 32; m <<= 1) {
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            float o = __shfl_xor_sync(0xffffffffu, v[j], m);
+            v[j] = (lane & m) ? o - v[j] : v[j] + o;
+        }
+    }
+}
+
+template <int CB, int K2, int NT, int MTP, int KC, int PF, bool ROTX>
 __device__ __forceinline__ void prompt4_body(const uint32_t* __restrict__ T, int NTILES, int KT, int nt0, bool active,
                                              half (*xs)[16 * MTP * (KC * 16 + 8)], const half* __restrict__ X,
-                                             const int* rows_sh, int K, float (&acc)[MTP][NT][2][4], int W32, int nm) {
+                                             const int* rows_sh, int K, float (&acc)[MTP][NT][2][4], int W32, int nm,
+                                             const half* __restrict__ suh, int slots) {
     constexpr int TW = Fmt<K2>::TW, LW = Fmt<K2>::LW;
     constexpr int ROWS = 16 * MTP, STRIDE = KC * 16 + 8, VECS = KC * 2;
     const int lane = threadIdx.x & 31;
@@ -417,7 +432,7 @@ __device__ __forceinline__ void prompt4_body(const uint32_t* __restrict__ T, int
         const int k0 = slice * KC * 16;
         for (int idx = threadIdx.x; idx < nm * 16 * VECS; idx += W32) {
             const int row = idx / VECS, v = idx % VECS;
-            const int r = rows_sh[row];
+            const int r = ROTX && rows_sh[row] >= 0 ? rows_sh[row] / slots : rows_sh[row];   // ROTX: token row
             cp_async16(&xs[buf][row * STRIDE + v * 8], X + (size_t)(r >= 0 ? r : 0) * K + k0 + v * 8, r >= 0);
         }
         cp_async_commit();
@@ -438,6 +453,24 @@ __device__ __forceinline__ void prompt4_body(const uint32_t* __restrict__ T, int
             cp_async_wait<0>();
         }
         __syncthreads();
+        if constexpr (ROTX) {                              // raw bf16 token rows -> fp16((x * suh) @ H) in place
+            static_assert(KC == 8, "one Hadamard block a slice");
+            const int k0 = sl * 128;
+            float sv[4];
+#pragma unroll
+            for (int j = 0; j < 4; ++j) sv[j] = __half2float(suh[k0 + 4 * lane + j]);
+            for (int row = threadIdx.x >> 5; row < nm * 16; row += W32 >> 5) {
+                half* q = &xs[sl & 1][row * STRIDE + 4 * lane];
+                const __nv_bfloat16* qb = reinterpret_cast<const __nv_bfloat16*>(q);
+                float v[4];
+#pragma unroll
+                for (int j = 0; j < 4; ++j) v[j] = __bfloat162float(qb[j]) * sv[j];
+                fwht128_s(v, lane);
+#pragma unroll
+                for (int j = 0; j < 4; ++j) q[j] = __float2half_rn(v[j] * 0.08838834764831845f);
+            }
+            __syncthreads();
+        }
         if (active) {
             const half* xb = xs[sl & 1];
 #pragma unroll
@@ -488,20 +521,23 @@ __device__ __forceinline__ void store2(half* z, float a, float b) {
     *reinterpret_cast<half2*>(z) = __floats2half2_rn(a * ZH_SCALE, b * ZH_SCALE);
 }
 
-template <int CB, int NT, int W, int MTP, int KC, int PF, typename ZT>
+template <int CB, int NT, int W, int MTP, int KC, int PF, typename ZT, bool ROTX = false>
 __global__ void __launch_bounds__(W * 32) grouped_prompt4_kernel(
     const half* __restrict__ X0, const half* __restrict__ X1, const int64_t* __restrict__ TP0,
     const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
     const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
-    ZT* __restrict__ Z, int K, int N, int P, int maxm, int slots) {
+    ZT* __restrict__ Z, int K, int N, int P, int maxm, int slots, const half* __restrict__ SUH0 = nullptr,
+    const half* __restrict__ SUH1 = nullptr) {
     constexpr int ROWS = 16 * MTP, STRIDE = KC * 16 + 8;
     __shared__ __align__(16) half xs[2][ROWS * STRIDE];
     __shared__ int rows_sh[ROWS];
-    const int u = blockIdx.y;                              // grid: (n group, expert, mat x member group)
+    const int u = blockIdx.y;                              // grid: (member group x n group, expert, mat)
     if (u >= ucount[0]) return;
     const int MG = (maxm + ROWS - 1) / ROWS;
-    const int mgroup = blockIdx.z % MG;
-    const int mat = blockIdx.z / MG;
+    const int ngroups = gridDim.x / MG;
+    const int mgroup = blockIdx.x / ngroups;               // a busy expert's member groups run side by side:
+    const int ngrp = blockIdx.x - mgroup * ngroups;        // its weights shared in L2 (as X across n groups)
+    const int mat = blockIdx.z;
     const half* X = mat ? X1 : X0;
     const int e = uids[u];
     const uint32_t* T = reinterpret_cast<const uint32_t*>(mat ? TP1[e] : TP0[e]);
@@ -516,8 +552,9 @@ __global__ void __launch_bounds__(W * 32) grouped_prompt4_kernel(
     }
     __syncthreads();
     if (rows_sh[0] < 0) return;
-    const int nt0 = (blockIdx.x * W + warp) * NT;   // an expert's n groups run side by side: X shared in L2
+    const int nt0 = (ngrp * W + warp) * NT;          // an expert's n groups run side by side: X shared in L2
     const bool active = nt0 < NTILES;
+    const half* suh = ROTX ? (mat ? SUH1 : SUH0) + (size_t)e * K : nullptr;
     int nm = 0;                                            // m tiles holding members (members come first)
 #pragma unroll
     for (int m = 0; m < MTP; ++m) nm += rows_sh[m * 16] >= 0;
@@ -531,10 +568,10 @@ __global__ void __launch_bounds__(W * 32) grouped_prompt4_kernel(
 #pragma unroll
                 for (int c = 0; c < 4; ++c) acc[m][i][h][c] = 0.f;
     switch (k2) {
-        case 4: prompt4_body<CB, 4, NT, MTP, KC, PF>(T, NTILES, KT, nt0, active, xs, X, rows_sh, K, acc, W * 32, nm); break;
-        case 5: prompt4_body<CB, 5, NT, MTP, KC, PF>(T, NTILES, KT, nt0, active, xs, X, rows_sh, K, acc, W * 32, nm); break;
-        case 6: prompt4_body<CB, 6, NT, MTP, KC, PF>(T, NTILES, KT, nt0, active, xs, X, rows_sh, K, acc, W * 32, nm); break;
-        case 8: prompt4_body<CB, 8, NT, MTP, KC, PF>(T, NTILES, KT, nt0, active, xs, X, rows_sh, K, acc, W * 32, nm); break;
+        case 4: prompt4_body<CB, 4, NT, MTP, KC, PF, ROTX>(T, NTILES, KT, nt0, active, xs, X, rows_sh, K, acc, W * 32, nm, suh, slots); break;
+        case 5: prompt4_body<CB, 5, NT, MTP, KC, PF, ROTX>(T, NTILES, KT, nt0, active, xs, X, rows_sh, K, acc, W * 32, nm, suh, slots); break;
+        case 6: prompt4_body<CB, 6, NT, MTP, KC, PF, ROTX>(T, NTILES, KT, nt0, active, xs, X, rows_sh, K, acc, W * 32, nm, suh, slots); break;
+        case 8: prompt4_body<CB, 8, NT, MTP, KC, PF, ROTX>(T, NTILES, KT, nt0, active, xs, X, rows_sh, K, acc, W * 32, nm, suh, slots); break;
         default: __trap();
     }
     if (!active) return;
@@ -742,7 +779,7 @@ void grouped_prompt3(const at::Tensor& X0, const at::Tensor& X1, const at::Tenso
     case ID: {                                                                                                     \
         const int MG = (maxm + 16 * MTP_ - 1) / (16 * MTP_);                                                        \
         const int ngroups = (int)((N / 16 + NT_ * W_ - 1) / (NT_ * W_));                                            \
-        dim3 grid((unsigned)ngroups, (unsigned)uids.numel(), (unsigned)(mats * MG));                                \
+        dim3 grid((unsigned)(ngroups * MG), (unsigned)uids.numel(), (unsigned)mats);                                \
         tf_exl3x::grouped_prompt4_kernel<2, NT_, W_, MTP_, KC_, PF_, float><<<grid, W_ * 32, 0,                            \
                                                                       at::cuda::getCurrentCUDAStream()>>>(          \
             reinterpret_cast<const half*>(X0.data_ptr()), reinterpret_cast<const half*>(X1.data_ptr()),             \
@@ -789,44 +826,49 @@ void grouped_prompt3(const at::Tensor& X0, const at::Tensor& X1, const at::Tenso
 void grouped_prompt4(const at::Tensor& X0, const at::Tensor& X1, const at::Tensor& TP0, const at::Tensor& TP1,
                      const at::Tensor& K2_0, const at::Tensor& K2_1, const at::Tensor& uids, const at::Tensor& ucount,
                      const at::Tensor& members, at::Tensor& Z, int64_t mats, int64_t K, int64_t N, int64_t P,
-                     int64_t slots, int64_t cb, int64_t config) {
+                     int64_t slots, int64_t cb, int64_t config, const c10::optional<at::Tensor>& suh0,
+                     const c10::optional<at::Tensor>& suh1) {
+    const bool rotx = suh0.has_value();                    // X0/X1: raw bf16 token rows, rotated per expert on stage
+    if (rotx) TORCH_CHECK(X0.scalar_type() == at::kBFloat16 && suh1.has_value() && Z.scalar_type() == at::kHalf,
+                          "rotating stage: bf16 token rows, both suh, fp16 Z");
+    const half* s0 = rotx ? reinterpret_cast<const half*>(suh0->data_ptr()) : nullptr;
+    const half* s1 = rotx ? reinterpret_cast<const half*>(suh1->data_ptr()) : nullptr;
     TORCH_CHECK(cb == 2, "prompt expert kernel: mul1 codebook only");
     TORCH_CHECK((K / 16) % 8 == 0, "prompt expert kernel v4: K/16 must be a multiple of 8");
     TORCH_CHECK(Z.numel() >= mats * P * N, "Z: mats x P x N");
     const bool zh = Z.scalar_type() == at::kHalf;
     TORCH_CHECK(zh || Z.scalar_type() == at::kBFloat16, "Z: fp16 or bf16");
     const int maxm = (int)members.size(1);
-#define TF_V4B_LAUNCH(ZT_, NT_, W_, MTP_, KC_, PF_, grid)                                                             \
-    tf_exl3x::grouped_prompt4_kernel<2, NT_, W_, MTP_, KC_, PF_, ZT_><<<grid, W_ * 32, 0,                          \
+#define TF_V4B_LAUNCH(ZT_, NT_, W_, MTP_, KC_, PF_, grid, RX_)                                                        \
+    tf_exl3x::grouped_prompt4_kernel<2, NT_, W_, MTP_, KC_, PF_, ZT_, RX_><<<grid, W_ * 32, 0,                     \
                                                                         at::cuda::getCurrentCUDAStream()>>>(        \
         reinterpret_cast<const half*>(X0.data_ptr()), reinterpret_cast<const half*>(X1.data_ptr()),                 \
         TP0.data_ptr<int64_t>(), TP1.data_ptr<int64_t>(), K2_0.data_ptr<int>(), K2_1.data_ptr<int>(),               \
         uids.data_ptr<int>(), ucount.data_ptr<int>(), members.data_ptr<int>(), reinterpret_cast<ZT_*>(Z.data_ptr()), \
-        (int)K, (int)N, (int)P, maxm, (int)slots)
+        (int)K, (int)N, (int)P, maxm, (int)slots, s0, s1)
 #define TF_V4B(ID, NT_, W_, MTP_, KC_, PF_)                                                                        \
     case ID: {                                                                                                     \
         const int MG = (maxm + 16 * MTP_ - 1) / (16 * MTP_);                                                        \
         const int ngroups = (int)((N / 16 + NT_ * W_ - 1) / (NT_ * W_));                                            \
-        dim3 grid((unsigned)ngroups, (unsigned)uids.numel(), (unsigned)(mats * MG));                                \
-        if (zh)                                                                                                    \
-            TF_V4B_LAUNCH(half, NT_, W_, MTP_, KC_, PF_, grid);                                                    \
+        dim3 grid((unsigned)(ngroups * MG), (unsigned)uids.numel(), (unsigned)mats);                                \
+        if (rotx)                                                                                                  \
+            TF_V4B_LAUNCH(half, NT_, W_, MTP_, KC_, PF_, grid, true);                                              \
+        else if (zh)                                                                                               \
+            TF_V4B_LAUNCH(half, NT_, W_, MTP_, KC_, PF_, grid, false);                                             \
         else                                                                                                       \
-            TF_V4B_LAUNCH(__nv_bfloat16, NT_, W_, MTP_, KC_, PF_, grid);                                           \
+            TF_V4B_LAUNCH(__nv_bfloat16, NT_, W_, MTP_, KC_, PF_, grid, false);                                    \
         break;                                                                                                     \
     }
     switch (config) {
-        TF_V4B(102, 2, 16, 4, 8, 2)
+        TF_V4B(101, 2, 8, 4, 8, 4)
         TF_V4B(103, 2, 16, 4, 8, 4)
         TF_V4B(108, 2, 12, 4, 8, 4)
-        TF_V4B(112, 2, 16, 4, 8, 8)
-        TF_V4B(101, 2, 8, 4, 8, 4)
+        TF_V4B(118, 2, 12, 4, 8, 4)
         TF_V4B(105, 2, 8, 2, 8, 4)
         TF_V4B(107, 2, 16, 2, 8, 4)
-        TF_V4B(109, 2, 18, 4, 8, 4)
-        TF_V4B(113, 2, 20, 4, 8, 4)
-        TF_V4B(116, 1, 16, 4, 8, 4)
-        TF_V4B(117, 4, 8, 4, 8, 2)
-        TF_V4B(118, 2, 12, 4, 8, 4)
+        TF_V4B(120, 2, 16, 1, 8, 4)
+        TF_V4B(121, 4, 8, 2, 8, 4)
+        TF_V4B(122, 2, 8, 1, 8, 4)
         default: TORCH_CHECK(false, "unknown v4 config");
     }
 #undef TF_V4B
@@ -867,7 +909,10 @@ void down_combine_b(const at::Tensor& Z, const at::Tensor& pick, const at::Tenso
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("grouped_prompt4", &grouped_prompt4);
+    m.def("grouped_prompt4", &grouped_prompt4, py::arg("X0"), py::arg("X1"), py::arg("TP0"), py::arg("TP1"),
+          py::arg("K2_0"), py::arg("K2_1"), py::arg("uids"), py::arg("ucount"), py::arg("members"), py::arg("Z"),
+          py::arg("mats"), py::arg("K"), py::arg("N"), py::arg("P"), py::arg("slots"), py::arg("cb"),
+          py::arg("config"), py::arg("suh0") = py::none(), py::arg("suh1") = py::none());
     m.def("gateup_epilogue_b", &gateup_epilogue_b);
     m.def("down_combine_b", &down_combine_b);
     m.def("grouped_prompt3", &grouped_prompt3);

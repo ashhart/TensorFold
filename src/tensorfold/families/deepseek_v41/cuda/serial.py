@@ -26,6 +26,10 @@ from . import kernels as K
 from .weights import HCW, LayerW, Weights
 
 BF, F32 = torch.bfloat16, torch.float32
+
+
+def triton_cdiv(a: int, b: int) -> int:
+    return -(-a // b)
 MAX_ROWS = 2048              # rows of one call (prompt chunks); every expert's weights are read once a chunk
 RING = 4096                  # window and compressor-raw rings: a 2048-row chunk plus the 127-token window
 
@@ -61,17 +65,18 @@ class Comm:
         return recv
 
     def partials_rows(self, make, R: int):
-        """``partials`` of the rows ``make(r0, r1)`` computes, in two row blocks for prompt chunks: the first block's
-        all-gather runs on a side stream while the second block computes (post() reads the two-block layout)."""
+        """``partials`` of the rows ``make(r0, r1)`` computes, in PROMPT_BLOCKS row blocks for prompt chunks: each
+        block's all-gather runs on a side stream while the next block computes (post() reads the block layout)."""
 
         if R <= PROMPT_ROWS or self.world == 1 or not PROMPT_OVERLAP:
             return self.partials(make(0, R))
-        h = (R // 2 + 15) // 16 * 16
+        h = (triton_cdiv(R, PROMPT_BLOCKS) + 15) // 16 * 16
         main = torch.cuda.current_stream()
         if self.side is None:
             self.side = torch.cuda.Stream()
         buf = None
-        for r0, r1 in ((0, h), (h, R)):
+        for r0 in range(0, R, h):
+            r1 = min(R, r0 + h)
             send = make(r0, r1).to(BF).contiguous()
             if buf is None:
                 buf = torch.empty((self.world * R * send.shape[1],), dtype=BF, device=send.device)
@@ -109,8 +114,10 @@ class Caches:
 
 FUSE_HC = True               # prompt chunks: hc post + the next sublayer's pre in two launches (post_pre)
 PAR_DECODE = os.environ.get("TF_PAR", "1") == "1"            # decode/verify rows: independent linears on side streams (Par)
-PROMPT_ZB = (101, 103)       # v4 with bf16 Z (gate/up config, down config); None: fp32 Z (PROMPT_V3)
+PROMPT_ZB = tuple(int(v) for v in os.environ.get("TF_ZB", "121,101").split(","))       # v4 with bf16 Z (gate/up config, down config); None: fp32 Z (PROMPT_V3)
+PROMPT_ROTX = True           # gate/up: rotate the token rows inside the expert kernel (no rot_in copies)
 PROMPT_ZDT = torch.float16   # Z element type (fp16 stores acc / 64; bf16 also works)
+PROMPT_BLOCKS = 2            # row blocks of the overlapped prompt all-gathers
 PROMPT_OVERLAP = True        # prompt chunks: all-gather the first row block while the second computes
 PROMPT_V3 = 103                # v3 config (experts_prompt.cu grouped_prompt3); None: v2
 PROMPT_V2 = True             # smem-staged activations, K sliced (experts_prompt.cu grouped_prompt2_kernel)
@@ -184,7 +191,16 @@ def routed_prompt(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ex, s,
     slots = s.slots
     P = R * slots
     ids, members = group_members(pick, E, s)
-    ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots, E)
+    if os.environ.get("TF_ROUTE_STATS") and R == MAX_ROWS:
+        cnt = torch.bincount(pick.flatten().long(), minlength=E).float()
+        q = torch.quantile(cnt, torch.tensor([0.1, 0.5, 0.9, 0.99], device=cnt.device)).tolist()
+        print(f"[route] mean {cnt.mean():.1f} q10/50/90/99 {[round(v) for v in q]} max {cnt.max():.0f} "
+              f"reads64 {(torch.ceil(cnt / 64).clamp(min=1) * (cnt > 0)).sum() / (cnt > 0).sum():.3f} "
+              f"reads80 {(torch.ceil(cnt / 80).clamp(min=1) * (cnt > 0)).sum() / (cnt > 0).sum():.3f} "
+              f"rows-in-64 {(cnt.sum() / (torch.ceil(cnt / 16) * 16).sum()):.2f} used {(cnt > 0).sum():.0f}", flush=True)
+    rotx = PROMPT_ZB is not None and PROMPT_ROTX and x.dtype == BF and PROMPT_ZDT == torch.float16
+    if not rotx:
+        ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots, E)
     from .experts_prompt import ext as prompt_ext
 
     pe = prompt_ext()
@@ -193,8 +209,13 @@ def routed_prompt(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ex, s,
         need = 2 * P * max(I, D)
         if _ZB is None or _ZB.numel() < need or _ZB.dtype != PROMPT_ZDT:
             _ZB = torch.empty((need,), dtype=PROMPT_ZDT, device=x.device)
-        pe.grouped_prompt4(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, _ZB, 2, D,
-                           I, P, slots, ex.cb, PROMPT_ZB[0])
+        if rotx:                                    # token rows rotated per expert while staged (no xg / xu)
+            xc = x.contiguous()
+            pe.grouped_prompt4(xc, xc, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, _ZB, 2,
+                               D, I, P, slots, ex.cb, PROMPT_ZB[0], ex.suh_g, ex.suh_u)
+        else:
+            pe.grouped_prompt4(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, _ZB,
+                               2, D, I, P, slots, ex.cb, PROMPT_ZB[0])
         pe.gateup_epilogue_b(_ZB, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, P, I, E, float(limit))
         pe.grouped_prompt4(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, _ZB, 1,
                            I, D, P, slots, ex.cb, PROMPT_ZB[1])

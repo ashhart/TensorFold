@@ -12,5 +12,5 @@ def ext():
     from tensorfold.cuda.build import load
 
     inc = str(Path(exl3.__file__).parent)
-    return load("tensorfold_dsv41_experts_prompt_v15", [str(Path(__file__).with_name("experts_prompt.cu"))],
+    return load("tensorfold_dsv41_experts_prompt_v19", [str(Path(__file__).with_name("experts_prompt.cu"))],
                 extra_include_paths=[inc], extra_cuda_cflags=["-O3", "-lineinfo"])
