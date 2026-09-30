@@ -1,4 +1,4 @@
-# Decision scoring: GB10 validation
+# Decision scoring: GB10 and MLX validation
 
 ## Environment and scope
 
@@ -49,6 +49,39 @@ The low yes/no label_mass is important: the relative probability among lowercase
 `yes` and `no` is not calibrated confidence over every possible model response.
 Seven correct examples demonstrate operation, not general decision accuracy.
 This run did not compare logits against SGLang on the identical full checkpoint.
+
+## Full-model MLX HTTP checks
+
+Apple M4 Max, 48 GB; `Vontra/Qwen3.8-27B-MLX-4bit`, TensorFold PR code,
+MLX backend, drafts off, context 1024, thinking off,
+`TENSORFOLD_MEMORY_LIMIT_GB=26`. Loaded weights occupied 14.6 GiB;
+startup reported 90.3 seconds. The test server used a separate localhost port
+and was stopped afterwards.
+
+The same seven known-answer questions as above passed **7/7**:
+
+| Task | Result | Winning label probability | label_mass | HTTP seconds | Prompt tokens |
+|---|---|---:|---:|---:|---:|
+| Duplicate charge / category | billing | 0.999195 | 0.991777 | 0.4236 | 53 |
+| API HTTP 500 / category | technical | 0.999767 | 0.998274 | 0.5381 | 60 |
+| Quote and demo / category | sales | 0.999748 | 0.996657 | 0.7416 | 59 |
+| Delivered Monday? | yes | 0.998901 | 0.896961 | 0.7300 | 40 |
+| Delivered Friday? | no | 0.999569 | 0.672203 | 0.6706 | 40 |
+| Explicit HIGH / score | mean 1.999942 / 2 | 0.999959 | 0.999327 | 0.6258 | 50 |
+| Explicit NISKI / Polish score | mean 0.000214 / 2 | 0.999809 | 0.991759 | 0.8715 | 67 |
+
+Ten sequential single-question requests: min **0.4236 s**, median **0.5982 s**,
+max **0.8715 s**, 40–67 prompt tokens and zero completion tokens. These are
+localhost client-observed wall times on an already-loaded model, not throughput
+measurements. The first successful decision request is included; no warmup
+request was discarded. Different models, tokenizers and hardware mean this is
+not a controlled speed comparison with the GB10 run.
+
+Passed the same extra checks: option reordering, multiple questions, finite and
+normalized probabilities, distinct label IDs, temperature versus label_mass,
+tiny temperature, invalid kwargs, and identical greedy chat and conversation
+continuation before/after decisions. MLX yes/no label_mass was 0.672–0.897,
+unlike the much lower mass on GLM; neither is a general confidence calibration.
 
 ## Regression coverage
 
