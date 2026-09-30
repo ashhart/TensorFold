@@ -203,8 +203,6 @@ class Scheduler(PromptFill):
     def submit(self, job: ChatJob) -> None:
         if self._stop.is_set():
             raise RuntimeError("the scheduler is closed")
-        if self.metrics is not None:
-            self.metrics.prompt_tokens.add(len(job.prompt_ids))
         self._queue.put(job)
 
     def cancel(self, cancellation: Cancellation) -> None:

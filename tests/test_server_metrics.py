@@ -12,7 +12,7 @@ from types import ModuleType, SimpleNamespace
 from tensorfold.server.http import make_handler
 from tensorfold.server.metrics import Metrics
 from tensorfold.server.text import render_prompt_ids
-from tests.lane_fakes import fake_serial
+from tests.lane_fakes import FakeEngine, fake_serial
 from tests.prometheus_format import check_histograms, parse, series_value
 from tests.test_lane_server import EOS, make_app
 
@@ -201,6 +201,31 @@ def test_mac_counters_and_histograms_follow_a_real_request(monkeypatch, capsys):
         capsys.readouterr()
         get(server.server_port)
         assert "GET /metrics" not in capsys.readouterr().out
+
+
+def test_mac_a_request_cancelled_while_queued_counts_no_prompt_tokens(monkeypatch):
+    # prompt_tokens_total is "prefill tokens processed": a job that leaves the queue before its prefill adds none,
+    # while a job that is prefilled counts its whole prompt once
+    install_fake_mlx(monkeypatch)
+    from tensorfold.server.app import ChatJob, Scheduler
+
+    metrics = Metrics()
+    scheduler = Scheduler(FakeEngine(), lanes=1, eos_ids=frozenset({EOS}), metrics=metrics)
+    left = ChatJob("left", [5, 6, 7], 4, 0)
+    scheduler.submit(left)
+    scheduler.cancel(left.cancellation)
+    assert left.done.is_set()
+    assert metrics.prompt_tokens.value == 0
+
+    served = ChatJob("served", [1, 2], 4, 0)
+    scheduler.submit(served)
+    scheduler.start()
+    try:
+        assert served.done.wait(WAIT)
+    finally:
+        scheduler.stop()
+    assert served.error is None
+    assert metrics.prompt_tokens.value == 2
 
 
 # -- what the gauges and the drafter counters report, on a fake app -----------------------------

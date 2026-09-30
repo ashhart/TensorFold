@@ -252,12 +252,12 @@ rather than read zero.
 | --- | --- | --- | --- |
 | `tensorfold:num_requests_running` | gauge | Concurrent engines: the decoder's live and prefilling streams; serialized engines: the request in flight | `scheduler.active`, plus the stream being prefilled |
 | `tensorfold:num_requests_waiting` | gauge | The engine's scheduler queue, or the serialized engine's turn queue | The scheduler's queue, admitted streams waiting included |
-| `tensorfold:prompt_tokens_total` | counter | Finished requests' prompts, as `/health` counts them | Counted as each job's prompt is admitted |
+| `tensorfold:prompt_tokens_total` | counter | Finished requests' prompts, as `/health` counts them | Each job's whole prompt, counted once when its prefill completes; a job cancelled before its prefill counts none |
 | `tensorfold:generation_tokens_total` | counter | Finished replies' tokens (live replies' tokens so far included), as `/health` counts them | Counted as each reply finishes |
 | `tensorfold:kv_cache_usage_perc{stream}` | gauge, 0..1 | Each stream's rows held in its own pool: per-stream pools on concurrent engines (labeled by stream ID), the serialized engine's single pool (labeled `0`) while a request runs it. Omitted when the engine reports no pool | Omitted: on the Mac each stream's cache grows from the memory budget, so no fixed pool exists to take a fraction of |
 | `tensorfold:spec_decode_num_draft_tokens_total` | counter | `/health`'s `drafted_total` (zero on engines that count no drafts) | The engine's `drafted` counter, when the engine counts it; omitted otherwise |
 | `tensorfold:spec_decode_num_accepted_tokens_total` | counter | `/health`'s `accepted_total` | The engine's `accepted` counter, when the engine counts it; omitted otherwise |
-| `tensorfold:time_to_first_token_seconds` | histogram | First token minus the request's arrival at the server, so queue and turn waits are in, as in vLLM. A reply whose client left before any token took no first token and takes no observation | Prefill completion minus submission, when the prefill path ran |
+| `tensorfold:time_to_first_token_seconds` | histogram | First token minus the request's arrival at the server, so queue and turn waits are in, as in vLLM. A reply whose client left before any token took no first token and takes no observation | Prefill completion (when the first token is emitted) minus submission; a job that never finished its prefill takes no observation |
 | `tensorfold:e2e_request_latency_seconds` | histogram | Reply completion minus arrival, for every finished request | Job completion minus submission |
 
 What vLLM reports that stays out: `vllm:spec_decode_num_drafts_total` (the engines count drafted and accepted
@@ -265,5 +265,7 @@ What vLLM reports that stays out: `vllm:spec_decode_num_drafts_total` (the engin
 count would be a guess), and on the Mac `vllm:kv_cache_usage_perc` (above).
 
 The histograms use vLLM's default bucket lists. Counters and histograms are cumulative since server start, as
-Prometheus expects; a stream's `kv_cache_usage_perc` line disappears when its request ends. Scrapes are silent in
-the request log, and scraping cadence is the scraper's.
+Prometheus expects; a stream's `kv_cache_usage_perc` line disappears when its request ends. The `stream` label is
+the request's stream ID, so over time a scraper sees one short-lived series per request (at most the engine's
+stream count at once). Each metric in a scrape is read on its own, not as one atomic snapshot. Scrapes are silent
+in the request log, and scraping cadence is the scraper's.

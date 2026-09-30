@@ -67,6 +67,9 @@ class PromptFill:
             self._keep_checkpoints(job, shared_at)
             job.cancellation.check()
             job.prefilled_at = time.perf_counter()
+            metrics = getattr(self, "metrics", None)
+            if metrics is not None:                      # counted once the prompt is prefilled, as vLLM counts it
+                metrics.prompt_tokens.add(len(job.prompt_ids))
             job.cached_tokens = int(stream.cached_tokens)      # 0 when a stored state was not at a chunk start
             if stream.emitted:
                 job.chunks.put(list(stream.emitted))
