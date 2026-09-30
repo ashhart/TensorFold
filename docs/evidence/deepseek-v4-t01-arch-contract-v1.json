@@ -1,0 +1,140 @@
+{
+  "schema_version": "1.0",
+  "contract_id": "deepseek-v4-t01-arch-contract",
+  "contract_version": "1",
+  "status": "AGREED",
+  "captured_at": "2026-09-30T04:30:00Z",
+  "author": "audit (t_36cc607c)",
+  "scope": "serial (non-drafting) CUDA forward architecture for the 0731 checkpoint, comparing the TensorFold deepseek_v4 MLX reference against the installed Entrpi/ds4 donor",
+  "references": {
+    "reference": "src/tensorfold/families/deepseek_v4/{config.py, model.py, attention.py, caches.py, compressor.py, moe.py, weights.py, dense.py, runtime.py}",
+    "donor": "/home/josh/code/ds4/{ds4.c, ds4.h, ds4_gpu.h, ds4_cuda.cu}",
+    "plan": "docs/recipes/deepseek-v4-cuda-plan.md",
+    "evidence": "docs/evidence/deepseek-v4-t01-evidence.json"
+  },
+
+  "model_structure": {
+    "finding": "IDENTICAL on both sides; both read the architecture from GGUF metadata (deepseek4.* keys) / checkpoint config",
+    "contract": "Adopt the donor shape reader as authoritative for the serial build; keep the TensorFold config dataclass in sync.",
+    "fields": {
+      "n_layer": "43 (from GGUF deepseek4.block_count)",
+      "n_embd": "4096 (deepseek4.embedding_length)",
+      "n_head": "64 (deepseek4.attention.head_count)",
+      "head_dim": "512 (deepseek4.attention.head_dim)",
+      "qk_rope": "64 (deepseek4.attention.qk_rope_head_dim)",
+      "qk_nope": "448 (= head_dim - qk_rope)",
+      "kv_lora_rank": "512 (deepseek4.attention.kv_lora_rank; single shared KV head)",
+      "q_lora_rank": "per-checkpoint (deepseek4.attention.q_lora_rank)",
+      "o_lora_rank": "per-checkpoint (deepseek4.attention.output_lora_rank)",
+      "sliding_window": "128 (deepseek4.attention.sliding_window)",
+      "compress_ratios": "per-layer (deepseek4.attention.compress_ratios)",
+      "n_routed_experts": "256 (deepseek4.moe.expert_count)",
+      "experts_per_tok": "6 (deepseek4.moe.experts_per_tok)",
+      "n_shared_experts": "1 (deepseek4.moe.expert_shared_count)",
+      "num_hash_layers": "3 (deepseek4.moe.attention_hash_layer_count)",
+      "vocab": "129280 (deepseek4.vocab_size)",
+      "mtp": "donor reads optional mtp.* head tensors; TensorFold 0731 serial reference does not use MTP"
+    },
+    "tolerances": "Architecture integers must match exactly across reference, donor, and the 0731 GGUF. A mismatch is a hard validation failure."
+  },
+
+  "tensor_layout": {
+    "finding": "SAME tensor set and quant scheme on both sides",
+    "contract": "Per-layer tensor names and quant types are fixed by the 0731 GGUF layout; the serial build must read exactly this set.",
+    "tensor_set": [
+      "token_embd.weight (F16/F32)",
+      "blk.{layer}.attn_q.{proj}.weight",
+      "blk.{layer}.attn_q_a.{proj}.weight",
+      "blk.{layer}.attn_q_b.{proj}.weight",
+      "blk.{layer}.attn_kv.{proj}.weight",
+      "blk.{layer}.attn_kv_a.{proj}.weight",
+      "blk.{layer}.attn_kv_b.{proj}.weight",
+      "blk.{layer}.attn_output.{proj}.weight",
+      "blk.{layer}.attn_output_a.{proj}.weight",
+      "blk.{layer}.attn_output_b.{proj}.weight",
+      "blk.{layer}.mlp_gate.{proj}.weight",
+      "blk.{layer}.mlp_up.{proj}.weight",
+      "blk.{layer}.mlp_down.{proj}.weight",
+      "blk.{layer}.mlp_shared_experts.{gate|up|down}.weight",
+      "blk.{layer}.mlp_experts.{gate|up|down}.weight",
+      "blk.{layer}.attn_norm.weight",
+      "blk.{layer}.ffn_norm.weight",
+      "blk.{layer}.norm_attn_norm.weight",
+      "blk.{layer}.norm_ffn_norm.weight",
+      "output.weight (F16/F32)"
+    ],
+    "quant_scheme": {
+      "experts_gate_up": "IQ2_XXS (per-layer)",
+      "experts_down": "Q2_K (per-layer)",
+      "dense_projections": "Q8_0",
+      "embeddings_output_norms": "F16/F32"
+    },
+    "tolerances": "Tensor names, shapes, and quant types must match the 0731 GGUF exactly. Any tensor the serial build maps differently is a hard failure."
+  },
+
+  "kv_cache": {
+    "finding": "DIFFERENT storage model",
+    "reference": "MLX: per-attention compressed pools (raw sliding-window ring + ratio-compressed pool + indexer pool), bf16/fp32 tensors, host/GPU managed",
+    "donor": "device-resident slabs: raw_cache (sliding window), comp_cache (ratio-pooled), index_comp_cache (indexer pool), with optional packed FP8 compressed KV (DS4_CUDA_FP8_KV) and FP4 activation quant (DS4_CUDA_FP4_ACT)",
+    "contract": "Adopt the donor slab geometry (raw_cache / comp_cache / index_comp_cache) as the serial cache contract.",
+    "precision": {
+      "default": "fp32 accumulator, exact reference path",
+      "opt_in": "FP8 packed compressed KV (DS4_CUDA_FP8_KV) and FP4 activation (DS4_CUDA_FP4_ACT) are OPT-IN ONLY; disabled for the first serial release",
+      "tolerance_fp8": "e4m3 max absolute error on packed values; top-1 logit margin must stay >= preregistered threshold",
+      "tolerance_fp4": "e2m1 max absolute error on activations; top-1 logit margin >= preregistered threshold"
+    },
+    "tolerances": "Exact path must reproduce the reference cache math bitwise (same compression ratios, same indexer top-k selection). FP8/FP4 paths are declared-lossy and gated on operator evidence (T19), not presumed exact."
+  },
+
+  "attention": {
+    "finding": "SAME algorithm on both sides",
+    "algorithm": "sliding-window 128 + ratio-compressor (per-layer compress_ratios) + sparse indexer top-k over the compressed pool, with hash-layer routing (num_hash_layers=3)",
+    "contract": "Implement in CUDA per the donor kernel set: raw SWA read, compressor emit, indexer top-k read. Keep the reference attention math (fp32 accumulation, exact masking) in the serial path.",
+    "tolerances": "Exactness gate R6: token/state equality must be bitwise vs the trusted fixture oracle. No numerical tolerance substitutes for this gate. Cross-runtime (ds4 CUDA vs MLX) bitwise equality is NOT presumed (plan note); self-consistency plus fixture-oracle equality is the gate."
+  },
+
+  "serial_execution_path": {
+    "finding": "DIFFERENT execution model",
+    "reference": "Python/MLX compiled per-row decode: per-layer loop, mx.compile per-row kernels, mx.async_eval pipeline",
+    "donor": "C/CUDA per-layer decode loop over the slab cache with a token-stable scalar substrate (per-layer scalars), optional cudaGraph capture/replay (DS4_CUDA_LAYER_GRAPHS, DS4_CUDA_CONT_CAPTURE)",
+    "contract": "Adopt the donor serial eager per-layer loop as the first release. Drafting (MTP / multi-token prediction) and cudaGraph capture are OUT OF SCOPE for R3 (serial, no drafting).",
+    "gates": {
+      "R3": "serial only, one request, no drafting",
+      "R6": "serial forward exactness (fixture oracle, bitwise)",
+      "R7": "build/reproducibility recorded",
+      "R8": "DSpark (drafting) optional follow-up",
+      "G11": "window/compress/indexer equality tests required before enabling graph capture"
+    },
+    "tolerances": "Serial eager path must be deterministic and bitwise-reproducible across runs under fixed seeds and fixed GPU. Graph-capture paths are opt-in only and require G11 equality evidence first."
+  },
+
+  "hardware_dependent_pending": [
+    {
+      "id": "T16",
+      "item": "CUDA kernel bring-up on target",
+      "status": "PENDING",
+      "note": "All CUDA kernel / slab-residency claims are unverified until T16 runs on the target (GB10)."
+    },
+    {
+      "id": "T19",
+      "item": "full-model operator evidence",
+      "status": "PENDING",
+      "note": "FP8 KV / FP4 activation lossiness and full-model residency (81 GiB-class) are gated on T19 operator evidence; not presumed exact."
+    },
+    {
+      "id": "VMM",
+      "item": "packed-KV demand-map residency",
+      "status": "PENDING",
+      "note": "FP8 packed compressed-KV requires virtual-memory demand-mapping on target; unverified until T16/T19."
+    }
+  ],
+
+  "decision_summary": [
+    "Keep donor model structure and tensor layout as authoritative (identical to 0731 GGUF).",
+    "Adopt donor slab KV-cache geometry; fp32 exact path is the release default.",
+    "FP8-KV and FP4-activation are declared opt-in, lossy, and PENDING T19.",
+    "Adopt donor serial eager per-layer loop for R3; drafting (MTP) and graph capture are out of scope.",
+    "Exactness = bitwise fixture-oracle equality (R6); cross-runtime bitwise is not presumed.",
+    "CUDA claims are PENDING until T16 (target) and T19 (full-model operator evidence)."
+  ]
+}
