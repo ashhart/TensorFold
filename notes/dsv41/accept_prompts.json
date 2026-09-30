@@ -1,0 +1,102 @@
+{
+ "max_tokens": 200,
+ "prompts": [
+  {
+   "name": "story",
+   "ids": [
+    16600,
+    4465,
+    260,
+    1014,
+    14,
+    295,
+    260,
+    2395,
+    13671,
+    509,
+    270,
+    9449,
+    294,
+    260,
+    12596,
+    9364,
+    14,
+    1031,
+    11385,
+    411,
+    3072,
+    15714,
+    33690,
+    9306,
+    84689,
+    16,
+    9198,
+    7469,
+    468,
+    10725,
+    793,
+    15391,
+    509,
+    36365,
+    14,
+    21928,
+    1750,
+    15714,
+    377,
+    270,
+    6072,
+    14,
+    305,
+    34226,
+    16,
+    4114,
+    2173,
+    14,
+    834,
+    294,
+    270,
+    69799,
+    1687,
+    554,
+    12039,
+    16,
+    1166,
+    10725,
+    1009,
+    2352,
+    305,
+    2006,
+    14,
+    6240,
+    294,
+    66084,
+    14,
+    260,
+    17168,
+    44056,
+    7155,
+    396,
+    1733,
+    28
+   ]
+  },
+  {
+   "name": "reasoning",
+   "messages": [
+    {
+     "role": "user",
+     "content": "A farmer has 17 sheep. All but 9 run away. Then he buys twice as many as he has left. How many sheep does he have now? Think step by step."
+    }
+   ]
+  },
+  {
+   "name": "code",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Write a Python function that returns the n-th prime number, with a docstring and a short explanation."
+    }
+   ]
+  }
+ ]
+}

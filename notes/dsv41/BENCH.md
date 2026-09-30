@@ -52,3 +52,16 @@ NCCL 2.6 (81 × 32 µs), HC 1.6, attention 1.1, rot_in 0.6, rest small. Parity v
 Remaining per token (~29.8 ms): EXL3 weights ~20.5 ms (floor), NCCL ~2 ms (83 calls), HC 1.6 ms
 (2 MB fp32 mix matrix per sublayer), attention 0.8, rot_in 0.6, small kernels ~1.5, host ~1–2 ms.
 Next levers are structural (shared expert folded into the grouped expert call, batched small linears).
+
+## 2026-09-30 — head-to-head vs vLLM (same prompt ids, greedy, 200-token cap; `tools/dsv41_vllm_accept.py` + `--cases`)
+
+| prompt | vLLM DSpark k=3 (incl. ~0.1 s prefill) | TensorFold serial | TensorFold DSpark k=3 | ratio |
+|---|---:|---:|---:|---:|
+| story (creative) | 25.8 tok/s, 0.94 acc/round | 30.9 | **33.7**, 1.03 acc/round | 1.31× |
+| reasoning (chat, thinking) | 42.0, 2.53 | 33.2 | **56.7**, 2.38 | 1.35× |
+| code (chat, thinking) | 32.6, 1.53 | 33.1 | **42.9**, 1.74 | 1.32× |
+
+- DSpark acceptance matches vLLM's on the same prompts; vLLM's production 2.19 average reflects predictable traffic.
+- TensorFold's DSpark round costs ~2× a serial step (reasoning: 3.38 tokens/round at 56.7 tok/s = 60 ms/round).
+- Outputs differ from vLLM's (kernel numerics, fp8 KV) and DSpark vs serial differ slightly: multi-row verify is not
+  yet bit-identical to one-row decode (suspect cuBLAS router matmul algorithm by row count).

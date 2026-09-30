@@ -79,7 +79,10 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 
 ## Phase 3 — drafting, long context, prefill
 
-- [ ] DSpark on CUDA (checkpoint `mtp.*`, 128 experts top-3, targets 37–39, block 5), exact verify windows
+- [x] DSpark on CUDA (`cuda/dspark.py`): taps = entry streams of layers 37–39 (V4.1 semantics), Markov head,
+      draft + (N+1)-row verify graphs. Acceptance equals vLLM's on the same prompts; ~1.3× vLLM tok/s (BENCH.md)
+- [ ] Exact verify: multi-row verify must equal one-row decode bit for bit (router mm, any row-count-dependent op)
+- [ ] DSpark round cost (~2× serial step): profile draft vs verify; adaptive k by acceptance; fewer host syncs
 - [ ] CUDA graphs per window width; eager == graph checks
 - [ ] Prefill kernels (EXL3 chunked prefill), long prompts to 600k
 - [ ] KV format ≤ ~3.4 KiB/token; carveout-backed pools

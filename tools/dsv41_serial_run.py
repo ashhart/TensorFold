@@ -33,6 +33,7 @@ def main() -> None:
     ap.add_argument("--no-parity", action="store_true")
     ap.add_argument("--graph", action="store_true", help="capture the one-row decode step as a CUDA graph")
     ap.add_argument("--dspark", type=int, default=0, help="draft N tokens a round with the checkpoint's DSpark blocks")
+    ap.add_argument("--cases", type=Path, help="tools/dsv41_vllm_accept.py results: replay every case's prompt ids")
     args = ap.parse_args()
 
     torch.cuda.set_device(0)
@@ -80,6 +81,19 @@ def main() -> None:
             print(f"vs reference: top-1 agree {100 * agree:.1f}%, |dlogprob| mean {d.mean():.4f} max {d.max():.3f}, "
                   f"NLL ours {-lp_o[:-1].gather(1, tgt[:, None]).mean():.3f} ref "
                   f"{-lp_r[:-1].gather(1, tgt[:, None]).mean():.3f}", flush=True)
+    if args.cases:
+        cases = json.loads(args.cases.read_text())["results"]
+        for case in cases:
+            r = eng.generate(case["ids"], args.decode)
+            if args.rank == 0:
+                same = case.get("out_ids") is not None and r["tokens"][:len(case["out_ids"])] == case["out_ids"][:len(
+                    r["tokens"])]
+                extra = (f", {r['accepted_per_round']:.2f} accepted a round (vLLM {case['accepted_per_round']:.2f})"
+                         if "rounds" in r else "")
+                print(f"{case['name']}: {len(r['tokens'])} tokens {r['decode_tps']:.1f} tok/s{extra}; "
+                      f"same tokens as vLLM: {same}", flush=True)
+        nccl.barrier()
+        return
     res = eng.generate(ids, args.decode)
     if args.rank == 0:
         from tokenizers import Tokenizer
