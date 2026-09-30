@@ -1,0 +1,53 @@
+"""DeepSeek-V4.1-Flash family: discovery, config parsing and CLI refusals, without torch or weights."""
+
+import json
+import shutil
+from pathlib import Path
+
+import pytest
+
+from tensorfold import families
+from tensorfold.families import deepseek_v41
+from tensorfold.families.deepseek_v41.config import Config
+
+FIXTURE = Path(__file__).parent / "fixtures" / "deepseek_v41"
+
+
+def test_family_is_discovered_for_cuda():
+    family = families.families()["deepseek_v41"]
+    assert families.backends_of(family) == ("cuda",)
+
+
+def test_config_parses_the_released_checkpoint():
+    c = Config.from_dict(json.loads((FIXTURE / "config.json").read_text()))
+    assert (c.hidden_size, c.num_hidden_layers, c.n_routed_experts) == (5120, 40, 384)
+    assert len(c.layer_ratios) == 40 and c.layer_ratios[:3] == (0, 0, 2) and c.layer_ratios[-1] == 1
+    assert c.engram_layer_ids == (1, 14) and c.dspark_target_layer_ids == (37, 38, 39)
+    assert (c.rope_factor, c.rope_original) == (16.0, 65536)
+
+
+def test_config_names_a_missing_setting():
+    config = json.loads((FIXTURE / "config.json").read_text())
+    del config["text_config"]["index_topk"]
+    with pytest.raises(KeyError, match="index_topk"):
+        Config.from_dict(config)
+
+
+def test_check_accepts_exl3(tmp_path, capsys):
+    shutil.copy(FIXTURE / "config.json", tmp_path / "config.json")
+    deepseek_v41.check(tmp_path)
+    assert "two DGX Sparks" in capsys.readouterr().out
+
+
+def test_engine_needs_two_ranks(tmp_path):
+    with pytest.raises(ValueError, match="two GPUs"):
+        deepseek_v41.cuda_engine(tmp_path, tp=1)
+    with pytest.raises(ValueError, match="--master"):
+        deepseek_v41.cuda_engine(tmp_path, tp=2)
+
+
+def test_engram_dir_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("TF_DSV41_ENGRAM_DIR", raising=False)
+    assert deepseek_v41.engram_dir(tmp_path) == tmp_path / "engram"
+    monkeypatch.setenv("TF_DSV41_ENGRAM_DIR", "/x/engram-src")
+    assert deepseek_v41.engram_dir(tmp_path) == Path("/x/engram-src")

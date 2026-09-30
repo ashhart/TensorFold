@@ -1,0 +1,313 @@
+"""A slow, single-GPU reference forward of DeepSeek-V4.1-Flash over one prompt, streaming layers from the checkpoint.
+
+Quality and parity checks only: it teacher-forces one sequence of at most 512 tokens (where every layer's sparse
+selection takes all visible compressed entries, so no indexer or candidate blocks run), loads each layer's EXL3
+weights, runs it for all positions and frees it. Arithmetic follows notes/dsv41/ARCH.md: RMS in fp32 (eps 1e-20),
+the residual streams in bf16 between sublayers, hyper-connection math, compressor pooling and attention in fp32.
+
+    python -m tensorfold.families.deepseek_v41.reference MODEL_DIR ENGRAM_DIR --ids 0,1,2 --out logits.pt
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+from safetensors import safe_open
+
+from tensorfold.cuda.exl3.linear import Exl3Linear
+
+from . import engram as E
+from .config import Config
+
+MAX_TOKENS = 512            # beyond this the indexer's top-512 selection would drop entries
+BF = torch.bfloat16
+F32 = torch.float32
+
+
+class Checkpoint:
+    def __init__(self, root: Path, device: str = "cuda") -> None:
+        self.root, self.device = root, device
+        self.index = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
+        self.files: dict[str, object] = {}
+
+    def has(self, name: str) -> bool:
+        return name in self.index
+
+    def get(self, name: str, dtype=None) -> torch.Tensor:
+        f = self.index[name]
+        if f not in self.files:
+            self.files[f] = safe_open(str(self.root / f), framework="pt")
+        t = self.files[f].get_tensor(name).to(self.device)
+        return t if dtype is None else t.to(dtype)
+
+    def linear(self, prefix: str) -> Exl3Linear:
+        return Exl3Linear.from_tensors(self.get(prefix + ".trellis"), self.get(prefix + ".suh"),
+                                       self.get(prefix + ".svh"), "mul1", device=self.device)
+
+
+def lin(layer: Exl3Linear, x: torch.Tensor, out_dtype=None) -> torch.Tensor:
+    """x [T, K] @ W in chunks of 128 rows (the decode linear's limit)."""
+
+    return torch.cat([layer(x[i:i + 128].contiguous(), out_dtype=out_dtype) for i in range(0, x.shape[0], 128)])
+
+
+def rms(x: torch.Tensor, weight: torch.Tensor | None, eps: float) -> torch.Tensor:
+    """fp32 RMSNorm; the caller rounds."""
+
+    xf = x.float()
+    y = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
+    return y * weight.float() if weight is not None else y
+
+
+def inv_freq(c: Config, ratio: int, device) -> torch.Tensor:
+    """32 rotary frequencies: plain theta 1e4 on window-only layers, YaRN theta 1.6e5 on compressed ones."""
+
+    dim = c.qk_rope_head_dim
+    i = torch.arange(0, dim, 2, dtype=torch.float64, device=device)
+    if ratio == 0:
+        return (1.0 / c.rope_theta ** (i / dim)).float()
+    base = c.compress_rope_theta
+    freqs = 1.0 / base ** (i / dim)
+
+    def corr(rot: float) -> float:
+        return dim * math.log(c.rope_original / (rot * 2 * math.pi)) / (2 * math.log(base))
+
+    low = max(math.floor(corr(c.beta_fast)), 0)
+    high = min(math.ceil(corr(c.beta_slow)), dim - 1)
+    ramp = ((torch.arange(dim // 2, dtype=torch.float64, device=device) - low) / max(high - low, 1e-3)).clamp(0, 1)
+    return (freqs * (1 - ramp) + freqs / c.rope_factor * ramp).float()
+
+
+def rope(x: torch.Tensor, pos: torch.Tensor, freqs: torch.Tensor, inverse: bool = False) -> torch.Tensor:
+    """GPT-J interleaved rotation of the last 64 dims of x [T, (heads,) D] at positions pos [T]; fp32 out."""
+
+    x = x.float().clone()
+    ang = pos.double()[:, None] * freqs.double()[None, :]
+    shape = [x.shape[0]] + [1] * (x.dim() - 2) + [freqs.numel()]
+    cos, sin = ang.cos().float().view(shape), ang.sin().float().view(shape)
+    r = x[..., -2 * freqs.numel():]
+    e, o = r[..., 0::2].clone(), r[..., 1::2].clone()
+    if inverse:
+        sin = -sin
+    r[..., 0::2] = e * cos - o * sin
+    r[..., 1::2] = o * cos + e * sin
+    return x
+
+
+class HCMix:
+    def __init__(self, ck: Checkpoint, prefix: str) -> None:
+        self.fn = ck.get(prefix + "_fn", F32)          # [24, 20480]
+        self.base = ck.get(prefix + "_base", F32)      # [24]
+        self.scale = ck.get(prefix + "_scale", F32)    # [3]
+
+    def __call__(self, X: torch.Tensor, pre_in: torch.Tensor, norm_w: torch.Tensor, c: Config):
+        """X bf16 [T, 4, D] -> post [T,4], comb [T,4,4], normed collapsed input bf16 [T, D], this sublayer's pre."""
+
+        T, S, D = X.shape
+        eps = c.hc_eps
+        xf = X.float().reshape(T, S * D)
+        mix = (xf @ self.fn.T) * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + c.rms_norm_eps)
+        pre = torch.sigmoid(mix[:, 0:S] * self.scale[0] + self.base[0:S]) + eps
+        post = 2 * torch.sigmoid(mix[:, S:2 * S] * self.scale[1] + self.base[S:2 * S])
+        comb = mix[:, 2 * S:].view(T, S, S) * self.scale[2] + self.base[2 * S:].view(S, S)
+        comb = torch.softmax(comb, dim=-1) + eps
+        comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
+        for _ in range(c.hc_sinkhorn_iters - 1):
+            comb = comb / (comb.sum(dim=-1, keepdim=True) + eps)
+            comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
+        x_in = (pre_in[:, :, None] * X.float()).sum(1)
+        x_in = rms(x_in.to(BF), norm_w, c.rms_norm_eps).to(BF)
+        return post, comb, x_in, pre
+
+
+def hc_post(b: torch.Tensor, X: torch.Tensor, post: torch.Tensor, comb: torch.Tensor) -> torch.Tensor:
+    """Y[:, j] = post_j * b + sum_i comb[i, j] * X[:, i], fp32 math, bf16 streams."""
+
+    y = post[:, :, None] * b.float()[:, None, :] + torch.einsum("tij,tid->tjd", comb, X.float())
+    return y.to(BF)
+
+
+def attention(ck: Checkpoint, c: Config, L: int, x: torch.Tensor, pos: torch.Tensor, caches: dict) -> torch.Tensor:
+    p = f"layers.{L}.attn"
+    T = x.shape[0]
+    H, Dh = c.num_attention_heads, c.head_dim
+    ratio = c.layer_ratios[L]
+    freqs = inv_freq(c, ratio, x.device)
+    eps = c.rms_norm_eps
+
+    qr = rms(lin(ck.linear(p + ".wq_a"), x), ck.get(p + ".q_norm.weight"), eps).to(BF)
+    kv = rms(lin(ck.linear(p + ".wkv"), x), ck.get(p + ".kv_norm.weight"), eps).to(BF)
+    q = lin(ck.linear(p + ".wq_b"), qr).view(T, H, Dh)
+    q = rms(q, None, eps)                                   # per-head RMS, no weight
+    q = rope(q, pos, freqs)                                 # fp32 [T, H, Dh]
+    kv = rope(kv, pos, freqs).to(BF).float()                # this layer's window rows [T, Dh]
+
+    # compressed entries: layer L's kv source wrote them earlier in this forward (sources compute them here)
+    comp = None
+    if ratio > 0:
+        src = max(s for s in c.kv_source_layer_ids if s <= L)
+        if src == L:
+            caches[src] = compress(ck, c, L, x, ratio, freqs)
+        comp = caches[src]                                  # fp32 [C, Dh], entry j covers [j r, j r + r - 1]
+
+    scale = Dh ** -0.5
+    sink = ck.get(p + ".attn_sink", F32)                    # [H]
+    t = torch.arange(T, device=x.device)
+    # window: keys s with p - 127 <= s <= p
+    win_mask = (t[None, :] <= t[:, None]) & (t[None, :] >= t[:, None] - (c.sliding_window - 1))
+    keys = kv
+    mask = win_mask
+    if comp is not None and comp.shape[0]:
+        C = comp.shape[0]
+        vis = torch.arange(C, device=x.device)[None, :] < ((t[:, None] + 1) // ratio)
+        keys = torch.cat([comp, kv])
+        mask = torch.cat([vis, win_mask], dim=1)
+    scores = torch.einsum("thd,sd->ths", q, keys) * scale  # [T, H, S]
+    scores = scores.masked_fill(~mask[:, None, :], float("-inf"))
+    full = torch.cat([scores, sink.view(1, H, 1).expand(T, H, 1)], dim=-1)
+    w = torch.softmax(full, dim=-1)[..., :-1]
+    o = torch.einsum("ths,sd->thd", w, keys)               # V = K
+    o = rope(o, pos, freqs, inverse=True)                   # fp32
+    o = o.to(BF).view(T, c.o_groups, (H // c.o_groups) * Dh)
+    z = torch.cat([lin(ck.linear(f"{p}.wo_a.slice.{g}"), o[:, g].contiguous()) for g in range(c.o_groups)], dim=1)
+    return lin(ck.linear(p + ".wo_b"), z)
+
+
+def compress(ck: Checkpoint, c: Config, L: int, x: torch.Tensor, ratio: int, freqs: torch.Tensor) -> torch.Tensor:
+    """Compressed KV rows of a kv source (RoPE at the group's first position), fp32 [T // ratio, Dh]."""
+
+    p = f"layers.{L}.attn.compressor"
+    T = x.shape[0]
+    kv = lin(ck.linear(p + ".wkv"), x, out_dtype=F32)
+    norm_w = ck.get(p + ".norm.weight")
+    if ratio == 1:
+        latent = rms(kv, norm_w, c.rms_norm_eps).to(BF)
+    else:
+        gate = lin(ck.linear(p + ".wgate"), x, out_dtype=F32)
+        n = T // ratio
+        kvg = kv[:n * ratio].view(n, ratio, -1)
+        g = torch.softmax(gate[:n * ratio].view(n, ratio, -1), dim=1)
+        latent = rms((g * kvg).sum(1), norm_w, c.rms_norm_eps).to(BF)
+    start = torch.arange(latent.shape[0], device=x.device) * ratio
+    return rope(latent, start, freqs).to(BF).float()
+
+
+def moe(ck: Checkpoint, c: Config, L: int, x: torch.Tensor) -> torch.Tensor:
+    p = f"layers.{L}.ffn"
+    T = x.shape[0]
+    limit = c.swiglu_limit
+    logits = x.float() @ ck.get(p + ".gate.weight", F32).T
+    sc = torch.sqrt(torch.nn.functional.softplus(logits))
+    idx = torch.topk(sc + ck.get(p + ".gate.bias", F32), c.num_experts_per_tok, dim=-1).indices
+    w = sc.gather(1, idx)
+    w = w / w.sum(-1, keepdim=True) * c.routed_scaling_factor
+
+    def expert(prefix: str, xs: torch.Tensor) -> torch.Tensor:
+        g = lin(ck.linear(prefix + ".w1"), xs).float()
+        u = lin(ck.linear(prefix + ".w3"), xs).float()
+        a = torch.nn.functional.silu(g.clamp(max=limit)) * u.clamp(-limit, limit)
+        return lin(ck.linear(prefix + ".w2"), a.to(BF)).float()
+
+    y = torch.zeros((T, c.hidden_size), dtype=F32, device=x.device)
+    for e in torch.unique(idx).tolist():
+        rows, slot = (idx == e).nonzero(as_tuple=True)
+        y.index_add_(0, rows, expert(f"{p}.experts.{e}", x[rows]) * w[rows, slot, None])
+    y += expert(p + ".shared_experts", x)
+    return y.to(BF)
+
+
+def engram_apply(ck: Checkpoint, c: Config, L: int, ell: int, X: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
+    """X bf16 [T, 4, D] plus a gated value from the layer's 24 hashed rows (fp32 [T, 24, 256])."""
+
+    p = f"layers.{L}.engram"
+    T, S, D = X.shape
+    kv = lin(ck.linear(p + ".wkv"), rows.to(BF).reshape(T, -1))            # [T, 5 D]
+    qw, kw = ck.get(p + ".q_weight", F32), ck.get(p + ".k_weight", F32)
+    h = X.float()
+    key = kv[:, :S * D].view(T, S, D).float()
+    val = kv[:, S * D:].float()
+    eps = c.rms_norm_eps
+    dot = (h * qw * kw * key).sum(-1)
+    dot = dot * torch.rsqrt(h.pow(2).mean(-1) + eps) * torch.rsqrt(key.pow(2).mean(-1) + eps) / math.sqrt(D)
+    gate = torch.sigmoid(torch.sign(dot) * torch.sqrt(dot.abs().clamp(min=1e-6)))
+    return (h + gate[:, :, None] * val[:, None, :]).to(BF)
+
+
+def forward(model_dir: Path, engram_dir: Path, ids: list[int], *, layers: int | None = None,
+            log=print) -> dict[str, torch.Tensor]:
+    """Logits fp32 [T, vocab] and the per-layer mean stream (a probe for layer-by-layer parity)."""
+
+    if not 0 < len(ids) <= MAX_TOKENS:
+        raise ValueError(f"the reference takes 1..{MAX_TOKENS} tokens, got {len(ids)}")
+    c = Config.from_dict(json.loads((model_dir / "config.json").read_text()))
+    ck = Checkpoint(model_dir)
+    dev = "cuda"
+    T = len(ids)
+    pos = torch.arange(T, device=dev)
+
+    layout = E.Layout.from_config(c)
+    tmap_file = model_dir / "engram_token_map.npy"
+    tmap = np.load(tmap_file) if tmap_file.exists() else E.token_map(model_dir / "tokenizer.json",
+                                                                     c.engram_compressed_vocab_size)
+    rows_idx = E.hashes(np.array(ids), tmap.astype(np.int64), layout, c.engram_pad_token_id)
+    tables = E.Tables(engram_dir, c.engram_layer_ids)
+
+    e = ck.get("embed.weight")[torch.tensor(ids, device=dev)]
+    X = e[:, None, :].expand(T, c.hc_mult, c.hidden_size).contiguous()
+    pre = torch.zeros((T, c.hc_mult), dtype=F32, device=dev)
+    pre[:, 0] = 1.0                                         # identity collapse: every stream is the embedding
+    caches: dict[int, torch.Tensor] = {}
+    probes = []
+    f = post = comb = None
+    n_layers = c.num_hidden_layers if layers is None else layers
+    for L in range(n_layers):
+        t0 = time.time()
+        if L > 0:
+            X = hc_post(f, X, post, comb)
+        if L in c.engram_layer_ids:
+            ell = c.engram_layer_ids.index(L)
+            rows = tables.rows(ell, rows_idx[:, ell, :]).to(dev)
+            X = engram_apply(ck, c, L, ell, X, rows)
+        hc_a = HCMix(ck, f"layers.{L}.hc_attn")
+        post, comb, x, pre = hc_a(X, pre, ck.get(f"layers.{L}.attn_norm.weight"), c)
+        a = attention(ck, c, L, x, pos, caches)
+        X = hc_post(a, X, post, comb)
+        hc_f = HCMix(ck, f"layers.{L}.hc_ffn")
+        post, comb, x, pre = hc_f(X, pre, ck.get(f"layers.{L}.ffn_norm.weight"), c)
+        f = moe(ck, c, L, x)
+        probes.append(X.float().mean(1)[-1].cpu())
+        torch.cuda.synchronize()
+        log(f"layer {L:2d} {time.time() - t0:5.1f} s  |x| {X.float().norm(dim=-1).mean():.1f}")
+        torch.cuda.empty_cache()
+    X = hc_post(f, X, post, comb)
+    h = (pre[:, :, None] * X.float()).sum(1).to(BF)
+    h = rms(h, ck.get("norm.weight"), c.rms_norm_eps).to(BF)
+    logits = lin(ck.linear("head"), h, out_dtype=F32)
+    return {"logits": logits.cpu(), "probes": torch.stack(probes)}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("model", type=Path)
+    ap.add_argument("engram", type=Path)
+    ap.add_argument("--ids", required=True, help="comma-separated token ids, or @file.json with a list")
+    ap.add_argument("--layers", type=int)
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+    ids = json.loads(Path(args.ids[1:]).read_text()) if args.ids.startswith("@") else \
+        [int(t) for t in args.ids.split(",")]
+    with torch.no_grad():
+        out = forward(args.model, args.engram, ids, layers=args.layers)
+    torch.save({"ids": ids, **out}, args.out)
+    top = out["logits"].argmax(-1).tolist()
+    print("greedy next tokens:", top[-8:])
+
+
+if __name__ == "__main__":
+    main()

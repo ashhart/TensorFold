@@ -14,14 +14,15 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 ## Phase 0 — groundwork
 
 - [x] Clone upstream, branch `dsv41-cuda`, this TODO
-- [ ] NVIDIA container `nvcr.io/nvidia/pytorch:26.07-py3` on both nodes; install TensorFold; build kernels on sm_121
-- [ ] Toolchain smoke: `python -m tensorfold.cuda.exl3.inspect` on the V4.1 checkpoint (headers only)
-- [ ] Toolchain smoke: `tests/cuda/test_exl3_*` on GB10 (needs vLLM stopped)
+- [x] NVIDIA container `nvcr.io/nvidia/pytorch:26.07-py3` on both nodes; install TensorFold; build kernels on sm_121
+  (dev container `tf-dev` on aiai: repo at /tf, models at /models, Engram at /engram-src)
+- [x] Toolchain smoke: `python -m tensorfold.cuda.exl3.inspect` — all 47,900 groups readable (`notes/dsv41/inspect.txt`)
+- [x] Toolchain smoke: `tests/cuda/test_exl3_*` on GB10 — 114 passed, 54 skipped (need other checkpoints)
 - [x] **DRM scanout carveout allocator, clean-room rewrite** (`tensorfold/cuda/carveout.py`, pure ctypes, MIT)
   - [x] DRM dumb buffer create/map, `cudaHostRegister(DEVICEMAP)`, torch tensor view, process-lifetime owner
   - [x] Opt-in via `TF_CARVEOUT=1`, size `TF_CARVEOUT_BYTES` (default 1792 MiB), card `TF_DRM_CARD`
   - [x] Probe CLI: `python -m tensorfold.cuda.carveout probe [--cuda]`
-  - [ ] Verify on GB10 with vLLM stopped: MemAvailable unchanged, GPU round trip, bandwidth vs cudaMalloc
+  - [x] Verify on GB10 with vLLM stopped: 1792 MiB, 0 MiB host RAM, round trip ok, 59 vs 122 GB/s (`notes/dsv41/BENCH.md`)
   - [ ] Hand the carveout to the V4.1 compressed-KV pools only (59 vs 124 GB/s — keep hot buffers out)
 - [x] Capacity: host reserve configurable (`TF_HOST_RESERVE_GIB`; default stays max(4 GiB, 10 %)),
       carveout bytes counted as room outside MemAvailable
@@ -30,11 +31,24 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 ## Phase 1 — family skeleton + reference
 
 - [x] `families/deepseek_v41`: MODEL_TYPES, config parsing (text_config), EXL3 check, `cuda_engine` stub
+- [x] Architecture spec from vLLM reference: `notes/dsv41/ARCH.md` (open questions in §13)
+- [x] Weight-streaming floor per rank: 482 µs/layer, ~49 tok/s serial ceiling (`tools/dsv41_bench_layer.py`, BENCH.md)
 - [ ] Checkpoint map: EXL3 groups vs plain tensors per layer; per-rank split plan (experts by id, attention by head)
 - [ ] Per-rank weight budget (must stay ≤ ~99.5 GiB/rank like vLLM)
-- [ ] Reference activations: dump per-layer hidden states from the vLLM deployment for a few prompts
-      (teacher-forced) → golden files for layer-by-layer parity
+- [x] Engram hashing/token map/bucket layout (`families/deepseek_v41/engram.py`; multipliers, primes, 99,092 ids verified)
+- [x] Single-GPU layer-streaming reference forward, T ≤ 512 (`families/deepseek_v41/reference.py`)
+- [ ] Goldens: vLLM `prompt_logprobs` for 6 prompts (`tools/dsv41_golden.py`) → `notes/dsv41/golden.json`
+- [ ] Reference vs goldens (`tools/dsv41_compare.py`): top-1 agreement, |Δlogprob|
 - [ ] Chat template / tokenizer: DeepSeek V4.1 encoder (`deepseek_v41` template, DSML tool calls, reasoning_effort)
+
+## Spec findings that change the plan (ARCH.md)
+
+- Not an encoder/decoder: all layers causal. Only layers 2, 8, 14 (ratio 2) and 20 (ratio 1) own long-range KV;
+  the rest read their source's cache. ~1.8 KB/token long-range KV (fp8) → 600k context ≈ 1.1 GB. KV is cheap.
+- Top-k computed once per index source (2, 8, 14, 20, 24, 28, 32, 36) and reused by following layers.
+- Below 512 tokens nothing is dropped: indexer/candidates can be deferred for first parity.
+- Engram tables are 101 GB/layer fp8 in the original shards; 24 random 256 B rows/token/layer.
+- The served checkpoint is the in-place abliterated variant (`ABLIT_META.json`, wo_b of layers 10–35).
 
 ## Phase 2 — serial TP=2 engine (go/no-go)
 
