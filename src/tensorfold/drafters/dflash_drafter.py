@@ -43,6 +43,9 @@ def resolve_draft_path(draft: str) -> str:
     return hits[-1]
 
 
+# the reduced draft head against the full head, as a share of the largest logit (tests/test_dflash_draft_vocab.py)
+SUB_HEAD_TOLERANCE = 0.02
+
 class DFlashDrafter:
     """The shared drafter model; one ``DFlashProposer`` per stream holds that stream's cache."""
 
@@ -120,12 +123,35 @@ class DFlashDrafter:
             return logits, ids
         from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
-        weight, sbt, ids, nt = sub
-        logits = lane_qmm.lane_matmul(hidden, weight, sbt, tiled=True, nt=nt) * self.model.config.output_multiplier
+        weight, sbt, ids, nt, group = sub
+        # the head's own group size: a group-32 head (oQ4e keeps lm_head at its 4-bit/32 base) read at the
+        # default 64 gave wrong draft logits, so drafts were almost never accepted while replies stayed exact
+        logits = lane_qmm.lane_matmul(hidden, weight, sbt, tiled=True, nt=nt, group=group) * self.model.config.output_multiplier
         cap = self.model.config.final_logit_softcapping
         if cap is not None and cap > 0:
             logits = mx.tanh(logits / cap) * cap
+        if not getattr(self, "_sub_checked", False):
+            self._sub_checked = True
+            if not self._sub_matches_head(hidden, head, logits, ids):
+                self._sub = None
+                return self.candidate_logits(hidden)
         return logits, ids
+
+    def _sub_matches_head(self, hidden: mx.array, head: Any, logits: mx.array, ids: mx.array) -> bool:
+        """Once, on the first draft: the reduced head's logits against the full head's on the same rows."""
+
+        full = head(hidden) * self.model.config.output_multiplier
+        cap = self.model.config.final_logit_softcapping
+        if cap is not None and cap > 0:
+            full = mx.tanh(full / cap) * cap
+        kept = mx.take(full, ids, axis=-1).astype(mx.float32)
+        diff = float(mx.max(mx.abs(logits.astype(mx.float32) - kept)).item())
+        scale = float(mx.max(mx.abs(kept)).item())
+        if diff <= SUB_HEAD_TOLERANCE * max(scale, 1e-6):
+            return True
+        print(f"[tensorfold] draft head check: the reduced head's logits differ from the full head's (max "
+              f"{diff:.3g} against {scale:.3g}); drafting with the full head instead", flush=True)
+        return False
 
     def _matmul_head(self) -> Any:
         """The head's matmul: the head itself, or the matmul under a head that rotates its rows first."""
@@ -152,7 +178,7 @@ class DFlashDrafter:
                     self._plain_sub = (parts, ids, int(head.group_size), int(head.bits))
         return self._plain_sub
 
-    def _sub_head(self) -> tuple[mx.array, mx.array, mx.array, int] | None:
+    def _sub_head(self) -> tuple[mx.array, mx.array, mx.array, int, int] | None:
         """``draft_vocab``'s rows of the lane-tiled head (whole 32-row tiles), built once."""
 
         if getattr(self, "_sub", False) is False:
@@ -169,7 +195,7 @@ class DFlashDrafter:
                     sbt = mx.concatenate([head._lane_sbt[:, a:b] for a, b in spans], axis=1)
                     ids = mx.concatenate([mx.arange(a, b, dtype=mx.int32) for a, b in spans])
                     mx.eval(weight, sbt, ids)
-                    self._sub = (weight, sbt, ids, nt)
+                    self._sub = (weight, sbt, ids, nt, int(getattr(head, "group_size", 64)))
         return self._sub
 
 
