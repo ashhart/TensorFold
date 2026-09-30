@@ -53,6 +53,19 @@ pub const Runtime = struct {
     }
 
     pub fn checkWeights(runtime: Runtime, io: std.Io, directory: []const u8, flash: bool) !void {
+        return runtime.checkWeightsAndDraft(io, directory, flash, null);
+    }
+
+    pub fn checkWeightsAndDraft(runtime: Runtime, io: std.Io, directory: []const u8, flash: bool, drafter: ?[]const u8) !void {
+        var size = try weightBytes(io, directory, flash);
+        if (drafter) |path| size = try std.math.add(u64, size, try weightBytes(io, path, false));
+        if (size >= runtime.share) {
+            std.debug.print("Weights need {d:.1} GiB; the server budget leaves {d:.1} GiB for MLX. Set TENSORFOLD_MEMORY_LIMIT_GB within this Mac's working-set limit or use a smaller checkpoint.\n", .{ @as(f64, @floatFromInt(size)) / policy.gib, @as(f64, @floatFromInt(runtime.share)) / policy.gib });
+            return error.WeightsExceedMemoryBudget;
+        }
+    }
+
+    fn weightBytes(io: std.Io, directory: []const u8, flash: bool) !u64 {
         var dir = try std.Io.Dir.cwd().openDir(io, directory, .{ .iterate = true });
         defer dir.close(io);
         var iterator = dir.iterate();
@@ -71,10 +84,7 @@ pub const Runtime = struct {
                 };
             }
         }
-        if (size >= runtime.share) {
-            std.debug.print("Weights need {d:.1} GiB; the server budget leaves {d:.1} GiB for MLX. Set TENSORFOLD_MEMORY_LIMIT_GB within this Mac's working-set limit or use a smaller checkpoint.\n", .{ @as(f64, @floatFromInt(size)) / policy.gib, @as(f64, @floatFromInt(runtime.share)) / policy.gib });
-            return error.WeightsExceedMemoryBudget;
-        }
+        return size;
     }
 
     pub fn wire(runtime: *Runtime) !void {
@@ -141,21 +151,32 @@ fn growthFloor(comptime M: type, state: *@import("request_state.zig").State(M)) 
             kv += @as(f64, @floatFromInt(arrayBytes(cache.pool) + arrayBytes(cache.ipool))) / @as(f64, @floatFromInt(@max(1, state.position)));
         }
     }
+    if (@hasDecl(M, "DraftCache")) {
+        inline for (comptime std.meta.fieldNames(M.DraftCache)) |name| {
+            if (@FieldType(M.DraftCache, name) == @import("kv_buffer.zig").Buffer) {
+                const buffer = @field(state.head_cache, name);
+                const each = perPosition(buffer.current, buffer.axis);
+                kv += each;
+                spare += each;
+            }
+        }
+    }
     return .{ .kv = kv, .spare = spare };
 }
 
 pub fn measure(s: *session.Session) !policy.StreamMemory {
     switch (s.backend) {
-        inline else => |*m| return measureModel(m, &s.tokenizer),
+        inline else => |*m| return measureModel(m, &s.tokenizer, s.draftSink(.{})),
     }
 }
 
-fn measureModel(m: anytype, tokenizer: *@import("vendor/tokenizer.zig").Tokenizer) !policy.StreamMemory {
+fn measureModel(m: anytype, tokenizer: *@import("vendor/tokenizer.zig").Tokenizer, sink: session.Sink) !policy.StreamMemory {
     const M = @TypeOf(m.*);
     const G = session.Generation(M);
     const chunk: usize = if (@hasDecl(M, "prefill")) 2048 else 16;
+    const vocab: usize = if (M == @import("model.zig").Model) 248320 else if (@hasField(M, "vocab")) @intCast(m.vocab) else M.vocab;
     var tokens: [2 * chunk + 64]i32 = undefined;
-    for (&tokens, 0..) |*token, index| token.* = @intCast(1000 + index);
+    for (&tokens, 0..) |*token, index| token.* = @intCast((1000 + index) % vocab);
     var held: [3]G = undefined;
     var initialized: usize = 0;
     defer {
@@ -164,7 +185,7 @@ fn measureModel(m: anytype, tokenizer: *@import("vendor/tokenizer.zig").Tokenize
     }
     // Materialize the same path before measuring cache growth.
     {
-        var warm = try G.init(m, tokenizer, mx.allocator, tokens[0..64], .{ .max_tokens = 1 }, .{}, null);
+        var warm = try G.init(m, tokenizer, mx.allocator, tokens[0..64], .{ .max_tokens = 1 }, sink, null);
         defer warm.deinit();
         while (warm.phase == .prefill) _ = try warm.step(m);
     }
@@ -175,7 +196,7 @@ fn measureModel(m: anytype, tokenizer: *@import("vendor/tokenizer.zig").Tokenize
         try mx.check(mx.c.mlx_clear_cache());
         const before = try activeBytes();
         try mx.check(mx.c.mlx_reset_peak_memory());
-        generation.* = try G.init(m, tokenizer, mx.allocator, tokens[0..count], .{ .max_tokens = 2, .ignore_eos = true }, .{}, null);
+        generation.* = try G.init(m, tokenizer, mx.allocator, tokens[0..count], .{ .max_tokens = @max(2, sink.draft_budget + 2), .ignore_eos = true }, sink, null);
         initialized += 1;
         while (generation.phase == .prefill) _ = try generation.step(m);
         try mx.check(mx.c.mlx_synchronize(mx.stream));

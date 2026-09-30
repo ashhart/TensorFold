@@ -888,6 +888,7 @@ pub fn checkModel(io: std.Io, dir: []const u8, output: []const u8) !void {
         }
     }
     std.debug.print("PASS: DeepSeek greedy/stochastic MTP generation at draft budgets 0, 1, 3, 7 and 15.\n", .{});
+    try @import("session_checks.zig").checkSyntheticNeural(&m);
 }
 
 pub fn checkDspark(io: std.Io, dir: []const u8, output: []const u8) !void {
@@ -932,4 +933,5 @@ pub fn checkDspark(io: std.Io, dir: []const u8, output: []const u8) !void {
         }
     }
     std.debug.print("PASS: DSpark partial target commits, context positions and serial/speculative generation.\n", .{});
+    try @import("session_checks.zig").checkSyntheticNeural(&model);
 }

@@ -112,6 +112,10 @@ pub fn State(comptime M: type) type {
         mtp_cache: if (@hasField(M, "mtp_cache")) @FieldType(M, "mtp_cache") else void = if (@hasField(M, "mtp_cache")) .{} else {},
         mtp_position: i32 = 0,
         mtp_generation: u64 = 0,
+        draft_hidden: mx.Array = mx.empty,
+        head_cache: if (@hasDecl(M, "DraftCache")) M.DraftCache else void = if (@hasDecl(M, "DraftCache")) .{} else {},
+        dflash_cache: [5]@import("model.zig").Cache = @splat(.{}),
+        dflash_offset: i32 = 0,
         draft: ?DFlash = null,
         dspark: ?DSpark = null,
 
@@ -133,6 +137,9 @@ pub fn State(comptime M: type) type {
             for (s.cache) |*cache| cache.deinit();
             mx.allocator.free(s.cache);
             if (@hasField(M, "mtp_cache")) s.mtp_cache.deinit();
+            mx.free(s.draft_hidden);
+            if (@hasDecl(M, "DraftCache")) s.head_cache.deinit();
+            for (&s.dflash_cache) |*cache| cache.deinit();
             if (s.draft) |*draft| draft.deinit();
             if (s.dspark) |*draft| draft.deinit();
             s.* = undefined;
@@ -143,6 +150,10 @@ pub fn State(comptime M: type) type {
             @memset(cache, .{});
             var out = Self{ .cache = cache, .position = s.position, .rope_delta = s.rope_delta, .generation = s.generation, .mtp_position = s.mtp_position, .mtp_generation = s.mtp_generation };
             errdefer out.deinit();
+            out.draft_hidden = try retained(s.draft_hidden);
+            if (@hasDecl(M, "DraftCache")) out.head_cache = try s.head_cache.clone();
+            out.dflash_offset = s.dflash_offset;
+            for (s.dflash_cache, &out.dflash_cache) |source, *copy| copy.* = try source.clone();
             for (s.cache, out.cache) |source, *copy| copy.* = try source.clone();
             if (@hasField(M, "mtp_cache")) out.mtp_cache = try s.mtp_cache.clone();
             if (s.draft) |draft| out.draft = try draft.clone();
@@ -154,6 +165,9 @@ pub fn State(comptime M: type) type {
             var total: u64 = 0;
             for (s.cache) |cache| total +|= cacheBytes(cache);
             if (@hasField(M, "mtp_cache")) total +|= cacheBytes(s.mtp_cache);
+            total +|= arrayBytes(s.draft_hidden);
+            if (@hasDecl(M, "DraftCache")) total +|= cacheBytes(s.head_cache);
+            for (s.dflash_cache) |cache| total +|= cacheBytes(cache);
             if (s.draft) |draft| {
                 for (draft.cache) |cache| total +|= cacheBytes(cache);
                 total +|= arrayBytes(draft.pending);
@@ -165,6 +179,11 @@ pub fn State(comptime M: type) type {
         }
 
         /// Every pass must be committed or destroyed before switching requests.
+        pub fn swapDFlash(s: *Self, d: *@import("drafter.zig").Drafter) void {
+            std.mem.swap(@TypeOf(s.dflash_cache), &s.dflash_cache, &d.cache);
+            std.mem.swap(i32, &s.dflash_offset, &d.offset);
+        }
+
         pub fn swap(s: *Self, m: *M) void {
             for (s.cache, m.cache[0..]) |*saved, *active| std.mem.swap(Cache, saved, active);
             inline for (.{ "position", "rope_delta", "generation", "mtp_cache", "mtp_position", "mtp_generation" }) |field| if (@hasField(M, field)) {

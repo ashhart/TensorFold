@@ -20,7 +20,9 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-bonsai-pack")) return @import("bonsai.zig").check(io, args[2], args[3]);
     if (args.len == 2 and std.mem.eql(u8, args[1], "check-request-state")) return @import("request_state_checks.zig").check();
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-session-images")) return @import("session_checks.zig").checkImages(io, args[2], args[3]);
+    if (args.len == 5 and std.mem.eql(u8, args[1], "check-session-neural-images")) return @import("session_checks.zig").checkNeuralImages(io, args[2], args[3], args[4]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-session-rounds")) return @import("session_checks.zig").check(io, args[2]);
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-session-neural")) return @import("session_checks.zig").checkNeural(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-memory-budget")) return @import("memory_budget.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-prompt-cache")) return @import("prompt_cache.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-prefill-plan")) return @import("prefill_plan.zig").check(io, args[2]);
@@ -70,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 3 or !std.mem.eql(u8, args[1], "run")) {
         std.debug.print("Convert DeepSeek drafters: tensorfold convert-drafter mtp SHARD... OUTDIR [--layer 0]\n  tensorfold convert-drafter dspark SHARD... OUTDIR\n", .{});
         std.debug.print("DFlash2 calibration: built-in upstream tables; --draft-calibration FILE overrides them.\n  tensorfold fit-draft-calibration SAMPLES_JSON OUTPUT_JSON\n", .{});
-        std.debug.print("HTTP: tensorfold serve MODEL_DIR [--host 127.0.0.1] [--port 8080] [--served-model-name NAME]\n  [--temperature T] [--top-k K] [--top-p P] [--max-tokens 4096]\n  [--thinking | --no-thinking] [--reasoning-effort medium] [--thinking-budget 0]\n  [--request-timeout-seconds 0] [--shutdown-grace-seconds 5]\n  [--vision-urls] Raw/chat completions with SSE; Qwen accepts data URLs and opt-in public HTTPS images.\n", .{});
+        std.debug.print("HTTP: tensorfold serve MODEL_DIR [--host 127.0.0.1] [--port 8080] [--served-model-name NAME]\n  [--temperature T] [--top-k K] [--top-p P] [--max-tokens 4096]\n  [--thinking | --no-thinking] [--reasoning-effort medium] [--thinking-budget 0]\n  [--drafter DIR] [--drafter-bits 8|4|0] [--max-draft 3] [--draft-calibration FILE] [--no-drafts]\n  [--request-timeout-seconds 0] [--shutdown-grace-seconds 5]\n  [--vision-urls] Raw/chat completions with SSE; Qwen accepts data URLs and opt-in public HTTPS images.\n", .{});
         std.debug.print("Qwen images: --image LOCAL_FILE (up to four); optional explicit <|vision_start|><|image_pad|><|vision_end|> markers in --prompt.\n", .{});
         std.debug.print("Text families: Qwen/Bonsai, Nemotron, Flash Next, Gemma, GLM, DeepSeek.\nGLM/DeepSeek MTP: --mtp-drafts 0..15 or --no-drafts. DeepSeek: --drafter DIR with model.safetensors and config.json (deepseek_v4_mtp or deepseek_v4_dspark). Gemma: --drafter DIR [--drafter-bits 8|4|0].\nNemotron/Flash MTP options: --full-draft-vocab, --no-queued-drafts, --no-early-mtp, --no-gpu-handoff, --fixed-drafts, --check-mtp-state\n", .{});
         std.debug.print("Flash resident PLE: --resident-ple [--no-ple-wiring], --check-ple-state [--check-long-cache]\nDiagnostics: tensorfold check-ngram-gpu; tensorfold check-ple-resident MODEL_DIR\n", .{});

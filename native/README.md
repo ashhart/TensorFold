@@ -166,6 +166,8 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
 | Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven tokenizers, including DeepSeek's official encoder and upstream's rejection of required DeepSeek tool calls; no weights loaded |
 | Tool structure and copy proposals | `test-tool-drafts test-server-tool-drafts -Doptimize=safe -j1` | Seven-tokenizer upstream oracle; Qwen HTTP acceptance/rejection, serial parity, sampling and streaming |
+| Neural request state and HTTP | `test-session-neural test-server-neural -Doptimize=safe -j1` | Qwen DFlash2, Nemotron/Flash MTP and Gemma DFlash; serial parity, prefix reuse, interleaving, JSON/SSE and cancellation. Add `-Dgemma-drafter=/absolute/checkpoint` for a trained Gemma drafter; otherwise uses the synthetic fixture |
+| Neural images/tools and large-family HTTP | `test-server-neural-multimodal test-server-neural-synthetic -Doptimize=safe -j1` | Qwen image/text and tool controls; synthetic GLM MTP, DeepSeek MTP and DSpark. Full GLM/DeepSeek inference remains unverified |
 | Checkpoint metadata rejection | `test-schema-failures -Doptimize=safe -j1` | Installed schema checkpoints; no GPU |
 
 Start GPU verification with:
@@ -252,7 +254,14 @@ mode use the final parser, matching upstream. Prose streams as its interpretatio
 becomes unambiguous. Serving verifies schema-derived tool structure and copy-span
 drafts against the target model. Use request `"draft": false` or server
 `--no-drafts` for serial decoding. `/health.inference` includes proposed/accepted
-token totals and structural-token totals. Neural speculative serving remains pending.
+token totals, structural-token totals and neural-token totals. Serving enables
+checkpoint MTP heads for Nemotron, Flash and GLM. `--drafter DIR` loads Qwen
+DFlash2, Gemma DFlash or a converted DeepSeek MTP/DSpark folder; Gemma supports
+`--drafter-bits 8|4|0`. `--max-draft N` (alias `--mtp-drafts`, default `3`, range
+`0`–`15`) limits neural proposals; zero leaves only tool/copy drafting enabled.
+Qwen accepts `--draft-calibration FILE`. Draft caches are request-local and
+included in prefix snapshots and memory admission. No models are downloaded by
+these options.
 One inference worker owns the model; its queue holds eight requests.
 Against a running Qwen server, compare JSON/SSE text, reasoning and images with
 `.zig-toolchain/zig run tools/native_http_checks.zig -- http://127.0.0.1:8080/v1/chat/completions /path/to/image.png`.

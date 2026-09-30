@@ -139,7 +139,7 @@ fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.
     for (prompts, options, &baseline, &expected) |prompt, opt, *capture, *reply| {
         var serial = opt;
         serial.draft = false;
-        var g = try G.init(m, tok, a, prompt, serial, capture.sink(), null);
+        var g = try G.init(m, tok, a, prompt, serial, s.draftSink(capture.sink()), null);
         defer g.deinit();
         while (!try g.step(m)) {}
         reply.* = try g.takeReply();
@@ -155,7 +155,7 @@ fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.
         for ([_]usize{ 320, 640 }) |at| @memcpy(adaptive_prompt[at..][0..plan.assistant.len], plan.assistant);
         var adaptive_capture = Capture{};
         defer adaptive_capture.deinit();
-        var cold = try G.init(m, tok, a, adaptive_prompt, options[1], adaptive_capture.sink(), null);
+        var cold = try G.init(m, tok, a, adaptive_prompt, options[1], s.draftSink(adaptive_capture.sink()), null);
         defer cold.deinit();
         try cold.setPlan(plan);
         try std.testing.expectEqual(@as(usize, 320), cold.chunks.next(0));
@@ -170,12 +170,13 @@ fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.
     var initialized: usize = 0;
     defer for (active[0..initialized]) |*g| g.deinit();
     for (prompts, options, &captured, &active) |prompt, opt, *capture, *g| {
-        g.* = try G.init(m, tok, a, prompt, opt, capture.sink(), null);
+        g.* = try G.init(m, tok, a, prompt, opt, s.draftSink(capture.sink()), null);
+        if (s.draft_options.enabled) g.proposer.?.fallback_enabled = false;
         initialized += 1;
     }
     var cancelled_capture = Capture{};
     defer cancelled_capture.deinit();
-    var cancelled = try G.init(m, tok, a, prompts[0], options[0], cancelled_capture.sink(), null);
+    var cancelled = try G.init(m, tok, a, prompts[0], options[0], s.draftSink(cancelled_capture.sink()), null);
     defer cancelled.deinit();
     _ = try cancelled.step(m);
     cancelled_capture.cancelled = true;
@@ -192,6 +193,7 @@ fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.
         }
     }
     for (&active, expected, baseline, captured) |*g, before, before_sink, after_sink| {
+        if (s.draft_options.enabled) try std.testing.expect(g.neural_proposed > 0);
         var actual = try g.takeReply();
         defer actual.deinit(a);
         try same(before, actual, before_sink, after_sink);
@@ -202,7 +204,7 @@ fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.
         options[0].stops = &.{expected[0].content[0..3]};
         var stopped_capture = Capture{};
         defer stopped_capture.deinit();
-        var stopped = try G.init(m, tok, a, prompts[0], options[0], stopped_capture.sink(), null);
+        var stopped = try G.init(m, tok, a, prompts[0], options[0], s.draftSink(stopped_capture.sink()), null);
         defer stopped.deinit();
         while (!try stopped.step(m)) {}
         var reply = try stopped.takeReply();
@@ -221,10 +223,18 @@ fn interleaved(s: *session.Session, m: anytype, tok: *@import("vendor/tokenizer.
 }
 
 pub fn check(io: std.Io, dir: []const u8) !void {
+    return checkWithDraft(io, dir, .{});
+}
+
+pub fn checkNeural(io: std.Io, dir: []const u8, drafter: []const u8) !void {
+    return checkWithDraft(io, dir, .{ .enabled = true, .directory = if (std.mem.eql(u8, drafter, "-")) null else drafter, .max_draft = 15 });
+}
+
+fn checkWithDraft(io: std.Io, dir: []const u8, options: @import("neural_draft.zig").Options) !void {
     try mx.init();
     defer mx.shutdown();
     {
-        var s = try session.Session.init(io, dir);
+        var s = try session.Session.initWithDraft(io, dir, options);
         defer s.deinit();
         switch (s.backend) {
             inline else => |*m| try interleaved(&s, m, &s.tokenizer),
@@ -237,11 +247,19 @@ pub fn check(io: std.Io, dir: []const u8) !void {
 }
 
 pub fn checkImages(io: std.Io, dir: []const u8, path: []const u8) !void {
+    return checkImagesWithDraft(io, dir, path, .{});
+}
+
+pub fn checkNeuralImages(io: std.Io, dir: []const u8, path: []const u8, drafter: []const u8) !void {
+    return checkImagesWithDraft(io, dir, path, .{ .enabled = true, .directory = drafter, .max_draft = 15 });
+}
+
+fn checkImagesWithDraft(io: std.Io, dir: []const u8, path: []const u8, draft_options: @import("neural_draft.zig").Options) !void {
     try mx.init();
     defer mx.shutdown();
     {
         const a = mx.allocator;
-        var s = try session.Session.init(io, dir);
+        var s = try session.Session.initWithDraft(io, dir, draft_options);
         defer s.deinit();
         if (s.backend != .qwen) return error.ExpectedQwen;
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(20 * 1024 * 1024));
@@ -276,7 +294,7 @@ pub fn checkImages(io: std.Io, dir: []const u8, path: []const u8) !void {
         for (prompts, images, &reference, &expected) |prompt, image, *output, *reply| {
             var serial = options;
             serial.draft = false;
-            var g = try G.init(&s.backend.qwen, &s.tokenizer, a, prompt, serial, output.sink(), image);
+            var g = try G.init(&s.backend.qwen, &s.tokenizer, a, prompt, serial, s.draftSink(output.sink()), image);
             defer g.deinit();
             while (!try g.step(&s.backend.qwen)) {}
             reply.* = try g.takeReply();
@@ -286,7 +304,8 @@ pub fn checkImages(io: std.Io, dir: []const u8, path: []const u8) !void {
         var initialized: usize = 0;
         defer for (active[0..initialized]) |*g| g.deinit();
         for (prompts, images, &capture, &active) |prompt, image, *output, *g| {
-            g.* = try G.init(&s.backend.qwen, &s.tokenizer, a, prompt, options, output.sink(), image);
+            g.* = try G.init(&s.backend.qwen, &s.tokenizer, a, prompt, options, s.draftSink(output.sink()), image);
+            if (draft_options.enabled) g.proposer.?.fallback_enabled = false;
             initialized += 1;
         }
         var done = [_]bool{ false, false };
@@ -297,6 +316,7 @@ pub fn checkImages(io: std.Io, dir: []const u8, path: []const u8) !void {
             };
         }
         for (&active, expected, reference, capture) |*g, before, before_sink, after_sink| {
+            if (draft_options.enabled) try std.testing.expect(g.neural_proposed > 0);
             var actual = try g.takeReply();
             defer actual.deinit(a);
             try same(before, actual, before_sink, after_sink);
@@ -307,4 +327,70 @@ pub fn checkImages(io: std.Io, dir: []const u8, path: []const u8) !void {
     try mx.check(mx.c.mlx_get_active_memory(&active));
     try std.testing.expectEqual(@as(usize, 0), active);
     std.debug.print("PASS: interleaved image/text requests preserve tokens, streaming and independent multimodal positions\n", .{});
+}
+
+pub fn checkSyntheticNeural(m: anytype) !void {
+    const M = @TypeOf(m.*);
+    const G = session.Generation(M);
+    const a = mx.allocator;
+    m.reset();
+    defer m.reset();
+    var tok = @import("vendor/tokenizer.zig").Tokenizer.initEmptyForTests(a, .wordpiece);
+    defer tok.deinit();
+    for (0..@intCast(m.vocab)) |id| {
+        const word = try std.fmt.allocPrint(a, "t{d}", .{id});
+        try tok.vocab.put(word, @intCast(id));
+        try tok.id_to_token.put(@intCast(id), word);
+    }
+    var prompt: [33]i32 = undefined;
+    for (&prompt, 0..) |*id, i| id.* = @intCast(i + 1);
+    for ([_]f64{ 0, 0.7 }) |temperature| {
+        const options = session.Options{ .max_tokens = 18, .ignore_eos = true, .seed = 819, .sampling = .{ .temperature = temperature, .top_k = 12, .top_p = 0.8, .metal = true } };
+        var reference = Capture{};
+        defer reference.deinit();
+        var serial_options = options;
+        serial_options.draft = false;
+        var baseline = try G.init(m, &tok, a, &prompt, serial_options, reference.sink(), null);
+        defer baseline.deinit();
+        while (!try baseline.step(m)) {}
+        for ([_]usize{ 1, 3, 15 }) |depth| {
+            var captures: [2]Capture = @splat(.{});
+            defer for (&captures) |*capture| capture.deinit();
+            var generations: [2]G = undefined;
+            var initialized: usize = 0;
+            defer for (generations[0..initialized]) |*g| g.deinit();
+            for (&generations, &captures) |*g, *capture| {
+                var sink = capture.sink();
+                sink.draft_budget = depth;
+                g.* = try G.init(m, &tok, a, &prompt, options, sink, null);
+                initialized += 1;
+                g.proposer.?.fallback_enabled = false;
+            }
+            try std.testing.expect(!try generations[0].step(m));
+            try generations[1].restorePrefix(&generations[0].state);
+            var done = [_]bool{ false, false };
+            while (!std.mem.allEqual(bool, &done, true)) {
+                for (&generations, &done) |*g, *ended| if (!ended.*) {
+                    ended.* = try g.step(m);
+                };
+                try std.testing.expectEqual(@as(i32, 0), m.position);
+            }
+            for (&generations, captures) |*g, capture| {
+                try std.testing.expect(g.neural_proposed > 0);
+                try same(baseline.reply, g.reply, reference, capture);
+                try std.testing.expectEqual(baseline.state.position, g.state.position);
+                var scope = mx.Scope{};
+                defer scope.deinit();
+                for (baseline.state.cache, g.state.cache) |expected, actual| inline for (comptime std.meta.fieldNames(@TypeOf(actual))) |field| {
+                    if (@FieldType(@TypeOf(actual), field) == mx.Array) {
+                        const x = @field(expected, field);
+                        const y = @field(actual, field);
+                        try std.testing.expectEqual(x.ctx == null, y.ctx == null);
+                        if (x.ctx != null) try @import("sampling_checks.zig").equal(&scope, x, y);
+                    }
+                };
+            }
+        }
+    }
+    std.debug.print("PASS: synthetic {s} request-local neural depths 1/3/15, serial cache/output parity, sampling and prefix restoration\n", .{@typeName(M)});
 }

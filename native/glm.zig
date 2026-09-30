@@ -867,6 +867,7 @@ pub fn checkModel(io: std.Io, dir: []const u8, out_dir: []const u8) !void {
     try m.checkExact(19);
     try m.checkMtp();
     try m.checkGeneration();
+    try @import("session_checks.zig").checkSyntheticNeural(&m);
 }
 fn save(s: *mx.Scope, path: []const u8, value: A) !void {
     const z = try mx.allocator.dupeSentinel(u8, path, 0);

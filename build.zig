@@ -388,6 +388,22 @@ pub fn build(b: *std.Build) void {
     server_drafts.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--drafts-only" });
     server_drafts.addArtifactArg(http_checks);
     b.step("test-server-tool-drafts", "Verify target-accepted tool/copy proposals, serial parity, sampling and forced controls over HTTP").dependOn(&server_drafts.step);
+    const neural_images = b.addRunArtifact(exe);
+    neural_images.addArgs(&.{ "check-session-neural-images", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "build/native-checks/session-image/image.png", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}) });
+    neural_images.step.dependOn(&session_image_fixture.step);
+    const neural_tools = b.addRunArtifact(lifecycle.producer.?);
+    neural_tools.addArtifactArg(exe);
+    neural_tools.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--drafts-only" });
+    neural_tools.addArtifactArg(http_checks);
+    neural_tools.addArg(b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}));
+    neural_tools.step.dependOn(&neural_images.step);
+    const neural_rounds = b.addRunArtifact(lifecycle.producer.?);
+    neural_rounds.addArtifactArg(exe);
+    neural_rounds.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "build/native-checks/session-image/image.png" });
+    neural_rounds.addArtifactArg(http_checks);
+    neural_rounds.addArg(b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}));
+    neural_rounds.step.dependOn(&neural_tools.step);
+    b.step("test-server-neural-multimodal", "Verify neural image/text interleaving, tools, forced controls and streaming").dependOn(&neural_rounds.step);
     const server_rounds = b.addRunArtifact(lifecycle.producer.?);
     server_rounds.addArtifactArg(exe);
     server_rounds.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "build/native-checks/session-image/image.png" });
@@ -551,6 +567,49 @@ pub fn build(b: *std.Build) void {
     b.step("test-gemma-prefill", "Compare batched Gemma prompt arithmetic, ring wrap, caches and decode continuation").dependOn(&gemma_prefill_compare.step);
     const gemma_drafter_option = b.option([]const u8, "gemma-drafter", "Existing trained Gemma DFlash checkpoint; default is the synthetic oracle fixture");
     const gemma_drafter = gemma_drafter_option orelse "build/native-checks/dflash-3";
+    const neural_sessions = b.step("test-session-neural", "Verify neural drafts, prefix restoration and interleaved requests on Qwen, Gemma, Nemotron and Flash");
+    const neural_http = b.step("test-server-neural", "Verify neural HTTP drafts, serial/concurrent JSON/SSE parity, cancellation and opt-out");
+    var neural_prior: ?*std.Build.Step = null;
+    var neural_http_prior: ?*std.Build.Step = null;
+    for ([_][2][]const u8{
+        .{ "Qwen3.8-27B-MLX-4bit", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}) },
+        .{ "gemma-4-26b-a4b-it-4bit", gemma_drafter },
+        .{ "NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", "-" },
+        .{ "Qwen3.8-Flash-Next-MLX-4bit-MTP", "-" },
+    }) |pair| {
+        const check = b.addRunArtifact(exe);
+        check.addArgs(&.{ "check-session-neural", b.fmt("{s}/{s}", .{ model_root, pair[0] }), pair[1] });
+        if (neural_prior) |prior| check.step.dependOn(prior);
+        if (gemma_drafter_option == null) check.step.dependOn(dflash_previous.?);
+        neural_prior = &check.step;
+        const http = b.addRunArtifact(lifecycle.producer.?);
+        http.addArtifactArg(exe);
+        http.addArgs(&.{ b.fmt("{s}/{s}", .{ model_root, pair[0] }), if (gemma_drafter_option == null and std.mem.eql(u8, pair[0], "gemma-4-26b-a4b-it-4bit")) "--neural-untrained" else "--neural-only", pair[1] });
+        if (neural_http_prior) |prior| http.step.dependOn(prior);
+        if (gemma_drafter_option == null) http.step.dependOn(dflash_previous.?);
+        neural_http_prior = &http.step;
+    }
+    neural_sessions.dependOn(neural_prior.?);
+    const disabled_neural = b.addRunArtifact(lifecycle.producer.?);
+    disabled_neural.addArtifactArg(exe);
+    disabled_neural.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--neural-disabled", "build/native-checks/nonexistent-disabled-drafter" });
+    disabled_neural.step.dependOn(neural_http_prior.?);
+    neural_http.dependOn(&disabled_neural.step);
+    const synthetic_http = b.step("test-server-neural-synthetic", "Verify GLM MTP, DeepSeek MTP and DSpark over HTTP using synthetic checkpoints");
+    var synthetic_http_prior: ?*std.Build.Step = null;
+    for ([_][2][]const u8{
+        .{ "build/native-checks/glm-model-0", "-" },
+        .{ "build/native-checks/deepseek-model", "build/native-checks/deepseek-model/drafter" },
+        .{ "build/native-checks/dspark-0", "build/native-checks/dspark-0/drafter" },
+    }, 0..) |pair, index| {
+        const http = b.addRunArtifact(lifecycle.producer.?);
+        http.addArtifactArg(exe);
+        http.addArgs(&.{ pair[0], "--neural-synthetic", pair[1] });
+        http.step.dependOn(if (index == 0) glm_models else if (index == 1) &ds_compare.step else dspark_tests);
+        if (synthetic_http_prior) |prior| http.step.dependOn(prior);
+        synthetic_http_prior = &http.step;
+    }
+    synthetic_http.dependOn(synthetic_http_prior.?);
     const gemma_draft_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", gemma_model, "--gemma-drafter", gemma_drafter, "--output", "build/native-checks/gemma-draft/oracle/logits.npy", "--state-directory", "build/native-checks/gemma-draft/oracle" });
     if (gemma_drafter_option == null) gemma_draft_oracle.step.dependOn(dflash_previous.?);
     const gemma_draft = b.addRunArtifact(exe);

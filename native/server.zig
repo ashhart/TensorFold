@@ -26,6 +26,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var thinking = true;
     var vision_urls = false;
     var drafts = true;
+    var draft_options = @import("neural_draft.zig").Options{ .enabled = true };
     var effort: []const u8 = "medium";
     var overrides = std.json.Value{ .object = .empty };
     defer overrides.object.deinit(init.gpa);
@@ -50,6 +51,22 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         const flag = args[i];
         const value = args[i + 1];
         i += 2;
+        if (std.mem.eql(u8, flag, "--drafter")) {
+            draft_options.directory = value;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--drafter-bits")) {
+            draft_options.bits = try std.fmt.parseInt(i32, value, 10);
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--max-draft") or std.mem.eql(u8, flag, "--mtp-drafts")) {
+            draft_options.max_draft = try std.fmt.parseInt(usize, value, 10);
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--draft-calibration")) {
+            draft_options.calibration = value;
+            continue;
+        }
         if (std.mem.eql(u8, flag, "--batch-streams")) {
             batch_streams = try std.fmt.parseInt(usize, value, 10);
             if (batch_streams < 1 or batch_streams > 8) return error.InvalidBatchStreams;
@@ -80,6 +97,8 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         }
     }
     defaults = try inference.Options.parseWithDefaults(init.gpa, overrides, defaults);
+    draft_options.enabled = drafts and draft_options.max_draft > 0;
+    try draft_options.validate();
     var signals = control.Signals.install();
     defer signals.deinit();
     var registry = control.Registry{ .io = init.io, .timeout_ms = timeout_ms, .shutdown_grace_ms = shutdown_grace_ms };
@@ -109,6 +128,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     worker.checkpoint_slots = checkpoint_slots orelse @max(8, 3 * batch_streams);
     worker.prompt_cache_bytes = prompt_cache_bytes;
     worker.drafts = drafts;
+    worker.draft_options = draft_options;
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     defer {
         worker.queue.close(init.io);
@@ -167,6 +187,7 @@ const Job = struct {
     failure: ?anyerror = null,
 };
 const Worker = struct {
+    draft_options: @import("neural_draft.zig").Options = .{},
     drafts: bool = true,
     stats: *live_status.Stats,
     display: *live_status.Display,
@@ -199,8 +220,8 @@ const Worker = struct {
         defer mx.shutdown();
         var memory = try memory_runtime.Runtime.init(w.memory_limit, w.is_glm);
         defer memory.deinit();
-        try memory.checkWeights(w.io, w.dir, w.is_flash);
-        var session = try inference.Session.init(w.io, w.dir);
+        try memory.checkWeightsAndDraft(w.io, w.dir, w.is_flash, if (w.draft_options.enabled) w.draft_options.directory else null);
+        var session = try inference.Session.initWithDraft(w.io, w.dir, w.draft_options);
         defer session.deinit();
         const profile = try memory_runtime.measure(&session);
         try memory.wire();
@@ -568,6 +589,7 @@ const Pending = struct {
         const after = p.generation.?.progress();
         p.job.stats.record(after.prefilled - before.prefilled, after.decoded - before.decoded, started, ended);
         p.job.stats.recordDrafts(after.proposed - before.proposed, after.accepted - before.accepted, after.structural_proposed - before.structural_proposed, after.structural_accepted - before.structural_accepted);
+        p.job.stats.recordNeural(after.neural_proposed - before.neural_proposed, after.neural_accepted - before.neural_accepted);
         if (!done) return false;
         var reply = try p.generation.?.takeReply();
         defer reply.deinit(mx.allocator);

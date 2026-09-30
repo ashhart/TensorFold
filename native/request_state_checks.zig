@@ -78,6 +78,16 @@ fn checkModel(comptime M: type) !void {
     };
     var saved = try states.State(M).init(&m);
     defer saved.deinit();
+    saved.draft_hidden = try mx.retain(other);
+    if (@hasDecl(M, "DraftCache")) try fill(&saved.head_cache, other);
+    var tree: @import("drafter.zig").Drafter = undefined;
+    tree.cache = @splat(.{});
+    tree.offset = 73;
+    for (&tree.cache) |*cache| try fill(cache, original);
+    defer for (&tree.cache) |*cache| cache.deinit();
+    saved.swapDFlash(&tree);
+    try std.testing.expectEqual(@as(i32, 0), tree.offset);
+    try std.testing.expectEqual(@as(i32, 73), saved.dflash_offset);
     saved.swap(&m);
     try std.testing.expectEqual(@as(i32, 0), m.position);
     for (m.cache[0..]) |*cache| {
@@ -95,6 +105,15 @@ fn checkModel(comptime M: type) !void {
     try std.testing.expectEqual(saved.position, snapshot.position);
     try std.testing.expectEqual(saved.nbytes(), snapshot.nbytes());
     try std.testing.expect(snapshot.nbytes() > 0);
+    try equalArray(snapshot.draft_hidden, other);
+    if (@hasDecl(M, "DraftCache")) try equal(snapshot.head_cache, other);
+    try std.testing.expectEqual(@as(i32, 73), snapshot.dflash_offset);
+    for (snapshot.dflash_cache) |cache| try equal(cache, original);
+    try mx.replace(&saved.draft_hidden, original);
+    saved.swapDFlash(&tree);
+    try std.testing.expectEqual(@as(i32, 73), tree.offset);
+    for (snapshot.dflash_cache) |cache| try equal(cache, original);
+    try equalArray(snapshot.draft_hidden, other);
     for (saved.cache) |*cache| {
         cache.deinit();
         try fill(cache, original);

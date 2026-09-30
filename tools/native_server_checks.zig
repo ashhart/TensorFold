@@ -187,6 +187,10 @@ const Scenario = struct {
     prefixes: bool = false,
     live: bool = false,
     drafts: bool = false,
+    neural: bool = false,
+    neural_enabled: bool = true,
+    synthetic: bool = false,
+    require_acceptance: bool = true,
     terminal: ?Terminal = null,
     live_enabled: bool = false,
     cache_enabled: bool = true,
@@ -206,6 +210,52 @@ const Scenario = struct {
         for (calls.array.items) |call| try functions.append(a, call.object.get("function").?);
         if (functions.items.len == 0) return error.MissingToolCall;
         return std.json.Stringify.valueAlloc(a, functions.items, .{});
+    }
+
+    fn checkNeural(s: *Scenario, port: u16) !void {
+        const a = s.init.arena.allocator();
+        const io = s.init.io;
+        var expected: [2]Output = undefined;
+        const fixture_prompts = try std.json.parseFromSlice(std.json.Value, a, "[[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],[21,22,23,24,25,26,27,28]]", .{});
+        const prompts = [_]std.json.Value{
+            if (s.synthetic) fixture_prompts.value.array.items[0] else .{ .string = "Explain why the sky is blue:" },
+            if (s.synthetic) fixture_prompts.value.array.items[1] else .{ .string = "A short story about a fox:" },
+        };
+        for (&expected, prompts, 0..) |*output, prompt, i| {
+            const socket = try post(io, port, try std.json.Stringify.valueAlloc(a, .{ .prompt = prompt, .max_tokens = 32, .ignore_eos = true, .temperature = @as(f64, if (i == 0) 0 else 0.7), .seed = 819, .draft = false }, .{}));
+            defer socket.close(io);
+            output.* = try Output.parse(a, try readAll(a, io, socket), false);
+        }
+        _ = try s.waitForCounts(port, 0, 0);
+        if ((try s.liveSnapshot(port)).object.get("neural_proposed").?.integer != 0) return error.SerialRequestUsedNeuralDrafts;
+        for ([_]bool{ false, true }) |streaming| {
+            var sockets: [2]std.Io.net.Stream = undefined;
+            var count: usize = 0;
+            defer for (sockets[0..count]) |socket| socket.close(io);
+            for (&sockets, prompts, 0..) |*socket, prompt, i| {
+                socket.* = try post(io, port, try std.json.Stringify.valueAlloc(a, .{ .prompt = prompt, .max_tokens = 32, .ignore_eos = true, .temperature = @as(f64, if (i == 0) 0 else 0.7), .seed = 819, .draft = true, .stream = streaming }, .{}));
+                count += 1;
+            }
+            for (sockets, expected) |socket, reference| try reference.compare(try Output.parse(a, try readAll(a, io, socket), streaming));
+        }
+        _ = try s.waitForCounts(port, 0, 0);
+        const stats = try s.liveSnapshot(port);
+        const proposed = stats.object.get("neural_proposed").?.integer;
+        const accepted = stats.object.get("neural_accepted").?.integer;
+        if ((proposed > 0) != s.neural_enabled) return error.NeuralDraftActivationMismatch;
+        if (s.neural_enabled and !s.synthetic and s.require_acceptance and accepted == 0) return error.NoNeuralDraftsAccepted;
+        const abandoned = try post(io, port, try std.json.Stringify.valueAlloc(a, .{ .prompt = prompts[0], .max_tokens = 4096, .ignore_eos = true, .stream = true }, .{}));
+        var bytes: [128]u8 = undefined;
+        var reader = abandoned.reader(io, &bytes);
+        _ = try reader.interface.takeByte();
+        abandoned.close(io);
+        _ = try s.waitForCounts(port, 0, 0);
+        const recovery = try post(io, port, try std.json.Stringify.valueAlloc(a, .{ .prompt = prompts[0], .max_tokens = 32, .ignore_eos = true, .temperature = @as(f64, 0), .seed = 819 }, .{}));
+        defer recovery.close(io);
+        try expected[0].compare(try Output.parse(a, try readAll(a, io, recovery), false));
+        try std.posix.kill(s.child.id.?, .TERM);
+        if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+        std.debug.print("PASS: neural HTTP enabled={any}, {d}/{d} accepted; serial/concurrent JSON/SSE parity, seeded sampling, request opt-out and cancellation recovery\n", .{ s.neural_enabled, accepted, proposed });
     }
 
     fn checkDrafts(s: *Scenario, port: u16) !void {
@@ -598,6 +648,7 @@ const Scenario = struct {
             }
         };
         if (s.memory) return s.checkMemory(port);
+        if (s.neural) return s.checkNeural(port);
         if (s.drafts) return s.checkDrafts(port);
         if (s.live) return s.checkLive(port);
         if (s.prefixes) return s.checkPrefixes(port);
@@ -668,12 +719,13 @@ const Scenario = struct {
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 3 and args.len != 5) return error.ExpectedExecutableAndModel;
-    if (args.len == 5) {
+    if (args.len != 3 and args.len != 5 and args.len != 6) return error.ExpectedExecutableAndModel;
+    if (args.len >= 5) {
         const memory = std.mem.eql(u8, args[3], "--memory-only");
         const prefixes = std.mem.eql(u8, args[3], "--cache-only");
         const live = std.mem.eql(u8, args[3], "--live-only");
         const drafts = std.mem.eql(u8, args[3], "--drafts-only");
+        const neural = std.mem.eql(u8, args[3], "--neural-only") or std.mem.eql(u8, args[3], "--neural-disabled") or std.mem.eql(u8, args[3], "--neural-synthetic") or std.mem.eql(u8, args[3], "--neural-untrained");
         const terminal = if (live and !std.mem.eql(u8, args[4], "redirected")) try Terminal.init() else null;
         defer if (terminal) |t| {
             t.master.close(init.io);
@@ -686,8 +738,18 @@ pub fn main(init: std.process.Init) !void {
             try environment.put("TENSORFOLD_NO_LIVE", if (std.mem.eql(u8, args[4], "disabled")) "1" else "0");
             try environment.put("COLUMNS", "0");
         }
-        var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory and !prefixes and !live, .memory = memory, .prefixes = prefixes, .live = live, .terminal = terminal, .live_enabled = live and std.mem.eql(u8, args[4], "enabled"), .cache_enabled = !std.mem.eql(u8, args[4], "0"), .cache_oversize = std.mem.eql(u8, args[4], "0.000001"), .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", if (live) "1" else "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" }, .environ_map = &environment, .stdout = if (terminal) |t| .{ .file = t.slave } else if (live) .pipe else .inherit, .stderr = .pipe }) };
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(init.arena.allocator(), &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", if (live) "1" else "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" });
+        if (neural) {
+            try argv.appendSlice(init.arena.allocator(), &.{ "--max-draft", "15" });
+            if (!std.mem.eql(u8, args[4], "-")) try argv.appendSlice(init.arena.allocator(), &.{ "--drafter", args[4] });
+            if (std.mem.eql(u8, args[3], "--neural-disabled")) try argv.append(init.arena.allocator(), "--no-drafts");
+        }
+        if (args.len == 6) try argv.appendSlice(init.arena.allocator(), &.{ "--drafter", args[5], "--max-draft", "15" });
+        var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory and !prefixes and !live, .memory = memory, .prefixes = prefixes, .live = live, .neural = neural, .neural_enabled = !std.mem.eql(u8, args[3], "--neural-disabled"), .terminal = terminal, .live_enabled = live and std.mem.eql(u8, args[4], "enabled"), .cache_enabled = !std.mem.eql(u8, args[4], "0"), .cache_oversize = std.mem.eql(u8, args[4], "0.000001"), .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = argv.items, .environ_map = &environment, .stdout = if (terminal) |t| .{ .file = t.slave } else if (live) .pipe else .inherit, .stderr = .pipe }) };
         scenario.drafts = drafts;
+        scenario.synthetic = std.mem.eql(u8, args[3], "--neural-synthetic");
+        scenario.require_acceptance = !std.mem.eql(u8, args[3], "--neural-untrained");
         defer if (scenario.child.id) |id| {
             std.posix.kill(id, .KILL) catch {};
             scenario.child.kill(init.io);

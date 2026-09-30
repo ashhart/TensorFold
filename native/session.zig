@@ -5,6 +5,7 @@ const qwen = @import("model.zig");
 const sampling = @import("sampling.zig");
 const text = @import("reply_text.zig");
 const prefill_plan = @import("prefill_plan.zig");
+const neural = @import("neural_draft.zig");
 pub const Options = @import("request_options.zig").Options;
 
 pub const Backend = union(enum) {
@@ -15,7 +16,7 @@ pub const Backend = union(enum) {
     glm: @import("glm.zig").Model,
     deepseek: @import("deepseek.zig").Model,
 
-    fn init(io: std.Io, dir: []const u8) !Backend {
+    fn init(io: std.Io, dir: []const u8, drafts: bool) !Backend {
         const path = try std.fmt.allocPrint(mx.allocator, "{s}/config.json", .{dir});
         defer mx.allocator.free(path);
         const bytes = try @import("weights.zig").readFile(io, path);
@@ -25,8 +26,8 @@ pub const Backend = union(enum) {
         if (cfg.value != .object) return error.InvalidConfig;
         const kind = cfg.value.object.get("model_type") orelse return error.UnsupportedModel;
         if (kind != .string) return error.UnsupportedModel;
-        if (std.mem.eql(u8, kind.string, "nemotron_h")) return .{ .nemotron = try @import("nemotron.zig").Model.init(io, dir, false) };
-        if (std.mem.eql(u8, kind.string, "qwen4_exp")) return .{ .flash = try @import("flash.zig").Model.init(io, dir, false) };
+        if (std.mem.eql(u8, kind.string, "nemotron_h")) return .{ .nemotron = try @import("nemotron.zig").Model.init(io, dir, drafts) };
+        if (std.mem.eql(u8, kind.string, "qwen4_exp")) return .{ .flash = try @import("flash.zig").Model.init(io, dir, drafts) };
         if (std.mem.eql(u8, kind.string, "gemma4")) return .{ .gemma = try @import("gemma.zig").Model.init(io, dir) };
         if (std.mem.eql(u8, kind.string, "glm5_next")) return .{ .glm = try @import("glm.zig").Model.init(io, dir) };
         if (std.mem.eql(u8, kind.string, "deepseek_v4")) return .{ .deepseek = try @import("deepseek.zig").Model.init(io, dir) };
@@ -40,6 +41,8 @@ pub const Backend = union(enum) {
 };
 
 pub const Sink = struct {
+    drafter: ?*neural.Drafter = null,
+    draft_budget: usize = 0,
     tools: std.json.Value = .null,
     cancellation: @import("cancellation.zig").Cancellation = .{},
     gate: ?*@import("call_gate.zig").Gate = null,
@@ -72,7 +75,7 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
         if (image != null and s.backend != .qwen) return error.UnsupportedModelImages;
         switch (s.backend) {
             inline else => |*m, tag| {
-                var request = try Generation(@TypeOf(m.*)).init(m, &s.tokenizer, a, prompt, options, sink, image);
+                var request = try Generation(@TypeOf(m.*)).init(m, &s.tokenizer, a, prompt, options, s.draftSink(sink), image);
                 errdefer request.deinit();
                 if (image == null) try request.setPlan(try s.prefillPlan());
                 return @unionInit(RequestGeneration, @tagName(tag), request);
@@ -95,9 +98,9 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
         }
     }
 
-    pub fn progress(g: *const RequestGeneration) struct { prefilled: usize, decoded: usize, proposed: usize, accepted: usize, structural_proposed: usize, structural_accepted: usize } {
+    pub fn progress(g: *const RequestGeneration) struct { prefilled: usize, decoded: usize, proposed: usize, accepted: usize, structural_proposed: usize, structural_accepted: usize, neural_proposed: usize, neural_accepted: usize } {
         return switch (g.*) {
-            inline else => |*request| .{ .prefilled = request.offset, .decoded = request.reply.tokens.items.len, .proposed = request.proposed, .accepted = request.accepted, .structural_proposed = if (request.proposer) |p| p.structural_tokens else 0, .structural_accepted = if (request.proposer) |p| p.structural_accepted else 0 },
+            inline else => |*request| .{ .prefilled = request.offset, .decoded = request.reply.tokens.items.len, .proposed = request.proposed, .accepted = request.accepted, .structural_proposed = if (request.proposer) |p| p.structural_tokens else 0, .structural_accepted = if (request.proposer) |p| p.structural_accepted else 0, .neural_proposed = request.neural_proposed, .neural_accepted = request.neural_accepted },
         };
     }
 
@@ -175,6 +178,15 @@ pub const Session = struct {
     directory: []u8,
     chat_template: ?@import("chat.zig").Template = null,
     prefill_plan: ?prefill_plan.Plan = null,
+    drafter: ?neural.Drafter = null,
+    draft_options: neural.Options = .{},
+
+    pub fn draftSink(s: *Session, sink: Sink) Sink {
+        var result = sink;
+        result.drafter = if (s.drafter) |*d| d else null;
+        result.draft_budget = if (s.draft_options.enabled) s.draft_options.max_draft else 0;
+        return result;
+    }
     pub fn prefillStep(s: *const Session) usize {
         switch (s.backend) {
             inline else => |m| return Generation(@TypeOf(m)).chunk_size,
@@ -198,13 +210,33 @@ pub const Session = struct {
         return plan;
     }
     pub fn init(io: std.Io, dir: []const u8) !Session {
-        var backend = try Backend.init(io, dir);
+        return initWithDraft(io, dir, .{});
+    }
+    pub fn initWithDraft(io: std.Io, dir: []const u8, options: neural.Options) !Session {
+        try options.validate();
+        var backend = try Backend.init(io, dir, options.enabled and options.max_draft > 0);
         errdefer backend.deinit();
+        if (options.enabled) switch (backend) {
+            .gemma => |*m| if (options.directory) |path| try m.loadDraftBits(io, path, options.bits),
+            .deepseek => |*m| if (options.directory) |path| try m.loadDraft(io, path),
+            inline .nemotron, .flash => |*m| {
+                if (options.directory != null) return error.UnsupportedDraftDirectory;
+                if (m.mtp) try @import("draft_vocab.zig").install(&m.weights, @TypeOf(m.*).draft_vocabulary, @TypeOf(m.*).vocab, 8);
+            },
+            .glm => if (options.directory != null) return error.UnsupportedDraftDirectory,
+            .qwen => {},
+        };
+        var drafter: ?neural.Drafter = if (options.enabled and backend == .qwen and options.directory != null) try neural.Drafter.init(io, options.directory.?, &backend.qwen) else null;
+        errdefer if (drafter) |*d| d.deinit();
+        if (options.calibration) |path| {
+            if (drafter) |*d| try d.loadCalibration(io, path) else return error.CalibrationRequiresDFlash2;
+        }
         const path = try std.Io.Dir.cwd().realPathFileAlloc(io, dir, mx.allocator);
         errdefer mx.allocator.free(path);
-        return .{ .backend = backend, .tokenizer = try tokenizer.loadTokenizer(io, mx.allocator, path), .io = io, .directory = path };
+        return .{ .backend = backend, .tokenizer = try tokenizer.loadTokenizer(io, mx.allocator, path), .io = io, .directory = path, .drafter = drafter, .draft_options = options };
     }
     pub fn deinit(s: *Session) void {
+        if (s.drafter) |*d| d.deinit();
         if (s.chat_template) |*template| template.deinit();
         s.tokenizer.deinit();
         s.backend.deinit();
@@ -229,7 +261,7 @@ pub const Session = struct {
         try ids.appendSlice(a, prompt);
         var prepared = try @import("vision.zig").Prompt.prepareEncoded(s.io, s.directory, images, &ids, a, &s.backend.qwen.weights);
         defer prepared.deinit();
-        return generateModel(&s.backend.qwen, &s.tokenizer, a, ids.items, options, sink, &prepared);
+        return generateModel(&s.backend.qwen, &s.tokenizer, a, ids.items, options, s.draftSink(sink), &prepared);
     }
     pub fn validate(s: *Session, prompt: []const i32, options: Options) !void {
         const vocab: i32 = switch (s.backend) {
@@ -276,6 +308,8 @@ pub fn Generation(comptime M: type) type {
         next_adjusted: bool = false,
         proposed: usize = 0,
         accepted: usize = 0,
+        neural_proposed: usize = 0,
+        neural_accepted: usize = 0,
 
         pub fn init(m: *M, tok: *tokenizer.Tokenizer, a: std.mem.Allocator, prompt: []const i32, options: Options, sink: Sink, image: ?*@import("vision.zig").Prompt) !Self {
             const vocab: i32 = if (M == qwen.Model) 248320 else if (@hasField(M, "vocab")) m.vocab else M.vocab;
@@ -342,6 +376,8 @@ pub fn Generation(comptime M: type) type {
             try g.sink.check();
             g.state.swap(m);
             defer g.state.swap(m);
+            if (g.sink.drafter) |d| g.state.swapDFlash(d);
+            defer if (g.sink.drafter) |d| g.state.swapDFlash(d);
             if (g.phase == .prefill) try g.prefill(m) else try g.decode(m);
             return g.phase == .finished;
         }
@@ -367,6 +403,9 @@ pub fn Generation(comptime M: type) type {
                 for (kept[0..count], 0..) |*row, j| row.* = @intCast(j);
                 try m.commit(&pass, kept[0..count]);
             } else try m.commit(&pass, count);
+            var rows_kept: [2048]i32 = undefined;
+            for (rows_kept[0..count], 0..) |*row, j| row.* = @intCast(j);
+            if (g.sink.draft_budget > 0) try neural.absorb(m, &g.state, g.sink.drafter, &pass, tokens, rows_kept[0..count]);
             g.offset += count;
             if (g.offset == g.prompt.len) g.phase = .decode;
         }
@@ -384,43 +423,68 @@ pub fn Generation(comptime M: type) type {
             var parents: [16]i32 = undefined;
             var positions: [16]i32 = undefined;
             window[0] = g.next;
-            var proposed: usize = 0;
+            parents[0] = -1;
+            var draft = @import("drafter.zig").Proposal{};
             if (g.proposer) |*proposer| {
-                const draft = try proposer.propose(g.a, g.context.items, @min(15, g.options.max_tokens - g.reply.tokens.items.len));
-                proposed = draft.len;
-                @memcpy(window[1..][0..proposed], draft.tokens[0..proposed]);
+                draft = try proposer.propose(g.a, g.context.items, @min(15, g.options.max_tokens - g.reply.tokens.items.len));
             }
+            const from_neural = draft.len == 0 and g.options.draft and g.sink.draft_budget > 0 and neural.enabled(m, g.sink.drafter);
+            if (from_neural) draft = try neural.propose(m, &g.state, g.sink.drafter, g.next, @min(g.sink.draft_budget, g.options.max_tokens - g.reply.tokens.items.len), g.settings);
+            const proposed = draft.len;
+            @memcpy(window[1..][0..proposed], draft.tokens[0..proposed]);
             const count = proposed + 1;
-            for (0..count) |i| {
-                parents[i] = @as(i32, @intCast(i)) - 1;
-                positions[i] = m.position + @as(i32, @intCast(i)) + 1;
+            positions[0] = m.position + 1;
+            for (0..proposed) |i| {
+                parents[i + 1] = draft.parents[i] + 1;
+                positions[i + 1] = positions[@intCast(parents[i + 1])] + 1;
             }
             var pass = if (M == qwen.Model) try m.forward(window[0..count], parents[0..count]) else try m.forward(window[0..count]);
             defer pass.deinit();
             const ids = try sampling.rows(&m.kernels, &pass.scope, pass.logits, positions[0..count], g.settings);
             defer mx.allocator.free(ids);
             var keep: usize = 1;
+            var kept: [16]i32 = undefined;
+            kept[0] = 0;
             var accepted: usize = 0;
-            for (0..proposed) |i| {
+            var row: usize = 0;
+            while (true) {
                 try g.sink.check();
-                g.next = try g.budget.next(g.sink.gate, g.reply.tokens.items.len, ids[i], eos(m, ids[i]));
-                if (g.next != window[i + 1]) {
+                var has_children = false;
+                for (parents[1..count]) |parent| if (parent == row) {
+                    has_children = true;
+                    break;
+                };
+                if (!has_children) {
+                    g.next = ids[row];
+                    break;
+                }
+                g.next = try g.budget.next(g.sink.gate, g.reply.tokens.items.len, ids[row], eos(m, ids[row]));
+                var child: ?usize = null;
+                for (row + 1..count) |i| if (parents[i] == row and window[i] == g.next) {
+                    child = i;
+                    break;
+                };
+                if (child == null) {
                     g.next_adjusted = true;
                     break;
                 }
                 accepted += 1;
                 try g.emitToken(m);
                 if (g.phase == .finished) break;
+                row = child.?;
+                kept[keep] = @intCast(row);
                 keep += 1;
             }
-            if (keep == count and g.phase != .finished) g.next = ids[count - 1];
             if (M == qwen.Model) {
-                for (parents[0..keep], 0..) |*row, i| row.* = @intCast(i);
-                try m.commit(&pass, parents[0..keep]);
+                try m.commit(&pass, kept[0..keep]);
             } else try m.commit(&pass, keep);
+            if (g.sink.draft_budget > 0) try neural.absorb(m, &g.state, g.sink.drafter, &pass, window[0..count], kept[0..keep]);
             g.proposed += proposed;
             g.accepted += accepted;
-            if (g.proposer) |*proposer| proposer.observe(proposed, accepted);
+            if (from_neural) {
+                g.neural_proposed += proposed;
+                g.neural_accepted += accepted;
+            } else if (g.proposer) |*proposer| proposer.observe(proposed, accepted);
         }
 
         fn emitToken(g: *Self, m: *M) !void {
