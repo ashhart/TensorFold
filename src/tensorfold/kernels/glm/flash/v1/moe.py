@@ -386,8 +386,11 @@ def moe_fits(moe: Any) -> bool:
             and shared_ok)
 
 
-def moe_rows(moe: Any, x: mx.array, *, rps: int = 4) -> mx.array:
-    """The MoE block on a window's rows with the row-by-row block's bits; SPLIT_SHARED runs the shared expert apart."""
+def moe_rows(moe: Any, x: mx.array, *, rps: int = 4, shared_out: mx.array | None = None) -> mx.array:
+    """The MoE block on a window's rows with the row-by-row block's bits; SPLIT_SHARED runs the shared expert apart.
+
+    ``shared_out`` [R, D] bf16: the shared expert's output computed by the caller (SPLIT_SHARED only), e.g. on the
+    matrix units; the routed experts and the combine are unchanged."""
 
     rows, dims = x.shape
     cfg = moe.cfg
@@ -422,8 +425,10 @@ def moe_rows(moe: Any, x: mx.array, *, rps: int = 4) -> mx.array:
                     grid=(32 * rows, dims // rps, zs), threadgroup=(32 * rows, 1, 1),
                     output_shapes=[(rows, slots, dims)], output_dtypes=[mx.bfloat16])[0]
 
-    split = SPLIT_SHARED
-    if split:
+    split = SPLIT_SHARED or shared_out is not None     # a caller's shared output takes the split path
+    if shared_out is not None:
+        ys = shared_out
+    elif split:
         # the shared expert first, from x alone (its group inputs are placeholders it never reads)
         none = moe.__dict__.get("_no_group")
         if none is None:
