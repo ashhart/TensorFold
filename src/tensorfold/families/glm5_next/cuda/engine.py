@@ -17,6 +17,10 @@ EXL3_AUTO = DFLASH_POLICY             # what auto runs on an EXL3 checkpoint wit
 GRAPH_ROWS = (1, 2, 3, 4, 5, 6)       # verify windows captured as CUDA graphs
 MAX_ROWS = 8                          # the widest verify window (a pending token and up to 7 drafts)
 DENSE_CAPACITY = 2560                 # cache slots while DSA attention stays dense (contexts up to 2,051 tokens)
+# TF_GLM_DRAFT_RING=0: DFlash2 keeps its context in a flat buffer of the whole window (10,240 bytes a slot on each
+# rank) instead of a ring of its 2,048-row sliding window and block (2,176 rows, 21.25 MiB; ``dflash2.Drafter``);
+# the drafts are the same bits either way
+DRAFT_RING = os.environ.get("TF_GLM_DRAFT_RING", "1").strip() != "0"
 
 
 def encode_policy(spec: str) -> list[int]:
@@ -118,7 +122,8 @@ class GlmEngine:
         from .weights import Config, load
         from .split import rule
         from tensorfold.cuda.capacity import admit
-        from tensorfold.cuda.geometry import PREFILL_ROWS, draft_geometry, mla_geometry, split_weights
+        from tensorfold.cuda.geometry import (PREFILL_ROWS, dflash2_geometry, dflash2_weights, mla_geometry,
+                                              split_weights)
 
         encode_policy(policy)                           # a bad default fails here, not in the first request
         torch.cuda.set_device(0)
@@ -142,14 +147,15 @@ class GlmEngine:
                                    lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY,
                                                              latent=LATENT, mtp=self.mtp_on),
                                    weights_estimate, rank=rank, world=2, gather=self._gather_ints,
-                                   draft_dir=drafter, draft_geometry=lambda text: draft_geometry(text, 2, MAX_ROWS))
+                                   draft_dir=drafter, draft_weights=lambda d: dflash2_weights(d, 2),
+                                   draft_geometry=lambda text: dflash2_geometry(text, 2, MAX_ROWS, ring=DRAFT_RING))
         self.limit = self.capacity_plan["context_window"]
         capacity = self.capacity_plan["cache_slots"]
         long_context = self.limit > cfg.dense_limit
         # both ranks must run the same calls: refuse to start when they were given different settings
         prefill_rows = PREFILL_ROWS if prefill_rows is None else int(prefill_rows)
         mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(LATENT),
-                prefill_rows, int(self.mtp_on)]
+                prefill_rows, int(self.mtp_on), int(DRAFT_RING)]
         # other conversations' kept prompts get what the window leaves, at most TF_GLM_CACHE_GIB, the same on both ranks
         plan = self.capacity_plan
         wanted = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
@@ -157,7 +163,7 @@ class GlmEngine:
         both = self._gather_ints(mine + [spare >> 20])
         if both[0][:-1] != both[1][:-1]:
             raise RuntimeError("the two ranks were started with different settings (draft model, context, drafts, "
-                               "TF_GLM_LATENT, TF_GLM_MTP): "
+                               "TF_GLM_LATENT, TF_GLM_MTP, TF_GLM_DRAFT_RING): "
                                f"rank 0 {both[0][:-1]}, rank 1 {both[1][:-1]}; pull the draft model on both machines "
                                "(or pass --drafter none to both) and give both the same flags")
         self.cache_bytes = min(both[0][-1], both[1][-1]) << 20
@@ -184,7 +190,7 @@ class GlmEngine:
         if drafter is not None:
             from .dflash2 import Drafter
 
-            self.drafter = Drafter(drafter, w, capacity=capacity)
+            self.drafter = Drafter(drafter, w, capacity=capacity, ring=DRAFT_RING)
         self.e = Engine(w, capacity=capacity, max_rows=MAX_ROWS, prefill_rows=prefill_rows, graphs=True, graph_rows=GRAPH_ROWS,
                         long_context=long_context, taps=self.drafter.tap_layers if self.drafter is not None else ())
         if self.drafter is not None:
@@ -359,7 +365,7 @@ class GlmEngine:
 
     def _drop(self, snap) -> None:
         """Forget a kept snapshot and free its saved rows now, even while a caller still holds the object."""
-        snap.rows, snap.nbytes = None, 0
+        snap.rows, snap.nbytes, snap.drafter_rows = None, 0, None
         self.cache.remove(snap)
 
     def _remember(self, snap) -> None:

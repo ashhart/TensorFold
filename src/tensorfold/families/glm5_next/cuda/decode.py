@@ -241,15 +241,42 @@ class Snapshot:
     drafter_end: int
     rows: list | None = None      # the attention rows of ids, saved when another conversation took the live caches
     nbytes: int = 0
+    drafter_rows: list | None = None  # a ring drafter's window rows before drafter_end, copied when taken
 
 
 def take_snapshot(e: Engine, ids: Sequence[int], pending: torch.Tensor | None, *, mtp: bool,
                   drafter=None) -> Snapshot:
+    """A ring drafter's window rows are copied now (``_ring_window``): its next rows overwrite them in the ring."""
     st = e.st
     rec = st.rec[st.cur[0]].clone() if st.cur else st.rec[0].clone()
-    return Snapshot(list(ids), rec, st.conv.clone(), pending.clone() if pending is not None else None,
+    snap = Snapshot(list(ids), rec, st.conv.clone(), pending.clone() if pending is not None else None,
                     st.mtp_len - st.mtp_drafted if mtp and pending is not None else -1,
                     drafter.context_end if drafter is not None else -1)
+    if drafter is not None and getattr(drafter, "ring", 0) and snap.drafter_end == len(snap.ids):
+        snap.drafter_rows = _ring_window(drafter, len(snap.ids))
+    return snap
+
+
+def _ring_slots(drafter, n: int) -> torch.Tensor:
+    """Where a ring drafter (``drafter.ring`` rows) holds the window rows a block pass at context end n reads
+    (positions n - window - 1 .. n - 1, one spare): those positions modulo the ring."""
+    lo = max(0, n - drafter.window - 1)
+    return torch.arange(lo, n, device=drafter.kc[0].device) % drafter.ring
+
+
+def _ring_window(drafter, n: int) -> list[torch.Tensor]:
+    """A copy of a ring drafter's window rows before n, in position order."""
+    idx = _ring_slots(drafter, n)
+    return [c.index_select(1, idx) for c in drafter.kc] + [c.index_select(1, idx) for c in drafter.vc]
+
+
+def _put_ring_window(drafter, n: int, rows: list[torch.Tensor]) -> None:
+    idx = _ring_slots(drafter, n)
+    caches = list(drafter.kc) + list(drafter.vc)
+    if len(rows) != len(caches) or any(r.shape[1] != idx.numel() for r in rows):
+        raise ValueError("a kept state's DFlash2 window does not match the drafter's ring")
+    for c, r in zip(caches, rows):
+        c.index_copy_(1, idx, r)
 
 
 def _row_views(st, n: int, m: int) -> list[torch.Tensor]:
@@ -275,6 +302,7 @@ def save_rows(e: Engine, snap: Snapshot) -> None:
     snap.rows = [v.clone() for v in views]
     snap.nbytes = sum(r.numel() * r.element_size() for r in snap.rows)
     snap.drafter_end = -1
+    snap.drafter_rows = None
 
 
 def row_bytes(e: Engine, snap: Snapshot) -> int:
@@ -283,8 +311,9 @@ def row_bytes(e: Engine, snap: Snapshot) -> int:
 
 
 def snapshot_bytes(snap: Snapshot) -> int:
-    """Device memory a kept snapshot holds: its KDA states, conv windows, pending MTP rows and any saved rows."""
-    held = [snap.rec, snap.conv] + ([snap.pending] if snap.pending is not None else [])
+    """Device memory a kept snapshot holds: its KDA states, conv windows, pending MTP rows, a ring drafter's window
+    and any saved rows."""
+    held = [snap.rec, snap.conv] + ([snap.pending] if snap.pending is not None else []) + (snap.drafter_rows or [])
     return sum(t.numel() * t.element_size() for t in held) + (snap.nbytes if snap.rows is not None else 0)
 
 
@@ -303,6 +332,10 @@ def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
     st.set_mtp_len(max(snap.mtp_len, 0))
     st.mtp_drafted = 0
     if drafter is not None:
+        if getattr(drafter, "ring", 0):
+            if snap.drafter_rows is None or snap.drafter_end != len(snap.ids):
+                raise ValueError("this snapshot kept no DFlash2 window for the drafter's ring")
+            _put_ring_window(drafter, snap.drafter_end, snap.drafter_rows)
         drafter.context_end = snap.drafter_end
         drafter.pos_dev.fill_(snap.drafter_end)
 

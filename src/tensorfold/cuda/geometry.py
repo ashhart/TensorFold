@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
-from .capacity import Geometry, itemsize
+import re
+
+from .capacity import Geometry, Weights, headers, itemsize
 
 PREFILL_ROWS = 2048     # a prompt chunk's rows: Flash Next and GLM keep buffers of this many rows
 PREFILL_ATT_ROWS = 256  # Flash Next's prompt attention block
@@ -260,6 +262,15 @@ def mla_chunk_scratch(t: dict, world: int, capacity: int, *, latent: bool) -> in
     return select + 128 * heads * (kd + 2) * 4 * ((topk + 515) // 512)
 
 
+def draft_ring_rows(window: int, block: int, tile: int = 64) -> int:
+    """Rows of GLM's DFlash2 context ring (``dflash2.Drafter``, TF_GLM_DRAFT_RING): a block pass at context end s
+    reads keys from the ``tile``-row tile holding s - window (older rows are masked for every query; ``window`` is the
+    drafter's, sliding_window - 1) through its own rows s .. s + block - 1, at most window + block + tile - 1 rows,
+    here rounded up to whole tiles; a kept state's window rows (window + 1) fit as well."""
+
+    return -(-(window + block + tile - 1) // tile) * tile
+
+
 def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, streams: int = 1,
                    kept: int = 0) -> Geometry:
     layers = int(t["num_hidden_layers"])
@@ -274,6 +285,65 @@ def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, 
         slots = min(capacity, window) if bounded and window > 0 else capacity
         return fixed + copies * 2 * layers * heads * hd * (slots + block) * 2
     return Geometry(bytes_at, reserve)
+
+
+def dflash2_geometry(t: dict, world: int, reserve: int, *, ring: bool) -> Geometry:
+    """GLM's DFlash2 drafter (``dflash2.Drafter``) on each of ``world`` ranks: one context of keys and values, a ring
+    of ``draft_ring_rows`` rows whatever the window (``ring``, TF_GLM_DRAFT_RING; a flat buffer when the window is
+    smaller) or ``capacity`` + block rows, and a block pass's activations. Kept prompt states' copies of its window
+    count in the kept-state budget (``snapshot_bytes``)."""
+
+    layers = int(t["num_hidden_layers"])
+    heads = int(t["num_key_value_heads"]) // world
+    hd = int(t["head_dim"])
+    block = int((t.get("dflash_config") or {}).get("block_size", 16))
+    window = int(t.get("sliding_window", 0))
+    fixed = 16 * max(64, block) * (int(t["hidden_size"]) + int(t["intermediate_size"])) * 4
+    rows = draft_ring_rows(window - 1, block) if ring and window > 0 else 0
+
+    def bytes_at(capacity: int) -> int:
+        slots = capacity + block if not rows else min(rows, capacity + block)
+        return fixed + 2 * layers * heads * hd * slots * 2
+    return Geometry(bytes_at, reserve)
+
+
+def dflash2_weights(draft_dir, world: int) -> Weights:
+    """What GLM's DFlash2 drafter (``dflash2.Drafter``) holds on each of ``world`` ranks, not its checkpoint's BF16:
+    4-bit copies (``qmm.quantize4``: groups of 64 with BF16 scales and biases, rows padded to 128) of fc, the
+    convolutions' kernel projections and this rank's attention and MLP rows (k and v twice: in qkv and in kv); BF16
+    norms, base kernels and selector projection; the selector's float32 codebooks in host memory (the same memory on
+    GB10). Staging: the largest matrix read and uploaded in BF16 with its quantization temporaries (float32 groups
+    of up to 8,192 rows, the packer's int64 lanes)."""
+
+    h = headers(draft_dir)
+    shape = {name: [int(x) for x in info["shape"]] for name, info in h.items()}
+
+    def q4(n: int, k: int) -> int:
+        return -(-n // 128) * 128 * k * 9 // 16
+
+    mats = [tuple(shape["fc.weight"])]
+    quantized = {"fc.weight"}
+    for i in sorted({int(m.group(1)) for m in map(re.compile(r"layers\.(\d+)\.").match, shape) if m}):
+        p = f"layers.{i}."
+        q, k, v = (shape[p + f"self_attn.{x}_proj.weight"] for x in "qkv")
+        o, gate, up, down = (shape[p + x] for x in ("self_attn.o_proj.weight", "mlp.gate_proj.weight",
+                                                      "mlp.up_proj.weight", "mlp.down_proj.weight"))
+        d = q[1]
+        mats += [((q[0] + k[0] + v[0]) // world, d), ((k[0] + v[0]) // world, d), (o[0], o[1] // world),
+                 ((gate[0] + up[0]) // world, d), (down[0], down[1] // world)]
+        quantized |= {p + x for x in ("self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight",
+                                      "self_attn.o_proj.weight", "mlp.gate_proj.weight", "mlp.up_proj.weight",
+                                      "mlp.down_proj.weight")}
+        for conv in ("attention_conv", "mlp_conv"):
+            name = p + conv + ".kernel_projection.weight"
+            mats.append(tuple(shape[name]))
+            quantized.add(name)
+    resident = sum(q4(n, k) for n, k in mats)
+    for name, dims in shape.items():
+        if name not in quantized:
+            resident += math.prod(dims) * (4 if name.endswith("_codebook") else 2)
+    staging = max(4 * n * k + 24 * min(n, 8192) * k for n, k in mats)
+    return Weights(resident, staging, 0)
 
 
 def _gdn_dims(t: dict, world: int) -> tuple:
