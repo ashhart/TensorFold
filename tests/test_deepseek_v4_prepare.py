@@ -300,3 +300,79 @@ def test_real_gguf_inventory_is_adapted_and_validated():
     assert "token_embd.weight" not in [e for e in report.errors]
     # token_embd and output_norm present; every layer tensor missing
     assert any("blk.0" in e for e in report.missing) or any("blk.1" in e for e in report.missing)
+
+
+# ---------------------------------------------------------------------------
+# T03.02: pinned tokenizer/config provenance validation
+# ---------------------------------------------------------------------------
+
+from tensorfold.families.deepseek_v4.gguf import (
+    DeepSeekV4TokenizerProvenance,
+    TokenizerReport,
+    tokenizer_provenance_v1,
+    validate_tokenizer_provenance,
+    validate_tokenizer_provenance_or_raise,
+)
+
+PINNED = tokenizer_provenance_v1()
+
+def _candidate(**overrides) -> dict:
+    """A candidate tokenizer/config metadata dict (the kind preparation generates)."""
+    base = {
+        "checkpoint": PINNED.checkpoint,
+        "vocab_size": PINNED.vocab_size,
+        "tokenizer_type": PINNED.tokenizer_type,
+        "eos_tokens": list(PINNED.eos_tokens),
+        "provenance": {"source": "/home/josh/gguf/pinned-0731.gguf", "sha256": "a" * 64},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_provenance_pins_audited_0731_facts():
+    assert PINNED.version == "1"
+    assert PINNED.checkpoint == "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+    assert PINNED.vocab_size == 129280
+    assert PINNED.tokenizer_type == "joyai-llm"
+    assert PINNED.eos_tokens == ("",)
+    assert PINNED.provenance_keys
+
+
+def test_valid_candidate_reports_no_errors():
+    report = validate_tokenizer_provenance(_candidate())
+    assert report.errors == []
+
+
+def test_wrong_vocabulary_is_rejected():
+    report = validate_tokenizer_provenance(_candidate(vocab_size=129281))
+    assert any("vocab" in e.lower() for e in report.errors)
+
+
+def test_wrong_eos_tokens_are_rejected():
+    report = validate_tokenizer_provenance(_candidate(eos_tokens=["<|EOS|>"]))
+    assert any("eos" in e.lower() for e in report.errors)
+
+
+def test_tokenizer_type_mismatch_is_rejected():
+    report = validate_tokenizer_provenance(_candidate(tokenizer_type="gpt2"))
+    assert any("tokenizer" in e.lower() for e in report.errors)
+
+
+def test_missing_provenance_is_rejected():
+    report = validate_tokenizer_provenance(_candidate(provenance=None))
+    assert any("provenance" in e.lower() for e in report.errors)
+    report2 = validate_tokenizer_provenance(_candidate(provenance={}))
+    assert any("provenance" in e.lower() for e in report2.errors)
+
+
+def test_changed_checkpoint_identity_is_rejected():
+    report = validate_tokenizer_provenance(_candidate(checkpoint="Some-Other-Model.gguf"))
+    assert any("checkpoint" in e.lower() for e in report.errors)
+
+
+def test_raise_variant_raises_on_incompatible_input():
+    with pytest.raises(ValueError):
+        validate_tokenizer_provenance_or_raise(_candidate(vocab_size=1))
+    # valid input returns the report
+    ok = validate_tokenizer_provenance_or_raise(_candidate())
+    assert ok.errors == []

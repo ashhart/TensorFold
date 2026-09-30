@@ -296,3 +296,104 @@ def validate_deepseek_v4_gguf_or_raise(inventory: TensorInventory,
     if report.errors:
         raise DeepSeekV4SchemaError("; ".join(report.errors))
     return report
+
+
+# ---------------------------------------------------------------------------
+# pinned tokenizer/config provenance validation (T03.02)
+# ---------------------------------------------------------------------------
+
+# Pinned facts are grounded in the audited 0731 donor: tokenizer.ggml.pre is
+# "joyai-llm", the vocabulary is 129280 entries, and the EOS token is the empty
+# string (ds4's vocab_load looks up `""` for eos_id).
+
+CHECKPOINT_0731 = "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+VOCAB_SIZE_0731 = 129280
+TOKENIZER_TYPE_0731 = "joyai-llm"
+EOS_TOKENS_0731 = ("",)
+
+PROVENANCE_KEYS = ("source", "sha256")
+
+
+@dataclass(frozen=True)
+class DeepSeekV4TokenizerProvenance:
+    """The pinned provenance facts a candidate tokenizer/config must match."""
+
+    version: str
+    checkpoint: str
+    vocab_size: int
+    tokenizer_type: str
+    eos_tokens: tuple[str, ...]
+    provenance_keys: tuple[str, ...]
+
+
+def tokenizer_provenance_v1() -> DeepSeekV4TokenizerProvenance:
+    return DeepSeekV4TokenizerProvenance(
+        version="1",
+        checkpoint=CHECKPOINT_0731,
+        vocab_size=VOCAB_SIZE_0731,
+        tokenizer_type=TOKENIZER_TYPE_0731,
+        eos_tokens=EOS_TOKENS_0731,
+        provenance_keys=tuple(PROVENANCE_KEYS),
+    )
+
+
+@dataclass
+class TokenizerReport:
+    errors: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.errors is None:
+            self.errors = []
+
+
+def validate_tokenizer_provenance(tokenizer: dict[str, Any],
+                                  prov: DeepSeekV4TokenizerProvenance | None = None,
+                                  ) -> TokenizerReport:
+    """Reject a candidate tokenizer/config metadata dict that is incompatible.
+
+    ``tokenizer`` carries the fields preparation records: checkpoint identity,
+    vocab_size, tokenizer_type, eos_tokens, and a provenance record (source
+    path + sha256 + checkpoint). A missing provenance record or a mismatch
+    against the pinned 0731 facts is reported as an error.
+    """
+    prov = prov or tokenizer_provenance_v1()
+    report = TokenizerReport()
+
+    provenance = tokenizer.get("provenance")
+    if not isinstance(provenance, dict) or not provenance:
+        report.errors.append("missing provenance record for tokenizer/config")
+    else:
+        for key in prov.provenance_keys:
+            if not provenance.get(key):
+                report.errors.append(f"missing provenance field {key!r}")
+
+    checkpoint = tokenizer.get("checkpoint")
+    if checkpoint != prov.checkpoint:
+        report.errors.append(
+            f"changed checkpoint identity: {checkpoint!r} != {prov.checkpoint!r}")
+
+    vocab_size = tokenizer.get("vocab_size")
+    if vocab_size != prov.vocab_size:
+        report.errors.append(
+            f"wrong vocabulary size: {vocab_size!r} != {prov.vocab_size!r}")
+
+    eos_tokens = tokenizer.get("eos_tokens")
+    if tuple(eos_tokens or ()) != prov.eos_tokens:
+        report.errors.append(
+            f"wrong EOS tokens: {eos_tokens!r} != {prov.eos_tokens!r}")
+
+    tokenizer_type = tokenizer.get("tokenizer_type")
+    if tokenizer_type != prov.tokenizer_type:
+        report.errors.append(
+            f"tokenizer mismatch: {tokenizer_type!r} != {prov.tokenizer_type!r}")
+
+    return report
+
+
+def validate_tokenizer_provenance_or_raise(tokenizer: dict[str, Any],
+                                           prov: DeepSeekV4TokenizerProvenance | None = None,
+                                           ) -> TokenizerReport:
+    report = validate_tokenizer_provenance(tokenizer, prov=prov)
+    if report.errors:
+        raise DeepSeekV4SchemaError("; ".join(report.errors))
+    return report
