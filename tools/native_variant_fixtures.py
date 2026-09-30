@@ -97,6 +97,11 @@ class Capture:
         header = re.sub(r"\n\[\[max_total_threads_per_threadgroup\(\d+\)\]\]\n$", "", spec.get("header", ""))
         source_hash = fingerprint(source, header)
         key = self.catalog.get((source_hash, "DEP" in spec["input_names"]))
+        if key is None:
+            normalized_hash = fingerprint(source.rstrip() + "\n", header)
+            key = self.catalog.get((normalized_hash, "DEP" in spec["input_names"]))
+            if key is not None:
+                source_hash = normalized_hash
         if spec["name"].startswith("tf_glm5_"):
             alias = re.sub(r"^tf_glm5_(?:fused_)?", "", spec["name"]).rsplit("_", 1)[0]
             alias = alias if alias.startswith("ds4_") else "glm_" + alias
@@ -653,6 +658,146 @@ def flash_prefill_hc_fixtures(capture):
     print(f"Saved {len(cases)} complete Flash prefill hyper-connections and their intermediate arrays", flush=True)
 
 
+def flash_prefill_gdn_fixtures(capture):
+    import mlx.nn as nn
+    from tensorfold.families.qwen4_exp import model_layers, decode
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+    from tests.test_flash_next_affine import quantized, bf16
+
+    rng = np.random.default_rng(10629)
+    cases = []
+    for hidden, nk, nv, dk, dv, taps, batch, activation, bits, groups in (
+        (256, 2, 4, 32, 64, 4, 2, "sigmoid", (4,) * 5, (32, 64, 128, 32, 64)),
+        (384, 3, 6, 64, 32, 2, 1, "silu", (2, 3, 5, 6, 8), (128, 64, 32, 128, 64)),
+        (2560, 16, 48, 128, 128, 4, 1, "sigmoid", (4,) * 5, (32,) * 5),
+    ):
+        cfg = SimpleNamespace(linear_num_key_heads=nk, linear_num_value_heads=nv,
+                              linear_key_head_dim=dk, linear_value_head_dim=dv, linear_conv_kernel_dim=taps,
+                              hidden_size=hidden, rms_norm_eps=1e-6, output_gate_type=activation)
+        layer = model_layers.GatedDeltaNet(cfg)
+        names = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj")
+        for name, b, group in zip(names, bits, groups):
+            shape = getattr(layer, name).weight.shape
+            weight = quantized(rng, shape, b, group, scale=.02)
+            linear = nn.QuantizedLinear(shape[1], shape[0], bias=False, group_size=group, bits=b)
+            linear.weight, linear.scales, linear.biases = weight.weight, weight.scales, weight.biases
+            setattr(layer, name, linear)
+        layer.conv1d.weight = bf16(rng, layer.conv1d.weight.shape, scale=.2)
+        layer.A_log = mx.array(rng.uniform(-2, 0, nv), mx.bfloat16)
+        layer.dt_bias = mx.array(rng.uniform(-2, 0, nv), mx.bfloat16)
+        layer.norm.weight = mx.array(rng.uniform(.8, 1.2, dv), mx.bfloat16)
+        stacked, _ = decode._stacked([getattr(layer, name) for name in names[:4]])
+        layer.__dict__["stacked"] = stacked if isinstance(stacked, nn.QuantizedLinear) else None
+        cache = model_layers.LinearCache()
+        for count in (1, 17, 31, 32, 63, 64, 65, 257, 2048, 1):
+            name = f"gdn{len(cases):03}"
+            capture.test = name
+            x = bf16(rng, (batch, count, hidden))
+            arrays = {"input": x, "conv": layer.conv1d.weight, "a_log": layer.A_log,
+                      "dt_bias": layer.dt_bias, "norm": layer.norm.weight}
+            cached = cache.ssm is not None
+            if cached:
+                arrays.update({"previous.conv": cache.conv, "previous.state": cache.ssm})
+            original_update, original_linear = model_layers.gated_delta_update, prefill_mm.linear
+            def record_update(q, k, v, *args, **kwargs):
+                out, state = original_update(q, k, v, *args, **kwargs)
+                arrays.update(q=q, k=k, v=v, recurrent=out)
+                return out, state
+            def record_linear(projection, value):
+                if projection is layer.out_proj:
+                    arrays["gated"] = value
+                return original_linear(projection, value)
+            model_layers.gated_delta_update, prefill_mm.linear = record_update, record_linear
+            try:
+                arrays["output"] = layer(x, cache)
+            finally:
+                model_layers.gated_delta_update, prefill_mm.linear = original_update, original_linear
+            arrays.update({"next.conv": cache.conv, "next.state": cache.ssm})
+            for key, part in zip(("qkv", "z", "b", "a", "out"), names):
+                arrays.update({f"{key}.{suffix}": getattr(getattr(layer, part), suffix)
+                               for suffix in ("weight", "scales", "biases")})
+            mx.eval(*arrays.values())
+            mx.save_safetensors(str(capture.directory / f"{name}.safetensors"), arrays)
+            cases.append(dict(name=name, config=dict(key_heads=nk, value_heads=nv, key_dims=dk, value_dims=dv,
+                                                     activation=activation, epsilon=1e-6),
+                              cached=cached, bits=bits, groups=groups, stacked=layer.__dict__["stacked"] is not None))
+    (capture.directory / "gdn.json").write_text(json.dumps(cases, indent=2) + "\n")
+    print(f"Saved {len(cases)} complete Flash GDN layers, batched projections and cache continuation", flush=True)
+
+
+def flash_prefill_moe_fixtures(directory):
+    import mlx.nn as nn
+    from mlx_lm.models.switch_layers import QuantizedSwitchLinear
+    from tensorfold.families.qwen4_exp.model_layers import SparseMoE
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+    from tests.test_flash_next_affine import quantized, bf16
+
+    rng = np.random.default_rng(74013)
+    cases = []
+    for geometry, (dims, inner, shared_inner, experts, top, batch, bits, groups) in enumerate((
+        (256, 128, 128, 32, 4, 1, (4,) * 7, (32,) * 7),
+        (384, 192, 128, 16, 3, 2, (4, 5, 6, 2, 3, 8, 5), (64,) * 7),
+        (2560, 640, 640, 32, 10, 1, (4,) * 7, (32,) * 7),
+        (256, 128, 128, 512, 10, 1, (4,) * 7, (32,) * 7),
+        (128, 128, 128, 64, 64, 1, (4,) * 7, (32,) * 7),
+    )):
+        cfg = SimpleNamespace(hidden_size=dims, num_experts=experts, num_experts_per_tok=top,
+                              moe_intermediate_size=inner, shared_expert_intermediate_size=shared_inner)
+        layer = SparseMoE(cfg)
+        layer.gate.weight = bf16(rng, (experts, dims), scale=.02)
+        parts = ((layer.switch_mlp, "gate_proj"), (layer.switch_mlp, "up_proj"), (layer.switch_mlp, "down_proj"),
+                 (layer.shared_expert, "gate_proj"), (layer.shared_expert, "up_proj"),
+                 (layer.shared_expert, "down_proj"), (layer, "shared_expert_gate"))
+        weights = {"router": layer.gate.weight}
+        keys = ("gate", "up", "down", "shared_gate", "shared_up", "shared_down", "shared_route")
+        for (module, attr), key, b, group in zip(parts, keys, bits, groups):
+            shape = getattr(module, attr).weight.shape
+            weight = quantized(rng, shape, b, group, scale=.02)
+            if len(shape) == 3:
+                linear = QuantizedSwitchLinear(shape[2], shape[1], shape[0], bias=False, group_size=group, bits=b)
+            else:
+                linear = nn.QuantizedLinear(shape[1], shape[0], bias=False, group_size=group, bits=b)
+            linear.weight, linear.scales, linear.biases = weight.weight, weight.scales, weight.biases
+            setattr(module, attr, linear)
+            weights.update({f"{key}.{suffix}": getattr(linear, suffix) for suffix in ("weight", "scales", "biases")})
+        weight_name = f"moe_weights{geometry}"
+        mx.eval(*weights.values())
+        mx.save_safetensors(str(directory / f"{weight_name}.safetensors"), weights)
+        lengths = (511, 512, 513) if top == 64 else (1, 7, 16, 17, 63, 64, 65, 257, 2048)
+        for count in lengths:
+            x = bf16(rng, (batch, count, dims))
+            if count == 7:
+                x = mx.zeros_like(x)  # Equal router probabilities exercise partition ties.
+            output = layer(x)
+            ids, probs = layer.route(x)
+            if prefill_mm.moe_applies(layer, x):
+                flat = ids.reshape(-1)
+                order = mx.argsort(flat)
+                pos = mx.argsort(order).astype(mx.int32)
+                index = flat[order].astype(mx.uint32)
+                rows = x.reshape(count, dims)[order // top]
+                sw = layer.switch_mlp
+                gate = prefill_mm._experts(rows, sw.gate_proj, index)
+                up = prefill_mm._experts(rows, sw.up_proj, index)
+                y = prefill_mm._experts(sw.activation(up, gate), sw.down_proj, index)
+                routed = (y[pos].reshape(batch, count, top, dims) * probs[..., None]).sum(axis=-2)
+                xf = x.reshape(count, dims)
+                se = layer.shared_expert
+                shared = prefill_mm.linear(se.down_proj, nn.silu(prefill_mm.linear(se.gate_proj, xf)) * prefill_mm.linear(se.up_proj, xf))
+                shared = (shared * mx.sigmoid(prefill_mm.linear(layer.shared_expert_gate, xf))).reshape(x.shape)
+            else:
+                routed = (layer.switch_mlp(x, ids) * probs[..., None]).sum(axis=-2)
+                shared = layer.shared_expert(x) * mx.sigmoid(layer.shared_expert_gate(x))
+            assert mx.array_equal(output, routed + shared).item()
+            name = f"moe{len(cases):03}"
+            arrays = dict(input=x, output=output, ids=ids, weights=probs, routed=routed, shared=shared)
+            mx.eval(*arrays.values())
+            mx.save_safetensors(str(directory / f"{name}.safetensors"), arrays)
+            cases.append(dict(name=name, weights=weight_name, top=top, bits=bits, groups=groups))
+    (directory / "moe.json").write_text(json.dumps(cases, indent=2) + "\n")
+    print(f"Saved {len(cases)} complete Flash MoE layers, routing, shared experts and sorted-gather boundaries", flush=True)
+
+
 def flash_affine_variants(capture):
     from tensorfold.kernels.qwen.flash_next.v1 import base, rows, hc, experts, embed
     from tests.test_flash_next_affine import quantized, bf16, same
@@ -751,10 +896,15 @@ def main():
     parser.add_argument("--flash-affine", action="store_true")
     parser.add_argument("--flash-weights", action="store_true")
     parser.add_argument("--flash-prefill-hc", action="store_true")
+    parser.add_argument("--flash-prefill-gdn", action="store_true")
+    parser.add_argument("--flash-prefill-moe", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     if args.flash_weights:
         flash_weight_fixtures(args.directory)
+        return
+    if args.flash_prefill_moe:
+        flash_prefill_moe_fixtures(args.directory)
         return
     if args.simd_dense:
         simd_dense_fixtures(args.directory)
@@ -764,6 +914,16 @@ def main():
         return
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
+    if args.flash_prefill_gdn:
+        try:
+            flash_prefill_gdn_fixtures(capture)
+        finally:
+            mx.fast.metal_kernel = capture.original
+        if "flash_prefill_gdn" not in {case["kernel"] for case in capture.cases}:
+            raise RuntimeError("Flash prefill scalar gated-delta kernel was not captured")
+        (args.directory / "cases.json").write_text(json.dumps(capture.cases, indent=2) + "\n")
+        print(f"Saved {len(capture.cases)} Flash prefill recurrence launches", flush=True)
+        return
     if args.flash_prefill_hc:
         try:
             flash_prefill_hc_fixtures(capture)
