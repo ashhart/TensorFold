@@ -4,7 +4,7 @@ const c = mx.c;
 const A = mx.Array;
 const src = @import("kernel_sources.zig");
 const Weight = @import("flash_ops.zig").Weight;
-const mm = @import("flash_prefill_ops.zig").matmul;
+const mm = @import("flash_prefill_mm.zig").linear;
 const Ops = @import("prefill_ops.zig").Ops;
 
 pub const Config = struct {
@@ -139,12 +139,12 @@ pub fn forward(kernels: *mx.Kernels, ops: *Ops, s: *mx.Scope, x: A, w: Weights, 
     if (rows < 1 or rows > 2048 or previous.offset < 0 or previous.offset > 262144 - rows) return error.InvalidTensorShape;
     const past = previous.offset;
     const end = past + rows;
-    const qg = try s.reshape(try mm(s, x, w.q), &.{ 1, rows, cfg.heads, 2 * cfg.dims });
+    const qg = try s.reshape(try mm(kernels, s, x, w.q), &.{ 1, rows, cfg.heads, 2 * cfg.dims });
     const queries = try rope(s, try s.transpose(try norm(s, try s.slice(qg, 3, 0, cfg.dims), w.q_scale, cfg.epsilon), &.{ 0, 2, 1, 3 }), cfg, past, 1);
     const gate = try s.reshape(try s.slice(qg, 3, cfg.dims, cfg.dims * 2), &.{ 1, rows, cfg.heads * cfg.dims });
-    var keys = try rope(s, try s.transpose(try norm(s, try s.reshape(try mm(s, x, w.k), &.{ 1, rows, cfg.kv_heads, cfg.dims }), w.k_scale, cfg.epsilon), &.{ 0, 2, 1, 3 }), cfg, past, 1);
-    var values = try s.transpose(try s.reshape(try mm(s, x, w.v), &.{ 1, rows, cfg.kv_heads, cfg.dims }), &.{ 0, 2, 1, 3 });
-    const index = try s.reshape(try mm(s, x, w.index), &.{ 1, rows, cfg.index_heads + 1, cfg.index_dims });
+    var keys = try rope(s, try s.transpose(try norm(s, try s.reshape(try mm(kernels, s, x, w.k), &.{ 1, rows, cfg.kv_heads, cfg.dims }), w.k_scale, cfg.epsilon), &.{ 0, 2, 1, 3 }), cfg, past, 1);
+    var values = try s.transpose(try s.reshape(try mm(kernels, s, x, w.v), &.{ 1, rows, cfg.kv_heads, cfg.dims }), &.{ 0, 2, 1, 3 });
+    const index = try s.reshape(try mm(kernels, s, x, w.index), &.{ 1, rows, cfg.index_heads + 1, cfg.index_dims });
     const iq = try s.slice(index, 2, 0, cfg.index_heads);
     var raw = try s.reshape(try s.slice(index, 2, cfg.index_heads, cfg.index_heads + 1), &.{ 1, rows, cfg.index_dims });
     if (past > 0) {
@@ -174,7 +174,7 @@ pub fn forward(kernels: *mx.Kernels, ops: *Ops, s: *mx.Scope, x: A, w: Weights, 
         const all = if (count == 1) parts[0] else try s.cat(parts[0..count], 2);
         break :blk try s.reshape(try s.transpose(all, &.{ 0, 2, 1, 3 }), &.{ 1, rows, cfg.heads * cfg.dims });
     };
-    return .{ .output = try mm(s, try s.binary(c.mlx_multiply, out, try s.unary(c.mlx_sigmoid, gate)), w.out), .cache = cache, .queries = queries, .index_queries = iq, .attended = out };
+    return .{ .output = try mm(kernels, s, try s.binary(c.mlx_multiply, out, try s.unary(c.mlx_sigmoid, gate)), w.out), .cache = cache, .queries = queries, .index_queries = iq, .attended = out };
 }
 
 pub fn check(io: std.Io, dir: []const u8) !void {

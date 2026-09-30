@@ -66,8 +66,16 @@ pub fn identity(s: *session.Session) ![]u8 {
     try hashFile(s.io, &hash, executable);
     if (s.draft_options.enabled) if (s.draft_options.directory) |path| try checkpointIdentity(s.io, &hash, path);
     if (s.draft_options.calibration) |path| try hashFile(s.io, &hash, path);
+    const device = mx.c.mlx_device_new_type(mx.c.MLX_GPU, 0);
+    defer _ = mx.c.mlx_device_free(device);
+    var info = mx.c.mlx_device_info_new();
+    defer _ = mx.c.mlx_device_info_free(info);
+    try mx.check(mx.c.mlx_device_info_get(&info, device));
+    var architecture: [*c]const u8 = null;
+    try mx.check(mx.c.mlx_device_info_get_string(&architecture, info, "architecture"));
+    const flash_tiles: ?bool = if (s.backend == .flash) try s.backend.flash.kernels.flash_prefill.tiles(&s.backend.flash.kernels) else null;
     const form = if (s.backend == .qwen) s.backend.qwen.weights.bonsai_form else null;
-    const options = try std.json.Stringify.valueAlloc(a, .{ .draft = s.draft_options, .tensor = mx.tensor_units, .bonsai = form, .buffers = @import("kv_buffer.zig").enabled }, .{});
+    const options = try std.json.Stringify.valueAlloc(a, .{ .draft = s.draft_options, .architecture = std.mem.span(architecture), .tensor = mx.tensor_units, .flash_tiles = flash_tiles, .bonsai = form, .buffers = @import("kv_buffer.zig").enabled }, .{});
     defer a.free(options);
     hash.update(options);
     var digest: [32]u8 = undefined;

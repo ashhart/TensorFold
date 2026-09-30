@@ -165,6 +165,15 @@ pub fn build(b: *std.Build) void {
     flash_prefill_hc_kernels.addArgs(&.{ "check-variants", "build/native-checks/flash-prefill-hc" });
     flash_prefill_hc_kernels.step.dependOn(&flash_prefill_hc.step);
     b.step("test-flash-prefill-hc", "Compare Flash batched hyper-connections, residual write-back and intermediate arithmetic with upstream").dependOn(&flash_prefill_hc_kernels.step);
+
+    const flash_prefill_mm_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/flash-prefill-mm", "--flash-prefill-mm" });
+    const flash_prefill_mm = b.addRunArtifact(exe);
+    flash_prefill_mm.addArgs(&.{ "check-flash-prefill-mm", "build/native-checks/flash-prefill-mm" });
+    flash_prefill_mm.step.dependOn(&flash_prefill_mm_fixture.step);
+    const flash_prefill_mm_kernels = b.addRunArtifact(exe);
+    flash_prefill_mm_kernels.addArgs(&.{ "check-variants", "build/native-checks/flash-prefill-mm" });
+    flash_prefill_mm_kernels.step.dependOn(&flash_prefill_mm.step);
+    b.step("test-flash-prefill-mm", "Compare Flash pre-M5 tiled projections, expert gathers and runtime self-check with upstream").dependOn(&flash_prefill_mm_kernels.step);
     metal_tests.dependOn(&flash_prefill_hc_kernels.step);
     const flash_prefill_gdn_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/flash-prefill-gdn", "--flash-prefill-gdn" });
     const flash_prefill_gdn = b.addRunArtifact(exe);
@@ -811,14 +820,18 @@ pub fn build(b: *std.Build) void {
     b.step("test-nemotron-prefill", "Compare long Nemotron prompts, recurrent/KV caches and fused decode continuation").dependOn(&nemotron_prefill_compare.step);
     const flash_prefill_model = b.fmt("{s}/Qwen3.8-Flash-Next-MLX-4bit-MTP", .{model_root});
     const flash_prefill_simd = b.option(bool, "flash-prefill-simd", "Verify Flash prefill using forced SIMD/GQA fallback selection") orelse false;
-    const flash_prefill_dir = if (flash_prefill_simd) "build/native-checks/flash-prefill-simd" else "build/native-checks/flash-prefill";
+    const flash_prefill_tiles = b.option(bool, "flash-prefill-tiles", "Verify Flash custom prefill matmuls even when the runtime self-check would disable them") orelse false;
+    if (flash_prefill_simd and flash_prefill_tiles) @panic("Select either flash-prefill-simd or flash-prefill-tiles");
+    const flash_prefill_dir = if (flash_prefill_tiles) "build/native-checks/flash-prefill-tiles" else if (flash_prefill_simd) "build/native-checks/flash-prefill-simd" else "build/native-checks/flash-prefill";
     const flash_oracle_dir = b.fmt("{s}/oracle", .{flash_prefill_dir});
     const flash_native_dir = b.fmt("{s}/native", .{flash_prefill_dir});
     const flash_prefill_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", flash_prefill_model, "--flash-prefill", "--output", b.fmt("{s}/logits.npy", .{flash_oracle_dir}), "--state-directory", flash_oracle_dir });
     if (flash_prefill_simd) flash_prefill_oracle.addArg("--simd");
+    if (flash_prefill_tiles) flash_prefill_oracle.addArg("--custom-tiles");
     const flash_prefill = b.addRunArtifact(exe);
     flash_prefill.addArgs(&.{ "check-flash-prefill", flash_prefill_model, flash_native_dir });
     if (flash_prefill_simd) flash_prefill.addArg("--metal-simd");
+    if (flash_prefill_tiles) flash_prefill.addArg("--custom-tiles");
     flash_prefill.step.dependOn(&flash_prefill_oracle.step);
     const flash_prefill_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", flash_oracle_dir, flash_native_dir });
     flash_prefill_compare.step.dependOn(&flash_prefill.step);

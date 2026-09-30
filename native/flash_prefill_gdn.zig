@@ -72,7 +72,7 @@ pub fn forward(kernels: *mx.Kernels, ops: *Ops, s: *mx.Scope, x: A, w: Weights, 
     if (w.stacked != null and batch * rows >= 64) {
         const sg = try w.stacked.?.geometry(2);
         if (sg.n != conv_width + value_width + 2 * cfg.value_heads or sg.k != mx.dim(x, 2)) return error.InvalidTensorShape;
-        const all = try mm(s, x, w.stacked.?);
+        const all = try @import("flash_prefill_mm.zig").linear(kernels, s, x, w.stacked.?);
         qkv = try s.slice(all, 2, 0, conv_width);
         z = try s.slice(all, 2, conv_width, conv_width + value_width);
         b = try s.slice(all, 2, conv_width + value_width, conv_width + value_width + cfg.value_heads);
@@ -103,7 +103,7 @@ pub fn forward(kernels: *mx.Kernels, ops: *Ops, s: *mx.Scope, x: A, w: Weights, 
     const gate = try s.cast(try s.reshape(z, mx.shape(result[0])), mx.f32t);
     const activated_gate = if (cfg.activation == .sigmoid) try s.unary(c.mlx_sigmoid, gate) else try ops.call(s, .silu, &.{gate});
     const gated = try s.reshape(try s.cast(try s.binary(c.mlx_multiply, y, activated_gate), mx.bf16), &.{ batch, rows, value_width });
-    return .{ .output = try mm(s, gated, w.out), .cache = .{ .conv = next_conv, .state = result[1] }, .q = q, .k = k, .v = v, .recurrent = result[0], .gated = gated };
+    return .{ .output = try @import("flash_prefill_mm.zig").linear(kernels, s, gated, w.out), .cache = .{ .conv = next_conv, .state = result[1] }, .q = q, .k = k, .v = v, .recurrent = result[0], .gated = gated };
 }
 
 pub fn check(io: std.Io, dir: []const u8) !void {

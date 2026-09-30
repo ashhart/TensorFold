@@ -69,6 +69,8 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
     defer chunks.deinit(a);
     const count = chunks.next(0);
     const disk_path = "build/native-checks/session-prefix.safetensors";
+    const identity = try @import("snapshot_store.zig").identity(s);
+    defer a.free(identity);
     const boundary = @import("prompt_cache.zig").Boundary{ .starts = chunks.starts };
     {
         var donor = try session.RequestGeneration.init(s, a, prompt, options, .{}, null);
@@ -76,7 +78,7 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
         try std.testing.expectEqual(null, try donor.snapshot());
         try std.testing.expect(!try donor.step(s));
         const saved = (try donor.snapshot()) orelse return error.MissingPrefixSnapshot;
-        saved.save(s.io, disk_path, s.directory, prompt[0..count]) catch |err| {
+        saved.save(s.io, disk_path, identity, prompt[0..count]) catch |err| {
             var owned = saved;
             owned.deinit();
             return err;
@@ -84,6 +86,14 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
         try std.testing.expectEqual(count, saved.position());
         try std.testing.expect(saved.nbytes() > 0);
         try store.insertOwned(prompt[0..count], saved, prompt, false);
+    }
+    if (s.backend == .flash) {
+        const decision = s.backend.flash.kernels.flash_prefill.decision.?;
+        defer s.backend.flash.kernels.flash_prefill.decision = decision;
+        s.backend.flash.kernels.flash_prefill.decision = !decision;
+        const changed = try @import("snapshot_store.zig").identity(s);
+        defer a.free(changed);
+        try std.testing.expectError(error.IncompatibleSnapshot, session.Snapshot.load(s.io, disk_path, changed, prompt[0..count], .flash));
     }
     try std.testing.expectEqual(@as(usize, 0), store.longest(prompt[0..count], boundary));
     var captures: [4]Capture = @splat(.{});
@@ -95,7 +105,7 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
         request.* = try session.RequestGeneration.init(s, a, prompt, options, capture.sink(), null);
         initialized += 1;
         if (index == 3) {
-            var loaded = try session.Snapshot.load(s.io, disk_path, s.directory, prompt[0..count], @as(std.meta.Tag(session.Backend), s.backend));
+            var loaded = try session.Snapshot.load(s.io, disk_path, identity, prompt[0..count], @as(std.meta.Tag(session.Backend), s.backend));
             defer loaded.deinit();
             try request.restoreOwnedPrefix(&loaded);
             try std.testing.expectEqual(count, request.memoryLengths().now);

@@ -58,7 +58,7 @@ fn experts(m: *flash.Model, s: *mx.Scope, base: []const u8, x: A) !A {
     var w: moe.Weights = undefined;
     w.router = try m.f(base, "gate.weight");
     inline for (.{ .{ "gate", "switch_mlp.gate_proj" }, .{ "up", "switch_mlp.up_proj" }, .{ "down", "switch_mlp.down_proj" }, .{ "shared_gate", "shared_expert.gate_proj" }, .{ "shared_up", "shared_expert.up_proj" }, .{ "shared_down", "shared_expert.down_proj" }, .{ "shared_route", "shared_expert_gate" } }) |entry| @field(w, entry[0]) = try weight(m, base, entry[1]);
-    const out = try moe.forward(&m.prefill_ops, s, try s.reshape(x, &.{ 1, mx.dim(x, 0), 2560 }), w, 10);
+    const out = try moe.forward(&m.kernels, &m.prefill_ops, s, try s.reshape(x, &.{ 1, mx.dim(x, 0), 2560 }), w, 10);
     return s.reshape(out.output, &.{ mx.dim(x, 0), 2560 });
 }
 fn embedding(m: *flash.Model, s: *mx.Scope, h: A, tokens: []const i32, previous: flash.Cache, record: *flash.Cache) !A {
@@ -142,11 +142,12 @@ pub fn forward(m: *flash.Model, tokens: []const i32) !flash.Pass {
     return pass;
 }
 
-pub fn check(io: std.Io, dir: []const u8, output: []const u8) !void {
+pub fn check(io: std.Io, dir: []const u8, output: []const u8, custom_tiles: bool) !void {
     try mx.init();
     defer mx.shutdown();
     var m = try flash.Model.init(io, dir, false);
     defer m.deinit();
+    if (custom_tiles) m.kernels.flash_prefill.decision = true;
     try std.Io.Dir.cwd().createDirPath(io, output);
     var buf: [256]u8 = undefined;
     for ([_]usize{ 17, 63, 64, 2048, 2048, 17, 1 }, 0..) |count, step| {

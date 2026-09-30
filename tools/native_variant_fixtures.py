@@ -598,6 +598,84 @@ def flash_weight_fixtures(directory):
     print(f"Saved {len(cases)} mixed-format Flash checkpoint and exact-widening cases", flush=True)
 
 
+def flash_prefill_mm_fixtures(capture):
+    import mlx.nn as nn
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm as mm
+    mm._kernels.clear()
+    capture.test = "flash-prefill-mm-self-check"
+    probes = {}
+    original_qmm, original_gather = mm.qmm, mm.gather_sorted
+    count = 0
+    def record_probe(index, x, w, s, b):
+        probes.update({f"probe{index}.{key}": value for key, value in
+                       dict(input=x, weight=w, scales=s, biases=b).items()})
+    def record_qmm(x, w, s, b):
+        nonlocal count
+        record_probe(count, x, w, s, b)
+        count += 1
+        return original_qmm(x, w, s, b)
+    def record_gather(x, w, s, b, ids, tile):
+        record_probe(2, x, w, s, b)
+        probes["probe2.ids"] = ids
+        return original_gather(x, w, s, b, ids, tile)
+    mm.qmm, mm.gather_sorted = record_qmm, record_gather
+    try:
+        self_check = mm._self_check()
+    finally:
+        mm.qmm, mm.gather_sorted = original_qmm, original_gather
+    mx.save_safetensors(str(capture.directory / "self-check.safetensors"), probes)
+    cases = []
+    def save(mode, x, w, s, b, output, *, ids=None, tile=None, decision=True, bits=4):
+        name = f"mm-{len(cases):03}"
+        tensors = dict(input=x, weight=w, scales=s, biases=b, output=output)
+        if ids is not None:
+            tensors["ids"] = ids
+        mx.eval(tensors)
+        mx.save_safetensors(str(capture.directory / f"{name}.safetensors"), tensors)
+        cases.append(dict(name=name, mode=mode, bits=bits, group=x.shape[-1] // s.shape[-1],
+                          tile=tile, decision=decision))
+    for m, n, k in ((1, 33, 256), (63, 129, 320), (64, 640, 256), (65, 641, 256),
+                    (511, 640, 256), (512, 640, 256), (513, 640, 256),
+                    (128, 8191, 256), (128, 8192, 256), (129, 8193, 256), (2048, 324, 320)):
+        capture.test = f"flash-prefill-qmm-{m}-{n}-{k}"
+        x = mx.random.normal((m, k), key=mx.random.key(m)).astype(mx.bfloat16)
+        w, s, b = mx.quantize(mx.random.normal((n, k), key=mx.random.key(n)).astype(mx.bfloat16), group_size=32, bits=4)
+        save("qmm", x, w, s, b, mm.qmm(x, w, s, b))
+        for decision in (False, True):
+            mm._tiles[:] = [decision]
+            save("matmul", x, w, s, b, mm.matmul(x, w, s, b), decision=decision)
+        layer = nn.QuantizedLinear(k, n, bias=False, group_size=32, bits=4)
+        layer.update(dict(weight=w, scales=s, biases=b))
+        save("linear", x, w, s, b, mm.linear(layer, x))
+    for n in (1, 16):
+        x = mx.random.normal((2048, 32), key=mx.random.key(n)).astype(mx.bfloat16)
+        layer = nn.QuantizedLinear(32, n, bias=False, group_size=32, bits=4)
+        w, s, b = mx.quantize(mx.random.normal((n, 32), key=mx.random.key(n + 100)).astype(mx.bfloat16), group_size=32, bits=4)
+        layer.update(dict(weight=w, scales=s, biases=b))
+        mm._tiles[:] = [True]
+        save("linear", x, layer.weight, layer.scales, layer.biases, mm.linear(layer, x))
+    for bits in (2, 3, 4, 5, 6, 8):
+        for group in (32, 64, 128):
+            x = mx.random.normal((2, 256, 256), key=mx.random.key(bits)).astype(mx.bfloat16)
+            w, s, b = mx.quantize(mx.random.normal((640, 256), key=mx.random.key(group)).astype(mx.bfloat16), group_size=group, bits=bits)
+            mm._tiles[:] = [True]
+            y = mm.matmul(x.reshape(-1, 256), w, s, b, group=group, bits=bits).reshape(2, 256, 640)
+            save("linear", x, w, s, b, y, bits=bits)
+    for group in (32, 64, 128):
+        for m, experts, n in ((63, 16, 65), (64, 16, 64), (65, 16, 33),
+                              (895, 16, 64), (896, 16, 64), (897, 16, 64), (257, 37, 65)):
+            k = 256
+            capture.test = f"flash-prefill-gather-{group}-{m}-{experts}-{n}"
+            x = mx.random.normal((m, k), key=mx.random.key(m)).astype(mx.bfloat16)
+            w, s, b = mx.quantize(mx.random.normal((experts, n, k), key=mx.random.key(experts)).astype(mx.bfloat16), group_size=group, bits=4)
+            # Empty experts, a dominant expert, and tail experts exercise the tile scan.
+            ids = mx.sort(mx.array([0 if i % 3 else experts - 1 if i % 5 else i % experts for i in range(m)], mx.uint32))
+            for tile in (None, *mm.SHAPES, (64, 64, 2, 2)):
+                save("gather", x, w, s, b, mm.gather_sorted(x, w, s, b, ids, tile), ids=ids, tile=tile)
+    mm._tiles.clear()
+    (capture.directory / "mm.json").write_text(json.dumps(dict(self_check=self_check, cases=cases), indent=2) + "\n")
+
+
 def flash_prefill_hc_fixtures(capture):
     from tensorfold.kernels.qwen.flash_next.v1 import base, hc, prefill_hc
     from tests.test_flash_next_affine import quantized, bf16
@@ -1052,6 +1130,7 @@ def main():
     parser.add_argument("--flash-affine", action="store_true")
     parser.add_argument("--flash-weights", action="store_true")
     parser.add_argument("--flash-prefill-hc", action="store_true")
+    parser.add_argument("--flash-prefill-mm", action="store_true")
     parser.add_argument("--flash-prefill-gdn", action="store_true")
     parser.add_argument("--flash-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-attention", action="store_true")
@@ -1075,6 +1154,17 @@ def main():
         return
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
+    if args.flash_prefill_mm:
+        try:
+            flash_prefill_mm_fixtures(capture)
+        finally:
+            mx.fast.metal_kernel = capture.original
+        required = {"flash_prefill_qmm", "flash_prefill_gather", "flash_prefill_offsets"}
+        if required - {case["kernel"] for case in capture.cases}:
+            raise RuntimeError("Flash prefill matmul kernels were not captured")
+        (args.directory / "cases.json").write_text(json.dumps(capture.cases, indent=2) + "\n")
+        print(f"Saved {len(capture.cases)} Flash prefill matmul launches", flush=True)
+        return
     if args.flash_prefill_attention:
         try:
             flash_prefill_attention_fixtures(capture)

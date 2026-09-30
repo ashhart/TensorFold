@@ -274,7 +274,7 @@ def gemma_dflash_fixture(directory, draft_dir, output):
     print("Saved full Gemma target taps and DFlash proposals", flush=True)
 
 
-def flash_prefill_fixture(directory, output, simd=False):
+def flash_prefill_fixture(directory, output, simd=False, custom_tiles=False):
     import mlx.core as mx
     from tensorfold.families.qwen4_exp.model import load, select_by_kernels
     from tensorfold.families.qwen4_exp import decode
@@ -284,6 +284,8 @@ def flash_prefill_fixture(directory, output, simd=False):
     decode.DENSE = "rows"
     if simd:
         prefill_mm._tensor_units = lambda: False
+    if custom_tiles:
+        prefill_mm._tiles[:] = [True]
     model, _ = load(directory, lazy=True, ple_on_ssd=True)
     model.__dict__["fused"] = decode.FusedDecode(model)
     select_by_kernels(model.layers)
@@ -1152,6 +1154,7 @@ def main():
     p.add_argument("--gemma-prefill", action="store_true")
     p.add_argument("--nemotron-prefill", action="store_true")
     p.add_argument("--flash-prefill", action="store_true")
+    p.add_argument("--custom-tiles", action="store_true")
     p.add_argument("--synthetic-glm-layout", action="store_true")
     p.add_argument("--synthetic-glm-mixed", action="store_true")
     p.add_argument("--serial-rows", action="store_true")
@@ -1185,7 +1188,7 @@ def main():
         gemma_prefill_fixture(args.model, args.state_directory)
         return
     if args.flash_prefill:
-        flash_prefill_fixture(args.model, args.state_directory, args.simd)
+        flash_prefill_fixture(args.model, args.state_directory, args.simd, args.custom_tiles)
         return
     if args.nemotron_prefill:
         nemotron_prefill_fixture(args.model, args.state_directory, args.simd)

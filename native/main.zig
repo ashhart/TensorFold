@@ -15,9 +15,11 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     @import("bonsai.zig").memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB");
+    @import("flash_prefill_mm.zig").require_kernels = std.mem.eql(u8, init.environ_map.get("TF_REQUIRE_KERNELS") orelse "", "1");
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-checkpoint")) return @import("flash_names.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-weights")) return @import("flash_ops.zig").checkWeights(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-hc")) return @import("flash_prefill_ops.zig").check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-mm")) return @import("flash_prefill_mm.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-gdn")) return @import("flash_prefill_gdn.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-moe")) return @import("flash_prefill_moe.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-attention")) return @import("flash_prefill_attention.zig").check(io, args[2]);
@@ -50,10 +52,11 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-image-url")) return @import("image_http.zig").fetchCheck(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-gemma-prefill")) return @import("gemma_prefill.zig").check(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-nemotron-prefill")) return @import("nemotron_prefill.zig").check(io, args[2], args[3]);
-    if (args.len == 4 and std.mem.eql(u8, args[1], "check-flash-prefill")) return @import("flash_prefill.zig").check(io, args[2], args[3]);
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-flash-prefill")) return @import("flash_prefill.zig").check(io, args[2], args[3], false);
+    if (args.len == 5 and std.mem.eql(u8, args[1], "check-flash-prefill") and std.mem.eql(u8, args[4], "--custom-tiles")) return @import("flash_prefill.zig").check(io, args[2], args[3], true);
     if (args.len == 5 and std.mem.eql(u8, args[1], "check-flash-prefill") and std.mem.eql(u8, args[4], "--metal-simd")) {
         mx.force_simd = true;
-        return @import("flash_prefill.zig").check(io, args[2], args[3]);
+        return @import("flash_prefill.zig").check(io, args[2], args[3], false);
     }
     if (args.len == 5 and std.mem.eql(u8, args[1], "check-nemotron-prefill") and std.mem.eql(u8, args[4], "--metal-simd")) {
         mx.force_simd = true;

@@ -72,8 +72,8 @@ pub fn hyper(kernels: *mx.Kernels, s: *mx.Scope, h: A, pending: ?Pending, down: 
     if (low < 1 or low > std.math.maxInt(i32) - streams or dg.k != g.wide or ug.n != g.wide or ug.k != low or (dg.n != low and dg.n != low + streams)) return error.InvalidTensorShape;
     const written = try writeBack(kernels, s, h, pending, streams);
     const normed = try normalize(kernels, s, written[0], written[1], scale, eps, streams);
-    const active = try activate(kernels, s, try matmul(s, normed, down), streams, low);
-    const projected = try matmul(s, active.act, up);
+    const active = try activate(kernels, s, try @import("flash_prefill_mm.zig").matmul(kernels, s, normed, down), streams, low);
+    const projected = try @import("flash_prefill_mm.zig").matmul(kernels, s, active.act, up);
     return .{ .residual = written[0], .mixed = try mix(kernels, s, projected, normed, streams), .inject = active.inject };
 }
 

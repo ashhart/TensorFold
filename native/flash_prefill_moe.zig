@@ -24,7 +24,11 @@ fn gather(s: *mx.Scope, x: A, w: Weight, ids: A, sorted: bool) !A {
     return s.result(rc, out);
 }
 
-fn expert(s: *mx.Scope, x: A, w: Weight, ids: A, sorted: bool, bounded: bool) !A {
+fn expert(kernels: *mx.Kernels, s: *mx.Scope, x: A, w: Weight, ids: A, sorted: bool, bounded: bool) !A {
+    if (bounded and @divTrunc(mx.dim(x, 0), mx.dim(w.arrays[0], 0)) >= 4 and try kernels.flash_prefill.tiles(kernels)) {
+        const out = try @import("flash_prefill_mm.zig").gatherSorted(kernels, s, try s.reshape(x, &.{ mx.dim(x, 0), mx.dim(x, -1) }), w, try s.cast(ids, c.MLX_UINT32), null);
+        return s.reshape(out, &.{ mx.dim(out, 0), 1, mx.dim(out, 1) });
+    }
     if (!bounded or mx.dim(x, 0) <= 32768) return gather(s, x, w, ids, sorted);
     // Upstream balances slices to avoid MLX's 16-bit sorted-gather row offsets.
     const rows = mx.dim(x, 0);
@@ -37,7 +41,7 @@ fn expert(s: *mx.Scope, x: A, w: Weight, ids: A, sorted: bool, bounded: bool) !A
     return s.cat(parts.items, 0);
 }
 
-pub fn forward(ops: *Ops, s: *mx.Scope, x: A, w: Weights, top: i32) !Result {
+pub fn forward(kernels: *mx.Kernels, ops: *Ops, s: *mx.Scope, x: A, w: Weights, top: i32) !Result {
     if (mx.shape(x).len != 3 or mx.dtype(x) != mx.bf16 or mx.shape(w.router).len != 2 or mx.dtype(w.router) != mx.bf16) return error.InvalidTensorShape;
     const batch = mx.dim(x, 0);
     const rows = mx.dim(x, 1);
@@ -80,10 +84,10 @@ pub fn forward(ops: *Ops, s: *mx.Scope, x: A, w: Weights, top: i32) !Result {
         input = try s.take(try s.reshape(x, &.{ batch * rows, 1, dims }), row_ids, 0);
         indices = try s.take(flat, order, 0);
     }
-    const gate = try expert(s, input, w.gate, indices, sorted, optimized);
-    const up = try expert(s, input, w.up, indices, sorted, optimized);
+    const gate = try expert(kernels, s, input, w.gate, indices, sorted, optimized);
+    const up = try expert(kernels, s, input, w.up, indices, sorted, optimized);
     const act = try ops.call(s, .swiglu, &.{ gate, up });
-    var routed = try expert(s, act, w.down, indices, sorted, optimized);
+    var routed = try expert(kernels, s, act, w.down, indices, sorted, optimized);
     if (sorted) routed = try s.take(routed, inverse, 0);
     routed = try s.reshape(routed, &.{ batch, rows, top, dims });
     const weighted = try s.binary(c.mlx_multiply, routed, try s.reshape(weights, &.{ batch, rows, top, 1 }));
@@ -91,10 +95,14 @@ pub fn forward(ops: *Ops, s: *mx.Scope, x: A, w: Weights, top: i32) !Result {
     const rr = c.mlx_sum_axis(&reduced, weighted, -2, false, mx.stream);
     reduced = try s.result(rr, reduced);
     const sx = if (optimized) try s.reshape(x, &.{ rows, dims }) else x;
-    const shared_gate = try ops.call(s, .silu, &.{try mm(s, sx, w.shared_gate)});
-    const shared_act = try s.binary(c.mlx_multiply, shared_gate, try mm(s, sx, w.shared_up));
-    const shared = try s.reshape(try s.binary(c.mlx_multiply, try mm(s, shared_act, w.shared_down), try s.unary(c.mlx_sigmoid, try mm(s, sx, w.shared_route))), &.{ batch, rows, dims });
+    const shared_gate = try ops.call(s, .silu, &.{try sharedLinear(kernels, s, sx, w.shared_gate, optimized)});
+    const shared_act = try s.binary(c.mlx_multiply, shared_gate, try sharedLinear(kernels, s, sx, w.shared_up, optimized));
+    const shared = try s.reshape(try s.binary(c.mlx_multiply, try sharedLinear(kernels, s, shared_act, w.shared_down, optimized), try s.unary(c.mlx_sigmoid, try sharedLinear(kernels, s, sx, w.shared_route, optimized))), &.{ batch, rows, dims });
     return .{ .output = try s.binary(c.mlx_add, reduced, shared), .ids = ids, .weights = weights, .routed = reduced, .shared = shared };
+}
+
+fn sharedLinear(kernels: *mx.Kernels, s: *mx.Scope, x: A, w: Weight, optimized: bool) !A {
+    return if (optimized and mx.dim(w.arrays[0], 0) >= 32) @import("flash_prefill_mm.zig").linear(kernels, s, x, w) else mm(s, x, w);
 }
 
 pub fn check(io: std.Io, dir: []const u8) !void {
@@ -102,6 +110,8 @@ pub fn check(io: std.Io, dir: []const u8) !void {
     defer mx.shutdown();
     var ops = Ops{};
     defer ops.deinit();
+    var kernels = mx.Kernels.init();
+    defer kernels.deinit();
     var path: [4096]u8 = undefined;
     const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/moe.json", .{dir}));
     defer mx.allocator.free(bytes);
@@ -120,7 +130,7 @@ pub fn check(io: std.Io, dir: []const u8) !void {
         var w: Weights = undefined;
         w.router = try store.get("router");
         inline for (.{ "gate", "up", "down", "shared_gate", "shared_up", "shared_down", "shared_route" }, 0..) |key, i| @field(w, key) = .{ .arrays = .{ try store.get(key ++ ".weight"), try store.get(key ++ ".scales"), try store.get(key ++ ".biases") }, .format = .{ .bits = case.bits[i], .group_size = case.groups[i] } };
-        const result = try forward(&ops, &s, try store.get("input"), w, case.top);
+        const result = try forward(&kernels, &ops, &s, try store.get("input"), w, case.top);
         inline for (.{ "output", "ids", "weights", "routed", "shared" }) |key| {
             errdefer std.debug.print("Mismatch in {s}\n", .{key});
             try @import("variant_checks.zig").equalBits(&s, @field(result, key), try store.get(key));
