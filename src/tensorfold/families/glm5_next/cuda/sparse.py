@@ -175,8 +175,7 @@ def select_tokens(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: in
         raise ValueError("select_tokens: index queries must be contiguous rows, weights unit-stride columns")
     # score only visible pools, rounded up to a power of two so the allocator reuses a few sizes (exact sizes fragmented memory at 128k)
     np_max = bucket if bucket is not None else pool_bucket(pos, R, np_max)
-    # rows go through in blocks of SELECT_ROWS, each block scoring the window's np_max pools (the same columns, so the
-    # same bits a row): the fp32 scores hold SELECT_ROWS rows of the capacity-sized width, not the window's
+    # rows scored SELECT_ROWS at a time over the window's np_max pools (the same columns, so the same bits a row)
     B = min(R, SELECT_ROWS)
     scores = torch.empty((B, np_max), dtype=torch.float32, device=qi.device)
     # heads and width from the tensors: fixed ones read past a row's index query into its window neighbours

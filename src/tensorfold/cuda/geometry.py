@@ -233,8 +233,7 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     def bytes_at(capacity: int) -> int:
         scratch = mla_chunk_scratch(t, world, capacity, latent=latent)
         if latent:
-            # latent cache; a prompt chunk's latent partials (its dense pass runs MLA_PROMPT_ATT_ROWS rows at a time)
-            # and absorbed rows (the MTP absorbs through the same buffers)
+            # latent cache; a prompt chunk's partials (MLA_PROMPT_ATT_ROWS rows at a time) and absorbed rows (MTP's too)
             cache = count * capacity * lw * 2
             dense = min(capacity, minimum_slots) + PREFILL_ROWS
             scratch += (((dense + 511) // 512) * min(PREFILL_ROWS, MLA_PROMPT_ATT_ROWS) * heads * (lw + 2) * 4
