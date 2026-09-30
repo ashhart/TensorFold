@@ -256,6 +256,37 @@ class GlmEngine:
         self.comm.all_gather(mine, got)
         return [got[:len(values)].tolist(), got[len(values):].tolist()]
 
+    # -- the idle doorbell ---------------------------------------------------------------------------------------------
+    # Between requests rank 1 used to wait inside the next header's all-gather: an NCCL kernel spinning on its GPU and
+    # a host thread spinning in the copy that waits for it, for as long as the server stays idle. Rank 0 now sets a key
+    # in the rendezvous TCP store (NCCL.store) before each request's header, and rank 1 blocks on that socket first, so
+    # an idle rank 1 holds no GPU and no core. Communicators without a store (test fakes) skip it.
+    def _store(self):
+        return getattr(self.comm, "store", None)
+
+    def _ring(self) -> None:
+        store = self._store()
+        if store is not None:
+            self._bell = getattr(self, "_bell", 0) + 1
+            store.set(f"tf_glm_request_{self._bell}", b"1")
+
+    def _await_bell(self) -> None:
+        store = self._store()
+        if store is None:
+            return
+        from datetime import timedelta
+
+        key = f"tf_glm_request_{getattr(self, '_bell', 0) + 1}"
+        while True:
+            try:
+                store.wait([key], timedelta(hours=1))
+                break
+            except Exception as e:            # an idle hour: wait again (a lost rank 0 is a connection error instead)
+                if "timeout" not in str(e).lower():
+                    raise
+        store.delete_key(key)
+        self._bell = getattr(self, "_bell", 0) + 1
+
     def _share(self, values: list[int] | None) -> list[int]:
         """Rank 0's int list on every rank (a length, then the values, through the all-gather)."""
 
@@ -442,6 +473,7 @@ class GlmEngine:
                   int(constraint is not None)] + code
         from tensorfold.engine.grammar import pack
 
+        self._ring()                                   # wakes rank 1, which idles on the store, not in the all-gather
         self._share(header)
         self._share(list(prompt))
         if constraint is not None:                     # the request's grammar: rank 1 compiles the same
@@ -456,6 +488,7 @@ class GlmEngine:
         from tensorfold.engine.exact_sampling import Sampling
 
         while True:
+            self._await_bell()
             (max_tokens, stop_eos, draft, cached, s_lo, s_hi, s_top, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi, shaped,
              *code) = self._share(None)
             prompt = self._share(None)
