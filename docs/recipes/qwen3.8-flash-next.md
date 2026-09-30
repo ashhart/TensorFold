@@ -71,9 +71,11 @@ gathered partials in rank order.
 
 With one GPU, `--parallel N` enables eager shared forwards for up to N requests; CUDA
 `--parallel auto` selects one request. Two ranks serve one request at a time and reject `--parallel N`
-when N exceeds one. The single-request engine retains prompt and reply states for prefix reuse; the
-concurrent decoder retains prompt snapshots per stream. Cache capacity is allocated at startup; inspect
-the reported capacity rather than assuming an older fixed token limit.
+when N exceeds one. For prefix reuse, the single-request engine and the concurrent decoder keep prompt
+states; a follow-up prefills the reply again. A kept state stops one token before its prompt's end, so the
+same prompt sent again resumes, and so does a next chat turn that renders the generation prompt's `<think>`
+and newline as `<think>` and two newlines. Cache capacity is allocated at startup; inspect the reported
+capacity rather than assuming an older fixed token limit.
 
 N-gram tables are file-backed host data. On unified-memory GPUs they compete with weights and cache
 allocations for RAM, so a checkpoint's GPU allocation alone does not describe its memory requirement.
@@ -111,7 +113,7 @@ A token costs 30,784 bytes in bf16, 18,304 in int8 and 11,648 in int4, counting 
 cache: 1.68x and 2.64x smaller (the keys and values alone shrink 1.88x and 3.56x). The startup admission counts
 those bytes, so an omitted `--context` admits a longer window at int8 and int4, and an explicit `--context` is
 checked against the quantized cache. The dtype holds on every path: prompt chunks and decode windows, the MTP head,
-`"draft": false` requests, `--parallel N` streams and their kept prompt ends, and both ranks of `--tp 2`, which
+`"draft": false` requests, `--parallel N` streams and their kept prompt states, and both ranks of `--tp 2`, which
 refuse to start with different `--kv-dtype` values.
 
 A quantized cache changes the output, so its replies differ from bf16's. Drafted output still equals
