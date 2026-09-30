@@ -32,6 +32,7 @@ def private(st: State, rows: int) -> State:
     """A copy of a committed state with its own attention caches of ``rows`` rows (rows below ``pos`` copied in)."""
 
     other = clone_state(st)
+    other.kv = list(st.kv)                            # its own list: the buffers reserved next are this stream's
     reserve(other, rows)                              # new buffers now: prefill never grows or reallocates them
     return other
 

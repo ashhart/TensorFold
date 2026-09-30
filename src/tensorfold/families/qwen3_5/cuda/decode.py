@@ -16,14 +16,14 @@ from .weights import Weights
 
 
 def clone_state(st: State) -> State:
-    """The committed tensors are immutable; commits replace their list entries."""
+    """Commits replace list entries; the attention list is shared, so a grow reaches every clone and frees the old."""
 
     other = object.__new__(State)
     other.pos, other.limit = st.pos, st.limit
-    other.rope_delta = st.rope_delta
+    other.rope_delta, other.room = st.rope_delta, st.room
     other.conv = st.conv.copy()
     other.rec = st.rec.copy()
-    other.kv = st.kv.copy()
+    other.kv = st.kv
     return other
 
 
@@ -49,7 +49,7 @@ def prefill_stops(w: Weights, prompt: Sequence[int], st: State, draft=None, *, s
 @torch.no_grad()
 def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
             draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
-            keep: Callable | None = None, keep_at: int | None = None, vision=None, constraint=None):
+            keep: Callable | None = None, keep_at: int | None = None, vision=None, constraint=None, room=None):
     """Commit the prompt and sample the first token; resuming a kept ``state`` gives a fresh prefill's bits (``keep_at`` adds a third item: the state after prompt[:keep_at] and the drafter's snapshot there)."""
 
     from .forward import _mm
@@ -59,6 +59,8 @@ def prefill(w: Weights, prompt: Sequence[int], sampling: Sampling | None,
     st = clone_state(state) if state is not None else State(w)
     if state is None:
         st.limit = limit                    # a fresh state's attention caches stop here; a resumed one keeps its own
+    if room is not None:
+        st.room = room                      # before a grow, the engine frees other conversations' kept buffers
     if st.pos >= len(prompt):
         raise ValueError("a reused state must leave at least one prompt token to process")
     out = prefill_stops(w, prompt, st, draft, stops=stops, keep=keep, keep_at=keep_at, vision=vision)

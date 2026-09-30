@@ -17,9 +17,7 @@ EXL3_AUTO = DFLASH_POLICY             # what auto runs on an EXL3 checkpoint wit
 GRAPH_ROWS = (1, 2, 3, 4, 5, 6)       # verify windows captured as CUDA graphs
 MAX_ROWS = 8                          # the widest verify window (a pending token and up to 7 drafts)
 DENSE_CAPACITY = 2560                 # cache slots while DSA attention stays dense (contexts up to 2,051 tokens)
-# TF_GLM_DRAFT_RING=0: DFlash2 keeps its context in a flat buffer of the whole window (10,240 bytes a slot on each
-# rank) instead of a ring of its 2,048-row sliding window and block (2,176 rows, 21.25 MiB; ``dflash2.Drafter``);
-# the drafts are the same bits either way
+# TF_GLM_DRAFT_RING=0: DFlash2's context in a flat buffer of the whole window, not a 2,176-row ring (the same drafts)
 DRAFT_RING = os.environ.get("TF_GLM_DRAFT_RING", "1").strip() != "0"
 
 
@@ -369,9 +367,9 @@ class GlmEngine:
         self.cache.remove(snap)
 
     def _remember(self, snap) -> None:
-        for c in [c for c in self.cache if c.ids == snap.ids]:
+        for c in [c for c in self.cache if c.ids == snap.ids and c is not snap]:
             self._drop(c)
-        self.cache.append(snap)
+        self.cache[:] = [c for c in self.cache if c is not snap] + [snap]   # a resumed prompt kept again moves last
         dropped = False
         while len(self.cache) > 1 and (len(self.cache) > self.cache_entries or self._held_bytes() > self.cache_bytes):
             self._drop(self.cache[0])

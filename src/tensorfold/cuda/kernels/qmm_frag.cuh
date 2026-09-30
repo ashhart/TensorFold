@@ -60,7 +60,12 @@ __device__ __forceinline__ void mma0(float (&d)[4], const uint32_t (&a)[4], uint
 __device__ __forceinline__ uint32_t pair(uint32_t w, int s) {
     const uint32_t t = ((w >> s) & 0x000F000Fu) | 0x43004300u;
     uint32_t r;
+#if __CUDA_ARCH__ >= 900
     asm("sub.rn.bf16x2 %0, %1, %2;\n" : "=r"(r) : "r"(t), "r"(0x43004300u));
+#else
+    // no sub.bf16x2 before sm_90: t * 1 - 128 rounds the exact q once too (an exact value, the same bits)
+    asm("fma.rn.bf16x2 %0, %1, %2, %3;\n" : "=r"(r) : "r"(t), "r"(0x3F803F80u), "r"(0xC300C300u));
+#endif
     return r;
 }
 

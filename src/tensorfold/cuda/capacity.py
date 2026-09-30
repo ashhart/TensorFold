@@ -182,6 +182,12 @@ def available_bytes(torch) -> int:
     return host if unified(torch) else min(available, host)
 
 
+def total_bytes(torch) -> int:
+    """The GPU's memory (a GB10's is the host's): the same on every rank, so what it sizes agrees without a gather."""
+
+    return int(torch.cuda.mem_get_info()[1])
+
+
 def page_room(torch) -> int | None:
     """What caches and mapped read-only tables share on a unified GPU (MemAvailable); None on a discrete GPU."""
 
@@ -246,6 +252,19 @@ def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
     return min(target, fitting)
 
 
+def floor(model_dir: str | Path) -> tuple[int, int]:
+    """The compute capability a checkpoint's kernels need: NVFP4 and FP8 (ModelOpt, compressed-tensors) use clusters."""
+
+    from tensorfold.cuda import build
+    from tensorfold.cuda.nvfp4.format import is_quantized
+
+    try:
+        quantized = is_quantized(model_dir)
+    except (OSError, ValueError):                   # an unreadable config is named by the estimate below
+        quantized = False
+    return build.CLUSTERS if quantized else build.MIN_CAPABILITY
+
+
 def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, torch,
           geometry: Geometry | Callable, transform: Callable, *, rank: int = 0, world: int = 1,
           gather: Callable | None = None, draft_dir: Path | None = None,
@@ -253,9 +272,11 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
           extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
           draft_transform: Callable | None = None,
           draft_weights: Callable[[Path], Weights] | None = None) -> dict:
-    """Reach the same refusal or capacity before either rank allocates model tensors. The draft model: ``draft_weights``
-    from its folder, else its tensors through ``draft_transform`` (default: 4 bytes a value, or more)."""
+    """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform."""
 
+    from tensorfold.cuda import build
+
+    build.refuse_old_gpu(floor(model_dir))          # an old GPU is refused here, before any weight loads
     error = None
     plan = None
     try:
@@ -271,7 +292,9 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
             draft = draft_weights(draft_dir) if draft_weights is not None else estimate_weights(
                 draft_dir, draft_transform or (lambda name, info: (math.prod(info["shape"]) * max(4, itemsize(info, name)),
                                                                    0)))
-            weights = Weights(weights.resident + draft.resident, weights.staging + draft.staging, weights.mapped)
+            # the drafter loads after the target: the peak is the larger of either load's
+            weights = Weights(weights.resident + draft.resident, max(weights.staging - draft.resident, draft.staging),
+                              weights.mapped)
             if draft_geometry is not None:
                 draft_geometry = draft_geometry(config(draft_dir)) if callable(draft_geometry) else draft_geometry
                 main = geometry

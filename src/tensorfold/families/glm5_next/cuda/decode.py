@@ -258,8 +258,7 @@ def take_snapshot(e: Engine, ids: Sequence[int], pending: torch.Tensor | None, *
 
 
 def _ring_slots(drafter, n: int) -> torch.Tensor:
-    """Where a ring drafter (``drafter.ring`` rows) holds the window rows a block pass at context end n reads
-    (positions n - window - 1 .. n - 1, one spare): those positions modulo the ring."""
+    """The ring slots of the window rows a block pass at context end n reads (n - window - 1 .. n - 1)."""
     lo = max(0, n - drafter.window - 1)
     return torch.arange(lo, n, device=drafter.kc[0].device) % drafter.ring
 
@@ -311,8 +310,7 @@ def row_bytes(e: Engine, snap: Snapshot) -> int:
 
 
 def snapshot_bytes(snap: Snapshot) -> int:
-    """Device memory a kept snapshot holds: its KDA states, conv windows, pending MTP rows, a ring drafter's window
-    and any saved rows."""
+    """A kept snapshot's device bytes: KDA states, conv windows, pending MTP rows, a ring window, saved rows."""
     held = [snap.rec, snap.conv] + ([snap.pending] if snap.pending is not None else []) + (snap.drafter_rows or [])
     return sum(t.numel() * t.element_size() for t in held) + (snap.nbytes if snap.rows is not None else 0)
 
@@ -387,6 +385,12 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
                             keep_at - 1 if use_mtp else -1, keep_at if drafter is not None else -1)
         if drafter is not None:
             drafter.add_taps(e.tap_rows(R, b))
+            if 0 < point <= R and getattr(drafter, "ring", 0):
+                # a ring keeps the kept point's window unless this chunk wrote past it by more than the ring's slack
+                if R - point < drafter.ring - drafter.window:
+                    kept.drafter_rows = _ring_window(drafter, keep_at)
+                else:
+                    kept.drafter_end = -1
         if use_mtp:
             nxt = list(prompt[start + 1:start + R + 1])
             if nxt:

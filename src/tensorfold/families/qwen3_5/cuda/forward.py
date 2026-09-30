@@ -98,9 +98,10 @@ Record = GDNRecord | AttentionRecord
 
 
 class State:
-    """Cloned states share growable KV buffers whose rows below ``pos`` remain committed, so writes preserve shorter clones but invalidate longer cached extensions."""
+    """Clones share one list of KV buffers: writes keep shorter clones' rows and invalidate longer cached ones."""
 
     rope_delta = 0                      # an image prompt's rotary shift past its tokens; text has none
+    room = None                         # called (state, bytes) before a grow: one GPU's engine frees kept buffers
 
     def __init__(self, w: Weights):
         c = w.config
@@ -162,14 +163,28 @@ def stage(w: Weights, st: State, width: int, context: int) -> Staged:
                   _cache_offsets([st], softmax, device), _conv_windows(parents, c.conv_kernel - 1).to(device), host, dev)
 
 
+def grow(st: State, i: int, need: int, *, exact: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+    """Layer ``i``'s cache at ``need`` rows (doubled to ``st.limit``, or exact): every row moves, the old ones free."""
+
+    k, v = st.kv[i]
+    if k.shape[0] < need:
+        cap = need if exact else max(need, 2 * k.shape[0], 1024)
+        if st.limit and not exact:
+            cap = max(need, min(cap, st.limit))
+        if st.room is not None:
+            st.room(st, cap * (k.stride(0) * k.element_size() + v.stride(0) * v.element_size()))
+        grown = k.new_empty((cap, *k.shape[1:])), v.new_empty((cap, *v.shape[1:]))
+        grown[0][:k.shape[0]], grown[1][:v.shape[0]] = k, v
+        st.kv[i] = grown
+    return st.kv[i]
+
+
 def reserve(st: State, rows: int) -> None:
     """Grow every attention cache to ``rows`` now, so later commits never move a buffer (graphs keep addresses)."""
 
     for i, kv in enumerate(st.kv):
-        if kv is not None and kv[0].shape[0] < rows:
-            k, v = kv[0].new_empty((rows, *kv[0].shape[1:])), kv[1].new_empty((rows, *kv[1].shape[1:]))
-            k[:st.pos], v[:st.pos] = kv[0][:st.pos], kv[1][:st.pos]
-            st.kv[i] = (k, v)
+        if kv is not None:
+            grow(st, i, rows, exact=True)
     st.limit = rows
 
 
@@ -450,16 +465,7 @@ def _commit(states: Sequence[State], record: Sequence[Record], paths: Sequence[S
         for st, path in zip(states, paths):
             need = st.pos + len(path)
             for i, _ in att:
-                kbuf, vbuf = st.kv[i]
-                if kbuf.shape[0] < need:
-                    cap = max(need, 2 * kbuf.shape[0], 1024)
-                    if st.limit:
-                        cap = max(need, min(cap, st.limit))
-                    grown_k = kbuf.new_empty((cap, *kbuf.shape[1:]))
-                    grown_v = vbuf.new_empty((cap, *vbuf.shape[1:]))
-                    grown_k[:st.pos] = kbuf[:st.pos]
-                    grown_v[:st.pos] = vbuf[:st.pos]
-                    st.kv[i] = (grown_k, grown_v)
+                grow(st, i, need)
         # every stream's accepted key/value rows: one gather a layer, one multi-tensor copy into every cache
         take = takes[0] if len(takes) == 1 else torch.cat(list(takes))
         dst, src = [], []

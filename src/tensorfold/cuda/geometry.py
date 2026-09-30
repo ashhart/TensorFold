@@ -8,6 +8,7 @@ import re
 from .capacity import Geometry, Weights, headers, itemsize
 
 PREFILL_ROWS = 2048     # a prompt chunk's rows: Flash Next and GLM keep buffers of this many rows
+PROMPT_SHARE = 32       # a dense prompt chunk's arrays take at most this fraction of the GPU's memory
 PREFILL_ATT_ROWS = 256  # Flash Next's prompt attention block
 MLA_PROMPT_ATT_ROWS = 512   # GLM's prompt-chunk rows one dense latent attention call takes (forward.PROMPT_ATT_ROWS)
 MLA_SELECT_ROWS = 512       # GLM's prompt-chunk rows whose pool scores are held at once (sparse.SELECT_ROWS)
@@ -136,8 +137,29 @@ def layer_counts(t: dict) -> tuple[int, int]:
     return layers - layers // interval, layers // interval
 
 
+def prompt_row_bytes(t: dict, world: int = 1) -> int:
+    """Bytes one dense prompt row's arrays hold at once, drafter taps included (the 27B measured 306-315 KiB)."""
+
+    return 16 * (int(t["hidden_size"]) + int(t["intermediate_size"]) // world)
+
+
+def prompt_rows(total: int, row_bytes: int, most: int = 4096) -> int:
+    """Prompt chunk rows: a multiple of 512 up to ``most`` whose arrays fit a PROMPT_SHARE-th of ``total``."""
+
+    return max(512, min(most, total // PROMPT_SHARE // row_bytes // 512 * 512))
+
+
+def live_kv(t: dict, world: int, window: int) -> int:
+    """A dense stream's attention caches at ``window`` rows (1,024 at least) and one layer's buffer mid-grow."""
+
+    _, attention = layer_counts(t)
+    return (attention + 1) * max(1024, window) * int(t["num_key_value_heads"]) // world * int(t["head_dim"]) * 4
+
+
 def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
-                 kv_bits: int = 16) -> Geometry:
+                 kv_bits: int = 16, rows: int | None = None, prompt: int = 0, evicts: bool = False) -> Geometry:
+    """``rows``: widest verify; ``prompt``: chunk rows sharing its scratch; ``evicts``: only the live window counts."""
+
     linear, attention = layer_counts(t)
     d, h = int(t["hidden_size"]), int(t["num_attention_heads"]) // world
     hk = int(t["num_key_value_heads"]) // world
@@ -151,13 +173,13 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
     # Persistent state, retained recurrent prefixes, rollback and row replay inputs.
     fixed = linear * ((6 if indexed else 4) * nv * dk * dv * 4 +
                       4 * (conv - 1) * (2 * nk * dk + nv * dv) * 2)
-    rows = 64 if indexed else 128
+    rows = rows or (64 if indexed else 128)
     fixed += linear * rows * (width * 2 + nk * dk * 4 + nv * dv * 4 + nv * 8)
     # Bound the concurrent activation arrays, MoE expert rows, logits and split-K scratch.
     slots = int(t.get("num_experts_per_tok", 1)) + 1
     intermediate = int(t.get("moe_intermediate_size", t.get("intermediate_size", d))) // world
     extent = d * streams + int(t["vocab_size"]) // world + slots * (intermediate + d) + width + h * hd
-    fixed += 16 * rows * extent * 4
+    fixed += max(16 * rows * extent * 4, prompt * prompt_row_bytes(t, world) if prompt else 0)
     fixed += (2 if mtp else 1) * 32 * rows * 2560 * 4
     if indexed:
         fixed += 4 * (int(t.get("ple_conv_kernel_size", 4)) - 1) * int(t.get("ngram_size", 3)) * streams * d * 2
@@ -178,7 +200,7 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
         else:
             # Bound two retained prefixes, current KV state and a growth copy; speculative rows use separate workspace.
             rounded = 1 << (max(1024, capacity - reserve) - 1).bit_length()
-            cache = 4 * attention * rounded * hk * hd * 4
+            cache = live_kv(t, world, capacity - reserve) if evicts else 4 * attention * rounded * hk * hd * 4
             scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
         return fixed + cache + scratch
     return Geometry(bytes_at, reserve)
@@ -263,10 +285,7 @@ def mla_chunk_scratch(t: dict, world: int, capacity: int, *, latent: bool) -> in
 
 
 def draft_ring_rows(window: int, block: int, tile: int = 64) -> int:
-    """Rows of GLM's DFlash2 context ring (``dflash2.Drafter``, TF_GLM_DRAFT_RING): a block pass at context end s
-    reads keys from the ``tile``-row tile holding s - window (older rows are masked for every query; ``window`` is the
-    drafter's, sliding_window - 1) through its own rows s .. s + block - 1, at most window + block + tile - 1 rows,
-    here rounded up to whole tiles; a kept state's window rows (window + 1) fit as well."""
+    """Rows of GLM's DFlash2 context ring: window + block + a tile in whole tiles (a kept state's window fits too)."""
 
     return -(-(window + block + tile - 1) // tile) * tile
 
@@ -288,10 +307,7 @@ def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, 
 
 
 def dflash2_geometry(t: dict, world: int, reserve: int, *, ring: bool) -> Geometry:
-    """GLM's DFlash2 drafter (``dflash2.Drafter``) on each of ``world`` ranks: one context of keys and values, a ring
-    of ``draft_ring_rows`` rows whatever the window (``ring``, TF_GLM_DRAFT_RING; a flat buffer when the window is
-    smaller) or ``capacity`` + block rows, and a block pass's activations. Kept prompt states' copies of its window
-    count in the kept-state budget (``snapshot_bytes``)."""
+    """GLM's DFlash2 drafter on each rank: one context (a ring, or capacity + block rows) and a block pass."""
 
     layers = int(t["num_hidden_layers"])
     heads = int(t["num_key_value_heads"]) // world
@@ -308,12 +324,7 @@ def dflash2_geometry(t: dict, world: int, reserve: int, *, ring: bool) -> Geomet
 
 
 def dflash2_weights(draft_dir, world: int) -> Weights:
-    """What GLM's DFlash2 drafter (``dflash2.Drafter``) holds on each of ``world`` ranks, not its checkpoint's BF16:
-    4-bit copies (``qmm.quantize4``: groups of 64 with BF16 scales and biases, rows padded to 128) of fc, the
-    convolutions' kernel projections and this rank's attention and MLP rows (k and v twice: in qkv and in kv); BF16
-    norms, base kernels and selector projection; the selector's float32 codebooks in host memory (the same memory on
-    GB10). Staging: the largest matrix read and uploaded in BF16 with its quantization temporaries (float32 groups
-    of up to 8,192 rows, the packer's int64 lanes)."""
+    """GLM's DFlash2 drafter as held on each rank (4-bit copies, bf16 norms, fp32 codebooks), and its staging."""
 
     h = headers(draft_dir)
     shape = {name: [int(x) for x in info["shape"]] for name, info in h.items()}

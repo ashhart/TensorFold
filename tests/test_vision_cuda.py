@@ -170,11 +170,12 @@ def test_state_clone_preserves_image_offset_without_importing_cuda():
     namespace = {"State": state_type}
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), namespace)
     state = state_type()
-    state.pos, state.limit, state.rope_delta = 257, 1024, -192
+    state.pos, state.limit, state.rope_delta, state.room = 257, 1024, -192, object()
     state.conv, state.rec, state.kv = [1], [2], [3]
     cloned = namespace["clone_state"](state)
-    assert (cloned.pos, cloned.rope_delta, cloned.limit) == (257, -192, 1024)
-    assert cloned.kv == state.kv and cloned.kv is not state.kv
+    assert (cloned.pos, cloned.rope_delta, cloned.limit, cloned.room) == (257, -192, 1024, state.room)
+    assert cloned.conv == state.conv and cloned.conv is not state.conv
+    assert cloned.kv is state.kv                   # one attention list: a grow reaches every clone
 
 
 def test_a_meta_built_tower_matches_a_normally_built_one_in_the_installed_transformers():

@@ -39,8 +39,17 @@ def test_the_flags_name_only_this_gpu(monkeypatch):
 @pytest.mark.torch
 def test_an_older_gpu_is_refused_by_name(monkeypatch):
     _gpu(monkeypatch, (8, 6), "NVIDIA GeForce RTX 3090")
-    with pytest.raises(RuntimeError, match=r"capability 9\.0 or newer.*RTX 3090.*is 8\.6"):
+    with pytest.raises(RuntimeError, match=r"capability 8\.9 or newer \(FP8 MMA\).*RTX 3090.*is 8\.6"):
         build.arch_flags()
+
+
+@pytest.mark.torch
+def test_ada_builds_all_but_the_cluster_only_extensions(monkeypatch):
+    _gpu(monkeypatch, (8, 9), "NVIDIA GeForce RTX 4090")
+    assert build.arch_flags() == ["-gencode=arch=compute_89,code=sm_89"]
+    with pytest.raises(RuntimeError, match=r"capability 9\.0 or newer \(thread-block clusters for these weights\)"
+                                           r".*RTX 4090.*is 8\.9"):
+        build.arch_flags(build.CLUSTERS)
 
 
 @pytest.mark.torch

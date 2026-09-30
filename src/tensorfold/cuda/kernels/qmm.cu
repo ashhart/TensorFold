@@ -171,6 +171,9 @@ __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
         wait<0>();
         __syncthreads();
         if constexpr (CLUSTER) {
+#if __CUDA_ARCH__ < 900
+            __trap();                                     // no clusters before sm_90: the host never launches this
+#else
             // K slices of a tile form a cluster: slice 0 adds peers' partials in slice order, as reduce_kernel does
             constexpr int E = T::MT * T::NT * 4;
             auto cluster = cooperative_groups::this_cluster();
@@ -198,6 +201,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmm_kernel(
             }
             cluster.sync();                               // peers keep their memory until slice 0 has read it
             if (slice != 0) return;
+#endif
         }
 #pragma unroll
         for (int i = 0; i < T::MT; ++i)
@@ -290,12 +294,16 @@ void dispatch(int bm, const at::Tensor& x, const at::Tensor& xs, const at::Tenso
 
 } // namespace
 
+// Clusters hold up to 8 K slices (the portable size) from sm_90; more, unreduced slices or older GPUs use the buffer.
+bool qmm_clusters(int SK, bool reduce) {
+    return SK > 1 && SK <= 8 && reduce && at::cuda::getCurrentDeviceProperties()->major >= 9;
+}
+
 void qmm_cuda(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const at::Tensor& scales,
               const at::Tensor& biases, at::Tensor& out, const at::Tensor& part, int N, int SK, int gs, int bm,
               bool f32, bool reduce) {
     const int M = x.size(0);
-    // clusters hold up to 8 K slices (the portable size); more, or unreduced slices, go through the slice buffer
-    const bool cluster = SK > 1 && SK <= 8 && reduce;
+    const bool cluster = qmm_clusters(SK, reduce);
 #define GO(G, F, C) dispatch<G, F, C>(bm, x, xs, w, scales, biases, out, part, N, SK)
     if (gs == 64) {
         if (f32) { if (cluster) GO(64, true, true); else GO(64, true, false); }

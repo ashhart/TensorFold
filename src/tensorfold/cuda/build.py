@@ -6,31 +6,47 @@ import os
 import threading
 from typing import Any
 
-MIN_CAPABILITY = (9, 0)         # the kernels use thread-block clusters and FP8 MMA
+MIN_CAPABILITY = (8, 9)         # FP8 MMA and e4m3 conversions (Ada); kernels with clusters use them from 9.0
+CLUSTERS = (9, 0)               # extensions built only on thread-block clusters (NVFP4) need Hopper or newer
 # stop first: when the lock goes, a waiting start imports whatever module is there without building, even an old one
 HINT = "if no other build is running, a killed build left it: stop this start, delete the lock and start again"
 LOCK_WAIT_SECONDS = 60.0        # a start still waiting on the same lock this long says so again
 
 
-def arch_flags() -> list[str]:
-    """nvcc flags for the current GPU alone; a GPU older than the kernels need is refused by name."""
+def arch_flags(need: tuple[int, int] = MIN_CAPABILITY) -> list[str]:
+    """nvcc flags for the current GPU alone; a GPU older than ``need`` is refused by name."""
 
     import torch
 
     major, minor = torch.cuda.get_device_capability()
-    if (major, minor) < MIN_CAPABILITY:
-        raise RuntimeError(f"TensorFold's CUDA kernels need compute capability {MIN_CAPABILITY[0]}.{MIN_CAPABILITY[1]} "
-                           f"or newer (thread-block clusters and FP8 MMA); this GPU ({torch.cuda.get_device_name()}) "
-                           f"is {major}.{minor}")
+    if (major, minor) < need:
+        why = "thread-block clusters" if need >= CLUSTERS else "FP8 MMA"
+        raise RuntimeError(f"TensorFold's CUDA kernels need compute capability {need[0]}.{need[1]} or newer ({why}"
+                           f"{' for these weights' if need > MIN_CAPABILITY else ''}); this GPU "
+                           f"({torch.cuda.get_device_name()}) is {major}.{minor}")
     return [f"-gencode=arch=compute_{major}{minor},code=sm_{major}{minor}"]
 
 
-def load(name: str, sources: str | list[str], **kwargs: Any) -> Any:
+def refuse_old_gpu(need: tuple[int, int] = MIN_CAPABILITY) -> None:
+    """At startup, before any weight loads: a GPU older than ``need`` is refused by name (no GPU: skipped)."""
+
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        try:
+            arch_flags(need)
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from None
+
+
+def load(name: str, sources: str | list[str], need: tuple[int, int] = MIN_CAPABILITY, **kwargs: Any) -> Any:
     """torch's JIT ``load`` for this GPU only (NVIDIA's containers list every architecture back to sm_80), with a line when it compiles or waits on a lock."""
 
     from torch.utils import cpp_extension
 
-    kwargs["extra_cuda_cflags"] = [*kwargs.get("extra_cuda_cflags", []), *arch_flags()]
+    kwargs["extra_cuda_cflags"] = [*kwargs.get("extra_cuda_cflags", []), *arch_flags(need)]
     held = _announce(cpp_extension, name, sources, kwargs.get("build_directory"))
     timer = None
     if held is not None:
@@ -98,4 +114,4 @@ def _say(text: str) -> None:
     print(f"[tensorfold] {text}", flush=True)
 
 
-__all__ = ["MIN_CAPABILITY", "arch_flags", "load"]
+__all__ = ["CLUSTERS", "MIN_CAPABILITY", "arch_flags", "load"]

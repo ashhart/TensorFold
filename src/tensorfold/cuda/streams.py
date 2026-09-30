@@ -147,12 +147,13 @@ class PrefixCache:
         while len(self.entries) > self.keep:
             self._drop(self.entries[:-1])
 
-    def evict(self) -> bool:
-        """Memory is short: drop the entry ``add`` would drop next; False when none is left."""
+    def evict(self, among: list | None = None) -> bool:
+        """Memory is short: drop the entry ``add`` would drop next (of ``among``); False when none is left."""
 
-        if not self.entries:
+        among = self.entries if among is None else among
+        if not among:
             return False
-        self._drop(self.entries)
+        self._drop(among)
         return True
 
     def _drop(self, among: list) -> None:
@@ -160,3 +161,27 @@ class PrefixCache:
         gone = cold[0] if cold else among[0]
         self.entries = [e for e in self.entries if e is not gone]
         self.hit &= {tuple(e[0]) for e in self.entries}
+
+
+class KVRoom:
+    """One GPU's attention-cache bytes: a grow first evicts kept entries on other buffers, least recently used."""
+
+    def __init__(self, cache: PrefixCache, budget: int) -> None:
+        self.cache, self.budget = cache, int(budget)
+
+    def __call__(self, st: Any, extra: int) -> None:
+        while self.held(st) + extra > self.budget:
+            if not self.cache.evict([e for e in self.cache.entries if e[1].kv is not st.kv]):
+                return                      # only this conversation is left: the window was admitted for it
+
+    def held(self, st: Any) -> int:
+        """Bytes of every distinct attention buffer the state and the kept entries hold."""
+
+        seen, total = set(), 0
+        for kv in [st.kv, *(e[1].kv for e in self.cache.entries)]:
+            for pair in kv:
+                for t in pair or ():
+                    if t.data_ptr() not in seen:
+                        seen.add(t.data_ptr())
+                        total += t.untyped_storage().nbytes()
+        return total

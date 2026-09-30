@@ -126,6 +126,7 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr(torch, "empty", cpu(original_empty))
     monkeypatch.setattr(torch.cuda, "set_device", lambda *a: None)
     monkeypatch.setattr(capacity, "available_bytes", lambda t: 16 * capacity.GIB)
+    monkeypatch.setattr(capacity, "total_bytes", lambda t: 128 * capacity.GIB)       # a GB10: 4096-row prompt chunks
     calls = []
     def load(*a, **kw):
         calls.append(kw)
@@ -290,7 +291,8 @@ def test_actual_distributed_startup_agrees_on_smaller_rank_before_loading(tmp_pa
     checkpoint(tmp_path, small_config(), HEAD)
     calls, capacity = fake_runtime
     geom = (mla_geometry(small_config(), 2, 8, latent=LATENT) if family == "mla" else
-            gdn_geometry(small_config(), 2, 1 if family == "indexed" else 12, indexed=family == "indexed"))
+            gdn_geometry(small_config(), 2, 1, indexed=True) if family == "indexed" else
+            gdn_geometry(small_config(), 2, 12, rows=12, prompt=4096))     # the 27B engine's, prompt chunks on a GB10
     transform = split_weights(rule) if family == "mla" else indexed_weights(2, False) if family == "indexed" else linear_weights
     weights = capacity.estimate_weights(tmp_path, transform)
     if family == "linear":

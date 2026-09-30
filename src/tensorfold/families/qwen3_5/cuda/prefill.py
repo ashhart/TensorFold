@@ -14,7 +14,7 @@ from tensorfold.cuda.kernels.prefill_attention import attention
 from . import glue
 from . import prefill_bf16, prefill_glue
 from .decode import clone_state
-from .forward import State
+from .forward import State, grow as _grow
 from .qmm_fast import matmul, matmul_partial, tile
 from .weights import QLinear, Weights
 
@@ -43,19 +43,6 @@ def _row_mm(x, w: QLinear, tp: bool) -> torch.Tensor:
     return gather_rank_partials(_mm(x, w))                 # bf16 partials: half the bytes of fp32 over the link
 
 
-def _grow(st: State, i: int, need: int) -> tuple[torch.Tensor, torch.Tensor]:
-    kbuf, vbuf = st.kv[i]
-    if kbuf.shape[0] < need:
-        cap = max(need, 2 * kbuf.shape[0], 1024)
-        if st.limit:
-            cap = max(need, min(cap, st.limit))
-        grown_k, grown_v = kbuf.new_empty((cap, *kbuf.shape[1:])), vbuf.new_empty((cap, *vbuf.shape[1:]))
-        grown_k[:st.pos] = kbuf[:st.pos]
-        grown_v[:st.pos] = vbuf[:st.pos]
-        st.kv[i] = (grown_k, grown_v)
-    return st.kv[i]
-
-
 @torch.no_grad()
 def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = False, capture_taps: bool = False,
                   last: bool = True, every: bool = False, cut: int = 0, vision=None):
@@ -80,9 +67,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
         x = replace_rows(x, vision, p0, p0 + W)
     pending: torch.Tensor | None = None
     taps: list[torch.Tensor] = []
-    part = clone_state(st) if cut else None
-    if part is not None:
-        part.kv = []            # the chunk's final buffers, set below: these would outlive a grow that replaces them
+    part = clone_state(st) if cut else None     # its attention buffers are the chunk's, through the shared list
     for i, layer in enumerate(w.layers):
         x, h = pg.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
@@ -146,7 +131,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
     taps_out = torch.cat(taps, dim=-1) if capture_taps else None
     if part is None:
         return normed, taps_out
-    part.pos, part.kv = p0 + cut, st.kv.copy()      # the chunk's buffers: their rows below part.pos stay as committed
+    part.pos = p0 + cut                             # the chunk's buffers: their rows below part.pos stay as committed
     return normed, taps_out, part
 
 
@@ -159,7 +144,7 @@ def chunks(start: int, end: int, size: int = CHUNK) -> list[tuple[int, int]]:
 
 @torch.no_grad()
 def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = False, draft=None,
-                  size: int = CHUNK, keep_at: int | None = None, vision=None):
+                  size: int | None = None, keep_at: int | None = None, vision=None):
     """Commit prompt[st.pos:] into ``st``, tapping the drafter's window; ``keep_at``: ``(normed, (state, snapshot))``, the state after prompt[:keep_at] from a cut chunk."""
 
     dev = w.norm.device
@@ -177,11 +162,10 @@ def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = Fa
     if draft is not None and end - draft.window > base:
         tap_from = end - draft.window
         draft.skip(tap_from - base)
-    spans = chunks(base, n, size)
+    spans = chunks(base, n, size or getattr(w, "prompt_rows", CHUNK))       # stand-in weights take 4096
     for j, (a, b) in enumerate(spans):
         if keep_at == a:
             kept = (clone_state(st), draft.snapshot() if draft is not None else None)
-            kept[0].kv = []                        # the final buffers, set below, as for a cut
         cut = keep_at - a if keep_at is not None and a < keep_at < b else 0
         want = draft is not None and b > tap_from
         normed, taps, *part = prefill_chunk(w, ids[a - base:b - base], st, tp=tp, capture_taps=want,
@@ -201,5 +185,4 @@ def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = Fa
         return normed
     if keep_at == n:
         kept = (clone_state(st), draft.snapshot() if draft is not None else None)
-    kept[0].kv = st.kv.copy()                      # grown buffers copy the committed rows: never hold the old ones
     return normed, kept
