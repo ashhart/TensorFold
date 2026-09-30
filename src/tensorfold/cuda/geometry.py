@@ -204,8 +204,7 @@ def exl3_expert_scratch(rows: int, slots: int, d: int, width: int) -> int:
 
 def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560, latent: bool = False,
                  mtp: bool | None = None) -> Geometry:
-    """GLM's engine: ``mtp`` whether it holds the MTP head's caches and decode buffers (None: when the checkpoint has
-    one; GLM's TF_GLM_MTP can leave it out)."""
+    """GLM's engine; ``mtp``: whether it holds the MTP head's caches and buffers (None: when the checkpoint has one)."""
     linear, attention = layer_counts(t)
     lin = t.get("linear_attn_config") or {}
     heads = int(t["num_attention_heads"]) // world

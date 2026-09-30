@@ -81,16 +81,11 @@ def _ints_f64(lo: int, hi: int) -> float:
     return struct.unpack("<d", struct.pack("<2i", lo, hi))[0]
 
 
-MTP_DEFAULT = "auto"                  # TF_GLM_MTP when unset: "1" keeps the MTP head beside DFlash2 as before
+MTP_DEFAULT = "1"                     # TF_GLM_MTP when unset: the MTP head stays beside DFlash2 (auto, 0: left out)
 
 
 def mtp_head(drafter: bool, serial_only: bool, layers: int, value: str | None = None) -> bool:
-    """TF_GLM_MTP: whether the engine loads and runs the checkpoint's MTP head (``layers``: its
-    num_nextn_predict_layers). auto (MTP_DEFAULT): off when a DFlash2 drafter is loaded or no request drafts
-    (--no-drafts), on otherwise; 1: on whenever the checkpoint has one (MTP drafts and auto's per-round choice
-    between both drafters stay available beside DFlash2); 0: off. Off, the head's weights, caches and decode buffers
-    are never allocated, prompts skip its absorb, and MTP policies draft with DFlash2 instead (``_effective``): the
-    same replies, since drafts only propose."""
+    """TF_GLM_MTP: load the MTP head? auto: not beside DFlash2 or with --no-drafts; 1: whenever it exists; 0: never."""
 
     value = os.environ.get("TF_GLM_MTP", "") if value is None else value
     value = value.strip().lower() or MTP_DEFAULT
@@ -138,8 +133,7 @@ class GlmEngine:
         explicit = context is not None if context_explicit is None else bool(context_explicit)
         from . import LATENT
 
-        # TF_GLM_MTP (``mtp_head``): off, the MTP layer's tensors are not loaded, nor its caches and decode buffers
-        # allocated, so the estimate drops them too
+        # TF_GLM_MTP off: the MTP layer's tensors, caches and buffers are neither loaded nor estimated
         self.mtp_on = mtp_head(drafter is not None, serial_only, cfg.mtp_layers)
         weights_estimate = split_weights(rule)
         if not self.mtp_on:

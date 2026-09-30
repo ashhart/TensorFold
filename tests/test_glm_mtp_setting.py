@@ -1,6 +1,4 @@
-"""TF_GLM_MTP on CPU: when GLM's CUDA engine loads the MTP head, and that leaving it out leaves its tensors, cache
-rows and decode buffers out of the startup estimate. The engine end to end (replies with and without the head) is
-tests/cuda/test_glm_engine.py's."""
+"""TF_GLM_MTP on CPU: when GLM's CUDA engine loads the MTP head, and that the startup estimate leaves it out."""
 
 from __future__ import annotations
 
@@ -27,8 +25,9 @@ def test_the_setting(monkeypatch):
         assert mtp_head(*args, "") is mtp_head(*args, MTP_DEFAULT), args
         monkeypatch.delenv("TF_GLM_MTP", raising=False)
         assert mtp_head(*args) is mtp_head(*args, MTP_DEFAULT), args
-    monkeypatch.setenv("TF_GLM_MTP", "1")
-    assert mtp_head(True, False, 1) is True
+    assert MTP_DEFAULT == "1" and mtp_head(True, False, 1) is True       # unset: the head stays beside DFlash2
+    monkeypatch.setenv("TF_GLM_MTP", "auto")
+    assert mtp_head(True, False, 1) is False
 
 
 def test_the_weight_estimate_leaves_out_only_the_head():
@@ -49,8 +48,7 @@ TEXT = {"hidden_size": 512, "num_attention_heads": 8, "num_hidden_layers": 4,
 
 @pytest.mark.parametrize("latent", [True, False])
 def test_the_geometry_follows_the_setting_not_the_config(latent):
-    """mla_geometry(mtp=False) on a checkpoint with the head is the geometry of one without it, and smaller by the
-    head's cache rows (latent and indexer) at every capacity."""
+    """mla_geometry(mtp=False) with a head equals the geometry without one, smaller by the head's cache rows."""
 
     with_head = {**TEXT, "num_nextn_predict_layers": 1}
     without = {**TEXT, "num_nextn_predict_layers": 0}

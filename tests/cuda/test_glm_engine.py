@@ -457,8 +457,7 @@ def test_no_mtp_head_drafts_with_dflash2(engine_n, sampling):
 
 @pytest.fixture(scope="module")
 def engine_off(tmp_path_factory):
-    """engine_f's checkpoint and drafter under TF_GLM_MTP=auto (the default beside a drafter): the checkpoint's MTP
-    head is not loaded; TF_GLM_MTP=0 without a drafter refuses to start."""
+    """engine_f's checkpoint and drafter under TF_GLM_MTP=auto: no MTP head; TF_GLM_MTP=0 without a drafter refuses."""
 
     import os
 
@@ -483,8 +482,7 @@ def engine_off(tmp_path_factory):
 
 @pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
 def test_mtp_off_beside_dflash2_gives_the_same_replies(engine_off, engine_f, sampling):
-    """Without the MTP head (TF_GLM_MTP off) the engine holds neither its weights, caches nor decode buffers, estimates
-    less, and every policy (MTP ones through DFlash2) gives the replies the engine with the head gives."""
+    """Without the MTP head the engine holds less and every policy gives the replies the engine with the head gives."""
 
     from tensorfold.families.glm5_next.cuda.engine import DFLASH_POLICY, encode_policy
 
@@ -515,7 +513,7 @@ def test_mtp_off_resumes(engine_off):
     after = first + reply + [21, 22]
     for policy in ("auto", "2", "f3"):
         warm, stats = _generate(engine_off, after, sampling, policy=policy)
-        assert stats["cached"] == len(first), policy
+        assert stats["cached"] == len(first) - 1, policy
         _forget(engine_off)
         cold, stats = _generate(engine_off, after, sampling, policy=policy)
         assert stats["cached"] == 0 and warm == cold, policy
