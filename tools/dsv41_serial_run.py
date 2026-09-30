@@ -31,6 +31,7 @@ def main() -> None:
     ap.add_argument("--decode", type=int, default=32)
     ap.add_argument("--profile", action="store_true", help="profile 4 decode steps after the run (rank 0 prints)")
     ap.add_argument("--profile-rows", type=int, default=1, help="rows a profiled step takes (a verify window)")
+    ap.add_argument("--profile-prefill", type=int, default=0, help="profile one prompt chunk of N rows and exit")
     ap.add_argument("--no-parity", action="store_true")
     ap.add_argument("--graph", action="store_true", help="capture the one-row decode step as a CUDA graph")
     ap.add_argument("--dspark", type=int, default=0, help="draft N tokens a round with the checkpoint's DSpark blocks")
@@ -68,6 +69,30 @@ def main() -> None:
         print(f"[rank {args.rank}] decode graphs captured in {time.time() - t0:.1f} s", flush=True)
 
     from tensorfold.engine.exact_sampling import Sampling
+
+    if args.profile_prefill:
+        from torch.profiler import ProfilerActivity, profile
+
+        doc = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][0]["ids"]
+        n = args.profile_prefill
+        with torch.no_grad():
+            eng.reset()
+            eng.forward(doc[:n])                                   # warm: kernels, Engram pages
+            eng.forward(doc[n:2 * n])
+            torch.cuda.synchronize()
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+                t = time.perf_counter()
+                eng.forward(doc[2 * n:3 * n])
+                torch.cuda.synchronize()
+                wall = time.perf_counter() - t
+        if args.rank == 0:
+            ev = prof.key_averages()
+            gpu = sum(e.self_device_time_total for e in ev) / 1e3
+            print(f"prefill chunk {n} rows: wall {wall * 1e3:.0f} ms ({n / wall:.0f} tok/s), GPU busy {gpu:.0f} ms",
+                  flush=True)
+            print(ev.table(sort_by="self_device_time_total", row_limit=25, max_name_column_width=60), flush=True)
+        nccl.barrier()
+        return
 
     sampling = Sampling(seed=args.seed, temperature=args.temperature, top_k=0, top_p=0.95) \
         if args.temperature > 0 else None

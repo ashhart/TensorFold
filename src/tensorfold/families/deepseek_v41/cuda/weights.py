@@ -18,16 +18,29 @@ from .reader import Dsv41Reader
 WORLD = 2
 
 
+_WORKSPACE = None
+
+
 class Linear(Exl3Linear):
-    """An EXL3 linear for any row count: the row-invariant kernel takes up to 128 rows a call, so prompt chunks
-    are split into 128-row pieces (the small dense weights are re-read; the experts, the big reads, are not)."""
+    """An EXL3 linear for any row count. Up to 128 rows (decode and verify windows): the row-invariant decode
+    kernel. Prompt chunks: the prompt GEMM (W decoded to fp16 once a call, tensor-core matmul) for matrices up to
+    GEMM_MAX weights, 128-row pieces of the decode kernel otherwise (the vocabulary head)."""
 
     PIECE = 128
+    GEMM_MAX = 96 * 2**20
 
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None, out_dtype: torch.dtype | None = None,
                  xh: torch.Tensor | None = None, z: torch.Tensor | None = None) -> torch.Tensor:
         if x.shape[0] <= self.PIECE:
             return super().__call__(x, out, out_dtype, xh, z)
+        if self.k * self.n <= self.GEMM_MAX:
+            global _WORKSPACE
+            from tensorfold.cuda.exl3 import prefill
+
+            if _WORKSPACE is None:
+                _WORKSPACE = prefill.Workspace()
+            y = torch.empty((x.shape[0], self.n), dtype=out_dtype or x.dtype, device=x.device)
+            return prefill.matmul(self, x, y, _WORKSPACE)
         return torch.cat([super(Linear, self).__call__(x[i:i + self.PIECE].contiguous(), out_dtype=out_dtype)
                           for i in range(0, x.shape[0], self.PIECE)])
 

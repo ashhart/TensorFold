@@ -105,3 +105,17 @@ Context limit 16,384 until layer 20's candidate blocks are implemented. Prefill 
 
 vLLM decode at 40K context (prefix-cached prompt): ~19 tok/s with DSpark (1.68 accepted/round).
 1024-row chunks moved prefill only 330 → 369 tok/s: expert weight reads are not the prefill bottleneck.
+
+## 2026-09-30 — prefill (one 1,024-row chunk at ~2K context, `--profile-prefill 1024`)
+
+| step | chunk wall | tok/s |
+|---|---:|---:|
+| 128-row chunks (before) | — | ~330 |
+| 1,024-row chunks, dense linears in 128-row decode pieces | 2,762 ms | 371 |
+| + dense linears through the EXL3 prompt GEMM (W decoded once a call) | 2,426 ms | 422 |
+| + expert member tables sized to the busiest expert | 2,283 ms | 449 |
+| + prompt grouped expert kernel (one decode, 2 member tiles) + bf16 prompt partials over NCCL | 2,107 ms | **486** |
+
+Long parity unchanged (8K: NLL 1.676 vs 1.675; 24K: 1.631 vs 1.630), prefill 450–490 tok/s on real prompts.
+Remaining: the expert prompt kernel is 807 ms/chunk (~3× its weight-read floor): activations re-read per N block
+and in-register decode; needs activations staged in shared memory / wider N tiles. vLLM prefills ~1,000 tok/s.

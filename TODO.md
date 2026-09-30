@@ -88,7 +88,10 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [x] Adaptive draft length (`DraftPolicy`, k = 0..N by expected tokens/ms): 1.39–1.49× vLLM on the 3 cases
 - [ ] Verify cost: split Engram reads across ranks (skew shows up as NCCL wait); fold shared expert into grouped call
 - [ ] CUDA graphs per window width; eager == graph checks
-- [ ] Prefill speed: ~330 tok/s vs vLLM ~1,000 (EXL3 GEMM prompt path, grouped expert prefill, bigger chunks)
+- [x] Prefill 330 → 486 tok/s: 1,024-row chunks, EXL3 prompt GEMM for dense linears, prompt grouped expert kernel
+      (`cuda/experts_prompt.cu`), bf16 prompt partials
+- [ ] Prefill to ~1,000 tok/s: expert prompt kernel redesign (smem-staged activations, wider N tiles); attention
+      over query blocks; grouping kernel (1.3 ms/layer)
 - [ ] Long prompts to 600k (cap/memory: comp caches bf16 ~1.5 KB/token)
 - [ ] KV format ≤ ~3.4 KiB/token; carveout-backed pools
 - [ ] `--parallel N` shared rounds (optional; vLLM wins at width today)

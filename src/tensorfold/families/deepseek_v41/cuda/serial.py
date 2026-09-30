@@ -47,12 +47,13 @@ class Comm:
         return total
 
     def partials(self, partial: torch.Tensor) -> torch.Tensor:
-        """Every rank's fp32 partial, stacked in rank order [world, ...] (the consumer adds them in order)."""
+        """Every rank's partial, stacked in rank order [world, ...] (the consumer adds them in order): fp32 for decode
+        and verify windows, bf16 for prompt chunks (half the bytes; the prompt path has its own arithmetic)."""
 
-        send = partial.contiguous().float()
+        send = partial.contiguous().float() if partial.shape[0] <= PROMPT_ROWS else partial.to(BF).contiguous()
         if self.world == 1:
             return send[None]
-        recv = torch.empty((self.world, *send.shape), dtype=F32, device=send.device)
+        recv = torch.empty((self.world, *send.shape), dtype=send.dtype, device=send.device)
         self.nccl.all_gather(send.view(-1), recv.view(-1))
         return recv
 
@@ -77,6 +78,38 @@ class Caches:
     raw: dict[int, torch.Tensor]                # per ratio-2 source fp32 ring [RING, 1024]: projected kv | gate
     ik: dict[int, torch.Tensor]                 # per kv source bf16 [cap // ratio + 1, 128]: indexer keys
     ids: list[int] = field(default_factory=list)
+
+
+PROMPT_CFG = [1, 1]          # prompt expert kernel config for gate/up and down (experts_prompt.cu)
+PROMPT_ROWS = 16             # above this, expert calls size their member table to the busiest expert (host sync)
+
+
+def routed_prompt(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ex, s, R: int, limit: float) -> torch.Tensor:
+    """``ex3.routed`` for prompt chunks: the grouped kernel's grid spans member tiles up to the busiest expert's row
+    count, not R (at 1,024 rows that is ~16x fewer, mostly empty, programs)."""
+
+    ext = ex3._ext()
+    D, I, E = ex.dims, ex.width, ex.count
+    slots = s.slots
+    P = R * slots
+    busiest = int(torch.bincount(pick.flatten().long(), minlength=E).max())
+    maxu = min(P, E)
+    ids = s.ids[:maxu]
+    members = s.members_buf[:maxu * busiest].view(maxu, busiest)
+    ext.group(pick, ids, s.count, members, R, slots, E)
+    ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots, E)
+    from .experts_prompt import ext as prompt_ext
+
+    pe = prompt_ext()                                  # one K split: the epilogues read SK = 1
+    pe.grouped_prompt(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, s.z, 2, D, I,
+                      P, slots, ex.cb, PROMPT_CFG[0])
+    ext.gateup_epilogue(s.z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, I, 1, slots, E, float(limit),
+                        ex3.ACT_F32)
+    pe.grouped_prompt(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, s.z, 1, I,
+                      D, P, slots, ex.cb, PROMPT_CFG[1])
+    out = torch.empty((R, D), dtype=torch.float32, device=x.device)
+    ext.down_combine(s.z, pick, ex.svh_d, s.y, wts, out, R, P, D, 1, slots, E)
+    return out
 
 
 class _Fixed:
@@ -433,7 +466,10 @@ class SerialEngine:
         logits = K.router_logits(x, m.gate)                         # a row's bits never depend on the row count
         pick, w = K.route(logits, m.bias, top_k or c.num_experts_per_tok, c.routed_scaling_factor)
         scratch = scratch if scratch is not None else self.scratch[layer.index]
-        routed = ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit)
+        if R > PROMPT_ROWS:
+            routed = routed_prompt(x.contiguous(), pick, w, m.experts, scratch, R, limit)
+        else:
+            routed = ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit)
         g = m.shared[0](x, out_dtype=F32)
         u = m.shared[1](x, out_dtype=F32)
         act = (torch.nn.functional.silu(g.clamp(max=limit)) * u.clamp(-limit, limit)).to(BF)
