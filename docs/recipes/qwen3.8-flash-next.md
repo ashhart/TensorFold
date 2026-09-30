@@ -264,6 +264,22 @@ Tests check the kernels against an fp64 reference built by an independent numpy 
 tells centred from uncentred norms by their stored values. An n-gram table's shards must share one layout, or the
 load stops.
 
+Block-scaled FP8 linears (ModelOpt `FP8_PB_WO`, the DeepSeek-style layout: e4m3 bytes and an fp32
+`weight_scale_inv` per 128x128 block) are read too. Decode keeps the e4m3 bytes in the FP8 GEMM's fragment order
+and each (64 inputs, column)'s block scale as fp32; the lane matmul multiplies a 64-input stage in bf16 MMAs (e4m3
+fits bf16 exactly) and adds the stage's products times its scale in stage order, so the stored weight is exact and
+rows stay independent of the row count, as for the other formats. Prompts run the FP8 prompt matmul over the same
+bytes with the block scales as bf16 group scales (rounded to nearest, at most 2^-9 relative, below the prompt
+path's e4m3 rounding of the activations). A projection stack that mixes block FP8 with bf16 (`in_proj_b` and
+`in_proj_a` beside `in_proj_qkv` and `in_proj_z`; the indexer's projection beside q/k/v) runs each part on its own
+kernel into its columns. A block-FP8 `lm_head` is dequantized to bf16 at load (code x block scale, for the head and
+the draft head's rows). Checked on a local ModelOpt export with NVFP4 experts, block-FP8 DeltaNet and attention
+projections, an FP8 n-gram table and NVFP4 MTP experts: drafted replies equal `"draft": false` ones (six pairs,
+2k-16k-token prompts, greedy and sampled), resumed prompts equal fresh ones, and each reply of 2 and 4 concurrent
+requests equals the same request alone. On one Spark, one request, it decodes 6-27% faster than the same weights
+dequantized to bf16 on the bf16 path (code 59.2 against 49.1 tok/s greedy, chat 36.6 against 34.6 greedy and 41.6
+against 32.8 sampled).
+
 The routed experts run on a grouped NVFP4 kernel that reads the step's routing plan on the GPU, so a decode graph
 captured for one step's experts replays another step's. A test decodes a checkpoint whose expert picks change
 every step with graphs on and off and compares the tokens; on both exports, replies with the decode graphs equal

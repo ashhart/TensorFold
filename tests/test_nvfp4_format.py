@@ -77,3 +77,20 @@ def test_config_gate_takes_nvfp4_and_fp8_and_refuses_integer_weights():
                                    "config_groups": {"g": {"weights": {"num_bits": 4, "type": "int"}}}}}
     with pytest.raises(ValueError, match="4-bit int"):
         fmt.require_config(awq, **kw)
+
+
+@pytest.mark.torch
+def test_block_fp8_matches_torch_float8_and_its_block_scales():
+    torch = pytest.importorskip("torch")
+    rng = np.random.default_rng(3)
+    w = rng.integers(0, 256, size=(200, 256), dtype=np.uint8)
+    w[(w & 0x7F) == 0x7F] = 0x10
+    s = rng.random((2, 2)).astype(np.float32) + 0.5                                # [ceil(200/128), 256/128]
+    e4 = torch.from_numpy(w).view(torch.float8_e4m3fn).float().numpy()
+    want = e4 * np.repeat(np.repeat(s, 128, axis=0)[:200], 128, axis=1)
+    assert np.array_equal(fmt.dequant("fp8block", w, s), want)
+
+
+def test_block_fp8_scheme_from_tensor_storage():
+    assert fmt.scheme({"weight": ("F8_E4M3", [200, 256]), "weight_scale_inv": ("F32", [2, 2])}) == "fp8block"
+    assert fmt.scheme({"weight": ("F8_E4M3", [200, 256]), "weight_scale": ("F32", [])}) == "fp8"

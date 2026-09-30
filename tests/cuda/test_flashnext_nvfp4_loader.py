@@ -229,7 +229,38 @@ def test_the_loader_reads_mxfp8_linears_and_an_nvfp4_table(tmp_path: Path) -> No
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
-@pytest.mark.parametrize("layout", [{}, {"mxfp8": True, "ple_nvfp4": True}], ids=["bf16", "mxfp8"])
+def test_the_loader_reads_block_fp8_linears(tmp_path: Path) -> None:
+    """ModelOpt ``FP8_PB_WO``: the DeltaNet and attention projections stored as e4m3 with an fp32 scale per 128x128
+    block go to the lane matmul as stored, joined with their bf16 neighbours (``in_proj_b/a``, the indexer), and
+    the block-FP8 lm_head comes back as bf16(code x block scale); the engine decodes."""
+
+    from safetensors import safe_open
+
+    from tensorfold.cuda.nvfp4 import format as fmt
+    from tensorfold.cuda.nvfp4.linear import Concat, Fp8BlockLinear
+    from tensorfold.families.qwen4_exp.cuda.decode import Engine, prefill, serial_decode
+    from tensorfold.families.qwen4_exp.cuda.weights import load
+
+    tiny = write(tmp_path / "fp8b", fp8block=True, hidden=512)                 # PLE kernels: 512-wide streams
+    w = load(tiny, mtp=True, draft_vocab=None)
+    gdn = next(layer.gdn for layer in w.layers if layer.gdn is not None)
+    attn = next(layer.attn for layer in w.layers if layer.attn is not None)
+    for stack in (gdn.proj, attn.proj):
+        assert isinstance(stack, Concat) and isinstance(stack.parts[0], Fp8BlockLinear)
+        assert getattr(stack.parts[1], "kernel", "") == "b16"
+    assert isinstance(gdn.out, Fp8BlockLinear) and isinstance(attn.o, Fp8BlockLinear)
+    with safe_open(str(tiny / "model-00001-of-00001.safetensors"), framework="pt") as f:
+        codes, scale = f.get_tensor("lm_head.weight"), f.get_tensor("lm_head.weight_scale_inv")
+    want = torch.from_numpy(fmt.dequant("fp8block", codes.view(torch.uint8).numpy(), scale.numpy()))
+    assert torch.equal(w.head.weight.cpu(), want.to(torch.bfloat16))
+    e = Engine(w, capacity=256, max_rows=8, prefill_rows=16, graphs=False)
+    first = prefill(e, [5, 17, 99, 250, 7, 64, 30, 11, 12, 13], None)
+    assert len(serial_decode(e, first, 8, None).tokens) == 8
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
+@pytest.mark.parametrize("layout", [{}, {"mxfp8": True, "ple_nvfp4": True}, {"fp8block": True}],
+                         ids=["bf16", "mxfp8", "fp8block"])
 @pytest.mark.parametrize("seed", [None, 7])
 def test_drafts_over_a_draft_vocabulary_keep_the_serial_tokens(tmp_path: Path, layout: dict, seed) -> None:
     """The draft head holds the draft vocabulary's rows (not the whole head), so drafts map back to their ids."""

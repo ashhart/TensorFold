@@ -10,7 +10,7 @@ import numpy as np
 METHODS = ("modelopt", "compressed-tensors")
 E2M1 = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
                 dtype=np.float32)
-SCHEMES = ("nvfp4", "fp8", "mxfp8", "bf16")
+SCHEMES = ("nvfp4", "fp8", "fp8block", "mxfp8", "bf16")
 
 
 def config_block(config: dict) -> dict | None:
@@ -62,6 +62,9 @@ def scheme(tensors: dict[str, tuple[str, list[int]]]) -> str:
         return "nvfp4"
     if w[0] == "F8_E4M3" and s is not None and s[0] == "U8":
         return "mxfp8"
+    si = tensors.get("weight_scale_inv")
+    if w[0] == "F8_E4M3" and si is not None and si[0] == "F32" and len(si[1]) == 2:
+        return "fp8block"                      # ModelOpt FP8_PB_WO / DeepSeek: an fp32 scale per 128x128 block
     if w[0] == "F8_E4M3":
         return "fp8"
     if w[0] in ("BF16", "F16", "F32"):
@@ -100,4 +103,8 @@ def dequant(scheme_name: str, weight: np.ndarray, scale: np.ndarray | None = Non
         return e4m3(weight) * np.float32(np.asarray(scale, dtype=np.float32).reshape(-1)[0])
     if scheme_name == "mxfp8":
         return e4m3(weight) * np.repeat(e8m0(scale), 32, axis=1)
+    if scheme_name == "fp8block":              # ``scale`` = weight_scale_inv [ceil(N/128), K/128]
+        n, k = weight.shape
+        s = np.asarray(scale, dtype=np.float32)
+        return e4m3(weight) * np.repeat(np.repeat(s, 128, axis=0)[:n], k // s.shape[1], axis=1)
     return weight.astype(np.float32)
