@@ -47,6 +47,8 @@ class MultiDecoder:
         self.draft_host = w.draft_ids.cpu().numpy() if w.draft_ids is not None else None
         self.kept: list[tuple[list[int], State, dict, torch.Tensor | None]] = []   # (ids, slot, snapshot, tail)
         self.keep = keep
+        # Scheduler-owned cooperative callback, same worker and CUDA stream.
+        self.prefill_yield = None
 
     def _busy(self) -> set[int]:
         return {id(s.st) for s in self.streams.values()}
@@ -113,6 +115,7 @@ class MultiDecoder:
         t0 = time.perf_counter()
         st, resume, s.cached = self._slot_for(list(s.prompt), s.draft)
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity)
+        e.prefill_yield = self.prefill_yield
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
         try:
             first = prefill(e, s.prompt, s.sampling, mtp=mtp, resume=resume,

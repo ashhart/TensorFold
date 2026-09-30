@@ -284,6 +284,12 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
                 mtp_forward(w, st, pb, nxt, pb.streams[:len(nxt)])
                 st.set_mtp_len(st.mtp_len + len(nxt))
         commit(w, st, pb, R, R)
+        # Full chunk commit is the safe boundary: recurrent state, KV lengths,
+        # MTP absorption and PLE history now belong to this request's slot.
+        # Decode uses buf/mbuf, not pb. No new admission may reuse pb here.
+        # Skip the final chunk so its sampled token/draft setup stays atomic.
+        if not final and getattr(e, "prefill_yield", None) is not None:
+            e.prefill_yield()
     if constraint is not None:                           # a reply's grammar: this rank's vocabulary columns
         last = constraint.mask(last, None, e.w.meta.get("vocab_offset", 0))
     first = e.sample(last, [len(prompt)], sampling)[0]

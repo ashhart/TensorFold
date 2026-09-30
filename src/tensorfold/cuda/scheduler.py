@@ -38,6 +38,8 @@ class Scheduler:
         self.waiting = Waiting()
         self.boxes: dict[int, queue.Queue] = {}
         self.yields = 0                              # background streams that gave up their lane
+        if hasattr(decoder, "prefill_yield"):
+            decoder.prefill_yield = self._prefill_round
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
@@ -101,6 +103,19 @@ class Scheduler:
         box = self.boxes.pop(id(s), None)            # None: the stream's request has had its reply
         if box is not None:
             box.put((kind, value))
+
+    def _prefill_round(self) -> None:
+        """Run existing decodes only; never recursively admit into shared prefill scratch."""
+        try:
+            done = self.decoder.round()
+        except Exception as exc:
+            for s in self.decoder.drop():
+                self._reply(s, "error", exc)
+            # Do not continue the in-progress prefill after a device/round error.
+            raise
+        self.decoder.finish(done)
+        for s in done:
+            self._reply(s, *(("error", s.error) if s.error is not None else ("done", s.stats())))
 
     def _loop(self) -> None:
         while True:
