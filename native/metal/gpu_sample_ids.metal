@@ -7,9 +7,10 @@
   const uint sg = simdgroup_index_in_threadgroup;
   const size_t base = size_t(row) * V;
   // the row's settings, read once (device memory: the compiler cannot keep them across the loops' stores)
-  const float inv_t = cfg[3 * row];
-  const float top_p = cfg[3 * row + 1];
-  const float near = cfg[3 * row + 2];
+  const float inv_t = cfg[4 * row];
+  const float top_p = cfg[4 * row + 1];
+  const float near = cfg[4 * row + 2];
+  const float min_log = cfg[4 * row + 3];     // ln(min_p), -inf when off
   const uint kc = kcap[row];
   const uint cap = (kc == 0u || kc > C) ? C : kc;
   const ulong seed = ulong(seeds[2 * row]) | (ulong(seeds[2 * row + 1]) << 32);
@@ -195,6 +196,13 @@
         cum += metal::exp(tf_val(ck[j]) - m) / norm;
         if (cum >= top_p) { keep = j + 1; break; }
       }
+    }
+    // min_p: the tokens within ln(min_p) of the top, a prefix of the order
+    if (min_log > -INFINITY) {
+      const float floor_p = m + min_log;
+      uint j = 0;
+      while (j < keep && tf_val(ck[j]) >= floor_p) j++;
+      keep = j;
     }
     st[0] = keep;
   }

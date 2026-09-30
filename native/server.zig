@@ -104,7 +104,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             if (!std.mem.eql(u8, value, "low") and !std.mem.eql(u8, value, "medium") and !std.mem.eql(u8, value, "xhigh")) return error.InvalidReasoningEffort;
             effort = value;
         } else {
-            const fields = .{ .{ "--temperature", "temperature" }, .{ "--top-k", "top_k" }, .{ "--top-p", "top_p" }, .{ "--max-tokens", "max_tokens" }, .{ "--thinking-budget", "thinking_budget" } };
+            const fields = .{ .{ "--temperature", "temperature" }, .{ "--top-k", "top_k" }, .{ "--top-p", "top_p" }, .{ "--min-p", "min_p" }, .{ "--max-tokens", "max_tokens" }, .{ "--thinking-budget", "thinking_budget" } };
             var found = false;
             inline for (fields) |pair| if (std.mem.eql(u8, flag, pair[0])) {
                 try overrides.object.put(init.gpa, pair[1], .{ .string = value });

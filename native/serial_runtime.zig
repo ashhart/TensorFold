@@ -62,7 +62,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             i += 1;
             continue;
         }
-        if (std.mem.eql(u8, key, "--prompt")) prompt = value else if (std.mem.eql(u8, key, "--tokens")) token_list = value else if (std.mem.eql(u8, key, "--max-tokens")) max_tokens = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, key, "--temperature")) settings.temperature = try std.fmt.parseFloat(f64, value) else if (std.mem.eql(u8, key, "--top-k")) settings.top_k = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, key, "--top-p")) settings.top_p = try std.fmt.parseFloat(f64, value) else if (std.mem.eql(u8, key, "--seed")) {
+        if (std.mem.eql(u8, key, "--prompt")) prompt = value else if (std.mem.eql(u8, key, "--tokens")) token_list = value else if (std.mem.eql(u8, key, "--max-tokens")) max_tokens = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, key, "--temperature")) settings.temperature = try std.fmt.parseFloat(f64, value) else if (std.mem.eql(u8, key, "--top-k")) settings.top_k = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, key, "--top-p")) settings.top_p = try std.fmt.parseFloat(f64, value) else if (std.mem.eql(u8, key, "--min-p")) settings.min_p = try std.fmt.parseFloat(f64, value) else if (std.mem.eql(u8, key, "--seed")) {
             settings.seed = try std.fmt.parseInt(u64, value, 10);
             seed_set = true;
         } else if (std.mem.eql(u8, key, "--report")) report = value else if (std.mem.eql(u8, key, "--dump-logits")) dump = value else return error.UnsupportedArgument;
@@ -120,7 +120,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     if (report) |file| {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(generated.tokens.items), &digest, .{});
-        const bytes = try std.json.Stringify.valueAlloc(a, .{ .prompt_tokens = tokens.items, .tokens = generated.tokens.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .metal_sampling = settings.metal, .rounds = generated.rounds, .drafted = generated.drafted, .accepted = generated.accepted, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
+        const bytes = try std.json.Stringify.valueAlloc(a, .{ .prompt_tokens = tokens.items, .tokens = generated.tokens.items, .text = text, .seed = settings.seed, .temperature = settings.temperature, .top_k = settings.top_k, .top_p = settings.top_p, .min_p = settings.min_p, .metal_sampling = settings.metal, .rounds = generated.rounds, .drafted = generated.drafted, .accepted = generated.accepted, .token_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{});
         defer a.free(bytes);
         const f = try std.Io.Dir.cwd().createFile(io, file, .{});
         defer f.close(io);

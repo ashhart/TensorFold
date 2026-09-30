@@ -147,10 +147,10 @@
     "checks": [{"step":"test-drafts","driver":{"path":"native/main.zig","symbol":"main"},"scope":"checkpoint"}]
   },
   {
-    "id": "sampling", "state": "present", "requirement": "Seeded position-stable CPU/Metal sampling, top-k/top-p and adaptive draft depth",
+    "id": "sampling", "state": "present", "requirement": "Seeded position-stable CPU/Metal sampling, top-k/top-p/min-p and adaptive draft depth",
     "upstream": ["src/tensorfold/engine/exact_sampling.py", "src/tensorfold/engine/gpu_sampling.py", "src/tensorfold/engine/topk.py", "src/tensorfold/engine/family_depth.py"],
     "implementation": [{"path":"native/draft_depth.zig","symbol":"choose"}, {"path":"native/sampling.zig","symbol":"rowsMapped"}, {"path":"native/sampling.zig","symbol":"choose"}],
-    "checks": [{"step":"test-metal","driver":{"path":"native/sampling_checks.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-draft-depth","driver":{"path":"native/draft_depth.zig","symbol":"check"},"scope":"host"}, {"step":"test-mtp-positions","driver":{"path":"native/mtp_position_checks.zig","symbol":"check"},"scope":"host"}]
+    "checks": [{"step":"test-sampling","driver":{"path":"native/sampling_checks.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-draft-depth","driver":{"path":"native/draft_depth.zig","symbol":"check"},"scope":"host"}, {"step":"test-mtp-positions","driver":{"path":"native/mtp_position_checks.zig","symbol":"check"},"scope":"host"}]
   },
   {
     "id": "serial-generation", "state": "present", "requirement": "Serial/speculative verification, committed sampling positions and GPU pipeline ownership",
@@ -186,11 +186,11 @@
     "checks": [{"step":"test-kv-buffers","driver":{"path":"native/kv_buffer_checks.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-kv-runtime","driver":{"path":"native/main.zig","symbol":"main"},"scope":"checkpoint"}]
   },
   {
-    "id": "chat-templates", "state": "present", "requirement": "Native tokenization and upstream chat templates for all seven checkpoints",
-    "upstream": ["src/tensorfold/server/messages.py", "src/tensorfold/server/prompts.py", "src/tensorfold/families/tokenizer.py", "src/tensorfold/families/deepseek_v4/prompts.py", "src/tensorfold/families/deepseek_v4/vendor/__init__.py", "src/tensorfold/families/deepseek_v4/vendor/encoding_dsv4.py"],
+    "id": "chat-templates", "state": "partial", "requirement": "Native tokenization and upstream chat templates for all seven checkpoints",
+    "upstream": ["src/tensorfold/server/messages.py", "src/tensorfold/server/prompts.py", "src/tensorfold/families/tokenizer.py", "src/tensorfold/families/glm5_next/prompts.py", "src/tensorfold/families/deepseek_v4/prompts.py", "src/tensorfold/families/deepseek_v4/vendor/__init__.py", "src/tensorfold/families/deepseek_v4/vendor/encoding_dsv4.py"],
     "implementation": [{"path":"native/chat.zig","symbol":"renderWithDefaults"}, {"path":"native/chat.zig","symbol":"encode"}, {"path":"native/deepseek_prompts.zig","symbol":"render"}],
     "checks": [{"step":"test-chat","driver":{"path":"native/chat.zig","symbol":"check"},"scope":"checkpoint"}],
-    "limitation": "Tokenizer-only checks include DeepSeek's official encoder; its full-model inference remains unverified. DeepSeek required/named tool calls are rejected like upstream because their opener spans multiple tokens."
+    "limitation": "Upstream 0.5.0 GLM thinking-off normalization and template-selected reasoning defaults still need porting. Tokenizer-only checks include DeepSeek's official encoder; its full-model inference remains unverified. DeepSeek required/named tool calls are rejected like upstream because their opener spans multiple tokens."
   },
   {
     "id": "tool-parsing-streaming", "state": "present", "requirement": "Qwen/Gemma/GLM/DeepSeek tool grammars, typed arguments, policy and incremental Qwen deltas",
@@ -206,10 +206,21 @@
     "limitation": "Tokenizer/proposer parity covers all seven checkpoints; HTTP structure verification uses Qwen and copy-block cache checks use Qwen/Gemma/Nemotron. Full GLM/DeepSeek inference remains unverified."
   },
   {
-    "id": "request-controls", "state": "present", "requirement": "Sampling defaults, thinking budgets, required-call gates, stop strings and reasoning separation",
+    "id": "request-controls", "state": "partial", "requirement": "Sampling defaults, thinking budgets, required-call gates, stop strings and reasoning separation",
     "upstream": ["src/tensorfold/server/request_options.py", "src/tensorfold/server/stopping.py", "src/tensorfold/server/text.py", "src/tensorfold/engine/call_gate.py"],
     "implementation": [{"path":"native/request_options.zig","symbol":"parseWithDefaults"}, {"path":"native/reply_text.zig","symbol":"splitThinking"}],
-    "checks": [{"step":"test-chat","driver":{"path":"native/chat.zig","symbol":"check"},"scope":"checkpoint"}, {"step":"test","driver":{"path":"native/request_options.zig","symbol":"model sampling defaults and request overrides preserve null and explicit zero","kind":"test"},"scope":"host"}]
+    "checks": [{"step":"test-chat","driver":{"path":"native/chat.zig","symbol":"check"},"scope":"checkpoint"}, {"step":"test","driver":{"path":"native/request_options.zig","symbol":"model sampling defaults and request overrides preserve null and explicit zero","kind":"test"},"scope":"host"}],
+    "limitation": "Upstream 0.5.0 template-aware reasoning effort aliases and reasoning-token usage details still need porting."
+  },
+  {
+    "id": "structured-output", "state": "missing", "requirement": "Grammar-constrained JSON/schema, regex, choice and EBNF output across serial and draft windows",
+    "upstream": ["src/tensorfold/engine/grammar.py"],
+    "limitation": "Upstream 0.5.0 grammar compilation, per-request matcher state and draft-window masks are not ported to Zig."
+  },
+  {
+    "id": "responses-api", "state": "missing", "requirement": "Responses request translation, streaming events and stored response chains",
+    "upstream": ["src/tensorfold/server/responses.py", "src/tensorfold/server/responses_translate.py"],
+    "limitation": "Upstream 0.5.0 Responses endpoints and stateful response storage are not ported to Zig."
   },
   {
     "id": "http-lifecycle", "state": "present", "requirement": "Raw/chat JSON/SSE endpoints, request cancellation, deadlines and graceful signal shutdown",

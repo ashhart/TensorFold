@@ -27,13 +27,16 @@ def main():
                 ix, val = topk.topk_rows(x, count)
                 arrays.update({key + ".x": x, key + ".indices": ix, key + ".values": val})
                 cases.append(dict(key=key, op="topk", k=count))
-            for seed, temp, count, prob in ((0, 0., 20, .95), (1234, 1., 20, .95),
-                                          (2**64-1, .7, 0, .8), (5678, 2., 2048, 1.)):
+            for seed, temp, count, prob, min_p in ((0, 0., 20, .95, 0), (1234, 1., 20, .95, 0),
+                                                 (2**64-1, .7, 0, .8, 0), (5678, 2., 2048, 1., 0),
+                                                 (1234, 1., 20, .95, .2), (5678, 2., 0, 1., .5),
+                                                 (2**64-1, .7, 2048, .8, 1.), (9, 1., 0, 1., 1e-12),
+                                                 (10, 0., 0, 1., 1.)):
                 for mapped in (False, True):
                     key = f"c{len(cases)}"
                     ids = mx.arange(vocab, dtype=mx.uint32) * 3 + 7 if mapped else None
                     positions = [1, 513, 2049, 262144]
-                    settings = Sampling(seed, temperature=temp, top_k=count, top_p=prob)
+                    settings = Sampling(seed, temperature=temp, top_k=count, top_p=prob, min_p=min_p)
                     expected = gpu_sampling.sample(x, settings if temp else None, positions, ids)
                     # Freeze each oracle while its inputs/settings are current;
                     # saving the whole lazy batch produced non-reproducible draws.
@@ -42,7 +45,7 @@ def main():
                     if mapped:
                         arrays[key + ".ids"] = ids
                     cases.append(dict(key=key, op="sample", seed=seed, temperature=temp,
-                                      k=count, p=prob, mapped=mapped, positions=positions))
+                                      k=count, p=prob, min_p=min_p, mapped=mapped, positions=positions))
                     key = f"c{len(cases)}"
                     values = np.array(x.astype(mx.float32))
                     mapping = np.array(ids) if mapped else np.arange(vocab, dtype=np.uint32)
@@ -52,7 +55,7 @@ def main():
                     if mapped:
                         arrays[key + ".ids"] = ids
                     cases.append(dict(key=key, op="cpu_sample", seed=seed, temperature=temp,
-                                      k=count, p=prob, mapped=mapped, positions=positions))
+                                      k=count, p=prob, min_p=min_p, mapped=mapped, positions=positions))
     mx.save_safetensors(str(args.output / "arrays.safetensors"), arrays)
     (args.output / "cases.json").write_text(json.dumps(cases, indent=2) + "\n")
     print(f"Saved {len(cases)} CPU/Metal sampling/top-k cases in {args.output}")

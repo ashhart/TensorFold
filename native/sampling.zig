@@ -20,20 +20,27 @@ pub const Sampling = struct {
     temperature: f64 = 1,
     top_k: usize = 20,
     top_p: f64 = 0.95,
+    min_p: f64 = 0,
     pub fn validate(s: Sampling) !void {
         if (!std.math.isFinite(s.temperature) or s.temperature < 0 or !std.math.isFinite(s.top_p) or s.top_p <= 0 or s.top_p > 1) return error.InvalidSampling;
+        if (!std.math.isFinite(s.min_p) or s.min_p < 0 or s.min_p > 1) return error.InvalidSampling;
+    }
+    pub fn minLog(s: Sampling) f64 {
+        return if (s.min_p > 0) @log(s.min_p) else -std.math.inf(f64);
     }
     pub fn choose(s: Sampling, sorted: []const Candidate, position: u64) i32 {
         if (s.temperature == 0) return sorted[0].id;
         const n = if (s.top_k == 0) sorted.len else @min(s.top_k, sorted.len);
         const temp = @max(s.temperature, 1e-6);
         const max = sorted[0].value / temp;
+        const floor = max + s.minLog();
         var total: f64 = 0;
         for (sorted[0..n]) |v| total += @exp(v.value / temp - max);
         var cumulative: f64 = 0;
         var best: f64 = -std.math.inf(f64);
         var chosen = sorted[0].id;
         for (sorted[0..n]) |v| {
+            if (v.value / temp < floor) break;
             const score = v.value / temp + noise(s.seed, position, @intCast(v.id));
             if (score > best) {
                 best = score;

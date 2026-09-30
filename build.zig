@@ -336,6 +336,7 @@ pub fn build(b: *std.Build) void {
         check.addArgs(&.{ b.fmt("check-{s}", .{kind}), dir });
         check.step.dependOn(&fixture.step);
         metal_tests.dependOn(&check.step);
+        if (std.mem.eql(u8, kind, "sampling")) b.step("test-sampling", "Compare CPU and Metal top-k/top-p/min-p sampling against upstream").dependOn(&check.step);
         if (std.mem.eql(u8, kind, "ple_norm")) b.step("test-ple-norm", "Compare PLE normalization against original Python arithmetic").dependOn(&check.step);
     }
     const model_tests = b.step("test-models", "Real-model row/rollback/cache checks for all three Metal families (large RAM required)");

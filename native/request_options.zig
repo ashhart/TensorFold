@@ -38,6 +38,7 @@ pub const Options = struct {
     fn readSampling(out: *Options, body: std.json.Value) !void {
         if (try number(body, "temperature")) |v| out.sampling.temperature = @max(0, v);
         if (try number(body, "top_p")) |v| out.sampling.top_p = v;
+        if (try number(body, "min_p")) |v| out.sampling.min_p = v;
         if (try integer(body, "top_k")) |v| out.sampling.top_k = @intCast(@max(0, v));
     }
 
@@ -124,6 +125,25 @@ test "request defaults, explicit zero, numeric strings and stop validation" {
         const bad = try std.json.parseFromSlice(std.json.Value, a, json, .{});
         defer bad.deinit();
         try std.testing.expectError(expected, Options.parse(a, bad.value));
+    }
+}
+
+test "min-p preserves model defaults, explicit zero and upstream range checks" {
+    const a = std.testing.allocator;
+    const config = try std.json.parseFromSlice(std.json.Value, a, "{\"min_p\":0.25}", .{});
+    defer config.deinit();
+    const defaults = try Options.fromGenerationConfig(config.value);
+    for ([_][]const u8{ "{}", "{\"min_p\":null}", "{\"min_p\":0}", "{\"min_p\":\"1\"}" }, [_]f64{ 0.25, 0.25, 0, 1 }) |source, expected| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, source, .{});
+        defer parsed.deinit();
+        const result = try Options.parseWithDefaults(a, parsed.value, defaults);
+        defer a.free(result.stops);
+        try std.testing.expectEqual(expected, result.sampling.min_p);
+    }
+    for ([_][]const u8{ "{\"min_p\":-0.01}", "{\"min_p\":1.01}", "{\"min_p\":\"NaN\"}", "{\"min_p\":true}" }, [_]anyerror{ error.InvalidSampling, error.InvalidSampling, error.InvalidNumber, error.InvalidNumber }) |source, expected| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, source, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(expected, Options.parseWithDefaults(a, parsed.value, defaults));
     }
 }
 

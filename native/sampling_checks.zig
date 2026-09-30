@@ -9,6 +9,7 @@ const Case = struct {
     seed: u64 = 0,
     temperature: f64 = 1,
     p: f64 = 0.95,
+    min_p: f64 = 0,
     mapped: bool = false,
     positions: []const i32 = &.{},
 };
@@ -35,10 +36,10 @@ pub fn check(io: std.Io, dir: []const u8) !void {
             try equal(&s, out[0], try store.field(case.key, "indices"));
             try equal(&s, out[1], try store.field(case.key, "values"));
         } else if (std.mem.eql(u8, case.op, "sample")) {
-            const out = try gpu.sample(&kernels, &s, x, case.positions, .{ .seed = case.seed, .temperature = case.temperature, .top_k = case.k, .top_p = case.p }, if (case.mapped) try store.field(case.key, "ids") else null);
+            const out = try gpu.sample(&kernels, &s, x, case.positions, .{ .seed = case.seed, .temperature = case.temperature, .top_k = case.k, .top_p = case.p, .min_p = case.min_p }, if (case.mapped) try store.field(case.key, "ids") else null);
             try equal(&s, out, try store.field(case.key, "expected"));
         } else if (std.mem.eql(u8, case.op, "cpu_sample")) {
-            const out = try @import("sampling.zig").rowsMapped(&kernels, &s, x, case.positions, .{ .seed = case.seed, .temperature = case.temperature, .top_k = case.k, .top_p = case.p }, if (case.mapped) try store.field(case.key, "ids") else null);
+            const out = try @import("sampling.zig").rowsMapped(&kernels, &s, x, case.positions, .{ .seed = case.seed, .temperature = case.temperature, .top_k = case.k, .top_p = case.p, .min_p = case.min_p }, if (case.mapped) try store.field(case.key, "ids") else null);
             defer mx.allocator.free(out);
             try equal(&s, try s.cast(try s.ints(out), mx.c.MLX_UINT32), try store.field(case.key, "expected"));
         } else return error.UnknownFixtureOperation;

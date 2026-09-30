@@ -132,7 +132,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
         }
         if (i + 1 >= args.len) return error.MissingArgument;
         const val = args[i + 1];
-        if (std.mem.eql(u8, key, "--prompt")) prompt = val else if (std.mem.eql(u8, key, "--tokens")) token_list = val else if (std.mem.eql(u8, key, "--max-tokens")) max_tokens = try std.fmt.parseInt(usize, val, 10) else if (std.mem.eql(u8, key, "--mtp-drafts")) drafts = try std.fmt.parseInt(usize, val, 10) else if (std.mem.eql(u8, key, "--temperature")) settings.temperature = try std.fmt.parseFloat(f64, val) else if (std.mem.eql(u8, key, "--top-k")) settings.top_k = try std.fmt.parseInt(usize, val, 10) else if (std.mem.eql(u8, key, "--top-p")) settings.top_p = try std.fmt.parseFloat(f64, val) else if (std.mem.eql(u8, key, "--seed")) {
+        if (std.mem.eql(u8, key, "--prompt")) prompt = val else if (std.mem.eql(u8, key, "--tokens")) token_list = val else if (std.mem.eql(u8, key, "--max-tokens")) max_tokens = try std.fmt.parseInt(usize, val, 10) else if (std.mem.eql(u8, key, "--mtp-drafts")) drafts = try std.fmt.parseInt(usize, val, 10) else if (std.mem.eql(u8, key, "--temperature")) settings.temperature = try std.fmt.parseFloat(f64, val) else if (std.mem.eql(u8, key, "--top-k")) settings.top_k = try std.fmt.parseInt(usize, val, 10) else if (std.mem.eql(u8, key, "--top-p")) settings.top_p = try std.fmt.parseFloat(f64, val) else if (std.mem.eql(u8, key, "--min-p")) settings.min_p = try std.fmt.parseFloat(f64, val) else if (std.mem.eql(u8, key, "--seed")) {
             settings.seed = try std.fmt.parseInt(u64, val, 10);
             seed_set = true;
         } else if (std.mem.eql(u8, key, "--report")) report = val else if (std.mem.eql(u8, key, "--dump-logits")) dump = val else if (std.mem.eql(u8, key, "--trace-dir")) trace_dir = val else if (std.mem.eql(u8, key, "--trace-gdn")) trace_gdn = try std.fmt.parseInt(usize, val, 10) else return error.UnknownArgument;
@@ -441,6 +441,7 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             .temperature = settings.temperature,
             .top_k = settings.top_k,
             .top_p = settings.top_p,
+            .min_p = settings.min_p,
             .metal_sampling = settings.metal,
             .context_copy = copy_enabled,
             .draft_vocab_size = if (draft_ids) |ids| mx.c.mlx_array_size(ids) else @as(usize, M.vocab),
