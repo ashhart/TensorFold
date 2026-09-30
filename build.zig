@@ -373,6 +373,38 @@ pub fn build(b: *std.Build) void {
         glm_prefill_previous = &compare.step;
     }
     glm_prefill.dependOn(glm_prefill_previous.?);
+    const ds_prefill = b.step("test-deepseek-prefill", "Compare complete synthetic DeepSeek prompt/draft prefill, every cache, partial MTP commits and request restoration");
+    var ds_prefill_previous: ?*std.Build.Step = null;
+    for (0..3) |case| {
+        const fixture = b.fmt("build/native-checks/deepseek-prefill-{d}", .{case});
+        const oracle_dir = b.fmt("{s}/oracle", .{fixture});
+        const native_dir = b.fmt("{s}/native", .{fixture});
+        const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", fixture, if (case == 0) "--synthetic-deepseek" else if (case == 1) "--synthetic-deepseek-wide" else "--synthetic-deepseek-packed", "--deepseek-prefill", "--state-directory", oracle_dir, "--output", b.fmt("{s}/logits.npy", .{oracle_dir}) });
+        if (ds_prefill_previous) |previous| oracle.step.dependOn(previous);
+        const native = b.addRunArtifact(exe);
+        native.addArgs(&.{ "check-deepseek-prefill", fixture, native_dir });
+        native.step.dependOn(&oracle.step);
+        const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", oracle_dir, native_dir });
+        compare.step.dependOn(&native.step);
+        ds_prefill_previous = &compare.step;
+    }
+    ds_prefill.dependOn(ds_prefill_previous.?);
+    const dspark_prefill = b.step("test-dspark-prefill", "Compare DeepSeek DSpark prompt taps, retained context, block logits, draws and long request restoration");
+    var dspark_prefill_previous: ?*std.Build.Step = null;
+    for (0..3) |case| {
+        const fixture = b.fmt("build/native-checks/dspark-prefill-{d}", .{case});
+        const oracle_dir = b.fmt("{s}/oracle", .{fixture});
+        const native_dir = b.fmt("{s}/native", .{fixture});
+        const oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", fixture, if (case == 0) "--synthetic-dspark" else if (case == 1) "--synthetic-dspark-sorted" else "--synthetic-dspark-wide", "--deepseek-prefill", "--state-directory", oracle_dir, "--output", b.fmt("{s}/logits.npy", .{oracle_dir}) });
+        if (dspark_prefill_previous) |previous| oracle.step.dependOn(previous);
+        const native = b.addRunArtifact(exe);
+        native.addArgs(&.{ "check-dspark-prefill", fixture, native_dir });
+        native.step.dependOn(&oracle.step);
+        const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", oracle_dir, native_dir });
+        compare.step.dependOn(&native.step);
+        dspark_prefill_previous = &compare.step;
+    }
+    dspark_prefill.dependOn(dspark_prefill_previous.?);
     const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
     var glm_previous: ?*std.Build.Step = null;
     for (0..3) |case| {

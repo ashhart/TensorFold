@@ -77,13 +77,15 @@ pub const Pass = struct {
     hidden: A = mx.empty,
     streams: A = mx.empty,
     taps: A = mx.empty,
+    mtp_keys: A = mx.empty,
     records: [16][]Cache = @splat(&.{}),
     rows: usize,
     position: i32,
     generation: u64,
     is_mtp: bool = false,
+    prefilled: bool = false,
     pub fn deinit(p: *Pass) void {
-        for (p.records[0..p.rows]) |records| mx.allocator.free(records);
+        for (p.records[0..if (p.prefilled) 1 else p.rows]) |records| mx.allocator.free(records);
         p.scope.deinit();
     }
 };
@@ -567,6 +569,60 @@ pub const Model = struct {
         const y = if (mx.dim(x, 0) > 16) try @import("prefill_ops.zig").uncompiled(s, .deepseek_head, &args) else try m.activations.call(s, .deepseek_head, &args);
         return cp.norm(s, y, if (mtp) try m.weight(m.cache.len, "norm.weight") else try m.weights.get("model.norm.weight"), g.rms_norm_eps);
     }
+    pub fn prefill(m: *Model, tokens: []const i32) !Pass {
+        if (tokens.len <= 16) return m.forward(tokens);
+        if (tokens.len > 2048 or m.position < 0 or m.position > 1048576 - tokens.len) return error.ContextLimitExceeded;
+        for (tokens) |token| if (token < 0 or token >= m.vocab) return error.InvalidToken;
+        var p = Pass{ .position = m.position, .generation = m.generation, .rows = tokens.len, .prefilled = true };
+        errdefer p.deinit();
+        p.records[0] = try mx.allocator.alloc(Cache, m.cache.len);
+        @memset(p.records[0], .{});
+        var carry = mx.Scope{};
+        defer carry.deinit();
+        const h = try m.weights.embed(&carry, "model.embed_tokens", tokens);
+        var x = try carry.stack(&.{ h, h, h, h }, 1);
+        var taps: std.ArrayList(A) = .empty;
+        defer taps.deinit(mx.allocator);
+        const g = m.config.value;
+        for (m.cache, p.records[0], 0..) |old, *record, i| {
+            var scratch = mx.Scope{};
+            defer scratch.deinit();
+            const s = &scratch;
+            var cache = old;
+            const a = try m.hc(s, i, "attn", x);
+            const ax = try cp.norm(s, a[0], try m.weight(i, "attn_norm.weight"), g.rms_norm_eps);
+            try m.trace(s, m.position, i, "attn-input", ax);
+            const attended = try m.attention(s, i, ax, &cache, m.position);
+            try m.trace(s, m.position, i, "attn-output", attended);
+            x = try expand(s, x, attended, a[1], a[2]);
+            const f = try m.hc(s, i, "ffn", x);
+            const fx = try cp.norm(s, f[0], try m.weight(i, "ffn_norm.weight"), g.rms_norm_eps);
+            try m.trace(s, m.position, i, "ffn-input", fx);
+            const ff = (try @import("deepseek_prefill_moe.zig").forward(m, s, i, fx, tokens)).output;
+            try m.trace(s, m.position, i, "ffn-output", ff);
+            x = try expand(s, x, ff, f[1], f[2]);
+            try m.trace(s, m.position, i, "streams", x);
+            try mx.eval(x);
+            inline for (comptime std.meta.fieldNames(Cache)) |field| {
+                const value = @field(cache, field);
+                if (value.ctx != null) {
+                    try mx.eval(value);
+                    @field(record, field) = try p.scope.own(try mx.retain(value));
+                }
+            }
+            try m.captureTap(&p.scope, &taps, i, x);
+            carry.deinit();
+            carry = .{};
+            x = try carry.own(try mx.retain(x));
+        }
+        const s = &p.scope;
+        p.streams = try s.own(try mx.retain(x));
+        if (m.dspark != null) p.taps = try s.cat(taps.items, 1);
+        p.hidden = try m.head(s, x, false);
+        p.logits = try m.dispatch.apply(&m.kernels, s, try s.slice(p.hidden, 0, @intCast(tokens.len - 1), @intCast(tokens.len)), .{ .weights = try m.weights.triple("lm_head") });
+        try mx.eval(p.logits);
+        return p;
+    }
     pub fn forward(m: *Model, tokens: []const i32) !Pass {
         if (tokens.len == 0 or tokens.len > 16 or m.position > 1048576 - tokens.len) return error.ContextLimitExceeded;
         for (tokens) |token| if (token < 0 or token >= m.vocab) return error.InvalidToken;
@@ -639,7 +695,7 @@ pub const Model = struct {
             const streams = try s.cast(x, mx.f32t);
             var sum = try s.slice(streams, 1, 0, 1);
             for (1..4) |j| sum = try s.binary(c.mlx_add, sum, try s.slice(streams, 1, @intCast(j), @intCast(j + 1)));
-            const out = try s.reshape(try s.cast(try s.binary(c.mlx_multiply, sum, try s.scalar(0.25)), mx.bf16), &.{ 1, m.config.value.hidden_size });
+            const out = try s.reshape(try s.cast(try s.binary(c.mlx_multiply, sum, try s.scalar(0.25)), mx.bf16), &.{ mx.dim(x, 0), m.config.value.hidden_size });
             try taps.append(mx.allocator, out);
             break;
         };
@@ -651,19 +707,24 @@ pub const Model = struct {
     }
     pub fn commit(m: *Model, p: *Pass, keep: usize) !void {
         if (p.is_mtp or p.position != m.position or p.generation != m.generation or keep == 0 or keep > p.rows) return error.InvalidCommit;
+        if (p.prefilled and keep != p.rows) return error.InvalidCommit;
         const next = try mx.allocator.alloc(Cache, m.cache.len);
         @memset(next, .{});
         errdefer {
             for (next) |*cache| cache.deinit();
             mx.allocator.free(next);
         }
-        for (next, p.records[keep - 1]) |*dst, record| dst.* = try record.clone();
+        for (next, p.records[if (p.prefilled) 0 else keep - 1]) |*dst, record| dst.* = try record.clone();
         for (next) |cache| inline for (comptime std.meta.fieldNames(Cache)) |field| {
             if (@field(cache, field).ctx != null) try mx.eval(@field(cache, field));
         };
         if (m.dspark) |*draft| {
             if (draft.position != m.position or p.taps.ctx == null) return error.InvalidDraftState;
-            try draft.absorb(&m.kernels, try p.scope.slice(p.taps, 0, 0, @intCast(keep)));
+            const old_position = draft.position;
+            errdefer draft.position = old_position;
+            const skip = if (p.prefilled) @max(0, @as(i32, @intCast(keep)) - m.config.value.sliding_window) else 0;
+            draft.position += skip;
+            try draft.absorb(&m.kernels, try p.scope.slice(p.taps, 0, skip, @intCast(keep)));
         }
         for (m.cache) |*cache| cache.deinit();
         mx.allocator.free(m.cache);
@@ -675,17 +736,42 @@ pub const Model = struct {
         if (m.dspark != null) return error.UnsupportedDraftOperation;
         return m.forwardMtpAt(streams, tokens, m.mtp_cache, m.mtp_position);
     }
+    pub fn absorbDraftContext(m: *Model, streams: A, tokens: []const i32) !void {
+        if (m.dspark != null or tokens.len == 0) return;
+        var pass = try m.forwardMtp(streams, tokens);
+        defer pass.deinit();
+        try m.commitMtp(&pass, tokens.len);
+    }
     fn forwardMtpAt(m: *Model, streams: A, tokens: []const i32, entry: Cache, position: i32) !Pass {
         if (!m.has_mtp) return error.MissingDraftHead;
         const g = m.config.value;
-        if (tokens.len == 0 or tokens.len > 16 or position > 1048576 - tokens.len) return error.ContextLimitExceeded;
+        if (tokens.len == 0 or tokens.len > 2048 or position < 0 or position > 1048576 - tokens.len) return error.ContextLimitExceeded;
         if (!std.mem.eql(i32, mx.shape(streams), &.{ @intCast(tokens.len), 4, g.hidden_size }) or mx.dtype(streams) != mx.bf16) return error.InvalidTensorShape;
         for (tokens) |token| if (token < 0 or token >= m.vocab) return error.InvalidToken;
-        var p = Pass{ .position = position, .generation = m.mtp_generation, .rows = tokens.len, .is_mtp = true };
+        var p = Pass{ .position = position, .generation = m.mtp_generation, .rows = tokens.len, .is_mtp = true, .prefilled = tokens.len > 16 };
         errdefer p.deinit();
         const s = &p.scope;
         const i = m.cache.len;
         var cache = entry;
+        if (p.prefilled) {
+            const rows: i32 = @intCast(tokens.len);
+            const e = try m.project(s, i, "e_proj", try cp.norm(s, try m.weights.embed(s, "model.embed_tokens", tokens), try m.weight(i, "enorm.weight"), g.rms_norm_eps));
+            const h = try s.reshape(try cp.norm(s, streams, try m.weight(i, "hnorm.weight"), g.rms_norm_eps), &.{ 4 * rows, g.hidden_size });
+            var x = try s.binary(c.mlx_add, try s.reshape(e, &.{ rows, 1, g.hidden_size }), try s.reshape(try m.project(s, i, "h_proj", h), &.{ rows, 4, g.hidden_size }));
+            const a = try m.hc(s, i, "attn", x);
+            const ax = try cp.norm(s, a[0], try m.weight(i, "attn_norm.weight"), g.rms_norm_eps);
+            const attended = try @import("deepseek_prefill_attention.zig").forward(m, s, i, ax, &cache, position);
+            p.mtp_keys = if (entry.keys.ctx != null) try s.cat(&.{ entry.keys, attended.kv }, 0) else attended.kv;
+            x = try expand(s, x, attended.output, a[1], a[2]);
+            const f = try m.hc(s, i, "ffn", x);
+            const fx = try cp.norm(s, f[0], try m.weight(i, "ffn_norm.weight"), g.rms_norm_eps);
+            p.streams = try expand(s, x, (try @import("deepseek_prefill_moe.zig").forward(m, s, i, fx, tokens)).output, f[1], f[2]);
+            p.hidden = try m.head(s, p.streams, true);
+            p.logits = try stock(s, p.hidden, try m.weights.triple("lm_head"));
+            try mx.eval(p.logits);
+            p.records[0] = try mx.allocator.dupe(Cache, &.{cache});
+            return p;
+        }
         var logits: [16]A = undefined;
         var states: [16]A = undefined;
         var hidden: [16]A = undefined;
@@ -712,7 +798,14 @@ pub const Model = struct {
     }
     pub fn commitMtp(m: *Model, p: *Pass, keep: usize) !void {
         if (!p.is_mtp or keep == 0 or keep > p.rows or p.position != m.mtp_position or p.generation != m.mtp_generation) return error.InvalidCommit;
-        const next = try p.records[keep - 1][0].clone();
+        const index = if (p.prefilled) 0 else keep - 1;
+        if (p.records[index].len != 1) return error.InvalidCommit;
+        var record = p.records[index][0];
+        if (p.prefilled and keep < p.rows) {
+            const end = @min(p.position, m.config.value.sliding_window) + @as(i32, @intCast(keep));
+            record.keys = try p.scope.contiguous(try p.scope.slice(p.mtp_keys, 0, @max(0, end - m.config.value.sliding_window), end));
+        }
+        const next = try record.clone();
         m.mtp_cache.deinit();
         m.mtp_cache = next;
         m.mtp_position += @intCast(keep);

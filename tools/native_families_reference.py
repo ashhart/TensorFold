@@ -9,7 +9,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
-def deepseek_fixture(directory, output, wide=False, packed=False):
+def deepseek_fixture(directory, output, wide=False, packed=False, prefill=False):
     import mlx.core as mx
     if wide:
         from tests import dsv4_fakes as fake
@@ -36,6 +36,9 @@ def deepseek_fixture(directory, output, wide=False, packed=False):
     from tensorfold.families.deepseek_v4.mtp import load as load_mtp, MTPCache
     mtp = load_mtp(model, directory / "drafter/model.safetensors")
     mtp_cache = MTPCache(model.args.sliding_window)
+    if prefill:
+        deepseek_prefill_fixture(model, cache, mtp, mtp_cache, output)
+        return
     previous_streams = None
     def save(name, value):
         np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
@@ -134,7 +137,74 @@ def deepseek_fixture(directory, output, wide=False, packed=False):
     print("Saved DeepSeek backbone oracle through 137 tokens", flush=True)
 
 
-def deepseek_dspark_fixture(directory, output, sorted_experts=False, wide=False):
+def deepseek_prefill_fixture(model, cache, mtp, mtp_cache, output):
+    import mlx.core as mx
+    from tensorfold.families.deepseek_v4.model import Block
+    from tensorfold.families.deepseek_v4.attention import Attention
+    from tensorfold.families.deepseek_v4.moe import MoE
+    def save(name, value):
+        np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
+    def save_cache(prefix, item, ratio):
+        end = item.offset
+        save(prefix + "keys", item.window_keys(end - 1))
+        if ratio:
+            save(prefix + "proj", item.proj_rows(max(0, end - ratio * (2 if ratio == 4 else 1)), end))
+            if end // ratio:
+                save(prefix + "pool", item.pool[:end // ratio])
+                if ratio == 4:
+                    save(prefix + "ipool", item.ipool[:end // ratio])
+    original_block, original_attention, original_moe = Block.__call__, Attention.__call__, MoE.__call__
+    blocks = {id(layer): i for i, layer in enumerate(model.layers)}
+    attentions = {id(layer.attn): i for i, layer in enumerate(model.layers)}
+    experts = {id(layer.moe): i for i, layer in enumerate(model.layers)}
+    position = 0
+    def traced_block(self, x, *args, **kwargs):
+        out = original_block(self, x, *args, **kwargs)
+        if x.shape[0] > 16 and id(self) in blocks:
+            save(f"trace-{position}-{blocks[id(self)]}-streams", out)
+        return out
+    def traced_attention(self, x, *args, **kwargs):
+        out = original_attention(self, x, *args, **kwargs)
+        if x.shape[0] > 16 and id(self) in attentions:
+            save(f"trace-{position}-{attentions[id(self)]}-attn-input", x)
+            save(f"trace-{position}-{attentions[id(self)]}-attn-output", out)
+        return out
+    def traced_moe(self, x, *args, **kwargs):
+        out = original_moe(self, x, *args, **kwargs)
+        if x.shape[0] > 16 and id(self) in experts:
+            save(f"trace-{position}-{experts[id(self)]}-ffn-input", x)
+            save(f"trace-{position}-{experts[id(self)]}-ffn-output", out)
+        return out
+    Block.__call__, Attention.__call__, MoE.__call__ = traced_block, traced_attention, traced_moe
+    try:
+        for step, count in enumerate((17, 63, 64, 511, 512, 513, 2048, 17, 1)):
+            tokens = mx.array([1 + (position + j) % 97 for j in range(count)], dtype=mx.uint32)
+            next_tokens = mx.array([1 + (position + j + 1) % 97 for j in range(count)], dtype=mx.uint32)
+            hidden = model.hidden(tokens, cache)[0]
+            save(f"hidden-{step}", hidden)
+            save(f"streams-{step}", model.last_streams)
+            save(f"logits-{step}", model.head(hidden[-1:]))
+            position += count
+            for i, item in enumerate(cache):
+                save_cache(f"cache-{step}-{i}-", item, model.args.ratio(i))
+            out = mtp(model, model.last_streams, next_tokens, [mtp_cache], (count,), count <= 16)
+            save(f"head-{step}-streams", out)
+            save(f"head-{step}-hidden", mx.fast.rms_norm(mtp.head_hc(out, count <= 16), mtp.norm, mtp.eps))
+            save(f"head-{step}-logits", mtp.logits(model, out))
+            if step == 7:
+                mtp_cache.trim(3)
+                save_cache("head-partial-", mtp_cache, 0)
+                replay = mtp(model, model.last_streams[-3:], next_tokens[-3:], [mtp_cache], (3,), True)
+                save("head-replay", mtp.logits(model, replay))
+            save_cache(f"head-cache-{step}-", mtp_cache, 0)
+            print(f"DeepSeek prefill and draft oracle at {position} tokens", flush=True)
+        for step in range(4):
+            save(f"continuation-{step}", model.head(model.hidden(mx.array([200 + step], dtype=mx.uint32), cache))[0])
+    finally:
+        Block.__call__, Attention.__call__, MoE.__call__ = original_block, original_attention, original_moe
+
+
+def deepseek_dspark_fixture(directory, output, sorted_experts=False, wide=False, prefill=False):
     import mlx.core as mx
     from tests import dsv4_fakes as fake
     from tensorfold.families.deepseek_v4.weights import load_backbone
@@ -161,12 +231,16 @@ def deepseek_dspark_fixture(directory, output, sorted_experts=False, wide=False)
     def save(name, value):
         np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
     position = 0
-    for round_id, count in enumerate((3, 5, 16, 7)):
+    counts = (17, 63, 64, 511, 512, 513, 2048, 17, 1) if prefill else (3, 5, 16, 7)
+    for round_id, count in enumerate(counts):
         ids = mx.array([[1 + (position + j) % 250 for j in range(count)]], dtype=mx.uint32)
         hidden = model.hidden(ids, target_cache)
-        save(f"target-{round_id}", model.head(hidden)[0])
+        save(f"target-{round_id}", model.head(hidden[0, -1:]) if prefill else model.head(hidden)[0])
         save(f"taps-{round_id}", model.last_taps)
-        drafter.absorb(model.last_taps, cache)
+        skip = max(0, count - drafter.window) if prefill else 0
+        for item in cache:
+            item.offset += skip
+        drafter.absorb(model.last_taps[skip:], cache)
         position += count
         for i, c in enumerate(cache):
             save(f"keys-{round_id}-{i}", c.ring_rows(c.keys, max(0, c.offset - drafter.window), c.offset))
@@ -1217,6 +1291,7 @@ def main():
     p.add_argument("--nemotron-prefill", action="store_true")
     p.add_argument("--flash-prefill", action="store_true")
     p.add_argument("--glm-prefill", action="store_true")
+    p.add_argument("--deepseek-prefill", action="store_true")
     p.add_argument("--custom-tiles", action="store_true")
     p.add_argument("--synthetic-glm-layout", action="store_true")
     p.add_argument("--synthetic-glm-mixed", action="store_true")
@@ -1263,10 +1338,10 @@ def main():
         dflash_fixture(args.model, args.state_directory, args.synthetic_dflash)
         return
     if args.synthetic_dspark or args.synthetic_dspark_sorted or args.synthetic_dspark_wide:
-        deepseek_dspark_fixture(args.model, args.state_directory, args.synthetic_dspark_sorted, args.synthetic_dspark_wide)
+        deepseek_dspark_fixture(args.model, args.state_directory, args.synthetic_dspark_sorted, args.synthetic_dspark_wide, args.deepseek_prefill)
         return
     if args.synthetic_deepseek or args.synthetic_deepseek_wide or args.synthetic_deepseek_packed:
-        deepseek_fixture(args.model, args.state_directory, args.synthetic_deepseek_wide or args.synthetic_deepseek_packed, args.synthetic_deepseek_packed)
+        deepseek_fixture(args.model, args.state_directory, args.synthetic_deepseek_wide or args.synthetic_deepseek_packed, args.synthetic_deepseek_packed, args.deepseek_prefill)
         return
     if args.synthetic_glm or args.synthetic_glm_mixed:
         from tests.glm5_fakes import write_checkpoint
