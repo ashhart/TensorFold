@@ -63,6 +63,11 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [ ] Engram layers 1/14: n-gram hashing, FP8 e4m3 rows (never uint8), file-backed row store (O_DIRECT/mmap),
       mapped-table accounting in capacity
 - [ ] 2-rank split + NCCL rank-order reduction; lm_head (6-bit)
+- [x] First serial TP=2 engine (`cuda/serial.py`, `tools/dsv41_serial_run.py`): eager PyTorch, 96.1 GiB/rank,
+      365-token prefill 94.5% top-1 vs reference (NLL 1.420 vs 1.400), coherent greedy text; decode 7.3 tok/s,
+      prefill 237 tok/s (2026-09-30)
+- [ ] Engine vs reference agreement should be ~99%: layer-diff the engine against reference dumps
+- [ ] Decode speed: CUDA graphs per row count, fused HC/attention kernels, fewer launches (floor ~20 ms/token)
 - [ ] **Go/no-go**: serial decode must clearly beat 23 tok/s (target ≥ 40) at matching quality
 
 ## Phase 3 — drafting, long context, prefill
