@@ -73,7 +73,10 @@ pub fn identity(s: *session.Session) ![]u8 {
     try mx.check(mx.c.mlx_device_info_get(&info, device));
     var architecture: [*c]const u8 = null;
     try mx.check(mx.c.mlx_device_info_get_string(&architecture, info, "architecture"));
-    const flash_tiles: ?bool = if (s.backend == .flash) try s.backend.flash.kernels.flash_prefill.tiles(&s.backend.flash.kernels) else null;
+    const flash_tiles: ?bool = switch (s.backend) {
+        inline .flash, .glm => |*m| try m.kernels.flash_prefill.tiles(&m.kernels),
+        else => null,
+    };
     const form = if (s.backend == .qwen) s.backend.qwen.weights.bonsai_form else null;
     const options = try std.json.Stringify.valueAlloc(a, .{ .draft = s.draft_options, .architecture = std.mem.span(architecture), .tensor = mx.tensor_units, .flash_tiles = flash_tiles, .bonsai = form, .buffers = @import("kv_buffer.zig").enabled }, .{});
     defer a.free(options);

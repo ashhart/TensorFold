@@ -368,8 +368,16 @@ fn checkImagesWithDraft(io: std.Io, dir: []const u8, path: []const u8, draft_opt
 }
 
 pub fn checkSyntheticNeural(m: anytype, io: std.Io) !void {
+    var prompt: [33]i32 = undefined;
+    for (&prompt, 0..) |*id, i| id.* = @intCast(i + 1);
+    return checkSyntheticNeuralPrompt(m, io, &prompt);
+}
+
+pub fn checkSyntheticNeuralPrompt(m: anytype, io: std.Io, prompt: []const i32) !void {
     const M = @TypeOf(m.*);
     const G = session.Generation(M);
+    if (prompt.len < 2) return error.InvalidSnapshotState;
+    const plan = @import("prefill_plan.zig").Plan{ .step = @min(G.chunk_size, prompt.len - 1) };
     const a = mx.allocator;
     m.reset();
     defer m.reset();
@@ -380,16 +388,15 @@ pub fn checkSyntheticNeural(m: anytype, io: std.Io) !void {
         try tok.vocab.put(word, @intCast(id));
         try tok.id_to_token.put(@intCast(id), word);
     }
-    var prompt: [33]i32 = undefined;
-    for (&prompt, 0..) |*id, i| id.* = @intCast(i + 1);
     for ([_]f64{ 0, 0.7 }) |temperature| {
         const options = session.Options{ .max_tokens = 18, .ignore_eos = true, .seed = 819, .sampling = .{ .temperature = temperature, .top_k = 12, .top_p = 0.8, .metal = true } };
         var reference = Capture{};
         defer reference.deinit();
         var serial_options = options;
         serial_options.draft = false;
-        var baseline = try G.init(m, &tok, a, &prompt, serial_options, reference.sink(), null);
+        var baseline = try G.init(m, &tok, a, prompt, serial_options, reference.sink(), null);
         defer baseline.deinit();
+        try baseline.setPlan(plan);
         while (!try baseline.step(m)) {}
         for ([_]usize{ 1, 3, 15 }) |depth| {
             var captures: [3]Capture = @splat(.{});
@@ -400,8 +407,9 @@ pub fn checkSyntheticNeural(m: anytype, io: std.Io) !void {
             for (&generations, &captures) |*g, *capture| {
                 var sink = capture.sink();
                 sink.draft_budget = depth;
-                g.* = try G.init(m, &tok, a, &prompt, options, sink, null);
+                g.* = try G.init(m, &tok, a, prompt, options, sink, null);
                 initialized += 1;
+                try g.setPlan(plan);
                 g.proposer.?.fallback_enabled = false;
             }
             try std.testing.expect(!try generations[0].step(m));

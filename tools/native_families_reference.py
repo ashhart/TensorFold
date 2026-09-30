@@ -274,6 +274,68 @@ def gemma_dflash_fixture(directory, draft_dir, output):
     print("Saved full Gemma target taps and DFlash proposals", flush=True)
 
 
+def glm_prefill_fixture(directory, output, custom_tiles=False):
+    import mlx.core as mx
+    from tensorfold.families.glm5_next.weights import load_backbone
+    from tensorfold.families.glm5_next.model import Layer
+    from tensorfold.families.glm5_next.mtp import load as load_mtp
+    from tensorfold.families.glm5_next.linear import project
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+    if custom_tiles:
+        prefill_mm._tiles[:] = [True]
+    model = load_backbone(directory)
+    cache = model.make_cache()
+    head = load_mtp(model)
+    head_cache = head.make_cache()
+    output.mkdir(parents=True, exist_ok=True)
+    def save(name, value):
+        np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
+    def save_cache(prefix, item):
+        for key, attr in (("conv", "conv"), ("state", "ssm"), ("keys", "keys"), ("ik", "ik"), ("ig", "ig"), ("pool", "pool")):
+            value = getattr(item, attr, None)
+            if value is not None:
+                if key in ("keys", "ik", "ig", "pool"):
+                    value = value[:item.offset // model.args.index_kpool if key == "pool" else item.offset]
+                save(prefix + key, value)
+    original = Layer.__call__
+    layer_ids = {id(layer): i for i, layer in enumerate(model.layers)}
+    position = 0
+    def record_layer(self, x, *args, **kwargs):
+        out = original(self, x, *args, **kwargs)
+        if id(self) in layer_ids and x.shape[0] > 16:
+            save(f"trace-{position}-{layer_ids[id(self)]}", out)
+        return out
+    Layer.__call__ = record_layer
+    try:
+        for step, count in enumerate((17, 63, 64, 511, 512, 513, 2048, 17, 1)):
+            tokens = mx.array([1 + (position + j) % 97 for j in range(count)])
+            next_tokens = mx.array([1 + (position + j + 1) % 97 for j in range(count)])
+            hidden = model.hidden(tokens, cache)[0]
+            save(f"hidden-{step}", hidden)
+            save(f"logits-{step}", model.head(hidden[-1:]))
+            position += count
+            for i, item in enumerate(cache):
+                save_cache(f"cache-{step}-{i}-", item)
+            projected_input = mx.concatenate([mx.fast.rms_norm(model.embed_tokens(next_tokens), head.enorm, head.eps),
+                                               mx.fast.rms_norm(hidden, head.hnorm, head.eps)], axis=-1)
+            projected = project(projected_input, head.eh_proj, rows_exact=count <= 16)
+            out = head(model, hidden, next_tokens, [head_cache], (count,), count <= 16)
+            save(f"head-{step}-mtp_input", projected_input)
+            save(f"head-{step}-mtp_projection", projected)
+            save(f"head-{step}-hidden", out)
+            save(f"head-{step}-logits", head.logits(model, out))
+            if step == 7:
+                head_cache.trim(3)
+                replay = head(model, hidden[-3:], next_tokens[-3:], [head_cache], (3,), True)
+                save("head-replay", head.logits(model, replay))
+            save_cache(f"head-cache-{step}-", head_cache)
+            print(f"GLM prefill and draft oracle at {position} tokens", flush=True)
+        for step in range(4):
+            save(f"continuation-{step}", model.head(model.hidden(mx.array([200 + step]), cache))[0])
+    finally:
+        Layer.__call__ = original
+
+
 def flash_prefill_fixture(directory, output, simd=False, custom_tiles=False):
     import mlx.core as mx
     from tensorfold.families.qwen4_exp.model import load, select_by_kernels
@@ -1154,6 +1216,7 @@ def main():
     p.add_argument("--gemma-prefill", action="store_true")
     p.add_argument("--nemotron-prefill", action="store_true")
     p.add_argument("--flash-prefill", action="store_true")
+    p.add_argument("--glm-prefill", action="store_true")
     p.add_argument("--custom-tiles", action="store_true")
     p.add_argument("--synthetic-glm-layout", action="store_true")
     p.add_argument("--synthetic-glm-mixed", action="store_true")
@@ -1229,6 +1292,9 @@ def main():
         args.model = args.model / "mlxlm"
     if args.synthetic_glm or args.synthetic_glm_layout:
         (args.model / "tokenizer.json").write_text(json.dumps({"model": {"type": "BPE", "vocab": {f"t{i}": i for i in range(256)}, "merges": []}, "pre_tokenizer": {"type": "ByteLevel"}, "decoder": {"type": "ByteLevel"}}))
+    if args.glm_prefill:
+        glm_prefill_fixture(args.model, args.state_directory, args.custom_tiles)
+        return
     from tensorfold.engine.exact_sampling import Sampling, sample_rows
     kind = json.loads((args.model / "config.json").read_text())["model_type"]
     if kind == "glm5_next":
@@ -1275,7 +1341,9 @@ def main():
             from tensorfold.families.glm5_next.mtp import load as load_mtp
             mtp = load_mtp(model)
             mtp_cache = mtp.make_cache()
-        forward = lambda ids: model.head(model.hidden(mx.array([ids], dtype=mx.uint32), cache))
+        def forward(ids):
+            hidden = model.hidden(mx.array([ids], dtype=mx.uint32), cache)
+            return model.head(hidden[:, -1:] if len(ids) > 16 else hidden)
     elif kind in ("gemma4", "gemma4_text"):
         from tensorfold.families.gemma4.model import load
         model, tokenizer = load(args.model, backend="rows", check=False)
@@ -1362,7 +1430,7 @@ def main():
         raise ValueError(kind)
     tokens = ([int(x) for x in args.tokens.split(",")] if args.tokens else list(range(1, 41)) if args.synthetic_glm or args.synthetic_glm_layout else
               tokenizer.encode(args.prompt, add_special_tokens=False) if args.generate else [1, 2, 3, 4])
-    prompt_chunk = 2048 if kind in ("gemma4", "gemma4_text", "nemotron_h", "qwen4_exp") else 16
+    prompt_chunk = 2048 if kind in ("gemma4", "gemma4_text", "nemotron_h", "qwen4_exp") or (kind == "glm5_next" and not (args.synthetic_glm or args.synthetic_glm_layout)) else 16
     for start in range(0, len(tokens), prompt_chunk):
         chunk = tokens[start:start + prompt_chunk]
         if kind in ("gemma4", "gemma4_text"):

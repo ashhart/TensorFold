@@ -98,6 +98,7 @@ pub fn generateWithPrefill(m: anytype, tokens: []const i32, max_tokens: usize, s
 }
 
 fn absorb(m: anytype, hidden: mx.Array, tokens: []const i32) !void {
+    if (comptime @hasDecl(@TypeOf(m.*), "absorbDraftContext")) return m.absorbDraftContext(hidden, tokens);
     if (comptime !@hasDecl(@TypeOf(m.*), "forwardMtp")) return error.UnsupportedDrafts;
     var pass = try m.forwardMtp(hidden, tokens);
     defer pass.deinit();

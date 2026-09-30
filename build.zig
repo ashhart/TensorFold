@@ -330,6 +330,25 @@ pub fn build(b: *std.Build) void {
     glm_moe.step.dependOn(&glm_moe_fixture.step);
     b.step("test-glm-prefill-moe", "Compare GLM batched routing, sorted expert gathers, shared experts and mixed formats with upstream").dependOn(&glm_moe.step);
     metal_tests.dependOn(&glm_moe.step);
+    const glm_prefill = b.step("test-glm-prefill", "Compare complete synthetic GLM prompt/draft prefill, every cache, partial MTP commits and request restoration");
+    const glm_tiles = b.option(bool, "glm-prefill-tiles", "Force GLM custom expert tiles in both upstream and native prefill checks") orelse false;
+    var glm_prefill_previous: ?*std.Build.Step = null;
+    for (0..3) |case| {
+        const fixture = b.fmt("build/native-checks/glm-prefill-{s}{d}", .{ if (glm_tiles) "tiles-" else "", case });
+        const oracle_dir = b.fmt("{s}/oracle", .{fixture});
+        const native_dir = b.fmt("{s}/native", .{fixture});
+        const oracle = b.addSystemCommand(&.{ "env", "MLX_ENABLE_TF32=0", ".venv/bin/python", "tools/native_families_reference.py", fixture, if (case == 0) "--synthetic-glm" else if (case == 1) "--synthetic-glm-layout" else "--synthetic-glm-mixed", "--glm-prefill", "--state-directory", oracle_dir, "--output", b.fmt("{s}/logits.npy", .{oracle_dir}) });
+        if (glm_tiles) oracle.addArg("--custom-tiles");
+        if (glm_prefill_previous) |previous| oracle.step.dependOn(previous);
+        const native = b.addRunArtifact(exe);
+        native.addArgs(&.{ "check-glm-prefill", if (case == 1) b.fmt("{s}/mlxlm", .{fixture}) else fixture, native_dir });
+        if (glm_tiles) native.addArg("--custom-tiles");
+        native.step.dependOn(&oracle.step);
+        const compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", oracle_dir, native_dir });
+        compare.step.dependOn(&native.step);
+        glm_prefill_previous = &compare.step;
+    }
+    glm_prefill.dependOn(glm_prefill_previous.?);
     const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
     var glm_previous: ?*std.Build.Step = null;
     for (0..3) |case| {

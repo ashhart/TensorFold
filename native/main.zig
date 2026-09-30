@@ -24,6 +24,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-glm-prefill-kda")) return @import("glm.zig").checkPrefillKda(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-glm-prefill-mla")) return @import("glm_prefill_mla.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-glm-prefill-moe")) return @import("glm_prefill_moe.zig").check(io, args[2]);
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-glm-prefill")) return @import("glm_prefill_checks.zig").check(io, args[2], args[3], false);
+    if (args.len == 5 and std.mem.eql(u8, args[1], "check-glm-prefill") and std.mem.eql(u8, args[4], "--custom-tiles")) return @import("glm_prefill_checks.zig").check(io, args[2], args[3], true);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-moe")) return @import("flash_prefill_moe.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-attention")) return @import("flash_prefill_attention.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-ple")) return @import("flash_prefill_ple.zig").check(io, args[2]);

@@ -74,12 +74,13 @@ pub const Pass = struct {
     mtp_projection: A = mx.empty,
     mtp_input: A = mx.empty,
     is_mtp: bool = false,
+    prefilled: bool = false,
     records: [16][]Cache = @splat(&.{}),
     rows: usize,
     position: i32,
     generation: u64,
     pub fn deinit(p: *Pass) void {
-        for (p.records[0..p.rows]) |records| mx.allocator.free(records);
+        for (p.records[0..if (p.prefilled) 1 else p.rows]) |records| mx.allocator.free(records);
         p.scope.deinit();
     }
 };
@@ -507,9 +508,12 @@ pub const Model = struct {
         return if (m.weights.has(try name(&b, i, "mlp.shared_experts.gate_proj.weight"))) s.binary(c.mlx_add, out, try m.dense(s, i, "mlp.shared_experts", x)) else out;
     }
     fn embedding(m: *Model, s: *mx.Scope, token: i32) !A {
+        return m.embeddingRows(s, &.{token});
+    }
+    fn embeddingRows(m: *Model, s: *mx.Scope, tokens: []const i32) !A {
         const embed = try m.weights.triple("embed_tokens");
         const fmt = try m.format("embed_tokens");
-        const ids = try s.ints(&.{token});
+        const ids = try s.ints(tokens);
         var e = c.mlx_array_new();
         const rc = c.mlx_dequantize(&e, try s.take(embed[0], ids, 0), try s.take(embed[1], ids, 0), try s.take(embed[2], ids, 0), mx.opt(fmt.group_size), mx.opt(fmt.bits), "affine", mx.empty, .{ .value = mx.bf16, .has_value = true }, mx.stream);
         return s.result(rc, e);
@@ -517,17 +521,36 @@ pub const Model = struct {
     pub fn forwardMtp(m: *Model, hidden: A, tokens: []const i32) !Pass {
         return m.forwardMtpAt(hidden, tokens, m.mtp_cache, m.mtp_position);
     }
+    pub fn absorbDraftContext(m: *Model, hidden: A, tokens: []const i32) !void {
+        if (tokens.len == 0) return;
+        var pass = try m.forwardMtp(hidden, tokens);
+        defer pass.deinit();
+        try m.commitMtp(&pass, tokens.len);
+    }
     fn forwardMtpAt(m: *Model, hidden: A, tokens: []const i32, entry: Cache, position: i32) !Pass {
         if (!m.has_mtp) return error.MissingDraftHead;
-        if (tokens.len == 0 or tokens.len > 16 or position > 1048576 - tokens.len) return error.ContextLimitExceeded;
+        if (tokens.len == 0 or tokens.len > 2048 or position < 0 or position > 1048576 - tokens.len) return error.ContextLimitExceeded;
         if (!std.mem.eql(i32, mx.shape(hidden), &.{ @intCast(tokens.len), m.config.value.hidden_size }) or mx.dtype(hidden) != mx.bf16) return error.InvalidTensorShape;
         for (tokens) |token| if (token < 0 or token >= m.vocab) return error.InvalidToken;
-        var p = Pass{ .position = position, .generation = m.mtp_generation, .rows = tokens.len, .is_mtp = true };
+        var p = Pass{ .position = position, .generation = m.mtp_generation, .rows = tokens.len, .is_mtp = true, .prefilled = tokens.len > 16 };
         errdefer p.deinit();
         const s = &p.scope;
         var cache = entry;
         const i = m.cache.len;
         const eps = m.config.value.rms_norm_eps;
+        if (p.prefilled) {
+            const e = try cp.norm(s, try m.embeddingRows(s, tokens), try m.weight(i, "enorm.weight"), eps);
+            const h = try cp.norm(s, hidden, try m.weight(i, "hnorm.weight"), eps);
+            p.mtp_input = try s.cat(&.{ e, h }, 1);
+            p.mtp_projection = try m.project(s, i, "eh_proj", p.mtp_input);
+            var x = p.mtp_projection;
+            x = try s.binary(c.mlx_add, x, try m.mla(s, i, try cp.norm(s, x, try m.weight(i, "input_layernorm.weight"), eps), &cache, position));
+            p.hidden = try s.binary(c.mlx_add, x, try m.mlp(s, i, try cp.norm(s, x, try m.weight(i, "post_attention_layernorm.weight"), eps)));
+            p.logits = try m.qmm(s, try cp.norm(s, p.hidden, try m.weight(i, "shared_head.norm.weight"), eps), "lm_head", true, null);
+            try mx.eval(p.logits);
+            p.records[0] = try mx.allocator.dupe(Cache, &.{cache});
+            return p;
+        }
         var logits: [16]A = undefined;
         var states: [16]A = undefined;
         var projected: [16]A = undefined;
@@ -573,12 +596,74 @@ pub const Model = struct {
         }
     }
     pub fn commitMtp(m: *Model, p: *Pass, keep: usize) !void {
-        if (!p.is_mtp or keep == 0 or keep > p.rows or p.position != m.mtp_position or p.generation != m.mtp_generation or p.records[keep - 1].len != 1) return error.InvalidCommit;
-        const next = try p.records[keep - 1][0].clone();
+        if (!p.is_mtp or keep == 0 or keep > p.rows or p.position != m.mtp_position or p.generation != m.mtp_generation) return error.InvalidCommit;
+        const index = if (p.prefilled) 0 else keep - 1;
+        if (p.records[index].len != 1) return error.InvalidCommit;
+        var record = p.records[index][0];
+        if (p.prefilled and keep < p.rows) {
+            const end = p.position + @as(i32, @intCast(keep));
+            inline for (.{ "keys", "ik", "ig", "pool" }) |key| {
+                const value = @field(record, key);
+                if (value.ctx != null) @field(record, key) = try p.scope.slice(value, 0, 0, if (comptime std.mem.eql(u8, key, "pool")) @divTrunc(end, m.config.value.index_kpool) else end);
+            }
+        }
+        const next = try record.clone();
         m.mtp_cache.deinit();
         m.mtp_cache = next;
         m.mtp_position += @intCast(keep);
         m.mtp_generation +%= 1;
+    }
+    pub fn prefill(m: *Model, tokens: []const i32) !Pass {
+        if (tokens.len <= 16) return m.forward(tokens);
+        if (tokens.len > 2048 or m.position < 0 or m.position > 1048576 - tokens.len) return error.ContextLimitExceeded;
+        for (tokens) |token| if (token < 0 or token >= m.vocab) return error.InvalidToken;
+        var p = Pass{ .position = m.position, .generation = m.generation, .rows = tokens.len, .prefilled = true };
+        errdefer p.deinit();
+        p.records[0] = try mx.allocator.alloc(Cache, m.cache.len);
+        @memset(p.records[0], .{});
+        var carry = mx.Scope{};
+        defer carry.deinit();
+        const e = try m.embeddingRows(&carry, tokens);
+        var x = try carry.stack(&.{ e, e, e, e }, 1);
+        const g = m.config.value;
+        for (m.cache, p.records[0], 0..) |old, *record, i| {
+            var scratch = mx.Scope{};
+            defer scratch.deinit();
+            const s = &scratch;
+            var cache = old;
+            const ah = try m.hc(s, i, "attn", x);
+            const normed = try cp.norm(s, ah[0], try m.weight(i, "input_layernorm.weight"), g.rms_norm_eps);
+            var key: [256]u8 = undefined;
+            const branch = if (m.weights.has(try name(&key, i, "self_attn.q_a_proj.weight"))) try m.mla(s, i, normed, &cache, m.position) else try m.kda(s, i, normed, &cache);
+            x = try expand(s, x, branch, ah[1], ah[2]);
+            const fh = try m.hc(s, i, "ffn", x);
+            const feed = try m.mlp(s, i, try cp.norm(s, fh[0], try m.weight(i, "post_attention_layernorm.weight"), g.rms_norm_eps));
+            x = try expand(s, x, feed, fh[1], fh[2]);
+            try mx.eval(x);
+            inline for (comptime std.meta.fieldNames(Cache)) |field| {
+                const value = @field(cache, field);
+                if (value.ctx != null) {
+                    try mx.eval(value);
+                    @field(record, field) = try p.scope.own(try mx.retain(value));
+                }
+            }
+            if (m.trace_dir) |dir| {
+                var path: [4096]u8 = undefined;
+                try save(s, try std.fmt.bufPrint(&path, "{s}/trace-{d}-{d}.npy", .{ dir, m.position, i }), x);
+            }
+            carry.deinit();
+            carry = .{};
+            x = try carry.own(try mx.retain(x));
+        }
+        const s = &p.scope;
+        const rows: i32 = @intCast(tokens.len);
+        const wide = try s.cast(x, mx.f32t);
+        var sum = try s.reshape(try s.slice(wide, 1, 0, 1), &.{ rows, g.hidden_size });
+        for (1..4) |j| sum = try s.binary(c.mlx_add, sum, try s.reshape(try s.slice(wide, 1, @intCast(j), @intCast(j + 1)), &.{ rows, g.hidden_size }));
+        p.hidden = try cp.norm(s, try s.cast(try s.binary(c.mlx_multiply, sum, try s.scalar(0.25)), mx.bf16), try m.weights.get("norm.weight"), g.rms_norm_eps);
+        p.logits = try m.qmm(s, try s.slice(p.hidden, 0, rows - 1, rows), "lm_head", true, null);
+        try mx.eval(p.logits);
+        return p;
     }
     pub fn forward(m: *Model, tokens: []const i32) !Pass {
         if (tokens.len == 0 or tokens.len > 16 or m.position < 0 or m.position > 1048576 - tokens.len) return error.ContextLimitExceeded;
@@ -636,13 +721,14 @@ pub const Model = struct {
     }
     pub fn commit(m: *Model, p: *Pass, keep: usize) !void {
         if (p.is_mtp or keep == 0 or keep > p.rows or p.position != m.position or p.generation != m.generation) return error.InvalidCommit;
+        if (p.prefilled and keep != p.rows) return error.InvalidCommit;
         const next = try mx.allocator.alloc(Cache, m.cache.len);
         @memset(next, .{});
         errdefer {
             for (next) |*cache| cache.deinit();
             mx.allocator.free(next);
         }
-        for (p.records[keep - 1], next) |record, *cache| cache.* = try record.clone();
+        for (p.records[if (p.prefilled) 0 else keep - 1], next) |record, *cache| cache.* = try record.clone();
         for (m.cache) |*cache| cache.deinit();
         mx.allocator.free(m.cache);
         m.cache = next;

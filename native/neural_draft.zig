@@ -36,6 +36,20 @@ pub fn absorb(m: anytype, state: anytype, d: ?*Drafter, pass: anytype, tokens: [
     } else {
         const on_commit = if (@hasDecl(M, "draftAbsorbsOnCommit")) m.draftAbsorbsOnCommit() else false;
         const hidden = if (@hasDecl(M, "draftHidden")) M.draftHidden(pass) else pass.hidden;
+        if (comptime @hasDecl(M, "absorbDraftContext")) {
+            if (rows.len == 0) return;
+            const selected = try pass.scope.take(hidden, try pass.scope.ints(rows), 0);
+            const n: i32 = @intCast(rows.len);
+            const prefix = try pass.scope.slice(selected, 0, 0, n - 1);
+            const previous = state.draft_hidden.ctx != null;
+            const context = if (previous) try pass.scope.cat(&.{ state.draft_hidden, prefix }, 0) else prefix;
+            const next = try mx.allocator.alloc(i32, rows.len);
+            defer mx.allocator.free(next);
+            for (rows, next) |row, *token| token.* = tokens[@intCast(row)];
+            try m.absorbDraftContext(context, next[if (previous) 0 else 1..]);
+            try mx.replace(&state.draft_hidden, try pass.scope.slice(selected, 0, n - 1, n));
+            return;
+        }
         for (rows) |row| {
             if (state.draft_hidden.ctx != null and !on_commit) {
                 if (@hasDecl(M, "DraftCache")) {
