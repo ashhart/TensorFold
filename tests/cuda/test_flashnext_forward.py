@@ -373,11 +373,12 @@ def test_prefix_reuse_and_the_serial_switch(tmp_path, sampling):
             ask(first)                                           # the first request's states again
         prompt = first + (reply if extend == "reply" else []) + [401, 33, 2048]
         warm, warm_stats = ask(prompt)
-        assert warm_stats["cached"] == len(first), (extend, warm_stats)     # prompt ends only: the reply prefills again
+        assert warm_stats["cached"] == len(first) - 1, (extend, warm_stats)   # the entry ends one early: the
+        # last token prefills again with the reply
         serial, serial_stats = ask(prompt, draft=False)          # one token a round, a fresh prefill
         assert serial == warm and serial_stats["drafts"] is False and serial_stats["cached"] == 0
         again, again_stats = ask(prompt + [9])                   # the kept states survived the serial request
-        assert again_stats["cached"] >= len(prompt)
+        assert again_stats["cached"] == len(prompt) - 1
         ask([1500, 9, 10])                                       # an unrelated prompt: nothing to resume from
         cold, cold_stats = ask(prompt)
         assert cold_stats["cached"] == 0 and cold == warm, extend

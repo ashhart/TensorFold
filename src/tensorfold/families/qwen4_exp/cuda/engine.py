@@ -12,6 +12,7 @@ from . import CONFIDENCE, DEPTH
 
 MAX_DEPTH = 15           # a verify window of at most 16 rows
 KEEP = 8                 # prompt ends a concurrent decoder keeps to resume from
+KEEP_SERIAL = 4          # prompt states the serial engine keeps (they share its attention rows)
 
 
 class FlashNextEngine:
@@ -97,6 +98,9 @@ class FlashNextEngine:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
                              "that has it, or --no-drafts for the serial reference (one token a round)")
         self.w = w
+        from tensorfold.cuda.markers import resume_points
+
+        self.points = resume_points(model_dir)          # a prompt's message starts to keep states at, or None
         # ``streams`` > 1: up to that many requests decoded together, every stream's chain in one forward
         self.concurrent = streams > 1
         self.multi = self.scheduler = None
@@ -107,7 +111,7 @@ class FlashNextEngine:
 
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
-                                      confidence=self.confidence, keep=KEEP, kv_dtype=self.kv_dtype)
+                                      confidence=self.confidence, keep=KEEP, points=self.points, kv_dtype=self.kv_dtype)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
@@ -243,16 +247,16 @@ class FlashNextEngine:
         return best
 
     def _start_from(self, hit) -> None:
-        """Before a prefill: resuming overwrites the cache rows past the kept prefix, so the states that extend it go; a fresh prompt overwrites them all."""
+        """Before a prefill: resuming overwrites the cache rows past the kept prefix, so the states that extend it go; a fresh prompt overwrites them all. The hit's own prefixes stay: one prefill wrote their rows."""
 
         if hit is None:
             self.cache = []
         else:
             n = len(hit[0])
-            self.cache = [c for c in self.cache if len(c[0]) <= n or c[0][:n] != hit[0]]
+            self.cache = [c for c in self.cache if len(c[0]) < n and hit[0][:len(c[0])] == c[0]] + [hit]
 
     def _remember(self, ids: list[int], snap: dict) -> None:
-        self.cache = [c for c in self.cache if c[0] != ids][-1:] + [(ids, snap)]
+        self.cache = [c for c in self.cache if c[0] != ids][-(KEEP_SERIAL - 1):] + [(ids, snap)]
 
     def _serial(self, prompt: list[int], max_tokens: int, sampling, on_tokens, constraint=None,
                 stop_eos: bool = True) -> dict[str, Any]:
@@ -283,10 +287,16 @@ class FlashNextEngine:
 
         t0 = time.perf_counter()
         self._start_from(hit)
-        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint)
-        # the prompt's state: the MTP head has absorbed every position but the last, whose streams resume needs
-        self._remember(list(prompt), {"state": self.e.st.snapshot(),
-                                      "tail": self.e.last_streams.clone() if self.e.mbuf is not None else None})
+        cached = len(hit[0]) if hit else 0
+        from tensorfold.cuda.markers import MIN_GAP
+
+        from .decode import entry_end
+
+        stops = sorted({entry_end(prompt)} | {p for p in (self.points(prompt) if self.points is not None else [])
+                                               if p >= cached + MIN_GAP})
+        keep = lambda p, snap, tail: self._remember(list(prompt[:p]), {"state": snap, "tail": tail})    # noqa: E731
+        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint,
+                        stops=stops, keep=keep)
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                                  "drafts": True}

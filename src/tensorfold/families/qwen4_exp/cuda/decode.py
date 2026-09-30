@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import torch
@@ -111,6 +111,13 @@ def _gathered_fits(sampling: Sampling | None) -> bool:
 
 
 PREFILL_ROWS = 2048      # rows of a prompt chunk
+
+
+def entry_end(prompt: Sequence[int]) -> int:
+    """Where a prompt's cache entry ends: one token early, since a next turn sent back without its reasoning renders
+    the generation prompt's final newline as two."""
+
+    return max(1, len(prompt) - 1)
 
 
 class Engine:
@@ -250,14 +257,22 @@ def draft(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int], position
 
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True,
-            resume: dict | None = None, constraint=None) -> int:
-    """Commit the prompt in chunks, sample the first token; rows ignore chunking, so ``resume`` equals a fresh run."""
+            resume: dict | None = None, constraint=None, stops: Sequence[int] = (),
+            keep: Callable[[int, dict, torch.Tensor | None], None] | None = None) -> int:
+    """Commit the prompt in chunks, sample the first token; rows ignore chunking, so ``resume`` equals a fresh run.
+
+    ``stops`` splits chunks further at prompt positions (each strictly between the resumed point and the prompt's
+    end); a chunk ending at one commits first, then ``keep(position, snapshot, tail)`` receives the state there
+    (the MTP tail is the row before it). The token a stop's chunk ends on is left for the next chunk's overshoot to
+    absorb, so every kept state holds the head through its own ``pos`` minus one, as a prompt end's does.
+    """
 
     if not prompt:
         raise ValueError("prefill requires at least one token")
     w, st, pb = e.w, e.st, e.pbuf
     use_mtp = mtp and w.mtp is not None and e.mbuf is not None
     begin = 0
+    absorbed = 0                                        # tokens the MTP head holds; a stop's chunk leaves one
     if resume is None:
         e.reset()
     else:
@@ -268,22 +283,35 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
         if use_mtp and resume.get("tail") is not None:
             mtp_forward(w, st, pb, [prompt[begin]], resume["tail"])
             st.set_mtp_len(st.mtp_len + 1)
-    last = None
-    for start in range(begin, len(prompt), e.prefill_rows):
-        chunk = list(prompt[start:start + e.prefill_rows])
+        absorbed = begin
+    pending = sorted(p for p in stops if begin < p < len(prompt))
+    last, streams_last = None, None
+    start = begin
+    while start < len(prompt):
+        end = min(start + e.prefill_rows, next((p for p in pending if p > start), len(prompt)), len(prompt))
+        chunk = list(prompt[start:end])
         R = len(chunk)
-        final = start + R >= len(prompt)
+        final = end >= len(prompt)
         # only the prompt's last row is sampled: the head runs on the final chunk alone
         logits = forward(w, st, pb, chunk, logits=final)
         if final:
             last = logits.clone()
         streams_last = pb.streams[R - 1:R].clone()
         if use_mtp:
-            nxt = list(prompt[start + 1:start + R + 1])
+            if absorbed + 1 == start:                   # a stop's chunk left the boundary token unabsorbed
+                mtp_forward(w, st, pb, [prompt[start]], streams_last)
+                st.set_mtp_len(st.mtp_len + 1)
+                absorbed = start
+            nxt = list(prompt[absorbed + 1:min(end + (0 if end in pending and keep is not None and not final
+                                                      else 1), len(prompt))])
             if nxt:
                 mtp_forward(w, st, pb, nxt, pb.streams[:len(nxt)])
                 st.set_mtp_len(st.mtp_len + len(nxt))
+                absorbed += len(nxt)
         commit(w, st, pb, R, R)
+        if keep is not None and end in pending and not final:
+            keep(end, st.snapshot(), streams_last if use_mtp else None)
+        start = end
     if constraint is not None:                           # a reply's grammar: this rank's vocabulary columns
         last = constraint.mask(last, None, e.w.meta.get("vocab_offset", 0))
     first = e.sample(last, [len(prompt)], sampling)[0]

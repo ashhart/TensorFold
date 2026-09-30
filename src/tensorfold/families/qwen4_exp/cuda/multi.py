@@ -7,12 +7,13 @@ import time
 import numpy as np
 import torch
 
+from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import Stream, accept
 from tensorfold.engine.exact_sampling import MARGIN, choose_rows
 from tensorfold.engine.grammar import GrammarError
 
-from .decode import PREFILL_ROWS, WARM_TAIL, Engine, draft, prefill
+from .decode import PREFILL_ROWS, WARM_TAIL, Engine, draft, entry_end, prefill
 from .forward import commit, compute, stage
 from .mtp import mtp_compute, mtp_stage
 from .state import Buffers, State
@@ -31,10 +32,11 @@ class MultiDecoder:
     """Rounds over the live streams; ``slots`` streams at most, each with ``capacity`` tokens of context."""
 
     def __init__(self, w, *, slots: int, capacity: int, depth: int = DEPTH, confidence: float = CONFIDENCE,
-                 stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16") -> None:
+                 stop_eos: bool = True, keep: int = 8, points=None, kv_dtype: str = "bf16") -> None:
         if w.comm is not None:
             raise ValueError("concurrent Flash Next runs on one GPU for now")
         self.w, self.depth, self.confidence, self.capacity = w, depth, confidence, capacity
+        self.points = points                         # a prompt's message starts to keep states at, or None
         self.eos = tuple(w.cfg.eos) if stop_eos else ()
         rows = slots * (depth + 1)
         self.buf = Buffers(w, rows, capacity)
@@ -55,7 +57,11 @@ class MultiDecoder:
         self.kept = [k for k in self.kept if k[1] is not st]
 
     def _slot_for(self, prompt: list[int], reuse: bool):
-        """The idle kept slot the prompt extends furthest, else a free slot, else the oldest idle kept one."""
+        """The idle kept slot the prompt extends furthest, else a free slot, else the oldest idle kept one.
+
+        A prompt that matches an entry another extends (a fork at a message start) takes a free slot when one
+        is spare: its own prefill would overwrite the longer entries its slot holds, which the turns that
+        extend them resume from."""
 
         busy = self._busy()
         best = None
@@ -64,9 +70,14 @@ class MultiDecoder:
             if id(st) not in busy and len(ids) < len(prompt) and prompt[:len(ids)] == ids and \
                     (best is None or len(ids) > len(best[0])):
                 best = k
+        if best is not None and self.free and any(k[1] is best[1] and len(k[0]) > len(best[0]) for k in self.kept):
+            best = None                                        # a fork: leave the slot's chain to its own turns
         if best is not None:
-            self._drop_kept(best[1])
-            return best[1], {"state": best[2], "tail": best[3]}, len(best[0])
+            # the resumed prefill writes past the kept prefix: the entries extending it on its slot go, its own
+            # prefixes stay (every entry a slot holds is a prefix of a longer one)
+            n = len(best[0])
+            self.kept = [k for k in self.kept if k[1] is not best[1] or len(k[0]) <= n and best[0][:len(k[0])] == k[0]]
+            return best[1], {"state": best[2], "tail": best[3]}, n
         if not self.free:
             idle = next((k[1] for k in self.kept if id(k[1]) not in busy), None)
             if idle is None:
@@ -114,16 +125,22 @@ class MultiDecoder:
         st, resume, s.cached = self._slot_for(list(s.prompt), s.draft)
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity)
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
+        keeps: list[tuple[int, dict, torch.Tensor | None]] = []      # prefill snapshots: states kept at the stop points
+        stops = () if not s.draft else sorted(
+            {entry_end(s.prompt)} |
+            {p for p in (self.points(s.prompt) if self.points is not None else []) if p >= s.cached + MIN_GAP})
+        grab = lambda p, snap, tail: keeps.append((p, snap, tail))    # noqa: E731
         try:
-            first = prefill(e, s.prompt, s.sampling, mtp=mtp, resume=resume,
+            first = prefill(e, s.prompt, s.sampling, mtp=mtp, resume=resume, stops=stops, keep=grab,
                             **({} if s.constraint is None else {"constraint": s.constraint}))
         except Exception:
+            self._drop_kept(st)
             self.free.append(st)
             raise
+        for p, snap, tail in keeps:                    # the prompt's states, its ends one token early included
+            self._remember(list(s.prompt[:p]), st, snap, tail if mtp else None)
         s.sid, s.st = self.next_id, st
         self.next_id += 1
-        if s.draft:                    # the prompt's state; the MTP head has absorbed every position but the last
-            self._remember(list(s.prompt), st, st.snapshot(), e.last_streams.clone() if mtp else None)
         s.context = list(s.prompt)
         s.drafts = draft(e, e.last_streams, [first], st.pos + 1, min(self.depth, s.count - 1), s.sampling,
                          self.confidence) if mtp and s.count > 1 else []
