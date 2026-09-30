@@ -344,7 +344,7 @@ def prompt_cache_fixtures(output):
     from tensorfold.engine.prefill_plan import PrefillPlan
 
     rng = random.Random(418137)
-    result = dict(stores=[], checkpoints=[])
+    result = dict(stores=[], checkpoints=[], shared=[])
     prompts = [list(range(n)) for n in range(25)]
     prompts += [list(range(n)) + [91, 92, 93] for n in range(20)]
     for slots in (1, 3, 8):
@@ -389,10 +389,20 @@ def prompt_cache_fixtures(output):
         result['checkpoints'].append(dict(prompt=prompt, previous=previous, history=history, cached=cached,
                                           expected=chosen, starts=list(chunks.starts),
                                           aligned=sorted(at for at in {chunks.floor(n) for n in chosen} if cached < at < len(prompt))))
+    for _ in range(1000):
+        length = rng.randrange(1, 16385)
+        system = rng.choice((0, 511, 512, 513, 1024, 2048, 2560, length - 1, length))
+        tokens = [1] * length
+        for at in (min(600, length - 1), min(3500, length - 1)):
+            tokens[at] = 7
+        chunks = PrefillPlan(step=rng.choice((16, 256, 2048)), min_chunk=1, openers=(7,), assistant=(7,)).chunks(tokens)
+        positions = (n for n in (system - 2048, system - 512, system) if n >= 512)
+        expected = sorted(at for at in {chunks.floor(n) for n in positions} if 0 < at < length)
+        result['shared'].append(dict(system=system, length=length, starts=list(chunks.starts), expected=expected))
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result))
-    print('Saved 9000 upstream prompt-cache operations and 1000 checkpoint selections')
+    print('Saved 9000 upstream prompt-cache operations, 1000 history and 1000 shared checkpoint selections')
 
 
 def memory_fixtures(output):

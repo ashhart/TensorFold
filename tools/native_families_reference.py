@@ -308,6 +308,8 @@ def chat_fixture(directory, output):
     from tensorfold.engine.lane_engine import LaneStream
     from tensorfold.engine.lane_family import FamilyRounds
     from tensorfold.server.request_options import RequestOptions
+    from tensorfold.server.app import ChatApp
+    from tensorfold.server.text import template_late_system
     from threading import Lock
     tokenizer = TokenizerWrapper(AutoTokenizer.from_pretrained(str(directory), local_files_only=True))
     deepseek = json.loads((directory / 'config.json').read_text()).get('model_type') == 'deepseek_v4'
@@ -361,6 +363,10 @@ def chat_fixture(directory, output):
         [{"role": "user", "content": "Weather in Copenhagen?"}, {"role": "assistant", "content": None, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "weather", "arguments": '{"city":"Copenhagen"}'}}]}, {"role": "tool", "tool_call_id": "call_1", "name": "weather", "content": "Sunny"}, {"role": "user", "content": "Summarize."}],
     ]
     cases = []
+    app = ChatApp.__new__(ChatApp)
+    app.tokenizer = tokenizer
+    app.tokenizer_lock = Lock()
+    app.late_system = template_late_system(tokenizer)
     for thinking, effort in ((False, None), (True, "low"), (True, "medium"), (True, "xhigh")):
         for index, messages in enumerate(conversations):
             tools = [tool] if index >= 4 else None
@@ -372,7 +378,16 @@ def chat_fixture(directory, output):
             ids = render_prompt_ids(tokenizer, messages, tools=tools, enable_thinking=thinking, reasoning_effort=effort)
             history = render_prompt_ids(tokenizer, messages, tools=tools, enable_thinking=thinking, reasoning_effort=effort, add_generation_prompt=False)
             history_len = len(history) if 0 < len(history) < len(ids) and ids[:len(history)] == history else 0
-            cases.append({"body": body, "tokens": ids, "history_len": history_len, "gates": gate_cases(ids)})
+            app.enable_thinking, app.reasoning_effort = thinking, effort
+            system_len = app.system_prefix_len(messages, tools, ids, thinking)
+            cases.append({"body": body, "tokens": ids, "history_len": history_len, "system_len": system_len, "gates": gate_cases(ids)})
+    for words in (480, 511, 512, 520, 1024, 2560, 4096):
+        for thinking in (False, True):
+            messages = [{"role": "system", "content": "word " * words}, {"role": "developer", "content": "Be brief."}, {"role": "user", "content": "Explain."}]
+            body = {"messages": messages, "tools": [tool], "chat_template_kwargs": {"enable_thinking": thinking}}
+            ids = render_prompt_ids(tokenizer, messages, tools=[tool], enable_thinking=thinking)
+            app.enable_thinking, app.reasoning_effort = thinking, None
+            cases.append({"body": body, "tokens": ids, "system_len": app.system_prefix_len(messages, [tool], ids, thinking)})
     output.parent.mkdir(parents=True, exist_ok=True)
     from tensorfold.engine.prefill_plan import message_markers
     marks, assistant = message_markers(tokenizer)

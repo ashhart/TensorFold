@@ -27,7 +27,7 @@ pub fn commonPrefix(lhs: []const i32, rhs: []const i32) usize {
 }
 
 pub const Checkpoints = struct {
-    values: [2]usize = .{ 0, 0 },
+    values: [3]usize = @splat(0),
     count: usize = 0,
 
     pub fn contains(c: Checkpoints, position: usize) bool {
@@ -45,6 +45,18 @@ pub const Checkpoints = struct {
         return out;
     }
 };
+
+pub fn sharedCheckpoints(system: usize, boundary: Boundary, length: usize) Checkpoints {
+    var out = Checkpoints{};
+    for ([_]usize{ system -| 2048, system -| 512, system }) |position| {
+        if (position < 512) continue;
+        const at = boundary.floor(position);
+        if (at == 0 or at >= length or out.contains(at)) continue;
+        out.values[out.count] = at;
+        out.count += 1;
+    }
+    return out;
+}
 
 pub fn checkpoints(history: usize, cached: usize, previous: ?[]const i32, prompt: []const i32) Checkpoints {
     var out = Checkpoints{};
@@ -258,6 +270,7 @@ pub fn check(io: std.Io, path: []const u8) !void {
     const Fixture = struct {
         stores: []const struct { slots: usize, budget: ?u64, pinned_slots: usize, operations: []const Operation },
         checkpoints: []const struct { prompt: []const i32, previous: ?[]const i32, history: usize, cached: usize, expected: []const usize, starts: []const usize, aligned: []const usize },
+        shared: []const struct { system: usize, length: usize, starts: []const usize, expected: []const usize },
     };
     const parsed = try std.json.parseFromSlice(Fixture, a, source, .{});
     defer parsed.deinit();
@@ -305,7 +318,11 @@ pub fn check(io: std.Io, path: []const u8) !void {
         const aligned = actual.aligned(.{ .starts = case.starts }, case.cached, case.prompt.len);
         try std.testing.expectEqualSlices(usize, case.aligned, aligned.values[0..aligned.count]);
     }
-    std.debug.print("PASS: {d} upstream prompt-cache operations and {d} checkpoint selections\n", .{ count, parsed.value.checkpoints.len });
+    for (parsed.value.shared) |case| {
+        const actual = sharedCheckpoints(case.system, .{ .starts = case.starts }, case.length);
+        try std.testing.expectEqualSlices(usize, case.expected, actual.values[0..actual.count]);
+    }
+    std.debug.print("PASS: {d} upstream prompt-cache operations, {d} history and {d} shared checkpoint selections\n", .{ count, parsed.value.checkpoints.len, parsed.value.shared.len });
 }
 
 test "prefixes are strict and checkpoints exclude cached or terminal positions" {

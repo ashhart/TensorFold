@@ -510,6 +510,38 @@ const Scenario = struct {
         std.debug.print("PASS: HTTP prefix cache enabled={any}: cold/reused/concurrent JSON/SSE agree; eviction, cache counters and cancellation match policy\n", .{s.cache_enabled});
         std.debug.print("PASS: {d}-token adaptive chat JSON/SSE agree, cache enabled={any}\n", .{ prompt_tokens, s.cache_enabled });
         std.debug.print("PASS: multi-turn history and revised prompts reuse checkpoints with seeded JSON/SSE parity\n", .{});
+        const shared_system = try a.alloc(u8, 5 * 600);
+        const shared_user = try a.alloc(u8, 5 * 600);
+        for (0..600) |i| {
+            @memcpy(shared_system[i * 5 ..][0..5], "word ");
+            @memcpy(shared_user[i * 5 ..][0..5], "item ");
+        }
+        const shared_body = try std.json.Stringify.valueAlloc(a, .{ .messages = &.{ .{ .role = "system", .content = shared_system }, .{ .role = "user", .content = shared_user } }, .reasoning_effort = "none", .max_tokens = @as(usize, 8), .ignore_eos = true, .temperature = @as(f64, 0.7), .top_k = @as(usize, 12), .top_p = @as(f64, 0.8), .seed = @as(usize, 21) }, .{});
+        const warm_shared = try postRoute(io, port, "/v1/chat/completions", shared_body);
+        defer warm_shared.close(io);
+        const shared_expected = try Output.parse(a, try readAll(a, io, warm_shared), false);
+        const pinned = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(@as(usize, if (s.cache_enabled) 2 else 0), pinned.entries);
+        const churn = try post(io, port, changed);
+        defer churn.close(io);
+        _ = try Output.parse(a, try readAll(a, io, churn), false);
+        const churned = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(pinned.entries, churned.entries);
+        const before_shared = try s.liveSnapshot(port);
+        const resumed_shared = try postRoute(io, port, "/v1/chat/completions", shared_body);
+        defer resumed_shared.close(io);
+        const shared_actual = try Output.parse(a, try readAll(a, io, resumed_shared), false);
+        try shared_expected.compare(shared_actual);
+        const after_shared = try s.waitForCounts(port, 0, 0);
+        const restored_shared = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(churned.hits + @as(u64, @intFromBool(s.cache_enabled)), restored_shared.hits);
+        const shared_usage = try std.json.parseFromSlice(std.json.Value, a, shared_actual.usage.?, .{});
+        const full_prompt = shared_usage.value.object.get("prompt_tokens").?.integer;
+        const fed = after_shared.object.get("prefilled_tokens").?.integer - before_shared.object.get("prefilled_tokens").?.integer;
+        if (s.cache_enabled) {
+            try std.testing.expect(fed > 0 and fed < full_prompt - 512);
+        } else try std.testing.expectEqual(full_prompt, fed);
+        std.debug.print("PASS: shared system checkpoint survives ordinary LRU eviction and resumes exact seeded output; cache enabled={any}\n", .{s.cache_enabled});
         try std.posix.kill(s.child.id.?, .TERM);
         if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
     }

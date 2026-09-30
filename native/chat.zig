@@ -57,6 +57,9 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
         if (case.object.get("history_len")) |expected_history| {
             try std.testing.expectEqual(@as(usize, @intCast(expected_history.integer)), try template.historyLength(a, &tokenizer, body, false, null, ids));
         }
+        if (case.object.get("system_len")) |expected_system| {
+            try std.testing.expectEqual(@as(usize, @intCast(expected_system.integer)), try template.systemPrefixLength(a, &tokenizer, body, false, null, ids));
+        }
         if (case.object.get("call_form")) |expected_form| {
             const form = try template.callForm(a, &tokenizer);
             if (expected_form == .null) {
@@ -315,6 +318,33 @@ pub const Template = struct {
         defer scratch.deinit();
         const history = try encode(scratch.allocator(), tokenizer, try t.renderWithGeneration(scratch.allocator(), body, thinking, effort, false));
         return if (history.len > 0 and history.len < prompt.len and std.mem.eql(i32, history, prompt[0..history.len])) history.len else 0;
+    }
+
+    pub fn systemPrefixLength(t: *const Template, a: std.mem.Allocator, tokenizer: *Tokenizer, body: V, thinking: bool, effort: ?[]const u8, prompt: []const i32) !usize {
+        var scratch = std.heap.ArenaAllocator.init(a);
+        defer scratch.deinit();
+        const temp = scratch.allocator();
+        const messages = body.object.get("messages").?.array.items;
+        for (messages, 0..) |message, index| {
+            const role = message.object.get("role").?;
+            if (!std.mem.eql(u8, role.string, "user")) continue;
+            var probe = V{ .array = std.json.Array.init(temp) };
+            try probe.array.appendSlice(messages[0..index]);
+            var user = V{ .object = .empty };
+            try user.object.put(temp, "role", .{ .string = "user" });
+            try user.object.put(temp, "content", .{ .string = "\u{2063}probe" });
+            try probe.array.append(user);
+            var request = V{ .object = try body.object.clone(temp) };
+            try request.object.put(temp, "messages", probe);
+            const rendered = t.renderWithDefaults(temp, request, thinking, effort) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                return 0;
+            };
+            const other = try encode(temp, tokenizer, rendered);
+            const shared = @import("prompt_cache.zig").commonPrefix(prompt, other);
+            return if (shared >= 512) shared else 0;
+        }
+        return 0;
     }
 
     fn renderWithGeneration(t: *const Template, a: std.mem.Allocator, body: V, default_thinking: bool, default_effort: ?[]const u8, generation: bool) !Rendered {

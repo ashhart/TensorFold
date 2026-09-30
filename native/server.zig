@@ -581,7 +581,9 @@ const Pending = struct {
     buffer: [8192]u8 = undefined,
     saved_position: usize = 0,
     history_len: usize = 0,
+    system_len: usize = 0,
     checkpoints: @import("prompt_cache.zig").Checkpoints = .{},
+    shared_checkpoints: @import("prompt_cache.zig").Checkpoints = .{},
     prefix_reserve: u64 = 0,
     activation_order: u64 = 0,
     growth: enum { run, paused, ended } = .run,
@@ -630,7 +632,10 @@ const Pending = struct {
             const rendered = try session.renderChat(a, body, w.thinking, w.effort);
             try ids.appendSlice(a, try chat.encode(a, &session.tokenizer, rendered));
             raw_images = rendered.images;
-            if (raw_images != .array or raw_images.array.items.len == 0) p.history_len = try session.chat_template.?.historyLength(a, &session.tokenizer, body, w.thinking, w.effort, ids.items);
+            if (raw_images != .array or raw_images.array.items.len == 0) {
+                p.history_len = try session.chat_template.?.historyLength(a, &session.tokenizer, body, w.thinking, w.effort, ids.items);
+                p.system_len = try session.chat_template.?.systemPrefixLength(a, &session.tokenizer, body, w.thinking, w.effort, ids.items);
+            }
             p.thinking = rendered.thinking;
             if (chat.requiresCall(body)) {
                 const form = (try session.chat_template.?.callForm(a, &session.tokenizer)) orelse return error.UnsupportedRequiredToolCalls;
@@ -719,6 +724,7 @@ const Pending = struct {
             if (p.image == null and p.options.max_tokens > 0) if (prefixes) |store| {
                 const policy = @import("prompt_cache.zig");
                 p.checkpoints = policy.checkpoints(p.history_len, 0, null, p.ids).aligned(p.generation.?.boundary(), 0, p.ids.len);
+                p.shared_checkpoints = policy.sharedCheckpoints(p.system_len, p.generation.?.boundary(), p.ids.len);
                 var hit = store.match(p.ids, p.generation.?.boundary(), false) catch null;
                 if (hit) |*value| {
                     defer value.deinit(mx.allocator);
@@ -731,7 +737,8 @@ const Pending = struct {
         }
         const done = try p.step(session);
         if (!done) if (prefixes) |store| {
-            if (!p.job.is_chat or p.checkpoints.contains(p.generation.?.memoryLengths().now)) p.savePrefix(store, admission.*, active) catch {};
+            const at = p.generation.?.memoryLengths().now;
+            if (!p.job.is_chat or p.checkpoints.contains(at) or p.shared_checkpoints.contains(at)) p.savePrefix(store, admission.*, active) catch {};
         };
         return done;
     }
@@ -783,7 +790,7 @@ const Pending = struct {
         }
         const position = snapshot.position();
         adopted = true;
-        try store.insertOwned(p.ids[0..position], snapshot, p.ids, false);
+        try store.insertOwned(p.ids[0..position], snapshot, p.ids, p.shared_checkpoints.contains(position));
         p.saved_position = position;
         p.prefix_reserve = @max(p.prefix_reserve, size);
     }
