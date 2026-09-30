@@ -200,7 +200,7 @@ def main() -> None:
             launches = sum(e.count for e in events if e.self_device_time_total > 0) / 4
             print(f"profile: wall {wall * 1e3:.1f} ms/step, GPU busy {gpu:.1f} ms/step, ~{launches:.0f} kernels/step",
                   flush=True)
-            print(events.table(sort_by="self_device_time_total", row_limit=22, max_name_column_width=60), flush=True)
+            print(events.table(sort_by="self_device_time_total", row_limit=45, max_name_column_width=60), flush=True)
     nccl.barrier()
 
 

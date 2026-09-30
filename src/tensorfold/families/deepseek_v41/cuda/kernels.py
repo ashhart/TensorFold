@@ -12,11 +12,11 @@ import torch
 import triton
 import triton.language as tl
 
-HEAD_TILE = 32              # heads a program (one rank's 32): each key tile is loaded once a row
+HEAD_TILE = 16              # heads a chunk program (decode and verify rows; prompt chunks use FULL_HT)
 KEY_TILE = 64
 FULL_ROWS = 16            # above this many rows (prompt chunks) with RoPE: _mqa_full, one program a row
 FULL_HT, FULL_KT, FULL_WARPS, FULL_STAGES = 32, 32, 8, 1
-CHUNK = 256               # keys a chunk program takes
+CHUNK = 128               # keys a chunk program takes (small row counts: more programs to fill the SMs)
 
 
 @triton.jit

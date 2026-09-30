@@ -8,6 +8,7 @@ Contexts stay within the short-context regime (every compressed entry visible, n
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -106,6 +107,7 @@ class Caches:
     ids: list[int] = field(default_factory=list)
 
 
+PAR_DECODE = os.environ.get("TF_PAR", "1") == "1"            # decode/verify rows: independent linears on side streams (Par)
 PROMPT_ZB = (103, 103)       # v4 with bf16 Z (gate/up config, down config); None: fp32 Z (PROMPT_V3)
 PROMPT_ZDT = torch.float16   # Z element type (fp16 stores acc / 64; bf16 also works)
 PROMPT_OVERLAP = True        # prompt chunks: all-gather the first row block while the second computes
@@ -118,6 +120,33 @@ _Z2 = None
 _ZB = None
 PROMPT_CFG = [1, 1]          # prompt expert kernel config for gate/up and down (experts_prompt.cu)
 PROMPT_ROWS = 16             # above this, expert calls size their member table to the busiest expert (host sync)
+
+
+class Par:
+    """Fork/join of independent small launches over side streams (decode and verify rows: short GEMVs leave DRAM
+    idle between them; captured into the CUDA graphs as parallel branches). Arithmetic is unchanged."""
+
+    def __init__(self, n: int = 4) -> None:
+        self.streams = [torch.cuda.Stream() for _ in range(n)]
+
+    def __call__(self, *fns):
+        if not PAR_DECODE:
+            return [f() for f in fns]
+        main = torch.cuda.current_stream()
+        outs, used = [None] * len(fns), []
+        for i, f in enumerate(fns):
+            if i == 0:
+                continue
+            st = self.streams[(i - 1) % len(self.streams)]
+            if st not in used:
+                st.wait_stream(main)
+                used.append(st)
+            with torch.cuda.stream(st):
+                outs[i] = f()
+        outs[0] = fns[0]()
+        for st in used:
+            main.wait_stream(st)
+        return outs
 
 
 def group_members(pick: torch.Tensor, E: int, s) -> tuple[torch.Tensor, torch.Tensor]:
@@ -238,6 +267,7 @@ class SerialEngine:
         shared = ex3.Scratch(w.layers[0].moe.experts, MAX_ROWS, c.num_experts_per_tok)   # every layer: same shapes
         self.scratch = [shared] * len(w.layers)
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
+        self.par = Par()
         self.split = c.engram_layer_ids[1]
         self.tables_rope = {r: K.rope_tables(f, cap) for r, f in self.freqs.items()}
         self.attnbuf = K.AttnBuffers(MAX_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,
@@ -559,8 +589,11 @@ class SerialEngine:
         Dh, W = c.head_dim, c.sliding_window
         cos, sin = self.tables_rope[a.ratio]
         eps = c.rms_norm_eps
-        qr = K.rmsnorm(a.wq_a(x), a.q_norm, eps)
-        kv = K.rmsnorm(a.wkv(x), a.kv_norm, eps)
+        if R <= PROMPT_ROWS:
+            qr, kv = self.par(lambda: K.rmsnorm(a.wq_a(x), a.q_norm, eps), lambda: K.rmsnorm(a.wkv(x), a.kv_norm, eps))
+        else:
+            qr = K.rmsnorm(a.wq_a(x), a.q_norm, eps)
+            kv = K.rmsnorm(a.wkv(x), a.kv_norm, eps)
         H = a.wq_b.n // Dh
         q = K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin)          # bf16, this rank's heads
         st.swa[L].index_copy_(0, pos % RING, K.rope(kv, pos, cos, sin))
@@ -575,7 +608,10 @@ class SerialEngine:
         o = K.mqa(q, comp, idx, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin)   # inverse-rotated bf16
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
-        z = torch.cat([wo(o[:, g] if R > PROMPT_ROWS else o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)], dim=1)
+        if R <= PROMPT_ROWS:
+            z = torch.cat(self.par(*[lambda g=g, wo=wo: wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)]), dim=1)
+        else:
+            z = torch.cat([wo(o[:, g]) for g, wo in enumerate(a.wo_a)], dim=1)
         return self.comm.partials_rows(lambda r0, r1: a.wo_b(z[r0:r1], out_dtype=F32 if R <= PROMPT_ROWS else BF), R)
 
     def select(self, layer: LayerW, qr: torch.Tensor, x: torch.Tensor, pos: torch.Tensor,
@@ -638,14 +674,18 @@ class SerialEngine:
         logits = K.router_logits(x, m.gate)                         # a row's bits never depend on the row count
         pick, w = K.route(logits, m.bias, top_k or c.num_experts_per_tok, c.routed_scaling_factor)
         scratch = scratch if scratch is not None else self.scratch[layer.index]
+
+        def shared_act() -> torch.Tensor:
+            g = m.shared[0](x, out_dtype=F32)
+            u = m.shared[1](x, out_dtype=F32)
+            return (torch.nn.functional.silu(g.clamp(max=limit)) * u.clamp(-limit, limit)).to(BF)
+
         if R > PROMPT_ROWS:
             routed = routed_prompt(x.contiguous(), pick, w, m.experts, scratch, R, limit)
+            act = shared_act()
         else:
-            routed = ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit)
-
-        g = m.shared[0](x, out_dtype=F32)
-        u = m.shared[1](x, out_dtype=F32)
-        act = (torch.nn.functional.silu(g.clamp(max=limit)) * u.clamp(-limit, limit)).to(BF)
+            routed, act = self.par(lambda: ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit),
+                                   shared_act)
 
         def block(r0: int, r1: int) -> torch.Tensor:
             return routed[r0:r1] + m.shared[2](act[r0:r1], out_dtype=F32)
