@@ -10,12 +10,24 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
+| `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; MLX only; no text is generated |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 require a string `prompt`.
 With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept user `image_url` content parts alongside text.
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
+
+## Decisions
+
+`POST /v1/decisions` is served by the MLX server. The CUDA server has its own handler and returns 404 for this path.
+The prompt wording is SGLang's decision prompt format version 1: the input, a blank line, the question, one line per
+option, level, or described yes or no answer, and a closing instruction to answer with one label. Choice labels are
+`A` to `Z`, score labels are `0` to `9`, and a yes/no question uses `yes` and `no`. Each label must be one distinct
+token at the answer position. Thinking stays off. The response carries `prompt_format_version`, `answers` keyed by
+question id, and `usage.completion_tokens` 0. `probabilities` are a softmax over the label logits divided by
+`temperature` (default 1). `label_mass` is the full-vocabulary probability of those labels and does not use
+`temperature`. A request the tokenizer or the context window cannot score returns HTTP 400.
 
 ## Request fields
 
