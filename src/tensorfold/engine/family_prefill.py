@@ -250,6 +250,37 @@ class FamilyPrefill:
         self._family_feed(prompt_ids, work, chunks.between(start, len(prompt_ids)))
         return drop_spares(work)
 
+    def score_labels(self, prompt_ids: Sequence[int], label_ids: Sequence[int]) -> tuple[list[float], float]:
+        """Last-position logits of ``label_ids`` and the full-vocabulary logsumexp. No token is sampled."""
+
+        import math
+
+        import mlx.core as mx
+
+        prompt = [int(token) for token in prompt_ids]
+        labels = [int(token) for token in label_ids]
+        if not prompt:
+            raise ValueError("empty prompt")
+        if not labels:
+            raise ValueError("empty labels")
+        chunks = self.prompt_chunks(prompt)
+        work, start = self._family_start(None, 0, chunks)
+        try:
+            hidden = self._family_feed(prompt, work, chunks.between(start, len(prompt)))
+            logits = self.model.head(hidden)
+            row = logits.reshape(-1, logits.shape[-1])[-1].astype(mx.float32)
+            picked = row[mx.array(labels, dtype=mx.int32)]
+            peak = mx.max(row)
+            logsumexp = peak + mx.log(mx.sum(mx.exp(row - peak)))
+            mx.eval(picked, logsumexp)
+            values = [float(item) for item in picked.tolist()]
+            total = float(logsumexp.item())
+        finally:
+            del work
+        if not math.isfinite(total) or any(not math.isfinite(value) for value in values):
+            raise ValueError("label scoring produced a non-finite logit")
+        return values, total
+
     def _family_add_stream(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
                            checkpoints_at: Sequence[int]) -> Iterator[None]:
         """Prefill a stream a chunk a step; after the last chunk it takes part in the rounds."""

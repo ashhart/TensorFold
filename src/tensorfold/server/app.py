@@ -213,6 +213,26 @@ class ChatApp(RequestOptions, PromptBlocks):
                   f"{window:,}-token request and a shared round leave idle, freed whenever a request needs it",
                   flush=True)
 
+    def decisions(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Answer typed questions from next-token label logits. No text is generated."""
+
+        from tensorfold.server.decisions import DecisionError, build_response, prepare
+
+        try:
+            with self.tokenizer_lock:
+                prepared = prepare(self.tokenizer, body, context_len=self.context_window or None)
+        except DecisionError as exc:
+            raise RequestError(str(exc)) from exc
+        scored = []
+        for item in prepared:
+            prompt, labels = item.prompt_ids, item.label_ids
+            try:
+                scored.append(self.scheduler.on_engine(
+                    lambda engine, prompt=prompt, labels=labels: engine.score_labels(prompt, labels)))
+            except ValueError as exc:
+                raise RequestError(f"question {item.id!r}: {exc}") from exc
+        return build_response(body, prepared, scored)
+
     def chat(
         self,
         messages: list[dict[str, Any]],

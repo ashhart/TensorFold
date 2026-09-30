@@ -169,8 +169,11 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:
             route = self._route()
+            if route.endswith("/decisions"):
+                return self._post_decisions(app)
             if responses.route(route) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
+
             is_chat_completion = route.endswith("/chat/completions")
             is_text_completion = route.endswith("/completions") and not is_chat_completion
             if not is_chat_completion and not is_text_completion:
@@ -479,5 +482,27 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     self._send_json({"error": {"message": str(exc)}}, status=500)
                 except Exception:
                     pass
+
+
+        def _post_decisions(self, app: Any) -> None:
+            decide = getattr(app, "decisions", None)
+            if decide is None:
+                self._send_json({"error": {"message": f"unknown path {self.path}"}}, status=404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= 32 * 1024**2:
+                    raise RequestError("request body exceeds the 32 MiB limit")
+                body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
+                if not isinstance(body, dict):
+                    raise RequestError("request body must be an object")
+                payload = decide(body)
+            except RequestError as exc:
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            except Exception as exc:  # noqa: BLE001 - a bad body is a client error
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            self._send_json(payload)
 
     return Handler

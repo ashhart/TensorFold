@@ -134,6 +134,7 @@ class Scheduler(PromptFill):
         self.slow_round_ms = 1000.0
         self._held: ChatJob | None = None
         self._queue = _JobQueue()
+        self._engine_calls: queue.Queue[tuple[Callable[[Any], Any], queue.Queue[Any]]] = queue.Queue()
         self.preemptions = 0
         self._jobs: dict[str, ChatJob] = {}
         self._stop = threading.Event()
@@ -204,6 +205,41 @@ class Scheduler(PromptFill):
             raise RuntimeError("the scheduler is closed")
         self._queue.put(job)
 
+    def on_engine(self, fn: Callable[[Any], Any], timeout: float = 600.0) -> Any:
+        """Run ``fn`` on the engine thread once no stream is live and no prompt is open."""
+
+        if self._stop.is_set():
+            raise RuntimeError("the scheduler is closed")
+        done: queue.Queue[Any] = queue.Queue(1)
+        self._engine_calls.put((fn, done))
+        try:
+            result = done.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError("the engine did not score the prompt in time") from exc
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def _run_engine_call(self) -> bool:
+        try:
+            fn, done = self._engine_calls.get_nowait()
+        except queue.Empty:
+            return False
+        try:
+            done.put(fn(self.engine))
+        except Exception as exc:  # noqa: BLE001 - the waiter raises this on its own thread
+            exc.__traceback__ = exc.__cause__ = exc.__context__ = None
+            done.put(exc)
+        return True
+
+    def _fail_engine_calls(self) -> None:
+        while True:
+            try:
+                _, done = self._engine_calls.get_nowait()
+            except queue.Empty:
+                return
+            done.put(RuntimeError("the scheduler is closed"))
+
     def cancel(self, cancellation: Cancellation) -> None:
         cancellation.cancel()
         for job in self._queue.remove(cancellation):
@@ -266,6 +302,7 @@ class Scheduler(PromptFill):
         try:
             self._loop()
         finally:
+            self._fail_engine_calls()
             for filling in list(self._fills):
                 self._fill(filling, abort=RequestCancelled("server stopping"))
             if self.on_stop is not None:
@@ -286,6 +323,8 @@ class Scheduler(PromptFill):
                 continue
             if self.engine.active_count == 0:
                 if self._held is None and not self._fills:
+                    if self._run_engine_call():
+                        continue
                     self._release_idle()
                     try:
                         self._held = self._queue.get(timeout=self.idle_wait)
