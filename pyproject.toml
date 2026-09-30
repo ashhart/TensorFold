@@ -8,13 +8,13 @@ dynamic = ["version"]
 description = "Fast, exact LLM decoding on Apple Silicon (MLX) and NVIDIA GPUs (CUDA) behind an OpenAI-compatible endpoint"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "TensorFold contributors" }]
 keywords = ["llm", "mlx", "apple-silicon", "cuda", "dgx-spark", "inference", "speculative-decoding", "openai"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Environment :: GPU :: NVIDIA CUDA",
@@ -45,7 +45,7 @@ grammar = ["xgrammar>=0.2.8,<0.3"]
 tensorfold = "tensorfold.cli:main"
 
 [tool.setuptools]
-license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

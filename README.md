@@ -268,5 +268,6 @@ every release. The first time a new version serves, it prints one line linking t
 
 Family interfaces, kernel layout and verification requirements are in the [recipe book](docs/recipes/README.md),
 [family map](src/tensorfold/families/README.md) and [kernel map](src/tensorfold/kernels/README.md).
-MIT; see [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+Apache-2.0 from 0.6.0; see [LICENSE](LICENSE), [NOTICE](NOTICE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+Releases up to 0.5.0 were MIT, and code written before 0.6.0 keeps its [MIT notice](LICENSES/MIT.txt).
 Model weights keep their own licenses.
