@@ -78,6 +78,15 @@ def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, wscale, H: tl.constexpr
     pb = tl.program_id(1)
     P = tl.load(POS)
     p = pb * BP + tl.arange(0, BP)
+    # Keep bucket-sized allocations for graph reuse, but do no dot products
+    # for tiles beyond this row block's last visible complete pool.
+    visible = (P + tl.minimum((rb + 1) * RB, R)) // 4
+    if pb * BP >= visible:
+        for i in tl.static_range(RB):
+            r = rb * RB + i
+            if r < R:
+                tl.store(OUT + r * NP + p, float("-inf"), mask=p < NP)
+        return
     d = tl.arange(0, D)
     hh = tl.arange(0, HP)
     hok = hh < H
