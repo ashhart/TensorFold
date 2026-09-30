@@ -324,6 +324,12 @@ pub fn build(b: *std.Build) void {
     glm_mla.step.dependOn(&glm_mla_fixture.step);
     b.step("test-glm-prefill-mla", "Compare GLM batched latent attention, sparse indexer, pooling and decode continuation with upstream").dependOn(&glm_mla.step);
     metal_tests.dependOn(&glm_mla.step);
+    const glm_moe_fixture = b.addSystemCommand(&.{ "env", "MLX_ENABLE_TF32=0", ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/glm-prefill-moe", "--glm-prefill-moe" });
+    const glm_moe = b.addRunArtifact(exe);
+    glm_moe.addArgs(&.{ "check-glm-prefill-moe", "build/native-checks/glm-prefill-moe" });
+    glm_moe.step.dependOn(&glm_moe_fixture.step);
+    b.step("test-glm-prefill-moe", "Compare GLM batched routing, sorted expert gathers, shared experts and mixed formats with upstream").dependOn(&glm_moe.step);
+    metal_tests.dependOn(&glm_moe.step);
     const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
     var glm_previous: ?*std.Build.Step = null;
     for (0..3) |case| {

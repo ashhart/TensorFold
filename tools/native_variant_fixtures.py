@@ -736,6 +736,85 @@ def flash_prefill_hc_fixtures(capture):
     print(f"Saved {len(cases)} complete Flash prefill hyper-connections and their intermediate arrays", flush=True)
 
 
+def glm_prefill_moe_fixtures(directory):
+    import copy
+    from tests import glm5_fakes as fakes
+    from tensorfold.families.glm5_next.weights import load_backbone
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+    from tests.test_flash_next_affine import bf16
+
+    rng = np.random.default_rng(41097)
+    original_text, original_dims = fakes.TEXT, fakes.D
+    original_tiles = list(prefill_mm._tiles)
+    groups = []
+    try:
+        for geometry, (dims, experts, inner, top, shared, norm, limit, mixed, group) in enumerate((
+            (128, 8, 64, 2, True, True, 10., False, 64),
+            (256, 16, 128, 3, True, False, 0., True, 64),
+            (256, 288, 128, 8, False, True, 1., False, 32),
+            (4096, 8, 2048, 8, True, True, 10., False, 64),
+            (128, 16, 128, 16, False, False, 0., False, 128),
+        )):
+            cfg = copy.deepcopy(original_text)
+            cfg.update(hidden_size=dims, num_hidden_layers=1, layer_types=["linear_attention"],
+                       mlp_layer_types=["sparse"], num_nextn_predict_layers=0, n_routed_experts=experts,
+                       num_experts_per_tok=top, moe_intermediate_size=inner, n_shared_experts=int(shared),
+                       norm_topk_prob=norm, swiglu_limit=limit)
+            fakes.TEXT, fakes.D = cfg, dims
+            prefix = "model.language_model.layers.0.mlp."
+            overrides = {}
+            for expert in range(experts):
+                for key, fmt in zip(("gate_proj", "up_proj", "down_proj"),
+                                    ((2, 32), (3, 64), (8, 128)) if mixed else ((4, group),) * 3):
+                    overrides[f"{prefix}experts.{expert}.{key}"] = dict(bits=fmt[0], group_size=fmt[1])
+            if mixed:
+                for key, fmt in zip(("gate_proj", "up_proj", "down_proj"), ((5, 128), (6, 64), (4, 32))):
+                    overrides[f"{prefix}shared_experts.{key}"] = dict(bits=fmt[0], group_size=fmt[1])
+            checkpoint = f"checkpoint{geometry}"
+            folder = fakes.write_checkpoint(directory / checkpoint, seed=89 + geometry, mtp=False, overrides=overrides)
+            if not shared:
+                weight_map = {}
+                for shard in sorted(folder.glob("*.safetensors")):
+                    tensors = {key: value for key, value in mx.load(str(shard)).items()
+                               if not key.startswith(prefix + "shared_experts.")}
+                    if geometry == 4 and prefix + "gate.e_score_correction_bias" in tensors:
+                        tensors[prefix + "gate.e_score_correction_bias"] = mx.zeros((experts,), dtype=mx.float32)
+                    mx.save_safetensors(str(shard), tensors)
+                    weight_map.update({key: shard.name for key in tensors})
+                (folder / "model.safetensors.index.json").write_text(json.dumps(dict(weight_map=weight_map)))
+            model = load_backbone(folder)
+            layer = model.layers[0].mlp
+            cases = []
+            lengths = (17, 63, 64, 257, 2048) if dims == 4096 else (1, 3, 4, 7, 8, 16, 17, 21, 22, 31, 32, 63, 64, 65, 257, 2048)
+            for count in lengths:
+                x = bf16(rng, (count, dims), scale=.2)
+                if count == 7:
+                    x = mx.zeros_like(x)
+                for tiles in (False, True):
+                    prefill_mm._tiles[:] = [tiles]
+                    name = f"moe{geometry}-{count}-{int(tiles)}"
+                    logits = x.astype(mx.float32) @ layer.router
+                    ids, weights = layer.route(logits)
+                    selected = layer.experts(x, ids)
+                    routed = layer.combine(weights, selected, x.dtype)
+                    arrays = dict(input=x, logits=logits, ids=ids, weights=weights, experts=selected,
+                                  routed=routed, output=layer(x, rows_exact=False))
+                    expected = routed
+                    if layer.shared is not None:
+                        arrays["shared"] = layer.shared(x, rows_exact=False)
+                        expected = expected + arrays["shared"]
+                    assert mx.array_equal(expected, arrays["output"]).item()
+                    mx.eval(*arrays.values())
+                    mx.save_safetensors(str(directory / f"{name}.safetensors"), arrays)
+                    cases.append(dict(name=name, tiles=tiles))
+            groups.append(dict(checkpoint=checkpoint, cases=cases))
+            print(f"Saved GLM MoE geometry D={dims}, E={experts}, inner={inner}, {len(cases)} cases", flush=True)
+    finally:
+        fakes.TEXT, fakes.D = original_text, original_dims
+        prefill_mm._tiles[:] = original_tiles
+    (directory / "moe.json").write_text(json.dumps(groups, indent=2) + "\n")
+
+
 def glm_prefill_mla_fixtures(directory):
     import copy
     from tests import glm5_fakes as fakes
@@ -1352,11 +1431,15 @@ def main():
     parser.add_argument("--flash-prefill-gdn", action="store_true")
     parser.add_argument("--glm-prefill-kda", action="store_true")
     parser.add_argument("--glm-prefill-mla", action="store_true")
+    parser.add_argument("--glm-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-attention", action="store_true")
     parser.add_argument("--flash-prefill-ple", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.glm_prefill_moe:
+        glm_prefill_moe_fixtures(args.directory)
+        return
     if args.glm_prefill_mla:
         glm_prefill_mla_fixtures(args.directory)
         return

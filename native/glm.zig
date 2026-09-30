@@ -468,13 +468,13 @@ pub const Model = struct {
         const value = try m.qmm(s, attended, try name(&b, i, if (absorbed) "self_attn.unembed_out" else "self_attn.wv"), true, null);
         return m.project(s, i, "self_attn.o_proj", try s.reshape(value, &.{ 1, g.num_attention_heads * g.v_head_dim }));
     }
-    fn activation(m: *Model, s: *mx.Scope, gate: A, up: A) !A {
+    pub fn activation(m: *Model, s: *mx.Scope, gate: A, up: A) !A {
         const limit = m.config.value.swiglu_limit;
         const g = if (limit > 0) try s.binary(c.mlx_minimum, gate, try s.cast(try s.scalar(limit), mx.dtype(gate))) else gate;
         const u = if (limit > 0) try s.binary(c.mlx_maximum, try s.binary(c.mlx_minimum, up, try s.cast(try s.scalar(limit), mx.dtype(up))), try s.cast(try s.scalar(-limit), mx.dtype(up))) else up;
         return s.binary(c.mlx_multiply, try m.activations.call(s, .silu, &.{g}), u);
     }
-    fn dense(m: *Model, s: *mx.Scope, i: usize, prefix: []const u8, x: A) !A {
+    pub fn dense(m: *Model, s: *mx.Scope, i: usize, prefix: []const u8, x: A) !A {
         var b: [256]u8 = undefined;
         const gu = try m.project(s, i, try std.fmt.bufPrint(&b, "{s}.gate_up", .{prefix}), x);
         const width = @divExact(mx.dim(gu, 1), 2);
@@ -484,6 +484,7 @@ pub const Model = struct {
         var b: [256]u8 = undefined;
         const g = m.config.value;
         if (!m.weights.has(try name(&b, i, "mlp.gate.weight"))) return m.dense(s, i, "mlp", x);
+        if (mx.dim(x, 0) > 16) return (try @import("glm_prefill_moe.zig").forward(m, s, i, x)).output;
         const scores = try s.unary(c.mlx_sigmoid, try s.binary(c.mlx_matmul, try s.cast(x, mx.f32t), try m.weight(i, "mlp.router")));
         const ids = try partition(s, try s.unary(c.mlx_negative, try s.binary(c.mlx_add, scores, try s.cast(try m.weight(i, "mlp.gate.e_score_correction_bias"), mx.f32t))), g.num_experts_per_tok);
         var ww = c.mlx_array_new();
