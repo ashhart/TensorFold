@@ -273,6 +273,8 @@ def kernel_version(model: Any) -> str:
 # The metadata-only info command also displays these CUDA affine formats.
 CUDA_AFFINE_BITS = (2, 3, 4, 5, 6, 8)
 CUDA_AFFINE_GROUPS = (32, 64, 128)
+# --checkpoint-slots on CUDA: the prompt states the concurrent decoder keeps (--parallel 2 or more)
+CUDA_CHECKPOINT_SLOTS = True
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, **options: Any):
@@ -294,4 +296,4 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                         split_head=tp == 2, tp_draft=tp == 2 and draft is not None, allow_copy=not no_drafts,
                         streams=streams, context=options.get("context"),
                         context_explicit=options.get("context_explicit"), vision=bool(options.get("vision", False)),
-                        vision_urls=bool(options.get("vision_urls", False)))
+                        vision_urls=bool(options.get("vision_urls", False)), keep=options.get("checkpoint_slots"))
