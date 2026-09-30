@@ -127,8 +127,8 @@ tensorfold pull Vontra/GLM-5.3-Flash-MLX-4bit-MTP
 tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP
 ```
 
-The chat template names `low` and `high`. GLM's default is Max, and `high` suits agent and coding work.
-`medium` is heard as `high`. `xhigh` stays `xhigh`, which this template renders as Max.
+The chat template names `low`, `high` and `max`. GLM's default is Max, and `high` suits agent and coding work.
+`medium` is heard as `high`. `max` stays `max`. `xhigh` stays `xhigh`, and this template renders both as Max.
 `--reasoning-effort high` selects High, and `--reasoning-effort low` selects Low.
 
 The model decodes through the lane engine's family rounds with the checkpoint's MTP head. A round's drafted rows

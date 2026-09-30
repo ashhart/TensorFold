@@ -46,7 +46,7 @@ def test_available_bytes_uses_the_reserve(monkeypatch):
     assert capacity.available_bytes(torch) == 110 * GIB - 121 * GIB // 10
     monkeypatch.setenv("TENSORFOLD_MEMORY_RESERVE_GIB", "6")
     assert capacity.available_bytes(torch) == 104 * GIB
-    monkeypatch.setattr(capacity, "unified", lambda torch: False)      # a discrete GPU: bounded by both
+    monkeypatch.setattr(capacity, "unified", lambda torch: False)      # a discrete GPU: its own budget
     assert capacity.available_bytes(torch) == 94 * GIB
     monkeypatch.setattr(capacity, "_meminfo", lambda: None)
     assert capacity.available_bytes(torch) == 94 * GIB

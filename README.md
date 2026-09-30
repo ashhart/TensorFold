@@ -8,19 +8,23 @@ python -m pip install git+https://github.com/ashhart/TensorFold.git
 tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
+On a Mac, Homebrew installs it too: `brew install ashhart/tensorfold/tensorfold`.
+
 Use `http://127.0.0.1:8080/v1` as the client base URL and the model ID from `/v1/models`. Both backends serve chat
 completions, completions and OpenAI's Responses API (`/v1/responses`); see the [API reference](docs/api.md).
 Python 3.11 or newer is required, and MLX 0.32.2 or newer on a Mac (pip installs it). See the [runbook](RUNBOOK.md)
 for installation and a first request. On NVIDIA GPUs the CUDA kernels need compute capability 8.9 or newer: Ada (RTX 40
-series), Hopper and Blackwell, including the DGX Spark's GB10 and the RTX 50 series. NVFP4 and FP8 checkpoints need 9.0
-or newer, since their kernels use thread-block clusters. RTX 30 cards (8.6) aren't supported, and the server refuses a
-GPU below its checkpoint's floor at startup.
+series), Hopper and Blackwell, including the DGX Spark's GB10 and the RTX 50 series. NVFP4 and FP8 checkpoints run from
+8.9: their own math where the GPU has each mma (FP4 on 12.x, FP8 from 8.9), W4A16 elsewhere; the RTX 40, Hopper and
+B200 builds are compiled and bit-checked on Blackwell but not yet run on those cards. RTX 30 cards (8.6) aren't
+supported, and the server refuses a GPU below 8.9 at startup.
 
 ## Image input
 
 Install the vision extra, `python -m pip install 'tensorfold[vision] @ git+https://github.com/ashhart/TensorFold.git'`,
 and start a supported GLM-5.3-Flash or Qwen3.5/3.8 dense checkpoint with `--vision` to accept image and text content
-parts through the same lane engine. GLM-5.3-Flash images run on MLX; Qwen's run on MLX and CUDA. See
+parts through the same lane engine; Flash Next CUDA also accepts images with `--vision --parallel 2` or more.
+GLM-5.3-Flash images run on MLX; dense Qwen's run on MLX and CUDA. See
 [image input](docs/vision.md) for the API, checkpoint requirements, cache behavior and qualification status.
 
 ## Models
@@ -102,7 +106,8 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | --- | --- | --- |
 | `--host`, `--port` | Listen address, default `127.0.0.1:8080` | Both |
 | `--name` | Model ID advertised to clients | Both |
-| `--vision` | Opt-in GLM-5.3-Flash and Qwen3.5/3.8 dense image input | MLX; Qwen also CUDA |
+| `--vision` | Opt-in GLM-5.3-Flash, Qwen3.5/3.8 dense and Flash Next image input | MLX; dense Qwen also CUDA; Flash Next CUDA with `--parallel >=2` |
+| `--vision-max-images N` | With `--vision`, images across the full request history (default 4); other image limits still apply | Both |
 | `--alias` | Additional model IDs | MLX |
 | `--context N` | Prompt plus reply capacity | Both |
 | `--max-tokens N` | Default reply limit, 4096 | Both |
@@ -118,6 +123,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--kv-dtype bf16`, `int8`, `int4` | Flash Next: `int8` or `int4` stores keys and values with one fp16 scale per 32 values. Other families and the MLX path refuse it | CUDA |
 | `--mtp-confidence P` | Flash Next: stop a draft chain before a later draft under this probability, 0 to 1 (default 0.30) | CUDA |
 | `--prefill-fp8` | Prompt matmuls take FP8 (e4m3) activations, one scale a row, where the checkpoint has an FP8 prompt kernel (Qwen3.8 27B and Qwen3.6 MLX 4-bit, FP8 and MXFP8 layers of NVFP4 checkpoints): faster prompts at lower precision ([measured](docs/recipes/cuda.md#prompt-precision)). Default: bf16 activations, as decode | CUDA |
+| `--precision checkpoint`, `full` | NVFP4 checkpoints: `checkpoint` (default) runs their own math, FP4 x FP4 on SM 12.x and FP8 x FP8 from 8.9, W4A16 elsewhere; `full` runs bf16 activations against the stored weights ([measured](docs/recipes/cuda.md#nvfp4-precision)) | CUDA |
 | `--tp 2 --rank R --master HOST` | Two-rank CUDA execution; `--master-port P` sets rank 0's rendezvous port (default 29551) | CUDA |
 | `--decode-share F` | While prompts prefill, running replies keep moving for this share of each chunk's time; a new prompt starts at the next chunk, the fewest tokens left first (default 0.25; 0 prefills whole prompts first, in order, as 0.3.6.2) | MLX |
 | `--prompt-cache-gib N` | Retained conversation-prefix budget; zero disables retention. Default: the memory the weights, a whole-window request and a shared round leave idle, at least an eighth of RAM up to 16 GiB, given back on demand | MLX |
@@ -259,7 +265,8 @@ recipe keeps its own tables.
 `tensorfold update --check` checks for a release; `tensorfold update` installs it (`--force` reinstalls the newest
 release even when it is current), then the server must restart. A normal installation uses the same interpreter's pip. An editable clone must be clean and able
 to fast-forward to the release tag; afterwards run `python -m pip install -e .` in the checkout to refresh
-metadata and dependencies. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` disables startup checks.
+metadata and dependencies. A Homebrew install upgrades with `brew upgrade tensorfold` instead. `--no-update-check`
+or `TENSORFOLD_NO_UPDATE_CHECK=1` disables startup checks.
 
 When the update finishes it prints what changed since your version, from [CHANGELOG.md](CHANGELOG.md), which lists
 every release. The first time a new version serves, it prints one line linking to its notes.
