@@ -307,15 +307,19 @@ def chat_fixture(directory, output):
     from tensorfold.engine.call_gate import CallGate, call_format
     from tensorfold.engine.lane_engine import LaneStream
     from tensorfold.engine.lane_family import FamilyRounds
-    from tensorfold.server.request_options import RequestOptions
+    from tensorfold.server.request_options import RequestOptions, thinking_fields
     from tensorfold.server.app import ChatApp
     from tensorfold.server.text import template_late_system
     from threading import Lock
     tokenizer = TokenizerWrapper(AutoTokenizer.from_pretrained(str(directory), local_files_only=True))
-    deepseek = json.loads((directory / 'config.json').read_text()).get('model_type') == 'deepseek_v4'
+    model_type = json.loads((directory / 'config.json').read_text()).get('model_type')
+    deepseek = model_type == 'deepseek_v4'
     if deepseek:
         from tensorfold.families.deepseek_v4.prompts import DeepSeekTokenizer
         tokenizer = DeepSeekTokenizer(tokenizer)
+    if model_type == 'glm5_next':
+        from tensorfold.families.glm5_next.prompts import GlmTokenizer
+        tokenizer = GlmTokenizer(tokenizer)
     openers = ("<tool_call>", "<|tool_call>", "<｜DSML｜tool_calls>")
     probe = [{"role": "user", "content": "x"}, {"role": "assistant", "content": "", "tool_calls": [{"id": "call_0", "type": "function", "function": {"name": "tfprobe_fn", "arguments": {}}}]}]
     form = call_format(tokenizer.decode(render_prompt_ids(tokenizer, probe, add_generation_prompt=False)), "tfprobe_fn", openers)
@@ -404,6 +408,24 @@ def chat_fixture(directory, output):
             raise AssertionError('Expected upstream to reject an unsupported required call')
     if deepseek:
         cases.extend(deepseek_chat_cases(tokenizer, tool))
+    for default_thinking in (False, True):
+        for default_effort in (None, "medium"):
+            for controls in ({}, {"reasoning_effort": None}, *({"reasoning_effort": e} for e in ("none", "minimal", "low", "medium", "high", "xhigh")),
+                             {"chat_template_kwargs": {"reasoning_effort": "high"}},
+                             {"reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": True}},
+                             {"chat_template_kwargs": {"reasoning_effort": "none", "enable_thinking": True}},
+                             *({"chat_template_kwargs": {"enable_thinking": v}} for v in (False, None, 0, 1, "", "false", [], {}))):
+                body = {"messages": [{"role": "user", "content": "Hello"}], **controls}
+                fields = thinking_fields(body, options.effort_levels)
+                thinking = fields.get("enable_thinking", default_thinking)
+                effort = fields.get("reasoning_effort", default_effort)
+                ids = render_prompt_ids(tokenizer, body["messages"], enable_thinking=thinking, reasoning_effort=effort)
+                cases.append({"body": body, "tokens": ids, "default_thinking": default_thinking, "default_effort": default_effort, "thinking": thinking})
+    from tensorfold.server.text import reasoning_count
+    cases[0]['reasoning_counts'] = [dict(tokens=tokens, end=end, expected=reasoning_count(tokens, end))
+                                  for end in (None, -1, think_end)
+                                  for tokens in ([], [1, 2], [think_end], [1, think_end, 2], [1, think_end, think_end])
+                                  if all(t >= 0 for t in tokens)]
     output.write_text(json.dumps(cases, ensure_ascii=False))
     print(f"Saved {len(cases)} upstream chat fixtures for {directory.name}")
 

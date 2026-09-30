@@ -47,11 +47,20 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
             }
         }
         const body = case.object.get("body").?;
+        const default_thinking = if (case.object.get("default_thinking")) |value| value.bool else false;
+        const default_effort = case.object.get("default_effort") orelse .null;
         const rendered = if (case.object.get("raw")) |_| Rendered{
             .text = try template.raw(a, body.object.get("messages").?, body.object.get("tools") orelse .null, body.object.get("chat_template_kwargs").?, body.object.get("add_generation_prompt").?.bool, true),
             .images = .null,
             .thinking = true,
-        } else try template.render(a, body);
+        } else try template.renderWithDefaults(a, body, default_thinking, if (default_effort == .string) default_effort.string else null);
+        if (case.object.get("thinking")) |expected_thinking| try std.testing.expectEqual(expected_thinking.bool, rendered.thinking);
+        if (case.object.get("reasoning_counts")) |counts| for (counts.array.items) |count| {
+            var tokens: std.ArrayList(u32) = .empty;
+            for (count.object.get("tokens").?.array.items) |token| try tokens.append(a, @intCast(token.integer));
+            const end = count.object.get("end").?;
+            try std.testing.expectEqual(@as(usize, @intCast(count.object.get("expected").?.integer)), @import("reply_text.zig").reasoningCount(tokens.items, if (end == .integer and end.integer >= 0) @intCast(end.integer) else null));
+        };
         if (case.object.get("text")) |expected_text| try std.testing.expectEqualStrings(expected_text.string, rendered.text);
         const ids = try encode(a, &tokenizer, rendered);
         if (case.object.get("history_len")) |expected_history| {
@@ -109,6 +118,7 @@ pub const Template = struct {
     context: V,
     late_system: []const u8 = "system",
     deepseek: bool = false,
+    glm: bool = false,
 
     pub fn load(a: std.mem.Allocator, io: std.Io, dir: []const u8) !Template {
         var arena = std.heap.ArenaAllocator.init(a);
@@ -137,7 +147,7 @@ pub const Template = struct {
             if (err != error.FileNotFound) return err;
             break :blk try templateSource(config.value.object.get("chat_template") orelse return error.MissingChatTemplate);
         };
-        var result = Template{ .arena = undefined, .source = try numericMembers(owned, source), .context = context, .deepseek = deepseek };
+        var result = Template{ .arena = undefined, .source = try numericMembers(owned, source), .context = context, .deepseek = deepseek, .glm = model_type == .string and std.mem.eql(u8, model_type.string, "glm5_next") };
         const probe = try std.json.parseFromSlice(V, owned,
             \\[{"role":"system","content":"s"},{"role":"user","content":"u"},{"role":"assistant","content":"a"},{"role":"system","content":"tensorfold-late-system-probe"},{"role":"user","content":"v"}]
         , .{});
@@ -303,6 +313,7 @@ pub const Template = struct {
             return error.ChatTemplateFailed;
         };
         defer jinja_str_free(output);
+        if (t.glm) if (extra.object.get("enable_thinking")) |enabled| if (enabled == .bool and !enabled.bool) return glmThinkingOff(a, output[0..len]);
         return a.dupe(u8, output[0..len]);
     }
     pub fn render(t: *const Template, a: std.mem.Allocator, body: V) !Rendered {
@@ -365,7 +376,7 @@ pub const Template = struct {
             for (choices) |choice| valid = valid or std.mem.eql(u8, choice, value.string);
             if (!valid) return error.InvalidReasoningEffort;
             thinking = !std.mem.eql(u8, value.string, "none");
-            effort = if (std.mem.eql(u8, value.string, "high")) "xhigh" else if (std.mem.eql(u8, value.string, "minimal")) "low" else value.string;
+            effort = if (namesEffort(t.source, value.string)) value.string else if (std.mem.eql(u8, value.string, "high")) "xhigh" else if (std.mem.eql(u8, value.string, "minimal")) "low" else value.string;
         }
         if (kwargs == .object) {
             var entries = kwargs.object.iterator();
@@ -374,20 +385,47 @@ pub const Template = struct {
                 try context.object.put(a, entry.key_ptr.*, entry.value_ptr.*);
             }
             if (kwargs.object.get("enable_thinking")) |enabled| {
-                if (enabled != .bool) return error.InvalidThinking;
-                thinking = enabled.bool;
+                thinking = truthy(enabled);
                 if (thinking and effort != null and std.mem.eql(u8, effort.?, "none")) effort = default_effort;
             }
         }
         try context.object.put(a, "enable_thinking", .{ .bool = thinking });
         try context.object.put(a, "thinking_mode", .{ .string = if (thinking) "thinking" else "chat" });
         if (thinking) {
-            if (effort) |e| try context.object.put(a, "reasoning_effort", .{ .string = e });
+            if (effort) |e| try context.object.put(a, "reasoning_effort", .{ .string = e }) else _ = context.object.swapRemove("reasoning_effort");
         } else _ = context.object.swapRemove("reasoning_effort");
         const tools = try activeTools(a, body);
         return .{ .text = try t.raw(a, messages, tools, context, generation, true), .images = images, .thinking = thinking };
     }
 };
+
+fn truthy(value: V) bool {
+    return switch (value) {
+        .null => false,
+        .bool => value.bool,
+        .integer => value.integer != 0,
+        .float => value.float != 0,
+        .string, .number_string => |text| text.len > 0,
+        .array => value.array.items.len > 0,
+        .object => value.object.count() > 0,
+    };
+}
+
+fn namesEffort(source: []const u8, effort: []const u8) bool {
+    for (source, 0..) |c, i| {
+        if ((c != '\'' and c != '"') or source.len - i < effort.len + 2) continue;
+        const end = source[i + effort.len + 1];
+        if ((end == '\'' or end == '"') and std.mem.eql(u8, source[i + 1 ..][0..effort.len], effort)) return true;
+    }
+    return false;
+}
+
+fn glmThinkingOff(a: std.mem.Allocator, text: []const u8) ![]u8 {
+    const effort = "<|system|>Reasoning Effort: Max";
+    const close = if (std.mem.endsWith(u8, text, "<|assistant|><think>")) "</think>" else "";
+    if (std.mem.indexOf(u8, text, effort)) |at| return std.mem.concat(a, u8, &.{ text[0..at], text[at + effort.len ..], close });
+    return std.mem.concat(a, u8, &.{ text, close });
+}
 
 fn numericMembers(a: std.mem.Allocator, source: []const u8) ![:0]u8 {
     var out: std.ArrayList(u8) = .empty;

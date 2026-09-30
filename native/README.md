@@ -251,8 +251,8 @@ SIGINT/SIGTERM stop admission, cancel queued/active work and release the engine.
 In-progress GPU operations finish before their resources are released.
 Sampling defaults follow the model's `generation_config.json`; `--temperature`,
 `--top-k` and `--top-p` override them, then non-null request fields take precedence.
-Serving defaults to 4096 output tokens, thinking enabled and medium reasoning
-effort. Use `--max-tokens`, `--no-thinking`, `--reasoning-effort low|medium|xhigh`
+Serving defaults to 4096 output tokens, thinking enabled and the chat template's
+reasoning effort. Use `--max-tokens`, `--no-thinking`, `--reasoning-effort low|medium|xhigh`
 and `--thinking-budget N` to change these defaults. The request's
 `thinking_budget` overrides a nonzero default when nonzero; a negative value
 disables it. Budgets force `\n</think>\n\n` through decoding for tokenizers with

@@ -1,6 +1,20 @@
 const std = @import("std");
 const V = std.json.Value;
 
+pub fn compareUsage(expected: V, actual: V) !void {
+    for ([_]V{ expected, actual }) |usage| {
+        const prompt = usage.object.get("prompt_tokens").?.integer;
+        const completion = usage.object.get("completion_tokens").?.integer;
+        const cached = usage.object.get("prompt_tokens_details").?.object.get("cached_tokens").?.integer;
+        const reasoning = usage.object.get("completion_tokens_details").?.object.get("reasoning_tokens").?.integer;
+        if (prompt < 0 or completion < 0 or cached < 0 or cached > prompt or reasoning < 0 or reasoning > completion or usage.object.get("total_tokens").?.integer != prompt + completion) return error.InvalidUsage;
+    }
+    for ([_][]const u8{ "prompt_tokens", "completion_tokens", "total_tokens" }) |name| {
+        if (expected.object.get(name).?.integer != actual.object.get(name).?.integer) return error.UsageMismatch;
+    }
+    if (expected.object.get("completion_tokens_details").?.object.get("reasoning_tokens").?.integer != actual.object.get("completion_tokens_details").?.object.get("reasoning_tokens").?.integer) return error.ReasoningUsageMismatch;
+}
+
 fn post(init: std.process.Init, url: []const u8, body: V) ![]const u8 {
     const a = init.arena.allocator();
     const bytes = try std.json.Stringify.valueAlloc(a, body, .{});
@@ -30,9 +44,12 @@ fn compareStream(init: std.process.Init, url: []const u8, body: V, incremental: 
     }
     const choice = plain.value.object.get("choices").?.array.items[0];
     const message = choice.object.get("message").?;
+    const reasoning_tokens = plain.value.object.get("usage").?.object.get("completion_tokens_details").?.object.get("reasoning_tokens").?.integer;
+    if (body.object.get("reasoning_effort")) |effort| if (effort == .string and std.mem.eql(u8, effort.string, "none") and reasoning_tokens != 0) return error.UnexpectedReasoningUsage;
     if (body.object.get("thinking_budget")) |budget| if (budget == .integer and budget.integer == 1) {
         if (std.mem.trim(u8, message.object.get("reasoning_content").?.string, " \r\n\t").len != 0) return error.ThinkingBudgetExceeded;
         if (message.object.get("content").?.string.len == 0) return error.MissingAnswerAfterThinkingBudget;
+        if (reasoning_tokens != 2) return error.ThinkingBudgetUsageMismatch;
     };
     const expected_calls = message.object.get("tool_calls") orelse V{ .array = std.json.Array.init(a) };
     const arguments = try a.alloc(std.ArrayList(u8), expected_calls.array.items.len);
@@ -45,6 +62,7 @@ fn compareStream(init: std.process.Init, url: []const u8, body: V, incremental: 
     var reasoning: std.ArrayList(u8) = .empty;
     var finished = false;
     var done = false;
+    var usage_seen = false;
     var argument_fragments: usize = 0;
     var lines = std.mem.splitScalar(u8, stream, '\n');
     while (lines.next()) |line| {
@@ -77,9 +95,12 @@ fn compareStream(init: std.process.Init, url: []const u8, body: V, incremental: 
         if (item.object.get("finish_reason")) |value| if (value == .string) {
             if (!std.mem.eql(u8, value.string, choice.object.get("finish_reason").?.string)) return error.FinishMismatch;
             finished = true;
+            const usage = chunk.value.object.get("usage") orelse return error.MissingStreamUsage;
+            try compareUsage(plain.value.object.get("usage").?, usage);
+            usage_seen = true;
         };
     }
-    if (!finished or !done) return error.MissingStreamEnd;
+    if (!finished or !done or !usage_seen) return error.MissingStreamEnd;
     if (!std.mem.eql(u8, content.items, message.object.get("content").?.string) or !std.mem.eql(u8, reasoning.items, message.object.get("reasoning_content").?.string)) return error.StreamContentMismatch;
     for (expected_calls.array.items, arguments, named) |call, value, name_seen| if (!name_seen or !std.mem.eql(u8, call.object.get("function").?.object.get("arguments").?.string, value.items)) return error.ToolArgumentsMismatch;
     if (incremental and argument_fragments <= 2 * arguments.len) return error.ToolArgumentsNotIncremental;
@@ -128,6 +149,10 @@ pub fn main(init: std.process.Init) !void {
         try defaults.value.object.put(a, "top_p", .{ .float = 0.95 });
         const second = try std.json.parseFromSlice(V, a, try post(init, args[1], defaults.value), .{});
         for ([_][]const u8{ "choices", "usage" }) |key| {
+            if (std.mem.eql(u8, key, "usage")) {
+                try compareUsage(first.value.object.get(key).?, second.value.object.get(key).?);
+                continue;
+            }
             const lhs = try std.json.Stringify.valueAlloc(a, first.value.object.get(key).?, .{});
             const rhs = try std.json.Stringify.valueAlloc(a, second.value.object.get(key).?, .{});
             if (!std.mem.eql(u8, lhs, rhs)) return error.ModelSamplingDefaultsMismatch;

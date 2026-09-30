@@ -9,6 +9,11 @@ const calls = [_]Markers{
 };
 pub const Parts = struct { reasoning: []const u8 = "", content: []const u8 = "" };
 
+pub fn reasoningCount(tokens: []const u32, think_end: ?u32) usize {
+    const end = think_end orelse return 0;
+    return if (std.mem.indexOfScalar(u32, tokens, end)) |index| index + 1 else tokens.len;
+}
+
 pub fn partialTag(text: []const u8, tag: []const u8) usize {
     if (tag.len == 0) return 0;
     var size = @min(text.len, tag.len - 1);

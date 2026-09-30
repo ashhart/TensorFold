@@ -150,6 +150,7 @@ const Output = struct {
         var content: std.ArrayList(u8) = .empty;
         var reasoning: std.ArrayList(u8) = .empty;
         var finish: ?[]const u8 = null;
+        var usage: ?[]const u8 = null;
         var done = false;
         var lines = std.mem.splitScalar(u8, bytes, '\n');
         while (lines.next()) |line| {
@@ -172,15 +173,20 @@ const Output = struct {
             }
             if (choice.object.get("finish_reason")) |reason| if (reason == .string) {
                 finish = reason.string;
+                usage = try std.json.Stringify.valueAlloc(a, body.value.object.get("usage") orelse return error.MissingStreamUsage, .{});
             };
         }
         if (!done or finish == null) return error.IncompleteStream;
-        return .{ .content = content.items, .reasoning = reasoning.items, .finish = finish.? };
+        return .{ .content = content.items, .reasoning = reasoning.items, .finish = finish.?, .usage = usage orelse return error.MissingStreamUsage };
     }
 
     fn compare(expected: Output, actual: Output) !void {
         if (!std.mem.eql(u8, expected.content, actual.content) or !std.mem.eql(u8, expected.reasoning, actual.reasoning) or !std.mem.eql(u8, expected.finish, actual.finish)) return error.ConcurrentOutputMismatch;
-        if (actual.usage) |usage| if (!std.mem.eql(u8, expected.usage.?, usage)) return error.ConcurrentUsageMismatch;
+        const lhs = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, expected.usage orelse return error.MissingUsage, .{});
+        defer lhs.deinit();
+        const rhs = try std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, actual.usage orelse return error.MissingUsage, .{});
+        defer rhs.deinit();
+        try @import("native_http_checks.zig").compareUsage(lhs.value, rhs.value);
     }
 };
 
@@ -223,6 +229,8 @@ const Scenario = struct {
         const after = try s.liveSnapshot(port);
         const fed = after.object.get("prefilled_tokens").?.integer - before.object.get("prefilled_tokens").?.integer;
         try std.testing.expectEqual(@as(i64, if (phase == 1 or phase == 2) 3 else 2051), fed);
+        const raw_usage = try std.json.parseFromSlice(std.json.Value, a, actual.usage.?, .{});
+        try std.testing.expectEqual(@as(i64, 2051) - fed, raw_usage.value.object.get("prompt_tokens_details").?.object.get("cached_tokens").?.integer);
         if (phase == 0) {
             tokens[0] = 101;
             const changed = try std.json.Stringify.valueAlloc(a, .{ .prompt = &tokens, .max_tokens = @as(usize, 1), .ignore_eos = true }, .{});
@@ -248,6 +256,7 @@ const Scenario = struct {
         const usage = try std.json.parseFromSlice(std.json.Value, a, chat_actual.usage.?, .{});
         const prompt = usage.value.object.get("prompt_tokens").?.integer;
         const chat_fed = chat_after.object.get("prefilled_tokens").?.integer - chat_before.object.get("prefilled_tokens").?.integer;
+        try std.testing.expectEqual(prompt - chat_fed, usage.value.object.get("prompt_tokens_details").?.object.get("cached_tokens").?.integer);
         if (phase == 1 or phase == 2) try std.testing.expect(chat_fed <= prompt - 512) else try std.testing.expectEqual(prompt, chat_fed);
         try std.posix.kill(s.child.id.?, .INT);
         if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;

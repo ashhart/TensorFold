@@ -30,7 +30,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var vision_urls = false;
     var drafts = true;
     var draft_options = @import("neural_draft.zig").Options{ .enabled = true };
-    var effort: []const u8 = "medium";
+    var effort: ?[]const u8 = null;
     var overrides = std.json.Value{ .object = .empty };
     defer overrides.object.deinit(init.gpa);
     var i: usize = 3;
@@ -221,7 +221,7 @@ const Worker = struct {
     control: *control.Registry,
     defaults: inference.Options,
     thinking: bool,
-    effort: []const u8,
+    effort: ?[]const u8,
     vision_urls: bool,
     batch_streams: usize,
     is_glm: bool,
@@ -666,6 +666,8 @@ const Pending = struct {
     stream: ?Stream = null,
     buffer: [8192]u8 = undefined,
     saved_position: usize = 0,
+    cached_tokens: usize = 0,
+    think_end: ?u32 = null,
     history_len: usize = 0,
     system_len: usize = 0,
     checkpoints: @import("prompt_cache.zig").Checkpoints = .{},
@@ -746,6 +748,10 @@ const Pending = struct {
         const images = try @import("image_source.zig").loadWithCancellation(a, session.io, raw_images, w.vision_urls, cancellation);
         p.id = try std.fmt.allocPrint(a, "{s}cmpl-{d}-{d}", .{ if (p.job.is_chat) "chat" else "", p.job.created, p.job.sequence });
         p.markers = if (session.backend == .gemma) reply_text.gemma_markers else .{};
+        if (p.thinking) {
+            const end = try session.tokenizer.encode(a, p.markers.close);
+            if (end.len == 1 and std.mem.eql(u8, try session.tokenizer.decode(a, end, false), p.markers.close)) p.think_end = end[0];
+        }
         try cancellation.check();
         if (images.len > 0) {
             p.prepared_image = try @import("vision.zig").Prepared.init(session.io, session.directory, images, ids.items);
@@ -837,6 +843,7 @@ const Pending = struct {
             const size = value.cache.nbytes();
             try p.generation.?.restoreOwnedPrefix(&value.cache);
             p.saved_position = value.count;
+            p.cached_tokens = value.count;
             p.prefix_reserve = if (take) reserved.shared else size;
             p.checkpoints = policy.checkpoints(p.history_len, value.count, value.last_prompt, p.ids).aligned(p.generation.?.boundary(), value.count, p.ids.len);
         }
@@ -931,16 +938,14 @@ const Pending = struct {
         const id = p.id;
         const model = p.job.model;
         const created = p.job.created;
+        const usage = .{ .prompt_tokens = reply.prompt_tokens, .completion_tokens = reply.tokens.items.len, .total_tokens = reply.prompt_tokens + reply.tokens.items.len, .prompt_tokens_details = .{ .cached_tokens = p.cached_tokens }, .completion_tokens_details = .{ .reasoning_tokens = reply_text.reasoningCount(reply.tokens.items, p.think_end) } };
         if (p.response) |*response| {
             const state = &p.stream.?;
-            if (p.job.is_chat) {
-                try state.chatText(true);
-                try state.chatChunk(std.json.Value{ .object = .empty }, if (state.calls_sent > 0) "tool_calls" else @tagName(reply.finish_reason));
-            } else try state.chunk("", @tagName(reply.finish_reason));
+            if (p.job.is_chat) try state.chatText(true);
+            try state.finishWithUsage(if (state.calls_sent > 0) "tool_calls" else @tagName(reply.finish_reason), usage);
             try response.writer.writeAll("data: [DONE]\n\n");
             try response.end();
         } else {
-            const usage = .{ .prompt_tokens = reply.prompt_tokens, .completion_tokens = reply.tokens.items.len, .total_tokens = reply.prompt_tokens + reply.tokens.items.len };
             if (p.job.is_chat) {
                 const parts = if (p.thinking) reply_text.splitThinking(reply.content, true, p.markers) else reply_text.Parts{ .content = reply.content };
                 var parsed = try tool_calls.parse(a, parts.content, p.tools, p.max_calls, id);
@@ -970,6 +975,15 @@ const Stream = struct {
     max_calls: ?usize = null,
     calls_sent: usize = 0,
     tool_stream: @import("tool_stream.zig").Streamer = .{},
+    fn finishWithUsage(s: *Stream, reason: []const u8, usage: anytype) !void {
+        const body = if (s.is_chat)
+            try std.json.Stringify.valueAlloc(s.a, .{ .id = s.id, .object = "chat.completion.chunk", .created = s.created, .model = s.model, .choices = &.{.{ .index = @as(usize, 0), .delta = std.json.Value{ .object = .empty }, .finish_reason = reason }}, .usage = usage }, .{})
+        else
+            try std.json.Stringify.valueAlloc(s.a, .{ .id = s.id, .object = "text_completion", .created = s.created, .model = s.model, .choices = &.{.{ .index = @as(usize, 0), .text = "", .finish_reason = reason, .logprobs = @as(?u8, null) }}, .usage = usage }, .{});
+        try s.writer.print("data: {s}\n\n", .{body});
+        try s.writer.flush();
+        try s.transport.flush();
+    }
     fn chunk(s: *Stream, value: []const u8, finish: ?[]const u8) !void {
         const body = try std.json.Stringify.valueAlloc(s.a, .{ .id = s.id, .object = "text_completion", .created = s.created, .model = s.model, .choices = &.{.{ .index = @as(usize, 0), .text = value, .finish_reason = finish, .logprobs = @as(?u8, null) }} }, .{});
         try s.writer.print("data: {s}\n\n", .{body});
