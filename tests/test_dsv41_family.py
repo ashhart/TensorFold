@@ -51,3 +51,17 @@ def test_engram_dir_override(tmp_path, monkeypatch):
     assert deepseek_v41.engram_dir(tmp_path) == tmp_path / "engram"
     monkeypatch.setenv("TF_DSV41_ENGRAM_DIR", "/x/engram-src")
     assert deepseek_v41.engram_dir(tmp_path) == Path("/x/engram-src")
+
+
+def test_split_rules():
+    from tensorfold.families.deepseek_v41.split import rank_bytes, rule
+
+    assert rule("layers.3.attn.wq_b.trellis") == "cols"
+    assert rule("layers.3.attn.wo_b.suh") == "rows"
+    assert rule("layers.3.ffn.experts.17.w2.trellis") == "rows"
+    assert rule("layers.3.ffn.shared_experts.w1.svh") == "cols"
+    assert rule("layers.3.attn.wq_a.trellis") == "rep"
+    assert rule("vision.blocks.0.attn.wo.weight") == "skip"
+    assert rank_bytes("layers.3.attn.wo_a.slice.2.trellis", 100, 0) == 100
+    assert rank_bytes("layers.3.attn.wo_a.slice.5.trellis", 100, 0) == 0
+    assert rank_bytes("head.trellis", 100, 1) == 50
