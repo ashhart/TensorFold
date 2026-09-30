@@ -11,8 +11,8 @@ A floating-point tower in the indexed checkpoint is discovered normally. EXL3 pa
 quantized sidecar need a one-time CPU conversion, stored outside the original model snapshot:
 
 ```bash
-python -m tensorfold.vision.exl3_convert /models/vision_k6.safetensors /cache/vision-f16-v1.safetensors
-TENSORFOLD_VISION_WEIGHTS=/cache/vision-f16-v1.safetensors tensorfold serve /models --vision --parallel 2
+python -m tensorfold.vision.exl3_convert /models/vision_k6.safetensors /cache/vision-f16-v2.safetensors
+TENSORFOLD_VISION_WEIGHTS=/cache/vision-f16-v2.safetensors tensorfold serve /models --vision --parallel 2
 ```
 
 The converter decodes represented EXL3 weights, transposes matrices and combines split Q/K/V. It records the

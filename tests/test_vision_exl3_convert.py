@@ -75,3 +75,19 @@ def test_external_tower_is_read_without_language_payloads_and_counted_once(tmp_p
     base = lambda text: Geometry(lambda slots: 100 + slots, 2)
     assert capacity_geometry(base, tmp_path, True, 0, 50)({}).bytes_at(10) == 160 + size
     assert weight_transform(lambda n, i: (7, 0), True, 0)("model.visual.test", {}) == (0, 0)
+
+
+def test_converter_removes_only_configured_mlp_padding():
+    rng = np.random.default_rng(8)
+    source = {}
+    for part in ("linear_fc1", "linear_fc2"):
+        source.update(_group(rng, "model.visual.blocks.0.mlp." + part))
+    config = {"depth": 1, "hidden_size": 128, "intermediate_size": 112}
+    full = convert_tensors(source)
+    trimmed = convert_tensors(source, config)
+    prefix = "vision_tower.blocks.0.mlp."
+    np.testing.assert_array_equal(trimmed[prefix + "linear_fc1.weight"], full[prefix + "linear_fc1.weight"][:112])
+    np.testing.assert_array_equal(trimmed[prefix + "linear_fc1.bias"], full[prefix + "linear_fc1.bias"][:112])
+    np.testing.assert_array_equal(trimmed[prefix + "linear_fc2.weight"], full[prefix + "linear_fc2.weight"][:, :112])
+    with pytest.raises(ValueError, match="padding"):
+        convert_tensors(source, {**config, "intermediate_size": 129})
