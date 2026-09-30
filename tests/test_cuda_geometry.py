@@ -184,3 +184,47 @@ def test_gpu_and_host_available_memory_are_both_guarded(monkeypatch):
     fake = SimpleNamespace(cuda=SimpleNamespace(mem_get_info=lambda: (100 * capacity.GIB, 128 * capacity.GIB)))
     monkeypatch.setattr(Path, "read_text", lambda *a: "MemTotal: 134217728 kB\nMemAvailable: 62914560 kB\n")
     assert capacity.available_bytes(fake) == 60 * capacity.GIB - 128 * capacity.GIB // 10
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("mtp", [False, True])
+def test_mla_exl3_scratch_and_buffers_are_budgeted(monkeypatch, allocations, mtp):
+    """GLM-5.3-Flash's EXL3 checkpoint (one of two ranks' shapes): exl3_mm.Scratch allocates what
+    geometry.exl3_expert_scratch says for a decode window and a prompt chunk, and the engine's buffers (decode window,
+    MTP head's, prompt chunk's with its split-K partials) and caches stay within mla_geometry's estimate."""
+    arrays, fake = allocations
+    mod = importlib.import_module("tensorfold.families.glm5_next.cuda.forward")
+    names = ("kda", "latent", "attention", "exl3_mm")
+    mods = [mod] + [importlib.import_module(f"tensorfold.families.glm5_next.cuda.{n}") for n in names]
+    for m in mods + [importlib.import_module("tensorfold.cuda.experts")]:
+        monkeypatch.setattr(m, "torch", fake)
+    monkeypatch.setattr(mods[2], "ENABLED", True)
+    exl3_mm = mods[-1]
+    text = {"hidden_size": 4096, "num_attention_heads": 64, "num_hidden_layers": 4,
+            "layer_types": ["linear_attention", "full_attention"] * 2, "linear_attn_config": {"num_heads": 64},
+            "qk_nope_head_dim": 192, "qk_rope_head_dim": 64, "v_head_dim": 256, "vocab_size": 154880,
+            "q_lora_rank": 1536, "kv_lora_rank": 512, "intermediate_size": 12288, "moe_intermediate_size": 2048,
+            "num_experts_per_tok": 8, "n_routed_experts": 288, "index_n_heads": 32, "index_head_dim": 128,
+            "num_nextn_predict_layers": int(mtp), "_quantization": {"quant_method": "exl3"}}
+    cfg = SimpleNamespace(heads=64, lin_heads=64, conv=4, qk_dim=256, v_dim=256, index_dim=128, hidden=4096,
+                          streams=4, q_lora=1536, kv_lora=512, index_heads=32, dense_width=12288, top_k=8,
+                          moe_width=2048, shared_width=2048, experts=288, quant="exl3")
+    layers = [SimpleNamespace(index=i, kind="kda" if i % 2 == 0 else "dsa",
+                              kda=SimpleNamespace(proj=SimpleNamespace(n=3 * 32 * 128 + 256 + 32))) for i in range(4)]
+    weights = SimpleNamespace(cfg=cfg, world=2, device="cpu", layers=layers, meta={"long_context": True},
+                              mtp=SimpleNamespace() if mtp else None, head=SimpleNamespace(n=154880 // 2))
+    slots, d, width = 9, 4096, 1024
+    for rows in (8, 64, geometry.PREFILL_ROWS):
+        arrays.clear()
+        exl3_mm.Scratch(rows, slots, d, width, "cpu")
+        assert bytes_in(arrays) == geometry.exl3_expert_scratch(rows, slots, d, width), rows
+    arrays.clear()
+    cap = 1 << 20
+    mod.Buffers(weights, 64, cap)
+    if mtp:
+        mod.Buffers(weights, 64, cap)
+    pbuf = mod.Buffers(weights, geometry.PREFILL_ROWS, cap, prefill=True)
+    assert pbuf.sk.numel() == 8 * geometry.PREFILL_ROWS * 16384          # BF16 prompt projections' partials
+    mod.State(weights, cap, 64)
+    estimated = geometry.mla_geometry(text, 2, 16, latent=True).bytes_at(cap)
+    assert bytes_in(arrays) <= estimated - geometry.mla_chunk_scratch(text, 2, cap, latent=True)

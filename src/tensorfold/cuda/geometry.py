@@ -193,6 +193,15 @@ def _indexed_prefill_row(t: dict, world: int, h: int, hk: int, hd: int, nv: int,
             + 12 * streams + 64)
 
 
+def exl3_expert_scratch(rows: int, slots: int, d: int, width: int) -> int:
+    """GLM's ``exl3_mm.Scratch`` for a window of ``rows`` rows of ``slots`` slots: fp16 rotated inputs of gate/up
+    (2 x pairs x ``d``) and of down (pairs x ``width``, a rank's expert width), and the fp32 split-K sums of 4 slices
+    for two outputs (2 x 4 x pairs x max(``width``, ``d``))."""
+
+    pairs = rows * slots
+    return 2 * pairs * d * 2 + pairs * width * 2 + 2 * 4 * pairs * max(width, d) * 4
+
+
 def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560, latent: bool = False) -> Geometry:
     linear, attention = layer_counts(t)
     lin = t.get("linear_attn_config") or {}
@@ -216,7 +225,10 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     # prompt-chunk buffers: at most 5 row extents a row without the head
     fixed += PREFILL_ROWS * 5 * (extent - int(t["vocab_size"]) // world)
     if (t.get("_quantization") or {}).get("quant_method") == "exl3":
-        fixed += 128 * rows * slots * max(width, d) * 4
+        # the routed experts' scratch of the decode windows (the MTP head's too) and of a prompt chunk, and the prompt
+        # buffers' split-K partials for the BF16 projections (8 x rows x 16,384 fp32, as forward.Buffers allocates them)
+        fixed += (2 if mtp else 1) * exl3_expert_scratch(rows, slots, d, width)
+        fixed += exl3_expert_scratch(PREFILL_ROWS, slots, d, width) + 8 * PREFILL_ROWS * 16384 * 4
     count = attention + int(mtp)
     lw = int(t.get("kv_lora_rank", 512))
     def bytes_at(capacity: int) -> int:
