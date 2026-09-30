@@ -218,8 +218,8 @@ class GLMFlash:
 
         self._trim_chained(mtp_cache)
         count = int(tokens.shape[0])
-        return self.mtp(self.model, rows, tokens, [mtp_cache], (count,), count <= self.fused_rows,
-                        embeddings=embeddings)
+        images = {} if embeddings is None else {"embeddings": embeddings}      # heads without vision take none
+        return self.mtp(self.model, rows, tokens, [mtp_cache], (count,), count <= self.fused_rows, **images)
 
     @staticmethod
     def _trim_chained(mtp_cache: MTPCache) -> None:

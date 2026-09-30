@@ -270,7 +270,14 @@ class NVFP4Table(BF16Table):
         return _prefetch(self.values + self.scales, workers)
 
 
-def open_table(model_dir: Path, shards: list[tuple[str, str]], scale):
+def shard_keys(name: str, count: int, names) -> list[str]:
+    """Resolve the flat and nested shard spellings used by MLX checkpoints."""
+
+    return [next((key for key in (f"{name}.shard_{i}", f"{name}.shards.{i}")
+                  if key + ".weight" in names), f"{name}.shard_{i}") for i in range(count)]
+
+
+def open_table(model_dir: Path, shards: list[tuple[str, str]], scale, *, ssd: bool = False):
     """The n-gram table in its shards' layout (MLX 4-bit, bf16, FP8, NVFP4); ``scale(name)`` reads a table scale."""
 
     headers: dict[str, dict] = {}
@@ -295,7 +302,9 @@ def open_table(model_dir: Path, shards: list[tuple[str, str]], scale):
         return NVFP4Table(files, scale("weight_scale_2"))
     if used[0] == "fp8":
         return FP8Table(files, scale("weight_scale"))
-    return BF16Table(files) if used[0] == "bf16" else HostTable(files)
+    table = BF16Table(files) if used[0] == "bf16" else SSDTable(files) if ssd else HostTable(files)
+    table.weight_scale = float(scale("weight_scale"))
+    return table
 
 
 class ReadAhead:
@@ -419,9 +428,7 @@ def from_checkpoint(model_dir: Path, name: str, count: int, *, ssd: bool = False
 
     headers = {path: read_header(path) for path in sorted(Path(model_dir).glob("model*.safetensors"))}
     files = []
-    for i in range(count):
-        key = next((k for k in (f"{name}.shard_{i}", f"{name}.shards.{i}")      # mlx-lm and oMLX names
-                    if any(f"{k}.weight" in h for h in headers.values())), f"{name}.shard_{i}")
+    for key in shard_keys(name, count, {key for h in headers.values() for key in h}):
         found = [(path, h) for path, h in headers.items() if any(f"{key}.{part}" in h for part in _PARTS)]
         if len(found) != 1 or not all(f"{key}.{part}" in found[0][1] for part in _PARTS):
             raise ValueError(f"{key}: expected its weight, scales and biases together in one checkpoint file")

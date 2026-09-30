@@ -12,10 +12,11 @@ import uuid
 from tensorfold.engine.lane_engine import LaneEngine, SuffixLookupProposer
 from tensorfold.engine import grammar
 from tensorfold.server.admission import concurrency
-from tensorfold.server.checkpoints import (CheckpointStore, longest_common_prefix, prune_conversations,
+from tensorfold.server.checkpoints import (CheckpointStore, prune_conversations,
                                            save_conversations, spill_conversation)
 from tensorfold.server.cancellation import Cancellation
 from tensorfold.server.errors import CONTEXT_LIMIT, ContextLengthError, RequestError
+from tensorfold.server.prompt_blocks import PromptBlocks, _REQUEST
 from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
 from tensorfold.server import metrics
@@ -28,15 +29,11 @@ from tensorfold.server.text import (
     hide_tool_calls,
     is_title_request,
     parse_harmony_output,
-    render_prompt_ids,
     reasoning_count, split_thinking, think_markers,
     streaming_visible_text,
     template_late_system,
     strip_trailing_stops,
 )
-
-
-_REQUEST = threading.local()
 
 
 def _mlx_version() -> str:
@@ -53,7 +50,7 @@ def _token_sha(tokens: list[int]) -> str:
     return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
 
 
-class ChatApp(RequestOptions):
+class ChatApp(RequestOptions, PromptBlocks):
     """One model behind the OpenAI endpoint (``server.http.make_handler``)."""
 
     accepts_sampling = True
@@ -216,86 +213,6 @@ class ChatApp(RequestOptions):
                   f"{window:,}-token request and a shared round leave idle, freed whenever a request needs it",
                   flush=True)
 
-    def render(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
-        thinking: bool | None = None,
-    ) -> tuple[list[int], int]:
-        """Prompt ids plus the length of the rendered history that prefixes them."""
-
-        thinking = self.enable_thinking if thinking is None else bool(thinking)
-        effort = self.effort_for((getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort"))
-        with self.tokenizer_lock:
-            prompt = render_prompt_ids(self.tokenizer, messages, tools=tools, enable_thinking=thinking,
-                                       reasoning_effort=effort, late_system=self.late_system)
-            history = render_prompt_ids(self.tokenizer, messages, tools=tools, enable_thinking=thinking,
-                                        reasoning_effort=effort, add_generation_prompt=False,
-                                        late_system=self.late_system)
-        history_len = len(history) if 0 < len(history) < len(prompt) and prompt[: len(history)] == history else 0
-        return prompt, history_len
-
-    def system_prefix_len(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None,
-        prompt_ids: list[int], thinking: bool | None = None,
-    ) -> int:
-        """Find a reusable system prefix by substituting a probe for the first user message; return zero for short matches."""
-
-        effort = self.effort_for((getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort"))
-        first_user = next((i for i, m in enumerate(messages) if m.get("role") == "user"), None)
-        if first_user is None:
-            return 0
-        probe = [*messages[:first_user], {"role": "user", "content": "⁣probe"}]
-        try:
-            with self.tokenizer_lock:
-                other = render_prompt_ids(
-                    self.tokenizer, probe, tools=tools,
-                    enable_thinking=self.enable_thinking if thinking is None else bool(thinking),
-                    reasoning_effort=effort, late_system=self.late_system)
-        except Exception:  # noqa: BLE001 - a template quirk must not fail the request
-            return 0
-        shared = longest_common_prefix(prompt_ids, other)
-        return shared if shared >= 512 else 0
-
-    def _warm_known_blocks(self, snapshot_dir: Path, model_id: str) -> None:
-        """Compute the newest system block saved by other kernels in the background, a prompt chunk a job."""
-
-        from tensorfold.engine.prefill_plan import block_jobs
-        from tensorfold.engine.prefix_snapshots import blocks_to_warm
-
-        blocks = blocks_to_warm(snapshot_dir, model_id)[:1]
-        if not blocks:
-            return
-        pad = int(self.tokenizer.encode("\n", add_special_tokens=False)[-1])
-
-        def warm() -> None:
-            try:
-                warm_blocks()
-            finally:
-                self.warming = False
-
-        def warm_blocks() -> None:
-            for tokens in blocks:
-                started = time.perf_counter()
-                jobs = block_jobs(self.engine.prefill_plan, tokens, pad)
-                for i, (prompt, at) in enumerate(jobs):
-                    final = i == len(jobs) - 1
-                    while True:
-                        job = ChatJob(
-                            job_id=f"warm-{uuid.uuid4().hex[:8]}", prompt_ids=prompt, max_tokens=1,
-                            temperature=0.0, history_len=at, shared_prefix_lens=(at,) if final else (),
-                            drafts=False, background=True)
-                        self.scheduler.submit(job)
-                        while job.chunks.get() is not None:
-                            pass
-                        if not job.preempted:
-                            break
-                print(f"[tensorfold] warmed system block tokens={jobs[-1][1] if jobs else 0} of {len(tokens)} in "
-                      f"{time.perf_counter() - started:.1f}s", flush=True)
-
-        print(f"[tensorfold] warming {len(blocks)} saved system block(s) for these kernels in the background: "
-              "until it ends, a request first waits for one prompt chunk (GET /health reports warming)", flush=True)
-        self.warming = True
-        threading.Thread(target=warm, name="warm-blocks", daemon=True).start()
-
     def chat(
         self,
         messages: list[dict[str, Any]],
@@ -331,7 +248,7 @@ class ChatApp(RequestOptions):
             metrics.finish_request()
 
     class _Preparing:
-        """A."""
+        """A user's request between arrival and submission: background requests wait for these."""
 
         def __init__(self, app: "ChatApp") -> None:
             self.app = app

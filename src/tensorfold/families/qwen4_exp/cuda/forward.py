@@ -257,11 +257,13 @@ def ple_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int
         _mm(emb, p.key, None, b.ple_keys[:R], b)
         _mm(emb, p.value, None, b.ple_vals[:R], b)
     elif getattr(p.table, "bits", 4) == 16:           # the published revision's rows: bf16, nothing to unpack
-        glue.ple_embed_bf16(R, b.ple_v, p.ngram.heads, p.ngram.dims, b.ple_emb[:R], b.xs_ple[:R])
+        glue.ple_embed_bf16(R, b.ple_v, p.ngram.heads, p.ngram.dims, b.ple_emb[:R], b.xs_ple[:R],
+                            scale=getattr(p.table, "weight_scale", 1.0))
         _mm(b.ple_emb[:R], p.key, b.xs_ple[:R], b.ple_keys[:R], b)
         _mm(b.ple_emb[:R], p.value, b.xs_ple[:R], b.ple_vals[:R], b)
     else:
-        glue.ple_embed(R, b.ple_w, b.ple_s, b.ple_b, p.ngram.heads, p.ngram.dims, b.ple_emb[:R], b.xs_ple[:R])
+        glue.ple_embed(R, b.ple_w, b.ple_s, b.ple_b, p.ngram.heads, p.ngram.dims, b.ple_emb[:R], b.xs_ple[:R],
+                       scale=getattr(p.table, "weight_scale", 1.0))
         _mm(b.ple_emb[:R], p.key, b.xs_ple[:R], b.ple_keys[:R], b)
         _mm(b.ple_emb[:R], p.value, b.xs_ple[:R], b.ple_vals[:R], b)
     glue.ple_gate(b.ple_keys[:R], b.ple_vals[:R], b.h[:R], p.norm_key, p.norm_query, b.ple_gated[:R],
@@ -469,9 +471,7 @@ def converges(w: Weights) -> bool:
 
 def compute_mixed(w: Weights, dsegs: Sequence[Seg], db: Buffers, psegs: Sequence[Seg], pb: Buffers, *,
                   ends: Sequence[int] = (), cuts: Sequence[Cut] = ()) -> tuple:
-    """A decode window (``db``) and a prompt pass (``pb``) in one forward. Each keeps its own kernels, so its own
-    bits; each layer's experts run once for both, the window's rows after the pass's (one read of each expert's
-    weights). Returns the window's logits and the pass's heads (``ends``, else None)."""
+    """A decode window and a prompt pass in one forward, each on its own kernels and bits, experts read once."""
 
     c = w.cfg
     Rd, Rp = dsegs[-1][2], psegs[-1][2]
