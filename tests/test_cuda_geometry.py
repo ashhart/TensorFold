@@ -189,9 +189,7 @@ def test_gpu_and_host_available_memory_are_both_guarded(monkeypatch):
 @pytest.mark.torch
 @pytest.mark.parametrize("mtp", [False, True])
 def test_mla_exl3_scratch_and_buffers_are_budgeted(monkeypatch, allocations, mtp):
-    """GLM-5.3-Flash's EXL3 checkpoint (one of two ranks' shapes): exl3_mm.Scratch allocates what
-    geometry.exl3_expert_scratch says for a decode window and a prompt chunk, and the engine's buffers (decode window,
-    MTP head's, prompt chunk's with its split-K partials) and caches stay within mla_geometry's estimate."""
+    """GLM-5.3-Flash EXL3 at one rank's shapes: the scratch and buffers allocated stay within mla_geometry."""
     arrays, fake = allocations
     mod = importlib.import_module("tensorfold.families.glm5_next.cuda.forward")
     names = ("kda", "latent", "attention", "exl3_mm")

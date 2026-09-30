@@ -392,7 +392,7 @@ class GlmEngine:
 
     def _run_once(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool,
                   on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool) -> dict[str, Any]:
-        from .decode import DepthPolicy, dflash_decode, mtp_decode, prefill, serial_decode, take_snapshot
+        from .decode import DepthPolicy, dflash_decode, mtp_decode, prefill, serial_decode
         from .drafter_choice import DrafterChoice, auto_decode
 
         auto, use_mtp, use_dflash = self._drafters(code)
@@ -407,11 +407,9 @@ class GlmEngine:
             load_rows(self.e, hit)
             hit.rows, hit.nbytes = None, 0            # live again
         self.live = list(prompt)
-        first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=hit)
+        first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=hit,
+                        keep_at=max(1, len(prompt) - 1) if draft else None, keep=self._remember)
         prefill_s = time.perf_counter() - t0
-        if draft:
-            self._remember(take_snapshot(self.e, prompt, self.e.last_hidden if use_mtp else None, mtp=use_mtp,
-                                         drafter=drafter))
         stats: dict[str, Any] = {"prefill_s": prefill_s, "cached": cut}
         on_tokens([first])
         if max_tokens <= 1 or (stop_eos and first in self.eos):

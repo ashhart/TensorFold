@@ -342,10 +342,11 @@ def test_drafter_choice_resumes(engine_f):
     after = first + reply + [21, 22]
     for policy in ("auto:1:1:0", "auto", "2", "f3"):
         warm, stats = _generate(engine_f, after, sampling, policy=policy)
-        assert stats["cached"] == len(first), policy
+        assert stats["cached"] == len(first) - 1, policy
         _forget(engine_f)
         cold, stats = _generate(engine_f, after, sampling, policy=policy)
         assert stats["cached"] == 0 and warm == cold, policy
+        _forget(engine_f)
         _generate(engine_f, first, sampling, policy="auto:1:1:0", tokens=30)      # the prompt's state again
 
 
@@ -356,14 +357,14 @@ def test_resumed_prompts_equal_fresh_prefills(engine, sampling):
     reply, _ = _generate(engine, first, sampling)
     after_reply = first + reply + [5, 6, 7]
     warm, stats = _generate(engine, after_reply, sampling)
-    assert stats["cached"] == len(first)                # the reply prefills again
+    assert stats["cached"] == len(first) - 1                # the reply prefills again
     _forget(engine)                                     # every kept state goes: the next prefill is fresh
     cold, stats = _generate(engine, after_reply, sampling)
     assert stats["cached"] == 0 and warm == cold
     _generate(engine, first, sampling)
     after_prompt = first + [11, 12, 13]
     warm, stats = _generate(engine, after_prompt, sampling, policy="2")
-    assert stats["cached"] == len(first)
+    assert stats["cached"] == len(first) - 1
     _forget(engine)
     cold, stats = _generate(engine, after_prompt, sampling, policy="2")
     assert stats["cached"] == 0 and warm == cold
@@ -395,7 +396,7 @@ def test_exl3_checkpoint_resumes(engine_x):
     reply, _ = _generate(engine_x, first, sampling, policy="auto:1:1:0", tokens=20)
     after = first + reply + [31, 32]
     warm, stats = _generate(engine_x, after, sampling)
-    assert stats["cached"] == len(first)
+    assert stats["cached"] == len(first) - 1
     _forget(engine_x)
     cold, stats = _generate(engine_x, after, sampling)
     assert stats["cached"] == 0 and warm == cold
@@ -496,3 +497,85 @@ def test_long_prompt_chunks_leave_the_same_state(engine_long):
     (a, want), (b, got) = runs
     assert a == b
     assert len(want) == len(got) and all(torch.equal(x, y) for x, y in zip(want, got))
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(19, 0.8, 10, 0.9)])
+def test_identical_resend_and_thinking_turn_reuse_prompt_prefix(engine, sampling):
+    _forget(engine)
+    prompt = list(range(11, 30))
+    cold, _ = _generate(engine, prompt, sampling, tokens=8)
+    repeated, stats = _generate(engine, prompt, sampling, tokens=8)
+    assert stats["cached"] == len(prompt) - 1
+    assert repeated == cold
+    fresh, _ = _generate(engine, prompt, sampling, tokens=8, draft=False)
+    assert repeated == fresh
+    turn = prompt[:-1] + [271, 77, 78]
+    resumed, stats = _generate(engine, turn, sampling, tokens=8)
+    assert stats["cached"] == len(prompt) - 1
+    fresh, _ = _generate(engine, turn, sampling, tokens=8, draft=False)
+    assert resumed == fresh
+
+
+@pytest.mark.parametrize("point", [1, 5, 128])
+def test_prompt_cut_keeps_fresh_prefix_bits_and_full_forward(engine_f, point, monkeypatch):
+    from tensorfold.families.glm5_next.cuda import decode
+
+    e, drafter = engine_f.e, engine_f.drafter
+    prompt = list(range(11, 140))
+    decode.prefill(e, prompt, None, drafter=drafter)
+    full = [x.clone() for x in _state(e)]
+    hidden = e.last_hidden.clone()
+    calls, kept = [], []
+    compute = decode.compute
+
+    def counted(*args, **kwargs):
+        calls.append(args[3])
+        return compute(*args, **kwargs)
+
+    monkeypatch.setattr(decode, "compute", counted)
+    decode.prefill(e, prompt, None, drafter=drafter, keep_at=point, keep=kept.append)
+    assert calls == [len(prompt)]
+    assert torch.equal(e.last_hidden, hidden)
+    for actual, expected in zip(_state(e), full):
+        assert torch.equal(actual, expected)
+    decode.prefill(e, prompt[:point], None, drafter=drafter)
+    fresh = decode.take_snapshot(e, prompt[:point], e.last_hidden, mtp=True, drafter=drafter)
+    snap = kept[0]
+    for name in ("rec", "conv", "pending"):
+        assert torch.equal(getattr(snap, name), getattr(fresh, name)), name
+    assert snap.mtp_len == fresh.mtp_len
+    assert snap.drafter_end == fresh.drafter_end
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(23, 1.0, 20, 0.95)])
+def test_three_resends_preserve_every_kept_glm_state(engine, sampling):
+    from prefix_checks import same_tokens
+    from tensorfold.families.glm5_next.cuda import decode
+
+    _forget(engine)
+    ref = decode.Engine(engine.w, capacity=2560, prefill_rows=engine.e.prefill_rows)
+    system = list(range(11, 20))
+    prompt = system + list(range(30, 50))
+    turn = prompt[:-1] + [271, 77, 78]
+    different = system + [301, 302, 303, 304]
+    for step, tokens in enumerate((system + [501], prompt, prompt, prompt, turn, different)):
+        actual, stats = _generate(engine, tokens, sampling, tokens=8)
+        if step in (2, 3, 4):
+            assert stats["cached"] == len(prompt) - 1
+        if step == 5:
+            assert stats["cached"] == len(system)
+        first = decode.prefill(ref, tokens, sampling)
+        same_tokens(actual, decode.serial_decode(ref, first, 8, sampling).tokens)
+        for snap in engine.cache:
+            decode.prefill(ref, snap.ids, sampling)
+            fresh = decode.take_snapshot(ref, snap.ids, ref.last_hidden, mtp=True)
+            for name in ("rec", "conv", "pending"):
+                assert torch.equal(getattr(snap, name), getattr(fresh, name)), (step, name)
+            assert snap.mtp_len == fresh.mtp_len == len(snap.ids) - 1
+            views = decode._row_views(engine.e.st, len(snap.ids), snap.mtp_len)
+            stored = views if snap.rows is None else snap.rows
+            for name in ("mtp_kc", "mtp_vc"):
+                live = getattr(engine.e.st, name, None)
+                if live is not None and snap.mtp_len:
+                    index = next(i for i, v in enumerate(views) if v.data_ptr() == live.data_ptr())
+                    assert torch.equal(stored[index], getattr(ref.st, name)[:snap.mtp_len]), (step, name)

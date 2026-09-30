@@ -310,7 +310,7 @@ def restore(e: Engine, snap: Snapshot, drafter=None) -> None:
 # -- prefill ----------------------------------------------------------------------------------------------------
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True, drafter=None,
-            resume: Snapshot | None = None) -> int:
+            resume: Snapshot | None = None, keep_at: int | None = None, keep=None) -> int:
     """Commit the prompt in chunks and sample its first token; a resumed prompt ends in a fresh prefill's state."""
 
     if not prompt:
@@ -332,13 +332,26 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
         if use_mtp:
             k = resume.pending.shape[0]
             _absorb_rows(e, resume.pending, list(prompt[begin - k + 1:begin + 1]))
+    from .forward import Cut
+
+    if keep_at is not None and (keep is None or not max(1, begin) <= keep_at <= len(prompt)):
+        raise ValueError("a kept prefix needs a callback and a point in the prompt's prefill")
+    kept = resume if keep_at == begin else None
     last = None
     prof.active = True
     for start in range(begin, len(prompt), e.prefill_rows):
         chunk = list(prompt[start:start + e.prefill_rows])
         R = len(chunk)
-        last = compute(w, st, b, stage(w, st, b, chunk), nch=chunks_for(st, R), host_pos=st.pos).clone()
+        point = keep_at - start if keep_at is not None else 0
+        cut = Cut(point, torch.empty_like(st.rec[0]), st.conv.clone()) if 0 < point < R else None
+        last = compute(w, st, b, stage(w, st, b, chunk), nch=chunks_for(st, R), host_pos=st.pos, cut=cut).clone()
         e.last_hidden = b.fnormed[R - 1:R].clone()
+        if 0 < point <= R:
+            rec = cut.rec if cut is not None else st.rec[st.cur[0] if st.cur else 0].clone()
+            conv = cut.conv if cut is not None else st.conv.clone()
+            kept = Snapshot(list(prompt[:keep_at]), rec, conv,
+                            b.fnormed[point - 1:point].clone() if use_mtp else None,
+                            keep_at - 1 if use_mtp else -1, keep_at if drafter is not None else -1)
         if drafter is not None:
             drafter.add_taps(e.tap_rows(R, b))
         if use_mtp:
@@ -348,6 +361,8 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
                     _absorb_rows(e, b.fnormed[:len(nxt)], nxt)
         with prof.timed("commit"):
             commit(w, st, b, R, R)
+    if kept is not None:
+        keep(kept)
     prof.active = False
     prof.report(len(prompt) - begin)
     if e.constraint is not None:                         # the first token's row, under the reply's grammar
