@@ -291,6 +291,12 @@ void exl3x_group_cuda(const at::Tensor& pick, at::Tensor& uids, at::Tensor& ucou
                       int64_t slots, int64_t E) {
     TORCH_CHECK(E <= GROUP_THREADS * GROUP_PER_THREAD, "too many experts for the grouping kernel");
     TORCH_CHECK(slots <= 32, "at most 32 slots a row");
+    static bool smem_raised = false;
+    if (!smem_raised) {
+        cudaError_t attr = cudaFuncSetAttribute(group_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
+        TORCH_CHECK(attr == cudaSuccess, "setattr: ", cudaGetErrorString(attr));
+        smem_raised = true;
+    }
     const size_t smem = (size_t)R * slots * sizeof(int);
     group_kernel<<<1, GROUP_THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
         pick.data_ptr<int>(), uids.data_ptr<int>(), ucount.data_ptr<int>(), members.data_ptr<int>(), (int)R,
