@@ -22,6 +22,8 @@ def test_converter_preserves_represented_linears_and_qkv_order():
     source = {}
     for proj in ("q", "k", "v"):
         source.update(_group(rng, f"model.visual.blocks.0.attn.{proj}_proj"))
+    source["model.visual.blocks.0.attn.qkv.weight"] = np.zeros((384, 128), dtype=np.float16)
+    source["model.visual.blocks.0.attn.qkv.bias"] = np.zeros(384, dtype=np.float16)
     result = convert_tensors(source)
     weight = result["vision_tower.blocks.0.attn.qkv.weight"]
     bias = result["vision_tower.blocks.0.attn.qkv.bias"]

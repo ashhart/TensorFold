@@ -53,8 +53,8 @@ def convert_tensors(tensors):
             if any(name not in result for name in names):
                 raise ValueError(f"incomplete split QKV: {block}")
             combined = f"{block}.attn.qkv.{part}"
-            if combined in result:
-                raise ValueError(f"duplicate QKV: {block}")
+            # Some packs retain the original fused float QKV beside quantized split projections.
+            # ExLlamaV3 loads the split projections; reconstruct those instead of the stale fused copy.
             result[combined] = np.concatenate([result.pop(name) for name in names], axis=0)
     return {"vision_tower." + name: np.ascontiguousarray(value) for name, value in result.items()}
 
