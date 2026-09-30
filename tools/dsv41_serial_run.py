@@ -42,7 +42,13 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--fixed-k", action="store_true", help="verify every draft each round (no adaptive policy)")
     ap.add_argument("--cases", type=Path, help="tools/dsv41_vllm_accept.py results: replay every case's prompt ids")
+    ap.add_argument("--stack-after", type=int, default=0, help="dump every thread's stack after N seconds")
     args = ap.parse_args()
+    if args.stack_after:
+        import faulthandler
+        import sys
+
+        faulthandler.dump_traceback_later(args.stack_after, repeat=True, file=sys.stderr)
 
     torch.cuda.set_device(0)
     nccl = NCCL(args.rank, 2, args.master, args.port)

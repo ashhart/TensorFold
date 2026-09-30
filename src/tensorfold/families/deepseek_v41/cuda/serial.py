@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
+from tensorfold.cuda.capacity import gather_ints
 from tensorfold.cuda.exl3 import experts as ex3
 from tensorfold.cuda.sampling import sample_rows
 
@@ -326,6 +327,42 @@ class SerialEngine:
         self.graphs[rows] = g
         self.graph = True
 
+    def agree(self, k: int) -> int:
+        """Rank 0's draft count for this round, on every rank (a tiny all-gather; ranks must replay the same graphs)."""
+
+        if self.comm.world == 1:
+            return k
+        return gather_ints(torch, lambda a, b: self.comm.nccl.all_gather(a, b), [k], self.comm.world)[0][0]
+
+    def round_costs(self) -> list[float]:
+        """Milliseconds of a round verifying k = 0 .. n drafts (graph replays, measured once, the slower rank's)."""
+
+        if getattr(self, "_round_costs", None) is not None:
+            return self._round_costs
+        saved = self._save_caches()
+        n = max(self.graphs) - 1
+
+        def replay_ms(fn, reps=3) -> float:
+            fn()
+            torch.cuda.synchronize()
+            t = time.perf_counter()
+            for _ in range(reps):
+                fn()
+            torch.cuda.synchronize()
+            return 1e3 * (time.perf_counter() - t) / reps
+
+        def verify(R):
+            g = self.graphs[R]
+            return lambda: (g["a0"].replay(), g["a1"].replay(), g["b"].replay())
+
+        draft = replay_ms(self.drafter.graph.replay) if self.drafter is not None and self.drafter.graph else 0.0
+        mine = [replay_ms(verify(1))] + [draft + replay_ms(verify(k + 1)) for k in range(1, n + 1)]
+        self._restore_caches(saved)
+        both = gather_ints(torch, lambda a, b: self.comm.nccl.all_gather(a, b), [int(1e3 * c) for c in mine],
+                           self.comm.world) if self.comm.world > 1 else [[int(1e3 * c) for c in mine]]
+        self._round_costs = [max(row[k] for row in both) / 1e3 for k in range(n + 1)]
+        return self._round_costs
+
     def _save_caches(self):
         st = self.state
         extra = [t.clone() for t in self.drafter.swa] if self.drafter is not None else []
@@ -505,7 +542,7 @@ class SerialEngine:
             from .dspark import DraftPolicy
 
             n = max(r for r in self.graphs) - 1                        # verify windows captured: 1 .. n + 1 rows
-            policy = DraftPolicy(n) if self.adaptive else _Fixed(n)
+            policy = DraftPolicy(n, self.round_costs()) if self.adaptive else _Fixed(n)
             ks = [0] * (n + 1)
         while len(out) < max_tokens:
             if dsp is None:
@@ -520,7 +557,7 @@ class SerialEngine:
                     nxt = sample_rows(self.forward([nxt])[-1:], [len(self.state.ids)], sampling)[0]
                 continue
             P = len(self.state.ids)
-            k = policy.choose()
+            k = self.agree(policy.choose())
             ta = time.perf_counter()
             if k == 0:                                             # drafting does not pay here: one plain row
                 target = [self.step(nxt, sampling)]

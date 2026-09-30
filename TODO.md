@@ -86,6 +86,9 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
       draft + (N+1)-row verify graphs. Acceptance equals vLLM's on the same prompts; ~1.3× vLLM tok/s (BENCH.md)
 - [x] Exact verify: bit-identical to one-row decode (Triton router matmul + Engram gate); DSpark == serial tokens
 - [x] Adaptive draft length (`DraftPolicy`, k = 0..N by expected tokens/ms): 1.39–1.49× vLLM on the 3 cases
+- [x] Rank-deterministic draft policy (rank 0 decides k each round; ranks chose different k from own clocks → deadlock)
+- [x] DSpark == serial tokens greedy and sampled (temperature 0.8) on all cases
+- [ ] Policy tuning: low-acceptance prompts still slightly below serial (k=0 rarely chosen)
 - [ ] Verify cost: split Engram reads across ranks (skew shows up as NCCL wait); fold shared expert into grouped call
 - [ ] CUDA graphs per window width; eager == graph checks
 - [x] Prefill 330 → 486 tok/s: 1,024-row chunks, EXL3 prompt GEMM for dense linears, prompt grouped expert kernel
