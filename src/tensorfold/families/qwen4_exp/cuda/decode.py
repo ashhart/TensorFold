@@ -250,12 +250,16 @@ def draft(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int], position
 
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True,
-            resume: dict | None = None, constraint=None) -> int:
+            resume: dict | None = None, constraint=None, vision=None) -> int:
     """Commit the prompt in chunks, sample the first token; rows ignore chunking, so ``resume`` equals a fresh run."""
 
     if not prompt:
         raise ValueError("prefill requires at least one token")
+    if vision is not None and resume is not None:
+        raise ValueError("an image prompt prefills from its start")
     w, st, pb = e.w, e.st, e.pbuf
+    if vision is not None and pb.attn.qsa and e.prefill_rows % pb.attn.ratio:
+        raise ValueError(f"image prefill rows must be divisible by {pb.attn.ratio}")
     use_mtp = mtp and w.mtp is not None and e.mbuf is not None
     begin = 0
     if resume is None:
@@ -268,13 +272,33 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
         if use_mtp and resume.get("tail") is not None:
             mtp_forward(w, st, pb, [prompt[begin]], resume["tail"])
             st.set_mtp_len(st.mtp_len + 1)
+    image_rows = positions = None
+    if vision is not None:
+        image_rows = torch.tensor(vision.rows, dtype=torch.int64, device=vision.features.device)
+        positions = vision.positions.t().contiguous()
+    try:
+        return _prefill_chunks(e, prompt, sampling, begin, use_mtp, constraint, vision, image_rows, positions)
+    finally:
+        if vision is not None:
+            pb.rope_rows = None
+
+
+def _prefill_chunks(e, prompt, sampling, begin, use_mtp, constraint, vision, image_rows, positions):
+    w, st, pb = e.w, e.st, e.pbuf
     last = None
     for start in range(begin, len(prompt), e.prefill_rows):
         chunk = list(prompt[start:start + e.prefill_rows])
         R = len(chunk)
         final = start + R >= len(prompt)
+        features = None
+        if vision is not None:
+            pb.rope_rows = positions[start:start + R]
+            inside = ((image_rows >= start) & (image_rows < start + R)).nonzero().flatten()
+            if inside.numel():
+                features = (image_rows.index_select(0, inside) - start, vision.features.index_select(0, inside))
         # only the prompt's last row is sampled: the head runs on the final chunk alone
-        logits = forward(w, st, pb, chunk, logits=final)
+        logits = forward(w, st, pb, chunk, logits=final,
+                         **({"features": features} if features is not None else {}))
         if final:
             last = logits.clone()
         streams_last = pb.streams[R - 1:R].clone()
@@ -284,6 +308,8 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
                 mtp_forward(w, st, pb, nxt, pb.streams[:len(nxt)])
                 st.set_mtp_len(st.mtp_len + len(nxt))
         commit(w, st, pb, R, R)
+    if vision is not None:
+        st.set_rope_delta(vision.rope_delta)
     if constraint is not None:                           # a reply's grammar: this rank's vocabulary columns
         last = constraint.mask(last, None, e.w.meta.get("vocab_offset", 0))
     first = e.sample(last, [len(prompt)], sampling)[0]

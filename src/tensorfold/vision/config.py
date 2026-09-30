@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 
+FAMILIES = ('qwen3_5', 'qwen4_exp')     # the Qwen3.5/3.8 dense models, and Flash Next (same tower) on CUDA
+
+
 def validate_vision_config(config, family):
-    if family != 'qwen3_5':
-        raise ValueError('--vision currently supports Qwen3.5/3.8 dense checkpoints with their vision tower')
+    if family not in FAMILIES:
+        raise ValueError('--vision currently supports Qwen3.5/3.8 dense and Flash Next checkpoints with their vision '
+                         'tower')
     vision = config.get('vision_config')
     text = config.get('text_config', config)
     if not isinstance(vision, dict) or not vision:

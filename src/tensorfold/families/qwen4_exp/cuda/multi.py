@@ -31,10 +31,11 @@ class MultiDecoder:
     """Rounds over the live streams; ``slots`` streams at most, each with ``capacity`` tokens of context."""
 
     def __init__(self, w, *, slots: int, capacity: int, depth: int = DEPTH, confidence: float = CONFIDENCE,
-                 stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16") -> None:
+                 stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16", vision=None) -> None:
         if w.comm is not None:
             raise ValueError("concurrent Flash Next runs on one GPU for now")
         self.w, self.depth, self.confidence, self.capacity = w, depth, confidence, capacity
+        self.vision = vision
         self.eos = tuple(w.cfg.eos) if stop_eos else ()
         rows = slots * (depth + 1)
         self.buf = Buffers(w, rows, capacity)
@@ -111,18 +112,31 @@ class MultiDecoder:
             raise ValueError(f"a prompt of {len(s.prompt)} tokens leaves no room in the {self.capacity}-token context")
         s.count = max(1, min(s.count, room))
         t0 = time.perf_counter()
-        st, resume, s.cached = self._slot_for(list(s.prompt), s.draft)
+        encoded = None
+        if s.vision is not None:
+            if self.vision is None:
+                raise ValueError("image inputs require starting this server with --vision")
+            encoded = self.vision.encode(s.vision, s.prompt)
+        image = encoded is not None
+        # Identical placeholder IDs may represent different pixels: never reuse image states.
+        st, resume, s.cached = self._slot_for(list(s.prompt), s.draft and not image)
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity)
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
         try:
             first = prefill(e, s.prompt, s.sampling, mtp=mtp, resume=resume,
-                            **({} if s.constraint is None else {"constraint": s.constraint}))
+                            **({} if s.constraint is None else {"constraint": s.constraint}),
+                            **({"vision": encoded} if image else {}))
         except Exception:
             self.free.append(st)
             raise
+        finally:
+            s.vision = None
+            if image:
+                encoded = None
+                torch.cuda.empty_cache()
         s.sid, s.st = self.next_id, st
         self.next_id += 1
-        if s.draft:                    # the prompt's state; the MTP head has absorbed every position but the last
+        if s.draft and not image:      # the prompt's state; the MTP head has absorbed every position but the last
             self._remember(list(s.prompt), st, st.snapshot(), e.last_streams.clone() if mtp else None)
         s.context = list(s.prompt)
         s.drafts = draft(e, e.last_streams, [first], st.pos + 1, min(self.depth, s.count - 1), s.sampling,
