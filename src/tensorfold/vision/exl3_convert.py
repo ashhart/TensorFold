@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = "2"
+VERSION = "3"
 
 
 def convert_tensors(tensors, config=None):
@@ -77,6 +77,7 @@ def convert(source: Path, output: Path):
     from safetensors import safe_open
     from safetensors.numpy import load_file, save_file
 
+    config_path = source.parent / "config.json"  # retain the snapshot directory before following HF blob symlinks
     source, output = source.resolve(), output.resolve()
     if source == output:
         raise ValueError("output must differ from the immutable source")
@@ -84,7 +85,6 @@ def convert(source: Path, output: Path):
     with source.open("rb") as stream:
         for chunk in iter(lambda: stream.read(8 * 1024**2), b""):
             digest.update(chunk)
-    config_path = source.parent / "config.json"
     config_raw = config_path.read_bytes() if config_path.exists() else b""
     config = json.loads(config_raw).get("vision_config") if config_raw else None
     metadata = {"tensorfold_converter": VERSION, "source_sha256": digest.hexdigest(), "dtype": "F16",
