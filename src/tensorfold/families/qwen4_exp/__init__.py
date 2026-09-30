@@ -56,16 +56,16 @@ def check(model_dir: Path) -> None:
             print("[tensorfold] this EXL3 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
         return
     if quant_method(config) == "modelopt":
-        # the CUDA engine's NVFP4 route: NVFP4 experts in blocks of 16, other linears bf16, MXFP8 or NVFP4
+        # the CUDA engine's NVFP4 route: NVFP4 experts in blocks of 16, other linears bf16, MXFP8, block FP8 or NVFP4
         found = config.get("quantization") or config.get("quantization_config") or {}
         algo = str(found.get("quant_algo") or "NVFP4").upper()
         layers = {str(v.get("quant_algo", "")).upper() for v in (found.get("quantized_layers") or {}).values()}
         algos = layers if algo == "MIXED_PRECISION" else {algo}
         weights = [g.get("weights") or {} for g in (found.get("config_groups") or {}).values()]
         fp4 = {int(w.get("group_size", 16)) for w in weights if int(w.get("num_bits", 4)) == 4}
-        if not algos <= {"NVFP4", "W4A16_NVFP4", "MXFP8"} or fp4 - {16}:
+        if not algos <= {"NVFP4", "W4A16_NVFP4", "MXFP8", "FP8_PB_WO"} or fp4 - {16}:
             raise ValueError(f"TensorFold's Flash Next kernels read NVFP4 (ModelOpt FP4) weights in blocks of 16, the "
-                             f"other linears bf16 or MXFP8 ({', '.join(NVFP4_MODELS)}); this checkpoint has "
+                             f"other linears bf16, MXFP8 or 128x128-block FP8 ({', '.join(NVFP4_MODELS)}); this checkpoint has "
                              + describe_quantization(config) + f". {OWN_MODEL_HELP}")
         if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
             print("[tensorfold] this NVFP4 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
