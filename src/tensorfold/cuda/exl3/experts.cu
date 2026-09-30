@@ -291,13 +291,18 @@ void exl3x_group_cuda(const at::Tensor& pick, at::Tensor& uids, at::Tensor& ucou
                       int64_t slots, int64_t E) {
     TORCH_CHECK(E <= GROUP_THREADS * GROUP_PER_THREAD, "too many experts for the grouping kernel");
     TORCH_CHECK(slots <= 32, "at most 32 slots a row");
-    static bool smem_raised = false;
-    if (!smem_raised) {
-        cudaError_t attr = cudaFuncSetAttribute(group_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
-        TORCH_CHECK(attr == cudaSuccess, "setattr: ", cudaGetErrorString(attr));
-        smem_raised = true;
-    }
     const size_t smem = (size_t)R * slots * sizeof(int);
+    constexpr size_t static_smem = GROUP_THREADS / 32 * sizeof(int);
+    if (smem + static_smem > 48 * 1024) {
+        cudaFuncAttributes attributes;
+        C10_CUDA_CHECK(cudaFuncGetAttributes(&attributes, group_kernel));
+        const auto* device = at::cuda::getCurrentDeviceProperties();
+        const size_t limit = device->sharedMemPerBlockOptin - attributes.sharedSizeBytes;
+        TORCH_CHECK(smem <= limit, "EXL3 grouping needs ", smem, " dynamic shared-memory bytes; this GPU allows ",
+                    limit, " after the kernel's static storage");
+        if (smem > (size_t)attributes.maxDynamicSharedSizeBytes)
+            C10_CUDA_CHECK(cudaFuncSetAttribute(group_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)limit));
+    }
     group_kernel<<<1, GROUP_THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
         pick.data_ptr<int>(), uids.data_ptr<int>(), ucount.data_ptr<int>(), members.data_ptr<int>(), (int)R,
         (int)slots, (int)E, (int)members.size(1));

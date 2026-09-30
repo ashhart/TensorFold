@@ -1,21 +1,4 @@
-"""The grouping kernel at prefill scale: shared memory must be raised before launch.
-
-`group_kernel` launches with dynamic shared memory `R * slots * 4` bytes. The
-engine builds its `Buffers` for `PREFILL_ROWS` rows (a prompt chunk) at
-`top_k + 1` slots, and a rank's first `routed()` call during startup
-calibration therefore launches with `2048 * 9 * 4` = 72 KB — above the 48 KB
-default dynamic-smem limit, which makes the launch fail with
-`cudaErrorInvalidValue`. Upstream's own tests never cross it (their largest
-fixture is 128 rows at 7 slots, 3.6 KB), which is why the kernel worked
-everywhere it was tested and failed in the first real engine run.
-
-The fix raises the limit once per process before the first launch, with the
-call's return checked: `cudaFuncSetAttribute` failure is silent, and the sticky
-error it leaves surfaces later as a confusing "invalid argument" on the launch
-itself. A better upstream home for the attribute is the extension's init; the
-value should come from `cudaDevAttrMaxSharedMemoryPerBlockOptin` clamped to
-the largest launch the engine can issue (`PREFILL_ROWS * max_slots * 4`).
-"""
+"""EXL3 grouping opts in to the device limit for large launches and preserves exact membership order."""
 
 import pytest
 import torch
@@ -27,10 +10,9 @@ SLOTS = 9               # top_k + 1
 EXPERTS = 288           # a 288-expert MoE layer
 
 
-@pytest.mark.parametrize("rows", [8, 512, PREFILL_ROWS])
+@pytest.mark.parametrize("rows", [PREFILL_ROWS, 8, 512])
 def test_group_succeeds_cold_at_prefill_scale(rows):
-    """`group()` must succeed on the first call of a process: a cold context is
-    exactly when the attribute has not been raised yet."""
+    """The first parameter is a 72-KiB launch, before any small launch can opt this kernel in."""
     from tensorfold.cuda.exl3 import experts
 
     ext = experts._ext()
@@ -44,11 +26,11 @@ def test_group_succeeds_cold_at_prefill_scale(rows):
     torch.cuda.synchronize()
     distinct = ucount[0].item()
     assert 0 < distinct <= min(rows * SLOTS, EXPERTS)
+    _assert_members(pick, uids, ucount, members, EXPERTS)
 
 
 def test_group_output_is_consistent_across_call_order():
-    """The first and second call must agree: a cold first call failing while the
-    second succeeds is the failure mode being pinned here."""
+    """Small grouping calls stay deterministic after a large call has configured the kernel."""
     from tensorfold.cuda.exl3 import experts
 
     ext = experts._ext()
@@ -66,3 +48,55 @@ def test_group_output_is_consistent_across_call_order():
         torch.cuda.synchronize()
         results.append((count[0].item(), members.clone()))
     assert results[0][0] == results[1][0] and torch.equal(results[0][1], results[1][1])
+
+
+def _assert_members(pick, ids, count, members, experts):
+    cpu = pick.cpu()
+    wanted = torch.unique(cpu[(cpu >= 0) & (cpu < experts)], sorted=True)
+    n = int(count.item())
+    assert n == len(wanted) and torch.equal(ids[:n].cpu(), wanted)
+    actual = members[:n].cpu()
+    for i, expert in enumerate(wanted):
+        at = (cpu == expert).nonzero()
+        expected = (at[:, 0] * 32 + at[:, 1]).to(torch.int32)
+        assert len(expected) <= members.shape[1]
+        assert torch.equal(actual[i, :len(expected)], expected)
+        assert torch.all(actual[i, len(expected):] == -1)
+
+
+def _launch(rows, slots=SLOTS, device="cuda"):
+    from tensorfold.cuda.exl3 import experts
+
+    g = torch.Generator().manual_seed(31)
+    pick = torch.randint(0, EXPERTS, (rows, slots), generator=g, dtype=torch.int32).to(device)
+    n = min(rows * slots, EXPERTS)
+    ids = torch.zeros(n, dtype=torch.int32, device=device)
+    count = torch.zeros(1, dtype=torch.int32, device=device)
+    members = torch.full((n, rows), -1, dtype=torch.int32, device=device)
+    experts._ext().group(pick, ids, count, members, rows, slots, EXPERTS)
+    torch.cuda.synchronize(device)
+    _assert_members(pick, ids, count, members, EXPERTS)
+
+
+def test_device_limit_allows_more_than_a_hardcoded_96_kib_when_available():
+    limit = torch.cuda.get_device_properties(0).shared_memory_per_block_optin - 128
+    rows = limit // (SLOTS * 4)
+    if rows * SLOTS * 4 <= 96 * 1024:
+        pytest.skip("this device has no grouping launch between 96 KiB and its opt-in limit")
+    _launch(rows)
+
+
+def test_oversized_launch_refuses_before_launch_and_a_small_one_still_works():
+    limit = torch.cuda.get_device_properties(0).shared_memory_per_block_optin
+    with pytest.raises(RuntimeError, match="EXL3 grouping needs"):
+        _launch(limit // (SLOTS * 4) + 1)
+    _launch(8)
+
+
+def test_large_group_opt_in_is_per_device():
+    if torch.cuda.device_count() < 2:
+        pytest.skip("two local CUDA devices are needed for the per-device attribute check")
+    if torch.cuda.get_device_capability(0) != torch.cuda.get_device_capability(1):
+        pytest.skip("the extension builds for one architecture; this check needs matching devices")
+    _launch(PREFILL_ROWS, device="cuda:0")
+    _launch(PREFILL_ROWS, device="cuda:1")
