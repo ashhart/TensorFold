@@ -192,7 +192,7 @@ __global__ void __launch_bounds__(W * 32) grouped_kernel(
     const half* __restrict__ X0, const half* __restrict__ X1, const int64_t* __restrict__ TP0,
     const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
     const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
-    float* __restrict__ Z, int K, int N, int P, int SK, int maxm, int slots) {
+    float* __restrict__ Z, int K, int N, int P, int SK, int maxm, int slots, int NS) {
     const int u = blockIdx.x;
     if (u >= ucount[0]) return;
     const int MT = (maxm + 15) / 16;
@@ -205,7 +205,7 @@ __global__ void __launch_bounds__(W * 32) grouped_kernel(
     const int k2 = mat ? K2_1[e] : K2_0[e];
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int g = lane >> 2, t = lane & 3;
-    const int KT = K >> 4, NTILES = N >> 4;
+    const int KT = K >> 4, NTILES = NS > 0 ? NS : (N >> 4);  // row stride of the trellis, in tiles (gate/up column blocks)
 
     __shared__ int rows_sh[16];
     if (threadIdx.x < 16) {
@@ -319,6 +319,7 @@ struct GroupedArgs {
     int K, N, P, SK, maxm, slots;
     int nexp_max;        // grid.x (upper bound of distinct experts)
     int mats, nt, warps, pf, lo, hi;
+    int ns = 0;          // trellis row stride in tiles (0 = N/16)
 };
 
 template <int CB>
@@ -328,7 +329,7 @@ void grouped_launch(const GroupedArgs& a, cudaStream_t stream) {
 #define TF_LAUNCH(NT_, W_, PF_, LO_, HI_)                                                                       \
     grouped_kernel<CB, NT_, W_, PF_, LO_, HI_><<<grid, W_ * 32, 0, stream>>>(                                   \
         a.x0, a.x1, a.tp0, a.tp1, a.k2_0, a.k2_1, a.uids, a.ucount, a.members, a.z, a.K, a.N, a.P, a.SK, a.maxm, \
-        a.slots)
+        a.slots, a.ns)
 #define TF_RANGES(NT_, W_, PF_)                                                                                 \
     if (a.lo == 8 && a.hi == 8) TF_LAUNCH(NT_, W_, PF_, 8, 8);                                                  \
     else if (a.lo >= 2 && a.hi <= 10) TF_LAUNCH(NT_, W_, PF_, 2, 10);                                           \

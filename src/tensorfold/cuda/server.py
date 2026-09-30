@@ -419,6 +419,8 @@ class App:
 
             probabilities = Probabilities(body.get("top_logprobs") or 0, len(prompt), max_tokens)
             options["probabilities"] = probabilities
+        if body.get("tf_mtp") and "mtp_mode" in inspect.signature(self.engine.generate).parameters:
+            options["mtp_mode"] = str(body["tf_mtp"])        # engine-specific MTP input variant (A/B)
         if takes_stop_eos:
             options["stop_eos"] = not prepared.ignore_eos
         shaped = prepared.grammar is not None or prepared.think_budget > 0
