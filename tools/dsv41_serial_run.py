@@ -37,6 +37,8 @@ def main() -> None:
     ap.add_argument("--cap", type=int, default=1024, help="context capacity (cache rows)")
     ap.add_argument("--long-golden", type=Path, help="tools/dsv41_golden_long.py output: prefill parity per prefix")
     ap.add_argument("--save", type=Path, help="rank 0 writes each case's generated tokens here (JSON)")
+    ap.add_argument("--temperature", type=float, default=0.0, help="position-keyed sampling (0: greedy)")
+    ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--fixed-k", action="store_true", help="verify every draft each round (no adaptive policy)")
     ap.add_argument("--cases", type=Path, help="tools/dsv41_vllm_accept.py results: replay every case's prompt ids")
     args = ap.parse_args()
@@ -65,6 +67,10 @@ def main() -> None:
                 eng.adaptive = not args.fixed_k
         print(f"[rank {args.rank}] decode graphs captured in {time.time() - t0:.1f} s", flush=True)
 
+    from tensorfold.engine.exact_sampling import Sampling
+
+    sampling = Sampling(seed=args.seed, temperature=args.temperature, top_k=0, top_p=0.95) \
+        if args.temperature > 0 else None
     if args.long_golden:
         for g in json.loads(args.long_golden.read_text())["goldens"]:
             ids = g["ids"]
@@ -119,7 +125,7 @@ def main() -> None:
         cases = json.loads(args.cases.read_text())["results"]
         saved_tokens = {}
         for case in cases:
-            r = eng.generate(case["ids"], args.decode)
+            r = eng.generate(case["ids"], args.decode, sampling=sampling)
             saved_tokens[case["name"]] = r["tokens"]
             if args.rank == 0:
                 same = case.get("out_ids") is not None and r["tokens"][:len(case["out_ids"])] == case["out_ids"][:len(

@@ -93,3 +93,15 @@ NCCL 6.2 ms incl. rank skew from per-rank Engram reads).
 
 Document: upstream README + four recipes (`notes/dsv41/long_doc.txt`). Index keys stored bf16 (vLLM: fp8).
 Context limit 16,384 until layer 20's candidate blocks are implemented. Prefill ~330 tok/s vs vLLM ~1,000.
+
+## 2026-09-30 — candidate blocks: parity to 40K (`golden_long_all.json`, cap 40960, 1024-row chunks)
+
+| prompt | top-1 vs vLLM | NLL ours / vLLM | prefill |
+|---:|---:|---:|---:|
+| 1,024 | 97.8% | 1.241 / 1.231 | 102 tok/s (cold Engram) |
+| 8,192 | 96.2% | 1.676 / 1.675 | 350 tok/s |
+| 24,576 | 95.8% | 1.631 / 1.630 | 362 tok/s |
+| 40,000 | 95.7% | 1.614 / 1.613 | 369 tok/s |
+
+vLLM decode at 40K context (prefix-cached prompt): ~19 tok/s with DSpark (1.68 accepted/round).
+1024-row chunks moved prefill only 330 → 369 tok/s: expert weight reads are not the prefill bottleneck.

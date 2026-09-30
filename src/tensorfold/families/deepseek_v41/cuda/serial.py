@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from tensorfold.cuda.exl3 import experts as ex3
+from tensorfold.cuda.sampling import sample_rows
 
 from .. import engram as E
 from ..reference import inv_freq
@@ -312,11 +313,12 @@ class SerialEngine:
         for k, v in saved[4].items():
             st.ik[k].copy_(v)
 
-    def step(self, token: int) -> int:
-        return self.step_rows([token])[0]
+    def step(self, token: int, sampling=None) -> int:
+        return self.step_rows([token], sampling)[0]
 
-    def step_rows(self, tokens: list[int]) -> list[int]:
-        """R rows through the captured graphs; returns the target's argmax at each row."""
+    def step_rows(self, tokens: list[int], sampling=None) -> list[int]:
+        """R rows through the captured graphs; returns the target's token at each row: the argmax, or with
+        ``sampling`` the position-keyed sample (so a verify window's rows equal the serial path's)."""
 
         c, st = self.c, self.state
         R = len(tokens)
@@ -336,6 +338,8 @@ class SerialEngine:
         self.tables.gather(h[:, 1, :].reshape(1, -1), out=g["h_raw"][1:], layers=[1])     # overlaps layers 1-13
         g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
         g["b"].replay()
+        if sampling is not None and sampling.temperature > 0:
+            return sample_rows(g["logits"], [p0 + 1 + j for j in range(R)], sampling)
         g["h_next"].copy_(g["next"], non_blocking=True)
         torch.cuda.current_stream().synchronize()
         return g["h_next"].tolist()
@@ -444,8 +448,9 @@ class SerialEngine:
 
     # -- requests ---------------------------------------------------------------------------------------------
     @torch.no_grad()
-    def generate(self, prompt: list[int], max_tokens: int, *, chunk: int = MAX_ROWS, on_token=None) -> dict:
-        """Greedy decode after a chunked prefill; returns tokens and timings."""
+    def generate(self, prompt: list[int], max_tokens: int, *, chunk: int = MAX_ROWS, on_token=None,
+                 sampling=None) -> dict:
+        """Decode after a chunked prefill (greedy, or position-keyed sampling); returns tokens and timings."""
 
         self.reset()
         t0 = time.perf_counter()
@@ -455,7 +460,7 @@ class SerialEngine:
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         out = []
-        nxt = int(logits[-1].argmax())
+        nxt = sample_rows(logits[-1:], [len(prompt)], sampling)[0]
         rounds = accepted = 0
         t_draft = t_verify = 0.0
         eos = self.c.eos_token_id
@@ -473,19 +478,22 @@ class SerialEngine:
                     on_token(nxt)
                 if nxt == eos:
                     break
-                nxt = self.step(nxt) if self.graph is not None else int(self.forward([nxt])[-1].argmax())
+                if self.graph is not None:
+                    nxt = self.step(nxt, sampling)
+                else:
+                    nxt = sample_rows(self.forward([nxt])[-1:], [len(self.state.ids)], sampling)[0]
                 continue
             P = len(self.state.ids)
             k = policy.choose()
             ta = time.perf_counter()
             if k == 0:                                             # drafting does not pay here: one plain row
-                target = [self.step(nxt)]
+                target = [self.step(nxt, sampling)]
                 drafts = []
                 tb = ta
             else:
                 drafts = dsp.propose(nxt, P)[:k]
                 tb = time.perf_counter()
-                target = self.step_rows([nxt, *drafts])
+                target = self.step_rows([nxt, *drafts], sampling)
             t_draft += tb - ta
             t_verify += time.perf_counter() - tb
             ks[k] += 1

@@ -60,7 +60,8 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [ ] CSA2 compressors (ratios 2 / 1 per layer), compressed pools, cross-layer KV sharing (`kv_source_layer_ids`)
 - [x] Indexer (32×128, top-512, bf16 keys) shared by `index_source_layer_ids`; rings for window/raw caches;
       long-context parity to 16K tokens (NLL equal to vLLM; BENCH.md)
-- [ ] Candidate blocks (layer 20, 2048×8) for contexts > 16,384; goldens at ~32K
+- [x] Candidate blocks (layer 20, 2048×8): parity to 40K tokens (NLL 1.614 vs 1.613)
+- [x] Position-keyed sampling (`tensorfold.cuda.sampling.sample_rows`), DSpark acceptance against keyed samples
 - [ ] MoE: sqrt-softplus router, noaux_tc top-6 of 384, shared expert; routed via `cuda/exl3/experts`
 - [ ] Engram layers 1/14: n-gram hashing, FP8 e4m3 rows (never uint8), file-backed row store (O_DIRECT/mmap),
       mapped-table accounting in capacity
