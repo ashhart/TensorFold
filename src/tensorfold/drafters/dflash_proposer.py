@@ -111,15 +111,15 @@ class DFlashProposer:
             return []
         started = time.perf_counter()
         inputs = mx.array([[int(context[-1])] + [self.drafter.mask_id] * (block - 1)])
-        if self.drafter._sub_head() is None and self.drafter._plain_sub_head() is not None:
-            # Use the draft vocabulary and radix top-k when the head is not lane-tiled.
-            hidden = self.drafter.model.hidden_states(inputs, self.context, self.cache, 1)
-            tokens = self._chain_on_draft_vocab(hidden, inputs[:, 0], len(context))
-        elif not hasattr(self.drafter.model, "candidate_selector"):
-            # DFlash without DFlash2's selector: each position's most likely token (a keyed draw lands less often)
+        if not hasattr(self.drafter.model, "candidate_selector"):
+            # DFlash without a selector: each position's most likely token, over the draft vocabulary when it has one
             from .dflash_block import block_chain
 
             tokens = block_chain(self.drafter, inputs, self.context, self.cache)
+        elif self.drafter._sub_head() is None and self.drafter._plain_sub_head() is not None:
+            # Use the draft vocabulary and radix top-k when the head is not lane-tiled.
+            hidden = self.drafter.model.hidden_states(inputs, self.context, self.cache, 1)
+            tokens = self._chain_on_draft_vocab(hidden, inputs[:, 0], len(context))
         elif self.sampling is None:
             tokens, _, _ = self.drafter.model.propose(inputs, self.context, self.cache, 0.0, logits_start=1)
         else:
