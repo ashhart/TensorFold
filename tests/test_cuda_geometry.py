@@ -47,7 +47,7 @@ def allocations(monkeypatch):
                            int32="int32", int64="int64",
                            zeros=allocate, empty=allocate, full=lambda shape, fill, **kw: allocate(shape, **kw),
                            zeros_like=lambda x: allocate(x.shape, dtype=x.dtype, device=x.device),
-                           arange=lambda n, **kw: allocate((n,), **kw),
+                           arange=lambda *a, **kw: allocate((len(range(*a)),), **kw),
                            cuda=SimpleNamespace(is_available=lambda: False))
     # Imports use real torch annotations; only the allocation sites are replaced.
     try:
@@ -107,10 +107,11 @@ def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, alloc
     assert bytes_in(arrays) <= estimated
 
 
-def test_mla_latent_estimate_grows_by_the_cache_and_counts_one_prompt_chunk_scratch():
+def test_mla_latent_estimate_grows_by_the_cache_and_counts_one_prompt_chunk_scratch(monkeypatch):
     """Per token, the latent estimate grows by the latent and indexer caches of every attention layer (the MTP's
-    too) plus one fp32 pool score for each prompt-chunk row; the MTP head adds its caches and decode buffers, never a
-    second set of the prompt chunk's latent partials (it absorbs through the same prefill buffers)."""
+    too) plus one fp32 pool score for each of the (at most 512) prompt-chunk rows scored at once; the MTP head adds its
+    caches and decode buffers, never a second set of the prompt chunk's latent partials (it absorbs through the same
+    prefill buffers)."""
 
     text = {"hidden_size": 512, "num_attention_heads": 8, "num_hidden_layers": 4,
             "layer_types": ["linear_attention", "full_attention"] * 2, "linear_num_heads": 8,
@@ -119,14 +120,18 @@ def test_mla_latent_estimate_grows_by_the_cache_and_counts_one_prompt_chunk_scra
     rows, heads, lw, index = geometry.PREFILL_ROWS, 4, 512, 128
     a, b = 1 << 18, (1 << 18) + 4096
     const = {}
-    for mtp in (0, 1):
-        g = geometry.mla_geometry({**text, "num_nextn_predict_layers": mtp}, 2, 8, latent=True)
-        count = 2 + mtp
-        slope = count * lw * 2 + count * index * 2 * 9 // 4 + rows
-        assert g.bytes_at(b) - g.bytes_at(a) == (b - a) * slope
-        const[mtp] = g.bytes_at(a) - a * slope
-    partials = ((2560 + rows + 511) // 512) * rows * heads * (lw + 2) * 4
-    assert 0 < const[1] - const[0] < partials
+    for block in (256, 512):                     # rows of the dense pass's partials
+        monkeypatch.setattr(geometry, "MLA_PROMPT_ATT_ROWS", block)
+        for mtp in (0, 1):
+            g = geometry.mla_geometry({**text, "num_nextn_predict_layers": mtp}, 2, 8, latent=True)
+            count = 2 + mtp
+            slope = count * lw * 2 + count * index * 2 * 9 // 4 + min(rows, 512)
+            assert g.bytes_at(b) - g.bytes_at(a) == (b - a) * slope
+            const[block, mtp] = g.bytes_at(a) - a * slope
+    # one set of partials, with or without the MTP head: 256 more rows of them cost the same in both
+    more = ((2560 + rows + 511) // 512) * 256 * heads * (lw + 2) * 4
+    assert const[512, 0] - const[256, 0] == const[512, 1] - const[256, 1] == more
+    assert const[512, 1] > const[512, 0]
 
 
 @pytest.mark.torch
@@ -164,6 +169,42 @@ def test_mla_actual_cache_and_replay_state_are_budgeted(monkeypatch, allocations
     estimated = geometry.mla_geometry(text, 2, 8, latent=latent).bytes_at(slots)
     assert any(slots in t.shape for t in arrays)             # the constructors ran on the fake allocator
     assert bytes_in(arrays) <= estimated
+
+
+@pytest.mark.torch
+def test_mla_prompt_chunk_latent_partials_hold_one_row_block(monkeypatch, allocations):
+    """A prompt chunk's dense partials and pool scores hold one row block each, as mla_geometry counts."""
+    arrays, fake = allocations
+    mod = importlib.import_module("tensorfold.families.glm5_next.cuda.forward")
+    kda = importlib.import_module("tensorfold.families.glm5_next.cuda.kda")
+    cache = importlib.import_module("tensorfold.families.glm5_next.cuda.latent")
+    attention = importlib.import_module("tensorfold.families.glm5_next.cuda.attention")
+    sparse = importlib.import_module("tensorfold.families.glm5_next.cuda.sparse")
+    for m in (mod, kda, cache, attention):
+        monkeypatch.setattr(m, "torch", fake)
+    monkeypatch.setattr(cache, "ENABLED", True)
+    cfg = SimpleNamespace(heads=64, lin_heads=8, conv=4, qk_dim=256, v_dim=256, index_dim=128, hidden=512, streams=4,
+                          q_lora=512, kv_lora=512, index_heads=32, dense_width=1024, top_k=2, moe_width=512, experts=8,
+                          quant="mlx")
+    layers = [SimpleNamespace(index=i, kind="kda" if i % 2 == 0 else "dsa",
+                              kda=SimpleNamespace(proj=SimpleNamespace(n=3 * 4 * 128 + 256 + 4))) for i in range(4)]
+    weights = SimpleNamespace(cfg=cfg, world=2, device="cpu", layers=layers, meta={}, mtp=None,
+                              head=SimpleNamespace(n=512))
+    assert mod.PROMPT_ATT_ROWS == geometry.MLA_PROMPT_ATT_ROWS == 512
+    assert sparse.SELECT_ROWS == geometry.MLA_SELECT_ROWS == 512
+    for rows, prefill, part in ((2048, True, 512), (4096, True, 512), (256, True, 256), (16, False, 16)):
+        s = mod.Buffers(weights, rows, 1 << 20, prefill=prefill).lat_s
+        assert s.rows == rows and s.part_rows == part
+        assert s.po.shape == (s.nch * part * 32 * 512,) and s.pm.shape == s.pl.shape == (s.nch * part * 32,)
+        assert s.qa.shape == s.ol.shape == (rows, 32, 512)
+
+
+def test_mla_chunk_scratch_counts_one_block_of_pool_scores():
+    text = {"num_attention_heads": 64, "kv_lora_rank": 512, "index_topk": 2048, "qk_nope_head_dim": 256}
+    for cap in (4096, 262152, 1 << 20):
+        partials = 5 * 2048 * 32 * 514 * 4                            # sparse attention's 5 chunk partials a row
+        assert geometry.mla_chunk_scratch(text, 2, cap, latent=True) == \
+            512 * 4 * ((cap + 3) // 4) + 2048 * 16 * 2051 + partials
 
 
 def test_weight_partition_rounding_and_float_casts():

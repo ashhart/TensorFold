@@ -7,6 +7,8 @@ from .capacity import Geometry, itemsize
 
 PREFILL_ROWS = 2048     # a prompt chunk's rows: Flash Next and GLM keep buffers of this many rows
 PREFILL_ATT_ROWS = 256  # Flash Next's prompt attention block
+MLA_PROMPT_ATT_ROWS = 512   # GLM's prompt-chunk rows one dense latent attention call takes (forward.PROMPT_ATT_ROWS)
+MLA_SELECT_ROWS = 512       # GLM's prompt-chunk rows whose pool scores are held at once (sparse.SELECT_ROWS)
 
 
 def size(info: dict, name: str = "tensor") -> int:
@@ -231,10 +233,12 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     def bytes_at(capacity: int) -> int:
         scratch = mla_chunk_scratch(t, world, capacity, latent=latent)
         if latent:
-            # latent cache; one prompt chunk's latent partials and absorbed rows (the MTP absorbs through the same buffers)
+            # latent cache; a prompt chunk's latent partials (its dense pass runs MLA_PROMPT_ATT_ROWS rows at a time)
+            # and absorbed rows (the MTP absorbs through the same buffers)
             cache = count * capacity * lw * 2
             dense = min(capacity, minimum_slots) + PREFILL_ROWS
-            scratch += ((dense + 511) // 512) * PREFILL_ROWS * heads * (lw + 2) * 4 + 4 * PREFILL_ROWS * heads * lw
+            scratch += (((dense + 511) // 512) * min(PREFILL_ROWS, MLA_PROMPT_ATT_ROWS) * heads * (lw + 2) * 4
+                        + 4 * PREFILL_ROWS * heads * lw)
         else:
             cache = count * capacity * heads * (kd + vd) * 2
             scratch += (2 if mtp else 1) * ((capacity + rows + 511) // 512) * rows * heads * (kd + 2) * 4
@@ -247,7 +251,8 @@ def mla_chunk_scratch(t: dict, world: int, capacity: int, *, latent: bool) -> in
     """A prompt chunk's transient bytes: token selection (fp32 pool scores, chosen pools, token lists), then sparse attention's partials."""
 
     heads, topk = int(t["num_attention_heads"]) // world, int(t.get("index_topk", 2048))
-    select = PREFILL_ROWS * (4 * ((capacity + 3) // 4) + 16 * (topk + 3))
+    # the fp32 pool scores of at most MLA_SELECT_ROWS rows at once, the chosen pools and token lists of the chunk's
+    select = min(PREFILL_ROWS, MLA_SELECT_ROWS) * 4 * ((capacity + 3) // 4) + PREFILL_ROWS * 16 * (topk + 3)
     if latent:
         return select + ((topk + 515) // 512) * PREFILL_ROWS * heads * (int(t.get("kv_lora_rank", 512)) + 2) * 4
     kd = int(t["qk_nope_head_dim"]) + int(t.get("qk_rope_head_dim", 0))

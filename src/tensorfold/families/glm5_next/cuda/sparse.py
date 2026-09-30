@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from tensorfold.cuda.geometry import MLA_SELECT_ROWS as SELECT_ROWS   # a prompt chunk's rows scored at once
+
 POOL = 4
 TOPK_POOLS = 512
 BR = 16
@@ -173,14 +175,24 @@ def select_tokens(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: in
         raise ValueError("select_tokens: index queries must be contiguous rows, weights unit-stride columns")
     # score only visible pools, rounded up to a power of two so the allocator reuses a few sizes (exact sizes fragmented memory at 128k)
     np_max = bucket if bucket is not None else pool_bucket(pos, R, np_max)
-    scores = torch.empty((R, np_max), dtype=torch.float32, device=qi.device)
+    # rows go through in blocks of SELECT_ROWS, each block scoring the window's np_max pools (the same columns, so the
+    # same bits a row): the fp32 scores hold SELECT_ROWS rows of the capacity-sized width, not the window's
+    B = min(R, SELECT_ROWS)
+    scores = torch.empty((B, np_max), dtype=torch.float32, device=qi.device)
     # heads and width from the tensors: fixed ones read past a row's index query into its window neighbours
     H = wts.shape[1]
     D = qi.shape[1] // H
     wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # 32 ** -0.5 exactly as before
-    _scores[(R, triton.cdiv(np_max, 64))](qi, wts, wts.stride(0), pk, scores, pos_dev, R, np_max, D ** -0.5, wscale,
-                                         H=H, HP=max(16, triton.next_power_of_2(H)), D=D, BP=64, RB=1, num_warps=4)
-    pools = top_pools(scores, TOPK_POOLS)                                               # ascending pool index
+    blocks = []
+    for a in range(0, R, B):
+        n = min(B, R - a)
+        at = pos_dev if a == 0 else pos_dev + a                        # the block's first row's position
+        _scores[(n, triton.cdiv(np_max, 64))](qi[a:a + n], wts[a:a + n], wts.stride(0), pk, scores, at, n, np_max,
+                                             D ** -0.5, wscale, H=H, HP=max(16, triton.next_power_of_2(H)), D=D,
+                                             BP=64, RB=1, num_warps=4)
+        blocks.append(top_pools(scores[:n], TOPK_POOLS))                               # ascending pool index
+    del scores
+    pools = blocks[0] if len(blocks) == 1 else torch.cat(blocks)
     dev = qi.device
     width = TOPK_POOLS * POOL + POOL - 1
     # all rows at once: the 512 pools' tokens ascending, then the incomplete last pool's visible tokens; rows within the dense limit count 0

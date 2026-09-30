@@ -10,6 +10,7 @@ import triton
 import triton.language as tl
 
 from tensorfold.cuda import experts as grouped
+from tensorfold.cuda.geometry import MLA_PROMPT_ATT_ROWS as PROMPT_ATT_ROWS   # a dense latent call's prompt rows
 from tensorfold.cuda.kernels import prefill_attention, qmm as shared
 
 from . import glue, kda as kda_mod, latent, prof, qmm, sparse
@@ -45,8 +46,9 @@ class Buffers:
         if latent.ENABLED:
             # Dense attention only ever covers contexts up to the dense limit; longer rows go sparse.
             self.attn = None
+            # a prompt chunk's dense pass runs PROMPT_ATT_ROWS rows at a time: its fp32 partials hold that many rows
             self.lat_s = latent.LatentScratch(rows, HL, latent.chunks_for(min(capacity, 2560) + rows), dev,
-                                              lw=c.kv_lora)
+                                              lw=c.kv_lora, part_rows=PROMPT_ATT_ROWS if prefill else rows)
         else:
             self.attn = AttnScratch(1 if prefill else rows, HL, c.qk_dim, capacity, dev)
         if prefill:
@@ -324,6 +326,21 @@ def dsa_block(layer: LayerW, w: Weights, kc: torch.Tensor, vc: torch.Tensor, pos
     return out_proj(w, b, o, a.o, None if b.prefill else qmm.group_sums(o, b.xs_ao[:R]), R)
 
 
+def dense_attention(qa: torch.Tensor, lc: torch.Tensor, pos_dev: torch.Tensor, s: latent.LatentScratch, *,
+                    scale: float, nch: int, out: torch.Tensor) -> torch.Tensor:
+    """``latent.attention`` in blocks of ``part_rows`` rows, each at its first row's position: one call's bits a row."""
+
+    R, step = qa.shape[0], s.part_rows
+    hb = latent.head_block(R)
+    if R <= step:
+        return latent.attention(qa, lc, pos_dev, s, scale=scale, nch=nch, out=out, hb=hb)
+    for r0 in range(0, R, step):
+        r1 = min(R, r0 + step)
+        at = pos_dev if r0 == 0 else pos_dev + r0          # the block's first row's position, on the device
+        latent.attention(qa[r0:r1], lc, at, s, scale=scale, nch=nch, out=out[r0:r1], hb=hb)
+    return out
+
+
 def _dsa_latent(a, w: Weights, lc: torch.Tensor, pos_dev: torch.Tensor, b: Buffers, R: int, nch: int | None,
                 index, host_pos: int | None, sparse_np: int | None = None) -> torch.Tensor:
     """DSA on the latent cache: the same indexer and selection, attention over latents with kv_b's key blocks absorbed into the query."""
@@ -350,7 +367,7 @@ def _dsa_latent(a, w: Weights, lc: torch.Tensor, pos_dev: torch.Tensor, b: Buffe
     if not all_sparse:
         # Rows past the dense limit are recomputed sparsely below, so the dense pass needs only the chunks up to it.
         with prof.timed("dsa: dense attention"):
-            latent.attention(qa, lc, pos_dev, s, scale=scale, nch=min(nch or s.nch, s.nch), out=ol)
+            dense_attention(qa, lc, pos_dev, s, scale=scale, nch=min(nch or s.nch, s.nch), out=ol)
     if sparse_rows:
         with prof.timed("dsa: select tokens"):
             mm(b, b.qr[:R], ix.qb, b.xs_qr[:R], b.qi[:R])

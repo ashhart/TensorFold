@@ -325,3 +325,74 @@ def test_a_deep_prompt_chunk_stays_within_the_estimates_chunk_scratch():
     used = torch.cuda.max_memory_allocated() - base
     assert bool((counts > 0).all())
     assert used <= mla_chunk_scratch(text, 2, cap, latent=True), used
+
+
+@cuda
+@pytest.mark.parametrize("P, R", [(0, 2048), (0, 1100), (1900, 2048), (1024, 1500), (300, 530), (0, 600), (40, 300)])
+def test_dense_pass_in_row_blocks_keeps_the_bits(P, R):
+    """A prompt chunk's dense pass in PROMPT_ATT_ROWS-row blocks equals one latent.attention call, bitwise."""
+    from tensorfold.families.glm5_next.cuda import forward, latent
+
+    gen = torch.Generator(device="cuda").manual_seed(P + R)
+    heads, nch = 32, latent.chunks_for(P + R)
+    cache = torch.empty((P + R, L), dtype=torch.bfloat16, device="cuda").normal_(generator=gen)
+    qa = (torch.empty((R, heads, L), dtype=torch.bfloat16, device="cuda").normal_(generator=gen) * 0.05)
+    pos = torch.tensor([P], dtype=torch.int32, device="cuda")
+    whole = latent.LatentScratch(R, heads, nch, "cuda")
+    want = latent.attention(qa, cache, pos, whole, scale=0.07, nch=nch,
+                            out=torch.empty((R, heads, L), dtype=torch.bfloat16, device="cuda")).clone()
+    del whole
+    s = latent.LatentScratch(R, heads, nch, "cuda", part_rows=forward.PROMPT_ATT_ROWS)
+    assert s.po.numel() == nch * min(R, forward.PROMPT_ATT_ROWS) * heads * L
+    got = torch.full((R, heads, L), float("nan"), dtype=torch.bfloat16, device="cuda")
+    forward.dense_attention(qa, cache, pos, s, scale=0.07, nch=nch, out=got)
+    torch.cuda.synchronize()
+    assert torch.equal(got.view(torch.int16), want.view(torch.int16))
+    if R > s.part_rows:                                             # one call past the partials' rows refuses
+        with pytest.raises(ValueError, match="past the scratch"):
+            latent.attention(qa, cache, pos, s, scale=0.07, nch=nch, out=got)
+
+
+@cuda
+@pytest.mark.parametrize("pos, R", [(262144 - 2048, 2048), (130000, 1100), (9000, 513), (5000, 512), (2047, 64)])
+def test_select_tokens_in_row_blocks_keeps_the_lists(monkeypatch, pos, R):
+    """Pools scored SELECT_ROWS rows at a time give every row the tokens and count of all rows at once."""
+    from tensorfold.families.glm5_next.cuda import sparse
+
+    gen = torch.Generator().manual_seed(pos + R)
+    H, D = 32, 128
+    npool_max = (pos + R) // 4 + 2
+    qi = torch.randn((R, H * D), generator=gen).to(torch.bfloat16).cuda()
+    wts = torch.randn((R, H), generator=gen).to(torch.bfloat16).cuda()
+    pk = torch.randn((npool_max, D), generator=gen).to(torch.bfloat16).cuda()
+    pos_dev = torch.tensor([pos], dtype=torch.int32, device="cuda")
+    assert sparse.SELECT_ROWS == 512
+    got_t, got_c = sparse.select_tokens(qi, wts, pk, pos, R, npool_max - 2, pos_dev)
+    monkeypatch.setattr(sparse, "SELECT_ROWS", 1 << 20)                       # every row at once, as before
+    want_t, want_c = sparse.select_tokens(qi, wts, pk, pos, R, npool_max - 2, pos_dev)
+    assert torch.equal(got_c, want_c)
+    assert torch.equal(got_t, want_t)
+
+
+@cuda
+def test_select_tokens_scores_hold_one_row_block():
+    """The deepest chunk of a 1,048,576-token window: selection's fp32 pool scores hold SELECT_ROWS rows at peak."""
+    from tensorfold.families.glm5_next.cuda import sparse
+
+    cap, R, H, D = 1 << 20, 2048, 32, 128
+    pos = cap - 8 - R
+    gen = torch.Generator(device="cuda").manual_seed(9)
+
+    def rand(*shape):
+        return torch.empty(shape, dtype=torch.bfloat16, device="cuda").normal_(generator=gen)
+    pk, qi, wts = rand(cap // 4 + 2, D), rand(R, H * D), rand(R, H)
+    pos_dev = torch.tensor([pos], dtype=torch.int32, device="cuda")
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    tokens, counts = sparse.select_tokens(qi, wts, pk, pos, R, cap // 4, pos_dev)
+    torch.cuda.synchronize()
+    used = torch.cuda.max_memory_allocated() - base
+    scores = sparse.SELECT_ROWS * (cap // 4) * 4
+    assert bool((counts > 0).all())
+    assert scores <= used < 2 * scores, used                    # one block's scores (512 MiB), not 2,048 rows' (2 GiB)
