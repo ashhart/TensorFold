@@ -75,6 +75,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
         protocol_version = "HTTP/1.1"
 
         def log_message(self, format: str, *args: Any) -> None:
+            if self._route() in ("/metrics", "/v1/metrics"):       # scrapes are not conversation
+                return
             print(f"[tensorfold] {self.address_string()} {format % args}")
 
         def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
@@ -85,6 +87,14 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_text(self, body: str, status: int = 200) -> None:
+            data = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _route(self) -> str:
             # Tolerate query strings, trailing slashes and client URLs with or without the /v1 prefix.
             return self.path.split("?", 1)[0].rstrip("/")
@@ -93,6 +103,10 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             route = self._route()
             if responses.route(route):
                 return responses.get(self, app, responses.route(route))
+            if route in ("/metrics", "/v1/metrics"):
+                builder = getattr(app, "metrics_text", None)
+                self._send_text(builder() if callable(builder) else "")
+                return
             if route in {"", "/health"}:
                 self._send_json(
                     {

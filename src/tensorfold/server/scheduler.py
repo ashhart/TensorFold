@@ -105,6 +105,7 @@ class Scheduler(PromptFill):
         admission: Any = None,
         prompt_memory: Any = None,
         decode_share: float = 0.25,
+        metrics: Any = None,
     ) -> None:
         if lanes < 1:
             raise ValueError("lanes must be positive")
@@ -160,6 +161,7 @@ class Scheduler(PromptFill):
         self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
         self.decoded, self.prefilled = Meter(), ChunkRate()       # the live line's decode and prefill tok/s
+        self.metrics = metrics
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:
@@ -201,6 +203,8 @@ class Scheduler(PromptFill):
     def submit(self, job: ChatJob) -> None:
         if self._stop.is_set():
             raise RuntimeError("the scheduler is closed")
+        if self.metrics is not None:
+            self.metrics.prompt_tokens.add(len(job.prompt_ids))
         self._queue.put(job)
 
     def cancel(self, cancellation: Cancellation) -> None:
@@ -596,8 +600,16 @@ class Scheduler(PromptFill):
         self.completed += 1
         self._finish(job)
 
-    @staticmethod
-    def _finish(job: ChatJob) -> None:
+    def _finish(self, job: ChatJob) -> None:
+        """Take a finished job off the books and give it the one token it is owed."""
+
         job.finished_at = time.perf_counter()
+        metrics = self.metrics
+        if metrics is not None:
+            if job.prefilled_at > 0.0:
+                metrics.observe_ttft(job.prefilled_at - job.submitted_at)
+            metrics.observe_e2e(job.finished_at - job.submitted_at)
+            if job.stream is not None:
+                metrics.generation_tokens.add(len(job.stream.emitted))
         job.chunks.put(None)
         job.done.set()

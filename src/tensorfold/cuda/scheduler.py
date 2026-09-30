@@ -87,7 +87,8 @@ class Scheduler:
 
         if self.decoder.live() < self.max_streams or not self.waiting.foreground():
             return
-        live = list(getattr(self.decoder, "streams", {}).values())
+        streams = getattr(self.decoder, "streams", {})
+        live = list(streams.values() if isinstance(streams, dict) else streams)
         stream = next((s for s in reversed(live) if s.background and not s.done and s.constraint is None
                        and s.vision is None and len(s.out) < s.count), None)
         if stream is None:

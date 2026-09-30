@@ -45,14 +45,20 @@ def make_handler(app: App):
 
         def _json(self, code: int, payload: dict[str, Any]) -> None:
             data = json.dumps(payload).encode()
+            self._write(code, data, "application/json")
+
+        def _write(self, code: int, data: bytes, content_type: str) -> None:
             try:
                 self.send_response(code)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError):          # the client has gone
                 self.close_connection = True
+
+        def _metrics(self) -> None:
+            self._write(200, health.exposition(app).encode(), "text/plain; version=0.0.4")
 
         def _stream_error(self, error: dict[str, Any]) -> None:
             """End an open stream with an error event and ``[DONE]``, as the MLX server does."""
@@ -69,6 +75,8 @@ def make_handler(app: App):
                 self._json(200, {"object": "list", "data": [{"id": app.served, "object": "model", "owned_by": "tensorfold"}]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
                 self._json(200, health.of(app).snapshot(app))
+            elif self.path.rstrip("/") in ("/metrics", "/v1/metrics"):
+                self._metrics()
             elif responses.route(self.path):
                 responses.get(self, app, responses.route(self.path))
             else:

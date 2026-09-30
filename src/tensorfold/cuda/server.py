@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -260,6 +261,7 @@ class App:
         """One reply; once ``cancelled()`` holds, a waiting request raises ``RequestCancelled`` unstarted, a running one stops at its next round and raises it after ``generate``."""
 
         prepared = prepared if prepared is not None else self.prepare(body, chat)
+        arrived = time.perf_counter()                # the request's clock: the /metrics latencies start here
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
         tools, thinking = prepared.tools, prepared.thinking
         policy = ToolCallPolicy(body)
@@ -369,8 +371,12 @@ class App:
         try:
             if cancelled is not None and cancelled():                # the client left while this request waited
                 raise RequestCancelled("the client left before the request started")
-            with health.of(self).running(len(prompt), out) as request:      # /health reads ``out``; rounds never call in
-                stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, on_tokens)
+            with health.of(self).running(len(prompt), out, started=arrived) as request:      # /health reads ``out``; rounds never call in
+                def first_token(new: list[int]) -> bool:
+                    if request.first <= 0.0:
+                        request.first = time.perf_counter()
+                    return on_tokens(new)
+                stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, first_token)
         finally:
             if turns is not None:
                 turns.give()

@@ -18,6 +18,7 @@ from tensorfold.server.cancellation import Cancellation
 from tensorfold.server.errors import RequestError
 from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
+from tensorfold.server.metrics import Metrics
 from tensorfold.server.scheduler import ChatJob, Scheduler
 from tensorfold.server.stopping import StopPolicy
 from tensorfold.server.text import (
@@ -163,6 +164,7 @@ class ChatApp(RequestOptions):
             self.engine, measure, probe_tokens(tokenizer))
         if self.prompt_memory is not None:
             self.context_window, self.context_fitted = self.prompt_memory.fit_window(self.context_window, fit_context)
+        self.metrics = Metrics()
         self.scheduler = Scheduler(
             self.engine,
             lanes=int(lanes),
@@ -175,6 +177,7 @@ class ChatApp(RequestOptions):
             model_id=model_id,
             prompt_memory=self.prompt_memory,
             decode_share=decode_share,
+            metrics=self.metrics,
         )
         # evicted conversations go to disk (``spill_bytes`` of this model's files at most) and come back on demand
         self.spill_bytes = int(spill_bytes) if self.checkpoints is not None and self.scheduler.session_dir else 0
@@ -583,8 +586,21 @@ class ChatApp(RequestOptions):
                 f"draft={sum(r.draft_ms for r in stats) / n:.1f} post={sum(r.post_ms for r in stats) / n:.1f} "
                 f"rows={sum(r.width for r in stats) / n:.1f} ")
 
+    def metrics_text(self) -> str:
+        """``GET /metrics``: the scheduler's queue, the token counters and the request latencies, vLLM's names.
+
+        The gauges read the scheduler's own tables; the counters and histograms are the ones the scheduler updates
+        as jobs are admitted, prefilled and finished. The engine's drafter counters appear only when the engine
+        counts them; a stream's KV pool appears nowhere here: on the Mac the cache grows from the memory budget
+        and has no fixed size to take a percentage of.
+        """
+
+        running = self.scheduler.active + (1 if self.scheduler.filling is not None else 0)
+        drafted = getattr(self.engine, "drafted", None)
+        accepted = getattr(self.engine, "accepted", None)
+        return "\n".join(self.metrics.render(running, self.scheduler.waiting, drafted, accepted)) + "\n"
+
     def close(self) -> None:
-        self.scheduler.on_stop = self.save_sessions    # saved by the scheduler thread, which owns the arrays
         self.scheduler.stop(timeout=120.0)
 
     def save_sessions(self) -> int:

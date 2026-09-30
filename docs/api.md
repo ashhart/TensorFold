@@ -6,6 +6,7 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | --- | --- |
 | `GET /v1/models` | Served model ID; MLX also lists configured aliases |
 | `GET /health` | Server health and available status information |
+| `GET /metrics` | Prometheus metrics (`text/plain; version=0.0.4`); CUDA also serves it at `GET /v1/metrics` |
 | `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
 | `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
@@ -238,3 +239,31 @@ HTTP 400 refuses what this server does not run: built-in tools (web search, file
 others), `background`, `include` (encrypted reasoning among them), `conversation`, `prompt` templates,
 `truncation: "auto"`, `top_logprobs`, `input_file` parts and file IDs, `item_reference` items, encrypted reasoning
 items, and a `previous_response_id` that is not stored.
+
+## Metrics
+
+`GET /metrics` serves the server's live counters in Prometheus text format (0.0.4); the CUDA server also answers
+`GET /v1/metrics`. The names mirror vLLM's `vllm:*` metrics one for one (issue #110), so a vLLM dashboard scrapes
+TensorFold by swapping the prefix. The counters are the same numbers `/health` reports, and the latencies are each
+request's own times; nothing is estimated, and a metric the engine cannot measure honestly is left out of the body
+rather than read zero.
+
+| Metric | Type | CUDA server | Mac server |
+| --- | --- | --- | --- |
+| `tensorfold:num_requests_running` | gauge | Concurrent engines: the decoder's live and prefilling streams; serialized engines: the request in flight | `scheduler.active`, plus the stream being prefilled |
+| `tensorfold:num_requests_waiting` | gauge | The engine's scheduler queue, or the serialized engine's turn queue | The scheduler's queue, admitted streams waiting included |
+| `tensorfold:prompt_tokens_total` | counter | Finished requests' prompts, as `/health` counts them | Counted as each job's prompt is admitted |
+| `tensorfold:generation_tokens_total` | counter | Finished replies' tokens (live replies' tokens so far included), as `/health` counts them | Counted as each reply finishes |
+| `tensorfold:kv_cache_usage_perc{stream}` | gauge, 0..1 | Each stream's rows held in its own pool: per-stream pools on concurrent engines (labeled by stream ID), the serialized engine's single pool (labeled `0`) while a request runs it. Omitted when the engine reports no pool | Omitted: on the Mac each stream's cache grows from the memory budget, so no fixed pool exists to take a fraction of |
+| `tensorfold:spec_decode_num_draft_tokens_total` | counter | `/health`'s `drafted_total` (zero on engines that count no drafts) | The engine's `drafted` counter, when the engine counts it; omitted otherwise |
+| `tensorfold:spec_decode_num_accepted_tokens_total` | counter | `/health`'s `accepted_total` | The engine's `accepted` counter, when the engine counts it; omitted otherwise |
+| `tensorfold:time_to_first_token_seconds` | histogram | First token minus the request's arrival at the server, so queue and turn waits are in, as in vLLM. A reply whose client left before any token took no first token and takes no observation | Prefill completion minus submission, when the prefill path ran |
+| `tensorfold:e2e_request_latency_seconds` | histogram | Reply completion minus arrival, for every finished request | Job completion minus submission |
+
+What vLLM reports that stays out: `vllm:spec_decode_num_drafts_total` (the engines count drafted and accepted
+*tokens*; a draft *step* count is not tracked, and the round count mixes draft and non-draft rounds, so a draft
+count would be a guess), and on the Mac `vllm:kv_cache_usage_perc` (above).
+
+The histograms use vLLM's default bucket lists. Counters and histograms are cumulative since server start, as
+Prometheus expects; a stream's `kv_cache_usage_perc` line disappears when its request ends. Scrapes are silent in
+the request log, and scraping cadence is the scraper's.
