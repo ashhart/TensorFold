@@ -29,6 +29,9 @@ def main() -> None:
     ap.add_argument("--prompt", type=int, default=6)
     ap.add_argument("--ref", type=Path, help="reference .pt of the same prompt (rank 0 compares)")
     ap.add_argument("--decode", type=int, default=32)
+    ap.add_argument("--profile", action="store_true", help="profile 4 decode steps after the run (rank 0 prints)")
+    ap.add_argument("--no-parity", action="store_true")
+    ap.add_argument("--graph", action="store_true", help="capture the one-row decode step as a CUDA graph")
     args = ap.parse_args()
 
     torch.cuda.set_device(0)
@@ -41,15 +44,25 @@ def main() -> None:
           f"{torch.cuda.memory_allocated() / 2**30:.1f} GiB", flush=True)
     eng = SerialEngine(w, Comm(nccl), str(args.engram), str(args.model / "tokenizer.json"), cap=1024)
     nccl.barrier()
+    if args.graph:
+        t0 = time.time()
+        with torch.no_grad():
+            eng.capture()
+        print(f"[rank {args.rank}] decode graph captured in {time.time() - t0:.1f} s", flush=True)
 
     ids = json.loads(args.golden.read_text())["goldens"][args.prompt]["ids"]
     with torch.no_grad():
+        if args.no_parity:
+            ids_parity = []
+        else:
+            ids_parity = ids
         eng.reset()
         t1 = time.time()
-        logits = torch.cat([eng.forward(ids[i:i + MAX_ROWS]) for i in range(0, len(ids), MAX_ROWS)])
+        logits = torch.cat([eng.forward(ids_parity[i:i + MAX_ROWS]) for i in range(0, len(ids_parity), MAX_ROWS)]) \
+            if ids_parity else None
         torch.cuda.synchronize()
         t2 = time.time()
-    if args.rank == 0:
+    if args.rank == 0 and ids_parity:
         print(f"prefill {len(ids)} tokens in {t2 - t1:.2f} s ({len(ids) / (t2 - t1):.0f} tok/s)", flush=True)
         if args.ref:
             ref = torch.load(args.ref)["logits"].float()
@@ -69,6 +82,22 @@ def main() -> None:
         print(f"decode {len(res['tokens'])} tokens: {res['decode_tps']:.2f} tok/s "
               f"(prefill {res['prefill_tps']:.0f} tok/s)", flush=True)
         print("text:", repr(tok.decode(res["tokens"])), flush=True)
+    if args.profile:
+        from torch.profiler import ProfilerActivity, profile
+
+        with torch.no_grad(), profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            t = time.perf_counter()
+            for tok_id in res["tokens"][:4]:
+                eng.forward([tok_id])
+            torch.cuda.synchronize()
+            wall = (time.perf_counter() - t) / 4
+        if args.rank == 0:
+            events = prof.key_averages()
+            gpu = sum(e.self_device_time_total for e in events) / 4 / 1e3
+            launches = sum(e.count for e in events if e.self_device_time_total > 0) / 4
+            print(f"profile: wall {wall * 1e3:.1f} ms/step, GPU busy {gpu:.1f} ms/step, ~{launches:.0f} kernels/step",
+                  flush=True)
+            print(events.table(sort_by="self_device_time_total", row_limit=22, max_name_column_width=60), flush=True)
     nccl.barrier()
 
 

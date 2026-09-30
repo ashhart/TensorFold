@@ -67,7 +67,9 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
       365-token prefill 94.5% top-1 vs reference (NLL 1.420 vs 1.400), coherent greedy text; decode 7.3 tok/s,
       prefill 237 tok/s (2026-09-30)
 - [ ] Engine vs reference agreement should be ~99%: layer-diff the engine against reference dumps
-- [ ] Decode speed: CUDA graphs per row count, fused HC/attention kernels, fewer launches (floor ~20 ms/token)
+- [x] Fused HC pre/post Triton kernels (`cuda/hc.py`, tests/cuda/test_dsv41_hc.py) + one-row decode CUDA graph:
+      decode 7.3 → 18.4 tok/s; profile 38 ms GPU/step: weights ~22, small torch ops ~7, NCCL 2.7, HC 1.7, host ~5
+- [ ] Precomputed RoPE tables, fused attention kernel, fused norms; overlap Engram host reads (target ≤ 26 ms)
 - [ ] **Go/no-go**: serial decode must clearly beat 23 tok/s (target ≥ 40) at matching quality
 
 ## Phase 3 — drafting, long context, prefill
