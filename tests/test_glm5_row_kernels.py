@@ -317,7 +317,6 @@ def _requant(q: linear.Q, bits: int) -> linear.Q:
     return linear.Q(*mx.quantize(w, group_size=64, bits=bits), bits=bits, group=64)
 
 
-@pytest.mark.skipif(os.environ.get("TF_GLM_DENSE") == "matrix", reason="compares the fused MoE (MLX one-row arithmetic for the shared expert) with the unfused block, whose projections TF_GLM_DENSE=matrix moves to the matrix units")
 def test_moe_window_with_8bit_shared_expert_is_row_by_row(gpu, monkeypatch):
     """The fused MoE with an 8-bit shared expert gives every row of a window the row-by-row block's bits."""
 
@@ -334,7 +333,9 @@ def test_moe_window_with_8bit_shared_expert_is_row_by_row(gpu, monkeypatch):
     x = (0.5 * mx.random.normal((16, 512))).astype(mx.bfloat16)
     one = mx.concatenate([moe(x[r:r + 1], True) for r in range(16)])
     for rows in (2, 3, 4, 8, 16):
-        assert _same(F.moe_rows(moe, x[:rows]), one[:rows]), rows
+        # TF_GLM_DENSE=matrix: the block hands the fused MoE its shared expert, computed on the matrix units
+        kw = {"shared_out": moe.shared(x[:rows], True)} if linear.DENSE == "matrix" else {}
+        assert _same(F.moe_rows(moe, x[:rows], **kw), one[:rows]), rows
 
 
 def _rows_part(gate_up: linear.Q, half: int) -> linear.Q:
