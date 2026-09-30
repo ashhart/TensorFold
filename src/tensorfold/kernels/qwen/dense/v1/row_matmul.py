@@ -232,7 +232,9 @@ def fits(model: Any, backend: Backend) -> bool:
         return False
     for layer in language_model.model.layers:
         inner = layer.linear_attn if getattr(layer, "is_linear", False) else layer.self_attn
-        for _, module in list(inner.named_modules()) + list(layer.mlp.named_modules()):
+        # MoE: router and experts run MLX's kernels (row_forward.moe); only the shared expert uses the backend
+        mlp = layer.mlp.shared_expert if hasattr(layer.mlp, "switch_mlp") else layer.mlp
+        for _, module in list(inner.named_modules()) + list(mlp.named_modules()):
             if isinstance(module, nn.QuantizedLinear) and not backend.fits(module):
                 return False
     return True

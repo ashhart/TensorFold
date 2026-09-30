@@ -185,7 +185,7 @@ def _model_context(model_dir: Path) -> int:
     return int(limit) if isinstance(limit, int) and limit > 0 else 0
 
 
-def _drafter(family: Any, choice: str) -> str:
+def _drafter(family: Any, choice: str, backend: str = "mlx") -> str:
     """The draft model directory for ``--drafter`` (auto: the family's draft model if it has been pulled)."""
 
     from tensorfold import hub
@@ -194,7 +194,9 @@ def _drafter(family: Any, choice: str) -> str:
         return ""
     if choice != "auto":
         return str(hub.resolve(choice))
-    repo = getattr(family.package, "DRAFTER", "")
+    # a family that drafts otherwise on CUDA (Qwen3.6 MoE: its MTP layer) declares CUDA_DRAFTER = ""
+    repo = getattr(family.package, "CUDA_DRAFTER" if backend == "cuda" else "DRAFTER",
+                   getattr(family.package, "DRAFTER", ""))
     if not repo:
         return ""
     found = hub.cached(repo)
@@ -237,7 +239,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2")
     started = time.perf_counter()
-    drafter = "" if args.no_drafts else _drafter(family, args.drafter)
+    drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
     if getattr(args, "kv_dtype", "bf16") != "bf16":

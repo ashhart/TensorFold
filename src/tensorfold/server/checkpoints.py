@@ -57,7 +57,13 @@ def save_conversations(store: "CheckpointStore", directory: Path, model_id: str,
     with store._lock:
         entries = [entry for entry in store._entries if not entry.pinned]   # most recently used first
     # Save longest conversations first, with recency breaking ties, so short background requests cannot displace them.
-    entries.sort(key=lambda entry: -len(entry.tokens))
+    # Prompt-side entries (a prefix of their own prompt) go before reply ends: a template that re-renders the reply
+    # as history (Qwen3.6 drops the empty think block) never matches a reply end, while a prompt-side entry does and
+    # leaves only the reply to prefill again (M4 Pro, Qwen3.6: an 18,419-token turn resumed in 1.2 s, not 27 s).
+    def reply_end(entry: CheckpointEntry) -> bool:
+        return entry.tokens != entry.last_prompt[:len(entry.tokens)]
+
+    entries.sort(key=lambda entry: (reply_end(entry), -len(entry.tokens)))
     saved = total = 0
     for entry in entries:
         if saved >= keep or total + entry.nbytes > limit_bytes:
