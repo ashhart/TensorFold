@@ -46,6 +46,7 @@ pub const Sink = struct {
     tools: std.json.Value = .null,
     cancellation: @import("cancellation.zig").Cancellation = .{},
     gate: ?*@import("call_gate.zig").Gate = null,
+    replay_tokens: []const u32 = &.{},
     context: ?*anyopaque = null,
     emit: ?*const fn (?*anyopaque, []const u8) anyerror!void = null,
     fn check(s: Sink) !void {
@@ -113,6 +114,12 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
     pub fn isDecoding(g: *const RequestGeneration) bool {
         return switch (g.*) {
             inline else => |request| request.phase == .decode,
+        };
+    }
+
+    pub fn tokens(g: *const RequestGeneration) []const u32 {
+        return switch (g.*) {
+            inline else => |request| request.reply.tokens.items,
         };
     }
 
@@ -547,6 +554,7 @@ pub fn Generation(comptime M: type) type {
         }
 
         fn emitToken(g: *Self, m: *M) !void {
+            try @import("background.zig").Replay.token(g.sink.replay_tokens, g.reply.tokens.items.len, g.next);
             if (eos(m, g.next) and !g.options.ignore_eos) {
                 const ending = try g.tokenizer.decode(g.a, &.{@intCast(g.next)}, false);
                 defer g.a.free(ending);
@@ -572,6 +580,7 @@ pub fn Generation(comptime M: type) type {
         }
 
         fn finish(g: *Self) !void {
+            if (g.reply.tokens.items.len < g.sink.replay_tokens.len) return error.BackgroundReplayEndedEarly;
             const decoded = try g.tokenizer.decode(g.a, g.reply.tokens.items, false);
             defer g.a.free(decoded);
             g.reply.content = try g.a.dupe(u8, text.visible(decoded, g.options.stops, false));

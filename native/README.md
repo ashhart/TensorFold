@@ -163,6 +163,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Live serving status | `test-server-live test-server-live-http -Doptimize=safe -j1` | Python rate/redraw oracle; local Qwen for request counters, prefix reuse, cancellation, queue overflow and terminal modes |
 | Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream admission/growth-gate parity, repeated probes and Qwen/Gemma/Nemotron pause/resume correctness |
 | Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen rolling reservations, waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
+| Background priority | `test-server-background -Doptimize=safe -j1` | Qwen repeated interruption, free-slot admission, JSON/SSE replay, reasoning, images, Responses/tools and queued cancellation |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
 | Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven tokenizers, including DeepSeek's official encoder and upstream's rejection of required DeepSeek tool calls; no weights loaded |
@@ -226,8 +227,10 @@ memory before admitting another request. Requests that cannot fit
 alone are rejected. Retained text prefixes are evicted when doing so can make
 admission fit. Each prefill chunk is checked before allocation. Before decode
 rounds, the growth gate reserves shared-prefix copies, reclaims buffers and prefixes,
-pauses newer streams, or ends the newest when the oldest cannot grow. Background
-preemption remains incomplete. `/health` reports memory, growth-gate counters,
+pauses newer streams, or ends the newest when the oldest cannot grow. Requests with
+`priority: "background"` and short title-generation chats yield their caches when
+foreground work needs a slot or memory, then replay without repeating delivered
+output. `/health` reports `background_preemptions`, memory, growth-gate counters,
 memory-waiting requests and prompt-cache counters. Its `inference` object reports
 all admitted/queued requests, waiting requests, token totals and rates. Interactive
 stdout shows the same status every half second; `TENSORFOLD_NO_LIVE=1` disables it.

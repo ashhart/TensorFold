@@ -119,6 +119,36 @@ fn sameResponse(c: Client, expected: V, actual: V) !void {
     }
 }
 
+pub fn checkBackground(init: std.process.Init, port: u16, context: anytype, interrupt: anytype) !void {
+    const c = Client{ .init = init, .port = port };
+    const a = init.arena.allocator();
+    const cases = [_][]const u8{
+        \\{"input":"Explain why the sky is blue.","max_output_tokens":96,"ignore_eos":true,"temperature":0.7,"seed":123,"thinking_budget":24}
+        ,
+        \\{"input":"Call write with content containing a greeting in Danish, Chinese and English. Write at least 30 words.","tools":[{"type":"function","name":"write","parameters":{"type":"object","properties":{"content":{"type":"string"}},"required":["content"]}}],"tool_choice":"required","reasoning":{"effort":"none"},"max_output_tokens":256,"temperature":0,"seed":123}
+        ,
+    };
+    for (cases, 0..) |source, kind| {
+        var request = (try std.json.parseFromSlice(V, a, source, .{})).value;
+        const expected = try c.call("POST", "/v1/responses", request, 200);
+        if (kind == 1) try std.testing.expectEqualStrings("function_call", field(field(expected, "output").array.items[0], "type").string);
+        for ([_]bool{ false, true }) |streaming| {
+            try request.object.put(a, "priority", .{ .string = "background" });
+            try request.object.put(a, "stream", .{ .bool = streaming });
+            const status = try c.call("GET", "/health", .null, 200);
+            const decoded = field(field(status, "inference"), "decoded_tokens").integer;
+            const preemptions = field(status, "background_preemptions").integer;
+            const socket = try c.open("POST", "/v1/responses", request);
+            defer socket.close(init.io);
+            try interrupt(context, port, decoded, preemptions);
+            const actual = if (streaming) try c.streamed(socket) else (try std.json.parseFromSlice(V, a, try c.read(socket, 200), .{})).value;
+            try sameResponse(c, expected, actual);
+            try equal(actual, try c.call("GET", try c.path(actual), .null, 200));
+        }
+    }
+    std.debug.print("PASS: preempted Responses text/reasoning and required tools preserve JSON/SSE, event sequence, final usage and stored response\n", .{});
+}
+
 pub fn check(init: std.process.Init, port: u16, image: []const u8) !void {
     const c = Client{ .init = init, .port = port };
     const a = init.arena.allocator();

@@ -132,6 +132,12 @@ pub const Stats = struct {
         s.waiting -= 1;
     }
 
+    pub fn requeue(s: *Stats) void {
+        s.mutex.lockUncancelable(s.io);
+        defer s.mutex.unlock(s.io);
+        s.waiting += 1;
+    }
+
     pub fn finish(s: *Stats, activated: bool) void {
         s.mutex.lockUncancelable(s.io);
         defer s.mutex.unlock(s.io);

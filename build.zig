@@ -394,6 +394,17 @@ pub fn build(b: *std.Build) void {
     server_responses.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--responses-only", "build/native-checks/session-image/image.png" });
     server_responses.step.dependOn(&session_image_fixture.step);
     b.step("test-server-responses", "Verify Responses JSON/SSE, history chains, tool results and images on Qwen").dependOn(&server_responses.step);
+    const background_check = b.step("test-server-background", "Verify foreground preemption and deterministic background JSON/SSE replay on Qwen");
+    var background_previous: ?*std.Build.Step = null;
+    for ([_][]const u8{ "1", "2" }) |slots| {
+        const server_background = b.addRunArtifact(lifecycle.producer.?);
+        server_background.addArtifactArg(exe);
+        server_background.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--background-only", slots });
+        server_background.step.dependOn(&session_image_fixture.step);
+        if (background_previous) |previous| server_background.step.dependOn(previous);
+        background_previous = &server_background.step;
+    }
+    background_check.dependOn(background_previous.?);
     const neural_images = b.addRunArtifact(exe);
     neural_images.addArgs(&.{ "check-session-neural-images", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "build/native-checks/session-image/image.png", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}) });
     neural_images.step.dependOn(&session_image_fixture.step);

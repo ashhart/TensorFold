@@ -442,6 +442,7 @@ pub fn main(init: std.process.Init) !void {
 
 test {
     _ = @import("draft_allocation.zig");
+    _ = @import("background.zig");
     _ = @import("memory_budget.zig");
     _ = @import("prompt_cache.zig");
     _ = @import("prefill_plan.zig");

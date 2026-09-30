@@ -200,6 +200,8 @@ const Scenario = struct {
     live: bool = false,
     drafts: bool = false,
     responses: bool = false,
+    background: bool = false,
+    background_lanes: usize = 1,
     neural: bool = false,
     neural_enabled: bool = true,
     synthetic: bool = false,
@@ -212,6 +214,95 @@ const Scenario = struct {
     http_checks: []const u8 = "",
     disk_phase: ?usize = null,
     disk_expected: ?*[2]?Output = null,
+
+    fn interruptBackground(s: *Scenario, port: u16, initial_decoded: i64, count: i64) !void {
+        const a = s.init.arena.allocator();
+        const io = s.init.io;
+        var decoded = initial_decoded;
+        for (0..2) |round| {
+            var progressed = false;
+            for (0..1000) |_| {
+                const current = (try s.liveSnapshot(port)).object.get("decoded_tokens").?.integer;
+                if (current >= decoded + 8) {
+                    progressed = true;
+                    break;
+                }
+                try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+            }
+            if (!progressed) return error.BackgroundDidNotProgress;
+            const foreground = try post(io, port, "{\"prompt\":\"Hello\",\"max_tokens\":1,\"temperature\":0}");
+            defer foreground.close(io);
+            _ = try Output.parse(a, try readAll(a, io, foreground), false);
+            const interruptions: i64 = if (s.background_lanes == 1) @as(i64, @intCast(round)) + 1 else 0;
+            try std.testing.expectEqual(count + interruptions, (try health(a, io, port)).object.get("background_preemptions").?.integer);
+            decoded = (try s.liveSnapshot(port)).object.get("decoded_tokens").?.integer;
+        }
+    }
+
+    fn checkBackground(s: *Scenario, port: u16) !void {
+        const a = s.init.arena.allocator();
+        const io = s.init.io;
+        const raw = "{\"prompt\":\"Count upwards, one number per line:\",\"max_tokens\":96,\"ignore_eos\":true,\"temperature\":0.7,\"seed\":123}";
+        const chat = "{\"messages\":[{\"role\":\"user\",\"content\":\"Explain why the sky is blue.\"}],\"max_tokens\":96,\"ignore_eos\":true,\"temperature\":0.7,\"seed\":123,\"thinking_budget\":24}";
+        const pixels = try std.Io.Dir.cwd().readFileAlloc(io, "build/native-checks/session-image/image.png", a, .limited(4 * 1024 * 1024));
+        const encoded = try a.alloc(u8, std.base64.standard.Encoder.calcSize(pixels.len));
+        const url = try std.fmt.allocPrint(a, "data:image/png;base64,{s}", .{std.base64.standard.Encoder.encode(encoded, pixels)});
+        const image = try std.json.Stringify.valueAlloc(a, .{ .messages = &.{.{ .role = "user", .content = .{ .{ .type = "text", .text = "Describe this image." }, .{ .type = "image_url", .image_url = .{ .url = url, .detail = "low" } } } }}, .reasoning_effort = "none", .max_tokens = @as(usize, 96), .ignore_eos = true, .temperature = @as(f64, 0.7), .seed = @as(usize, 123) }, .{});
+        for ([_][]const u8{ raw, chat, image }, 0..) |source, kind| {
+            const route = if (kind == 0) "/v1/completions" else "/v1/chat/completions";
+            var request = try std.json.parseFromSlice(std.json.Value, a, source, .{});
+            const isolated = try postRoute(io, port, route, source);
+            defer isolated.close(io);
+            const expected = try Output.parse(a, try readAll(a, io, isolated), false);
+            for ([_]bool{ false, true }) |streaming| {
+                _ = try s.waitForCounts(port, 0, 0);
+                try request.value.object.put(a, "priority", .{ .string = "background" });
+                try request.value.object.put(a, "stream", .{ .bool = streaming });
+                const decoded = (try s.liveSnapshot(port)).object.get("decoded_tokens").?.integer;
+                const count = (try health(a, io, port)).object.get("background_preemptions").?.integer;
+                const ongoing = try postRoute(io, port, route, try std.json.Stringify.valueAlloc(a, request.value, .{}));
+                defer ongoing.close(io);
+                try s.interruptBackground(port, decoded, count);
+                try expected.compare(try Output.parse(a, try readAll(a, io, ongoing), streaming));
+                _ = try s.waitForCounts(port, 0, 0);
+            }
+        }
+        if (s.background_lanes == 1) {
+            try @import("native_responses_checks.zig").checkBackground(s.init, port, s, Scenario.interruptBackground);
+            const count = (try health(a, io, port)).object.get("background_preemptions").?.integer;
+            const low = "{\"prompt\":\"Count upwards.\",\"priority\":\"background\",\"max_tokens\":4096,\"ignore_eos\":true,\"stream\":true}";
+            const active = try post(io, port, low);
+            var active_open = true;
+            defer if (active_open) active.close(io);
+            try firstEvent(io, active);
+            const queued = try post(io, port, low);
+            var queued_open = true;
+            defer if (queued_open) queued.close(io);
+            _ = try s.waitForCounts(port, 2, 1);
+            try std.testing.expectEqual(count, (try health(a, io, port)).object.get("background_preemptions").?.integer);
+            queued.close(io);
+            queued_open = false;
+            _ = try s.waitForCounts(port, 1, 0);
+            const foreground = try post(io, port, long_request);
+            var foreground_open = true;
+            defer if (foreground_open) foreground.close(io);
+            try firstEvent(io, foreground);
+            _ = try s.waitForCounts(port, 2, 1);
+            try std.testing.expectEqual(count + 1, (try health(a, io, port)).object.get("background_preemptions").?.integer);
+            active.close(io);
+            active_open = false;
+            _ = try s.waitForCounts(port, 1, 0);
+            foreground.close(io);
+            foreground_open = false;
+            _ = try s.waitForCounts(port, 0, 0);
+            const recovery = try post(io, port, "{\"prompt\":\"Hello\",\"max_tokens\":1}");
+            defer recovery.close(io);
+            _ = try Output.parse(a, try readAll(a, io, recovery), false);
+        }
+        try std.posix.kill(s.child.id.?, .INT);
+        if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+        std.debug.print("PASS: background lanes={d}: seeded JSON/SSE text, reasoning, images and usage; preemption only when needed, cancellation and recovery\n", .{s.background_lanes});
+    }
 
     fn checkDisk(s: *Scenario, port: u16) !void {
         const a = s.init.arena.allocator();
@@ -782,6 +873,7 @@ const Scenario = struct {
             }
         };
         if (s.disk_phase != null) return s.checkDisk(port);
+        if (s.background) return s.checkBackground(port);
         if (s.responses) {
             try @import("native_responses_checks.zig").check(s.init, port, s.http_checks);
             try std.posix.kill(s.child.id.?, .INT);
@@ -902,6 +994,7 @@ pub fn main(init: std.process.Init) !void {
         const live = std.mem.eql(u8, args[3], "--live-only");
         const drafts = std.mem.eql(u8, args[3], "--drafts-only");
         const responses = std.mem.eql(u8, args[3], "--responses-only");
+        const background = std.mem.eql(u8, args[3], "--background-only");
         const neural = std.mem.eql(u8, args[3], "--neural-only") or std.mem.eql(u8, args[3], "--neural-disabled") or std.mem.eql(u8, args[3], "--neural-synthetic") or std.mem.eql(u8, args[3], "--neural-untrained");
         const terminal = if (live and !std.mem.eql(u8, args[4], "redirected")) try Terminal.init() else null;
         defer if (terminal) |t| {
@@ -917,7 +1010,7 @@ pub fn main(init: std.process.Init) !void {
         }
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(init.arena.allocator(), &.{ args[1], "serve", args[2], "--snapshot-dir", "none" });
-        try argv.appendSlice(init.arena.allocator(), &.{ "--port", "0", "--batch-streams", if (live) "1" else "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" });
+        try argv.appendSlice(init.arena.allocator(), &.{ "--port", "0", "--batch-streams", if (live) "1" else if (background) args[4] else "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" });
         if (neural) {
             try argv.appendSlice(init.arena.allocator(), &.{ "--max-draft", "15" });
             if (!std.mem.eql(u8, args[4], "-")) try argv.appendSlice(init.arena.allocator(), &.{ "--drafter", args[4] });
@@ -927,6 +1020,8 @@ pub fn main(init: std.process.Init) !void {
         var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory and !prefixes and !live, .memory = memory, .prefixes = prefixes, .live = live, .neural = neural, .neural_enabled = !std.mem.eql(u8, args[3], "--neural-disabled"), .terminal = terminal, .live_enabled = live and std.mem.eql(u8, args[4], "enabled"), .cache_enabled = !std.mem.eql(u8, args[4], "0"), .cache_oversize = std.mem.eql(u8, args[4], "0.000001"), .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = argv.items, .environ_map = &environment, .stdout = if (terminal) |t| .{ .file = t.slave } else if (live) .pipe else .inherit, .stderr = .pipe }) };
         scenario.drafts = drafts;
         scenario.responses = responses;
+        scenario.background = background;
+        if (background) scenario.background_lanes = try std.fmt.parseInt(usize, args[4], 10);
         scenario.synthetic = std.mem.eql(u8, args[3], "--neural-synthetic");
         scenario.require_acceptance = !std.mem.eql(u8, args[3], "--neural-untrained");
         defer if (scenario.child.id) |id| {
