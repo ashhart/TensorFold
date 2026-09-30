@@ -12,6 +12,7 @@ from tensorfold.cuda import prompt_precision
 from . import CONFIDENCE, DEPTH
 
 MAX_DEPTH = 15           # a verify window of at most 16 rows
+KEEP_SERIAL = 4          # prompt states the serial engine keeps (they share its attention rows)
 KEEP = 8                 # prompt states (one token before each end) a concurrent decoder keeps to resume from
 
 
@@ -100,6 +101,9 @@ class FlashNextEngine:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
                              "that has it, or --no-drafts for the serial reference (one token a round)")
         self.w = w
+        from tensorfold.cuda.markers import resume_points
+
+        self.points = resume_points(model_dir)          # a prompt's message starts to keep states at, or None
         # ``streams`` > 1: up to that many requests decoded together, every stream's chain in one forward
         self.concurrent = streams > 1
         self.multi = self.scheduler = None
@@ -110,7 +114,7 @@ class FlashNextEngine:
 
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
-                                      confidence=self.confidence, keep=KEEP, kv_dtype=self.kv_dtype, share=share)
+                                      confidence=self.confidence, keep=KEEP, points=self.points, kv_dtype=self.kv_dtype, share=share)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
@@ -254,10 +258,10 @@ class FlashNextEngine:
             self.cache = []
         else:
             n = len(hit[0])
-            self.cache = [c for c in self.cache if len(c[0]) <= n or c[0][:n] != hit[0]]
+            self.cache = [c for c in self.cache if len(c[0]) < n and hit[0][:len(c[0])] == c[0]] + [hit]
 
     def _remember(self, ids: list[int], snap: dict) -> None:
-        self.cache = [c for c in self.cache if c[0] != ids][-1:] + [(ids, snap)]
+        self.cache = [c for c in self.cache if c[0] != ids][-(KEEP_SERIAL - 1):] + [(ids, snap)]
 
     @property
     def supports_logprobs(self) -> bool:

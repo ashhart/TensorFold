@@ -43,10 +43,11 @@ class MultiDecoder:
 
     def __init__(self, w, *, slots: int, capacity: int, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16", prefill_rows: int = PREFILL_ROWS,
-                 share: float = SHARE) -> None:
+                 share: float = SHARE, points=None) -> None:
         if w.comm is not None:
             raise ValueError("concurrent Flash Next runs on one GPU for now")
         self.w, self.depth, self.confidence, self.capacity = w, depth, confidence, capacity
+        self.points = points                         # a prompt's message starts to keep states at, or None
         self.eos = tuple(w.cfg.eos) if stop_eos else ()
         rows = slots * (depth + 1)
         # a round's window and a prompt pass share each layer's expert launch: the pass's buffers hold both
@@ -153,9 +154,12 @@ class MultiDecoder:
             if id(st) not in busy and len(ids) < len(prompt) and prompt[:len(ids)] == ids and \
                     (best is None or len(ids) > len(best[0])):
                 best = k
+        if best is not None and self.free and any(k[1] is best[1] and len(k[0]) > len(best[0]) for k in self.kept):
+            best = None                                        # a fork: leave the slot's chain to its own turns
         if best is not None:
-            self._drop_kept(best[1])
-            return best[1], {"state": best[2], "tail": best[3]}, len(best[0])
+            n = len(best[0])
+            self.kept = [k for k in self.kept if k[1] is not best[1] or len(k[0]) <= n and best[0][:len(k[0])] == k[0]]
+            return best[1], {"state": best[2], "tail": best[3]}, n
         if not self.free:
             idle = next((k[1] for k in self.kept if id(k[1]) not in busy), None)
             if idle is None:
