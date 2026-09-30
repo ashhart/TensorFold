@@ -136,6 +136,8 @@ def rank_files(model_dir: str | Path, rank: int) -> list[Path]:
 class RankReader:
     """Read stored-dtype CPU tensors for one rank from the full checkpoint or its pre-split folder."""
 
+    rule = staticmethod(rule)          # name -> rep / row / col / dim1 / drop; another family passes its own
+
     def __init__(self, model_dir: str | Path, rank: int) -> None:
         from tensorfold.cuda.direct_read import ReadAhead, Reader, SafeTensors
 
@@ -191,7 +193,7 @@ class RankReader:
             self.files[file] = read_header(file)
         header, base = self.files[file]
         info = header[name]
-        kind = rule(name)
+        kind = self.rule(name)
         if kind == "drop":
             raise KeyError(f"{name} is not used by the engine")
         a, b = info["data_offsets"]

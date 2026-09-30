@@ -10,8 +10,11 @@ logprob of the actual next token.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.request
+
+AUTH = {"Authorization": "Bearer " + os.environ["VLLM_API_KEY"]} if os.environ.get("VLLM_API_KEY") else {}
 
 PROMPTS = [
     "The capital of France is Paris. The capital of Germany is Berlin. The capital of Italy is",
@@ -25,18 +28,37 @@ PROMPTS = [
     "Once upon a time, in a small village at the edge of a vast forest, there lived an old clockmaker named Elias. "
     "Every morning he opened his shop at dawn, wound every clock on the wall, and listened. One day, one of the "
     "clocks did not tick. He opened its case and found, instead of gears, a tiny folded note that read:",
+    ("The history of the printing press begins in the fifteenth century. Johannes Gutenberg, a goldsmith from Mainz, "
+     "combined several existing technologies into a system that made mass production of books possible for the first "
+     "time in Europe. His movable metal type was cast from an alloy of lead, tin and antimony, which melted at a low "
+     "temperature, cooled quickly, and produced durable letters that could be reused thousands of times. He adapted "
+     "the screw press, long used for pressing grapes and olives, to apply even pressure to paper, and he developed an "
+     "oil-based ink that adhered to metal far better than the water-based inks used for woodblock printing. "
+     "Around 1455 his workshop completed the famous Gutenberg Bible, of which roughly one hundred and eighty copies "
+     "were printed, some on paper and some on vellum. Within fifty years, printing shops had spread to more than two "
+     "hundred and fifty cities, and an estimated twenty million volumes had been produced. The consequences were "
+     "profound. The cost of books fell dramatically, literacy rates began to rise, and scholars could compare "
+     "identical copies of texts across great distances. Martin Luther's writings, printed in large numbers, spread "
+     "the ideas of the Reformation faster than any authority could suppress them. Scientists such as Copernicus, "
+     "Vesalius and later Galileo relied on printed books and diagrams to share observations with colleagues they "
+     "would never meet. Standardized spelling and grammar gradually emerged as printers settled on consistent forms "
+     "for the words they set in type. Newspapers appeared in the seventeenth century, first in Germany and the Dutch "
+     "Republic, and pamphlets became a weapon in every political and religious dispute. Historians sometimes argue "
+     "about whether the press caused these changes or merely accelerated trends that were already under way, but few "
+     "doubt that it transformed the circulation of knowledge. In summary, the three most important effects of the "
+     "printing press were"),
 ]
 
 
 def post(url: str, body: dict) -> dict:
-    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json", **AUTH})
     with urllib.request.urlopen(req, timeout=600) as r:
         return json.loads(r.read())
 
 
 def main() -> None:
     base, out = sys.argv[1].rstrip("/"), sys.argv[2]
-    model = json.loads(urllib.request.urlopen(base + "/v1/models").read())["data"][0]["id"]
+    model = json.loads(urllib.request.urlopen(urllib.request.Request(base + "/v1/models", headers=AUTH)).read())["data"][0]["id"]
     goldens = []
     for text in PROMPTS:
         ids = post(base + "/tokenize", {"model": model, "prompt": text, "add_special_tokens": True})["tokens"]

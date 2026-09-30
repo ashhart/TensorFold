@@ -65,3 +65,16 @@ def test_split_rules():
     assert rank_bytes("layers.3.attn.wo_a.slice.2.trellis", 100, 0) == 100
     assert rank_bytes("layers.3.attn.wo_a.slice.5.trellis", 100, 0) == 0
     assert rank_bytes("head.trellis", 100, 1) == 50
+
+
+def test_part_kinds_keep_exl3_tiles_and_scales_together():
+    from tensorfold.families.deepseek_v41.split import part_kind
+
+    assert [part_kind(f"layers.3.attn.wq_b.{p}") for p in ("trellis", "suh", "svh", "mul1")] == \
+        ["dim1", "rep", "row", "rep"]
+    assert [part_kind(f"layers.3.ffn.experts.9.w2.{p}") for p in ("trellis", "suh", "svh", "mul1")] == \
+        ["row", "row", "rep", "rep"]
+    assert part_kind("layers.3.attn.attn_sink") == "row"
+    assert part_kind("layers.3.attn.wo_a.slice.6.trellis") == "rep"
+    assert part_kind("embed.weight") == "rep"
+    assert part_kind("vision.norm.weight") == "drop"

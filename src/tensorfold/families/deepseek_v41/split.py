@@ -74,3 +74,23 @@ def budget(tensors: dict[str, tuple[str, list[int], int]], rank: int, world: int
             cat = "hc/norm/router"
         out[cat] = out.get(cat, 0) + b
     return out
+
+
+def part_kind(name: str) -> str:
+    """The byte-level split of one stored tensor for ``RankReader``: rep, row (leading axis), dim1 (second axis), drop.
+
+    EXL3 ``cols`` split tile columns (trellis axis 1) and svh; ``rows`` split tile rows and suh. Whole wo_a slices
+    read as ``rep`` (the loader asks only for its own); plain ``cols`` tensors (attn_sink) halve their only axis.
+    """
+
+    kind = rule(name)
+    if kind == "skip":
+        return "drop"
+    if kind in ("rep", "part"):
+        return "rep"
+    part = name.rsplit(".", 1)[-1]
+    if part in ("mul1", "mcg"):
+        return "rep"
+    if kind == "cols":
+        return {"trellis": "dim1", "suh": "rep", "svh": "row"}.get(part, "row")
+    return {"trellis": "row", "suh": "row", "svh": "rep"}[part]

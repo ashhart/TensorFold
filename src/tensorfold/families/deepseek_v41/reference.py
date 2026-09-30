@@ -5,7 +5,7 @@ selection takes all visible compressed entries, so no indexer or candidate block
 weights, runs it for all positions and frees it. Arithmetic follows notes/dsv41/ARCH.md: RMS in fp32 (eps 1e-20),
 the residual streams in bf16 between sublayers, hyper-connection math, compressor pooling and attention in fp32.
 
-    python -m tensorfold.families.deepseek_v41.reference MODEL_DIR ENGRAM_DIR --ids 0,1,2 --out logits.pt
+    python -m tensorfold.families.deepseek_v41.reference MODEL_DIR ENGRAM_DIR --golden golden.json --out DIR
 """
 
 from __future__ import annotations
@@ -35,11 +35,21 @@ class Checkpoint:
         self.root, self.device = root, device
         self.index = json.loads((root / "model.safetensors.index.json").read_text())["weight_map"]
         self.files: dict[str, object] = {}
+        self.memo: dict[str, object] = {}         # this layer's tensors and linears, dropped by clear()
+
+    def clear(self) -> None:
+        self.memo.clear()
 
     def has(self, name: str) -> bool:
         return name in self.index
 
     def get(self, name: str, dtype=None) -> torch.Tensor:
+        key = f"{name}:{dtype}"
+        if key not in self.memo:
+            self.memo[key] = self._get(name, dtype)
+        return self.memo[key]
+
+    def _get(self, name: str, dtype=None) -> torch.Tensor:
         f = self.index[name]
         if f not in self.files:
             self.files[f] = safe_open(str(self.root / f), framework="pt")
@@ -47,8 +57,11 @@ class Checkpoint:
         return t if dtype is None else t.to(dtype)
 
     def linear(self, prefix: str) -> Exl3Linear:
-        return Exl3Linear.from_tensors(self.get(prefix + ".trellis"), self.get(prefix + ".suh"),
-                                       self.get(prefix + ".svh"), "mul1", device=self.device)
+        key = prefix + ":linear"
+        if key not in self.memo:
+            self.memo[key] = Exl3Linear.from_tensors(self._get(prefix + ".trellis"), self._get(prefix + ".suh"),
+                                                     self._get(prefix + ".svh"), "mul1", device=self.device)
+        return self.memo[key]
 
 
 def lin(layer: Exl3Linear, x: torch.Tensor, out_dtype=None) -> torch.Tensor:
@@ -239,74 +252,95 @@ def engram_apply(ck: Checkpoint, c: Config, L: int, ell: int, X: torch.Tensor, r
     return (h + gate[:, :, None] * val[:, None, :]).to(BF)
 
 
-def forward(model_dir: Path, engram_dir: Path, ids: list[int], *, layers: int | None = None,
-            log=print) -> dict[str, torch.Tensor]:
-    """Logits fp32 [T, vocab] and the per-layer mean stream (a probe for layer-by-layer parity)."""
+class Sequence:
+    """One prompt's state through the layers."""
 
-    if not 0 < len(ids) <= MAX_TOKENS:
-        raise ValueError(f"the reference takes 1..{MAX_TOKENS} tokens, got {len(ids)}")
+    def __init__(self, ids: list[int], c: Config, ck: Checkpoint, rows_idx: np.ndarray) -> None:
+        dev = ck.device
+        self.ids, self.T = ids, len(ids)
+        self.pos = torch.arange(self.T, device=dev)
+        self.rows_idx = rows_idx
+        e = ck.get("embed.weight")[torch.tensor(ids, device=dev)]
+        self.X = e[:, None, :].expand(self.T, c.hc_mult, c.hidden_size).contiguous()
+        self.pre = torch.zeros((self.T, c.hc_mult), dtype=F32, device=dev)
+        self.pre[:, 0] = 1.0                                # identity collapse: every stream is the embedding
+        self.caches: dict[int, torch.Tensor] = {}
+        self.f = self.post = self.comb = None
+        self.probes: list[torch.Tensor] = []
+
+
+def layer_step(ck: Checkpoint, c: Config, L: int, s: Sequence, tables: E.Tables) -> None:
+    X = s.X
+    if L > 0:
+        X = hc_post(s.f, X, s.post, s.comb)
+    if L in c.engram_layer_ids:
+        ell = c.engram_layer_ids.index(L)
+        rows = tables.rows(ell, s.rows_idx[:, ell, :]).to(ck.device)
+        X = engram_apply(ck, c, L, ell, X, rows)
+    post, comb, x, pre = HCMix(ck, f"layers.{L}.hc_attn")(X, s.pre, ck.get(f"layers.{L}.attn_norm.weight"), c)
+    a = attention(ck, c, L, x, s.pos, s.caches)
+    X = hc_post(a, X, post, comb)
+    s.post, s.comb, x, s.pre = HCMix(ck, f"layers.{L}.hc_ffn")(X, pre, ck.get(f"layers.{L}.ffn_norm.weight"), c)
+    s.f = moe(ck, c, L, x)
+    s.X = X
+    s.probes.append(X.float().mean(1)[-1].cpu())
+
+
+def forward(model_dir: Path, engram_dir: Path, prompts: list[list[int]], *, layers: int | None = None,
+            log=print) -> list[dict[str, torch.Tensor]]:
+    """Per prompt: logits fp32 [T, vocab] and the last position's mean stream after each layer (a parity probe)."""
+
+    for ids in prompts:
+        if not 0 < len(ids) <= MAX_TOKENS:
+            raise ValueError(f"the reference takes 1..{MAX_TOKENS} tokens a prompt, got {len(ids)}")
     c = Config.from_dict(json.loads((model_dir / "config.json").read_text()))
     ck = Checkpoint(model_dir)
-    dev = "cuda"
-    T = len(ids)
-    pos = torch.arange(T, device=dev)
-
     layout = E.Layout.from_config(c)
     tmap_file = model_dir / "engram_token_map.npy"
     tmap = np.load(tmap_file) if tmap_file.exists() else E.token_map(model_dir / "tokenizer.json",
                                                                      c.engram_compressed_vocab_size)
-    rows_idx = E.hashes(np.array(ids), tmap.astype(np.int64), layout, c.engram_pad_token_id)
     tables = E.Tables(engram_dir, c.engram_layer_ids)
-
-    e = ck.get("embed.weight")[torch.tensor(ids, device=dev)]
-    X = e[:, None, :].expand(T, c.hc_mult, c.hidden_size).contiguous()
-    pre = torch.zeros((T, c.hc_mult), dtype=F32, device=dev)
-    pre[:, 0] = 1.0                                         # identity collapse: every stream is the embedding
-    caches: dict[int, torch.Tensor] = {}
-    probes = []
-    f = post = comb = None
+    seqs = [Sequence(ids, c, ck, E.hashes(np.array(ids), tmap.astype(np.int64), layout, c.engram_pad_token_id))
+            for ids in prompts]
+    ck.clear()
     n_layers = c.num_hidden_layers if layers is None else layers
     for L in range(n_layers):
         t0 = time.time()
-        if L > 0:
-            X = hc_post(f, X, post, comb)
-        if L in c.engram_layer_ids:
-            ell = c.engram_layer_ids.index(L)
-            rows = tables.rows(ell, rows_idx[:, ell, :]).to(dev)
-            X = engram_apply(ck, c, L, ell, X, rows)
-        hc_a = HCMix(ck, f"layers.{L}.hc_attn")
-        post, comb, x, pre = hc_a(X, pre, ck.get(f"layers.{L}.attn_norm.weight"), c)
-        a = attention(ck, c, L, x, pos, caches)
-        X = hc_post(a, X, post, comb)
-        hc_f = HCMix(ck, f"layers.{L}.hc_ffn")
-        post, comb, x, pre = hc_f(X, pre, ck.get(f"layers.{L}.ffn_norm.weight"), c)
-        f = moe(ck, c, L, x)
-        probes.append(X.float().mean(1)[-1].cpu())
+        for s in seqs:
+            layer_step(ck, c, L, s, tables)
         torch.cuda.synchronize()
-        log(f"layer {L:2d} {time.time() - t0:5.1f} s  |x| {X.float().norm(dim=-1).mean():.1f}")
+        ck.clear()
         torch.cuda.empty_cache()
-    X = hc_post(f, X, post, comb)
-    h = (pre[:, :, None] * X.float()).sum(1).to(BF)
-    h = rms(h, ck.get("norm.weight"), c.rms_norm_eps).to(BF)
-    logits = lin(ck.linear("head"), h, out_dtype=F32)
-    return {"logits": logits.cpu(), "probes": torch.stack(probes)}
+        log(f"layer {L:2d} {time.time() - t0:5.1f} s  |x| {seqs[-1].X.float().norm(dim=-1).mean():.1f}", flush=True)
+    out = []
+    for s in seqs:
+        X = hc_post(s.f, s.X, s.post, s.comb)
+        h = (s.pre[:, :, None] * X.float()).sum(1).to(BF)
+        h = rms(h, ck.get("norm.weight"), c.rms_norm_eps).to(BF)
+        out.append({"ids": s.ids, "logits": lin(ck.linear("head"), h, out_dtype=F32).cpu(),
+                    "probes": torch.stack(s.probes)})
+    return out
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("model", type=Path)
     ap.add_argument("engram", type=Path)
-    ap.add_argument("--ids", required=True, help="comma-separated token ids, or @file.json with a list")
+    ap.add_argument("--ids", help="comma-separated token ids of one prompt")
+    ap.add_argument("--golden", type=Path, help="a tools/dsv41_golden.py file: every prompt in it")
     ap.add_argument("--layers", type=int)
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--out", type=Path, required=True, help="directory for ref-K.pt files")
     args = ap.parse_args()
-    ids = json.loads(Path(args.ids[1:]).read_text()) if args.ids.startswith("@") else \
-        [int(t) for t in args.ids.split(",")]
+    if args.golden:
+        prompts = [g["ids"] for g in json.loads(args.golden.read_text())["goldens"]]
+    else:
+        prompts = [[int(t) for t in args.ids.split(",")]]
+    args.out.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
-        out = forward(args.model, args.engram, ids, layers=args.layers)
-    torch.save({"ids": ids, **out}, args.out)
-    top = out["logits"].argmax(-1).tolist()
-    print("greedy next tokens:", top[-8:])
+        outs = forward(args.model, args.engram, prompts, layers=args.layers)
+    for k, o in enumerate(outs):
+        torch.save(o, args.out / f"ref-{k}.pt")
+        print(f"prompt {k}: greedy next token {int(o['logits'][-1].argmax())}")
 
 
 if __name__ == "__main__":
