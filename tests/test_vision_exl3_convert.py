@@ -91,3 +91,22 @@ def test_converter_removes_only_configured_mlp_padding():
     np.testing.assert_array_equal(trimmed[prefix + "linear_fc2.weight"], full[prefix + "linear_fc2.weight"][:, :112])
     with pytest.raises(ValueError, match="padding"):
         convert_tensors(source, {**config, "intermediate_size": 129})
+
+
+def test_conversion_hashes_config_beside_snapshot_symlink(tmp_path):
+    from safetensors.numpy import save_file
+    from safetensors import safe_open
+    import hashlib
+
+    blob = tmp_path / "blob.safetensors"
+    save_file({"model.visual.pos_embed.weight": np.zeros((4, 8), np.float16)}, str(blob))
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    source = snapshot / "vision.safetensors"
+    source.symlink_to(blob)
+    config = b'{"vision_config": {"depth": 0, "hidden_size": 8, "intermediate_size": 8}}'
+    (snapshot / "config.json").write_bytes(config)
+    output = tmp_path / "converted.safetensors"
+    convert(source, output)
+    with safe_open(str(output), framework="np") as artifact:
+        assert artifact.metadata()["config_sha256"] == hashlib.sha256(config).hexdigest()
