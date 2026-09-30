@@ -439,7 +439,7 @@ def _pattern(t: dict) -> str:
 
 def hybrid_geometry(t: dict, world: int, reserve: int, *, rows: int, chunk: int, drafts: bool,
                     draft: int) -> Geometry:
-    """Nemotron-H: the engine's caches, three prompt-end snapshots and the row buffers, measured against load."""
+    """Nemotron-H: the engine, its lazy serial twin, three prompt-end snapshots and the row buffers."""
 
     pattern = _pattern(t)
     nm, na = pattern.count("M"), pattern.count("*")
@@ -450,9 +450,10 @@ def hybrid_geometry(t: dict, world: int, reserve: int, *, rows: int, chunk: int,
     proj, qkv, experts = mh * mhd + cd + mh, (heads + 2 * kv) * hd, int(t["n_routed_experts"]) + 2
     slots, width = int(t["num_experts_per_tok"]) + 2, int(t["moe_intermediate_size"])
     extent = d + proj + qkv + slots * (width + d) + experts
-    state = nm * (mh * mhd * ms * 4 + (int(t["conv_kernel"]) - 1) * cd * 2)
+    state = nm * (mh * mhd * ms * 4 + (int(t["conv_kernel"]) - 1) * cd * 2
+                  + 2 * rows * (2 * cd * 2 + mh * 4))
     buffers = rows * (vocab * 2 + 4 * extent * 4) + PREFILL_ROWS * (2 * d + cd + slots * (width + d) + 8 * slots) * 2
-    fixed = (1 + 3) * state + 2 * buffers + 8 * max(rows, 64) * extent * 4
+    fixed = (2 + 3) * state + 2 * buffers + 8 * max(rows, 64) * extent * 4
     fixed += PREFILL_ROWS * (d + proj + qkv + experts) * 4 * 2
     row = d // 2 + d // 64 * 4                       # a 4-bit head row with its scales and biases
     if world > 1:                                    # the rank's vocabulary scales and biases, and the partials
@@ -461,7 +462,7 @@ def hybrid_geometry(t: dict, world: int, reserve: int, *, rows: int, chunk: int,
         fixed += rows * d * 2 + (vocab * d * 2 if draft else 0) + (draft // world) * row
     def bytes_at(capacity: int) -> int:
         length = -(-capacity // chunk) * chunk
-        cache = (1 + 3) * 2 * na * length * kv * hd * 2          # the engine's k/v and three prompt-end snapshots
+        cache = (2 + 3) * 2 * na * length * kv * hd * 2          # engine, serial twin and three snapshots
         cache += (1 + 3) * 2 * length * kv * hd * 2 if drafts else 0   # the MTP head's k/v and their snapshots
         scratch = (2 + int(drafts)) * rows * (length // chunk) * heads * (hd + 2) * 4
         return fixed + cache + scratch

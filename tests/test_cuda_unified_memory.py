@@ -47,6 +47,20 @@ def test_the_limit_env_caps_the_grant_on_both_bounds(meminfo, monkeypatch):
     assert capacity.available_bytes(device(False, free, gpu)) == 30 * capacity.GIB
 
 
+@pytest.mark.parametrize("integrated", [False, True])
+def test_31_gib_limit_grants_the_full_budget_without_a_reserve(monkeypatch: pytest.MonkeyPatch,
+                                                            integrated: bool) -> None:
+    """Grant the requested 31 GiB when GPU and host memory can supply it.
+
+    :param monkeypatch: Fixture for setting the limit and available host memory.
+    :param integrated: Whether the device shares host memory.
+    """
+    monkeypatch.setenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "31")
+    monkeypatch.setattr(capacity, "_meminfo", lambda: {"MemTotal": 64 * capacity.GIB,
+                                                     "MemAvailable": 32 * capacity.GIB})
+    assert capacity.available_bytes(device(integrated, 32 * capacity.GIB, 32 * capacity.GIB)) == 31 * capacity.GIB
+
+
 def test_the_limit_env_leaves_free_memory_the_ceiling(meminfo, monkeypatch):
     _total, available = meminfo
     monkeypatch.setenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "1000")
