@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "manifest_id": "deepseek-v4-t04-quant-decode-vectors",
+  "formats": {
+    "Q8_0": {
+      "block_bytes": 34,
+      "layout": "fp16 d + 32 int8 qs"
+    },
+    "Q2_K": {
+      "block_bytes": 84,
+      "layout": "scales[16] + qs[64] + fp16 d + fp16 dmin; offsets 0,16,80,82"
+    }
+  },
+  "oracle": "tests/fixtures/deepseek_v4/quants/oracle.c; built with cc -O2 -ffp-contract=off outside checkout",
+  "cases": {
+    "Q8_0": [
+      "q8_ramp_extremes",
+      "q8_neg_scale",
+      "q8_zero_scale",
+      "q8_subnormal_scale",
+      "q8_max_scale",
+      "q8_all_127",
+      "q8_all_n128",
+      "q8_mixed_neg"
+    ],
+    "Q2_K": [
+      "q2_zero_scales",
+      "q2_zero_d",
+      "q2_neg_d_dmin",
+      "q2_boundary_16_32",
+      "q2_boundary_3_4",
+      "q2_boundary_127_128",
+      "q2_varied_nibbles",
+      "q2_all_three"
+    ]
+  },
+  "tolerance": {
+    "dtype": "float32",
+    "mode": "exact"
+  },
+  "provenance": {
+    "donor_revision": "d183482b413ecd2e3b540b290e6497437e9fbb73",
+    "donor_layout": "ds4.c:block_q2_K",
+    "reference_equations_sha256": "bc4f57bb5c12ad75a18f6ee75c1c6c5f0bfa2951358fde416e181d934e4ad181",
+    "oracle_sha256": "54253cfa08f0b44e65196de21aa519e58cf136d96724465ec920843d1ca08eb1"
+  },
+  "scope": "16 fixed blocks; exact independent decoded vectors and one nonzero payload corruption per format; no exhaustive sign/grid/bit-flip campaign"
+}

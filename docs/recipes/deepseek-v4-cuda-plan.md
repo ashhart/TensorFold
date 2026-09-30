@@ -10,6 +10,15 @@ available. The deliverable is a separately built TensorFold backend that can
 later serve the same unchanged GGUF; developing it must not require replacing
 the active ds4 installation or restarting the live stack.
 
+## Current first-release scope (2026-09-30)
+
+The operator requested the shortest practical GGUF deployment path and fewer
+unnecessary tests. [The short implementation plan](deepseek-v4-fast-path.md)
+supersedes this document's expanded test/implementation matrix for the first
+serial release. Target checkpoint, live-service isolation and truthful memory/
+quality evidence remain required. Exhaustive matrices and optional features
+below are deferred reference, not a blocker for the short release.
+
 ## Target checkpoint and baseline
 
 The target file is
