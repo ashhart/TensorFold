@@ -1,4 +1,4 @@
-"""TF_FLASH_DENSE=matrix: every affine width on the matrix units before M5, each row's bits independent of the window."""
+"""TF_FLASH_DENSE=matrix: a window matches its one-row steps, and stays near MLX's matmul."""
 
 import pytest
 

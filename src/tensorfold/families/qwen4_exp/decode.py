@@ -80,8 +80,7 @@ def first(a: mx.array) -> mx.array:
 
 
 _checked: set[tuple[int, int, int]] = set()
-# "lane": lane_qmm; "rows": per-row kernels; "simd": simd_qmm (4-bit groups of 32 only);
-# "matrix": every width on the matrix units before M5 (simd_qmm / simd_qmm_bits / affine_rows), by TF_FLASH_DENSE.
+# "lane": lane_qmm. "rows": per-row kernels. "simd": 4-bit groups of 32. "matrix": every width before M5.
 DENSE = os.environ.get("TF_FLASH_DENSE") or ("lane" if tensor_units() else "rows")
 _lane: dict[int, tuple[mx.array, mx.array, mx.array, int]] = {}   # id(linear) -> weight, tiled copy, scales, tile
 
@@ -118,9 +117,7 @@ _MATRIX_BACKEND: Any = None
 
 
 def _matrix_project(x: mx.array, linear: Any) -> mx.array:
-    """Before M5, every affine width on the matrix units: simd_qmm (4-bit), simd_qmm_bits (5/6/8-bit, groups of 64),
-    else affine_rows -- the Qwen dense backend, each shape checked once (one-row calls against the matrix kernel's
-    rows), and the same kernel at every row count, so a row's bits do not depend on the window."""
+    """Every affine width on the matrix units before M5, the same kernel at every row count."""
 
     global _MATRIX_BACKEND
     from tensorfold.kernels.qwen.dense.v1 import row_matmul
