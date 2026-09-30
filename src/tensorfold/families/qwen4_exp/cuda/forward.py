@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Sequence
 
 import numpy as np
@@ -118,14 +119,24 @@ def _down_act(hc: HC, b: Buffers, R: int, streams: int, low: int, inject) -> Non
 Seg = tuple[State, int, int]     # a stream's committed state and its rows [a0, a1) of the window
 
 
-def gdn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int) -> None:
+@dataclass
+class Cut:
+    """A kept point ``row`` rows into a prompt chunk: each DeltaNet chain runs as two launches, and the state and conv
+    window between them are kept here in layer order (a chain's steps never depend on where a launch starts)."""
+
+    row: int
+    rec: list[torch.Tensor] = field(default_factory=list)
+    conv: list[torch.Tensor] = field(default_factory=list)
+
+
+def gdn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int, cut: Cut | None = None) -> None:
     c = w.cfg
     g = layer.gdn
     li = segs[0][0].lin_index[layer.index]
     if b.prefill:
         _mm(b.mixed[:R], g.proj, b.xs_mixed[:R], b.proj[0, :R], b)
         for st, a0, a1 in segs:
-            _prefill_chain(g, st, li, b, a0, a1, c)
+            _prefill_chain(g, st, li, b, a0, a1, c, cut)
         return _out_proj(w, b, b.gout[:R], g.out, b.gxs[:R], R)
     _mm(b.mixed[:R], g.proj, b.xs_mixed[:R], b.proj[li, :R], b)
     for st, a0, a1 in segs:
@@ -135,14 +146,26 @@ def gdn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int
     return _out_proj(w, b, b.gout[:R], g.out, b.gxs[:R], R)
 
 
-def _prefill_chain(g, st: State, li: int, b: Buffers, a0: int, a1: int, c) -> None:
+def _prefill_chain(g, st: State, li: int, b: Buffers, a0: int, a1: int, c, cut: Cut | None = None) -> None:
     """A prompt chunk's DeltaNet; the layer commits at once (a chunk keeps every row)."""
 
     n, p, cur = a1 - a0, b.proj[0, a0:a1], st.cur[li]
     b.conv_ptr.fill_(st.conv[li].data_ptr())
     q, k, v, gt, beta = gdn_io.front(p, b.conv_ptr, b.sid[:n], b.windows[:n], g.conv, g.a_log, g.dt_bias, c.nk)
-    y = shared_gdn.chain(q, k, v, gt, beta, st.rec[cur, li], st.rec[1 - cur, li])
-    gdn_io.back(y, p, g.norm, c.eps, b.gout[a0:a1], b.gxs[a0:a1])
+    if cut is None:
+        y = shared_gdn.chain(q, k, v, gt, beta, st.rec[cur, li], st.rec[1 - cur, li])
+        gdn_io.back(y, p, g.norm, c.eps, b.gout[a0:a1], b.gxs[a0:a1])
+    else:                                        # the rows before the kept point, its state, then the rest from it
+        m, mid = cut.row, st.rec[1 - cur, li]
+        y = shared_gdn.chain(q[:m], k[:m], v[:m], gt[:m], beta[:m], st.rec[cur, li], mid)
+        gdn_io.back(y, p[:m], g.norm, c.eps, b.gout[a0:a0 + m], b.gxs[a0:a0 + m])
+        cut.rec.append(mid.clone())
+        window = st.conv[li:li + 1].clone()
+        shift_windows(window, b.proj[0:1, a0:a0 + m], m, c.conv_dim)
+        cut.conv.append(window[0])
+        y = shared_gdn.chain(q[m:], k[m:], v[m:], gt[m:], beta[m:], mid, st.rec[cur, li])
+        gdn_io.back(y, p[m:], g.norm, c.eps, b.gout[a0 + m:a1], b.gxs[a0 + m:a1])
+        cur = 1 - cur                            # the second launch wrote the state back where the first read it
     st.cur[li] = 1 - cur
     shift_windows(st.conv[li:li + 1], b.proj[0:1, a0:a1], n, c.conv_dim)
 
@@ -305,7 +328,7 @@ def _writeback(h: torch.Tensor, b: Buffers, R: int, c, pending) -> None:
 
 
 def layer_forward(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int, pending, *,
-                  mtp: bool = False, context: int | None = None):
+                  mtp: bool = False, context: int | None = None, cut: Cut | None = None):
     """One decoder layer on b.h[:R]; ``pending`` = the previous MoE's (mode, branch, weights, inject) or None. Returns the new pending write-back."""
 
     c = w.cfg
@@ -324,7 +347,7 @@ def layer_forward(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R:
         else:
             hc_block(layer.attn_hc, b, R, c.eps, c.streams, c.low, mode, inj[:R], b.inj_a, h, branch=a)
     if layer.linear:
-        mode, branch = gdn_block(layer, w, segs, b, R)
+        mode, branch = gdn_block(layer, w, segs, b, R, cut)
     else:
         mode, branch = attn_block(layer, w, segs, b, R, mtp, context)
     hc_block(layer.mlp_hc, b, R, c.eps, c.streams, c.low, mode, b.inj_a[:R], b.inj_m, h, branch=branch)
@@ -398,23 +421,28 @@ def stage(w: Weights, b: Buffers, windows: Sequence[tuple[State, Sequence[int]]]
     return segs
 
 
-def compute(w: Weights, segs: Sequence[Seg], b: Buffers, *, logits: bool = True, context: int | None = None):
-    """The forward's GPU work on staged rows (capturable); ``context`` bounds the attention launches."""
+def compute(w: Weights, segs: Sequence[Seg], b: Buffers, *, logits: bool = True, context: int | None = None,
+            cut: Cut | None = None):
+    """The forward's GPU work on staged rows (capturable); ``context`` bounds the attention launches; ``cut``: a prompt
+    chunk's kept point."""
 
     c = w.cfg
     R = segs[-1][2]
     _embed(w, b.ids[:R], c.streams, b.h[:R])
     pending = None
     for layer in w.layers:
-        pending = layer_forward(layer, w, segs, b, R, pending, context=context)
+        pending = layer_forward(layer, w, segs, b, R, pending, context=context, cut=cut)
     return finish(w, w.mixer, b, R, pending, logits=logits)
 
 
 @torch.no_grad()
-def forward(w: Weights, st: State, b: Buffers, tokens: Sequence[int], *, logits: bool = True):
-    """Rows for ``tokens`` at positions st.pos .. st.pos + R - 1: logits [R, V] bf16 (a view of b.logits) and the residual streams b.streams[:R]. The committed state is unchanged until ``commit``."""
+def forward(w: Weights, st: State, b: Buffers, tokens: Sequence[int], *, logits: bool = True,
+            cut: Cut | None = None):
+    """Rows for ``tokens`` at positions st.pos .. st.pos + R - 1: logits [R, V] bf16 (a view of b.logits) and the residual streams b.streams[:R]. The committed state is unchanged until ``commit``; ``cut`` (a prompt chunk): keeps each DeltaNet layer's state at its row."""
 
-    return compute(w, stage(w, b, [(st, tokens)]), b, logits=logits)
+    if cut is not None and not (b.prefill and 0 < cut.row < len(tokens)):
+        raise ValueError(f"a prompt chunk of {len(tokens)} rows has no kept point at row {cut.row}")
+    return compute(w, stage(w, b, [(st, tokens)]), b, logits=logits, cut=cut)
 
 
 @triton.jit
@@ -470,3 +498,17 @@ def commit(w: Weights, st: State, b: Buffers, R: int, keep: int, at: int = 0) ->
         tail = st.ple_tail
         shift_windows(tail[None], b.ple_nrow[None, at:at + R], keep, tail.shape[1])
     st.set_pos(st.pos + keep)
+
+
+def cut_snapshot(w: Weights, st: State, b: Buffers, cut: Cut) -> dict:
+    """``State.snapshot`` at a prompt chunk's kept point, before ``commit``: the DeltaNet states and conv windows the
+    forward kept there, and the n-gram windows after the rows before it."""
+
+    c = w.cfg
+    tail, history = st.ple_tail.clone(), st.ple_history
+    if st.ple_last is not None:
+        before, tokens = st.ple_last
+        history = np.concatenate([before, tokens[:cut.row]])[-(c.ngram_size - 1):]
+        shift_windows(tail[None], b.ple_nrow[None, :cut.row], cut.row, tail.shape[1])
+    return {"pos": st.pos + cut.row, "rec": torch.stack(cut.rec), "conv": torch.stack(cut.conv), "ple_tail": tail,
+            "ple_history": None if history is None else history.copy(), "mtp_len": st.mtp_len - st.mtp_drafted}
