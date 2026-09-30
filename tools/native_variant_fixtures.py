@@ -736,6 +736,56 @@ def flash_prefill_hc_fixtures(capture):
     print(f"Saved {len(cases)} complete Flash prefill hyper-connections and their intermediate arrays", flush=True)
 
 
+def deepseek_prefill_compress_fixtures(directory):
+    import copy
+    from tests import dsv4_fakes as fake
+    from tests.test_flash_next_affine import bf16
+    from tensorfold.families.deepseek_v4.weights import load_backbone
+
+    rng = np.random.default_rng(31307)
+    original_text, original_dims = fake.TEXT, fake.D
+    groups = []
+    try:
+        for geometry, (dims, head, index, ratio) in enumerate((
+            (128, 128, 64, 4), (256, 256, 128, 128),
+            (4096, 512, 128, 4), (4096, 512, 128, 128),
+        )):
+            fake.TEXT = copy.deepcopy(original_text)
+            fake.D = dims
+            fake.TEXT.update(hidden_size=dims, num_hidden_layers=1, compress_ratios=[ratio, 0],
+                             head_dim=head, index_head_dim=index)
+            checkpoint = f"checkpoint{geometry}"
+            folder = fake.write_checkpoint(directory / checkpoint, seed=311 + geometry)
+            model = load_backbone(folder)
+            attn = model.layers[0].attn
+            cache = model.make_cache()[0]
+            cases, past = [], 0
+            lengths = ((1, 2, 14, 63, 64, 65, 127, 128, 129, 511, 512, 513, 2048) if dims < 4096
+                       else (17, 127, 128, 129, 511, 512, 513, 2048))
+            for step, count in enumerate(lengths):
+                name = f"compress{geometry}-{step}"
+                x = bf16(rng, (count, dims * 2), scale=.2)[:, ::2]
+                projection = attn.cproj(x.astype(mx.float32))
+                attn._compress(cache, projection, past)
+                end = past + count
+                kept = min(end, ratio * (2 if ratio == 4 else 1))
+                arrays = dict(input=x, projection=projection, proj=cache.proj_rows(end - kept, end))
+                pooled = end // ratio
+                if pooled:
+                    arrays["pool"] = cache.pool[:pooled]
+                    if ratio == 4:
+                        arrays["ipool"] = cache.ipool[:pooled]
+                mx.eval(*arrays.values())
+                mx.save_safetensors(str(directory / f"{name}.safetensors"), arrays)
+                cases.append(dict(name=name, past=past))
+                cache.offset = past = end
+            groups.append(dict(checkpoint=checkpoint, cases=cases))
+            print(f"Saved DeepSeek compressor D={dims}, head={head}, ratio={ratio}: {len(cases)} chunks", flush=True)
+    finally:
+        fake.TEXT, fake.D = original_text, original_dims
+    (directory / "compress.json").write_text(json.dumps(groups, indent=2) + "\n")
+
+
 def deepseek_prefill_moe_fixtures(directory):
     import copy
     from tests import dsv4_fakes as fake
@@ -1545,11 +1595,15 @@ def main():
     parser.add_argument("--glm-prefill-moe", action="store_true")
     parser.add_argument("--deepseek-prefill-hc", action="store_true")
     parser.add_argument("--deepseek-prefill-moe", action="store_true")
+    parser.add_argument("--deepseek-prefill-compress", action="store_true")
     parser.add_argument("--flash-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-attention", action="store_true")
     parser.add_argument("--flash-prefill-ple", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.deepseek_prefill_compress:
+        deepseek_prefill_compress_fixtures(args.directory)
+        return
     if args.deepseek_prefill_moe:
         deepseek_prefill_moe_fixtures(args.directory)
         return

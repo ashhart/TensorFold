@@ -264,6 +264,12 @@ pub fn build(b: *std.Build) void {
     ds_moe.step.dependOn(&ds_moe_fixture.step);
     b.step("test-deepseek-prefill-moe", "Compare DeepSeek batched hash/score routing, sorted MXFP4 gathers and shared experts with upstream").dependOn(&ds_moe.step);
     metal_tests.dependOn(&ds_moe.step);
+    const ds_compress_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/deepseek-prefill-compress", "--deepseek-prefill-compress" });
+    const ds_compress = b.addRunArtifact(exe);
+    ds_compress.addArgs(&.{ "check-deepseek-prefill-compress", "build/native-checks/deepseek-prefill-compress" });
+    ds_compress.step.dependOn(&ds_compress_fixture.step);
+    b.step("test-deepseek-prefill-compress", "Compare DeepSeek batched compressor projections, overlapping/block pools and context tails with upstream").dependOn(&ds_compress.step);
+    metal_tests.dependOn(&ds_compress.step);
     const simd_bits_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/simd-bits", "--simd-bits" });
     const simd_bits = b.addRunArtifact(exe);
     simd_bits.addArgs(&.{ "check-deepseek-dense", "build/native-checks/simd-bits" });

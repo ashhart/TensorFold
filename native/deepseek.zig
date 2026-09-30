@@ -53,7 +53,7 @@ pub const Config = struct {
         if ((!std.mem.eql(u8, kind, "yarn") and !std.mem.eql(u8, kind, "deepseek_yarn")) or !std.math.isFinite(r.factor) or r.factor < 1 or !std.math.isFinite(r.beta_fast) or !std.math.isFinite(r.beta_slow) or r.beta_fast <= 0 or r.beta_slow <= 0) return error.UnsupportedRotaryGeometry;
     }
 };
-const Cache = struct {
+pub const Cache = struct {
     keys: A = mx.empty,
     proj: A = mx.empty,
     pool: A = mx.empty,
@@ -150,7 +150,7 @@ pub const Model = struct {
         m.mtp_position = 0;
         m.mtp_generation +%= 1;
     }
-    fn layerRatio(m: *Model, i: usize) i32 {
+    pub fn layerRatio(m: *Model, i: usize) i32 {
         return if (i < m.config.value.compress_ratios.len) m.config.value.compress_ratios[i] else 0;
     }
     pub fn validateDraft(io: std.Io, dir: []const u8) !void {
@@ -403,17 +403,24 @@ pub const Model = struct {
         return ops.hcStep(&m.kernels, s, x, pending, fnw, scale, base, norm, g.rms_norm_eps, g.hc_eps, g.hc_sinkhorn_iters);
     }
     fn pool(m: *Model, s: *mx.Scope, i: usize, proj: A, position: i32, index: bool) !A {
-        const g = m.config.value;
         const ratio = m.layerRatio(i);
-        const d = if (index) g.index_head_dim else g.head_dim;
-        const w = d * @as(i32, if (ratio == 4) 2 else 1);
         const first = @divTrunc(position + 1, ratio) - 1;
         const base = position + 1 - mx.dim(proj, 0);
+        return m.poolBlocks(s, i, proj, base, first, 1, index);
+    }
+    pub fn poolBlocks(m: *Model, s: *mx.Scope, i: usize, proj: A, base: i32, first: i32, count: i32, index: bool) !A {
+        const g = m.config.value;
+        const ratio = m.layerRatio(i);
+        if ((ratio != 4 and ratio != 128) or (index and ratio != 4)) return error.UnsupportedCompressionRatio;
+        const d = if (index) g.index_head_dim else g.head_dim;
+        const w = d * @as(i32, if (ratio == 4) 2 else 1);
+        const width = if (ratio == 4) 4 * (g.head_dim + g.index_head_dim) else 2 * g.head_dim;
+        if (mx.shape(proj).len != 2 or mx.dtype(proj) != mx.f32t or mx.dim(proj, 1) != width or count < 1 or first < 0 or base < 0 or @max(0, (first - @as(i32, if (ratio == 4) 1 else 0)) * ratio) < base or (first + count) * ratio > base + mx.dim(proj, 0)) return error.InvalidTensorShape;
         const key = if (index) "attn.indexer.compressor" else "attn.compressor";
         var buf: [256]u8 = undefined;
         const ape = try s.cast(try m.weight(i, try std.fmt.bufPrint(&buf, "{s}.ape", .{key})), mx.f32t);
         const norm = try m.weight(i, try std.fmt.bufPrint(&buf, "{s}.norm.weight", .{key}));
-        return (try m.kernels.run(s, src.ds4_pool_rows, &.{ proj, ape, norm, try m.weight(i, "inv"), try s.scalar(g.rms_norm_eps), try s.ints(&.{ first, base, 0, if (index) 4 * g.head_dim else 0 }) }, &.{ mx.ti("D", d), mx.ti("R", ratio), mx.ti("OV", @intFromBool(ratio == 4)), mx.ti("WT", mx.dim(proj, 1)), mx.ti("W", w), mx.ti("PE", g.qk_rope_head_dim) }, .{ 32, 1, 1 }, .{ 32, 1, 1 }, &.{.{ .shape = &.{ 1, d } }}))[0];
+        return (try m.kernels.run(s, src.ds4_pool_rows, &.{ proj, ape, norm, try m.weight(i, "inv"), try s.scalar(g.rms_norm_eps), try s.ints(&.{ first, base, 0, if (index) 4 * g.head_dim else 0 }) }, &.{ mx.ti("D", d), mx.ti("R", ratio), mx.ti("OV", @intFromBool(ratio == 4)), mx.ti("WT", mx.dim(proj, 1)), mx.ti("W", w), mx.ti("PE", g.qk_rope_head_dim) }, .{ 32, count, 1 }, .{ 32, 1, 1 }, &.{.{ .shape = &.{ count, d } }}))[0];
     }
     fn attention(m: *Model, s: *mx.Scope, i: usize, x: A, cache: *Cache, position: i32) !A {
         const g = m.config.value;
