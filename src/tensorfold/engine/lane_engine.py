@@ -176,6 +176,8 @@ class LaneStream:
     # response_format's grammar (engine.grammar.Constraint): follows every committed token, masks each drawn row
     constraint: Any = None
     error: Any = None           # why the stream ended with finish_reason "error" (its grammar failed)
+    mtp_drafted: int = 0
+    mtp_accepted: int = 0
 
     @property
     def context(self) -> list[int]:

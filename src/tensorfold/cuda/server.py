@@ -334,8 +334,14 @@ class App:
         background = body.get("priority") == "background" or (chat and is_title_request(body.get("messages"), tools))
         concurrent = getattr(self.engine, "concurrent", False)
         turns = None if concurrent else self._turns()
-        if concurrent and background and "background" in inspect.signature(self.engine.generate).parameters:
+        generate_parameters = inspect.signature(self.engine.generate).parameters
+        if concurrent and background and "background" in generate_parameters:
             options["background"] = True            # the engine's scheduler orders its lanes and prompts
+        tracks_admission = concurrent and "on_admit" in generate_parameters
+        if concurrent and "cancelled" in generate_parameters:
+            options["cancelled"] = cancelled
+        if tracks_admission:
+            options["on_admit"] = lambda: request.admit()
         # one engine at a time: a background reply yields between rounds (not on two ranks, which decode to the end)
         yielding = background and turns is not None and getattr(self.engine, "tp", 1) == 1
         gates = [g for g in (gate, budget, Yield(turns) if yielding else None) if g is not None]
@@ -344,8 +350,10 @@ class App:
 
         def generate(ids: list[int], count: int, feed: Callable[[list[int]], bool]) -> Any:
             if yielding and cached:                 # a run after a cut: foreground requests waiting go first
+                request.admit(False)
                 turns.give()
                 turns.take(True, cancelled)
+                request.admit()
             extra = dict(options)
             if prepared.grammar is not None:    # response_format: a fresh grammar state, after </think> when thinking
                 spec, compiled = prepared.grammar
@@ -363,17 +371,24 @@ class App:
                 cached.append(int((stats or {}).get("cached") or 0))
             return stats
 
-        # an engine that decodes concurrent requests together (``concurrent``) takes them as they come
-        if turns is not None:
-            turns.take(background, cancelled)
-        try:
-            if cancelled is not None and cancelled():                # the client left while this request waited
-                raise RequestCancelled("the client left before the request started")
-            with health.of(self).running(len(prompt), out) as request:      # /health reads ``out``; rounds never call in
-                stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, on_tokens)
-        finally:
+        with health.of(self).running(len(prompt), out) as request:      # /health reads ``out``; rounds never call in
+            # an engine without concurrent streams waits for its turn inside the measured request lifetime
             if turns is not None:
-                turns.give()
+                turns.take(background, cancelled)
+            try:
+                if cancelled is not None and cancelled():            # the client left while this request waited
+                    raise RequestCancelled("the client left before the request started")
+                if not tracks_admission:
+                    request.admit()
+
+                def measured_tokens(new: list[int]) -> bool:
+                    request.mark_tokens(new)
+                    return on_tokens(new)
+
+                stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, measured_tokens)
+            finally:
+                if turns is not None:
+                    turns.give()
         if failed:
             raise failed[0]
         if stopped["client"]:                                        # as the Mac server: nothing more is written

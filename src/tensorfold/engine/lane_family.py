@@ -282,6 +282,8 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
                     if callable(observe):
                         observe(rows - 1, accepted)
                 elif kind == "head":
+                    stream.mtp_drafted += rows - 1
+                    stream.mtp_accepted += accepted
                     self._observe_depth(stream, max(tree_paths(rows_parents)[0]), accepted)
         cut = stream.think_cut(committed)
         if cut is not None:

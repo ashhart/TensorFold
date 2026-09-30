@@ -57,6 +57,10 @@ class ChatJob:
     call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
     constraint: Any = None                  # response_format's grammar (engine.grammar.Constraint), or None
     vision: Any = None
+    received_at: float = 0.0
+    first_token_at: float = 0.0
+    prompt_tokens_processed: int = 0
+    internal: bool = False
 
 
 class _JobQueue(queue.PriorityQueue):
@@ -160,6 +164,7 @@ class Scheduler(PromptFill):
         self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
         self.decoded, self.prefilled = Meter(), ChunkRate()       # the live line's decode and prefill tok/s
+        self.metrics: Any = None
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:
@@ -243,6 +248,22 @@ class Scheduler(PromptFill):
         """Requests not started yet: queued, or held until they fit."""
 
         return self._queue.qsize() + (self._held is not None)
+
+    def metrics_snapshot(self) -> dict[str, int]:
+        """A coherent-enough lock-free snapshot; only this scheduler thread mutates jobs and streams."""
+
+        filling_state = self._filling
+        filling = filling_state.job if filling_state is not None else self._starting
+        jobs = list(self._jobs.values())
+        if filling is not None and all(job is not filling for job in jobs):
+            jobs.append(filling)
+        tokens = sum(
+            (filling_state.position if filling_state is not None and job is filling_state.job
+             else len(job.stream.context))
+            for job in jobs
+            if job.stream is not None and not job.stream.finished
+        )
+        return {"running": len(jobs), "waiting": self.waiting, "tokens": tokens}
 
     @property
     def filling(self) -> Any:
@@ -333,6 +354,8 @@ class Scheduler(PromptFill):
                 if job is None:
                     continue
                 if tokens:
+                    if not job.first_token_at:
+                        job.first_token_at = time.perf_counter()
                     job.chunks.put(list(tokens))
                 if job.stream is not None and job.stream.finished:
                     del self._jobs[stream_id]
@@ -550,7 +573,7 @@ class Scheduler(PromptFill):
         except Exception as exc:  # noqa: BLE001 - reported to the waiting request, as a failed prefill is
             self._end_fill(job, shared_at, exc)
             return
-        self._filling = Filling(job, steps, shared_at)
+        self._filling = Filling(job, steps, shared_at, position=int(cached))
 
     def _keep_checkpoints(self, job: ChatJob, shared_at: set[int]) -> None:
         """Store the prefixes the job's prefill kept (system blocks pinned and saved to disk), once."""
@@ -596,8 +619,18 @@ class Scheduler(PromptFill):
         self.completed += 1
         self._finish(job)
 
-    @staticmethod
-    def _finish(job: ChatJob) -> None:
+    def _finish(self, job: ChatJob) -> None:
         job.finished_at = time.perf_counter()
+        if self.metrics is not None and not job.preempted and not job.internal:
+            stream = job.stream
+            self.metrics.observe(
+                prompt_tokens=job.prompt_tokens_processed,
+                generation_tokens=len(stream.emitted) if stream is not None else 0,
+                latency=max(0.0, job.finished_at - (job.received_at or job.submitted_at)),
+                ttft=(max(0.0, job.first_token_at - (job.received_at or job.submitted_at))
+                      if job.first_token_at else None),
+                mtp_drafted=int(getattr(stream, "mtp_drafted", 0) or 0),
+                mtp_accepted=int(getattr(stream, "mtp_accepted", 0) or 0),
+            )
         job.chunks.put(None)
         job.done.set()

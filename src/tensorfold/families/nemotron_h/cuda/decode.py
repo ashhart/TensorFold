@@ -31,6 +31,8 @@ class DecodeResult:
     drafted: int = 0
     accepted: int = 0
     widths: list[int] = field(default_factory=list)
+    mtp_drafted: int = 0
+    mtp_accepted: int = 0
 
     @property
     def tokens_per_second(self) -> float:
@@ -212,6 +214,9 @@ def draft_decode(eng: Engine, mtp: MTPHead, pre: Prefilled, count: int, sampling
         res.rounds += 1
         res.drafted += len(proposal)
         res.accepted += accepted
+        if not copied:
+            res.mtp_drafted += len(proposal)
+            res.mtp_accepted += accepted
         res.widths.append(1 + len(proposal))
         if len(out) < count and not (stop_eos and out[-1] in eos):
             # queue the next round's drafts before handing tokens over, so the caller's work overlaps the head's graph

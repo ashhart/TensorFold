@@ -6,6 +6,7 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | --- | --- |
 | `GET /v1/models` | Served model ID; MLX also lists configured aliases |
 | `GET /health` | Server health and available status information |
+| `GET /metrics` | Prometheus request, token, KV, MTP and latency metrics |
 | `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
 | `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
@@ -191,6 +192,16 @@ move when a request ends, taken from the engine's own statistics: `prompt_tokens
 `prefill_seconds_total`, `decode_seconds_total`, `rounds_total`, and `drafted_total` and `accepted_total` where the
 engine reports them. A `--parallel` server adds `streams` (decoding, prefilling and the maximum), and
 `context_length` is the served window. The first sample is a baseline, not a rate.
+
+`GET /metrics` (also `/v1/metrics`) exposes Prometheus 0.0.4 text on both backends. The process-lifetime
+`tensorfold:prompt_tokens_total` and `tensorfold:generation_tokens_total` counters include terminal requests;
+`tensorfold:mtp_drafted_total` and `tensorfold:mtp_accepted_total` count only drafts produced by an MTP head.
+`tensorfold:requests_running` includes prompt prefill and decode, while `tensorfold:requests_waiting` counts
+requests accepted by the server but not admitted to an engine stream. `tensorfold:kv_cache_usage_ratio` is a
+bounded logical token-position ratio labelled by `pool`; a backend omits the pool sample when it has no finite
+capacity. Request latency and time to first token are cumulative histograms.
+The endpoint is unauthenticated like the other server routes. When binding beyond localhost, expose it only on a
+trusted network or through a proxy that supplies access control, connection timeouts and scrape rate limits.
 
 For exactness comparisons, hold the checkpoint, template, runtime, prompt, seed and sampling settings
 constant, then compare the decoded reply with `draft` enabled and disabled. Repeat with fresh and reused

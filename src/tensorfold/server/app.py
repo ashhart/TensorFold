@@ -176,6 +176,10 @@ class ChatApp(RequestOptions):
             prompt_memory=self.prompt_memory,
             decode_share=decode_share,
         )
+        from tensorfold.server.metrics import of as metrics_of
+
+        self.metrics = metrics_of(self)
+        self.scheduler.metrics = self.metrics
         # evicted conversations go to disk (``spill_bytes`` of this model's files at most) and come back on demand
         self.spill_bytes = int(spill_bytes) if self.checkpoints is not None and self.scheduler.session_dir else 0
         if self.spill_bytes > 0:
@@ -267,7 +271,7 @@ class ChatApp(RequestOptions):
                         job = ChatJob(
                             job_id=f"warm-{uuid.uuid4().hex[:8]}", prompt_ids=prompt, max_tokens=1,
                             temperature=0.0, history_len=at, shared_prefix_lens=(at,) if final else (),
-                            drafts=False, background=True)
+                            drafts=False, background=True, internal=True)
                         self.scheduler.submit(job)
                         while job.chunks.get() is not None:
                             pass
@@ -394,6 +398,7 @@ class ChatApp(RequestOptions):
                                          if n >= 512) if system_len else (),
                 sampling=spec,
                 background=background,
+                received_at=received_at,
                 drafts=drafts,
                 ignore_eos=stops.ignore_eos, stop_check=stops if stops.strings else None,
                 cancellation=cancellation, call_gate=self._call_gate(fields, prompt_ids, tools),
@@ -450,7 +455,9 @@ class ChatApp(RequestOptions):
                     # Replay preempted work with the same prompt and sampling, dropping tokens already delivered.
                     preemptions += 1
                     replay = list(collected)
+                    earliest_first_token = job.first_token_at
                     job = make_job()
+                    job.first_token_at = earliest_first_token
                     self.scheduler.submit(job)
                     continue
                 break

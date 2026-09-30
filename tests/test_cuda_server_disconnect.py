@@ -252,6 +252,7 @@ def test_waiting_request_whose_client_left_never_reaches_the_engine(tmp_path, st
         until(lambda: app.turns.left >= 1 and not app.turns.waiting and not app.turns.busy,
               "the second request to leave")
         assert [app.tok.decode(call["prompt"]) for call in engine.calls] == ["user:first;assistant:"]
+        assert app.health.totals["prompt_tokens_total"] == len(engine.calls[0]["prompt"])
         status, _ = post(port, {"messages": [{"role": "user", "content": "third"}], "max_tokens": 3})
     assert status == 200
     assert [app.tok.decode(call["prompt"]) for call in engine.calls] == ["user:first;assistant:",

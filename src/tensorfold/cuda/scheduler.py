@@ -8,6 +8,8 @@ import queue
 import threading
 from typing import Any, Callable
 
+from tensorfold.server.cancellation import RequestCancelled
+
 from .streams import Stream
 
 
@@ -30,6 +32,19 @@ class Waiting(queue.PriorityQueue):
         with self.mutex:
             return bool(self.queue) and self.queue[0][0] == 0
 
+    def remove(self, stream: Stream) -> bool:
+        """Remove ``stream`` before admission, if it is still waiting."""
+
+        with self.mutex:
+            before = len(self.queue)
+            self.queue[:] = [entry for entry in self.queue if entry[2][0] is not stream]
+            if len(self.queue) == before:
+                return False
+            import heapq
+
+            heapq.heapify(self.queue)
+            return True
+
 
 class Scheduler:
     def __init__(self, decoder: Any, *, max_streams: int = 4) -> None:
@@ -43,23 +58,41 @@ class Scheduler:
 
     def submit(self, prompt: list[int], count: int, sampling: Any, draft: bool,
                emit: Callable[[list[int]], bool | None], stop_eos: bool = True, *, vision: Any = None,
-               constraint: Any = None, background: bool = False) -> dict:
+               constraint: Any = None, background: bool = False,
+               cancelled: Callable[[], bool] | None = None, on_admit: Callable[[], None] | None = None) -> dict:
         """Decode one request; ``emit`` runs on the calling thread and returns True to stop. Returns its stats."""
 
+        if cancelled is not None and cancelled():
+            raise RequestCancelled("the client left before the request started")
         box: queue.Queue = queue.Queue()
         stream = Stream(list(prompt), max(1, count), sampling, draft=draft, stop_eos=stop_eos, vision=vision,
-                        constraint=constraint, background=background)
+                        constraint=constraint, background=background, cancelled=cancelled)
         cancel = [False]
+        left = [False]
         stream.emit = lambda new: (box.put(("tokens", new)), cancel[0])[1]
         self.waiting.put((stream, box))
         while True:
-            kind, value = box.get()
+            try:
+                kind, value = box.get(timeout=0.05)
+            except queue.Empty:
+                if cancelled is None or not cancelled():
+                    continue
+                cancel[0] = True
+                left[0] = True
+                if self.waiting.remove(stream):
+                    raise RequestCancelled("the client left before the request started")
+                continue
             if kind == "tokens":
                 if not cancel[0] and emit(value):
                     cancel[0] = True                 # the client left: the stream ends after its next round
+            elif kind == "admitted":
+                if on_admit is not None:
+                    on_admit()
             elif kind == "error":
                 raise value
             else:
+                if left[0]:
+                    raise RequestCancelled("the client left during the reply")
                 return value
 
     def _admit(self, first=None) -> list[Stream]:
@@ -74,7 +107,10 @@ class Scheduler:
                     break
             self.boxes[id(stream)] = box
             try:
+                if stream.cancelled is not None and stream.cancelled():
+                    raise RequestCancelled("the client left before the request started")
                 self.decoder.admit(stream)
+                box.put(("admitted", None))
             except Exception as exc:                 # noqa: BLE001  (this request fails, the others go on)
                 self.boxes.pop(id(stream)).put(("error", exc))
                 continue

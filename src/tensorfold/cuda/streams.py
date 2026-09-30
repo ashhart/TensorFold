@@ -41,13 +41,21 @@ class Stream:
     prefill_s: float = 0.0
     started: float = 0.0
     finished: float = 0.0
+    mtp: bool = False
+    mtp_window: bool = False
+    mtp_drafted: int = 0
+    mtp_accepted: int = 0
+    cancelled: Callable[[], bool] | None = None
 
     def take(self, new: list[int], eos: Sequence[int] = ()) -> None:
         """Append a round's tokens and emit them; the stream ends at its count, an end token or a stop."""
 
         self.out.extend(new)
         self.context.extend(new)
-        self.accepted += max(0, len(new) - 1)             # a round's kept drafts come before its own token
+        accepted = max(0, len(new) - 1)                  # a round's kept drafts come before its own token
+        self.accepted += accepted
+        if self.mtp or self.mtp_window:
+            self.mtp_accepted += accepted
         fresh = list(new)
         if self.owed:                                     # a replay writes the tokens it sent before again first
             k = min(len(self.owed), len(fresh))
@@ -62,24 +70,35 @@ class Stream:
     def counted(self, rows: int) -> None:
         self.rounds += 1
         self.drafted += rows - 1
+        if self.mtp or self.mtp_window:
+            self.mtp_drafted += rows - 1
         self.min_rows = rows if self.min_rows == 0 else min(self.min_rows, rows)
 
     def stats(self) -> dict:
         own = {"prefill_s": round(self.prefill_s, 4), "decode_s": round(max(self.finished - self.started, 0.0), 4),
                "rounds": self.rounds, "drafts": self.draft, "cached": self.cached, "min_rows": self.min_rows,
                "drafted": self.drafted, "accepted": self.accepted}
+        if self.mtp or self.mtp_drafted or self.mtp_accepted:
+            own.update(mtp_drafted=self.mtp_drafted, mtp_accepted=self.mtp_accepted)
         if self.carry is None:
             return own
         both = {k: round(self.carry[k] + own[k], 4) for k in ("prefill_s", "decode_s")}
         both.update({k: self.carry[k] + own[k] for k in ("rounds", "drafted", "accepted")})
         rows = [r for r in (self.carry["min_rows"], own["min_rows"]) if r]
-        return {**own, **both, "cached": self.carry["cached"], "min_rows": min(rows, default=0)}
+        result = {**own, **both, "cached": self.carry["cached"], "min_rows": min(rows, default=0)}
+        if "mtp_drafted" in own or "mtp_drafted" in self.carry:
+            result.update(
+                mtp_drafted=int(self.carry.get("mtp_drafted", 0)) + int(own.get("mtp_drafted", 0)),
+                mtp_accepted=int(self.carry.get("mtp_accepted", 0)) + int(own.get("mtp_accepted", 0)),
+            )
+        return result
 
     def continued(self) -> "Stream":
         """This stream again from its prompt, for later (as the Mac replays): what it sent is owed, not sent again."""
 
         return Stream(self.prompt, self.count, self.sampling, draft=self.draft, stop_eos=self.stop_eos, emit=self.emit,
-                      background=self.background, carry=self.stats(), owed=[*self.out, *self.owed])
+                      background=self.background, carry=self.stats(), owed=[*self.out, *self.owed], mtp=self.mtp,
+                      cancelled=self.cancelled)
 
 
 def next_fill(filling: list[Stream]) -> Stream:

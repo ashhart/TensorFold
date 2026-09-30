@@ -12,6 +12,7 @@ from tensorfold.server import responses
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.http import Server
+from tensorfold.server.metrics import CONTENT_TYPE
 from tensorfold.server.stacks import Rearming
 
 if TYPE_CHECKING:
@@ -65,9 +66,17 @@ def make_handler(app: App):
             self.close_connection = True
 
         def do_GET(self):
-            if self.path.rstrip("/") in ("/v1/models", "/models"):
+            route = self.path.split("?", 1)[0].rstrip("/")
+            if route in ("/metrics", "/v1/metrics"):
+                data = health.of(app).prometheus(app)
+                self.send_response(200)
+                self.send_header("Content-Type", CONTENT_TYPE)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            elif route in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [{"id": app.served, "object": "model", "owned_by": "tensorfold"}]})
-            elif self.path.rstrip("/") in ("/health", "/v1/health"):
+            elif route in ("/health", "/v1/health"):
                 self._json(200, health.of(app).snapshot(app))
             elif responses.route(self.path):
                 responses.get(self, app, responses.route(self.path))

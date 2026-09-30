@@ -97,6 +97,8 @@ def test_mtp_decode_equals_serial(monkeypatch, oracle):
         res = decode.mtp_decode(w, head, st, mc, carry, first, 24, sampling, depth=4, confidence=0.3)
         assert res.tokens == want, (prompt, res.tokens, want)
         assert min(res.widths) >= 2
+        assert 0 <= res.mtp_drafted <= res.drafted
+        assert 0 <= res.mtp_accepted <= res.accepted
         if oracle:
             assert res.accepted > 0 and res.rounds < 23
             monkeypatch.undo()
@@ -316,6 +318,8 @@ def test_streams_decoded_together_equal_solo_and_serial(expandable, confidence):
         assert got == refs[i] and s.out == got and solo[i].tokens == got, i
         if s.draft:
             assert (s.rounds, s.min_rows) == (solo[i].rounds, min(solo[i].widths)), (i, s.rounds, solo[i].rounds)
+            assert 0 < s.mtp_drafted <= s.drafted
+            assert 0 <= s.mtp_accepted <= s.accepted
         else:
             assert s.min_rows == 1 and s.rounds == len(got) - 1
     assert not dec.streams and not dec.filling

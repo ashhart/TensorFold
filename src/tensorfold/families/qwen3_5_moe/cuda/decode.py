@@ -35,6 +35,8 @@ class Result:
     drafted: int = 0
     accepted: int = 0
     widths: list[int] = field(default_factory=list)
+    mtp_drafted: int = 0
+    mtp_accepted: int = 0
 
 
 def draft(logits: torch.Tensor, position: int, sampling: Sampling | None,
@@ -160,9 +162,11 @@ def mtp_decode(w, head: Head, st: State, mc: Cache, carry: Carry, pending: int, 
             normed = head.forward(mc, states, tokens, p0)
             return normed, head.logits(normed[-1:])
     out, rounds, drafted, kept, widths = [pending], 0, 0, 0, []
+    mtp_drafted = mtp_kept = 0
     context, copies = list(prompt) + [pending], CopyIndex()
     start = time.perf_counter()
     while len(out) < count and not (stop_eos and out[-1] in w.config.eos):
+        copied = bool(copies.propose(context, COPY_ROWS - 1))
         tokens, path, new, carry = mtp_round(st, mc, carry, out[-1], count - len(out), sampling, context, copies,
                                              depth=depth, confidence=confidence, ids=head.ids, verify=verify,
                                              step=step, eos=w.config.eos if stop_eos else (),
@@ -170,10 +174,13 @@ def mtp_decode(w, head: Head, st: State, mc: Cache, carry: Carry, pending: int, 
         out.extend(new)
         context.extend(new)
         rounds, drafted, kept = rounds + 1, drafted + len(tokens) - 1, kept + len(path) - 1
+        if not copied:
+            mtp_drafted += len(tokens) - 1
+            mtp_kept += len(path) - 1
         widths.append(len(tokens))
         if on_tokens is not None and on_tokens(new):
             break
-    return Result(out, time.perf_counter() - start, rounds, drafted, kept, widths)
+    return Result(out, time.perf_counter() - start, rounds, drafted, kept, widths, mtp_drafted, mtp_kept)
 
 
 def mtp_round(st: State, mc: Cache, carry: Carry, pending: int, room: int, sampling: Sampling | None,

@@ -173,7 +173,8 @@ class Qwen27Engine:
         return not (stops and len(prompt) - stops[-1] < MIN_GAP)
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
-                 draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
+                 draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False,
+                 cancelled=None, on_admit=None):
         """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``:
         past end tokens (``ignore_eos``); ``background``: under ``--parallel``, after the other requests and yielding a
         lane to one that waits."""
@@ -189,11 +190,13 @@ class Qwen27Engine:
         grammar = {} if constraint is None else {"constraint": constraint}     # a plain request calls as before
         if self.scheduler is not None:
             grammar.update({"background": True} if background else {})
+            lifecycle = {key: value for key, value in (("cancelled", cancelled), ("on_admit", on_admit))
+                         if value is not None}
             if vision is None:
                 return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                             **grammar)
+                                             **lifecycle, **grammar)
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         vision=vision, **grammar)
+                                         vision=vision, **lifecycle, **grammar)
         t0 = time.perf_counter()
         hit = self._resume(prompt) if draft and vision is None else None
         encoded = self.vision.encode(vision, prompt) if vision is not None else None

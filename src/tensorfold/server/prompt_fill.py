@@ -17,6 +17,7 @@ class Filling:
     job: Any
     steps: Any
     shared_at: set[int]
+    position: int = 0
 
 
 class PromptFill:
@@ -39,6 +40,8 @@ class PromptFill:
         filling = self._filling
         started = self.clock()
         fed = getattr(self.engine, "prefill_tokens", 0)
+        terminal = False
+        error: BaseException | None = None
         self.engine.prefill_guard = PrefillGuard(filling.job.cancellation, self.prompt_memory)
         try:
             if abort is None:
@@ -46,12 +49,17 @@ class PromptFill:
             else:
                 filling.steps.throw(abort)
         except StopIteration:
-            self._end_fill(filling.job, filling.shared_at, None)
+            terminal = True
         except Exception as exc:  # noqa: BLE001 - a failed or cancelled prefill ends only its own request
-            self._end_fill(filling.job, filling.shared_at, exc)
+            terminal, error = True, exc
         finally:
             self.engine.prefill_guard = None
-        self.prefilled.add(getattr(self.engine, "prefill_tokens", 0) - fed, self.clock() - started)
+        filled = max(0, getattr(self.engine, "prefill_tokens", 0) - fed)
+        filling.position = min(len(filling.job.prompt_ids), filling.position + filled)
+        filling.job.prompt_tokens_processed = max(filling.job.prompt_tokens_processed, filling.position)
+        self.prefilled.add(filled, self.clock() - started)
+        if terminal:
+            self._end_fill(filling.job, filling.shared_at, error)
         # a debt of the last round carries over, an unspent credit does not
         self._credit = min(self._credit, 0.0) + self.decode_share * (self.clock() - started)
         self._rounds_left = self.fill_rounds
@@ -67,8 +75,11 @@ class PromptFill:
             self._keep_checkpoints(job, shared_at)
             job.cancellation.check()
             job.prefilled_at = time.perf_counter()
+            job.prompt_tokens_processed = len(job.prompt_ids)
             job.cached_tokens = int(stream.cached_tokens)      # 0 when a stored state was not at a chunk start
             if stream.emitted:
+                if not job.first_token_at:
+                    job.first_token_at = time.perf_counter()
                 job.chunks.put(list(stream.emitted))
             if stream.finished:
                 self._retire(job)

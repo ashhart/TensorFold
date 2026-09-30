@@ -11,6 +11,7 @@ import pytest
 from tensorfold.cuda.scheduler import Scheduler
 from tensorfold.cuda.streams import Stream
 from tensorfold.cuda.turns import Turns
+from tensorfold.server.cancellation import RequestCancelled
 from tests.test_cuda_geometry import allocations  # noqa: F401  (fixture: fake triton, so the modules import)
 
 
@@ -86,6 +87,34 @@ def test_background_requests_wait_for_the_foreground_ones_queued_with_them():
     for t in threads:
         t.join()
     assert order[1:] == [False, False, True]                  # after the first, foreground before background
+
+
+def test_a_cancelled_queued_request_is_removed_before_admission():
+    dec = Lanes()
+    sched = Scheduler(dec, max_streams=1)
+    first = threading.Thread(target=sched.submit, args=([1] * 5, 100, None, True, lambda new: False))
+    first.start()
+    _until(lambda: dec.live() == 1)
+    cancelled = threading.Event()
+    admitted, errors = [], []
+
+    def second():
+        try:
+            sched.submit([2] * 6, 3, None, True, lambda new: False, cancelled=cancelled.is_set,
+                         on_admit=lambda: admitted.append(True))
+        except Exception as exc:  # noqa: BLE001 - asserted below
+            errors.append(exc)
+
+    waiting = threading.Thread(target=second)
+    waiting.start()
+    _until(lambda: sched.waiting.qsize() == 1)
+    cancelled.set()
+    waiting.join(5)
+    first.join(5)
+
+    assert len(errors) == 1 and isinstance(errors[0], RequestCancelled)
+    assert not admitted
+    assert [prompt for prompt, _ in dec.admitted] == [[1] * 5]
 
 
 def test_turns_give_the_engine_to_a_waiting_foreground_request_first():

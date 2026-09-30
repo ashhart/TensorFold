@@ -116,7 +116,7 @@ class Qwen36Engine:
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, constraint=None,
-                 background: bool = False) -> dict[str, Any]:
+                 background: bool = False, cancelled=None, on_admit=None) -> dict[str, Any]:
         """``draft=False``: serial decoding from a fresh prefill, no drafts or kept states; ``stop_eos=False``: past end
         tokens; ``background``: under ``--parallel``, after the other requests and yielding a lane to one that waits."""
 
@@ -132,8 +132,10 @@ class Qwen36Engine:
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
         grammar = {} if constraint is None else {"constraint": constraint}     # a plain request calls as before
         if self.scheduler is not None:
+            lifecycle = {key: value for key, value in (("cancelled", cancelled), ("on_admit", on_admit))
+                         if value is not None}
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         **grammar, **({"background": True} if background else {}))
+                                         **lifecycle, **grammar, **({"background": True} if background else {}))
         t0 = time.perf_counter()
         if not draft or self.head is None:
             st, first = serial_prefill(self.w, prompt, sampling, **grammar)
@@ -161,5 +163,6 @@ class Qwen36Engine:
                          confidence=self.confidence, stop_eos=stop_eos, on_tokens=on_tokens, prompt=prompt,
                          runner=self.graphs, **grammar)
         stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, drafted=res.drafted, accepted=res.accepted,
+                     mtp_drafted=res.mtp_drafted, mtp_accepted=res.mtp_accepted,
                      min_rows=min(res.widths, default=0))
         return stats

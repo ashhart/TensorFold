@@ -40,6 +40,8 @@ def test_drafted_request_equals_serial(engine, greedy):
     engine.generate(prompt, 48, sampling, lambda new: serial.extend(new), draft=False)
     assert drafted == serial
     assert stats["accepted"] > 0 and stats["min_rows"] >= 2
+    assert 0 <= stats["mtp_drafted"] <= stats["drafted"]
+    assert 0 <= stats["mtp_accepted"] <= stats["accepted"]
 
 
 def test_resumed_prompts_equal_fresh(engine):

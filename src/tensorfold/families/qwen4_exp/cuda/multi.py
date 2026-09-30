@@ -114,6 +114,7 @@ class MultiDecoder:
         st, resume, s.cached = self._slot_for(list(s.prompt), s.draft)
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity)
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
+        s.mtp = mtp
         try:
             first = prefill(e, s.prompt, s.sampling, mtp=mtp, resume=resume,
                             **({} if s.constraint is None else {"constraint": s.constraint}))

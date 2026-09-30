@@ -411,8 +411,11 @@ class GlmEngine:
         # the caches now hold prompt and reply; only prompts are snapshotted, since a later prompt prefills the reply again
         self.live = list(prompt) + res.tokens[:self.e.st.pos - len(prompt)]
         stats.update(decode_s=res.seconds, rounds=res.rounds, min_rows=1 + min(res.depths, default=0),
+                     drafted=res.drafted, accepted=res.accepted,
                      tokens_per_round=round((len(res.tokens) - 1) / max(res.rounds, 1), 3),
                      sha256=hashlib.sha256(json.dumps(res.tokens).encode()).hexdigest()[:16])
+        if policy is not None and not auto and not use_dflash:
+            stats.update(mtp_drafted=res.drafted, mtp_accepted=res.accepted)
         if res.arms:
             stats.update(drafters=res.arms, keeps=res.keeps)
         if res.stages:

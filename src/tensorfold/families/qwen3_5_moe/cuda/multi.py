@@ -154,6 +154,7 @@ class MultiDecoder:
         if not live:
             return done
         if len(live) == 1 and self._fits(live[0]):
+            live[0].mtp_window = False       # mtp_round may choose a context copy, so do not mislabel its window
             return done + self._alone(live[0])
         self._propose(live)
         grammars = self._constrain(live)
@@ -229,6 +230,7 @@ class MultiDecoder:
         if self.resident is not s:
             s.st, d.cache = g.load(s.st, d.cache, min(g.capacity, len(s.prompt) + s.count + COPY_ROWS))
             self.resident = s
+        s.mtp_window = not bool(s.copies.propose(s.context, COPY_ROWS - 1))
         try:
             tokens, path, new, d.carry = mtp_round(s.st, d.cache, d.carry, s.out[-1], s.count - len(s.out),
                                                    s.sampling, s.context, s.copies, depth=self.depth,
@@ -248,6 +250,7 @@ class MultiDecoder:
 
         for s in live:
             s.drafts = []
+            s.mtp_window = False
         todo = [s for s in live if s.snap is not None]
         if not todo:
             return
@@ -263,6 +266,7 @@ class MultiDecoder:
         for s, r in zip(todo, last):                  # an exact repeat of the context first: a long, likely window
             s.drafts = s.copies.propose(s.context, COPY_ROWS - 1)
             if not s.drafts:
+                s.mtp_window = True
                 active.append((s, r))
         if not active:
             return

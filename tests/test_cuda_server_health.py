@@ -10,6 +10,7 @@ import pytest
 pytest.importorskip("jinja2")
 
 from tensorfold.cuda import health
+from tensorfold.server.metrics import CONTENT_TYPE
 from tests.test_cuda_server_disconnect import MESSAGES, PacedEngine, app_for, post, serving
 
 WAIT = 10
@@ -31,6 +32,17 @@ def health_of(port) -> dict:
         response = connection.getresponse()
         assert response.status == 200
         return json.loads(response.read())
+    finally:
+        connection.close()
+
+
+def metrics_of(port, path="/metrics") -> tuple[str, str]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=WAIT)
+    try:
+        connection.request("GET", path)
+        response = connection.getresponse()
+        assert response.status == 200
+        return response.getheader("Content-Type"), response.read().decode()
     finally:
         connection.close()
 
@@ -77,8 +89,11 @@ def test_a_failed_request_still_counts_what_it_emitted(tmp_path):
     with serving(app) as port:
         status, _ = post(port, {"messages": MESSAGES, "max_tokens": 4})
         after = health_of(port)
+        prometheus = metrics_of(port)[1]
     assert status == 500 and after["requests_running"] == 0 and after["requests_total"] == 1
     assert after["completion_tokens_total"] == 2 and after["rounds_total"] == 0
+    assert "tensorfold:generation_tokens_total 2" in prometheus
+    assert "tensorfold:request_latency_seconds_count 1" in prometheus
 
 
 def test_a_concurrent_engine_reports_its_streams(tmp_path):
@@ -99,7 +114,7 @@ def test_a_bare_app_still_answers(tmp_path):
 def test_a_concurrent_stream_reports_its_drafted_rows_and_kept_drafts():
     from tensorfold.cuda.streams import Stream
 
-    s = Stream([1, 2], 10, None)
+    s = Stream([1, 2], 10, None, mtp=True)
     s.take([5])                               # the prefill's first token
     s.counted(4)
     s.take([6, 7])                            # a 4-row window: 3 drafted rows, 1 kept, then the round's own token
@@ -107,3 +122,103 @@ def test_a_concurrent_stream_reports_its_drafted_rows_and_kept_drafts():
     s.take([8])                               # a one-row round
     stats = s.stats()
     assert (stats["rounds"], stats["drafted"], stats["accepted"]) == (2, 3, 1)
+    assert (stats["mtp_drafted"], stats["mtp_accepted"]) == (3, 1)
+
+
+def test_concurrent_stream_labels_only_mtp_windows_and_carries_their_totals():
+    from tensorfold.cuda.streams import Stream
+
+    copied = Stream([1], 10)
+    copied.counted(3)
+    copied.take([2, 3])
+    assert "mtp_drafted" not in copied.stats()
+
+    mtp = Stream([1], 10, mtp_window=True)
+    mtp.counted(3)
+    mtp.take([2, 3])
+    resumed = mtp.continued()
+    resumed.counted(2)
+    resumed.take([4])
+
+    stats = resumed.stats()
+    assert (stats["drafted"], stats["accepted"]) == (3, 1)
+    assert (stats["mtp_drafted"], stats["mtp_accepted"]) == (2, 1)
+
+
+def test_metrics_reuse_health_totals_and_request_timings(tmp_path):
+    app = app_for(tmp_path, StatsEngine())
+    with serving(app) as port:
+        status, _ = post(port, {"messages": MESSAGES, "max_tokens": 4})
+        content_type, body = metrics_of(port, "/v1/metrics?now=1")
+
+    assert status == 200
+    assert content_type == CONTENT_TYPE
+    assert "tensorfold:requests_running 0" in body
+    assert "tensorfold:requests_waiting 0" in body
+    assert "tensorfold:prompt_tokens_total " in body
+    assert "tensorfold:generation_tokens_total 4" in body
+    assert "tensorfold:mtp_drafted_total 0" in body       # generic draft stats are not labelled MTP
+    assert "tensorfold:request_latency_seconds_count 1" in body
+    assert "tensorfold:time_to_first_token_seconds_count 1" in body
+
+
+def test_cuda_metrics_report_concurrent_queue_and_kv_pool():
+    stream = SimpleNamespace(context=list(range(25)))
+    filling = SimpleNamespace(context=list(range(10)), st=SimpleNamespace(pos=10))
+    decoder = SimpleNamespace(streams={1: stream}, filling=[stream, filling], capacity=100)
+    scheduler = SimpleNamespace(
+        decoder=decoder,
+        max_streams=2,
+        waiting=SimpleNamespace(qsize=lambda: 1),
+    )
+    app = SimpleNamespace(engine=SimpleNamespace(scheduler=scheduler))
+    state = health.of(app)
+    running_request = health.Request(3, [4])
+    waiting_request = health.Request(2, [])
+    state.live.update((running_request, waiting_request))
+
+    body = state.prometheus(app).decode()
+
+    assert "tensorfold:requests_running 1" in body
+    assert "tensorfold:requests_waiting 1" in body
+    assert 'tensorfold:kv_cache_usage_ratio{pool="cuda"} 0.175' in body
+
+
+def test_cuda_metrics_count_explicit_mtp_stats_only():
+    app = SimpleNamespace()
+    state = health.of(app)
+    with state.running(2, [3, 4]) as request:
+        request.mark_tokens([3])
+        request.stats = {"drafted": 99, "accepted": 98, "mtp_drafted": 5, "mtp_accepted": 3}
+
+    body = state.prometheus(app).decode()
+
+    assert "tensorfold:mtp_drafted_total 5" in body
+    assert "tensorfold:mtp_accepted_total 3" in body
+
+
+def test_cuda_metrics_do_not_count_an_unprocessed_queued_prompt():
+    app = SimpleNamespace()
+    state = health.of(app)
+    with state.running(7, []):
+        pass
+
+    body = state.prometheus(app).decode()
+
+    assert state.totals["requests_total"] == 1
+    assert state.totals["prompt_tokens_total"] == 0
+    assert "tensorfold:prompt_tokens_total 0" in body
+
+
+def test_serial_cuda_metrics_distinguish_turn_waiters_from_running_requests():
+    app = SimpleNamespace()
+    state = health.of(app)
+    running = health.Request(3, [])
+    waiting = health.Request(2, [])
+    running.admit()
+    state.live.update((running, waiting))
+
+    body = state.prometheus(app).decode()
+
+    assert "tensorfold:requests_running 1" in body
+    assert "tensorfold:requests_waiting 1" in body

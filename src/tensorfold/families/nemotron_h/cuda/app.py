@@ -224,7 +224,9 @@ class NemotronEngine:
             res = draft_decode(self.e, self.mtp, pre, max_tokens, sampling, drafts=self.drafts,
                                confidence=self.confidence, stop_eos=stop_eos, on_tokens=on_tokens,
                                constraint=constraint)
-            stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
+            stats.update(drafted=res.drafted, accepted=res.accepted,
+                         mtp_drafted=res.mtp_drafted, mtp_accepted=res.mtp_accepted,
+                         min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, pre, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,
                                 constraint=constraint)

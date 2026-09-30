@@ -295,7 +295,9 @@ class FlashNextEngine:
         if self.depth > 0:
             res = mtp_decode(self.e, first, max_tokens, sampling, depth=self.depth, confidence=self.confidence,
                              stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint)
-            stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
+            stats.update(drafted=res.drafted, accepted=res.accepted,
+                         mtp_drafted=res.drafted, mtp_accepted=res.accepted,
+                         min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,
                                 constraint=constraint)
@@ -304,7 +306,7 @@ class FlashNextEngine:
 
     def generate(self, prompt: list[int], max_tokens: int, sampling,
                  on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None,
-                 stop_eos: bool = True, background: bool = False) -> dict[str, Any]:
+                 stop_eos: bool = True, background: bool = False, cancelled=None, on_admit=None) -> dict[str, Any]:
         """``draft=False``: one token a round with no MTP drafts, from a fresh prefill that leaves the kept states
         alone: the serial reference. ``stop_eos=False``: past end tokens (``ignore_eos``). ``background``: under
         ``--parallel``, after the other requests and yielding a lane to one that waits."""
@@ -312,8 +314,10 @@ class FlashNextEngine:
         max_tokens = self._limit(prompt, max_tokens)
         if self.scheduler is not None:
             grammar = {} if constraint is None else {"constraint": constraint}
+            lifecycle = {key: value for key, value in (("cancelled", cancelled), ("on_admit", on_admit))
+                         if value is not None}
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         **grammar, **({"background": True} if background else {}))
+                                         **lifecycle, **grammar, **({"background": True} if background else {}))
         hit = self._resume(prompt) if draft else None
         if self.tp == 2:                     # rank 0 decodes exactly what it hands rank 1
             prompt, max_tokens, sampling, draft, _, _, stop_eos = self._share(

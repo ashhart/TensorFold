@@ -17,6 +17,7 @@ from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_co
 from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.request_options import parse_numbers, thinking_fields
 from tensorfold.server.messages import normalize_messages, validate_modalities
+from tensorfold.server import metrics
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.stacks import Rearming
@@ -85,12 +86,23 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_metrics(self) -> None:
+            running, waiting, pools = metrics.mlx_state(app)
+            body = metrics.of(app).render(running=running, waiting=waiting, pools=pools)
+            self.send_response(200)
+            self.send_header("Content-Type", metrics.CONTENT_TYPE)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _route(self) -> str:
             # Tolerate query strings, trailing slashes and client URLs with or without the /v1 prefix.
             return self.path.split("?", 1)[0].rstrip("/")
 
         def do_GET(self) -> None:
             route = self._route()
+            if route in {"/metrics", "/v1/metrics"}:
+                return self._send_metrics()
             if responses.route(route):
                 return responses.get(self, app, responses.route(route))
             if route in {"", "/health"}:
