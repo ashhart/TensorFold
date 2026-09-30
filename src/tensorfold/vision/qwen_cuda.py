@@ -71,8 +71,6 @@ def _vision_sources(model_dir):
 def checkpoint_vision(model_dir: str | Path) -> tuple[dict, int]:
     """Validate vision tensor headers before any model or accelerator allocation."""
     from tensorfold.cuda.capacity import SIZES
-    from .qwen_checkpoint import vision_tensors
-
     config = vision_config(model_dir)
     sources = _vision_sources(model_dir)
     tensors = {k: value[1] for k, value in sources.items()}
@@ -135,7 +133,8 @@ def capacity_geometry(base, model_dir, enabled: bool, rank: int, workspace: int 
             if os.environ.get("TENSORFOLD_VISION_WEIGHTS"):
                 external_weights = tower_bytes
         reserve = workspace if rank == 0 else 128 * 1024**2
-        return Geometry(lambda slots: result.bytes_at(slots) + reserve + external_weights, result.reserve, result.minimum_slots)
+        return Geometry(lambda slots: result.bytes_at(slots) + reserve + external_weights,
+                        result.reserve, result.minimum_slots)
     return geometry
 
 
