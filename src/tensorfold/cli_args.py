@@ -28,6 +28,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     endpoint.add_argument("--port", type=int, default=8080)
     endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
+    endpoint.add_argument("--name-priority", action="append", default=[], metavar="ID=background",
+                          help="a request naming ID (--name or --alias) with no priority of its own is treated as "
+                               "priority: background; CUDA only, repeatable")
     endpoint.add_argument("--api-key", action="append", default=[], help="require this API key; repeat for more keys")
     endpoint.add_argument("--api-key-file", help="restricted key file, one key or label: key per line; # comments")
     endpoint.add_argument("--metrics-open", action="store_true", help="allow metrics without an API key")

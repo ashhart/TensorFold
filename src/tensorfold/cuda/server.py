@@ -73,7 +73,8 @@ class App:
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
                  context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0,
                  aliases: tuple[str, ...] | list[str] = (), vision_max_images: int | None = None,
-                 vision_image_tokens: int | None = None):
+                 vision_image_tokens: int | None = None,
+                 background_ids: tuple[str, ...] | frozenset[str] = ()):
         from tokenizers import Tokenizer
 
         self.engine = engine
@@ -83,6 +84,7 @@ class App:
                         **({} if vision_image_tokens is None else {"max_visual_tokens": vision_image_tokens}))
         self.served = served
         self.aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
+        self.background_ids = frozenset(background_ids)   # --name-priority ID=background: a default for this id
         self.model_dir = Path(model_dir)
         self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         self.template = ChatTemplate(model_dir)
@@ -485,8 +487,10 @@ class App:
         shaped = prepared.grammar is not None or prepared.think_budget > 0
         think_end = self.tok.token_to_id("</think>") if chat and thinking and shaped else None
         budget = self._think_budget(prepared, think_end)
-        # priority "background" (or a session-title request): after the others, as on the Mac
-        background = body.get("priority") == "background" or (chat and is_title_request(body.get("messages"), tools))
+        # priority "background": the request's own field, else --name-priority's default for the id it asked for
+        # (a request's own priority wins over the default); a session-title request is background either way
+        by_name = "priority" not in body and self.reply_model(body) in getattr(self, "background_ids", ())
+        background = body.get("priority") == "background" or by_name or (chat and is_title_request(body.get("messages"), tools))
         concurrent = getattr(self.engine, "concurrent", False)
         turns = None if concurrent else self._turns()
         if concurrent and background and "background" in inspect.signature(self.engine.generate).parameters:

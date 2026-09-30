@@ -4,7 +4,31 @@ from __future__ import annotations
 
 import argparse
 import inspect
+from pathlib import Path
 from typing import Any
+
+
+def _served_name(args: argparse.Namespace) -> str:
+    """``--name``, else a repo id's last segment or the model path's name; no I/O (matches ``cli._serve_cuda``)."""
+
+    if getattr(args, "name", ""):
+        return args.name
+    from tensorfold import hub
+
+    model = str(args.model).rstrip("/")
+    return model.split("/")[-1] if hub.is_repo_id(str(args.model)) else Path(model).name
+
+
+def name_priority(args: argparse.Namespace) -> dict[str, str]:
+    """``--name-priority ID=background`` parsed: the id and the priority word it defaults to. No I/O."""
+
+    parsed: dict[str, str] = {}
+    for entry in getattr(args, "name_priority", None) or []:
+        model_id, sep, priority = str(entry).partition("=")
+        if not sep or not model_id.strip() or priority.strip().lower() != "background":
+            raise ValueError(f"--name-priority takes ID=background, not {entry!r}")
+        parsed[model_id.strip()] = "background"
+    return parsed
 
 
 def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any = None) -> None:
@@ -64,6 +88,16 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
     if getattr(args, "prefill_fp8", None) and not fp8:              # asked for by name, not a default
         raise ValueError(f"--prefill-fp8 picks FP8 prompt kernels on CUDA; {family.title} on "
                          f"{'CUDA' if backend == 'cuda' else 'MLX'} has none (its prompts run bf16 activations)")
+    priorities = name_priority(args)
+    if priorities and backend != "cuda":
+        raise ValueError("--name-priority is a CUDA server option: the MLX server has its own background rule")
+    if priorities:
+        served = _served_name(args)
+        ids = {served, *(str(a).strip() for a in getattr(args, "alias", None) or () if str(a).strip())}
+        bad = sorted(set(priorities) - ids)
+        if bad:
+            raise ValueError(f"--name-priority names {', '.join(bad)}, not --name or an --alias "
+                             f"({', '.join(sorted(ids))})")
     confidence = getattr(args, "mtp_confidence", None)
     if confidence is None:
         return

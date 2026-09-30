@@ -16,7 +16,8 @@ from tensorfold import __version__
 from tensorfold import cli_args
 from tensorfold.server import stacks, thinking_notes
 from tensorfold.server.memory_budget import MEMORY_FRACTION
-from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
+from tensorfold.serve_options import check as _check_serve_options, name_priority as _name_priority
+from tensorfold.serve_options import vision_options as _vision_options
 
 COMMANDS = ("serve", "pull", "models", "info", "update", "service", "tui", "plan")
 
@@ -305,7 +306,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
                     vision_max_images=getattr(args, "vision_max_images", None),
                     **({"vision_image_tokens": args.vision_image_tokens}
                        if getattr(args, "vision_image_tokens", None) is not None else {}),
-                    aliases=list(args.alias))
+                    aliases=list(args.alias), background_ids=frozenset(_name_priority(args)))
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
     effective_context = app.effective_context_window
