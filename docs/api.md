@@ -143,6 +143,11 @@ a background prompt's ~1 s prefill waited 0.57 s on Qwen3.6, against 0.70 s with
 background prompt's prefill once it has started. Two-rank engines serving one request at a time
 only order the queue.
 
+`--name-priority ID=background` gives one served id (`--name` or an `--alias`) a default priority: a request that
+asks for it and sends no `priority` of its own is treated as `priority: "background"`. The request's own `priority`
+field always wins over the default. This lets one CUDA server answer to several ids at their usual priority while a
+background-only client (a batch extractor, say) gets one id that always yields, without sending the field itself.
+
 ## Messages and tools
 
 Developer messages use system-message semantics. Only leading system and developer messages merge, in order,
