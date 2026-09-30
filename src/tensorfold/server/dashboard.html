@@ -35,6 +35,21 @@
   .bar { height:4px; border-radius:2px; background:var(--line); margin-top:8px; overflow:hidden; }
   .bar i { display:block; height:100%; background:var(--accent); transition:width .5s; }
   .bar i.warm { background:var(--warm); } .bar i.hot { background:var(--hot); }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted);
+       margin:26px 0 8px; font-weight:500; }
+  .req { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+         padding:9px 13px; margin-bottom:8px; }
+  .req .top { display:flex; justify-content:space-between; gap:10px; font-size:12.5px; }
+  .req .top .id { color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
+  .badge { display:inline-block; font-size:10px; padding:1px 7px; border-radius:8px; margin-left:8px;
+           text-transform:uppercase; letter-spacing:.06em; }
+  .badge.hit { background:color-mix(in srgb, var(--accent) 22%, transparent); color:var(--accent); }
+  .badge.miss { background:color-mix(in srgb, var(--warm) 22%, transparent); color:var(--warm); }
+  .badge.off { background:var(--line); color:var(--muted); }
+  .badge.acc { background:color-mix(in srgb, var(--cool) 18%, transparent); color:var(--cool); }
+  .stats { display:flex; flex-wrap:wrap; gap:4px 16px; margin-top:5px;
+           font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .stats b { color:var(--text); font-weight:500; }
   footer { text-align:center; color:var(--muted); font-size:11px; padding:12px 0 24px; }
 </style>
 </head>
@@ -49,12 +64,16 @@
     <div class="tile"><div class="label">Cached tokens</div><div class="value" id="cache">—</div>
       <div class="cap">held by the live streams</div></div>
     <div class="tile"><div class="label">Memory</div><div class="value" id="mem">—</div>
-      <div class="cap" id="memcap"></div></div>
+      <div class="cap" id="memcap"></div><div class="bar"><i id="membar"></i></div></div>
     <div class="tile"><div class="label">5-min gen rate</div><div class="value" id="gen5">—</div>
       <div class="cap" id="gen5cap"></div></div>
     <div class="tile"><div class="label">Avg prefill</div><div class="value" id="pavg">—</div>
       <div class="cap" id="pavgcap"></div></div>
+    <div class="tile"><div class="label">MTP acceptance</div><div class="value" id="acc">—</div>
+      <div class="cap" id="acccap">drafts the verify rounds committed</div></div>
   </div>
+  <h2>Recent requests</h2>
+  <div id="requests"></div>
 </main>
 <footer>sampled once a second · decode/prefill are the same numbers the terminal's live line shows</footer>
 <script>
@@ -124,9 +143,18 @@ function apply(s) {
   const m = s.memory;
   if (m) {
     const used = GiB((m.active || 0) + (m.cache || 0));
-    el("mem").innerHTML = `${used} <small>/ ${GiB(m.budget ?? m.physical)} GiB</small>`;
+    const budget = m.budget ?? m.physical;
+    el("mem").innerHTML = `${used} <small>/ ${GiB(budget)} GiB</small>`;
     el("memcap").textContent = `peak ${GiB(m.peak)} GiB · ${m.physical ? GiB(m.physical) + " GiB RAM" : ""}`;
+    const frac = budget ? Math.min(100, 100 * ((m.active || 0) + (m.cache || 0)) / budget) : 0;
+    const mb = el("membar");
+    mb.style.width = frac + "%"; mb.className = frac >= 95 ? "hot" : frac >= 75 ? "warm" : "";
   }
+  const sp = s.speculative || {};
+  el("acc").innerHTML = sp.acceptance_rate == null ? "—" :
+    `${(100 * sp.acceptance_rate).toFixed(1)}<small>%</small>`;
+  el("acccap").textContent = sp.drafted ? `${fmt(sp.accepted)} of ${fmt(sp.drafted)} drafts · ${fmt(sp.rounds)} rounds`
+                                        : "drafts the verify rounds committed";
   const g = s.decode_5m || {};
   el("gen5").innerHTML = g.min == null ? "—" :
     `${fmt(g.min)} <small>min ·</small> ${fmt(g.max)} <small>tok/s max</small>`;
@@ -134,6 +162,35 @@ function apply(s) {
   const p = s.prefill || {};
   el("pavg").innerHTML = p.avg_tok_s == null ? "—" : `${fmt(p.avg_tok_s)} <small>tok/s</small>`;
   el("pavgcap").textContent = p.count ? `${p.count} chunks · last ${fmt(p.last_tok_s)}` : "";
+  el("requests").innerHTML = (s.requests || []).map(row).join("") ||
+    "<div class='req'><div class='stats'>no requests finished yet</div></div>";
+}
+
+function ago(when) {
+  const d = Date.now() / 1000 - when;
+  return d < 90 ? `${Math.max(1, Math.round(d))}s ago` :
+         d < 5400 ? `${Math.round(d / 60)}m ago` : `${(d / 3600).toFixed(1)}h ago`;
+}
+
+function row(r) {
+  const badge = r.cache === "hit" ? `<span class="badge hit">cache hit</span>`
+              : r.cache === "miss" ? `<span class="badge miss">miss</span>` : "";
+  const acc = r.drafted ? `<span class="badge acc">${(100 * r.accepted / r.drafted).toFixed(0)}% acc</span>` : "";
+  const speed = r.tok_s == null ? "—" : fmt(r.tok_s);
+  const range = r.tok_s_min == null ? "" : ` · ${fmt(r.tok_s_min)}–${fmt(r.tok_s_max)}`;
+  return `<div class="req">
+    <div class="top"><span><b>${speed}</b> tok/s${range}${badge}${acc}</span>
+      <span class="id">${r.job_id} · ${ago(r.when)}</span></div>
+    <div class="stats">
+      <span>total <b>${(r.total_seconds ?? 0).toFixed(2)}s</b></span>
+      <span>prefill <b>${r.prefill_seconds == null ? "—" : r.prefill_seconds.toFixed(2) + "s"}</b>
+        <b>${fmt(r.prompt_tokens)}</b> tok</span>
+      <span>decode <b>${r.decode_seconds == null ? "—" : r.decode_seconds.toFixed(2) + "s"}</b>
+        <b>${fmt(r.completion_tokens)}</b> tok</span>
+      <span>cache <b>${fmt(r.cached_tokens)}</b> tok</span>
+      <span>${r.rounds} rounds</span>
+    </div>
+  </div>`;
 }
 
 async function poll() {

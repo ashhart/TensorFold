@@ -16,6 +16,7 @@ WINDOW = 300.0          # seconds the decode min/max/mean average over (the page
 EVERY = 1.0             # seconds between samples
 HISTORY_MAX = 300       # points the page may plot (one a sample, the window's worth)
 PREFILL_MAX = 256       # completed prefill chunks kept for the average rate
+HISTORY_MAX_REQUESTS = 32   # completed requests the page's recent list shows
 
 
 class RollingRate:
@@ -78,6 +79,7 @@ class StatsCollector:
         self._last: dict[str, Any] | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._tick, name="tensorfold-dashboard", daemon=True)
+        self._history: collections.deque[dict[str, Any]] = collections.deque(maxlen=HISTORY_MAX_REQUESTS)
 
     def start(self) -> "StatsCollector":
         """Begin sampling and hand this collector to the scheduler, whose fill loop feeds the prefill average."""
@@ -94,16 +96,17 @@ class StatsCollector:
         self._stop.set()
 
     def snapshot(self) -> dict[str, Any]:
-        """The newest sample (the thread's, or a first one built on the spot before it has ticked)."""
+        """A fresh build, remembered as the thread's newest: a poll never serves a sample older than itself."""
 
-        with self._lock:
-            return self._last if self._last is not None else self._build()
-
-    def sample(self) -> dict[str, Any]:
         built = self._build()
         with self._lock:
             self._last = built
         return built
+
+    def sample(self) -> dict[str, Any]:
+        """One sampler tick; the 1 Hz thread calls this, and tests call it to step time deterministically."""
+
+        return self.snapshot()
 
     def record_prefill(self, tokens: int, seconds: float) -> None:
         """A prompt chunk prefilled (the scheduler's own call site; a raising page must never stop a serve)."""
@@ -111,6 +114,15 @@ class StatsCollector:
         try:
             self.prefill_average.add(tokens, seconds)
         except Exception:  # noqa: BLE001 - the dashboard is never a way to fail a request
+            pass
+
+    def record_request(self, summary: dict[str, Any]) -> None:
+        """A finished request's stats, for the page's recent list (scheduler thread; a raising page must not)."""
+
+        try:
+            with self._lock:
+                self._history.appendleft(summary)
+        except Exception:  # noqa: BLE001
             pass
 
     def _tick(self) -> None:
@@ -134,11 +146,15 @@ class StatsCollector:
             if live["decode_tok_s"] > 0:
                 self.decode.add(live["decode_tok_s"])
             context.update(scheduler.context_snapshot())
+        speculative = scheduler.stream_spec_snapshot() if scheduler is not None else {}
+        drafted = speculative.get("drafted", 0)
         return {"ts": self.clock(), "model": getattr(app, "served_name", ""),
                 "warming": bool(getattr(app, "warming", False)),
                 "connections": connections, "live": live, "context": context,
                 "memory": _memory(app), "decode_5m": self.decode.snapshot(),
-                "prefill": self.prefill_average.snapshot()}
+                "prefill": self.prefill_average.snapshot(), "requests": list(self._history),
+                "speculative": {**speculative,
+                                "acceptance_rate": (speculative["accepted"] / drafted) if drafted else None}}
 
 
 def _memory(app: Any) -> dict[str, int] | None:
@@ -171,4 +187,5 @@ def _physical_bytes() -> int:
         return 0
 
 
-__all__ = ["EVERY", "HISTORY_MAX", "PREFILL_MAX", "WINDOW", "PrefillAverage", "RollingRate", "StatsCollector"]
+__all__ = ["EVERY", "HISTORY_MAX", "HISTORY_MAX_REQUESTS", "PREFILL_MAX", "WINDOW", "PrefillAverage",
+           "RollingRate", "StatsCollector"]

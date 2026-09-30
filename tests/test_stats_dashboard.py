@@ -155,3 +155,43 @@ def test_the_dashboards_own_polls_stay_out_of_the_access_log(capsys):
         collector.stop()
         app.scheduler.stats = None
         app.close()
+
+
+def test_a_finished_request_lands_in_the_pages_recent_list():
+    app = make_app()
+    collector = StatsCollector(app).start()
+    try:
+        app.chat([{"role": "user", "content": "count the tokens as they land"}], max_tokens=8)
+        requests = collector.snapshot()["requests"]
+        assert requests and requests[0]["job_id"].startswith("req-")
+        row = requests[0]
+        assert row["prompt_tokens"] > 0 and row["completion_tokens"] >= 8
+        assert row["cache"] in {"hit", "miss", "off"}
+        # the fake engine finishes short replies inside the prefill, so decode_seconds may be 0 and the
+        # request's own tok/s None; the burst readings (min/max) exist either way
+        if row["decode_seconds"]:
+            assert row["tok_s"] > 0 and row["tok_s_min"] <= row["tok_s"] <= row["tok_s_max"]
+        else:
+            assert row["tok_s"] is None and row["tok_s_max"] > 0
+        assert row["total_seconds"] > 0 and row["rounds"] > 0
+    finally:
+        collector.stop()
+        app.scheduler.stats = None
+        app.close()
+
+
+def test_the_snapshot_carries_the_live_streams_speculative_state():
+    app = make_app()
+    collector = StatsCollector(app).start()
+    try:
+        hold_a_stream(app.scheduler)
+        app.scheduler._jobs["live"].stream.rounds = 3
+        app.scheduler._jobs["live"].stream.drafted = 10
+        app.scheduler._jobs["live"].stream.accepted = 7
+        spec = collector.sample()["speculative"]
+        assert (spec["rounds"], spec["drafted"], spec["accepted"]) == (3, 10, 7)
+        assert spec["acceptance_rate"] == 0.7
+    finally:
+        collector.stop()
+        app.scheduler.stats = None
+        app.close()

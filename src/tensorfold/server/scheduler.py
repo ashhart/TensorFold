@@ -270,6 +270,22 @@ class Scheduler(PromptFill):
             cached += int(getattr(stream, "cached_tokens", 0) or job.cached_tokens)
         return {"used_tokens": used, "cached_tokens": cached}
 
+    def stream_spec_snapshot(self) -> dict[str, Any]:
+        """Speculative state of the live streams: rounds run, tokens the MTP drafts committed.
+
+        The sampler reads this between the engine's rounds, the same contract as ``context_snapshot``.
+        """
+
+        rounds = drafted = accepted = 0
+        for job in list(self._jobs.values()) + ([] if self._filling is None else [self._filling.job]):
+            stream = job.stream
+            if stream is None:
+                continue
+            rounds += int(getattr(stream, "rounds", 0))
+            drafted += int(getattr(stream, "drafted", 0))
+            accepted += int(getattr(stream, "accepted", 0))
+        return {"rounds": rounds, "drafted": drafted, "accepted": accepted}
+
     @staticmethod
     def finish_job(job: ChatJob, reason: str = "stop") -> None:
         """Ask the engine to stop a stream at the next round (safe from any thread)."""
@@ -610,7 +626,35 @@ class Scheduler(PromptFill):
         if stream is not None and stream in self.engine.streams:
             self.engine.streams.remove(stream)
         self.completed += 1
+        if self.stats is not None:              # --dashboard: the page's recent list, newest first
+            self.stats.record_request(self._request_summary(job, stream))
         self._finish(job)
+
+    def _request_summary(self, job: ChatJob, stream: Any) -> dict[str, Any]:
+        """One finished request for the dashboard: its times, its speed, and the cache it hit or missed on."""
+
+        finished = time.perf_counter()
+        decode_tokens = max(0, len(stream.emitted) - 1) if stream is not None else 0
+        prefill_seconds = max(0.0, job.prefilled_at - job.started_at) if job.started_at and job.prefilled_at else None
+        decode_seconds = max(0.0, job.finished_at - job.prefilled_at) if job.prefilled_at else 0.0
+        # The job's own rate over its decode window, plus the meter's shortest-window reading for the burst
+        # its last rounds reached (the live line's 2 s window outlives a short request's rounds).
+        rates = [decode_tokens / decode_seconds] if decode_seconds > 0 else []
+        burst = self.decoded.rate()
+        if burst > 0:
+            rates.append(burst)
+        checkpoints = self.checkpoints
+        return {"job_id": job.job_id, "when": finished,
+                "prompt_tokens": len(job.prompt_ids), "completion_tokens": decode_tokens + 1,
+                "cached_tokens": int(job.cached_tokens),
+                "cache": "hit" if job.cached_tokens > 0 else ("off" if checkpoints is None else "miss"),
+                "total_seconds": max(0.0, finished - job.submitted_at),
+                "prefill_seconds": prefill_seconds, "decode_seconds": decode_seconds or None,
+                "tok_s": (decode_tokens / decode_seconds) if decode_seconds > 0 else None,
+                "tok_s_min": min(rates) if rates else None, "tok_s_max": max(rates) if rates else None,
+                "rounds": int(getattr(stream, "rounds", 0)) if stream is not None else 0,
+                "drafted": int(getattr(stream, "drafted", 0)) if stream is not None else 0,
+                "accepted": int(getattr(stream, "accepted", 0)) if stream is not None else 0}
 
     @staticmethod
     def _finish(job: ChatJob) -> None:
