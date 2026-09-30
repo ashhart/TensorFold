@@ -37,8 +37,11 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [ ] Per-rank weight budget (must stay ≤ ~99.5 GiB/rank like vLLM)
 - [x] Engram hashing/token map/bucket layout (`families/deepseek_v41/engram.py`; multipliers, primes, 99,092 ids verified)
 - [x] Single-GPU layer-streaming reference forward, T ≤ 512 (`families/deepseek_v41/reference.py`)
-- [ ] Goldens: vLLM `prompt_logprobs` for 6 prompts (`tools/dsv41_golden.py`) → `notes/dsv41/golden.json`
-- [ ] Reference vs goldens (`tools/dsv41_compare.py`): top-1 agreement, |Δlogprob|
+- [x] Goldens: vLLM `prompt_logprobs` for 7 prompts (`tools/dsv41_golden.py`) → `notes/dsv41/golden.json`
+- [x] Reference vs goldens: 94.2% top-1 / NLL 1.400 vs 1.383 on 365 tokens after dropping q per-head RMS
+      (found with vLLM activation dumps: private recipe copy `/home/docker/ai/vllm-serve/tf-dump`, eager mode,
+      hook in `overlay/patch_memory_log.py`; `tools/dsv41_dump_diff.py`). vLLM itself is noisy on short
+      prompts (eager vs CUDA graphs differ by up to 0.6 mean |Δlogprob|).
 - [ ] Chat template / tokenizer: DeepSeek V4.1 encoder (`deepseek_v41` template, DSML tool calls, reasoning_effort)
 
 ## Spec findings that change the plan (ARCH.md)

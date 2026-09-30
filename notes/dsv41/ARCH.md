@@ -282,7 +282,8 @@ qr_kv = x @ [wq_a | wkv]                         # [T, 1792]
 qr    = RMSNorm(qr_kv[:, :1280], q_norm, 1e-20)  # bf16; also feeds the indexer (§4.4)
 kv    = RMSNorm(qr_kv[:, 1280:], kv_norm, 1e-20) # bf16 [T,512]
 q     = (qr @ wq_b).view(T, 64, 512)
-q_h   = q_h · rsqrt(mean(q_h²) + 1e-20)          # per-head RMS, NO weight ("qnorm" in the fused op)
+# (NO per-head RMS on q in V4.1 — measured against vLLM layer-0 dumps: with it the attention output is
+#  26% off at position 0, without it 1.6%. TensorFold's V4 normalizes each head; V4.1 does not.)
 q     = RoPE(q, pos)                             # dims 448..511
 kv    = RoPE(kv, pos) → written to this layer's SWA cache at pos   # §7
 ```
@@ -845,6 +846,10 @@ plus 2 Engram gathers per forward.
 ---
 
 ## 13. Open questions the source code does not answer
+
+0. RESOLVED 2026-09-30 by dumping vLLM activations: no per-head q RMS (see §3.3). Engram hashes match vLLM
+   bit for bit on a 365-token prompt. Reference vs vLLM: 94.2% top-1, NLL 1.400 vs 1.383.
+
 
 1. The exact `mhc_pre_delayed` kernel: Sinkhorn order and eps placement are taken from the V4
    reference, and what happens when `pre_mix=None` with a 3-D input (DSpark's first block) is not

@@ -170,7 +170,8 @@ def attention(ck: Checkpoint, c: Config, L: int, x: torch.Tensor, pos: torch.Ten
     qr = rms(lin(ck.linear(p + ".wq_a"), x), ck.get(p + ".q_norm.weight"), eps).to(BF)
     kv = rms(lin(ck.linear(p + ".wkv"), x), ck.get(p + ".kv_norm.weight"), eps).to(BF)
     q = lin(ck.linear(p + ".wq_b"), qr).view(T, H, Dh)
-    q = rms(q, None, eps)                                   # per-head RMS, no weight
+    if "qnorm" in VARIANT:                                  # V4 normalized each head; V4.1 does not (measured)
+        q = rms(q, None, eps)
     q = rope(q, pos, freqs)                                 # fp32 [T, H, Dh]
     kv = rope(kv, pos, freqs).to(BF).float()                # this layer's window rows [T, Dh]
 
@@ -290,26 +291,40 @@ class Sequence:
         self.probes: list[torch.Tensor] = []
 
 
+def _dump(s: Sequence, name: str, obj: dict) -> None:
+    dump = os.environ.get("TF_REF_DUMP_DIR")
+    if dump and s.T == int(os.environ.get("TF_DUMP_TOKENS", "365")):
+        os.makedirs(dump, exist_ok=True)
+        torch.save({k: v.detach().cpu() for k, v in obj.items()}, f"{dump}/{name}.pt")
+
+
 def layer_step(ck: Checkpoint, c: Config, L: int, s: Sequence, tables: E.Tables) -> None:
     X = s.X
+    if L == 0:
+        _dump(s, "embed", {"embed": X[:, 0]})
     if L > 0:
         X = hc_post(s.f, X, s.post, s.comb)
     if L in c.engram_layer_ids and "noengram" not in VARIANT:
         ell = c.engram_layer_ids.index(L)
         rows = tables.rows(ell, s.rows_idx[:, ell, :]).to(ck.device)
+        before = X
         X = engram_apply(ck, c, L, ell, X, rows)
+        if L < 3:
+            _dump(s, f"l{L:02d}_engram", {"x": before, "out": X, "hashes": torch.from_numpy(s.rows_idx[:, ell, :])})
     post, comb, x, pre = HCMix(ck, f"layers.{L}.hc_attn")(X, s.pre, ck.get(f"layers.{L}.attn_norm.weight"), c)
     a = attention(ck, c, L, x, s.pos, s.caches)
+    if L < 3:
+        _dump(s, f"l{L:02d}_attn", {"x": x, "out": a})
     X = hc_post(a, X, post, comb)
     s.post, s.comb, x, s.pre = HCMix(ck, f"layers.{L}.hc_ffn")(X, pre, ck.get(f"layers.{L}.ffn_norm.weight"), c)
     s.f = moe(ck, c, L, x)
+    if L < 3:
+        _dump(s, f"l{L:02d}_ffn", {"x": x, "out": s.f})
+        _dump(s, f"l{L:02d}_gate", {"x": x, "logits": x.float() @ ck.get(f"layers.{L}.ffn.gate.weight", F32).T})
     s.X = X
     s.probes.append(X.float().mean(1)[-1].cpu())
-    dump = os.environ.get("TF_REF_DUMP_DIR")
-    if dump and s.T == int(os.environ.get("TF_DUMP_TOKENS", "365")):
-        os.makedirs(dump, exist_ok=True)
-        torch.save({"stream": hc_post(s.f, X, s.post, s.comb).cpu(), "pre": s.pre.cpu(), "ffn_out": s.f.cpu()},
-                   f"{dump}/layer{L:02d}.pt")
+    _dump(s, f"layer{L:02d}", {"stream": hc_post(s.f, X, s.post, s.comb), "pre": s.pre, "ffn_out": s.f,
+                               "residual": X, "post": s.post, "comb": s.comb})
 
 
 def forward(model_dir: Path, engram_dir: Path, prompts: list[list[int]], *, layers: int | None = None,
