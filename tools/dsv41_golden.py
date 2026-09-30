@@ -19,15 +19,15 @@ AUTH = {"Authorization": "Bearer " + os.environ["VLLM_API_KEY"]} if os.environ.g
 PROMPTS = [
     "The capital of France is Paris. The capital of Germany is Berlin. The capital of Italy is",
     "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n    if n < 2:\n        return n\n    return",
-    "In 1905, Albert Einstein published four papers that changed physics. The first explained the photoelectric "
-    "effect, the second Brownian motion, the third special relativity, and the fourth showed that mass and energy "
-    "are equivalent, expressed by the famous equation",
-    "Q: A train leaves at 3 pm travelling 60 km/h. Another leaves the same station at 4 pm travelling 90 km/h on the "
-    "same track. At what time does the second train catch up?\nA: Let t be hours after 3 pm. 60t = 90(t - 1), so",
+    ("In 1905, Albert Einstein published four papers that changed physics. The first explained the photoelectric "
+     "effect, the second Brownian motion, the third special relativity, and the fourth showed that mass and energy "
+     "are equivalent, expressed by the famous equation"),
+    ("Q: A train leaves at 3 pm travelling 60 km/h. Another leaves the same station at 4 pm travelling 90 km/h on the "
+     "same track. At what time does the second train catch up?\nA: Let t be hours after 3 pm. 60t = 90(t - 1), so"),
     "Die Donau ist der zweitlängste Fluss Europas. Sie entspringt im Schwarzwald und mündet ins",
-    "Once upon a time, in a small village at the edge of a vast forest, there lived an old clockmaker named Elias. "
-    "Every morning he opened his shop at dawn, wound every clock on the wall, and listened. One day, one of the "
-    "clocks did not tick. He opened its case and found, instead of gears, a tiny folded note that read:",
+    ("Once upon a time, in a small village at the edge of a vast forest, there lived an old clockmaker named Elias. "
+     "Every morning he opened his shop at dawn, wound every clock on the wall, and listened. One day, one of the "
+     "clocks did not tick. He opened its case and found, instead of gears, a tiny folded note that read:"),
     ("The history of the printing press begins in the fifteenth century. Johannes Gutenberg, a goldsmith from Mainz, "
      "combined several existing technologies into a system that made mass production of books possible for the first "
      "time in Europe. His movable metal type was cast from an alloy of lead, tin and antimony, which melted at a low "

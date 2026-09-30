@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import torch
 
 
 def main() -> None:
-    goldens = json.load(open(sys.argv[1]))["goldens"]
+    goldens = json.loads(Path(sys.argv[1]).read_text())["goldens"]
     by_ids = {tuple(g["ids"]): g for g in goldens}
     for path in sys.argv[2:]:
         ref = torch.load(path)

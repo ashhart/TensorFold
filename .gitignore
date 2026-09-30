@@ -15,3 +15,4 @@ notes/dsv41/tensors.json
 notes/ref/
 notes/dsv41/tokenizer.json
 notes/dsv41/token_map.npy
+out/

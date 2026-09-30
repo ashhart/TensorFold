@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from tensorfold.cuda.exl3.linear import Exl3Linear
 from . import engram as E
 from .config import Config
 
+VARIANT = set(filter(None, os.environ.get("DSV41_REF_VARIANT", "").split(",")))   # debugging toggles
 MAX_TOKENS = 512            # beyond this the indexer's top-512 selection would drop entries
 BF = torch.bfloat16
 F32 = torch.float32
@@ -38,7 +40,10 @@ class Checkpoint:
         self.memo: dict[str, object] = {}         # this layer's tensors and linears, dropped by clear()
 
     def clear(self) -> None:
+        """Drop this layer's tensors and the open files (safetensors keeps what a handle has read in host memory)."""
+
         self.memo.clear()
+        self.files.clear()
 
     def has(self, name: str) -> bool:
         return name in self.index
@@ -52,8 +57,8 @@ class Checkpoint:
     def _get(self, name: str, dtype=None) -> torch.Tensor:
         f = self.index[name]
         if f not in self.files:
-            self.files[f] = safe_open(str(self.root / f), framework="pt")
-        t = self.files[f].get_tensor(name).to(self.device)
+            self.files[f] = safe_open(str(self.root / f), framework="pt", device=str(torch.device(self.device, 0)))
+        t = self.files[f].get_tensor(name)
         return t if dtype is None else t.to(dtype)
 
     def linear(self, prefix: str) -> Exl3Linear:
@@ -104,12 +109,20 @@ def rope(x: torch.Tensor, pos: torch.Tensor, freqs: torch.Tensor, inverse: bool 
     ang = pos.double()[:, None] * freqs.double()[None, :]
     shape = [x.shape[0]] + [1] * (x.dim() - 2) + [freqs.numel()]
     cos, sin = ang.cos().float().view(shape), ang.sin().float().view(shape)
-    r = x[..., -2 * freqs.numel():]
-    e, o = r[..., 0::2].clone(), r[..., 1::2].clone()
+    r = x[..., :2 * freqs.numel()] if "ropefirst" in VARIANT else x[..., -2 * freqs.numel():]
+    half = freqs.numel()
+    if "neox" in VARIANT:
+        e, o = r[..., :half].clone(), r[..., half:].clone()
+    else:
+        e, o = r[..., 0::2].clone(), r[..., 1::2].clone()
     if inverse:
         sin = -sin
-    r[..., 0::2] = e * cos - o * sin
-    r[..., 1::2] = o * cos + e * sin
+    if "neox" in VARIANT:
+        r[..., :half] = e * cos - o * sin
+        r[..., half:] = o * cos + e * sin
+    else:
+        r[..., 0::2] = e * cos - o * sin
+        r[..., 1::2] = o * cos + e * sin
     return x
 
 
@@ -134,7 +147,7 @@ class HCMix:
         for _ in range(c.hc_sinkhorn_iters - 1):
             comb = comb / (comb.sum(dim=-1, keepdim=True) + eps)
             comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
-        x_in = (pre_in[:, :, None] * X.float()).sum(1)
+        x_in = ((pre if "nodelay" in VARIANT else pre_in)[:, :, None] * X.float()).sum(1)
         x_in = rms(x_in.to(BF), norm_w, c.rms_norm_eps).to(BF)
         return post, comb, x_in, pre
 
@@ -176,13 +189,19 @@ def attention(ck: Checkpoint, c: Config, L: int, x: torch.Tensor, pos: torch.Ten
     win_mask = (t[None, :] <= t[:, None]) & (t[None, :] >= t[:, None] - (c.sliding_window - 1))
     keys = kv
     mask = win_mask
-    if comp is not None and comp.shape[0]:
+    skip = "nocomp" in VARIANT or f"nocomp{ratio}" in VARIANT
+    if "nowin" in VARIANT and ratio > 0:
+        win_mask = win_mask & (t[None, :] == t[:, None])
+        mask = win_mask
+    if comp is not None and comp.shape[0] and not skip:
         C = comp.shape[0]
         vis = torch.arange(C, device=x.device)[None, :] < ((t[:, None] + 1) // ratio)
         keys = torch.cat([comp, kv])
         mask = torch.cat([vis, win_mask], dim=1)
     scores = torch.einsum("thd,sd->ths", q, keys) * scale  # [T, H, S]
     scores = scores.masked_fill(~mask[:, None, :], float("-inf"))
+    if "nosink" in VARIANT:
+        sink = torch.full_like(sink, float("-inf"))
     full = torch.cat([scores, sink.view(1, H, 1).expand(T, H, 1)], dim=-1)
     w = torch.softmax(full, dim=-1)[..., :-1]
     o = torch.einsum("ths,sd->thd", w, keys)               # V = K
@@ -207,7 +226,7 @@ def compress(ck: Checkpoint, c: Config, L: int, x: torch.Tensor, ratio: int, fre
         kvg = kv[:n * ratio].view(n, ratio, -1)
         g = torch.softmax(gate[:n * ratio].view(n, ratio, -1), dim=1)
         latent = rms((g * kvg).sum(1), norm_w, c.rms_norm_eps).to(BF)
-    start = torch.arange(latent.shape[0], device=x.device) * ratio
+    start = torch.arange(latent.shape[0], device=x.device) * ratio + (ratio - 1 if "compend" in VARIANT else 0)
     return rope(latent, start, freqs).to(BF).float()
 
 
@@ -217,9 +236,10 @@ def moe(ck: Checkpoint, c: Config, L: int, x: torch.Tensor) -> torch.Tensor:
     limit = c.swiglu_limit
     logits = x.float() @ ck.get(p + ".gate.weight", F32).T
     sc = torch.sqrt(torch.nn.functional.softplus(logits))
-    idx = torch.topk(sc + ck.get(p + ".gate.bias", F32), c.num_experts_per_tok, dim=-1).indices
+    bias = 0 if "nobias" in VARIANT else ck.get(p + ".gate.bias", F32)
+    idx = torch.topk(sc + bias, c.num_experts_per_tok, dim=-1).indices
     w = sc.gather(1, idx)
-    w = w / w.sum(-1, keepdim=True) * c.routed_scaling_factor
+    w = w / w.sum(-1, keepdim=True) * (1.0 if "noscale" in VARIANT else c.routed_scaling_factor)
 
     def expert(prefix: str, xs: torch.Tensor) -> torch.Tensor:
         g = lin(ck.linear(prefix + ".w1"), xs).float()
@@ -231,7 +251,8 @@ def moe(ck: Checkpoint, c: Config, L: int, x: torch.Tensor) -> torch.Tensor:
     for e in torch.unique(idx).tolist():
         rows, slot = (idx == e).nonzero(as_tuple=True)
         y.index_add_(0, rows, expert(f"{p}.experts.{e}", x[rows]) * w[rows, slot, None])
-    y += expert(p + ".shared_experts", x)
+    if "noshared" not in VARIANT:
+        y += expert(p + ".shared_experts", x)
     return y.to(BF)
 
 
@@ -273,7 +294,7 @@ def layer_step(ck: Checkpoint, c: Config, L: int, s: Sequence, tables: E.Tables)
     X = s.X
     if L > 0:
         X = hc_post(s.f, X, s.post, s.comb)
-    if L in c.engram_layer_ids:
+    if L in c.engram_layer_ids and "noengram" not in VARIANT:
         ell = c.engram_layer_ids.index(L)
         rows = tables.rows(ell, s.rows_idx[:, ell, :]).to(ck.device)
         X = engram_apply(ck, c, L, ell, X, rows)
@@ -284,6 +305,11 @@ def layer_step(ck: Checkpoint, c: Config, L: int, s: Sequence, tables: E.Tables)
     s.f = moe(ck, c, L, x)
     s.X = X
     s.probes.append(X.float().mean(1)[-1].cpu())
+    dump = os.environ.get("TF_REF_DUMP_DIR")
+    if dump and s.T == int(os.environ.get("TF_DUMP_TOKENS", "365")):
+        os.makedirs(dump, exist_ok=True)
+        torch.save({"stream": hc_post(s.f, X, s.post, s.comb).cpu(), "pre": s.pre.cpu(), "ffn_out": s.f.cpu()},
+                   f"{dump}/layer{L:02d}.pt")
 
 
 def forward(model_dir: Path, engram_dir: Path, prompts: list[list[int]], *, layers: int | None = None,
@@ -311,7 +337,10 @@ def forward(model_dir: Path, engram_dir: Path, prompts: list[list[int]], *, laye
         torch.cuda.synchronize()
         ck.clear()
         torch.cuda.empty_cache()
-        log(f"layer {L:2d} {time.time() - t0:5.1f} s  |x| {seqs[-1].X.float().norm(dim=-1).mean():.1f}", flush=True)
+        rss = int(Path("/proc/self/statm").read_text().split()[1]) * 4096 / 2**30
+        log(f"layer {L:2d} {time.time() - t0:5.1f} s  |x| {seqs[-1].X.float().norm(dim=-1).mean():.1f}  "
+            f"rss {rss:.1f} GiB  cuda alloc {torch.cuda.memory_allocated() / 2**30:.1f} "
+            f"reserved {torch.cuda.memory_reserved() / 2**30:.1f} GiB", flush=True)
     out = []
     for s in seqs:
         X = hc_post(s.f, s.X, s.post, s.comb)
