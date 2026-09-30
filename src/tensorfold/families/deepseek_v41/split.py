@@ -21,6 +21,7 @@ RULES: tuple[tuple[str, str], ...] = (
     (r"\.ffn\.(experts\.\d+|shared_experts)\.w2\.", "rows"),
     (r"^head\.", "cols"),
     (r"\.attn\.attn_sink$", "cols"),
+    (r"\.engram\.wkv\.", "cols"),            # 6144 -> 25600: each rank projects half, then an all-gather
 )
 
 

@@ -65,3 +65,14 @@ def test_a_row_alone_equals_the_row_in_a_window():
                  CFG.hc_sinkhorn_iters)
     for a, b in zip(all_rows, one):
         assert torch.equal(a[4:5], b)
+
+
+def test_post_adds_rank_partials_in_order_then_rounds():
+    g = torch.Generator(device="cuda").manual_seed(3)
+    D = CFG.hidden_size
+    X = torch.randn((2, 4, D), generator=g, device="cuda").to(torch.bfloat16)
+    parts = torch.randn((2, 2, D), generator=g, device="cuda")
+    post_w = torch.rand((2, 4), generator=g, device="cuda")
+    comb = torch.softmax(torch.randn((2, 4, 4), generator=g, device="cuda"), -1)
+    want = hc.post((parts[0] + parts[1]).to(torch.bfloat16), X, post_w, comb)
+    assert torch.equal(hc.post(parts, X, post_w, comb), want)

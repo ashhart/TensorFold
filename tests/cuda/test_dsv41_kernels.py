@@ -64,3 +64,15 @@ def test_mqa_matches_the_masked_softmax(ratio, positions):
     got = K.mqa(q, comp if ratio else None, n_buf, ratio, swa, pos, sink, W, buf, 512 ** -0.5)
     ref = _ref_attention(q, comp, ratio, swa, pos, sink, W)
     assert (got - ref).abs().max() <= 0.03 * ref.abs().max()
+
+
+def test_route_matches_topk_on_sqrt_softplus():
+    g = torch.Generator(device="cuda").manual_seed(11)
+    logits = torch.randn((9, 384), generator=g, device="cuda") * 3
+    bias = torch.randn((384,), generator=g, device="cuda") * 0.1
+    pick, wts = K.route(logits, bias, 6, 1.5)
+    sc = torch.sqrt(torch.nn.functional.softplus(logits))
+    ref = torch.topk(sc + bias, 6, dim=-1).indices
+    assert torch.equal(pick.long().sort(-1).values, ref.sort(-1).values)
+    w = sc.gather(1, pick.long())
+    torch.testing.assert_close(wts, w / w.sum(-1, keepdim=True) * 1.5, rtol=1e-5, atol=1e-6)

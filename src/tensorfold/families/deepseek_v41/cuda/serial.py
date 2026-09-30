@@ -18,7 +18,7 @@ import torch
 from tensorfold.cuda.exl3 import experts as ex3
 
 from .. import engram as E
-from ..reference import inv_freq, rms
+from ..reference import inv_freq
 from . import hc as hcf
 from . import kernels as K
 from .weights import HCW, LayerW, Weights
@@ -45,6 +45,16 @@ class Comm:
         for r in range(1, self.world):
             total += recv[r]
         return total
+
+    def partials(self, partial: torch.Tensor) -> torch.Tensor:
+        """Every rank's fp32 partial, stacked in rank order [world, ...] (the consumer adds them in order)."""
+
+        send = partial.contiguous().float()
+        if self.world == 1:
+            return send[None]
+        recv = torch.empty((self.world, *send.shape), dtype=F32, device=send.device)
+        self.nccl.all_gather(send.view(-1), recv.view(-1))
+        return recv
 
     def gather_last(self, part: torch.Tensor) -> torch.Tensor:
         """Concatenate each rank's slice of the last axis in rank order."""
@@ -79,6 +89,7 @@ class SerialEngine:
         self.tables = E.Tables(engram_dir, c.engram_layer_ids)
         self.scratch = [ex3.Scratch(layer.moe.experts, MAX_ROWS, c.num_experts_per_tok) for layer in w.layers]
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
+        self.split = c.engram_layer_ids[1]
         self.tables_rope = {r: K.rope_tables(f, cap) for r, f in self.freqs.items()}
         self.attnbuf = K.AttnBuffers(MAX_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,
                                      cap + 1 + c.sliding_window, device=self.dev)
@@ -115,13 +126,10 @@ class SerialEngine:
             raise ValueError(f"1..{MAX_ROWS} rows a call, got {R}")
         if p0 + R > min(st.cap, SHORT_CONTEXT):
             raise ValueError(f"context {p0 + R} beyond {min(st.cap, SHORT_CONTEXT)} (indexer not implemented yet)")
-        rows = self.engram_rows(tokens)
         if R == 1 and self.graph is not None:
-            self.g_tok.fill_(tokens[0])
-            self.g_pos.fill_(p0)
-            self.g_rows.copy_(rows)
-            self.graph.replay()
+            self.step(tokens[0])
             return self.g_logits
+        rows = self.engram_rows(tokens)
         return self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
                          static=False)
 
@@ -140,60 +148,117 @@ class SerialEngine:
         return E.dequant(w, sc)
 
     def core(self, ids: torch.Tensor, pos: torch.Tensor, rows: torch.Tensor, *, static: bool) -> torch.Tensor:
-        """The device-only forward (capturable when ``static``: fixed shapes, positions read on the device)."""
+        """The device-only forward over all layers (eager prompt chunks)."""
+
+        carry = self.part_a(ids, pos, rows[0], static=static)
+        return self.part_b(carry, pos, rows[1], static=static)
+
+    def part_a(self, ids: torch.Tensor, pos: torch.Tensor, rows1: torch.Tensor, *, static: bool) -> tuple:
+        """Embedding and the layers before the second Engram layer."""
 
         c = self.c
         R = ids.shape[0]
-        e = self.w.embed[ids]
-        X = e[:, None, :].expand(R, c.hc_mult, c.hidden_size).contiguous()
+        X = self.w.embed[ids][:, None, :].expand(R, c.hc_mult, c.hidden_size).contiguous()
         pre = torch.zeros((R, c.hc_mult), dtype=F32, device=self.dev)
         pre[:, 0] = 1.0
-        f = post = comb = None
-        for layer in self.w.layers:
-            L = layer.index
-            if L > 0:
+        carry = (X, pre, None, None, None)
+        return self.layers(carry, pos, {c.engram_layer_ids[0]: rows1}, 0, self.split, static)
+
+    def part_b(self, carry: tuple, pos: torch.Tensor, rows14: torch.Tensor, *, static: bool) -> torch.Tensor:
+        """The remaining layers and the vocabulary head."""
+
+        c = self.c
+        X, pre, f, post, comb = self.layers(carry, pos, {c.engram_layer_ids[1]: rows14}, self.split,
+                                            len(self.w.layers), static)
+        X = hcf.post(f, X, post, comb)
+        h = (pre[:, :, None] * X.float()).sum(1).to(BF)
+        h = K.rmsnorm(h, self.w.norm, c.rms_norm_eps)
+        return self.comm.gather_last(self.w.head(h, out_dtype=F32))
+
+    def layers(self, carry: tuple, pos: torch.Tensor, rows: dict, first: int, last: int, static: bool) -> tuple:
+        X, pre, f, post, comb = carry
+        for layer in self.w.layers[first:last]:
+            if f is not None:
                 X = hcf.post(f, X, post, comb)
             if layer.engram is not None:
-                X = self.engram(layer, X, rows[c.engram_layer_ids.index(L)])
+                X = self.engram(layer, X, rows[layer.index])
             post, comb, x, pre_a = self.hc(layer.hc_attn, X, pre)
             a = self.attention(layer, x, pos, static)
             X = hcf.post(a, X, post, comb)
             post, comb, x, pre = self.hc(layer.hc_ffn, X, pre_a)
-            f = self.moe(layer, x, R)
-        X = hcf.post(f, X, post, comb)
-        h = (pre[:, :, None] * X.float()).sum(1).to(BF)
-        h = rms(h, self.w.norm, c.rms_norm_eps).to(BF)
-        return self.comm.gather_last(self.w.head(h, out_dtype=F32))
+            f = self.moe(layer, x, x.shape[0])
+        return X, pre, f, post, comb
 
-    # -- decode graph -----------------------------------------------------------------------------------------
+    # -- decode graphs ----------------------------------------------------------------------------------------
     def capture(self) -> None:
-        """Capture the one-row decode step (both ranks must call this together)."""
+        """Capture the one-row decode step as two graphs split at the second Engram layer (both ranks together)."""
 
         c = self.c
         self.graph = None
+        n_rows = 3 * c.engram_n_heads
+        row_bytes = c.engram_head_dim + c.engram_head_dim // 32
         self.g_tok = torch.zeros((1,), dtype=torch.long, device=self.dev)
         self.g_pos = torch.zeros((1,), dtype=torch.long, device=self.dev)
-        self.g_rows = torch.zeros((len(c.engram_layer_ids), 1, 3 * c.engram_n_heads, c.engram_head_dim),
-                                  dtype=F32, device=self.dev)
+        self.g_raw = [torch.zeros((1, n_rows, row_bytes), dtype=torch.uint8, device=self.dev) for _ in range(2)]
+        self.h_raw = torch.zeros((2, n_rows, row_bytes), dtype=torch.uint8).pin_memory()
+        self.h_next = torch.zeros((1,), dtype=torch.long).pin_memory()
         saved = [t.clone() for t in self.state.swa], {k: v.clone() for k, v in self.state.comp.items()}, \
             {k: v.clone() for k, v in self.state.raw.items()}
+        hd = c.engram_head_dim
+
+        def rows(k):
+            raw = self.g_raw[k]
+            return E.dequant(raw[..., :hd], raw[..., hd:])
+
+        def run_a():
+            carry = self.part_a(self.g_tok, self.g_pos, rows(0), static=True)
+            return carry
+
+        def run_b(carry):
+            logits = self.part_b(carry, self.g_pos, rows(1), static=True)
+            return logits, logits.argmax(-1)
+
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(side):
             for _ in range(2):
-                self.core(self.g_tok, self.g_pos, self.g_rows, static=True)
+                run_b(run_a())
         torch.cuda.current_stream().wait_stream(side)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            self.g_logits = self.core(self.g_tok, self.g_pos, self.g_rows, static=True)
+        self.graph_a, self.graph_b = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph_a):
+            self.g_carry = run_a()
+        with torch.cuda.graph(self.graph_b, pool=self.graph_a.pool()):
+            self.g_logits, self.g_next = run_b(self.g_carry)
         torch.cuda.synchronize()
-        for dst, src in zip(self.state.swa, saved[0]):         # the warm-up wrote position 0: put it back
+        for dst, src in zip(self.state.swa, saved[0]):
             dst.copy_(src)
         for k, v in saved[1].items():
             self.state.comp[k].copy_(v)
         for k, v in saved[2].items():
             self.state.raw[k].copy_(v)
-        self.graph = graph
+        self.graph = True
+
+    def step(self, token: int) -> int:
+        """One decode row through the graphs: the second Engram layer's rows are read while the first graph runs."""
+
+        c, st = self.c, self.state
+        p0 = len(st.ids)
+        if p0 + 1 > min(st.cap, SHORT_CONTEXT):
+            raise ValueError(f"context {p0 + 1} beyond {min(st.cap, SHORT_CONTEXT)} (indexer not implemented yet)")
+        st.ids.append(token)
+        start = max(0, p0 - (c.engram_max_ngram_size - 1))
+        h = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[-1]   # [layers, 24]
+        self.tables.gather(h[:1], out=self.h_raw[:1], layers=[0])
+        self.g_raw[0].copy_(self.h_raw[:1], non_blocking=True)
+        self.g_tok.fill_(token)
+        self.g_pos.fill_(p0)
+        self.graph_a.replay()
+        self.tables.gather(h[1:], out=self.h_raw[1:], layers=[1])      # overlaps graph A on the GPU
+        self.g_raw[1].copy_(self.h_raw[1:], non_blocking=True)
+        self.graph_b.replay()
+        self.h_next.copy_(self.g_next, non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+        return int(self.h_next[0])
 
     # -- pieces ----------------------------------------------------------------------------------------------
     def hc(self, w: HCW, X: torch.Tensor, pre_in: torch.Tensor):
@@ -223,7 +288,7 @@ class SerialEngine:
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
         z = torch.cat([wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)], dim=1)
-        return self.comm.sum(a.wo_b(z, out_dtype=F32)).to(BF)
+        return self.comm.partials(a.wo_b(z, out_dtype=F32))
 
     def compress(self, layer: LayerW, x: torch.Tensor, pos: torch.Tensor, static: bool) -> None:
         c, st, a = self.c, self.state, layer.attn
@@ -257,23 +322,18 @@ class SerialEngine:
     def moe(self, layer: LayerW, x: torch.Tensor, R: int) -> torch.Tensor:
         c, m = self.c, layer.moe
         limit = c.swiglu_limit
-        logits = x.float() @ m.gate.float().T
-        sc = torch.sqrt(torch.nn.functional.softplus(logits))
-        pick = torch.topk(sc + m.bias, c.num_experts_per_tok, dim=-1).indices
-        w = sc.gather(1, pick)
-        w = (w / w.sum(-1, keepdim=True) * c.routed_scaling_factor).float().contiguous()
-        routed = ex3.routed(x.contiguous(), pick.int().contiguous(), w, m.experts, self.scratch[layer.index], None,
-                            R, limit=limit)
+        pick, w = K.route(x.float() @ m.gate.T, m.bias, c.num_experts_per_tok, c.routed_scaling_factor)
+        routed = ex3.routed(x.contiguous(), pick, w, m.experts, self.scratch[layer.index], None, R, limit=limit)
         g = m.shared[0](x, out_dtype=F32)
         u = m.shared[1](x, out_dtype=F32)
         act = (torch.nn.functional.silu(g.clamp(max=limit)) * u.clamp(-limit, limit)).to(BF)
         shared = m.shared[2](act, out_dtype=F32)
-        return self.comm.sum(routed + shared).to(BF)
+        return self.comm.partials(routed + shared)
 
     def engram(self, layer: LayerW, X: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
         c, g = self.c, layer.engram
         R, S, D = X.shape
-        kv = g.wkv(rows.to(BF).reshape(R, -1))
+        kv = self.comm.gather_last(g.wkv(rows.to(BF).reshape(R, -1)))    # each rank projects half the columns
         h = X.float()
         key = kv[:, :S * D].view(R, S, D).float()
         val = kv[:, S * D:].float()
@@ -303,8 +363,7 @@ class SerialEngine:
                 on_token(nxt)
             if nxt == self.c.eos_token_id:
                 break
-            logits = self.forward([nxt])
-            nxt = int(logits[-1].argmax())
+            nxt = self.step(nxt) if self.graph is not None else int(self.forward([nxt])[-1].argmax())
         torch.cuda.synchronize()
         t2 = time.perf_counter()
         return {"tokens": out, "prefill_s": t1 - t0, "decode_s": t2 - t1,

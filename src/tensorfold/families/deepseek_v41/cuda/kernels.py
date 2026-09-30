@@ -84,11 +84,18 @@ def _mqa_chunks(Q, COMP, SWA, POS, PO, PM, PL, n_comp_buf, ratio, H: tl.constexp
     n_vis = tl.where(ratio > 0, (p + 1) // tl.maximum(ratio, 1), 0)
     hh = hg * 16 + tl.arange(0, 16)
     d = tl.arange(0, D)
-    q = tl.load(Q + (r * H + hh[:, None]) * D + d[None, :]).to(tl.bfloat16)
     m = tl.full((16,), float("-inf"), tl.float32)
     l = tl.zeros((16,), tl.float32)
     o = tl.zeros((16, D), tl.float32)
     total = n_comp_buf + W
+    base = (r * NCH + c) * H + hh
+    lo = c * CH
+    # a chunk wholly inside the not-yet-visible part of the compressed buffer contributes nothing
+    if (lo >= n_vis) & (lo + CH <= n_comp_buf):
+        tl.store(PM + base, m)
+        tl.store(PL + base, l)
+        return
+    q = tl.load(Q + (r * H + hh[:, None]) * D + d[None, :]).to(tl.bfloat16)
     for t in range(CH // 64):
         k = c * CH + t * 64 + tl.arange(0, 64)
         is_comp = k < n_comp_buf
@@ -109,7 +116,6 @@ def _mqa_chunks(Q, COMP, SWA, POS, PO, PM, PL, n_comp_buf, ratio, H: tl.constexp
         o = o * alpha[:, None] + tl.dot(pr.to(tl.bfloat16), kk)
         l = l * alpha + tl.sum(pr, 1)
         m = next_m
-    base = (r * NCH + c) * H + hh
     tl.store(PO + base[:, None] * D + d[None, :], o)
     tl.store(PM + base, m)
     tl.store(PL + base, l)
@@ -127,8 +133,8 @@ def _mqa_merge(PO, PM, PL, SINK, OUT, H: tl.constexpr, D: tl.constexpr, NCH: tl.
         base = (r * NCH + c) * H + h
         cm = tl.load(PM + base)
         cl = tl.load(PL + base)
-        co = tl.load(PO + base * D + d)
         active = cl > 0.0
+        co = tl.load(PO + base * D + d, mask=(d < D) & active, other=0.0)
         next_m = tl.where(active, tl.maximum(m, cm), m)
         a = tl.exp(m - next_m)
         b = tl.where(active, tl.exp(cm - next_m), 0.0)
@@ -163,3 +169,37 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, n_comp_buf: int, ratio: int,
                                           num_warps=8, num_stages=1)
     _mqa_merge[(R, H)](buf.po, buf.pm, buf.pl, sink, out, H=H, D=D, NCH=nch, num_warps=4)
     return out
+
+
+@triton.jit
+def _route(L, BIAS, PICK, WTS, scale, E: tl.constexpr, EP: tl.constexpr, K: tl.constexpr, KP: tl.constexpr):
+    """sqrt(softplus) scores; the K best of score + bias (lowest id on ties); weights = scores renormalized x scale."""
+
+    r = tl.program_id(0)
+    e = tl.arange(0, EP)
+    ok = e < E
+    x = tl.load(L + r * E + e, mask=ok, other=0.0)
+    sp = tl.where(x > 20.0, x, tl.log(1.0 + tl.exp(tl.minimum(x, 20.0))))
+    sc = tl.sqrt(sp)
+    choice = tl.where(ok, sc + tl.load(BIAS + e, mask=ok, other=0.0), float("-inf"))
+    total = 0.0
+    for k in tl.static_range(K):
+        best = tl.max(choice, axis=0)
+        idx = tl.min(tl.where(choice == best, e, EP), axis=0)
+        w = tl.sum(tl.where(e == idx, sc, 0.0), axis=0)
+        tl.store(PICK + r * K + k, idx)
+        tl.store(WTS + r * K + k, w)
+        total += w
+        choice = tl.where(e == idx, float("-inf"), choice)
+    kk = tl.arange(0, KP)
+    w = tl.load(WTS + r * K + kk, mask=kk < K, other=0.0)
+    tl.store(WTS + r * K + kk, w / total * scale, mask=kk < K)
+
+
+def route(logits: torch.Tensor, bias: torch.Tensor, k: int, scale: float) -> tuple[torch.Tensor, torch.Tensor]:
+    R, E = logits.shape
+    pick = torch.empty((R, k), dtype=torch.int32, device=logits.device)
+    wts = torch.empty((R, k), dtype=torch.float32, device=logits.device)
+    _route[(R,)](logits.contiguous(), bias, pick, wts, scale, E=E, EP=triton.next_power_of_2(E), K=k,
+                     KP=triton.next_power_of_2(k), num_warps=4)
+    return pick, wts

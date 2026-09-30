@@ -97,11 +97,19 @@ def _pre_finish(X, PART, BASE, SCALE, PRE_IN, NW, OUT, PRE, POST, COMB, eps_norm
 
 
 @triton.jit
-def _post(B, X, POST, COMB, Y, D: tl.constexpr, CH: tl.constexpr):
+def _post(B, X, POST, COMB, Y, parts, part_stride, D: tl.constexpr, CH: tl.constexpr):
+    """B holds ``parts`` rank partials (fp32, rank order, part_stride apart) or one bf16 branch (parts 0)."""
+
     r = tl.program_id(0)
     c = tl.program_id(1)
     o = c * CH + tl.arange(0, CH)
-    b = tl.load(B + r * D + o).to(tl.float32)
+    if parts == 0:
+        b = tl.load(B + r * D + o).to(tl.float32)
+    else:
+        b = tl.load(B + r * D + o).to(tl.float32)
+        for k in range(1, parts):
+            b = b + tl.load(B + k * part_stride + r * D + o).to(tl.float32)
+        b = b.to(tl.bfloat16).to(tl.float32)
     x0 = tl.load(X + r * (4 * D) + o).to(tl.float32)
     x1 = tl.load(X + r * (4 * D) + D + o).to(tl.float32)
     x2 = tl.load(X + r * (4 * D) + 2 * D + o).to(tl.float32)
@@ -143,7 +151,12 @@ def pre(X: torch.Tensor, fn: torch.Tensor, base: torch.Tensor, scale: torch.Tens
 
 
 def post(b: torch.Tensor, X: torch.Tensor, post_w: torch.Tensor, comb: torch.Tensor) -> torch.Tensor:
+    """New streams; ``b`` is the bf16 branch [R, D] or the ranks' fp32 partials [world, R, D] (summed in rank order,
+    rounded to bf16 like the branch)."""
+
     R, _, D = X.shape
     Y = torch.empty_like(X)
-    _post[(R, D // CHUNK)](b.contiguous(), X, post_w, comb, Y, D=D, CH=CHUNK, num_warps=4)
+    b = b.contiguous()
+    parts = b.shape[0] if b.dim() == 3 else 0
+    _post[(R, D // CHUNK)](b, X, post_w, comb, Y, parts, R * D, D=D, CH=CHUNK, num_warps=4)
     return Y

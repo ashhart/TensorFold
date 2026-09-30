@@ -147,6 +147,40 @@ class Tables:
             fd = os.open(path, os.O_RDONLY)
             self.spans.append((fd, base + w0, base + s0, width, width // 32))
 
+    def gather(self, idx: np.ndarray, out=None, threads: int = 64, layers: list[int] | None = None):
+        """All rows of one position batch, every layer at once, with the native reader into ``out``.
+
+        ``idx`` int64 [len(layers), n]: rows per Engram layer (``layers``: which ones, default all). Returns uint8 [layers, n, 256 + 8] (row bytes | scale bytes)
+        in a pinned host tensor (``out`` when given).
+        """
+
+        import torch
+
+        from .cuda.rowread import reader
+
+        L, n = idx.shape
+        layers = list(range(L)) if layers is None else layers
+        spans = [self.spans[ell] for ell in layers]
+        width, sw = spans[0][3], spans[0][4]
+        row = width + sw
+        if out is None:
+            out = torch.empty((L, n, row), dtype=torch.uint8).pin_memory()
+        fds = np.repeat([s[0] for s in spans], 2 * n).astype(np.int32)
+        offs = np.empty((L, 2, n), dtype=np.int64)
+        sizes = np.empty((L, 2, n), dtype=np.int32)
+        dest = np.empty((L, 2, n), dtype=np.int64)
+        slot = (np.arange(L)[:, None] * n + np.arange(n)[None, :]) * row
+        for k, (_, w_off, s_off, _, _) in enumerate(spans):
+            offs[k, 0], offs[k, 1] = w_off + idx[k] * width, s_off + idx[k] * sw
+        sizes[:, 0], sizes[:, 1] = width, sw
+        dest[:, 0], dest[:, 1] = slot, slot + width
+        failed = reader().read_many(torch.from_numpy(fds), torch.from_numpy(offs.reshape(-1)),
+                                    torch.from_numpy(sizes.reshape(-1)), torch.from_numpy(dest.reshape(-1)), out,
+                                    threads)
+        if failed:
+            raise OSError(f"Engram: {failed} row reads failed")
+        return out
+
     def raw(self, requests: list[tuple[int, np.ndarray]]) -> list[tuple[np.ndarray, np.ndarray]]:
         """For each (layer, row ids) the stored bytes (uint8 [n, 256], [n, 8]): every row read concurrently."""
 
