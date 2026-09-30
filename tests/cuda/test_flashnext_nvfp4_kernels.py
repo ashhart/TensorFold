@@ -155,3 +155,56 @@ def test_moe4_step_runs_each_row_through_its_expert_and_the_shared_one():
         assert torch.equal(y[r, 1], nvfp4.matmul(sa, ex.shared.down, f32=True)[0])
     alone = step(x[2:3].contiguous())[1]
     assert torch.equal(alone[0], y[2])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_each_kernel_groups_a_prompt_in_its_own_item():
+    """A prompt plan's items hold its kernel's pairs (MLX grouped 64, NVFP4 16), inside ``max_items`` for that item."""
+
+    from tensorfold.cuda import experts as grouped
+    from tensorfold.cuda.nvfp4 import experts as nvx
+
+    rows, top_k, experts = 400, 10, 128
+    g = torch.Generator().manual_seed(3)
+    picks = torch.stack([torch.randperm(experts, generator=g)[:top_k] for _ in range(rows)]).to(torch.int32)
+    picks = torch.cat([picks, torch.full((rows, 1), experts, dtype=torch.int32)], dim=1).cuda()   # the shared one
+    assert (grouped.PREFILL_TILE, nvx.PREFILL_TILE) == (64, 16), "measured on Flash Next's routed prompts"
+    for tile in (grouped.PREFILL_TILE, nvx.PREFILL_TILE):
+        plan = grouped.Plan(rows, top_k + 1, experts + 1, "cuda", prefill=True)
+        grouped.route(picks, plan, tile)
+        items, distinct = int(plan.counts[0].item()), int(plan.counts[1].item())
+        assert plan.tile == tile and distinct == experts + 1
+        assert items <= grouped.max_items(rows * (top_k + 1), experts + 1, tile) <= plan.items.shape[0]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_moe4_prompt_rows_take_the_nvfp4_item_and_keep_their_bits(monkeypatch):
+    """A prompt's NVFP4 experts run in 16-pair items, and every pair's bits equal those of 64-pair items."""
+
+    from types import SimpleNamespace
+
+    from tensorfold.cuda import moe as moe_mod
+    from tensorfold.cuda.nvfp4 import experts as nvx
+
+    torch.manual_seed(7)
+    dev, e, d, ni, rows = "cuda", 3, 256, 128, 200
+
+    def proj(n, k):
+        return (torch.randint(0, 256, (n, k // 2), dtype=torch.uint8, device=dev),
+                torch.randint(40, 60, (n, k // 16), dtype=torch.uint8, device=dev).view(torch.float8_e4m3fn), 0.01)
+
+    ex = nvfp4_moe.moe4_from_experts([proj(ni, d) for _ in range(e)], [proj(ni, d) for _ in range(e)],
+                                     [proj(d, ni) for _ in range(e)],
+                                     tuple((torch.randn(o, i) * 0.02).to(torch.bfloat16).to(dev)
+                                           for o, i in ((ni, d), (ni, d), (d, ni))))
+    cfg = SimpleNamespace(num_experts_per_tok=1, num_experts=e, moe_intermediate_size=ni, hidden_size=d)
+    router = (torch.randn(e + 1, d, device=dev) * 0.1).to(torch.bfloat16)
+    x = (torch.randn(rows, d, device=dev) * 0.5).to(torch.bfloat16)
+    got = {}
+    for tile in (nvx.PREFILL_TILE, 64):
+        monkeypatch.setattr(nvx, "PREFILL_TILE", tile)
+        buf = moe_mod.MoEBuffers(rows, cfg, dev, prefill=True)
+        nvfp4_moe.moe(x, None, router, ex, buf, cfg)
+        got[tile] = (buf.plan.tile, int(buf.plan.counts[0]), buf.y.clone())
+    assert got[16][0] == 16 and got[64][0] == 64 and got[64][1] < got[16][1]
+    assert torch.equal(got[16][2], got[64][2])

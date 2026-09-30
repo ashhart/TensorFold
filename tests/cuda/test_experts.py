@@ -115,22 +115,45 @@ def want_plan(picks: torch.Tensor, e: int, tile: int):
     return items, members, len(set(flat))
 
 
-@pytest.mark.parametrize("rows,prefill", [(23, False), (23, True), (300, False), (300, True), (1500, True)])
-def test_plan_groups_pairs_by_expert(rows, prefill):
-    """One block up to 1,024 pairs, then 1,024-pair blocks in turn, in items of 16 pairs (decode) or 64 (prefill)."""
+@pytest.mark.parametrize("rows,prefill,tile", [(23, False, 64), (23, True, 64), (300, False, 64), (300, True, 64),
+                                              (1500, True, 64), (1500, True, 16)])
+def test_plan_groups_pairs_by_expert(rows, prefill, tile):
+    """One block up to 1,024 pairs, then 1,024-pair blocks in turn, in items of 16 pairs (decode) or the kernel's."""
 
     slots, e = 7, 50
     g = torch.Generator().manual_seed(9)
     picks = torch.stack([torch.randperm(e, generator=g)[:slots] for _ in range(rows)]).to(torch.int32)
     picks[:, 0] = 3                                            # one expert with a pair in every row
     plan = experts.Plan(rows, slots, e, DEV, prefill=prefill)
-    tile = plan.tile
-    experts.route(picks.to(DEV), plan)
-    want_items, want_members, distinct = want_plan(picks, e, tile)
+    experts.route(picks.to(DEV), plan, tile)
+    assert plan.tile == (tile if prefill else experts.TILE)
+    want_items, want_members, distinct = want_plan(picks, e, plan.tile)
     n = int(plan.counts[0])
     assert n == len(want_items) and int(plan.counts[1]) == distinct
     assert plan.items[:n].tolist() == want_items
     assert plan.members.tolist() == want_members
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_a_pairs_bits_never_depend_on_its_item(case):
+    """A prompt plan grouped in items of 16 pairs and of 64 gives every pair the same bits."""
+
+    ex, _, _ = build(case, 31)
+    rows = 300
+    x = (torch.randn((rows, ex.dims), device=DEV) * 0.5).to(torch.bfloat16)
+    picks = picks_for(rows, case, 6).contiguous()
+    slots = picks.shape[1]
+    got = {}
+    for tile in (experts.TILE, experts.PREFILL_TILE):
+        plan = experts.Plan(rows, slots, ex.count, DEV, prefill=True)
+        experts.route(picks, plan, tile)
+        act = torch.empty((rows * slots, ex.width), dtype=torch.bfloat16, device=DEV)
+        y = torch.empty((rows * slots, ex.dims), dtype=torch.bfloat16, device=DEV)
+        experts.gate_up(x, ex, plan, act, rows)
+        experts.down(act, ex, plan, y, rows)
+        got[tile] = (act, y, int(plan.counts[0]))
+    assert torch.equal(got[16][0], got[64][0]) and torch.equal(got[16][1], got[64][1])
+    assert got[64][2] < got[16][2]                             # fewer, wider items
 
 
 @pytest.mark.parametrize("prefill", [False, True])

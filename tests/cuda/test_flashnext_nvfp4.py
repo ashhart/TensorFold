@@ -171,11 +171,15 @@ def test_matmul_splitk_sum_order_is_the_reduces_one():
                                          GPI=nvfp4.gpi_for((k // nvfp4.GS) // sk, 2), F32=False,
                                          PACKED=fp.packed, num_warps=4, num_stages=3)
     got = torch.empty_like(out)
-    nvfp4._reduce[(triton.cdiv(4 * n, 1024),)](part, got, 4 * n, SK=sk, BLOCK=1024, num_warps=4)
+    nvfp4._reduce[(triton.cdiv(4 * n, 1024),)](part, got, 4 * n, SK=sk, BLOCK=1024, F32=False, num_warps=4)
     serial = part[0]
     for s in range(1, sk):
         serial = serial + part[s]
-    assert torch.equal(got, serial.to(torch.bfloat16))
+    assert torch.equal(got, serial.to(torch.bfloat16)), "the bf16 face rounds each sum, as the loop does"
+    # the fp32 face: the loop's own sums in the loop's order, never rounded
+    f32 = torch.empty((4, n), dtype=torch.float32, device="cuda")
+    nvfp4._reduce[(triton.cdiv(4 * n, 1024),)](part, f32, 4 * n, SK=sk, BLOCK=1024, F32=True, num_warps=4)
+    assert torch.equal(f32, serial), "the fp32 face adds in the same order, with no bf16 rounding"
 
 
 def test_a_packed_table_holds_the_checkpoints_own_bytes():

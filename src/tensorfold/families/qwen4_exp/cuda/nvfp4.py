@@ -307,17 +307,17 @@ try:
         for i in range(PER // GPI):
             for j in tl.static_range(GPI):
                 b = pid_s * PER + i * GPI + j
-                kb = b // 4
-                row0 = (b % 4) * 16
                 x = tl.load(X + rm[:, None] * x_stride + (b * 16 + r16)[None, :], mask=m_ok[:, None], other=0.0)
                 if PACKED:
-                    # a block's 16 codes are its 8 bytes: a byte a value, the low nibble for the even input
-                    w8 = tl.load(tile + kb * (32 * SBN) + (row0 // 2 + r16 // 2)[:, None] * SBN + local[None, :])
-                    code = tl.where((r16 % 2)[:, None] == 0, w8 & 0xF, w8 >> 4).to(tl.int32)
-                    wv = _bf16_widen(_e2m1_pattern(code)).to(tl.bfloat16)
+                    # 8 bytes a block (low nibble: even input), 8 * SBN apart: an address the pipeliner follows
+                    w8 = tl.load(tile + b * (8 * SBN) + (r16 // 2)[:, None] * SBN + local[None, :])
+                    # the input's parity picks the nibble; the pattern is a bf16's bits, so the bitcast is exact
+                    code = ((w8 >> ((r16 % 2) * 4)[:, None]) & 0xF).to(tl.int32)
+                    wv = _e2m1_pattern(code).to(tl.bfloat16, bitcast=True)
                 else:
-                    wbits = tl.load(tile + kb * (64 * SBN) + (row0 + r16)[:, None] * SBN + local[None, :])
-                    wv = _bf16_widen(wbits).to(tl.bfloat16)
+                    # 16 rows a stored macro block; the table's words are already bf16 patterns
+                    wbits = tl.load(tile + b * (16 * SBN) + r16[:, None] * SBN + local[None, :])
+                    wv = wbits.to(tl.bfloat16, bitcast=True)
                 p = tl.dot(x, wv)
                 if PACKED:
                     s = _e4m3_value(tl.load(S + b * N + rn, mask=n_ok, other=0).to(tl.int32)) * s2
@@ -331,13 +331,15 @@ try:
             tl.store(PART + (pid_s * M + rm[:, None]) * N + rn[None, :], acc, mask=out_mask)
 
     @triton.jit
-    def _reduce(PART, OUT, total, SK: tl.constexpr, BLOCK: tl.constexpr):
+    def _reduce(PART, OUT, total, SK: tl.constexpr, BLOCK: tl.constexpr, F32: tl.constexpr):
+        """The K slices summed in slice order, one fp32 add a slice, in one launch for either output face."""
+
         offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
         ok = offs < total
         acc = tl.load(PART + offs, mask=ok, other=0.0)
         for s in tl.static_range(1, SK):
             acc = acc + tl.load(PART + s * total + offs, mask=ok, other=0.0)
-        tl.store(OUT + offs, acc.to(tl.bfloat16), mask=ok)
+        tl.store(OUT + offs, acc if F32 else acc.to(tl.bfloat16), mask=ok)
 except ModuleNotFoundError:                   # the CPU tests of the format import this module without Triton
     HAS_TRITON = False
 
@@ -397,11 +399,6 @@ def matmul(x: torch.Tensor, fp: FP4, *, out: torch.Tensor | None = None, f32: bo
                  num_warps=num_warps or c_warps, num_stages=num_stages)
     if sk > 1:
         total = m * fp.n
-        if f32:
-            # fp32 outputs: the slices summed here in slice order, one fp32 add each, no bf16 rounding
-            out.copy_(part[0])
-            for s in range(1, sk):
-                out += part[s]
-        else:
-            _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, num_warps=4)
+        # fp32 outputs keep the loop's own sums: one fp32 add a slice, in slice order, no bf16 rounding
+        _reduce[(triton.cdiv(total, 1024),)](part, out, total, SK=sk, BLOCK=1024, F32=f32, num_warps=4)
     return out

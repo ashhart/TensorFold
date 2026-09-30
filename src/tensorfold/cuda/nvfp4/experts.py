@@ -10,6 +10,7 @@ from tensorfold.cuda import experts as grouped
 
 COLS = 32                 # output columns a block
 WORDS = 144               # int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
+PREFILL_TILE = 16         # this kernel's prompt item: 64 ran 1.53x slower on Flash Next's routed prompts
 
 
 def _i32(v: torch.Tensor) -> torch.Tensor:

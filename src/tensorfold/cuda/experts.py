@@ -10,8 +10,8 @@ import torch
 
 NTW = 4                  # n8 tiles a warp
 COLS = 8 * NTW           # output columns a warp
-TILE = 16                # pairs an item holds (decode form)
-PREFILL_TILE = 64        # pairs an item holds (prefill form)
+TILE = 16                # pairs an item holds (decode form), and the narrowest a prompt plan's consumer may take
+PREFILL_TILE = 64        # this kernel's prompt item: 16 ran 1.64x slower on Flash Next's routed prompts
 SMALL = 1024             # pairs the one-block plan takes; wider plans rank in blocks of 1024 pairs
 
 
@@ -105,21 +105,22 @@ class Plan:
                  prefill: bool = False) -> None:
         pairs = rows * slots
         self.rows, self.slots, self.experts, self.prefill = rows, slots, experts, prefill
-        self.tile = PREFILL_TILE if prefill else TILE
+        self.tile = PREFILL_TILE if prefill else TILE     # ``route`` sets a prompt plan's to its consumer's
         self.members = torch.zeros((pairs,), dtype=torch.int32, device=device)
-        self.items = torch.zeros((max_items(pairs, experts, self.tile), 3), dtype=torch.int32, device=device)
+        self.items = torch.zeros((max_items(pairs, experts, TILE), 3), dtype=torch.int32, device=device)
         self.counts = torch.zeros((2,), dtype=torch.int32, device=device)
         wide = pairs > SMALL
         self.rank = torch.zeros((pairs if wide else 1,), dtype=torch.int32, device=device)
         self.hist = torch.zeros((-(-pairs // 1024) * experts if wide else 1,), dtype=torch.int32, device=device)
 
 
-def route(picks: torch.Tensor, plan: Plan) -> None:
-    """``picks`` [R, slots] int32, contiguous: each (row, slot) pair's expert id (shared experts included)."""
+def route(picks: torch.Tensor, plan: Plan, tile: int = PREFILL_TILE) -> None:
+    """``picks`` [R, slots] int32, contiguous: each pair's expert; a prompt plan's items hold ``tile``, its kernel's."""
 
     rows, slots = picks.shape
     if slots != plan.slots or rows > plan.rows:
         raise ValueError(f"picks {tuple(picks.shape)} do not fit a plan of {plan.rows} x {plan.slots}")
+    plan.tile = tile if plan.prefill else TILE
     _ext().plan(picks, rows * slots, plan.experts, plan.tile, plan.members, plan.items, plan.counts, plan.rank,
                 plan.hist)
 

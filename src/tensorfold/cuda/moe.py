@@ -108,11 +108,12 @@ def select_rows(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int)
                         BLOCK=triton.next_power_of_2(experts + 1), SLOTP=triton.next_power_of_2(top_k + 1), num_warps=4)
 
 
-def select(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int) -> None:
-    """Each row's experts and weights (rows in parallel), then the (row, slot) pairs grouped by expert."""
+def select(logits: torch.Tensor, buf: MoEBuffers, top_k: int, experts: int,
+           tile: int = grouped.PREFILL_TILE) -> None:
+    """Each row's experts and weights (rows in parallel), then the pairs grouped by expert, ``tile`` a prompt's item."""
 
     select_rows(logits, buf, top_k, experts)
-    grouped.route(buf.pick[:logits.shape[0]], buf.plan)
+    grouped.route(buf.pick[:logits.shape[0]], buf.plan, tile)
 
 
 def moe(x: torch.Tensor, router_rows: torch.Tensor, ex: grouped.Experts, buf: MoEBuffers, top_k: int,
