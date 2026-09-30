@@ -158,7 +158,7 @@ class _Holder(nn.Module):
             setattr(self, name, nn.Linear(K, n, bias=False))
 
 
-def _real_groups(bits=4):
+def _real_groups(bits=4, group=64):
     root = nn.Module()
     root.linear_attn = _Holder([("in_proj_z", 6144), ("in_proj_b", 48), ("in_proj_a", 48)])
     root.self_attn = _Holder([("k_proj", 1024), ("v_proj", 1024)])
@@ -167,15 +167,19 @@ def _real_groups(bits=4):
         if isinstance(module, nn.Linear):
             mx.random.seed(300 + i)
             module.weight = (mx.random.normal(module.weight.shape) * 0.02).astype(mx.bfloat16)
-    nn.quantize(root, group_size=64, bits=bits)
+    nn.quantize(root, group_size=group, bits=bits)
     mx.eval(root.parameters())
     return root
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2, 5, 6, 8])
-def test_build_keeps_the_weights_and_adds_only_the_scales(bits):
+# every width in groups of 64; 4-bit in groups of 32 too (the lane matmul reads 4-bit g32 checkpoints)
+WIDTHS = [(4, 64), (3, 64), (2, 64), (5, 64), (6, 64), (8, 64), (4, 32)]
+
+
+@pytest.mark.parametrize("bits,group", WIDTHS)
+def test_build_keeps_the_weights_and_adds_only_the_scales(bits, group):
     _needs_tensor_units()
-    root = _real_groups(bits)
+    root = _real_groups(bits, group)
     members = {kind: [getattr(parent, n) for n in lane_fuse.GROUPS[kind]]
                for kind, parent in (("zba", root.linear_attn), ("kv", root.self_attn), ("gu", root.mlp))}
     originals = {id(m): m["weight"] for ms in members.values() for m in ms}          # MLX's layout
@@ -198,12 +202,14 @@ def test_build_keeps_the_weights_and_adds_only_the_scales(bits):
         expect = sum(sum(lane_qmm.pack_scales(m["scales"], m["biases"]).nbytes for m in ms) for ms in members.values())
         expect += 96 * (K * bits // 32) * 4
         assert added == expect
-        # scales are 1/(2 * bits) of the weights' bytes (1/8 at 4 bits): a second copy of the weights would add them all
-        assert abs(grown - expect) < 1024**2 and grown < 1.6 / (2 * bits) * weight_bytes, (grown, expect, weight_bytes)
+        # scales are 64 / (2 * bits * group) of the weights' bytes (1/8 at 4 bits g64): a second copy would add them all
+        assert abs(grown - expect) < 1024**2 and grown < 1.6 * 64 / (2 * bits * group) * weight_bytes, \
+            (grown, expect, weight_bytes)
         for ms in members.values():
             for m in ms:
                 w = m["weight"]
-                seen = lane_qmm.untile_weight(w, bits=bits) if getattr(m, "_lane_tiled", False) else w
+                seen = lane_qmm.untile_weight(w, int(getattr(m, "_lane_nt", lane_qmm.NT)), group, bits=bits) \
+                    if getattr(m, "_lane_tiled", False) else w
                 assert _same(seen, originals[id(m)]), "a member's weight changed"
         # each member's own call (on its view of the stack) keeps its bits, and the stack gives them too
         lane_fuse.enabled = True
@@ -305,7 +311,7 @@ def test_groups_of_mixed_widths_stay_separate():
         lane_fuse.clear(root)
 
 
-def _tiny_model(bits=4):
+def _tiny_model(bits=4, group=64):
     from mlx_lm.models.qwen3_5 import TextModel, TextModelArgs
 
     # Qwen3.8's head shapes and MLP width on a 1024-wide residual: the gate/up stack alone would
@@ -318,21 +324,21 @@ def _tiny_model(bits=4):
     mx.random.seed(21)
     model = TextModel(args)
     model.set_dtype(mx.bfloat16)
-    nn.quantize(model, group_size=64, bits=bits)
+    nn.quantize(model, group_size=group, bits=bits)
     mx.eval(model.parameters())
     return model
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2, 5, 6, 8])
-def test_tree_forward_fused_equals_unfused(bits):
+@pytest.mark.parametrize("bits,group", WIDTHS)
+def test_tree_forward_fused_equals_unfused(bits, group):
     """Whole lane-decoder rounds: prompt chain, draft tree, commit, chain, one row; every bit the same."""
 
     _needs_tensor_units()
-    _check_fused_rounds(bits, pipeline_layers=2)
+    _check_fused_rounds(bits, pipeline_layers=2, group=group)
 
 
-def _check_fused_rounds(bits, *, pipeline_layers):
-    model = _tiny_model(bits)
+def _check_fused_rounds(bits, *, pipeline_layers, group=64):
+    model = _tiny_model(bits, group)
     core, head = model.model, model.lm_head
     mx.random.seed(5)
     prompt = [int(t) for t in mx.random.randint(0, 512, (40,)).tolist()]      # gate/up stacked (> 32 rows)
