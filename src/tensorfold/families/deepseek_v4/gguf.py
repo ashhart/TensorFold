@@ -18,7 +18,11 @@ Design notes
 """
 from __future__ import annotations
 
+import json
+import math
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 # ---------------------------------------------------------------------------
@@ -397,3 +401,131 @@ def validate_tokenizer_provenance_or_raise(tokenizer: dict[str, Any],
     if report.errors:
         raise DeepSeekV4SchemaError("; ".join(report.errors))
     return report
+
+
+# ---------------------------------------------------------------------------
+# T03.03: atomic sidecars and family discovery
+# ---------------------------------------------------------------------------
+
+MODEL_TYPE = "deepseek_v4"
+SIDECAR_VERSION = "1"
+
+
+class PrepareConflictError(ValueError):
+    """Existing candidate sidecars conflict with the requested preparation."""
+
+
+@dataclass
+class PrepareReport:
+    config_path: Path
+    descriptor_path: Path
+    changed: bool
+    replaced: bool
+    descriptor_digest: str
+
+
+def _canonical_json(obj: Any) -> bytes:
+    """Deterministic JSON bytes so identical inputs yield identical sidecars."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write *data* to *path* through a same-directory temp file + rename.
+
+    Any stale temp left by an earlier interrupted write is removed first, so a
+    partial temp never becomes the published file. On failure the temp is
+    unlinked; the final path is untouched (atomic publish).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.unlink(missing_ok=True)          # clean a temp from an interrupted write
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _read_existing(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _descriptor_digest(desc: dict[str, Any]) -> str:
+    import hashlib
+    # digest over the canonical descriptor without its own digest field
+    body = {k: v for k, v in desc.items() if k != "descriptor_digest"}
+    return hashlib.sha256(_canonical_json(body)).hexdigest()
+
+
+def prepare_candidate(model_dir: str | Path, *,
+                      arch: dict[str, Any],
+                      tokenizer: dict[str, Any],
+                      source: str | Path,
+                      source_size: int,
+                      source_sha256: str,
+                      reserve_gib: float,
+                      replace: bool = False,
+                      ) -> PrepareReport:
+    """Generate candidate ``config.json`` + ``descriptor.json`` atomically and idempotently.
+
+    ``arch`` is the architecture settings reproduced from the checkpoint's GGUF
+    metadata; ``tokenizer`` is the tokenizer/config provenance record (validated
+    against the pinned 0731 facts). ``source_size``/``source_sha256``/``reserve_gib``
+    are measured facts the caller records. Existing sidecars that exactly match the
+    desired output are left untouched (idempotent); incompatible existing output
+    requires ``replace=True``.
+    """
+    model_dir = Path(model_dir)
+    validate_tokenizer_provenance_or_raise(tokenizer)
+    reserve_gib = float(reserve_gib)
+    if not math.isfinite(reserve_gib) or reserve_gib < 0:
+        raise ValueError(f"companion reserve must be a finite non-negative Gib, got {reserve_gib!r}")
+
+    config = {"model_type": MODEL_TYPE, "text_config": dict(arch)}
+    config_path = model_dir / "config.json"
+    descriptor_path = model_dir / "descriptor.json"
+
+    desc: dict[str, Any] = {
+        "version": SIDECAR_VERSION,
+        "source": str(source),
+        "size": int(source_size),
+        "sha256": str(source_sha256),
+        "provenance": dict(tokenizer),
+        "reserve_gib": reserve_gib,
+    }
+    digest = _descriptor_digest(desc)
+    desc["descriptor_digest"] = digest
+
+    config_bytes = _canonical_json(config)
+    desc_bytes = _canonical_json(desc)
+
+    cur_cfg = _read_existing(config_path)
+    cur_desc = _read_existing(descriptor_path)
+
+    if cur_cfg == config_bytes and cur_desc == desc_bytes:
+        return PrepareReport(config_path, descriptor_path, changed=False, replaced=False,
+                             descriptor_digest=digest)
+
+    if (cur_cfg is not None and cur_cfg != config_bytes) or \
+       (cur_desc is not None and cur_desc != desc_bytes):
+        if not replace:
+            raise PrepareConflictError(
+                f"candidate sidecars in {model_dir} conflict with requested preparation; "
+                "pass replace=True to overwrite")
+        replaced = True
+    else:
+        replaced = False
+
+    _atomic_write(config_path, config_bytes)
+    _atomic_write(descriptor_path, desc_bytes)
+    return PrepareReport(config_path, descriptor_path, changed=True, replaced=replaced,
+                         descriptor_digest=digest)

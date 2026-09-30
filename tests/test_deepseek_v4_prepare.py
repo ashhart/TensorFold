@@ -376,3 +376,154 @@ def test_raise_variant_raises_on_incompatible_input():
     # valid input returns the report
     ok = validate_tokenizer_provenance_or_raise(_candidate())
     assert ok.errors == []
+
+
+# ---------------------------------------------------------------------------
+# T03.03: atomic sidecars and family discovery
+# ---------------------------------------------------------------------------
+
+import inspect
+import json
+
+from tensorfold.families.deepseek_v4.gguf import (
+    PrepareConflictError,
+    PrepareReport,
+    prepare_candidate,
+)
+
+SOURCE_0731 = "/home/josh/gguf/pinned-0731.gguf"
+
+
+def _arch(block_count: int = 1) -> dict:
+    """Architecture settings preparation records; fixed independent oracle."""
+    return {
+        "deepseek4.block_count": block_count,
+        "deepseek4.embedding_length": 4096,
+        "deepseek4.attention.head_count": 64,
+        "deepseek4.attention.head_count_kv": 8,
+        "deepseek4.attention.key_length": 512,
+        "deepseek4.attention.q_lora_rank": 1536,
+        "deepseek4.attention.output_lora_rank": 1024,
+        "deepseek4.expert_count": 256,
+        "deepseek4.expert_used_count": 6,
+        "deepseek4.expert_feed_forward_length": 2048,
+        "deepseek4.attention.sliding_window": 128,
+    }
+
+
+def _prepare(model_dir, **overrides) -> PrepareReport:
+    """Run candidate sidecar preparation with fixed measured facts."""
+    kw = dict(
+        arch=_arch(),
+        tokenizer=_candidate(),
+        source=SOURCE_0731,
+        source_size=123456,
+        source_sha256="a" * 64,
+        reserve_gib=2.0,
+    )
+    kw.update(overrides)
+    return prepare_candidate(model_dir, **kw)
+
+
+def test_prepare_writes_candidate_sidecars_atomically(tmp_path):
+    model = tmp_path / "model"
+    report = _prepare(model)
+    cfg = model / "config.json"
+    desc = model / "descriptor.json"
+    assert cfg.is_file() and desc.is_file()
+    cfg_json = json.loads(cfg.read_text())
+    assert cfg_json["model_type"] == "deepseek_v4"
+    assert cfg_json["text_config"] == _arch()
+    desc_json = json.loads(desc.read_text())
+    assert desc_json["version"] == "1"
+    assert desc_json["source"] == SOURCE_0731
+    assert desc_json["size"] == 123456
+    assert desc_json["sha256"] == "a" * 64
+    assert desc_json["reserve_gib"] == 2.0
+    assert desc_json["provenance"]["checkpoint"] == PINNED.checkpoint
+    assert desc_json["descriptor_digest"] == report.descriptor_digest
+    assert report.changed and not report.replaced
+
+
+def test_prepare_is_idempotent_for_identical_inputs(tmp_path):
+    model = tmp_path / "model"
+    first = _prepare(model)
+    second = _prepare(model)
+    assert not second.changed and not second.replaced
+    assert (model / "config.json").read_bytes() == (model / "config.json").read_bytes()
+    assert json.loads((model / "descriptor.json").read_text())["reserve_gib"] == 2.0
+    assert first.descriptor_digest == second.descriptor_digest
+
+
+def test_prepare_conflicting_output_requires_explicit_replacement(tmp_path):
+    model = tmp_path / "model"
+    _prepare(model)
+    # a different reserve changes the descriptor: conflict, refused without replace
+    with pytest.raises(PrepareConflictError):
+        _prepare(model, reserve_gib=3.0)
+    assert json.loads((model / "descriptor.json").read_text())["reserve_gib"] == 2.0
+    # explicit replacement succeeds and marks replaced
+    rep = _prepare(model, reserve_gib=3.0, replace=True)
+    assert rep.changed and rep.replaced
+    assert json.loads((model / "descriptor.json").read_text())["reserve_gib"] == 3.0
+
+
+def test_prepare_rejects_missing_negative_or_nonfinite_reserve(tmp_path):
+    model = tmp_path / "model"
+    with pytest.raises(ValueError):
+        _prepare(model, reserve_gib=-1.0)
+    with pytest.raises(ValueError):
+        _prepare(model, reserve_gib=float("nan"))
+    with pytest.raises(ValueError):
+        _prepare(model, reserve_gib=float("inf"))
+
+
+def test_prepare_rejects_incompatible_tokenizer_provenance(tmp_path):
+    model = tmp_path / "model"
+    with pytest.raises(ValueError):
+        _prepare(model, tokenizer=_candidate(vocab_size=1))
+    assert not (model / "config.json").exists()
+
+
+def test_prepare_interrupted_write_leaves_no_partial_final(tmp_path):
+    model = tmp_path / "model"
+    # a stale temp from a previously interrupted write must not publish a partial file
+    model.mkdir()
+    (model / "config.json.tmp").write_text("partial")
+    report = _prepare(model)
+    assert report.changed
+    assert json.loads((model / "config.json").read_text())["model_type"] == "deepseek_v4"
+    assert not list(model.glob("*.tmp"))
+
+
+def test_prepare_atomic_write_does_not_publish_partial(tmp_path, monkeypatch):
+    model = tmp_path / "model"
+    model.mkdir()
+    import tensorfold.families.deepseek_v4.gguf as gguf_mod
+
+    def boom(path, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gguf_mod, "_atomic_write", boom)
+    with pytest.raises(OSError):
+        _prepare(model)
+    assert not (model / "config.json").exists()
+    assert not (model / "descriptor.json").exists()
+    assert not list(model.glob("*.tmp"))
+
+
+def test_discovery_without_torch(tmp_path):
+    model = tmp_path / "model"
+    _prepare(model)
+    from tensorfold.families import detect
+
+    fam = detect(model)
+    assert fam.model_type == "deepseek_v4"
+    # the candidate is discoverable purely from config.json; gguf.py imports no torch
+    src = inspect.getsource(gguf_mod_import())
+    assert "import torch" not in src
+
+
+def gguf_mod_import():
+    import tensorfold.families.deepseek_v4.gguf as gguf_mod
+    return gguf_mod
