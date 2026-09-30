@@ -142,3 +142,36 @@ class DSpark:
         self.h_drafts.copy_(self.g_drafts, non_blocking=True)
         torch.cuda.current_stream().synchronize()
         return self.h_drafts.tolist()
+
+
+class DraftPolicy:
+    """How many of the N drafts to verify each round: the k (0 = no drafting) with the most expected tokens per
+    millisecond, from running acceptance estimates per draft position and measured round costs per k."""
+
+    def __init__(self, n: int, alpha: float = 0.15, refresh: int = 16, prior: float = 0.7) -> None:
+        self.n, self.alpha, self.refresh = n, alpha, refresh
+        self.accept = [prior] * n                     # P(draft j accepted | drafts before it accepted)
+        self.cost: list[float | None] = [None] * (n + 1)
+        self.rounds = 0
+
+    def expected_tokens(self, k: int) -> float:
+        total, run = 1.0, 1.0
+        for j in range(k):
+            run *= self.accept[j]
+            total += run
+        return total
+
+    def choose(self) -> int:
+        self.rounds += 1
+        if self.rounds % self.refresh == 0:            # keep the later positions' estimates fresh
+            return self.n
+        for k in range(self.n, -1, -1):                # measure every k once, widest first
+            if self.cost[k] is None:
+                return k
+        return max(range(self.n + 1), key=lambda k: self.expected_tokens(k) / self.cost[k])
+
+    def update(self, k: int, accepted: int, ms: float) -> None:
+        a = self.alpha
+        self.cost[k] = ms if self.cost[k] is None else (1 - a) * self.cost[k] + a * ms
+        for j in range(min(k, accepted + 1)):          # positions after the first rejection are unobserved
+            self.accept[j] = (1 - a) * self.accept[j] + a * (1.0 if j < accepted else 0.0)

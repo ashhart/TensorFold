@@ -203,3 +203,73 @@ def route(logits: torch.Tensor, bias: torch.Tensor, k: int, scale: float) -> tup
     _route[(R,)](logits.contiguous(), bias, pick, wts, scale, E=E, EP=triton.next_power_of_2(E), K=k,
                      KP=triton.next_power_of_2(k), num_warps=4)
     return pick, wts
+
+
+@triton.jit
+def _router_logits(X, W, OUT, R, E: tl.constexpr, D: tl.constexpr, BR: tl.constexpr, BE: tl.constexpr,
+                   BK: tl.constexpr):
+    """OUT [R, E] fp32 = X [R, D] fp16 @ W [E, D]^T fp16; a row's K order is fixed and MMA rows are independent."""
+
+    rb = tl.program_id(0)
+    eb = tl.program_id(1)
+    r = rb * BR + tl.arange(0, BR)
+    e = eb * BE + tl.arange(0, BE)
+    k = tl.arange(0, BK)
+    acc = tl.zeros((BR, BE), dtype=tl.float32)
+    for k0 in range(0, D, BK):
+        x = tl.load(X + r[:, None] * D + k0 + k[None, :], mask=(r < R)[:, None], other=0.0)
+        w = tl.load(W + e[:, None] * D + k0 + k[None, :], mask=(e < E)[:, None], other=0.0)
+        acc = tl.dot(x, tl.trans(w), acc)
+    tl.store(OUT + r[:, None] * E + e[None, :], acc, mask=(r < R)[:, None] & (e < E)[None, :])
+
+
+def router_logits(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """fp32 router logits; x bf16/fp16 [R, D] (bf16 -> fp16 exact for normed rows), w fp16 [E, D]."""
+
+    R, D = x.shape
+    E = w.shape[0]
+    out = torch.empty((R, E), dtype=torch.float32, device=x.device)
+    BR, BE, BK = 16, 32, 256
+    _router_logits[(triton.cdiv(R, BR), triton.cdiv(E, BE))](x.half().contiguous(), w, out, R, E=E, D=D, BR=BR, BE=BE,
+                                                             BK=BK, num_warps=4)
+    return out
+
+
+@triton.jit
+def _engram_gate(X, KV, QW, KW, OUT, eps, clamp, D: tl.constexpr, S: tl.constexpr, CH: tl.constexpr):
+    """One (row, stream): RMS-cosine gate of the stream against its key, then stream + gate * value (fixed order)."""
+
+    r = tl.program_id(0)
+    s = tl.program_id(1)
+    d = tl.arange(0, CH)
+    hh = 0.0
+    kk = 0.0
+    dot = 0.0
+    for c in range(D // CH):
+        o = c * CH + d
+        h = tl.load(X + (r * S + s) * D + o).to(tl.float32)
+        key = tl.load(KV + r * (S + 1) * D + s * D + o).to(tl.float32)
+        q = tl.load(QW + s * D + o)
+        k = tl.load(KW + s * D + o)
+        hh += tl.sum(h * h, axis=0)
+        kk += tl.sum(key * key, axis=0)
+        dot += tl.sum(h * q * k * key, axis=0)
+    dot = dot * (1.0 / tl.sqrt(hh / D + eps)) * (1.0 / tl.sqrt(kk / D + eps)) / tl.sqrt(D * 1.0)
+    g = tl.sqrt(tl.maximum(tl.abs(dot), clamp))
+    g = tl.where(dot < 0.0, -g, g)
+    gate = 1.0 / (1.0 + tl.exp(-g))
+    for c in range(D // CH):
+        o = c * CH + d
+        h = tl.load(X + (r * S + s) * D + o).to(tl.float32)
+        val = tl.load(KV + r * (S + 1) * D + S * D + o).to(tl.float32)
+        tl.store(OUT + (r * S + s) * D + o, (h + gate * val).to(tl.bfloat16))
+
+
+def engram_gate(X: torch.Tensor, kv: torch.Tensor, qw: torch.Tensor, kw: torch.Tensor, eps: float,
+                clamp: float = 1e-6) -> torch.Tensor:
+    """X bf16 [R, S, D], kv [R, (S + 1) D] (S keys then the value), q/k weights fp32 [S, D] -> bf16 [R, S, D]."""
+
+    R, S, D = X.shape
+    out = torch.empty_like(X)
+    _engram_gate[(R, S)](X.contiguous(), kv.contiguous(), qw, kw, out, eps, clamp, D=D, S=S, CH=1024, num_warps=4)
+    return out

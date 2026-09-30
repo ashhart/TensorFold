@@ -8,7 +8,6 @@ Contexts stay within the short-context regime (every compressed entry visible, n
 
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass, field
 
@@ -78,6 +77,19 @@ class Caches:
     ids: list[int] = field(default_factory=list)
 
 
+class _Fixed:
+    """Always verify every draft (the fixed-k policy vLLM uses)."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+    def choose(self) -> int:
+        return self.n
+
+    def update(self, k: int, accepted: int, ms: float) -> None:
+        pass
+
+
 class SerialEngine:
     def __init__(self, w: Weights, comm: Comm, engram_dir: str, tokenizer_json: str, *, cap: int = 4096,
                  device: str = "cuda") -> None:
@@ -96,6 +108,8 @@ class SerialEngine:
         self.graph = None
         self.graphs: dict[int, dict] = {}
         self.drafter = None
+        self.debug: list | None = None
+        self.adaptive = True
         self.taps: list[torch.Tensor] = []
         self.cap = cap
         self.reset()
@@ -219,6 +233,8 @@ class SerialEngine:
             X = hcf.post(a, X, post, comb)
             post, comb, x, pre = self.hc(layer.hc_ffn, X, pre_a)
             f = self.moe(layer, x, x.shape[0])
+            if self.debug is not None:
+                self.debug.append({"attn_in": x.clone(), "X": X.clone(), "f": f.clone()})
         return X, pre, f, post, comb
 
     # -- decode graphs ----------------------------------------------------------------------------------------
@@ -377,8 +393,7 @@ class SerialEngine:
     def moe(self, layer: LayerW, x: torch.Tensor, R: int, top_k: int | None = None, scratch=None) -> torch.Tensor:
         c, m = self.c, layer.moe
         limit = c.swiglu_limit
-        # fp16 inputs (bf16 -> fp16 is exact for normed rows), fp32 accumulation and output: no TF32, half the bytes
-        logits = torch.mm(x.half(), m.gate.T, out_dtype=F32)
+        logits = K.router_logits(x, m.gate)                         # a row's bits never depend on the row count
         pick, w = K.route(logits, m.bias, top_k or c.num_experts_per_tok, c.routed_scaling_factor)
         scratch = scratch if scratch is not None else self.scratch[layer.index]
         routed = ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit)
@@ -389,17 +404,10 @@ class SerialEngine:
         return self.comm.partials(routed + shared)
 
     def engram(self, layer: LayerW, X: torch.Tensor, rows: torch.Tensor) -> torch.Tensor:
-        c, g = self.c, layer.engram
-        R, S, D = X.shape
+        R = X.shape[0]
+        g = layer.engram
         kv = self.comm.gather_last(g.wkv(rows.to(BF).reshape(R, -1)))    # each rank projects half the columns
-        h = X.float()
-        key = kv[:, :S * D].view(R, S, D).float()
-        val = kv[:, S * D:].float()
-        eps = c.rms_norm_eps
-        dot = (h * g.q * g.k * key).sum(-1)
-        dot = dot * torch.rsqrt(h.pow(2).mean(-1) + eps) * torch.rsqrt(key.pow(2).mean(-1) + eps) / math.sqrt(D)
-        gate = torch.sigmoid(torch.sign(dot) * torch.sqrt(dot.abs().clamp(min=1e-6)))
-        return (h + gate[:, :, None] * val[:, None, :]).to(BF)
+        return K.engram_gate(X, kv, g.q, g.k, self.c.rms_norm_eps)
 
     # -- requests ---------------------------------------------------------------------------------------------
     @torch.no_grad()
@@ -416,8 +424,15 @@ class SerialEngine:
         out = []
         nxt = int(logits[-1].argmax())
         rounds = accepted = 0
+        t_draft = t_verify = 0.0
         eos = self.c.eos_token_id
         dsp = self.drafter if self.drafter is not None and self.drafter.graph is not None else None
+        if dsp is not None:
+            from .dspark import DraftPolicy
+
+            n = max(r for r in self.graphs) - 1                        # verify windows captured: 1 .. n + 1 rows
+            policy = DraftPolicy(n) if self.adaptive else _Fixed(n)
+            ks = [0] * (n + 1)
         while len(out) < max_tokens:
             if dsp is None:
                 out.append(nxt)
@@ -428,12 +443,24 @@ class SerialEngine:
                 nxt = self.step(nxt) if self.graph is not None else int(self.forward([nxt])[-1].argmax())
                 continue
             P = len(self.state.ids)
-            drafts = dsp.propose(nxt, P)
-            target = self.step_rows([nxt, *drafts])
+            k = policy.choose()
+            ta = time.perf_counter()
+            if k == 0:                                             # drafting does not pay here: one plain row
+                target = [self.step(nxt)]
+                drafts = []
+                tb = ta
+            else:
+                drafts = dsp.propose(nxt, P)[:k]
+                tb = time.perf_counter()
+                target = self.step_rows([nxt, *drafts])
+            t_draft += tb - ta
+            t_verify += time.perf_counter() - tb
+            ks[k] += 1
             m = 0
             while m < len(drafts) and drafts[m] == target[m]:
                 m += 1
             del self.state.ids[P + 1 + m:]                         # rejected rows: overwritten by later positions
+            policy.update(k, m, 1e3 * (time.perf_counter() - ta))
             rounds += 1
             accepted += m
             emitted = [nxt, *drafts[:m]]
@@ -452,5 +479,6 @@ class SerialEngine:
                "prefill_tps": len(prompt) / (t1 - t0), "decode_tps": len(out) / max(t2 - t1, 1e-9)}
         if dsp is not None:
             res.update(rounds=rounds, accepted_per_round=accepted / max(rounds, 1),
-                       tokens_per_round=len(out) / max(rounds, 1))
+                       tokens_per_round=len(out) / max(rounds, 1), draft_ms=1e3 * t_draft / max(rounds, 1),
+                       verify_ms=1e3 * t_verify / max(rounds, 1), k_histogram=ks)
         return res

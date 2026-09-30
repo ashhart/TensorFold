@@ -30,9 +30,12 @@ def main() -> None:
     ap.add_argument("--ref", type=Path, help="reference .pt of the same prompt (rank 0 compares)")
     ap.add_argument("--decode", type=int, default=32)
     ap.add_argument("--profile", action="store_true", help="profile 4 decode steps after the run (rank 0 prints)")
+    ap.add_argument("--profile-rows", type=int, default=1, help="rows a profiled step takes (a verify window)")
     ap.add_argument("--no-parity", action="store_true")
     ap.add_argument("--graph", action="store_true", help="capture the one-row decode step as a CUDA graph")
     ap.add_argument("--dspark", type=int, default=0, help="draft N tokens a round with the checkpoint's DSpark blocks")
+    ap.add_argument("--save", type=Path, help="rank 0 writes each case's generated tokens here (JSON)")
+    ap.add_argument("--fixed-k", action="store_true", help="verify every draft each round (no adaptive policy)")
     ap.add_argument("--cases", type=Path, help="tools/dsv41_vllm_accept.py results: replay every case's prompt ids")
     args = ap.parse_args()
 
@@ -53,8 +56,10 @@ def main() -> None:
         with torch.no_grad():
             eng.capture(1)
             if args.dspark:
-                eng.capture(args.dspark + 1)
+                for rows in range(2, args.dspark + 2):
+                    eng.capture(rows)
                 eng.drafter.capture()
+                eng.adaptive = not args.fixed_k
         print(f"[rank {args.rank}] decode graphs captured in {time.time() - t0:.1f} s", flush=True)
 
     ids = json.loads(args.golden.read_text())["goldens"][args.prompt]["ids"]
@@ -83,15 +88,20 @@ def main() -> None:
                   f"{-lp_r[:-1].gather(1, tgt[:, None]).mean():.3f}", flush=True)
     if args.cases:
         cases = json.loads(args.cases.read_text())["results"]
+        saved_tokens = {}
         for case in cases:
             r = eng.generate(case["ids"], args.decode)
+            saved_tokens[case["name"]] = r["tokens"]
             if args.rank == 0:
                 same = case.get("out_ids") is not None and r["tokens"][:len(case["out_ids"])] == case["out_ids"][:len(
                     r["tokens"])]
-                extra = (f", {r['accepted_per_round']:.2f} accepted a round (vLLM {case['accepted_per_round']:.2f})"
+                extra = (f", {r['accepted_per_round']:.2f} accepted a round (vLLM {case['accepted_per_round']:.2f}), "
+                         f"draft {r['draft_ms']:.1f} ms + verify {r['verify_ms']:.1f} ms a round, k used {r['k_histogram']}"
                          if "rounds" in r else "")
                 print(f"{case['name']}: {len(r['tokens'])} tokens {r['decode_tps']:.1f} tok/s{extra}; "
                       f"same tokens as vLLM: {same}", flush=True)
+        if args.save and args.rank == 0:
+            args.save.write_text(json.dumps(saved_tokens))
         nccl.barrier()
         return
     res = eng.generate(ids, args.decode)
@@ -110,8 +120,9 @@ def main() -> None:
 
         with torch.no_grad(), profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
             t = time.perf_counter()
-            for tok_id in res["tokens"][:4]:
-                eng.forward([tok_id])
+            R = args.profile_rows
+            for k in range(4):
+                eng.forward(res["tokens"][k * R:(k + 1) * R])
             torch.cuda.synchronize()
             wall = (time.perf_counter() - t) / 4
         if args.rank == 0:

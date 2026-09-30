@@ -65,3 +65,18 @@ Next levers are structural (shared expert folded into the grouped expert call, b
 - TensorFold's DSpark round costs ~2× a serial step (reasoning: 3.38 tokens/round at 56.7 tok/s = 60 ms/round).
 - Outputs differ from vLLM's (kernel numerics, fp8 KV) and DSpark vs serial differ slightly: multi-row verify is not
   yet bit-identical to one-row decode (suspect cuBLAS router matmul algorithm by row count).
+
+## 2026-09-30 — exact verification + adaptive draft length
+
+Multi-row verify is now bit-identical to one-row decode (`tools/dsv41_exact.py`: every row of every window
+equal, max |Δlogit| 0; DSpark token streams == serial on all cases). Culprits were row-count-dependent reductions:
+cuBLAS router matmul → Triton `router_logits`; torch `.sum/.mean` in the Engram gate → Triton `engram_gate`.
+
+| prompt | vLLM DSpark | TF serial | TF DSpark k=3 | TF DSpark adaptive (k histogram 0..3) |
+|---|---:|---:|---:|---:|
+| story | 25.8 | 33.6 | 35.1 | 36.0 ([18, 3, 26, 4]) |
+| reasoning | 42.0 | 33.6 | 62.1 | 60.0 ([1, 1, 19, 31]) |
+| code | 32.6 | 33.2 | 48.5 | 48.4 ([1, 1, 28, 51]) |
+
+Round: draft ~5 ms, 4-row verify ~48 ms (GPU 46.7: routed experts 20.5 ms for ~16 distinct experts/layer,
+NCCL 6.2 ms incl. rank skew from per-rank Engram reads).

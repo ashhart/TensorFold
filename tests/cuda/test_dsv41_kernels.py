@@ -76,3 +76,31 @@ def test_route_matches_topk_on_sqrt_softplus():
     assert torch.equal(pick.long().sort(-1).values, ref.sort(-1).values)
     w = sc.gather(1, pick.long())
     torch.testing.assert_close(wts, w / w.sum(-1, keepdim=True) * 1.5, rtol=1e-5, atol=1e-6)
+
+
+def test_router_logits_are_row_invariant_and_accurate():
+    g = torch.Generator(device="cuda").manual_seed(5)
+    x = (torch.randn((7, 5120), generator=g, device="cuda")).to(torch.bfloat16)
+    w = (torch.randn((384, 5120), generator=g, device="cuda") * 0.02).half()
+    got = K.router_logits(x, w)
+    ref = x.double() @ w.double().T
+    assert (got.double() - ref).abs().max() <= 1e-3 * ref.abs().max()
+    for r in range(7):
+        assert torch.equal(K.router_logits(x[r:r + 1], w)[0], got[r])
+
+
+def test_engram_gate_matches_the_reference_and_is_row_invariant():
+    g = torch.Generator(device="cuda").manual_seed(9)
+    D = CFG.hidden_size
+    X = torch.randn((5, 4, D), generator=g, device="cuda").to(torch.bfloat16)
+    kv = torch.randn((5, 5 * D), generator=g, device="cuda").to(torch.bfloat16)
+    qw, kw = torch.rand((4, D), generator=g, device="cuda"), torch.rand((4, D), generator=g, device="cuda")
+    got = K.engram_gate(X, kv, qw, kw, CFG.rms_norm_eps)
+    h, key, val = X.float(), kv[:, :4 * D].view(5, 4, D).float(), kv[:, 4 * D:].float()
+    dot = (h * qw * kw * key).sum(-1) * torch.rsqrt(h.pow(2).mean(-1) + CFG.rms_norm_eps) \
+        * torch.rsqrt(key.pow(2).mean(-1) + CFG.rms_norm_eps) / D ** 0.5
+    gate = torch.sigmoid(torch.sign(dot) * torch.sqrt(dot.abs().clamp(min=1e-6)))
+    ref = (h + gate[:, :, None] * val[:, None, :]).to(torch.bfloat16)
+    assert (got.float() - ref.float()).abs().max() <= 0.02 * ref.float().abs().max()
+    for r in range(5):
+        assert torch.equal(K.engram_gate(X[r:r + 1], kv[r:r + 1], qw, kw, CFG.rms_norm_eps)[0], got[r])
