@@ -405,6 +405,17 @@ pub fn build(b: *std.Build) void {
         dspark_prefill_previous = &compare.step;
     }
     dspark_prefill.dependOn(dspark_prefill_previous.?);
+    const synthetic_memory = b.step("test-synthetic-memory", "Verify measured GLM/DeepSeek cache growth, draft residency and memory admission on synthetic layouts; full checkpoints unverified");
+    var synthetic_memory_previous: ?*std.Build.Step = null;
+    for (0..3) |family| for (0..3) |case| {
+        const fixture = b.fmt("build/native-checks/{s}-{d}", .{ if (family == 0) "glm-prefill" else if (family == 1) "deepseek-prefill" else "dspark-prefill", case });
+        const check = b.addRunArtifact(exe);
+        check.addArgs(&.{ "check-memory-runtime", if (family == 0 and case == 1) b.fmt("{s}/mlxlm", .{fixture}) else fixture, if (family == 0) "-" else b.fmt("{s}/drafter", .{fixture}) });
+        check.step.dependOn(if (family == 0) glm_prefill_previous.? else if (family == 1) ds_prefill_previous.? else dspark_prefill_previous.?);
+        if (synthetic_memory_previous) |previous| check.step.dependOn(previous);
+        synthetic_memory_previous = &check.step;
+    };
+    synthetic_memory.dependOn(synthetic_memory_previous.?);
     const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
     var glm_previous: ?*std.Build.Step = null;
     for (0..3) |case| {

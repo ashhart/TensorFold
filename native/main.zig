@@ -48,6 +48,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-server-live")) return @import("server_live.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-tool-drafts")) return @import("tool_draft_checks.zig").check(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-memory-runtime")) return @import("memory_runtime.zig").check(io, args[2]);
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-memory-runtime")) return @import("memory_runtime.zig").checkWithDraft(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-allocation")) return @import("draft_allocation.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-capture")) return @import("draft_capture.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "fit-draft-calibration")) return @import("draft_calibration.zig").fitFile(io, args[2], args[3]);

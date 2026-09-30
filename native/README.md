@@ -167,6 +167,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | DeepSeek calibrated dense arithmetic | `test-deepseek-dense -Doptimize=safe -j1` | Synthetic scalar/MMA calibration and physical threadgroup variants |
 | DSpark block drafting | `test-dspark -Doptimize=safe -j1` | Synthetic layer taps, context caches, sorted experts, Markov draws and generation; includes production widths |
 | DSpark prompt context | `test-dspark-prefill -Doptimize=safe -j1` | Three synthetic layouts; long prompt taps, retained context, exact logits/draws and request restoration |
+| GLM/DeepSeek memory admission | `test-synthetic-memory -Doptimize=safe -j1` | Nine synthetic layouts; measured residency, 15-draft budgets, cache growth at prefill/compression boundaries, pause/resume and pressure-driven prefix ownership; full checkpoint profiles remain unverified |
 | Standard DFlash / Gemma drafting | `test-dflash` / `test-gemma-draft -Doptimize=safe -j1` | Float/quantized blocks and rotary layouts; full Gemma with synthetic drafter, taps, cache rollback and seeded generation |
 | DeepSeek drafter conversion | `test-drafter-conversion -Doptimize=safe -j1` | Synthetic official FP8/FP4 shards; exact upstream tensor bytes and native draft generation |
 | GLM/DeepSeek kernel components | `test-large-family-kernels -Doptimize=safe -j1` | Synthetic shapes; includes hardware-specific paths |

@@ -262,11 +262,15 @@ fn measureModel(m: anytype, tokenizer: *@import("vendor/tokenizer.zig").Tokenize
 }
 
 pub fn check(io: std.Io, directory: []const u8) !void {
+    return checkWithDraft(io, directory, null);
+}
+
+pub fn checkWithDraft(io: std.Io, directory: []const u8, drafter: ?[]const u8) !void {
     try mx.init();
     defer mx.shutdown();
     var runtime = try Runtime.init(null, false);
     defer runtime.deinit();
-    var model = try session.Session.init(io, directory);
+    var model = try session.Session.initWithDraft(io, directory, .{ .enabled = drafter != null, .directory = if (drafter) |path| if (std.mem.eql(u8, path, "-")) null else path else null, .max_draft = 15 });
     defer model.deinit();
     const profile = try measure(&model);
     try profile.validate();
@@ -275,18 +279,21 @@ pub fn check(io: std.Io, directory: []const u8) !void {
     switch (model.backend) {
         inline else => |*m| {
             const M = @TypeOf(m.*);
+            const vocab: usize = if (M == @import("model.zig").Model) 248320 else if (@hasField(M, "vocab")) @intCast(m.vocab) else M.vocab;
             var tokens: [4161]i32 = undefined;
-            for (&tokens, 0..) |*token, index| token.* = @intCast(1000 + index);
-            const counts: []const usize = if (M == @import("nemotron.zig").Model) &.{ 1, 15, 16, 17, 65, 127, 128, 129, 2047, 2048, 2049, 4161 } else if (@hasDecl(M, "prefill")) &.{ 1, 65, 2047, 2048, 2049, 4161 } else &.{ 1, 15, 16, 17, 65, 257 };
+            for (&tokens, 0..) |*token, index| token.* = @intCast((1000 + index) % vocab);
+            const counts: []const usize = if (M == @import("glm.zig").Model or M == @import("deepseek.zig").Model) &.{ 1, 15, 16, 17, 63, 64, 65, 127, 128, 129, 511, 512, 513, 2047, 2048, 2049, 4161 } else if (M == @import("nemotron.zig").Model) &.{ 1, 15, 16, 17, 65, 127, 128, 129, 2047, 2048, 2049, 4161 } else if (@hasDecl(M, "prefill")) &.{ 1, 65, 2047, 2048, 2049, 4161 } else &.{ 1, 15, 16, 17, 65, 257 };
+            const sink = model.draftSink(.{});
+            const reply_tokens = @max(2, sink.draft_budget + 2);
             for (counts) |count| {
                 try mx.check(mx.c.mlx_clear_cache());
                 const before = try activeBytes();
-                var generation = try session.Generation(M).init(m, &model.tokenizer, mx.allocator, tokens[0..count], .{ .max_tokens = 2, .ignore_eos = true }, .{}, null);
+                var generation = try session.Generation(M).init(m, &model.tokenizer, mx.allocator, tokens[0..count], .{ .max_tokens = reply_tokens, .ignore_eos = true }, sink, null);
                 defer generation.deinit();
                 while (!try generation.step(m)) {}
                 try mx.check(mx.c.mlx_synchronize(mx.stream));
                 const held = (try activeBytes()) -| before;
-                const estimate = try profile.streamBytes(count + 2);
+                const estimate = try profile.streamBytes(count + reply_tokens);
                 if (held > estimate) {
                     std.debug.print("Underestimated {d}-token request: {d} held, {d} predicted\n", .{ count, held, estimate });
                     return error.CacheMemoryUnderestimated;
