@@ -82,6 +82,7 @@ pub const Entry = struct {
     load_bytes: u64,
     modified: i96,
     pinned: bool,
+    compatible: bool,
     fn deinit(e: *Entry) void {
         a.free(e.path);
         a.free(e.tokens);
@@ -146,7 +147,8 @@ pub const Store = struct {
             errdefer a.free(owned);
             const tokens = try a.dupe(i32, reader.metadata.value.tokens);
             errdefer a.free(tokens);
-            try result.append(a, .{ .path = owned, .tokens = tokens, .bytes = stat.size, .load_bytes = reader.loadBytes(), .modified = stat.mtime.toNanoseconds(), .pinned = pinned });
+            const compatible = std.mem.eql(u8, reader.metadata.value.identity, s.identity) and std.mem.eql(u8, reader.metadata.value.dependencies, @embedFile("dependencies.json")) and reader.metadata.value.tensor_backend == mx.tensor_units;
+            try result.append(a, .{ .path = owned, .tokens = tokens, .bytes = stat.size, .load_bytes = reader.loadBytes(), .modified = stat.mtime.toNanoseconds(), .pinned = pinned, .compatible = compatible });
         }
         std.mem.sort(Entry, result.items, {}, struct {
             fn less(_: void, x: Entry, y: Entry) bool {
@@ -230,6 +232,29 @@ pub const Store = struct {
         }
     }
 
+    pub fn blocksToWarm(s: *Store) ![][]i32 {
+        var entries = try s.list(true, false);
+        defer freeEntries(&entries);
+        var wanted: std.ArrayList([]i32) = .empty;
+        errdefer {
+            for (wanted.items) |tokens| a.free(tokens);
+            wanted.deinit(a);
+        }
+        outer: for (entries.items) |entry| {
+            if (entry.compatible) continue;
+            for (entries.items) |have| if (have.compatible and std.mem.eql(i32, have.tokens, entry.tokens)) continue :outer;
+            for (wanted.items) |tokens| if (std.mem.startsWith(i32, tokens, entry.tokens)) continue :outer;
+            var i: usize = 0;
+            while (i < wanted.items.len) {
+                if (std.mem.startsWith(i32, entry.tokens, wanted.items[i])) a.free(wanted.orderedRemove(i)) else i += 1;
+            }
+            const tokens = try a.dupe(i32, entry.tokens);
+            errdefer a.free(tokens);
+            try wanted.append(a, tokens);
+        }
+        return wanted.toOwnedSlice(a);
+    }
+
     pub fn readBest(s: *Store, cache: *Cache, tag: std.meta.Tag(session.Backend), prompt: []const i32, boundary: policy.Boundary, extra: u64) !void {
         var best: ?Entry = null;
         defer if (best) |*entry| entry.deinit();
@@ -285,6 +310,28 @@ pub const Store = struct {
 fn freeEntries(entries: *std.ArrayList(Entry)) void {
     for (entries.items) |*entry| entry.deinit();
     entries.deinit(a);
+}
+
+pub fn checkWarming(io: std.Io, path: []const u8) !void {
+    const backend = mx.tensor_units;
+    mx.tensor_units = true;
+    defer mx.tensor_units = backend;
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(8 * 1024 * 1024));
+    defer a.free(source);
+    const cases = try std.json.parseFromSlice([]const struct { directory: []const u8, identity: []const u8, expected: []const []const i32 }, a, source, .{});
+    defer cases.deinit();
+    for (cases.value) |case| {
+        var disk = try Store.initIdentity(io, case.directory, case.identity, 0, 0, 0);
+        defer disk.deinit();
+        const blocks = try disk.blocksToWarm();
+        defer {
+            for (blocks) |tokens| a.free(tokens);
+            a.free(blocks);
+        }
+        try std.testing.expectEqual(case.expected.len, blocks.len);
+        for (case.expected, blocks) |expected, actual| try std.testing.expectEqualSlices(i32, expected, actual);
+    }
+    std.debug.print("PASS: {d} upstream snapshot warming selections: model isolation, newest/longest prefixes, covered blocks and invalid/partial files\n", .{cases.value.len});
 }
 pub fn report(action: []const u8, err: anyerror) void {
     @import("server_live.zig").print("Native snapshot {s} failed: {s}\n", .{ action, @errorName(err) });

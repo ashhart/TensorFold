@@ -2,6 +2,33 @@ const std = @import("std");
 
 pub const Markers = struct { openers: []const i32 = &.{}, assistant: []const i32 = &.{} };
 
+pub const BlockJobs = struct {
+    probe: []i32,
+    stops: []usize,
+
+    pub fn init(a: std.mem.Allocator, plan: ?Plan, block: []const i32, pad: i32) !BlockJobs {
+        const probe = try a.alloc(i32, block.len + 1);
+        errdefer a.free(probe);
+        @memcpy(probe[0..block.len], block);
+        var next = pad;
+        if (plan) |p| if (p.openers.len > 0) {
+            next = p.openers[0];
+            for (p.openers[1..]) |id| next = @min(next, id);
+        };
+        probe[block.len] = next;
+        if (plan) |p| {
+            const chunks = try p.chunks(a, probe);
+            defer chunks.deinit(a);
+            return .{ .probe = probe, .stops = try a.dupe(usize, chunks.starts.?[1..]) };
+        }
+        return .{ .probe = probe, .stops = try a.dupe(usize, &.{block.len}) };
+    }
+    pub fn deinit(j: BlockJobs, a: std.mem.Allocator) void {
+        a.free(j.probe);
+        a.free(j.stops);
+    }
+};
+
 pub const Plan = struct {
     step: usize = 2048,
     min_chunk: usize = 256,
@@ -119,6 +146,7 @@ pub fn check(io: std.Io, path: []const u8) !void {
         starts: []const usize,
         positions: []const struct { position: usize, contains: bool, floor: usize },
         spans: []const struct { begin: usize, end: usize, chunks: []const [2]usize },
+        warming: []const struct { last: i32, at: usize },
     };
     const parsed = try std.json.parseFromSlice([]const Case, a, source, .{});
     defer parsed.deinit();
@@ -136,6 +164,14 @@ pub fn check(io: std.Io, path: []const u8) !void {
         const chunks = try case.plan.chunks(a, case.tokens);
         defer chunks.deinit(a);
         try std.testing.expectEqualSlices(usize, case.starts, chunks.starts.?);
+        const warming = try BlockJobs.init(a, case.plan, case.tokens, 17);
+        defer warming.deinit(a);
+        try std.testing.expectEqual(case.warming.len, warming.stops.len);
+        try std.testing.expectEqualSlices(i32, case.tokens, warming.probe[0 .. warming.probe.len - 1]);
+        for (case.warming, warming.stops) |job, at| {
+            try std.testing.expectEqual(job.at, at);
+            try std.testing.expectEqual(job.last, warming.probe[at]);
+        }
         for (case.positions) |position| {
             try std.testing.expectEqual(position.contains, chunks.contains(position.position));
             try std.testing.expectEqual(position.floor, chunks.floor(position.position));
@@ -164,6 +200,10 @@ test "empty plans and unbounded chunk positions" {
     try std.testing.expect(!chunks.contains(29));
     try std.testing.expectEqual(@as(usize, 29), chunks.floor(31));
     try std.testing.expectEqual(@as(usize, 11), chunks.next(3));
+    const unplanned = try BlockJobs.init(a, null, &.{ 1, 2, 3 }, 17);
+    defer unplanned.deinit(a);
+    try std.testing.expectEqualSlices(i32, &.{ 1, 2, 3, 17 }, unplanned.probe);
+    try std.testing.expectEqualSlices(usize, &.{3}, unplanned.stops);
 }
 
 fn allocationFailures(a: std.mem.Allocator) !void {
@@ -173,6 +213,8 @@ fn allocationFailures(a: std.mem.Allocator) !void {
     const name = try plan.name(a);
     defer a.free(name);
     try std.testing.expectEqualStrings("grid8+msg2:6.7:7.8", name);
+    const jobs = try BlockJobs.init(a, plan, &.{ 6, 1, 2, 7, 8, 3, 4, 7, 8, 2, 3, 4 }, 17);
+    defer jobs.deinit(a);
 }
 
 test "plan allocations release owned boundaries and scheme names on failure" {

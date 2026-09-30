@@ -200,11 +200,11 @@ const Job = struct {
     stats: *live_status.Stats,
     activated: bool = false,
     a: std.mem.Allocator,
-    request: *Request,
+    request: ?*Request = null,
     model: []const u8,
     sequence: usize,
     created: i64,
-    client: *control.Client,
+    client: ?*control.Client = null,
     body: std.json.Value,
     is_chat: bool,
     options: inference.Options,
@@ -213,10 +213,87 @@ const Job = struct {
     suspended: ?*Pending = null,
     done: std.Io.Event = .unset,
     failure: ?anyerror = null,
+    warmer: ?*Warmer = null,
+
+    fn cancellation(job: *Job) @import("cancellation.zig").Cancellation {
+        if (job.warmer) |warmer| return .{ .context = warmer, .callback = Warmer.checkCancellation };
+        return job.client.?.cancellation();
+    }
+
+    fn finish(job: *Job, io: std.Io) void {
+        if (job.warmer) |warmer| {
+            warmer.inflight = false;
+            warmer.index = if (job.failure == null) warmer.index + 1 else warmer.jobs.stops.len;
+            if (warmer.index == warmer.jobs.stops.len) warmer.worker.warming.store(false, .release);
+        } else job.done.set(io);
+    }
+
+    fn reportError(job: *Job, err: anyerror) !void {
+        if (job.warmer != null) {
+            job.failure = err;
+            @import("snapshot_store.zig").report("warming", err);
+        } else try requestFailure(job.a, job.request.?, err);
+    }
 
     fn cancelled(job: *Job) bool {
-        job.client.cancellation().check() catch return true;
+        job.cancellation().check() catch return true;
         return false;
+    }
+};
+
+const Warmer = struct {
+    worker: *Worker,
+    jobs: @import("prefill_plan.zig").BlockJobs,
+    index: usize = 0,
+    inflight: bool = false,
+    arena: std.heap.ArenaAllocator,
+    job: Job = undefined,
+
+    fn init(worker: *Worker, session: *inference.Session, disk: *@import("snapshot_store.zig").Store) !?*Warmer {
+        if (disk.reads != 0) return null;
+        const blocks = try disk.blocksToWarm();
+        defer {
+            for (blocks) |tokens| mx.allocator.free(tokens);
+            mx.allocator.free(blocks);
+        }
+        if (blocks.len == 0) return null;
+        const pad = try session.tokenizer.encode(mx.allocator, "\n");
+        defer mx.allocator.free(pad);
+        if (pad.len == 0) return error.EmptyWarmPadding;
+        const jobs = try @import("prefill_plan.zig").BlockJobs.init(mx.allocator, try session.prefillPlan(), blocks[0], @intCast(pad[pad.len - 1]));
+        errdefer jobs.deinit(mx.allocator);
+        if (jobs.stops.len == 0) {
+            jobs.deinit(mx.allocator);
+            return null;
+        }
+        try session.validate(jobs.probe, .{ .max_tokens = 1 });
+        const warmer = try mx.allocator.create(Warmer);
+        warmer.* = .{ .worker = worker, .jobs = jobs, .arena = .init(mx.allocator) };
+        worker.warming.store(true, .release);
+        return warmer;
+    }
+
+    fn deinit(w: *Warmer) void {
+        w.worker.warming.store(false, .release);
+        w.jobs.deinit(mx.allocator);
+        w.arena.deinit();
+        mx.allocator.destroy(w);
+    }
+
+    fn checkCancellation(context: ?*anyopaque) !void {
+        const w: *Warmer = @ptrCast(@alignCast(context.?));
+        if (w.worker.control.stopping.load(.acquire)) return error.ServerStopping;
+    }
+
+    fn enqueue(w: *Warmer) void {
+        if (w.inflight or w.index >= w.jobs.stops.len) return;
+        if (w.worker.control.stopping.load(.acquire)) {
+            w.worker.warming.store(false, .release);
+            return;
+        }
+        _ = w.arena.reset(.retain_capacity);
+        w.job = .{ .stats = w.worker.stats, .a = w.arena.allocator(), .model = "", .sequence = 0, .created = 0, .body = .null, .is_chat = true, .options = .{ .max_tokens = 1, .draft = false, .sampling = .{ .temperature = 0 } }, .background = true, .warmer = w };
+        w.inflight = w.worker.queue.put(w.worker.io, &w.job, false);
     }
 };
 const Worker = struct {
@@ -229,6 +306,7 @@ const Worker = struct {
     dir: []const u8,
     queue: background.Queue(*Job) = .{},
     preemptions: std.atomic.Value(u64) = .init(0),
+    warming: std.atomic.Value(bool) = .init(false),
     ready: std.Io.Event = .unset,
     startup_error: ?anyerror = null,
     control: *control.Registry,
@@ -287,6 +365,11 @@ const Worker = struct {
             }
         };
         defer if (disk) |*value| if (prefixes) |*store| value.shutdown(store);
+        const warmer = if (disk) |*value| Warmer.init(w, &session, value) catch |err| blk: {
+            @import("snapshot_store.zig").report("warming setup", err);
+            break :blk null;
+        } else null;
+        defer if (warmer) |value| value.deinit();
         w.prefix_stats.update(if (prefixes) |*store| store else null);
         w.memory_stats.budget = memory.budget;
         w.memory_stats.mlx_budget = memory.share;
@@ -299,19 +382,20 @@ const Worker = struct {
         var closed = false;
         var activation_order: u64 = 0;
         while (!closed or live > 0) {
+            if (warmer) |value| value.enqueue();
             while (w.queue.removeIf(w.io, Job.cancelled)) |job| {
-                job.client.cancellation().check() catch |err| {
+                job.cancellation().check() catch |err| {
                     if (job.suspended) |pending| {
                         pending.reportError(err) catch |write_err| {
                             job.failure = write_err;
                         };
                         pending.deinit();
                         job.suspended = null;
-                    } else requestFailure(job.a, job.request, err) catch |write_err| {
+                    } else job.reportError(err) catch |write_err| {
                         job.failure = write_err;
                     };
                 };
-                job.done.set(w.io);
+                job.finish(w.io);
             }
             if (!w.control.stopping.load(.acquire)) try w.preempt(&session, &admission, &active, &live, if (prefixes) |*store| store else null);
             while (!closed and live < w.batch_streams) {
@@ -329,7 +413,7 @@ const Worker = struct {
                         live += 1;
                         break;
                     };
-                } else job.done.set(w.io);
+                } else job.finish(w.io);
             }
             try gateRound(&gate, &active, if (prefixes) |*store| store else null);
             for (&active) |*slot| if (slot.*) |pending| if (pending.growth == .ended) {
@@ -340,7 +424,7 @@ const Worker = struct {
                 pending.deinit();
                 slot.* = null;
                 live -= 1;
-                job.done.set(w.io);
+                job.finish(w.io);
                 try mx.check(mx.c.mlx_clear_cache());
             };
             for (&active) |*slot| if (slot.*) |pending| {
@@ -367,7 +451,7 @@ const Worker = struct {
                     pending.deinit();
                     slot.* = null;
                     live -= 1;
-                    job.done.set(w.io);
+                    job.finish(w.io);
                 }
             };
             var waiting: u64 = 0;
@@ -410,7 +494,7 @@ const Worker = struct {
                 pending.deinit();
                 active[at] = null;
                 live.* -= 1;
-                job.done.set(w.io);
+                job.finish(w.io);
                 continue;
             };
             active[at] = null;
@@ -422,7 +506,7 @@ const Worker = struct {
                 };
                 pending.deinit();
                 job.suspended = null;
-                job.done.set(w.io);
+                job.finish(w.io);
             }
             try mx.check(mx.c.mlx_clear_cache());
         }
@@ -490,6 +574,7 @@ pub fn checkGrowth(session: *inference.Session, profile: memory_policy.StreamMem
         var client = control.Client{ .owner = &registry };
         var job: Job = undefined;
         job.client = &client;
+        job.warmer = null;
         newer.job = &job;
         var admission = memory_policy.Admission{ .budget = gate.budget, .memory = .{ .short_tokens = 0, .short = 0, .long_tokens = 1, .long = 0, .per_token = 1, .prefill_a = 0, .prefill_b = 0, .round_bytes = 0 } };
         try std.testing.expectError(error.RequestCancelled, newer.advance(session, &admission, &active, null));
@@ -707,7 +792,7 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
         if (id.len != 0) return failure(a, request, .not_found, "Unknown route");
     }
     if (request.head.method == .GET) {
-        if (route.len == 0 or std.mem.eql(u8, route, "/health")) return json(a, request, .ok, .{ .status = "ok", .model = model, .warming = false, .max_batch_size = worker.batch_streams, .background_preemptions = worker.preemptions.load(.acquire), .memory = worker.memory_stats.snapshot(), .prompt_cache = worker.prefix_stats.snapshot(), .inference = worker.stats.snapshot() });
+        if (route.len == 0 or std.mem.eql(u8, route, "/health")) return json(a, request, .ok, .{ .status = "ok", .model = model, .warming = worker.warming.load(.acquire), .max_batch_size = worker.batch_streams, .background_preemptions = worker.preemptions.load(.acquire), .memory = worker.memory_stats.snapshot(), .prompt_cache = worker.prefix_stats.snapshot(), .inference = worker.stats.snapshot() });
         if (std.mem.eql(u8, route, "/v1/models") or std.mem.eql(u8, route, "/models")) return json(a, request, .ok, .{ .object = "list", .data = &.{.{ .id = model, .object = "model", .created = std.Io.Clock.real.now(worker.io).toSeconds(), .owned_by = "tensorfold" }} });
         return failure(a, request, .not_found, "Unknown route");
     }
@@ -780,6 +865,7 @@ const Pending = struct {
     cached_tokens: usize = 0,
     think_end: ?u32 = null,
     history_len: usize = 0,
+    warm_checkpoint: ?usize = null,
     system_len: usize = 0,
     checkpoints: @import("prompt_cache.zig").Checkpoints = .{},
     shared_checkpoints: @import("prompt_cache.zig").Checkpoints = .{},
@@ -837,7 +923,7 @@ const Pending = struct {
         p.growth = .run;
         if (p.stream) |*stream| stream.replay.restart(stream.accumulated.items);
         if (p.job.activated) {
-            p.job.stats.requeue();
+            if (p.job.warmer == null) p.job.stats.requeue();
             p.job.activated = false;
         }
     }
@@ -851,14 +937,22 @@ const Pending = struct {
             const body = try std.json.Stringify.valueAlloc(p.job.a, .{ .@"error" = .{ .message = @errorName(err) } }, .{});
             try response.writer.print("data: {s}\n\ndata: [DONE]\n\n", .{body});
             try response.end();
-        } else try requestFailure(p.job.a, p.job.request, err);
+        } else try p.job.reportError(err);
     }
 
     fn prepare(p: *Pending, w: *Worker, session: *inference.Session) !void {
         const a = p.job.a;
         const body = p.job.body;
-        const cancellation = p.job.client.cancellation();
+        const cancellation = p.job.cancellation();
         try cancellation.check();
+        if (p.job.warmer) |warmer| {
+            p.history_len = warmer.jobs.stops[warmer.index];
+            p.ids = warmer.jobs.probe[0 .. p.history_len + 1];
+            p.options = p.job.options;
+            if (warmer.index + 1 == warmer.jobs.stops.len) p.warm_checkpoint = p.history_len;
+            try session.validate(p.ids, p.options);
+            return;
+        }
         if (body.object.get("response_format")) |format| if (format != .null) {
             const kind = if (format == .object) format.object.get("type") orelse std.json.Value.null else std.json.Value.null;
             if (kind != .string or !std.mem.eql(u8, kind.string, "text")) return error.StructuredOutputNotImplemented;
@@ -921,10 +1015,10 @@ const Pending = struct {
 
     fn activate(p: *Pending, session: *inference.Session) !void {
         const a = p.job.a;
-        const cancellation = p.job.client.cancellation();
+        const cancellation = p.job.cancellation();
         const options = p.options;
         try cancellation.check();
-        p.job.stats.activate();
+        if (p.job.warmer == null) p.job.stats.activate();
         p.job.activated = true;
         if (p.prepared_image) |*prepared| {
             p.image = try prepared.encode(session.io, session.directory, &session.backend.qwen.weights);
@@ -932,8 +1026,8 @@ const Pending = struct {
             p.prepared_image = null;
         }
         if (options.stream and p.response == null) {
-            p.response = try p.job.request.respondStreaming(&p.buffer, .{ .respond_options = .{ .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" } } } });
-            p.stream = .{ .a = a, .writer = &p.response.?.writer, .transport = p.job.request.server.out, .id = p.id, .model = p.job.model, .created = p.job.created, .is_chat = p.job.is_chat, .thinking = p.thinking, .markers = p.markers, .tools = p.tools, .max_calls = p.max_calls, .cancellation = cancellation, .response_reply = p.job.response_reply };
+            p.response = try p.job.request.?.respondStreaming(&p.buffer, .{ .respond_options = .{ .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" } } } });
+            p.stream = .{ .a = a, .writer = &p.response.?.writer, .transport = p.job.request.?.server.out, .id = p.id, .model = p.job.model, .created = p.job.created, .is_chat = p.job.is_chat, .thinking = p.thinking, .markers = p.markers, .tools = p.tools, .max_calls = p.max_calls, .cancellation = cancellation, .response_reply = p.job.response_reply };
             if (p.job.response_reply) |reply| {
                 reply.context = &p.stream.?;
                 reply.emit = Stream.responseEvent;
@@ -998,6 +1092,7 @@ const Pending = struct {
         const policy = @import("prompt_cache.zig");
         p.checkpoints = policy.checkpoints(p.history_len, 0, null, p.ids).aligned(p.generation.?.boundary(), 0, p.ids.len);
         p.shared_checkpoints = policy.sharedCheckpoints(p.system_len, p.generation.?.boundary(), p.ids.len);
+        if (p.warm_checkpoint) |at| p.shared_checkpoints = .{ .values = .{ at, 0, 0 }, .count = 1 };
         const take = reserved.copy > budget;
         var hit = try store.match(p.ids, p.generation.?.boundary(), take);
         if (take and hit == null) return error.MissingReservedPrefix;
@@ -1013,7 +1108,7 @@ const Pending = struct {
     }
 
     fn advance(p: *Pending, session: *inference.Session, admission: *memory_policy.Admission, active: []const ?*Pending, prefixes: ?*PrefixStore) !bool {
-        try p.job.client.cancellation().check();
+        try p.job.cancellation().check();
         if (p.growth == .ended) return error.StreamGrowthExceedsMemoryBudget;
         if (p.growth == .paused) return false;
         if (p.generation) |*generation| if (!generation.isDecoding()) try p.guardPrefill(admission.*, active, prefixes);
@@ -1022,6 +1117,10 @@ const Pending = struct {
             try mx.check(mx.c.mlx_clear_cache());
             try p.activate(session);
             if (p.image == null and p.options.max_tokens > 0) if (prefixes) |store| try p.restorePrefix(store, reserved, admission.budget);
+            if (p.warm_checkpoint) |at| if (p.cached_tokens == at) if (prefixes) |store| {
+                p.saved_position = 0;
+                try p.savePrefix(store, admission.*, active);
+            };
         }
         const done = try p.step(session);
         if (!done) if (prefixes) |store| {
@@ -1096,8 +1195,9 @@ const Pending = struct {
         if (!done) return false;
         var reply = try p.generation.?.takeReply();
         defer reply.deinit(mx.allocator);
+        if (p.job.warmer != null) return true;
         const a = p.job.a;
-        const request = p.job.request;
+        const request = p.job.request.?;
         const id = p.id;
         const model = p.job.model;
         const created = p.job.created;

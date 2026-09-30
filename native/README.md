@@ -160,6 +160,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Adaptive prefill boundaries and markers | `test-prefill-plan test-chat -Doptimize=safe -j1` | Python plan oracle and all seven local tokenizers; no model weights loaded |
 | HTTP prefix reuse and eviction | `test-server-prefixes -Doptimize=safe -j1` | Local Qwen; JSON/SSE parity, cancellation, LRU eviction and disabled caching |
 | HTTP disk snapshots | `test-server-snapshots -Doptimize=safe -j1` | Local Qwen; eviction spill, startup/on-demand reuse and corrupt-file recovery with exact seeded outputs |
+| Cross-kernel prefix warming | `test-snapshot-warming test-server-warming -Doptimize=safe -j1` | Upstream selection oracle; Qwen rebuilds incompatible snapshots, yields to foreground work, preserves sampled output and cancels on shutdown |
 | Live serving status | `test-server-live test-server-live-http -Doptimize=safe -j1` | Python rate/redraw oracle; local Qwen for request counters, prefix reuse, cancellation, queue overflow and terminal modes |
 | Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream admission/growth-gate parity, repeated probes and Qwen/Gemma/Nemotron pause/resume correctness |
 | Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen rolling reservations, waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
@@ -250,7 +251,9 @@ retain fixed chunks and bypass this cache. Text snapshots persist under
 `--spill-gib N` enables eviction spill with a disk budget (default `0`, off).
 Without spill, clean shutdown retains up to two conversations within 10 GiB.
 Reuse requires matching checkpoint, executable, runtime options and dependency pins.
-Cross-kernel warming remains pending.
+If no compatible system snapshot loads, serving rebuilds the newest uncovered
+prefix from the same checkpoint's saved tokens in preemptible background chunks.
+It never loads incompatible cache arrays; `/health` reports `warming` until done.
 `--request-timeout-seconds N` sets an absolute deadline from connection acceptance
 through queuing and generation (default `0`, disabled). Cooperative cancellation
 returns HTTP 408 or an SSE error; stalled sockets close after a 250 ms allowance.

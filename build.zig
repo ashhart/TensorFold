@@ -441,6 +441,10 @@ pub fn build(b: *std.Build) void {
     server_snapshots.addArtifactArg(exe);
     server_snapshots.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--disk-only", "build/native-checks/server-snapshots" });
     b.step("test-server-snapshots", "Verify disk spill, server restarts, on-demand snapshots and corrupt-file recovery").dependOn(&server_snapshots.step);
+    const server_warming = b.addRunArtifact(lifecycle.producer.?);
+    server_warming.addArtifactArg(exe);
+    server_warming.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--warming-only", "build/native-checks/server-warming" });
+    b.step("test-server-warming", "Rebuild incompatible system snapshots and verify HTTP prefix reuse and preemption").dependOn(&server_warming.step);
     const memory_image = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--model", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--vision-fixture", "1870", "3110", "--image-fixture", "--image-format", "JPEG", "--image-only", "--output", "build/native-checks/memory-image" });
     const server_memory = b.addRunArtifact(lifecycle.producer.?);
     server_memory.addArtifactArg(exe);
@@ -484,6 +488,12 @@ pub fn build(b: *std.Build) void {
     prefill_plan_check.addArgs(&.{ "check-prefill-plan", prefill_plan_fixture });
     prefill_plan_check.step.dependOn(&prefill_plan_oracle.step);
     b.step("test-prefill-plan", "Compare adaptive chunk boundaries and resume points with upstream").dependOn(&prefill_plan_check.step);
+    const warming_fixture = "build/native-checks/snapshot-warming.json";
+    const warming_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--snapshot-warming-fixtures", "--output", warming_fixture });
+    const warming_check = b.addRunArtifact(exe);
+    warming_check.addArgs(&.{ "check-snapshot-warming", warming_fixture });
+    warming_check.step.dependOn(&warming_oracle.step);
+    b.step("test-snapshot-warming", "Compare cross-kernel snapshot selection with upstream").dependOn(&warming_check.step);
     const live_fixture = "build/native-checks/server-live.json";
     const live_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--server-live-fixtures", "--output", live_fixture });
     const live_check = b.addRunArtifact(exe);

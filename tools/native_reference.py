@@ -303,9 +303,42 @@ def server_live_fixtures(output):
     print(f'Saved {len(events)} upstream live rate/status cases and {len(lines)} terminal cases')
 
 
+def snapshot_warming_fixtures(output):
+    import os
+    import random
+    from safetensors.numpy import save_file
+    from tensorfold.engine.prefix_snapshots import blocks_to_warm
+    output = Path(output)
+    root = output.parent / 'snapshot-warming-oracle'
+    dependencies = Path('native/dependencies.json').read_text()
+    rng = random.Random(142091)
+    cases = []
+    for case_id in range(64):
+        directory = root / str(case_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        for old in directory.glob('*.safetensors'):
+            old.unlink()
+        for i in range(16):
+            identity = rng.choice(('model-a|current', 'model-a|old', 'model-a|older', 'model-b|current'))
+            tokens = list(range(rng.randrange(1, 16)))
+            if rng.randrange(3) == 0:
+                tokens[0] = 91
+            native = dict(format=1, dependencies=dependencies, identity=identity, tensor_backend=True,
+                          state_type='unused', tokens=tokens, state={})
+            path = directory / f'{i}.safetensors'
+            save_file({}, str(path), metadata={'model': identity, 'tokens': json.dumps(tokens), 'tensorfold_native': json.dumps(native)})
+            os.utime(path, (1000 + i, 1000 + i))
+        (directory / 'broken.safetensors').write_bytes(b'invalid')
+        partial = directory / 'incomplete.partial.safetensors'
+        save_file({}, str(partial), metadata={'model': 'model-a|old', 'tokens': '[999]'})
+        cases.append(dict(directory=str(directory), identity='model-a|current', expected=blocks_to_warm(directory, 'model-a|current')))
+    output.write_text(json.dumps(cases))
+    print(f'Saved {len(cases)} upstream cross-kernel snapshot selection cases')
+
+
 def prefill_plan_fixtures(output):
     import random
-    from tensorfold.engine.prefill_plan import PrefillPlan
+    from tensorfold.engine.prefill_plan import PrefillPlan, block_jobs
     rng = random.Random(61749)
     cases = []
     for _ in range(1600):
@@ -315,7 +348,7 @@ def prefill_plan_fixtures(output):
         assistant = rng.choice(([], [91], [91, 92], [92, 93, 94]))
         tokens = [rng.randrange(89, 96) for _ in range(rng.choice((0, 1, 15, 16, 17, 255, 256, 257, 2049, 4099)))]
         case = dict(plan=dict(step=step, min_chunk=minimum, openers=openers, assistant=assistant), tokens=tokens,
-                    name=None, points=[], starts=[], positions=[], spans=[])
+                    name=None, points=[], starts=[], positions=[], spans=[], warming=[])
         try:
             plan = PrefillPlan(step, openers, minimum, assistant)
         except ValueError:
@@ -323,6 +356,7 @@ def prefill_plan_fixtures(output):
             continue
         chunks = plan.chunks(tokens)
         case.update(name=plan.name, points=plan.points(np.asarray(tokens)), starts=chunks.starts)
+        case['warming'] = [dict(last=prompt[-1], at=at) for prompt, at in block_jobs(plan, tokens, 17)]
         positions = {0, 1, len(tokens), len(tokens) + 1, *chunks.starts}
         positions.update(max(0, p - 1) for p in chunks.starts)
         positions.update(p + 1 for p in chunks.starts)
@@ -644,6 +678,7 @@ def main():
     parser.add_argument("--memory-fixtures", action="store_true")
     parser.add_argument("--prompt-cache-fixtures", action="store_true")
     parser.add_argument("--prefill-plan-fixtures", action="store_true")
+    parser.add_argument("--snapshot-warming-fixtures", action="store_true")
     parser.add_argument("--server-live-fixtures", action="store_true")
     parser.add_argument("--capture-fixtures", action="store_true")
     parser.add_argument("--verify-capture", nargs=2, metavar=('DRAFTER', 'REPORT'))
@@ -665,6 +700,8 @@ def main():
         return server_live_fixtures(args.output)
     if args.prefill_plan_fixtures:
         return prefill_plan_fixtures(args.output)
+    if args.snapshot_warming_fixtures:
+        return snapshot_warming_fixtures(args.output)
     if args.prompt_cache_fixtures:
         return prompt_cache_fixtures(args.output)
     if args.memory_fixtures:

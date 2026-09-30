@@ -214,6 +214,57 @@ const Scenario = struct {
     http_checks: []const u8 = "",
     disk_phase: ?usize = null,
     disk_expected: ?*[2]?Output = null,
+    warming_phase: ?usize = null,
+    warming_expected: ?*?Output = null,
+
+    fn checkWarming(s: *Scenario, port: u16) !void {
+        const a = s.init.arena.allocator();
+        const io = s.init.io;
+        const phase = s.warming_phase.?;
+        const initial = try health(a, io, port);
+        try std.testing.expectEqual(phase == 1 or phase == 4, initial.object.get("warming").?.bool);
+        if (phase == 4) {
+            try std.posix.kill(s.child.id.?, .INT);
+            if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+            std.debug.print("PASS: SIGINT cancels active prefix warming and releases its queued work\n", .{});
+            return;
+        }
+        if (phase == 1) {
+            const foreground = try post(io, port, long_request);
+            var opened = true;
+            defer if (opened) foreground.close(io);
+            try firstEvent(io, foreground);
+            const during = try health(a, io, port);
+            try std.testing.expect(during.object.get("warming").?.bool);
+            try std.testing.expect(during.object.get("background_preemptions").?.integer > 0);
+            foreground.close(io);
+            opened = false;
+            var finished = false;
+            for (0..6000) |_| {
+                if (!(try health(a, io, port)).object.get("warming").?.bool) {
+                    finished = true;
+                    break;
+                }
+                try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+            }
+            if (!finished) return error.WarmingDidNotFinish;
+            const cache = try CacheCounts.read(a, io, port);
+            try std.testing.expect(cache.entries > 0);
+        }
+        const system = try a.alloc(u8, 3000 * 5);
+        for (0..3000) |i| @memcpy(system[i * 5 ..][0..5], "word ");
+        const body = try std.json.Stringify.valueAlloc(a, .{ .messages = &.{ .{ .role = "system", .content = system }, .{ .role = "user", .content = "Name three colors." } }, .reasoning_effort = "none", .max_tokens = @as(usize, 12), .ignore_eos = true, .temperature = @as(f64, 0.7), .seed = @as(usize, 123) }, .{});
+        const socket = try postRoute(io, port, "/v1/chat/completions", body);
+        defer socket.close(io);
+        const actual = try Output.parse(a, try readAll(a, io, socket), false);
+        if (s.warming_expected.?.*) |expected| try expected.compare(actual) else s.warming_expected.?.* = actual;
+        const usage = (try std.json.parseFromSlice(std.json.Value, a, actual.usage.?, .{})).value;
+        const cached = usage.object.get("prompt_tokens_details").?.object.get("cached_tokens").?.integer;
+        if (phase == 1 or phase == 2) try std.testing.expect(cached >= 3000) else try std.testing.expectEqual(@as(i64, 0), cached);
+        try std.posix.kill(s.child.id.?, .INT);
+        if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+        std.debug.print("PASS: snapshot warming phase {d}: exact sampled output, rebuilt prefix reuse, foreground preemption and startup policy\n", .{phase});
+    }
 
     fn interruptBackground(s: *Scenario, port: u16, initial_decoded: i64, count: i64) !void {
         const a = s.init.arena.allocator();
@@ -873,6 +924,7 @@ const Scenario = struct {
             }
         };
         if (s.disk_phase != null) return s.checkDisk(port);
+        if (s.warming_phase != null) return s.checkWarming(port);
         if (s.background) return s.checkBackground(port);
         if (s.responses) {
             try @import("native_responses_checks.zig").check(s.init, port, s.http_checks);
@@ -950,9 +1002,75 @@ const Scenario = struct {
     }
 };
 
+fn invalidateWarmSnapshots(init: std.process.Init, directory: []const u8) !void {
+    const a = init.arena.allocator();
+    const io = init.io;
+    var dir = try std.Io.Dir.cwd().openDir(io, directory, .{ .iterate = true });
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    var changed: usize = 0;
+    while (try iterator.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".safetensors")) continue;
+        const file = try dir.openFile(io, entry.name, .{ .mode = .read_write });
+        defer file.close(io);
+        var size: [8]u8 = undefined;
+        if (try file.readPositionalAll(io, &size, 0) != size.len) return error.InvalidSnapshotHeader;
+        const length = std.mem.readInt(u64, &size, .little);
+        if (length > 64 * 1024 * 1024) return error.InvalidSnapshotHeader;
+        const buffer = try a.alloc(u8, @intCast(length));
+        if (try file.readPositionalAll(io, buffer, 8) != buffer.len) return error.InvalidSnapshotHeader;
+        var header = try std.json.parseFromSlice(std.json.Value, a, buffer, .{ .allocate = .alloc_always });
+        const encoded = header.value.object.getPtr("__metadata__").?.object.getPtr("tensorfold_native").?;
+        var metadata = try std.json.parseFromSlice(std.json.Value, a, encoded.string, .{});
+        const identity = try a.dupe(u8, metadata.value.object.get("identity").?.string);
+        const at = (std.mem.indexOfScalar(u8, identity, '|') orelse return error.MissingSnapshotRevision) + 1;
+        @memset(identity[at..], '0');
+        try metadata.value.object.put(a, "identity", .{ .string = identity });
+        try metadata.value.object.put(a, "dependencies", .{ .string = "obsolete" });
+        try metadata.value.object.put(a, "state", .null);
+        encoded.* = .{ .string = try std.json.Stringify.valueAlloc(a, metadata.value, .{}) };
+        const updated = try std.json.Stringify.valueAlloc(a, header.value, .{});
+        if (updated.len > buffer.len) return error.SnapshotHeaderGrew;
+        @memset(buffer, ' ');
+        @memcpy(buffer[0..updated.len], updated);
+        try file.writePositionalAll(io, buffer, 8);
+        changed += 1;
+    }
+    try std.testing.expect(changed > 0);
+}
+
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 3 and args.len != 5 and args.len != 6) return error.ExpectedExecutableAndModel;
+    if (args.len == 5 and std.mem.eql(u8, args[3], "--warming-only")) {
+        const a = init.arena.allocator();
+        const root = args[4];
+        std.Io.Dir.cwd().deleteTree(init.io, root) catch |err| if (err != error.FileNotFound) return err;
+        const directory = try std.fs.path.join(a, &.{ root, "system" });
+        var expected: ?Output = null;
+        for (0..5) |phase| {
+            if (phase == 1 or phase == 4) {
+                try invalidateWarmSnapshots(init, directory);
+                std.Io.Dir.cwd().deleteTree(init.io, try std.fs.path.join(a, &.{ root, "native-session-snapshots" })) catch |err| if (err != error.FileNotFound) return err;
+            }
+            var scenario = Scenario{ .init = init, .idle = false, .warming_phase = phase, .warming_expected = &expected, .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", "1", "--snapshot-dir", directory, "--spill-gib", "1", "--checkpoint-slots", "1", "--prompt-cache-gib", if (phase == 3) "0" else "1" }, .stderr = .pipe }) };
+            defer if (scenario.child.id) |id| {
+                std.posix.kill(id, .KILL) catch {};
+                scenario.child.kill(init.io);
+            };
+            const Event = union(enum) { done: anyerror!void, timeout: std.Io.Cancelable!void };
+            var events: [2]Event = undefined;
+            var select = std.Io.Select(Event).init(init.io, &events);
+            defer select.cancelDiscard();
+            try select.concurrent(.done, Scenario.run, .{&scenario});
+            try select.concurrent(.timeout, std.Io.sleep, .{ init.io, std.Io.Duration.fromSeconds(300), .awake });
+            switch (try select.await()) {
+                .done => |result| try result,
+                .timeout => return error.ServerWarmingCheckTimedOut,
+            }
+        }
+        return;
+    }
     if (args.len == 5 and std.mem.eql(u8, args[3], "--disk-only")) {
         const root = args[4];
         std.Io.Dir.cwd().deleteTree(init.io, root) catch |err| if (err != error.FileNotFound) return err;
