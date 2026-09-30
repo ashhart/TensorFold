@@ -512,6 +512,41 @@ class GlmEngine:
         stats.update(policy=spec, drafts=draft)
         return stats
 
+    def score_labels(self, prompt_ids: list[int], label_ids: list[int]) -> tuple[list[float], float]:
+        """Both ranks prefill the prompt and return its label logits plus the full-vocabulary logsumexp."""
+
+        prompt = [int(token) for token in prompt_ids]
+        labels = [int(token) for token in label_ids]
+        if not prompt:
+            raise ValueError("empty prompt")
+        if not labels:
+            raise ValueError("empty labels")
+        if len(prompt) >= self.limit:
+            raise ValueError(f"prompt of {len(prompt)} tokens: this engine serves contexts up to {self.limit}")
+        self._ring()                    # rank 1 waits on the store before this header, as a chat request does
+        self._share([0, len(labels)])   # max_tokens on a chat header is at least 1, so 0 is a score
+        self._share(prompt)
+        self._share(labels)
+        return self._score_local(prompt, labels)
+
+    def _score_local(self, prompt: list[int], labels: list[int]) -> tuple[list[float], float]:
+        from tensorfold.families.glm5_next.cuda.decode import prompt_logits
+        from tensorfold.server.decisions import reduce_vocab_shards
+
+        local = prompt_logits(self.e, prompt)
+        rows = [local] if self.comm is None else self._gather_floats(local)
+        if self.rank != 0:
+            return [], 0.0
+        return reduce_vocab_shards(rows, labels, len(rows[0]))
+
+    def _gather_floats(self, values: list[float]) -> list[list[float]]:
+        torch = self.torch
+        mine = torch.tensor(values, dtype=torch.float32, device="cuda")
+        got = torch.empty((2 * len(values),), dtype=torch.float32, device="cuda")
+        self.comm.all_gather(mine, got)
+        width = len(values)
+        return [[float(item) for item in got[:width].tolist()], [float(item) for item in got[width:].tolist()]]
+
     def follow(self) -> None:
         """Rank 1: mirror every request rank 0 serves, forever."""
 
@@ -519,8 +554,14 @@ class GlmEngine:
 
         while True:
             self._await_bell()
+            header = self._share(None)
+            if len(header) == 2 and header[0] == 0:     # a decision: both ranks prefill, neither samples
+                prompt = self._share(None)
+                labels = self._share(None)
+                self._score_local(prompt, labels)
+                continue
             (max_tokens, stop_eos, draft, cached, s_lo, s_hi, s_top, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi, shaped,
-             *code) = self._share(None)
+             *code) = header
             prompt = self._share(None)
             packed = self._share(None) if shaped else []
             constraint = None
