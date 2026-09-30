@@ -133,3 +133,15 @@ def test_glm_and_gemma_calls_parse_through_one_parser():
     assert content == "Two reads."
     assert got == [("read_file", {"path": "a.py"}), ("read_file", {"limit": 5, "path": "b.py"}),
                    ("call:search", {"query": "x"})]
+
+
+def test_gemma_spontaneous_empty_thought_channel_is_stripped():
+    """Gemma 4 can open an (often empty) thought channel even with thinking off — e.g. when
+    continuing after a tool result. With the channel markers, split_thinking strips it instead
+    of leaking `<|channel>thought...<channel|>` into the answer (follow-up to the #121 tool leak)."""
+    from tensorfold.server.text import CHANNEL_MARKERS
+
+    reply = "<|channel>thought\n<channel|>The files are: a.py, b.py."
+    assert split_thinking(reply, finished=True, markers=CHANNEL_MARKERS) == ("", "The files are: a.py, b.py.")
+    # a plain reply (no channel) is unchanged — the strip is a no-op
+    assert split_thinking("Just an answer.", finished=True, markers=CHANNEL_MARKERS) == ("", "Just an answer.")
