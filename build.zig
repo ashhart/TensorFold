@@ -270,6 +270,12 @@ pub fn build(b: *std.Build) void {
     ds_compress.step.dependOn(&ds_compress_fixture.step);
     b.step("test-deepseek-prefill-compress", "Compare DeepSeek batched compressor projections, overlapping/block pools and context tails with upstream").dependOn(&ds_compress.step);
     metal_tests.dependOn(&ds_compress.step);
+    const ds_attention_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/deepseek-prefill-attention", "--deepseek-prefill-attention" });
+    const ds_attention = b.addRunArtifact(exe);
+    ds_attention.addArgs(&.{ "check-deepseek-prefill-attention", "build/native-checks/deepseek-prefill-attention" });
+    ds_attention.step.dependOn(&ds_attention_fixture.step);
+    b.step("test-deepseek-prefill-attention", "Compare DeepSeek batched dense/sparse pooled attention, production staged kernels and cache continuation with upstream").dependOn(&ds_attention.step);
+    metal_tests.dependOn(&ds_attention.step);
     const simd_bits_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/simd-bits", "--simd-bits" });
     const simd_bits = b.addRunArtifact(exe);
     simd_bits.addArgs(&.{ "check-deepseek-dense", "build/native-checks/simd-bits" });

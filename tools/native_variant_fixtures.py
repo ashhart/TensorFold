@@ -736,6 +736,77 @@ def flash_prefill_hc_fixtures(capture):
     print(f"Saved {len(cases)} complete Flash prefill hyper-connections and their intermediate arrays", flush=True)
 
 
+def deepseek_prefill_attention_fixtures(directory):
+    import copy
+    from tests import dsv4_fakes as fake
+    from tests.test_flash_next_affine import bf16
+    from tensorfold.families.deepseek_v4.weights import load_backbone
+    from tensorfold.families.deepseek_v4.compressor import norm_rope
+
+    rng = np.random.default_rng(81631)
+    original_text, original_dims = fake.TEXT, fake.D
+    groups = []
+    try:
+        for geometry, (wide, ratio) in enumerate((False, r) for r in (0, 4, 128)):
+            groups.append((geometry, wide, ratio))
+        groups += [(len(groups) + j, True, r) for j, r in enumerate((0, 4, 128))]
+        configurations, groups = groups, []
+        for geometry, wide, ratio in configurations:
+            fake.TEXT = copy.deepcopy(original_text)
+            fake.D = 4096 if wide else 128
+            fake.TEXT.update(hidden_size=fake.D, num_hidden_layers=1, compress_ratios=[ratio, 0],
+                             num_attention_heads=64 if wide else 4, head_dim=512 if wide else 128,
+                             q_lora_rank=512 if wide else 64, o_groups=8 if wide else 2,
+                             index_n_heads=32 if wide else 2, index_head_dim=128 if wide else 64,
+                             index_topk=512 if wide else 4, sliding_window=128 if wide else 8)
+            checkpoint = f"checkpoint{geometry}"
+            folder = fake.write_checkpoint(directory / checkpoint, seed=409 + geometry)
+            model = load_backbone(folder)
+            attn = model.layers[0].attn
+            cache = model.make_cache()[0]
+            cases, past = [], 0
+            lengths = (17, 64, 257, 2048, 17, 1) if wide else (17, 63, 64, 65, 511, 512, 513, 2048, 17, 1)
+            for step, count in enumerate(lengths):
+                name = f"attention{geometry}-{step}"
+                x = bf16(rng, (count, fake.D * 2), scale=.2)[:, ::2]
+                positions = mx.arange(past, past + count, dtype=mx.int32)
+                q, kv, qr, *projection = attn.front(x, positions, False)
+                arrays = dict(input=x, q=q, kv=kv, qr=qr)
+                if projection:
+                    arrays["projection"] = projection[0]
+                if ratio == 4 and (past + count) // ratio > attn.indexer.topk:
+                    arrays["iq"], arrays["iw"] = attn.indexer.queries(qr, x, positions, False)
+                original_back = attn.back
+                def record_back(out, pos, rows_exact, rotated):
+                    arrays["attended"] = out
+                    back = out if rotated else norm_rope(out, pos, attn.inv_freq, norm=False, inverse=True)
+                    arrays["grouped"] = back.reshape(count, attn.groups, -1)
+                    return original_back(out, pos, rows_exact, rotated)
+                attn.back = record_back
+                try:
+                    arrays["output"] = attn(x, [cache], (count,), False, positions)
+                finally:
+                    attn.back = original_back
+                end = past + count
+                arrays["cache-keys"] = cache.window_keys(end - 1)
+                if ratio:
+                    kept = min(end, ratio * (2 if ratio == 4 else 1))
+                    arrays["cache-proj"] = cache.proj_rows(end - kept, end)
+                    if end // ratio:
+                        arrays["cache-pool"] = cache.pool[:end // ratio]
+                        if ratio == 4:
+                            arrays["cache-ipool"] = cache.ipool[:end // ratio]
+                mx.eval(*arrays.values())
+                mx.save_safetensors(str(directory / f"{name}.safetensors"), arrays)
+                cases.append(dict(name=name, past=past))
+                past = end
+            groups.append(dict(checkpoint=checkpoint, cases=cases))
+            print(f"Saved DeepSeek attention production={wide}, ratio={ratio}: {len(cases)} chunks", flush=True)
+    finally:
+        fake.TEXT, fake.D = original_text, original_dims
+    (directory / "attention.json").write_text(json.dumps(groups, indent=2) + "\n")
+
+
 def deepseek_prefill_compress_fixtures(directory):
     import copy
     from tests import dsv4_fakes as fake
@@ -1596,11 +1667,15 @@ def main():
     parser.add_argument("--deepseek-prefill-hc", action="store_true")
     parser.add_argument("--deepseek-prefill-moe", action="store_true")
     parser.add_argument("--deepseek-prefill-compress", action="store_true")
+    parser.add_argument("--deepseek-prefill-attention", action="store_true")
     parser.add_argument("--flash-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-attention", action="store_true")
     parser.add_argument("--flash-prefill-ple", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.deepseek_prefill_attention:
+        deepseek_prefill_attention_fixtures(args.directory)
+        return
     if args.deepseek_prefill_compress:
         deepseek_prefill_compress_fixtures(args.directory)
         return

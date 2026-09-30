@@ -423,6 +423,7 @@ pub const Model = struct {
         return (try m.kernels.run(s, src.ds4_pool_rows, &.{ proj, ape, norm, try m.weight(i, "inv"), try s.scalar(g.rms_norm_eps), try s.ints(&.{ first, base, 0, if (index) 4 * g.head_dim else 0 }) }, &.{ mx.ti("D", d), mx.ti("R", ratio), mx.ti("OV", @intFromBool(ratio == 4)), mx.ti("WT", mx.dim(proj, 1)), mx.ti("W", w), mx.ti("PE", g.qk_rope_head_dim) }, .{ 32, count, 1 }, .{ 32, 1, 1 }, &.{.{ .shape = &.{ count, d } }}))[0];
     }
     fn attention(m: *Model, s: *mx.Scope, i: usize, x: A, cache: *Cache, position: i32) !A {
+        if (mx.dim(x, 0) > 16) return (try @import("deepseek_prefill_attention.zig").forward(m, s, i, x, cache, position)).output;
         const g = m.config.value;
         const positions = try s.ints(&.{position});
         const inv = try m.weight(i, "inv");
