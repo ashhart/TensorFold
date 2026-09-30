@@ -124,9 +124,9 @@ class DFlashDrafter:
         from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
         weight, sbt, ids, nt, group = sub
-        # the head's own group size: a group-32 head (oQ4e keeps lm_head at its 4-bit/32 base) read at the
-        # default 64 gave wrong draft logits, so drafts were almost never accepted while replies stayed exact
-        logits = lane_qmm.lane_matmul(hidden, weight, sbt, tiled=True, nt=nt, group=group) * self.model.config.output_multiplier
+        # the head's own group size (oQ4e keeps lm_head at 4-bit/32; read at 64, almost no draft was accepted)
+        logits = lane_qmm.lane_matmul(hidden, weight, sbt, tiled=True, nt=nt, group=group)
+        logits = logits * self.model.config.output_multiplier
         cap = self.model.config.final_logit_softcapping
         if cap is not None and cap > 0:
             logits = mx.tanh(logits / cap) * cap
