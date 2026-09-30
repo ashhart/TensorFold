@@ -27,10 +27,16 @@ class Stream:
     committed: list[int] = field(default_factory=list)     # tokens committed after the prompt, on every rank
     drafts: list[int] = field(default_factory=list)       # an MTP family's drafts for the next round
     stops: list[int] = field(default_factory=list)        # prompt positions whose states the prefill keeps
+    constraint: Any = None                                # the reply's grammar (tensorfold.engine.grammar), or None
+    background: bool = False                              # priority "background": after, and yielding to, the rest
+    carry: dict | None = None                             # the stats of the stream this one continues
+    owed: list[int] = field(default_factory=list)         # a replay's tokens sent before it gave way: checked, not resent
     error: Exception | None = None                        # why a stream ended without finishing
     done: bool = False
     rounds: int = 0
     min_rows: int = 0
+    drafted: int = 0                                      # drafted rows its rounds verified, and the ones kept
+    accepted: int = 0
     cached: int = 0
     prefill_s: float = 0.0
     started: float = 0.0
@@ -41,18 +47,45 @@ class Stream:
 
         self.out.extend(new)
         self.context.extend(new)
-        stop = bool(self.emit(new)) if self.emit is not None else False
-        if stop or len(self.out) >= self.count or self.out[-1] in eos:
+        self.accepted += max(0, len(new) - 1)             # a round's kept drafts come before its own token
+        fresh = list(new)
+        if self.owed:                                     # a replay writes the tokens it sent before again first
+            k = min(len(self.owed), len(fresh))
+            if fresh[:k] != self.owed[:k]:
+                self.error = RuntimeError("a background request's replay differs from the reply it sent")
+            self.owed, fresh = self.owed[k:], fresh[k:]
+        stop = bool(self.emit(fresh)) if self.emit is not None and fresh else False
+        if self.error is not None or stop or len(self.out) >= self.count or self.out[-1] in eos:
             self.done = True
             self.finished = time.perf_counter()
 
     def counted(self, rows: int) -> None:
         self.rounds += 1
+        self.drafted += rows - 1
         self.min_rows = rows if self.min_rows == 0 else min(self.min_rows, rows)
 
     def stats(self) -> dict:
-        return {"prefill_s": round(self.prefill_s, 4), "decode_s": round(max(self.finished - self.started, 0.0), 4),
-                "rounds": self.rounds, "drafts": self.draft, "cached": self.cached, "min_rows": self.min_rows}
+        own = {"prefill_s": round(self.prefill_s, 4), "decode_s": round(max(self.finished - self.started, 0.0), 4),
+               "rounds": self.rounds, "drafts": self.draft, "cached": self.cached, "min_rows": self.min_rows,
+               "drafted": self.drafted, "accepted": self.accepted}
+        if self.carry is None:
+            return own
+        both = {k: round(self.carry[k] + own[k], 4) for k in ("prefill_s", "decode_s")}
+        both.update({k: self.carry[k] + own[k] for k in ("rounds", "drafted", "accepted")})
+        rows = [r for r in (self.carry["min_rows"], own["min_rows"]) if r]
+        return {**own, **both, "cached": self.carry["cached"], "min_rows": min(rows, default=0)}
+
+    def continued(self) -> "Stream":
+        """This stream again from its prompt, for later (as the Mac replays): what it sent is owed, not sent again."""
+
+        return Stream(self.prompt, self.count, self.sampling, draft=self.draft, stop_eos=self.stop_eos, emit=self.emit,
+                      background=self.background, carry=self.stats(), owed=[*self.out, *self.owed])
+
+
+def next_fill(filling: list[Stream]) -> Stream:
+    """The queued prompt to prefill next: the oldest foreground one, else the oldest."""
+
+    return next((s for s in filling if not s.background), filling[0])
 
 
 def accept(tokens: Sequence[int], parents: Sequence[int], sampled: Sequence[int], room: int,

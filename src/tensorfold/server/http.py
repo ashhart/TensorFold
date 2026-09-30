@@ -10,10 +10,12 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from tensorfold.engine import grammar
+from tensorfold.server import responses
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
 from tensorfold.server.errors import CapacityError, RequestError
-from tensorfold.server.request_options import parse_numbers
+from tensorfold.server.request_options import parse_numbers, thinking_fields
 from tensorfold.server.messages import normalize_messages, validate_modalities
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
@@ -89,6 +91,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:
             route = self._route()
+            if responses.route(route):
+                return responses.get(self, app, responses.route(route))
             if route in {"", "/health"}:
                 self._send_json(
                     {
@@ -148,8 +152,13 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 return list(prompt)
             return self._legacy_prompt_to_text(prompt)
 
+        def do_DELETE(self) -> None:
+            responses.delete(self, app, responses.route(self._route()))
+
         def do_POST(self) -> None:
             route = self._route()
+            if responses.route(route) == "":         # a Response: this handler's chat completion, translated
+                return responses.post(self, app)
             is_chat_completion = route.endswith("/chat/completions")
             is_text_completion = route.endswith("/completions") and not is_chat_completion
             if not is_chat_completion and not is_text_completion:
@@ -181,25 +190,16 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 max_tokens = body.get("max_tokens") or body.get("max_completion_tokens")
                 temperature = float(body.get("temperature") or 0.0)
                 # Preserve raw sampling and scheduling options; an absent temperature differs from temperature zero.
-                sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "seed", "priority", "draft",
-                                                        "thinking_budget", "ignore_eos", "stop")
+                sampling_fields = {k: body[k] for k in ("temperature", "top_p", "top_k", "min_p", "seed", "priority",
+                                                        "draft", "thinking_budget", "ignore_eos", "stop",
+                                                        *grammar.FIELDS)
                                    if k in body}
+                problem = grammar.refusal(body, app)        # compiled before a stream's headers: a bad grammar is a 400
+                if problem:
+                    raise RequestError(problem)
                 if tools and tool_choice_requires_call(body.get("tool_choice")):
                     sampling_fields["tool_call_required"] = True     # the engine opens the answer with a call
-                template_kwargs = body.get("chat_template_kwargs") or {}
-                effort = body.get("reasoning_effort")
-                if effort is None and isinstance(template_kwargs, dict):
-                    effort = template_kwargs.get("reasoning_effort")    # where vLLM's clients put it
-                if effort is not None:
-                    # null means the server's default; OpenAI's "minimal" is the template's "low"
-                    if effort not in ("none", "minimal", "low", "medium", "high", "xhigh"):
-                        raise ValueError("reasoning_effort must be none, minimal, low, medium, high or xhigh")
-                    sampling_fields["reasoning_effort"] = {"high": "xhigh", "minimal": "low"}.get(effort, effort)
-                    sampling_fields["enable_thinking"] = effort != "none"
-                if isinstance(template_kwargs, dict) and "enable_thinking" in template_kwargs:
-                    sampling_fields["enable_thinking"] = bool(template_kwargs["enable_thinking"])
-                    if sampling_fields["enable_thinking"] and sampling_fields.get("reasoning_effort") == "none":
-                        sampling_fields.pop("reasoning_effort")
+                sampling_fields.update(thinking_fields(body, getattr(app, "effort_levels", frozenset())))
                 sampling_kw = ({"sampling": sampling_fields}
                                if getattr(app, "accepts_sampling", False) else {})
                 if getattr(app, "accepts_cancellation", False):
@@ -227,6 +227,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     "completion_tokens": reply["completion_tokens"],
                     "total_tokens": reply["prompt_tokens"] + reply["completion_tokens"],
                     "prompt_tokens_details": {"cached_tokens": reply["cached_tokens"]},
+                    "completion_tokens_details": {"reasoning_tokens": reply.get("reasoning_tokens", 0)},
                 }
 
             def response_extras(reply: dict[str, Any]) -> dict[str, Any]:

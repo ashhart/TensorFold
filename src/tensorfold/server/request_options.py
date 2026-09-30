@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from tensorfold.server.errors import RequestError
@@ -15,7 +16,7 @@ _INTEGER_FIELDS = {"seed", "top_k", "thinking_budget", "max_tokens", "max_comple
 def parse_numbers(fields: dict[str, Any]) -> dict[str, Any]:
     stop_options(fields)
     parsed = dict(fields)
-    for name in (*sorted(_INTEGER_FIELDS), "temperature", "top_p"):
+    for name in (*sorted(_INTEGER_FIELDS), "temperature", "top_p", "min_p"):
         value = fields.get(name)
         if value is None:
             continue
@@ -31,12 +32,57 @@ def parse_numbers(fields: dict[str, Any]) -> dict[str, Any]:
         except (ValueError, TypeError, OverflowError) as exc:
             kind = "an integer" if integer else "a finite number"
             raise RequestError(f"{name} must be {kind} or null") from exc
+        if name == "min_p" and not 0.0 <= number <= 1.0:
+            raise RequestError("min_p must be between 0 and 1, or null")
         parsed[name] = max(0, number) if name == "top_k" else number
     return parsed
 
 
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+
+def effort_levels(template: str | None) -> frozenset[str]:
+    """The efforts a chat template names: Qwen3.8's low, medium and xhigh; GLM-5.3's low and high."""
+
+    return frozenset(re.findall(r"""['"](minimal|low|medium|high|xhigh)['"]""", template or ""))
+
+
+def thinking_fields(body: dict[str, Any], levels: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """A request's ``reasoning_effort`` and ``enable_thinking`` where it sets them; unset is the server's default."""
+
+    kwargs = body.get("chat_template_kwargs") or {}
+    fields: dict[str, Any] = {}
+    effort = body.get("reasoning_effort")
+    if effort is None and isinstance(kwargs, dict):
+        effort = kwargs.get("reasoning_effort")           # where vLLM's clients put it
+    if effort is not None:
+        if not isinstance(effort, str) or effort not in EFFORTS:
+            raise RequestError("reasoning_effort must be none, minimal, low, medium, high or xhigh")
+        # OpenAI's "high" and "minimal" are "xhigh" and "low" unless the template names them (GLM-5.3 names "high")
+        named = effort in levels or effort not in ("high", "minimal")
+        fields["reasoning_effort"] = effort if named else {"high": "xhigh", "minimal": "low"}[effort]
+        fields["enable_thinking"] = effort != "none"
+    if isinstance(kwargs, dict) and "enable_thinking" in kwargs:          # an explicit switch wins
+        fields["enable_thinking"] = bool(kwargs["enable_thinking"])
+        if fields["enable_thinking"] and fields.get("reasoning_effort") == "none":
+            fields.pop("reasoning_effort")
+    return fields
+
+
 class RequestOptions:
     """Resolve sampling and thinking controls before a request reaches the engine."""
+
+    @property
+    def effort_levels(self) -> frozenset[str]:
+        """The reasoning efforts this model's chat template names (``effort_levels``), read once."""
+
+        found = self.__dict__.get("_effort_levels")
+        if found is None:
+            template = getattr(self.tokenizer, "chat_template", None)
+            if isinstance(template, dict):                   # named templates: any of them may name a level
+                template = " ".join(str(t) for t in template.values())
+            found = self.__dict__["_effort_levels"] = effort_levels(template if isinstance(template, str) else None)
+        return found
 
     def _resolve_sampling(self, fields: dict[str, Any] | None, temperature: float,
                           prompt_ids: list[int]) -> Any:
@@ -50,7 +96,8 @@ class RequestOptions:
         if temp <= 0.0:
             return None
         return Sampling(seed=options.get("seed", seed_for(prompt_ids)), temperature=temp,
-                        top_k=options.get("top_k", 0), top_p=options.get("top_p", 1.0))
+                        top_k=options.get("top_k", 0), top_p=options.get("top_p", 1.0),
+                        min_p=options.get("min_p", 0.0))
 
     def _call_gate(self, fields: dict[str, Any], prompt_ids: list[int], tools: Any) -> Any:
         """The gate that opens a required tool call (``tool_choice`` "required" or a named function), else None."""
@@ -104,8 +151,9 @@ class RequestOptions:
     def _token_id(self, text: str) -> int:
         """The id of a token the tokenizer has whole, else -1."""
 
+        convert = getattr(self.tokenizer, "convert_tokens_to_ids", None)     # a tokenizer without it has no whole tokens
         with self.tokenizer_lock:
-            found = self.tokenizer.convert_tokens_to_ids(text)
+            found = convert(text) if convert is not None else None
             unk = getattr(self.tokenizer, "unk_token_id", None)
         return int(found) if isinstance(found, int) and found >= 0 and found != unk else -1
 
@@ -121,8 +169,9 @@ class RequestOptions:
         """The forced close and its end token, or -1 when the tokenizer has no think-end token."""
 
         if self._think_tokens is None:
+            convert = getattr(self.tokenizer, "convert_tokens_to_ids", None)
             with self.tokenizer_lock:
-                end = self.tokenizer.convert_tokens_to_ids("</think>")
+                end = convert("</think>") if convert is not None else None
                 unk = getattr(self.tokenizer, "unk_token_id", None)
                 if not isinstance(end, int) or end < 0 or end == unk:
                     self._think_tokens = ((), -1)

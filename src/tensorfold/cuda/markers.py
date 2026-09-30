@@ -53,7 +53,7 @@ def resume_points(model_dir: str | Path) -> Callable[[Sequence[int]], list[int]]
 
     from tensorfold.engine.prefill_plan import message_markers
 
-    from .server import ChatTemplate
+    from .chat_template import ChatTemplate
 
     model_dir = Path(model_dir)
     if not (model_dir / "tokenizer.json").is_file():

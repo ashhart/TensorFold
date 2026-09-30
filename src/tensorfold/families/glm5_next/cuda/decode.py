@@ -9,6 +9,7 @@ from typing import Sequence
 import numpy as np
 import torch
 
+from tensorfold.cuda.sampling import comm_gather, nucleus_rows, one_rank
 from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
 from . import glue, prof, qmm
@@ -24,6 +25,9 @@ def sample_rows(w: Weights, logits: torch.Tensor, positions: Sequence[int], samp
 
     R = logits.shape[0]
     greedy = sampling is None or sampling.temperature <= 0
+    if not greedy and not sampling.top_k:           # top_k off: the shared nucleus rule over every rank's shard
+        return nucleus_rows(logits, positions, sampling, offset=w.vocab_offset if offset is None else offset,
+                            gather=one_rank if w.comm is None else comm_gather(w.comm), probs=probs)
     k = 1 if greedy else min(logits.shape[1], int(sampling.top_k) + MARGIN)
     if probs is not None and greedy:
         k = min(logits.shape[1], 20 + MARGIN)       # the draft's confidence needs its competitors too
@@ -92,6 +96,7 @@ class Engine:
         self.mbuf = Buffers(w, max_rows, capacity) if w.mtp is not None else None
         self.st = State(w, capacity, max_rows)
         self.last_hidden: torch.Tensor | None = None
+        self.constraint = self.window = None            # a request's grammar, and the next sample's rows under it
         self.draft_n = w.head.n
         self.graphs = None
         self.replays = {"main": 0, "sparse": 0, "mtp": 0, "sparse_mtp": 0, "eager": 0}   # steps by path
@@ -146,7 +151,22 @@ class Engine:
 
     def sample(self, logits: torch.Tensor, positions: Sequence[int], sampling: Sampling | None, *,
                draft: bool = False, probs: list[float] | None = None) -> list[int]:
+        if not draft and self.constraint is not None and self.window is not None:
+            self.constraint.mask(logits, self.window, self.w.vocab_offset)   # this rank's vocabulary columns
+            self.window = None
         return sample_rows(self.w, logits, positions, sampling, None, probs)
+
+    def verify_window(self, tokens: list[int]) -> list[int]:
+        """The window a reply's grammar keeps (a chain cut at its first rejected draft), masked at the next sample."""
+
+        if self.constraint is None:
+            return tokens
+        self.window = self.constraint.window(tokens, list(range(-1, len(tokens) - 1)))
+        return self.window.tokens
+
+    def follow(self, tokens: Sequence[int]) -> None:
+        if self.constraint is not None:
+            self.constraint.advance(tokens)
 
     def tap_rows(self, n: int, b: Buffers | None = None) -> torch.Tensor:
         """The last forward's first n rows of DFlash2 taps, concatenated in layer order: [n, taps * D]."""
@@ -330,7 +350,11 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
             commit(w, st, b, R, R)
     prof.active = False
     prof.report(len(prompt) - begin)
-    return e.sample(last, [len(prompt)], sampling)[0]
+    if e.constraint is not None:                         # the first token's row, under the reply's grammar
+        e.window = e.constraint.window([0], [-1])
+    first = e.sample(last, [len(prompt)], sampling)[0]
+    e.follow([first])
+    return first
 
 
 def _absorb_rows(e: Engine, hidden: torch.Tensor, next_tokens: Sequence[int]) -> None:
@@ -376,10 +400,11 @@ def serial_decode(e: Engine, pending: int, count: int, sampling: Sampling | None
     start = time.perf_counter()
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
         t0 = time.perf_counter()
-        logits = e.forward([out[-1]])
+        logits = e.forward(e.verify_window([out[-1]]))
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         tok = e.sample(logits[:1], [st.pos + 1], sampling)[0]
+        e.follow([tok])
         t2 = time.perf_counter()
         commit(w, st, b, 1, 1)
         t3 = time.perf_counter()
@@ -430,7 +455,8 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
     stages["draft"] += time.perf_counter() - t0
     while len(out) < count and not (stop_eos and out[-1] in w.cfg.eos):
         t0 = time.perf_counter()
-        tokens = [out[-1]] + drafts
+        tokens = e.verify_window([out[-1]] + drafts)
+        drafts = tokens[1:]
         R = len(tokens)
         logits = e.forward(tokens)
         torch.cuda.synchronize()
@@ -449,6 +475,7 @@ def mtp_decode(e: Engine, pending: int, count: int, sampling: Sampling | None, *
         accepted += keep - 1
         depths.append(len(drafts))
         keeps.append(keep)
+        e.follow(sampled[:keep])
         out.extend(sampled[:keep])
         if on_tokens is not None:
             on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])
@@ -485,7 +512,8 @@ def dflash_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampli
         t0 = time.perf_counter()
         drafts = drafter.propose(out[-1], depth, sampling, policy.confidence) if depth > 0 else []
         t1 = time.perf_counter()
-        tokens = [out[-1]] + drafts
+        tokens = e.verify_window([out[-1]] + drafts)
+        drafts = tokens[1:]
         R = len(tokens)
         logits = e.forward(tokens)
         torch.cuda.synchronize()
@@ -506,6 +534,7 @@ def dflash_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampli
         accepted += keep - 1
         depths.append(len(drafts))
         keeps.append(keep)
+        e.follow(sampled[:keep])
         out.extend(sampled[:keep])
         if on_tokens is not None:
             on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])

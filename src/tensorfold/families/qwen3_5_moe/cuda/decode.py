@@ -54,10 +54,43 @@ def draft(logits: torch.Tensor, position: int, sampling: Sampling | None,
     return token, float(torch.softmax(row, -1)[pick].item())
 
 
+def picks(logits: torch.Tensor, positions: Sequence[int], samplings: Sequence[Sampling | None],
+          ids: np.ndarray | None = None) -> list[tuple[int, float]]:
+    """``draft`` for every row of ``logits`` (a stream's row each; ``ids``: the draft vocabulary), read back together by candidate count."""
+
+    rows = logits.float()
+    probs = torch.softmax(rows, -1)
+    width = rows.shape[1]
+    groups: dict[int, list[int]] = {}
+    for i, smp in enumerate(samplings):
+        greedy = smp is None or smp.temperature <= 0
+        groups.setdefault(0 if greedy else min(width, int(smp.top_k) + MARGIN) if smp.top_k else width, []).append(i)
+    launched = []
+    for k, members in groups.items():
+        sub = rows if len(members) == len(samplings) else rows[members]
+        values, cols = (None, sub.argmax(-1, keepdim=True)) if k == 0 else torch.topk(sub, k)
+        mine = probs if len(members) == len(samplings) else probs[members]
+        launched.append((members, values, cols, mine.gather(1, cols)))
+    out: list[tuple[int, float]] = [(0, 0.0)] * len(samplings)
+    for members, values, cols, p in launched:
+        cols, p = cols.cpu().numpy(), p.cpu().numpy()
+        values = values.cpu().numpy() if values is not None else None
+        for j, i in enumerate(members):
+            tokens = (ids[cols[j]] if ids is not None else cols[j]).astype(np.int64)
+            if values is None:
+                out[i] = int(tokens[0]), float(p[j, 0])
+                continue
+            chosen = choose_rows(values[j][None], tokens[None], [positions[i]], samplings[i])[0]
+            at = int(np.nonzero(tokens == chosen)[0][0])
+            out[i] = int(chosen), float(p[j, at])
+    return out
+
+
 @torch.no_grad()
 def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | None, *,
             state: State | None = None, cache: Cache | None = None, held: torch.Tensor | None = None,
-            stops: Sequence[int] = (), keep: Callable | None = None) -> tuple[State, Cache | None, int, Carry | None]:
+            stops: Sequence[int] = (), keep: Callable | None = None,
+            constraint=None) -> tuple[State, Cache | None, int, Carry | None]:
     """Commit the prompt, sample its next token, absorb all prompt rows but the last into the head; ``keep(p, ...)`` gets each stop's state."""
 
     st = clone_state(state) if state is not None else State(w)
@@ -66,26 +99,41 @@ def prefill(w, head: Head | None, prompt: Sequence[int], sampling: Sampling | No
     mc = None
     if head is not None:
         mc = cache.view(len(prompt)) if cache is not None else Cache(w, len(prompt))      # the prompt's rows only
-    ids = torch.tensor(list(prompt[st.pos:]), dtype=torch.int32, device=w.norm.device)
-    base, normed = st.pos, None
-    bounds = sorted({p for p in stops if base < p < len(prompt)} | {len(prompt)}) if keep is not None else \
+    normed = None
+    bounds = sorted({p for p in stops if st.pos < p < len(prompt)} | {len(prompt)}) if keep is not None else \
         [len(prompt)]
     for end in bounds:
-        for a, b in chunks(st.pos, end):
-            normed, _ = prefill_chunk(w, ids[a - base:b - base], st, every=head is not None)
-            if head is None:
-                continue
-            rows = normed if held is None else torch.cat([held, normed])
-            start = a - (0 if held is None else 1)
-            if rows.shape[0] > 1:
-                head.forward(mc, rows[:-1], prompt[start + 1:b], start)
-                mc.pos = b - 1
-            held = rows[-1:]
+        normed, held = extend(w, head, prompt, st, mc, held, end)
         if end < len(prompt):
             keep(end, clone_state(st), mc.view() if mc is not None else None, held)
-    first = sample_rows(_mm(normed[-1:], w.head), [len(prompt)], sampling)[0]
+    logits = _mm(normed[-1:], w.head)
+    if constraint is not None:                           # a reply's grammar (tensorfold.engine.grammar)
+        logits = constraint.mask(logits)
+    first = sample_rows(logits, [len(prompt)], sampling)[0]
+    if constraint is not None:
+        constraint.advance([first])
     carry = Carry(held, [first]) if head is not None else None
     return st, mc, first, carry
+
+
+@torch.no_grad()
+def extend(w, head: Head | None, prompt: Sequence[int], st: State, mc: Cache | None, held: torch.Tensor | None,
+           end: int) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Commit prompt[st.pos:end] in chunks (bits independent of ``end``); the head absorbs every row but the last, returned held."""
+
+    ids = torch.tensor(list(prompt[st.pos:end]), dtype=torch.int32, device=w.norm.device)
+    base, normed = st.pos, None
+    for a, b in chunks(st.pos, end):
+        normed, _ = prefill_chunk(w, ids[a - base:b - base], st, every=head is not None)
+        if head is None:
+            continue
+        rows = normed if held is None else torch.cat([held, normed])
+        start = a - (0 if held is None else 1)
+        if rows.shape[0] > 1:
+            head.forward(mc, rows[:-1], prompt[start + 1:b], start)
+            mc.pos = b - 1
+        held = rows[-1:]
+    return normed, held
 
 
 COPY_ROWS = 16       # a copied continuation's verify window
@@ -95,7 +143,7 @@ COPY_ROWS = 16       # a copied continuation's verify window
 def mtp_decode(w, head: Head, st: State, mc: Cache, carry: Carry, pending: int, count: int,
                sampling: Sampling | None, *, depth: int, confidence: float, stop_eos: bool = True,
                on_tokens: Callable[[list[int]], bool | None] | None = None, runner=None,
-               prompt: Sequence[int] = ()) -> Result:
+               prompt: Sequence[int] = (), constraint=None) -> Result:
     """Each round: absorb the carry (its last row drafts first), then verify a copied continuation from the context or a chain of up to ``depth`` MTP drafts, and keep a path; ``runner``: a ``graphs.Graphs`` to decode in and replay."""
 
     if runner is not None:                               # copied into its fixed buffers; commits write in place
@@ -115,29 +163,47 @@ def mtp_decode(w, head: Head, st: State, mc: Cache, carry: Carry, pending: int, 
     context, copies = list(prompt) + [pending], CopyIndex()
     start = time.perf_counter()
     while len(out) < count and not (stop_eos and out[-1] in w.config.eos):
-        n = st.pos                                        # the pending token's position
-        normed, logits = step(carry.states, carry.tokens, mc.pos)
-        mc.pos += len(carry.tokens)
-        guesses = copies.propose(context, COPY_ROWS - 1)  # an exact repeat of the context first: a long, likely window
-        while not guesses:
-            token, prob = draft(logits, n + 1, sampling, head.ids)
-            guesses.append(token)
-            while prob >= confidence and len(guesses) < depth:
-                normed, logits = step(normed[-1:], [token], mc.pos + len(guesses) - 1)
-                token, prob = draft(logits, n + 1 + len(guesses), sampling, head.ids)
-                guesses.append(token)
-        tokens = [out[-1]] + guesses
-        parents = list(range(-1, len(tokens) - 1))
-        logits, record, states = verify(tokens)
-        sampled = sample_rows(logits, [n + 1 + i for i in range(len(tokens))], sampling)
-        path, terminal = accept(tokens, parents, sampled, count - len(out), w.config.eos if stop_eos else ())
-        commit(st, record, path, in_place=runner is not None)
-        new = [tokens[r] for r in path[1:]] + [terminal]
-        carry = Carry(states[path[0]:path[-1] + 1], new)
+        tokens, path, new, carry = mtp_round(st, mc, carry, out[-1], count - len(out), sampling, context, copies,
+                                             depth=depth, confidence=confidence, ids=head.ids, verify=verify,
+                                             step=step, eos=w.config.eos if stop_eos else (),
+                                             in_place=runner is not None, constraint=constraint)
         out.extend(new)
         context.extend(new)
-        rounds, drafted, kept = rounds + 1, drafted + len(guesses), kept + len(path) - 1
+        rounds, drafted, kept = rounds + 1, drafted + len(tokens) - 1, kept + len(path) - 1
         widths.append(len(tokens))
         if on_tokens is not None and on_tokens(new):
             break
     return Result(out, time.perf_counter() - start, rounds, drafted, kept, widths)
+
+
+def mtp_round(st: State, mc: Cache, carry: Carry, pending: int, room: int, sampling: Sampling | None,
+              context: Sequence[int], copies: CopyIndex, *, depth: int, confidence: float, ids, verify, step,
+              eos: Sequence[int] = (), in_place: bool = False,
+              constraint=None) -> tuple[list[int], list[int], list[int], Carry]:
+    """One round (carry absorbed, copy or MTP chain proposed, verified, at most ``room`` rows kept): (tokens, path, new, carry)."""
+
+    n = st.pos                                            # the pending token's position
+    normed, logits = step(carry.states, carry.tokens, mc.pos)
+    mc.pos += len(carry.tokens)
+    guesses = copies.propose(context, COPY_ROWS - 1)      # an exact repeat of the context first: a long, likely window
+    while not guesses:
+        token, prob = draft(logits, n + 1, sampling, ids)
+        guesses.append(token)
+        while prob >= confidence and len(guesses) < depth:
+            normed, logits = step(normed[-1:], [token], mc.pos + len(guesses) - 1)
+            token, prob = draft(logits, n + 1 + len(guesses), sampling, ids)
+            guesses.append(token)
+    tokens = [pending] + guesses
+    window = constraint.window(tokens, list(range(-1, len(tokens) - 1))) if constraint is not None else None
+    if window is not None:                                # the drafts no accepted path can hold are cut first
+        tokens = window.tokens
+    logits, record, states = verify(tokens)
+    if window is not None:
+        logits = constraint.mask(logits, window)
+    sampled = sample_rows(logits, [n + 1 + i for i in range(len(tokens))], sampling)
+    path, terminal = accept(tokens, list(range(-1, len(tokens) - 1)), sampled, room, eos)
+    commit(st, record, path, in_place=in_place)
+    new = [tokens[r] for r in path[1:]] + [terminal]
+    if constraint is not None:
+        constraint.advance(new)
+    return tokens, path, new, Carry(states[path[0]:path[-1] + 1], new)

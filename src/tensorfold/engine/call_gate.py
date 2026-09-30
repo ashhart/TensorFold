@@ -1,4 +1,5 @@
-"""A reply that must call a tool opens a call to an offered tool; the cut lands the same way in every kind of round."""
+"""A reply that must call a tool opens a call to an offered tool, and a thinking budget closes the think block; each cut
+lands the same way in every kind of round."""
 
 from __future__ import annotations
 
@@ -112,30 +113,69 @@ class CallGate:
             self.state = state if fix is None else (state[0], _DONE, "")     # off script: stop constraining
 
 
+class ThinkBudget:
+    """The lane engine's thinking budget: the ``budget``-th token of a reply still thinking becomes ``close``."""
+
+    def __init__(self, budget: int, close: Sequence[int], think_end: int) -> None:
+        self.budget, self.close, self.think_end = int(budget), [int(t) for t in close], int(think_end)
+        self.count, self.open = 0, True
+
+    def cut(self, tokens: Sequence[int]) -> tuple[int, list[int]] | None:
+        """(index in the next committed ``tokens`` the close replaces, the close), as ``CallGate.cut``."""
+
+        if not self.open:
+            return None
+        for i, token in enumerate(tokens):
+            if self.count + i + 1 >= self.budget:
+                return i, list(self.close)
+            if int(token) == self.think_end:
+                return None
+        return None
+
+    def observe(self, token: int) -> None:
+        self.count += 1
+        self.open = self.open and int(token) != self.think_end
+
+
 def generate_gated(generate: Callable[[list[int], int, Callable[[list[int]], bool]], Any], prompt: Sequence[int],
-                   max_tokens: int, gate: CallGate | None, on_tokens: Callable[[list[int]], bool]) -> Any:
-    """Decode with ``gate`` outside the engine: stop at each cut, then go on from the prompt, the reply and the fix."""
+                   max_tokens: int, gates: Sequence[Any], on_tokens: Callable[[list[int]], bool]) -> Any:
+    """Decode with ``gates``: at a cut go on from the prompt, reply and fix, or (a ``replay`` gate) run the prompt again."""
 
     reply: list[int] = []
-    state = {"cut": False, "stopped": False}
+    owed: list[int] = []                         # a replay's tokens already sent (a ``replay`` gate's cut)
+    state = {"cut": False, "stopped": False, "replay": False}
 
     def take(new: list[int]) -> bool:
         if state["cut"] or state["stopped"]:
             return True                          # an engine that decodes on after a stop: the rest is not the reply
-        hit = gate.cut(new) if gate is not None else None
-        if hit is not None:
-            new, state["cut"] = [*new[:hit[0]], *hit[1]], True
+        if owed:                                 # a replay writes the tokens it sent before again first: not resent
+            k = min(len(owed), len(new))
+            if list(new[:k]) != owed[:k]:
+                raise RuntimeError("a replay after a yield differs from the reply it sent")
+            del owed[:k]
+            new = list(new[k:])
+            if not new:
+                return False
+        hits = [(hit, getattr(gate, "replay", False)) for gate in gates if (hit := gate.cut(new)) is not None]
+        if hits:
+            (at, fix), replay = min(hits, key=lambda h: (h[0][0], h[1]))   # the earliest; a fix before a replay
+            new, state["cut"], state["replay"] = [*new[:at], *fix][:max_tokens - len(reply)], True, replay
         for token in new:
-            if gate is not None:
+            for gate in gates:
                 gate.observe(token)
         reply.extend(new)
         state["stopped"] = bool(on_tokens(new))
         return state["stopped"] or state["cut"]
 
+    anchor = 0                                   # reply tokens in the current run's prompt
     runs = [generate(list(prompt), max_tokens, take)]
     while state["cut"] and not state["stopped"] and len(reply) < max_tokens:
         state["cut"] = False
-        runs.append(generate([*prompt, *reply], max_tokens - len(reply), take))
+        if state["replay"]:                      # from the same prompt again: its reply comes back token for token
+            owed[:] = reply[anchor:]
+        else:                                    # on from the reply and the fix
+            anchor = len(reply)
+        runs.append(generate([*prompt, *reply[:anchor]], max_tokens - anchor, take))
     stats = dict(runs[0] or {})
     for run in runs[1:]:
         for key, value in (run or {}).items():
@@ -145,4 +185,4 @@ def generate_gated(generate: Callable[[list[int], int, Callable[[list[int]], boo
     return stats
 
 
-__all__ = ["CallGate", "call_format", "generate_gated"]
+__all__ = ["CallGate", "ThinkBudget", "call_format", "generate_gated"]

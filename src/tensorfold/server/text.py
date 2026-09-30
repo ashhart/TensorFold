@@ -47,6 +47,14 @@ def split_thinking(text: str, *, finished: bool, markers: tuple[str, str] = THIN
     return text[: len(text) - held], ""
 
 
+def reasoning_count(tokens: list[int], think_end: int | None) -> int:
+    """A thinking reply's reasoning tokens: through its close ``think_end`` (None or -1: not thinking), else all."""
+
+    if think_end is None or think_end < 0:
+        return 0
+    return tokens.index(think_end) + 1 if think_end in tokens else len(tokens)
+
+
 def think_markers(tokenizer: Any) -> tuple[str, str]:
     """Gemma 4's thought channel when the tokenizer has its ``<channel|>`` token, else Qwen's ``</think>``."""
 

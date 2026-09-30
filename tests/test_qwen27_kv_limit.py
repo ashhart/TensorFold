@@ -144,7 +144,7 @@ def test_engine_prefills_within_its_context_window(allocations, monkeypatch):  #
         st = SimpleNamespace(pos=len(prompt))
         return (st, 5) if keep_at is None else (st, 5, (SimpleNamespace(pos=keep_at), None))
 
-    done = SimpleNamespace(seconds=0.0, rounds=0, widths=[])
+    done = SimpleNamespace(seconds=0.0, rounds=0, widths=[], drafted_rows=0, accepted_drafts=0)
     monkeypatch.setattr(decode, "prefill", prefill)
     monkeypatch.setattr(decode, "draft_decode", lambda *a, **kw: done)
     monkeypatch.setattr(decode_tp, "prefill_tp", prefill_tp)

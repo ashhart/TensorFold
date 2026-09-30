@@ -1,9 +1,11 @@
-"""Key Gumbel draws by seed, absolute position, and token id so verification matches serial top-k/top-p sampling."""
+"""Key Gumbel draws by seed, absolute position, and token id so verification matches serial top-k/top-p/min-p
+sampling."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import math
 from typing import Any, Sequence
 
 import numpy as np
@@ -19,9 +21,16 @@ class Sampling:
     temperature: float = 1.0
     top_k: int = 20
     top_p: float = 0.95
+    min_p: float = 0.0          # keep tokens at least min_p times as likely as the likeliest (after temperature)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "top_k", max(0, int(self.top_k)))
+
+    @property
+    def min_log(self) -> float:
+        """ln(min_p), -inf when off: every rule adds it to the row's top scaled logit, one float64 add."""
+
+        return math.log(self.min_p) if self.min_p > 0.0 else -math.inf
 
 
 def seed_for(tokens: Sequence[int], salt: int = 0) -> int:
@@ -71,6 +80,9 @@ def choose(values: np.ndarray, ids: np.ndarray, position: int, s: Sampling) -> i
     if 0.0 < s.top_p < 1.0:
         keep = int(np.searchsorted(np.cumsum(probs), s.top_p) + 1)
         ids, scaled = ids[:keep], scaled[:keep]
+    if s.min_p > 0.0:            # a prefix of the order: the tokens within ln(min_p) of the top
+        keep = int((scaled >= scaled[0] + s.min_log).sum())
+        ids, scaled = ids[:keep], scaled[:keep]
     gumbel = -np.log(-np.log(uniform(s.seed, position, ids)))
     return int(ids[int(np.argmax(scaled + gumbel))])
 
@@ -89,6 +101,8 @@ def choose_rows(values: np.ndarray, ids: np.ndarray, positions: Sequence[int], s
         probs /= probs.sum(axis=-1, keepdims=True)
         keep = (np.cumsum(probs, axis=-1) < s.top_p).sum(axis=-1) + 1    # searchsorted(cumsum, top_p) + 1
         score[np.arange(k)[None, :] >= keep[:, None]] = -np.inf
+    if s.min_p > 0.0:
+        score[scaled < scaled[:, :1] + s.min_log] = -np.inf               # ``choose``'s min_p prefix
     return [int(t) for t in ids[np.arange(rows), np.argmax(score, axis=-1)]]
 
 
@@ -162,6 +176,8 @@ def _nucleus_rows(logits: Any, positions: Sequence[int], s: Sampling) -> list[in
         ids, values = cand_np[row][order], vals_np[row][order].astype(np.float64)
         scaled = values / temperature
         kept = int((np.cumsum(np.exp(scaled - norm_np[row])) < s.top_p).sum()) + 1
+        if s.min_p > 0.0:
+            kept = min(kept, int((scaled >= scaled[0] + s.min_log).sum()))
         if kept >= count or values[kept - 1] <= values[-1]:
             out.append(None)
             continue

@@ -117,6 +117,7 @@ class Qwen27Engine:
         from tensorfold.cuda.streams import PrefixCache
 
         self.eos = tuple(self.w.config.eos)
+        self.model_dir = Path(model_dir)
         self.points = resume_points(model_dir)              # message starts a prefill keeps states at
         self.cache = PrefixCache(KEEP_ONE)                  # (committed ids, state, drafter snapshot)
         # ``streams`` > 1: up to that many requests decoded together, their windows verified in one forward
@@ -130,6 +131,7 @@ class Qwen27Engine:
             self.multi = MultiDecoder(self.w, self.draft, allow_copy=allow_copy, rank=rank, world=tp,
                                       context=self.capacity_plan["cache_slots"], keep=KEEP, points=self.points,
                                       vision=self.vision)
+            self.multi.model_dir = self.model_dir             # rank 1 compiles a request's grammar from it
             self.multi.calibrate(streams)
             if rank == 0:
                 print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens", flush=True)
@@ -171,8 +173,10 @@ class Qwen27Engine:
         return not (stops and len(prompt) - stops[-1] < MIN_GAP)
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
-                 draft: bool = True, stop_eos: bool = True, *, vision=None):
-        """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``: past end tokens (``ignore_eos``)."""
+                 draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
+        """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``:
+        past end tokens (``ignore_eos``); ``background``: under ``--parallel``, after the other requests and yielding a
+        lane to one that waits."""
 
         from .decode import draft_decode, prefill
 
@@ -182,16 +186,20 @@ class Qwen27Engine:
             raise ValueError(f"prompt of {len(prompt)} tokens exceeds the {self.context_window}-token safe capacity; "
                              "shorten the prompt or reserve fewer reply tokens")
         max_tokens = max(1, min(int(max_tokens), self.context_window - len(prompt)))
+        grammar = {} if constraint is None else {"constraint": constraint}     # a plain request calls as before
         if self.scheduler is not None:
+            grammar.update({"background": True} if background else {})
             if vision is None:
-                return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos)
+                return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
+                                             **grammar)
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         vision=vision)
+                                         vision=vision, **grammar)
         t0 = time.perf_counter()
         hit = self._resume(prompt) if draft and vision is None else None
         encoded = self.vision.encode(vision, prompt) if vision is not None else None
         if self.tp == 2:
-            return self._generate_tp(prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos, vision=encoded)
+            return self._generate_tp(prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos, vision=encoded,
+                                     constraint=constraint)
         drafter = self.draft if draft else None
         if hit is not None and drafter is not None:
             drafter.restore(hit[2])
@@ -200,7 +208,8 @@ class Qwen27Engine:
         stops, keep = self._stops(prompt, hit, draft) if vision is None else ((), None)
         end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
         st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
-                                     limit=self.context_window, stops=stops, keep=keep, keep_at=end, vision=encoded)
+                                     limit=self.context_window, stops=stops, keep=keep, keep_at=end, vision=encoded,
+                                     **grammar)
         if end is not None:
             self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0
@@ -209,21 +218,27 @@ class Qwen27Engine:
         # the cache holds the state before the last prompt token, not ``st``: the decode may commit into it
         result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
                               max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
-                              on_tokens=on_tokens, inplace=True)
+                              on_tokens=on_tokens, inplace=True, **grammar)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
-                "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0)}
+                "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0),
+                "drafted": result.drafted_rows, "accepted": result.accepted_drafts}
 
     # two ranks: rank 0 sends each request's header and prompt to rank 1, both run the same calls
-    def _generate_tp(self, prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos=True, vision=None):
+    def _generate_tp(self, prompt, max_tokens, sampling, on_tokens, hit, t0, draft, stop_eos=True, vision=None,
+                     constraint=None):
         from .decode_tp import _share, decode_tp, pack_sampling, prefill_tp
+        from tensorfold.engine.grammar import pack
         from tensorfold.vision.qwen_cuda import broadcast_encoded
 
         dev = self.w.norm.device
         cached = hit[1].pos if hit else 0
-        _share([1, max_tokens, cached, int(draft), *pack_sampling(sampling), int(vision is not None)], 0, dev)
+        # the request's grammar rides after the header's fields (rank 1 compiles the same): a plain header is unchanged
+        _share([1, max_tokens, cached, int(draft), *pack_sampling(sampling), int(vision is not None),
+                *pack(constraint)], 0, dev)
         _share(prompt, 0, dev)
         if vision is not None:
             vision = broadcast_encoded(vision, 0, dev, hidden=self.w.config.hidden, prompt_length=len(prompt))
+        grammar = {} if constraint is None else {"constraint": constraint}
         drafter = self.draft if draft else None
         if hit is not None and drafter is not None:
             drafter.restore(hit[2])
@@ -233,7 +248,7 @@ class Qwen27Engine:
         end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
         st, pending, *kept = prefill_tp(self.w, prompt, sampling, 0, drafter, state=hit[1] if hit else None,
                                         limit=self.context_window, stops=stops, keep=keep, keep_at=end,
-                                        vision=vision)
+                                        vision=vision, **grammar)
         if end is not None:
             self._remember(list(prompt[:end]), *kept[0])
         prefill_s = time.perf_counter() - t0
@@ -241,7 +256,7 @@ class Qwen27Engine:
         # rank 0 alone decides where a reply ends; rank 1 follows its windows (no header field needed)
         result = decode_tp(self.w, st, prompt, pending, 1 if stop_now else max_tokens, sampling, 0, drafter,
                            max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
-                           on_tokens=on_tokens, inplace=True)
+                           on_tokens=on_tokens, inplace=True, **grammar)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds, "cached": cached,
                 "drafts": draft, "min_rows": min(result.widths, default=0)}
 
@@ -252,17 +267,23 @@ class Qwen27Engine:
             self.multi.follow()
             return
 
-        from .decode_tp import _share, decode_tp, prefill_tp, unpack_sampling
+        from .decode_tp import SAMPLING_WORDS as W, _share, decode_tp, prefill_tp, unpack_sampling
         from tensorfold.vision.qwen_cuda import broadcast_encoded
 
         dev = self.w.norm.device
         while True:
             header = _share(None, 1, dev)
             _, max_tokens, cached, draft = header[:4]
-            sampling = unpack_sampling(header[4:18])
+            sampling = unpack_sampling(header[4:4 + W])
             prompt = _share(None, 1, dev)
             vision = (broadcast_encoded(None, 1, dev, hidden=self.w.config.hidden, prompt_length=len(prompt))
-                      if len(header) > 18 and header[18] else None)
+                      if len(header) > 4 + W and header[4 + W] else None)
+            packed = header[5 + W:]
+            grammar = {}
+            if packed:                                  # compiled here as on rank 0
+                from tensorfold.engine import grammar as g
+
+                grammar = {"constraint": g.compiler(self, self.model_dir, self.eos).follow(packed)}
             drafter = self.draft if draft else None
             hit = self.cache.named(prompt, cached) if cached else None
             if cached and hit is None:
@@ -277,8 +298,8 @@ class Qwen27Engine:
             end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
             st, pending, *kept = prefill_tp(self.w, prompt, sampling, 1, drafter, state=hit[1] if hit else None,
                                             limit=self.context_window, stops=stops, keep=keep, keep_at=end,
-                                            vision=vision)
+                                            vision=vision, **grammar)
             if end is not None:
                 self._remember(list(prompt[:end]), *kept[0])
             result = decode_tp(self.w, st, prompt, pending, max_tokens, sampling, 1, drafter, max_rows=self.max_rows,
-                               inplace=True)
+                               inplace=True, **grammar)

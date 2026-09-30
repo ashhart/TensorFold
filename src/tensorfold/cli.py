@@ -49,10 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
                             help="0 decodes greedily (default: the model's generation_config.json, else 0)")
     generation.add_argument("--top-p", type=float, default=None, help="(default: the model's generation config)")
     generation.add_argument("--top-k", type=int, default=None, help="(default: the model's generation config)")
+    generation.add_argument("--min-p", type=float, default=None,
+                            help="keep tokens at least this share of the likeliest one's probability (default: the "
+                                 "model's generation config, else 0: off)")
     generation.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=True,
                             help="open a think block when the chat template supports it")
-    generation.add_argument("--reasoning-effort", choices=("low", "medium", "xhigh"), default="medium",
-                            help="for chat templates that take one (Qwen3.8); medium adds no system-prompt text")
+    generation.add_argument("--reasoning-effort", choices=("low", "medium", "xhigh"), default=None,
+                            help="for chat templates that take one (Qwen3.8); default: the template's own (Qwen3.8's "
+                                 "is xhigh), as vLLM and mlx-lm render it; medium adds no system-prompt text")
     generation.add_argument("--thinking-budget", type=int, default=0,
                             help="most thinking tokens before the server closes the think block (0: no limit)")
 
@@ -273,7 +277,7 @@ def cmd_info(args: argparse.Namespace) -> int:
 def _generation_config(model_dir: Path) -> dict[str, Any]:
     path = Path(model_dir) / "generation_config.json"
     config = json.loads(path.read_text()) if path.exists() else {}
-    sampling = {k: config[k] for k in ("temperature", "top_k", "top_p") if k in config}
+    sampling = {k: config[k] for k in ("temperature", "top_k", "top_p", "min_p") if k in config}
     if config.get("do_sample") is False:
         sampling["temperature"] = 0.0
     elif config.get("do_sample") is True and "temperature" not in sampling:
@@ -371,12 +375,14 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     from tensorfold.cuda.server import App, serve
 
     sampling = _generation_config(model_dir)
-    for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k)):
+    for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k),
+                       ("min_p", args.min_p)):
         if value is not None:
             sampling[key] = value
     app_class = getattr(family.package, "CUDA_APP", None) or App
     app = app_class(engine, model_dir, served, default_thinking=bool(args.thinking), sampling=sampling,
-                    max_tokens=int(args.max_tokens), context_window=context if context is not None else args.context)
+                    max_tokens=int(args.max_tokens), context_window=context if context is not None else args.context,
+                    reasoning_effort=args.reasoning_effort, thinking_budget=int(args.thinking_budget))
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
     effective_context = app.effective_context_window
@@ -525,7 +531,8 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
 
     engine_factory = functools.partial(LaneEngine, prefill_plan=plan)      # every family decodes through lanes
     sampling = _generation_config(model_dir)
-    for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k)):
+    for key, value in (("temperature", args.temperature), ("top_p", args.top_p), ("top_k", args.top_k),
+                       ("min_p", args.min_p)):
         if value is not None:
             sampling[key] = value
     snapshot_dir = None if str(args.snapshot_dir).lower() == "none" else Path(args.snapshot_dir).expanduser()
@@ -563,7 +570,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         memory_budget_bytes=memory_limit,
         fit_context=args.context is None,
         use_proposer=not args.no_drafts,
-        snapshot_dir=snapshot_dir, model_id=model_id,
+        snapshot_dir=snapshot_dir, model_id=model_id, model_dir=model_dir,
         decode_share=0.25 if args.decode_share is None else float(args.decode_share),
     )
     if app.context_fitted:

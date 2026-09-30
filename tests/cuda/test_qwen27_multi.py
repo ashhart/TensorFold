@@ -124,7 +124,7 @@ def _serial(w, prompt, sampling, count):
 
 
 PROMPTS = [[5, 6, 7], [9, 10, 11, 12, 13], [3, 4], [7, 7, 8], [1, 2, 3, 4, 5, 6]]
-SAMPLINGS = [None, Sampling(1234, 1.0, 20, 0.95), Sampling(99, 0.8, 0, 1.0), Sampling(5, 1.0, 20, 0.95), None]
+SAMPLINGS = [None, Sampling(1234, 1.0, 20, 0.95), Sampling(99, 0.8, 0, 1.0), Sampling(5, 1.0, 20, 0.95, 0.1), None]
 
 
 @pytest.mark.parametrize("serial_too,curve", [(False, False), (True, False), (False, True)])

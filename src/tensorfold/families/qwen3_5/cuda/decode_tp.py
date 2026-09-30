@@ -13,7 +13,7 @@ from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
 from .decode import CopyIndex, DecodeResult, clone_state
 from .forward import State, _paths, commit, tree_forward
-from tensorfold.cuda.sampling import sample_rows
+from tensorfold.cuda.sampling import dist_gather, nucleus_rows, sample_rows
 from .weights import Weights
 
 
@@ -48,20 +48,25 @@ def _value(words: Sequence[int]) -> int:
     return sum(int(w) << (16 * i) for i, w in enumerate(words))
 
 
+SAMPLING_WORDS = 18          # pack_sampling's length: a header's fields after it start this far on
+
+
 def pack_sampling(sampling: Sampling | None) -> list[int]:
-    """14 ints for a share: the seed and the float settings cross as their exact bits (16-bit words)."""
+    """18 ints for a share: the seed and the float settings cross as their exact bits (16-bit words)."""
 
     if sampling is None:
-        return [0] * 14
-    bits = [struct.unpack("<Q", struct.pack("<d", float(x)))[0] for x in (sampling.temperature, sampling.top_p)]
-    return [1, int(sampling.top_k), *_words(int(sampling.seed)), *_words(bits[0]), *_words(bits[1])]
+        return [0] * SAMPLING_WORDS
+    bits = [struct.unpack("<Q", struct.pack("<d", float(x)))[0]
+            for x in (sampling.temperature, sampling.top_p, sampling.min_p)]
+    return [1, int(sampling.top_k), *_words(int(sampling.seed)), *(w for b in bits for w in _words(b))]
 
 
 def unpack_sampling(words: Sequence[int]) -> Sampling | None:
     if not words[0]:
         return None
-    temperature, top_p = (struct.unpack("<d", struct.pack("<Q", _value(words[i:i + 4])))[0] for i in (6, 10))
-    return Sampling(_value(words[2:6]), temperature, int(words[1]), top_p)
+    temperature, top_p, min_p = (struct.unpack("<d", struct.pack("<Q", _value(words[i:i + 4])))[0]
+                                 for i in (6, 10, 14))
+    return Sampling(_value(words[2:6]), temperature, int(words[1]), top_p, min_p)
 
 
 def split_candidates(logits: torch.Tensor, sampling: Sampling | None, offset: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -88,6 +93,9 @@ def _sample_split(logits: torch.Tensor, positions: Sequence[int], sampling: Samp
                   rank: int) -> list[int] | None:
     """Both ranks call this with their half of the logits; rank 0 returns the tokens, rank 1 None."""
 
+    if sampling is not None and sampling.temperature > 0 and not sampling.top_k:     # the shared nucleus rule
+        tokens = nucleus_rows(logits, positions, sampling, offset=rank * logits.shape[1], gather=dist_gather)
+        return tokens if rank == 0 else None
     values, ids = split_candidates(logits, sampling, rank * logits.shape[1])
     all_values = torch.empty((2, *values.shape), dtype=values.dtype, device=values.device)
     all_ids = torch.empty((2, *ids.shape), dtype=ids.dtype, device=ids.device)
@@ -105,26 +113,37 @@ def _tokens(ids: Sequence[int], device: torch.device) -> torch.Tensor:
 
 
 def first_token(w: Weights, normed: torch.Tensor, n: int, sampling: Sampling | None, rank: int = 0,
-                world: int = 1) -> int:
+                world: int = 1, constraint=None) -> int:
     """The token after an ``n``-token prompt from its last row's normed state; two ranks share rank 0's draw."""
 
     from .forward import _mm
 
     if world == 1:
-        return sample_rows(_mm(normed, w.head), [n], sampling)[0]
+        logits = _mm(normed, w.head)
+        if constraint is not None:              # a reply's grammar (tensorfold.engine.grammar): masked, then followed
+            constraint.mask(logits)
+        first = sample_rows(logits, [n], sampling)[0]
+        if constraint is not None:
+            constraint.advance([first])
+        return first
     split = 2 * w.head.n == w.config.vocab          # split_weights(..., split_head=True)
     last = _mm(normed, w.head) if split or rank == 0 else None
+    if constraint is not None and last is not None:  # each rank masks the vocabulary columns it holds
+        constraint.mask(last, None, rank * w.head.n if split else 0)
     if split:
         first = _sample_split(last, [n], sampling, rank)
     else:
         first = [sample_rows(last, [n], sampling)[0]] if rank == 0 else None
-    return _share(first, rank, w.norm.device)[0]
+    first = _share(first, rank, w.norm.device)[0]
+    if constraint is not None:
+        constraint.advance([first])
+    return first
 
 
 @torch.no_grad()
 def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, rank: int,
                draft=None, *, state: State | None = None, limit: int = 0, stops: Sequence[int] = (),
-               keep: Callable | None = None, keep_at: int | None = None, vision=None):
+               keep: Callable | None = None, keep_at: int | None = None, vision=None, constraint=None):
     """Both ranks prefill, from a kept ``state`` with a fresh prefill's bits; rank 0 shares the first token (``keep_at``: a third item, as ``decode.prefill``'s; the split chains are each rank's own)."""
 
     from .decode import prefill_stops
@@ -135,7 +154,7 @@ def prefill_tp(w: Weights, prompt: Sequence[int], sampling: Sampling | None, ran
     taps = draft is not None and (rank == 0 or getattr(draft, "world", 1) == 2)
     out = prefill_stops(w, prompt, st, draft if taps else None, stops=stops, keep=keep, tp=True, keep_at=keep_at,
                         vision=vision)
-    first = first_token(w, out if keep_at is None else out[0], len(prompt), sampling, rank, 2)
+    first = first_token(w, out if keep_at is None else out[0], len(prompt), sampling, rank, 2, constraint)
     return (st, first) if keep_at is None else (st, first, out[1])
 
 
@@ -162,7 +181,7 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
               sampling: Sampling | None, rank: int, draft=None, *, max_rows: int = 16,
               allow_copy: bool = False, stop_eos: bool = True,
               on_tokens: Callable[[list[int]], bool | None] | None = None,
-              inplace: bool = False) -> DecodeResult | None:
+              inplace: bool = False, constraint=None) -> DecodeResult | None:
     """Draft on rank zero or jointly with a two-rank drafter, then verify and commit on both ranks, whose ``prompt + tokens[:-1]`` agree despite rank one storing -1 for the uncommitted last token (``inplace``: as ``draft_decode``'s)."""
 
     device = w.norm.device
@@ -182,6 +201,8 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
     start = time.perf_counter()
     eos = tuple(w.config.eos)
     stopped = False
+    behind = False                  # rank 1 learns a round's last token as the next window's first
+    kept = None
     while True:
         stage = time.perf_counter()
         window: list[int] | None = None
@@ -201,6 +222,9 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
                         guesses, gparents = draft.propose_tree(out[-1], len(context), max_rows - 1, sampling)
                 window = [out[-1]] + list(guesses)
                 parents = [-1] + [0 if p < 0 else p + 1 for p in gparents]
+                if constraint is not None:          # the drafts no accepted path can hold are cut before the share
+                    kept = constraint.window(window, parents)
+                    window, parents = kept.tokens, kept.parents
             if tp_draft and not window:
                 _share([2, 0, 0], rank, device)                     # stop
         elif tp_draft:
@@ -211,6 +235,10 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
         if not packed:
             break
         window, parents = packed[:len(packed) // 2], packed[len(packed) // 2:]
+        if constraint is not None and rank != 0 and behind:
+            constraint.advance(window[:1])
+        masks = (kept if rank == 0 else constraint.window(window, parents)) if constraint is not None and (
+            split or rank == 0) else None
         stages["draft"] += time.perf_counter() - stage
         stage = time.perf_counter()
         taps_wanted = draft is not None and (rank == 0 or tp_draft)
@@ -222,6 +250,8 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
             logits, record = result
         path: list[int] | None = None
         terminal = -1
+        if masks is not None:                       # each rank masks the vocabulary columns it holds
+            constraint.mask(logits, masks, rank * w.head.n if split else 0)
         depths, _ = _paths(parents)
         positions = [st.pos + d + 1 for d in depths]
         sampled = _sample_split(logits, positions, sampling, rank) if split else None
@@ -235,6 +265,9 @@ def decode_tp(w: Weights, st: State, prompt: Sequence[int], pending: int, count:
             stages["sample"] += time.perf_counter() - stage
             stage = time.perf_counter()
         path = _share(path, rank, device)
+        if constraint is not None:                  # rank 1 knows the kept drafts now, the last token next round
+            constraint.advance([window[r] for r in path[1:]] + ([terminal] if rank == 0 else []))
+            behind = rank != 0
         commit(st, record, path)
         committed.extend(window[row] for row in path)
         if taps_wanted:

@@ -173,6 +173,9 @@ class LaneStream:
     stop_check: Callable[[list[int]], bool] | None = None
     # a request that must call a tool: its answer opens a call to an offered tool (call_gate.CallGate)
     call_gate: Any = None
+    # response_format's grammar (engine.grammar.Constraint): follows every committed token, masks each drawn row
+    constraint: Any = None
+    error: Any = None           # why the stream ended with finish_reason "error" (its grammar failed)
 
     @property
     def context(self) -> list[int]:
@@ -201,8 +204,11 @@ class LaneStream:
         """Begin the thinking budget's close: returns its first token; the rest wait in ``force``."""
 
         self.think_open = False
-        self.force = list(self.think_close[1:])
-        return int(self.think_close[0])
+        close = self.think_close
+        if self.constraint is not None and self.think_end in close:    # a grammar takes the reply from </think> on
+            close = close[:close.index(self.think_end) + 1]
+        self.force = list(close[1:])
+        return int(close[0])
 
     @property
     def draft_room(self) -> int:
@@ -213,6 +219,11 @@ class LaneStream:
             room = min(room, self.think_budget - len(self.emitted))
         return room
 
+    def fail(self, error: BaseException) -> None:
+        """End the stream with ``error`` (its request answers with it); the round and the other streams go on."""
+
+        self.finished, self.finish_reason, self.error = True, "error", error
+
     def commit(self, tokens: Sequence[int]) -> list[int]:
         """Append committed tokens until the stream finishes; return what landed."""
 
@@ -221,6 +232,12 @@ class LaneStream:
             if self.finished:
                 break
             value = int(token)
+            if self.constraint is not None:
+                try:
+                    self.constraint.advance([value])
+                except Exception as exc:    # noqa: BLE001  the grammar failed: this reply ends, other streams go on
+                    self.fail(exc)
+                    break
             self.emitted.append(value)
             landed.append(value)
             if value == self.think_end:

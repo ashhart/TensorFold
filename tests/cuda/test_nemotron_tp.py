@@ -16,7 +16,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def _worker(rank: int, port: int, out, split: bool, ids: bool):
+def _worker(rank: int, port: int, out, split: bool, ids: bool, shaped: bool = False):
     import sys
 
     import torch.distributed as dist
@@ -44,7 +44,21 @@ def _worker(rank: int, port: int, out, split: bool, ids: bool):
     prompt = [(37 * i + 11) % 500 + 1 for i in range(21)]
     results = {}
     even = True
-    for name, sampling in (("keyed", Sampling(1234, 1.0, 20, 0.95)), ("greedy", None)):
+    samplings = (("keyed", Sampling(1234, 1.0, 20, 0.95)), ("min_p", Sampling(1234, 1.0, 20, 0.95, 0.1)),
+                 ("nucleus", Sampling(1234, 1.0, 0, 0.9, 0.02)), ("top_k 40", Sampling(1234, 1.0, 40, 0.95)),
+                 ("greedy", None))
+    from tensorfold.families.nemotron_h.cuda import sampler as S
+
+    g = torch.Generator(device="cuda").manual_seed(9)
+    whole = torch.randn(6, 512, generator=g, device="cuda") * 3                # both ranks: the same rows
+    meta = torch.tensor([50, 0, 0, 0], dtype=torch.int32, device="cuda")
+    for name, sampling in samplings:                  # a rank's shard draws what one rank draws from the whole row
+        eng.set_sampling(sampling)
+        one, two = (torch.zeros(6, dtype=torch.int32, device="cuda") for _ in range(2))
+        S.sample(whole, meta, eng.params, one)
+        eng._sample_shards(whole[:, rank * 256:(rank + 1) * 256].contiguous(), meta, two)
+        results[name + "-draw"] = (one.tolist(), [two.tolist()])
+    for name, sampling in samplings:
         pre = prefill(eng, mtp, prompt, sampling)
         serial = serial_decode(eng, pre, 40, sampling)
         drafted = []
@@ -52,18 +66,30 @@ def _worker(rank: int, port: int, out, split: bool, ids: bool):
             drafted.append(draft_decode(eng, mtp, pre, 40, sampling, drafts=d, copy=False).tokens)
             even = even and all(t % 2 == 0 for t in mtp.drafts())
         results[name] = (serial.tokens, drafted)
+        if shaped:                            # each rank masks its own head columns by the same grammar state
+            from toy_grammar import toy
+
+            grammars, compiled = toy(512)
+            c = grammars.constraint(compiled)
+            serial = serial_decode(eng, prefill(eng, mtp, prompt, sampling, constraint=c), 40, sampling, constraint=c)
+            drafted = []
+            for d in (1, 3):
+                c = grammars.constraint(compiled)
+                drafted.append(draft_decode(eng, mtp, prefill(eng, mtp, prompt, sampling, constraint=c), 40, sampling,
+                                            drafts=d, copy=False, constraint=c).tokens)
+            results[name + "-grammar"] = (serial.tokens, drafted)
     out.put((rank, results, even))
     dist.barrier()
     dist.destroy_process_group()
 
 
-def _run_pair(split: bool = False, ids: bool = False):
+def _run_pair(split: bool = False, ids: bool = False, shaped: bool = False):
     import torch.multiprocessing as mp
 
     ctx = mp.get_context("spawn")
     out = ctx.Queue()
     port = _free_port()
-    procs = [ctx.Process(target=_worker, args=(r, port, out, split, ids)) for r in (0, 1)]
+    procs = [ctx.Process(target=_worker, args=(r, port, out, split, ids, shaped)) for r in (0, 1)]
     for p in procs:
         p.start()
     items = [out.get(timeout=600) for _ in procs]
@@ -86,3 +112,12 @@ def test_two_rank_drafted_equals_serial():
     split_ids = _run_pair(split=True, ids=True)               # same verified tokens
     for name in whole:
         assert split[name][0] == whole[name][0] and split_ids[name][0] == whole[name][0]
+
+
+def test_two_rank_grammar_drafted_equals_serial():
+    """A grammar on two ranks: each masks its half of the head, both follow the same tokens, drafted == serial."""
+
+    pytest.importorskip("xgrammar")
+    split = _run_pair(split=True, shaped=True)
+    for name in ("keyed", "greedy"):
+        assert split[name + "-grammar"][0] != split[name][0]              # the grammar changed the reply

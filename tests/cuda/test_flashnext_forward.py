@@ -168,7 +168,8 @@ def test_a_bf16_ngram_table_holds_the_same_window_contract():
                 assert torch.equal(lg[i], logits[i]), (R, i)
 
 
-@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95)])
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=1234, top_k=20, top_p=0.95),
+                                      Sampling(seed=1234, top_k=20, top_p=0.95, min_p=0.1)])
 def test_graphs_and_mtp_drafts_give_serial_tokens(sampling):
     w = _model()
     prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
@@ -431,3 +432,53 @@ def test_capture_is_declined_when_the_experts_cannot_be_captured():
     prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
     first = prefill(e, prompt, None)
     assert len(serial_decode(e, first, 8, None).tokens) == 8
+
+
+def _set_end(eng, end: int) -> None:
+    """The engine's end tokens become ``end`` alone: stopping changes, the arithmetic does not."""
+
+    import dataclasses
+
+    eng.w.cfg = dataclasses.replace(eng.w.cfg, eos=(end,))
+    eng.eos = (end,)
+    if getattr(eng, "multi", None) is not None:
+        eng.multi.eos = (end,)
+
+
+@pytest.mark.parametrize("parallel", [1, 2])
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=23, top_k=20, top_p=0.95)])
+def test_the_engine_decodes_past_end_tokens_with_ignore_eos(tmp_path, sampling, parallel):
+    """``stop_eos=False`` (ignore_eos) runs a reply to max_tokens through end tokens, drafted as serial, alone or
+    under ``--parallel`` beside a stream that stops at them (each equal to its solo run)."""
+
+    import threading
+
+    from tensorfold.families.qwen4_exp import cuda_engine
+
+    from test_flashnext_tp import _checkpoint
+
+    _checkpoint(tmp_path)
+    eng = cuda_engine(tmp_path, context=1017, **({"parallel": parallel} if parallel > 1 else {}))
+    prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
+
+    def ask(p=prompt, **kw):
+        got: list[int] = []
+        eng.generate(p, 32, sampling, lambda new: got.extend(new) or False, **kw)
+        return got
+
+    free = ask(draft=False, stop_eos=False)
+    end = next(t for i, t in enumerate(free) if i >= 3 and free.index(t) == i and i < len(free) - 1)
+    _set_end(eng, end)
+    assert len(free) == 32 and ask(stop_eos=False) == free and ask(draft=False, stop_eos=False) == free
+    assert ask() == free[:free.index(end) + 1] == ask(draft=False)
+    if parallel > 1:                             # one stream through its end token beside one that stops at it
+        other = prompt[:5] + [42]
+        alone = [ask(stop_eos=False), ask(other)]
+        together: list = [None, None]
+        threads = [threading.Thread(target=lambda: together.__setitem__(0, ask(stop_eos=False))),
+                   threading.Thread(target=lambda: together.__setitem__(1, ask(other)))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert together == alone

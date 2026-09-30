@@ -130,3 +130,37 @@ def test_explicit_thinking_overrides_none_and_preserves_default(default_effort, 
         server.shutdown()
         server.server_close()
         app.close()
+
+
+@pytest.mark.parametrize("names, effort, want", [
+    ("{# 'xhigh' 'medium' 'low' #}", "high", "xhigh"),       # Qwen3.8 names no high: OpenAI's high is its xhigh
+    ("{# 'xhigh' 'medium' 'low' #}", "minimal", "low"),
+    ("{# 'low' 'high' #}", "high", "high"),                  # GLM-5.3 names high: it renders High, not Max
+    ("{# 'low' 'high' #}", "minimal", "low"),
+    ("", "high", "xhigh"),
+])
+def test_a_template_that_names_an_effort_is_given_that_effort(names, effort, want):
+    app = make_app(enable_thinking=True)
+    app.tokenizer.chat_template = names
+    server = serve_fake(app)
+    try:
+        app.tokenizer.template_calls.clear()
+        status, body = post_json(server, "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2, "reasoning_effort": effort})
+        assert status == 200 and json.loads(body)["tensorfold"]["reasoning_effort"] == want
+        assert all(c["reasoning_effort"] == want for c in app.tokenizer.template_calls if c.get("enable_thinking"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        app.close()
+
+
+def test_no_effort_leaves_the_template_its_own_default():
+    app = make_app(enable_thinking=True)                  # no --reasoning-effort: as vLLM and mlx-lm render it
+    try:
+        app.tokenizer.template_calls.clear()
+        app.chat([{"role": "user", "content": "hi"}], max_tokens=2)
+        assert app.tokenizer.template_calls and all(
+            c.get("enable_thinking") and "reasoning_effort" not in c for c in app.tokenizer.template_calls)
+    finally:
+        app.close()

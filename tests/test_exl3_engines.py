@@ -56,7 +56,7 @@ def _group(k: int, n: int, bits: int, seed: int) -> dict[str, np.ndarray]:
 
 def test_a_group_split_across_shards_loads_from_each_part_s_own_file(tmp_path):
     from tensorfold.cuda.exl3 import format as fmt
-    from tensorfold.families.qwen3_5.cuda.exl3_load import _read_groups, _where
+    from tensorfold.families.qwen3_5.cuda.exl3_load import _files, _read_groups, _where
 
     prefix = "model.language_model.layers.0.mlp.down_proj"
     g = _group(256, 128, 3, 1)
@@ -65,7 +65,7 @@ def test_a_group_split_across_shards_loads_from_each_part_s_own_file(tmp_path):
     _config(tmp_path, quantization_config=EXL3)
     ckpt = fmt.scan(tmp_path, read_markers=False)
     assert set(ckpt.groups[prefix].files) == {"a.safetensors", "b.safetensors"}
-    layer = _read_groups(tmp_path, _where(tmp_path), ckpt.groups, "cpu")[prefix].layer
+    layer = _read_groups(_files(tmp_path, _where(tmp_path)), ckpt.groups, "cpu")[prefix].layer
     assert torch.equal(layer.suh, torch.from_numpy(g["suh"])) and torch.equal(layer.svh, torch.from_numpy(g["svh"]))
     assert layer.k == 256 and layer.n == 128 and layer.bits == 3 and layer.codebook == "mul1"
 

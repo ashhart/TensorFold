@@ -15,6 +15,7 @@ pytest.importorskip("jinja2")
 
 from tensorfold.cuda import server
 from tensorfold.cuda.scheduler import Scheduler
+from tensorfold.cuda.turns import Turns
 from tensorfold.families.glm5_next.cuda.app import GlmApp
 from tensorfold.server.cancellation import RequestCancelled
 
@@ -218,47 +219,38 @@ def test_a_connected_client_gets_the_whole_reply(tmp_path, stream):
 
 # -- a request waiting for the lock -------------------------------------------------------------
 
-class CountingLock:
-    """The server lock, counting the requests waiting for it and those that have been through it."""
+class CountingTurns(Turns):
+    """The server's turns, counting the requests that have been through them."""
 
     def __init__(self):
-        self._lock, self._count = threading.Lock(), threading.Lock()
-        self.waiting = self.entered = self.left = 0
+        super().__init__()
+        self.left = 0
 
-    def __enter__(self):
-        with self._count:
-            self.waiting += 1
-        self._lock.acquire()
-        with self._count:
-            self.waiting -= 1
-            self.entered += 1
-        return self
-
-    def __exit__(self, *exc):
-        with self._count:
+    def give(self) -> None:
+        with self.cv:
             self.left += 1
-        self._lock.release()
-        return False
+        super().give()
 
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_waiting_request_whose_client_left_never_reaches_the_engine(tmp_path, stream):
     engine = PacedEngine(hold_at=1)
     app = app_for(tmp_path, engine)
-    app.lock = CountingLock()
+    app.turns = CountingTurns()
     with serving(app) as port:
         first = send(port, {"messages": [{"role": "user", "content": "first"}], "max_tokens": 3})
         assert engine.held.wait(WAIT)
         second = send(port, {"messages": [{"role": "user", "content": "second"}], "max_tokens": 3,
                              "stream": stream})
-        until(lambda: app.lock.waiting == 1, "the second request to wait for the lock")
+        until(lambda: app.turns.waiting == 1, "the second request to wait for its turn")
         leave(second)
         engine.release.set()
         response = http.client.HTTPResponse(first)
         response.begin()
         assert response.status == 200 and json.loads(response.read())["usage"]["completion_tokens"] == 3
         first.close()
-        until(lambda: app.lock.left == 2, "the second request to leave the lock")
+        until(lambda: app.turns.left >= 1 and not app.turns.waiting and not app.turns.busy,
+              "the second request to leave")
         assert [app.tok.decode(call["prompt"]) for call in engine.calls] == ["user:first;assistant:"]
         status, _ = post(port, {"messages": [{"role": "user", "content": "third"}], "max_tokens": 3})
     assert status == 200
@@ -274,7 +266,7 @@ def test_run_makes_no_engine_call_once_the_client_has_gone(tmp_path, concurrent,
     app = app_for(tmp_path, engine, cls)
     with pytest.raises(RequestCancelled):
         app.run({"messages": MESSAGES, "max_tokens": 4}, True, lambda delta: True, cancelled=lambda: True)
-    assert engine.calls == [] and not app.lock.locked()
+    assert engine.calls == [] and not app._turns().busy
     assert app.run({"messages": MESSAGES, "max_tokens": 4}, True, lambda delta: True,
                    cancelled=lambda: False)["completion_tokens"] == 4
 

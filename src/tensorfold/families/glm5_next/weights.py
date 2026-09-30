@@ -190,11 +190,13 @@ def load(model_dir: Path, *, ssd_experts: float | None = None) -> tuple[GLM5, An
 
     from tensorfold.families.tokenizer import load_tokenizer
 
+    from tensorfold.families.glm5_next.prompts import GlmTokenizer
+
     model = load_backbone(Path(model_dir), stream=bool(ssd_experts))
     if ssd_experts:
         from tensorfold.families.glm5_next import stream
 
         stream.attach(model, Path(model_dir), float(ssd_experts))
-    tokenizer = load_tokenizer(Path(model_dir), eos_token_ids=model.args.eos_token_id or None)
+    tokenizer = GlmTokenizer(load_tokenizer(Path(model_dir), eos_token_ids=model.args.eos_token_id or None))
     return model, tokenizer
 

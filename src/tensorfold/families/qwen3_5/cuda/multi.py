@@ -6,12 +6,13 @@ import time
 
 import torch
 
+from tensorfold.engine.grammar import GrammarError, pack
 from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.sampling import sample_streams
-from tensorfold.cuda.streams import PrefixCache, Stream, accept
+from tensorfold.cuda.streams import PrefixCache, Stream, accept, next_fill
 
 from .decode import CopyIndex, clone_state
-from .decode_tp import _sample_split, _share, first_token, pack_sampling, unpack_sampling
+from .decode_tp import SAMPLING_WORDS as W, _sample_split, _share, first_token, pack_sampling, unpack_sampling
 from .draft_tree import allocate
 from .engine import entry_end
 from .forward import State, _paths, commit_streams, multi_tree_forward, path_indices, reserve
@@ -121,8 +122,9 @@ class MultiDecoder:
         hit = self.cache.longest(s.prompt) if s.draft and encoded is None else None
         s.sid, s.cached = self.next_id, len(hit[0]) if hit else 0
         self.next_id += 1
+        # the request's grammar rides after the fields (rank 1 compiles the same): a plain ADMIT is unchanged
         self._send([ADMIT, s.sid, s.count, int(s.draft), s.cached, *pack_sampling(s.sampling),
-                    int(encoded is not None)])
+                    int(encoded is not None), *pack(s.constraint)])
         self._send(list(s.prompt))
         if self.world == 2 and encoded is not None:     # rank 1 takes the image rows as rank 0 encoded them
             from tensorfold.vision.qwen_cuda import broadcast_encoded
@@ -144,12 +146,13 @@ class MultiDecoder:
         self.filling.append(s)
 
     def _fill(self) -> list[Stream]:
-        """One prefill step for the oldest queued prompt: to its next kept state, or STEP rows while others decode."""
+        """One prefill step for the oldest queued prompt (foreground first): to its next kept state, or STEP rows
+        while others decode."""
 
-        s = self.filling[0]
+        s = next_fill(self.filling)
         pos, n = s.st.pos, len(s.prompt)
         stop = next((p for p in s.stops if p > pos), n)
-        if any(not x.done for x in self.streams.values()):
+        if s.background or any(not x.done for x in self.streams.values()):   # a later foreground prompt waits one step
             stop = min(stop, pos + STEP)
         self._send([FILL, s.sid, stop])
         try:
@@ -181,9 +184,11 @@ class MultiDecoder:
             normed = out if end is None else out[0]
             if drafter is not None:
                 s.snap = drafter.snapshot()
+                drafter.skip(0)                  # no reference of its own: rounds read and replace s.snap's context
             if stop in s.stops:
                 self.cache.add(list(s.prompt[:stop]), kept(s.st), own(s.snap))
-            first = None if stop < n else first_token(self.w, normed, n, s.sampling, self.rank, self.world)
+            first = None if stop < n else first_token(self.w, normed, n, s.sampling, self.rank, self.world,
+                                                     s.constraint)
             if end is not None:
                 at, snap = out[1]
                 self.cache.add(list(s.prompt[:end]), viewed(at) if end < n else kept(at), own(snap))
@@ -204,7 +209,7 @@ class MultiDecoder:
 
     @torch.no_grad()
     def round(self) -> list[Stream]:
-        """A prefill step for the oldest queued prompt, then one round over the decoding streams; returns the finished."""
+        """A prefill step for the next queued prompt, then one round over the decoding streams; returns the finished."""
 
         self._check()
         done = self._fill() if self.filling else []
@@ -223,7 +228,16 @@ class MultiDecoder:
         self._send([x for path in paths for x in (len(path), *path)])
         self._commit(plan, wins, record, taps, starts, paths)
         for s, (tokens, _), path, end in zip(live, wins, paths, ends):
-            s.take([tokens[r] for r in path[1:]] + [end], self._ends(s))
+            new = [tokens[r] for r in path[1:]] + [end]
+            if s.constraint is not None and s.error is None:
+                try:
+                    s.constraint.advance(new)
+                except GrammarError as exc:
+                    s.error = exc
+            if s.error is not None:                   # its grammar failed: this request ends alone, with the error
+                s.done, s.finished = True, time.perf_counter()
+                continue
+            s.take(new, self._ends(s))
         return done + [s for s in live if s.done]
 
     def _ends(self, s: Stream) -> tuple[int, ...]:
@@ -303,16 +317,22 @@ class MultiDecoder:
             launched = self.draft.launch_blocks([self.streams[sid].snap for sid, _ in tree],
                                                 [pending for _, pending in tree], self.max_rows - 1)
             blocks = {sid: block for (sid, _), block in zip(tree, launched)}
+        grammars = {}
         if self.rank == 0:
             wins = self._windows(plan, copied, blocks)
+            grammars = self._constrain(plan, wins)
             self._send([x for tokens, parents in wins for x in (len(tokens), *tokens, *parents)])
         else:
             wins = _unflatten(_share(None, 1, self.device), pairs=True)
+            grammars = self._masks(plan, wins) if self.split else {}
         states = [self.streams[item[0]].st for item in plan]
         taps_wanted = self.drafts and any(self.streams[item[0]].draft for item in plan)
         logits, record, taps, starts = multi_tree_forward(
             self.w, [(t, p, st) for (t, p), st in zip(wins, states)],
             full_logits=self.split or self.rank == 0, tp=self.world == 2, capture_taps=taps_wanted)
+        for k, window in grammars.items():          # a constrained stream's rows, each masked by its path
+            self.streams[plan[k][0]].constraint.mask(logits[starts[k]:starts[k + 1]], window,
+                                                     self.rank * self.w.head.n if self.split else 0)
         positions = [[st.pos + d + 1 for d in _paths(parents)[0]] for (_, parents), st in zip(wins, states)]
         samplings = [self.streams[item[0]].sampling for item in plan]
         if self.split:                                # both ranks gather their halves' candidates
@@ -321,6 +341,35 @@ class MultiDecoder:
         else:
             sampled = sample_streams(logits, starts, positions, samplings) if self.rank == 0 else [None] * len(plan)
         return wins, record, taps, starts, sampled
+
+    def _constrain(self, plan, wins) -> dict:
+        """Rank 0: each constrained stream's window without the drafts its grammar rules out, and its rows' masks."""
+
+        grammars = {}
+        for k, (sid, *_) in enumerate(plan):
+            s = self.streams[sid]
+            if s.constraint is None or s.error is not None:
+                continue
+            try:
+                window = s.constraint.window(*wins[k])
+            except GrammarError as exc:              # this request ends after the round; the others go on
+                s.error = exc
+                continue
+            wins[k] = (window.tokens, window.parents)
+            grammars[k] = window
+        return grammars
+
+    def _masks(self, plan, wins) -> dict:
+        """Rank 1 of a split head: each constrained stream's rows masked as rank 0 masks them (it sent the windows)."""
+
+        grammars = {}
+        for k, (sid, *_) in enumerate(plan):
+            s = self.streams[sid]
+            if s.constraint is not None:
+                if getattr(s, "behind", False):         # the last round's final token is this window's first
+                    s.constraint.advance(wins[k][0][:1])
+                grammars[k] = s.constraint.window(*wins[k])
+        return grammars
 
     def _commit(self, plan, wins, record, taps, starts, paths) -> None:
         rows = [[starts[k] + r for r in path] for k, path in enumerate(paths)]
@@ -371,13 +420,19 @@ class MultiDecoder:
                 return
             if msg[0] == ADMIT:
                 sid, count, draft, cached = msg[1:5]
-                s = Stream(_share(None, 1, self.device), count, unpack_sampling(msg[5:19]), draft=bool(draft), sid=sid)
+                s = Stream(_share(None, 1, self.device), count, unpack_sampling(msg[5:5 + W]), draft=bool(draft),
+                           sid=sid)
                 vision = None
-                if len(msg) > 19 and msg[19]:
+                if len(msg) > 5 + W and msg[5 + W]:
                     from tensorfold.vision.qwen_cuda import broadcast_encoded
 
                     vision = broadcast_encoded(None, 1, self.device, hidden=self.w.config.hidden,
                                                prompt_length=len(s.prompt))
+                packed = msg[6 + W:]
+                if packed:                              # compiled here as on rank 0
+                    from tensorfold.engine import grammar
+
+                    s.constraint = grammar.compiler(self, self.model_dir, self.eos).follow(packed)
                 hit = self.cache.named(s.prompt, cached) if cached else None
                 if cached and hit is None:
                     raise RuntimeError(f"rank 1 has no cached state for the {cached} tokens rank 0 resumes from")
@@ -391,6 +446,11 @@ class MultiDecoder:
                 wins, record, taps, starts, _ = self._verify(plan)
                 paths = _unflatten(_share(None, 1, self.device), pairs=False)
                 self._commit(plan, wins, record, taps, starts, paths)
+                for (sid, *_), (tokens, _), path in zip(plan, wins, paths):
+                    s = self.streams[sid]
+                    if s.constraint is not None and self.split:     # the kept drafts now, the last token next round
+                        s.constraint.advance([tokens[r] for r in path[1:]])
+                        s.behind = True
             elif msg[0] == DONE:
                 for sid in msg[2:2 + msg[1]]:
                     self._finish(sid)

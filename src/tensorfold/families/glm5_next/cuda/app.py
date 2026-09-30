@@ -5,21 +5,20 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from tensorfold.cuda.server import App, PreparedRequest, RequestError
+from tensorfold.families.glm5_next.prompts import thinking_off
 
 
 class ThinkingOffTemplate:
-    """The checkpoint's chat template, rendered as GLM-5.3's thinking-off template renders it when thinking is off."""
+    """The checkpoint's chat template, rendered as GLM-5.3's thinking-off template renders it when thinking is off
+    (``prompts.thinking_off``, as the Mac's tokenizer renders it)."""
 
     def __init__(self, inner) -> None:
         self.inner = inner
+        self.efforts = getattr(inner, "efforts", frozenset())
 
     def render(self, messages, *, tools, enable_thinking, extra=None) -> str:
         text = self.inner.render(messages, tools=tools, enable_thinking=enable_thinking, extra=extra)
-        if not enable_thinking:
-            text = text.replace("<|system|>Reasoning Effort: Max", "", 1)
-            if text.endswith("<|assistant|><think>"):
-                text += "</think>"
-        return text
+        return text if enable_thinking else thinking_off(text)
 
 
 class GlmApp(App):

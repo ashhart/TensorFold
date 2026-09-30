@@ -164,7 +164,7 @@ def test_the_engine_passes_stop_eos_to_the_one_gpu_decode(monkeypatch, allocatio
     monkeypatch.setattr(decode, "prefill", lambda w, prompt, sampling, drafter, state=None, keep_at=None, **kw:
                         (SimpleNamespace(pos=0), 5, (SimpleNamespace(pos=keep_at), None)))
     monkeypatch.setattr(decode, "draft_decode", lambda *a, **kw: seen.update(kw) or SimpleNamespace(
-        seconds=0.0, rounds=0, widths=[]))
+        seconds=0.0, rounds=0, widths=[], drafted_rows=0, accepted_drafts=0))
     eng = bare_engine(engine_mod)
     kw = {} if stop_eos is None else {"stop_eos": stop_eos}
     eng.generate([1, 2, 3], 8, None, lambda new: False, draft=draft, **kw)
@@ -186,7 +186,8 @@ def test_the_engine_passes_stop_eos_to_rank_zero_of_two(monkeypatch, allocations
     eng = bare_engine(engine_mod, tp=2)
     eng.generate([1, 2, 3], 8, None, lambda new: False, stop_eos=stop_eos)
     assert seen["stop_eos"] is stop_eos
-    assert len(shared[0]) == 19                   # no stop_eos field: rank 1 follows rank 0 (19th: image flag)
+    # no stop_eos field: rank 1 follows rank 0 (after the sampling words, the image flag)
+    assert len(shared[0]) == 5 + decode_tp.SAMPLING_WORDS
 
 
 @pytest.mark.torch
@@ -204,11 +205,11 @@ def test_the_engine_passes_stop_eos_to_its_scheduler(allocations, stop_eos):  # 
 @pytest.mark.torch
 def test_the_admit_message_rank_one_reads_is_unchanged(allocations):  # noqa: F811
     """Rank 1 builds its streams from the ADMIT message alone and commits the paths rank 0 sends: end tokens are
-    decided on rank 0 only, so the message carries no stop_eos field (its 20th is the image flag)."""
+    decided on rank 0 only, so the message carries no stop_eos field (after the sampling words, the image flag)."""
 
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
     dec = scripted_decoder(multi)
     sent = []
     dec.world, dec._send = 2, sent.append
     dec.admit(Stream([1, 2], 12, stop_eos=False))
-    assert sent[0][:5] == [multi.ADMIT, 0, 12, 1, 0] and len(sent[0]) == 20
+    assert sent[0][:5] == [multi.ADMIT, 0, 12, 1, 0] and len(sent[0]) == 6 + multi.W

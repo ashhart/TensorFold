@@ -145,7 +145,10 @@ class FamilyPrefill:
         stream.cache_len = prompt_len
         stream.cached_tokens = int(cached_tokens)
         stream.started_at = time.perf_counter()
-        token = self._draw(self.model.head(hidden), stream.sampling, [prompt_len])
+        logits = self.model.head(hidden)
+        if stream.constraint is not None:                # the first token under the reply's grammar
+            logits = stream.constraint.mask(logits)
+        token = self._draw(logits, stream.sampling, [prompt_len])
         forced = self._forced_next(stream, token)
         if forced is not None:
             token = mx.array([forced], dtype=mx.uint32)
@@ -155,7 +158,7 @@ class FamilyPrefill:
             # the first drafts settle at the next round, so the first token goes out without the draft forward
             self._next[stream.stream_id] = partial(self.model.settle, work, 1, firsts.reshape(-1)[:1],
                                                    prompt_len + 1, stream.sampling, self._depth(stream))
-        elif self.pipelined:
+        elif self.pipelined and stream.constraint is None:      # a grammar reads each token before the next
             self._queue_next(stream, work, token)
         return token
 

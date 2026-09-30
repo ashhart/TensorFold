@@ -165,6 +165,7 @@ class GlmEngine:
                   f"; MTP draft {c['mtp']:.2f} (+{c['mtp_step']:.2f} a chained draft, +{c['mtp_row']:.2f} a row); "
                   f"DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
         self.eos = tuple(w.cfg.eos)
+        self.model_dir = Path(model_dir)
         self.request = threading.local()    # the calling request's policy and stop-at-EOS (``app.GlmApp``)
         # kept conversations (decode.Snapshot, least recently used first) and the live caches' ids; states and saved rows stay within cache_bytes
         self.cache: list = []
@@ -354,7 +355,15 @@ class GlmEngine:
         return sum(snapshot_bytes(c) for c in self.cache)
 
     def _run(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool, on_tokens: Callable[[list[int]], Any],
-             code: list[int], hit, draft: bool) -> dict[str, Any]:
+             code: list[int], hit, draft: bool, constraint=None) -> dict[str, Any]:
+        self.e.constraint, self.e.window = constraint, None       # both ranks walk and mask the same rows
+        try:
+            return self._run_once(prompt, max_tokens, sampling, stop_eos, on_tokens, code, hit, draft)
+        finally:
+            self.e.constraint = self.e.window = None
+
+    def _run_once(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool,
+                  on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool) -> dict[str, Any]:
         from .decode import DepthPolicy, dflash_decode, mtp_decode, prefill, serial_decode, take_snapshot
         from .drafter_choice import DrafterChoice, auto_decode
 
@@ -410,7 +419,8 @@ class GlmEngine:
             stats["stages_ms"] = {k: round(v * 1e3, 1) for k, v in res.stages.items()}
         return stats
 
-    def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True) -> dict[str, Any]:
+    def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True,
+                 constraint=None) -> dict[str, Any]:
         """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal."""
 
         if len(prompt) >= self.limit:
@@ -427,10 +437,15 @@ class GlmEngine:
         header = [max_tokens, int(stop_eos), int(draft), len(hit.ids) if hit is not None else 0,
                   seed & 0x7FFFFFFF, (seed >> 31) & 0x7FFFFFFF, seed >> 62,
                   *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
-                  *_f64_ints(sampling.top_p if sampling else 1.0)] + code
+                  *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
+                  int(constraint is not None)] + code
+        from tensorfold.engine.grammar import pack
+
         self._share(header)
         self._share(list(prompt))
-        stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft)
+        if constraint is not None:                     # the request's grammar: rank 1 compiles the same
+            self._share(pack(constraint))
+        stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint)
         stats.update(policy=spec, drafts=draft)
         return stats
 
@@ -440,15 +455,23 @@ class GlmEngine:
         from tensorfold.engine.exact_sampling import Sampling
 
         while True:
-            max_tokens, stop_eos, draft, cached, s_lo, s_hi, s_top, t_lo, t_hi, top_k, p_lo, p_hi, *code = \
-                self._share(None)
+            (max_tokens, stop_eos, draft, cached, s_lo, s_hi, s_top, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi, shaped,
+             *code) = self._share(None)
             prompt = self._share(None)
+            packed = self._share(None) if shaped else []
+            constraint = None
+            if packed:                                  # compiled here as on rank 0
+                from tensorfold.engine import grammar
+
+                constraint = grammar.compiler(self, self.model_dir, self.eos).follow(packed)
             temperature = _ints_f64(t_lo, t_hi)
             seed = (s_top << 62) | (s_hi << 31) | s_lo
-            sampling = Sampling(seed, temperature, top_k, _ints_f64(p_lo, p_hi)) if temperature > 0 else None
+            sampling = (Sampling(seed, temperature, top_k, _ints_f64(p_lo, p_hi), _ints_f64(m_lo, m_hi))
+                        if temperature > 0 else None)
             hit = None
             if cached:
                 hit = next((c for c in self.cache if len(c.ids) == cached and prompt[:cached] == c.ids), None)
                 if hit is None:
                     raise RuntimeError(f"rank 1 has no snapshot of the {cached} tokens rank 0 resumes from")
-            self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft))
+            self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft),
+                      constraint)
