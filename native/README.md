@@ -155,6 +155,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Additional M5 tensor-attention fixtures | `test-metal -Dmetal-tensors=true -Doptimize=safe -j1` | M5 Metal tensor support |
 | GLM backbone/MTP/cache/generation | `test-glm-model -Doptimize=safe -j1` | Metal and Python; small synthetic checkpoints |
 | GLM batched recurrent attention and hyper-connections | `test-glm-prefill-kda -Doptimize=safe -j1` | Metal and Python; exact intermediates, mixed quantization, production-sized synthetic recurrence and decode continuation; full-model prefill remains unverified |
+| GLM batched sparse latent attention | `test-glm-prefill-mla -Doptimize=safe -j1` | Metal and Python; exact pooled caches, index scores, selected keys, softmax, dense/sparse boundaries, mixed/absorbed layouts and production-sized synthetic attention; full-model prefill remains unverified |
 | DeepSeek backbone/MTP/cache/generation | `test-deepseek-model test-deepseek-wide test-deepseek-packed -Doptimize=safe -j1` | Synthetic checkpoints, including production hidden/attention widths and BF16 packed hyper-connections |
 | DeepSeek calibrated dense arithmetic | `test-deepseek-dense -Doptimize=safe -j1` | Synthetic scalar/MMA calibration and physical threadgroup variants |
 | DSpark block drafting | `test-dspark -Doptimize=safe -j1` | Synthetic layer taps, context caches, sorted experts, Markov draws and generation; includes production widths |

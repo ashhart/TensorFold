@@ -736,6 +736,142 @@ def flash_prefill_hc_fixtures(capture):
     print(f"Saved {len(cases)} complete Flash prefill hyper-connections and their intermediate arrays", flush=True)
 
 
+def glm_prefill_mla_fixtures(directory):
+    import copy
+    from tests import glm5_fakes as fakes
+    from tensorfold.families.glm5_next import mla as mla_module
+    from tensorfold.families.glm5_next.weights import load_backbone
+    from tests.test_flash_next_affine import bf16
+
+    rng = np.random.default_rng(81302)
+    original_text, original_dims = fakes.TEXT, fakes.D
+    groups = []
+    try:
+        for geometry, (dims, heads, nope, rank, qrank, ih, idim, top, tail, absorbed, mixed) in enumerate((
+            (128, 2, 64, 128, 64, 2, 64, 16, True, False, False),
+            (256, 3, 128, 256, 128, 3, 128, 16, False, True, True),
+            (256, 2, 128, 128, 128, 2, 64, 1024, True, False, True),
+            (4096, 64, 256, 512, 1536, 32, 128, 2048, True, False, False),
+        )):
+            cfg = copy.deepcopy(original_text)
+            cfg.update(hidden_size=dims, num_hidden_layers=1, layer_types=["deepseek_sparse_attention"],
+                       mlp_layer_types=["dense"], num_nextn_predict_layers=0, num_attention_heads=heads,
+                       qk_nope_head_dim=nope, v_head_dim=nope, kv_lora_rank=rank, q_lora_rank=qrank,
+                       index_n_heads=ih, index_head_dim=idim, index_topk=top, index_kpool_always_select_tail=tail)
+            fakes.TEXT, fakes.D = cfg, dims
+            checkpoint = f"checkpoint{geometry}"
+            names = ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "indexer.wq_b", "indexer.wk",
+                     "indexer.weights_proj", "kv_b_proj", "o_proj")
+            formats = ((2, 32), (3, 64), (4, 128), (5, 32), (6, 64), (8, 128), (4, 128), (5, 128))
+            overrides = {f"model.language_model.layers.0.self_attn.{key}": dict(bits=b, group_size=g)
+                         for key, (b, g) in zip(names, formats)} if mixed else {}
+            folder = fakes.write_checkpoint(directory / checkpoint, seed=61 + geometry, mtp=False, overrides=overrides)
+            if absorbed:
+                tensors = {}
+                shards = sorted(folder.glob("*.safetensors"))
+                for shard in shards:
+                    tensors.update(mx.load(str(shard)))
+                prefix = "model.language_model.layers.0.self_attn."
+                fmt = overrides.get(prefix + "kv_b_proj", dict(bits=4, group_size=64))
+                w = mx.dequantize(*(tensors.pop(prefix + "kv_b_proj." + key) for key in ("weight", "scales", "biases")), **fmt)
+                w = w.reshape(heads, 2 * nope, rank)
+                for key, value, bits in (("embed_q", mx.contiguous(w[:, :nope].swapaxes(-1, -2)), 5),
+                                         ("unembed_out", mx.contiguous(w[:, nope:]), 6)):
+                    overrides[prefix + key] = dict(bits=bits, group_size=128)
+                    tensors.update(zip((prefix + key + "." + field for field in ("weight", "scales", "biases")),
+                                       mx.quantize(value, bits=bits, group_size=128)))
+                names = sorted(tensors)
+                mid = len(names) // 2
+                weight_map = {}
+                for shard, keys in zip(shards, (names[:mid], names[mid:])):
+                    mx.save_safetensors(str(shard), {key: tensors[key] for key in keys})
+                    weight_map.update({key: shard.name for key in keys})
+                (folder / "model.safetensors.index.json").write_text(json.dumps(dict(weight_map=weight_map)))
+                config = json.loads((folder / "config.json").read_text())
+                config["quantization"].update(overrides)
+                (folder / "config.json").write_text(json.dumps(config))
+            model = load_backbone(folder)
+            attn = model.layers[0].attn
+            cache = model.make_cache()[0]
+            cases = []
+            lengths = ((2047, 17, 513, 1) if dims == 4096 else (512, 513, 17, 1) if top == 1024 else
+                       (17, 15, 1, 17, 63, 64, 65, 511, 512, 513, 2048, 1) if geometry == 0 else
+                       (1, 15, 1, 17, 63, 64, 65, 511, 512, 513, 2048, 1))
+            for step, count in enumerate(lengths):
+                decode = step == len(lengths) - 1
+                name = f"mla{geometry}-{step}"
+                x = bf16(rng, (count, dims), scale=.2)
+                if step == 3 and dims < 4096:
+                    x = mx.zeros_like(x)  # Tied index scores must preserve partition ordering.
+                arrays = dict(input=x)
+                def save_cache(prefix):
+                    for key in ("keys", "ik", "ig", "pool"):
+                        value = getattr(cache, key)
+                        if value is not None:
+                            end = cache.offset // 4 if key == "pool" else cache.offset
+                            arrays[prefix + key] = value[:end]
+                save_cache("previous.")
+                chunks = []
+                original_prefill, original_absorb = attn._prefill, attn.absorb
+                original_scores = attn.index_scores
+                original_take, original_softmax, original_matmul = mx.take, mx.softmax, mx.matmul
+                original_attention, original_project = mx.fast.scaled_dot_product_attention, mla_module.project
+                def record_prefill(q, iq, iw, *args):
+                    arrays.update(q=q, iq=iq, iw=iw)
+                    return original_prefill(q, iq, iw, *args)
+                def record_absorb(q):
+                    out = original_absorb(q)
+                    arrays["ql"] = out
+                    return out
+                def record_scores(*args):
+                    out = original_scores(*args)
+                    chunks.append(dict(scores=out))
+                    return out
+                def record_take(value, indices, axis=None, **kwargs):
+                    if chunks and axis == 0 and value.ndim == 2 and value.shape[1] == rank:
+                        chunks[-1]["safe_ids"] = indices.astype(mx.int32)
+                    return original_take(value, indices, axis=axis, **kwargs)
+                def record_softmax(value, *args, **kwargs):
+                    out = original_softmax(value, *args, **kwargs)
+                    if chunks and kwargs.get("precise"):
+                        chunks[-1].update(attention_scores=value, probabilities=out)
+                    return out
+                def record_matmul(left, right, *args, **kwargs):
+                    out = original_matmul(left, right, *args, **kwargs)
+                    if chunks and left is chunks[-1].get("probabilities"):
+                        chunks[-1]["output"] = out
+                    return out
+                def record_attention(*args, **kwargs):
+                    out = original_attention(*args, **kwargs)
+                    chunks.append(dict(output=out[0].transpose(1, 0, 2)))
+                    return out
+                def record_project(value, weight, **kwargs):
+                    if weight is attn.o_proj:
+                        arrays["flat"] = value
+                    return original_project(value, weight, **kwargs)
+                if not decode:
+                    attn._prefill, attn.absorb, attn.index_scores = record_prefill, record_absorb, record_scores
+                    mx.take, mx.softmax, mx.matmul = record_take, record_softmax, record_matmul
+                    mx.fast.scaled_dot_product_attention, mla_module.project = record_attention, record_project
+                try:
+                    arrays["output"] = attn(x, [cache], (count,), decode)
+                finally:
+                    attn._prefill, attn.absorb, attn.index_scores = original_prefill, original_absorb, original_scores
+                    mx.take, mx.softmax, mx.matmul = original_take, original_softmax, original_matmul
+                    mx.fast.scaled_dot_product_attention, mla_module.project = original_attention, original_project
+                save_cache("next.")
+                for chunk, values in enumerate(chunks):
+                    arrays.update({f"chunk{chunk}.{key}": value for key, value in values.items()})
+                mx.eval(*arrays.values())
+                mx.save_safetensors(str(directory / f"{name}.safetensors"), arrays)
+                cases.append(dict(name=name, decode=decode, chunks=len(chunks)))
+            groups.append(dict(checkpoint=checkpoint, cases=cases))
+            print(f"Saved GLM MLA geometry D={dims}, H={heads}, rank={rank}, {len(cases)} cases", flush=True)
+    finally:
+        fakes.TEXT, fakes.D = original_text, original_dims
+    (directory / "mla.json").write_text(json.dumps(groups, indent=2) + "\n")
+
+
 def glm_prefill_kda_fixtures(directory):
     import copy
     from tests import glm5_fakes as fakes
@@ -1215,11 +1351,15 @@ def main():
     parser.add_argument("--flash-prefill-mm", action="store_true")
     parser.add_argument("--flash-prefill-gdn", action="store_true")
     parser.add_argument("--glm-prefill-kda", action="store_true")
+    parser.add_argument("--glm-prefill-mla", action="store_true")
     parser.add_argument("--flash-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-attention", action="store_true")
     parser.add_argument("--flash-prefill-ple", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.glm_prefill_mla:
+        glm_prefill_mla_fixtures(args.directory)
+        return
     if args.glm_prefill_kda:
         glm_prefill_kda_fixtures(args.directory)
         return

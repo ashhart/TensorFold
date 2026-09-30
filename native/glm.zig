@@ -47,7 +47,7 @@ const Config = struct {
         try (@import("large_family_ops.zig").Kda{ .heads = lin.num_heads, .dims = lin.head_dim, .taps = lin.short_conv_kernel_size, .f_bits = 4, .g_bits = 4 }).validate();
     }
 };
-const Cache = struct {
+pub const Cache = struct {
     conv: A = mx.empty,
     state: A = mx.empty,
     keys: A = mx.empty,
@@ -195,10 +195,10 @@ pub const Model = struct {
     fn format(m: *Model, key_name: []const u8) !quant.Spec {
         return m.formats.get(key_name) orelse error.UnsupportedQuantization;
     }
-    fn name(buf: []u8, i: usize, suffix: []const u8) ![]const u8 {
+    pub fn name(buf: []u8, i: usize, suffix: []const u8) ![]const u8 {
         return std.fmt.bufPrint(buf, "layers.{d}.{s}", .{ i, suffix });
     }
-    fn weight(m: *Model, i: usize, suffix: []const u8) !A {
+    pub fn weight(m: *Model, i: usize, suffix: []const u8) !A {
         var b: [256]u8 = undefined;
         return m.weights.get(try name(&b, i, suffix));
     }
@@ -295,7 +295,7 @@ pub const Model = struct {
             if (m.weights.has(try name(&b, i, "mlp.shared_experts.gate_proj.weight"))) try m.stack(&s, i, "mlp.shared_experts.gate_up", &.{ "mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj" }, 0);
         } else try m.stack(&s, i, "mlp.gate_up", &.{ "mlp.gate_proj", "mlp.up_proj" }, 0);
     }
-    fn qmm(m: *Model, s: *mx.Scope, x: A, key: []const u8, transpose: bool, ids: ?A) !A {
+    pub fn qmm(m: *Model, s: *mx.Scope, x: A, key: []const u8, transpose: bool, ids: ?A) !A {
         if (m.splits.get(key)) |parts| {
             const outputs = try mx.allocator.alloc(A, parts.len);
             defer mx.allocator.free(outputs);
@@ -316,7 +316,7 @@ pub const Model = struct {
         const rc = if (ids) |ix| c.mlx_gather_qmm(&out, x, t[0], t[1], t[2], mx.empty, ix, transpose, mx.opt(f.group_size), mx.opt(f.bits), "affine", false, mx.stream) else c.mlx_quantized_matmul(&out, x, t[0], t[1], t[2], transpose, mx.opt(f.group_size), mx.opt(f.bits), "affine", mx.stream);
         return s.result(rc, out);
     }
-    fn project(m: *Model, s: *mx.Scope, i: usize, key: []const u8, x: A) !A {
+    pub fn project(m: *Model, s: *mx.Scope, i: usize, key: []const u8, x: A) !A {
         var b: [256]u8 = undefined;
         return m.qmm(s, x, try name(&b, i, key), true, null);
     }
@@ -402,7 +402,8 @@ pub const Model = struct {
     fn append(s: *mx.Scope, old: A, value: A) !A {
         return if (old.ctx == null) value else s.cat(&.{ old, value }, 0);
     }
-    fn mla(m: *Model, s: *mx.Scope, i: usize, x: A, cache: *Cache, position: i32) !A {
+    pub fn mla(m: *Model, s: *mx.Scope, i: usize, x: A, cache: *Cache, position: i32) !A {
+        if (mx.dim(x, 0) > 16) return (try @import("glm_prefill_mla.zig").forward(m, s, i, x, cache, position)).output;
         const g = m.config.value;
         var b: [256]u8 = undefined;
         const xp = try m.project(s, i, "self_attn.x_proj", x);

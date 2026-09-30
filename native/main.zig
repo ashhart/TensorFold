@@ -22,6 +22,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-mm")) return @import("flash_prefill_mm.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-gdn")) return @import("flash_prefill_gdn.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-glm-prefill-kda")) return @import("glm.zig").checkPrefillKda(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-glm-prefill-mla")) return @import("glm_prefill_mla.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-moe")) return @import("flash_prefill_moe.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-attention")) return @import("flash_prefill_attention.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-flash-prefill-ple")) return @import("flash_prefill_ple.zig").check(io, args[2]);
