@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import mlx.core as mx
@@ -131,10 +132,75 @@ def _rows(q: Q | QSplit, lo: int, hi: int) -> Q:
     return Q(q.weight[lo:hi], q.scales[lo:hi], q.biases[lo:hi], bits=q.bits, group=q.group)
 
 
+# "rows" (default): MLX's one-row arithmetic (a window by qmv_rows).  "matrix": the decode path's dense projections
+# on the matrix units at every row count, one row included -- simd_qmm / simd_qmm_bits / affine_rows before M5
+# (the Qwen dense backend, each shape checked once), lane_qmm on M5 -- so a row's bits do not depend on the window.
+DENSE = os.environ.get("TF_GLM_DENSE", "rows")
+_MATRIX: dict[int, tuple] = {}            # id(Q) -> (weight, prepared arrays)
+_BACKEND: list = []
+
+
+def _tensor_units() -> bool:
+    from tensorfold.families.qwen3_5 import tensor_units
+
+    return bool(tensor_units())
+
+
+def matrix(x: mx.array, q: "Q") -> mx.array:
+    """x [R, K] bf16 through a 2-D affine linear on the matrix units (see ``DENSE``); groups of 128 read as 2 x 64."""
+
+    if not _BACKEND:
+        if _tensor_units():
+            _BACKEND.append("lane")
+        else:
+            from tensorfold.kernels.qwen.dense.v1 import row_matmul
+
+            _BACKEND.append(row_matmul.simd_qmm_backend())
+    backend = _BACKEND[0]
+    hit = _MATRIX.get(id(q))
+    if hit is None or hit[0] is not q.weight:
+        scales, biases, group = q.scales, q.biases, q.group
+        if group == 128:
+            scales, biases, group = mx.repeat(scales, 2, axis=1), mx.repeat(biases, 2, axis=1), 64
+        if backend == "lane":
+            from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+
+            n = q.outs
+            nt = 64 if (q.bits == 4 and n % 64 == 0) else 32 if n % 32 == 0 else 0
+            tiled = lane_qmm.tile_weight(q.weight, nt, group, bits=q.bits) if nt else q.weight
+            sbt = lane_qmm.pack_scales(scales, biases)
+            mx.eval(tiled, sbt)
+            hit = (q.weight, tiled, sbt, nt, group)
+        else:
+            mx.eval(scales, biases)
+            backend.prepare([(q.weight, scales, biases, group, q.bits)])
+            hit = (q.weight, scales, biases, group)
+        _MATRIX[id(q)] = hit
+    dtype = x.dtype
+    xb = x if dtype == mx.bfloat16 else x.astype(mx.bfloat16)
+    if backend == "lane":
+        from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+
+        _, tiled, sbt, nt, group = hit
+        kwargs = {"tiled": bool(nt), "nt": nt or lane_qmm.NT, "group": group}
+        rows, most = int(xb.shape[0]), lane_qmm.MAX_ROWS
+        y = (lane_qmm.lane_matmul(xb, tiled, sbt, **kwargs) if rows <= most else
+             mx.concatenate([lane_qmm.lane_matmul(xb[i:i + most], tiled, sbt, **kwargs) for i in range(0, rows, most)]))
+    else:
+        _, scales, biases, group = hit
+        y = backend(xb, q.weight, scales, biases, group, q.bits)
+    return y if dtype == mx.bfloat16 else y.astype(dtype)
+
+
 def project(x: mx.array, q: Any, *, rows_exact: bool) -> mx.array:
     """x [R, K] through a linear: one row by MLX's call, a decode window by ``qmv_rows`` where it fits, else by row."""
 
     rows = int(x.shape[0])
+    if DENSE == "matrix" and rows_exact and K.metal():                 # Metal kernels: the CPU keeps MLX's
+        if isinstance(q, QSplit):
+            return mx.concatenate([project(x, p, rows_exact=True) for p in q.parts], axis=-1)
+        if isinstance(q, Q) and q.weight.ndim == 2:
+            return matrix(x, q)
     if rows == 1 or not rows_exact:
         return q(x)
     if isinstance(q, QSplit):

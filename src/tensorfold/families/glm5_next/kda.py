@@ -6,6 +6,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.families.glm5_next import linear as L
 from tensorfold.families.glm5_next import config as C
 from tensorfold.families.glm5_next.caches import KDACache
 from tensorfold.families.glm5_next.config import Config, row_kernel
@@ -58,6 +59,8 @@ class KDA:
         """f_b / g_b (128 inputs: MLX's one-row kernel for them is qmv_quad, which qmv_rows does not cover)."""
 
         rows = int(x.shape[0])
+        if decode and L.DENSE == "matrix" and isinstance(q, Q) and K.metal():   # one kernel at every row count
+            return L.matrix(x, q)
         if (isinstance(q, Q) and x.dtype == mx.bfloat16
                 and row_kernel("kda_proj", rows, decode) and K.qmv_quad_rows_fits(q, rows)):
             return K.qmv_quad_rows(x, q)
