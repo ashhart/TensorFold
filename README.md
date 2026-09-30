@@ -15,7 +15,7 @@ for installation and a first request.
 
 ## Image input
 
-Install `pip install '.[vision]'` from this branch and start a compatible Qwen3.5/3.8 dense checkpoint with `--vision` to accept image and text content parts through the same lane engine.
+Install `pip install '.[vision]'` from this branch and start a compatible Qwen3.5/3.8 dense checkpoint or Qwen3.8 Flash Next CUDA checkpoint with `--vision` to accept image and text content parts through the same lane engine.
 See [image input](docs/vision.md) for the API, checkpoint requirements, cache behavior and qualification status.
 
 ## Models
@@ -97,7 +97,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | --- | --- | --- |
 | `--host`, `--port` | Listen address, default `127.0.0.1:8080` | Both |
 | `--name` | Model ID advertised to clients | Both |
-| `--vision` | Opt-in Qwen3.5/3.8 dense image input | Both |
+| `--vision` | Opt-in dense image input; Flash Next on one CUDA GPU with `--parallel >=2` | Both |
 | `--alias` | Additional model IDs | MLX |
 | `--context N` | Prompt plus reply capacity | Both |
 | `--max-tokens N` | Default reply limit, 4096 | Both |

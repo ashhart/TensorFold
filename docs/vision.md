@@ -3,6 +3,7 @@
 The `vision` branch adds opt-in image understanding to compatible Qwen3.5/3.8 dense checkpoints on MLX and CUDA while retaining the existing lane decoder for generated text.
 The checkpoint must contain its vision tower, tokenizer and vision configuration; text-only conversions cannot recover image support from a flag.
 The first supported checkpoint is `Vontra/Qwen3.8-27B-MLX-4bit`.
+Qwen3.8 Flash Next also supports images on one CUDA GPU with `--parallel` of at least two; see the [Flash Next image recipe](recipes/flash-next-vision.md), including offline reconstruction of an EXL3 vision sidecar.
 Other families, videos, audio and image generation are not supported by this adapter.
 
 ## Start a server
@@ -17,7 +18,7 @@ tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --vision
 CUDA uses the same flag with `--backend cuda`; its vision tower must use floating-point weights.
 MLX also reads per-module quantized tower weights when the checkpoint declares their format.
 The tower shares the server process and the existing language model's embeddings; it does not load a second language model.
-CUDA two-rank mode encodes images on rank zero and sends their features and positions to rank one.
+Dense Qwen CUDA two-rank mode encodes images on rank zero and sends their features and positions to rank one.
 Use the usual model and drafter prerequisites from the [Qwen recipe](recipes/qwen3.8-27b.md).
 
 ## Send an image
