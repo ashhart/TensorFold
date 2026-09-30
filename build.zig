@@ -181,6 +181,21 @@ pub fn build(b: *std.Build) void {
     flash_prefill_moe.step.dependOn(&flash_prefill_moe_fixture.step);
     b.step("test-flash-prefill-moe", "Compare Flash batched MoE routing, sorted experts, BF16 reductions and shared gates with upstream").dependOn(&flash_prefill_moe.step);
     metal_tests.dependOn(&flash_prefill_moe.step);
+    const flash_prefill_attention_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/flash-prefill-attention", "--flash-prefill-attention" });
+    const flash_prefill_attention = b.addRunArtifact(exe);
+    flash_prefill_attention.addArgs(&.{ "check-flash-prefill-attention", "build/native-checks/flash-prefill-attention" });
+    flash_prefill_attention.step.dependOn(&flash_prefill_attention_fixture.step);
+    const flash_prefill_attention_kernels = b.addRunArtifact(exe);
+    flash_prefill_attention_kernels.addArgs(&.{ "check-variants", "build/native-checks/flash-prefill-attention" });
+    flash_prefill_attention_kernels.step.dependOn(&flash_prefill_attention.step);
+    b.step("test-flash-prefill-attention", "Compare Flash dense/sparse prompt attention, GQA variants and indexer caches with upstream").dependOn(&flash_prefill_attention_kernels.step);
+    metal_tests.dependOn(&flash_prefill_attention_kernels.step);
+    const flash_prefill_ple_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/flash-prefill-ple", "--flash-prefill-ple" });
+    const flash_prefill_ple = b.addRunArtifact(exe);
+    flash_prefill_ple.addArgs(&.{ "check-flash-prefill-ple", "build/native-checks/flash-prefill-ple" });
+    flash_prefill_ple.step.dependOn(&flash_prefill_ple_fixture.step);
+    b.step("test-flash-prefill-ple", "Compare Flash prompt PLE gating, dilated convolution and retained tails with upstream").dependOn(&flash_prefill_ple.step);
+    metal_tests.dependOn(&flash_prefill_ple.step);
     const bonsai_model = b.fmt("{s}/Ternary-Bonsai-2-27B-mlx-2bit", .{model_root});
     const bonsai_pack_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", bonsai_model, "--bonsai-widening", "--output", "build/native-checks/bonsai-pack" });
     const bonsai_pack = b.addRunArtifact(exe);
@@ -794,6 +809,30 @@ pub fn build(b: *std.Build) void {
     const nemotron_prefill_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", nemotron_oracle_dir, nemotron_native_dir });
     nemotron_prefill_compare.step.dependOn(&nemotron_prefill.step);
     b.step("test-nemotron-prefill", "Compare long Nemotron prompts, recurrent/KV caches and fused decode continuation").dependOn(&nemotron_prefill_compare.step);
+    const flash_prefill_model = b.fmt("{s}/Qwen3.8-Flash-Next-MLX-4bit-MTP", .{model_root});
+    const flash_prefill_simd = b.option(bool, "flash-prefill-simd", "Verify Flash prefill using forced SIMD/GQA fallback selection") orelse false;
+    const flash_prefill_dir = if (flash_prefill_simd) "build/native-checks/flash-prefill-simd" else "build/native-checks/flash-prefill";
+    const flash_oracle_dir = b.fmt("{s}/oracle", .{flash_prefill_dir});
+    const flash_native_dir = b.fmt("{s}/native", .{flash_prefill_dir});
+    const flash_prefill_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", flash_prefill_model, "--flash-prefill", "--output", b.fmt("{s}/logits.npy", .{flash_oracle_dir}), "--state-directory", flash_oracle_dir });
+    if (flash_prefill_simd) flash_prefill_oracle.addArg("--simd");
+    const flash_prefill = b.addRunArtifact(exe);
+    flash_prefill.addArgs(&.{ "check-flash-prefill", flash_prefill_model, flash_native_dir });
+    if (flash_prefill_simd) flash_prefill.addArg("--metal-simd");
+    flash_prefill.step.dependOn(&flash_prefill_oracle.step);
+    const flash_prefill_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", flash_oracle_dir, flash_native_dir });
+    flash_prefill_compare.step.dependOn(&flash_prefill.step);
+    b.step("test-flash-prefill", "Compare long Flash prompts, every cache and fused decode continuation on the local checkpoint").dependOn(&flash_prefill_compare.step);
+    const flash_requests = b.step("test-flash-requests", "Verify Flash long-prompt interleaving, prefix reuse, neural drafts and memory admission");
+    var flash_request_prior: ?*std.Build.Step = null;
+    for ([_][]const u8{ "check-session-rounds", "check-session-neural", "check-memory-runtime" }) |command| {
+        const check = b.addRunArtifact(exe);
+        check.addArgs(&.{ command, flash_prefill_model });
+        if (std.mem.eql(u8, command, "check-session-neural")) check.addArg("-");
+        if (flash_request_prior) |prior| check.step.dependOn(prior);
+        flash_request_prior = &check.step;
+    }
+    flash_requests.dependOn(flash_request_prior.?);
     const nemotron_requests = b.step("test-nemotron-requests", "Verify Nemotron long-prompt interleaving, prefix reuse, neural drafts and memory admission");
     var nemotron_request_prior: ?*std.Build.Step = null;
     for ([_][]const u8{ "check-session-rounds", "check-session-neural", "check-memory-runtime" }) |command| {

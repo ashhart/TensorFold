@@ -2,7 +2,7 @@
 //! Compile the original operation graphs through MLX-C, just as mlx-lm does.
 const mx = @import("mlx.zig");
 const c = mx.c;
-pub const Kind = enum { silu, swiglu, gated, decay, gelu, gelu_tanh, geglu, softcap, clipped_swiglu, deepseek_head, ssm_dt };
+pub const Kind = enum { silu, swiglu, gated, decay, gelu, gelu_tanh, geglu, softcap, clipped_swiglu, deepseek_head, ssm_dt, flash_index_sum };
 pub const Ops = struct {
     closures: [@typeInfo(Kind).@"enum".field_names.len]c.mlx_closure = @splat(.{ .ctx = null }),
     pub fn deinit(o: *Ops) void {
@@ -20,7 +20,7 @@ pub const Ops = struct {
                 }
             }.apply);
             defer _ = c.mlx_closure_free(fun);
-            try mx.check(c.mlx_compile(slot, fun, kind != .deepseek_head));
+            try mx.check(c.mlx_compile(slot, fun, kind != .deepseek_head and kind != .flash_index_sum));
         }
         var prepared: [6]mx.Array = undefined;
         const call_args = if (kind == .deepseek_head) blk: {
@@ -58,6 +58,16 @@ fn graph(comptime kind: Kind, out: [*c]c.mlx_vector_array, ins: c.mlx_vector_arr
         var x = c.mlx_array_new();
         const rc = c.mlx_vector_array_get(&x, ins, i);
         a.* = try s.result(rc, x);
+    }
+    if (kind == .flash_index_sum) {
+        const scores = args[0];
+        const heads = mx.dim(scores, 0);
+        const zero = try s.scalar(0);
+        var total = try s.binary(c.mlx_maximum, try s.slice(scores, 0, 0, 1), zero);
+        var head: i32 = 1;
+        while (head < heads) : (head += 1) total = try s.binary(c.mlx_add, total, try s.binary(c.mlx_maximum, try s.slice(scores, 0, head, head + 1), zero));
+        const result = try s.reshape(try s.binary(c.mlx_divide, total, args[1]), &.{ mx.dim(scores, 1), mx.dim(scores, 2) });
+        return c.mlx_vector_array_set_data(out, &result, 1);
     }
     if (kind == .ssm_dt) {
         const sum = try s.binary(c.mlx_add, try s.cast(args[0], mx.f32t), args[1]);

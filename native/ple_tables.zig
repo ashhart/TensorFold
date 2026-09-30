@@ -92,25 +92,28 @@ pub const Tables = struct {
         return .{ .shard = lo, .row = @intCast(id - t.starts[lo]) };
     }
     pub fn gather(t: *const Tables, s: *mx.Scope, ids: []const i64) !mx.Array {
-        if (ids.len == 0 or ids.len > 16 * 16) return error.InvalidLaneWidth;
+        if (ids.len == 0 or ids.len > 2048 * 16) return error.InvalidLaneWidth;
         const words: usize = @intCast(@divExact(160 * t.format.bits, 32));
         const groups: usize = @intCast(@divExact(160, t.format.group_size));
-        var weights: [16 * 16 * 40]u32 = undefined;
-        var scales: [16 * 16 * 5]u16 = undefined;
-        var biases: [16 * 16 * 5]u16 = undefined;
+        const weights = try mx.allocator.alloc(u32, ids.len * words);
+        defer mx.allocator.free(weights);
+        const scales = try mx.allocator.alloc(u16, ids.len * groups);
+        defer mx.allocator.free(scales);
+        const biases = try mx.allocator.alloc(u16, ids.len * groups);
+        defer mx.allocator.free(biases);
         for (ids, 0..) |id, i| {
             const loc = try t.locate(id);
             const refs = t.rows[loc.shard];
-            inline for (.{ &weights, &scales, &biases }, 0..) |buffer, part| {
+            inline for (.{ weights, scales, biases }, 0..) |buffer, part| {
                 const width = if (part == 0) words else groups;
                 try t.files.items[refs[part].file].readRow(refs[part].tensor, loc.row, std.mem.sliceAsBytes(buffer[i * width ..][0..width]));
             }
         }
         const count: i32 = @intCast(ids.len);
         return @import("checkpoint.zig").dequantizeFormat(s, .{
-            try s.data(&weights, &.{ count, @intCast(words) }, mx.c.MLX_UINT32),
-            try s.data(&scales, &.{ count, @intCast(groups) }, mx.bf16),
-            try s.data(&biases, &.{ count, @intCast(groups) }, mx.bf16),
+            try s.data(weights.ptr, &.{ count, @intCast(words) }, mx.c.MLX_UINT32),
+            try s.data(scales.ptr, &.{ count, @intCast(groups) }, mx.bf16),
+            try s.data(biases.ptr, &.{ count, @intCast(groups) }, mx.bf16),
         }, t.format);
     }
     pub fn check(io: std.Io, dir: []const u8) !void {

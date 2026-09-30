@@ -141,6 +141,10 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Flash batched hyper-connections | `test-flash-prefill-hc -Doptimize=safe -j1` | Metal and Python; synthetic residual write-back, mixed affine formats and exact intermediate arrays; does not verify full-model prefill |
 | Flash recurrent prefill layers | `test-flash-prefill-gdn -Doptimize=safe -j1` | Metal and Python; synthetic production dimensions, separate/stacked projections, scalar recurrence and cache continuation; does not verify full-model prefill |
 | Flash MoE prefill layers | `test-flash-prefill-moe -Doptimize=safe -j1` | Metal and Python; synthetic routing, mixed formats, BF16 expert sums, shared gates and sorted-gather boundaries; does not verify full-model prefill |
+| Flash prompt attention | `test-flash-prefill-attention -Doptimize=safe -j1` | Synthetic dense/sparse transitions, GQA variants, indexer pooling and retained KV caches |
+| Flash prompt PLE | `test-flash-prefill-ple test-ngram-gpu -Doptimize=safe -j1` | Synthetic embedding gates, dilated convolution, retained tails and GPU hashes through 2,048-token chunks |
+| Flash complete prefill | `test-flash-prefill -Doptimize=safe -j1` | Local Flash checkpoint; 4,258 prompt tokens, every cache and decode continuation; `-Dflash-prefill-simd=true` forces fallback selection on the current GPU |
+| Flash requests | `test-flash-requests -Doptimize=safe -j1` | Local Flash checkpoint; interleaved long prompts, persisted prefixes, MTP continuation and memory admission |
 | Setup, sync and dependency guards | `test-setup test-sync-upstream test-dependencies test-upstream-coverage -j1` | Python for dependency tests; no models |
 | Runtime loading and hardware capabilities | `test-runtime -Doptimize=safe -j1` | CPU arithmetic always checked; unavailable Metal reported explicitly |
 | Hardware-selected Metal smoke suite | `test-metal-smoke -Doptimize=safe -j1` | Synthetic SIMD checks, plus tensor/GLM checks when supported; fails if Metal is unavailable |

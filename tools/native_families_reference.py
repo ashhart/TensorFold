@@ -274,6 +274,50 @@ def gemma_dflash_fixture(directory, draft_dir, output):
     print("Saved full Gemma target taps and DFlash proposals", flush=True)
 
 
+def flash_prefill_fixture(directory, output, simd=False):
+    import mlx.core as mx
+    from tensorfold.families.qwen4_exp.model import load, select_by_kernels
+    from tensorfold.families.qwen4_exp import decode
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm
+    from types import SimpleNamespace
+    decode.DENSE = "rows"
+    if simd:
+        prefill_mm._tensor_units = lambda: False
+    model, _ = load(directory, lazy=True, ple_on_ssd=True)
+    model.__dict__["fused"] = decode.FusedDecode(model)
+    select_by_kernels(model.layers)
+    runtime = SimpleNamespace(model=model)
+    cache = model.make_cache()
+    output.mkdir(parents=True, exist_ok=True)
+    def save(name, value):
+        np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
+    position = 0
+    for step, count in enumerate((17, 63, 64, 2048, 2048, 17, 1)):
+        tokens = np.array([[1000 + (position + j) % 37 for j in range(count)]], dtype=np.int64)
+        hidden = model.hidden(tokens, cache)
+        streams = model.fused.last_streams if count <= model.fused_rows else model.__dict__["last_streams"]
+        save(f"hidden-{step}", streams)
+        save(f"logits-{step}", FlashNext.head(runtime, hidden[:, -1:])[0])
+        position += count
+        for i, (layer, item) in enumerate(zip(model.layers, cache)):
+            if layer.is_linear:
+                save(f"cache-{step}-{i}-0", item.conv[0])
+                save(f"cache-{step}-{i}-1", item.ssm[0])
+            else:
+                save(f"cache-{step}-{i}-0", item.keys[:, :, :item.offset])
+                save(f"cache-{step}-{i}-1", item.values[:, :, :item.offset])
+                save(f"raw-{step}-{i}", item.index_keys[0, :item.offset])
+                if item.pooled is not None:
+                    save(f"pooled-{step}-{i}", item.pooled[0])
+            if "ple" in layer:
+                save(f"ple-{step}", item.ple_conv[0])
+                save(f"history-{step}", mx.array(item.history[0]))
+        print(f"Flash prefill oracle at {position} tokens", flush=True)
+    for step in range(4):
+        save(f"continuation-{step}", FlashNext.head(runtime, model.hidden(np.array([[2000 + step]]), cache))[0])
+
+
 def nemotron_prefill_fixture(directory, output, simd=False):
     import mlx.core as mx
     from mlx_lm import load
@@ -1107,6 +1151,7 @@ def main():
     p.add_argument("--gemma-drafter", type=Path)
     p.add_argument("--gemma-prefill", action="store_true")
     p.add_argument("--nemotron-prefill", action="store_true")
+    p.add_argument("--flash-prefill", action="store_true")
     p.add_argument("--synthetic-glm-layout", action="store_true")
     p.add_argument("--synthetic-glm-mixed", action="store_true")
     p.add_argument("--serial-rows", action="store_true")
@@ -1138,6 +1183,9 @@ def main():
         return
     if args.gemma_prefill:
         gemma_prefill_fixture(args.model, args.state_directory)
+        return
+    if args.flash_prefill:
+        flash_prefill_fixture(args.model, args.state_directory, args.simd)
         return
     if args.nemotron_prefill:
         nemotron_prefill_fixture(args.model, args.state_directory, args.simd)
@@ -1262,7 +1310,7 @@ def main():
         cache = model.make_cache()
         forward = lambda ids: model.lm_head(fused(mx.array([ids], dtype=mx.uint32), cache) if len(ids) <= 16 else model.backbone(mx.array([ids], dtype=mx.uint32), cache)[:, -1:])
     elif kind == "qwen4_exp":
-        from tensorfold.families.qwen4_exp.model import load
+        from tensorfold.families.qwen4_exp.model import load, select_by_kernels
         from tensorfold.families.qwen4_exp.decode import FusedDecode
         from tensorfold.families.qwen4_exp.runtime import FlashNext
         from types import SimpleNamespace
@@ -1275,6 +1323,7 @@ def main():
         flash_kernels.ple_lookup = lambda ids, tables: tables(ids)
         model, tokenizer = load(args.model, lazy=True)
         model.__dict__["fused"] = FusedDecode(model)
+        select_by_kernels(model.layers)
         if args.trace_layers:
             if args.state_directory is None:
                 raise ValueError("--trace-layers requires --state-directory")
@@ -1303,12 +1352,14 @@ def main():
         # The serving runtime uses a row-invariant vocabulary projection; the raw
         # model's __call__ uses MLX's batch-dependent quantized matmul instead.
         runtime = SimpleNamespace(model=model)
-        forward = lambda ids: FlashNext.head(runtime, model.hidden(mx.array([ids], dtype=mx.int32), cache))
+        def forward(ids):
+            hidden = model.hidden(mx.array([ids], dtype=mx.int32), cache)
+            return FlashNext.head(runtime, hidden[:, -1:] if len(ids) > 16 else hidden)
     else:
         raise ValueError(kind)
     tokens = ([int(x) for x in args.tokens.split(",")] if args.tokens else list(range(1, 41)) if args.synthetic_glm or args.synthetic_glm_layout else
               tokenizer.encode(args.prompt, add_special_tokens=False) if args.generate else [1, 2, 3, 4])
-    prompt_chunk = 2048 if kind in ("gemma4", "gemma4_text", "nemotron_h") else 16
+    prompt_chunk = 2048 if kind in ("gemma4", "gemma4_text", "nemotron_h", "qwen4_exp") else 16
     for start in range(0, len(tokens), prompt_chunk):
         chunk = tokens[start:start + prompt_chunk]
         if kind in ("gemma4", "gemma4_text"):

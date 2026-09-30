@@ -62,7 +62,8 @@ pub const Pass = struct {
     logits: A = mx.empty,
     hidden: A = mx.empty,
     records: [48]Cache = @splat(.{}),
-    tokens: [16]i32 = undefined,
+    tokens: [2048]i32 = undefined,
+    prefilled: bool = false,
     count: usize = 0,
     start: i32 = 0,
     pub fn deinit(p: *Pass) void {
@@ -72,6 +73,7 @@ pub const Pass = struct {
 pub const Model = struct {
     weights: cp.Store,
     kernels: mx.Kernels,
+    prefill_ops: @import("prefill_ops.zig").Ops = .{},
     cache: [48]Cache = @splat(.{}),
     position: i32 = 0,
     mtp: bool = false,
@@ -190,6 +192,7 @@ pub const Model = struct {
         if (m.ple_tables) |*tables| tables.deinit();
         m.weights.deinit();
         m.kernels.deinit();
+        m.prefill_ops.deinit();
         if (m.wired_before) |previous| {
             _ = mx.c.mlx_synchronize(mx.stream);
             var ignored: usize = 0;
@@ -213,10 +216,10 @@ pub const Model = struct {
         try mx.eval(value_f32);
         try mx.check(mx.c.mlx_save(zpath, value_f32));
     }
-    fn f(m: *Model, base: []const u8, suffix: []const u8) !A {
+    pub fn f(m: *Model, base: []const u8, suffix: []const u8) !A {
         return m.weights.field(base, suffix);
     }
-    fn scale(m: *Model, s: *mx.Scope, base: []const u8, suffix: []const u8) !A {
+    pub fn scale(m: *Model, s: *mx.Scope, base: []const u8, suffix: []const u8) !A {
         var buf: [256]u8 = undefined;
         const key = try std.fmt.bufPrint(&buf, "{s}.{s}.native_scale", .{ base, suffix });
         if (m.weights.arrays.get(key)) |v| return v;
@@ -246,7 +249,7 @@ pub const Model = struct {
         const r = mx.dim(h, 0);
         return if (branch) |b| m.kernels.run(s, src.q4_hc_norm_plain, &.{ h, inject, b }, &.{ ti("S", 4), ti("D", 2560) }, .{ 2560, r, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 10240 } }, .{ .shape = &.{ r, 10, 4 }, .dtype = mx.f32t } }) else m.kernels.run(s, src.q4_hc_norm_none, &.{h}, &.{ ti("S", 4), ti("D", 2560) }, .{ 2560, r, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ r, 10240 } }, .{ .shape = &.{ r, 10, 4 }, .dtype = mx.f32t } });
     }
-    fn hcProject(m: *Model, s: *mx.Scope, base: []const u8, h: A, ssp: A, inject: bool) ![5]A {
+    pub fn hcWeights(m: *Model, s: *mx.Scope, base: []const u8, inject: bool) !struct { down: @import("flash_ops.zig").Weight, up: @import("flash_ops.zig").Weight, scale: A } {
         var buf: [256]u8 = undefined;
         const stacked = try std.fmt.bufPrint(&buf, "{s}.native_down", .{base});
         if (!m.weights.has(stacked)) {
@@ -261,7 +264,11 @@ pub const Model = struct {
         const down = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.native_down", .{base}));
         const up = try m.weights.affine(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_up", .{base}));
         const sc = try m.scale(s, base, "hc_norm.weight");
-        const out = try @import("flash_ops.zig").hyper(&m.kernels, s, h, ssp, down, up, sc, try s.scalar(1e-6), 4, 320, mx.gpu_generation);
+        return .{ .down = down, .up = up, .scale = sc };
+    }
+    fn hcProject(m: *Model, s: *mx.Scope, base: []const u8, h: A, ssp: A, inject: bool) ![5]A {
+        const w = try m.hcWeights(s, base, inject);
+        const out = try @import("flash_ops.zig").hyper(&m.kernels, s, h, ssp, w.down, w.up, w.scale, try s.scalar(1e-6), 4, 320, mx.gpu_generation);
         return .{ out[0], out[1], mx.empty, mx.empty, mx.empty };
     }
     fn gdn(m: *Model, s: *mx.Scope, base: []const u8, x: A, cache: Cache, record: *Cache) !A {
@@ -410,6 +417,9 @@ pub const Model = struct {
         try observeBuffers(&p);
         return p;
     }
+    pub fn prefill(m: *Model, tokens: []const i32) !Pass {
+        return if (tokens.len <= 16) m.forward(tokens) else @import("flash_prefill.zig").forward(m, tokens);
+    }
     pub fn observeBuffers(p: *Pass) !void {
         if (!kv.track_reuse) return;
         for (p.records) |rec| {
@@ -477,6 +487,7 @@ pub const Model = struct {
     }
     fn commitImpl(m: *Model, p: *Pass, keep: usize, evaluate: bool) !void {
         if (keep == 0 or keep > p.count or m.position != p.start) return error.InvalidCommit;
+        if (p.prefilled and keep != p.count) return error.InvalidCommit;
         const n: i32 = @intCast(keep);
         const end = m.position + n;
         var next: [48]Cache = @splat(.{});
@@ -485,8 +496,8 @@ pub const Model = struct {
             const rec = p.records[i];
             next[i].offset = end;
             if (i % 4 != 3) {
-                next[i].a = try mx.retain(try p.scope.reshape(try p.scope.slice(rec.a, 0, n - 1, n), &.{ 3, 10240 }));
-                next[i].b = try mx.retain(try p.scope.reshape(try p.scope.slice(rec.b, 0, n - 1, n), &.{ 48, 128, 128 }));
+                next[i].a = try mx.retain(if (p.prefilled) rec.a else try p.scope.reshape(try p.scope.slice(rec.a, 0, n - 1, n), &.{ 3, 10240 }));
+                next[i].b = try mx.retain(if (p.prefilled) rec.b else try p.scope.reshape(try p.scope.slice(rec.b, 0, n - 1, n), &.{ 48, 128, 128 }));
             } else {
                 next[i] = try (try rec.attentionPrefix(&p.scope, end)).clone();
                 next[i].keys = try m.cache[i].keys.finish(&p.scope, rec.key_write, n);
@@ -494,7 +505,7 @@ pub const Model = struct {
                 next[i].index_keys = try m.cache[i].index_keys.finish(&p.scope, rec.index_write, n);
             }
             if (i == 1) {
-                next[i].ple = try mx.retain(try p.scope.slice(rec.ple, 0, n, n + 9));
+                next[i].ple = try mx.retain(if (p.prefilled) rec.ple else try p.scope.slice(rec.ple, 0, n, n + 9));
                 if (m.gpuTokensEnabled()) {
                     next[i].token_history = try mx.retain(try p.scope.slice(rec.token_history, 0, n, n + 2));
                 } else {

@@ -798,6 +798,162 @@ def flash_prefill_moe_fixtures(directory):
     print(f"Saved {len(cases)} complete Flash MoE layers, routing, shared experts and sorted-gather boundaries", flush=True)
 
 
+def flash_prefill_attention_fixtures(capture):
+    import mlx.nn as nn
+    from tensorfold.families.qwen4_exp.model_layers import SparseAttention, AttentionCache
+    from tensorfold.kernels.qwen.flash_next.v1 import prefill, prefill_mm
+    from tests.test_flash_next_affine import quantized, bf16
+
+    rng = np.random.default_rng(29516)
+    cases = []
+    for geometry, (hidden, heads, kvh, dims, ih, idim, top, bits, groups) in enumerate((
+        (256, 4, 1, 64, 2, 64, 8, (4, 5, 6, 3, 8), (32,) * 5),
+        (2560, 24, 2, 256, 4, 128, 512, (4,) * 5, (32,) * 5),
+        (128, 6, 2, 256, 3, 64, 8, (4,) * 5, (32,) * 5),
+    )):
+        rotary = 32 if dims == 64 else 64
+        cfg = SimpleNamespace(hidden_size=hidden, num_attention_heads=heads, num_key_value_heads=kvh,
+                              head_dim=dims, rotary_dim=rotary, rope_theta=10000000, rms_norm_eps=1e-6,
+                              indexer_n_heads=ih, indexer_head_dim=idim, indexer_compress_ratio=4, indexer_budget=4*top)
+        layer = SparseAttention(cfg)
+        parts = ((layer, "q_proj"), (layer, "k_proj"), (layer, "v_proj"), (layer, "o_proj"), (layer.indexer, "index_qk_proj"))
+        weights = {}
+        for (module, attr), key, b, group in zip(parts, ("q", "k", "v", "out", "index"), bits, groups):
+            shape = getattr(module, attr).weight.shape
+            w = quantized(rng, shape, b, group, scale=.02)
+            linear = nn.QuantizedLinear(shape[1], shape[0], bias=False, group_size=group, bits=b)
+            linear.weight, linear.scales, linear.biases = w.weight, w.scales, w.biases
+            setattr(module, attr, linear)
+            weights.update({f"{key}.{suffix}": getattr(linear, suffix) for suffix in ("weight", "scales", "biases")})
+        for key, norm in (("q_scale", layer.q_norm), ("k_scale", layer.k_norm),
+                          ("iq_scale", layer.indexer.q_layernorm), ("ik_scale", layer.indexer.k_layernorm)):
+            norm.weight = bf16(rng, norm.weight.shape, scale=.1)
+            weights[key] = 1 + norm.weight.astype(mx.float32)
+        weight_name = f"attention_weights{geometry}"
+        mx.eval(*weights.values())
+        mx.save_safetensors(str(capture.directory / f"{weight_name}.safetensors"), weights)
+        for past, count, kernel_select, hs in (
+            (0, 17, True, 1), (0, 2048, True, 1), (2032, 17, True, 1), (2048, 1, True, 1),
+            (2048, 64, True, 1), (4095, 1, True, 1), (4095, 17, True, 1), (4095, 17, True, 2),
+            (4096, 1, True, 1), (4096, 65, True, 2), (8192, 257, False, 1), (8192, 257, True, 1),
+        ):
+            name = f"attention{len(cases):03}"
+            capture.test = name
+            layer.__dict__["kernel_select"] = kernel_select
+            cache = AttentionCache()
+            cache.offset = past
+            x = bf16(rng, (1, count, hidden))
+            arrays = dict(input=x)
+            if past:
+                cache.keys = bf16(rng, (1, kvh, past, dims))
+                cache.values = bf16(rng, cache.keys.shape)
+                cache.index_keys = bf16(rng, (1, past, idim))
+                if past // 4 > top:
+                    layer.indexer.pool(cache.index_keys, cache, past // 4 - 1)
+                arrays.update({"previous.keys": cache.keys, "previous.values": cache.values, "previous.raw": cache.index_keys})
+                if cache.pooled is not None:
+                    arrays["previous.pooled"] = cache.pooled
+            previous_pooled = cache.pooled is not None
+            qg = prefill_mm.linear(layer.q_proj, x).reshape(1, count, heads, 2*dims)
+            arrays["queries"] = mx.fast.rope(layer.q_norm(qg[..., :dims]).transpose(0, 2, 1, 3), rotary,
+                                              traditional=False, base=10000000, scale=1.0, offset=past)
+            arrays["index_queries"] = layer.indexer.project(x)[0]
+            selected, sdpa, heads_fn = prefill.selected, mx.fast.scaled_dot_product_attention, prefill.heads_a_simdgroup
+            chunks = []
+            def record_selected(*args, **kwargs):
+                out = selected(*args, **kwargs)
+                arrays["attended"] = out
+                return out
+            def record_sdpa(*args, **kwargs):
+                out = sdpa(*args, **kwargs)
+                chunks.append(out)
+                return out
+            prefill.selected = record_selected
+            mx.fast.scaled_dot_product_attention = record_sdpa
+            prefill.heads_a_simdgroup = lambda: (hs, 1)
+            try:
+                arrays["output"] = layer(x, cache)
+            finally:
+                prefill.selected, mx.fast.scaled_dot_product_attention, prefill.heads_a_simdgroup = selected, sdpa, heads_fn
+            if chunks:
+                arrays["attended"] = mx.concatenate(chunks, axis=2).transpose(0, 2, 1, 3).reshape(1, count, heads*dims)
+            arrays.update({"next.keys": cache.keys[:, :, :cache.offset], "next.values": cache.values[:, :, :cache.offset],
+                           "next.raw": cache.index_keys[:, :cache.offset]})
+            if cache.pooled is not None:
+                arrays["next.pooled"] = cache.pooled
+            mx.eval(*arrays.values())
+            mx.save_safetensors(str(capture.directory / f"{name}.safetensors"), arrays)
+            cases.append(dict(name=name, weights=weight_name, config=dict(heads=heads, kv_heads=kvh, dims=dims,
+                              rotary_dims=rotary, index_heads=ih, index_dims=idim, top=top,
+                              kernel_select=kernel_select, heads_per_simdgroup=hs), past=past,
+                              previous_pooled=previous_pooled, pooled=cache.pooled is not None, bits=bits, groups=groups))
+    (capture.directory / "attention.json").write_text(json.dumps(cases, indent=2) + "\n")
+    print(f"Saved {len(cases)} complete Flash prefill attention layers and sparse/cache boundary cases", flush=True)
+
+
+def flash_prefill_ple_fixtures(directory):
+    import math
+    import mlx.nn as nn
+    from tensorfold.families.qwen4_exp.model import PLELayer, LinearCache
+    from tests.test_flash_next_affine import quantized, bf16
+
+    rng = np.random.default_rng(88512)
+    cases = []
+    for geometry, (streams, dims, taps, dilation, batch, bits, groups) in enumerate((
+        (1, 256, 2, 2, 2, (3, 5), (64, 32)),
+        (4, 2560, 4, 3, 1, (4, 4), (32, 32)),
+        (8, 256, 4, 3, 1, (8, 6), (128, 64)),
+    )):
+        cfg = SimpleNamespace(hc_count=streams, hidden_size=dims, ple_embed_dim=dims, rms_norm_eps=1e-6,
+                              ngram_size=dilation, ple_conv_kernel_size=taps, heads_per_ngram=8, ple_eos=31,
+                              ngram_vocab_size_base=128, ngram_vocab_divisor=128, ngram_shards=8,
+                              vocab_size=256, seed=1234, group_size=32, bits=4)
+        layer = PLELayer(cfg, 0)
+        for shard in layer.ple_embedding.shards:
+            shard.weight = bf16(rng, shard.weight.shape)
+        weights = {}
+        for attr, key, b, group in zip(("key_proj", "value_proj"), ("key", "value"), bits, groups):
+            shape = getattr(layer, attr).weight.shape
+            w = quantized(rng, shape, b, group, scale=.02)
+            linear = nn.QuantizedLinear(shape[1], shape[0], bias=False, group_size=group, bits=b)
+            linear.weight, linear.scales, linear.biases = w.weight, w.scales, w.biases
+            setattr(layer, attr, linear)
+            weights.update({f"{key}.{suffix}": getattr(linear, suffix) for suffix in ("weight", "scales", "biases")})
+        for key, norm in (("key_scale", layer.norm_key), ("query_scale", layer.norm_query), ("conv_scale", layer.norm_conv)):
+            norm.weight = bf16(rng, norm.weight.shape, scale=.1)
+            weights[key] = 1 + norm.weight.astype(mx.float32)
+        layer.conv1d.weight = bf16(rng, layer.conv1d.weight.shape, scale=.1)
+        weights["conv"] = layer.conv1d.weight
+        weight_name = f"ple_weights{geometry}"
+        mx.eval(*weights.values())
+        mx.save_safetensors(str(directory / f"{weight_name}.safetensors"), weights)
+        cache = LinearCache()
+        for count in (1, 17, 63, 64, 65, 257, 2048, 1):
+            name = f"ple{len(cases):03}"
+            h = bf16(rng, (batch, count, streams*dims))
+            tokens = rng.integers(0, 256, size=(batch, count))
+            tokens[:, count // 2] = cfg.ple_eos
+            history = cache.history if cache.history is not None else np.full((batch, dilation-1), cfg.ple_eos, np.int64)
+            embedding = layer.ple_embedding(layer.ple_embedding.ids(history, tokens))
+            arrays = dict(h=h, embedding=embedding)
+            cached = cache.ple_conv is not None
+            if cached:
+                arrays["previous"] = cache.ple_conv
+            shape = (batch, count, streams, dims)
+            key = layer.norm_key(layer.key_proj(embedding)).reshape(shape)
+            query = layer.norm_query(h).reshape(shape)
+            gate = mx.sum(key * query, axis=-1, keepdims=True) / math.sqrt(dims)
+            gate = mx.sign(gate) * mx.sqrt(mx.maximum(mx.abs(gate), 1e-6))
+            gated = (mx.sigmoid(gate) * layer.value_proj(embedding)[..., None, :]).reshape(h.shape)
+            arrays.update(gated=gated, normed=layer.norm_conv(gated), branch=layer(h, tokens, cache), tail=cache.ple_conv)
+            mx.eval(*arrays.values())
+            mx.save_safetensors(str(directory / f"{name}.safetensors"), arrays)
+            cases.append(dict(name=name, weights=weight_name, streams=streams, dilation=dilation,
+                              cached=cached, bits=bits, groups=groups))
+    (directory / "ple.json").write_text(json.dumps(cases, indent=2) + "\n")
+    print(f"Saved {len(cases)} Flash PLE projection/gating/convolution cases with long-prompt continuation", flush=True)
+
+
 def flash_affine_variants(capture):
     from tensorfold.kernels.qwen.flash_next.v1 import base, rows, hc, experts, embed
     from tests.test_flash_next_affine import quantized, bf16, same
@@ -898,6 +1054,8 @@ def main():
     parser.add_argument("--flash-prefill-hc", action="store_true")
     parser.add_argument("--flash-prefill-gdn", action="store_true")
     parser.add_argument("--flash-prefill-moe", action="store_true")
+    parser.add_argument("--flash-prefill-attention", action="store_true")
+    parser.add_argument("--flash-prefill-ple", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     if args.flash_weights:
@@ -905,6 +1063,9 @@ def main():
         return
     if args.flash_prefill_moe:
         flash_prefill_moe_fixtures(args.directory)
+        return
+    if args.flash_prefill_ple:
+        flash_prefill_ple_fixtures(args.directory)
         return
     if args.simd_dense:
         simd_dense_fixtures(args.directory)
@@ -914,6 +1075,16 @@ def main():
         return
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
+    if args.flash_prefill_attention:
+        try:
+            flash_prefill_attention_fixtures(capture)
+        finally:
+            mx.fast.metal_kernel = capture.original
+        if "flash_prefill_gqa" not in {case["kernel"] for case in capture.cases}:
+            raise RuntimeError("Flash prefill GQA kernel was not captured")
+        (args.directory / "cases.json").write_text(json.dumps(capture.cases, indent=2) + "\n")
+        print(f"Saved {len(capture.cases)} Flash prefill attention kernel launches", flush=True)
+        return
     if args.flash_prefill_gdn:
         try:
             flash_prefill_gdn_fixtures(capture)

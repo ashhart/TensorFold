@@ -48,12 +48,12 @@ pub const NGram = struct {
         }
         return result;
     }
-    /// joined contains the two previous token IDs followed by 1..16 new IDs.
+    /// joined contains the two previous token IDs followed by 1..2048 new IDs.
     /// All operations remain lazy GPU arrays; no token or history host read.
     pub fn idsArray(n: NGram, s: *mx.Scope, joined: mx.Array) !mx.Array {
         if (joined.ctx == null or mx.shape(joined).len != 1) return error.InvalidNGramHistory;
         const count = mx.dim(joined, 0);
-        if (count < 3 or count > 18 or (mx.dtype(joined) != mx.i32t and mx.dtype(joined) != mx.c.MLX_UINT32 and mx.dtype(joined) != mx.c.MLX_INT64)) return error.InvalidNGramHistory;
+        if (count < 3 or count > 2050 or (mx.dtype(joined) != mx.i32t and mx.dtype(joined) != mx.c.MLX_UINT32 and mx.dtype(joined) != mx.c.MLX_INT64)) return error.InvalidNGramHistory;
         const rows = count - 2;
         const tokens = try s.cast(joined, mx.c.MLX_INT64);
         const previous = try s.slice(tokens, 0, 1, rows + 1);
@@ -88,16 +88,16 @@ pub fn checkGpu() !void {
         const n = NGram.init();
         try std.testing.expectError(error.InvalidNGramHistory, n.idsArray(&s, mx.empty));
         try std.testing.expectError(error.InvalidNGramHistory, n.idsArray(&s, try s.zeros(&.{2}, mx.i32t)));
-        try std.testing.expectError(error.InvalidNGramHistory, n.idsArray(&s, try s.zeros(&.{19}, mx.i32t)));
+        try std.testing.expectError(error.InvalidNGramHistory, n.idsArray(&s, try s.zeros(&.{2051}, mx.i32t)));
         try std.testing.expectError(error.InvalidNGramHistory, n.idsArray(&s, try s.zeros(&.{ 1, 3 }, mx.i32t)));
         try std.testing.expectError(error.InvalidNGramHistory, n.idsArray(&s, try s.zeros(&.{3}, mx.f32t)));
     }
     for (0..2) |overflow| {
         var n = NGram.init();
         if (overflow == 1) n.multipliers = .{ std.math.maxInt(i64), std.math.minInt(i64) + 37, -1 };
-        for ([_]usize{ 1, 3, 16 }) |rows| {
+        for ([_]usize{ 1, 3, 16, 17, 64, 257, 2048 }) |rows| {
             for (0..64) |trial| {
-                var joined: [18]i32 = undefined;
+                var joined: [2050]i32 = undefined;
                 for (joined[0 .. rows + 2]) |*id| id.* = rng.random().intRangeAtMost(i32, 0, 248319);
                 // Every EOS location, adjacent EOS, non-reset EOS, and vocabulary ends.
                 joined[trial % (rows + 2)] = switch (trial % 4) {
@@ -108,7 +108,7 @@ pub fn checkGpu() !void {
                 };
                 if (trial < rows + 2) joined[trial] = 248044;
                 if (trial % 5 == 0) joined[0..2].* = .{ 248044, 248044 };
-                var expected: [16 * 16]u32 = undefined;
+                var expected: [2048 * 16]u32 = undefined;
                 for (0..rows) |i| {
                     const ids = n.ids(.{ joined[i], joined[i + 1] }, joined[i + 2]);
                     for (ids, 0..) |id, h| expected[i * 16 + h] = @intCast(id);
