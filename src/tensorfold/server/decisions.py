@@ -1,9 +1,5 @@
-"""``/v1/decisions`` in SGLang prompt-format version 1: one prefill, label logits, no generated text.
-
-The wording, single-token label check and probability math follow
-``sglang.srt.entrypoints.openai.serving_decisions`` (prompt format version 1).
-TensorFold reads the logits from its own prefill instead of SGLang's ``score_prompts``.
-"""
+"""``/v1/decisions`` scores one prefill's label logits and returns no generated text."""
+# Wording and probability math follow SGLang prompt format v1; logits come from this prefill, not score_prompts.
 
 from __future__ import annotations
 
@@ -104,11 +100,15 @@ def _validate_body(body: dict[str, Any]) -> None:
             f"prompt_format_version {version} is not served, this server uses version {PROMPT_FORMAT_VERSION}"
         )
     temperature = body.get("temperature", 1)
-    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not math.isfinite(temperature) or temperature <= 0:
+    if (isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature) or temperature <= 0):
         raise DecisionError("temperature must be a number above 0")
-    kwargs = body.get("chat_template_kwargs") or {}
+    kwargs = body.get("chat_template_kwargs")
+    if kwargs is None:
+        kwargs = {}
     if not isinstance(kwargs, dict):
         raise DecisionError("chat_template_kwargs must be an object")
+    _unknown(kwargs, frozenset({"enable_thinking"}))
     if "enable_thinking" in kwargs and kwargs["enable_thinking"] is not False:
         raise DecisionError("decisions need enable_thinking false or unset")
     questions = body.get("questions")
@@ -182,7 +182,11 @@ def _wording(text: str, question: dict[str, Any]) -> tuple[str, list[str], list[
         lines = [_question_line(question), *[f"{label}: {detail}" for label, detail in zip(labels, details)]]
     elif kind == "yes_no":
         _unknown(question, _YES_NO_FIELDS)
-        names, details, labels = ["yes", "no"], [_optional_text(question.get("yes")), _optional_text(question.get("no"))], ["yes", "no"]
+        names, details, labels = (
+            ["yes", "no"],
+            [_optional_text(question.get("yes")), _optional_text(question.get("no"))],
+            ["yes", "no"],
+        )
         closing = "Answer with yes or no only."
         lead = _render_text(question.get("question"))
         if not lead.strip():

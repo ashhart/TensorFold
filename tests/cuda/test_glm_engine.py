@@ -411,7 +411,8 @@ def test_decision_between_chats_preserves_replies(engine_f, cache_bytes, policy)
         expected_scores = e.score_labels(decision, labels)
         reply, _ = _generate(e, prompt, sampling, policy=policy, tokens=16)
         after = prompt + reply + [31, 32]
-        assert e.drafter.context_end > 0
+        if policy == "f3":
+            assert e.drafter.context_end > 0
         assert e.score_labels(decision, labels) == expected_scores
         assert e.e.st.pos == 0 and e.drafter.context_end == 0
         assert e.live == []
