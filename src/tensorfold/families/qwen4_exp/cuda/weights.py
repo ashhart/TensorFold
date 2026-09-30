@@ -230,6 +230,15 @@ class Weights:
     def device(self) -> torch.device:
         return self.inv_freq.device
 
+    @property
+    def fast_prefill(self) -> bool:
+        """Whether a DeltaNet or attention linear has an FP8 prompt kernel (MXFP8, block FP8; --prefill-fp8)."""
+
+        faces = [f for layer in self.layers for f in (layer.gdn and layer.gdn.proj, layer.gdn and layer.gdn.out,
+                                                       layer.attn and layer.attn.proj, layer.attn and layer.attn.o)]
+        return any(hasattr(f, "prefill8") or any(hasattr(p, "prefill8") for p in getattr(f, "parts", ()))
+                   for f in faces if f is not None)
+
     def nbytes(self) -> int:
         """Device bytes the weights hold, each storage once (an EXL3 layer's expert views share one buffer)."""
 
@@ -314,9 +323,15 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return b16_from_rows(raw(name + ".weight"))
 
     def dense(name: str, rows=None, cols: slice | None = None):
-        """A linear's weight and its e8m0 scales (MXFP8) or None (bf16), a rank's rows or 32-aligned input columns."""
+        """A linear's weight and its scales: e8m0 (MXFP8), ("block", fp32 per row and 64 inputs) or None (bf16)."""
 
         w = raw(name + ".weight")
+        if w.dtype == torch.float8_e4m3fn and rd.has(prefix + name + ".weight_scale_inv"):   # FP8_PB_WO blocks
+            if rows is not None or cols is not None:
+                raise ValueError(f"{name}: block-scaled FP8 is read on one GPU only (--tp 1)")
+            from tensorfold.cuda.nvfp4.linear import Fp8BlockLinear
+
+            return w, ("block", Fp8BlockLinear.column_scales(raw(name + ".weight_scale_inv"), *w.shape))
         s = raw(name + ".weight_scale") if w.dtype == torch.float8_e4m3fn else None
         if s is not None and s.dtype != torch.uint8:
             raise ValueError(f"{name}: FP8 with a per-tensor scale; Flash Next reads MXFP8 (a scale every 32 inputs)")
@@ -330,6 +345,22 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         """Linears of one input as one face by their storage: bf16 rows on ``bf16.matmul``, MXFP8 on the lane matmul."""
 
         got = [dense(*p) for p in parts]
+        if any(isinstance(s, tuple) for _, s in got):     # block FP8: its own lane-matmul face; bf16 parts beside it
+            from tensorfold.cuda.nvfp4.linear import Concat, Fp8BlockLinear
+
+            runs: list[list] = []
+            for w, s in got:
+                kind = "block" if isinstance(s, tuple) else "bf16" if s is None else "mx"
+                if kind == "mx":
+                    raise ValueError(f"{parts[0][0]}: a projection stack mixes MXFP8 and block FP8 weights")
+                if runs and runs[-1][0] == kind:
+                    runs[-1][1].append((w, s))
+                else:
+                    runs.append([kind, [(w, s)]])
+            faces = [Fp8BlockLinear.from_rows(torch.cat([w for w, _ in ws]), torch.cat([s[1] for _, s in ws]))
+                     if kind == "block" else b16_rows(torch.cat([w for w, _ in ws]).to(torch.bfloat16))
+                     for kind, ws in runs]
+            return faces[0] if len(faces) == 1 else Concat(faces)
         if all(s is None for _, s in got):
             faces = [b16_rows(w.to(torch.bfloat16)) for w, _ in got]
             return faces[0] if len(faces) == 1 else stack_b16(faces)
@@ -401,6 +432,24 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return PLEW(table, b16(name + ".key_proj"), b16(name + ".value_proj"),
                     cscale(name + ".norm_key.weight"), cscale(name + ".norm_query.weight"),
                     cscale(name + ".norm_conv.weight"), conv.contiguous(), ngram)
+
+    def weight_bf16(name: str, index: torch.Tensor | None = None) -> torch.Tensor:
+        """A linear's weight as bf16 rows: block FP8 (``weight_scale_inv``) dequantized in row chunks, else cast."""
+
+        full = raw(name + ".weight")
+        w = full if index is None else full.index_select(0, index)
+        if w.dtype != torch.float8_e4m3fn or not rd.has(prefix + name + ".weight_scale_inv"):
+            return w.to(torch.bfloat16)
+        from tensorfold.cuda.nvfp4.linear import Fp8BlockLinear
+
+        cols = Fp8BlockLinear.column_scales(raw(name + ".weight_scale_inv"), *full.shape)
+        if index is not None:
+            cols = cols.index_select(0, index)
+        out = torch.empty(w.shape, dtype=torch.bfloat16, device=w.device)
+        for r in range(0, w.shape[0], 16384):
+            blk = w[r:r + 16384].float().view(-1, w.shape[1] // 64, 64) * cols[r:r + 16384, :, None]
+            out[r:r + 16384] = blk.view(-1, w.shape[1]).to(torch.bfloat16)
+        return out
 
     def b16_rows(t: torch.Tensor):
         return b16_from_rows(t.to(torch.bfloat16).contiguous())
@@ -562,8 +611,15 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                 torch.cuda.empty_cache()
         mixer = (hc_nvfp4 if cfg.quant == "modelopt" else hc)(mbase + "hyper_connection_mixer", False)
         vl = full.vocab // world
-        if cfg.quant == "modelopt":
-            head = b16_rows(raw("lm_head.weight").to(torch.bfloat16)[rank * vl:(rank + 1) * vl])
+        if cfg.quant == "modelopt" and rd.has(prefix + "lm_head.weight_scale_inv"):     # block FP8: its stored bytes
+            from dataclasses import replace
+
+            from tensorfold.cuda.nvfp4.linear import Fp8BlockLinear
+
+            head = replace(Fp8BlockLinear.from_checkpoint(raw("lm_head.weight"), raw("lm_head.weight_scale_inv")),
+                           lane=True)
+        elif cfg.quant == "modelopt":
+            head = b16_rows(weight_bf16("lm_head")[rank * vl:(rank + 1) * vl])
         else:
             head_raw = triple("lm_head")
             head = make_q4(*_rows(head_raw, rank * vl, (rank + 1) * vl))
@@ -576,7 +632,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             ids = torch.from_numpy(ids).to(device)
             draft_ids = ids
             if cfg.quant == "modelopt":
-                draft_head = quantize4(raw("lm_head.weight").index_select(0, ids).to(torch.bfloat16))
+                draft_head = quantize4(weight_bf16("lm_head", ids))
             else:
                 draft_head = make_q4(*_rows_at(triple("lm_head"), ids))
         inv = torch.tensor(cfg.rope_theta, dtype=torch.float64) ** (

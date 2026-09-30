@@ -178,6 +178,63 @@ def test_per_row_projections_do_not_depend_on_the_row_count(nib, half, monkeypat
         assert mx.array_equal(one[1][:1], gates[r:r + 1]).item(), r
 
 
+@pytest.mark.parametrize("inject", [True, False])
+def test_hyper_connection_tiles_keep_the_per_row_bits(inject):
+    """Before M5 rows.hc_project takes 8-row tiles from HC_MMA_FROM rows: every row keeps the per-row kernels' bits."""
+
+    from tensorfold.kernels.qwen.flash_next.v1 import row_tiles, rows
+
+    S, D, LOW = 4, 2560, 320
+    rng = np.random.default_rng(71 + inject)
+    down, up = _qweights(rng, LOW + (S if inject else 0), S * D), _qweights(rng, S * D, LOW)
+    scale = mx.array((1.0 + 0.1 * rng.normal(size=(S * D,))).astype(np.float32))
+    eps = mx.array([1e-6], dtype=mx.float32)
+    h = mx.array((0.3 * rng.normal(size=(40, S * D))).astype(np.float32)).astype(mx.bfloat16)
+    hn, ssp = hc.hc_norm(h, streams=S)
+    rows._hc_mma_ok.clear()                           # another test's check (patched kernels) never answers this one
+    exact = rows._hc_mma_exact(down, up, scale, eps, S, LOW)
+    if base.nib_rows():                               # before M5 the dispatch must take the tiles
+        assert exact
+    for n in (1, 2, 3, 5, 8, 9, 16, 17, 32, 40):
+        tiles = row_tiles.hc_tiles(hn[:n], ssp[:n], down, up, scale, eps=eps, streams=S, low=LOW)
+        per_row = rows._hc_rows(hn[:n], ssp[:n], down, up, scale, eps=eps, streams=S, low=LOW)
+        if exact:
+            assert mx.array_equal(tiles[0], per_row[0]).item(), n
+            if inject:
+                assert mx.array_equal(tiles[1][:n], per_row[1][:n]).item(), n
+        called = rows.hc_project(hn[:n], ssp[:n], down, up, scale, eps=eps, streams=S, low=LOW)
+        assert mx.array_equal(called[0], per_row[0]).item(), n
+
+
+def test_windows_are_checked_with_the_tiles_and_timed_without(monkeypatch):
+    """check_windows checks exactness on the tiles and times the per-row kernels, whose costs the allocator prices."""
+
+    from types import SimpleNamespace
+
+    from tensorfold.families.qwen4_exp.runtime import FlashNext
+    from tensorfold.kernels.qwen.flash_next.v1 import row_tiles, rows
+
+    seen = []
+
+    def hidden(tokens, cache):
+        seen.append(rows.hc_tiles_on)
+        return mx.array(np.asarray(tokens, dtype=np.float32)[..., None])      # [1, R, 1]: row r is its token
+
+    fake = SimpleNamespace(model=SimpleNamespace(make_cache=list, hidden=hidden), head=lambda h: h, fused_rows=4,
+                           _check_streams=lambda base, window: True)
+    assert FlashNext.check_windows(fake)[0] == 4
+    assert seen == [True] * 8 + [False] * 12 and rows.hc_tiles_on    # prompt, 4 serial steps, widths 2-4; then timing
+    monkeypatch.setattr(row_tiles, "hc_tiles", lambda *a, **k: pytest.fail("tiles while they are off"))
+    monkeypatch.setattr(rows, "hc_tiles_on", False)
+    S, LOW = 4, 320
+    rng = np.random.default_rng(5)
+    down, up = _qweights(rng, LOW + S, S * 2560), _qweights(rng, S * 2560, LOW)
+    h = mx.array((0.3 * rng.normal(size=(16, S * 2560))).astype(np.float32)).astype(mx.bfloat16)
+    hn, ssp = hc.hc_norm(h, streams=S)
+    scale, eps = mx.ones((S * 2560,), dtype=mx.float32), mx.array([1e-6], dtype=mx.float32)
+    mx.eval(rows.hc_project(hn, ssp, down, up, scale, eps=eps, streams=S, low=LOW))
+
+
 @pytest.mark.parametrize("has_state", [True, False])
 def test_gdn_pipelined_rows_equal_the_row_by_row_kernel(has_state, monkeypatch):
     """The three-phase GDN step gives the row-by-row kernel's outputs and states bit for bit."""

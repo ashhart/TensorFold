@@ -8,7 +8,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("CUDA only", allow_module_level=True)
 
-from tensorfold.cuda import experts as grouped  # noqa: E402
+from tensorfold.cuda import experts as grouped, prompt_precision  # noqa: E402
 from tensorfold.cuda.moe import Routed  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
 from tensorfold.families.qwen3_5.cuda.decode import draft_decode, prefill as serial_prefill  # noqa: E402
@@ -102,10 +102,19 @@ def test_mtp_decode_equals_serial(monkeypatch, oracle):
             monkeypatch.undo()
 
 
-def test_prefill_chunks_give_the_same_state_and_head_cache(monkeypatch):
+@pytest.fixture(params=[False, True], ids=["bf16", "fp8"])
+def fp8(request):
+    """bf16 prompts (the default), then --prefill-fp8."""
+
+    with prompt_precision.using(request.param):
+        yield request.param
+
+
+def test_prefill_chunks_give_the_same_state_and_head_cache(monkeypatch, fp8):
     from tensorfold.families.qwen3_5.cuda import prefill as prefill_mod
 
     w, head = _model()
+    assert w.fast_prefill                                               # the FP8 prompt path exists for --prefill-fp8
     prompt = list(range(20, 43))
     st, mc, first, carry = decode.prefill(w, head, prompt, None)
     monkeypatch.setattr(prefill_mod, "CHUNK", 5)
@@ -116,7 +125,7 @@ def test_prefill_chunks_give_the_same_state_and_head_cache(monkeypatch):
     assert torch.equal(carry.states, carry2.states) and carry.tokens == carry2.tokens
 
 
-def test_a_prompt_resumed_at_a_kept_start_equals_fresh():
+def test_a_prompt_resumed_at_a_kept_start_equals_fresh(fp8):
     """The state, head cache and held row kept at a stop resume another prompt with that prefix to fresh bits."""
 
     w, head = _model()

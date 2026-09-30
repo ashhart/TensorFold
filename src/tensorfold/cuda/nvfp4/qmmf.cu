@@ -1,5 +1,5 @@
-// Lane matmul for NVFP4 and FP8 weights (W4A16 / W8A16), exact weights in bf16 MMAs: per 16 inputs (NVFP4) or 32
-// (MXFP8) acc = fma(P, block scale, acc), per tensor one final scale; K slices set by shape, so no row affects another.
+// Lane matmul for NVFP4 and FP8 weights (W4A16 / W8A16), exact weights in bf16 MMAs: per 16 (NVFP4), 32 (MXFP8) or 64
+// inputs (FP8G: fp32 scales) acc = fma(P, block scale, acc), one tensor scale; K slices by shape, no row affects another.
 
 #include <ATen/ATen.h>
 #include <algorithm>
@@ -15,7 +15,7 @@ namespace {
 
 using namespace qmm_frag;
 
-enum Mode : int { FP4 = 0, FP8 = 1, MXFP8 = 2 };
+enum Mode : int { FP4 = 0, FP8 = 1, MXFP8 = 2, FP8G = 3 };
 
 constexpr int GS = 64;                                    // inputs a pipeline stage
 
@@ -52,7 +52,7 @@ struct Tile {
     static constexpr int CHUNKS = ROW / 16;
     static constexpr int X = BM * ROW;
     static constexpr int W = MODE == FP4 ? BN * GS / 2 : BN * GS;
-    static constexpr int S = MODE == FP4 ? BN * 4 : MODE == MXFP8 ? BN * 2 : 0;   // block scales a group
+    static constexpr int S = MODE == FP4 || MODE == FP8G ? BN * 4 : MODE == MXFP8 ? BN * 2 : 0;   // block scales a group
     static constexpr int STAGE = (X + W + S + 127) / 128 * 128;   // on 128-byte lines: shifted stages slow FP8
     static constexpr int PARTIALS = MT * NT * 4 * THREADS * 4;
     static constexpr int SMEM = STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS;
@@ -122,7 +122,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         for (int j = 0; j < T::NT; ++j) {
             const int jj = wn * T::NT + j;
             const int col = wn * (BN / WN) + j * 8 + (lane & 3) * 2;
-            if constexpr (MODE == FP4) {
+            if constexpr (MODE == FP4 || MODE == FP8G) {   // FP8G: the two columns' fp32 scale bits
                 const uint2 v = *reinterpret_cast<const uint2*>(ps + col * 4);
                 sq[j][0] = v.x;
                 sq[j][1] = v.y;
@@ -162,17 +162,22 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
 #pragma unroll
                 for (int i = 0; i < T::MT; ++i) {
                     if constexpr (MODE == FP8) mma(acc[i][j], a[i], b0, b1);
-                    else if (MODE == FP4 || (kt & 1) == 0) mma0(d[i][j], a[i], b0, b1);
+                    else if (MODE == FP4 || (MODE == MXFP8 && (kt & 1) == 0) || (MODE == FP8G && kt == 0))
+                        mma0(d[i][j], a[i], b0, b1);
                     else mma(d[i][j], a[i], b0, b1);
                 }
             }
-            if constexpr (MODE == FP4 || MODE == MXFP8) {
-                if (MODE == FP4 || (kt & 1)) {             // a block's products, scaled into acc in block order
+            if constexpr (MODE == FP4 || MODE == MXFP8 || MODE == FP8G) {
+                if (MODE == FP4 || (MODE == MXFP8 && (kt & 1)) || (MODE == FP8G && kt == GS / 16 - 1)) {
+                    // a block's products, scaled into acc in block order
                     const int blk = MODE == FP4 ? kt : kt / 2;
 #pragma unroll
                     for (int j = 0; j < T::NT; ++j) {
                         float s0, s1;
-                        if constexpr (MODE == FP4) {
+                        if constexpr (MODE == FP8G) {
+                            s0 = __uint_as_float(sq[j][0]);
+                            s1 = __uint_as_float(sq[j][1]);
+                        } else if constexpr (MODE == FP4) {
                             s0 = e4m3f(static_cast<uint8_t>(sq[j][0] >> (8 * blk)));
                             s1 = e4m3f(static_cast<uint8_t>(sq[j][1] >> (8 * blk)));
                         } else {
@@ -325,7 +330,8 @@ void qmmf_cuda(const at::Tensor& x, const at::Tensor& w, const at::Tensor& bs, d
     const int n = static_cast<int>(N), k = static_cast<int>(K), sk = static_cast<int>(SK), np = static_cast<int>(npad);
     if (mode == FP4) by_output<FP4>(static_cast<int>(bm), f32, cluster, x, w, bs, scale, out, part, n, k, sk, np);
     else if (mode == FP8) by_output<FP8>(static_cast<int>(bm), f32, cluster, x, w, bs, scale, out, part, n, k, sk, np);
-    else by_output<MXFP8>(static_cast<int>(bm), f32, cluster, x, w, bs, scale, out, part, n, k, sk, np);
+    else if (mode == MXFP8) by_output<MXFP8>(static_cast<int>(bm), f32, cluster, x, w, bs, scale, out, part, n, k, sk, np);
+    else by_output<FP8G>(static_cast<int>(bm), f32, cluster, x, w, bs, scale, out, part, n, k, sk, np);
     if (SK > 1 && !cluster) {
         const long long total = static_cast<long long>(x.size(0)) * N;
         const int threads = 256, blocks = static_cast<int>((total + threads - 1) / threads);

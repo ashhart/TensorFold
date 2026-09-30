@@ -6,7 +6,7 @@ from typing import Sequence
 
 import torch
 
-from tensorfold.cuda import moe
+from tensorfold.cuda import moe, prompt_precision
 from tensorfold.cuda.kernels import gdn as deltanet
 from tensorfold.cuda.kernels import qmm as shared
 from tensorfold.cuda.kernels.prefill_attention import attention
@@ -23,13 +23,15 @@ TAP_LAYERS = (5, 19, 33, 47, 61)
 
 
 def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
-    """``x``: e4m3 inputs with group sums and row scales from ``prefill_glue``, or bf16 rows from ``prefill_bf16``."""
+    """``x``: bf16 rows (``prefill_bf16``), or e4m3 rows with group sums and row scales (``prefill_glue``, FP8)."""
 
-    if not isinstance(w, QLinear):
-        return w.prefill(x)                               # an EXL3 pack's projection
     if isinstance(x, tuple):
-        return shared.prefill_matmul8(x, tile(w), f32=f32)
-    packed = tile(w)                                      # an affine format past the FP8 four-bit path
+        return shared.prefill_matmul8(x, tile(w), f32=f32) if isinstance(w, QLinear) else w.prefill8(x)
+    if not isinstance(w, QLinear):
+        return w.prefill(x)                               # an EXL3 pack's or an NVFP4 checkpoint's projection
+    packed = tile(w)
+    if packed.fast:                                       # each weight rounded once to bf16, one fp32 chain over K
+        return shared.prefill_matmul(x, packed, f32=f32, tile=shared.prompt_tile(x.shape[0], packed.n))
     return matmul_partial(x, packed) if f32 else matmul(x, packed)
 
 
@@ -60,7 +62,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
     """Commit ``tokens`` at [st.pos, st.pos + W) into ``st`` without writing through its entries (``every``: all rows' final normed states; ``cut``: also the state after the first ``cut`` rows, the GDN chains run as two launches with one launch's bits)."""
 
     c = w.config
-    pg = prefill_glue if w.fast_prefill else prefill_bf16         # FP8 inputs only where every projection is 4-bit g64
+    pg = prefill_glue if w.fast_prefill and prompt_precision.fp8() else prefill_bf16   # e4m3 rows when prompts take FP8
     W = int(tokens.shape[0])
     if not 0 <= cut < W:
         raise ValueError(f"cut {cut} is not inside a chunk of {W} rows")

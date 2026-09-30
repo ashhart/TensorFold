@@ -107,6 +107,54 @@ def test_cuda_admission_metadata_does_not_enlarge_the_engine_cache(tmp_path, mon
     assert "context: 8185" in capsys.readouterr().out
 
 
+def test_the_prompt_precision_flag_parses_and_help_states_the_default():
+    from tensorfold.cuda import prompt_precision
+
+    parser = cli.build_parser()
+    assert getattr(parser.parse_args(["serve", "owner/model"]), "prefill_fp8", None) is None   # the default applies
+    assert parser.parse_args(["serve", "owner/model", "--prefill-fp8"]).prefill_fp8 is True
+    assert parser.parse_args(["serve", "owner/model", "--no-prefill-fp8"]).prefill_fp8 is False
+    default = "FP8" if prompt_precision.FP8_BY_DEFAULT else "bf16"         # one constant picks the default
+    serve = next(a for a in parser._actions if a.dest == "command").choices["serve"]
+    flag = next(a for a in serve._actions if a.dest == "prefill_fp8")
+    assert "e4m3" in flag.help and f"Default: {default} activations" in flag.help   # --help states both precisions
+
+
+@pytest.mark.parametrize("fast,flags,fp8", [(True, [], None), (True, ["--prefill-fp8"], True),
+                                            (True, ["--no-prefill-fp8"], False), (False, ["--prefill-fp8"], True),
+                                            (False, [], None), (False, ["--no-prefill-fp8"], False)])
+def test_the_prompt_precision_is_set_before_loading_and_shown(tmp_path, monkeypatch, capsys, fast, flags, fp8):
+    """The switch is set before the engine loads (None: the default); a checkpoint without an FP8 prompt kernel
+    refuses the flag by name and serves bf16 prompts otherwise."""
+
+    import tensorfold.cuda.server as server
+    from tensorfold.cuda import prompt_precision
+
+    asked = prompt_precision.FP8_BY_DEFAULT if fp8 is None else fp8
+    seen = []
+
+    def engine(*a, **k):
+        seen.append(prompt_precision.fp8())
+        return SimpleNamespace(max_len=8192, w=SimpleNamespace(fast_prefill=fast))
+
+    family = _family(cuda_engine=engine)
+    family.model_type = "test"
+    monkeypatch.setattr(server, "App", lambda *a, **k: SimpleNamespace(effective_context_window=8185))
+    monkeypatch.setattr(server, "serve", lambda *a: None)
+    args = cli.build_parser().parse_args(["serve", str(tmp_path), "--backend", "cuda", "--no-drafts"] + flags)
+    try:
+        if not fast and flags == ["--prefill-fp8"]:
+            with pytest.raises(ValueError, match="no FP8 kernel"):
+                cli._serve_cuda(args, family, tmp_path, 8192)
+        else:
+            assert cli._serve_cuda(args, family, tmp_path, 8192) == 0
+            shown = "FP8 activations" if asked and fast else "bf16 activations"
+            assert f"prompts: {shown}" in capsys.readouterr().out
+        assert seen == [asked]
+    finally:
+        prompt_precision.set_fp8(prompt_precision.FP8_BY_DEFAULT)
+
+
 def test_serve_parses_the_kv_cache_flag():
     plain = cli.build_parser().parse_args(["serve", "owner/model"])
     assert plain.kv_dtype == "bf16"                        # the cache stays bf16 unless it is asked for
@@ -153,11 +201,14 @@ def test_kv_dtype_reaches_only_the_families_that_declare_it(tmp_path, monkeypatc
     (["--mtp-confidence", "0.6"], "cuda", "nemotron_h", "on CUDA has no such rule"),
     (["--mtp-confidence", "1.5"], "cuda", "qwen4_exp", "probability from 0 to 1"),
     (["--mtp-confidence", "-0.1"], "cuda", "qwen4_exp", "probability from 0 to 1"),
+    (["--prefill-fp8"], "mlx", "qwen3_5", "Qwen3.8 dense on MLX has none"),
+    (["--prefill-fp8"], "cuda", "nemotron_h", "on CUDA has none"),
+    (["--prefill-fp8"], "cuda", "glm5_next", "on CUDA has none"),
 ])
 def test_cache_and_confidence_options_are_refused_before_any_download(tmp_path, monkeypatch, flags, backend, family,
                                                                       message):
-    """Every family and backend answers ``--kv-dtype`` and ``--mtp-confidence``: served as asked, or refused by name
-    before a weight moves; none ignores them."""
+    """Every family and backend answers ``--kv-dtype``, ``--mtp-confidence`` and ``--prefill-fp8``: served as asked,
+    or refused by name before a weight moves; none ignores them."""
 
     import importlib
 

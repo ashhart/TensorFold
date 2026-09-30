@@ -100,13 +100,54 @@ def test_prompts_that_extend_a_finished_stream_resume_from_its_slot(sampling, kv
     first = run(PROMPTS[1], 12)
     longer = PROMPTS[1] + first.out[:-1] + [42, 43]          # the reply's committed tokens, then new ones
     warm = run(longer, 10)
-    assert warm.cached == len(PROMPTS[1]) and warm.out == fresh(longer, 10)       # the reply prefills again
+    assert warm.cached == len(PROMPTS[1]) - 1 and warm.out == fresh(longer, 10)   # kept one token early
+    same = run(longer, 10)                                    # the same prompt again: all but its last token kept
+    assert same.cached == len(longer) - 1 and same.out == warm.out
     ext = PROMPTS[0] + [7, 8]                                 # a prompt kept at admission, extended
     run(PROMPTS[0], 6)
     other = run(ext, 8)
     assert other.cached > 0 and other.out == fresh(ext, 8)
     serial = run(longer, 10, draft=False)
     assert serial.cached == 0 and serial.out == warm.out
+
+
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
+def test_packed_passes_keep_each_prompt_one_token_early(kv_dtype):
+    """Prompts sharing passes keep a fresh prefill's state one token early; a resend or a next turn resumes there."""
+
+    w = _model(5)
+    g = torch.Generator().manual_seed(13)
+    long = torch.randint(1, V, (70,), generator=g).tolist()
+    # 32-row passes: three points inside the first, one inside the long prompt's third piece, one ending a piece
+    prompts = [PROMPTS[3], PROMPTS[1], [13, 400, 9, 21], long, [(5 * i + 2) % (V - 1) + 1 for i in range(12)]]
+    samplings = [None, Sampling(seed=8, top_k=20, top_p=0.95), None, Sampling(seed=9, top_k=20, top_p=0.95), None]
+
+    def fresh(prompt, sampling):
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype)
+        return serial_decode(e, prefill(e, prompt, sampling), 12, sampling).tokens
+
+    dec = MultiDecoder(w, slots=5, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype, prefill_rows=32)
+    streams = [Stream(p, 12, smp) for p, smp in zip(prompts, samplings)]
+    for s in streams:
+        dec.admit(s)
+    while dec.live():
+        dec.finish(dec.round())
+    assert [s.out for s in streams] == [fresh(p, smp) for p, smp in zip(prompts, samplings)]
+    for p in prompts:                                        # what a fresh prefill of all but the last token leaves
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype)
+        prefill(e, p[:-1], None)
+        want = e.st.snapshot()
+        _, _, snap, tail = next(k for k in dec.kept if k[0] == p[:-1])
+        assert all(torch.equal(snap[k], want[k]) for k in ("rec", "conv", "ple_tail")), len(p)
+        assert (snap["pos"], snap["mtp_len"]) == (want["pos"], want["mtp_len"]), len(p)
+        assert torch.equal(tail, e.last_streams), len(p)
+    for p, smp in zip(prompts, samplings):
+        for q in (p, p[:-1] + [271, 77]):                    # the same prompt again, then a next turn
+            s = Stream(list(q), 12, smp)
+            dec.admit(s)
+            while dec.live():
+                dec.finish(dec.round())
+            assert s.cached == len(p) - 1 and s.out == fresh(q, smp), (len(p), q[-2:])
 
 
 @pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])

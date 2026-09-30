@@ -150,6 +150,8 @@ def make_handler(app: App):
                     emit(result["final"])
                 if result["calls"]:
                     for i, call in enumerate(result["calls"]):
+                        if i < result.get("calls_streamed", 0):      # sent as deltas already
+                            continue
                         emit({"tool_calls": [{"index": i, "id": call["id"], "type": "function",
                                               "function": {"name": call["function"]["name"],
                                                            "arguments": call["function"]["arguments"]}}]})

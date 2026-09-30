@@ -212,15 +212,18 @@ class Weights:
 
     @cached_property
     def fast_prefill(self) -> bool:
+        """Whether every projection has an FP8 prompt kernel (run when prompts take FP8)."""
+
         if self.quant == "exl3":                     # an EXL3 pack's prompt glue stays in bf16
             return False
-        if self.quant == "nvfp4":                    # NVFP4, FP8 and the gates' copies all take FP8 prompt rows
-            return True
         for layer in self.layers:
             modules = [m for m in (layer.gate, layer.up, layer.down) if m is not None]    # a MoE layer's are None
             modules += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []
             modules += [layer.attn.q, layer.attn.k, layer.attn.v, layer.attn.o] if layer.attn else []
-            if any(not q.fast for q in modules):
+            if self.quant == "nvfp4":                # NVFP4 and FP8 have one; bf16 gates only with their e4m3 copies
+                if any(not hasattr(q, "prefill8") for q in modules):
+                    return False
+            elif any(not q.fast for q in modules):
                 return False
         return True
 

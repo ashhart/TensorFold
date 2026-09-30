@@ -8,10 +8,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorfold.cuda import prompt_precision
 from . import CONFIDENCE, DEPTH
 
 MAX_DEPTH = 15           # a verify window of at most 16 rows
-KEEP = 8                 # prompt ends a concurrent decoder keeps to resume from
+KEEP = 8                 # prompt states (one token before each end) a concurrent decoder keeps to resume from
 
 
 class FlashNextEngine:
@@ -164,11 +165,12 @@ class FlashNextEngine:
 
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
-                             len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype]],
-                            dtype=torch.int64, device="cuda")
+                             len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype],
+                             int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
         both = both.view(2, -1).cpu()
+        prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
                                f"draft vocabulary, KV cache): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
@@ -286,14 +288,15 @@ class FlashNextEngine:
                 stop_eos: bool = True, probabilities=None) -> dict[str, Any]:
         import torch
 
-        from .decode import mtp_decode, prefill, serial_decode
+        from .decode import entry_end, mtp_decode, prefill, serial_decode
 
         t0 = time.perf_counter()
         self._start_from(hit)
-        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint, probabilities=probabilities)
-        # the prompt's state: the MTP head has absorbed every position but the last, whose streams resume needs
-        self._remember(list(prompt), {"state": self.e.st.snapshot(),
-                                      "tail": self.e.last_streams.clone() if self.e.mbuf is not None else None})
+        end = entry_end(prompt)
+        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint,
+                        probabilities=probabilities, keep_at=end)
+        # the state one token before the prompt's end, so the same prompt or a next turn resumes from it
+        self._remember(list(prompt[:end]), self.e.kept)
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                                  "drafts": True}
@@ -312,9 +315,7 @@ class FlashNextEngine:
     def generate(self, prompt: list[int], max_tokens: int, sampling,
                  on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None,
                  stop_eos: bool = True, background: bool = False, probabilities=None) -> dict[str, Any]:
-        """``draft=False``: one token a round with no MTP drafts, from a fresh prefill that leaves the kept states
-        alone: the serial reference. ``stop_eos=False``: past end tokens (``ignore_eos``). ``background``: under
-        ``--parallel``, after the other requests and yielding a lane to one that waits."""
+        """``draft=False``: one token a round, no MTP drafts; ``background``: last, yielding lanes to waiting ones."""
 
         max_tokens = self._limit(prompt, max_tokens)
         if probabilities is not None and not self.supports_logprobs:

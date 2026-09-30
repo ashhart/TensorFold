@@ -115,6 +115,30 @@ def test_two_ranks_with_different_caches_refuse_to_start(fake_runtime, peer):  #
         rank("int8", Comm(theirs.sent))._same_settings(torch, None)
 
 
+def test_two_ranks_with_different_prompt_precision_refuse_to_start(fake_runtime):  # noqa: F811
+    from tensorfold.cuda import prompt_precision
+    from tensorfold.families.qwen4_exp.cuda.engine import FlashNextEngine
+
+    class Comm:
+        def __init__(self, other=None):
+            self.other, self.sent = other, None
+
+        def all_gather(self, send, recv):
+            self.sent = send.clone()
+            recv.copy_(torch.cat([send, send if self.other is None else self.other]))
+
+    def rank(comm):
+        obj = FlashNextEngine.__new__(FlashNextEngine)
+        obj.depth, obj.confidence, obj.max_len, obj.kv_dtype, obj.comm = 6, 0.3, 8192, "bf16", comm
+        return obj
+
+    theirs = Comm()
+    with prompt_precision.using(True):                        # rank 1 started with --prefill-fp8
+        rank(theirs)._same_settings(torch, None)
+    with prompt_precision.using(False), pytest.raises(RuntimeError, match="prompt precision.*--prefill-fp8"):
+        rank(Comm(theirs.sent))._same_settings(torch, None)
+
+
 @pytest.mark.parametrize("confidence", [-0.1, 1.5])
 def test_a_draft_confidence_outside_0_to_1_is_refused_before_loading(tmp_path, fake_runtime, confidence):  # noqa: F811
     checkpoint(tmp_path, small_config(), WEIGHTS)

@@ -15,7 +15,7 @@ from tensorfold.cuda.sampling import comm_gather, nucleus_rows, sample_rows
 from tensorfold.engine.exact_sampling import MARGIN, Sampling, choose_rows
 
 from . import CONFIDENCE, DEPTH
-from .forward import commit, forward
+from .forward import Cut, commit, cut_snapshot, forward
 from .state import CAND, Buffers, State
 from .mtp import mtp_forward
 from .weights import Weights
@@ -113,6 +113,12 @@ def _gathered_fits(sampling: Sampling | None) -> bool:
 
 
 PREFILL_ROWS = 2048      # rows of a prompt chunk
+
+
+def entry_end(prompt: Sequence[int]) -> int:
+    """Where a prompt's kept state ends: one token early, since a next turn sent back without its reasoning renders ``<think>`` and two newlines there."""
+
+    return max(1, len(prompt) - 1)
 
 
 class Engine:
@@ -274,34 +280,47 @@ def prefill_begin(e: Engine, prompt: Sequence[int], *, mtp: bool = True, resume:
 
 
 @torch.no_grad()
-def prefill_chunk(e: Engine, prompt: Sequence[int], start: int, *, mtp: bool = True) -> torch.Tensor | None:
-    """Commit up to ``e.prefill_rows`` rows from ``start``; the prompt's last chunk returns its last row's logits."""
+def prefill_chunk(e: Engine, prompt: Sequence[int], start: int, *, mtp: bool = True,
+                  keep_at: int | None = None) -> torch.Tensor | None:
+    """Commit up to ``e.prefill_rows`` rows from ``start`` (the last chunk returns its logits); a chunk holding ``keep_at`` sets ``e.kept``."""
 
     w, st, pb = e.w, e.st, e.pbuf
-    chunk = list(prompt[start:start + e.prefill_rows])
+    end = min(start + e.prefill_rows, len(prompt))
+    chunk = list(prompt[start:end])
     R = len(chunk)
-    final = start + R >= len(prompt)
+    final = end == len(prompt)
+    point = keep_at - start if keep_at is not None and start < keep_at <= end else 0     # the kept point's row
+    cut = Cut(point) if 0 < point < R else None           # inside the chunk, not at its end
     # only the prompt's last row is sampled: the head runs on the final chunk alone
-    logits = forward(w, st, pb, chunk, logits=final)
+    logits = forward(w, st, pb, chunk, logits=final, cut=cut)
     last = logits.clone() if final else None
     e.last_streams = pb.streams[R - 1:R].clone()
-    if _absorbs(e, mtp):
-        nxt = list(prompt[start + 1:start + R + 1])
-        if nxt:
-            mtp_forward(w, st, pb, nxt, pb.streams[:len(nxt)])
-            st.set_mtp_len(st.mtp_len + len(nxt))
+    use_mtp = _absorbs(e, mtp)
+    if point:                    # before the MTP head writes the streams: the point's tail, its state inside the chunk
+        mtp_len = st.mtp_len + point - 1 if use_mtp else st.mtp_len       # every row but the point's last
+        tail = pb.streams[point - 1:point].clone() if use_mtp else None
+        snap = cut_snapshot(w, st, pb, cut, mtp_len) if cut is not None else None
+    nxt = list(prompt[start + 1:end + 1])
+    if use_mtp and nxt:
+        mtp_forward(w, st, pb, nxt, pb.streams[:len(nxt)])
+        st.set_mtp_len(st.mtp_len + len(nxt))
     commit(w, st, pb, R, R)
+    if point:                                            # as a fresh prefill of prompt[:keep_at] leaves it
+        e.kept = {"state": snap if snap is not None else {**st.snapshot(), "mtp_len": mtp_len}, "tail": tail}
     return last
 
 
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True,
-            resume: dict | None = None, constraint=None, probabilities=None) -> int:
-    """Commit the prompt in chunks, sample the first token; rows ignore chunking, so ``resume`` equals a fresh run."""
+            resume: dict | None = None, constraint=None, probabilities=None, keep_at: int | None = None) -> int:
+    """Commit the prompt in chunks and sample the first token (``resume`` equals a fresh run); ``e.kept`` resumes prompt[:keep_at]."""
 
     start, last = prefill_begin(e, prompt, mtp=mtp, resume=resume), None
+    if keep_at is not None and not start <= keep_at <= len(prompt):
+        raise ValueError(f"keep_at {keep_at} is outside the prefilled range [{start}, {len(prompt)}]")
+    e.kept = resume if keep_at == start else None                 # the same prompt again: its own point
     while start < len(prompt):
-        last = prefill_chunk(e, prompt, start, mtp=mtp)
+        last = prefill_chunk(e, prompt, start, mtp=mtp, keep_at=keep_at)
         start += e.prefill_rows
     if constraint is not None:                           # a reply's grammar: this rank's vocabulary columns
         last = constraint.mask(last, None, e.w.meta.get("vocab_offset", 0))
@@ -319,9 +338,11 @@ WARM_TAIL = 18      # a partial chunk after a full one: neither its rows nor the
 
 @torch.no_grad()
 def warm(e: Engine) -> None:
-    """Prefill a synthetic prompt (a full chunk, then a partial one) and empty the state, so no request compiles or loads a prompt kernel."""
+    """Prefill a synthetic prompt (a full chunk, then a partial one cut at the kept point a row before its end) and empty the state, so no request compiles or loads a prompt kernel."""
 
-    prefill(e, [0] * min(e.prefill_rows + WARM_TAIL, e.capacity), None)
+    prompt = [0] * min(e.prefill_rows + WARM_TAIL + 1, e.capacity)
+    prefill(e, prompt, None, keep_at=entry_end(prompt))
+    e.kept = None
     e.reset()
 
 

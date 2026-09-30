@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorfold.cuda import prompt_precision
 from . import CONFIDENCE, DRAFTS
 
 
@@ -106,11 +107,12 @@ class NemotronEngine:
 
         ids = list(draft_ids) if draft_ids is not None else []
         digest = int.from_bytes(hashlib.sha256(" ".join(map(str, ids)).encode()).digest()[:7], "big")   # order too
-        mine = torch.tensor([self.drafts, round(self.confidence * 1e6), self.max_len, len(ids), digest],
-                            dtype=torch.int64, device="cuda")
+        mine = torch.tensor([self.drafts, round(self.confidence * 1e6), self.max_len, len(ids), digest,
+                             int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
         both = both.view(2, -1).cpu()
+        prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
                                f"draft ids): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
@@ -238,8 +240,7 @@ class NemotronEngine:
     def generate(self, prompt: list[int], max_tokens: int, sampling,
                  on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None,
                  stop_eos: bool = True) -> dict[str, Any]:
-        """``draft=False``: the serial reference, one token a round from a fresh prefill in the twin engine;
-        ``stop_eos=False``: past end tokens (``ignore_eos``)."""
+        """``draft=False``: serial one-token rounds from a fresh prefill; ``stop_eos=False``: past end tokens."""
 
         max_tokens = self._limit(prompt, max_tokens)
         hit = self._resume(prompt) if draft else None

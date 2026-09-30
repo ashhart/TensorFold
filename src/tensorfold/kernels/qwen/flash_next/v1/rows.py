@@ -6,6 +6,7 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels.qwen.flash_next.v1 import row_tiles
 from tensorfold.kernels.qwen.flash_next.v1.base import (AFFINE_HEADER, LANE_CODES, QDOT_HEADER, QWeights, by_rows,
                                                         count, edited, kernel)
 from tensorfold.kernels.qwen.flash_next.v1.hc import RINV
@@ -302,9 +303,48 @@ def qmv_rows_mma(x: mx.array, weights: Any, *, simdgroups: int = 8) -> mx.array:
     return out.reshape(*shape[:-1], n)
 
 
+HC_MMA_FROM = 8     # rows from which the tiles beat the per-row kernels inside a forward on the M3 (same bits)
+hc_tiles_on = True  # off while the runtime times its windows at load
+_hc_mma_ok: dict[tuple[int, ...], bool] = {}   # shape: the tiles give the per-row kernels' bits on this GPU
+
+
 def hc_project(h_new: mx.array, ssp: mx.array, down: QWeights, up: QWeights, norm_scale: mx.array, *,
                eps: mx.array, streams: int, low: int) -> tuple[mx.array, mx.array]:
-    """hc.hc_project with every row in its own threadgroups: (mixed [R, D], inject gates [max(R, 2), S])."""
+    """hc.hc_project with every row's bits its own one-row call's: (mixed [R, D], inject gates [max(R, 2), S])."""
+
+    if hc_tiles_on and int(h_new.shape[0]) >= HC_MMA_FROM and _hc_mma_exact(down, up, norm_scale, eps, streams, low):
+        return row_tiles.hc_tiles(h_new, ssp, down, up, norm_scale, eps=eps, streams=streams, low=low)
+    return _hc_rows(h_new, ssp, down, up, norm_scale, eps=eps, streams=streams, low=low)
+
+
+def _hc_mma_exact(down: QWeights, up: QWeights, norm_scale: mx.array, eps: mx.array, streams: int, low: int) -> bool:
+    """Whether the tiles give this shape's rows the per-row kernels' bits here (checked once, on 12 random rows)."""
+
+    key = (down.rows, down.cols, down.bits, down.group, up.rows, up.cols, up.bits, up.group, streams, low)
+    if key not in _hc_mma_ok:
+        _hc_mma_ok[key] = False
+        if down.q4 and up.q4 and (down.cols // streams) % 32 == 0:
+            from tensorfold.kernels.qwen.flash_next.v1.hc import hc_norm
+
+            h = (mx.random.normal((12, down.cols), key=mx.random.key(3)) * 0.3).astype(mx.bfloat16)
+            hn, ssp = hc_norm(h, streams=streams)
+            want = _hc_rows(hn, ssp, down, up, norm_scale, eps=eps, streams=streams, low=low)
+            try:
+                got = row_tiles.hc_tiles(hn, ssp, down, up, norm_scale, eps=eps, streams=streams, low=low)
+                same = bool(mx.array_equal(want[0], got[0]).item())
+                if down.rows > low:                   # the gates exist only with inject rows
+                    same = same and bool(mx.array_equal(want[1][:12], got[1][:12]).item())
+            except Exception as exc:  # noqa: BLE001 - a GPU the tiles don't build on keeps the per-row kernels
+                print(f"[flash-next] hyper-connection tiles unavailable here ({type(exc).__name__}): per-row kernels",
+                      flush=True)
+                same = False
+            _hc_mma_ok[key] = same
+    return _hc_mma_ok[key]
+
+
+def _hc_rows(h_new: mx.array, ssp: mx.array, down: QWeights, up: QWeights, norm_scale: mx.array, *,
+             eps: mx.array, streams: int, low: int) -> tuple[mx.array, mx.array]:
+    """Every row in its own threadgroups: 0.3.4.1's hyper-connection kernels."""
 
     rows, wide = h_new.shape
     dims = wide // streams

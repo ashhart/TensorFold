@@ -9,6 +9,8 @@ from pathlib import Path
 
 import torch
 
+from tensorfold.cuda import prompt_precision
+
 from .weights import Plain
 
 SUFFIXES = ("weight", "weight_packed", "weight_scale", "weight_scale_2", "weight_global_scale", "input_scale",
@@ -32,12 +34,12 @@ def skipped(name: str) -> bool:
 
 @dataclass
 class Plain8(Plain):
-    """A bf16 projection (the GDN gates): decode reads it as stored, prompts an e4m3 copy made at load."""
+    """A bf16 projection (the GDN gates) with an e4m3 copy made at load for --prefill-fp8's prompts."""
 
     rows8: object = None      # tensorfold.cuda.nvfp4.linear.Fp8Linear
 
-    def prefill(self, xq):
-        return self.rows8.prefill(xq)
+    def prefill8(self, xq):
+        return self.rows8.prefill8(xq)
 
     def nbytes(self) -> int:
         return super().nbytes() + self.rows8.nbytes()
@@ -56,20 +58,20 @@ def weight_bytes(name: str, info: dict) -> tuple[int, int]:
     if len(shape) == 2 and dtype in ("U8", "F8_E4M3") and not name.endswith("_scale"):
         shape[0] = -(-shape[0] // 128) * 128
     amount = math.prod(shape) * SIZES[dtype]
-    if name.endswith(("in_proj_a.weight", "in_proj_b.weight")) and len(shape) == 2:
+    if name.endswith(("in_proj_a.weight", "in_proj_b.weight")) and len(shape) == 2 and prompt_precision.fp8():
         npad = -(-shape[0] // 128) * 128
         amount += npad * shape[1] + shape[1] // 64 * npad * 2
     return amount, 0
 
 
 def admission(geometry):
-    """The MLX path's geometry plus the prompt staging of the widest NVFP4 projection, and the tensors' bytes."""
+    """The MLX path's geometry (FP8 prompts: plus the widest NVFP4 projection's e4m3 staging) and tensor bytes."""
 
     from tensorfold.cuda.geometry import with_fixed
 
     def with_staging(text):
         d, i = int(text["hidden_size"]), int(text["intermediate_size"])
-        return with_fixed(geometry(text), d * i + d * i // 32 + (4 << 20))
+        return with_fixed(geometry(text), d * i + d * i // 32 + (4 << 20)) if prompt_precision.fp8() else geometry(text)
 
     return with_staging, weight_bytes
 
@@ -114,7 +116,7 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
             return Fp8Linear.from_checkpoint(weight, float(s[0]))
         if kind == "bf16":
             w = weight.to(torch.bfloat16).contiguous()
-            return Plain8(w, rows8=Fp8Linear.from_bf16(w)) if prompt else Plain(w)
+            return Plain8(w, rows8=Fp8Linear.from_bf16(w)) if prompt and prompt_precision.fp8() else Plain(w)
         raise ValueError(f"{name}: {kind} projections are not read on Qwen3.8-27B yet")
 
     def get(name: str) -> torch.Tensor:

@@ -446,6 +446,7 @@ class FlashNext:
         import time
 
         from tensorfold.engine.lane_engine import LaneEngine
+        from tensorfold.kernels.qwen.flash_next.v1 import rows
 
         copy = LaneEngine.copy_single_cache
         widest = int(widest or self.fused_rows)
@@ -467,14 +468,19 @@ class FlashNext:
                 break
             exact = width
         costs: dict[int, float] = {}
-        for width in range(1, exact + 1):
-            best = float("inf")
-            for _ in range(3):
-                cache = copy(base)
-                started = time.perf_counter()
-                mx.eval(self.head(self.model.hidden(np.array([window[:width]], dtype=np.int64), cache)))
-                best = min(best, (time.perf_counter() - started) * 1e3)
-            costs[width] = round(best, 3)
+        # the allocator prices rounds at the per-row kernels' costs: at the tiles' cheaper 8+ rows, 2 streams lost 4%
+        before, rows.hc_tiles_on = rows.hc_tiles_on, False
+        try:
+            for width in range(1, exact + 1):
+                best = float("inf")
+                for _ in range(3):
+                    cache = copy(base)
+                    started = time.perf_counter()
+                    mx.eval(self.head(self.model.hidden(np.array([window[:width]], dtype=np.int64), cache)))
+                    best = min(best, (time.perf_counter() - started) * 1e3)
+                costs[width] = round(best, 3)
+        finally:
+            rows.hc_tiles_on = before
         if exact >= 2:
             self.exact_width = exact                         # hidden_multi's per-stream limit, for the check
             self.streams_exact = self._check_streams(base, window)

@@ -1,8 +1,4 @@
-"""``--checkpoint-slots`` on Qwen3.8-27B's CUDA engine with two streams: the concurrent decoder keeps the asked number of
-prompt states, the startup line names it, and the startup estimate holds each against the window.
-
-Needs ``TENSORFOLD_MLX_MODEL=<Vontra/Qwen3.8-27B-MLX-4bit dir>`` and ``TENSORFOLD_QWEN27_DRAFTER=<z-lab/Qwen3.8-27B-DFlash2
-dir>``; skipped otherwise. Two engines, one after the other, about 22 GB of GPU memory each."""
+"""``--checkpoint-slots`` on the 27B's two-stream CUDA engine (needs TENSORFOLD_MLX_MODEL and TENSORFOLD_QWEN27_DRAFTER)."""
 
 from __future__ import annotations
 
@@ -36,14 +32,16 @@ def _start(keep, capsys):
     del engine
     gc.collect()
     torch.cuda.empty_cache()
-    line = next(x for x in out.splitlines() if "streams of" in x)
+    line = next(x for x in out.splitlines() if "streams" in x and "prompt states kept" in x)
     estimate = float(re.search(r"startup estimate ([0-9.]+) GiB", out).group(1))
     return kept, line, estimate
 
 
 def test_the_concurrent_decoder_keeps_the_asked_prompt_states(capsys):
     kept, line, low = _start(None, capsys)
-    assert kept == 3 and line.endswith(f"2 streams of {CONTEXT} prompt/reply tokens, 3 prompt states kept")
+    assert kept == 3 and line.endswith(f"up to 2 streams, each growing to {CONTEXT} prompt/reply tokens while memory "
+                                       "lasts, 3 prompt states kept")
     kept, line, high = _start(5, capsys)
-    assert kept == 5 and line.endswith(f"2 streams of {CONTEXT} prompt/reply tokens, 5 prompt states kept")
-    assert high > low                              # two more kept states, each held against the window
+    assert kept == 5 and line.endswith(f"up to 2 streams, each growing to {CONTEXT} prompt/reply tokens while memory "
+                                       "lasts, 5 prompt states kept")
+    assert high > low                              # two more kept states' DeltaNet copies and first rows

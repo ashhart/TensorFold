@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Callable, Sequence
 
+from tensorfold.cuda import prompt_precision
 
 KEEP = 3             # prompt states a concurrent decoder keeps to resume from (each holds a DeltaNet copy)
 KEEP_ONE = 4         # prompt states one stream keeps (they share its attention buffers)
@@ -65,10 +66,11 @@ class Qwen27Engine:
             # both ranks must run the same calls: refuse to start when they were given different settings
             flags = torch.tensor([int(draft_dir is not None and tp_draft), max_rows, int(split_head), int(allow_copy),
                                   streams, -1 if context is None else int(context), int(bool(context_explicit)),
-                                  int(vision), keep],
+                                  int(vision), keep, int(prompt_precision.fp8())],      # precision last (same_on_ranks)
                                  dtype=torch.int64, device="cuda")
             both = torch.empty((2, flags.numel()), dtype=torch.int64, device="cuda")
             dist.all_gather_into_tensor(both, flags)
+            prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
             if not torch.equal(both[0], both[1]):
                 raise RuntimeError("the two ranks were started with different settings (two-rank drafter, rows, "
                                    f"head split, copies, --parallel, --context, --checkpoint-slots): rank 0 "

@@ -19,6 +19,7 @@ from tensorfold.server.request_options import heard_effort, parse_numbers, think
 from tensorfold.server.stopping import stop_options
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
+from tensorfold.engine.tool_draft import ToolCallStreamer
 from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
 from tensorfold.cuda import health
@@ -308,6 +309,9 @@ class App:
         stopped = {"client": False, "stop": False}
         failed: list[Exception] = []
         stream = StreamDecoder(self.tok, ends)
+        # calls stream as argument deltas while written (as on the Mac); one-call requests keep the end parser
+        calls_stream = ToolCallStreamer(tools) if tools and not policy.single else None
+        answer_raw = [""]
 
         def visible(finished: bool) -> tuple[str, str]:
             raw = stream.final() if finished else stream.text
@@ -317,6 +321,7 @@ class App:
                 reasoning, answer = split_thinking(raw, finished=finished)
             else:
                 reasoning, answer = "", raw
+            answer_raw[0] = answer
             if tools:
                 answer = (policy.content(answer, finished=finished) if policy.single
                           else hide_tool_calls(answer, finished=finished))
@@ -351,7 +356,12 @@ class App:
                     sent["content"] = len(answer)
                 if delta and not emit(delta):
                     stopped["client"] = True
-                elif cancelled is not None and cancelled():     # every round, with or without new text
+                if calls_stream is not None and not stopped["client"]:
+                    for call_delta in calls_stream.feed(answer_raw[0]):   # never the reasoning
+                        if not emit(call_delta):
+                            stopped["client"] = True
+                            break
+                if not stopped["client"] and cancelled is not None and cancelled():   # every round, text or not
                     stopped["client"] = True
                 if serving[0] is not None:
                     serving[0].saw()
@@ -444,11 +454,13 @@ class App:
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
         logprobs = (self._probability_decoder.format(probabilities.emitted(out), ends)
                     if probabilities is not None else None)
+        # the calls already sent as deltas; the handler sends the rest (a call the streamer could not follow)
+        streamed = calls_stream.index + 1 if calls_stream is not None and calls_stream.streamed else 0
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
                 **({"logprobs": logprobs} if logprobs is not None else {}),
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "cached_tokens": (cached or [0])[0],
                 "reasoning_tokens": reasoning_count(out, self.tok.token_to_id("</think>") if chat and thinking else None),
-                "stats": stats}
+                "stats": stats, "calls_streamed": streamed}
 
     def _turns(self) -> Turns:
         """The engine's turns (one request at a time, background ones last), made on first use."""

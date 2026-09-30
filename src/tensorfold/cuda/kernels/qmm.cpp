@@ -47,7 +47,7 @@ void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const a
 void qmm_prefill(const at::Tensor& x, const at::Tensor& w, const at::Tensor& scales, const at::Tensor& biases,
                  at::Tensor& out, int64_t n, int64_t gs, bool f32, int64_t tile) {
     TORCH_CHECK(gs == 32 || gs == 64, "groups of 32 or 64");
-    TORCH_CHECK(tile >= 0 && tile <= 4, "tile 0-4");
+    TORCH_CHECK(tile >= 0 && tile <= 11, "tile 0-11");
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.size(0) >= 1 &&
                 x.stride(1) == 1 && x.stride(0) >= x.size(1), "x: (M, K) bf16 with contiguous rows");
     TORCH_CHECK(reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 && (x.size(0) == 1 || x.stride(0) % 8 == 0),

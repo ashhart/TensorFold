@@ -936,7 +936,8 @@ def _cpu_kernels(torch, monkeypatch, prefill, forward):
                            add_rmsnorm=glue_add_rmsnorm, gdn_pre=gdn_pre, attn_prep=attn_prep)
     pg = SimpleNamespace(add_rmsnorm=pg_add_rmsnorm, gated_norm=gated_norm, gate_mul=gate_mul, swiglu=swiglu)
     monkeypatch.setattr(prefill, "glue", glue)
-    monkeypatch.setattr(prefill, "prefill_glue", pg)         # the MLX checkpoint's prompt glue (w.quant "mlx")
+    monkeypatch.setattr(prefill, "prefill_glue", pg)         # the MLX checkpoint's prompt glue (w.quant "mlx"),
+    monkeypatch.setattr(prefill, "prefill_bf16", pg)         # FP8 or bf16 prompts alike
     monkeypatch.setattr(prefill, "_mm", matmul)
     monkeypatch.setattr(prefill, "deltanet", SimpleNamespace(chain=chain))
     monkeypatch.setattr(prefill, "attention", attention)

@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from tensorfold import __version__
+from tensorfold.cuda.prompt_precision import FP8_BY_DEFAULT
 from tensorfold.server import stacks
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
@@ -82,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="cached conversation prefixes kept in memory (default: 3 per parallel lane, at least 8); "
                             "with long conversations this, not --prompt-cache-gib, is usually the limit. Qwen3.8-27B "
                             "on CUDA with --parallel 2 or more: the prompt states its concurrent decoder keeps "
-                            "(default 3; each is held against the window in the startup estimate)")
+                            "(default 3; one GPU keeps them while memory lasts, two ranks reserve a window each)")
     speed.add_argument("--spill-gib", type=float, default=0.0,
                        help="write evicted conversation prefixes to disk, up to this many GiB, and read them back on "
                             "demand instead of prefilling again (0: off; needs --snapshot-dir)")
@@ -126,6 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
     cuda.add_argument("--kv-dtype", choices=("bf16", "int8", "int4"), default="bf16",
                       help="KV cache: bf16 (the default), int8, or int4. Quantized keys and values use one "
                            "fp16 scale per 32 values (changes the output; Flash Next on CUDA only)")
+    cuda.add_argument("--prefill-fp8", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS,
+                      help="prompt matmuls take FP8 (e4m3) activations, one scale a row, where the checkpoint has an "
+                           "FP8 prompt kernel (Qwen3.8 27B and Qwen3.6 MLX 4-bit, NVFP4 checkpoints' FP8 and MXFP8 "
+                           "layers): faster prompts, lower precision (e4m3 keeps 3 mantissa bits, bf16 keeps 7; "
+                           "docs/recipes/cuda.md#prompt-precision has the measured cost). Default: "
+                           f"{'FP8' if FP8_BY_DEFAULT else 'bf16'} activations. Replies equal this server's own serial "
+                           "decoding either way")
     serve.set_defaults(func=cmd_serve)
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")
@@ -379,7 +387,15 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
+    from tensorfold.cuda import prompt_precision
+
+    asked = getattr(args, "prefill_fp8", None)
+    prompt_precision.set_fp8(prompt_precision.FP8_BY_DEFAULT if asked is None else asked)   # before any weight loads
     engine = family.package.cuda_engine(model_dir, **options)
+    fp8 = prompt_precision.fp8() and bool(getattr(getattr(engine, "w", None), "fast_prefill", False))
+    if asked and not fp8:
+        raise ValueError("--prefill-fp8: this checkpoint's prompt matmuls have no FP8 kernel (EXL3 packs, MLX formats "
+                         "other than Qwen's 4-bit g64, Flash Next without MXFP8 layers); drop the flag")
     stacks.arm()            # its warmup may have loaded a compiler that took USR1
     if args.tp == 2 and args.rank == 1:
         print(f"[tensorfold] rank 1 ready in {time.perf_counter() - started:.1f}s, following rank 0", flush=True)
@@ -402,6 +418,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     effective_context = app.effective_context_window
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 on CUDA{where} "
           f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
+          f"prompts: {'FP8 activations' if fp8 else 'bf16 activations'}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
     serve(app, args.host, int(args.port))

@@ -290,6 +290,7 @@ CUDA_AFFINE_BITS = (2, 3, 4, 5, 6, 8)
 CUDA_AFFINE_GROUPS = (32, 64, 128)
 # --checkpoint-slots on CUDA: the prompt states the concurrent decoder keeps (--parallel 2 or more)
 CUDA_CHECKPOINT_SLOTS = True
+CUDA_PREFILL_FP8 = True            # --prefill-fp8: MLX 4-bit g64 and NVFP4 checkpoints have FP8 prompt kernels
 
 def gb10() -> bool:
     """Whether GPU 0 is a GB10 (DGX Spark: compute capability 12.1), where the lone stream's wide windows were measured."""
@@ -317,6 +318,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                          "--tp 2), or pass --no-drafts for the serial reference")
     draft = Path(drafter) if drafter and not no_drafts else None
     streams = max(1, int(options.get("parallel") or 1))
+    # one stream on one GB10 takes the width it affords (16-row trees, widening to 128); other shapes keep 12 rows
     wide = tp == 1 and streams == 1 and gb10()
     return Qwen27Engine(Path(model_dir), draft, max_rows=128 if wide else 12, tree_rows=16 if wide else None,
                         tp=tp, rank=rank, master=master, port=master_port,

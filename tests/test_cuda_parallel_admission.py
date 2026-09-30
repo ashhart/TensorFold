@@ -153,3 +153,28 @@ def test_two_ranks_with_different_streams_or_context_refuse_to_start(tmp_path, m
     with pytest.raises(RuntimeError, match="different settings"):
         obj.__init__(tmp_path, None, tp=2, rank=0, master="example", **mine)
     assert not calls
+
+
+@pytest.mark.torch
+def test_two_ranks_with_different_prompt_precision_refuse_to_start(tmp_path, monkeypatch, fake_runtime):  # noqa: F811
+    """Rank 1 with --prefill-fp8 and rank 0 without would mix FP8 and bf16 prompt partials: refused, by name."""
+
+    import torch
+    import torch.distributed as dist
+    from tensorfold.cuda import prompt_precision
+    from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
+
+    checkpoint(tmp_path, small_config(), WEIGHTS)
+    calls, _ = fake_runtime
+    with prompt_precision.using(True):
+        theirs = handshake(monkeypatch, tmp_path, 1, streams=2)
+
+    def gather(recv, send):
+        other = theirs if send.numel() == theirs.numel() else send
+        recv.view(-1).copy_(torch.cat([send.view(-1), other.view(-1)]))
+
+    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    obj = Qwen27Engine.__new__(Qwen27Engine)
+    with prompt_precision.using(False), pytest.raises(RuntimeError, match="prompt precision.*--prefill-fp8"):
+        obj.__init__(tmp_path, None, tp=2, rank=0, master="example", streams=2)
+    assert not calls

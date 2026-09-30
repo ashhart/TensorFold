@@ -8,8 +8,7 @@ from typing import Any
 
 
 def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any = None) -> None:
-    """Refuse a KV cache, draft rule, image, share or checkpoint-slot option the backend or family can't serve, before
-    any download."""
+    """Refuse KV cache, draft rule, image, share, slot and precision options the backend or family can't serve."""
 
     if getattr(args, "vision_urls", False) and not getattr(args, "vision", False):
         raise ValueError("--vision-urls needs --vision")
@@ -39,6 +38,10 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
         if _cuda_streams(getattr(args, "parallel", "auto")) < 2:
             raise ValueError(f"--checkpoint-slots sets the prompt states {family.title}'s concurrent decoder keeps on "
                              "CUDA (--parallel 2 or more); one stream keeps 4, which share its attention buffer")
+    fp8 = getattr(family.package, "CUDA_PREFILL_FP8", False) and backend == "cuda"
+    if getattr(args, "prefill_fp8", None) and not fp8:              # asked for by name, not a default
+        raise ValueError(f"--prefill-fp8 picks FP8 prompt kernels on CUDA; {family.title} on "
+                         f"{'CUDA' if backend == 'cuda' else 'MLX'} has none (its prompts run bf16 activations)")
     confidence = getattr(args, "mtp_confidence", None)
     if confidence is None:
         return
@@ -51,8 +54,7 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
 
 
 def _cuda_streams(value: Any) -> int:
-    """The streams a CUDA engine serves for ``--parallel`` (auto is one request at a time; a number, at least one), or
-    2 for a value the serve command refuses on its own."""
+    """The streams a CUDA engine serves for ``--parallel`` (auto: one), or 2 for a value the serve command refuses itself."""
 
     text = str(value).strip().lower()
     if text == "auto":
