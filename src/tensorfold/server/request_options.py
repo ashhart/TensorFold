@@ -41,6 +41,23 @@ def parse_numbers(fields: dict[str, Any]) -> dict[str, Any]:
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 
 
+_EFFORT_ORDER = ("xhigh", "high", "medium", "low", "minimal")   # highest first
+
+
+def nearest_named_effort(effort: str, levels: frozenset[str]) -> str:
+    """The named level nearest effort, the higher one when two are as near; effort itself when none.
+
+    A template that names none of the five keeps the effort as sent: its else-branch is the
+    template's own default. GLM-5.3 names low and high but no medium, whose requests used to
+    fall out of the template's else-branch as Max -- its own ceiling, not the level asked for.
+    """
+
+    if not levels:
+        return effort
+    want = _EFFORT_ORDER.index(effort)
+    return min(levels, key=lambda name: (abs(_EFFORT_ORDER.index(name) - want), _EFFORT_ORDER.index(name)))
+
+
 def effort_levels(template: str | None) -> frozenset[str]:
     """The efforts a chat template names: Qwen3.8's low, medium and xhigh; GLM-5.3's low and high."""
 
@@ -52,15 +69,13 @@ def coerce_effort(effort: str | None, levels: frozenset[str] = frozenset()) -> s
 
     if effort is None:
         return None
+    # a medium the template does not name lands on the nearest named level, the higher when two are as near
+    if effort == "medium" and effort not in levels:
+        return nearest_named_effort(effort, levels)
     # OpenAI's "high" and "minimal" are "xhigh" and "low" unless the template names them (GLM-5.3 names "high")
     if effort in levels or effort not in ("high", "minimal"):
-        chosen = effort
-    else:
-        chosen = "xhigh" if effort == "high" else "low"
-    # GLM lists high and leaves medium unnamed. medium is that high. xhigh stays xhigh, and the template renders Max.
-    if chosen == "medium" and "high" in levels and "medium" not in levels:
-        return "high"
-    return chosen
+        return effort
+    return "xhigh" if effort == "high" else "low"
 
 
 def heard_effort(explicit: str | None, default: str | None, levels: frozenset[str]) -> str | None:

@@ -212,3 +212,47 @@ def test_no_effort_leaves_the_template_its_own_default():
             c.get("enable_thinking") and "reasoning_effort" not in c for c in app.tokenizer.template_calls)
     finally:
         app.close()
+
+
+@pytest.mark.parametrize("names, effort, want", [
+    ("{# 'low' 'high' #}", "medium", "high"),      # GLM-5.3 names no medium: the higher of the two levels as near
+    ("{# 'low' 'high' #}", "xhigh", "xhigh"),      # the else-branch is the template's own ceiling: as sent
+    ("{# 'low' 'high' #}", "low", "low"),
+    ("{# 'low' 'high' #}", "high", "high"),
+    ("{# 'high' #}", "medium", "high"),                 # a single named level: straight to it
+    ("{# 'low' #}", "medium", "low"),
+    ("{# 'medium' #}", "medium", "medium"),             # a named medium is honoured
+    ("{# 'xhigh' 'medium' 'low' #}", "medium", "medium"),   # Qwen3.8 names medium: untouched
+    ("", "medium", "medium"),                     # a template naming no level keeps the effort as sent
+])
+def test_a_medium_the_template_does_not_name_lands_on_the_nearest_named_level(names, effort, want):
+    app = make_app(enable_thinking=True)
+    app.tokenizer.chat_template = names
+    server = serve_fake(app)
+    try:
+        app.tokenizer.template_calls.clear()
+        status, body = post_json(server, "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2, "reasoning_effort": effort})
+        assert status == 200 and json.loads(body)["tensorfold"]["reasoning_effort"] == want
+        assert all(c["reasoning_effort"] == want for c in app.tokenizer.template_calls if c.get("enable_thinking"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        app.close()
+
+
+def test_medium_reaches_the_template_through_chat_template_kwargs_too():
+    app = make_app(enable_thinking=True)
+    app.tokenizer.chat_template = "{# 'low' 'high' #}"
+    server = serve_fake(app)
+    try:
+        app.tokenizer.template_calls.clear()
+        status, body = post_json(server, "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2,
+            "chat_template_kwargs": {"reasoning_effort": "medium"}})
+        assert status == 200 and json.loads(body)["tensorfold"]["reasoning_effort"] == "high"
+        assert all(c["reasoning_effort"] == "high" for c in app.tokenizer.template_calls if c.get("enable_thinking"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        app.close()
