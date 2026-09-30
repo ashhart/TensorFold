@@ -323,21 +323,26 @@ pub const Model = struct {
     fn hc(m: *Model, s: *mx.Scope, i: usize, kind: []const u8, x: A) ![3]A {
         var b: [256]u8 = undefined;
         const g = m.config.value;
-        const z = try cp.norm(s, try s.reshape(try s.cast(x, mx.f32t), &.{ 1, 4 * g.hidden_size }), mx.empty, g.rms_norm_eps);
+        if (mx.shape(x).len != 3 or mx.dtype(x) != mx.bf16 or mx.dim(x, 1) != 4 or mx.dim(x, 2) != g.hidden_size) return error.InvalidTensorShape;
+        const rows = mx.dim(x, 0);
+        if (rows < 1 or rows > 2048) return error.InvalidTensorShape;
+        const z = try cp.norm(s, try s.reshape(try s.cast(x, mx.f32t), &.{ rows, 4 * g.hidden_size }), mx.empty, g.rms_norm_eps);
         const fnw = try s.cast(try m.weight(i, try std.fmt.bufPrint(&b, "hc_{s}_fn", .{kind})), mx.f32t);
         if (!std.mem.eql(i32, mx.shape(fnw), &.{ 24, 4 * g.hidden_size })) return error.InvalidTensorShape;
         const scale = try s.cast(try m.weight(i, try std.fmt.bufPrint(&b, "hc_{s}_scale", .{kind})), mx.f32t);
         const base = try s.cast(try m.weight(i, try std.fmt.bufPrint(&b, "hc_{s}_base", .{kind})), mx.f32t);
         if (c.mlx_array_size(scale) != 3 or c.mlx_array_size(base) != 24) return error.InvalidTensorShape;
         const mixes = try s.binary(c.mlx_matmul, z, try s.transpose(fnw, &.{ 1, 0 }));
-        const result = try m.kernels.run(s, src.glm_hc_split, &.{ x, mixes, scale, base }, &.{ mx.td("T", mx.bf16), mx.ti("HC", 4), mx.ti("ITERS", g.hc_sinkhorn_iters), mx.ti("D", g.hidden_size), mx.ti("EPS_INT", @intFromFloat(@round(g.hc_eps / 1e-9))) }, .{ 256, 1, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ 1, g.hidden_size } }, .{ .shape = &.{ 1, 4 }, .dtype = mx.f32t }, .{ .shape = &.{ 1, 4, 4 }, .dtype = mx.f32t } });
+        const result = try m.kernels.run(s, src.glm_hc_split, &.{ x, mixes, scale, base }, &.{ mx.td("T", mx.bf16), mx.ti("HC", 4), mx.ti("ITERS", g.hc_sinkhorn_iters), mx.ti("D", g.hidden_size), mx.ti("EPS_INT", @intFromFloat(@round(g.hc_eps / 1e-9))) }, .{ 256 * rows, 1, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ rows, g.hidden_size } }, .{ .shape = &.{ rows, 4 }, .dtype = mx.f32t }, .{ .shape = &.{ rows, 4, 4 }, .dtype = mx.f32t } });
         return .{ result[0], result[1], result[2] };
     }
     fn expand(s: *mx.Scope, x: A, branch: A, post: A, comb: A) !A {
-        const y = try s.binary(c.mlx_multiply, try s.reshape(post, &.{ 1, 4, 1 }), try s.reshape(try s.cast(branch, mx.f32t), &.{ 1, 1, -1 }));
+        const rows = mx.dim(x, 0);
+        const y = try s.binary(c.mlx_multiply, try s.reshape(post, &.{ rows, 4, 1 }), try s.reshape(try s.cast(branch, mx.f32t), &.{ rows, 1, -1 }));
         return s.cast(try s.binary(c.mlx_add, y, try s.binary(c.mlx_matmul, try s.transpose(comb, &.{ 0, 2, 1 }), try s.cast(x, mx.f32t))), mx.bf16);
     }
     fn kda(m: *Model, s: *mx.Scope, i: usize, x: A, cache: *Cache) !A {
+        if (mx.dim(x, 0) > 16) return m.kdaFallback(s, i, x, cache);
         const g = m.config.value.linear_attn_config;
         const width = g.num_heads * g.head_dim;
         var b: [256]u8 = undefined;
@@ -352,36 +357,47 @@ pub const Model = struct {
         return m.project(s, i, "self_attn.o_proj", result[0]);
     }
     fn kdaFallback(m: *Model, s: *mx.Scope, i: usize, x: A, cache: *Cache) !A {
+        return (try m.kdaPrefill(s, i, x, cache)).output;
+    }
+    const KdaResult = struct { output: A, projection: A, convolved: A, q: A, k: A, value: A, decay: A, beta: A, recurrent: A, gated: A };
+    fn kdaPrefill(m: *Model, s: *mx.Scope, i: usize, x: A, cache: *Cache) !KdaResult {
         const g = m.config.value.linear_attn_config;
         const h = g.num_heads;
         const d = g.head_dim;
         const width = h * d;
+        if (mx.shape(x).len != 2 or mx.dtype(x) != mx.bf16 or mx.dim(x, 1) != m.config.value.hidden_size) return error.InvalidTensorShape;
+        const rows = mx.dim(x, 0);
+        if (rows < 1 or rows > 2048) return error.InvalidTensorShape;
+        if (cache.conv.ctx != null and (!std.mem.eql(i32, mx.shape(cache.conv), &.{ g.short_conv_kernel_size - 1, 3 * width }) or mx.dtype(cache.conv) != mx.bf16)) return error.InvalidTensorShape;
+        if (cache.state.ctx != null and (!std.mem.eql(i32, mx.shape(cache.state), &.{ 1, h, d, d }) or mx.dtype(cache.state) != mx.f32t)) return error.InvalidTensorShape;
         const proj = try m.project(s, i, "self_attn.in_proj", x);
         const mixed = try s.slice(proj, 1, 0, 3 * width);
         const conv = if (cache.conv.ctx != null) cache.conv else try s.zeros(&.{ g.short_conv_kernel_size - 1, 3 * width }, mx.bf16);
         const ci = try s.cat(&.{ conv, mixed }, 0);
         const cw = try m.weight(i, "self_attn.conv");
-        var acc = try s.binary(c.mlx_multiply, try s.cast(try s.slice(ci, 0, 0, 1), mx.f32t), try s.slice(cw, 0, 0, 1));
+        var acc = try s.binary(c.mlx_multiply, try s.cast(try s.slice(ci, 0, 0, rows), mx.f32t), try s.slice(cw, 0, 0, 1));
         var t: i32 = 1;
-        while (t < g.short_conv_kernel_size) : (t += 1) acc = try s.binary(c.mlx_add, acc, try s.binary(c.mlx_multiply, try s.cast(try s.slice(ci, 0, t, t + 1), mx.f32t), try s.slice(cw, 0, t, t + 1)));
+        while (t < g.short_conv_kernel_size) : (t += 1) acc = try s.binary(c.mlx_add, acc, try s.binary(c.mlx_multiply, try s.cast(try s.slice(ci, 0, t, t + rows), mx.f32t), try s.slice(cw, 0, t, t + 1)));
         const co = try m.activations.call(s, .silu, &.{try s.cast(acc, mx.bf16)});
-        const q0 = try s.reshape(try s.slice(co, 1, 0, width), &.{ 1, 1, h, d });
-        const k0 = try s.reshape(try s.slice(co, 1, width, 2 * width), &.{ 1, 1, h, d });
-        const value = try s.reshape(try s.slice(co, 1, 2 * width, 3 * width), &.{ 1, 1, h, d });
+        const q0 = try s.reshape(try s.slice(co, 1, 0, width), &.{ 1, rows, h, d });
+        const k0 = try s.reshape(try s.slice(co, 1, width, 2 * width), &.{ 1, rows, h, d });
+        const value = try s.reshape(try s.slice(co, 1, 2 * width, 3 * width), &.{ 1, rows, h, d });
         const df: f32 = @floatFromInt(d);
         const q = try s.cast(try s.binary(c.mlx_multiply, try cp.norm(s, try s.cast(q0, mx.f32t), mx.empty, 1e-6 / df), try s.scalar(1 / df)), mx.bf16);
         const k = try s.cast(try s.binary(c.mlx_multiply, try cp.norm(s, try s.cast(k0, mx.f32t), mx.empty, 1e-6 / df), try s.scalar(1 / @sqrt(df))), mx.bf16);
-        const a = try s.reshape(try s.cast(try m.project(s, i, "self_attn.f_b_proj", try s.slice(proj, 1, 3 * width, 3 * width + d)), mx.f32t), &.{ 1, 1, h, d });
+        const a = try s.reshape(try s.cast(try m.project(s, i, "self_attn.f_b_proj", try s.slice(proj, 1, 3 * width, 3 * width + d)), mx.f32t), &.{ 1, rows, h, d });
         const decay = try s.unary(c.mlx_exp, try s.binary(c.mlx_multiply, try s.scalar(g.gate_lower_bound), try s.unary(c.mlx_sigmoid, try s.binary(c.mlx_multiply, try s.reshape(try m.weight(i, "self_attn.A"), &.{ h, 1 }), try s.binary(c.mlx_add, a, try s.reshape(try m.weight(i, "self_attn.dt"), &.{ h, d }))))));
-        const beta = try s.reshape(try s.unary(c.mlx_sigmoid, try s.slice(proj, 1, 3 * width + 2 * d, 3 * width + 2 * d + h)), &.{ 1, 1, h });
+        const beta = try s.reshape(try s.unary(c.mlx_sigmoid, try s.slice(proj, 1, 3 * width + 2 * d, 3 * width + 2 * d + h)), &.{ 1, rows, h });
         const entry = if (cache.state.ctx != null) cache.state else try s.zeros(&.{ 1, h, d, d }, mx.f32t);
-        const outputs = try m.kernels.run(s, src.glm_gated_delta, &.{ q, k, value, decay, beta, entry, try s.reshape(try s.ints(&.{1}), &.{}) }, &.{ mx.td("InT", mx.bf16), mx.td("StT", mx.f32t), mx.ti("Dk", d), mx.ti("Dv", d), mx.ti("Hk", h), mx.ti("Hv", h) }, .{ 32, d, h }, .{ 32, 4, 1 }, &.{ .{ .shape = &.{ 1, 1, h, d } }, .{ .shape = &.{ 1, h, d, d }, .dtype = mx.f32t } });
+        const outputs = try m.kernels.run(s, src.glm_gated_delta, &.{ q, k, value, decay, beta, entry, try s.reshape(try s.ints(&.{rows}), &.{}) }, &.{ mx.td("InT", mx.bf16), mx.td("StT", mx.f32t), mx.ti("Dk", d), mx.ti("Dv", d), mx.ti("Hk", h), mx.ti("Hv", h) }, .{ 32, d, h }, .{ 32, 4, 1 }, &.{ .{ .shape = &.{ 1, rows, h, d } }, .{ .shape = &.{ 1, h, d, d }, .dtype = mx.f32t } });
+        const next_conv = try s.contiguous(try s.slice(ci, 0, rows, rows + g.short_conv_kernel_size - 1));
+        const gate = try s.reshape(try s.cast(try m.project(s, i, "self_attn.g_b_proj", try s.slice(proj, 1, 3 * width + d, 3 * width + 2 * d)), mx.f32t), &.{ rows, h, d });
+        const normed = try cp.norm(s, try s.reshape(try s.cast(outputs[0], mx.f32t), &.{ rows, h, d }), try m.weight(i, "self_attn.onorm"), m.config.value.rms_norm_eps);
+        const result = try s.reshape(try s.cast(try s.binary(c.mlx_multiply, normed, try s.unary(c.mlx_sigmoid, gate)), mx.bf16), &.{ rows, width });
+        const output = try m.project(s, i, "self_attn.o_proj", result);
         cache.state = outputs[1];
-        cache.conv = try s.contiguous(try s.slice(ci, 0, 1, g.short_conv_kernel_size));
-        const gate = try s.reshape(try s.cast(try m.project(s, i, "self_attn.g_b_proj", try s.slice(proj, 1, 3 * width + d, 3 * width + 2 * d)), mx.f32t), &.{ 1, h, d });
-        const normed = try cp.norm(s, try s.reshape(try s.cast(outputs[0], mx.f32t), &.{ 1, h, d }), try m.weight(i, "self_attn.onorm"), m.config.value.rms_norm_eps);
-        const result = try s.reshape(try s.cast(try s.binary(c.mlx_multiply, normed, try s.unary(c.mlx_sigmoid, gate)), mx.bf16), &.{ 1, width });
-        return m.project(s, i, "self_attn.o_proj", result);
+        cache.conv = next_conv;
+        return .{ .output = output, .projection = proj, .convolved = co, .q = q, .k = k, .value = value, .decay = decay, .beta = beta, .recurrent = outputs[0], .gated = result };
     }
     fn append(s: *mx.Scope, old: A, value: A) !A {
         return if (old.ctx == null) value else s.cat(&.{ old, value }, 0);
@@ -868,6 +884,76 @@ pub fn checkModel(io: std.Io, dir: []const u8, out_dir: []const u8) !void {
     try m.checkMtp();
     try m.checkGeneration();
     try @import("session_checks.zig").checkSyntheticNeural(&m, io);
+}
+pub fn checkPrefillKda(io: std.Io, dir: []const u8) !void {
+    try Model.prepareRuntime();
+    try mx.init();
+    defer mx.shutdown();
+    var path: [4096]u8 = undefined;
+    const bytes = try @import("weights.zig").readFile(io, try std.fmt.bufPrint(&path, "{s}/kda.json", .{dir}));
+    defer mx.allocator.free(bytes);
+    const Case = struct { name: []const u8, decode: bool };
+    const Group = struct { checkpoint: []const u8, cases: []const Case };
+    const groups = try std.json.parseFromSlice([]const Group, mx.allocator, bytes, .{});
+    defer groups.deinit();
+    if (groups.value.len == 0) return error.EmptyFixtures;
+    var count: usize = 0;
+    for (groups.value) |group| {
+        var m = try Model.init(io, try std.fmt.bufPrint(&path, "{s}/{s}", .{ dir, group.checkpoint }));
+        defer m.deinit();
+        if (group.cases.len == 0) return error.EmptyFixtures;
+        {
+            var s = mx.Scope{};
+            defer s.deinit();
+            const dims = m.config.value.hidden_size;
+            var cache = Cache{};
+            try std.testing.expectError(error.InvalidTensorShape, m.kdaPrefill(&s, 0, try s.zeros(&.{ 2049, dims }, mx.bf16), &cache));
+            try std.testing.expectError(error.InvalidTensorShape, m.hc(&s, 0, "attn", try s.zeros(&.{ 2049, 4, dims }, mx.bf16)));
+            try std.testing.expectError(error.InvalidTensorShape, m.kdaPrefill(&s, 0, try s.zeros(&.{ 1, dims }, mx.f32t), &cache));
+            cache.conv = try s.zeros(&.{ 1, 1 }, mx.bf16);
+            try std.testing.expectError(error.InvalidTensorShape, m.kdaPrefill(&s, 0, try s.zeros(&.{ 1, dims }, mx.bf16), &cache));
+            try std.testing.expect(cache.state.ctx == null);
+        }
+        for (group.cases) |case| {
+            errdefer std.debug.print("GLM prefill KDA fixture failed: {s}/{s}\n", .{ group.checkpoint, case.name });
+            var store = cp.Store.init(32);
+            defer store.deinit();
+            try store.loadFile(io, try std.fmt.bufPrint(&path, "{s}/{s}.safetensors", .{ dir, case.name }), "", "");
+            var s = mx.Scope{};
+            defer s.deinit();
+            const equal = @import("variant_checks.zig").equalBits;
+            const x = try store.get("input");
+            const hc = try m.hc(&s, 0, "attn", x);
+            for (hc, [_][]const u8{ "collapsed", "post", "comb" }) |actual, key| try equal(&s, actual, try store.get(key));
+            const normed = try cp.norm(&s, hc[0], try m.weight(0, "input_layernorm.weight"), m.config.value.rms_norm_eps);
+            try equal(&s, normed, try store.get("normed"));
+            var cache = m.cache[0];
+            if (cache.state.ctx != null) {
+                try equal(&s, cache.state, try store.get("previous.state"));
+                try equal(&s, cache.conv, try store.get("previous.conv"));
+            }
+            const output = if (case.decode) try m.kda(&s, 0, normed, &cache) else blk: {
+                const result = try m.kdaPrefill(&s, 0, normed, &cache);
+                inline for (comptime std.meta.fieldNames(Model.KdaResult)) |key| {
+                    errdefer std.debug.print("Mismatch in {s}\n", .{key});
+                    try equal(&s, @field(result, key), try store.get(key));
+                }
+                break :blk result.output;
+            };
+            try equal(&s, output, try store.get("output"));
+            try equal(&s, cache.state, try store.get("next.state"));
+            try equal(&s, cache.conv, try store.get("next.conv"));
+            const expanded = try Model.expand(&s, x, output, hc[1], hc[2]);
+            try equal(&s, expanded, try store.get("expanded"));
+            const ffn = try m.hc(&s, 0, "ffn", expanded);
+            for (ffn, [_][]const u8{ "ffn.collapsed", "ffn.post", "ffn.comb" }) |actual, key| try equal(&s, actual, try store.get(key));
+            const saved = try cache.clone();
+            m.cache[0].deinit();
+            m.cache[0] = saved;
+            count += 1;
+        }
+    }
+    std.debug.print("PASS: {d} GLM batched KDA/hyper-connection cases, exact intermediate arrays, mixed projections, caches and decode continuation\n", .{count});
 }
 fn save(s: *mx.Scope, path: []const u8, value: A) !void {
     const z = try mx.allocator.dupeSentinel(u8, path, 0);

@@ -736,6 +736,88 @@ def flash_prefill_hc_fixtures(capture):
     print(f"Saved {len(cases)} complete Flash prefill hyper-connections and their intermediate arrays", flush=True)
 
 
+def glm_prefill_kda_fixtures(directory):
+    import copy
+    from tests import glm5_fakes as fakes
+    from tensorfold.families.glm5_next import kda as kda_module
+    from tensorfold.families.glm5_next.model import hc_expand
+    from tensorfold.families.glm5_next.weights import load_backbone
+    from tests.test_flash_next_affine import bf16
+
+    rng = np.random.default_rng(53147)
+    original_text, original_dims = fakes.TEXT, fakes.D
+    groups = []
+    try:
+        for geometry, (dims, heads, dim, mixed) in enumerate(((128, 2, 64, False), (256, 3, 128, True),
+                                                            (4096, 64, 128, False))):
+            cfg = copy.deepcopy(original_text)
+            cfg.update(hidden_size=dims, num_hidden_layers=1, layer_types=["linear_attention"],
+                       mlp_layer_types=["dense"], num_nextn_predict_layers=0)
+            cfg["linear_attn_config"].update(num_heads=heads, head_dim=dim)
+            cfg["hc_sinkhorn_iters"] = 8 if mixed else 20
+            cfg["hc_eps"] = 1e-5 if mixed else 1e-6
+            cfg["rms_norm_eps"] = 1e-6 if dims == 4096 else 1e-5
+            fakes.TEXT, fakes.D = cfg, dims
+            checkpoint = f"checkpoint{geometry}"
+            names = ("q_proj", "k_proj", "v_proj", "f_a_proj", "g_a_proj", "b_proj", "f_b_proj", "g_b_proj", "o_proj")
+            formats = ((2, 32), (3, 64), (4, 128), (5, 32), (6, 64), (8, 128), (3, 128), (6, 64), (5, 128))
+            overrides = {f"model.language_model.layers.0.self_attn.{key}": dict(bits=b, group_size=g)
+                         for key, (b, g) in zip(names, formats)} if mixed else {}
+            folder = fakes.write_checkpoint(directory / checkpoint, seed=19 + geometry, mtp=False, overrides=overrides)
+            model = load_backbone(folder)
+            layer = model.layers[0]
+            cache = model.make_cache()[0]
+            cases = []
+            lengths = (17, 64, 257, 1) if dims == 4096 else (1, 16, 17, 31, 32, 63, 64, 65, 257, 2048, 1)
+            for step, count in enumerate(lengths):
+                decode = step == len(lengths) - 1
+                name = f"kda{geometry}-{step}"
+                x = bf16(rng, (count, 4, dims), scale=.2)
+                collapsed, post, comb = layer.attn_hc.split(x, rows_exact=decode)
+                normed = mx.fast.rms_norm(collapsed, layer.in_norm, layer.eps)
+                arrays = dict(input=x, collapsed=collapsed, post=post, comb=comb, normed=normed)
+                if cache.ssm is not None:
+                    arrays.update({"previous.conv": cache.conv, "previous.state": cache.ssm})
+                original_delta = kda_module.K.gated_delta
+                original_project, original_silu = kda_module.project, kda_module.silu
+                def record_delta(q, k, v, g, beta, entry):
+                    y, state = original_delta(q, k, v, g, beta, entry)
+                    arrays.update(q=q, k=k, value=v, decay=g, beta=beta, recurrent=y)
+                    return y, state
+                def record_project(value, weight, **kwargs):
+                    out = original_project(value, weight, **kwargs)
+                    if weight is layer.attn.in_proj:
+                        arrays["projection"] = out
+                    if weight is layer.attn.o_proj:
+                        arrays["gated"] = value
+                    return out
+                def record_silu(value):
+                    out = original_silu(value)
+                    arrays["convolved"] = out
+                    return out
+                kda_module.K.gated_delta = record_delta
+                kda_module.project, kda_module.silu = record_project, record_silu
+                try:
+                    output = layer.attn(normed, [cache], (count,), decode)
+                finally:
+                    kda_module.K.gated_delta = original_delta
+                    kda_module.project, kda_module.silu = original_project, original_silu
+                arrays.update(output=output)
+                arrays.update({"next.conv": cache.conv, "next.state": cache.ssm})
+                expanded = hc_expand(output, x, post, comb, rows_exact=decode)
+                arrays["expanded"] = expanded
+                ffn = layer.ffn_hc.split(expanded, rows_exact=decode)
+                arrays.update(zip(("ffn.collapsed", "ffn.post", "ffn.comb"), ffn))
+                mx.eval(*arrays.values())
+                mx.save_safetensors(str(directory / f"{name}.safetensors"), arrays)
+                cases.append(dict(name=name, decode=decode))
+            groups.append(dict(checkpoint=checkpoint, cases=cases))
+            print(f"Saved GLM KDA/HC geometry D={dims}, H={heads}, d={dim}, {len(cases)} cases", flush=True)
+    finally:
+        fakes.TEXT, fakes.D = original_text, original_dims
+    (directory / "kda.json").write_text(json.dumps(groups, indent=2) + "\n")
+
+
 def flash_prefill_gdn_fixtures(capture):
     import mlx.nn as nn
     from tensorfold.families.qwen4_exp import model_layers, decode
@@ -1132,11 +1214,15 @@ def main():
     parser.add_argument("--flash-prefill-hc", action="store_true")
     parser.add_argument("--flash-prefill-mm", action="store_true")
     parser.add_argument("--flash-prefill-gdn", action="store_true")
+    parser.add_argument("--glm-prefill-kda", action="store_true")
     parser.add_argument("--flash-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-attention", action="store_true")
     parser.add_argument("--flash-prefill-ple", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.glm_prefill_kda:
+        glm_prefill_kda_fixtures(args.directory)
+        return
     if args.flash_weights:
         flash_weight_fixtures(args.directory)
         return

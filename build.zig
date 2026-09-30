@@ -312,6 +312,12 @@ pub fn build(b: *std.Build) void {
         dflash_previous = &compare.step;
     }
     dflash_tests.dependOn(dflash_previous.?);
+    const glm_kda_fixture = b.addSystemCommand(&.{ "env", "MLX_ENABLE_TF32=0", ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/glm-prefill-kda", "--glm-prefill-kda" });
+    const glm_kda = b.addRunArtifact(exe);
+    glm_kda.addArgs(&.{ "check-glm-prefill-kda", "build/native-checks/glm-prefill-kda" });
+    glm_kda.step.dependOn(&glm_kda_fixture.step);
+    b.step("test-glm-prefill-kda", "Compare GLM batched recurrent attention, hyper-connections and decode continuation with upstream").dependOn(&glm_kda.step);
+    metal_tests.dependOn(&glm_kda.step);
     const glm_models = b.step("test-glm-model", "Compare synthetic GLM backbone logits, mixed layouts and cache commits; full model unverified");
     var glm_previous: ?*std.Build.Step = null;
     for (0..3) |case| {
