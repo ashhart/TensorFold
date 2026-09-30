@@ -80,3 +80,16 @@ cuBLAS router matmul → Triton `router_logits`; torch `.sum/.mean` in the Engra
 
 Round: draft ~5 ms, 4-row verify ~48 ms (GPU 46.7: routed experts 20.5 ms for ~16 distinct experts/layer,
 NCCL 6.2 ms incl. rank skew from per-rank Engram reads).
+
+## 2026-09-30 — long context: indexer top-512, rings (`--long-golden notes/dsv41/golden_long.json`, cap 16384)
+
+| prompt | top-1 vs vLLM | NLL ours / vLLM | prefill |
+|---:|---:|---:|---:|
+| 1,024 | 97.8% | 1.241 / 1.231 | 227 tok/s |
+| 2,048 | 95.9% | 1.567 / 1.560 | 330 tok/s |
+| 4,096 | 96.0% | 1.625 / 1.622 | 331 tok/s |
+| 8,192 | 96.2% | 1.676 / 1.675 | 329 tok/s |
+| 16,000 | 95.8% | 1.660 / 1.660 | 315 tok/s |
+
+Document: upstream README + four recipes (`notes/dsv41/long_doc.txt`). Index keys stored bf16 (vLLM: fp8).
+Context limit 16,384 until layer 20's candidate blocks are implemented. Prefill ~330 tok/s vs vLLM ~1,000.

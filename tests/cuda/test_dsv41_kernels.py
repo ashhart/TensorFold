@@ -36,13 +36,14 @@ def test_rope_and_inverse(ratio):
     torch.testing.assert_close(back, x, rtol=1e-4, atol=1e-4)
 
 
-def _ref_attention(q, comp, ratio, swa, pos, sink, W):
+def _ref_attention(q, comp, idx, ring, pos, sink, W):
     outs = []
     for r in range(q.shape[0]):
         p = int(pos[r])
-        keys = [swa[max(0, p - W + 1):p + 1].float()]
-        if ratio:
-            keys.insert(0, comp[:(p + 1) // ratio].float())
+        keys = [ring[[s % ring.shape[0] for s in range(max(0, p - W + 1), p + 1)]].float()]
+        if idx is not None:
+            sel = [int(i) for i in idx[r] if int(i) >= 0]
+            keys.insert(0, comp[sel].float())
         k = torch.cat(keys)
         s = torch.einsum("hd,sd->hs", q[r].float(), k) * 512 ** -0.5
         full = torch.cat([s, sink[:, None]], dim=1)
@@ -50,20 +51,43 @@ def _ref_attention(q, comp, ratio, swa, pos, sink, W):
     return torch.stack(outs)
 
 
-@pytest.mark.parametrize("ratio,positions", [(0, [0, 5, 200]), (2, [0, 1, 2, 63, 300, 511]), (1, [0, 7, 640])])
-def test_mqa_matches_the_masked_softmax(ratio, positions):
-    g = torch.Generator(device="cuda").manual_seed(ratio)
-    cap, W, H = 1024, 128, 32
-    swa = torch.randn((cap, 512), generator=g, device="cuda").to(torch.bfloat16)
-    comp = torch.randn((cap // max(ratio, 1) + 1, 512), generator=g, device="cuda").to(torch.bfloat16).float()
+@pytest.mark.parametrize("with_comp,positions", [(False, [0, 5, 200]), (True, [0, 1, 63, 300, 511, 900])])
+def test_mqa_matches_the_masked_softmax(with_comp, positions):
+    g = torch.Generator(device="cuda").manual_seed(len(positions))
+    W, H, n_sel = 128, 32, 512
+    ring = torch.randn((256, 512), generator=g, device="cuda").to(torch.bfloat16)
+    comp = torch.randn((1025, 512), generator=g, device="cuda").to(torch.bfloat16)
     pos = torch.tensor(positions, device="cuda")
+    idx = None
+    if with_comp:                                  # a random subset of the visible entries, ascending, -1 padded
+        rows = []
+        for p in positions:
+            vis = torch.randperm(p + 1, generator=torch.Generator().manual_seed(p))[:n_sel].sort().values
+            rows.append(torch.cat([vis, torch.full((n_sel - len(vis),), -1)]))
+        idx = torch.stack(rows).int().cuda()
     q = (torch.randn((len(positions), H, 512), generator=g, device="cuda") * 0.2).to(torch.bfloat16)
     sink = torch.randn((H,), generator=g, device="cuda")
-    buf = K.AttnBuffers(8, H, 512, comp.shape[0] + W)
-    n_buf = comp.shape[0] if ratio else 0
-    got = K.mqa(q, comp if ratio else None, n_buf, ratio, swa, pos, sink, W, buf, 512 ** -0.5)
-    ref = _ref_attention(q, comp, ratio, swa, pos, sink, W)
+    buf = K.AttnBuffers(8, H, 512, n_sel + W)
+    got = K.mqa(q, comp if with_comp else None, idx, ring, pos, sink, W, buf, 512 ** -0.5)
+    ref = _ref_attention(q, comp, idx, ring, pos, sink, W)
     assert (got - ref).abs().max() <= 0.03 * ref.abs().max()
+
+
+def test_index_select_takes_all_visible_then_top_k():
+    g = torch.Generator(device="cuda").manual_seed(4)
+    keys = torch.randn((2048, 128), generator=g, device="cuda").to(torch.bfloat16)
+    iq = torch.randn((3, 32, 128), generator=g, device="cuda").to(torch.bfloat16)
+    wts = torch.randn((3, 32), generator=g, device="cuda")
+    pos = torch.tensor([10, 400, 1999], device="cuda")
+    idx = K.index_select(iq, wts, keys, pos, 1, 512)
+    assert idx[0, :11].tolist() == list(range(11)) and (idx[0, 11:] == -1).all()
+    assert idx[1, :401].tolist() == list(range(401)) and (idx[1, 401:] == -1).all()
+    full = (wts[2, :, None] * torch.relu(iq[2].float() @ keys[:2000].float().T)).sum(0)
+    want = torch.topk(full, 512).indices.sort().values
+    overlap = len(set(want.tolist()) & set(idx[2].tolist()))
+    assert (idx[2] >= 0).all() and overlap >= 505          # tensor-core vs fp32 rounding may swap near-ties
+    for r in range(3):                                      # row-invariant
+        assert torch.equal(K.index_select(iq[r:r + 1], wts[r:r + 1], keys, pos[r:r + 1], 1, 512)[0], idx[r])
 
 
 def test_route_matches_topk_on_sqrt_softplus():

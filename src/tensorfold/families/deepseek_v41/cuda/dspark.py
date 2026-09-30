@@ -35,7 +35,10 @@ class DSpark:
             raise ValueError(f"DSpark drafts 1..{c.dspark_block_size} tokens a round, got {tokens}")
         self.N = tokens
         self.dev = eng.dev
-        self.swa = [torch.zeros((eng.cap, c.head_dim), dtype=BF, device=self.dev) for _ in self.dw.layers]
+        from .serial import RING
+
+        self.ring = RING
+        self.swa = [torch.zeros((RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.dw.layers]
         self.scratch = [ex3.Scratch(b.moe.experts, 8, c.dspark_num_experts_per_tok) for b in self.dw.layers]
         self.noise = torch.full((tokens - 1,), c.dspark_noise_token_id, dtype=torch.long, device=self.dev)
         self.taps: list[torch.Tensor] = []
@@ -55,7 +58,7 @@ class DSpark:
         for j, block in enumerate(dw.layers):
             a = block.attn
             kv = K.rmsnorm(a.wkv(main_x), a.kv_norm, c.rms_norm_eps)
-            self.swa[j].index_copy_(0, pos, K.rope(kv, pos, cos, sin))
+            self.swa[j].index_copy_(0, pos % self.ring, K.rope(kv, pos, cos, sin))
 
     # -- one drafting pass ------------------------------------------------------------------------------------
     def draft(self, anchor: torch.Tensor, P: torch.Tensor) -> torch.Tensor:
@@ -98,9 +101,9 @@ class DSpark:
         kv = K.rmsnorm(a.wkv(x), a.kv_norm, c.rms_norm_eps)
         H = a.wq_b.n // Dh
         q = K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin).float()
-        self.swa[j].index_copy_(0, pos, K.rope(kv, pos, cos, sin))
+        self.swa[j].index_copy_(0, pos % self.ring, K.rope(kv, pos, cos, sin))
         idx = P - (W - 1) + torch.arange(W - 1 + R, device=self.dev)           # P - 127 .. P + N - 1
-        keys = self.swa[j][idx.clamp(min=0)].float()
+        keys = self.swa[j][idx.clamp(min=0) % self.ring].float()
         mask = (idx[None, :] >= (pos[:, None] - (W - 1))) & (idx[None, :] >= 0)
         if "causal" in VARIANT:
             mask = mask & (idx[None, :] <= pos[:, None])

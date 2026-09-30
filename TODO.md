@@ -58,7 +58,9 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [ ] Embedding, hyper-connections (hc_mult 4, 20 Sinkhorn iters) on CUDA
 - [ ] Attention: q/kv low-rank, 64 heads × 512 shared KV, window 128 + sinks, RoPE/YaRN, grouped low-rank output
 - [ ] CSA2 compressors (ratios 2 / 1 per layer), compressed pools, cross-layer KV sharing (`kv_source_layer_ids`)
-- [ ] Indexer (32×128, top-512) shared by `index_source_layer_ids`; candidate blocks (layer 20, 2048×8)
+- [x] Indexer (32×128, top-512, bf16 keys) shared by `index_source_layer_ids`; rings for window/raw caches;
+      long-context parity to 16K tokens (NLL equal to vLLM; BENCH.md)
+- [ ] Candidate blocks (layer 20, 2048×8) for contexts > 16,384; goldens at ~32K
 - [ ] MoE: sqrt-softplus router, noaux_tc top-6 of 384, shared expert; routed via `cuda/exl3/experts`
 - [ ] Engram layers 1/14: n-gram hashing, FP8 e4m3 rows (never uint8), file-backed row store (O_DIRECT/mmap),
       mapped-table accounting in capacity
@@ -85,7 +87,8 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [x] Adaptive draft length (`DraftPolicy`, k = 0..N by expected tokens/ms): 1.39–1.49× vLLM on the 3 cases
 - [ ] Verify cost: split Engram reads across ranks (skew shows up as NCCL wait); fold shared expert into grouped call
 - [ ] CUDA graphs per window width; eager == graph checks
-- [ ] Prefill kernels (EXL3 chunked prefill), long prompts to 600k
+- [ ] Prefill speed: ~330 tok/s vs vLLM ~1,000 (EXL3 GEMM prompt path, grouped expert prefill, bigger chunks)
+- [ ] Long prompts to 600k (cap/memory: comp caches bf16 ~1.5 KB/token)
 - [ ] KV format ≤ ~3.4 KiB/token; carveout-backed pools
 - [ ] `--parallel N` shared rounds (optional; vLLM wins at width today)
 

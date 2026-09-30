@@ -1,0 +1,1012 @@
+# TensorFold
+
+TensorFold serves language models on Apple Silicon and NVIDIA GPUs through an OpenAI-compatible API.
+Each model family supplies its own kernels and draft verification.
+
+```bash
+python -m pip install git+https://github.com/ashhart/TensorFold.git
+tensorfold serve Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
+```
+
+Use `http://127.0.0.1:8080/v1` as the client base URL and the model ID from `/v1/models`. Both backends serve chat
+completions, completions and OpenAI's Responses API (`/v1/responses`); see the [API reference](docs/api.md).
+Python 3.11 or newer is required, and MLX 0.32.2 or newer on a Mac (pip installs it). See the [runbook](RUNBOOK.md)
+for installation and a first request.
+
+## Image input
+
+Install `pip install '.[vision]'` from this branch and start a compatible Qwen3.5/3.8 dense checkpoint with `--vision` to accept image and text content parts through the same lane engine.
+See [image input](docs/vision.md) for the API, checkpoint requirements, cache behavior and qualification status.
+
+## Models
+
+| Model | Checkpoint | Backend | Drafting |
+| --- | --- | --- | --- |
+| Nemotron 3.5 Lightning | `Vontra/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | MLX, CUDA | Included MTP head; context copies on MLX |
+| Qwen3.8-27B | `Vontra/Qwen3.8-27B-MLX-4bit` | MLX, CUDA | `z-lab/Qwen3.8-27B-DFlash2` and context copies; DFlash2 is optional on MLX |
+| Qwen3.8 Flash Next | `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX, CUDA | Included MTP head and context copies |
+| GLM-5.3-Flash | `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` | MLX on a 256 GB Mac, CUDA with two ranks | MTP; optional DFlash2 on CUDA |
+| Gemma 4 26B-A4B | `mlx-community/gemma-4-26b-a4b-it-4bit` | MLX | Context copies; `z-lab/gemma-4-26B-A4B-it-DFlash` is optional |
+| DeepSeek-V4-Flash | `mlx-community/DeepSeek-V4-Flash-4bit` | MLX on a 256 GB Mac | `Vontra/DeepSeek-V4-Flash-DSpark-MLX` or `Vontra/DeepSeek-V4-Flash-MTP-MLX` |
+| Qwen3.8-27B (NVFP4) | `nvidia/Qwen3.8-27B-NVFP4` (ModelOpt: NVFP4 MLP, FP8 attention) | CUDA, one GPU | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
+| Qwen3.8-27B (EXL3, experimental) | `turboderp/Qwen3.8-27B-exl3` (branches `3.00bpw`, `4.00bpw`; any codebook, 1 to 8 bits per weight) | CUDA | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
+| Qwen3.8 Flash Next (EXL3, experimental) | `turboderp/Qwen3.8-Flash-Next-exl3` (branch `3.05bpw_h5_ng5`; any codebook, a width per tensor) | CUDA | Included MTP head and context copies |
+| Ternary Bonsai 2 27B | `prism-ml/Ternary-Bonsai-2-27B-mlx-2bit` | MLX | `z-lab/Qwen3.8-27B-DFlash2` and context copies |
+| Qwen3.8 Flash Next (NVFP4) | `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (ModelOpt: NVFP4 experts, MXFP8 attention and DeltaNet); `RadixArk/Qwen3.8-Flash-Next-NVFP4` (bf16 besides the experts) | CUDA, one GPU | Included MTP head and context copies |
+
+`tensorfold models` lists families and checkpoints. `tensorfold info MODEL` checks configuration without
+fetching weights. `serve` downloads a missing checkpoint; `pull` downloads it ahead of time.
+
+```bash
+tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit
+```
+
+Qwen3.8-27B reads MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit checkpoints, including mixed layer formats.
+This branch adds packed row readers for groups of 32, 64 and 128 on Apple Silicon and CUDA, with hardware
+qualification still pending for the new paths. M5 keeps its native tensor-unit kernels for compatible formats,
+and other formats use the row decoder. See [quantized checkpoints](docs/quantization.md) for the exact scope.
+On CUDA, pull DFlash2 before serving; without it, explicitly choose `--no-drafts` for the serial reference.
+
+Nemotron uses TensorFold projections and routed-expert kernels. Its load-time row check controls drafting;
+keep the installed MLX version within the package requirements. The named checkpoint includes
+`mtp-4bit.safetensors`, which `pull` and `serve` check for.
+
+Flash Next requires 4-bit/group-32 weights. Without an MTP head it can run without MTP drafting on MLX;
+on CUDA, explicitly pass `--no-drafts`. On one CUDA GPU it also reads the two NVFP4 exports in the table as they
+ship; see [the recipe](docs/recipes/qwen3.8-flash-next.md#nvfp4-checkpoints) for their formats, the checks they
+passed and what is not supported. Nemotron CUDA requires 4-bit/group-64 weights and an MTP head
+unless `--no-drafts` is set. GLM on MLX reads 4-bit/group-64 weights and mlx-lm's mixed-bit conversions,
+whose 5-, 6- and 8-bit tensors take their own row kernels; it needs MLX 0.32.2 or later. GLM CUDA reads
+MLX 4-bit/group-64 weights and the experimental `Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` conversion. GLM's optional
+`incoai/GLM-5.3-Flash-DFlash2` checkpoint has non-commercial license
+terms, described in [third-party notices](THIRD_PARTY_NOTICES.md).
+
+Gemma 4 has no draft head. It drafts copies of its context, and chains from z-lab's DFlash model when served with
+`--drafter z-lab/gemma-4-26B-A4B-it-DFlash` (pulled once). Its kernels read 4-bit weights in groups of 32 or 64
+with an 8-bit router, as the mlx-community conversion stores them; `serve` refuses other Gemma 4 layouts
+before downloading.
+
+DeepSeek-V4-Flash reads the mlx-community conversion (affine 4-bit/group-64 weights, mxfp4 routed experts) and
+needs MLX 0.32.2 or later. Its draft heads are DeepSeek's DSpark blocks and MTP layer (MIT), converted:
+`tensorfold pull Vontra/DeepSeek-V4-Flash-DSpark-MLX` once and `serve` drafts with it; see
+[its recipe](docs/recipes/deepseek-v4-flash.md).
+
+See the [recipes](docs/recipes/README.md) for supported formats and backend limits.
+
+## Exact decoding
+
+A draft is accepted only when it equals the token the same engine would produce serially.
+Sampling depends on the prompt or explicit seed, absolute position and token ID. Verify kernels keep each
+row's arithmetic independent of the other rows in the call. Compare a request with the same request using
+`"draft": false` to check drafted versus serial output.
+
+The MLX engine can share a round across requests. Each stream keeps its own state and sampling key, with
+concurrent output required to match its solo output. Load-time checks restrict window width and shared
+forwards where a family cannot reproduce its serial arithmetic. On CUDA, `--parallel N` with N greater
+than one enables shared rounds for Qwen3.8-27B on one or two ranks and for Flash Next and Qwen3.6-35B-A3B on
+one rank. Flash Next rejects concurrent two-rank execution. GLM and Nemotron CUDA serve one request at a time;
+CUDA `--parallel auto` also means one request at a time.
+
+Exactness is against the same engine, weights, runtime and settings. It does not imply identical output
+between MLX and CUDA, different quantizations, or different tensor-parallel rank counts.
+
+## Serve options
+
+| Option | Meaning | Backend |
+| --- | --- | --- |
+| `--host`, `--port` | Listen address, default `127.0.0.1:8080` | Both |
+| `--name` | Model ID advertised to clients | Both |
+| `--vision` | Opt-in Qwen3.5/3.8 dense image input | Both |
+| `--alias` | Additional model IDs | MLX |
+| `--context N` | Prompt plus reply capacity | Both |
+| `--max-tokens N` | Default reply limit, 4096 | Both |
+| `--temperature`, `--top-p`, `--top-k`, `--min-p` | Sampling defaults; temperature zero is greedy | Both |
+| `--thinking`, `--no-thinking` | Template thinking toggle | Both |
+| `--reasoning-effort` | Template effort when a request sets none; default: the template's own | Both |
+| `--thinking-budget N` | Token-count limit inside reasoning | Both |
+| `--backend auto`, `mlx`, `cuda` | Select backend; auto uses MLX on macOS | Both |
+| `--parallel N` | MLX `auto` admits up to 8 within budget; CUDA `auto` is 1, explicit N enables supported shared rounds | Both |
+| `--no-drafts` | Decode serially | Both |
+| `--drafter auto`, `none`, or model ID | Select an optional draft model where the family supports it | Both |
+| `--mtp-drafts N` | Family-specific cap on MTP drafts | Both |
+| `--kv-dtype bf16`, `int8`, `int4` | Flash Next: `int8` or `int4` stores keys and values with one fp16 scale per 32 values. Other families and the MLX path refuse it | CUDA |
+| `--mtp-confidence P` | Flash Next: stop a draft chain before a later draft under this probability, 0 to 1 (default 0.30) | CUDA |
+| `--tp 2 --rank R --master HOST` | Two-rank CUDA execution | CUDA |
+| `--decode-share F` | While a prompt prefills, running replies keep moving for this share of each chunk's time and later prompts start later (default 0.25; 0 prefills whole prompts first, as 0.3.6.2) | MLX |
+| `--prompt-cache-gib N` | Retained conversation-prefix budget; zero disables retention | MLX |
+| `--checkpoint-slots N` | Retained conversation prefixes (default 3 per lane, at least 8); long conversations hit this before the byte budget | MLX |
+| `--spill-gib N` | Write evicted conversation prefixes to disk (up to N GiB) and read them back instead of prefilling again; zero disables | MLX |
+| `--mlx-cache-gib N` | Reusable freed-buffer cache, default 8 GiB | MLX |
+| `--snapshot-dir DIR` | Persistent prefix snapshots; `none` disables them | MLX |
+| `--no-update-check` | Disable the startup release check | Both |
+
+The default sampling settings come from `generation_config.json`. Requests can override sampling and reply
+length. CUDA does not implement the MLX-only options above. See [API fields](docs/api.md) for request scope.
+
+<a id="memory"></a>
+
+## Context and memory
+
+On MLX, omitted `--context` targets the model's metadata window and reduces it to the startup memory
+estimate when needed, allowing room to retain a prompt for the next turn. An explicit positive value
+that cannot fit one request is refused at startup. A larger explicit window may fit a request without
+leaving room to retain its prompt, so a later turn can need a full prefill. `--context 0` removes the
+metadata cap; finite engine capacity and memory admission still apply. Use the reported context when
+configuring client compaction.
+
+On CUDA, Qwen defaults to the affordable native capacity. GLM targets a dense 2,051-token window,
+and Nemotron targets 16,384 tokens; the capacity estimate can lower these defaults. Flash Next's `--kv-dtype int8` or `int4` counts
+its smaller cache, so the same memory admits a longer window. Explicit `--context 0` targets the affordable native capacity for every CUDA family.
+A positive CUDA value must fit both the native window and the capacity estimate on every rank;
+otherwise startup refuses it with fitting guidance. Increasing GLM beyond its dense window enables
+its sparse-attention path. The startup report distinguishes native and allocated capacity.
+
+MLX defaults to a process budget of 70% of RAM. A family can state a larger share: GLM-5.3-Flash takes 85%
+on a Mac with 256 GB or less, with nothing else loaded. `TENSORFOLD_MEMORY_LIMIT_GB` replaces that default in
+GiB, raising or lowering it; physical RAM and the GPU's recommended working set still cap the result.
+The server reserves 3 GiB for the rest of the process before setting the MLX allocator limit, so a
+110 GiB process budget allows 107 GiB of MLX buffers. Concurrent admission honors the raised budget
+while accounting for memory held elsewhere on the machine. Admission accounts for weights, cache
+growth, reply tokens and prefill workspace. Retained prefixes and reusable MLX buffers have separate
+limits. Admission can evict retained prefixes or queue another stream; fitting weights alone does not
+establish a usable context size. A larger budget leaves less RAM for other applications and cached file pages.
+The startup line says how far the variable can raise the budget on this Mac, and a startup refusal says how far it
+must go. On a 32 GB Mac, Qwen3.8-27B needs more than the default 22.4 GiB, with or without its draft model.
+
+Flash Next's startup weight check excludes n-gram tensors when the loader keeps them in host file
+mappings. The startup report shows resident and file-backed bytes separately. Cached file pages still
+consume RAM and can be reclaimed by the OS; see [Flash Next memory](docs/recipes/qwen3.8-flash-next.md#mlx-execution).
+
+An explicit reply limit is reserved before prefill. A request that exceeds context or memory is refused
+with fitting guidance; an omitted reply limit is capped by the remaining context. MLX reports a
+context refusal as HTTP 400 for a non-streamed request or as an error event after opening a stream.
+CUDA checks context before opening a stream.
+
+On MLX, streams that share rounds take memory as they grow. A stream beside others holds its next 2,048
+tokens of growth, not its whole reply, so `--parallel` streams are admitted while their real contexts fit.
+Before each round the server checks that the live streams' next growth fits. If it doesn't, it first frees
+MLX's cached buffers and retained prefixes, but only when that makes room. Then the newest streams wait a
+round, keeping their state, so their tokens don't change. If even the oldest stream can't grow, the newest one
+ends with an error that says so; the tokens it already sent stay valid.
+
+The memory-class table below keeps the model combinations under qualification. Its GiB budget ceilings
+emulate the listed RAM classes before the 3 GiB process reserve. The actual default budget uses
+OS-reported physical memory and the GPU working set; an explicit memory budget can lower or raise it.
+Context and peak-memory results remain TBD until a public
+prompt fixture, checkpoint revision, runtime, command and measurement output accompany each result.
+
+| Nominal RAM class | Budget ceiling | Qwen3.8-27B + DFlash2 | Qwen3.8-27B, `--drafter none` | Nemotron 3.5 Lightning | Qwen3.8 Flash Next |
+| --- | --- | --- | --- | --- | --- |
+| 32 GB | 22.4 GiB | TBD | TBD | TBD | TBD |
+| 36 GB | 25.2 GiB | TBD | TBD | TBD | TBD |
+| 48 GB | 33.6 GiB | TBD | TBD | TBD | TBD |
+| 64 GB | 44.8 GiB | 140,288 tokens, 43.7 GiB (0.3.5.1) | 152,576 tokens, 39.9 GiB (0.3.5.1) | 262,144 tokens, 42.2 GiB (0.3.5.1) | Not run: 4-bit weights exceed the budget |
+| 96 GB | 67.2 GiB | TBD | TBD | TBD | TBD |
+| 128 GB | 89.6 GiB | TBD | TBD | TBD | TBD |
+| 192 GB | 134.4 GiB | TBD | TBD | TBD | TBD |
+| 256 GB | 179.2 GiB | TBD | TBD | TBD | TBD |
+
+Each model cell needs the fitted context and peak physical process footprint. An emulated budget on
+a larger host is not a measurement on hardware with that RAM size. These are qualification slots,
+not minimum-memory promises. Weights that exceed the MLX budget are refused before loading.
+
+The 64 GB row comes from @benwilson's run on a 64 GB M5 Pro with TensorFold 0.3.5.1 and MLX 0.31.2 (#70),
+not from this release. Each cell is the fitted context at the default budget and the process's lifetime peak
+footprint over cold and resumed prompts at that context. The [Qwen3.8-27B recipe](docs/recipes/qwen3.8-27b.md#a-64-gb-m5-pro-on-0351)
+lists the checkpoint revisions, fixture, commands and results. On 0.3.5.1 with DFlash2, prompts above about
+100,000 tokens were served but not kept for the next turn (#71).
+
+## Prompt caching
+
+On MLX, chunk starts come from the rendered token sequence. Resume points are assistant-message
+starts and the second message start, using markers discovered from the chat template. The planner
+skips points less than 256 tokens from the previous chunk start and otherwise cuts at the first
+eligible point or after the model family's chunk. Qwen3.8 Flash Next measures one chunk at startup and
+takes the largest of 8,192, 4,096 and 2,048 tokens (4,096 and 2,048 on GPUs without tensor units) that
+still leaves room for 128K tokens of context; other families use 2,048. Without recognized markers it
+uses that grid. There is no configurable `--prefill-grid` option.
+
+Fresh and resumed requests use the same chunk plan. Reuse stops at a matching token prefix and a valid
+chunk boundary; the previous reply is prefilled again under the current prompt. A template that rewrites
+an earlier turn can reduce reuse. A follow-up therefore need not reprocess a full grid cell, but short
+messages or changed earlier text can make it reprocess more than the latest reply and new messages.
+
+Snapshots include the model, runtime, kernel and chunk-plan identity. System prefixes and retained
+conversations can survive restarts. CUDA engines keep their own prompt/reply states and do not use the
+MLX disk-snapshot or retained-prefix options.
+
+<a id="dgx-spark-and-other-nvidia-gpus"></a>
+
+## NVIDIA GPUs
+
+Use NVIDIA's PyTorch container for CUDA, PyTorch, Triton and the extension compiler; the package has no
+`cuda` installation extra. Install TensorFold inside the container without replacing that toolchain.
+
+```bash
+docker run -it --gpus all --ipc=host --network host nvcr.io/nvidia/pytorch:26.07-py3
+python -m pip install git+https://github.com/ashhart/TensorFold.git
+tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --host 0.0.0.0
+```
+
+Qwen3.8-27B, Flash Next and Nemotron support one or two CUDA ranks; GLM requires two.
+For two ranks, see the [CUDA runbook](RUNBOOK.md#nvidia-gpus). Each rank needs its checkpoint and any
+optional drafter. Rank 0 serves HTTP. Unified GPU/host memory also holds runtime buffers and file-backed
+model data; the startup estimate is not a measured maximum capacity.
+
+## Measurements
+
+Each release's notes give its measured decode, prompt and concurrency numbers against the previous release and the
+standard servers, on the machines they name: see [CHANGELOG.md](CHANGELOG.md) and the GitHub releases. The
+[recipe book](docs/recipes/README.md#measurements) gives the public prompts and benchmark command, and each family's
+recipe keeps its own tables.
+
+## Updating
+
+`tensorfold update --check` checks for a release; `tensorfold update` installs it, then the server must
+restart. A normal installation uses the same interpreter's pip. An editable clone must be clean and able
+to fast-forward to the release tag; afterwards run `python -m pip install -e .` in the checkout to refresh
+metadata and dependencies. `--no-update-check` or `TENSORFOLD_NO_UPDATE_CHECK=1` disables startup checks.
+
+When the update finishes it prints what changed since your version, from [CHANGELOG.md](CHANGELOG.md), which lists
+every release. The first time a new version serves, it prints one line linking to its notes.
+
+## Development and license
+
+Family interfaces, kernel layout and verification requirements are in the [recipe book](docs/recipes/README.md),
+[family map](src/tensorfold/families/README.md) and [kernel map](src/tensorfold/kernels/README.md).
+MIT; see [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+Model weights keep their own licenses.
+
+
+# CUDA implementation
+
+CUDA families read supported checkpoints through PyTorch loaders and execute family-specific Triton and
+CUDA kernels. Use the [runbook](../../RUNBOOK.md#nvidia-gpus) for the container and two-rank setup.
+
+| Family | CUDA execution |
+| --- | --- |
+| [Qwen3.8-27B](qwen3.8-27b.md#cuda) | One or two ranks, DFlash2 trees and context copies |
+| [Flash Next](qwen3.8-flash-next.md#cuda) | One or two ranks, MTP chains and CUDA graphs |
+| [Nemotron 3.5 Lightning](nemotron-3.5.md#cuda) | One or two ranks, MTP chains and CUDA graphs |
+| [GLM-5.3-Flash](glm-5.3-flash.md#cuda) | Two ranks, MTP and optional DFlash2 |
+| [Qwen3.6-35B-A3B](qwen3.6-moe.md#cuda-execution) | One rank, MTP chains and context copies, CUDA graphs |
+
+An EXL3 checkpoint's trellis is read by one shared module for every family, any codebook (3inst, mcg, mul1)
+and any width 1 to 8, mixed across a checkpoint and inside one MoE layer: `src/tensorfold/cuda/exl3/`. A family
+whose CUDA engine reads it declares `EXL3_VARIANT = "any"`, and TensorFold checks the checkpoint before
+downloading. The dense linear layer, its plan and its measured throughput are in [EXL3 weights](exl3.md);
+`python -m tensorfold.cuda.exl3.inspect MODEL_DIR` prints what a checkpoint holds.
+
+## Arithmetic and state
+
+Each engine defines its own serial reference. A verify row uses the same group order, K split and
+rounding as that row alone. Attention partitions depend on absolute key position; router ties use a
+stable ID order. Recurrent commits replay the accepted path with the same update routine.
+
+The default two-rank decode paths gather fp32 partials and add them in rank order. The dense Qwen
+prefill path gathers bf16 partials and adds them in fp32. Rank 0 chooses the window and both ranks
+execute the same forwards. Prefix token IDs must describe the state actually cached on each rank.
+CUDA graphs replay the same kernels using stable buffers; changing capture shapes must preserve these rules.
+
+## Shared kernels and prefill
+
+`tensorfold/cuda/kernels/qmm.py` packs 4-bit weights for the shared CUDA matmul. Its decode kernel fixes
+the K split by weight shape, while the prefill kernels use separate arithmetic. Dense Qwen prefill uses
+FP8 activations in chunks of up to 4,096 tokens. It retains prompt-end states and prefills replies again
+on a follow-up, because prefill and decode use different arithmetic.
+
+`tensorfold/cuda/kernels/gdn.py` and `attention.py` support several streams in one call. Each stream
+supplies its own tree, cache offsets and accepted path. `tensorfold/cuda/experts.py` groups routed
+row/expert pairs so the MLX 4-bit formats of Flash Next, GLM and Nemotron share expert kernels, with
+separate prefill and decode forms. A shared call must preserve each row's arithmetic and each stream's cache.
+
+## Requests and memory
+
+CUDA `--parallel auto` serves one request at a time. Set an explicit `--parallel N` above one for shared
+Qwen3.8-27B rounds on one or two ranks, or Flash Next on one rank. Flash Next rejects this setting with
+`--tp 2`; Nemotron, GLM and Qwen3.6 remain serialized. The shared scheduler admits requests between decode
+rounds, then verifies each active stream's drafts together and commits each stream independently. On the 27B,
+a new prompt prefills 1,024 tokens a round while the other streams keep decoding, and its state is kept at
+message starts (the second message and the last assistant turn), so prompts that share a system prompt or
+extend a conversation resume there with a fresh prefill's bits.
+
+Cache capacity is fixed at startup and bounds prompt plus reply.
+A positive context that exceeds the startup budget is refused; automatic capacity is an estimate.
+Unified-memory GPUs share physical RAM with host buffers and file-backed model data. Admission uses
+available host memory, including reclaimable page cache, and considers mapped-table residency when sizing
+an automatic window. It accounts for stream count and retained caches where concurrency is enabled.
+
+Two-rank Flash Next, Nemotron and GLM requests finish on both ranks after a client disconnects, keeping the
+collective sequence aligned. MLX disk snapshots and cache-budget flags do not configure these CUDA
+caches. The CUDA CLI also does not apply `--alias`; use `--name` for the served model ID. `--thinking`,
+`--reasoning-effort` and `--thinking-budget` set the defaults a request's `chat_template_kwargs.enable_thinking`,
+`reasoning_effort` and `thinking_budget` override, as on the Mac.
+
+## Measuring
+
+Use the [public benchmark command](README.md#measurements), the same client and fixtures for each engine,
+and record runtime and checkpoint revisions. Decode, prefill, memory and comparative speed for 0.3.5 are
+TBD [release-0.3.5].
+
+Compare exact output separately from throughput. Test long prompts as well as short fixtures and compare
+resumed requests with fresh ones. When profiling NCCL, exclude annotation events from summed GPU time to
+avoid counting a collective twice. Record system memory pressure alongside GPU timing on unified-memory
+systems rather than inferring a kernel regression from one slow run.
+
+The [CUDA family guide](adding-a-cuda-family.md) specifies the interface and required checks.
+
+
+# EXL3 weights on CUDA, for any family
+
+ExLlamaV3's trellis quantization (EXL3) is what the community's best 4-bit and low-bit NVIDIA checkpoints ship as:
+`mul1` codebook at 2 to 6 bits for MiMo-V2.6-Flash, Qwen3.8-27B and Flash Next, `mcg` at 4 bits for
+GLM-5.3-Flash. TensorFold reads all of it with one module, so a family's engine does not need its own EXL3
+kernel:
+
+- `src/tensorfold/cuda/exl3/format.py` — the format, per-tensor metadata out of the safetensors headers, and a
+  numpy reference decoder;
+- `src/tensorfold/cuda/exl3/decode.cuh` — header-only device functions that decode a 16x16 tile of any codebook
+  and width straight into the B fragments of two `mma.m16n8k16`;
+- `src/tensorfold/cuda/exl3/linear.py`, `linear.cu` — a row-invariant linear layer for 1 to 128 rows;
+- `python -m tensorfold.cuda.exl3.inspect MODEL_DIR` — what a checkpoint holds, from its headers alone.
+
+The GLM-5.3-Flash engine keeps its own tuned `families/glm5_next/cuda/exl3.py` (4-bit `mcg`, routed experts
+only); it stays as it is.
+
+## What a family has to say
+
+A family whose CUDA engine reads every codebook and width declares it, and TensorFold checks the checkpoint's
+`config.json` before downloading anything:
+
+```python
+QUANT_METHODS = {"cuda": ("mlx", "exl3")}
+EXL3_VARIANT = "any"          # any codebook and any width of BITS (the average bits may be fractional)
+```
+
+A family that reads one variant declares it as a dict instead (`families/glm5_next`) and checks it in its own
+`check()`. The per-tensor widths are the module's business, not the config's: one checkpoint mixes them across
+layers, projections and the experts of one MoE layer, and `config.json`'s `bits` is only the model's average
+(`head_bits` is the head's, `mtp_bits` the MTP head's).
+
+## The format, in one paragraph
+
+A quantized linear layer with K inputs and N outputs (both multiples of 128; ExLlamaV3 pads) is a group of
+tensors under one prefix: `trellis` int16 `[K/16, N/16, 16 * bits]`, `suh` fp16 `[K]` (or the packed sign words
+`su` int16 `[K/16]` of older checkpoints), `svh`/`sv` for the outputs, an optional fp16 `bias`, and a zero-size
+marker tensor `mcg` or `mul1` naming the codebook (no marker: the original `3inst`). Each tile holds 256 values
+in a circular bitstream; the codebook maps a 16-bit state to an fp16 value; the tiles' layout is the tensor-core
+permutation. The exact bit arithmetic follows; `tests/test_exl3_format.py` checks `format.py`'s decoder against
+one written from this description, bit by bit, for all 27 codebook-and-width combinations.
+
+```text
+The tile. A tile holds 256 values in R = 256 * bits bits (16 * bits int16 words). Its int16 words, read in pairs as
+little-endian 32-bit words, form a circular bitstream of R bits read from the most significant bit of each 32-bit
+word. Value p of the tile (p = 0..255) is decoded from the 16 bits of the stream that end at bit E(p) (exclusive,
+wrapping around past the tile's last bit), taken as an unsigned integer s, first bit most significant:
+
+    E(p) = (p + 1) * bits                                   integer bits
+    E(p) = ((p + 1) * (2 * KA + 1) - ((p + 1) % 2)) / 2     bits = KA + 1/2: positions alternate KA and KA + 1
+                                                            new bits, the odd positions taking the extra bit
+
+and the codebook maps the 16-bit state s to an fp16 value:
+
+    3inst  x = (s * 89226354 + 64248484) mod 2^32; x = (x & 0x8FFF8FFF) ^ 0x3B603B60;
+           value = fp16(x & 0xFFFF) + fp16(x >> 16)         one fp16 addition, rounded to nearest even
+    mcg    x = s * 0xCBAC1FED mod 2^32, then as 3inst
+    mul1   x = s * 0x83DCD12D mod 2^32; h = 1024 + (the sum of x's four bytes);
+           value = h * fp16(0x1EEE) + fp16(0xC931)          one fused multiply-add, rounded once (1/147.7, -10.39)
+
+Value p lands in its tile at row 2 * (l % 4) + (j & 1) + 8 * ((j >> 1) & 1), column l // 4 + 8 * (j >> 2), where
+l = p // 8 and j = p % 8: lane l of a warp holds values 8l..8l+7, exactly its B fragments of the two
+mma.m16n8k16 of the tile (columns 0-7 and 8-15). The tiles make W_q [K, N], the weight in the rotated domain.
+
+The layer. With H the 128x128 Sylvester Hadamard matrix scaled by 1/sqrt(128), applied to each block of 128 inputs
+or outputs,
+
+    y = x @ W + bias,   W = diag(suh) @ H_K @ W_q @ H_N @ diag(svh),
+    so  y = ((((x * suh) @ H_K) @ W_q) @ H_N) * svh + bias
+
+(``out_scales`` in the config only says whether the quantizer folded per-column scales into svh; the formula is the
+same.) Splitting a layer keeps whole tiles and whole Hadamard blocks: by outputs, take columns of tiles and of svh
+and all of suh; by inputs, rows of tiles and of suh and all of svh, and add the partial outputs.
+```
+
+## Using it
+
+```python
+from tensorfold.cuda.exl3 import format as exl3_format
+from tensorfold.cuda.exl3.linear import Exl3Linear
+
+layer = Exl3Linear.load(model_dir, "model.language_model.layers.0.self_attn.q_proj")
+y = layer(x)                                  # x [1..128, K] fp16/bf16/fp32 -> y, same dtype
+```
+
+`load` reads one group with safetensors and copies the trellis, never changing it, into the read order the
+kernel wants (`layout="strips"`: a 128-column block's tiles in k order, so a warp walks contiguous words).
+`layout="stored"` reads the checkpoint's own order instead; both give the same bits.
+
+To serve a whole checkpoint, walk `format.scan(model_dir).groups`, build one `Exl3Linear` per group, and treat
+the checkpoint's plain tensors (`checkpoint.plain`: embeddings, norms, routers, sometimes a head) as ordinary
+weights of the family's engine. `python -m tensorfold.cuda.exl3.inspect MODEL_DIR` prints exactly that split,
+the bits per category, and every group that does not parse.
+
+## The layer's arithmetic
+
+```
+y = ((((x * suh) @ H_K) @ W_q) @ H_N) * svh + bias        H = the 128x128 Hadamard / sqrt(128)
+```
+
+`rot_in` rotates the input once per call (fp16 out, as ExLlamaV3 does), `linear` decodes each k tile straight
+into tensor-core fragments and multiplies in fp32. Rows are independent by construction: the k ranges of warps
+and of K splits depend only on (K, N) (`plan(k, n)`), every sum runs in a fixed order, and `mma.m16n8k16` keeps
+its rows independent — which is the verify path's contract (`docs/recipes/cuda.md`).
+
+## Prompts
+
+Prompt chunks take their own arithmetic, as the MLX 4-bit path's FP8 prefill does (`cuda/exl3/prefill.py`): the
+input rotation is decode's, W_q is decoded once a chunk into fp16, a fixed-tile fp16 GEMM with fp32 accumulation
+multiplies it, and its epilogue rotates each 128-column block (the accumulator's bf16 high and low halves times
+H) before `svh` and the bias. Tiles depend on the shape alone, so a row's bits never depend on its chunk and a
+resumed prompt equals a fresh one; they differ from decode's, so the engines keep prompt ends and prefill a reply
+again, as for the MLX checkpoints. A family's head, read one row a prompt, keeps the decode linear.
+
+## Numbers
+
+`tools/bench_exl3.py` prints this table. It cycles over enough weight copies to exceed L2, so these are DRAM
+figures, medians of 9 runs of a CUDA graph of back-to-back calls on an idle DGX Spark (GB10), the same tensors
+through ExLlamaV3's own `LinearEXL3`:
+
+| MiMo-V2.6-Flash 2.50bpw tensor | bits | bytes | rows | TensorFold | ExLlamaV3 |
+| --- | --- | --- | --- | --- | --- |
+| `layers.0.self_attn.q_proj` | 2 | 12.6 MB | 1 | 57.0 us (221 GB/s) | 59.0 us (213 GB/s) |
+| `layers.0.self_attn.q_proj` | 2 | 12.6 MB | 16 | 60.0 us (210 GB/s) | 65.9 us (191 GB/s) |
+| `layers.2.self_attn.o_proj` | 3 | 12.6 MB | 1 | 72.9 us (173 GB/s) | 73.0 us (172 GB/s) |
+| `layers.2.self_attn.o_proj` | 3 | 12.6 MB | 16 | 68.4 us (184 GB/s) | 63.5 us (198 GB/s) |
+| `layers.41.self_attn.o_proj` | 6 | 25.2 MB | 1 | 114.0 us (221 GB/s) | 113.5 us (222 GB/s) |
+| `layers.41.self_attn.o_proj` | 6 | 25.2 MB | 16 | 123.7 us (203 GB/s) | 116.0 us (217 GB/s) |
+| `lm_head` | 6 | 468.7 MB | 1 | 2074.5 us (226 GB/s) | 2071.8 us (226 GB/s) |
+| `lm_head` | 6 | 468.7 MB | 16 | 2113.0 us (222 GB/s) | 2045.8 us (229 GB/s) |
+
+Rows cost little: every tensor above is within 5% from 1 row to 16, because one program's weights are decoded
+once and reused by all its rows. 6-bit is at ExLlamaV3's level (221-226 GB/s of a 237 GB/s streaming ceiling on
+this box) and so is 2-bit at 1 row (221 vs 213 GB/s). 2 bits is where the decode itself is the work (four weights
+per byte), so the loader there has a warp fetch a k step's words as one coalesced run and hand each lane its two
+words of a 16x16 tile by shuffle, and keeps the next k step in flight while the current one decodes; that is worth
+40% at 2 bits (q_proj 156 -> 221 GB/s at 1 row, o_proj 76 -> 187) and 10-15% at 3 to 5 bits. Above 6 bits a step
+is 224 or 256 B of words a warp and prefetching it measured 1-2% slower than loading per tile, so those widths
+load per tile. What is left is the small-N 3-bit shapes at 16 rows (o_proj 184 vs 198 GB/s) and, on the 27B packs,
+rows 8 and 16 of the 3-bit shapes, where the split a shape alone picks is 3-19% off the best cell of the
+(K split, warps) grid. An earlier version of this kernel streamed the tiles through shared memory with `cp.async`; that was
+three to five times slower than these per-lane cached loads on GB10, whose L1 serves a warp's 256-byte search
+from one line.
+
+## Traps
+
+- `config.json`'s `bits` is the average, `head_bits` the head's. Read the width from each tensor's trellis
+  (`16 * bits` words per tile), never from the config.
+- Half bits (1.5, 2.5, 3.5) exist only with the `mul1` codebook, and their tiles are not a whole number of
+  bits per value: the bitstream alternates KA and KA + 1 bits, so the window ends are `E(p)` of `format.py`,
+  not `(p + 1) * bits`.
+- `suh`/`svh` are scales, not signs: the sign of a weight lives in its 16-bit state. The packed `su`/`sv` words
+  of older checkpoints are signs only (`1` bit set = -1), and `format.unpack_signs` expands them.
+- A model may keep some tensors unquantized (a head, an MTP head, embeddings, norms): `scan` lists them under
+  `plain`.
+- The Hadamard blocks run along K and N, so both must be multiples of 128. A split of K must keep whole tiles
+  and whole blocks: `plan` only ever splits 128-aligned k ranges.
+
+
+# GLM-5.3-Flash
+
+The `glm5_next` family serves `Vontra/GLM-5.3-Flash-MLX-4bit-MTP` on two-rank CUDA and, on a Mac with
+256 GB, on the MLX lane engine ([Apple Silicon](#apple-silicon-mlx)).
+The checkpoint uses affine 4-bit weights in groups of 64 and includes its MTP layer.
+Kimi delta attention, sparse MLA and MoE blocks mix four residual streams.
+
+## CUDA
+
+Use the [two-rank container setup](../../RUNBOOK.md#nvidia-gpus) and pull the same checkpoint on both ranks:
+
+```bash
+tensorfold pull Vontra/GLM-5.3-Flash-MLX-4bit-MTP
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
+```
+
+Rank 1 starts first and rank 0 serves HTTP. Use the same context and drafting settings on both ranks.
+The optional `incoai/GLM-5.3-Flash-DFlash2` model has CC BY-NC-ND 4.0 terms; pull it on both ranks only
+when those terms fit the intended use. The CLI uses it automatically once it has been pulled.
+Without it, the engine uses MTP drafts; `--drafter none` explicitly selects MTP-only drafting.
+Give both ranks the same drafter setting. `--no-drafts` disables all drafting for the serial reference.
+A checkpoint with neither an MTP head nor a supplied DFlash2 model is refused unless drafts are disabled.
+
+### Draft policies
+
+For the affine checkpoint, the default `auto` policy uses MTP for sampled requests. For greedy requests with DFlash2 available,
+it compares committed tokens per estimated round time and chooses a drafter. It periodically probes
+the other drafter and discards its old rate after switching away, so later probes can change the choice.
+Every policy verifies against the same target, and `"draft": false` selects the serial reference.
+A request can select a policy after `@` in its model ID, such as `bench@c3:0.35`, or with `tf_policy`.
+`--mtp-drafts N` selects a fixed depth at startup. With DFlash2 available, `--mtp-drafts 0` selects
+`fc5:0.3`; without it, zero selects the serial reference.
+
+| Policy | Meaning |
+| --- | --- |
+| `auto` | Default per-request selection |
+| `0` | Serial |
+| `N` | Fixed number of MTP drafts |
+| `a:LOW:HIGH` | MTP depth from running acceptance |
+| `cN:P` | MTP chain capped at N and a probability-product threshold |
+| `fN`, `fcN:P`, `fa:...` | Corresponding DFlash2 policies, requiring its checkpoint |
+
+The default context is 2,051 tokens, where attention stays dense. A larger positive `--context` enables
+sparse attention beyond that boundary if the startup memory estimate admits it on both ranks.
+`--context 0` instead targets the affordable native window. An explicit reply reservation beyond the allocated window receives HTTP 400 before streaming; an omitted reply limit
+is capped to the remaining space. Larger-context restart advice appears only when the estimate allows it.
+
+Prompt prefill uses the shared CUDA prefill kernels. Decode uses CUDA graphs, past the dense limit one per
+pool bucket. The engine keeps up to 8 conversations' prompts (`TF_GLM_CACHE_ENTRIES`): when another
+conversation takes the attention caches, a kept prompt's rows are saved. Kept states and saved rows together get
+`TF_GLM_CACHE_GIB` (default 3), or less when the window leaves less memory on either Spark; the startup log says
+when it is less, and the memory estimate includes it. It serves one request at a time. Both ranks finish a started
+reply after a client disconnects.
+
+### Long contexts: the latent cache
+
+The DSA layers are NoPE MLA: head h's key is `Wk_h c` and its value `Wv_h c`, with `c` the token's 512-wide
+normalized latent and `Wk_h`, `Wv_h` blocks of `kv_b_proj`. So `score_h = (Wk_h^T q_h) . c` and
+`out_h = Wv_h (sum_j p_j c_j)`. The CUDA engine caches `c` only (bf16, 1 KB a token and layer, shared by the
+heads and both ranks; `TF_GLM_LATENT=0` returns to per-head keys and values), absorbs the query once per row,
+attends over latents and expands the attended latent once. Past 2,051 tokens a row attends to its top 512 index
+pools (2,048 tokens) plus its incomplete pool; the pools are ranked by one radix-select kernel over the pools the
+chunk can see, rounded up to a power of two. Every kernel computes a row alone in an order fixed by its own
+position, so a decode window's rows keep the serial steps' bits; prompt chunks give the same bits for any
+chunking. The memory estimate sizes the latent cache (`mla_geometry(latent=True)`).
+
+Measured on two DGX Sparks (GB10, 128 GB each) with the MLX 4-bit checkpoint, MTP drafts only,
+`--context 262144`, a synthetic codebase with one hidden fact, cold prompts:
+
+| Prompt | Prompt reading | First token | Decode at that depth | Hidden fact |
+| --- | ---: | ---: | ---: | :---: |
+| 32,770 tokens | 1,138 tok/s | 29 s | 50.9 tok/s | found |
+| 131,074 tokens | 898 tok/s | 146 s | 47.2 tok/s | found |
+| 261,906 tokens | 849 tok/s | 309 s | 31.9 tok/s | found |
+
+An earlier run of the same kernels read 131k and 256k prompts at 1,002 and 1,006 tok/s and decoded at 40.2 tok/s
+at 256k; runs vary with page migration on the Sparks. Through the 256k prompt the torch peak stayed at 93.7 GiB
+against a 96.1 GiB estimate, the kept conversations' 1.6 GiB included. MemAvailable never fell below 9.5 GiB;
+the admission reserve (a tenth of RAM) also carries 3.5-4.8 GiB of CUDA context, NCCL and graph memory outside
+the estimate. Drafted replies equaled serial ones (9/9, 2k to 16k), resumed prompts equaled fresh ones (6/6),
+and four interleaved conversations each equaled their solo replies. `--context 0` allocated a 487,495-token
+window, not measured that far.
+
+Short prompts, with the recipe's default drafting (DFlash2, `auto`), decode at 53.8 / 43.4 / 85.0 / 50.0 tok/s
+(code and chat, sampled and greedy, 64 tokens, median of 5 seeds) against 0.3.6's 53.4 / 44.1 / 63.7 / 45.5. The
+latent path rounds attention differently, so some replies differ from 0.3.6 (the greedy cells' texts, hence their
+speeds); `TF_GLM_LATENT=0` gives 0.3.6's replies exactly.
+
+### EXL3
+
+`Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` is an experimental CUDA checkpoint. The reader supports 4-bit
+mcg-codebook routed experts with BF16 weights elsewhere, not arbitrary EXL3 layouts. Start it with the
+same two-rank command, substituting its checkpoint ID on both ranks. With DFlash2 available, the EXL3
+`auto` policy uses DFlash2; without it, MTP remains available.
+
+The expert decoder and BF16 target matmul keep row arithmetic fixed. A quantized copy of the head may
+propose drafts, but target verification retains the BF16 head. EXL3 speed, capacity and long-context
+qualification are TBD [release-0.3.5].
+
+## Apple Silicon (MLX)
+
+On a Mac with 256 GB and MLX 0.32.2 or later (`serve` refuses an older MLX):
+
+```bash
+tensorfold pull Vontra/GLM-5.3-Flash-MLX-4bit-MTP
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP
+```
+
+The model decodes through the lane engine's family rounds with the checkpoint's MTP head. A round's drafted rows
+are verified in one forward, and every row of a window gets its one-row call's bits, so drafted replies equal
+`"draft": false`. A load-time check sets the widest exact window (up to 16 rows) and a second one whether several
+streams' rows can share a forward; concurrent requests share rounds when it passes. The family sets
+`MLX_ENABLE_TF32=0`, so M5-generation GPUs keep fp32 matmuls in fp32. Prompts prefill in the engine's chunks and a
+resumed prompt gets a fresh prompt's bits.
+
+The weights take about 170 GiB, so the family states an 85% memory allowance on Macs of 256 GB or less, for a
+machine with nothing else loaded; concurrent streams are still admitted within it less what other programs hold.
+Prompt admission counts the latent cache's growth and a prompt chunk's indexer workspace.
+
+The load-time checks narrow the window or stop sharing forwards where bits would differ (on the CPU, where
+nothing serves, a mixed-bit checkpoint's window narrows to 7 rows). Real-weight qualification on the 0.3.5 line,
+against mlx-vlm 0.7.3's server (mlx_lm has no GLM-5.3-Flash), is TBD [release-0.3.5.1].
+
+### Experts on SSD
+
+`--ssd-experts GIB` leaves the decoder layers' routed experts (159.5 GiB of the 169.2) in the checkpoint and
+streams them into a GPU pool of that many GiB. Everything else stays resident, the MTP layer included. With it,
+a 128 GB Mac can serve GLM-5.3-Flash:
+
+```bash
+python -m pip install "tensorfold[ssd]"       # cmake and nanobind, to build a small MLX extension on first use
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --ssd-experts 64
+```
+
+- After each layer's router, the GPU signals the host through a shared Metal event and waits.
+- The host reads the picks and copies any expert missing from the pool from SSD into a free slot. It then
+  updates the slot table and lets the GPU go on.
+- The expert kernels are the resident ones with only the weight address changed, so replies are the
+  resident model's tokens.
+- A prompt chunk loads each layer's picked experts in turn.
+- The pool keeps the most recently used experts, and reads bypass the page cache.
+- The extension builds against the installed MLX with the Xcode command line tools.
+
+On an M3 Ultra held to a 128 GB Mac's budget (TENSORFOLD_MEMORY_LIMIT_GB=89.6) with `--ssd-experts 64`, the
+streamed run was compared with the resident one on the same machine:
+- Replies were the same tokens: 36 of 36 serial and cell requests, plus the 2k prompt.
+- Two concurrent streams each matched their solo reply, and resumed prompts matched fresh ones.
+- The footprint peaked at 87.6 GiB against 184.0 resident.
+- Decode ran at 8.9-10.5 tok/s against 62.8-73.6 resident.
+- A 2k prompt prefilled at 144 tok/s against 451.
+
+### Mixed-bit checkpoints
+
+The loader reads two layouts of the same weights: the original one (`Vontra/GLM-5.3-Flash-MLX-4bit-MTP`) and the
+one mlx-lm's converter writes (`language_model.model.*`, one fused `conv1d`, `forget_gate.*`, the absorbed
+`embed_q` / `unembed_out` pair in place of `kv_b_proj`, the MTP layer as `mtp.0.*` with a bf16 `eh_proj`). Such
+conversions usually store per-tensor overrides: routed experts at 4 bits, attention, shared experts and the head at
+8, some layers at 5 or 6. `layouts.py` maps the names, a stack of parts at different widths runs part by part, and
+8-, 6- and 5-bit tensors take row kernels transcribed from MLX's one-row `qmv_fast` / `qmv_quad` loops, so verify
+windows keep one-row bits. On grant-ai's abliterated conversion, on a 256 GB M3 Ultra, the contributor measured
+46.3 tok/s drafted, equal to `"draft": false`.
+
+### Prefill
+
+Prompt chunks attend as decode does: each query reads its own selected keys from the latent cache, so prefill cost
+and memory stay flat with context. The contributor measured 336 / 334 / 309 tok/s at 10k / 35k / 103k tokens on a
+256 GB M3 Ultra, against 331 / 260 / 143 for the previous prefill.
+
+## Responses and exactness
+
+When thinking is disabled, the server closes the template's open think block so the response reaches
+`content`. Both servers turn GLM's native `arg_key`/`arg_value` tool calls into OpenAI `tool_calls`,
+decoding each value by the tool's schema (a string keeps its exact text); the CUDA server keeps Qwen's XML
+parameter values as text.
+
+CUDA tests cover row arithmetic, recurrent rollback and synthetic model execution. Validate real
+weights separately for drafted/serial and resumed/fresh output, with both thinking modes.
+CUDA graphs and eager execution must agree under the same rank configuration.
+Use a separate fp32 reference for quality checks, with TF32 disabled on that reference.
+
+## Measurements
+
+Use the [public benchmark command](README.md#measurements) with the server above. Retain model and
+runtime revisions with every run. Decode rate, cold/resumed first-token latency and peak memory are
+TBD [release-0.3.5]. Record the selected drafter policy with the result.
+
+
+# Qwen3.8 Flash Next
+
+The `qwen4_exp` family has Gated DeltaNet, sparse attention, MoE, hyper-connections and hashed n-gram
+embeddings. The supported checkpoint uses MLX affine 4-bit weights in groups of 32 and includes an MTP head.
+
+```bash
+tensorfold pull Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --name bench
+```
+
+On MLX, a supported conversion without the head runs without MTP drafting. On CUDA, pass `--no-drafts`
+for such a conversion; the default positive draft depth otherwise refuses the missing head.
+
+## MLX execution
+
+N-gram tables stay in host file mappings when the checkpoint's model files exceed 75% of the GPU's
+recommended working set. `TF_NGRAM_HOST=1` forces this mode; `TF_NGRAM_HOST=0` keeps the tables in MLX.
+Startup admission uses the same choice as the loader and subtracts the mapped weights, scales and biases
+from the checkpoint's size. For the named 4-bit checkpoint, about 29.8 GiB of its 105.4 GiB is mapped,
+leaving a conservative 75.6 GiB resident-weight estimate. The default command selects host mode on an
+M4 Max with 128 GiB, whose process budget is 89.6 GiB, including the 3 GiB process reserve.
+
+Mapped pages still use RAM while cached. The loader prefetches them after its initial forwards; macOS
+can reclaim them, and subsequent lookups may read from disk. The remaining weights must fit the MLX
+budget, and the server sizes context from runtime cache and workspace needs. `TENSORFOLD_MEMORY_LIMIT_GB`
+can lower or raise the default budget, capped by physical RAM and the GPU's recommended working set.
+For example, `TENSORFOLD_MEMORY_LIMIT_GB=110` gives a 128 GiB M4 Max a 110 GiB process budget and
+107 GiB for MLX. An explicit context must still fit the startup estimate; a larger budget does not
+establish full-window inference or keep every mapped page resident.
+After measuring shared rounds, the runtime releases the probes' rollback buffers before sizing prompt
+memory, so those unused states do not reduce the available context.
+
+Fused kernels handle hyper-connections, routing, experts, recurrence and sparse attention. Row-exact
+projections and stable routing ties keep each verify row independent of the other rows. M5 GPUs use
+the lane matmul; M1 through M4 use the per-row projection and hyper-connection kernels by default. Rejected tails
+restore recurrent state, n-gram history and attention state, including incomplete pooled blocks.
+The load-time row check disables drafting when windows do not reproduce serial steps.
+
+The prefill path uses sparse selected-key attention, fused hyper-connections and n-gram lookups,
+stacked DeltaNet projections and sorted expert rows. It submits bounded groups of layers to limit live
+workspace. Compatible prefill matmul kernels check against MLX; unsupported paths use MLX's kernels.
+`TF_FLASH_PREFILL=0` selects the reference prefill path for comparison.
+
+Prefill and decode can round differently. The chunk planner uses detected assistant-message starts and
+the second message when at least 256 tokens follow the previous chunk start, otherwise cutting after
+the chunk chosen at startup: the largest of 8,192 (with tensor units), 4,096 and 2,048 tokens whose
+working memory leaves room for 128K tokens of context, or the model's window if smaller. Where none
+fits, the prompt path queues one layer at a time instead of two. Cold and resumed prompts use the same
+rendered-token boundaries, and reuse starts only at these cuts. Templates without detected markers use
+the same fixed chunks. A chunk's sorted expert rows reach MLX's gather in slices of at most 32,768
+(its M5 kernel keeps row offsets in 16 bits through MLX 0.32.2). Snapshots include the prefill
+path, resolved matmul route and GPU identity; changing arithmetic requires a fresh cache.
+
+Load-time shared-forward checks compare each stream with its own call. A failed check limits forwards
+to one stream, while successful checks allow the lane engine to combine requests.
+
+## CUDA
+
+Use the [container setup](../../RUNBOOK.md#nvidia-gpus). For two ranks, pull the checkpoint on both and
+start rank 1 first:
+
+```bash
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
+```
+
+The default CUDA cap is six MTP drafts, with chains stopping below the configured confidence threshold.
+`--mtp-drafts N` changes the cap; `--no-drafts` or `"draft": false` selects serial decoding.
+Single-request serving uses CUDA graphs for verify windows and draft steps. Two-rank reductions add
+gathered partials in rank order.
+
+With one GPU, `--parallel N` enables eager shared forwards for up to N requests; CUDA
+`--parallel auto` selects one request. Two ranks serve one request at a time and reject `--parallel N`
+when N exceeds one. The single-request engine retains prompt and reply states for prefix reuse; the
+concurrent decoder retains prompt snapshots per stream. Cache capacity is allocated at startup; inspect
+the reported capacity rather than assuming an older fixed token limit.
+
+N-gram tables are file-backed host data. On unified-memory GPUs they compete with weights and cache
+allocations for RAM, so a checkpoint's GPU allocation alone does not describe its memory requirement.
+
+`--ple-on-ssd` leaves the 29.8 GiB of n-gram tables in the checkpoint and reads each lookup's rows from SSD,
+so a 128 GB Mac can hold Flash Next. It is an opt-in trade. On an M3 Ultra, replies were the same tokens,
+decode was 3.5-8% slower across the four cells, prefill was unchanged, the peak footprint fell by 40 GiB
+(135.1 to 95.4 GiB) and start-up halved (35.7 s to 17.8 s).
+
+`--ssd-experts GIB` also leaves the routed experts (70.3 GiB) in the checkpoint and streams them into a GPU pool
+of that many GiB; with `--ple-on-ssd` as well, a 64 GB Mac can hold Flash Next (`python -m pip install
+"tensorfold[ssd]"` first: the pool's host side is a small MLX extension built on first use). The GPU hands each
+MoE layer's picks to the host and waits while missing experts are read into the pool; the expert kernels are the
+resident ones with only the weight address changed, so replies are the resident model's tokens.
+
+On an M3 Ultra, each flag was held to a smaller Mac's budget and compared on the same machine:
+- `--ple-on-ssd` at a 128 GB Mac's budget (89.6 GiB) peaked at 85.6 GiB. Decode was 0.91-1.03x the resident
+  run and prefill 0.84-0.91x.
+- Adding `--ssd-experts 24` at a 64 GB Mac's budget (44.8 GiB) peaked at 39.5 GiB. Replies were the same tokens as
+  with the experts resident: 36 of 36 requests, drafted and serial. Decode ran at 36.8-42.5 tok/s against
+  107.6-129.7 (0.31-0.39x), and prefill at 332-354 against 1,014-1,081 tok/s.
+- A smaller budget also halves the prompt chunk, to 2,048 tokens. Prompts past that length then reply
+  differently from a 256 GB Mac's run, whichever flags are set.
+
+### KV cache
+
+`--kv-dtype bf16` is the default. `--kv-dtype int8` and `--kv-dtype int4` store each attention layer's keys and
+values as codes with one fp16 scale per 32 values, the arithmetic of ExLlamaV3's `-cq 8` and `-cq 4` (the
+non-companded grid): each group of 32 is rotated by a 32-point Hadamard, its absmax is the scale, and the codes sit
+on the midpoint grid. 8-bit stores `q - 128` as int8; 4-bit stores two unsigned codes a byte, low nibble first. The
+query is rotated the same way and the merged attention output is rotated back, so the stored keys and values stay
+rotated. Indexer keys and pooled block keys stay bf16.
+
+A token costs 30,784 bytes in bf16, 18,304 in int8 and 11,648 in int4, counting the scales and the MTP head's own
+cache: 1.68x and 2.64x smaller (the keys and values alone shrink 1.88x and 3.56x). The startup admission counts
+those bytes, so an omitted `--context` admits a longer window at int8 and int4, and an explicit `--context` is
+checked against the quantized cache. The dtype holds on every path: prompt chunks and decode windows, the MTP head,
+`"draft": false` requests, `--parallel N` streams and their kept prompt ends, and both ranks of `--tp 2`, which
+refuse to start with different `--kv-dtype` values.
+
+A quantized cache changes the output, so its replies differ from bf16's. Drafted output still equals
+`"draft": false` output at the same dtype, and a resumed prompt equals a fresh one. The MLX path and the other
+families refuse `--kv-dtype` before any download.
+
+`--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
+default is 0.30. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
+
+### EXL3 checkpoints (experimental)
+
+The CUDA engine also serves EXL3 packs of Flash Next (`quant_method: exl3`) on one GPU through the shared EXL3
+module ([EXL3 weights](exl3.md)): any codebook, and a width per tensor, so mixed-K packs whose experts range from
+2 to 8 bits within a layer load as they are. turboderp publishes a 3.05 bpw pack on the branch `3.05bpw_h5_ng5`.
+Download that branch, then serve the folder:
+
+```bash
+python -c "from huggingface_hub import snapshot_download as d; d('turboderp/Qwen3.8-Flash-Next-exl3', revision='3.05bpw_h5_ng5', local_dir='flashnext-exl3-3.05bpw')"
+python -m tensorfold.cuda.exl3.inspect flashnext-exl3-3.05bpw   # bits per tensor, from the headers
+tensorfold serve flashnext-exl3-3.05bpw --host 0.0.0.0 --port 8080
+```
+
+A pack maps its n-gram table from its own file and runs on one GPU: `--tp 2` and `--ple-on-ssd` are for the MLX
+checkpoint, and an EXL3 pack refuses both.
+
+- Dense projections (attention, DeltaNet, the MTP head's fc layers, the head) run on the row-invariant EXL3
+  linear (`cuda/exl3/linear.py`). Routed experts and the shared expert (as expert 512 of the same table) run on
+  the grouped EXL3 expert kernel (`cuda/exl3/experts.py`), each expert matrix at its own width. The fp32 router,
+  its top-k with id tie-break, and the write-back in slot order are the MLX path's.
+- The tensors a pack leaves unquantized (hyper-connection down / inject / up, DeltaNet `in_proj_a/b`, the n-gram
+  key and value) run on an fp16 Triton matmul whose tiles and K split depend only on the shape. No cuBLAS.
+- The packs store every centred RMSNorm weight as gamma - 1: the hyper-connection norms, q/k norms, the
+  indexer's, the n-gram branch's three and the MTP head's two input norms. The loader detects this and adds 1
+  in fp32. Checked tensor by tensor against the MLX checkpoint: after the offset the largest difference is
+  0.031 (hyper-connection norms) and 0.004 (n-gram norms). DeltaNet's gated norm, `A_log`, `dt_bias`, the conv weights and the router equal the MLX values.
+- The 128 `ple.ngram_embedding.shard_*` tensors are named `.trellis` but are not EXL3 tiles. They use
+  ExLlamaV3's n-gram row codec: a row is one fp16 scale followed by 160 values of K bits in a tail-biting mul1
+  trellis, and each head has an fp16 bias. The engine decodes a window's rows as ExLlamaV3's `ngram_dequant`
+  does, bit for bit (tested at 2 to 8 bits). The rows stay in the checkpoint, memory-mapped.
+- turboderp's pack keeps the MTP head's final mixer in `mtp_hyper_connection_mixer_patch.safetensors`,
+  outside the index, and the reader loads it from there. A pack that carries the MTP layer drafts with it.
+  For the draft head, the head's rows for the draft vocabulary are decoded through the EXL3 linear and
+  requantized to 4-bit groups of 32. This affects only which drafts are proposed; verification uses the full
+  EXL3 head.
+- Prompt chunks decode each dense projection's weights once a chunk and multiply with a fixed-tile GEMM, so a
+  prompt's rows do not depend on its chunking; routed experts run the grouped kernel in 1,024-row windows.
+
+Measured on one DGX Spark (GB10) through `tensorfold serve`: the 3.05 bpw pack against the MLX 4-bit checkpoint
+on the same engine and box, the [public benchmark command](README.md#measurements), medians of 10 runs a cell
+(two sessions of each, alternated):
+
+| Cell | EXL3 3.05 bpw | MLX 4-bit | vLLM MTP=3 |
+| --- | ---: | ---: | ---: |
+| Code, sampled | 80.8 tok/s | 76.5 tok/s | 42.4 tok/s |
+| Chat, sampled | 59.4 tok/s | 62.7 tok/s | 33.2 tok/s |
+| Code, greedy | 77.7 tok/s | 74.2 tok/s | 40.9 tok/s |
+| Chat, greedy | 69.2 tok/s | 72.4 tok/s | 37.6 tok/s |
+
+Drafted replies equal `"draft": false` ones (9 of 9), resumed prompts equal fresh ones, and four concurrent
+streams equal their solo runs. Cold prefill runs 930-970 tok/s from 2k to 64k, about 0.4x the MLX checkpoint's
+2,300-2,500: the routed experts decode their tiles again for every 16 rows. The pack's weights take 52 GB of GPU
+memory against the MLX checkpoint's 81 GB, so on a Spark the default window is the full 262,144 tokens (57.6 GiB
+allocated after loading) where the MLX checkpoint's is about 74,000; the 32.6 GB n-gram table stays in the page
+cache.
+
+#### Against ExLlamaV3 on the same pack
+
+These comparisons were made when the path was written, on the 0.3.4.1 engine, with two packs: turboderp's
+3.05 bpw and SAGE, a mixed-K 4.15 bpw pack the contributor built (2 to 8 bits a matrix; not published).
+
+The first comparison is teacher-forced over 2,048 positions: the first 2,049 tokens of ExLlamaV3's
+`eval/eval_texts`, all fed in one pass. TensorFold decodes in 64-row windows. ExLlamaV3 is the fork at 249f22a
+with its mixed-K expert path. The token ids are the same for all three checkpoints, which share one
+tokenizer.
+
+| | top-1 agreement | TensorFold NLL | ExLlamaV3 NLL | TensorFold top-1 acc | ExLlamaV3 top-1 acc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SAGE 4.15 bpw (mixed-K, 2-8 bits) | 0.954 | 1.0640 | 1.0642 | 0.718 | 0.720 |
+| turboderp 3.05 bpw | 0.959 | 0.8510 | 0.8506 | 0.774 | 0.779 |
+| TensorFold, MLX 4-bit (same tokens) | | 1.0574 | | 0.726 | |
+
+The two engines' mean NLLs agree within 0.0005. The positions where they pick different tokens are close
+calls. Where ExLlamaV3's top two logits are at least 0.5 apart, the engines agree on 98.8% (SAGE) and 99.1%
+(3.05) of positions; at a gap of at least 1.0 they agree on 99.7%. ExLlamaV3 is no closer to itself when the
+batch shape changes: rerunning the first 1,025 tokens alone, instead of as part of all 2,049, it agrees with its
+own full pass on 96.4% (SAGE) and 97.2% (3.05) of positions. At the same positions TensorFold agrees with
+ExLlamaV3's full pass on 95.5% and 97.0%. The per-position NLL difference has a median of 0.018 and 0.011.
+
+On TensorFold's side, `tests/cuda/test_qwen4_exp_exl3.py` checks the following against the pack that
+`TENSORFOLD_EXL3_FLASHNEXT` names, cut to 4 layers plus the head and the MTP head:
+
+- a window of 1 to 128 rows gives one-row steps' logits bit for bit;
+- MTP-drafted decoding gives serial decoding's tokens, eager and in CUDA graphs, greedy and sampled;
+- a real layer's experts match an fp64 reference and are row-invariant.
+
+Through `tensorfold serve` on the full packs, each reply was requested with `"draft": false` and again with
+drafts. The prompts were the benchmark's two, the raw prompt as chat, and two 256-token chats, each greedy and
+with seeds 1234 to 1238. On both packs, 30 of 30 replies had identical token-id SHA-256s. A drafted round
+emitted 2.93 tokens on average on SAGE and 3.16 on 3.05.
+
+```bash
+TENSORFOLD_EXL3_FLASHNEXT=flashnext-exl3-3.05bpw pytest -q tests/cuda/test_qwen4_exp_exl3.py
+```
+
+#### Serial speed against ExLlamaV3
+
+These are decode tokens per second after the first token, on one Spark. Each cell is one stream, 64-token replies,
+and the median of seeds 1234 to 1238 after one warm-up. Every engine went through the same client:
+`python tools/bench_openai.py http://127.0.0.1:PORT MODEL --tokens 64 --reps 5`. All TensorFold rows ran in
+one exclusive GPU session, with every pack's page cache dropped before each server started. ExLlamaV3 ran behind a
+minimal OpenAI shim around its `Generator`, serially: batch size 1, an 8,192-token cache, n-gram tables in host
+RAM, no drafts. The ExLlamaV3 SAGE row comes from a second session. In that session it first failed to load
+("Insufficient VRAM in split") while the previous server's pack was still in the page cache. The second session
+also re-measured TensorFold on SAGE serially at 34.6 / 34.4 / 34.8 / 34.6, within 3.5% of the table.
+
+| | Code, sampled | Chat, sampled | Code, greedy | Chat, greedy |
+| --- | ---: | ---: | ---: | ---: |
+| ExLlamaV3, SAGE 4.15 bpw, serial | 22.3 | 22.2 | 22.3 | 22.2 |
+| TensorFold, SAGE 4.15 bpw, serial | 34.3 | 34.0 | 34.5 | 33.5 |
+| ExLlamaV3, turboderp 3.05 bpw, serial | 37.0 | 36.9 | 37.1 | 36.9 |
+| TensorFold, turboderp 3.05 bpw, serial | 34.9 | 34.9 | 35.1 | 35.0 |
+| TensorFold, MLX 4-bit, serial | 36.8 | 36.7 | 37.0 | 36.8 |
+
+Serially on the mixed-K pack, TensorFold is 1.51-1.55x ExLlamaV3. On the uniform 3.05 bpw pack
+TensorFold's serial path is 5-6% behind ExLlamaV3's, and on both EXL3 packs it is 5-9% behind its own MLX path.
+With drafts on the current engine (the table above), the 3.05 bpw pack decodes 1.6-2.2x ExLlamaV3's serial speed.
+
+### NVFP4 checkpoints
+
+The CUDA engine reads two published ModelOpt NVFP4 exports as they ship, MTP head included, on one GPU:
+
+```bash
+tensorfold serve local-inference-lab/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8080
+```
+
+| Checkpoint (revision) | Routed experts | DeltaNet, attention, shared expert | n-gram table |
+| --- | --- | --- | --- |
+| `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (`7c4f1bc1`) | NVFP4 | MXFP8 | NVFP4 rows |
+| `RadixArk/Qwen3.8-Flash-Next-NVFP4` (`7b719225`) | NVFP4 | bf16 | FP8 rows |
+
+The loader reads each linear by its tensors. An NVFP4 weight is an E2M1 code times its e4m3 scale (a block of 16
+inputs) times the tensor's fp32 `weight_scale_2`; an MXFP8 weight is an e4m3 byte times a power of two (a block of
+32). Both products fit bf16 exactly, so decode multiplies them in bf16 MMAs, adds each block's products times its
+scale in block order and applies the tensor's scale once; the K split depends on the shape alone, so drafted
+windows keep serial decoding's bits. Prompts run the MXFP8 linears on the FP8 prompt matmul with the stored bytes.
+Tests check the kernels against an fp64 reference built by an independent numpy dequantizer
+(`tensorfold/cuda/nvfp4/format.py`). Both exports store their RMSNorm weights centred (gamma - 1), and the loader
+tells centred from uncentred norms by their stored values. An n-gram table's shards must share one layout, or the
+load stops.
+
+The routed experts run on a grouped NVFP4 kernel that reads the step's routing plan on the GPU, so a decode graph
+captured for one step's experts replays another step's. A test decodes a checkpoint whose expert picks change
+every step with graphs on and off and compares the tokens; on both exports, replies with the decode graphs equal
+replies without them.
+
+Both exports were served with `tensorfold serve` and checked: drafted replies equal `"draft": false` ones (nine
+pairs, 2k-16k-token prompts, greedy and sampled), resumed prompts equal fresh ones, and each reply of concurrent
+requests (`--parallel 4`) equals the same request alone.
+
+Not supported here:
+- `--tp 2` and `--ple-on-ssd` on an NVFP4 checkpoint stop at startup: two ranks read the MLX checkpoint, and the
+  NVFP4 exports' tables stay memory-mapped.
+- `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` (186 GB; bf16 linears and n-gram table) has the RadixArk layout apart
+  from its bf16 table, which the loader reads, but the whole checkpoint has not been loaded or served here, so it
+  is not listed as tested.
+
+## Draft vocabulary provenance
+
+Both backends read the public list in `src/tensorfold/families/qwen4_exp/cuda/draft_vocab.txt`.
+It contains 79,591 sorted IDs; MLX pads it with the lowest unused IDs to a multiple of 64 at load.
+The target sampler still reads the full vocabulary, so the list affects proposals only.
+
+The corpus is Homebrew CPython 3.14.5's standard-library `*.py` files, excluding `site-packages` and
+`__pycache__`. It contains no repository or PyPI package text. Use `tokenizers==0.22.2` and
+`tools/draft_vocab.py` with SHA-256
+`1baf0dd08669355cf9cf6e32998e5436ce8712c3ab1bffe38d369f3fa3a86b56`.
+The tokenizer JSON SHA-256 is:
+
+```text
+0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3
+```
+
+Place that tokenizer at `tokenizer.json` and copy the clean stdlib into an empty `cpython` directory,
+preserving relative paths. The [Nemotron corpus-copy example](nemotron-3.5.md#draft-vocabulary-provenance)
+shows the file-selection rules; change its destination to `cpython`. Then run from the repository root:
+
+```bash
+TOKENIZERS_PARALLELISM=false python3 -B tools/draft_vocab.py tokenizer.json draft_vocab.txt --size 79591 --keep-below 65536 --min-count 1 --added-tokens 'cpython/**/*.py'
+```
+
+The generator retains all IDs below 65,536 and tokenizer-added IDs, then adds corpus IDs by frequency
+and fills remaining places with the lowest unused IDs. It skips empty, unreadable and oversized files.
+Expected output SHA-256:
+
+```text
+88d5b483a849ae9245b78b69f41f11cdfc8b5c024f0786c1c8196263857cc93e
+```
+
+Check this hash before adopting a rebuild; a different stdlib distribution can change the corpus.
+The current list replaces the older list whose PyPI corpus was not reproducible.
+
+## Measurements
+
+Use the [public benchmark command](README.md#measurements) with the server above; omit tensor-parallel
+flags for one rank. The client supplies fixed public prompts, 64-token replies and seeds 1234 through
+1238. Historical rates measured with the earlier draft list do not qualify the current list.
+
+Use a separately pinned public long-context fixture when measuring prefill and reuse. Check fresh versus
+resumed prompts across sparse-attention transitions and template changes, as well as drafted versus
+serial output. Decode, cold/resumed latency, concurrent throughput and peak memory are
+TBD [release-0.3.5].

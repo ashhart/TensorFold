@@ -24,7 +24,8 @@ from .weights import HCW, LayerW, Weights
 
 BF, F32 = torch.bfloat16, torch.float32
 MAX_ROWS = 128
-SHORT_CONTEXT = 512          # beyond this the indexer's top-512 selection drops entries (not implemented yet)
+RING = 256                   # window and compressor-raw rings: a 128-row chunk plus the 127-token window
+CANDIDATE_FREE = 16384       # beyond this layer 20's candidate blocks restrict layers 24-36 (not implemented yet)
 
 
 class Comm:
@@ -71,9 +72,10 @@ class Caches:
     """Position-addressed state of one request (rows beyond the committed length are overwritten on reuse)."""
 
     cap: int
-    swa: list[torch.Tensor]                     # per layer bf16 [cap, 512], RoPE'd window keys (= values)
-    comp: dict[int, torch.Tensor]               # per kv source fp32 [cap // ratio + 1, 512], RoPE'd entries
-    raw: dict[int, torch.Tensor]                # per ratio-2 source fp32 [cap, 1024]: projected kv | gate
+    swa: list[torch.Tensor]                     # per layer bf16 ring [RING, 512], RoPE'd window keys (= values)
+    comp: dict[int, torch.Tensor]               # per kv source bf16 [cap // ratio + 1, 512], RoPE'd entries (+ spare)
+    raw: dict[int, torch.Tensor]                # per ratio-2 source fp32 ring [RING, 1024]: projected kv | gate
+    ik: dict[int, torch.Tensor]                 # per kv source bf16 [cap // ratio + 1, 128]: indexer keys
     ids: list[int] = field(default_factory=list)
 
 
@@ -99,12 +101,15 @@ class SerialEngine:
         self.layout = E.Layout.from_config(c)
         self.tmap = E.token_map(tokenizer_json, c.engram_compressed_vocab_size)
         self.tables = E.Tables(engram_dir, c.engram_layer_ids)
-        self.scratch = [ex3.Scratch(layer.moe.experts, MAX_ROWS, c.num_experts_per_tok) for layer in w.layers]
+        shared = ex3.Scratch(w.layers[0].moe.experts, MAX_ROWS, c.num_experts_per_tok)   # every layer: same shapes
+        self.scratch = [shared] * len(w.layers)
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
         self.split = c.engram_layer_ids[1]
         self.tables_rope = {r: K.rope_tables(f, cap) for r, f in self.freqs.items()}
         self.attnbuf = K.AttnBuffers(MAX_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,
-                                     cap + 1 + c.sliding_window, device=self.dev)
+                                     c.index_topk + c.sliding_window, device=self.dev)
+        self.topk: dict[int, torch.Tensor] = {}
+        self.limit = min(cap, CANDIDATE_FREE)
         self.graph = None
         self.graphs: dict[int, dict] = {}
         self.drafter = None
@@ -123,7 +128,7 @@ class SerialEngine:
         """Forget the request; caches are zeroed in place (a captured graph holds their addresses)."""
 
         if getattr(self, "state", None) is not None:
-            for t in [*self.state.swa, *self.state.comp.values(), *self.state.raw.values()]:
+            for t in [*self.state.swa, *self.state.comp.values(), *self.state.raw.values(), *self.state.ik.values()]:
                 t.zero_()
             self.state.ids.clear()
             if self.drafter is not None:
@@ -132,11 +137,13 @@ class SerialEngine:
         c, cap = self.c, self.cap
         self.state = Caches(
             cap,
-            [torch.zeros((cap, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers],
-            {s: torch.zeros((cap // c.layer_ratios[s] + 1, c.head_dim), dtype=F32, device=self.dev)
+            [torch.zeros((RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers],
+            {s: torch.zeros((cap // c.layer_ratios[s] + 1, c.head_dim), dtype=BF, device=self.dev)
              for s in c.kv_source_layer_ids},
-            {s: torch.zeros((cap, 2 * c.head_dim), dtype=F32, device=self.dev)
+            {s: torch.zeros((RING, 2 * c.head_dim), dtype=F32, device=self.dev)
              for s in c.kv_source_layer_ids if c.layer_ratios[s] == 2},
+            {s: torch.zeros((cap // c.layer_ratios[s] + 1, c.index_head_dim), dtype=BF, device=self.dev)
+             for s in c.kv_source_layer_ids},
         )
 
     # -- one forward over new rows ------------------------------------------------------------------------
@@ -148,8 +155,8 @@ class SerialEngine:
         p0 = len(st.ids)
         if not 0 < R <= MAX_ROWS:
             raise ValueError(f"1..{MAX_ROWS} rows a call, got {R}")
-        if p0 + R > min(st.cap, SHORT_CONTEXT):
-            raise ValueError(f"context {p0 + R} beyond {min(st.cap, SHORT_CONTEXT)} (indexer not implemented yet)")
+        if p0 + R > self.limit:
+            raise ValueError(f"context {p0 + R} beyond {self.limit} tokens")
         if R in self.graphs:
             self.step_rows(tokens)
             return self.graphs[R]["logits"]
@@ -165,11 +172,11 @@ class SerialEngine:
         st.ids.extend(tokens)
         start = max(0, p0 - (c.engram_max_ngram_size - 1))        # the n-gram history of the first new row
         hashes = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[p0 - start:]
-        got = self.tables.raw([(ell, hashes[:, ell, :]) for ell in range(len(c.engram_layer_ids))])
-        R = len(tokens)
-        w = torch.from_numpy(np.stack([g[0] for g in got])).to(self.dev).view(len(got), R, -1, c.engram_head_dim)
-        sc = torch.from_numpy(np.stack([g[1] for g in got])).to(self.dev).view(len(got), R, w.shape[2], -1)
-        return E.dequant(w, sc)
+        R, L = len(tokens), len(c.engram_layer_ids)
+        raw = self.tables.gather(np.stack([hashes[:, ell, :].reshape(-1) for ell in range(L)]))   # native reader
+        raw = raw.to(self.dev, non_blocking=True).view(L, R, -1, raw.shape[-1])
+        hd = c.engram_head_dim
+        return E.dequant(raw[..., :hd], raw[..., hd:])
 
     def core(self, ids: torch.Tensor, pos: torch.Tensor, rows: torch.Tensor, *, static: bool) -> torch.Tensor:
         """The device-only forward over all layers (eager prompt chunks)."""
@@ -289,7 +296,7 @@ class SerialEngine:
         st = self.state
         extra = [t.clone() for t in self.drafter.swa] if self.drafter is not None else []
         return ([t.clone() for t in st.swa], {k: v.clone() for k, v in st.comp.items()},
-                {k: v.clone() for k, v in st.raw.items()}, extra)
+                {k: v.clone() for k, v in st.raw.items()}, extra, {k: v.clone() for k, v in st.ik.items()})
 
     def _restore_caches(self, saved) -> None:
         st = self.state
@@ -302,6 +309,8 @@ class SerialEngine:
         if self.drafter is not None:
             for dst, src in zip(self.drafter.swa, saved[3]):
                 dst.copy_(src)
+        for k, v in saved[4].items():
+            st.ik[k].copy_(v)
 
     def step(self, token: int) -> int:
         return self.step_rows([token])[0]
@@ -313,8 +322,8 @@ class SerialEngine:
         R = len(tokens)
         g = self.graphs[R]
         p0 = len(st.ids)
-        if p0 + R > min(st.cap, SHORT_CONTEXT):
-            raise ValueError(f"context {p0 + R} beyond {min(st.cap, SHORT_CONTEXT)} (indexer not implemented yet)")
+        if p0 + R > self.limit:
+            raise ValueError(f"context {p0 + R} beyond {self.limit} tokens")
         st.ids.extend(tokens)
         start = max(0, p0 - (c.engram_max_ngram_size - 1))
         g["tok"].copy_(torch.tensor(tokens), non_blocking=True)
@@ -347,19 +356,33 @@ class SerialEngine:
         kv = K.rmsnorm(a.wkv(x), a.kv_norm, eps)
         H = a.wq_b.n // Dh
         q = K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin)          # bf16, this rank's heads
-        st.swa[L].index_copy_(0, pos, K.rope(kv, pos, cos, sin))
-        if a.compressor is not None:
-            self.compress(layer, x, pos, static)
-        comp, n = None, 0
+        st.swa[L].index_copy_(0, pos % RING, K.rope(kv, pos, cos, sin))
+        comp = idx = None
         if a.ratio > 0:
+            if a.compressor is not None:
+                self.compress(layer, x, pos, static)
+            if a.indexer is not None:
+                self.topk[L] = self.select(layer, qr, x, pos)
             comp = st.comp[max(s for s in c.kv_source_layer_ids if s <= L)]
-            n = comp.shape[0] if static else (int(pos[-1]) + 1) // a.ratio
-        o = K.mqa(q, comp, n, a.ratio, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5)
+            idx = self.topk[max(s for s in c.index_source_layer_ids if s <= L)]
+        o = K.mqa(q, comp, idx, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5)
         o = K.rope(o, pos, cos, sin, inverse=True, out_dtype=BF)
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
         z = torch.cat([wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)], dim=1)
         return self.comm.partials(a.wo_b(z, out_dtype=F32))
+
+    def select(self, layer: LayerW, qr: torch.Tensor, x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+        """This index source's top-k compressed entries for each row (shared by the layers after it)."""
+
+        c, a = self.c, layer.attn
+        ix = a.indexer
+        R = x.shape[0]
+        cos, sin = self.tables_rope[a.ratio]
+        iq = K.rope(ix.wq_b(qr).view(R, c.index_n_heads, c.index_head_dim), pos, cos, sin)
+        wts = K.router_logits(x, ix.weights_proj) * (c.index_head_dim ** -0.5 * c.index_n_heads ** -0.5)
+        keys = self.state.ik[max(s for s in c.kv_source_layer_ids if s <= layer.index)]
+        return K.index_select(iq, wts, keys, pos, a.ratio, c.index_topk)
 
     def compress(self, layer: LayerW, x: torch.Tensor, pos: torch.Tensor, static: bool) -> None:
         c, st, a = self.c, self.state, layer.attn
@@ -369,26 +392,29 @@ class SerialEngine:
         kv = cw.wkv(x, out_dtype=F32)
         if r == 1:
             latent = K.rmsnorm(kv, cw.norm, c.rms_norm_eps)
-            st.comp[L].index_copy_(0, pos, K.rope(latent, pos, cos, sin).float())
-            return
-        gate = cw.wgate(x, out_dtype=F32)
-        raw = st.raw[L]
-        raw.index_copy_(0, pos, torch.cat([kv, gate], dim=1))
-        if static:                                                      # write the group only when pos closes it
-            ends = pos
+            ends, start, slot = pos, pos, pos
         else:
-            closing = [int(p) for p in pos.tolist() if (p + 1) % 2 == 0]
-            if not closing:
-                return
-            ends = torch.tensor(closing, device=self.dev)
-        pair = torch.stack([raw[(ends - 1).clamp(min=0)], raw[ends]], dim=1)   # [G, 2, 1024]
-        wts = torch.softmax(pair[..., c.head_dim:], dim=1)
-        latent = K.rmsnorm((wts * pair[..., :c.head_dim]).sum(1), cw.norm, c.rms_norm_eps)
-        row = K.rope(latent, (ends // 2) * 2, cos, sin).float()
-        slot = ends // 2
-        if static:                                                      # rows that close no group write the spare slot
-            slot = torch.where((ends + 1) % 2 == 0, slot, st.comp[L].shape[0] - 1)
-        st.comp[L].index_copy_(0, slot, row)
+            gate = cw.wgate(x, out_dtype=F32)
+            raw = st.raw[L]
+            raw.index_copy_(0, pos % RING, torch.cat([kv, gate], dim=1))
+            if static:                                                  # write the group only when pos closes it
+                ends = pos
+            else:
+                closing = [int(p) for p in pos.tolist() if (p + 1) % 2 == 0]
+                if not closing:
+                    return
+                ends = torch.tensor(closing, device=self.dev)
+            pair = torch.stack([raw[(ends - 1).clamp(min=0) % RING], raw[ends % RING]], dim=1)   # [G, 2, 1024]
+            wts = torch.softmax(pair[..., c.head_dim:], dim=1)
+            latent = K.rmsnorm((wts * pair[..., :c.head_dim]).sum(1), cw.norm, c.rms_norm_eps)
+            start, slot = (ends // 2) * 2, ends // 2
+            if static:                                                  # rows that close no group write the spare slot
+                slot = torch.where((ends + 1) % 2 == 0, slot, st.comp[L].shape[0] - 1)
+        st.comp[L].index_copy_(0, slot, K.rope(latent, start, cos, sin))
+        ix = a.indexer
+        if ix is not None and ix.wk is not None:                        # this source's indexer keys
+            key = K.rmsnorm(ix.wk(latent), ix.k_norm, c.rms_norm_eps)
+            st.ik[L].index_copy_(0, slot, K.rope(key, start, cos, sin))
 
     def moe(self, layer: LayerW, x: torch.Tensor, R: int, top_k: int | None = None, scratch=None) -> torch.Tensor:
         c, m = self.c, layer.moe

@@ -34,6 +34,8 @@ def main() -> None:
     ap.add_argument("--no-parity", action="store_true")
     ap.add_argument("--graph", action="store_true", help="capture the one-row decode step as a CUDA graph")
     ap.add_argument("--dspark", type=int, default=0, help="draft N tokens a round with the checkpoint's DSpark blocks")
+    ap.add_argument("--cap", type=int, default=1024, help="context capacity (cache rows)")
+    ap.add_argument("--long-golden", type=Path, help="tools/dsv41_golden_long.py output: prefill parity per prefix")
     ap.add_argument("--save", type=Path, help="rank 0 writes each case's generated tokens here (JSON)")
     ap.add_argument("--fixed-k", action="store_true", help="verify every draft each round (no adaptive policy)")
     ap.add_argument("--cases", type=Path, help="tools/dsv41_vllm_accept.py results: replay every case's prompt ids")
@@ -43,11 +45,12 @@ def main() -> None:
     nccl = NCCL(args.rank, 2, args.master, args.port)
     nccl.barrier()
     t0 = time.time()
-    w = W.load(args.model, rank=args.rank, log=lambda *a, **k: None)
+    w = W.load(args.model, rank=args.rank, log=lambda *a, **k: None, draft=args.dspark > 0)
+    torch.cuda.empty_cache()
     torch.cuda.synchronize()
     print(f"[rank {args.rank}] weights loaded in {time.time() - t0:.0f} s, "
           f"{torch.cuda.memory_allocated() / 2**30:.1f} GiB", flush=True)
-    eng = SerialEngine(w, Comm(nccl), str(args.engram), str(args.model / "tokenizer.json"), cap=1024)
+    eng = SerialEngine(w, Comm(nccl), str(args.engram), str(args.model / "tokenizer.json"), cap=args.cap)
     nccl.barrier()
     if args.dspark:
         eng.enable_dspark(args.dspark)
@@ -62,6 +65,32 @@ def main() -> None:
                 eng.adaptive = not args.fixed_k
         print(f"[rank {args.rank}] decode graphs captured in {time.time() - t0:.1f} s", flush=True)
 
+    if args.long_golden:
+        for g in json.loads(args.long_golden.read_text())["goldens"]:
+            ids = g["ids"]
+            nll, best = [], []                          # per position, reduced on the GPU (full logits are GBs)
+            nxt = torch.tensor(ids[1:] + [0], device="cuda")
+            with torch.no_grad():
+                eng.reset()
+                t1 = time.time()
+                for i in range(0, len(ids), MAX_ROWS):
+                    lp = torch.log_softmax(eng.forward(ids[i:i + MAX_ROWS]).float(), -1)
+                    nll.append(-lp.gather(1, nxt[i:i + lp.shape[0], None]).squeeze(1).cpu())
+                    best.append(lp.argmax(-1).cpu())
+                torch.cuda.synchronize()
+                t2 = time.time()
+            if args.rank == 0:
+                ours = torch.cat(nll)[:-1]
+                theirs = torch.tensor([-a for a in g["prompt_actual"][1:]])
+                top = torch.tensor(g["prompt_top1"][1:])
+                agree = (torch.cat(best)[:-1] == top).float()
+                q = len(ids) // 4
+                print(f"{len(ids)} tokens: prefill {len(ids) / (t2 - t1):.0f} tok/s, top-1 agree "
+                      f"{100 * agree.mean():.1f}% (last quarter {100 * agree[-q:].mean():.1f}%), NLL ours "
+                      f"{ours.mean():.3f} vLLM {theirs.mean():.3f} (last quarter {ours[-q:].mean():.3f} vs "
+                      f"{theirs[-q:].mean():.3f})", flush=True)
+        nccl.barrier()
+        return
     ids = json.loads(args.golden.read_text())["goldens"][args.prompt]["ids"]
     with torch.no_grad():
         if args.no_parity:
