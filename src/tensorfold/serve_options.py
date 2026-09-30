@@ -18,9 +18,9 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
 
         validate_vision_config(read_config(config_dir) if config_dir else {}, family.model_type)
     share = getattr(args, "decode_share", None)
-    if share is not None and backend == "cuda":
-        raise ValueError("--decode-share sets the Mac server's share; the CUDA engine runs a round after each 1,024 "
-                         "prompt rows")
+    if share is not None and backend == "cuda" and not getattr(family.package, "CUDA_DECODE_SHARE", False):
+        raise ValueError("--decode-share sets the Mac server's share, and Flash Next's on CUDA; this CUDA engine runs "
+                         "a round after each 1,024 prompt rows")
     if share is not None and share < 0:
         raise ValueError(f"--decode-share is 0 (whole prompts first) or more, not {share}")
     kv = getattr(args, "kv_dtype", "bf16")

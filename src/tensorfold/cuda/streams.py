@@ -32,6 +32,7 @@ class Stream:
     carry: dict | None = None                             # the stats of the stream this one continues
     owed: list[int] = field(default_factory=list)         # a replay's tokens sent before it gave way: checked, not resent
     error: Exception | None = None                        # why a stream ended without finishing
+    waiting: bool = False                                 # held out of rounds until its caches can grow
     done: bool = False
     rounds: int = 0
     min_rows: int = 0
@@ -142,7 +143,18 @@ class PrefixCache:
 
         self.entries = [e for e in self.entries if e[0] != ids] + [(ids, state, snap)]
         while len(self.entries) > self.keep:
-            cold = [e for e in self.entries[:-1] if tuple(e[0]) not in self.hit]
-            gone = cold[0] if cold else self.entries[0]
-            self.entries = [e for e in self.entries if e is not gone]
+            self._drop(self.entries[:-1])
+
+    def evict(self) -> bool:
+        """Memory is short: drop the entry ``add`` would drop next; False when none is left."""
+
+        if not self.entries:
+            return False
+        self._drop(self.entries)
+        return True
+
+    def _drop(self, among: list) -> None:
+        cold = [e for e in among if tuple(e[0]) not in self.hit]
+        gone = cold[0] if cold else among[0]
+        self.entries = [e for e in self.entries if e is not gone]
         self.hit &= {tuple(e[0]) for e in self.entries}

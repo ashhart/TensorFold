@@ -269,8 +269,11 @@ def _gdn_dims(t: dict, world: int) -> tuple:
             nk, nv, dk, dv, 2 * nk * dk + 2 * nv * dv + 2 * nv)
 
 
-def stream_geometry(t: dict, world: int, streams: int, keep: int) -> Geometry:
-    """The 27B's concurrent decoder: each live stream, ``keep`` cached prompt ends and rows for every window."""
+def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int | None = None) -> Geometry:
+    """The 27B's concurrent decoder: each live stream, ``keep`` cached prompt ends and rows for every window.
+
+    ``first``: caches grow with their streams (one GPU), so the window is what one stream reaches beside the others'
+    ``first`` rows; else every stream and cached end holds the window."""
 
     linear, attention = layer_counts(t)
     d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, world)
@@ -284,13 +287,18 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int) -> Geometry:
     fixed += 16 * max(128, rows) * extent * 4 + 32 * rows * 2560 * 4
     def bytes_at(capacity: int) -> int:
         kv = attention * capacity * hk * hd * 2 * 2
+        caches = (streams + keep + 1) * kv if first is None else \
+            kv + (streams + keep) * attention * min(first, capacity) * hk * hd * 2 * 2
         scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
-        return fixed + (streams + keep + 1) * kv + kv // max(1, attention) + scratch   # one layer's growth copy
+        return fixed + caches + kv // max(1, attention) + scratch   # one layer's growth copy
     return Geometry(bytes_at, 1)
 
 
-def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool, kv_bits: int = 16) -> Geometry:
-    """Flash Next's concurrent decoder on one GPU: ``streams`` slots of ``each``-row windows and kept snapshots."""
+def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool, kv_bits: int = 16,
+                            first: int = 256) -> Geometry:
+    """Flash Next's concurrent decoder on one GPU: ``streams`` slots of ``each``-row windows and kept snapshots.
+
+    Slots grow with their streams, so the window is what one stream reaches beside the others' ``first`` rows."""
 
     linear, attention = layer_counts(t)
     d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, 1)
@@ -308,9 +316,12 @@ def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp:
     fixed += (1 + mtp) * (linear * rows * width * 2 + 32 * max(rows, 4) * 2560 * 4) + 16 * max(64, rows) * extent * 4
     fixed += PREFILL_ROWS * _indexed_prefill_row(t, 1, h, hk, hd, nv, dv, width, slots, moe)
     count, row = attention + int(mtp), kv_bytes(hd, kv_bits)
+    def caches(rows: int) -> int:
+        return count * (2 * rows * hk * row + (rows + (rows + ratio - 1) // ratio) * index_dim * 2)
+
     def bytes_at(capacity: int) -> int:
         blocks = (capacity + ratio - 1) // ratio
-        cache = streams * count * (2 * capacity * hk * row + (capacity + blocks) * index_dim * 2)
+        cache = caches(capacity) + (streams - 1) * caches(min(first, capacity))
         chunks = (min(capacity, budget + ratio - 1) + 511) // 512
         scratch = ((1 + mtp) * rows + PREFILL_ATT_ROWS) * (h * (hd + 2) * chunks + blocks + budget + ratio) * 4
         return fixed + cache + scratch

@@ -53,8 +53,8 @@ def mtp_compute(w: Weights, segs: Sequence, b: Buffers, *, last_only: bool = Tru
         return _mm(b.mixed[:n], w.head, b.xs_mixed[:n], b.logits[:n], b)
     head = w.head if w.draft_head is None else w.draft_head
     k = len(segs)
-    if b.prefill:                                # prefill buffers mix the last row into row 0
-        rows, xs = b.mixed[:1], b.xs_mixed[:1]
+    if b.prefill:                                # prefill buffers mix the last row into row 0: its logits only
+        rows, xs, k = b.mixed[:1], b.xs_mixed[:1], 1
     elif k == 1:
         rows, xs = b.mixed[n - 1:n], b.xs_mixed[n - 1:n]
     else:

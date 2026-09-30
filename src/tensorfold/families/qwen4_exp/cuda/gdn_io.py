@@ -20,18 +20,18 @@ def _ext():
 
 
 def front(p: torch.Tensor, conv_ptrs: torch.Tensor, sid: torch.Tensor, windows: torch.Tensor, conv_w: torch.Tensor,
-          a_log: torch.Tensor, dt_bias: torch.Tensor, nk: int) -> tuple[torch.Tensor, ...]:
-    """``windows`` taps: < 3 a row of stream ``sid``'s conv state (``conv_ptrs``), else projection row tap - 3."""
+          a_log: torch.Tensor, dt_bias: torch.Tensor, nk: int, out: tuple | None = None) -> tuple[torch.Tensor, ...]:
+    """``windows`` taps: < 3 a row of stream ``sid``'s conv state, else projection row tap - 3; fills ``out``."""
 
-    rows, nv = windows.shape[0], a_log.numel()
-    dev = p.device
-    q = torch.empty((rows, nk, DK), dtype=torch.float32, device=dev)
-    k = torch.empty_like(q)
-    v = torch.empty((rows, nv, DV), dtype=torch.bfloat16, device=dev)
-    g = torch.empty((rows, nv), dtype=torch.float32, device=dev)
-    beta = torch.empty_like(g)
-    _ext().front(p, conv_ptrs, sid, windows, conv_w, a_log, dt_bias, q, k, v, g, beta)
-    return q, k, v, g, beta
+    if out is None:
+        rows, nv = windows.shape[0], a_log.numel()
+        dev = p.device
+        q = torch.empty((rows, nk, DK), dtype=torch.float32, device=dev)
+        v = torch.empty((rows, nv, DV), dtype=torch.bfloat16, device=dev)
+        g = torch.empty((rows, nv), dtype=torch.float32, device=dev)
+        out = (q, torch.empty_like(q), v, g, torch.empty_like(g))
+    _ext().front(p, conv_ptrs, sid, windows, conv_w, a_log, dt_bias, *out)
+    return out
 
 
 def back(y: torch.Tensor, p: torch.Tensor, norm_w: torch.Tensor, eps: float, out: torch.Tensor,

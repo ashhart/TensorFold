@@ -16,17 +16,19 @@ from .weights import Weights
 # -- per-window buffers --------------------------------------------------------------------------------
 CAND = 32      # tensor parallel: candidates a rank gathers per row for sampling (top-k 20 plus the sampler's margin 8)
 ATT_ROWS = 256  # prompt attention runs in blocks of this many rows (its partials scale with rows x context)
+ENDS = 16       # prompts one prompt pass can end (each ending prompt's last row gets the head)
 
 
 class Buffers:
     """Scratch for windows of up to ``rows`` rows, sliced [:R] for smaller ones; ``prefill`` for prompt chunks."""
 
-    def __init__(self, w: Weights, rows: int, capacity: int, *, prefill: bool = False) -> None:
+    def __init__(self, w: Weights, rows: int, capacity: int, *, prefill: bool = False,
+                 moe_prefill: bool | None = None) -> None:
         c = w.cfg
         dev = w.device
         wide = c.streams * c.hidden
         self.rows, self.prefill = rows, prefill
-        head_rows = 1 if prefill else rows
+        head_rows = ENDS if prefill else rows
         bf, f32 = torch.bfloat16, torch.float32
         self.ids = torch.zeros((rows,), dtype=torch.int32, device=dev)
         self.ids_host = torch.zeros((rows,), dtype=torch.int32, pin_memory=torch.cuda.is_available())
@@ -55,7 +57,8 @@ class Buffers:
                                          dev, budget=c.index_budget, ratio=c.index_ratio)
         self.gated = torch.empty((rows, c.heads * c.head_dim), dtype=bf, device=dev)
         self.xs_gated = torch.empty((rows, c.heads * c.head_dim // 32), dtype=f32, device=dev)
-        self.moe = moe_mod.MoEBuffers(rows, _MoECfg(c), dev, prefill=prefill)
+        # the experts' prefill arithmetic for decode windows too (``moe_prefill``): their rows can share a pass's launch
+        self.moe = moe_mod.MoEBuffers(rows, _MoECfg(c), dev, prefill=prefill if moe_prefill is None else moe_prefill)
         # DeltaNet projections and outputs and attention outputs; ``commit`` reads the projections' conv channels
         lin = 1 if prefill else sum(1 for layer in w.layers if layer.linear)     # a prompt chunk commits each layer
         self.proj = torch.zeros((lin, rows, gdn_mod.widths(c.nk, c.nv)[1]), dtype=bf, device=dev)
@@ -110,6 +113,15 @@ class Buffers:
         self.mtp_in = torch.empty((rows, wide), dtype=bf, device=dev)          # the MTP's input streams
 
 
+def _rows(t: torch.Tensor, rows: int, keep: int) -> torch.Tensor:
+    """``t`` reallocated with ``rows`` rows, its first ``keep`` copied."""
+
+    other = torch.zeros((rows, *t.shape[1:]), dtype=t.dtype, device=t.device)
+    keep = min(keep, t.shape[0], rows)
+    other[:keep] = t[:keep]
+    return other
+
+
 class _MoECfg:
     def __init__(self, c) -> None:
         self.num_experts_per_tok = c.top_k
@@ -120,13 +132,17 @@ class _MoECfg:
 
 # -- committed state -----------------------------------------------------------------------------------
 class State:
-    """Committed caches of one sequence (and of the MTP head's attention layer); keys and values bf16, int8 or int4, indexer keys bf16."""
+    """Committed caches of one sequence (and the MTP head's attention layer); grown by ``ensure`` up to ``limit``."""
 
-    def __init__(self, w: Weights, capacity: int, max_rows: int, kv_dtype: str = "bf16") -> None:
+    def __init__(self, w: Weights, capacity: int, max_rows: int, kv_dtype: str = "bf16", *,
+                 limit: int | None = None) -> None:
         c = w.cfg
         dev = w.device
         self.kv_dtype = kvcache.check(kv_dtype)
+        self.limit = int(capacity if limit is None else limit)     # the rows this sequence may grow to
+        capacity = min(int(capacity), self.limit)
         self.capacity = capacity
+        self.version = 0                 # counts reallocations: a graph's pointer table refreshes on a change
         self.pos = 0
         self.pos_dev = torch.zeros((1,), dtype=torch.int32, device=dev)
         lin = [l for l in w.layers if l.linear]
@@ -138,6 +154,9 @@ class State:
         self.rec = torch.zeros((2, n, c.nv, c.dv, c.dk), dtype=torch.float32, device=dev)
         self.cur = [0] * n
         self.scratch = [gdn_mod.GDNScratch(max_rows, dev, c.nk, c.nv) for _ in range(n)]
+        self.ratio, self.index_dim = c.index_ratio, c.index_dim
+        self.layers = len(att) + (w.mtp is not None)              # attention caches: the layers', the MTP head's
+        self.row_bytes = kvcache.row_bytes(c.kv_heads, c.head_dim, self.kv_dtype) + c.index_dim * 2
         self.kc = [kvcache.KVCache(capacity, c.kv_heads, c.head_dim, dev, self.kv_dtype) for _ in att]
         self.ikc = [torch.zeros((capacity, c.index_dim), dtype=torch.bfloat16, device=dev) for _ in att]
         nb = -(-capacity // c.index_ratio)
@@ -159,6 +178,49 @@ class State:
     def set_pos(self, pos: int) -> None:
         self.pos = pos
         self.pos_dev.fill_(pos)
+
+    def cache_bytes(self, rows: int | None = None) -> int:
+        """Bytes of the caches that grow with context at ``rows`` rows (now: ``capacity``), the MTP head's included."""
+
+        return self.layers * self.layer_bytes(rows)
+
+    def layer_bytes(self, rows: int | None = None) -> int:
+        """One attention layer's share of ``cache_bytes``: what a resize holds twice at once."""
+
+        rows = self.capacity if rows is None else int(rows)
+        return rows * self.row_bytes + -(-rows // self.ratio) * self.index_dim * 2
+
+    def ensure(self, rows: int, step: int = 8192) -> int:
+        """Grow every context cache to hold ``rows`` rows (a ``step`` at a time, at most ``limit``); returns the new bytes."""
+
+        rows = int(rows)
+        if rows <= self.capacity:
+            return 0
+        if rows > self.limit:
+            raise ValueError(f"context of {rows} rows past this sequence's {self.limit}-row window")
+        return self.resize(min(self.limit, -(-rows // step) * step))
+
+    def resize(self, rows: int) -> int:
+        """Reallocate the context caches at ``rows`` rows, keeping every committed row; returns the bytes it added."""
+
+        rows = int(rows)
+        before = self.cache_bytes()
+        keep = max(self.pos, self.mtp_len)
+        if rows < keep:
+            raise ValueError(f"a {rows}-row cache can't keep {keep} committed rows")
+        blocks, kept_blocks = -(-rows // self.ratio), -(-keep // self.ratio)
+        for i in range(len(self.kc)):            # a layer at a time: its old buffers go before the next one's come
+            self.kc[i] = self.kc[i].resized(rows, self.pos)
+            self.ikc[i] = _rows(self.ikc[i], rows, self.pos)
+            self.pooled[i] = _rows(self.pooled[i], blocks, kept_blocks)
+        if hasattr(self, "mtp_kc"):
+            mtp_blocks = -(-self.mtp_len // self.ratio)
+            self.mtp_kc = self.mtp_kc.resized(rows, self.mtp_len)
+            self.mtp_ikc = _rows(self.mtp_ikc, rows, self.mtp_len)
+            self.mtp_pooled = _rows(self.mtp_pooled, blocks, mtp_blocks)
+        self.capacity = rows
+        self.version += 1
+        return self.cache_bytes() - before
 
     def reset(self, w: Weights) -> None:
         """An empty sequence in the same buffers (captured graphs keep pointing at them)."""

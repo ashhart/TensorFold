@@ -146,11 +146,12 @@ def kernel_version(model: Any) -> str:
 CUDA_QUANTIZATION = (4, 32)
 # the KV cache dtypes the CUDA engine can allocate (``--kv-dtype``)
 CUDA_KV_DTYPES = ("bf16", "int8", "int4")
+CUDA_DECODE_SHARE = True           # --parallel rounds size their prompt pass by --decode-share (0: whole passes)
 
 def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0, master: str = "",
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
                 mtp_confidence: float | None = None, context: int | None = None, ple_on_ssd: bool = False,
-                kv_dtype: str = "bf16", **options: Any):
+                kv_dtype: str = "bf16", decode_share: float | None = None, **options: Any):
     """The CUDA engine: MTP chains verified exactly on one GPU or two (``tp=2``; start rank 1 first), keys and values bf16, int8 or int4."""
 
     from tensorfold.cuda.exl3.format import is_exl3
@@ -174,4 +175,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     return FlashNextEngine(Path(model_dir), depth=depth, confidence=confidence, max_len=context,
                            context_explicit=options.get("context_explicit"), tp=int(tp), rank=int(rank),
                            master=master, port=int(master_port), streams=max(1, int(options.get("parallel") or 1)),
-                           ple_on_ssd=ple_on_ssd, kv_dtype=kv_dtype)
+                           ple_on_ssd=ple_on_ssd, kv_dtype=kv_dtype,
+                           share=0.0 if decode_share is None else float(decode_share))

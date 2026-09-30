@@ -164,6 +164,14 @@ def copy_chain(context: Sequence[int], max_nodes: int = 127,
     return best if len(best) >= min_match else []
 
 
+def next_copy_rows(rows: int, landed_whole: bool, tree_rows: int, max_rows: int) -> int:
+    """A copy's next window: twice as wide after a copy landed whole, half as wide after one broke, never below the
+    first width."""
+
+    first = min(max_rows, max(tree_rows, 16))       # room for a backed copy (8 matching tokens) from the start
+    return min(max_rows, max(rows, first) * 2) if landed_whole else max(first, min(rows, max_rows) // 2)
+
+
 @torch.no_grad()
 def _round_record(tokens: list[int], parents: list[int], depths: list[int], path: list[int], terminal: int,
                   stop: str, source: str, draft, spent: dict[str, float]) -> dict:
@@ -195,7 +203,8 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
                  allow_copy: bool = True, stop_eos: bool = True,
                  on_tokens: Callable[[list[int]], bool | None] | None = None,
                  trace: list | None = None, inplace: bool = False, constraint=None) -> DecodeResult:
-    """Verify trees and replay matching paths (host-only traces leave tokens unchanged); ``inplace``: commit into ``st`` itself, which nothing else holds."""
+    """Verify trees and replay matching paths (host-only traces leave tokens unchanged); ``inplace``: commit into ``st`` itself, which nothing else holds.
+    Trees use ``tree_rows``; a copy's window starts there and doubles while copies land whole, up to ``max_rows``."""
 
     if count < 1 or not 1 <= max_rows <= 128:
         raise ValueError("count >= 1 and 1 <= max_rows <= 128 required")
@@ -206,6 +215,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
     out = [pending]
     context = list(prompt) + out
     copies = CopyIndex() if allow_copy else None
+    copy_rows = next_copy_rows(tree_rows, False, tree_rows, max_rows)
     stages = dict(draft=0.0, verify=0.0, sample=0.0, commit=0.0)
     rounds = drafted_rows = accepted_drafts = 0
     widths: list[int] = []
@@ -213,7 +223,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
     stopped = False
     while len(out) < count and (not stop_eos or out[-1] not in w.config.eos) and not stopped:
         stage = time.perf_counter()
-        copied = copies.propose(context, max_rows - 1) if copies is not None else []
+        copied = copies.propose(context, copy_rows - 1) if copies is not None else []
         if copied:
             guesses = copied
             parents = list(range(-1, len(guesses) - 1))
@@ -277,6 +287,8 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
         stages["commit"] += time.perf_counter() - stage
         if trace is not None:
             trace[-1]["commit_ms"] = round(1000 * (time.perf_counter() - stage), 3)
+        if copied:                           # the verified window's rows: a grammar may have dropped some
+            copy_rows = next_copy_rows(copy_rows, len(path) == len(tokens), tree_rows, max_rows)
         rounds += 1
         drafted_rows += len(tokens) - 1
         accepted_drafts += len(path) - 1

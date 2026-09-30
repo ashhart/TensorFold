@@ -125,7 +125,7 @@ def _one_gpu(monkeypatch, drafter=None):
     fake.prefill = rec.prefill
 
     def draft_decode(w, st, prompt, pending, count, sampling, draft, *, max_rows, allow_copy, on_tokens, inplace,
-                     stop_eos=True):
+                     stop_eos=True, tree_rows=None):
         # the decode may commit into the prompt state: no entry holds it
         assert inplace and all(st is not entry for _, entry, _ in engine.cache.entries)
         result = rec.decode(st, prompt, pending, count)

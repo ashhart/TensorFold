@@ -14,7 +14,7 @@ from tensorfold.cuda.kernels import gdn as shared_gdn
 
 from . import attention as attn_mod
 from . import gdn as gdn_mod
-from . import bf16, gdn_io, glue, nvfp4_moe, qmm
+from . import attn_multi, bf16, gdn_io, gdn_multi, glue, nvfp4_moe, qmm
 from .state import ATT_ROWS, CAND, Buffers, State, _MoECfg
 from .weights import HC, LayerW, Weights
 
@@ -128,6 +128,10 @@ def gdn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int
             _prefill_chain(g, st, li, b, a0, a1, c)
         return _out_proj(w, b, b.gout[:R], g.out, b.gxs[:R], R)
     _mm(b.mixed[:R], g.proj, b.xs_mixed[:R], b.proj[li, :R], b)
+    tables = getattr(b, "gdn_tables", None)           # a concurrent round: every stream in one launch a step
+    if tables is not None:
+        gdn_multi.block(g, li, tables, b.proj[li, :R], c.eps, b.gout[:R], b.gxs[:R], c.nk)
+        return _out_proj(w, b, b.gout[:R], g.out, b.gxs[:R], R)
     for st, a0, a1 in segs:
         cur = st.cur[li]
         gdn_mod.chain(b.proj[li, a0:a1], st.conv[li], g.conv, st.rec[cur, li], g.a_log, g.dt_bias, g.norm, c.eps,
@@ -178,6 +182,11 @@ def attn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: in
     a = layer.attn
     _mm(b.mixed[:R], a.proj, b.xs_mixed[:R], b.pa[:R], b)
     scale = c.head_dim ** -0.5
+    step = None if b.prefill else getattr(b, "attn_step", None)     # a concurrent step: every stream at once
+    if step is not None:
+        o = attn_multi.layer(layer, w, b, step, mtp, scale)
+        glue.attn_gate(o[:R], b.pa[:R], b.gated[:R], b.xs_gated[:R], q_heads=c.heads, head_dim=c.head_dim)
+        return _out_proj(w, b, b.gated[:R], a.o, b.xs_gated[:R], R)
     for st, a0, a1 in segs:
         cache, ikc, pooled, pos, host_pos = _caches(layer, st, mtp)
         bits = 0 if not cache.quantized else cache.bits
@@ -304,9 +313,9 @@ def _writeback(h: torch.Tensor, b: Buffers, R: int, c, pending) -> None:
         glue.hc_writeback(h[:R], h[:R], b.pss[:R], c.streams, mode, branch=a, inject=inj[:R])
 
 
-def layer_forward(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int, pending, *,
-                  mtp: bool = False, context: int | None = None):
-    """One decoder layer on b.h[:R]; ``pending`` = the previous MoE's (mode, branch, weights, inject) or None. Returns the new pending write-back."""
+def _pre_moe(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int, pending, *, mtp: bool = False,
+             context: int | None = None) -> None:
+    """A decoder layer up to its experts' input b.mixed[:R]: the n-gram branch, the mixer and both hyper-connections."""
 
     c = w.cfg
     h = b.h
@@ -328,20 +337,36 @@ def layer_forward(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R:
     else:
         mode, branch = attn_block(layer, w, segs, b, R, mtp, context)
     hc_block(layer.mlp_hc, b, R, c.eps, c.streams, c.low, mode, b.inj_a[:R], b.inj_m, h, branch=branch)
+
+
+def layer_forward(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: int, pending, *,
+                  mtp: bool = False, context: int | None = None):
+    """One decoder layer on b.h[:R]; ``pending`` = the previous MoE's (mode, branch, weights, inject) or None. Returns the new pending write-back."""
+
+    _pre_moe(layer, w, segs, b, R, pending, mtp=mtp, context=context)
     moe_mode, a, wts = moe_block(layer, w, b, R)
     return (moe_mode, a, wts, b.inj_m)
 
 
-def finish(w: Weights, mixer: HC, b: Buffers, R: int, pending, logits: bool = True) -> torch.Tensor | None:
-    """The last write-back (b.streams: the residual streams before the final mixer), the mixer and the head."""
+def finish(w: Weights, mixer: HC, b: Buffers, R: int, pending, logits: bool = True,
+           ends: Sequence[int] = ()) -> torch.Tensor | None:
+    """The last write-back (b.streams: the residual streams before the final mixer), the mixer and the head; a prompt
+    pass mixes and heads only ``ends`` (each ending prompt's last row, default the pass's last) into rows 0 ..."""
 
     c = w.cfg
     b.streams[:R].copy_(b.h[:R])
     _writeback(b.streams, b, R, c, pending)
-    if b.prefill:                 # the mixer and the head for the last row only (row 0 of the scratch)
-        b.pss[0].copy_(b.pss[R - 1])
-        _readout(mixer, b, b.streams[R - 1:R], 1, c.eps, c.streams, c.low, None)
-        R = 1
+    if b.prefill:
+        if len(ends) > 1:
+            at = torch.tensor(list(ends), dtype=torch.long, device=b.pss.device)
+            b.pss[:len(ends)].copy_(b.pss.index_select(0, at))
+            rows = b.streams.index_select(0, at)
+        else:
+            last = ends[0] if ends else R - 1
+            b.pss[0].copy_(b.pss[last])
+            rows = b.streams[last:last + 1]
+        R = max(1, len(ends))
+        _readout(mixer, b, rows, R, c.eps, c.streams, c.low, None)
     else:
         _readout(mixer, b, b.streams, R, c.eps, c.streams, c.low, None)
     if not logits:
@@ -398,8 +423,10 @@ def stage(w: Weights, b: Buffers, windows: Sequence[tuple[State, Sequence[int]]]
     return segs
 
 
-def compute(w: Weights, segs: Sequence[Seg], b: Buffers, *, logits: bool = True, context: int | None = None):
-    """The forward's GPU work on staged rows (capturable); ``context`` bounds the attention launches."""
+def compute(w: Weights, segs: Sequence[Seg], b: Buffers, *, logits: bool = True, context: int | None = None,
+            ends: Sequence[int] = ()):
+    """The forward's GPU work on staged rows (capturable); ``context`` bounds the attention launches; ``ends``: a
+    prompt pass's rows that get the head (``finish``)."""
 
     c = w.cfg
     R = segs[-1][2]
@@ -407,7 +434,36 @@ def compute(w: Weights, segs: Sequence[Seg], b: Buffers, *, logits: bool = True,
     pending = None
     for layer in w.layers:
         pending = layer_forward(layer, w, segs, b, R, pending, context=context)
-    return finish(w, w.mixer, b, R, pending, logits=logits)
+    return finish(w, w.mixer, b, R, pending, logits=logits, ends=ends)
+
+
+def converges(w: Weights) -> bool:
+    """Whether a decode window and a prompt pass can share each layer's expert launch (grouped 4-bit experts, one GPU)."""
+
+    return w.comm is None and getattr(w, "x3", None) is None and all(
+        getattr(getattr(getattr(layer, "moe", None), "experts", None), "kernel", "qmm") == "qmm" for layer in w.layers)
+
+
+def compute_mixed(w: Weights, dsegs: Sequence[Seg], db: Buffers, psegs: Sequence[Seg], pb: Buffers, *,
+                  ends: Sequence[int] = ()) -> tuple:
+    """A decode window (``db``) and a prompt pass (``pb``) in one forward. Each keeps its own kernels, so its own
+    bits; each layer's experts run once for both, the window's rows after the pass's (one read of each expert's
+    weights). Returns the window's logits and the pass's heads (``ends``, else None)."""
+
+    c = w.cfg
+    Rd, Rp = dsegs[-1][2], psegs[-1][2]
+    if Rp + Rd > pb.rows:
+        raise ValueError(f"a pass of {Rp} rows and a window of {Rd} exceed the prompt buffers' {pb.rows}")
+    _embed(w, db.ids[:Rd], c.streams, db.h[:Rd])
+    _embed(w, pb.ids[:Rp], c.streams, pb.h[:Rp])
+    dp = pp = None
+    for layer in w.layers:
+        _pre_moe(layer, w, dsegs, db, Rd, dp)
+        _pre_moe(layer, w, psegs, pb, Rp, pp)
+        pb.mixed[Rp:Rp + Rd].copy_(db.mixed[:Rd])
+        mode, y, wts = moe_block(layer, w, pb, Rp + Rd)
+        dp, pp = (mode, y[Rp:], wts[Rp:], db.inj_m), (mode, y[:Rp], wts[:Rp], pb.inj_m)
+    return finish(w, w.mixer, db, Rd, dp), finish(w, w.mixer, pb, Rp, pp, logits=bool(ends), ends=ends)
 
 
 @torch.no_grad()
@@ -449,15 +505,15 @@ def shift_windows(old: torch.Tensor, new: torch.Tensor, keep: int, channels: int
 
 
 @torch.no_grad()
-def commit(w: Weights, st: State, b: Buffers, R: int, keep: int, at: int = 0) -> None:
-    """Keep the first ``keep`` of the R rows the last forward (buffers ``b``) ran for ``st``, from window row ``at``."""
+def commit(w: Weights, st: State, b: Buffers, R: int, keep: int, at: int = 0, states: bool = True) -> None:
+    """Keep the first ``keep`` of R rows ``st`` ran from row ``at``; ``states=False``: gdn_multi committed them."""
 
     c = w.cfg
     if not 1 <= keep <= R or (b.prefill and keep != R):
         raise ValueError("keep must be in 1..R, and all of a prompt chunk")
     n = 0 if b.prefill else len(st.cur)          # a prompt chunk's DeltaNet layers committed during the forward
     if n:
-        for li in range(n):
+        for li in range(n if states else 0):
             cur = st.cur[li]
             if keep < R:
                 gdn_mod.replay(st.rec[cur, li], st.scratch[li], keep, st.rec[1 - cur, li])

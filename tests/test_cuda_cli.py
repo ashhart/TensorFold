@@ -207,7 +207,17 @@ def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="tensorfold pull z-lab/Qwen3.8-27B-DFlash2"):
         qwen3_5.cuda_engine(tmp_path, drafter="")
     assert qwen3_5.cuda_engine(tmp_path, drafter="", no_drafts=True).allow_copy is False
-    assert qwen3_5.cuda_engine(tmp_path, drafter=str(tmp_path)).max_rows == 12
+    monkeypatch.setattr(qwen3_5, "gb10", lambda: True)
+    one = qwen3_5.cuda_engine(tmp_path, drafter=str(tmp_path))
+    assert (one.max_rows, one.tree_rows) == (128, 16)          # one stream on one GB10: copies widen, trees at 16
+    monkeypatch.setattr(qwen3_5, "gb10", lambda: False)
+    other = qwen3_5.cuda_engine(tmp_path, drafter=str(tmp_path))
+    assert (other.max_rows, other.tree_rows) == (12, None)     # other GPUs keep 0.5.0's rows until measured
+    monkeypatch.setattr(qwen3_5, "gb10", lambda: True)
+    many = qwen3_5.cuda_engine(tmp_path, drafter=str(tmp_path), parallel=4)
+    assert (many.max_rows, many.tree_rows) == (12, None)       # concurrent streams keep their rows
+    ranks = qwen3_5.cuda_engine(tmp_path, drafter=str(tmp_path), tp=2, master="192.0.2.10")
+    assert (ranks.max_rows, ranks.tree_rows) == (12, None)     # two ranks too
 
     # Flash Next drafts with the checkpoint's MTP head: a checkpoint without it serves only the serial reference
     index = {"weight_map": {"model.layers.0.mlp.gate.weight": "model.safetensors"}}
@@ -218,6 +228,10 @@ def test_no_cuda_engine_serves_one_token_a_round_by_default(tmp_path, monkeypatc
     index["weight_map"]["mtp.fc.weight"] = "model.safetensors"
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
     assert qwen4_exp.cuda_engine(tmp_path).depth == 6
+    assert made[-1]["confidence"] == 0.7                                   # one stream or many
+    assert qwen4_exp.cuda_engine(tmp_path, mtp_confidence=0.6).confidence == 0.6
+    assert made[-1]["share"] == 0.0                                        # whole prompt passes unless asked
+    assert qwen4_exp.cuda_engine(tmp_path, decode_share=0.25).share == 0.25
 
     # GLM: --mtp-drafts 0 with the DFlash2 drafter still drafts (DFlash2 alone); without it, the serial reference
     glm = dict(tp=2, master="192.0.2.10")
@@ -240,3 +254,22 @@ def test_cuda_parallel_is_one_request_at_a_time_unless_a_number_asks(tmp_path, m
     command = ["serve", str(tmp_path), "--backend", "cuda", "--no-drafts"] + (["--parallel", flag] if flag else [])
     assert cli._serve_cuda(cli.build_parser().parse_args(command), family, tmp_path, 4096) == 0
     assert made[0].get("parallel") == streams
+
+
+@pytest.mark.parametrize("available,capability,name,expected", [
+    (True, (12, 1), "NVIDIA GB10", True), (True, (12, 1), "", True), (True, (11, 0), "NVIDIA GB10", True),
+    (True, (12, 0), "NVIDIA GeForce RTX 5090", False), (True, (9, 0), "NVIDIA H100 80GB HBM3", False),
+    (False, (12, 1), "NVIDIA GB10", False)])
+def test_gb10_reads_the_devices_capability_or_name(monkeypatch, available, capability, name, expected):
+    """The lone stream's wide windows are for a GB10: compute capability 12.1 or the device's name."""
+
+    import sys
+    from types import ModuleType
+
+    from tensorfold.families import qwen3_5
+
+    torch = ModuleType("torch")
+    torch.cuda = SimpleNamespace(is_available=lambda: available, get_device_capability=lambda i: capability,
+                                 get_device_name=lambda i: name)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    assert qwen3_5.gb10() is expected

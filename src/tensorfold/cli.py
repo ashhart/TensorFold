@@ -68,11 +68,11 @@ def build_parser() -> argparse.ArgumentParser:
                             "pulled; none: no draft model")
     speed.add_argument("--drafter-bits", type=int, default=4, help="quantize the draft model's linears (0: bf16)")
     speed.add_argument("--mtp-drafts", type=int, default=None,
-                       help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 30%% "
+                       help="most MTP drafts a round (Qwen3.8 Flash Next: 3 on Mac; on CUDA 6, stopping under 70%% "
                             "confidence); 0: no MTP drafts (any family)")
     speed.add_argument("--mtp-confidence", type=float, default=None,
                        help="on CUDA, stop an MTP chain before a later draft under this probability "
-                            "(Flash Next default 0.30)")
+                            "(Flash Next default 0.70)")
     speed.add_argument("--lane-kernels", choices=("auto", "on", "off"), default="auto",
                        help="lane kernels for Qwen3.8 dense (auto: on GPUs with tensor units)")
     speed.add_argument("--prompt-cache-gib", type=float, default=None,
@@ -92,7 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
                             "CUDA: one at a time, the others waiting their turn)")
     speed.add_argument("--decode-share", type=float, default=None, help="Mac: while a prompt prefills, running replies "
                        "keep moving for this share of each chunk's time and later prompts start later (default 0.25; "
-                       "0: whole prompts first, as 0.3.6.2)")
+                       "0: whole prompts first, as 0.3.6.2). CUDA Flash Next --parallel: replies decode inside each "
+                       "prompt pass; a share sizes the passes so a round's decoding takes it (default 0: whole passes)")
     speed.add_argument("--mlx-cache-gib", type=float, default=8.0, help="MLX's cache of freed buffers")
     speed.add_argument("--ssd-experts", type=float, default=None, metavar="GIB",
                        help="stream routed experts from the checkpoint into a GPU pool of this many GiB, for models "
@@ -358,6 +359,8 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
         options["ple_on_ssd"] = True
     if getattr(args, "mtp_confidence", None) is not None:
         options["mtp_confidence"] = float(args.mtp_confidence)
+    if getattr(args, "decode_share", None) is not None:
+        options["decode_share"] = float(args.decode_share)
     options["context"] = context if context is not None else args.context
     options["context_explicit"] = args.context is not None
     streams = 1 if str(args.parallel).strip().lower() == "auto" else _parallel(args.parallel)

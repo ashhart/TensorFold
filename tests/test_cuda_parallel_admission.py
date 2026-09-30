@@ -40,9 +40,10 @@ def test_parallel_window_that_cannot_fit_every_stream_is_refused_before_loading(
     from tensorfold.cuda.geometry import indexed_stream_geometry, stream_geometry
     checkpoint(tmp_path, small_config(), WEIGHTS)
     calls, capacity = fake_runtime
-    four = (stream_geometry(small_config(), world, 4, 8) if family == "linear" else
-            indexed_stream_geometry(small_config(), 4, 4, 8, mtp=True))
-    budget = four.needed(12000) + 32768                   # four streams fit 12,000 tokens each, not 60,000
+    # one GPU: the window is what one stream reaches beside the others' first rows; two ranks: every stream's
+    four = (stream_geometry(small_config(), world, 4, 8, first=256 if world == 1 else None) if family == "linear"
+            else indexed_stream_geometry(small_config(), 4, 4, 8, mtp=True))
+    budget = four.needed(12000) + 32768                   # the streams fit 12,000 tokens, not 60,000
     monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
     _, go = start(family, tmp_path, 60000, True, world, 4)
     with pytest.raises(ValueError, match="largest fitting"):
@@ -100,10 +101,11 @@ def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocation
     from tensorfold.cuda.geometry import indexed_stream_geometry, kv_bytes
     one = dec.free[0]
     snapshot = bytes_in([one.rec]) // 2 + bytes_in([one.conv, one.ple_tail])
-    used = bytes_in(arrays) + (min(keep, streams) + 1) * snapshot
-    kv = [t for t in arrays if t.shape[:2] == (slots, cfg.kv_heads)]      # K and V of two attention layers and the MTP's
+    first = [t for t in arrays if t.shape[:2] == (multi.FIRST, cfg.kv_heads)]     # K and V: two layers and the MTP's
     assert len(dec.free) == streams and all(st.kv_dtype == kv_dtype for st in dec.free)
-    assert bytes_in(kv) == streams * 3 * 2 * slots * cfg.kv_heads * kv_bytes(cfg.head_dim, bits)
+    assert bytes_in(first) == streams * 3 * 2 * multi.FIRST * cfg.kv_heads * kv_bytes(cfg.head_dim, bits)
+    # one stream grown to the window beside the others' first rows
+    used = bytes_in(arrays) - one.cache_bytes(multi.FIRST) + one.cache_bytes(slots) + (min(keep, streams) + 1) * snapshot
     assert used <= indexed_stream_geometry(text, streams, depth + 1, keep, mtp=True, kv_bits=bits).bytes_at(slots)
 
 

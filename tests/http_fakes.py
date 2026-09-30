@@ -2,6 +2,7 @@
 
 from io import BytesIO
 import json
+import socket
 
 from tensorfold.server.http import make_handler
 
@@ -21,7 +22,18 @@ def post(app, body, path="/v1/chat/completions"):
         def sendall(self, data):
             self.output.extend(data)
 
+        def fileno(self):
+            return connected.fileno()
+
+        def recv(self, *args):
+            return connected.recv(*args)
+
     connection = Connection()
-    make_handler(app)(connection, ("127.0.0.1", 0), None)
+    connected, peer = socket.socketpair()
+    try:
+        make_handler(app)(connection, ("127.0.0.1", 0), None)
+    finally:
+        connected.close()
+        peer.close()
     headers, response = bytes(connection.output).split(b"\r\n\r\n", 1)
     return int(headers.split()[1]), response.decode()

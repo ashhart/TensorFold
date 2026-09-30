@@ -107,3 +107,181 @@ def test_prompts_that_extend_a_finished_stream_resume_from_its_slot(sampling, kv
     assert other.cached > 0 and other.out == fresh(ext, 8)
     serial = run(longer, 10, draft=False)
     assert serial.cached == 0 and serial.out == warm.out
+
+
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
+def test_sparse_streams_decode_together_as_alone(kv_dtype):
+    """Past the attention budget a long stream selects blocks beside short dense ones, each emitting its solo run."""
+
+    w = _model(7)
+    g = torch.Generator().manual_seed(9)
+    prompts = [torch.randint(1, V, (2400,), generator=g).tolist(), PROMPTS[0], PROMPTS[1]]
+    samplings = [Sampling(seed=5, top_k=20, top_p=0.95), None, Sampling(seed=6, top_k=20, top_p=0.95)]
+    refs = []
+    for prompt, sampling in zip(prompts, samplings):
+        e = Engine(w, capacity=4096, max_rows=8, prefill_rows=256, kv_dtype=kv_dtype)
+        refs.append(serial_decode(e, prefill(e, prompt, sampling), 16, sampling).tokens)
+    dec = MultiDecoder(w, slots=3, capacity=4096, depth=3, confidence=0.3, kv_dtype=kv_dtype)
+    streams = [Stream(p, 16, smp) for p, smp in zip(prompts, samplings)]
+    for s in streams:
+        dec.admit(s)
+    while dec.live():
+        dec.finish(dec.round())
+    assert [s.out for s in streams] == refs
+
+
+def test_streams_keep_their_bits_when_their_caches_move():
+    """A stream's caches may be reallocated between rounds (growth): the step tables read addresses each step."""
+
+    w = _model()
+    samplings = [Sampling(seed=11, top_k=20, top_p=0.95), None]
+    refs = []
+    for prompt, sampling in zip(PROMPTS[:2], samplings):
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16)
+        refs.append(serial_decode(e, prefill(e, prompt, sampling), 24, sampling).tokens)
+    dec = MultiDecoder(w, slots=2, capacity=1024, depth=3, confidence=0.3)
+    streams = [Stream(p, 24, smp) for p, smp in zip(PROMPTS[:2], samplings)]
+    for s in streams:
+        dec.admit(s)
+    rounds = 0
+    while dec.live():
+        dec.finish(dec.round())
+        rounds += 1
+        if rounds % 2 == 0:                          # move every live stream's caches and states to new storage
+            for s in streams:
+                st = s.st
+                for kc in st.kc + [st.mtp_kc]:
+                    kc.k, kc.v, kc.ks, kc.vs = kc.k.clone(), kc.v.clone(), kc.ks.clone(), kc.vs.clone()
+                st.ikc = [t.clone() for t in st.ikc]
+                st.pooled = [t.clone() for t in st.pooled]
+                st.mtp_ikc, st.mtp_pooled = st.mtp_ikc.clone(), st.mtp_pooled.clone()
+                st.conv, st.rec = st.conv.clone(), st.rec.clone()
+    assert [s.out for s in streams] == refs
+
+
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int4"])
+def test_streams_that_grow_past_their_first_rows_equal_each_alone(kv_dtype):
+    """Slots start at 256 rows; two streams decoding past them grow (a copy of every committed row) mid-reply."""
+
+    w = _model()
+    samplings = [None, Sampling(seed=5, top_k=20, top_p=0.95)]
+    prompts = [[(7 * i + 3) % (V - 1) + 1 for i in range(240)], [(11 * i + 5) % (V - 1) + 1 for i in range(250)]]
+    refs = []
+    for prompt, sampling in zip(prompts, samplings):
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype)
+        refs.append(serial_decode(e, prefill(e, prompt, sampling), 40, sampling).tokens)
+    dec = MultiDecoder(w, slots=2, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype)
+    streams = []
+    for prompt, sampling in zip(prompts, samplings):
+        s = Stream(list(prompt), 40, sampling, draft=True)
+        dec.admit(s)
+        streams.append(s)
+    assert all(s.st.capacity == 256 for s in streams)
+    while dec.live():
+        dec.finish(dec.round())
+    for s, ref in zip(streams, refs):
+        assert s.out == ref and s.st.version >= 1
+
+
+def test_a_window_and_a_prompt_pass_share_each_layers_experts_and_keep_their_bits(monkeypatch):
+    """One forward for a decode window and a prompt pass launches each layer's experts once for both rows, and both
+    get the rows they get apart."""
+
+    from tensorfold.families.qwen4_exp.cuda import forward as fwd
+
+    w = _model()
+    db, pb = Buffers(w, 16, 1024, moe_prefill=True), Buffers(w, 48, 1024, prefill=True)
+    chains, pieces = [[401, 33, 2048], [5, 6]], [PROMPTS[2] + [70, 71], PROMPTS[3]]
+    dstates = []
+    for prompt in PROMPTS[:2]:
+        st = State(w, 1024, 16)
+        forward(w, st, db, prompt)
+        commit(w, st, db, len(prompt), len(prompt))
+        dstates.append(st)
+    pstates = [State(w, 1024, 16) for _ in pieces]
+
+    def run(mixed: bool):
+        d, p = [st.clone() for st in dstates], [st.clone() for st in pstates]
+        segs, psegs = stage(w, db, list(zip(d, chains))), stage(w, pb, list(zip(p, pieces)))
+        ends = [a1 - 1 for _, _, a1 in psegs]
+        if mixed:
+            lg, heads = fwd.compute_mixed(w, segs, db, psegs, pb, ends=ends)
+        else:
+            lg = compute(w, segs, db).clone()
+            heads = compute(w, psegs, pb, logits=True, ends=ends)
+        rd, rp = segs[-1][2], psegs[-1][2]
+        return lg[:rd].clone(), db.streams[:rd].clone(), heads[:len(ends)].clone(), pb.streams[:rp].clone()
+
+    apart = run(False)
+    calls, real = [], fwd.moe_block
+    monkeypatch.setattr(fwd, "moe_block", lambda layer, w_, b, R: calls.append(R) or real(layer, w_, b, R))
+    together = run(True)
+    assert calls == [sum(map(len, chains)) + sum(map(len, pieces))] * len(w.layers)
+    assert all(torch.equal(x, y) for x, y in zip(together, apart))
+
+
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
+def test_prompts_fill_between_rounds_while_streams_decode(kv_dtype):
+    """A prompt admitted beside decoding streams prefills a chunk a round, in the round's own forward, while they
+    keep decoding; a burst queues behind it, oldest first; every stream emits its solo run."""
+
+    w = _model()
+    g = torch.Generator().manual_seed(11)
+    long = torch.randint(1, V, (70,), generator=g).tolist()           # five 16-row chunks
+    prompts = [PROMPTS[0], long, PROMPTS[1], PROMPTS[0] + [7, 8]]
+    samplings = [Sampling(seed=3, top_k=20, top_p=0.95), None, Sampling(seed=4, top_k=20, top_p=0.95), None]
+    refs = []
+    for prompt, sampling in zip(prompts, samplings):
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype)
+        refs.append(serial_decode(e, prefill(e, prompt, sampling), 24, sampling).tokens)
+    dec = MultiDecoder(w, slots=4, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype, prefill_rows=16)
+    first = Stream(prompts[0], 24, samplings[0])
+    dec.admit(first)
+    assert dec.live() == 1 and not first.out                          # queued: the prompt fills in the rounds
+    dec.finish(dec.round())                                           # alone: the whole prompt, then a round
+    assert len(first.out) > 1
+    rest = [Stream(p, 24, smp) for p, smp in zip(prompts[1:], samplings[1:])]
+    for s in rest:
+        dec.admit(s)
+    grew = []
+    while dec.filling and rest[0] in dec.filling:
+        before = len(first.out)
+        dec.finish(dec.round())
+        grew.append(len(first.out) - before)
+    assert len(grew) >= 4 and all(n > 0 for n in grew[:3])           # a chunk a round; the first stream decodes
+    while dec.live():
+        dec.finish(dec.round())
+    assert [s.out for s in [first, *rest]] == refs
+
+
+@pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
+@pytest.mark.parametrize("decoding", [False, True])
+def test_packed_prompt_passes_keep_each_prompt_its_solo_run(kv_dtype, decoding):
+    """Several prompts share each prompt pass (short ones end together, a long one spans passes), beside a decoding
+    stream or alone; every stream emits its solo run."""
+
+    w = _model(5)
+    g = torch.Generator().manual_seed(12)
+    long = torch.randint(1, V, (70,), generator=g).tolist()
+    prompts = [PROMPTS[3], PROMPTS[1], [13, 400, 9, 21], long, PROMPTS[0]]
+    samplings = [None, Sampling(seed=8, top_k=20, top_p=0.95), None, Sampling(seed=9, top_k=20, top_p=0.95), None]
+    refs = []
+    for prompt, sampling in zip(prompts, samplings):
+        e = Engine(w, capacity=1024, max_rows=8, prefill_rows=16, kv_dtype=kv_dtype)
+        refs.append(serial_decode(e, prefill(e, prompt, sampling), 18, sampling).tokens)
+    dec = MultiDecoder(w, slots=5, capacity=1024, depth=3, confidence=0.3, kv_dtype=kv_dtype, prefill_rows=32)
+    streams = [Stream(p, 18, smp) for p, smp in zip(prompts, samplings)]
+    if decoding:
+        dec.admit(streams[0])
+        dec.finish(dec.round())
+    for s in streams[1 if decoding else 0:]:
+        dec.admit(s)
+    ends = []
+    while dec.filling:
+        before = len(dec.filling)
+        dec.finish(dec.round())
+        ends.append(before - len(dec.filling))
+    while dec.live():
+        dec.finish(dec.round())
+    assert [s.out for s in streams] == refs
+    assert max(ends) >= 2                                             # a pass that ended two prompts at once

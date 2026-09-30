@@ -31,7 +31,7 @@ class Qwen35Family:
     draft_prior = (0.78, 0.74, 0.71, 0.73, 0.71, 0.75, 0.78, 0.75, 0.75, 0.75, 0.75, 0.7, 0.7, 0.7, 0.7)
 
     def __init__(self, model: Any, *, drafter: Any = None, nodes: int = 15, widest: int = 32,
-                 rows: bool = False) -> None:
+                 rows: bool = False, first_copy_rows: int | None = None) -> None:
         self.inner = model
         language_model = getattr(model, "language_model", model)
         self.core = language_model.model
@@ -52,6 +52,8 @@ class Qwen35Family:
         self._last: dict[int, tuple[Any, int, int, int]] = {}   # Cache id -> last forward record, row count, start and first row within the shared forward.
         self._shared: list[tuple[Any, int, int]] = []         # the last hidden_rows: (record, rows, start) a stream
         self.exact_width, self.window_costs = self.check_windows(int(widest), int(self.batch_rows))
+        # a copy's first window; each copy that lands whole doubles the next, up to exact_width rows
+        self.first_copy_rows = min(int(first_copy_rows or widest), self.exact_width)
 
     def make_cache(self) -> list[Any]:
         caches = list(self.inner.make_cache())
@@ -263,8 +265,8 @@ class Qwen35Family:
             steps.append(self.head(self.hidden(mx.array([[t]]), step_cache))[0, -1])
         mx.eval(*steps)
         exact, costs = 1, {}
-        # the row tiles step at 9, 17 and 25 rows without tensor units, and at 17, 33 and 65 with them (32-row ops)
-        steps_at = ((1, 2, 4, 8, 9, 12, 16, 17, 24, 25) if self.rows
+        # the row tiles step every 8 rows without tensor units (9, 17, 25, 33), and at 17, 33 and 65 with them
+        steps_at = ((1, 2, 4, 8, 9, 12, 16, 17, 24, 25, 32, 33, 48, 64, 65, 96) if self.rows
                     else (1, 2, 4, 8, 12, 16, 17, 24, 32, 33, 48, 64, 65, 96))
         for width in sorted({w for w in steps_at if w <= timed} | {widest, timed}):
             best = float("inf")

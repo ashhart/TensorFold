@@ -277,8 +277,16 @@ def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps,
     """Normalize stacked q/k/indexer heads in fp32, round to bf16, apply rotate-half RoPE and round again; store keys, values and raw indexer keys at POS0 + r; BITS 8 or 4 quantize keys and values and rotate q alike (q . Hk = Hq . k)."""
 
     r = tl.program_id(0)
-    head = tl.program_id(1)
-    pos = tl.load(POS0) + r
+    _prep_row(P, tl.load(POS0) + r, r, tl.program_id(1), QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps, PW, NQ,
+              NKV, HD, NI, IHD, HALF, BITS)
+
+
+@triton.jit
+def _prep_row(P, pos, r, head, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps, PW: tl.constexpr, NQ: tl.constexpr,
+              NKV: tl.constexpr, HD: tl.constexpr, NI: tl.constexpr, IHD: tl.constexpr, HALF: tl.constexpr,
+              BITS: tl.constexpr):
+    """``_attn_prep``'s head ``head`` of row r at position ``pos``, into the caches given."""
+
     d = tl.arange(0, HD)
     if head < NQ + NKV + NI:
         is_q = head < NQ

@@ -6,10 +6,12 @@ import time
 
 import torch
 
-from tensorfold.engine.grammar import GrammarError, pack
+from tensorfold.cuda.capacity import available_bytes
 from tensorfold.cuda.markers import MIN_GAP
+from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import PrefixCache, Stream, accept, next_fill
+from tensorfold.engine.grammar import GrammarError, pack
 
 from .decode import CopyIndex, clone_state
 from .decode_tp import SAMPLING_WORDS as W, _sample_split, _share, first_token, pack_sampling, unpack_sampling
@@ -22,6 +24,8 @@ from .weights import Weights
 ADMIT, ROUND, DONE, FILL = 1, 2, 3, 4   # rank 0's messages
 COPY, TREE, ONE = 0, 1, 2               # a stream's window this round
 STEP = 1024                             # prompt rows a prefill step takes while other streams decode
+GROW = 8192                             # rows a stream's attention caches grow by at a time (one GPU)
+GIB = 1024**3
 
 
 def private(st: State, rows: int) -> State:
@@ -73,6 +77,8 @@ def _unflatten(flat: list[int], pairs: bool) -> list:
 class MultiDecoder:
     """The ``Scheduler``'s decoder on one GPU or as ``rank`` of two; a stream's window holds at most 16 rows."""
 
+    memory_gate: MemoryGate | None = None     # one GPU: streams' caches grow by use (two ranks reserve up front)
+
     def __init__(self, w: Weights, draft=None, *, max_rows: int = 16, allow_copy: bool = True, stop_eos: bool = True,
                  keep: int = 8, rank: int = 0, world: int = 1, context: int = 0, points=None, vision=None) -> None:
         if not 1 <= max_rows <= 16:
@@ -92,6 +98,12 @@ class MultiDecoder:
         self.broken: Exception | None = None
         self.costs: list[tuple[int, float]] | None = None     # (rows, ms) of the forward: tree widths by the curve
         self.overhead = (8.0, 1.5)                            # a round's other ms: fixed, and per stream
+        # one GPU: a stream's caches hold its prompt, then grow a step at a time while the gate has room
+        c, att = w.config, sum(1 for layer in getattr(w, "layers", ()) if not layer.linear)
+        self.layer_bytes = 2 * getattr(c, "kv_heads", 0) * getattr(c, "head_dim", 0) * 2     # a row of one layer
+        self.row_bytes = att * self.layer_bytes
+        self.memory_gate = (MemoryGate(1 << 62, reserve=2 * GIB, live=torch_live(torch, available_bytes))
+                     if world == 1 and torch.cuda.is_available() else None)
 
     def live(self) -> int:
         return len(self.streams) + len(self.filling)
@@ -115,6 +127,8 @@ class MultiDecoder:
                 raise ValueError(f"a prompt of {len(s.prompt)} tokens leaves no room in the {self.context}-token "
                                  "context (--context)")
             s.count = min(s.count, room)
+        if self.memory_gate is not None:
+            self._room(s)
         prepared = getattr(s, "vision", None)
         if prepared is not None and self.vision is None:
             raise ValueError("image inputs require starting this engine with --vision")
@@ -136,14 +150,80 @@ class MultiDecoder:
 
     def _queue(self, s: Stream, hit) -> None:
         drafter = self.draft if s.draft and self.drafts else None
-        need = len(s.prompt) + s.count                       # the most a stream's attention caches ever hold
-        state = private(hit[1] if hit else State(self.w), min(self.context, need) if self.context else need)
+        rows = self._most(s) if self.memory_gate is None else self._first(s)
+        state = private(hit[1] if hit else State(self.w), rows)
         s.st = state
         s.snap = None if drafter is None else own(hit[2]) if hit and hit[2] is not None else \
             ([None] * drafter.layers, [None] * drafter.layers, 0, 0)
         s.stops = ([p for p in self.points(s.prompt) if p >= state.pos + MIN_GAP]
                    if self.points is not None and s.draft and s.vision is None else [])    # image prompts keep none
         self.filling.append(s)
+
+    def _most(self, s: Stream) -> int:
+        """The most a stream's attention caches ever hold: its prompt and reply, within the context."""
+
+        need = len(s.prompt) + s.count
+        return min(self.context, need) if self.context else need
+
+    def _first(self, s: Stream) -> int:
+        """The rows a stream's caches start with (one GPU): its prompt and a window, a step at a time."""
+
+        return min(self._most(s), -(-(len(s.prompt) + self.max_rows + 2) // GROW) * GROW)
+
+    def _room(self, s: Stream) -> None:
+        """A new prompt's rows fit beside the live streams, cached prompt ends going first; else it waits (NoRoom)."""
+
+        if any(x.waiting for x in self.streams.values()):
+            raise NoRoom("streams already wait for memory; a new request waits until one finishes")
+        while not self.memory_gate.fits(self._first(s) * self.row_bytes):
+            if not self.cache.evict():
+                if not self.live():
+                    return                          # alone: startup fitted one stream's whole window
+                raise NoRoom(f"a {len(s.prompt)}-token prompt waits for memory until a live stream finishes")
+            torch.cuda.empty_cache()
+
+    def _grow(self, st: State, have: int, size: int, alone: bool) -> bool:
+        """Grow ``st``'s caches from ``have`` to ``size`` rows while the gate has room (a layer's copy at a time)."""
+
+        while not self.memory_gate.fits((size - have) * self.row_bytes + size * self.layer_bytes):
+            if not self.cache.evict():
+                if alone:
+                    break                           # startup fitted one stream's whole window
+                return False
+            torch.cuda.empty_cache()
+        reserve(st, size)
+        torch.cuda.empty_cache()                    # the old buffers back to the system: MemAvailable stays true
+        return True
+
+    def _make_room(self, live: list[Stream]) -> list[Stream]:
+        """Before a round (one GPU): each stream's caches hold its next window, oldest first; once one can't grow,
+        newer streams run only if they needn't; if even the oldest can't, the newest ends. Returns those it ended."""
+
+        live = sorted(live, key=lambda x: x.sid)
+        blocked = False
+        for s in live:
+            rows = min(s.st.pos + self.max_rows + 2, self._most(s))   # a stream never commits past its prompt and reply
+            have = next((kv[0].shape[0] for kv in s.st.kv if kv is not None), rows)
+            if rows <= have:
+                s.waiting = False
+                continue
+            size = max(rows, min(self._most(s), -(-rows // GROW) * GROW))
+            s.waiting = blocked or not self._grow(s.st, have, size, alone=len(live) == 1 and not self.filling)
+            blocked = blocked or s.waiting
+        if len(live) > 1 and live[0].waiting:          # even the oldest can't grow: the newest ends
+            newest = live[-1]
+            newest.error = RuntimeError(
+                f"This server ran out of memory with {len(live)} streams decoding, so the newest (this request, after "
+                f"{len(newest.out)} tokens) was stopped for the older ones to finish. Retry it, shorten the prompt or "
+                "max_tokens, or start the server with a smaller --parallel.")
+            newest.done, newest.waiting = True, False
+            self.memory_gate.ends += 1
+            self.streams.pop(newest.sid, None)
+            newest.st = None                         # its caches go now (a cached prompt end may still view them)
+            torch.cuda.empty_cache()
+            return [newest, *self._make_room(live[:-1])]
+        self.memory_gate.waits += any(s.waiting for s in live)
+        return []
 
     def _fill(self) -> list[Stream]:
         """One prefill step for the oldest queued prompt (foreground first): to its next kept state, or STEP rows
@@ -214,6 +294,9 @@ class MultiDecoder:
         self._check()
         done = self._fill() if self.filling else []
         live = [s for s in self.streams.values() if not s.done]
+        if self.memory_gate is not None:
+            done += self._make_room(live)
+            live = [s for s in live if not s.done and not s.waiting]
         if not live:
             return done
         copied: dict[int, list[int]] = {}

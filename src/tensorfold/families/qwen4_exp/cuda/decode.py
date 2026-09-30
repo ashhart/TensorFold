@@ -122,7 +122,7 @@ class Engine:
         self.capacity = capacity
         self.rows, self.prefill_rows = max_rows, prefill_rows
         self.kv_dtype = kv_dtype
-        self.buf = Buffers(w, max_rows, capacity)
+        self.buf = Buffers(w, max_rows, capacity, moe_prefill=True)       # the experts' arithmetic MultiDecoder's use
         self.mbuf = Buffers(w, max_rows, capacity) if w.mtp is not None else None
         self.pbuf = Buffers(w, prefill_rows, capacity, prefill=True)
         self.st = State(w, capacity, max_rows, kv_dtype)
@@ -248,48 +248,64 @@ def draft(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int], position
     return drafts
 
 
+def _absorbs(e: Engine, mtp: bool) -> bool:
+    return mtp and e.w.mtp is not None and e.mbuf is not None
+
+
+@torch.no_grad()
+def prefill_begin(e: Engine, prompt: Sequence[int], *, mtp: bool = True, resume: dict | None = None) -> int:
+    """Empty the state, or restore a kept prompt end and absorb its tail; returns the first prompt row to commit."""
+
+    if not prompt:
+        raise ValueError("prefill requires at least one token")
+    if resume is None:
+        e.reset()
+        return 0
+    st = e.st
+    st.restore(resume["state"])
+    if not 0 < st.pos < len(prompt):
+        raise ValueError("a resumed prompt must extend the cached tokens")
+    if _absorbs(e, mtp) and resume.get("tail") is not None:
+        mtp_forward(e.w, st, e.pbuf, [prompt[st.pos]], resume["tail"])
+        st.set_mtp_len(st.mtp_len + 1)
+    return st.pos
+
+
+@torch.no_grad()
+def prefill_chunk(e: Engine, prompt: Sequence[int], start: int, *, mtp: bool = True) -> torch.Tensor | None:
+    """Commit up to ``e.prefill_rows`` rows from ``start``; the prompt's last chunk returns its last row's logits."""
+
+    w, st, pb = e.w, e.st, e.pbuf
+    chunk = list(prompt[start:start + e.prefill_rows])
+    R = len(chunk)
+    final = start + R >= len(prompt)
+    # only the prompt's last row is sampled: the head runs on the final chunk alone
+    logits = forward(w, st, pb, chunk, logits=final)
+    last = logits.clone() if final else None
+    e.last_streams = pb.streams[R - 1:R].clone()
+    if _absorbs(e, mtp):
+        nxt = list(prompt[start + 1:start + R + 1])
+        if nxt:
+            mtp_forward(w, st, pb, nxt, pb.streams[:len(nxt)])
+            st.set_mtp_len(st.mtp_len + len(nxt))
+    commit(w, st, pb, R, R)
+    return last
+
+
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True,
             resume: dict | None = None, constraint=None) -> int:
     """Commit the prompt in chunks, sample the first token; rows ignore chunking, so ``resume`` equals a fresh run."""
 
-    if not prompt:
-        raise ValueError("prefill requires at least one token")
-    w, st, pb = e.w, e.st, e.pbuf
-    use_mtp = mtp and w.mtp is not None and e.mbuf is not None
-    begin = 0
-    if resume is None:
-        e.reset()
-    else:
-        st.restore(resume["state"])
-        begin = st.pos
-        if not 0 < begin < len(prompt):
-            raise ValueError("a resumed prompt must extend the cached tokens")
-        if use_mtp and resume.get("tail") is not None:
-            mtp_forward(w, st, pb, [prompt[begin]], resume["tail"])
-            st.set_mtp_len(st.mtp_len + 1)
-    last = None
-    for start in range(begin, len(prompt), e.prefill_rows):
-        chunk = list(prompt[start:start + e.prefill_rows])
-        R = len(chunk)
-        final = start + R >= len(prompt)
-        # only the prompt's last row is sampled: the head runs on the final chunk alone
-        logits = forward(w, st, pb, chunk, logits=final)
-        if final:
-            last = logits.clone()
-        streams_last = pb.streams[R - 1:R].clone()
-        if use_mtp:
-            nxt = list(prompt[start + 1:start + R + 1])
-            if nxt:
-                mtp_forward(w, st, pb, nxt, pb.streams[:len(nxt)])
-                st.set_mtp_len(st.mtp_len + len(nxt))
-        commit(w, st, pb, R, R)
+    start, last = prefill_begin(e, prompt, mtp=mtp, resume=resume), None
+    while start < len(prompt):
+        last = prefill_chunk(e, prompt, start, mtp=mtp)
+        start += e.prefill_rows
     if constraint is not None:                           # a reply's grammar: this rank's vocabulary columns
         last = constraint.mask(last, None, e.w.meta.get("vocab_offset", 0))
     first = e.sample(last, [len(prompt)], sampling)[0]
     if constraint is not None:
         constraint.advance([first])
-    e.last_streams = streams_last
     e.first = first
     return first
 

@@ -29,9 +29,11 @@ class NarrowModel(StreamsModel):
         return mx.concatenate([self.hidden(mx.array(w).reshape(1, -1), c) for w, c in zip(windows, caches)], axis=1)
 
 
-def _run(drafts, width=2, gpu=True, count=1, limit=12, batch_rows=32):
+def _run(drafts, width=2, gpu=True, count=1, limit=12, batch_rows=32, first_copy_rows=None):
     model = NarrowModel(drafts=1, gpu_tokens=gpu)
     model.exact_width, model.widths = width, []
+    if first_copy_rows is not None:
+        model.first_copy_rows = first_copy_rows
     engine = LaneEngine(model)
     engine.batch_rows = batch_rows
     streams = [LaneStream(stream_id=str(i), prompt_ids=[8, 2], max_new_tokens=limit, think_budget=4,
@@ -62,3 +64,12 @@ def test_forced_windows_fit_the_shared_row_budget():
     drafted, widest = _run(True, 3, False, 3, batch_rows=2)
     assert widest <= 2
     assert drafted == _run(False, 3, False)[0] * 3
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_forced_windows_keep_the_first_copy_width(count):
+    """A family whose lone-stream copies may widen past their first window forces tokens in that first window."""
+    wide, widest = _run(True, 3, False, count)
+    capped, capped_widest = _run(True, 3, False, count, first_copy_rows=2)
+    assert widest == 3 and capped_widest == 2
+    assert wide == capped == _run(False, 3, False, 1)[0] * count

@@ -157,5 +157,7 @@ def test_the_serve_option_is_refused_where_it_cannot_apply_before_any_download()
     serve_options.check(parse("--decode-share", "0"), family, "mlx")
     with pytest.raises(ValueError, match="0 .whole prompts first. or more"):
         serve_options.check(parse("--decode-share", "-0.5"), family, "mlx")
-    with pytest.raises(ValueError, match="the CUDA engine runs a round after each 1,024 prompt rows"):
+    with pytest.raises(ValueError, match="this CUDA engine runs a round after each 1,024 prompt rows"):
         serve_options.check(parse("--decode-share", "0.25"), family, "cuda")
+    flash = SimpleNamespace(title="Flash Next", package=SimpleNamespace(CUDA_DECODE_SHARE=True), model_type="qwen4_exp")
+    serve_options.check(parse("--decode-share", "0.25"), flash, "cuda")             # its passes take the share

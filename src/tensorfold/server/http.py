@@ -59,6 +59,14 @@ def redact_images(value: Any) -> Any:
     return {key: redact_images(item) for key, item in value.items()}
 
 
+def reply_model(app: Any, body: Any) -> str:
+    """The id a reply names: the one the request asked for when this endpoint answers to it, else the served name."""
+
+    asked = body.get("model") if isinstance(body, dict) else None
+    name = str(getattr(app, "served_name", "") or getattr(app, "served", "") or "")
+    return asked if isinstance(asked, str) and asked in (getattr(app, "model_ids", None) or [name]) else name
+
+
 def served_model_ids(served_name: str, aliases: list[str] | None = None) -> list[str]:
     """Return the OpenAI model ids this endpoint advertises."""
 
@@ -171,6 +179,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     raise RequestError("request body exceeds the 32 MiB limit")
                 body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
                 validate_modalities(body)
+                named = reply_model(app, body)          # the id the request asked for, as vLLM names it
                 if _REQUEST_LOG and body.get("priority") != "background":   # batch jobs are not client traffic
                     with open(_REQUEST_LOG, "a") as handle:
                         handle.write(json.dumps(redact_images(body)) + "\n")
@@ -259,7 +268,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         "id": completion_id,
                         "object": "text_completion",
                         "created": created,
-                        "model": app.served_name,
+                        "model": named,
                         "choices": [
                             {
                                 "index": 0,
@@ -273,7 +282,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     "id": completion_id,
                     "object": "chat.completion.chunk",
                     "created": created,
-                    "model": app.served_name,
+                    "model": named,
                     "choices": [
                         {
                             "index": 0,
@@ -414,7 +423,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                             "id": completion_id,
                             "object": "text_completion",
                             "created": created,
-                            "model": app.served_name,
+                            "model": named,
                             "choices": [
                                 {
                                     "index": 0,
@@ -442,7 +451,7 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                         "id": completion_id,
                         "object": "chat.completion",
                         "created": created,
-                        "model": app.served_name,
+                        "model": named,
                         "choices": [
                             {
                                 "index": 0,

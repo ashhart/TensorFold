@@ -55,8 +55,9 @@ class Plan:
     budget: int
     weights: Weights
     geometry: Geometry
-    keeps_tables: bool | None = None   # a default window sized so the mapped tables keep their pages
+    keeps_tables: bool | None = None   # the window leaves the mapped tables their pages (None: nothing to keep)
     largest: int = 0                   # the largest window the budget fits up to the native one: what a restart gets
+    resident: int = 0                  # the largest window that leaves the mapped tables their pages
 
     @property
     def settings(self) -> list[int]:
@@ -193,13 +194,17 @@ def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
                 high = middle - 1
         return low
 
-    fitting, keeps = fit(budget), None
-    if not explicit and weights.mapped and room is not None:
-        # a default window leaves the mapped tables their pages (page cache, like the reserve); else they page
+    fitting, keeps, resident = fit(budget), None, 0
+    if weights.mapped and room is not None:
+        # windows up to ``resident`` leave the mapped tables their pages (page cache, like the reserve); past it they
+        # page; a default window stays within it when it can, an explicit one is only told
         resident = fit(min(budget, room - weights.mapped))
-        fitting, keeps = (resident, True) if resident else (fitting, False)
+        if explicit:
+            keeps = 0 < resident >= upper
+        else:
+            fitting, keeps = (resident, True) if resident else (fitting, False)
     largest = fit(budget, native if native > 0 else target)
-    return Plan(native, requested, bool(explicit), fitting, int(budget), weights, geometry, keeps, largest)
+    return Plan(native, requested, bool(explicit), fitting, int(budget), weights, geometry, keeps, largest, resident)
 
 
 def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
@@ -268,10 +273,21 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
     print(f"[tensorfold] CUDA rank {rank} startup estimate {receipt['total_bytes_estimate'] / GIB:.2f} GiB "
           f"within {plan.budget / GIB:.2f} GiB; native {plan.native}, allocated prompt/reply window {window}, "
           f"cache slots {receipt['cache_slots']}", flush=True)
-    if plan.keeps_tables is False:
-        print(f"[tensorfold] the {plan.weights.mapped / GIB:.1f} GiB of mapped tables do not fit beside the weights "
-              "and caches: lookups will page them from disk (free memory to keep them resident)", flush=True)
+    note = tables_note(plan)
+    if note:
+        print(f"[tensorfold] {note}", flush=True)
     return receipt
+
+
+def tables_note(plan: Plan) -> str | None:
+    """What startup says when the window leaves the mapped tables no room (their lookups then read the disk)."""
+
+    if plan.keeps_tables is not False:
+        return None
+    fix = (f"a --context of {plan.resident} or less, or fewer --parallel streams, keeps them resident"
+           if plan.explicit and plan.resident else "free memory to keep them resident")
+    return (f"the {plan.weights.mapped / GIB:.1f} GiB of mapped tables do not fit beside the weights and caches: "
+            f"lookups will page them from disk, which slows prompts ({fix})")
 
 
 def gather_ints(torch, gather: Callable, values: list[int], world: int = 2) -> list[list[int]]:

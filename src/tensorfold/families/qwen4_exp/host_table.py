@@ -54,7 +54,9 @@ class HostTable:
             if path not in maps:
                 with open(path, "rb") as f:
                     data = 8 + struct.unpack("<Q", f.read(8))[0]
-                maps[path] = (len(maps), np.memmap(path, dtype=np.uint8, mode="r"), data)
+                view = np.memmap(path, dtype=np.uint8, mode="r")
+                _random_access(view)          # gathers read through this view: a fault reads its page, not those around
+                maps[path] = (len(maps), view, data)
             index, _, data = maps[path]
             fidx.append(index)
             wbase.append(data + hw["data_offsets"][0])

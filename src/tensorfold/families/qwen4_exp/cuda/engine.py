@@ -21,7 +21,7 @@ class FlashNextEngine:
                  draft_vocab: str | int | None = "default", max_len: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
                  prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False,
-                 kv_dtype: str = "bf16") -> None:
+                 kv_dtype: str = "bf16", share: float = 0.0) -> None:
         import torch
 
         from .exl3_pack import admission, extra_files, is_exl3
@@ -107,7 +107,7 @@ class FlashNextEngine:
 
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
-                                      confidence=self.confidence, keep=KEEP, kv_dtype=self.kv_dtype)
+                                      confidence=self.confidence, keep=KEEP, kv_dtype=self.kv_dtype, share=share)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
@@ -140,8 +140,9 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
-        where = (f"{streams} streams of {self.context_window} prompt/reply tokens "
-                 f"({self.multi.slot_bytes / 2**20:.0f} MiB a stream), eager" if self.concurrent else
+        where = (f"up to {streams} streams, each growing to {self.context_window} prompt/reply tokens while memory "
+                 f"lasts ({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
+                 f"{self.multi.window_bytes / 2**30:.2f} GiB for one at the full window), eager" if self.concurrent else
                  f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
         if ple_on_ssd:
             how = "read from SSD at each lookup"

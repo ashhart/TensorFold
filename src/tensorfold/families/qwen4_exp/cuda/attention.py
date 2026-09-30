@@ -39,6 +39,15 @@ def _chunks(Q, KC, VC, KSC, VSC, POS0, PO, PM, PL, IDS, NKR, SPR,
     if QSA:
         sparse = tl.load(SPR + r) != 0
         n = tl.where(sparse, tl.load(NKR + r), n)
+    _chunk(Q, KC, VC, KSC, VSC, n, sparse, r, hk, c, PO, PM, PL, IDS, H, HK, D, G, CH, NCH, SCALE, IDW, QSA, BITS)
+
+
+@triton.jit
+def _chunk(Q, KC, VC, KSC, VSC, n, sparse, r, hk, c, PO, PM, PL, IDS,
+           H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, G: tl.constexpr, CH: tl.constexpr,
+           NCH: tl.constexpr, SCALE: tl.constexpr, IDW: tl.constexpr, QSA: tl.constexpr, BITS: tl.constexpr):
+    """Row r's keys in chunk c of its ``n`` (a sparse row's through IDS): the chunk's partial o, m and l."""
+
     start = c * CH
     if start < n:                       # chunks past a row's keys write nothing: the merge never reads them
         gg = tl.arange(0, 16)
@@ -93,6 +102,14 @@ def _merge(PO, PM, PL, POS0, OUT, NKR, SPR, H: tl.constexpr, HK: tl.constexpr, D
     n = tl.load(POS0) + r + 1
     if QSA:
         n = tl.where(tl.load(SPR + r) != 0, tl.load(NKR + r), n)
+    _merge_row(PO, PM, PL, OUT, n, r, hk, H, HK, D, G, CH, NCH, BITS)
+
+
+@triton.jit
+def _merge_row(PO, PM, PL, OUT, n, r, hk, H: tl.constexpr, HK: tl.constexpr, D: tl.constexpr, G: tl.constexpr,
+               CH: tl.constexpr, NCH: tl.constexpr, BITS: tl.constexpr):
+    """Row r's chunk partials merged in chunk order into its output heads (rotated back when the cache is)."""
+
     gg = tl.arange(0, 16)
     d = tl.arange(0, D)
     head = hk * G + gg
@@ -173,8 +190,13 @@ def attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, pos0: torch.T
 def _pool(IKC, POOLED, POS0, W, INV, eps, R, DI: tl.constexpr, HALF: tl.constexpr, RATIO: tl.constexpr):
     """Pool each complete RATIO-key block in fp32 order, then bf16 RMSNorm and rotate-half RoPE at its first position; recomputing a block preserves its bits."""
 
-    i = tl.program_id(0)
-    p0 = tl.load(POS0)
+    _pool_block(IKC, POOLED, tl.load(POS0), tl.program_id(0), W, INV, eps, R, DI, HALF, RATIO)
+
+
+@triton.jit
+def _pool_block(IKC, POOLED, p0, i, W, INV, eps, R, DI: tl.constexpr, HALF: tl.constexpr, RATIO: tl.constexpr):
+    """Block i past p0 // RATIO, if rows [p0, p0 + R) complete it."""
+
     b = p0 // RATIO + i
     if RATIO * b + RATIO <= p0 + R:
         d = tl.arange(0, DI)

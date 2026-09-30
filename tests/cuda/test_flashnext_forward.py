@@ -328,10 +328,10 @@ def test_the_family_hook_serves_the_recipe(tmp_path, sampling):
 
     from test_flashnext_tp import _checkpoint
 
-    assert (DEPTH, CONFIDENCE, CONTEXT) == (6, 0.3, 8192)
+    assert (DEPTH, CONFIDENCE, CONTEXT) == (6, 0.7, 8192)
     _checkpoint(tmp_path)
     eng = cuda_engine(tmp_path, context=8185)                  # the synthetic checkpoint names no native window
-    assert (eng.depth, eng.confidence, eng.max_len, eng.tp) == (6, 0.3, 8192, 1)
+    assert (eng.depth, eng.confidence, eng.max_len, eng.tp) == (6, 0.7, 8192, 1)
     assert eng.w.draft_ids is not None
     prompt = [5, 17, 99, 250, 1023, 7, 64, 300, 11, 12, 13]
     first = prefill(eng.e, prompt, sampling)

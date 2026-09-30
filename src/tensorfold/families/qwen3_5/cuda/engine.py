@@ -20,11 +20,13 @@ def entry_end(prompt: Sequence[int]) -> int:
 class Qwen27Engine:
     """Qwen3.8-27B on one GPU or two ranks (rank 0 here), DFlash2 drafting, prefix reuse."""
 
+    tree_rows: int | None = None       # a lone stream's tree rows on one GPU (None: max_rows, as in 0.5.0)
+
     def __init__(self, model_dir: Path, draft_dir: Path | None, *, max_rows: int = 12, tp: int = 1,
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
                  tp_draft: bool = False, allow_copy: bool = True, streams: int = 1,
                  context: int | None = None, context_explicit: bool | None = None, vision: bool = False,
-                 vision_urls: bool = False):
+                 vision_urls: bool = False, tree_rows: int | None = None):
         import torch
 
         from tensorfold.cuda.nvfp4.format import is_quantized
@@ -47,6 +49,7 @@ class Qwen27Engine:
 
         self.torch = torch
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
+        self.tree_rows = None if tree_rows is None else min(int(tree_rows), max_rows)
         self.vision = None
         self.vision_enabled = bool(vision)
         torch.cuda.set_device(0)
@@ -74,8 +77,8 @@ class Qwen27Engine:
         else:
             gather = None
         many = streams > 1
-        geometry = ((lambda text: stream_geometry(text, tp, streams, KEEP)) if many else
-                    (lambda text: gdn_geometry(text, tp, max_rows)))
+        geometry = ((lambda text: stream_geometry(text, tp, streams, KEEP, first=256 if tp == 1 else None)) if many
+                    else (lambda text: gdn_geometry(text, tp, max_rows)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
         tensor_bytes = weight_transform(model_dir)
         if exl3:
@@ -134,7 +137,9 @@ class Qwen27Engine:
             self.multi.model_dir = self.model_dir             # rank 1 compiles a request's grammar from it
             self.multi.calibrate(streams)
             if rank == 0:
-                print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens", flush=True)
+                print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens" if tp == 2 else
+                      f"[tensorfold] up to {streams} streams, each growing to {self.context_window} prompt/reply "
+                      "tokens while memory lasts", flush=True)
                 curve = ", ".join(f"{r}: {ms:.1f}" for r, ms in self.multi.costs)
                 print(f"[tensorfold] verify ms by rows (tree widths follow it): {curve}", flush=True)
                 self.scheduler = Scheduler(self.multi, max_streams=streams)
@@ -217,7 +222,8 @@ class Qwen27Engine:
             return {"prefill_s": prefill_s, "cached": hit[1].pos if hit else 0}
         # the cache holds the state before the last prompt token, not ``st``: the decode may commit into it
         result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
-                              max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
+                              max_rows=self.max_rows, tree_rows=self.tree_rows,
+                              allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
                               on_tokens=on_tokens, inplace=True, **grammar)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0),
