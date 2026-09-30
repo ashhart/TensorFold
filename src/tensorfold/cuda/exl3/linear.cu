@@ -108,12 +108,13 @@ __device__ __forceinline__ void step_lane_words(const uint32_t (&raw)[step_regs<
 }
 
 __global__ void __launch_bounds__(128) rot_in_kernel(const void* __restrict__ x, int x_dtype,
-                                                     const half* __restrict__ suh, half* __restrict__ xh, int K) {
+                                                     const half* __restrict__ suh, half* __restrict__ xh, int K,
+                                                     long long x_stride) {
     const int blk = blockIdx.x * 4 + (threadIdx.x >> 5), row = blockIdx.y, lane = threadIdx.x & 31;
     if (blk * 128 >= K) return;
     const int k = blk * 128 + 4 * lane;
     float v[4], s[4];
-    load4(x, x_dtype, (size_t)row * K + k, v);
+    load4(x, x_dtype, (size_t)row * x_stride + k, v);
     load4(suh, F16, k, s);
 #pragma unroll
     for (int j = 0; j < 4; ++j) v[j] *= s[j];
@@ -294,7 +295,7 @@ void exl3_rot_in_cuda(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh
     dim3 grid((unsigned)((K / 128 + 3) / 4), (unsigned)M);
     rot_in_kernel<<<grid, 128, 0, at::cuda::getCurrentCUDAStream()>>>(
         x.data_ptr(), dtype_of(x), reinterpret_cast<const half*>(suh.data_ptr()),
-        reinterpret_cast<half*>(xh.data_ptr()), K);
+        reinterpret_cast<half*>(xh.data_ptr()), K, (long long)x.stride(0));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

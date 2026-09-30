@@ -575,8 +575,8 @@ class SerialEngine:
         o = K.mqa(q, comp, idx, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin)   # inverse-rotated bf16
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
-        z = torch.cat([wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)], dim=1)
-        return self.comm.partials_rows(lambda r0, r1: a.wo_b(z[r0:r1], out_dtype=F32), R)
+        z = torch.cat([wo(o[:, g] if R > PROMPT_ROWS else o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)], dim=1)
+        return self.comm.partials_rows(lambda r0, r1: a.wo_b(z[r0:r1], out_dtype=F32 if R <= PROMPT_ROWS else BF), R)
 
     def select(self, layer: LayerW, qr: torch.Tensor, x: torch.Tensor, pos: torch.Tensor,
                static: bool = True) -> torch.Tensor:

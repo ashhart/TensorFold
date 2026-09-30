@@ -14,6 +14,8 @@ import triton.language as tl
 
 HEAD_TILE = 32              # heads a program (one rank's 32): each key tile is loaded once a row
 KEY_TILE = 64
+FULL_ROWS = 16            # above this many rows (prompt chunks) with RoPE: _mqa_full, one program a row
+FULL_HT, FULL_KT, FULL_WARPS, FULL_STAGES = 32, 32, 8, 1
 CHUNK = 256               # keys a chunk program takes
 
 
@@ -121,6 +123,62 @@ def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, H: tl.con
 
 
 @triton.jit
+def _mqa_full(Q, COMP, IDX, SWA, POS, SINK, OUT, COS, SIN, n_idx, idx_stride, H: tl.constexpr, D: tl.constexpr,
+              W: tl.constexpr, RING: tl.constexpr, SCALE: tl.constexpr, HT: tl.constexpr, KT: tl.constexpr,
+              HALF: tl.constexpr):
+    """Prompt rows: one program takes a row's every key (as _mqa_chunks) and finishes it (sink, normalize, inverse
+    RoPE of the last 2 * HALF dims), writing bf16 [R, H, D]; no per-chunk partials."""
+
+    r = tl.program_id(0)
+    hg = tl.program_id(1)
+    p = tl.load(POS + r)
+    hh = hg * HT + tl.arange(0, HT)
+    d = tl.arange(0, D)
+    m = tl.full((HT,), float("-inf"), tl.float32)
+    l = tl.zeros((HT,), tl.float32)
+    o = tl.zeros((HT, D), tl.float32)
+    total = n_idx + W
+    q = tl.load(Q + (r * H + hh[:, None]) * D + d[None, :]).to(tl.bfloat16)
+    for k0 in range(0, total, KT):
+        k = k0 + tl.arange(0, KT)
+        is_comp = k < n_idx
+        kidx = tl.load(IDX + r * idx_stride + k, mask=is_comp, other=-1)
+        slot = p - (W - 1) + (k - n_idx)
+        ok_c = is_comp & (kidx >= 0)
+        ok_w = (k >= n_idx) & (k < total) & (slot >= 0)
+        kc = tl.load(COMP + tl.maximum(kidx, 0)[:, None].to(tl.int64) * D + d[None, :], mask=ok_c[:, None], other=0.0)
+        kw = tl.load(SWA + (tl.maximum(slot, 0) % RING)[:, None].to(tl.int64) * D + d[None, :], mask=ok_w[:, None],
+                     other=0.0)
+        kk = tl.where(ok_c[:, None], kc.to(tl.bfloat16), kw.to(tl.bfloat16))
+        ok = ok_c | ok_w
+        scores = tl.dot(q, tl.trans(kk)).to(tl.float32) * SCALE
+        scores = tl.where(ok[None, :], scores, float("-inf"))
+        tile_m = tl.max(scores, 1)
+        active = tile_m != float("-inf")
+        next_m = tl.where(active, tl.maximum(m, tile_m), m)
+        alpha = tl.where(active, tl.where(m == float("-inf"), 0.0, tl.exp(m - next_m)), 1.0)
+        pr = tl.where(ok[None, :] & active[:, None], tl.exp(scores - next_m[:, None]), 0.0)
+        o = o * alpha[:, None] + tl.dot(pr.to(tl.bfloat16), kk)
+        l = l * alpha + tl.sum(pr, 1)
+        m = next_m
+    sink = tl.load(SINK + hh)                  # a logit with a zero value vector
+    top = tl.maximum(m, sink)
+    a = tl.where(m == float("-inf"), 0.0, tl.exp(m - top))
+    o = o * (a / (l * a + tl.exp(sink - top)))[:, None]
+    rot = d >= D - 2 * HALF
+    i = tl.maximum(d - (D - 2 * HALF), 0) // 2
+    c_ = tl.load(COS + p * HALF + i, mask=rot, other=1.0)
+    s_ = tl.load(SIN + p * HALF + i, mask=rot, other=0.0)
+    ev, od = tl.split(tl.reshape(o, (HT, D // 2, 2)))
+    cev, _ = tl.split(tl.reshape(c_, (D // 2, 2)))
+    sev, _ = tl.split(tl.reshape(s_, (D // 2, 2)))
+    ne = ev * cev[None, :] + od * sev[None, :]
+    no = od * cev[None, :] - ev * sev[None, :]
+    o = tl.reshape(tl.join(ne, no), (HT, D))
+    tl.store(OUT + (r * H + hh[:, None]) * D + d[None, :], o.to(tl.bfloat16))
+
+
+@triton.jit
 def _mqa_merge(PO, PM, PL, SINK, OUT, POS, COS, SIN, H: tl.constexpr, D: tl.constexpr, NCH: tl.constexpr,
                HALF: tl.constexpr, ROPE: tl.constexpr):
     """Combine the chunks with the sink; with ROPE, rotate the last 2 * HALF dims back (inverse RoPE) and write
@@ -192,6 +250,12 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, sw
     rope = cos is not None
     out = torch.empty((R, H, D), dtype=torch.bfloat16 if rope else torch.float32, device=q.device)
     idx_t = idx if idx is not None else pos
+    if rope and R > FULL_ROWS:
+        _mqa_full[(R, H // FULL_HT)](q.contiguous(), comp if comp is not None else swa, idx_t, swa, pos, sink, out, cos,
+                                     sin, n_idx, idx_t.stride(0) if idx is not None else 0, H=H, D=D, W=window,
+                                     RING=swa.shape[0], SCALE=scale, HT=FULL_HT, KT=FULL_KT, HALF=cos.shape[1],
+                                     num_warps=FULL_WARPS, num_stages=FULL_STAGES)
+        return out
     _mqa_chunks[(R, H // HEAD_TILE, nch)](q.contiguous(), comp if comp is not None else swa, idx_t, swa, pos, buf.po,
                                           buf.pm, buf.pl, n_idx, idx_t.stride(0) if idx is not None else 0, H=H, D=D,
                                           W=window, RING=swa.shape[0], CH=CHUNK, SCALE=scale, NCH=nch,

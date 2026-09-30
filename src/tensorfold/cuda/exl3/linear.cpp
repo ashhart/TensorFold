@@ -20,9 +20,14 @@ static void check_io(const at::Tensor& x, const char* name) {
     TORCH_CHECK(reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0, name, ": must be 16-byte aligned");
 }
 
-// xh [M, K] fp16 = fp16(((x * suh) @ H) / sqrt(128)); x [M, K] fp16, bf16 or fp32.
+// xh [M, K] fp16 = fp16(((x * suh) @ H) / sqrt(128)); x [M, K] fp16, bf16 or fp32 (rows may be strided).
 void rot_in(const at::Tensor& x, const at::Tensor& suh, at::Tensor xh) {
-    check_io(x, "x");
+    const auto t = x.scalar_type();
+    TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.stride(1) == 1 && (t == at::kHalf || t == at::kBFloat16 || t == at::kFloat),
+                "x: expected a 2-d fp16, bf16 or fp32 CUDA tensor with contiguous rows");
+    const int64_t align = 16 / x.element_size();
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 && x.stride(0) % align == 0,
+                "x: rows must be 16-byte aligned");
     check(suh, at::kHalf, "suh");
     check(xh, at::kHalf, "xh");
     TORCH_CHECK(x.size(1) % 128 == 0 && suh.numel() == x.size(1) && xh.sizes() == x.sizes(),
