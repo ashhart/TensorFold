@@ -420,6 +420,10 @@ pub fn build(b: *std.Build) void {
         prefix_previous = &check_prefixes.step;
     }
     server_prefixes.dependOn(prefix_previous.?);
+    const server_snapshots = b.addRunArtifact(lifecycle.producer.?);
+    server_snapshots.addArtifactArg(exe);
+    server_snapshots.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--disk-only", "build/native-checks/server-snapshots" });
+    b.step("test-server-snapshots", "Verify disk spill, server restarts, on-demand snapshots and corrupt-file recovery").dependOn(&server_snapshots.step);
     const memory_image = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--model", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--vision-fixture", "1870", "3110", "--image-fixture", "--image-format", "JPEG", "--image-only", "--output", "build/native-checks/memory-image" });
     const server_memory = b.addRunArtifact(lifecycle.producer.?);
     server_memory.addArtifactArg(exe);

@@ -203,6 +203,56 @@ const Scenario = struct {
     cache_oversize: bool = false,
     image: []const u8 = "",
     http_checks: []const u8 = "",
+    disk_phase: ?usize = null,
+    disk_expected: ?*[2]?Output = null,
+
+    fn checkDisk(s: *Scenario, port: u16) !void {
+        const a = s.init.arena.allocator();
+        const io = s.init.io;
+        const phase = s.disk_phase.?;
+        const initial = try CacheCounts.read(a, io, port);
+        try std.testing.expectEqual(phase == 1, initial.entries > 0);
+        var tokens: [2051]i32 = undefined;
+        for (&tokens, 0..) |*id, i| id.* = @intCast(10 + i % 93);
+        const body = try std.json.Stringify.valueAlloc(a, .{ .prompt = &tokens, .max_tokens = @as(usize, 8), .ignore_eos = true, .temperature = @as(f64, 0.7), .top_k = @as(usize, 12), .seed = @as(usize, 123) }, .{});
+        const before = try s.liveSnapshot(port);
+        const response = try post(io, port, body);
+        defer response.close(io);
+        const actual = try Output.parse(a, try readAll(a, io, response), false);
+        if (s.disk_expected.?[0]) |expected| try expected.compare(actual) else s.disk_expected.?[0] = actual;
+        const after = try s.liveSnapshot(port);
+        const fed = after.object.get("prefilled_tokens").?.integer - before.object.get("prefilled_tokens").?.integer;
+        try std.testing.expectEqual(@as(i64, if (phase == 1 or phase == 2) 3 else 2051), fed);
+        if (phase == 0) {
+            tokens[0] = 101;
+            const changed = try std.json.Stringify.valueAlloc(a, .{ .prompt = &tokens, .max_tokens = @as(usize, 1), .ignore_eos = true }, .{});
+            const different = try post(io, port, changed);
+            defer different.close(io);
+            _ = try Output.parse(a, try readAll(a, io, different), false);
+            const start = try s.liveSnapshot(port);
+            const repeated = try post(io, port, body);
+            defer repeated.close(io);
+            try actual.compare(try Output.parse(a, try readAll(a, io, repeated), false));
+            const finish = try s.liveSnapshot(port);
+            try std.testing.expectEqual(@as(i64, 3), finish.object.get("prefilled_tokens").?.integer - start.object.get("prefilled_tokens").?.integer);
+        }
+        const system = try a.alloc(u8, 5 * 600);
+        for (0..600) |i| @memcpy(system[i * 5 ..][0..5], "word ");
+        const chat = try std.json.Stringify.valueAlloc(a, .{ .messages = &.{ .{ .role = "system", .content = system }, .{ .role = "user", .content = system } }, .reasoning_effort = "none", .max_tokens = @as(usize, 8), .ignore_eos = true, .temperature = @as(f64, 0.7), .top_k = @as(usize, 12), .seed = @as(usize, 21) }, .{});
+        const chat_before = try s.liveSnapshot(port);
+        const chat_response = try postRoute(io, port, "/v1/chat/completions", chat);
+        defer chat_response.close(io);
+        const chat_actual = try Output.parse(a, try readAll(a, io, chat_response), false);
+        if (s.disk_expected.?[1]) |expected| try expected.compare(chat_actual) else s.disk_expected.?[1] = chat_actual;
+        const chat_after = try s.liveSnapshot(port);
+        const usage = try std.json.parseFromSlice(std.json.Value, a, chat_actual.usage.?, .{});
+        const prompt = usage.value.object.get("prompt_tokens").?.integer;
+        const chat_fed = chat_after.object.get("prefilled_tokens").?.integer - chat_before.object.get("prefilled_tokens").?.integer;
+        if (phase == 1 or phase == 2) try std.testing.expect(chat_fed <= prompt - 512) else try std.testing.expectEqual(prompt, chat_fed);
+        try std.posix.kill(s.child.id.?, .INT);
+        if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+        std.debug.print("PASS: HTTP snapshot phase {d}: spill, restart/on-demand reuse and corrupt-file fallback preserve seeded output\n", .{phase});
+    }
 
     fn liveSnapshot(s: *Scenario, port: u16) !std.json.Value {
         return (try health(s.init.arena.allocator(), s.init.io, port)).object.get("inference").?;
@@ -721,6 +771,7 @@ const Scenario = struct {
                 break try std.fmt.parseInt(u16, value[0..end], 10);
             }
         };
+        if (s.disk_phase != null) return s.checkDisk(port);
         if (s.memory) return s.checkMemory(port);
         if (s.neural) return s.checkNeural(port);
         if (s.drafts) return s.checkDrafts(port);
@@ -794,6 +845,41 @@ const Scenario = struct {
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 3 and args.len != 5 and args.len != 6) return error.ExpectedExecutableAndModel;
+    if (args.len == 5 and std.mem.eql(u8, args[3], "--disk-only")) {
+        const root = args[4];
+        std.Io.Dir.cwd().deleteTree(init.io, root) catch |err| if (err != error.FileNotFound) return err;
+        const directory = try std.fs.path.join(init.arena.allocator(), &.{ root, "system" });
+        var expected: [2]?Output = @splat(null);
+        for (0..4) |phase| {
+            if (phase == 3) {
+                var dir = try std.Io.Dir.cwd().openDir(init.io, root, .{ .iterate = true });
+                defer dir.close(init.io);
+                var walk = try dir.walk(init.arena.allocator());
+                defer walk.deinit();
+                while (try walk.next(init.io)) |entry| {
+                    if (!std.mem.endsWith(u8, entry.path, ".safetensors")) continue;
+                    const file = try dir.createFile(init.io, entry.path, .{});
+                    file.close(init.io);
+                }
+            }
+            var scenario = Scenario{ .init = init, .idle = false, .disk_phase = phase, .disk_expected = &expected, .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--snapshot-dir", directory, "--spill-gib", "1", "--max-snapshots", if (phase == 2) "0" else "3", "--checkpoint-slots", "1", "--prompt-cache-gib", "1" }, .stderr = .pipe }) };
+            defer if (scenario.child.id) |id| {
+                std.posix.kill(id, .KILL) catch {};
+                scenario.child.kill(init.io);
+            };
+            const Event = union(enum) { done: anyerror!void, timeout: std.Io.Cancelable!void };
+            var events: [2]Event = undefined;
+            var select = std.Io.Select(Event).init(init.io, &events);
+            defer select.cancelDiscard();
+            try select.concurrent(.done, Scenario.run, .{&scenario});
+            try select.concurrent(.timeout, std.Io.sleep, .{ init.io, std.Io.Duration.fromSeconds(300), .awake });
+            switch (try select.await()) {
+                .done => |result| try result,
+                .timeout => return error.ServerSnapshotCheckTimedOut,
+            }
+        }
+        return;
+    }
     if (args.len >= 5) {
         const memory = std.mem.eql(u8, args[3], "--memory-only");
         const prefixes = std.mem.eql(u8, args[3], "--cache-only");
@@ -813,7 +899,8 @@ pub fn main(init: std.process.Init) !void {
             try environment.put("COLUMNS", "0");
         }
         var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(init.arena.allocator(), &.{ args[1], "serve", args[2], "--port", "0", "--batch-streams", if (live) "1" else "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" });
+        try argv.appendSlice(init.arena.allocator(), &.{ args[1], "serve", args[2], "--snapshot-dir", "none" });
+        try argv.appendSlice(init.arena.allocator(), &.{ "--port", "0", "--batch-streams", if (live) "1" else "4", "--shutdown-grace-seconds", "1", "--checkpoint-slots", if (prefixes) "1" else "12", "--prompt-cache-gib", if (prefixes) args[4] else "16" });
         if (neural) {
             try argv.appendSlice(init.arena.allocator(), &.{ "--max-draft", "15" });
             if (!std.mem.eql(u8, args[4], "-")) try argv.appendSlice(init.arena.allocator(), &.{ "--drafter", args[4] });
@@ -850,7 +937,7 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("PASS: invalid/insufficient process budgets fail before model weights load\n", .{});
     for ([_]bool{ false, true }) |idle| {
-        var scenario = Scenario{ .init = init, .idle = idle, .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--port", "0", "--request-timeout-seconds", if (idle) "0" else "2", "--shutdown-grace-seconds", "1", "--no-thinking" }, .stderr = .pipe }) };
+        var scenario = Scenario{ .init = init, .idle = idle, .child = try std.process.spawn(init.io, .{ .argv = &.{ args[1], "serve", args[2], "--snapshot-dir", "none", "--port", "0", "--request-timeout-seconds", if (idle) "0" else "2", "--shutdown-grace-seconds", "1", "--no-thinking" }, .stderr = .pipe }) };
         defer if (scenario.child.id) |id| {
             std.posix.kill(id, .KILL) catch {};
             scenario.child.kill(init.io);

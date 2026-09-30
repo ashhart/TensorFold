@@ -171,6 +171,14 @@ pub const Reader = struct {
     metadata: std.json.Parsed(Metadata),
 
     pub fn open(io: std.Io, path: []const u8, identity: []const u8) !Reader {
+        var reader = try inspect(io, path);
+        errdefer reader.deinit();
+        const v = reader.metadata.value;
+        if (!std.mem.eql(u8, v.identity, identity) or !std.mem.eql(u8, v.dependencies, @embedFile("dependencies.json")) or v.tensor_backend != mx.tensor_units) return error.IncompatibleSnapshot;
+        return reader;
+    }
+
+    pub fn inspect(io: std.Io, path: []const u8) !Reader {
         var file = try safe.File.open(mx.allocator, io, path);
         errdefer file.deinit();
         const meta = file.header.parsed.value.object.get("__metadata__") orelse return error.IncompatibleSnapshot;
@@ -180,13 +188,24 @@ pub const Reader = struct {
         const metadata = try std.json.parseFromSlice(Metadata, mx.allocator, json.string, .{ .allocate = .alloc_always });
         errdefer metadata.deinit();
         const v = metadata.value;
-        if (v.format != 1 or !std.mem.eql(u8, v.identity, identity) or !std.mem.eql(u8, v.dependencies, @embedFile("dependencies.json")) or v.tensor_backend != mx.tensor_units) return error.IncompatibleSnapshot;
+        if (v.format != 1) return error.IncompatibleSnapshot;
         return .{ .file = file, .metadata = metadata };
     }
 
     pub fn deinit(r: *Reader) void {
         r.metadata.deinit();
         r.file.deinit();
+    }
+
+    pub fn loadBytes(r: *const Reader) u64 {
+        var total: u64 = 0;
+        var largest: u64 = 0;
+        var tensors = r.file.header.tensors.valueIterator();
+        while (tensors.next()) |tensor| {
+            total +|= tensor.len;
+            largest = @max(largest, tensor.len);
+        }
+        return total +| largest;
     }
 
     pub fn load(r: *Reader, comptime T: type) !T {

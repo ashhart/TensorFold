@@ -182,6 +182,10 @@ pub const Snapshot = union(std.meta.Tag(Backend)) {
     pub fn load(io: std.Io, path: []const u8, identity: []const u8, tokens: []const i32, tag: std.meta.Tag(Backend)) !Snapshot {
         var reader = try @import("snapshot_file.zig").Reader.open(io, path, identity);
         defer reader.deinit();
+        return loadReader(&reader, tokens, tag);
+    }
+
+    pub fn loadReader(reader: *@import("snapshot_file.zig").Reader, tokens: []const i32, tag: std.meta.Tag(Backend)) !Snapshot {
         if (!std.mem.eql(i32, tokens, reader.metadata.value.tokens)) return error.IncompatibleSnapshot;
         switch (tag) {
             inline else => |kind| {

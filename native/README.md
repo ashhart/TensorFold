@@ -159,6 +159,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Prefix cache policy and restoration | `test-prompt-cache test-session-rounds -Doptimize=safe -j1` | Python policy oracle; exact Qwen/Gemma/Nemotron continuation after prefix reuse and eviction |
 | Adaptive prefill boundaries and markers | `test-prefill-plan test-chat -Doptimize=safe -j1` | Python plan oracle and all seven local tokenizers; no model weights loaded |
 | HTTP prefix reuse and eviction | `test-server-prefixes -Doptimize=safe -j1` | Local Qwen; JSON/SSE parity, cancellation, LRU eviction and disabled caching |
+| HTTP disk snapshots | `test-server-snapshots -Doptimize=safe -j1` | Local Qwen; eviction spill, startup/on-demand reuse and corrupt-file recovery with exact seeded outputs |
 | Live serving status | `test-server-live test-server-live-http -Doptimize=safe -j1` | Python rate/redraw oracle; local Qwen for request counters, prefix reuse, cancellation, queue overflow and terminal modes |
 | Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream admission/growth-gate parity, repeated probes and Qwen/Gemma/Nemotron pause/resume correctness |
 | Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen rolling reservations, waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
@@ -233,7 +234,15 @@ reused prefix tokens.
 the process memory budget permits it. `--checkpoint-slots N` bounds ordinary entries (default
 `max(8, 3 * batch-streams)`). Text chunks follow upstream's adaptive message
 boundaries; reuse requires the same boundary in the new prompt. Image requests
-retain fixed chunks and bypass this cache. Persistence and disk spill remain pending.
+retain fixed chunks and bypass this cache. Text snapshots persist under
+`~/.cache/tensorfold/native-prefix-snapshots`; conversation snapshots use the sibling
+`native-session-snapshots` directory. Override with `--snapshot-dir PATH` or
+`TENSORFOLD_SNAPSHOT_DIR`; `--snapshot-dir none` disables disk persistence.
+`--max-snapshots N` bounds startup loading (default `3`; `0` keeps on-demand loading).
+`--spill-gib N` enables eviction spill with a disk budget (default `0`, off).
+Without spill, clean shutdown retains up to two conversations within 10 GiB.
+Reuse requires matching checkpoint, executable, runtime options and dependency pins.
+Cross-kernel warming remains pending.
 `--request-timeout-seconds N` sets an absolute deadline from connection acceptance
 through queuing and generation (default `0`, disabled). Cooperative cancellation
 returns HTTP 408 or an SSE error; stalled sockets close after a 250 ms allowance.

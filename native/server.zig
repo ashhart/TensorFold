@@ -20,6 +20,9 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var batch_streams: usize = 4;
     var checkpoint_slots: ?usize = null;
     var prompt_cache_bytes: ?u64 = null;
+    var snapshot_dir: ?[]const u8 = init.environ_map.get("TENSORFOLD_SNAPSHOT_DIR");
+    var spill_bytes: u64 = 0;
+    var max_snapshots: usize = 3;
     var name = std.fs.path.basename(args[2]);
     var defaults = try inference.Options.load(init.gpa, init.io, args[2]);
     defaults.max_tokens = 4096;
@@ -51,6 +54,20 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         const flag = args[i];
         const value = args[i + 1];
         i += 2;
+        if (std.mem.eql(u8, flag, "--snapshot-dir")) {
+            snapshot_dir = value;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--max-snapshots")) {
+            max_snapshots = try std.fmt.parseInt(usize, value, 10);
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--spill-gib")) {
+            const size = try std.fmt.parseFloat(f64, value);
+            if (!std.math.isFinite(size) or size < 0 or size >= 17179869184) return error.InvalidPromptCacheBudget;
+            spill_bytes = @intFromFloat(size * memory_policy.gib);
+            continue;
+        }
         if (std.mem.eql(u8, flag, "--drafter")) {
             draft_options.directory = value;
             continue;
@@ -127,6 +144,11 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams, .is_glm = is_glm, .is_flash = is_flash, .memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB"), .stats = &stats, .display = &display };
     worker.checkpoint_slots = checkpoint_slots orelse @max(8, 3 * batch_streams);
     worker.prompt_cache_bytes = prompt_cache_bytes;
+    const snapshot_path = if (snapshot_dir) |dir| if (std.ascii.eqlIgnoreCase(dir, "none")) null else try init.gpa.dupe(u8, dir) else if (init.environ_map.get("HOME")) |home| try std.fs.path.join(init.gpa, &.{ home, ".cache", "tensorfold", "native-prefix-snapshots" }) else null;
+    defer if (snapshot_path) |path_value| init.gpa.free(path_value);
+    worker.snapshot_dir = snapshot_path;
+    worker.spill_bytes = spill_bytes;
+    worker.max_snapshots = max_snapshots;
     worker.drafts = drafts;
     worker.draft_options = draft_options;
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
@@ -208,6 +230,10 @@ const Worker = struct {
     memory_stats: MemoryStats = .{},
     checkpoint_slots: usize = 8,
     prompt_cache_bytes: ?u64 = null,
+    snapshot_dir: ?[]const u8 = null,
+    spill_bytes: u64 = 0,
+    max_snapshots: usize = 3,
+    disk: ?*@import("snapshot_store.zig").Store = null,
     prefix_stats: PrefixStats = .{},
     fn run(w: *Worker) void {
         w.loop() catch |err| {
@@ -231,6 +257,23 @@ const Worker = struct {
         var prefixes: ?PrefixStore = if (prefix_budget == 0) null else try PrefixStore.init(mx.allocator, w.checkpoint_slots, prefix_budget);
         defer if (prefixes) |*store| store.deinit();
         if (prefixes) |*store| store.admit_oversize = true;
+        var disk: ?@import("snapshot_store.zig").Store = null;
+        defer if (disk) |*value| value.deinit();
+        defer w.disk = null;
+        if (prefixes) |*store| if (w.snapshot_dir) |directory| {
+            disk = @import("snapshot_store.zig").Store.init(&session, directory, admission.budget, w.spill_bytes, w.max_snapshots) catch |err| blk: {
+                @import("snapshot_store.zig").report("initialization", err);
+                break :blk null;
+            };
+            if (disk) |*value| {
+                w.disk = value;
+                store.pinned_slots = @max(3, w.max_snapshots);
+                store.eviction_context = value;
+                store.on_evict = @import("snapshot_store.zig").Store.evicted;
+                value.startup(store, @as(std.meta.Tag(inference.Backend), session.backend), try admission.projected(0, 64, 64, &.{})) catch |err| @import("snapshot_store.zig").report("startup", err);
+            }
+        };
+        defer if (disk) |*value| if (prefixes) |*store| value.shutdown(store);
         w.prefix_stats.update(if (prefixes) |*store| store else null);
         w.memory_stats.budget = memory.budget;
         w.memory_stats.mlx_budget = memory.share;
@@ -627,13 +670,14 @@ const Pending = struct {
     system_len: usize = 0,
     checkpoints: @import("prompt_cache.zig").Checkpoints = .{},
     shared_checkpoints: @import("prompt_cache.zig").Checkpoints = .{},
+    disk: ?*@import("snapshot_store.zig").Store = null,
     prefix_reserve: u64 = 0,
     activation_order: u64 = 0,
     growth: enum { run, paused, ended } = .run,
 
     fn start(w: *Worker, session: *inference.Session, job: *Job) !?*Pending {
         const p = try job.a.create(Pending);
-        p.* = .{ .job = job };
+        p.* = .{ .job = job, .disk = w.disk };
         p.prepare(w, session) catch |err| {
             defer p.deinit();
             try p.reportError(err);
@@ -752,6 +796,10 @@ const Pending = struct {
         var prefix_bytes: u64 = 0;
         if (p.prepared_image == null and p.options.max_tokens > 0) if (prefixes) |store| {
             chunks = try (try session.prefillPlan()).chunks(mx.allocator, p.ids);
+            if (p.disk) |disk| {
+                const extra = (try admission.projected(0, work_prompt, longest, live[0..count])) +| copies +| workspace;
+                disk.readBest(store, @as(std.meta.Tag(inference.Backend), session.backend), p.ids, .{ .starts = chunks.?.starts }, extra) catch |err| @import("snapshot_store.zig").report("read", err);
+            }
             if (store.best(p.ids, .{ .starts = chunks.?.starts })) |index| {
                 keep = store.entries.items[index].tokens;
                 prefix_bytes = store.entries.items[index].nbytes;
@@ -861,6 +909,7 @@ const Pending = struct {
         const position = snapshot.position();
         adopted = true;
         try store.insertOwned(p.ids[0..position], snapshot, p.ids, p.shared_checkpoints.contains(position));
+        if (p.shared_checkpoints.contains(position)) if (p.disk) |disk| if (store.entries.items.len > 0) disk.persist(&store.entries.items[0]);
         p.saved_position = position;
         p.prefix_reserve = @max(p.prefix_reserve, size);
     }

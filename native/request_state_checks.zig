@@ -176,6 +176,7 @@ pub fn check(io: std.Io) !void {
     try mx.init();
     defer mx.shutdown();
     try @import("snapshot_file.zig").check(io);
+    try @import("snapshot_store.zig").check(io);
     inline for (.{ @import("model.zig").Model, @import("gemma.zig").Model, @import("nemotron.zig").Model, @import("flash.zig").Model, @import("glm.zig").Model, @import("deepseek.zig").Model }) |M| try checkModel(M, io);
     try mx.check(mx.c.mlx_synchronize(mx.stream));
     var active: usize = 0;

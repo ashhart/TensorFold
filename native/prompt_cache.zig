@@ -108,6 +108,8 @@ pub fn Store(comptime T: type) type {
         hits: u64 = 0,
         misses: u64 = 0,
         evictions: u64 = 0,
+        eviction_context: ?*anyopaque = null,
+        on_evict: ?*const fn (?*anyopaque, *const Entry) void = null,
 
         pub fn init(a: std.mem.Allocator, slots: usize, budget: ?u64) !Self {
             if (slots == 0 or budget == 0) return error.InvalidPromptCacheBudget;
@@ -209,6 +211,7 @@ pub fn Store(comptime T: type) type {
                 if (ordinary <= s.slots and !over_budget) break;
                 const remove = oldest orelse if (over_budget) s.entries.items.len - 1 else break;
                 var gone = s.entries.orderedRemove(remove);
+                if (s.on_evict) |callback| callback(s.eviction_context, &gone);
                 gone.deinit(s.a);
                 s.evictions +|= 1;
             }
@@ -223,6 +226,7 @@ pub fn Store(comptime T: type) type {
             }
             const index = ordinary orelse oldest orelse return false;
             var gone = s.entries.orderedRemove(index);
+            if (s.on_evict) |callback| callback(s.eviction_context, &gone);
             gone.deinit(s.a);
             s.evictions +|= 1;
             return true;
