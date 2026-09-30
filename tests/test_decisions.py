@@ -78,6 +78,15 @@ def test_probabilities_use_temperature_and_label_mass_does_not():
     assert cool["prompt_format_version"] == 1
 
 
+def test_probabilities_at_tiny_temperature_remain_finite():
+    body = {**_choice(), "temperature": 1e-320}
+    prepared = prepare(_Tokenizer(), body)
+    for logits, expected in (([1.0, 2.0], [0.0, 1.0]), ([2.0, 2.0], [0.5, 0.5])):
+        answer = build_response(body, prepared, [(logits, 3.0)])["answers"]["team"]
+        assert list(answer["probabilities"].values()) == expected
+        assert math.isfinite(answer["label_mass"])
+
+
 def test_http_decisions_returns_the_scored_body():
     class App:
         served_name = "qwen"

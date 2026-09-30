@@ -533,6 +533,12 @@ class GlmEngine:
         from tensorfold.families.glm5_next.cuda.decode import prompt_logits
         from tensorfold.server.decisions import reduce_vocab_shards
 
+        # The score prefill writes attention rows from position 0. Save or drop every snapshot those rows
+        # still belong to, then stop naming them: the next chat must not resume the decision as that conversation.
+        self._take_over([])
+        self.live = []
+        if self.drafter is not None:
+            self.drafter.reset()
         local = prompt_logits(self.e, prompt)
         rows = [local] if self.comm is None else self._gather_floats(local)
         if self.rank != 0:

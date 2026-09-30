@@ -317,9 +317,10 @@ def reduce_vocab_shards(rows: list[list[float]], label_ids: list[int], shard: in
 
 
 def _softmax(logits: list[float], temperature: float) -> list[float]:
-    scaled = [logit / temperature for logit in logits]
-    peak = max(scaled)
-    weights = [math.exp(item - peak) for item in scaled]
+    # Shift before dividing: finite logits / a tiny positive temperature can
+    # overflow, whereas the maximum's shifted value stays exactly zero.
+    peak = max(logits)
+    weights = [math.exp((logit - peak) / temperature) for logit in logits]
     total = math.fsum(weights)
     return [weight / total for weight in weights]
 
