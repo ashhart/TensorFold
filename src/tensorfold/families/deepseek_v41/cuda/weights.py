@@ -36,6 +36,12 @@ class Linear(Exl3Linear):
                  xh: torch.Tensor | None = None, z: torch.Tensor | None = None) -> torch.Tensor:
         if x.shape[0] <= self.PIECE:
             return super().__call__(x, out, out_dtype, xh, z)
+        return self.prompt(x, out_dtype)
+
+    def prompt(self, x: torch.Tensor, out_dtype: torch.dtype | None = None,
+               res: torch.Tensor | None = None) -> torch.Tensor:
+        """Prompt rows (above PIECE); ``res`` [M, N] is added in fp32 in the GEMM epilogue (prompt GEMM shapes)."""
+
         if self.k * self.n <= self.GEMM_MAX:
             global _WORKSPACE
             from tensorfold.cuda.exl3 import prefill
@@ -44,7 +50,9 @@ class Linear(Exl3Linear):
                 _WORKSPACE = prefill.Workspace()
                 prefill.TILES = PROMPT_TILES
             y = torch.empty((x.shape[0], self.n), dtype=out_dtype or x.dtype, device=x.device)
-            return prefill.matmul(self, x, y, _WORKSPACE)
+            return prefill.matmul(self, x, y, _WORKSPACE, res)
+        if res is not None:
+            raise ValueError("a residual needs the prompt GEMM")
         return torch.cat([super(Linear, self).__call__(x[i:i + self.PIECE].contiguous(), out_dtype=out_dtype)
                           for i in range(0, x.shape[0], self.PIECE)])
 

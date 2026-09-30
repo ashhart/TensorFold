@@ -157,3 +157,26 @@ Second link: `rocep1s0f0` (aiai) / `rocep1s0f1` (aiai2) needed IPv4 for a RoCE v
 NetworkManager profile `cx7-companion-mtu` (10.43.0.1/24 on aiai `enp1s0f0np0`, 10.43.0.2/24 on aiai2
 `enp1s0f1np1`, never-default, MTU 9000). vLLM stays pinned to the first half (`roceP2p1s0f0`/`...f1`).
 Chunk profile now: experts 740 ms, dense GEMM 260, NCCL 164, MQA 143, _post 76, rot_in 58 + 57, unpack 45.
+
+## 2026-10-01 — prefill past 1,250 tok/s (`TF_DUAL=1 --profile-prefill 2048`)
+
+| step | tok/s |
+|---|---:|
+| start (dual link) | 1,058 |
+| expert grid: an expert's n groups adjacent (activations shared in L2) | 1,119 |
+| fused hc post + next pre for prompt chunks (streams not read back) | 1,144 |
+| gate/up inputs rotated inside the expert kernel while staged (no rot_in copies; bit-identical) | 1,149–1,171 |
+| busy experts' member groups adjacent (weights shared in L2; real routing: median 8, max ~950 rows) | 1,204 |
+| expert configs (121 gate/up, 101 down) re-tuned on real routing | 1,230 |
+| routed + shared added in the shared down GEMM epilogue, stored bf16 | **1,252–1,254** |
+
+Parity (`golden_long_all.json`): 1K NLL 1.237 / vLLM 1.231, 8K 1.674 / 1.675, 24K 1.630 / 1.630,
+40K 1.612 / 1.613. DSpark == serial. Chunk GPU busy 1.60 s: experts ~546 ms, dense GEMM 256, MQA 142,
+NCCL ~115, hc post_pre ~100. Tried and dropped: folding both Hadamards into W for cuBLAS (slower), fused
+rotation in the decode GEMV (neutral), 4 NCCL row blocks (neutral), caching fp16 dense W (7 GB, too little
+headroom: ~7 GiB MemAvailable at cap 40960).
+
+Decode (same day): MQA chunk 128 x 16 heads for <= 16 rows, side-stream parallel linears (q / window KV /
+compressor, 8 wo_a slices, the shared expert beside the routed ones): 4-row verify 52 -> 47 ms, serial
+31.5 -> 34-35 tok/s, DSpark reasoning 59 -> 63 tok/s. Experts at ~210 GB/s (at the DRAM limit). Graph replay of
+a k = 3 round is 37 ms but the measured round is ~49 ms: ~12 ms a round of host work is the next decode lever.

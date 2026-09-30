@@ -13,8 +13,8 @@ BN = 128                                  # a program's columns: one Hadamard bl
 
 
 @triton.jit(do_not_specialize=["M"])
-def _gemm(X, W, H, SVH, BIAS, OUT, M, o_stride, K: tl.constexpr, N: tl.constexpr, BM: tl.constexpr,
-          BK: tl.constexpr, GROUP: tl.constexpr, HAS_BIAS: tl.constexpr, SCALE: tl.constexpr):
+def _gemm(X, W, H, SVH, BIAS, OUT, M, o_stride, RES, r_stride, K: tl.constexpr, N: tl.constexpr, BM: tl.constexpr,
+          BK: tl.constexpr, GROUP: tl.constexpr, HAS_BIAS: tl.constexpr, SCALE: tl.constexpr, HAS_RES: tl.constexpr):
     """OUT[m, block] = ((xh[m] @ W_q[:, block]) @ H) * SCALE * svh + bias; K in BK steps in order, a row alone."""
 
     pid = tl.program_id(0)
@@ -41,6 +41,8 @@ def _gemm(X, W, H, SVH, BIAS, OUT, M, o_stride, K: tl.constexpr, N: tl.constexpr
     y = y * SCALE * tl.load(SVH + rn).to(tl.float32)[None, :]
     if HAS_BIAS:
         y += tl.load(BIAS + rn).to(tl.float32)[None, :]
+    if HAS_RES:                                  # a residual added in fp32 before the store (out = res + x @ W)
+        y = tl.load(RES + rm[:, None] * r_stride + rn[None, :], mask=ok[:, None], other=0.0).to(tl.float32) + y
     tl.store(OUT + rm[:, None] * o_stride + rn[None, :], y.to(OUT.dtype.element_ty), mask=ok[:, None])
 
 
@@ -82,8 +84,10 @@ class Workspace:
         return sum(t.numel() * t.element_size() for t in (self.w, self.xh, self.h) if t is not None)
 
 
-def matmul(layer: Exl3Linear, x: torch.Tensor, out: torch.Tensor, ws: Workspace) -> torch.Tensor:
-    """out [M, N] (row stride free) = x [M, K] @ W + bias for any M, the prompt path's arithmetic."""
+def matmul(layer: Exl3Linear, x: torch.Tensor, out: torch.Tensor, ws: Workspace,
+           res: torch.Tensor | None = None) -> torch.Tensor:
+    """out [M, N] (row stride free) = x [M, K] @ W + bias (+ res [M, N], added in fp32) for any M, the prompt
+    path's arithmetic."""
 
     m, k, n = x.shape[0], layer.k, layer.n
     if x.shape[1] != k or out.shape != (m, n) or out.stride(1) != 1:
@@ -97,7 +101,11 @@ def matmul(layer: Exl3Linear, x: torch.Tensor, out: torch.Tensor, ws: Workspace)
         ws.held = layer
     bm, bk, warps, stages, group = tiles(k, n)
     bias = layer.bias if layer.bias is not None else layer.svh
+    if res is not None and (res.shape != (m, n) or res.stride(1) != 1):
+        raise ValueError(f"prefill matmul: res {tuple(res.shape)} must be [{m}, {n}] with contiguous rows")
     _gemm[(triton.cdiv(m, bm) * (n // BN),)](xh, wq, ws.hadamard(x.device), layer.svh, bias, out, m, out.stride(0),
+                                             res if res is not None else out, res.stride(0) if res is not None else 0,
                                              K=k, N=n, BM=bm, BK=bk, GROUP=group, HAS_BIAS=layer.bias is not None,
-                                             SCALE=HAD_SCALE, num_warps=warps, num_stages=stages)
+                                             SCALE=HAD_SCALE, HAS_RES=res is not None, num_warps=warps,
+                                             num_stages=stages)
     return out

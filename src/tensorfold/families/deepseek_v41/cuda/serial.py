@@ -737,8 +737,8 @@ class SerialEngine:
         routed = routed_prompt(x.contiguous(), pick, w, m.experts, scratch, R, limit)
         act = shared_act()
 
-        def block(r0: int, r1: int) -> torch.Tensor:
-            return routed[r0:r1] + m.shared[2](act[r0:r1], out_dtype=F32)
+        def block(r0: int, r1: int) -> torch.Tensor:          # routed + shared, added in the GEMM, sent as bf16
+            return m.shared[2].prompt(act[r0:r1], out_dtype=BF, res=routed[r0:r1])
 
         return self.comm.partials_rows(block, R)
 
