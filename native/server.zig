@@ -451,9 +451,52 @@ pub fn checkGrowth(session: *inference.Session, profile: memory_policy.StreamMem
     defer actual.deinit(mx.allocator);
     try std.testing.expectEqualSlices(u32, expected.tokens.items, actual.tokens.items);
     try std.testing.expectEqualStrings(expected.content, actual.content);
+    for ([_]bool{ false, true }) |take| {
+        var store = try PrefixStore.init(mx.allocator, 4, std.math.maxInt(u64));
+        defer store.deinit();
+        try store.insertOwned(prompt[0..before.prefilled], try checkpoint.clone(), prompt, false);
+        var next = Pending{ .job = undefined, .ids = prompt, .options = .{ .max_tokens = 4, .ignore_eos = true } };
+        admission.budget = 0;
+        try std.testing.expectError(error.RequestExceedsMemoryBudget, next.reservePrefix(session, &admission, &.{}, &store));
+        try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
+        try std.testing.expectEqual(@as(u64, 0), store.evictions);
+        admission.budget = std.math.maxInt(u64);
+        const full = (try next.reservePrefix(session, &admission, &.{}, &store)).?;
+        try std.testing.expect(full.copy > full.take);
+        const shared = (try next.reservePrefix(session, &admission, &.{&filling}, &store)).?;
+        try std.testing.expectEqual(@min(checkpoint.nbytes(), filling.generation.?.cacheBytes()), shared.shared);
+        try std.testing.expect(shared.copy - shared.take <= full.copy - full.take);
+        if (take) {
+            const unrelated = try mx.allocator.dupe(i32, prompt);
+            defer mx.allocator.free(unrelated);
+            unrelated[0] += 1;
+            try store.insertOwned(unrelated[0..before.prefilled], try checkpoint.clone(), unrelated, false);
+            admission.budget = full.take + (full.copy - full.take) / 2;
+        }
+        const reserved = (try next.reservePrefix(session, &admission, &.{}, &store)).?;
+        try std.testing.expectEqual(take, reserved.copy > admission.budget);
+        try std.testing.expectEqual(@as(u64, @intFromBool(take)), store.evictions);
+        const pointer = switch (store.entries.items[0].cache) {
+            inline else => |state| @intFromPtr(state.cache.ptr),
+        };
+        next.generation = try inference.RequestGeneration.init(session, mx.allocator, prompt, next.options, .{}, null);
+        defer next.generation.?.deinit();
+        try next.restorePrefix(&store, reserved, admission.budget);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!take)), store.entries.items.len);
+        try std.testing.expectEqual(if (take) @as(u64, 0) else checkpoint.nbytes(), next.prefix_reserve);
+        if (take) switch (next.generation.?) {
+            inline else => |request| try std.testing.expectEqual(pointer, @intFromPtr(request.state.cache.ptr)),
+        };
+        while (!try next.generation.?.step(session)) {}
+        var result = try next.generation.?.takeReply();
+        defer result.deinit(mx.allocator);
+        try std.testing.expectEqualSlices(u32, expected.tokens.items, result.tokens.items);
+        try std.testing.expectEqualStrings(expected.content, result.content);
+    }
     std.debug.print("PASS: live cache growth gating preserves activation order, paused greedy/seeded output and oldest-stream recovery\n", .{});
     std.debug.print("PASS: prefill chunk memory refusal preserves request state for subsequent completion\n", .{});
     std.debug.print("PASS: selected history checkpoint resumes with identical tokens and content\n", .{});
+    std.debug.print("PASS: admission protects the matching prefix, takes ownership only under pressure, and preserves resumed output\n", .{});
 }
 
 const PrefixStats = struct {
@@ -688,52 +731,79 @@ const Pending = struct {
         p.generation = try inference.RequestGeneration.init(session, mx.allocator, p.ids, options, .{ .tools = p.tools, .context = if (p.stream) |*stream| stream else null, .emit = if (p.stream != null) Stream.emit else null, .cancellation = cancellation, .gate = if (p.gate) |*gate| gate else null }, if (p.image) |*image| image else null);
     }
 
+    fn reservePrefix(p: *Pending, session: *inference.Session, admission: *memory_policy.Admission, active: []const ?*Pending, prefixes: ?*PrefixStore) !?memory_policy.Admission.Prefix {
+        var live: [8]memory_policy.Live = undefined;
+        var count: usize = 0;
+        var copies: u64 = 0;
+        var active_caches: u64 = 0;
+        var work_prompt = p.ids.len;
+        for (active) |slot| if (slot) |other| if (other.generation) |*generation| {
+            live[count] = memory_policy.reserveLive(generation.memoryLengths(), other.ids.len, memory_policy.growth_horizon);
+            count += 1;
+            copies +|= other.prefix_reserve;
+            active_caches +|= generation.cacheBytes();
+            if (!generation.isDecoding()) work_prompt = @max(work_prompt, other.ids.len);
+        };
+        const workspace = if (p.prepared_image) |*prepared| prepared.workspaceBytes() else 0;
+        const longest = p.ids.len + memory_policy.reserveReply(p.options.max_tokens, memory_policy.growth_horizon);
+        var chunks: ?@import("prefill_plan.zig").Chunks = null;
+        defer if (chunks) |plan| plan.deinit(mx.allocator);
+        var keep: ?[]const i32 = null;
+        var prefix_bytes: u64 = 0;
+        if (p.prepared_image == null and p.options.max_tokens > 0) if (prefixes) |store| {
+            chunks = try (try session.prefillPlan()).chunks(mx.allocator, p.ids);
+            if (store.best(p.ids, .{ .starts = chunks.?.starts })) |index| {
+                keep = store.entries.items[index].tokens;
+                prefix_bytes = store.entries.items[index].nbytes;
+            }
+        };
+        var reserved: memory_policy.Admission.Prefix = undefined;
+        while (true) {
+            const used = try memory_runtime.activeBytes();
+            const stored_others = if (prefixes) |store| store.nbytes() -| prefix_bytes else 0;
+            reserved = try admission.prefixProjected(used, work_prompt, longest, live[0..count], prefix_bytes, stored_others +| active_caches, copies +| workspace);
+            if ((p.options.max_tokens == 0 and workspace == 0) or reserved.take <= admission.budget) break;
+            const store = prefixes orelse break;
+            const reclaimed = try admission.prefixProjected(used -| stored_others, work_prompt, longest, live[0..count], prefix_bytes, active_caches, copies +| workspace);
+            // The selected entry survives reclamation; arrays held elsewhere are remeasured after each eviction.
+            if (reclaimed.take > admission.budget or !store.evictOne(keep)) break;
+            try mx.check(mx.c.mlx_clear_cache());
+        }
+        if ((p.options.max_tokens > 0 or workspace > 0) and reserved.take > admission.budget) {
+            admission.refused +|= 1;
+            if (count == 0) return error.RequestExceedsMemoryBudget;
+            return null;
+        }
+        return reserved;
+    }
+
+    fn restorePrefix(p: *Pending, store: *PrefixStore, reserved: memory_policy.Admission.Prefix, budget: u64) !void {
+        const policy = @import("prompt_cache.zig");
+        p.checkpoints = policy.checkpoints(p.history_len, 0, null, p.ids).aligned(p.generation.?.boundary(), 0, p.ids.len);
+        p.shared_checkpoints = policy.sharedCheckpoints(p.system_len, p.generation.?.boundary(), p.ids.len);
+        const take = reserved.copy > budget;
+        var hit = try store.match(p.ids, p.generation.?.boundary(), take);
+        if (take and hit == null) return error.MissingReservedPrefix;
+        if (hit) |*value| {
+            defer value.deinit(mx.allocator);
+            const size = value.cache.nbytes();
+            try p.generation.?.restoreOwnedPrefix(&value.cache);
+            p.saved_position = value.count;
+            p.prefix_reserve = if (take) reserved.shared else size;
+            p.checkpoints = policy.checkpoints(p.history_len, value.count, value.last_prompt, p.ids).aligned(p.generation.?.boundary(), value.count, p.ids.len);
+        }
+    }
+
     fn advance(p: *Pending, session: *inference.Session, admission: *memory_policy.Admission, active: []const ?*Pending, prefixes: ?*PrefixStore) !bool {
         try p.job.client.cancellation().check();
         if (p.growth == .ended) return error.StreamGrowthExceedsMemoryBudget;
         if (p.growth == .paused) return false;
         if (p.generation) |*generation| if (!generation.isDecoding()) try p.guardPrefill(admission.*, active, prefixes);
         if (p.generation == null) {
-            var live: [8]memory_policy.Live = undefined;
-            var count: usize = 0;
-            var copies: u64 = 0;
-            var work_prompt = p.ids.len;
-            for (active) |slot| if (slot) |other| if (other.generation) |*generation| {
-                live[count] = memory_policy.reserveLive(generation.memoryLengths(), other.ids.len, memory_policy.growth_horizon);
-                count += 1;
-                copies +|= other.prefix_reserve;
-                if (!generation.isDecoding()) work_prompt = @max(work_prompt, other.ids.len);
-            };
-            const workspace = if (p.prepared_image) |*prepared| prepared.workspaceBytes() else 0;
-            const longest = p.ids.len + memory_policy.reserveReply(p.options.max_tokens, memory_policy.growth_horizon);
-            var projected = (try admission.projected(try memory_runtime.activeBytes(), work_prompt, longest, live[0..count])) +| copies;
-            while ((p.options.max_tokens > 0 or workspace > 0) and projected +| workspace > admission.budget) {
-                const store = prefixes orelse break;
-                // Shared arrays may outlive an eviction; remeasure after every release.
-                if ((projected +| workspace) -| store.nbytes() > admission.budget or !store.evictOne(null)) break;
-                try mx.check(mx.c.mlx_clear_cache());
-                projected = (try admission.projected(try memory_runtime.activeBytes(), work_prompt, longest, live[0..count])) +| copies;
-            }
-            if ((p.options.max_tokens > 0 or workspace > 0) and projected +| workspace > admission.budget) {
-                admission.refused +|= 1;
-                if (count == 0) return error.RequestExceedsMemoryBudget;
-                return false;
-            }
+            const reserved = (try p.reservePrefix(session, admission, active, prefixes)) orelse return false;
             try mx.check(mx.c.mlx_clear_cache());
             try p.activate(session);
-            if (p.image == null and p.options.max_tokens > 0) if (prefixes) |store| {
-                const policy = @import("prompt_cache.zig");
-                p.checkpoints = policy.checkpoints(p.history_len, 0, null, p.ids).aligned(p.generation.?.boundary(), 0, p.ids.len);
-                p.shared_checkpoints = policy.sharedCheckpoints(p.system_len, p.generation.?.boundary(), p.ids.len);
-                var hit = store.match(p.ids, p.generation.?.boundary(), false) catch null;
-                if (hit) |*value| {
-                    defer value.deinit(mx.allocator);
-                    p.generation.?.restorePrefix(&value.cache) catch return p.step(session);
-                    p.saved_position = value.count;
-                    p.prefix_reserve = value.cache.nbytes();
-                    p.checkpoints = policy.checkpoints(p.history_len, value.count, value.last_prompt, p.ids).aligned(p.generation.?.boundary(), value.count, p.ids.len);
-                }
-            };
+            if (p.image == null and p.options.max_tokens > 0) if (prefixes) |store| try p.restorePrefix(store, reserved, admission.budget);
         }
         const done = try p.step(session);
         if (!done) if (prefixes) |store| {

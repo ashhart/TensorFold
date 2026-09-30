@@ -80,15 +80,15 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
         try store.insertOwned(prompt[0..count], saved, prompt, false);
     }
     try std.testing.expectEqual(@as(usize, 0), store.longest(prompt[0..count], boundary));
-    var captures: [2]Capture = @splat(.{});
+    var captures: [3]Capture = @splat(.{});
     defer for (&captures) |*capture| capture.deinit();
-    var requests: [2]session.RequestGeneration = undefined;
+    var requests: [3]session.RequestGeneration = undefined;
     var initialized: usize = 0;
     defer for (requests[0..initialized]) |*request| request.deinit();
-    for (&requests, &captures) |*request, *capture| {
+    for (&requests, &captures, 0..) |*request, *capture, index| {
         request.* = try session.RequestGeneration.init(s, a, prompt, options, capture.sink(), null);
         initialized += 1;
-        var hit = (try store.match(prompt, boundary, false)) orelse return error.MissingPrefixHit;
+        var hit = (try store.match(prompt, boundary, index == 2)) orelse return error.MissingPrefixHit;
         defer hit.deinit(a);
         var invalid = try hit.cache.clone();
         defer invalid.deinit();
@@ -96,14 +96,28 @@ fn prefixReuse(s: *session.Session, prompt: []const i32, options: session.Option
             inline else => |*state| state.position += 1,
         }
         try std.testing.expectError(error.IncompatibleSnapshotBoundary, request.restorePrefix(&invalid));
-        try request.restorePrefix(&hit.cache);
+        try std.testing.expectError(error.IncompatibleSnapshotBoundary, request.restoreOwnedPrefix(&invalid));
+        try std.testing.expectEqual(count + 1, invalid.position());
+        try std.testing.expectEqual(@as(u64, 0), request.memoryLengths().now);
+        if (index == 0) {
+            try request.restorePrefix(&hit.cache);
+        } else {
+            const pointer = switch (hit.cache) {
+                inline else => |state| @intFromPtr(state.cache.ptr),
+            };
+            try request.restoreOwnedPrefix(&hit.cache);
+            try std.testing.expectEqual(@as(usize, 0), hit.cache.position());
+            switch (request.*) {
+                inline else => |state| try std.testing.expectEqual(pointer, @intFromPtr(state.state.cache.ptr)),
+            }
+        }
         try std.testing.expectEqual(count, request.memoryLengths().now);
         try std.testing.expectError(error.InvalidSnapshotState, request.restorePrefix(&hit.cache));
     }
-    // Both requests must retain independent state after the stored owner is evicted.
-    try std.testing.expect(store.evictOne(null));
+    // Copied requests remain independent after the final request takes the stored owner.
+    try std.testing.expectEqual(@as(usize, 0), store.entries.items.len);
     try std.testing.expectEqual(@as(u64, 0), store.nbytes());
-    var finished = [_]bool{ false, false };
+    var finished = [_]bool{ false, false, false };
     while (!std.mem.allEqual(bool, &finished, true)) {
         for (&requests, &finished) |*request, *done| if (!done.*) {
             done.* = try request.step(s);
@@ -367,7 +381,12 @@ pub fn checkSyntheticNeural(m: anytype) !void {
                 g.proposer.?.fallback_enabled = false;
             }
             try std.testing.expect(!try generations[0].step(m));
-            try generations[1].restorePrefix(&generations[0].state);
+            var owned = try generations[0].state.clone();
+            defer owned.deinit();
+            const pointer = owned.cache.ptr;
+            try generations[1].restoreOwnedPrefix(&owned);
+            try std.testing.expectEqual(pointer, generations[1].state.cache.ptr);
+            try std.testing.expectEqual(@as(i32, 0), owned.position);
             var done = [_]bool{ false, false };
             while (!std.mem.allEqual(bool, &done, true)) {
                 for (&generations, &done) |*g, *ended| if (!ended.*) {

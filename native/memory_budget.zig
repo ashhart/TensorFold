@@ -197,6 +197,18 @@ pub const Admission = struct {
         return ok;
     }
 
+    pub const Prefix = struct { copy: u64, take: u64, shared: u64 };
+
+    pub fn prefixProjected(admission: Admission, used: u64, prompt: u64, longest: u64, live: []const Live, prefix: u64, other_caches: u64, copies: u64) !Prefix {
+        const shared = @min(prefix, other_caches);
+        // Only the bytes that cannot remain shared are credited to the incoming working cache.
+        return .{
+            .copy = try std.math.add(u64, try admission.projected(used, prompt, longest, live), copies),
+            .take = try std.math.add(u64, try admission.projected(used -| (prefix - shared), prompt, longest, live), copies),
+            .shared = shared,
+        };
+    }
+
     pub fn prefillProjected(admission: Admission, used: u64, prompt: u64, now: u64, copies: u64, decoding: []const Live) !u64 {
         var grow = @min(admission.memory.chunk, prompt -| now);
         var copy_bytes = copies;
@@ -405,4 +417,12 @@ test "memory accounting rejects overflow and malformed profiles" {
     const memory = StreamMemory{ .short_tokens = 64, .short = 0, .long_tokens = 64, .long = 0, .per_token = 0, .prefill_a = 0, .prefill_b = 0, .round_bytes = 0 };
     try t.expectError(error.InvalidMemoryProfile, memory.streamBytes(0));
     try t.expectError(error.InvalidMemoryBudget, limit(0, 0, 0.7, null));
+}
+
+test "taking a prefix credits only bytes outside other retained and live caches" {
+    const admission = Admission{ .budget = 1000, .memory = .{ .short_tokens = 64, .short = 100, .long_tokens = 512, .long = 100, .per_token = 0, .prefill_a = 0, .prefill_b = 0, .round_bytes = 20 } };
+    try std.testing.expectEqualDeep(Admission.Prefix{ .copy = 1140, .take = 940, .shared = 0 }, try admission.prefixProjected(1000, 64, 64, &.{}, 200, 0, 20));
+    try std.testing.expectEqualDeep(Admission.Prefix{ .copy = 1140, .take = 1040, .shared = 100 }, try admission.prefixProjected(1000, 64, 64, &.{}, 200, 100, 20));
+    try std.testing.expectEqualDeep(Admission.Prefix{ .copy = 1140, .take = 1140, .shared = 200 }, try admission.prefixProjected(1000, 64, 64, &.{}, 200, 1000, 20));
+    try std.testing.expectEqualDeep(Admission.Prefix{ .copy = 240, .take = 140, .shared = 0 }, try admission.prefixProjected(100, 64, 64, &.{}, 200, 0, 20));
 }

@@ -140,6 +140,21 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
         }
     }
 
+    pub fn restoreOwnedPrefix(g: *RequestGeneration, snapshot_value: *Snapshot) !void {
+        switch (g.*) {
+            inline else => |*request, tag| {
+                if (@as(std.meta.Tag(Backend), snapshot_value.*) != tag) return error.WrongSnapshotModel;
+                try request.restoreOwnedPrefix(&@field(snapshot_value.*, @tagName(tag)));
+            },
+        }
+    }
+
+    pub fn cacheBytes(g: *const RequestGeneration) u64 {
+        return switch (g.*) {
+            inline else => |*request| request.state.nbytes(),
+        };
+    }
+
     pub fn deinit(g: *RequestGeneration) void {
         switch (g.*) {
             inline else => |*request| request.deinit(),
@@ -356,12 +371,23 @@ pub fn Generation(comptime M: type) type {
         }
 
         pub fn restorePrefix(g: *Self, saved: *const @import("request_state.zig").State(M)) !void {
+            _ = try g.validatePrefix(saved);
+            var copy = try saved.clone();
+            defer copy.deinit();
+            try g.restoreOwnedPrefix(&copy);
+        }
+
+        fn validatePrefix(g: *const Self, saved: *const @import("request_state.zig").State(M)) !usize {
             if (g.phase != .prefill or g.offset != 0 or g.image != null or saved.rope_delta != 0 or saved.position <= 0) return error.InvalidSnapshotState;
             const offset: usize = @intCast(saved.position);
             if (!g.chunks.contains(offset) or saved.cache.len != g.state.cache.len) return error.IncompatibleSnapshotBoundary;
-            const copy = try saved.clone();
-            g.state.deinit();
-            g.state = copy;
+            return offset;
+        }
+
+        /// On success, saved owns the request's former empty state and remains safe to deinitialize.
+        pub fn restoreOwnedPrefix(g: *Self, saved: *@import("request_state.zig").State(M)) !void {
+            const offset = try g.validatePrefix(saved);
+            std.mem.swap(@TypeOf(g.state), &g.state, saved);
             g.offset = offset;
         }
 
