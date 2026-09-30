@@ -44,7 +44,8 @@ def test_glm_nonfit_refuses_before_weight_load(tmp_path, monkeypatch):
     from tensorfold.families.glm5_next.cuda import engine
     import sys
 
-    weights = SimpleNamespace(Config=SimpleNamespace(read=lambda *a: SimpleNamespace(dense_limit=2051)), load=None)
+    glm = SimpleNamespace(dense_limit=2051, mtp_layers=1, layers=4)
+    weights = SimpleNamespace(Config=SimpleNamespace(read=lambda *a: glm), load=None)
     monkeypatch.setitem(sys.modules, "tensorfold.families.glm5_next.cuda.weights", weights)
     monkeypatch.setitem(sys.modules, "tensorfold.families.glm5_next.cuda.decode", SimpleNamespace(Engine=None))
 
@@ -59,7 +60,7 @@ def test_glm_nonfit_refuses_before_weight_load(tmp_path, monkeypatch):
     monkeypatch.setattr(torch.cuda, "set_device", lambda *a: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a: (6 * 1024**3, 8 * 1024**3))
     monkeypatch.setattr(capacity, "_meminfo", lambda: None)      # a Spark's MemAvailable would admit it
-    monkeypatch.setattr(weights.Config, "read", lambda *a: SimpleNamespace(dense_limit=2051))
+    monkeypatch.setattr(weights.Config, "read", lambda *a: glm)
     monkeypatch.setattr(engine.GlmEngine, "_gather_ints", lambda self, x: [x, x])
     def load(*a, **kw):
         pytest.fail("weight allocation was reached before startup admission")
@@ -136,7 +137,8 @@ def fake_runtime(monkeypatch):
     for family in ("qwen3_5", "qwen4_exp", "glm5_next"):
         prefix = f"tensorfold.families.{family}.cuda"
         weights = SimpleNamespace(load=load, draft_token_ids=lambda *a: None,
-                                  Config=SimpleNamespace(read=lambda *a: SimpleNamespace(dense_limit=2051)))
+                                  Config=SimpleNamespace(read=lambda *a: SimpleNamespace(dense_limit=2051, mtp_layers=1,
+                                                                                         layers=4)))
         monkeypatch.setitem(sys.modules, prefix + ".weights", weights)
         monkeypatch.setitem(sys.modules, prefix + ".decode", SimpleNamespace(Engine=None))
     import torch.distributed as dist

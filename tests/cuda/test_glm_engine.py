@@ -456,6 +456,73 @@ def test_no_mtp_head_drafts_with_dflash2(engine_n, sampling):
 
 
 @pytest.fixture(scope="module")
+def engine_off(tmp_path_factory):
+    """engine_f's checkpoint and drafter under TF_GLM_MTP=auto (the default beside a drafter): the checkpoint's MTP
+    head is not loaded; TF_GLM_MTP=0 without a drafter refuses to start."""
+
+    import os
+
+    from tensorfold.families.glm5_next.cuda.engine import GlmEngine
+
+    path = tmp_path_factory.mktemp("glm_off")
+    _checkpoint(path / "model")
+    _drafter(path / "dflash2")
+    old = os.environ.get("TF_GLM_MTP")
+    try:
+        os.environ["TF_GLM_MTP"] = "0"
+        with pytest.raises(ValueError, match="TF_GLM_MTP=0 leaves no MTP head"):
+            GlmEngine(path / "model", rank=0, master="", port=0, comm=_TwoCopies())
+        os.environ["TF_GLM_MTP"] = "auto"
+        return GlmEngine(path / "model", rank=0, master="", port=0, drafter=path / "dflash2", comm=_TwoCopies())
+    finally:
+        if old is None:
+            os.environ.pop("TF_GLM_MTP", None)
+        else:
+            os.environ["TF_GLM_MTP"] = old
+
+
+@pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
+def test_mtp_off_beside_dflash2_gives_the_same_replies(engine_off, engine_f, sampling):
+    """Without the MTP head (TF_GLM_MTP off) the engine holds neither its weights, caches nor decode buffers, estimates
+    less, and every policy (MTP ones through DFlash2) gives the replies the engine with the head gives."""
+
+    from tensorfold.families.glm5_next.cuda.engine import DFLASH_POLICY, encode_policy
+
+    off, on = engine_off, engine_f
+    assert off.w.mtp is None and off.e.mbuf is None and not hasattr(off.e.st, "mtp_kc")
+    assert on.w.mtp is not None and on.e.mbuf is not None and hasattr(on.e.st, "mtp_kc")
+    assert off.w.nbytes() < on.w.nbytes()
+    for key in ("weight_bytes_estimate", "cache_workspace_bytes_estimate"):
+        assert off.capacity_plan[key] < on.capacity_plan[key], key
+    assert off._effective(encode_policy("auto")) == encode_policy(DFLASH_POLICY)
+    assert off._effective(encode_policy("auto:1:1:0")) == encode_policy(DFLASH_POLICY)
+    assert off._effective(encode_policy("2")) == encode_policy("f2")
+    prompt = list(np.random.default_rng(6).integers(0, 1000, size=41))
+    serial, _ = _generate(on, prompt, sampling, draft=False, tokens=40)
+    assert _generate(off, prompt, sampling, draft=False, tokens=40)[0] == serial
+    for policy in (None, "auto", "auto:1:1:0", "2", "c3:0.35", "a:0.6:0.85", "f3", "fc5:0.3"):
+        drafted, stats = _generate(off, prompt, sampling, policy=policy, tokens=40)
+        assert drafted == serial, policy
+        assert stats["min_rows"] >= 2 and "m" not in stats.get("drafters", ""), (policy, stats)
+
+
+def test_mtp_off_resumes(engine_off):
+    """Kept prompt states without the head's rows resume like fresh prefills."""
+
+    sampling = Sampling(11, 1.0, 20, 0.95)
+    first = list(np.random.default_rng(12).integers(0, 1000, size=30))
+    reply, _ = _generate(engine_off, first, sampling, tokens=30)
+    after = first + reply + [21, 22]
+    for policy in ("auto", "2", "f3"):
+        warm, stats = _generate(engine_off, after, sampling, policy=policy)
+        assert stats["cached"] == len(first), policy
+        _forget(engine_off)
+        cold, stats = _generate(engine_off, after, sampling, policy=policy)
+        assert stats["cached"] == 0 and warm == cold, policy
+        _generate(engine_off, first, sampling, tokens=30)                        # the prompt's state again
+
+
+@pytest.fixture(scope="module")
 def engine_long(tmp_path_factory):
     """The model with a context past the dense limit (2,051 tokens), so rows attend to DSA-selected tokens."""
 

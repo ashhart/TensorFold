@@ -202,7 +202,10 @@ def exl3_expert_scratch(rows: int, slots: int, d: int, width: int) -> int:
     return 2 * pairs * d * 2 + pairs * width * 2 + 2 * 4 * pairs * max(width, d) * 4
 
 
-def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560, latent: bool = False) -> Geometry:
+def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560, latent: bool = False,
+                 mtp: bool | None = None) -> Geometry:
+    """GLM's engine: ``mtp`` whether it holds the MTP head's caches and decode buffers (None: when the checkpoint has
+    one; GLM's TF_GLM_MTP can leave it out)."""
     linear, attention = layer_counts(t)
     lin = t.get("linear_attn_config") or {}
     heads = int(t["num_attention_heads"]) // world
@@ -211,7 +214,7 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     conv = int(lin.get("short_conv_kernel_size", t.get("linear_conv_kernel_dim", 4)))
     kd = int(t["qk_nope_head_dim"]) + int(t.get("qk_rope_head_dim", 0))
     vd, index = int(t["v_head_dim"]), int(t.get("index_head_dim", 128))
-    mtp = int(t.get("num_nextn_predict_layers", 0)) > 0
+    mtp = int(t.get("num_nextn_predict_layers", 0)) > 0 if mtp is None else bool(mtp)
     rows, d, streams = 64, int(t["hidden_size"]), int(t.get("hc_mult", 4))
     fixed = linear * (4 * lh * ld * ld * 4 + 3 * (conv - 1) * 3 * lh * ld * 2)
     fixed += linear * rows * (3 * lh * ld + 2 * ld + lh) * 2

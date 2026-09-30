@@ -81,6 +81,33 @@ def _ints_f64(lo: int, hi: int) -> float:
     return struct.unpack("<d", struct.pack("<2i", lo, hi))[0]
 
 
+MTP_DEFAULT = "auto"                  # TF_GLM_MTP when unset: "1" keeps the MTP head beside DFlash2 as before
+
+
+def mtp_head(drafter: bool, serial_only: bool, layers: int, value: str | None = None) -> bool:
+    """TF_GLM_MTP: whether the engine loads and runs the checkpoint's MTP head (``layers``: its
+    num_nextn_predict_layers). auto (MTP_DEFAULT): off when a DFlash2 drafter is loaded or no request drafts
+    (--no-drafts), on otherwise; 1: on whenever the checkpoint has one (MTP drafts and auto's per-round choice
+    between both drafters stay available beside DFlash2); 0: off. Off, the head's weights, caches and decode buffers
+    are never allocated, prompts skip its absorb, and MTP policies draft with DFlash2 instead (``_effective``): the
+    same replies, since drafts only propose."""
+
+    value = os.environ.get("TF_GLM_MTP", "") if value is None else value
+    value = value.strip().lower() or MTP_DEFAULT
+    if value not in ("0", "1", "auto"):
+        raise ValueError(f"TF_GLM_MTP: 0, 1 or auto, not {value!r}")
+    if value == "auto":
+        return bool(layers) and not drafter and not serial_only
+    return value == "1" and bool(layers)
+
+
+def without_mtp(transform, layers: int):
+    """A startup weight transform that leaves out the MTP layer's tensors (``layers.<num_hidden_layers>.``)."""
+
+    prefix = f"model.language_model.layers.{layers}."
+    return lambda name, info: (0, 0) if name.startswith(prefix) else transform(name, info)
+
+
 class GlmEngine:
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
@@ -111,10 +138,16 @@ class GlmEngine:
         explicit = context is not None if context_explicit is None else bool(context_explicit)
         from . import LATENT
 
+        # TF_GLM_MTP (``mtp_head``): off, the MTP layer's tensors are not loaded, nor its caches and decode buffers
+        # allocated, so the estimate drops them too
+        self.mtp_on = mtp_head(drafter is not None, serial_only, cfg.mtp_layers)
+        weights_estimate = split_weights(rule)
+        if not self.mtp_on:
+            weights_estimate = without_mtp(weights_estimate, cfg.layers)
         self.capacity_plan = admit(model_dir, context if explicit else cfg.dense_limit, explicit, torch,
                                    lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY,
-                                                             latent=LATENT),
-                                   split_weights(rule), rank=rank, world=2, gather=self._gather_ints,
+                                                             latent=LATENT, mtp=self.mtp_on),
+                                   weights_estimate, rank=rank, world=2, gather=self._gather_ints,
                                    draft_dir=drafter, draft_geometry=lambda text: draft_geometry(text, 2, MAX_ROWS))
         self.limit = self.capacity_plan["context_window"]
         capacity = self.capacity_plan["cache_slots"]
@@ -122,7 +155,7 @@ class GlmEngine:
         # both ranks must run the same calls: refuse to start when they were given different settings
         prefill_rows = PREFILL_ROWS if prefill_rows is None else int(prefill_rows)
         mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(LATENT),
-                prefill_rows]
+                prefill_rows, int(self.mtp_on)]
         # other conversations' kept prompts get what the window leaves, at most TF_GLM_CACHE_GIB, the same on both ranks
         plan = self.capacity_plan
         wanted = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
@@ -130,7 +163,7 @@ class GlmEngine:
         both = self._gather_ints(mine + [spare >> 20])
         if both[0][:-1] != both[1][:-1]:
             raise RuntimeError("the two ranks were started with different settings (draft model, context, drafts, "
-                               "TF_GLM_LATENT): "
+                               "TF_GLM_LATENT, TF_GLM_MTP): "
                                f"rank 0 {both[0][:-1]}, rank 1 {both[1][:-1]}; pull the draft model on both machines "
                                "(or pass --drafter none to both) and give both the same flags")
         self.cache_bytes = min(both[0][-1], both[1][-1]) << 20
@@ -140,15 +173,19 @@ class GlmEngine:
         if rank == 0 and self.cache_bytes < wanted:
             print(f"[tensorfold] other conversations' prompts are kept in {self.cache_bytes / 2 ** 30:.1f} GiB, what "
                   f"the {self.limit}-token window leaves (TF_GLM_CACHE_GIB asks {wanted / 2 ** 30:.1f})", flush=True)
-        w = load(model_dir, rank=rank)
+        if not self.mtp_on and drafter is None and not serial_only:
+            raise ValueError(("TF_GLM_MTP=0 leaves" if cfg.mtp_layers else "this checkpoint has") + " no MTP head and "
+                             "no DFlash2 draft model was given, so every round would decode one token: pull the draft "
+                             "model on both machines (--drafter), or pass --no-drafts to both for the serial reference")
+        w = load(model_dir, rank=rank, mtp=self.mtp_on)
         w.comm = self.comm
         self.comm.ready("loading")                   # a peer stuck loading is named, not waited on in NCCL
         self.comm.barrier()
-        if w.mtp is None and drafter is None and not serial_only:
-            raise ValueError("this checkpoint has no MTP head and no DFlash2 draft model was given, so every round "
-                             "would decode one token: pull the draft model on both machines (--drafter), or pass "
-                             "--no-drafts to both for the serial reference")
         self.w = w
+        if rank == 0 and cfg.mtp_layers and not self.mtp_on:
+            print("[tensorfold] the checkpoint's MTP head is not loaded (TF_GLM_MTP=" +
+                  (os.environ.get("TF_GLM_MTP", "").strip() or MTP_DEFAULT) + "): " +
+                  ("DFlash2 drafts every request" if drafter is not None else "--no-drafts"), flush=True)
         self.drafter = None
         if drafter is not None:
             from .dflash2 import Drafter
@@ -162,9 +199,10 @@ class GlmEngine:
         if rank == 0:
             c = self.costs
             print(f"[tensorfold] drafter timings (ms, fastest of 7): {c['timed']}", flush=True)
-            print("[tensorfold] drafter costs (ms): verify " + " ".join(f"{v:.1f}" for v in c["verify"]) +
-                  f"; MTP draft {c['mtp']:.2f} (+{c['mtp_step']:.2f} a chained draft, +{c['mtp_row']:.2f} a row); "
-                  f"DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
+            mtp = (f"; MTP draft {c['mtp']:.2f} (+{c['mtp_step']:.2f} a chained draft, +{c['mtp_row']:.2f} a row)"
+                   if w.mtp is not None else "")
+            print("[tensorfold] drafter costs (ms): verify " + " ".join(f"{v:.1f}" for v in c["verify"]) + mtp +
+                  f"; DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
         self.eos = tuple(w.cfg.eos)
         self.model_dir = Path(model_dir)
         self.request = threading.local()    # the calling request's policy and stop-at-EOS (``app.GlmApp``)
