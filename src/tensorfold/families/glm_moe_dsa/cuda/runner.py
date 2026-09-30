@@ -120,15 +120,21 @@ class Runner:
         cols = fused.bucket(capacity, self.topk) or 0
         self.st = fused.State(w, capacity)
         self.drafter = None                              # DFlash2 (engine attaches; set_drafter)
+        self.cap = None                                  # DFlash2 training capture (rank 0, TF_GLM53_CAPTURE_DIR)
+        if os.environ.get("TF_GLM53_CAPTURE_DIR") and w.rank == 0 and w.tap_slot:
+            from .capture import Capture
+
+            self.cap = Capture(os.environ["TF_GLM53_CAPTURE_DIR"], len(w.tap_slot), w.cfg.hidden_size)
         self.vrows = max(k + 1, int(os.environ.get("TF_GLM53_VERIFY_ROWS", "8")) if w.tap_slot else 1)
         self.vb = fused.Buffers(w, self.vrows, max(cols, 1))                    # verify windows
         self.mb = (fused.Buffers(w, max(k + 1, self.vrows), max(cols, 1))          # MTP windows (+ a backlog of
                    if k else None)                                                # rows DFlash2 rounds kept)
-        self.pb = fused.Buffers(w, PROMPT_ROWS, max(capacity, 1))                  # prompt chunks (exact key range)
+        self.prompt_rows = PROMPT_ROWS if w.dcp == 1 else min(PROMPT_ROWS, 1024)      # DCP: room for the long cache
+        self.pb = fused.Buffers(w, self.prompt_rows, max(capacity, 1))            # prompt chunks (exact key range)
         self.overlap = (fused.PROMPT_OVERLAP and w.world > 1 and hasattr(w.comm, "all_reduce")
-                        and fused.PREFILL_REDUCE == "ring")
+                        and fused.PREFILL_REDUCE == "ring" and w.dcp == 1)    # DCP: its collectives stay in order
         if self.overlap:                                 # the second micro-batch of a prompt chunk
-            self.pb1 = fused.Buffers(w, PROMPT_ROWS - PROMPT_ROWS // 2, max(capacity, 1))
+            self.pb1 = fused.Buffers(w, self.prompt_rows - self.prompt_rows // 2, max(capacity, 1))
             self.pos1 = torch.zeros((1,), dtype=torch.int32, device=w.device)
             self.comm_stream = torch.cuda.Stream()
         self.carry = torch.zeros((c.hidden_size,), dtype=torch.bfloat16, device=w.device)
@@ -151,7 +157,7 @@ class Runner:
         while self.topk < self.capacity and t <= max(fused.bucket(self.capacity, self.topk) or 0, 2 * self.topk):
             buckets.append(t)
             t *= 2
-        n = min(self.capacity - 1, PROMPT_ROWS + self.topk + 301)   # a full chunk, a remainder, rows past topk
+        n = min(self.capacity - 1, self.prompt_rows + self.topk + 301)   # a full chunk, a remainder, rows past topk
         self.prefill([1000 + (i * 7919) % 150000 for i in range(n)])  # compiles the prompt path's kernels
         cn, full = self.chain_normed, self.draft_full
         self.st.pos.fill_(0)
@@ -222,7 +228,9 @@ class Runner:
         logits = None
         if self.drafter is not None:
             self.drafter.reset()
-        n = -(-L0 // PROMPT_ROWS)                        # equal chunks: a short remainder would read every
+        if self.cap is not None:
+            self.cap.reset()
+        n = -(-L0 // self.prompt_rows)                   # equal chunks: a short remainder would read every
         step = -(-L0 // n)                               # weight again for a few rows (4102 = 2 x 2051, not 4096 + 6)
         for a in range(0, L0, step):
             e = min(a + step, L0)
@@ -238,6 +246,8 @@ class Runner:
                 fused.compute(w, st, b, R, T, logits="last" if e == L0 else "none")
             if self.drafter is not None:                 # the drafter's context: this chunk's committed taps
                 self.drafter.add_taps(b.taps[:R])
+            if self.cap is not None:
+                self.cap.add_taps(b.taps[:R])
             if e == L0:
                 logits = b.logits[:1].clone()
             if self.k:
@@ -347,6 +357,8 @@ class Runner:
                 picks = []
                 for i in range(R):
                     picks.append(sample(vb.logits[i:i + 1], P + i + 1))
+                    if self.cap is not None:
+                        self.cap.add_logits(P + i, vb.logits[i])
                     if i >= len(drafts) or drafts[i] != picks[-1]:
                         break
             n = 0
@@ -356,6 +368,8 @@ class Runner:
             drafted += len(drafts)
             accepted += n
             dr.add_taps(vb.taps[:n + 1])                 # DFlash2 context: every round's kept rows
+            if self.cap is not None:
+                self.cap.add_taps(vb.taps[:n + 1])
             if m + n + 1 > mb.rows:                      # MTP backlog would outgrow its window: write it now
                 if m:
                     self.st.mpos.fill_(P - m)
@@ -425,6 +439,8 @@ class Runner:
                 picks = []
                 for i in range(R):
                     picks.append(sample(vb.logits[i:i + 1], P + i + 1))
+                    if self.cap is not None:
+                        self.cap.add_logits(P + i, vb.logits[i])
                     if i >= len(drafts) or drafts[i] != picks[-1]:
                         break
             n = 0
@@ -436,6 +452,8 @@ class Runner:
             if sample is not None:
                 tb = time.perf_counter()
             dr.add_taps(vb.taps[:n + 1])
+            if self.cap is not None:
+                self.cap.add_taps(vb.taps[:n + 1])
             torch.cuda.synchronize()
             tc = time.perf_counter()
             t_draft += ta - tr
@@ -471,6 +489,8 @@ class Runner:
         t0 = time.perf_counter()
         L0 = len(prompt)
         lg = self.prefill(prompt)
+        if self.cap is not None and sample is not None:
+            self.cap.add_logits(L0 - 1, lg[0])
         tok = sample(lg, L0) if sample else int(torch.argmax(lg[0]).item())
         prefill_s = time.perf_counter() - t0
         out = [tok]
@@ -512,6 +532,8 @@ class Runner:
                 for i in range(R):
                     ts = time.perf_counter()
                     picks.append(sample(vb.logits[i:i + 1], P + i + 1))
+                    if self.cap is not None:
+                        self.cap.add_logits(P + i, vb.logits[i])
                     t_sample += time.perf_counter() - ts
                     if i >= len(drafts) or drafts[i] != picks[-1]:
                         break
@@ -529,6 +551,8 @@ class Runner:
                 if len(out) >= max_tokens or stop(e_tok):
                     done = True
                     break
+            if self.cap is not None:
+                self.cap.add_taps(vb.taps[:n + 1])
             if k:                                # next round's MTP rows: (target hidden P + i, token P + i + 1)
                 m = n + 1
                 fused.target_hidden_for_mtp(w, vb, slice(0, m), mb.hin[:m], self.hid_normed)
