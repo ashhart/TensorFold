@@ -94,8 +94,16 @@ class SerialEngine:
         self.attnbuf = K.AttnBuffers(MAX_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,
                                      cap + 1 + c.sliding_window, device=self.dev)
         self.graph = None
+        self.graphs: dict[int, dict] = {}
+        self.drafter = None
+        self.taps: list[torch.Tensor] = []
         self.cap = cap
         self.reset()
+
+    def enable_dspark(self, tokens: int = 3) -> None:
+        from .dspark import DSpark
+
+        self.drafter = DSpark(self, tokens)
 
     def reset(self) -> None:
         """Forget the request; caches are zeroed in place (a captured graph holds their addresses)."""
@@ -104,6 +112,8 @@ class SerialEngine:
             for t in [*self.state.swa, *self.state.comp.values(), *self.state.raw.values()]:
                 t.zero_()
             self.state.ids.clear()
+            if self.drafter is not None:
+                self.drafter.reset()
             return
         c, cap = self.c, self.cap
         self.state = Caches(
@@ -126,9 +136,9 @@ class SerialEngine:
             raise ValueError(f"1..{MAX_ROWS} rows a call, got {R}")
         if p0 + R > min(st.cap, SHORT_CONTEXT):
             raise ValueError(f"context {p0 + R} beyond {min(st.cap, SHORT_CONTEXT)} (indexer not implemented yet)")
-        if R == 1 and self.graph is not None:
-            self.step(tokens[0])
-            return self.g_logits
+        if R in self.graphs:
+            self.step_rows(tokens)
+            return self.graphs[R]["logits"]
         rows = self.engram_rows(tokens)
         return self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
                          static=False)
@@ -176,18 +186,32 @@ class SerialEngine:
         """The remaining layers and the vocabulary head."""
 
         c = self.c
+        self.taps = []
         X, pre, f, post, comb = self.layers(carry, pos, {c.engram_layer_ids[1]: rows14}, self.split,
                                             len(self.w.layers), static)
         X = hcf.post(f, X, post, comb)
+        if self.drafter is not None:
+            self.drafter.context(self.taps, pos)
         h = (pre[:, :, None] * X.float()).sum(1).to(BF)
         h = K.rmsnorm(h, self.w.norm, c.rms_norm_eps)
         return self.comm.gather_last(self.w.head(h, out_dtype=F32))
+
+    def _tap(self, X: torch.Tensor) -> torch.Tensor:
+        from .dspark import VARIANT
+
+        if "tap0" in VARIANT:
+            return X[:, 0].contiguous()
+        if "tapsum" in VARIANT:
+            return X.float().sum(1).to(BF)
+        return X.float().mean(1).to(BF)
 
     def layers(self, carry: tuple, pos: torch.Tensor, rows: dict, first: int, last: int, static: bool) -> tuple:
         X, pre, f, post, comb = carry
         for layer in self.w.layers[first:last]:
             if f is not None:
                 X = hcf.post(f, X, post, comb)
+                if self.drafter is not None and layer.index in self.c.dspark_target_layer_ids:
+                    self.taps.append(self._tap(X))                    # V4.1 taps the entry stream of layer L
             if layer.engram is not None:
                 X = self.engram(layer, X, rows[layer.index])
             post, comb, x, pre_a = self.hc(layer.hc_attn, X, pre)
@@ -198,34 +222,33 @@ class SerialEngine:
         return X, pre, f, post, comb
 
     # -- decode graphs ----------------------------------------------------------------------------------------
-    def capture(self) -> None:
-        """Capture the one-row decode step as two graphs split at the second Engram layer (both ranks together)."""
+    def capture(self, rows: int = 1) -> None:
+        """Capture an R-row decode step as three graphs (embedding + layer 0 / layers 1-13 / the rest), so the Engram
+        rows of each table are read while the graph before it runs. Both ranks must capture together."""
 
         c = self.c
-        self.graph = None
         n_rows = 3 * c.engram_n_heads
         row_bytes = c.engram_head_dim + c.engram_head_dim // 32
-        self.g_tok = torch.zeros((1,), dtype=torch.long, device=self.dev)
-        self.g_pos = torch.zeros((1,), dtype=torch.long, device=self.dev)
-        self.g_raw = [torch.zeros((1, n_rows, row_bytes), dtype=torch.uint8, device=self.dev) for _ in range(2)]
-        self.h_raw = torch.zeros((2, n_rows, row_bytes), dtype=torch.uint8).pin_memory()
-        self.h_next = torch.zeros((1,), dtype=torch.long).pin_memory()
-        saved = [t.clone() for t in self.state.swa], {k: v.clone() for k, v in self.state.comp.items()}, \
-            {k: v.clone() for k, v in self.state.raw.items()}
+        g = {"tok": torch.zeros((rows,), dtype=torch.long, device=self.dev),
+             "pos": torch.zeros((rows,), dtype=torch.long, device=self.dev),
+             "raw": [torch.zeros((rows, n_rows, row_bytes), dtype=torch.uint8, device=self.dev) for _ in range(2)],
+             "h_raw": torch.zeros((2, rows * n_rows, row_bytes), dtype=torch.uint8).pin_memory(),
+             "h_next": torch.zeros((rows,), dtype=torch.long).pin_memory()}
+        saved = self._save_caches()
         hd = c.engram_head_dim
 
-        def rows(k):
-            raw = self.g_raw[k]
+        def table(k):
+            raw = g["raw"][k]
             return E.dequant(raw[..., :hd], raw[..., hd:])
 
         def run_a0():
-            return self.part_a0(self.g_tok, self.g_pos, static=True)
+            return self.part_a0(g["tok"], g["pos"], static=True)
 
         def run_a1(carry):
-            return self.part_a1(carry, self.g_pos, rows(0), static=True)
+            return self.part_a1(carry, g["pos"], table(0), static=True)
 
         def run_b(carry):
-            logits = self.part_b(carry, self.g_pos, rows(1), static=True)
+            logits = self.part_b(carry, g["pos"], table(1), static=True)
             return logits, logits.argmax(-1)
 
         side = torch.cuda.Stream()
@@ -234,44 +257,63 @@ class SerialEngine:
             for _ in range(2):
                 run_b(run_a1(run_a0()))
         torch.cuda.current_stream().wait_stream(side)
-        self.graph_a0, self.graph_a, self.graph_b = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph_a0):
-            self.g_carry0 = run_a0()
-        with torch.cuda.graph(self.graph_a, pool=self.graph_a0.pool()):
-            self.g_carry = run_a1(self.g_carry0)
-        with torch.cuda.graph(self.graph_b, pool=self.graph_a0.pool()):
-            self.g_logits, self.g_next = run_b(self.g_carry)
+        g["a0"], g["a1"], g["b"] = torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g["a0"]):
+            g["carry0"] = run_a0()
+        with torch.cuda.graph(g["a1"], pool=g["a0"].pool()):
+            g["carry"] = run_a1(g["carry0"])
+        with torch.cuda.graph(g["b"], pool=g["a0"].pool()):
+            g["logits"], g["next"] = run_b(g["carry"])
         torch.cuda.synchronize()
-        for dst, src in zip(self.state.swa, saved[0]):
-            dst.copy_(src)
-        for k, v in saved[1].items():
-            self.state.comp[k].copy_(v)
-        for k, v in saved[2].items():
-            self.state.raw[k].copy_(v)
+        self._restore_caches(saved)
+        self.graphs[rows] = g
         self.graph = True
 
+    def _save_caches(self):
+        st = self.state
+        extra = [t.clone() for t in self.drafter.swa] if self.drafter is not None else []
+        return ([t.clone() for t in st.swa], {k: v.clone() for k, v in st.comp.items()},
+                {k: v.clone() for k, v in st.raw.items()}, extra)
+
+    def _restore_caches(self, saved) -> None:
+        st = self.state
+        for dst, src in zip(st.swa, saved[0]):
+            dst.copy_(src)
+        for k, v in saved[1].items():
+            st.comp[k].copy_(v)
+        for k, v in saved[2].items():
+            st.raw[k].copy_(v)
+        if self.drafter is not None:
+            for dst, src in zip(self.drafter.swa, saved[3]):
+                dst.copy_(src)
+
     def step(self, token: int) -> int:
-        """One decode row through the graphs: the second Engram layer's rows are read while the first graph runs."""
+        return self.step_rows([token])[0]
+
+    def step_rows(self, tokens: list[int]) -> list[int]:
+        """R rows through the captured graphs; returns the target's argmax at each row."""
 
         c, st = self.c, self.state
+        R = len(tokens)
+        g = self.graphs[R]
         p0 = len(st.ids)
-        if p0 + 1 > min(st.cap, SHORT_CONTEXT):
-            raise ValueError(f"context {p0 + 1} beyond {min(st.cap, SHORT_CONTEXT)} (indexer not implemented yet)")
-        st.ids.append(token)
+        if p0 + R > min(st.cap, SHORT_CONTEXT):
+            raise ValueError(f"context {p0 + R} beyond {min(st.cap, SHORT_CONTEXT)} (indexer not implemented yet)")
+        st.ids.extend(tokens)
         start = max(0, p0 - (c.engram_max_ngram_size - 1))
-        self.g_tok.fill_(token)
-        self.g_pos.fill_(p0)
-        self.graph_a0.replay()                                          # layer 0 needs no table rows
-        h = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[-1]   # [layers, 24]
-        self.tables.gather(h[:1], out=self.h_raw[:1], layers=[0])      # overlaps layer 0
-        self.g_raw[0].copy_(self.h_raw[:1], non_blocking=True)
-        self.graph_a.replay()
-        self.tables.gather(h[1:], out=self.h_raw[1:], layers=[1])      # overlaps graph A on the GPU
-        self.g_raw[1].copy_(self.h_raw[1:], non_blocking=True)
-        self.graph_b.replay()
-        self.h_next.copy_(self.g_next, non_blocking=True)
+        g["tok"].copy_(torch.tensor(tokens), non_blocking=True)
+        g["pos"].copy_(torch.arange(p0, p0 + R), non_blocking=True)
+        g["a0"].replay()                                                # layer 0 needs no table rows
+        h = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[-R:]   # [R, 2, 24]
+        self.tables.gather(h[:, 0, :].reshape(1, -1), out=g["h_raw"][:1], layers=[0])     # overlaps layer 0
+        g["raw"][0].copy_(g["h_raw"][0].view_as(g["raw"][0]), non_blocking=True)
+        g["a1"].replay()
+        self.tables.gather(h[:, 1, :].reshape(1, -1), out=g["h_raw"][1:], layers=[1])     # overlaps layers 1-13
+        g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
+        g["b"].replay()
+        g["h_next"].copy_(g["next"], non_blocking=True)
         torch.cuda.current_stream().synchronize()
-        return int(self.h_next[0])
+        return g["h_next"].tolist()
 
     # -- pieces ----------------------------------------------------------------------------------------------
     def hc(self, w: HCW, X: torch.Tensor, pre_in: torch.Tensor):
@@ -327,18 +369,19 @@ class SerialEngine:
         wts = torch.softmax(pair[..., c.head_dim:], dim=1)
         latent = K.rmsnorm((wts * pair[..., :c.head_dim]).sum(1), cw.norm, c.rms_norm_eps)
         row = K.rope(latent, (ends // 2) * 2, cos, sin).float()
-        if static:
-            closes = ((ends + 1) % 2 == 0)[:, None]
-            row = torch.where(closes, row, st.comp[L][ends // 2])
-        st.comp[L].index_copy_(0, ends // 2, row)
+        slot = ends // 2
+        if static:                                                      # rows that close no group write the spare slot
+            slot = torch.where((ends + 1) % 2 == 0, slot, st.comp[L].shape[0] - 1)
+        st.comp[L].index_copy_(0, slot, row)
 
-    def moe(self, layer: LayerW, x: torch.Tensor, R: int) -> torch.Tensor:
+    def moe(self, layer: LayerW, x: torch.Tensor, R: int, top_k: int | None = None, scratch=None) -> torch.Tensor:
         c, m = self.c, layer.moe
         limit = c.swiglu_limit
         # fp16 inputs (bf16 -> fp16 is exact for normed rows), fp32 accumulation and output: no TF32, half the bytes
         logits = torch.mm(x.half(), m.gate.T, out_dtype=F32)
-        pick, w = K.route(logits, m.bias, c.num_experts_per_tok, c.routed_scaling_factor)
-        routed = ex3.routed(x.contiguous(), pick, w, m.experts, self.scratch[layer.index], None, R, limit=limit)
+        pick, w = K.route(logits, m.bias, top_k or c.num_experts_per_tok, c.routed_scaling_factor)
+        scratch = scratch if scratch is not None else self.scratch[layer.index]
+        routed = ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit)
         g = m.shared[0](x, out_dtype=F32)
         u = m.shared[1](x, out_dtype=F32)
         act = (torch.nn.functional.silu(g.clamp(max=limit)) * u.clamp(-limit, limit)).to(BF)
@@ -372,14 +415,42 @@ class SerialEngine:
         t1 = time.perf_counter()
         out = []
         nxt = int(logits[-1].argmax())
-        for _ in range(max_tokens):
-            out.append(nxt)
-            if on_token:
-                on_token(nxt)
-            if nxt == self.c.eos_token_id:
+        rounds = accepted = 0
+        eos = self.c.eos_token_id
+        dsp = self.drafter if self.drafter is not None and self.drafter.graph is not None else None
+        while len(out) < max_tokens:
+            if dsp is None:
+                out.append(nxt)
+                if on_token:
+                    on_token(nxt)
+                if nxt == eos:
+                    break
+                nxt = self.step(nxt) if self.graph is not None else int(self.forward([nxt])[-1].argmax())
+                continue
+            P = len(self.state.ids)
+            drafts = dsp.propose(nxt, P)
+            target = self.step_rows([nxt, *drafts])
+            m = 0
+            while m < len(drafts) and drafts[m] == target[m]:
+                m += 1
+            del self.state.ids[P + 1 + m:]                         # rejected rows: overwritten by later positions
+            rounds += 1
+            accepted += m
+            emitted = [nxt, *drafts[:m]]
+            nxt = target[m]
+            for tok in emitted:
+                out.append(tok)
+                if on_token:
+                    on_token(tok)
+                if tok == eos or len(out) >= max_tokens:
+                    break
+            if out[-1] == eos:
                 break
-            nxt = self.step(nxt) if self.graph is not None else int(self.forward([nxt])[-1].argmax())
         torch.cuda.synchronize()
         t2 = time.perf_counter()
-        return {"tokens": out, "prefill_s": t1 - t0, "decode_s": t2 - t1,
-                "prefill_tps": len(prompt) / (t1 - t0), "decode_tps": len(out) / max(t2 - t1, 1e-9)}
+        res = {"tokens": out, "prefill_s": t1 - t0, "decode_s": t2 - t1,
+               "prefill_tps": len(prompt) / (t1 - t0), "decode_tps": len(out) / max(t2 - t1, 1e-9)}
+        if dsp is not None:
+            res.update(rounds=rounds, accepted_per_round=accepted / max(rounds, 1),
+                       tokens_per_round=len(out) / max(rounds, 1))
+        return res

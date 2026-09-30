@@ -82,6 +82,18 @@ class LayerW:
 
 
 @dataclass
+class DraftW:
+    """DSpark: three draft blocks (window-only attention, 128-expert MoE) and the heads they feed."""
+
+    layers: list[LayerW]
+    main_proj: Exl3Linear     # 3 D -> D, replicated
+    main_norm: torch.Tensor
+    norm: torch.Tensor        # the draft's final norm (mtp.2.norm)
+    markov_embed: torch.Tensor  # bf16 [V, 256]
+    markov_head: torch.Tensor   # fp16 [V, 256]
+
+
+@dataclass
 class Weights:
     cfg: Config
     rank: int
@@ -90,12 +102,13 @@ class Weights:
     norm: torch.Tensor
     head: Exl3Linear          # this rank's vocabulary half
     vocab_start: int
+    draft: DraftW | None = None
     extra: dict = field(default_factory=dict)
 
 
 def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, device: str = "cuda",
-         log=print) -> Weights:
-    """Rank ``rank``'s weights (every layer, or ``layers`` for tests and benchmarks)."""
+         log=print, draft: bool = True) -> Weights:
+    """Rank ``rank``'s weights (every layer, or ``layers`` for tests and benchmarks), with the DSpark blocks."""
 
     root = Path(model_dir)
     cfg = Config.from_dict(json.loads((root / "config.json").read_text()))
@@ -111,15 +124,14 @@ def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, d
         return Exl3Linear.from_tensors(t(prefix + ".trellis"), t(prefix + ".suh"), t(prefix + ".svh"), "mul1",
                                        device=dev)
 
-    def hc(i: int, site: str, norm: str) -> HCW:
-        p = f"layers.{i}."
+    def hc(p: str, site: str, norm: str) -> HCW:
         return HCW(t(p + f"hc_{site}_fn", torch.float32), t(p + f"hc_{site}_base", torch.float32),
                    t(p + f"hc_{site}_scale", torch.float32), t(p + norm + ".weight"))
 
-    def attn(i: int) -> AttnW:
-        p = f"layers.{i}.attn."
+    def attn(i: int, block: str) -> AttnW:
+        p = block + "attn."
         groups = cfg.o_groups // WORLD
-        ratio = cfg.layer_ratios[i]
+        ratio = cfg.compress_ratios[i]
         a = AttnW(lin(p + "wq_a"), lin(p + "wkv"), t(p + "q_norm.weight"), t(p + "kv_norm.weight"), lin(p + "wq_b"),
                   [lin(p + f"wo_a.slice.{g}") for g in range(rank * groups, (rank + 1) * groups)], lin(p + "wo_b"),
                   t(p + "attn_sink", torch.float32), ratio)
@@ -134,9 +146,9 @@ def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, d
                                  t(p + "indexer.k_norm.weight") if owns_k else None)
         return a
 
-    def moe(i: int) -> MoEW:
-        p = f"layers.{i}.ffn."
-        names = [p + f"experts.{e}.{w}.{x}" for w in ("w1", "w3", "w2") for e in range(cfg.n_routed_experts)
+    def moe(block: str, n_experts: int) -> MoEW:
+        p = block + "ffn."
+        names = [p + f"experts.{e}.{w}.{x}" for w in ("w1", "w3", "w2") for e in range(n_experts)
                  for x in ("trellis", "suh", "svh")]
         rd.prefetch(names, dev)
 
@@ -144,9 +156,9 @@ def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, d
             q = p + f"experts.{e}.{w}."
             return (rd.get(q + "trellis").to(dev).contiguous(), rd.get(q + "suh").to(dev), rd.get(q + "svh").to(dev))
 
-        gate = [triple(e, "w1") for e in range(cfg.n_routed_experts)]
-        up = [triple(e, "w3") for e in range(cfg.n_routed_experts)]
-        down = [triple(e, "w2") for e in range(cfg.n_routed_experts)]
+        gate = [triple(e, "w1") for e in range(n_experts)]
+        up = [triple(e, "w3") for e in range(n_experts)]
+        down = [triple(e, "w2") for e in range(n_experts)]
         experts = ex3.prepare(gate, up, down, "mul1", device=dev)
         shared = (lin(p + "shared_experts.w1"), lin(p + "shared_experts.w3"), lin(p + "shared_experts.w2"))
         return MoEW(t(p + "gate.weight"), t(p + "gate.bias", torch.float32), experts, shared)
@@ -159,11 +171,22 @@ def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, d
 
     wanted = list(range(cfg.num_hidden_layers)) if layers is None else layers
     out = []
+    def block(i: int, pfx: str, n_experts: int) -> LayerW:
+        return LayerW(i, hc(pfx, "attn", "attn_norm"), hc(pfx, "ffn", "ffn_norm"), attn(i, pfx),
+                      moe(pfx, n_experts), engram(i) if i < cfg.num_hidden_layers else None)
+
     for i in wanted:
-        out.append(LayerW(i, hc(i, "attn", "attn_norm"), hc(i, "ffn", "ffn_norm"), attn(i), moe(i), engram(i)))
+        out.append(block(i, f"layers.{i}.", cfg.n_routed_experts))
         log(f"[tensorfold] rank {rank} layer {i} loaded ({time.time() - t0:.0f} s, "
             f"{torch.cuda.memory_allocated(dev) / 2**30:.1f} GiB)", flush=True)
     head = lin("head")
     w = Weights(cfg, rank, t("embed.weight"), out, t("norm.weight"), head, rank * head.n)
+    if draft:
+        n = cfg.num_hidden_layers
+        blocks = [block(n + j, f"mtp.{j}.", cfg.dspark_n_routed_experts) for j in range(cfg.num_nextn_predict_layers)]
+        w.draft = DraftW(blocks, lin("mtp.0.main_proj"), t("mtp.0.main_norm.weight"), t("mtp.2.norm.weight"),
+                         t("mtp.2.markov_head.embed.weight"), t("mtp.2.markov_head.head.weight"))
+        log(f"[tensorfold] rank {rank} DSpark blocks loaded ({time.time() - t0:.0f} s, "
+            f"{torch.cuda.memory_allocated(dev) / 2**30:.1f} GiB)", flush=True)
     rd.close()
     return w

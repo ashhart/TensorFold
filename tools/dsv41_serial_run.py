@@ -32,6 +32,7 @@ def main() -> None:
     ap.add_argument("--profile", action="store_true", help="profile 4 decode steps after the run (rank 0 prints)")
     ap.add_argument("--no-parity", action="store_true")
     ap.add_argument("--graph", action="store_true", help="capture the one-row decode step as a CUDA graph")
+    ap.add_argument("--dspark", type=int, default=0, help="draft N tokens a round with the checkpoint's DSpark blocks")
     args = ap.parse_args()
 
     torch.cuda.set_device(0)
@@ -44,11 +45,16 @@ def main() -> None:
           f"{torch.cuda.memory_allocated() / 2**30:.1f} GiB", flush=True)
     eng = SerialEngine(w, Comm(nccl), str(args.engram), str(args.model / "tokenizer.json"), cap=1024)
     nccl.barrier()
-    if args.graph:
+    if args.dspark:
+        eng.enable_dspark(args.dspark)
+    if args.graph or args.dspark:
         t0 = time.time()
         with torch.no_grad():
-            eng.capture()
-        print(f"[rank {args.rank}] decode graph captured in {time.time() - t0:.1f} s", flush=True)
+            eng.capture(1)
+            if args.dspark:
+                eng.capture(args.dspark + 1)
+                eng.drafter.capture()
+        print(f"[rank {args.rank}] decode graphs captured in {time.time() - t0:.1f} s", flush=True)
 
     ids = json.loads(args.golden.read_text())["goldens"][args.prompt]["ids"]
     with torch.no_grad():
@@ -81,6 +87,9 @@ def main() -> None:
         tok = Tokenizer.from_file(str(args.model / "tokenizer.json"))
         print(f"decode {len(res['tokens'])} tokens: {res['decode_tps']:.2f} tok/s "
               f"(prefill {res['prefill_tps']:.0f} tok/s)", flush=True)
+        if "rounds" in res:
+            print(f"dspark: {res['rounds']} rounds, {res['accepted_per_round']:.2f} drafts accepted a round, "
+                  f"{res['tokens_per_round']:.2f} tokens a round", flush=True)
         print("text:", repr(tok.decode(res["tokens"])), flush=True)
     if args.profile:
         from torch.profiler import ProfilerActivity, profile
