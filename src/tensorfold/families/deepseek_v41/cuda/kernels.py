@@ -192,9 +192,8 @@ def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, HI: tl.constexpr, DI: 
     tl.store(OUT + r * n_keys + sidx, score, mask=sidx < n_keys)
 
 
-def index_select(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: torch.Tensor, ratio: int,
-                 topk: int) -> torch.Tensor:
-    """The compressed entries each row attends to: int32 [R, topk], ascending, -1 padded (all visible when <= topk)."""
+def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: torch.Tensor, ratio: int) -> torch.Tensor:
+    """fp32 [R, S] indexer scores over every compressed entry, -inf where not yet visible."""
 
     R, HI, DI = iq.shape
     S = keys.shape[0]
@@ -202,14 +201,57 @@ def index_select(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: t
     BS = 64
     _index_scores[(R, triton.cdiv(S, BS))](iq.contiguous(), wts.contiguous(), keys, pos, scores, S, ratio, HI=HI,
                                            DI=DI, BS=BS, num_warps=4)
+    return scores
+
+
+def top_entries(scores: torch.Tensor, topk: int) -> torch.Tensor:
+    """int32 [R, topk]: the best visible entries ascending, -1 padded (every visible one when <= topk)."""
+
+    R, S = scores.shape
     k = min(topk, S)
     vals, idx = torch.topk(scores, k, dim=1, sorted=False)
-    idx = torch.where(torch.isinf(vals), torch.full_like(idx, S), idx)   # invisible entries sort last, then drop
+    idx = torch.where(torch.isinf(vals) & (vals < 0), torch.full_like(idx, S), idx)   # invisible sort last, dropped
     idx = torch.sort(idx, dim=1).values
     idx = torch.where(idx >= S, torch.full_like(idx, -1), idx).int()
     if k < topk:
         idx = torch.cat([idx, torch.full((R, topk - k), -1, dtype=idx.dtype, device=idx.device)], dim=1)
     return idx.contiguous()
+
+
+def candidate_blocks(scores: torch.Tensor, pos: torch.Tensor, ratio: int, block: int, keep: int) -> torch.Tensor:
+    """Layer 20's blocks of ``block`` entries scored by their best entry, the newest block pinned, the ``keep`` best
+    kept: int64 [R, keep], -1 padded."""
+
+    R, S = scores.shape
+    nb = -(-S // block)
+    padded = torch.full((R, nb * block), float("-inf"), dtype=scores.dtype, device=scores.device)
+    padded[:, :S] = scores
+    best = padded.view(R, nb, block).amax(-1)
+    newest = ((pos + 1) // ratio - 1).clamp(min=0) // block
+    best.scatter_(1, newest[:, None].long(), float("inf"))
+    vals, idx = torch.topk(best, min(keep, nb), dim=1)
+    idx = torch.where(torch.isinf(vals) & (vals < 0), torch.full_like(idx, -1), idx)
+    if idx.shape[1] < keep:
+        idx = torch.cat([idx, torch.full((R, keep - idx.shape[1]), -1, dtype=idx.dtype, device=idx.device)], dim=1)
+    return idx
+
+
+def mask_to_blocks(scores: torch.Tensor, blocks: torch.Tensor, block: int) -> torch.Tensor:
+    """Scores outside the chosen blocks set to -inf."""
+
+    R, S = scores.shape
+    nb = -(-S // block)
+    flags = torch.zeros((R, nb + 1), dtype=torch.bool, device=scores.device)
+    flags.scatter_(1, torch.where(blocks >= 0, blocks, nb), True)
+    keep = flags[:, :nb].repeat_interleave(block, dim=1)[:, :S]
+    return scores.masked_fill(~keep, float("-inf"))
+
+
+def index_select(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: torch.Tensor, ratio: int,
+                 topk: int) -> torch.Tensor:
+    """The compressed entries each row attends to: int32 [R, topk], ascending, -1 padded (all visible when <= topk)."""
+
+    return top_entries(index_scores(iq, wts, keys, pos, ratio), topk)
 
 @triton.jit
 def _route(L, BIAS, PICK, WTS, scale, E: tl.constexpr, EP: tl.constexpr, K: tl.constexpr, KP: tl.constexpr):

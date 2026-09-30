@@ -55,7 +55,7 @@ def _ref_attention(q, comp, idx, ring, pos, sink, W):
 def test_mqa_matches_the_masked_softmax(with_comp, positions):
     g = torch.Generator(device="cuda").manual_seed(len(positions))
     W, H, n_sel = 128, 32, 512
-    ring = torch.randn((256, 512), generator=g, device="cuda").to(torch.bfloat16)
+    ring = torch.randn((2048, 512), generator=g, device="cuda").to(torch.bfloat16)
     comp = torch.randn((1025, 512), generator=g, device="cuda").to(torch.bfloat16)
     pos = torch.tensor(positions, device="cuda")
     idx = None
@@ -128,3 +128,16 @@ def test_engram_gate_matches_the_reference_and_is_row_invariant():
     assert (got.float() - ref.float()).abs().max() <= 0.02 * ref.float().abs().max()
     for r in range(5):
         assert torch.equal(K.engram_gate(X[r:r + 1], kv[r:r + 1], qw, kw, CFG.rms_norm_eps)[0], got[r])
+
+
+def test_candidate_blocks_pin_the_newest_and_mask_the_rest():
+    scores = torch.full((1, 64), float("-inf"), device="cuda")
+    scores[0, :50] = torch.arange(50, device="cuda", dtype=torch.float32) * 0.0
+    scores[0, 3] = 5.0                                  # block 0 has the best entry
+    scores[0, 20] = 4.0                                 # block 2 next
+    pos = torch.tensor([49], device="cuda")             # 50 visible entries (ratio 1): newest block is 6
+    blocks = K.candidate_blocks(scores, pos, 1, 8, 3)
+    assert sorted(blocks[0].tolist()) == [0, 2, 6]
+    masked = K.mask_to_blocks(scores, blocks, 8)
+    kept = torch.isfinite(masked[0]).nonzero().flatten().tolist()
+    assert kept == list(range(8)) + list(range(16, 24)) + list(range(48, 50))

@@ -23,9 +23,8 @@ from . import kernels as K
 from .weights import HCW, LayerW, Weights
 
 BF, F32 = torch.bfloat16, torch.float32
-MAX_ROWS = 128
-RING = 256                   # window and compressor-raw rings: a 128-row chunk plus the 127-token window
-CANDIDATE_FREE = 16384       # beyond this layer 20's candidate blocks restrict layers 24-36 (not implemented yet)
+MAX_ROWS = 1024              # rows of one call (prompt chunks); every expert's weights are read once a chunk
+RING = 2048                  # window and compressor-raw rings: a 1024-row chunk plus the 127-token window
 
 
 class Comm:
@@ -109,7 +108,8 @@ class SerialEngine:
         self.attnbuf = K.AttnBuffers(MAX_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,
                                      c.index_topk + c.sliding_window, device=self.dev)
         self.topk: dict[int, torch.Tensor] = {}
-        self.limit = min(cap, CANDIDATE_FREE)
+        self.limit = cap
+        self.candidates: torch.Tensor | None = None
         self.graph = None
         self.graphs: dict[int, dict] = {}
         self.drafter = None
@@ -381,8 +381,15 @@ class SerialEngine:
         cos, sin = self.tables_rope[a.ratio]
         iq = K.rope(ix.wq_b(qr).view(R, c.index_n_heads, c.index_head_dim), pos, cos, sin)
         wts = K.router_logits(x, ix.weights_proj) * (c.index_head_dim ** -0.5 * c.index_n_heads ** -0.5)
-        keys = self.state.ik[max(s for s in c.kv_source_layer_ids if s <= layer.index)]
-        return K.index_select(iq, wts, keys, pos, a.ratio, c.index_topk)
+        L = layer.index
+        keys = self.state.ik[max(s for s in c.kv_source_layer_ids if s <= L)]
+        scores = K.index_scores(iq, wts, keys, pos, a.ratio)
+        if L == c.candidate_source_layer_id:                            # publishes blocks for the later indexers
+            self.candidates = K.candidate_blocks(scores, pos, a.ratio, c.candidate_block_size,
+                                                 c.candidate_topk_blocks)
+        elif L > c.candidate_source_layer_id:
+            scores = K.mask_to_blocks(scores, self.candidates, c.candidate_block_size)
+        return K.top_entries(scores, c.index_topk)
 
     def compress(self, layer: LayerW, x: torch.Tensor, pos: torch.Tensor, static: bool) -> None:
         c, st, a = self.c, self.state, layer.attn

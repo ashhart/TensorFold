@@ -18,6 +18,20 @@ from .reader import Dsv41Reader
 WORLD = 2
 
 
+class Linear(Exl3Linear):
+    """An EXL3 linear for any row count: the row-invariant kernel takes up to 128 rows a call, so prompt chunks
+    are split into 128-row pieces (the small dense weights are re-read; the experts, the big reads, are not)."""
+
+    PIECE = 128
+
+    def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None, out_dtype: torch.dtype | None = None,
+                 xh: torch.Tensor | None = None, z: torch.Tensor | None = None) -> torch.Tensor:
+        if x.shape[0] <= self.PIECE:
+            return super().__call__(x, out, out_dtype, xh, z)
+        return torch.cat([super(Linear, self).__call__(x[i:i + self.PIECE].contiguous(), out_dtype=out_dtype)
+                          for i in range(0, x.shape[0], self.PIECE)])
+
+
 @dataclass
 class HCW:
     fn: torch.Tensor          # fp32 [24, 4 D]
@@ -121,7 +135,7 @@ def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, d
         return (x if dtype is None else x.to(dtype)).to(dev).contiguous()
 
     def lin(prefix: str) -> Exl3Linear:
-        return Exl3Linear.from_tensors(t(prefix + ".trellis"), t(prefix + ".suh"), t(prefix + ".svh"), "mul1",
+        return Linear.from_tensors(t(prefix + ".trellis"), t(prefix + ".suh"), t(prefix + ".svh"), "mul1",
                                        device=dev)
 
     def hc(p: str, site: str, norm: str) -> HCW:
