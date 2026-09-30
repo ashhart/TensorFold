@@ -13,6 +13,7 @@ from tensorfold.engine.exact_sampling import MARGIN, choose_rows
 from tensorfold.engine.grammar import GrammarError
 
 from .decode import PREFILL_ROWS, WARM_TAIL, Engine, draft, prefill
+from .engine import entry_end
 from .forward import commit, compute, stage
 from .mtp import mtp_compute, mtp_stage
 from .state import Buffers, State
@@ -114,16 +115,23 @@ class MultiDecoder:
         st, resume, s.cached = self._slot_for(list(s.prompt), s.draft)
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity)
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
-        try:
-            first = prefill(e, s.prompt, s.sampling, mtp=mtp, resume=resume,
+        end = entry_end(s.prompt) if s.draft else None   # keep the entry one token early, so a next turn whose
+        try:                                             # re-rendered boundary differs there still resumes (#98)
+            first = prefill(e, s.prompt, s.sampling, mtp=mtp, resume=resume, keep_at=end,
                             **({} if s.constraint is None else {"constraint": s.constraint}))
         except Exception:
             self.free.append(st)
             raise
+        kept = None
+        if isinstance(first, tuple):
+            first, kept = first
         s.sid, s.st = self.next_id, st
         self.next_id += 1
-        if s.draft:                    # the prompt's state; the MTP head has absorbed every position but the last
-            self._remember(list(s.prompt), st, st.snapshot(), e.last_streams.clone() if mtp else None)
+        if s.draft:                    # the prompt's state, one token before its end, for the next turn to resume
+            if kept is not None:
+                self._remember(list(s.prompt[:end]), st, kept["state"], kept["tail"])
+            else:                      # too short to keep early: keep the whole prompt end, as before
+                self._remember(list(s.prompt), st, st.snapshot(), e.last_streams.clone() if mtp else None)
         s.context = list(s.prompt)
         s.drafts = draft(e, e.last_streams, [first], st.pos + 1, min(self.depth, s.count - 1), s.sampling,
                          self.confidence) if mtp and s.count > 1 else []

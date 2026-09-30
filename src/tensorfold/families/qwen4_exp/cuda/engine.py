@@ -6,12 +6,19 @@ import json
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from . import CONFIDENCE, DEPTH
 
 MAX_DEPTH = 15           # a verify window of at most 16 rows
 KEEP = 8                 # prompt ends a concurrent decoder keeps to resume from
+
+
+def entry_end(prompt: Sequence[int]) -> int:
+    """Where a prompt's cache entry ends: one token early, since a next turn sent back without its reasoning renders
+    ``<think>`` and two newlines at the boundary, so the last token differs and a full-prompt entry would not match."""
+
+    return max(1, len(prompt) - 1)
 
 
 class FlashNextEngine:
@@ -283,10 +290,17 @@ class FlashNextEngine:
 
         t0 = time.perf_counter()
         self._start_from(hit)
-        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint)
-        # the prompt's state: the MTP head has absorbed every position but the last, whose streams resume needs
-        self._remember(list(prompt), {"state": self.e.st.snapshot(),
-                                      "tail": self.e.last_streams.clone() if self.e.mbuf is not None else None})
+        # keep the entry one token early so a next turn's re-rendered boundary resumes (#98); one GPU only, so the
+        # two-rank path (which hands rank 1 a fixed resume point) is unchanged.
+        end = entry_end(prompt) if self.tp == 1 else None
+        out = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint, keep_at=end)
+        if isinstance(out, tuple):
+            first, kept = out
+            self._remember(list(prompt[:end]), kept)
+        else:                            # too short to keep early: keep the whole prompt end, as before
+            first = out
+            self._remember(list(prompt), {"state": self.e.st.snapshot(),
+                                          "tail": self.e.last_streams.clone() if self.e.mbuf is not None else None})
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                                  "drafts": True}

@@ -250,8 +250,14 @@ def draft(e: Engine, streams: torch.Tensor, next_tokens: Sequence[int], position
 
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True,
-            resume: dict | None = None, constraint=None) -> int:
-    """Commit the prompt in chunks, sample the first token; rows ignore chunking, so ``resume`` equals a fresh run."""
+            resume: dict | None = None, constraint=None, keep_at: int | None = None):
+    """Commit the prompt in chunks, sample the first token; rows ignore chunking, so ``resume`` equals a fresh run.
+
+    ``keep_at``: also capture the committed state after ``prompt[:keep_at]`` (a ``resume`` dict) so the next turn
+    resumes from it. It returns ``(first, kept)`` then, else ``first`` alone. A chunk boundary is forced onto
+    ``keep_at`` and token ``keep_at`` is absorbed into the MTP head afterwards, exactly as a resume would, so the
+    kept state's bits match a fresh prefill of ``prompt[:keep_at]`` and the current request is unchanged.
+    """
 
     if not prompt:
         raise ValueError("prefill requires at least one token")
@@ -268,22 +274,37 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
         if use_mtp and resume.get("tail") is not None:
             mtp_forward(w, st, pb, [prompt[begin]], resume["tail"])
             st.set_mtp_len(st.mtp_len + 1)
-    last = None
-    for start in range(begin, len(prompt), e.prefill_rows):
-        chunk = list(prompt[start:start + e.prefill_rows])
+    if keep_at is not None and not begin < keep_at < len(prompt):
+        keep_at = None                                   # nothing left to keep one token early
+    last = kept = None
+    start = begin
+    while start < len(prompt):
+        stop = min(start + e.prefill_rows, len(prompt))
+        if keep_at is not None and start < keep_at < stop:
+            stop = keep_at                               # land a chunk boundary exactly on keep_at
+        chunk = list(prompt[start:stop])
         R = len(chunk)
-        final = start + R >= len(prompt)
+        final = stop >= len(prompt)
         # only the prompt's last row is sampled: the head runs on the final chunk alone
         logits = forward(w, st, pb, chunk, logits=final)
         if final:
             last = logits.clone()
         streams_last = pb.streams[R - 1:R].clone()
+        at_keep = keep_at is not None and stop == keep_at
         if use_mtp:
-            nxt = list(prompt[start + 1:start + R + 1])
+            # at the keep boundary, do not absorb token ``keep_at`` yet: the kept state ends one token
+            # early, and it is absorbed below (as a resume does) so the current request is unchanged.
+            nxt = list(prompt[start + 1:(keep_at if at_keep else stop + 1)])
             if nxt:
                 mtp_forward(w, st, pb, nxt, pb.streams[:len(nxt)])
                 st.set_mtp_len(st.mtp_len + len(nxt))
         commit(w, st, pb, R, R)
+        if at_keep:
+            kept = {"state": st.snapshot(), "tail": streams_last.clone() if use_mtp else None}
+            if use_mtp:                                  # token keep_at is next-of-(keep_at-1): absorb it now
+                mtp_forward(w, st, pb, [prompt[keep_at]], streams_last)
+                st.set_mtp_len(st.mtp_len + 1)
+        start = stop
     if constraint is not None:                           # a reply's grammar: this rank's vocabulary columns
         last = constraint.mask(last, None, e.w.meta.get("vocab_offset", 0))
     first = e.sample(last, [len(prompt)], sampling)[0]
@@ -291,7 +312,7 @@ def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp:
         constraint.advance([first])
     e.last_streams = streams_last
     e.first = first
-    return first
+    return first if keep_at is None else (first, kept)
 
 
 WARM_TAIL = 18      # a partial chunk after a full one: neither its rows nor the MTP head's 17 divide by 16
