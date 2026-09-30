@@ -124,8 +124,9 @@
   {
     "id": "other-family-prefill", "state": "partial", "requirement": "Optimized prefill for Nemotron, Flash Next, GLM and DeepSeek",
     "upstream": ["src/tensorfold/engine/family_prefill.py", "src/tensorfold/engine/prefill_plan.py", "src/tensorfold/kernels/qwen/flash_next/v1/prefill.py", "src/tensorfold/kernels/qwen/flash_next/v1/prefill_hc.py", "src/tensorfold/kernels/qwen/flash_next/v1/prefill_mm.py"],
-    "implementation": [{"path":"native/session.zig","symbol":"generateModel"}],
-    "limitation": "These backends still use small forward batches; optimized upstream prefill execution and its oracle checks are missing."
+    "implementation": [{"path":"native/session.zig","symbol":"generateModel"}, {"path":"native/family_runtime.zig","symbol":"run"}, {"path":"native/nemotron_prefill.zig","symbol":"forward"}, {"path":"native/ssm_prefill.zig","symbol":"forward"}],
+    "checks": [{"step":"test-ssm-prefill","driver":{"path":"native/ssm_prefill.zig","symbol":"check"},"scope":"synthetic"}, {"step":"test-nemotron-prefill","driver":{"path":"native/nemotron_prefill.zig","symbol":"check"},"scope":"checkpoint"}, {"step":"test-nemotron-requests","driver":{"path":"native/session_checks.zig","symbol":"checkNeural"},"scope":"checkpoint"}],
+    "limitation": "Nemotron uses upstream's chunked SSD, batched attention and sorted expert prefill with shared fused-decode caches. Flash Next, GLM and DeepSeek still lack optimized upstream prefill execution and its oracle checks. Physical M1–M4 execution remains unverified."
   },
   {
     "id": "dflash-execution", "state": "present", "requirement": "DFlash2 and standard DFlash proposals, attention, target taps and cache retention",

@@ -11,6 +11,7 @@ pub const Pass = struct {
     scope: mx.Scope = .{},
     logits: A = mx.empty,
     hidden: A = mx.empty,
+    prefilled: bool = false,
     records: [52]Cache = @splat(.{}),
     pub fn deinit(p: *Pass) void {
         p.scope.deinit();
@@ -25,6 +26,8 @@ pub const Model = struct {
     kinds: [52]u8 = undefined,
     position: i32 = 0,
     mtp: bool = false,
+    prefill_ops: @import("prefill_ops.zig").Ops = .{},
+    prefill_route: @import("nemotron_prefill.zig").Route = .{},
     pub const vocab = 131072;
     pub fn eos(id: i32) bool {
         return id == 2 or id == 11;
@@ -67,6 +70,8 @@ pub const Model = struct {
         m.reset();
         m.weights.deinit();
         m.kernels.deinit();
+        m.prefill_ops.deinit();
+        m.prefill_route.deinit();
     }
     fn norm(m: *Model, s: *mx.Scope, x: A, name: []const u8) !A {
         return cp.norm(s, x, try m.weights.field(name, "weight"), 1e-5);
@@ -87,6 +92,10 @@ pub const Model = struct {
         try mx.eval(p.logits);
         try observeBuffers(&p);
         return p;
+    }
+    pub fn prefill(m: *Model, tokens: []const i32) !Pass {
+        if (tokens.len <= 16) return m.forward(tokens);
+        return @import("nemotron_prefill.zig").forward(m, tokens);
     }
     pub fn observeBuffers(p: *Pass) !void {
         if (!kv.track_reuse) return;
@@ -214,14 +223,15 @@ pub const Model = struct {
     }
     fn commitImpl(m: *Model, p: *Pass, keep: usize, evaluate: bool) !void {
         if (keep == 0 or keep > @as(usize, @intCast(mx.dim(p.hidden, 0)))) return error.InvalidCommit;
+        if (p.prefilled and keep != mx.dim(p.hidden, 0)) return error.InvalidCommit;
         var next: [52]Cache = @splat(.{});
         errdefer for (&next) |*c| c.deinit();
         const n: i32 = @intCast(keep);
         for (m.kinds, 0..) |kind, i| {
             const rec = p.records[i];
             if (kind == 'M') {
-                next[i].a = try mx.retain(try p.scope.slice(rec.a, 0, n - 1, n));
-                next[i].b = try mx.retain(try p.scope.slice(rec.b, 0, n - 1, n));
+                next[i].a = try mx.retain(if (p.prefilled) rec.a else try p.scope.slice(rec.a, 0, n - 1, n));
+                next[i].b = try mx.retain(if (p.prefilled) rec.b else try p.scope.slice(rec.b, 0, n - 1, n));
             }
             if (kind == '*') {
                 next[i].a = try mx.retain(try p.scope.slice(rec.a, 2, 0, m.position + n));

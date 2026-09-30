@@ -166,6 +166,8 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen rolling reservations, waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
 | Background priority | `test-server-background -Doptimize=safe -j1` | Qwen repeated interruption, free-slot admission, JSON/SSE replay, reasoning, images, Responses/tools and queued cancellation |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
+| Nemotron batched prefill | `test-nemotron-prefill -Doptimize=safe -j1` | Pinned MLX SSD arithmetic; full-model hidden states, recurrent/KV caches and fused continuation. Add `-Dnemotron-prefill-simd=true` for SIMD projections |
+| Nemotron prompt integration | `test-nemotron-requests -Doptimize=safe -j1` | Long-prompt interleaving, prefix reuse, MTP drafts and memory admission on the installed checkpoint |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
 | Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven tokenizers, including DeepSeek's official encoder and upstream's rejection of required DeepSeek tool calls; no weights loaded |
 | Tool structure and copy proposals | `test-tool-drafts test-server-tool-drafts -Doptimize=safe -j1` | Seven-tokenizer upstream oracle; Qwen HTTP acceptance/rejection, serial parity, sampling and streaming |

@@ -274,6 +274,47 @@ def gemma_dflash_fixture(directory, draft_dir, output):
     print("Saved full Gemma target taps and DFlash proposals", flush=True)
 
 
+def nemotron_prefill_fixture(directory, output, simd=False):
+    import mlx.core as mx
+    from mlx_lm import load
+    from tensorfold.families.nemotron_h.model import NemotronH
+    from tensorfold.kernels.nemotron.lightning.v1.kernels import FusedDecode
+    from tensorfold.kernels.nemotron.lightning.v1 import kernels, rows
+    if simd:
+        kernels.tensor_units = lambda: False
+    model = NemotronH.__new__(NemotronH)
+    model.model, _ = load(str(directory))
+    model.args = model.model.args
+    model.fused = FusedDecode(model.model)
+    model.mtp = None
+    if kernels.tensor_units():
+        model._install_lane_matmul()
+    else:
+        rows.install(model)
+    cache = model.make_cache()
+    output.mkdir(parents=True, exist_ok=True)
+    def save(name, value):
+        np.save(output / f"{name}.npy", np.asarray(value.astype(mx.float32)))
+    position = 0
+    for step, count in enumerate((17, 255, 16, 257, 2048, 1)):
+        tokens = mx.array([[1000 + (position + j) % 37 for j in range(count)]], dtype=mx.uint32)
+        hidden = model.hidden(tokens, cache)
+        save(f"hidden-{step}", hidden[0])
+        save(f"logits-{step}", model.head(hidden[:, -1:])[0])
+        position += count
+        index = 0
+        for i, layer in enumerate(model.layers):
+            if layer.block_type not in "M*":
+                continue
+            state = cache[index].state
+            for j, value in enumerate(state):
+                save(f"cache-{step}-{i}-{j}", value)
+            index += 1
+        print(f"Nemotron prefill oracle at {position} tokens", flush=True)
+    for step in range(4):
+        save(f"continuation-{step}", model.head(model.hidden(mx.array([[2000 + step]], dtype=mx.uint32), cache))[0])
+
+
 def gemma_prefill_fixture(directory, output):
     import mlx.core as mx
     from tensorfold.families.gemma4.model import load
@@ -1065,6 +1106,7 @@ def main():
     p.add_argument("--synthetic-dflash", type=int)
     p.add_argument("--gemma-drafter", type=Path)
     p.add_argument("--gemma-prefill", action="store_true")
+    p.add_argument("--nemotron-prefill", action="store_true")
     p.add_argument("--synthetic-glm-layout", action="store_true")
     p.add_argument("--synthetic-glm-mixed", action="store_true")
     p.add_argument("--serial-rows", action="store_true")
@@ -1096,6 +1138,9 @@ def main():
         return
     if args.gemma_prefill:
         gemma_prefill_fixture(args.model, args.state_directory)
+        return
+    if args.nemotron_prefill:
+        nemotron_prefill_fixture(args.model, args.state_directory, args.simd)
         return
     if args.gemma_drafter:
         gemma_dflash_fixture(args.model, args.gemma_drafter, args.state_directory)
@@ -1209,13 +1254,13 @@ def main():
         holder.model = model
         holder.stacked = [x for x, _ in fused.qkv.values()]
         if args.simd:
-            for _, module in holder.named_modules():
-                if isinstance(module, nn.QuantizedLinear):
-                    module.__class__ = nemotron_rows.RowLinear
+            from tensorfold.kernels.nemotron.lightning.v1 import rows
+            from types import SimpleNamespace
+            rows.install(SimpleNamespace(model=model, fused=fused, args=model.args, batch_rows=128))
         else:
             lane_qmm.install(holder, rows=128, tile=True, wide=True)
         cache = model.make_cache()
-        forward = lambda ids: model.lm_head(fused(mx.array([ids], dtype=mx.uint32), cache))
+        forward = lambda ids: model.lm_head(fused(mx.array([ids], dtype=mx.uint32), cache) if len(ids) <= 16 else model.backbone(mx.array([ids], dtype=mx.uint32), cache)[:, -1:])
     elif kind == "qwen4_exp":
         from tensorfold.families.qwen4_exp.model import load
         from tensorfold.families.qwen4_exp.decode import FusedDecode
@@ -1263,7 +1308,7 @@ def main():
         raise ValueError(kind)
     tokens = ([int(x) for x in args.tokens.split(",")] if args.tokens else list(range(1, 41)) if args.synthetic_glm or args.synthetic_glm_layout else
               tokenizer.encode(args.prompt, add_special_tokens=False) if args.generate else [1, 2, 3, 4])
-    prompt_chunk = 2048 if kind in ("gemma4", "gemma4_text") else 16
+    prompt_chunk = 2048 if kind in ("gemma4", "gemma4_text", "nemotron_h") else 16
     for start in range(0, len(tokens), prompt_chunk):
         chunk = tokens[start:start + prompt_chunk]
         if kind in ("gemma4", "gemma4_text"):

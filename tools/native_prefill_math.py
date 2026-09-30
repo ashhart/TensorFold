@@ -15,12 +15,45 @@ from tensorfold.families.deepseek_v4.moe import swiglu as clipped_swiglu
 from tensorfold.families.deepseek_v4.model import HeadHC
 
 
+def ssm_fixtures(directory):
+    from mlx_lm.models.ssm import ssm_attn
+    mx.random.seed(8765)
+    arrays, cases = {}, []
+    for heads, groups, dims, state_dim in ((8, 2, 16, 32), (64, 8, 64, 128)):
+        for dtype in (mx.bfloat16, mx.float32):
+            state = None
+            for rows in (1, 17, 255, 256, 257, 513, 2048):
+                batch = 2 if heads == 8 else 1
+                x = (mx.random.normal((batch, rows, heads, dims)) * 0.2).astype(dtype)
+                a = mx.random.uniform(-2, 1, (heads,))
+                b = (mx.random.normal((batch, rows, groups, state_dim)) * 0.1).astype(dtype)
+                c = (mx.random.normal(b.shape) * 0.1).astype(dtype)
+                d = mx.random.normal((heads,)).astype(dtype)
+                dt = (mx.random.normal((batch, rows, heads)) * 2).astype(dtype)
+                bias = mx.random.uniform(-4, 0, (heads,)).astype(dtype)
+                limits = (0.001, 0.7) if rows in (17, 257) else (0.0, 1e6)
+                out, next_state = ssm_attn(x, a, b, c, d, dt, bias, state, limits)
+                key = f"case{len(cases)}"
+                cases.append(dict(key=key, state=state is not None, limits=limits))
+                inputs = [x, a, b, c, d, dt, bias, mx.zeros((batch, heads, dims, state_dim)) if state is None else state]
+                arrays.update({f"{key}.input{i}": value for i, value in enumerate(inputs)})
+                arrays[f"{key}.output"], arrays[f"{key}.state"] = out, next_state
+                mx.eval(out, next_state)
+                state = next_state
+    mx.save_safetensors(str(directory / "ssm.safetensors"), arrays)
+    (directory / "ssm.json").write_text(json.dumps(cases) + "\n")
+    print(f"Wrote {len(cases)} chunked SSD fixtures, including production Nemotron dimensions and continuation")
+
+
 def main():
     require_mlx()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
+    parser.add_argument("--ssm-only", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.ssm_only:
+        return ssm_fixtures(args.directory)
     arrays, cases = {}, []
 
     def save(kind, inputs, expected):

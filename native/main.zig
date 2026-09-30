@@ -44,6 +44,11 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-image-http")) return @import("image_http.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-image-url")) return @import("image_http.zig").fetchCheck(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-gemma-prefill")) return @import("gemma_prefill.zig").check(io, args[2], args[3]);
+    if (args.len == 4 and std.mem.eql(u8, args[1], "check-nemotron-prefill")) return @import("nemotron_prefill.zig").check(io, args[2], args[3]);
+    if (args.len == 5 and std.mem.eql(u8, args[1], "check-nemotron-prefill") and std.mem.eql(u8, args[4], "--metal-simd")) {
+        mx.force_simd = true;
+        return @import("nemotron_prefill.zig").check(io, args[2], args[3]);
+    }
     if (args.len == 5 and std.mem.eql(u8, args[1], "check-gemma-draft")) return @import("gemma.zig").checkDraft(io, args[2], args[3], args[4]);
     if (args.len == 5 and std.mem.eql(u8, args[1], "check-dflash")) return @import("dflash.zig").check(io, args[2], args[3], try std.fmt.parseInt(usize, args[4], 10));
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-dspark")) return @import("deepseek.zig").checkDspark(io, args[2], args[3]);
@@ -55,6 +60,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-vision")) return @import("vision.zig").check(io, args[2], args[3]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-image")) return @import("vision.zig").checkImage(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-prefill-math")) return @import("prefill_checks.zig").check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-ssm-prefill")) return @import("ssm_prefill.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-sampling")) return @import("sampling_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-vocab")) return @import("draft_vocab_checks.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-draft-depth")) return @import("draft_depth.zig").check(io, args[2]);

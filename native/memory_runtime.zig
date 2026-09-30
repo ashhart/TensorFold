@@ -156,9 +156,10 @@ fn perPosition(array: mx.Array, axis: usize) f64 {
     return if (positions <= 0) 0 else @as(f64, @floatFromInt(arrayBytes(array))) / @as(f64, @floatFromInt(positions));
 }
 
-fn growthFloor(comptime M: type, state: *@import("request_state.zig").State(M)) struct { kv: f64, spare: f64 } {
+fn growthFloor(comptime M: type, state: *@import("request_state.zig").State(M)) struct { kv: f64, spare: f64, unbuffered: f64 } {
     var kv: f64 = 0;
     var spare: f64 = 0;
+    var unbuffered: f64 = 0;
     for (state.cache, 0..) |cache, index| {
         if (@TypeOf(cache.keys) == @import("kv_buffer.zig").Buffer) {
             inline for (.{ "keys", "values", "index_keys" }) |name| if (@hasField(@TypeOf(cache), name)) {
@@ -167,6 +168,13 @@ fn growthFloor(comptime M: type, state: *@import("request_state.zig").State(M)) 
                 kv += each;
                 spare += each;
             };
+            if (M == @import("nemotron.zig").Model and cache.keys.current.ctx == null and cache.a.ctx != null and mx.shape(cache.a).len == 4) {
+                // Long prefill has plain KV arrays; decode creates both alternating buffers.
+                const each = perPosition(cache.a, 2) + perPosition(cache.b, 2);
+                kv += each;
+                spare += each;
+                unbuffered += each;
+            }
             if (@hasField(@TypeOf(cache), "pooled")) {
                 kv += @as(f64, @floatFromInt(arrayBytes(cache.pooled) + arrayBytes(cache.token_history))) / @as(f64, @floatFromInt(@max(1, state.position)));
             }
@@ -188,7 +196,7 @@ fn growthFloor(comptime M: type, state: *@import("request_state.zig").State(M)) 
             }
         }
     }
-    return .{ .kv = kv, .spare = spare };
+    return .{ .kv = kv, .spare = spare, .unbuffered = unbuffered };
 }
 
 pub fn measure(s: *session.Session) !policy.StreamMemory {
@@ -238,8 +246,10 @@ fn measureModel(m: anytype, tokenizer: *@import("vendor/tokenizer.zig").Tokenize
         peak.* = high -| after;
     }
     const floor = growthFloor(M, &held[2].state);
+    // Plain prefill arrays have neither the second KV copy nor capacity rounding.
+    for (&sizes, probes) |*size, count| size.* += @intFromFloat(floor.unbuffered * @as(f64, @floatFromInt(count)));
     const per_token = @max((@as(f64, @floatFromInt(sizes[2])) - @as(f64, @floatFromInt(sizes[1]))) / chunk, floor.kv + floor.spare);
-    const spare: u64 = @intFromFloat(floor.spare * 2048);
+    const spare: u64 = @intFromFloat((floor.spare + floor.unbuffered) * 2048);
     const b = @max(0, (@as(f64, @floatFromInt(peaks[2])) - @as(f64, @floatFromInt(peaks[1]))) / (chunk * chunk));
     const a = @max(0, @as(f64, @floatFromInt(peaks[1])) / chunk - b * chunk);
     const before_decode = try activeBytes();
@@ -267,7 +277,7 @@ pub fn check(io: std.Io, directory: []const u8) !void {
             const M = @TypeOf(m.*);
             var tokens: [4161]i32 = undefined;
             for (&tokens, 0..) |*token, index| token.* = @intCast(1000 + index);
-            const counts: []const usize = if (@hasDecl(M, "prefill")) &.{ 1, 65, 2047, 2048, 2049, 4161 } else &.{ 1, 15, 16, 17, 65, 257 };
+            const counts: []const usize = if (M == @import("nemotron.zig").Model) &.{ 1, 15, 16, 17, 65, 127, 128, 129, 2047, 2048, 2049, 4161 } else if (@hasDecl(M, "prefill")) &.{ 1, 65, 2047, 2048, 2049, 4161 } else &.{ 1, 15, 16, 17, 65, 257 };
             for (counts) |count| {
                 try mx.check(mx.c.mlx_clear_cache());
                 const before = try activeBytes();

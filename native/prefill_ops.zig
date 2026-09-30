@@ -2,9 +2,9 @@
 //! Compile the original operation graphs through MLX-C, just as mlx-lm does.
 const mx = @import("mlx.zig");
 const c = mx.c;
-pub const Kind = enum { silu, swiglu, gated, decay, gelu, gelu_tanh, geglu, softcap, clipped_swiglu, deepseek_head };
+pub const Kind = enum { silu, swiglu, gated, decay, gelu, gelu_tanh, geglu, softcap, clipped_swiglu, deepseek_head, ssm_dt };
 pub const Ops = struct {
-    closures: [10]c.mlx_closure = @splat(.{ .ctx = null }),
+    closures: [@typeInfo(Kind).@"enum".field_names.len]c.mlx_closure = @splat(.{ .ctx = null }),
     pub fn deinit(o: *Ops) void {
         for (o.closures) |fun| if (fun.ctx != null) {
             _ = c.mlx_closure_free(fun);
@@ -53,11 +53,19 @@ pub fn uncompiled(s: *mx.Scope, comptime kind: Kind, args: []const mx.Array) !mx
 fn graph(comptime kind: Kind, out: [*c]c.mlx_vector_array, ins: c.mlx_vector_array) !c_int {
     var s = mx.Scope{};
     defer s.deinit();
-    var args: [if (kind == .deepseek_head) 6 else if (kind == .decay or kind == .clipped_swiglu) 3 else if (kind == .silu or kind == .gelu or kind == .gelu_tanh) 1 else 2]mx.Array = undefined;
+    var args: [if (kind == .deepseek_head) 6 else if (kind == .ssm_dt) 4 else if (kind == .decay or kind == .clipped_swiglu) 3 else if (kind == .silu or kind == .gelu or kind == .gelu_tanh) 1 else 2]mx.Array = undefined;
     for (&args, 0..) |*a, i| {
         var x = c.mlx_array_new();
         const rc = c.mlx_vector_array_get(&x, ins, i);
         a.* = try s.result(rc, x);
+    }
+    if (kind == .ssm_dt) {
+        const sum = try s.binary(c.mlx_add, try s.cast(args[0], mx.f32t), args[1]);
+        const softplus = try s.binary(c.mlx_logaddexp, sum, try s.scalar(0));
+        var result = c.mlx_array_new();
+        const rc = c.mlx_clip(&result, softplus, args[2], args[3], mx.stream);
+        result = try s.result(rc, result);
+        return c.mlx_vector_array_set_data(out, &result, 1);
     }
     if (kind == .deepseek_head) {
         const rows = mx.dim(args[0], 0);

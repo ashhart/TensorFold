@@ -750,6 +750,36 @@ pub fn build(b: *std.Build) void {
     prefill_math.addArgs(&.{ "check-prefill-math", "build/native-checks/prefill-math" });
     prefill_math.step.dependOn(&prefill_fixture.step);
     b.step("test-prefill-math", "Exhaustive BF16 activation and mixed-precision decay parity with mlx-lm").dependOn(&prefill_math.step);
+    const ssm_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_prefill_math.py", "build/native-checks/ssm-prefill", "--ssm-only" });
+    const ssm_check = b.addRunArtifact(exe);
+    ssm_check.addArgs(&.{ "check-ssm-prefill", "build/native-checks/ssm-prefill" });
+    ssm_check.step.dependOn(&ssm_fixture.step);
+    b.step("test-ssm-prefill", "Compare chunked SSD arithmetic and recurrent continuation with pinned mlx-lm").dependOn(&ssm_check.step);
+    const nemotron_prefill_model = b.fmt("{s}/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit", .{model_root});
+    const nemotron_prefill_simd = b.option(bool, "nemotron-prefill-simd", "Verify Nemotron prefill using forced SIMD projection kernels") orelse false;
+    const nemotron_prefill_dir = if (nemotron_prefill_simd) "build/native-checks/nemotron-prefill-simd" else "build/native-checks/nemotron-prefill";
+    const nemotron_oracle_dir = b.fmt("{s}/oracle", .{nemotron_prefill_dir});
+    const nemotron_native_dir = b.fmt("{s}/native", .{nemotron_prefill_dir});
+    const nemotron_prefill_oracle = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", nemotron_prefill_model, "--nemotron-prefill", "--output", b.fmt("{s}/logits.npy", .{nemotron_oracle_dir}), "--state-directory", nemotron_oracle_dir });
+    if (nemotron_prefill_simd) nemotron_prefill_oracle.addArg("--simd");
+    nemotron_prefill_oracle.step.dependOn(&ssm_check.step);
+    const nemotron_prefill = b.addRunArtifact(exe);
+    nemotron_prefill.addArgs(&.{ "check-nemotron-prefill", nemotron_prefill_model, nemotron_native_dir });
+    if (nemotron_prefill_simd) nemotron_prefill.addArg("--metal-simd");
+    nemotron_prefill.step.dependOn(&nemotron_prefill_oracle.step);
+    const nemotron_prefill_compare = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_reference.py", "--compare-arrays", nemotron_oracle_dir, nemotron_native_dir });
+    nemotron_prefill_compare.step.dependOn(&nemotron_prefill.step);
+    b.step("test-nemotron-prefill", "Compare long Nemotron prompts, recurrent/KV caches and fused decode continuation").dependOn(&nemotron_prefill_compare.step);
+    const nemotron_requests = b.step("test-nemotron-requests", "Verify Nemotron long-prompt interleaving, prefix reuse, neural drafts and memory admission");
+    var nemotron_request_prior: ?*std.Build.Step = null;
+    for ([_][]const u8{ "check-session-rounds", "check-session-neural", "check-memory-runtime" }) |command| {
+        const check = b.addRunArtifact(exe);
+        check.addArgs(&.{ command, nemotron_prefill_model });
+        if (std.mem.eql(u8, command, "check-session-neural")) check.addArg("-");
+        if (nemotron_request_prior) |prior| check.step.dependOn(prior);
+        nemotron_request_prior = &check.step;
+    }
+    nemotron_requests.dependOn(nemotron_request_prior.?);
     const prefill_tests = b.step("test-prefill", "Trace production Qwen/Bonsai prefill layers, caches and logits against Python");
     const prefill_family = b.option(usize, "prefill-family", "Select 0=Qwen or 1=Bonsai prefill reference") orelse 0;
     if (prefill_family > 1) @panic("prefill-family must be 0 or 1");

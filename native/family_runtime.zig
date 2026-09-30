@@ -220,9 +220,9 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
     var pending: i32 = 0;
     var off: usize = 0;
     while (off < tokens.items.len) {
-        const n = @min(16, tokens.items.len - off);
+        const n = @min(if (@hasDecl(M, "prefill")) @as(usize, 2048) else 16, tokens.items.len - off);
         if (@hasField(M, "trace_dir")) m.trace_dir = if (trace_gdn != null or off + n == tokens.items.len) trace_dir else null;
-        var p = try m.forward(tokens.items[off..][0..n]);
+        var p = if (@hasDecl(M, "prefill")) try m.prefill(tokens.items[off..][0..n]) else try m.forward(tokens.items[off..][0..n]);
         if (@hasField(M, "trace_dir")) m.trace_dir = null;
         defer p.deinit();
         if (m.mtp) for (0..n) |j| {
@@ -230,7 +230,8 @@ pub fn run(comptime M: type, init: std.process.Init, args: []const []const u8) !
             try mx.replace(&last, try p.scope.slice(p.hidden, 0, @intCast(j), @intCast(j + 1)));
         };
         if (!m.mtp) try mx.replace(&last, try p.scope.slice(p.hidden, 0, @intCast(n - 1), @intCast(n)));
-        const ids = try sampling.rows(&m.kernels, &p.scope, try p.scope.slice(p.logits, 0, @intCast(n - 1), @intCast(n)), &.{@intCast(off + n)}, settings);
+        const logit_rows = mx.dim(p.logits, 0);
+        const ids = try sampling.rows(&m.kernels, &p.scope, try p.scope.slice(p.logits, 0, logit_rows - 1, logit_rows), &.{@intCast(off + n)}, settings);
         defer mx.allocator.free(ids);
         pending = ids[0];
         if (dump) |file| if (off + n == tokens.items.len) {
