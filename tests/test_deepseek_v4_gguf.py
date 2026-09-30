@@ -20,7 +20,7 @@ from tensorfold.gguf import (GGUFError, GGUF_TYPE_BOOL, GGUF_TYPE_FLOAT16, GGUF_
                              GGUF_TYPE_FLOAT64, GGUF_TYPE_INT8, GGUF_TYPE_INT16, GGUF_TYPE_INT32,
                              GGUF_TYPE_INT64, GGUF_TYPE_STRING, GGUF_TYPE_UINT8, GGUF_TYPE_UINT16,
                              GGUF_TYPE_UINT32, GGUF_TYPE_UINT64, GGUF_MAGIC, GGUF_VERSION,
-                             parse_gguf)
+                             parse_gguf, parse_gguf_tensors)
 
 GGUF_MAGIC_LE = 0x46554747  # "GGUF"
 
@@ -310,3 +310,156 @@ def test_metadata_section_ends_exactly_at_n_kv():
     info = parse_gguf(_file(n_kv=1, pairs=pairs, header_kwargs={"n_tensors": 99}))
     assert list(info.metadata) == ["a"]
     assert info.header.n_tensors == 99
+
+
+# ---------------------------------------------------------------------------
+# T02.2: tensor descriptor inventory (spans/type/shape) and validation
+# ---------------------------------------------------------------------------
+# GGUF tensor descriptor layout: name (string), n_dims (uint32),
+# dims (uint64 x n_dims), type (uint32), offset (uint64).
+
+GGML_F32 = 0
+GGML_F16 = 1
+GGML_Q8_0 = 6
+GGML_Q2_K = 28
+GGML_IQ2_XXS = 34
+
+def _align(n: int) -> int:
+    return (n + 31) // 32 * 32
+
+
+def _tensor_desc(name: str, dims: list, type_id: int, offset: int) -> bytes:
+    return (_string(name.encode("utf-8"))
+            + struct.pack("<I", len(dims))
+            + b"".join(struct.pack("<Q", d) for d in dims)
+            + struct.pack("<I", type_id)
+            + struct.pack("<Q", offset))
+
+
+def _tensor_file(*, n_tensors, descriptors=(), data_len=0, pairs=(), n_kv=0,
+                 header_kwargs=None):
+    """Header + metadata + tensor descriptors + 32-byte-aligned data section."""
+    header = _header(n_tensors=n_tensors, n_kv=n_kv, **(header_kwargs or {}))
+    out = bytearray(header)
+    for key, type_, payload in pairs:
+        out += _kv(key, type_, payload)
+    out += b"".join(descriptors)
+    out += b"\x00" * ((-len(out)) % 32)
+    out += b"\x00" * data_len
+    return bytes(out)
+
+
+def test_tensor_inventory_exact_spans_and_shapes():
+    # Three tensors with offsets chosen 32-byte aligned and non-overlapping:
+    #   embd     F32     (8, 4)     nelem 32      size 128
+    #   wq       Q8_0    (8, 32)    nelem 256     size 256//32*34 = 272
+    #   experts  IQ2_XXS (256, 256) nelem 65536   size 65536//256*66 = 16896
+    descs = [
+        _tensor_desc("embd", [8, 4], GGML_F32, 0),
+        _tensor_desc("wq", [8, 32], GGML_Q8_0, 128),
+        _tensor_desc("experts", [256, 256], GGML_IQ2_XXS, 416),
+    ]
+    header = _header(n_tensors=3, n_kv=0)
+    desc_bytes = b"".join(descs)
+    # independent oracle for the data section start
+    data_offset = _align(len(header) + len(desc_bytes))
+
+    inv = parse_gguf_tensors(_tensor_file(
+        n_tensors=3, descriptors=descs,
+        data_len=data_offset + 416 + 16896))
+
+    assert inv.info.header.n_tensors == 3
+    assert inv.data_offset == data_offset
+    assert [t.name for t in inv.tensors] == ["embd", "wq", "experts"]
+
+    embd, wq, experts = inv.tensors
+    assert embd.type_name == "F32"
+    assert embd.shape == (8, 4)
+    assert embd.nelements == 32
+    assert embd.offset == 0 and embd.size == 128
+    assert embd.start == data_offset and embd.end == data_offset + 128
+
+    assert wq.type_name == "Q8_0"
+    assert wq.shape == (8, 32)
+    assert wq.nelements == 256
+    assert wq.size == 272
+    assert wq.offset == 128 and wq.end == data_offset + 400
+
+    assert experts.type_name == "IQ2_XXS"
+    assert experts.shape == (256, 256)
+    assert experts.nelements == 65536
+    assert experts.size == 16896
+    assert experts.offset == 416 and experts.end == data_offset + 17312
+
+
+def test_tensor_offset_not_aligned_is_rejected():
+    desc = _tensor_desc("bad", [4], GGML_F32, 100)  # 100 % 32 != 0
+    with pytest.raises(GGUFError, match="aligned"):
+        parse_gguf_tensors(_tensor_file(n_tensors=1, descriptors=[desc], data_len=200))
+
+
+def test_duplicate_tensor_name_is_rejected():
+    descs = [_tensor_desc("dup", [4], GGML_F32, 0),
+             _tensor_desc("dup", [4], GGML_F32, 32)]
+    with pytest.raises(GGUFError, match="duplicate"):
+        parse_gguf_tensors(_tensor_file(n_tensors=2, descriptors=descs, data_len=200))
+
+
+def test_overlapping_tensor_spans_are_rejected():
+    # A spans [0, 64); B spans [32, 96) -> overlap
+    descs = [_tensor_desc("a", [16], GGML_F32, 0),
+             _tensor_desc("b", [16], GGML_F32, 32)]
+    with pytest.raises(GGUFError, match="overlap"):
+        parse_gguf_tensors(_tensor_file(n_tensors=2, descriptors=descs, data_len=200))
+
+
+def test_tensor_span_out_of_bounds_is_rejected():
+    # declared size 128 but no data section is present
+    desc = _tensor_desc("x", [32], GGML_F32, 0)
+    with pytest.raises(GGUFError, match="out of bounds|bounds"):
+        parse_gguf_tensors(_tensor_file(n_tensors=1, descriptors=[desc]))
+
+
+def test_tensor_shape_overflow_is_rejected():
+    # product of dims exceeds 2^64
+    desc = _tensor_desc("big", [2 ** 33, 2 ** 33], GGML_F32, 0)
+    with pytest.raises(GGUFError, match="overflow"):
+        parse_gguf_tensors(_tensor_file(n_tensors=1, descriptors=[desc]))
+
+
+def test_quantized_block_divisibility_is_enforced():
+    # IQ2_XXS blocks hold 256 elements; 10000 is not divisible by 256
+    desc = _tensor_desc("exp", [100, 100], GGML_IQ2_XXS, 0)
+    with pytest.raises(GGUFError, match="divisible|block"):
+        parse_gguf_tensors(_tensor_file(n_tensors=1, descriptors=[desc], data_len=40960))
+
+
+def test_quantized_block_divisible_shape_is_accepted():
+    # Q2_K blocks hold 256 elements; 256 is divisible -> size 84 bytes
+    desc = _tensor_desc("q2k", [256], GGML_Q2_K, 0)
+    inv = parse_gguf_tensors(_tensor_file(n_tensors=1, descriptors=[desc], data_len=128))
+    assert inv.tensors[0].type_name == "Q2_K"
+    assert inv.tensors[0].size == 84
+
+
+def test_f16_tensor_type_inventory():
+    # F16 is 2 bytes per element: shape (8, 4) -> 32 elements -> 64 bytes
+    desc = _tensor_desc("h", [8, 4], GGML_F16, 0)
+    inv = parse_gguf_tensors(_tensor_file(n_tensors=1, descriptors=[desc], data_len=128))
+    assert inv.tensors[0].type_name == "F16"
+    assert inv.tensors[0].shape == (8, 4)
+    assert inv.tensors[0].size == 64
+
+
+
+def test_unknown_tensor_type_is_rejected():
+    desc = _tensor_desc("weird", [4], 999, 0)
+    with pytest.raises(GGUFError, match="type"):
+        parse_gguf_tensors(_tensor_file(n_tensors=1, descriptors=[desc], data_len=16))
+
+
+def test_truncated_tensor_descriptor_is_rejected_before_read():
+    # header claims one tensor but the descriptor table is missing
+    with pytest.raises(GGUFError):
+        parse_gguf_tensors(_tensor_file(n_tensors=1))
+
