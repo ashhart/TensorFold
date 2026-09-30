@@ -34,7 +34,11 @@ def block_chain(drafter: Any, inputs: mx.array, context: mx.array, cache: list[A
     masks: dict = {}                                 # one mask a layer kind (``_dflash_attend``)
     for (pre, post), layer, item in zip(_parts(drafter), model.layers, cache):
         h = post(h, _dflash_attend(layer.self_attn, pre(h), h_ctx, model.rope, item, masks))
-    return mx.argmax(model.compute_logits(model.norm(h[:, 1:])), axis=-1)
+    # the draft vocabulary's head rows when the drafter has them (a third of Qwen3.6's 248k), mapped back to token ids
+    logits, ids = drafter.candidate_logits(model.norm(h[:, 1:])) if hasattr(drafter, "candidate_logits") else (
+        model.compute_logits(model.norm(h[:, 1:])), None)
+    cols = mx.argmax(logits, axis=-1)
+    return cols if ids is None else mx.take(ids, cols)
 
 
 __all__ = ["block_chain"]

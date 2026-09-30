@@ -118,6 +118,36 @@ def test_dflash_v1_chains_even_with_a_draft_vocabulary(monkeypatch):
     assert proposer.propose([1, 2, 3], 3) == [5, 6, 7]
 
 
+def test_dflash_v1_family_sizes_chains_from_round_costs(monkeypatch):
+    """A v1 head gives no per-draft chances, so the family exposes none and the engine sizes chains by depth."""
+
+    from tensorfold.families.qwen3_5.family import Qwen35Family
+
+    monkeypatch.setattr(Qwen35Family, "check_windows", lambda self, widest, rows: (widest, {}))
+    core = SimpleNamespace(embed_tokens=object())
+    model = SimpleNamespace(model=core, lm_head=object(), args=None)
+    drafter = SimpleNamespace(model=SimpleNamespace(), block_size=16, proposer=lambda **_: None)
+    family = Qwen35Family(model, drafter=drafter)
+    assert family.head_drafts.v1 and family.draft_probabilities is None
+    assert callable(Qwen35Family(model).draft_probabilities)
+
+
+def test_dflash_v1_block_reads_the_draft_vocabulary_rows():
+    """``block_chain`` argmaxes the draft vocabulary's head rows and maps each column back to its token id."""
+
+    from tensorfold.drafters.dflash_block import block_chain
+
+    def full_head(_):
+        raise AssertionError("the full vocabulary head was read")
+
+    model = SimpleNamespace(embed_tokens=lambda t: mx.zeros((*t.shape, 4)), embed_scale=1.0, fc=lambda c: c,
+                            hidden_norm=lambda c: c, norm=lambda h: h, layers=[], compute_logits=full_head)
+    ids = mx.array([100, 200, 300])
+    drafter = SimpleNamespace(model=model, _block_parts=[],
+                              candidate_logits=lambda h: (mx.array([[[0.0, 1.0, 0.0], [0.0, 0.0, 2.0]]]), ids))
+    assert block_chain(drafter, mx.array([[1, 0, 0]]), mx.zeros((1, 1, 4)), []).tolist() == [[200, 300]]
+
+
 def test_shutdown_saves_prompt_side_entries_before_reply_ends(tmp_path, monkeypatch):
     from tensorfold.server import checkpoints
 
