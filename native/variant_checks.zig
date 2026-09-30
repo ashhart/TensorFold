@@ -252,7 +252,7 @@ fn parameter(case: Case, name: []const u8) i32 {
 fn matrix(s: *mx.Scope, a: mx.Array, n: i32, width: i32) !mx.Array {
     return s.reshape(try s.slice(try s.reshape(a, &.{-1}), 0, 0, n * width), &.{ n, width });
 }
-fn equalBits(s: *mx.Scope, a: mx.Array, b: mx.Array) !void {
+pub fn equalBits(s: *mx.Scope, a: mx.Array, b: mx.Array) !void {
     const x = try raw(s, a);
     const y = try raw(s, b);
     try mx.evalMany(&.{ x, y }, false);

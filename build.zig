@@ -157,6 +157,15 @@ pub fn build(b: *std.Build) void {
     flash_weights.step.dependOn(&flash_weight_fixture.step);
     b.step("test-flash-weights", "Compare mixed Flash checkpoint formats and exact packed widening with upstream").dependOn(&flash_weights.step);
     metal_tests.dependOn(&flash_weights.step);
+    const flash_prefill_hc_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_variant_fixtures.py", "build/native-checks/flash-prefill-hc", "--flash-prefill-hc" });
+    const flash_prefill_hc = b.addRunArtifact(exe);
+    flash_prefill_hc.addArgs(&.{ "check-flash-prefill-hc", "build/native-checks/flash-prefill-hc" });
+    flash_prefill_hc.step.dependOn(&flash_prefill_hc_fixture.step);
+    const flash_prefill_hc_kernels = b.addRunArtifact(exe);
+    flash_prefill_hc_kernels.addArgs(&.{ "check-variants", "build/native-checks/flash-prefill-hc" });
+    flash_prefill_hc_kernels.step.dependOn(&flash_prefill_hc.step);
+    b.step("test-flash-prefill-hc", "Compare Flash batched hyper-connections, residual write-back and intermediate arithmetic with upstream").dependOn(&flash_prefill_hc_kernels.step);
+    metal_tests.dependOn(&flash_prefill_hc_kernels.step);
     const bonsai_model = b.fmt("{s}/Ternary-Bonsai-2-27B-mlx-2bit", .{model_root});
     const bonsai_pack_fixture = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", bonsai_model, "--bonsai-widening", "--output", "build/native-checks/bonsai-pack" });
     const bonsai_pack = b.addRunArtifact(exe);

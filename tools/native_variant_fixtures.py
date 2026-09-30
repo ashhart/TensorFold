@@ -593,6 +593,66 @@ def flash_weight_fixtures(directory):
     print(f"Saved {len(cases)} mixed-format Flash checkpoint and exact-widening cases", flush=True)
 
 
+def flash_prefill_hc_fixtures(capture):
+    from tensorfold.kernels.qwen.flash_next.v1 import base, hc, prefill_hc
+    from tests.test_flash_next_affine import quantized, bf16
+
+    rng = np.random.default_rng(82936)
+    cases = []
+    shapes = []
+    for index, (bits, group) in enumerate((b, g) for b in (2, 3, 4, 5, 6, 8) for g in (32, 64, 128)):
+        shapes.append((4, 256, 384, (17, 65, 257)[index % 3], bool(index % 2), bool(index % 3),
+                       (bits, group), (8 if bits != 8 else 3, 128 if group != 128 else 32)))
+    for count in (17, 63, 64, 65, 257, 2048):
+        for pending, inject in ((False, False), (True, True)):
+            shapes.append((4, 2560, 320, count, pending, inject, (4, 32), (4, 32)))
+    for streams in (1, 8):
+        for pending, inject in ((False, True), (True, False)):
+            shapes.append((streams, 256, 128, 65, pending, inject, (5, 64), (6, 128)))
+    for streams, dims, low, count, pending, inject, df, uf in shapes:
+        name = f"hyper{len(cases):03}"
+        capture.test = name
+        wide = streams * dims
+        down = quantized(rng, (low + (streams if inject else 0), wide), *df, scale=.02)
+        up = quantized(rng, (wide, low), *uf, scale=.02)
+        scale = mx.array(1 + .1 * rng.normal(size=wide), mx.float32)
+        eps = mx.array([1e-6], mx.float32)
+        entry = SimpleNamespace(down=base.QWeights(down.weight, down.scales, down.biases, *df),
+                                up=base.QWeights(up.weight, up.scales, up.biases, *uf), scale=scale, low=low)
+        h = bf16(rng, (count, wide * 2))[:, ::2]
+        branch = bf16(rng, (count, dims))
+        gates = bf16(rng, (count, streams))
+        residual, ssp = hc.hc_norm(h, streams=streams, **(
+            dict(write_back="plain", branch=(branch,), inject=gates) if pending else {}))
+        arrays = dict(h=h, branch=branch, pending_inject=gates, scale=scale, eps=eps,
+                      residual=residual, ssp=ssp)
+        original_qmm = prefill_hc._qmm
+        def record_qmm(x, weight):
+            result = original_qmm(x, weight)
+            arrays["normed" if weight is entry.down else "act"] = x
+            arrays["dn" if weight is entry.down else "projected"] = result
+            return result
+        prefill_hc._qmm = record_qmm
+        try:
+            written, mixed, inj = prefill_hc.hyper_connection(entry, h, (branch, gates) if pending else None,
+                                                            streams=streams, eps=eps)
+        finally:
+            prefill_hc._qmm = original_qmm
+        assert mx.array_equal(written, residual).item()
+        assert (inj is not None) == inject
+        arrays["mixed"] = mixed
+        if inject:
+            arrays["inject"] = inj
+        arrays.update({f"{key}.{suffix}": getattr(weight, suffix) for key, weight in (("down", down), ("up", up))
+                       for suffix in ("weight", "scales", "biases")})
+        mx.eval(*arrays.values())
+        mx.save_safetensors(str(capture.directory / f"{name}.safetensors"), arrays)
+        cases.append(dict(name=name, streams=streams, low=low, pending=pending, inject=inject,
+                          down_bits=df[0], down_group=df[1], up_bits=uf[0], up_group=uf[1]))
+    (capture.directory / "hyper.json").write_text(json.dumps(cases, indent=2) + "\n")
+    print(f"Saved {len(cases)} complete Flash prefill hyper-connections and their intermediate arrays", flush=True)
+
+
 def flash_affine_variants(capture):
     from tensorfold.kernels.qwen.flash_next.v1 import base, rows, hc, experts, embed
     from tests.test_flash_next_affine import quantized, bf16, same
@@ -690,6 +750,7 @@ def main():
     parser.add_argument("--simd-bits", action="store_true")
     parser.add_argument("--flash-affine", action="store_true")
     parser.add_argument("--flash-weights", action="store_true")
+    parser.add_argument("--flash-prefill-hc", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     if args.flash_weights:
@@ -703,12 +764,23 @@ def main():
         return
     capture = Capture(args.directory)
     mx.fast.metal_kernel = capture.kernel
+    if args.flash_prefill_hc:
+        try:
+            flash_prefill_hc_fixtures(capture)
+        finally:
+            mx.fast.metal_kernel = capture.original
+        required = {name for name in capture.fingerprints if name.startswith("flash_prefill_hc_")}
+        if len(required) != 3 or required - {case["kernel"] for case in capture.cases}:
+            raise RuntimeError("Flash prefill hyper-connection kernels were not captured")
+        (args.directory / "cases.json").write_text(json.dumps(capture.cases, indent=2) + "\n")
+        print(f"Saved {len(capture.cases)} Flash prefill kernel launches", flush=True)
+        return
     if args.flash_affine:
         try:
             flash_affine_variants(capture)
         finally:
             mx.fast.metal_kernel = capture.original
-        required = {name for name in capture.fingerprints if name.startswith("flash_")}
+        required = {name for name in capture.fingerprints if name.startswith("flash_") and not name.startswith("flash_prefill_")}
         missing = required - {case["kernel"] for case in capture.cases}
         if missing:
             raise RuntimeError(f"Missing Flash affine kernels: {sorted(missing)}")

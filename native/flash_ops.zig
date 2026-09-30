@@ -8,7 +8,7 @@ pub const Weight = struct {
     arrays: [3]A,
     format: Quant = .{ .bits = 4, .group_size = 32 },
 
-    fn geometry(w: Weight, rank: usize) !struct { n: i32, k: i32 } {
+    pub fn geometry(w: Weight, rank: usize) !struct { n: i32, k: i32 } {
         const dims = mx.shape(w.arrays[0]);
         const scales = mx.shape(w.arrays[1]);
         const biases = mx.shape(w.arrays[2]);
