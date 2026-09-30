@@ -397,11 +397,12 @@ def memory_fixtures(output):
     from types import SimpleNamespace
     from contextlib import nullcontext
     from tensorfold.engine.memory import StreamMemory, Admission
-    from tensorfold.server.stream_gate import StreamGate
+    from tensorfold.server.stream_gate import HORIZON, StreamGate
+    from tensorfold.server.scheduler import Scheduler
     from tensorfold.server.memory_budget import CacheMemory, memory_limit_bytes, needed_bytes, largest_context, GIB, PROBE_REPEATS
 
     rng = random.Random(81071)
-    result = dict(limits=[], caches=[], streams=[], budgets=[], gates=[], probe_repeats=PROBE_REPEATS)
+    result = dict(limits=[], caches=[], streams=[], budgets=[], gates=[], reservations=[], probe_repeats=PROBE_REPEATS, growth_horizon=HORIZON)
     for ram in (8 * GIB, 48 * GIB, 128 * GIB, 256 * GIB):
         for recommended in (0, ram // 2, ram, ram * 2):
             for fraction in (0.7, 0.85):
@@ -441,6 +442,39 @@ def memory_fixtures(output):
                                       live=[dict(now=now, most=most) for now, most in live], stream=memory.stream_bytes(tokens),
                                       prefill=memory.prefill_bytes(prompt), projected=projected, admits=admission.admits(prompt, tokens, live),
                                       fitting=admission.fitting(tokens)))
+    class ObservedAdmission(Admission):
+        def admits(self, prompt, longest, live):
+            self.reservation = (prompt, longest, live)
+            return super().admits(prompt, longest, live)
+
+    for _ in range(1000):
+        scheduler = Scheduler.__new__(Scheduler)
+        memory = StreamMemory(**rng.choice(result["streams"])["memory"])
+        horizon = rng.choice((None, 0, 1, 16, 2048, 4096))
+        scheduler.gate = None if horizon is None else SimpleNamespace(horizon=horizon)
+        scheduler.prompt_memory = None
+        jobs = []
+        for _ in range(rng.randrange(1, 9)):
+            prompt, reply = rng.randrange(262144), rng.choice((0, 1, 2047, 2048, 2049, 260000))
+            now = prompt + rng.randrange(reply + 1)
+            jobs.append(SimpleNamespace(prompt_ids=range(prompt), max_tokens=reply,
+                                        stream=SimpleNamespace(context=range(now), finished=False)))
+        scheduler._jobs = dict(enumerate(jobs))
+        scheduler.engine = SimpleNamespace(active_count=len(jobs))
+        prompt, reply = rng.randrange(262144), rng.choice((0, 1, 2047, 2048, 2049, 260000))
+        used = rng.randrange(20 * GIB)
+        scheduler.admission = ObservedAdmission(0, memory, used=lambda: used, lanes=rng.choice((1, 2, 4, 8)))
+        candidate = SimpleNamespace(prompt_ids=range(prompt), max_tokens=reply)
+        scheduler._fits(candidate)
+        requested, longest, live = scheduler.admission.reservation
+        projected = scheduler.admission.projected(requested, longest, live)
+        scheduler.admission.budget = max(0, projected + rng.choice((-1, 0, 1)))
+        fits = scheduler._fits(candidate)
+        result["reservations"].append(dict(horizon=horizon, prompt=prompt, reply=reply, longest=longest,
+                                           memory=asdict(memory), used=used, lanes=scheduler.admission.lanes,
+                                           budget=scheduler.admission.budget, projected=projected, fits=fits,
+                                           jobs=[dict(prompt=len(j.prompt_ids), now=len(j.stream.context), most=len(j.prompt_ids) + j.max_tokens) for j in jobs],
+                                           live=[dict(now=now, most=most) for now, most in live]))
     for fraction in (0.7, 0.85):
         for process in (64 * GIB, 110 * GIB):
             for elsewhere in (0, 8 * GIB, 20 * GIB, 128 * GIB):

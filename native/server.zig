@@ -236,7 +236,7 @@ const Worker = struct {
         w.memory_stats.mlx_budget = memory.share;
         w.memory_stats.admission_budget = admission.budget;
         w.memory_stats.update(0);
-        std.debug.print("Native memory admission: {d} bytes available, {d} resident, {d} bytes per token\n", .{ admission.budget, try memory_runtime.activeBytes(), profile.per_token });
+        std.debug.print("Native memory admission: {d} bytes available, {d} resident, {d} bytes per token; stream={d}, decode work={d}, prefill work={d}\n", .{ admission.budget, try memory_runtime.activeBytes(), profile.per_token, try profile.streamBytes(64), profile.round_bytes, try profile.prefillBytes(profile.chunk) });
         w.ready.set(w.io);
         var active: [8]?*Pending = @splat(null);
         var live: usize = 0;
@@ -323,13 +323,16 @@ fn gateRound(gate: *memory_policy.StreamGate, active: []const ?*Pending, prefixe
         }
     }.less);
     var streams: [8]memory_policy.Live = undefined;
-    for (oldest[0..count], streams[0..count]) |pending, *stream| stream.* = pending.generation.?.memoryLengths();
+    for (oldest[0..count], streams[0..count]) |pending, *stream| {
+        stream.* = pending.generation.?.memoryLengths();
+        stream.copy_bytes = pending.prefix_reserve;
+    }
     const plan = try gate.plan(memory_runtime.Reclaim{ .prefixes = prefixes }, streams[0..count]);
     for (oldest[plan.run..count]) |pending| pending.growth = .paused;
     if (plan.ended) |index| oldest[index].growth = .ended;
 }
 
-pub fn checkGrowth(session: *inference.Session) !void {
+pub fn checkGrowth(session: *inference.Session, profile: memory_policy.StreamMemory) !void {
     const tokens = [_]i32{ 10, 20, 30, 40, 50, 60, 70, 80 };
     for ([_]f32{ 0, 0.7 }) |temperature| {
         const options = inference.Options{ .max_tokens = 12, .ignore_eos = true, .sampling = .{ .temperature = temperature, .top_k = 0, .top_p = 1, .metal = true }, .seed = 71 };
@@ -374,6 +377,15 @@ pub fn checkGrowth(session: *inference.Session) !void {
         gate.budget = std.math.maxInt(u64);
         try gateRound(&gate, &active, null);
         try std.testing.expect(older.growth == .run and newer.growth == .run);
+        try mx.check(mx.c.mlx_clear_cache());
+        gate.per_token = 0;
+        gate.budget = try memory.used() + memory_policy.gib;
+        newer.prefix_reserve = 2 * memory_policy.gib;
+        try gateRound(&gate, &active, null);
+        try std.testing.expect(older.growth == .run and newer.growth == .paused);
+        newer.prefix_reserve = 0;
+        try gateRound(&gate, &active, null);
+        try std.testing.expect(older.growth == .run and newer.growth == .run);
         for ([_]*Pending{ &older, &newer }) |pending| {
             while (!try pending.generation.?.step(session)) {}
             var actual = try pending.generation.?.takeReply();
@@ -381,7 +393,7 @@ pub fn checkGrowth(session: *inference.Session) !void {
             try std.testing.expectEqualSlices(u32, expected.tokens.items, actual.tokens.items);
             try std.testing.expectEqualStrings(expected.content, actual.content);
         }
-        try std.testing.expectEqual(@as(u64, 1), gate.waits);
+        try std.testing.expectEqual(@as(u64, 2), gate.waits);
         try std.testing.expectEqual(@as(u64, 0), gate.ends);
     }
 
@@ -403,7 +415,23 @@ pub fn checkGrowth(session: *inference.Session) !void {
     try gateRound(&gate, &.{&older}, null);
     while (!try older.generation.?.step(session)) {}
     try std.testing.expectEqual(@as(u64, 1), gate.ends);
+    const prompt = try mx.allocator.alloc(i32, @intCast(profile.chunk + 1));
+    defer mx.allocator.free(prompt);
+    for (prompt, 0..) |*token, i| token.* = @intCast(10 + i % 93);
+    var filling = Pending{ .job = undefined, .ids = prompt };
+    filling.generation = try inference.RequestGeneration.init(session, mx.allocator, prompt, .{ .max_tokens = 4, .ignore_eos = true }, .{}, null);
+    defer filling.generation.?.deinit();
+    _ = try filling.generation.?.step(session);
+    try std.testing.expect(!filling.generation.?.isDecoding());
+    const before = filling.generation.?.progress();
+    var admission = memory_policy.Admission{ .budget = 0, .memory = profile };
+    try std.testing.expectError(error.RequestExceedsMemoryBudget, filling.guardPrefill(admission, &.{&filling}, null));
+    try std.testing.expectEqualDeep(before, filling.generation.?.progress());
+    admission.budget = std.math.maxInt(u64);
+    try filling.guardPrefill(admission, &.{&filling}, null);
+    while (!try filling.generation.?.step(session)) {}
     std.debug.print("PASS: live cache growth gating preserves activation order, paused greedy/seeded output and oldest-stream recovery\n", .{});
+    std.debug.print("PASS: prefill chunk memory refusal preserves request state for subsequent completion\n", .{});
 }
 
 const PrefixStats = struct {
@@ -634,23 +662,27 @@ const Pending = struct {
         try p.job.client.cancellation().check();
         if (p.growth == .ended) return error.StreamGrowthExceedsMemoryBudget;
         if (p.growth == .paused) return false;
+        if (p.generation) |*generation| if (!generation.isDecoding()) try p.guardPrefill(admission.*, active, prefixes);
         if (p.generation == null) {
             var live: [8]memory_policy.Live = undefined;
             var count: usize = 0;
             var copies: u64 = 0;
+            var work_prompt = p.ids.len;
             for (active) |slot| if (slot) |other| if (other.generation) |*generation| {
-                live[count] = generation.memoryLengths();
+                live[count] = memory_policy.reserveLive(generation.memoryLengths(), other.ids.len, memory_policy.growth_horizon);
                 count += 1;
                 copies +|= other.prefix_reserve;
+                if (!generation.isDecoding()) work_prompt = @max(work_prompt, other.ids.len);
             };
             const workspace = if (p.prepared_image) |*prepared| prepared.workspaceBytes() else 0;
-            var projected = (try admission.projected(try memory_runtime.activeBytes(), p.ids.len, p.ids.len + p.options.max_tokens, live[0..count])) +| copies;
+            const longest = p.ids.len + memory_policy.reserveReply(p.options.max_tokens, memory_policy.growth_horizon);
+            var projected = (try admission.projected(try memory_runtime.activeBytes(), work_prompt, longest, live[0..count])) +| copies;
             while ((p.options.max_tokens > 0 or workspace > 0) and projected +| workspace > admission.budget) {
                 const store = prefixes orelse break;
                 // Shared arrays may outlive an eviction; remeasure after every release.
                 if ((projected +| workspace) -| store.nbytes() > admission.budget or !store.evictOne(null)) break;
                 try mx.check(mx.c.mlx_clear_cache());
-                projected = (try admission.projected(try memory_runtime.activeBytes(), p.ids.len, p.ids.len + p.options.max_tokens, live[0..count])) +| copies;
+                projected = (try admission.projected(try memory_runtime.activeBytes(), work_prompt, longest, live[0..count])) +| copies;
             }
             if ((p.options.max_tokens > 0 or workspace > 0) and projected +| workspace > admission.budget) {
                 admission.refused +|= 1;
@@ -674,6 +706,25 @@ const Pending = struct {
         return done;
     }
 
+    fn guardPrefill(p: *Pending, admission: memory_policy.Admission, active: []const ?*Pending, prefixes: ?*PrefixStore) !void {
+        var decoding: [8]memory_policy.Live = undefined;
+        var count: usize = 0;
+        for (active) |slot| if (slot) |other| if (other.growth == .run) {
+            if (other.generation) |*generation| if (generation.isDecoding()) {
+                decoding[count] = memory_policy.reserveLive(generation.memoryLengths(), other.ids.len, memory_policy.growth_horizon);
+                decoding[count].copy_bytes = other.prefix_reserve;
+                count += 1;
+            };
+        };
+        const position = p.generation.?.memoryLengths().now;
+        const memory = memory_runtime.Reclaim{ .prefixes = prefixes };
+        while (true) {
+            const needed = try admission.prefillProjected(try memory.used(), p.ids.len, position, p.prefix_reserve, decoding[0..count]);
+            if (needed <= admission.budget) return;
+            if (needed -| (try memory.freeable()) > admission.budget or !try memory.reclaim()) return error.RequestExceedsMemoryBudget;
+        }
+    }
+
     fn savePrefix(p: *Pending, store: *PrefixStore, admission: memory_policy.Admission, active: []const ?*Pending) !void {
         const generation = &p.generation.?;
         if (generation.memoryLengths().now <= p.saved_position) return;
@@ -687,7 +738,7 @@ const Pending = struct {
         var prompt: usize = 0;
         var copies: u64 = 0;
         for (active) |slot| if (slot) |other| if (other.generation) |*request| {
-            live[count] = request.memoryLengths();
+            live[count] = memory_policy.reserveLive(request.memoryLengths(), other.ids.len, memory_policy.growth_horizon);
             count += 1;
             prompt = @max(prompt, other.ids.len);
             copies +|= other.prefix_reserve;

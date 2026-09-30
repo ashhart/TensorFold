@@ -161,7 +161,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | HTTP prefix reuse and eviction | `test-server-prefixes -Doptimize=safe -j1` | Local Qwen; JSON/SSE parity, cancellation, LRU eviction and disabled caching |
 | Live serving status | `test-server-live test-server-live-http -Doptimize=safe -j1` | Python rate/redraw oracle; local Qwen for request counters, prefix reuse, cancellation, queue overflow and terminal modes |
 | Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream admission/growth-gate parity, repeated probes and Qwen/Gemma/Nemotron pause/resume correctness |
-| Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
+| Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen rolling reservations, waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
 | Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven tokenizers, including DeepSeek's official encoder and upstream's rejection of required DeepSeek tool calls; no weights loaded |
@@ -180,6 +180,10 @@ Fixtures and oracle outputs go under `build/native-checks`. Long-context/layer
 traces can consume tens or hundreds of GiB. Tests do not download missing models.
 Metadata checks read safetensors headers and file lengths; they do not establish
 that a model fits in memory or generates correct output.
+
+HTTP checks use the server's memory admission policy. For Flash checks on a
+128 GiB Mac, set `TENSORFOLD_MEMORY_LIMIT_GB=96` if the default budget is too small.
+Hardware limits and memory occupied by other applications still apply.
 
 The `Native macOS bootstrap` GitHub workflow starts with fresh sources and a fresh
 Python environment, builds dependencies from archives, checks the installation,
@@ -210,10 +214,12 @@ GPU forwards are still per request. Up to eight further requests can queue.
 Serving follows upstream's RAM allowance and `TENSORFOLD_MEMORY_LIMIT_GB`, capped
 by Metal's recommended working set, with 3 GiB reserved outside MLX. Checkpoints
 that exceed the buffer budget are rejected before loading. Serving measures cache
-growth with three startup probes, reserves active requests' remaining replies and image workspace,
-and waits for memory before admitting another request. Requests that cannot fit
+growth with three startup probes, reserves unfinished prompts, up to 2,048 future
+reply tokens per request, shared-prefix copies and image workspace, and waits for
+memory before admitting another request. Requests that cannot fit
 alone are rejected. Retained text prefixes are evicted when doing so can make
-admission fit. Before decode rounds, the growth gate reclaims buffers and prefixes,
+admission fit. Each prefill chunk is checked before allocation. Before decode
+rounds, the growth gate reserves shared-prefix copies, reclaims buffers and prefixes,
 pauses newer streams, or ends the newest when the oldest cannot grow. Background
 preemption remains incomplete. `/health` reports memory, growth-gate counters,
 memory-waiting requests and prompt-cache counters. Its `inference` object reports

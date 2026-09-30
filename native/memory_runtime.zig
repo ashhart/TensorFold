@@ -285,6 +285,6 @@ pub fn check(io: std.Io, directory: []const u8) !void {
             }
         },
     }
-    try @import("server.zig").checkGrowth(&model);
+    try @import("server.zig").checkGrowth(&model, profile);
     std.debug.print("PASS: request memory probes cover prefill boundaries and decode growth without retaining request state\n", .{});
 }

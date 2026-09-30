@@ -2,6 +2,7 @@ const std = @import("std");
 pub const gib = 1024 * 1024 * 1024;
 pub const process_bytes = 3 * gib;
 pub const probe_repeats = 3;
+pub const growth_horizon = 2048;
 
 fn bytes(value: f64) !u64 {
     if (!std.math.isFinite(value) or value < 0 or value >= 18446744073709551616.0) return error.InvalidMemorySize;
@@ -113,13 +114,22 @@ pub const StreamMemory = struct {
     }
 };
 
-pub const Live = struct { now: u64, most: u64 };
+pub const Live = struct { now: u64, most: u64, copy_bytes: u64 = 0 };
+
+pub fn reserveReply(reply: u64, horizon: ?u64) u64 {
+    return if (horizon) |limit_tokens| @min(reply, limit_tokens) else reply;
+}
+
+pub fn reserveLive(stream: Live, prompt: u64, horizon: ?u64) Live {
+    // Native prefills can interleave; reserve their unfinished prompt as well as reply growth.
+    return .{ .now = stream.now, .most = if (horizon) |limit_tokens| @min(stream.most, @max(stream.now, prompt) +| limit_tokens) else stream.most, .copy_bytes = stream.copy_bytes };
+}
 
 pub const StreamGate = struct {
     per_token: f64,
     work: u64,
     budget: u64,
-    horizon: u64 = 2048,
+    horizon: u64 = growth_horizon,
     lanes: u64 = 1,
     waits: u64 = 0,
     ends: u64 = 0,
@@ -134,7 +144,7 @@ pub const StreamGate = struct {
         const lanes = @max(1, g.lanes);
         const work = try std.math.mul(u64, g.work, @min(streams.len, lanes));
         var result = try std.math.add(u64, used, work / lanes + @intFromBool(work % lanes != 0));
-        for (streams) |stream| result = try std.math.add(u64, result, try g.growth(stream));
+        for (streams) |stream| result = try std.math.add(u64, result, try std.math.add(u64, try g.growth(stream), stream.copy_bytes));
         return result;
     }
 
@@ -187,6 +197,17 @@ pub const Admission = struct {
         return ok;
     }
 
+    pub fn prefillProjected(admission: Admission, used: u64, prompt: u64, now: u64, copies: u64, decoding: []const Live) !u64 {
+        var grow = @min(admission.memory.chunk, prompt -| now);
+        var copy_bytes = copies;
+        for (decoding) |stream| {
+            grow = try std.math.add(u64, grow, stream.most -| stream.now);
+            copy_bytes = try std.math.add(u64, copy_bytes, stream.copy_bytes);
+        }
+        const work = @max(try admission.roundBytes(decoding.len + 1), try admission.memory.prefillBytes(prompt));
+        return bytes(@as(f64, @floatFromInt(used)) + @as(f64, @floatFromInt(copy_bytes)) + @as(f64, @floatFromInt(grow)) * admission.memory.per_token + @as(f64, @floatFromInt(work)));
+    }
+
     pub fn fitting(admission: Admission, used: u64, tokens: u64) !u64 {
         const each = try admission.memory.streamBytes(tokens);
         if (used > admission.budget) return 0;
@@ -208,10 +229,25 @@ pub fn check(io: std.Io, path: []const u8) !void {
     defer a.free(source);
     const Fixture = struct {
         probe_repeats: u32,
+        growth_horizon: u64,
         limits: []const struct { ram: u64, recommended: u64, fraction: f64, override: ?[]const u8, result: ?u64 },
         caches: []const struct { memory: CacheMemory, tokens: u64, in_flight: u64, request: CacheMemory.Request, budget: u64, window: u64, cache: u64, growth: u64, needed: u64, largest: u64 },
         streams: []const struct { memory: StreamMemory, lanes: u64, tokens: u64, prompt: u64, used: u64, budget: u64, live: []const Live, stream: u64, prefill: u64, projected: u64, admits: bool, fitting: u64 },
         budgets: []const struct { ram: u64, fraction: f64, process: u64, share: u64, elsewhere: u64, result: u64 },
+        reservations: []const struct {
+            horizon: ?u64,
+            prompt: u64,
+            reply: u64,
+            longest: u64,
+            memory: StreamMemory,
+            used: u64,
+            lanes: u64,
+            budget: u64,
+            projected: u64,
+            fits: bool,
+            jobs: []const struct { prompt: u64, now: u64, most: u64 },
+            live: []const Live,
+        },
         gates: []const struct {
             active: u64,
             cache: u64,
@@ -227,6 +263,7 @@ pub fn check(io: std.Io, path: []const u8) !void {
     const parsed = try std.json.parseFromSlice(Fixture, a, source, .{});
     defer parsed.deinit();
     try std.testing.expectEqual(probe_repeats, parsed.value.probe_repeats);
+    try std.testing.expectEqual(growth_horizon, parsed.value.growth_horizon);
     for (parsed.value.limits) |case| {
         const result = limit(case.ram, case.recommended, case.fraction, case.override) catch {
             if (case.result != null) return error.MemoryLimitMismatch;
@@ -242,6 +279,18 @@ pub fn check(io: std.Io, path: []const u8) !void {
         if (try case.memory.streamBytes(case.tokens) != case.stream or try case.memory.prefillBytes(case.prompt) != case.prefill or try admission.projected(case.used, case.prompt, case.tokens, case.live) != case.projected or try admission.admits(case.used, case.prompt, case.tokens, case.live) != case.admits or try admission.fitting(case.used, case.tokens) != case.fitting or admission.refused != @intFromBool(!case.admits)) return error.StreamMemoryMismatch;
     }
     for (parsed.value.budgets) |case| if (concurrentBudget(case.ram, case.fraction, case.process, case.share, case.elsewhere) != case.result) return error.ConcurrentBudgetMismatch;
+    for (parsed.value.reservations) |case| {
+        const longest = case.prompt + reserveReply(case.reply, case.horizon);
+        try std.testing.expectEqual(case.longest, longest);
+        var live: [8]Live = undefined;
+        for (case.jobs, case.live, live[0..case.jobs.len]) |job, expected, *actual| {
+            actual.* = reserveLive(.{ .now = job.now, .most = job.most }, job.prompt, case.horizon);
+            try std.testing.expectEqualDeep(expected, actual.*);
+        }
+        var admission = Admission{ .budget = case.budget, .memory = case.memory, .lanes = case.lanes };
+        try std.testing.expectEqual(case.projected, try admission.projected(case.used, case.prompt, longest, live[0..case.jobs.len]));
+        try std.testing.expectEqual(case.fits, try admission.admits(case.used, case.prompt, longest, live[0..case.jobs.len]));
+    }
     for (parsed.value.gates) |case| {
         var memory = GateMemory{ .active = case.active, .cache = case.cache, .entries = case.entries };
         var gate = StreamGate{ .per_token = case.per_token, .work = case.work, .budget = 0, .horizon = case.horizon, .lanes = case.lanes };
@@ -259,6 +308,7 @@ pub fn check(io: std.Io, path: []const u8) !void {
     }
     std.debug.print("PASS: upstream memory parity: {d} limits, {d} cache projections, {d} stream admission cases, {d} concurrency budgets\n", .{ parsed.value.limits.len, parsed.value.caches.len, parsed.value.streams.len, parsed.value.budgets.len });
     std.debug.print("PASS: {d} upstream stream-growth scenarios with reclaim, pause, termination and recovery\n", .{parsed.value.gates.len});
+    std.debug.print("PASS: {d} upstream scheduler rolling reservations and admission decisions\n", .{parsed.value.reservations.len});
 }
 
 const GateMemory = struct {
@@ -316,6 +366,34 @@ test "empty stream gate neither reclaims nor counts a wait" {
     var gate = StreamGate{ .per_token = 1, .work = 100, .budget = 0 };
     try std.testing.expectEqualDeep(StreamGate.Plan{ .run = 0, .paused = 0 }, try gate.plan(&memory, &.{}));
     try std.testing.expectEqual(@as(u64, 0), memory.reclaims);
+}
+
+test "rolling reservations keep unfinished prompts and never reserve past the reply limit" {
+    const t = std.testing;
+    try t.expectEqualDeep(Live{ .now = 1024, .most = 12048 }, reserveLive(.{ .now = 1024, .most = 100000 }, 10000, growth_horizon));
+    try t.expectEqualDeep(Live{ .now = 1024, .most = 10010 }, reserveLive(.{ .now = 1024, .most = 10010 }, 10000, growth_horizon));
+    try t.expectEqualDeep(Live{ .now = 10000, .most = 12048 }, reserveLive(.{ .now = 10000, .most = 100000 }, 10000, growth_horizon));
+    try t.expectEqualDeep(Live{ .now = 10999, .most = 11000 }, reserveLive(.{ .now = 10999, .most = 11000 }, 10000, growth_horizon));
+    const maximum = std.math.maxInt(u64);
+    try t.expectEqualDeep(Live{ .now = maximum - 1, .most = maximum }, reserveLive(.{ .now = maximum - 1, .most = maximum }, 10000, growth_horizon));
+}
+
+test "decode gate reserves retained-prefix copies only for running streams" {
+    var memory = GateMemory{ .active = 100, .cache = 0, .entries = &.{} };
+    var gate = StreamGate{ .budget = 200, .per_token = 0, .work = 0 };
+    const streams = [_]Live{ .{ .now = 100, .most = 1000 }, .{ .now = 100, .most = 1000, .copy_bytes = 200 } };
+    try std.testing.expectEqualDeep(StreamGate.Plan{ .run = 1, .paused = 1 }, try gate.plan(&memory, &streams));
+    try std.testing.expectEqual(@as(u64, 0), memory.reclaims);
+    gate.budget = 300;
+    try std.testing.expectEqualDeep(StreamGate.Plan{ .run = 2, .paused = 0 }, try gate.plan(&memory, &streams));
+}
+
+test "prefill rounds reserve their chunk and the decode growth already scheduled beside it" {
+    const admission = Admission{ .budget = 320, .memory = .{ .short_tokens = 0, .short = 0, .long_tokens = 1, .long = 0, .chunk = 4, .per_token = 10, .prefill_a = 2, .prefill_b = 0, .round_bytes = 50 } };
+    const decoding = [_]Live{.{ .now = 100, .most = 103, .copy_bytes = 20 }};
+    try std.testing.expectEqual(@as(u64, 320), try admission.prefillProjected(100, 10, 8, 100, &decoding));
+    try std.testing.expect(try admission.prefillProjected(100, 10, 4, 100, &decoding) > admission.budget);
+    try std.testing.expect(try admission.prefillProjected(100, 10, 4, 100, &.{}) <= admission.budget);
 }
 
 test "memory accounting rejects overflow and malformed profiles" {

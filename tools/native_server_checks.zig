@@ -136,7 +136,10 @@ const Output = struct {
     usage: ?[]const u8 = null,
 
     fn parse(a: std.mem.Allocator, bytes: []const u8, streaming: bool) !Output {
-        if (!std.mem.startsWith(u8, bytes, "HTTP/1.1 200")) return error.HttpRequestFailed;
+        if (!std.mem.startsWith(u8, bytes, "HTTP/1.1 200")) {
+            std.debug.print("Unexpected HTTP response: {s}\n", .{bytes[0..@min(bytes.len, 4096)]});
+            return error.HttpRequestFailed;
+        }
         if (!streaming) {
             const start = (std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.MissingHttpBody) + 4;
             const body = try std.json.parseFromSlice(std.json.Value, a, bytes[start..], .{});
@@ -157,7 +160,10 @@ const Output = struct {
                 continue;
             }
             const body = try std.json.parseFromSlice(std.json.Value, a, data, .{});
-            if (body.value.object.contains("error")) return error.StreamFailed;
+            if (body.value.object.contains("error")) {
+                std.debug.print("Stream error: {s}\n", .{data});
+                return error.StreamFailed;
+            }
             const choice = body.value.object.get("choices").?.array.items[0];
             if (choice.object.get("text")) |text| try content.appendSlice(a, text.string);
             if (choice.object.get("delta")) |delta| {
@@ -215,6 +221,8 @@ const Scenario = struct {
     fn checkNeural(s: *Scenario, port: u16) !void {
         const a = s.init.arena.allocator();
         const io = s.init.io;
+        var stage: []const u8 = "isolated completions";
+        errdefer std.debug.print("Neural HTTP failure during {s}\n", .{stage});
         var expected: [2]Output = undefined;
         const fixture_prompts = try std.json.parseFromSlice(std.json.Value, a, "[[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17],[21,22,23,24,25,26,27,28]]", .{});
         const prompts = [_]std.json.Value{
@@ -229,6 +237,7 @@ const Scenario = struct {
         _ = try s.waitForCounts(port, 0, 0);
         if ((try s.liveSnapshot(port)).object.get("neural_proposed").?.integer != 0) return error.SerialRequestUsedNeuralDrafts;
         for ([_]bool{ false, true }) |streaming| {
+            stage = if (streaming) "concurrent SSE" else "concurrent JSON";
             var sockets: [2]std.Io.net.Stream = undefined;
             var count: usize = 0;
             defer for (sockets[0..count]) |socket| socket.close(io);
@@ -244,6 +253,7 @@ const Scenario = struct {
         const accepted = stats.object.get("neural_accepted").?.integer;
         if ((proposed > 0) != s.neural_enabled) return error.NeuralDraftActivationMismatch;
         if (s.neural_enabled and !s.synthetic and s.require_acceptance and accepted == 0) return error.NoNeuralDraftsAccepted;
+        stage = "cancellation and recovery";
         const abandoned = try post(io, port, try std.json.Stringify.valueAlloc(a, .{ .prompt = prompts[0], .max_tokens = 4096, .ignore_eos = true, .stream = true }, .{}));
         var bytes: [128]u8 = undefined;
         var reader = abandoned.reader(io, &bytes);
@@ -508,20 +518,36 @@ const Scenario = struct {
         const cancelled = try post(io, port, reserved);
         var cancelled_open = true;
         defer if (cancelled_open) cancelled.close(io);
-        try waitForMemory(a, io, port, 1);
-        _ = try s.waitForCounts(port, 2, 1);
+        try firstEvent(io, cancelled);
+        try waitForMemory(a, io, port, 0);
+        _ = try s.waitForCounts(port, 2, 0);
+        const concurrent = try post(io, port, short);
+        defer concurrent.close(io);
+        try expected.compare(try Output.parse(a, try readAll(a, io, concurrent), false));
         cancelled.close(io);
         cancelled_open = false;
         try waitForMemory(a, io, port, 0);
         _ = try s.waitForCounts(port, 1, 0);
-        var next = try post(io, port, reserved);
+        const tokens = try a.alloc(i32, 262000);
+        @memset(tokens, 1001);
+        const oversized = try std.json.Stringify.valueAlloc(a, .{ .prompt = tokens, .max_tokens = @as(usize, 1) }, .{});
+        const waiting = try post(io, port, oversized);
+        var waiting_open = true;
+        defer if (waiting_open) waiting.close(io);
+        try waitForMemory(a, io, port, 1);
+        _ = try s.waitForCounts(port, 2, 1);
+        waiting.close(io);
+        waiting_open = false;
+        try waitForMemory(a, io, port, 0);
+        _ = try s.waitForCounts(port, 1, 0);
+        var next = try post(io, port, oversized);
         var next_open = true;
         defer if (next_open) next.close(io);
         try waitForMemory(a, io, port, 1);
         _ = try s.waitForCounts(port, 2, 1);
         active.close(io);
         active_open = false;
-        try firstEvent(io, next);
+        if (std.mem.indexOf(u8, try readAll(a, io, next), "RequestExceedsMemoryBudget") == null) return error.MissingPromptMemoryRefusal;
         try waitForMemory(a, io, port, 0);
         next.close(io);
         next_open = false;
@@ -529,7 +555,7 @@ const Scenario = struct {
         defer recovery.close(io);
         try expected.compare(try Output.parse(a, try readAll(a, io, recovery), false));
         _ = try s.waitForCounts(port, 0, 0);
-        std.debug.print("PASS: memory-limited request waits for release; queued cancellation clears the wait; next request matches its isolated output\n", .{});
+        std.debug.print("PASS: long replies share rolling reservations; concurrent output matches isolation; oversized prompts wait, cancel and refuse after release\n", .{});
 
         var prefix: [2051]i32 = undefined;
         for (&prefix, 0..) |*id, i| id.* = @intCast(10 + i % 93);
@@ -539,9 +565,6 @@ const Scenario = struct {
         _ = try Output.parse(a, try readAll(a, io, warm), false);
         const retained = try CacheCounts.read(a, io, port);
         try std.testing.expect(retained.entries > 0 and retained.bytes > 0);
-        const tokens = try a.alloc(i32, 262000);
-        @memset(tokens, 1001);
-        const oversized = try std.json.Stringify.valueAlloc(a, .{ .prompt = tokens, .max_tokens = @as(usize, 1) }, .{});
         const too_long = try post(io, port, oversized);
         defer too_long.close(io);
         const refusal = try readAll(a, io, too_long);
