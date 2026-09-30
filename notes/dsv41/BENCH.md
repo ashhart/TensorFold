@@ -153,6 +153,7 @@ Parity (`golden_long_all.json`): 1K NLL 1.245 / vLLM 1.231 (was 1.241), 8K 1.675
 40K 1.614 / 1.613. DSpark output == serial (greedy, 3 cases); decode unchanged with the dual link.
 bf16 Z instead of fp16 cost 8K NLL +0.001 (rel 2.7e-3 vs 4.2e-4 on one layer), hence the scaled fp16.
 
-Second link: `rocep1s0f0` (aiai) / `rocep1s0f1` (aiai2) needed IPv4 for a RoCE v2 GID; set non-persistently with
-`ip addr add 10.43.0.1/24 dev enp1s0f0np0` (aiai) and `10.43.0.2/24 dev enp1s0f1np1` (aiai2); lost on reboot.
+Second link: `rocep1s0f0` (aiai) / `rocep1s0f1` (aiai2) needed IPv4 for a RoCE v2 GID; persistent in the
+NetworkManager profile `cx7-companion-mtu` (10.43.0.1/24 on aiai `enp1s0f0np0`, 10.43.0.2/24 on aiai2
+`enp1s0f1np1`, never-default, MTU 9000). vLLM stays pinned to the first half (`roceP2p1s0f0`/`...f1`).
 Chunk profile now: experts 740 ms, dense GEMM 260, NCCL 164, MQA 143, _post 76, rot_in 58 + 57, unpack 45.
