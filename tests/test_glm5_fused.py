@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 mx = pytest.importorskip("mlx.core")
@@ -57,6 +59,7 @@ def split_shared(request, monkeypatch):
     return request.param
 
 
+@pytest.mark.skipif(os.environ.get("TF_GLM_DENSE") == "matrix", reason="compares the fused MoE (MLX one-row arithmetic for the shared expert) with the unfused block, whose projections TF_GLM_DENSE=matrix moves to the matrix units")
 def test_fused_moe_is_the_row_by_row_block(monkeypatch, split_shared):
     """On Metal the five-kernel MoE gives every row of a 1-16-row window the row-by-row block's bits."""
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 mx = pytest.importorskip("mlx.core")
@@ -315,6 +317,7 @@ def _requant(q: linear.Q, bits: int) -> linear.Q:
     return linear.Q(*mx.quantize(w, group_size=64, bits=bits), bits=bits, group=64)
 
 
+@pytest.mark.skipif(os.environ.get("TF_GLM_DENSE") == "matrix", reason="compares the fused MoE (MLX one-row arithmetic for the shared expert) with the unfused block, whose projections TF_GLM_DENSE=matrix moves to the matrix units")
 def test_moe_window_with_8bit_shared_expert_is_row_by_row(gpu, monkeypatch):
     """The fused MoE with an 8-bit shared expert gives every row of a window the row-by-row block's bits."""
 
