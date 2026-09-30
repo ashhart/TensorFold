@@ -128,6 +128,8 @@ class App:
         if problem is None and grammar.request_spec(body) and "constraint" not in inspect.signature(
                 self.engine.generate).parameters:
             problem = "this model's engine does not enforce structured output"
+        if problem is None and grammar.request_spec(body) and getattr(self.engine, "refuses_structured_output", None):
+            problem = self.engine.refuses_structured_output       # e.g. Flash Next on two ranks with --parallel
         return problem
 
     def _grammars(self) -> grammar.Grammars:
@@ -617,7 +619,7 @@ def token_sha(tokens: list[int]) -> str:
 
 def print_done(prompt: int, cached: int, thinking: bool, out: list[int], finish: str, stats: dict[str, Any],
                request: Any) -> None:
-    """The Mac server's ``done`` line for a finished reply."""
+    """The Mac server's ``done`` line for a finished reply; tok/s runs from the first token to the last."""
 
     ended = time.perf_counter()
     first, started = getattr(request, "first", None), getattr(request, "started", ended)

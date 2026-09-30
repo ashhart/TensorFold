@@ -475,3 +475,20 @@ def test_the_first_structured_request_builds_the_compiler_from_the_checkpoint(tm
     (tmp_path / "config.json").write_text(json.dumps({"text_config": {"vocab_size": 128}, "vocab_size": 7}))
     assert app._grammars() == "compiler" and app._grammars() == "compiler"
     assert built == [(str(tmp_path), 128, (STOP,))]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_engine_refusing_structured_output_says_why_before_generating(tmp_path, stream):
+    """Flash Next on two ranks with --parallel: a structured request is a 400 naming why, never a reply served some
+    other way; a plain request is served as before."""
+
+    engine = GrammarEngine("Hello")
+    engine.refuses_structured_output = "structured output is not served by Flash Next on two ranks with --parallel yet"
+    app = _app(tmp_path, engine)
+    with http_server(app) as port:
+        for extra in ({"response_format": {"type": "json_object"}}, {"guided_regex": "a+"}):
+            status, text = post(port, _body(stream, **extra), True)
+            assert status == 400 and "two ranks with --parallel" in json.loads(text)["error"]["message"], text
+        status, text = post(port, _body(stream), True)
+        assert status == 200 and _content(stream, text) == "Hello"
+    assert engine.calls == [{"draft": True, "constraint": None}]

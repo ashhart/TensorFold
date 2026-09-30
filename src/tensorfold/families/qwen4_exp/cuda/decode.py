@@ -107,6 +107,39 @@ def choose_gathered(w: Weights, cand_all: torch.Tensor, R: int, positions: Seque
     return chosen, probs
 
 
+def choose_gathered_streams(w: Weights, cand_all: torch.Tensor, R: int, starts: Sequence[int],
+                            positions: Sequence[Sequence[int]], samplings: Sequence[Sampling | None],
+                            with_prob: bool = False):
+    """One read-back of gathered rows; each stream samples its own rows with the same keyed rule it uses alone."""
+
+    world, width = int(w.meta["world"]), 2 * CAND + 1
+    g = cand_all[:world * R * width].view(world, R, width).cpu().numpy()
+    values = np.concatenate([g[r, :, :CAND] for r in range(world)], axis=1).astype(np.float32)
+    tokens = np.concatenate([np.ascontiguousarray(g[r, :, CAND:2 * CAND]).view(np.int32) for r in range(world)],
+                            axis=1).astype(np.int64)
+    if with_prob:
+        lse = g[:, :, 2 * CAND].astype(np.float64)
+        top = lse.max(axis=0)
+        total = top + np.log(np.exp(lse - top).sum(axis=0))
+    chosen_all, probs_all = [], []
+    for k, (pos, smp) in enumerate(zip(positions, samplings)):
+        a0, a1 = starts[k], starts[k + 1]
+        v, t = values[a0:a1], tokens[a0:a1]
+        if smp is None or smp.temperature <= 0:
+            order = np.lexsort((t, -v), axis=-1)
+            chosen = [int(t[i, order[i, 0]]) for i in range(a1 - a0)]
+        else:
+            chosen = choose_rows(v, t, pos, smp)
+        chosen_all.append(chosen)
+        if with_prob:
+            probs = []
+            for i, tok in enumerate(chosen):
+                hit = np.nonzero(t[i] == tok)[0]
+                probs.append(float(np.exp(float(v[i, hit[0]]) - total[a0 + i])) if len(hit) else 0.0)
+            probs_all.append(probs)
+    return (chosen_all, probs_all) if with_prob else chosen_all
+
+
 def _gathered_fits(sampling: Sampling | None) -> bool:
     """Whether a step's gathered candidates (CAND a rank) cover the sampler's top-k plus its margin."""
 

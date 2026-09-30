@@ -268,6 +268,38 @@ class State:
                 setattr(sc_new, name, value.clone())
         return other
 
+    def copy_from(self, other: State) -> None:
+        """Become ``other`` in place: every tensor copied into this state's own (CUDA graphs keep their addresses),
+        the host-side positions and histories taken over. Both states have the same geometry."""
+
+        def tensors(obj):
+            for name, value in vars(obj).items():
+                if isinstance(value, torch.Tensor):
+                    yield name, value
+
+        for name, value in vars(other).items():
+            mine = getattr(self, name)
+            if isinstance(value, torch.Tensor):
+                mine.copy_(value)
+            elif isinstance(value, list) and value and isinstance(value[0], torch.Tensor):
+                for a, b in zip(mine, value):
+                    a.copy_(b)
+            elif isinstance(value, kvcache.KVCache):
+                for n, t in tensors(value):
+                    getattr(mine, n).copy_(t)
+            elif name == "scratch" or (isinstance(value, list) and value and isinstance(value[0], kvcache.KVCache)):
+                for a, b in zip(mine, value):
+                    for n, t in tensors(b):
+                        getattr(a, n).copy_(t)
+            elif name == "cur":
+                self.cur = list(value)
+            elif name == "ple_history":
+                self.ple_history = None if value is None else value.copy()
+            elif name in ("lin_index", "att_index", "capacity", "kv_dtype"):
+                continue                                   # the same geometry
+            else:
+                setattr(self, name, value)                 # pos, mtp_len, mtp_drafted, ple_last
+
     def set_mtp_len(self, n: int) -> None:
         self.mtp_len = n
         self.mtp_pos.fill_(n)

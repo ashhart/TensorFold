@@ -1,8 +1,11 @@
-"""Flash Next's concurrent rounds on one GPU: every stream keeps exactly its own accepted prefix."""
+"""Flash Next's concurrent rounds on one GPU or two ranks in step: every stream keeps exactly its own accepted prefix."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
+from datetime import timedelta
 
 import numpy as np
 import torch
@@ -12,12 +15,14 @@ from tensorfold.cuda.logprobs import capture
 from tensorfold.cuda.capacity import LIMIT_ENV, available_bytes, cuda_limit_bytes
 from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
+from tensorfold.cuda.capacity import gather_ints
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import Stream, accept
 from tensorfold.engine.exact_sampling import MARGIN, choose_rows
 from tensorfold.engine.grammar import GrammarError
 
-from .decode import PREFILL_ROWS, WARM_TAIL, Engine, draft, entry_end, prefill_begin
+from .decode import (PREFILL_ROWS, WARM_TAIL, Engine, _gathered_fits, choose_gathered_streams, draft, entry_end,
+                     prefill, prefill_begin, tp_sample_rows)
 from . import attn_multi, gdn_multi, image_rows, prefixes
 from .forward import Cut, commit, compute, compute_mixed, converges, cut_snapshot, stage
 from .mtp import mtp_compute, mtp_stage
@@ -32,7 +37,99 @@ PASS_MIN = 512                   # live shared passes keep this floor within the
 FILL_GUARD = 8                   # a prompt passed over this many passes takes the next one (no starvation), as on Macs
 
 
-def _slot(w, st: State, buf: Buffers, mbuf: Buffers, pbuf: Buffers, capacity: int, prefill_rows: int) -> Engine:
+class Link:
+    """Rank 0's ordered messages to rank 1: every admission, round and completion in the order rank 0 made it.
+    Rank 1 blocks on a socket read between them, not inside a GPU collective. With ``host`` (rank 0's address on
+    the link between the ranks) they cross one TCP connection whose port the rendezvous store publishes; without,
+    they go through the store itself (wait, get, delete: three round trips a message; tests)."""
+
+    KEY = "tensorfold/flashnext/multi/socket"
+
+    def __init__(self, store, *, rank: int | None = None, host: str | None = None) -> None:
+        import socket
+
+        self.store, self.n, self.sock, self.server = store, 0, None, None
+        if host is None:
+            return
+        if rank == 0:
+            self.server = socket.create_server((host, 0))
+            store.set(self.KEY, str(self.server.getsockname()[1]))
+        else:
+            store.wait([self.KEY], timedelta(hours=24))
+            self.sock = socket.create_connection((host, int(store.get(self.KEY).decode())))
+            self._fast(self.sock)
+
+    @staticmethod
+    def _fast(sock) -> None:
+        import socket
+
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+    def _key(self) -> str:
+        return f"tensorfold/flashnext/multi/{self.n}"
+
+    def send(self, op: list) -> None:
+        if self.server is not None:
+            import struct
+
+            if self.sock is None:                       # rank 1 connected at startup: this returns at once
+                self.sock, _ = self.server.accept()
+                self._fast(self.sock)
+            data = json.dumps(op).encode()
+            self.sock.sendall(struct.pack("!I", len(data)) + data)
+            return
+        self.store.set(self._key(), json.dumps(op))
+        self.n += 1
+
+    def _read(self, n: int) -> bytes | None:
+        out = b""
+        while len(out) < n:
+            chunk = self.sock.recv(n - len(out))
+            if not chunk:                               # rank 0 is gone
+                return None
+            out += chunk
+        return out
+
+    def receive(self) -> list | None:
+        if self.sock is not None:
+            import struct
+
+            head = self._read(4)
+            body = None if head is None else self._read(struct.unpack("!I", head)[0])
+            return None if body is None else json.loads(body)
+        from torch.distributed import DistNetworkError
+
+        key = self._key()
+        while True:
+            try:
+                self.store.wait([key], timedelta(hours=1))
+                break
+            except DistNetworkError:                        # rank 0 is gone
+                return None
+            except Exception:                               # noqa: BLE001, S112  (no message within the hour: wait on)
+                continue
+        text = self.store.get(key).decode()
+        self.store.delete_key(key)
+        self.n += 1
+        return json.loads(text)
+
+
+def _pack(sampling) -> list | None:
+    """A request's sampling rule as exact JSON (floats round-trip bit for bit)."""
+
+    if sampling is None:
+        return None
+    return [int(sampling.seed), float(sampling.temperature), int(sampling.top_k), float(sampling.top_p),
+            float(sampling.min_p)]
+
+
+def _unpack(values):
+    from tensorfold.engine.exact_sampling import Sampling
+
+    return None if values is None else Sampling(values[0], values[1], values[2], values[3], values[4])
+
+
+def _slot(w, st: State, buf: Buffers, mbuf: Buffers, pbuf: Buffers, capacity: int, prefill_rows: int = PREFILL_ROWS) -> Engine:
     """A one-sequence engine over a slot's state and the shared buffers (eager: no CUDA graphs)."""
 
     e = object.__new__(Engine)
@@ -42,14 +139,19 @@ def _slot(w, st: State, buf: Buffers, mbuf: Buffers, pbuf: Buffers, capacity: in
     return e
 
 
+class OutOfStep(RuntimeError):
+    """The two ranks' plans for an admission or a round differ: both ranks raise it at the same point, before any
+    collective of that step, so neither waits on the other; the requests it touches fail and serving goes on."""
+
+
 class MultiDecoder:
     """Rounds over the live streams; ``slots`` streams at most, each with ``capacity`` tokens of context."""
 
     def __init__(self, w, *, slots: int, capacity: int, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16", prefill_rows: int = PREFILL_ROWS,
-                 share: float = SHARE, points=None, vision=None, workspace_bytes: int = 0) -> None:
-        if w.comm is not None:
-            raise ValueError("concurrent Flash Next runs on one GPU for now")
+                 share: float = SHARE, points=None, vision=None, workspace_bytes: int = 0,
+                 graphs: bool = True) -> None:
+        self.link: Link | None = None
         self.w, self.depth, self.confidence, self.capacity = w, depth, confidence, capacity
         self.points = points                         # a prompt's message starts to keep states at, or None
         self.vision = vision
@@ -61,11 +163,14 @@ class MultiDecoder:
         self.share, self.round_s, self.row_s = share, None, None
         self.buf = Buffers(w, rows, capacity, moe_prefill=True)
         self.mbuf = Buffers(w, rows, capacity) if w.mtp is not None else None
-        self.pbuf = Buffers(w, prefill_rows + (rows if self.converged else 0), capacity, prefill=True)
-        self.gdn = gdn_multi.Scratch(w, rows)            # every stream's DeltaNet rows, one launch a step
-        self.held: dict[int, list[int]] = {}             # stream id -> last round's kept rows, folded in next round
-        # slots start small and grow with their stream's context, up to the window, while the gate has room
-        self.free = [State(w, min(capacity, FIRST), depth + 1, kv_dtype, limit=capacity) for _ in range(slots)]
+        self.pbuf = Buffers(w, PREFILL_ROWS, capacity, prefill=True)
+        # A stream decoding alone replays the one-stream CUDA graphs: the graphs' state is one of the slots (new
+        # requests take it first), so a lone stream needs no copy; beside other streams it decodes eagerly like any.
+        self.solo = _solo(w, capacity, depth, kv_dtype, self.pbuf) if graphs and depth > 0 and self.mbuf is not None \
+            else None
+        self.solo_on = self.solo is not None
+        self.free = ([self.solo.st] if self.solo is not None else []) + \
+            [State(w, capacity, depth + 1, kv_dtype) for _ in range(slots - (self.solo is not None))]
         self.slot_bytes = sum(t.numel() * t.element_size() for t in _tensors(self.free[0]))
         self.window_bytes = self.free[0].cache_bytes(capacity)          # one stream's caches at the full window
         free = torch_live(torch, available_bytes) if torch.cuda.is_available() else None
@@ -82,6 +187,7 @@ class MultiDecoder:
         self.draft_host = w.draft_ids.cpu().numpy() if w.draft_ids is not None else None
         self.kept: list[tuple[list[int], State, dict, torch.Tensor | None]] = []   # (ids, slot, snapshot, tail)
         self.keep = keep
+        self.slots = list(self.free)            # every slot by index: rank 0 names the slot a request takes
 
     def _busy(self) -> set[int]:
         return {id(s.st) for s in [*self.streams.values(), *self.filling]}
@@ -183,6 +289,37 @@ class MultiDecoder:
 
         return prefixes.slot_for(self, prompt, reuse)
 
+    def _index(self, st: State) -> int:
+        return next(i for i, x in enumerate(self.slots) if x is st)
+
+    def _slot_as_told(self, prompt: list[int], slot: int, cached: int):
+        """Rank 1: the slot rank 0 chose, resumed from the kept prompt end rank 0 resumes from; None when this rank
+        cannot (the admission then fails on both ranks)."""
+
+        if not 0 <= slot < len(self.slots) or id(self.slots[slot]) in self._busy():
+            return None
+        st = self.slots[slot]
+        if cached > 0:
+            k = next((k for k in self.kept if k[1] is st and len(k[0]) == cached and list(prompt[:cached]) == k[0]),
+                     None)
+            if k is None:
+                return None
+            self._drop_kept(st)
+            return st, {"state": k[2], "tail": k[3]}, cached
+        self._drop_kept(st)
+        self.free = [f for f in self.free if f is not st]
+        return st, None, 0
+
+    def _agree(self, what: str, plan: list) -> None:
+        """Two ranks: both confirm the same plan in one small all-gather before the step's work, or both raise."""
+
+        if self.w.comm is None:
+            return
+        digest = int.from_bytes(hashlib.sha256(json.dumps(plan).encode()).digest()[:8], "big", signed=True)
+        mine, theirs = gather_ints(torch, self.w.comm.all_gather, [digest])
+        if mine != theirs:
+            raise OutOfStep(f"the two ranks planned different {what}s; the requests in it fail, serving goes on")
+
     def _remember(self, ids: list[int], st: State, snap: dict, tail) -> None:
         prefixes.remember(self, ids, st, snap, tail)
 
@@ -193,37 +330,46 @@ class MultiDecoder:
     def warm(self) -> None:
         """A synthetic greedy request through prefill (a full chunk, then a partial one cut at the kept point), its drafts and one round, then forgotten, so no request compiles or loads a kernel."""
 
-        s = Stream([0] * min(self.prefill_rows + WARM_TAIL + 1, self.capacity - self.depth - 2), 2)
-        self.admit(s)
-        if not s.done:
-            self.round()                                 # the whole prompt (nothing else decodes), then a round
-        self.streams.pop(s.sid, None)
-        self._drop_kept(s.st)
-        self._shrink(s.st)
-        if all(f is not s.st for f in self.free):
-            self.free.append(s.st)
+        if self.solo is not None and self.solo.graphs is not None:    # every one-stream window, captured now
+            self.solo.graphs.warm(self.depth + 1)
+        self.solo_on = False                           # the synthetic request warms the eager rounds' kernels
+        try:
+            s = Stream([0] * min(PREFILL_ROWS + WARM_TAIL, self.capacity - self.depth - 2), 2)
+            self.admit(s)
+            if not s.done:
+                self.round()
+            self.streams.pop(s.sid, None)
+            self._drop_kept(s.st)
+            if all(f is not s.st for f in self.free):
+                self.free.append(s.st)
+        finally:
+            self.solo_on = self.solo is not None
 
     @torch.no_grad()
-    def admit(self, s: Stream) -> None:
-        """Queue a request in a free slot (a kept prompt end it extends, if any); rounds prefill its prompt."""
+    def admit(self, s: Stream, told: tuple[int, int] | None = None) -> None:
+        """Prefill a request in a free slot, draft its first chain and emit its first token; told: on rank 1,
+        the slot and resume point rank 0 chose."""
 
         room = self.capacity - len(s.prompt) - self.depth - 1
         if room < 1:
             raise ValueError(f"a prompt of {len(s.prompt)} tokens leaves no room in the {self.capacity}-token context")
         s.count = max(1, min(s.count, room))
-        if any(x.waiting for x in self.streams.values()):
-            raise NoRoom("streams already wait for memory; a new request waits until one finishes")
+        if self.w.comm is not None and (s.constraint is not None or s.vision is not None):
+            raise ValueError("concurrent Flash Next on two ranks serves text without a response grammar for now")
         t0 = time.perf_counter()
-        st, resume, s.cached = self._slot_for(list(s.prompt), s.draft and s.vision is None)
+        taken = self._slot_for(list(s.prompt), s.draft) if told is None else self._slot_as_told(s.prompt, *told)
+        slot, cached = (-1, -1) if taken is None else (self._index(taken[0]), taken[2])
+        if self.link is not None:
+            self.link.send(["admit", self.next_id, list(s.prompt), s.count, _pack(s.sampling), bool(s.draft),
+                            bool(s.stop_eos), slot, cached])
         try:
-            if not self._grow(st, len(s.prompt) + self.depth + 2, alone=not self.streams and not self.filling):
-                raise NoRoom(f"a {len(s.prompt)}-token prompt waits for memory until a live stream finishes")
-        except NoRoom:
-            if resume is None:
-                self.free.append(st)
-            else:                                        # the kept prompt end stays kept
-                self._remember(list(s.prompt[:s.cached]), st, resume["state"], resume["tail"])
+            self._agree("admission", [self.next_id, slot, cached, list(s.prompt), _pack(s.sampling), bool(s.draft),
+                                      s.count])
+        except OutOfStep:
+            if taken is not None:
+                self.free.append(taken[0])
             raise
+        st, resume, s.cached = taken
         e = _slot(self.w, st, self.buf, self.mbuf, self.pbuf, self.capacity, self.prefill_rows)
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
         try:
@@ -427,11 +573,10 @@ class MultiDecoder:
     def round(self) -> list[Stream]:
         """One round over the live streams, with the next prompt pass in the same forward while prompts fill."""
 
-        ended = self._make_room()                      # every stream's caches hold this round, or the newest wait
-        live = [s for s in self.streams.values() if not s.done and not s.waiting]
-        if self.filling and (not live or not self.converged):
-            ended += self._fill()                      # passes alone; a prompt that ends here joins this round
-            live = [s for s in self.streams.values() if not s.done and not s.waiting]
+        live = [s for s in self.streams.values() if not s.done]
+        if self.link is not None:            # streams rank 0 ended alone (a client that left) and not yet finished
+            self.link.send(["round", [s.sid for s in self.streams.values() if s.done], self._step_check(live)])
+        self._agree("round", [self._step_check(live), [self._index(s.st) for s in live], self.solo_on])
         if not live:
             return ended
         grammars, failed = {}, []
@@ -448,8 +593,11 @@ class MultiDecoder:
                 s.drafts = grammars[s.sid].tokens[1:]
         live = [s for s in live if not s.done]
         if not live:
-            return failed + ended
-        t0 = time.perf_counter()
+            return failed
+        if self.solo_on and len(live) == 1 and live[0].draft and live[0].constraint is None:
+            if live[0].st is not self.solo.st:
+                self._move_to_solo(live[0])
+            return failed + self._solo_round(live[0])
         windows = [(s.st, [s.out[-1]] + list(s.drafts)) for s in live]
         segs = stage(self.w, self.buf, windows)
         # a pass shares the round's forward only where their experts share a launch; else _fill ran it between rounds
@@ -481,15 +629,14 @@ class MultiDecoder:
             if s.sid in grammars:
                 s.constraint.mask(logits[a0:a1], grammars[s.sid])
         positions = [[st.pos + 1 + r for r in range(a1 - a0)] for st, a0, a1 in segs]
-        sampled = sample_streams(logits, starts, positions, [s.sampling for s in live])
-        paths = [accept(tokens, list(range(-1, len(tokens) - 1)), rows, s.count - len(s.out), self._ends(s))
-                 for s, (_, tokens), rows in zip(live, windows, sampled)]
-        for s, (_, tokens), (_, a0, _), (path, end), pos in zip(live, windows, segs, paths, positions):
-            if s.probabilities is not None:
-                capture(logits, [tokens[r] for r in path[1:]] + [end], [pos[r] for r in path],
-                        s.probabilities, rows=[a0 + r for r in path])
-        for s, rows in zip(live, gdn_multi.keep(tables, [len(path) for path, _ in paths])):
-            self.held[s.sid] = rows                      # the next round's trees fold these rows in first
+        samplings = [s.sampling for s in live]
+        if self.w.comm is None:
+            sampled = sample_streams(logits, starts, positions, samplings)
+        elif all(_gathered_fits(x) for x in samplings):    # the candidates gathered inside the forward, one read-back
+            sampled = choose_gathered_streams(self.w, self.buf.cand_all, starts[-1], starts, positions, samplings)
+        else:                                            # a rule wider than the gathered candidates: both ranks gather
+            sampled = [tp_sample_rows(self.w, logits[a0:a1], pos, smp, offset=int(self.w.meta["vocab_offset"]))
+                       for (_, a0, a1), pos, smp in zip(segs, positions, samplings)]
         kept = []
         for s, (_, tokens), (st, a0, a1), rows, (path, end) in zip(live, windows, segs, sampled, paths):
             commit(self.w, st, self.buf, a1 - a0, len(path), at=a0, states=False)
@@ -517,6 +664,41 @@ class MultiDecoder:
         for s in done:                                   # a finished stream's state is never read again
             self.held.pop(s.sid, None)
         return failed + done + ended
+
+    def _move_to_solo(self, s: Stream) -> None:
+        """A stream now decoding alone moves into the graphs' slot: its state copied in once (the same bits), the
+        slot's kept prompt end, if any, given up; its old slot stays kept or goes back to the free list."""
+
+        solo, old = self.solo.st, s.st
+        self._drop_kept(solo)
+        self.free = [f for f in self.free if f is not solo]
+        solo.copy_from(old)
+        s.st = solo
+        if not any(k[1] is old for k in self.kept) and all(f is not old for f in self.free):
+            self.free.append(old)
+
+    def _solo_round(self, s: Stream) -> list[Stream]:
+        """A lone stream's round in the one-stream engine (its graphs): verify, keep, commit and chain the next
+        drafts as ``mtp_decode`` does, so the kept tokens are the ones every other path keeps."""
+
+        e, st = self.solo, s.st
+        tokens = [s.out[-1]] + list(s.drafts)
+        R = len(tokens)
+        logits = e.forward(tokens)
+        rows = e.sample(logits[:R], [st.pos + 1 + r for r in range(R)], s.sampling)
+        path, end = accept(tokens, list(range(-1, R - 1)), rows, s.count - len(s.out), self._ends(s))
+        commit(self.w, st, e.buf, R, len(path))
+        s.committed.extend(tokens[:len(path)])
+        s.counted(R)
+        new = [tokens[r] for r in path[1:]] + [end]
+        last = len(s.out) + len(new) >= s.count or end in self._ends(s)
+        s.drafts = []
+        room = min(self.depth, s.count - len(s.out) - len(path))
+        if not last and room > 0:
+            s.drafts = draft(e, e.buf.streams[:len(path)], rows[:len(path)], st.pos + 1, room, s.sampling,
+                             self.confidence)
+        s.take(new, self._ends(s))
+        return [s] if s.done else []
 
     def _draft_all(self, streams: list) -> None:
         """Every drafting stream absorbs its kept rows and chains drafts, all streams in one step a depth."""
@@ -570,6 +752,8 @@ class MultiDecoder:
     def _picks(self, logits: torch.Tensor, positions: list[int], samplings: list) -> list[tuple[int, float]]:
         """Each row's keyed draft and its probability at temperature 1, one read-back (drafts change speed only)."""
 
+        if self.w.comm is not None:
+            return self._picks_tp(logits, positions, samplings)
         row = logits.float()
         k = max([int(s.top_k) + MARGIN for s in samplings if s is not None and s.temperature > 0 and s.top_k] or [1])
         k = min(k, row.shape[1])
@@ -593,9 +777,68 @@ class MultiDecoder:
             out.append((int(tok), float(np.exp(float(g[hit[0]]) - lse_i)) if len(hit) else 0.0))
         return out
 
+    def _picks_tp(self, logits: torch.Tensor, positions: list[int], samplings: list) -> list[tuple[int, float]]:
+        """Two ranks: each row's keyed draft and probability from the draft head's gathered candidates."""
+
+        w, n = self.w, len(positions)
+        if all(_gathered_fits(s) for s in samplings):
+            chosen, probs = choose_gathered_streams(w, self.mbuf.cand_all, n, list(range(n + 1)),
+                                                    [[p] for p in positions], samplings, with_prob=True)
+            return [(c[0], p[0]) for c, p in zip(chosen, probs)]
+        out = []
+        for i, (pos, smp) in enumerate(zip(positions, samplings)):
+            toks, probs = tp_sample_rows(w, logits[i:i + 1], [pos], smp, offset=int(w.meta["vocab_offset"]),
+                                         id_map=w.draft_ids, with_prob=True)
+            out.append((toks[0], probs[0]))
+        return out
+
+    @staticmethod
+    def _step_check(live: list[Stream]) -> list:
+        """What both ranks must agree on before a round: each live stream, its length and its drafts."""
+
+        return [[s.sid, len(s.out), list(s.drafts)] for s in live]
+
+    @torch.no_grad()
+    def follow(self, link: Link) -> None:
+        """Rank 1: replay rank 0's admissions, rounds and completions in order until rank 0 stops."""
+
+        while True:
+            op = link.receive()
+            if op is None or op[0] == "stop":
+                return
+            kind = op[0]
+            if kind == "admit":
+                sid, prompt, count, smp, draft_, stop_eos, slot, cached = op[1:]
+                if sid != self.next_id:              # the admission's collective check fails on both ranks
+                    print(f"[tensorfold] rank 1: rank 0 admits stream {sid}, rank 1 expects {self.next_id}", flush=True)
+                s = Stream(prompt, count, _unpack(smp), draft=draft_, stop_eos=stop_eos)
+                try:
+                    self.admit(s, told=(slot, cached))
+                except (ValueError, OutOfStep) as exc:   # rank 0 raised at the same point on the same input
+                    print(f"[tensorfold] rank 1: stream {sid} failed on both ranks: {exc}", flush=True)
+            elif kind == "round":
+                ended, check = op[1], op[2]
+                for sid in ended:                        # ended on rank 0 alone: here too, finished with it later
+                    if sid in self.streams:
+                        self.streams[sid].done = True
+                mine = self._step_check([s for s in self.streams.values() if not s.done])
+                if mine != check:                        # the round's collective check fails on both ranks
+                    print(f"[tensorfold] rank 1: out of step before a round: rank 0 {check}, rank 1 {mine}",
+                          flush=True)
+                try:
+                    self.round()
+                except Exception as exc:                 # noqa: BLE001  (rank 0 fails the same round and drops)
+                    print(f"[tensorfold] rank 1: a round failed: {exc}", flush=True)
+            elif kind == "finish":
+                self.finish([self.streams[sid] for sid in op[1] if sid in self.streams])
+            elif kind == "drop":
+                self.drop()
+
     def finish(self, done: list[Stream]) -> None:
         """Drop finished streams; a slot whose prompt state is kept stays with it, the rest are free again."""
 
+        if self.link is not None and done:
+            self.link.send(["finish", [s.sid for s in done]])
         for s in done:
             self.streams.pop(s.sid, None)
             if not any(k[1] is s.st for k in self.kept) and all(f is not s.st for f in self.free):
@@ -603,8 +846,9 @@ class MultiDecoder:
                 self.free.append(s.st)
 
     def drop(self) -> list[Stream]:
-        live = [s for s in self.streams.values() if not s.done] + self.filling
-        self.filling, self.fills = [], {}
+        if self.link is not None:
+            self.link.send(["drop"])
+        live = [s for s in self.streams.values() if not s.done]
         for s in live:
             self.streams.pop(s.sid, None)
             self.held.pop(s.sid, None)
@@ -612,6 +856,23 @@ class MultiDecoder:
             self._shrink(s.st)
             self.free.append(s.st)
         return live
+
+
+def _solo(w, capacity: int, depth: int, kv_dtype: str, pbuf: Buffers) -> Engine | None:
+    """The one-stream engine a lone stream decodes in: its own small window buffers and CUDA graphs, the
+    concurrent decoder's prompt buffer; None when this checkpoint's experts can't be captured."""
+
+    from .graphs import Graphs
+
+    if any(getattr(layer.moe.experts, "capturable", True) is False for layer in w.layers):
+        return None
+    rows = max(8, depth + 1)
+    e = object.__new__(Engine)
+    e.w, e.capacity, e.rows, e.prefill_rows, e.kv_dtype = w, capacity, rows, pbuf.rows, kv_dtype
+    e.buf, e.mbuf, e.pbuf = Buffers(w, rows, capacity), Buffers(w, rows, capacity), pbuf
+    e.st = State(w, capacity, depth + 1, kv_dtype)          # a slot's geometry: a stream's state copies in
+    e.graphs = Graphs(e, max_rows=rows)
+    return e
 
 
 def _tensors(st: State):
