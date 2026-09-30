@@ -234,3 +234,79 @@ def test_runner_dflash_drafted_equals_serial():
         assert a == b, "DFlash2-drafted reply != serial reply"
         assert c == b, f"auto (arms {arms}) reply != serial reply"
         assert arms["m"] and arms["f"], arms                 # both arms ran
+
+
+def _fused_dcp(rank, comm, capacity, dcp):
+    from tensorfold.families.glm_moe_dsa.cuda import fused
+
+    cfg, _, (embed, norm, head), layers = _parts(rank, 4)
+    w = fused.Weights(cfg, rank, 4, comm, embed, norm, head, layers, None)
+    w.dcp = dcp
+    return w, fused.State(w, capacity)
+
+
+def test_dcp_matches_replicated_and_windows_stay_exact():
+    """Decode context parallelism (KV positions interleaved over 4 ranks, all-gathered queries, rank-order merge of
+    log-sum-exp partials, distributed top-2048): close to the replicated cache past index_topk, and a 3-row verify
+    window still has 3 serial steps' bits."""
+    from tensorfold.families.glm_moe_dsa.cuda import fused
+
+    toks = _tokens(2110, seed=23)
+
+    def run(rank, comm):
+        out = {}
+        for dcp in (1, 4):
+            w, st = _fused_dcp(rank, comm, 4096, dcp)
+            big = fused.Buffers(w, 128, 4096)
+            small = fused.Buffers(w, 4, 4096)
+            for a in range(0, 2100, 128):
+                _prefill(w, st, big, toks, a, min(a + 128, 2100))
+            win, _ = _window(w, st, small, toks, 2100, 2103)
+            ser = [_window(w, st, small, toks, i, i + 1)[0] for i in range(2100, 2103)]
+            out[dcp] = (win, ser)
+            del w, st, big, small
+            torch.cuda.empty_cache()
+        return out
+
+    for out in run_ranks(run, 4):
+        win4, ser4 = out[4]
+        for i, h in enumerate(ser4):
+            assert torch.equal(win4[i:i + 1], h), f"DCP row {i}: window != serial"
+        rel = float((win4.float() - out[1][0].float()).norm() / out[1][0].float().norm())
+        assert rel < 2e-2, rel
+
+
+@pytest.mark.skipif(not DFLASH, reason="set TF_GLM53_DFLASH_TEST to a GLM-5.3 DFlash2 checkpoint")
+def test_capture_writes_trainer_sequences(tmp_path, monkeypatch):
+    """TF_GLM53_CAPTURE_DIR: rank 0 writes dflash2_train.py's sequence layout - one row per committed position, ids =
+    prompt + reply, fp8 taps that round-trip to the live ones (the drafter's ring buffer runs underneath)."""
+    from safetensors import safe_open
+
+    from tensorfold.families.glm_moe_dsa.cuda import fused
+    from tensorfold.families.glm_moe_dsa.cuda.dflash import GlmDrafter
+    from tensorfold.families.glm_moe_dsa.cuda.runner import Runner
+
+    monkeypatch.setenv("TF_GLM53_CAPTURE_DIR", str(tmp_path))
+    prompt = _tokens(150, seed=29).tolist()
+    cfg_d = json.loads((Path(DFLASH) / "config.json").read_text())
+
+    def run(rank, comm):
+        cfg, r, (embed, norm, head), layers = _parts(rank, 4)
+        w = fused.Weights(cfg, rank, 4, comm, embed, norm, head, layers, None)
+        w.tap_slot = {int(i): s for s, i in enumerate(cfg_d["dflash_config"]["target_layer_ids"])}
+        run_ = Runner(w, 512, 0, graphs=False)
+        run_.drafter = GlmDrafter(DFLASH, w, capacity=512)
+        st = run_.generate(prompt, 80, None, lambda t: False, lambda new: None, 0, "dflash")
+        fn = run_.cap.finish(prompt + st["out"], {"temp": 0}) if run_.cap is not None else None
+        return fn, st["out"]
+
+    res = run_ranks(run, 4)
+    fn, out = res[0]
+    assert fn is not None and all(r[0] is None for r in res[1:]), "rank 0 alone writes"
+    f = safe_open(fn, framework="pt")
+    ids = f.get_tensor("ids").tolist()
+    T = len(ids)
+    assert T == len(prompt) + len(out) - 1, (T, len(prompt), len(out))      # the last token has no taps yet
+    assert ids == (prompt + out)[:T]
+    assert f.get_tensor("aux_fp8").shape == (T, 6 * 6144) and f.get_tensor("aux_scale").shape == (T, 6)
+    assert (f.get_tensor("topk_ids") == -1).all()                            # greedy: no sampled rows

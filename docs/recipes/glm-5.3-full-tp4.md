@@ -19,6 +19,22 @@ hardware, vLLM with EXL3 kernels, MTP k = 2, CUDA graphs, RoCE all-reduce):
 | vLLM (same checkpoint, tuned) | 23.9 | 30.3 | 77-78 ms | ~755 / 749 tok/s | 43.6 s |
 
 Short context, greedy: MTP 28.8 prose / 31.7 code; DFlash2 28.3 / **40.0** (3.6 tokens a verify step).
+
+### 1M-token context (decode context parallelism 4)
+
+`--context 1000000` (anything past 200K turns it on; `TF_GLM53_DCP=4` forces it): the KV cache is interleaved over the
+four ranks (position p on rank p % 4), each rank scores its own keys for the indexer and keeps a local top-2048, every
+rank takes the same global top-2048, attends all heads over its own keys, and the log-sum-exp partials merge in rank
+order — drafted replies still equal serial ones. ~25 GB of cache per rank at 1M.
+
+| Needle (passphrase at half depth) | Prompt | TTFT | Prefill | Result |
+|---|---|---|---|---|
+| 128K | 133,162 tok | 419 s | 318 tok/s | PASS |
+| 512K | 532,509 tok | 2,031 s | 262 tok/s | PASS |
+| ~1M | 966,562 tok | 4,245 s | 228 tok/s | PASS |
+
+Decode with DCP on: 25.9 prose / 28.6 code tok/s at short context (about 10 % below the replicated cache). DFlash2's
+drafter keeps a 4096-slot ring of its sliding window, so it works at any context length.
 Checkpoint quality vs BF16 (exllamav3 `model_diff`, 65,536 tokens): KL 0.124 nats, top-1 agreement 89.6 %.
 
 ## Run
@@ -48,6 +64,9 @@ Node settings that matter on GB10:
 - `NCCL_MAX_NCHANNELS=2` (the launcher's default): with NCCL's default channels a prompt chunk's all-reduce cannot run
   beside compute; with two it hides ~2/3 of its time.
 - Keep bulk transfers (NFS copies, uploads) off the RoCE port while serving: they add decode latency.
+- At 1M, GB10's allocator counts only free memory: drop clean page cache (`sysctl vm.drop_caches=1`) on the nodes
+  while the engine loads — an NFS server node's cache otherwise crowds the warm-up — and raise the RoCE runtime's
+  wait (`B12X_ROCE_SPIN_LIMIT=300000000`) so first-use kernel compiles cannot time out a collective.
 
 ## How it works
 

@@ -59,11 +59,17 @@ def _rope_pair(a, b, cos, sin):
 
 
 @triton.jit
-def _kv_write(KVA, kva_stride, NW, LC, POS, INV, eps, LW: tl.constexpr, RD: tl.constexpr):
+def _kv_write(KVA, kva_stride, NW, LC, POS, INV, eps, LW: tl.constexpr, RD: tl.constexpr, DCP: tl.constexpr = 1,
+              RANK: tl.constexpr = 0):
     """Row r at position POS + r: cache[p, :LW] = RMSNorm(kva[:LW]), cache[p, LW:] = RoPE(kva[LW:LW + RD]) (GLM's
-    interleaved pairs written evens then odds)."""
+    interleaved pairs written evens then odds). DCP > 1: only the owner of p (p % DCP) stores it, at slot p // DCP."""
     r = tl.program_id(0)
-    p = (tl.load(POS) + r).to(tl.int64)
+    pg = (tl.load(POS) + r).to(tl.int64)
+    if DCP > 1:
+        if pg % DCP != RANK:
+            return
+    p = pg // DCP
+    ang_p = pg
     k = tl.arange(0, LW)
     x = tl.load(KVA + r * kva_stride + k).to(tl.float32)
     rinv = 1.0 / tl.sqrt(tl.sum(x * x, axis=0) / LW + eps)
@@ -72,7 +78,7 @@ def _kv_write(KVA, kva_stride, NW, LC, POS, INV, eps, LW: tl.constexpr, RD: tl.c
     i = tl.arange(0, RD // 2)
     a = tl.load(KVA + r * kva_stride + LW + 2 * i).to(tl.float32)
     b = tl.load(KVA + r * kva_stride + LW + 2 * i + 1).to(tl.float32)
-    ang = p.to(tl.float32) * tl.load(INV + i)
+    ang = ang_p.to(tl.float32) * tl.load(INV + i)
     ra, rb = _rope_pair(a, b, tl.cos(ang), tl.sin(ang))
     tl.store(LC + p * (LW + RD) + LW + i, ra.to(tl.bfloat16))
     tl.store(LC + p * (LW + RD) + LW + RD // 2 + i, rb.to(tl.bfloat16))
@@ -184,10 +190,116 @@ def _attn_chunks(QA, QR, LC, TOK, POS, PO, PM, PL, R, H: tl.constexpr, LW: tl.co
 
 
 @triton.jit
-def _ik_write(IK, NW, NB, INV, IC, POS, eps, D: tl.constexpr, RD: tl.constexpr):
-    """Index key of row r: LayerNorm(ik) (fp32, with bias) to bf16, RoPE on its first RD dims, into IC[POS + r]."""
+def _attn_dcp(QALL, LC, TOK, CNT, POS, PO, PM, PL, R, H: tl.constexpr, G: tl.constexpr, LW: tl.constexpr,
+              RD: tl.constexpr, K: tl.constexpr, CHK: tl.constexpr, KTT: tl.constexpr, SCALE: tl.constexpr,
+              DCP: tl.constexpr, RANK: tl.constexpr):
+    """Program (row, chunk, head group g): H heads of rank g's gathered queries (QALL [G, R, H, LW + RD]) over this
+    rank's keys of row r - its slots of positions 0..p while p < K, else its share of the row's selected keys
+    (TOK, CNT). Partials go to head g * H + h (merged over chunks, then over ranks)."""
     r = tl.program_id(0)
-    p = (tl.load(POS) + r).to(tl.int64)
+    c = tl.program_id(1)
+    grp = tl.program_id(2)
+    p = tl.load(POS) + r
+    if p < K:
+        n = tl.where(p >= RANK, (p - RANK) // DCP + 1, 0)
+    else:
+        n = tl.load(CNT + r)
+    hh = tl.arange(0, H)
+    kl = tl.arange(0, LW)
+    kr = tl.arange(0, RD)
+    m = tl.full((H,), float("-inf"), tl.float32)
+    l = tl.zeros((H,), tl.float32)
+    o = tl.zeros((H, LW), tl.float32)
+    start = c * CHK
+    if start < n:
+        qb = QALL + ((grp * R + r) * H + hh[:, None]) * (LW + RD)
+        ql = tl.load(qb + kl[None, :])
+        qr = tl.load(qb + LW + kr[None, :])
+        for t in range(CHK // KTT):
+            idx = start + t * KTT + tl.arange(0, KTT)
+            ok = idx < n
+            if p < K:
+                key = idx.to(tl.int64)
+            else:
+                key = tl.load(TOK + r * K + idx, mask=ok, other=0).to(tl.int64)
+            kv = tl.load(LC + key[:, None] * (LW + RD) + kl[None, :], mask=ok[:, None], other=0.0)
+            kro = tl.load(LC + key[:, None] * (LW + RD) + LW + kr[None, :], mask=ok[:, None], other=0.0)
+            s = (tl.dot(ql, tl.trans(kv)) + tl.dot(qr, tl.trans(kro))) * SCALE
+            s = tl.where(ok[None, :], s, float("-inf"))
+            tile_m = tl.max(s, 1)
+            active = tile_m != float("-inf")
+            next_m = tl.where(active, tl.maximum(m, tile_m), m)
+            alpha = tl.where(active, tl.where(m == float("-inf"), 0.0, tl.exp(m - next_m)), 1.0)
+            pr = tl.where(ok[None, :] & active[:, None], tl.exp(s - next_m[:, None]), 0.0)
+            o = o * alpha[:, None] + tl.dot(pr.to(tl.bfloat16), kv)
+            l = l * alpha + tl.sum(pr, 1)
+            m = next_m
+    base = (c * R + r) * (G * H) + grp * H + hh
+    tl.store(PO + base[:, None] * LW + kl[None, :], o)
+    tl.store(PM + base, m)
+    tl.store(PL + base, l)
+
+
+@triton.jit
+def _merge_lse(PO, PM, PL, OSEND, LSEND, R, HT: tl.constexpr, H: tl.constexpr, LW: tl.constexpr,
+               NCH: tl.constexpr):
+    """Program (row, head of all HT): this rank's chunk partials in chunk order -> the normalized output (bf16) and its
+    log-sum-exp, laid out [destination rank = head // H, row, head % H] for the exchange; no keys: 0 and -inf."""
+    r = tl.program_id(0)
+    h = tl.program_id(1)
+    k = tl.arange(0, LW)
+    m = float("-inf")
+    l = 0.0
+    o = tl.zeros((LW,), tl.float32)
+    for c in range(NCH):
+        base = (c * R + r) * HT + h
+        cm = tl.load(PM + base)
+        cl = tl.load(PL + base)
+        co = tl.load(PO + base * LW + k)
+        active = cl > 0.0
+        next_m = tl.where(active, tl.maximum(m, cm), m)
+        a = tl.where(active, tl.where(m == float("-inf"), 0.0, tl.exp(m - next_m)), 1.0)
+        b = tl.where(active, tl.exp(cm - next_m), 0.0)
+        o = o * a + co * b
+        l = l * a + cl * b
+        m = next_m
+    dst = ((h // H) * R + r) * H + h % H
+    has = l > 0.0
+    tl.store(OSEND + dst * LW + k, tl.where(has, o / tl.where(has, l, 1.0), 0.0).to(tl.bfloat16))
+    tl.store(LSEND + dst, tl.where(has, m + tl.log(tl.where(has, l, 1.0)), float("-inf")))
+
+
+@triton.jit
+def _dcp_combine(ORECV, LRECV, OUT, R, SS, SSL, H: tl.constexpr, LW: tl.constexpr, WORLD: tl.constexpr):
+    """Program (row, own head): every rank's normalized partial for this head merged in rank order by their
+    log-sum-exps (ORECV[src] = [R, H, LW] at stride SS, LRECV[src] = [R, H] at stride SSL) -> OUT [R, H, LW] bf16."""
+    r = tl.program_id(0)
+    h = tl.program_id(1)
+    k = tl.arange(0, LW)
+    mx = float("-inf")
+    for src in tl.static_range(WORLD):
+        mx = tl.maximum(mx, tl.load(LRECV + src * SSL + r * H + h))
+    acc = tl.zeros((LW,), tl.float32)
+    den = 0.0
+    for src in tl.static_range(WORLD):
+        ls = tl.load(LRECV + src * SSL + r * H + h)
+        wgt = tl.where(ls == float("-inf"), 0.0, tl.exp(ls - mx))
+        acc = acc + wgt * tl.load(ORECV + src * SS + (r * H + h) * LW + k).to(tl.float32)
+        den = den + wgt
+    tl.store(OUT + (r * H + h) * LW + k, (acc / den).to(tl.bfloat16))
+
+
+@triton.jit
+def _ik_write(IK, NW, NB, INV, IC, POS, eps, D: tl.constexpr, RD: tl.constexpr, DCP: tl.constexpr = 1,
+              RANK: tl.constexpr = 0):
+    """Index key of row r: LayerNorm(ik) (fp32, with bias) to bf16, RoPE on its first RD dims, into IC[POS + r]
+    (DCP > 1: the owner's slot p // DCP only)."""
+    r = tl.program_id(0)
+    pg = (tl.load(POS) + r).to(tl.int64)
+    if DCP > 1:
+        if pg % DCP != RANK:
+            return
+    p = pg // DCP
     d = tl.arange(0, D)
     x = tl.load(IK + r * D + d)
     mu = tl.sum(x, axis=0) / D
@@ -201,7 +313,7 @@ def _ik_write(IK, NW, NB, INV, IC, POS, eps, D: tl.constexpr, RD: tl.constexpr):
           + tl.load(NB + e).to(tl.float32)).to(tl.bfloat16).to(tl.float32)
     yo = ((tl.load(IK + r * D + o) - mu) * rs * tl.load(NW + o).to(tl.float32)
           + tl.load(NB + o).to(tl.float32)).to(tl.bfloat16).to(tl.float32)
-    ang = p.to(tl.float32) * tl.load(INV + i)
+    ang = pg.to(tl.float32) * tl.load(INV + i)
     ra, rb = _rope_pair(ye, yo, tl.cos(ang), tl.sin(ang))
     tl.store(IC + p * D + i, ra.to(tl.bfloat16))
     tl.store(IC + p * D + RD // 2 + i, rb.to(tl.bfloat16))
@@ -225,16 +337,17 @@ def _iq_rope(Q, INV, POS, NH: tl.constexpr, D: tl.constexpr, RD: tl.constexpr):
 
 @triton.jit
 def _index_scores(Q, W, IC, POS, OUT, T, R0, NH: tl.constexpr, D: tl.constexpr, BTT: tl.constexpr,
-                  WSCALE: tl.constexpr, QSCALE: tl.constexpr):
+                  WSCALE: tl.constexpr, QSCALE: tl.constexpr, DCP: tl.constexpr = 1, RANK: tl.constexpr = 0):
     """Program (row, key block): score[t] = sum_h w[h] relu(q[h] . k[t] QSCALE) for keys t <= POS + r, packed with
     the key into one int64 that orders by score, then lower position first (so top-k is tie-free); later keys -> min."""
     r = tl.program_id(0)                     # row r of this block: window row R0 + r
     t0 = tl.program_id(1) * BTT
     p = tl.load(POS) + R0 + r
-    t = t0 + tl.arange(0, BTT)
-    ok = (t <= p) & (t < T)
-    lo = (0x7FFFFFFF - t).to(tl.int64)
-    if t0 <= p:
+    t = t0 + tl.arange(0, BTT)                        # this rank's cache slots; their global positions:
+    g = t * DCP + RANK
+    ok = (g <= p) & (t < T)
+    lo = (0x7FFFFFFF - g).to(tl.int64)
+    if t0 * DCP + RANK <= p:
         hh = tl.arange(0, NH)
         d = tl.arange(0, D)
         q = tl.load(Q + (r * NH + hh[:, None]) * D + d[None, :])
@@ -301,6 +414,7 @@ class Weights:
         self.expert_shape = ex
         self.fast = None                 # RoceReduce for decode windows (engine sets it)
         self.tap_slot: dict[int, int] = {}   # DFlash2: target layer -> slot in Buffers.taps (engine sets it)
+        self.dcp = 1                     # decode context parallelism: KV positions interleaved over the ranks
         self.vocab_off = rank * self.lm_head.shape[0]
         self.draft_head = self.draft_ids = None
         if TUNE:
@@ -369,14 +483,15 @@ class State:
         self.capacity = capacity
         lw = c.kv_lora_rank + c.qk_rope_head_dim
         n = len(w.layers)
-        self.kc = [torch.zeros((capacity, lw), dtype=torch.bfloat16, device=dev) for _ in range(n)]
-        self.ic = {L.index: torch.zeros((capacity, c.index_head_dim), dtype=torch.bfloat16, device=dev)
+        local = -(-capacity // w.dcp) + 1               # DCP: this rank's positions p % dcp == rank at p // dcp
+        self.kc = [torch.zeros((local, lw), dtype=torch.bfloat16, device=dev) for _ in range(n)]
+        self.ic = {L.index: torch.zeros((local, c.index_head_dim), dtype=torch.bfloat16, device=dev)
                    for L in w.layers if L.indexer is not None}
         self.pos = torch.zeros((1,), dtype=torch.int32, device=dev)
         self.mpos = torch.zeros((1,), dtype=torch.int32, device=dev)
         if w.mtp is not None:
-            self.mkc = torch.zeros((capacity, lw), dtype=torch.bfloat16, device=dev)
-            self.mic = torch.zeros((capacity, c.index_head_dim), dtype=torch.bfloat16, device=dev)
+            self.mkc = torch.zeros((local, lw), dtype=torch.bfloat16, device=dev)
+            self.mic = torch.zeros((local, c.index_head_dim), dtype=torch.bfloat16, device=dev)
 
 
 class Buffers:
@@ -400,6 +515,18 @@ class Buffers:
         self.qlat = torch.empty((rows, H, lw), dtype=bf, device=dev)
         self.qrot = torch.empty((rows, H, rd), dtype=bf, device=dev)
         slots = max(c.index_topk // ATTN_DECODE[0] * min(rows, FAST_ROWS), c.index_topk // ATTN_PROMPT[0] * rows)
+        slots *= w.dcp                                   # DCP: partials for every rank's heads
+        if w.dcp > 1:
+            G = w.dcp
+            self.qpack = torch.empty((rows, H, lw + rd), dtype=bf, device=dev)
+            self.qall = torch.empty((G, rows, H, lw + rd), dtype=bf, device=dev)
+            self.osend = torch.empty((G * rows * H * lw,), dtype=bf, device=dev)
+            self.lsend = torch.empty((G * rows * H,), dtype=f32, device=dev)
+            fan = G if rows <= FAST_ROWS else 1          # decode windows exchange by all-gather (G x the bytes)
+            self.orecv = torch.empty((fan * G * rows * H * lw,), dtype=bf, device=dev)
+            self.lrecv = torch.empty((fan * G * rows * H,), dtype=f32, device=dev)
+            self.cnt = torch.zeros((rows,), dtype=torch.int32, device=dev)
+            self.cand = torch.empty((G * min(rows, SEL_ROWS) * c.index_topk,), dtype=torch.int64, device=dev)
         self.po = torch.empty((slots * H * lw,), dtype=f32, device=dev)   # chunk partials: chunks x rows
         self.pm = torch.empty((slots * H,), dtype=f32, device=dev)
         self.pl = torch.empty((slots * H,), dtype=f32, device=dev)
@@ -411,7 +538,7 @@ class Buffers:
         self.ik = torch.empty((rows, idd), dtype=f32, device=dev)
         self.iw = torch.empty((rows, nh), dtype=f32, device=dev)
         self.iq = torch.empty((rows, nh * idd), dtype=bf, device=dev)
-        self.sc = torch.empty((min(rows, SEL_ROWS) * score_cols,), dtype=torch.int64, device=dev)
+        self.sc = torch.empty((min(rows, SEL_ROWS) * (-(-score_cols // w.dcp)),), dtype=torch.int64, device=dev)
         self.tok = torch.zeros((rows, c.index_topk), dtype=torch.int32, device=dev)
         # MLPs
         width = max(c.intermediate_size, c.moe_intermediate_size * max(c.n_shared_experts, 1)) // w.world
@@ -497,19 +624,89 @@ def gather(w: Weights, b: Buffers, R: int) -> torch.Tensor:
     return out.view(w.world, R, d)
 
 
+def dcp_gather(w: Weights, x: torch.Tensor, out: torch.Tensor, small: bool) -> None:
+    """Every rank's x in rank order (RoCE one-shot for decode windows when available, else NCCL)."""
+    if small and w.fast is not None:
+        w.fast.all_gather(x, out)
+    else:
+        w.comm.all_gather(x.reshape(-1), out.reshape(-1))
+
+
 def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: int, T: int) -> None:
     """The indexer's choice for the window's rows past index_topk: b.tok[:R] (ascending). ``T``: keys scored (the
-    host's bound on the window's last position + 1; a captured graph uses its bucket)."""
+    host's bound on the window's last position + 1; a captured graph uses its bucket). DCP: each rank scores its own
+    slots, keeps its top index_topk, the candidates are gathered and every rank takes the same global top index_topk
+    (keys are tie-free); b.tok then holds this rank's share as local slots (ascending), b.cnt how many."""
     c = w.cfg
-    nh, D = c.index_n_heads, c.index_head_dim
+    nh, D, K = c.index_n_heads, c.index_head_dim, c.index_topk
+    dcp, rank = w.dcp, w.rank if w.dcp > 1 else 0
+    Tl = -(-T // dcp)
     for r0 in range(0, R, SEL_ROWS):
         n = min(SEL_ROWS, R - r0)
-        sc = b.sc[:n * T].view(n, T)
-        _index_scores[(n, triton.cdiv(T, BT))](b.iq[r0:], b.iw[r0:], icache, pos, sc, T, R0=r0, NH=nh, D=D, BTT=BT,
-                                               WSCALE=nh ** -0.5, QSCALE=D ** -0.5, num_warps=4)
-        top = torch.topk(sc, c.index_topk, dim=-1, sorted=False).values
-        keys = (0x7FFFFFFF - (top & 0xFFFFFFFF)).to(torch.int32)
-        b.tok[r0:r0 + n].copy_(torch.sort(keys, dim=-1).values)
+        sc = b.sc[:n * Tl].view(n, Tl)
+        _index_scores[(n, triton.cdiv(Tl, BT))](b.iq[r0:], b.iw[r0:], icache, pos, sc, Tl, R0=r0, NH=nh, D=D,
+                                                BTT=BT, WSCALE=nh ** -0.5, QSCALE=D ** -0.5, DCP=dcp, RANK=rank,
+                                                num_warps=4)
+        if dcp == 1:
+            top = torch.topk(sc, K, dim=-1, sorted=False).values
+            keys = (0x7FFFFFFF - (top & 0xFFFFFFFF)).to(torch.int32)
+            b.tok[r0:r0 + n].copy_(torch.sort(keys, dim=-1).values)
+            continue
+        kk = min(K, Tl)
+        mine = torch.full((n, K), -9223372036854775807, dtype=torch.int64, device=sc.device)
+        mine[:, :kk] = torch.topk(sc, kk, dim=-1, sorted=False).values
+        allc = b.cand[:dcp * n * K].view(dcp, n, K)
+        dcp_gather(w, mine, allc, n <= FAST_ROWS)
+        top = torch.topk(allc.permute(1, 0, 2).reshape(n, dcp * K), K, dim=-1, sorted=False).values
+        gpos = 0x7FFFFFFF - (top & 0xFFFFFFFF)                                  # global positions, int64
+        own = (gpos % dcp) == rank
+        key = torch.where(own, gpos // dcp, torch.full_like(gpos, 1 << 40))
+        b.tok[r0:r0 + n].copy_(torch.sort(key, dim=-1).values.to(torch.int32))
+        b.cnt[r0:r0 + n].copy_(own.sum(-1).to(torch.int32))
+
+
+def _attention_local(w: Weights, b: Buffers, R: int, cache, pos, nch, chk, kt, nw, ns) -> None:
+    """Every key on this rank: this rank's heads over the rows' key lists -> b.ol."""
+    c, H = w.cfg, w.heads
+    lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
+    n = nch * R * H
+    _attn_chunks[(R, nch)](b.qlat, b.qrot, cache, b.tok, pos, b.po[:n * lw], b.pm[:n], b.pl[:n], R, H=H, LW=lw,
+                           RD=rd, K=c.index_topk, CHK=chk, KTT=kt, SCALE=(nope + rd) ** -0.5, num_warps=nw,
+                           num_stages=ns)
+    latent._merge[(R, H)](b.po, b.pm, b.pl, b.ol, b.dummy, R, H=H, LW=lw, NCH=nch, SPARSE=False, num_warps=4)
+
+
+def _attention_dcp(w: Weights, b: Buffers, R: int, cache, pos, nch, chk, kt, nw, ns) -> None:
+    """Decode context parallelism: gather every rank's absorbed queries, attend all heads over this rank's keys,
+    send each head's normalized partial and log-sum-exp to the rank that owns the head, merge in rank order -> b.ol."""
+    c, H, G, rank = w.cfg, w.heads, w.dcp, w.rank
+    lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
+    small = R <= FAST_ROWS
+    qp = b.qpack[:R]
+    qp[:, :, :lw].copy_(b.qlat[:R])
+    qp[:, :, lw:].copy_(b.qrot[:R])
+    qall = b.qall.view(-1)[:G * R * H * (lw + rd)].view(G, R, H, lw + rd)
+    dcp_gather(w, qp, qall, small)
+    n = nch * R * G * H
+    _attn_dcp[(R, nch, G)](qall, cache, b.tok, b.cnt, pos, b.po[:n * lw], b.pm[:n], b.pl[:n], R, H=H, G=G, LW=lw,
+                           RD=rd, K=c.index_topk, CHK=chk, KTT=kt, SCALE=(nope + rd) ** -0.5, DCP=G, RANK=rank,
+                           num_warps=nw, num_stages=ns)
+    osend = b.osend.view(-1)[:G * R * H * lw]
+    lsend = b.lsend.view(-1)[:G * R * H]
+    _merge_lse[(R, G * H)](b.po, b.pm, b.pl, osend, lsend, R, HT=G * H, H=H, LW=lw, NCH=nch, num_warps=4)
+    if small:                                            # all-gather everything, read what is ours
+        orecv = b.orecv[:G * G * R * H * lw]
+        lrecv = b.lrecv[:G * G * R * H]
+        dcp_gather(w, osend, orecv, True)
+        dcp_gather(w, lsend, lrecv, True)
+        o0, l0, ss, ssl = rank * R * H * lw, rank * R * H, G * R * H * lw, G * R * H
+    else:                                                # prompt chunks: NCCL all-to-all of head blocks
+        orecv = b.orecv[:G * R * H * lw]
+        lrecv = b.lrecv[:G * R * H]
+        w.comm.all_to_all(osend.view(G, R * H * lw), orecv.view(G, R * H * lw))
+        w.comm.all_to_all(lsend.view(G, R * H), lrecv.view(G, R * H))
+        o0, l0, ss, ssl = 0, 0, R * H * lw, R * H
+    _dcp_combine[(R, H)](orecv[o0:], lrecv[l0:], b.ol, R, ss, ssl, H=H, LW=lw, WORLD=G, num_warps=4)
 
 
 def attention(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor, icache: torch.Tensor | None,
@@ -528,13 +725,14 @@ def attention_part(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor
     lin(L.q_a, b, b.normed[:R], b.qa[:R])
     lin(L.kv_a, b, b.normed[:R], b.kva[:R])
     glue.rmsnorm(b.qa[:R], L.q_a_norm, c.rms_norm_eps, b.qn[:R])
-    _kv_write[(R,)](b.kva, b.kva.stride(0), L.kv_a_norm, cache, pos, w.inv, c.rms_norm_eps, LW=lw, RD=rd,
-                    num_warps=4)
+    dcp, rank = w.dcp, (w.rank if w.dcp > 1 else 0)
+    _kv_write[(R,)](b.kva, b.kva.stride(0), L.kv_a_norm, cache, pos, w.inv, c.rms_norm_eps, LW=lw, RD=rd, DCP=dcp,
+                    RANK=rank, num_warps=4)
     if L.indexer is not None:
         ix = L.indexer
         glue.router(b.normed[:R], ix["wk"], b.ik[:R])
         _ik_write[(R,)](b.ik, L.extra["ik_w"], L.extra["ik_b"], w.inv, icache, pos, 1e-6, D=c.index_head_dim, RD=rd,
-                        num_warps=4)
+                        DCP=dcp, RANK=rank, num_warps=4)
         if T is not None:
             glue.router(b.normed[:R], ix["weights_proj"], b.iw[:R])
             lin(ix["wq_b"], b, b.qn[:R], b.iq[:R])
@@ -554,11 +752,10 @@ def attention_part(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor
                                                     RD=rd, LW=lw, BN=32, RBK=rbk, num_warps=4)
     chk, kt, nw, ns = ATTN_DECODE if R <= FAST_ROWS else ATTN_PROMPT
     nch = c.index_topk // chk
-    n = nch * R * H
-    _attn_chunks[(R, nch)](b.qlat, b.qrot, cache, b.tok, pos, b.po[:n * lw], b.pm[:n], b.pl[:n], R, H=H, LW=lw,
-                           RD=rd, K=c.index_topk, CHK=chk, KTT=kt, SCALE=(nope + rd) ** -0.5, num_warps=nw,
-                           num_stages=ns)
-    latent._merge[(R, H)](b.po, b.pm, b.pl, b.ol, b.dummy, R, H=H, LW=lw, NCH=nch, SPARSE=False, num_warps=4)
+    if dcp > 1:
+        _attention_dcp(w, b, R, cache, pos, nch, chk, kt, nw, ns)
+    else:
+        _attention_local(w, b, R, cache, pos, nch, chk, kt, nw, ns)
     if wide:
         o = torch.bmm(b.ol[:R].transpose(0, 1), L.extra["wv"].transpose(1, 2))           # [H, R, v]
         b.o[:R].view(R, H, c.v_head_dim).copy_(o.transpose(0, 1))

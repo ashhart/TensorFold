@@ -33,6 +33,7 @@ CHUNK = 1024                 # prompt rows per forward (the eager reference path
 FUSED = os.environ.get("TF_GLM53_FUSED", "1") != "0"          # 0: the M2 reference path (torch ops, no graphs)
 GRAPHS = os.environ.get("TF_GLM53_GRAPHS", "1") != "0"
 ROCE = os.environ.get("TF_GLM53_ROCE", "1") != "0"
+DCP_AUTO = 200_000           # contexts past this interleave the KV cache over the ranks (decode context parallelism)
 
 
 def _f64_ints(x: float) -> list[int]:
@@ -84,6 +85,10 @@ class Glm53Engine:
         self.runner = None
         if FUSED:
             fw = fused.Weights(cfg, rank, WORLD, comm, embed, norm, head, layers, self.mtp)
+            dcp = int(os.environ.get("TF_GLM53_DCP", "0")) or (WORLD if self.limit > DCP_AUTO else 1)
+            if dcp not in (1, WORLD):
+                raise ValueError(f"TF_GLM53_DCP={dcp}: 1 or {WORLD}")
+            fw.dcp = dcp
             if self.k and fused.DRAFT_VOCAB:            # reduced draft vocabulary: a quarter of it on each rank
                 q = fused.DRAFT_VOCAB // WORLD
                 sl = r._file("lm_head.weight").get_slice("lm_head.weight")
@@ -109,6 +114,10 @@ class Glm53Engine:
                 changed = {k: v for k, v in fw.tuned.items() if v[0] != v[1]}
                 print(f"[tensorfold] rank {rank}: tuned {len(fw.tuned)} linear shapes, {len(changed)} retiled: "
                       + ", ".join(f"{k[0]}x{k[1]} {v[0]}->{v[1]}" for k, v in changed.items()), flush=True)
+            sl = None                                    # the checkpoint reader's handles and heap: gone before
+            r._open.clear()                              # the caches and buffers allocate (GB10 unified memory:
+            del r                                        # host memory is device memory; a 1M cache needs it all)
+            _trim_host()
             dpath = os.environ.get("TF_GLM53_DFLASH", "")
             if dpath:                                    # DFlash2: the target taps its layers before buffers exist
                 dcfg = json.loads((Path(dpath) / "config.json").read_text())
@@ -145,11 +154,8 @@ class Glm53Engine:
         self.load_s = time.perf_counter() - t0
         print(f"[tensorfold] GLM-5.3 rank {rank}/{WORLD}: {n} layers loaded in {self.load_s:.0f}s, context "
               f"{self.limit} ({'fused, ' + ('CUDA graphs' if GRAPHS else 'eager') if FUSED else 'reference path'}; "
-              f"MTP drafts {self.k}; token-level DSA past {cfg.index_topk})", flush=True)
-        sl = None
-        r._open.clear()                                  # the checkpoint reader's handles and buffers: gone before
-        del r                                            # the warm-up allocates (unified memory: host = device)
-        _trim_host()
+              f"MTP drafts {self.k}; token-level DSA past {cfg.index_topk}"
+              f"{'; decode context parallel ' + str(self.runner.w.dcp) if self.runner is not None and self.runner.w.dcp > 1 else ''})", flush=True)
         with open("/proc/self/status") as f:
             rss = next((ln.split()[1] for ln in f if ln.startswith("RssAnon")), "0")
         print(f"[tensorfold] rank {rank}: host anon {int(rss) / 2**20:.1f} GiB, device free "
@@ -192,6 +198,10 @@ class Glm53Engine:
             st = self.runner.generate(prompt, max_tokens, sample, lambda t: stop_eos and t in self.eos, on_tokens, k,
                                       mode, sampling=s)
             out = st.pop("out")
+            if self.runner.cap is not None:
+                fn = self.runner.cap.finish(list(prompt) + out, {"temp": s.temperature if s else 0.0,
+                                                                   "mode": st.get("mtp_mode"), "prompt_len": len(prompt)})
+                st["capture"] = os.path.basename(fn) if fn else None
             st["sha256"] = hashlib.sha256(json.dumps(out).encode()).hexdigest()[:16]
             return st
         m, L0 = self.model, len(prompt)

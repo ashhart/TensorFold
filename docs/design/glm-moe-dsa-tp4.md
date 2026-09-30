@@ -3,8 +3,8 @@
 Status: **working on four DGX Sparks** (branch `glm-moe-dsa` off v0.5.0). Milestones M0-M5 and most of M6 are
 done: four-rank CLI and collectives, the family, a fused CUDA-graph forward, MTP and DFlash2 drafts (drafted ==
 serial), token-level DSA past 2,048 tokens, and a fast prompt path. Measured results and how to run it:
-`docs/recipes/glm-5.3-full-tp4.md`. Remaining: the 1M-token context (DCP, M7) and a larger context by default. The
-sections below are the original plan; estimates in them predate the measurements.
+`docs/recipes/glm-5.3-full-tp4.md`. M7 (1M-token context, decode context parallelism 4) is done too: needles pass at
+128K, 512K and ~1M. The sections below are the original plan; estimates in them predate the measurements.
 
 ## Why
 
