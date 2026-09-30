@@ -209,6 +209,9 @@ class _TwoCopies:
     def barrier(self) -> None:
         torch.cuda.synchronize()
 
+    def ready(self, label: str, **kwargs) -> None:
+        pass                                  # the other rank is this one
+
 
 @pytest.fixture(scope="module")
 def engine(tmp_path_factory):

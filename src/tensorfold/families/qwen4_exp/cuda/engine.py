@@ -93,6 +93,8 @@ class FlashNextEngine:
         wait_all(reads)                               # raises a table read's error
         waited = time.perf_counter() - waited
         w.comm = self.comm
+        if self.comm is not None:
+            self.comm.ready("loading")               # a peer stuck loading is named, not waited on in NCCL
         if self.depth > 0 and w.mtp is None:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
                              "that has it, or --no-drafts for the serial reference (one token a round)")

@@ -64,7 +64,7 @@ def test_glm_nonfit_refuses_before_weight_load(tmp_path, monkeypatch):
     def load(*a, **kw):
         pytest.fail("weight allocation was reached before startup admission")
     monkeypatch.setattr(weights, "load", load)
-    comm = SimpleNamespace(barrier=lambda: None)
+    comm = SimpleNamespace(barrier=lambda: None, ready=lambda *a, **k: None)
     with pytest.raises(ValueError, match="fit|memory|budget"):
         engine.GlmEngine(tmp_path, rank=0, master="example", port=29551, context=65536, comm=comm)
 
@@ -131,7 +131,7 @@ def fake_runtime(monkeypatch):
         raise Loaded
     def both(send, recv):
         recv.view(-1).copy_(torch.cat([send.view(-1), send.view(-1)]))
-    comm = SimpleNamespace(barrier=lambda: None, all_gather=both)
+    comm = SimpleNamespace(barrier=lambda: None, ready=lambda *a, **k: None, all_gather=both)
     monkeypatch.setitem(sys.modules, "tensorfold.cuda.comm", SimpleNamespace(NCCL=lambda *a: comm))
     for family in ("qwen3_5", "qwen4_exp", "glm5_next"):
         prefix = f"tensorfold.families.{family}.cuda"
@@ -363,3 +363,18 @@ def test_an_unsizable_dtype_names_its_tensor_in_the_operators_message(tmp_path, 
     geometry = capacity.Geometry(lambda slots: slots * 1024, 8)
     with pytest.raises(ValueError, match=r"F8_E9M9.*model\.layers\.0\.w|model\.layers\.0\.w.*F8_E9M9"):
         capacity.admit(tmp_path, None, None, object(), geometry, lambda name, info: (1, 0))
+
+
+def test_a_4bit_drafter_is_admitted_at_its_packed_bytes(tmp_path):
+    from tensorfold.cuda.capacity import estimate_weights
+    from tensorfold.families.qwen3_5.cuda.affine_memory import draft_bytes, packed_draft
+
+    checkpoint(tmp_path, {}, [("layers.0.mlp.gate_proj.weight", "BF16", [5120, 5120], 2 * 5120 * 5120),
+                              ("layers.0.self_attn.k_proj.weight", "BF16", [1024, 5120], 2 * 1024 * 5120),
+                              ("layers.0.input_layernorm.weight", "BF16", [5120], 2 * 5120),
+                              ("layers.0.narrow.weight", "BF16", [5120, 64], 2 * 5120 * 64)])
+    q4 = lambda n: n // 2 + n // 64 * 4
+    assert estimate_weights(tmp_path, draft_bytes).resident == (q4(5120 * 5120) + 2 * q4(1024 * 5120) + 2 * 5120
+                                                                + 2 * 5120 * 64)
+    assert packed_draft("a.weight", [5120, 5120]) and not packed_draft("a.weight", [5120, 64])
+    assert not packed_draft("a.bias", [5120, 5120]) and not packed_draft("a.weight", [5120])

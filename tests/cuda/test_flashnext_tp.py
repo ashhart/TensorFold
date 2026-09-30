@@ -163,6 +163,9 @@ class _ThreadComm:
     def barrier(self) -> None:
         self.hub.barrier.wait()
 
+    def ready(self, label: str, **kwargs) -> None:
+        self.hub.barrier.wait()
+
 
 def _run_ranks(fn, engines: list) -> list:
     """fn(rank, engine) on every rank at once (threads); results in rank order."""
@@ -409,6 +412,9 @@ def _fake_nccl(monkeypatch, hub):
             self.inner.all_gather(send, recv)
 
         def barrier(self):
+            hub.barrier.wait()
+
+        def ready(self, label, **kwargs):
             hub.barrier.wait()
 
     monkeypatch.setattr(comm_mod, "NCCL", FakeNCCL)

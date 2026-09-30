@@ -148,6 +148,85 @@ _QMV_ROWS_Q = r"""
   }
 """
 
+_ROW_BLOCK_SUMS = r"""
+  // qmv_rows' sum of each (row, block): block b's VPT inputs added in order from zero
+  const int b = int(thread_position_in_grid.x), r = int(thread_position_in_grid.y);
+  if (b >= K / VPT) return;
+  const device bfloat* xp = X + size_t(r) * K + b * VPT;
+  float sum = 0.0f;
+  for (int i = 0; i < VPT; i++) sum += float(xp[i]);
+  SUMS[size_t(r) * (K / VPT) + b] = sum;
+"""
+
+_QMV_ROWS_MMA = r"""
+  // qmv_rows' per-row arithmetic for several rows on the matrix units. Threadgroup (i, t): outputs 8 i .. 8 i + 7, rows
+  // 8 t .. 8 t + 7 (rows past R read row R - 1, dropped). qmv_rows' lane l at step s reads block b = 32 s + l
+  // (values VPT b ..); simdgroup j of SG keeps lanes l = j (32 / SG) .. : per block an MMA from zero gives each
+  // (output, row) that lane's dot, fma(scale, dot, bias * sum) joins the lane's partial in step order, and the 32
+  // partials of each (output, row) meet in one simd_sum, as in qmv_rows.
+  const uint lane = thread_index_in_simdgroup;
+  const int sg = int(simdgroup_index_in_threadgroup);
+  const int qid = int(lane) / 4;
+  const int fm = (qid & 4) + ((int(lane) / 2) % 4);
+  const int fn = (qid & 2) * 2 + (int(lane) % 2) * 2;
+  const int R = X_shape[0];
+  constexpr int VPT = lane_values(BITS), NB = K / VPT, STEPS = NB / 32, KG = K / GS, WPR = K * BITS / 32;
+  constexpr int L = 32 / SG;
+  constexpr bool ONE_GROUP = L * VPT <= GS;             // a simdgroup's blocks of a step share one scale and bias
+  static_assert(L == 4, "the sums load a step's 4 blocks as one float4");
+  threadgroup float red[64 * 33];
+  const int nb = int(threadgroup_position_in_grid.x) * 8;
+  const int rb = int(threadgroup_position_in_grid.y) * 8;
+  const int o = min(nb + fm, N - 1);
+  const device uint* wrow = W + size_t(o) * WPR;
+  const int ra = min(rb + fn, R - 1), rc = min(rb + fn + 1, R - 1);
+  const device bfloat* xa = X + size_t(ra) * K;
+  const device bfloat* xc = X + size_t(rc) * K;
+  const device float* sa = SUMS + size_t(ra) * NB;
+  const device float* scs = SUMS + size_t(rc) * NB;
+  float acc0[L], acc1[L];
+  for (int j = 0; j < L; j++) { acc0[j] = 0.0f; acc1[j] = 0.0f; }
+  constexpr uint MASK = (1u << BITS) - 1u;
+  for (int t = 0; t < STEPS; t++) {
+    const int b0 = 32 * t + sg * L;
+    const float4 sua = *(const device float4*)(sa + b0), suc = *(const device float4*)(scs + b0);
+    const float sums_a[4] = {sua.x, sua.y, sua.z, sua.w}, sums_c[4] = {suc.x, suc.y, suc.z, suc.w};
+    float sc = 0.0f, bi = 0.0f;
+    if (ONE_GROUP) { const size_t at = size_t(o) * KG + b0 * VPT / GS; sc = float(S[at]); bi = float(B[at]); }
+    PRAGMA_UNROLL
+    for (int j = 0; j < L; j++) {
+      const int b = b0 + j;
+      const int v0 = b * VPT;
+      simdgroup_matrix<float, 8, 8> P = simdgroup_matrix<float, 8, 8>(0.0f);
+      PRAGMA_UNROLL
+      for (int h = 0; h < VPT / 8; h++) {
+        simdgroup_matrix<float, 8, 8> am, bm;
+        const int bit = (v0 + 8 * h + fn) * BITS, word = bit >> 5, shift = bit & 31;
+        const uint hi = shift + 2 * BITS > 32 ? wrow[word + 1] : 0u;
+        const ulong pair = ((ulong(hi) << 32) | ulong(wrow[word])) >> shift;
+        am.thread_elements()[0] = float(uint(pair) & MASK);
+        am.thread_elements()[1] = float(uint(pair >> BITS) & MASK);
+        bm.thread_elements()[0] = float(xa[v0 + 8 * h + fm]);
+        bm.thread_elements()[1] = float(xc[v0 + 8 * h + fm]);
+        simdgroup_multiply_accumulate(P, am, bm, P);
+      }
+      if (!ONE_GROUP) { const size_t at = size_t(o) * KG + v0 / GS; sc = float(S[at]); bi = float(B[at]); }
+      acc0[j] += fma(sc, P.thread_elements()[0], bi * sums_a[j]);
+      acc1[j] += fma(sc, P.thread_elements()[1], bi * sums_c[j]);
+    }
+  }
+  for (int j = 0; j < L; j++) {
+    red[(fm * 8 + fn) * 33 + sg * L + j] = acc0[j];
+    red[(fm * 8 + fn + 1) * 33 + sg * L + j] = acc1[j];
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (int e = sg; e < 64; e += SG) {
+    const float v = simd_sum(red[e * 33 + int(lane)]);
+    const int n = nb + e / 8, row = rb + e % 8;
+    if (lane == 0 && n < N && row < R) OUT[size_t(row) * N + n] = bfloat(v);
+  }
+"""
+
 ROWS_A_CALL = 32     # simdgroups a qmv_rows threadgroup: one an input row
 
 
@@ -168,6 +247,8 @@ def qmv_rows(x: mx.array, weights: Any, *, rows_per_simdgroup: int = 4) -> mx.ar
     else:
         if dims % 16:
             raise ValueError("qmv_rows: needs K % 16 == 0")
+        if rows >= MMA_FROM and dims % (32 * (8 if bits in (6, 8) else 16)) == 0 and _mma_exact(weights, n, dims):
+            return qmv_rows_mma(x, weights)
         rows_per_simdgroup = next(c for c in (rows_per_simdgroup, 2, 1) if n % c == 0)   # a row's bits never depend on it
         run = kernel("qa_qmv_rows", _QMV_ROWS_Q, ["X", "W", "S", "B"], ["OUT"], header=QDOT_HEADER + LANE_CODES,
                      reserve=32 * ROWS_A_CALL)
@@ -181,6 +262,43 @@ def qmv_rows(x: mx.array, weights: Any, *, rows_per_simdgroup: int = 4) -> mx.ar
                          grid=(32 * m, n // rows_per_simdgroup, 1), threadgroup=(32 * m, 1, 1),
                          output_shapes=[(m, n)], output_dtypes=[mx.bfloat16])[0])
     out = parts[0] if len(parts) == 1 else mx.concatenate(parts)
+    return out.reshape(*shape[:-1], n)
+
+
+MMA_FROM = 4   # rows from which qmv_rows_mma beats the per-row loop on the M3 (level at 3, behind at 2)
+_mma_ok: dict[tuple[int, int, int, int], bool] = {}   # (N, K, bits, group): its rows equal the loop's on this GPU
+
+
+def _mma_exact(weights: Any, n: int, dims: int) -> bool:
+    """Whether qmv_rows_mma gives this shape's rows the per-row loop's bits here (checked once, on 8 random rows)."""
+
+    key = (n, dims, int(weights.bits), int(weights.group_size))
+    if key not in _mma_ok:
+        x = (mx.random.normal((8, dims), key=mx.random.key(0)) * 0.5).astype(mx.bfloat16)
+        rows_alone = mx.concatenate([qmv_rows(x[r:r + 1], weights) for r in range(8)])
+        _mma_ok[key] = bool(mx.array_equal(qmv_rows_mma(x, weights), rows_alone).item())
+    return _mma_ok[key]
+
+
+def qmv_rows_mma(x: mx.array, weights: Any, *, simdgroups: int = 8) -> mx.array:
+    """qmv_rows for any width but 4-bit g32, several rows at once on the matrix units: every row qmv_rows' own bits."""
+
+    shape = x.shape
+    x2 = x.reshape(-1, shape[-1])
+    rows, dims = int(x2.shape[0]), int(x2.shape[1])
+    n = int(weights.weight.shape[0])
+    bits, group = int(weights.bits), int(weights.group_size)
+    vpt = 8 if bits in (6, 8) else 16
+    blocks = dims // vpt
+    sums_run = kernel("qa_row_block_sums", _ROW_BLOCK_SUMS, ["X"], ["SUMS"])
+    sums = sums_run(inputs=[x2], template=[("K", dims), ("VPT", vpt)], grid=(-(-blocks // 32) * 32, rows, 1),
+                    threadgroup=(32, 1, 1), output_shapes=[(rows, blocks)], output_dtypes=[mx.float32])[0]
+    run = kernel("qa_qmv_rows_mma", _QMV_ROWS_MMA, ["X", "SUMS", "W", "S", "B"], ["OUT"],
+                 header=QDOT_HEADER + LANE_CODES + AFFINE_HEADER + '#define PRAGMA_UNROLL _Pragma("clang loop unroll(full)")\n')
+    out = run(inputs=[x2, sums, weights.weight, weights.scales, weights.biases],
+              template=[("K", dims), ("N", n), ("BITS", bits), ("GS", group), ("SG", simdgroups)],
+              grid=(-(-n // 8) * 32 * simdgroups, -(-rows // 8), 1), threadgroup=(32 * simdgroups, 1, 1),
+              output_shapes=[(rows, n)], output_dtypes=[mx.bfloat16])[0]
     return out.reshape(*shape[:-1], n)
 
 
@@ -222,4 +340,4 @@ def hc_project(h_new: mx.array, ssp: mx.array, down: QWeights, up: QWeights, nor
     return mixed, inject
 
 
-__all__ = ["hc_project", "qmv_rows"]
+__all__ = ["hc_project", "qmv_rows", "qmv_rows_mma"]

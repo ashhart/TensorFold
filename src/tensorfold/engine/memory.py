@@ -129,6 +129,7 @@ def measure(engine: Any, probe: tuple[int, int, int] | None = None) -> StreamMem
     import mlx.core as mx
 
     from tensorfold.engine.family_common import cache_arrays
+    from tensorfold.server.memory_budget import cache_nbytes
 
     chunk = int(getattr(getattr(engine, "prefill_plan", None), "step", 0) or _CHUNK)
     probe = probe or (64, chunk + 64, 2 * chunk + 64)
@@ -143,7 +144,7 @@ def measure(engine: Any, probe: tuple[int, int, int] | None = None) -> StreamMem
         cache = engine.prefill_prefix(tokens, cache=None, cached_tokens=0)
         mx.eval(*cache_arrays(cache))
         after = mx.get_active_memory()
-        sizes.append(max(0, after - before))
+        sizes.append(cache_nbytes(cache))         # the stream's caches' own bytes: allocator state doesn't move them
         peaks.append(max(0, mx.get_peak_memory() - after))
         held.append(cache)
     (n1, n2, n3), (s1, s2, s3), (_, t2, t3) = probe, sizes, peaks

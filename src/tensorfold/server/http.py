@@ -19,6 +19,7 @@ from tensorfold.server.request_options import parse_numbers, thinking_fields
 from tensorfold.server.messages import normalize_messages, validate_modalities
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
+from tensorfold.server import metrics
 from tensorfold.server.stacks import Rearming
 
 # TENSORFOLD_REQUEST_LOG=path appends every request body (one JSON a line), for exact replays of real traffic
@@ -101,6 +102,8 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             route = self._route()
             if responses.route(route):
                 return responses.get(self, app, responses.route(route))
+            if route in {"/metrics", "/v1/metrics"}:
+                return metrics.send(self, app)
             if route in {"", "/health"}:
                 self._send_json(
                     {

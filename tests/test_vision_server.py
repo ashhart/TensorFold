@@ -69,7 +69,8 @@ class Tokenizer:
 
 def prompt_app(frontend):
     return NS(tokenizer=Tokenizer(), tokenizer_lock=threading.Lock(), vision=frontend, late_system="user",
-              context_window=32, reasoning_effort="medium", render=lambda *args, **kwargs: ([1, 2, 3], 2))
+              context_window=32, reasoning_effort="medium", render=lambda *args, **kwargs: ([1, 2, 3], 2),
+              effort_for=lambda explicit: explicit or "medium")      # the plumbing, not the coercion (tested elsewhere)
 
 
 def cuda_app(frontend):

@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -13,7 +14,7 @@ from tensorfold.engine import grammar
 from tensorfold.server.cancellation import RequestCancelled
 from tensorfold.server.errors import RequestError
 from tensorfold.server.messages import validate_modalities
-from tensorfold.server.request_options import parse_numbers, thinking_fields
+from tensorfold.server.request_options import heard_effort, parse_numbers, thinking_fields
 from tensorfold.server.stopping import stop_options
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
@@ -176,11 +177,12 @@ class App:
             raise RequestError("chat_template_kwargs must be a JSON object or null")
         kwargs = dict(kwargs)
         # reasoning_effort and enable_thinking as the Mac server reads them: the template hears an effort when thinking
-        fields = thinking_fields(body, getattr(self.template, "efforts", frozenset()))
+        levels = getattr(self.template, "efforts", frozenset())
+        fields = thinking_fields(body, levels)
         kwargs.pop("enable_thinking", None)
         kwargs.pop("reasoning_effort", None)
         thinking = bool(fields.get("enable_thinking", self.default_thinking))
-        effort = fields.get("reasoning_effort", getattr(self, "reasoning_effort", None))
+        effort = heard_effort(fields.get("reasoning_effort"), getattr(self, "reasoning_effort", None), levels)
         if thinking and effort:
             kwargs["reasoning_effort"] = effort
         budget = parse_numbers({"thinking_budget": body.get("thinking_budget")})["thinking_budget"]
@@ -277,6 +279,7 @@ class App:
             prepared: PreparedRequest | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         """One reply; once ``cancelled()`` holds, a waiting request raises ``RequestCancelled`` unstarted, a running one stops at its next round and raises it after ``generate``."""
 
+        arrived = time.perf_counter()
         prepared = prepared if prepared is not None else self.prepare(body, chat)
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
         tools, thinking = prepared.tools, prepared.thinking
@@ -304,6 +307,8 @@ class App:
                 answer = (policy.content(answer, finished=finished) if policy.single
                           else hide_tool_calls(answer, finished=finished))
             return reasoning, answer
+
+        serving: list[Any] = [None]
 
         def on_tokens(new: list[int]) -> bool:
             # True stops the engine after this round; engines that finish on both ranks keep calling and get True
@@ -334,6 +339,8 @@ class App:
                     stopped["client"] = True
                 elif cancelled is not None and cancelled():     # every round, with or without new text
                     stopped["client"] = True
+                if serving[0] is not None:
+                    serving[0].saw()
             except Exception as exc:        # noqa: BLE001  raised after generate returns, never into the engine
                 failed.append(exc)
                 return True
@@ -387,8 +394,12 @@ class App:
         try:
             if cancelled is not None and cancelled():                # the client left while this request waited
                 raise RequestCancelled("the client left before the request started")
-            with health.of(self).running(len(prompt), out) as request:      # /health reads ``out``; rounds never call in
-                stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, on_tokens)
+            with health.of(self).running(len(prompt), out, arrived) as request:  # /health reads ``out``; rounds never call in
+                serving[0] = request
+                try:
+                    stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, on_tokens)
+                finally:
+                    serving[0] = None
         finally:
             if turns is not None:
                 turns.give()

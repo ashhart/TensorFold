@@ -8,7 +8,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from tensorfold.cuda import health
-from tensorfold.server import responses
+from tensorfold.server import metrics, responses
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.http import Server
@@ -65,6 +65,9 @@ def make_handler(app: App):
             self.close_connection = True
 
         def do_GET(self):
+            route = self.path.split("?", 1)[0].rstrip("/")
+            if route in ("/metrics", "/v1/metrics"):
+                return metrics.send(self, app)
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "tensorfold"}
                                                             for model_id in app.model_ids]})

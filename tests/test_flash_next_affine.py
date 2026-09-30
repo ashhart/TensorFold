@@ -158,3 +158,16 @@ def test_lane_matmul_reads_group_32_for_every_width(fmt):
             assert same(lane_qmm.lane_matmul(x[r:r + 1], w, sbt, group=fmt[1], **kw)[0], full[r]), r
         ref = x.astype(mx.float32) @ dense(lin).T
         assert np.allclose(np.asarray(full.astype(mx.float32)), np.asarray(ref), rtol=0.03, atol=0.03)
+
+
+@pytest.mark.parametrize("fmt", FORMATS + [(5, 128)])
+@pytest.mark.parametrize("n,k", [(328, 2560), (2560, 6144), (40, 512)])
+def test_qmv_rows_on_the_matrix_units_keeps_every_rows_bits(fmt, n, k):
+    rng = np.random.default_rng(fmt[0] * 13 + fmt[1] + n)
+    lin = quantized(rng, (n, k), *fmt)
+    x = bf16(rng, (37, k))
+    per_row = [rows.qmv_rows(x[r:r + 1], lin)[0] for r in range(37)]
+    for m in (2, 3, 4, 8, 9, 17, 37):
+        got = rows.qmv_rows_mma(x[:m], lin)
+        assert all(same(got[r], per_row[r]) for r in range(m)), m
+    assert all(same(rows.qmv_rows(x, lin)[r], per_row[r]) for r in range(37))

@@ -40,10 +40,10 @@ def ask(sched, prompt, count):
 
 
 class St:
-    """A committed state: its position only (the stand-in prefill and copies hold no tensors)."""
+    """A committed state: its position and no attention caches (the stand-in prefill and copies hold no tensors)."""
 
     def __init__(self, pos=0):
-        self.pos, self.limit = pos, 0
+        self.pos, self.limit, self.kv = pos, 0, []
 
 
 @pytest.fixture
@@ -75,6 +75,7 @@ def decoders(monkeypatch, allocations):  # noqa: F811
         w = SimpleNamespace(config=SimpleNamespace(eos=(0,), vocab=10), norm=SimpleNamespace(device="cpu"),
                             head=SimpleNamespace(n=10))
         dec = multi.MultiDecoder(w, None, allow_copy=False, world=world)
+        dec.memory_gate = None                                    # stand-ins hold no caches to grow by use
         dec.gate, dec.entered = threading.Event(), threading.Event()      # a round waits at the gate while it is shut
         dec.gate.set()
 

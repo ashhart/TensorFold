@@ -64,6 +64,8 @@ class NemotronEngine:
         if tp == 2:
             self._same_settings(torch, draft_ids)
         w = load(model_dir, mtp=self.drafts > 0)
+        if self.comm is not None:
+            self.comm.ready("loading")               # a peer stuck loading is named, not waited on in NCCL
         if self.drafts and w.mtp is None:
             raise ValueError("this checkpoint has no MTP head (mtp-4bit.safetensors), which Nemotron's CUDA engine "
                              "drafts with: use one that has it, or --no-drafts for the serial reference")

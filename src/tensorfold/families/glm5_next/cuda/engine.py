@@ -142,6 +142,7 @@ class GlmEngine:
                   f"the {self.limit}-token window leaves (TF_GLM_CACHE_GIB asks {wanted / 2 ** 30:.1f})", flush=True)
         w = load(model_dir, rank=rank)
         w.comm = self.comm
+        self.comm.ready("loading")                   # a peer stuck loading is named, not waited on in NCCL
         self.comm.barrier()
         if w.mtp is None and drafter is None and not serial_only:
             raise ValueError("this checkpoint has no MTP head and no DFlash2 draft model was given, so every round "

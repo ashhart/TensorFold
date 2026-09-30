@@ -62,6 +62,12 @@ def probe_tokens(tokenizer: Any) -> list[int]:
         return []
 
 
+def cached_rows(cache: Any) -> int:
+    """Rows a live prompt cache holds (its layers' largest offset); 0 for none."""
+
+    return max((int(getattr(c, "offset", 0) or 0) for c in cache), default=0) if cache is not None else 0
+
+
 class PromptMemory:
     """One model's profile, learned from a request's first existing prefill chunk."""
 
@@ -146,13 +152,20 @@ class PromptMemory:
                   else 2 * self.score_rows * max(0, self.heads) * int(tokens) * 2)
         return max(self.bootstrap, self.observed_work) + growth + scores
 
+    def need(self, tokens: int, resident: int, *, started: bool = False, rows: int = 0, copies: int = 1) -> int:
+        """Bytes ``tokens`` need beside ``resident``, which holds the growth of the ``rows`` already cached."""
+
+        if self.profile is None:
+            return int(resident) + self.bootstrap
+        beyond = max(0, self.stream_per_token - self.profile.bytes_per_token)      # a draft model's context
+        return (int(resident) + (0 if started else self.carry) + copies * self.profile.cache_bytes(tokens)
+                + beyond * max(0, int(tokens) - int(rows)) + self._work(tokens))
+
     def projected(self, prompt: int, *, current_cache: Any = None, extra_bytes: int = 0) -> int:
         current = cache_nbytes(current_cache) if current_cache is not None else 0
-        resident = max(0, self._used() - current)
-        if self.profile is None:
-            return resident + int(extra_bytes) + self.bootstrap
-        tokens = int(prompt) + self.reply
-        return resident + int(extra_bytes) + self.profile.cache_bytes(tokens) + self._work(tokens)
+        resident = max(0, self._used() - current) + int(extra_bytes)
+        return self.need(int(prompt) + self.reply, resident, started=current_cache is not None,
+                         rows=cached_rows(current_cache))
 
     def require(self, current_cache: Any = None, keep: Any = None) -> None:
         """Reclaim until the prompt fits, never evicting ``keep``; refuse when nothing is left to free."""
@@ -195,15 +208,21 @@ class PromptMemory:
         return self.projected(self.prompt) <= self.budget
 
     def _refusal(self, current_cache: Any) -> RequestError:
+        current = cache_nbytes(current_cache) if current_cache is not None else 0
+        store = self.store.nbytes if self.store is not None else 0
+        # what stays once freed buffers and retained prefixes are gone: the refusal's own terms
+        held = max(0, int(self.runtime.get_active_memory()) - store - current)
+        started, rows = current_cache is not None, cached_rows(current_cache)
         top = max(0, (self.window or self.prompt + self.reply) - self.reply)
         lo, hi = 0, top
         while lo < hi:
             mid = (lo + hi + 1) // 2
-            if self.profile is not None and self.projected(mid, current_cache=current_cache) <= self.budget:
+            if (self.profile is not None
+                    and self.need(mid + self.reply, held, started=started, rows=rows) <= self.budget):
                 lo = mid
             else:
                 hi = mid - 1
-        needed = self.projected(self.prompt, current_cache=current_cache)
+        needed = self.need(self.prompt + self.reply, held, started=started, rows=rows)
         return RequestError(f"This request needs about {needed / GIB:.1f} GiB of the {self.budget / GIB:.1f} GiB "
                             f"MLX may use (this server's {self.process_budget / GIB:.1f} GiB memory budget less "
                             f"{(self.process_budget - self.budget) / GIB:.1f} GiB for the rest of the process); it "
@@ -321,13 +340,11 @@ class PromptMemory:
             if self.profile is None:
                 return None
             retained = self.store.nbytes if self.store is not None else 0
-            floor = max(0, int(self.runtime.get_active_memory()) - retained) + self.carry
+            floor = max(0, int(self.runtime.get_active_memory()) - retained)
             kept = 2 if resumable else 1
-            beyond = max(0, self.stream_per_token - self.profile.bytes_per_token)   # the live stream's, not kept
 
             def fits(tokens: int) -> bool:
-                return (floor + kept * self.profile.cache_bytes(tokens) + beyond * int(tokens) + self._work(tokens)
-                        <= self.budget)
+                return self.need(tokens, floor, copies=kept) <= self.budget
 
             if not fits(0):
                 return 0

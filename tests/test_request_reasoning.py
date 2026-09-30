@@ -135,8 +135,15 @@ def test_explicit_thinking_overrides_none_and_preserves_default(default_effort, 
 @pytest.mark.parametrize("names, effort, want", [
     ("{# 'xhigh' 'medium' 'low' #}", "high", "xhigh"),       # Qwen3.8 names no high: OpenAI's high is its xhigh
     ("{# 'xhigh' 'medium' 'low' #}", "minimal", "low"),
+    ("{# 'xhigh' 'medium' 'low' #}", "low", "low"),
+    ("{# 'xhigh' 'medium' 'low' #}", "medium", "medium"),
+    ("{# 'xhigh' 'medium' 'low' #}", "xhigh", "xhigh"),
     ("{# 'low' 'high' #}", "high", "high"),                  # GLM-5.3 names high: it renders High, not Max
     ("{# 'low' 'high' #}", "minimal", "low"),
+    ("{# 'low' 'high' #}", "low", "low"),
+    ("{# 'low' 'high' #}", "medium", "high"),                # medium is not a GLM name; Max was the silent result
+    ("{# 'low' 'high' #}", "xhigh", "xhigh"),               # GLM renders xhigh as its own Max; leave the name
+    ("{# 'low' 'high' #}", "none", "none"),
     ("", "high", "xhigh"),
 ])
 def test_a_template_that_names_an_effort_is_given_that_effort(names, effort, want):
@@ -153,6 +160,47 @@ def test_a_template_that_names_an_effort_is_given_that_effort(names, effort, wan
         server.shutdown()
         server.server_close()
         app.close()
+
+
+def test_glm_omitted_effort_stays_the_template_default_and_a_medium_default_is_high():
+    jinja2 = pytest.importorskip("jinja2")
+    from tensorfold.server.request_options import coerce_effort, effort_levels
+
+    source = ("{%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined "
+              "and reasoning_effort in ['low', 'high'] else 'max' -%}{{ effective_reasoning_effort }}")
+    levels = effort_levels(source)
+    assert levels == frozenset({"low", "high"})
+    template = jinja2.Environment().from_string(source)
+    assert template.render() == "max"
+    assert template.render(reasoning_effort="medium") == "max"
+    for effort in ("minimal", "low", "medium", "high", "xhigh"):
+        heard = coerce_effort(effort, levels)
+        assert template.render(reasoning_effort=heard) == {"minimal": "low", "low": "low", "medium": "high",
+                                                           "high": "high", "xhigh": "max"}[effort]
+
+    app = make_app(enable_thinking=True, reasoning_effort="medium")
+    app.tokenizer.chat_template = "{# 'low' 'high' #}"
+    server = serve_fake(app)
+    try:
+        app.tokenizer.template_calls.clear()
+        status, body = post_json(server, "/v1/chat/completions",
+                                 {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2})
+        assert status == 200 and json.loads(body)["tensorfold"]["reasoning_effort"] == "high"
+        assert all(c.get("reasoning_effort") == "high" for c in app.tokenizer.template_calls if c.get("enable_thinking"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        app.close()
+
+    plain = make_app(enable_thinking=True)
+    plain.tokenizer.chat_template = "{# 'low' 'high' #}"
+    try:
+        plain.tokenizer.template_calls.clear()
+        plain.chat([{"role": "user", "content": "hi"}], max_tokens=2)
+        assert plain.tokenizer.template_calls and all(
+            c.get("enable_thinking") and "reasoning_effort" not in c for c in plain.tokenizer.template_calls)
+    finally:
+        plain.close()
 
 
 def test_no_effort_leaves_the_template_its_own_default():

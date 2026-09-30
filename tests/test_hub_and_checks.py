@@ -287,3 +287,9 @@ def test_auto_drafter_waits_for_a_complete_cached_model(tmp_path, monkeypatch):
     assert _drafter(family, "auto") == ""
     (snapshot / "model.safetensors").write_bytes(b"weights")
     assert Path(_drafter(family, "auto")).resolve() == snapshot.resolve()
+
+
+def test_null_sampling_fields_in_generation_config_keep_the_defaults(tmp_path):
+    (tmp_path / "generation_config.json").write_text(json.dumps(
+        {"do_sample": True, "temperature": None, "top_k": 20, "top_p": 0.95, "min_p": None}))
+    assert _generation_config(tmp_path) == {"temperature": 1.0, "top_k": 20, "top_p": 0.95}

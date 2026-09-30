@@ -48,8 +48,7 @@ def packed_draft(name: str, shape) -> bool:
 
 
 def draft_bytes(name: str, info: dict) -> tuple[int, int]:
-    """GPU bytes of one checkpoint tensor once the 4-bit drafter holds it (for ``capacity.admit``): packed words plus
-    bf16 scales and biases, the fused path's second [k | v] copy, other tensors as stored, codebooks on the host."""
+    """GPU bytes of a draft tensor as the 4-bit drafter holds it (q4 words and scales; k and v twice)."""
 
     from tensorfold.cuda.capacity import itemsize
 

@@ -237,8 +237,7 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
           draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
           extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
           draft_transform: Callable | None = None) -> dict:
-    """Reach the same refusal or capacity before either rank allocates model tensors (``draft_transform``: the draft
-    model's bytes a tensor as its loader keeps them; otherwise every tensor counts at fp32 or wider)."""
+    """Reach the same refusal or capacity before either rank allocates tensors (a draft at fp32 by default)."""
 
     error = None
     plan = None

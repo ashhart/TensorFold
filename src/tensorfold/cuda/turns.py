@@ -14,11 +14,13 @@ class Turns:
         self.cv = threading.Condition()
         self.busy = False
         self.waiting = 0                             # foreground requests waiting for the engine
+        self.parked = 0                              # every request in take(), background included
 
     def take(self, background: bool, cancelled: Callable[[], bool] | None = None) -> None:
         """Wait for the engine (a background request also for no waiting foreground one); RequestCancelled if gone."""
 
         with self.cv:
+            self.parked += 1
             self.waiting += not background
             try:
                 while self.busy or (background and self.waiting):
@@ -26,6 +28,7 @@ class Turns:
                     if cancelled is not None and cancelled():
                         raise RequestCancelled("the client left before the request started")
             finally:
+                self.parked -= 1
                 self.waiting -= not background
             self.busy = True
 

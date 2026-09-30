@@ -54,9 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
                                  "model's generation config, else 0: off)")
     generation.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=True,
                             help="open a think block when the chat template supports it")
-    generation.add_argument("--reasoning-effort", choices=("low", "medium", "xhigh"), default=None,
-                            help="for chat templates that take one (Qwen3.8); default: the template's own (Qwen3.8's "
-                                 "is xhigh), as vLLM and mlx-lm render it; medium adds no system-prompt text")
+    generation.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh"), default=None,
+                            help="default: the template's own (Qwen3.8's is xhigh, GLM-5.3's is Max). high is xhigh "
+                                 "where the template has no high; on GLM-5.3, medium is high; xhigh and the default are Max")
     generation.add_argument("--thinking-budget", type=int, default=0,
                             help="most thinking tokens before the server closes the think block (0: no limit)")
 
@@ -278,7 +278,7 @@ def cmd_info(args: argparse.Namespace) -> int:
 def _generation_config(model_dir: Path) -> dict[str, Any]:
     path = Path(model_dir) / "generation_config.json"
     config = json.loads(path.read_text()) if path.exists() else {}
-    sampling = {k: config[k] for k in ("temperature", "top_k", "top_p", "min_p") if k in config}
+    sampling = {k: config[k] for k in ("temperature", "top_k", "top_p", "min_p") if config.get(k) is not None}
     if config.get("do_sample") is False:
         sampling["temperature"] = 0.0
     elif config.get("do_sample") is True and "temperature" not in sampling:

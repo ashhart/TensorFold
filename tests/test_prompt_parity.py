@@ -142,6 +142,8 @@ def test_the_mac_and_cuda_render_the_same_prompt(name, default_effort):
     ("flashnext", {}, "Reasoning effort is set to xhigh"),
     ("glm", {}, "Reasoning Effort: Max"),
     ("glm", {"reasoning_effort": "high"}, "Reasoning Effort: High"),   # GLM-5.3 names high: it stays high
+    ("glm", {"reasoning_effort": "medium"}, "Reasoning Effort: High"), # medium is the nearest named level
+    ("glm", {"reasoning_effort": "xhigh"}, "Reasoning Effort: Max"),   # xhigh stays xhigh; the template renders Max
     ("glm", {"reasoning_effort": "minimal"}, "Reasoning Effort: Low"),
 ])
 def test_the_effort_each_template_writes(name, request_fields, words):

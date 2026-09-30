@@ -90,6 +90,30 @@ def test_gemma_tool_calls_are_parsed_and_kept_out_of_the_streamed_text():
     assert shown == hide_tool_calls(reply, finished=True) == "Reading it now."
 
 
+def test_gemma_bare_colon_tool_call_is_structured():
+    """Issue 121: gemma-4-26b-a4b-it writes <|tool_call>:name{args}<tool_call|> with no call prefix."""
+
+    import json
+
+    from tensorfold.server.tools import parse_tool_calls_from_content
+
+    def tool(name):
+        return {"type": "function", "function": {"name": name, "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "command": {"type": "string"}, "filePath": {"type": "string"},
+            "pattern": {"type": "string"}}}}}
+
+    tools = [tool(name) for name in ("bash", "read", "write", "edit", "glob", "grep", "list")]
+    leaked = '<|tool_call>:list{path:<|"|>.<|"|>}<tool_call|>'
+    content, calls = parse_tool_calls_from_content(leaked, tools)
+    assert content == "" and len(calls) == 1
+    assert calls[0]["function"]["name"] == "list"
+    assert json.loads(calls[0]["function"]["arguments"]) == {"path": "."}
+    prose, parsed = parse_tool_calls_from_content("Looking.\n" + leaked, tools)
+    assert prose == "Looking." and json.loads(parsed[0]["function"]["arguments"]) == {"path": "."}
+    stayed, missed = parse_tool_calls_from_content(leaked, [tool("bash")])
+    assert missed is None and stayed == leaked
+
+
 def test_glm_and_gemma_calls_parse_through_one_parser():
     """GLM's <arg_key> calls and Gemma 4's call:NAME{...} calls in one reply, each in the order written."""
 

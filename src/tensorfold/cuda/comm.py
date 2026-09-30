@@ -72,6 +72,31 @@ class NCCL:
         self._check(self.lib.ncclAllGather(send.data_ptr(), recv.data_ptr(), send.numel(), _DTYPES[send.dtype],
                                            self.comm, stream))
 
+    def ready(self, label: str, *, every: float = 60.0, timeout: float = 3600.0) -> None:
+        """Every rank finishes ``label`` before any goes on; a rank missing after ``timeout`` s is named."""
+
+        import time
+        from datetime import timedelta
+
+        self.store.set(f"tf_ready/{label}/{self.rank}", "1")
+        others = [r for r in range(self.world) if r != self.rank]
+        started = time.monotonic()
+        while True:
+            try:
+                self.store.wait([f"tf_ready/{label}/{r}" for r in others], timedelta(seconds=every))
+                return
+            except Exception as exc:                  # noqa: BLE001  (the store's timeout; anything else goes up)
+                if "timeout" not in str(exc).lower():
+                    raise
+            waited = time.monotonic() - started
+            missing = ", ".join(str(r) for r in others)
+            if waited >= timeout:
+                raise RuntimeError(f"rank {self.rank} finished {label} but rank {missing} has not after "
+                                   f"{waited / 60:.0f} min: check that rank's log (a CUDA extension build waiting on "
+                                   "a lock names the lock there)")
+            print(f"[tensorfold] rank {self.rank} finished {label}; waiting for rank {missing} ({waited:.0f} s)",
+                  flush=True)
+
     def barrier(self) -> None:
         x = torch.zeros((1,), dtype=torch.float32, device="cuda")
         y = torch.zeros((self.world,), dtype=torch.float32, device="cuda")

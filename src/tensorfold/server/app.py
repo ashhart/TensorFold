@@ -18,6 +18,7 @@ from tensorfold.server.cancellation import Cancellation
 from tensorfold.server.errors import RequestError
 from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
+from tensorfold.server import metrics
 from tensorfold.server.scheduler import ChatJob, Scheduler
 from tensorfold.server.stopping import StopPolicy
 from tensorfold.server.text import (
@@ -208,7 +209,7 @@ class ChatApp(RequestOptions):
         """Prompt ids plus the length of the rendered history that prefixes them."""
 
         thinking = self.enable_thinking if thinking is None else bool(thinking)
-        effort = (getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort", self.reasoning_effort)
+        effort = self.effort_for((getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort"))
         with self.tokenizer_lock:
             prompt = render_prompt_ids(self.tokenizer, messages, tools=tools, enable_thinking=thinking,
                                        reasoning_effort=effort, late_system=self.late_system)
@@ -224,7 +225,7 @@ class ChatApp(RequestOptions):
     ) -> int:
         """Find a reusable system prefix by substituting a probe for the first user message; return zero for short matches."""
 
-        effort = (getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort", self.reasoning_effort)
+        effort = self.effort_for((getattr(_REQUEST, "sampling", None) or {}).get("reasoning_effort"))
         first_user = next((i for i, m in enumerate(messages) if m.get("role") == "user"), None)
         if first_user is None:
             return 0
@@ -313,6 +314,7 @@ class ChatApp(RequestOptions):
         finally:
             if preparing is not None:
                 preparing.release()
+            metrics.finish_request()
 
     class _Preparing:
         """A."""
@@ -423,6 +425,8 @@ class ChatApp(RequestOptions):
                 time.sleep(0.005)
         cancellation.check()
         self.scheduler.submit(job)
+        metrics.begin(self, len(prompt_ids), received_at)
+        metrics.bind(job)
         if preparing is not None:
             preparing.release()           # submitted: a waiting background request may go now
 
@@ -452,6 +456,7 @@ class ChatApp(RequestOptions):
                     replay = list(collected)
                     job = make_job()
                     self.scheduler.submit(job)
+                    metrics.bind(job)
                     continue
                 break
             if replay:
@@ -466,6 +471,7 @@ class ChatApp(RequestOptions):
             if not first_token_at:
                 first_token_at = time.perf_counter()
             collected.extend(chunk)
+            metrics.tokens(len(collected), first_token_at)
             if on_delta is None or streaming_done:
                 continue
             fresh = []
@@ -522,7 +528,7 @@ class ChatApp(RequestOptions):
             "seconds": seconds,
             "runtime": {
                 "enable_thinking": thinking,
-                "reasoning_effort": fields.get("reasoning_effort", self.reasoning_effort) if thinking else "none",
+                "reasoning_effort": self.effort_for(fields.get("reasoning_effort")) if thinking else "none",
                 "engine": self.exact_mode["engine"],
                 "tokens_per_second": (decode_tokens / decode_seconds) if decode_seconds > 0 else 0.0,
                 "seconds": seconds,
