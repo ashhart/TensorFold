@@ -1,4 +1,4 @@
-"""DeepSeek-V4-Flash (model_type ``deepseek_v4``): an MLX engine on a 256 GB Mac."""
+"""DeepSeek-V4-Flash: MLX on Mac or serial mapped-GGUF CUDA on Spark."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ KERNEL_VERSION = "v1"
 # the shared GLM-5.3 pieces this engine runs (hyper-connections, row linears), hashed into snapshot keys
 KERNEL_DEPENDENCIES = ("tensorfold.kernels.glm.flash.v1", "tensorfold.families.glm5_next.linear",
                        "tensorfold.families.glm5_next.model")
-QUANT_METHODS = {"mlx": ("mlx",)}
+QUANT_METHODS = {"mlx": ("mlx",), "cuda": ("gguf",)}
 # buffers of 200 ops and 200 MB, so a prompt chunk's memory frees as it runs; no TF32: row kernels repeat fp32
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "200", "MLX_ENABLE_TF32": "0"}
 LEAST_MLX = (0, 32, 2)
@@ -28,11 +28,16 @@ def check(model_dir: str | Path) -> None:
 
     import sys
 
-    from tensorfold.families import OWN_MODEL_HELP, read_config
+    from tensorfold.families import OWN_MODEL_HELP, read_config, quant_method
+    config = read_config(model_dir)
+    if quant_method(config) == "gguf":
+        import json
+        descriptor = Path(model_dir) / "descriptor.json"
+        if not descriptor.is_file() or not json.loads(descriptor.read_text()).get("source"):
+            raise ValueError("DeepSeek GGUF needs prepared storage/provenance descriptor.json")
+        return  # Native admission validates actual headers before loading; no MLX import.
     from tensorfold.families.deepseek_v4.config import Config
     from tensorfold.families.deepseek_v4.weights import unreadable
-
-    config = read_config(model_dir)
     Config.from_dict(config)
     bad = unreadable(config)
     if bad:
@@ -70,6 +75,19 @@ def load(model_dir: Path, **options: Any) -> tuple[Any, Any]:
         if limit:
             mx.set_wired_limit(limit)
     return load_runtime(Path(model_dir), **options)
+
+
+def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: int = 0,
+                master: str = "", master_port: int = 29551, no_drafts: bool = False,
+                mtp_drafts: int | None = None, **options: Any):
+    """One mapped-GGUF session behind TensorFold serving; no speculative head."""
+    allowed = {"parallel", "streams", "context", "context_explicit", "threads"}
+    unsupported = set(options) - allowed
+    if unsupported:
+        raise ValueError(f"unsupported DeepSeek CUDA options: {', '.join(sorted(unsupported))}")
+    from .cuda.engine import DeepSeekEngine
+    return DeepSeekEngine(model_dir, tp=tp, rank=rank, drafter=drafter, no_drafts=no_drafts,
+                          mtp_drafts=mtp_drafts, **options)
 
 
 def engine_settings(model: Any) -> dict[str, Any]:

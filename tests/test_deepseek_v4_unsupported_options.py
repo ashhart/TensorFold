@@ -1,13 +1,4 @@
-"""Discovery / unsupported-option tests for the DeepSeek V4 CUDA port audit.
-
-These probe what the current TensorFold codebase supports and does NOT support,
-so the port plan records every upstream option that is absent today.
-
-CPU-only by design: they import neither the torch backend nor MLX (gate G0).
-Some tests are intended-failing (RED) because the behaviour they assert is not
-yet implemented; each carries `_INTENDED_FAIL` in its id and is recorded in the
-evidence manifest docs/evidence/deepseek-v4-t01-evidence.json.
-"""
+"""CPU discovery and storage boundaries for the DeepSeek native CUDA adapter."""
 
 from __future__ import annotations
 
@@ -26,8 +17,7 @@ def _write_config(tmp_path: Path, config: dict) -> Path:
     return tmp_path
 
 
-# 0731-style GGUF storage formats the port must read (R2), none of which the
-# current deepseek_v4 family declares.
+# 0731 mixed GGUF storage is supported only by the native CUDA adapter.
 GGUF_IQ2XXS = {"model_type": "deepseek_v4",
                "quantization_config": {"quant_method": "gguf", "bits": 2.5625, "format": "IQ2_XXS"}}
 GGUF_Q2K = {"model_type": "deepseek_v4",
@@ -40,23 +30,20 @@ GGUF_MIXED = {"model_type": "deepseek_v4",
 DS_FAMILY = families.families()["deepseek_v4"]
 
 
-def test_deepseek_v4_has_no_cuda_backend():
-    # The MLX family ships a `load` member but no `cuda_engine`: CUDA is unsupported today.
-    assert families.backends_of(DS_FAMILY) == ("mlx",)
-    assert not hasattr(DS_FAMILY.package, "cuda_engine")
+def test_deepseek_v4_registers_cuda_backend():
+    assert set(families.backends_of(DS_FAMILY)) == {"mlx", "cuda"}
+    assert callable(DS_FAMILY.package.cuda_engine)
 
 
-def test_deepseek_v4_declares_only_mlx_quant_methods():
-    # QUANT_METHODS = {"mlx": ("mlx",)}: affine MLX weights only; GGUF IQ2_XXS/Q2_K/Q8_0 absent.
-    assert DS_FAMILY.package.QUANT_METHODS == {"mlx": ("mlx",)}
+def test_deepseek_v4_declares_backend_specific_quant_methods():
+    assert DS_FAMILY.package.QUANT_METHODS == {"mlx": ("mlx",), "cuda": ("gguf",)}
 
 
 @pytest.mark.parametrize("name,config", [
     ("IQ2_XXS", GGUF_IQ2XXS), ("Q2_K", GGUF_Q2K), ("Q8_0", GGUF_Q8_0), ("mixed", GGUF_MIXED),
 ])
-def test_gguf_quant_refused_on_cuda(name, config):
-    with pytest.raises(ValueError, match="does not read"):
-        families.require_readable(DS_FAMILY, config, "cuda")
+def test_gguf_quant_declared_on_cuda(name, config):
+    families.require_readable(DS_FAMILY, config, "cuda")
 
 
 @pytest.mark.parametrize("name,config", [
@@ -89,16 +76,10 @@ def test_pr119_q8_0_gguf_reader_is_not_present_in_upstream():
     assert not (Path(__file__).resolve().parents[1] / "tools" / "glm5_q8_0_gguf_to_mlx.py").exists()
 
 
-def _INTENDED_FAIL_check_deepseek_v4_check_refuses_gguf(tmp_path):
-    # Intended-failing (RED): exercising deepseek_v4.check() requires importing
-    # weights.py -> mlx, which is absent in the CPU-only audit environment.
-    from tensorfold.families import deepseek_v4  # package __init__ imports no mlx at top level
-
+def test_gguf_check_requires_provenance_without_mlx(tmp_path):
+    from tensorfold.families import deepseek_v4
     folder = _write_config(tmp_path / "gguf", GGUF_IQ2XXS)
+    with pytest.raises(ValueError, match="descriptor"):
+        deepseek_v4.check(folder)
+    (folder / "descriptor.json").write_text(json.dumps({"source": "candidate.gguf"}))
     deepseek_v4.check(folder)
-
-
-def test_intended_fail_check_refuses_gguf_is_red():
-    # The behaviour above is what the port needs (R2: refuse unsupported ranks/features
-    # before loading). Recorded as intended-failing: needs an MLX-capable environment.
-    pytest.xfail("requires MLX; documented in evidence manifest as intended-failing RED")

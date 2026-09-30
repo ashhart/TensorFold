@@ -490,7 +490,8 @@ def prepare_candidate(model_dir: str | Path, *,
     if not math.isfinite(reserve_gib) or reserve_gib < 0:
         raise ValueError(f"companion reserve must be a finite non-negative Gib, got {reserve_gib!r}")
 
-    config = {"model_type": MODEL_TYPE, "text_config": dict(arch)}
+    config = {"model_type": MODEL_TYPE, "text_config": dict(arch),
+              "quantization_config": {"quant_method": "gguf"}, "gguf_file": str(source)}
     config_path = model_dir / "config.json"
     descriptor_path = model_dir / "descriptor.json"
 

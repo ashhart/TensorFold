@@ -110,3 +110,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Native DeepSeek GGUF engine (ds4)
+
+The serial DeepSeek CUDA adapter vendors pinned native engine and CUDA/MMQ
+sources from https://github.com/Entrpi/ds4 at d183482b413ecd2e3b540b290e6497437e9fbb73.
+Copyright2026 ds4.c authors and Entrpi; copyright2023-2026 ggml authors.
+MIT notice is preserved in LICENSES/ds4.txt and the vendor source directory.
+TensorFold adds a versioned C shim and local process adapter; the native
+forward/quant/cache operations are reused without changing their arithmetic.
