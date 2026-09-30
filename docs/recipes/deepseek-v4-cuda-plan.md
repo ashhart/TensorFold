@@ -33,6 +33,11 @@ BF16 nor requiring that conversion meets this target.
 
 ## Implementation milestones
 
+Every milestone follows the test-first workflow and gates below. A milestone
+is complete only when its required tests pass; a skipped GPU or full-model
+gate remains pending. The milestone order is 0 through 5, then 7 for the first
+serial release. Milestone 6 is a separate optional follow-up.
+
 0. **Agree the integration boundary.** Extend the existing `deepseek_v4`
    family under `families/deepseek_v4/cuda/`, following the
    [CUDA family guide](adding-a-cuda-family.md) and
@@ -178,6 +183,8 @@ documented NVIDIA toolchain environment:
 # The helper reads the existing GGUF and does not start or stop any service.
 python tools/build_deepseek_v4_cuda.py \
   --gguf "$HOME/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf" \
+  --tokenizer-dir ./pinned-0731-tokenizer \
+  --companion-reserve-gib "$COMPANION_RESERVE_GIB" \
   --model-dir ./candidate-model --jobs 2
 
 # Launch the completed backend separately; refuse before loading if it cannot fit.
@@ -193,6 +200,204 @@ budget option, then require the loader to enforce that setting. The live
 service remains on its original endpoint throughout development. The candidate
 port does not trigger a production cutover, and a refused launch does not
 change the active stack.
+
+`COMPANION_RESERVE_GIB` must be selected from measured companion peaks and
+headroom before this command is usable; it has no invented default. The helper
+rejects a missing, negative or non-finite value. `--tokenizer-dir` names an
+already available, pinned 0731-compatible tokenizer/config source; preparation
+must not silently download another model revision. A build can succeed while
+its recorded launch preflight reports insufficient memory. `--preflight-only`
+performs validation/reporting without installation or compilation.
+
+## Fixed scope and interfaces
+
+Use these requirements as the implementation checklist. Changing them requires
+a documented design update and corresponding test changes before new behavior
+is implemented.
+
+| ID | Requirement |
+| --- | --- |
+| R1 | The existing DeepSeek endpoint, Hunyuan and moderation remain running during development; build/tests never manage their lifecycle or client routes. |
+| R2 | Read the named 0731 GGUF unchanged, with IQ2_XXS/Q2_K/Q8_0/F16/F32 validated from actual tensor descriptors. No full BF16 expert expansion, replacement quant or download. |
+| R3 | Native TensorFold family CUDA engine, `tp=1`, one request, no drafting for the first release. Preserve the existing MLX family and shared server contracts. |
+| R4 | Companion-aware physical-memory accounting precedes full loading; oversized explicit context is refused. A configured 262,144-token context is a target awaiting measurement. |
+| R5 | Build/install/prepare are separate from serve; CPU preparation does not create CUDA allocations, and startup uses its own candidate port and caches. |
+| R6 | Serial forward passes independent quant/math/state fixtures and real-checkpoint quality gates. Exactness and model fidelity are separately evidenced. |
+| R7 | Build artifact, checkpoint identity, tokenizer provenance, toolchain and test results are reproducible and recorded. |
+| R8 | Optional DSpark requires the matching 0731 head, additional memory admission and drafted-versus-serial equality; legacy MTP is refused. |
+
+Suggested file ownership, subject to the agreed upstream boundary:
+
+- Shared GGUF container parsing belongs in one agreed reader coordinated with
+  PR #119. Model-specific tensor aliases, shapes and semantics belong under
+  `families/deepseek_v4/`; do not put V4 architecture decisions in a shared reader.
+- Backend implementation belongs in `families/deepseek_v4/cuda/`: separate
+  checkpoint/weights, forward/attention/compressor, cache, engine and app
+  responsibilities. Exact filenames may follow donor or upstream conventions.
+- GGUF size input extends `cuda/capacity.py`; serving, sampling and extension
+  compilation use shared components. Declare compiled sources in package data.
+- The proposed `tools/build_deepseek_v4_cuda.py` orchestrates isolated artifact
+  creation and preflight; it does not become a second inference engine.
+- CPU tests live in `tests/test_deepseek_v4_*.py`; device tests in
+  `tests/cuda/test_deepseek_v4_*.py`. Reuse existing prompt/CLI/capacity fixtures
+  and test helpers rather than copying their assertions into parallel suites.
+
+The CPU inspection result must describe every tensor's canonical name, stored
+name/type, shape, byte span, block size and required interpretation. Validate
+unique names, offsets/alignment, shape products, quant block divisibility,
+bounds against actual file size and required/optional tensor sets. Metadata
+must retain the architecture, EOS IDs, maximum context and tokenizer identity.
+Unsupported architecture differences fail explicitly; a filename suffix is
+not sufficient evidence of generation/head compatibility.
+
+Candidate metadata must carry a versioned GGUF storage descriptor separate
+from architecture settings: source path, size, recorded immutable identity,
+descriptor digest and tokenizer/config provenance. Use an existing verified
+checksum or deliberately compute one once before final qualification; a
+header digest plus size/mtime is only a fast consistency check, not a full
+content identity. Keep generated files within `--model-dir`, write them
+atomically, and require explicit replacement of incompatible existing
+metadata. No modification of the source GGUF or live tokenizer directory.
+
+The CUDA engine factory must match the existing family contract and expose
+`eos`, effective context/capacity and
+`generate(prompt, max_tokens, sampling, on_tokens, ...)`. Match the server's
+return-statistics and cancellation contract using its existing engine fixtures.
+Reject `tp != 1`, unsupported parallel settings, incompatible drafters and
+unknown formats before loading. `ignore_eos`, stop strings and token limits
+must use existing request policy. Prefix reuse and CUDA graphs may be disabled
+initially; enabling either requires its equality tests. Do not advertise a
+feature because the shared CLI can parse its flag.
+
+## Test-first development protocol
+
+For each behavior below:
+
+1. Write an observable test that fails on the missing or incorrect behavior.
+   Use a small independent fixture/oracle; do not generate expected results
+   through the implementation under test. Record the failing command and
+   failure reason. A fixture/import problem is not the intended failing test.
+2. Implement the smallest supported behavior that makes the test pass. Run the
+   targeted test, then the existing tests for any shared code it touched.
+3. Refactor while those tests remain green. Preserve the same oracle and
+   tolerance. Never loosen a numerical gate merely to accept a new kernel.
+4. Record the test command, result, artifact revision and resource ceiling.
+   Commit the test and implementation together in a reviewable increment.
+5. Stop at the milestone's gate. Mark hardware-unavailable checks pending and
+   continue independent CPU/build work; do not convert skipped checks into a
+   claim of working CUDA or full-model support.
+
+CPU tests may use numpy and minimal existing project dependencies, but must
+not import MLX, initialize CUDA or require target weights. Mock the allocator
+and weight loader so refusal tests fail if those paths are reached. CUDA tests
+use deterministic tiny fixtures, fixed seeds and one worker. Suggested initial
+test limits are 256 MiB device allocations per process and two compiler jobs;
+include context/extension overhead in preflight and lower the limit if the live
+stack has less headroom. These limits are development controls, not inferred
+available-memory guarantees or production context limits.
+
+## Test matrix and milestone gates
+
+These are proposed test modules/behaviors to implement, not existing passing
+tests. Prefer adding cases to existing suites when they cover the same contract.
+
+| Gate | Tests written first | Required passing behavior |
+| --- | --- | --- |
+| G0: scope/reuse (R1–R3) | Import/discovery and backend-option tests | CPU family discovery imports neither torch backend nor MLX; existing MLX selection remains valid; unsupported ranks/features fail before loading. Record donor and upstream revisions. |
+| G1: GGUF inspection (R2,R7) | `test_deepseek_v4_gguf.py`: tiny handcrafted containers; wrong magic/version, duplicate tensor names, malformed metadata, overflow/negative counts, overlap/out-of-bounds spans, invalid shapes, truncation and unsupported types | Header-only inspection returns exact byte spans and type/shape inventory, with descriptive failures and bounded reads. Required V4 tensor schema matches the fixture; missing or unexpected architecture fields are handled explicitly. |
+| G2: sidecars/CLI (R2,R5,R7) | `test_deepseek_v4_prepare.py`: mismatched tokenizer/vocabulary/EOS, conflicting model directories, changed source identity, absent reserve and interrupted writes | Generated metadata reproduces the selected checkpoint's architecture/tokenizer, stays within candidate paths, is atomic and idempotent for identical inputs, and is detected by normal family discovery. Preflight does no install, GPU work or service launch. |
+| G3: quant primitives (R2,R6) | CPU quant fixtures and `tests/cuda/test_deepseek_v4_quant.py`: zero/negative/subnormal scales, extreme codes, each IQ2 sign/grid pattern, Q2 subblocks, block boundaries, multiple expert IDs, strides and final tiles | CPU decode agrees with pinned ggml/ds4 fixtures; CUDA unpack agrees with that decode under declared output rounding. GEMV/GEMM checks cover relevant dimensions and tails; no whole-model dequantization or second expert copy is allocated. |
+| G4: forward primitives (R3,R6) | `tests/cuda/test_deepseek_v4_forward.py`: RMSNorm, hc mixing, Sinkhorn, routing ties, token-table layers, shared expert, gated activation clamp, positional frequencies and output head | Each primitive matches an independent high-precision calculation within a preregistered dtype-specific tolerance. Stable tie ordering and fixed reduction partitions are tested separately by exact equality. |
+| G5: attention/state (R3,R6) | `tests/cuda/test_deepseek_v4_cache.py` and `test_deepseek_v4_attention.py`: ratio 0/4/128, boundaries, window/ring wrap, sparse transition and partial keeps | Visibility includes only valid past/current rows; no future or stale pool row leaks. Fresh and resumed supported paths match; rejected rows never corrupt committed cache. V4 overlap/position rules match an independent miniature forward. |
+| G6: startup memory (R1,R4) | CPU cases in `test_cuda_capacity.py` plus V4 geometry tests: fitting and nonfitting budgets, missing memory info, reclaimed pages, companion reserve, mapped/resident/staging bytes, changed pressure and explicit/default contexts | Shared receipt includes all live/candidate budgets once, accounts for prefill and graph peaks, and refuses before full load. No negative/overflow capacity; explicit requested context is never silently reduced. Insufficient memory does not trigger service management. |
+| G7: serial engine (R3,R6) | Tiny end-to-end fixture tests: prefill + decode, zero/one/max reply, EOS/ignore-EOS, seeded sampling, callback cancellation, exception cleanup and repeated request | Sequence and committed state match the independent serial fixture; callback receives each committed token once; effective capacity bounds prompt plus reply; cleanup releases candidate-owned allocations/mappings. |
+| G8: HTTP integration (R1,R3,R5) | Existing CUDA server tests with tiny V4 engine: models/health, completions/chat, streaming, thinking/DSML tools, stops, context refusal, disconnect and error paths | Reuse shared response schemas, finish reasons and policies. Bad requests fail before streaming as appropriate; disconnect ends candidate work; listen only on requested candidate port; no redirect or restart of live services. |
+| G9: artifact/handoff (R5,R7) | `test_deepseek_v4_build.py`: subprocess commands stubbed; missing compiler, failed build, incompatible dependencies, wrong target architecture, absent kernel files and repeat builds | Wheel includes kernel sources/licenses; build uses candidate caches/env and requested job cap; clean wheel install and preflight work without the checkout; diagnostics distinguish build success from pending launch qualification. |
+| G10: real checkpoint (R1,R2,R4,R6,R7) | Operator-run manifest-driven quality, long-context and coexistence fixtures, explicitly separated from routine unit tests | Same quant and tokenizer; real chat/tools work, long prefill/decode stays within admitted capacity, actual Hunyuan generation and CUDA moderation succeed, candidate errors do not disrupt live serving. Record system pressure and failure evidence. |
+| G11: optional features (R8) | Window-width/drafted equality, base/head mismatch, partial accept/reject, resumed/fresh, eager/graph and concurrent/solo cases | Enable only independently qualified features. Legacy MTP is rejected for 0731; DSpark also fits the companion budget. All supported verify widths reproduce serial tokens and committed state. |
+
+For cache tests, explicitly cover positions 0/1, 3/4/5, 127/128/129,
+2,047/2,048/2,049 and multiple wraps. Include compression block completion,
+partially filled blocks, overlap at ratio 4 and top-k score ties. The exact
+first sparse-selection position follows validated V4 visibility semantics;
+test both sides of that boundary rather than assuming a generic GLM cutoff.
+Use real head dimensions in isolated tests where their bounded footprint fits.
+Before enabling verify width W, test every accepted prefix from 0 through W,
+including rejection on a compression/window boundary and decode immediately
+after rollback. Default serial width is one until wider widths are qualified.
+
+## Numerical oracles and quality qualification
+
+Use three distinct kinds of evidence:
+
+- **Stored values:** independent ggml/ds4 quant vectors with pinned revisions
+  and expected decoded values. For identical declared output dtype and decode
+  rounding, require exact equality; verify the quant codebook and scale rules
+  rather than just matching two copies of the same decoder.
+- **Model math:** a small CPU numpy/high-precision reference implementing the
+  validated V4 equations on those stored values. Define absolute/relative
+  tolerances per operation and activation dtype before testing; record them
+  with fixtures, including near-zero and close-logit cases. The independent
+  reference and tolerance review are prerequisites to the affected gate.
+- **Runtime exactness:** bitwise equality of supported serial/verify cache
+  states and complete token sequences under identical weights, settings,
+  runtime, seed and absolute positions. No numerical tolerance substitutes for
+  this gate. Cross-runtime ds4/TensorFold bitwise equality is not presumed.
+
+For the real GGUF, pin a public prompt fixture containing plain chat, a coding
+task, thinking, offered tools and a tool-result follow-up. Collect the trusted
+same-quant reference's rendered tokens, selected layer outputs/logits where
+available, top-token margins and quality/latency results. Specify the quality
+thresholds in the fixture manifest before looking at candidate results. Close
+logit disagreements require diagnosis; do not classify a broken attention or
+router as acceptable rounding. A rendered prompt mismatch is an integration
+failure and must be fixed before comparing inference quality. Continue using
+the official TensorFold public benchmark separately for comparable throughput.
+
+Full-model execution alongside two instances of DeepSeek is not a required
+development assumption. If the running service leaves insufficient memory,
+G10 remains pending and the artifact is labeled **build ready, full-model
+qualification pending**. Final validation of TensorFold + Hunyuan + moderation
+may require a later operator-arranged service replacement. That action is not
+authorized or automated by this plan. No result from tiny fixtures can replace
+the final target-hardware gate.
+
+## Evidence, drift control and completion
+
+Maintain a versioned fixture/result manifest containing:
+
+- Requirement/gate IDs, test names and current state: pending, failed, passed
+  or skipped with reason; skipped required tests block the relevant claim.
+- TensorFold base/candidate commits, donor kernel/parser commits, copied
+  source paths/licenses and coordinated upstream PR revisions.
+- GGUF full identity and tensor inventory, sidecar provenance, tokenizer
+  revision/hash, architecture differences and effective cache precision.
+- CPU architecture, GB10 compute capability as queried from the target,
+  Python/compiler/toolchain/container versions, package pins and build flags.
+- Build commands, wheel hash, fixture seeds, rendered token hashes,
+  preregistered tolerances/quality thresholds and complete output hashes.
+- Requested/allocated context, reply limit, process/system peak memory,
+  mapped/staging/cache/graph bytes, companion reserve, swap/page faults,
+  benchmark commands and measured latency/throughput.
+- Live endpoint probes before/after bounded tests and any observed impact.
+
+Keep portable fixtures/results in the agreed test/benchmark locations, and
+large machine-specific artifacts outside the repository. Do not publish
+credentials, user prompts, workstation paths or private service data. Record
+decisions as requirement changes with the reason and affected tests. Work on
+new quants, two ranks, concurrency, new drafters or performance optimizations
+only as separate follow-ups with their own gates. Recheck upstream/donor
+changes before each shared-code increment; extend shared tests when behavior
+changes for other families.
+
+The serial implementation is **build ready** after G0–G9 and required existing
+regression checks pass, the wheel installs cleanly and the two-command handoff
+works through preflight. It is **qualified for this deployment** only after
+G10 passes on the named GGUF with the measured companion budget. DSpark and
+other optional features need G11 for each advertised feature. At handoff,
+provide the exact pinned build/run commands, result manifest and remaining
+pending gates; never describe a successful compilation as proof the model
+runs correctly.
 
 ## Reuse map and remaining work
 
