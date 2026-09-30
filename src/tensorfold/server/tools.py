@@ -165,7 +165,7 @@ def _parse_glm_payload(block: str, schemas: dict[str, dict[str, Any]] | None, *,
     if complete and _GLM_ARG_RE.sub("", rest).strip():
         return None
     schema = (schemas or {}).get(name.lower(), {})
-    return name, {key.strip(): decode_parameter(value, schema.get(key.strip(), {}))
+    return name, {key.strip(): decode_parameter(value, schema.get(key.strip(), {}), python=False)
                   for key, value in _GLM_ARG_RE.findall(rest)}
 
 

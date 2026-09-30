@@ -32,6 +32,18 @@ from tensorfold.server.http import parse_tool_calls_from_content
         ("object", '{"a": "cut', '{"a": "cut'),
         ("object", '{"a": 1,', '{"a": 1,'),
         ("array", '{"x": 1', '{"x": 1'),
+        # Python's spelling, which Qwen writes as often as JSON's: BFCL's lockDoors(unlock=False) arrived as the
+        # string "False", which the vehicle took as true
+        ("boolean", "False", False),
+        ("boolean", "True", True),
+        ("boolean", "maybe", "maybe"),
+        ("null", "None", None),
+        ("array", "['driver', 'passenger']", ["driver", "passenger"]),
+        ("array", "('a', 1)", ["a", 1]),
+        ("object", "{'locked': True, 'doors': None}", {"locked": True, "doors": None}),
+        ("integer", "True", "True"),
+        ("string", "False", "False"),
+        ("object", "{'a': __import__('os')}", "{'a': __import__('os')}"),
     ],
 )
 @pytest.mark.parametrize("step", [1, 7, 10000])
