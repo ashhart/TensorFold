@@ -103,9 +103,10 @@ _TOOL_PARAMETER_BLOCK_RE = re.compile(
     r"<parameter=([^>\s]+)>\n?(.*?)\n?</parameter>",
     re.IGNORECASE | re.DOTALL,
 )
-# Gemma 4: <|tool_call>call:NAME{key:value,...}<tool_call|>, keys bare, strings between <|"|> marks
+# Gemma 4: <|tool_call>[call]:NAME{key:value,...}<tool_call|>, keys bare, strings between <|"|> marks
+# (the model emits the block with or without the leading "call" keyword)
 _GEMMA_TOOL_CALL_BLOCK_RE = re.compile(r"<\|tool_call>\s*(.*?)\s*<tool_call\|>", re.DOTALL)
-_GEMMA_CALL_RE = re.compile(r"^call:([\w.-]+)\s*(\{.*\})$", re.DOTALL)
+_GEMMA_CALL_RE = re.compile(r"^(?:call)?:([\w.-]+)\s*(\{.*\})$", re.DOTALL)
 _GEMMA_STRING_RE = re.compile(r'<\|"\|>(.*?)<\|"\|>', re.DOTALL)
 _GEMMA_KEY_RE = re.compile(r"(?<=[{,])\s*([A-Za-z_][\w-]*)\s*:")
 # DeepSeek-V4's DSML: one <｜DSML｜tool_calls> block holds invokes of named parameters, string="false" ones as JSON
@@ -188,7 +189,7 @@ def _parse_gemma_call(block: str) -> tuple[str, dict[str, Any]] | None:
 
 
 def _parse_tool_call_payload(block: str, schemas: dict[str, dict[str, Any]] | None = None, *, complete: bool = False) -> tuple[str, dict[str, Any]] | None:
-    gemma = _parse_gemma_call(block) if block.startswith("call:") else None
+    gemma = _parse_gemma_call(block) if block.startswith(("call:", ":")) else None
     if gemma is not None:
         return gemma
     try:

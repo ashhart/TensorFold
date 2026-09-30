@@ -58,3 +58,16 @@ def test_a_json_answer_with_tools_is_a_200_with_content(stream) -> None:
         choice = json.loads(body)["choices"][0]
         assert choice["message"]["content"] == ANSWER and "tool_calls" not in choice["message"]
         assert choice["finish_reason"] == "stop"
+
+
+@pytest.mark.parametrize("prefix", ["call:", ":"])
+def test_gemma_tool_call_with_or_without_call_keyword(prefix) -> None:
+    """Gemma 4 emits <|tool_call>[call]:NAME{...}<tool_call|>; the leading 'call' is optional (issue #121).
+
+    Without the fix the ':'-prefixed form is never routed to the Gemma parser and leaks as content.
+    """
+    block = f'<|tool_call>{prefix}get_weather{{location:<|"|>Oslo<|"|>}}<tool_call|>'
+    content, calls = parse_tool_calls_from_content(block, TOOLS)
+    assert content == ""
+    assert [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in calls] == [
+        ("get_weather", {"location": "Oslo"})]
