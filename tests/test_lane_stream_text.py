@@ -121,3 +121,43 @@ def test_gemma_spontaneous_empty_thought_channel_is_stripped():
     assert split_thinking(reply, finished=True, markers=CHANNEL_MARKERS) == ("", "The files are: a.py, b.py.")
     # a plain reply (no channel) is unchanged — the strip is a no-op
     assert split_thinking("Just an answer.", finished=True, markers=CHANNEL_MARKERS) == ("", "Just an answer.")
+
+
+def test_gemma_thought_channel_not_at_the_start_is_stripped():
+    """The spontaneous channel does not always sit at position 0: it can follow visible text, a leading
+    newline, or a stray/doubled `<|channel>` opener. Each of those must still be stripped, not leaked
+    (observed live after #157, which only handled a channel anchored at the start)."""
+    from tensorfold.server.text import CHANNEL_MARKERS as C
+
+    # after visible text (block empty) -> the text stays, the block goes
+    assert split_thinking("### Read the findings first.\n\n<|channel>thought\n<channel|>", finished=True,
+                          markers=C) == ("", "### Read the findings first.\n\n")
+    # a doubled opener -> both markers and the empty channel are dropped
+    assert split_thinking("<|channel><|channel>thought\n<channel|>The findings are clear.", finished=True,
+                          markers=C) == ("", "The findings are clear.")
+    # a leading newline before the block
+    assert split_thinking("\n\n<|channel>thought\n<channel|>Answer here.", finished=True,
+                          markers=C) == ("", "\n\nAnswer here.")
+    # a real (non-empty) channel after visible text: text is the answer, the channel body is reasoning
+    assert split_thinking("Preamble. <|channel>thought\nquietly.\n<channel|>Done.", finished=True,
+                          markers=C) == ("quietly.\n", "Preamble. Done.")
+    # none of these ever leak a marker into the answer
+    for reply in ("x\n<|channel>thought\n<channel|>y", "<|channel><|channel>thought\n<channel|>z",
+                  "\n<|channel>thought\n<channel|>w"):
+        _, answer = split_thinking(reply, finished=True, markers=C)
+        assert "<|channel>" not in answer and "<channel|>" not in answer
+
+
+def test_gemma_channel_after_text_streams_monotonically():
+    """While the channel-after-text case streams, the visible answer only grows — a partial `<|channel>`
+    opening tag is held back rather than shown then retracted."""
+    from tensorfold.server.text import CHANNEL_MARKERS as C
+
+    reply = "Here is the plan.\n\n<|channel>thought\n<channel|>"
+    seen = ""
+    for n in range(1, len(reply) + 1):
+        _, answer = split_thinking(reply[:n], finished=False, markers=C)
+        assert answer.startswith(seen), f"answer taken back at {n}: {seen!r} -> {answer!r}"
+        assert "<|channel>" not in answer
+        seen = answer
+    assert split_thinking(reply, finished=True, markers=C) == ("", "Here is the plan.\n\n")

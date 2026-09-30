@@ -25,12 +25,26 @@ def _partial_tag(text: str, tag: str) -> int:
 
 
 def split_thinking(text: str, *, finished: bool, markers: tuple[str, str] = THINK_MARKERS) -> tuple[str, str]:
-    """(reasoning, answer) of a thinking reply; while it streams, a tail that could begin a marker is held back."""
+    """(reasoning, answer) of a thinking reply; while it streams, a tail that could begin a marker is held back.
+
+    A Gemma 4 thought channel can open *anywhere*, not only at the start of the reply — after some visible
+    text, behind a leading newline, or behind a stray/doubled ``<|channel>`` opener. The block is stripped
+    wherever it is so ``<|channel>thought...<channel|>`` never leaks into the answer (follow-up to #157,
+    which only stripped a channel anchored at position 0)."""
 
     opener, closer = markers
+    if opener and not text.startswith(opener):
+        start = text.find(opener)
+        if start > 0:                                        # a thought channel opened after some visible text
+            prefix = text[:start]
+            prefix = prefix[: len(prefix) - _partial_tag(prefix, opener)]   # drop a stray/doubled partial opener
+            reasoning, answer = split_thinking(text[start:], finished=finished, markers=markers)
+            return reasoning, prefix + answer
+        if not finished:                                     # no opener yet: hold a tail that could begin one
+            return "", text[: len(text) - max(_partial_tag(text, tag)
+                                               for tag in (opener, closer, *(o for o, _ in _CALLS)))]
+        return "", text                                      # a finished reply that never opened the block
     if opener:
-        if not text.startswith(opener):                      # a reply that did not open the block has no reasoning
-            return ("", "") if not finished and opener.startswith(text) else ("", text)
         text = text[len(opener):].lstrip("\n")
     end = text.find(closer)
     if end >= 0:
