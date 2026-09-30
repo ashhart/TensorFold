@@ -888,12 +888,159 @@ def flash_checkpoint_fixture(output):
     print(f"Exported {len(cases)} Flash checkpoint naming/scale fixtures")
 
 
+def responses_fixture(output):
+    from tensorfold.server import responses
+    from tensorfold.server.errors import RequestError
+    from dataclasses import asdict
+    import random
+
+    function = {"type": "function", "name": "weather", "parameters": {"type": "object"}, "strict": True}
+    items = [{"role": "developer", "content": [{"type": "input_text", "text": "rules"}]},
+             {"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AA", "detail": "low"}]},
+             {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "hm"}]},
+             {"role": "assistant", "content": [{"type": "output_text", "text": "Sure."}]},
+             {"type": "function_call", "call_id": "c1", "name": "weather", "arguments": "{}"},
+             {"type": "function_call", "call_id": "c2", "name": "weather"},
+             {"type": "function_call_output", "call_id": "c1", "output": [{"type": "input_text", "text": "sunny"}]},
+             {"type": "function_call_output", "call_id": "c2", "output": "none"}]
+    bodies = [None, [], {}, {"input": ""}, {"input": items}, {"input": [items[2], items[4]]},
+              {"input": [{"role": "assistant", "content": [{"type": "refusal", "refusal": "no"}]}]}]
+    controls = [{}, {"instructions": "Be kind", "metadata": {"æ": "🌍"}, "user": "u"},
+                {"store": False, "stream": True, "max_output_tokens": 0, "reasoning": {"effort": "none", "summary": "auto"}},
+                {"model": "test", "temperature": .7, "top_p": .9, "top_k": 20, "min_p": .2, "seed": 42,
+                 "stop": ["END"], "draft": False, "thinking_budget": 3, "ignore_eos": True, "priority": "background",
+                 "return_token_ids": True, "chat_template_kwargs": {"enable_thinking": True}},
+                {"tools": [function], "tool_choice": {"type": "function", "name": "weather"}},
+                {"tools": [function], "tool_choice": {"type": "allowed_tools", "mode": "required", "tools": [function]}},
+                {"tools": [function], "tool_choice": {"type": "allowed_tools", "tools": []}},
+                *({"tool_choice": c, "tools": [function], "parallel_tool_calls": p} for c in (None, "auto", "none", "required") for p in (True, False)),
+                *({"text": {"format": f}} for f in (None, {"type": "text"}, {"type": "json_object"},
+                   {"type": "json_schema", "name": "n", "schema": {"type": "object"}, "strict": False, "description": "D"})),
+                *({"store": v, "metadata": v, "reasoning": v} for v in (None, False, 0, "", [], {})),
+                {"instructions": 5}, {"input": []}, {"input": [False]}, {"reasoning": [1]}, {"text": "x"},
+                {"tools": {}}, {"tools": [{"type": "web_search"}]}, {"tools": [{"type": "function", "name": ""}]},
+                {"metadata": {"k": 1}}, {"metadata": {"k" * 65: "v"}}, {"metadata": {"k": "v" * 513}},
+                {"metadata": {str(n): "v" for n in range(17)}}, {"metadata": {"🌍" * 64: "ø" * 512}},
+                *({k: True} for k in ("background", "conversation", "prompt", "context_management", "top_logprobs")),
+                {"include": ["reasoning.encrypted_content"]},
+                {"truncation": "auto"}, {"previous_response_id": "missing"}, {"previous_response_id": 1},
+                {"input": [{"type": "reasoning", "encrypted_content": "hidden"}]},
+                {"input": [{"role": "user", "content": [{"type": "input_image", "file_id": "f"}]}]},
+                {"input": [{"role": "user", "content": [{"type": "input_file", "file_id": "f"}]}]},
+                {"input": [{"role": "tool", "content": "x"}]}, {"input": [{"type": "item_reference", "id": "x"}]},
+                {"input": [{"type": "function_call", "call_id": "c"}]},
+                {"input": [{"type": "function_call_output", "call_id": "c", "output": 7}]},
+                {"tool_choice": {"type": "allowed_tools", "mode": "none"}},
+                {"tool_choice": {"type": "allowed_tools", "tools": [{"type": "web_search"}]}},
+                {"text": {"format": {"type": "grammar"}}}]
+    bodies.extend({"input": "Hello", **control} for control in controls)
+    cases = []
+    for body in bodies:
+        try:
+            cases.append(dict(body=body, expected=asdict(responses.translate(body, responses.Store()))))
+        except RequestError:
+            cases.append(dict(body=body, error=True))
+    rng = random.Random(90210)
+    scenarios = []
+    for limit, max_bytes in ((4, 1 << 20), (100, 1300), (0, 1 << 20), (10, 0)):
+        store = responses.Store(limit=limit, max_bytes=max_bytes)
+        actions = []
+        for n in range(150):
+            action = {"op": ("put", "put", "translate", "get", "delete", "conversation")[n] if n < 6 else rng.choice(("put", "put", "get", "delete", "conversation", "translate"))}
+            rid = ("r1" if n in (2, 3, 5) else "r0") if n < 6 else f"r{rng.randrange(max(1, n))}"
+            if action['op'] == 'put':
+                response = {"id": f"r{n}", "previous_response_id": "r0" if n == 1 else rng.choice([None, *store.entries]),
+                            "output": [{"role": "assistant", "content": "æ🌍\n" + str(n)}], "temperature": .7}
+                added = [{"role": "user", "content": str(n)}]
+                action.update(response=response, added=added)
+                store.put(response, added)
+                result = None
+            else:
+                action['id'] = rid
+                try:
+                    if action['op'] == 'get':
+                        result = store.get(rid)
+                    elif action['op'] == 'delete':
+                        result = store.delete(rid)
+                    elif action['op'] == 'conversation':
+                        result = store.conversation(rid)
+                    else:
+                        action['body'] = {"input": "next", "instructions": "new", "previous_response_id": rid}
+                        result = asdict(responses.translate(action['body'], store))
+                except RequestError:
+                    action['error'] = True
+                    result = None
+            action.update(expected=result, ids=list(store.entries), bytes=store.bytes)
+            actions.append(action)
+        scenarios.append(dict(limit=limit, max_bytes=max_bytes, actions=actions))
+    from tensorfold.server import responses_translate
+    from unittest.mock import patch
+    from copy import deepcopy
+    reply_cases = []
+    chat_usage = {"prompt_tokens": 5, "completion_tokens": 7, "prompt_tokens_details": {"cached_tokens": 2},
+                  "completion_tokens_details": {"reasoning_tokens": 3}}
+    sample_calls = [{"id": "c1", "type": "function", "function": {"name": "weather", "arguments": '{"city":"Oslo"}'}},
+                    {"id": "c2", "type": "function", "function": {"name": "weather", "arguments": "{}"}}]
+    for message in ({}, {"content": "Hi æ🌍"}, {"reasoning_content": "hmm"},
+                    {"reasoning_content": "hmm", "content": "Hi"}, {"tool_calls": sample_calls},
+                    {"reasoning_content": "hmm", "content": "Hi", "tool_calls": sample_calls}):
+        for reason in ("stop", "length", "tool_calls"):
+            completion = {"choices": [{"message": message, "finish_reason": reason}], "usage": chat_usage,
+                          "tensorfold": {"token_sha": "fixed"}}
+            reply_cases.append(dict(completion=completion))
+            chunks = [{"choices": [{"delta": {"role": "assistant"}}]}]
+            for key in ("reasoning_content", "content"):
+                chunks.extend({"choices": [{"delta": {key: c}}]} for c in message.get(key, ""))
+            for i, call in enumerate(message.get('tool_calls', [])):
+                chunks.append({"choices": [{"delta": {"tool_calls": [{"index": i, **call, "function": {"name": call['function']['name'], "arguments": ""}}]}}]})
+                chunks.extend({"choices": [{"delta": {"tool_calls": [{"index": i, "function": {"arguments": c}}]}}]} for c in call['function']['arguments'])
+            chunks.extend([{"choices": [{"delta": {}, "finish_reason": reason}], "usage": chat_usage, "tensorfold": {"token_sha": "fixed"}}, None,
+                           {"error": {"message": "ignored after completion"}}])
+            reply_cases.append(dict(chunks=chunks))
+    reply_cases.extend(dict(chunks=c) for c in (
+        [None], [{"choices": [{"delta": {"content": "partial"}}]}, None],
+        [{"error": {"message": "boom", "type": "invalid_request_error"}}],
+        [{"choices": [{"delta": {"reasoning": "thinking"}}]}, {"error": {"message": "boom"}}],
+        [{"choices": [{"delta": {"tool_calls": [{"function": {"name": "f", "arguments": "{"}}]}}]}, {"error": {}}],
+        [{"choices": [{"delta": {"content": "Hi"}, "finish_reason": "stop"}]}]))
+    for case in reply_cases:
+        counter = 0
+        def next_id(prefix):
+            nonlocal counter
+            value = f"{prefix}_resp_fixture_{counter}"
+            counter += 1
+            return value
+        store = responses.Store()
+        events, kept = [], []
+        base = {"id": "resp_fixture", "object": "response", "status": "in_progress", "output": [], "usage": None, "error": None, "previous_response_id": None}
+        added = [{"role": "user", "content": "Hi"}]
+        def emit(event):
+            events.append(deepcopy(event))
+            kept.append(store.get('resp_fixture') is not None)
+        with patch.object(responses_translate, '_id', next_id), patch.object(responses_translate.time, 'time', return_value=1234):
+            reply = responses.Reply(base, emit, lambda final: store.put(final, added))
+            reply.start()
+            if 'completion' in case:
+                reply.completion(case['completion'])
+            else:
+                for chunk in case['chunks']:
+                    reply.chunk(chunk)
+        case.update(base=base, added=added, events=events, kept=kept, expected=reply.final, stored=store.get('resp_fixture'))
+    routes = ["/v1/responses", "/responses/", "/v1/responses/r?x=1", "/responses/r///", "/v1/responses/r/input_items", "/v1/chat/completions", "/responsesx/r"]
+    output.parent.mkdir(parents=True, exist_ok=True)
+    sizes = [None, True, False, 0, -1, 1.0, -0.0, .0001, .00001, 1e16, 1e15, -1e100, 1e-100, 5e-324,
+             "ascii\x00\x7fæ🌍", {"f": 1.0, "s": "\t\r\n"}, ["x", None, False]]
+    output.write_text(json.dumps(dict(requests=cases, stores=scenarios, replies=reply_cases, sizes=[dict(value=v, expected=len(json.dumps(v))) for v in sizes], routes=[dict(path=p, expected=responses.route(p)) for p in routes])))
+    print(f"Saved {len(cases)} upstream Responses requests, {sum(len(s['actions']) for s in scenarios)} store operations and {len(reply_cases)} reply/event sequences")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("model", type=Path)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--chat-fixtures", action="store_true")
     p.add_argument("--tool-fixtures", action="store_true")
+    p.add_argument("--responses-fixtures", action="store_true")
     p.add_argument("--tool-draft-fixtures", action="store_true")
     p.add_argument("--tokens", help="Explicit prompt IDs, including for generation")
     p.add_argument("--dump-logits", type=Path)
@@ -924,6 +1071,9 @@ def main():
     p.add_argument("--trace-layers", action="store_true")
     p.add_argument("--state-directory", type=Path)
     args = p.parse_args()
+    if args.responses_fixtures:
+        responses_fixture(args.output)
+        return
     if args.flash_checkpoint:
         flash_checkpoint_fixture(args.output)
         return

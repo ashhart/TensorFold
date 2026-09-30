@@ -38,6 +38,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len >= 3 and std.mem.eql(u8, args[1], "serve")) return @import("server.zig").run(init, args);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-chat")) return @import("chat.zig").check(io, args[2], args[3]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-tool-calls")) return @import("tool_calls.zig").check(io, args[2]);
+    if (args.len == 3 and std.mem.eql(u8, args[1], "check-responses")) return @import("responses.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-tool-stream")) return @import("tool_stream.zig").check(io, args[2]);
     if (args.len == 3 and std.mem.eql(u8, args[1], "check-image-http")) return @import("image_http.zig").check(io, args[2]);
     if (args.len == 4 and std.mem.eql(u8, args[1], "check-image-url")) return @import("image_http.zig").fetchCheck(io, args[2], args[3]);

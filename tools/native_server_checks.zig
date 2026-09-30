@@ -199,6 +199,7 @@ const Scenario = struct {
     prefixes: bool = false,
     live: bool = false,
     drafts: bool = false,
+    responses: bool = false,
     neural: bool = false,
     neural_enabled: bool = true,
     synthetic: bool = false,
@@ -781,6 +782,12 @@ const Scenario = struct {
             }
         };
         if (s.disk_phase != null) return s.checkDisk(port);
+        if (s.responses) {
+            try @import("native_responses_checks.zig").check(s.init, port, s.http_checks);
+            try std.posix.kill(s.child.id.?, .INT);
+            if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
+            return;
+        }
         if (s.memory) return s.checkMemory(port);
         if (s.neural) return s.checkNeural(port);
         if (s.drafts) return s.checkDrafts(port);
@@ -894,6 +901,7 @@ pub fn main(init: std.process.Init) !void {
         const prefixes = std.mem.eql(u8, args[3], "--cache-only");
         const live = std.mem.eql(u8, args[3], "--live-only");
         const drafts = std.mem.eql(u8, args[3], "--drafts-only");
+        const responses = std.mem.eql(u8, args[3], "--responses-only");
         const neural = std.mem.eql(u8, args[3], "--neural-only") or std.mem.eql(u8, args[3], "--neural-disabled") or std.mem.eql(u8, args[3], "--neural-synthetic") or std.mem.eql(u8, args[3], "--neural-untrained");
         const terminal = if (live and !std.mem.eql(u8, args[4], "redirected")) try Terminal.init() else null;
         defer if (terminal) |t| {
@@ -918,6 +926,7 @@ pub fn main(init: std.process.Init) !void {
         if (args.len == 6) try argv.appendSlice(init.arena.allocator(), &.{ "--drafter", args[5], "--max-draft", "15" });
         var scenario = Scenario{ .init = init, .idle = false, .rounds = !memory and !prefixes and !live, .memory = memory, .prefixes = prefixes, .live = live, .neural = neural, .neural_enabled = !std.mem.eql(u8, args[3], "--neural-disabled"), .terminal = terminal, .live_enabled = live and std.mem.eql(u8, args[4], "enabled"), .cache_enabled = !std.mem.eql(u8, args[4], "0"), .cache_oversize = std.mem.eql(u8, args[4], "0.000001"), .image = if (memory) args[4] else args[3], .http_checks = args[4], .child = try std.process.spawn(init.io, .{ .argv = argv.items, .environ_map = &environment, .stdout = if (terminal) |t| .{ .file = t.slave } else if (live) .pipe else .inherit, .stderr = .pipe }) };
         scenario.drafts = drafts;
+        scenario.responses = responses;
         scenario.synthetic = std.mem.eql(u8, args[3], "--neural-synthetic");
         scenario.require_acceptance = !std.mem.eql(u8, args[3], "--neural-untrained");
         defer if (scenario.child.id) |id| {

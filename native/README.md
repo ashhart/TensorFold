@@ -167,6 +167,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
 | Chat templates, tokenizers and required tools | `test-chat test-tool-calls -Doptimize=safe -j1` | All seven tokenizers, including DeepSeek's official encoder and upstream's rejection of required DeepSeek tool calls; no weights loaded |
 | Tool structure and copy proposals | `test-tool-drafts test-server-tool-drafts -Doptimize=safe -j1` | Seven-tokenizer upstream oracle; Qwen HTTP acceptance/rejection, serial parity, sampling and streaming |
+| Responses API | `test-responses test-server-responses -Doptimize=safe -j1` | Upstream translation/events/store oracle; Qwen HTTP text, tools, images, history chains and streaming |
 | Neural request state and HTTP | `test-session-neural test-server-neural -Doptimize=safe -j1` | Qwen DFlash2, Nemotron/Flash MTP and Gemma DFlash; serial parity, prefix reuse, interleaving, JSON/SSE and cancellation. Add `-Dgemma-drafter=/absolute/checkpoint` for a trained Gemma drafter; otherwise uses the synthetic fixture |
 | Neural images/tools and large-family HTTP | `test-server-neural-multimodal test-server-neural-synthetic -Doptimize=safe -j1` | Qwen image/text and tool controls; synthetic GLM MTP, DeepSeek MTP and DSpark. Full GLM/DeepSeek inference remains unverified |
 | Checkpoint metadata rejection | `test-schema-failures -Doptimize=safe -j1` | Installed schema checkpoints; no GPU |
@@ -207,8 +208,12 @@ zig-out/bin/tensorfold run "$HOME/.models/Vontra/Qwen3.8-27B-MLX-4bit" --prompt 
 This is a raw completion CLI: it does not automatically build a conversation or
 apply a chat template. Use `--tokens ID,ID,...` for controlled comparisons.
 `tensorfold serve MODEL_DIR --host 127.0.0.1 --port 8080` exposes `/health`,
-`/v1/models`, `/v1/completions` and `/v1/chat/completions`, including SSE,
+`/v1/models`, `/v1/completions`, `/v1/chat/completions` and `/v1/responses`, including SSE,
 seeded sampling, stop strings, reasoning content and disconnect cancellation.
+Responses support GET/DELETE by ID and `previous_response_id`; the in-memory
+store keeps up to 1,024 responses with a 256 MiB limit on serialized data.
+`store: false` disables retention.
+JSON/schema output constraints are refused until grammar support is implemented.
 `--batch-streams N` controls active requests (default `4`, range `1`–`8`). One
 GPU worker interleaves their prefill chunks and decode steps with separate caches;
 GPU forwards are still per request. Up to eight further requests can queue.

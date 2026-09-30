@@ -1,4 +1,5 @@
 const std = @import("std");
+const responses = @import("responses.zig");
 const mx = @import("mlx.zig");
 const inference = @import("session.zig");
 const chat = @import("chat.zig");
@@ -141,7 +142,9 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var stats = live_status.Stats{ .io = init.io, .allocator = init.gpa };
     defer stats.deinit();
     var display = live_status.Display{ .io = init.io, .stats = &stats };
-    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams, .is_glm = is_glm, .is_flash = is_flash, .memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB"), .stats = &stats, .display = &display };
+    var response_store = responses.Store{ .a = init.gpa };
+    defer response_store.deinit();
+    var worker = Worker{ .io = init.io, .dir = args[2], .queue = .init(&jobs), .defaults = defaults, .thinking = thinking, .effort = effort, .vision_urls = vision_urls, .control = &registry, .batch_streams = batch_streams, .is_glm = is_glm, .is_flash = is_flash, .memory_limit = init.environ_map.get("TENSORFOLD_MEMORY_LIMIT_GB"), .stats = &stats, .display = &display, .response_store = &response_store };
     worker.checkpoint_slots = checkpoint_slots orelse @max(8, 3 * batch_streams);
     worker.prompt_cache_bytes = prompt_cache_bytes;
     const snapshot_path = if (snapshot_dir) |dir| if (std.ascii.eqlIgnoreCase(dir, "none")) null else try init.gpa.dupe(u8, dir) else if (init.environ_map.get("HOME")) |home| try std.fs.path.join(init.gpa, &.{ home, ".cache", "tensorfold", "native-prefix-snapshots" }) else null;
@@ -205,10 +208,12 @@ const Job = struct {
     body: std.json.Value,
     is_chat: bool,
     options: inference.Options,
+    response_reply: ?*responses.Reply = null,
     done: std.Io.Event = .unset,
     failure: ?anyerror = null,
 };
 const Worker = struct {
+    response_store: *responses.Store,
     draft_options: @import("neural_draft.zig").Options = .{},
     drafts: bool = true,
     stats: *live_status.Stats,
@@ -616,12 +621,24 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
     var route = request.head.target;
     if (std.mem.indexOfScalar(u8, route, '?')) |at| route = route[0..at];
     route = std.mem.trimEnd(u8, route, "/");
+    const response_id = responses.route(route);
+    if (response_id) |id| {
+        if (request.head.method == .GET) {
+            const found = try worker.response_store.getResponse(a, worker.io, id) orelse return failure(a, request, .not_found, "Response not stored");
+            return json(a, request, .ok, found);
+        }
+        if (request.head.method == .DELETE) {
+            if (!worker.response_store.delete(worker.io, id)) return failure(a, request, .not_found, "Response not stored");
+            return json(a, request, .ok, .{ .id = id, .object = "response", .deleted = true });
+        }
+        if (id.len != 0) return failure(a, request, .not_found, "Unknown route");
+    }
     if (request.head.method == .GET) {
         if (route.len == 0 or std.mem.eql(u8, route, "/health")) return json(a, request, .ok, .{ .status = "ok", .model = model, .warming = false, .max_batch_size = worker.batch_streams, .memory = worker.memory_stats.snapshot(), .prompt_cache = worker.prefix_stats.snapshot(), .inference = worker.stats.snapshot() });
         if (std.mem.eql(u8, route, "/v1/models") or std.mem.eql(u8, route, "/models")) return json(a, request, .ok, .{ .object = "list", .data = &.{.{ .id = model, .object = "model", .created = std.Io.Clock.real.now(worker.io).toSeconds(), .owned_by = "tensorfold" }} });
         return failure(a, request, .not_found, "Unknown route");
     }
-    const is_chat = std.mem.eql(u8, route, "/v1/chat/completions") or std.mem.eql(u8, route, "/chat/completions");
+    const is_chat = response_id != null or std.mem.eql(u8, route, "/v1/chat/completions") or std.mem.eql(u8, route, "/chat/completions");
     if (request.head.method != .POST or (!is_chat and !std.mem.eql(u8, route, "/v1/completions") and !std.mem.eql(u8, route, "/completions"))) return failure(a, request, .not_found, "Unknown route");
     var body_buffer: [8192]u8 = undefined;
     const body_reader = try request.readerExpectContinue(&body_buffer);
@@ -630,10 +647,20 @@ fn handle(worker: *Worker, a: std.mem.Allocator, request: *Request, model: []con
         return failure(a, request, .bad_request, "Invalid or oversized request body");
     };
     const body = std.json.parseFromSlice(std.json.Value, a, bytes, .{ .allocate = .alloc_always }) catch return failure(a, request, .bad_request, "Invalid JSON");
-    const options = inference.Options.parseWithDefaults(a, body.value, worker.defaults) catch |err| return failure(a, request, .bad_request, @errorName(err));
-    if (body.value.object.get("model")) |value| if (value != .string or !std.mem.eql(u8, value.string, model)) return failure(a, request, .not_found, "Unknown model");
+    var chat_body = body.value;
+    const created = std.Io.Clock.real.now(worker.io).toSeconds();
+    var response_reply: ?responses.Reply = null;
+    defer if (response_reply) |*reply| reply.deinit();
+    if (response_id != null) {
+        const translated = responses.translate(a, worker.io, body.value, worker.response_store) catch |err| return failure(a, request, .bad_request, @errorName(err));
+        chat_body = translated.chat;
+        const id = try std.fmt.allocPrint(a, "resp_{d}_{d}", .{ created, sequence });
+        response_reply = .{ .a = a, .io = worker.io, .initial = try responses.base(a, translated, id, model, created), .store = if (translated.store) worker.response_store else null, .added = translated.added };
+    }
+    const options = inference.Options.parseWithDefaults(a, chat_body, worker.defaults) catch |err| return failure(a, request, .bad_request, @errorName(err));
+    if (chat_body.object.get("model")) |value| if (value != .string or !std.mem.eql(u8, value.string, model)) return failure(a, request, .not_found, "Unknown model");
     client.cancellation().check() catch |err| return requestFailure(a, request, err);
-    var job = Job{ .stats = worker.stats, .a = a, .request = request, .model = model, .sequence = sequence, .created = std.Io.Clock.real.now(worker.io).toSeconds(), .client = client, .body = body.value, .is_chat = is_chat, .options = options };
+    var job = Job{ .stats = worker.stats, .a = a, .request = request, .model = model, .sequence = sequence, .created = created, .client = client, .body = chat_body, .is_chat = is_chat, .options = options, .response_reply = if (response_reply) |*reply| reply else null };
     worker.stats.enqueue();
     defer worker.stats.finish(job.activated);
     if (try worker.queue.putUncancelable(worker.io, &.{&job}, 0) == 0) return failure(a, request, .service_unavailable, "Inference queue is full");
@@ -697,6 +724,10 @@ const Pending = struct {
 
     fn reportError(p: *Pending, err: anyerror) !void {
         if (p.response) |*response| {
+            if (p.job.response_reply) |reply| {
+                _ = try reply.fail(.{ .string = @errorName(err) });
+                return response.end();
+            }
             const body = try std.json.Stringify.valueAlloc(p.job.a, .{ .@"error" = .{ .message = @errorName(err) } }, .{});
             try response.writer.print("data: {s}\n\ndata: [DONE]\n\n", .{body});
             try response.end();
@@ -708,6 +739,10 @@ const Pending = struct {
         const body = p.job.body;
         const cancellation = p.job.client.cancellation();
         try cancellation.check();
+        if (body.object.get("response_format")) |format| if (format != .null) {
+            const kind = if (format == .object) format.object.get("type") orelse std.json.Value.null else std.json.Value.null;
+            if (kind != .string or !std.mem.eql(u8, kind.string, "text")) return error.StructuredOutputNotImplemented;
+        };
         var options = p.job.options;
         if (!w.drafts) options.draft = false;
         var ids: std.ArrayList(i32) = .empty;
@@ -775,7 +810,12 @@ const Pending = struct {
         }
         if (options.stream) {
             p.response = try p.job.request.respondStreaming(&p.buffer, .{ .respond_options = .{ .keep_alive = false, .extra_headers = &.{ .{ .name = "content-type", .value = "text/event-stream" }, .{ .name = "cache-control", .value = "no-cache" } } } });
-            p.stream = .{ .a = a, .writer = &p.response.?.writer, .transport = p.job.request.server.out, .id = p.id, .model = p.job.model, .created = p.job.created, .is_chat = p.job.is_chat, .thinking = p.thinking, .markers = p.markers, .tools = p.tools, .max_calls = p.max_calls, .cancellation = cancellation };
+            p.stream = .{ .a = a, .writer = &p.response.?.writer, .transport = p.job.request.server.out, .id = p.id, .model = p.job.model, .created = p.job.created, .is_chat = p.job.is_chat, .thinking = p.thinking, .markers = p.markers, .tools = p.tools, .max_calls = p.max_calls, .cancellation = cancellation, .response_reply = p.job.response_reply };
+            if (p.job.response_reply) |reply| {
+                reply.context = &p.stream.?;
+                reply.emit = Stream.responseEvent;
+                try reply.start();
+            }
             if (p.job.is_chat) try p.stream.?.chatChunk(.{ .role = "assistant", .content = "" }, null);
         }
         p.generation = try inference.RequestGeneration.init(session, mx.allocator, p.ids, options, .{ .tools = p.tools, .context = if (p.stream) |*stream| stream else null, .emit = if (p.stream != null) Stream.emit else null, .cancellation = cancellation, .gate = if (p.gate) |*gate| gate else null }, if (p.image) |*image| image else null);
@@ -943,14 +983,17 @@ const Pending = struct {
             const state = &p.stream.?;
             if (p.job.is_chat) try state.chatText(true);
             try state.finishWithUsage(if (state.calls_sent > 0) "tool_calls" else @tagName(reply.finish_reason), usage);
-            try response.writer.writeAll("data: [DONE]\n\n");
+            if (p.job.response_reply == null) try response.writer.writeAll("data: [DONE]\n\n");
             try response.end();
         } else {
             if (p.job.is_chat) {
                 const parts = if (p.thinking) reply_text.splitThinking(reply.content, true, p.markers) else reply_text.Parts{ .content = reply.content };
                 var parsed = try tool_calls.parse(a, parts.content, p.tools, p.max_calls, id);
                 if (p.max_calls != null and p.tools == .array and p.tools.array.items.len > 0) parsed.content = try tool_calls.singleContent(a, parsed.content);
-                try json(a, request, .ok, .{ .id = id, .object = "chat.completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .message = .{ .role = "assistant", .content = parsed.content, .reasoning_content = parts.reasoning, .tool_calls = parsed.calls }, .finish_reason = if (parsed.calls.len > 0) "tool_calls" else @tagName(reply.finish_reason) }}, .usage = usage });
+                const completion = .{ .id = id, .object = "chat.completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .message = .{ .role = "assistant", .content = parsed.content, .reasoning_content = parts.reasoning, .tool_calls = parsed.calls }, .finish_reason = if (parsed.calls.len > 0) "tool_calls" else @tagName(reply.finish_reason) }}, .usage = usage };
+                if (p.job.response_reply) |result| {
+                    try json(a, request, .ok, try result.complete(completion, std.Io.Clock.real.now(session.io).toSeconds()));
+                } else try json(a, request, .ok, completion);
             } else try json(a, request, .ok, .{ .id = id, .object = "text_completion", .created = created, .model = model, .choices = &.{.{ .index = @as(usize, 0), .text = reply.content, .finish_reason = @tagName(reply.finish_reason), .logprobs = @as(?u8, null) }}, .usage = usage });
         }
         return true;
@@ -958,6 +1001,7 @@ const Pending = struct {
 };
 
 const Stream = struct {
+    response_reply: ?*responses.Reply = null,
     a: std.mem.Allocator,
     writer: *std.Io.Writer,
     transport: *std.Io.Writer,
@@ -975,7 +1019,20 @@ const Stream = struct {
     max_calls: ?usize = null,
     calls_sent: usize = 0,
     tool_stream: @import("tool_stream.zig").Streamer = .{},
+    fn responseEvent(context: ?*anyopaque, event: std.json.Value) !void {
+        const s: *Stream = @ptrCast(@alignCast(context.?));
+        var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer scratch.deinit();
+        const body = try std.json.Stringify.valueAlloc(scratch.allocator(), event, .{});
+        try s.writer.print("event: {s}\ndata: {s}\n\n", .{ event.object.get("type").?.string, body });
+        try s.writer.flush();
+        try s.transport.flush();
+    }
     fn finishWithUsage(s: *Stream, reason: []const u8, usage: anytype) !void {
+        if (s.response_reply) |reply| {
+            _ = try reply.finishUsage(reason, usage, std.Io.Clock.real.now(reply.io).toSeconds());
+            return;
+        }
         const body = if (s.is_chat)
             try std.json.Stringify.valueAlloc(s.a, .{ .id = s.id, .object = "chat.completion.chunk", .created = s.created, .model = s.model, .choices = &.{.{ .index = @as(usize, 0), .delta = std.json.Value{ .object = .empty }, .finish_reason = reason }}, .usage = usage }, .{})
         else
@@ -999,6 +1056,7 @@ const Stream = struct {
         try s.chatText(false);
     }
     fn chatChunk(s: *Stream, delta: anytype, finish: ?[]const u8) !void {
+        if (s.response_reply) |reply| return reply.writeDelta(delta);
         const body = try std.json.Stringify.valueAlloc(s.a, .{ .id = s.id, .object = "chat.completion.chunk", .created = s.created, .model = s.model, .choices = &.{.{ .index = @as(usize, 0), .delta = delta, .finish_reason = finish }} }, .{});
         try s.writer.print("data: {s}\n\n", .{body});
         try s.writer.flush();

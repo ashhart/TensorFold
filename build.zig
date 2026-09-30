@@ -389,6 +389,11 @@ pub fn build(b: *std.Build) void {
     server_drafts.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--drafts-only" });
     server_drafts.addArtifactArg(http_checks);
     b.step("test-server-tool-drafts", "Verify target-accepted tool/copy proposals, serial parity, sampling and forced controls over HTTP").dependOn(&server_drafts.step);
+    const server_responses = b.addRunArtifact(lifecycle.producer.?);
+    server_responses.addArtifactArg(exe);
+    server_responses.addArgs(&.{ b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "--responses-only", "build/native-checks/session-image/image.png" });
+    server_responses.step.dependOn(&session_image_fixture.step);
+    b.step("test-server-responses", "Verify Responses JSON/SSE, history chains, tool results and images on Qwen").dependOn(&server_responses.step);
     const neural_images = b.addRunArtifact(exe);
     neural_images.addArgs(&.{ "check-session-neural-images", b.fmt("{s}/Qwen3.8-27B-MLX-4bit", .{model_root}), "build/native-checks/session-image/image.png", b.fmt("{s}/Qwen3.8-27B-DFlash2", .{model_root}) });
     neural_images.step.dependOn(&session_image_fixture.step);
@@ -432,6 +437,11 @@ pub fn build(b: *std.Build) void {
     server_memory.step.dependOn(&memory_image.step);
     b.step("test-server-memory", "Verify request admission waits, memory refusal, image reservation and cancellation recovery").dependOn(&server_memory.step);
     const chat_tests = b.step("test-chat", "Compare native chat prompts with upstream for all seven local tokenizers; no model weights loaded");
+    const responses_fixtures = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", ".", "--responses-fixtures", "--output", "build/native-checks/responses.json" });
+    const responses_tests = b.addRunArtifact(exe);
+    responses_tests.addArgs(&.{ "check-responses", "build/native-checks/responses.json" });
+    responses_tests.step.dependOn(&responses_fixtures.step);
+    b.step("test-responses", "Compare native Responses translation and history storage with upstream").dependOn(&responses_tests.step);
     const tool_drafts = b.step("test-tool-drafts", "Compare schema proposals, stateful tokenization and copy fallback with upstream across all local tokenizers");
     const tool_fixtures = b.addSystemCommand(&.{ ".venv/bin/python", "tools/native_families_reference.py", ".", "--tool-fixtures", "--output", "build/native-checks/tool-calls.json" });
     const tool_tests = b.addRunArtifact(exe);

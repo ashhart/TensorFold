@@ -218,9 +218,11 @@
     "limitation": "Upstream 0.5.0 grammar compilation, per-request matcher state and draft-window masks are not ported to Zig."
   },
   {
-    "id": "responses-api", "state": "missing", "requirement": "Responses request translation, streaming events and stored response chains",
+    "id": "responses-api", "state": "present", "requirement": "Responses request translation, streaming events and stored response chains",
     "upstream": ["src/tensorfold/server/responses.py", "src/tensorfold/server/responses_translate.py"],
-    "limitation": "Upstream 0.5.0 Responses endpoints and stateful response storage are not ported to Zig."
+    "implementation": [{"path":"native/responses.zig","symbol":"translate"}, {"path":"native/responses.zig","symbol":"conversation"}, {"path":"native/responses.zig","symbol":"finish"}, {"path":"native/server.zig","symbol":"handle"}],
+    "checks": [{"step":"test-responses","driver":{"path":"native/responses.zig","symbol":"check"},"scope":"host"}, {"step":"test-server-responses","driver":{"path":"tools/native_responses_checks.zig","symbol":"check"},"scope":"checkpoint"}],
+    "limitation": "Request, reply-event and bounded history-store checks use upstream oracles; HTTP text/tool/image checks use Qwen. JSON/schema format constraints are explicitly refused pending the separately tracked structured-output implementation. Full GLM/DeepSeek inference remains unverified."
   },
   {
     "id": "http-lifecycle", "state": "present", "requirement": "Raw/chat JSON/SSE endpoints, request cancellation, deadlines and graceful signal shutdown",
