@@ -589,18 +589,28 @@ class SerialEngine:
         Dh, W = c.head_dim, c.sliding_window
         cos, sin = self.tables_rope[a.ratio]
         eps = c.rms_norm_eps
-        if R <= PROMPT_ROWS:
-            qr, kv = self.par(lambda: K.rmsnorm(a.wq_a(x), a.q_norm, eps), lambda: K.rmsnorm(a.wkv(x), a.kv_norm, eps))
-        else:
-            qr = K.rmsnorm(a.wq_a(x), a.q_norm, eps)
-            kv = K.rmsnorm(a.wkv(x), a.kv_norm, eps)
         H = a.wq_b.n // Dh
-        q = K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin)          # bf16, this rank's heads
-        st.swa[L].index_copy_(0, pos % RING, K.rope(kv, pos, cos, sin))
+
+        def q_branch():
+            qr = K.rmsnorm(a.wq_a(x), a.q_norm, eps)
+            return qr, K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin)          # bf16, this rank's heads
+
+        def kv_branch():
+            kv = K.rmsnorm(a.wkv(x), a.kv_norm, eps)
+            st.swa[L].index_copy_(0, pos % RING, K.rope(kv, pos, cos, sin))
+
+        def comp_branch():
+            if a.ratio > 0 and a.compressor is not None:
+                self.compress(layer, x, pos, static)
+
+        if R <= PROMPT_ROWS:                                            # independent: q, window KV, compressor
+            (qr, q), _, _ = self.par(q_branch, kv_branch, comp_branch)
+        else:
+            qr, q = q_branch()
+            kv_branch()
+            comp_branch()
         comp = idx = None
         if a.ratio > 0:
-            if a.compressor is not None:
-                self.compress(layer, x, pos, static)
             if a.indexer is not None:
                 self.topk[L] = self.select(layer, qr, x, pos, static)
             comp = st.comp[max(s for s in c.kv_source_layer_ids if s <= L)]
@@ -671,21 +681,26 @@ class SerialEngine:
     def moe(self, layer: LayerW, x: torch.Tensor, R: int, top_k: int | None = None, scratch=None) -> torch.Tensor:
         c, m = self.c, layer.moe
         limit = c.swiglu_limit
-        logits = K.router_logits(x, m.gate)                         # a row's bits never depend on the row count
-        pick, w = K.route(logits, m.bias, top_k or c.num_experts_per_tok, c.routed_scaling_factor)
         scratch = scratch if scratch is not None else self.scratch[layer.index]
+
+        def route():                                                # a row's bits never depend on the row count
+            return K.route(K.router_logits(x, m.gate), m.bias, top_k or c.num_experts_per_tok, c.routed_scaling_factor)
 
         def shared_act() -> torch.Tensor:
             g = m.shared[0](x, out_dtype=F32)
             u = m.shared[1](x, out_dtype=F32)
             return (torch.nn.functional.silu(g.clamp(max=limit)) * u.clamp(-limit, limit)).to(BF)
 
-        if R > PROMPT_ROWS:
-            routed = routed_prompt(x.contiguous(), pick, w, m.experts, scratch, R, limit)
-            act = shared_act()
-        else:
-            routed, act = self.par(lambda: ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit),
-                                   shared_act)
+        def routed_rows():
+            pick, w = route()
+            return ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit)
+
+        if R <= PROMPT_ROWS:                                        # the whole shared expert beside the routed ones
+            routed, shared = self.par(routed_rows, lambda: m.shared[2](shared_act(), out_dtype=F32))
+            return self.comm.partials(routed + shared)
+        pick, w = route()
+        routed = routed_prompt(x.contiguous(), pick, w, m.experts, scratch, R, limit)
+        act = shared_act()
 
         def block(r0: int, r1: int) -> torch.Tensor:
             return routed[r0:r1] + m.shared[2](act[r0:r1], out_dtype=F32)
