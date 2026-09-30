@@ -168,10 +168,7 @@ def load_layer(w: Weights, i: int, cfg: Config, *, plain: bool = False, stream: 
 
 
 def load_backbone(model_dir: Path, *, layers: int | None = None, stream: bool = False) -> GLM5:
-    """The backbone, layer by layer; ``layers``: only the first that many; ``stream``: routed experts left on disk.
-
-    Callers outside the server wire the weights and cap MLX's buffer cache themselves (docs/recipes/glm-5.3-flash.md,
-    "Scripts that load the backbone directly")."""
+    """The backbone, layer by layer; ``layers``: only the first that many; ``stream``: routed experts left on disk."""
 
     model_dir = Path(model_dir)
     config = json.loads((model_dir / "config.json").read_text())
