@@ -372,19 +372,23 @@ pub const Model = struct {
         const all = if (old.ctx == null) row else try s.cat(&.{ old, row }, 0);
         return if (limit > 0 and mx.dim(all, 0) > limit) s.contiguous(try s.slice(all, 0, mx.dim(all, 0) - limit, mx.dim(all, 0))) else all;
     }
-    fn hc(m: *Model, s: *mx.Scope, i: usize, kind: []const u8, x: A) ![3]A {
+    pub fn hc(m: *Model, s: *mx.Scope, i: usize, kind: []const u8, x: A) ![3]A {
         const g = m.config.value;
+        if (mx.shape(x).len != 3 or mx.dtype(x) != mx.bf16 or mx.dim(x, 1) != 4 or mx.dim(x, 2) != g.hidden_size) return error.InvalidTensorShape;
+        const rows = mx.dim(x, 0);
+        if (rows < 1 or rows > 2048) return error.InvalidTensorShape;
         var buf: [256]u8 = undefined;
-        const z = try cp.norm(s, try s.reshape(try s.cast(x, mx.f32t), &.{ 1, 4 * g.hidden_size }), mx.empty, g.rms_norm_eps);
+        const z = try cp.norm(s, try s.reshape(try s.cast(x, mx.f32t), &.{ rows, 4 * g.hidden_size }), mx.empty, g.rms_norm_eps);
         const fnw = try s.cast(try m.weight(i, try std.fmt.bufPrint(&buf, "{s}_hc.fn", .{kind})), mx.f32t);
         const base = try s.cast(try m.weight(i, try std.fmt.bufPrint(&buf, "{s}_hc.base", .{kind})), mx.f32t);
         const scale = try s.cast(try m.weight(i, try std.fmt.bufPrint(&buf, "{s}_hc.scale", .{kind})), mx.f32t);
         const mixes = try s.binary(c.mlx_matmul, z, try s.transpose(fnw, &.{ 1, 0 }));
-        const result = try m.kernels.run(s, src.glm_hc_split, &.{ x, mixes, scale, base }, &.{ mx.td("T", mx.bf16), mx.ti("HC", 4), mx.ti("ITERS", g.hc_sinkhorn_iters), mx.ti("D", g.hidden_size), mx.ti("EPS_INT", @intFromFloat(@round(g.hc_eps / 1e-9))) }, .{ 256, 1, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ 1, g.hidden_size } }, .{ .shape = &.{ 1, 4 }, .dtype = mx.f32t }, .{ .shape = &.{ 1, 4, 4 }, .dtype = mx.f32t } });
+        const result = try m.kernels.run(s, src.glm_hc_split, &.{ x, mixes, scale, base }, &.{ mx.td("T", mx.bf16), mx.ti("HC", 4), mx.ti("ITERS", g.hc_sinkhorn_iters), mx.ti("D", g.hidden_size), mx.ti("EPS_INT", @intFromFloat(@round(g.hc_eps / 1e-9))) }, .{ @intCast(256 * rows), 1, 1 }, .{ 256, 1, 1 }, &.{ .{ .shape = &.{ rows, g.hidden_size } }, .{ .shape = &.{ rows, 4 }, .dtype = mx.f32t }, .{ .shape = &.{ rows, 4, 4 }, .dtype = mx.f32t } });
         return .{ result[0], result[1], result[2] };
     }
-    fn expand(s: *mx.Scope, x: A, branch: A, post: A, comb: A) !A {
-        const y = try s.binary(c.mlx_multiply, try s.reshape(post, &.{ 1, 4, 1 }), try s.reshape(try s.cast(branch, mx.f32t), &.{ 1, 1, -1 }));
+    pub fn expand(s: *mx.Scope, x: A, branch: A, post: A, comb: A) !A {
+        const rows = mx.dim(x, 0);
+        const y = try s.binary(c.mlx_multiply, try s.reshape(post, &.{ rows, 4, 1 }), try s.reshape(try s.cast(branch, mx.f32t), &.{ rows, 1, -1 }));
         return s.cast(try s.binary(c.mlx_add, y, try s.binary(c.mlx_matmul, try s.transpose(comb, &.{ 0, 2, 1 }), try s.cast(x, mx.f32t))), mx.bf16);
     }
     fn hcStep(m: *Model, s: *mx.Scope, i: usize, kind: []const u8, x: A, pending: ?[3]A) ![4]A {
@@ -543,12 +547,14 @@ pub const Model = struct {
         const shared = try m.project(s, i, "ffn.shared_experts.down_proj", try m.swiglu(s, try s.slice(gu, 1, 0, width), try s.slice(gu, 1, width, width * 2)));
         return (try m.kernels.run(s, src.ds4_moe_combine, &.{ routed, shared }, &.{ mx.ti("D", hidden), mx.ti("TOPK", top) }, .{ hidden, 1, 1 }, .{ 256, 1, 1 }, &.{.{ .shape = &.{ 1, hidden } }}))[0];
     }
-    fn head(m: *Model, s: *mx.Scope, x: A, mtp: bool) !A {
+    pub fn head(m: *Model, s: *mx.Scope, x: A, mtp: bool) !A {
         const g = m.config.value;
+        if (mx.shape(x).len != 3 or mx.dtype(x) != mx.bf16 or mx.dim(x, 1) != 4 or mx.dim(x, 2) != g.hidden_size or mx.dim(x, 0) < 1 or mx.dim(x, 0) > 2048) return error.InvalidTensorShape;
         const fnw = if (mtp) try m.weight(m.cache.len, "hc_head.fn") else try m.weights.get("model.hc_head.fn");
         const sc = if (mtp) try m.weight(m.cache.len, "hc_head.scale") else try m.weights.get("model.hc_head.scale");
         const base = if (mtp) try m.weight(m.cache.len, "hc_head.base") else try m.weights.get("model.hc_head.base");
-        const y = try m.activations.call(s, .deepseek_head, &.{ x, fnw, base, sc, try s.scalar(g.rms_norm_eps), try s.scalar(g.hc_eps) });
+        const args = [_]A{ x, try s.cast(fnw, mx.f32t), try s.cast(base, mx.f32t), try s.cast(sc, mx.f32t), try s.scalar(g.rms_norm_eps), try s.scalar(g.hc_eps) };
+        const y = if (mx.dim(x, 0) > 16) try @import("prefill_ops.zig").uncompiled(s, .deepseek_head, &args) else try m.activations.call(s, .deepseek_head, &args);
         return cp.norm(s, y, if (mtp) try m.weight(m.cache.len, "norm.weight") else try m.weights.get("model.norm.weight"), g.rms_norm_eps);
     }
     pub fn forward(m: *Model, tokens: []const i32) !Pass {

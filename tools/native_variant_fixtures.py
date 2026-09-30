@@ -736,6 +736,65 @@ def flash_prefill_hc_fixtures(capture):
     print(f"Saved {len(cases)} complete Flash prefill hyper-connections and their intermediate arrays", flush=True)
 
 
+def deepseek_prefill_hc_fixtures(directory):
+    import copy
+    from tests import dsv4_fakes as fake
+    from tests.test_flash_next_affine import bf16
+    from tensorfold.families.deepseek_v4.weights import load_backbone
+    from tensorfold.families.deepseek_v4.mtp import load as load_mtp
+    from tensorfold.families.glm5_next.model import hc_expand
+
+    rng = np.random.default_rng(48013)
+    original_text, original_dims, original_hc = fake.TEXT, fake.D, fake._hc
+    groups = []
+    try:
+        for geometry, (dims, packed, eps, hc_eps, iterations) in enumerate((
+            (128, False, 1e-6, 1e-6, 20), (256, True, 1e-5, 1e-5, 1),
+            (4096, False, 1e-6, 1e-6, 20), (4096, True, 1e-5, 1e-6, 32),
+        )):
+            fake.TEXT = copy.deepcopy(original_text)
+            fake.D = dims
+            fake.TEXT.update(hidden_size=dims, num_hidden_layers=1, compress_ratios=[0, 0],
+                             rms_norm_eps=eps, hc_eps=hc_eps, hc_sinkhorn_iters=iterations)
+            def write_hc(tensors, name, mixes):
+                original_hc(tensors, name, mixes)
+                if packed:
+                    for key in ("fn", "base", "scale"):
+                        tensors[f"{name}.{key}"] = tensors[f"{name}.{key}"].astype(mx.bfloat16)
+            fake._hc = write_hc
+            checkpoint = f"checkpoint{geometry}"
+            folder = fake.write_checkpoint(directory / checkpoint, seed=137 + geometry)
+            fake.write_mtp(folder / "drafter", seed=141 + geometry)
+            model = load_backbone(folder)
+            mtp = load_mtp(model, folder / "drafter/model.safetensors")
+            cases = []
+            for count in ((1, 17, 63, 64, 65, 257, 2048) if dims < 4096 else (1, 17, 64, 257, 2048)):
+                name = f"hc{geometry}-{count}"
+                streams = bf16(rng, (count, 4, dims * 2))[:, :, ::2]
+                branch = bf16(rng, (count, dims), scale=.3)
+                if count == 17:
+                    streams = mx.zeros_like(streams)
+                arrays = dict(input=streams, branch=branch)
+                for prefix, block in (("target", model.layers[0]), ("mtp", mtp.block)):
+                    for kind in ("attn", "ffn"):
+                        hc = getattr(block, f"{kind}_hc")
+                        collapsed, post, comb = hc.split(streams, False)
+                        key = f"{prefix}-{kind}-"
+                        arrays.update({key + "collapsed": collapsed, key + "post": post, key + "comb": comb,
+                                       key + "expanded": hc_expand(branch, streams, post, comb, False)})
+                    head = model.head_hc if prefix == "target" else mtp.head_hc
+                    norm = model.norm if prefix == "target" else mtp.norm
+                    arrays[prefix + "-head"] = mx.fast.rms_norm(head(streams, count == 1), norm, eps)
+                mx.eval(*arrays.values())
+                mx.save_safetensors(str(directory / f"{name}.safetensors"), arrays)
+                cases.append(name)
+            groups.append(dict(checkpoint=checkpoint, cases=cases))
+            print(f"Saved DeepSeek HC D={dims}, packed={packed}: {len(cases)} cases", flush=True)
+    finally:
+        fake.TEXT, fake.D, fake._hc = original_text, original_dims, original_hc
+    (directory / "hc.json").write_text(json.dumps(groups, indent=2) + "\n")
+
+
 def glm_prefill_moe_fixtures(directory):
     import copy
     from tests import glm5_fakes as fakes
@@ -1432,11 +1491,15 @@ def main():
     parser.add_argument("--glm-prefill-kda", action="store_true")
     parser.add_argument("--glm-prefill-mla", action="store_true")
     parser.add_argument("--glm-prefill-moe", action="store_true")
+    parser.add_argument("--deepseek-prefill-hc", action="store_true")
     parser.add_argument("--flash-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-attention", action="store_true")
     parser.add_argument("--flash-prefill-ple", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.deepseek_prefill_hc:
+        deepseek_prefill_hc_fixtures(args.directory)
+        return
     if args.glm_prefill_moe:
         glm_prefill_moe_fixtures(args.directory)
         return
