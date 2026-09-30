@@ -15,6 +15,7 @@ import triton.language as tl
 NB = 16          # K blocks of the 24-mix projection (20,480 / 16 = 1,280 columns each)
 SUB = 128        # columns a partial step takes
 CHUNK = 1024     # hidden columns a finish/post step takes (5,120 = 5 chunks)
+PROMPT_ROWS = 16 # above this a call is a prompt chunk (blocked mix partials); up to it, per-row arithmetic
 
 
 @triton.jit
@@ -34,6 +35,28 @@ def _pre_partial(X, FN, PART, WIDE: tl.constexpr, NBLK: tl.constexpr, SUBK: tl.c
         ss += x * x
     tl.store(PART + (r * NBLK + b) * 32 + m, acc, mask=m < 24)
     tl.store(PART + (r * NBLK + b) * 32 + 24, tl.sum(ss, axis=0))
+
+
+@triton.jit
+def _pre_partial_rows(X, FN, PART, R, WIDE: tl.constexpr, NBLK: tl.constexpr, SUBK: tl.constexpr, BR: tl.constexpr):
+    """Prompt chunks: BR rows share each block of the mix matrix (a tensor-core dot); same partial layout."""
+
+    rb = tl.program_id(0)
+    b = tl.program_id(1)
+    KB: tl.constexpr = WIDE // NBLK
+    r = rb * BR + tl.arange(0, BR)
+    m = tl.arange(0, 32)
+    k = tl.arange(0, SUBK)
+    acc = tl.zeros((BR, 32), dtype=tl.float32)
+    ss = tl.zeros((BR,), dtype=tl.float32)
+    for t in range(KB // SUBK):
+        base = b * KB + t * SUBK
+        x = tl.load(X + r[:, None] * WIDE + base + k[None, :], mask=(r < R)[:, None], other=0.0).to(tl.float32)
+        w = tl.load(FN + m[:, None] * WIDE + base + k[None, :], mask=m[:, None] < 24, other=0.0)
+        acc = tl.dot(x, tl.trans(w), acc)
+        ss += tl.sum(x * x, axis=1)
+    tl.store(PART + (r[:, None] * NBLK + b) * 32 + m[None, :], acc, mask=(r < R)[:, None] & (m[None, :] < 24))
+    tl.store(PART + (r * NBLK + b) * 32 + 24, ss, mask=r < R)
 
 
 @triton.jit
@@ -144,7 +167,11 @@ def pre(X: torch.Tensor, fn: torch.Tensor, base: torch.Tensor, scale: torch.Tens
     comb = torch.empty((R, 4, 4), dtype=torch.float32, device=dev)
     pre_out = torch.empty((R, 4), dtype=torch.float32, device=dev)
     x_in = out if out is not None else torch.empty((R, D), dtype=torch.bfloat16, device=dev)
-    _pre_partial[(R, NB)](X, fn, buf.part, WIDE=S * D, NBLK=NB, SUBK=SUB, num_warps=4)
+    if R > PROMPT_ROWS:                     # prompt chunks: rows share the mix matrix loads (TF32 dot, like vLLM)
+        _pre_partial_rows[(triton.cdiv(R, 16), NB)](X, fn, buf.part, R, WIDE=S * D, NBLK=NB, SUBK=64, BR=16,
+                                                   num_warps=4)
+    else:                                   # decode and verify windows: the row-invariant per-row sums
+        _pre_partial[(R, NB)](X, fn, buf.part, WIDE=S * D, NBLK=NB, SUBK=SUB, num_warps=4)
     _pre_finish[(R,)](X, buf.part, base, scale, pre_in.contiguous(), norm_w, x_in, pre_out, post, comb, eps, hc_eps,
                       D=D, NBLK=NB, ITERS=iters, CH=CHUNK, num_warps=8)
     return post, comb, x_in, pre_out

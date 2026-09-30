@@ -141,3 +141,19 @@ def test_candidate_blocks_pin_the_newest_and_mask_the_rest():
     masked = K.mask_to_blocks(scores, blocks, 8)
     kept = torch.isfinite(masked[0]).nonzero().flatten().tolist()
     assert kept == list(range(8)) + list(range(16, 24)) + list(range(48, 50))
+
+
+def test_mqa_merge_applies_the_inverse_rope():
+    g = torch.Generator(device="cuda").manual_seed(12)
+    W, H = 128, 32
+    ring = torch.randn((4096, 512), generator=g, device="cuda").to(torch.bfloat16)
+    pos = torch.tensor([3, 77, 1000], device="cuda")
+    q = (torch.randn((3, H, 512), generator=g, device="cuda") * 0.2).to(torch.bfloat16)
+    sink = torch.randn((H,), generator=g, device="cuda")
+    buf = K.AttnBuffers(8, H, 512, W)
+    cos, sin = K.rope_tables(R.inv_freq(CFG, 0, "cuda"), 4096)
+    plain = K.mqa(q, None, None, ring, pos, sink, W, buf, 512 ** -0.5)
+    fused = K.mqa(q, None, None, ring, pos, sink, W, buf, 512 ** -0.5, cos, sin)
+    want = K.rope(plain, pos, cos, sin, inverse=True, out_dtype=torch.bfloat16)
+    assert fused.dtype == torch.bfloat16
+    assert (fused.float() - want.float()).abs().max() <= 0.02 * want.float().abs().max()

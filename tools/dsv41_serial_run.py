@@ -79,23 +79,26 @@ def main() -> None:
     if args.profile_prefill:
         from torch.profiler import ProfilerActivity, profile
 
-        doc = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][0]["ids"]
+        doc = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
         n = args.profile_prefill
         with torch.no_grad():
             eng.reset()
-            eng.forward(doc[:n], last_only=True)                   # warm: kernels, Engram pages
-            eng.forward(doc[n:2 * n], last_only=True)
+            eng.prefill(doc[:n], n)                               # warm: kernels, Engram pages
             torch.cuda.synchronize()
+            t = time.perf_counter()
+            eng.prefill(doc[n:5 * n], n)                          # four chunks, rows read ahead
+            torch.cuda.synchronize()
+            steady = time.perf_counter() - t
             with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
                 t = time.perf_counter()
-                eng.forward(doc[2 * n:3 * n], last_only=True)
+                eng.prefill(doc[5 * n:6 * n], n)
                 torch.cuda.synchronize()
                 wall = time.perf_counter() - t
         if args.rank == 0:
             ev = prof.key_averages()
             gpu = sum(e.self_device_time_total for e in ev) / 1e3
-            print(f"prefill chunk {n} rows: wall {wall * 1e3:.0f} ms ({n / wall:.0f} tok/s), GPU busy {gpu:.0f} ms",
-                  flush=True)
+            print(f"prefill {4 * n} tokens in chunks of {n}: {4 * n / steady:.0f} tok/s; profiled chunk wall "
+                  f"{wall * 1e3:.0f} ms, GPU busy {gpu:.0f} ms", flush=True)
             print(ev.table(sort_by="self_device_time_total", row_limit=25, max_name_column_width=60), flush=True)
         nccl.barrier()
         return

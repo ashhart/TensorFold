@@ -12,7 +12,7 @@ import torch
 import triton
 import triton.language as tl
 
-HEAD_TILE = 16
+HEAD_TILE = 32              # heads a program (one rank's 32): each key tile is loaded once a row
 KEY_TILE = 64
 CHUNK = 256               # keys a chunk program takes
 
@@ -76,7 +76,8 @@ def rope_tables(freqs: torch.Tensor, max_pos: int) -> tuple[torch.Tensor, torch.
 
 @triton.jit
 def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, H: tl.constexpr, D: tl.constexpr,
-                W: tl.constexpr, RING: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr, NCH: tl.constexpr):
+                W: tl.constexpr, RING: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr, NCH: tl.constexpr,
+                HT: tl.constexpr, KT: tl.constexpr):
     """Keys: the first ``n_idx`` slots are compressed entries named by IDX (-1: none), then the row's window
     positions p - W + 1 .. p read from the SWA ring at pos % RING."""
 
@@ -84,16 +85,16 @@ def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, H: tl.con
     hg = tl.program_id(1)
     c = tl.program_id(2)
     p = tl.load(POS + r)
-    hh = hg * 16 + tl.arange(0, 16)
+    hh = hg * HT + tl.arange(0, HT)
     d = tl.arange(0, D)
-    m = tl.full((16,), float("-inf"), tl.float32)
-    l = tl.zeros((16,), tl.float32)
-    o = tl.zeros((16, D), tl.float32)
+    m = tl.full((HT,), float("-inf"), tl.float32)
+    l = tl.zeros((HT,), tl.float32)
+    o = tl.zeros((HT, D), tl.float32)
     total = n_idx + W
     base = (r * NCH + c) * H + hh
     q = tl.load(Q + (r * H + hh[:, None]) * D + d[None, :]).to(tl.bfloat16)
-    for t in range(CH // 64):
-        k = c * CH + t * 64 + tl.arange(0, 64)
+    for t in range(CH // KT):
+        k = c * CH + t * KT + tl.arange(0, KT)
         is_comp = k < n_idx
         kidx = tl.load(IDX + r * idx_stride + k, mask=is_comp, other=-1)
         slot = p - (W - 1) + (k - n_idx)                             # window position of a window key
@@ -120,7 +121,11 @@ def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, H: tl.con
 
 
 @triton.jit
-def _mqa_merge(PO, PM, PL, SINK, OUT, H: tl.constexpr, D: tl.constexpr, NCH: tl.constexpr):
+def _mqa_merge(PO, PM, PL, SINK, OUT, POS, COS, SIN, H: tl.constexpr, D: tl.constexpr, NCH: tl.constexpr,
+               HALF: tl.constexpr, ROPE: tl.constexpr):
+    """Combine the chunks with the sink; with ROPE, rotate the last 2 * HALF dims back (inverse RoPE) and write
+    bf16 (the output projection's input), else fp32."""
+
     r = tl.program_id(0)
     h = tl.program_id(1)
     d = tl.arange(0, D)
@@ -139,7 +144,27 @@ def _mqa_merge(PO, PM, PL, SINK, OUT, H: tl.constexpr, D: tl.constexpr, NCH: tl.
         o = o * a + co * b
         l = l * a + cl * b
         m = next_m
-    tl.store(OUT + (r * H + h) * D + d, o / l)
+    o = o / l
+    if ROPE:
+        p = tl.load(POS + r)
+        rot = d >= D - 2 * HALF
+        i = tl.maximum(d - (D - 2 * HALF), 0) // 2
+        c_ = tl.load(COS + p * HALF + i, mask=rot, other=1.0)
+        s_ = tl.load(SIN + p * HALF + i, mask=rot, other=0.0)
+        # pair values come from the normalized o itself: even dims pair with the next odd dim
+        oe = tl.reshape(o, (D // 2, 2))
+        ev, od = tl.split(oe)
+        ce = tl.reshape(c_, (D // 2, 2))
+        cev, _ = tl.split(ce)
+        se = tl.reshape(s_, (D // 2, 2))
+        sev, _ = tl.split(se)
+        # inverse rotation: e' = e c + o s, o' = o c - e s (identity where c = 1, s = 0)
+        ne = ev * cev + od * sev
+        no = od * cev - ev * sev
+        o = tl.reshape(tl.join(ne, no), (D,))
+        tl.store(OUT + (r * H + h) * D + d, o.to(tl.bfloat16))
+    else:
+        tl.store(OUT + (r * H + h) * D + d, o)
 
 
 class AttnBuffers:
@@ -152,9 +177,11 @@ class AttnBuffers:
 
 
 def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, swa: torch.Tensor, pos: torch.Tensor,
-        sink: torch.Tensor, window: int, buf: AttnBuffers, scale: float) -> torch.Tensor:
-    """q [R, H, D] (RoPE'd) -> o fp32 [R, H, D] over the compressed entries ``idx`` [R, n] of ``comp`` and the window
-    (``swa`` a ring of window rows addressed by position modulo its length)."""
+        sink: torch.Tensor, window: int, buf: AttnBuffers, scale: float, cos: torch.Tensor | None = None,
+        sin: torch.Tensor | None = None) -> torch.Tensor:
+    """q [R, H, D] (RoPE'd) -> o [R, H, D] over the compressed entries ``idx`` [R, n] of ``comp`` and the window
+    (``swa`` a ring of window rows addressed by position modulo its length): fp32, or with RoPE tables the
+    inverse-rotated bf16 the output projection takes."""
 
     R, H, D = q.shape
     assert H % HEAD_TILE == 0
@@ -162,13 +189,15 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, sw
     keys = n_idx + window
     nch = triton.cdiv(keys, CHUNK)
     assert keys <= buf.max_keys
-    out = torch.empty((R, H, D), dtype=torch.float32, device=q.device)
+    rope = cos is not None
+    out = torch.empty((R, H, D), dtype=torch.bfloat16 if rope else torch.float32, device=q.device)
     idx_t = idx if idx is not None else pos
     _mqa_chunks[(R, H // HEAD_TILE, nch)](q.contiguous(), comp if comp is not None else swa, idx_t, swa, pos, buf.po,
                                           buf.pm, buf.pl, n_idx, idx_t.stride(0) if idx is not None else 0, H=H, D=D,
                                           W=window, RING=swa.shape[0], CH=CHUNK, SCALE=scale, NCH=nch,
-                                          num_warps=8, num_stages=1)
-    _mqa_merge[(R, H)](buf.po, buf.pm, buf.pl, sink, out, H=H, D=D, NCH=nch, num_warps=4)
+                                          HT=HEAD_TILE, KT=32, num_warps=8, num_stages=1)
+    _mqa_merge[(R, H)](buf.po, buf.pm, buf.pl, sink, out, pos, cos if rope else sink, sin if rope else sink, H=H, D=D,
+                       NCH=nch, HALF=cos.shape[1] if rope else 1, ROPE=rope, num_warps=4)
     return out
 
 

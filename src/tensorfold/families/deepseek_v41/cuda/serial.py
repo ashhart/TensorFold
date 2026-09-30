@@ -81,6 +81,7 @@ class Caches:
     ids: list[int] = field(default_factory=list)
 
 
+PROMPT_V3 = 103                # v3 config (experts_prompt.cu grouped_prompt3); None: v2
 PROMPT_V2 = True             # smem-staged activations, K sliced (experts_prompt.cu grouped_prompt2_kernel)
 PROMPT_KC = [80, 72]         # k tiles a slice for gate/up (K 5120) and down (K 1152)
 PROMPT_WARPS = 8
@@ -128,8 +129,23 @@ def routed_prompt(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ex, s,
     from .experts_prompt import ext as prompt_ext
 
     pe = prompt_ext()
-    if PROMPT_V2:
+    if PROMPT_V3 is not None:
         global _Z2
+        need = 2 * P * max(I, D)
+        if _Z2 is None or _Z2.numel() < need:
+            _Z2 = torch.empty((need,), dtype=torch.float32, device=x.device)
+        z = _Z2
+        cfg_gu, cfg_d = PROMPT_V3 if isinstance(PROMPT_V3, tuple) else (PROMPT_V3, PROMPT_V3)
+        pe.grouped_prompt3(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, z, 2, D, I,
+                           P, slots, ex.cb, cfg_gu)
+        ext.gateup_epilogue(z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, I, 1, slots, E, float(limit),
+                            ex3.ACT_F32)
+        pe.grouped_prompt3(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, z, 1, I,
+                           D, P, slots, ex.cb, cfg_d)
+        out = torch.empty((R, D), dtype=torch.float32, device=x.device)
+        ext.down_combine(z, pick, ex.svh_d, s.y, wts, out, R, P, D, 1, slots, E)
+        return out
+    if PROMPT_V2:
         need = max(2 * (D // 16 // PROMPT_KC[0]) * I, (I // 16 // PROMPT_KC[1]) * D) * P
         if _Z2 is None or _Z2.numel() < need:
             _Z2 = torch.empty((need,), dtype=torch.float32, device=x.device)
@@ -191,6 +207,8 @@ class SerialEngine:
         self.graphs: dict[int, dict] = {}
         self.drafter = None
         self.debug: list | None = None
+        self._pinned: list = []
+        self._pool = None
         self.adaptive = True
         self.taps: list[torch.Tensor] = []
         self.cap = cap
@@ -224,7 +242,7 @@ class SerialEngine:
         )
 
     # -- one forward over new rows ------------------------------------------------------------------------
-    def forward(self, tokens: list[int], last_only: bool = False) -> torch.Tensor:
+    def forward(self, tokens: list[int], last_only: bool = False, raw: torch.Tensor | None = None) -> torch.Tensor:
         """Logits fp32 [R, vocab] of the new rows (``last_only``: only the last row's, [1, vocab] — what a prompt
         chunk needs); positions continue the committed ones."""
 
@@ -238,20 +256,46 @@ class SerialEngine:
         if R in self.graphs:
             self.step_rows(tokens)
             return self.graphs[R]["logits"]
-        rows = self.engram_rows(tokens)
+        rows = self.engram_rows(tokens, raw)
         return self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
                          static=False, last_only=last_only)
 
-    def engram_rows(self, tokens: list[int]) -> torch.Tensor:
-        """Commit the tokens and read their Engram rows: fp32 [layers, R, 24, 256] on the device."""
+    def read_rows(self, ids: list[int], p0: int, R: int, slot: int = 0) -> torch.Tensor:
+        """Engram rows of positions p0 .. p0 + R - 1 of ``ids`` into pinned host buffer ``slot`` (uint8, host)."""
+
+        c = self.c
+        start = max(0, p0 - (c.engram_max_ngram_size - 1))        # the n-gram history of the first new row
+        hashes = E.hashes(np.array(ids[start:p0 + R]), self.tmap, self.layout, c.engram_pad_token_id)[p0 - start:]
+        L = len(c.engram_layer_ids)
+        row = c.engram_head_dim + c.engram_head_dim // 32
+        need = L * R * 3 * c.engram_n_heads
+        pin = self._pinned[slot] if slot < len(self._pinned) else None
+        if pin is None or pin.numel() < need * row:
+            pin = torch.empty((need * row,), dtype=torch.uint8).pin_memory()
+            while len(self._pinned) <= slot:
+                self._pinned.append(None)
+            self._pinned[slot] = pin
+        out = pin[:need * row].view(L, R * 3 * c.engram_n_heads, row)
+        return self.tables.gather(np.stack([hashes[:, ell, :].reshape(-1) for ell in range(L)]), out=out)
+
+    def prefetch(self, ids: list[int], p0: int, R: int, slot: int):
+        """Read a later chunk's Engram rows on a background thread (the reads release the GIL)."""
+
+        if self._pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._pool = ThreadPoolExecutor(max_workers=1)
+        return self._pool.submit(self.read_rows, list(ids), p0, R, slot)
+
+    def engram_rows(self, tokens: list[int], raw: torch.Tensor | None = None) -> torch.Tensor:
+        """Commit the tokens and read their Engram rows (or take ``raw`` read ahead): fp32 [layers, R, 24, 256]."""
 
         c, st = self.c, self.state
         p0 = len(st.ids)
         st.ids.extend(tokens)
-        start = max(0, p0 - (c.engram_max_ngram_size - 1))        # the n-gram history of the first new row
-        hashes = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[p0 - start:]
         R, L = len(tokens), len(c.engram_layer_ids)
-        raw = self.tables.gather(np.stack([hashes[:, ell, :].reshape(-1) for ell in range(L)]))   # native reader
+        if raw is None:
+            raw = self.read_rows(st.ids, p0, R)
         raw = raw.to(self.dev, non_blocking=True).view(L, R, -1, raw.shape[-1])
         hd = c.engram_head_dim
         return E.dequant(raw[..., :hd], raw[..., hd:])
@@ -483,17 +527,17 @@ class SerialEngine:
             if a.compressor is not None:
                 self.compress(layer, x, pos, static)
             if a.indexer is not None:
-                self.topk[L] = self.select(layer, qr, x, pos)
+                self.topk[L] = self.select(layer, qr, x, pos, static)
             comp = st.comp[max(s for s in c.kv_source_layer_ids if s <= L)]
             idx = self.topk[max(s for s in c.index_source_layer_ids if s <= L)]
-        o = K.mqa(q, comp, idx, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5)
-        o = K.rope(o, pos, cos, sin, inverse=True, out_dtype=BF)
+        o = K.mqa(q, comp, idx, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin)   # inverse-rotated bf16
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
         z = torch.cat([wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)], dim=1)
         return self.comm.partials(a.wo_b(z, out_dtype=F32))
 
-    def select(self, layer: LayerW, qr: torch.Tensor, x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+    def select(self, layer: LayerW, qr: torch.Tensor, x: torch.Tensor, pos: torch.Tensor,
+               static: bool = True) -> torch.Tensor:
         """This index source's top-k compressed entries for each row (shared by the layers after it)."""
 
         c, a = self.c, layer.attn
@@ -504,6 +548,8 @@ class SerialEngine:
         wts = K.router_logits(x, ix.weights_proj) * (c.index_head_dim ** -0.5 * c.index_n_heads ** -0.5)
         L = layer.index
         keys = self.state.ik[max(s for s in c.kv_source_layer_ids if s <= L)]
+        if not static:                                                  # prompt chunks: only the visible prefix
+            keys = keys[:max(1, (int(pos[-1]) + 1) // a.ratio)]
         scores = K.index_scores(iq, wts, keys, pos, a.ratio)
         if L == c.candidate_source_layer_id:                            # publishes blocks for the later indexers
             self.candidates = K.candidate_blocks(scores, pos, a.ratio, c.candidate_block_size,
@@ -568,6 +614,24 @@ class SerialEngine:
 
     # -- requests ---------------------------------------------------------------------------------------------
     @torch.no_grad()
+    def prefill(self, prompt: list[int], chunk: int = MAX_ROWS) -> torch.Tensor:
+        """Chunked prompt, each chunk's Engram rows read while the previous chunk runs; the last row's logits."""
+
+        starts = list(range(len(self.state.ids), len(self.state.ids) + len(prompt), chunk))
+        base = len(self.state.ids)
+        ids = list(self.state.ids) + list(prompt)
+        ahead = self.prefetch(ids, starts[0], min(chunk, base + len(prompt) - starts[0]), 0)
+        logits = None
+        for n, p0 in enumerate(starts):
+            R = min(chunk, base + len(prompt) - p0)
+            raw = ahead.result()
+            if n + 1 < len(starts):
+                p1 = starts[n + 1]
+                ahead = self.prefetch(ids, p1, min(chunk, base + len(prompt) - p1), (n + 1) % 2)
+            logits = self.forward(ids[p0:p0 + R], last_only=True, raw=raw)
+        return logits
+
+    @torch.no_grad()
     def generate(self, prompt: list[int], max_tokens: int, *, chunk: int = MAX_ROWS, on_token=None,
                  sampling=None) -> dict:
         """Decode after a chunked prefill (greedy, or position-keyed sampling); returns tokens and timings."""
@@ -575,8 +639,7 @@ class SerialEngine:
         self.reset()
         t0 = time.perf_counter()
         logits = None
-        for i in range(0, len(prompt), chunk):
-            logits = self.forward(prompt[i:i + chunk], last_only=True)
+        logits = self.prefill(prompt, chunk)
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         out = []
