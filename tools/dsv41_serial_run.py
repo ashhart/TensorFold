@@ -169,6 +169,9 @@ def main() -> None:
                          if "rounds" in r else "")
                 print(f"{case['name']}: {len(r['tokens'])} tokens {r['decode_tps']:.1f} tok/s{extra}; "
                       f"same tokens as vLLM: {same}", flush=True)
+        if args.rank == 0 and getattr(eng, "_round_costs", None):
+            print("graph round costs (ms, k = 0..n, draft included):", [round(c, 1) for c in eng._round_costs],
+                  flush=True)
         if args.save and args.rank == 0:
             args.save.write_text(json.dumps(saved_tokens))
         nccl.barrier()

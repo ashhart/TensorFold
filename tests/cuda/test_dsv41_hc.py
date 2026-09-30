@@ -76,3 +76,31 @@ def test_post_adds_rank_partials_in_order_then_rounds():
     comb = torch.softmax(torch.randn((2, 4, 4), generator=g, device="cuda"), -1)
     want = hc.post((parts[0] + parts[1]).to(torch.bfloat16), X, post_w, comb)
     assert torch.equal(hc.post(parts, X, post_w, comb), want)
+
+
+def test_post_pre_fused_matches_post_then_pre():
+    """Prompt chunks: post_pre gives the same streams and the same pre() outputs as post then pre."""
+
+    torch.manual_seed(7)
+    R, D = 100, 5120
+    dev = "cuda"
+    X = (torch.randn(R, 4, D, device=dev) * 0.5).to(torch.bfloat16)
+    parts = torch.randn(2, R, D, device=dev).to(torch.bfloat16)
+    post_w = torch.rand(R, 4, device=dev) * 2
+    comb = torch.softmax(torch.randn(R, 4, 4, device=dev), -1)
+    fn = torch.randn(24, 4 * D, device=dev) * 0.01
+    base = torch.randn(24, device=dev) * 0.1
+    scale = torch.rand(3, device=dev)
+    pre_in = torch.rand(R, 4, device=dev)
+    norm_w = torch.rand(D, device=dev).to(torch.bfloat16)
+    buf = hc.HCBuffers(R, D, device=dev)
+    Y_ref = hc.post(parts, X, post_w, comb)
+    ref = hc.pre(Y_ref, fn, base, scale, pre_in, norm_w, buf, 1e-6, 1e-6, 20)
+    ref = [t.clone() for t in ref]
+    for split in (R, 48):
+        b = parts if split == R else hc.SplitPartials(torch.cat([parts[:, :split].reshape(-1),
+                                                                 parts[:, split:].reshape(-1)]), 2, split)
+        Y, got = hc.post_pre(b, X, post_w, comb, fn, base, scale, pre_in, norm_w, buf, 1e-6, 1e-6, 20)
+        assert torch.equal(Y, Y_ref)
+        for name, a, e in zip(("post", "comb", "x_in", "pre"), got, ref):
+            assert torch.allclose(a.float(), e.float(), rtol=0, atol=1e-6 if name != "x_in" else 1e-2), name

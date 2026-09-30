@@ -107,8 +107,9 @@ class Caches:
     ids: list[int] = field(default_factory=list)
 
 
+FUSE_HC = True               # prompt chunks: hc post + the next sublayer's pre in two launches (post_pre)
 PAR_DECODE = os.environ.get("TF_PAR", "1") == "1"            # decode/verify rows: independent linears on side streams (Par)
-PROMPT_ZB = (103, 103)       # v4 with bf16 Z (gate/up config, down config); None: fp32 Z (PROMPT_V3)
+PROMPT_ZB = (101, 103)       # v4 with bf16 Z (gate/up config, down config); None: fp32 Z (PROMPT_V3)
 PROMPT_ZDT = torch.float16   # Z element type (fp16 stores acc / 64; bf16 also works)
 PROMPT_OVERLAP = True        # prompt chunks: all-gather the first row block while the second computes
 PROMPT_V3 = 103                # v3 config (experts_prompt.cu grouped_prompt3); None: v2
@@ -426,17 +427,25 @@ class SerialEngine:
 
     def layers(self, carry: tuple, pos: torch.Tensor, rows: dict, first: int, last: int, static: bool) -> tuple:
         X, pre, f, post, comb = carry
+        fuse = X.shape[0] > PROMPT_ROWS and FUSE_HC            # prompt chunks: post and the next pre in one pass
         for layer in self.w.layers[first:last]:
-            if f is not None:
+            fused = fuse and f is not None and layer.engram is None
+            if fused:
+                X, (post, comb, x, pre_a) = self.post_hc(f, X, post, comb, layer.hc_attn, pre)
+            elif f is not None:
                 X = hcf.post(f, X, post, comb)
-                if self.drafter is not None and layer.index in self.c.dspark_target_layer_ids:
-                    self.taps.append(self._tap(X))                    # V4.1 taps the entry stream of layer L
-            if layer.engram is not None:
-                X = self.engram(layer, X, rows[layer.index])
-            post, comb, x, pre_a = self.hc(layer.hc_attn, X, pre)
+            if f is not None and self.drafter is not None and layer.index in self.c.dspark_target_layer_ids:
+                self.taps.append(self._tap(X))                        # V4.1 taps the entry stream of layer L
+            if not fused:
+                if layer.engram is not None:
+                    X = self.engram(layer, X, rows[layer.index])
+                post, comb, x, pre_a = self.hc(layer.hc_attn, X, pre)
             a = self.attention(layer, x, pos, static)
-            X = hcf.post(a, X, post, comb)
-            post, comb, x, pre = self.hc(layer.hc_ffn, X, pre_a)
+            if fuse:
+                X, (post, comb, x, pre) = self.post_hc(a, X, post, comb, layer.hc_ffn, pre_a)
+            else:
+                X = hcf.post(a, X, post, comb)
+                post, comb, x, pre = self.hc(layer.hc_ffn, X, pre_a)
             f = self.moe(layer, x, x.shape[0])
             if self.debug is not None:
                 self.debug.append({"attn_in": x.clone(), "X": X.clone(), "f": f.clone() if torch.is_tensor(f) else f})
@@ -578,6 +587,11 @@ class SerialEngine:
         return g["h_next"].tolist()
 
     # -- pieces ----------------------------------------------------------------------------------------------
+    def post_hc(self, b, X: torch.Tensor, post: torch.Tensor, comb: torch.Tensor, w: HCW, pre_in: torch.Tensor):
+        c = self.c
+        return hcf.post_pre(b, X, post, comb, w.fn, w.base, w.scale, pre_in, w.norm, self.hcbuf, c.rms_norm_eps,
+                            c.hc_eps, c.hc_sinkhorn_iters)
+
     def hc(self, w: HCW, X: torch.Tensor, pre_in: torch.Tensor):
         c = self.c
         return hcf.pre(X, w.fn, w.base, w.scale, pre_in, w.norm, self.hcbuf, c.rms_norm_eps, c.hc_eps,

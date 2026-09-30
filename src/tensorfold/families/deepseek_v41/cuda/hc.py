@@ -17,6 +17,7 @@ import triton.language as tl
 NB = 16          # K blocks of the 24-mix projection (20,480 / 16 = 1,280 columns each)
 SUB = 128        # columns a partial step takes
 CHUNK = 1024     # hidden columns a finish/post step takes (5,120 = 5 chunks)
+FUSED_NB, FUSED_SUBK, FUSED_WARPS = 32, 128, 8   # post_pre's mix K blocks (prompt only), step, warps
 PROMPT_ROWS = 16 # above this a call is a prompt chunk (blocked mix partials); up to it, per-row arithmetic
 
 
@@ -63,7 +64,8 @@ def _pre_partial_rows(X, FN, PART, R, WIDE: tl.constexpr, NBLK: tl.constexpr, SU
 
 @triton.jit
 def _pre_finish(X, PART, BASE, SCALE, PRE_IN, NW, OUT, PRE, POST, COMB, eps_norm, hc_eps,
-                D: tl.constexpr, NBLK: tl.constexpr, ITERS: tl.constexpr, CH: tl.constexpr):
+                D: tl.constexpr, NBLK: tl.constexpr, ITERS: tl.constexpr, CH: tl.constexpr,
+                COLLAPSED: tl.constexpr = False):
     r = tl.program_id(0)
     m = tl.arange(0, 32)
     mix = tl.zeros((32,), dtype=tl.float32)
@@ -103,20 +105,26 @@ def _pre_finish(X, PART, BASE, SCALE, PRE_IN, NW, OUT, PRE, POST, COMB, eps_norm
     sq = 0.0
     for c in range(D // CH):
         o = c * CH + d
-        x0 = tl.load(X + r * (4 * D) + o).to(tl.float32)
-        x1 = tl.load(X + r * (4 * D) + D + o).to(tl.float32)
-        x2 = tl.load(X + r * (4 * D) + 2 * D + o).to(tl.float32)
-        x3 = tl.load(X + r * (4 * D) + 3 * D + o).to(tl.float32)
-        v = (p0 * x0 + p1 * x1 + p2 * x2 + p3 * x3).to(tl.bfloat16).to(tl.float32)
+        if COLLAPSED:
+            v = tl.load(X + r * D + o).to(tl.float32)
+        else:
+            x0 = tl.load(X + r * (4 * D) + o).to(tl.float32)
+            x1 = tl.load(X + r * (4 * D) + D + o).to(tl.float32)
+            x2 = tl.load(X + r * (4 * D) + 2 * D + o).to(tl.float32)
+            x3 = tl.load(X + r * (4 * D) + 3 * D + o).to(tl.float32)
+            v = (p0 * x0 + p1 * x1 + p2 * x2 + p3 * x3).to(tl.bfloat16).to(tl.float32)
         sq += tl.sum(v * v, axis=0)
     rinv = 1.0 / tl.sqrt(sq / D + eps_norm)
     for c in range(D // CH):
         o = c * CH + d
-        x0 = tl.load(X + r * (4 * D) + o).to(tl.float32)
-        x1 = tl.load(X + r * (4 * D) + D + o).to(tl.float32)
-        x2 = tl.load(X + r * (4 * D) + 2 * D + o).to(tl.float32)
-        x3 = tl.load(X + r * (4 * D) + 3 * D + o).to(tl.float32)
-        v = (p0 * x0 + p1 * x1 + p2 * x2 + p3 * x3).to(tl.bfloat16).to(tl.float32)
+        if COLLAPSED:
+            v = tl.load(X + r * D + o).to(tl.float32)
+        else:
+            x0 = tl.load(X + r * (4 * D) + o).to(tl.float32)
+            x1 = tl.load(X + r * (4 * D) + D + o).to(tl.float32)
+            x2 = tl.load(X + r * (4 * D) + 2 * D + o).to(tl.float32)
+            x3 = tl.load(X + r * (4 * D) + 3 * D + o).to(tl.float32)
+            v = (p0 * x0 + p1 * x1 + p2 * x2 + p3 * x3).to(tl.bfloat16).to(tl.float32)
         w = tl.load(NW + o).to(tl.float32)
         tl.store(OUT + r * D + o, (v * rinv * w).to(tl.bfloat16))
 
@@ -155,6 +163,85 @@ def _post(B, X, POST, COMB, Y, parts, R, split, D: tl.constexpr, CH: tl.constexp
         v = pj * b + (c0 * x0 + c1 * x1 + c2 * x2 + c3 * x3)
         tl.store(Y + r * (4 * D) + j * D + o, v.to(tl.bfloat16))
 
+
+@triton.jit
+def _mix_stream(Y, FN, COMB, xo, r, ok, j: tl.constexpr, pj, b, x0, x1, x2, x3, fcol, m, k, D: tl.constexpr, acc, ss):
+    """One new stream j of a tile (as _post), stored bf16, and its mix partial and square-sum steps."""
+
+    c0 = tl.load(COMB + r * 16 + 0 * 4 + j, mask=ok, other=0.0)
+    c1 = tl.load(COMB + r * 16 + 1 * 4 + j, mask=ok, other=0.0)
+    c2 = tl.load(COMB + r * 16 + 2 * 4 + j, mask=ok, other=0.0)
+    c3 = tl.load(COMB + r * 16 + 3 * 4 + j, mask=ok, other=0.0)
+    y = pj[:, None] * b + (c0[:, None] * x0 + c1[:, None] * x1 + c2[:, None] * x2 + c3[:, None] * x3)
+    yb = y.to(tl.bfloat16)
+    tl.store(Y + xo + j * D, yb, mask=ok[:, None])
+    yf = yb.to(tl.float32)
+    w = tl.load(FN + m[:, None] * (4 * D) + (j * D + fcol) + k[None, :], mask=m[:, None] < 24, other=0.0)
+    return yf, tl.dot(yf, tl.trans(w), acc), ss + tl.sum(yf * yf, axis=1)
+
+
+@triton.jit
+def _post_mix_rows(B, X, POST, COMB, Y, PRE_IN, V, FN, PART, parts, R, split, D: tl.constexpr, NBLK: tl.constexpr,
+                   SUBK: tl.constexpr, BR: tl.constexpr):
+    """Prompt chunks: _post for BR rows and one D chunk (all 4 streams), then on the new streams the mix partials
+    of their 4 K blocks (as _pre_partial_rows) and the collapse with the carried-in pre-mix (as _pre_finish,
+    bf16, into V); the streams are not read back."""
+
+    rb = tl.program_id(0)
+    c = tl.program_id(1)
+    KB: tl.constexpr = 4 * D // NBLK                   # columns a K block (within one stream)
+    CPS: tl.constexpr = D // KB                         # K blocks a stream
+    r = rb * BR + tl.arange(0, BR)
+    ok = r < R
+    m = tl.arange(0, 32)
+    k = tl.arange(0, SUBK)
+    lo = r < split
+    base_b = tl.where(lo, r * D, parts * split * D + (r - split) * D)
+    stride_b = tl.where(lo, split * D, (R - split) * D)
+    p0 = tl.load(POST + r * 4 + 0, mask=ok, other=0.0)
+    p1 = tl.load(POST + r * 4 + 1, mask=ok, other=0.0)
+    p2 = tl.load(POST + r * 4 + 2, mask=ok, other=0.0)
+    p3 = tl.load(POST + r * 4 + 3, mask=ok, other=0.0)
+    q0 = tl.load(PRE_IN + r * 4 + 0, mask=ok, other=0.0)
+    q1 = tl.load(PRE_IN + r * 4 + 1, mask=ok, other=0.0)
+    q2 = tl.load(PRE_IN + r * 4 + 2, mask=ok, other=0.0)
+    q3 = tl.load(PRE_IN + r * 4 + 3, mask=ok, other=0.0)
+    a0 = tl.zeros((BR, 32), dtype=tl.float32)
+    a1 = tl.zeros((BR, 32), dtype=tl.float32)
+    a2 = tl.zeros((BR, 32), dtype=tl.float32)
+    a3 = tl.zeros((BR, 32), dtype=tl.float32)
+    s0 = tl.zeros((BR,), dtype=tl.float32)
+    s1 = tl.zeros((BR,), dtype=tl.float32)
+    s2 = tl.zeros((BR,), dtype=tl.float32)
+    s3 = tl.zeros((BR,), dtype=tl.float32)
+    for t in range(KB // SUBK):
+        fcol = c * KB + t * SUBK
+        d = fcol + k
+        b = tl.load(B + base_b[:, None] + d[None, :], mask=ok[:, None], other=0.0).to(tl.float32)
+        for q in range(1, parts):
+            b = b + tl.load(B + base_b[:, None] + q * stride_b[:, None] + d[None, :], mask=ok[:, None],
+                            other=0.0).to(tl.float32)
+        b = b.to(tl.bfloat16).to(tl.float32)
+        xo = r[:, None] * (4 * D) + d[None, :]
+        x0 = tl.load(X + xo, mask=ok[:, None], other=0.0).to(tl.float32)
+        x1 = tl.load(X + xo + D, mask=ok[:, None], other=0.0).to(tl.float32)
+        x2 = tl.load(X + xo + 2 * D, mask=ok[:, None], other=0.0).to(tl.float32)
+        x3 = tl.load(X + xo + 3 * D, mask=ok[:, None], other=0.0).to(tl.float32)
+        y0, a0, s0 = _mix_stream(Y, FN, COMB, xo, r, ok, 0, p0, b, x0, x1, x2, x3, fcol, m, k, D, a0, s0)
+        y1, a1, s1 = _mix_stream(Y, FN, COMB, xo, r, ok, 1, p1, b, x0, x1, x2, x3, fcol, m, k, D, a1, s1)
+        y2, a2, s2 = _mix_stream(Y, FN, COMB, xo, r, ok, 2, p2, b, x0, x1, x2, x3, fcol, m, k, D, a2, s2)
+        y3, a3, s3 = _mix_stream(Y, FN, COMB, xo, r, ok, 3, p3, b, x0, x1, x2, x3, fcol, m, k, D, a3, s3)
+        v = q0[:, None] * y0 + q1[:, None] * y1 + q2[:, None] * y2 + q3[:, None] * y3
+        tl.store(V + r[:, None] * D + d[None, :], v.to(tl.bfloat16), mask=ok[:, None])
+    pm = ok[:, None] & (m[None, :] < 24)
+    tl.store(PART + (r[:, None] * NBLK + 0 * CPS + c) * 32 + m[None, :], a0, mask=pm)
+    tl.store(PART + (r[:, None] * NBLK + 1 * CPS + c) * 32 + m[None, :], a1, mask=pm)
+    tl.store(PART + (r[:, None] * NBLK + 2 * CPS + c) * 32 + m[None, :], a2, mask=pm)
+    tl.store(PART + (r[:, None] * NBLK + 3 * CPS + c) * 32 + m[None, :], a3, mask=pm)
+    tl.store(PART + (r * NBLK + 0 * CPS + c) * 32 + 24, s0, mask=ok)
+    tl.store(PART + (r * NBLK + 1 * CPS + c) * 32 + 24, s1, mask=ok)
+    tl.store(PART + (r * NBLK + 2 * CPS + c) * 32 + 24, s2, mask=ok)
+    tl.store(PART + (r * NBLK + 3 * CPS + c) * 32 + 24, s3, mask=ok)
 
 class HCBuffers:
     """Scratch for up to ``rows`` rows (graph-stable addresses)."""
@@ -207,3 +294,36 @@ def post(b, X: torch.Tensor, post_w: torch.Tensor, comb: torch.Tensor) -> torch.
         parts, split = (b.shape[0] if b.dim() == 3 else 0), R
     _post[(R, D // CHUNK)](b, X, post_w, comb, Y, parts, R, split, D=D, CH=CHUNK, num_warps=4)
     return Y
+
+
+def post_pre(b, X: torch.Tensor, post_w: torch.Tensor, comb: torch.Tensor, fn: torch.Tensor, base: torch.Tensor,
+             scale: torch.Tensor, pre_in: torch.Tensor, norm_w: torch.Tensor, buf: HCBuffers, eps: float,
+             hc_eps: float, iters: int):
+    """Prompt chunks: post() then pre() of the next sublayer in two launches (the new streams written once, never
+    read back): (Y, (post, comb, x_in, pre))."""
+
+    R, S, D = X.shape
+    assert R > PROMPT_ROWS and S == 4 and X.is_contiguous() and (S * D) % NB == 0
+    dev = X.device
+    Y = torch.empty_like(X)
+    if isinstance(b, SplitPartials):
+        parts, split, b = b.parts, b.split, b.buf
+    else:
+        b = b.contiguous()
+        parts, split = (b.shape[0] if b.dim() == 3 else 0), R
+    assert parts > 0, "post_pre takes rank partials"
+    x_in = torch.empty((R, D), dtype=torch.bfloat16, device=dev)
+    pre_in = pre_in.contiguous()
+    nb = FUSED_NB
+    if buf.part.numel() < R * nb * 32:
+        buf.part = torch.empty((max(buf.rows, R) * nb * 32,), dtype=torch.float32, device=dev)
+    _post_mix_rows[(triton.cdiv(R, 16), D // ((S * D) // nb))](
+        b, X, post_w, comb, Y, pre_in, x_in, fn, buf.part, parts, R, split, D=D, NBLK=nb, SUBK=FUSED_SUBK, BR=16,
+        num_warps=FUSED_WARPS)
+    post = torch.empty((R, 4), dtype=torch.float32, device=dev)
+    comb_out = torch.empty((R, 4, 4), dtype=torch.float32, device=dev)
+    pre_out = torch.empty((R, 4), dtype=torch.float32, device=dev)
+    _pre_finish[(R,)](x_in, buf.part, base, scale, pre_in, norm_w, x_in, pre_out, post, comb_out, eps, hc_eps,
+                      D=D, NBLK=nb, ITERS=iters, CH=CHUNK, COLLAPSED=True, num_warps=8)
+    return Y, (post, comb_out, x_in, pre_out)
+

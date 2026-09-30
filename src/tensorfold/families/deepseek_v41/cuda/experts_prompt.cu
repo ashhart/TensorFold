@@ -497,7 +497,7 @@ __global__ void __launch_bounds__(W * 32) grouped_prompt4_kernel(
     constexpr int ROWS = 16 * MTP, STRIDE = KC * 16 + 8;
     __shared__ __align__(16) half xs[2][ROWS * STRIDE];
     __shared__ int rows_sh[ROWS];
-    const int u = blockIdx.x;
+    const int u = blockIdx.y;                              // grid: (n group, expert, mat x member group)
     if (u >= ucount[0]) return;
     const int MG = (maxm + ROWS - 1) / ROWS;
     const int mgroup = blockIdx.z % MG;
@@ -516,7 +516,7 @@ __global__ void __launch_bounds__(W * 32) grouped_prompt4_kernel(
     }
     __syncthreads();
     if (rows_sh[0] < 0) return;
-    const int nt0 = (blockIdx.y * W + warp) * NT;
+    const int nt0 = (blockIdx.x * W + warp) * NT;   // an expert's n groups run side by side: X shared in L2
     const bool active = nt0 < NTILES;
     int nm = 0;                                            // m tiles holding members (members come first)
 #pragma unroll
@@ -742,7 +742,7 @@ void grouped_prompt3(const at::Tensor& X0, const at::Tensor& X1, const at::Tenso
     case ID: {                                                                                                     \
         const int MG = (maxm + 16 * MTP_ - 1) / (16 * MTP_);                                                        \
         const int ngroups = (int)((N / 16 + NT_ * W_ - 1) / (NT_ * W_));                                            \
-        dim3 grid((unsigned)uids.numel(), (unsigned)ngroups, (unsigned)(mats * MG));                                \
+        dim3 grid((unsigned)ngroups, (unsigned)uids.numel(), (unsigned)(mats * MG));                                \
         tf_exl3x::grouped_prompt4_kernel<2, NT_, W_, MTP_, KC_, PF_, float><<<grid, W_ * 32, 0,                            \
                                                                       at::cuda::getCurrentCUDAStream()>>>(          \
             reinterpret_cast<const half*>(X0.data_ptr()), reinterpret_cast<const half*>(X1.data_ptr()),             \
@@ -807,7 +807,7 @@ void grouped_prompt4(const at::Tensor& X0, const at::Tensor& X1, const at::Tenso
     case ID: {                                                                                                     \
         const int MG = (maxm + 16 * MTP_ - 1) / (16 * MTP_);                                                        \
         const int ngroups = (int)((N / 16 + NT_ * W_ - 1) / (NT_ * W_));                                            \
-        dim3 grid((unsigned)uids.numel(), (unsigned)ngroups, (unsigned)(mats * MG));                                \
+        dim3 grid((unsigned)ngroups, (unsigned)uids.numel(), (unsigned)(mats * MG));                                \
         if (zh)                                                                                                    \
             TF_V4B_LAUNCH(half, NT_, W_, MTP_, KC_, PF_, grid);                                                    \
         else                                                                                                       \
@@ -819,6 +819,14 @@ void grouped_prompt4(const at::Tensor& X0, const at::Tensor& X1, const at::Tenso
         TF_V4B(103, 2, 16, 4, 8, 4)
         TF_V4B(108, 2, 12, 4, 8, 4)
         TF_V4B(112, 2, 16, 4, 8, 8)
+        TF_V4B(101, 2, 8, 4, 8, 4)
+        TF_V4B(105, 2, 8, 2, 8, 4)
+        TF_V4B(107, 2, 16, 2, 8, 4)
+        TF_V4B(109, 2, 18, 4, 8, 4)
+        TF_V4B(113, 2, 20, 4, 8, 4)
+        TF_V4B(116, 1, 16, 4, 8, 4)
+        TF_V4B(117, 4, 8, 4, 8, 2)
+        TF_V4B(118, 2, 12, 4, 8, 4)
         default: TORCH_CHECK(false, "unknown v4 config");
     }
 #undef TF_V4B
