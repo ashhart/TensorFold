@@ -492,6 +492,10 @@ const Scenario = struct {
     fn checkMemory(s: *Scenario, port: u16) !void {
         const a = s.init.arena.allocator();
         const io = s.init.io;
+        const memory = (try health(a, io, port)).object.get("memory").?.object;
+        try std.testing.expectEqual(@as(i64, 3), memory.get("probe_repeats").?.integer);
+        try std.testing.expectEqual(@as(i64, 0), memory.get("growth_waits").?.integer);
+        try std.testing.expectEqual(@as(i64, 0), memory.get("growth_ends").?.integer);
         const short = "{\"prompt\":\"Hello\",\"max_tokens\":12,\"temperature\":0}";
         const baseline = try post(io, port, short);
         defer baseline.close(io);

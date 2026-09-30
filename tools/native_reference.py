@@ -395,11 +395,13 @@ def memory_fixtures(output):
     from dataclasses import asdict
     import random
     from types import SimpleNamespace
+    from contextlib import nullcontext
     from tensorfold.engine.memory import StreamMemory, Admission
-    from tensorfold.server.memory_budget import CacheMemory, memory_limit_bytes, needed_bytes, largest_context, GIB
+    from tensorfold.server.stream_gate import StreamGate
+    from tensorfold.server.memory_budget import CacheMemory, memory_limit_bytes, needed_bytes, largest_context, GIB, PROBE_REPEATS
 
     rng = random.Random(81071)
-    result = dict(limits=[], caches=[], streams=[], budgets=[])
+    result = dict(limits=[], caches=[], streams=[], budgets=[], gates=[], probe_repeats=PROBE_REPEATS)
     for ram in (8 * GIB, 48 * GIB, 128 * GIB, 256 * GIB):
         for recommended in (0, ram // 2, ram, ram * 2):
             for fraction in (0.7, 0.85):
@@ -445,6 +447,48 @@ def memory_fixtures(output):
                 share = process - 3 * GIB
                 value = max(0, min(max(int(fraction * 128 * GIB), process) - elsewhere, share))
                 result["budgets"].append(dict(ram=128 * GIB, fraction=fraction, process=process, share=share, elsewhere=elsewhere, result=value))
+    class Memory:
+        def __init__(self, active, cache, entries):
+            self.active, self.cache, self.entries = active, cache, list(entries)
+            self.store = SimpleNamespace(nbytes=sum(size for size, released in entries))
+            self.runtime = SimpleNamespace(get_cache_memory=lambda: self.cache)
+            self._memory_lock = nullcontext()
+            self.reclaims = 0
+
+        def _used(self):
+            return self.active + self.cache
+
+        def _reclaim(self):
+            self.reclaims += 1
+            if self.cache:
+                self.cache = 0
+                return True
+            if self.entries:
+                size, released = self.entries.pop(0)
+                self.store.nbytes -= size
+                self.active -= released
+                return True
+            return False
+
+    for _ in range(1500):
+        live = [(str(i), rng.randrange(10000), rng.randrange(30000)) for i in range(rng.randrange(1, 9))]
+        entries = [(rng.randrange(100000), rng.randrange(100000)) for _ in range(rng.randrange(6))]
+        entries = [(size, min(size, released)) for size, released in entries]
+        active, cache = rng.randrange(1000000) + sum(released for size, released in entries), rng.randrange(1000000)
+        memory = Memory(active, cache, entries)
+        gate = StreamGate(memory, rng.choice((0.0, 0.3, 0.5, 131072.0, rng.random() * 65536)),
+                          rng.randrange(100000), 0, horizon=rng.choice((0, 1, 16, 2048)), lanes=rng.choice((0, 1, 2, 8)))
+        budgets = [max(0, gate.need(live) + rng.choice((-1, 0, 1))), rng.randrange(1000000), 2**40]
+        plans = []
+        for budget in budgets:
+            gate.budget = budget
+            plan = gate.plan(live)
+            plans.append(dict(budget=budget, run=len(plan.run), paused=len(plan.paused),
+                              ended=int(plan.ended[0]) if plan.ended else None, waits=gate.waits, ends=gate.ends,
+                              active=memory.active, cache=memory.cache, entries=len(memory.entries), reclaims=memory.reclaims))
+        result["gates"].append(dict(active=active, cache=cache, entries=[dict(size=size, released=released) for size, released in entries],
+                                    per_token=gate.per_token, work=gate.work, horizon=gate.horizon, lanes=gate.lanes,
+                                    streams=[dict(now=now, most=most) for _, now, most in live], plans=plans))
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result))

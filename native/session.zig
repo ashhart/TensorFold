@@ -110,6 +110,12 @@ pub const RequestGeneration = union(std.meta.Tag(Backend)) {
         }
     }
 
+    pub fn isDecoding(g: *const RequestGeneration) bool {
+        return switch (g.*) {
+            inline else => |request| request.phase == .decode,
+        };
+    }
+
     pub fn snapshot(g: *const RequestGeneration) !?Snapshot {
         switch (g.*) {
             inline else => |*request, tag| {

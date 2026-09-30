@@ -226,6 +226,7 @@ const Worker = struct {
         const profile = try memory_runtime.measure(&session);
         try memory.wire();
         var admission = memory_policy.Admission{ .budget = try memory.admissionBudget(w.io), .memory = profile };
+        var gate = memory_policy.StreamGate{ .budget = admission.budget, .per_token = profile.per_token, .work = profile.round_bytes };
         const prefix_budget = w.prompt_cache_bytes orelse @min(memory.ram / 8, 16 * memory_policy.gib);
         var prefixes: ?PrefixStore = if (prefix_budget == 0) null else try PrefixStore.init(mx.allocator, w.checkpoint_slots, prefix_budget);
         defer if (prefixes) |*store| store.deinit();
@@ -240,6 +241,7 @@ const Worker = struct {
         var active: [8]?*Pending = @splat(null);
         var live: usize = 0;
         var closed = false;
+        var activation_order: u64 = 0;
         while (!closed or live > 0) {
             if (!closed and live < w.batch_streams) {
                 var ready: [8]*Job = undefined;
@@ -261,13 +263,30 @@ const Worker = struct {
                     } else job.done.set(w.io);
                 }
             }
+            try gateRound(&gate, &active, if (prefixes) |*store| store else null);
+            for (&active) |*slot| if (slot.*) |pending| if (pending.growth == .ended) {
+                pending.reportError(error.StreamGrowthExceedsMemoryBudget) catch |err| {
+                    pending.job.failure = err;
+                };
+                const job = pending.job;
+                pending.deinit();
+                slot.* = null;
+                live -= 1;
+                job.done.set(w.io);
+                try mx.check(mx.c.mlx_clear_cache());
+            };
             for (&active) |*slot| if (slot.*) |pending| {
+                const was_active = pending.generation != null;
                 const done = pending.advance(&session, &admission, &active, if (prefixes) |*store| store else null) catch |err| blk: {
                     pending.reportError(err) catch |write_err| {
                         pending.job.failure = write_err;
                     };
                     break :blk true;
                 };
+                if (!was_active and pending.generation != null) {
+                    pending.activation_order = activation_order;
+                    activation_order += 1;
+                }
                 w.prefix_stats.update(if (prefixes) |*store| store else null);
                 if (done) {
                     const job = pending.job;
@@ -279,12 +298,113 @@ const Worker = struct {
             };
             var waiting: u64 = 0;
             for (active) |slot| if (slot) |pending| {
-                if (pending.generation == null) waiting += 1;
+                if (pending.generation == null or pending.growth == .paused) waiting += 1;
             };
+            w.memory_stats.growth_waits.store(gate.waits, .release);
+            w.memory_stats.growth_ends.store(gate.ends, .release);
             w.memory_stats.update(waiting);
         }
     }
 };
+
+fn gateRound(gate: *memory_policy.StreamGate, active: []const ?*Pending, prefixes: ?*PrefixStore) !void {
+    var oldest: [8]*Pending = undefined;
+    var count: usize = 0;
+    for (active) |slot| if (slot) |pending| {
+        pending.growth = .run;
+        if (pending.generation) |*generation| if (generation.isDecoding()) {
+            oldest[count] = pending;
+            count += 1;
+        };
+    };
+    std.mem.sort(*Pending, oldest[0..count], {}, struct {
+        fn less(_: void, lhs: *Pending, rhs: *Pending) bool {
+            return lhs.activation_order < rhs.activation_order;
+        }
+    }.less);
+    var streams: [8]memory_policy.Live = undefined;
+    for (oldest[0..count], streams[0..count]) |pending, *stream| stream.* = pending.generation.?.memoryLengths();
+    const plan = try gate.plan(memory_runtime.Reclaim{ .prefixes = prefixes }, streams[0..count]);
+    for (oldest[plan.run..count]) |pending| pending.growth = .paused;
+    if (plan.ended) |index| oldest[index].growth = .ended;
+}
+
+pub fn checkGrowth(session: *inference.Session) !void {
+    const tokens = [_]i32{ 10, 20, 30, 40, 50, 60, 70, 80 };
+    for ([_]f32{ 0, 0.7 }) |temperature| {
+        const options = inference.Options{ .max_tokens = 12, .ignore_eos = true, .sampling = .{ .temperature = temperature, .top_k = 0, .top_p = 1, .metal = true }, .seed = 71 };
+        var isolated = try inference.RequestGeneration.init(session, mx.allocator, &tokens, options, .{}, null);
+        defer isolated.deinit();
+        while (!try isolated.step(session)) {}
+        var expected = try isolated.takeReply();
+        defer expected.deinit(mx.allocator);
+
+        var older = Pending{ .job = undefined, .activation_order = 2 };
+        defer if (older.generation) |*g| g.deinit();
+        var newer = Pending{ .job = undefined, .activation_order = 9 };
+        defer if (newer.generation) |*g| g.deinit();
+        for ([_]*Pending{ &older, &newer }) |pending| {
+            pending.generation = try inference.RequestGeneration.init(session, mx.allocator, &tokens, options, .{}, null);
+            while (!pending.generation.?.isDecoding()) _ = try pending.generation.?.step(session);
+        }
+        // A reused worker slot can contain a younger stream than a later slot.
+        const active = [_]?*Pending{ &newer, null, &older };
+        var gate = memory_policy.StreamGate{ .budget = 0, .per_token = memory_policy.gib, .work = 0, .horizon = 1 };
+        const memory = memory_runtime.Reclaim{ .prefixes = null };
+        try mx.check(mx.c.mlx_clear_cache());
+        gate.budget = try memory.used() + memory_policy.gib;
+        const before = newer.generation.?.progress();
+        try gateRound(&gate, &active, null);
+        try std.testing.expect(older.growth == .run and newer.growth == .paused);
+        var registry = control.Registry{ .io = session.io };
+        var client = control.Client{ .owner = &registry };
+        var job: Job = undefined;
+        job.client = &client;
+        newer.job = &job;
+        var admission = memory_policy.Admission{ .budget = gate.budget, .memory = .{ .short_tokens = 0, .short = 0, .long_tokens = 1, .long = 0, .per_token = 1, .prefill_a = 0, .prefill_b = 0, .round_bytes = 0 } };
+        try std.testing.expectError(error.RequestCancelled, newer.advance(session, &admission, &active, null));
+        client.deadline = 0;
+        try std.testing.expectError(error.RequestTimedOut, newer.advance(session, &admission, &active, null));
+        client = .{ .owner = &registry };
+        registry.stop();
+        try std.testing.expectError(error.ServerStopping, newer.advance(session, &admission, &active, null));
+        _ = try older.generation.?.step(session);
+        try std.testing.expectEqualDeep(before, newer.generation.?.progress());
+
+        gate.budget = std.math.maxInt(u64);
+        try gateRound(&gate, &active, null);
+        try std.testing.expect(older.growth == .run and newer.growth == .run);
+        for ([_]*Pending{ &older, &newer }) |pending| {
+            while (!try pending.generation.?.step(session)) {}
+            var actual = try pending.generation.?.takeReply();
+            defer actual.deinit(mx.allocator);
+            try std.testing.expectEqualSlices(u32, expected.tokens.items, actual.tokens.items);
+            try std.testing.expectEqualStrings(expected.content, actual.content);
+        }
+        try std.testing.expectEqual(@as(u64, 1), gate.waits);
+        try std.testing.expectEqual(@as(u64, 0), gate.ends);
+    }
+
+    var older = Pending{ .job = undefined, .activation_order = 3 };
+    defer if (older.generation) |*g| g.deinit();
+    var newer = Pending{ .job = undefined, .activation_order = 4 };
+    defer if (newer.generation) |*g| g.deinit();
+    for ([_]*Pending{ &older, &newer }) |pending| {
+        pending.generation = try inference.RequestGeneration.init(session, mx.allocator, &tokens, .{ .max_tokens = 12, .ignore_eos = true }, .{}, null);
+        while (!pending.generation.?.isDecoding()) _ = try pending.generation.?.step(session);
+    }
+    var gate = memory_policy.StreamGate{ .budget = 0, .per_token = 1, .work = 0 };
+    try gateRound(&gate, &.{ &newer, &older }, null);
+    try std.testing.expect(older.growth == .run and newer.growth == .ended);
+    newer.generation.?.deinit();
+    newer.generation = null;
+    try mx.check(mx.c.mlx_clear_cache());
+    gate.budget = std.math.maxInt(u64);
+    try gateRound(&gate, &.{&older}, null);
+    while (!try older.generation.?.step(session)) {}
+    try std.testing.expectEqual(@as(u64, 1), gate.ends);
+    std.debug.print("PASS: live cache growth gating preserves activation order, paused greedy/seeded output and oldest-stream recovery\n", .{});
+}
 
 const PrefixStats = struct {
     enabled: std.atomic.Value(bool) = .init(false),
@@ -318,6 +438,8 @@ const MemoryStats = struct {
     cache: std.atomic.Value(usize) = .init(0),
     peak: std.atomic.Value(usize) = .init(0),
     waiting: std.atomic.Value(u64) = .init(0),
+    growth_waits: std.atomic.Value(u64) = .init(0),
+    growth_ends: std.atomic.Value(u64) = .init(0),
 
     fn update(stats: *MemoryStats, waiting: u64) void {
         var value: usize = 0;
@@ -327,8 +449,8 @@ const MemoryStats = struct {
         stats.waiting.store(waiting, .release);
     }
 
-    fn snapshot(stats: *const MemoryStats) struct { budget: u64, mlx_budget: u64, admission_budget: u64, active: usize, cache: usize, peak: usize, waiting_requests: u64 } {
-        return .{ .budget = stats.budget, .mlx_budget = stats.mlx_budget, .admission_budget = stats.admission_budget, .active = stats.active.load(.acquire), .cache = stats.cache.load(.acquire), .peak = stats.peak.load(.acquire), .waiting_requests = stats.waiting.load(.acquire) };
+    fn snapshot(stats: *const MemoryStats) struct { budget: u64, mlx_budget: u64, admission_budget: u64, active: usize, cache: usize, peak: usize, waiting_requests: u64, growth_waits: u64, growth_ends: u64, probe_repeats: u32 } {
+        return .{ .budget = stats.budget, .mlx_budget = stats.mlx_budget, .admission_budget = stats.admission_budget, .active = stats.active.load(.acquire), .cache = stats.cache.load(.acquire), .peak = stats.peak.load(.acquire), .waiting_requests = stats.waiting.load(.acquire), .growth_waits = stats.growth_waits.load(.acquire), .growth_ends = stats.growth_ends.load(.acquire), .probe_repeats = memory_policy.probe_repeats };
     }
 };
 fn connectionTask(w: *Worker, a: std.mem.Allocator, stream: std.Io.net.Stream, name: []const u8, sequence: usize, client: *control.Client) void {
@@ -409,6 +531,8 @@ const Pending = struct {
     buffer: [8192]u8 = undefined,
     saved_position: usize = 0,
     prefix_reserve: u64 = 0,
+    activation_order: u64 = 0,
+    growth: enum { run, paused, ended } = .run,
 
     fn start(w: *Worker, session: *inference.Session, job: *Job) !?*Pending {
         const p = try job.a.create(Pending);
@@ -508,6 +632,8 @@ const Pending = struct {
 
     fn advance(p: *Pending, session: *inference.Session, admission: *memory_policy.Admission, active: []const ?*Pending, prefixes: ?*PrefixStore) !bool {
         try p.job.client.cancellation().check();
+        if (p.growth == .ended) return error.StreamGrowthExceedsMemoryBudget;
+        if (p.growth == .paused) return false;
         if (p.generation == null) {
             var live: [8]memory_policy.Live = undefined;
             var count: usize = 0;

@@ -160,7 +160,7 @@ The table entries are arguments to `.zig-toolchain/zig build`:
 | Adaptive prefill boundaries and markers | `test-prefill-plan test-chat -Doptimize=safe -j1` | Python plan oracle and all seven local tokenizers; no model weights loaded |
 | HTTP prefix reuse and eviction | `test-server-prefixes -Doptimize=safe -j1` | Local Qwen; JSON/SSE parity, cancellation, LRU eviction and disabled caching |
 | Live serving status | `test-server-live test-server-live-http -Doptimize=safe -j1` | Python rate/redraw oracle; local Qwen for request counters, prefix reuse, cancellation, queue overflow and terminal modes |
-| Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream policy comparisons and Qwen/Gemma/Nemotron cache growth |
+| Memory accounting | `test-memory-budget test-memory-runtime -Doptimize=safe -j1` | Upstream admission/growth-gate parity, repeated probes and Qwen/Gemma/Nemotron pause/resume correctness |
 | Memory admission | `test-server-memory -Doptimize=safe -j1` | Qwen waiting, refusals and cancellation with a 70 GiB process budget on the 128 GiB development Mac |
 | Gemma batched prefill | `test-gemma-prefill -Doptimize=safe -j1` | Hidden states, logits, sliding/full caches and continuation through 3,212 tokens |
 | Image preprocessing, encoder and end-to-end | `test-images test-vision-encoder test-vision -Doptimize=safe -j1` | Installed Qwen checkpoint and image dependencies |
@@ -210,10 +210,12 @@ GPU forwards are still per request. Up to eight further requests can queue.
 Serving follows upstream's RAM allowance and `TENSORFOLD_MEMORY_LIMIT_GB`, capped
 by Metal's recommended working set, with 3 GiB reserved outside MLX. Checkpoints
 that exceed the buffer budget are rejected before loading. Serving measures cache
-growth at startup, reserves active requests' remaining replies and image workspace,
+growth with three startup probes, reserves active requests' remaining replies and image workspace,
 and waits for memory before admitting another request. Requests that cannot fit
 alone are rejected. Retained text prefixes are evicted when doing so can make
-admission fit; background preemption remains incomplete. `/health` reports memory,
+admission fit. Before decode rounds, the growth gate reclaims buffers and prefixes,
+pauses newer streams, or ends the newest when the oldest cannot grow. Background
+preemption remains incomplete. `/health` reports memory, growth-gate counters,
 memory-waiting requests and prompt-cache counters. Its `inference` object reports
 all admitted/queued requests, waiting requests, token totals and rates. Interactive
 stdout shows the same status every half second; `TENSORFOLD_NO_LIVE=1` disables it.

@@ -9,6 +9,33 @@ pub fn activeBytes() !u64 {
     return value;
 }
 
+pub const Reclaim = struct {
+    prefixes: ?*@import("prompt_cache.zig").Store(session.Snapshot),
+
+    pub fn used(_: Reclaim) !u64 {
+        var cached: usize = 0;
+        try mx.check(mx.c.mlx_get_cache_memory(&cached));
+        return std.math.add(u64, try activeBytes(), cached);
+    }
+
+    pub fn freeable(r: Reclaim) !u64 {
+        var cached: usize = 0;
+        try mx.check(mx.c.mlx_get_cache_memory(&cached));
+        return std.math.add(u64, cached, if (r.prefixes) |store| store.nbytes() else 0);
+    }
+
+    pub fn reclaim(r: Reclaim) !bool {
+        const before = try r.used();
+        try mx.check(mx.c.mlx_clear_cache());
+        if (try r.used() < before) return true;
+        if (r.prefixes) |store| if (store.evictOne(null)) {
+            try mx.check(mx.c.mlx_clear_cache());
+            return true;
+        };
+        return false;
+    }
+};
+
 pub fn recommendedBytes() !usize {
     const device = mx.c.mlx_device_new_type(mx.c.MLX_GPU, 0);
     defer _ = mx.c.mlx_device_free(device);
@@ -166,7 +193,11 @@ fn growthFloor(comptime M: type, state: *@import("request_state.zig").State(M)) 
 
 pub fn measure(s: *session.Session) !policy.StreamMemory {
     switch (s.backend) {
-        inline else => |*m| return measureModel(m, &s.tokenizer, s.draftSink(.{})),
+        inline else => |*m| {
+            var profile = try measureModel(m, &s.tokenizer, s.draftSink(.{}));
+            for (1..policy.probe_repeats) |_| try profile.include(try measureModel(m, &s.tokenizer, s.draftSink(.{})));
+            return profile;
+        },
     }
 }
 
@@ -254,5 +285,6 @@ pub fn check(io: std.Io, directory: []const u8) !void {
             }
         },
     }
+    try @import("server.zig").checkGrowth(&model);
     std.debug.print("PASS: request memory probes cover prefill boundaries and decode growth without retaining request state\n", .{});
 }

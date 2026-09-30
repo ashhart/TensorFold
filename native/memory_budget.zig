@@ -1,6 +1,7 @@
 const std = @import("std");
 pub const gib = 1024 * 1024 * 1024;
 pub const process_bytes = 3 * gib;
+pub const probe_repeats = 3;
 
 fn bytes(value: f64) !u64 {
     if (!std.math.isFinite(value) or value < 0 or value >= 18446744073709551616.0) return error.InvalidMemorySize;
@@ -85,6 +86,15 @@ pub const StreamMemory = struct {
         for ([_]f64{ m.per_token, m.prefill_a, m.prefill_b }) |value| if (!std.math.isFinite(value) or value < 0) return error.InvalidMemoryProfile;
     }
 
+    pub fn include(m: *StreamMemory, other: StreamMemory) !void {
+        try m.validate();
+        try other.validate();
+        if (m.short_tokens != other.short_tokens or m.long_tokens != other.long_tokens or m.chunk != other.chunk) return error.IncompatibleMemoryProbes;
+        inline for (.{ "short", "long", "per_token", "prefill_a", "prefill_b", "round_bytes" }) |field| {
+            @field(m, field) = @max(@field(m, field), @field(other, field));
+        }
+    }
+
     pub fn streamBytes(m: StreamMemory, tokens: u64) !u64 {
         try m.validate();
         const t = try std.math.add(u64, tokens, 256);
@@ -104,6 +114,53 @@ pub const StreamMemory = struct {
 };
 
 pub const Live = struct { now: u64, most: u64 };
+
+pub const StreamGate = struct {
+    per_token: f64,
+    work: u64,
+    budget: u64,
+    horizon: u64 = 2048,
+    lanes: u64 = 1,
+    waits: u64 = 0,
+    ends: u64 = 0,
+
+    pub const Plan = struct { run: usize, paused: usize, ended: ?usize = null };
+
+    pub fn growth(g: StreamGate, stream: Live) !u64 {
+        return bytes(@as(f64, @floatFromInt(@min(stream.most -| stream.now, g.horizon))) * g.per_token);
+    }
+
+    pub fn need(g: StreamGate, used: u64, streams: []const Live) !u64 {
+        const lanes = @max(1, g.lanes);
+        const work = try std.math.mul(u64, g.work, @min(streams.len, lanes));
+        var result = try std.math.add(u64, used, work / lanes + @intFromBool(work % lanes != 0));
+        for (streams) |stream| result = try std.math.add(u64, result, try g.growth(stream));
+        return result;
+    }
+
+    /// Streams are oldest first. Memory is remeasured after every reclaim because snapshots may share arrays.
+    pub fn plan(g: *StreamGate, memory: anytype, streams: []const Live) !Plan {
+        if (streams.len == 0) return .{ .run = 0, .paused = 0 };
+        var count = streams.len;
+        while (true) {
+            while (try g.need(try memory.used(), streams[0..count]) > g.budget and
+                (try g.need(try memory.used(), streams[0..count])) -| (try memory.freeable()) <= g.budget)
+            {
+                if (!try memory.reclaim()) break;
+            }
+            if (try g.need(try memory.used(), streams[0..count]) <= g.budget or count == 1) break;
+            count -= 1;
+        }
+        var result = Plan{ .run = count, .paused = streams.len - count };
+        if (result.paused > 0 and try g.need(try memory.used(), streams[0..count]) > g.budget) {
+            result.ended = streams.len - 1;
+            result.paused -= 1;
+        }
+        g.waits +|= @intFromBool(result.paused > 0);
+        g.ends +|= @intFromBool(result.ended != null);
+        return result;
+    }
+};
 pub const Admission = struct {
     budget: u64,
     memory: StreamMemory,
@@ -150,13 +207,26 @@ pub fn check(io: std.Io, path: []const u8) !void {
     const source = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(32 * 1024 * 1024));
     defer a.free(source);
     const Fixture = struct {
+        probe_repeats: u32,
         limits: []const struct { ram: u64, recommended: u64, fraction: f64, override: ?[]const u8, result: ?u64 },
         caches: []const struct { memory: CacheMemory, tokens: u64, in_flight: u64, request: CacheMemory.Request, budget: u64, window: u64, cache: u64, growth: u64, needed: u64, largest: u64 },
         streams: []const struct { memory: StreamMemory, lanes: u64, tokens: u64, prompt: u64, used: u64, budget: u64, live: []const Live, stream: u64, prefill: u64, projected: u64, admits: bool, fitting: u64 },
         budgets: []const struct { ram: u64, fraction: f64, process: u64, share: u64, elsewhere: u64, result: u64 },
+        gates: []const struct {
+            active: u64,
+            cache: u64,
+            entries: []const GateMemory.Entry,
+            per_token: f64,
+            work: u64,
+            horizon: u64,
+            lanes: u64,
+            streams: []const Live,
+            plans: []const struct { budget: u64, run: usize, paused: usize, ended: ?usize, waits: u64, ends: u64, active: u64, cache: u64, entries: usize, reclaims: u64 },
+        },
     };
     const parsed = try std.json.parseFromSlice(Fixture, a, source, .{});
     defer parsed.deinit();
+    try std.testing.expectEqual(probe_repeats, parsed.value.probe_repeats);
     for (parsed.value.limits) |case| {
         const result = limit(case.ram, case.recommended, case.fraction, case.override) catch {
             if (case.result != null) return error.MemoryLimitMismatch;
@@ -172,7 +242,80 @@ pub fn check(io: std.Io, path: []const u8) !void {
         if (try case.memory.streamBytes(case.tokens) != case.stream or try case.memory.prefillBytes(case.prompt) != case.prefill or try admission.projected(case.used, case.prompt, case.tokens, case.live) != case.projected or try admission.admits(case.used, case.prompt, case.tokens, case.live) != case.admits or try admission.fitting(case.used, case.tokens) != case.fitting or admission.refused != @intFromBool(!case.admits)) return error.StreamMemoryMismatch;
     }
     for (parsed.value.budgets) |case| if (concurrentBudget(case.ram, case.fraction, case.process, case.share, case.elsewhere) != case.result) return error.ConcurrentBudgetMismatch;
+    for (parsed.value.gates) |case| {
+        var memory = GateMemory{ .active = case.active, .cache = case.cache, .entries = case.entries };
+        var gate = StreamGate{ .per_token = case.per_token, .work = case.work, .budget = 0, .horizon = case.horizon, .lanes = case.lanes };
+        for (case.plans) |expected| {
+            gate.budget = expected.budget;
+            const actual = try gate.plan(&memory, case.streams);
+            try std.testing.expectEqualDeep(StreamGate.Plan{ .run = expected.run, .paused = expected.paused, .ended = expected.ended }, actual);
+            try std.testing.expectEqual(expected.waits, gate.waits);
+            try std.testing.expectEqual(expected.ends, gate.ends);
+            try std.testing.expectEqual(expected.active, memory.active);
+            try std.testing.expectEqual(expected.cache, memory.cache);
+            try std.testing.expectEqual(expected.entries, memory.entries.len);
+            try std.testing.expectEqual(expected.reclaims, memory.reclaims);
+        }
+    }
     std.debug.print("PASS: upstream memory parity: {d} limits, {d} cache projections, {d} stream admission cases, {d} concurrency budgets\n", .{ parsed.value.limits.len, parsed.value.caches.len, parsed.value.streams.len, parsed.value.budgets.len });
+    std.debug.print("PASS: {d} upstream stream-growth scenarios with reclaim, pause, termination and recovery\n", .{parsed.value.gates.len});
+}
+
+const GateMemory = struct {
+    const Entry = struct { size: u64, released: u64 };
+    active: u64,
+    cache: u64,
+    entries: []const Entry,
+    reclaims: u64 = 0,
+
+    pub fn used(m: *GateMemory) !u64 {
+        return m.active + m.cache;
+    }
+    pub fn freeable(m: *GateMemory) !u64 {
+        var total = m.cache;
+        for (m.entries) |entry| total += entry.size;
+        return total;
+    }
+    pub fn reclaim(m: *GateMemory) !bool {
+        m.reclaims += 1;
+        if (m.cache > 0) {
+            m.cache = 0;
+            return true;
+        }
+        if (m.entries.len == 0) return false;
+        m.active -= m.entries[0].released;
+        m.entries = m.entries[1..];
+        return true;
+    }
+};
+
+test "repeated memory profiles retain every observed worst case" {
+    const first = StreamMemory{ .short_tokens = 64, .long_tokens = 2112, .short = 100, .long = 300, .per_token = 1, .prefill_a = 10, .prefill_b = 0.5, .round_bytes = 500 };
+    var other = first;
+    other.short = 120;
+    other.long = 200;
+    other.per_token = 2;
+    other.prefill_a = 5;
+    other.prefill_b = 0.7;
+    other.round_bytes = 400;
+    var combined = first;
+    try combined.include(other);
+    for ([_]u64{ 0, 1, 64, 128, 2048, 2112, 8192, 262144 }) |tokens| {
+        try std.testing.expect(try combined.streamBytes(tokens) >= try first.streamBytes(tokens));
+        try std.testing.expect(try combined.streamBytes(tokens) >= try other.streamBytes(tokens));
+        try std.testing.expect(try combined.prefillBytes(tokens) >= try first.prefillBytes(tokens));
+        try std.testing.expect(try combined.prefillBytes(tokens) >= try other.prefillBytes(tokens));
+    }
+    try std.testing.expectEqual(first.round_bytes, combined.round_bytes);
+    other.chunk = 16;
+    try std.testing.expectError(error.IncompatibleMemoryProbes, combined.include(other));
+}
+
+test "empty stream gate neither reclaims nor counts a wait" {
+    var memory = GateMemory{ .active = 100, .cache = 100, .entries = &.{} };
+    var gate = StreamGate{ .per_token = 1, .work = 100, .budget = 0 };
+    try std.testing.expectEqualDeep(StreamGate.Plan{ .run = 0, .paused = 0 }, try gate.plan(&memory, &.{}));
+    try std.testing.expectEqual(@as(u64, 0), memory.reclaims);
 }
 
 test "memory accounting rejects overflow and malformed profiles" {
