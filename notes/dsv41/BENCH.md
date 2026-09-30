@@ -135,3 +135,24 @@ size (grouping smem cap); v1 50.9 ms/layer; v2 (activations staged in shared mem
 
 Parity unchanged (8K NLL 1.675 vs 1.675; 24K 1.631 vs 1.630). Remaining per chunk: experts 1.04 s, attention
 0.36 s (per-row key loads), dense GEMMs 0.25 s, NCCL 0.19 s, expert epilogues 0.19 s, host ~0.4 s.
+
+## 2026-10-01 — prefill past 1,000 tok/s (`--profile-prefill 2048`, steady-state 2,048-row chunks at 2–8K)
+
+| step | tok/s |
+|---|---:|
+| previous (v2 expert kernel, 32-head MQA) | 785 |
+| expert kernel v3: one K pass per program (Z written once) | 837 |
+| v4: cp.async-staged activations, weight prefetch ring across slices, 16 warps | 888 |
+| NCCL all-gather of the first row block overlapped with the second block's tail GEMMs | 893 |
+| expert Z in scaled fp16 (acc / 64) + prompt epilogues (no fp32 per-member copy) | 939 |
+| strided rot_in rows (no wo_a group copies), bf16 wo_b output | 946 |
+| single-pass prompt MQA (no per-chunk fp32 partials), sink + inverse RoPE fused | **1,031** |
+| + second PCIe half of the 200G link (`TF_DUAL=1`, NCCL 9.7 → 18.7 GB/s at 21 MB) | **1,058** |
+
+Parity (`golden_long_all.json`): 1K NLL 1.245 / vLLM 1.231 (was 1.241), 8K 1.675 / 1.675, 24K 1.631 / 1.630,
+40K 1.614 / 1.613. DSpark output == serial (greedy, 3 cases); decode unchanged with the dual link.
+bf16 Z instead of fp16 cost 8K NLL +0.001 (rel 2.7e-3 vs 4.2e-4 on one layer), hence the scaled fp16.
+
+Second link: `rocep1s0f0` (aiai) / `rocep1s0f1` (aiai2) needed IPv4 for a RoCE v2 GID; set non-persistently with
+`ip addr add 10.43.0.1/24 dev enp1s0f0np0` (aiai) and `10.43.0.2/24 dev enp1s0f1np1` (aiai2); lost on reboot.
+Chunk profile now: experts 740 ms, dense GEMM 260, NCCL 164, MQA 143, _post 76, rot_in 58 + 57, unpack 45.
