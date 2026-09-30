@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import os
 from pathlib import Path
 import re
 import struct
@@ -155,13 +156,28 @@ def unified(torch) -> bool:
         return False
 
 
+def reserve_bytes(total: int, *, host: bool = False) -> int:
+    """What the startup budget leaves free: max(4 GiB, a tenth of ``total``), or TENSORFOLD_MEMORY_RESERVE_GIB (>= 2)."""
+
+    value = os.environ.get("TENSORFOLD_MEMORY_RESERVE_GIB", "").strip()
+    if not value:
+        return max(4 * GIB, total // 10 if host else math.ceil(total / 10))
+    try:
+        gib = float(value)
+    except ValueError:
+        gib = math.nan
+    if not 2 <= gib <= total / GIB:
+        raise ValueError(f"TENSORFOLD_MEMORY_RESERVE_GIB={value}: a number of GiB from 2 to the memory's size")
+    return int(gib * GIB)
+
+
 def available_bytes(torch) -> int:
     free, total = map(int, torch.cuda.mem_get_info())
-    available = max(0, free - max(4 * GIB, math.ceil(total / 10)))
+    available = max(0, free - reserve_bytes(total))
     memory = _meminfo()
     if memory is None:
         return available
-    host = max(0, memory["MemAvailable"] - max(4 * GIB, memory["MemTotal"] // 10))
+    host = max(0, memory["MemAvailable"] - reserve_bytes(memory["MemTotal"], host=True))
     # one pool on a unified GPU: reclaimable page cache is available; a discrete GPU is bounded by both
     return host if unified(torch) else min(available, host)
 
