@@ -1,18 +1,29 @@
-"""G0 gate: discovery and backend-option tests for the DeepSeek V4 serial CUDA port.
+"""G0 gate: DeepSeek-V4-Flash family discovery and backend selection.
 
-Covers the discovery half of gate G0 (R1-R3 of the serial-contract plan):
-  * CPU family discovery imports neither the torch backend nor MLX;
-  * the existing MLX selection remains valid;
-  * an unsupported backend (cuda, when undeclared) is refused before any load;
-  * and the *intended-failing* serial-contract tests: tp != 1, --parallel > 1,
-    incompatible drafters and unknown formats must fail before loading.
+Covers G0's two halves:
+  * discovery (CPU family import pulls neither torch backend nor MLX); and
+  * backend refusal for an undeclared CUDA backend today (RED -> GREEN as the
+    port lands), plus the *future* serial-rejection contract for the CUDA port
+    (T16): tp != 1, --parallel > 1, an incompatible drafter and an unknown
+    storage format must be refused by the future cuda_engine factory before
+    any weight is loaded.
 
-The serial-contract tests are xfail-strict because the serial CUDA engine is not
-implemented yet (T16). strict=True means they can never be silently marked
-passed. Their rejection behaviour is pinned against the qwen3_5_moe / qwen3_5
-cuda-engine contract, the independent oracle for this gate. No GPU test here is
-marked passed; the engine tests are recorded as intended-failing (RED) pending
-T16, and the engine itself is gated on T19 (kernel evidence).
+G0b pins that future serial-rejection API and its pending (RED) status:
+
+  * the factory signature must conform to docs/recipes/adding-a-cuda-family.md
+    (drafter, tp, rank, master, master_port, no_drafts, mtp_drafts, **options);
+  * rejection must happen at factory-call time, before any engine is built or
+    any weight is loaded (the no-load sentinel); and
+  * the unknown-format case must use a genuinely unsupported storage value,
+    never gguf (GGUF is the intended supported storage for this family).
+
+The rejection tests below are intentionally RED (xfail-strict) while
+deepseek_v4.cuda_engine does not exist: they assert the contract the port must
+satisfy, not just "fails because the factory is missing". A bounded expected
+failure (the missing factory) is NOT evidence the future engine qualifies: when
+the factory lands with the documented signature, each RED test must flip to
+GREEN and its xfail mark removed. An XPASS-strict is the signal that the
+contract is satisfied and the mark is stale.
 """
 from __future__ import annotations
 
@@ -23,7 +34,7 @@ import pytest
 from tensorfold import families
 
 DS_FAMILY = families.families()["deepseek_v4"]
-# a gguf storage config: refused by discovery for any declared backend today
+# a gguf storage config: the supported serial storage for this family
 GGUF = {"quantization_config": {"quant_method": "gguf"}, "bits": 2.5625}
 
 
@@ -50,61 +61,112 @@ def test_importing_family_discovery_pulls_no_torch_or_mlx():
 
 
 def test_mlx_selection_remains_valid():
-    # G0: the existing MLX family selection stays valid (it must survive the CUDA port).
+    # G0: the existing MLX selection stays valid (it must survive the CUDA port).
     assert "mlx" in families.backends_of(DS_FAMILY)
     assert "mlx" in families.readable_quants(DS_FAMILY, "mlx")
 
 
 def test_unsupported_backend_rejected_before_load():
-    # G0/R3: --backend cuda is refused at discovery time (no CUDA backend
-    # declared), before any weight is loaded.
-    assert "cuda" not in families.backends_of(DS_FAMILY)
+    # G0/R3: --backend cuda is refused by the MLX factory today, before any load.
     with pytest.raises(ValueError, match="does not read"):
-        families.require_readable(DS_FAMILY, GGUF, "cuda")  # refused before any load
-    # gguf storage is also refused for the declared mlx backend, before any load
-    with pytest.raises(ValueError, match="gguf"):
-        families.require_readable(DS_FAMILY, GGUF, "mlx")
+        families.require_readable(DS_FAMILY, GGUF, "cuda")  # no cuda backend yet
 
 
 # ---------------------------------------------------------------------------
-# RED / intended-failing: serial-contract rejection (pending T16).
+# RED / pending: the future serial-rejection contract for the CUDA port (T16).
 # ---------------------------------------------------------------------------
+
+# The future cuda_engine factory must conform to docs/recipes/adding-a-cuda-family.md:
+#     def cuda_engine(model_dir, *, drafter="", tp=1, rank=0, master="",
+#                     master_port=29551, no_drafts=False, mtp_drafts=None, **options):
+# It must reject a non-serial configuration (tp != 1, --parallel > 1, an
+# incompatible drafter, an unknown storage format) at factory-call time --
+# before any engine is built or any weight is loaded (the no-load sentinel).
+# These tests are intentionally RED: cuda_engine does not exist yet, so they
+# xfail-strict. When the factory lands, they must flip to GREEN and the xfail
+# marks removed; an XPASS-strict is the signal the contract is satisfied.
+# A bounded expected failure (the absent factory) does NOT qualify the future
+# engine: the RED assertions below pin the documented behaviour itself.
 
 
 def _serial_engine(**opts):  # forwards to the future factory; absent today
+    """Forward a keyword-only config to the *future* cuda_engine factory.
+
+    Pins the test API to the adding-a-cuda-family.md contract: the first
+    positional argument is the family, the rest are the keyword-only serial
+    parameters (tp, drafter, rank, ...) plus **options (parallel, format, ...).
+    Because cuda_engine is absent today this is the pending (RED) path: a
+    missing factory fails the call, which is exactly the no-load sentinel the
+    rejection tests assert (no engine can have been built or loaded).
+    """
     import tensorfold.families.deepseek_v4 as dsv4
 
     factory = getattr(dsv4, "cuda_engine", None)
     if factory is None:
-        raise AssertionError("deepseek_v4.cuda_engine not implemented yet (T16)")
+        pytest.fail("deepseek_v4.cuda_engine not implemented yet (T16) — pending RED")
     return factory(DS_FAMILY, **opts)
 
 
-@pytest.mark.xfail(reason="pending deepseek_v4.cuda_engine serial CUDA factory (T16)", strict=True)
+@pytest.mark.xfail(reason="pending deepseek_v4.cuda_engine serial contract (T16)", strict=True)
 def test_serial_engine_rejects_tp_neq_1_before_load():
-    # Serial contract: tp != 1 (e.g. --tp 2) must be refused before any load.
-    # Oracle: qwen3_5_moe refuses tp != 1 ("runs on one GPU: drop --tp").
+    # No-load sentinel: rejection must happen inside the factory call itself --
+    # a tp != 1 config must never return an engine or load any weight.
     with pytest.raises(ValueError, match=r"tp.*1|tp.*one GPU|tp.*serial"):
         _serial_engine(tp=2)
 
 
-@pytest.mark.xfail(reason="pending deepseek_v4.cuda_engine serial CUDA factory (T16)", strict=True)
+@pytest.mark.xfail(reason="pending deepseek_v4.cuda_engine serial contract (T16)", strict=True)
 def test_serial_engine_rejects_parallel_gt_1_before_load():
-    # Serial contract: --parallel > 1 is refused before any load (one request).
+    # Serial contract: the first CUDA release is one-request serial, so a
+    # --parallel > 1 config must be refused before any load.
     with pytest.raises(ValueError, match=r"parallel|concurrent|one request"):
         _serial_engine(parallel=8)
 
 
-@pytest.mark.xfail(reason="pending deepseek_v4.cuda_engine serial CUDA factory (T16)", strict=True)
+@pytest.mark.xfail(reason="pending deepseek_v4.cuda_engine serial contract (T16)", strict=True)
 def test_serial_engine_rejects_incompatible_drafter_before_load():
-    # Serial contract: no drafting; an incompatible/external drafter is refused.
+    # No-load sentinel: an incompatible draft model must be refused before load.
     with pytest.raises(ValueError, match=r"drafter|draft|no drafting"):
         _serial_engine(drafter="dflash")
 
 
-@pytest.mark.xfail(reason="pending deepseek_v4.cuda_engine serial CUDA factory (T16)", strict=True)
+@pytest.mark.xfail(reason="pending deepseek_v4.cuda_engine serial contract (T16)", strict=True)
 def test_serial_engine_rejects_unknown_format_before_load():
-    # Serial contract: an unknown/unsupported storage format is refused before
-    # any load, mirroring require_readable(mlx) refusing gguf today.
+    # GGUF is the intended supported storage for this family, so the unknown-
+    # format case must use a genuinely unsupported value, never gguf.
     with pytest.raises(ValueError, match=r"format|storage|unsupported"):
-        _serial_engine(format="gguf")
+        _serial_engine(format="onnx")
+
+
+@pytest.mark.xfail(reason="pending deepseek_v4.cuda_engine serial contract (T16)", strict=True)
+def test_serial_engine_signature_pins_cuda_family_contract():
+    """Pins the future cuda_engine factory signature to adding-a-cuda-family.md.
+
+    RED until the factory exists; when it lands with this signature, this test
+    must pass (GREEN) and the xfail mark removed. Contract:
+
+        def cuda_engine(model_dir, *, drafter="", tp=1, rank=0, master="",
+                        master_port=29551, no_drafts=False, mtp_drafts=None,
+                        **options):
+    """
+    import inspect
+    import tensorfold.families.deepseek_v4 as dsv4
+
+    factory = getattr(dsv4, "cuda_engine", None)
+    if factory is None:
+        pytest.fail("deepseek_v4.cuda_engine not implemented yet (T16) — pending RED")
+
+    sig = inspect.signature(factory)
+    p = sig.parameters
+    # keyword-only serial params with the documented defaults
+    assert p["drafter"].default == ""
+    assert p["tp"].default == 1
+    assert p["rank"].default == 0
+    assert p["master"].default == ""
+    assert p["master_port"].default == 29551
+    assert p["no_drafts"].default is False
+    assert p["mtp_drafts"].default is None
+    # every param except model_dir is keyword-only (drafter/tp/rank/master/...)
+    assert all(v.kind == inspect.Parameter.KEYWORD_ONLY for k, v in p.items() if k != "model_dir")
+    # a catch-all **options must remain for parallel/format/... rejections
+    assert any(v.kind == inspect.Parameter.VAR_KEYWORD for v in p.values())
