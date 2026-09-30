@@ -28,6 +28,8 @@ token at the answer position. Thinking stays off. The response carries `prompt_f
 question id, and `usage.completion_tokens` 0. `probabilities` are a softmax over the label logits divided by
 `temperature` (default 1). `label_mass` is the full-vocabulary probability of those labels and does not use
 `temperature`. A request the tokenizer or the context window cannot score returns HTTP 400.
+For decisions, `chat_template_kwargs` may be omitted, null, or an object containing only
+`enable_thinking: false`; other types, keys, or thinking values return HTTP 400.
 
 ## Request fields
 

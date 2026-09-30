@@ -106,9 +106,12 @@ def _validate_body(body: dict[str, Any]) -> None:
     temperature = body.get("temperature", 1)
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not math.isfinite(temperature) or temperature <= 0:
         raise DecisionError("temperature must be a number above 0")
-    kwargs = body.get("chat_template_kwargs") or {}
+    kwargs = body.get("chat_template_kwargs")
+    if kwargs is None:
+        kwargs = {}
     if not isinstance(kwargs, dict):
         raise DecisionError("chat_template_kwargs must be an object")
+    _unknown(kwargs, frozenset({"enable_thinking"}))
     if "enable_thinking" in kwargs and kwargs["enable_thinking"] is not False:
         raise DecisionError("decisions need enable_thinking false or unset")
     questions = body.get("questions")
