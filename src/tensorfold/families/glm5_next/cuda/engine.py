@@ -256,11 +256,7 @@ class GlmEngine:
         self.comm.all_gather(mine, got)
         return [got[:len(values)].tolist(), got[len(values):].tolist()]
 
-    # -- the idle doorbell ---------------------------------------------------------------------------------------------
-    # Between requests rank 1 used to wait inside the next header's all-gather: an NCCL kernel spinning on its GPU and
-    # a host thread spinning in the copy that waits for it, for as long as the server stays idle. Rank 0 now sets a key
-    # in the rendezvous TCP store (NCCL.store) before each request's header, and rank 1 blocks on that socket first, so
-    # an idle rank 1 holds no GPU and no core. Communicators without a store (test fakes) skip it.
+    # the idle doorbell: rank 1 waits for each request on the rendezvous store (no store: no doorbell), not in NCCL
     def _store(self):
         return getattr(self.comm, "store", None)
 
