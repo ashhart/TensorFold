@@ -60,7 +60,9 @@ class KDA:
 
         rows = int(x.shape[0])
         if decode and L.DENSE == "matrix" and isinstance(q, Q) and K.metal():   # one kernel at every row count
-            return L.matrix(x, q)
+            y = L.matrix(x, q)
+            if y is not None:
+                return y
         if (isinstance(q, Q) and x.dtype == mx.bfloat16
                 and row_kernel("kda_proj", rows, decode) and K.qmv_quad_rows_fits(q, rows)):
             return K.qmv_quad_rows(x, q)

@@ -146,8 +146,10 @@ def _tensor_units() -> bool:
     return bool(tensor_units())
 
 
-def matrix(x: mx.array, q: "Q") -> mx.array:
-    """x [R, K] bf16 through a 2-D affine linear on the matrix units (see ``DENSE``); groups of 128 read as 2 x 64."""
+def matrix(x: mx.array, q: "Q") -> mx.array | None:
+    """x [R, K] bf16 through a 2-D affine linear on the matrix units (see ``DENSE``); groups of 128 read as 2 x 64.
+
+    None when this chip's matrix kernel does not cover the linear: the caller then keeps MLX's calls."""
 
     if not _BACKEND:
         if _tensor_units():
@@ -165,6 +167,12 @@ def matrix(x: mx.array, q: "Q") -> mx.array:
         if backend == "lane":
             from tensorfold.kernels.qwen.dense.v1 import lane_qmm
 
+            # decided once per linear from its format and shape (never from the input): a linear the lane matmul
+            # does not cover keeps MLX's calls at every row count, as with DENSE="rows"
+            probe = mx.zeros((1, q.ins), dtype=mx.bfloat16)
+            if not lane_qmm.supports(q.weight, scales, probe, q.bits, group, "affine"):
+                _MATRIX[id(q)] = (q.weight, None)
+                return None
             n = q.outs
             nt = 64 if (q.bits == 4 and n % 64 == 0) else 32 if n % 32 == 0 else 0
             tiled = lane_qmm.tile_weight(q.weight, nt, group, bits=q.bits) if nt else q.weight
@@ -176,6 +184,8 @@ def matrix(x: mx.array, q: "Q") -> mx.array:
             backend.prepare([(q.weight, scales, biases, group, q.bits)])
             hit = (q.weight, scales, biases, group)
         _MATRIX[id(q)] = hit
+    if hit[1] is None:                    # not covered on this chip: the caller keeps MLX's calls
+        return None
     dtype = x.dtype
     xb = x if dtype == mx.bfloat16 else x.astype(mx.bfloat16)
     if backend == "lane":
@@ -200,7 +210,9 @@ def project(x: mx.array, q: Any, *, rows_exact: bool) -> mx.array:
         if isinstance(q, QSplit):
             return mx.concatenate([project(x, p, rows_exact=True) for p in q.parts], axis=-1)
         if isinstance(q, Q) and q.weight.ndim == 2:
-            return matrix(x, q)
+            y = matrix(x, q)
+            if y is not None:
+                return y
     if rows == 1 or not rows_exact:
         return q(x)
     if isinstance(q, QSplit):
