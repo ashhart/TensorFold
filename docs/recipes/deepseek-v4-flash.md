@@ -107,3 +107,7 @@ rings. `TENSORFOLD_MEMORY_LIMIT_GB` raises the budget on a machine with nothing 
 ## Not yet
 
 CUDA on two DGX Sparks and DeepSeek-V4-flash-vision-exp are not in this family yet.
+
+The [one-Spark GGUF CUDA proposal](deepseek-v4-cuda-plan.md) describes the work
+needed to serve a smaller mixed quant alongside Hunyuan3D. It does not add CUDA
+support to this family.
