@@ -50,6 +50,15 @@ class NCCL:
         lib.ncclCommInitRank.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, _UniqueId, ctypes.c_int]
         lib.ncclAllGather.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_void_p,
                                       ctypes.c_void_p]
+        lib.ncclAllReduce.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_void_p, ctypes.c_void_p]
+        # point-to-point, for the all-to-all an exact reduce-scatter needs at world > 2
+        lib.ncclSend.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                                 ctypes.c_void_p]
+        lib.ncclRecv.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                                 ctypes.c_void_p]
+        lib.ncclGroupStart.argtypes = []
+        lib.ncclGroupEnd.argtypes = []
         self.store = TCPStore(master, port, world, rank == 0, timeout=timedelta(seconds=600))
         uid = _UniqueId()
         if rank == 0:
@@ -99,6 +108,41 @@ class NCCL:
                                    "a lock names the lock there)")
             print(f"[tensorfold] rank {self.rank} finished {label}; waiting for rank {missing} ({waited:.0f} s)",
                   flush=True)
+    def all_reduce(self, send: torch.Tensor, recv: torch.Tensor) -> None:
+        """recv <- the sum of every rank's send (NCCL's ring: every rank gets the same bits; the summation order of
+        an element depends on the message size, so callers that need row-invariant bits use the all-gather)."""
+
+        if recv.numel() != send.numel() or send.dtype != recv.dtype:
+            raise ValueError("all_reduce: send and recv must match")
+        stream = torch.cuda.current_stream().cuda_stream
+        self._check(self.lib.ncclAllReduce(send.data_ptr(), recv.data_ptr(), send.numel(), _DTYPES[send.dtype], 0,
+                                           self.comm, stream))
+
+    def all_to_all(self, send: torch.Tensor, recv: torch.Tensor) -> None:
+        """recv[j] <- rank j's send[self.rank], for send and recv both [world, n].
+
+        Every rank sends its row j to rank j and receives rank j's row self.rank into its row j, all in one NCCL
+        group on the current stream (so CUDA graphs capture it). Row order is rank order, so a caller that sums
+        recv's rows 0..world-1 in order gets the same fp32 bits on every rank - the exact reduce-scatter.
+        """
+
+        if send.shape != recv.shape or send.dim() != 2 or send.shape[0] != self.world or send.dtype != recv.dtype:
+            raise ValueError("all_to_all: send and recv must be [world, n] tensors of the same dtype")
+        if not (send.is_contiguous() and recv.is_contiguous()):
+            raise ValueError("all_to_all: send and recv must be contiguous")
+        n, dtype = send.shape[1], _DTYPES[send.dtype]
+        stream = torch.cuda.current_stream().cuda_stream
+        lib = self.lib
+        self._check(lib.ncclGroupStart())
+        try:
+            for peer in range(self.world):
+                if peer == self.rank:
+                    continue
+                self._check(lib.ncclSend(send[peer].data_ptr(), n, dtype, peer, self.comm, stream))
+                self._check(lib.ncclRecv(recv[peer].data_ptr(), n, dtype, peer, self.comm, stream))
+        finally:
+            self._check(lib.ncclGroupEnd())
+        recv[self.rank].copy_(send[self.rank])
 
     def barrier(self) -> None:
         x = torch.zeros((1,), dtype=torch.float32, device="cuda")

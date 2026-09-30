@@ -26,7 +26,7 @@ def _ext():
 
     here = Path(__file__).parent
     srcs = [str(here / f) for f in ("experts.cpp", "experts.cu", "experts_cb0.cu", "experts_cb1.cu", "experts_cb2.cu")]
-    return load(name="tensorfold_exl3_experts_v1", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
+    return load(name="tensorfold_exl3_experts_v2", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
                 verbose=False)
 
 
@@ -79,9 +79,11 @@ class Exl3RoutedExperts:
     def nbytes_read(self, ids: Sequence[int]) -> int:
         return int(self.trellis_bytes[list(ids)].sum())
 
+    gu_stride: int = 0            # gate/up trellis row stride in tiles (0: contiguous [D/16, I/16, *]); a larger
+                                  # stride reads each as a column block of one fused [D/16, 2I/16, *] trellis
 
 def prepare(gate: Sequence[tuple], up: Sequence[tuple], down: Sequence[tuple], codebook: int | str,
-            device="cuda") -> Exl3RoutedExperts:
+            device="cuda", gu_stride: int = 0) -> Exl3RoutedExperts:
     """A layer from per-expert (trellis, suh, svh) triples, trellises referenced in place, each at its own width."""
 
     cb = codebook_id(codebook) if isinstance(codebook, str) else int(codebook)
@@ -91,11 +93,16 @@ def prepare(gate: Sequence[tuple], up: Sequence[tuple], down: Sequence[tuple], c
     D, I = gate[0][0].shape[0] * 16, gate[0][0].shape[1] * 16
     keep = []
 
-    def table(mats, k, n):
+    def table(mats, k, n, stride=0):
         ptrs, k2s = [], []
         for t, _, _ in mats:
-            if t.dtype != torch.int16 or not t.is_contiguous() or t.device.type != "cuda":
-                raise ValueError("trellis must be a contiguous CUDA int16 tensor")
+            if stride:                   # a column block of a wider [K/16, stride, 16 * bits] trellis
+                ok = (t.dtype == torch.int16 and t.device.type == "cuda" and t.stride(2) == 1
+                      and t.stride(1) == t.shape[2] and t.stride(0) == stride * t.shape[2])
+            else:
+                ok = t.dtype == torch.int16 and t.is_contiguous() and t.device.type == "cuda"
+            if not ok:
+                raise ValueError("trellis must be a contiguous CUDA int16 tensor (or a row-strided block)")
             if t.shape[0] * 16 != k or t.shape[1] * 16 != n:
                 raise ValueError(f"expert shape {tuple(t.shape)} does not match [{k // 16}, {n // 16}, *]")
             k2s.append(k2_of(t))
@@ -104,8 +111,8 @@ def prepare(gate: Sequence[tuple], up: Sequence[tuple], down: Sequence[tuple], c
         return (torch.tensor(ptrs, dtype=torch.int64, device=device),
                 torch.tensor(k2s, dtype=torch.int32, device=device), k2s)
 
-    gp, gk, gks = table(gate, D, I)
-    upp, uk, uks = table(up, D, I)
+    gp, gk, gks = table(gate, D, I, gu_stride)
+    upp, uk, uks = table(up, D, I, gu_stride)
     dp, dk, dks = table(down, I, D)
 
     def stack(mats, j, n):
@@ -117,7 +124,7 @@ def prepare(gate: Sequence[tuple], up: Sequence[tuple], down: Sequence[tuple], c
     tb = torch.tensor([(D * I // 256) * (gks[e] + uks[e] + dks[e]) * 16 for e in range(E)], dtype=torch.int64)
     return Exl3RoutedExperts(gp, upp, dp, gk, uk, dk, stack(gate, 1, D), stack(up, 1, D), stack(gate, 2, I),
                              stack(up, 2, I), stack(down, 1, I), stack(down, 2, D), E, D, I, cb,
-                             (min(gks + uks), max(gks + uks)), (min(dks), max(dks)), tb, keep)
+                             (min(gks + uks), max(gks + uks)), (min(dks), max(dks)), tb, keep, gu_stride)
 
 
 def prepare_stacked(gt: torch.Tensor, ut: torch.Tensor, dt: torch.Tensor, suh_g, suh_u, svh_g, svh_u, suh_d, svh_d,
@@ -187,11 +194,11 @@ def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Ex
     ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots, E)
     nt, w, sk, pf = s.cfg_gu
     ext.grouped(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, s.z, 2, D, I,
-                P, sk, slots, ex.cb, nt, w, pf, ex.k2_gu[0], ex.k2_gu[1])
+                P, sk, slots, ex.cb, nt, w, pf, ex.k2_gu[0], ex.k2_gu[1], ex.gu_stride)
     ext.gateup_epilogue(s.z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, I, sk, slots, E, float(limit), act_mode)
     nt, w, sk, pf = s.cfg_d
     ext.grouped(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, s.z, 1, I,
-                D, P, sk, slots, ex.cb, nt, w, pf, ex.k2_d[0], ex.k2_d[1])
+                D, P, sk, slots, ex.cb, nt, w, pf, ex.k2_d[0], ex.k2_d[1], 0)
     if wts is None:
         ext.down_epilogue(s.z, pick, ex.svh_d, s.y, R, P, D, sk, slots, E)
         return s.y[:P]

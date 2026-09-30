@@ -11,3 +11,4 @@ venv/
 .DS_Store
 *.swp
 *.log
+.torch_ext/
