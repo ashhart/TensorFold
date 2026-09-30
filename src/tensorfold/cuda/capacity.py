@@ -182,16 +182,17 @@ def host_stream_bytes() -> int | None:
     return max(0, memory["MemAvailable"] - reserve)
 
 
-def available_bytes(torch) -> int:
-    """The original unified-memory budget, or a discrete GPU's own budget; host staging is checked separately."""
+def available_bytes(torch, *, carveout: int = 0) -> int:
+    """The original unified-memory budget, or a discrete GPU's own budget; host staging is checked separately.
+    ``carveout`` adds the GB10 display scanout bytes a family places its pools in (outside MemAvailable)."""
 
     free, total = map(int, torch.cuda.mem_get_info())
     available = max(0, free - reserve_bytes(total))
     memory = _meminfo()
     if memory is None:
-        return available
+        return available + carveout
     if unified(torch):
-        return max(0, memory["MemAvailable"] - reserve_bytes(memory["MemTotal"], host=True))
+        return max(0, memory["MemAvailable"] - reserve_bytes(memory["MemTotal"], host=True)) + carveout
     return available
 
 
@@ -279,8 +280,9 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
           draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
           extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
           draft_transform: Callable | None = None,
-          draft_weights: Callable[[Path], Weights] | None = None) -> dict:
-    """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform."""
+          draft_weights: Callable[[Path], Weights] | None = None, carveout: int = 0) -> dict:
+    """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform;
+    ``carveout``: display scanout bytes the family's pools may use besides memory."""
 
     from tensorfold.cuda import build
 
@@ -319,7 +321,7 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
                                  "free host memory or use a checkpoint with smaller loading buffers")
         plan = make_plan(int(text.get("max_position_embeddings") or 0), requested,
                          requested is not None if explicit is None else explicit,
-                         available_bytes(torch), weights, geometry, room=page_room(torch))
+                         (available_bytes(torch, carveout=carveout) if carveout else available_bytes(torch)), weights, geometry, room=page_room(torch))
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
         error = f"{type(exc).__name__}: {exc}"     # name the cause: its text alone has hidden a dtype's KeyError
     status = [1 if error else 0, *(plan.settings + [plan.fitting, plan.largest] if plan else [0, -1, 0, 0, 0])]
