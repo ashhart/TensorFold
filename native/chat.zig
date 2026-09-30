@@ -54,6 +54,9 @@ pub fn check(io: std.Io, directory: []const u8, fixture: []const u8) !void {
         } else try template.render(a, body);
         if (case.object.get("text")) |expected_text| try std.testing.expectEqualStrings(expected_text.string, rendered.text);
         const ids = try encode(a, &tokenizer, rendered);
+        if (case.object.get("history_len")) |expected_history| {
+            try std.testing.expectEqual(@as(usize, @intCast(expected_history.integer)), try template.historyLength(a, &tokenizer, body, false, null, ids));
+        }
         if (case.object.get("call_form")) |expected_form| {
             const form = try template.callForm(a, &tokenizer);
             if (expected_form == .null) {
@@ -304,6 +307,17 @@ pub const Template = struct {
     }
 
     pub fn renderWithDefaults(t: *const Template, a: std.mem.Allocator, body: V, default_thinking: bool, default_effort: ?[]const u8) !Rendered {
+        return t.renderWithGeneration(a, body, default_thinking, default_effort, true);
+    }
+
+    pub fn historyLength(t: *const Template, a: std.mem.Allocator, tokenizer: *Tokenizer, body: V, thinking: bool, effort: ?[]const u8, prompt: []const i32) !usize {
+        var scratch = std.heap.ArenaAllocator.init(a);
+        defer scratch.deinit();
+        const history = try encode(scratch.allocator(), tokenizer, try t.renderWithGeneration(scratch.allocator(), body, thinking, effort, false));
+        return if (history.len > 0 and history.len < prompt.len and std.mem.eql(i32, history, prompt[0..history.len])) history.len else 0;
+    }
+
+    fn renderWithGeneration(t: *const Template, a: std.mem.Allocator, body: V, default_thinking: bool, default_effort: ?[]const u8, generation: bool) !Rendered {
         if (body != .object) return error.InvalidRequest;
         const input = body.object.get("messages") orelse return error.MissingMessages;
         var images = V{ .array = std.json.Array.init(a) };
@@ -341,7 +355,7 @@ pub const Template = struct {
             if (effort) |e| try context.object.put(a, "reasoning_effort", .{ .string = e });
         } else _ = context.object.swapRemove("reasoning_effort");
         const tools = try activeTools(a, body);
-        return .{ .text = try t.raw(a, messages, tools, context, true, true), .images = images, .thinking = thinking };
+        return .{ .text = try t.raw(a, messages, tools, context, generation, true), .images = images, .thinking = thinking };
     }
 };
 

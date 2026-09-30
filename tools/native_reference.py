@@ -341,6 +341,7 @@ def prefill_plan_fixtures(output):
 def prompt_cache_fixtures(output):
     import random
     from tensorfold.server.checkpoints import CheckpointStore, choose_checkpoints
+    from tensorfold.engine.prefill_plan import PrefillPlan
 
     rng = random.Random(418137)
     result = dict(stores=[], checkpoints=[])
@@ -383,8 +384,11 @@ def prompt_cache_fixtures(output):
         prompt = rng.choice(prompts)
         previous = rng.choice([None, *prompts])
         history, cached = rng.randrange(30), rng.randrange(30)
+        chosen = choose_checkpoints(history, cached, previous, prompt)
+        chunks = PrefillPlan(step=rng.choice((4, 8, 16)), min_chunk=2, openers=(3, 7), assistant=(11,)).chunks(prompt)
         result['checkpoints'].append(dict(prompt=prompt, previous=previous, history=history, cached=cached,
-                                          expected=choose_checkpoints(history, cached, previous, prompt)))
+                                          expected=chosen, starts=list(chunks.starts),
+                                          aligned=sorted(at for at in {chunks.floor(n) for n in chosen} if cached < at < len(prompt))))
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result))

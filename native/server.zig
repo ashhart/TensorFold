@@ -278,6 +278,12 @@ const Worker = struct {
             for (&active) |*slot| if (slot.*) |pending| {
                 const was_active = pending.generation != null;
                 const done = pending.advance(&session, &admission, &active, if (prefixes) |*store| store else null) catch |err| blk: {
+                    switch (err) {
+                        error.RequestCancelled, error.RequestTimedOut, error.ServerStopping, error.RequestExceedsMemoryBudget => {
+                            if (pending.generation != null) if (prefixes) |*store| pending.savePrefix(store, admission, &active) catch {};
+                        },
+                        else => {},
+                    }
                     pending.reportError(err) catch |write_err| {
                         pending.job.failure = write_err;
                     };
@@ -424,14 +430,30 @@ pub fn checkGrowth(session: *inference.Session, profile: memory_policy.StreamMem
     _ = try filling.generation.?.step(session);
     try std.testing.expect(!filling.generation.?.isDecoding());
     const before = filling.generation.?.progress();
+    const selected = @import("prompt_cache.zig").checkpoints(prompt.len - 1, 0, null, prompt).aligned(filling.generation.?.boundary(), 0, prompt.len);
+    try std.testing.expect(selected.contains(before.prefilled));
+    var checkpoint = (try filling.generation.?.snapshot()).?;
+    defer checkpoint.deinit();
     var admission = memory_policy.Admission{ .budget = 0, .memory = profile };
     try std.testing.expectError(error.RequestExceedsMemoryBudget, filling.guardPrefill(admission, &.{&filling}, null));
     try std.testing.expectEqualDeep(before, filling.generation.?.progress());
     admission.budget = std.math.maxInt(u64);
     try filling.guardPrefill(admission, &.{&filling}, null);
     while (!try filling.generation.?.step(session)) {}
+    var expected = try filling.generation.?.takeReply();
+    defer expected.deinit(mx.allocator);
+    var resumed = try inference.RequestGeneration.init(session, mx.allocator, prompt, .{ .max_tokens = 4, .ignore_eos = true }, .{}, null);
+    defer resumed.deinit();
+    try resumed.restorePrefix(&checkpoint);
+    try std.testing.expectEqual(before.prefilled, resumed.progress().prefilled);
+    while (!try resumed.step(session)) {}
+    var actual = try resumed.takeReply();
+    defer actual.deinit(mx.allocator);
+    try std.testing.expectEqualSlices(u32, expected.tokens.items, actual.tokens.items);
+    try std.testing.expectEqualStrings(expected.content, actual.content);
     std.debug.print("PASS: live cache growth gating preserves activation order, paused greedy/seeded output and oldest-stream recovery\n", .{});
     std.debug.print("PASS: prefill chunk memory refusal preserves request state for subsequent completion\n", .{});
+    std.debug.print("PASS: selected history checkpoint resumes with identical tokens and content\n", .{});
 }
 
 const PrefixStats = struct {
@@ -558,6 +580,8 @@ const Pending = struct {
     stream: ?Stream = null,
     buffer: [8192]u8 = undefined,
     saved_position: usize = 0,
+    history_len: usize = 0,
+    checkpoints: @import("prompt_cache.zig").Checkpoints = .{},
     prefix_reserve: u64 = 0,
     activation_order: u64 = 0,
     growth: enum { run, paused, ended } = .run,
@@ -606,6 +630,7 @@ const Pending = struct {
             const rendered = try session.renderChat(a, body, w.thinking, w.effort);
             try ids.appendSlice(a, try chat.encode(a, &session.tokenizer, rendered));
             raw_images = rendered.images;
+            if (raw_images != .array or raw_images.array.items.len == 0) p.history_len = try session.chat_template.?.historyLength(a, &session.tokenizer, body, w.thinking, w.effort, ids.items);
             p.thinking = rendered.thinking;
             if (chat.requiresCall(body)) {
                 const form = (try session.chat_template.?.callForm(a, &session.tokenizer)) orelse return error.UnsupportedRequiredToolCalls;
@@ -692,17 +717,22 @@ const Pending = struct {
             try mx.check(mx.c.mlx_clear_cache());
             try p.activate(session);
             if (p.image == null and p.options.max_tokens > 0) if (prefixes) |store| {
+                const policy = @import("prompt_cache.zig");
+                p.checkpoints = policy.checkpoints(p.history_len, 0, null, p.ids).aligned(p.generation.?.boundary(), 0, p.ids.len);
                 var hit = store.match(p.ids, p.generation.?.boundary(), false) catch null;
                 if (hit) |*value| {
                     defer value.deinit(mx.allocator);
                     p.generation.?.restorePrefix(&value.cache) catch return p.step(session);
                     p.saved_position = value.count;
                     p.prefix_reserve = value.cache.nbytes();
+                    p.checkpoints = policy.checkpoints(p.history_len, value.count, value.last_prompt, p.ids).aligned(p.generation.?.boundary(), value.count, p.ids.len);
                 }
             };
         }
         const done = try p.step(session);
-        if (!done) if (prefixes) |store| p.savePrefix(store, admission.*, active) catch {};
+        if (!done) if (prefixes) |store| {
+            if (!p.job.is_chat or p.checkpoints.contains(p.generation.?.memoryLengths().now)) p.savePrefix(store, admission.*, active) catch {};
+        };
         return done;
     }
 

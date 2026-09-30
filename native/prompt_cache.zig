@@ -7,6 +7,17 @@ pub const Boundary = struct {
         if (b.starts) |starts| return std.mem.indexOfScalar(usize, starts, count) != null;
         return b.step != 0 and count % b.step == 0;
     }
+    pub fn floor(b: Boundary, count: usize) usize {
+        if (b.starts) |starts| {
+            var result: usize = 0;
+            for (starts) |at| {
+                if (at > count) break;
+                result = at;
+            }
+            return result;
+        }
+        return if (b.step == 0) 0 else count - count % b.step;
+    }
 };
 
 pub fn commonPrefix(lhs: []const i32, rhs: []const i32) usize {
@@ -15,7 +26,25 @@ pub fn commonPrefix(lhs: []const i32, rhs: []const i32) usize {
     return n;
 }
 
-const Checkpoints = struct { values: [2]usize = .{ 0, 0 }, count: usize = 0 };
+pub const Checkpoints = struct {
+    values: [2]usize = .{ 0, 0 },
+    count: usize = 0,
+
+    pub fn contains(c: Checkpoints, position: usize) bool {
+        return std.mem.indexOfScalar(usize, c.values[0..c.count], position) != null;
+    }
+
+    pub fn aligned(c: Checkpoints, boundary: Boundary, cached: usize, length: usize) Checkpoints {
+        var out = Checkpoints{};
+        for (c.values[0..c.count]) |position| {
+            const at = boundary.floor(position);
+            if (at <= cached or at >= length or out.contains(at)) continue;
+            out.values[out.count] = at;
+            out.count += 1;
+        }
+        return out;
+    }
+};
 
 pub fn checkpoints(history: usize, cached: usize, previous: ?[]const i32, prompt: []const i32) Checkpoints {
     var out = Checkpoints{};
@@ -228,7 +257,7 @@ pub fn check(io: std.Io, path: []const u8) !void {
     };
     const Fixture = struct {
         stores: []const struct { slots: usize, budget: ?u64, pinned_slots: usize, operations: []const Operation },
-        checkpoints: []const struct { prompt: []const i32, previous: ?[]const i32, history: usize, cached: usize, expected: []const usize },
+        checkpoints: []const struct { prompt: []const i32, previous: ?[]const i32, history: usize, cached: usize, expected: []const usize, starts: []const usize, aligned: []const usize },
     };
     const parsed = try std.json.parseFromSlice(Fixture, a, source, .{});
     defer parsed.deinit();
@@ -273,6 +302,8 @@ pub fn check(io: std.Io, path: []const u8) !void {
     for (parsed.value.checkpoints) |case| {
         const actual = checkpoints(case.history, case.cached, case.previous, case.prompt);
         try std.testing.expectEqualSlices(usize, case.expected, actual.values[0..actual.count]);
+        const aligned = actual.aligned(.{ .starts = case.starts }, case.cached, case.prompt.len);
+        try std.testing.expectEqualSlices(usize, case.aligned, aligned.values[0..aligned.count]);
     }
     std.debug.print("PASS: {d} upstream prompt-cache operations and {d} checkpoint selections\n", .{ count, parsed.value.checkpoints.len });
 }

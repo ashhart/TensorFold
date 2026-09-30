@@ -493,8 +493,23 @@ const Scenario = struct {
         try expected_chat.compare(try Output.parse(a, try readAll(a, io, cached_chat), true));
         counts = try CacheCounts.read(a, io, port);
         try std.testing.expectEqual(@as(u64, if (s.cache_enabled) 8 else 0), counts.hits);
+        for ([_][]const u8{ "Continue briefly.", "Revise the previous answer briefly." }) |followup| {
+            const turn = try std.json.Stringify.valueAlloc(a, .{ .messages = &.{ .{ .role = "system", .content = system }, .{ .role = "user", .content = "Reply briefly." }, .{ .role = "assistant", .content = system }, .{ .role = "user", .content = followup } }, .reasoning_effort = "none", .max_tokens = @as(usize, 8), .ignore_eos = true, .temperature = @as(f64, 0.7), .top_k = @as(usize, 12), .top_p = @as(f64, 0.8), .seed = @as(usize, 21) }, .{});
+            const first = try postRoute(io, port, "/v1/chat/completions", turn);
+            defer first.close(io);
+            const wanted = try Output.parse(a, try readAll(a, io, first), false);
+            var repeated_turn = try std.json.parseFromSlice(std.json.Value, a, turn, .{});
+            try repeated_turn.value.object.put(a, "stream", .{ .bool = true });
+            const repeated = try postRoute(io, port, "/v1/chat/completions", try std.json.Stringify.valueAlloc(a, repeated_turn.value, .{}));
+            defer repeated.close(io);
+            try wanted.compare(try Output.parse(a, try readAll(a, io, repeated), true));
+        }
+        const turns = try CacheCounts.read(a, io, port);
+        // With one slot, the revised last user message replaces the previous history checkpoint.
+        try std.testing.expectEqual(counts.hits + @as(u64, if (s.cache_enabled) 3 else 0), turns.hits);
         std.debug.print("PASS: HTTP prefix cache enabled={any}: cold/reused/concurrent JSON/SSE agree; eviction, cache counters and cancellation match policy\n", .{s.cache_enabled});
         std.debug.print("PASS: {d}-token adaptive chat JSON/SSE agree, cache enabled={any}\n", .{ prompt_tokens, s.cache_enabled });
+        std.debug.print("PASS: multi-turn history and revised prompts reuse checkpoints with seeded JSON/SSE parity\n", .{});
         try std.posix.kill(s.child.id.?, .TERM);
         if (!(try s.child.wait(io)).success()) return error.UncleanShutdown;
     }

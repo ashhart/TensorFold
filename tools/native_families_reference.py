@@ -370,7 +370,9 @@ def chat_fixture(directory, output):
             if tools:
                 body["tools"] = tools
             ids = render_prompt_ids(tokenizer, messages, tools=tools, enable_thinking=thinking, reasoning_effort=effort)
-            cases.append({"body": body, "tokens": ids, "gates": gate_cases(ids)})
+            history = render_prompt_ids(tokenizer, messages, tools=tools, enable_thinking=thinking, reasoning_effort=effort, add_generation_prompt=False)
+            history_len = len(history) if 0 < len(history) < len(ids) and ids[:len(history)] == history else 0
+            cases.append({"body": body, "tokens": ids, "history_len": history_len, "gates": gate_cases(ids)})
     output.parent.mkdir(parents=True, exist_ok=True)
     from tensorfold.engine.prefill_plan import message_markers
     marks, assistant = message_markers(tokenizer)
