@@ -67,7 +67,7 @@ def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True):
     def transform(name: str, info: dict) -> tuple[int, int]:
         if "vision" in name or ".visual." in name or (not mtp and (name.startswith("mtp.") or ".mtp." in name)):
             return 0, 0
-        if ".ngram_embedding.shard_" in name:          # host pages when mapped; none when read from SSD
+        if ".ngram_embedding.shard_" in name or name.endswith(".ngram_embedding.trellis"):          # host pages when mapped; none when read from SSD
             return 0, size(info, name) if mapped_tables else 0
         shape = list(info["shape"])
         if world > 1 and not info.get("split"):

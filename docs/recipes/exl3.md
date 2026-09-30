@@ -155,3 +155,11 @@ from one line.
   `plain`.
 - The Hadamard blocks run along K and N, so both must be multiples of 128. A split of K must keep whole tiles
   and whole blocks: `plan` only ever splits 128-aligned k ranges.
+
+### Consolidated Flash Next n-grams
+
+Flash Next EXL3 packs may store `ngram_embedding.trellis` as one int16 `[rows, words]` tensor instead of
+`ngram_embedding.shard_N.trellis`. Both layouts use the same scale-plus-160-values row codec. CUDA maps either
+layout read-only and gathers only requested rows; the consolidated layout does not require re-sharding or
+requantization. Admission treats the packed table as reclaimable mapped pages, while head metadata remains
+resident. Mapped pages still consume physical RAM when touched; keep the normal cache/workspace reserve.
