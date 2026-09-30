@@ -49,10 +49,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     generation.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=True,
                             help="open a think block when the chat template supports it")
     generation.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh"), default=None,
-                            help="for chat templates that take one (Qwen3.8, GLM-5.3); default: the template's own "
-                                 "(Qwen3.8's is xhigh), as vLLM and mlx-lm render it; medium adds no system-prompt "
-                                 "text on Qwen3.8, and a level the template does not name lands on the nearest one "
-                                 "it does")
+                            help="default effort when a request omits one. An unnamed level maps to the nearest "
+                                 "level the template names, and a tie takes the higher one. This flag uses that "
+                                 "rule. xhigh stays xhigh, so GLM-5.3 renders it as Max")
     generation.add_argument("--thinking-budget", type=int, default=0,
                             help="most thinking tokens before the server closes the think block (0: no limit)")
 

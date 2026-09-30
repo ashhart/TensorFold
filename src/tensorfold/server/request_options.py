@@ -45,13 +45,8 @@ _EFFORT_ORDER = ("xhigh", "high", "medium", "low", "minimal")   # highest first
 
 
 def nearest_named_effort(effort: str, levels: frozenset[str]) -> str:
-    """The named level nearest effort, the higher one when two are as near; effort itself when the
-    template names no level, or when effort is not on the five-level ladder (none is not a level).
-
-    A template that names none of the five keeps the effort as sent: its else-branch is the
-    template's own default. GLM-5.3 names low and high but no medium, whose requests used to
-    fall out of the template's else-branch as Max -- its own ceiling, not the level asked for.
-    """
+    """The nearest named level, ties going higher; effort itself when none is named or it is off the ladder."""
+    # GLM-5.3 names low and high but no medium, so its template used to render medium as Max, its ceiling
 
     if not levels or effort not in _EFFORT_ORDER:
         return effort
@@ -66,17 +61,19 @@ def effort_levels(template: str | None) -> frozenset[str]:
 
 
 def coerce_effort(effort: str | None, levels: frozenset[str] = frozenset()) -> str | None:
-    """The name the template hears. None stays None, so an omitted effort keeps the template's own default."""
+    """The nearest level the template names, ties going higher. None stays None, and xhigh stays xhigh."""
 
     if effort is None:
         return None
-    # a medium the template does not name lands on the nearest named level, the higher when two are as near
-    if effort == "medium" and effort not in levels:
-        return nearest_named_effort(effort, levels)
-    # OpenAI's "high" and "minimal" are "xhigh" and "low" unless the template names them (GLM-5.3 names "high")
-    if effort in levels or effort not in ("high", "minimal"):
+    if not levels:
+        if effort == "high":
+            return "xhigh"
+        if effort == "minimal":
+            return "low"
         return effort
-    return "xhigh" if effort == "high" else "low"
+    if effort in levels or effort in ("xhigh", "none"):
+        return effort
+    return nearest_named_effort(effort, levels)
 
 
 def heard_effort(explicit: str | None, default: str | None, levels: frozenset[str]) -> str | None:

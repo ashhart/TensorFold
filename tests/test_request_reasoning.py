@@ -258,18 +258,50 @@ def test_medium_reaches_the_template_through_chat_template_kwargs_too():
         app.close()
 
 
-def test_the_server_default_effort_reaches_the_template_as_started():
-    """The boot default passes through as the template renders it (pinned: NOT normalized)."""
+def test_the_server_default_effort_uses_the_nearest_named_level():
+    """``--reasoning-effort`` goes through the same nearest-level rule as a request."""
 
-    app = make_app(enable_thinking=True, reasoning_effort="medium")
-    app.tokenizer.chat_template = "{# \x27low\x27 \x27high\x27 #}"       # GLM-5.3 names no medium
+    glm = make_app(enable_thinking=True, reasoning_effort="medium")
+    glm.tokenizer.chat_template = "{# 'low' 'high' #}"
+    qwen = make_app(enable_thinking=True, reasoning_effort="high")
+    qwen.tokenizer.chat_template = "{# 'xhigh' 'medium' 'low' #}"
     try:
-        app.tokenizer.template_calls.clear()
-        app.chat([{"role": "user", "content": "hi"}], max_tokens=2)
-        assert app.tokenizer.template_calls and all(
-            c["reasoning_effort"] == "medium" for c in app.tokenizer.template_calls)
+        glm.tokenizer.template_calls.clear()
+        glm.chat([{"role": "user", "content": "hi"}], max_tokens=2)
+        assert all(c["reasoning_effort"] == "high" for c in glm.tokenizer.template_calls)
+        qwen.tokenizer.template_calls.clear()
+        qwen.chat([{"role": "user", "content": "hi"}], max_tokens=2)
+        assert all(c["reasoning_effort"] == "xhigh" for c in qwen.tokenizer.template_calls)
     finally:
-        app.close()
+        glm.close()
+        qwen.close()
+
+
+def test_glm_and_qwen_templates_hear_the_nearest_named_level():
+    """GLM-5.3's effort line and Qwen3.8's effort line, the text in those checkpoints."""
+
+    jinja2 = pytest.importorskip("jinja2")
+    from tensorfold.server.request_options import coerce_effort, effort_levels, heard_effort
+
+    glm = ("{%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined "
+           "and reasoning_effort in ['low', 'high'] else 'max' -%}{{ effective_reasoning_effort }}")
+    qwen = ("{%- set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}"
+            "{%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}"
+            "{{- raise_exception('Unexpected reasoning effort') }}{%- endif -%}{{ resolved_reasoning_effort }}")
+    glm_levels, qwen_levels = effort_levels(glm), effort_levels(qwen)
+    assert glm_levels == frozenset({"low", "high"})
+    assert qwen_levels == frozenset({"low", "medium", "xhigh"})
+    glm_template = jinja2.Environment().from_string(glm)
+    qwen_template = jinja2.Environment().from_string(qwen)
+    assert glm_template.render(reasoning_effort=coerce_effort("medium", glm_levels)) == "high"
+    assert glm_template.render(reasoning_effort=coerce_effort("minimal", glm_levels)) == "low"
+    assert glm_template.render(reasoning_effort=coerce_effort("xhigh", glm_levels)) == "max"
+    assert qwen_template.render(reasoning_effort=coerce_effort("high", qwen_levels)) == "xhigh"
+    assert qwen_template.render(reasoning_effort=coerce_effort("minimal", qwen_levels)) == "low"
+    assert qwen_template.render(reasoning_effort=coerce_effort("medium", qwen_levels)) == "medium"
+    assert heard_effort(None, "medium", glm_levels) == "high"
+    assert heard_effort(None, "high", qwen_levels) == "xhigh"
+    assert heard_effort(None, "medium", qwen_levels) == "medium"
 
 
 def test_nearest_named_effort_direct():
