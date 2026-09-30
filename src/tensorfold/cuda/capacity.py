@@ -196,8 +196,7 @@ def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
 
     fitting, keeps, resident = fit(budget), None, 0
     if weights.mapped and room is not None:
-        # windows up to ``resident`` leave the mapped tables their pages (page cache, like the reserve); past it they
-        # page; a default window stays within it when it can, an explicit one is only told
+        # windows up to ``resident`` keep mapped tables in the page cache, like the reserve; past it they page
         resident = fit(min(budget, room - weights.mapped))
         if explicit:
             keeps = 0 < resident >= upper

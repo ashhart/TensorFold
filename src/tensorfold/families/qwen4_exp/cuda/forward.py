@@ -375,8 +375,7 @@ def layer_forward(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R:
 
 def finish(w: Weights, mixer: HC, b: Buffers, R: int, pending, logits: bool = True,
            ends: Sequence[int] = ()) -> torch.Tensor | None:
-    """The last write-back (b.streams: the residual streams before the final mixer), the mixer and the head; a prompt
-    pass mixes and heads only ``ends`` (each ending prompt's last row, default the pass's last) into rows 0 ..."""
+    """The last write-back, mixer and head; a prompt pass heads only its ``ends`` rows."""
 
     c = w.cfg
     b.streams[:R].copy_(b.h[:R])

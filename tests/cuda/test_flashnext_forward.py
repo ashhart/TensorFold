@@ -439,6 +439,8 @@ def test_prefix_reuse_and_the_serial_switch(tmp_path, sampling):
         assert again_stats["cached"] == len(prompt) - 1
         same, same_stats = ask(prompt + [9])                     # the same prompt again: all but its last token kept
         assert same == again and same_stats["cached"] == len(prompt), (extend, same_stats)
+        third, third_stats = ask(prompt + [9])                   # and a third time: every resend hits
+        assert third == again and third_stats["cached"] == len(prompt), (extend, third_stats)
         ask([1500, 9, 10])                                       # an unrelated prompt: nothing to resume from
         cold, cold_stats = ask(prompt)
         assert cold_stats["cached"] == 0 and cold == warm, extend

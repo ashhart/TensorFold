@@ -14,10 +14,7 @@ import numpy as np
 from tensorfold.families.qwen4_exp.ssd_table import SSDTable
 
 _PARTS = ("weight", "scales", "biases")
-# A prompt chunk's gather (2 GATHER_SPLIT rows or more) copies them on up to GATHER_THREADS threads, GATHER_SPLIT
-# rows or more each: numpy's fancy indexing releases the GIL, so rows whose pages are not in the page cache are read
-# from disk in parallel instead of one page fault at a time. The bytes are the same; a decode step's few rows (and
-# GATHER_THREADS 1) keep the single-threaded copy.
+# a prompt chunk's gather copies big row runs on worker threads (GIL released); bytes stay the same as single-threaded
 GATHER_THREADS = 16
 GATHER_SPLIT = 512
 

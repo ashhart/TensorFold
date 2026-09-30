@@ -270,10 +270,7 @@ def _gdn_dims(t: dict, world: int) -> tuple:
 
 
 def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int | None = None) -> Geometry:
-    """The 27B's concurrent decoder: each live stream, ``keep`` cached prompt ends and rows for every window.
-
-    ``first``: caches grow with their streams (one GPU), so the window is what one stream reaches beside the others'
-    ``first`` rows; else every stream and cached end holds the window."""
+    """The 27B's concurrent decoder: live streams, ``keep`` kept prompt ends, windows; ``first``: growth on one GPU."""
 
     linear, attention = layer_counts(t)
     d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, world)
@@ -296,9 +293,7 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int 
 
 def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool, kv_bits: int = 16,
                             first: int = 256) -> Geometry:
-    """Flash Next's concurrent decoder on one GPU: ``streams`` slots of ``each``-row windows and kept snapshots.
-
-    Slots grow with their streams, so the window is what one stream reaches beside the others' ``first`` rows."""
+    """Flash Next's concurrent decoder on one GPU: per-row windows and kept snapshots sized to share one GPU."""
 
     linear, attention = layer_counts(t)
     d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, 1)

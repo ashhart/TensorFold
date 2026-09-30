@@ -185,9 +185,7 @@ class Qwen27Engine:
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
-        """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``:
-        past end tokens (``ignore_eos``); ``background``: under ``--parallel``, after the other requests and yielding a
-        lane to one that waits."""
+        """``draft=False``: serial re-runs, no drafts; ``background``: last under ``--parallel``, yielding lanes."""
 
         from .decode import draft_decode, prefill
 

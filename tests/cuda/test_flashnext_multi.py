@@ -103,6 +103,8 @@ def test_prompts_that_extend_a_finished_stream_resume_from_its_slot(sampling, kv
     assert warm.cached == len(PROMPTS[1]) - 1 and warm.out == fresh(longer, 10)   # kept one token early
     same = run(longer, 10)                                    # the same prompt again: all but its last token kept
     assert same.cached == len(longer) - 1 and same.out == warm.out
+    again = run(longer, 10)                                   # and a third time: every resend hits, not every other
+    assert again.cached == len(longer) - 1 and again.out == warm.out
     ext = PROMPTS[0] + [7, 8]                                 # a prompt kept at admission, extended
     run(PROMPTS[0], 6)
     other = run(ext, 8)

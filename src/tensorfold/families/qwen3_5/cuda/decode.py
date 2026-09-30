@@ -165,8 +165,7 @@ def copy_chain(context: Sequence[int], max_nodes: int = 127,
 
 
 def next_copy_rows(rows: int, landed_whole: bool, tree_rows: int, max_rows: int) -> int:
-    """A copy's next window: twice as wide after a copy landed whole, half as wide after one broke, never below the
-    first width."""
+    """A copy's next window: twice as wide after a whole copy, half after a broken one."""
 
     first = min(max_rows, max(tree_rows, 16))       # room for a backed copy (8 matching tokens) from the start
     return min(max_rows, max(rows, first) * 2) if landed_whole else max(first, min(rows, max_rows) // 2)
@@ -203,8 +202,7 @@ def draft_decode(w: Weights, st: State, prompt: Sequence[int], pending: int,
                  allow_copy: bool = True, stop_eos: bool = True,
                  on_tokens: Callable[[list[int]], bool | None] | None = None,
                  trace: list | None = None, inplace: bool = False, constraint=None) -> DecodeResult:
-    """Verify trees and replay matching paths (host-only traces leave tokens unchanged); ``inplace``: commit into ``st`` itself, which nothing else holds.
-    Trees use ``tree_rows``; a copy's window starts there and doubles while copies land whole, up to ``max_rows``."""
+    """Verify trees and replay matching paths; copies grow from ``tree_rows``, doubling while they land whole."""
 
     if count < 1 or not 1 <= max_rows <= 128:
         raise ValueError("count >= 1 and 1 <= max_rows <= 128 required")

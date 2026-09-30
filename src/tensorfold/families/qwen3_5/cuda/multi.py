@@ -196,8 +196,7 @@ class MultiDecoder:
         return True
 
     def _make_room(self, live: list[Stream]) -> list[Stream]:
-        """Before a round (one GPU): each stream's caches hold its next window, oldest first; once one can't grow,
-        newer streams run only if they needn't; if even the oldest can't, the newest ends. Returns those it ended."""
+        """Before a round: grow window caches oldest-first; no-growth streams run; the newest may end."""
 
         live = sorted(live, key=lambda x: x.sid)
         blocked = False
@@ -226,8 +225,7 @@ class MultiDecoder:
         return []
 
     def _fill(self) -> list[Stream]:
-        """One prefill step for the oldest queued prompt (foreground first): to its next kept state, or STEP rows
-        while others decode."""
+        """Prefill the oldest queued prompt a step: to its next kept state, or STEP rows while others decode."""
 
         s = next_fill(self.filling)
         pos, n = s.st.pos, len(s.prompt)
