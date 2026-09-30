@@ -28,6 +28,26 @@ def git_head(path: Path) -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(path)).decode().strip()
 
 
+def git_is_ancestor(path: Path, rev: str) -> bool:
+    """True if rev is a valid ancestor of the current HEAD at path (exit 0)."""
+    proc = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", rev, "HEAD"],
+        cwd=str(path),
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
+def git_rev_has_file(path: Path, rev: str, filepath: str) -> bool:
+    """True if filepath exists in commit rev at path."""
+    proc = subprocess.run(
+        ["git", "rev-parse", f"{rev}:{filepath}"],
+        cwd=str(path),
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
 def load_manifest() -> dict:
     with MANIFEST.open() as fh:
         return json.load(fh)
@@ -46,9 +66,19 @@ def test_manifest_exists_and_valid_json():
     assert data["manifest_id"].startswith("deepseek-v4-t01")
 
 
-def test_tensorfold_local_head_pinned(manifest):
+def test_tensorfold_local_audited_revision_is_historical_ancestor(manifest):
+    """The recorded revision must be a historical ancestor of the evolving
+    checkout that still contains every audited module, not required to equal
+    the moving HEAD. Repinning provenance to HEAD on every commit would erase
+    what was actually audited at record time."""
     src = manifest["sources"]["tensorfold_local"]
-    assert git_head(ROOT) == src["revision"]
+    assert git_is_ancestor(ROOT, src["revision"]), (
+        f"{src['revision']} is not an ancestor of HEAD at {ROOT}"
+    )
+    for module in src["modules"]:
+        assert git_rev_has_file(ROOT, src["revision"], module), (
+            f"audited module {module} missing at recorded revision {src['revision']}"
+        )
     assert src["license"] == "MIT"
 
 

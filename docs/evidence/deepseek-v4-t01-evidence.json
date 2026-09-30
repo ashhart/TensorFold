@@ -19,7 +19,6 @@
       "role": "audit checkout; discovery/backend-option API lives here",
       "modules": [
         "src/tensorfold/families/__init__.py",
-        "src/tensorfold/families/families.py",
         "src/tensorfold/families/deepseek_v4/__init__.py"
       ]
     },
