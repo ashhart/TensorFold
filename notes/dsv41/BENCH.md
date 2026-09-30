@@ -119,3 +119,19 @@ vLLM decode at 40K context (prefix-cached prompt): ~19 tok/s with DSpark (1.68 a
 Long parity unchanged (8K: NLL 1.676 vs 1.675; 24K: 1.631 vs 1.630), prefill 450–490 tok/s on real prompts.
 Remaining: the expert prompt kernel is 807 ms/chunk (~3× its weight-read floor): activations re-read per N block
 and in-register decode; needs activations staged in shared memory / wider N tiles. vLLM prefills ~1,000 tok/s.
+
+## 2026-09-30 — prompt expert kernel v2 + 2,048-row chunks (`--profile-prefill 2048`)
+
+Kernel (layer 3, one rank's expert halves, 2,048 rows, `experts_prompt.cu`): upstream decode-kernel path n/a at this
+size (grouping smem cap); v1 50.9 ms/layer; v2 (activations staged in shared memory per K slice, warps own N blocks)
+45.4; **v2 + 2 member tiles a decode + 8 warps: 32.9 ms** (weight-read floor ≈ 12.6 ms).
+
+| step (2,048-row chunk) | tok/s |
+|---|---:|
+| 1,024-row chunks, v1 kernel (before) | 486 |
+| 2,048-row chunks, v2, torch-built member tables | 547 |
+| + 2 member tiles, 8 warps, 3-deep weight prefetch | 588 |
+| + prompt chunks compute only the last row's logits (no 2,048 × 129,280 gather) | **622** |
+
+Parity unchanged (8K NLL 1.675 vs 1.675; 24K 1.631 vs 1.630). Remaining per chunk: experts 1.04 s, attention
+0.36 s (per-row key loads), dense GEMMs 0.25 s, NCCL 0.19 s, expert epilogues 0.19 s, host ~0.4 s.

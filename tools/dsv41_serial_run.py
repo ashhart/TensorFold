@@ -83,12 +83,12 @@ def main() -> None:
         n = args.profile_prefill
         with torch.no_grad():
             eng.reset()
-            eng.forward(doc[:n])                                   # warm: kernels, Engram pages
-            eng.forward(doc[n:2 * n])
+            eng.forward(doc[:n], last_only=True)                   # warm: kernels, Engram pages
+            eng.forward(doc[n:2 * n], last_only=True)
             torch.cuda.synchronize()
             with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
                 t = time.perf_counter()
-                eng.forward(doc[2 * n:3 * n])
+                eng.forward(doc[2 * n:3 * n], last_only=True)
                 torch.cuda.synchronize()
                 wall = time.perf_counter() - t
         if args.rank == 0:

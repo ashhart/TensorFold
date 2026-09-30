@@ -55,7 +55,7 @@ def _ref_attention(q, comp, idx, ring, pos, sink, W):
 def test_mqa_matches_the_masked_softmax(with_comp, positions):
     g = torch.Generator(device="cuda").manual_seed(len(positions))
     W, H, n_sel = 128, 32, 512
-    ring = torch.randn((2048, 512), generator=g, device="cuda").to(torch.bfloat16)
+    ring = torch.randn((4096, 512), generator=g, device="cuda").to(torch.bfloat16)
     comp = torch.randn((1025, 512), generator=g, device="cuda").to(torch.bfloat16)
     pos = torch.tensor(positions, device="cuda")
     idx = None

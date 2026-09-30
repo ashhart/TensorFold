@@ -93,8 +93,10 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [ ] CUDA graphs per window width; eager == graph checks
 - [x] Prefill 330 → 486 tok/s: 1,024-row chunks, EXL3 prompt GEMM for dense linears, prompt grouped expert kernel
       (`cuda/experts_prompt.cu`), bf16 prompt partials
-- [ ] Prefill to ~1,000 tok/s: expert prompt kernel redesign (smem-staged activations, wider N tiles); attention
-      over query blocks; grouping kernel (1.3 ms/layer)
+- [x] Expert prompt kernel v2 (smem-staged activations, 2 member tiles/decode, 8 warps), 2,048-row chunks,
+      last-row-only prompt logits: prefill **622 tok/s**
+- [ ] Prefill to ~1,000: attention over query blocks (0.36 s/chunk), NCCL overlap, Engram prefetch for prompts,
+      expert kernel toward its 12.6 ms/layer floor (now 26 ms)
 - [ ] Long prompts to 600k (cap/memory: comp caches bf16 ~1.5 KB/token)
 - [ ] KV format ≤ ~3.4 KiB/token; carveout-backed pools
 - [ ] `--parallel N` shared rounds (optional; vLLM wins at width today)

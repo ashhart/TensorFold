@@ -25,8 +25,8 @@ from . import kernels as K
 from .weights import HCW, LayerW, Weights
 
 BF, F32 = torch.bfloat16, torch.float32
-MAX_ROWS = 1024              # rows of one call (prompt chunks); every expert's weights are read once a chunk
-RING = 2048                  # window and compressor-raw rings: a 1024-row chunk plus the 127-token window
+MAX_ROWS = 2048              # rows of one call (prompt chunks); every expert's weights are read once a chunk
+RING = 4096                  # window and compressor-raw rings: a 2048-row chunk plus the 127-token window
 
 
 class Comm:
@@ -81,8 +81,38 @@ class Caches:
     ids: list[int] = field(default_factory=list)
 
 
+PROMPT_V2 = True             # smem-staged activations, K sliced (experts_prompt.cu grouped_prompt2_kernel)
+PROMPT_KC = [80, 72]         # k tiles a slice for gate/up (K 5120) and down (K 1152)
+PROMPT_WARPS = 8
+PROMPT_MTP = [2, 2]          # 16-row member tiles sharing one weight decode
+_Z2 = None
 PROMPT_CFG = [1, 1]          # prompt expert kernel config for gate/up and down (experts_prompt.cu)
 PROMPT_ROWS = 16             # above this, expert calls size their member table to the busiest expert (host sync)
+
+
+def group_members(pick: torch.Tensor, E: int, s) -> tuple[torch.Tensor, torch.Tensor]:
+    """The grouping kernel's tables built with torch (prompt chunks; its shared memory caps R * slots): expert ids
+    ascending in ``ids`` (count in ``s.count``), each expert's members (row * 32 + slot, pick order) padded with -1."""
+
+    slots = pick.shape[1]
+    flat = pick.reshape(-1).long()
+    counts = torch.bincount(flat, minlength=E)
+    busiest = int(counts.max())
+    used = torch.nonzero(counts).flatten()
+    nu = used.numel()
+    ids = s.ids[:nu]
+    ids.copy_(used.int())
+    s.count.fill_(nu)
+    order = torch.sort(flat, stable=True).indices                 # entries grouped by expert, pick order within
+    experts = flat[order]
+    start = torch.cumsum(counts, 0) - counts
+    rank = torch.arange(flat.numel(), device=pick.device) - start[experts]
+    slot_of = torch.full((E,), -1, dtype=torch.long, device=pick.device)
+    slot_of[used] = torch.arange(nu, device=pick.device)
+    members = s.members_buf[:nu * busiest].view(nu, busiest)
+    members.fill_(-1)
+    members[slot_of[experts], rank] = ((order // slots) * 32 + order % slots).int()
+    return ids, members
 
 
 def routed_prompt(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ex, s, R: int, limit: float) -> torch.Tensor:
@@ -93,20 +123,32 @@ def routed_prompt(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ex, s,
     D, I, E = ex.dims, ex.width, ex.count
     slots = s.slots
     P = R * slots
-    busiest = int(torch.bincount(pick.flatten().long(), minlength=E).max())
-    maxu = min(P, E)
-    ids = s.ids[:maxu]
-    members = s.members_buf[:maxu * busiest].view(maxu, busiest)
-    ext.group(pick, ids, s.count, members, R, slots, E)
+    ids, members = group_members(pick, E, s)
     ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots, E)
     from .experts_prompt import ext as prompt_ext
 
-    pe = prompt_ext()                                  # one K split: the epilogues read SK = 1
-    pe.grouped_prompt(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, s.z, 2, D, I,
+    pe = prompt_ext()
+    if PROMPT_V2:
+        global _Z2
+        need = max(2 * (D // 16 // PROMPT_KC[0]) * I, (I // 16 // PROMPT_KC[1]) * D) * P
+        if _Z2 is None or _Z2.numel() < need:
+            _Z2 = torch.empty((need,), dtype=torch.float32, device=x.device)
+        z = _Z2
+        sk = pe.grouped_prompt2(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, z, 2,
+                                D, I, P, slots, ex.cb, PROMPT_KC[0], PROMPT_MTP[0], PROMPT_WARPS)
+        ext.gateup_epilogue(z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, I, sk, slots, E, float(limit),
+                            ex3.ACT_F32)
+        sk = pe.grouped_prompt2(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, z,
+                                1, I, D, P, slots, ex.cb, PROMPT_KC[1], PROMPT_MTP[1], PROMPT_WARPS)
+        out = torch.empty((R, D), dtype=torch.float32, device=x.device)
+        ext.down_combine(z, pick, ex.svh_d, s.y, wts, out, R, P, D, sk, slots, E)
+        return out
+    z = s.z                                            # v1: one K split, the epilogues read SK = 1
+    pe.grouped_prompt(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, z, 2, D, I,
                       P, slots, ex.cb, PROMPT_CFG[0])
-    ext.gateup_epilogue(s.z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, I, 1, slots, E, float(limit),
+    ext.gateup_epilogue(z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, I, 1, slots, E, float(limit),
                         ex3.ACT_F32)
-    pe.grouped_prompt(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, s.z, 1, I,
+    pe.grouped_prompt(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, z, 1, I,
                       D, P, slots, ex.cb, PROMPT_CFG[1])
     out = torch.empty((R, D), dtype=torch.float32, device=x.device)
     ext.down_combine(s.z, pick, ex.svh_d, s.y, wts, out, R, P, D, 1, slots, E)
@@ -182,8 +224,9 @@ class SerialEngine:
         )
 
     # -- one forward over new rows ------------------------------------------------------------------------
-    def forward(self, tokens: list[int]) -> torch.Tensor:
-        """Logits fp32 [R, vocab] of the new rows; positions continue the committed ones."""
+    def forward(self, tokens: list[int], last_only: bool = False) -> torch.Tensor:
+        """Logits fp32 [R, vocab] of the new rows (``last_only``: only the last row's, [1, vocab] — what a prompt
+        chunk needs); positions continue the committed ones."""
 
         st = self.state
         R = len(tokens)
@@ -197,7 +240,7 @@ class SerialEngine:
             return self.graphs[R]["logits"]
         rows = self.engram_rows(tokens)
         return self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
-                         static=False)
+                         static=False, last_only=last_only)
 
     def engram_rows(self, tokens: list[int]) -> torch.Tensor:
         """Commit the tokens and read their Engram rows: fp32 [layers, R, 24, 256] on the device."""
@@ -213,11 +256,12 @@ class SerialEngine:
         hd = c.engram_head_dim
         return E.dequant(raw[..., :hd], raw[..., hd:])
 
-    def core(self, ids: torch.Tensor, pos: torch.Tensor, rows: torch.Tensor, *, static: bool) -> torch.Tensor:
+    def core(self, ids: torch.Tensor, pos: torch.Tensor, rows: torch.Tensor, *, static: bool,
+             last_only: bool = False) -> torch.Tensor:
         """The device-only forward over all layers (eager prompt chunks)."""
 
         carry = self.part_a(ids, pos, rows[0], static=static)
-        return self.part_b(carry, pos, rows[1], static=static)
+        return self.part_b(carry, pos, rows[1], static=static, last_only=last_only)
 
     def part_a(self, ids: torch.Tensor, pos: torch.Tensor, rows1: torch.Tensor, *, static: bool) -> tuple:
         """Embedding and the layers before the second Engram layer."""
@@ -238,7 +282,8 @@ class SerialEngine:
         c = self.c
         return self.layers(carry, pos, {c.engram_layer_ids[0]: rows1}, c.engram_layer_ids[0], self.split, static)
 
-    def part_b(self, carry: tuple, pos: torch.Tensor, rows14: torch.Tensor, *, static: bool) -> torch.Tensor:
+    def part_b(self, carry: tuple, pos: torch.Tensor, rows14: torch.Tensor, *, static: bool,
+               last_only: bool = False) -> torch.Tensor:
         """The remaining layers and the vocabulary head."""
 
         c = self.c
@@ -248,6 +293,8 @@ class SerialEngine:
         X = hcf.post(f, X, post, comb)
         if self.drafter is not None:
             self.drafter.context(self.taps, pos)
+        if last_only:
+            X, pre = X[-1:].contiguous(), pre[-1:].contiguous()
         h = (pre[:, :, None] * X.float()).sum(1).to(BF)
         h = K.rmsnorm(h, self.w.norm, c.rms_norm_eps)
         return self.comm.gather_last(self.w.head(h, out_dtype=F32))
@@ -529,7 +576,7 @@ class SerialEngine:
         t0 = time.perf_counter()
         logits = None
         for i in range(0, len(prompt), chunk):
-            logits = self.forward(prompt[i:i + chunk])
+            logits = self.forward(prompt[i:i + chunk], last_only=True)
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         out = []

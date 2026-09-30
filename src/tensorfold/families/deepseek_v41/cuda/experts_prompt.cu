@@ -130,6 +130,137 @@ __global__ void __launch_bounds__(W * 32) grouped_prompt_kernel(
     }
 }
 
+
+// v2: a program owns (expert, 16-member group, K slice of KC k tiles, matrix). The members' activations for the slice
+// are staged in shared memory once; each warp then walks its own N blocks (NT tiles of 16 columns) over the slice,
+// decoding each weight tile straight into MMA fragments. Slices write Z partials [mat, split, P, N] (epilogues sum).
+template <int CB, int K2, int NT, int MTP>
+__device__ __forceinline__ void warp_nblock(const uint32_t* __restrict__ T, int NTILES, int kt0, int nkt, int nt0,
+                                            const half* xs, int xs_stride, int lane, float (&acc)[MTP][NT][2][4]) {
+    constexpr int TW = Fmt<K2>::TW, LW = Fmt<K2>::LW;
+    const LaneMap<K2> map(lane);
+    const int g = lane >> 2, t = lane & 3;
+    const size_t kstride = (size_t)NTILES * TW;
+    const uint32_t* tp = T + ((size_t)kt0 * NTILES + nt0) * TW + lane;
+    uint32_t cur[NT][LW], nxt[NT][LW], nx2[NT][LW];
+#pragma unroll
+    for (int i = 0; i < NT; ++i) load_words<K2>(cur[i], tp + i * TW, lane);
+    if (nkt > 1)
+#pragma unroll
+        for (int i = 0; i < NT; ++i) load_words<K2>(nxt[i], tp + kstride + i * TW, lane);
+    for (int it = 0; it < nkt; ++it) {
+        if (it + 2 < nkt)
+#pragma unroll
+            for (int i = 0; i < NT; ++i) load_words<K2>(nx2[i], tp + (size_t)(it + 2) * kstride + i * TW, lane);
+        uint32_t a[MTP][4];
+#pragma unroll
+        for (int m = 0; m < MTP; ++m) {
+            const half* xk = xs + (m * 16) * xs_stride + it * 16 + 2 * t;
+            a[m][0] = *reinterpret_cast<const uint32_t*>(xk + g * xs_stride);
+            a[m][1] = *reinterpret_cast<const uint32_t*>(xk + (g + 8) * xs_stride);
+            a[m][2] = *reinterpret_cast<const uint32_t*>(xk + g * xs_stride + 8);
+            a[m][3] = *reinterpret_cast<const uint32_t*>(xk + (g + 8) * xs_stride + 8);
+        }
+#pragma unroll
+        for (int i = 0; i < NT; ++i) {
+            uint32_t b0[2], b1[2];
+            decode_tile<CB, K2>(cur[i], map, lane, b0, b1);
+#pragma unroll
+            for (int m = 0; m < MTP; ++m) {
+                mma16816(acc[m][i][0], a[m], b0);
+                mma16816(acc[m][i][1], a[m], b1);
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < NT; ++i)
+#pragma unroll
+            for (int l = 0; l < LW; ++l) {
+                cur[i][l] = nxt[i][l];
+                nxt[i][l] = nx2[i][l];
+            }
+    }
+}
+
+template <int CB, int NT, int W, int MTP>
+__global__ void __launch_bounds__(W * 32) grouped_prompt2_kernel(
+    const half* __restrict__ X0, const half* __restrict__ X1, const int64_t* __restrict__ TP0,
+    const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
+    const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
+    float* __restrict__ Z, int K, int N, int P, int maxm, int slots, int KC, int SK) {
+    extern __shared__ __align__(16) half xs[];            // [16 * MTP][KC * 16 + 8]
+    const int u = blockIdx.x;
+    if (u >= ucount[0]) return;
+    const int split = blockIdx.y;
+    const int MG = (maxm + 16 * MTP - 1) / (16 * MTP);
+    const int mgroup = blockIdx.z % MG;
+    const int mat = blockIdx.z / MG;
+    const half* X = mat ? X1 : X0;
+    const int e = uids[u];
+    const uint32_t* T = reinterpret_cast<const uint32_t*>(mat ? TP1[e] : TP0[e]);
+    const int k2 = mat ? K2_1[e] : K2_0[e];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int g = lane >> 2, t = lane & 3;
+    const int NTILES = N >> 4;
+    const int stride = KC * 16 + 8;                        // halves; +8 staggers rows across banks
+
+    __shared__ int rows_sh[16 * MTP];
+    for (int i = threadIdx.x; i < 16 * MTP; i += W * 32) {
+        const int m = mgroup * 16 * MTP + i;
+        const int code = m < maxm ? members[u * maxm + m] : -1;
+        rows_sh[i] = code >= 0 ? (code >> 5) * slots + (code & 31) : -1;
+    }
+    __syncthreads();
+    if (rows_sh[0] < 0) return;                            // members come first, so this group is empty
+    const int k0 = split * KC * 16;
+    // stage the 16 members' K slice: 16-byte vectors, zeros for absent members
+    const int vecs = KC * 2;                               // 8 halves a vector, 16 halves a k tile
+    for (int idx = threadIdx.x; idx < 16 * MTP * vecs; idx += W * 32) {
+        const int row = idx / vecs, v = idx % vecs;
+        const int r = rows_sh[row];
+        uint4 val = make_uint4(0u, 0u, 0u, 0u);
+        if (r >= 0) val = *reinterpret_cast<const uint4*>(X + (size_t)r * K + k0 + v * 8);
+        *reinterpret_cast<uint4*>(xs + row * stride + v * 8) = val;
+    }
+    __syncthreads();
+    const int nblocks = N / (16 * NT);
+    for (int nb = warp; nb < nblocks; nb += W) {
+        float acc[MTP][NT][2][4];
+#pragma unroll
+        for (int m = 0; m < MTP; ++m)
+#pragma unroll
+            for (int i = 0; i < NT; ++i)
+#pragma unroll
+                for (int h = 0; h < 2; ++h)
+#pragma unroll
+                    for (int c = 0; c < 4; ++c) acc[m][i][h][c] = 0.f;
+        const int nt0 = nb * NT;
+        switch (k2) {
+            case 4: warp_nblock<CB, 4, NT, MTP>(T, NTILES, split * KC, KC, nt0, xs, stride, lane, acc); break;
+            case 5: warp_nblock<CB, 5, NT, MTP>(T, NTILES, split * KC, KC, nt0, xs, stride, lane, acc); break;
+            case 6: warp_nblock<CB, 6, NT, MTP>(T, NTILES, split * KC, KC, nt0, xs, stride, lane, acc); break;
+            case 8: warp_nblock<CB, 8, NT, MTP>(T, NTILES, split * KC, KC, nt0, xs, stride, lane, acc); break;
+            default: __trap();
+        }
+        float* zbase = Z + ((size_t)mat * SK + split) * P * N;
+#pragma unroll
+        for (int m = 0; m < MTP; ++m) {
+            const int ra = rows_sh[m * 16 + g], rb = rows_sh[m * 16 + g + 8];
+#pragma unroll
+            for (int i = 0; i < NT; ++i)
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int col = (nt0 + i) * 16 + h * 8 + 2 * t;
+                    if (ra >= 0)
+                        *reinterpret_cast<float2*>(zbase + (size_t)ra * N + col) =
+                            make_float2(acc[m][i][h][0], acc[m][i][h][1]);
+                    if (rb >= 0)
+                        *reinterpret_cast<float2*>(zbase + (size_t)rb * N + col) =
+                            make_float2(acc[m][i][h][2], acc[m][i][h][3]);
+                }
+        }
+    }
+}
+
 }  // namespace tf_exl3x
 
 template <int NT, int W, int MTP>
@@ -169,4 +300,38 @@ void grouped_prompt(const at::Tensor& X0, const at::Tensor& X1, const at::Tensor
 #undef TF_CFG
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("grouped_prompt", &grouped_prompt); }
+// v2: K split in slices of KC k tiles staged in shared memory; returns the split count the epilogues must sum.
+int64_t grouped_prompt2(const at::Tensor& X0, const at::Tensor& X1, const at::Tensor& TP0, const at::Tensor& TP1,
+                        const at::Tensor& K2_0, const at::Tensor& K2_1, const at::Tensor& uids,
+                        const at::Tensor& ucount, const at::Tensor& members, at::Tensor& Z, int64_t mats, int64_t K,
+                        int64_t N, int64_t P, int64_t slots, int64_t cb, int64_t KC, int64_t mtp, int64_t warps) {
+    TORCH_CHECK(cb == 2, "prompt expert kernel: mul1 codebook only");
+    TORCH_CHECK(mtp == 1 || mtp == 2, "member tiles a program: 1 or 2");
+    TORCH_CHECK(warps == 4 || warps == 8, "warps a program: 4 or 8");
+    constexpr int NT = 8;
+    const int KT = (int)(K / 16);
+    TORCH_CHECK(KT % KC == 0 && N % (16 * NT) == 0, "prompt expert kernel v2: shape does not tile");
+    const int SK = KT / (int)KC;
+    TORCH_CHECK(Z.numel() >= mats * SK * P * N, "Z too small for the K splits");
+    const int maxm = (int)members.size(1);
+    const int MG = (maxm + 16 * (int)mtp - 1) / (16 * (int)mtp);
+    const size_t smem = (size_t)16 * mtp * (KC * 16 + 8) * sizeof(half);
+    auto kern = warps == 8 ? (mtp == 2 ? tf_exl3x::grouped_prompt2_kernel<2, NT, 8, 2>
+                                       : tf_exl3x::grouped_prompt2_kernel<2, NT, 8, 1>)
+                           : (mtp == 2 ? tf_exl3x::grouped_prompt2_kernel<2, NT, 4, 2>
+                                       : tf_exl3x::grouped_prompt2_kernel<2, NT, 4, 1>);
+    if (smem > 48 * 1024) cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    dim3 grid((unsigned)uids.numel(), (unsigned)SK, (unsigned)(mats * MG));
+    kern<<<grid, (unsigned)(warps * 32), smem, at::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const half*>(X0.data_ptr()), reinterpret_cast<const half*>(X1.data_ptr()),
+        TP0.data_ptr<int64_t>(), TP1.data_ptr<int64_t>(), K2_0.data_ptr<int>(), K2_1.data_ptr<int>(),
+        uids.data_ptr<int>(), ucount.data_ptr<int>(), members.data_ptr<int>(), Z.data_ptr<float>(), (int)K, (int)N,
+        (int)P, maxm, (int)slots, (int)KC, SK);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return SK;
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("grouped_prompt", &grouped_prompt);
+    m.def("grouped_prompt2", &grouped_prompt2);
+}
