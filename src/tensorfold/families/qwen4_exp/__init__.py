@@ -177,4 +177,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                            context_explicit=options.get("context_explicit"), tp=int(tp), rank=int(rank),
                            master=master, port=int(master_port), streams=max(1, int(options.get("parallel") or 1)),
                            ple_on_ssd=ple_on_ssd, kv_dtype=kv_dtype,
-                           share=0.0 if decode_share is None else float(decode_share))
+                           share=0.0 if decode_share is None else float(decode_share),
+                           vision=bool(options.get("vision", False)), vision_urls=bool(options.get("vision_urls", False)))

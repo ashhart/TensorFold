@@ -127,8 +127,9 @@ class QwenImageProcessor:
         if not path.is_dir():
             raise ValueError("Image preprocessing requires a local checkpoint directory")
         config = json.loads((path / "config.json").read_text())
-        if config.get("model_type") != "qwen3_5" or not config.get("vision_config"):
-            raise ValueError("Image preprocessing currently supports Qwen3.5/3.8 dense multimodal checkpoints only")
+        if config.get("model_type") not in ("qwen3_5", "qwen4_exp") or not config.get("vision_config"):
+            raise ValueError("Image preprocessing currently supports Qwen3.5/3.8 dense and Flash Next "
+                             "multimodal checkpoints")
         AutoTokenizer, ImageProcessor = _processor_runtime()
         tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True, trust_remote_code=False)
         processor = ImageProcessor(**_processor_options(path, config["vision_config"]))

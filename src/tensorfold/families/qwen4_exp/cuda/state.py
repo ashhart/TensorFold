@@ -28,6 +28,7 @@ class Buffers:
         dev = w.device
         wide = c.streams * c.hidden
         self.rows, self.prefill = rows, prefill
+        self.rope_rows = None          # an image prompt chunk's [rows, 3] positions, else None
         head_rows = ENDS if prefill else rows
         bf, f32 = torch.bfloat16, torch.float32
         self.ids = torch.zeros((rows,), dtype=torch.int32, device=dev)
@@ -145,6 +146,9 @@ class State:
         self.version = 0                 # counts reallocations: a graph's pointer table refreshes on a change
         self.pos = 0
         self.pos_dev = torch.zeros((1,), dtype=torch.int32, device=dev)
+        # text after an image prompt rotates at its cache position plus this offset (0: no images, the plain path)
+        self.rope_delta = 0
+        self.rope_delta_dev = torch.zeros((1,), dtype=torch.int32, device=dev)
         lin = [l for l in w.layers if l.linear]
         att = [l for l in w.layers if not l.linear]
         self.lin_index = {l.index: i for i, l in enumerate(lin)}
@@ -232,8 +236,13 @@ class State:
         self.ple_history = w.cfg.ngram(0).initial_history() if w.cfg.ple_layers else None
         self.ple_last = None
         self.set_pos(0)
+        self.set_rope_delta(0)
         self.mtp_drafted = 0
         self.set_mtp_len(0)
+
+    def set_rope_delta(self, delta: int) -> None:
+        self.rope_delta = int(delta)
+        self.rope_delta_dev.fill_(int(delta))
 
     def clone(self) -> "State":
         """An independent copy (tests and A/B checks)."""
@@ -280,5 +289,6 @@ class State:
         self.ple_history = None if snap["ple_history"] is None else snap["ple_history"].copy()
         self.ple_last = None
         self.set_pos(snap["pos"])
+        self.set_rope_delta(0)                       # kept prompts are text only
         self.mtp_drafted = 0
         self.set_mtp_len(snap["mtp_len"])

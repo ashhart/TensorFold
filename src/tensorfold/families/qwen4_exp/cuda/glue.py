@@ -271,9 +271,10 @@ def rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float, group: int | None = No
 
 
 @triton.jit
-def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps,
+def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, ROPE, DELTA, eps,
                PW: tl.constexpr, NQ: tl.constexpr, NKV: tl.constexpr, HD: tl.constexpr, NI: tl.constexpr,
-               IHD: tl.constexpr, HALF: tl.constexpr, BITS: tl.constexpr):
+               IHD: tl.constexpr, HALF: tl.constexpr, BITS: tl.constexpr, MODE: tl.constexpr = 0,
+               S1: tl.constexpr = 11, S2: tl.constexpr = 10):
     """Normalize stacked q/k/indexer heads in fp32, round to bf16, apply rotate-half RoPE and round again; store keys, values and raw indexer keys at POS0 + r; BITS 8 or 4 quantize keys and values and rotate q alike (q . Hk = Hq . k)."""
 
     r = tl.program_id(0)
@@ -318,7 +319,16 @@ def _prep_row(P, pos, r, head, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps,
             wp = tl.load(IW + partner, mask=live, other=0.0).to(tl.float32)
         xpn = (xp * rinv * wp).to(tl.bfloat16).to(tl.float32)
         i = tl.where(d < HALF, d, tl.where(d < 2 * HALF, d - HALF, 0))
-        ang = pos.to(tl.float32) * tl.load(INV + i)
+        if MODE == 0:                                # text: the row's cache position
+            ang = pos.to(tl.float32) * tl.load(INV + i)
+        elif MODE == 1:                              # text after images: the position plus the stream's offset
+            ang = (pos + tl.load(DELTA)).to(tl.float32) * tl.load(INV + i)
+        else:                                        # an image prompt's rows: interleaved (t, h, w) positions
+            pt = tl.load(ROPE + r * 3)
+            ph = tl.load(ROPE + r * 3 + 1)
+            pv = tl.load(ROPE + r * 3 + 2)
+            axis = tl.where((i % 3 == 1) & (i < 3 * S1), ph, tl.where((i % 3 == 2) & (i < 3 * S2), pv, pt))
+            ang = axis.to(tl.float32) * tl.load(INV + i)
         cos = tl.cos(ang)
         sin = tl.sin(ang)
         rot = tl.where(d < HALF, xn * cos - xpn * sin, tl.where(d < 2 * HALF, xpn * sin + xn * cos, xn))
@@ -365,17 +375,22 @@ def _prep_row(P, pos, r, head, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps,
 
 def attn_prep(p: torch.Tensor, pos0: torch.Tensor, q_scale, k_scale, i_scale, inv_freq, q, kc, vc, iq, ikc,
               eps: float, *, q_heads: int, kv_heads: int, head_dim: int, index_heads: int, index_dim: int,
-              ks: torch.Tensor | None = None, vs: torch.Tensor | None = None, bits: int = 0) -> None:
-    """Write the rows' queries (rotated when the cache is quantized), keys and values; ``bits`` 0 (bf16), 8 or 4 with scales ``ks``/``vs``."""
+              ks: torch.Tensor | None = None, vs: torch.Tensor | None = None, bits: int = 0,
+              rope: torch.Tensor | None = None, delta: torch.Tensor | None = None,
+              sections: tuple[int, int, int] = (11, 11, 10)) -> None:
+    """Write the rows' queries (rotated when the cache is quantized), keys and values; ``bits`` 0 (bf16), 8 or 4 with scales ``ks``/``vs``. Rotary positions: the cache position; plus ``delta`` [1] (text after images); or ``rope`` [rows, 3] (an image prompt's interleaved t/h/w positions, ``sections`` as the checkpoint's mrope_section)."""
 
     rows, pw = p.shape
     if bits and (ks is None or vs is None):
         raise ValueError("a quantized KV cache needs its scale tensors")
     if ks is None:
         ks = vs = kc
+    mode = 2 if rope is not None else 1 if delta is not None else 0
     _attn_prep[(rows, q_heads + kv_heads + index_heads + 1)](
-        p, pos0, q_scale, k_scale, i_scale, inv_freq, q, kc, vc, ks, vs, iq, ikc, eps, PW=pw, NQ=q_heads, NKV=kv_heads,
-        HD=head_dim, NI=index_heads, IHD=index_dim, HALF=inv_freq.numel(), BITS=bits, num_warps=2)
+        p, pos0, q_scale, k_scale, i_scale, inv_freq, q, kc, vc, ks, vs, iq, ikc,
+        rope if rope is not None else pos0, delta if delta is not None else pos0, eps, PW=pw, NQ=q_heads,
+        NKV=kv_heads, HD=head_dim, NI=index_heads, IHD=index_dim, HALF=inv_freq.numel(), BITS=bits, MODE=mode,
+        S1=sections[1], S2=sections[2], num_warps=2)
 
 
 @triton.jit
