@@ -45,14 +45,15 @@ _EFFORT_ORDER = ("xhigh", "high", "medium", "low", "minimal")   # highest first
 
 
 def nearest_named_effort(effort: str, levels: frozenset[str]) -> str:
-    """The named level nearest effort, the higher one when two are as near; effort itself when none.
+    """The named level nearest effort, the higher one when two are as near; effort itself when the
+    template names no level, or when effort is not on the five-level ladder (none is not a level).
 
     A template that names none of the five keeps the effort as sent: its else-branch is the
     template's own default. GLM-5.3 names low and high but no medium, whose requests used to
     fall out of the template's else-branch as Max -- its own ceiling, not the level asked for.
     """
 
-    if not levels:
+    if not levels or effort not in _EFFORT_ORDER:
         return effort
     want = _EFFORT_ORDER.index(effort)
     return min(levels, key=lambda name: (abs(_EFFORT_ORDER.index(name) - want), _EFFORT_ORDER.index(name)))

@@ -256,3 +256,65 @@ def test_medium_reaches_the_template_through_chat_template_kwargs_too():
         server.shutdown()
         server.server_close()
         app.close()
+
+
+def test_the_server_default_effort_reaches_the_template_as_started():
+    """The boot default passes through as the template renders it (pinned: NOT normalized)."""
+
+    app = make_app(enable_thinking=True, reasoning_effort="medium")
+    app.tokenizer.chat_template = "{# \x27low\x27 \x27high\x27 #}"       # GLM-5.3 names no medium
+    try:
+        app.tokenizer.template_calls.clear()
+        app.chat([{"role": "user", "content": "hi"}], max_tokens=2)
+        assert app.tokenizer.template_calls and all(
+            c["reasoning_effort"] == "medium" for c in app.tokenizer.template_calls)
+    finally:
+        app.close()
+
+
+def test_nearest_named_effort_direct():
+    from tensorfold.server.request_options import nearest_named_effort
+
+    nearest = nearest_named_effort
+    assert nearest("medium", frozenset({"xhigh", "low"})) == "low"      # non-tie, downward
+    assert nearest("medium", frozenset({"minimal"})) == "minimal"       # the only named level
+    assert nearest("medium", frozenset({"xhigh", "high"})) == "high"    # distance 2 vs 1
+    assert nearest("medium", frozenset()) == "medium"                   # no named levels: as sent
+    assert nearest("none", frozenset({"low", "high"})) == "none"        # none is not a level: as sent
+    assert nearest("medium", frozenset({"low", "high"})) == "high"      # the GLM-5.3 tie: upward
+
+
+def test_glm_medium_with_thinking_forced_off_reaches_no_effort():
+    app = make_app(enable_thinking=True)
+    app.tokenizer.chat_template = "{# \x27low\x27 \x27high\x27 #}"
+    server = serve_fake(app)
+    try:
+        app.tokenizer.template_calls.clear()
+        status, body = post_json(server, "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2,
+            "reasoning_effort": "medium", "chat_template_kwargs": {"enable_thinking": False}})
+        assert status == 200 and json.loads(body)["tensorfold"]["enable_thinking"] is False
+        assert all(not c["enable_thinking"] and "reasoning_effort" not in c
+                   for c in app.tokenizer.template_calls)
+    finally:
+        server.shutdown()
+        server.server_close()
+        app.close()
+
+
+def test_a_top_level_effort_wins_over_chat_template_kwargs():
+    app = make_app(enable_thinking=True)
+    app.tokenizer.chat_template = ""                    # names no level: nothing maps
+    server = serve_fake(app)
+    try:
+        app.tokenizer.template_calls.clear()
+        status, body = post_json(server, "/v1/chat/completions", {
+            "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2,
+            "reasoning_effort": "low", "chat_template_kwargs": {"reasoning_effort": "medium"}})
+        assert status == 200 and json.loads(body)["tensorfold"]["reasoning_effort"] == "low"
+        assert all(c["reasoning_effort"] == "low" for c in app.tokenizer.template_calls
+                   if c.get("enable_thinking"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        app.close()
