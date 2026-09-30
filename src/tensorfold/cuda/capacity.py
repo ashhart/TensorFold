@@ -171,15 +171,24 @@ def reserve_bytes(total: int, *, host: bool = False) -> int:
     return int(gib * GIB)
 
 
-def available_bytes(torch) -> int:
-    free, total = map(int, torch.cuda.mem_get_info())
-    available = max(0, free - reserve_bytes(total))
+def host_stream_bytes() -> int | None:
+    """Host RAM usable for streaming reads: MemAvailable less a fixed reserve.
+
+    The CUDA loader reads one tensor at a time through host staging and uploads
+    it (device-direct reads keep even that off the host where O_DIRECT works),
+    so the host needs staging-sized buffers and reclaimable page cache, never
+    the whole checkpoint. None when host memory cannot be read: the caller then
+    keeps the conservative min(GPU, host) bound.
+    """
     memory = _meminfo()
     if memory is None:
-        return available
-    host = max(0, memory["MemAvailable"] - reserve_bytes(memory["MemTotal"], host=True))
-    # one pool on a unified GPU: reclaimable page cache is available; a discrete GPU is bounded by both
-    return host if unified(torch) else min(available, host)
+        return None
+    return max(0, memory["MemAvailable"] - 2 * GIB)
+
+
+def available_bytes(torch, peer: int = 0) -> int:
+    free, total = map(int, torch.cuda.mem_get_info())
+    return max(0, free - max(4 * GIB, math.ceil(total / 20)) - peer)
 
 
 def total_bytes(torch) -> int:
@@ -196,7 +205,8 @@ def page_room(torch) -> int | None:
 
 
 def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
-              weights: Weights, geometry: Geometry, room: int | None = None) -> Plan:
+              weights: Weights, geometry: Geometry, room: int | None = None,
+              host_free: int | None = None) -> Plan:
     native = int(native)
     requested = None if requested is None else int(requested)
     if requested is not None and requested < 0:
@@ -206,8 +216,13 @@ def make_plan(native: int, requested: int | None, explicit: bool, budget: int,
         raise ValueError("checkpoint has no native window; give an explicit positive --context")
     upper = min(target, native) if native > 0 else target
 
+    if host_free is not None and weights.staging > host_free:
+        host_free = 0 if weights.resident + weights.staging > budget else host_free
+    elif host_free is not None:
+        host_free = max(host_free, 1)
+
     def fit(ceiling: int, top: int = upper) -> int:
-        low, high = 0, 0 if weights.resident + weights.staging > budget else top
+        low, high = 0, 0 if (host_free == 0 or weights.resident + weights.staging > budget) else top
         while low < high:
             middle = (low + high + 1) // 2
             if weights.resident + geometry.needed(middle) <= ceiling:
@@ -271,8 +286,12 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
           draft_geometry: Geometry | Callable | None = None, startup_copies: int = 0,
           extra_files: tuple[Path, ...] = (), files: list[Path] | None = None,
           draft_transform: Callable | None = None,
-          draft_weights: Callable[[Path], Weights] | None = None) -> dict:
-    """One refusal or capacity on both ranks before allocating; the draft model by ``draft_weights`` or a transform."""
+          draft_weights: Callable[[Path], Weights] | None = None, peer_bytes: int = 0) -> dict:
+    """peer_bytes: device bytes to reserve for co-located peer ranks on this
+    machine (0 = ranks are on separate machines, the historical default). With
+    world N on one machine, each rank passes (N-1) * (its own estimated
+    footprint / N) so all N agree on a stable split of the GPUs' memory."""
+    """Reach the same refusal or capacity before either rank allocates model tensors."""
 
     from tensorfold.cuda import build
 
@@ -302,7 +321,8 @@ def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, t
                                     main.reserve, main.minimum_slots)
         plan = make_plan(int(text.get("max_position_embeddings") or 0), requested,
                          requested is not None if explicit is None else explicit,
-                         available_bytes(torch), weights, geometry, room=page_room(torch))
+                         available_bytes(torch, peer_bytes), weights, geometry, room=page_room(torch),
+                         host_free=host_stream_bytes())
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
         error = f"{type(exc).__name__}: {exc}"     # name the cause: its text alone has hidden a dtype's KeyError
     status = [1 if error else 0, *(plan.settings + [plan.fitting, plan.largest] if plan else [0, -1, 0, 0, 0])]
