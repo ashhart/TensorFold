@@ -736,6 +736,58 @@ def flash_prefill_hc_fixtures(capture):
     print(f"Saved {len(cases)} complete Flash prefill hyper-connections and their intermediate arrays", flush=True)
 
 
+def deepseek_prefill_moe_fixtures(directory):
+    import copy
+    from tests import dsv4_fakes as fake
+    from tests.test_flash_next_affine import bf16
+    from tensorfold.families.deepseek_v4.weights import load_backbone
+
+    rng = np.random.default_rng(91743)
+    original_text, original_dims = fake.TEXT, fake.D
+    groups = []
+    try:
+        for geometry, (dims, experts, inner, top, hashed, limit) in enumerate((
+            (128, 8, 64, 2, True, 10.), (256, 16, 128, 3, False, 0.),
+            (256, 256, 128, 6, False, 1.), (4096, 16, 2048, 6, True, 10.),
+            (128, 16, 128, 16, False, .25),
+        )):
+            fake.TEXT = copy.deepcopy(original_text)
+            fake.D = dims
+            fake.TEXT.update(hidden_size=dims, num_hidden_layers=1, compress_ratios=[0, 0],
+                             n_routed_experts=experts, moe_intermediate_size=inner, num_experts_per_tok=top,
+                             num_hash_layers=int(hashed), swiglu_limit=limit)
+            checkpoint = f"checkpoint{geometry}"
+            folder = fake.write_checkpoint(directory / checkpoint, seed=213 + geometry)
+            model = load_backbone(folder)
+            layer = model.layers[0].moe
+            cases = []
+            lengths = (17, 64, 257, 2048) if dims == 4096 else (1, 3, 4, 7, 8, 16, 17, 21, 22, 31, 32, 63, 64, 65, 257, 2048)
+            for count in lengths:
+                name = f"moe{geometry}-{count}"
+                x = bf16(rng, (count, dims * 2), scale=.3)[:, ::2]
+                if count == 7:
+                    x = mx.zeros_like(x)
+                tokens = mx.array([(j * 7 + 3) % fake.VOCAB for j in range(count)], mx.uint32)
+                logits = x.astype(mx.float32) @ layer.router
+                scores = layer.scores(x, False)
+                ids, weights = layer.route(scores, tokens)
+                selected = layer.experts(x, ids)
+                routed = layer.combine(weights, selected, x.dtype)
+                shared = layer.shared(x, False)
+                output = layer(x, tokens, False)
+                assert mx.array_equal(routed + shared, output).item()
+                arrays = dict(input=x, logits=logits, scores=scores, ids=ids, weights=weights,
+                              experts=selected, routed=routed, shared=shared, output=output)
+                mx.eval(*arrays.values())
+                mx.save_safetensors(str(directory / f"{name}.safetensors"), arrays)
+                cases.append(name)
+            groups.append(dict(checkpoint=checkpoint, cases=cases))
+            print(f"Saved DeepSeek MoE D={dims}, E={experts}, top={top}, hashed={hashed}: {len(cases)} cases", flush=True)
+    finally:
+        fake.TEXT, fake.D = original_text, original_dims
+    (directory / "moe.json").write_text(json.dumps(groups, indent=2) + "\n")
+
+
 def deepseek_prefill_hc_fixtures(directory):
     import copy
     from tests import dsv4_fakes as fake
@@ -1492,11 +1544,15 @@ def main():
     parser.add_argument("--glm-prefill-mla", action="store_true")
     parser.add_argument("--glm-prefill-moe", action="store_true")
     parser.add_argument("--deepseek-prefill-hc", action="store_true")
+    parser.add_argument("--deepseek-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-moe", action="store_true")
     parser.add_argument("--flash-prefill-attention", action="store_true")
     parser.add_argument("--flash-prefill-ple", action="store_true")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
+    if args.deepseek_prefill_moe:
+        deepseek_prefill_moe_fixtures(args.directory)
+        return
     if args.deepseek_prefill_hc:
         deepseek_prefill_hc_fixtures(args.directory)
         return

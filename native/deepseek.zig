@@ -212,11 +212,11 @@ pub const Model = struct {
     fn name(buf: []u8, i: usize, suffix: []const u8) ![]const u8 {
         return std.fmt.bufPrint(buf, "model.layers.{d}.{s}", .{ i, suffix });
     }
-    fn weight(m: *Model, i: usize, suffix: []const u8) !A {
+    pub fn weight(m: *Model, i: usize, suffix: []const u8) !A {
         var b: [256]u8 = undefined;
         return m.weights.get(try name(&b, i, suffix));
     }
-    fn triple(m: *Model, i: usize, suffix: []const u8) ![3]A {
+    pub fn triple(m: *Model, i: usize, suffix: []const u8) ![3]A {
         var b: [256]u8 = undefined;
         return m.weights.triple(try name(&b, i, suffix));
     }
@@ -360,10 +360,12 @@ pub const Model = struct {
         const smooth = try s.binary(c.mlx_subtract, try s.scalar(1), try s.binary(c.mlx_minimum, try s.scalar(1), try s.binary(c.mlx_maximum, ramp, try s.scalar(0))));
         return s.binary(c.mlx_add, try s.binary(c.mlx_multiply, try s.binary(c.mlx_divide, freq, try s.scalar(r.factor)), try s.binary(c.mlx_subtract, try s.scalar(1), smooth)), try s.binary(c.mlx_multiply, freq, smooth));
     }
-    fn project(m: *Model, s: *mx.Scope, i: usize, key: []const u8, x: A) !A {
-        return m.dispatch.apply(&m.kernels, s, x, .{ .weights = try m.triple(i, key) });
+    pub fn project(m: *Model, s: *mx.Scope, i: usize, key: []const u8, x: A) !A {
+        const weights = try m.triple(i, key);
+        if (mx.dim(x, 0) > 16) return stock(s, x, weights);
+        return m.dispatch.apply(&m.kernels, s, x, .{ .weights = weights });
     }
-    fn stock(s: *mx.Scope, x: A, weights: [3]A) !A {
+    pub fn stock(s: *mx.Scope, x: A, weights: [3]A) !A {
         var out = c.mlx_array_new();
         const rc = c.mlx_quantized_matmul(&out, x, weights[0], weights[1], weights[2], true, mx.opt(64), mx.opt(4), "affine", mx.stream);
         return s.result(rc, out);
