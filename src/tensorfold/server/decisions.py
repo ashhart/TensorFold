@@ -129,6 +129,44 @@ def _validate_body(body: dict[str, Any]) -> None:
 def _prepare_question(
     tokenizer: Any, text: str, question: dict[str, Any], *, context_len: int | None,
 ) -> PreparedQuestion:
+    kind, names, labels, content = _wording(text, question)
+    prompt, prompt_ids = _chat_prompt(tokenizer, content)
+    return _finish(
+        question["id"], kind, names, labels, prompt, prompt_ids, context_len,
+        lambda rendered: _encode(tokenizer, rendered),
+    )
+
+
+def prompts_for(
+    body: dict[str, Any], render: Any, encode: Any, *, context_len: int | None = None,
+) -> list[PreparedQuestion]:
+    """The same questions as prepare, for a server that renders text and encodes it itself (the CUDA GLM template)."""
+
+    _validate_body(body)
+    text = _render_text(body.get("input"))
+    if not text.strip():
+        raise DecisionError("input must not be blank")
+    prepared = []
+    for index, question in enumerate(body["questions"]):
+        try:
+            prepared.append(_from_text(render, encode, text, question, context_len=context_len))
+        except DecisionError as exc:
+            ident = question.get("id") if isinstance(question, dict) else None
+            where = repr(ident) if isinstance(ident, str) and ident else f"at position {index}"
+            raise DecisionError(f"question {where}: {exc}") from exc
+    return prepared
+
+
+def _from_text(
+    render: Any, encode: Any, text: str, question: dict[str, Any], *, context_len: int | None,
+) -> PreparedQuestion:
+    kind, names, labels, content = _wording(text, question)
+    prompt = render(content)
+    prompt_ids = [int(token) for token in encode(prompt)]
+    return _finish(question["id"], kind, names, labels, prompt, prompt_ids, context_len, encode)
+
+
+def _wording(text: str, question: dict[str, Any]) -> tuple[str, list[str], list[str], str]:
     kind = question.get("type")
     if kind == "choice":
         _unknown(question, _CHOICE_FIELDS)
@@ -158,15 +196,20 @@ def _prepare_question(
     if kind != "yes_no":
         lines = [line for line in lines if line]
     lines.append(closing)
-    content = "\n".join([text, "", *lines])
-    prompt, prompt_ids = _chat_prompt(tokenizer, content)
+    return kind, names, labels, "\n".join([text, "", *lines])
+
+
+def _finish(
+    question_id: str, kind: str, names: list[str], labels: list[str], prompt: str, prompt_ids: list[int],
+    context_len: int | None, encode: Any,
+) -> PreparedQuestion:
     if context_len and len(prompt_ids) >= context_len:
         raise DecisionError(
             f"the prompt has {len(prompt_ids)} tokens, which does not fit the context length of {context_len} tokens"
         )
     return PreparedQuestion(
-        id=question["id"], kind=kind, names=names, prompt_ids=prompt_ids,
-        label_ids=_label_ids(tokenizer, prompt, prompt_ids, labels),
+        id=question_id, kind=kind, names=names, prompt_ids=prompt_ids,
+        label_ids=_label_ids(encode, prompt, prompt_ids, labels),
     )
 
 
@@ -239,10 +282,10 @@ def _chat_prompt(tokenizer: Any, content: str) -> tuple[str, list[int]]:
     return text, prompt_ids
 
 
-def _label_ids(tokenizer: Any, prompt: str, prompt_ids: list[int], labels: list[str]) -> list[int]:
+def _label_ids(encode: Any, prompt: str, prompt_ids: list[int], labels: list[str]) -> list[int]:
     found = []
     for label in labels:
-        ids = _encode(tokenizer, prompt + label)
+        ids = [int(token) for token in encode(prompt + label)]
         if len(ids) != len(prompt_ids) + 1 or ids[:-1] != prompt_ids or ids[-1] in found:
             raise DecisionError(
                 f"the answer label {label!r} is not one distinct token after the chat prompt for this tokenizer, "
@@ -250,6 +293,27 @@ def _label_ids(tokenizer: Any, prompt: str, prompt_ids: list[int], labels: list[
             )
         found.append(ids[-1])
     return found
+
+
+def reduce_vocab_shards(rows: list[list[float]], label_ids: list[int], shard: int) -> tuple[list[float], float]:
+    """Join per-rank vocabulary shards into the label logits and the full-vocabulary logsumexp."""
+
+    if shard < 1 or not rows or any(not row for row in rows):
+        raise ValueError("label scoring needs a positive shard width and one row per rank")
+    peak = max(max(row) for row in rows)
+    total = math.fsum(math.exp(value - peak) for row in rows for value in row)
+    if not math.isfinite(peak) or total <= 0 or not math.isfinite(total):
+        raise ValueError("label scoring produced a non-finite logit")
+    logsumexp = peak + math.log(total)
+    logits = []
+    for token in label_ids:
+        rank, column = divmod(int(token), shard)
+        if rank < 0 or rank >= len(rows) or column >= len(rows[rank]):
+            raise ValueError(f"label token {token} is outside the vocabulary")
+        logits.append(float(rows[rank][column]))
+    if not math.isfinite(logsumexp) or any(not math.isfinite(value) for value in logits):
+        raise ValueError("label scoring produced a non-finite logit")
+    return logits, logsumexp
 
 
 def _softmax(logits: list[float], temperature: float) -> list[float]:
