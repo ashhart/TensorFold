@@ -59,7 +59,9 @@ def check(model_dir: Path) -> None:
         # the CUDA engine's NVFP4 route: NVFP4 experts in blocks of 16, other linears bf16, MXFP8, block FP8 or NVFP4
         found = config.get("quantization") or config.get("quantization_config") or {}
         algo = str(found.get("quant_algo") or "NVFP4").upper()
-        layers = {str(v.get("quant_algo", "")).upper() for v in (found.get("quantized_layers") or {}).values()}
+        # FP8 is read in the MTP drafter's experts only (dequantized and re-quantized at load: they only draft)
+        layers = {str(v.get("quant_algo", "")).upper() for k, v in (found.get("quantized_layers") or {}).items()
+                  if not (str(v.get("quant_algo", "")).upper() == "FP8" and {"mtp", "experts"} <= set(k.split(".")))}
         algos = layers if algo == "MIXED_PRECISION" else {algo}
         weights = [g.get("weights") or {} for g in (found.get("config_groups") or {}).values()]
         fp4 = {int(w.get("group_size", 16)) for w in weights if int(w.get("num_bits", 4)) == 4}

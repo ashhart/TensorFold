@@ -263,7 +263,27 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             shared = (raw(se + "gate_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
                       raw(se + "up_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
                       raw(se + "down_proj.weight").to(torch.bfloat16)[:, dlo * gs:dhi * gs].contiguous())
-        if rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):      # the main layers: per-expert FP4
+        fp8_drafter = (rd.has(prefix + f"{name}.experts.0.gate_proj.weight")
+                       and raw(f"{name}.experts.0.gate_proj.weight").dtype == torch.float8_e4m3fn)
+        if fp8_drafter and not name.startswith("mtp."):
+            raise ValueError(f"{name}: FP8 routed experts; Flash Next reads the routed experts as NVFP4 (FP8 only in "
+                             "the MTP drafter, which is re-quantized at load)")
+        if fp8_drafter:                                  # the MTP layer's per-expert FP8: dequantized, then drafted as below
+            def expert_bf16(base: str) -> torch.Tensor:
+                if rd.has(prefix + base + ".weight_scale_inv"):          # 128x128 blocks
+                    return weight_bf16(base)
+                w = raw(base + ".weight").float()
+                s = raw(base + ".weight_scale").float()                  # per tensor, or one scale a row
+                return (w * (s.reshape(-1, 1) if s.numel() > 1 else s)).to(torch.bfloat16)
+
+            def stacked(proj: str) -> torch.Tensor:
+                return torch.stack([expert_bf16(f"{name}.experts.{i}.{proj}") for i in range(e)])
+
+            gate, up, dn = stacked("gate_proj"), stacked("up_proj"), stacked("down_proj")
+            if world > 1:
+                gate, up, dn = gate[:, lo:hi], up[:, lo:hi], dn[:, :, dlo * gs:dhi * gs]
+            moe4 = nvfp4_moe.moe4_from_bf16(torch.cat([gate, up], dim=1), dn, shared)
+        elif rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):    # the main layers: per-expert FP4
             def stack(proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 w = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight") for i in range(e)])
                 s = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight_scale") for i in range(e)])
