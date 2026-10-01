@@ -3,6 +3,7 @@
 import errno
 import http.client
 import json
+import os
 import socket
 import threading
 import time
@@ -17,7 +18,7 @@ from tensorfold.cuda import server
 from tensorfold.cuda.scheduler import Scheduler
 from tensorfold.cuda.turns import Turns
 from tensorfold.families.glm5_next.cuda.app import GlmApp
-from tensorfold.server.cancellation import RequestCancelled
+from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
 
 WAIT = 10                    # seconds: every wait on a thread, a socket or the engine is bounded by this
 MESSAGES = [{"role": "user", "content": "Hi"}]
@@ -412,3 +413,24 @@ def test_a_per_token_failure_ends_a_shared_round_stream(tmp_path, monkeypatch):
     until(lambda: engine.decoder.live() == 0, "the stream to leave the decoder")
     stream = engine.decoder.seen[0]
     assert len(stream.out) < 10, len(stream.out)          # it ended a round or two later, not at its count
+
+
+def test_the_socket_check_reads_descriptors_past_1023():
+    resource = pytest.importorskip("resource")          # POSIX: Windows' select() has no 1023 limit
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 1100:
+        pytest.skip("the descriptor limit is below 1100")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 1100), hard))
+    try:
+        a, b = socket.socketpair()
+        high = socket.socket(fileno=os.dup2(a.fileno(), 1050))
+        a.close()
+        try:
+            gone = socket_cancellation(high)
+            assert not gone.cancelled                   # open and quiet: select() would raise here
+            b.close()
+            assert gone.cancelled
+        finally:
+            high.close()
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
