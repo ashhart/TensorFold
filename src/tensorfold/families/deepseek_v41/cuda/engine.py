@@ -41,11 +41,17 @@ def available_bytes() -> int:
     return torch.cuda.mem_get_info()[0]
 
 
-def largest_context(free: int) -> int:
-    """The largest context (a multiple of 1,024) whose caches and prompt buffers fit ``free`` bytes."""
+SLOT_BYTES = 40 * 4096 * 512 * 2 + 3 * 4096 * 1024 * 4 + 3 * 4096 * 512 * 2   # a stream slot's rings (~230 MB)
+CACHE_BYTES = 3200               # a stream's per-token caches (compressed entries + indexer keys)
 
-    room = free - int((FIXED_GIB + RESERVE_GIB) * 2 ** 30)
-    return min(NATIVE_CONTEXT, max(0, room // TOKEN_BYTES // 1024 * 1024))
+
+def largest_context(free: int, streams: int = 1) -> int:
+    """The largest context (a multiple of 1,024) whose caches and prompt buffers fit ``free`` bytes, ``streams``
+    stream slots each holding that context."""
+
+    room = free - int((FIXED_GIB + RESERVE_GIB) * 2 ** 30) - (streams - 1) * SLOT_BYTES
+    per = TOKEN_BYTES + (streams - 1) * CACHE_BYTES
+    return min(NATIVE_CONTEXT, max(0, room // per // 1024 * 1024))
 
 
 def _f64_ints(value: float) -> list[int]:
@@ -63,7 +69,8 @@ class Dsv41Engine:
     tp = 2
 
     def __init__(self, model_dir: Path, *, rank: int, master: str, port: int, engram: Path, drafts: bool = True,
-                 context: int | None = None, context_explicit: bool | None = None, warm: bool = True) -> None:
+                 context: int | None = None, context_explicit: bool | None = None, warm: bool = True,
+                 parallel: int = 1) -> None:
         import torch
 
         from tensorfold.cuda.comm import NCCL
@@ -93,11 +100,12 @@ class Dsv41Engine:
         if not (Path(engram) / "config.json").exists() and not any(Path(engram).glob("*.safetensors")):
             raise FileNotFoundError(f"no Engram tables in {engram}: put shards 47-48 of deepseek-ai/DeepSeek-V4.1-Flash "
                                     "there (or point TF_DSV41_ENGRAM_DIR at them)")
-        mine = [cap, int(bool(drafts)), int(explicit)]
+        self.streams = max(1, int(parallel))
+        mine = [cap, int(bool(drafts)), int(explicit), self.streams]
         both = self._gather_ints(mine)
         if both[0] != both[1]:
-            raise RuntimeError(f"the two ranks were started with different settings (context, drafts): rank 0 "
-                               f"{both[0][:2]}, rank 1 {both[1][:2]}; give both the same flags")
+            raise RuntimeError(f"the two ranks were started with different settings (context, drafts, parallel): "
+                               f"rank 0 {both[0]}, rank 1 {both[1]}; give both the same flags")
         started = time.perf_counter()
         w = W.load(self.model_dir, rank=rank, log=lambda *a, **k: None, draft=bool(drafts))
         torch.cuda.synchronize()
@@ -106,7 +114,7 @@ class Dsv41Engine:
         free = available_bytes()
         if rank == 0:
             print(f"[tensorfold] memory left after the weights: {free / 2 ** 30:.1f} GiB", flush=True)
-        largest = min(row[0] for row in self._gather_ints([largest_context(free)]))
+        largest = min(row[0] for row in self._gather_ints([largest_context(free, self.streams)]))
         self.capacity_plan = {"largest_window": largest, "context_window": cap}
         if cap > largest:
             if explicit:
@@ -118,15 +126,18 @@ class Dsv41Engine:
         if cap < 4096:
             raise ValueError(f"only {largest} tokens of context fit after the weights: free memory first")
         self.capacity_plan["context_window"] = cap
-        self.e = SerialEngine(w, Comm(self.nccl), str(engram), str(self.model_dir / "tokenizer.json"), cap=cap)
+        self.e = SerialEngine(w, Comm(self.nccl), str(engram), str(self.model_dir / "tokenizer.json"), cap=cap,
+                              slots=self.streams)
         self.nccl.barrier()
         with torch.no_grad():
             if drafts:
                 self.e.enable_dspark(DRAFTS)
             self.e.capture(1)
+            # verify windows of one stream (1 + drafts rows); with --parallel, any round of up to 16 rows
+            top = 16 if self.streams > 1 else (DRAFTS + 1 if drafts else 1)
+            for rows in range(2, top + 1):
+                self.e.capture(rows)
             if drafts:
-                for rows in range(2, DRAFTS + 2):
-                    self.e.capture(rows)
                 self.e.drafter.capture()
         self.limit = cap
         self.eos = (int(w.cfg.eos_token_id),)
@@ -140,6 +151,18 @@ class Dsv41Engine:
         if warm and os.environ.get("TF_DSV41_WARM", "1") != "0":
             self._warm()
         self._make_pool(cap)
+        self.concurrent = self.streams > 1
+        self.multi = self.scheduler = None
+        if self.concurrent:
+            from tensorfold.cuda.scheduler import Scheduler
+
+            from .multi import MultiDecoder
+
+            self.multi = MultiDecoder(self.e, self._share, rank=rank, drafts=DRAFTS if drafts else 0)
+            self.multi.model_dir = self.model_dir
+            if rank == 0:
+                self.scheduler = Scheduler(self.multi, max_streams=self.streams)
+                print(f"[tensorfold] {self.streams} concurrent streams of up to {cap} tokens each", flush=True)
 
     def _make_pool(self, cap: int) -> None:
         """Kept prompt states (``tensorfold.cuda.kv_pool``) in what the context's prompt buffers and the reserve
@@ -210,12 +233,17 @@ class Dsv41Engine:
                 self.torch.cuda.empty_cache()
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True,
-                 stop_eos: bool = True, constraint=None) -> dict[str, Any]:
-        """Rank 0: one reply, mirrored on rank 1; ``draft=False`` decodes serially (the reference drafts equal)."""
+                 stop_eos: bool = True, constraint=None, background: bool = False) -> dict[str, Any]:
+        """Rank 0: one reply, mirrored on rank 1; ``draft=False`` decodes serially (the reference drafts equal).
+        With --parallel the request joins the scheduler's rounds (this call returns when it is done)."""
 
         if len(prompt) >= self.limit:
             raise ValueError(f"prompt of {len(prompt)} tokens: this engine serves contexts up to {self.limit}")
         max_tokens = max(1, min(int(max_tokens), self.limit - len(prompt)))
+        if self.concurrent:
+            stats = self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos,
+                                          constraint=constraint, background=background)
+            return {**stats, "prompt_tokens": len(prompt)}
         seed = (sampling.seed if sampling else 0) & 0xFFFFFFFFFFFFFFFF
         header = [max_tokens, int(stop_eos), int(draft), seed & 0xFFFFFFFF, seed >> 32,
                   *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
@@ -242,6 +270,10 @@ class Dsv41Engine:
         """Rank 1: mirror every request rank 0 serves, forever."""
 
         from tensorfold.engine.exact_sampling import Sampling
+
+        if self.concurrent:
+            self.multi.follow()
+            return
 
         while True:
             (max_tokens, stop_eos, draft, s_lo, s_hi, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi,

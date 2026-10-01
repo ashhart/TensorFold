@@ -1,0 +1,289 @@
+"""DeepSeek-V4.1's concurrent rounds (``tensorfold serve --parallel N``): N streams in N cache slots, each round's rows
+of every stream verified in one forward (``SerialEngine.step_multi``), so the weights a round reads serve them all.
+
+Rows are row-invariant, so a stream's tokens equal its serial decoding however many streams share its rounds. Rank 0
+decides (admissions, prefill steps, each stream's draft count, completions) and sends every decision to rank 1 before
+acting on it; both ranks then compute the same tokens (argmax or position-keyed samples of the gathered logits).
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+from typing import Any
+
+import torch
+
+from tensorfold.cuda.sampling import sample_rows
+from tensorfold.cuda.streams import Stream, next_fill
+
+from .serial import MAX_ROWS, SerialEngine
+
+ADMIT, FILL, ROUND, DONE = 1, 2, 3, 4      # rank 0's messages
+ROWS = 16                                  # a round's rows at most (above it, kernels switch to the prompt path)
+SAMPLING_WORDS = 10
+
+
+def pack_sampling(sampling) -> list[int]:
+    """[on, seed lo, seed hi, top_k, temperature, top_p, min_p as int pairs]: SAMPLING_WORDS ints."""
+
+    import struct
+
+    if sampling is None or sampling.temperature <= 0:
+        return [0] * SAMPLING_WORDS
+    seed = sampling.seed & 0xFFFFFFFFFFFFFFFF
+    out = [1, seed & 0xFFFFFFFF, seed >> 32, int(sampling.top_k)]
+    for value in (sampling.temperature, sampling.top_p, sampling.min_p):
+        out += list(struct.unpack("<ii", struct.pack("<d", float(value))))
+    return out
+
+
+def unpack_sampling(words: list[int]):
+    import struct
+
+    from tensorfold.engine.exact_sampling import Sampling
+
+    if not words[0]:
+        return None
+    f = [struct.unpack("<d", struct.pack("<ii", words[4 + 2 * i], words[5 + 2 * i]))[0] for i in range(3)]
+    return Sampling(seed=(words[2] << 32) | words[1], temperature=f[0], top_k=words[3], top_p=f[1], min_p=f[2])
+
+
+
+class MultiDecoder:
+    """The ``tensorfold.cuda.scheduler.Scheduler``'s decoder over ``SerialEngine`` slots (rank 0 or 1 of two)."""
+
+    def __init__(self, e: SerialEngine, share: Callable[[list[int] | None], list[int]], *, rank: int,
+                 drafts: int = 3, step: int = MAX_ROWS) -> None:
+        self.e, self.share, self.rank = e, share, rank
+        self.drafts = drafts if e.drafter is not None else 0
+        self.step_rows = step                      # prompt rows a fill step takes while other streams decode
+        self.free = list(range(e.slots))
+        self.streams: dict[int, Stream] = {}       # decoding, by sid
+        self.filling: list[Stream] = []
+        self.next_id = 0
+        self.eos = (int(e.c.eos_token_id),)
+        self.broken: Exception | None = None
+        self.model_dir = None                      # rank 1 compiles a request's grammar from it
+
+    # -- bookkeeping --------------------------------------------------------------------------------------------
+    def live(self) -> int:
+        return len(self.streams) + len(self.filling)
+
+    def _send(self, values: list[int]) -> None:
+        if self.broken is None:
+            self.share(values)
+
+    def _check(self) -> None:
+        if self.broken is not None:
+            raise RuntimeError("the two ranks are out of step after an error; restart both") from self.broken
+
+    def _ends(self, s: Stream) -> tuple[int, ...]:
+        return self.eos if s.stop_eos else ()
+
+    # -- admission and prompts ------------------------------------------------------------------------------------
+    @torch.no_grad()
+    def admit(self, s: Stream) -> None:
+        self._check()
+        room = self.e.limit - len(s.prompt) - 1
+        if room < 1:
+            raise ValueError(f"a prompt of {len(s.prompt)} tokens leaves no room in the {self.e.limit}-token context")
+        s.count = min(s.count, room)
+        s.sid = self.next_id
+        self.next_id += 1
+        from tensorfold.engine.grammar import pack
+
+        packed = pack(s.constraint)
+        self._send([ADMIT, s.sid, s.count, int(s.draft), int(s.stop_eos), *pack_sampling(s.sampling), len(packed)])
+        self._send(list(s.prompt))
+        if packed:
+            self._send(packed)
+        self._queue(s)
+
+    def _queue(self, s: Stream) -> None:
+        s.slot = self.free.pop(0)
+        s.pos = -1                                 # prompt tokens prefilled so far (-1: not started)
+        self.filling.append(s)
+
+    def _fill(self) -> list[Stream]:
+        s = next_fill(self.filling)
+        n = len(s.prompt)
+        start = max(s.pos, 0)
+        stop = n if not any(not x.done for x in self.streams.values()) else min(n, start + self.step_rows)
+        self._send([FILL, s.sid, stop])
+        first = self._step(s, stop)
+        if first is None:
+            return []
+        s.take([first], self._ends(s))
+        return [s] if s.done else []
+
+    def _step(self, s: Stream, stop: int) -> int | None:
+        """Prefill prompt[pos:stop] in the stream's slot (resuming a kept or live state first); at the prompt's end,
+        keep its state and sample the first token."""
+
+        e = self.e
+        t0 = time.perf_counter()
+        try:
+            e.select_slot(s.slot)
+            n = len(s.prompt)
+            if s.pos < 0:                          # the first step: resume what the slot or the pool holds
+                cached = e.reusable(s.prompt) if s.draft else 0
+                kept = e.pool.match(s.prompt) if s.draft and e.pool is not None else None
+                if kept is not None and len(kept.ids) > cached:
+                    e.load_prefix(kept.snapshot, kept.ids)
+                    cached = len(kept.ids)
+                elif cached:
+                    del e.state.ids[cached:]
+                else:
+                    e.reset()
+                s.pos, s.cached = cached, cached
+            logits = e.prefill(s.prompt[s.pos:stop]) if stop > s.pos else None
+            s.pos = stop
+            if stop < n:
+                return None
+            if e.pool is not None and s.draft:
+                e.pool.add(list(s.prompt[:-1]), lambda: e.save_prefix(n - 1))
+            last = logits[-1:]
+            if s.constraint is not None:
+                last = s.constraint.mask(last.float().clone())
+            first = sample_rows(last, [n], s.sampling)[0]
+        except Exception as exc:
+            self.broken = exc
+            raise
+        finally:
+            s.prefill_s += time.perf_counter() - t0
+        s.context = list(s.prompt)
+        s.started = time.perf_counter()
+        self.filling = [x for x in self.filling if x is not s]
+        self.streams[s.sid] = s
+        return first
+
+    # -- rounds ---------------------------------------------------------------------------------------------------
+    def _plan(self, live: list[Stream]) -> list[tuple[int, int]]:
+        """(sid, drafts) a stream: drafts while the round's rows fit (none for a grammar's stream yet)."""
+
+        each = max(0, min(self.drafts, ROWS // max(len(live), 1) - 1))
+        plan = []
+        for s in live:
+            room = self.e.limit - len(self.e.views[s.slot].ids) - 1
+            k = 0 if (not s.draft or s.constraint is not None) else max(0, min(each, room, s.count - len(s.out) - 1))
+            plan.append((s.sid, k))
+        return plan
+
+    @torch.no_grad()
+    def round(self) -> list[Stream]:
+        self._check()
+        done = self._fill() if self.filling else []
+        live = [s for s in self.streams.values() if not s.done]
+        if not live:
+            return done
+        plan = self._plan(live)
+        self._send([ROUND, len(plan), *[x for item in plan for x in item]])
+        news = self._verify(plan)
+        for s, new in zip(live, news):
+            if s.error is None:
+                s.take(new, self._ends(s))
+            else:
+                s.done, s.finished = True, time.perf_counter()
+        return done + [s for s in live if s.done]
+
+    def _verify(self, plan: list[tuple[int, int]]) -> list[list[int]]:
+        """One forward over every planned stream's pending token and drafts; returns each stream's new tokens (kept
+        drafts, then its next token) and rolls rejected rows back in its slot."""
+
+        e = self.e
+        try:
+            rows, spans = [], []
+            for sid, k in plan:
+                s = self.streams[sid]
+                pending = s.out[-1]
+                drafts: list[int] = []
+                if k:
+                    e.select_slot(s.slot)
+                    drafts = e.drafter.propose(pending, len(e.views[s.slot].ids))[:k]
+                if s.constraint is not None:
+                    s.constraint.advance([pending])
+                spans.append((len(rows), len(drafts) + 1, len(e.views[s.slot].ids)))
+                rows += [(s.slot, t) for t in [pending, *drafts]]
+            logits, greedy = e.step_multi(rows)
+            news = []
+            for (sid, k), (r0, nrows, p0) in zip(plan, spans):
+                s = self.streams[sid]
+                if s.sampling is not None and s.sampling.temperature > 0 or s.constraint is not None:
+                    block = logits[r0:r0 + nrows].float()
+                    if s.constraint is not None:
+                        block = s.constraint.mask(block.clone(), s.constraint.window([rows[r0][1]], [-1]))
+                    target = sample_rows(block, [p0 + 1 + j for j in range(nrows)], s.sampling)
+                else:
+                    target = greedy[r0:r0 + nrows]
+                drafts = [t for _, t in rows[r0 + 1:r0 + nrows]]
+                m = 0
+                while m < len(drafts) and drafts[m] == target[m]:
+                    m += 1
+                del e.views[s.slot].ids[p0 + 1 + m:]           # rejected rows: overwritten later
+                if s.constraint is not None and m:
+                    s.constraint.advance(drafts[:m])
+                s.counted(nrows)
+                news.append(drafts[:m] + [target[m]])
+            return news
+        except Exception as exc:
+            self.broken = exc
+            raise
+
+    # -- completion -----------------------------------------------------------------------------------------------
+    def finish(self, done: list[Stream]) -> None:
+        if done:
+            self._send([DONE, len(done), *[s.sid for s in done]])
+            for s in done:
+                self._finish(s.sid)
+
+    def _finish(self, sid: int) -> None:
+        s = self.streams.pop(sid, None)
+        if s is None:
+            s = next((x for x in self.filling if x.sid == sid), None)
+            if s is not None:
+                self.filling.remove(s)
+        if s is not None and s.slot not in self.free:
+            self.free.append(s.slot)
+            self.free.sort()
+
+    def drop(self) -> list[Stream]:
+        live = [s for s in self.streams.values() if not s.done] + self.filling
+        for s in live:
+            self._finish(s.sid)
+        if self.broken is None:
+            self.broken = RuntimeError("a round failed")
+        return live
+
+    @torch.no_grad()
+    def follow(self) -> None:
+        """Rank 1: mirror rank 0's admissions, prefill steps, rounds and completions, forever."""
+
+        while True:
+            msg = self.share(None)
+            if msg[0] == ADMIT:
+                sid, count, draft, stop_eos = msg[1:5]
+                words, npacked = msg[5:5 + SAMPLING_WORDS], msg[5 + SAMPLING_WORDS]
+                s = Stream(self.share(None), count, unpack_sampling(words), draft=bool(draft),
+                           stop_eos=bool(stop_eos), sid=sid)
+                if npacked:
+                    from tensorfold.engine import grammar
+
+                    s.constraint = grammar.compiler(self, self.model_dir, self.eos).follow(self.share(None))
+                self._queue(s)
+            elif msg[0] == FILL:
+                s = next(x for x in self.filling if x.sid == msg[1])
+                first = self._step(s, msg[2])
+                if first is not None:
+                    s.out.append(first)
+            elif msg[0] == ROUND:
+                plan = [(msg[2 + 2 * i], msg[3 + 2 * i]) for i in range(msg[1])]
+                for (sid, _), new in zip(plan, self._verify(plan)):
+                    self.streams[sid].out.extend(new)
+            elif msg[0] == DONE:
+                for sid in msg[2:2 + msg[1]]:
+                    self._finish(sid)
+
+
+def stream_stats(s: Stream) -> dict[str, Any]:
+    return s.stats()

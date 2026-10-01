@@ -52,4 +52,5 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
 
     return Dsv41Engine(Path(model_dir), rank=int(rank), master=master, port=int(master_port),
                        engram=engram_dir(model_dir), drafts=not no_drafts,
-                       context=options.get("context"), context_explicit=options.get("context_explicit"))
+                       context=options.get("context"), context_explicit=options.get("context_explicit"),
+                       parallel=int(options.get("parallel") or 1))
