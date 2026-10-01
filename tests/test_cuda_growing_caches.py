@@ -58,6 +58,7 @@ def decoder(multi, state, torch, room: int):
     dec = multi.MultiDecoder.__new__(multi.MultiDecoder)
     dec.w, dec.depth, dec.streams, dec.free, dec.kept, dec.keep = weights(), 3, {}, [], [], 8
     dec.filling, dec.fills, dec.held = [], {}, {}
+    dec.solo, dec.solo_on, dec.planning = None, False, False       # no graph slot, one GPU
     dec.memory_gate = importlib.import_module("tensorfold.cuda.memory_gate").MemoryGate(room, reserve=0)
     return dec
 
@@ -124,3 +125,37 @@ def test_a_request_waits_while_a_stream_waits_and_starts_alone_regardless(alloca
     st = state.State(weights(), 256, 4, "bf16", limit=65536)
     assert dec._grow(st, 300, alone=True) and st.capacity == 8192       # alone: startup fitted one whole window
     assert not dec._grow(state.State(weights(), 256, 4, "bf16", limit=65536), 300)
+
+
+def test_the_lone_streams_graph_slot_keeps_its_rows_until_memory_is_short(allocations):  # noqa: F811
+    """Every resize of the graph slot recaptures its graphs: it keeps its rows when idle and grows by doubling."""
+    import torch
+
+    state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
+    multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    probe = state.State(weights(), 256, 4, "bf16", limit=65536)
+    one = probe.cache_bytes(8192) - probe.cache_bytes(256) + probe.layer_bytes(8192)
+    dec = decoder(multi, state, torch, room=one)                        # room for one slot's first step
+    solo = state.State(weights(), 256, 4, "bf16", limit=65536)
+    dec.solo = SimpleNamespace(st=solo)
+    resized = []
+    dec._state_changed = lambda st: resized.append(st) if st is solo else None    # drops the slot's graphs
+    assert dec._grow(solo, 300, alone=True) and solo.capacity == 8192 and resized == [solo]
+    dec._shrink(solo)                                                   # a request ended: the rows stay
+    assert solo.capacity == 8192 and solo.pos == 0 and resized == [solo]
+    other = stream(multi, state, torch, 0, 254)
+    dec.streams = {0: other}
+    assert dec._grow(other.st, 300)                                     # another stream needs the memory
+    assert other.st.capacity == 8192 and solo.capacity == 256 and resized == [solo, solo]
+    dec._shrink(other.st)                                               # any other slot shrinks as before
+    assert other.st.capacity == 256
+
+    big = decoder(multi, state, torch, room=1 << 40)
+    solo = state.State(weights(), 256, 4, "bf16", limit=65536)
+    big.solo, big._state_changed = SimpleNamespace(st=solo), (lambda st: None)
+    assert big._grow(solo, 300, alone=True) and solo.capacity == 8192
+    assert big._grow(solo, 8193, alone=True) and solo.capacity == 16384
+    assert big._grow(solo, 16385, alone=True) and solo.capacity == 32768      # not 24576: doubling
+    assert big._grow(solo, 40000, alone=True) and solo.capacity == 65536      # and never past the window
+    big._shrink(solo, release=True)                                     # memory is short: it gives them back
+    assert solo.capacity == 256

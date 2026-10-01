@@ -99,6 +99,8 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         if rows <= st.capacity or st.capacity >= st.limit:       # admission's count keeps a stream within its window
             return True
         size = min(st.limit, -(-rows // STEP) * STEP)
+        if self._is_solo(st):                    # each resize recaptures its graphs: double, so they rarely do
+            size = min(st.limit, max(size, 1 << (st.capacity - 1).bit_length() + 1))
         grow = st.cache_bytes(size) - st.cache_bytes()
         while not self.memory_gate.fits(grow + st.layer_bytes(size)):     # a layer's old buffers stay until its copy
             if not self._evict_kept(st):
@@ -113,11 +115,15 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
             torch.cuda.empty_cache()             # the old buffers back to the system: MemAvailable stays true
         return True
 
-    def _shrink(self, st: State) -> None:
-        """An idle slot back to its first rows: its caches' memory returns to the gate."""
+    def _is_solo(self, st: State) -> bool:
+        return self.solo is not None and getattr(st, "source", st) is self.solo.st      # a plan's stand-in too
+
+    def _shrink(self, st: State, *, release: bool = False) -> None:
+        """An idle slot back to its first rows: its caches' memory returns to the gate. The lone stream's graph
+        slot keeps its rows (a resize recaptures its graphs) unless ``release``: memory is short."""
 
         st.reset(self.w)
-        if st.capacity > FIRST:
+        if st.capacity > FIRST and (release or not self._is_solo(st)):
             self._state_changed(st)
             self.memory_gate.give(-st.resize(FIRST))
 
@@ -128,10 +134,14 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         for ids, st, _, _ in self.kept:
             if st is not keep and id(st) not in busy:
                 self._drop_kept(st)
-                self._shrink(st)
+                self._shrink(st, release=True)
                 if all(f is not st for f in self.free):
                     self.free.append(st)
                 return True
+        solo = None if self.solo is None or self.planning else self.solo.st     # an idle graph slot's rows
+        if solo is not None and solo is not keep and id(solo) not in busy and solo.capacity > FIRST:
+            self._shrink(solo, release=True)
+            return True
         return False
 
     def _make_room(self) -> list[Stream]:
@@ -154,7 +164,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
             self.streams.pop(newest.sid, None)
             self.held.pop(newest.sid, None)
             self._drop_kept(newest.st)
-            self._shrink(newest.st)
+            self._shrink(newest.st, release=True)
             self.free.append(newest.st)
             return [newest, *self._make_room()]
         for s in live:
@@ -208,8 +218,6 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
     def warm(self) -> None:
         """Warm a full prompt chunk, a cut partial chunk, drafts and a shared round, then discard their state."""
 
-        if self.solo is not None:
-            self.solo.graphs.warm(self.depth + 1)
         self.solo_on = False
         try:
             s = Stream([0] * min(self.prefill_rows + WARM_TAIL + 1, self.capacity - self.depth - 2), 2)
@@ -223,6 +231,9 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
                 self.free.append(s.st)
         finally:
             self.solo_on = self.solo is not None
+        if self.solo is not None:                    # last: the graph slot's rows are the ones requests will find
+            self.solo.graphs.warm(self.depth + 1)
+            self.solo.st.reset(self.w)               # the captures wrote its state
 
     @torch.no_grad()
     def admit(self, s: Stream, told=None) -> None:
