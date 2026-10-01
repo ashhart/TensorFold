@@ -111,7 +111,7 @@ class MultiDecoder:
             for _ in range(4):
                 torch.cuda.synchronize()
                 t = time.perf_counter()
-                g["a0"].replay(), g["a1"].replay(), g["b"].replay()
+                e._replay_free(g)
                 torch.cuda.synchronize()
                 best = min(best, time.perf_counter() - t)
             ms.append(1e3 * best)

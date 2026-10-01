@@ -10,5 +10,5 @@ from pathlib import Path
 def reader():
     from tensorfold.cuda.build import load
 
-    return load("tensorfold_dsv41_rowread_v1", [str(Path(__file__).with_name("rowread.cpp"))],
+    return load("tensorfold_dsv41_rowread_v4", [str(Path(__file__).with_name("rowread.cpp"))],
                 extra_cflags=["-O3"])

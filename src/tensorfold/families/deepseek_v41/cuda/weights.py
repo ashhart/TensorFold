@@ -22,6 +22,9 @@ _WORKSPACE = None
 
 
 PROMPT_TILES = (64, 64, 4, 4, 8)     # the prompt GEMM's (rows, K step, warps, stages, raster group) on GB10
+# decode / verify: TF_FOLD_SHARED=1 runs the shared expert as one more member of the routed experts' grouped call;
+# measured slower (its 5-bit blocks set the tail: 35.0 vs 36.0 tok/s serial, 113.8 vs 117.1 at 16 clients), so off
+FOLD_SHARED = __import__("os").environ.get("TF_FOLD_SHARED", "0") == "1"
 
 
 class Linear(Exl3Linear):
@@ -101,6 +104,7 @@ class MoEW:
     bias: torch.Tensor        # fp32 [E]
     experts: ex3.Exl3RoutedExperts
     shared: tuple[Exl3Linear, Exl3Linear, Exl3Linear]   # w1, w3 (this rank's columns), w2 (rows)
+    shared_id: int | None = None   # the shared expert's index in ``experts`` (FOLD_SHARED), for decode / verify rows
 
 
 @dataclass
@@ -198,9 +202,17 @@ def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, d
         gate = [triple(e, "w1") for e in range(n_experts)]
         up = [triple(e, "w3") for e in range(n_experts)]
         down = [triple(e, "w2") for e in range(n_experts)]
-        experts = ex3.prepare(gate, up, down, "mul1", device=dev)
-        shared = (lin(p + "shared_experts.w1"), lin(p + "shared_experts.w3"), lin(p + "shared_experts.w2"))
-        return MoEW(t(p + "gate.weight"), t(p + "gate.bias", torch.float32), experts, shared)
+        if not FOLD_SHARED:
+            experts = ex3.prepare(gate, up, down, "mul1", device=dev)
+            shared = (lin(p + "shared_experts.w1"), lin(p + "shared_experts.w3"), lin(p + "shared_experts.w2"))
+            return MoEW(t(p + "gate.weight"), t(p + "gate.bias", torch.float32), experts, shared)
+        # the shared expert as one more grouped expert (this rank's width, like the routed ones; its own bits): its
+        # stored trellis serves both the grouped decode kernel and the prompt GEMM (the "stored" layout), one copy
+        sh = [(t(p + f"shared_experts.{w}.trellis"), t(p + f"shared_experts.{w}.suh"), t(p + f"shared_experts.{w}.svh"))
+              for w in ("w1", "w3", "w2")]
+        experts = ex3.prepare(gate + [sh[0]], up + [sh[1]], down + [sh[2]], "mul1", device=dev)
+        shared = tuple(Linear.from_tensors(*m, "mul1", device=dev, layout="stored") for m in sh)
+        return MoEW(t(p + "gate.weight"), t(p + "gate.bias", torch.float32), experts, shared, n_experts)
 
     def engram(i: int) -> EngramW | None:
         if i not in cfg.engram_layer_ids:

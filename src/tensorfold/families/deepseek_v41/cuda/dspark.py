@@ -46,7 +46,10 @@ class DSpark:
         self.stage_ring = RING
         self.slot = eng.slot
         self.g_base = torch.zeros((1,), dtype=torch.long, device=self.dev)   # the drafting stream's first ring row
-        self.scratch = [ex3.Scratch(b.moe.experts, 8, c.dspark_num_experts_per_tok) for b in self.dw.layers]
+        from .serial import decode_slots
+
+        self.scratch = [ex3.Scratch(b.moe.experts, 8, decode_slots(b.moe, c.dspark_num_experts_per_tok))
+                        for b in self.dw.layers]
         self.noise = torch.full((tokens - 1,), c.dspark_noise_token_id, dtype=torch.long, device=self.dev)
         self.taps: list[torch.Tensor] = []
         self.graph = None
@@ -226,7 +229,9 @@ class DSpark:
         """Draft graphs for 1..``streams`` streams at once (each stream's N block rows: M * N <= the decode rows)."""
 
         c = self.c
-        self.scratch_multi = [ex3.Scratch(b.moe.experts, streams * self.N, c.dspark_num_experts_per_tok)
+        from .serial import decode_slots
+
+        self.scratch_multi = [ex3.Scratch(b.moe.experts, streams * self.N, decode_slots(b.moe, c.dspark_num_experts_per_tok))
                               for b in self.dw.layers]
         self.multi_graphs = {}
         saved = [t.clone() for t in self.swa_big]

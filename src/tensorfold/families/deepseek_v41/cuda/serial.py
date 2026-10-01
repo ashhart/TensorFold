@@ -56,7 +56,7 @@ class Comm:
             total += recv[r]
         return total
 
-    def partials(self, partial: torch.Tensor) -> torch.Tensor:
+    def partials(self, partial: torch.Tensor, during=None) -> torch.Tensor:
         """Every rank's partial, stacked in rank order [world, ...] (the consumer adds them in order): fp32 for decode
         and verify windows, bf16 for prompt chunks (half the bytes; the prompt path has its own arithmetic)."""
 
@@ -64,15 +64,17 @@ class Comm:
         if self.world == 1:
             return send[None]
         recv = torch.empty((self.world, *send.shape), dtype=send.dtype, device=send.device)
+        if during is not None:                                  # side work while the gather waits (L2 warming)
+            during()
         self.nccl.all_gather(send.view(-1), recv.view(-1))
         return recv
 
-    def partials_rows(self, make, R: int):
+    def partials_rows(self, make, R: int, during=None):
         """``partials`` of the rows ``make(r0, r1)`` computes, in PROMPT_BLOCKS row blocks for prompt chunks: each
         block's all-gather runs on a side stream while the next block computes (post() reads the block layout)."""
 
         if R <= PROMPT_ROWS or self.world == 1 or not PROMPT_OVERLAP:
-            return self.partials(make(0, R))
+            return self.partials(make(0, R), during if R <= PROMPT_ROWS else None)
         h = (triton_cdiv(R, PROMPT_BLOCKS) + 15) // 16 * 16
         main = torch.cuda.current_stream()
         if self.side is None:
@@ -116,7 +118,13 @@ class Caches:
 
 
 SKIP_READS = os.environ.get("TF_SKIP_READS") == "1"   # timing experiments: stale Engram rows (wrong output)
-SKIP_SHARED = os.environ.get("TF_SKIP_SHARED") == "1"  # timing experiments: no shared expert in decode (wrong output)
+# decode / verify: while an all-gather waits on the other rank, a side stream warms L2 with the weights read next
+# (the router and shared expert before the MoE, the next layer's first projections before its attention)
+L2_PREFETCH = os.environ.get("TF_L2_PREFETCH") == "1"   # measured: no gain at one row (and idle gaps before the gather)
+SKIP_SHARED = os.environ.get("TF_SKIP_SHARED") == "1"
+# decode / verify step as one graph: the graph waits on a pinned-memory flag for each table's rows (read by the host
+# meanwhile) instead of three graphs launched around the reads (each graph switch left the GPU idle ~0.7 ms)
+ONE_GRAPH = os.environ.get("TF_ONE_GRAPH", "1") != "0"  # timing experiments: no shared expert in decode (wrong output)
 STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS") or "16")   # decode/verify Engram row reads (few rows)
 # decode/verify: each rank reads its share of a token's Engram rows and the graphs all-gather the bytes (same rows)
 SPLIT_READS = os.environ.get("TF_SPLIT_READS", "1") != "0"
@@ -239,6 +247,12 @@ def group_members(pick: torch.Tensor, E: int, s) -> tuple[torch.Tensor, torch.Te
     return ids, members
 
 
+def decode_slots(m, top_k: int) -> int:
+    """Expert slots a decode / verify row takes: its routed picks, and the shared expert when folded in."""
+
+    return top_k + (m.shared_id is not None)
+
+
 def routed_prompt(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor, ex, s, R: int, limit: float) -> torch.Tensor:
     """``ex3.routed`` for prompt chunks: the grouped kernel's grid spans member tiles up to the busiest expert's row
     count, not R (at 1,024 rows that is ~16x fewer, mostly empty, programs)."""
@@ -348,7 +362,7 @@ class SerialEngine:
         self.tables = E.Tables(engram_dir, c.engram_layer_ids)
         # every layer has the same shapes: one small scratch for decode / verify rows, one for prompt chunks whose
         # gate/up inputs and fp32 partials the prompt kernel no longer reads (rotated while staged, its own fp16 Z)
-        small = ex3.Scratch(w.layers[0].moe.experts, PROMPT_ROWS, c.num_experts_per_tok)
+        small = ex3.Scratch(w.layers[0].moe.experts, PROMPT_ROWS, decode_slots(w.layers[0].moe, c.num_experts_per_tok))
         self.scratch = [small] * len(w.layers)
         self.scratch_prompt = ex3.Scratch(w.layers[0].moe.experts, MAX_ROWS, c.num_experts_per_tok)
         if PROMPT_ZB is not None and PROMPT_ROTX:
@@ -357,6 +371,15 @@ class SerialEngine:
             torch.cuda.empty_cache()
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
         self.par = Par()
+        self._pf_stream, self._pf_moe, self._pf_attn = None, {}, {}
+        if L2_PREFETCH and comm.world > 1:
+            self._pf_stream = torch.cuda.Stream()
+            for i, lw in enumerate(w.layers):
+                m = lw.moe
+                self._pf_moe[lw.index] = K.prefetch_table([m.gate, m.shared[0].words, m.shared[1].words])
+                if i + 1 < len(w.layers):
+                    a = w.layers[i + 1].attn
+                    self._pf_attn[lw.index] = K.prefetch_table([a.wq_a.words, a.wkv.words])
         self._rp = RoundProfile() if os.environ.get("TF_ROUND_PROF") else None
         self.pool = None                                            # tensorfold.cuda.kv_pool.PrefixPool, when kept
         self.state = None
@@ -638,6 +661,7 @@ class SerialEngine:
             f = self.moe(layer, x, x.shape[0])
             if self.debug is not None:
                 self.debug.append({"attn_in": x.clone(), "X": X.clone(), "f": f.clone() if torch.is_tensor(f) else f})
+        self._join()                                                    # (a graph ends with every stream joined)
         return X, pre, f, post, comb
 
     # -- decode graphs ----------------------------------------------------------------------------------------
@@ -692,10 +716,69 @@ class SerialEngine:
             g["carry"] = run_a1(g["carry0"])
         with torch.cuda.graph(g["b"], pool=g["a0"].pool()):
             g["logits"], g["next"] = run_b(g["carry"])
+        if ONE_GRAPH:                                                   # the step in one launch (step_rows / multi)
+            self._prime_flags()
+
+            def run_one():
+                carry0 = run_a0()
+                K.await_rows(self._flag, self._seen, g["h_raw"][0], g["raw"][0], self._flag_err)
+                carry = run_a1(carry0)
+                K.await_rows(self._flag, self._seen, g["h_raw"][1], g["raw"][1], self._flag_err)
+                return run_b(carry)
+
+            g["one"] = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g["one"], pool=g["a0"].pool()):
+                g["logits"], g["next"] = run_one()              # the steps read these (the timing replays don't)
         torch.cuda.synchronize()
         self._restore_rows(saved)
         self.graphs[rows] = g
         self.graph = True
+
+    def _prime_flags(self) -> None:
+        """The one-graph step's host flag and device counter (shared by every graph), and its kernels compiled: one
+        wait run eagerly against a published flag. Counters advance in step: one publish per wait."""
+
+        if getattr(self, "_flag", None) is not None:
+            return
+        self._flag = torch.zeros((1,), dtype=torch.int64).pin_memory()
+        self._flag_err = torch.zeros((1,), dtype=torch.int32).pin_memory()
+        self._seen = torch.zeros((1,), dtype=torch.int64, device=self.dev)
+        self._flag_n = 0
+        scratch = torch.zeros((64,), dtype=torch.uint8).pin_memory()
+        self._publish()
+        K.await_rows(self._flag, self._seen, scratch, torch.empty((64,), dtype=torch.uint8, device=self.dev),
+                     self._flag_err)
+        torch.cuda.synchronize()
+
+    def _publish(self) -> None:
+        """Release the next wait of the one-graph step (after its rows are in the pinned buffer)."""
+
+        from .rowread import reader
+
+        self._flag_n += 1
+        reader().publish(self._flag, self._flag_n)
+
+    def _launch(self, g) -> None:
+        """Start a decode step: the one graph (the caller then publishes each table's rows) or the first of three."""
+
+        if "one" in g:
+            g["one"].replay()
+        else:
+            g["a0"].replay()
+
+    def _replay_free(self, g) -> None:
+        """A whole step for timing, its waits released up front (rows: whatever the buffers hold)."""
+
+        if "one" in g:
+            self._publish()
+            self._publish()
+            g["one"].replay()
+        else:
+            g["a0"].replay(), g["a1"].replay(), g["b"].replay()
+
+    def _check_flags(self) -> None:
+        if getattr(self, "_flag_err", None) is not None and int(self._flag_err[0]):
+            raise RuntimeError("decode graph waited for Engram rows that were never published")
 
     def agree(self, k: int) -> int:
         """Rank 0's draft count for this round, on every rank (a tiny all-gather; ranks must replay the same graphs)."""
@@ -734,7 +817,7 @@ class SerialEngine:
             g["tok"].copy_(torch.tensor(tail))
             g["pos"].copy_(torch.arange(max(P - R, 0), max(P - R, 0) + R))
             g["sid"].fill_(self.slot)
-            return lambda: (g["a0"].replay(), g["a1"].replay(), g["b"].replay())
+            return lambda: self._replay_free(g)
 
         draft = 0.0
         if self.drafter is not None and self.drafter.graph:
@@ -839,18 +922,26 @@ class SerialEngine:
         g["tok"].copy_(torch.tensor([t for _, t in rows]), non_blocking=True)
         g["pos"].copy_(torch.tensor(pos), non_blocking=True)
         g["sid"].copy_(torch.tensor(sid), non_blocking=True)
-        g["a0"].replay()
+        one = "one" in g
+        self._launch(g)
         mine = self.read_cols
         self.tables.gather(h[:, 0, mine].reshape(1, -1), out=g["h_raw"][:1], layers=[0], threads=threads)
         t2 = time.perf_counter()
-        g["raw"][0].copy_(g["h_raw"][0].view_as(g["raw"][0]), non_blocking=True)
-        g["a1"].replay()
+        if one:
+            self._publish()
+        else:
+            g["raw"][0].copy_(g["h_raw"][0].view_as(g["raw"][0]), non_blocking=True)
+            g["a1"].replay()
         self.tables.gather(h[:, 1, mine].reshape(1, -1), out=g["h_raw"][1:], layers=[1], threads=threads)
         t3 = time.perf_counter()
-        g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
-        g["b"].replay()
+        if one:
+            self._publish()
+        else:
+            g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
+            g["b"].replay()
         g["h_next"].copy_(g["next"], non_blocking=True)
         torch.cuda.current_stream().synchronize()
+        self._check_flags()
         if mp is not None:
             for k, v in (("hash", t1 - t0), ("gather0", t2 - t1), ("gather1", t3 - t2), ("wait", time.perf_counter() - t3)):
                 mp[k] = mp.get(k, 0.0) + v
@@ -878,7 +969,8 @@ class SerialEngine:
         g["pos"].copy_(torch.arange(p0, p0 + R), non_blocking=True)
         g["sid"].fill_(self.slot)
         rp and rp.event("v.gpu0")
-        g["a0"].replay()                                                # layer 0 needs no table rows
+        one = "one" in g
+        self._launch(g)                                                 # layer 0 needs no table rows
         rp and rp.mark("v.a0")
         h = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[-R:]   # [R, 2, 24]
         rp and rp.mark("v.hash")
@@ -886,15 +978,21 @@ class SerialEngine:
             self.tables.gather(h[:, 0, self.read_cols].reshape(1, -1), out=g["h_raw"][:1], layers=[0],  # ~ layer 0
                                threads=STEP_READ_THREADS)
         rp and rp.mark("v.gather0")
-        g["raw"][0].copy_(g["h_raw"][0].view_as(g["raw"][0]), non_blocking=True)
-        g["a1"].replay()
+        if one:
+            self._publish()
+        else:
+            g["raw"][0].copy_(g["h_raw"][0].view_as(g["raw"][0]), non_blocking=True)
+            g["a1"].replay()
         rp and rp.mark("v.a1")
         if not SKIP_READS:
             self.tables.gather(h[:, 1, self.read_cols].reshape(1, -1), out=g["h_raw"][1:], layers=[1],  # ~ 1-13
                                threads=STEP_READ_THREADS)
         rp and rp.mark("v.gather1")
-        g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
-        g["b"].replay()
+        if one:
+            self._publish()
+        else:
+            g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
+            g["b"].replay()
         rp and rp.mark("v.b")
         rp and rp.event("v.gpu1")
         if constraint is not None:                                      # the grammar's rows masked, then chosen
@@ -904,6 +1002,7 @@ class SerialEngine:
             return sample_rows(g["logits"], [p0 + 1 + j for j in range(R)], sampling)
         g["h_next"].copy_(g["next"], non_blocking=True)
         torch.cuda.current_stream().synchronize()
+        self._check_flags()
         return g["h_next"].tolist()
 
     # -- pieces ----------------------------------------------------------------------------------------------
@@ -918,6 +1017,7 @@ class SerialEngine:
                        c.hc_sinkhorn_iters)
 
     def attention(self, layer: LayerW, x: torch.Tensor, pos: torch.Tensor, static: bool) -> torch.Tensor:
+        self._join()
         c, st, a = self.c, self.state, layer.attn
         L, R = layer.index, x.shape[0]
         Dh, W = c.head_dim, c.sliding_window
@@ -967,7 +1067,9 @@ class SerialEngine:
             z = torch.cat(self.par(*[lambda g=g, wo=wo: wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)]), dim=1)
         else:
             z = torch.cat([wo(o[:, g]) for g, wo in enumerate(a.wo_a)], dim=1)
-        return self.comm.partials_rows(lambda r0, r1: a.wo_b(z[r0:r1], out_dtype=F32 if R <= PROMPT_ROWS else BF), R)
+        pf = self._pf_moe.get(L) if R <= PROMPT_ROWS else None        # the MoE's router + shared expert, meanwhile
+        return self.comm.partials_rows(lambda r0, r1: a.wo_b(z[r0:r1], out_dtype=F32 if R <= PROMPT_ROWS else BF), R,
+                                       during=(lambda: self._prefetch(pf)) if pf is not None else None)
 
     def select(self, layer: LayerW, qr: torch.Tensor, x: torch.Tensor, pos: torch.Tensor,
                static: bool = True) -> torch.Tensor:
@@ -1048,7 +1150,22 @@ class SerialEngine:
             key = K.rmsnorm(ix.wk(latent), ix.k_norm, c.rms_norm_eps)
             ik_t.index_copy_(0, slot, K.rope(key, start, cos, sin))
 
+    def _prefetch(self, table) -> None:
+        """Warm L2 with ``table``'s weights on the prefetch stream (joined by ``_join``)."""
+
+        main, side = torch.cuda.current_stream(), self._pf_stream
+        side.wait_stream(main)
+        with torch.cuda.stream(side):
+            K.l2_prefetch(table)
+        self._pf_live = True
+
+    def _join(self) -> None:
+        if getattr(self, "_pf_live", False):
+            torch.cuda.current_stream().wait_stream(self._pf_stream)
+            self._pf_live = False
+
     def moe(self, layer: LayerW, x: torch.Tensor, R: int, top_k: int | None = None, scratch=None) -> torch.Tensor:
+        self._join()
         c, m = self.c, layer.moe
         limit = c.swiglu_limit
         if scratch is None:
@@ -1066,11 +1183,20 @@ class SerialEngine:
             pick, w = route()
             return ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit)
 
+        if R <= PROMPT_ROWS and m.shared_id is not None:
+            # the shared expert as one more slot of every row (weight 1, added last), in the same grouped call
+            pick, w = route()
+            sid = m.experts.count if SKIP_SHARED else m.shared_id                 # (timing: a skipped slot)
+            pick = torch.cat([pick, torch.full((R, 1), sid, dtype=pick.dtype, device=pick.device)], dim=1)
+            w = torch.cat([w, torch.ones((R, 1), dtype=w.dtype, device=w.device)], dim=1)
+            return self.comm.partials(ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit))
         if R <= PROMPT_ROWS:                                        # the whole shared expert beside the routed ones
             if SKIP_SHARED:
                 return self.comm.partials(routed_rows())
             routed, shared = self.par(routed_rows, lambda: m.shared[2](shared_act(), out_dtype=F32))
-            return self.comm.partials(routed + shared)
+            main_layer = layer.index < len(self.scratch) and scratch is self.scratch[layer.index]   # (not drafter)
+            pf = self._pf_attn.get(layer.index) if main_layer else None
+            return self.comm.partials(routed + shared, during=(lambda: self._prefetch(pf)) if pf is not None else None)
         pick, w = route()
         routed = routed_prompt(x.contiguous(), pick, w, m.experts, scratch, R, limit)
         act = shared_act()

@@ -15,7 +15,7 @@ a = ap.parse_args()
 torch.cuda.set_device(0)
 nccl = NCCL(a.rank, 2, a.master, a.port)
 nccl.barrier()
-for rows, dt in ((1, torch.float32), (2, torch.float32), (4, torch.float32), (8, torch.float32), (16, torch.float32), (128, torch.bfloat16),
+for rows, dt in ((1, torch.float32), (2, torch.float32), (3, torch.float32), (4, torch.float32), (6, torch.float32), (7, torch.float32), (8, torch.float32), (16, torch.float32), (32, torch.float32), (128, torch.bfloat16),
                  (512, torch.bfloat16), (1024, torch.bfloat16), (2048, torch.bfloat16)):
     n = rows * 5120
     send = torch.randn(n, device="cuda").to(dt)

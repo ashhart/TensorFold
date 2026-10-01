@@ -31,6 +31,8 @@ def main() -> None:
     ap.add_argument("--ref", type=Path, help="reference .pt of the same prompt (rank 0 compares)")
     ap.add_argument("--decode", type=int, default=32)
     ap.add_argument("--profile", action="store_true", help="profile 4 decode steps after the run (rank 0 prints)")
+    ap.add_argument("--profile-step", type=int, default=0,
+                    help="after the cases: profile this many 1-row decode graph replays (kernels inside the graphs)")
     ap.add_argument("--profile-rows", type=int, default=1, help="rows a profiled step takes (a verify window)")
     ap.add_argument("--profile-prefill", type=int, default=0, help="profile one prompt chunk of N rows and exit")
     ap.add_argument("--no-parity", action="store_true")
@@ -348,6 +350,47 @@ def main() -> None:
                 if args.rank == 0:
                     print(f"live-context replay {R} rows: {(time.perf_counter() - t) / 5 * 1e3:.1f} ms "
                           f"(context {len(eng.state.ids)})", flush=True)
+        if args.profile_step and eng.graphs:                  # kernels of the 1-row decode graphs, back to back
+            from torch.profiler import ProfilerActivity, profile
+
+            g = eng.graphs[1]
+            for _ in range(3):
+                g["a0"].replay(), g["a1"].replay(), g["b"].replay()
+            nccl.barrier()
+            torch.cuda.synchronize()
+            n = args.profile_step
+            if "one" in g:                                    # the whole step as one graph vs three launches
+                for label, fn in (("three launches", lambda: (g["a0"].replay(), g["a1"].replay(), g["b"].replay())),
+                                  ("one launch", lambda: eng._replay_free(g))) * 2:
+                    nccl.barrier()
+                    torch.cuda.synchronize()
+                    t = time.perf_counter()
+                    for _ in range(n):
+                        fn()
+                    torch.cuda.synchronize()
+                    if args.rank == 0:
+                        print(f"full-graph test: {label}: {(time.perf_counter() - t) / n * 1e3:.2f} ms a step", flush=True)
+            if os.environ.get("TF_NSYS"):                     # an Nsight Systems capture range instead
+                torch.cuda.profiler.start()
+                for _ in range(n):
+                    eng._replay_free(g)
+                torch.cuda.synchronize()
+                torch.cuda.profiler.stop()
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                t = time.perf_counter()
+                for _ in range(n):
+                    g["a0"].replay(), g["a1"].replay(), g["b"].replay()
+                torch.cuda.synchronize()
+                wall = (time.perf_counter() - t) / n * 1e3
+            if args.rank == 0:
+                ev = prof.key_averages()
+                busy = sum(e.self_device_time_total for e in ev) / n / 1e3
+                print(f"profile-step: {wall:.2f} ms a step, kernels {busy:.2f} ms (side streams overlap: may exceed)",
+                      flush=True)
+                for e in sorted(ev, key=lambda e: -e.self_device_time_total)[:40]:
+                    if e.self_device_time_total > 0:
+                        print(f"  {e.self_device_time_total / n / 1e3:7.3f} ms  {e.count / n:6.1f}x  {e.key[:110]}",
+                              flush=True)
         if args.rank == 0 and getattr(eng, "_round_costs", None):
             print("graph round costs (ms, k = 0..n, draft included):", [round(c, 1) for c in eng._round_costs],
                   flush=True)

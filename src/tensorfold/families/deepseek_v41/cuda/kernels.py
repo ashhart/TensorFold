@@ -613,20 +613,39 @@ def route(logits: torch.Tensor, bias: torch.Tensor, k: int, scale: float) -> tup
 
 @triton.jit
 def _router_logits(X, W, OUT, R, E: tl.constexpr, D: tl.constexpr, BR: tl.constexpr, BE: tl.constexpr,
-                   BK: tl.constexpr):
-    """OUT [R, E] fp32 = X [R, D] fp16 @ W [E, D]^T fp16; a row's K order is fixed and MMA rows are independent."""
+                   BK: tl.constexpr, KS: tl.constexpr):
+    """OUT [KS, R, E] fp32: slice ks of X [R, D] fp16 @ W [E, D]^T fp16 over D / KS inputs; a row's K order within
+    a slice is fixed and MMA rows are independent."""
 
     rb = tl.program_id(0)
     eb = tl.program_id(1)
+    ks = tl.program_id(2)
     r = rb * BR + tl.arange(0, BR)
     e = eb * BE + tl.arange(0, BE)
     k = tl.arange(0, BK)
     acc = tl.zeros((BR, BE), dtype=tl.float32)
-    for k0 in range(0, D, BK):
+    for k0 in range(ks * (D // KS), (ks + 1) * (D // KS), BK):
         x = tl.load(X + r[:, None] * D + k0 + k[None, :], mask=(r < R)[:, None], other=0.0)
         w = tl.load(W + e[:, None] * D + k0 + k[None, :], mask=(e < E)[:, None], other=0.0)
         acc = tl.dot(x, tl.trans(w), acc)
-    tl.store(OUT + r[:, None] * E + e[None, :], acc, mask=(r < R)[:, None] & (e < E)[None, :])
+    tl.store(OUT + (ks * R + r[:, None]) * E + e[None, :], acc, mask=(r < R)[:, None] & (e < E)[None, :])
+
+
+@triton.jit
+def _sum_slices(P, OUT, n, KS: tl.constexpr, B: tl.constexpr):
+    """OUT [n] = P [KS, n] summed over the slices in order (fixed per element)."""
+
+    i = tl.program_id(0) * B + tl.arange(0, B)
+    m = i < n
+    acc = tl.load(P + i, mask=m, other=0.0)
+    for s in range(1, KS):
+        acc += tl.load(P + s * n + i, mask=m, other=0.0)
+    tl.store(OUT + i, acc, mask=m)
+
+
+# K slices of the router / indexer-weight matmuls: one row's 384 (or 64) outputs alone are a dozen programs, too few
+# to stream the weights; slices fill the SMs and are added in a fixed order (the same for every row count)
+ROUTER_SLICES = int(__import__("os").environ.get("TF_ROUTER_SLICES") or 8)
 
 
 def router_logits(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
@@ -634,11 +653,84 @@ def router_logits(x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
 
     R, D = x.shape
     E = w.shape[0]
+    BR, BE, BK = 16, 32, 64
+    KS = ROUTER_SLICES if D % (ROUTER_SLICES * BK) == 0 else 1
+    part = torch.empty((KS, R, E), dtype=torch.float32, device=x.device)
+    _router_logits[(triton.cdiv(R, BR), triton.cdiv(E, BE), KS)](x.half().contiguous(), w, part, R, E=E, D=D, BR=BR,
+                                                                 BE=BE, BK=BK, KS=KS, num_warps=4)
+    if KS == 1:
+        return part[0]
     out = torch.empty((R, E), dtype=torch.float32, device=x.device)
-    BR, BE, BK = 16, 32, 256
-    _router_logits[(triton.cdiv(R, BR), triton.cdiv(E, BE))](x.half().contiguous(), w, out, R, E=E, D=D, BR=BR, BE=BE,
-                                                             BK=BK, num_warps=4)
+    _sum_slices[(triton.cdiv(R * E, 1024),)](part, out, R * E, KS=KS, B=1024, num_warps=4)
     return out
+
+
+@triton.jit
+def _l2_prefetch(ADDR, LINES, n, B: tl.constexpr):
+    """Prefetch regions into L2 (evict-last): region j is LINES[j] 128-byte lines from address ADDR[j]."""
+
+    pid = tl.program_id(0)
+    npg = tl.num_programs(0)
+    for j in range(n):
+        base = tl.load(ADDR + j)
+        lines = tl.load(LINES + j)
+        for i0 in range(pid * B, lines, npg * B):
+            i = i0 + tl.arange(0, B)
+            a = base + tl.where(i < lines, i, 0).to(tl.int64) * 128
+            tl.inline_asm_elementwise("prefetch.global.L2::evict_last [$1]; mov.u32 $0, 0;", "=r,l", [a],
+                                      dtype=tl.int32, is_pure=False, pack=1)
+
+
+def prefetch_table(tensors: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    """(addresses, 128-byte line counts) of tensors' storage, for ``l2_prefetch``."""
+
+    dev = tensors[0].device
+    addr = torch.tensor([t.data_ptr() for t in tensors], dtype=torch.int64, device=dev)
+    lines = torch.tensor([(t.numel() * t.element_size() + 127) // 128 for t in tensors], dtype=torch.int64, device=dev)
+    return addr, lines
+
+
+def l2_prefetch(table: tuple[torch.Tensor, torch.Tensor], programs: int = 48) -> None:
+    """Warm L2 with weights a later step reads (no data moves to registers; the kernel ends once issued)."""
+
+    addr, lines = table
+    _l2_prefetch[(programs,)](addr, lines, addr.numel(), B=256, num_warps=8)
+
+
+@triton.jit
+def _await_rows(FLAG, SEEN, SRC, DST, ERR, n, B: tl.constexpr, SPIN: tl.constexpr):
+    """Wait until the host's flag passes this graph's counter (``SEEN`` + 1), then copy ``n`` int32 words of rows from
+    pinned host memory into the graph's buffer. ``ERR`` (pinned) <- 1 when the host never published (a bounded wait)."""
+
+    target = tl.load(SEEN) + 1
+    f = tl.load(FLAG, volatile=True)
+    it = 0
+    while (f < target) & (it < SPIN):
+        f = tl.load(FLAG, volatile=True)
+        it += 1
+    if f < target:
+        tl.store(ERR, 1)
+    tl.inline_asm_elementwise("fence.acq_rel.sys; mov.b64 $0, $1;", "=l,l", [f], dtype=tl.int64, is_pure=False,
+                              pack=1)
+    pid = tl.program_id(0)
+    npg = tl.num_programs(0)
+    for i0 in range(pid * B, n, npg * B):
+        i = i0 + tl.arange(0, B)
+        m = i < n
+        tl.store(DST + i, tl.load(SRC + i, mask=m, volatile=True), mask=m)
+
+
+@triton.jit
+def _bump(SEEN):
+    tl.store(SEEN, tl.load(SEEN) + 1)
+
+
+def await_rows(flag: torch.Tensor, seen: torch.Tensor, src: torch.Tensor, dst: torch.Tensor, err: torch.Tensor) -> None:
+    """In a decode graph: wait for the host's rows (``flag`` > ``seen``), copy them in, count the wait in ``seen``."""
+
+    s32, d32 = src.view(torch.int32).reshape(-1), dst.view(torch.int32).reshape(-1)
+    _await_rows[(8,)](flag, seen, s32, d32, err, s32.numel(), B=1024, SPIN=20_000_000, num_warps=4)
+    _bump[(1,)](seen)
 
 
 @triton.jit
