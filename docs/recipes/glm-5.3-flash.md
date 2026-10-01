@@ -44,6 +44,25 @@ The expert decoder and BF16 target matmul keep row arithmetic fixed. A quantized
 propose drafts, but target verification retains the BF16 head. EXL3 speed, capacity and long-context
 qualification are TBD [release-0.3.5].
 
+#### Dense projections from an EXL3 pack
+
+The checkpoint quantizes the routed experts only: attention, the shared experts, the three dense MLPs and the head
+stay BF16, about 9.7 GiB a rank that every decode round reads. `TF_GLM_DENSE_EXL3` names one or more safetensors
+files (`:`-separated) holding EXL3 groups for some of those matrices under the checkpoint's own module names
+(`<module>.trellis`, `suh`, `svh`, and `mul1` or `mcg`), for instance the non-expert groups of
+`turboderp/GLM-5.3-Flash-exl3`, whose KDA `qkv_proj` is cut back into `q_proj` / `k_proj` / `v_proj`. Each matrix a
+pack holds runs on `tensorfold.cuda.exl3`'s row-invariant `Exl3Linear` (the decode kernel up to 128 rows, the prompt
+GEMM above); the others keep the BF16 path. A rank takes the tiles its BF16 twin's split rule gives it (output
+columns for q/k/v, q_b, gate and up; input rows for o and down; whole for q_a and kv_a; its vocabulary columns for the
+head), so the ranks' all-reduce returns the full layer's output. A pack is lossy like any EXL3 weight, and a pack that
+holds `lm_head` replaces the BF16 head for verification too; leave the head out to keep it.
+
+Measured on two DGX Sparks with a pack of attention and shared experts at 4 bpw, dense MLPs at 5 and the head at 6
+(MiaAI-Lab's GLM-5.3-Flash TensorFold recipe, whose FP8 dense weights serve the matrices the pack lacks; sparkDash,
+1 stream, prose / code / structured): FP8 51.4 / 116.1 / 99.7 tok/s, the pack 66.8 / 122.9 / 107.1. HumanEval
+(164 problems x 5 samples) 96.3% against 96.4% with FP8; a 68k-token prompt filled in ~40 s against 42.5 s with
+`TF_GLM_PREFILL_ROWS=4096`, which amortizes the per-chunk weight unpack over twice the rows.
+
 ### Draft policies
 
 For the affine checkpoint with its MTP head loaded, the default `auto` policy uses MTP for sampled requests.

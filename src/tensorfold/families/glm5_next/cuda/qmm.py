@@ -224,6 +224,12 @@ def matmul(x: torch.Tensor, q: Q4 | B16, xs: torch.Tensor | None = None, *, out:
 
     if isinstance(q, B16):
         return _matmul_b16(x, q, out=out, f32=f32, part=part)
+    from .dense_exl3 import Dense3
+
+    if isinstance(q, Dense3):                     # TF_GLM_DENSE_EXL3: EXL3 shards, BF16 parts on this function
+        from .dense_exl3 import matmul as dense3_matmul
+
+        return dense3_matmul(x, q, out=out, f32=f32, dense_matmul=lambda xx, p, f: matmul(xx, p, f32=f, part=part))
     if x.shape[1] != q.k or x.stride(1) != 1 or x.dtype != torch.bfloat16:
         raise ValueError(f"matmul: x {tuple(x.shape)} {x.dtype} does not match K={q.k}")
     if out is not None and (out.shape != (x.shape[0], q.n) or not out.is_contiguous()):

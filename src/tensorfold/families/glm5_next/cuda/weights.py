@@ -12,8 +12,9 @@ import torch
 from tensorfold.cuda import experts as grouped
 
 from .exl3_mm import Exl3Experts, words as exl3_words
-from . import latent
+from . import dense_exl3, latent
 from .qmm import B16, Q4, as_i32, make_b16, make_q4, quantize4, stack_b16, stack_q4
+from .split import rule as split_rule
 
 PREFIX = "model.language_model."
 
@@ -226,6 +227,9 @@ class Weights:
             if isinstance(t, torch.Tensor) and t.data_ptr() not in seen:
                 seen.add(t.data_ptr())
                 total += t.numel() * t.element_size()
+            elif isinstance(t, dense_exl3.Dense3):
+                for v in t.tensors():
+                    add(v)
             elif isinstance(t, (Q4, B16, grouped.Experts, Exl3Experts, HCW, KDAW, DSAW, MLPW, MoEW, LayerW, MTPW, IndexW)):
                 for v in vars(t).values():
                     add(v)
@@ -269,10 +273,22 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = 
     def trip(name: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return (as_i32(t(name + ".weight")), t(name + ".scales"), t(name + ".biases"))
 
-    def q4(name: str) -> Q4 | B16:
+    # TF_GLM_DENSE_EXL3: the pack's matrices as Exl3Linear shards (``dense_exl3``), the others BF16 as stored
+    pk = dense_exl3.pack() if exl3 else None
+
+    def exl3_linear(name: str):
+        return dense_exl3.linear(PREFIX + name, split_rule(PREFIX + name + ".weight"), rank, world, dev)
+
+    def q4(name: str) -> Q4 | B16 | dense_exl3.Dense3:
+        if pk is not None and pk.has(PREFIX + name):
+            lin = exl3_linear(name)
+            return dense_exl3.Dense3([lin], [lin.n], lin.k)
         return make_b16(t(name + ".weight")) if exl3 else make_q4(*trip(name))
 
-    def stack(names: list[str]) -> Q4 | B16:
+    def stack(names: list[str]) -> Q4 | B16 | dense_exl3.Dense3:
+        if pk is not None and any(pk.has(PREFIX + n) for n in names):
+            parts = [exl3_linear(n) if pk.has(PREFIX + n) else make_b16(t(n + ".weight")) for n in names]
+            return dense_exl3.Dense3(parts, [p.n for p in parts], parts[0].k)
         if exl3:
             return stack_b16([t(n + ".weight") for n in names])
         return stack_q4([trip(n) for n in names])
@@ -417,9 +433,15 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = 
         vl = cfg.vocab // world
         draft_head = None
         if exl3:
-            head = make_b16(rd.get("lm_head.weight")[rank * vl:(rank + 1) * vl].to(dev))
+            raw = rd.get("lm_head.weight")[rank * vl:(rank + 1) * vl].to(dev)
+            if pk is not None and pk.has("lm_head"):  # the rank's vocabulary columns of an EXL3 head
+                lin = dense_exl3.linear("lm_head", "rep", rank, world, dev, cols=(rank * vl, (rank + 1) * vl))
+                head = dense_exl3.Dense3([lin], [lin.n], lin.k)
+            else:
+                head = make_b16(raw)
             # Draft steps use the quantized head; verification keeps the original head.
-            draft_head = quantize4(head.weight)
+            draft_head = quantize4(raw.to(torch.bfloat16).contiguous())
+            del raw
         else:
             hw, hs, hb = (rd.get("lm_head." + x) for x in ("weight", "scales", "biases"))
             head = make_q4(as_i32(hw[rank * vl:(rank + 1) * vl]).to(dev), hs[rank * vl:(rank + 1) * vl].to(dev),
