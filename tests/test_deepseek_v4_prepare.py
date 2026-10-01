@@ -334,7 +334,7 @@ def test_provenance_pins_audited_0731_facts():
     assert PINNED.checkpoint == "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
     assert PINNED.vocab_size == 129280
     assert PINNED.tokenizer_type == "joyai-llm"
-    assert PINNED.eos_tokens == ("",)
+    assert PINNED.eos_tokens == ("<｜end▁of▁sentence｜>",)
     assert PINNED.provenance_keys
 
 

@@ -74,6 +74,7 @@ def build(build_dir: Path, *, backend='cuda', jobs=2, source=VENDOR):
     (build_dir / 'native-build.json').write_text(json.dumps({
         'abi': 1, 'revision': PIN, 'backend': backend, 'source_sha256': manifest['sha256'],
         'library_sha256': hashlib.sha256(output.read_bytes()).hexdigest(),
+        'shim_sha256': hashlib.sha256((PACKAGE / 'native/shim.c').read_bytes()).hexdigest(),
         'cc': subprocess.check_output([cc, '--version'], text=True).splitlines()[0],
         'cuda_arch': 'sm_121a' if backend == 'cuda' else None,
     }, indent=2) + '\n')

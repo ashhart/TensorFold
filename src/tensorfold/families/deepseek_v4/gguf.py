@@ -307,13 +307,13 @@ def validate_deepseek_v4_gguf_or_raise(inventory: TensorInventory,
 # ---------------------------------------------------------------------------
 
 # Pinned facts are grounded in the audited 0731 donor: tokenizer.ggml.pre is
-# "joyai-llm", the vocabulary is 129280 entries, and the EOS token is the empty
-# string (ds4's vocab_load looks up `""` for eos_id).
+# "joyai-llm", the vocabulary is 129280 entries, and EOS is the donor's
+# end-of-sentence spelling (also stored at token ID 1 in the actual GGUF).
 
 CHECKPOINT_0731 = "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
 VOCAB_SIZE_0731 = 129280
 TOKENIZER_TYPE_0731 = "joyai-llm"
-EOS_TOKENS_0731 = ("",)
+EOS_TOKENS_0731 = ("<｜end▁of▁sentence｜>",)
 
 PROVENANCE_KEYS = ("source", "sha256")
 
@@ -474,6 +474,8 @@ def prepare_candidate(model_dir: str | Path, *,
                       source_sha256: str,
                       reserve_gib: float,
                       replace: bool = False,
+                      native_library: str | Path | None = None,
+                      source_identity: dict[str, Any] | None = None,
                       ) -> PrepareReport:
     """Generate candidate ``config.json`` + ``descriptor.json`` atomically and idempotently.
 
@@ -492,6 +494,8 @@ def prepare_candidate(model_dir: str | Path, *,
 
     config = {"model_type": MODEL_TYPE, "text_config": dict(arch),
               "quantization_config": {"quant_method": "gguf"}, "gguf_file": str(source)}
+    if native_library is not None:
+        config.update(native_library=str(native_library), tokenizer_backend="ds4")
     config_path = model_dir / "config.json"
     descriptor_path = model_dir / "descriptor.json"
 
@@ -503,6 +507,8 @@ def prepare_candidate(model_dir: str | Path, *,
         "provenance": dict(tokenizer),
         "reserve_gib": reserve_gib,
     }
+    if source_identity is not None:
+        desc["source_identity"] = dict(source_identity)
     digest = _descriptor_digest(desc)
     desc["descriptor_digest"] = digest
 

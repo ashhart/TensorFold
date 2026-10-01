@@ -43,6 +43,7 @@ grammar = ["xgrammar>=0.2.8,<0.3"]
 
 [project.scripts]
 tensorfold = "tensorfold.cli:main"
+tensorfold-deepseek-build = "tensorfold.families.deepseek_v4.cuda.build_runtime:main"
 
 [tool.setuptools]
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "LICENSES/*"]
