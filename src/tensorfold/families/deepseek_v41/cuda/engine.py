@@ -16,6 +16,35 @@ from typing import Any
 
 DEFAULT_CONTEXT = 40960          # long-context parity is verified to 40K; --context takes more where memory allows
 DRAFTS = 3                       # the checkpoint's DSpark block drafts up to 3 tokens a round
+# memory a context token costs: compressed + indexer-key caches (3.2 KB) and RoPE tables (0.8 KB), plus the prompt
+# path's transient [2,048 rows x keys] fp32 indexer scores (~3 live copies at the ratio-1 source)
+TOKEN_BYTES = 3200 + 768 + 3 * 2048 * 4
+FIXED_GIB = float(os.environ.get("TF_DSV41_FIXED_GIB") or "4")      # engine buffers 2.7 + prompt transients 1.0 (measured)
+RESERVE_GIB = float(os.environ.get("TF_DSV41_RESERVE_GIB") or "2.5")  # left to the OS (unified memory: an OOM wedges)
+
+
+def available_bytes() -> int:
+    """What the system can still give us: the smaller of MemAvailable and CUDA's free memory (unified on GB10)."""
+
+    import torch
+
+    free = torch.cuda.mem_get_info()[0]
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    free = min(free, int(line.split()[1]) * 1024)
+                    break
+    except OSError:
+        pass
+    return free
+
+
+def largest_context(free: int) -> int:
+    """The largest context (a multiple of 1,024) whose caches and prompt buffers fit ``free`` bytes."""
+
+    room = free - int((FIXED_GIB + RESERVE_GIB) * 2 ** 30)
+    return max(0, room // TOKEN_BYTES // 1024 * 1024)
 
 
 def _f64_ints(value: float) -> list[int]:
@@ -41,6 +70,17 @@ class Dsv41Engine:
         from . import weights as W
         from .serial import Comm, SerialEngine
 
+        if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF"):
+            # prompt chunks allocate indexer buffers of a new size each chunk: expandable segments return them
+            # instead of keeping every size reserved (3.6 -> 1.6 GiB at a 38K prompt)
+            if not torch.cuda.is_initialized():
+                os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"    # read at the first allocation
+            else:
+                import warnings
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         torch.cuda.set_device(0)
         self.torch = torch
         self.rank = rank
@@ -52,14 +92,31 @@ class Dsv41Engine:
         if not (Path(engram) / "config.json").exists() and not any(Path(engram).glob("*.safetensors")):
             raise FileNotFoundError(f"no Engram tables in {engram}: put shards 47-48 of deepseek-ai/DeepSeek-V4.1-Flash "
                                     "there (or point TF_DSV41_ENGRAM_DIR at them)")
-        mine = [cap, int(bool(drafts))]
+        mine = [cap, int(bool(drafts)), int(explicit)]
         both = self._gather_ints(mine)
         if both[0] != both[1]:
             raise RuntimeError(f"the two ranks were started with different settings (context, drafts): rank 0 "
-                               f"{both[0]}, rank 1 {both[1]}; give both the same flags")
+                               f"{both[0][:2]}, rank 1 {both[1][:2]}; give both the same flags")
         started = time.perf_counter()
         w = W.load(self.model_dir, rank=rank, log=lambda *a, **k: None, draft=bool(drafts))
-        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()                     # the load's staging buffers back before memory is measured
+        # admission, before any cache exists: both ranks' memory decides (a GB10 out of memory can wedge the node)
+        free = available_bytes()
+        if rank == 0:
+            print(f"[tensorfold] memory left after the weights: {free / 2 ** 30:.1f} GiB", flush=True)
+        largest = min(row[0] for row in self._gather_ints([largest_context(free)]))
+        self.capacity_plan = {"largest_window": largest, "context_window": cap}
+        if cap > largest:
+            if explicit:
+                raise ValueError(f"--context {cap} does not fit: after the weights, this memory admits up to {largest} "
+                                 f"tokens on both ranks (TF_DSV41_RESERVE_GIB={RESERVE_GIB:g} kept for the system)")
+            if rank == 0:
+                print(f"[tensorfold] context {largest} (the default {cap} does not fit the memory left)", flush=True)
+            cap = largest
+        if cap < 4096:
+            raise ValueError(f"only {largest} tokens of context fit after the weights: free memory first")
+        self.capacity_plan["context_window"] = cap
         self.e = SerialEngine(w, Comm(self.nccl), str(engram), str(self.model_dir / "tokenizer.json"), cap=cap)
         self.nccl.barrier()
         with torch.no_grad():
@@ -74,6 +131,8 @@ class Dsv41Engine:
         self.eos = (int(w.cfg.eos_token_id),)
         self.drafts = bool(drafts)
         if rank == 0:
+            print(f"[tensorfold] memory left after capture: {available_bytes() / 2 ** 30:.1f} GiB "
+                  f"(largest admissible context {largest})", flush=True)
             print(f"[tensorfold] DeepSeek-V4.1-Flash ready in {time.perf_counter() - started:.0f}s: context {cap}, "
                   f"{'DSpark drafts up to ' + str(DRAFTS) if drafts else 'serial decoding'}, "
                   f"{torch.cuda.memory_allocated() / 2 ** 30:.1f} GiB a rank", flush=True)
@@ -112,16 +171,26 @@ class Dsv41Engine:
         t = time.perf_counter()
         for draft in ((True, False) if self.drafts else (False,)):
             self._run(prompt, 8, None, draft, True, None)
+        torch = self.torch
+        reserved = torch.cuda.memory_reserved()
+        torch.cuda.empty_cache()                     # the warm-up's prompt buffers back to the system
         if self.rank == 0:
-            print(f"[tensorfold] warmed in {time.perf_counter() - t:.0f}s", flush=True)
+            print(f"[tensorfold] warmed in {time.perf_counter() - t:.0f}s; GPU memory {torch.cuda.memory_allocated() / 2 ** 30:.1f} "
+                  f"GiB in use, {reserved / 2 ** 30:.1f} GiB was reserved; {available_bytes() / 2 ** 30:.1f} GiB left",
+                  flush=True)
 
-    def _run(self, prompt: list[int], max_tokens: int, sampling, draft: bool, stop_eos: bool, on_tokens) -> dict:
-        with self.torch.no_grad():
-            return self.e.generate(list(prompt), max_tokens, sampling=sampling, on_tokens=on_tokens,
-                                   draft=draft and self.drafts, stop_eos=stop_eos)
+    def _run(self, prompt: list[int], max_tokens: int, sampling, draft: bool, stop_eos: bool, on_tokens,
+             constraint=None) -> dict:
+        try:
+            with self.torch.no_grad():
+                return self.e.generate(list(prompt), max_tokens, sampling=sampling, on_tokens=on_tokens,
+                                       draft=draft and self.drafts, stop_eos=stop_eos, constraint=constraint)
+        finally:
+            if len(prompt) > 4096:                   # a long prompt's transient buffers back to the system
+                self.torch.cuda.empty_cache()
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True,
-                 stop_eos: bool = True) -> dict[str, Any]:
+                 stop_eos: bool = True, constraint=None) -> dict[str, Any]:
         """Rank 0: one reply, mirrored on rank 1; ``draft=False`` decodes serially (the reference drafts equal)."""
 
         if len(prompt) >= self.limit:
@@ -130,14 +199,19 @@ class Dsv41Engine:
         seed = (sampling.seed if sampling else 0) & 0xFFFFFFFFFFFFFFFF
         header = [max_tokens, int(stop_eos), int(draft), seed & 0xFFFFFFFF, seed >> 32,
                   *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
-                  *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0)]
+                  *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
+                  int(constraint is not None)]
         self._share(header)
         self._share(list(prompt))
-        res = self._run(prompt, max_tokens, sampling, draft, stop_eos, on_tokens)
+        if constraint is not None:                     # the request's grammar: rank 1 compiles the same
+            from tensorfold.engine.grammar import pack
+
+            self._share(pack(constraint))
+        res = self._run(prompt, max_tokens, sampling, draft, stop_eos, on_tokens, constraint)
         stats = {"prompt_tokens": len(prompt), "completion_tokens": len(res["tokens"]),
                  "prefill_s": round(res["prefill_s"], 3), "decode_s": round(res["decode_s"], 3),
                  "prefill_tps": round(res["prefill_tps"], 1), "decode_tps": round(res["decode_tps"], 1),
-                 "drafts": bool(draft and self.drafts), "cached": 0}
+                 "drafts": bool(draft and self.drafts), "cached": int(res.get("cached", 0))}
         for key in ("rounds", "accepted_per_round", "tokens_per_round", "k_histogram"):
             if key in res:
                 stats[key] = res[key]
@@ -149,10 +223,23 @@ class Dsv41Engine:
         from tensorfold.engine.exact_sampling import Sampling
 
         while True:
-            (max_tokens, stop_eos, draft, s_lo, s_hi, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi) = self._share(None)
+            (max_tokens, stop_eos, draft, s_lo, s_hi, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi,
+             shaped) = self._share(None)
             prompt = self._share(None)
+            constraint = None
+            if shaped:                                 # compiled here as on rank 0
+                from tensorfold.engine import grammar
+
+                constraint = grammar.compiler(self, self.model_dir, self.eos).follow(self._share(None))
             temperature = _ints_f64(t_lo, t_hi)
             sampling = (Sampling(seed=(s_hi << 32) | s_lo, temperature=temperature, top_k=top_k,
                                  top_p=_ints_f64(p_lo, p_hi), min_p=_ints_f64(m_lo, m_hi))
                         if temperature > 0 else None)
-            self._run(prompt, max_tokens, sampling, bool(draft), bool(stop_eos), None)
+            try:
+                self._run(prompt, max_tokens, sampling, bool(draft), bool(stop_eos), None, constraint)
+            except Exception as exc:
+                from tensorfold.engine.grammar import GrammarError
+
+                if not isinstance(exc, GrammarError):
+                    raise
+                print(f"[tensorfold] rank 1: the request's grammar ended it: {exc}", flush=True)

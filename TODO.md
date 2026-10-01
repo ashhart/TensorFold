@@ -109,9 +109,13 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
       `draft: false` == drafted output, client disconnect stops within a round
 - [x] DSML tool calls: V4.1 writes `<｜DSML｜ calls>` (space, no `tool_`); server + CUDA reply parsers read both forms
 - [x] Launcher `tools/dsv41_serve2.sh [--port P] [--context N]` (dual-link NCCL env, Engram dir)
-- [ ] Prompt reuse across turns (prefix snapshots; every request prefills from scratch today)
-- [ ] Capacity admission for `--context` (today: default 40,960, larger values trusted)
-- [ ] Grammar / `response_format` constraints (engine has no `constraint` hook yet)
+- [x] Prompt reuse: the live caches serve a prompt that extends them (common prefix >= 64 tokens, ring-safe);
+      a follow-up turn of 8.5K tokens: 8,503 cached, 0.6 s instead of 8.0 s
+- [ ] Several conversations: snapshots of more than the live cache
+- [x] `--context` admission before any cache exists (both ranks' free memory; refuses with the largest that fits;
+      default 40,960 shrinks to fit); expandable-segments allocator (prompt transients 3.6 -> 1.6 GiB at 38K)
+- [x] Structured output: `response_format` json_schema / json_object, guided_choice / regex / grammar (xgrammar),
+      masks on verify rows (DSpark drafts cut to the grammar's prefix), rank 1 compiles the same grammar
 - [ ] systemd/compose unit to run it in place of the vLLM recipe
 
 ## Ops notes

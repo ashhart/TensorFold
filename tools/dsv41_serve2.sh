@@ -6,8 +6,15 @@ cd /home/urtho/dev/_experiments/ai/tensorfold
 rsync -a --exclude .venv --exclude .git --exclude notes/ref --exclude out ./ aiai:tensorfold/
 rsync -a --exclude .venv --exclude .git --exclude notes/ref --exclude out ./ aiai2:tensorfold/
 for h in aiai aiai2; do timeout 30 ssh $h "docker exec tf-dev pkill -f 'tensorfold serve|tools/dsv41_' ; true" >/dev/null 2>&1; done
-sleep 3
+# wait until the old ranks have exited (their memory is back), at most 2 minutes
+for h in aiai aiai2; do
+  for i in $(seq 1 60); do
+    timeout 10 ssh $h "docker exec tf-dev pgrep -f 'tensorfold serve|tools/dsv41_'" >/dev/null 2>&1 || break
+    sleep 2
+  done
+done
+sleep 2
 M=/models/dsv41/DeepSeek-V4.1-Flash-EXL3-2.9bpw
-ENV="-e PYTHONPATH=/tf/src -e TF_DSV41_ENGRAM_DIR=/models/dsv41/DeepSeek-V4.1-Flash-engram -e NCCL_IB_GID_INDEX=3 -e NCCL_DEBUG=ERROR"
+ENV="-e TF_DSV41_FIXED_GIB=${TF_DSV41_FIXED_GIB:-} -e PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-} -e PYTHONPATH=/tf/src -e TF_DSV41_ENGRAM_DIR=/models/dsv41/DeepSeek-V4.1-Flash-engram -e NCCL_IB_GID_INDEX=3 -e NCCL_DEBUG=ERROR"
 timeout 30 ssh aiai2 "docker exec -d $ENV -e NCCL_SOCKET_IFNAME=enP2p1s0f1np1 -e NCCL_IB_HCA==roceP2p1s0f1,rocep1s0f1 tf-dev bash -c 'cd /tf && python -m tensorfold serve $M --tp 2 --rank 1 --master 10.42.0.1 $* > /tf/serve-r1.log 2>&1'"
-exec ssh aiai "docker exec $ENV -e NCCL_SOCKET_IFNAME=enP2p1s0f0np0 -e NCCL_IB_HCA==roceP2p1s0f0,rocep1s0f0 tf-dev bash -c 'cd /tf && python -m tensorfold serve $M --tp 2 --rank 0 --master 10.42.0.1 --host 0.0.0.0 $* 2>&1 | grep -v -E \"Warning|USDT\"'"
+exec ssh aiai "docker exec $ENV -e NCCL_SOCKET_IFNAME=enP2p1s0f0np0 -e NCCL_IB_HCA==roceP2p1s0f0,rocep1s0f0 tf-dev bash -c 'cd /tf && python -m tensorfold serve $M --tp 2 --rank 0 --master 10.42.0.1 --host 0.0.0.0 $* 2>&1 | grep --line-buffered -v -E \"Warning|USDT\"'"

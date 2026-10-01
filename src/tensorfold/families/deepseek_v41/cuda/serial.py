@@ -114,6 +114,8 @@ class Caches:
 
 SKIP_READS = os.environ.get("TF_SKIP_READS") == "1"   # timing experiments: stale Engram rows (wrong output)
 STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS", "4"))   # decode/verify Engram row reads (few rows)
+REUSE = os.environ.get("TF_DSV41_REUSE", "1") != "0"    # keep the live caches for a prompt that extends them
+REUSE_MIN = 64               # shorter common prefixes start fresh
 FUSE_HC = True               # prompt chunks: hc post + the next sublayer's pre in two launches (post_pre)
 PAR_DECODE = os.environ.get("TF_PAR", "1") == "1"            # decode/verify rows: independent linears on side streams (Par)
 PROMPT_ZB = tuple(int(v) for v in os.environ.get("TF_ZB", "121,101").split(","))       # v4 with bf16 Z (gate/up config, down config); None: fp32 Z (PROMPT_V3)
@@ -331,14 +333,21 @@ class SerialEngine:
         self.layout = E.Layout.from_config(c)
         self.tmap = E.token_map(tokenizer_json, c.engram_compressed_vocab_size)
         self.tables = E.Tables(engram_dir, c.engram_layer_ids)
-        shared = ex3.Scratch(w.layers[0].moe.experts, MAX_ROWS, c.num_experts_per_tok)   # every layer: same shapes
-        self.scratch = [shared] * len(w.layers)
+        # every layer has the same shapes: one small scratch for decode / verify rows, one for prompt chunks whose
+        # gate/up inputs and fp32 partials the prompt kernel no longer reads (rotated while staged, its own fp16 Z)
+        small = ex3.Scratch(w.layers[0].moe.experts, PROMPT_ROWS, c.num_experts_per_tok)
+        self.scratch = [small] * len(w.layers)
+        self.scratch_prompt = ex3.Scratch(w.layers[0].moe.experts, MAX_ROWS, c.num_experts_per_tok)
+        if PROMPT_ZB is not None and PROMPT_ROTX:
+            sp = self.scratch_prompt
+            sp.xg = sp.xu = sp.z = sp.y = torch.empty((0,), dtype=torch.float16, device=self.dev)
+            torch.cuda.empty_cache()
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
         self.par = Par()
         self._rp = RoundProfile() if os.environ.get("TF_ROUND_PROF") else None
         self.split = c.engram_layer_ids[1]
         self.tables_rope = {r: K.rope_tables(f, cap) for r, f in self.freqs.items()}
-        self.attnbuf = K.AttnBuffers(MAX_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,
+        self.attnbuf = K.AttnBuffers(K.FULL_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,   # prompt: _mqa_full
                                      c.index_topk + c.sliding_window, device=self.dev)
         self.topk: dict[int, torch.Tensor] = {}
         self.limit = cap
@@ -633,7 +642,7 @@ class SerialEngine:
     def step(self, token: int, sampling=None) -> int:
         return self.step_rows([token], sampling)[0]
 
-    def step_rows(self, tokens: list[int], sampling=None) -> list[int]:
+    def step_rows(self, tokens: list[int], sampling=None, constraint=None, window=None) -> list[int]:
         """R rows through the captured graphs; returns the target's token at each row: the argmax, or with
         ``sampling`` the position-keyed sample (so a verify window's rows equal the serial path's)."""
 
@@ -669,6 +678,9 @@ class SerialEngine:
         g["b"].replay()
         rp and rp.mark("v.b")
         rp and rp.event("v.gpu1")
+        if constraint is not None:                                      # the grammar's rows masked, then chosen
+            logits = constraint.mask(g["logits"][:R].float().clone(), window)
+            return sample_rows(logits, [p0 + 1 + j for j in range(R)], sampling)
         if sampling is not None and sampling.temperature > 0:
             return sample_rows(g["logits"], [p0 + 1 + j for j in range(R)], sampling)
         g["h_next"].copy_(g["next"], non_blocking=True)
@@ -784,7 +796,8 @@ class SerialEngine:
     def moe(self, layer: LayerW, x: torch.Tensor, R: int, top_k: int | None = None, scratch=None) -> torch.Tensor:
         c, m = self.c, layer.moe
         limit = c.swiglu_limit
-        scratch = scratch if scratch is not None else self.scratch[layer.index]
+        if scratch is None:
+            scratch = self.scratch[layer.index] if R <= PROMPT_ROWS else self.scratch_prompt
 
         def route():                                                # a row's bits never depend on the row count
             return K.route(K.router_logits(x, m.gate), m.bias, top_k or c.num_experts_per_tok, c.routed_scaling_factor)
@@ -836,8 +849,25 @@ class SerialEngine:
         return logits
 
     @torch.no_grad()
+    def reusable(self, prompt: list[int]) -> int:
+        """How many leading tokens of ``prompt`` the live caches already hold (0: start fresh). The rest is prefilled
+        over them: every position from there on is rewritten before it is read, as long as the previous request
+        went less than a ring past it (the window and compressor rings are addressed by position modulo RING)."""
+
+        st = getattr(self, "state", None)
+        if st is None or not REUSE:
+            return 0
+        ids, n = st.ids, min(len(st.ids), len(prompt) - 1)        # at least one row to prefill: its logits
+        L = 0
+        while L < n and ids[L] == prompt[L]:
+            L += 1
+        if L < REUSE_MIN or len(ids) - L > RING - self.c.sliding_window - 2:
+            return 0
+        return L
+
     def generate(self, prompt: list[int], max_tokens: int, *, chunk: int = MAX_ROWS, on_token=None,
-                 sampling=None, on_tokens=None, draft: bool = True, stop_eos: bool = True) -> dict:
+                 sampling=None, on_tokens=None, draft: bool = True, stop_eos: bool = True, constraint=None,
+                 reuse: bool = True) -> dict:
         """Decode after a chunked prefill (greedy, or position-keyed sampling); returns tokens and timings.
 
         ``on_tokens(new) -> bool`` (rank 0) gets each round's tokens; True stops after that round. Both ranks must
@@ -845,17 +875,24 @@ class SerialEngine:
         context limit) follows from the tokens, which are the same on both ranks. ``draft=False``: serial decoding,
         the reference drafted replies equal."""
 
-        self.reset()
         t0 = time.perf_counter()
+        cached = self.reusable(prompt) if reuse else 0
+        if cached:
+            del self.state.ids[cached:]                            # positions from here on are rewritten
+        else:
+            self.reset()
         logits = None
-        logits = self.prefill(prompt, chunk)
+        logits = self.prefill(prompt[cached:], chunk)
         dsp = self.drafter if draft and self.drafter is not None and self.drafter.graph is not None else None
         if dsp is not None and self.adaptive:
             self.round_costs()                                     # once an engine, at a real context (not timed)
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         out = []
-        nxt = sample_rows(logits[-1:], [len(prompt)], sampling)[0]
+        first = logits[-1:]
+        if constraint is not None:                                 # the first reply token under the grammar
+            first = constraint.mask(first.float().clone())
+        nxt = sample_rows(first, [len(prompt)], sampling)[0]
         rounds = accepted = 0
         t_draft = t_verify = 0.0
         eos = self.c.eos_token_id
@@ -896,7 +933,13 @@ class SerialEngine:
                     break
                 if rows_left < 2:
                     break
-                if self.graph is not None:
+                if constraint is not None:
+                    constraint.advance([nxt])                      # (emitted above)
+                    if constraint.finished:
+                        break
+                    nxt = self.step_rows([nxt], sampling, constraint=constraint,
+                                         window=constraint.window([nxt], [-1]))[0]
+                elif self.graph is not None:
                     nxt = self.step(nxt, sampling)
                 else:
                     nxt = sample_rows(self.forward([nxt])[-1:], [len(self.state.ids)], sampling)[0]
@@ -909,17 +952,30 @@ class SerialEngine:
                 break
             rp and rp.mark("agree")
             ta = time.perf_counter()
+            window = None
+            if constraint is not None:
+                constraint.advance([nxt])                          # chosen last round under the grammar's mask
+                if constraint.finished:                            # nxt was the grammar's stop token: emit it
+                    emit([nxt])
+                    break
             if k == 0:                                             # drafting does not pay here: one plain row
-                target = [self.step(nxt, sampling)]
                 drafts = []
+                if constraint is not None:
+                    window = constraint.window([nxt], [-1])
+                    target = self.step_rows([nxt], sampling, constraint=constraint, window=window)
+                else:
+                    target = [self.step(nxt, sampling)]
                 tb = ta
             else:
                 rp and rp.event("d.gpu0")
                 drafts = dsp.propose(nxt, P)[:k]
                 rp and rp.event("d.gpu1")
                 rp and rp.mark("propose")
+                if constraint is not None:                         # only the drafts the grammar can take
+                    window = constraint.window([nxt, *drafts], list(range(-1, len(drafts))))
+                    drafts = window.tokens[1:]
                 tb = time.perf_counter()
-                target = self.step_rows([nxt, *drafts], sampling)
+                target = self.step_rows([nxt, *drafts], sampling, constraint=constraint, window=window)
                 rp and rp.mark("verify.done")
             t_draft += tb - ta
             t_verify += time.perf_counter() - tb
@@ -933,6 +989,8 @@ class SerialEngine:
             rp and rp.end(k)
             rounds += 1
             accepted += m
+            if constraint is not None and m:
+                constraint.advance(drafts[:m])                     # accepted drafts: chosen under the mask
             if emit([nxt, *drafts[:m]]):
                 break
             nxt = target[m]
@@ -940,7 +998,7 @@ class SerialEngine:
         t2 = time.perf_counter()
         if self._rp:
             self._rp.report()
-        res = {"tokens": out, "prefill_s": t1 - t0, "decode_s": t2 - t1,
+        res = {"tokens": out, "cached": cached, "prefill_s": t1 - t0, "decode_s": t2 - t1,
                "prefill_tps": len(prompt) / (t1 - t0), "decode_tps": len(out) / max(t2 - t1, 1e-9)}
         if dsp is not None:
             res.update(rounds=rounds, accepted_per_round=accepted / max(rounds, 1),
