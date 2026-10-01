@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import math
+import os
 from typing import Any, Sequence
 
 import numpy as np
@@ -32,9 +33,23 @@ class Sampling:
         return math.log(self.min_p) if self.min_p > 0.0 else -math.inf
 
 
-def seed_for(tokens: Sequence[int], salt: int = 0) -> int:
-    """A reproducible seed from the prompt: the same conversation samples the same reply."""
+def _salt_from_env() -> int:
+    """``TENSORFOLD_SEED_SALT``: an integer mixed into every prompt-derived seed (0, the default, changes nothing)."""
 
+    value = os.environ.get("TENSORFOLD_SEED_SALT", "").strip()
+    try:
+        return int(value) if value else 0
+    except ValueError:
+        raise ValueError(f"TENSORFOLD_SEED_SALT={value}: an integer") from None
+
+
+SEED_SALT = _salt_from_env()
+
+
+def seed_for(tokens: Sequence[int], salt: int | None = None) -> int:
+    """A reproducible seed from the prompt: the same conversation samples the same reply (for one salt)."""
+
+    salt = SEED_SALT if salt is None else salt
     digest = hashlib.sha256((",".join(str(int(t)) for t in tokens) + f"|{salt}").encode()).digest()
     return int.from_bytes(digest[:8], "little") & ((1 << 63) - 1)
 
