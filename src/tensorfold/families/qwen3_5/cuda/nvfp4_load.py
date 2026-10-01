@@ -26,10 +26,11 @@ def quantized(model_dir: Path) -> bool:
 
 
 def skipped(name: str) -> bool:
-    """Tensors the text model never reads: the vision tower and the MTP head."""
+    """Tensors the text model never reads: the vision tower, the MTP head, and FP8 KV-cache calibration scales
+    (``self_attn.k_scale`` / ``v_scale`` / ``q_scale``: the cache here is bf16, so they have nothing to scale)."""
 
     return (name.startswith(("model.visual.", "visual.", "vision_tower", "mtp.")) or ".visual." in name
-            or ".mtp." in name)
+            or ".mtp." in name or name.endswith(("self_attn.k_scale", "self_attn.v_scale", "self_attn.q_scale")))
 
 
 @dataclass
