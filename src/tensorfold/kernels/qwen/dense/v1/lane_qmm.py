@@ -377,6 +377,10 @@ def _call(self: Any, x: mx.array) -> mx.array:
 
 # Kept 32 columns wide under ``wide``: in_proj_z stacks with in_proj_b/a (48 rows each), which only 32-column tiles divide
 NARROW = ("in_proj_z",)
+# Above 4 K slices a 64-wide tile's partial sums take 28 KB of threadgroup memory, one threadgroup a core: up to 32 rows
+# the 32-wide kernel (same bits) runs down_proj 22% faster on M5 Max (113 vs 144 us a call), o_proj and out_proj 17-19%
+# faster; at 64-128 rows the 64-wide kernel's forward is 8-11% faster.
+NARROW_MAX_SK = 4
 
 
 def takes(module: Any) -> bool:
@@ -386,8 +390,12 @@ def takes(module: Any) -> bool:
         and module["scales"].dtype == mx.bfloat16
 
 
-def install(model: Any = None, *, rows: int = MAX_ROWS, tile: bool = True, wide: bool = False) -> None:
-    """Route the QuantizedLinear calls the lane matmul takes through it; with ``model``, pack scales and tile."""
+def install(model: Any = None, *, rows: int = MAX_ROWS, tile: bool = True, wide: bool = False,
+            narrow_rows: bool = False) -> None:
+    """Route the QuantizedLinear calls the lane matmul takes through it; with ``model``, pack scales and tile.
+
+    ``wide`` tiles 4-bit weights 64 columns wide; ``narrow_rows`` (calls of at most 32 rows) keeps weights split into
+    more than ``NARROW_MAX_SK`` K slices 32 wide."""
 
     global _ORIG, enabled, max_rows
     import mlx.nn as nn
@@ -411,7 +419,8 @@ def install(model: Any = None, *, rows: int = MAX_ROWS, tile: bool = True, wide:
             n, words = int(weight.shape[0]), int(weight.shape[-1])
             if (tile and not getattr(module, "_lane_tiled", False) and weight.dtype == mx.uint32
                     and weight.ndim == 2 and n % NT == 0 and words % (module.group_size * module.bits // 32) == 0):
-                nt = 64 if (wide and module.bits == 4 and n % 64 == 0 and not name.endswith(NARROW)) else NT
+                nt = 64 if (wide and module.bits == 4 and n % 64 == 0 and not name.endswith(NARROW)
+                            and not (narrow_rows and split_k(n, words * 32 // module.bits) > NARROW_MAX_SK)) else NT
                 module.weight = tile_weight(weight, nt, module.group_size, bits=module.bits)
                 object.__setattr__(module, "_lane_tiled", True)
                 object.__setattr__(module, "_lane_nt", nt)

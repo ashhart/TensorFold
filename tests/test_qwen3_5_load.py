@@ -74,18 +74,19 @@ def gate(monkeypatch):
     family = ModuleType("tensorfold.families.qwen3_5.family")
     family.Qwen35Family = Family
     monkeypatch.setitem(sys.modules, family.__name__, family)
-    calls = {"loaded": [], "lanes": [], "rows": []}
+    calls = {"loaded": [], "lanes": [], "rows": [], "narrow": []}
 
     def run(top, widths, *, units=True, lane_kernels="auto", config=None, tied=False, dtype="bfloat16",
-            row_supported=True):
+            row_supported=True, **options):
         model = Model(widths, tied=tied, dtype=dtype)
         monkeypatch.setattr(qwen3_5, "load_lane_model", lambda path: calls["loaded"].append(model) or (model, "tok"))
         monkeypatch.setattr(families, "read_config",
                             lambda path: {"quantization": {"bits": top[0], "group_size": top[1]}, **(config or {})})
         monkeypatch.setattr(qwen3_5, "tensor_units", lambda: units)
-        monkeypatch.setattr(qwen3_5, "install_lane_kernels", calls["lanes"].append)
+        monkeypatch.setattr(qwen3_5, "install_lane_kernels",
+                            lambda m, narrow_rows=False: calls["lanes"].append(m) or calls["narrow"].append(narrow_rows))
         monkeypatch.setattr(qwen3_5, "install_row_decoder", lambda m: calls["rows"].append(m) or row_supported)
-        return qwen3_5.load("unused", lane_kernels=lane_kernels)
+        return qwen3_5.load("unused", lane_kernels=lane_kernels, **options)
 
     return run, calls
 
@@ -99,6 +100,19 @@ def test_native_lane_formats_keep_tensor_unit_routing(gate, top, widths):
     family, _ = run(top, widths)
     assert family.inner._tensorfold_lanes is True and not family.rows
     assert calls["lanes"] == [family.inner] and calls["rows"] == []
+
+
+@pytest.mark.parametrize("options,copy_rows,narrow", [({}, None, False), ({"parallel": 8}, None, False),
+                                                      ({"parallel": 2}, None, False), ({"parallel": 1}, None, True),
+                                                      ({"parallel": 1}, "64", False)])
+def test_one_stream_servers_ask_for_narrow_tiles(gate, monkeypatch, options, copy_rows, narrow):
+    if copy_rows is None:
+        monkeypatch.delenv("TF_COPY_ROWS", raising=False)
+    else:
+        monkeypatch.setenv("TF_COPY_ROWS", copy_rows)
+    run, calls = gate
+    run((4, 64), (4, 4), **options)
+    assert calls["narrow"] == [narrow]
 
 
 @pytest.mark.parametrize("top", [(bits, group) for bits in (2, 3, 4, 5, 6, 8) for group in (32, 64, 128)])
