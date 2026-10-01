@@ -15,6 +15,6 @@ for h in aiai aiai2; do
 done
 sleep 2
 M=/models/dsv41/DeepSeek-V4.1-Flash-EXL3-2.9bpw
-ENV="-e TF_DSV41_FIXED_GIB=${TF_DSV41_FIXED_GIB:-} -e TF_DSV41_KV_FP8=${TF_DSV41_KV_FP8:-} -e TF_STEP_THREADS=${TF_STEP_THREADS:-} -e TF_MULTI_DRAFTS=${TF_MULTI_DRAFTS:-} -e TF_MULTI_PROF=${TF_MULTI_PROF:-} -e PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-} -e PYTHONPATH=/tf/src -e TF_DSV41_ENGRAM_DIR=/models/dsv41/DeepSeek-V4.1-Flash-engram -e NCCL_IB_GID_INDEX=3 -e NCCL_DEBUG=ERROR"
+ENV="-e TF_DSV41_FIXED_GIB=${TF_DSV41_FIXED_GIB:-} -e TF_CARVEOUT=${TF_CARVEOUT:-} -e TF_MULTI_CHECK=${TF_MULTI_CHECK:-} -e TF_DSV41_WARM=${TF_DSV41_WARM:-} -e TF_DSV41_KV_FP8=${TF_DSV41_KV_FP8:-} -e TF_STEP_THREADS=${TF_STEP_THREADS:-} -e TF_MULTI_DRAFTS=${TF_MULTI_DRAFTS:-} -e TF_MULTI_PROF=${TF_MULTI_PROF:-} -e PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-} -e PYTHONPATH=/tf/src -e TF_DSV41_ENGRAM_DIR=/models/dsv41/DeepSeek-V4.1-Flash-engram -e NCCL_IB_GID_INDEX=3 -e NCCL_DEBUG=ERROR"
 timeout 30 ssh aiai2 "docker exec -d $ENV -e NCCL_SOCKET_IFNAME=enP2p1s0f1np1 -e NCCL_IB_HCA==roceP2p1s0f1,rocep1s0f1 tf-dev bash -c 'cd /tf && python -m tensorfold serve $M --tp 2 --rank 1 --master 10.42.0.1 $* > /tf/serve-r1.log 2>&1'"
 exec ssh aiai "docker exec $ENV -e NCCL_SOCKET_IFNAME=enP2p1s0f0np0 -e NCCL_IB_HCA==roceP2p1s0f0,rocep1s0f0 tf-dev bash -c 'cd /tf && python -m tensorfold serve $M --tp 2 --rank 0 --master 10.42.0.1 --host 0.0.0.0 $* 2>&1 | grep --line-buffered -v -E \"Warning|USDT\"'"

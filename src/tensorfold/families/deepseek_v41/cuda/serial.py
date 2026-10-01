@@ -393,7 +393,7 @@ class SerialEngine:
         self.big = Caches(
             cap,
             [torch.zeros((S * RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers],
-            {s_: self._entries(S * E[s_], c.head_dim, KV_FP8) for s_ in c.kv_source_layer_ids},
+            self._comp_pools(S, E),
             {s_: torch.zeros((S * RING, 2 * c.head_dim), dtype=F32, device=self.dev)
              for s_ in c.kv_source_layer_ids if c.layer_ratios[s_] == 2},
             {s_: self._entries(S * E[s_], c.index_head_dim, KV_FP8, keys=True) for s_ in c.kv_source_layer_ids},
@@ -405,15 +405,40 @@ class SerialEngine:
                              {k: t[i * E[k]:(i + 1) * E[k]] for k, t in big.ik.items()}) for i in range(S)]
         self.state = self.views[self.slot]
 
-    def _entries(self, n: int, dim: int, fp8: bool, keys: bool = False):
+    def _comp_pools(self, S: int, E: dict) -> dict:
+        """The compressed-entry pools of every source, largest first into the display carveout when it is on
+        (``TF_CARVEOUT=1``: attention gathers 512 entries a row, sparse reads that its half bandwidth suits), the
+        rest (and the indexer keys, scanned whole every step) in ordinary memory."""
+
+        from tensorfold.cuda import carveout
+
+        c = self.c
+        owner = carveout.get()
+        self.carved = 0
+        pools = {}
+        for s_ in sorted(c.kv_source_layer_ids, key=lambda k: -E[k]):
+            alloc = None
+            if owner is not None:
+                need = self._pool_bytes(S * E[s_], c.head_dim, KV_FP8)
+                if need + 4096 <= owner.free:
+                    alloc = owner.take
+                    self.carved += need
+            pools[s_] = self._entries(S * E[s_], c.head_dim, KV_FP8, alloc=alloc)
+        return {s_: pools[s_] for s_ in c.kv_source_layer_ids}
+
+    @staticmethod
+    def _pool_bytes(n: int, dim: int, fp8: bool) -> int:
+        return n * (448 + 64 * 2 + 7 * 4) if fp8 else n * dim * 2
+
+    def _entries(self, n: int, dim: int, fp8: bool, keys: bool = False, alloc=None):
         """Per-position cache rows: bf16, or fp8 (``K.Fp8Rows``): compressed entries keep their RoPE dims bf16 and
         a scale per 64 values (DeepSeek's fp8 KV layout), indexer keys a scale per key."""
 
         if not fp8:
-            return torch.zeros((n, dim), dtype=BF, device=self.dev)
+            return alloc((n, dim), BF) if alloc else torch.zeros((n, dim), dtype=BF, device=self.dev)
         if keys:
             return K.Fp8Rows(n, dim, plain=0, group=dim, device=self.dev)
-        return K.Fp8Rows(n, dim, plain=self.c.qk_rope_head_dim, group=64, device=self.dev)
+        return K.Fp8Rows(n, dim, plain=self.c.qk_rope_head_dim, group=64, device=self.dev, alloc=alloc)
 
     def select_slot(self, slot: int) -> None:
         """Make ``slot`` the current stream (prompt chunks, single-stream decoding and kept states use it)."""
@@ -574,7 +599,7 @@ class SerialEngine:
              "raw": [torch.zeros((rows, n_rows, row_bytes), dtype=torch.uint8, device=self.dev) for _ in range(2)],
              "h_raw": torch.zeros((2, rows * n_rows, row_bytes), dtype=torch.uint8).pin_memory(),
              "h_next": torch.zeros((rows,), dtype=torch.long).pin_memory()}
-        saved = self._save_caches()
+        saved = self._save_rows(0, g["pos"])                            # capture replays write slot 0, position 0
         hd = c.engram_head_dim
         self._sid = g["sid"]                                           # the graphs read each row's slot from it
 
@@ -606,7 +631,7 @@ class SerialEngine:
         with torch.cuda.graph(g["b"], pool=g["a0"].pool()):
             g["logits"], g["next"] = run_b(g["carry"])
         torch.cuda.synchronize()
-        self._restore_caches(saved)
+        self._restore_rows(saved)
         self.graphs[rows] = g
         self.graph = True
 
@@ -622,8 +647,10 @@ class SerialEngine:
 
         if getattr(self, "_round_costs", None) is not None:
             return self._round_costs
-        saved = self._save_caches()
-        n = max(self.graphs) - 1
+        n = min(max(self.graphs), (self.drafter.N if self.drafter is not None else 0) + 1) - 1
+        P0 = len(self.state.ids)
+        saved = self._save_rows(self.slot, torch.arange(max(P0 - n - 1, 0), P0 + n + 1),
+                                torch.arange(P0, P0 + n + 2))
 
         def replay_ms(fn, reps=3) -> float:
             fn()
@@ -647,13 +674,49 @@ class SerialEngine:
             g["sid"].fill_(self.slot)
             return lambda: (g["a0"].replay(), g["a1"].replay(), g["b"].replay())
 
-        draft = replay_ms(self.drafter.graph.replay) if self.drafter is not None and self.drafter.graph else 0.0
+        draft = 0.0
+        if self.drafter is not None and self.drafter.graph:
+            dsp = self.drafter                                          # at this stream's position and ring
+            dsp.g_anchor.fill_(ids[-1] if ids else 1000)
+            dsp.g_P.fill_(P)
+            dsp.g_base.fill_(self.slot * RING)
+            draft = replay_ms(dsp.graph.replay)
         mine = [replay_ms(verify(1))] + [draft + replay_ms(verify(k + 1)) for k in range(1, n + 1)]
-        self._restore_caches(saved)
+        self._restore_rows(saved)
         both = gather_ints(torch, lambda a, b: self.comm.nccl.all_gather(a, b), [int(1e3 * c) for c in mine],
                            self.comm.world) if self.comm.world > 1 else [[int(1e3 * c) for c in mine]]
         self._round_costs = [max(row[k] for row in both) / 1e3 for k in range(n + 1)]
         return self._round_costs
+
+    def _save_rows(self, slot: int, pos: torch.Tensor, draft: torch.Tensor | None = None) -> list:
+        """The cache rows a timing replay at positions ``pos`` of ``slot`` writes (window and compressor ring rows,
+        compressed entries and indexer keys with the spare entry, the drafter's rows at ``pos`` and ``draft``), so
+        they can be put back: kilobytes, where cloning every slot's caches would take gigabytes."""
+
+        c = self.c
+        pos = pos.to(self.dev).long()
+        ring = torch.unique(slot * RING + pos % RING)
+        out = [(t, ring, t[ring].clone()) for t in self.big.swa]
+        out += [(t, ring, t[ring].clone()) for t in self.big.raw.values()]
+        for s_ in c.kv_source_layer_ids:
+            r, E = c.layer_ratios[s_], self.entries[s_]
+            ent = torch.unique(torch.cat([pos // r, torch.tensor([E - 1], device=self.dev)]).clamp(max=E - 1)
+                               + slot * E)
+            for t in (self.big.comp[s_], self.big.ik[s_]):
+                out.append((t, ent, t.take(ent) if isinstance(t, K.Fp8Rows) else t[ent].clone()))
+        if self.drafter is not None:
+            dpos = pos if draft is None else torch.cat([pos, draft.to(self.dev).long()])
+            dring = torch.unique(slot * RING + dpos.clamp(min=0) % RING)
+            out += [(t, dring, t[dring].clone()) for t in self.drafter.swa_big]
+        return out
+
+    @staticmethod
+    def _restore_rows(saved: list) -> None:
+        for t, idx, vals in saved:
+            if isinstance(t, K.Fp8Rows):
+                t.put_rows(idx, vals)
+            else:
+                t.index_copy_(0, idx, vals)
 
     def _save_caches(self):
         st = self.big
@@ -997,6 +1060,27 @@ class SerialEngine:
         tensors = [*snap["comp"].values(), *snap["ik"].values(), *snap["swa"], *snap["raw"].values(), *snap["dswa"]]
         return snap, sum(K.cache_nbytes(t) for t in tensors)
 
+    def prefix_bytes(self, n: int) -> int:
+        """What ``save_prefix(n)`` copies (computed without copying)."""
+
+        c = self.c
+        entries = sum((n // c.layer_ratios[s_] + 1) * (K.cache_nbytes(self.big.comp[s_][:1])
+                                                         + K.cache_nbytes(self.big.ik[s_][:1]))
+                      for s_ in c.kv_source_layer_ids)
+        win = min(n, c.sliding_window + 2)
+        row = (sum(t.shape[1] * t.element_size() for t in self.big.swa)
+               + sum(t.shape[1] * t.element_size() for t in self.big.raw.values())
+               + (sum(t.shape[1] * t.element_size() for t in self.drafter.swa_big) if self.drafter else 0))
+        return int(entries + win * row)
+
+    def keep_prompt(self, prompt: list[int]) -> None:
+        """Keep this prompt's state in the pool (one token short, so a retry resumes too) when it would be kept:
+        checked before copying, as a long prompt's state can be gigabytes."""
+
+        ids = list(prompt[:-1])
+        if self.pool is not None and self.pool.wants(ids, self.prefix_bytes(len(ids))):
+            self.pool.add(ids, lambda: self.save_prefix(len(ids)))
+
     def load_prefix(self, snap: dict, ids: list[int]) -> None:
         """Copy a saved state into the live buffers (same addresses: the captured graphs keep reading them)."""
 
@@ -1054,9 +1138,8 @@ class SerialEngine:
             self.reset()
         logits = None
         logits = self.prefill(prompt[cached:], chunk)
-        if reuse and self.pool is not None:                        # this prompt's state, before decoding moves on;
-            # one token short, so the same prompt again (a retry) resumes too: its last row is prefilled for logits
-            self.pool.add(list(prompt[:-1]), lambda: self.save_prefix(len(prompt) - 1))
+        if reuse:                                                  # this prompt's state, before decoding moves on
+            self.keep_prompt(prompt)
         dsp = self.drafter if draft and self.drafter is not None and self.drafter.graph is not None else None
         if dsp is not None and self.adaptive:
             self.round_costs()                                     # once an engine, at a real context (not timed)
@@ -1074,7 +1157,7 @@ class SerialEngine:
         if dsp is not None:
             from .dspark import DraftPolicy
 
-            n = max(r for r in self.graphs) - 1                        # verify windows captured: 1 .. n + 1 rows
+            n = min(max(self.graphs), dsp.N + 1) - 1                    # verify windows: 1 .. n + 1 rows
             policy = DraftPolicy(n, self.round_costs()) if self.adaptive else _Fixed(n)
             ks = [0] * (n + 1)
 

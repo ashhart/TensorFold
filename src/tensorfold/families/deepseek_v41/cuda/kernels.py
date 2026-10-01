@@ -85,15 +85,16 @@ class Fp8Rows:
     index_copy_ / zero_ / slicing (views) / clone / copy_ / shape; kernels read q, r and s."""
 
     def __init__(self, n: int = 0, dim: int = 0, *, plain: int = 0, group: int = 64, device="cuda",
-                 parts: tuple | None = None) -> None:
+                 parts: tuple | None = None, alloc=None) -> None:
         if parts is not None:
             self.q, self.r, self.s, self.dim, self.plain, self.group = parts
             return
         self.dim, self.plain, self.group = dim, plain, group
         f = dim - plain
-        self.q = torch.zeros((n, f), dtype=torch.float8_e4m3fn, device=device)
-        self.r = torch.zeros((n, max(plain, 1)), dtype=torch.bfloat16, device=device)
-        self.s = torch.zeros((n, f // group), dtype=torch.float32, device=device)
+        alloc = alloc or (lambda shape, dtype: torch.zeros(shape, dtype=dtype, device=device))
+        self.q = alloc((n, f), torch.uint8).view(torch.float8_e4m3fn)
+        self.r = alloc((n, max(plain, 1)), torch.bfloat16)
+        self.s = alloc((n, f // group), torch.float32)
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -119,6 +120,18 @@ class Fp8Rows:
         self.r.zero_()
         self.s.zero_()
         return self
+
+    def take(self, index: torch.Tensor) -> Fp8Rows:
+        """Copies of rows ``index`` (no fp8 gather kernel: through uint8)."""
+
+        return self._parts(self.q.view(torch.uint8)[index].view(torch.float8_e4m3fn), self.r[index], self.s[index])
+
+    def put_rows(self, index: torch.Tensor, rows: Fp8Rows) -> None:
+        """Rows ``index`` set to ``rows`` as stored (no re-quantization)."""
+
+        self.q.view(torch.uint8).index_copy_(0, index, rows.q.view(torch.uint8))
+        self.r.index_copy_(0, index, rows.r)
+        self.s.index_copy_(0, index, rows.s)
 
     def nbytes(self) -> int:
         return sum(t.numel() * t.element_size() for t in (self.q, self.r, self.s))
@@ -416,12 +429,20 @@ def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: t
     return scores
 
 
+def untie(scores: torch.Tensor, first: int = 0) -> torch.Tensor:
+    """Exact-zero scores (every head's ReLU closed) as tiny negatives ordered by index (lowest first), so a top-k
+    among tied zeros keeps the same entries whatever the rows a call holds (torch.topk leaves ties unspecified)."""
+
+    idx = torch.arange(first, first + scores.shape[1], device=scores.device, dtype=torch.float32)
+    return torch.where(scores == 0, -1e-30 * (1.0 + idx * 2.0 ** -21), scores)
+
+
 def top_entries(scores: torch.Tensor, topk: int) -> torch.Tensor:
     """int32 [R, topk]: the best visible entries ascending, -1 padded (every visible one when <= topk)."""
 
     R, S = scores.shape
     k = min(topk, S)
-    vals, idx = torch.topk(scores, k, dim=1, sorted=False)
+    vals, idx = torch.topk(untie(scores), k, dim=1, sorted=False)
     idx = torch.where(torch.isinf(vals) & (vals < 0), torch.full_like(idx, S), idx)   # invisible sort last, dropped
     idx = torch.sort(idx, dim=1).values
     idx = torch.where(idx >= S, torch.full_like(idx, -1), idx).int()
@@ -438,7 +459,7 @@ def candidate_blocks(scores: torch.Tensor, pos: torch.Tensor, ratio: int, block:
     nb = -(-S // block)
     padded = torch.full((R, nb * block), float("-inf"), dtype=scores.dtype, device=scores.device)
     padded[:, :S] = scores
-    best = padded.view(R, nb, block).amax(-1)
+    best = untie(padded.view(R, nb, block).amax(-1))
     newest = ((pos + 1) // ratio - 1).clamp(min=0) // block
     best.scatter_(1, newest[:, None].long(), float("inf"))
     vals, idx = torch.topk(best, min(keep, nb), dim=1)
@@ -534,13 +555,14 @@ def index_select_blocked(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor
                 keep = flags[:, off // block: off // block + -(-length // block)].repeat_interleave(block, 1)
                 sc = sc.masked_fill(~keep[:, :length], float("-inf"))
             kk = min(k, length)
-            v, i = torch.topk(sc, kk, dim=1, sorted=False)
+            v, i = torch.topk(untie(sc, off), kk, dim=1, sorted=False)
             vals, pick = torch.topk(torch.cat([vals, v], dim=1), k, dim=1, sorted=False)
             ids = torch.gather(torch.cat([ids, i + off], dim=1), 1, pick)
         ids = torch.where(torch.isinf(vals) & (vals < 0), torch.full_like(ids, S), ids)   # invisible: dropped
         ids = torch.sort(ids, dim=1).values
         idx_out[r0:r1, :k] = torch.where(ids >= S, torch.full_like(ids, -1), ids).int()
         if best is not None:
+            best = untie(best)
             newest = ((pos[r0:r1] + 1) // ratio - 1).clamp(min=0) // block
             best.scatter_(1, newest[:, None].long(), float("inf"))
             v, i = torch.topk(best, min(candidates, nb), dim=1)

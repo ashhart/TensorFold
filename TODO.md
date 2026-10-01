@@ -23,7 +23,8 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
   - [x] Opt-in via `TF_CARVEOUT=1`, size `TF_CARVEOUT_BYTES` (default 1792 MiB), card `TF_DRM_CARD`
   - [x] Probe CLI: `python -m tensorfold.cuda.carveout probe [--cuda]`
   - [x] Verify on GB10 with vLLM stopped: 1792 MiB, 0 MiB host RAM, round trip ok, 59 vs 122 GB/s (`notes/dsv41/BENCH.md`)
-  - [ ] Hand the carveout to the V4.1 compressed-KV pools only (59 vs 124 GB/s — keep hot buffers out)
+  - [x] Carveout holds the V4.1 compressed-KV pools (`TF_CARVEOUT=1`, largest source first; indexer keys stay in
+        ordinary memory): prefill speed and long parity unchanged, admission credits the 1.75 GiB
 - [x] Capacity: host reserve configurable (`TF_HOST_RESERVE_GIB`; default stays max(4 GiB, 10 %)),
       carveout bytes counted as room outside MemAvailable
 - [ ] Container flags doc: `--device /dev/dri/card0`, `nvidia_drm modeset=1 fbdev=0`, no display in use
@@ -97,9 +98,9 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [x] Expert prompt kernel v2 (smem-staged activations, 2 member tiles/decode, 8 warps), 2,048-row chunks,
       last-row-only prompt logits: prefill **622 tok/s**
 - [x] Prefill 1,252 tok/s steady (whole prompts 1,376 at 8K, 1,160 at 32K) vs vLLM ~710 (BENCH.md)
-- [ ] Long prompts to 600k (cap/memory: comp caches bf16 ~1.5 KB/token)
-- [ ] KV format ≤ ~3.4 KiB/token; carveout-backed pools
-- [ ] `--parallel N` shared rounds (optional; vLLM wins at width today)
+- [x] Long prompts to 600k: 4 sessions x 614,400 tokens admitted (fp8 caches), a 592,960-token prompt answered
+- [x] KV format ~1.8 KB/token (fp8); carveout-backed pools
+- [x] `--parallel N` shared rounds (see Phase 4)
 
 ## Phase 4 — serving
 

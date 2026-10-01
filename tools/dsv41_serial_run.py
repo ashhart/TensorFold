@@ -35,6 +35,9 @@ def main() -> None:
     ap.add_argument("--profile-prefill", type=int, default=0, help="profile one prompt chunk of N rows and exit")
     ap.add_argument("--no-parity", action="store_true")
     ap.add_argument("--slots", type=int, default=1, help="stream slots (concurrent decoding)")
+    ap.add_argument("--step-test", type=int, default=0, help="N: decode after a prompt: greedy vs drafted rounds")
+    ap.add_argument("--step-len", type=int, default=36000, help="--step-test prompt tokens (the document repeated)")
+    ap.add_argument("--decoder-test", type=int, default=0, help="1: MultiDecoder (rank 1 following) vs greedy; 2: +pool")
     ap.add_argument("--multi-test", type=int, default=0, help="N steps: two streams batched vs alone (needs --slots 2)")
     ap.add_argument("--prefill-bench", default="", help="comma lengths: whole-prompt prefill time of each (fresh request)")
     ap.add_argument("--graph", action="store_true", help="capture the one-row decode step as a CUDA graph")
@@ -81,6 +84,103 @@ def main() -> None:
 
     from tensorfold.engine.exact_sampling import Sampling
 
+    if args.decoder_test:
+        from tensorfold.cuda.kv_pool import PrefixPool
+        from tensorfold.cuda.streams import Stream
+        from tensorfold.families.deepseek_v41.cuda.multi import MultiDecoder
+
+        base = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+        doc = (base * (1 + args.step_len // len(base)))[:args.step_len]
+
+        def share(values):
+            n = torch.tensor([len(values) if args.rank == 0 else 0], dtype=torch.int64, device="cuda")
+            got = torch.empty((2,), dtype=torch.int64, device="cuda")
+            nccl.all_gather(n, got)
+            count = int(got[0])
+            if count == 0:
+                return []
+            mine = (torch.tensor(values, dtype=torch.int64, device="cuda") if args.rank == 0
+                    else torch.zeros((count,), dtype=torch.int64, device="cuda"))
+            out = torch.empty((2 * count,), dtype=torch.int64, device="cuda")
+            nccl.all_gather(mine, out)
+            return out[:count].tolist()
+
+        def gather(values):
+            mine = torch.tensor(values, dtype=torch.int64, device="cuda")
+            out = torch.empty((2 * len(values),), dtype=torch.int64, device="cuda")
+            nccl.all_gather(mine, out)
+            return [out[:len(values)].tolist(), out[len(values):].tolist()]
+
+        with torch.no_grad():
+            for rows in range(2, 17):
+                if rows not in eng.graphs:
+                    eng.capture(rows)
+            eng.select_slot(args.slots - 1)                       # the reference: whole prefill, greedy steps
+            eng.reset()
+            nxt = int(eng.prefill(doc)[-1].argmax())
+            ref = [nxt]
+            for _ in range(23):
+                nxt = eng.step(nxt)
+                ref.append(nxt)
+            if args.decoder_test == 2:
+                eng.pool = PrefixPool(4 << 30)
+            dec = MultiDecoder(eng, share, rank=args.rank, drafts=3)
+            dec.calibrate(gather)
+            if args.rank == 0:
+                s = Stream(list(doc), 24, None, draft=True, stop_eos=False)
+                dec.admit(s)
+                while not s.done:
+                    dec.round()
+                dec.finish([s])
+                share([])
+                print(f"decoder-test: equal {s.out == ref}\n  ref {ref[:16]}\n  dec {s.out[:16]}", flush=True)
+            else:
+                dec.follow()
+        nccl.barrier()
+        return
+    if args.step_test:
+        base = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+        doc = (base * (1 + args.step_len // len(base)))[:args.step_len]
+        res = {}
+        with torch.no_grad():
+            for mode in ("whole", "steps", "steps_drafted"):
+                slot = args.slots - 1
+                eng.select_slot(slot)
+                eng.reset()
+                if mode.startswith("steps"):
+                    for p0 in range(0, len(doc), 16384):
+                        logits = eng.prefill(doc[p0:p0 + 16384])
+                else:
+                    logits = eng.prefill(doc)
+                nxt = int(logits[-1].argmax())
+                toks = [nxt]
+                if mode in ("whole", "steps"):
+                    for _ in range(23):
+                        nxt = eng.step(nxt)
+                        toks.append(nxt)
+                else:                                   # MultiDecoder's round: drafts, step_multi, accept, roll back
+                    log = []
+                    while len(toks) < 24:
+                        ids = eng.views[slot].ids
+                        p0 = len(ids)
+                        drafts = eng.drafter.propose(nxt, p0)[:3]
+                        _, target = eng.step_multi([(slot, t) for t in [nxt, *drafts]])
+                        m = 0
+                        while m < len(drafts) and drafts[m] == target[m]:
+                            m += 1
+                        del eng.views[slot].ids[p0 + 1 + m:]
+                        log.append((drafts, target, m))
+                        toks += drafts[:m] + [target[m]]
+                        nxt = target[m]
+                    if args.rank == 0:
+                        print("rounds:", log[:4], flush=True)
+                res[mode] = toks[:24]
+        if args.rank == 0:
+            print(f"step-test: steps equal {res['whole'] == res['steps']}, steps_drafted equal "
+                  f"{res['whole'] == res['steps_drafted']}\n  whole {res['whole'][:16]}\n  steps {res['steps'][:16]}\n"
+                  f"  s+d   {res['steps_drafted'][:16]}", flush=True)
+        nccl.barrier()
+        return
     if args.multi_test:
         doc = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
         prompts = [doc[:900], doc[5000:6300]]

@@ -59,6 +59,7 @@ class MultiDecoder:
         self.drafts = drafts if e.drafter is not None else 0
         import os
 
+        self.check = os.environ.get("TF_MULTI_CHECK") == "1"
         if os.environ.get("TF_MULTI_PROF"):
             e._mprof = {}
         if os.environ.get("TF_MULTI_DRAFTS"):                    # tuning: drafts a stream in concurrent rounds
@@ -78,6 +79,12 @@ class MultiDecoder:
         self.draft_ms = 0.0
         self.overhead = 2.0                        # a round's host ms besides the forward and drafts
         self.prior = [0.6] * max(self.drafts, 1)   # acceptance by draft position, over every stream (new ones start here)
+        import os as _os
+
+        # while streams decode, prompt steps take this share of the time (the rest: decode rounds)
+        self.fill_share = float(_os.environ.get("TF_FILL_SHARE") or "0.5")
+        self.t_fill = self.t_decode = 0.0
+        self.alone_rows = 8 * step                 # a prompt step's rows when nothing decodes (new arrivals join after)
 
     # -- costs and draft allocation -------------------------------------------------------------------------------
     @torch.no_grad()
@@ -213,19 +220,18 @@ class MultiDecoder:
 
     def _fill(self) -> list[Stream]:
         s = next_fill(self.filling)
-        n = len(s.prompt)
-        start = max(s.pos, 0)
-        stop = n if not any(not x.done for x in self.streams.values()) else min(n, start + self.step_rows)
-        self._send([FILL, s.sid, stop])
-        first = self._step(s, stop)
+        busy = any(not x.done for x in self.streams.values())
+        rows = self.step_rows if busy else self.alone_rows
+        self._send([FILL, s.sid, rows])
+        first = self._step(s, rows)
         if first is None:
             return []
         s.take([first], self._ends(s))
         return [s] if s.done else []
 
-    def _step(self, s: Stream, stop: int) -> int | None:
-        """Prefill prompt[pos:stop] in the stream's slot (resuming a kept or live state first); at the prompt's end,
-        keep its state and sample the first token."""
+    def _step(self, s: Stream, rows: int) -> int | None:
+        """Prefill the next ``rows`` prompt tokens in the stream's slot (resuming a kept or live state first, so the
+        step ends past what was resumed); at the prompt's end, keep its state and sample the first token."""
 
         e = self.e
         t0 = time.perf_counter()
@@ -243,12 +249,13 @@ class MultiDecoder:
                 else:
                     e.reset()
                 s.pos, s.cached = cached, cached
-            logits = e.prefill(s.prompt[s.pos:stop]) if stop > s.pos else None
+            stop = min(n, s.pos + rows)
+            logits = e.prefill(s.prompt[s.pos:stop])
             s.pos = stop
             if stop < n:
                 return None
-            if e.pool is not None and s.draft:
-                e.pool.add(list(s.prompt[:-1]), lambda: e.save_prefix(n - 1))
+            if s.draft:
+                e.keep_prompt(s.prompt)
             last = logits[-1:]
             if s.constraint is not None:
                 last = s.constraint.mask(last.float().clone())
@@ -274,7 +281,13 @@ class MultiDecoder:
     def round(self) -> list[Stream]:
         self._check()
         tr = time.perf_counter()
-        done = self._fill() if self.filling else []
+        busy = any(not x.done for x in self.streams.values())
+        share = self.fill_share / max(1e-6, 1.0 - self.fill_share)
+        done = []
+        if self.filling and (not busy or self.t_fill <= share * self.t_decode):   # time-sliced while others decode
+            done = self._fill()
+            if busy:
+                self.t_fill += time.perf_counter() - tr
         if self.prof is not None and self.rank == 0:
             self.prof["fill"] += time.perf_counter() - tr
         live = [s for s in self.streams.values() if not s.done]
@@ -282,7 +295,12 @@ class MultiDecoder:
             return done
         plan = self._plan(live)
         self._send([ROUND, len(plan), *[x for item in plan for x in item]])
+        td = time.perf_counter()
         news = self._verify(plan)
+        if self.filling:
+            self.t_decode += time.perf_counter() - td
+        else:
+            self.t_fill = self.t_decode = 0.0                  # nothing waits to fill: the shares start over
         for s, new in zip(live, news):
             if s.error is None:
                 s.take(new, self._ends(s))
@@ -313,6 +331,22 @@ class MultiDecoder:
                 rows += [(s.slot, t) for t in [pending, *drafts]]
             t1 = time.perf_counter()
             logits, greedy = e.step_multi(rows)
+            if self.check and len(rows) > 1:               # debug: row 0 of each stream alone, at the same position
+                main = logits[:len(rows)].float().clone()
+                for (sid, k), (r0, nrows, p0) in zip(plan, spans):
+                    s = self.streams[sid]
+                    ids = e.views[s.slot].ids
+                    keep = ids[p0:]
+                    del ids[p0:]
+                    alone, g1 = e.step_multi([(s.slot, rows[r0][1])])
+                    a = alone[0].float()
+                    if self.rank == 0:
+                        d = (a - main[r0]).abs().max().item()
+                        top = torch.topk(main[r0], 2).values.tolist()
+                        print(f"[check] sid {sid} pos {p0} rows {len(rows)}: max|diff| {d:.3g}, argmax multi "
+                              f"{int(main[r0].argmax())} alone {g1[0]}, top2 gap {top[0] - top[1]:.3g}", flush=True)
+                    del ids[p0:]
+                    ids.extend(keep)
             if self.prof is not None and self.rank == 0:
                 p = self.prof
                 p["rounds"] += 1
@@ -351,7 +385,10 @@ class MultiDecoder:
                 if s.constraint is not None and m:
                     s.constraint.advance(drafts[:m])
                 s.counted(nrows)
-                news.append(drafts[:m] + [target[m]])
+                new = drafts[:m] + [target[m]]
+                ends = self._ends(s)                           # a kept draft can be the end token: stop at it
+                cut = next((j + 1 for j, t in enumerate(new) if t in ends), len(new))
+                news.append(new[:min(cut, max(1, s.count - len(s.out)))])
             if self.prof is not None and self.rank == 0:
                 self.prof["post"] += time.perf_counter() - t2
             return news
@@ -390,6 +427,8 @@ class MultiDecoder:
 
         while True:
             msg = self.share(None)
+            if not msg:                                # rank 0 has stopped (tests)
+                return
             if msg[0] == ADMIT:
                 sid, count, draft, stop_eos = msg[1:5]
                 words, npacked = msg[5:5 + SAMPLING_WORDS], msg[5 + SAMPLING_WORDS]

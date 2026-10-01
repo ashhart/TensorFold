@@ -54,13 +54,28 @@ SLOT_BYTES = 40 * 4096 * 512 * 2 + 3 * 4096 * 1024 * 4 + 3 * 4096 * 512 * 2   # 
 CACHE_BYTES = _cache_bytes()     # a stream's per-token caches (compressed entries + indexer keys)
 
 
-def largest_context(free: int, streams: int = 1) -> int:
+def _comp_bytes() -> int:
+    """A stream's per-token compressed entries (the part a display carveout can hold)."""
+
+    from .serial import KV_FP8
+
+    return int(2.5 * (604 if KV_FP8 else 1024))
+
+
+def largest_context(free: int, streams: int = 1, carve: int = 0) -> int:
     """The largest context (a multiple of 1,024) whose caches and prompt buffers fit ``free`` bytes, ``streams``
-    stream slots each holding that context."""
+    stream slots each holding that context; ``carve`` bytes of display carveout take compressed entries first."""
 
     room = free - int((FIXED_GIB + RESERVE_GIB) * 2 ** 30) - (streams - 1) * SLOT_BYTES
     per = TOKEN_BYTES + (streams - 1) * CACHE_BYTES
-    return min(NATIVE_CONTEXT, max(0, room // per // 1024 * 1024))
+    comp = _comp_bytes() * streams
+    best = room // per                                   # no carveout help
+    if carve:
+        full = (room + carve) // per                     # the carveout holds comp up to its size
+        if full * comp >= carve:
+            best = max(best, full)
+        best = max(best, min(room // max(per - comp, 1), carve // comp))   # all comp carved
+    return min(NATIVE_CONTEXT, max(0, best // 1024 * 1024))
 
 
 def _f64_ints(value: float) -> list[int]:
@@ -123,7 +138,10 @@ class Dsv41Engine:
         free = available_bytes()
         if rank == 0:
             print(f"[tensorfold] memory left after the weights: {free / 2 ** 30:.1f} GiB", flush=True)
-        largest = min(row[0] for row in self._gather_ints([largest_context(free, self.streams)]))
+        from tensorfold.cuda import carveout
+
+        carve = carveout.requested_bytes() if carveout.enabled() else 0
+        largest = min(row[0] for row in self._gather_ints([largest_context(free, self.streams, carve)]))
         self.capacity_plan = {"largest_window": largest, "context_window": cap}
         if cap > largest:
             if explicit:
@@ -151,6 +169,9 @@ class Dsv41Engine:
         self.limit = cap
         self.eos = (int(w.cfg.eos_token_id),)
         self.drafts = bool(drafts)
+        if rank == 0 and getattr(self.e, "carved", 0):
+            print(f"[tensorfold] compressed-KV pools in the display carveout: {self.e.carved / 2 ** 30:.2f} GiB",
+                  flush=True)
         if rank == 0:
             print(f"[tensorfold] memory left after capture: {available_bytes() / 2 ** 30:.1f} GiB "
                   f"(largest admissible context {largest})", flush=True)
