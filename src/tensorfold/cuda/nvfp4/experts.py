@@ -138,3 +138,88 @@ def dense(ex: Experts4, e: int, which: str) -> torch.Tensor:
     sc = blocks[..., 128:].contiguous().view(torch.uint8).view(nb, kg, 4, 2, 4, 2)      # [cb, g, t, h, j, c]
     sc = sc.permute(0, 4, 2, 5, 1, 3).reshape(nb * COLS, kg * 2).contiguous()
     return mags[codes] * sc.view(torch.float8_e4m3fn).float().repeat_interleave(16, dim=1) * scale
+
+
+@dataclass
+class ExpertsCk:
+    """One layer's routed experts in the checkpoint's own math (FP4 x FP4): each projection's experts stacked in the
+    lane matmul's words and block scales, each expert's output factor, and the input scales rows quantize under."""
+
+    gate: tuple               # (words, block scales): the lane matmul's, lane-major a 32-column half (_stacked)
+    up: tuple
+    down: tuple
+    alpha: torch.Tensor       # [3, E] fp32: input scale x weight scale (gate, up, down)
+    down_inv: torch.Tensor    # [E] fp32: 1 / down's input scale, what SiLU(gate) * up is quantized under
+    act: float                # gate and up's input scale (one for the layer's rows)
+    width: int                # NI
+    dims: int                 # D
+
+    @property
+    def count(self) -> int:
+        return int(self.alpha.shape[1])
+
+    def nbytes(self) -> int:
+        return sum(t.numel() * t.element_size() for pair in (self.gate, self.up, self.down) for t in pair) + \
+            self.alpha.numel() * 4 + self.down_inv.numel() * 4
+
+
+def _stacked(words: torch.Tensor, scales: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """[E, N, K/2] codes and [E, N, K/16] e4m3 -> words [E*N/64, K/64, 2, 32, 4, 2] int32 (half, lane, n8 tile) and
+    scales [E*N/64, K/64, 2, 8, 4, 4] uint8 (half, column of the tile, tile): a lane's step in two and one loads."""
+
+    from . import checkpoint
+
+    e, n, k2 = words.shape
+    k = 2 * k2
+    if n % 64 or k % 64:
+        raise ValueError(f"NVFP4 experts [{e}, {n}, {k}]: the FP4 mma takes whole 64-column, 64-input tiles")
+    t, kg = e * n // 64, k // 64
+    w = checkpoint.pack4(words.reshape(e * n, k2), e * n)                       # [T, KG, 8 tiles, 32 lanes, 2]
+    w = w.view(t, kg, 2, 4, 32, 2).permute(0, 1, 2, 4, 3, 5).contiguous()       # [T, KG, half, lane, tile, 2]
+    bs = scales.contiguous().view(torch.uint8).reshape(t, 64, kg, 4).permute(0, 2, 1, 3)   # [T, KG, column, 4]
+    bs = bs.reshape(t, kg, 2, 4, 8, 4).permute(0, 1, 2, 4, 3, 5).contiguous()   # [T, KG, half, column, tile, 4]
+    return w, bs
+
+
+def make_ck(gate: tuple, up: tuple, down: tuple, acts: tuple) -> ExpertsCk:
+    """gate, up, down: (words [E, N, K/2] uint8, e4m3 scales [E, N, K/16], per-expert scales [E] fp32); acts: each
+    projection's per-expert input scales [E]. Rows enter gate|up once, under the largest of their input scales (the
+    checkpoints we know store one value for every expert), and leave for down under each expert's own."""
+
+    f32 = [torch.as_tensor(a, dtype=torch.float32).reshape(-1) for a in acts]
+    act = torch.maximum(f32[0].max(), f32[1].max())
+    alpha = torch.stack([act * gate[2].to(torch.float32).reshape(-1), act * up[2].to(torch.float32).reshape(-1),
+                         f32[2].to(gate[2].device) * down[2].to(torch.float32).reshape(-1)]).contiguous()
+    inv = (torch.ones_like(f32[2]) / f32[2]).to(gate[0].device).contiguous()
+    return ExpertsCk(_stacked(gate[0], gate[1]), _stacked(up[0], up[1]), _stacked(down[0], down[1]), alpha, inv,
+                     float(act), int(gate[0].shape[1]), int(gate[0].shape[2]) * 2)
+
+
+def gate_up_ck(x: torch.Tensor, ex: ExpertsCk, plan: grouped.Plan, rows: int,
+               skip: int = -1) -> tuple[torch.Tensor, torch.Tensor]:
+    """x [R, D] bf16 -> each routed pair's SiLU(gate) * up as down's NVFP4 rows: codes [P, NI/2], scales [NI/64, ppad,
+    4]; rows quantized once under the layer's input scale, pairs of expert ``skip`` unwritten."""
+
+    from . import checkpoint
+
+    xq = checkpoint.quant4(x[:rows], ex.act)
+    pairs = rows * plan.slots
+    codes = torch.empty((pairs, ex.width // 2), dtype=torch.uint8, device=x.device)
+    scales = torch.empty((ex.width // 64, -(-pairs // 64) * 64, 4), dtype=torch.uint8, device=x.device)
+    units = grouped.max_items(pairs, plan.experts, plan.tile) * (ex.width // 32)        # 32 columns a unit
+    checkpoint._ext().experts_gu_ck(xq.codes, xq.scales, plan.slots, ex.gate[0], ex.gate[1], ex.alpha[0], ex.up[0],
+                                    ex.up[1], ex.alpha[1], ex.down_inv, ex.dims, ex.width, plan.items, plan.counts,
+                                    plan.members[:pairs], codes, scales, skip, units)
+    return codes, scales
+
+
+def down_ck(rows4: tuple[torch.Tensor, torch.Tensor], ex: ExpertsCk, plan: grouped.Plan, out: torch.Tensor,
+            rows: int, skip: int = -1) -> None:
+    """Down's NVFP4 rows a pair -> out [R * slots, D] in ``out``'s dtype (fp32 or bf16); pairs of ``skip`` untouched."""
+
+    from . import checkpoint
+
+    pairs = rows * plan.slots
+    units = grouped.max_items(pairs, plan.experts, plan.tile) * (ex.dims // 32)
+    checkpoint._ext().experts_down_ck(rows4[0], rows4[1], ex.down[0], ex.down[1], ex.alpha[2], ex.width, ex.dims,
+                                      plan.items, plan.counts, plan.members[:pairs], out, skip, units)

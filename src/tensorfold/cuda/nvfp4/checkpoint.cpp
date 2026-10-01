@@ -11,6 +11,13 @@ void gemm_cuda(int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&,
 void gemm_gu_ck_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                      const at::Tensor&, double, double, int64_t, int64_t, int64_t, double, at::Tensor&, at::Tensor&,
                      bool);
+void experts_gu_ck_cuda(const at::Tensor&, const at::Tensor&, int64_t, const at::Tensor&, const at::Tensor&,
+                        const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                        int64_t, int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&,
+                        at::Tensor&, int64_t, int64_t);
+void experts_down_ck_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                          const at::Tensor&, int64_t, int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                          at::Tensor&, int64_t, int64_t);
 void gemm_ws_cuda(int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, double,
                   at::Tensor&, int64_t, int64_t, int64_t, int64_t, int64_t, bool);
 
@@ -160,6 +167,63 @@ void gemm_gu_ck(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& wg,
     gemm_gu_ck_cuda(x, xs, wg, wsg, wu, wsu, alpha_g, alpha_u, m, npad, k, qg, codes, scales, fp32);
 }
 
+static void experts_in(const at::Tensor& xc, const at::Tensor& xs, int64_t k, const at::Tensor& items,
+                       const at::Tensor& counts, const at::Tensor& members) {
+    TORCH_CHECK(k % 64 == 0, "K in steps of 64");
+    TORCH_CHECK(xc.is_cuda() && xc.is_contiguous() && xc.scalar_type() == at::kByte && xc.dim() == 2 &&
+                xc.size(1) == k / 2, "rows: NVFP4 codes (M, K/2) uint8");
+    TORCH_CHECK(xs.is_contiguous() && xs.scalar_type() == at::kByte && xs.dim() == 3 && xs.size(0) == k / 64 &&
+                xs.size(1) >= xc.size(0) && xs.size(2) == 4, "row scales: (K/64, mpad, 4) uint8");
+    for (const auto* v : {&items, &counts, &members})
+        TORCH_CHECK(v->is_cuda() && v->is_contiguous() && v->scalar_type() == at::kInt, "plan tensors: int32");
+}
+
+static void experts_w(const at::Tensor& w, const at::Tensor& s, const at::Tensor& alpha, int64_t n, int64_t k) {
+    TORCH_CHECK(n % 64 == 0, "experts' outputs in whole 64-column tiles");
+    TORCH_CHECK(w.is_cuda() && w.is_contiguous() && (w.numel() * w.element_size()) % (n * k / 2) == 0,
+                "words: [E * N/64, K/64, 8, 32, 2]");
+    const int64_t e = w.numel() * w.element_size() / (n * k / 2);
+    TORCH_CHECK(s.is_contiguous() && s.numel() * s.element_size() == e * n * (k / 16),
+                "block scales: [E * N/64, K/64, 64, 4]");
+    TORCH_CHECK(alpha.is_contiguous() && alpha.scalar_type() == at::kFloat && alpha.numel() == e,
+                "alpha: (E,) fp32");
+}
+
+// Routed gate|up in the checkpoint's math: pairs of the plan's items, NVFP4 rows ``xc`` / ``xs`` (row p / slots),
+// -> SiLU(gate) * up as down's NVFP4 input a pair: codes (P, NI/2), scales (NI/64, ppad, 4) under 1 / qg[e].
+void experts_gu_ck(const at::Tensor& xc, const at::Tensor& xs, int64_t slots, const at::Tensor& wg,
+                   const at::Tensor& sg, const at::Tensor& ag, const at::Tensor& wu, const at::Tensor& su,
+                   const at::Tensor& au, const at::Tensor& qg, int64_t k, int64_t ni, const at::Tensor& items,
+                   const at::Tensor& counts, const at::Tensor& members, at::Tensor codes, at::Tensor scales,
+                   int64_t skip, int64_t max_units) {
+    experts_in(xc, xs, k, items, counts, members);
+    TORCH_CHECK(slots > 0, "gate|up reads token rows: slots > 0");
+    experts_w(wg, sg, ag, ni, k);
+    experts_w(wu, su, au, ni, k);
+    TORCH_CHECK(qg.is_contiguous() && qg.scalar_type() == at::kFloat && qg.numel() == ag.numel(), "qg: (E,) fp32");
+    TORCH_CHECK(codes.is_contiguous() && codes.scalar_type() == at::kByte && codes.dim() == 2 &&
+                codes.size(1) == ni / 2 && codes.size(0) >= members.numel(), "codes: (P, NI/2) uint8");
+    TORCH_CHECK(scales.is_contiguous() && scales.scalar_type() == at::kByte && scales.dim() == 3 &&
+                scales.size(0) == ni / 64 && scales.size(1) >= codes.size(0) && scales.size(2) == 4,
+                "scales: (NI/64, ppad, 4) uint8");
+    c10::cuda::CUDAGuard guard(xc.device());
+    experts_gu_ck_cuda(xc, xs, slots, wg, sg, ag, wu, su, au, qg, k, ni, items, counts, members, codes, scales, skip,
+                       max_units);
+}
+
+// Routed down in the checkpoint's math: the pairs' NVFP4 rows (row p) -> out (P, N) fp32 or bf16, alpha[e] each.
+void experts_down_ck(const at::Tensor& xc, const at::Tensor& xs, const at::Tensor& w, const at::Tensor& s,
+                     const at::Tensor& alpha, int64_t k, int64_t n, const at::Tensor& items, const at::Tensor& counts,
+                     const at::Tensor& members, at::Tensor out, int64_t skip, int64_t max_units) {
+    experts_in(xc, xs, k, items, counts, members);
+    experts_w(w, s, alpha, n, k);
+    TORCH_CHECK(out.is_cuda() && out.is_contiguous() && out.dim() == 2 && out.size(1) == n &&
+                out.size(0) >= members.numel() &&
+                (out.scalar_type() == at::kFloat || out.scalar_type() == at::kBFloat16), "out: (P, N) fp32 or bf16");
+    c10::cuda::CUDAGuard guard(xc.device());
+    experts_down_ck_cuda(xc, xs, w, s, alpha, k, n, items, counts, members, out, skip, max_units);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("quant4", &quant4);
     m.def("quant8", &quant8);
@@ -168,4 +232,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("gemm", &gemm);
     m.def("gemm_ws", &gemm_ws);
     m.def("gemm_gu_ck", &gemm_gu_ck);
+    m.def("experts_gu_ck", &experts_gu_ck);
+    m.def("experts_down_ck", &experts_down_ck);
 }

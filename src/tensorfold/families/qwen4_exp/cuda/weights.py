@@ -303,6 +303,18 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             gate = stack("gate_proj")
             up = stack("up_proj")
             down = stack("down_proj")
+            if nvfp4_moe.own_math(world):                # rows in NVFP4 under the checkpoint's static input scales
+                def acts(proj: str) -> torch.Tensor:
+                    names = [f"{name}.experts.{i}.{proj}.input_scale" for i in range(e)]
+                    if not all(rd.has(prefix + n) for n in names):
+                        raise ValueError(f"{name}.{proj}: no static input scales, so the experts' own math is "
+                                         "unknown; serve it with --precision full")
+                    return torch.stack([raw(n).float().reshape(()) for n in names])
+
+                moe4 = nvfp4_moe.moe4_own_math(gate, up, down, (acts("gate_proj"), acts("up_proj"),
+                                                                acts("down_proj")), shared)
+                del gate, up, down
+                return MoEW(router, moe4)
             if world > 1:
                 gate = (gate[0][:, lo:hi], gate[1][:, lo:hi], gate[2])
                 up = (up[0][:, lo:hi], up[1][:, lo:hi], up[2])

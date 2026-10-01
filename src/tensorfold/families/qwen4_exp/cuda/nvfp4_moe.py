@@ -21,13 +21,18 @@ class Expert4:
 
 @dataclass
 class MoE4:
-    """One layer's experts: the routed ones as grouped NVFP4 blocks, the shared one as bf16 tables."""
+    """One layer's experts: the routed ones as grouped NVFP4 blocks (bf16 rows) or in the checkpoint's own math (FP4
+    rows, ``nvx.ExpertsCk``), the shared one as bf16 tables."""
 
-    routed_experts: nvx.Experts4
+    routed_experts: nvx.Experts4 | nvx.ExpertsCk
     shared: Expert4
     kernel: str = "nvfp4"
 
     capturable = True     # the plan stays on the device
+
+    @property
+    def own_math(self) -> bool:
+        return isinstance(self.routed_experts, nvx.ExpertsCk)
 
     @property
     def routed(self) -> int:
@@ -78,6 +83,24 @@ def moe4_from_checkpoint(gate: tuple, up: tuple, down: tuple,
     return MoE4(nvx.make(gate, up, down), shared if isinstance(shared, Expert4) else expert4_from_bf16(*shared))
 
 
+def own_math(world: int) -> bool:
+    """Whether the routed experts run the checkpoint's own math (``--precision checkpoint``, an SM 12.x GPU, one
+    rank): rows in NVFP4 under the static input scales on the block-scaled FP4 mma. Else bf16 rows (W4A16)."""
+
+    from tensorfold.cuda import precision
+
+    if precision.mode() != precision.CHECKPOINT or world != 1 or not torch.cuda.is_available():
+        return False
+    return precision.own_math(torch.cuda.get_device_capability())["nvfp4"]
+
+
+def moe4_own_math(gate: tuple, up: tuple, down: tuple, acts: tuple, shared) -> MoE4:
+    """A layer whose routed experts run the checkpoint's own math; ``acts``: gate, up and down's input scales [E]."""
+
+    return MoE4(nvx.make_ck(gate, up, down, acts),
+                shared if isinstance(shared, Expert4) else expert4_from_bf16(*shared))
+
+
 def moe4_from_bf16(gate_up: torch.Tensor, down: torch.Tensor,
                    shared: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> MoE4:
     """The MTP layer's bf16 experts (gate_up [E, 2NI, K], down [E, K, NI]) in NVFP4: they only draft."""
@@ -108,6 +131,12 @@ def moe(x: torch.Tensor, xs: torch.Tensor, router_rows: torch.Tensor, ex: MoE4, 
     moe_mod.router(x, router_rows, buf.logits[:rows])
     moe_mod.select(buf.logits[:rows], buf, top_k, ex.routed, nvx.PREFILL_TILE)
     prompt = buf.y.dtype != torch.float32                  # a prompt's buffers keep bf16 slots
+    if ex.own_math:                                        # NVFP4 rows in, down's NVFP4 rows between, no bf16 act
+        rows4 = nvx.gate_up_ck(x, ex.routed_experts, buf.plan, rows, skip=ex.routed)
+        nvx.down_ck(rows4, ex.routed_experts, buf.plan, buf.y.view(-1, ex.dims), rows, skip=ex.routed)
+        buf.act[:rows, top_k] = ex.shared_act(x, prompt)
+        buf.y[:rows, top_k] = _shared(ex.shared.down, buf.act[:rows, top_k], prompt, not prompt)
+        return buf
     nvx.gate_up(x, ex.routed_experts, buf.plan, buf.act.view(-1, ex.width), rows, skip=ex.routed)
     buf.act[:rows, top_k] = ex.shared_act(x, prompt)
     nvx.down(buf.act.view(-1, ex.width), ex.routed_experts, buf.plan, buf.y.view(-1, ex.dims), rows, skip=ex.routed)

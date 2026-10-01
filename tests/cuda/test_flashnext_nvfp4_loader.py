@@ -56,9 +56,11 @@ def test_the_header_names_every_tensor(tiny: Path) -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
 def test_the_loader_builds_the_nvfp4_faces(tiny: Path) -> None:
+    from tensorfold.cuda import precision
     from tensorfold.families.qwen4_exp.cuda.weights import load
 
-    w = load(tiny, mtp=True, draft_vocab=None)
+    with precision.using(precision.FULL):                               # bf16 rows: the W4A16 blocks
+        w = load(tiny, mtp=True, draft_vocab=None)
     assert w.cfg.quant == "modelopt"
     l0 = w.layers[0]
     moe = l0.moe
@@ -96,6 +98,36 @@ def test_the_loader_builds_the_nvfp4_faces(tiny: Path) -> None:
     assert float((fd - ref).norm() / ref.norm()) < 0.12
 
 
+def test_the_checkpoint_math_stacks_the_routed_experts_for_the_fp4_mma(tiny: Path) -> None:
+    """``--precision checkpoint`` on an SM 12.x GPU: the routed experts as the lane matmul's words and block scales,
+    each factor its input scale times its weight scale; the MTP layer's draft-only experts keep their blocks."""
+
+    if torch.cuda.get_device_capability()[0] != 12:
+        pytest.skip("the block-scaled FP4 mma needs an SM 12.x GPU")
+    from safetensors import safe_open
+
+    from tensorfold.cuda import precision
+    from tensorfold.cuda.nvfp4 import checkpoint
+    from tensorfold.cuda.nvfp4.experts import ExpertsCk
+    from tensorfold.families.qwen4_exp.cuda.weights import load
+
+    with precision.using(precision.CHECKPOINT):
+        w = load(tiny, mtp=True, draft_vocab=None)
+    ex = w.layers[0].moe.experts
+    assert ex.own_math and isinstance(ex.routed_experts, ExpertsCk)
+    ck = ex.routed_experts
+    assert ex.routed == 2 and ex.width == 128 and ex.dims == 256 and ck.act == 1.0
+    with safe_open(str(tiny / "model-00001-of-00001.safetensors"), framework="pt") as f:
+        name = next(n for n in f.keys() if n.endswith("layers.0.mlp.experts.0.gate_proj.weight"))
+        p = name[:-len("0.gate_proj.weight")]
+        words = torch.stack([f.get_tensor(f"{p}{i}.gate_proj.weight") for i in range(2)]).cuda()
+        s2 = torch.stack([f.get_tensor(f"{p}{i}.gate_proj.weight_scale_2").float().reshape(()) for i in range(2)])
+    lane = checkpoint.pack4(words.reshape(256, 128), 256).view(4, 4, 2, 4, 32, 2).permute(0, 1, 2, 4, 3, 5)
+    assert torch.equal(ck.gate[0], lane.contiguous())                   # the lane matmul's words, lane-major halves
+    assert torch.equal(ck.alpha[0].cpu(), s2)
+    assert not w.mtp.layer.moe.experts.own_math
+
+
 def test_the_reader_finds_the_published_naming(tmp_path: Path) -> None:
     """The published NVFP4 checkpoint spells its language-model tensors ``model.language_model.*`` while its
     lm_head and mtp stay top level; the loader reads the same faces as from the plain ``model.*`` layout."""
@@ -111,7 +143,10 @@ def test_the_reader_finds_the_published_naming(tmp_path: Path) -> None:
 
     if not torch.cuda.is_available():                                   # the loader builds CUDA tensors
         pytest.skip("the loader builds CUDA tensors")
-    a, b = load(plain, mtp=True, draft_vocab=None), load(named, mtp=True, draft_vocab=None)
+    from tensorfold.cuda import precision
+
+    with precision.using(precision.FULL):                               # the W4A16 faces compared below
+        a, b = load(plain, mtp=True, draft_vocab=None), load(named, mtp=True, draft_vocab=None)
     assert b.cfg.quant == "modelopt" and len(b.layers) == len(a.layers)
     for i, (x, y) in enumerate(zip(a.layers, b.layers, strict=True)):
         for face in ("up", "down", "up_scale", "down_scale"):
