@@ -135,7 +135,7 @@ def fake_runtime(monkeypatch):
     def both(send, recv):
         recv.view(-1).copy_(torch.cat([send.view(-1), send.view(-1)]))
     comm = SimpleNamespace(barrier=lambda: None, ready=lambda *a, **k: None, all_gather=both)
-    monkeypatch.setitem(sys.modules, "tensorfold.cuda.comm", SimpleNamespace(NCCL=lambda *a: comm))
+    monkeypatch.setitem(sys.modules, "tensorfold.cuda.comm", SimpleNamespace(open_comm=lambda *a, **k: comm))
     for family in ("qwen3_5", "qwen4_exp", "glm5_next"):
         prefix = f"tensorfold.families.{family}.cuda"
         weights = SimpleNamespace(load=load, draft_token_ids=lambda *a: None,

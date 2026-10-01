@@ -102,11 +102,11 @@ class FlashNextEngine:
         self.vision = None                   # the image tower (``QwenCudaVision``) with --vision
         ids = draft_token_ids(draft_vocab) if self.depth > 0 else None
         if tp == 2:
-            from tensorfold.cuda.comm import NCCL
+            from tensorfold.cuda.comm import open_comm
 
             if not master:
                 raise ValueError("two ranks need rank 0's address (master)")
-            self.comm = NCCL(rank, 2, master, port)
+            self.comm = open_comm(rank, 2, master, port)
             self.comm.barrier()
         gather = (lambda values: gather_ints(torch, self.comm.all_gather, values)) if tp == 2 else None
         each, mtp, bits = self.depth + 1, self.depth > 0, BITS_OF[self.kv_dtype]
