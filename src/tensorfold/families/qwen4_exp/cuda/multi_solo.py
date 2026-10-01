@@ -58,12 +58,33 @@ class Alone:
         counts = gdn.to_device([len(rows)], torch.int32, self.w.device)
         gdn.replay(table, sc.lin, 1, kept, counts, k[0], v[0], in_place=True)
 
+    def _relocate_kept(self, target, avoid) -> bool:
+        """Move the kept prompt end held in the graph slot into a free slot of its size (one GPU), so a different lone
+        request can take the slot without dropping its graphs; False when no free slot fits without evicting."""
+
+        if self.planning or getattr(self.w, "comm", None) is not None:
+            return False                         # two ranks name kept ends by slot: they keep the slot swap
+        spare = next((f for f in self.free if f is not target and f is not avoid), None)
+        if spare is None:
+            return False
+        size = target.capacity
+        if spare.capacity != size:
+            self._shrink(spare, release=True)    # back to its first rows (a no-op when already there)
+            need = spare.cache_bytes(size) - spare.cache_bytes() + spare.layer_bytes(size)
+            if not self.memory_gate.fits(need):
+                return False
+            self.memory_gate.take(spare.resize(size))
+        spare.copy_from(target)
+        self.free = [f for f in self.free if f is not spare]
+        self.kept = [(ids, spare if st is target else st, snap, tail) for ids, st, snap, tail in self.kept]
+        return True
+
     def _move_to_solo(self, s) -> None:
         """Copy a lone stream into the graph slot after committing its pending rows and matching cache sizes."""
 
         target, old = self.solo.st, s.st
         self._flush(s)
-        if any(k[1] is target for k in self.kept):
+        if any(k[1] is target for k in self.kept) and not self._relocate_kept(target, old):
             self.solo.st = old                   # preserve both prefix chains instead of evicting a kept slot
             if self.planning:
                 self.actions.append(["solo", self._index(old)])

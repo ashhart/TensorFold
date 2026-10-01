@@ -58,6 +58,7 @@ def decoder(multi, state, torch, room: int):
     dec = multi.MultiDecoder.__new__(multi.MultiDecoder)
     dec.w, dec.depth, dec.streams, dec.free, dec.kept, dec.keep = weights(), 3, {}, [], [], 8
     dec.filling, dec.fills, dec.held = [], {}, {}
+    dec.solo, dec.solo_on, dec.planning = None, False, False       # no graph slot, one GPU
     dec.memory_gate = importlib.import_module("tensorfold.cuda.memory_gate").MemoryGate(room, reserve=0)
     return dec
 
@@ -124,3 +125,109 @@ def test_a_request_waits_while_a_stream_waits_and_starts_alone_regardless(alloca
     st = state.State(weights(), 256, 4, "bf16", limit=65536)
     assert dec._grow(st, 300, alone=True) and st.capacity == 8192       # alone: startup fitted one whole window
     assert not dec._grow(state.State(weights(), 256, 4, "bf16", limit=65536), 300)
+
+
+def test_the_lone_streams_graph_slot_keeps_its_rows_until_memory_is_short(allocations):  # noqa: F811
+    """Every resize of the graph slot recaptures its graphs: it keeps its rows when idle and grows by doubling."""
+    import torch
+
+    state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
+    multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    probe = state.State(weights(), 256, 4, "bf16", limit=65536)
+    one = probe.cache_bytes(8192) - probe.cache_bytes(256) + probe.layer_bytes(8192)
+    dec = decoder(multi, state, torch, room=one)                        # room for one slot's first step
+    solo = state.State(weights(), 256, 4, "bf16", limit=65536)
+    dec.solo = SimpleNamespace(st=solo)
+    resized = []
+    dec._state_changed = lambda st: resized.append(st) if st is solo else None    # drops the slot's graphs
+    assert dec._grow(solo, 300, alone=True) and solo.capacity == 8192 and resized == [solo]
+    dec._shrink(solo)                                                   # a request ended: the rows stay
+    assert solo.capacity == 8192 and solo.pos == 0 and resized == [solo]
+    other = stream(multi, state, torch, 0, 254)
+    dec.streams = {0: other}
+    assert dec._grow(other.st, 300)                                     # another stream needs the memory
+    assert other.st.capacity == 8192 and solo.capacity == 256 and resized == [solo, solo]
+    dec._shrink(other.st)                                               # any other slot shrinks as before
+    assert other.st.capacity == 256
+
+    big = decoder(multi, state, torch, room=1 << 40)
+    solo = state.State(weights(), 256, 4, "bf16", limit=65536)
+    big.solo, big._state_changed = SimpleNamespace(st=solo), (lambda st: None)
+    assert big._grow(solo, 300, alone=True) and solo.capacity == 8192
+    assert big._grow(solo, 8193, alone=True) and solo.capacity == 16384
+    assert big._grow(solo, 16385, alone=True) and solo.capacity == 32768      # not 24576: doubling
+    assert big._grow(solo, 40000, alone=True) and solo.capacity == 65536      # and never past the window
+    big._shrink(solo, release=True)                                     # memory is short: it gives them back
+    assert solo.capacity == 256
+
+
+def test_the_graph_slot_keeps_its_rows_on_two_ranks_too(allocations):  # noqa: F811
+    """Rank 0 plans on Shadows of the slots: the graph slot is recognised through its Shadow, and keeping its rows
+    records no resize for rank 1 to replay."""
+    import torch
+
+    state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
+    multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    plan = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi_plan")
+    dec = decoder(multi, state, torch, room=1 << 40)
+    solo = state.State(weights(), 256, 4, "bf16", limit=65536)
+    other = state.State(weights(), 256, 4, "bf16", limit=65536)
+    dec._state_changed = lambda st: None
+    dec.solo = SimpleNamespace(st=solo)
+    assert dec._grow(solo, 300, alone=True) and solo.capacity == 8192
+    actions = []
+    shadow, other_shadow = plan.Shadow(solo, 0, actions), plan.Shadow(other, 1, actions)
+    dec.solo, dec.planning = SimpleNamespace(st=shadow), True
+    assert dec._is_solo(shadow) and dec._is_solo(solo) and not dec._is_solo(other_shadow)
+    dec._shrink(shadow)                                                 # a request ended on two ranks
+    assert actions == [["reset", 0]] and shadow.capacity == 8192
+    dec._shrink(shadow, release=True)                                   # memory is short: rank 1 shrinks it too
+    assert actions[-1] == ["resize", 0, 256]
+
+
+def _mover(multi, state, torch, solo):
+    dec = decoder(multi, state, torch, room=1 << 40)
+    dec.solo = SimpleNamespace(st=solo)
+    dropped = []
+    dec._state_changed = lambda st: dropped.append(st) if st is solo else None       # the slot's graphs dropped
+    return dec, dropped
+
+
+def test_a_lone_stream_moves_into_a_graph_slot_with_more_rows(allocations):  # noqa: F811
+    """The graph slot keeps its rows, so a lone stream from a smaller slot lands in its first rows, unresized."""
+    import torch
+
+    state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
+    multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    solo = state.State(weights(), 8192, 4, "bf16", limit=65536)
+    old = filled(state, torch, "bf16")                                   # 256 rows, 200 committed
+    k, mtp = old.kc[0].k[:200].clone(), old.mtp_kc.v[:203].clone()
+    dec, dropped = _mover(multi, state, torch, solo)
+    s = SimpleNamespace(sid=0, st=old)
+    dec._move_to_solo(s)
+    assert s.st is solo and dec.solo.st is solo and solo.capacity == 8192 and not dropped
+    assert solo.pos == 200 and torch.equal(solo.kc[0].k[:200], k) and torch.equal(solo.mtp_kc.v[:203], mtp)
+    assert old in dec.free
+
+
+def test_a_different_lone_request_takes_the_graph_slot_and_the_kept_prefix_moves_out(allocations):  # noqa: F811
+    """A kept prompt end in the graph slot moves to a free slot of its size, so the next lone request with another
+    prompt takes the slot without dropping its graphs, and the kept end still resumes from the same rows."""
+    import torch
+
+    state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
+    multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    solo = filled(state, torch, "bf16", rows=8192)                     # holds a kept prompt end
+    kept_k = solo.kc[0].k[:200].clone()
+    spare = state.State(weights(), 256, 4, "bf16", limit=65536)
+    old = filled(state, torch, "bf16")
+    k = old.kc[0].k[:200].clone()
+    dec, dropped = _mover(multi, state, torch, solo)
+    snap = {"pos": 200}
+    dec.kept, dec.free = [([1, 2, 3], solo, snap, None)], [spare]
+    s = SimpleNamespace(sid=0, st=old)
+    dec._move_to_solo(s)
+    assert dec.solo.st is solo and s.st is solo and not dropped and solo.capacity == 8192
+    assert torch.equal(solo.kc[0].k[:200], k)
+    assert dec.kept == [([1, 2, 3], spare, snap, None)] and spare.capacity == 8192
+    assert torch.equal(spare.kc[0].k[:200], kept_k) and spare not in dec.free

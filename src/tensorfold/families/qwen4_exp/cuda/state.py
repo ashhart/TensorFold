@@ -270,27 +270,38 @@ class State:
 
     def copy_from(self, other: State) -> None:
         """Become ``other`` in place: every tensor copied into this state's own (CUDA graphs keep their addresses),
-        the host-side positions and histories taken over. Both states have the same geometry."""
+        the host-side positions and histories taken over. This state may hold more cache rows than ``other`` (a graph
+        slot keeps its rows): ``other``'s rows land in the first ones; rows past ``pos`` are written before read."""
 
         def tensors(obj):
             for name, value in vars(obj).items():
                 if isinstance(value, torch.Tensor):
                     yield name, value
 
+        def into(mine: torch.Tensor, t: torch.Tensor) -> None:
+            if mine.shape == t.shape:
+                mine.copy_(t)
+            elif mine.dim() == t.dim() and mine.shape[1:] == t.shape[1:] and mine.shape[0] >= t.shape[0]:
+                mine[:t.shape[0]].copy_(t)
+            else:
+                raise ValueError(f"copy_from: {tuple(t.shape)} does not fit {tuple(mine.shape)}")
+
+        if other.capacity > self.capacity:
+            raise ValueError(f"copy_from: {other.capacity} cache rows do not fit {self.capacity}")
         for name, value in vars(other).items():
             mine = getattr(self, name)
             if isinstance(value, torch.Tensor):
-                mine.copy_(value)
+                into(mine, value)
             elif isinstance(value, list) and value and isinstance(value[0], torch.Tensor):
                 for a, b in zip(mine, value):
-                    a.copy_(b)
+                    into(a, b)
             elif isinstance(value, kvcache.KVCache):
                 for n, t in tensors(value):
-                    getattr(mine, n).copy_(t)
+                    into(getattr(mine, n), t)
             elif name == "scratch" or (isinstance(value, list) and value and isinstance(value[0], kvcache.KVCache)):
                 for a, b in zip(mine, value):
                     for n, t in tensors(b):
-                        getattr(a, n).copy_(t)
+                        into(getattr(a, n), t)
             elif name == "cur":
                 self.cur = list(value)
             elif name == "ple_history":
