@@ -111,6 +111,8 @@ def _send(handler: Any, status: int, payload: dict[str, Any]) -> None:
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Content-Length", str(len(data)))
+        if handler.close_connection:                 # so a pooling client does not reuse the socket
+            handler.send_header("Connection", "close")
         handler.end_headers()
         handler.wfile.write(data)
     except OSError:                                  # the client has gone

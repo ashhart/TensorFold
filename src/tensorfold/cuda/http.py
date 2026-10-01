@@ -50,9 +50,23 @@ def make_handler(app: App):
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
+                if self.close_connection:                # so a pooling client does not reuse the socket
+                    self.send_header("Connection", "close")
                 self.end_headers()
                 self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError):          # the client has gone
+                self.close_connection = True
+
+        def _discard_body(self) -> None:
+            """Read a refused request's body, so it cannot reach the next request on this connection."""
+
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                length = -1
+            if 0 <= length <= 32 * 1024**2:
+                self.rfile.read(length)
+            else:
                 self.close_connection = True
 
         def _stream_error(self, error: dict[str, Any]) -> None:
@@ -90,6 +104,7 @@ def make_handler(app: App):
                 return responses.post(self, app)
             chat = self.path.rstrip("/").endswith("/chat/completions")
             if not chat and not self.path.rstrip("/").endswith("/completions"):
+                self._discard_body()
                 return self._json(404, {"error": "not found"})
             try:
                 length = int(self.headers.get("Content-Length", 0))

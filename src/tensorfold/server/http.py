@@ -93,8 +93,22 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if self.close_connection:                    # so a pooling client does not reuse the socket
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
+
+        def _discard_body(self) -> None:
+            """Read a refused request's body, so it cannot reach the next request on this connection."""
+
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = -1
+            if 0 <= length <= 32 * 1024**2:
+                self.rfile.read(length)
+            else:
+                self.close_connection = True
 
         def _route(self) -> str:
             # Tolerate query strings, trailing slashes and client URLs with or without the /v1 prefix.
@@ -178,12 +192,14 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             is_chat_completion = route.endswith("/chat/completions")
             is_text_completion = route.endswith("/completions") and not is_chat_completion
             if not is_chat_completion and not is_text_completion:
+                self._discard_body()
                 self._send_json({"error": {"message": f"unknown path {self.path}"}}, status=404)
                 return
 
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 <= length <= 32 * 1024**2:
+                    self.close_connection = True         # the unread body must not reach the next request
                     raise RequestError("request body exceeds the 32 MiB limit")
                 body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
                 validate_modalities(body)
