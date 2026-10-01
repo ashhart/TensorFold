@@ -1,9 +1,5 @@
-"""Two-host regression: run rank 1 first, then rank 0 with the same master/port.
-
-PYTHONPATH=src:tests/cuda python tests/cuda/glm_decision_tp.py --rank 1 --master HOST
-Rank 1 is a normal follow() worker; stop that test process after rank 0 exits.
-Uses a tiny synthetic checkpoint, real NCCL and CUDA, not duplicated shards.
-"""
+"""Two-host check on a tiny synthetic checkpoint: real NCCL, rank 1 follows until rank 0 exits."""
+# PYTHONPATH=src:tests/cuda python tests/cuda/glm_decision_tp.py --rank 1 --master HOST
 from __future__ import annotations
 
 import argparse

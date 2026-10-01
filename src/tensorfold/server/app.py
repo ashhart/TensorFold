@@ -16,6 +16,7 @@ from tensorfold.server.checkpoints import (CheckpointStore, prune_conversations,
                                            save_conversations, spill_conversation)
 from tensorfold.server.cancellation import Cancellation
 from tensorfold.server.errors import CONTEXT_LIMIT, ContextLengthError, RequestError
+from tensorfold.server.decision_requests import DecisionRequests
 from tensorfold.server.prompt_blocks import PromptBlocks, _REQUEST
 from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
@@ -50,7 +51,7 @@ def _token_sha(tokens: list[int]) -> str:
     return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
 
 
-class ChatApp(RequestOptions, PromptBlocks):
+class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
     """One model behind the OpenAI endpoint (``server.http.make_handler``)."""
 
     accepts_sampling = True
@@ -212,26 +213,6 @@ class ChatApp(RequestOptions, PromptBlocks):
             print(f"[tensorfold] prompt cache up to {spare / 1024**3:.1f} GiB: the memory the weights, a "
                   f"{window:,}-token request and a shared round leave idle, freed whenever a request needs it",
                   flush=True)
-
-    def decisions(self, body: dict[str, Any]) -> dict[str, Any]:
-        """Answer typed questions from next-token label logits. No text is generated."""
-
-        from tensorfold.server.decisions import DecisionError, build_response, prepare
-
-        try:
-            with self.tokenizer_lock:
-                prepared = prepare(self.tokenizer, body, context_len=self.context_window or None)
-        except DecisionError as exc:
-            raise RequestError(str(exc)) from exc
-        scored = []
-        for item in prepared:
-            prompt, labels = item.prompt_ids, item.label_ids
-            try:
-                scored.append(self.scheduler.on_engine(
-                    lambda engine, prompt=prompt, labels=labels: engine.score_labels(prompt, labels)))
-            except ValueError as exc:
-                raise RequestError(f"question {item.id!r}: {exc}") from exc
-        return build_response(body, prepared, scored)
 
     def chat(
         self,

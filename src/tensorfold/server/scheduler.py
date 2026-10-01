@@ -57,6 +57,9 @@ class ChatJob:
     call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
     constraint: Any = None                  # response_format's grammar (engine.grammar.Constraint), or None
     vision: Any = None
+    # a decision: prefill ends at these labels' last-row logits and joins no round (empty: a chat)
+    label_ids: tuple[int, ...] = ()
+    scored: tuple[list[float], float] | None = None
 
 
 class _JobQueue(queue.PriorityQueue):

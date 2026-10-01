@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from tensorfold.cuda import health
 from tensorfold.server import metrics, responses
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
+from tensorfold.server.decisions import DecisionError
 from tensorfold.server.errors import CapacityError, RequestError, error_body
 from tensorfold.server.http import Server
 from tensorfold.server.stacks import Rearming
@@ -214,11 +215,20 @@ def make_handler(app: App):
                 body = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(body, dict):
                     raise RequestError("request body must be an object")
-                payload = decide(body)
             except RequestError as exc:
                 return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
             except Exception as exc:        # noqa: BLE001 - a bad body is a client error
                 return self._json(400, {"error": {"message": _error_message(exc), "type": "invalid_request_error"}})
+            try:
+                payload = decide(body)
+            except (RequestError, DecisionError) as exc:
+                return self._json(400, {"error": {"message": str(exc), "type": "invalid_request_error"}})
+            except Exception as exc:        # a scoring failure is the server's, not a bad body
+                _log_error(exc)
+                try:
+                    return self._json(500, {"error": {"message": _error_message(exc)}})
+                except OSError:
+                    return
             self._json(200, payload)
 
     return Handler

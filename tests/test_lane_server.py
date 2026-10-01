@@ -80,7 +80,8 @@ def make_app(**kwargs: Any) -> ChatApp:
         "engine_factory": FakeEngine,
     }
     settings.update(kwargs)
-    return ChatApp(None, FakeTokenizer(), **settings)
+    tokenizer = settings.pop("tokenizer", None)
+    return ChatApp(None, tokenizer or FakeTokenizer(), **settings)
 
 
 def expected_reply(app: ChatApp, messages: list[dict[str, Any]], max_new: int) -> tuple[list[int], str]:

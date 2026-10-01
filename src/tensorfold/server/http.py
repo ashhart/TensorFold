@@ -14,6 +14,7 @@ from tensorfold.engine import grammar
 from tensorfold.server import responses
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
+from tensorfold.server.decisions import DecisionError
 from tensorfold.server.errors import CapacityError, RequestError, error_body
 from tensorfold.server.request_options import parse_numbers, thinking_fields
 from tensorfold.server.probabilities import probability_options
@@ -496,12 +497,24 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                 body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
                 if not isinstance(body, dict):
                     raise RequestError("request body must be an object")
-                payload = decide(body)
             except RequestError as exc:
                 self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
                 return
             except Exception as exc:  # noqa: BLE001 - a bad body is a client error
                 self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            try:
+                payload = decide(body)
+            except (RequestError, DecisionError) as exc:
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            except Exception as exc:  # a scoring failure is the server's, not a bad body
+                print(f"[tensorfold] request error: {type(exc).__name__}: {exc}", flush=True)
+                traceback.print_exc()
+                try:
+                    self._send_json({"error": {"message": str(exc)}}, status=500)
+                except Exception:
+                    pass
                 return
             self._send_json(payload)
 

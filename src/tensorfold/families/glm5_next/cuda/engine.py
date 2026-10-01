@@ -530,7 +530,7 @@ class GlmEngine:
         return self._score_local(prompt, labels)
 
     def _score_local(self, prompt: list[int], labels: list[int]) -> tuple[list[float], float]:
-        from tensorfold.families.glm5_next.cuda.decode import prompt_logits
+        from tensorfold.families.glm5_next.cuda.score import prompt_logits
         from tensorfold.server.decisions import reduce_vocab_shards
 
         # The score prefill writes attention rows from position 0. Save or drop every snapshot those rows

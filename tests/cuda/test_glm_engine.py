@@ -392,11 +392,8 @@ def test_exl3_checkpoint_drafted_equals_serial(engine_x, sampling):
 @pytest.mark.parametrize("cache_bytes", [0, 64 * 1024 * 1024], ids=["drop", "save"])
 @pytest.mark.parametrize("policy", ["2", "f3"], ids=["mtp", "dflash2"])
 def test_decision_between_chats_preserves_replies(engine_f, cache_bytes, policy):
-    """Real scoring must not poison either an immediate resume or a later conversation switch.
-
-    The checkpoint and drafter run real CUDA kernels; only the existing single-GPU
-    collective fixture duplicates rank 0's shard. This is not a two-rank parity test.
-    """
+    """Real scoring leaves the next resume and a later conversation switch on the serial reply."""
+    # The checkpoint and drafter run real CUDA kernels. This single-GPU fixture is not a two-rank parity test.
     e = engine_f
     old_budget = e.cache_bytes
     sampling = Sampling(127, 1.0, 20, 0.95)

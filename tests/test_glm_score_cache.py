@@ -33,9 +33,11 @@ def _engine(monkeypatch, cells, logits):
         cells[:] = ["decision", *prompt]
         return logits
 
-    decode = SimpleNamespace(row_bytes=lambda e, s: s.need, save_rows=save_rows, prompt_logits=prompt_logits,
+    decode = SimpleNamespace(row_bytes=lambda e, s: s.need, save_rows=save_rows,
                              snapshot_bytes=lambda s: s.states + (s.nbytes if s.rows is not None else 0))
     monkeypatch.setitem(sys.modules, "tensorfold.families.glm5_next.cuda.decode", decode)
+    monkeypatch.setitem(sys.modules, "tensorfold.families.glm5_next.cuda.score",
+                        SimpleNamespace(prompt_logits=prompt_logits))
     monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(cuda=SimpleNamespace(empty_cache=lambda: None)))
     engine = GlmEngine.__new__(GlmEngine)
     engine.cache, engine.live, engine.cache_entries = [], [], 8
