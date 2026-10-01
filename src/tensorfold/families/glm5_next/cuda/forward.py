@@ -466,13 +466,15 @@ def stage(w: Weights, st: State, b: Buffers, tokens: Sequence[int]) -> int:
 
 
 def compute(w: Weights, st: State, b: Buffers, R: int, *, logits: bool = True, nch: int | None = None,
-            host_pos: int | None = None, sparse_np: int | None = None, cut: Cut | None = None):
+            host_pos: int | None = None, sparse_np: int | None = None, cut: Cut | None = None, images=None):
     """Run capturable GPU work on static buffers and device positions; eager long contexts use host_pos (graphs sparse_np) to select sparse attention."""
 
     if cut is not None and (not b.prefill or not 0 < cut.point < R):
         raise ValueError("a prompt cut must lie inside a prefill chunk")
     c = w.cfg
     glue.embed(b.ids[:R], w.embed, c.hidden, c.streams, b.x[:R])
+    if images is not None:              # an image prompt's chunk: its placeholder rows take the tower's features
+        images(b.x[:R], c.streams)
     for layer in w.layers:
         layer_forward(layer, w, st, b, R, nch, host_pos, sparse_np, cut)
         for slot in b.tap_at.get(layer.index, ()):

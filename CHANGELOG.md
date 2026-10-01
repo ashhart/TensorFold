@@ -3,6 +3,16 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- **GLM-5.3-Flash takes images on CUDA.** `--vision` now works on the two-rank CUDA engine as it does on Macs: rank 0
+  encodes each image with the checkpoint's BF16 tower and both ranks prefill its features in place of the
+  placeholders, in the main model and the MTP head. Image prompts start fresh and keep no prompt state; text requests
+  are unchanged. On two DGX Sparks (EXL3 checkpoint) a 512x512 image costs about 1.2 s to first token, like a
+  425-token text prompt, and the tower holds 1.05 GiB on rank 0. `--vision-offload` keeps the tower in host RAM and
+  `--vision-image-tokens` lets many images share a larger budget, as on Qwen; video stays Flash Next's. Needs
+  Transformers 5.17 or newer.
+
 ## 0.6.4 (3 Oct 2026)
 
 - **Flash Next on two DGX Sparks serves concurrent requests.** `--parallel N` with two CUDA ranks runs every stream

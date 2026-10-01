@@ -110,7 +110,8 @@ class GlmEngine:
 
     def __init__(self, model_dir: Path, *, rank: int, master: str, port: int, policy: str = DEFAULT_POLICY,
                  drafter: Path | None = None, context: int | None = None, context_explicit: bool | None = None, serial_only: bool = False, comm=None,
-                 prefill_rows: int | None = None) -> None:
+                 prefill_rows: int | None = None, vision: bool = False, vision_urls: bool = False,
+                 vision_offload: bool = False) -> None:
         """``comm``: a communicator with ``all_gather`` and ``barrier`` instead of NCCL between two machines (tests)."""
 
         import torch
@@ -122,6 +123,7 @@ class GlmEngine:
         from tensorfold.cuda.capacity import admit
         from tensorfold.cuda.geometry import (PREFILL_ROWS, dflash2_geometry, dflash2_weights, mla_geometry,
                                               split_weights)
+        from tensorfold.vision.glm_cuda import capacity_geometry, weight_transform as vision_weights
 
         encode_policy(policy)                           # a bad default fails here, not in the first request
         torch.cuda.set_device(0)
@@ -141,10 +143,13 @@ class GlmEngine:
         weights_estimate = split_weights(rule)
         if not self.mtp_on:
             weights_estimate = without_mtp(weights_estimate, cfg.layers)
-        self.capacity_plan = admit(model_dir, context if explicit else cfg.dense_limit, explicit, torch,
-                                   lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY,
-                                                             latent=LATENT, mtp=self.mtp_on),
-                                   weights_estimate, rank=rank, world=2, gather=self._gather_ints,
+        # --vision: rank 0 holds the image tower and its workspace, rank 1 the features it receives
+        geometry = capacity_geometry(lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY,
+                                                               latent=LATENT, mtp=self.mtp_on), model_dir, vision, rank,
+                                   offload=vision_offload)
+        self.capacity_plan = admit(model_dir, context if explicit else cfg.dense_limit, explicit, torch, geometry,
+                                   vision_weights(weights_estimate, vision, rank, vision_offload), rank=rank, world=2,
+                                   gather=self._gather_ints,
                                    draft_dir=drafter, draft_weights=lambda d: dflash2_weights(d, 2),
                                    draft_geometry=lambda text: dflash2_geometry(text, 2, MAX_ROWS, ring=DRAFT_RING))
         self.limit = self.capacity_plan["context_window"]
@@ -153,7 +158,7 @@ class GlmEngine:
         # both ranks must run the same calls: refuse to start when they were given different settings
         prefill_rows = PREFILL_ROWS if prefill_rows is None else int(prefill_rows)
         mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(LATENT),
-                prefill_rows, int(self.mtp_on), int(DRAFT_RING)]
+                prefill_rows, int(self.mtp_on), int(DRAFT_RING), int(vision)]
         # other conversations' kept prompts get what the window leaves, at most TF_GLM_CACHE_GIB, the same on both ranks
         plan = self.capacity_plan
         wanted = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
@@ -161,7 +166,7 @@ class GlmEngine:
         both = self._gather_ints(mine + [spare >> 20])
         if both[0][:-1] != both[1][:-1]:
             raise RuntimeError("the two ranks were started with different settings (draft model, context, drafts, "
-                               "TF_GLM_LATENT, TF_GLM_MTP, TF_GLM_DRAFT_RING): "
+                               "TF_GLM_LATENT, TF_GLM_MTP, TF_GLM_DRAFT_RING, --vision): "
                                f"rank 0 {both[0][:-1]}, rank 1 {both[1][:-1]}; pull the draft model on both machines "
                                "(or pass --drafter none to both) and give both the same flags")
         self.cache_bytes = min(both[0][-1], both[1][-1]) << 20
@@ -201,6 +206,17 @@ class GlmEngine:
                    if w.mtp is not None else "")
             print("[tensorfold] drafter costs (ms): verify " + " ".join(f"{v:.1f}" for v in c["verify"]) + mtp +
                   f"; DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
+        self.vision = self.image_token = None
+        if vision:                          # rank 0 encodes; both find the image rows in the prompt
+            self.image_token = int(json.loads((Path(model_dir) / "config.json").read_text())["image_token_id"])
+            if rank == 0:
+                from tensorfold.vision.glm_cuda import GLMCudaVision
+
+                self.vision = GLMCudaVision(model_dir, torch.device("cuda"), allow_urls=vision_urls,
+                                           offload=vision_offload)
+                torch.cuda.empty_cache()
+                print(f"[tensorfold] GLM image tower: {self.vision.weight_bytes / 2 ** 30:.2f} GiB on rank 0",
+                      flush=True)
         self.eos = tuple(w.cfg.eos)
         self.model_dir = Path(model_dir)
         self.request = threading.local()    # the calling request's policy and stop-at-EOS (``app.GlmApp``)
@@ -333,6 +349,15 @@ class GlmEngine:
         self.comm.all_gather(buf, allv)
         return [int(v) for v in allv[:count].tolist()]
 
+    def _images(self, encoded, prompt: list[int]):
+        """Rank 0's image features on both ranks (rank 1 passes None)."""
+
+        from tensorfold.vision.glm_cuda import share_encoded
+
+        if self.image_token is None:
+            raise RuntimeError("rank 0 sent an image request, and this rank was started without --vision")
+        return share_encoded(encoded, self.rank, self.comm, prompt, self.image_token, self.w.cfg.hidden, "cuda")
+
     def _effective(self, code: list[int]) -> list[int]:
         """Resolve auto and MTP policies to the available heads, using EXL3_AUTO for EXL3 with DFlash2 and DFlash2 when MTP is absent."""
 
@@ -419,15 +444,16 @@ class GlmEngine:
         return sum(snapshot_bytes(c) for c in self.cache)
 
     def _run(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool, on_tokens: Callable[[list[int]], Any],
-             code: list[int], hit, draft: bool, constraint=None) -> dict[str, Any]:
+             code: list[int], hit, draft: bool, constraint=None, vision=None) -> dict[str, Any]:
         self.e.constraint, self.e.window = constraint, None       # both ranks walk and mask the same rows
         try:
-            return self._run_once(prompt, max_tokens, sampling, stop_eos, on_tokens, code, hit, draft)
+            return self._run_once(prompt, max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, vision)
         finally:
             self.e.constraint = self.e.window = None
 
     def _run_once(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool,
-                  on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool) -> dict[str, Any]:
+                  on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool,
+                  vision=None) -> dict[str, Any]:
         from .decode import DepthPolicy, dflash_decode, mtp_decode, prefill, serial_decode
         from .drafter_choice import DrafterChoice, auto_decode
 
@@ -442,9 +468,11 @@ class GlmEngine:
         if hit is not None and hit.rows is not None:
             load_rows(self.e, hit)
             hit.rows, hit.nbytes = None, 0            # live again
-        self.live = list(prompt)
+        # the caches' rows by id; an image row is no token id, so no kept text prompt matches it
+        self.live = list(prompt) if vision is None else [-1 if t == self.image_token else t for t in prompt]
         first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=hit,
-                        keep_at=max(1, len(prompt) - 1) if draft else None, keep=self._remember)
+                        keep_at=max(1, len(prompt) - 1) if draft and vision is None else None, keep=self._remember,
+                        vision=vision)
         prefill_s = time.perf_counter() - t0
         stats: dict[str, Any] = {"prefill_s": prefill_s, "cached": cut}
         on_tokens([first])
@@ -471,7 +499,7 @@ class GlmEngine:
             res = mtp_decode(self.e, first, max_tokens, sampling, policy=policy, stop_eos=stop_eos,
                              on_tokens=on_tokens)
         # the caches now hold prompt and reply; only prompts are snapshotted, since a later prompt prefills the reply again
-        self.live = list(prompt) + res.tokens[:self.e.st.pos - len(prompt)]
+        self.live = self.live[:len(prompt)] + res.tokens[:self.e.st.pos - len(prompt)]
         stats.update(decode_s=res.seconds, rounds=res.rounds, min_rows=1 + min(res.depths, default=0),
                      tokens_per_round=round((len(res.tokens) - 1) / max(res.rounds, 1), 3),
                      sha256=hashlib.sha256(json.dumps(res.tokens).encode()).hexdigest()[:16])
@@ -484,9 +512,11 @@ class GlmEngine:
         return stats
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens, draft: bool = True,
-                 constraint=None) -> dict[str, Any]:
+                 constraint=None, vision=None) -> dict[str, Any]:
         """Mirror one rank-0 request on rank 1; draft=False uses serial decoding and fresh prefill as the reference drafted replies must equal."""
 
+        if vision is not None and self.vision is None:
+            raise ValueError("image inputs require starting this engine with --vision")
         if len(prompt) >= self.limit:
             raise ValueError(f"prompt of {len(prompt)} tokens: this engine serves contexts up to {self.limit}")
         max_tokens = max(1, min(int(max_tokens), self.limit - len(prompt)))
@@ -496,13 +526,15 @@ class GlmEngine:
             spec = getattr(self.request, "policy", None) or self.policy
         code = self._effective(encode_policy(spec))
         stop_eos = bool(getattr(self.request, "stop_eos", True))
-        hit = self._resume(list(prompt), code) if draft else None
+        # an image prompt is encoded before rank 1 is woken (a refused image never reaches it) and starts fresh
+        encoded = self.vision.encode(vision, prompt) if vision is not None else None
+        hit = self._resume(list(prompt), code) if draft and encoded is None else None
         seed = (sampling.seed if sampling else 0) & 0xFFFFFFFFFFFFFFFF
         header = [max_tokens, int(stop_eos), int(draft), len(hit.ids) if hit is not None else 0,
                   seed & 0x7FFFFFFF, (seed >> 31) & 0x7FFFFFFF, seed >> 62,
                   *_f64_ints(sampling.temperature if sampling else 0.0), int(sampling.top_k) if sampling else 0,
                   *_f64_ints(sampling.top_p if sampling else 1.0), *_f64_ints(sampling.min_p if sampling else 0.0),
-                  int(constraint is not None)] + code
+                  int(constraint is not None), int(encoded is not None)] + code
         from tensorfold.engine.grammar import pack
 
         self._ring()                                   # wakes rank 1, which idles on the store, not in the all-gather
@@ -510,7 +542,10 @@ class GlmEngine:
         self._share(list(prompt))
         if constraint is not None:                     # the request's grammar: rank 1 compiles the same
             self._share(pack(constraint))
-        stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint)
+        if encoded is not None:
+            encoded = self._images(encoded, prompt)
+        stats = self._run(list(prompt), max_tokens, sampling, stop_eos, on_tokens, code, hit, draft, constraint,
+                          encoded)
         stats.update(policy=spec, drafts=draft)
         return stats
 
@@ -569,7 +604,7 @@ class GlmEngine:
                 self._score_local(prompt, labels)
                 continue
             (max_tokens, stop_eos, draft, cached, s_lo, s_hi, s_top, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi, shaped,
-             *code) = header
+             imaged, *code) = header
             prompt = self._share(None)
             packed = self._share(None) if shaped else []
             constraint = None
@@ -577,6 +612,7 @@ class GlmEngine:
                 from tensorfold.engine import grammar
 
                 constraint = grammar.compiler(self, self.model_dir, self.eos).follow(packed)
+            vision = self._images(None, prompt) if imaged else None
             temperature = _ints_f64(t_lo, t_hi)
             seed = (s_top << 62) | (s_hi << 31) | s_lo
             sampling = (Sampling(seed, temperature, top_k, _ints_f64(p_lo, p_hi), _ints_f64(m_lo, m_hi))
@@ -587,4 +623,4 @@ class GlmEngine:
                 if hit is None:
                     raise RuntimeError(f"rank 1 has no snapshot of the {cached} tokens rank 0 resumes from")
             self._run(prompt, max_tokens, sampling, bool(stop_eos), lambda new: None, code, hit, bool(draft),
-                      constraint)
+                      constraint, vision)
