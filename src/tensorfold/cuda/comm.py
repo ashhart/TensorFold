@@ -6,10 +6,25 @@ import ctypes
 import ctypes.util
 import glob
 import os
+from collections.abc import Callable
+from typing import Protocol
 
 import torch
 
-_DTYPES = {torch.float32: 7, torch.bfloat16: 9, torch.int32: 2, torch.int64: 4}
+_DTYPES = {torch.float32: 7, torch.bfloat16: 9, torch.int32: 2, torch.int64: 4,
+           torch.uint8: 1, torch.int8: 0, torch.float16: 6}
+BACKEND_ENV = "TF_COMM_BACKEND"
+
+
+class Comm(Protocol):
+    """What every engine assumes; ``all_gather_fast``, ``exchange``, ``check`` (and NCCL's ``store``) are optional."""
+
+    rank: int
+    world: int
+
+    def all_gather(self, send: torch.Tensor, recv: torch.Tensor) -> None: ...
+
+    def barrier(self) -> None: ...
 
 
 class _UniqueId(ctypes.Structure):
@@ -36,7 +51,8 @@ def _library() -> ctypes.CDLL:
 
 
 class NCCL:
-    def __init__(self, rank: int, world: int, master: str, port: int) -> None:
+    def __init__(self, rank: int, world: int, master: str, port: int, *, timeout_s: float = 600,
+                 key: str = "tf_nccl_uid") -> None:
         from datetime import timedelta
 
         from torch.distributed import TCPStore
@@ -50,13 +66,13 @@ class NCCL:
         lib.ncclCommInitRank.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, _UniqueId, ctypes.c_int]
         lib.ncclAllGather.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_void_p,
                                       ctypes.c_void_p]
-        self.store = TCPStore(master, port, world, rank == 0, timeout=timedelta(seconds=600))
+        self.store = TCPStore(master, port, world, rank == 0, timeout=timedelta(seconds=timeout_s))
         uid = _UniqueId()
         if rank == 0:
             self._check(self.lib.ncclGetUniqueId(ctypes.byref(uid)))
-            self.store.set("tf_nccl_uid", bytes(uid.internal))
+            self.store.set(key, bytes(uid.internal))
         else:
-            raw = self.store.get("tf_nccl_uid")
+            raw = self.store.get(key)
             ctypes.memmove(ctypes.addressof(uid), raw, 128)
         self.comm = ctypes.c_void_p()
         torch.cuda.current_device()
@@ -100,8 +116,109 @@ class NCCL:
             print(f"[tensorfold] rank {self.rank} finished {label}; waiting for rank {missing} ({waited:.0f} s)",
                   flush=True)
 
+    def exchange(self, sends: list[torch.Tensor], recvs: list[torch.Tensor], peer: int) -> None:
+        """One NCCL group with ``peer``: each ``sends[i]`` lands in the peer's ``recvs[i]`` (contiguous tensors)."""
+
+        if len(sends) != len(recvs) or peer == self.rank or not 0 <= peer < self.world:
+            raise ValueError("exchange: one receive per send, with another rank")
+        lib = self.lib
+        if not getattr(self, "_p2p", False):
+            for name in ("ncclSend", "ncclRecv"):
+                getattr(lib, name).argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int,
+                                               ctypes.c_void_p, ctypes.c_void_p]
+            lib.ncclGroupStart.argtypes = []
+            lib.ncclGroupEnd.argtypes = []
+            self._p2p = True
+        stream = torch.cuda.current_stream().cuda_stream
+        self._check(lib.ncclGroupStart())
+        try:
+            for s, r in zip(sends, recvs):
+                if s.numel():
+                    self._check(lib.ncclSend(s.data_ptr(), s.numel(), _DTYPES[s.dtype], peer, self.comm, stream))
+                if r.numel():
+                    self._check(lib.ncclRecv(r.data_ptr(), r.numel(), _DTYPES[r.dtype], peer, self.comm, stream))
+        finally:
+            self._check(lib.ncclGroupEnd())
+
     def barrier(self) -> None:
         x = torch.zeros((1,), dtype=torch.float32, device="cuda")
         y = torch.zeros((self.world,), dtype=torch.float32, device="cuda")
         self.all_gather(x, y)
         torch.cuda.synchronize()
+
+
+def fast_gather(comm: Comm, send: torch.Tensor, recv: torch.Tensor) -> None:
+    """A model exchange: the communicator's faster ``all_gather_fast`` if it has one, else ``all_gather``."""
+
+    fast = getattr(comm, "all_gather_fast", None)
+    if fast is None:
+        comm.all_gather(send, recv)
+    else:
+        fast(send, recv)
+
+
+def check(comm: Comm) -> None:
+    """Raise a failure the communicator's transport recorded (call it after a synchronizing exchange)."""
+
+    found = getattr(comm, "check", None)
+    if found is not None:
+        found()
+
+
+def exchange(comm: Comm, sends: list[torch.Tensor], recvs: list[torch.Tensor], peer: int | None = None) -> None:
+    """``comm.exchange`` when it has one, else (two ranks) each pair traded as bytes through the all-gather."""
+
+    peer = 1 - comm.rank if peer is None else peer
+    fn = getattr(comm, "exchange", None)
+    if fn is not None:
+        fn(sends, recvs, peer)
+        return
+    if comm.world != 2:
+        raise ValueError("exchange: a communicator without exchange trades through its all-gather, two ranks only")
+    for s, r in zip(sends, recvs):
+        sb, rb = s.contiguous().view(-1).view(torch.uint8), r.view(-1).view(torch.uint8)
+        n = max(sb.numel(), rb.numel())
+        if n == 0:
+            continue
+        pad = torch.zeros((n,), dtype=torch.uint8, device=s.device)
+        pad[:sb.numel()].copy_(sb)
+        both = torch.empty((2 * n,), dtype=torch.uint8, device=s.device)
+        comm.all_gather(pad, both)
+        rb.copy_(both[peer * n:peer * n + rb.numel()])
+
+
+class Transport:
+    """A base for transports: whatever a subclass does not define (``store``, ``ready``, ...) is the wrapped NCCL's."""
+
+    def __init__(self, base: Comm) -> None:
+        self.base, self.rank, self.world = base, base.rank, base.world
+
+    def __getattr__(self, name: str):
+        if name == "base":                          # not set yet (a copy): no recursion
+            raise AttributeError(name)
+        return getattr(self.base, name)
+
+
+BACKENDS: dict[str, Callable[[Comm], Comm]] = {}
+
+
+def register_backend(name: str, wrap: Callable[[Comm], Comm]) -> None:
+    """A transport over NCCL (still the control channel): ``wrap(nccl)`` runs on every rank at once."""
+
+    BACKENDS[name] = wrap
+
+
+def open_comm(rank: int, world: int, master: str, port: int, *, backend: str | None = None, **nccl) -> Comm:
+    """NCCL, wrapped by ``backend`` (default TF_COMM_BACKEND, else none); the ranks check they named the same one."""
+
+    name = (backend if backend is not None else os.environ.get(BACKEND_ENV, "")).strip().lower() or "nccl"
+    if name != "nccl" and name not in BACKENDS:
+        raise ValueError(f"{BACKEND_ENV}={name!r}: expected nccl{''.join(', ' + b for b in sorted(BACKENDS))}")
+    base = NCCL(rank, world, master, port, **nccl)
+    store = getattr(base, "store", None)
+    if store is not None and world > 1:          # a transport on one rank only would hang the first exchange
+        store.set(f"tf_comm_backend/{rank}", name)
+        names = [store.get(f"tf_comm_backend/{r}").decode() for r in range(world)]
+        if len(set(names)) > 1:
+            raise RuntimeError(f"the ranks were started with different {BACKEND_ENV}: {', '.join(names)} (rank order)")
+    return base if name == "nccl" else BACKENDS[name](base)
