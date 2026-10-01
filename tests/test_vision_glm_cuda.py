@@ -108,6 +108,38 @@ def test_prefill_skips_chunks_that_hold_no_image_rows():
     assert all(_images(payload, s, n) is not None for s, n in ((0, 11), (11, 1), (12, 16), (30, 4)))
 
 
+def test_a_long_prompt_writes_every_image_row_once_in_each_chunk_on_both_ranks():
+    torch = pytest.importorskip("torch")
+    from tensorfold.families.glm5_next.cuda.decode import PREFILL_ROWS, _images
+    from tensorfold.vision.glm_cuda import share_encoded
+    from tensorfold.vision.qwen_cuda import EncodedVision
+
+    # a 12,164-token prompt whose 4,096 image rows straddle prefill chunks and the 2,051-token dense limit
+    n, image, rows = 12_164, 7, tuple(range(1_900, 1_900 + 4_096))
+    prompt = [image if i in rows else 1 + i % 5 for i in range(n)]
+    features = (torch.arange(len(rows), dtype=torch.float32)[:, None] + 1).expand(-1, 2).to(torch.bfloat16)
+    sent = []
+
+    def all_gather(send, recv):
+        sent.append(send.clone()) if not sent else None
+        recv[:send.numel()], recv[send.numel():] = sent[0], send
+
+    comm = SimpleNamespace(all_gather=all_gather)
+    ranks = [share_encoded(EncodedVision(rows, features, None, 0), 0, comm, prompt, image, 2, "cpu"),
+             share_encoded(None, 1, comm, prompt, image, 2, "cpu")]
+    for payload in ranks:
+        for shift in (0, 1):                           # the main model's rows, the MTP head's next-token rows
+            x = torch.zeros((n, 2), dtype=torch.bfloat16)
+            for start in range(0, n, PREFILL_ROWS):
+                begin, end = start + shift, min(start + PREFILL_ROWS + shift, n)
+                write = _images(payload, begin, end - begin)
+                if write is not None:
+                    write(x[begin:end], 1)
+            want = torch.zeros((n, 2), dtype=torch.bfloat16)
+            want[list(rows)] = features
+            assert torch.equal(x, want), shift
+
+
 def test_both_ranks_receive_the_same_features_and_find_the_rows_themselves():
     torch = pytest.importorskip("torch")
     from tensorfold.vision.glm_cuda import share_encoded

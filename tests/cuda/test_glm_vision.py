@@ -91,6 +91,39 @@ def test_an_image_request_replies_as_its_text_twin_and_keeps_no_state(engine, sa
         _forget(engine)
 
 
+LONG = 2_400                                  # past the 2,051-token dense limit
+LONG_ROWS = tuple(range(1_990, 2_110)) + tuple(range(2_300, 2_320))   # across a 256-row chunk and the dense limit
+
+
+@pytest.fixture(scope="module")
+def engine_long(tmp_path_factory):
+    from tensorfold.families.glm5_next.cuda.engine import GlmEngine
+
+    path = tmp_path_factory.mktemp("glm_vision_long")
+    _checkpoint(path)
+    return GlmEngine(path, rank=0, master="", port=0, comm=_TwoCopies(), context=2_600, prefill_rows=256)
+
+
+@pytest.mark.parametrize("sampling", [Sampling(31, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
+def test_a_long_image_prompt_replies_as_its_text_twin(engine_long, sampling):
+    text = [int(t) for t in np.random.default_rng(13).integers(0, 900, size=LONG)]
+    image = [IMAGE if i in LONG_ROWS else t for i, t in enumerate(text)]
+    features = _features(engine_long, [text[i] for i in LONG_ROWS])
+    engine_long.vision = SimpleNamespace(encode=lambda prepared, prompt: EncodedVision(LONG_ROWS, features, None, 0))
+    engine_long.image_token = IMAGE
+    try:
+        _forget(engine_long)
+        want, _ = _generate(engine_long, text, sampling, draft=False)
+        _forget(engine_long)
+        out: list[int] = []
+        engine_long.request.policy, engine_long.request.stop_eos = None, False
+        stats = engine_long.generate(list(image), 24, sampling, out.extend, vision=object())
+        assert out == want and stats["cached"] == 0
+    finally:
+        engine_long.vision = engine_long.image_token = None
+        _forget(engine_long)
+
+
 def test_a_server_without_the_tower_refuses_images(engine):
     with pytest.raises(ValueError, match="--vision"):
         engine.generate([1, 2, 3], 4, None, lambda new: None, vision=object())
