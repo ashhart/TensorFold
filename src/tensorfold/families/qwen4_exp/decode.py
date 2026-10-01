@@ -159,6 +159,18 @@ def unreadable(*models: Any) -> dict[str, int]:
     return counts
 
 
+def _default_matrix(linear: Any) -> bool:
+    """Unset switch: the fused GDN stack, 4-bit group 64 at 16480 x 2560, uses the matrix kernel."""
+
+    if os.environ.get("TF_FLASH_DENSE") or DENSE != "rows":
+        return False
+    if (int(linear.bits), int(linear.group_size)) != (4, 64):
+        return False
+    n = int(linear.weight.shape[0])
+    k = int(linear.weight.shape[1]) * 32 // int(linear.bits)
+    return n == 16480 and k == 2560
+
+
 def project(x: mx.array, linear: Any) -> mx.array:
     """x [..., R, K] through an affine linear, a row's bits independent of R: per-row kernels before M5, lane_qmm on M5."""
 
@@ -166,7 +178,7 @@ def project(x: mx.array, linear: Any) -> mx.array:
         return linear(x)
     if DENSE == "lane":
         return _lane_project(x, linear)
-    if DENSE == "matrix":                                   # before M5: every width on the matrix units
+    if DENSE == "matrix" or _default_matrix(linear):        # before M5: every width on the matrix units
         return _matrix_project(x, linear)
     if (linear.bits, linear.group_size) != (4, 32):         # other widths before M5: every row alone, at any count
         return rows.qmv_rows(x, linear)

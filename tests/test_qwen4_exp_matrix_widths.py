@@ -31,3 +31,42 @@ def test_matrix_rows_equal_one_row_steps(bits, group):
     ref = linear(x).astype(mx.float32)
     err = float(mx.max(mx.abs(window.astype(mx.float32) - ref)).item())
     assert err <= 0.02 * float(mx.max(mx.abs(ref)).item())
+
+
+class _Shape:
+    def __init__(self, n, k, bits, group):
+        self.bits = bits
+        self.group_size = group
+        self.weight = type("W", (), {"shape": (n, k * bits // 32)})()
+
+
+def test_default_matrix_is_only_the_stacked_gdn_shape(monkeypatch):
+    monkeypatch.delenv("TF_FLASH_DENSE", raising=False)
+    monkeypatch.setattr(decode, "DENSE", "rows")
+    assert decode._default_matrix(_Shape(16480, 2560, 4, 64))
+    assert not decode._default_matrix(_Shape(10240, 2560, 4, 64))
+    assert not decode._default_matrix(_Shape(16480, 2560, 4, 128))
+    assert not decode._default_matrix(_Shape(16480, 2560, 8, 64))
+    monkeypatch.setenv("TF_FLASH_DENSE", "rows")
+    assert not decode._default_matrix(_Shape(16480, 2560, 4, 64))
+    monkeypatch.delenv("TF_FLASH_DENSE", raising=False)
+    monkeypatch.setattr(decode, "DENSE", "lane")
+    assert not decode._default_matrix(_Shape(16480, 2560, 4, 64))
+
+
+def test_project_routes_the_stacked_shape_to_matrix(monkeypatch):
+    monkeypatch.delenv("TF_FLASH_DENSE", raising=False)
+    monkeypatch.setattr(decode, "DENSE", "rows")
+    linear = _linear(16480, 2560, 4, 64, seed=16480)
+    seen = {}
+
+    def fake(x, got):
+        seen["linear"] = got
+        return x
+
+    monkeypatch.setattr(decode, "_matrix_project", fake)
+    x = mx.zeros((2, 2560), dtype=mx.bfloat16)
+    out = decode.project(x, linear)
+    mx.eval(out)
+    assert seen["linear"] is linear
+    assert decode._default_matrix(linear)
