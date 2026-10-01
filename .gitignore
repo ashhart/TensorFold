@@ -12,3 +12,11 @@ venv/
 .DS_Store
 *.swp
 *.log
+
+# Native build outputs and local GGUF checkpoints
+*.o
+*.a
+*.so
+*.whl
+*.gguf
+native-build.json
