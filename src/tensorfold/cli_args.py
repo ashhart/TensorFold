@@ -32,6 +32,10 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                           help="enable image input for supported GLM and Qwen vision checkpoints")
     endpoint.add_argument("--vision-urls", action="store_true",
                           help="with --vision, accept public HTTP(S) image URLs (default: data URLs only)")
+    endpoint.add_argument("--vision-offload", action="store_true",
+                          help="with --vision on CUDA, keep the image tower in host RAM and copy it to the GPU only "
+                               "while an image is encoded (frees about 5 GiB of the startup budget on a small card; "
+                               "each image pays the copy)")
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
     generation.add_argument("--context", type=int, default=None,

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import threading
 import math
 from pathlib import Path
 from typing import Any
 
 MAX_PATCHES = 16384
 WORKSPACE_BYTES = 4 * 1024**3
+# --vision-offload: the tower (about 0.9 GiB) visits the GPU per image, so the budget keeps room for it plus the
+# activations of the largest accepted image (measured peak about 1.2 GiB over idle on a 4,096-token image)
+OFFLOAD_WORKSPACE_BYTES = int(2.25 * 1024**3)
 
 
 def rotary_frequencies(rotary: Any, config: dict, device: Any) -> None:
@@ -100,17 +104,17 @@ def checkpoint_vision(model_dir: str | Path) -> tuple[dict, int]:
     return config, sum(math.prod(v["shape"]) * max(2, SIZES[v["dtype"]]) for v in tensors.values())
 
 
-def weight_transform(base, enabled: bool, rank: int):
+def weight_transform(base, enabled: bool, rank: int, offload: bool = False):
     def transform(name, info):
         if enabled and rank == 0 and name.startswith("vision_tower."):
             from tensorfold.cuda.geometry import size
 
-            return size(info), 0
+            return (0, 0) if offload else (size(info), 0)   # offloaded: resident in host RAM between images
         return base(name, info)
     return transform
 
 
-def capacity_geometry(base, model_dir, enabled: bool, rank: int):
+def capacity_geometry(base, model_dir, enabled: bool, rank: int, offload: bool = False):
     def geometry(text):
         from tensorfold.cuda.capacity import Geometry
 
@@ -119,7 +123,7 @@ def capacity_geometry(base, model_dir, enabled: bool, rank: int):
             return result
         if rank == 0:
             checkpoint_vision(model_dir)
-        reserve = WORKSPACE_BYTES if rank == 0 else 128 * 1024**2
+        reserve = (OFFLOAD_WORKSPACE_BYTES if offload else WORKSPACE_BYTES) if rank == 0 else 128 * 1024**2
         return Geometry(lambda slots: result.bytes_at(slots) + reserve, result.reserve, result.minimum_slots)
     return geometry
 
@@ -127,8 +131,11 @@ def capacity_geometry(base, model_dir, enabled: bool, rank: int):
 class QwenCudaVision:
     """Only the image tower is loaded; the CUDA family retains all language computation."""
 
-    def __init__(self, model_dir, device, allow_urls: bool = False):
+    def __init__(self, model_dir, device, allow_urls: bool = False, offload: bool = False):
         self.allow_urls = allow_urls
+        self.offload = offload
+        self._lock = threading.Lock()   # one image on the GPU at a time when the tower is offloaded
+        resident = "cpu" if offload else device
         import torch
         from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5VisionConfig
         from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5VisionModel
@@ -154,15 +161,28 @@ class QwenCudaVision:
                         value = source.get_tensor(name)
                         if key == "patch_embed.proj.weight" and value.shape[-1] == self.config["in_channels"]:
                             value = value.permute(0, 4, 1, 2, 3).contiguous()
-                        tensors[key] = value.to(device=device, dtype=torch.bfloat16)
+                        tensors[key] = value.to(device=resident, dtype=torch.bfloat16)
         tower.load_state_dict(tensors, strict=True, assign=True)
-        rotary_frequencies(tower.rotary_pos_emb, self.config, device)
+        rotary_frequencies(tower.rotary_pos_emb, self.config, resident)
         self.tower = tower.eval()
 
     def prepare(self, *args, **kwargs):
         return self.frontend.prepare(*args, **kwargs)
 
     def encode(self, prepared, prompt) -> EncodedVision:
+        if not self.offload:
+            return self._encode(prepared, prompt)
+        import torch
+
+        with self._lock:
+            try:
+                self.tower.to(self.device)
+                return self._encode(prepared, prompt)
+            finally:
+                self.tower.to("cpu")
+                torch.cuda.empty_cache()
+
+    def _encode(self, prepared, prompt) -> EncodedVision:
         import torch
         from torch.nn.attention import SDPBackend, sdpa_kernel
 
