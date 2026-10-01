@@ -19,9 +19,9 @@ guessed: set[Hashable] = set()
 def _probes() -> bool:
     """Whether pipelines here can take fewer threads than a launch asks: M1 and M2 (M3 on give every one 1024)."""
 
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-    found = re.match(r"applegpu_g(\d+)", str(info.get("architecture", "")))
-    return not found or int(found.group(1)) < 15
+    from tensorfold.kernels import device
+
+    return device.generation() < 15
 
 
 # fit() probes only where limits vary (tests emulating an M1/M2 set it)

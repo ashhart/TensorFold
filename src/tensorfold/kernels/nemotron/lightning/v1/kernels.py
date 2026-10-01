@@ -7,7 +7,7 @@ from typing import Any
 
 import mlx.core as mx
 
-from tensorfold.kernels import threads as tg
+from tensorfold.kernels import device, threads as tg
 from tensorfold.kernels.inputs import ints, padded
 from tensorfold.kernels.nemotron.lightning.v1 import rows as row_kernels
 from tensorfold.kernels.nemotron.lightning.v1.sources import (
@@ -53,10 +53,7 @@ _kernels: dict[str, Any] = {}
 def tensor_units() -> bool:
     """Whether this GPU has the M5 generation's tensor units (applegpu_g17 and later)."""
 
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-    arch = str(info.get("architecture", ""))
-    digits = "".join(ch for ch in arch.removeprefix("applegpu_g") if ch.isdigit())
-    return bool(digits) and int(digits) >= 17
+    return device.tensor_units()
 
 
 def _named(base: str, source: str) -> str:

@@ -11,6 +11,8 @@ from typing import Any, Iterator
 import mlx.core as mx
 import mlx.nn as nn
 
+from tensorfold.kernels import device
+
 MIN_ROWS = 64
 _INCLUDE = os.path.join(os.path.dirname(mx.__file__), "include")
 # already in every custom kernel: MLX prefixes its utils.h (and what that includes)
@@ -195,19 +197,13 @@ def active(rows: int) -> bool:
 def _tensor_units() -> bool:
     """Whether this GPU has the M5 generation's tensor units (applegpu_g17 and later)."""
 
-    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
-    digits = "".join(ch for ch in str(info.get("architecture", "")).removeprefix("applegpu_g") if ch.isdigit())
-    return bool(digits) and int(digits) >= 17
+    return device.tensor_units()
 
 
 def gpu_tensor_units() -> bool:
-    """``_tensor_units`` of the Metal GPU whatever the default device (with the CPU as default it reads arm64)."""
+    """``_tensor_units``: the Metal GPU's, whatever the default device."""
 
-    if not mx.metal.is_available():
-        return False
-    info = mx.device_info(mx.gpu) if hasattr(mx, "device_info") else mx.metal.device_info()
-    digits = "".join(ch for ch in str(info.get("architecture", "")).removeprefix("applegpu_g") if ch.isdigit())
-    return bool(digits) and int(digits) >= 17
+    return device.tensor_units()
 
 
 _tiles: list[bool] = []
