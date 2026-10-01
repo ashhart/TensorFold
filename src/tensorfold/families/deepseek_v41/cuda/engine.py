@@ -18,7 +18,16 @@ DEFAULT_CONTEXT = 40960          # long-context parity is verified to 40K; --con
 DRAFTS = 3                       # the checkpoint's DSpark block drafts up to 3 tokens a round
 # memory a context token costs: compressed + indexer-key caches (3.2 KB), RoPE tables (0.8 KB), and the prompt
 # selection's per-block maxima and flags (512 rows / 8-entry blocks: ~0.3 KB; scores stream in fixed segments)
-TOKEN_BYTES = 3200 + 768 + 512 * 4 // 8 + 512 // 8
+def _cache_bytes() -> int:
+    """A stream's per-token caches: compressed entries + indexer keys at 2.5 entries a token (ratio-2 sources 2, 8, 14
+    and ratio-1 source 20): bf16 1024 + 256 B an entry, fp8 604 (448 e4m3 + 64 bf16 RoPE + 7 scales) + 134."""
+
+    from .serial import KV_FP8
+
+    return int(2.5 * ((604 + 134) if KV_FP8 else (1024 + 256)))
+
+
+TOKEN_BYTES = _cache_bytes() + 768 + 512 * 4 // 8 + 512 // 8
 NATIVE_CONTEXT = 1048576         # the model's window (config max_position_embeddings)
 FIXED_GIB = float(os.environ.get("TF_DSV41_FIXED_GIB") or "4")      # engine buffers 2.7 + prompt transients 1.0 (measured)
 RESERVE_GIB = float(os.environ.get("TF_DSV41_RESERVE_GIB") or "2.5")  # left to the OS (unified memory: an OOM wedges)
@@ -42,7 +51,7 @@ def available_bytes() -> int:
 
 
 SLOT_BYTES = 40 * 4096 * 512 * 2 + 3 * 4096 * 1024 * 4 + 3 * 4096 * 512 * 2   # a stream slot's rings (~230 MB)
-CACHE_BYTES = 3200               # a stream's per-token caches (compressed entries + indexer keys)
+CACHE_BYTES = _cache_bytes()     # a stream's per-token caches (compressed entries + indexer keys)
 
 
 def largest_context(free: int, streams: int = 1) -> int:
@@ -182,7 +191,7 @@ class Dsv41Engine:
         budget = min(row[0] for row in self._gather_ints([mine]))
         self.e.pool = PrefixPool(budget, min_tokens=int(os.environ.get("TF_DSV41_POOL_MIN", "1024")))
         if self.rank == 0:
-            per_token = 3200
+            per_token = CACHE_BYTES
             print(f"[tensorfold] kept prompt states: {budget / 2 ** 30:.1f} GiB (~{budget // per_token:,} tokens of "
                   f"conversation prefixes)", flush=True)
 

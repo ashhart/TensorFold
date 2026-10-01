@@ -114,6 +114,8 @@ class Caches:
 
 SKIP_READS = os.environ.get("TF_SKIP_READS") == "1"   # timing experiments: stale Engram rows (wrong output)
 STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS") or "16")   # decode/verify Engram row reads (few rows)
+KV_FP8 = (os.environ.get("TF_DSV41_KV_FP8") or "1") == "1"   # compressed entries + indexer keys in fp8 (~1.8 KB a
+#   token instead of 3.2; long parity unchanged: NLL 1.676 / 1.631 / 1.613 at 8K / 24K / 40K vs bf16 1.674 / 1.630 / 1.612)
 BLOCKED_SELECT = True        # prompt chunks: segmented indexer top-k (no [rows, keys] fp32 matrix)
 REUSE = os.environ.get("TF_DSV41_REUSE", "1") != "0"    # keep the live caches for a prompt that extends them
 REUSE_MIN = 64               # shorter common prefixes start fresh
@@ -391,10 +393,10 @@ class SerialEngine:
         self.big = Caches(
             cap,
             [torch.zeros((S * RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers],
-            {s_: torch.zeros((S * E[s_], c.head_dim), dtype=BF, device=self.dev) for s_ in c.kv_source_layer_ids},
+            {s_: self._entries(S * E[s_], c.head_dim, KV_FP8) for s_ in c.kv_source_layer_ids},
             {s_: torch.zeros((S * RING, 2 * c.head_dim), dtype=F32, device=self.dev)
              for s_ in c.kv_source_layer_ids if c.layer_ratios[s_] == 2},
-            {s_: torch.zeros((S * E[s_], c.index_head_dim), dtype=BF, device=self.dev) for s_ in c.kv_source_layer_ids},
+            {s_: self._entries(S * E[s_], c.index_head_dim, KV_FP8, keys=True) for s_ in c.kv_source_layer_ids},
         )
         big = self.big
         self.views = [Caches(cap, [t[i * RING:(i + 1) * RING] for t in big.swa],
@@ -402,6 +404,16 @@ class SerialEngine:
                              {k: t[i * RING:(i + 1) * RING] for k, t in big.raw.items()},
                              {k: t[i * E[k]:(i + 1) * E[k]] for k, t in big.ik.items()}) for i in range(S)]
         self.state = self.views[self.slot]
+
+    def _entries(self, n: int, dim: int, fp8: bool, keys: bool = False):
+        """Per-position cache rows: bf16, or fp8 (``K.Fp8Rows``): compressed entries keep their RoPE dims bf16 and
+        a scale per 64 values (DeepSeek's fp8 KV layout), indexer keys a scale per key."""
+
+        if not fp8:
+            return torch.zeros((n, dim), dtype=BF, device=self.dev)
+        if keys:
+            return K.Fp8Rows(n, dim, plain=0, group=dim, device=self.dev)
+        return K.Fp8Rows(n, dim, plain=self.c.qk_rope_head_dim, group=64, device=self.dev)
 
     def select_slot(self, slot: int) -> None:
         """Make ``slot`` the current stream (prompt chunks, single-stream decoding and kept states use it)."""
@@ -983,7 +995,7 @@ class SerialEngine:
                 "raw": {s_: t[slots] for s_, t in st.raw.items()},
                 "dswa": [t[slots] for t in self.drafter.swa] if self.drafter is not None else []}
         tensors = [*snap["comp"].values(), *snap["ik"].values(), *snap["swa"], *snap["raw"].values(), *snap["dswa"]]
-        return snap, sum(t.numel() * t.element_size() for t in tensors)
+        return snap, sum(K.cache_nbytes(t) for t in tensors)
 
     def load_prefix(self, snap: dict, ids: list[int]) -> None:
         """Copy a saved state into the live buffers (same addresses: the captured graphs keep reading them)."""

@@ -76,10 +76,107 @@ def rope_tables(freqs: torch.Tensor, max_pos: int) -> tuple[torch.Tensor, torch.
     return ang.cos().float().contiguous(), ang.sin().float().contiguous()
 
 
+FP8_MAX = 448.0
+
+
+class Fp8Rows:
+    """Rows stored as fp8 e4m3 with an fp32 scale per ``group`` values, the last ``plain`` values kept bf16 (the
+    compressed KV keeps its 64 RoPE dims bf16, as DeepSeek's fp8 KV cache does). Supports what the caches use:
+    index_copy_ / zero_ / slicing (views) / clone / copy_ / shape; kernels read q, r and s."""
+
+    def __init__(self, n: int = 0, dim: int = 0, *, plain: int = 0, group: int = 64, device="cuda",
+                 parts: tuple | None = None) -> None:
+        if parts is not None:
+            self.q, self.r, self.s, self.dim, self.plain, self.group = parts
+            return
+        self.dim, self.plain, self.group = dim, plain, group
+        f = dim - plain
+        self.q = torch.zeros((n, f), dtype=torch.float8_e4m3fn, device=device)
+        self.r = torch.zeros((n, max(plain, 1)), dtype=torch.bfloat16, device=device)
+        self.s = torch.zeros((n, f // group), dtype=torch.float32, device=device)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (self.q.shape[0], self.dim)
+
+    def _parts(self, q, r, s) -> Fp8Rows:
+        return Fp8Rows(parts=(q, r, s, self.dim, self.plain, self.group))
+
+    def __getitem__(self, key) -> Fp8Rows:
+        return self._parts(self.q[key], self.r[key], self.s[key])
+
+    def clone(self) -> Fp8Rows:
+        return self._parts(self.q.clone(), self.r.clone(), self.s.clone())
+
+    def copy_(self, other: Fp8Rows) -> Fp8Rows:
+        self.q.view(torch.uint8).copy_(other.q.view(torch.uint8))
+        self.r.copy_(other.r)
+        self.s.copy_(other.s)
+        return self
+
+    def zero_(self) -> Fp8Rows:
+        self.q.view(torch.uint8).zero_()
+        self.r.zero_()
+        self.s.zero_()
+        return self
+
+    def nbytes(self) -> int:
+        return sum(t.numel() * t.element_size() for t in (self.q, self.r, self.s))
+
+    def quantize(self, x: torch.Tensor):
+        """(q, r, s) of rows x [G, dim] (fp32 or bf16)."""
+
+        G = x.shape[0]
+        f = self.dim - self.plain
+        body = x[:, :f].float().view(G, f // self.group, self.group)
+        scale = body.abs().amax(-1).clamp(min=1e-12) / FP8_MAX
+        q = (body / scale[..., None]).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn).view(G, f)
+        r = x[:, f:].to(torch.bfloat16) if self.plain else torch.zeros((G, 1), dtype=torch.bfloat16, device=x.device)
+        return q, r, scale
+
+    def index_copy_(self, dim: int, index: torch.Tensor, x: torch.Tensor) -> Fp8Rows:
+        q, r, sc = self.quantize(x)
+        self.q.view(torch.uint8).index_copy_(0, index, q.view(torch.uint8))     # (no fp8 index_copy kernel)
+        self.r.index_copy_(0, index, r)
+        self.s.index_copy_(0, index, sc)
+        return self
+
+    def dequant(self) -> torch.Tensor:
+        """bf16 [n, dim] (tests)."""
+
+        n, f = self.q.shape[0], self.dim - self.plain
+        body = (self.q.float().view(n, f // self.group, self.group) * self.s[..., None]).view(n, f)
+        return torch.cat([body, self.r[:, :self.plain].float()], dim=1).to(torch.bfloat16) if self.plain else \
+            body.to(torch.bfloat16)
+
+
+def cache_nbytes(t) -> int:
+    return t.nbytes() if isinstance(t, Fp8Rows) else t.numel() * t.element_size()
+
+
 @triton.jit
-def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, SBASE, H: tl.constexpr, D: tl.constexpr,
-                W: tl.constexpr, RING: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr, NCH: tl.constexpr,
-                HT: tl.constexpr, KT: tl.constexpr, HAS_BASE: tl.constexpr = False):
+def _comp_rows(COMP, CR, CS, kidx, ok_c, d, D: tl.constexpr, FP8: tl.constexpr, F: tl.constexpr, G: tl.constexpr):
+    """Compressed entries ``kidx`` [KT] as fp32/bf16 [KT, D]: bf16 rows, or fp8 rows (F values, a scale per G) with
+    the last D - F values bf16."""
+
+    row = tl.maximum(kidx, 0)[:, None].to(tl.int64)
+    if FP8:
+        body = d[None, :] < F
+        q = tl.load(COMP + row * F + d[None, :], mask=ok_c[:, None] & body).to(tl.float32)
+        sc = tl.load(CS + row * (F // G) + d[None, :] // G, mask=ok_c[:, None] & body, other=0.0)
+        r = tl.load(CR + row * (D - F) + (d[None, :] - F), mask=ok_c[:, None] & (d[None, :] >= F),
+                    other=0.0).to(tl.float32)
+        out = tl.where(body, tl.where(ok_c[:, None], q, 0.0) * sc, r)
+    else:
+        out = tl.load(COMP + row * D + d[None, :], mask=ok_c[:, None], other=0.0).to(tl.float32)
+    return out
+
+
+@triton.jit
+def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, SBASE, CR, CS, H: tl.constexpr,
+                D: tl.constexpr, W: tl.constexpr, RING: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr,
+                NCH: tl.constexpr, HT: tl.constexpr, KT: tl.constexpr, HAS_BASE: tl.constexpr = False,
+                FP8: tl.constexpr = False, F: tl.constexpr = 448, G: tl.constexpr = 64):
     """Keys: the first ``n_idx`` slots are compressed entries named by IDX (-1: none), then the row's window
     positions p - W + 1 .. p read from the SWA ring at pos % RING."""
 
@@ -103,7 +200,7 @@ def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, SBASE, H:
         slot = p - (W - 1) + (k - n_idx)                             # window position of a window key
         ok_c = is_comp & (kidx >= 0)
         ok_w = (k >= n_idx) & (k < total) & (slot >= 0)
-        kc = tl.load(COMP + tl.maximum(kidx, 0)[:, None].to(tl.int64) * D + d[None, :], mask=ok_c[:, None], other=0.0)
+        kc = _comp_rows(COMP, CR, CS, kidx, ok_c, d, D, FP8, F, G)
         kw = tl.load(SWA + (sbase + tl.maximum(slot, 0) % RING)[:, None].to(tl.int64) * D + d[None, :],
                      mask=ok_w[:, None], other=0.0)
         kk = tl.where(ok_c[:, None], kc.to(tl.bfloat16), kw.to(tl.bfloat16))
@@ -124,9 +221,10 @@ def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, SBASE, H:
 
 
 @triton.jit
-def _mqa_full(Q, COMP, IDX, SWA, POS, SINK, OUT, COS, SIN, n_idx, idx_stride, H: tl.constexpr, D: tl.constexpr,
-              W: tl.constexpr, RING: tl.constexpr, SCALE: tl.constexpr, HT: tl.constexpr, KT: tl.constexpr,
-              HALF: tl.constexpr):
+def _mqa_full(Q, COMP, IDX, SWA, POS, SINK, OUT, COS, SIN, n_idx, idx_stride, CR, CS, H: tl.constexpr,
+              D: tl.constexpr, W: tl.constexpr, RING: tl.constexpr, SCALE: tl.constexpr, HT: tl.constexpr,
+              KT: tl.constexpr, HALF: tl.constexpr, FP8: tl.constexpr = False, F: tl.constexpr = 448,
+              G: tl.constexpr = 64):
     """Prompt rows: one program takes a row's every key (as _mqa_chunks) and finishes it (sink, normalize, inverse
     RoPE of the last 2 * HALF dims), writing bf16 [R, H, D]; no per-chunk partials."""
 
@@ -147,7 +245,7 @@ def _mqa_full(Q, COMP, IDX, SWA, POS, SINK, OUT, COS, SIN, n_idx, idx_stride, H:
         slot = p - (W - 1) + (k - n_idx)
         ok_c = is_comp & (kidx >= 0)
         ok_w = (k >= n_idx) & (k < total) & (slot >= 0)
-        kc = tl.load(COMP + tl.maximum(kidx, 0)[:, None].to(tl.int64) * D + d[None, :], mask=ok_c[:, None], other=0.0)
+        kc = _comp_rows(COMP, CR, CS, kidx, ok_c, d, D, FP8, F, G)
         kw = tl.load(SWA + (tl.maximum(slot, 0) % RING)[:, None].to(tl.int64) * D + d[None, :], mask=ok_w[:, None],
                      other=0.0)
         kk = tl.where(ok_c[:, None], kc.to(tl.bfloat16), kw.to(tl.bfloat16))
@@ -251,27 +349,32 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, sw
     rope = cos is not None
     out = torch.empty((R, H, D), dtype=torch.bfloat16 if rope else torch.float32, device=q.device)
     idx_t = idx if idx is not None else pos
+    fp8 = isinstance(comp, Fp8Rows)
+    cq = comp.q if fp8 else (comp if comp is not None else swa)
+    cr, cs = (comp.r, comp.s) if fp8 else (swa, swa)
+    fkw = {"FP8": True, "F": comp.dim - comp.plain, "G": comp.group} if fp8 else {}
     if sbase is not None and R > FULL_ROWS:
         raise ValueError("stream window bases are for decode rows (the chunk path)")
     if rope and R > FULL_ROWS:
-        _mqa_full[(R, H // FULL_HT)](q.contiguous(), comp if comp is not None else swa, idx_t, swa, pos, sink, out, cos,
-                                     sin, n_idx, idx_t.stride(0) if idx is not None else 0, H=H, D=D, W=window,
+        _mqa_full[(R, H // FULL_HT)](q.contiguous(), cq, idx_t, swa, pos, sink, out, cos, sin, n_idx,
+                                     idx_t.stride(0) if idx is not None else 0, cr, cs, H=H, D=D, W=window,
                                      RING=swa.shape[0], SCALE=scale, HT=FULL_HT, KT=FULL_KT, HALF=cos.shape[1],
-                                     num_warps=FULL_WARPS, num_stages=FULL_STAGES)
+                                     num_warps=FULL_WARPS, num_stages=FULL_STAGES, **fkw)
         return out
-    _mqa_chunks[(R, H // HEAD_TILE, nch)](q.contiguous(), comp if comp is not None else swa, idx_t, swa, pos, buf.po,
-                                          buf.pm, buf.pl, n_idx, idx_t.stride(0) if idx is not None else 0,
-                                          sbase if sbase is not None else pos, H=H, D=D, W=window,
+    _mqa_chunks[(R, H // HEAD_TILE, nch)](q.contiguous(), cq, idx_t, swa, pos, buf.po, buf.pm, buf.pl, n_idx,
+                                          idx_t.stride(0) if idx is not None else 0,
+                                          sbase if sbase is not None else pos, cr, cs, H=H, D=D, W=window,
                                           RING=ring or swa.shape[0], CH=CHUNK, SCALE=scale, NCH=nch,
-                                          HT=HEAD_TILE, KT=32, HAS_BASE=sbase is not None, num_warps=8, num_stages=1)
+                                          HT=HEAD_TILE, KT=32, HAS_BASE=sbase is not None, num_warps=8, num_stages=1,
+                                          **fkw)
     _mqa_merge[(R, H)](buf.po, buf.pm, buf.pl, sink, out, pos, cos if rope else sink, sin if rope else sink, H=H, D=D,
                        NCH=nch, HALF=cos.shape[1] if rope else 1, ROPE=rope, num_warps=4)
     return out
 
 
 @triton.jit
-def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, HI: tl.constexpr, DI: tl.constexpr,
-                  BS: tl.constexpr, HAS_BASE: tl.constexpr = False):
+def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, KS, HI: tl.constexpr, DI: tl.constexpr,
+                  BS: tl.constexpr, HAS_BASE: tl.constexpr = False, FP8: tl.constexpr = False):
     """I[r, s] = sum_h w[r, h] * relu(iq[r, h] . k[s]) for visible s < (p + 1) // ratio, -inf elsewhere."""
 
     r = tl.program_id(0)
@@ -285,7 +388,11 @@ def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, HI: tl.constexp
     q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
     k = tl.load(KEYS + (kbase + sidx)[:, None].to(tl.int64) * DI + d[None, :], mask=(sidx < n_keys)[:, None],
                 other=0.0)
+    if FP8:                                                    # e4m3 -> bf16 is exact; the key's scale after the dot
+        k = k.to(tl.bfloat16)
     dots = tl.dot(q, tl.trans(k)).to(tl.float32)                     # [HI, BS]
+    if FP8:
+        dots = dots * tl.load(KS + kbase + sidx, mask=sidx < n_keys, other=0.0)[None, :]
     w = tl.load(WTS + r * HI + h)
     score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
     score = tl.where(sidx < n_vis, score, float("-inf"))
@@ -301,9 +408,11 @@ def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: t
     S = keys.shape[0] if n_keys is None else n_keys
     scores = torch.empty((R, S), dtype=torch.float32, device=iq.device)
     BS = 64
-    _index_scores[(R, triton.cdiv(S, BS))](iq.contiguous(), wts.contiguous(), keys, pos, scores, S, ratio,
-                                           kbase if kbase is not None else pos, HI=HI, DI=DI, BS=BS,
-                                           HAS_BASE=kbase is not None, num_warps=4)
+    fp8 = isinstance(keys, Fp8Rows)
+    kq, ks = (keys.q, keys.s) if fp8 else (keys, pos)
+    _index_scores[(R, triton.cdiv(S, BS))](iq.contiguous(), wts.contiguous(), kq, pos, scores, S, ratio,
+                                           kbase if kbase is not None else pos, ks, HI=HI, DI=DI, BS=BS,
+                                           HAS_BASE=kbase is not None, FP8=fp8, num_warps=4)
     return scores
 
 
@@ -351,8 +460,8 @@ def mask_to_blocks(scores: torch.Tensor, blocks: torch.Tensor, block: int) -> to
 
 
 @triton.jit
-def _index_scores_seg(IQ, WTS, KEYS, POS, OUT, n_keys, off, seg, out_stride, ratio, HI: tl.constexpr,
-                      DI: tl.constexpr, BS: tl.constexpr):
+def _index_scores_seg(IQ, WTS, KEYS, POS, OUT, n_keys, off, seg, out_stride, ratio, KS, HI: tl.constexpr,
+                      DI: tl.constexpr, BS: tl.constexpr, FP8: tl.constexpr = False):
     """_index_scores over the key segment [off, off + seg): OUT[r, j] for key off + j (-inf past n_keys or not yet
     visible), the same arithmetic per key."""
 
@@ -366,7 +475,11 @@ def _index_scores_seg(IQ, WTS, KEYS, POS, OUT, n_keys, off, seg, out_stride, rat
     sidx = off + j
     q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
     k = tl.load(KEYS + sidx[:, None].to(tl.int64) * DI + d[None, :], mask=(sidx < n_keys)[:, None], other=0.0)
+    if FP8:
+        k = k.to(tl.bfloat16)
     dots = tl.dot(q, tl.trans(k)).to(tl.float32)
+    if FP8:
+        dots = dots * tl.load(KS + sidx, mask=sidx < n_keys, other=0.0)[None, :]
     w = tl.load(WTS + r * HI + h)
     score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
     score = tl.where((sidx < n_vis) & (sidx < n_keys), score, float("-inf"))
@@ -394,6 +507,8 @@ def index_select_blocked(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor
     cand_out = torch.full((R, candidates), -1, dtype=torch.int64, device=dev) if candidates else None
     nb = -(-S // block)
     buf = torch.empty((min(R, SELECT_ROWS), seg), dtype=torch.float32, device=dev)
+    fp8 = isinstance(keys, Fp8Rows)
+    kq, ks = (keys.q, keys.s) if fp8 else (keys, pos)
     for r0 in range(0, R, SELECT_ROWS):
         r1 = min(R, r0 + SELECT_ROWS)
         n = r1 - r0
@@ -408,9 +523,9 @@ def index_select_blocked(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor
         for off in range(0, S, seg):
             length = min(seg, S - off)
             sc = buf[:n, :length]
-            _index_scores_seg[(n, triton.cdiv(length, 64))](iq[r0:r1], wts[r0:r1], keys, pos[r0:r1], sc, S, off,
-                                                           length, buf.stride(0), ratio, HI=HI, DI=DI, BS=64,
-                                                           num_warps=4)
+            _index_scores_seg[(n, triton.cdiv(length, 64))](iq[r0:r1], wts[r0:r1], kq, pos[r0:r1], sc, S, off,
+                                                           length, buf.stride(0), ratio, ks, HI=HI, DI=DI, BS=64,
+                                                           FP8=fp8, num_warps=4)
             if best is not None:                               # the source layer's block maxima (unmasked)
                 padded = sc if length % block == 0 else torch.nn.functional.pad(sc, (0, block - length % block),
                                                                                 value=float("-inf"))

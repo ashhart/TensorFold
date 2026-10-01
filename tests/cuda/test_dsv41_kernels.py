@@ -187,3 +187,40 @@ def test_blocked_select_matches_full(S, ratio):
         assert torch.equal(masked_got, masked_want)
     finally:
         K.SELECT_SEG, K.SELECT_ROWS = old_seg, old_rows
+
+
+def test_fp8_rows_attention_and_indexer():
+    """fp8 compressed entries / indexer keys: attention equals attention over their bf16 dequantization, scores
+    match the dequantized keys', and the rows round-trip within e4m3's precision."""
+
+    from tensorfold.families.deepseek_v41.cuda import kernels as K
+
+    torch.manual_seed(5)
+    dev = "cuda"
+    E, D = 3000, 512
+    x = torch.randn(E, D, device=dev) * 0.7
+    rows = K.Fp8Rows(E, D, plain=64, group=64, device=dev)
+    rows.index_copy_(0, torch.arange(E, device=dev), x)
+    back = rows.dequant().float()
+    rel = ((back - x).norm() / x.norm()).item()
+    assert rel < 0.04 and torch.equal(back[:, 448:], x[:, 448:].to(torch.bfloat16).float())
+    R, H, W = 6, 32, 128
+    q = (torch.randn(R, H, D, device=dev) * 0.05).to(torch.bfloat16)
+    swa = (torch.randn(4096, D, device=dev)).to(torch.bfloat16)
+    pos = torch.arange(5000, 5000 + R, device=dev)
+    idx = torch.stack([torch.randperm(E, device=dev)[:512] for _ in range(R)]).int()
+    sink = torch.randn(H, device=dev)
+    buf = K.AttnBuffers(R, H, D, 512 + W, dev)
+    freqs = 1.0 / (10000.0 ** (torch.arange(0, 64, 2, device=dev).float() / 64))
+    cos, sin = K.rope_tables(freqs, 8192)
+    a = K.mqa(q, rows, idx, swa, pos, sink, W, buf, D ** -0.5, cos, sin)
+    b = K.mqa(q, rows.dequant(), idx, swa, pos, sink, W, buf, D ** -0.5, cos, sin)
+    assert torch.allclose(a.float(), b.float(), rtol=1e-2, atol=1e-3)            # bf16 rounding of the same values
+    keys = K.Fp8Rows(E, 128, plain=0, group=128, device=dev)
+    kx = torch.randn(E, 128, device=dev) * 0.5
+    keys.index_copy_(0, torch.arange(E, device=dev), kx)
+    iq = (torch.randn(R, 32, 128, device=dev) * 0.3).to(torch.bfloat16)
+    wts = torch.randn(R, 32, device=dev)
+    s8 = K.index_scores(iq, wts, keys, pos, 1)
+    sb = K.index_scores(iq, wts, keys.dequant(), pos, 1)
+    assert torch.allclose(s8, sb, rtol=2e-2, atol=2e-2 * sb.abs().max().item())
