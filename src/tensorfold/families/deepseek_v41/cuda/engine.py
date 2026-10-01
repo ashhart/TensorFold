@@ -16,35 +16,35 @@ from typing import Any
 
 DEFAULT_CONTEXT = 40960          # long-context parity is verified to 40K; --context takes more where memory allows
 DRAFTS = 3                       # the checkpoint's DSpark block drafts up to 3 tokens a round
-# memory a context token costs: compressed + indexer-key caches (3.2 KB) and RoPE tables (0.8 KB), plus the prompt
-# path's transient [2,048 rows x keys] fp32 indexer scores (~3 live copies at the ratio-1 source)
-TOKEN_BYTES = 3200 + 768 + 3 * 2048 * 4
+# memory a context token costs: compressed + indexer-key caches (3.2 KB), RoPE tables (0.8 KB), and the prompt
+# selection's per-block maxima and flags (512 rows / 8-entry blocks: ~0.3 KB; scores stream in fixed segments)
+TOKEN_BYTES = 3200 + 768 + 512 * 4 // 8 + 512 // 8
+NATIVE_CONTEXT = 1048576         # the model's window (config max_position_embeddings)
 FIXED_GIB = float(os.environ.get("TF_DSV41_FIXED_GIB") or "4")      # engine buffers 2.7 + prompt transients 1.0 (measured)
 RESERVE_GIB = float(os.environ.get("TF_DSV41_RESERVE_GIB") or "2.5")  # left to the OS (unified memory: an OOM wedges)
 
 
 def available_bytes() -> int:
-    """What the system can still give us: the smaller of MemAvailable and CUDA's free memory (unified on GB10)."""
+    """What the system can still give us: MemAvailable (GB10 memory is unified; it counts the reclaimable page cache,
+    which right after loading holds the weight files and which CUDA's free figure leaves out), else CUDA's free."""
 
-    import torch
-
-    free = torch.cuda.mem_get_info()[0]
     try:
         with open("/proc/meminfo") as f:
             for line in f:
                 if line.startswith("MemAvailable:"):
-                    free = min(free, int(line.split()[1]) * 1024)
-                    break
+                    return int(line.split()[1]) * 1024
     except OSError:
         pass
-    return free
+    import torch
+
+    return torch.cuda.mem_get_info()[0]
 
 
 def largest_context(free: int) -> int:
     """The largest context (a multiple of 1,024) whose caches and prompt buffers fit ``free`` bytes."""
 
     room = free - int((FIXED_GIB + RESERVE_GIB) * 2 ** 30)
-    return max(0, room // TOKEN_BYTES // 1024 * 1024)
+    return min(NATIVE_CONTEXT, max(0, room // TOKEN_BYTES // 1024 * 1024))
 
 
 def _f64_ints(value: float) -> list[int]:

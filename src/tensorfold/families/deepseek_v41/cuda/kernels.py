@@ -340,6 +340,89 @@ def mask_to_blocks(scores: torch.Tensor, blocks: torch.Tensor, block: int) -> to
     return scores.masked_fill(~keep, float("-inf"))
 
 
+@triton.jit
+def _index_scores_seg(IQ, WTS, KEYS, POS, OUT, n_keys, off, seg, out_stride, ratio, HI: tl.constexpr,
+                      DI: tl.constexpr, BS: tl.constexpr):
+    """_index_scores over the key segment [off, off + seg): OUT[r, j] for key off + j (-inf past n_keys or not yet
+    visible), the same arithmetic per key."""
+
+    r = tl.program_id(0)
+    sb = tl.program_id(1)
+    p = tl.load(POS + r)
+    n_vis = (p + 1) // ratio
+    h = tl.arange(0, HI)
+    d = tl.arange(0, DI)
+    j = sb * BS + tl.arange(0, BS)
+    sidx = off + j
+    q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
+    k = tl.load(KEYS + sidx[:, None].to(tl.int64) * DI + d[None, :], mask=(sidx < n_keys)[:, None], other=0.0)
+    dots = tl.dot(q, tl.trans(k)).to(tl.float32)
+    w = tl.load(WTS + r * HI + h)
+    score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
+    score = tl.where((sidx < n_vis) & (sidx < n_keys), score, float("-inf"))
+    tl.store(OUT + r * out_stride + j, score, mask=j < seg)
+
+
+SELECT_ROWS = 512          # prompt rows a blocked selection pass takes
+SELECT_SEG = 16384         # keys a segment scores at once (a multiple of every candidate block size)
+
+
+def index_select_blocked(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: torch.Tensor, ratio: int,
+                         topk: int, *, blocks: torch.Tensor | None = None, block: int = 8,
+                         candidates: int = 0) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Prompt rows: top_entries(index_scores(...)) (masked to ``blocks`` when given) without the [rows, keys]
+    matrix: rows in passes of SELECT_ROWS, keys in segments of SELECT_SEG, a running top-k merged per segment.
+    With ``candidates`` > 0 also returns candidate_blocks(...) of the unmasked scores (the source layer's)."""
+
+    R, HI, DI = iq.shape
+    S = keys.shape[0]
+    dev = iq.device
+    iq, wts = iq.contiguous(), wts.contiguous()
+    k = min(topk, S)
+    seg = min(SELECT_SEG, -(-S // block) * block)
+    idx_out = torch.full((R, topk), -1, dtype=torch.int32, device=dev)
+    cand_out = torch.full((R, candidates), -1, dtype=torch.int64, device=dev) if candidates else None
+    nb = -(-S // block)
+    buf = torch.empty((min(R, SELECT_ROWS), seg), dtype=torch.float32, device=dev)
+    for r0 in range(0, R, SELECT_ROWS):
+        r1 = min(R, r0 + SELECT_ROWS)
+        n = r1 - r0
+        vals = torch.full((n, k), float("-inf"), dtype=torch.float32, device=dev)
+        ids = torch.full((n, k), S, dtype=torch.int64, device=dev)
+        best = torch.full((n, nb), float("-inf"), dtype=torch.float32, device=dev) if candidates else None
+        flags = None
+        if blocks is not None:
+            flags = torch.zeros((n, nb + 1), dtype=torch.bool, device=dev)
+            b = blocks[r0:r1]
+            flags.scatter_(1, torch.where(b >= 0, b, nb), True)
+        for off in range(0, S, seg):
+            length = min(seg, S - off)
+            sc = buf[:n, :length]
+            _index_scores_seg[(n, triton.cdiv(length, 64))](iq[r0:r1], wts[r0:r1], keys, pos[r0:r1], sc, S, off,
+                                                           length, buf.stride(0), ratio, HI=HI, DI=DI, BS=64,
+                                                           num_warps=4)
+            if best is not None:                               # the source layer's block maxima (unmasked)
+                padded = sc if length % block == 0 else torch.nn.functional.pad(sc, (0, block - length % block),
+                                                                                value=float("-inf"))
+                best[:, off // block: off // block + padded.shape[1] // block] = padded.view(n, -1, block).amax(-1)
+            if flags is not None:                              # the later layers: only the candidate blocks
+                keep = flags[:, off // block: off // block + -(-length // block)].repeat_interleave(block, 1)
+                sc = sc.masked_fill(~keep[:, :length], float("-inf"))
+            kk = min(k, length)
+            v, i = torch.topk(sc, kk, dim=1, sorted=False)
+            vals, pick = torch.topk(torch.cat([vals, v], dim=1), k, dim=1, sorted=False)
+            ids = torch.gather(torch.cat([ids, i + off], dim=1), 1, pick)
+        ids = torch.where(torch.isinf(vals) & (vals < 0), torch.full_like(ids, S), ids)   # invisible: dropped
+        ids = torch.sort(ids, dim=1).values
+        idx_out[r0:r1, :k] = torch.where(ids >= S, torch.full_like(ids, -1), ids).int()
+        if best is not None:
+            newest = ((pos[r0:r1] + 1) // ratio - 1).clamp(min=0) // block
+            best.scatter_(1, newest[:, None].long(), float("inf"))
+            v, i = torch.topk(best, min(candidates, nb), dim=1)
+            cand_out[r0:r1, :i.shape[1]] = torch.where(torch.isinf(v) & (v < 0), torch.full_like(i, -1), i)
+    return idx_out, cand_out
+
+
 def index_select(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: torch.Tensor, ratio: int,
                  topk: int) -> torch.Tensor:
     """The compressed entries each row attends to: int32 [R, topk], ascending, -1 padded (all visible when <= topk)."""

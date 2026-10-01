@@ -114,6 +114,7 @@ class Caches:
 
 SKIP_READS = os.environ.get("TF_SKIP_READS") == "1"   # timing experiments: stale Engram rows (wrong output)
 STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS", "4"))   # decode/verify Engram row reads (few rows)
+BLOCKED_SELECT = True        # prompt chunks: segmented indexer top-k (no [rows, keys] fp32 matrix)
 REUSE = os.environ.get("TF_DSV41_REUSE", "1") != "0"    # keep the live caches for a prompt that extends them
 REUSE_MIN = 64               # shorter common prefixes start fresh
 FUSE_HC = True               # prompt chunks: hc post + the next sublayer's pre in two launches (post_pre)
@@ -753,6 +754,15 @@ class SerialEngine:
         keys = self.state.ik[max(s for s in c.kv_source_layer_ids if s <= L)]
         if not static:                                                  # prompt chunks: only the visible prefix
             keys = keys[:max(1, (int(pos[-1]) + 1) // a.ratio)]
+        if R > PROMPT_ROWS and BLOCKED_SELECT:                          # no [rows, keys] matrix: memory O(rows)
+            src = L == c.candidate_source_layer_id
+            idx, cand = K.index_select_blocked(
+                iq, wts, keys, pos, a.ratio, c.index_topk, block=c.candidate_block_size,
+                blocks=self.candidates if L > c.candidate_source_layer_id else None,
+                candidates=c.candidate_topk_blocks if src else 0)
+            if src:
+                self.candidates = cand
+            return idx
         scores = K.index_scores(iq, wts, keys, pos, a.ratio)
         if L == c.candidate_source_layer_id:                            # publishes blocks for the later indexers
             self.candidates = K.candidate_blocks(scores, pos, a.ratio, c.candidate_block_size,

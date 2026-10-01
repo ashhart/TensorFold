@@ -215,3 +215,20 @@ Fixes: cost replays use the request's own recent tokens and run once before the 
 [29, 41, 46, 51] ms for k = 0..3, matching live replays); decode Engram reads with 16 threads instead of 64.
 Result (DSpark k <= 3, greedy): story 35.9 tok/s (first case no longer pays the cost measurement), reasoning
 62-63 -> 65, code ~49. DSpark == serial. The 6 ms a verified row is mostly the extra experts' weights (DRAM-bound).
+
+## 2026-10-01 — segmented indexer top-k: contexts to the native 1,048,576
+
+Prompt chunks no longer build the [rows, keys] fp32 score matrix: rows in passes of 512, keys in 16K segments, a
+running top-512 merged per segment (layer 20's block maxima gathered per segment; later layers masked per segment).
+Same entries as the full path (tests/cuda/test_dsv41_kernels.py). Admission: ~4.3 KB a context token (caches 3.2,
+RoPE 0.8, block maxima 0.3) instead of ~28.5; `--context 1048576` admitted with ~7 GiB left idle.
+
+| check | result |
+|---|---|
+| steady prefill (2,048-row chunks) | 1,255 tok/s (unchanged) |
+| whole 32K prompt | 1,160 -> 1,321 tok/s |
+| long parity 1K / 8K / 24K / 40K | NLL 1.237 / 1.674 / 1.630 / 1.612 (unchanged; vLLM 1.231 / 1.675 / 1.630 / 1.613) |
+| 215,632-token prompt over HTTP (`--context 1048576`) | 214 s (1,009 tok/s), correct answer, >= 5.7 GiB free throughout |
+
+Also: admission reads MemAvailable (CUDA's free figure on GB10 leaves out the reclaimable page cache full of weight
+files right after loading, and read 0 on one rank).

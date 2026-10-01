@@ -157,3 +157,33 @@ def test_mqa_merge_applies_the_inverse_rope():
     want = K.rope(plain, pos, cos, sin, inverse=True, out_dtype=torch.bfloat16)
     assert fused.dtype == torch.bfloat16
     assert (fused.float() - want.float()).abs().max() <= 0.02 * want.float().abs().max()
+
+
+@pytest.mark.parametrize("S,ratio", [(700, 1), (5000, 1), (5000, 2), (40000, 1)])
+def test_blocked_select_matches_full(S, ratio):
+    """The segmented prompt selection picks the full-matrix path's entries and candidate blocks (several segments)."""
+
+    from tensorfold.families.deepseek_v41.cuda import kernels as K
+
+    torch.manual_seed(S + ratio)
+    R, HI, DI = 600, 32, 128
+    dev = "cuda"
+    iq = (torch.randn(R, HI, DI, device=dev) * 0.3).to(torch.bfloat16)
+    wts = torch.randn(R, HI, device=dev)
+    keys = (torch.randn(S, DI, device=dev) * 0.3).to(torch.bfloat16)
+    p_last = S * ratio - 1                                     # the last row sees all S entries
+    pos = torch.arange(p_last - R + 1, p_last + 1, device=dev)
+    old_seg, old_rows = K.SELECT_SEG, K.SELECT_ROWS
+    K.SELECT_SEG, K.SELECT_ROWS = 1024, 256
+    try:
+        full = K.index_scores(iq, wts, keys, pos, ratio)
+        want_idx = K.top_entries(full, 512)
+        want_cand = K.candidate_blocks(full, pos, ratio, 8, 64)
+        got_idx, got_cand = K.index_select_blocked(iq, wts, keys, pos, ratio, 512, block=8, candidates=64)
+        assert torch.equal(got_idx, want_idx)
+        assert torch.equal(torch.sort(got_cand, 1).values, torch.sort(want_cand, 1).values)
+        masked_want = K.top_entries(K.mask_to_blocks(full, want_cand, 8), 512)
+        masked_got, _ = K.index_select_blocked(iq, wts, keys, pos, ratio, 512, block=8, blocks=want_cand)
+        assert torch.equal(masked_got, masked_want)
+    finally:
+        K.SELECT_SEG, K.SELECT_ROWS = old_seg, old_rows
