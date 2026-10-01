@@ -28,6 +28,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     endpoint.add_argument("--port", type=int, default=8080)
     endpoint.add_argument("--name", default="", help="model id clients ask for (default: the model's name)")
     endpoint.add_argument("--alias", action="append", default=[], help="another model id to answer to")
+    endpoint.add_argument("--api-key", default=None,
+                          help="CUDA: require this bearer key on every route but /health and /metrics "
+                               "(default: $TF_API_KEY, none)")
     endpoint.add_argument("--vision", action="store_true",
                           help="enable image input for supported GLM and Qwen vision checkpoints")
     endpoint.add_argument("--vision-urls", action="store_true",

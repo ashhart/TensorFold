@@ -1,6 +1,7 @@
 """The CUDA server's HTTP side: OpenAI routes over ``App`` (tensorfold.cuda.server), streamed or not."""
 from __future__ import annotations
 
+import hmac
 import json
 import time
 import traceback
@@ -87,10 +88,29 @@ def make_handler(app: App):
                 pass
             self.close_connection = True
 
+        def _authorized(self) -> bool:
+            """True without a server key, or with it as ``Authorization: Bearer`` / ``X-API-Key``; else a 401 sent."""
+
+            key = getattr(app, "api_key", "") or ""
+            if not key:
+                return True
+            given = self.headers.get("Authorization", "")
+            given = given[7:].strip() if given[:7].lower() == "bearer " else self.headers.get("X-API-Key", "")
+            if hmac.compare_digest(given.encode(), key.encode()):
+                return True
+            self.close_connection = True                      # an unread request body must not reach the next
+            self._json(401, {"error": {"message": "a valid API key is required", "type": "invalid_request_error",
+                                       "code": "invalid_api_key"}})
+            return False
+
         def do_GET(self):
             route = self.path.split("?", 1)[0].rstrip("/")
-            if route in ("/metrics", "/v1/metrics"):
+            if route in ("/metrics", "/v1/metrics"):                  # open, like /health: scrapers and pollers
                 return metrics.send(self, app)
+            if route in ("/health", "/v1/health"):
+                return self._json(200, health.of(app).snapshot(app))
+            if not self._authorized():
+                return
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "tensorfold"}
                                                             for model_id in app.model_ids]})
@@ -102,9 +122,12 @@ def make_handler(app: App):
                 self._json(404, {"error": "not found"})
 
         def do_DELETE(self):
-            responses.delete(self, app, responses.route(self.path))
+            if self._authorized():
+                responses.delete(self, app, responses.route(self.path))
 
         def do_POST(self):
+            if not self._authorized():
+                return
             path = self.path.split("?", 1)[0].rstrip("/")
             if path.endswith("/decisions"):
                 return self._post_decisions()

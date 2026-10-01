@@ -125,7 +125,7 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
       default 40,960 shrinks to fit); expandable-segments allocator (prompt transients 3.6 -> 1.6 GiB at 38K)
 - [x] Structured output: `response_format` json_schema / json_object, guided_choice / regex / grammar (xgrammar),
       masks on verify rows (DSpark drafts cut to the grammar's prefix), rank 1 compiles the same grammar
-- [ ] systemd/compose unit to run it in place of the vLLM recipe
+- [x] Compose project in place of the vLLM recipe: `deploy/dsv41-tp2` (image with deps baked in, `make swap-in` / `swap-out`, API key)
 
 ## Ops notes
 

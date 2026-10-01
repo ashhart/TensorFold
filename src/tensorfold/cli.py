@@ -296,6 +296,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
                     reasoning_effort=args.reasoning_effort, thinking_budget=int(args.thinking_budget),
                     vision_max_images=getattr(args, "vision_max_images", None),
                     aliases=list(args.alias))
+    app.api_key = args.api_key or os.environ.get("TF_API_KEY", "")
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
     effective_context = app.effective_context_window

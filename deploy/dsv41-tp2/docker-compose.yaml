@@ -1,0 +1,54 @@
+# TensorFold serving DeepSeek-V4.1-Flash EXL3 2.9bpw at TP=2 across two DGX Sparks.
+#
+# One file serves both ranks. `make up` runs it on the worker with rank1.env (rank 1 follows) and then
+# here with rank0.env (rank 0 serves HTTP); compose reads .env and then the rank file, the later winning.
+# Compose substitution is not rank-aware, so keep per-rank NIC/HCA settings in rankN.env, never in .env.
+#
+# Not restarted on its own (like the vLLM head): a rank coming back alone waits at rendezvous for a peer
+# that is not coming. `make up` / `make down` start and stop both together.
+
+name: tensorfold-dsv41
+
+services:
+  serve:
+    image: ${TF_IMAGE:-tensorfold-dsv41:latest}
+    pull_policy: never
+    restart: "no"
+    network_mode: host
+    ipc: host
+    shm_size: "64gb"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    gpus: all
+    devices:
+      - /dev/infiniband:/dev/infiniband
+      - ${DRM_CARD:-/dev/dri/card0}:/dev/dri/card0      # the display carveout (TF_CARVEOUT)
+    volumes:
+      - ${MODELS_DIR:?MODELS_DIR must be set in .env}:/models:ro
+      - ${CACHE_DIR:?CACHE_DIR must be set in .env}:/root/.cache  # built CUDA extensions, Triton kernels
+    environment:
+      TF_RANK: ${TF_RANK:?TF_RANK comes from rank0.env / rank1.env}
+      TF_PORT: ${PORT:-8888}
+      TF_API_KEY: ${TF_API_KEY:-}
+      TF_CARVEOUT: ${TF_CARVEOUT:-1}
+      TF_DSV41_KV_FP8: ${TF_DSV41_KV_FP8:-1}
+      TF_DSV41_FIXED_GIB: ${TF_DSV41_FIXED_GIB:-}
+      TF_DSV41_ENGRAM_DIR: /models/${ENGRAM:-dsv41/DeepSeek-V4.1-Flash-engram}
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      NCCL_SOCKET_IFNAME: ${NCCL_SOCKET_IFNAME:?per rank, in rankN.env}
+      NCCL_IB_HCA: ${NCCL_IB_HCA:?per rank, in rankN.env}
+      NCCL_IB_GID_INDEX: ${NCCL_IB_GID_INDEX:-3}
+      NCCL_DEBUG: ${NCCL_DEBUG:-ERROR}
+    command: >-
+      python -m tensorfold serve /models/${MODEL:-dsv41/DeepSeek-V4.1-Flash-EXL3-2.9bpw}
+      --tp 2 --rank ${TF_RANK} --master ${MASTER_ADDR:?MASTER_ADDR must be set in .env}
+      --host ${HOST:-0.0.0.0} --port ${PORT:-8888} --name ${SERVED_NAME:-DeepSeek-v4.1-Flash-EXL3}
+      --parallel ${PARALLEL:-8} --context ${CONTEXT:-131072} ${EXTRA_ARGS:-}
+    healthcheck:                                         # rank 0 answers /health once loaded; rank 1 has no port
+      test: ["CMD-SHELL", "[ \"$$TF_RANK\" != 0 ] || python -c \"import urllib.request as u; u.urlopen('http://127.0.0.1:$$TF_PORT/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      start_period: 15m
+      retries: 3
+    stop_grace_period: 30s
