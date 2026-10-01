@@ -207,6 +207,31 @@ def test_attention_index_arrays_grow_with_context_and_state_views_do_not_hide_ca
     assert cache_nbytes(cache) > sum(array.nbytes for array in cache[0].state)
 
 
+def test_sparse_indexer_price_is_steady_not_inflated_by_a_short_request():
+    # Flash Next's sparse-attention indexer keys and pooled blocks are allocated in 256-position
+    # capacity steps (AttentionCache.update), so their per-token cost is a steady layer property.
+    # issue 95: pricing them per valid token made a 15-token request look ~3x the startup probe;
+    # observe_cache keeps the largest profile it has seen, so every later prompt inside the window
+    # was then refused.
+    def layer(capacity, offset):
+        return SimpleNamespace(
+            keys=Array((1, 2, capacity, 256)), values=Array((1, 2, capacity, 256)),
+            index_keys=Array((1, capacity, 128)), pooled=Array((1, capacity // 4, 128)),
+            offset=offset)
+
+    probe = CacheMemory.from_cache([layer(2304, 2112)])   # the startup probe: 2,112 tokens of a 2,304-position cache
+    short = CacheMemory.from_cache([layer(256, 15)])      # a 15-token request on a 256-position cache
+    full = CacheMemory.from_cache([layer(2304, 2304)])     # a long prompt that fills the 2,304-position cache
+
+    each = 2 * 2 * 256 * 2                     # keys and values per position: 2 tensors x 2 heads x 256 dim x bf16
+    auxiliary = 1 * 128 * 2 + (1 * 128 * 2) // 4   # indexer key per position plus one pooled block per 4 positions
+    steady = each + auxiliary
+    assert probe.bytes_per_token == steady
+    assert short.bytes_per_token == steady
+    assert short.bytes_per_token == probe.bytes_per_token
+    assert full.bytes_per_token == steady             # a full cache prices the same before and after the fix
+
+
 def test_admission_reserves_reply_work_and_checkpoint_copies():
     profile = CacheMemory(100, 2, 16)
     projected = needed_bytes(profile, 65, resident_bytes=1000, working_bytes=100,

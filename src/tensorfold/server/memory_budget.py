@@ -162,8 +162,7 @@ class CacheMemory:
             spare = _array_bytes(getattr(item, "spare_keys", None))
             spare += _array_bytes(getattr(item, "spare_values", None))
             extra = max(0, held - main - spare)
-            valid = max(1, min(positions, int(getattr(item, "offset", positions))))
-            auxiliary = -(-extra // valid)
+            auxiliary = -(-extra // positions)    # index keys and pooled blocks fill whole capacity steps
             capacity = int(getattr(item, "max_size", 0) or 0)
             if capacity:
                 fixed += max(held, (each + auxiliary) * capacity)
