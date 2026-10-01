@@ -166,6 +166,101 @@ class DSpark:
         torch.cuda.current_stream().synchronize()
         return self.h_drafts.tolist()
 
+    # -- several streams in one pass (concurrent rounds) ---------------------------------------------------------
+    def draft_multi(self, anchor: torch.Tensor, P: torch.Tensor, base: torch.Tensor) -> torch.Tensor:
+        """N greedy drafts for each of M streams (long [M, N]): anchors, positions and ring bases [M], one pass."""
+
+        c, eng, dw, N = self.c, self.eng, self.dw, self.N
+        M = anchor.shape[0]
+        ids = torch.cat([anchor[:, None], self.noise[None, :].expand(M, N - 1)], dim=1).reshape(-1)
+        pos = (P[:, None] + torch.arange(N, device=self.dev)[None, :]).reshape(-1)
+        rbase = base[:, None].expand(M, N).reshape(-1)
+        X = eng.w.embed[ids][:, None, :].expand(M * N, c.hc_mult, c.hidden_size).contiguous()
+        pre = torch.zeros((M * N, c.hc_mult), dtype=F32, device=self.dev)
+        pre[:, 0] = 1.0
+        f = post = comb = None
+        for j, block in enumerate(dw.layers):
+            if f is not None:
+                X = hcf.post(f, X, post, comb)
+            post, comb, x, pre_a = eng.hc(block.hc_attn, X, pre)
+            X = hcf.post(self.attention_multi(j, block, x, pos, P, base, rbase, M), X, post, comb)
+            post, comb, x, pre = eng.hc(block.hc_ffn, X, pre_a)
+            f = eng.moe(block, x, M * N, top_k=c.dspark_num_experts_per_tok, scratch=self.scratch_multi[j])
+        X = hcf.post(f, X, post, comb)
+        h = K.rmsnorm((pre[:, :, None] * X.float()).sum(1).to(BF), dw.norm, c.rms_norm_eps)
+        logits = eng.comm.gather_last(eng.w.head(h, out_dtype=F32)).view(M, N, -1)
+        prev, out = anchor, []
+        for j in range(N):                                                    # sequential Markov stage, batched
+            bias = torch.mm(dw.markov_embed[prev].half(), dw.markov_head.T, out_dtype=F32)
+            prev = (logits[:, j] + bias).argmax(-1)
+            out.append(prev)
+        return torch.stack(out, dim=1)
+
+    def attention_multi(self, j: int, block, x: torch.Tensor, pos: torch.Tensor, P: torch.Tensor,
+                        base: torch.Tensor, rbase: torch.Tensor, M: int) -> torch.Tensor:
+        """``attention`` for M streams' block rows: each stream's rows see its own context ring's window."""
+
+        c, eng, a = self.c, self.eng, block.attn
+        R, Dh, W, N = x.shape[0], c.head_dim, c.sliding_window, self.N
+        cos, sin = eng.tables_rope[0]
+        qr = K.rmsnorm(a.wq_a(x), a.q_norm, c.rms_norm_eps)
+        kv = K.rmsnorm(a.wkv(x), a.kv_norm, c.rms_norm_eps)
+        H = a.wq_b.n // Dh
+        q = K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin).float().view(M, N, H, Dh)
+        self.swa_big[j].index_copy_(0, rbase + pos % self.ring, K.rope(kv, pos, cos, sin))
+        idx = P[:, None] - (W - 1) + torch.arange(W - 1 + N, device=self.dev)[None, :]      # [M, keys]
+        keys = self.swa_big[j][base[:, None] + idx.clamp(min=0) % self.ring].float()        # [M, keys, D]
+        pr = pos.view(M, N)
+        mask = (idx[:, None, :] >= (pr[:, :, None] - (W - 1))) & (idx[:, None, :] >= 0)    # [M, N, keys]
+        sc = torch.einsum("mthd,msd->mths", q, keys) * Dh ** -0.5
+        sc = sc.masked_fill(~mask[:, :, None, :], float("-inf"))
+        full = torch.cat([sc, a.sink.view(1, 1, H, 1).expand(M, N, H, 1)], dim=-1)
+        o = torch.einsum("mths,msd->mthd", torch.softmax(full, dim=-1)[..., :-1], keys).reshape(R, H, Dh)
+        o = K.rope(o, pos, cos, sin, inverse=True, out_dtype=BF)
+        groups = len(a.wo_a)
+        o = o.view(R, groups, (H // groups) * Dh)
+        z = torch.cat([wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)], dim=1)
+        return eng.comm.partials(a.wo_b(z, out_dtype=F32))
+
+    def capture_multi(self, streams: int) -> None:
+        """Draft graphs for 1..``streams`` streams at once (each stream's N block rows: M * N <= the decode rows)."""
+
+        c = self.c
+        self.scratch_multi = [ex3.Scratch(b.moe.experts, streams * self.N, c.dspark_num_experts_per_tok)
+                              for b in self.dw.layers]
+        self.multi_graphs = {}
+        saved = [t.clone() for t in self.swa_big]
+        for M in range(1, streams + 1):
+            g = {"anchor": torch.zeros((M,), dtype=torch.long, device=self.dev),
+                 "P": torch.full((M,), 200, dtype=torch.long, device=self.dev),
+                 "base": torch.zeros((M,), dtype=torch.long, device=self.dev),
+                 "h": torch.zeros((M, self.N), dtype=torch.long).pin_memory()}
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                for _ in range(2):
+                    self.draft_multi(g["anchor"], g["P"], g["base"])
+            torch.cuda.current_stream().wait_stream(side)
+            g["graph"] = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g["graph"]):
+                g["out"] = self.draft_multi(g["anchor"], g["P"], g["base"])
+            self.multi_graphs[M] = g
+        torch.cuda.synchronize()
+        for dst, src in zip(self.swa_big, saved):
+            dst.copy_(src)
+
+    def propose_multi(self, items: list[tuple[int, int, int]]) -> list[list[int]]:
+        """Drafts for several streams in one pass: ``items`` = (slot, anchor, position) each."""
+
+        g = self.multi_graphs[len(items)]
+        g["anchor"].copy_(torch.tensor([a for _, a, _ in items]), non_blocking=True)
+        g["P"].copy_(torch.tensor([p for _, _, p in items]), non_blocking=True)
+        g["base"].copy_(torch.tensor([s * self.ring for s, _, _ in items]), non_blocking=True)
+        g["graph"].replay()
+        g["h"].copy_(g["out"], non_blocking=True)
+        torch.cuda.current_stream().synchronize()
+        return g["h"].tolist()
+
 
 class DraftPolicy:
     """How many of the N drafts to verify each round: the k (0 = no drafting) with the most expected tokens per

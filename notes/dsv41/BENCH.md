@@ -258,3 +258,26 @@ Sustained load (clients sending 256-token requests back to back, temperature 0.7
 The decode Engram reads had run with 4 threads in the server (16 only in the runner): 16-stream rounds waited 16 ms
 on the first table's rows; now 16 threads (4 a row for multi-row rounds, at most 64): 2.7 ms.
 Next: more than 16 rows a round (row-invariant thresholds at 32), batched drafting for low concurrency.
+
+## 2026-10-02 — carveout, 32-row rounds, small decode rings, batched drafting
+
+- Display carveout (`TF_CARVEOUT=1`, 1,792 MiB, host RAM cost <= 90 MiB) holds the compressed-KV pools, largest
+  source first; indexer keys stay in ordinary memory (scanned whole every decode step). Prefill 1,348 / 1,283 tok/s
+  at 8K / 32K (unchanged), long parity unchanged.
+- Decode rounds up to 32 rows (`TF_DSV41_DECODE_ROWS`, row-invariant kernels up to it; outputs == sequential).
+  Verify ms by rows: 16: 98, 24: 132, 32: 154.
+- A slot's rings: 230 MB -> 15 MB (decode rings of 256 rows; prompt chunks use one shared set of 4,096-row staging
+  rings, the slot's 130-row window copied in before and out after each eager chunk). 32 slots at 16K context fit
+  with 7.8 GiB left after capture.
+- Batched DSpark drafting: one drafter pass for up to 10 drafting streams (graphs by stream count); the allocator
+  charges the batched cost.
+- Fixes found on the way: a kept draft equal to the end token did not end the stream (Stream.take checks only the
+  last token): rounds are cut at it; fills resume past cached tokens (FILL carries rows); prompt fills are
+  time-sliced while others decode (`TF_FILL_SHARE`); prompt snapshots are size-checked before copying.
+
+| sustained load (256-token requests) | aggregate | per request |
+|---|---:|---:|
+| `--parallel 8`, 4 clients | 69.1 tok/s | 18.0 tok/s |
+| `--parallel 8`, 8 clients | 88.9 tok/s | 11.9 tok/s |
+| `--parallel 16 --context 16384`, 16 clients | 115–119 tok/s | 7.6 tok/s |
+| `--parallel 32 --context 16384`, 32 clients | **143.3 tok/s** | 4.9 tok/s |

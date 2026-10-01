@@ -78,6 +78,7 @@ class MultiDecoder:
         self.model_dir = None                      # rank 1 compiles a request's grammar from it
         self.costs: list[float] | None = None      # verify ms by rows (calibrate)
         self.draft_ms = 0.0
+        self.draft_curve: list[float] = []
         self.overhead = 2.0                        # a round's host ms besides the forward and drafts
         self.prior = [0.6] * max(self.drafts, 1)   # acceptance by draft position, over every stream (new ones start here)
         import os as _os
@@ -114,18 +115,26 @@ class MultiDecoder:
                 torch.cuda.synchronize()
                 best = min(best, time.perf_counter() - t)
             ms.append(1e3 * best)
-        draft = 0.0
+        drafts = []                                          # ms of one drafting pass for 1.. streams at once
         if self.drafts:
-            best = float("inf")
-            for _ in range(4):
-                torch.cuda.synchronize()
-                t = time.perf_counter()
-                e.drafter.propose(rng.randrange(1000, 100000), 300)
-                best = min(best, time.perf_counter() - t)
-            draft = 1e3 * best
-        both = gather([int(1e3 * v) for v in ms] + [int(1e3 * draft)])
+            batched = getattr(e.drafter, "multi_graphs", None) or {}
+            for M in range(1, max(batched, default=1) + 1):
+                items = [(m % e.slots, rng.randrange(1000, 100000), 300) for m in range(M)]
+                best = float("inf")
+                for _ in range(4):
+                    torch.cuda.synchronize()
+                    t = time.perf_counter()
+                    if M in batched:
+                        e.drafter.propose_multi(items)
+                    else:
+                        e.drafter.propose(items[0][1], 300)
+                    best = min(best, time.perf_counter() - t)
+                drafts.append(1e3 * best)
+        both = gather([int(1e3 * v) for v in ms + drafts])
         worst = [max(a, b) / 1e3 for a, b in zip(*both)]
-        self.costs, self.draft_ms = worst[:ROWS], worst[ROWS]
+        self.costs = worst[:ROWS]
+        self.draft_curve = worst[ROWS:]
+        self.draft_ms = self.draft_curve[0] if self.draft_curve else 0.0
         for slot in range(e.slots):                          # the timing rows wrote every slot's caches
             e.select_slot(slot)
             e.reset()
@@ -159,7 +168,7 @@ class MultiDecoder:
                 if ks[i] >= caps[i]:
                     continue
                 gain = self._expected(s.acc, ks[i] + 1) - self._expected(s.acc, ks[i])
-                cost = self.costs[rows] + self.overhead + (drafting + (ks[i] == 0)) * self.draft_ms
+                cost = self.costs[rows] + self.overhead + self._draft_cost(drafting + (ks[i] == 0))
                 r = (tokens + gain) / cost
                 if r > rate and (best is None or r > best[0]):
                     best = (r, i, gain)
@@ -171,6 +180,16 @@ class MultiDecoder:
             tokens += gain
             rows += 1
         return ks
+
+    def _draft_cost(self, streams: int) -> float:
+        """ms of drafting for ``streams`` streams: one batched pass where captured, else a pass each."""
+
+        if streams <= 0:
+            return 0.0
+        curve = self.draft_curve
+        if streams <= len(curve) and len(curve) > 1:
+            return curve[streams - 1]
+        return streams * self.draft_ms
 
     def _learn(self, s: Stream, k: int, m: int) -> None:
         a = 0.15
@@ -319,11 +338,20 @@ class MultiDecoder:
         try:
             rows, spans = [], []
             t0 = time.perf_counter()
+            want = [(sid, k) for sid, k in plan if k]
+            batched = getattr(e.drafter, "multi_graphs", None) if e.drafter is not None else None
+            proposals: dict[int, list[int]] = {}
+            if want and batched and len(want) in batched:     # one drafting pass for every drafting stream
+                items = [(self.streams[sid].slot, self.streams[sid].out[-1], len(e.views[self.streams[sid].slot].ids))
+                         for sid, _ in want]
+                proposals = {sid: d for (sid, _), d in zip(want, e.drafter.propose_multi(items))}
             for sid, k in plan:
                 s = self.streams[sid]
                 pending = s.out[-1]
                 drafts: list[int] = []
-                if k:
+                if k and sid in proposals:
+                    drafts = proposals[sid][:k]
+                elif k:
                     e.select_slot(s.slot)
                     drafts = e.drafter.propose(pending, len(e.views[s.slot].ids))[:k]
                 if s.constraint is not None:

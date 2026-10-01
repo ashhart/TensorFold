@@ -168,6 +168,10 @@ class Dsv41Engine:
                 self.e.capture(rows)
             if drafts:
                 self.e.drafter.capture()
+                if self.streams > 1:                      # one drafting pass for several streams
+                    from .serial import PROMPT_ROWS
+
+                    self.e.drafter.capture_multi(min(self.streams, PROMPT_ROWS // DRAFTS))
         self.limit = cap
         self.eos = (int(w.cfg.eos_token_id),)
         self.drafts = bool(drafts)

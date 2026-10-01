@@ -119,8 +119,8 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [x] Concurrent decoding (`--parallel N`): stream slots, stream-aware decode graphs, MultiDecoder + shared Scheduler,
       cost-based draft allocation; 16 clients: 115.5 tok/s aggregate (vLLM recipe baseline 113.7 at x6); outputs ==
       sequential
-- [ ] More than 16 rows a round (raise the row-invariant thresholds to 32: per-row HC / routed scratch / fp32 partials)
-- [ ] Batched DSpark drafting across streams (one drafter pass for every drafting stream)
+- [x] Up to 32 rows a round + 15 MB decode rings a slot: 32 clients 143.3 tok/s aggregate
+- [x] Batched DSpark drafting across streams (8 clients 82.5 -> 88.9 tok/s)
 - [x] `--context` admission before any cache exists (both ranks' free memory; refuses with the largest that fits;
       default 40,960 shrinks to fit); expandable-segments allocator (prompt transients 3.6 -> 1.6 GiB at 38K)
 - [x] Structured output: `response_format` json_schema / json_object, guided_choice / regex / grammar (xgrammar),
