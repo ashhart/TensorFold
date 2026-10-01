@@ -211,7 +211,7 @@ __global__ void __launch_bounds__(W * 32) grouped_kernel(
     __shared__ int rows_sh[16];
     if (threadIdx.x < 16) {
         const int m = mtile * 16 + threadIdx.x;
-        const int code = m < maxm ? members[u * maxm + m] : -1;
+        const int code = m < maxm ? members[(size_t)u * maxm + m] : -1;     // 64-bit: a window may be large
         rows_sh[threadIdx.x] = code >= 0 ? (code >> 5) * slots + (code & 31) : -1;
     }
     __syncthreads();
