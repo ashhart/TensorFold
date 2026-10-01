@@ -26,7 +26,7 @@ def _ext():
 
     here = Path(__file__).parent
     srcs = [str(here / f) for f in ("experts.cpp", "experts.cu", "experts_cb0.cu", "experts_cb1.cu", "experts_cb2.cu")]
-    return load(name="tensorfold_exl3_experts_v1", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
+    return load(name="tensorfold_exl3_experts_v2", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
                 verbose=False)
 
 
@@ -161,13 +161,17 @@ class Scratch:
         self.ids = torch.zeros((maxu,), dtype=torch.int32, device=device)
         self.count = torch.zeros((1,), dtype=torch.int32, device=device)
         self.members_buf = torch.full((maxu * rows,), -1, dtype=torch.int32, device=device)
+        # every non-empty 16-row member tile, listed by the grouping: at most one partial tile an expert
+        self.tiles_buf = torch.zeros(((P + 15) // 16 + maxu,), dtype=torch.int32, device=device)
+        self.tile_count = torch.zeros((1,), dtype=torch.int32, device=device)
         self.rows, self.slots, self.count_experts = rows, slots, ex.count
 
     def window(self, R: int):
-        """(ids, members) sized for R rows: the grids only span what R rows can use."""
+        """(ids, members, tiles) sized for R rows: the grids only span what R rows can use."""
 
         maxu = min(R * self.slots, self.count_experts)
-        return self.ids[:maxu], self.members_buf[:maxu * R].view(maxu, R)
+        return (self.ids[:maxu], self.members_buf[:maxu * R].view(maxu, R),
+                self.tiles_buf[:(R * self.slots + 15) // 16 + maxu])
 
 
 def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Exl3RoutedExperts, s: Scratch,
@@ -181,17 +185,17 @@ def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Ex
     P = R * slots
     if R > s.rows:
         raise ValueError(f"{R} rows but the scratch holds {s.rows}")
-    ids, members = s.window(R)
+    ids, members, tiles = s.window(R)
     if group:
-        ext.group(pick, ids, s.count, members, R, slots, E)
+        ext.group(pick, ids, s.count, members, tiles, s.tile_count, R, slots, E)
     ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots, E)
     nt, w, sk, pf = s.cfg_gu
-    ext.grouped(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, s.z, 2, D, I,
-                P, sk, slots, ex.cb, nt, w, pf, ex.k2_gu[0], ex.k2_gu[1])
+    ext.grouped(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, tiles, s.tile_count,
+                s.z, 2, D, I, P, sk, slots, ex.cb, nt, w, pf, ex.k2_gu[0], ex.k2_gu[1])
     ext.gateup_epilogue(s.z, pick, ex.svh_g, ex.svh_u, ex.suh_d, s.xd, R, P, I, sk, slots, E, float(limit), act_mode)
     nt, w, sk, pf = s.cfg_d
-    ext.grouped(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, s.z, 1, I,
-                D, P, sk, slots, ex.cb, nt, w, pf, ex.k2_d[0], ex.k2_d[1])
+    ext.grouped(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, tiles,
+                s.tile_count, s.z, 1, I, D, P, sk, slots, ex.cb, nt, w, pf, ex.k2_d[0], ex.k2_d[1])
     if wts is None:
         ext.down_epilogue(s.z, pick, ex.svh_d, s.y, R, P, D, sk, slots, E)
         return s.y[:P]

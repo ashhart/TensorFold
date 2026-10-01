@@ -385,3 +385,23 @@ def test_lane_map_extracts_every_window():
                         off = end(p_last, k2) - end(p, k2)
                         assert off + 16 <= 64, (k2, lane, g, j, off)
                         assert (mm >> off) & 0xFFFF == state(p), (k2, lane, g, j)
+
+
+def test_grouping_lists_exactly_the_tiles_in_use():
+    """The grouped kernels run one program a listed tile: every expert's ceil(members / 16) tiles, none past them, in
+    expert order, so a window's shared expert (all its rows) no longer sizes every other expert's grid."""
+    from tensorfold.cuda.exl3 import experts
+
+    E, D, I, TOPK, ROWS = 24, 512, 256, 6, 100
+    ex, _ = _layer(E + 1, D, I, [(6, 6, 6)] * (E + 1), 2, seed=5)       # expert E is the shared one
+    g = torch.Generator().manual_seed(9)
+    sel, _ = _picks(E, ROWS, TOPK, g, shared=True)
+    s = experts.Scratch(ex, ROWS, TOPK + 1)
+    ids, members, tiles = s.window(ROWS)
+    experts._ext().group(sel, ids, s.count, members, tiles, s.tile_count, ROWS, TOPK + 1, ex.count)
+    used = int(s.count.item())
+    counts = (members[:used] >= 0).sum(1).tolist()
+    want = [(u << 16) | m for u, c in enumerate(counts) for m in range(-(-c // 16))]
+    assert int(s.tile_count.item()) == len(want) <= tiles.numel()
+    assert tiles[:len(want)].tolist() == want
+    assert max(counts) == ROWS                                       # the shared expert: every row

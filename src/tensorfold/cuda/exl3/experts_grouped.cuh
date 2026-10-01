@@ -186,19 +186,20 @@ __host__ __device__ constexpr bool k2_supported(int k2) {
     return k2 >= 2 && k2 <= 16;
 }
 
-// Program (expert u, n block, split and member tile): up to 16 members times W_q over the split's K range; warps added in order.
+// Program (listed tile: expert u and its member tile, n block, split): up to 16 members times W_q over the split's K
+// range; warps added in order.
 template <int CB, int NT, int W, int PF, int LO, int HI>
 __global__ void __launch_bounds__(W * 32) grouped_kernel(
     const half* __restrict__ X0, const half* __restrict__ X1, const int64_t* __restrict__ TP0,
     const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
     const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
+    const int* __restrict__ tiles, const int* __restrict__ tcount,
     float* __restrict__ Z, int K, int N, int P, int SK, int maxm, int slots) {
-    const int u = blockIdx.x;
-    if (u >= ucount[0]) return;
-    const int MT = (maxm + 15) / 16;
-    const int mtile = blockIdx.z % MT;
-    const int split = (blockIdx.z / MT) % SK;
-    const int mat = blockIdx.z / MT / SK;
+    if ((int)blockIdx.x >= tcount[0]) return;
+    const int code = tiles[blockIdx.x];
+    const int u = code >> 16, mtile = code & 0xffff;
+    const int split = blockIdx.z % SK;
+    const int mat = blockIdx.z / SK;
     const half* X = mat ? X1 : X0;
     const int e = uids[u];
     const uint32_t* T = reinterpret_cast<const uint32_t*>(mat ? TP1[e] : TP0[e]);
@@ -315,20 +316,22 @@ struct GroupedArgs {
     const int* uids;
     const int* ucount;
     const int* members;
+    const int* tiles;    // (place << 16) | member tile of every non-empty tile, tcount[0] of them
+    const int* tcount;
     float* z;
     int K, N, P, SK, maxm, slots;
-    int nexp_max;        // grid.x (upper bound of distinct experts)
+    int nexp_max;        // upper bound of distinct experts
+    int tile_max;        // grid.x: upper bound of listed tiles
     int mats, nt, warps, pf, lo, hi;
 };
 
 template <int CB>
 void grouped_launch(const GroupedArgs& a, cudaStream_t stream) {
-    const int MT = (a.maxm + 15) / 16;
-    dim3 grid((unsigned)a.nexp_max, (unsigned)(a.N / (16 * a.nt)), (unsigned)(a.mats * a.SK * MT));
+    dim3 grid((unsigned)a.tile_max, (unsigned)(a.N / (16 * a.nt)), (unsigned)(a.mats * a.SK));
 #define TF_LAUNCH(NT_, W_, PF_, LO_, HI_)                                                                       \
     grouped_kernel<CB, NT_, W_, PF_, LO_, HI_><<<grid, W_ * 32, 0, stream>>>(                                   \
-        a.x0, a.x1, a.tp0, a.tp1, a.k2_0, a.k2_1, a.uids, a.ucount, a.members, a.z, a.K, a.N, a.P, a.SK, a.maxm, \
-        a.slots)
+        a.x0, a.x1, a.tp0, a.tp1, a.k2_0, a.k2_1, a.uids, a.ucount, a.members, a.tiles, a.tcount, a.z, a.K, a.N, \
+        a.P, a.SK, a.maxm, a.slots)
 #define TF_RANGES(NT_, W_, PF_)                                                                                 \
     if (a.lo == 8 && a.hi == 8) TF_LAUNCH(NT_, W_, PF_, 8, 8);                                                  \
     else if (a.lo >= 2 && a.hi <= 10) TF_LAUNCH(NT_, W_, PF_, 2, 10);                                           \

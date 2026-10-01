@@ -10,6 +10,12 @@ SLOTS = 9               # top_k + 1
 EXPERTS = 288           # a 288-expert MoE layer
 
 
+def _tiles(rows, slots, maxu, device="cuda"):
+    """The grouping's tile list and count, at the bound it checks: one entry a 16-row member tile in use."""
+    return (torch.zeros(((rows * slots + 15) // 16 + maxu,), dtype=torch.int32, device=device),
+            torch.zeros((1,), dtype=torch.int32, device=device))
+
+
 @pytest.mark.parametrize("rows", [PREFILL_ROWS, 8, 512])
 def test_group_succeeds_cold_at_prefill_scale(rows):
     """The first parameter is a 72-KiB launch, before any small launch can opt this kernel in."""
@@ -22,11 +28,13 @@ def test_group_succeeds_cold_at_prefill_scale(rows):
     ucount = torch.zeros((1,), dtype=torch.int32, device="cuda")
     members = torch.full((maxu * rows,), -1, dtype=torch.int32, device="cuda").view(maxu, rows)
 
-    ext.group(pick, uids, ucount, members, rows, SLOTS, EXPERTS)
+    tiles, tcount = _tiles(rows, SLOTS, maxu)
+    ext.group(pick, uids, ucount, members, tiles, tcount, rows, SLOTS, EXPERTS)
     torch.cuda.synchronize()
     distinct = ucount[0].item()
     assert 0 < distinct <= min(rows * SLOTS, EXPERTS)
     _assert_members(pick, uids, ucount, members, EXPERTS)
+    _assert_tiles(ucount, members, tiles, tcount)
 
 
 def test_group_output_is_consistent_across_call_order():
@@ -44,7 +52,8 @@ def test_group_output_is_consistent_across_call_order():
         ids = torch.zeros((maxu,), dtype=torch.int32, device="cuda")
         count = torch.zeros((1,), dtype=torch.int32, device="cuda")
         members = torch.full((maxu * R,), -1, dtype=torch.int32, device="cuda").view(maxu, R)
-        ext.group(pick, ids, count, members, R, slots, E)
+        tiles, tcount = _tiles(R, slots, maxu)
+        ext.group(pick, ids, count, members, tiles, tcount, R, slots, E)
         torch.cuda.synchronize()
         results.append((count[0].item(), members.clone()))
     assert results[0][0] == results[1][0] and torch.equal(results[0][1], results[1][1])
@@ -64,6 +73,13 @@ def _assert_members(pick, ids, count, members, experts):
         assert torch.all(actual[i, len(expected):] == -1)
 
 
+def _assert_tiles(count, members, tiles, tcount):
+    n = int(count.item())
+    rows = (members[:n] >= 0).sum(1).tolist()
+    want = [(u << 16) | m for u, c in enumerate(rows) for m in range(-(-c // 16))]
+    assert int(tcount.item()) == len(want) and tiles[:len(want)].tolist() == want
+
+
 def _launch(rows, slots=SLOTS, device="cuda"):
     from tensorfold.cuda.exl3 import experts
 
@@ -73,13 +89,15 @@ def _launch(rows, slots=SLOTS, device="cuda"):
     ids = torch.zeros(n, dtype=torch.int32, device=device)
     count = torch.zeros(1, dtype=torch.int32, device=device)
     members = torch.full((n, rows), -1, dtype=torch.int32, device=device)
-    experts._ext().group(pick, ids, count, members, rows, slots, EXPERTS)
+    tiles, tcount = _tiles(rows, slots, n, device)
+    experts._ext().group(pick, ids, count, members, tiles, tcount, rows, slots, EXPERTS)
     torch.cuda.synchronize(device)
     _assert_members(pick, ids, count, members, EXPERTS)
+    _assert_tiles(count, members, tiles, tcount)
 
 
 def test_device_limit_allows_more_than_a_hardcoded_96_kib_when_available():
-    limit = torch.cuda.get_device_properties(0).shared_memory_per_block_optin - 128
+    limit = torch.cuda.get_device_properties(0).shared_memory_per_block_optin - 256     # the kernel's static scans
     rows = limit // (SLOTS * 4)
     if rows * SLOTS * 4 <= 96 * 1024:
         pytest.skip("this device has no grouping launch between 96 KiB and its opt-in limit")
