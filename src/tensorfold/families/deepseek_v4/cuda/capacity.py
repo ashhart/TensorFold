@@ -71,5 +71,5 @@ def admit(model_dir, context=None, context_explicit=None):
             'runtime_reserve_bytes': RUNTIME_RESERVE, 'floor_bytes': FLOOR,
             'companion_growth_bytes': growth, 'required_bytes': required,
             'available_bytes': room, 'total_bytes_estimate': required-FLOOR-growth,
-            'donor_estimator': 'ds4_engine_session_graph_bytes_estimate',
+            'donor_estimator': 'ds4_engine_session_graph_bytes_estimate less inactive F32 primary shells',
             'largest_window': context}

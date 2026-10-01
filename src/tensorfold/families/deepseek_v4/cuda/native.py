@@ -16,7 +16,8 @@ from .build import PIN
 
 NATIVE_ENV = {'DS4_WEIGHT_RESIDENCY_BASE': 'mapped', 'DS4_NO_BOOT_PREWARM': '1',
               'DS4_MEM_FLOOR_GB': '8', 'DS4_CUDA_BUILD_ARTIFACTS': '1',
-              'DS4_METAL_PREFILL_CHUNK': '1024', 'DS4_CUDA_PREBUILD_F16': '0'}
+              'DS4_METAL_PREFILL_CHUNK': '2048',
+              'DS4_CUDA_FP8_KV': '1', 'DS4_CUDA_FP4_INDEX': '1', 'DS4_CUDA_PREBUILD_F16': '0'}
 
 
 def _policy():
@@ -92,9 +93,16 @@ def _native_worker(pipe, library):
                 ids = (C.c_int * len(tokens))(*tokens)
                 if api.sync(ctx, ids, len(tokens), error, len(error)):
                     raise NativeError(error.value.decode(errors='replace'))
-            elif op == 'eval':
+            elif op in ('eval', 'eval_logits'):
                 if api.eval(ctx, args[0], error, len(error)):
                     raise NativeError(error.value.decode(errors='replace'))
+                if op == 'eval_logits':
+                    logits = (C.c_float * vocab)()
+                    if api.logits(ctx, logits, vocab) != vocab:
+                        raise NativeError('native logits have the wrong vocabulary width')
+                    pipe.send({'ok': True, 'bytes': vocab * 4})
+                    pipe.send_bytes(bytes(logits))
+                    continue
             elif op == 'logits':
                 logits = (C.c_float * vocab)()
                 if api.logits(ctx, logits, vocab) != vocab:
@@ -193,7 +201,7 @@ class NativeSession:
                     data = self._pipe.recv_bytes(maxlength=self.vocab_size * 4)
                     if len(data) != self.vocab_size * 4:
                         raise NativeError('truncated native logits')
-                    return np.frombuffer(data, dtype=np.float32).copy()
+                    return np.frombuffer(data, dtype=np.float32)
                 return result.get('value')
             except (EOFError, BrokenPipeError, OSError) as exc:
                 self.close()
@@ -207,6 +215,9 @@ class NativeSession:
 
     def eval(self, token):
         self._rpc('eval', int(token))
+
+    def eval_logits(self, token):
+        return self._rpc('eval_logits', int(token))
 
     def logits(self):
         return self._rpc('logits')
@@ -254,11 +265,11 @@ def _estimate_worker(pipe, library, model_path, context):
         function = api.lib.tf_ds4_estimate
         function.argtypes = [C.c_char_p, C.c_int, C.POINTER(C.c_uint64), C.c_int, C.c_char_p, C.c_size_t]
         function.restype = C.c_int
-        values, error = (C.c_uint64 * 5)(), C.create_string_buffer(1024)
-        if function(os.fsencode(model_path), context, values, 5, error, len(error)):
+        values, error = (C.c_uint64 * 6)(), C.create_string_buffer(1024)
+        if function(os.fsencode(model_path), context, values, 6, error, len(error)):
             raise NativeError(error.value.decode(errors='replace') or 'native estimate is unavailable')
         pipe.send({'ok': True, 'value': dict(zip(
-            ('graph_bytes', 'raw_bytes', 'compressed_bytes', 'scratch_bytes', 'prefill_cap'), values))})
+            ('graph_bytes', 'raw_bytes', 'compressed_bytes', 'scratch_bytes', 'prefill_cap', 'logical_graph_bytes'), values))})
     except BaseException as exc:
         pipe.send({'ok': False, 'error': str(exc)})
     finally:

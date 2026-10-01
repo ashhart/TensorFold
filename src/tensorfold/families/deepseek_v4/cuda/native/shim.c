@@ -87,7 +87,7 @@ int tf_ds4_estimate(const char *path, int context, uint64_t *out, int count,
 #ifdef DS4_NO_GPU
     snprintf(err, cap, "CUDA estimate requires the CUDA library"); return 1;
 #else
-    if (!path || context < 1 || !out || count != 5 || access(path, R_OK)) {
+    if (!path || context < 1 || !out || count != 6 || access(path, R_OK)) {
         snprintf(err, cap, "invalid estimate inputs"); return 1;
     }
     ds4_engine *engine = NULL;
@@ -98,7 +98,27 @@ int tf_ds4_estimate(const char *path, int context, uint64_t *out, int count,
         snprintf(err, cap, "metadata inspection failed"); return 1;
     }
     ds4_context_memory m = ds4_context_memory_estimate(DS4_BACKEND_CUDA, context);
-    out[0] = ds4_engine_session_graph_bytes_estimate(engine, context);
+    out[5] = ds4_engine_session_graph_bytes_estimate(engine, context);
+    out[0] = out[5];
+    /* The donor estimate includes F32 cache shells even when all readers and
+     * writers use packed primaries. Those VMM shells remain uncommitted. Keep
+     * every packed row and all scratch in the budget; remove only inactive
+     * primary storage under the exact compiled/selected policy. */
+    uint64_t inactive = 0;
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) {
+        const uint32_t ratio = ds4_layer_compress_ratio(il);
+        if (!ratio) continue;
+        const uint64_t rows = (uint64_t)(context / ratio + 2u);
+        if (!DS4_GPU_ATTN_COMP_CACHE_F16 && ds4_cuda_fp8_kv_enabled())
+            inactive += rows * DS4_N_HEAD_DIM * sizeof(float);
+        if (ratio == 4 && ds4_cuda_fp4_index_enabled())
+            inactive += rows * DS4_N_INDEXER_HEAD_DIM * sizeof(float);
+    }
+    if (inactive >= out[0]) {
+        ds4_engine_close(engine);
+        snprintf(err, cap, "invalid resident graph estimate"); return 1;
+    }
+    out[0] -= inactive;
     out[1] = m.raw_bytes; out[2] = m.compressed_bytes;
     out[3] = m.scratch_bytes; out[4] = m.prefill_cap;
     ds4_engine_close(engine);

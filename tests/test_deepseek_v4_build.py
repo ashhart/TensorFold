@@ -44,3 +44,13 @@ def test_success_and_preparation_publish_installed_library(tmp_path):
     assert prepare.call_args.kwargs['native_library'] == library
     assert prepare.call_args.kwargs['source_identity']['sha256_scope'] == 'gguf-header'
     assert result['wheel']['sha256'] == 'wheel'
+
+
+def test_aligned_budget_adds_dense_q8_but_not_replaced_expert_weights():
+    from types import SimpleNamespace as T
+    dense = T(name='blk.0.attn_q_a.weight', type_id=8, shape=(1024, 2048), size=1024*2048//32*34)
+    iq2 = T(name='blk.0.ffn_gate_exps.weight', type_id=16, shape=(1024, 2048, 256), size=1024*2048*256//256*66)
+    q2 = T(name='blk.0.ffn_down_exps.weight', type_id=10, shape=(2048, 4096, 256), size=2048*4096*256//256*84)
+    assert b.aligned_artifact_extra_bytes([dense, iq2, q2]) == dense.size
+    dense.name = 'token_embd.weight'
+    assert b.aligned_artifact_extra_bytes([dense, iq2, q2]) == 0

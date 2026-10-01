@@ -84,18 +84,25 @@ class DeepSeekEngine:
             self.session.sync(ids)
             prefill_s = time.perf_counter() - start
             decode_start, count = time.perf_counter(), 0
-            for _ in range(max_tokens):
-                logits = self.session.logits()
+            logits = self.session.logits()
+            for step in range(max_tokens):
                 if (logits.shape != (self.vocab_size,) or not np.isfinite(logits).any() or
                         np.isnan(logits).any() or np.isposinf(logits).any()):
                     raise RuntimeError('native engine returned invalid logits')
                 token = (int(np.argmax(logits)) if sampling is None or sampling.temperature <= 0 else
                          choose(logits, np.arange(self.vocab_size), len(ids), sampling))
-                self.session.eval(token)
+                ending = step == max_tokens-1 or (stop_eos and token in self.eos)
+                if not ending and hasattr(self.session, 'eval_logits'):
+                    next_logits = self.session.eval_logits(token)
+                else:
+                    self.session.eval(token)
+                    next_logits = None
                 ids.append(token)
                 count += 1
                 if on_tokens([token]) or (stop_eos and token in self.eos):
                     break
+                if step < max_tokens-1:
+                    logits = next_logits if next_logits is not None else self.session.logits()
             self._timeline = ids
             return {'generated': count, 'cached': cached, 'drafts': False, 'prefill_s': prefill_s,
                     'decode_s': time.perf_counter() - decode_start, 'rounds': count,

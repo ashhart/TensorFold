@@ -74,6 +74,7 @@ int tf_ds4_iq2_dot(void *p,int b,void *a,int n,float *out) { return 1; }
         session.sync([0, 1])
         np.testing.assert_array_equal(session.logits(), np.arange(4, dtype=np.float32))
         session.eval(2)
+        np.testing.assert_array_equal(session.eval_logits(1), np.arange(4, dtype=np.float32))
         assert session.encode('text') == [1]
         assert session.encode('text', rendered=True) == [2]
         assert session.token_text(2) == b'ok'
