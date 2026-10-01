@@ -20,6 +20,7 @@ NATIVE_ENV = {
     "DS4_MEM_FLOOR_GB": "8",
     "DS4_CUDA_BUILD_ARTIFACTS": "1",
     "DS4_METAL_PREFILL_CHUNK": "2048",
+    "DS4_METAL_RESUME_PREFILL_MIN": "1",
     "DS4_CUDA_FP8_KV": "1",
     "DS4_CUDA_FP4_INDEX": "1",
     "DS4_CUDA_PREBUILD_F16": "0",
@@ -49,6 +50,7 @@ class NativeLibrary:
             "eos": (C.c_int, [C.c_void_p]),
             "context": (C.c_int, [C.c_void_p]),
             "reset": (None, [C.c_void_p]),
+            "cached": (C.c_int, [C.c_void_p]),
             "sync": (C.c_int, [C.c_void_p, C.POINTER(C.c_int), C.c_int, C.c_char_p, C.c_size_t]),
             "eval": (C.c_int, [C.c_void_p, C.c_int, C.c_char_p, C.c_size_t]),
             "logits": (C.c_int, [C.c_void_p, C.POINTER(C.c_float), C.c_int]),
@@ -61,7 +63,7 @@ class NativeLibrary:
             function = getattr(self.lib, "tf_ds4_" + name)
             function.restype, function.argtypes = result, args
             setattr(self, name, function)
-        if self.abi() != 1 or self.revision().decode() != PIN:
+        if self.abi() != 2 or self.revision().decode() != PIN:
             raise NativeError("native ABI/revision mismatch; rebuild the pinned TensorFold library")
 
 
@@ -103,6 +105,7 @@ def _native_worker(pipe, library):
                 ids = (C.c_int * len(tokens))(*tokens)
                 if api.sync(ctx, ids, len(tokens), error, len(error)):
                     raise NativeError(error.value.decode(errors="replace"))
+                value = api.cached(ctx)
             elif op in ("eval", "eval_logits"):
                 if api.eval(ctx, args[0], error, len(error)):
                     raise NativeError(error.value.decode(errors="replace"))
@@ -228,7 +231,7 @@ class NativeSession:
         self._rpc("reset")
 
     def sync(self, ids):
-        self._rpc("sync", list(ids))
+        return self._rpc("sync", list(ids))
 
     def eval(self, token):
         self._rpc("eval", int(token))
@@ -282,8 +285,8 @@ def _estimate_worker(pipe, library, model_path, context):
         function = api.lib.tf_ds4_estimate
         function.argtypes = [C.c_char_p, C.c_int, C.POINTER(C.c_uint64), C.c_int, C.c_char_p, C.c_size_t]
         function.restype = C.c_int
-        values, error = (C.c_uint64 * 6)(), C.create_string_buffer(1024)
-        if function(os.fsencode(model_path), context, values, 6, error, len(error)):
+        values, error = (C.c_uint64 * 7)(), C.create_string_buffer(1024)
+        if function(os.fsencode(model_path), context, values, 7, error, len(error)):
             raise NativeError(error.value.decode(errors="replace") or "native estimate is unavailable")
         pipe.send(
             {
@@ -297,6 +300,7 @@ def _estimate_worker(pipe, library, model_path, context):
                             "scratch_bytes",
                             "prefill_cap",
                             "logical_graph_bytes",
+                            "snapshot_bytes",
                         ),
                         values,
                     )

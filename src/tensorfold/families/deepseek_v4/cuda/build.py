@@ -119,7 +119,7 @@ def build(build_dir: Path, *, backend="cuda", jobs=2, source=VENDOR):
     (build_dir / "native-build.json").write_text(
         json.dumps(
             {
-                "abi": 1,
+                "abi": 2,
                 "revision": PIN,
                 "backend": backend,
                 "source_sha256": manifest["sha256"],

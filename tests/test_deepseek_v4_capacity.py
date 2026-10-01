@@ -33,12 +33,13 @@ def test_admitted_context_counts_growth_once(tmp_path):
     report = model(tmp_path)
     with (
         patch.object(capacity, "inspect_inputs", return_value=report),
-        patch.object(capacity, "estimate", return_value={"graph_bytes": 6 * GIB}),
+        patch.object(capacity, "estimate", return_value={"graph_bytes": 6 * GIB, "snapshot_bytes": GIB}),
         patch.object(capacity, "available", return_value=32 * GIB),
     ):
         plan = capacity.admit(tmp_path, 262144, True)
     assert plan["context_window"] == plan["cache_slots"] == 262144
-    assert plan["required_bytes"] == 28 * GIB
+    assert plan["required_bytes"] == 29 * GIB
+    assert plan["snapshot_reserve_bytes"] == GIB
     assert plan["companion_growth_bytes"] == 2 * GIB
 
 
@@ -46,7 +47,7 @@ def test_refusal_never_starts_session_and_preserves_explicit_context(tmp_path):
     report = model(tmp_path)
     with (
         patch.object(capacity, "inspect_inputs", return_value=report),
-        patch.object(capacity, "estimate", return_value={"graph_bytes": 6 * GIB}),
+        patch.object(capacity, "estimate", return_value={"graph_bytes": 6 * GIB, "snapshot_bytes": GIB}),
         patch.object(capacity, "available", return_value=20 * GIB),
         pytest.raises(ValueError, match="cannot fit.*262144"),
     ):

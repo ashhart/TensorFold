@@ -158,7 +158,7 @@ def native_library(args):
     if output.is_file() and receipt_path.is_file():
         receipt = json.loads(receipt_path.read_text())
         if (
-            receipt.get("abi") == 1
+            receipt.get("abi") == 2
             and receipt.get("revision") == PIN
             and receipt.get("backend") == "cuda"
             and receipt.get("cuda_arch") == "sm_121a"

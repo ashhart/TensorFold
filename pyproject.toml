@@ -69,6 +69,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "tests"]
+markers = ["gpu: requires an explicitly supplied prepared GPU model"]
 
 [tool.ruff]
 line-length = 120

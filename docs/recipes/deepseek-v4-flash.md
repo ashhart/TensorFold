@@ -176,13 +176,12 @@ CUDA HTTP hooks. Token bytes are joined before UTF8 decoding; instance-local bou
 repeated tokenizer RPCs. Required/named tools reuse the existing call gate without assuming the DSML
 opener is one token. HTTP shutdown and bind failure close the native engine.
 
-An unchanged, fully evaluated timeline reuses the live native state. Appended, changed or shorter
-prompts reset and prefill fresh: native suffix reuse failed one real 3,609-token greedy resumed/fresh
-comparison. This prevents history-dependent output, but growing conversations lose that unqualified
-prefix speedup. Re-running that failing case with fresh prefill produced identical output; unchanged
-timeline reuse also passed the real comparison. The decode measurements below do not claim unchanged
-multi-turn prefill latency.
-Prompt-resume snapshots and reuse after process restart remain outside this serial release.
+Continuations restore the last complete 2,048-token prefill boundary using the donor's packed
+snapshot API, then replay only the unfinished tail with the same batch boundaries as a fresh request.
+This avoids re-prefilling the full history and preserves fresh/resumed output. A partial chunk contains
+state built by decode and cannot safely be extended as if it were a cold batched prompt. Changed
+prefixes invalidate the saved state. The cache holds one process-local boundary; it is not a durable
+cache across restarts. Native ABI 2 reports the actual reused token count to TensorFold.
 Callbacks observe evaluated tokens once, EOS/stop/disconnect terminate generation, and prompt-plus-reply
 capacity is checked before streaming. Fatal native failures close the engine instead of silently serving
 from damaged state.
@@ -191,7 +190,8 @@ from damaged state.
 
 Admission precedes native model loading. It validates prepared/source identity, preserves an explicit
 context without shrinking it, and budgets the complete packed file, aligned-artifact overhead, active
-cache/workspace geometry, 1 GiB runtime allowance, additional companion growth and an 8 GiB host floor.
+cache/workspace geometry, a bounded snapshot reserve, 1 GiB runtime allowance, additional companion
+growth and an 8 GiB host floor.
 `MemAvailable` already includes resident companion occupancy; only their additional growth is reserved.
 The local 3 GiB allowance is rounded from an independently measured 2.91 GiB Hunyuan generation peak.
 Re-measure it for a different companion workload.
@@ -210,6 +210,11 @@ The native allocator's own fit checks remain enabled. The donor's bounded 512-to
 prewarm also remains enabled; its 256 MiB growth allowance fits within the runtime reserve. Disabling it
 produced an intermittent bad first request on this Spark, even when later requests passed.
 
+The snapshot reserve uses the donor's serialized raw-window and packed-cache capacities, compressor
+state, token histories and staging buffer. Its fixed allocation avoids an old-plus-new realloc peak;
+allocation failure is reported and closes the isolated worker. Bounds and null checks protect the C
+boundary, and snapshots are released during shutdown and partial-initialization cleanup.
+
 Shared top-k sampling partitions the vocabulary before sorting candidates, including all threshold ties.
 It preserves token-ID ordering, nucleus/min-p rules and seed/position-keyed draws. A 129,280-logit CPU
 measurement fell from 8.44 to 0.70 ms per sampled token without changing the recorded seeded picks.
@@ -220,7 +225,11 @@ Focused CPU tests cover GGUF wire format and malformed input, real schema/proven
 vectors, a pinned IQ2 primitive, option refusal before allocation, insufficient-memory sentinels,
 callback/EOS/cancellation/lifetime, shared HTTP streaming/tools, shutdown and build/preflight boundaries.
 Packaged-source hashes are checked without depending on another local donor checkout. The focused
-suite passes 156 tests; two MLX GPU tests are excluded on the CUDA host.
+suite passes 156 tests; two MLX GPU tests are excluded on the CUDA host. One opt-in GPU regression
+covers the original continuation failure, sampled output, an exact chunk boundary, changed history and
+a longer prefix. All four fresh/resumed comparisons passed with cache reuse. Local ASan/UBSan and leak
+checks found no issues in the tested null/bounds, allocation-failure, packed-input and cleanup paths;
+the audit harness remains outside the PR.
 
 Real GB10 inference passed chat/code, thinking, SSE termination, required tool calls and a tool followup.
 With chat decoding at the same time, Hunyuan generated a 15,375,500-byte GLB at 30 steps/octree 256;
@@ -236,6 +245,8 @@ Local optimization and final cleanup measurements on that same Spark and GGUF:
 | Sampled decode, 256 tokens | 18.24 tok/s | 20.44 tok/s | Same prompt, seed and output token hash; sampler optimization |
 | 16,224-token prefill | 927.6 tok/s | 1,037.0 tok/s | Same prompt; 1,024 then 2,048-token prefill batches |
 | Sampled decode across cleanup, 256 tokens | 20.44 tok/s | 20.93 tok/s | Same prompt/seed/token hash; final median of three runs |
+| 3,609-token continuation prefill | 4.16 s fresh | 2.32 s resumed | 2,048 cached tokens; identical output |
+| 16,212-token continuation prefill | 16.98 s fresh | 2.83 s resumed | 14,336 cached tokens; identical output |
 | Thinking decode | 16.07 tok/s | 21.11 tok/s | Same fixture; output lengths differ, before/after aligned kernels |
 
 The final upstream public 64-token fixtures measured median decode rates of 20.87–21.43 tok/s

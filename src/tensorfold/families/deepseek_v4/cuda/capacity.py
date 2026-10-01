@@ -61,7 +61,8 @@ def admit(model_dir, context=None, context_explicit=None):
     geometry = estimate(library, source, context)
     growth = math.ceil(reserve * GIB)
     weight_bytes = report["source_size"] + report.get("aligned_artifact_extra_bytes", 0)
-    required = weight_bytes + geometry["graph_bytes"] + RUNTIME_RESERVE + FLOOR + growth
+    snapshot = geometry["snapshot_bytes"]
+    required = weight_bytes + geometry["graph_bytes"] + snapshot + RUNTIME_RESERVE + FLOOR + growth
     # MemAvailable already accounts for the resident companions. Count only their
     # measured future growth, and protect the unified pool's floor exactly once.
     room = min(room, available())
@@ -77,6 +78,7 @@ def admit(model_dir, context=None, context_explicit=None):
         "native_window": native,
         "mapped_weights_bytes": report["source_size"],
         "geometry": geometry,
+        "snapshot_reserve_bytes": snapshot,
         "aligned_artifact_extra_bytes": report.get("aligned_artifact_extra_bytes", 0),
         "weight_residency_budget_bytes": weight_bytes,
         "runtime_reserve_bytes": RUNTIME_RESERVE,

@@ -41,7 +41,7 @@ def test_native_rpc_ownership_and_fatal_exit(tmp_path):
 #include <string.h>
 #include <unistd.h>
 #include <stddef.h>
-int tf_ds4_abi(void) { return 1; }
+int tf_ds4_abi(void) { return 2; }
 const char *tf_ds4_revision(void) { return "REVISION"; }
 int tf_ds4_backend(void) { return 1; }
 int tf_ds4_open(const char *p,int n,int t,void **out,char *err,size_t cap) {
@@ -54,6 +54,7 @@ int tf_ds4_vocab(void *p) { return 4; }
 int tf_ds4_eos(void *p) { return 3; }
 int tf_ds4_context(void *p) { return *(int *)p; }
 void tf_ds4_reset(void *p) {}
+int tf_ds4_cached(void *p) { return 1; }
 int tf_ds4_sync(void *p,const int *ids,int n,char *err,size_t cap) { return 0; }
 int tf_ds4_eval(void *p,int id,char *err,size_t cap) { return 0; }
 int tf_ds4_logits(void *p,float *out,int n) {
@@ -73,7 +74,7 @@ int tf_ds4_iq2_dot(void *p,int b,void *a,int n,float *out) { return 1; }
     subprocess.run([cc, "-shared", "-fPIC", str(source), "-o", str(library)], check=True)
     with NativeSession(library=library, model_path="normal", context=8, timeout=10) as session:
         session.reset()
-        session.sync([0, 1])
+        assert session.sync([0, 1]) == 1
         np.testing.assert_array_equal(session.logits(), np.arange(4, dtype=np.float32))
         session.eval(2)
         np.testing.assert_array_equal(session.eval_logits(1), np.arange(4, dtype=np.float32))
@@ -89,7 +90,7 @@ int tf_ds4_iq2_dot(void *p,int b,void *a,int n,float *out) { return 1; }
     with NativeSession(library=library, model_path="normal", context=8, timeout=10) as session:
         assert session.vocab_size == 4
     wrong = tmp_path / "wrong-abi.so"
-    source.write_text(source.read_text().replace("tf_ds4_abi(void) { return 1;", "tf_ds4_abi(void) { return 0;"))
+    source.write_text(source.read_text().replace("tf_ds4_abi(void) { return 2;", "tf_ds4_abi(void) { return 0;"))
     subprocess.run([cc, "-shared", "-fPIC", str(source), "-o", str(wrong)], check=True)
     with pytest.raises(NativeError, match="ABI/revision mismatch"):
         NativeLibrary(wrong)

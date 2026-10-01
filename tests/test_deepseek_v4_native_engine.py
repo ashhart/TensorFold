@@ -17,6 +17,7 @@ class Session:
         self.pos = 0
         self.closed = False
         self.calls = []
+        self.cached = 0
 
     def reset(self):
         self.calls.append("reset")
@@ -24,6 +25,7 @@ class Session:
     def sync(self, tokens):
         self.pos = len(tokens)
         self.calls.append(("sync", list(tokens)))
+        return self.cached
 
     def logits(self):
         return np.array([0, 1, 4, 7 if self.pos >= 3 else 2], dtype=np.float32)
@@ -68,7 +70,7 @@ def test_serial_eos_callbacks_and_repeat_request(tmp_path):
     out.clear()
     instance.generate([0, 1], 1, None, lambda ids: out.extend(ids))
     assert out == [2]
-    assert session.calls.count("reset") == 2
+    assert session.calls.count("reset") == 1
     instance.close()
     assert session.closed
 
@@ -114,17 +116,19 @@ def test_bad_options_refuse_before_admission_or_native_loading(tmp_path):
             DeepSeekEngine(tmp_path, _admission=forbidden, _session_factory=forbidden, **options)
 
 
-def test_unchanged_timeline_reuses_but_appended_prompt_resets(tmp_path):
+def test_native_sync_owns_prefix_reuse_and_reports_cached_tokens(tmp_path):
     instance, session = engine(tmp_path)
     instance.generate([0, 1], 1, None, lambda _: None)
     session.calls.clear()
-    stats = instance.generate([0, 1, 2], 1, None, lambda _: None)
-    assert session.calls[0] == ("sync", [0, 1, 2])
-    assert "reset" not in session.calls and stats["cached"] == 3
+    session.cached = 2
+    stats = instance.generate([0, 1, 2, 0], 1, None, lambda _: None)
+    assert session.calls[0] == ("sync", [0, 1, 2, 0])
+    assert "reset" not in session.calls and stats["cached"] == 2
     session.calls.clear()
-    stats = instance.generate([0, 1, 2, 3, 0], 1, None, lambda _: None)
-    assert session.calls[0] == "reset" and stats["cached"] == 0
-    session.calls.clear()
+    session.cached = 0
     stats = instance.generate([1, 0], 1, None, lambda _: None)
-    assert session.calls[0] == "reset" and stats["cached"] == 0
+    assert session.calls[0] == ("sync", [1, 0]) and stats["cached"] == 0
+    session.cached = 3
+    with pytest.raises(RuntimeError, match="cached prefix"):
+        instance.generate([0, 1], 1, None, lambda _: None)
     instance.close()

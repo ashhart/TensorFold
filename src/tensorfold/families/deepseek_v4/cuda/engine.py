@@ -71,7 +71,7 @@ class DeepSeekEngine:
         self._timeline = []
 
     def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True, stop_eos=True):
-        """Reuse an unchanged evaluated timeline; appended prompts rebuild fresh."""
+        """Reuse canonical native prefill state; callbacks receive committed tokens once."""
         import numpy as np
 
         from tensorfold.engine.exact_sampling import choose
@@ -95,12 +95,11 @@ class DeepSeekEngine:
                 return {"generated": 0, "cached": 0, "drafts": False, "prefill_s": 0.0, "decode_s": 0.0}
             start = time.perf_counter()
             ids = [int(t) for t in ids]
-            cached = len(self._timeline) if self._timeline and ids == self._timeline else 0
-            # Native suffix extension can differ from fresh batched prefill.
-            # Reuse only an unchanged, fully evaluated timeline.
-            if not cached:
+            if not self._timeline:
                 self.session.reset()
-            self.session.sync(ids)
+            cached = int(self.session.sync(ids) or 0)
+            if not 0 <= cached <= len(ids):
+                raise RuntimeError("native cached prefix exceeds the supplied prompt")
             prefill_s = time.perf_counter() - start
             decode_start, count = time.perf_counter(), 0
             logits = self.session.logits()
