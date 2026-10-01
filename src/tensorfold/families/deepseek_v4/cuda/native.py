@@ -15,7 +15,8 @@ import threading
 from .build import PIN
 
 NATIVE_ENV = {'DS4_WEIGHT_RESIDENCY_BASE': 'mapped', 'DS4_NO_BOOT_PREWARM': '1',
-              'DS4_MEM_FLOOR_GB': '8', 'DS4_CUDA_BUILD_ARTIFACTS': '0'}
+              'DS4_MEM_FLOOR_GB': '8', 'DS4_CUDA_BUILD_ARTIFACTS': '1',
+              'DS4_METAL_PREFILL_CHUNK': '1024', 'DS4_CUDA_PREBUILD_F16': '0'}
 
 
 def _policy():

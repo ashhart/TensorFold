@@ -95,3 +95,17 @@ def test_bad_options_refuse_before_admission_or_native_loading(tmp_path):
     for options in ({'tp': 2}, {'parallel': 2}, {'drafter': 'legacy-mtp'}, {'rank': 1}):
         with pytest.raises(ValueError):
             DeepSeekEngine(tmp_path, _admission=forbidden, _session_factory=forbidden, **options)
+
+
+def test_exact_committed_prefix_is_reused_but_changed_prefix_resets(tmp_path):
+    instance, session = engine(tmp_path)
+    instance.generate([0, 1], 1, None, lambda _: None)
+    session.calls.clear()
+    stats = instance.generate([0, 1, 2, 0], 1, None, lambda _: None)
+    assert session.calls[0] == ('sync', [0, 1, 2, 0])
+    assert 'reset' not in session.calls
+    assert stats['cached'] == 3
+    session.calls.clear()
+    stats = instance.generate([1, 0], 1, None, lambda _: None)
+    assert session.calls[0] == 'reset' and stats['cached'] == 0
+    instance.close()

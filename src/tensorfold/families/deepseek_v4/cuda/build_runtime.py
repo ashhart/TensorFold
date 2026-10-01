@@ -31,6 +31,34 @@ def stamp(path):
             'device': stat.st_dev, 'inode': stat.st_ino}
 
 
+def aligned_artifact_extra_bytes(tensors):
+    """Pinned ds4_repack.cu byte geometry: MoE replaces raw; dense Q8 adds.
+
+    Full raw-file residency is already budgeted, so charge only additional
+    Q8 copies and expert alignment padding, not a second set of MoE weights.
+    F16 prebuilding is disabled; aligned out_a uses the donor fused kernel.
+    """
+    extra = 0
+    for t in tensors:
+        dims, size = t.shape, t.size
+        if (t.type_id == 8 and len(dims) == 2 and all(dims) and
+            dims[0] % 1024 == 0 and size >= 2*1024**2 and size % 34 == 0 and
+            'token_embd' not in t.name):
+            blocks = size//34
+            extra += ((blocks*2+63)//64)*64 + blocks*32
+        elif (t.type_id == 16 and len(dims) == 3 and all(dims) and
+              dims[0] % 1024 == 0 and dims[2] <= 2**32-1 and size % 66 == 0 and
+              t.name.endswith(('.ffn_gate_exps.weight', '.ffn_up_exps.weight'))):
+            blocks = size//66
+            extra += ((blocks*2+63)//64)*64 + blocks*64 - size
+        elif (t.type_id == 10 and len(dims) == 3 and all(dims) and
+              dims[0] % 256 == 0 and dims[1] % 2 == 0 and dims[2] <= 2**32-1 and
+              size % 84 == 0 and t.name.endswith('.ffn_down_exps.weight')):
+            pairs = size//84//2
+            extra += ((pairs*8+63)//64)*64 + ((pairs*32+63)//64)*64 + pairs*128 - size
+    return extra
+
+
 def inspect_inputs(args):
     """Map the file read-only; visit only header/table pages, never tensor payload."""
     source = args.gguf.expanduser().resolve(strict=True)
@@ -50,6 +78,7 @@ def inspect_inputs(args):
         header_hash = hashlib.sha256(mapped[:inventory.data_offset]).hexdigest()
         arch = {k: v for k, v in md.items() if k.startswith('deepseek4.')}
         count, header_bytes = len(inventory.tensors), inventory.data_offset
+        artifact_extra = aligned_artifact_extra_bytes(inventory.tensors)
     if stamp(source) != before:
         raise ValueError('GGUF changed during header inspection')
     external = {}
@@ -71,7 +100,7 @@ def inspect_inputs(args):
     identity = {**before, 'header_bytes': header_bytes, 'sha256_scope': 'gguf-header'}
     return {'artifact_valid': True, 'source': str(source), 'source_size': before['size'],
             'source_identity': identity, 'header_sha256': header_hash,
-            'tensor_count': count, 'arch': arch, 'tokenizer': provenance,
+            'tensor_count': count, 'aligned_artifact_extra_bytes': artifact_extra, 'arch': arch, 'tokenizer': provenance,
             'external_tokenizer': external, 'context_window': args.context,
             'companion_reserve_gib': args.companion_reserve_gib,
             'current_memory_fit': {'status': 'not_evaluated',

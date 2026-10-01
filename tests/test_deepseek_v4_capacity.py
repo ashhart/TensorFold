@@ -13,7 +13,7 @@ def model(tmp_path):
               'gguf_file': '/mock.gguf', 'native_library': '/mock.so'}
     (tmp_path / 'config.json').write_text(json.dumps(config))
     (tmp_path / 'descriptor.json').write_text(json.dumps({'reserve_gib': 2}))
-    return {'source_size': 10*GIB, 'arch': {'deepseek4.context_length': 262144},
+    return {'aligned_artifact_extra_bytes': GIB, 'source_size': 10*GIB, 'arch': {'deepseek4.context_length': 262144},
             'header_sha256': 'header', 'source_identity': {}}
 
 
@@ -24,7 +24,7 @@ def test_admitted_context_counts_growth_once(tmp_path):
          patch.object(capacity, 'available', return_value=32*GIB):
         plan = capacity.admit(tmp_path, 262144, True)
     assert plan['context_window'] == plan['cache_slots'] == 262144
-    assert plan['required_bytes'] == 27*GIB
+    assert plan['required_bytes'] == 28*GIB
     assert plan['companion_growth_bytes'] == 2*GIB
 
 

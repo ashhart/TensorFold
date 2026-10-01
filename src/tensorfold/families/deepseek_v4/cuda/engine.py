@@ -52,9 +52,10 @@ class DeepSeekEngine:
         self.vocab_size = self.session.vocab_size
         self.tp, self.rank, self.concurrent, self.max_rows = 1, 0, False, 1
         self._lock, self._closed = threading.Lock(), False
+        self._timeline = []
 
     def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True, stop_eos=True):
-        """Fresh serial timeline; callbacks receive evaluated/committed tokens once."""
+        """Reuse an exact committed prefix; callbacks receive committed tokens once."""
         import numpy as np
         from tensorfold.engine.exact_sampling import choose
 
@@ -74,8 +75,13 @@ class DeepSeekEngine:
             if max_tokens == 0:
                 return {'generated': 0, 'cached': 0, 'drafts': False, 'prefill_s': 0., 'decode_s': 0.}
             start = time.perf_counter()
-            self.session.reset()
-            self.session.sync([int(t) for t in ids])
+            ids = [int(t) for t in ids]
+            cached = len(self._timeline) if (self._timeline and
+                len(ids) >= len(self._timeline) and
+                ids[:len(self._timeline)] == self._timeline) else 0
+            if not cached:
+                self.session.reset()
+            self.session.sync(ids)
             prefill_s = time.perf_counter() - start
             decode_start, count = time.perf_counter(), 0
             for _ in range(max_tokens):
@@ -90,7 +96,8 @@ class DeepSeekEngine:
                 count += 1
                 if on_tokens([token]) or (stop_eos and token in self.eos):
                     break
-            return {'generated': count, 'cached': 0, 'drafts': False, 'prefill_s': prefill_s,
+            self._timeline = ids
+            return {'generated': count, 'cached': cached, 'drafts': False, 'prefill_s': prefill_s,
                     'decode_s': time.perf_counter() - decode_start, 'rounds': count,
                     'min_rows': 1, 'drafted': 0, 'accepted': 0}
         except BaseException:

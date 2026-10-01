@@ -55,7 +55,8 @@ def admit(model_dir, context=None, context_explicit=None):
             raise ValueError(f'prepared GGUF identity changed: {key}')
     geometry = estimate(library, source, context)
     growth = math.ceil(reserve*GIB)
-    required = report['source_size'] + geometry['graph_bytes'] + RUNTIME_RESERVE + FLOOR + growth
+    weight_bytes = report['source_size'] + report.get('aligned_artifact_extra_bytes', 0)
+    required = weight_bytes + geometry['graph_bytes'] + RUNTIME_RESERVE + FLOOR + growth
     # MemAvailable already accounts for the resident companions. Count only their
     # measured future growth, and protect the unified pool's floor exactly once.
     room = min(room, available())
@@ -65,6 +66,8 @@ def admit(model_dir, context=None, context_explicit=None):
                          f'available {room/GIB:.2f} GiB; no weights or KV cache loaded')
     return {'context_window': context, 'cache_slots': context, 'native_window': native,
             'mapped_weights_bytes': report['source_size'], 'geometry': geometry,
+            'aligned_artifact_extra_bytes': report.get('aligned_artifact_extra_bytes', 0),
+            'weight_residency_budget_bytes': weight_bytes,
             'runtime_reserve_bytes': RUNTIME_RESERVE, 'floor_bytes': FLOOR,
             'companion_growth_bytes': growth, 'required_bytes': required,
             'available_bytes': room, 'total_bytes_estimate': required-FLOOR-growth,
