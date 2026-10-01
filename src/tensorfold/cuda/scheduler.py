@@ -40,6 +40,8 @@ class Scheduler:
         self.held: tuple | None = None               # a request waiting for memory, admitted before any other
         self.boxes: dict[int, queue.Queue] = {}
         self.yields = 0                              # background streams that gave up their lane
+        if hasattr(decoder, "arrived"):              # a decoder filling prompts lets a new request in between passes
+            decoder.arrived = self.waiting.foreground
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
