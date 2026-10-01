@@ -368,3 +368,28 @@ def test_an_nvfp4_checkpoint_refuses_two_ranks(tiny: Path, monkeypatch) -> None:
     monkeypatch.setattr("tensorfold.cuda.comm.NCCL", lambda *a, **k: pytest.fail("the ranks started"))
     with pytest.raises(ValueError, match="one GPU"):
         FlashNextEngine(tiny, tp=2, rank=0, master="127.0.0.1")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the loader builds CUDA tensors")
+def test_fp8_drafter_experts_draft_as_their_dequantized_bf16(tmp_path: Path) -> None:
+    """Per-expert FP8 MTP experts (e4m3, a scale a tensor) load: they are dequantized and re-quantized as the bf16
+    drafter is, so they draft exactly as stacked bf16 experts holding the same values, and drafts keep serial tokens."""
+
+    from tensorfold.engine.exact_sampling import Sampling
+    from tensorfold.families.qwen4_exp.cuda.decode import Engine, mtp_decode, prefill, serial_decode
+    from tensorfold.families.qwen4_exp.cuda.weights import load
+
+    prompt = [5, 17, 99, 250, 7, 64, 30, 11, 12, 13]
+    sampling = Sampling(seed=7, top_k=20, top_p=0.95)
+    runs = {}
+    for kind in ("fp8", "fp8_dequant"):
+        w = load(write(tmp_path / kind, hidden=512, mtp_experts=kind), mtp=True, draft_vocab=128)
+        e = Engine(w, capacity=256, max_rows=8, prefill_rows=16, graphs=False)
+        first = prefill(e, prompt, sampling)
+        ref = serial_decode(e, first, 16, sampling).tokens
+        assert prefill(e, prompt, sampling) == first                  # the prompt's state again
+        out = mtp_decode(e, first, 16, sampling, depth=4, confidence=0.0)
+        assert out.tokens == ref, kind
+        runs[kind] = out
+    same = ("tokens", "rounds", "drafted", "accepted", "keeps", "widths")    # the same drafts, accepted the same
+    assert [getattr(runs["fp8"], k) for k in same] == [getattr(runs["fp8_dequant"], k) for k in same]
