@@ -281,3 +281,26 @@ Next: more than 16 rows a round (row-invariant thresholds at 32), batched drafti
 | `--parallel 8`, 8 clients | 88.9 tok/s | 11.9 tok/s |
 | `--parallel 16 --context 16384`, 16 clients | 115–119 tok/s | 7.6 tok/s |
 | `--parallel 32 --context 16384`, 32 clients | **143.3 tok/s** | 4.9 tok/s |
+
+## 2026-10-02 — Engram read split, shared-expert fold, serial decode push
+
+Serial (1-row) decode: 36.0 -> ~36 tok/s (27.6 ms a step); the GPU is busy 96 % of it (Nsight: 1.1 ms all-idle).
+Exactness unchanged throughout (serial == DSpark == multi-stream, drafted == greedy, parity to 40K).
+
+| change | result |
+|---|---|
+| Engram reads split across ranks (each half a token's rows, in-graph all-gather) | reads 3.7/3.4 -> 2.9/2.6 ms a round at 16 clients; 16 clients 114.9 -> 117.1 tok/s; bit-identical |
+| shared expert folded into the grouped call (`TF_FOLD_SHARED=1`) | slower: 35.0 vs 36.0 tok/s serial, 113.8 vs 117.1 at 16 clients (its 5-bit blocks set the tail); off |
+| shared expert removed entirely (timing only) | 36.0 -> 38 tok/s: the side stream already hides most of it, so a fold's ceiling is small |
+| router logits split-K (8 slices) | 32.6 -> 20.5 us (router), 25.1 -> 7.9 us (indexer weights); ~+0.7 tok/s |
+| decode step as one CUDA graph (pinned-flag waits for the rows) | back-to-back replays 28.7 -> 27.0 ms; real steps +0.3 tok/s (host sync already hid most switches) |
+| persistent Engram read pool | 12 cached rows 342 -> 26 us (thread spawns); no serial change (reads were off the critical path) |
+| L2 prefetch of next weights during all-gathers | slower (34.2 vs 35.3); off |
+| NCCL size tuner (LL 1 row, Simple 2-4 rows) | standalone 2-4 row all-gathers 54/67/122 -> 23/27/29 us, but no change in the engine; removed |
+| linear kernel at 2 blocks/SM (220 -> 128 registers) | no gain (wq_b 215 -> 202 GB/s); reverted |
+| grouped expert tile settings | defaults already best (whole routed call 199 GB/s) |
+
+Where the 27 ms goes: ~4.2 GB of weights a rank a step; plain reads reach ~247 GB/s on GB10, large EXL3 GEMVs
+~215 GB/s, small ones (1.6-4 MB) 110-180 GB/s (fixed ~8-10 us each), the routed call 199 GB/s; 86 all-gathers at
+~19 us pure latency (both GPUs equally fast). 40 tok/s (25 ms) needs the EXL3 decode kernels near ~240 GB/s plus
+fusing the small kernels (input rotation, HC pre/post, router+route): a kernel rewrite, not a setting.

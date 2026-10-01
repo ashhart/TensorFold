@@ -79,7 +79,7 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
       rank-order partial sums fused into HC post, fused router (fp16 mm → fp32, no TF32), attention chunk skip,
       Engram wkv split: **33.5 tok/s** serial (vLLM 23 serial / 31.6 DSpark)
 - [x] Small linears in parallel on side streams (q / window KV / compressor, 8 wo_a slices, shared expert)
-- [ ] Shared expert folded into the grouped expert call
+- [x] Shared expert folded into the grouped expert call (measured slower; off by default)
 - [x] **Go/no-go**: serial 34–35 tok/s vs vLLM 23 at matching quality (target ≥ 40 still open)
 
 ## Phase 3 — drafting, long context, prefill
@@ -91,7 +91,10 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [x] Rank-deterministic draft policy (rank 0 decides k each round; ranks chose different k from own clocks → deadlock)
 - [x] DSpark == serial tokens greedy and sampled (temperature 0.8) on all cases
 - [x] Round costs from real tokens (capture zeros understated multi-row verify); policy picks k by true costs
-- [ ] Verify cost: split Engram reads across ranks (skew shows up as NCCL wait); fold shared expert into grouped call
+- [x] Split Engram reads across ranks (bit-identical; 16 clients 114.9 -> 117.1 tok/s)
+- [x] Shared expert folded into the grouped call: implemented, measured slower (35.0 vs 36.0 serial), off (`TF_FOLD_SHARED=1`)
+- [ ] Serial decode >= 40 tok/s (now ~36, GPU-bound 96 %): EXL3 decode GEMV toward ~240 GB/s (now ~215 large,
+      110-180 small, 199 routed), fuse input rotation into the linear kernel, HC pre/post into one, router + route
 - [ ] CUDA graphs per window width; eager == graph checks
 - [x] Prefill 330 → 486 tok/s: 1,024-row chunks, EXL3 prompt GEMM for dense linears, prompt grouped expert kernel
       (`cuda/experts_prompt.cu`), bf16 prompt partials
