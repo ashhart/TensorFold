@@ -121,8 +121,13 @@ class Scheduler(PromptFill):
         self.disk_blocks: Any = None
         self.session_blocks: Any = None
         if model_id and (snapshot_dir is not None or session_dir is not None):
-            from tensorfold.engine.prefix_snapshots import DiskBlocks
+            from tensorfold.engine.prefix_snapshots import DiskBlocks, remove_stale_partials
 
+            for directory in (snapshot_dir, session_dir):
+                freed = 0 if directory is None else remove_stale_partials(Path(directory))
+                if freed:
+                    print(f"[tensorfold] removed {freed / 1024**3:.2f} GiB of unfinished snapshot writes in "
+                          f"{directory}", flush=True)
             if snapshot_dir is not None:
                 self.disk_blocks = DiskBlocks(Path(snapshot_dir), model_id)
             if session_dir is not None:
@@ -164,7 +169,7 @@ class Scheduler(PromptFill):
         self.stall_s = 120.0            # no round, start or finish while requests wait: dump stacks
         self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
-        self.decoded, self.prefilled = Meter(), ChunkRate()
+        self.decoded, self.prefilled = Meter(), ChunkRate()       # the live line's decode and prefill tok/s
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:

@@ -15,6 +15,44 @@ import numpy as np
 
 FORMAT = 1
 DEFAULT_DIR = Path.home() / ".cache" / "tensorfold" / "prefix-snapshots"
+PARTIAL = ".partial.safetensors"
+# a partial without its writer's pid (0.6.0 and earlier) may be another server's write in progress until it is this old
+UNNAMED_PARTIAL_SECONDS = 3600
+
+
+def remove_stale_partials(directory: Path) -> int:
+    """Delete the partial writes of processes that have ended (a server stopped mid-write); return the bytes freed."""
+
+    if not directory.is_dir():
+        return 0
+    freed, now = 0, time.time()
+    for path in directory.glob(f"*{PARTIAL}"):
+        try:
+            stat = path.stat()
+            if not _abandoned(path.name, stat.st_mtime, now):
+                continue
+            path.unlink()
+        except OSError:
+            continue                          # gone already, or not ours to remove
+        freed += stat.st_size
+    return freed
+
+
+def _abandoned(name: str, mtime: float, now: float) -> bool:
+    parts = name[:-len(PARTIAL)].split(".")
+    if len(parts) == 2 and parts[1].isdigit():
+        return not _running(int(parts[1]))
+    return now - mtime > UNNAMED_PARTIAL_SECONDS
+
+
+def _running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:                   # another user's process: running
+        return True
+    return True
 
 
 def snapshot_key(model_id: str, tokens: Sequence[int]) -> str:
@@ -71,9 +109,13 @@ def save_snapshot(directory: Path, model_id: str, tokens: Sequence[int], cache: 
         layers.append(entry)
     meta = {"format": str(FORMAT), "model": model_id, "tokens": json.dumps([int(t) for t in tokens]),
             "layers": json.dumps(layers), "saved": str(time.time())}
-    partial = target.with_suffix(".partial.safetensors")
-    mx.save_safetensors(str(partial), arrays, metadata=meta)
-    partial.rename(target)
+    partial = target.with_name(f"{key}.{os.getpid()}{PARTIAL}")      # this process's own: startup knows if it ended
+    try:
+        mx.save_safetensors(str(partial), arrays, metadata=meta)
+        partial.rename(target)
+    except BaseException:
+        partial.unlink(missing_ok=True)   # a full disk would otherwise keep these bytes, outside every byte budget
+        raise
     # keep the newest ``keep`` of this model only: another model's blocks are not this one's to evict
     ours = []
     for path in sorted(directory.glob("*.safetensors"), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -248,4 +290,4 @@ def blocks_to_warm(directory: Path, model_id: str) -> list[list[int]]:
 
 
 __all__ = ["DEFAULT_DIR", "DiskBlocks", "blocks_to_warm", "load_snapshot", "load_snapshots", "read_metadata",
-           "save_snapshot", "snapshot_key"]
+           "remove_stale_partials", "save_snapshot", "snapshot_key"]
