@@ -124,14 +124,17 @@ __global__ void __launch_bounds__(128) rot_in_kernel(const void* __restrict__ x,
     store4(xh, F16, (size_t)row * K + k, v);
 }
 
-template <int K2, int CB, int WK>
+// ROT: the input rotation (x * suh, H / sqrt(128) per 128 block, fp16; rot_in's arithmetic) done here for the block's
+// K range, into shared memory after red, instead of a separate rot_in launch writing xh
+template <int K2, int CB, int WK, bool ROT>
 __global__ void __launch_bounds__(WK * 32) linear_kernel(
     const half* __restrict__ xh, const uint32_t* __restrict__ T, long long stride_k, long long stride_nb,
     const half* __restrict__ svh, const half* __restrict__ bias, void* __restrict__ y, int y_dtype,
-    float* __restrict__ Z, int* __restrict__ counters, int M, int K, int N, int SK, int XS, int GN) {
+    float* __restrict__ Z, int* __restrict__ counters, int M, int K, int N, int SK, int XS, int GN,
+    const void* __restrict__ xr, int xr_dtype, long long xr_stride, const half* __restrict__ suh) {
     constexpr int TW = tile_words<K2>();
     constexpr int LW = lane_words<K2>();
-    extern __shared__ __align__(16) float red[];              // WK * RH * 128 floats
+    extern __shared__ __align__(16) float red[];              // WK * RH * 128 floats (then ROT's rotated rows)
     __shared__ int last;
     const int RH = min(M, 8);                                 // rows of red a warp
 
@@ -142,6 +145,24 @@ __global__ void __launch_bounds__(WK * 32) linear_kernel(
     const int kt0 = split * (per_warp * WK) + warp * per_warp;
     const uint32_t* tiles = T + nb * stride_nb;
     const int col0 = nb * 128;
+    const int kb0 = split * per_warp * WK * 16, span = per_warp * WK * 16;   // this block's K range (ROT)
+    half* xs = reinterpret_cast<half*>(red + WK * RH * 128);
+    if constexpr (ROT) {
+        const int grp = (col0 / GN) * K, nblk = span / 128;
+        for (int task = warp; task < M * nblk; task += WK) {
+            const int row = task / nblk, kl = (task % nblk) * 128 + 4 * lane;
+            float v[4], sv[4];
+            load4(xr, xr_dtype, (size_t)row * xr_stride + grp + kb0 + kl, v);
+            load4(suh, F16, (size_t)grp + kb0 + kl, sv);
+#pragma unroll
+            for (int j = 0; j < 4; ++j) v[j] *= sv[j];
+            fwht128(v, lane);
+#pragma unroll
+            for (int j = 0; j < 4; ++j) v[j] *= HAD_SCALE;
+            store4(xs, F16, (size_t)row * span + kl, v);
+        }
+        __syncthreads();
+    }
     bool prev = false;
     if constexpr (step_shuffled<K2>()) {
         int word, offset;
@@ -176,10 +197,19 @@ __global__ void __launch_bounds__(WK * 32) linear_kernel(
         for (int i = 0; i < per_warp; ++i) {
             const int kt = kt0 + i;
             uint32_t a[4];
-            a[0] = __ldg(reinterpret_cast<const uint32_t*>(x0 + kt * 16 + 2 * t));
-            a[1] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t));
-            a[2] = __ldg(reinterpret_cast<const uint32_t*>(x0 + kt * 16 + 2 * t + 8));
-            a[3] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t + 8));
+            if constexpr (ROT) {                              // the rotated rows in shared memory
+                const half* s0 = xs + (size_t)r0 * span + (kt * 16 - kb0) + 2 * t;
+                const half* s1 = xs + (size_t)r1 * span + (kt * 16 - kb0) + 2 * t;
+                a[0] = *reinterpret_cast<const uint32_t*>(s0);
+                a[1] = *reinterpret_cast<const uint32_t*>(s1);
+                a[2] = *reinterpret_cast<const uint32_t*>(s0 + 8);
+                a[3] = *reinterpret_cast<const uint32_t*>(s1 + 8);
+            } else {
+                a[0] = __ldg(reinterpret_cast<const uint32_t*>(x0 + kt * 16 + 2 * t));
+                a[1] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t));
+                a[2] = __ldg(reinterpret_cast<const uint32_t*>(x0 + kt * 16 + 2 * t + 8));
+                a[3] = __ldg(reinterpret_cast<const uint32_t*>(x1 + kt * 16 + 2 * t + 8));
+            }
             if constexpr (PF) {
                 if (i + 1 < per_warp) load_step<K2>(tile + (size_t)(i + 1) * stride_k, lane, nxt);
             }
@@ -304,7 +334,8 @@ void exl3_rot_in_cuda(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh
 void exl3_linear_cuda(const at::Tensor& xh, const at::Tensor& T, int64_t stride_k, int64_t stride_nb,
                       const at::Tensor& svh, const c10::optional<at::Tensor>& bias, at::Tensor& y,
                       const c10::optional<at::Tensor>& Z, at::Tensor& counters, int64_t K2, int64_t cb, int64_t SK,
-                      int64_t WK, int64_t KG, int64_t GN) {
+                      int64_t WK, int64_t KG, int64_t GN, const c10::optional<at::Tensor>& xr,
+                      const c10::optional<at::Tensor>& suh) {
     const int M = (int)xh.size(0), XS = (int)xh.size(1), N = (int)y.size(1);
     const int K = KG > 0 ? (int)KG : XS, G = GN > 0 ? (int)GN : N;
     TORCH_CHECK(WK == 2 || WK == 4 || WK == 8, "WK must be 2, 4 or 8");
@@ -316,14 +347,20 @@ void exl3_linear_cuda(const at::Tensor& xh, const at::Tensor& T, int64_t stride_
     TORCH_CHECK(SK == 1 || zptr, "Z is needed with more than one split");
 #define TF_LAUNCH(K2_, CB_)                                                                                        \
     if (K2 == K2_ && cb == CB_) {                                                                               \
-        auto kernel = WK == 2 ? linear_kernel<K2_, CB_, 2>                                                      \
-                              : WK == 4 ? linear_kernel<K2_, CB_, 4> : linear_kernel<K2_, CB_, 8>;              \
-        const int smem = (int)(WK * std::min(M, 8) * 128 * sizeof(float));                                \
+        const bool rot = xr.has_value();                                                                        \
+        auto kernel = rot ? (WK == 2 ? linear_kernel<K2_, CB_, 2, true>                                         \
+                                     : WK == 4 ? linear_kernel<K2_, CB_, 4, true> : linear_kernel<K2_, CB_, 8, true>) \
+                          : (WK == 2 ? linear_kernel<K2_, CB_, 2, false>                                        \
+                                     : WK == 4 ? linear_kernel<K2_, CB_, 4, false> : linear_kernel<K2_, CB_, 8, false>); \
+        const int span = K / (int)SK;                                                                           \
+        const int smem = (int)(WK * std::min(M, 8) * 128 * sizeof(float)) + (rot ? M * span * 2 : 0);          \
         if (smem > 48 * 1024) cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); \
         kernel<<<grid, (unsigned)(WK * 32), smem, stream>>>(                                              \
             reinterpret_cast<const half*>(xh.data_ptr()), reinterpret_cast<const uint32_t*>(T.data_ptr()),      \
             stride_k, stride_nb, reinterpret_cast<const half*>(svh.data_ptr()), bptr, y.data_ptr(), dtype_of(y),\
-            zptr, counters.data_ptr<int>(), M, K, N, (int)SK, XS, G);                                                  \
+            zptr, counters.data_ptr<int>(), M, K, N, (int)SK, XS, G,                                            \
+            rot ? xr->data_ptr() : nullptr, rot ? dtype_of(*xr) : 0, rot ? (long long)xr->stride(0) : 0LL,      \
+            rot ? reinterpret_cast<const half*>(suh->data_ptr()) : nullptr);                                                  \
         C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                         \
         return;                                                                                                 \
     }

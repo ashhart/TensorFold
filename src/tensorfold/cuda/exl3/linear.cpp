@@ -4,7 +4,7 @@
 void exl3_rot_in_cuda(const at::Tensor&, const at::Tensor&, at::Tensor&);
 void exl3_linear_cuda(const at::Tensor&, const at::Tensor&, int64_t, int64_t, const at::Tensor&,
                       const c10::optional<at::Tensor>&, at::Tensor&, const c10::optional<at::Tensor>&, at::Tensor&,
-                      int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+                      int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, const c10::optional<at::Tensor>&, const c10::optional<at::Tensor>&);
 void exl3_unpack_cuda(const at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t, int64_t);
 
 static void check(const at::Tensor& x, at::ScalarType t, const char* name) {
@@ -62,7 +62,29 @@ void linear(const at::Tensor& xh, const at::Tensor& T, int64_t stride_k, int64_t
         TORCH_CHECK(Z->numel() >= SK * M * N, "Z too small");
     }
     c10::cuda::CUDAGuard guard(xh.device());
-    exl3_linear_cuda(xh, T, stride_k, stride_nb, svh, bias, y, Z, counters, K2, cb, SK, WK, KG, GN);
+    exl3_linear_cuda(xh, T, stride_k, stride_nb, svh, bias, y, Z, counters, K2, cb, SK, WK, KG, GN, c10::nullopt,
+                     c10::nullopt);
+}
+
+// linear() with the input rotation in the kernel: x [M, G*K] raw rows (fp16 / bf16 / fp32, row stride any), suh the
+// rotation signs; each block rotates its K range (must be whole 128 blocks) into shared memory
+void linear_rot(const at::Tensor& x, const at::Tensor& suh, const at::Tensor& T, int64_t stride_k, int64_t stride_nb,
+                const at::Tensor& svh, const c10::optional<at::Tensor>& bias, at::Tensor y,
+                const c10::optional<at::Tensor>& Z, at::Tensor counters, int64_t K2, int64_t cb, int64_t SK, int64_t WK,
+                int64_t KG, int64_t GN) {
+    check_io(y, "y");
+    check(svh, at::kHalf, "svh");
+    check(suh, at::kHalf, "suh");
+    check(T, at::kInt, "T");
+    check(counters, at::kInt, "counters");
+    const int64_t M = x.size(0), K = KG > 0 ? KG : x.size(1), N = y.size(1);
+    TORCH_CHECK(x.dim() == 2 && x.stride(1) == 1 && y.size(0) == M && M >= 1 && M <= 128, "x: 1 to 128 rows");
+    TORCH_CHECK((K / SK) % 128 == 0, "a block's K range must be whole 128-blocks");
+    TORCH_CHECK(suh.numel() == x.size(1), "suh must have one sign a column of x");
+    TORCH_CHECK(T.numel() == K * N * K2 / 64, "T must hold K * N * bits / 32 words");
+    if (SK > 1) TORCH_CHECK(Z.has_value() && Z->numel() >= SK * M * N, "Z too small");
+    c10::cuda::CUDAGuard guard(x.device());
+    exl3_linear_cuda(x, T, stride_k, stride_nb, svh, bias, y, Z, counters, K2, cb, SK, WK, KG, GN, x, suh);
 }
 
 // W [K, N] fp16 = W_q, the trellis tiles decoded; tile (kt, nt) at kt * stride_k + (nt / 8) * stride_nb words.
@@ -78,5 +100,6 @@ void unpack(const at::Tensor& T, at::Tensor W, int64_t stride_k, int64_t stride_
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("rot_in", &rot_in);
     m.def("linear", &linear);
+    m.def("linear_rot", &linear_rot);
     m.def("unpack", &unpack);
 }

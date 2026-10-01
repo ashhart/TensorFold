@@ -18,9 +18,21 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_exl3_linear_v5", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
+    return load(name="tensorfold_exl3_linear_v6", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3", "--expt-relaxed-constexpr"],
                 verbose=False)
+
+
+# the input rotation inside the linear kernel (one launch, not rot_in + linear) where a block's K range is whole
+# 128-blocks and the kernel's shared memory (warp sums + rotated rows) stays within the default 48 KB (no opt-in
+# attribute: the unfused kernel never needed one); the same arithmetic (bit-identical outputs)
+ROT_FUSE = __import__("os").environ.get("TF_EXL3_ROT_FUSE") == "1"   # (no measured gain in the V4.1 decode; off)
+SMEM_DEFAULT = 48 * 1024
+
+
+def rot_fusable(k: int, sk: int, wk: int, rows: int) -> bool:
+    return (ROT_FUSE and (k // sk) % 128 == 0
+            and wk * min(rows, 8) * 128 * 4 + rows * (k // sk) * 2 <= SMEM_DEFAULT)
 
 
 def k2_of(bits: float) -> int:
@@ -179,6 +191,10 @@ class Exl3Linear:
             z = torch.empty((sk * m * self.n,), dtype=torch.float32, device=x.device)
         sk_stride, nb_stride = self.strides
         ext = _ext()
+        if rot_fusable(self.k, sk, wk, m):
+            ext.linear_rot(x, self.suh, self.words, sk_stride, nb_stride, self.svh, self.bias, out,
+                           z if sk > 1 else None, self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk, 0, 0)
+            return out
         ext.rot_in(x, self.suh, xh)
         ext.linear(xh, self.words, sk_stride, nb_stride, self.svh, self.bias, out, z if sk > 1 else None,
                    self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk, 0, 0)
@@ -237,6 +253,10 @@ class GroupedLinear:
         sk, wk = self.split
         z = torch.empty((sk * m * N,), dtype=torch.float32, device=x.device) if sk > 1 else None
         ext = _ext()
+        if rot_fusable(self.k, sk, wk, m):
+            ext.linear_rot(x, self.suh, self.words, *self.strides, self.svh, None, out, z, self.counters, self.k2,
+                           CODEBOOK_IDS[self.codebook], sk, wk, self.k, self.n)
+            return out
         ext.rot_in(x, self.suh, xh)                          # 128-blocks: each group rotated by its own suh
         ext.linear(xh, self.words, *self.strides, self.svh, None, out, z, self.counters, self.k2,
                    CODEBOOK_IDS[self.codebook], sk, wk, self.k, self.n)

@@ -681,6 +681,24 @@ def _l2_prefetch(ADDR, LINES, n, B: tl.constexpr):
                                       dtype=tl.int32, is_pure=False, pack=1)
 
 
+@triton.jit
+def _l2_load(ADDR, LINES, SINK, n, B: tl.constexpr):
+    """Read regions (ADDR[j], LINES[j] 128-byte lines) with evict-last loads, so they stay in L2 for the next kernel
+    (GB10 drops prefetch hints; real loads stay). One int32 a 32-byte sector, folded into a sink the kernel writes."""
+
+    pid = tl.program_id(0)
+    npg = tl.num_programs(0)
+    acc = tl.zeros((B,), dtype=tl.int32)
+    for j in range(n):
+        base = tl.load(ADDR + j).to(tl.pointer_type(tl.int32))
+        sectors = tl.load(LINES + j) * 4                     # L2 fills 32-byte sectors: one load each
+        for i0 in range(pid * B, sectors, npg * B):
+            i = i0 + tl.arange(0, B)
+            m = i < sectors
+            acc ^= tl.load(base + i.to(tl.int64) * 8, mask=m, other=0, eviction_policy="evict_last")
+    tl.store(SINK + pid * B + tl.arange(0, B), acc)
+
+
 def prefetch_table(tensors: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
     """(addresses, 128-byte line counts) of tensors' storage, for ``l2_prefetch``."""
 
@@ -690,11 +708,17 @@ def prefetch_table(tensors: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Ten
     return addr, lines
 
 
+_SINK: dict = {}
+
+
 def l2_prefetch(table: tuple[torch.Tensor, torch.Tensor], programs: int = 48) -> None:
-    """Warm L2 with weights a later step reads (no data moves to registers; the kernel ends once issued)."""
+    """Warm L2 with weights a later step reads: one evict-last load a 128-byte line (prefetch hints are dropped)."""
 
     addr, lines = table
-    _l2_prefetch[(programs,)](addr, lines, addr.numel(), B=256, num_warps=8)
+    sink = _SINK.get(addr.device)
+    if sink is None or sink.numel() < programs * 256:
+        sink = _SINK[addr.device] = torch.zeros((max(programs, 64) * 256,), dtype=torch.int32, device=addr.device)
+    _l2_load[(programs,)](addr, lines, sink, addr.numel(), B=256, num_warps=8)
 
 
 @triton.jit

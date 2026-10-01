@@ -120,8 +120,10 @@ class Caches:
 SKIP_READS = os.environ.get("TF_SKIP_READS") == "1"   # timing experiments: stale Engram rows (wrong output)
 # decode / verify: while an all-gather waits on the other rank, a side stream warms L2 with the weights read next
 # (the router and shared expert before the MoE, the next layer's first projections before its attention)
-L2_PREFETCH = os.environ.get("TF_L2_PREFETCH") == "1"   # measured: no gain at one row (and idle gaps before the gather)
+L2_PREFETCH = os.environ.get("TF_L2_PREFETCH") == "1"
+PF_WOA = os.environ.get("TF_PF_WOA") == "1"            # (experiment) wo_a weights into L2 during the attention core   # measured: no gain at one row (and idle gaps before the gather)
 SKIP_SHARED = os.environ.get("TF_SKIP_SHARED") == "1"
+PF_PROGRAMS = int(os.environ.get("TF_PF_PROGRAMS") or 4)
 # decode / verify step as one graph: the graph waits on a pinned-memory flag for each table's rows (read by the host
 # meanwhile) instead of three graphs launched around the reads (each graph switch left the GPU idle ~0.7 ms)
 ONE_GRAPH = os.environ.get("TF_ONE_GRAPH", "1") != "0"  # timing experiments: no shared expert in decode (wrong output)
@@ -371,7 +373,12 @@ class SerialEngine:
             torch.cuda.empty_cache()
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
         self.par = Par()
-        self._pf_stream, self._pf_moe, self._pf_attn = None, {}, {}
+        self._pf_stream, self._pf_moe, self._pf_attn, self._pf_woa = None, {}, {}, {}
+        if PF_WOA:
+            self._pf_stream = torch.cuda.Stream()
+            for lw in w.layers:
+                if lw.attn.wo_a_grouped is not None:
+                    self._pf_woa[lw.index] = K.prefetch_table([lw.attn.wo_a_grouped.words])
         if L2_PREFETCH and comm.world > 1:
             self._pf_stream = torch.cuda.Stream()
             for i, lw in enumerate(w.layers):
@@ -1056,6 +1063,8 @@ class SerialEngine:
             if static:                                                  # entries of the row's stream
                 comp = self.big.comp[src]
                 idx = torch.where(idx >= 0, idx + (self._sid * self.entries[src]).int()[:, None], idx)
+        if R <= PROMPT_ROWS and L in self._pf_woa:
+            self._prefetch(self._pf_woa[L], programs=PF_PROGRAMS)  # wo_a streams in while the attention core runs
         if static:
             o = K.mqa(q, comp, idx, self.big.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin,
                       sbase=self._sid * DRING, ring=DRING)
@@ -1064,6 +1073,7 @@ class SerialEngine:
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
         if R <= PROMPT_ROWS and a.wo_a_grouped is not None:
+            self._join()
             z = a.wo_a_grouped(o.reshape(R, -1))                        # every group in one launch
         elif R <= PROMPT_ROWS:
             z = torch.cat(self.par(*[lambda g=g, wo=wo: wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)]), dim=1)
@@ -1152,13 +1162,13 @@ class SerialEngine:
             key = K.rmsnorm(ix.wk(latent), ix.k_norm, c.rms_norm_eps)
             ik_t.index_copy_(0, slot, K.rope(key, start, cos, sin))
 
-    def _prefetch(self, table) -> None:
+    def _prefetch(self, table, programs: int = 48) -> None:
         """Warm L2 with ``table``'s weights on the prefetch stream (joined by ``_join``)."""
 
         main, side = torch.cuda.current_stream(), self._pf_stream
         side.wait_stream(main)
         with torch.cuda.stream(side):
-            K.l2_prefetch(table)
+            K.l2_prefetch(table, programs)
         self._pf_live = True
 
     def _join(self) -> None:
