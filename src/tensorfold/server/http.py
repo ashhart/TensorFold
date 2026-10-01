@@ -14,6 +14,7 @@ from tensorfold.engine import grammar
 from tensorfold.server import responses
 from tensorfold.server.tools import (active_tool_specs, parse_tool_calls_from_content, stream_tool_call_deltas,
                                      tool_choice_requires_call)
+from tensorfold.server.decisions import DecisionError
 from tensorfold.server.errors import CapacityError, RequestError, error_body
 from tensorfold.server.request_options import parse_numbers, thinking_fields
 from tensorfold.server.probabilities import probability_options
@@ -92,8 +93,22 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if self.close_connection:                    # so a pooling client does not reuse the socket
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
+
+        def _discard_body(self) -> None:
+            """Read a refused request's body, so it cannot reach the next request on this connection."""
+
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = -1
+            if 0 <= length <= 32 * 1024**2:
+                self.rfile.read(length)
+            else:
+                self.close_connection = True
 
         def _route(self) -> str:
             # Tolerate query strings, trailing slashes and client URLs with or without the /v1 prefix.
@@ -169,17 +184,22 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:
             route = self._route()
+            if route.endswith("/decisions"):
+                return self._post_decisions(app)
             if responses.route(route) == "":         # a Response: this handler's chat completion, translated
                 return responses.post(self, app)
+
             is_chat_completion = route.endswith("/chat/completions")
             is_text_completion = route.endswith("/completions") and not is_chat_completion
             if not is_chat_completion and not is_text_completion:
+                self._discard_body()
                 self._send_json({"error": {"message": f"unknown path {self.path}"}}, status=404)
                 return
 
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 if not 0 <= length <= 32 * 1024**2:
+                    self.close_connection = True         # the unread body must not reach the next request
                     raise RequestError("request body exceeds the 32 MiB limit")
                 body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
                 validate_modalities(body)
@@ -479,5 +499,39 @@ def make_handler(app: Any) -> type[BaseHTTPRequestHandler]:
                     self._send_json({"error": {"message": str(exc)}}, status=500)
                 except Exception:
                     pass
+
+
+        def _post_decisions(self, app: Any) -> None:
+            decide = getattr(app, "decisions", None)
+            if decide is None:
+                self._send_json({"error": {"message": f"unknown path {self.path}"}}, status=404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 <= length <= 32 * 1024**2:
+                    raise RequestError("request body exceeds the 32 MiB limit")
+                body = parse_numbers(json.loads(self.rfile.read(length) or b"{}"))
+                if not isinstance(body, dict):
+                    raise RequestError("request body must be an object")
+            except RequestError as exc:
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            except Exception as exc:  # noqa: BLE001 - a bad body is a client error
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            try:
+                payload = decide(body)
+            except (RequestError, DecisionError) as exc:
+                self._send_json({"error": {"message": str(exc), "type": "invalid_request_error"}}, status=400)
+                return
+            except Exception as exc:  # a scoring failure is the server's, not a bad body
+                print(f"[tensorfold] request error: {type(exc).__name__}: {exc}", flush=True)
+                traceback.print_exc()
+                try:
+                    self._send_json({"error": {"message": str(exc)}}, status=500)
+                except Exception:
+                    pass
+                return
+            self._send_json(payload)
 
     return Handler

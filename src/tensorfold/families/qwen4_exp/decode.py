@@ -281,7 +281,12 @@ class FusedDecode:
         # Attend to selected blocks and the tail past ``top`` complete blocks, otherwise all keys.
         sparse = [c > top for c in complete]
         counts = [ratio * top + e - ratio * c if sp else e for e, c, sp in zip(ends, complete, sparse)]
-        gated = attention.attention_rows(q, cache.keys, cache.values, counts, ids, sparse, a.scale, gate=p)
+        side = getattr(cache, "side", None)
+        if side is None:
+            gated = attention.attention_rows(q, cache.keys, cache.values, counts, ids, sparse, a.scale, gate=p)
+        else:                                           # a chained draft: keys from side_base on are the side's
+            gated = attention.attention_rows_split(q, cache.keys, cache.values, side[0], side[1], cache.side_base,
+                                                   counts, ids, sparse, a.scale, gate=p)
         return project(gated, a.o_proj)
 
     def _select(self, iq: mx.array, raw: mx.array, cache: Any, complete: list[int], ends: list[int],
@@ -291,8 +296,13 @@ class FusedDecode:
         cfg = self.cfg
         done = 0 if cache.pooled is None else int(cache.pooled.shape[1])
         if complete[-1] > done:
-            fresh = attention.index_pool(first(raw), done, complete[-1], pool_scale, self.eps, rotary_dim=cfg.rotary_dim,
-                                 base=cfg.rope_theta)[None]
+            if raw is None:                             # a chained draft's block: raw keys read from its first row
+                rows = cache.side_index_rows(cfg.indexer_compress_ratio * done)
+                fresh = attention.index_pool(first(rows), done, complete[-1], pool_scale, self.eps,
+                                             rotary_dim=cfg.rotary_dim, base=cfg.rope_theta, relative=True)[None]
+            else:
+                fresh = attention.index_pool(first(raw), done, complete[-1], pool_scale, self.eps,
+                                             rotary_dim=cfg.rotary_dim, base=cfg.rope_theta)[None]
             cache.pooled = fresh if cache.pooled is None else mx.concatenate([cache.pooled, fresh], axis=1)
         return attention.index_select(iq, first(cache.pooled), complete, ends, top=top)
 
@@ -344,7 +354,8 @@ class FusedDecode:
             if "ple" in layer:
                 h = self._write_back(h, pending)
                 pending = _NONE
-                h = self._ple(layer.ple, h, tokens.reshape(1, -1), c)
+                host = np.asarray(tokens, dtype=np.int64).reshape(1, -1)      # a GPU window's ids, read after layer 0
+                h = self._ple(layer.ple, h, host, c)
             entry = self.layers[i]
             h, mixed, inj = self._hc(h, pending, entry["attn_hc"])
             out = self._gdn(i, mixed, c) if layer.is_linear else self._attention(i, mixed, c)

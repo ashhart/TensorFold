@@ -12,6 +12,12 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
 
     if getattr(args, "vision_urls", False) and not getattr(args, "vision", False):
         raise ValueError("--vision-urls needs --vision")
+    images = getattr(args, "vision_max_images", None)
+    if images is not None:
+        if not isinstance(images, int) or isinstance(images, bool) or images < 1:
+            raise ValueError("--vision-max-images must be a positive integer")
+        if not getattr(args, "vision", False):
+            raise ValueError("--vision-max-images needs --vision")
     if getattr(args, "vision_offload", False):
         if not getattr(args, "vision", False):
             raise ValueError("--vision-offload needs --vision")
@@ -24,6 +30,8 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
         from tensorfold.vision.config import validate_vision_config
 
         validate_vision_config(read_config(config_dir) if config_dir else {}, family.model_type)
+        if family.model_type == "qwen4_exp" and backend != "cuda":
+            raise ValueError("--vision for Flash Next runs on the CUDA engine; the MLX path has no image tower yet")
     share = getattr(args, "decode_share", None)
     if share is not None and backend == "cuda" and not getattr(family.package, "CUDA_DECODE_SHARE", False):
         raise ValueError("--decode-share sets the Mac server's share, and Flash Next's on CUDA; this CUDA engine runs "

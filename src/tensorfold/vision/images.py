@@ -47,6 +47,13 @@ class ImageLimits:
 DEFAULT_LIMITS = ImageLimits()
 
 
+def _count_error(limits: ImageLimits) -> ImageInputError:
+    return ImageInputError(
+        f"a request supports at most {limits.max_images} images across the full message history, "
+        "including prior turns; remove older image content, start a new conversation, or restart the server "
+        "with --vision-max-images N to raise the count limit (other image limits still apply)")
+
+
 @dataclass(frozen=True, slots=True)
 class ImageSource:
     url: str
@@ -148,7 +155,7 @@ def split_images(messages: list[dict[str, Any]], *, limits: ImageLimits = DEFAUL
                 if any(part.get(key) for key in _MEDIA - {"image_url"}):
                     raise ImageInputError("image_url parts cannot contain other media")
                 if len(sources) >= limits.max_images:
-                    raise ImageInputError(f"a request supports at most {limits.max_images} images")
+                    raise _count_error(limits)
                 source = _source(part.get("image_url"), limits, allow_urls)
                 sources.append(source)
                 parts.append({"type": "image", "detail": source.detail})
@@ -215,7 +222,7 @@ def load_images(sources: list[ImageSource], *, limits: ImageLimits = DEFAULT_LIM
                 ) -> list[ImageInput]:
     """Bound encoded bytes and decoded pixels across all images in one request."""
     if not isinstance(sources, (list, tuple)) or len(sources) > limits.max_images:
-        raise ImageInputError(f"a request supports at most {limits.max_images} images")
+        raise _count_error(limits)
     total_bytes, total_pixels = 0, 0
     deadline = time.monotonic() + limits.total_timeout_seconds
     output = []

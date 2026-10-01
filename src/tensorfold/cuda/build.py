@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import os
+from pathlib import Path
+import shutil
+import sys
 import threading
 from typing import Any
 
@@ -13,8 +17,8 @@ HINT = "if no other build is running, a killed build left it: stop this start, d
 LOCK_WAIT_SECONDS = 60.0        # a start still waiting on the same lock this long says so again
 
 
-def arch_flags(need: tuple[int, int] = MIN_CAPABILITY) -> list[str]:
-    """nvcc flags for the current GPU alone; a GPU older than ``need`` is refused by name."""
+def arch_flags(need: tuple[int, int] = MIN_CAPABILITY, arch_specific: bool = False) -> list[str]:
+    """nvcc flags for this GPU alone (``arch_specific``: its ``a`` target); a GPU under ``need`` is refused by name."""
 
     import torch
 
@@ -24,7 +28,8 @@ def arch_flags(need: tuple[int, int] = MIN_CAPABILITY) -> list[str]:
         raise RuntimeError(f"TensorFold's CUDA kernels need compute capability {need[0]}.{need[1]} or newer ({why}"
                            f"{' for these weights' if need > MIN_CAPABILITY else ''}); this GPU "
                            f"({torch.cuda.get_device_name()}) is {major}.{minor}")
-    return [f"-gencode=arch=compute_{major}{minor},code=sm_{major}{minor}"]
+    a = "a" if arch_specific else ""
+    return [f"-gencode=arch=compute_{major}{minor}{a},code=sm_{major}{minor}{a}"]
 
 
 def refuse_old_gpu(need: tuple[int, int] = MIN_CAPABILITY) -> None:
@@ -41,12 +46,16 @@ def refuse_old_gpu(need: tuple[int, int] = MIN_CAPABILITY) -> None:
             raise ValueError(str(exc)) from None
 
 
-def load(name: str, sources: str | list[str], need: tuple[int, int] = MIN_CAPABILITY, **kwargs: Any) -> Any:
+def load(name: str, sources: str | list[str], need: tuple[int, int] = MIN_CAPABILITY, *, arch_specific: bool = False,
+         **kwargs: Any) -> Any:
     """torch's JIT ``load`` for this GPU only (NVIDIA's containers list every architecture back to sm_80), with a line when it compiles or waits on a lock."""
 
     from torch.utils import cpp_extension
 
-    kwargs["extra_cuda_cflags"] = [*kwargs.get("extra_cuda_cflags", []), *arch_flags(need)]
+    kwargs["extra_cuda_cflags"] = [*kwargs.get("extra_cuda_cflags", []), *arch_flags(need, arch_specific)]
+    links = _toolkit()
+    if links:
+        kwargs["extra_ldflags"] = [*kwargs.get("extra_ldflags", []), *links]
     held = _announce(cpp_extension, name, sources, kwargs.get("build_directory"))
     timer = None
     if held is not None:
@@ -108,10 +117,67 @@ def _still_waiting(lock: str, identity: tuple[int, int]) -> None:
         _say(f"still waiting after {LOCK_WAIT_SECONDS:g} s on the build lock {lock}; {HINT}")
 
 
+def _toolkit() -> list[str]:
+    """The pip route's tools: the venv's ninja on PATH, NVIDIA's pip toolkit, and the link flags it needs."""
+
+    venv = Path(sys.executable).parent              # an inactive venv: ninja is beside its python, not on PATH
+    tool = "ninja.exe" if os.name == "nt" else "ninja"              # the venv's ninja, named as Windows names it
+    if shutil.which("ninja") is None and (venv / tool).is_file():
+        os.environ["PATH"] = f"{venv}{os.pathsep}{os.environ.get('PATH', '')}"
+    return list(_pip_flags())
+
+
+@lru_cache(maxsize=1)
+def _pip_flags() -> tuple[str, ...]:
+    """Once a process: NVIDIA's pip toolkit when torch found none (the module keeps it after the first call)."""
+
+    import torch
+    from torch.utils import cpp_extension
+
+    return tuple(pip_toolkit(cpp_extension, torch))
+
+
+def pip_toolkit(cpp_extension: Any, torch: Any) -> list[str]:
+    """No toolkit found (CUDA_HOME, nvcc, /usr/local/cuda): NVIDIA's pip one beside torch, its cudart linked by name."""
+
+    if cpp_extension.CUDA_HOME is not None or not getattr(torch.version, "cuda", None):
+        return []
+    home = Path(torch.__file__).resolve().parents[1] / "nvidia" / f"cu{torch.version.cuda.split('.')[0]}"
+    if os.name == "nt":                       # a Windows wheel: DLLs beside torch and in NVIDIA's cu13 folder
+        search = [folder for folder in (home / "bin", home / "lib", Path(torch.__file__).resolve().parent / "lib")
+                  if folder.is_dir()]
+        for folder in search:                 # a built .pyd loads cudart64_13.dll by name at import
+            try:
+                os.add_dll_directory(str(folder))
+            except (AttributeError, OSError):
+                pass                          # old CPython or a refused folder: PATH is the fallback
+            os.environ["PATH"] = f"{folder}{os.pathsep}{os.environ.get('PATH', '')}"
+        return [f"/LIBPATH:{folder}" for folder in search if (folder / "cudart.lib").is_file()]
+    if not (home / "bin" / "nvcc").is_file():
+        return []
+    cpp_extension.CUDA_HOME = os.environ["CUDA_HOME"] = str(home)    # torch reads its CUDA_HOME at every build
+    os.environ["PATH"] = f"{home / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+    _say(f"CUDA compiler: NVIDIA's pip toolkit for CUDA {torch.version.cuda} at {home}")
+    versioned = sorted((home / "lib").glob("libcudart.so.*"))
+    if (home / "lib" / "libcudart.so").exists() or not versioned:
+        return []
+    root = os.environ.get("TORCH_EXTENSIONS_DIR") or cpp_extension.get_default_build_root()
+    links = Path(root) / "tensorfold_cudart"                         # -lcudart wants the bare name
+    links.mkdir(parents=True, exist_ok=True)
+    bare = links / "libcudart.so"
+    if not bare.is_symlink() or bare.resolve() != versioned[0].resolve():
+        bare.unlink(missing_ok=True)
+        try:
+            bare.symlink_to(versioned[0])
+        except FileExistsError:                                      # another start made the same link first
+            pass
+    return [f"-L{links}"]
+
+
 def _say(text: str) -> None:
     """One ``[tensorfold]`` line, flushed like the CLI's."""
 
     print(f"[tensorfold] {text}", flush=True)
 
 
-__all__ = ["CLUSTERS", "MIN_CAPABILITY", "arch_flags", "load"]
+__all__ = ["CLUSTERS", "MIN_CAPABILITY", "arch_flags", "load", "pip_toolkit"]

@@ -196,6 +196,9 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
     wait<0>();
     __syncthreads();
     if constexpr (CLUSTER) {
+#if __CUDA_ARCH__ < 900
+        __trap();                                     // no clusters before sm_90: the host never launches this
+#else
         auto cluster = cooperative_groups::this_cluster();
         float* mine = reinterpret_cast<float*>(buf);
         if (slice != 0) {
@@ -221,6 +224,7 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         }
         cluster.sync();
         if (slice != 0) return;
+#endif
     }
 #pragma unroll
     for (int i = 0; i < T::MT; ++i)
@@ -326,19 +330,24 @@ void by_output(int bm, bool f32, bool cluster, const at::Tensor& x, const at::Te
 void qmmf_cuda(const at::Tensor& x, const at::Tensor& w, const at::Tensor& bs, double scale, at::Tensor& out,
                const at::Tensor& part, int64_t mode, int64_t N, int64_t K, int64_t SK, int64_t npad, int64_t bm,
                bool f32) {
-    const bool cluster = SK > 1 && SK <= 8;
+    // slices add in one order via a cluster's shared memory (sm_90 on) or ``part`` and the reduce: the same bits
+    const bool cluster = SK > 1 && SK <= 8 && !part.defined() && at::cuda::getCurrentDeviceProperties()->major >= 9;
     const int n = static_cast<int>(N), k = static_cast<int>(K), sk = static_cast<int>(SK), np = static_cast<int>(npad);
-    if (mode == FP4) by_output<FP4>(static_cast<int>(bm), f32, cluster, x, w, bs, scale, out, part, n, k, sk, np);
-    else if (mode == FP8) by_output<FP8>(static_cast<int>(bm), f32, cluster, x, w, bs, scale, out, part, n, k, sk, np);
-    else if (mode == MXFP8) by_output<MXFP8>(static_cast<int>(bm), f32, cluster, x, w, bs, scale, out, part, n, k, sk, np);
-    else by_output<FP8G>(static_cast<int>(bm), f32, cluster, x, w, bs, scale, out, part, n, k, sk, np);
+    at::Tensor slices = part;                         // sm_89: no clusters, so slices up to 8 meet here too
+    if (SK > 1 && !cluster && !slices.defined())
+        slices = at::empty({SK, x.size(0), N}, out.options().dtype(at::kFloat));
+    const int b = static_cast<int>(bm);
+    if (mode == FP4) by_output<FP4>(b, f32, cluster, x, w, bs, scale, out, slices, n, k, sk, np);
+    else if (mode == FP8) by_output<FP8>(b, f32, cluster, x, w, bs, scale, out, slices, n, k, sk, np);
+    else if (mode == MXFP8) by_output<MXFP8>(b, f32, cluster, x, w, bs, scale, out, slices, n, k, sk, np);
+    else by_output<FP8G>(b, f32, cluster, x, w, bs, scale, out, slices, n, k, sk, np);
     if (SK > 1 && !cluster) {
         const long long total = static_cast<long long>(x.size(0)) * N;
         const int threads = 256, blocks = static_cast<int>((total + threads - 1) / threads);
         auto stream = at::cuda::getCurrentCUDAStream();
-        if (f32) reduce_kernel<true><<<blocks, threads, 0, stream>>>(part.data_ptr<float>(), out.data_ptr(), total, sk,
-                                                                     static_cast<float>(scale));
-        else reduce_kernel<false><<<blocks, threads, 0, stream>>>(part.data_ptr<float>(), out.data_ptr(), total, sk,
+        if (f32) reduce_kernel<true><<<blocks, threads, 0, stream>>>(slices.data_ptr<float>(), out.data_ptr(), total,
+                                                                     sk, static_cast<float>(scale));
+        else reduce_kernel<false><<<blocks, threads, 0, stream>>>(slices.data_ptr<float>(), out.data_ptr(), total, sk,
                                                                   static_cast<float>(scale));
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }

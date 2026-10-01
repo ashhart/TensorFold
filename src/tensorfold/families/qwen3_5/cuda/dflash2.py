@@ -198,6 +198,7 @@ class DFlash2:
         self.eps = float(cfg["rms_norm_eps"])
         self.theta = float(cfg["rope_parameters"]["rope_theta"])
         self.mask_id = int(cfg["dflash_config"]["mask_token_id"])
+        self.trained = int(cfg["dflash_config"].get("block_size", 8))     # its training block: the planner's floor
         self.group_size = int(cfg["dflash_config"]["conv_group_size"])
         self.layers = int(cfg["num_hidden_layers"])
         self.window = int(cfg["sliding_window"]) - 1

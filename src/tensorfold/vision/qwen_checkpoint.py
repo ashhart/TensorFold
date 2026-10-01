@@ -36,12 +36,14 @@ def _header(path: Path) -> tuple[dict, int]:
     return header, 8 + length
 
 
-def vision_tensors(model_dir: Path) -> dict[str, tuple[Path, dict, int]]:
+def vision_tensors(model_dir: Path, *, weights_path: Path | None = None) -> dict[str, tuple[Path, dict, int]]:
     """Inspect headers only and return local tower names with their file, tensor metadata and data start."""
     model_dir = Path(model_dir)
     index = model_dir / "model.safetensors.index.json"
     expected = None
-    if index.exists():
+    if weights_path is not None:
+        files = [Path(weights_path)]
+    elif index.exists():
         mapping = json.loads(index.read_text())["weight_map"]
         expected = {name: shard for name, shard in mapping.items() if vision_key(name) is not None}
         shards = sorted(set(expected.values()))

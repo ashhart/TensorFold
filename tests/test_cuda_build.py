@@ -86,6 +86,7 @@ def ext(tmp_path, monkeypatch):
     monkeypatch.setattr(cpp_extension, "_get_build_directory", directory)
     monkeypatch.setattr(cpp_extension, "load", lambda *a, **k: calls.append((a, k)) or "module")
     monkeypatch.setattr(build, "_say", said.append)
+    monkeypatch.setattr(build, "_toolkit", lambda: [])               # the pip toolkit has tests of its own
     return SimpleNamespace(build=build, torch=cpp_extension, dir=Path(directory("tf_test", False)), sources=sources,
                            calls=calls, said=said)
 
@@ -241,3 +242,42 @@ def test_the_lock_named_is_the_one_torch_waits_on(tmp_path, monkeypatch):
     lock.unlink()
     thread.join(10)
     assert not thread.is_alive() and len(ended) == 1
+
+
+def _pip_site(tmp_path, nvcc=True):
+    """A venv's site-packages with torch beside NVIDIA's pip toolkit (bin/nvcc, lib/libcudart.so.13 only)."""
+
+    site = tmp_path / "site"
+    (site / "torch").mkdir(parents=True)
+    (site / "torch" / "__init__.py").write_text("")
+    home = site / "nvidia" / "cu13"
+    (home / "bin").mkdir(parents=True)
+    (home / "lib").mkdir()
+    if nvcc:
+        (home / "bin" / "nvcc").write_text("#!/bin/sh\n")
+    (home / "lib" / "libcudart.so.13").write_text("")
+    torch = SimpleNamespace(__file__=str(site / "torch" / "__init__.py"), version=SimpleNamespace(cuda="13.0"))
+    ext = SimpleNamespace(CUDA_HOME=None, get_default_build_root=lambda: str(tmp_path / "ext"))
+    return home, torch, ext
+
+
+def test_with_no_toolkit_the_pip_one_beside_torch_builds_and_links(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.delenv("TORCH_EXTENSIONS_DIR", raising=False)
+    home, torch, ext = _pip_site(tmp_path)
+    links = tmp_path / "ext" / "tensorfold_cudart"
+    assert build.pip_toolkit(ext, torch) == [f"-L{links}"]
+    assert ext.CUDA_HOME == str(home) == os.environ["CUDA_HOME"] and os.environ["PATH"].startswith(str(home / "bin"))
+    assert (links / "libcudart.so").resolve() == (home / "lib" / "libcudart.so.13").resolve()
+    assert f"CUDA compiler: NVIDIA's pip toolkit for CUDA 13.0 at {home}" in capsys.readouterr().out
+    assert build.pip_toolkit(ext, torch) == []                      # found now: nothing more to do
+
+
+def test_a_toolkit_torch_found_or_no_pip_toolkit_changes_nothing(tmp_path, monkeypatch):
+    monkeypatch.delenv("CUDA_HOME", raising=False)
+    home, torch, ext = _pip_site(tmp_path)
+    ext.CUDA_HOME = "/usr/local/cuda"
+    assert build.pip_toolkit(ext, torch) == [] and ext.CUDA_HOME == "/usr/local/cuda"
+    _, torch, ext = _pip_site(tmp_path / "bare", nvcc=False)
+    assert build.pip_toolkit(ext, torch) == [] and ext.CUDA_HOME is None and "CUDA_HOME" not in os.environ

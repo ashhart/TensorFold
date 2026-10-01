@@ -9,7 +9,7 @@ from tensorfold.drafters.draft_ngram import SessionNGram
 
 
 class _Reference:
-    """The offline prototype's model (scratchpad ngram_rescore.py): Counters over tuples, recursion from 1/V."""
+    """The offline prototype's model: Counters over tuples, recursion from 1/V."""
 
     def __init__(self, vocab, n=4):
         self.n, self.vocab, self.seen = n, vocab, 0

@@ -46,6 +46,10 @@ class Qwen35Family:
             trees = row_forward.ROW_ATTENTION
             self.batch_rows, self.max_streams = 32, 32
         self.head_drafts = DFlashHead(drafter, nodes, _calibration(), chains=not trees) if drafter is not None else None
+        if self.head_drafts is not None and self.head_drafts.v1:
+            # DFlash (v1) gives no per-draft chances: the engine sizes its chains from per-depth acceptance and
+            # measured round times (``DraftDepth._depth``), not from the forward's cost alone
+            self.draft_probabilities = None
         self.mtp = drafter
         self.drafts = int(nodes) if drafter is not None else 0
         self.mtp_step_ms = 0.0         # a lattice costs the same whatever the tree's size

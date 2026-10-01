@@ -10,6 +10,7 @@ import torch
 from tensorfold.cuda.logprobs import capture
 
 from tensorfold.cuda.capacity import available_bytes
+from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import Stream, accept
@@ -17,9 +18,10 @@ from tensorfold.engine.exact_sampling import MARGIN, choose_rows
 from tensorfold.engine.grammar import GrammarError
 
 from .decode import PREFILL_ROWS, WARM_TAIL, Engine, draft, entry_end, prefill_begin
-from . import attn_multi, gdn_multi
+from . import attn_multi, gdn_multi, image_rows, prefixes
 from .forward import Cut, commit, compute, compute_mixed, converges, cut_snapshot, stage
 from .mtp import mtp_compute, mtp_stage
+from .prompt_plan import pass_limit
 from .state import ENDS, Buffers, State
 from ..cuda import CONFIDENCE, DEPTH
 
@@ -27,6 +29,7 @@ FIRST, STEP = 256, 8192          # rows an idle slot keeps; rows a stream's cach
 GIB = 1024**3
 SHARE = 0.0                      # --decode-share: a round alone takes this share of its pass's time (0: whole passes)
 PASS_MIN = 128                   # the fewest prompt rows a round's pass takes
+FILL_GUARD = 8                   # a prompt passed over this many passes takes the next one (no starvation), as on Macs
 
 
 def _slot(w, st: State, buf: Buffers, mbuf: Buffers, pbuf: Buffers, capacity: int, prefill_rows: int) -> Engine:
@@ -35,6 +38,7 @@ def _slot(w, st: State, buf: Buffers, mbuf: Buffers, pbuf: Buffers, capacity: in
     e = object.__new__(Engine)
     e.w, e.capacity, e.rows, e.prefill_rows = w, capacity, buf.rows, prefill_rows
     e.buf, e.mbuf, e.pbuf, e.st, e.graphs = buf, mbuf, pbuf, st, None
+    e.stops = ()
     return e
 
 
@@ -43,10 +47,12 @@ class MultiDecoder:
 
     def __init__(self, w, *, slots: int, capacity: int, depth: int = DEPTH, confidence: float = CONFIDENCE,
                  stop_eos: bool = True, keep: int = 8, kv_dtype: str = "bf16", prefill_rows: int = PREFILL_ROWS,
-                 share: float = SHARE) -> None:
+                 share: float = SHARE, points=None, vision=None, workspace_bytes: int = 0) -> None:
         if w.comm is not None:
             raise ValueError("concurrent Flash Next runs on one GPU for now")
         self.w, self.depth, self.confidence, self.capacity = w, depth, confidence, capacity
+        self.points = points                         # a prompt's message starts to keep states at, or None
+        self.vision = vision
         self.eos = tuple(w.cfg.eos) if stop_eos else ()
         rows = slots * (depth + 1)
         # a round's window and a prompt pass share each layer's expert launch: the pass's buffers hold both
@@ -65,10 +71,13 @@ class MultiDecoder:
         free = torch_live(torch, available_bytes) if torch.cuda.is_available() else None
         # the mapped n-gram tables are not held back (they barely fit on a Spark); lookups page from disk instead
         live = free
-        self.memory_gate = MemoryGate(live() if live is not None else 1 << 62, reserve=2 * GIB, live=live)
+        self.memory_gate = MemoryGate(live() if live is not None else 1 << 62,
+                                      reserve=max(2 * GIB, workspace_bytes), live=live)
         self.streams: dict[int, Stream] = {}
         self.filling: list[Stream] = []                  # admitted, prompts still prefilling (oldest first)
         self.fills: dict[int, list] = {}                 # stream id -> [its engine, drafts?, next row, kept state]
+        self.passed: dict[int, int] = {}                 # stream id -> prompt passes since its last rows
+        self.arrived = lambda: False                     # a request waits to be admitted (the scheduler sets this)
         self.next_id = 0
         self.draft_host = w.draft_ids.cpu().numpy() if w.draft_ids is not None else None
         self.kept: list[tuple[list[int], State, dict, torch.Tensor | None]] = []   # (ids, slot, snapshot, tail)
@@ -80,36 +89,42 @@ class MultiDecoder:
     def _drop_kept(self, st: State) -> None:
         self.kept = [k for k in self.kept if k[1] is not st]
 
-    def _grow(self, st: State, rows: int, *, alone: bool = False) -> bool:
+    def _grow(self, st: State, rows: int, *, alone: bool = False, protect: State | None = None) -> bool:
         """Grow caches to hold ``rows`` while the gate has room, kept ends first; ``alone`` grows anyway."""
 
         if rows <= st.capacity or st.capacity >= st.limit:       # admission's count keeps a stream within its window
             return True
         size = min(st.limit, -(-rows // STEP) * STEP)
-        grow = st.cache_bytes(size) - st.cache_bytes()
+        before = st.cache_bytes()
+        grow = st.cache_bytes(size) - before
         while not self.memory_gate.fits(grow + st.layer_bytes(size)):     # a layer's old buffers stay until its copy
-            if not self._evict_kept(st):
+            if not self._evict_kept(st, protect=protect):
                 if alone:
                     break
                 return False
-        self.memory_gate.take(st.resize(size))
+        try:
+            added = st.resize(size)
+        except Exception:
+            self.memory_gate.take(st.cache_bytes() - before)
+            raise
+        self.memory_gate.take(added)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()             # the old buffers back to the system: MemAvailable stays true
         return True
 
-    def _shrink(self, st: State) -> None:
+    def _shrink(self, st: State, *, force: bool = False) -> None:
         """An idle slot back to its first rows: its caches' memory returns to the gate."""
 
         st.reset(self.w)
-        if st.capacity > FIRST:
-            self.memory_gate.give(-st.resize(FIRST))
+        if force or st.capacity > FIRST:
+            self.memory_gate.give(-st.resize(min(FIRST, st.limit)))
 
-    def _evict_kept(self, keep: State) -> bool:
+    def _evict_kept(self, keep: State, *, protect: State | None = None) -> bool:
         """Free the oldest idle kept prompt end (never ``keep``); False when none is left."""
 
         busy = self._busy()
         for ids, st, _, _ in self.kept:
-            if st is not keep and id(st) not in busy:
+            if st is not keep and st is not protect and id(st) not in busy:
                 self._drop_kept(st)
                 self._shrink(st)
                 if all(f is not st for f in self.free):
@@ -144,36 +159,12 @@ class MultiDecoder:
         return []
 
     def _slot_for(self, prompt: list[int], reuse: bool):
-        """The idle kept slot the prompt extends furthest, else a free slot, else the oldest idle kept one."""
+        """Reuse the longest kept point, copying a fork into a free slot when the memory gate permits it."""
 
-        busy = self._busy()
-        best = None
-        for k in self.kept if reuse else []:
-            ids, st = k[0], k[1]
-            if id(st) not in busy and len(ids) < len(prompt) and prompt[:len(ids)] == ids and \
-                    (best is None or len(ids) > len(best[0])):
-                best = k
-        if best is not None:
-            self._drop_kept(best[1])
-            return best[1], {"state": best[2], "tail": best[3]}, len(best[0])
-        if not self.free:
-            idle = next((k[1] for k in self.kept if id(k[1]) not in busy), None)
-            if idle is None:
-                raise RuntimeError("no free stream slot")
-            self._drop_kept(idle)
-            self.free.append(idle)
-        return self.free.pop(), None, 0
+        return prefixes.slot_for(self, prompt, reuse)
 
     def _remember(self, ids: list[int], st: State, snap: dict, tail) -> None:
-        gone = [k[1] for k in self.kept if k[0] == ids]
-        self.kept = [k for k in self.kept if k[0] != ids] + [(ids, st, snap, tail)]
-        while len(self.kept) > self.keep:
-            gone.append(self.kept.pop(0)[1])
-        busy = self._busy()
-        for old in gone:           # a displaced idle slot no kept entry holds goes back to the free list
-            if old is not st and id(old) not in busy and all(k[1] is not old for k in self.kept) and \
-                    all(f is not old for f in self.free):
-                self.free.append(old)
+        prefixes.remember(self, ids, st, snap, tail)
 
     def live(self) -> int:
         return len(self.streams) + len(self.filling)
@@ -203,7 +194,7 @@ class MultiDecoder:
         if any(x.waiting for x in self.streams.values()):
             raise NoRoom("streams already wait for memory; a new request waits until one finishes")
         t0 = time.perf_counter()
-        st, resume, s.cached = self._slot_for(list(s.prompt), s.draft)
+        st, resume, s.cached = self._slot_for(list(s.prompt), s.draft and s.vision is None)
         if not self._grow(st, len(s.prompt) + self.depth + 2, alone=not self.streams and not self.filling):
             if resume is None:
                 self.free.append(st)
@@ -214,9 +205,13 @@ class MultiDecoder:
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
         try:
             begin = prefill_begin(e, s.prompt, mtp=mtp, resume=resume)
+            image_rows.begin(e, s, self.vision)
         except Exception:
+            self._drop_kept(st)
             self.free.append(st)
             raise
+        e.stops = sorted({p for p in self.points(s.prompt) if begin + MIN_GAP <= p < entry_end(s.prompt)}) \
+            if s.draft and st.image_positions is None and self.points is not None else []
         s.sid, s.st = self.next_id, st
         self.next_id += 1
         s.prefill_s = time.perf_counter() - t0
@@ -225,22 +220,20 @@ class MultiDecoder:
         self.filling.append(s)
 
     def _fill(self) -> list[Stream]:
-        """Prompt passes over the filling prompts, oldest first, packed to the pass's rows."""
+        """Fill ordered prompt pieces until a stream decodes or a waiting request needs admission."""
 
         ended: list[Stream] = []
         while self.filling:
             ended += self._pass()
-            if any(not x.done and not x.waiting for x in self.streams.values()):
+            if any(not x.done and not x.waiting for x in self.streams.values()) or self.arrived():
                 break
         return ended
 
     def _pass_rows(self) -> int:
         """A round's prompt rows: its decode (a round alone) takes ``share`` of the pass's time, by the last rounds."""
 
-        if self.share <= 0 or not self.round_s or not self.row_s:
-            return self.prefill_rows
-        rows = int(self.round_s / (self.share * self.row_s)) // 64 * 64
-        return max(PASS_MIN, min(self.prefill_rows, rows))
+        live = any(not s.done for s in self.streams.values())
+        return pass_limit(self.prefill_rows, live, self.share, self.round_s, self.row_s, PASS_MIN)
 
     def _timed(self, seconds: float, rows: int) -> None:
         """A round's wall time: a round alone updates its estimate, a round with a pass the seconds a row adds."""
@@ -251,13 +244,23 @@ class MultiDecoder:
         else:
             self.round_s = seconds if self.round_s is None else 0.7 * self.round_s + 0.3 * seconds
 
-    def _pieces(self, rows: int | None = None) -> list[tuple[Stream, int, int]]:
-        """The next pass: rows from the filling prompts, oldest first, up to ``rows`` and ENDS ending prompts."""
+    def _order(self) -> list[Stream]:
+        """Order overdue prompts first, then foreground, fewest rows left and stable arrival order."""
 
-        pieces, room = [], self.prefill_rows if rows is None else rows
-        for s in sorted(self.filling, key=lambda x: x.background):     # foreground prompts first, each oldest first
+        def key(s: Stream):
+            passed = self.passed.get(s.sid, 0)
+            due = passed >= FILL_GUARD
+            return (not due, -passed if due else 0, s.background, len(s.prompt) - self.fills[s.sid][2])
+
+        return sorted(self.filling, key=key)                         # stable: ties keep arrival order
+
+    def _pieces(self, rows: int | None = None) -> list[tuple[Stream, int, int]]:
+        """The next pass: rows from the filling prompts in ``_order``, up to ``rows`` and ENDS ending prompts."""
+
+        pieces, room = [], self._pass_rows() if rows is None else rows
+        for s in self._order():
             e, mtp, start, _ = self.fills[s.sid]
-            n = min(len(s.prompt) - start, room)
+            n = min(next((p for p in e.stops if p > start), len(s.prompt)) - start, room)
             ends = sum(1 for x, a, k in pieces if a + k == len(x.prompt))
             if n == 0 or (start + n == len(s.prompt) and ends == ENDS):
                 break
@@ -269,6 +272,7 @@ class MultiDecoder:
         """One prompt pass alone; prompts that end sample their first token, draft and join the rounds."""
 
         pieces = self._pieces()
+        self._note_passed(pieces)
         t0 = time.perf_counter()
         try:
             segs = stage(self.w, self.pbuf, [(s.st, s.prompt[a:a + n]) for s, a, n in pieces])
@@ -280,6 +284,15 @@ class MultiDecoder:
             return self._failed(pieces, exc)
         return self._joined(pieces, heads, lasts, (time.perf_counter() - t0) / len(pieces))
 
+    def _note_passed(self, pieces) -> None:
+        """Count a pass against every filling prompt it left out; one it took starts over."""
+
+        took = {s.sid for s, _, _ in pieces}
+        for s in self.filling:
+            self.passed[s.sid] = 0 if s.sid in took else self.passed.get(s.sid, 0) + 1
+        for sid in [k for k in self.passed if k not in {s.sid for s in self.filling}]:
+            del self.passed[sid]
+
     @staticmethod
     def _end_rows(pieces, segs) -> list[int]:
         """The pass rows that end a prompt (each gets the head)."""
@@ -290,13 +303,20 @@ class MultiDecoder:
     def _keep_at(s: Stream) -> int | None:
         """Where a drafting stream's prompt state is kept: one token before its end, which a next turn extends."""
 
-        return entry_end(s.prompt) if s.draft else None
+        return entry_end(s.prompt) if s.draft and s.st.image_positions is None else None
+
+    def _point(self, s: Stream, start: int) -> int | None:
+        """The next message-start or prompt-end snapshot this prompt piece can reach."""
+
+        if not s.draft or s.st.image_positions is not None:
+            return None
+        return next((p for p in self.fills[s.sid][0].stops if p > start), self._keep_at(s))
 
     def _cuts(self, pieces, segs) -> list[Cut]:
         """The kept points strictly inside the pass's pieces, where their DeltaNet chains split."""
 
         return [Cut(k - a, at=a0) for (s, a, n), (_, a0, _) in zip(pieces, segs)
-                if (k := self._keep_at(s)) is not None and a < k < a + n]
+                if (k := self._point(s, a)) is not None and a < k < a + n]
 
     def _absorb(self, pieces, segs, cuts=()) -> list[torch.Tensor]:
         """After a pass's forward: each prompt's last row and kept point, the MTP head's absorb, the commits."""
@@ -304,7 +324,7 @@ class MultiDecoder:
         lasts = [self.pbuf.streams[a1 - 1:a1].clone() for _, _, a1 in segs]
         at, points = {cut.at: cut for cut in cuts}, []
         for (s, a, n), (st, a0, _) in zip(pieces, segs):      # before the MTP head writes the pass's streams
-            k = self._keep_at(s)
+            k = self._point(s, a)
             if k is None or not a < k <= a + n:
                 continue
             row, mtp = k - a, self.fills[s.sid][1]
@@ -332,6 +352,7 @@ class MultiDecoder:
             s.error, s.done = exc, True
             self.filling.remove(s)
             self.fills.pop(s.sid)
+            self._drop_kept(s.st)
         return failed                                    # finish() frees their slots
 
     def _joined(self, pieces, heads, lasts, spent: float) -> list[Stream]:
@@ -342,6 +363,9 @@ class MultiDecoder:
             s.prefill_s += spent
             e, mtp, _, kept = self.fills[s.sid]
             self.fills[s.sid][2] = a + n
+            if kept is not None and a < kept[0]["pos"] <= a + n:
+                self._remember(list(s.prompt[:kept[0]["pos"]]), s.st, *kept)
+            self.fills[s.sid][3] = None                    # only the bounded cache owns a stored snapshot
             if a + n < len(s.prompt):
                 continue
             self.filling.remove(s)
@@ -356,8 +380,7 @@ class MultiDecoder:
             if s.constraint is not None:
                 s.constraint.advance([first])
             head += 1
-            if s.draft:                # the state one token before the prompt's end, which a next turn extends
-                self._remember(list(s.prompt[:self._keep_at(s)]), st, *kept)
+            image_rows.finish(st)
             s.context = list(s.prompt)
             s.drafts = draft(e, last, [first], st.pos + 1, min(self.depth, s.count - 1), s.sampling,
                              self.confidence) if mtp and s.count > 1 else []
@@ -406,6 +429,7 @@ class MultiDecoder:
         pieces, psegs = (self._pieces(self._pass_rows()) if self.filling and self.converged else []), None
         cuts = []
         if pieces:
+            self._note_passed(pieces)
             try:
                 psegs = stage(self.w, self.pbuf, [(s.st, s.prompt[a:a + n]) for s, a, n in pieces])
                 cuts = self._cuts(pieces, psegs)

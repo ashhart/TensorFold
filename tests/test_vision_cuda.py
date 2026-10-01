@@ -102,7 +102,7 @@ def test_offloaded_tower_leaves_the_gpu_budget_but_keeps_a_smaller_workspace(tmp
     _checkpoint(tmp_path)
     base = lambda text: Geometry(lambda slots: slots * 64, 8)
     resident = capacity_geometry(base, tmp_path, True, 0)({})
-    offloaded = capacity_geometry(base, tmp_path, True, 0, True)({})
+    offloaded = capacity_geometry(base, tmp_path, True, 0, offload=True)({})
     plain = capacity_geometry(base, tmp_path, False, 0)({})
     assert resident.needed(32) > offloaded.needed(32) > plain.needed(32)
     assert offloaded.needed(32) - plain.needed(32) == OFFLOAD_WORKSPACE_BYTES < WORKSPACE_BYTES

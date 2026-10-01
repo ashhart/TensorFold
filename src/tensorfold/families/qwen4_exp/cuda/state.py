@@ -28,6 +28,7 @@ class Buffers:
         dev = w.device
         wide = c.streams * c.hidden
         self.rows, self.prefill = rows, prefill
+        self.rope_rows = None          # an image prompt chunk's [rows, 3] positions, else None
         head_rows = ENDS if prefill else rows
         bf, f32 = torch.bfloat16, torch.float32
         self.ids = torch.zeros((rows,), dtype=torch.int32, device=dev)
@@ -145,6 +146,10 @@ class State:
         self.version = 0                 # counts reallocations: a graph's pointer table refreshes on a change
         self.pos = 0
         self.pos_dev = torch.zeros((1,), dtype=torch.int32, device=dev)
+        # text after an image prompt rotates at its cache position plus this offset (0: no images, the plain path)
+        self.image_positions, self.image_rows, self.image_features = None, (), None
+        self.rope_delta = 0
+        self.rope_delta_dev = torch.zeros((1,), dtype=torch.int32, device=dev)
         lin = [l for l in w.layers if l.linear]
         att = [l for l in w.layers if not l.linear]
         self.lin_index = {l.index: i for i, l in enumerate(lin)}
@@ -232,8 +237,14 @@ class State:
         self.ple_history = w.cfg.ngram(0).initial_history() if w.cfg.ple_layers else None
         self.ple_last = None
         self.set_pos(0)
+        self.set_rope_delta(0)
+        self.image_positions, self.image_rows, self.image_features = None, (), None
         self.mtp_drafted = 0
         self.set_mtp_len(0)
+
+    def set_rope_delta(self, delta: int) -> None:
+        self.rope_delta = int(delta)
+        self.rope_delta_dev.fill_(int(delta))
 
     def clone(self) -> "State":
         """An independent copy (tests and A/B checks)."""
@@ -261,6 +272,30 @@ class State:
         self.mtp_len = n
         self.mtp_pos.fill_(n)
 
+    def copy_prefix(self, source: "State", pos: int, mtp_len: int) -> None:
+        """Copy only valid cache rows and complete pools; the caller restores the kept point's recurrent snapshot."""
+
+        if self is source or self.kv_dtype != source.kv_dtype or self.ratio != source.ratio:
+            raise ValueError("a prefix copy needs distinct slots with matching cache formats")
+        if not 0 <= pos <= min(self.capacity, source.pos) or not 0 <= mtp_len <= min(self.capacity, source.mtp_len):
+            raise ValueError("a prefix copy must fit the destination and the source's committed rows")
+        if len(self.kc) != len(source.kc):
+            raise ValueError("a prefix copy needs matching attention layers")
+        def copy_cache(dst, src, rows):
+            dst.k[:rows].copy_(src.k[:rows])
+            dst.v[:rows].copy_(src.v[:rows])
+            if dst.quantized:
+                dst.ks[:rows].copy_(src.ks[:rows])
+                dst.vs[:rows].copy_(src.vs[:rows])
+        for i, cache in enumerate(self.kc):
+            copy_cache(cache, source.kc[i], pos)
+            self.ikc[i][:pos].copy_(source.ikc[i][:pos])
+            self.pooled[i][:pos // self.ratio].copy_(source.pooled[i][:pos // self.ratio])
+        if mtp_len:
+            copy_cache(self.mtp_kc, source.mtp_kc, mtp_len)
+            self.mtp_ikc[:mtp_len].copy_(source.mtp_ikc[:mtp_len])
+            self.mtp_pooled[:mtp_len // self.ratio].copy_(source.mtp_pooled[:mtp_len // self.ratio])
+
     def snapshot(self) -> dict:
         """The committed state outside the cache rows; ``restore`` needs the cache rows below ``pos`` still in place."""
 
@@ -280,5 +315,7 @@ class State:
         self.ple_history = None if snap["ple_history"] is None else snap["ple_history"].copy()
         self.ple_last = None
         self.set_pos(snap["pos"])
+        self.set_rope_delta(0)                       # kept prompts are text only
+        self.image_positions, self.image_rows, self.image_features = None, (), None
         self.mtp_drafted = 0
         self.set_mtp_len(snap["mtp_len"])

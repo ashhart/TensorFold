@@ -1,4 +1,4 @@
-"""Pack affine group-32 MLX weights with the shared expert last, concatenate n-gram shards in order, and retain centered-norm gamma itself as fp32 after checking it is around one."""
+"""Load affine MLX or ModelOpt weights, shared experts and n-gram shards with fp32 centered-norm scales."""
 
 from __future__ import annotations
 
@@ -17,9 +17,21 @@ from .weight_types import (
     AttnW, Config, GDNW, HC, LayerW, MoEW, MTPW, PLEW, Weights, draft_token_ids, stop_ids)  # noqa: F401 (re-exported)
 
 
+_PLAIN = (torch.bfloat16, torch.float16, torch.float32)
+
+
+def _plain(name: str, w: torch.Tensor) -> torch.Tensor:
+    """Refuse quantized bytes where a bf16 linear needs real values."""
+
+    if w.dtype not in _PLAIN:
+        raise ValueError(f"{name}: {str(w.dtype).removeprefix('torch.')} weights without a scale this loader reads; "
+                         "Flash Next reads its non-expert linears as bf16, MXFP8 or 128x128-block FP8")
+    return w
+
+
 def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: tuple[int, int] | None = None,
          draft_vocab: int | str | None = None, ple_on_ssd: bool = False, table_reads: list | None = None) -> Weights:
-    """Load rank ``tp``'s head, expert-width and vocabulary shares while replicating other weights; ``draft_vocab`` restricts draft scoring to default/file ids or ids below N, with None using all ids."""
+    """Load rank ``tp``'s shares; ``draft_vocab`` selects default/file ids or ids below N, None scores all ids."""
 
     import time
     from dataclasses import replace
@@ -89,6 +101,8 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         s = raw(name + ".weight_scale") if w.dtype == torch.float8_e4m3fn else None
         if s is not None and s.dtype != torch.uint8:
             raise ValueError(f"{name}: FP8 with a per-tensor scale; Flash Next reads MXFP8 (a scale every 32 inputs)")
+        if s is None:
+            _plain(name, w)
         if rows is not None:
             w, s = w[rows], None if s is None else s[rows]
         if cols is not None:
@@ -131,7 +145,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         return HC(stack_b16(parts), b16(name + ".input_mix_weight_up"), cscale(name + ".hc_norm.weight"), inject)
 
     def gdn_nvfp4(name: str) -> GDNW:
-        """A DeltaNet block from the NVFP4 checkpoint (bf16 or MXFP8 linears): the rank's rows, conv and head vectors."""
+        """A rank's DeltaNet rows, conv and head vectors from bf16 or MXFP8 checkpoint linears."""
 
         kl, vl = full.nk // world, full.nv // world
         dk, dv = full.dk, full.dv
@@ -166,7 +180,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                      o)
 
     def ple_nvfp4(name: str, ple_index: int) -> PLEW:
-        """A PLE layer from the NVFP4 checkpoint: n-gram rows from bf16, FP8, NVFP4 or MLX 4-bit shards, the rest bf16."""
+        """A PLE layer with bf16, FP8, NVFP4 or MLX 4-bit n-gram shards and bf16 projections."""
 
         if ple_on_ssd:
             raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram shards from disk; an NVFP4 checkpoint's "
@@ -193,7 +207,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         full = raw(name + ".weight")
         w = full if index is None else full.index_select(0, index)
         if w.dtype != torch.float8_e4m3fn or not rd.has(prefix + name + ".weight_scale_inv"):
-            return w.to(torch.bfloat16)
+            return _plain(name, w).to(torch.bfloat16)
         from tensorfold.cuda.nvfp4.linear import Fp8BlockLinear
 
         cols = Fp8BlockLinear.column_scales(raw(name + ".weight_scale_inv"), *full.shape)
@@ -249,9 +263,39 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             shared = (raw(se + "gate_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
                       raw(se + "up_proj.weight").to(torch.bfloat16)[lo:hi].contiguous(),
                       raw(se + "down_proj.weight").to(torch.bfloat16)[:, dlo * gs:dhi * gs].contiguous())
-        if rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):      # the main layers: per-expert FP4
+        fp8_drafter = (rd.has(prefix + f"{name}.experts.0.gate_proj.weight")
+                       and raw(f"{name}.experts.0.gate_proj.weight").dtype == torch.float8_e4m3fn)
+        if fp8_drafter and not name.startswith("mtp."):
+            raise ValueError(f"{name}: FP8 routed experts; Flash Next reads the routed experts as NVFP4 (FP8 only in "
+                             "the MTP drafter, which is re-quantized at load)")
+        if fp8_drafter:                                  # MTP experts dequantize before draft-only NVFP4 packing
+            def expert_bf16(base: str) -> torch.Tensor:
+                codes = raw(base + ".weight")
+                if codes.dtype != torch.float8_e4m3fn:
+                    raise ValueError(f"{base}: expected FP8 e4m3 MTP expert weights")
+                if rd.has(prefix + base + ".weight_scale_inv"):          # 128x128 blocks
+                    return weight_bf16(base)
+                if not rd.has(prefix + base + ".weight_scale"):
+                    raise ValueError(f"{base}: FP8 MTP experts need a tensor, row or 128x128-block scale")
+                scale = raw(base + ".weight_scale")
+                if scale.dtype not in _PLAIN or scale.numel() not in (1, codes.shape[0]):
+                    raise ValueError(f"{base}: FP8 MTP weight_scale must hold one float per tensor or output row")
+                s = scale.float().reshape(-1, 1)
+                return (codes.float() * s).to(torch.bfloat16)
+
+            def stacked(proj: str) -> torch.Tensor:
+                return torch.stack([expert_bf16(f"{name}.experts.{i}.{proj}") for i in range(e)])
+
+            gate, up, dn = stacked("gate_proj"), stacked("up_proj"), stacked("down_proj")
+            if world > 1:
+                gate, up, dn = gate[:, lo:hi], up[:, lo:hi], dn[:, :, dlo * gs:dhi * gs]
+            moe4 = nvfp4_moe.moe4_from_bf16(torch.cat([gate, up], dim=1), dn, shared)
+        elif rd.has(prefix + f"{name}.experts.0.gate_proj.weight"):    # the main layers: per-expert FP4
             def stack(proj: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-                w = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight") for i in range(e)])
+                weights = [raw(f"{name}.experts.{i}.{proj}.weight") for i in range(e)]
+                if any(w.dtype != torch.uint8 for w in weights):
+                    raise ValueError(f"{name}.{proj}: expected packed NVFP4 experts; FP8 is read only in MTP")
+                w = torch.stack(weights)
                 s = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight_scale") for i in range(e)])
                 s2 = torch.stack([raw(f"{name}.experts.{i}.{proj}.weight_scale_2") for i in range(e)])
                 return w, s, s2

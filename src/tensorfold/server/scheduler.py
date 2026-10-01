@@ -57,6 +57,9 @@ class ChatJob:
     call_gate: Any = None                   # tool_choice "required": the answer opens a tool call (LaneStream)
     constraint: Any = None                  # response_format's grammar (engine.grammar.Constraint), or None
     vision: Any = None
+    # a decision: prefill ends at these labels' last-row logits and joins no round (empty: a chat)
+    label_ids: tuple[int, ...] = ()
+    scored: tuple[list[float], float] | None = None
 
 
 class _JobQueue(queue.PriorityQueue):
@@ -134,6 +137,7 @@ class Scheduler(PromptFill):
         self.slow_round_ms = 1000.0
         self._held: ChatJob | None = None
         self._queue = _JobQueue()
+        self._engine_calls: queue.Queue[tuple[Callable[[Any], Any], queue.Queue[Any]]] = queue.Queue()
         self.preemptions = 0
         self._jobs: dict[str, ChatJob] = {}
         self._stop = threading.Event()
@@ -204,6 +208,41 @@ class Scheduler(PromptFill):
             raise RuntimeError("the scheduler is closed")
         self._queue.put(job)
 
+    def on_engine(self, fn: Callable[[Any], Any], timeout: float = 600.0) -> Any:
+        """Run ``fn`` on the engine thread once no stream is live and no prompt is open."""
+
+        if self._stop.is_set():
+            raise RuntimeError("the scheduler is closed")
+        done: queue.Queue[Any] = queue.Queue(1)
+        self._engine_calls.put((fn, done))
+        try:
+            result = done.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError("the engine did not score the prompt in time") from exc
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def _run_engine_call(self) -> bool:
+        try:
+            fn, done = self._engine_calls.get_nowait()
+        except queue.Empty:
+            return False
+        try:
+            done.put(fn(self.engine))
+        except Exception as exc:  # noqa: BLE001 - the waiter raises this on its own thread
+            exc.__traceback__ = exc.__cause__ = exc.__context__ = None
+            done.put(exc)
+        return True
+
+    def _fail_engine_calls(self) -> None:
+        while True:
+            try:
+                _, done = self._engine_calls.get_nowait()
+            except queue.Empty:
+                return
+            done.put(RuntimeError("the scheduler is closed"))
+
     def cancel(self, cancellation: Cancellation) -> None:
         cancellation.cancel()
         for job in self._queue.remove(cancellation):
@@ -266,6 +305,7 @@ class Scheduler(PromptFill):
         try:
             self._loop()
         finally:
+            self._fail_engine_calls()
             for filling in list(self._fills):
                 self._fill(filling, abort=RequestCancelled("server stopping"))
             if self.on_stop is not None:
@@ -286,6 +326,8 @@ class Scheduler(PromptFill):
                 continue
             if self.engine.active_count == 0:
                 if self._held is None and not self._fills:
+                    if self._run_engine_call():
+                        continue
                     self._release_idle()
                     try:
                         self._held = self._queue.get(timeout=self.idle_wait)
@@ -420,7 +462,7 @@ class Scheduler(PromptFill):
             return True
         live = [(n, min(len(j.prompt_ids) + int(j.max_tokens), n + self._reserved(int(j.max_tokens))))
                 for j in self._jobs.values() if j.stream is not None and not j.stream.finished
-                for n in [len(j.stream.context)]]
+                for n in [j.stream.context_len]]
         # an open prompt grows from the rows it holds to its prompt and reply horizon; its chunks' workspace counts too
         live += [(len(f.job.prompt_ids) - f.left, len(f.job.prompt_ids) + self._reserved(int(f.job.max_tokens)))
                  for f in self._fills]
@@ -437,7 +479,7 @@ class Scheduler(PromptFill):
 
         live = sorted((j for j in self._jobs.values() if j.stream is not None and not j.stream.finished),
                       key=lambda j: j.started_at)
-        plan = self.gate.plan([(j.stream.stream_id, len(j.stream.context), len(j.prompt_ids) + int(j.max_tokens))
+        plan = self.gate.plan([(j.stream.stream_id, j.stream.context_len, len(j.prompt_ids) + int(j.max_tokens))
                                for j in live])
         if set(plan.paused) != self.engine.paused:
             print(f"[tensorfold] memory: {len(plan.paused)} of {len(live)} streams wait for room (newest first)",
@@ -475,6 +517,8 @@ class Scheduler(PromptFill):
 
             started = time.perf_counter()
             if self.prompt_memory is not None and not self.prompt_memory.allow_load(found[0].stat().st_size):
+                print(f"[tensorfold] left the stored prefix of {len(found[1])} tokens on disk: memory cannot "
+                      "hold a copy beside what runs; this prompt re-prefills it", flush=True)
                 return
             loaded = load_snapshot(found[0], self.model_id)
             if loaded is None:

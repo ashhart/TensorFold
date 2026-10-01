@@ -12,7 +12,21 @@ from tensorfold.cuda import prompt_precision
 from . import CONFIDENCE, DEPTH
 
 MAX_DEPTH = 15           # a verify window of at most 16 rows
+KEEP_SERIAL = 4          # prompt states the serial engine keeps (they share its attention rows)
 KEEP = 8                 # prompt states (one token before each end) a concurrent decoder keeps to resume from
+# Reserve bounded tower workspace separately from its weights; override for measured deployments.
+VISION_WORKSPACE = 4 * 2**30
+
+
+def vision_workspace() -> int:
+    import os
+
+    value = os.environ.get("TENSORFOLD_VISION_WORKSPACE_MIB")
+    if value is None or value == "":
+        return VISION_WORKSPACE
+    if not value.isdecimal() or int(value) > 16384:
+        raise ValueError(f"TENSORFOLD_VISION_WORKSPACE_MIB: 0 to 16,384 MiB, not {value!r}")
+    return int(value) * 2**20
 
 
 class FlashNextEngine:
@@ -22,7 +36,7 @@ class FlashNextEngine:
                  draft_vocab: str | int | None = "default", max_len: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
                  prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False,
-                 kv_dtype: str = "bf16", share: float = 0.0) -> None:
+                 kv_dtype: str = "bf16", share: float = 0.0, vision: bool = False, vision_urls: bool = False) -> None:
         import torch
 
         from .exl3_pack import admission, extra_files, is_exl3
@@ -33,14 +47,17 @@ class FlashNextEngine:
         if (exl3 or quant_method(read_config(model_dir)) == "modelopt") and tp != 1:
             raise ValueError(f"{'EXL3 packs' if exl3 else 'NVFP4 checkpoints'} of Flash Next run on one GPU: drop --tp "
                              "2, or serve the MLX checkpoint (Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP) on two")
+        if vision and (streams < 2 or tp != 1):
+            raise ValueError("image input on Flash Next runs on one GPU with --parallel 2 or more")
         if exl3 and ple_on_ssd:
             raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram tables; an EXL3 pack maps its own table "
                              "from its file, so drop --ple-on-ssd")
         from .decode import Engine
+        from .prompt_plan import choose as prompt_plan
         from .kvcache import BITS_OF, check as check_kv
         from .weights import draft_token_ids, load
-        from tensorfold.cuda.capacity import admit, gather_ints
-        from tensorfold.cuda.geometry import gdn_geometry, indexed_stream_geometry, indexed_weights
+        from tensorfold.cuda.capacity import admit, config, gather_ints
+        from tensorfold.cuda.geometry import PREFILL_ROWS, gdn_geometry, indexed_stream_geometry, indexed_weights
 
         if tp not in (1, 2) or rank not in range(tp):
             raise ValueError(f"rank {rank} of {tp}: Flash Next runs on one GPU or two")
@@ -55,6 +72,7 @@ class FlashNextEngine:
         self.tp, self.rank, self.depth, self.confidence = tp, rank, int(depth), float(confidence)
         self.kv_dtype = check_kv(kv_dtype)
         self.comm = None
+        self.vision = None                   # the image tower (``QwenCudaVision``) with --vision
         ids = draft_token_ids(draft_vocab) if self.depth > 0 else None
         if tp == 2:
             from tensorfold.cuda.comm import NCCL
@@ -68,12 +86,25 @@ class FlashNextEngine:
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
         geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp, kv_bits=bits))
                     if streams > 1 else
-                    (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp, kv_bits=bits)))
+                    (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp, kv_bits=bits,
+                                               kept=KEEP_SERIAL + 1)))
         if exl3:
             geometry = admission(geometry)
-        self.capacity_plan = admit(model_dir, max_len, context_explicit, torch, geometry,
-                                   indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd), rank=rank, world=tp,
+        from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
+
+        workspace = vision_workspace() if vision else 0
+        self.capacity_plan = admit(model_dir, max_len, context_explicit, torch,
+                                   capacity_geometry(geometry, model_dir, vision, rank, workspace),
+                                   vision_weights(indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd), vision, rank),
+                                   rank=rank, world=tp,
                                    gather=gather, extra_files=extra_files(model_dir) if exl3 else ())
+        self.prefill_rows, prompt_workspace = (PREFILL_ROWS, 0) if exl3 else prompt_plan(
+            self.capacity_plan, config(model_dir), torch.cuda.get_device_capability(), world=tp, vision=vision,
+            fp8=prompt_precision.fp8())
+        if prompt_workspace:
+            peak = self.capacity_plan["total_bytes_estimate"] / 2**30
+            print(f"[tensorfold] {self.prefill_rows}-row idle prompt workspace {prompt_workspace / 2**30:.2f} GiB; "
+                  f"planned peak {peak:.2f} GiB at the admitted window", flush=True)
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
             self._same_settings(torch, ids)
@@ -100,6 +131,18 @@ class FlashNextEngine:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
                              "that has it, or --no-drafts for the serial reference (one token a round)")
         self.w = w
+        from tensorfold.cuda.markers import resume_points
+
+        self.points = resume_points(model_dir)          # a prompt's message starts to keep states at, or None
+        if vision:
+            from tensorfold.vision.qwen_cuda import QwenCudaVision
+
+            self.vision = QwenCudaVision(model_dir, torch.device("cuda", 0),
+                                         allow_urls=vision_urls)
+            torch.cuda.empty_cache()
+            print(f"[tensorfold] vision: image input, a "
+                  f"{self.vision.weight_bytes / 2**30:.2f} GiB tower with {vision_workspace() / 2**30:.2f} GiB of "
+                  f"workspace reserved{'; https URLs allowed' if vision_urls else ''}", flush=True)
         # ``streams`` > 1: up to that many requests decoded together, every stream's chain in one forward
         self.concurrent = streams > 1
         self.multi = self.scheduler = None
@@ -110,11 +153,13 @@ class FlashNextEngine:
 
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
-                                      confidence=self.confidence, keep=KEEP, kv_dtype=self.kv_dtype, share=share)
+                                      confidence=self.confidence, keep=KEEP, points=self.points,
+                                      kv_dtype=self.kv_dtype, share=share, vision=self.vision,
+                                      prefill_rows=self.prefill_rows, workspace_bytes=prompt_workspace)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
-                            kv_dtype=self.kv_dtype)
+                            kv_dtype=self.kv_dtype, prefill_rows=self.prefill_rows)
         started = time.perf_counter()
         locked = False
         if prefetch and not ple_on_ssd:               # the n-gram tables' pages, read now rather than by requests
@@ -135,6 +180,9 @@ class FlashNextEngine:
             from .decode import warm
 
             warm(self.e)
+        if self.vision is not None:
+            self.vision.warm()
+            torch.cuda.empty_cache()
         warm_s = time.perf_counter() - started
         self.eos = tuple(w.cfg.eos)
         self.model_dir = Path(model_dir)
@@ -156,7 +204,8 @@ class FlashNextEngine:
             how = f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s"
         kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
-              f"decode graphs captured; prompt kernels warmed in {warm_s:.1f}s", flush=True)
+              f"decode graphs captured; idle prompt pieces {self.prefill_rows} rows; "
+              f"prompt kernels warmed in {warm_s:.1f}s", flush=True)
 
     def _same_settings(self, torch, ids) -> None:
         """Both ranks must decode with the same rule, context, draft vocabulary and KV cache, or they would fall out of step: refuse to start otherwise."""
@@ -188,7 +237,9 @@ class FlashNextEngine:
                stop_eos: bool = True) -> tuple:
         from tensorfold.engine.grammar import pack
 
+        points = getattr(self, "points", None)
         body = {"prompt": prompt, "max_tokens": max_tokens, "draft": bool(draft), "cached": int(cached),
+                "points": list(points(prompt)) if draft and points is not None else [],
                 "stop_eos": bool(stop_eos),
                 "sampling": None if sampling is None else [int(sampling.seed), float(sampling.temperature),
                                                            int(sampling.top_k), float(sampling.top_p),
@@ -224,7 +275,8 @@ class FlashNextEngine:
             return None
         s = body["sampling"]
         return (body["prompt"], body["max_tokens"], None if s is None else Sampling(*s),
-                body["draft"], body["cached"], body.get("grammar") or [], body.get("stop_eos", True))
+                body["draft"], body["cached"], body.get("grammar") or [], body.get("stop_eos", True),
+                body.get("points", []))
 
     @property
     def context_window(self) -> int:
@@ -254,10 +306,10 @@ class FlashNextEngine:
             self.cache = []
         else:
             n = len(hit[0])
-            self.cache = [c for c in self.cache if len(c[0]) <= n or c[0][:n] != hit[0]]
+            self.cache = [c for c in self.cache if len(c[0]) < n and hit[0][:len(c[0])] == c[0]] + [hit]
 
     def _remember(self, ids: list[int], snap: dict) -> None:
-        self.cache = [c for c in self.cache if c[0] != ids][-1:] + [(ids, snap)]
+        self.cache = [c for c in self.cache if c[0] != ids][-(KEEP_SERIAL - 1):] + [(ids, snap)]
 
     @property
     def supports_logprobs(self) -> bool:
@@ -285,16 +337,24 @@ class FlashNextEngine:
         return stats
 
     def _decode(self, prompt: list[int], max_tokens: int, sampling, on_tokens, hit, constraint=None,
-                stop_eos: bool = True, probabilities=None) -> dict[str, Any]:
+                stop_eos: bool = True, probabilities=None, points=None) -> dict[str, Any]:
         import torch
 
         from .decode import entry_end, mtp_decode, prefill, serial_decode
 
         t0 = time.perf_counter()
         self._start_from(hit)
-        end = entry_end(prompt)
+        from tensorfold.cuda.markers import MIN_GAP
+
+        end, cached = entry_end(prompt), len(hit[0]) if hit else 0
+        markers = getattr(self, "points", None)
+        if points is None:
+            points = markers(prompt) if markers is not None else []
+        stops = [p for p in points if cached + MIN_GAP <= p < end]
+        def keep(p, snap, tail):
+            self._remember(list(prompt[:p]), {"state": snap, "tail": tail})
         first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint,
-                        probabilities=probabilities, keep_at=end)
+                        probabilities=probabilities, keep_at=end, stops=stops, keep=keep)
         # the state one token before the prompt's end, so the same prompt or a next turn resumes from it
         self._remember(list(prompt[:end]), self.e.kept)
         torch.cuda.synchronize()
@@ -312,9 +372,16 @@ class FlashNextEngine:
         stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, decode_tps=round(res.tokens_per_second, 2))
         return stats
 
+    def close(self) -> None:
+        """Stop the concurrent scheduler's worker, so the engine's GPU memory can go (tests start several engines)."""
+
+        if self.scheduler is not None:
+            self.scheduler.close()
+            self.scheduler = None
+
     def generate(self, prompt: list[int], max_tokens: int, sampling,
                  on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None,
-                 stop_eos: bool = True, background: bool = False, probabilities=None) -> dict[str, Any]:
+                 stop_eos: bool = True, background: bool = False, probabilities=None, *, vision=None) -> dict[str, Any]:
         """``draft=False``: one token a round, no MTP drafts; ``background``: last, yielding lanes to waiting ones."""
 
         max_tokens = self._limit(prompt, max_tokens)
@@ -322,20 +389,28 @@ class FlashNextEngine:
             raise ValueError("logprobs are supported on one GPU only")
         if probabilities is not None and constraint is not None:
             raise ValueError("logprobs do not support structured output")
+        if vision is not None and self.vision is None:
+            raise ValueError("image inputs require starting this server with --vision")
+        if vision is not None and background:
+            raise ValueError("image requests cannot yield a background lane")
         if self.scheduler is not None:
             grammar = {} if constraint is None else {"constraint": constraint}
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         **grammar, **({"background": True} if background else {}), probabilities=probabilities)
+                                         **grammar, **({"background": True} if background else {}),
+                                         probabilities=probabilities,
+                                         **({"vision": vision} if vision is not None else {}))
         hit = self._resume(prompt) if draft else None
+        points = None
         if self.tp == 2:                     # rank 0 decodes exactly what it hands rank 1
-            prompt, max_tokens, sampling, draft, _, _, stop_eos = self._share(
+            prompt, max_tokens, sampling, draft, _, _, stop_eos, points = self._share(
                 prompt, max_tokens, sampling, draft, len(hit[0]) if hit else 0, constraint, stop_eos)
             self.served += 1
             emit = on_tokens
             on_tokens = lambda new: (emit(new), False)[1]       # noqa: E731  both ranks decode to the end
         if not draft:
             return self._serial(prompt, max_tokens, sampling, on_tokens, constraint, stop_eos, probabilities=probabilities)
-        return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos, probabilities=probabilities)
+        return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos,
+                            probabilities=probabilities, points=points)
 
     def follow(self) -> None:
         """Rank 1: decode every request rank 0 serves, until rank 0 stops."""
@@ -344,7 +419,7 @@ class FlashNextEngine:
             request = self._receive()
             if request is None:
                 return
-            prompt, max_tokens, sampling, draft, cached, packed, stop_eos = request
+            prompt, max_tokens, sampling, draft, cached, packed, stop_eos, points = request
             constraint = None
             if packed:                                      # the request's grammar, compiled here as on rank 0
                 from tensorfold.engine import grammar
@@ -359,7 +434,7 @@ class FlashNextEngine:
                     raise RuntimeError(f"rank 1 has no kept state for the {cached} tokens rank 0 resumes from")
             try:
                 if draft:
-                    self._decode(prompt, max_tokens, sampling, None, hit, constraint, stop_eos)
+                    self._decode(prompt, max_tokens, sampling, None, hit, constraint, stop_eos, points=points)
                 else:
                     self._serial(prompt, max_tokens, sampling, None, constraint, stop_eos)
             except ValueError as exc:                       # rank 0 raised at the same point on the same input

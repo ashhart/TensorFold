@@ -7,6 +7,7 @@ mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 pytest.importorskip("mlx_lm")
 
+from tensorfold.engine.family_common import cache_contents  # noqa: E402
 from tensorfold.families.nemotron_h import prompt_pass  # noqa: E402
 
 
@@ -47,8 +48,8 @@ def test_a_pass_gives_each_chunk_its_own_forwards_bits(sizes):
         both = prompt_pass.hidden(backbone, ids, passed, tuple(sizes))
         mx.eval(solo, both)
         assert bool(mx.array_equal(solo, both).item())
-        a = [x for c in one for x in c.state if x is not None]
-        b = [x for c in passed for x in c.state if x is not None]
+        a = [x for c in one for x in cache_contents(c)]
+        b = [x for c in passed for x in cache_contents(c)]
         assert len(a) == len(b) and all(bool(mx.array_equal(x, y).item()) for x, y in zip(a, b))
     finally:
         mx.set_default_device(previous)

@@ -6,16 +6,32 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 | --- | --- |
 | `GET /v1/models` | Served model ID; MLX also lists configured aliases |
 | `GET /health` | Server health and available status information |
+| `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
 | `POST /v1/chat/completions` | Text chat, optional image input, tools and reasoning; streamed or non-streamed |
 | `POST /v1/completions` | Raw text without a chat template; MLX also accepts token IDs |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
+| `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 require a string `prompt`.
 With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept user `image_url` content parts alongside text.
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
+
+## Decisions
+
+`POST /v1/decisions` is served by the MLX server and by the CUDA GLM engine.
+Another CUDA engine, one without label scoring, returns HTTP 400.
+The prompt wording is SGLang's decision prompt format version 1: the input, a blank line, the question, one line per
+option, level, or described yes or no answer, and a closing instruction to answer with one label. Choice labels are
+`A` to `Z`, score labels are `0` to `9`, and a yes/no question uses `yes` and `no`. Each label must be one distinct
+token at the answer position. Thinking stays off. The response carries `prompt_format_version`, `answers` keyed by
+question id, and `usage.completion_tokens` 0. `probabilities` are a softmax over the label logits divided by
+`temperature` (default 1). `label_mass` is the full-vocabulary probability of those labels and does not use
+`temperature`. A request the tokenizer or the context window cannot score returns HTTP 400.
+For decisions, `chat_template_kwargs` may be omitted, null, or an object containing only
+`enable_thinking: false`; other types, keys, or thinking values return HTTP 400.
 
 ## Request fields
 
@@ -27,14 +43,14 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 | `parallel_tool_calls` | False returns at most one completed call | Both |
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
-| `seed` | Sampling key; otherwise derived from the prompt | Both |
+| `seed` | Sampling key; otherwise derived from the prompt (and `TENSORFOLD_SEED_SALT`) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
 | `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | Both |
 | `stop` | Stop at a string or any string in a list; omit the matched text from the response | Both |
-| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high` or `xhigh` | Both |
+| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | Both |
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
 
@@ -146,9 +162,12 @@ requests go on.
 
 On both backends, `reasoning_effort: none` disables thinking; other effort values enable it and reach the chat
 template. The server also reads it from `chat_template_kwargs.reasoning_effort`, where vLLM's clients send it; the
-top-level field wins. `high` maps to `xhigh`, and `minimal` maps to `low`, unless the template names them.
-GLM-5.3 lists `low` and `high`, so `medium` is heard as `high`. `xhigh` stays `xhigh`, and that template renders
-it as Max. An omitted effort stays the template's own Max. An explicit `chat_template_kwargs.enable_thinking` takes
+top-level field wins. An unnamed level maps to the nearest level the template names, and a tie takes
+the higher one. GLM-5.3 lists `low`, `high` and `max`, so `max` stays `max`, `medium` is heard as `high`
+and `minimal` as `low`. Qwen3.8 lists `low`, `medium` and `xhigh`, so `high` and `max` are heard as `xhigh`.
+`xhigh` stays `xhigh`. GLM-5.3 renders `xhigh` and `max` as Max. A template that names no level hears `max` as
+`xhigh`. `--reasoning-effort` uses the same rule. An omitted effort, with no startup flag, stays
+the template's own default. An explicit `chat_template_kwargs.enable_thinking` takes
 precedence. A request without an effort gets `--reasoning-effort` when the server was started with one; otherwise
 the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is `xhigh`, which adds an instruction
 to the system prompt; `medium` adds none). The template hears an effort only while thinking, and both backends render
@@ -214,6 +233,28 @@ engine reports them. A `--parallel` server adds `streams` (decoding, prefilling 
 For exactness comparisons, hold the checkpoint, template, runtime, prompt, seed and sampling settings
 constant, then compare the decoded reply with `draft` enabled and disabled. Repeat with fresh and reused
 prefixes, and compare each MLX concurrent request with its solo run.
+
+A request without `seed` takes one derived from its prompt, so running the same evaluation twice against one server
+repeats the same samples wherever the conversations agree (an agent benchmark's second pass then mostly replays its
+first). To draw independent repeats, send a `seed` per run, or start each run's server with a different
+`TENSORFOLD_SEED_SALT` (an integer mixed into every prompt-derived seed; 0, the default, keeps today's seeds).
+
+## Metrics
+
+`GET /metrics` and `GET /v1/metrics` answer as Prometheus text on both servers. Each family is read on its own
+at scrape time (the scrape is not one atomic snapshot), and a family the server cannot count honestly is left
+out of the text rather than reported at a permanent zero.
+
+The scrape carries `requests_running`, `requests_waiting`, `prompt_tokens_total`, `generation_tokens_total`,
+`kv_cache_usage_ratio` (one `pool` label per live stream cache), `mtp_drafted_total` and `mtp_accepted_total`
+(draft tokens verified and kept on finished requests; the engines keep one draft counter, so copies and chain
+drafts share it), `request_latency_seconds` and `time_to_first_token_seconds`, all under the `tensorfold:`
+prefix. Every reading is repeated under a vLLM-compatible name (`num_requests_running`, `num_requests_waiting`,
+`kv_cache_usage_perc`, `spec_decode_num_draft_tokens_total`, `spec_decode_num_accepted_tokens_total`,
+`e2e_request_latency_seconds`) with identical values, so a dashboard copied from vLLM fills by swapping the
+`tensorfold:` prefix for the metric name. `client_disconnections_total` (requests the client walked away from)
+and `preemptions_total` (background work that gave up a lane to a later request) are published where the
+server counts those events, and never at a fabricated zero.
 
 ## The Responses API
 

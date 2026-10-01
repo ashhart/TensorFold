@@ -98,7 +98,7 @@ class Qwen27Engine:
             geometry, tensor_bytes = nvfp4_admission(geometry)
         # one admission for one stream or many, on every rank, before any weight loads
         self.capacity_plan = admit(model_dir, context, context_explicit, torch,
-                                   capacity_geometry(geometry, model_dir, vision, rank, vision_offload),
+                                   capacity_geometry(geometry, model_dir, vision, rank, offload=vision_offload),
                                    vision_weights(tensor_bytes, vision, rank, vision_offload),
                                    rank=rank, world=tp, gather=gather,
                                    draft_dir=draft_dir if rank == 0 or tp_draft else None,
@@ -195,6 +195,13 @@ class Qwen27Engine:
         from tensorfold.cuda.markers import MIN_GAP
 
         return not (stops and len(prompt) - stops[-1] < MIN_GAP)
+
+    def close(self) -> None:
+        """Stop the concurrent scheduler's worker, so the engine's GPU memory can go (tests start several engines)."""
+
+        if self.scheduler is not None:
+            self.scheduler.close()
+            self.scheduler = None
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):

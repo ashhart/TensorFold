@@ -118,6 +118,8 @@ class PromptFill:
             prompt_data=job.vision,
             retain=job.vision is None,
         )
+        if job.label_ids:
+            stream.label_ids = tuple(job.label_ids)     # the prefill stops at these logits and draws nothing
         job.stream = stream
         filling.steps = self.engine.begin_stream(stream, cache=cache, cached_tokens=cached,
                                                  checkpoints_at=checkpoints_at)
@@ -201,6 +203,9 @@ class PromptFill:
                 raise error
             stream = job.stream
             self._keep_checkpoints(job, shared_at)
+            scored = getattr(stream, "scored", None)
+            if scored is not None:
+                job.scored = scored
             job.cancellation.check()
             job.prefilled_at = time.perf_counter()
             job.cached_tokens = int(stream.cached_tokens)      # 0 when a stored state was not at a chunk start

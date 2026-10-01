@@ -53,8 +53,11 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
           heads: int = 2, kv_heads: int = 2, hd: int = 64, nk: int = 8, nv: int = 24, dk: int = 128, dv: int = 128,
           moe_width: int = 128, shared_width: int = 64, streams: int = 4, low: int = 64,
           ple: bool = True, mtp: bool = True, seed: int = 0, prefix: str = "", ple_bf16: bool = False,
-          mxfp8: bool = False, ple_nvfp4: bool = False, centred: bool = False, fp8block: bool = False) -> Path:
-    """A tiny ModelOpt checkpoint: ``mxfp8``, ``ple_nvfp4``, ``centred`` norms or ``fp8block`` (block FP8 beside bf16)."""
+          mxfp8: bool = False, ple_nvfp4: bool = False, centred: bool = False, fp8block: bool = False,
+          mtp_experts: str = "bf16", mtp_scale: str = "tensor") -> Path:
+    """Write ModelOpt weights with bf16 or FP8 MTP experts and tensor, row or block FP8 scales."""
+    if mtp_experts not in ("bf16", "fp8", "fp8_dequant") or mtp_scale not in ("tensor", "row", "block"):
+        raise ValueError("unsupported MTP expert format or scale layout")
     dir.mkdir(parents=True, exist_ok=True)
     rng = torch.Generator().manual_seed(seed)
 
@@ -189,8 +192,41 @@ def write(dir: Path, *, layers: int = 2, experts: int = 2, vocab: int = 256, hid
         for proj, n_, k_ in (("gate_proj", moe_width, hidden), ("up_proj", moe_width, hidden),
                              ("down_proj", hidden, moe_width)):
             linear(f"mtp.layers.0.mlp.shared_expert.{proj}", n_, k_, fp4=False)
-        add("mtp.layers.0.mlp.experts.gate_up_proj", rand(experts, 2 * moe_width, hidden))
-        add("mtp.layers.0.mlp.experts.down_proj", rand(experts, hidden, moe_width))
+        if mtp_experts == "bf16":
+            add("mtp.layers.0.mlp.experts.gate_up_proj", rand(experts, 2 * moe_width, hidden))
+            add("mtp.layers.0.mlp.experts.down_proj", rand(experts, hidden, moe_width))
+        else:                                            # per-expert e4m3 with fp32 scales
+            def expanded(scale: torch.Tensor) -> torch.Tensor:
+                if mtp_scale == "block":
+                    return scale.repeat_interleave(128, 0).repeat_interleave(128, 1)
+                return scale
+
+            def fp8(n_: int, k_: int) -> tuple[torch.Tensor, torch.Tensor]:
+                w = rand(n_, k_).float()
+                if mtp_scale == "block":
+                    scale = w.view(n_ // 128, 128, k_ // 128, 128).abs().amax(dim=(1, 3)) / 448.0
+                elif mtp_scale == "row":
+                    scale = w.abs().amax(dim=1, keepdim=True) / 448.0
+                else:
+                    scale = w.abs().max() / 448.0
+                return (w / expanded(scale)).to(torch.float8_e4m3fn), scale
+
+            projs = {p_: [fp8(*shape) for _ in range(experts)] for p_, shape in
+                     (("gate_proj", (moe_width, hidden)), ("up_proj", (moe_width, hidden)),
+                      ("down_proj", (hidden, moe_width)))}
+            if mtp_experts == "fp8":
+                for p_, items in projs.items():
+                    for i, (codes, scale) in enumerate(items):
+                        add(f"mtp.layers.0.mlp.experts.{i}.{p_}.weight", codes)
+                        field = "weight_scale_inv" if mtp_scale == "block" else "weight_scale"
+                        add(f"mtp.layers.0.mlp.experts.{i}.{p_}.{field}", scale)
+            else:
+                def deq(items):
+                    return torch.stack([(c.float() * expanded(s_)).to(torch.bfloat16) for c, s_ in items])
+
+                add("mtp.layers.0.mlp.experts.gate_up_proj", torch.cat([deq(projs["gate_proj"]),
+                                                                        deq(projs["up_proj"])], dim=1))
+                add("mtp.layers.0.mlp.experts.down_proj", deq(projs["down_proj"]))
         for proj, n_, k_ in (("q_proj", 2 * heads * hd, hidden), ("k_proj", kv_heads * hd, hidden),
                              ("v_proj", kv_heads * hd, hidden), ("o_proj", hidden, heads * hd),
                              ("indexer.index_qk_proj", (4 + 1) * 128, hidden)):

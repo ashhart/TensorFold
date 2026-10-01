@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import threading
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +41,7 @@ class EncodedVision:
 def vision_config(model_dir: str | Path) -> dict:
     raw = json.loads((Path(model_dir) / "config.json").read_text())
     config = raw.get("vision_config")
-    if not isinstance(config, dict) or config.get("model_type") != "qwen3_5":
+    if not isinstance(config, dict) or config.get("model_type") not in ("qwen3_5", "qwen4_exp"):
         raise ValueError("CUDA vision requires a Qwen3.5-compatible vision checkpoint")
     if config.get("deepstack_visual_indexes"):
         raise ValueError("CUDA Qwen vision does not support deepstack image features")
@@ -64,13 +66,18 @@ def vision_config(model_dir: str | Path) -> dict:
     return config
 
 
+def _vision_sources(model_dir):
+    from .qwen_checkpoint import vision_tensors
+
+    override = os.environ.get("TENSORFOLD_VISION_WEIGHTS")
+    return vision_tensors(Path(model_dir), weights_path=Path(override) if override else None)
+
+
 def checkpoint_vision(model_dir: str | Path) -> tuple[dict, int]:
     """Validate vision tensor headers before any model or accelerator allocation."""
     from tensorfold.cuda.capacity import SIZES
-    from .qwen_checkpoint import vision_tensors
-
     config = vision_config(model_dir)
-    sources = vision_tensors(Path(model_dir))
+    sources = _vision_sources(model_dir)
     tensors = {k: value[1] for k, value in sources.items()}
     for name, (path, info, begin) in sources.items():
         shape, offsets = info.get("shape", ()), info.get("data_offsets", ())
@@ -106,25 +113,34 @@ def checkpoint_vision(model_dir: str | Path) -> tuple[dict, int]:
 
 def weight_transform(base, enabled: bool, rank: int, offload: bool = False):
     def transform(name, info):
-        if enabled and rank == 0 and name.startswith("vision_tower."):
-            from tensorfold.cuda.geometry import size
+        from .qwen_checkpoint import vision_key
 
-            return (0, 0) if offload else (size(info), 0)   # offloaded: resident in host RAM between images
+        if enabled and vision_key(name) is not None:
+            if rank != 0 or offload or os.environ.get("TENSORFOLD_VISION_WEIGHTS"):
+                return 0, 0                     # offloaded: resident in host RAM between images
+            from tensorfold.cuda.capacity import SIZES
+
+            return math.prod(info["shape"]) * max(2, SIZES[info["dtype"]]), 0
         return base(name, info)
     return transform
 
 
-def capacity_geometry(base, model_dir, enabled: bool, rank: int, offload: bool = False):
+def capacity_geometry(base, model_dir, enabled: bool, rank: int, workspace: int = WORKSPACE_BYTES,
+                      offload: bool = False):
     def geometry(text):
         from tensorfold.cuda.capacity import Geometry
 
         result = base(text)
         if not enabled:
             return result
+        external_weights = 0
         if rank == 0:
-            checkpoint_vision(model_dir)
-        reserve = (OFFLOAD_WORKSPACE_BYTES if offload else WORKSPACE_BYTES) if rank == 0 else 128 * 1024**2
-        return Geometry(lambda slots: result.bytes_at(slots) + reserve, result.reserve, result.minimum_slots)
+            _, tower_bytes = checkpoint_vision(model_dir)
+            if os.environ.get("TENSORFOLD_VISION_WEIGHTS") and not offload:
+                external_weights = tower_bytes
+        reserve = (OFFLOAD_WORKSPACE_BYTES if offload else workspace) if rank == 0 else 128 * 1024**2
+        return Geometry(lambda slots: result.bytes_at(slots) + reserve + external_weights,
+                        result.reserve, result.minimum_slots)
     return geometry
 
 
@@ -148,39 +164,61 @@ class QwenCudaVision:
         raw = json.loads((Path(model_dir) / "config.json").read_text())
         self.image_token = int(raw["image_token_id"])
         self.device = device
-        config = Qwen3_5VisionConfig(**self.config)
+        config = Qwen3_5VisionConfig(**{k: v for k, v in self.config.items()
+                                      if k not in ("model_type", "deepstack_visual_indexes")})
         config._attn_implementation = "sdpa"
         with torch.device("meta"):
             tower = Qwen3_5VisionModel(config)
         tensors = {}
-        for path in sorted(Path(model_dir).glob("*.safetensors")):
+        by_file = {}
+        for key, (path, info, begin) in _vision_sources(model_dir).items():
+            by_file.setdefault(path, {})[key] = info
+        for path, selected in by_file.items():
             with safe_open(str(path), framework="pt", device="cpu") as source:
-                for name in source.keys():
-                    key = vision_key(name)
-                    if key is not None and "position_ids" not in key:
-                        value = source.get_tensor(name)
-                        if key == "patch_embed.proj.weight" and value.shape[-1] == self.config["in_channels"]:
-                            value = value.permute(0, 4, 1, 2, 3).contiguous()
-                        tensors[key] = value.to(device=resident, dtype=torch.bfloat16)
+                names = {vision_key(name): name for name in source.keys()}
+                for key in selected:
+                    value = source.get_tensor(names[key])
+                    if key == "patch_embed.proj.weight" and value.shape[-1] == self.config["in_channels"]:
+                        value = value.permute(0, 4, 1, 2, 3).contiguous()
+                    tensors[key] = value.to(device=resident, dtype=torch.bfloat16)
         tower.load_state_dict(tensors, strict=True, assign=True)
         rotary_frequencies(tower.rotary_pos_emb, self.config, resident)
         self.tower = tower.eval()
 
+    def warm(self):
+        """Load tower kernels at startup using one small, merge-aligned image grid."""
+        import torch
+
+        merge = self.config["spatial_merge_size"]
+        patches = merge * merge
+        width = self.config["in_channels"] * self.config["temporal_patch_size"] * self.config["patch_size"]**2
+        with self._on_gpu(), torch.inference_mode():
+            self.tower(torch.zeros((patches, width), dtype=torch.bfloat16, device=self.device),
+                       grid_thw=torch.tensor([[1, merge, merge]], device=self.device), return_dict=True)
+            torch.cuda.synchronize()
+
     def prepare(self, *args, **kwargs):
         return self.frontend.prepare(*args, **kwargs)
 
-    def encode(self, prepared, prompt) -> EncodedVision:
+    @contextmanager
+    def _on_gpu(self):
+        """The tower on the GPU for the block; when offloaded, one caller at a time, and back to host RAM after."""
         if not self.offload:
-            return self._encode(prepared, prompt)
+            yield
+            return
         import torch
 
         with self._lock:
             try:
                 self.tower.to(self.device)
-                return self._encode(prepared, prompt)
+                yield
             finally:
                 self.tower.to("cpu")
                 torch.cuda.empty_cache()
+
+    def encode(self, prepared, prompt) -> EncodedVision:
+        with self._on_gpu():
+            return self._encode(prepared, prompt)
 
     def _encode(self, prepared, prompt) -> EncodedVision:
         import torch

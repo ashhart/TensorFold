@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
   # the prompt kernels and SSD streaming are tested on MLX 0.32.2 and 0.32.3 (#88)
   "mlx>=0.32.2,<0.32.4; sys_platform == 'darwin'",
-  "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin'",
+  "mlx-lm>=0.31.3,<0.33; sys_platform == 'darwin'",
   "numpy>=1.26",
   "huggingface-hub>=0.24",
   "tokenizers>=0.20; sys_platform != 'darwin'",
@@ -61,7 +61,7 @@ where = ["src"]
 "tensorfold.families.glm5_next.cuda" = ["*.cu", "*.cpp"]
 "tensorfold.families.nemotron_h.cuda" = ["*.cu", "*.cpp"]
 "tensorfold.cuda.exl3" = ["*.cu", "*.cuh", "*.cpp"]
-"tensorfold.cuda.nvfp4" = ["*.cu", "*.cpp"]
+"tensorfold.cuda.nvfp4" = ["*.cu", "*.cuh", "*.cpp"]
 "tensorfold.streaming.hostsync" = ["*.cpp", "CMakeLists.txt"]
 
 [tool.pytest.ini_options]

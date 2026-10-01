@@ -16,12 +16,14 @@ from tensorfold.server.checkpoints import (CheckpointStore, prune_conversations,
                                            save_conversations, spill_conversation)
 from tensorfold.server.cancellation import Cancellation
 from tensorfold.server.errors import CONTEXT_LIMIT, ContextLengthError, RequestError
+from tensorfold.server.decision_requests import DecisionRequests
 from tensorfold.server.prompt_blocks import PromptBlocks, _REQUEST
 from tensorfold.server.request_options import RequestOptions
 from tensorfold.server.http import served_model_ids
 from tensorfold.server import metrics
 from tensorfold.server.scheduler import ChatJob, Scheduler
 from tensorfold.server.stopping import StopPolicy
+from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 from tensorfold.server.text import (
     IncrementalText,
     _LockedTokenizer,
@@ -29,7 +31,7 @@ from tensorfold.server.text import (
     hide_tool_calls,
     is_title_request,
     parse_harmony_output,
-    reasoning_count, split_thinking, think_markers,
+    CHANNEL_MARKERS, reasoning_count, split_thinking, think_markers,
     streaming_visible_text,
     template_late_system,
     strip_trailing_stops,
@@ -50,7 +52,7 @@ def _token_sha(tokens: list[int]) -> str:
     return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
 
 
-class ChatApp(RequestOptions, PromptBlocks):
+class ChatApp(RequestOptions, PromptBlocks, DecisionRequests):
     """One model behind the OpenAI endpoint (``server.http.make_handler``)."""
 
     accepts_sampling = True
@@ -92,12 +94,14 @@ class ChatApp(RequestOptions, PromptBlocks):
         fit_context: bool = False,
         decode_share: float = 0.25,
         grow_checkpoints: bool = False,
+        vision_max_images: int | None = None,
     ) -> None:
         # three candidate entries per conversation (history boundary, stable prefix, reply end)
         if checkpoint_slots is None:
             checkpoint_slots = max(3 * int(lanes), 8)
         self._model = model
         self.vision = getattr(model, "vision", None)
+        self.image_limits = DEFAULT_LIMITS if vision_max_images is None else ImageLimits(max_images=vision_max_images)
         self.served_name = served_name
         self.model_ids = served_model_ids(served_name, model_aliases)
         self.max_batch_size = int(lanes)
@@ -415,7 +419,7 @@ class ChatApp(RequestOptions, PromptBlocks):
             if len(visible_text.tokens) and visible_text._read < len(visible_text.tokens):
                 continue                    # a character still split across tokens: wait for the rest
             answer = text
-            if thinking:
+            if thinking or self.think_markers == CHANNEL_MARKERS:
                 # the prompt opened a think block: reasoning streams as reasoning_content until </think>
                 reasoning_so_far, answer = split_thinking(text, finished=False, markers=self.think_markers)
                 piece = reasoning_so_far[len(streamed_reasoning):]
@@ -437,7 +441,7 @@ class ChatApp(RequestOptions, PromptBlocks):
         content_tokens = strip_trailing_stops(collected, set(stops.eos_ids))
         with self.tokenizer_lock:
             text = stops.visible(self.tokenizer.decode(content_tokens))
-        if thinking:
+        if thinking or self.think_markers == CHANNEL_MARKERS:
             reasoning_text, content = split_thinking(text, finished=True, markers=self.think_markers)
             reasoning = reasoning_text.strip() or None
         else:

@@ -36,6 +36,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                           help="with --vision on CUDA, keep the image tower in host RAM and copy it to the GPU only "
                                "while an image is encoded (frees about 5 GiB of the startup budget on a small card; "
                                "each image pays the copy)")
+    endpoint.add_argument("--vision-max-images", type=int, default=None,
+                          help="with --vision, maximum images across the full request history (default: 4); "
+                               "byte, pixel and visual-token limits still apply")
 
     generation = serve.add_argument_group("generation (requests can override each of these)")
     generation.add_argument("--context", type=int, default=None,
@@ -53,9 +56,9 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     generation.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=True,
                             help="open a think block when the chat template supports it")
     generation.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh"), default=None,
-                            help="default: the template's own (Qwen3.8's is xhigh, GLM-5.3's is Max). high is xhigh "
-                                 "where the template has no high; on GLM-5.3, medium is high; "
-                                 "xhigh and the default are Max")
+                            help="default effort when a request omits one. An unnamed level maps to the nearest "
+                                 "level the template names, and a tie takes the higher one. This flag uses that "
+                                 "rule. xhigh stays xhigh, so GLM-5.3 renders it as Max")
     generation.add_argument("--thinking-budget", type=int, default=0,
                             help="most thinking tokens before the server closes the think block (0: no limit)")
 
@@ -132,6 +135,13 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                            "docs/recipes/cuda.md#prompt-precision has the measured cost). Default: "
                            f"{'FP8' if FP8_BY_DEFAULT else 'bf16'} activations. Replies equal this server's own serial "
                            "decoding either way")
+    cuda.add_argument("--precision", choices=("checkpoint", "full"), default=argparse.SUPPRESS,
+                      help="the math for checkpoints that name their activations' formats (NVFP4): checkpoint, the "
+                           "default, runs their own math as their runtimes do (FP4 x FP4 in NVFP4 layers on SM 12.x "
+                           "GPUs, FP8 x FP8 in FP8 layers from SM 8.9, under the checkpoint's static input scales; "
+                           "layers a GPU has no mma for run W4A16, and the startup line says which); full runs bf16 "
+                           "activations against the stored weights exactly. The weights never change, only the math; "
+                           "MLX checkpoints have one math. Replies equal this server's own serial decoding either way")
     serve.set_defaults(func=handlers["serve"])
 
     pull = commands.add_parser("pull", help="download models (or draft models) from Hugging Face")

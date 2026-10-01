@@ -63,13 +63,20 @@ def decoders(monkeypatch, allocations):  # noqa: F811
             raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end entry)")
         return St(st.pos)
 
+    def prefill_batch(w, pieces, **kw):
+        for p in pieces:
+            p.st.pos = len(p.prompt)
+        return [(None, None if p.keep_at is None else (St(p.keep_at), None), None) for p in pieces]
+
     monkeypatch.setattr(multi, "prefill_state", prefill_state)
+    monkeypatch.setattr(multi, "prefill_batch", prefill_batch)
     monkeypatch.setattr(multi, "first_token", lambda *args: 7)
     monkeypatch.setattr(multi, "kept", entry)
     monkeypatch.setattr(multi, "viewed", entry)
     monkeypatch.setattr(multi, "private", lambda st, rows: St(st.pos))
     monkeypatch.setattr(multi, "State", lambda w: St())
     monkeypatch.setattr(multi, "_share", lambda values, src, device: values)      # two ranks: no NCCL here
+    monkeypatch.setattr(multi.torch.cuda, "is_available", lambda: False)          # CPU stand-ins, as on a host box
 
     def make(world=1):
         w = SimpleNamespace(config=SimpleNamespace(eos=(0,), vocab=10), norm=SimpleNamespace(device="cpu"),

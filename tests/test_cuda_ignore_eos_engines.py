@@ -94,10 +94,10 @@ def test_rank_one_reads_the_field_rank_zero_sends(modules, monkeypatch, family, 
     eng._key = lambda n: f"request/{n}"
     got = eng._share([5, 6], 9, None, True, 0, None, stop_eos)
     unpack = getattr(mod, "_unpack", None) or eng._unpack
-    assert got[-1] is stop_eos and unpack(sent["text"])[-1] is stop_eos
+    assert got[6] is stop_eos and unpack(sent["text"])[6] is stop_eos      # Flash Next's keep points follow it
     body = json.loads(sent["text"])
     body.pop("stop_eos")                                 # a body from before the field: end tokens count
-    assert unpack(json.dumps(body))[-1] is True
+    assert unpack(json.dumps(body))[6] is True
 
 
 @pytest.mark.torch

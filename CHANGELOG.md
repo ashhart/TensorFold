@@ -3,6 +3,27 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.6.1 (1 Oct 2026)
+
+- **NVFP4 checkpoints in their own math.** `nvidia/Qwen3.8-27B-NVFP4` runs the 4-bit activations its checkpoint
+  names, as vLLM does; `--precision full` runs 16-bit activations against the same weights. On an RTX PRO 6000 at its
+  250 W limit, one stream decodes 1.4-2.0x vLLM and prompts fill at 0.95-0.97x its speed.
+- **Waiting prompts fill together on CUDA.** With `--parallel`, prompts that arrive together now share one prefill
+  forward instead of filling one a round: on an RTX PRO 6000 at its 250 W limit, 8 streams of the 27B run 1.14-1.36x
+  faster and the slowest first token comes in 0.05-0.10 s instead of 0.4-0.8 s (1.6 s to 0.15 s on a DGX Spark), with
+  the same replies.
+- **More 27B tokens with several streams on CUDA.** Streams plan on their measured round cost, and wider lane blocks
+  on RTX PRO and RTX 50 cards add 4-8% at 8 streams, with the same tokens.
+- **Flash Next on Macs at long context.** One stream runs up to 9.6% faster on code at 64k and 10.2% on chat at 128k
+  on an M3 Ultra, with the same tokens.
+- **`/v1/decisions`** scores a choice, a score or a yes/no from the next-token logits, on the shared prompt lanes.
+- **Flash Next on CUDA:** image input, forks that resume from their shared prefix, shared system prompts copied
+  instead of filled again, and short prompts admitted while a long one fills.
+- **RTX cards without Docker:** pip alone installs and builds the CUDA kernels. Native Windows is in as an
+  experimental host layer, not yet run on Windows hardware.
+- **Fixes:** a refused request no longer breaks the next one on its connection; Gemma 4 thought blocks stay out of
+  replies with thinking off; an unnamed reasoning effort goes to the nearest named level; mlx-lm 0.32 support.
+
 ## 0.6.0 (30 Sep 2026)
 
 - **RTX 40 cards.** CUDA now runs on compute capability 8.9 (Ada). On one RTX 4090 the 27B serves with DFlash2 in a

@@ -25,6 +25,11 @@ class Waiting(queue.PriorityQueue):
     def get(self, block: bool = True, timeout: float | None = None):
         return super().get(block, timeout)[2]
 
+    def stop(self) -> None:
+        """Wake an idle worker to stop: None comes after every waiting request."""
+
+        super().put((2, next(self._order), None))
+
     def foreground(self) -> bool:
         """Whether a foreground request waits."""
 
@@ -40,8 +45,17 @@ class Scheduler:
         self.held: tuple | None = None               # a request waiting for memory, admitted before any other
         self.boxes: dict[int, queue.Queue] = {}
         self.yields = 0                              # background streams that gave up their lane
+        if hasattr(decoder, "arrived"):              # a decoder filling prompts lets a new request in between passes
+            decoder.arrived = self.waiting.foreground
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
+
+    def close(self) -> None:
+        """Stop the worker once idle and let go of the decoder (its thread held it, and its weights, until now)."""
+
+        self.waiting.stop()
+        self.thread.join()
+        self.decoder = None
 
     def submit(self, prompt: list[int], count: int, sampling: Any, draft: bool,
                emit: Callable[[list[int]], bool | None], stop_eos: bool = True, *, vision: Any = None,
@@ -117,7 +131,10 @@ class Scheduler:
         while True:
             self._yield()
             idle = not self.decoder.live() and self.held is None
-            done = self._admit(self.waiting.get() if idle else None)                  # idle: wait for a request
+            first = self.waiting.get() if idle else None                              # idle: wait for a request
+            if idle and first is None:
+                return                                                                # close()
+            done = self._admit(first)
             try:
                 done += self.decoder.round()
             except Exception as exc:                 # noqa: BLE001  (the live requests fail)

@@ -27,6 +27,7 @@ from tensorfold.cuda.chat_template import ChatTemplate
 from tensorfold.cuda.reply_text import StopStrings, StreamDecoder, hide_tool_calls, parse_tool_calls
 from tensorfold.cuda.turns import Turns, Yield
 from tensorfold.server.text import is_title_request, reasoning_count, split_thinking
+from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 
 
 # -- requests --------------------------------------------------------------------------------
@@ -68,11 +69,12 @@ class App:
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
                  context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0,
-                 aliases: tuple[str, ...] | list[str] = ()):
+                 aliases: tuple[str, ...] | list[str] = (), vision_max_images: int | None = None):
         from tokenizers import Tokenizer
 
         self.engine = engine
         self.vision = getattr(engine, "vision", None)
+        self.image_limits = DEFAULT_LIMITS if vision_max_images is None else ImageLimits(max_images=vision_max_images)
         self.served = served
         self.aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
         self.model_dir = Path(model_dir)
@@ -155,6 +157,42 @@ class App:
 
         return self._context_limit()
 
+    def decisions(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Answer typed questions from next-token label logits. No text is generated."""
+
+        from jinja2.exceptions import TemplateError
+
+        from tensorfold.server.decisions import DecisionError, build_response, prompts_for
+
+        if not hasattr(self.engine, "score_labels"):
+            raise RequestError("this model's CUDA engine does not score decision labels")
+
+        def render(content: str) -> str:
+            try:
+                return self.template.render([{"role": "user", "content": content}], tools=None, enable_thinking=False)
+            except TemplateError as exc:
+                raise DecisionError(f"the chat template failed: {exc}") from exc
+
+        def encode(text: str) -> list[int]:
+            return [int(token) for token in self.tok.encode(text, add_special_tokens=False).ids]
+
+        try:
+            prepared = prompts_for(body, render, encode, context_len=self.effective_context_window)
+        except DecisionError as exc:
+            raise RequestError(str(exc)) from exc
+        turns = self._turns()
+        turns.take(False)
+        try:
+            scored = []
+            for item in prepared:
+                try:
+                    scored.append(self.engine.score_labels(item.prompt_ids, item.label_ids))
+                except ValueError as exc:
+                    raise RequestError(f"question {item.id!r}: {exc}") from exc
+            return build_response(body, prepared, scored)
+        finally:
+            turns.give()
+
     def _requested_tokens(self, body: dict[str, Any]) -> int:
         for name in ("max_tokens", "max_completion_tokens"):
             value = body.get(name)
@@ -217,7 +255,8 @@ class App:
             if has_images(body["messages"]):
                 rendered = prepare_images(self.vision, body["messages"],
                                           lambda messages: render(messages, allow_images=True),
-                                          context_limit=self._context_limit())
+                                          context_limit=self._context_limit(),
+                                          limits=getattr(self, "image_limits", DEFAULT_LIMITS))
                 return PreparedRequest(rendered.tokens, max_tokens, tools, thinking,
                                        self.sampling_for(body, rendered.tokens), ignore_eos=ignore_eos, stop=stop,
                                        vision=rendered.vision, grammar=compiled, think_budget=budget)

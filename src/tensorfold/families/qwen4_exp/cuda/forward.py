@@ -16,6 +16,8 @@ from tensorfold.cuda.kernels import gdn as shared_gdn
 from . import attention as attn_mod
 from . import gdn as gdn_mod
 from . import attn_multi, bf16, gdn_io, gdn_multi, glue, nvfp4_moe, qmm
+from . import image_rows
+from .hc_check import fuser as _hc_fuser
 from .state import ATT_ROWS, CAND, Buffers, State, _MoECfg
 from .weights import HC, LayerW, Weights
 
@@ -50,6 +52,13 @@ def hc_block(hc: HC, b: Buffers, R: int, eps: float, streams: int, low: int, mod
              inject_out, h: torch.Tensor, branch=None, y=None, wts=None) -> None:
     """Write the pending branch back into the streams h (in place), then the hyper-connection's read-out: b.mixed [R, D] (+ group sums), and its inject gates into ``inject_out``."""
 
+    if b.prefill and R > FUSED_ROWS and isinstance(hc.down, qmm.Q4):
+        fused = _hc_fuser(h.device)
+        if fused is not None:
+            fused(h[:R], b.pss[:R], hc.scale, b.normed[:R], b.xs_normed[:R], streams, eps, mode,
+                  branch=branch, inject=inject_prev, y=y, wts=wts)
+            _readout_plain(hc, b, h, R, eps, streams, low, inject_out[:R] if hc.inject else None, normed=True)
+            return
     glue.hc_writeback(h[:R], h[:R], b.pss[:R], streams, mode, branch=branch, inject=inject_prev, y=y, wts=wts)
     _readout(hc, b, h, R, eps, streams, low, inject_out[:R] if hc.inject else None)
 
@@ -91,11 +100,18 @@ def _readout_fused(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, stre
     qmm.hc_upmix(b.act[:R], b.xs_act[:R], hc.up, b.normed[:R], b.mixed[:R], b.xs_mixed[:R], streams)
 
 
-def _readout_plain(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject) -> None:
+def _readout_plain(hc: HC, b: Buffers, h: torch.Tensor, R: int, eps: float, streams: int, low: int, inject,
+                   normed: bool = False) -> None:
     """The norm, the down projection with SiLU and the inject gates, the up projection, the mix: separate kernels."""
 
-    glue.hc_normed(h[:R], b.pss[:R], hc.scale, b.normed[:R], b.xs_normed[:R], streams, eps)
+    if not normed:
+        glue.hc_normed(h[:R], b.pss[:R], hc.scale, b.normed[:R], b.xs_normed[:R], streams, eps)
     _down_act(hc, b, R, streams, low, inject)
+    if b.prefill and R >= 512 and streams == 4 and low == 320 and isinstance(hc.up, qmm.Q4) and hc.up.n == 10240:
+        upmix = _hc_fuser(h.device, upmix=True)
+        if upmix is not None:
+            upmix(b.act[:R], hc.up, b.normed[:R], b.mixed[:R], b.xs_mixed[:R], streams)
+            return
     _mm(b.act[:R], hc.prefill_up if b.prefill else hc.up, b.xs_act[:R], b.up[:R], b)
     glue.hc_mix(b.up[:R], b.normed[:R], b.mixed[:R], b.xs_mixed[:R], streams)
 
@@ -207,6 +223,7 @@ def attn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: in
     a = layer.attn
     _mm(b.mixed[:R], a.proj, b.xs_mixed[:R], b.pa[:R], b)
     scale = c.head_dim ** -0.5
+    sections = getattr(c, "mrope_section", (11, 11, 10))
     step = None if b.prefill else getattr(b, "attn_step", None)     # a concurrent step: every stream at once
     if step is not None:
         o = attn_multi.layer(layer, w, b, step, mtp, scale)
@@ -216,12 +233,17 @@ def attn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: in
         cache, ikc, pooled, pos, host_pos = _caches(layer, st, mtp)
         bits = 0 if not cache.quantized else cache.bits
         keys = context if context is not None else host_pos + a1 - a0
+        rope = st.image_positions
+        length = 0 if rope is None else rope.shape[0]
+        delta = st.rope_delta_dev if rope is not None or st.rope_delta else None
         glue.attn_prep(b.pa[a0:a1], pos, a.q_scale, a.k_scale, a.iq_scale, w.inv_freq, b.q[a0:], cache.k, cache.v,
                        b.iq[a0:], ikc, c.eps, q_heads=c.heads, kv_heads=c.kv_heads, head_dim=c.head_dim,
-                       index_heads=c.index_heads, index_dim=c.index_dim, ks=cache.ks, vs=cache.vs, bits=bits)
+                       index_heads=c.index_heads, index_dim=c.index_dim, ks=cache.ks, vs=cache.vs, bits=bits,
+                       rope=rope, delta=delta, length=length, sections=sections)
         if b.prefill:
             if b.attn.qsa:
-                attn_mod.qsa_pool(ikc, pooled, pos, a.ik_scale, w.inv_freq, c.eps, b.attn, a1 - a0)
+                attn_mod.qsa_pool(ikc, pooled, pos, a.ik_scale, w.inv_freq, c.eps, b.attn, a1 - a0, rope=rope,
+                                  delta=delta, length=length, sections=sections)
             for r0 in range(a0, a1, ATT_ROWS):
                 n = min(ATT_ROWS, a1 - r0)
                 b.pos_blk.fill_(host_pos + r0 - a0)
@@ -233,7 +255,7 @@ def attn_block(layer: LayerW, w: Weights, segs: Sequence[Seg], b: Buffers, R: in
             continue
         if b.attn.qsa:
             attn_mod.qsa_select(b.iq[a0:a1], ikc, pooled, pos, a.ik_scale, w.inv_freq, c.eps, b.attn, a1 - a0,
-                                context=keys)
+                                context=keys, rope=rope, delta=delta, length=length, sections=sections)
         o = attn_mod.attention(b.q[a0:a1], cache.k, cache.v, pos, b.attn, a1 - a0, scale, context=keys,
                                ks=cache.ks, vs=cache.vs, bits=bits)
         if len(segs) > 1:                       # the scratch output is the next stream's too
@@ -450,12 +472,17 @@ def stage(w: Weights, b: Buffers, windows: Sequence[tuple[State, Sequence[int]]]
 
 
 def compute(w: Weights, segs: Sequence[Seg], b: Buffers, *, logits: bool = True, context: int | None = None,
-            ends: Sequence[int] = (), cuts: Sequence[Cut] = ()):
+            ends: Sequence[int] = (), cuts: Sequence[Cut] = (), features=None):
     """The forward's GPU work on staged rows (capturable); ``context`` bounds attention, ``ends`` get the head, ``cuts`` keep states."""
 
     c = w.cfg
     R = segs[-1][2]
     _embed(w, b.ids[:R], c.streams, b.h[:R])
+    if b.prefill:
+        image_rows.embed(segs, b, c.streams)
+    if features is not None:
+        target, source = features
+        b.h.index_copy_(0, target, source.to(b.h.dtype).repeat(1, c.streams))
     pending = None
     for layer in w.layers:
         pending = layer_forward(layer, w, segs, b, R, pending, context=context, cuts=cuts)
@@ -479,6 +506,7 @@ def compute_mixed(w: Weights, dsegs: Sequence[Seg], db: Buffers, psegs: Sequence
         raise ValueError(f"a pass of {Rp} rows and a window of {Rd} exceed the prompt buffers' {pb.rows}")
     _embed(w, db.ids[:Rd], c.streams, db.h[:Rd])
     _embed(w, pb.ids[:Rp], c.streams, pb.h[:Rp])
+    image_rows.embed(psegs, pb, c.streams)
     dp = pp = None
     for layer in w.layers:
         _pre_moe(layer, w, dsegs, db, Rd, dp)
@@ -491,12 +519,13 @@ def compute_mixed(w: Weights, dsegs: Sequence[Seg], db: Buffers, psegs: Sequence
 
 @torch.no_grad()
 def forward(w: Weights, st: State, b: Buffers, tokens: Sequence[int], *, logits: bool = True,
-            cut: Cut | None = None):
+            cut: Cut | None = None, features=None):
     """Rows for ``tokens`` at positions st.pos .. st.pos + R - 1: logits [R, V] bf16 (a view of b.logits) and the residual streams b.streams[:R]. The committed state is unchanged until ``commit``; ``cut`` (a prompt chunk): keeps each DeltaNet layer's state at its row."""
 
     if cut is not None and not (b.prefill and cut.at == 0 and 0 < cut.row < len(tokens)):
         raise ValueError(f"a prompt chunk of {len(tokens)} rows has no kept point at row {cut.row}")
-    return compute(w, stage(w, b, [(st, tokens)]), b, logits=logits, cuts=() if cut is None else (cut,))
+    return compute(w, stage(w, b, [(st, tokens)]), b, logits=logits,
+                   cuts=() if cut is None else (cut,), features=features)
 
 
 @triton.jit

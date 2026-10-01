@@ -13,14 +13,34 @@ from tensorfold.cuda.kernels import attention as tree_attention
 from tensorfold.cuda.kernels import gdn as deltanet
 
 from . import glue
-from .qmm_fast import matmul
-from .weights import QLinear, Weights
+from .qmm_fast import matmul, matmul_group
+from .weights import Plain, QLinear, Weights
 
 
 def _mm(x: torch.Tensor, w: QLinear, xs: torch.Tensor | None = None) -> torch.Tensor:
     if not isinstance(w, QLinear):
         return w(x)                                        # an EXL3 pack's weights run their own row-invariant kernels
     return matmul(x, w, xs)
+
+
+def _mm_group(x: torch.Tensor, ws: list, xs: torch.Tensor | None = None) -> list[torch.Tensor]:
+    """Projections of one input, each with the bits of its own ``_mm``: one launch on sm_12x for tiled 4-bit weights."""
+
+    if all(isinstance(w, QLinear) for w in ws):
+        return matmul_group(x, ws, xs)
+    shared = [i for i, w in enumerate(ws) if getattr(w, "act", None) is not None]   # checkpoint math: quantize once
+    got = {}
+    if len(shared) > 1:
+        from tensorfold.cuda.nvfp4 import checkpoint
+
+        outs = checkpoint.matmul_group(x, [ws[i] for i in shared])
+        got = dict(zip(shared, outs)) if outs is not None else {}
+    plain = [i for i, w in enumerate(ws) if isinstance(w, Plain) and i not in got]
+    if len(plain) == 2:                                    # the GDN gates b and a: one launch, each its own bits
+        from .b16 import matmul_pair
+
+        got.update(zip(plain, matmul_pair(x, ws[plain[0]].weight, ws[plain[1]].weight)))
+    return [got[i] if i in got else _mm(x, w, xs) for i, w in enumerate(ws)]
 
 
 def _row_mm(x: torch.Tensor, w: QLinear, tp: bool,
@@ -39,7 +59,7 @@ def _mlp(layer, h: torch.Tensor, xs: torch.Tensor, tp: bool) -> torch.Tensor:
         if tp:
             raise ValueError("routed experts run on one GPU")
         return moe.run(h, layer.moe)
-    act, act_xs = glue.swiglu(_mm(h, layer.gate, xs), _mm(h, layer.up, xs))
+    act, act_xs = glue.swiglu(*_mm_group(h, [layer.gate, layer.up], xs))
     return _row_mm(act, layer.down, tp, act_xs)
 
 
@@ -229,17 +249,15 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
         x, h, xs = glue.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
             gdn = layer.gdn
-            qkv = _mm(h, gdn.qkv, xs)
             if gdn.zba is not None:
-                zba = _mm(h, gdn.zba, xs)
+                qkv, zba = _mm_group(h, [gdn.qkv, gdn.zba], xs)
                 vd = c.v_heads * c.dv
                 z = zba[:, :vd].contiguous().reshape(W, c.v_heads, c.dv)
                 b = zba[:, vd:vd + c.v_heads].contiguous()
                 a = zba[:, vd + c.v_heads:].contiguous()
             else:
-                z = _mm(h, gdn.z, xs).reshape(W, c.v_heads, c.dv)
-                b = _mm(h, gdn.b, xs)
-                a = _mm(h, gdn.a, xs)
+                qkv, z, b, a = _mm_group(h, [gdn.qkv, gdn.z, gdn.b, gdn.a], xs)
+                z = z.reshape(W, c.v_heads, c.dv)
             q, k, v, g, beta = glue.gdn_pre(qkv, st.conv[i], gdn.conv, windows, a, b,
                                               gdn.A_log, gdn.dt_bias, kh=c.k_heads,
                                               vh=c.v_heads, dk=c.dk)
@@ -249,15 +267,14 @@ def tree_forward(w: Weights, tokens: torch.Tensor, parents: Sequence[int], st: S
             record.append(GDNRecord(q, k, v, g, beta, qkv))
         else:
             attn = layer.attn
-            qg = _mm(h, attn.q, xs)
             if attn.kv is not None:
-                kv = _mm(h, attn.kv, xs)
+                qg, kv = _mm_group(h, [attn.q, attn.kv], xs)
                 kd = c.kv_heads * c.head_dim
                 key = kv[:, :kd].contiguous()
                 value = kv[:, kd:].contiguous().reshape(W, c.kv_heads, c.head_dim)
             else:
-                key = _mm(h, attn.k, xs)
-                value = _mm(h, attn.v, xs).reshape(W, c.kv_heads, c.head_dim)
+                qg, key, value = _mm_group(h, [attn.q, attn.k, attn.v], xs)
+                value = value.reshape(W, c.kv_heads, c.head_dim)
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos,
                                     w.inv_freq, c.eps, heads=c.heads, kv_heads=c.kv_heads,
                                     head_dim=c.head_dim)
@@ -338,17 +355,15 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
         x, h, xs = glue.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
             gdn = layer.gdn
-            qkv = _mm(h, gdn.qkv, xs)
             if gdn.zba is not None:
-                zba = _mm(h, gdn.zba, xs)
+                qkv, zba = _mm_group(h, [gdn.qkv, gdn.zba], xs)
                 vd = c.v_heads * c.dv
                 z = zba[:, :vd].contiguous().reshape(W, c.v_heads, c.dv)
                 b = zba[:, vd:vd + c.v_heads].contiguous()
                 a = zba[:, vd + c.v_heads:].contiguous()
             else:
-                z = _mm(h, gdn.z, xs).reshape(W, c.v_heads, c.dv)
-                b = _mm(h, gdn.b, xs)
-                a = _mm(h, gdn.a, xs)
+                qkv, z, b, a = _mm_group(h, [gdn.qkv, gdn.z, gdn.b, gdn.a], xs)
+                z = z.reshape(W, c.v_heads, c.dv)
             conv = states[0].conv[i] if S == 1 else torch.cat([st.conv[i] for st in states])
             q, k, v, g, beta = glue.gdn_pre(qkv, conv, gdn.conv, windows_t, a, b, gdn.A_log, gdn.dt_bias,
                                             kh=c.k_heads, vh=c.v_heads, dk=c.dk, stream_ids=sid_t, nkeep=keep)
@@ -358,15 +373,14 @@ def multi_tree_forward(w: Weights, streams: Sequence[tuple[Sequence[int], Sequen
             record.append(GDNRecord(q, k, v, g, beta, qkv))
         else:
             attn = layer.attn
-            qg = _mm(h, attn.q, xs)
             if attn.kv is not None:
-                kv = _mm(h, attn.kv, xs)
+                qg, kv = _mm_group(h, [attn.q, attn.kv], xs)
                 kd = c.kv_heads * c.head_dim
                 key = kv[:, :kd].contiguous()
                 value = kv[:, kd:].contiguous().reshape(W, c.kv_heads, c.head_dim)
             else:
-                key = _mm(h, attn.k, xs)
-                value = _mm(h, attn.v, xs).reshape(W, c.kv_heads, c.head_dim)
+                qg, key, value = _mm_group(h, [attn.q, attn.k, attn.v], xs)
+                value = value.reshape(W, c.kv_heads, c.head_dim)
             q, key = glue.attn_prep(qg, key, attn.q_norm, attn.k_norm, pos,
                                     w.inv_freq, c.eps, heads=c.heads, kv_heads=c.kv_heads,
                                     head_dim=c.head_dim)
@@ -453,14 +467,18 @@ def _commit(states: Sequence[State], record: Sequence[Record], paths: Sequence[S
             news = src.index_select(1, pick_t).unbind(0)
         else:                                       # many rows: gather a layer at a time, the record uncopied
             news = [torch.cat([old, t.qkv]).index_select(0, pick_t) for old, t in zip(olds, items)]
+        dst, src = [], []
         for j, ((i, _), new) in enumerate(zip(linear, news)):
             for s, st in enumerate(states):
                 if replayed is not None:
                     st.rec[i] = replayed[s, j]
                 if in_place:
-                    st.conv[i].copy_(new[s * keep:(s + 1) * keep])
+                    dst.append(st.conv[i])
+                    src.append(new[s * keep:(s + 1) * keep])
                 else:
                     st.conv[i] = new[s * keep:(s + 1) * keep]
+        if dst:
+            torch._foreach_copy_(dst, src)            # every layer's and stream's window in one launch
     if att:
         for st, path in zip(states, paths):
             need = st.pos + len(path)

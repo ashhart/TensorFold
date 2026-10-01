@@ -6,6 +6,7 @@ import mlx.core as mx
 from mlx_lm.models.cache import KVCache
 
 from tensorfold.engine.alternating_kv import AlternatingKVCache, drop_spares
+from tensorfold.engine.family_common import cache_contents
 from tensorfold.engine.lane_engine import LaneEngine
 
 
@@ -29,9 +30,9 @@ def test_matches_kv_cache_under_random_writes_trims_and_copies():
             if rng.random() < 0.1:
                 copies.append((LaneEngine.copy_single_cache([ref])[0], LaneEngine.copy_single_cache([alt])[0]))
             assert ref.offset == alt.offset
-            assert _same(ref.state, alt.state)
+            assert _same(cache_contents(ref), cache_contents(alt))
         for r, a in copies:
-            assert _same(r.state, a.state)
+            assert _same(cache_contents(r), cache_contents(a))
 
 
 def test_decode_writes_alternate_and_spares_drop():
@@ -44,5 +45,5 @@ def test_decode_writes_alternate_and_spares_drop():
     assert alt.nbytes > KVCache.nbytes.fget(alt)
     drop_spares([alt])
     assert alt.spare_keys is None and alt.recent_keys is None
-    keys, _ = alt.state
+    keys, _ = cache_contents(alt)
     assert keys.shape[2] == 43 and float(keys[0, 0, 42, 0].item()) == 2.0

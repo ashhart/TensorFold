@@ -181,6 +181,8 @@ class FamilyPrefill:
                 if self.prefill_guard is None or self.prefill_guard.allow_checkpoint(work):
                     stream.history_checkpoints.append((list(prompt[:boundary]),
                                                        drop_spares(self.copy_single_cache(work))))
+                else:
+                    self.prefill_guard.refuse(boundary, work)        # logged where it refuses (issue #155)
                 start = boundary
             if fed:
                 yield
@@ -193,6 +195,9 @@ class FamilyPrefill:
             if prepared is None and at is not None and at in chunks and at not in kept:
                 stream.history_checkpoints.append((list(prompt[:at]), drop_spares(self.copy_single_cache(work))))
             raise
+        if getattr(stream, "label_ids", ()):                 # a decision: the last row, then no round
+            self._family_score(stream, hidden, cached_tokens)
+            return work
         first = self._family_first(stream, work, hidden, cached_tokens, self._fed_rows - 1)
         self._family_commit_first(stream, int(first.item()) if hasattr(first, "item") else int(first))
         return work
@@ -249,6 +254,55 @@ class FamilyPrefill:
         work, start = self._family_start(cache, cached_tokens, chunks)
         self._family_feed(prompt_ids, work, chunks.between(start, len(prompt_ids)))
         return drop_spares(work)
+
+    def _family_score(self, stream: Any, hidden: Any, cached_tokens: int) -> None:
+        """Read the decision's last row, draw nothing, and keep the stream out of the rounds."""
+
+        prompt_len = len(stream.prompt_ids)
+        stream.emitted = []
+        stream.pending = []
+        stream.cache_len = prompt_len
+        stream.cached_tokens = int(cached_tokens)
+        stream.started_at = time.perf_counter()
+        stream.scored = self._label_logits(hidden, stream.label_ids)
+        stream.finished = True
+        stream.finish_reason = "decision"
+
+    def _label_logits(self, hidden: Any, label_ids: Sequence[int]) -> tuple[list[float], float]:
+        """Last-row logits of ``label_ids`` and the full-vocabulary logsumexp."""
+
+        import math
+
+        import mlx.core as mx
+
+        logits = self.model.head(hidden)
+        row = logits.reshape(-1, logits.shape[-1])[-1].astype(mx.float32)
+        picked = row[mx.array([int(token) for token in label_ids], dtype=mx.int32)]
+        peak = mx.max(row)
+        logsumexp = peak + mx.log(mx.sum(mx.exp(row - peak)))
+        mx.eval(picked, logsumexp)
+        values = [float(item) for item in picked.tolist()]
+        total = float(logsumexp.item())
+        if not math.isfinite(total) or any(not math.isfinite(value) for value in values):
+            raise ValueError("label scoring produced a non-finite logit")
+        return values, total
+
+    def score_labels(self, prompt_ids: Sequence[int], label_ids: Sequence[int]) -> tuple[list[float], float]:
+        """Last-position logits of ``label_ids`` and the full-vocabulary logsumexp. No token is sampled."""
+
+        prompt = [int(token) for token in prompt_ids]
+        labels = [int(token) for token in label_ids]
+        if not prompt:
+            raise ValueError("empty prompt")
+        if not labels:
+            raise ValueError("empty labels")
+        chunks = self.prompt_chunks(prompt)
+        work, start = self._family_start(None, 0, chunks)
+        try:
+            hidden = self._family_feed(prompt, work, chunks.between(start, len(prompt)))
+            return self._label_logits(hidden, labels)
+        finally:
+            del work
 
     def _family_add_stream(self, stream: Any, *, cache: list[Any] | None, cached_tokens: int,
                            checkpoints_at: Sequence[int]) -> Iterator[None]:

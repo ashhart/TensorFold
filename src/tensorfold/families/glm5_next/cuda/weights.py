@@ -11,7 +11,7 @@ import torch
 
 from tensorfold.cuda import experts as grouped
 
-from .exl3_mm import Exl3Experts, words as exl3_words
+from tensorfold.cuda.exl3.experts import Exl3RoutedExperts as Exl3Experts
 from . import latent
 from .qmm import B16, Q4, as_i32, make_b16, make_q4, quantize4, stack_b16, stack_q4
 
@@ -346,18 +346,19 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = 
         return out
 
     def moe_exl3(p: str) -> Exl3Experts:
-        parts = {}
-        for proj in ("gate_proj", "up_proj", "down_proj"):
-            ts, us, vs = [], [], []
-            for e in range(cfg.experts):
-                name = PREFIX + p + f"experts.{e}.{proj}."
-                ts.append(exl3_words(rd.get(name + "trellis")))
-                us.append(rd.get(name + "suh"))
-                vs.append(rd.get(name + "svh"))
-            parts[proj] = (torch.stack(ts).to(dev), torch.stack(us).to(dev), torch.stack(vs).to(dev))
-            del ts, us, vs
-        (gt, sg, vg), (ut, su, vu), (dt, sd, vd) = parts["gate_proj"], parts["up_proj"], parts["down_proj"]
-        return Exl3Experts(gt, ut, dt, sg, su, vg, vu, sd, vd, cfg.experts, int(vg.shape[1]), int(vd.shape[1]))
+        from tensorfold.cuda.exl3 import experts as generic
+        gate = generic.prepare(
+            [(rd.get(PREFIX + p + f"experts.{e}.gate_proj.trellis").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.gate_proj.suh").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.gate_proj.svh").to(dev)) for e in range(cfg.experts)],
+            [(rd.get(PREFIX + p + f"experts.{e}.up_proj.trellis").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.up_proj.suh").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.up_proj.svh").to(dev)) for e in range(cfg.experts)],
+            [(rd.get(PREFIX + p + f"experts.{e}.down_proj.trellis").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.down_proj.suh").to(dev),
+              rd.get(PREFIX + p + f"experts.{e}.down_proj.svh").to(dev)) for e in range(cfg.experts)],
+            "mcg", device=dev)
+        return gate
 
     def moe(i: int) -> MoEW:
         p = f"layers.{i}.mlp."

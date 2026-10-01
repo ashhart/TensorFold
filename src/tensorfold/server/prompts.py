@@ -7,6 +7,7 @@ from typing import Any
 
 from tensorfold.server.errors import CapacityError, RequestError
 from tensorfold.server.messages import _normalize_tool_call_arguments, normalize_messages
+from tensorfold.vision.images import DEFAULT_LIMITS, ImageLimits
 
 
 @dataclass
@@ -39,19 +40,19 @@ def image_slot():
     return IMAGE_SLOTS
 
 
-def prepare_images(frontend, messages, render, *, context_limit=None):
+def prepare_images(frontend, messages, render, *, context_limit=None, limits: ImageLimits = DEFAULT_LIMITS):
     from tensorfold.vision.images import ImageInputError, load_images, split_images
 
     if frontend is None:
         raise RequestError('image input requires a supported vision checkpoint served with --vision')
     allow_urls = bool(getattr(frontend, 'allow_urls', False))
     try:
-        template, sources = split_images(messages, allow_urls=allow_urls)
+        template, sources = split_images(messages, limits=limits, allow_urls=allow_urls)
     except (ImageInputError, ValueError) as exc:
         raise RequestError(str(exc)) from exc
     slot = image_slot()
     try:
-        images = load_images(sources, allow_urls=allow_urls)
+        images = load_images(sources, limits=limits, allow_urls=allow_urls)
         prepared = frontend.prepare(render(template), images, max_prompt_tokens=context_limit)
     except (ImageInputError, ValueError, ImportError) as exc:
         raise RequestError(str(exc)) from exc
@@ -84,4 +85,5 @@ def prepare_prompt(app, messages, tools, thinking, prompt, fields):
         with app.tokenizer_lock:
             return app.tokenizer.apply_chat_template(template, **kwargs)
 
-    return prepare_images(getattr(app, 'vision', None), messages, render, context_limit=app.context_window or None)
+    return prepare_images(getattr(app, 'vision', None), messages, render, context_limit=app.context_window or None,
+                          limits=getattr(app, 'image_limits', DEFAULT_LIMITS))

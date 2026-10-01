@@ -36,6 +36,26 @@ def ngrams_on_host(model_dir: Path, ssd: bool = False) -> bool:
     return size > 0.75 * int(info["max_recommended_working_set_size"])
 
 
+def windows_lock_pages(arrays, kernel32=None):
+    """Best effort page pinning on Windows: VirtualLock answers False when it refuses, and nothing stays pinned."""
+
+    import ctypes
+
+    try:
+        api = kernel32 if kernel32 is not None else ctypes.WinDLL("kernel32", use_last_error=True)
+        pinned = []
+        for array in arrays:
+            address, size = ctypes.c_void_p(array.ctypes.data), ctypes.c_size_t(array.nbytes)
+            if not api.VirtualLock(address, size):
+                for past, past_size in pinned:
+                    api.VirtualUnlock(past, past_size)
+                return False
+            pinned.append((address, size))
+        return True
+    except (AttributeError, OSError):      # no kernel32 here either: the tables simply stay unpinned
+        return False
+
+
 class HostTable:
     """Keep n-gram shards memory-mapped on the host; gather copies only requested rows, never whole tables to the GPU."""
 
@@ -110,6 +130,8 @@ class HostTable:
 
         import ctypes
 
+        if os.name == "nt":
+            return windows_lock_pages(self.words + self.scales + self.biases)
         libc = ctypes.CDLL(None, use_errno=True)
         libc.mlock.argtypes = libc.munlock.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
         done = []
@@ -175,6 +197,8 @@ class BF16Table:
 
         import ctypes
 
+        if os.name == "nt":
+            return windows_lock_pages(self.values)
         libc = ctypes.CDLL(None, use_errno=True)
         libc.mlock.argtypes = libc.munlock.argtypes = (ctypes.c_void_p, ctypes.c_size_t)
         done = []

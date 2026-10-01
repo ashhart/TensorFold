@@ -211,6 +211,30 @@ def test_flash_next_reads_the_nvfp4_checkpoint_and_refuses_other_fp4_blocks(tmp_
         (tmp_path / "config.json").write_text(json.dumps(other))
         with pytest.raises(ValueError, match="blocks of 16"):
             qwen4_exp.check(tmp_path)
+    # NVFP4 outside the routed experts (e.g. a W4A16 DeltaNet projection) is refused before any weight is read
+    gdn_fp4 = json.loads(json.dumps(mixed))
+    gdn_fp4["quantization_config"]["quantized_layers"]["model.language_model.layers.0.linear_attn.in_proj_qkv"] = {
+        "quant_algo": "W4A16_NVFP4", "group_size": 16}
+    (tmp_path / "config.json").write_text(json.dumps(gdn_fp4))
+    with pytest.raises(ValueError, match="routed experts and n-gram tables only.*in_proj_qkv"):
+        qwen4_exp.check(tmp_path)
+    for suffix in ("", ".shard_0"):
+        ple_fp4 = json.loads(json.dumps(mixed))
+        key = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding" + suffix
+        ple_fp4["quantization_config"]["quantized_layers"][key] = {"quant_algo": "NVFP4", "group_size": 16}
+        (tmp_path / "config.json").write_text(json.dumps(ple_fp4))
+        qwen4_exp.check(tmp_path)
+    # FP8 in the MTP drafter's experts is read (dequantized and re-quantized at load); in the main experts it is not
+    mtp_fp8 = json.loads(json.dumps(mixed))
+    mtp_fp8["quantization_config"]["quantized_layers"]["mtp.layers.0.mlp.experts"] = {"quant_algo": "FP8"}
+    (tmp_path / "config.json").write_text(json.dumps(mtp_fp8))
+    qwen4_exp.check(tmp_path)
+    main_fp8 = json.loads(json.dumps(mixed))
+    main_fp8["quantization_config"]["quantized_layers"]["model.language_model.layers.0.mlp.experts"] = {
+        "quant_algo": "FP8"}
+    (tmp_path / "config.json").write_text(json.dumps(main_fp8))
+    with pytest.raises(ValueError, match="blocks of 16"):
+        qwen4_exp.check(tmp_path)
 
 
 def test_models_lists_the_tested_checkpoints(capsys):

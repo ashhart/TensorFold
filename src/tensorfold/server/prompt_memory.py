@@ -490,5 +490,15 @@ class PromptMemory:
     def allow_load(self, size: int) -> bool:
         return not self._over_store_budget(size) and self._make_room(size)
 
+    def refusal_reason(self, cache: Any) -> str:
+        """Why this copy is kept nowhere ("" = normal: this server keeps no prompt cache beside memory)."""
+
+        size = cache_nbytes(cache)
+        if self.store is None:
+            return ""
+        if self._over_store_budget(size):
+            return f"its {size} B copy passes the {self.store.budget_bytes} B prompt-cache budget"
+        return "memory is full and reclaiming what could be freed would still leave no room for the copy"
+
 
 __all__ = ["OpenPrompt", "PromptMemory", "attention_geometry", "pass_row_bytes", "probe_tokens"]

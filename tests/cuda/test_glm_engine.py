@@ -377,9 +377,10 @@ def test_exl3_checkpoint_drafted_equals_serial(engine_x, sampling):
     """An EXL3 checkpoint through the same engine: every policy's reply equals serial decoding."""
 
     from tensorfold.families.glm5_next.cuda.engine import EXL3_AUTO, encode_policy
-    from tensorfold.families.glm5_next.cuda.exl3_mm import Exl3Experts
+    from tensorfold.cuda.exl3.experts import Exl3RoutedExperts
 
-    assert isinstance(engine_x.w.layers[1].moe.experts, Exl3Experts) and engine_x.w.layers[1].moe.shared is not None
+    assert isinstance(engine_x.w.layers[1].moe.experts, Exl3RoutedExperts)
+    assert engine_x.w.layers[1].moe.shared is not None
     assert engine_x._effective(encode_policy("auto")) == encode_policy(EXL3_AUTO)       # the default drafts DFlash2
     assert engine_x._effective(encode_policy("auto:1:1:0")) == encode_policy("auto:1:1:0")
     prompt = list(np.random.default_rng(8).integers(0, 1000, size=45))
@@ -387,6 +388,47 @@ def test_exl3_checkpoint_drafted_equals_serial(engine_x, sampling):
     for policy in (None, "auto:1:1:0", "f3", "fc5:0.3", "2", "c3:0.35", "a:0.6:0.85"):
         drafted, stats = _generate(engine_x, prompt, sampling, policy=policy, tokens=32)
         assert drafted == serial, policy
+
+
+@pytest.mark.parametrize("cache_bytes", [0, 64 * 1024 * 1024], ids=["drop", "save"])
+@pytest.mark.parametrize("policy", ["2", "f3"], ids=["mtp", "dflash2"])
+def test_decision_between_chats_preserves_replies(engine_f, cache_bytes, policy):
+    """Real scoring leaves the next resume and a later conversation switch on the serial reply."""
+    # The checkpoint and drafter run real CUDA kernels. This single-GPU fixture is not a two-rank parity test.
+    e = engine_f
+    old_budget = e.cache_bytes
+    sampling = Sampling(127, 1.0, 20, 0.95)
+    rng = np.random.default_rng(127)
+    prompt = [int(t) for t in rng.integers(0, 1000, size=40)]
+    decision = [int(t) for t in rng.integers(0, 1000, size=80)]
+    other = [int(t) for t in rng.integers(0, 1000, size=24)]
+    labels = [0, 17, V // 2, V - 1]     # read both gathered vocabulary shards
+    try:
+        _forget(e)
+        e.cache_bytes = cache_bytes
+        expected_scores = e.score_labels(decision, labels)
+        reply, _ = _generate(e, prompt, sampling, policy=policy, tokens=16)
+        after = prompt + reply + [31, 32]
+        if policy == "f3":
+            assert e.drafter.context_end > 0
+        assert e.score_labels(decision, labels) == expected_scores
+        assert e.e.st.pos == 0 and e.drafter.context_end == 0
+        assert e.live == []
+
+        immediate, stats = _generate(e, after, sampling, policy=policy, tokens=16)
+        # Saved attention rows retain MTP, but not DFlash2's unsaved draft cache.
+        assert stats["cached"] == (len(prompt) - 1 if cache_bytes and policy == "2" else 0)
+        _generate(e, other, sampling, policy=policy, tokens=16)
+        switched, _ = _generate(e, after + [33], sampling, policy=policy, tokens=16)
+        _forget(e)
+        fresh, _ = _generate(e, after, sampling, policy=policy, tokens=16)
+        assert immediate == fresh
+        _forget(e)
+        fresh_switched, _ = _generate(e, after + [33], sampling, policy=policy, tokens=16)
+        assert switched == fresh_switched
+    finally:
+        _forget(e)
+        e.cache_bytes = old_budget
 
 
 def test_exl3_checkpoint_resumes(engine_x):

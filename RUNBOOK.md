@@ -82,7 +82,10 @@ docker run -it --gpus all --ipc=host --network host --device /dev/infiniband \
 ```
 
 Install and pull the same checkpoint and drafter on both ranks. Configure `NCCL_SOCKET_IFNAME` and
-`NCCL_IB_HCA` for the actual link if automatic selection fails. Start rank 1 first, then rank 0:
+`NCCL_IB_HCA` for the actual link if automatic selection fails. Two DGX Sparks on their direct cable expose two
+RoCE devices for the one port; list both, `NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1`. With `rocep1s0f1` alone, the
+27B read a 7k-token prompt about 8% slower in our runs, and decoded at the same speed. Start rank 1 first, then
+rank 0:
 
 ```bash
 tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --tp 2 --rank 1 --master 192.0.2.1
@@ -93,6 +96,34 @@ Replace the documentation address with rank 0's reachable address. Both ranks mu
 drafting settings. The default rendezvous port is 29551. The rendezvous port and the link between the ranks
 are not authenticated: keep them on a private link, or firewall the port to the peer. GLM requires two CUDA
 ranks; Flash Next can use one or two and needs `--no-drafts` when its checkpoint lacks an MTP head.
+
+### RTX cards without Docker
+
+On an RTX 40 or 50 series card or an RTX PRO Blackwell, pip alone is enough. torch comes from PyPI and the CUDA
+compiler from NVIDIA's own wheels, all in a virtual environment, with no root and no container:
+
+```bash
+python3 -m venv ~/tf-venv && . ~/tf-venv/bin/activate
+python -m pip install torch ninja "cuda-toolkit[nvcc,cccl]==13.0.*"
+python -m pip install git+https://github.com/ashhart/TensorFold.git
+tensorfold pull Vontra/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve Vontra/Qwen3.8-27B-MLX-4bit --name local-model --host 127.0.0.1 --port 8080
+```
+
+Match the compiler wheel to torch's CUDA version, which `python -c "import torch; print(torch.version.cuda)"`
+prints; PyPI's torch 2.14 uses CUDA 13.0. The first start compiles the kernels and names the compiler it found. On
+a card other jobs share, set `TENSORFOLD_MEMORY_RESERVE_GIB` to the memory TensorFold should leave free and pass an
+explicit `--context`.
+
+<a id="win-nvidia"></a>
+
+## Windows with an NVIDIA card
+
+Native Windows is experimental: its host layer is in, but it has not served a request on a Windows PC yet. It runs
+one GPU a process, since CUDA on Windows has no NCCL for two ranks; it reads weights through pinned buffers where
+Linux uses O_DIRECT, sizes memory with Windows' own API, and prints every thread's stack on Ctrl+Break. GPUs below
+compute capability 8.9 are refused at startup. WSL2 runs the Linux engine instead: inside Ubuntu, follow
+[RTX cards without Docker](#rtx-cards-without-docker). We have not run it under WSL2 yet either.
 
 ## Memory and context
 

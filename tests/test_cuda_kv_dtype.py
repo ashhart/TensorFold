@@ -41,12 +41,13 @@ def test_the_family_and_the_cache_list_the_same_dtypes():
 @pytest.mark.parametrize("streams", [1, 4])
 def test_quantized_caches_admit_longer_windows_on_the_same_budget(tmp_path, monkeypatch, fake_runtime, streams):  # noqa: F811
     from tensorfold.cuda.geometry import gdn_geometry, indexed_stream_geometry
+    from tensorfold.families.qwen4_exp.cuda.engine import KEEP, KEEP_SERIAL
 
     checkpoint(tmp_path, small_config(), WEIGHTS)
     calls, capacity = fake_runtime
     text = small_config()
-    bf16 = gdn_geometry(text, 1, 4, indexed=True, mtp=True) if streams == 1 else \
-        indexed_stream_geometry(text, streams, 4, 8, mtp=True)
+    bf16 = gdn_geometry(text, 1, 4, indexed=True, mtp=True, kept=KEEP_SERIAL + 1) if streams == 1 else \
+        indexed_stream_geometry(text, streams, 4, KEEP, mtp=True)
     budget = bf16.needed(12000) + 32768                      # bf16 fits about 12,000 tokens
     monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
     windows = {}

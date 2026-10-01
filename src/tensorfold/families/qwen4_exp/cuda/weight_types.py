@@ -74,6 +74,7 @@ class Config:
     group_size: int
     bits: int
     quant: str = "mlx"                 # "mlx" (affine 4-bit everywhere) or "modelopt" (NVFP4 routed experts)
+    mrope_section: tuple[int, int, int] = (11, 11, 10)   # interleaved t/h/w rotary pairs
     nvfp4_group: int = 16              # the NVFP4 block size (the checkpoint's config_groups weights.group_size)
 
     @classmethod
@@ -113,6 +114,7 @@ class Config:
             ple_eos=int(teos[0] if isinstance(teos, list) else teos) if teos is not None else 0,
             eos=eos, group_size=int(quant.get("group_size", 32)), bits=int(quant.get("bits", 4)),
             quant=method, nvfp4_group=group,
+            mrope_section=tuple(int(x) for x in rope.get("mrope_section", (11, 11, 10))),
         )
 
     @property

@@ -185,7 +185,7 @@ def _model_context(model_dir: Path) -> int:
     return int(limit) if isinstance(limit, int) and limit > 0 else 0
 
 
-def _drafter(family: Any, choice: str) -> str:
+def _drafter(family: Any, choice: str, backend: str = "mlx") -> str:
     """The draft model directory for ``--drafter`` (auto: the family's draft model if it has been pulled)."""
 
     from tensorfold import hub
@@ -194,7 +194,9 @@ def _drafter(family: Any, choice: str) -> str:
         return ""
     if choice != "auto":
         return str(hub.resolve(choice))
-    repo = getattr(family.package, "DRAFTER", "")
+    # a family that drafts otherwise on CUDA (Qwen3.6 MoE: its MTP layer) declares CUDA_DRAFTER = ""
+    repo = getattr(family.package, "CUDA_DRAFTER" if backend == "cuda" else "DRAFTER",
+                   getattr(family.package, "DRAFTER", ""))
     if not repo:
         return ""
     found = hub.cached(repo)
@@ -237,7 +239,7 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     if args.tp == 1 and args.rank != 0:
         raise ValueError("--rank 1 needs --tp 2")
     started = time.perf_counter()
-    drafter = "" if args.no_drafts else _drafter(family, args.drafter)
+    drafter = "" if args.no_drafts else _drafter(family, args.drafter, "cuda")
     options: dict[str, Any] = {"drafter": drafter, "tp": int(args.tp), "rank": int(args.rank), "master": args.master,
                                "master_port": int(args.master_port), "no_drafts": bool(args.no_drafts)}
     if getattr(args, "kv_dtype", "bf16") != "bf16":
@@ -261,12 +263,18 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
-    from tensorfold.cuda import prompt_precision
+    from tensorfold.cuda import precision, prompt_precision
 
     asked = getattr(args, "prefill_fp8", None)
     prompt_precision.set_fp8(prompt_precision.FP8_BY_DEFAULT if asked is None else asked)   # before any weight loads
+    chosen = getattr(args, "precision", None)
+    precision.set_mode(chosen or precision.CHECKPOINT, asked=chosen is not None)
     engine = family.package.cuda_engine(model_dir, **options)
-    fp8 = prompt_precision.fp8() and bool(getattr(getattr(engine, "w", None), "fast_prefill", False))
+    weights = getattr(engine, "w", None)
+    fp8 = prompt_precision.fp8() and bool(getattr(weights, "fast_prefill", False))
+    if asked and not fp8 and getattr(weights, "precision", "full") == precision.CHECKPOINT:
+        raise ValueError("--prefill-fp8 is for --precision full: the checkpoint's own math already runs its prompts in "
+                         "FP4 and FP8")
     if asked and not fp8:
         raise ValueError("--prefill-fp8: this checkpoint's prompt matmuls have no FP8 kernel (EXL3 packs, MLX formats "
                          "other than Qwen's 4-bit g64, Flash Next without MXFP8 layers); drop the flag")
@@ -286,13 +294,15 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     app = app_class(engine, model_dir, served, default_thinking=bool(args.thinking), sampling=sampling,
                     max_tokens=int(args.max_tokens), context_window=context if context is not None else args.context,
                     reasoning_effort=args.reasoning_effort, thinking_budget=int(args.thinking_budget),
+                    vision_max_images=getattr(args, "vision_max_images", None),
                     aliases=list(args.alias))
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
     effective_context = app.effective_context_window
+    own = getattr(weights, "precision", "") == precision.CHECKPOINT
+    prompts = "FP8 activations" if fp8 else "the checkpoint math" if own else "bf16 activations"
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 on CUDA{where} "
-          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
-          f"prompts: {'FP8 activations' if fp8 else 'bf16 activations'}; "
+          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; prompts: {prompts}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
     serve(app, args.host, int(args.port))
@@ -480,6 +490,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
         snapshot_dir=snapshot_dir, model_id=model_id, model_dir=model_dir,
         decode_share=0.25 if args.decode_share is None else float(args.decode_share),
         grow_checkpoints=args.prompt_cache_gib is None,
+        vision_max_images=getattr(args, "vision_max_images", None),
     )
     if app.context_fitted:
         print(f"[tensorfold] context window {app.context_window:,} tokens: the most one request can use in the "

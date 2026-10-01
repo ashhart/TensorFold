@@ -35,20 +35,19 @@ def test_no_gpu_leaves_it_to_the_engine(monkeypatch):
     build.refuse_old_gpu()
 
 
-@pytest.mark.parametrize("quantization,need", [({"group_size": 64, "bits": 4}, build.MIN_CAPABILITY),
-                                               ({"quant_method": "modelopt", "quant_algo": "NVFP4"}, build.CLUSTERS),
-                                               ({"quant_method": "compressed-tensors"}, build.CLUSTERS)])
-def test_a_checkpoint_sets_the_floor(tmp_path, quantization, need):
+@pytest.mark.parametrize("quantization", [{"group_size": 64, "bits": 4}, {"quant_method": "compressed-tensors"},
+                                          {"quant_method": "modelopt", "quant_algo": "NVFP4"}])
+def test_every_checkpoint_runs_from_ada(tmp_path, quantization):
     key = "quantization" if "bits" in quantization else "quantization_config"
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5", key: quantization}))
-    assert capacity.floor(tmp_path) == need
+    assert capacity.floor(tmp_path) == build.MIN_CAPABILITY == (8, 9)
 
 
-def test_an_nvfp4_checkpoint_on_ada_is_refused_before_any_weight_loads(monkeypatch, tmp_path):
-    _gpu(monkeypatch, (8, 9), "NVIDIA GeForce RTX 4090")
+def test_an_nvfp4_checkpoint_below_ada_is_refused_before_any_weight_loads(monkeypatch, tmp_path):
+    _gpu(monkeypatch, (8, 6), "NVIDIA GeForce RTX 3090")
     config = {"model_type": "qwen3_5", "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"}}
     (tmp_path / "config.json").write_text(json.dumps(config))
     fail = lambda *a, **k: pytest.fail("admission read the checkpoint on a GPU it refuses")   # noqa: E731
     monkeypatch.setattr(capacity, "estimate_weights", fail)
-    with pytest.raises(ValueError, match=r"compute capability 9\.0 or newer.*RTX 4090.*is 8\.9"):
+    with pytest.raises(ValueError, match=r"compute capability 8\.9 or newer.*RTX 3090.*is 8\.6"):
         capacity.admit(tmp_path, None, None, torch, fail, fail)
