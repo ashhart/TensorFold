@@ -314,3 +314,4 @@ Follow-up (same day): sublayer timing (graph of one sublayer over layers 4-39, 1
 | attention chunk 64 / 32 keys (20 / 40 programs for 1 row instead of 10) | no measurable change; default 128 (`TF_MQA_CHUNK`) |
 | input rotation fused into the EXL3 linear kernel (`TF_EXL3_ROT_FUSE=1`) | bit-identical in unit tests; standalone +-1-2.6 us; no serial gain; a multi-row case fails ("invalid argument"), so off |
 | L2 warming, corrected (GB10 ignores `prefetch.global.L2`: a 13 MB GEMV cold 129 us, after prefetch hints 110-124, after evict-last loads of every 32-byte sector 46-51, hot 44) | real warming but slower in decode: MoE weights during the attention all-gather 34.9, wo_a during the attention core 34.7, both 34.0, vs 36.1 tok/s; off |
+| GPU-initiated RDMA (NVSHMEM 3.8 IBGDA) in place of NCCL's ~19 us proxied all-gathers | not possible on GB10: no DMA-BUF export, no nvidia_peermem, so IBGDA (and GPUDirect RDMA) cannot initialise |
