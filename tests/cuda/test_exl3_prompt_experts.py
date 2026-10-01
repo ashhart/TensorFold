@@ -143,3 +143,25 @@ def test_prompt_bf16_y_is_the_rounded_fp32_y(monkeypatch):
     bad = (out.view(torch.int16) != ref.view(torch.int16))
     rows = bad.any(dim=1).nonzero().flatten().tolist()
     assert bad32 == 0 and not rows, (bad32, int(bad.sum()), rows[:20], len(rows))
+
+
+@pytest.mark.parametrize("n,k", [(324, 10240), (10240, 320), (96, 2560), (2560, 2560), (512, 2560), (1, 2560)])
+def test_f16_prompt_tiles_give_the_sliced_bits(n, k, monkeypatch):
+    """The EXL3 pack's fp16 matmul at prompt row counts (larger tiles; slices summed in one program) equals the 16-row
+    tiles with fp32 slices and the in-order reduce, row for row."""
+
+    from tensorfold.families.qwen4_exp.cuda import exl3_mm
+
+    g = torch.Generator().manual_seed(n + k)
+    w = (torch.randn((n, k), generator=g) * 0.02).half()
+    sc = exl3_mm.Scratch(11)
+    lin = exl3_mm.f16(sc, [w], "cuda")
+    sc.part = torch.empty((max(1, lin.sk) * exl3_mm.ROWS * n,), dtype=torch.float32, device="cuda")
+    for m in (65, 300, 2048):
+        x = torch.randn((m, k), generator=g).to(torch.bfloat16).cuda()
+        for dt in (torch.float32, torch.bfloat16):
+            monkeypatch.setattr(exl3_mm, "FUSED_MIN", 0)
+            ref = lin(x, torch.empty((m, n), dtype=dt, device="cuda")).clone()
+            monkeypatch.setattr(exl3_mm, "FUSED_MIN", 64)
+            got = lin(x, torch.full((m, n), float("nan"), dtype=dt, device="cuda"))
+            assert torch.equal(got.view(torch.int16), ref.view(torch.int16)), (n, k, m, dt)
