@@ -147,6 +147,8 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr(dist, "init_process_group", lambda *a, **kw: None)
     monkeypatch.setattr(dist, "all_gather_into_tensor", lambda recv, send: both(send, recv))
     monkeypatch.setitem(sys.modules, "tensorfold.families.qwen3_5.cuda.distributed", SimpleNamespace(split_weights=None))
+    from tensorfold.families.qwen4_exp.cuda import engine as flash_engine
+    monkeypatch.setattr(flash_engine, "build_kernels", lambda **kw: None)     # no CUDA extension builds here
     return calls, capacity
 
 

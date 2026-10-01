@@ -29,6 +29,31 @@ def vision_workspace() -> int:
     return int(value) * 2**20
 
 
+def build_kernels(*, exl3: bool = False, nvfp4: bool = False, solo: bool = True) -> None:
+    """Load each applicable extension after admission and before resident weights consume the pool."""
+
+    from tensorfold.cuda import experts
+    from tensorfold.cuda.kernels import gdn as shared_gdn
+    from tensorfold.cuda.kernels import qmm
+
+    from . import gdn, gdn_io
+
+    loaders = [experts._ext, shared_gdn._ext, qmm._ext, gdn_io._ext]
+    if solo:                                     # one stream's decode windows: gdn.chain; concurrent rounds don't
+        loaders.append(gdn._ext)
+    if nvfp4:
+        from tensorfold.cuda.nvfp4 import checkpoint, linear
+
+        loaders += [linear._ext, linear._prompt_ext, checkpoint._ext]
+    if exl3:
+        from tensorfold.cuda.exl3 import experts as x3experts
+        from tensorfold.cuda.exl3 import linear as x3linear
+
+        loaders += [x3experts._ext, x3linear._ext]
+    for load in loaders:
+        load()
+
+
 class FlashNextEngine:
     """``eos``, ``generate`` (rank 0 or one GPU) and ``follow`` (rank 1), as ``tensorfold.cuda.server`` expects."""
 
@@ -114,6 +139,8 @@ class FlashNextEngine:
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
             self._same_settings(torch, ids)
+        build_kernels(exl3=exl3, nvfp4=not exl3 and quant_method(read_config(model_dir)) == "modelopt",
+                      solo=streams == 1)
         from concurrent.futures import wait
 
         from tensorfold.cuda.direct_read import wait_all
