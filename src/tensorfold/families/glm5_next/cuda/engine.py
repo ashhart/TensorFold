@@ -105,6 +105,20 @@ def without_mtp(transform, layers: int):
     return lambda name, info: (0, 0) if name.startswith(prefix) else transform(name, info)
 
 
+class StopVote:
+    """A reply's callback on both ranks: True once rank 0's caller asked to stop, after the same round on both.
+
+    Only rank 0 sees the client. Without the vote a reply whose client left (or whose stop string matched) went on
+    to max_tokens on both ranks, silently, holding the pair for minutes. One int crosses the link a round."""
+
+    def __init__(self, on_tokens: Callable[[list[int]], Any], gather: Callable[[list[int]], list[list[int]]]) -> None:
+        self.on_tokens, self.gather, self.asked = on_tokens, gather, False
+
+    def __call__(self, tokens: list[int]) -> bool:
+        self.asked = bool(self.on_tokens(tokens)) or self.asked       # rank 1's callback never asks
+        return any(votes[0] for votes in self.gather([int(self.asked)]))
+
+
 class GlmEngine:
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
@@ -447,8 +461,8 @@ class GlmEngine:
                         keep_at=max(1, len(prompt) - 1) if draft else None, keep=self._remember)
         prefill_s = time.perf_counter() - t0
         stats: dict[str, Any] = {"prefill_s": prefill_s, "cached": cut}
-        on_tokens([first])
-        if max_tokens <= 1 or (stop_eos and first in self.eos):
+        on_tokens = StopVote(on_tokens, self._gather_ints)        # both ranks stop where rank 0's caller asks
+        if on_tokens([first]) or max_tokens <= 1 or (stop_eos and first in self.eos):
             return stats
         policy = decode_policy(code)
         if policy is None:

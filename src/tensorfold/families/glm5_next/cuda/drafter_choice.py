@@ -147,12 +147,13 @@ def auto_decode(e: Engine, drafter, pending: int, count: int, sampling: Sampling
         arms.append(arm)
         e.follow(sampled[:keep])
         out.extend(sampled[:keep])
-        if on_tokens is not None:
-            on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])
+        halt = on_tokens is not None and on_tokens(sampled[:keep][:max(0, count - (len(out) - keep))])
         stages["draft"] += (t1 - t0) + (t5 - t4)
         stages["forward"] += t2 - t1
         stages["sample"] += t3 - t2
         stages["commit"] += t4 - t3
+        if halt:                                # True: the caller stops the reply here
+            break
     _sync(w)
     seconds = time.perf_counter() - start
     if drafter is not None and n_f:
