@@ -43,6 +43,13 @@ def repeat_to(text: str, chars: int) -> str:
     return block * copies
 
 
+def tile(ids: list[int], need: int) -> list[int]:
+    if not ids:
+        raise SystemExit("empty chat")
+    copies = max(1, (need + len(ids) - 1) // len(ids))
+    return ids * copies
+
+
 def code_text(limit: int = 2_000_000) -> str:
     root = Path(sysconfig.get_paths()["stdlib"])
     parts: list[str] = []
@@ -69,7 +76,9 @@ def sequences(tokenizer, wikitext: Path, length: int, wiki: int, code: int, chat
     if code:
         rows += [("code", w) for w in windows(encode(tokenizer, code_text()), length, code)]
     if chat:
-        rows += [("chat", w) for w in windows(encode(tokenizer, repeat_to("".join(CHATS), length * 8)), length, chat)]
+        text = "".join(CHATS)
+        block = encode(tokenizer, text if text.endswith("\n") else text + "\n")
+        rows += [("chat", w) for w in windows(tile(block, chat * length), length, chat)]
     return rows
 
 
@@ -163,6 +172,10 @@ def self_test() -> int:
     text = repeat_to("abc ", 20)
     if len(text) < 20 or not text.startswith("abc"):
         raise SystemExit("repeat")
+    tiled = tile([1, 2, 3], LENGTH * 2)
+    got = windows(tiled, LENGTH, 2)
+    if len(got) != 2 or got[1][0] != tiled[LENGTH]:
+        raise SystemExit("tiled chat")
     print("self-test ok")
     return 0
 
