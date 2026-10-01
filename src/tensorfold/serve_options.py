@@ -12,6 +12,12 @@ def check(args: argparse.Namespace, family: Any, backend: str, config_dir: Any =
 
     if getattr(args, "vision_urls", False) and not getattr(args, "vision", False):
         raise ValueError("--vision-urls needs --vision")
+    images = getattr(args, "vision_max_images", None)
+    if images is not None:
+        if not isinstance(images, int) or isinstance(images, bool) or images < 1:
+            raise ValueError("--vision-max-images must be a positive integer")
+        if not getattr(args, "vision", False):
+            raise ValueError("--vision-max-images needs --vision")
     if getattr(args, "vision", False):             # only --vision reads the config here
         if family.model_type == "glm5_next" and backend != "mlx":
             raise ValueError("GLM-5.3-Flash image input is currently MLX-only")

@@ -103,6 +103,7 @@ between MLX and CUDA, different quantizations, or different tensor-parallel rank
 | `--host`, `--port` | Listen address, default `127.0.0.1:8080` | Both |
 | `--name` | Model ID advertised to clients | Both |
 | `--vision` | Opt-in GLM-5.3-Flash and Qwen3.5/3.8 dense image input | MLX; Qwen also CUDA |
+| `--vision-max-images N` | With `--vision`, images across the full request history (default 4); other image limits still apply | Both |
 | `--alias` | Additional model IDs | MLX |
 | `--context N` | Prompt plus reply capacity | Both |
 | `--max-tokens N` | Default reply limit, 4096 | Both |

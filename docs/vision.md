@@ -63,12 +63,26 @@ Image output is not generated.
 
 ## Limits and state
 
-Requests accept up to four JPEG, PNG or WebP images, 10 MiB encoded per image and 20 MiB total, within a 32 MiB HTTP body.
+Requests accept up to four JPEG, PNG or WebP images by default. `--vision-max-images N` sets a positive
+image-count limit when serving with `--vision`, on both backends:
+
+```bash
+tensorfold serve Vontra/GLM-5.3-Flash-MLX-4bit-MTP --vision --vision-max-images 8
+```
+
+The count includes **all images in the submitted message history**, including images from earlier turns
+and tool results that a client sends as user image parts. Reading images one at a time can therefore
+reach the limit. Once that history exceeds it, even a text-only follow-up is refused if the client resends
+the images. Remove older image content from the submitted history, start a new conversation, or restart
+the server with a larger count limit. The server does not discard images automatically.
+
+Changing the count does not change the other limits: 10 MiB encoded per image and 20 MiB total, within a 32 MiB HTTP body.
 Decoded images are bounded to 8,192 pixels per dimension, 16 million pixels per image and 32 million total.
 EXIF orientation is applied and transparency is composited onto white; animated and multipage inputs are refused.
 Up to 16 requests decode and process images at once; more wait up to a minute, and past 128 waiting the server answers 503 so the client retries.
 The request log (`TENSORFOLD_REQUEST_LOG`) records image parts as `<redacted>`.
 The model processor bounds the total expanded image tokens to 4,096, with a smaller budget for `detail: low`.
+That budget is shared across the images; a higher count can reduce the detail available for each image.
 Those expanded tokens count toward prompt usage and the context window before model execution.
 The available memory budget may impose a smaller practical image or context limit.
 
