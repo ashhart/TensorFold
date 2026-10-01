@@ -178,8 +178,8 @@ headroom: ~7 GiB MemAvailable at cap 40960).
 
 Decode (same day): MQA chunk 128 x 16 heads for <= 16 rows, side-stream parallel linears (q / window KV /
 compressor, 8 wo_a slices, the shared expert beside the routed ones): 4-row verify 52 -> 47 ms, serial
-31.5 -> 34-35 tok/s, DSpark reasoning 59 -> 63 tok/s. Experts at ~210 GB/s (at the DRAM limit). Graph replay of
-a k = 3 round is 37 ms but the measured round is ~49 ms: ~12 ms a round of host work is the next decode lever.
+31.5 -> 34-35 tok/s, DSpark reasoning 59 -> 63 tok/s. Experts at ~210 GB/s (at the DRAM limit). (A suspected ~12 ms of
+host work a round turned out to be a mis-measured cost table; see below.)
 
 ## 2026-10-01 — final head-to-head vs vLLM (same document / prompts, both on the 2-node GB10 pair)
 
@@ -202,3 +202,16 @@ Decode, DSpark k = 3, greedy, same prompt ids (vLLM incl. ~0.1 s prefill; output
 | code | 29.4 (1.25) | 48–52 | ~1.7× |
 | serial (no drafts) | 23 (earlier) | 34–35 | ~1.5× |
 | 40K context, DSpark | 19 (earlier) | 38 (earlier) | 2× |
+
+## 2026-10-01 — decode round anatomy (`TF_ROUND_PROF=1`)
+
+Host time a round is ~1 ms (agree 0.4, launches 0.4; Engram reads 2-3 ms each but overlapped with the graphs);
+the GPU is busy the whole round: draft 4.6 ms + 4-row verify 45-47 ms. The "12 ms host overhead" was an artifact:
+`round_costs` replayed the verify graphs with the capture's all-zero tokens, so every row routed to the same 6
+experts and a 4-row verify looked like 33 ms instead of 47 (real rows reach ~17 distinct experts a layer). The
+adaptive draft policy used those costs, so it over-chose large k.
+
+Fixes: cost replays use the request's own recent tokens and run once before the decode clock (costs now
+[29, 41, 46, 51] ms for k = 0..3, matching live replays); decode Engram reads with 16 threads instead of 64.
+Result (DSpark k <= 3, greedy): story 35.9 tok/s (first case no longer pays the cost measurement), reasoning
+62-63 -> 65, code ~49. DSpark == serial. The 6 ms a verified row is mostly the extra experts' weights (DRAM-bound).

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -189,6 +190,18 @@ def main() -> None:
                          if "rounds" in r else "")
                 print(f"{case['name']}: {len(r['tokens'])} tokens {r['decode_tps']:.1f} tok/s{extra}; "
                       f"same tokens as vLLM: {same}", flush=True)
+        if os.environ.get("TF_ROUND_PROF") and eng.graphs:     # replays at the live context vs capture-time costs
+            for R in sorted(eng.graphs):
+                g = eng.graphs[R]
+                nccl.barrier()
+                torch.cuda.synchronize()
+                t = time.perf_counter()
+                for _ in range(5):
+                    g["a0"].replay(), g["a1"].replay(), g["b"].replay()
+                torch.cuda.synchronize()
+                if args.rank == 0:
+                    print(f"live-context replay {R} rows: {(time.perf_counter() - t) / 5 * 1e3:.1f} ms "
+                          f"(context {len(eng.state.ids)})", flush=True)
         if args.rank == 0 and getattr(eng, "_round_costs", None):
             print("graph round costs (ms, k = 0..n, draft included):", [round(c, 1) for c in eng._round_costs],
                   flush=True)

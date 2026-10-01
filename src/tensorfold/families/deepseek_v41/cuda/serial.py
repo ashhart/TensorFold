@@ -112,6 +112,8 @@ class Caches:
     ids: list[int] = field(default_factory=list)
 
 
+SKIP_READS = os.environ.get("TF_SKIP_READS") == "1"   # timing experiments: stale Engram rows (wrong output)
+STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS", "4"))   # decode/verify Engram row reads (few rows)
 FUSE_HC = True               # prompt chunks: hc post + the next sublayer's pre in two launches (post_pre)
 PAR_DECODE = os.environ.get("TF_PAR", "1") == "1"            # decode/verify rows: independent linears on side streams (Par)
 PROMPT_ZB = tuple(int(v) for v in os.environ.get("TF_ZB", "121,101").split(","))       # v4 with bf16 Z (gate/up config, down config); None: fp32 Z (PROMPT_V3)
@@ -128,6 +130,49 @@ _Z2 = None
 _ZB = None
 PROMPT_CFG = [1, 1]          # prompt expert kernel config for gate/up and down (experts_prompt.cu)
 PROMPT_ROWS = 16             # above this, expert calls size their member table to the busiest expert (host sync)
+
+
+class RoundProfile:
+    """TF_ROUND_PROF=1: host time between marks of a DSpark round and the GPU time of the draft and verify graphs."""
+
+    def __init__(self) -> None:
+        from collections import defaultdict
+
+        self.host = defaultdict(list)
+        self.gpu = defaultdict(list)
+        self.events = {}
+        self.t = 0.0
+
+    def __bool__(self) -> bool:
+        return True
+
+    def start(self) -> None:
+        self.t, self.events, self.t0 = time.perf_counter(), {}, time.perf_counter()
+
+    def mark(self, name: str) -> None:
+        now = time.perf_counter()
+        self.host[name].append(1e3 * (now - self.t))
+        self.t = now
+
+    def event(self, name: str) -> None:
+        e = torch.cuda.Event(enable_timing=True)
+        e.record()
+        self.events[name] = e
+
+    def end(self, k: int) -> None:
+        self.host["round"].append(1e3 * (time.perf_counter() - self.t0))
+        ev = self.events
+        if "d.gpu0" in ev:
+            self.gpu["draft"].append(ev["d.gpu0"].elapsed_time(ev["d.gpu1"]))
+        if "v.gpu0" in ev:
+            self.gpu[f"verify k={k}"].append(ev["v.gpu0"].elapsed_time(ev["v.gpu1"]))
+
+    def report(self) -> None:
+        avg = lambda v: sum(v) / max(len(v), 1)
+        print("[round host ms] " + ", ".join(f"{k} {avg(v):.2f}" for k, v in self.host.items()), flush=True)
+        print("[round gpu ms] " + ", ".join(f"{k} {avg(v):.2f} (n={len(v)})" for k, v in self.gpu.items()), flush=True)
+        self.host.clear()
+        self.gpu.clear()
 
 
 class Par:
@@ -290,6 +335,7 @@ class SerialEngine:
         self.scratch = [shared] * len(w.layers)
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
         self.par = Par()
+        self._rp = RoundProfile() if os.environ.get("TF_ROUND_PROF") else None
         self.split = c.engram_layer_ids[1]
         self.tables_rope = {r: K.rope_tables(f, cap) for r, f in self.freqs.items()}
         self.attnbuf = K.AttnBuffers(MAX_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,
@@ -544,8 +590,16 @@ class SerialEngine:
             torch.cuda.synchronize()
             return 1e3 * (time.perf_counter() - t) / reps
 
+        ids = self.state.ids
+        P = len(ids)
+
         def verify(R):
             g = self.graphs[R]
+            # distinct real tokens (the request's latest), not the capture's zeros: identical rows route to the same
+            # experts and would make an R-row verify look nearly as cheap as one row
+            tail = (list(ids[-R:]) if len(ids) >= R else list(ids) + list(range(1000, 1000 + R - len(ids))))
+            g["tok"].copy_(torch.tensor(tail))
+            g["pos"].copy_(torch.arange(max(P - R, 0), max(P - R, 0) + R))
             return lambda: (g["a0"].replay(), g["a1"].replay(), g["b"].replay())
 
         draft = replay_ms(self.drafter.graph.replay) if self.drafter is not None and self.drafter.graph else 0.0
@@ -591,16 +645,30 @@ class SerialEngine:
             raise ValueError(f"context {p0 + R} beyond {self.limit} tokens")
         st.ids.extend(tokens)
         start = max(0, p0 - (c.engram_max_ngram_size - 1))
+        rp = self._rp
+        rp and rp.mark("v.enter")
         g["tok"].copy_(torch.tensor(tokens), non_blocking=True)
         g["pos"].copy_(torch.arange(p0, p0 + R), non_blocking=True)
+        rp and rp.event("v.gpu0")
         g["a0"].replay()                                                # layer 0 needs no table rows
+        rp and rp.mark("v.a0")
         h = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[-R:]   # [R, 2, 24]
-        self.tables.gather(h[:, 0, :].reshape(1, -1), out=g["h_raw"][:1], layers=[0])     # overlaps layer 0
+        rp and rp.mark("v.hash")
+        if not SKIP_READS:                                              # (timing experiments only)
+            self.tables.gather(h[:, 0, :].reshape(1, -1), out=g["h_raw"][:1], layers=[0],     # overlaps layer 0
+                               threads=STEP_READ_THREADS)
+        rp and rp.mark("v.gather0")
         g["raw"][0].copy_(g["h_raw"][0].view_as(g["raw"][0]), non_blocking=True)
         g["a1"].replay()
-        self.tables.gather(h[:, 1, :].reshape(1, -1), out=g["h_raw"][1:], layers=[1])     # overlaps layers 1-13
+        rp and rp.mark("v.a1")
+        if not SKIP_READS:
+            self.tables.gather(h[:, 1, :].reshape(1, -1), out=g["h_raw"][1:], layers=[1],     # overlaps layers 1-13
+                               threads=STEP_READ_THREADS)
+        rp and rp.mark("v.gather1")
         g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
         g["b"].replay()
+        rp and rp.mark("v.b")
+        rp and rp.event("v.gpu1")
         if sampling is not None and sampling.temperature > 0:
             return sample_rows(g["logits"], [p0 + 1 + j for j in range(R)], sampling)
         g["h_next"].copy_(g["next"], non_blocking=True)
@@ -776,6 +844,8 @@ class SerialEngine:
         t0 = time.perf_counter()
         logits = None
         logits = self.prefill(prompt, chunk)
+        if self.drafter is not None and self.drafter.graph is not None and self.adaptive:
+            self.round_costs()                                     # once an engine, at a real context (not timed)
         torch.cuda.synchronize()
         t1 = time.perf_counter()
         out = []
@@ -803,16 +873,23 @@ class SerialEngine:
                     nxt = sample_rows(self.forward([nxt])[-1:], [len(self.state.ids)], sampling)[0]
                 continue
             P = len(self.state.ids)
+            rp = self._rp
+            rp and rp.start()
             k = self.agree(policy.choose())
+            rp and rp.mark("agree")
             ta = time.perf_counter()
             if k == 0:                                             # drafting does not pay here: one plain row
                 target = [self.step(nxt, sampling)]
                 drafts = []
                 tb = ta
             else:
+                rp and rp.event("d.gpu0")
                 drafts = dsp.propose(nxt, P)[:k]
+                rp and rp.event("d.gpu1")
+                rp and rp.mark("propose")
                 tb = time.perf_counter()
                 target = self.step_rows([nxt, *drafts], sampling)
+                rp and rp.mark("verify.done")
             t_draft += tb - ta
             t_verify += time.perf_counter() - tb
             ks[k] += 1
@@ -821,6 +898,8 @@ class SerialEngine:
                 m += 1
             del self.state.ids[P + 1 + m:]                         # rejected rows: overwritten by later positions
             policy.update(k, m, 1e3 * (time.perf_counter() - ta))
+            rp and rp.mark("tail")
+            rp and rp.end(k)
             rounds += 1
             accepted += m
             emitted = [nxt, *drafts[:m]]
@@ -835,6 +914,8 @@ class SerialEngine:
                 break
         torch.cuda.synchronize()
         t2 = time.perf_counter()
+        if self._rp:
+            self._rp.report()
         res = {"tokens": out, "prefill_s": t1 - t0, "decode_s": t2 - t1,
                "prefill_tps": len(prompt) / (t1 - t0), "decode_tps": len(out) / max(t2 - t1, 1e-9)}
         if dsp is not None:
