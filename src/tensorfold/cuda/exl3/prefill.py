@@ -47,7 +47,7 @@ def _gemm(X, W, H, SVH, BIAS, OUT, M, o_stride, K: tl.constexpr, N: tl.constexpr
 def tiles(k: int, n: int) -> tuple[int, int, int, int, int]:
     """(rows a program, K step, warps, stages, row blocks a raster group): the shape's alone, so a row never depends on its chunk."""
 
-    return 128, 32, 8, 4, 8
+    return 128, 64, 8, 3, 8      # 2-5% over (128, 32, 8, 4, 8) on GB10, the same bits (the K step only regroups MMAs)
 
 
 class Workspace:

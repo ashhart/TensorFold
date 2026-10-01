@@ -165,3 +165,26 @@ def test_f16_prompt_tiles_give_the_sliced_bits(n, k, monkeypatch):
             monkeypatch.setattr(exl3_mm, "FUSED_MIN", 64)
             got = lin(x, torch.full((m, n), float("nan"), dtype=dt, device="cuda"))
             assert torch.equal(got.view(torch.int16), ref.view(torch.int16)), (n, k, m, dt)
+
+
+@pytest.mark.parametrize("k,n", [(2560, 1024), (1024, 2560)])
+def test_exl3_prompt_gemm_tiles_keep_the_bits(k, n, monkeypatch):
+    """The EXL3 prompt GEMM's tiles (rows a program, K step, warps, stages) never change a row's bits: today's tiles
+    against the previous (128, 32, 8, 4, 8), 6-bit mul1 weights, ragged row counts."""
+
+    from tensorfold.cuda.exl3 import prefill as XP
+    from tensorfold.cuda.exl3.linear import Exl3Linear
+
+    g = torch.Generator().manual_seed(k + n)
+    tr = torch.randint(-32768, 32768, (k // 16, n // 16, 96), generator=g, dtype=torch.int32).to(torch.int16)
+    suh = ((torch.rand(k, generator=g) + 0.5) * (torch.randint(0, 2, (k,), generator=g) * 2 - 1) / k ** 0.5).half()
+    svh = ((torch.rand(n, generator=g) + 0.5) * (torch.randint(0, 2, (n,), generator=g) * 2 - 1)).half()
+    lin = Exl3Linear.from_tensors(tr, suh, svh, "mul1")
+    ws = XP.Workspace()
+    for m in (1, 77, 300):
+        x = torch.randn((m, k), generator=g).to(torch.bfloat16).cuda()
+        got = XP.matmul(lin, x, torch.empty((m, n), dtype=torch.bfloat16, device="cuda"), ws).clone()
+        monkeypatch.setattr(XP, "tiles", lambda kk, nn: (128, 32, 8, 4, 8))
+        ref = XP.matmul(lin, x, torch.full((m, n), float("nan"), dtype=torch.bfloat16, device="cuda"), ws)
+        monkeypatch.undo()
+        assert torch.equal(got.view(torch.int16), ref.view(torch.int16)), (k, n, m)
