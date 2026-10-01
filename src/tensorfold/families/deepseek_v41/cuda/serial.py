@@ -639,7 +639,7 @@ class SerialEngine:
 
     def layers(self, carry: tuple, pos: torch.Tensor, rows: dict, first: int, last: int, static: bool) -> tuple:
         X, pre, f, post, comb = carry
-        fuse = X.shape[0] > PROMPT_ROWS and FUSE_HC            # prompt chunks: post and the next pre in one pass
+        fuse = (X.shape[0] > PROMPT_ROWS or hcf.FUSE_DECODE) and FUSE_HC   # post and the next pre in one pass
         for layer in self.w.layers[first:last]:
             fused = fuse and f is not None and layer.engram is None
             if fused:
@@ -1063,7 +1063,9 @@ class SerialEngine:
             o = K.mqa(q, comp, idx, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin)   # inverse-rotated
         groups = len(a.wo_a)
         o = o.view(R, groups, (H // groups) * Dh)
-        if R <= PROMPT_ROWS:
+        if R <= PROMPT_ROWS and a.wo_a_grouped is not None:
+            z = a.wo_a_grouped(o.reshape(R, -1))                        # every group in one launch
+        elif R <= PROMPT_ROWS:
             z = torch.cat(self.par(*[lambda g=g, wo=wo: wo(o[:, g].contiguous()) for g, wo in enumerate(a.wo_a)]), dim=1)
         else:
             z = torch.cat([wo(o[:, g]) for g, wo in enumerate(a.wo_a)], dim=1)

@@ -294,6 +294,10 @@ def post(b, X: torch.Tensor, post_w: torch.Tensor, comb: torch.Tensor) -> torch.
     return Y
 
 
+# decode / verify rows through the fused post + pre too (TF_FUSE_HC_DECODE=1; its own arithmetic, rows independent)
+FUSE_DECODE = __import__("os").environ.get("TF_FUSE_HC_DECODE") == "1"
+
+
 def post_pre(b, X: torch.Tensor, post_w: torch.Tensor, comb: torch.Tensor, fn: torch.Tensor, base: torch.Tensor,
              scale: torch.Tensor, pre_in: torch.Tensor, norm_w: torch.Tensor, buf: HCBuffers, eps: float,
              hc_eps: float, iters: int):
@@ -301,7 +305,7 @@ def post_pre(b, X: torch.Tensor, post_w: torch.Tensor, comb: torch.Tensor, fn: t
     read back): (Y, (post, comb, x_in, pre))."""
 
     R, S, D = X.shape
-    assert R > PROMPT_ROWS and S == 4 and X.is_contiguous() and (S * D) % NB == 0
+    assert (R > PROMPT_ROWS or FUSE_DECODE) and S == 4 and X.is_contiguous() and (S * D) % NB == 0
     dev = X.device
     Y = torch.empty_like(X)
     if isinstance(b, SplitPartials):

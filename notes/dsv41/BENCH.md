@@ -304,3 +304,11 @@ Where the 27 ms goes: ~4.2 GB of weights a rank a step; plain reads reach ~247 G
 ~215 GB/s, small ones (1.6-4 MB) 110-180 GB/s (fixed ~8-10 us each), the routed call 199 GB/s; 86 all-gathers at
 ~19 us pure latency (both GPUs equally fast). 40 tok/s (25 ms) needs the EXL3 decode kernels near ~240 GB/s plus
 fusing the small kernels (input rotation, HC pre/post, router+route): a kernel rewrite, not a setting.
+
+Follow-up (same day): sublayer timing (graph of one sublayer over layers 4-39, 1 row): attention 307-313 us a layer
+(~42 MB: ~140 us above its bandwidth time), MoE 297-303 us (~53 MB: ~80 us above), HC pre 19 us (x2).
+| change | result |
+|---|---|
+| wo_a slices as one grouped EXL3 launch (column groups in the linear kernel) | bit-identical; 35.6 -> 35.9 tok/s (noise level); kept |
+| fused HC post+pre for decode rows | 34.5 vs 35.7 tok/s; off (`TF_FUSE_HC_DECODE`) |
+| attention chunk 64 / 32 keys (20 / 40 programs for 1 row instead of 10) | no measurable change; default 128 (`TF_MQA_CHUNK`) |

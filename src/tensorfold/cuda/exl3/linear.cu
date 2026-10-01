@@ -128,7 +128,7 @@ template <int K2, int CB, int WK>
 __global__ void __launch_bounds__(WK * 32) linear_kernel(
     const half* __restrict__ xh, const uint32_t* __restrict__ T, long long stride_k, long long stride_nb,
     const half* __restrict__ svh, const half* __restrict__ bias, void* __restrict__ y, int y_dtype,
-    float* __restrict__ Z, int* __restrict__ counters, int M, int K, int N, int SK) {
+    float* __restrict__ Z, int* __restrict__ counters, int M, int K, int N, int SK, int XS, int GN) {
     constexpr int TW = tile_words<K2>();
     constexpr int LW = lane_words<K2>();
     extern __shared__ __align__(16) float red[];              // WK * RH * 128 floats
@@ -162,8 +162,10 @@ __global__ void __launch_bounds__(WK * 32) linear_kernel(
 
         // the walk's rows for the mma, clamped so rows past the pass read inside the buffer (their outputs are dropped)
         const int r0 = m0 + (g < R ? g : R - 1), r1 = m0 + (g + 8 < R ? g + 8 : R - 1);
-        const half* x0 = xh + (size_t)r0 * K;
-        const half* x1 = xh + (size_t)r1 * K;
+        // column group col0 / GN reads its own K inputs of a row (XS apart): GN = N, XS = K is one ordinary layer
+        const half* xg = xh + (size_t)(col0 / GN) * K;
+        const half* x0 = xg + (size_t)r0 * XS;
+        const half* x1 = xg + (size_t)r1 * XS;
         const uint32_t* tile = tiles + (size_t)kt0 * stride_k;
         // up to 6 bits the next k step's words are loaded while this one is decoded; 7 and 8 bits load per tile
         constexpr bool PF = K2 <= 12;
@@ -302,8 +304,9 @@ void exl3_rot_in_cuda(const at::Tensor& x, const at::Tensor& suh, at::Tensor& xh
 void exl3_linear_cuda(const at::Tensor& xh, const at::Tensor& T, int64_t stride_k, int64_t stride_nb,
                       const at::Tensor& svh, const c10::optional<at::Tensor>& bias, at::Tensor& y,
                       const c10::optional<at::Tensor>& Z, at::Tensor& counters, int64_t K2, int64_t cb, int64_t SK,
-                      int64_t WK) {
-    const int M = (int)xh.size(0), K = (int)xh.size(1), N = (int)y.size(1);
+                      int64_t WK, int64_t KG, int64_t GN) {
+    const int M = (int)xh.size(0), XS = (int)xh.size(1), N = (int)y.size(1);
+    const int K = KG > 0 ? (int)KG : XS, G = GN > 0 ? (int)GN : N;
     TORCH_CHECK(WK == 2 || WK == 4 || WK == 8, "WK must be 2, 4 or 8");
     TORCH_CHECK((K / 16) % (SK * WK) == 0, "K / 16 must split evenly over SK * WK warps");
     dim3 grid((unsigned)(N / 128), (unsigned)SK);
@@ -320,7 +323,7 @@ void exl3_linear_cuda(const at::Tensor& xh, const at::Tensor& T, int64_t stride_
         kernel<<<grid, (unsigned)(WK * 32), smem, stream>>>(                                              \
             reinterpret_cast<const half*>(xh.data_ptr()), reinterpret_cast<const uint32_t*>(T.data_ptr()),      \
             stride_k, stride_nb, reinterpret_cast<const half*>(svh.data_ptr()), bptr, y.data_ptr(), dtype_of(y),\
-            zptr, counters.data_ptr<int>(), M, K, N, (int)SK);                                                  \
+            zptr, counters.data_ptr<int>(), M, K, N, (int)SK, XS, G);                                                  \
         C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                         \
         return;                                                                                                 \
     }

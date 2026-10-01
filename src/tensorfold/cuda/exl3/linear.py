@@ -18,7 +18,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_exl3_linear_v4", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
+    return load(name="tensorfold_exl3_linear_v5", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3", "--expt-relaxed-constexpr"],
                 verbose=False)
 
@@ -181,7 +181,7 @@ class Exl3Linear:
         ext = _ext()
         ext.rot_in(x, self.suh, xh)
         ext.linear(xh, self.words, sk_stride, nb_stride, self.svh, self.bias, out, z if sk > 1 else None,
-                   self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk)
+                   self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk, 0, 0)
         return out
 
     def unpack(self, out: torch.Tensor | None = None) -> torch.Tensor:
@@ -202,3 +202,42 @@ def unpack_cuda(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
     tw = 4 * k2_of(bits)
     _ext().unpack(words, w, (n // 16) * tw, 8 * tw, k2_of(bits), CODEBOOK_IDS[codebook])
     return w
+
+
+class GroupedLinear:
+    """Several same-shape "strips" layers on separate inputs as one launch: y [M, G*N] = concat_g(x_g @ W_g), with
+    x = concat_g(x_g) [M, G*K]. Each output column is computed exactly as by its own layer (same K order and splits).
+    The layers' words, suh and svh are concatenated once; the layers keep views into the copy (no second copy)."""
+
+    def __init__(self, layers: list[Exl3Linear]) -> None:
+        first = layers[0]
+        if any(m.layout != "strips" or m.k != first.k or m.n != first.n or m.k2 != first.k2 or m.bias is not None
+               or m.codebook != first.codebook or m.split != first.split for m in layers):
+            raise ValueError("grouped layers need one strips shape, width, codebook and split, and no bias")
+        self.k, self.n, self.groups = first.k, first.n, len(layers)
+        self.k2, self.codebook, self.split = first.k2, first.codebook, first.split
+        self.strides = first.strides
+        self.words = torch.cat([m.words for m in layers])
+        per = first.words.shape[0]
+        for g, m in enumerate(layers):                       # the layers read the shared copy from now on
+            m.words = self.words[g * per:(g + 1) * per]
+        self.suh = torch.cat([m.suh for m in layers]).contiguous()
+        self.svh = torch.cat([m.svh for m in layers]).contiguous()
+        self.counters = torch.zeros((8 * (self.groups * self.n // 128),), dtype=torch.int32, device=self.words.device)
+
+    def __call__(self, x: torch.Tensor, out_dtype: torch.dtype | None = None) -> torch.Tensor:
+        """x [M, G*K] (rows of the concatenated group inputs), M = 1..128 -> y [M, G*N]."""
+
+        m, N = x.shape[0], self.groups * self.n
+        if x.dim() != 2 or x.shape[1] != self.groups * self.k or not 1 <= m <= 128:
+            raise ValueError(f"x must be [1..128, {self.groups * self.k}], got {tuple(x.shape)}")
+        x = x.contiguous()
+        out = torch.empty((m, N), dtype=out_dtype or x.dtype, device=x.device)
+        xh = torch.empty((m, self.groups * self.k), dtype=torch.float16, device=x.device)
+        sk, wk = self.split
+        z = torch.empty((sk * m * N,), dtype=torch.float32, device=x.device) if sk > 1 else None
+        ext = _ext()
+        ext.rot_in(x, self.suh, xh)                          # 128-blocks: each group rotated by its own suh
+        ext.linear(xh, self.words, *self.strides, self.svh, None, out, z, self.counters, self.k2,
+                   CODEBOOK_IDS[self.codebook], sk, wk, self.k, self.n)
+        return out

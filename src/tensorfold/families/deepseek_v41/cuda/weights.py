@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 
 from tensorfold.cuda.exl3 import experts as ex3
-from tensorfold.cuda.exl3.linear import Exl3Linear
+from tensorfold.cuda.exl3.linear import Exl3Linear, GroupedLinear
 
 from ..config import Config
 from .reader import Dsv41Reader
@@ -25,6 +25,8 @@ PROMPT_TILES = (64, 64, 4, 4, 8)     # the prompt GEMM's (rows, K step, warps, s
 # decode / verify: TF_FOLD_SHARED=1 runs the shared expert as one more member of the routed experts' grouped call;
 # measured slower (its 5-bit blocks set the tail: 35.0 vs 36.0 tok/s serial, 113.8 vs 117.1 at 16 clients), so off
 FOLD_SHARED = __import__("os").environ.get("TF_FOLD_SHARED", "0") == "1"
+# decode / verify: the wo_a slices (one per output group, separate inputs) in one launch, bit-identical to separate
+GROUP_WO_A = __import__("os").environ.get("TF_GROUPED_WO_A", "1") != "0"
 
 
 class Linear(Exl3Linear):
@@ -96,6 +98,7 @@ class AttnW:
     ratio: int
     compressor: CompressorW | None = None
     indexer: IndexerW | None = None
+    wo_a_grouped: GroupedLinear | None = None     # the wo_a slices as one launch (decode / verify rows)
 
 
 @dataclass
@@ -178,6 +181,8 @@ def load(model_dir: str | Path, *, rank: int, layers: list[int] | None = None, d
         a = AttnW(lin(p + "wq_a"), lin(p + "wkv"), t(p + "q_norm.weight"), t(p + "kv_norm.weight"), lin(p + "wq_b"),
                   [lin(p + f"wo_a.slice.{g}") for g in range(rank * groups, (rank + 1) * groups)], lin(p + "wo_b"),
                   t(p + "attn_sink", torch.float32), ratio)
+        if GROUP_WO_A:
+            a.wo_a_grouped = GroupedLinear(a.wo_a)
         if i in cfg.kv_source_layer_ids:
             a.compressor = CompressorW(lin(p + "compressor.wkv"),
                                        lin(p + "compressor.wgate") if ratio == 2 else None,

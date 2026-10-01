@@ -31,6 +31,8 @@ def main() -> None:
     ap.add_argument("--ref", type=Path, help="reference .pt of the same prompt (rank 0 compares)")
     ap.add_argument("--decode", type=int, default=32)
     ap.add_argument("--profile", action="store_true", help="profile 4 decode steps after the run (rank 0 prints)")
+    ap.add_argument("--sublayer-bench", action="store_true",
+                    help="after the cases: graph time of attention-only / MoE-only / HC-only passes over layers 4-39 (1 row)")
     ap.add_argument("--profile-step", type=int, default=0,
                     help="after the cases: profile this many 1-row decode graph replays (kernels inside the graphs)")
     ap.add_argument("--profile-rows", type=int, default=1, help="rows a profiled step takes (a verify window)")
@@ -350,6 +352,55 @@ def main() -> None:
                 if args.rank == 0:
                     print(f"live-context replay {R} rows: {(time.perf_counter() - t) / 5 * 1e3:.1f} ms "
                           f"(context {len(eng.state.ids)})", flush=True)
+        if args.sublayer_bench and eng.graphs:                # where a layer's time goes, piece by piece
+            c = eng.c
+            g1 = eng.graphs[1]
+            eng._sid = g1["sid"]
+            pos = g1["pos"]
+            Ls = eng.w.layers[4:40]
+            x = (torch.randn((1, c.hidden_size), device="cuda") * 0.05).to(torch.bfloat16)
+            X = (torch.randn((1, c.hc_mult, c.hidden_size), device="cuda") * 0.05).to(torch.bfloat16)
+            pre0 = torch.full((1, c.hc_mult), 0.25, device="cuda")
+            saved = eng._save_rows(eng.slot, torch.arange(0, 4), torch.arange(0, 4))
+            pieces = {
+                "attention": lambda: [eng.attention(L, x, pos, True) for L in Ls],
+                "moe": lambda: [eng.moe(L, x, 1) for L in Ls],
+                "hc pre": lambda: [eng.hc(L.hc_attn, X, pre0) for L in Ls],
+            }
+            for name, fn in pieces.items():
+                side = torch.cuda.Stream()
+                side.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(side):
+                    fn(); fn()
+                torch.cuda.current_stream().wait_stream(side)
+                gr = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(gr):
+                    fn()
+                for _ in range(3):
+                    gr.replay()
+                nccl.barrier()
+                torch.cuda.synchronize()
+                t = time.perf_counter()
+                for _ in range(20):
+                    gr.replay()
+                torch.cuda.synchronize()
+                ms = (time.perf_counter() - t) / 20 * 1e3
+                if args.rank == 0:
+                    print(f"sublayer-bench: {name}: {ms / len(Ls) * 1e3:.1f} us a layer ({ms:.2f} ms over {len(Ls)})",
+                          flush=True)
+                if os.environ.get("TF_SUBPROF") and name == "attention":
+                    from torch.profiler import ProfilerActivity, profile
+
+                    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                        for _ in range(5):
+                            gr.replay()
+                        torch.cuda.synchronize()
+                    if args.rank == 0:
+                        for e in sorted(prof.key_averages(), key=lambda e: -e.self_device_time_total)[:30]:
+                            if e.self_device_time_total > 0:
+                                print(f"    {e.self_device_time_total / 5 / len(Ls):7.2f} us/layer {e.count / 5 / len(Ls):5.2f}x "
+                                      f"{e.key[:90]}", flush=True)
+            eng._restore_rows(saved)
         if args.profile_step and eng.graphs:                  # kernels of the 1-row decode graphs, back to back
             from torch.profiler import ProfilerActivity, profile
 
