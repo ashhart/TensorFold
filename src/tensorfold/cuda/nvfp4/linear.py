@@ -1,4 +1,4 @@
-"""NVFP4 and FP8 linears on CUDA: exact W4A16 / W8A16 lane matmuls, prompts too; the FP8 GEMM with --prefill-fp8."""
+"""NVFP4 and FP8 linears on CUDA: exact W4A16 / W8A16 lane matmuls (FP8 GEMM with --prefill-fp8), or their own math."""
 
 from __future__ import annotations
 
@@ -15,11 +15,11 @@ FP4, FP8, MXFP8, FP8G = 0, 1, 2, 3
 
 @lru_cache(maxsize=1)
 def _ext():
-    from tensorfold.cuda.build import CLUSTERS, load
+    from tensorfold.cuda.build import MIN_CAPABILITY, load
 
     here = Path(__file__).parent
     return load(name="tensorfold_nvfp4_v3", sources=[str(here / "qmmf.cpp"), str(here / "qmmf.cu"),
-                                                      str(here / "experts.cu")], need=CLUSTERS,
+                                                      str(here / "experts.cu")], need=MIN_CAPABILITY,
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3"], verbose=False)
 
 
@@ -123,28 +123,36 @@ class Fp4Linear:
     k: int
     layout: str = "nvfp4"
     staging: Staging | None = None   # shared by the model's NVFP4 projections (prompts)
+    act: float | None = None         # checkpoint math: the static input scale; words in the FP4 mma's order
 
     @property
     def npad(self) -> int:
         return int(self.words.shape[0]) * 64
 
     @classmethod
-    def from_checkpoint(cls, weight: torch.Tensor, weight_scale: torch.Tensor, global_scale: float) -> "Fp4Linear":
-        """``weight`` uint8 [N, K/2] (low nibble first), ``weight_scale`` e4m3 bytes [N, K/16], the product's global."""
+    def from_checkpoint(cls, weight: torch.Tensor, weight_scale: torch.Tensor, global_scale: float,
+                        act: float | None = None) -> "Fp4Linear":
+        """``weight`` uint8 [N, K/2] low nibble first, e4m3 ``weight_scale`` [N, K/16]; ``act``: its input scale."""
 
         from tensorfold.cuda.kernels import qmm
 
         n, k = weight.shape[0], weight.shape[1] * 2
         if k % 64:
             raise ValueError(f"NVFP4 weight [{n}, {k}]: K must be a multiple of 64")
-        words = weight.contiguous().view(torch.int32)
-        dummy = torch.zeros((n, k // 64), dtype=torch.bfloat16, device=weight.device)
-        packed = qmm.pack(words, dummy, dummy, 64).weight
-        npad = packed.shape[0] * 64
+        if act is not None:
+            from . import checkpoint
+
+            npad = -(-n // 64) * 64
+            packed = checkpoint.pack4(weight, npad)
+        else:
+            words = weight.contiguous().view(torch.int32)
+            dummy = torch.zeros((n, k // 64), dtype=torch.bfloat16, device=weight.device)
+            packed = qmm.pack(words, dummy, dummy, 64).weight
+            npad = packed.shape[0] * 64
         bs = torch.zeros((npad, k // 16), dtype=torch.uint8, device=weight.device)
         bs[:n] = weight_scale.contiguous().view(torch.uint8)
         bs = bs.view(npad // 64, 64, k // 64, 4).permute(0, 2, 1, 3).contiguous()
-        return cls(packed, bs, float(global_scale), n, k)
+        return cls(packed, bs, float(global_scale), n, k, act=None if act is None else float(act))
 
     def nbytes(self) -> int:
         return self.words.numel() * 4 + self.bs.numel()
@@ -152,14 +160,23 @@ class Fp4Linear:
     def tiles(self, t0: int, t1: int) -> "Fp4Linear":
         """Outputs [64 t0, 64 t1) as views, no copy (decode only: the prompt GEMM wants 128-column multiples)."""
 
-        return Fp4Linear(self.words[t0:t1], self.bs[t0:t1], self.scale, min(self.n, 64 * t1) - 64 * t0, self.k)
+        return Fp4Linear(self.words[t0:t1], self.bs[t0:t1], self.scale, min(self.n, 64 * t1) - 64 * t0, self.k,
+                         act=self.act)
 
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        if self.act is not None:
+            from . import checkpoint
+
+            return checkpoint.matmul(checkpoint.A4, x, self, out)
         return _matmul(FP4, self.words, self.bs, self.scale, self.n, self.k, self.npad, x, out)
 
     def prefill(self, x: torch.Tensor) -> torch.Tensor:
-        """bf16 prompt rows on the exact prompt GEMM (each code times its block scale is exact in bf16)."""
+        """bf16 prompt rows on the exact prompt GEMM; under checkpoint math, NVFP4 rows on its prompt GEMM."""
 
+        if self.act is not None:
+            from . import checkpoint
+
+            return checkpoint.prompt(checkpoint.A4, x, self)
         return _prompt(FP4, self.words, self.bs, self.scale, self.n, self.npad, x)
 
     def prefill8(self, xq) -> torch.Tensor:
@@ -187,16 +204,18 @@ class Fp8Linear:
     npad: int
     layout: str = "fp8"
     groups: torch.Tensor | None = None   # bf16 [K/64, npad] of a copy made from bf16 (prompts only); else unit
+    act: float | None = None             # checkpoint math: the static input scale (rows in e4m3, the FP8 mma)
 
     @classmethod
-    def from_checkpoint(cls, weight: torch.Tensor, scale: float) -> "Fp8Linear":
-        """``weight`` e4m3 [N, K] with one fp32 scale (ModelOpt's per-tensor FP8)."""
+    def from_checkpoint(cls, weight: torch.Tensor, scale: float, act: float | None = None) -> "Fp8Linear":
+        """``weight`` e4m3 [N, K] with one fp32 scale (ModelOpt's per-tensor FP8); ``act``: its static input scale."""
 
         n, k = weight.shape
         if k % 64:
             raise ValueError(f"FP8 weight [{n}, {k}]: K must be a multiple of 64")
         npad = -(-n // 128) * 128
-        return cls(_fragment_order(weight.contiguous().view(torch.uint8), npad), float(scale), n, k, npad)
+        return cls(_fragment_order(weight.contiguous().view(torch.uint8), npad), float(scale), n, k, npad,
+                   act=None if act is None else float(act))
 
     @classmethod
     def from_bf16(cls, weight: torch.Tensor) -> "Fp8Linear":
@@ -222,14 +241,22 @@ class Fp8Linear:
 
         per = 64 * self.k
         return Fp8Linear(self.w8[t0 * per:t1 * per], self.scale, min(self.n, 64 * t1) - 64 * t0, self.k,
-                         64 * (t1 - t0))
+                         64 * (t1 - t0), act=self.act)
 
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        if self.act is not None:
+            from . import checkpoint
+
+            return checkpoint.matmul(checkpoint.A8, x, self, out)
         return _matmul(FP8, self.w8, None, self.scale, self.n, self.k, self.npad, x, out)
 
     def prefill(self, x: torch.Tensor) -> torch.Tensor:
-        """bf16 prompt rows on the exact prompt GEMM (a checkpoint's bytes; a bf16 copy serves --prefill-fp8 only)."""
+        """bf16 prompt rows on the exact prompt GEMM (a bf16 copy for --prefill-fp8 only); checkpoint math: e4m3."""
 
+        if self.act is not None:
+            from . import checkpoint
+
+            return checkpoint.prompt(checkpoint.A8, x, self)
         return _prompt(FP8, self.w8, None, self.scale, self.n, self.npad, x)
 
     def prefill8(self, xq: tuple) -> torch.Tensor:

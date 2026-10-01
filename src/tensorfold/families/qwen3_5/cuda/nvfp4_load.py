@@ -76,8 +76,30 @@ def admission(geometry):
     return with_staging, weight_bytes
 
 
+FULL_LINE = "full (bf16 activations, the stored weights exactly)"
+
+
+def maths() -> tuple[dict[str, bool], str]:
+    """Each format's math on this GPU under --precision, and the startup line naming it; no supported GPU is refused."""
+
+    from tensorfold.cuda import precision
+
+    if precision.mode() != precision.CHECKPOINT or not torch.cuda.is_available():
+        return {"nvfp4": False, "fp8": False}, FULL_LINE
+    major, minor = torch.cuda.get_device_capability()
+    own = precision.own_math((major, minor))
+    if all(own.values()):
+        return own, ("checkpoint (the checkpoint's own math: its NVFP4 layers FP4 x FP4, per-16 scales under its "
+                     "static input scales; its FP8 layers FP8 x FP8)")
+    gpu = f"{torch.cuda.get_device_name()}, SM {major}.{minor}"
+    if own["fp8"]:
+        return own, (f"checkpoint where this GPU has it ({gpu}): its FP8 layers FP8 x FP8 under their static input "
+                     "scales; its NVFP4 layers W4A16 (bf16 activations: the block-scaled FP4 mma is SM 12.x's)")
+    return own, f"full ({gpu} has neither the block-scaled FP4 nor the FP8 mma): bf16 activations, the stored weights"
+
+
 def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
-    """NVFP4 and FP8 projections on the exact lane matmuls, bf16 ones as stored; vision tower and MTP skipped."""
+    """NVFP4 and FP8 projections at full precision or in the checkpoint's own math, bf16 ones as stored."""
 
     from tensorfold.cuda.capacity import headers
     from tensorfold.cuda.nvfp4 import format as fmt
@@ -93,6 +115,18 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
     root = "model.language_model." if any(n.startswith("model.language_model.") for n in info) else "model."
     t = _Tensors(model_dir, device, skip=skipped)
     staging = Staging()                                   # one e4m3 copy at a time, shared by every NVFP4 projection
+    own, line = maths()
+
+    def act_scale(name: str, got: dict, kind: str) -> float | None:
+        """The checkpoint's static input scale (x = codes * scale), where ``kind`` runs its own math; else None."""
+
+        if not own[kind]:
+            return None
+        if "input_scale" in got:
+            return float(got["input_scale"].float().reshape(-1)[0])
+        if "input_global_scale" in got:
+            return 1.0 / float(got["input_global_scale"].float().reshape(-1)[0])
+        raise ValueError(f"{name}: no static input scale, so its own math is unknown; serve it with --precision full")
 
     def linear(name: str, prompt: bool = True):
         parts = {s: info[f"{name}.{s}"] for s in SUFFIXES if f"{name}.{s}" in info}
@@ -106,14 +140,15 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
             if g is None:
                 raise ValueError(f"{name}: an NVFP4 weight without its global scale")
             g = float(g.float().reshape(-1)[0])
-            lin = Fp4Linear.from_checkpoint(weight, got["weight_scale"], 1.0 / g if reciprocal else g)
+            lin = Fp4Linear.from_checkpoint(weight, got["weight_scale"], 1.0 / g if reciprocal else g,
+                                            act=act_scale(name, got, "nvfp4"))
             lin.staging = staging
             return lin
         if kind == "fp8":
             s = got["weight_scale"].float().reshape(-1)
             if s.numel() != 1:
                 raise ValueError(f"{name}: FP8 with {s.numel()} scales; the CUDA engine reads one scale a tensor")
-            return Fp8Linear.from_checkpoint(weight, float(s[0]))
+            return Fp8Linear.from_checkpoint(weight, float(s[0]), act=act_scale(name, got, "fp8"))
         if kind == "bf16":
             w = weight.to(torch.bfloat16).contiguous()
             return Plain8(w, rows8=Fp8Linear.from_bf16(w)) if prompt and prompt_precision.fp8() else Plain(w)
@@ -153,6 +188,9 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
         raise ValueError("this checkpoint ties its head to the embedding; the CUDA engine reads a separate lm_head")
     w = Weights(config=cfg, embed=Plain(get("embed_tokens.weight").to(torch.bfloat16)), layers=layers,
                 norm=norm("norm.weight"), head=linear("lm_head", prompt=False), quant="nvfp4")
+    w.precision = "checkpoint" if any(own.values()) else "full"
+    w.own = own
+    print(f"[tensorfold] precision: {line}", flush=True)
     half = cfg.rope_dims // 2
     inv = cfg.rope_theta ** (-torch.arange(0, half, dtype=torch.float64) / half)
     w.inv_freq = inv.to(torch.float32).to(device)

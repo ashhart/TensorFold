@@ -194,6 +194,13 @@ class Qwen27Engine:
 
         return not (stops and len(prompt) - stops[-1] < MIN_GAP)
 
+    def close(self) -> None:
+        """Stop the concurrent scheduler's worker, so the engine's GPU memory can go (tests start several engines)."""
+
+        if self.scheduler is not None:
+            self.scheduler.close()
+            self.scheduler = None
+
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
         """``draft=False``: serial re-runs, no drafts; ``background``: last under ``--parallel``, yielding lanes."""

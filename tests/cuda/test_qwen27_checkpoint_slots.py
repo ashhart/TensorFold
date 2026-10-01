@@ -29,6 +29,7 @@ def _start(keep, capsys):
                           keep=keep)
     out = capsys.readouterr().out
     kept = engine.multi.cache.keep
+    engine.close()                                       # its scheduler's worker held the weights until now
     del engine
     gc.collect()
     torch.cuda.empty_cache()

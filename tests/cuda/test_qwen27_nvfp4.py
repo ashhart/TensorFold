@@ -7,6 +7,7 @@ gates, as a ModelOpt export stores them. The checkpoint part needs ``TENSORFOLD_
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import os
 from pathlib import Path
@@ -128,13 +129,33 @@ def test_gate_copy_tracks_the_bf16_product():
     assert torch.equal(gate(x[:3]), gate(x)[:3])
 
 
-@pytest.fixture(scope="module")
-def engine():
+@pytest.fixture(scope="module", params=["checkpoint", "full", "fp8-only"])
+def engine(request):
+    """The real checkpoint in its own math, at full precision, and as SM 8.9-10.x GPUs choose, one engine at a time."""
+
     if not (MODEL and Path(MODEL).is_dir() and DRAFTER and Path(DRAFTER).is_dir()):
         pytest.skip("needs TENSORFOLD_QWEN27_NVFP4 and TENSORFOLD_QWEN27_DRAFTER")
+    from tensorfold.cuda import precision
     from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
 
-    return Qwen27Engine(Path(MODEL), Path(DRAFTER), max_rows=12)
+    own = precision.own_math(torch.cuda.get_device_capability())
+    if request.param == "checkpoint" and not own["nvfp4"]:
+        pytest.skip("the checkpoint's FP4 math needs an SM 12.x GPU")
+    if request.param == "fp8-only" and not own["fp8"]:
+        pytest.skip("FP8 x FP8 needs SM 8.9 or newer")
+    mode = precision.FULL if request.param == "full" else precision.CHECKPOINT
+    with pytest.MonkeyPatch.context() as patch, precision.using(mode, asked=True):
+        if request.param == "fp8-only":
+            patch.setattr(precision, "own_math", lambda capability: {"nvfp4": False, "fp8": True})
+        gc.collect()                                   # the previous engine (pytest held it through its teardown)
+        torch.cuda.empty_cache()                       # and earlier tests' cached blocks would shrink the budget
+        made = Qwen27Engine(Path(MODEL), Path(DRAFTER), max_rows=12, context=4096, context_explicit=True)
+    assert made.w.precision == mode
+    assert made.w.own == ({"nvfp4": False, "fp8": True} if request.param == "fp8-only" else
+                          {"nvfp4": mode == precision.CHECKPOINT, "fp8": mode == precision.CHECKPOINT})
+    yield made
+    del made
+    torch.cuda.empty_cache()
 
 
 def _ids(engine, prompt, sampling, draft, tokens=48):

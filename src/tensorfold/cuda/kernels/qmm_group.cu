@@ -6,6 +6,7 @@
 #include <cooperative_groups.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <type_traits>
 #include <vector>
 
 #include "qmm_frag.cuh"
@@ -42,9 +43,15 @@ __device__ __forceinline__ uint32_t pairm(uint32_t w, int s, uint32_t mask) {
     return r;
 }
 
+template <int N>
+using ic = std::integral_constant<int, N>;
+
 // Clusters of C blocks along x, one part each: a cluster covers C / sk column tiles, each split in sk K slices.
 // SWAP (8-row tiles): weights are the MMA's A operand (16 columns) and the rows its B (8), half the MMAs of 16 rows.
-template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool SWAP = false>
+// SKIP: a warp's m16 tiles wholly past M skip their fragments, mmas and scaling (a part-filled row tile). SPREAD:
+// every K slice sums its share of the tile's outputs (else slice 0 sums them all); the same adds in the same order.
+template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool SWAP = false, bool SKIP = false,
+          bool SPREAD = false>
 __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
         const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const __grid_constant__ Parts parts,
         int M, int K, int ldx, int rows_t, int C) {
@@ -150,101 +157,141 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
             commit();
         }
         grid_launch();
-        for (int it = 0; it < per; ++it) {
-            wait<STAGES - 2>();
-            __syncthreads();
-            const int next = it + STAGES - 1;
-            if (next < per) {
-                load_x(next % STAGES, g0 + next);
-                load_w(next % STAGES, g0 + next);
-            }
-            commit();
-            const unsigned char* p = stage(it % STAGES);
-            const uint32_t* pw = reinterpret_cast<const uint32_t*>(p + T::X);
-            const __nv_bfloat16* ps = reinterpret_cast<const __nv_bfloat16*>(p + T::X + T::W);
-            const float* px = reinterpret_cast<const float*>(p + T::X + T::W + 2 * T::S);
-            uint32_t words[T::NT][GS / 32];
-#pragma unroll
-            for (int j = 0; j < T::NT; ++j)
-#pragma unroll
-                for (int v = 0; v < GS / 32; ++v)
-                    words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * (GS / 32) + v];
-            float d[I][J][4];
-            if constexpr (SWAP) {
-#pragma unroll
-                for (int kt = 0; kt < GS / 16; ++kt) {
-                    uint32_t bx[2];                           // rows 0-7 at k lo, k hi: the B fragment
-                    ldmatrix2(bx, p + (lane & 7) * T::ROW + swz<T::CHUNKS>(lane & 7, kt * 2 + ((lane >> 3) & 1)) * 16);
-#pragma unroll
-                    for (int i = 0; i < I; ++i) {             // A rows g, g + 8 are columns of n8 tiles 2i, 2i + 1
-                        const int s0 = (kt & 1) * 8;
-                        const uint32_t a[4] = {pairm(words[2 * i][kt / 2], s0, mask),
-                                               pairm(words[2 * i + 1][kt / 2], s0, mask),
-                                               pairm(words[2 * i][kt / 2], s0 + 4, mask),
-                                               pairm(words[2 * i + 1][kt / 2], s0 + 4, mask)};
-                        if (kt == 0) mma0(d[i][0], a, bx[0], bx[1]);
-                        else mma(d[i][0], a, bx[0], bx[1]);
-                    }
+        auto steps = [&](auto live_c) {                   // LIVE: the warp's m16 tiles holding rows below M
+            [[maybe_unused]] constexpr int LIVE = decltype(live_c)::value;
+            for (int it = 0; it < per; ++it) {
+                wait<STAGES - 2>();
+                __syncthreads();
+                const int next = it + STAGES - 1;
+                if (next < per) {
+                    load_x(next % STAGES, g0 + next);
+                    load_w(next % STAGES, g0 + next);
                 }
+                commit();
+                const unsigned char* p = stage(it % STAGES);
+                const uint32_t* pw = reinterpret_cast<const uint32_t*>(p + T::X);
+                const __nv_bfloat16* ps = reinterpret_cast<const __nv_bfloat16*>(p + T::X + T::W);
+                const float* px = reinterpret_cast<const float*>(p + T::X + T::W + 2 * T::S);
+                uint32_t words[T::NT][GS / 32];
 #pragma unroll
-                for (int i = 0; i < I; ++i)
+                for (int j = 0; j < T::NT; ++j)
 #pragma unroll
-                    for (int e = 0; e < 4; ++e) {             // d: column g (+ 8 for e >= 2), rows 2t, 2t + 1
-                        const int col = wn * (BN / WN) + i * 16 + (lane >> 2) + (e >> 1) * 8;
-                        const float sv = __bfloat162float(ps[col]), bv = __bfloat162float(ps[BN + col]);
-                        const float xv = px[(lane & 3) * 2 + (e & 1)];
-                        acc[i][0][e] = __fmaf_rn(xv, bv, __fmaf_rn(d[i][0][e], sv, acc[i][0][e]));
+                    for (int v = 0; v < GS / 32; ++v)
+                        words[j][v] = pw[((wn * T::NT + j) * 32 + lane) * (GS / 32) + v];
+                float d[I][J][4];
+                if constexpr (SWAP) {
+#pragma unroll
+                    for (int kt = 0; kt < GS / 16; ++kt) {
+                        uint32_t bx[2];                           // rows 0-7 at k lo, k hi: the B fragment
+                        const int ch = kt * 2 + ((lane >> 3) & 1);
+                        ldmatrix2(bx, p + (lane & 7) * T::ROW + swz<T::CHUNKS>(lane & 7, ch) * 16);
+#pragma unroll
+                        for (int i = 0; i < I; ++i) {             // A rows g, g + 8 are columns of n8 tiles 2i, 2i + 1
+                            const int s0 = (kt & 1) * 8;
+                            const uint32_t a[4] = {pairm(words[2 * i][kt / 2], s0, mask),
+                                                   pairm(words[2 * i + 1][kt / 2], s0, mask),
+                                                   pairm(words[2 * i][kt / 2], s0 + 4, mask),
+                                                   pairm(words[2 * i + 1][kt / 2], s0 + 4, mask)};
+                            if (kt == 0) mma0(d[i][0], a, bx[0], bx[1]);
+                            else mma(d[i][0], a, bx[0], bx[1]);
+                        }
                     }
-            } else {
 #pragma unroll
-                for (int kt = 0; kt < GS / 16; ++kt) {
-                    uint32_t a[T::MT][4];
+                    for (int i = 0; i < I; ++i)
 #pragma unroll
-                    for (int i = 0; i < T::MT; ++i) {
-                        const int r = wm * (BM / WM) + i * 16 + (lane & 7) + ((lane >> 3) & 1) * 8;
-                        const int ch = kt * 2 + (lane >> 4);
-                        ldmatrix4(a[i], p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16);
+                        for (int e = 0; e < 4; ++e) {             // d: column g (+ 8 for e >= 2), rows 2t, 2t + 1
+                            const int col = wn * (BN / WN) + i * 16 + (lane >> 2) + (e >> 1) * 8;
+                            const float sv = __bfloat162float(ps[col]), bv = __bfloat162float(ps[BN + col]);
+                            const float xv = px[(lane & 3) * 2 + (e & 1)];
+                            acc[i][0][e] = __fmaf_rn(xv, bv, __fmaf_rn(d[i][0][e], sv, acc[i][0][e]));
+                        }
+                } else {
+#pragma unroll
+                    for (int kt = 0; kt < GS / 16; ++kt) {
+                        uint32_t a[LIVE > 0 ? LIVE : 1][4];
+#pragma unroll
+                        for (int i = 0; i < LIVE; ++i) {
+                            const int r = wm * (BM / WM) + i * 16 + (lane & 7) + ((lane >> 3) & 1) * 8;
+                            const int ch = kt * 2 + (lane >> 4);
+                            ldmatrix4(a[i], p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16);
+                        }
+#pragma unroll
+                        for (int j = 0; j < T::NT; ++j) {
+                            const uint32_t b0 = pairm(words[j][kt / 2], (kt & 1) * 8, mask);
+                            const uint32_t b1 = pairm(words[j][kt / 2], (kt & 1) * 8 + 4, mask);
+#pragma unroll
+                            for (int i = 0; i < LIVE; ++i) {
+                                if (kt == 0) mma0(d[i][j], a[i], b0, b1);
+                                else mma(d[i][j], a[i], b0, b1);
+                            }
+                        }
                     }
 #pragma unroll
                     for (int j = 0; j < T::NT; ++j) {
-                        const uint32_t b0 = pairm(words[j][kt / 2], (kt & 1) * 8, mask);
-                        const uint32_t b1 = pairm(words[j][kt / 2], (kt & 1) * 8 + 4, mask);
+                        const int col = wn * (BN / WN) + j * 8 + (lane & 3) * 2;
+                        const __nv_bfloat162 s2 = *reinterpret_cast<const __nv_bfloat162*>(ps + col);
+                        const __nv_bfloat162 b2 = *reinterpret_cast<const __nv_bfloat162*>(ps + BN + col);
+                        const float sv[2] = {__low2float(s2), __high2float(s2)};
+                        const float bv[2] = {__low2float(b2), __high2float(b2)};
 #pragma unroll
-                        for (int i = 0; i < T::MT; ++i) {
-                            if (kt == 0) mma0(d[i][j], a[i], b0, b1);
-                            else mma(d[i][j], a[i], b0, b1);
+                        for (int i = 0; i < LIVE; ++i) {
+                            const int row = wm * (BM / WM) + i * 16 + (lane >> 2);
+                            const float xv[2] = {px[row], px[row + 8]};
+#pragma unroll
+                            for (int e = 0; e < 4; ++e)           // acc = fma(xs, b, fma(p, s, acc)): qmm.cu's order
+                                acc[i][j][e] = __fmaf_rn(xv[e >> 1], bv[e & 1],
+                                                         __fmaf_rn(d[i][j][e], sv[e & 1], acc[i][j][e]));
                         }
                     }
                 }
-#pragma unroll
-                for (int j = 0; j < T::NT; ++j) {
-                    const int col = wn * (BN / WN) + j * 8 + (lane & 3) * 2;
-                    const __nv_bfloat162 s2 = *reinterpret_cast<const __nv_bfloat162*>(ps + col);
-                    const __nv_bfloat162 b2 = *reinterpret_cast<const __nv_bfloat162*>(ps + BN + col);
-                    const float sv[2] = {__low2float(s2), __high2float(s2)};
-                    const float bv[2] = {__low2float(b2), __high2float(b2)};
-#pragma unroll
-                    for (int i = 0; i < T::MT; ++i) {
-                        const int row = wm * (BM / WM) + i * 16 + (lane >> 2);
-                        const float xv[2] = {px[row], px[row + 8]};
-#pragma unroll
-                        for (int e = 0; e < 4; ++e)           // acc = fma(xs, b, fma(p, s, acc)): qmm.cu's order
-                            acc[i][j][e] = __fmaf_rn(xv[e >> 1], bv[e & 1],
-                                                     __fmaf_rn(d[i][j][e], sv[e & 1], acc[i][j][e]));
-                    }
-                }
             }
+        };
+        if constexpr (!SKIP || SWAP || T::MT == 1) {
+            steps(ic<T::MT>());
+        } else {
+            const int live = min(T::MT, max(0, (M - m0 - wm * (BM / WM) + 15) / 16));
+            if (live == 0) steps(ic<0>());
+            else if (live == 1) steps(ic<1>());
+            else if (T::MT > 2 && live == 2) steps(ic<(T::MT > 2 ? 2 : T::MT)>());
+            else if (T::MT > 3 && live == 3) steps(ic<(T::MT > 3 ? 3 : T::MT)>());
+            else if (T::MT > 4 && live <= 4) steps(ic<(T::MT > 4 ? 4 : T::MT)>());
+            else if (T::MT > 6 && live <= 6) steps(ic<(T::MT > 6 ? 6 : T::MT)>());
+            else steps(ic<T::MT>());
         }
         wait<0>();
         __syncthreads();
     } else {
         grid_launch();
     }
+    const int N = P.n;
+    auto put = [&](int row, int col, float v) {
+        if (row >= M || col >= N) return;
+        if (F32) reinterpret_cast<float*>(P.out)[static_cast<size_t>(row) * N + col] = v;
+        else reinterpret_cast<__nv_bfloat16*>(P.out)[static_cast<size_t>(row) * N + col] = __float2bfloat16_rn(v);
+    };
+    auto emit = [&](int i, int j, int h, float v0, float v1) {      // entries 2h, 2h + 1 of fragment (i, j)
+        if constexpr (SWAP) {                    // column g (+ 8 for h 1), rows 2t, 2t + 1
+            const int col = n0 + wn * (BN / WN) + i * 16 + (lane >> 2) + h * 8;
+            put(m0 + (lane & 3) * 2, col, v0);
+            put(m0 + (lane & 3) * 2 + 1, col, v1);
+        } else {
+            const int col = n0 + wn * (BN / WN) + j * 8 + (lane & 3) * 2;
+            const int row = m0 + wm * (BM / WM) + i * 16 + (lane >> 2) + h * 8;
+            if (row >= M) return;
+            if (!F32 && col + 1 < N && (N & 1) == 0) {
+                auto* dst = reinterpret_cast<__nv_bfloat16*>(P.out) + static_cast<size_t>(row) * N + col;
+                *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v0, v1);
+            } else {
+                put(row, col, v0);
+                put(row, col + 1, v1);
+            }
+        }
+    };
     if (sk > 1) {                                // uniform in a cluster: it holds one part
 #if __CUDA_ARCH__ >= 900
         auto cluster = cooperative_groups::this_cluster();
         float* mine = reinterpret_cast<float*>(buf);
-        if (slice != 0) {
+        if (SPREAD || slice != 0) {
 #pragma unroll
             for (int i = 0; i < I; ++i)
 #pragma unroll
@@ -253,62 +300,54 @@ __global__ void __launch_bounds__(WM * WN * 32) group_kernel(
                     for (int e = 0; e < 4; ++e) mine[((i * J + j) * 4 + e) * T::THREADS + tid] = acc[i][j][e];
         }
         cluster.sync();
-        if (slice == 0 && live) {                // slice 0 adds its tile's peers in slice order, as qmm.cu does
-            for (int peer = 1; peer < sk; ++peer) {
-                const float* theirs = cluster.map_shared_rank(mine, rank + peer);
-#pragma unroll
-                for (int i = 0; i < I; ++i)
-#pragma unroll
-                    for (int j = 0; j < J; ++j)
-#pragma unroll
-                        for (int e = 0; e < 4; ++e)
-                            acc[i][j][e] = acc[i][j][e] + theirs[((i * J + j) * 4 + e) * T::THREADS + tid];
+        if constexpr (SPREAD) {                  // slice s adds pairs s, s + sk, .. over the tile's slices in order
+            if (live) {
+                for (int pr = slice; pr < I * J * 2; pr += sk) {
+                    const float* first = cluster.map_shared_rank(mine, rank - slice);
+                    float v0 = first[2 * pr * T::THREADS + tid], v1 = first[(2 * pr + 1) * T::THREADS + tid];
+#pragma unroll 7
+                    for (int peer = 1; peer < sk; ++peer) {
+                        const float* theirs = cluster.map_shared_rank(mine, rank - slice + peer);
+                        v0 = v0 + theirs[2 * pr * T::THREADS + tid];
+                        v1 = v1 + theirs[(2 * pr + 1) * T::THREADS + tid];
+                    }
+                    emit(pr / (J * 2), pr / 2 % J, pr % 2, v0, v1);
+                }
             }
+            cluster.sync();                      // peers keep their memory until every slice has read it
+            return;
+        } else {
+            if (slice == 0 && live) {            // slice 0 adds its tile's peers in slice order, as qmm.cu does
+                for (int peer = 1; peer < sk; ++peer) {
+                    const float* theirs = cluster.map_shared_rank(mine, rank + peer);
+#pragma unroll
+                    for (int i = 0; i < I; ++i)
+#pragma unroll
+                        for (int j = 0; j < J; ++j)
+#pragma unroll
+                            for (int e = 0; e < 4; ++e)
+                                acc[i][j][e] = acc[i][j][e] + theirs[((i * J + j) * 4 + e) * T::THREADS + tid];
+                }
+            }
+            cluster.sync();                      // peers keep their memory until slice 0 has read it
+            if (slice != 0) return;
         }
-        cluster.sync();                          // peers keep their memory until slice 0 has read it
-        if (slice != 0) return;
 #else
         __trap();
+        return;
 #endif
     }
     if (!live) return;
-    const int N = P.n;
-    auto put = [&](int row, int col, float v) {
-        if (row >= M || col >= N) return;
-        if (F32) reinterpret_cast<float*>(P.out)[static_cast<size_t>(row) * N + col] = v;
-        else reinterpret_cast<__nv_bfloat16*>(P.out)[static_cast<size_t>(row) * N + col] = __float2bfloat16_rn(v);
-    };
-    if constexpr (SWAP) {
-#pragma unroll
-        for (int i = 0; i < I; ++i)
-#pragma unroll
-            for (int e = 0; e < 4; ++e)
-                put(m0 + (lane & 3) * 2 + (e & 1), n0 + wn * (BN / WN) + i * 16 + (lane >> 2) + (e >> 1) * 8,
-                    acc[i][0][e]);
-        return;
-    }
 #pragma unroll
     for (int i = 0; i < I; ++i)
 #pragma unroll
-        for (int j = 0; j < J; ++j) {
-            const int col = n0 + wn * (BN / WN) + j * 8 + (lane & 3) * 2;
+        for (int j = 0; j < J; ++j)
 #pragma unroll
-            for (int h = 0; h < 2; ++h) {
-                const int row = m0 + wm * (BM / WM) + i * 16 + (lane >> 2) + h * 8;
-                if (row >= M) continue;
-                const float v0 = acc[i][j][2 * h], v1 = acc[i][j][2 * h + 1];
-                if (!F32 && col + 1 < N && (N & 1) == 0) {
-                    auto* dst = reinterpret_cast<__nv_bfloat16*>(P.out) + static_cast<size_t>(row) * N + col;
-                    *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v0, v1);
-                } else {
-                    put(row, col, v0);
-                    put(row, col + 1, v1);
-                }
-            }
-        }
+            for (int h = 0; h < 2; ++h) emit(i, j, h, acc[i][j][2 * h], acc[i][j][2 * h + 1]);
 }
 
-template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool SWAP = false>
+template <int GS, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool SWAP = false, bool SKIP = false,
+          bool SPREAD = false>
 void launch(const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool pdl) {
     using T = LaneTile<GS, BM, BN, WM, WN, STAGES>;
     const int M = x.size(0), K = x.size(1), rows_t = (M + BM - 1) / BM;
@@ -319,7 +358,7 @@ void launch(const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool
         P.first = clusters;
         clusters += rows_t * ((P.tiles + C / P.sk - 1) / (C / P.sk));
     }
-    auto kernel = group_kernel<GS, BM, BN, WM, WN, STAGES, F32, SWAP>;
+    auto kernel = group_kernel<GS, BM, BN, WM, WN, STAGES, F32, SWAP, SKIP, SPREAD>;
     static bool configured = false;
     if (!configured) {
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM);
@@ -352,10 +391,12 @@ void launch(const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool
 }
 
 // Tiles never change bits; 0 picks by rows and chip: the PRO 6000, power-capped at one row, takes fewer MMAs a weight.
+// 10-12 (``qmm.group_tile`` on SM 12.0 from 96 SMs) spread the slice sums and skip m16 tiles wholly past M.
 template <bool F32>
 void dispatch(int tile, int M, bool gb10, const at::Tensor& x, const at::Tensor& xs, Parts& parts, int C, bool pdl) {
     if (tile == 0 && gb10) tile = M <= 16 ? 2 : M <= 32 ? 3 : M <= 64 ? 4 : 5;
     if (tile == 0) tile = M <= 8 ? 7 : M <= 16 ? 8 : M <= 32 ? 9 : M <= 64 ? 4 : 5;
+    auto go = [&](auto full, auto skip, int bm) { M % bm ? skip() : full(); };
     switch (tile) {
         case 1: launch<64, 16, 64, 1, 4, 4, F32>(x, xs, parts, C, pdl); break;
         case 2: launch<64, 16, 64, 1, 4, 8, F32>(x, xs, parts, C, pdl); break;
@@ -366,6 +407,12 @@ void dispatch(int tile, int M, bool gb10, const at::Tensor& x, const at::Tensor&
         case 7: launch<64, 8, 128, 1, 4, 4, F32, true>(x, xs, parts, C, pdl); break;
         case 8: launch<64, 16, 128, 1, 8, 4, F32>(x, xs, parts, C, pdl); break;
         case 9: launch<64, 32, 128, 1, 8, 4, F32>(x, xs, parts, C, pdl); break;
+        case 10: go([&] { launch<64, 128, 128, 2, 4, 2, F32, false, false, true>(x, xs, parts, C, pdl); },
+                    [&] { launch<64, 128, 128, 2, 4, 2, F32, false, true, true>(x, xs, parts, C, pdl); }, 128); break;
+        case 11: go([&] { launch<64, 64, 128, 1, 8, 3, F32, false, false, true>(x, xs, parts, C, pdl); },
+                    [&] { launch<64, 64, 128, 1, 8, 3, F32, false, true, true>(x, xs, parts, C, pdl); }, 64); break;
+        case 12: go([&] { launch<64, 64, 128, 2, 4, 3, F32, false, false, true>(x, xs, parts, C, pdl); },
+                    [&] { launch<64, 64, 128, 2, 4, 3, F32, false, true, true>(x, xs, parts, C, pdl); }, 64); break;
         default: TORCH_CHECK(false, "unknown group tile ", tile);
     }
 }

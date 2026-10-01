@@ -10,16 +10,24 @@ import torch
 import triton
 import triton.language as tl
 
+from .qmm_tiles import group_tile
+
 
 @lru_cache(maxsize=1)
 def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_qmm_v4", sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"),
+    return load(name="tensorfold_qmm_v5", sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"),
                                                    str(here / "qmm_group.cu"), str(here / "qmm_prefill.cu"),
                                                    str(here / "qmm_prefill8.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
+
+
+@lru_cache(maxsize=None)
+def _chip(device: int) -> tuple[int, int, int]:
+    p = torch.cuda.get_device_properties(device)
+    return p.major, p.minor, p.multi_processor_count
 
 
 @lru_cache(maxsize=None)
@@ -161,7 +169,8 @@ def matmul(x: torch.Tensor, q: Q4, xs: torch.Tensor | None = None, *, sk: int | 
     if out is None:
         out = torch.empty((m, q.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
     if q.gs == 64 and reduce and grouped(x.device.index):
-        _ext().qmm_group(x, xs, [q.weight], [q.scales], [q.biases], [out], [q.n], [sk], f32, 0, -1)
+        _ext().qmm_group(x, xs, [q.weight], [q.scales], [q.biases], [out], [q.n], [sk], f32,
+                         group_tile(m, *_chip(x.device.index)), -1)
         return out
     if sk > 1 and not reduce and part is None:
         part = torch.empty((sk, m, q.n), dtype=torch.float32, device=x.device)
@@ -184,6 +193,7 @@ def matmul_group(x: torch.Tensor, qs: list[Q4], xs: torch.Tensor | None = None, 
         xs = group_sums(x, 64)
     dtype = torch.float32 if f32 else torch.bfloat16
     outs = [torch.empty((x.shape[0], q.n), dtype=dtype, device=x.device) for q in qs]
+    tile = tile or group_tile(x.shape[0], *_chip(x.device.index))
     _ext().qmm_group(x, xs, [q.weight for q in qs], [q.scales for q in qs], [q.biases for q in qs], outs,
                      [q.n for q in qs], sks, f32, tile, early)
     return outs

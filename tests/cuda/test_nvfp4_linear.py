@@ -37,6 +37,32 @@ def _check_rows(lin, x):
     return full
 
 
+@pytest.mark.parametrize("kind", ["fp4", "fp8"])
+def test_slices_meet_in_part_with_the_clusters_bits(kind):
+    """SM 8.9 has no clusters: K slices add through ``part`` and the reduce, in the clusters' order: the same bits."""
+
+    from tensorfold.cuda.kernels import qmm
+    from tensorfold.cuda.nvfp4 import linear
+
+    n, k, m = 5120, 17408, 37                                                   # 4 slices (a down projection)
+    if kind == "fp4":
+        packed, scale, g = _fp4(n, k, 7)
+        lin = Fp4Linear.from_checkpoint(torch.from_numpy(packed).cuda(), torch.from_numpy(scale).cuda(), g)
+        mode, w, bs = linear.FP4, lin.words, lin.bs
+    else:
+        w8, s = _fp8(n, k, 7)
+        lin = Fp8Linear.from_checkpoint(torch.from_numpy(w8).cuda().view(torch.float8_e4m3fn), s)
+        mode, w, bs = linear.FP8, lin.w8, None
+    sk = qmm.split_k(n, k)
+    assert 1 < sk <= 8
+    x = (torch.randn((m, k), generator=torch.Generator().manual_seed(5)) * 0.6).to(torch.bfloat16).cuda()
+    clusters = lin(x)
+    y = torch.empty_like(clusters)
+    part = torch.empty((sk, m, n), dtype=torch.float32, device="cuda")
+    linear._ext().qmmf(x, w, bs, lin.scale, y, part, mode, n, sk, lin.npad, qmm.bucket(m), False)
+    assert torch.equal(y, clusters)
+
+
 @pytest.mark.parametrize("n,k", [(128, 256), (320, 1024), (1000, 5120)])
 def test_fp4_decode_is_the_dequantized_product_and_rows_are_independent(n, k):
     packed, scale, g = _fp4(n, k, n)

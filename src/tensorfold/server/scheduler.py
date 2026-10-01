@@ -164,7 +164,7 @@ class Scheduler(PromptFill):
         self.stall_s = 120.0            # no round, start or finish while requests wait: dump stacks
         self.stall_prefill_s = 900.0    # the same while one prefill runs
         self._watchdog = threading.Thread(target=self._watch, name="tensorfold-watchdog", daemon=True)
-        self.decoded, self.prefilled = Meter(), ChunkRate()
+        self.decoded, self.prefilled = Meter(), ChunkRate()       # the live line's decode and prefill tok/s
 
     # -- lifecycle ------------------------------------------------------------
     def start(self) -> None:
@@ -462,7 +462,7 @@ class Scheduler(PromptFill):
             return True
         live = [(n, min(len(j.prompt_ids) + int(j.max_tokens), n + self._reserved(int(j.max_tokens))))
                 for j in self._jobs.values() if j.stream is not None and not j.stream.finished
-                for n in [len(j.stream.context)]]
+                for n in [j.stream.context_len]]
         # an open prompt grows from the rows it holds to its prompt and reply horizon; its chunks' workspace counts too
         live += [(len(f.job.prompt_ids) - f.left, len(f.job.prompt_ids) + self._reserved(int(f.job.max_tokens)))
                  for f in self._fills]
@@ -479,7 +479,7 @@ class Scheduler(PromptFill):
 
         live = sorted((j for j in self._jobs.values() if j.stream is not None and not j.stream.finished),
                       key=lambda j: j.started_at)
-        plan = self.gate.plan([(j.stream.stream_id, len(j.stream.context), len(j.prompt_ids) + int(j.max_tokens))
+        plan = self.gate.plan([(j.stream.stream_id, j.stream.context_len, len(j.prompt_ids) + int(j.max_tokens))
                                for j in live])
         if set(plan.paused) != self.engine.paused:
             print(f"[tensorfold] memory: {len(plan.paused)} of {len(live)} streams wait for room (newest first)",

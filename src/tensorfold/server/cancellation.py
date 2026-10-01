@@ -35,7 +35,7 @@ def socket_cancellation(connection: socket.socket) -> Cancellation:
             ready, _, _ = select.select([connection], [], [], 0)
             if not ready:
                 return False
-            return connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b""
+            return connection.recv(1, socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)) == b""
         except BlockingIOError:
             return False
         except OSError:

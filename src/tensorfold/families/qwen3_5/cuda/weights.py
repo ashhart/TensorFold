@@ -63,7 +63,12 @@ class Plain:
 
         return matmul(x, self.weight)
 
-    prefill = __call__
+    def prefill(self, x: torch.Tensor) -> torch.Tensor:
+        """Prompt rows on the bf16 mma (chunk-invariant bits, not decode's)."""
+
+        from .b16 import prompt
+
+        return prompt(x, self.weight)
 
 
 @dataclass
@@ -215,8 +220,8 @@ class Weights:
     def fast_prefill(self) -> bool:
         """Whether every projection has an FP8 prompt kernel (run when prompts take FP8)."""
 
-        if self.quant == "exl3":                     # an EXL3 pack's prompt glue stays in bf16
-            return False
+        if self.quant == "exl3" or getattr(self, "precision", "full") == "checkpoint":
+            return False                             # EXL3 prompt glue stays bf16; checkpoint math has its own
         for layer in self.layers:
             modules = [m for m in (layer.gate, layer.up, layer.down) if m is not None]    # a MoE layer's are None
             modules += [layer.gdn.qkv, layer.gdn.z, layer.gdn.b, layer.gdn.a, layer.gdn.out] if layer.gdn else []

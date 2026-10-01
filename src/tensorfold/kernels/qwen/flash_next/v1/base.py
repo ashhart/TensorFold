@@ -376,15 +376,24 @@ def half_nibs() -> bool:
     return _generation() in (15, 16)
 
 
+_variants: dict[tuple[str, str], tuple[str, str]] = {}
+
+
 def by_rows(name: str, source: str, rows: int) -> tuple[str, str]:
     """A kernel's name and source for ``rows`` rows: from nib_rows() rows its dots skip the convert (same bits)."""
 
     if not nib_rows() or rows < nib_rows():
         return name, source
-    if half_nibs():
-        return name + "_h", (source.replace("load16(", "load16h(").replace("qdot16(", "qdot16h(")
-                             .replace("qgroup_dot(", "qgroup_doth("))
-    return name + "_x", source.replace("qdot16(", "qdot16x(").replace("qgroup_dot(", "qgroup_dotx(")
+    mode = "_h" if half_nibs() else "_x"
+    found = _variants.get((name, mode))           # one source per name, as kernel() keeps: rewrite it once
+    if found is None:
+        if mode == "_h":
+            text = (source.replace("load16(", "load16h(").replace("qdot16(", "qdot16h(")
+                    .replace("qgroup_dot(", "qgroup_doth("))
+        else:
+            text = source.replace("qdot16(", "qdot16x(").replace("qgroup_dot(", "qgroup_dotx(")
+        found = _variants[(name, mode)] = (name + mode, text)
+    return found
 
 
 def kernel(name: str, source: Any, inputs: list[str], outputs: list[str], header: str = QDOT_HEADER, *,

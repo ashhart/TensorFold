@@ -68,6 +68,16 @@ def test_streams_draft_a_level_below_the_deepest_kept_node(allocations, monkeypa
     assert dec.block == 4 and dec.draft.blocks == [16, 7, 11]
 
 
+def test_other_gpus_plan_on_the_prior_and_the_old_curve(allocations, monkeypatch):  # noqa: F811
+    multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
+    dec = decoder(multi, monkeypatch, [3, 2], CURVE)
+    dec.spent = {2: [1.0] * 8}
+    assert dec._overhead(2) == 1.0
+    dec.depth = False                                            # a GB10 or an unmeasured GPU
+    assert dec._overhead(2) == 11.0
+    assert not {17, 33, 65} & set(multi.calibration_rows(4, False)) and 17 in multi.calibration_rows(4)
+
+
 def test_other_gpus_draft_every_level(allocations, monkeypatch):  # noqa: F811
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
     assert (12, 0) in multi.DEPTH_CHIPS and (12, 1) not in multi.DEPTH_CHIPS
@@ -96,7 +106,7 @@ def test_the_overhead_past_one_stream_is_the_median_of_the_last_rounds(allocatio
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
     dec = multi.MultiDecoder.__new__(multi.MultiDecoder)
     dec.costs, dec.overhead = CURVE, (8.0, 1.5)
-    for i, ms in enumerate([33.0, 34.0, 60.0]):
+    for i, ms in enumerate([33.0, 34.0, 60.0]):                   # 32 rows cost 23.9 ms on the curve
         dec.last = (0.0, 8, 32)
         dec._timed(ms / 1e3)
     assert dec._overhead(8) == 20.0                                # three rounds: still the prior
@@ -110,8 +120,10 @@ def test_the_overhead_past_one_stream_is_the_median_of_the_last_rounds(allocatio
     assert dec._overhead(4) == 14.0                                # unseen stream counts keep the prior
 
 
-def test_rounds_time_only_while_streams_go_on(allocations):  # noqa: F811
+@pytest.mark.parametrize("batch", [False, True])
+def test_rounds_time_only_while_streams_go_on(allocations, monkeypatch, batch):  # noqa: F811
     multi = importlib.import_module("tensorfold.families.qwen3_5.cuda.multi")
+    monkeypatch.setattr(multi, "BATCH", batch)
     dec = scripted_decoder(multi, list(range(10, 40)))          # no end token: each stream decodes its count
     dec.costs, dec.overhead = CURVE, (8.0, 1.5)
     streams = [Stream([1, 2], 13), Stream([3, 4], 13)]
@@ -122,6 +134,9 @@ def test_rounds_time_only_while_streams_go_on(allocations):  # noqa: F811
     while dec.live():
         dec.finish(dec.round())
         timed.append(dec.last and dec.last[1:])
+    if batch:                                                    # both prompts fill in the first round
+        assert timed == [(2, 8), (2, 8), None] and {n: len(v) for n, v in dec.spent.items()} == {2: 2}
+        return
     # one stream while the second prompt fills, then both (three drafts a window), none after the last round
     assert timed == [(1, 4), (2, 8), (2, 8), None]
     assert {n: len(v) for n, v in dec.spent.items()} == {1: 1, 2: 2}   # each round timed by the next one's start

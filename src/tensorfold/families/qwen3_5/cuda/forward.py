@@ -14,7 +14,7 @@ from tensorfold.cuda.kernels import gdn as deltanet
 
 from . import glue
 from .qmm_fast import matmul, matmul_group
-from .weights import QLinear, Weights
+from .weights import Plain, QLinear, Weights
 
 
 def _mm(x: torch.Tensor, w: QLinear, xs: torch.Tensor | None = None) -> torch.Tensor:
@@ -28,7 +28,19 @@ def _mm_group(x: torch.Tensor, ws: list, xs: torch.Tensor | None = None) -> list
 
     if all(isinstance(w, QLinear) for w in ws):
         return matmul_group(x, ws, xs)
-    return [_mm(x, w, xs) for w in ws]
+    shared = [i for i, w in enumerate(ws) if getattr(w, "act", None) is not None]   # checkpoint math: quantize once
+    got = {}
+    if len(shared) > 1:
+        from tensorfold.cuda.nvfp4 import checkpoint
+
+        outs = checkpoint.matmul_group(x, [ws[i] for i in shared])
+        got = dict(zip(shared, outs)) if outs is not None else {}
+    plain = [i for i, w in enumerate(ws) if isinstance(w, Plain) and i not in got]
+    if len(plain) == 2:                                    # the GDN gates b and a: one launch, each its own bits
+        from .b16 import matmul_pair
+
+        got.update(zip(plain, matmul_pair(x, ws[plain[0]].weight, ws[plain[1]].weight)))
+    return [got[i] if i in got else _mm(x, w, xs) for i, w in enumerate(ws)]
 
 
 def _row_mm(x: torch.Tensor, w: QLinear, tp: bool,

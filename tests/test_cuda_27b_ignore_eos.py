@@ -105,6 +105,7 @@ def scripted_decoder(multi, script=SCRIPT, eos=(0,)):
         return wins, None, None, None, sampled
 
     dec._queue, dec._step, dec._verify = _queue, _step, _verify
+    dec._steps = lambda batch: [_step(s, stop) for s, stop in batch]    # prompts admitted together
     dec._commit = lambda plan, wins, record, taps, starts, paths: [
         dec.streams[item[0]].counted(len(w[0])) for item, w in zip(plan, wins)]
     return dec

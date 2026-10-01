@@ -63,7 +63,13 @@ def decoders(monkeypatch, allocations):  # noqa: F811
             raise torch.OutOfMemoryError("CUDA out of memory (simulated at the prompt-end entry)")
         return St(st.pos)
 
+    def prefill_batch(w, pieces, **kw):
+        for p in pieces:
+            p.st.pos = len(p.prompt)
+        return [(None, None if p.keep_at is None else (St(p.keep_at), None), None) for p in pieces]
+
     monkeypatch.setattr(multi, "prefill_state", prefill_state)
+    monkeypatch.setattr(multi, "prefill_batch", prefill_batch)
     monkeypatch.setattr(multi, "first_token", lambda *args: 7)
     monkeypatch.setattr(multi, "kept", entry)
     monkeypatch.setattr(multi, "viewed", entry)

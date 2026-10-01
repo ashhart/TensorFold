@@ -263,12 +263,18 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     served = args.name or (args.model.rstrip("/").split("/")[-1] if hub.is_repo_id(args.model) else model_dir.name)
     where = f", rank {args.rank} of 2" if args.tp == 2 else ""
     print(f"[tensorfold] loading {served}: {family.title} ({family.model_type}) on CUDA{where}", flush=True)
-    from tensorfold.cuda import prompt_precision
+    from tensorfold.cuda import precision, prompt_precision
 
     asked = getattr(args, "prefill_fp8", None)
     prompt_precision.set_fp8(prompt_precision.FP8_BY_DEFAULT if asked is None else asked)   # before any weight loads
+    chosen = getattr(args, "precision", None)
+    precision.set_mode(chosen or precision.CHECKPOINT, asked=chosen is not None)
     engine = family.package.cuda_engine(model_dir, **options)
-    fp8 = prompt_precision.fp8() and bool(getattr(getattr(engine, "w", None), "fast_prefill", False))
+    weights = getattr(engine, "w", None)
+    fp8 = prompt_precision.fp8() and bool(getattr(weights, "fast_prefill", False))
+    if asked and not fp8 and getattr(weights, "precision", "full") == precision.CHECKPOINT:
+        raise ValueError("--prefill-fp8 is for --precision full: the checkpoint's own math already runs its prompts in "
+                         "FP4 and FP8")
     if asked and not fp8:
         raise ValueError("--prefill-fp8: this checkpoint's prompt matmuls have no FP8 kernel (EXL3 packs, MLX formats "
                          "other than Qwen's 4-bit g64, Flash Next without MXFP8 layers); drop the flag")
@@ -293,9 +299,10 @@ def _serve_cuda(args: argparse.Namespace, family: Any, model_dir: Path, context:
     shown = "greedy" if float(sampling.get("temperature", 1.0)) <= 0 else ", ".join(
         f"{k} {v}" for k, v in sampling.items())
     effective_context = app.effective_context_window
+    own = getattr(weights, "precision", "") == precision.CHECKPOINT
+    prompts = "FP8 activations" if fp8 else "the checkpoint math" if own else "bf16 activations"
     print(f"[tensorfold] serving {served} at http://{args.host}:{args.port}/v1 on CUDA{where} "
-          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; "
-          f"prompts: {'FP8 activations' if fp8 else 'bf16 activations'}; "
+          f"(sampling: {shown}; drafts: {'off' if args.no_drafts else 'on'}; prompts: {prompts}; "
           f"context: {'unlimited' if effective_context is None else effective_context}; "
           f"loaded in {time.perf_counter() - started:.1f}s)", flush=True)
     serve(app, args.host, int(args.port))
@@ -510,7 +517,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     signal.signal(signal.SIGTERM, _terminate)
     from tensorfold.server import live
 
-    line = live.start(app)
+    line = live.start(app)      # connections and decode/prefill tok/s on one line, in a terminal only
     try:
         server.serve_forever()
     except KeyboardInterrupt:

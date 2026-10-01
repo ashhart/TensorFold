@@ -15,11 +15,12 @@ from tensorfold.cuda.kernels import qmm  # noqa: E402
 from tensorfold.families.qwen3_5.cuda import qmm as triton_qmm  # noqa: E402
 
 ROWS = [1, 2, 7, 8, 9, 16, 17, 33, 64, 65, 100, 128, 129]
-TILES = list(range(10))                              # 0 picks by rows and chip; 6 and 7 are the swapped 8-row tiles
+TILES = list(range(13))                              # 0 picks by rows and chip; 6 and 7 are the swapped 8-row tiles
 GROUPS = {"gdn": [(10240, 5120), (6144, 5120), (48, 5120), (48, 5120)],      # K splits 2, 2, 8, 8 in one launch
           "attention": [(12288, 5120), (1024, 5120), (1024, 5120)],          # 1, 8, 8
           "mlp": [(17408, 5120), (17408, 5120)],                             # 1, 1
-          "out": [(5120, 6144)], "down": [(5120, 17408)]}                    # 4; 4
+          "out": [(5120, 6144)], "down": [(5120, 17408)],                    # 4; 4
+          "drafter_attention": [(4096, 5120), (1024, 5120), (1024, 5120)], "drafter_o": [(5120, 4096)]}
 MODEL = Path(os.environ.get("TF_QWEN27_MODEL", "/models/Qwen3.8-27B-MLX-4bit"))
 
 
@@ -47,6 +48,20 @@ def _check(ws, rows) -> None:
 @pytest.mark.parametrize("name", list(GROUPS))
 def test_parts_keep_the_serial_reference_bits(name):
     _check([_weights(n, k, 3 * n + i) for i, (n, k) in enumerate(GROUPS[name])], ROWS)
+
+
+@pytest.mark.parametrize("name", list(GROUPS))
+def test_every_row_count_to_256_keeps_the_reference_bits(name):
+    """matmul_group's own block at every row count from 1 to 256 (128-row blocks on a wide SM 12.0): the bits."""
+
+    ws = [_weights(n, k, 5 * n + i) for i, (n, k) in enumerate(GROUPS[name])]
+    qs = [qmm.pack(*w, 64) for w in ws]
+    k = qs[0].k
+    x = torch.randn((256, k), generator=torch.Generator(device="cuda").manual_seed(k + 1), device="cuda").bfloat16()
+    want = [triton_qmm.lane_matmul(x, *w) for w in ws]                    # rows alone: a prefix is its own rows
+    bad = [m for m in range(1, 257)
+           if not all(torch.equal(a, b[:m]) for a, b in zip(qmm.matmul_group(x[:m], qs), want))]
+    assert not bad, bad[:10]
 
 
 def test_rows_past_the_tile_and_strided_rows():

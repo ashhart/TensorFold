@@ -183,7 +183,21 @@ class LaneStream:
 
     @property
     def context(self) -> list[int]:
-        return [*self.prompt_ids, *self.emitted]
+        """prompt_ids + emitted as one list grown as tokens land, not rebuilt a round (callers only read it)."""
+
+        key = (id(self.prompt_ids), len(self.prompt_ids), id(self.emitted))
+        held = self.__dict__.get("_context")
+        size = len(self.prompt_ids) + len(self.emitted)
+        if held is None or self.__dict__.get("_context_key") != key or len(held) > size:
+            held = self.__dict__["_context"] = [*self.prompt_ids, *self.emitted]
+            self.__dict__["_context_key"] = key
+        elif len(held) < size:
+            held.extend(self.emitted[len(held) - len(self.prompt_ids):])
+        return held
+
+    @property
+    def context_len(self) -> int:
+        return len(self.prompt_ids) + len(self.emitted)
 
     @property
     def budget_left(self) -> int:

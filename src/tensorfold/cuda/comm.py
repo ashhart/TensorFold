@@ -17,6 +17,9 @@ class _UniqueId(ctypes.Structure):
 
 
 def _library() -> ctypes.CDLL:
+    if os.name == "nt":
+        raise RuntimeError("TensorFold does not run tensor-parallel (NCCL) on Windows: CUDA on Windows has no "
+                           "libnccl to wrap; use one GPU per process there")
     candidates = [os.environ.get("TF_NCCL_LIB", "")]
     found = ctypes.util.find_library("nccl")
     if found:

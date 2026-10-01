@@ -266,16 +266,11 @@ def choose(plan: Plan, peers: list[list[int]] | None = None) -> int:
 
 
 def floor(model_dir: str | Path) -> tuple[int, int]:
-    """The compute capability a checkpoint's kernels need: NVFP4 and FP8 (ModelOpt, compressed-tensors) use clusters."""
+    """The compute capability a checkpoint's kernels need: 8.9 for every format (clusters are taken where present)."""
 
     from tensorfold.cuda import build
-    from tensorfold.cuda.nvfp4.format import is_quantized
 
-    try:
-        quantized = is_quantized(model_dir)
-    except (OSError, ValueError):                   # an unreadable config is named by the estimate below
-        quantized = False
-    return build.CLUSTERS if quantized else build.MIN_CAPABILITY
+    return build.MIN_CAPABILITY
 
 
 def admit(model_dir: str | Path, requested: int | None, explicit: bool | None, torch,

@@ -8,13 +8,8 @@ from typing import Any
 import mlx.core as mx
 import numpy as np
 
-from tensorfold.families.qwen4_exp.model import AttentionCache, _write_back, select_by_kernels
-
-
-class MTPCache(AttentionCache):
-    """Track MTP attention entries and chained drafts, trimming drafts before absorbing kept rows."""
-
-    drafted = 0
+from tensorfold.families.qwen4_exp.model import _write_back, select_by_kernels
+from tensorfold.families.qwen4_exp.mtp_cache import MTPCache
 
 
 class FlashNext:
@@ -36,6 +31,8 @@ class FlashNext:
         self.drafts = int(drafts)
         self._specs: dict[int, tuple[mx.array, int]] = {}        # head cache id -> (streams out, rows) of speculate
         self.exact_width, self.window_costs = self.check_windows() if self.fused is not None else (1, {})
+        if self.fused is not None:
+            self._warm_sparse()
         self.multi_row_exact = self.exact_width >= 2
         if self.fused is not None and not self.multi_row_exact:
             print("[flash-next] a multi-row forward does not reproduce serial steps on this MLX/GPU: no drafts",
@@ -69,6 +66,22 @@ class FlashNext:
             self.mtp_step_ms = self._time_mtp_step()
 
     queued_chains = False
+
+    def _warm_sparse(self) -> None:
+        """The sparse attention kernels' decode variants built at load, not inside the first long request."""
+
+        from tensorfold.kernels.qwen.flash_next.v1 import attention
+
+        entry = next((e for e in self.fused.layers if "attn" in e), None)
+        if entry is None:
+            return
+        c, a = self.args, entry["attn"][-1]
+        width = ((2 * c.num_attention_heads + 2 * c.num_key_value_heads) * c.head_dim
+                 + (c.indexer_n_heads + 1) * c.indexer_head_dim)      # [q|gate] pairs, k, v, indexer q, raw key
+        attention.warm_decode(heads=c.num_attention_heads, kv_heads=c.num_key_value_heads, dims=c.head_dim,
+                              index_heads=c.indexer_n_heads, index_dims=c.indexer_head_dim, top=a.indexer.top_blocks,
+                              scale=a.scale, width=width, norm=entry["attn"][4], eps=self.fused.eps,
+                              rotary_dim=c.rotary_dim, base=c.rope_theta)
 
     mtp_step_ms = 0.0
 
@@ -163,6 +176,12 @@ class FlashNext:
     def hidden(self, inputs: Any, cache: list[Any]) -> mx.array:
         """Mixed hidden states [1, R, D]: the fused kernels up to ``fused_rows`` rows, else a prompt chunk's path."""
 
+        if isinstance(inputs, mx.array) and self.fused is not None and inputs.size <= self.fused_rows:
+            window = inputs.reshape(1, -1)
+            mx.async_eval(window)          # its own buffer: the n-gram layer's read waits for the drafts, not layer 0
+            out = self.fused(window, cache[: self.layer_count])       # the host reads the ids at the n-gram layer
+            self._streams = self.fused.last_streams
+            return out
         tokens = np.asarray(inputs, dtype=np.int64)
         if tokens.ndim == 1:
             tokens = tokens[None]
@@ -329,11 +348,15 @@ class FlashNext:
         if count == 1:
             return head if isinstance(first, mx.array) else [int(first)]
         chain = [head]
-        for j in range(1, count):
-            mixed, streams = self._mtp_step(chain[-1], streams, mtp_cache)
-            mtp_cache.drafted += 1
-            chain.append(self._draft_draw(mixed, sampling, [position + j]))
-            mx.async_eval(chain[-1])           # the GPU starts each step while the host builds the next
+        mtp_cache.chaining = True              # the steps' rows go beside the buffers the last step still reads
+        try:
+            for j in range(1, count):
+                mixed, streams = self._mtp_step(chain[-1], streams, mtp_cache)
+                mtp_cache.drafted += 1
+                chain.append(self._draft_draw(mixed, sampling, [position + j]))
+                mx.async_eval(chain[-1])       # the GPU starts each step while the host builds the next
+        finally:
+            mtp_cache.chaining = False
         drafts = mx.concatenate(chain)
         mx.async_eval(drafts)
         return drafts
