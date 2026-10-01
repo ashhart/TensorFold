@@ -27,7 +27,7 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 | `parallel_tool_calls` | False returns at most one completed call | Both |
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
-| `seed` | Sampling key; otherwise derived from the prompt | Both |
+| `seed` | Sampling key; otherwise derived from the prompt (and `TENSORFOLD_SEED_SALT`) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
@@ -214,6 +214,11 @@ engine reports them. A `--parallel` server adds `streams` (decoding, prefilling 
 For exactness comparisons, hold the checkpoint, template, runtime, prompt, seed and sampling settings
 constant, then compare the decoded reply with `draft` enabled and disabled. Repeat with fresh and reused
 prefixes, and compare each MLX concurrent request with its solo run.
+
+A request without `seed` takes one derived from its prompt, so running the same evaluation twice against one server
+repeats the same samples wherever the conversations agree (an agent benchmark's second pass then mostly replays its
+first). To draw independent repeats, send a `seed` per run, or start each run's server with a different
+`TENSORFOLD_SEED_SALT` (an integer mixed into every prompt-derived seed; 0, the default, keeps today's seeds).
 
 ## The Responses API
 
