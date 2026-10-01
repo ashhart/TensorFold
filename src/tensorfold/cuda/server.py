@@ -69,14 +69,14 @@ class App:
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
                  context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0,
                  aliases: tuple[str, ...] | list[str] = ()):
-        from tokenizers import Tokenizer
+        from tensorfold.cuda import tokenizer_file
 
         self.engine = engine
         self.vision = getattr(engine, "vision", None)
         self.served = served
         self.aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
         self.model_dir = Path(model_dir)
-        self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+        self.tok = tokenizer_file.load(model_dir)
         self.template = ChatTemplate(model_dir)
         self.default_thinking = default_thinking
         self.reasoning_effort, self.thinking_budget = reasoning_effort, int(thinking_budget)   # the Mac's defaults

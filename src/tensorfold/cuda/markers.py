@@ -49,7 +49,7 @@ def snapshot_points(openers: Sequence[int], assistant: Sequence[int]) -> Callabl
 def resume_points(model_dir: str | Path) -> Callable[[Sequence[int]], list[int]] | None:
     """``snapshot_points`` for this checkpoint's chat template, or None when it marks no message starts."""
 
-    from tokenizers import Tokenizer
+    from tensorfold.cuda import tokenizer_file
 
     from tensorfold.engine.prefill_plan import message_markers
 
@@ -59,7 +59,7 @@ def resume_points(model_dir: str | Path) -> Callable[[Sequence[int]], list[int]]
     if not (model_dir / "tokenizer.json").is_file():
         return None
     try:
-        tokens = TemplateTokens(Tokenizer.from_file(str(model_dir / "tokenizer.json")), ChatTemplate(model_dir))
+        tokens = TemplateTokens(tokenizer_file.load(model_dir), ChatTemplate(model_dir))
         openers, assistant = message_markers(tokens)
     except (OSError, ValueError, KeyError):
         return None
