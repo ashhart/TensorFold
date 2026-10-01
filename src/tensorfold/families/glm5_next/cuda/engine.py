@@ -17,6 +17,8 @@ EXL3_AUTO = DFLASH_POLICY             # what auto runs on an EXL3 checkpoint wit
 GRAPH_ROWS = (1, 2, 3, 4, 5, 6)       # verify windows captured as CUDA graphs
 MAX_ROWS = 8                          # the widest verify window (a pending token and up to 7 drafts)
 DENSE_CAPACITY = 2560                 # cache slots while DSA attention stays dense (contexts up to 2,051 tokens)
+# TF_GLM_DRAFT_RING=0: DFlash2's context in a flat buffer of the whole window, not a 2,176-row ring (the same drafts)
+DRAFT_RING = os.environ.get("TF_GLM_DRAFT_RING", "1").strip() != "0"
 
 
 def encode_policy(spec: str) -> list[int]:
@@ -81,6 +83,28 @@ def _ints_f64(lo: int, hi: int) -> float:
     return struct.unpack("<d", struct.pack("<2i", lo, hi))[0]
 
 
+MTP_DEFAULT = "1"                     # TF_GLM_MTP when unset: the MTP head stays beside DFlash2 (auto, 0: left out)
+
+
+def mtp_head(drafter: bool, serial_only: bool, layers: int, value: str | None = None) -> bool:
+    """TF_GLM_MTP: load the MTP head? auto: not beside DFlash2 or with --no-drafts; 1: whenever it exists; 0: never."""
+
+    value = os.environ.get("TF_GLM_MTP", "") if value is None else value
+    value = value.strip().lower() or MTP_DEFAULT
+    if value not in ("0", "1", "auto"):
+        raise ValueError(f"TF_GLM_MTP: 0, 1 or auto, not {value!r}")
+    if value == "auto":
+        return bool(layers) and not drafter and not serial_only
+    return value == "1" and bool(layers)
+
+
+def without_mtp(transform, layers: int):
+    """A startup weight transform that leaves out the MTP layer's tensors (``layers.<num_hidden_layers>.``)."""
+
+    prefix = f"model.language_model.layers.{layers}."
+    return lambda name, info: (0, 0) if name.startswith(prefix) else transform(name, info)
+
+
 class GlmEngine:
     """GLM-5.3-Flash on two ranks (this one ``rank``): weights, MTP and DFlash2 drafting, per-request policies."""
 
@@ -96,7 +120,8 @@ class GlmEngine:
         from .weights import Config, load
         from .split import rule
         from tensorfold.cuda.capacity import admit
-        from tensorfold.cuda.geometry import PREFILL_ROWS, draft_geometry, mla_geometry, split_weights
+        from tensorfold.cuda.geometry import (PREFILL_ROWS, dflash2_geometry, dflash2_weights, mla_geometry,
+                                              split_weights)
 
         encode_policy(policy)                           # a bad default fails here, not in the first request
         torch.cuda.set_device(0)
@@ -111,18 +136,24 @@ class GlmEngine:
         explicit = context is not None if context_explicit is None else bool(context_explicit)
         from . import LATENT
 
+        # TF_GLM_MTP off: the MTP layer's tensors, caches and buffers are neither loaded nor estimated
+        self.mtp_on = mtp_head(drafter is not None, serial_only, cfg.mtp_layers)
+        weights_estimate = split_weights(rule)
+        if not self.mtp_on:
+            weights_estimate = without_mtp(weights_estimate, cfg.layers)
         self.capacity_plan = admit(model_dir, context if explicit else cfg.dense_limit, explicit, torch,
                                    lambda text: mla_geometry(text, 2, MAX_ROWS, minimum_slots=DENSE_CAPACITY,
-                                                             latent=LATENT),
-                                   split_weights(rule), rank=rank, world=2, gather=self._gather_ints,
-                                   draft_dir=drafter, draft_geometry=lambda text: draft_geometry(text, 2, MAX_ROWS))
+                                                             latent=LATENT, mtp=self.mtp_on),
+                                   weights_estimate, rank=rank, world=2, gather=self._gather_ints,
+                                   draft_dir=drafter, draft_weights=lambda d: dflash2_weights(d, 2),
+                                   draft_geometry=lambda text: dflash2_geometry(text, 2, MAX_ROWS, ring=DRAFT_RING))
         self.limit = self.capacity_plan["context_window"]
         capacity = self.capacity_plan["cache_slots"]
         long_context = self.limit > cfg.dense_limit
         # both ranks must run the same calls: refuse to start when they were given different settings
         prefill_rows = PREFILL_ROWS if prefill_rows is None else int(prefill_rows)
         mine = [int(drafter is not None), capacity, int(long_context), int(serial_only), int(LATENT),
-                prefill_rows]
+                prefill_rows, int(self.mtp_on), int(DRAFT_RING)]
         # other conversations' kept prompts get what the window leaves, at most TF_GLM_CACHE_GIB, the same on both ranks
         plan = self.capacity_plan
         wanted = int(float(os.environ.get("TF_GLM_CACHE_GIB", "3")) * 2 ** 30)
@@ -130,7 +161,7 @@ class GlmEngine:
         both = self._gather_ints(mine + [spare >> 20])
         if both[0][:-1] != both[1][:-1]:
             raise RuntimeError("the two ranks were started with different settings (draft model, context, drafts, "
-                               "TF_GLM_LATENT): "
+                               "TF_GLM_LATENT, TF_GLM_MTP, TF_GLM_DRAFT_RING): "
                                f"rank 0 {both[0][:-1]}, rank 1 {both[1][:-1]}; pull the draft model on both machines "
                                "(or pass --drafter none to both) and give both the same flags")
         self.cache_bytes = min(both[0][-1], both[1][-1]) << 20
@@ -140,19 +171,24 @@ class GlmEngine:
         if rank == 0 and self.cache_bytes < wanted:
             print(f"[tensorfold] other conversations' prompts are kept in {self.cache_bytes / 2 ** 30:.1f} GiB, what "
                   f"the {self.limit}-token window leaves (TF_GLM_CACHE_GIB asks {wanted / 2 ** 30:.1f})", flush=True)
-        w = load(model_dir, rank=rank)
+        if not self.mtp_on and drafter is None and not serial_only:
+            raise ValueError(("TF_GLM_MTP=0 leaves" if cfg.mtp_layers else "this checkpoint has") + " no MTP head and "
+                             "no DFlash2 draft model was given, so every round would decode one token: pull the draft "
+                             "model on both machines (--drafter), or pass --no-drafts to both for the serial reference")
+        w = load(model_dir, rank=rank, mtp=self.mtp_on)
         w.comm = self.comm
+        self.comm.ready("loading")                   # a peer stuck loading is named, not waited on in NCCL
         self.comm.barrier()
-        if w.mtp is None and drafter is None and not serial_only:
-            raise ValueError("this checkpoint has no MTP head and no DFlash2 draft model was given, so every round "
-                             "would decode one token: pull the draft model on both machines (--drafter), or pass "
-                             "--no-drafts to both for the serial reference")
         self.w = w
+        if rank == 0 and cfg.mtp_layers and not self.mtp_on:
+            print("[tensorfold] the checkpoint's MTP head is not loaded (TF_GLM_MTP=" +
+                  (os.environ.get("TF_GLM_MTP", "").strip() or MTP_DEFAULT) + "): " +
+                  ("DFlash2 drafts every request" if drafter is not None else "--no-drafts"), flush=True)
         self.drafter = None
         if drafter is not None:
             from .dflash2 import Drafter
 
-            self.drafter = Drafter(drafter, w, capacity=capacity)
+            self.drafter = Drafter(drafter, w, capacity=capacity, ring=DRAFT_RING)
         self.e = Engine(w, capacity=capacity, max_rows=MAX_ROWS, prefill_rows=prefill_rows, graphs=True, graph_rows=GRAPH_ROWS,
                         long_context=long_context, taps=self.drafter.tap_layers if self.drafter is not None else ())
         if self.drafter is not None:
@@ -161,9 +197,10 @@ class GlmEngine:
         if rank == 0:
             c = self.costs
             print(f"[tensorfold] drafter timings (ms, fastest of 7): {c['timed']}", flush=True)
-            print("[tensorfold] drafter costs (ms): verify " + " ".join(f"{v:.1f}" for v in c["verify"]) +
-                  f"; MTP draft {c['mtp']:.2f} (+{c['mtp_step']:.2f} a chained draft, +{c['mtp_row']:.2f} a row); "
-                  f"DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
+            mtp = (f"; MTP draft {c['mtp']:.2f} (+{c['mtp_step']:.2f} a chained draft, +{c['mtp_row']:.2f} a row)"
+                   if w.mtp is not None else "")
+            print("[tensorfold] drafter costs (ms): verify " + " ".join(f"{v:.1f}" for v in c["verify"]) + mtp +
+                  f"; DFlash2 block {c['block']:.2f} (+{c['taps_row']:.3f} a tap row)", flush=True)
         self.eos = tuple(w.cfg.eos)
         self.model_dir = Path(model_dir)
         self.request = threading.local()    # the calling request's policy and stop-at-EOS (``app.GlmApp``)
@@ -255,6 +292,33 @@ class GlmEngine:
         self.comm.all_gather(mine, got)
         return [got[:len(values)].tolist(), got[len(values):].tolist()]
 
+    # the idle doorbell: rank 1 waits for each request on the rendezvous store (no store: no doorbell), not in NCCL
+    def _store(self):
+        return getattr(self.comm, "store", None)
+
+    def _ring(self) -> None:
+        store = self._store()
+        if store is not None:
+            self._bell = getattr(self, "_bell", 0) + 1
+            store.set(f"tf_glm_request_{self._bell}", b"1")
+
+    def _await_bell(self) -> None:
+        store = self._store()
+        if store is None:
+            return
+        from datetime import timedelta
+
+        key = f"tf_glm_request_{getattr(self, '_bell', 0) + 1}"
+        while True:
+            try:
+                store.wait([key], timedelta(hours=1))
+                break
+            except Exception as e:            # an idle hour: wait again (a lost rank 0 is a connection error instead)
+                if "timeout" not in str(e).lower():
+                    raise
+        store.delete_key(key)
+        self._bell = getattr(self, "_bell", 0) + 1
+
     def _share(self, values: list[int] | None) -> list[int]:
         """Rank 0's int list on every rank (a length, then the values, through the all-gather)."""
 
@@ -299,13 +363,13 @@ class GlmEngine:
 
     def _drop(self, snap) -> None:
         """Forget a kept snapshot and free its saved rows now, even while a caller still holds the object."""
-        snap.rows, snap.nbytes = None, 0
+        snap.rows, snap.nbytes, snap.drafter_rows = None, 0, None
         self.cache.remove(snap)
 
     def _remember(self, snap) -> None:
-        for c in [c for c in self.cache if c.ids == snap.ids]:
+        for c in [c for c in self.cache if c.ids == snap.ids and c is not snap]:
             self._drop(c)
-        self.cache.append(snap)
+        self.cache[:] = [c for c in self.cache if c is not snap] + [snap]   # a resumed prompt kept again moves last
         dropped = False
         while len(self.cache) > 1 and (len(self.cache) > self.cache_entries or self._held_bytes() > self.cache_bytes):
             self._drop(self.cache[0])
@@ -364,7 +428,7 @@ class GlmEngine:
 
     def _run_once(self, prompt: list[int], max_tokens: int, sampling, stop_eos: bool,
                   on_tokens: Callable[[list[int]], Any], code: list[int], hit, draft: bool) -> dict[str, Any]:
-        from .decode import DepthPolicy, dflash_decode, mtp_decode, prefill, serial_decode, take_snapshot
+        from .decode import DepthPolicy, dflash_decode, mtp_decode, prefill, serial_decode
         from .drafter_choice import DrafterChoice, auto_decode
 
         auto, use_mtp, use_dflash = self._drafters(code)
@@ -379,11 +443,9 @@ class GlmEngine:
             load_rows(self.e, hit)
             hit.rows, hit.nbytes = None, 0            # live again
         self.live = list(prompt)
-        first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=hit)
+        first = prefill(self.e, prompt, sampling, mtp=use_mtp, drafter=drafter, resume=hit,
+                        keep_at=max(1, len(prompt) - 1) if draft else None, keep=self._remember)
         prefill_s = time.perf_counter() - t0
-        if draft:
-            self._remember(take_snapshot(self.e, prompt, self.e.last_hidden if use_mtp else None, mtp=use_mtp,
-                                         drafter=drafter))
         stats: dict[str, Any] = {"prefill_s": prefill_s, "cached": cut}
         on_tokens([first])
         if max_tokens <= 1 or (stop_eos and first in self.eos):
@@ -441,6 +503,7 @@ class GlmEngine:
                   int(constraint is not None)] + code
         from tensorfold.engine.grammar import pack
 
+        self._ring()                                   # wakes rank 1, which idles on the store, not in the all-gather
         self._share(header)
         self._share(list(prompt))
         if constraint is not None:                     # the request's grammar: rank 1 compiles the same
@@ -455,6 +518,7 @@ class GlmEngine:
         from tensorfold.engine.exact_sampling import Sampling
 
         while True:
+            self._await_bell()
             (max_tokens, stop_eos, draft, cached, s_lo, s_hi, s_top, t_lo, t_hi, top_k, p_lo, p_hi, m_lo, m_hi, shaped,
              *code) = self._share(None)
             prompt = self._share(None)

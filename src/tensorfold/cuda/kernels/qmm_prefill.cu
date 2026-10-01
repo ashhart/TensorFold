@@ -61,13 +61,14 @@ __global__ void __launch_bounds__(WM * WN * 32) prefill_kernel(
         for (int c = tid; c < T::W / 16; c += T::THREADS) {
             const int t = c / (TILE_BYTES / 16), off = c % (TILE_BYTES / 16);
             const size_t tile = static_cast<size_t>(n0 / 64 + t) * KG + g;
-            cp16(pw + c * 16, reinterpret_cast<const unsigned char*>(w) + tile * TILE_BYTES + off * 16);
+            if (n0 + t * 64 < npad)                       // a 256-wide block's last tiles may pass the padded columns
+                cp16(pw + c * 16, reinterpret_cast<const unsigned char*>(w) + tile * TILE_BYTES + off * 16);
         }
         unsigned char* ps = pw + T::W;
         for (int c = tid; c < 2 * (T::S / 16); c += T::THREADS) {
             const int which = c / (T::S / 16), off = c % (T::S / 16);
             const __nv_bfloat16* src = (which ? biases : scales) + static_cast<size_t>(g) * npad + n0 + off * 8;
-            cp16(ps + which * T::S + off * 16, src);
+            if (n0 + off * 8 < npad) cp16(ps + which * T::S + off * 16, src);
         }
     };
 
@@ -177,13 +178,21 @@ void dispatch(int tile, const at::Tensor& x, const at::Tensor& w, const at::Tens
         case 1: launch<GS, 64, 128, 1, 4, 4, F32>(x, w, s, b, out, N); break;
         case 2: launch<GS, 128, 64, 2, 2, 4, F32>(x, w, s, b, out, N); break;
         case 3: launch<GS, 64, 64, 1, 4, 4, F32>(x, w, s, b, out, N); break;
+        case 5: launch<GS, 128, 128, 2, 2, 3, F32>(x, w, s, b, out, N); break;
+        case 6: launch<GS, 128, 128, 2, 2, 4, F32>(x, w, s, b, out, N); break;
+        case 7: launch<GS, 128, 256, 2, 4, 3, F32>(x, w, s, b, out, N); break;
+        case 8: launch<GS, 64, 256, 1, 4, 4, F32>(x, w, s, b, out, N); break;
+        case 9: launch<GS, 128, 128, 2, 2, 2, F32>(x, w, s, b, out, N); break;
+        case 10: launch<GS, 64, 128, 1, 2, 2, F32>(x, w, s, b, out, N); break;
+        case 11: launch<GS, 128, 256, 2, 4, 2, F32>(x, w, s, b, out, N); break;
         default: launch<GS, 128, 128, 2, 4, 4, F32>(x, w, s, b, out, N); break;
     }
 }
 
 } // namespace
 
-// ``tile`` (0: 128x128, 3 stages; 1: 64x128; 2: 128x64; 3: 64x64; 4: 128x128, 4 stages) never changes a row's bits.
+// ``tile`` (0: 128x128, 3 stages; 1: 64x128; 2: 128x64; 3: 64x64; 4: 128x128, 4 stages; 5-11: 64x64 warp tiles) never
+// changes a row's bits.
 void qmm_prefill_cuda(const at::Tensor& x, const at::Tensor& w, const at::Tensor& scales, const at::Tensor& biases,
                       at::Tensor& out, int N, int gs, bool f32, int tile) {
     if (gs == 64) { if (f32) dispatch<64, true>(tile, x, w, scales, biases, out, N); else dispatch<64, false>(tile, x, w, scales, biases, out, N); }

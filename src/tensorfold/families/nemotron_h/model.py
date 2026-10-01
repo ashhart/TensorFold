@@ -298,6 +298,29 @@ class NemotronH:
         self._last_hidden = out
         return out
 
+    @property
+    def prompt_pass(self) -> bool:
+        """Passes on M1-M4 only: on M5 (tensor units) a prompt fills a chunk a forward until a run there measures it."""
+
+        from tensorfold.kernels.qwen.flash_next.v1 import prefill_mm as PM
+
+        return not PM.gpu_tensor_units()
+
+    def hidden_pass(self, inputs: Any, cache: list[Any], sizes: Any) -> Any:
+        """Consecutive prompt chunks (``sizes`` rows each) in one forward, every chunk with its own forward's bits."""
+
+        import mlx.core as mx
+
+        from tensorfold.families.nemotron_h import prompt_pass
+
+        sizes = tuple(int(n) for n in sizes)
+        tokens = inputs.reshape(1, -1) if isinstance(inputs, mx.array) else mx.array(inputs).reshape(1, -1)
+        if len(sizes) == 1 or sum(sizes) != int(tokens.shape[1]) or min(sizes) <= self.fused_rows:
+            raise ValueError(f"hidden_pass: chunks of {sizes} rows (each over {self.fused_rows}) for {tokens.shape}")
+        out = prompt_pass.hidden(self.model.backbone, tokens, cache, sizes)
+        self._last_hidden = out
+        return out
+
     @staticmethod
     def _chain_only(parents: Any) -> None:
         """Nemotron's head drafts chains: a window whose rows are not a chain is a caller's error."""

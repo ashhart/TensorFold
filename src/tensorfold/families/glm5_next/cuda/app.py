@@ -9,8 +9,7 @@ from tensorfold.families.glm5_next.prompts import thinking_off
 
 
 class ThinkingOffTemplate:
-    """The checkpoint's chat template, rendered as GLM-5.3's thinking-off template renders it when thinking is off
-    (``prompts.thinking_off``, as the Mac's tokenizer renders it)."""
+    """The checkpoint template as GLM-5.3's thinking-off template renders it (``prompts.thinking_off``)."""
 
     def __init__(self, inner) -> None:
         self.inner = inner

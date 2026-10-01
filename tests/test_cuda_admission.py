@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import re
 import threading
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
@@ -159,6 +160,9 @@ def test_native_boundary_refuses_explicit_completion_alias(model_dir, chat):
     error = json.loads(payload)["error"]
     assert error["type"] == "invalid_request_error"
     assert "9 reply tokens" in error["message"] and "12-token context window" in error["message"]
+    # OpenAI's code and wording, which clients match to compact instead of stopping
+    assert error["code"] == "context_length_exceeded" and "exceeds the context window" in error["message"]
+    assert re.search(r"maximum context length is \d+ tokens", error["message"])
     assert not engine.calls
 
 

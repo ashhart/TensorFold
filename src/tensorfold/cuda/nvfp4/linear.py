@@ -1,4 +1,4 @@
-"""NVFP4 and FP8 linears on CUDA: exact W4A16 / W8A16 lane matmuls for decode, the FP8 prefill GEMM for prompts."""
+"""NVFP4 and FP8 linears on CUDA: exact W4A16 / W8A16 lane matmuls, prompts too; the FP8 GEMM with --prefill-fp8."""
 
 from __future__ import annotations
 
@@ -8,17 +8,45 @@ from pathlib import Path
 
 import torch
 
-FP4, FP8, MXFP8 = 0, 1, 2
+from tensorfold.cuda import prompt_precision
+
+FP4, FP8, MXFP8, FP8G = 0, 1, 2, 3
 
 
 @lru_cache(maxsize=1)
 def _ext():
+    from tensorfold.cuda.build import CLUSTERS, load
+
+    here = Path(__file__).parent
+    return load(name="tensorfold_nvfp4_v3", sources=[str(here / "qmmf.cpp"), str(here / "qmmf.cu"),
+                                                      str(here / "experts.cu")], need=CLUSTERS,
+                extra_include_paths=[str(here)], extra_cuda_cflags=["-O3"], verbose=False)
+
+
+@lru_cache(maxsize=1)
+def _prompt_ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_nvfp4_v2", sources=[str(here / "qmmf.cpp"), str(here / "qmmf.cu"),
-                                                      str(here / "experts.cu")],
+    return load(name="tensorfold_nvfp4_prompt_v1", sources=[str(here / "prompt.cpp"), str(here / "prompt.cu")],
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3"], verbose=False)
+
+
+PROMPT_TILE = 4             # ``prompt.cu``'s tile (128x128 on four 64x64 warps, two blocks an SM): never changes bits
+
+
+def _prompt(mode: int, w: torch.Tensor, bs: torch.Tensor | None, scale: float, n: int, npad: int, x: torch.Tensor,
+            out: torch.Tensor | None = None) -> torch.Tensor:
+    """bf16 prompt rows (M, K) -> (M, n) bf16: exact weights, one fp32 chain over K; a row's bits never depend on M."""
+
+    if x.dtype != torch.bfloat16 or x.stride(-1) != 1 or (x.shape[0] > 1 and x.stride(0) % 8) or x.data_ptr() % 16:
+        x = x.to(torch.bfloat16).contiguous()
+    fits = out is not None and out.is_contiguous() and out.dtype == torch.bfloat16 and out.shape == (x.shape[0], n)
+    y = out if fits else torch.empty((x.shape[0], n), dtype=torch.bfloat16, device=x.device)
+    _prompt_ext().prompt16(x, w, bs, float(scale), y, mode, n, npad, PROMPT_TILE, False)
+    if out is not None and y is not out:
+        out.copy_(y)
+    return y
 
 
 def fragment_index(k: int, npad: int, device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -129,8 +157,13 @@ class Fp4Linear:
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
         return _matmul(FP4, self.words, self.bs, self.scale, self.n, self.k, self.npad, x, out)
 
-    def prefill(self, xq) -> torch.Tensor:
-        """Prompt rows (FP8 from the glue) times this weight staged as e4m3 per (64 inputs, column), once a call."""
+    def prefill(self, x: torch.Tensor) -> torch.Tensor:
+        """bf16 prompt rows on the exact prompt GEMM (each code times its block scale is exact in bf16)."""
+
+        return _prompt(FP4, self.words, self.bs, self.scale, self.n, self.npad, x)
+
+    def prefill8(self, xq) -> torch.Tensor:
+        """--prefill-fp8: e4m3 rows from the glue times the weight staged to e4m3 per (64 inputs, column) a call."""
 
         from tensorfold.cuda.kernels import qmm
 
@@ -194,8 +227,13 @@ class Fp8Linear:
     def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
         return _matmul(FP8, self.w8, None, self.scale, self.n, self.k, self.npad, x, out)
 
-    def prefill(self, xq: tuple) -> torch.Tensor:
-        """Prompt rows (FP8 from the glue) times the stored bytes; the tensor scale joins each row's scale."""
+    def prefill(self, x: torch.Tensor) -> torch.Tensor:
+        """bf16 prompt rows on the exact prompt GEMM (a checkpoint's bytes; a bf16 copy serves --prefill-fp8 only)."""
+
+        return _prompt(FP8, self.w8, None, self.scale, self.n, self.npad, x)
+
+    def prefill8(self, xq: tuple) -> torch.Tensor:
+        """--prefill-fp8: e4m3 rows from the glue times the stored bytes; the tensor scale joins each row's scale."""
 
         from tensorfold.cuda.kernels import qmm
 
@@ -217,6 +255,7 @@ class Mx8Linear:
     layout: str = "mxfp8"
     kernel: str = "mx8"
     groups: torch.Tensor | None = None   # bf16 [K/32, npad], the scales as powers of two (prompts, made on first use)
+    fold: bool | None = None             # every exponent keeps an e4m3 byte times its power of two exact in bf16
 
     @classmethod
     def from_checkpoint(cls, weight: torch.Tensor, scale: torch.Tensor) -> "Mx8Linear":
@@ -256,6 +295,15 @@ class Mx8Linear:
         return _matmul(MXFP8, self.w8, self.bs, 1.0, self.n, self.k, self.npad, x, out)
 
     def prefill(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        """bf16 prompt rows on the exact prompt GEMM (lane matmul past its exponent range); --prefill-fp8: FP8 GEMM."""
+
+        if prompt_precision.fp8():
+            return self.prefill8(x, out)
+        if self.fold is None:
+            self.fold = bool(((self.bs >= 3) & (self.bs <= 134)).all())
+        return _prompt(MXFP8, self.w8, self.bs, 1.0, self.n, self.npad, x, out) if self.fold else self(x, out)
+
+    def prefill8(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
         """bf16 prompt rows through FP8 rows and the stored bytes, each 32 inputs' power of two as a bf16 scale."""
 
         from tensorfold.cuda.kernels import qmm
@@ -271,6 +319,118 @@ class Mx8Linear:
             return y.contiguous()
         out.copy_(y)
         return out
+
+
+@dataclass
+class Fp8BlockLinear:
+    """A 128x128-block FP8 projection (``FP8_PB_WO``): e4m3 in fragment order, an fp32 scale per (64 inputs, column)."""
+
+    w8: torch.Tensor              # uint8, [npad/64][K/64][8][32][2][8]
+    bs: torch.Tensor              # uint8 view of fp32 [npad/64, K/64, 64]: a tile's column scales together
+    n: int
+    k: int
+    npad: int
+    layout: str = "fp8block"
+    groups: torch.Tensor | None = None   # bf16 [K/64, npad] (``prefill8``, made on first use)
+    lane: bool = False                   # ``prefill8`` on the lane matmul too: a head's few rows
+
+    @staticmethod
+    def column_scales(scale_inv: torch.Tensor, n: int, k: int, block=(128, 128)) -> torch.Tensor:
+        """fp32 [n, K/64]: each (row, 64-input group)'s block scale."""
+
+        bn, bk = block
+        if bk % 64:
+            raise ValueError(f"FP8 block {block}: the input block must be a multiple of 64")
+        s = scale_inv.float()
+        if s.shape != (-(-n // bn), k // bk):
+            raise ValueError(f"weight_scale_inv {tuple(s.shape)} does not tile [{n}, {k}] in {block} blocks")
+        return s.repeat_interleave(bn, dim=0)[:n].repeat_interleave(bk // 64, dim=1).contiguous()
+
+    @classmethod
+    def from_rows(cls, weight: torch.Tensor, cols: torch.Tensor) -> "Fp8BlockLinear":
+        """``weight`` e4m3 [N, K] and its fp32 scales per (row, 64 inputs) [N, K/64]."""
+
+        n, k = weight.shape
+        if k % 64:
+            raise ValueError(f"FP8 weight [{n}, {k}]: K must be a multiple of 64")
+        npad = -(-n // 128) * 128
+        full = torch.ones((npad, k // 64), dtype=torch.float32, device=weight.device)
+        full[:n] = cols
+        bs = full.view(npad // 64, 64, k // 64).permute(0, 2, 1).contiguous().view(torch.uint8)
+        return cls(_fragment_order(weight.contiguous().view(torch.uint8), npad), bs, n, k, npad)
+
+    @classmethod
+    def from_checkpoint(cls, weight: torch.Tensor, scale_inv: torch.Tensor, block=(128, 128)) -> "Fp8BlockLinear":
+        n, k = weight.shape
+        return cls.from_rows(weight, cls.column_scales(scale_inv, n, k, block))
+
+    def scale_rows(self) -> torch.Tensor:
+        """fp32 [n, K/64] back from the tiled scales."""
+
+        return self.bs.view(torch.float32).view(self.npad // 64, self.k // 64, 64).permute(0, 2, 1).reshape(
+            self.npad, self.k // 64)[:self.n]
+
+    def nbytes(self) -> int:
+        return self.w8.numel() + self.bs.numel() + (self.groups.numel() * 2 if self.groups is not None else 0)
+
+    def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        return _matmul(FP8G, self.w8, self.bs, 1.0, self.n, self.k, self.npad, x, out)
+
+    def prefill(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        """bf16 prompt rows on the lane matmul (FP8G): the stored bytes exactly, fp32 sums; --prefill-fp8: the FP8 GEMM."""
+
+        return self.prefill8(x, out) if prompt_precision.fp8() else self(x, out)
+
+    def prefill8(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        """Opt-in FP8 prompt rows through the FP8 GEMM and the stored bytes, each block scale as bf16."""
+
+        from tensorfold.cuda.kernels import qmm
+
+        if self.lane:
+            return self(x, out)
+        if self.groups is None:
+            self.groups = self.bs.view(torch.float32).view(self.npad // 64, self.k // 64, 64).permute(1, 0, 2).reshape(
+                self.k // 64, self.npad).to(torch.bfloat16).contiguous()
+        xq = qmm.quantize_rows(x if x.stride(-1) == 1 else x.contiguous())
+        y = torch.empty((x.shape[0], self.npad), dtype=torch.bfloat16, device=x.device)
+        qmm._ext().qmm_prefill8w(xq[0], xq[2], self.w8, self.groups, y, self.npad, 64, False, 0, False)
+        y = y if self.npad == self.n else y[:, :self.n]
+        if out is None:
+            return y.contiguous()
+        out.copy_(y)
+        return out
+
+
+class Concat:
+    """Linears of one input stored differently (block FP8 beside bf16): each part on its own kernel into its columns."""
+
+    def __init__(self, parts: list) -> None:
+        self.parts = parts
+        self.n = sum(p.n for p in parts)
+        self.k = parts[0].k
+
+    def nbytes(self) -> int:
+        return sum(p.nbytes() for p in self.parts)
+
+    def _run(self, x: torch.Tensor, out: torch.Tensor | None, prefill: bool) -> torch.Tensor:
+        from tensorfold.families.qwen4_exp.cuda import bf16 as b16
+
+        y = out if out is not None else torch.empty((x.shape[0], self.n), dtype=torch.bfloat16, device=x.device)
+        c = 0
+        for p in self.parts:
+            if getattr(p, "kernel", "") == "b16":
+                r = b16.matmul(x, p)
+            else:
+                r = p.prefill(x) if prefill else p(x)
+            y[:, c:c + p.n].copy_(r)
+            c += p.n
+        return y
+
+    def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        return self._run(x, out, False)
+
+    def prefill(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        return self._run(x, out, True)
 
 
 def _matmul(mode: int, w: torch.Tensor, bs: torch.Tensor | None, scale: float, n: int, k: int, npad: int,

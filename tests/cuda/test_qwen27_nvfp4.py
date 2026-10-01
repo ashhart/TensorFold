@@ -123,7 +123,7 @@ def test_gate_copy_tracks_the_bf16_product():
     gate = Plain8(w, rows8=Fp8Linear.from_bf16(w))
     x = torch.randn(300, 5120, generator=gen).to(torch.bfloat16).cuda()
     want = (x.float() @ w.float().t())
-    got = gate.prefill(quantize_rows(x)).float()
+    got = gate.prefill8(quantize_rows(x)).float()
     assert float((got - want).norm() / want.norm()) < 0.04
     assert torch.equal(gate(x[:3]), gate(x)[:3])
 

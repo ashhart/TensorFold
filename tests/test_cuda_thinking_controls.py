@@ -86,6 +86,11 @@ def rendered(engine):
      "effort=low;assistant:<think>"),
     ({"reasoning_effort": "high"}, GLM, "effort=high;assistant:<think>"),     # a template's own "high" is kept
     ({"reasoning_effort": "minimal"}, GLM, "effort=low;assistant:<think>"),
+    ({"reasoning_effort": "low"}, GLM, "effort=low;assistant:<think>"),
+    ({"reasoning_effort": "medium"}, GLM, "effort=high;assistant:<think>"),   # not Max: medium is not a GLM name
+    ({"reasoning_effort": "xhigh"}, GLM, "effort=xhigh;assistant:<think>"),  # GLM's template renders this as Max
+    ({"reasoning_effort": "none"}, GLM, "assistant:"),
+    ({}, GLM, "effort=high;assistant:<think>"),                                # server default medium, heard as high
     ({"reasoning_effort": "none"}, QWEN, "assistant:"),
     ({"reasoning_effort": "high", "chat_template_kwargs": {"enable_thinking": False}}, QWEN, "assistant:"),
     ({"reasoning_effort": "none", "chat_template_kwargs": {"enable_thinking": True}}, QWEN,

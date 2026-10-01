@@ -19,7 +19,7 @@ class SharedRounds:
         rows = 0
         for i in order:
             stream = live[i][0]
-            need = min(self.family_width, self.batch_rows, 1 + len(stream.force)) if stream.drafts else 1
+            need = min(self.base_width, self.batch_rows, 1 + len(stream.force)) if stream.drafts else 1
             if len(chosen) == self.batch_streams or (chosen and rows + need > self.batch_rows):
                 break
             chosen.append(i)

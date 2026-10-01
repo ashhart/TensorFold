@@ -5,18 +5,21 @@ import hashlib
 import inspect
 import json
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from tensorfold.engine import grammar
 from tensorfold.server.cancellation import RequestCancelled
-from tensorfold.server.errors import RequestError
+from tensorfold.server.errors import CONTEXT_LIMIT, RequestError, refusal
 from tensorfold.server.messages import validate_modalities
-from tensorfold.server.request_options import parse_numbers, thinking_fields
+from tensorfold.server.probabilities import TokenBytes, probability_options
+from tensorfold.server.request_options import heard_effort, parse_numbers, thinking_fields
 from tensorfold.server.stopping import stop_options
 from tensorfold.server.tool_policy import ToolCallPolicy
 from tensorfold.engine.call_gate import CallGate, ThinkBudget, call_format, generate_gated
+from tensorfold.engine.tool_draft import ToolCallStreamer
 from tensorfold.server.tools import active_tool_specs, tool_choice_requires_call
 
 from tensorfold.cuda import health
@@ -65,10 +68,12 @@ class App:
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
-                 context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0):
+                 context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0,
+                 aliases: tuple[str, ...] | list[str] = ()):
         self.engine = engine
         self.vision = getattr(engine, "vision", None)
         self.served = served
+        self.aliases = tuple(str(alias).strip() for alias in aliases if str(alias).strip())
         self.model_dir = Path(model_dir)
         self.tok, self.template = self._tokenizer_template(self.model_dir)
         self.default_thinking = default_thinking
@@ -89,11 +94,31 @@ class App:
         return (policy.content(answer, finished=finished) if policy.single
                 else hide_tool_calls(answer, finished=finished))
 
+    @property
+    def model_ids(self) -> list[str]:
+        """The ids this endpoint answers to, as the MLX server lists them: ``--name`` first, then each ``--alias``."""
+
+        ids: list[str] = []
+        for model_id in (self.served, *getattr(self, "aliases", ())):
+            if model_id and model_id not in ids:
+                ids.append(model_id)
+        return ids
+
+    def reply_model(self, body: Any) -> str:
+        """The id a reply names: the one the request asked for when this endpoint answers to it, else ``--name``."""
+
+        asked = body.get("model") if isinstance(body, dict) else None
+        return asked if isinstance(asked, str) and asked in self.model_ids else self.served
+
     def _check_fields(self, body: dict[str, Any]) -> str | None:
         import inspect
 
         if not isinstance(body, dict):
             return "the request body must be a JSON object"
+        try:
+            probability_options(body, supported=bool(getattr(self.engine, "supports_logprobs", False)))
+        except RequestError as exc:
+            return str(exc)
         if body.get("draft", True) is False and "draft" not in inspect.signature(self.engine.generate).parameters:
             return "this model's CUDA engine has no serial switch (\"draft\": false)"
         if not isinstance(body.get("messages", []), list):
@@ -164,16 +189,24 @@ class App:
             raise RequestError("chat_template_kwargs must be a JSON object or null")
         kwargs = dict(kwargs)
         # reasoning_effort and enable_thinking as the Mac server reads them: the template hears an effort when thinking
-        fields = thinking_fields(body, getattr(self.template, "efforts", frozenset()))
+        levels = getattr(self.template, "efforts", frozenset())
+        fields = thinking_fields(body, levels)
         kwargs.pop("enable_thinking", None)
         kwargs.pop("reasoning_effort", None)
         thinking = bool(fields.get("enable_thinking", self.default_thinking))
-        effort = fields.get("reasoning_effort", getattr(self, "reasoning_effort", None))
+        effort = heard_effort(fields.get("reasoning_effort"), getattr(self, "reasoning_effort", None), levels)
         if thinking and effort:
             kwargs["reasoning_effort"] = effort
         budget = parse_numbers({"thinking_budget": body.get("thinking_budget")})["thinking_budget"]
         budget = int(budget or getattr(self, "thinking_budget", 0)) if chat and thinking else 0     # 0: the default
         spec = grammar.request_spec(body)
+        top = probability_options(body, supported=bool(getattr(self.engine, "supports_logprobs", False)))
+        if top is not None:
+            if not chat or body.get("stream") or thinking or tools or stop or spec is not None or budget:
+                raise RequestError("logprobs support nonstreamed text chat with thinking off, without tools, "
+                                   "stop strings or structured output")
+            if not hasattr(self, "_probability_decoder"):
+                self._probability_decoder = TokenBytes(self.tok)
         compiled = (spec, self._grammars().compile(spec)) if spec is not None else None
         if chat:
             if not isinstance(body.get("messages"), list):
@@ -221,25 +254,27 @@ class App:
         if limit is not None and len(prepared.prompt) >= limit:
             kind = "safe cache capacity" if limit == self._engine_capacity() else "context window"
             native = f" (model window: {self.native_context_window} tokens)" if self.native_context_window else ""
-            return (f"the rendered prompt has {len(prepared.prompt)} tokens and leaves no room for a reply in "
-                    f"the server's {limit}-token {kind}{native}; shorten the prompt"
+            return (f"{CONTEXT_LIMIT} {limit} tokens: the rendered prompt has {len(prepared.prompt)} tokens and leaves "
+                    f"no room for a reply in the server's {limit}-token {kind}{native}, which exceeds the context "
+                    f"window; shorten the prompt"
                     f"{self._restart(len(prepared.prompt) + 1)}")
         asked = body.get("max_tokens") or body.get("max_completion_tokens")
         if limit is not None and asked and len(prepared.prompt) + prepared.max_tokens > limit:
             kind = "safe cache capacity" if limit == self._engine_capacity() else "context window"
-            return (f"the rendered prompt has {len(prepared.prompt)} tokens and requests {prepared.max_tokens} "
-                    f"reply tokens, exceeding the server's {limit}-token {kind}; reduce the prompt or reply "
-                    f"length{self._restart(len(prepared.prompt) + prepared.max_tokens)}")
+            return (f"{CONTEXT_LIMIT} {limit} tokens: the rendered prompt has {len(prepared.prompt)} tokens and "
+                    f"requests {prepared.max_tokens} reply tokens, which exceeds the context window (the server's "
+                    f"{limit}-token {kind}); reduce the prompt or reply length"
+                    f"{self._restart(len(prepared.prompt) + prepared.max_tokens)}")
         return None
 
     def prepare(self, body: dict[str, Any], chat: bool) -> PreparedRequest:
         problem = self._check_fields(body)
         if problem:
-            raise RequestError(problem)
+            raise refusal(problem)
         prepared = self._prepare(body, chat)
         problem = self.check(body, prepared=prepared)
         if problem:
-            raise RequestError(problem)
+            raise refusal(problem)
         limit = self._context_limit()
         if limit is not None:
             prepared.max_tokens = min(prepared.max_tokens, limit - len(prepared.prompt))
@@ -265,6 +300,7 @@ class App:
             prepared: PreparedRequest | None = None, cancelled: Callable[[], bool] | None = None) -> dict[str, Any]:
         """One reply; once ``cancelled()`` holds, a waiting request raises ``RequestCancelled`` unstarted, a running one stops at its next round and raises it after ``generate``."""
 
+        arrived = time.perf_counter()
         prepared = prepared if prepared is not None else self.prepare(body, chat)
         prompt, max_tokens = prepared.prompt, prepared.max_tokens
         tools, thinking = prepared.tools, prepared.thinking
@@ -279,6 +315,9 @@ class App:
         stopped = {"client": False, "stop": False}
         failed: list[Exception] = []
         stream = StreamDecoder(self.tok, ends)
+        # calls stream as argument deltas while written (as on the Mac); one-call requests keep the end parser
+        calls_stream = ToolCallStreamer(tools) if tools and not policy.single else None
+        answer_raw = [""]
 
         def visible(finished: bool) -> tuple[str, str]:
             raw = stream.final() if finished else stream.text
@@ -288,9 +327,12 @@ class App:
                 reasoning, answer = split_thinking(raw, finished=finished)
             else:
                 reasoning, answer = "", raw
+            answer_raw[0] = answer
             if tools:
                 answer = self._tool_content(policy, answer, finished=finished)
             return reasoning, answer
+
+        serving: list[Any] = [None]
 
         def on_tokens(new: list[int]) -> bool:
             # True stops the engine after this round; engines that finish on both ranks keep calling and get True
@@ -319,8 +361,15 @@ class App:
                     sent["content"] = len(answer)
                 if delta and not emit(delta):
                     stopped["client"] = True
-                elif cancelled is not None and cancelled():     # every round, with or without new text
+                if calls_stream is not None and not stopped["client"]:
+                    for call_delta in calls_stream.feed(answer_raw[0]):   # never the reasoning
+                        if not emit(call_delta):
+                            stopped["client"] = True
+                            break
+                if not stopped["client"] and cancelled is not None and cancelled():   # every round, text or not
                     stopped["client"] = True
+                if serving[0] is not None:
+                    serving[0].saw()
             except Exception as exc:        # noqa: BLE001  raised after generate returns, never into the engine
                 failed.append(exc)
                 return True
@@ -330,6 +379,12 @@ class App:
         gate = self._call_gate(prompt, tools) if tools and tool_choice_requires_call(body.get("tool_choice")) else None
 
         options: dict[str, Any] = {} if draft else {"draft": False}
+        probabilities = None
+        if body.get("logprobs"):
+            from tensorfold.engine.probabilities import Probabilities
+
+            probabilities = Probabilities(body.get("top_logprobs") or 0, len(prompt), max_tokens)
+            options["probabilities"] = probabilities
         if takes_stop_eos:
             options["stop_eos"] = not prepared.ignore_eos
         shaped = prepared.grammar is not None or prepared.think_budget > 0
@@ -374,8 +429,12 @@ class App:
         try:
             if cancelled is not None and cancelled():                # the client left while this request waited
                 raise RequestCancelled("the client left before the request started")
-            with health.of(self).running(len(prompt), out) as request:      # /health reads ``out``; rounds never call in
-                stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, on_tokens)
+            with health.of(self).running(len(prompt), out, arrived) as request:  # /health reads ``out``; rounds never call in
+                serving[0] = request
+                try:
+                    stats = request.stats = generate_gated(generate, prompt, max_tokens, gates, on_tokens)
+                finally:
+                    serving[0] = None
         finally:
             if turns is not None:
                 turns.give()
@@ -398,10 +457,15 @@ class App:
         finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
+        logprobs = (self._probability_decoder.format(probabilities.emitted(out), ends)
+                    if probabilities is not None else None)
+        # the calls already sent as deltas; the handler sends the rest (a call the streamer could not follow)
+        streamed = calls_stream.index + 1 if calls_stream is not None and calls_stream.streamed else 0
         return {"final": final, "calls": calls, "finish": finish, "content": content, "reasoning": reasoning,
+                **({"logprobs": logprobs} if logprobs is not None else {}),
                 "prompt_tokens": len(prompt), "completion_tokens": len(out), "cached_tokens": (cached or [0])[0],
                 "reasoning_tokens": reasoning_count(out, self.tok.token_to_id("</think>") if chat and thinking else None),
-                "stats": stats}
+                "stats": stats, "calls_streamed": streamed}
 
     def _turns(self) -> Turns:
         """The engine's turns (one request at a time, background ones last), made on first use."""

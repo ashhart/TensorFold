@@ -165,3 +165,41 @@ def test_a_finished_rounds_rollback_rows_go_before_the_next_prompt_is_sized():
         assert kept >= len(long) - 8                    # its prompt is kept for the next turn
     finally:
         served.close()
+
+
+def test_every_prompt_inside_the_advertised_window_is_admitted_and_a_refusal_counts_only_what_stays():
+    served = app(int(1.375 * 2**30), context_window=262144, fit_context=True)
+    try:
+        memory, reply = served.prompt_memory, 16
+        window = served.context_window
+        # the window's fit and a request use one need(): the edge of the window is admitted at idle
+        memory.begin(window - reply, reply)
+        memory.end()
+        held = memory.runtime.get_active_memory()
+        assert memory.need(window, held) <= memory.budget
+        # past what one copy of the cache affords, the refusal names a prompt length that is admitted
+        top = memory.largest_window(1 << 22)
+        with pytest.raises(Exception) as refused:
+            memory.begin(top + 1024, reply)
+        memory.end()
+        fits = int(str(refused.value).split("fits up to ")[1].split(" tokens")[0].replace(",", ""))
+        assert window - reply <= fits <= top
+        memory.begin(fits, reply)
+        memory.end()
+    finally:
+        served.close()
+
+
+def test_the_default_prompt_cache_takes_what_a_whole_window_request_leaves_idle():
+    served = app(2**31, context_window=65536, checkpoint_budget_bytes=2**20, grow_checkpoints=True)   # 0.625 GiB idle
+    try:
+        memory, store = served.prompt_memory, served.checkpoints
+        spare = memory.spare(served.context_window)
+        assert store.budget_bytes == spare == 2**31 - memory.need(served.context_window, memory.held()) > 2**20
+    finally:
+        served.close()
+    fixed = app(2**31, context_window=65536, checkpoint_budget_bytes=2**20)
+    try:
+        assert fixed.checkpoints.budget_bytes == 2**20                   # an explicit --prompt-cache-gib stays
+    finally:
+        fixed.close()

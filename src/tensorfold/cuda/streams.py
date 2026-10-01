@@ -29,9 +29,11 @@ class Stream:
     stops: list[int] = field(default_factory=list)        # prompt positions whose states the prefill keeps
     constraint: Any = None                                # the reply's grammar (tensorfold.engine.grammar), or None
     background: bool = False                              # priority "background": after, and yielding to, the rest
+    probabilities: Any = None
     carry: dict | None = None                             # the stats of the stream this one continues
     owed: list[int] = field(default_factory=list)         # a replay's tokens sent before it gave way: checked, not resent
     error: Exception | None = None                        # why a stream ended without finishing
+    waiting: bool = False                                 # held out of rounds until its caches can grow
     done: bool = False
     rounds: int = 0
     min_rows: int = 0
@@ -79,7 +81,8 @@ class Stream:
         """This stream again from its prompt, for later (as the Mac replays): what it sent is owed, not sent again."""
 
         return Stream(self.prompt, self.count, self.sampling, draft=self.draft, stop_eos=self.stop_eos, emit=self.emit,
-                      background=self.background, carry=self.stats(), owed=[*self.out, *self.owed])
+                      background=self.background, probabilities=self.probabilities,
+                      carry=self.stats(), owed=[*self.out, *self.owed])
 
 
 def next_fill(filling: list[Stream]) -> Stream:
@@ -142,7 +145,43 @@ class PrefixCache:
 
         self.entries = [e for e in self.entries if e[0] != ids] + [(ids, state, snap)]
         while len(self.entries) > self.keep:
-            cold = [e for e in self.entries[:-1] if tuple(e[0]) not in self.hit]
-            gone = cold[0] if cold else self.entries[0]
-            self.entries = [e for e in self.entries if e is not gone]
+            self._drop(self.entries[:-1])
+
+    def evict(self, among: list | None = None) -> bool:
+        """Memory is short: drop the entry ``add`` would drop next (of ``among``); False when none is left."""
+
+        among = self.entries if among is None else among
+        if not among:
+            return False
+        self._drop(among)
+        return True
+
+    def _drop(self, among: list) -> None:
+        cold = [e for e in among if tuple(e[0]) not in self.hit]
+        gone = cold[0] if cold else among[0]
+        self.entries = [e for e in self.entries if e is not gone]
         self.hit &= {tuple(e[0]) for e in self.entries}
+
+
+class KVRoom:
+    """One GPU's attention-cache bytes: a grow first evicts kept entries on other buffers, least recently used."""
+
+    def __init__(self, cache: PrefixCache, budget: int) -> None:
+        self.cache, self.budget = cache, int(budget)
+
+    def __call__(self, st: Any, extra: int) -> None:
+        while self.held(st) + extra > self.budget:
+            if not self.cache.evict([e for e in self.cache.entries if e[1].kv is not st.kv]):
+                return                      # only this conversation is left: the window was admitted for it
+
+    def held(self, st: Any) -> int:
+        """Bytes of every distinct attention buffer the state and the kept entries hold."""
+
+        seen, total = set(), 0
+        for kv in [st.kv, *(e[1].kv for e in self.cache.entries)]:
+            for pair in kv:
+                for t in pair or ():
+                    if t.data_ptr() not in seen:
+                        seen.add(t.data_ptr())
+                        total += t.untyped_storage().nbytes()
+        return total

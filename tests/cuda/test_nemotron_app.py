@@ -52,7 +52,7 @@ def test_resumed_prompts_equal_fresh(engine):
     for prompt in (first + _ids(" Also give its complexity."), first + reply + _ids(" Now in C.")):
         resumed: list[int] = []
         stats = engine.generate(prompt, 32, sampling, lambda new: resumed.extend(new))
-        assert stats["cached"] == len(first)                  # prompt ends only: a reply prefills again
+        assert stats["cached"] == len(first) - 1              # kept one token early (#98): a reply prefills again
         engine.cache = []                      # fresh: nothing to resume from
         fresh: list[int] = []
         engine.generate(prompt, 32, sampling, lambda new: fresh.extend(new))

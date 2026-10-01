@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 from tensorfold.server.errors import RequestError
+from tensorfold.server.probabilities import probability_options
 
 if TYPE_CHECKING:
     from tensorfold.server.responses import Store
@@ -159,6 +160,7 @@ def translate(body: Any, store: Store) -> Request:
 
     if not isinstance(body, dict):
         raise RequestError("the request body must be a JSON object")
+    probability_options(body)
     for name, reason in REFUSED.items():
         if body.get(name):
             raise RequestError(reason)

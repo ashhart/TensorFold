@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import math
-from .capacity import Geometry, itemsize
+import re
+
+from .capacity import Geometry, Weights, headers, itemsize
 
 PREFILL_ROWS = 2048     # a prompt chunk's rows: Flash Next and GLM keep buffers of this many rows
+PROMPT_SHARE = 32       # a dense prompt chunk's arrays take at most this fraction of the GPU's memory
 PREFILL_ATT_ROWS = 256  # Flash Next's prompt attention block
+MLA_PROMPT_ATT_ROWS = 512   # GLM's prompt-chunk rows one dense latent attention call takes (forward.PROMPT_ATT_ROWS)
+MLA_SELECT_ROWS = 512       # GLM's prompt-chunk rows whose pool scores are held at once (sparse.SELECT_ROWS)
 
 
 def size(info: dict, name: str = "tensor") -> int:
@@ -67,7 +72,7 @@ def indexed_weights(world: int, mtp: bool, mapped_tables: bool = True):
     def transform(name: str, info: dict) -> tuple[int, int]:
         if "vision" in name or ".visual." in name or (not mtp and (name.startswith("mtp.") or ".mtp." in name)):
             return 0, 0
-        if ".ngram_embedding.shard_" in name:          # host pages when mapped; none when read from SSD
+        if ".ngram_embedding.shard_" in name or name.endswith(".ngram_embedding.trellis"):     # host pages if mapped
             return 0, size(info, name) if mapped_tables else 0
         shape = list(info["shape"])
         if world > 1 and not info.get("split"):
@@ -132,8 +137,29 @@ def layer_counts(t: dict) -> tuple[int, int]:
     return layers - layers // interval, layers // interval
 
 
+def prompt_row_bytes(t: dict, world: int = 1) -> int:
+    """Bytes one dense prompt row's arrays hold at once, drafter taps included (the 27B measured 306-315 KiB)."""
+
+    return 16 * (int(t["hidden_size"]) + int(t["intermediate_size"]) // world)
+
+
+def prompt_rows(total: int, row_bytes: int, most: int = 4096) -> int:
+    """Prompt chunk rows: a multiple of 512 up to ``most`` whose arrays fit a PROMPT_SHARE-th of ``total``."""
+
+    return max(512, min(most, total // PROMPT_SHARE // row_bytes // 512 * 512))
+
+
+def live_kv(t: dict, world: int, window: int) -> int:
+    """A dense stream's attention caches at ``window`` rows (1,024 at least) and one layer's buffer mid-grow."""
+
+    _, attention = layer_counts(t)
+    return (attention + 1) * max(1024, window) * int(t["num_key_value_heads"]) // world * int(t["head_dim"]) * 4
+
+
 def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
-                 kv_bits: int = 16) -> Geometry:
+                 kv_bits: int = 16, rows: int | None = None, prompt: int = 0, evicts: bool = False) -> Geometry:
+    """``rows``: widest verify; ``prompt``: chunk rows sharing its scratch; ``evicts``: only the live window counts."""
+
     linear, attention = layer_counts(t)
     d, h = int(t["hidden_size"]), int(t["num_attention_heads"]) // world
     hk = int(t["num_key_value_heads"]) // world
@@ -147,13 +173,13 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
     # Persistent state, retained recurrent prefixes, rollback and row replay inputs.
     fixed = linear * ((6 if indexed else 4) * nv * dk * dv * 4 +
                       4 * (conv - 1) * (2 * nk * dk + nv * dv) * 2)
-    rows = 64 if indexed else 128
+    rows = rows or (64 if indexed else 128)
     fixed += linear * rows * (width * 2 + nk * dk * 4 + nv * dv * 4 + nv * 8)
     # Bound the concurrent activation arrays, MoE expert rows, logits and split-K scratch.
     slots = int(t.get("num_experts_per_tok", 1)) + 1
     intermediate = int(t.get("moe_intermediate_size", t.get("intermediate_size", d))) // world
     extent = d * streams + int(t["vocab_size"]) // world + slots * (intermediate + d) + width + h * hd
-    fixed += 16 * rows * extent * 4
+    fixed += max(16 * rows * extent * 4, prompt * prompt_row_bytes(t, world) if prompt else 0)
     fixed += (2 if mtp else 1) * 32 * rows * 2560 * 4
     if indexed:
         fixed += 4 * (int(t.get("ple_conv_kernel_size", 4)) - 1) * int(t.get("ngram_size", 3)) * streams * d * 2
@@ -174,7 +200,7 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
         else:
             # Bound two retained prefixes, current KV state and a growth copy; speculative rows use separate workspace.
             rounded = 1 << (max(1024, capacity - reserve) - 1).bit_length()
-            cache = 4 * attention * rounded * hk * hd * 4
+            cache = live_kv(t, world, capacity - reserve) if evicts else 4 * attention * rounded * hk * hd * 4
             scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
         return fixed + cache + scratch
     return Geometry(bytes_at, reserve)
@@ -193,7 +219,16 @@ def _indexed_prefill_row(t: dict, world: int, h: int, hk: int, hd: int, nv: int,
             + 12 * streams + 64)
 
 
-def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560, latent: bool = False) -> Geometry:
+def exl3_expert_scratch(rows: int, slots: int, d: int, width: int) -> int:
+    """GLM's ``exl3_mm.Scratch`` for ``rows`` x ``slots`` pairs: fp16 rotated inputs and the fp32 split-K sums."""
+
+    pairs = rows * slots
+    return 2 * pairs * d * 2 + pairs * width * 2 + 2 * 4 * pairs * max(width, d) * 4
+
+
+def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560, latent: bool = False,
+                 mtp: bool | None = None) -> Geometry:
+    """GLM's engine; ``mtp``: whether it holds the MTP head's caches and buffers (None: when the checkpoint has one)."""
     linear, attention = layer_counts(t)
     lin = t.get("linear_attn_config") or {}
     heads = int(t["num_attention_heads"]) // world
@@ -202,7 +237,7 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     conv = int(lin.get("short_conv_kernel_size", t.get("linear_conv_kernel_dim", 4)))
     kd = int(t["qk_nope_head_dim"]) + int(t.get("qk_rope_head_dim", 0))
     vd, index = int(t["v_head_dim"]), int(t.get("index_head_dim", 128))
-    mtp = int(t.get("num_nextn_predict_layers", 0)) > 0
+    mtp = int(t.get("num_nextn_predict_layers", 0)) > 0 if mtp is None else bool(mtp)
     rows, d, streams = 64, int(t["hidden_size"]), int(t.get("hc_mult", 4))
     fixed = linear * (4 * lh * ld * ld * 4 + 3 * (conv - 1) * 3 * lh * ld * 2)
     fixed += linear * rows * (3 * lh * ld + 2 * ld + lh) * 2
@@ -216,16 +251,19 @@ def mla_geometry(t: dict, world: int, reserve: int, *, minimum_slots: int = 2560
     # prompt-chunk buffers: at most 5 row extents a row without the head
     fixed += PREFILL_ROWS * 5 * (extent - int(t["vocab_size"]) // world)
     if (t.get("_quantization") or {}).get("quant_method") == "exl3":
-        fixed += 128 * rows * slots * max(width, d) * 4
+        # EXL3 experts' scratch (decode windows, the MTP head's, a prompt chunk) and the prompt's BF16 split-K partials
+        fixed += (2 if mtp else 1) * exl3_expert_scratch(rows, slots, d, width)
+        fixed += exl3_expert_scratch(PREFILL_ROWS, slots, d, width) + 8 * PREFILL_ROWS * 16384 * 4
     count = attention + int(mtp)
     lw = int(t.get("kv_lora_rank", 512))
     def bytes_at(capacity: int) -> int:
         scratch = mla_chunk_scratch(t, world, capacity, latent=latent)
         if latent:
-            # latent cache; one prompt chunk's latent partials and absorbed rows (the MTP absorbs through the same buffers)
+            # latent cache; a prompt chunk's partials (MLA_PROMPT_ATT_ROWS rows at a time) and absorbed rows (MTP's too)
             cache = count * capacity * lw * 2
             dense = min(capacity, minimum_slots) + PREFILL_ROWS
-            scratch += ((dense + 511) // 512) * PREFILL_ROWS * heads * (lw + 2) * 4 + 4 * PREFILL_ROWS * heads * lw
+            scratch += (((dense + 511) // 512) * min(PREFILL_ROWS, MLA_PROMPT_ATT_ROWS) * heads * (lw + 2) * 4
+                        + 4 * PREFILL_ROWS * heads * lw)
         else:
             cache = count * capacity * heads * (kd + vd) * 2
             scratch += (2 if mtp else 1) * ((capacity + rows + 511) // 512) * rows * heads * (kd + 2) * 4
@@ -238,11 +276,18 @@ def mla_chunk_scratch(t: dict, world: int, capacity: int, *, latent: bool) -> in
     """A prompt chunk's transient bytes: token selection (fp32 pool scores, chosen pools, token lists), then sparse attention's partials."""
 
     heads, topk = int(t["num_attention_heads"]) // world, int(t.get("index_topk", 2048))
-    select = PREFILL_ROWS * (4 * ((capacity + 3) // 4) + 16 * (topk + 3))
+    # the fp32 pool scores of at most MLA_SELECT_ROWS rows at once, the chosen pools and token lists of the chunk's
+    select = min(PREFILL_ROWS, MLA_SELECT_ROWS) * 4 * ((capacity + 3) // 4) + PREFILL_ROWS * 16 * (topk + 3)
     if latent:
         return select + ((topk + 515) // 512) * PREFILL_ROWS * heads * (int(t.get("kv_lora_rank", 512)) + 2) * 4
     kd = int(t["qk_nope_head_dim"]) + int(t.get("qk_rope_head_dim", 0))
     return select + 128 * heads * (kd + 2) * 4 * ((topk + 515) // 512)
+
+
+def draft_ring_rows(window: int, block: int, tile: int = 64) -> int:
+    """Rows of GLM's DFlash2 context ring: window + block + a tile in whole tiles (a kept state's window fits too)."""
+
+    return -(-(window + block + tile - 1) // tile) * tile
 
 
 def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, streams: int = 1,
@@ -261,6 +306,57 @@ def draft_geometry(t: dict, world: int, reserve: int, *, bounded: bool = False, 
     return Geometry(bytes_at, reserve)
 
 
+def dflash2_geometry(t: dict, world: int, reserve: int, *, ring: bool) -> Geometry:
+    """GLM's DFlash2 drafter on each rank: one context (a ring, or capacity + block rows) and a block pass."""
+
+    layers = int(t["num_hidden_layers"])
+    heads = int(t["num_key_value_heads"]) // world
+    hd = int(t["head_dim"])
+    block = int((t.get("dflash_config") or {}).get("block_size", 16))
+    window = int(t.get("sliding_window", 0))
+    fixed = 16 * max(64, block) * (int(t["hidden_size"]) + int(t["intermediate_size"])) * 4
+    rows = draft_ring_rows(window - 1, block) if ring and window > 0 else 0
+
+    def bytes_at(capacity: int) -> int:
+        slots = capacity + block if not rows else min(rows, capacity + block)
+        return fixed + 2 * layers * heads * hd * slots * 2
+    return Geometry(bytes_at, reserve)
+
+
+def dflash2_weights(draft_dir, world: int) -> Weights:
+    """GLM's DFlash2 drafter as held on each rank (4-bit copies, bf16 norms, fp32 codebooks), and its staging."""
+
+    h = headers(draft_dir)
+    shape = {name: [int(x) for x in info["shape"]] for name, info in h.items()}
+
+    def q4(n: int, k: int) -> int:
+        return -(-n // 128) * 128 * k * 9 // 16
+
+    mats = [tuple(shape["fc.weight"])]
+    quantized = {"fc.weight"}
+    for i in sorted({int(m.group(1)) for m in map(re.compile(r"layers\.(\d+)\.").match, shape) if m}):
+        p = f"layers.{i}."
+        q, k, v = (shape[p + f"self_attn.{x}_proj.weight"] for x in "qkv")
+        o, gate, up, down = (shape[p + x] for x in ("self_attn.o_proj.weight", "mlp.gate_proj.weight",
+                                                      "mlp.up_proj.weight", "mlp.down_proj.weight"))
+        d = q[1]
+        mats += [((q[0] + k[0] + v[0]) // world, d), ((k[0] + v[0]) // world, d), (o[0], o[1] // world),
+                 ((gate[0] + up[0]) // world, d), (down[0], down[1] // world)]
+        quantized |= {p + x for x in ("self_attn.q_proj.weight", "self_attn.k_proj.weight", "self_attn.v_proj.weight",
+                                      "self_attn.o_proj.weight", "mlp.gate_proj.weight", "mlp.up_proj.weight",
+                                      "mlp.down_proj.weight")}
+        for conv in ("attention_conv", "mlp_conv"):
+            name = p + conv + ".kernel_projection.weight"
+            mats.append(tuple(shape[name]))
+            quantized.add(name)
+    resident = sum(q4(n, k) for n, k in mats)
+    for name, dims in shape.items():
+        if name not in quantized:
+            resident += math.prod(dims) * (4 if name.endswith("_codebook") else 2)
+    staging = max(4 * n * k + 24 * min(n, 8192) * k for n, k in mats)
+    return Weights(resident, staging, 0)
+
+
 def _gdn_dims(t: dict, world: int) -> tuple:
     d, heads = int(t["hidden_size"]), int(t["num_attention_heads"])
     nk, nv = int(t["linear_num_key_heads"]) // world, int(t["linear_num_value_heads"]) // world
@@ -269,8 +365,8 @@ def _gdn_dims(t: dict, world: int) -> tuple:
             nk, nv, dk, dv, 2 * nk * dk + 2 * nv * dv + 2 * nv)
 
 
-def stream_geometry(t: dict, world: int, streams: int, keep: int) -> Geometry:
-    """The 27B's concurrent decoder: each live stream, ``keep`` cached prompt ends and rows for every window."""
+def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int | None = None) -> Geometry:
+    """The 27B's concurrent decoder: live streams, ``keep`` kept prompt ends, windows; ``first``: growth on one GPU."""
 
     linear, attention = layer_counts(t)
     d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, world)
@@ -284,13 +380,16 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int) -> Geometry:
     fixed += 16 * max(128, rows) * extent * 4 + 32 * rows * 2560 * 4
     def bytes_at(capacity: int) -> int:
         kv = attention * capacity * hk * hd * 2 * 2
+        caches = (streams + keep + 1) * kv if first is None else \
+            kv + (streams + keep) * attention * min(first, capacity) * hk * hd * 2 * 2
         scratch = rows * h * (hd + 2) * ((capacity + 511) // 512) * 4
-        return fixed + (streams + keep + 1) * kv + kv // max(1, attention) + scratch   # one layer's growth copy
+        return fixed + caches + kv // max(1, attention) + scratch   # one layer's growth copy
     return Geometry(bytes_at, 1)
 
 
-def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool, kv_bits: int = 16) -> Geometry:
-    """Flash Next's concurrent decoder on one GPU: ``streams`` slots of ``each``-row windows and kept snapshots."""
+def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool, kv_bits: int = 16,
+                            first: int = 256) -> Geometry:
+    """Flash Next's concurrent decoder on one GPU: per-row windows and kept snapshots sized to share one GPU."""
 
     linear, attention = layer_counts(t)
     d, h, hk, hd, nk, nv, dk, dv, width = _gdn_dims(t, 1)
@@ -308,9 +407,12 @@ def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp:
     fixed += (1 + mtp) * (linear * rows * width * 2 + 32 * max(rows, 4) * 2560 * 4) + 16 * max(64, rows) * extent * 4
     fixed += PREFILL_ROWS * _indexed_prefill_row(t, 1, h, hk, hd, nv, dv, width, slots, moe)
     count, row = attention + int(mtp), kv_bytes(hd, kv_bits)
+    def caches(rows: int) -> int:
+        return count * (2 * rows * hk * row + (rows + (rows + ratio - 1) // ratio) * index_dim * 2)
+
     def bytes_at(capacity: int) -> int:
         blocks = (capacity + ratio - 1) // ratio
-        cache = streams * count * (2 * capacity * hk * row + (capacity + blocks) * index_dim * 2)
+        cache = caches(capacity) + (streams - 1) * caches(min(first, capacity))
         chunks = (min(capacity, budget + ratio - 1) + 511) // 512
         scratch = ((1 + mtp) * rows + PREFILL_ATT_ROWS) * (h * (hd + 2) * chunks + blocks + budget + ratio) * 4
         return fixed + cache + scratch

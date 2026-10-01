@@ -30,6 +30,11 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         self.pipelined = bool(getattr(model, "gpu_tokens", False))
         self.family_width = max(1, min(int(getattr(model, "exact_width", 1) or 1), int(self.max_rows)))
         self.max_copy = self.family_width - 1
+        # a copy's first window; alone, one that lands whole doubles the next (rows) and one that breaks starts over
+        self.first_copy = max(1, min(self.max_copy, int(getattr(model, "first_copy_rows", 0) or self.family_width) - 1))
+        self._copy_width: dict[str, int] = {}        # stream id -> tokens its next copy may take while it runs alone
+        self._alone = True                           # this step has one live stream: its copies may take their ramp
+        self.base_width = min(self.family_width, self.first_copy + 1)   # forced windows and shared rounds keep it
         self.family_mtp = (getattr(model, "mtp", None) is not None and self.family_width >= 2
                            and callable(getattr(model, "speculate", None)))
         self.speculate_early = bool(getattr(model, "speculate_early", True))
@@ -87,6 +92,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
                 if stream.stream_id in self._inflight:
                     landed[stream.stream_id] = self._land_inflight(stream)
             live = [(s, c) for s, c in live if not s.finished]
+        self._alone = len(live) == 1
         if len(live) > 1 and self.family_streams:
             live = self._take_turns(live)
             self._shared_rounds += 1
@@ -142,8 +148,8 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         if stream.proposer is None or self.max_copy <= 0 or stream.force:
             return []
         try:
-            copied = [int(t) for t in stream.proposer.propose(stream.context, min(self.max_copy,
-                                                                                 stream.draft_room - 1))]
+            width = self._copy_width.get(stream.stream_id, self.first_copy) if self._alone else self.first_copy
+            copied = [int(t) for t in stream.proposer.propose(stream.context, min(width, stream.draft_room - 1))]
         except Exception:  # noqa: BLE001 - a proposer must never break a stream
             return []
         need = self.enter_match if min_match is None else min_match
@@ -195,7 +201,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         queued = self._next.pop(stream.stream_id, None)
         forced = []
         if stream.force:
-            width = min(self.family_width, self.batch_rows) if stream.drafts else 1
+            width = min(self.base_width, self.batch_rows) if stream.drafts else 1
             forced = stream.force[:width - 1]
             del stream.force[:len(forced)]
             return "forced", forced, forced, None
@@ -281,6 +287,10 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
                     observe = getattr(stream.proposer, "observe", None)
                     if callable(observe):
                         observe(rows - 1, accepted)
+                    if self._alone:
+                        width = self._copy_width.get(stream.stream_id, self.first_copy)
+                        self._copy_width[stream.stream_id] = (min(self.max_copy, 2 * width + 1)
+                                                              if accepted == rows - 1 else self.first_copy)
                 elif kind == "head":
                     self._observe_depth(stream, max(tree_paths(rows_parents)[0]), accepted)
         cut = stream.think_cut(committed)
@@ -421,7 +431,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
 
     def _release_stream_state(self, stream_id: str) -> None:
         for table in (self._inflight, self._next, self._mode, self._depth_state, self._served, self._granted,
-                      self._grammar_window):
+                      self._grammar_window, self._copy_width):
             table.pop(stream_id, None)
 
     def _family_reset(self) -> None:
@@ -433,6 +443,7 @@ class FamilyRounds(FamilyPrefill, SharedRounds, DraftDepth):
         self._served = {}
         self._granted = {}
         self._grammar_window = {}
+        self._copy_width = {}
 
     def _family_summary(self) -> dict[str, Any]:
         return {"engine": "lanes", "family": True, "rounds": len(self.round_stats), "streams": len(self.streams),

@@ -41,7 +41,7 @@ def _flash_next(monkeypatch, calls):
     monkeypatch.setattr(decode, "mtp_decode", _recording(calls, "mtp"))
     monkeypatch.setattr(torch.cuda, "synchronize", lambda *a: None)
     eng = mod.FlashNextEngine.__new__(mod.FlashNextEngine)
-    eng.e = SimpleNamespace(st=SimpleNamespace(snapshot=lambda: {}), mbuf=None, last_streams=None)
+    eng.e = SimpleNamespace(st=SimpleNamespace(snapshot=lambda: {}), mbuf=None, last_streams=None, kept={})
     eng.serial, eng.tp, eng.depth, eng.confidence, eng.scheduler = SimpleNamespace(), 1, 3, 0.0, None
     eng.cache, eng.eos, eng.max_len, eng.served = [], (END,), 1024, 0
     return mod, eng
@@ -50,7 +50,7 @@ def _flash_next(monkeypatch, calls):
 def _nemotron(monkeypatch, calls):
     mod = importlib.import_module("tensorfold.families.nemotron_h.cuda.app")
     decode = importlib.import_module("tensorfold.families.nemotron_h.cuda.decode")
-    pre = SimpleNamespace(pending=END, engine=None, mtp=None, last_hidden=None)
+    pre = SimpleNamespace(pending=END, engine=None, mtp=None, last_hidden=None, kept={})
     monkeypatch.setattr(decode, "prefill", lambda *a, **kw: pre)
     monkeypatch.setattr(decode, "serial_decode", _recording(calls, "serial"))
     monkeypatch.setattr(decode, "draft_decode", _recording(calls, "mtp"))

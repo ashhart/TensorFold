@@ -131,8 +131,7 @@ def message_markers(tokenizer: Any) -> tuple[tuple[int, ...], tuple[int, ...]]:
                     pieces[role].append([int(t) for t in after[len(before):]])
                 else:
                     parted.append((before, after, role))
-    # a template may render the last reply unlike the same reply in history (Qwen3.5 and 3.6 drop its empty think
-    # block once a user message follows): the new message then starts at the only opener past where the renders differ
+    # templates can render the last reply differently; new messages start at the next opener past the diff
     openers = _openers(pieces, special)
     for before, after, role in parted:
         split = next((i for i, (a, b) in enumerate(zip(before, after)) if a != b), min(len(before), len(after)))

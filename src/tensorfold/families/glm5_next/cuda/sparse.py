@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from tensorfold.cuda.geometry import MLA_SELECT_ROWS as SELECT_ROWS   # a prompt chunk's rows scored at once
+
 POOL = 4
 TOPK_POOLS = 512
 BR = 16
@@ -76,6 +78,14 @@ def _scores(QI, W, w_stride, PK, OUT, POS, R, NP, scale, wscale, H: tl.constexpr
     pb = tl.program_id(1)
     P = tl.load(POS)
     p = pb * BP + tl.arange(0, BP)
+    # tiles past this row block's last visible complete pool store -inf without dot products (the same allocations)
+    visible = (P + tl.minimum((rb + 1) * RB, R)) // 4
+    if pb * BP >= visible:
+        for i in tl.static_range(RB):
+            r = rb * RB + i
+            if r < R:
+                tl.store(OUT + r * NP + p, float("-inf"), mask=p < NP)
+        return
     d = tl.arange(0, D)
     hh = tl.arange(0, HP)
     hok = hh < H
@@ -113,20 +123,21 @@ def _order_key(s):
 
 
 @triton.jit
-def _select_rows(S, OUT, NP, K: tl.constexpr, BLOCK: tl.constexpr):
+def _select_rows(S, OUT, NP, POS, K: tl.constexpr, BLOCK: tl.constexpr, VISIBLE: tl.constexpr):
     """Program r: a radix select (8 bits a pass) finds the K-th best score, then one pass in pool order writes the pools above it and the lowest ties."""
 
     r = tl.program_id(0).to(tl.int64)
     row = S + r * NP
+    limit = tl.minimum(NP, tl.maximum(K, (tl.load(POS) + r + 1) // 4)) if VISIBLE else NP
     bins = tl.arange(0, 256)
     prefix = tl.zeros((), dtype=tl.uint32)
     fixed = tl.zeros((), dtype=tl.uint32)
     need = K
     for p in tl.static_range(4):
         hist = tl.zeros((256,), dtype=tl.int32)
-        for c in range(0, NP, BLOCK):
+        for c in range(0, limit, BLOCK):
             i = c + tl.arange(0, BLOCK)
-            ok = i < NP
+            ok = i < limit
             u = _order_key(tl.load(row + i, mask=ok, other=0.0))
             match = ok & ((u & fixed) == prefix)
             hist += tl.histogram(((u >> (24 - 8 * p)) & 0xFF).to(tl.int32), 256, mask=match)
@@ -137,9 +148,9 @@ def _select_rows(S, OUT, NP, K: tl.constexpr, BLOCK: tl.constexpr):
         fixed = fixed | (tl.full((), 0xFF, tl.uint32) << (24 - 8 * p))
     written = 0
     equal_seen = 0
-    for c in range(0, NP, BLOCK):
+    for c in range(0, limit, BLOCK):
         i = c + tl.arange(0, BLOCK)
-        ok = i < NP
+        ok = i < limit
         u = _order_key(tl.load(row + i, mask=ok, other=0.0))
         eq = (ok & (u == prefix)).to(tl.int32)
         take = (ok & (u > prefix)) | ((eq == 1) & (tl.cumsum(eq, 0) - eq + equal_seen < need))
@@ -149,13 +160,14 @@ def _select_rows(S, OUT, NP, K: tl.constexpr, BLOCK: tl.constexpr):
         equal_seen += tl.sum(eq, 0)
 
 
-def top_pools(scores: torch.Tensor, k: int) -> torch.Tensor:
+def top_pools(scores: torch.Tensor, k: int, pos_dev: torch.Tensor | None = None) -> torch.Tensor:
     """``_top_pools``'s pools in one kernel, ascending, without int64 keys, top-k or sort."""
     R, NP = scores.shape
     if NP < k or not scores.is_contiguous():
         return _top_pools(scores, k)
     out = torch.empty((R, k), dtype=torch.int64, device=scores.device)
-    _select_rows[(R,)](scores, out, NP, K=k, BLOCK=1024, num_warps=4)
+    _select_rows[(R,)](scores, out, NP, pos_dev if pos_dev is not None else scores,
+                       K=k, BLOCK=1024, VISIBLE=pos_dev is not None, num_warps=4)
     return out
 
 
@@ -173,14 +185,23 @@ def select_tokens(qi: torch.Tensor, wts: torch.Tensor, pk: torch.Tensor, pos: in
         raise ValueError("select_tokens: index queries must be contiguous rows, weights unit-stride columns")
     # score only visible pools, rounded up to a power of two so the allocator reuses a few sizes (exact sizes fragmented memory at 128k)
     np_max = bucket if bucket is not None else pool_bucket(pos, R, np_max)
-    scores = torch.empty((R, np_max), dtype=torch.float32, device=qi.device)
+    # rows scored SELECT_ROWS at a time over the window's np_max pools (the same columns, so the same bits a row)
+    B = min(R, SELECT_ROWS)
+    scores = torch.empty((B, np_max), dtype=torch.float32, device=qi.device)
     # heads and width from the tensors: fixed ones read past a row's index query into its window neighbours
     H = wts.shape[1]
     D = qi.shape[1] // H
     wscale = 1.0 / 5.656854249492381 if H == 32 else H ** -0.5            # 32 ** -0.5 exactly as before
-    _scores[(R, triton.cdiv(np_max, 64))](qi, wts, wts.stride(0), pk, scores, pos_dev, R, np_max, D ** -0.5, wscale,
-                                         H=H, HP=max(16, triton.next_power_of_2(H)), D=D, BP=64, RB=1, num_warps=4)
-    pools = top_pools(scores, TOPK_POOLS)                                               # ascending pool index
+    blocks = []
+    for a in range(0, R, B):
+        n = min(B, R - a)
+        at = pos_dev if a == 0 else pos_dev + a                        # the block's first row's position
+        _scores[(n, triton.cdiv(np_max, 64))](qi[a:a + n], wts[a:a + n], wts.stride(0), pk, scores, at, n, np_max,
+                                             D ** -0.5, wscale, H=H, HP=max(16, triton.next_power_of_2(H)), D=D,
+                                             BP=64, RB=1, num_warps=4)
+        blocks.append(top_pools(scores[:n], TOPK_POOLS, at))                           # ascending pool index
+    del scores
+    pools = blocks[0] if len(blocks) == 1 else torch.cat(blocks)
     dev = qi.device
     width = TOPK_POOLS * POOL + POOL - 1
     # all rows at once: the 512 pools' tokens ascending, then the incomplete last pool's visible tokens; rows within the dense limit count 0

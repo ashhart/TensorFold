@@ -73,7 +73,7 @@ def prepare_prompt(app, messages, tools, thinking, prompt, fields):
         return RenderedPrompt(tokens, history)
     messages = _normalize_tool_call_arguments(normalize_messages(messages, late_system=app.late_system,
                                                                  allow_images=True))
-    effort = fields.get('reasoning_effort', app.reasoning_effort)
+    effort = app.effort_for(fields.get('reasoning_effort'))
 
     def render(template):
         kwargs = dict(add_generation_prompt=True, tokenize=False, enable_thinking=thinking)

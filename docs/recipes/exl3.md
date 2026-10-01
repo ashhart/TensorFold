@@ -105,7 +105,7 @@ its rows independent — which is the verify path's contract (`docs/recipes/cuda
 
 ## Prompts
 
-Prompt chunks take their own arithmetic, as the MLX 4-bit path's FP8 prefill does (`cuda/exl3/prefill.py`): the
+Prompt chunks take their own arithmetic, as the MLX 4-bit path's prompt matmul does (`cuda/exl3/prefill.py`): the
 input rotation is decode's, W_q is decoded once a chunk into fp16, a fixed-tile fp16 GEMM with fp32 accumulation
 multiplies it, and its epilogue rotates each 128-column block (the accumulator's bf16 high and low halves times
 H) before `svh` and the bias. Tiles depend on the shape alone, so a row's bits never depend on its chunk and a
@@ -155,3 +155,11 @@ from one line.
   `plain`.
 - The Hadamard blocks run along K and N, so both must be multiples of 128. A split of K must keep whole tiles
   and whole blocks: `plan` only ever splits 128-aligned k ranges.
+
+### Consolidated Flash Next n-grams
+
+Flash Next EXL3 packs may store `ngram_embedding.trellis` as one int16 `[rows, words]` tensor instead of
+`ngram_embedding.shard_N.trellis`. Both layouts use the same scale-plus-160-values row codec. CUDA maps either
+layout read-only and gathers only requested rows; the consolidated layout does not require re-sharding or
+requantization. Admission treats the packed table as reclaimable mapped pages, while head metadata remains
+resident. Mapped pages still consume physical RAM when touched; keep the normal cache/workspace reserve.

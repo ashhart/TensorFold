@@ -38,9 +38,10 @@ class Model:
 
 
 class Family:
-    def __init__(self, model, *, drafter=None, widest=32, rows=False):
+    def __init__(self, model, *, drafter=None, widest=32, rows=False, first_copy_rows=None):
         self.inner, self.rows = model, rows
         self.exact_width, self.window_costs = widest, {1: 1.0}
+        self.first_copy_rows = first_copy_rows
 
 
 @pytest.fixture(autouse=True)
@@ -102,12 +103,27 @@ def test_native_lane_formats_keep_tensor_unit_routing(gate, top, widths):
 
 @pytest.mark.parametrize("top", [(bits, group) for bits in (2, 3, 4, 5, 6, 8) for group in (32, 64, 128)])
 @pytest.mark.parametrize("units,lane_kernels", [(False, "auto"), (True, "off")])
-def test_packed_row_decoder_accepts_every_affine_format(gate, top, units, lane_kernels):
+def test_packed_row_decoder_accepts_every_affine_format(gate, top, units, lane_kernels, monkeypatch):
+    monkeypatch.delenv("TF_COPY_ROWS", raising=False)
     run, calls = gate
     family, _ = run(top, (top, top), units=units, lane_kernels=lane_kernels)
     assert family.rows and not family.inner._tensorfold_lanes
     assert calls["rows"] == [family.inner] and calls["lanes"] == []
-    assert family.exact_width == 16
+    assert (family.exact_width, family.first_copy_rows) == (128, 16)
+
+
+@pytest.mark.parametrize("value,lanes,rows", [(None, 32, 128), ("0", 32, 16), ("128", 128, 128), ("64", 64, 64),
+                                               ("8", 32, 16), ("999", 128, 128)])
+def test_copy_rows_sets_the_checked_window_above_the_first_copy_width(gate, monkeypatch, value, lanes, rows):
+    run, _ = gate
+    if value is None:
+        monkeypatch.delenv("TF_COPY_ROWS", raising=False)
+    else:
+        monkeypatch.setenv("TF_COPY_ROWS", value)
+    family, _ = run((4, 64), (4, 4))
+    assert (family.exact_width, family.first_copy_rows) == (lanes, 32)
+    family, _ = run((4, 64), (4, 4), units=False)
+    assert (family.exact_width, family.first_copy_rows) == (rows, 16)
 
 
 @pytest.mark.parametrize("top", [(8, 32), (3, 32), (4, 128), (5, 128)])

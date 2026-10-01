@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorfold.cuda import prompt_precision
 from . import CONFIDENCE, DRAFTS
 
 
@@ -64,6 +65,8 @@ class NemotronEngine:
         if tp == 2:
             self._same_settings(torch, draft_ids)
         w = load(model_dir, mtp=self.drafts > 0)
+        if self.comm is not None:
+            self.comm.ready("loading")               # a peer stuck loading is named, not waited on in NCCL
         if self.drafts and w.mtp is None:
             raise ValueError("this checkpoint has no MTP head (mtp-4bit.safetensors), which Nemotron's CUDA engine "
                              "drafts with: use one that has it, or --no-drafts for the serial reference")
@@ -104,11 +107,12 @@ class NemotronEngine:
 
         ids = list(draft_ids) if draft_ids is not None else []
         digest = int.from_bytes(hashlib.sha256(" ".join(map(str, ids)).encode()).digest()[:7], "big")   # order too
-        mine = torch.tensor([self.drafts, round(self.confidence * 1e6), self.max_len, len(ids), digest],
-                            dtype=torch.int64, device="cuda")
+        mine = torch.tensor([self.drafts, round(self.confidence * 1e6), self.max_len, len(ids), digest,
+                             int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
         both = both.view(2, -1).cpu()
+        prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
                                f"draft ids): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
@@ -212,9 +216,11 @@ class NemotronEngine:
             n = len(hit[0])
             self.cache = [c for c in self.cache if len(c[0]) <= n or c[0][:n] != hit[0]]
         resume = None if hit is None else (hit[1]["engine"], hit[1]["mtp"], len(hit[0]), hit[1]["tail"])
-        pre = prefill(self.e, self.mtp, prompt, sampling, resume=resume, constraint=constraint)
-        # the prompt's state: the head has absorbed every position but the last, whose hidden state resume needs
-        self._remember(list(prompt), {"engine": pre.engine, "mtp": pre.mtp, "tail": pre.last_hidden})
+        end = max(1, len(prompt) - 1)
+        pre = prefill(self.e, self.mtp, prompt, sampling, resume=resume, constraint=constraint, keep_at=end)
+        if pre.kept is None:
+            raise RuntimeError(f"prefill did not retain the required {end}-token prefix of the {len(prompt)}-token prompt")
+        self._remember(list(prompt[:end]), pre.kept)
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                                  "drafts": True}
         if (on_tokens is not None and on_tokens([pre.pending])) or (stop_eos and pre.pending in self.eos) or \
@@ -234,8 +240,7 @@ class NemotronEngine:
     def generate(self, prompt: list[int], max_tokens: int, sampling,
                  on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None,
                  stop_eos: bool = True) -> dict[str, Any]:
-        """``draft=False``: the serial reference, one token a round from a fresh prefill in the twin engine;
-        ``stop_eos=False``: past end tokens (``ignore_eos``)."""
+        """``draft=False``: serial one-token rounds from a fresh prefill; ``stop_eos=False``: past end tokens."""
 
         max_tokens = self._limit(prompt, max_tokens)
         hit = self._resume(prompt) if draft else None

@@ -1,8 +1,4 @@
-"""One live line under a Mac server in a terminal: open connections, decode and prefill tok/s, redrawn in place.
-
-Other output to stdout or stderr clears the line first; the next redraw puts it back under the newest log line. It
-stays off when stdout is not a terminal (a log file sees nothing new) or with TENSORFOLD_NO_LIVE=1.
-"""
+"""One redrawn live throughput line, cleared by other output, off unless stdout is a terminal."""
 
 from __future__ import annotations
 
@@ -60,7 +56,7 @@ def status(scheduler: Any) -> str:
     """``[tensorfold] 3 connections (1 waiting) · decode 142 tok/s · prefill 1,210 tok/s``."""
 
     waiting = scheduler.waiting
-    open_ = scheduler.active + (scheduler.filling is not None) + waiting
+    open_ = scheduler.active + len(scheduler.filling) + waiting
     line = f"[tensorfold] {open_} connection{'' if open_ == 1 else 's'}"
     if waiting:
         line += f" ({waiting} waiting)"

@@ -24,6 +24,8 @@ class FlashNext:
     lane_family = True
     # Draw with gpu_sampling's keyed rule on the GPU.
     gpu_sampling = True
+    # the engine fills a prompt a chunk a forward: a pass holds every chunk's layer temporaries (+44-60 GiB served)
+    prompt_pass = False
 
     def __init__(self, model: Any, head: Any | None = None, *, drafts: int = 1) -> None:
         self.model = model
@@ -169,6 +171,20 @@ class FlashNext:
         out = self.model.hidden(tokens, cache[: self.layer_count])
         fused = self.fused is not None and tokens.shape[0] == 1 and tokens.shape[1] <= self.fused_rows
         self._streams = self.fused.last_streams if fused else self.model.__dict__["last_streams"]
+        return out
+
+    def hidden_pass(self, inputs: Any, cache: list[Any], sizes: Any) -> mx.array:
+        """Consecutive prompt chunks in one forward (``sizes`` rows each), every chunk with its own forward's bits."""
+
+        tokens = np.asarray(inputs, dtype=np.int64)
+        if tokens.ndim == 1:
+            tokens = tokens[None]
+        if min(int(n) for n in sizes) <= self.fused_rows:     # such a chunk alone takes the fused decode kernels
+            raise ValueError(f"hidden_pass: every chunk needs over {self.fused_rows} rows, got {tuple(sizes)}")
+        if "_resolved_prefill_identity" in self.__dict__:
+            self.prefill_key  # refuse a changed prefill mode before reading or updating a keyed cache
+        out = self.model.hidden_pass(tokens, cache[: self.layer_count], sizes)
+        self._streams = self.model.__dict__["last_streams"]
         return out
 
     def head(self, hidden: mx.array) -> mx.array:
@@ -430,6 +446,7 @@ class FlashNext:
         import time
 
         from tensorfold.engine.lane_engine import LaneEngine
+        from tensorfold.kernels.qwen.flash_next.v1 import rows
 
         copy = LaneEngine.copy_single_cache
         widest = int(widest or self.fused_rows)
@@ -451,14 +468,19 @@ class FlashNext:
                 break
             exact = width
         costs: dict[int, float] = {}
-        for width in range(1, exact + 1):
-            best = float("inf")
-            for _ in range(3):
-                cache = copy(base)
-                started = time.perf_counter()
-                mx.eval(self.head(self.model.hidden(np.array([window[:width]], dtype=np.int64), cache)))
-                best = min(best, (time.perf_counter() - started) * 1e3)
-            costs[width] = round(best, 3)
+        # the allocator prices rounds at the per-row kernels' costs: at the tiles' cheaper 8+ rows, 2 streams lost 4%
+        before, rows.hc_tiles_on = rows.hc_tiles_on, False
+        try:
+            for width in range(1, exact + 1):
+                best = float("inf")
+                for _ in range(3):
+                    cache = copy(base)
+                    started = time.perf_counter()
+                    mx.eval(self.head(self.model.hidden(np.array([window[:width]], dtype=np.int64), cache)))
+                    best = min(best, (time.perf_counter() - started) * 1e3)
+                costs[width] = round(best, 3)
+        finally:
+            rows.hc_tiles_on = before
         if exact >= 2:
             self.exact_width = exact                         # hidden_multi's per-stream limit, for the check
             self.streams_exact = self._check_streams(base, window)

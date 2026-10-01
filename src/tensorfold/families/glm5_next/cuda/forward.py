@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Sequence
 
 import torch
@@ -9,11 +10,21 @@ import triton
 import triton.language as tl
 
 from tensorfold.cuda import experts as grouped
+from tensorfold.cuda.geometry import MLA_PROMPT_ATT_ROWS as PROMPT_ATT_ROWS   # a dense latent call's prompt rows
 from tensorfold.cuda.kernels import prefill_attention, qmm as shared
 
 from . import glue, kda as kda_mod, latent, prof, qmm, sparse
 from .attention import AttnScratch, attention, kv_write
 from .weights import LayerW, Weights
+
+
+@dataclass
+class Cut:
+    """The recurrent state and convolution windows at an interior prompt row."""
+
+    point: int
+    rec: torch.Tensor
+    conv: torch.Tensor
 
 
 class Buffers:
@@ -35,8 +46,9 @@ class Buffers:
         if latent.ENABLED:
             # Dense attention only ever covers contexts up to the dense limit; longer rows go sparse.
             self.attn = None
+            # a prompt chunk's dense pass runs PROMPT_ATT_ROWS rows at a time: its fp32 partials hold that many rows
             self.lat_s = latent.LatentScratch(rows, HL, latent.chunks_for(min(capacity, 2560) + rows), dev,
-                                              lw=c.kv_lora)
+                                              lw=c.kv_lora, part_rows=PROMPT_ATT_ROWS if prefill else rows)
         else:
             self.attn = AttnScratch(1 if prefill else rows, HL, c.qk_dim, capacity, dev)
         if prefill:
@@ -243,7 +255,7 @@ def out_proj(w: Weights, b: Buffers, x: torch.Tensor, q: qmm.Q4, xs: torch.Tenso
     return gather(w, b, R)
 
 
-def kda_block(layer: LayerW, w: Weights, st: State, b: Buffers, R: int) -> torch.Tensor:
+def kda_block(layer: LayerW, w: Weights, st: State, b: Buffers, R: int, cut: Cut | None = None) -> torch.Tensor:
     c = w.cfg
     k = layer.kda
     li = st.kda_index[layer.index]
@@ -255,8 +267,18 @@ def kda_block(layer: LayerW, w: Weights, st: State, b: Buffers, R: int) -> torch
     mm(b, fa, k.fb, None if pre else qmm.group_sums(fa, b.xs_fa[:R]), b.ka[:R])
     mm(b, ga, k.gb, None if pre else qmm.group_sums(ga, b.xs_ga[:R]), b.kg[:R])
     cur = st.cur[li]
-    out = kda_mod.chain(p, k.b_off, b.ka[:R], b.kg[:R], st.conv[li], k.conv, st.rec[cur, li], k.a_log, k.dt_bias,
-                        k.norm, c.eps, c.lower, R, b.kscratch if pre else st.scratch[li], st.rec[1 - cur, li])
+    if cut is None:
+        out = kda_mod.chain(p, k.b_off, b.ka[:R], b.kg[:R], st.conv[li], k.conv, st.rec[cur, li], k.a_log,
+                            k.dt_bias, k.norm, c.eps, c.lower, R, b.kscratch if pre else st.scratch[li],
+                            st.rec[1 - cur, li])
+    else:
+        n = cut.point
+        first = kda_mod.chain(p[:n], k.b_off, b.ka[:n], b.kg[:n], st.conv[li], k.conv, st.rec[cur, li],
+                              k.a_log, k.dt_bias, k.norm, c.eps, c.lower, n, b.kscratch, cut.rec[li]).clone()
+        _shift_conv(cut.conv[li:li + 1], b.kproj[:, :n], n)
+        rest = kda_mod.chain(p[n:], k.b_off, b.ka[n:R], b.kg[n:R], cut.conv[li], k.conv, cut.rec[li],
+                             k.a_log, k.dt_bias, k.norm, c.eps, c.lower, R - n, b.kscratch, st.rec[1 - cur, li])
+        out = torch.cat((first, rest))
     if pre:                              # a prompt chunk keeps every row: the layer commits now
         st.cur[li] = 1 - cur
         _shift_conv(st.conv[li:li + 1], b.kproj[:, :R], R)
@@ -304,6 +326,21 @@ def dsa_block(layer: LayerW, w: Weights, kc: torch.Tensor, vc: torch.Tensor, pos
     return out_proj(w, b, o, a.o, None if b.prefill else qmm.group_sums(o, b.xs_ao[:R]), R)
 
 
+def dense_attention(qa: torch.Tensor, lc: torch.Tensor, pos_dev: torch.Tensor, s: latent.LatentScratch, *,
+                    scale: float, nch: int, out: torch.Tensor) -> torch.Tensor:
+    """``latent.attention`` in blocks of ``part_rows`` rows, each at its first row's position: one call's bits a row."""
+
+    R, step = qa.shape[0], s.part_rows
+    hb = latent.head_block(R)
+    if R <= step:
+        return latent.attention(qa, lc, pos_dev, s, scale=scale, nch=nch, out=out, hb=hb)
+    for r0 in range(0, R, step):
+        r1 = min(R, r0 + step)
+        at = pos_dev if r0 == 0 else pos_dev + r0          # the block's first row's position, on the device
+        latent.attention(qa[r0:r1], lc, at, s, scale=scale, nch=nch, out=out[r0:r1], hb=hb)
+    return out
+
+
 def _dsa_latent(a, w: Weights, lc: torch.Tensor, pos_dev: torch.Tensor, b: Buffers, R: int, nch: int | None,
                 index, host_pos: int | None, sparse_np: int | None = None) -> torch.Tensor:
     """DSA on the latent cache: the same indexer and selection, attention over latents with kv_b's key blocks absorbed into the query."""
@@ -330,7 +367,7 @@ def _dsa_latent(a, w: Weights, lc: torch.Tensor, pos_dev: torch.Tensor, b: Buffe
     if not all_sparse:
         # Rows past the dense limit are recomputed sparsely below, so the dense pass needs only the chunks up to it.
         with prof.timed("dsa: dense attention"):
-            latent.attention(qa, lc, pos_dev, s, scale=scale, nch=min(nch or s.nch, s.nch), out=ol)
+            dense_attention(qa, lc, pos_dev, s, scale=scale, nch=min(nch or s.nch, s.nch), out=ol)
     if sparse_rows:
         with prof.timed("dsa: select tokens"):
             mm(b, b.qr[:R], ix.qb, b.xs_qr[:R], b.qi[:R])
@@ -380,7 +417,7 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> torch.Tensor:
 
 
 def layer_forward(layer: LayerW, w: Weights, st: State, b: Buffers, R: int, nch: int | None = None,
-                  host_pos: int | None = None, sparse_np: int | None = None) -> None:
+                  host_pos: int | None = None, sparse_np: int | None = None, cut: Cut | None = None) -> None:
     c = w.cfg
     x = b.x[:R]
     h = layer.attn_hc
@@ -388,7 +425,7 @@ def layer_forward(layer: LayerW, w: Weights, st: State, b: Buffers, R: int, nch:
                 b.hcpart[:R], c.eps, c.hc_eps, c.hc_iters)
     if layer.kind == "kda":
         with prof.timed("kda"):
-            g = kda_block(layer, w, st, b, R)
+            g = kda_block(layer, w, st, b, R, cut)
     else:
         di = st.dsa_index[layer.index]
         with prof.timed("dsa (total)"):
@@ -428,13 +465,15 @@ def stage(w: Weights, st: State, b: Buffers, tokens: Sequence[int]) -> int:
 
 
 def compute(w: Weights, st: State, b: Buffers, R: int, *, logits: bool = True, nch: int | None = None,
-            host_pos: int | None = None, sparse_np: int | None = None):
+            host_pos: int | None = None, sparse_np: int | None = None, cut: Cut | None = None):
     """Run capturable GPU work on static buffers and device positions; eager long contexts use host_pos (graphs sparse_np) to select sparse attention."""
 
+    if cut is not None and (not b.prefill or not 0 < cut.point < R):
+        raise ValueError("a prompt cut must lie inside a prefill chunk")
     c = w.cfg
     glue.embed(b.ids[:R], w.embed, c.hidden, c.streams, b.x[:R])
     for layer in w.layers:
-        layer_forward(layer, w, st, b, R, nch, host_pos, sparse_np)
+        layer_forward(layer, w, st, b, R, nch, host_pos, sparse_np, cut)
         for slot in b.tap_at.get(layer.index, ()):
             glue.stream_mean(b.x[:R], b.taps[slot][:R])
     glue.stream_mean(b.x[:R], b.hidden[:R])

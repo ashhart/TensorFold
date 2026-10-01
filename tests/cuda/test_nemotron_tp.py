@@ -59,8 +59,12 @@ def _worker(rank: int, port: int, out, split: bool, ids: bool, shaped: bool = Fa
         eng._sample_shards(whole[:, rank * 256:(rank + 1) * 256].contiguous(), meta, two)
         results[name + "-draw"] = (one.tolist(), [two.tolist()])
     for name, sampling in samplings:
-        pre = prefill(eng, mtp, prompt, sampling)
+        pre = prefill(eng, mtp, prompt, sampling, keep_at=len(prompt) - 1)
         serial = serial_decode(eng, pre, 40, sampling)
+        kept = pre.kept
+        resumed = prefill(eng, mtp, prompt, sampling,
+                          resume=(kept["engine"], kept["mtp"], len(prompt) - 1, kept["tail"]))
+        results[name + "-resumed"] = (serial.tokens, [serial_decode(eng, resumed, 40, sampling).tokens])
         drafted = []
         for d in (1, 3):
             drafted.append(draft_decode(eng, mtp, pre, 40, sampling, drafts=d, copy=False).tokens)

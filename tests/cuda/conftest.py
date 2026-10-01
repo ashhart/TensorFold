@@ -1,6 +1,10 @@
 """The CUDA engines' tests: collected only where PyTorch sees an NVIDIA GPU (DGX Spark, in NVIDIA's container)."""
 
 import importlib.util
+import os
+
+# GLM's engines keep the MTP head beside DFlash2 here (TF_GLM_MTP=1), so both drafters stay under test
+os.environ.setdefault("TF_GLM_MTP", "1")
 
 
 def _cuda() -> bool:

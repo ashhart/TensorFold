@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 
+bool qmm_clusters(int, bool);
 void qmm_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
               at::Tensor&, const at::Tensor&, int, int, int, int, bool, bool);
 void qmm_prefill_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int,
@@ -34,7 +35,7 @@ void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const a
                 out.scalar_type() == (f32 ? at::kFloat : at::kBFloat16), "out: (M, n)");
     c10::cuda::CUDAGuard guard(x.device());
     at::Tensor p;
-    if (sk > 1 && (sk > 8 || !reduce)) {
+    if (sk > 1 && !qmm_clusters(static_cast<int>(sk), reduce)) {
         p = part.has_value() ? *part : at::empty({sk, m, n}, x.options().dtype(at::kFloat));
         TORCH_CHECK(p.is_cuda() && p.is_contiguous() && p.scalar_type() == at::kFloat && p.numel() >= sk * m * n,
                     "part: at least (SK, M, n) fp32");
@@ -47,7 +48,7 @@ void qmm(const at::Tensor& x, const at::Tensor& xs, const at::Tensor& w, const a
 void qmm_prefill(const at::Tensor& x, const at::Tensor& w, const at::Tensor& scales, const at::Tensor& biases,
                  at::Tensor& out, int64_t n, int64_t gs, bool f32, int64_t tile) {
     TORCH_CHECK(gs == 32 || gs == 64, "groups of 32 or 64");
-    TORCH_CHECK(tile >= 0 && tile <= 4, "tile 0-4");
+    TORCH_CHECK(tile >= 0 && tile <= 11, "tile 0-11");
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.dim() == 2 && x.size(0) >= 1 &&
                 x.stride(1) == 1 && x.stride(0) >= x.size(1), "x: (M, K) bf16 with contiguous rows");
     TORCH_CHECK(reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0 && (x.size(0) == 1 || x.stride(0) % 8 == 0),

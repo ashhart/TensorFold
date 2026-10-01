@@ -209,3 +209,25 @@ def test_two_ranks_with_the_same_draft_ids_in_another_order_refuse_to_start(fake
     with pytest.raises(RuntimeError, match="different settings"):
         settings(first, theirs)
     settings(first, settings(first))                          # the same list in the same order starts
+
+
+@pytest.mark.torch
+def test_two_ranks_with_different_prompt_precision_refuse_to_start(fake_runtime):  # noqa: F811
+    import torch
+    from tensorfold.cuda import prompt_precision
+    from tensorfold.families.nemotron_h.cuda.app import NemotronEngine
+
+    def settings(peer=None):
+        sent = []
+
+        def gather(mine, both):
+            sent.append(mine.clone())
+            both.copy_(torch.cat([mine, peer if peer is not None else mine]))
+        obj = SimpleNamespace(drafts=3, confidence=0.2, max_len=1024, comm=SimpleNamespace(all_gather=gather))
+        NemotronEngine._same_settings(obj, torch, [1, 2, 3])
+        return sent[0]
+
+    with prompt_precision.using(True):                        # rank 1 started with --prefill-fp8
+        theirs = settings()
+    with prompt_precision.using(False), pytest.raises(RuntimeError, match="prompt precision.*--prefill-fp8"):
+        settings(theirs)

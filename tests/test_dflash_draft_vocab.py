@@ -11,11 +11,11 @@ from tensorfold.kernels.qwen.dense.v1 import lane_qmm  # noqa: E402
 from tensorfold.drafters.dflash_drafter import DFlashDrafter  # noqa: E402
 
 
-def _drafter_with_head(n: int, k: int, bits: int = 4):
+def _drafter_with_head(n: int, k: int, bits: int = 4, group: int = 64):
     mx.random.seed(9)
     holder = nn.Sequential(nn.Linear(k, n, bias=False))
     holder.set_dtype(mx.bfloat16)
-    nn.quantize(holder, group_size=64, bits=bits)
+    nn.quantize(holder, group_size=group, bits=bits)
     mx.eval(holder.parameters())
     head = holder.layers[0]
     config = types.SimpleNamespace(output_multiplier=1.0, final_logit_softcapping=None)
@@ -27,10 +27,11 @@ def _drafter_with_head(n: int, k: int, bits: int = 4):
     return drafter, holder
 
 
-@pytest.mark.parametrize("bits", [4, 3, 2, 5, 6, 8])    # the drafter uses the target's head: 2-bit on oQ2
-def test_draft_vocab_keeps_the_full_heads_logits(bits):
+@pytest.mark.parametrize("bits, group", [(4, 64), (3, 64), (2, 64), (5, 64), (6, 64), (8, 64), (4, 32)])
+def test_draft_vocab_keeps_the_full_heads_logits(bits, group):
+    # the drafter uses the target's head: 2-bit on oQ2, and 4-bit in groups of 32 on oQ4e (lm_head at the base format)
     try:
-        drafter, holder = _drafter_with_head(4096, 512, bits)
+        drafter, holder = _drafter_with_head(4096, 512, bits, group)
         lane_qmm.install(holder, rows=lane_qmm.MAX_ROWS)
         hidden = (mx.random.normal((1, 16, 512)) * 0.5).astype(mx.bfloat16)
         full = drafter.model.compute_logits(hidden)

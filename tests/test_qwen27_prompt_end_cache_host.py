@@ -87,7 +87,7 @@ class Recorder:
         self.prefills = []
 
     def prefill(self, w, prompt, sampling, drafter=None, *, state=None, keep_at=None, rank=None, limit=0, stops=(),
-                keep=None, vision=None):
+                keep=None, vision=None, room=None):
         start = state.pos if state is not None else 0
         if state is not None:
             assert list(prompt[:start]) == state.ids, "resumed from a state that is not a prefix of the prompt"
@@ -125,7 +125,7 @@ def _one_gpu(monkeypatch, drafter=None):
     fake.prefill = rec.prefill
 
     def draft_decode(w, st, prompt, pending, count, sampling, draft, *, max_rows, allow_copy, on_tokens, inplace,
-                     stop_eos=True):
+                     stop_eos=True, tree_rows=None):
         # the decode may commit into the prompt state: no entry holds it
         assert inplace and all(st is not entry for _, entry, _ in engine.cache.entries)
         result = rec.decode(st, prompt, pending, count)
@@ -831,7 +831,7 @@ def test_keep_at_cuts_only_the_chunk_that_holds_the_point(cuda_modules, monkeypa
     assert [(p0, rows) for p0, rows, *_ in got] == [(a, b - a) for a, b in spans] == [(p0, r) for p0, r, *_ in ref_calls]
     assert [cut for _, _, cut, _, _ in got] == [keep_at - a if a < keep_at < b else 0 for a, b in spans]
     assert normed == ref == ("normed", n) and st.pos == n
-    assert kept.pos == keep_at and kept.kv == st.kv and kept.kv is not st.kv
+    assert kept.pos == keep_at and kept.kv is st.kv                 # one list: a later grow frees the old buffers
     assert kept.rec[0] == ("rec at", keep_at)
     if draft is None:
         assert snap is None
@@ -936,7 +936,8 @@ def _cpu_kernels(torch, monkeypatch, prefill, forward):
                            add_rmsnorm=glue_add_rmsnorm, gdn_pre=gdn_pre, attn_prep=attn_prep)
     pg = SimpleNamespace(add_rmsnorm=pg_add_rmsnorm, gated_norm=gated_norm, gate_mul=gate_mul, swiglu=swiglu)
     monkeypatch.setattr(prefill, "glue", glue)
-    monkeypatch.setattr(prefill, "prefill_glue", pg)         # the MLX checkpoint's prompt glue (w.quant "mlx")
+    monkeypatch.setattr(prefill, "prefill_glue", pg)         # the MLX checkpoint's prompt glue (w.quant "mlx"),
+    monkeypatch.setattr(prefill, "prefill_bf16", pg)         # FP8 or bf16 prompts alike
     monkeypatch.setattr(prefill, "_mm", matmul)
     monkeypatch.setattr(prefill, "deltanet", SimpleNamespace(chain=chain))
     monkeypatch.setattr(prefill, "attention", attention)
@@ -1113,9 +1114,7 @@ def test_the_same_prompt_again_resumes_from_its_kept_state_with_one_token(cpu):
 
 @pytest.mark.parametrize("cached,length,point", [(0, 1025, 1024), (1000, 1025, 1024), (1000, 1030, 1024)])
 def test_the_kept_state_holds_the_buffers_grown_after_the_point(cpu, cached, length, point):
-    """Key/value buffers grow to at least 1,024 rows and double. A prefill resumed at 1,000 tokens grows them past
-    1,024 inside the chunk that holds the point: the kept state then holds the grown buffers, whose first rows are
-    the old ones' copies, and no buffer of its own."""
+    """A prefill resumed at 1,000 tokens grows the buffers in the kept chunk; the kept state and prefix share them."""
 
     torch = cpu.torch
     prompt = _prompt(length, 50)
@@ -1126,7 +1125,7 @@ def test_the_kept_state_holds_the_buffers_grown_after_the_point(cpu, cached, len
     assert _bits_equal(torch, logits, ref_logits) and pending == ref_pending
     _assert_same_state(torch, st, ref)
     if cached:
-        assert prefix_b.kv[3][0].shape[0] == 1024 < st.kv[3][0].shape[0]    # grown inside the chunk
+        assert prefix_b.kv is st.kv and st.kv[3][0].shape[0] > 1024       # grown inside the chunk, for both
     assert _shares_kv(kept, st)
     (fresh, _), _ = cpu.run(prompt[:point])
     _assert_same_state(torch, kept, fresh)

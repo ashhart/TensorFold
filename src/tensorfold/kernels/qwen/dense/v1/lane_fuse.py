@@ -23,13 +23,15 @@ _SMALL_TAIL = 8 * 1024 * 1024    # an untiled tail is tiled into the stack as a 
 
 
 class _Group:
-    """A stacked projection: ``weight`` (sum N, K*bits/32) and ``sbt`` (K/64, sum N, 2) for one lane matmul."""
+    """A stacked projection: ``weight`` (sum N, K*bits/32) and ``sbt`` (K/group, sum N, 2) for one lane matmul."""
 
-    __slots__ = ("weight", "sbt", "tiled", "sk", "k", "sizes", "added", "members", "held", "sbts", "nt", "rotate")
+    __slots__ = ("weight", "sbt", "tiled", "sk", "k", "sizes", "added", "members", "held", "sbts", "nt", "rotate",
+                 "group")
 
     def __init__(self, weight: Any, sbt: Any, tiled: bool, sk: int, k: int, sizes: tuple[int, ...], added: int,
-                 members: tuple[Any, ...], nt: int = 32, rotate: Any = None) -> None:
+                 members: tuple[Any, ...], nt: int = 32, rotate: Any = None, group: int = 64) -> None:
         self.weight, self.sbt, self.tiled, self.sk, self.k, self.sizes = weight, sbt, tiled, sk, k, sizes
+        self.group = group                                                # the members' shared group size
         self.rotate = rotate                                              # the members' shared input transform
         self.nt = nt                                                      # the stack's tile width (lane_qmm)
         self.added = added                                                # bytes not shared with the modules
@@ -82,10 +84,11 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
     rotate = outer[0].rotate if hasattr(outer[0], "rotate") else None
     for m in members:
         w = m["weight"]
-        if not lane_qmm.takes(m) or m.group_size != 64 or "bias" in m or w.dtype != mx.uint32 or w.ndim != 2:
+        if not lane_qmm.takes(m) or m.group_size not in (32, 64) or "bias" in m or w.dtype != mx.uint32 or w.ndim != 2:
             return no
-    bits = members[0].bits
-    if any(m.bits != bits for m in members):     # one kernel a stack: members of mixed widths stay separate calls
+    bits, group = members[0].bits, int(members[0].group_size)
+    # one kernel a stack: members of mixed widths or group sizes stay separate calls
+    if any(m.bits != bits or int(m.group_size) != group for m in members):
         return no
     kw = int(members[0]["weight"].shape[1])
     k = kw * 32 // bits
@@ -111,7 +114,8 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
         if any(tiled[j:]) or tail % lane_qmm.NT or sum(m["weight"].nbytes for m in members[j:]) > _SMALL_TAIL:
             return no
         parts = [m["weight"] for m in members[:j]]
-        parts.append(lane_qmm.tile_weight(mx.concatenate([m["weight"] for m in members[j:]], axis=0), bits=bits))
+        parts.append(lane_qmm.tile_weight(mx.concatenate([m["weight"] for m in members[j:]], axis=0), group=group,
+                                          bits=bits))
         viewed = members[:j]
         stacked_tiled = True
         copied = parts[-1].nbytes
@@ -136,7 +140,7 @@ def _build(parent: Any, kind: str) -> _Group | _Unfusable:
         offset += n
     mx.eval(views)
     return _Group(weight, sbt, stacked_tiled, sk, k, sizes, sbt.nbytes + copied, members,
-                  nt if stacked_tiled else lane_qmm.NT, rotate)
+                  nt if stacked_tiled else lane_qmm.NT, rotate, group)
 
 
 def _group(parent: Any, kind: str, *, build: bool | None = None) -> _Group | None:
@@ -176,7 +180,8 @@ def _project(parent: Any, kind: str, x: mx.array) -> mx.array | None:
         return None
     if group.rotate is not None:
         x = group.rotate(x)
-    return lane_qmm.lane_matmul(x, group.weight, group.sbt, tiled=group.tiled, sk=group.sk, nt=group.nt)
+    return lane_qmm.lane_matmul(x, group.weight, group.sbt, tiled=group.tiled, sk=group.sk, nt=group.nt,
+                                group=group.group)
 
 
 def gdn_in(gdn: Any, x: mx.array) -> mx.array | None:

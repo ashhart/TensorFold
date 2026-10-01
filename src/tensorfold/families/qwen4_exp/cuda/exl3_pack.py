@@ -105,7 +105,7 @@ class Pack:
 
 
 class NgramTable:
-    """The n-gram embedding's shards in ExLlamaV3's row codec, memory-mapped; ``words``/``lock``/``prefetch`` as ``HostTable``."""
+    """The n-gram table in ExLlamaV3's row codec (one tensor or shards), memory-mapped; reads as ``HostTable``'s."""
 
     def __init__(self, pk: Pack, base: str, shards: int, device) -> None:
         starts, offsets, fidx, files, words = [0], [], [], [], None
@@ -113,12 +113,21 @@ class NgramTable:
         self.words: list[np.ndarray] = []
         self.scales: list[np.ndarray] = []
         self.biases: list[np.ndarray] = []
-        for i in range(shards):
-            file, begin, end, dtype, shape = pk.entry(f"{base}shard_{i}.trellis")
-            if dtype != "I16" or len(shape) != 2:
+        try:
+            consolidated = pk.entry(base + "trellis")
+        except KeyError:
+            consolidated = None
+        if consolidated is None and shards < 1:
+            raise ValueError("n-gram table needs at least one shard")
+        entries = [consolidated] if consolidated is not None else [
+            pk.entry(f"{base}shard_{i}.trellis") for i in range(shards)]
+        for i, (file, begin, end, dtype, shape) in enumerate(entries):
+            if dtype != "I16" or len(shape) != 2 or shape[0] <= 0:
                 raise ValueError(f"n-gram shard {i}: expected int16 [rows, words], got {dtype} {shape}")
             if words not in (None, shape[1]):
                 raise ValueError("n-gram shards of different widths")
+            if end - begin != 2 * shape[0] * shape[1]:
+                raise ValueError(f"n-gram segment {i}: byte range does not match its shape")
             words = shape[1]
             if file not in maps:
                 maps[file] = len(files)
@@ -130,7 +139,7 @@ class NgramTable:
         self.words_per_row = int(words)
         self.dh = 160
         self.bits = (self.words_per_row - 1) * 16 // self.dh
-        if 1 + self.dh * self.bits // 16 != self.words_per_row:
+        if self.bits not in range(2, 9) or 1 + self.dh * self.bits // 16 != self.words_per_row:
             raise ValueError(f"n-gram rows of {self.words_per_row} words are not one scale plus 160 values")
         self.maps = [np.memmap(pk.dir / f, dtype=np.uint8, mode="r") for f in files]
         self.fidx = np.array(fidx, dtype=np.int64)
@@ -148,6 +157,8 @@ class NgramTable:
         """Rows ``ids`` (global) -> int16 [n, words]."""
 
         flat = np.asarray(ids, dtype=np.int64).reshape(-1)
+        if np.any(flat < 0) or np.any(flat >= self.rows):
+            raise IndexError(f"n-gram row outside [0, {self.rows})")
         shard = np.searchsorted(self.starts, flat, side="right") - 1
         at = self.offsets[shard] + (flat - self.starts[shard]) * self.row_bytes
         where = self.fidx[shard]

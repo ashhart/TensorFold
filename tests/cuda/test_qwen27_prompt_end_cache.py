@@ -255,9 +255,7 @@ def test_longer_and_repeated_prompts_resume_exactly(monkeypatch, w, sampling, n)
 @pytest.mark.parametrize("cached,n,point", [(0, 1025, 1024), (1000, 1025, 1024), (1000, 1030, 1024),
                                             (2000, 2049, 2048)])
 def test_the_kept_state_holds_the_buffers_grown_after_the_point(monkeypatch, w, cached, n, point):
-    """Key/value buffers grow to at least 1,024 rows and double; one stream sets no limit. A prefill resumed at 1,000
-    or 2,000 tokens grows them inside the chunk that holds the point: the kept state then holds the grown buffers,
-    whose first rows are the old ones' copies, and no buffer of its own."""
+    """A prefill resumed at 1,000 or 2,000 tokens grows the buffers in the kept chunk; kept state and prefix share."""
 
     prompt = _prompt(n, seed=15)
     # two separately built prefixes: states resumed from one prefix share its key/value buffers
@@ -268,7 +266,7 @@ def test_the_kept_state_holds_the_buffers_grown_after_the_point(monkeypatch, w, 
     assert _same_bits(logits, ref_logits) and pending == ref_pending
     _assert_same_state(st, ref)
     if cached:
-        assert prefix_b.kv[3][0].shape[0] < n <= st.kv[3][0].shape[0]      # grown inside the chunk
+        assert prefix_b.kv is st.kv and n <= st.kv[3][0].shape[0]          # grown inside the chunk, for both
     assert _shares_kv(kept, st)
     (fresh_prefix, _), _ = _prefill(monkeypatch, w, prompt[:point])
     _assert_same_state(kept, fresh_prefix)

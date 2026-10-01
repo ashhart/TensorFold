@@ -157,6 +157,12 @@ def matmul(x: torch.Tensor, q: Q4, xs: torch.Tensor | None = None, *, sk: int | 
     return out if sk == 1 or reduce else part.reshape(-1)[:sk * m * q.n].view(sk, m, q.n)
 
 
+def prompt_tile(m: int, n: int) -> int:
+    """The prompt matmul's tile: 128x128 on four 64x64 warps, two blocks an SM, tuned for a GB10."""
+
+    return 9
+
+
 def prefill_matmul(x: torch.Tensor, q: Q4, *, f32: bool = False, tile: int = 0,
                    out: torch.Tensor | None = None) -> torch.Tensor:
     """Prefill: weights rounded once to bf16, one fp32 chain over K; any chunking gives the same bits, not decode's."""

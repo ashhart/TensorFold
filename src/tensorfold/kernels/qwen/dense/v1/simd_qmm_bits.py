@@ -1,10 +1,4 @@
-"""simd_qmm's row-exact arithmetic for 5-, 6- and 8-bit codes in groups of 64 (oQ formats, MLX 8-bit): the matrix
-units from two rows, a scalar twin for one, every row's bits the same at any width.
-
-A group's P is simd_qmm's MMA chain with integer codes and unscaled inputs: step s, k takes code 8 k + s times
-x[64 g + 8 k + s], an fp32 fma chain over k, steps in order; then fma(bias, xsum, fma(scale, P, acc)) and the same
-chunk tree. install() checks the twin against the matrix kernel per shape; a shape that differs takes affine_rows.
-"""
+"""Row-exact 5/6/8-bit code arithmetic in groups of 64; the scalar twin is checked equal per shape."""
 
 from __future__ import annotations
 

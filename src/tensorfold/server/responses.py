@@ -173,12 +173,10 @@ def _run_chat(handler: Any, body: dict[str, Any], wire: Wire) -> None:
     inner.do_POST()
 
 
-def served(app: Any) -> str:
-    return str(getattr(app, "served_name", None) or getattr(app, "served", "") or "")
-
-
 def post(handler: Any, app: Any) -> None:
     """POST /v1/responses."""
+
+    from tensorfold.server.http import reply_model     # http imports this module
 
     store = store_for(app)
     try:
@@ -194,7 +192,7 @@ def post(handler: Any, app: Any) -> None:
     except (RequestError, ValueError) as exc:
         return _refuse(handler, str(exc))
     base = {"id": _id("resp"), "object": "response", "created_at": int(time.time()), "status": "in_progress",
-            "error": None, "incomplete_details": None, "model": served(app), "output": [], "usage": None,
+            "error": None, "incomplete_details": None, "model": reply_model(app, body), "output": [], "usage": None,
             **request.echo}
 
     def send(event: dict[str, Any]) -> None:

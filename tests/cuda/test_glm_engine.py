@@ -209,6 +209,9 @@ class _TwoCopies:
     def barrier(self) -> None:
         torch.cuda.synchronize()
 
+    def ready(self, label: str, **kwargs) -> None:
+        pass                                  # the other rank is this one
+
 
 @pytest.fixture(scope="module")
 def engine(tmp_path_factory):
@@ -339,10 +342,11 @@ def test_drafter_choice_resumes(engine_f):
     after = first + reply + [21, 22]
     for policy in ("auto:1:1:0", "auto", "2", "f3"):
         warm, stats = _generate(engine_f, after, sampling, policy=policy)
-        assert stats["cached"] == len(first), policy
+        assert stats["cached"] == len(first) - 1, policy
         _forget(engine_f)
         cold, stats = _generate(engine_f, after, sampling, policy=policy)
         assert stats["cached"] == 0 and warm == cold, policy
+        _forget(engine_f)
         _generate(engine_f, first, sampling, policy="auto:1:1:0", tokens=30)      # the prompt's state again
 
 
@@ -353,14 +357,14 @@ def test_resumed_prompts_equal_fresh_prefills(engine, sampling):
     reply, _ = _generate(engine, first, sampling)
     after_reply = first + reply + [5, 6, 7]
     warm, stats = _generate(engine, after_reply, sampling)
-    assert stats["cached"] == len(first)                # the reply prefills again
+    assert stats["cached"] == len(first) - 1                # the reply prefills again
     _forget(engine)                                     # every kept state goes: the next prefill is fresh
     cold, stats = _generate(engine, after_reply, sampling)
     assert stats["cached"] == 0 and warm == cold
     _generate(engine, first, sampling)
     after_prompt = first + [11, 12, 13]
     warm, stats = _generate(engine, after_prompt, sampling, policy="2")
-    assert stats["cached"] == len(first)
+    assert stats["cached"] == len(first) - 1
     _forget(engine)
     cold, stats = _generate(engine, after_prompt, sampling, policy="2")
     assert stats["cached"] == 0 and warm == cold
@@ -392,7 +396,7 @@ def test_exl3_checkpoint_resumes(engine_x):
     reply, _ = _generate(engine_x, first, sampling, policy="auto:1:1:0", tokens=20)
     after = first + reply + [31, 32]
     warm, stats = _generate(engine_x, after, sampling)
-    assert stats["cached"] == len(first)
+    assert stats["cached"] == len(first) - 1
     _forget(engine_x)
     cold, stats = _generate(engine_x, after, sampling)
     assert stats["cached"] == 0 and warm == cold
@@ -452,6 +456,71 @@ def test_no_mtp_head_drafts_with_dflash2(engine_n, sampling):
 
 
 @pytest.fixture(scope="module")
+def engine_off(tmp_path_factory):
+    """engine_f's checkpoint and drafter under TF_GLM_MTP=auto: no MTP head; TF_GLM_MTP=0 without a drafter refuses."""
+
+    import os
+
+    from tensorfold.families.glm5_next.cuda.engine import GlmEngine
+
+    path = tmp_path_factory.mktemp("glm_off")
+    _checkpoint(path / "model")
+    _drafter(path / "dflash2")
+    old = os.environ.get("TF_GLM_MTP")
+    try:
+        os.environ["TF_GLM_MTP"] = "0"
+        with pytest.raises(ValueError, match="TF_GLM_MTP=0 leaves no MTP head"):
+            GlmEngine(path / "model", rank=0, master="", port=0, comm=_TwoCopies())
+        os.environ["TF_GLM_MTP"] = "auto"
+        return GlmEngine(path / "model", rank=0, master="", port=0, drafter=path / "dflash2", comm=_TwoCopies())
+    finally:
+        if old is None:
+            os.environ.pop("TF_GLM_MTP", None)
+        else:
+            os.environ["TF_GLM_MTP"] = old
+
+
+@pytest.mark.parametrize("sampling", [Sampling(1234, 1.0, 20, 0.95), None], ids=["sampled", "greedy"])
+def test_mtp_off_beside_dflash2_gives_the_same_replies(engine_off, engine_f, sampling):
+    """Without the MTP head the engine holds less and every policy gives the replies the engine with the head gives."""
+
+    from tensorfold.families.glm5_next.cuda.engine import DFLASH_POLICY, encode_policy
+
+    off, on = engine_off, engine_f
+    assert off.w.mtp is None and off.e.mbuf is None and not hasattr(off.e.st, "mtp_kc")
+    assert on.w.mtp is not None and on.e.mbuf is not None and hasattr(on.e.st, "mtp_kc")
+    assert off.w.nbytes() < on.w.nbytes()
+    for key in ("weight_bytes_estimate", "cache_workspace_bytes_estimate"):
+        assert off.capacity_plan[key] < on.capacity_plan[key], key
+    assert off._effective(encode_policy("auto")) == encode_policy(DFLASH_POLICY)
+    assert off._effective(encode_policy("auto:1:1:0")) == encode_policy(DFLASH_POLICY)
+    assert off._effective(encode_policy("2")) == encode_policy("f2")
+    prompt = list(np.random.default_rng(6).integers(0, 1000, size=41))
+    serial, _ = _generate(on, prompt, sampling, draft=False, tokens=40)
+    assert _generate(off, prompt, sampling, draft=False, tokens=40)[0] == serial
+    for policy in (None, "auto", "auto:1:1:0", "2", "c3:0.35", "a:0.6:0.85", "f3", "fc5:0.3"):
+        drafted, stats = _generate(off, prompt, sampling, policy=policy, tokens=40)
+        assert drafted == serial, policy
+        assert stats["min_rows"] >= 2 and "m" not in stats.get("drafters", ""), (policy, stats)
+
+
+def test_mtp_off_resumes(engine_off):
+    """Kept prompt states without the head's rows resume like fresh prefills."""
+
+    sampling = Sampling(11, 1.0, 20, 0.95)
+    first = list(np.random.default_rng(12).integers(0, 1000, size=30))
+    reply, _ = _generate(engine_off, first, sampling, tokens=30)
+    after = first + reply + [21, 22]
+    for policy in ("auto", "2", "f3"):
+        warm, stats = _generate(engine_off, after, sampling, policy=policy)
+        assert stats["cached"] == len(first) - 1, policy
+        _forget(engine_off)
+        cold, stats = _generate(engine_off, after, sampling, policy=policy)
+        assert stats["cached"] == 0 and warm == cold, policy
+        _generate(engine_off, first, sampling, tokens=30)                        # the prompt's state again
+
+
+@pytest.fixture(scope="module")
 def engine_long(tmp_path_factory):
     """The model with a context past the dense limit (2,051 tokens), so rows attend to DSA-selected tokens."""
 
@@ -493,3 +562,85 @@ def test_long_prompt_chunks_leave_the_same_state(engine_long):
     (a, want), (b, got) = runs
     assert a == b
     assert len(want) == len(got) and all(torch.equal(x, y) for x, y in zip(want, got))
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(19, 0.8, 10, 0.9)])
+def test_identical_resend_and_thinking_turn_reuse_prompt_prefix(engine, sampling):
+    _forget(engine)
+    prompt = list(range(11, 30))
+    cold, _ = _generate(engine, prompt, sampling, tokens=8)
+    repeated, stats = _generate(engine, prompt, sampling, tokens=8)
+    assert stats["cached"] == len(prompt) - 1
+    assert repeated == cold
+    fresh, _ = _generate(engine, prompt, sampling, tokens=8, draft=False)
+    assert repeated == fresh
+    turn = prompt[:-1] + [271, 77, 78]
+    resumed, stats = _generate(engine, turn, sampling, tokens=8)
+    assert stats["cached"] == len(prompt) - 1
+    fresh, _ = _generate(engine, turn, sampling, tokens=8, draft=False)
+    assert resumed == fresh
+
+
+@pytest.mark.parametrize("point", [1, 5, 128])
+def test_prompt_cut_keeps_fresh_prefix_bits_and_full_forward(engine_f, point, monkeypatch):
+    from tensorfold.families.glm5_next.cuda import decode
+
+    e, drafter = engine_f.e, engine_f.drafter
+    prompt = list(range(11, 140))
+    decode.prefill(e, prompt, None, drafter=drafter)
+    full = [x.clone() for x in _state(e)]
+    hidden = e.last_hidden.clone()
+    calls, kept = [], []
+    compute = decode.compute
+
+    def counted(*args, **kwargs):
+        calls.append(args[3])
+        return compute(*args, **kwargs)
+
+    monkeypatch.setattr(decode, "compute", counted)
+    decode.prefill(e, prompt, None, drafter=drafter, keep_at=point, keep=kept.append)
+    assert calls == [len(prompt)]
+    assert torch.equal(e.last_hidden, hidden)
+    for actual, expected in zip(_state(e), full):
+        assert torch.equal(actual, expected)
+    decode.prefill(e, prompt[:point], None, drafter=drafter)
+    fresh = decode.take_snapshot(e, prompt[:point], e.last_hidden, mtp=True, drafter=drafter)
+    snap = kept[0]
+    for name in ("rec", "conv", "pending"):
+        assert torch.equal(getattr(snap, name), getattr(fresh, name)), name
+    assert snap.mtp_len == fresh.mtp_len
+    assert snap.drafter_end == fresh.drafter_end
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(23, 1.0, 20, 0.95)])
+def test_three_resends_preserve_every_kept_glm_state(engine, sampling):
+    from prefix_checks import same_tokens
+    from tensorfold.families.glm5_next.cuda import decode
+
+    _forget(engine)
+    ref = decode.Engine(engine.w, capacity=2560, prefill_rows=engine.e.prefill_rows)
+    system = list(range(11, 20))
+    prompt = system + list(range(30, 50))
+    turn = prompt[:-1] + [271, 77, 78]
+    different = system + [301, 302, 303, 304]
+    for step, tokens in enumerate((system + [501], prompt, prompt, prompt, turn, different)):
+        actual, stats = _generate(engine, tokens, sampling, tokens=8)
+        if step in (2, 3, 4):
+            assert stats["cached"] == len(prompt) - 1
+        if step == 5:
+            assert stats["cached"] == len(system)
+        first = decode.prefill(ref, tokens, sampling)
+        same_tokens(actual, decode.serial_decode(ref, first, 8, sampling).tokens)
+        for snap in engine.cache:
+            decode.prefill(ref, snap.ids, sampling)
+            fresh = decode.take_snapshot(ref, snap.ids, ref.last_hidden, mtp=True)
+            for name in ("rec", "conv", "pending"):
+                assert torch.equal(getattr(snap, name), getattr(fresh, name)), (step, name)
+            assert snap.mtp_len == fresh.mtp_len == len(snap.ids) - 1
+            views = decode._row_views(engine.e.st, len(snap.ids), snap.mtp_len)
+            stored = views if snap.rows is None else snap.rows
+            for name in ("mtp_kc", "mtp_vc"):
+                live = getattr(engine.e.st, name, None)
+                if live is not None and snap.mtp_len:
+                    index = next(i for i, v in enumerate(views) if v.data_ptr() == live.data_ptr())
+                    assert torch.equal(stored[index], getattr(ref.st, name)[:snap.mtp_len]), (step, name)

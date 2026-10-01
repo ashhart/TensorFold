@@ -40,9 +40,10 @@ def test_parallel_window_that_cannot_fit_every_stream_is_refused_before_loading(
     from tensorfold.cuda.geometry import indexed_stream_geometry, stream_geometry
     checkpoint(tmp_path, small_config(), WEIGHTS)
     calls, capacity = fake_runtime
-    four = (stream_geometry(small_config(), world, 4, 8) if family == "linear" else
-            indexed_stream_geometry(small_config(), 4, 4, 8, mtp=True))
-    budget = four.needed(12000) + 32768                   # four streams fit 12,000 tokens each, not 60,000
+    # one GPU: the window is what one stream reaches beside the others' first rows; two ranks: every stream's
+    four = (stream_geometry(small_config(), world, 4, 8, first=256 if world == 1 else None) if family == "linear"
+            else indexed_stream_geometry(small_config(), 4, 4, 8, mtp=True))
+    budget = four.needed(12000) + 32768                   # the streams fit 12,000 tokens, not 60,000
     monkeypatch.setattr(capacity, "available_bytes", lambda t: budget)
     _, go = start(family, tmp_path, 60000, True, world, 4)
     with pytest.raises(ValueError, match="largest fitting"):
@@ -100,10 +101,11 @@ def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocation
     from tensorfold.cuda.geometry import indexed_stream_geometry, kv_bytes
     one = dec.free[0]
     snapshot = bytes_in([one.rec]) // 2 + bytes_in([one.conv, one.ple_tail])
-    used = bytes_in(arrays) + (min(keep, streams) + 1) * snapshot
-    kv = [t for t in arrays if t.shape[:2] == (slots, cfg.kv_heads)]      # K and V of two attention layers and the MTP's
+    first = [t for t in arrays if t.shape[:2] == (multi.FIRST, cfg.kv_heads)]     # K and V: two layers and the MTP's
     assert len(dec.free) == streams and all(st.kv_dtype == kv_dtype for st in dec.free)
-    assert bytes_in(kv) == streams * 3 * 2 * slots * cfg.kv_heads * kv_bytes(cfg.head_dim, bits)
+    assert bytes_in(first) == streams * 3 * 2 * multi.FIRST * cfg.kv_heads * kv_bytes(cfg.head_dim, bits)
+    # one stream grown to the window beside the others' first rows
+    used = bytes_in(arrays) - one.cache_bytes(multi.FIRST) + one.cache_bytes(slots) + (min(keep, streams) + 1) * snapshot
     assert used <= indexed_stream_geometry(text, streams, depth + 1, keep, mtp=True, kv_bits=bits).bytes_at(slots)
 
 
@@ -129,7 +131,8 @@ def handshake(monkeypatch, path, rank, **kw):
 
 
 @pytest.mark.torch
-@pytest.mark.parametrize("peer", [dict(streams=4), dict(streams=2, context=8192, context_explicit=True)])
+@pytest.mark.parametrize("peer", [dict(streams=4), dict(streams=2, context=8192, context_explicit=True),
+                                  dict(streams=2, keep=6)])
 def test_two_ranks_with_different_streams_or_context_refuse_to_start(tmp_path, monkeypatch, fake_runtime,
                                                                      peer):  # noqa: F811
     import torch
@@ -149,4 +152,29 @@ def test_two_ranks_with_different_streams_or_context_refuse_to_start(tmp_path, m
     obj = Qwen27Engine.__new__(Qwen27Engine)
     with pytest.raises(RuntimeError, match="different settings"):
         obj.__init__(tmp_path, None, tp=2, rank=0, master="example", **mine)
+    assert not calls
+
+
+@pytest.mark.torch
+def test_two_ranks_with_different_prompt_precision_refuse_to_start(tmp_path, monkeypatch, fake_runtime):  # noqa: F811
+    """Rank 1 with --prefill-fp8 and rank 0 without would mix FP8 and bf16 prompt partials: refused, by name."""
+
+    import torch
+    import torch.distributed as dist
+    from tensorfold.cuda import prompt_precision
+    from tensorfold.families.qwen3_5.cuda.engine import Qwen27Engine
+
+    checkpoint(tmp_path, small_config(), WEIGHTS)
+    calls, _ = fake_runtime
+    with prompt_precision.using(True):
+        theirs = handshake(monkeypatch, tmp_path, 1, streams=2)
+
+    def gather(recv, send):
+        other = theirs if send.numel() == theirs.numel() else send
+        recv.view(-1).copy_(torch.cat([send.view(-1), other.view(-1)]))
+
+    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
+    obj = Qwen27Engine.__new__(Qwen27Engine)
+    with prompt_precision.using(False), pytest.raises(RuntimeError, match="prompt precision.*--prefill-fp8"):
+        obj.__init__(tmp_path, None, tp=2, rank=0, master="example", streams=2)
     assert not calls

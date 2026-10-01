@@ -411,7 +411,7 @@ def test_host_table_gathers_the_rows_across_shards_and_files(tmp_path):
 
     import numpy as np
 
-    from tensorfold.families.qwen4_exp.cuda.weights import HostTable, _header
+    from tensorfold.families.qwen4_exp.host_table import HostTable, read_header as _header
 
     rng = np.random.default_rng(0)
     files, words, scales, biases = [], [], [], []

@@ -59,6 +59,11 @@ class Config:
     @classmethod
     def read(cls, model_dir: str | Path) -> "Config":
         raw = json.loads((Path(model_dir) / "config.json").read_text())
+        want = raw.get("tensorfold_activation_dtype")
+        if want not in (None, "bfloat16", "float32"):
+            raise ValueError(f"tensorfold_activation_dtype {want!r}: bfloat16 or float32")
+        if want == "float32":
+            raise ValueError("tensorfold_activation_dtype float32 is the Mac engine; the CUDA engine stays bf16")
         t = dict(raw.get("text_config") or raw)
         lin = dict(t.get("linear_attn_config") or {})
         quant = raw.get("quantization") or raw.get("quantization_config") or {}
@@ -240,8 +245,8 @@ class Weights:
         return total
 
 
-def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
-    """Read one of two ranks from a full checkpoint or rank folder, including MTP and its half of the vocabulary head."""
+def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = True) -> Weights:
+    """One of two ranks from a checkpoint or rank folder, MTP included unless ``mtp`` is False, with its head half."""
 
     from .split import RankReader
 
@@ -319,8 +324,8 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
     def expert_names(i: int) -> list[str]:
         """Layer ``i``'s expert tensors in the order ``moe`` reads them (none for a dense layer; ``cfg.layers``: MTP)."""
 
-        mtp = i == cfg.layers and cfg.mtp_layers
-        if not mtp and (i >= cfg.layers or cfg.mlp_kinds[i] != "moe"):
+        mtp_layer = i == cfg.layers and cfg.mtp_layers and mtp
+        if not mtp_layer and (i >= cfg.layers or cfg.mlp_kinds[i] != "moe"):
             return []
         p, parts = PREFIX + f"layers.{i}.mlp.", ("trellis", "suh", "svh") if exl3 else ("weight", "scales", "biases")
         names = []
@@ -420,7 +425,7 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda") -> Weights:
             head = make_q4(as_i32(hw[rank * vl:(rank + 1) * vl]).to(dev), hs[rank * vl:(rank + 1) * vl].to(dev),
                            hb[rank * vl:(rank + 1) * vl].to(dev))
         mtpw = None
-        if cfg.mtp_layers:
+        if cfg.mtp_layers and mtp:
             i = cfg.layers
             mtpw = MTPW(t(f"layers.{i}.enorm.weight"), t(f"layers.{i}.hnorm.weight"), q4(f"layers.{i}.eh_proj"),
                         t(f"layers.{i}.shared_head.norm.weight"), layer(i, plain=True))

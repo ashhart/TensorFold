@@ -8,10 +8,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from tensorfold.cuda import prompt_precision
 from . import CONFIDENCE, DEPTH
 
 MAX_DEPTH = 15           # a verify window of at most 16 rows
-KEEP = 8                 # prompt ends a concurrent decoder keeps to resume from
+KEEP = 8                 # prompt states (one token before each end) a concurrent decoder keeps to resume from
 
 
 class FlashNextEngine:
@@ -21,7 +22,7 @@ class FlashNextEngine:
                  draft_vocab: str | int | None = "default", max_len: int | None = None,
                  context_explicit: bool | None = None, tp: int = 1, rank: int = 0, master: str = "", port: int = 29551,
                  prefetch: bool = True, graphs: bool = True, streams: int = 1, ple_on_ssd: bool = False,
-                 kv_dtype: str = "bf16") -> None:
+                 kv_dtype: str = "bf16", share: float = 0.0) -> None:
         import torch
 
         from .exl3_pack import admission, extra_files, is_exl3
@@ -93,6 +94,8 @@ class FlashNextEngine:
         wait_all(reads)                               # raises a table read's error
         waited = time.perf_counter() - waited
         w.comm = self.comm
+        if self.comm is not None:
+            self.comm.ready("loading")               # a peer stuck loading is named, not waited on in NCCL
         if self.depth > 0 and w.mtp is None:
             raise ValueError("this checkpoint has no MTP head, which Flash Next's CUDA engine drafts with: use one "
                              "that has it, or --no-drafts for the serial reference (one token a round)")
@@ -107,7 +110,7 @@ class FlashNextEngine:
 
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
-                                      confidence=self.confidence, keep=KEEP, kv_dtype=self.kv_dtype)
+                                      confidence=self.confidence, keep=KEEP, kv_dtype=self.kv_dtype, share=share)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
@@ -140,8 +143,9 @@ class FlashNextEngine:
         self.serial = None                                # the serial requests' engine, made on first use
         rule = (f"1 to {self.depth} MTP drafts a round, a chain stops before a later draft under "
                 f"{self.confidence:.0%}" if self.depth else "no drafts: the serial reference, one token a round")
-        where = (f"{streams} streams of {self.context_window} prompt/reply tokens "
-                 f"({self.multi.slot_bytes / 2**20:.0f} MiB a stream), eager" if self.concurrent else
+        where = (f"up to {streams} streams, each growing to {self.context_window} prompt/reply tokens while memory "
+                 f"lasts ({self.multi.memory_gate.room / 2**30:.1f} GiB free for their caches, "
+                 f"{self.multi.window_bytes / 2**30:.2f} GiB for one at the full window), eager" if self.concurrent else
                  f"{self.context_window}-token prompt/reply window; {self.max_len}-token cache")
         if ple_on_ssd:
             how = "read from SSD at each lookup"
@@ -161,11 +165,12 @@ class FlashNextEngine:
 
         total = int(ids.sum()) if ids is not None else -1
         mine = torch.tensor([self.depth, round(self.confidence * 1e6), self.max_len,
-                             len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype]],
-                            dtype=torch.int64, device="cuda")
+                             len(ids) if ids is not None else -1, total, BITS_OF[self.kv_dtype],
+                             int(prompt_precision.fp8())], dtype=torch.int64, device="cuda")
         both = torch.empty((2 * mine.numel(),), dtype=torch.int64, device="cuda")
         self.comm.all_gather(mine, both)
         both = both.view(2, -1).cpu()
+        prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
         if not torch.equal(both[0], both[1]):
             raise RuntimeError(f"the two ranks were started with different settings (drafts, confidence, context, "
                                f"draft vocabulary, KV cache): rank 0 {both[0].tolist()}, rank 1 {both[1].tolist()}")
@@ -254,8 +259,12 @@ class FlashNextEngine:
     def _remember(self, ids: list[int], snap: dict) -> None:
         self.cache = [c for c in self.cache if c[0] != ids][-1:] + [(ids, snap)]
 
+    @property
+    def supports_logprobs(self) -> bool:
+        return self.tp == 1
+
     def _serial(self, prompt: list[int], max_tokens: int, sampling, on_tokens, constraint=None,
-                stop_eos: bool = True) -> dict[str, Any]:
+                stop_eos: bool = True, probabilities=None) -> dict[str, Any]:
         """One token a round from a fresh prefill in the serial engine's own state (no drafts, no kept states)."""
 
         import torch
@@ -265,28 +274,29 @@ class FlashNextEngine:
         if self.serial is None:
             self.serial = self.e.twin()
         t0 = time.perf_counter()
-        first = prefill(self.serial, prompt, sampling, mtp=False, constraint=constraint)
+        first = prefill(self.serial, prompt, sampling, mtp=False, constraint=constraint, probabilities=probabilities)
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": 0, "drafts": False}
         if (on_tokens is not None and on_tokens([first])) or (stop_eos and first in self.eos) or max_tokens <= 1:
             return stats
         res = serial_decode(self.serial, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,
-                            constraint=constraint)
+                            constraint=constraint, probabilities=probabilities)
         stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, decode_tps=round(res.tokens_per_second, 2))
         return stats
 
     def _decode(self, prompt: list[int], max_tokens: int, sampling, on_tokens, hit, constraint=None,
-                stop_eos: bool = True) -> dict[str, Any]:
+                stop_eos: bool = True, probabilities=None) -> dict[str, Any]:
         import torch
 
-        from .decode import mtp_decode, prefill, serial_decode
+        from .decode import entry_end, mtp_decode, prefill, serial_decode
 
         t0 = time.perf_counter()
         self._start_from(hit)
-        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint)
-        # the prompt's state: the MTP head has absorbed every position but the last, whose streams resume needs
-        self._remember(list(prompt), {"state": self.e.st.snapshot(),
-                                      "tail": self.e.last_streams.clone() if self.e.mbuf is not None else None})
+        end = entry_end(prompt)
+        first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint,
+                        probabilities=probabilities, keep_at=end)
+        # the state one token before the prompt's end, so the same prompt or a next turn resumes from it
+        self._remember(list(prompt[:end]), self.e.kept)
         torch.cuda.synchronize()
         stats: dict[str, Any] = {"prefill_s": round(time.perf_counter() - t0, 4), "cached": len(hit[0]) if hit else 0,
                                  "drafts": True}
@@ -294,26 +304,28 @@ class FlashNextEngine:
             return stats
         if self.depth > 0:
             res = mtp_decode(self.e, first, max_tokens, sampling, depth=self.depth, confidence=self.confidence,
-                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint)
+                             stop_eos=stop_eos, on_tokens=on_tokens, constraint=constraint, probabilities=probabilities)
             stats.update(drafted=res.drafted, accepted=res.accepted, min_rows=min(res.widths, default=0))
         else:
             res = serial_decode(self.e, first, max_tokens, sampling, stop_eos=stop_eos, on_tokens=on_tokens,
-                                constraint=constraint)
+                                constraint=constraint, probabilities=probabilities)
         stats.update(decode_s=round(res.seconds, 4), rounds=res.rounds, decode_tps=round(res.tokens_per_second, 2))
         return stats
 
     def generate(self, prompt: list[int], max_tokens: int, sampling,
                  on_tokens: Callable[[list[int]], bool | None], draft: bool = True, constraint=None,
-                 stop_eos: bool = True, background: bool = False) -> dict[str, Any]:
-        """``draft=False``: one token a round with no MTP drafts, from a fresh prefill that leaves the kept states
-        alone: the serial reference. ``stop_eos=False``: past end tokens (``ignore_eos``). ``background``: under
-        ``--parallel``, after the other requests and yielding a lane to one that waits."""
+                 stop_eos: bool = True, background: bool = False, probabilities=None) -> dict[str, Any]:
+        """``draft=False``: one token a round, no MTP drafts; ``background``: last, yielding lanes to waiting ones."""
 
         max_tokens = self._limit(prompt, max_tokens)
+        if probabilities is not None and not self.supports_logprobs:
+            raise ValueError("logprobs are supported on one GPU only")
+        if probabilities is not None and constraint is not None:
+            raise ValueError("logprobs do not support structured output")
         if self.scheduler is not None:
             grammar = {} if constraint is None else {"constraint": constraint}
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         **grammar, **({"background": True} if background else {}))
+                                         **grammar, **({"background": True} if background else {}), probabilities=probabilities)
         hit = self._resume(prompt) if draft else None
         if self.tp == 2:                     # rank 0 decodes exactly what it hands rank 1
             prompt, max_tokens, sampling, draft, _, _, stop_eos = self._share(
@@ -322,8 +334,8 @@ class FlashNextEngine:
             emit = on_tokens
             on_tokens = lambda new: (emit(new), False)[1]       # noqa: E731  both ranks decode to the end
         if not draft:
-            return self._serial(prompt, max_tokens, sampling, on_tokens, constraint, stop_eos)
-        return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos)
+            return self._serial(prompt, max_tokens, sampling, on_tokens, constraint, stop_eos, probabilities=probabilities)
+        return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos, probabilities=probabilities)
 
     def follow(self) -> None:
         """Rank 1: decode every request rank 0 serves, until rank 0 stops."""

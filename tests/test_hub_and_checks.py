@@ -236,8 +236,9 @@ def test_every_family_names_an_importable_kernel_version():
         if family.model_type == "qwen3_5":
             model = SimpleNamespace(_tensorfold_lanes=True)
             assert families.kernel_version(family, model).startswith(("qwen-dense-v1-", f"{family.model_type}-v1-"))
-        else:
-            assert families.kernel_version(family, None).startswith(f"{family.model_type}-v1-")
+        else:                               # an alias model_type (a newer export's name) keeps the package's own
+            names = getattr(package, "MODEL_TYPES", (family.model_type,))
+            assert families.kernel_version(family, None).startswith(tuple(f"{name}-v1-" for name in names))
 
 
 def test_info_reads_a_local_config(tmp_path, capsys):
@@ -287,3 +288,9 @@ def test_auto_drafter_waits_for_a_complete_cached_model(tmp_path, monkeypatch):
     assert _drafter(family, "auto") == ""
     (snapshot / "model.safetensors").write_bytes(b"weights")
     assert Path(_drafter(family, "auto")).resolve() == snapshot.resolve()
+
+
+def test_null_sampling_fields_in_generation_config_keep_the_defaults(tmp_path):
+    (tmp_path / "generation_config.json").write_text(json.dumps(
+        {"do_sample": True, "temperature": None, "top_k": 20, "top_p": 0.95, "min_p": None}))
+    assert _generation_config(tmp_path) == {"temperature": 1.0, "top_k": 20, "top_p": 0.95}

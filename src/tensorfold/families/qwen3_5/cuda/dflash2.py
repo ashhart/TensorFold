@@ -15,6 +15,7 @@ import triton.language as tl
 from tensorfold.cuda.direct_read import SafeTensors
 from tensorfold.engine.exact_sampling import Sampling
 
+from .affine_memory import packed_draft
 from .draft_tree import best_first
 from .glue import embedding, swiglu
 from .draft_attention import append, block_attention
@@ -282,8 +283,7 @@ class DFlash2:
         if bits == 4:
             for name in list(self.weights):
                 t = self.weights[name]
-                if (isinstance(t, torch.Tensor) and t.ndim == 2 and name.endswith(".weight")
-                        and t.shape[0] % 64 == 0 and t.shape[1] % 64 == 0 and t.numel() >= 1 << 20):
+                if isinstance(t, torch.Tensor) and packed_draft(name, t.shape):    # as admission counts it
                     self.q4[name] = tile(quantize4(t.to(self.device, torch.bfloat16)))
                     del self.weights[name]
         for name, t in self.weights.items():

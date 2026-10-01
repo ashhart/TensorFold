@@ -277,8 +277,16 @@ def _attn_prep(P, POS0, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps,
     """Normalize stacked q/k/indexer heads in fp32, round to bf16, apply rotate-half RoPE and round again; store keys, values and raw indexer keys at POS0 + r; BITS 8 or 4 quantize keys and values and rotate q alike (q . Hk = Hq . k)."""
 
     r = tl.program_id(0)
-    head = tl.program_id(1)
-    pos = tl.load(POS0) + r
+    _prep_row(P, tl.load(POS0) + r, r, tl.program_id(1), QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps, PW, NQ,
+              NKV, HD, NI, IHD, HALF, BITS)
+
+
+@triton.jit
+def _prep_row(P, pos, r, head, QW, KW, IW, INV, Q, KC, VC, KS, VS, IQ, IKC, eps, PW: tl.constexpr, NQ: tl.constexpr,
+              NKV: tl.constexpr, HD: tl.constexpr, NI: tl.constexpr, IHD: tl.constexpr, HALF: tl.constexpr,
+              BITS: tl.constexpr):
+    """``_attn_prep``'s head ``head`` of row r at position ``pos``, into the caches given."""
+
     d = tl.arange(0, HD)
     if head < NQ + NKV + NI:
         is_q = head < NQ
@@ -392,7 +400,7 @@ def attn_gate(o: torch.Tensor, p: torch.Tensor, out: torch.Tensor, xs: torch.Ten
 
 
 @triton.jit
-def _ple_embed(W, S, B, OUT, XS, HEADS: tl.constexpr, DH: tl.constexpr):
+def _ple_embed(W, S, B, OUT, XS, HEADS: tl.constexpr, DH: tl.constexpr, SCALE: tl.constexpr):
     """Program (r, h): gathered n-gram row r * HEADS + h (DH values, MLX layout, group 32) -> OUT[r, h DH: (h + 1) DH] bf16 and its group sums."""
 
     r = tl.program_id(0)
@@ -407,20 +415,22 @@ def _ple_embed(W, S, B, OUT, XS, HEADS: tl.constexpr, DH: tl.constexpr):
     s = tl.load(S + row * G + gi, mask=gok, other=0.0).to(tl.float32)
     b = tl.load(B + row * G + gi, mask=gok, other=0.0).to(tl.float32)
     v = (q * s[:, None] + b[:, None]).to(tl.bfloat16)
+    if SCALE != 1.0:
+        v = (v.to(tl.float32) * SCALE).to(tl.bfloat16)
     k = tl.arange(0, 32)
     tl.store(OUT + r * (HEADS * DH) + h * DH + gi[:, None] * 32 + k[None, :], v, mask=gok[:, None])
     tl.store(XS + r * (HEADS * DH // 32) + h * G + gi, tl.sum(v.to(tl.float32), axis=1), mask=gok)
 
 
 def ple_embed(rows: int, weight: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, heads: int, dh: int,
-              out: torch.Tensor, xs: torch.Tensor) -> None:
+              out: torch.Tensor, xs: torch.Tensor, *, scale: float = 1.0) -> None:
     """Gathered rows (``weights.HostTable.gather``, row r * heads + h) -> out [rows, heads * dh] bf16."""
 
-    _ple_embed[(rows, heads)](weight, scales, biases, out, xs, HEADS=heads, DH=dh, num_warps=1)
+    _ple_embed[(rows, heads)](weight, scales, biases, out, xs, HEADS=heads, DH=dh, SCALE=scale, num_warps=1)
 
 
 @triton.jit
-def _ple_embed_bf16(V, OUT, XS, HEADS: tl.constexpr, DH: tl.constexpr):
+def _ple_embed_bf16(V, OUT, XS, HEADS: tl.constexpr, DH: tl.constexpr, SCALE: tl.constexpr):
     """Program (r, h): gathered row r * HEADS + h (DH bf16 values) -> OUT[r, h DH:(h + 1) DH] and its group sums."""
 
     r = tl.program_id(0)
@@ -432,15 +442,17 @@ def _ple_embed_bf16(V, OUT, XS, HEADS: tl.constexpr, DH: tl.constexpr):
     k = tl.arange(0, 32)
     at = gi[:, None] * 32 + k[None, :]
     v = tl.load(V + row * DH + at, mask=gok[:, None], other=0.0)
+    if SCALE != 1.0:
+        v = (v.to(tl.float32) * SCALE).to(tl.bfloat16)
     tl.store(OUT + r * (HEADS * DH) + h * DH + at, v, mask=gok[:, None])
     tl.store(XS + r * (HEADS * DH // 32) + h * G + gi, tl.sum(v.to(tl.float32), axis=1), mask=gok)
 
 
 def ple_embed_bf16(rows: int, values: torch.Tensor, heads: int, dh: int, out: torch.Tensor,
-                   xs: torch.Tensor) -> None:
+                   xs: torch.Tensor, *, scale: float = 1.0) -> None:
     """A bf16 table's gathered rows (``BF16Table.gather``, row r * heads + h) -> out [rows, heads * dh] bf16."""
 
-    _ple_embed_bf16[(rows, heads)](values, out, xs, HEADS=heads, DH=dh, num_warps=1)
+    _ple_embed_bf16[(rows, heads)](values, out, xs, HEADS=heads, DH=dh, SCALE=scale, num_warps=1)
 
 
 @triton.jit

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import re
 import sys
-from typing import Any
+from typing import Any, Iterator
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -49,7 +50,7 @@ _QMM_BODY = """
   constexpr int BK_padded = BK + 16 / sizeof(bfloat16_t);
   threadgroup bfloat16_t Xs[BM * BK_padded];
   threadgroup bfloat16_t Ws[BN * BK_padded];
-  qmm_t_impl<bfloat16_t, 32, 4, ALIGNED != 0, BM, BK, BN>(W, S, B, X, Y, Xs, Ws, KK[0], NN[0], MM[0], KK[0],
+  qmm_t_impl<bfloat16_t, GS, BITS, ALIGNED != 0, BM, BK, BN>(W, S, B, X, Y, Xs, Ws, KK[0], NN[0], MM[0], KK[0],
       threadgroup_position_in_grid, thread_index_in_threadgroup, simdgroup_index_in_threadgroup,
       thread_index_in_simdgroup);
 """
@@ -199,6 +200,16 @@ def _tensor_units() -> bool:
     return bool(digits) and int(digits) >= 17
 
 
+def gpu_tensor_units() -> bool:
+    """``_tensor_units`` of the Metal GPU whatever the default device (with the CPU as default it reads arm64)."""
+
+    if not mx.metal.is_available():
+        return False
+    info = mx.device_info(mx.gpu) if hasattr(mx, "device_info") else mx.metal.device_info()
+    digits = "".join(ch for ch in str(info.get("architecture", "")).removeprefix("applegpu_g") if ch.isdigit())
+    return bool(digits) and int(digits) >= 17
+
+
 _tiles: list[bool] = []
 
 
@@ -254,18 +265,19 @@ def _self_check() -> bool:
 
     keys = mx.random.split(mx.random.key(20260926), 4)
 
-    def weights(key, lead, n, k):
-        w = mx.random.randint(0, 2**31, (*lead, n, k // 8), dtype=mx.uint32, key=key)
-        s = (mx.random.normal((*lead, n, k // 32), key=mx.random.split(key)[0]) * 0.02).astype(mx.bfloat16)
-        b = (mx.random.normal((*lead, n, k // 32), key=mx.random.split(key)[1]) * 0.02).astype(mx.bfloat16)
+    def weights(key, lead, n, k, bits=4, group=32):
+        w = mx.random.randint(0, 2**31, (*lead, n, k * bits // 32), dtype=mx.uint32, key=key)
+        s = (mx.random.normal((*lead, n, k // group), key=mx.random.split(key)[0]) * 0.02).astype(mx.bfloat16)
+        b = (mx.random.normal((*lead, n, k // group), key=mx.random.split(key)[1]) * 0.02).astype(mx.bfloat16)
         return w, s, b
 
     same = []
     for (m, n), key in (((512, 640), keys[0]), ((128, 8192), keys[1])):  # 64 x 32 and 64 x 64 tiles, no split-K
         x = mx.random.normal((m, 256), key=keys[3]).astype(mx.bfloat16)
-        w, s, b = weights(key, (), n, 256)
-        ref = mx.quantized_matmul(x, w, s, b, transpose=True, group_size=32, bits=4)
-        same.append(mx.array_equal(qmm(x, w, s, b), ref))
+        for bits, group in QMM_FORMATS:
+            w, s, b = weights(key, (), n, 256, bits, group)
+            ref = mx.quantized_matmul(x, w, s, b, transpose=True, group_size=group, bits=bits)
+            same.append(mx.array_equal(qmm(x, w, s, b, group=group, bits=bits), ref))
     x = mx.random.normal((400, 256), key=keys[3]).astype(mx.bfloat16)
     w, s, b = weights(keys[2], (16,), 64, 256)
     idx = mx.sort(mx.random.randint(0, 16, (400,), key=keys[2])).astype(mx.uint32)
@@ -294,32 +306,86 @@ def _q4(layer: Any) -> bool:
             and "bias" not in layer and layer.weight.dtype == mx.uint32)
 
 
-def qmm(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array) -> mx.array:
-    """x [M, K] @ w.T (4-bit, groups of 32) -> [M, N] bf16 on MLX's qmm kernel with a 64-row tile: its bits."""
+# (bits, group size) ``qmm`` takes: Flash Next's 4-bit g32, GLM's 4-bit g64 and its oQ checkpoints' 8-bit g64
+QMM_FORMATS = ((4, 32), (4, 64), (8, 64))
+
+
+def qmm(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, *, group: int = 32,
+        bits: int = 4) -> mx.array:
+    """x [M, K] @ w.T -> [M, N] bf16 on MLX's qmm kernel with a 64-row tile (a K pass in MLX's order): its bits."""
 
     m, k = x.shape
     n = int(w.shape[0])
-    bm, bn = (64, 64) if n >= 8192 else (64, 32)
+    bm, bn = (64, 64) if n >= 8192 and group == 32 else (64, 32)     # the M3 Ultra's best tiles (g64: 64 x 32)
     kern = _k("tf_prefill_qmm", _QMM_BODY, ["X", "W", "S", "B", "KK", "NN", "MM"], ["Y"], _header())
     return kern(inputs=[x, w, scales, biases, _int(k), _int(n), _int(m)],
-                template=[("BM", bm), ("BN", bn), ("BK", 32), ("ALIGNED", int(n % bn == 0))],
+                template=[("GS", group), ("BITS", bits), ("BM", bm), ("BN", bn), ("BK", 32),
+                          ("ALIGNED", int(n % bn == 0))],
                 grid=(-(-n // bn) * 128, -(-m // bm), 1), threadgroup=(128, 1, 1),
                 output_shapes=[(m, n)], output_dtypes=[mx.bfloat16])[0]
 
 
+_PASS: list[tuple[int, ...]] = []      # the chunk sizes of the prompt pass in flight
+
+
+@contextmanager
+def prompt_pass(sizes: Any) -> Iterator[None]:
+    """A pass of several prompt chunks: each chunk's rows keep the bits their own one-chunk forward gives them."""
+
+    _PASS.append(tuple(int(n) for n in sizes))
+    try:
+        yield
+    finally:
+        _PASS.pop()
+
+
+def pass_chunks(rows: int) -> tuple[int, ...] | None:
+    """The pass's chunk sizes when a call holds all its ``rows``, else None."""
+
+    return _PASS[-1] if _PASS and len(_PASS[-1]) > 1 and sum(_PASS[-1]) == int(rows) else None
+
+
+def each(x: mx.array, sizes: tuple[int, ...], fn: Any) -> mx.array:
+    """``fn`` on every chunk's rows alone, rows in order."""
+
+    outs, at = [], 0
+    for rows in sizes:
+        outs.append(fn(x[at:at + rows]))
+        at += rows
+    return mx.concatenate(outs, axis=0)
+
+
 def matmul(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, *, group: int = 32,
            bits: int = 4) -> mx.array:
-    """mx.quantized_matmul(x, w, scales, biases): for 4-bit group-32 weights ``qmm`` where it gives the same bits."""
+    """mx.quantized_matmul(x, w, scales, biases): ``qmm`` where it gives the same bits (QMM_FORMATS, no split-K)."""
 
+    sizes = pass_chunks(x.shape[0]) if x.ndim == 2 else None
+    if sizes is not None:                   # a pass: each chunk's own call (the M3's matmul rate is flat in rows)
+        return each(x, sizes, lambda part: _matmul(part, w, scales, biases, group, bits))
+    return _matmul(x, w, scales, biases, group, bits)
+
+
+def _matmul(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, group: int, bits: int) -> mx.array:
     m, k = x.shape
-    if (bits, group) == (4, 32) and active(m) and not _mlx_splits_k(m, int(w.shape[0]), k) and tiles():
-        return qmm(x, w, scales, biases)
+    n = int(w.shape[0])
+    if ((bits, group) in QMM_FORMATS and x.dtype == scales.dtype == biases.dtype == mx.bfloat16 and active(m)
+            and not _mlx_splits_k(m, n, k) and tiles()):
+        return qmm(x, w, scales, biases, group=group, bits=bits)
     return mx.quantized_matmul(x, w, scales, biases, transpose=True, group_size=group, bits=bits)
 
 
 def linear(layer: Any, x: mx.array) -> mx.array:
     """``layer(x)``: a 4-bit group-32 QuantizedLinear on 64+ bf16 rows through ``qmm`` (the same bits), else MLX."""
 
+    sizes = pass_chunks(x.size // x.shape[-1])
+    if sizes is not None:                   # a pass: each chunk's own call
+        lead, flat = x.shape[:-1], x.reshape(-1, x.shape[-1])
+        y = each(flat, tuple(sizes), lambda part: _linear(layer, part))
+        return y.reshape(*lead, y.shape[-1])
+    return _linear(layer, x)
+
+
+def _linear(layer: Any, x: mx.array) -> mx.array:
     rows, n, k = x.size // x.shape[-1], int(layer.weight.shape[0]), int(x.shape[-1])
     if (not isinstance(layer, nn.QuantizedLinear) or not _q4(layer) or x.dtype != mx.bfloat16 or n < 32
             or not active(rows) or _mlx_splits_k(rows, n, k) or not tiles()):
@@ -342,8 +408,9 @@ def shape_for(rows: int, experts: int) -> tuple[int, int, int, int]:
 def gather_fits(x: mx.array, w: mx.array, biases: mx.array | None, bits: int, group: int) -> bool:
     """Whether gather_sorted gives this sorted gather_qmm call's bits: 4-bit affine bf16, 4+ rows an expert, M1-M4."""
 
-    return (bits == 4 and biases is not None and group % 32 == 0 and x.dtype == mx.bfloat16 and w.dtype == mx.uint32
-            and x.size // int(x.shape[-1]) // int(w.shape[0]) >= 4 and fast_prefill() and tiles())
+    return (bits == 4 and biases is not None and group % 32 == 0 and x.dtype == biases.dtype == mx.bfloat16
+            and w.dtype == mx.uint32 and x.size // int(x.shape[-1]) // int(w.shape[0]) >= 4 and fast_prefill()
+            and tiles())
 
 
 def gather_sorted(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, idx: mx.array,
@@ -355,9 +422,10 @@ def gather_sorted(x: mx.array, w: mx.array, scales: mx.array, biases: mx.array, 
     group = k // int(scales.shape[-1])
     bm, bn, wm, wn = shape or shape_for(m, experts)
     count = _int(experts)
+    # 8+ entries: MLX passes an input of under 8 in constant memory, which the tile function can't take
     offsets = _k("tf_expert_offsets", _OFFSETS, ["IDX", "MM", "EE"], ["OFF"])(
         inputs=[idx, _int(m), count], grid=(experts + 1, 1, 1), threadgroup=(min(256, experts + 1), 1, 1),
-        output_shapes=[(experts + 1,)], output_dtypes=[mx.int32])[0]
+        output_shapes=[(max(experts + 1, 8),)], output_dtypes=[mx.int32])[0]
     most = min(m, -(-m // bm) + experts)                                # tiles past the last exit at once
     kern = _k("tf_gather_qmm_tiles", _GATHER_BODY, ["X", "W", "S", "B", "OFF", "MM", "NN", "KK", "EE"], ["Y"],
               _header() + _TILES_FN)
@@ -391,6 +459,39 @@ def _mlx_experts(x: mx.array, layer: Any, idx: mx.array) -> mx.array:
                          group_size=32, bits=4, sorted_indices=True)[:, 0]
 
 
+def _moe_pass(module: Any, x: mx.array, sizes: tuple[int, ...], switch: Any) -> mx.array:
+    """A pass's MoE: aligned-gather chunks share one expert call (routed chunk by chunk), the rest run alone."""
+
+    experts = int((module.switch_mlp if switch is None else switch).gate_proj.weight.shape[0])
+    k = module.top_k
+
+    def run(a: int, group: list[int]) -> mx.array:
+        if len(group) == 1:                             # the module picks the path this chunk takes alone
+            return module(x[:, a:a + group[0]])
+        parts, at = [], a
+        for n in group:
+            parts.append(module.route(x[:, at:at + n]))
+            at += n
+        route = (mx.concatenate([p[0] for p in parts], axis=1), mx.concatenate([p[1] for p in parts], axis=1))
+        with prompt_pass(group):
+            return moe(module, x[:, a:at], route=route, switch=switch)
+
+    outs, group, start, at = [], [], 0, 0
+    for n in sizes:
+        if n >= MIN_ROWS and n * k // experts >= 4 and tiles() and switch is None:
+            group.append(n)
+            at += n
+            continue
+        if group:
+            outs.append(run(start, group))
+        outs.append(run(at, [n]))
+        at += n
+        group, start = [], at
+    if group:
+        outs.append(run(start, group))
+    return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=1)
+
+
 def deltanet_in(g: Any, x: mx.array) -> tuple[mx.array, mx.array, mx.array, mx.array]:
     """GatedDeltaNet's input projections (qkv, z [B, L, NV, DV], b, a): one stacked matmul for a prefill chunk."""
 
@@ -417,6 +518,9 @@ def moe(module: Any, x: mx.array, *, route: Any = None, switch: Any = None) -> m
 
     batch, length, dims = x.shape
     k = module.top_k
+    sizes = pass_chunks(length) if batch == 1 and route is None else None
+    if sizes is not None:
+        return _moe_pass(module, x, sizes, switch)
     experts, weights = module.route(x) if route is None else route      # [1, L, k] each
     flat = experts.reshape(-1)
     order = mx.argsort(flat)
@@ -429,8 +533,13 @@ def moe(module: Any, x: mx.array, *, route: Any = None, switch: Any = None) -> m
     act = sw.activation(u, g)                                           # SwitchGLU: activation(x_up, x_gate)
     y = _experts(act, sw.down_proj, idx)
     # the reference's unsort, bf16 product and MLX's sum: a sequential fp32 sum of the products changes bits
-    routed = (y[pos].reshape(batch, length, k, dims) * weights[..., None]).sum(axis=-2)
-    routed = routed.reshape(length, dims)
+    sizes = pass_chunks(length) or (length,)
+    y = y[pos].reshape(batch, length, k, dims)
+    parts, at = [], 0
+    for n in sizes:                                     # row by row: in a pass, each chunk's own temporaries
+        parts.append((y[:, at:at + n] * weights[:, at:at + n, :, None]).sum(axis=-2))
+        at += n
+    routed = (parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=1)).reshape(length, dims)
     se = module.shared_expert
     xf = x.reshape(length, dims)
     shared = linear(se.down_proj, nn.silu(linear(se.gate_proj, xf)) * linear(se.up_proj, xf))

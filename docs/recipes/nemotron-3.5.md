@@ -30,6 +30,9 @@ cuts, so cold and resumed prompts use the same chunks; templates without markers
 
 ## CUDA
 
+CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Its prompt matmuls
+have no FP8 kernel, so prompt precision does not change and `--prefill-fp8` is refused.
+
 Use the [CUDA container setup](../../RUNBOOK.md#nvidia-gpus). One or two ranks are supported.
 Pull the checkpoint on each rank and start rank 1 first:
 

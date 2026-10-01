@@ -158,3 +158,30 @@ def test_decode_trace_records_every_round_and_keeps_serial_tokens():
     misses = [t for t in trace if t["stop"] == "miss"]
     assert misses and all(t["accepted"] == 3 and t["candidate_hit"] and not t["vocab_miss"] for t in misses)
     assert all(t["nodes_per_depth"][0] == 2 and t["max_depth"] == 4 for t in misses)
+
+
+def test_wide_copy_windows_keep_serial_tokens():
+    """Copies widen past the tree's rows while they land whole (``tree_rows`` 8, up to 64 rows); every token stays
+    the serial decode's, and a copy window never exceeds the width its predecessors earned."""
+
+    import dataclasses
+
+    base = _model()
+    w = Weights(dataclasses.replace(base.config, layers=64), base.embed, [base.layers[0]] * 64, base.norm,
+                base.head, base.inv_freq)
+    prompt = [3, 1, 4, 1, 5, 9, 2, 6] * 6                      # a repeated stretch so copies exist from the start
+    st, pending = State(w), None
+    from tensorfold.families.qwen3_5.cuda.decode import next_copy_rows, prefill
+
+    st, pending = prefill(w, prompt, None)
+    serial = serial_decode(w, st, pending, 160, None, stop_eos=False).tokens
+    st, pending = prefill(w, prompt, None)
+    trace: list[dict] = []
+    wide = draft_decode(w, st, prompt, pending, 160, None, None, max_rows=64, tree_rows=8, allow_copy=True,
+                        stop_eos=False, trace=trace)
+    assert wide.tokens == serial
+    rows = next_copy_rows(8, False, 8, 64)
+    for t in trace:
+        if t["source"] == "copy":
+            assert t["rows"] <= rows
+            rows = next_copy_rows(rows, t["accepted"] == t["rows"] - 1, 8, 64)

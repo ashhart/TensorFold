@@ -99,7 +99,7 @@ def indexed_attention(queries: mx.array, keys: mx.array, indices: mx.array, key_
 
     rows, heads, dim = queries.shape
     topk = int(indices.shape[-1])
-    if not metal():
+    if not metal() or queries.dtype != mx.bfloat16 or keys.dtype != mx.bfloat16:     # the kernel is bf16-only
         return indexed_attention_ops(queries, keys, indices, key_length, scale)
     return _kernel()(inputs=[mx.contiguous(queries), keys, mx.contiguous(indices.astype(mx.int32)),
                              mx.array([scale], dtype=mx.float32), mx.array([int(key_length)], dtype=mx.int32)],
@@ -120,5 +120,5 @@ def indexed_attention_ops(queries: mx.array, keys: mx.array, indices: mx.array, 
         s = (queries[r].astype(mx.float32) * scale) @ k.T                                 # [H, T]
         s = mx.where(valid[None], s, -mx.inf)
         p = mx.softmax(s, axis=-1)
-        outs.append((p @ k).astype(mx.bfloat16)[None])
+        outs.append((p @ k).astype(queries.dtype)[None])
     return mx.concatenate(outs)

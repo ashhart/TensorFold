@@ -1,3 +1,6 @@
+import json
+import re
+
 import pytest
 
 from tensorfold.server.http import RequestError
@@ -22,7 +25,7 @@ def test_requested_reply_reserve_one_over_refuses_before_prefix_or_submission(mo
         messages = [{"role": "user", "content": "abcdef"}]
         assert len(app.render(messages)[0]) == 9
         assert_unsubmitted(app, monkeypatch)
-        with pytest.raises(RequestError, match=r"9.*2.*10") as error:
+        with pytest.raises(RequestError, match=r"length is 10 tokens.*has 9 tokens.*requests 2 reply tokens") as error:
             app.chat(messages, max_tokens=2)
         assert "8 prompt tokens" in str(error.value)
         assert "1 reply tokens" in str(error.value)
@@ -50,7 +53,7 @@ def test_template_and_thinking_tokens_count_toward_reservation(monkeypatch, thin
         prompt_tokens = len(app.render(messages, thinking=thinking)[0])
         assert prompt_tokens == (8 if thinking else 6)
         assert_unsubmitted(app, monkeypatch)
-        with pytest.raises(RequestError, match=rf"{prompt_tokens}.*{11 - prompt_tokens}.*10"):
+        with pytest.raises(RequestError, match=rf"length is 10 tokens.*has {prompt_tokens} tokens.*requests {11 - prompt_tokens} reply"):
             app.chat(messages, max_tokens=11 - prompt_tokens,
                      sampling={"enable_thinking": thinking})
         assert not app.engine.prefill_calls and app._preparing == 0
@@ -98,6 +101,9 @@ def test_http_requested_reserve_refuses_with_counts_and_next_request_recovers(fi
         payload = {"messages": [{"role": "user", "content": "abcdef"}], field: 2}
         status, body = post_json(server, "/v1/chat/completions", payload)
         assert status == 400 and "9 tokens" in body and "2 reply tokens" in body
+        error = json.loads(body)["error"]           # OpenAI's code and wording, which clients match to compact
+        assert error["code"] == "context_length_exceeded" and "exceeds the context window" in error["message"]
+        assert re.search(r"maximum context length is \d+ tokens", error["message"])
         assert not app.engine.prefill_calls
         payload["messages"][0]["content"] = "abcde"
         status, body = post_json(server, "/v1/chat/completions", payload)

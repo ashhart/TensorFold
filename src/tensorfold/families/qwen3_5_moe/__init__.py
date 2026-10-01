@@ -13,6 +13,7 @@ MODELS = ("Vontra/Qwen3.6-35B-A3B-MLX-4bit-MTP",)
 REQUIRED_FILES = {MODELS[0]: ("mtp-4bit.safetensors",)}
 # the CUDA engine's kernels read MLX affine weights of this (bits, group size)
 CUDA_QUANTIZATION = (4, 64)
+CUDA_PREFILL_FP8 = True            # --prefill-fp8: the attention and DeltaNet projections' FP8 prompt kernel
 
 
 def check(model_dir: str | Path) -> None:

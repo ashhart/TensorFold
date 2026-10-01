@@ -56,70 +56,80 @@ to one stream, while successful checks allow the lane engine to combine requests
 
 ## CUDA
 
-Use the [container setup](../../RUNBOOK.md#nvidia-gpus). For two ranks, pull the checkpoint on both and
-start rank 1 first:
+On CUDA Flash Next serves NVFP4 and EXL3 checkpoints, and the MLX 4-bit checkpoint as the portable option: the same
+files a Mac serves, and the only format two ranks and `--ple-on-ssd` read. `tensorfold serve` loads the checkpoint
+you name; it picks none by itself. Use the [container setup](../../RUNBOOK.md#nvidia-gpus) for any of them. Prompts
+take bf16 activations by default; what that costs against the FP8 prompt path (`--prefill-fp8`) depends on the
+format ([prompt precision](cuda.md#prompt-precision)):
+
+| Checkpoint | Weights | bf16 prompts against `--prefill-fp8` |
+| --- | --- | --- |
+| `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` (`925d7be6`), a mirror of local-inference-lab's export | NVFP4 routed experts, MXFP8 elsewhere and in the n-gram table | the next row's kernels; not timed on its own |
+| `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (`7c4f1bc1`) | NVFP4 routed experts, MXFP8 elsewhere | 0.94-1.03x from 2k to 64k |
+| `RadixArk/Qwen3.8-Flash-Next-NVFP4` (`7b719225`) | NVFP4 routed experts, bf16 elsewhere | unchanged: no FP8 prompt kernel |
+| `turboderp/Qwen3.8-Flash-Next-exl3` (`3.05bpw_h5_ng5`) | EXL3 | unchanged: EXL3 prompts never took FP8 activations |
+| `Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP` | MLX affine 4-bit | unchanged: its prompts were already bf16 |
+
+TensorFold finds Mia-AiLab's export by its `model_type` (`qwen3_8_flash_next`) and serves it like
+local-inference-lab's.
+
+### NVFP4 checkpoints
+
+The CUDA engine reads published ModelOpt NVFP4 exports as they ship, MTP head included, on one GPU:
 
 ```bash
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
-tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
+tensorfold serve local-inference-lab/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8080
 ```
 
-The default CUDA cap is six MTP drafts, with chains stopping below the configured confidence threshold.
-`--mtp-drafts N` changes the cap; `--no-drafts` or `"draft": false` selects serial decoding.
-Single-request serving uses CUDA graphs for verify windows and draft steps. Two-rank reductions add
-gathered partials in rank order.
+| Checkpoint (revision) | Routed experts | DeltaNet, attention, shared expert | n-gram table |
+| --- | --- | --- | --- |
+| `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (`7c4f1bc1`) | NVFP4 | MXFP8 | NVFP4 rows |
+| `RadixArk/Qwen3.8-Flash-Next-NVFP4` (`7b719225`) | NVFP4 | bf16 | FP8 rows |
+| `Mia-AiLab/Qwen3.8-Flash-Next-NVFP4` (`925d7be6`), a mirror of local-inference-lab's export | NVFP4 | MXFP8 | MXFP8 rows |
 
-With one GPU, `--parallel N` enables eager shared forwards for up to N requests; CUDA
-`--parallel auto` selects one request. Two ranks serve one request at a time and reject `--parallel N`
-when N exceeds one. The single-request engine retains prompt and reply states for prefix reuse; the
-concurrent decoder retains prompt snapshots per stream. Cache capacity is allocated at startup; inspect
-the reported capacity rather than assuming an older fixed token limit.
+The loader reads each linear by its tensors. An NVFP4 weight is an E2M1 code times its e4m3 scale (a block of 16
+inputs) times the tensor's fp32 `weight_scale_2`; an MXFP8 weight is an e4m3 byte times a power of two (a block of
+32). Both products fit bf16 exactly, so decode multiplies them in bf16 MMAs, adds each block's products times its
+scale in block order and applies the tensor's scale once; the K split depends on the shape alone, so drafted
+windows keep serial decoding's bits. Prompts run the MXFP8 linears on bf16 rows and the stored bytes, each byte
+times its power of two exact in bf16 and one fp32 sum over the inputs (`--prefill-fp8`: the FP8 prompt matmul).
+Tests check the kernels against an fp64 reference built by an independent numpy dequantizer
+(`tensorfold/cuda/nvfp4/format.py`). Both exports store their RMSNorm weights centred (gamma - 1), and the loader
+tells centred from uncentred norms by their stored values. An n-gram table's shards must share one layout, or the
+load stops.
 
-N-gram tables are file-backed host data. On unified-memory GPUs they compete with weights and cache
-allocations for RAM, so a checkpoint's GPU allocation alone does not describe its memory requirement.
+Block-scaled FP8 linears (ModelOpt `FP8_PB_WO`, the DeepSeek-style layout: e4m3 bytes and an fp32 `weight_scale_inv`
+per 128x128 block) are read too. Decode keeps the e4m3 bytes in the FP8 GEMM's fragment order and each (64 inputs,
+column)'s block scale as fp32; the lane matmul multiplies a 64-input stage in bf16 MMAs (e4m3 fits bf16 exactly) and
+adds the stage's products times its scale in stage order, so the stored weight is exact and rows stay independent of
+the row count, as for the other formats. Prompts take the same lane matmul (bf16 activations, the stored bytes, fp32
+sums); `--prefill-fp8` runs the FP8 prompt matmul over the same bytes with the block scales as bf16 group scales. A
+projection stack that mixes block FP8 with bf16 (`in_proj_b` and `in_proj_a` beside `in_proj_qkv` and `in_proj_z`;
+the indexer's projection beside q/k/v) runs each part on its own kernel into its columns. A block-FP8 `lm_head`
+stays on the lane matmul with its stored bytes, for decode rows and a prompt's head rows; the draft head's rows are
+dequantized and requantized to 4 bits, as for every NVFP4 checkpoint (drafts only). Checked on a local ModelOpt
+export with NVFP4 experts, block-FP8 DeltaNet and attention projections, an FP8 n-gram table and NVFP4 MTP experts:
+drafted replies equal `"draft": false` ones (six pairs, 2k-16k-token prompts, greedy and sampled), resumed prompts
+equal fresh ones, and each reply of 2 and 4 concurrent requests equals the same request alone. On one Spark, one
+request, it decodes 6-27% faster than the same weights dequantized to bf16 on the bf16 path (code 59.2 against 49.1
+tok/s greedy, chat 36.6 against 34.6 greedy and 41.6 against 32.8 sampled).
 
-`--ple-on-ssd` leaves the 29.8 GiB of n-gram tables in the checkpoint and reads each lookup's rows from SSD,
-so a 128 GB Mac can hold Flash Next. It is an opt-in trade. On an M3 Ultra, replies were the same tokens,
-decode was 3.5-8% slower across the four cells, prefill was unchanged, the peak footprint fell by 40 GiB
-(135.1 to 95.4 GiB) and start-up halved (35.7 s to 17.8 s).
+The routed experts run on a grouped NVFP4 kernel that reads the step's routing plan on the GPU, so a decode graph
+captured for one step's experts replays another step's. A test decodes a checkpoint whose expert picks change every
+step with graphs on and off and compares the tokens; on local-inference-lab's and RadixArk's exports, replies with
+the decode graphs equal replies without them.
 
-`--ssd-experts GIB` also leaves the routed experts (70.3 GiB) in the checkpoint and streams them into a GPU pool
-of that many GiB; with `--ple-on-ssd` as well, a 64 GB Mac can hold Flash Next (`python -m pip install
-"tensorfold[ssd]"` first: the pool's host side is a small MLX extension built on first use). The GPU hands each
-MoE layer's picks to the host and waits while missing experts are read into the pool; the expert kernels are the
-resident ones with only the weight address changed, so replies are the resident model's tokens.
+local-inference-lab's and RadixArk's exports were served with `tensorfold serve` and checked: drafted replies equal
+`"draft": false` ones (nine pairs, 2k-16k-token prompts, greedy and sampled), resumed prompts equal fresh ones, and
+each reply of concurrent requests (`--parallel 4`) equals the same request alone. Mia-AiLab's mirror loads and serves
+through the same code; its replies have not been checked on their own.
 
-On an M3 Ultra, each flag was held to a smaller Mac's budget and compared on the same machine:
-- `--ple-on-ssd` at a 128 GB Mac's budget (89.6 GiB) peaked at 85.6 GiB. Decode was 0.91-1.03x the resident
-  run and prefill 0.84-0.91x.
-- Adding `--ssd-experts 24` at a 64 GB Mac's budget (44.8 GiB) peaked at 39.5 GiB. Replies were the same tokens as
-  with the experts resident: 36 of 36 requests, drafted and serial. Decode ran at 36.8-42.5 tok/s against
-  107.6-129.7 (0.31-0.39x), and prefill at 332-354 against 1,014-1,081 tok/s.
-- A smaller budget also halves the prompt chunk, to 2,048 tokens. Prompts past that length then reply
-  differently from a 256 GB Mac's run, whichever flags are set.
-
-### KV cache
-
-`--kv-dtype bf16` is the default. `--kv-dtype int8` and `--kv-dtype int4` store each attention layer's keys and
-values as codes with one fp16 scale per 32 values, the arithmetic of ExLlamaV3's `-cq 8` and `-cq 4` (the
-non-companded grid): each group of 32 is rotated by a 32-point Hadamard, its absmax is the scale, and the codes sit
-on the midpoint grid. 8-bit stores `q - 128` as int8; 4-bit stores two unsigned codes a byte, low nibble first. The
-query is rotated the same way and the merged attention output is rotated back, so the stored keys and values stay
-rotated. Indexer keys and pooled block keys stay bf16.
-
-A token costs 30,784 bytes in bf16, 18,304 in int8 and 11,648 in int4, counting the scales and the MTP head's own
-cache: 1.68x and 2.64x smaller (the keys and values alone shrink 1.88x and 3.56x). The startup admission counts
-those bytes, so an omitted `--context` admits a longer window at int8 and int4, and an explicit `--context` is
-checked against the quantized cache. The dtype holds on every path: prompt chunks and decode windows, the MTP head,
-`"draft": false` requests, `--parallel N` streams and their kept prompt ends, and both ranks of `--tp 2`, which
-refuse to start with different `--kv-dtype` values.
-
-A quantized cache changes the output, so its replies differ from bf16's. Drafted output still equals
-`"draft": false` output at the same dtype, and a resumed prompt equals a fresh one. The MLX path and the other
-families refuse `--kv-dtype` before any download.
-
-`--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
-default is 0.30. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
+Not supported here:
+- `--tp 2` and `--ple-on-ssd` on an NVFP4 checkpoint stop at startup: two ranks read the MLX checkpoint, and the
+  NVFP4 exports' tables stay memory-mapped.
+- `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` (186 GB; bf16 linears and n-gram table) has the RadixArk layout apart
+  from its bf16 table, which the loader reads, but the whole checkpoint has not been loaded or served here, so it
+  is not listed as tested.
 
 ### EXL3 checkpoints (experimental)
 
@@ -239,44 +249,85 @@ Serially on the mixed-K pack, TensorFold is 1.51-1.55x ExLlamaV3. On the uniform
 TensorFold's serial path is 5-6% behind ExLlamaV3's, and on both EXL3 packs it is 5-9% behind its own MLX path.
 With drafts on the current engine (the table above), the 3.05 bpw pack decodes 1.6-2.2x ExLlamaV3's serial speed.
 
-### NVFP4 checkpoints
+### MLX 4-bit, one or two ranks
 
-The CUDA engine reads two published ModelOpt NVFP4 exports as they ship, MTP head included, on one GPU:
+For two ranks, pull the checkpoint on both and start rank 1 first:
 
 ```bash
-tensorfold serve local-inference-lab/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8080
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 1 --master 192.0.2.1
+tensorfold serve Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP --tp 2 --rank 0 --master 192.0.2.1 --name bench --host 0.0.0.0
 ```
 
-| Checkpoint (revision) | Routed experts | DeltaNet, attention, shared expert | n-gram table |
-| --- | --- | --- | --- |
-| `local-inference-lab/Qwen3.8-Flash-Next-NVFP4` (`7c4f1bc1`) | NVFP4 | MXFP8 | NVFP4 rows |
-| `RadixArk/Qwen3.8-Flash-Next-NVFP4` (`7b719225`) | NVFP4 | bf16 | FP8 rows |
+### Serving
 
-The loader reads each linear by its tensors. An NVFP4 weight is an E2M1 code times its e4m3 scale (a block of 16
-inputs) times the tensor's fp32 `weight_scale_2`; an MXFP8 weight is an e4m3 byte times a power of two (a block of
-32). Both products fit bf16 exactly, so decode multiplies them in bf16 MMAs, adds each block's products times its
-scale in block order and applies the tensor's scale once; the K split depends on the shape alone, so drafted
-windows keep serial decoding's bits. Prompts run the MXFP8 linears on the FP8 prompt matmul with the stored bytes.
-Tests check the kernels against an fp64 reference built by an independent numpy dequantizer
-(`tensorfold/cuda/nvfp4/format.py`). Both exports store their RMSNorm weights centred (gamma - 1), and the loader
-tells centred from uncentred norms by their stored values. An n-gram table's shards must share one layout, or the
-load stops.
+The default CUDA cap is six MTP drafts, with chains stopping below the configured confidence threshold.
+`--mtp-drafts N` changes the cap; `--no-drafts` or `"draft": false` selects serial decoding.
+Single-request serving uses CUDA graphs for verify windows and draft steps. Two-rank reductions add
+gathered partials in rank order.
 
-The routed experts run on a grouped NVFP4 kernel that reads the step's routing plan on the GPU, so a decode graph
-captured for one step's experts replays another step's. A test decodes a checkpoint whose expert picks change
-every step with graphs on and off and compares the tokens; on both exports, replies with the decode graphs equal
-replies without them.
+With one GPU, `--parallel N` enables eager shared forwards for up to N requests; CUDA
+`--parallel auto` selects one request. Two ranks serve one request at a time and reject `--parallel N`
+when N exceeds one. For prefix reuse, the single-request engine and the concurrent decoder keep prompt
+states; a follow-up prefills the reply again. A kept state stops one token before its prompt's end, so the
+same prompt sent again resumes, and so does a next chat turn that renders the generation prompt's `<think>`
+and newline as `<think>` and two newlines. Cache capacity is allocated at startup; inspect the reported
+capacity rather than assuming an older fixed token limit.
 
-Both exports were served with `tensorfold serve` and checked: drafted replies equal `"draft": false` ones (nine
-pairs, 2k-16k-token prompts, greedy and sampled), resumed prompts equal fresh ones, and each reply of concurrent
-requests (`--parallel 4`) equals the same request alone.
+With `--parallel N`, a prompt prefills inside the rounds: each round runs the live replies' windows and the next
+prompt pass (up to 2,048 rows, several prompts packed) in one forward, and each layer's experts once for both. Every
+reply still equals its solo run. The cost is decode speed while prompts fill: a pass of more than ~500 rows reads
+most of the experts, so live replies decode at about a tenth of their usual rate during a burst's prefill (2.6-3.2
+of 32-41 tok/s on one Spark) instead of stopping. `--decode-share S` sizes the passes so a round's decoding takes
+that share of the pass's time: 0.25 about doubles decode during a prefill and roughly halves prompt speed. The
+default, 0, keeps whole passes.
 
-Not supported here:
-- `--tp 2` and `--ple-on-ssd` on an NVFP4 checkpoint stop at startup: two ranks read the MLX checkpoint, and the
-  NVFP4 exports' tables stay memory-mapped.
-- `ukisai/Swift-1.5-Qwen3.8-Flash-Next-NVFP4` (186 GB; bf16 linears and n-gram table) has the RadixArk layout apart
-  from its bf16 table, which the loader reads, but the whole checkpoint has not been loaded or served here, so it
-  is not listed as tested.
+N-gram tables are file-backed host data. On unified-memory GPUs they compete with weights and cache
+allocations for RAM, so a checkpoint's GPU allocation alone does not describe its memory requirement. An explicit
+`--context` that leaves them no room is reported at startup; their lookups then page from disk, a cost of about 1.3x
+on prompts.
+
+`--ple-on-ssd` leaves the 29.8 GiB of n-gram tables in the checkpoint and reads each lookup's rows from SSD,
+so a 128 GB Mac can hold Flash Next. It is an opt-in trade. On an M3 Ultra, replies were the same tokens,
+decode was 3.5-8% slower across the four cells, prefill was unchanged, the peak footprint fell by 40 GiB
+(135.1 to 95.4 GiB) and start-up halved (35.7 s to 17.8 s).
+
+`--ssd-experts GIB` also leaves the routed experts (70.3 GiB) in the checkpoint and streams them into a GPU pool
+of that many GiB; with `--ple-on-ssd` as well, a 64 GB Mac can hold Flash Next (`python -m pip install
+"tensorfold[ssd]"` first: the pool's host side is a small MLX extension built on first use). The GPU hands each
+MoE layer's picks to the host and waits while missing experts are read into the pool; the expert kernels are the
+resident ones with only the weight address changed, so replies are the resident model's tokens.
+
+On an M3 Ultra, each flag was held to a smaller Mac's budget and compared on the same machine:
+- `--ple-on-ssd` at a 128 GB Mac's budget (89.6 GiB) peaked at 85.6 GiB. Decode was 0.91-1.03x the resident
+  run and prefill 0.84-0.91x.
+- Adding `--ssd-experts 24` at a 64 GB Mac's budget (44.8 GiB) peaked at 39.5 GiB. Replies were the same tokens as
+  with the experts resident: 36 of 36 requests, drafted and serial. Decode ran at 36.8-42.5 tok/s against
+  107.6-129.7 (0.31-0.39x), and prefill at 332-354 against 1,014-1,081 tok/s.
+- A smaller budget also halves the prompt chunk, to 2,048 tokens. Prompts past that length then reply
+  differently from a 256 GB Mac's run, whichever flags are set.
+
+### KV cache
+
+`--kv-dtype bf16` is the default. `--kv-dtype int8` and `--kv-dtype int4` store each attention layer's keys and
+values as codes with one fp16 scale per 32 values, the arithmetic of ExLlamaV3's `-cq 8` and `-cq 4` (the
+non-companded grid): each group of 32 is rotated by a 32-point Hadamard, its absmax is the scale, and the codes sit
+on the midpoint grid. 8-bit stores `q - 128` as int8; 4-bit stores two unsigned codes a byte, low nibble first. The
+query is rotated the same way and the merged attention output is rotated back, so the stored keys and values stay
+rotated. Indexer keys and pooled block keys stay bf16.
+
+A token costs 30,784 bytes in bf16, 18,304 in int8 and 11,648 in int4, counting the scales and the MTP head's own
+cache: 1.68x and 2.64x smaller (the keys and values alone shrink 1.88x and 3.56x). The startup admission counts
+those bytes, so an omitted `--context` admits a longer window at int8 and int4, and an explicit `--context` is
+checked against the quantized cache. The dtype holds on every path: prompt chunks and decode windows, the MTP head,
+`"draft": false` requests, `--parallel N` streams and their kept prompt states, and both ranks of `--tp 2`, which
+refuse to start with different `--kv-dtype` values.
+
+A quantized cache changes the output, so its replies differ from bf16's. Drafted output still equals
+`"draft": false` output at the same dtype, and a resumed prompt equals a fresh one. The MLX path and the other
+families refuse `--kv-dtype` before any download.
+
+`--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
+default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
 
 ## Draft vocabulary provenance
 

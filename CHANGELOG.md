@@ -3,6 +3,56 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## 0.6.0 (30 Sep 2026)
+
+- **RTX 40 cards.** CUDA now runs on compute capability 8.9 (Ada). On one RTX 4090 the 27B serves with DFlash2 in a
+  40,182-token window, exact: drafted replies equal serial ones, and a resume or resend gives a fresh run's reply.
+  Prompts fill at 2.4-2.6k tok/s from 2k to 32k tokens, and replies decode at 64-86 tok/s. On one GPU the 27B's kept
+  prompt states give way, oldest first, when a live reply needs the room, so admission counts one live window.
+- **Prompts fill inside the decode rounds.** With `--parallel` on CUDA, Flash Next prefills a queued prompt in the
+  same forward as the live replies instead of stopping them: on one DGX Spark, first tokens came 2.8-3.1x sooner than
+  on 0.5.0. On Macs several prompts fill side by side, the fewest tokens left first: on an M3 Ultra, short requests
+  queued behind a long prompt got their first token in a median 9.9 s instead of 113 s (the slowest 11.7 s, not 130).
+- **Conversations resume on more engines.** An identical resend or the next thinking turn now resumes from the kept
+  prompt state on Flash Next, Qwen3.6, Nemotron and GLM-5.3 on CUDA, as the 27B did, with a fresh run's reply: an
+  18.7k-token Flash Next resend went from 8.3 s to 0.08 s. On Macs the prompt cache keeps each conversation's newest
+  checkpoint and grows into memory the model leaves idle.
+- **CUDA prompts run at bf16 by default.** Against an fp32 reference the 27B's prompt rows are 20x closer than with
+  FP8 (KL 0.0031 against 0.0624). `--prefill-fp8` keeps 0.5.0's faster FP8 prompts for those who want them.
+- **Tool calls for agents.** The CUDA server streams tool-call arguments as the model writes them (the longest
+  silence in a long call fell from about 30 s to half a second), Python-spelled values like `False` and `None`
+  decode to their schema types, Gemma 4's bare tool calls parse (#121), and a prompt past the context window gets
+  OpenAI's `context_length_exceeded`, so clients compact instead of retrying.
+- **More checkpoints.** GLM-5.3 on Macs reads 8-bit and Q8_0 GGUF checkpoints and takes images, and has an opt-in
+  float32 activation mode (bf16 stays the default). On Macs, Flash Next loads oMLX's oQ checkpoints with scaled
+  n-gram tables; on CUDA it reads consolidated EXL3 tables and block-scaled FP8 linears.
+- **Faster.** Flash Next NVFP4 decodes 4.9-7.1% faster and fills prompts 15-16% faster at 2k-16k, bit-identical. On an
+  M5 Ultra the 27B with DFlash2 on an oQ4e checkpoint went from 33 to 131-160 tok/s. Before M5, a lone stream's copy
+  windows widen to 128 rows (an M3 Ultra edit ran 190 -> 233 tok/s), and Flash Next's concurrent rounds use the matrix
+  units. GLM-5.3's DFlash2 reads only its sliding window: 8% faster at 52k, and 3.8 GiB lighter a rank on two Sparks.
+- **Operations.** Prometheus `/metrics` on both servers, `TENSORFOLD_MEMORY_RESERVE_GIB` for the CUDA startup
+  reserve, `--checkpoint-slots` for the 27B's concurrent decoder on CUDA, and an idle GLM rank no longer spins.
+- **Apache-2.0.** TensorFold is licensed under the Apache License 2.0 from this release, which adds an explicit patent
+  grant from contributors. Releases up to 0.5.0 stay MIT, and code written before 0.6.0 keeps its MIT notice in
+  `LICENSES/MIT.txt`.
+- **Community pull requests.**
+  - Resumed resends and thinking turns on Flash Next (#124). Thanks to @benthecarman, and to @Arminova for the
+    GB10 measurements and the third-resend test.
+  - Streamed tool-call arguments on CUDA (#114), `--alias` on CUDA (#111) and Python-spelled tool parameters
+    (#135). Thanks to @olexale, @philip-pentatonic and @outcastofmusic.
+  - GLM-5.3 on Macs: image input (#101), 8-bit and Q8_0 GGUF checkpoints (#119), float32 activations (#118) and
+    the backbone wiring notes (#120). Thanks to @mgoldwasser and @feni6.
+  - GLM-5.3 on two Sparks: lighter prompt buffers, the EXL3 estimate, the MTP setting, the idle rank and DFlash2's
+    ring (#128, #129, #131, #132, #134), visible-pool selection (#140), and the CUDA startup reserve setting (#133).
+    Thanks to @MiaAI-Lab and @mikolaj92.
+  - Flash Next: scaled n-gram tables (#148, reported in #142) and the M5 draft head fix (#147), consolidated EXL3
+    tables (#145), block-scaled FP8 (#126) and the NVFP4 expert speedups (#102, #105). Thanks to @gilby,
+    @cwschroeder, @shantanugoel, @jschmied and @tournierjc.
+  - On M5 Macs the 27B fuses the projections of 4-bit group-32 checkpoints such as oQ4e too (#164): four streams went
+    from 315-320 to 332-334 tok/s on an M5 Ultra, with the same bits. Thanks to @gilby.
+  - `--checkpoint-slots` (#125), and the DFlash2 drafter's admitted size (#112, from @jkuepker's ROCm work). Thanks
+    to @nood-co1 and @jkuepker.
+
 ## 0.5.0 (29 Sep 2026)
 
 - **OpenAI's Responses API on both servers.** `/v1/responses` runs as a chat completion: every response has its chat

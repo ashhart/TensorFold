@@ -92,6 +92,13 @@ def test_unknown_model_types_point_to_the_recipe_book(tmp_path):
     assert "RUNBOOK.md" in str(refused.value)
 
 
+@pytest.mark.parametrize("kind", ["qwen4_exp", "qwen3_8_flash_next"])
+def test_flash_next_is_found_by_either_model_type_its_exports_carry(tmp_path, kind):
+    config = {"model_type": kind, "text_config": {"model_type": kind + "_text"}}
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    assert families.detect(tmp_path).module == "tensorfold.families.qwen4_exp"
+
+
 def test_serve_refuses_an_unreadable_checkpoint_before_downloading(tmp_path, capsys, monkeypatch):
     # a GPTQ Qwen3.8 dense checkpoint: no engine of that family reads it (NVFP4 ModelOpt ones it does, on CUDA)
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5",

@@ -47,6 +47,28 @@ def effort_levels(template: str | None) -> frozenset[str]:
     return frozenset(re.findall(r"""['"](minimal|low|medium|high|xhigh)['"]""", template or ""))
 
 
+def coerce_effort(effort: str | None, levels: frozenset[str] = frozenset()) -> str | None:
+    """The name the template hears. None stays None, so an omitted effort keeps the template's own default."""
+
+    if effort is None:
+        return None
+    # OpenAI's "high" and "minimal" are "xhigh" and "low" unless the template names them (GLM-5.3 names "high")
+    if effort in levels or effort not in ("high", "minimal"):
+        chosen = effort
+    else:
+        chosen = "xhigh" if effort == "high" else "low"
+    # GLM lists high and leaves medium unnamed. medium is that high. xhigh stays xhigh, and the template renders Max.
+    if chosen == "medium" and "high" in levels and "medium" not in levels:
+        return "high"
+    return chosen
+
+
+def heard_effort(explicit: str | None, default: str | None, levels: frozenset[str]) -> str | None:
+    """A request's effort when it set one, otherwise the server default, both in the template's names."""
+
+    return coerce_effort(default if explicit is None else explicit, levels)
+
+
 def thinking_fields(body: dict[str, Any], levels: frozenset[str] = frozenset()) -> dict[str, Any]:
     """A request's ``reasoning_effort`` and ``enable_thinking`` where it sets them; unset is the server's default."""
 
@@ -58,9 +80,7 @@ def thinking_fields(body: dict[str, Any], levels: frozenset[str] = frozenset()) 
     if effort is not None:
         if not isinstance(effort, str) or effort not in EFFORTS:
             raise RequestError("reasoning_effort must be none, minimal, low, medium, high or xhigh")
-        # OpenAI's "high" and "minimal" are "xhigh" and "low" unless the template names them (GLM-5.3 names "high")
-        named = effort in levels or effort not in ("high", "minimal")
-        fields["reasoning_effort"] = effort if named else {"high": "xhigh", "minimal": "low"}[effort]
+        fields["reasoning_effort"] = coerce_effort(effort, levels)
         fields["enable_thinking"] = effort != "none"
     if isinstance(kwargs, dict) and "enable_thinking" in kwargs:          # an explicit switch wins
         fields["enable_thinking"] = bool(kwargs["enable_thinking"])
@@ -83,6 +103,11 @@ class RequestOptions:
                 template = " ".join(str(t) for t in template.values())
             found = self.__dict__["_effort_levels"] = effort_levels(template if isinstance(template, str) else None)
         return found
+
+    def effort_for(self, explicit: str | None) -> str | None:
+        """The effort the template hears: the request's name, or this server's default."""
+
+        return heard_effort(explicit, getattr(self, "reasoning_effort", None), self.effort_levels)
 
     def _resolve_sampling(self, fields: dict[str, Any] | None, temperature: float,
                           prompt_ids: list[int]) -> Any:

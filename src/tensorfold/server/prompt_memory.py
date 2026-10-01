@@ -51,6 +51,15 @@ def attention_geometry(model: Any) -> tuple[int, int]:
     return (max(fallback) if fallback else 0 if configurations else -1), rows
 
 
+def pass_row_bytes(model: Any) -> int:
+    """Bytes the shared expert call holds per row, plus half again for margin; 0 without experts."""
+
+    args = getattr(model, "args", None)
+    top, hidden, inner = (int(getattr(args, name, 0) or 0)
+                          for name in ("num_experts_per_tok", "hidden_size", "moe_intermediate_size"))
+    return 3 * top * (6 * hidden + 8 * inner) // 2 if top and hidden and inner else 0
+
+
 def probe_tokens(tokenizer: Any) -> list[int]:
     """Real text for the admission's probe: this module's source, as the model's tokenizer reads it."""
 
@@ -60,6 +69,21 @@ def probe_tokens(tokenizer: Any) -> list[int]:
         return [int(t) for t in tokenizer.encode(Path(__file__).read_text(), add_special_tokens=False)]
     except Exception:  # noqa: BLE001 - a tokenizer that can't: the probe falls back to synthetic ids
         return []
+
+
+def cached_rows(cache: Any) -> int:
+    """Rows a live prompt cache holds (its layers' largest offset); 0 for none."""
+
+    return max((int(getattr(c, "offset", 0) or 0) for c in cache), default=0) if cache is not None else 0
+
+
+class OpenPrompt:
+    """A prompt admitted and still filling: its tokens, its reply's reservation and its working cache once seen."""
+
+    __slots__ = ("prompt", "reply", "cache")
+
+    def __init__(self, prompt: int, reply: int) -> None:
+        self.prompt, self.reply, self.cache = int(prompt), int(reply), None
 
 
 class PromptMemory:
@@ -82,10 +106,13 @@ class PromptMemory:
         self.stream_per_token = 0      # a live stream's growth a token, beyond its cache (a draft model's context)
         self.heads, self.score_rows = attention_geometry(model)
         self.workspace_per_token = int(getattr(model, "prefill_workspace_per_token", 0) or 0)
+        self.pass_row_bytes = pass_row_bytes(model)
         self.profile: CacheMemory | None = None
         self.observed_work = 0
         self.workspace_profiled = False
-        self.prompt = self.reply = 0
+        self.prompt = self.reply = 0                   # the focused open prompt's (``focus``)
+        self.open: list[OpenPrompt] = []               # every admitted prompt still filling, oldest first
+        self.current: OpenPrompt | None = None
         self._memory_lock = RLock()
 
     def memory_snapshot(self, reset_peak: bool = False) -> dict[str, int]:
@@ -96,7 +123,7 @@ class PromptMemory:
             footprint = process_footprint()
             if footprint is not None:
                 memory["footprint"] = footprint
-            if reset_peak and (not self.prompt or self.workspace_profiled):
+            if reset_peak and (not self.open or self.workspace_profiled):
                 self.runtime.reset_peak_memory()
             return memory
 
@@ -124,18 +151,39 @@ class PromptMemory:
             return True
         return False
 
-    def begin(self, prompt: int, reply: int, *, admit: bool = True) -> None:
-        with self._memory_lock:
-            self.prompt, self.reply = int(prompt), int(reply)
-            self.runtime.reset_peak_memory()
-            if self.profile is None and self.store is not None and self.store._entries:
-                self.observe_cache(self.store._entries[0].cache, workspace=False)
-            if admit:
-                self.require()
+    def begin(self, prompt: int, reply: int, *, admit: bool = True) -> OpenPrompt:
+        """Open a prompt beside those still filling and focus it; a refused one closes again."""
 
-    def end(self) -> None:
         with self._memory_lock:
-            self.prompt = self.reply = 0
+            opened = OpenPrompt(prompt, reply)
+            self.open.append(opened)
+            self.focus(opened)
+            self.runtime.reset_peak_memory()
+            try:
+                if self.profile is None and self.store is not None and self.store._entries:
+                    self.observe_cache(self.store._entries[0].cache, workspace=False)
+                if admit:
+                    self.require()
+            except BaseException:
+                self.end(opened)
+                raise
+            return opened
+
+    def focus(self, opened: OpenPrompt | None) -> None:
+        """The open prompt whose chunk runs next: every check is its own, beside the other open prompts' growth."""
+
+        with self._memory_lock:
+            self.current = opened
+            self.prompt, self.reply = (opened.prompt, opened.reply) if opened is not None else (0, 0)
+
+    def end(self, opened: OpenPrompt | None = None) -> None:
+        """``opened`` (by default the focused prompt) stopped filling: its reservation goes."""
+
+        with self._memory_lock:
+            opened = self.current if opened is None else opened
+            self.open = [o for o in self.open if o is not opened]
+            if opened is self.current:
+                self.focus(None)
 
     def _work(self, tokens: int) -> int:
         if self.profile is None:
@@ -146,13 +194,40 @@ class PromptMemory:
                   else 2 * self.score_rows * max(0, self.heads) * int(tokens) * 2)
         return max(self.bootstrap, self.observed_work) + growth + scores
 
+    def need(self, tokens: int, resident: int, *, started: bool = False, rows: int = 0, copies: int = 1) -> int:
+        """Bytes ``tokens`` need beside ``resident``, which holds the growth of the ``rows`` already cached."""
+
+        if self.profile is None:
+            return int(resident) + self.bootstrap
+        return int(resident) + self._held_need(tokens, started, rows, copies) + self._work(tokens)
+
+    def _held_need(self, tokens: int, started: bool, rows: int, copies: int = 1) -> int:
+        """What a prompt of ``tokens`` holds between chunks: its caches and a draft model's context past ``rows``."""
+
+        beyond = max(0, self.stream_per_token - self.profile.bytes_per_token)      # a draft model's context
+        return ((0 if started else self.carry) + copies * self.profile.cache_bytes(tokens)
+                + beyond * max(0, int(tokens) - int(rows)))
+
+    def _others(self, tokens: int) -> int:
+        """Bytes the other open prompts still take: their growth to prompt and reply, and a larger chunk workspace."""
+
+        if self.profile is None:
+            return 0
+        grow, work = 0, self._work(tokens)
+        for other in self.open:
+            if other is self.current:
+                continue
+            total, cache = other.prompt + other.reply, other.cache
+            held = cache_nbytes(cache) if cache is not None else 0
+            grow += self._held_need(total, cache is not None, cached_rows(cache)) - held
+            work = max(work, self._work(total))
+        return grow + work - self._work(tokens)
+
     def projected(self, prompt: int, *, current_cache: Any = None, extra_bytes: int = 0) -> int:
         current = cache_nbytes(current_cache) if current_cache is not None else 0
-        resident = max(0, self._used() - current)
-        if self.profile is None:
-            return resident + int(extra_bytes) + self.bootstrap
         tokens = int(prompt) + self.reply
-        return resident + int(extra_bytes) + self.profile.cache_bytes(tokens) + self._work(tokens)
+        resident = max(0, self._used() - current) + int(extra_bytes) + self._others(tokens)
+        return self.need(tokens, resident, started=current_cache is not None, rows=cached_rows(current_cache))
 
     def require(self, current_cache: Any = None, keep: Any = None) -> None:
         """Reclaim until the prompt fits, never evicting ``keep``; refuse when nothing is left to free."""
@@ -178,13 +253,13 @@ class PromptMemory:
         """Whether a request would fit now once every retained prefix and freed buffer is released; no side effects."""
 
         with self._memory_lock:
-            saved = self.prompt, self.reply
-            self.prompt, self.reply = int(prompt), int(reply)
+            saved = self.prompt, self.reply, self.current
+            self.prompt, self.reply, self.current = int(prompt), int(reply), None     # beside every open prompt
             try:
                 freeable = int(self.runtime.get_cache_memory()) + (self.store.nbytes if self.store is not None else 0)
                 return self.projected(self.prompt) - freeable <= self.budget
             finally:
-                self.prompt, self.reply = saved
+                self.prompt, self.reply, self.current = saved
 
     def fits_now(self) -> bool:
         """Whether the prompt fits beside every retained prefix, after releasing only freed MLX buffers."""
@@ -195,15 +270,23 @@ class PromptMemory:
         return self.projected(self.prompt) <= self.budget
 
     def _refusal(self, current_cache: Any) -> RequestError:
+        current = cache_nbytes(current_cache) if current_cache is not None else 0
+        store = self.store.nbytes if self.store is not None else 0
+        # what stays once freed buffers and retained prefixes are gone, and the open prompts: the refusal's own terms
+        held = max(0, int(self.runtime.get_active_memory()) - store - current)
+        started, rows = current_cache is not None, cached_rows(current_cache)
         top = max(0, (self.window or self.prompt + self.reply) - self.reply)
         lo, hi = 0, top
         while lo < hi:
             mid = (lo + hi + 1) // 2
-            if self.profile is not None and self.projected(mid, current_cache=current_cache) <= self.budget:
+            beside = held + self._others(mid + self.reply)
+            if (self.profile is not None
+                    and self.need(mid + self.reply, beside, started=started, rows=rows) <= self.budget):
                 lo = mid
             else:
                 hi = mid - 1
-        needed = self.projected(self.prompt, current_cache=current_cache)
+        tokens = self.prompt + self.reply
+        needed = self.need(tokens, held + self._others(tokens), started=started, rows=rows)
         return RequestError(f"This request needs about {needed / GIB:.1f} GiB of the {self.budget / GIB:.1f} GiB "
                             f"MLX may use (this server's {self.process_budget / GIB:.1f} GiB memory budget less "
                             f"{(self.process_budget - self.budget) / GIB:.1f} GiB for the rest of the process); it "
@@ -213,6 +296,8 @@ class PromptMemory:
                             "checkpoint, or a Mac with more RAM leaves more room.")
 
     def before_chunk(self, cache: Any, rows: int) -> None:
+        if self.current is not None:
+            self.current.cache = cache                 # the other open prompts' checks count what it holds
         self.require(cache if self.profile is not None else None)
         if not self.workspace_profiled:
             # the peak must start after admission freed prefixes, or they would count as workspace
@@ -239,7 +324,39 @@ class PromptMemory:
                 self.observed_work = work if full else max(self.observed_work, work)
                 self.workspace_profiled = full
 
+    def pass_bytes(self, sizes: list[int]) -> int:
+        """Memory held beyond the largest chunk: expert pairs or a workspace for the other chunks."""
+
+        if self.pass_row_bytes:
+            return (sum(sizes) - max(sizes)) * self.pass_row_bytes
+        return (len(sizes) - 1) * max(self.bootstrap, self.observed_work)
+
+    def pass_width(self, cache: Any, sizes: list[int]) -> int:
+        """How many consecutive chunks one forward takes within the budget; freed buffers count as free."""
+
+        with self._memory_lock:
+            if self.profile is None or len(sizes) < 2:
+                return 1
+            free = int(self.runtime.get_cache_memory())
+            width = len(sizes)
+            while width > 1 and self.projected(self.prompt, current_cache=cache,
+                                               extra_bytes=self.pass_bytes(sizes[:width])) - free > self.budget:
+                width -= 1
+            return width
+
+    def pass_room(self, cache: Any, sizes: list[int], extra: int) -> bool:
+        """Whether a pass of these chunks fits with ``extra`` bytes more (a larger cache of freed buffers) beside it."""
+
+        with self._memory_lock:
+            if self.profile is None:
+                return False
+            free = int(self.runtime.get_cache_memory())
+            return self.projected(self.prompt, current_cache=cache,
+                                  extra_bytes=self.pass_bytes(sizes) + int(extra)) - free <= self.budget
+
     def after_chunk(self, cache: Any, rows: int) -> None:
+        if self.current is not None:
+            self.current.cache = cache
         self.observe_cache(cache, rows=rows)
         if self._probe_base is not None:          # what a prompt holds between chunks outside its cache
             held = int(self.runtime.get_active_memory()) - cache_nbytes(cache) - self._probe_base
@@ -295,6 +412,12 @@ class PromptMemory:
                 f"{need / GIB:.1f} GiB. {hint or 'Serve it'} on a Mac with more memory, without its draft model "
                 "(--drafter none), or use a smaller or more quantized checkpoint")
 
+    def spare(self, window: int, work: int = 0) -> int:
+        """MLX memory left idle beside what is held now, one ``window``-token request and ``work`` more (a round's)."""
+
+        with self._memory_lock:
+            return 0 if self.profile is None else max(0, self.budget - self.need(window, self.held()) - int(work))
+
     def fit_window(self, window: int, fit: bool) -> tuple[int, bool]:
         """(the context window, whether memory lowered it): omitted, what the budget affords; explicit, it must fit."""
 
@@ -321,13 +444,11 @@ class PromptMemory:
             if self.profile is None:
                 return None
             retained = self.store.nbytes if self.store is not None else 0
-            floor = max(0, int(self.runtime.get_active_memory()) - retained) + self.carry
+            floor = max(0, int(self.runtime.get_active_memory()) - retained)
             kept = 2 if resumable else 1
-            beyond = max(0, self.stream_per_token - self.profile.bytes_per_token)   # the live stream's, not kept
 
             def fits(tokens: int) -> bool:
-                return (floor + kept * self.profile.cache_bytes(tokens) + beyond * int(tokens) + self._work(tokens)
-                        <= self.budget)
+                return self.need(tokens, floor, copies=kept) <= self.budget
 
             if not fits(0):
                 return 0
@@ -370,4 +491,4 @@ class PromptMemory:
         return not self._over_store_budget(size) and self._make_room(size)
 
 
-__all__ = ["PromptMemory", "attention_geometry", "probe_tokens"]
+__all__ = ["OpenPrompt", "PromptMemory", "attention_geometry", "pass_row_bytes", "probe_tokens"]

@@ -51,8 +51,14 @@ def test_default_window_leaves_mapped_tables_their_pages():
     # caches and tables inside what is available: 80 + 32 + slots x 100 KB <= 120 GB
     assert choose(default) == 80_000 - 7
     assert default.receipt(choose(default))["mapped_tables_resident"] is True
-    # an explicit window may use the tables' pages and is refused only past the budget
-    assert choose(make_plan(262144, 200_000, True, budget, weights, geometry, room=room)) == 200_000
+    # an explicit window may use the tables' pages and is refused only past the budget; startup names the window
+    # that would keep them
+    explicit = make_plan(262144, 200_000, True, budget, weights, geometry, room=room)
+    assert choose(explicit) == 200_000 and explicit.receipt(200_000)["mapped_tables_resident"] is False
+    assert "a --context of 79993 or less, or fewer --parallel streams, keeps them resident" in \
+        capacity.tables_note(explicit)
+    small = make_plan(262144, 50_000, True, budget, weights, geometry, room=room)
+    assert small.keeps_tables is True and capacity.tables_note(small) is None
     with pytest.raises(ValueError, match="largest fitting"):
         choose(make_plan(262144, 250_000, True, 100 * GB, weights, geometry, room=room))
 
@@ -63,6 +69,7 @@ def test_default_window_pages_the_tables_when_they_cannot_stay():
     plan = make_plan(262144, 262144, False, 107 * GB, weights, geometry, room=100 * GB)
     assert choose(plan) == 262144                          # the budget holds the caches; the tables will page
     assert plan.receipt(262144)["mapped_tables_resident"] is False
+    assert "(free memory to keep them resident)" in capacity.tables_note(plan)
 
 
 def test_default_refusal_names_the_native_window_not_a_request():

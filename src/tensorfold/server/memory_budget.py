@@ -12,8 +12,7 @@ MEMORY_FRACTION = 0.70
 LIMIT_ENV = "TENSORFOLD_MEMORY_LIMIT_GB"
 # the process's memory outside MLX's buffers and Metal's late returns
 PROCESS_BYTES = 3 * GIB
-# a startup probe's peak moves run to run (streamed experts: how far MLX encodes ahead of each layer's SSD reads), so
-# the worst of PROBE_REPEATS sizes the prompt chunk and the window: the same flags then give the same window each start
+# probe peaks move run to run, so the worst of PROBE_REPEATS sizes the chunk and window
 PROBE_REPEATS = 3
 
 

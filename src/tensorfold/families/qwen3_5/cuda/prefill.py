@@ -6,7 +6,7 @@ from typing import Sequence
 
 import torch
 
-from tensorfold.cuda import moe
+from tensorfold.cuda import moe, prompt_precision
 from tensorfold.cuda.kernels import gdn as deltanet
 from tensorfold.cuda.kernels import qmm as shared
 from tensorfold.cuda.kernels.prefill_attention import attention
@@ -14,7 +14,7 @@ from tensorfold.cuda.kernels.prefill_attention import attention
 from . import glue
 from . import prefill_bf16, prefill_glue
 from .decode import clone_state
-from .forward import State
+from .forward import State, grow as _grow
 from .qmm_fast import matmul, matmul_partial, tile
 from .weights import QLinear, Weights
 
@@ -23,13 +23,15 @@ TAP_LAYERS = (5, 19, 33, 47, 61)
 
 
 def _mm(x, w: QLinear, f32: bool = False) -> torch.Tensor:
-    """``x``: e4m3 inputs with group sums and row scales from ``prefill_glue``, or bf16 rows from ``prefill_bf16``."""
+    """``x``: bf16 rows (``prefill_bf16``), or e4m3 rows with group sums and row scales (``prefill_glue``, FP8)."""
 
-    if not isinstance(w, QLinear):
-        return w.prefill(x)                               # an EXL3 pack's projection
     if isinstance(x, tuple):
-        return shared.prefill_matmul8(x, tile(w), f32=f32)
-    packed = tile(w)                                      # an affine format past the FP8 four-bit path
+        return shared.prefill_matmul8(x, tile(w), f32=f32) if isinstance(w, QLinear) else w.prefill8(x)
+    if not isinstance(w, QLinear):
+        return w.prefill(x)                               # an EXL3 pack's or an NVFP4 checkpoint's projection
+    packed = tile(w)
+    if packed.fast:                                       # each weight rounded once to bf16, one fp32 chain over K
+        return shared.prefill_matmul(x, packed, f32=f32, tile=shared.prompt_tile(x.shape[0], packed.n))
     return matmul_partial(x, packed) if f32 else matmul(x, packed)
 
 
@@ -41,26 +43,13 @@ def _row_mm(x, w: QLinear, tp: bool) -> torch.Tensor:
     return gather_rank_partials(_mm(x, w))                 # bf16 partials: half the bytes of fp32 over the link
 
 
-def _grow(st: State, i: int, need: int) -> tuple[torch.Tensor, torch.Tensor]:
-    kbuf, vbuf = st.kv[i]
-    if kbuf.shape[0] < need:
-        cap = max(need, 2 * kbuf.shape[0], 1024)
-        if st.limit:
-            cap = max(need, min(cap, st.limit))
-        grown_k, grown_v = kbuf.new_empty((cap, *kbuf.shape[1:])), vbuf.new_empty((cap, *vbuf.shape[1:]))
-        grown_k[:st.pos] = kbuf[:st.pos]
-        grown_v[:st.pos] = vbuf[:st.pos]
-        st.kv[i] = (grown_k, grown_v)
-    return st.kv[i]
-
-
 @torch.no_grad()
 def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = False, capture_taps: bool = False,
                   last: bool = True, every: bool = False, cut: int = 0, vision=None):
     """Commit ``tokens`` at [st.pos, st.pos + W) into ``st`` without writing through its entries (``every``: all rows' final normed states; ``cut``: also the state after the first ``cut`` rows, the GDN chains run as two launches with one launch's bits)."""
 
     c = w.config
-    pg = prefill_glue if w.fast_prefill else prefill_bf16         # FP8 inputs only where every projection is 4-bit g64
+    pg = prefill_glue if w.fast_prefill and prompt_precision.fp8() else prefill_bf16   # e4m3 rows when prompts take FP8
     W = int(tokens.shape[0])
     if not 0 <= cut < W:
         raise ValueError(f"cut {cut} is not inside a chunk of {W} rows")
@@ -78,9 +67,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
         x = replace_rows(x, vision, p0, p0 + W)
     pending: torch.Tensor | None = None
     taps: list[torch.Tensor] = []
-    part = clone_state(st) if cut else None
-    if part is not None:
-        part.kv = []            # the chunk's final buffers, set below: these would outlive a grow that replaces them
+    part = clone_state(st) if cut else None     # its attention buffers are the chunk's, through the shared list
     for i, layer in enumerate(w.layers):
         x, h = pg.add_rmsnorm(x, pending, layer.input_norm, c.eps)
         if layer.linear:
@@ -144,7 +131,7 @@ def prefill_chunk(w: Weights, tokens: torch.Tensor, st: State, *, tp: bool = Fal
     taps_out = torch.cat(taps, dim=-1) if capture_taps else None
     if part is None:
         return normed, taps_out
-    part.pos, part.kv = p0 + cut, st.kv.copy()      # the chunk's buffers: their rows below part.pos stay as committed
+    part.pos = p0 + cut                             # the chunk's buffers: their rows below part.pos stay as committed
     return normed, taps_out, part
 
 
@@ -157,7 +144,7 @@ def chunks(start: int, end: int, size: int = CHUNK) -> list[tuple[int, int]]:
 
 @torch.no_grad()
 def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = False, draft=None,
-                  size: int = CHUNK, keep_at: int | None = None, vision=None):
+                  size: int | None = None, keep_at: int | None = None, vision=None):
     """Commit prompt[st.pos:] into ``st``, tapping the drafter's window; ``keep_at``: ``(normed, (state, snapshot))``, the state after prompt[:keep_at] from a cut chunk."""
 
     dev = w.norm.device
@@ -175,11 +162,10 @@ def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = Fa
     if draft is not None and end - draft.window > base:
         tap_from = end - draft.window
         draft.skip(tap_from - base)
-    spans = chunks(base, n, size)
+    spans = chunks(base, n, size or getattr(w, "prompt_rows", CHUNK))       # stand-in weights take 4096
     for j, (a, b) in enumerate(spans):
         if keep_at == a:
             kept = (clone_state(st), draft.snapshot() if draft is not None else None)
-            kept[0].kv = []                        # the final buffers, set below, as for a cut
         cut = keep_at - a if keep_at is not None and a < keep_at < b else 0
         want = draft is not None and b > tap_from
         normed, taps, *part = prefill_chunk(w, ids[a - base:b - base], st, tp=tp, capture_taps=want,
@@ -199,5 +185,4 @@ def prefill_state(w: Weights, prompt: Sequence[int], st: State, *, tp: bool = Fa
         return normed
     if keep_at == n:
         kept = (clone_state(st), draft.snapshot() if draft is not None else None)
-    kept[0].kv = st.kv.copy()                      # grown buffers copy the committed rows: never hold the old ones
     return normed, kept

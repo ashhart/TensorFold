@@ -168,12 +168,21 @@ class Engine:
         self.p_meta.fill_(pos)
         return self.p_meta
 
-    def mamba_rows(self, m, normed, xs, rows: int, j: int):
+    def mamba_rows(self, m, normed, xs, rows: int, j: int, cut=0, kept=None):
         c = self.c
         proj = G.prefill_dense(normed, m.in_proj)
         M.conv_rows(proj, self.conv_base[j], self.p_xc[:rows], m.conv_w, m.conv_b, rows, xd=c.xd)
-        y = M.scan_rows(proj, self.p_xc[:rows], self.ssm[j], m.a, m.d, m.dt_bias, rows, heads=c.m_heads,
-                        head_dim=c.m_head_dim, groups=c.m_groups, state_dim=c.m_state, lo=c.dt_min, hi=c.dt_max)
+        params = dict(heads=c.m_heads, head_dim=c.m_head_dim, groups=c.m_groups,
+                      state_dim=c.m_state, lo=c.dt_min, hi=c.dt_max)
+        if kept is None:
+            y = M.scan_rows(proj, self.p_xc[:rows], self.ssm[j], m.a, m.d, m.dt_bias, rows, **params)
+        else:
+            first = M.scan_rows(proj, self.p_xc[:cut], self.ssm[j], m.a, m.d, m.dt_bias, cut, **params)
+            kept["ssm"][j].copy_(self.ssm[j])
+            M.commit_conv_rows(proj, kept["conv_base"][j], cut, xd=c.xd)
+            rest = M.scan_rows(proj[cut:], self.p_xc[cut:rows], self.ssm[j], m.a, m.d, m.dt_bias,
+                               rows - cut, **params)
+            y = torch.cat((first, rest))
         g, gxs = M.group_rmsnorm(y, m.gnorm, c.eps, c.m_groups)
         return self._dense_delta(g, m.out_proj, gxs)
 
@@ -215,7 +224,7 @@ class Engine:
                  self.p_sampled)
 
     @torch.no_grad()
-    def prefill_chunk(self, tokens) -> None:
+    def prefill_chunk(self, tokens, *, cut=0) -> dict | None:
         """Commit a prompt chunk (every row kept) and sample the next token from its last row."""
 
         rows = len(tokens)
@@ -223,6 +232,10 @@ class Engine:
             raise ValueError("a prompt chunk must fit the chunk buffers and the KV cache")
         if self.prev_keep:
             raise RuntimeError("a prompt chunk runs from a committed state (no window rows left to replay)")
+        kept = None
+        if 0 < cut < rows:
+            kept = {"ssm": torch.empty_like(self.ssm), "conv_base": self.conv_base.clone(),
+                    "host": (self.pos + cut, self.parity, 0)}
         w, c = self.w, self.c
         self.p_ids[:rows].copy_(torch.as_tensor(tokens, dtype=torch.int32), non_blocking=False)
         x = base.embed(self.p_ids[:rows], w.embed.weight, w.embed.scales, w.embed.biases, c.hidden)
@@ -231,7 +244,7 @@ class Engine:
         for blk in w.blocks:
             x, normed, xs = self.norm(x, delta, blk.norm)
             if blk.kind == "M":
-                delta = self.mamba_rows(blk.mamba, normed, xs, rows, mj)
+                delta = self.mamba_rows(blk.mamba, normed, xs, rows, mj, cut, kept)
                 mj += 1
             elif blk.kind == "*":
                 delta = self.attention_rows(blk.attn, normed, xs, rows, self.k_cache[aj], self.v_cache[aj])
@@ -244,6 +257,7 @@ class Engine:
         self.sample_last(normed[rows - 1:rows], xs[rows - 1:rows])
         self._host_p.copy_(self.p_sampled, non_blocking=True)
         self._sampled_ready.record()
+        return kept
 
     def prefill_token(self) -> int:
         """The token sampled from the last prompt chunk's last row."""

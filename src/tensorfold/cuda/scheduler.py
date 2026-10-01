@@ -8,6 +8,7 @@ import queue
 import threading
 from typing import Any, Callable
 
+from .memory_gate import NoRoom
 from .streams import Stream
 
 
@@ -36,6 +37,7 @@ class Scheduler:
         self.decoder = decoder
         self.max_streams = max_streams
         self.waiting = Waiting()
+        self.held: tuple | None = None               # a request waiting for memory, admitted before any other
         self.boxes: dict[int, queue.Queue] = {}
         self.yields = 0                              # background streams that gave up their lane
         self.thread = threading.Thread(target=self._loop, daemon=True)
@@ -43,12 +45,12 @@ class Scheduler:
 
     def submit(self, prompt: list[int], count: int, sampling: Any, draft: bool,
                emit: Callable[[list[int]], bool | None], stop_eos: bool = True, *, vision: Any = None,
-               constraint: Any = None, background: bool = False) -> dict:
+               constraint: Any = None, background: bool = False, probabilities: Any = None) -> dict:
         """Decode one request; ``emit`` runs on the calling thread and returns True to stop. Returns its stats."""
 
         box: queue.Queue = queue.Queue()
         stream = Stream(list(prompt), max(1, count), sampling, draft=draft, stop_eos=stop_eos, vision=vision,
-                        constraint=constraint, background=background)
+                        constraint=constraint, background=background, probabilities=probabilities)
         cancel = [False]
         stream.emit = lambda new: (box.put(("tokens", new)), cancel[0])[1]
         self.waiting.put((stream, box))
@@ -67,6 +69,8 @@ class Scheduler:
         while self.decoder.live() < self.max_streams:
             if first is not None:
                 (stream, box), first = first, None
+            elif self.held is not None:
+                (stream, box), self.held = self.held, None
             else:
                 try:
                     stream, box = self.waiting.get_nowait()
@@ -75,6 +79,13 @@ class Scheduler:
             self.boxes[id(stream)] = box
             try:
                 self.decoder.admit(stream)
+            except NoRoom as exc:
+                self.boxes.pop(id(stream))
+                if self.decoder.live():              # waits, first in line, until a live stream finishes
+                    self.held = (stream, box)
+                    break
+                box.put(("error", exc))
+                continue
             except Exception as exc:                 # noqa: BLE001  (this request fails, the others go on)
                 self.boxes.pop(id(stream)).put(("error", exc))
                 continue
@@ -105,7 +116,8 @@ class Scheduler:
     def _loop(self) -> None:
         while True:
             self._yield()
-            done = self._admit(None if self.decoder.live() else self.waiting.get())   # idle: wait for a request
+            idle = not self.decoder.live() and self.held is None
+            done = self._admit(self.waiting.get() if idle else None)                  # idle: wait for a request
             try:
                 done += self.decoder.round()
             except Exception as exc:                 # noqa: BLE001  (the live requests fail)

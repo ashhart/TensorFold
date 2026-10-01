@@ -8,9 +8,9 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from tensorfold.cuda import health
-from tensorfold.server import responses
+from tensorfold.server import metrics, responses
 from tensorfold.server.cancellation import RequestCancelled, socket_cancellation
-from tensorfold.server.errors import CapacityError, RequestError
+from tensorfold.server.errors import CapacityError, RequestError, error_body
 from tensorfold.server.http import Server
 from tensorfold.server.stacks import Rearming
 
@@ -65,8 +65,12 @@ def make_handler(app: App):
             self.close_connection = True
 
         def do_GET(self):
+            route = self.path.split("?", 1)[0].rstrip("/")
+            if route in ("/metrics", "/v1/metrics"):
+                return metrics.send(self, app)
             if self.path.rstrip("/") in ("/v1/models", "/models"):
-                self._json(200, {"object": "list", "data": [{"id": app.served, "object": "model", "owned_by": "tensorfold"}]})
+                self._json(200, {"object": "list", "data": [{"id": model_id, "object": "model", "owned_by": "tensorfold"}
+                                                            for model_id in app.model_ids]})
             elif self.path.rstrip("/") in ("/health", "/v1/health"):
                 self._json(200, health.of(app).snapshot(app))
             elif responses.route(self.path):
@@ -96,12 +100,13 @@ def make_handler(app: App):
                 prepared = app.prepare(body, chat)
             except RequestError as exc:
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
-                                  {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                                  {"error": error_body(exc)})
             except Exception as exc:        # any other failure to read the request is refused too, as on MLX
                 _log_error(exc)
                 return self._json(400, {"error": {"message": _error_message(exc)}})
             rid = f"chatcmpl-{uuid.uuid4().hex[:24]}" if chat else f"cmpl-{uuid.uuid4().hex[:24]}"
             created = int(time.time())
+            model = app.reply_model(body)
             stream = bool(body.get("stream"))
             kind = "chat.completion.chunk" if chat else "text_completion"
             gone = socket_cancellation(self.connection)          # the Mac server's check: the client has closed
@@ -109,9 +114,9 @@ def make_handler(app: App):
 
             def chunk(delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
                 if chat:
-                    return {"id": rid, "object": kind, "created": created, "model": app.served,
+                    return {"id": rid, "object": kind, "created": created, "model": model,
                             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
-                return {"id": rid, "object": kind, "created": created, "model": app.served,
+                return {"id": rid, "object": kind, "created": created, "model": model,
                         "choices": [{"index": 0, "text": delta.get("content", ""), "finish_reason": finish}]}
 
             if stream:
@@ -137,7 +142,7 @@ def make_handler(app: App):
                     self.close_connection = True
                     return
                 except RequestError as exc:
-                    return self._stream_error({"message": str(exc), "type": "invalid_request_error"})
+                    return self._stream_error(error_body(exc))
                 except Exception as exc:
                     _log_error(exc)
                     return self._stream_error({"message": _error_message(exc), "type": "server_error"})
@@ -145,6 +150,8 @@ def make_handler(app: App):
                     emit(result["final"])
                 if result["calls"]:
                     for i, call in enumerate(result["calls"]):
+                        if i < result.get("calls_streamed", 0):      # sent as deltas already
+                            continue
                         emit({"tool_calls": [{"index": i, "id": call["id"], "type": "function",
                                               "function": {"name": call["function"]["name"],
                                                            "arguments": call["function"]["arguments"]}}]})
@@ -165,7 +172,7 @@ def make_handler(app: App):
                 return
             except RequestError as exc:
                 return self._json(503 if isinstance(exc, CapacityError) else 400,
-                                  {"error": {"message": str(exc), "type": "invalid_request_error"}})
+                                  {"error": error_body(exc)})
             except Exception as exc:
                 _log_error(exc)
                 try:
@@ -180,11 +187,13 @@ def make_handler(app: App):
                     message["reasoning_content"] = result["reasoning"]
                 if result["calls"]:
                     message["tool_calls"] = result["calls"]
-                payload = {"id": rid, "object": "chat.completion", "created": created, "model": app.served,
+                payload = {"id": rid, "object": "chat.completion", "created": created, "model": model,
                            "choices": [{"index": 0, "message": message, "finish_reason": result["finish"]}],
                            "usage": usage, "tensorfold": result["stats"]}
+                if result.get("logprobs") is not None:
+                    payload["choices"][0]["logprobs"] = result["logprobs"]
             else:
-                payload = {"id": rid, "object": "text_completion", "created": created, "model": app.served,
+                payload = {"id": rid, "object": "text_completion", "created": created, "model": model,
                            "choices": [{"index": 0, "text": result["content"], "finish_reason": result["finish"]}],
                            "usage": usage, "tensorfold": result["stats"]}
             self._json(200, payload)

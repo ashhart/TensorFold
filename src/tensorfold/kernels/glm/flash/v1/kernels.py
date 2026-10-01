@@ -441,7 +441,7 @@ def _gather_one_row(x: mx.array, ids: mx.array, weights: Any) -> mx.array:
     """One row's picks as the one-row decode path runs them: x [k or 1, 1, K], ids [1, k] -> [1, k, N]."""
 
     return mx.gather_qmm(x[None], weights.weight, weights.scales, weights.biases, rhs_indices=ids, transpose=True,
-                         group_size=weights.group, bits=weights.bits).squeeze(-2)
+                         group_size=weights.group, bits=weights.bits).astype(x.dtype).squeeze(-2)
 
 
 def expert_qmv(x: mx.array, idx: mx.array, group: tuple[mx.array, mx.array, mx.array] | None, weights: Any, *,
@@ -450,7 +450,7 @@ def expert_qmv(x: mx.array, idx: mx.array, group: tuple[mx.array, mx.array, mx.a
 
     rows, top = idx.shape
     n, dims = int(weights.weight.shape[-2]), int(x.shape[-1])
-    if group is None or not expert_qmv_fits(weights, rows):
+    if group is None or x.dtype != mx.bfloat16 or not expert_qmv_fits(weights, rows):
         parts = []
         for r in range(rows):
             xr = x[r][:, None, :] if per_pick else x[r:r + 1][:, None, :]
@@ -496,6 +496,8 @@ def gemv_params(transposed: bool, in_len: int, out_len: int) -> tuple[int, int, 
 def matmul_rows(x: mx.array, m: mx.array, *, transposed: bool, params: tuple[int, ...] | None = None) -> mx.array:
     """x [R, K] @ m (or m.T) with MLX's one-row matmul bits for every row; no Metal: one MLX matmul a row."""
 
+    if x.dtype == mx.float32 and m.dtype == mx.bfloat16:          # float32 rows widen the matrix, not the reverse
+        m = m.astype(mx.float32)
     x = x.astype(m.dtype)
     rows, in_len = x.shape
     if not metal():

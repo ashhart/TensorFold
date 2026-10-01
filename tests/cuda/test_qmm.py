@@ -93,3 +93,19 @@ def test_strided_rows_buffers_and_unreduced_slices():
     for s in range(1, sk):
         total = total + slices[s]
     assert torch.equal(total, qmm.matmul(x, q, f32=True))
+
+
+@pytest.mark.parametrize("n,k,gs", [(128, 5120, 64), (200, 1024, 32)])
+def test_every_nibble_decodes_exactly(n, k, gs):
+    """One-hot rows read back each stored nibble (scale 1, bias 0): pair() and every K split are exact on any GPU."""
+
+    words = _weights(n, k, gs, 29)[0]
+    ones = torch.ones((n, k // gs), device="cuda").bfloat16()
+    zeros = torch.zeros_like(ones)
+    q = qmm.pack(words, ones, zeros, gs)
+    want = _dequant(words, ones, zeros, gs).T.contiguous()                                  # (k, n): every q, 0-15
+    eye = torch.eye(k, device="cuda").bfloat16()
+    assert qmm.split_k(n, k, gs) > 1 and set(want.unique().tolist()) == set(range(16))
+    for f32 in (False, True):
+        assert torch.equal(qmm.matmul(eye, q, f32=f32).float(), want), f32
+        assert torch.equal(qmm.prefill_matmul(eye, q, f32=f32).float(), want), f32

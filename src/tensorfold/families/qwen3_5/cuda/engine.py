@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Callable, Sequence
 
+from tensorfold.cuda import prompt_precision
 
 KEEP = 3             # prompt states a concurrent decoder keeps to resume from (each holds a DeltaNet copy)
 KEEP_ONE = 4         # prompt states one stream keeps (they share its attention buffers)
@@ -20,11 +21,14 @@ def entry_end(prompt: Sequence[int]) -> int:
 class Qwen27Engine:
     """Qwen3.8-27B on one GPU or two ranks (rank 0 here), DFlash2 drafting, prefix reuse."""
 
+    tree_rows: int | None = None       # a lone stream's tree rows on one GPU (None: max_rows, as in 0.5.0)
+    room = None                        # one GPU's attention-cache budget (streams.KVRoom), None on two
+
     def __init__(self, model_dir: Path, draft_dir: Path | None, *, max_rows: int = 12, tp: int = 1,
                  rank: int = 0, master: str = "", port: int = 29551, split_head: bool = False,
                  tp_draft: bool = False, allow_copy: bool = True, streams: int = 1,
                  context: int | None = None, context_explicit: bool | None = None, vision: bool = False,
-                 vision_urls: bool = False):
+                 vision_urls: bool = False, tree_rows: int | None = None, keep: int | None = None):
         import torch
 
         from tensorfold.cuda.nvfp4.format import is_quantized
@@ -40,18 +44,21 @@ class Qwen27Engine:
             raise ValueError("image input on CUDA is tested on the MLX checkpoint only: drop --vision for an NVFP4 "
                              "checkpoint, or serve Vontra/Qwen3.8-27B-MLX-4bit")
         from .weights import load
-        from tensorfold.cuda.capacity import admit, gather_ints
-        from tensorfold.cuda.geometry import draft_geometry, gdn_geometry, stream_geometry
-        from .affine_memory import weight_transform
+        from tensorfold.cuda.capacity import admit, config, gather_ints, total_bytes
+        from tensorfold.cuda.geometry import (draft_geometry, gdn_geometry, live_kv, prompt_row_bytes, prompt_rows,
+                                              stream_geometry)
+        from .affine_memory import draft_weights, weight_transform
         from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
 
         self.torch = torch
         self.tp, self.rank, self.max_rows, self.allow_copy = tp, rank, max_rows, allow_copy
+        self.tree_rows = None if tree_rows is None else min(int(tree_rows), max_rows)
         self.vision = None
         self.vision_enabled = bool(vision)
         torch.cuda.set_device(0)
         if streams > 1 and tp == 1:          # streams' caches of many sizes come and go: growable segments, less slack
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        keep = KEEP if keep is None else int(keep)         # --checkpoint-slots: each kept state is in the estimate
         if tp == 2:
             import torch.distributed as dist
 
@@ -61,23 +68,27 @@ class Qwen27Engine:
             # both ranks must run the same calls: refuse to start when they were given different settings
             flags = torch.tensor([int(draft_dir is not None and tp_draft), max_rows, int(split_head), int(allow_copy),
                                   streams, -1 if context is None else int(context), int(bool(context_explicit)),
-                                  int(vision)],
+                                  int(vision), keep, int(prompt_precision.fp8())],      # precision last (same_on_ranks)
                                  dtype=torch.int64, device="cuda")
             both = torch.empty((2, flags.numel()), dtype=torch.int64, device="cuda")
             dist.all_gather_into_tensor(both, flags)
+            prompt_precision.same_on_ranks(int(both[0, -1]), int(both[1, -1]))
             if not torch.equal(both[0], both[1]):
                 raise RuntimeError("the two ranks were started with different settings (two-rank drafter, rows, "
-                                   f"head split, copies, --parallel, --context): rank 0 {both[0].tolist()}, rank 1 "
-                                   f"{both[1].tolist()}; pull the draft model on both machines, and pass the same "
-                                   "--no-drafts, --parallel and --context to both")
+                                   f"head split, copies, --parallel, --context, --checkpoint-slots): rank 0 "
+                                   f"{both[0].tolist()}, rank 1 {both[1].tolist()}; pull the draft model on both "
+                                   "machines, and pass the same --no-drafts, --parallel, --context and "
+                                   "--checkpoint-slots to both")
             gather = lambda values: gather_ints(torch, lambda send, recv: dist.all_gather_into_tensor(recv, send), values)
         else:
             gather = None
         many = streams > 1
-        geometry = ((lambda text: stream_geometry(text, tp, streams, KEEP)) if many else
-                    (lambda text: gdn_geometry(text, tp, max_rows)))
+        # prompt chunks sized to the card (4096 rows from 80 GB), the verify scratch to the rows a round takes
+        chunk = prompt_rows(total_bytes(torch), prompt_row_bytes(config(model_dir), tp))
+        geometry = ((lambda text: stream_geometry(text, tp, streams, keep, first=256 if tp == 1 else None)) if many
+                    else (lambda text: gdn_geometry(text, tp, max_rows, rows=max_rows, prompt=chunk, evicts=tp == 1)))
         # an affine checkpoint's packed words at their stored precision; an EXL3 pack's by its own format
-        tensor_bytes = weight_transform(model_dir)
+        tensor_bytes = weight_transform(model_dir, one_gpu=tp == 1)
         if exl3:
             geometry, tensor_bytes = admission(geometry)
         elif nvfp4:
@@ -90,9 +101,10 @@ class Qwen27Engine:
                                    vision_weights(tensor_bytes, vision, rank),
                                    rank=rank, world=tp, gather=gather,
                                    draft_dir=draft_dir if rank == 0 or tp_draft else None,
+                                   draft_weights=draft_weights,
                                    draft_geometry=lambda text: draft_geometry(text, tp if tp_draft else 1, max_rows,
                                                                               bounded=True, streams=streams,
-                                                                              kept=KEEP + 1 if many else 0),
+                                                                              kept=keep + 1 if many else 0),
                                    startup_copies=int(tp == 2))
         self.context_window = self.capacity_plan["context_window"]
         if tp == 2:
@@ -101,6 +113,7 @@ class Qwen27Engine:
         else:
             full = load(model_dir, tiled=True)
             self.w = full
+        self.w.prompt_rows = chunk
         self.draft = None
         if draft_dir is not None and (rank == 0 or (tp == 2 and tp_draft)):
             from .dflash2 import DFlash2
@@ -120,6 +133,12 @@ class Qwen27Engine:
         self.model_dir = Path(model_dir)
         self.points = resume_points(model_dir)              # message starts a prefill keeps states at
         self.cache = PrefixCache(KEEP_ONE)                  # (committed ids, state, drafter snapshot)
+        if tp == 1 and not many:              # one GPU: kept buffers stay inside the bytes admission left the caches
+            from tensorfold.cuda.streams import KVRoom
+
+            plan = self.capacity_plan
+            spare = plan["budget_bytes"] - plan["weight_bytes_estimate"] - plan["cache_workspace_bytes_estimate"]
+            self.room = KVRoom(self.cache, spare + live_kv(config(model_dir), 1, self.context_window))
         # ``streams`` > 1: up to that many requests decoded together, their windows verified in one forward
         self.concurrent = streams > 1
         self.multi = self.scheduler = None
@@ -129,12 +148,15 @@ class Qwen27Engine:
             from .multi import MultiDecoder
 
             self.multi = MultiDecoder(self.w, self.draft, allow_copy=allow_copy, rank=rank, world=tp,
-                                      context=self.capacity_plan["cache_slots"], keep=KEEP, points=self.points,
+                                      context=self.capacity_plan["cache_slots"], keep=keep, points=self.points,
                                       vision=self.vision)
             self.multi.model_dir = self.model_dir             # rank 1 compiles a request's grammar from it
             self.multi.calibrate(streams)
             if rank == 0:
-                print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens", flush=True)
+                print(f"[tensorfold] {streams} streams of {self.context_window} prompt/reply tokens, {keep} prompt "
+                      "states kept" if tp == 2 else
+                      f"[tensorfold] up to {streams} streams, each growing to {self.context_window} prompt/reply "
+                      f"tokens while memory lasts, {keep} prompt states kept", flush=True)
                 curve = ", ".join(f"{r}: {ms:.1f}" for r, ms in self.multi.costs)
                 print(f"[tensorfold] verify ms by rows (tree widths follow it): {curve}", flush=True)
                 self.scheduler = Scheduler(self.multi, max_streams=streams)
@@ -174,9 +196,7 @@ class Qwen27Engine:
 
     def generate(self, prompt: list[int], max_tokens: int, sampling, on_tokens: Callable[[list[int]], bool | None],
                  draft: bool = True, stop_eos: bool = True, *, vision=None, constraint=None, background=False):
-        """``draft=False``: serial decoding from a fresh prefill, no drafts, copies or kept states; ``stop_eos=False``:
-        past end tokens (``ignore_eos``); ``background``: under ``--parallel``, after the other requests and yielding a
-        lane to one that waits."""
+        """``draft=False``: serial re-runs, no drafts; ``background``: last under ``--parallel``, yielding lanes."""
 
         from .decode import draft_decode, prefill
 
@@ -207,7 +227,7 @@ class Qwen27Engine:
             drafter.restore(([None] * drafter.layers, [None] * drafter.layers, 0, 0))
         stops, keep = self._stops(prompt, hit, draft) if vision is None else ((), None)
         end = entry_end(prompt) if draft and vision is None and self._ends(prompt, stops) else None
-        st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None,
+        st, pending, *kept = prefill(self.w, prompt, sampling, drafter, state=hit[1] if hit else None, room=self.room,
                                      limit=self.context_window, stops=stops, keep=keep, keep_at=end, vision=encoded,
                                      **grammar)
         if end is not None:
@@ -217,7 +237,8 @@ class Qwen27Engine:
             return {"prefill_s": prefill_s, "cached": hit[1].pos if hit else 0}
         # the cache holds the state before the last prompt token, not ``st``: the decode may commit into it
         result = draft_decode(self.w, st, prompt, pending, max_tokens, sampling, drafter,
-                              max_rows=self.max_rows, allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
+                              max_rows=self.max_rows, tree_rows=self.tree_rows,
+                              allow_copy=self.allow_copy and draft, stop_eos=stop_eos,
                               on_tokens=on_tokens, inplace=True, **grammar)
         return {"prefill_s": prefill_s, "decode_s": result.seconds, "rounds": result.rounds,
                 "cached": hit[1].pos if hit else 0, "drafts": draft, "min_rows": min(result.widths, default=0),
