@@ -17,6 +17,18 @@ from .weight_types import (
     AttnW, Config, GDNW, HC, LayerW, MoEW, MTPW, PLEW, Weights, draft_token_ids, stop_ids)  # noqa: F401 (re-exported)
 
 
+_PLAIN = (torch.bfloat16, torch.float16, torch.float32)
+
+
+def _plain(name: str, w: torch.Tensor) -> torch.Tensor:
+    """``w`` if it holds real values a bf16 linear can take, else a refusal: quantized bytes cast to bf16 decode garbage."""
+
+    if w.dtype not in _PLAIN:
+        raise ValueError(f"{name}: {str(w.dtype).removeprefix('torch.')} weights without a scale this loader reads; "
+                         "Flash Next reads its non-expert linears as bf16, MXFP8 or 128x128-block FP8")
+    return w
+
+
 def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: tuple[int, int] | None = None,
          draft_vocab: int | str | None = None, ple_on_ssd: bool = False, table_reads: list | None = None) -> Weights:
     """Load rank ``tp``'s head, expert-width and vocabulary shares while replicating other weights; ``draft_vocab`` restricts draft scoring to default/file ids or ids below N, with None using all ids."""
@@ -89,6 +101,8 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         s = raw(name + ".weight_scale") if w.dtype == torch.float8_e4m3fn else None
         if s is not None and s.dtype != torch.uint8:
             raise ValueError(f"{name}: FP8 with a per-tensor scale; Flash Next reads MXFP8 (a scale every 32 inputs)")
+        if s is None:
+            _plain(name, w)
         if rows is not None:
             w, s = w[rows], None if s is None else s[rows]
         if cols is not None:
@@ -193,7 +207,7 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         full = raw(name + ".weight")
         w = full if index is None else full.index_select(0, index)
         if w.dtype != torch.float8_e4m3fn or not rd.has(prefix + name + ".weight_scale_inv"):
-            return w.to(torch.bfloat16)
+            return _plain(name, w).to(torch.bfloat16)
         from tensorfold.cuda.nvfp4.linear import Fp8BlockLinear
 
         cols = Fp8BlockLinear.column_scales(raw(name + ".weight_scale_inv"), *full.shape)

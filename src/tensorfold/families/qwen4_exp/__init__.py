@@ -67,6 +67,12 @@ def check(model_dir: Path) -> None:
             raise ValueError(f"TensorFold's Flash Next kernels read NVFP4 (ModelOpt FP4) weights in blocks of 16, the "
                              f"other linears bf16, MXFP8 or 128x128-block FP8 ({', '.join(NVFP4_MODELS)}); this checkpoint has "
                              + describe_quantization(config) + f". {OWN_MODEL_HELP}")
+        # NVFP4 is read in the routed experts only: anywhere else its packed bytes would load as bf16 values
+        outside = sorted(name for name, layer in (found.get("quantized_layers") or {}).items()
+                         if "NVFP4" in str(layer.get("quant_algo", "")).upper() and "experts" not in name.split("."))
+        if outside:
+            raise ValueError(f"TensorFold's Flash Next kernels read NVFP4 in the routed experts only; this checkpoint "
+                             f"has it on {len(outside)} other layer(s), e.g. {outside[0]}. {OWN_MODEL_HELP}")
         if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
             print("[tensorfold] this NVFP4 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
         return
