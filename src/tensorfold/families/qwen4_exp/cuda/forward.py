@@ -347,8 +347,11 @@ def _exl3_moe(m, w: Weights, b: Buffers, R: int) -> tuple:
         return 2, y.view(R, buf.slots, -1), buf.wts[:R]
     for r0 in range(0, R, MOE_WINDOW):
         n = min(MOE_WINDOW, R - r0)
-        y = routed(b.mixed[r0:r0 + n], buf.pick[r0:r0 + n], None, m.experts, w.x3.moe, None, n)
-        buf.y[r0:r0 + n].copy_(y.view(n, buf.slots, -1))
+        dst = buf.y[r0:r0 + n]
+        y = routed(b.mixed[r0:r0 + n], buf.pick[r0:r0 + n], None, m.experts, w.x3.moe, None, n,
+                   y_out=dst.view(n * buf.slots, -1))
+        if y.data_ptr() != dst.data_ptr():
+            dst.copy_(y.view(n, buf.slots, -1))
     return 2, buf.y[:R], buf.wts[:R]
 
 
