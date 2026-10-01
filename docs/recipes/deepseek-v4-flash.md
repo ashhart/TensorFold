@@ -206,7 +206,9 @@ inactive F32 primary shells; the shim subtracts only those uncommitted shells wh
 packed row and all workspaces in its resident quote. Both logical and resident estimates are reported.
 At context 262,144 and prefill batches of 2,048, the quotes are 8,300,789,656 logical bytes and
 4,693,498,776 resident-budget bytes. The context remains 262K; the batch size controls temporary memory.
-The native allocator's own fit checks remain enabled.
+The native allocator's own fit checks remain enabled. The donor's bounded 512-token/two-chunk boot
+prewarm also remains enabled; its 256 MiB growth allowance fits within the runtime reserve. Disabling it
+produced an intermittent bad first request on this Spark, even when later requests passed.
 
 Shared top-k sampling partitions the vocabulary before sorting candidates, including all threshold ties.
 It preserves token-ID ordering, nucleus/min-p rules and seed/position-keyed draws. A 129,280-logit CPU

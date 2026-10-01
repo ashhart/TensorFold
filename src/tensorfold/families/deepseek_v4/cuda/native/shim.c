@@ -39,8 +39,8 @@ int tf_ds4_open(const char *path, int context, int threads, tf_ds4 **out,
     opt.backend = (ds4_backend)tf_ds4_backend();
     opt.n_threads = threads;
     opt.power_percent = 100;
-    /* No MTP, DSpark, distributed execution, graph snapshots or boot warmup. */
-    opt.defer_boot_prewarm = true;
+    /* No MTP, DSpark, distributed execution or graph snapshots.
+     * Keep the donor's bounded boot prewarm before accepting requests. */
     if (ds4_engine_open(&ctx->engine, &opt) ||
         ds4_session_create(&ctx->session, ctx->engine, context)) {
         snprintf(err, cap, "native engine/session initialization failed");

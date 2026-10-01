@@ -17,7 +17,6 @@ from .build import PIN
 
 NATIVE_ENV = {
     "DS4_WEIGHT_RESIDENCY_BASE": "mapped",
-    "DS4_NO_BOOT_PREWARM": "1",
     "DS4_MEM_FLOOR_GB": "8",
     "DS4_CUDA_BUILD_ARTIFACTS": "1",
     "DS4_METAL_PREFILL_CHUNK": "2048",
@@ -29,7 +28,7 @@ NATIVE_ENV = {
 
 def _policy():
     os.environ.update(NATIVE_ENV)
-    for key in ("DS4_DSPARK_MODEL", "DS4_CUDA_WEIGHT_IPC_MANIFEST"):
+    for key in ("DS4_DSPARK_MODEL", "DS4_CUDA_WEIGHT_IPC_MANIFEST", "DS4_NO_BOOT_PREWARM"):
         os.environ.pop(key, None)
 
 
