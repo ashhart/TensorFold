@@ -221,6 +221,7 @@ def test_no_effort_leaves_the_template_its_own_default():
 
 @pytest.mark.parametrize("names, effort, want", [
     ("{# 'low' 'high' #}", "medium", "high"),      # GLM-5.3 names no medium: the higher of the two levels as near
+    ("{# 'low' 'high' #}", "max", "high"),         # max is unnamed here, so the nearest name is high, not xhigh
     ("{# 'low' 'high' #}", "xhigh", "xhigh"),      # the else-branch is the template's own ceiling: as sent
     ("{# 'low' 'high' #}", "low", "low"),
     ("{# 'low' 'high' #}", "high", "high"),
@@ -321,6 +322,9 @@ def test_nearest_named_effort_direct():
     assert nearest("medium", frozenset()) == "medium"                   # no named levels: as sent
     assert nearest("none", frozenset({"low", "high"})) == "none"        # none is not a level: as sent
     assert nearest("medium", frozenset({"low", "high"})) == "high"      # the GLM-5.3 tie: upward
+    assert nearest("max", frozenset({"xhigh", "high"})) == "xhigh"
+    assert nearest("max", frozenset({"low", "high"})) == "high"
+    assert nearest("max", frozenset({"low", "high", "max"})) == "max"
 
 
 def test_glm_medium_with_thinking_forced_off_reaches_no_effort():
