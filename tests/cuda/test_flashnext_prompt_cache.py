@@ -1,11 +1,4 @@
-"""Flash Next's kept prompt states: mid-prompt stops leave prefill and decode unchanged, and a next turn whose
-history renders the last token differently (the generation prompt's newline against a sent-back turn's two)
-resumes from the entry kept one token early, byte-identical to a fresh run.
-
-A chat prompt ends in ```` and a newline; a next request that sends the turn back without its reasoning renders
-an empty reasoning block, ```` and two newlines, so only ``prompt[:n - 1]`` is a prefix of it — the entry
-ends at ``entry_end``, and message-start stops keep the states a fork at an earlier turn resumes from.
-"""
+"""Flash Next message-start snapshots and fork lanes preserve fresh-prefill and serial bits."""
 
 import pytest
 import torch
@@ -15,7 +8,7 @@ if not torch.cuda.is_available():
 
 import numpy as np  # noqa: E402
 
-from test_flashnext_forward import V, _model  # noqa: E402
+from test_flashnext_forward import V, _model, _rows  # noqa: E402
 
 from tensorfold.cuda.streams import Stream  # noqa: E402
 from tensorfold.engine.exact_sampling import Sampling  # noqa: E402
@@ -53,6 +46,9 @@ def _assert_same_state(a: State, b: State) -> None:
         assert _same_bits(la.k[:a.pos], lb.k[:b.pos]) and _same_bits(la.v[:a.pos], lb.v[:b.pos])
     for ia, ib in zip(a.ikc, b.ikc):
         assert _same_bits(ia[:a.pos], ib[:b.pos])
+    for ka, kb in zip(_rows(a.mtp_kc, a.mtp_len), _rows(b.mtp_kc, b.mtp_len)):
+        assert _same_bits(ka, kb)
+    assert _same_bits(a.mtp_ikc[:a.mtp_len], b.mtp_ikc[:b.mtp_len])
 
 
 @pytest.fixture(scope="module")
@@ -61,7 +57,7 @@ def w():
 
 
 def _engine(w, sampling) -> tuple[Engine, list[dict]]:
-    """A toy-width engine over one state, and the keeps its prefills take."""
+    """Build a toy-width engine over one state."""
 
     e = Engine(w, capacity=1024, max_rows=8, prefill_rows=CHUNK)
     return e, []
@@ -74,8 +70,7 @@ def _run(e: Engine, prompt, sampling, *, stops=(), keep=None, resume=None):
 @pytest.mark.parametrize("n", [8, 17, 33, 64, 130])
 @pytest.mark.parametrize("cuts", [[], [7], [3, 9], [CHUNK - 1, CHUNK, CHUNK + 1], [1], [64]])
 def test_stops_leave_the_prefill_and_the_kept_states_fresh(w, n, cuts):
-    """A prompt prefilled with keeps at arbitrary points (odd sizes, chunk boundaries) ends as one without them:
-    same first token, state and MTP head, and every kept state and tail is a fresh prefill of its own prefix's."""
+    """Arbitrary stop points preserve the final state and each saved prefix bit for bit."""
 
     sampling = Sampling(seed=31, top_k=20, top_p=0.95)
     prompt = _prompt(n, seed=n)
@@ -92,6 +87,7 @@ def test_stops_leave_the_prefill_and_the_kept_states_fresh(w, n, cuts):
     first = _run(mine, prompt, sampling, stops=stops, keep=keep)
     assert first == first_ref
     _assert_same_state(mine.st, ref)
+    assert set(keeps) == set(stops)
     for p, (snap, tail) in keeps.items():
         fresh = Engine(w, capacity=1024, max_rows=8, prefill_rows=CHUNK)
         _run(fresh, prompt[:p], sampling)
@@ -102,15 +98,14 @@ def test_stops_leave_the_prefill_and_the_kept_states_fresh(w, n, cuts):
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=99, top_k=20, top_p=0.95)])
 @pytest.mark.parametrize("base", [16, 40, 130])
 def test_a_turn_sent_back_without_its_reasoning_resumes_from_one_token_early(w, sampling, base):
-    """``...<think>\\n`` then ``...<think>\\n\\n</think>\\n\\n...``: the entry at n - 1 resumes the next turn, which
-    ends in a fresh prefill's state, first token and reply."""
+    """A rendered follow-up resumes from the prompt entry and matches fresh prefill and decode."""
 
     head = _prompt(base, seed=base)
     first = head + [THINK, NL]
     second = head + [THINK, NL2, END_THINK, NL2] + _prompt(7, seed=3) + [THINK, NL]
     assert second[:len(first) - 1] == first[:-1] and second[len(first) - 1] != first[-1]
     e = Engine(w, capacity=1024, max_rows=8, prefill_rows=CHUNK)
-    first_ref = _run(e, first, sampling)
+    _run(e, first, sampling)
     keeps: list[tuple[int, dict, torch.Tensor | None]] = []
 
     def keep(p, snap, tail):
@@ -134,8 +129,7 @@ def test_a_turn_sent_back_without_its_reasoning_resumes_from_one_token_early(w, 
 @pytest.mark.parametrize("fork", [64, 129])
 @pytest.mark.parametrize("gap", [1, 2, 17])
 def test_a_fork_at_an_earlier_message_resumes_from_a_mid_prompt_keep(w, fork, gap):
-    """Message-start keeps hold states an earlier divergence resumes from: a prompt that follows the kept prefix
-    then parts ways with it prefills only its own tokens and ends fresh."""
+    """An earlier divergence resumes its shared message prefix and leaves a fresh state."""
 
     sampling = Sampling(seed=17, top_k=20, top_p=0.95)
     head = _prompt(fork, seed=fork)
@@ -158,7 +152,7 @@ def test_a_fork_at_an_earlier_message_resumes_from_a_mid_prompt_keep(w, fork, ga
 
 
 def _engine_shim(w, points=None) -> FlashNextEngine:
-    """A serial engine over the toy weights, without the loader: the generate() path and its cache."""
+    """Build a serial engine over toy weights without loading a checkpoint."""
 
     engine = object.__new__(FlashNextEngine)
     engine.tp, engine.rank, engine.depth, engine.confidence = 1, 0, 1, 0.3
@@ -185,9 +179,7 @@ def _generate(engine, prompt, sampling, max_tokens=12, **kwargs) -> tuple[list[i
 @pytest.mark.parametrize("sampling", [None, Sampling(seed=4321, top_k=20, top_p=0.95)])
 @pytest.mark.parametrize("base", [40, 130])
 def test_the_engine_resumes_the_next_turn_exactly(w, sampling, base):
-    """End to end, serial: the first turn's entry ends one token early, the second (rendered without its
-    reasoning) resumes from it, its reply is a fresh engine's and the serial reference's, and the entries it
-    leaves equal fresh prefills of their own tokens."""
+    """The engine keeps a valid prefix chain and matches a fresh serial reply."""
 
     head = _prompt(base, seed=base)
     first = head + [THINK, NL]
@@ -211,10 +203,7 @@ def test_the_engine_resumes_the_next_turn_exactly(w, sampling, base):
 
 @pytest.mark.parametrize("points", [None, lambda ids: [len(ids) // 2]])
 def test_the_concurrent_decoder_resumes_forks_and_next_turns(w, points):
-    """``--parallel``: slots keep message-start states and the entry one token early. A turn that extends a
-    kept prompt resumes its entry; a fork takes a free lane of its own (it would overwrite the longer entries
-    its mid match holds) and, with no lane spare, resumes the mid entry; every reply is the serial
-    reference's."""
+    """Forks preserve longer chains in spare lanes and resume earlier entries when no lane is spare."""
 
     sampling = Sampling(seed=77, top_k=20, top_p=0.95)
     shared = _prompt(600, seed=9)                                  # past MIN_GAP, so the points' keep survives
@@ -254,3 +243,53 @@ def test_the_concurrent_decoder_resumes_forks_and_next_turns(w, points):
         assert ids_list == sorted(ids_list, key=len)
         for shorter, longer in zip(ids_list, ids_list[1:]):
             assert longer[:len(shorter)] == shorter
+
+
+@pytest.mark.parametrize("sampling", [None, Sampling(seed=51, top_k=20, top_p=0.95)])
+def test_three_resends_then_an_earlier_fork_keep_fresh_state_bits(w, sampling):
+    shared = _prompt(300, seed=8)
+    prompt = shared + _prompt(25, seed=12)
+    engine = _engine_shim(w, points=lambda ids: [len(shared)])
+    for turn in range(3):
+        got, stats = _generate(engine, prompt, sampling)
+        assert stats["cached"] == (len(prompt) - 1 if turn else 0)
+        assert got == _generate(_engine_shim(w), prompt, sampling, draft=False)[0]
+        for ids, snap in engine.cache:
+            fresh = Engine(w, capacity=1024, max_rows=8, prefill_rows=CHUNK)
+            prefill(fresh, ids, sampling)
+            assert _same_snap(snap["state"], fresh.st.snapshot())
+            assert _same_bits(snap["tail"], fresh.last_streams)
+    fork = shared + _prompt(31, seed=13)
+    got, stats = _generate(engine, fork, sampling)
+    assert stats["cached"] == len(shared)
+    assert got == _generate(_engine_shim(w), fork, sampling, draft=False)[0]
+
+
+@pytest.mark.parametrize("keep_at", [7, 12])
+def test_explicit_kept_point_and_message_stops_are_all_retained(w, keep_at):
+    prompt, saved = _prompt(33), {}
+    engine = Engine(w, capacity=1024, max_rows=8, prefill_rows=CHUNK)
+    first = prefill(engine, prompt, None, keep_at=keep_at, stops=[3, 9],
+                    keep=lambda p, snap, tail: saved.update({p: {"state": snap, "tail": tail}}))
+    assert set(saved) == {3, 9, keep_at}
+    assert engine.kept["state"]["pos"] == keep_at
+    fresh = Engine(w, capacity=1024, max_rows=8, prefill_rows=CHUNK)
+    assert first == prefill(fresh, prompt, None)
+    _assert_same_state(engine.st, fresh.st)
+    for p, snap in saved.items():
+        prefill(fresh, prompt[:p], None)
+        assert _same_snap(snap["state"], fresh.st.snapshot())
+        assert _same_bits(snap["tail"], fresh.last_streams)
+
+
+def test_filling_requests_do_not_retain_evicted_snapshot_references(w):
+    prompt = _prompt(700)
+    dec = MultiDecoder(w, slots=1, capacity=1024, depth=1, prefill_rows=300, points=lambda ids: [300], keep=1)
+    stream = Stream(prompt, 4, stop_eos=False)
+    dec.admit(stream)
+    dec._pass()
+    assert stream in dec.filling and len(dec.kept) == 1
+    assert dec.fills[stream.sid][3] is None
+    while dec.live():
+        dec.finish(dec.round())
+    assert len(dec.kept) == 1

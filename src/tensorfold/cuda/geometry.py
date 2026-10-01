@@ -157,7 +157,8 @@ def live_kv(t: dict, world: int, window: int) -> int:
 
 
 def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
-                 kv_bits: int = 16, rows: int | None = None, prompt: int = 0, evicts: bool = False) -> Geometry:
+                 kv_bits: int = 16, rows: int | None = None, prompt: int = 0, evicts: bool = False,
+                 kept: int = 2) -> Geometry:
     """``rows``: widest verify; ``prompt``: chunk rows sharing its scratch; ``evicts``: only the live window counts."""
 
     linear, attention = layer_counts(t)
@@ -171,8 +172,8 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
     index_dim, ratio = int(t.get("indexer_head_dim", 128)), int(t.get("indexer_compress_ratio", 4))
     width = 2 * nk * dk + 2 * nv * dv + 2 * nv
     # Persistent state, retained recurrent prefixes, rollback and row replay inputs.
-    fixed = linear * ((6 if indexed else 4) * nv * dk * dv * 4 +
-                      4 * (conv - 1) * (2 * nk * dk + nv * dv) * 2)
+    fixed = linear * ((4 + kept if indexed else 4) * nv * dk * dv * 4 +
+                      (2 + kept if indexed else 4) * (conv - 1) * (2 * nk * dk + nv * dv) * 2)
     rows = rows or (64 if indexed else 128)
     fixed += linear * rows * (width * 2 + nk * dk * 4 + nv * dv * 4 + nv * 8)
     # Bound the concurrent activation arrays, MoE expert rows, logits and split-K scratch.
@@ -182,7 +183,9 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
     fixed += max(16 * rows * extent * 4, prompt * prompt_row_bytes(t, world) if prompt else 0)
     fixed += (2 if mtp else 1) * 32 * rows * 2560 * 4
     if indexed:
-        fixed += 4 * (int(t.get("ple_conv_kernel_size", 4)) - 1) * int(t.get("ngram_size", 3)) * streams * d * 2
+        fixed += ((2 + kept) * (int(t.get("ple_conv_kernel_size", 4)) - 1) * int(t.get("ngram_size", 3))
+                  * streams * d * 2)
+        fixed += int(mtp) * kept * streams * d * 2
         fixed += PREFILL_ROWS * _indexed_prefill_row(t, world, h, hk, hd, nv, dv, width, slots, intermediate)
     count = attention + int(mtp)
     budget = int(t.get("indexer_budget", 2048))
@@ -400,7 +403,7 @@ def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp:
     conv = linear * (int(t["linear_conv_kernel_dim"]) - 1) * (2 * nk * dk + nv * dv) * 2
     tail = (int(t.get("ple_conv_kernel_size", 4)) - 1) * int(t.get("ngram_size", 3)) * hc * d * 2
     fixed = streams * (2 * rec + conv + tail + linear * each * (nk * dk * 4 + nv * dv * 4 + nv * 8))
-    fixed += (min(keep, streams) + 1) * (rec + conv + tail)     # a snapshot is taken before a kept one leaves
+    fixed += (keep + streams) * (rec + conv + tail + int(mtp) * hc * d * 2)  # retained plus this pass's cuts
     slots = int(t.get("num_experts_per_tok", 1)) + 1
     moe = int(t.get("moe_intermediate_size", t.get("intermediate_size", d)))
     extent = d * hc + int(t["vocab_size"]) + slots * (moe + d) + width + h * hd

@@ -281,11 +281,11 @@ def prefill_begin(e: Engine, prompt: Sequence[int], *, mtp: bool = True, resume:
 
 @torch.no_grad()
 def prefill_chunk(e: Engine, prompt: Sequence[int], start: int, *, mtp: bool = True,
-                  keep_at: int | None = None) -> torch.Tensor | None:
+                  keep_at: int | None = None, end: int | None = None) -> torch.Tensor | None:
     """Commit up to ``e.prefill_rows`` rows from ``start`` (the last chunk returns its logits); a chunk holding ``keep_at`` sets ``e.kept``."""
 
     w, st, pb = e.w, e.st, e.pbuf
-    end = min(start + e.prefill_rows, len(prompt))
+    end = min(start + e.prefill_rows, len(prompt) if end is None else end)
     chunk = list(prompt[start:end])
     R = len(chunk)
     final = end == len(prompt)
@@ -312,16 +312,29 @@ def prefill_chunk(e: Engine, prompt: Sequence[int], start: int, *, mtp: bool = T
 
 @torch.no_grad()
 def prefill(e: Engine, prompt: Sequence[int], sampling: Sampling | None, *, mtp: bool = True,
-            resume: dict | None = None, constraint=None, probabilities=None, keep_at: int | None = None) -> int:
+            resume: dict | None = None, constraint=None, probabilities=None, keep_at: int | None = None,
+            stops: Sequence[int] = (), keep=None) -> int:
     """Commit the prompt in chunks and sample the first token (``resume`` equals a fresh run); ``e.kept`` resumes prompt[:keep_at]."""
 
     start, last = prefill_begin(e, prompt, mtp=mtp, resume=resume), None
     if keep_at is not None and not start <= keep_at <= len(prompt):
         raise ValueError(f"keep_at {keep_at} is outside the prefilled range [{start}, {len(prompt)}]")
-    e.kept = resume if keep_at == start else None                 # the same prompt again: its own point
+    saved = e.kept = resume if keep_at == start else None
+    stops = sorted({p for p in stops if start < p < len(prompt)})
     while start < len(prompt):
-        last = prefill_chunk(e, prompt, start, mtp=mtp, keep_at=keep_at)
-        start += e.prefill_rows
+        end = min(start + e.prefill_rows, next((p for p in stops if p > start), len(prompt)))
+        if keep_at is not None and start < keep_at < end and end in stops:
+            end = keep_at
+        point = keep_at if keep_at is not None and start < keep_at <= end else end if end in stops else None
+        last = prefill_chunk(e, prompt, start, mtp=mtp, keep_at=point, end=end)
+        if point is not None:
+            if point == keep_at:
+                saved = e.kept
+            if keep is not None:
+                keep(point, e.kept["state"], e.kept["tail"])
+        start = end
+    if keep_at is not None:
+        e.kept = saved
     if constraint is not None:                           # a reply's grammar: this rank's vocabulary columns
         last = constraint.mask(last, None, e.w.meta.get("vocab_offset", 0))
     first = e.sample(last, [len(prompt)], sampling)[0]

@@ -69,7 +69,8 @@ class FlashNextEngine:
         # one admission for one stream or many (every slot, the shared rows and kept snapshots), before any load
         geometry = ((lambda text: indexed_stream_geometry(text, streams, each, KEEP, mtp=mtp, kv_bits=bits))
                     if streams > 1 else
-                    (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp, kv_bits=bits)))
+                    (lambda text: gdn_geometry(text, tp, each, indexed=True, mtp=mtp, kv_bits=bits,
+                                               kept=KEEP_SERIAL + 1)))
         if exl3:
             geometry = admission(geometry)
         self.capacity_plan = admit(model_dir, max_len, context_explicit, torch, geometry,
@@ -114,7 +115,8 @@ class FlashNextEngine:
 
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
-                                      confidence=self.confidence, keep=KEEP, points=self.points, kv_dtype=self.kv_dtype, share=share)
+                                      confidence=self.confidence, keep=KEEP, points=self.points,
+                                      kv_dtype=self.kv_dtype, share=share)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
@@ -192,7 +194,9 @@ class FlashNextEngine:
                stop_eos: bool = True) -> tuple:
         from tensorfold.engine.grammar import pack
 
+        points = getattr(self, "points", None)
         body = {"prompt": prompt, "max_tokens": max_tokens, "draft": bool(draft), "cached": int(cached),
+                "points": list(points(prompt)) if draft and points is not None else [],
                 "stop_eos": bool(stop_eos),
                 "sampling": None if sampling is None else [int(sampling.seed), float(sampling.temperature),
                                                            int(sampling.top_k), float(sampling.top_p),
@@ -228,7 +232,8 @@ class FlashNextEngine:
             return None
         s = body["sampling"]
         return (body["prompt"], body["max_tokens"], None if s is None else Sampling(*s),
-                body["draft"], body["cached"], body.get("grammar") or [], body.get("stop_eos", True))
+                body["draft"], body["cached"], body.get("grammar") or [], body.get("stop_eos", True),
+                body.get("points", []))
 
     @property
     def context_window(self) -> int:
@@ -289,16 +294,24 @@ class FlashNextEngine:
         return stats
 
     def _decode(self, prompt: list[int], max_tokens: int, sampling, on_tokens, hit, constraint=None,
-                stop_eos: bool = True, probabilities=None) -> dict[str, Any]:
+                stop_eos: bool = True, probabilities=None, points=None) -> dict[str, Any]:
         import torch
 
         from .decode import entry_end, mtp_decode, prefill, serial_decode
 
         t0 = time.perf_counter()
         self._start_from(hit)
-        end = entry_end(prompt)
+        from tensorfold.cuda.markers import MIN_GAP
+
+        end, cached = entry_end(prompt), len(hit[0]) if hit else 0
+        markers = getattr(self, "points", None)
+        if points is None:
+            points = markers(prompt) if markers is not None else []
+        stops = [p for p in points if cached + MIN_GAP <= p < end]
+        def keep(p, snap, tail):
+            self._remember(list(prompt[:p]), {"state": snap, "tail": tail})
         first = prefill(self.e, prompt, sampling, resume=hit[1] if hit else None, constraint=constraint,
-                        probabilities=probabilities, keep_at=end)
+                        probabilities=probabilities, keep_at=end, stops=stops, keep=keep)
         # the state one token before the prompt's end, so the same prompt or a next turn resumes from it
         self._remember(list(prompt[:end]), self.e.kept)
         torch.cuda.synchronize()
@@ -331,15 +344,17 @@ class FlashNextEngine:
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
                                          **grammar, **({"background": True} if background else {}), probabilities=probabilities)
         hit = self._resume(prompt) if draft else None
+        points = None
         if self.tp == 2:                     # rank 0 decodes exactly what it hands rank 1
-            prompt, max_tokens, sampling, draft, _, _, stop_eos = self._share(
+            prompt, max_tokens, sampling, draft, _, _, stop_eos, points = self._share(
                 prompt, max_tokens, sampling, draft, len(hit[0]) if hit else 0, constraint, stop_eos)
             self.served += 1
             emit = on_tokens
             on_tokens = lambda new: (emit(new), False)[1]       # noqa: E731  both ranks decode to the end
         if not draft:
             return self._serial(prompt, max_tokens, sampling, on_tokens, constraint, stop_eos, probabilities=probabilities)
-        return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos, probabilities=probabilities)
+        return self._decode(prompt, max_tokens, sampling, on_tokens, hit, constraint, stop_eos,
+                            probabilities=probabilities, points=points)
 
     def follow(self) -> None:
         """Rank 1: decode every request rank 0 serves, until rank 0 stops."""
@@ -348,7 +363,7 @@ class FlashNextEngine:
             request = self._receive()
             if request is None:
                 return
-            prompt, max_tokens, sampling, draft, cached, packed, stop_eos = request
+            prompt, max_tokens, sampling, draft, cached, packed, stop_eos, points = request
             constraint = None
             if packed:                                      # the request's grammar, compiled here as on rank 0
                 from tensorfold.engine import grammar
@@ -363,7 +378,7 @@ class FlashNextEngine:
                     raise RuntimeError(f"rank 1 has no kept state for the {cached} tokens rank 0 resumes from")
             try:
                 if draft:
-                    self._decode(prompt, max_tokens, sampling, None, hit, constraint, stop_eos)
+                    self._decode(prompt, max_tokens, sampling, None, hit, constraint, stop_eos, points=points)
                 else:
                     self._serial(prompt, max_tokens, sampling, None, constraint, stop_eos)
             except ValueError as exc:                       # rank 0 raised at the same point on the same input

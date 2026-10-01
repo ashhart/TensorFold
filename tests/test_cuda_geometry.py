@@ -268,3 +268,34 @@ def test_mla_exl3_scratch_and_buffers_are_budgeted(monkeypatch, allocations, mtp
     mod.State(weights, cap, 64)
     estimated = geometry.mla_geometry(text, 2, 16, latent=True).bytes_at(cap)
     assert bytes_in(arrays) <= estimated - geometry.mla_chunk_scratch(text, 2, cap, latent=True)
+
+
+@pytest.mark.torch
+@pytest.mark.parametrize("world", [1, 2])
+@pytest.mark.parametrize("mtp", [False, True])
+def test_flash_message_snapshot_budget_counts_actual_saved_tensors(world, mtp):
+    import torch
+    from tensorfold.families.qwen4_exp.cuda.state import State
+
+    text = {"hidden_size": 512, "num_attention_heads": 8, "num_key_value_heads": 2, "head_dim": 64,
+            "layer_types": ["linear_attention", "full_attention"] * 2,
+            "linear_num_key_heads": 2, "linear_num_value_heads": 4, "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4, "vocab_size": 1024, "hc_count": 4}
+    cfg = SimpleNamespace(hidden=512, streams=4, conv_kernel=4, conv_dim=1024 // world,
+                          nk=2 // world, nv=4 // world, dk=128, dv=128, kv_heads=2 // world,
+                          head_dim=64, index_dim=128, index_ratio=4, ple_kernel=4, ngram_size=3, ple_layers=[])
+    weights = SimpleNamespace(cfg=cfg, device="cpu", layers=[SimpleNamespace(index=i, linear=i % 2 == 0)
+                                                           for i in range(4)], mtp=object() if mtp else None)
+    state = State(weights, 32, 8)
+    snapshot = state.snapshot()
+    tensors = [value for value in snapshot.values() if isinstance(value, torch.Tensor)]
+    if mtp:
+        tensors.append(torch.zeros((1, cfg.hidden * cfg.streams), dtype=torch.bfloat16))
+    saved = sum(t.numel() * t.element_size() for t in tensors)
+    low = geometry.gdn_geometry(text, world, 8, indexed=True, mtp=mtp, kept=2).bytes_at(32)
+    high = geometry.gdn_geometry(text, world, 8, indexed=True, mtp=mtp, kept=5).bytes_at(32)
+    assert high - low == 3 * saved
+    if world == 1:
+        low = geometry.indexed_stream_geometry(text, 2, 4, 2, mtp=mtp).bytes_at(32)
+        high = geometry.indexed_stream_geometry(text, 2, 4, 8, mtp=mtp).bytes_at(32)
+        assert high - low == 6 * saved

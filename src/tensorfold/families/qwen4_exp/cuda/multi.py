@@ -10,6 +10,7 @@ import torch
 from tensorfold.cuda.logprobs import capture
 
 from tensorfold.cuda.capacity import available_bytes
+from tensorfold.cuda.markers import MIN_GAP
 from tensorfold.cuda.memory_gate import MemoryGate, NoRoom, torch_live
 from tensorfold.cuda.sampling import sample_streams
 from tensorfold.cuda.streams import Stream, accept
@@ -35,6 +36,7 @@ def _slot(w, st: State, buf: Buffers, mbuf: Buffers, pbuf: Buffers, capacity: in
     e = object.__new__(Engine)
     e.w, e.capacity, e.rows, e.prefill_rows = w, capacity, buf.rows, prefill_rows
     e.buf, e.mbuf, e.pbuf, e.st, e.graphs = buf, mbuf, pbuf, st, None
+    e.stops = ()
     return e
 
 
@@ -219,8 +221,11 @@ class MultiDecoder:
         try:
             begin = prefill_begin(e, s.prompt, mtp=mtp, resume=resume)
         except Exception:
+            self._drop_kept(st)
             self.free.append(st)
             raise
+        e.stops = sorted({p for p in self.points(s.prompt) if begin + MIN_GAP <= p < entry_end(s.prompt)}) \
+            if s.draft and self.points is not None else []
         s.sid, s.st = self.next_id, st
         self.next_id += 1
         s.prefill_s = time.perf_counter() - t0
@@ -261,7 +266,7 @@ class MultiDecoder:
         pieces, room = [], self.prefill_rows if rows is None else rows
         for s in sorted(self.filling, key=lambda x: x.background):     # foreground prompts first, each oldest first
             e, mtp, start, _ = self.fills[s.sid]
-            n = min(len(s.prompt) - start, room)
+            n = min(next((p for p in e.stops if p > start), len(s.prompt)) - start, room)
             ends = sum(1 for x, a, k in pieces if a + k == len(x.prompt))
             if n == 0 or (start + n == len(s.prompt) and ends == ENDS):
                 break
@@ -296,11 +301,18 @@ class MultiDecoder:
 
         return entry_end(s.prompt) if s.draft else None
 
+    def _point(self, s: Stream, start: int) -> int | None:
+        """The next message-start or prompt-end snapshot this prompt piece can reach."""
+
+        if not s.draft:
+            return None
+        return next((p for p in self.fills[s.sid][0].stops if p > start), self._keep_at(s))
+
     def _cuts(self, pieces, segs) -> list[Cut]:
         """The kept points strictly inside the pass's pieces, where their DeltaNet chains split."""
 
         return [Cut(k - a, at=a0) for (s, a, n), (_, a0, _) in zip(pieces, segs)
-                if (k := self._keep_at(s)) is not None and a < k < a + n]
+                if (k := self._point(s, a)) is not None and a < k < a + n]
 
     def _absorb(self, pieces, segs, cuts=()) -> list[torch.Tensor]:
         """After a pass's forward: each prompt's last row and kept point, the MTP head's absorb, the commits."""
@@ -308,7 +320,7 @@ class MultiDecoder:
         lasts = [self.pbuf.streams[a1 - 1:a1].clone() for _, _, a1 in segs]
         at, points = {cut.at: cut for cut in cuts}, []
         for (s, a, n), (st, a0, _) in zip(pieces, segs):      # before the MTP head writes the pass's streams
-            k = self._keep_at(s)
+            k = self._point(s, a)
             if k is None or not a < k <= a + n:
                 continue
             row, mtp = k - a, self.fills[s.sid][1]
@@ -336,6 +348,7 @@ class MultiDecoder:
             s.error, s.done = exc, True
             self.filling.remove(s)
             self.fills.pop(s.sid)
+            self._drop_kept(s.st)
         return failed                                    # finish() frees their slots
 
     def _joined(self, pieces, heads, lasts, spent: float) -> list[Stream]:
@@ -346,6 +359,9 @@ class MultiDecoder:
             s.prefill_s += spent
             e, mtp, _, kept = self.fills[s.sid]
             self.fills[s.sid][2] = a + n
+            if kept is not None and a < kept[0]["pos"] <= a + n:
+                self._remember(list(s.prompt[:kept[0]["pos"]]), s.st, *kept)
+            self.fills[s.sid][3] = None                    # only the bounded cache owns a stored snapshot
             if a + n < len(s.prompt):
                 continue
             self.filling.remove(s)
@@ -360,8 +376,6 @@ class MultiDecoder:
             if s.constraint is not None:
                 s.constraint.advance([first])
             head += 1
-            if s.draft:                # the state one token before the prompt's end, which a next turn extends
-                self._remember(list(s.prompt[:self._keep_at(s)]), st, *kept)
             s.context = list(s.prompt)
             s.drafts = draft(e, last, [first], st.pos + 1, min(self.depth, s.count - 1), s.sampling,
                              self.confidence) if mtp and s.count > 1 else []
