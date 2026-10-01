@@ -6,6 +6,7 @@ import inspect
 import json
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -489,6 +490,7 @@ class App:
         if tail:
             final["content"] = tail
         finish = "tool_calls" if calls else ("stop" if stopped["stop"] or (out and out[-1] in ends) else "length")
+        print_done(len(prompt), (cached or [0])[0], thinking, out, finish, stats, request)
         if body.get("return_token_ids"):              # the reply's ids in the "tensorfold" block, for exactness checks
             stats = {**(stats or {}), "token_ids": [int(t) for t in out]}
         logprobs = (self._probability_decoder.format(probabilities.emitted(out), ends)
@@ -552,6 +554,21 @@ def token_sha(tokens: list[int]) -> str:
     """A reply's token ids, hashed as the Mac server does: drafted and ``"draft": false`` replies must match."""
 
     return hashlib.sha256(",".join(str(int(t)) for t in tokens).encode()).hexdigest()[:12]
+
+
+def print_done(prompt: int, cached: int, thinking: bool, out: list[int], finish: str, stats: dict[str, Any],
+               request: Any) -> None:
+    """The Mac server's ``done`` line for a finished reply; tok/s runs from the first token to the last."""
+
+    ended = time.perf_counter()
+    first, started = getattr(request, "first", None), getattr(request, "started", ended)
+    decode = ended - first if first is not None else 0.0
+    rate = (len(out) - 1) / decode if decode > 0 and len(out) > 1 else 0.0
+    print(f"[tensorfold] done req-{uuid.uuid4().hex[:12]} prompt={prompt} cached={cached} thinking={thinking} "
+          f"tokens={len(out)} sha={token_sha(out)} finish={finish} tok/s={rate:.1f} "
+          f"ttft={(first - started) if first is not None else -1:.2f}s prefill={stats.get('prefill_s', -1):.2f}s "
+          f"rounds={stats.get('rounds', 0)} accepted={stats.get('accepted', 0)}/{stats.get('drafted', 0)}",
+          flush=True)
 
 
 from tensorfold.cuda.http import Server, make_handler, serve, usage_of  # noqa: E402,F401  (the HTTP side)
