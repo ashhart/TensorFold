@@ -22,6 +22,7 @@ TOKEN_BYTES = 3200 + 768 + 512 * 4 // 8 + 512 // 8
 NATIVE_CONTEXT = 1048576         # the model's window (config max_position_embeddings)
 FIXED_GIB = float(os.environ.get("TF_DSV41_FIXED_GIB") or "4")      # engine buffers 2.7 + prompt transients 1.0 (measured)
 RESERVE_GIB = float(os.environ.get("TF_DSV41_RESERVE_GIB") or "2.5")  # left to the OS (unified memory: an OOM wedges)
+PROMPT_TRANSIENT_GIB = 1.5       # a prompt chunk's buffers beyond the context's (expert Z, GEMM workspace, ...)
 
 
 def available_bytes() -> int:
@@ -138,6 +139,25 @@ class Dsv41Engine:
                   f"{torch.cuda.memory_allocated() / 2 ** 30:.1f} GiB a rank", flush=True)
         if warm and os.environ.get("TF_DSV41_WARM", "1") != "0":
             self._warm()
+        self._make_pool(cap)
+
+    def _make_pool(self, cap: int) -> None:
+        """Kept prompt states (``tensorfold.cuda.kv_pool``) in what the context's prompt buffers and the reserve
+        leave; both ranks keep the smaller budget, so their pools stay identical."""
+
+        from tensorfold.cuda.kv_pool import PrefixPool
+
+        transient = int(PROMPT_TRANSIENT_GIB * 2 ** 30) + (TOKEN_BYTES - 3200 - 768) * cap
+        mine = max(0, available_bytes() - int(RESERVE_GIB * 2 ** 30) - transient)
+        asked = os.environ.get("TF_DSV41_POOL_GIB")
+        if asked:
+            mine = min(mine, int(float(asked) * 2 ** 30))
+        budget = min(row[0] for row in self._gather_ints([mine]))
+        self.e.pool = PrefixPool(budget, min_tokens=int(os.environ.get("TF_DSV41_POOL_MIN", "1024")))
+        if self.rank == 0:
+            per_token = 3200
+            print(f"[tensorfold] kept prompt states: {budget / 2 ** 30:.1f} GiB (~{budget // per_token:,} tokens of "
+                  f"conversation prefixes)", flush=True)
 
     # -- rank agreement -------------------------------------------------------------------------------------------
     def _gather_ints(self, values: list[int]) -> list[list[int]]:
@@ -211,7 +231,8 @@ class Dsv41Engine:
         stats = {"prompt_tokens": len(prompt), "completion_tokens": len(res["tokens"]),
                  "prefill_s": round(res["prefill_s"], 3), "decode_s": round(res["decode_s"], 3),
                  "prefill_tps": round(res["prefill_tps"], 1), "decode_tps": round(res["decode_tps"], 1),
-                 "drafts": bool(draft and self.drafts), "cached": int(res.get("cached", 0))}
+                 "drafts": bool(draft and self.drafts), "cached": int(res.get("cached", 0)),
+                 "kept_states": len(self.e.pool.entries) if self.e.pool is not None else 0}
         for key in ("rounds", "accepted_per_round", "tokens_per_round", "k_histogram"):
             if key in res:
                 stats[key] = res[key]

@@ -111,7 +111,11 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [x] Launcher `tools/dsv41_serve2.sh [--port P] [--context N]` (dual-link NCCL env, Engram dir)
 - [x] Prompt reuse: the live caches serve a prompt that extends them (common prefix >= 64 tokens, ring-safe);
       a follow-up turn of 8.5K tokens: 8,503 cached, 0.6 s instead of 8.0 s
-- [ ] Several conversations: snapshots of more than the live cache
+- [x] Shared prompt-state pool `tensorfold/cuda/kv_pool.py` (model-agnostic: LCP match, LRU in a byte budget, rank-
+      deterministic) + V4.1 adapter (`save_prefix` / `load_prefix`: per-position caches + rings' last window); budget
+      from free memory (7 GiB ~ 2.35M tokens at context 40,960); switching conversations resumes in < 1 s, retries too
+- [ ] Move GLM-5 / Nemotron-H snapshots onto `kv_pool`
+- [ ] Concurrent decoding (`--parallel N`): per-stream caches, batched verify rows, graphs per streams x rows
 - [x] `--context` admission before any cache exists (both ranks' free memory; refuses with the largest that fits;
       default 40,960 shrinks to fit); expandable-segments allocator (prompt transients 3.6 -> 1.6 GiB at 38K)
 - [x] Structured output: `response_format` json_schema / json_object, guided_choice / regex / grammar (xgrammar),

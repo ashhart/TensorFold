@@ -346,6 +346,8 @@ class SerialEngine:
         self.hcbuf = hcf.HCBuffers(MAX_ROWS, c.hidden_size, device=self.dev)
         self.par = Par()
         self._rp = RoundProfile() if os.environ.get("TF_ROUND_PROF") else None
+        self.pool = None                                            # tensorfold.cuda.kv_pool.PrefixPool, when kept
+        self.state = None
         self.split = c.engram_layer_ids[1]
         self.tables_rope = {r: K.rope_tables(f, cap) for r, f in self.freqs.items()}
         self.attnbuf = K.AttnBuffers(K.FULL_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,   # prompt: _mqa_full
@@ -859,6 +861,45 @@ class SerialEngine:
         return logits
 
     @torch.no_grad()
+    # -- kept prompt states (tensorfold.cuda.kv_pool) ----------------------------------------------------------
+    def _window_slots(self, n: int) -> torch.Tensor:
+        win = min(n, self.c.sliding_window + 2)                 # the window rows and the compressor's open pair
+        return torch.arange(n - win, n, device=self.dev) % RING
+
+    def save_prefix(self, n: int) -> tuple[dict, int]:
+        """The state after the first ``n`` committed tokens, copied out: per-position caches up to n, the rings' last
+        window (attention, compressor, drafter). Restored, the next position on is rewritten before it is read."""
+
+        st, c = self.state, self.c
+        slots = self._window_slots(n)
+        snap = {"n": n,
+                "comp": {s_: t[:n // c.layer_ratios[s_] + 1].clone() for s_, t in st.comp.items()},
+                "ik": {s_: t[:n // c.layer_ratios[s_] + 1].clone() for s_, t in st.ik.items()},
+                "swa": [t[slots] for t in st.swa],
+                "raw": {s_: t[slots] for s_, t in st.raw.items()},
+                "dswa": [t[slots] for t in self.drafter.swa] if self.drafter is not None else []}
+        tensors = [*snap["comp"].values(), *snap["ik"].values(), *snap["swa"], *snap["raw"].values(), *snap["dswa"]]
+        return snap, sum(t.numel() * t.element_size() for t in tensors)
+
+    def load_prefix(self, snap: dict, ids: list[int]) -> None:
+        """Copy a saved state into the live buffers (same addresses: the captured graphs keep reading them)."""
+
+        st = self.state
+        n = snap["n"]
+        slots = self._window_slots(n)
+        for s_, t in snap["comp"].items():
+            st.comp[s_][:t.shape[0]].copy_(t)
+        for s_, t in snap["ik"].items():
+            st.ik[s_][:t.shape[0]].copy_(t)
+        for live, saved in zip(st.swa, snap["swa"]):
+            live.index_copy_(0, slots, saved)
+        for s_, t in snap["raw"].items():
+            st.raw[s_].index_copy_(0, slots, t)
+        if self.drafter is not None:
+            for live, saved in zip(self.drafter.swa, snap["dswa"]):
+                live.index_copy_(0, slots, saved)
+        st.ids[:] = list(ids[:n])
+
     def reusable(self, prompt: list[int]) -> int:
         """How many leading tokens of ``prompt`` the live caches already hold (0: start fresh). The rest is prefilled
         over them: every position from there on is rewritten before it is read, as long as the previous request
@@ -887,12 +928,19 @@ class SerialEngine:
 
         t0 = time.perf_counter()
         cached = self.reusable(prompt) if reuse else 0
-        if cached:
+        kept = self.pool.match(prompt) if reuse and self.pool is not None and self.state is not None else None
+        if kept is not None and len(kept.ids) > cached:            # a stored prompt state beats the live caches
+            self.load_prefix(kept.snapshot, kept.ids)
+            cached = len(kept.ids)
+        elif cached:
             del self.state.ids[cached:]                            # positions from here on are rewritten
         else:
             self.reset()
         logits = None
         logits = self.prefill(prompt[cached:], chunk)
+        if reuse and self.pool is not None:                        # this prompt's state, before decoding moves on;
+            # one token short, so the same prompt again (a retry) resumes too: its last row is prefilled for logits
+            self.pool.add(list(prompt[:-1]), lambda: self.save_prefix(len(prompt) - 1))
         dsp = self.drafter if draft and self.drafter is not None and self.drafter.graph is not None else None
         if dsp is not None and self.adaptive:
             self.round_costs()                                     # once an engine, at a real context (not timed)
