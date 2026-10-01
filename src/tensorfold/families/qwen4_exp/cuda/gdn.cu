@@ -46,7 +46,9 @@ __device__ __forceinline__ void update(float (&s)[4][4], const float (&kk)[4], c
     }
 }
 
-template <int NK, int NV>
+// AHEAD (windows of 2+ rows): the conv's 4 weights and last 3 inputs stay in registers and each row's projection
+// values (conv input, z, b, a) load a row ahead; one row loads each where it is used. Same ops in the same order.
+template <int NK, int NV, bool AHEAD>
 __global__ void __launch_bounds__(1024) chain_kernel(
         const __nv_bfloat16* __restrict__ P, const __nv_bfloat16* __restrict__ cs,
         const __nv_bfloat16* __restrict__ cw, const float* __restrict__ state_in,
@@ -71,15 +73,44 @@ __global__ void __launch_bounds__(1024) chain_kernel(
     for (int j = 0; j < 4; ++j)
 #pragma unroll
         for (int i = 0; i < 4; ++i) s[j][i] = state_in[sbase + (size_t)(warp * 4 + j) * DK + lane * 4 + i];
+    float w[TAPS] = {}, win[TAPS - 1] = {};
+    __nv_bfloat16 xin = {}, zin = {}, bin = {}, ain = {};
+    const __nv_bfloat16 *pz = P + C + hv * DV + (t < DV ? t : 0), *pb = P + C + NV * DV + hv, *pa = pb + NV;
+    if (AHEAD && rows > 0) {
+        if (c >= 0) {
+#pragma unroll
+            for (int tap = 0; tap < TAPS; ++tap) w[tap] = __bfloat162float(cw[c * TAPS + tap]);
+#pragma unroll
+            for (int tap = 0; tap < TAPS - 1; ++tap) win[tap] = __bfloat162float(cs[tap * C + c]);
+            xin = P[c];
+        }
+        if (t < DV) zin = pz[0];
+        if (warp == 2 && lane == 0) { bin = pb[0]; ain = pa[0]; }
+    }
     for (int r = 0; r < rows; ++r) {
+        const __nv_bfloat16 xr = xin, zr = zin, br = bin, ar = ain;
+        if (AHEAD && r + 1 < rows) {
+            const size_t next = (size_t)(r + 1) * PW;
+            if (c >= 0) xin = P[next + c];
+            if (t < DV) zin = pz[next];
+            if (warp == 2 && lane == 0) { bin = pb[next]; ain = pa[next]; }
+        }
         if (c >= 0) {
             float acc = 0.0f;
+            if constexpr (AHEAD) {
+                const float xn = __bfloat162float(xr);
 #pragma unroll
-            for (int tap = 0; tap < TAPS; ++tap) {
-                const int at = r + tap;
-                const float x = at < TAPS - 1 ? __bfloat162float(cs[at * C + c])
-                                              : __bfloat162float(P[(size_t)(at - (TAPS - 1)) * PW + c]);
-                acc = acc + __bfloat162float(cw[c * TAPS + tap]) * x;
+                for (int tap = 0; tap < TAPS - 1; ++tap) acc = acc + w[tap] * win[tap];
+                acc = acc + w[TAPS - 1] * xn;
+                win[0] = win[1]; win[1] = win[2]; win[2] = xn;
+            } else {
+#pragma unroll
+                for (int tap = 0; tap < TAPS; ++tap) {
+                    const int at = r + tap;
+                    const float x = at < TAPS - 1 ? __bfloat162float(cs[at * C + c])
+                                                  : __bfloat162float(P[(size_t)(at - (TAPS - 1)) * PW + c]);
+                    acc = acc + __bfloat162float(cw[c * TAPS + tap]) * x;
+                }
             }
             const float act = bf(acc / (1.0f + expf(-acc)));
             if (t < DK) qs[t] = act;
@@ -99,8 +130,8 @@ __global__ void __launch_bounds__(1024) chain_kernel(
 #pragma unroll
             for (int i = 0; i < 4; ++i) x[lane * 4 + i] = v4[i] * inv;
         } else if (warp == 2 && lane == 0) {
-            const float b = __bfloat162float(P[(size_t)r * PW + C + NV * DV + hv]);
-            const float a = __bfloat162float(P[(size_t)r * PW + C + NV * DV + NV + hv]);
+            const float b = __bfloat162float(AHEAD ? br : pb[(size_t)r * PW]);
+            const float a = __bfloat162float(AHEAD ? ar : pa[(size_t)r * PW]);
             gates[0] = expf(-expf(a_log[hv]) * softplusf_(a + dt_bias[hv]));
             gates[1] = bf(sigmoidf_(b));
         }
@@ -135,7 +166,7 @@ __global__ void __launch_bounds__(1024) chain_kernel(
         __syncthreads();
         if (t < DV) {
             const float yn = bf(bf(ys[t] * rinv) * __bfloat162float(norm_w[t]));
-            const float z = __bfloat162float(P[(size_t)r * PW + C + hv * DV + t]);
+            const float z = __bfloat162float(AHEAD ? zr : pz[(size_t)r * PW]);
             const float o = bf(yn * sigmoidf_(z));
             out[(size_t)r * NV * DV + hv * DV + t] = __float2bfloat16_rn(o);
             const float gs = warp_sum(o);
@@ -198,8 +229,8 @@ void gdn_chain_cuda(const at::Tensor& P, const at::Tensor& cs, const at::Tensor&
         ptr<__nv_bfloat16>(out), ptr<float>(xs), ptr<float>(state_out), ptr<float>(k_save),
         ptr<__nv_bfloat16>(v_save), ptr<float>(g_save), ptr<float>(b_save));
     };
-    if (nv == 48) launch(chain_kernel<16, 48>, 48);
-    else if (nv == 24) launch(chain_kernel<8, 24>, 24);
+    if (nv == 48) launch(rows > 1 ? chain_kernel<16, 48, true> : chain_kernel<16, 48, false>, 48);
+    else if (nv == 24) launch(rows > 1 ? chain_kernel<8, 24, true> : chain_kernel<8, 24, false>, 24);
     else TORCH_CHECK(false, "gdn chain: 48 or 24 value heads");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
