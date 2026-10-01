@@ -272,6 +272,30 @@ class State:
         self.mtp_len = n
         self.mtp_pos.fill_(n)
 
+    def copy_prefix(self, source: "State", pos: int, mtp_len: int) -> None:
+        """Copy only valid cache rows and complete pools; the caller restores the kept point's recurrent snapshot."""
+
+        if self is source or self.kv_dtype != source.kv_dtype or self.ratio != source.ratio:
+            raise ValueError("a prefix copy needs distinct slots with matching cache formats")
+        if not 0 <= pos <= min(self.capacity, source.pos) or not 0 <= mtp_len <= min(self.capacity, source.mtp_len):
+            raise ValueError("a prefix copy must fit the destination and the source's committed rows")
+        if len(self.kc) != len(source.kc):
+            raise ValueError("a prefix copy needs matching attention layers")
+        def copy_cache(dst, src, rows):
+            dst.k[:rows].copy_(src.k[:rows])
+            dst.v[:rows].copy_(src.v[:rows])
+            if dst.quantized:
+                dst.ks[:rows].copy_(src.ks[:rows])
+                dst.vs[:rows].copy_(src.vs[:rows])
+        for i, cache in enumerate(self.kc):
+            copy_cache(cache, source.kc[i], pos)
+            self.ikc[i][:pos].copy_(source.ikc[i][:pos])
+            self.pooled[i][:pos // self.ratio].copy_(source.pooled[i][:pos // self.ratio])
+        if mtp_len:
+            copy_cache(self.mtp_kc, source.mtp_kc, mtp_len)
+            self.mtp_ikc[:mtp_len].copy_(source.mtp_ikc[:mtp_len])
+            self.mtp_pooled[:mtp_len // self.ratio].copy_(source.mtp_pooled[:mtp_len // self.ratio])
+
     def snapshot(self) -> dict:
         """The committed state outside the cache rows; ``restore`` needs the cache rows below ``pos`` still in place."""
 

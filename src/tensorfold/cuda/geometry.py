@@ -158,7 +158,7 @@ def live_kv(t: dict, world: int, window: int) -> int:
 
 def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mtp: bool = False,
                  kv_bits: int = 16, rows: int | None = None, prompt: int = 0, evicts: bool = False,
-                 kept: int = 2) -> Geometry:
+                 kept: int = 2, prefill_rows: int = PREFILL_ROWS) -> Geometry:
     """``rows``: widest verify; ``prompt``: chunk rows sharing its scratch; ``evicts``: only the live window counts."""
 
     linear, attention = layer_counts(t)
@@ -186,7 +186,7 @@ def gdn_geometry(t: dict, world: int, reserve: int, *, indexed: bool = False, mt
         fixed += ((2 + kept) * (int(t.get("ple_conv_kernel_size", 4)) - 1) * int(t.get("ngram_size", 3))
                   * streams * d * 2)
         fixed += int(mtp) * kept * streams * d * 2
-        fixed += PREFILL_ROWS * _indexed_prefill_row(t, world, h, hk, hd, nv, dv, width, slots, intermediate)
+        fixed += prefill_rows * _indexed_prefill_row(t, world, h, hk, hd, nv, dv, width, slots, intermediate)
     count = attention + int(mtp)
     budget = int(t.get("indexer_budget", 2048))
     row = kv_bytes(hd, kv_bits)
@@ -220,6 +220,15 @@ def _indexed_prefill_row(t: dict, world: int, h: int, hk: int, hd: int, nv: int,
     return (21 * streams * d + (12 + 12 * world) * d + 4 * ple + 12 * h * hd + 4 * hk * hd + 6 * heads * dim
             + 4 * experts + slots * (2 * moe + 2 * d + 24 + experts // 256) + 2 * width + 3 * nv * dv + 8 * low
             + 12 * streams + 64)
+
+
+def indexed_prompt_bytes(t: dict, rows: int, world: int = 1) -> int:
+    """Flash Next prompt activations and workspace for a piece, using the startup geometry's row bound."""
+
+    _, h, hk, hd, _, nv, _, dv, width = _gdn_dims(t, world)
+    slots = int(t.get("num_experts_per_tok", 1)) + 1
+    moe = int(t.get("moe_intermediate_size", t.get("intermediate_size", t["hidden_size"]))) // world
+    return rows * _indexed_prefill_row(t, world, h, hk, hd, nv, dv, width, slots, moe)
 
 
 def exl3_expert_scratch(rows: int, slots: int, d: int, width: int) -> int:
@@ -391,7 +400,7 @@ def stream_geometry(t: dict, world: int, streams: int, keep: int, *, first: int 
 
 
 def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp: bool, kv_bits: int = 16,
-                            first: int = 256) -> Geometry:
+                            first: int = 256, prefill_rows: int = PREFILL_ROWS) -> Geometry:
     """Flash Next's concurrent decoder on one GPU: per-row windows and kept snapshots sized to share one GPU."""
 
     linear, attention = layer_counts(t)
@@ -408,7 +417,7 @@ def indexed_stream_geometry(t: dict, streams: int, each: int, keep: int, *, mtp:
     moe = int(t.get("moe_intermediate_size", t.get("intermediate_size", d)))
     extent = d * hc + int(t["vocab_size"]) + slots * (moe + d) + width + h * hd
     fixed += (1 + mtp) * (linear * rows * width * 2 + 32 * max(rows, 4) * 2560 * 4) + 16 * max(64, rows) * extent * 4
-    fixed += PREFILL_ROWS * _indexed_prefill_row(t, 1, h, hk, hd, nv, dv, width, slots, moe)
+    fixed += prefill_rows * _indexed_prefill_row(t, 1, h, hk, hd, nv, dv, width, slots, moe)
     count, row = attention + int(mtp), kv_bytes(hd, kv_bits)
     def caches(rows: int) -> int:
         return count * (2 * rows * hk * row + (rows + (rows + ratio - 1) // ratio) * index_dim * 2)

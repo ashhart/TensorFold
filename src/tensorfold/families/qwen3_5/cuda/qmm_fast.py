@@ -58,6 +58,14 @@ def matmul(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch
     return lane_matmul(x, q.weight, q.scales, q.biases, xs=xs)
 
 
+def matmul_group(x: torch.Tensor, qs: list[QLinear], xs: torch.Tensor | None = None) -> list[torch.Tensor]:
+    """``[matmul(x, q, xs) for q in qs]`` with the same bits: one launch on sm_12x when all are tiled 4-bit."""
+
+    if all(q.layout == "tiled" and q.fast for q in qs):
+        return shared.matmul_group(x, qs, xs)
+    return [matmul(x, q, xs) for q in qs]
+
+
 def matmul_partial(x: torch.Tensor, q: QLinear, xs: torch.Tensor | None = None) -> torch.Tensor:
     """fp32 sums for a tiled weight, unrounded: a row-parallel rank's share of a projection."""
 

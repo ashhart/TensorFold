@@ -517,6 +517,8 @@ class Scheduler(PromptFill):
 
             started = time.perf_counter()
             if self.prompt_memory is not None and not self.prompt_memory.allow_load(found[0].stat().st_size):
+                print(f"[tensorfold] left the stored prefix of {len(found[1])} tokens on disk: memory cannot "
+                      "hold a copy beside what runs; this prompt re-prefills it", flush=True)
                 return
             loaded = load_snapshot(found[0], self.model_id)
             if loaded is None:

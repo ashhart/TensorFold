@@ -71,8 +71,10 @@ def bytes_in(arrays):
 @pytest.mark.torch
 @pytest.mark.parametrize("world", [1, 2])
 @pytest.mark.parametrize("mtp", [False, True])
+@pytest.mark.parametrize("prefill_rows", [2048, 4096])
 @pytest.mark.parametrize("kv_dtype,bits", [("bf16", 16), ("int8", 8), ("int4", 4)])
-def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, allocations, world, mtp, kv_dtype, bits):
+def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, allocations, world, mtp, kv_dtype, bits,
+                                                            prefill_rows):
     arrays, fake = allocations
     mod = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
     gdn = importlib.import_module("tensorfold.families.qwen4_exp.cuda.gdn")
@@ -97,11 +99,12 @@ def test_indexed_state_actual_kv_and_serial_twin_are_budgeted(monkeypatch, alloc
     mod.Buffers(weights, 64, slots)
     if mtp:
         mod.Buffers(weights, 64, slots)
-    mod.Buffers(weights, 2048, slots, prefill=True)     # the prompt chunks' buffers, as ``decode.Engine`` makes them
+    mod.Buffers(weights, prefill_rows, slots, prefill=True)
     mod.State(weights, slots, 64, kv_dtype)
     mod.State(weights, slots, 64, kv_dtype)  # the actual serial-reference twin constructor
-    estimated = geometry.gdn_geometry(text, world, 7, indexed=True, mtp=mtp, kv_bits=bits).bytes_at(slots)
-    kv = [t for t in arrays if t.shape[:2] == (slots, cfg.kv_heads)]      # codes and scales, or bf16 keys and values
+    estimated = geometry.gdn_geometry(text, world, 7, indexed=True, mtp=mtp, kv_bits=bits,
+                                      prefill_rows=prefill_rows).bytes_at(slots)
+    kv = [t for t in arrays if len(t.shape) == 3 and t.shape[:2] == (slots, cfg.kv_heads)]
     caches = 2 * (2 + int(mtp))                                          # two states: two attention layers, the MTP's
     assert bytes_in(kv) == caches * 2 * slots * cfg.kv_heads * geometry.kv_bytes(cfg.head_dim, bits)
     assert bytes_in(arrays) <= estimated

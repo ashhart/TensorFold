@@ -232,7 +232,8 @@ def test_the_concurrent_decoder_resumes_forks_and_next_turns(w, points):
     s_nxt, out_nxt = run(nxt)
     assert out_nxt == fresh(nxt) and s_nxt.cached == len(one) - 1
     s_fork, out_fork = run(fork)
-    assert out_fork == fresh(fork) and s_fork.cached == 0          # a fork: a free lane, the chain stays whole
+    assert out_fork == fresh(fork)
+    assert s_fork.cached == (len(one) // 2 if points is not None else 0)
     s_other, out_other = run(other)
     assert out_other == fresh(other)
     assert s_other.cached == (len(one) // 2 if points is not None else 0)   # no lane spare: the mid entry

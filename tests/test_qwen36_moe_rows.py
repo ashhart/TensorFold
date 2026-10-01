@@ -1,5 +1,5 @@
-"""Qwen3.6 MoE on the lane decoder without tensor units (row_forward.moe): windows and several streams' windows
-reproduce one-row steps bit for bit, the DFlash (v1) head drafts chains, and shutdown saves prompt-side entries."""
+"""Qwen3.6 MoE on the lane decoder without tensor units: windows match one-row steps bit for bit."""
+# The DFlash v1 head drafts chains, and shutdown saves prompt-side entries.
 
 from types import SimpleNamespace
 
@@ -102,8 +102,7 @@ def test_dflash_v1_head_drafts_a_chain():
 
 
 def test_dflash_v1_chains_even_with_a_draft_vocabulary(monkeypatch):
-    """A v1 drafter whose head has draft-vocabulary rows (z-lab/Qwen3.6-35B-A3B-DFlash) drafts through
-    ``block_chain``, not the draft-vocabulary path that reads DFlash2's candidate selector."""
+    """A v1 head with draft-vocabulary rows drafts through block_chain, not DFlash2's selector."""
 
     from tensorfold.drafters import dflash_block
     from tensorfold.drafters.dflash_proposer import DFlashProposer
@@ -113,7 +112,8 @@ def test_dflash_v1_chains_even_with_a_draft_vocabulary(monkeypatch):
     proposer = DFlashProposer.__new__(DFlashProposer)
     proposer.drafter = SimpleNamespace(model=SimpleNamespace(), block_size=4, mask_id=0, _sub_head=lambda: None,
                                        _plain_sub_head=lambda: object(), _trim=lambda cache, n: None)
-    proposer.copy, proposer.model_cap, proposer.ready, proposer.context, proposer.cache = None, None, True, object(), [item]
+    proposer.copy, proposer.model_cap, proposer.ready = None, None, True
+    proposer.context, proposer.cache = object(), [item]
     proposer.draft_ms, proposer.proposals, proposer.proposed_tokens = 0.0, 0, 0
     assert proposer.propose([1, 2, 3], 3) == [5, 6, 7]
 

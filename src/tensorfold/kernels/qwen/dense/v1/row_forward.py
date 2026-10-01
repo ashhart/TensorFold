@@ -253,6 +253,7 @@ def _gate_up(mlp: Any, x: mx.array) -> mx.array:
         [project(mlp.gate_proj, x), project(mlp.up_proj, x)], axis=-1)
 
 
+# Qwen3.6 MoE rows: "batched" (one gather_qmm for all rows) or "rows" (each alone); one-row steps take the same path
 MOE_ROWS = os.environ.get("TF_MOE_ROWS", "batched")
 
 
@@ -277,7 +278,8 @@ def moe(mlp: Any, x: mx.array) -> mx.array:
     act = sw.activation(sw.up_proj(xe, inds), sw.gate_proj(xe, inds))
     y = (sw.down_proj(act, inds).squeeze(-2) * scores[..., None]).sum(axis=-2)
     shared = mlp.shared_expert
-    return y + mx.sigmoid(_per_row(mlp.shared_expert_gate, x)) * project(shared.down_proj, mlp_act(_gate_up(shared, x)))
+    gate = mx.sigmoid(_per_row(mlp.shared_expert_gate, x))
+    return y + gate * project(shared.down_proj, mlp_act(_gate_up(shared, x)))
 
 
 def _rows_forward(core: Any, windows: Sequence[Any], parents: Sequence[Sequence[int]], caches: Sequence[list[Any]],

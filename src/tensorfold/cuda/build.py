@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import os
+from pathlib import Path
+import shutil
+import sys
 import threading
 from typing import Any
 
@@ -47,6 +51,9 @@ def load(name: str, sources: str | list[str], need: tuple[int, int] = MIN_CAPABI
     from torch.utils import cpp_extension
 
     kwargs["extra_cuda_cflags"] = [*kwargs.get("extra_cuda_cflags", []), *arch_flags(need)]
+    links = _toolkit()
+    if links:
+        kwargs["extra_ldflags"] = [*kwargs.get("extra_ldflags", []), *links]
     held = _announce(cpp_extension, name, sources, kwargs.get("build_directory"))
     timer = None
     if held is not None:
@@ -108,10 +115,56 @@ def _still_waiting(lock: str, identity: tuple[int, int]) -> None:
         _say(f"still waiting after {LOCK_WAIT_SECONDS:g} s on the build lock {lock}; {HINT}")
 
 
+def _toolkit() -> list[str]:
+    """The pip route's tools: the venv's ninja on PATH, NVIDIA's pip toolkit, and the link flags it needs."""
+
+    venv = Path(sys.executable).parent              # an inactive venv: ninja is beside its python, not on PATH
+    if shutil.which("ninja") is None and (venv / "ninja").is_file():
+        os.environ["PATH"] = f"{venv}{os.pathsep}{os.environ.get('PATH', '')}"
+    return list(_pip_flags())
+
+
+@lru_cache(maxsize=1)
+def _pip_flags() -> tuple[str, ...]:
+    """Once a process: NVIDIA's pip toolkit when torch found none (the module keeps it after the first call)."""
+
+    import torch
+    from torch.utils import cpp_extension
+
+    return tuple(pip_toolkit(cpp_extension, torch))
+
+
+def pip_toolkit(cpp_extension: Any, torch: Any) -> list[str]:
+    """No toolkit found (CUDA_HOME, nvcc, /usr/local/cuda): NVIDIA's pip one beside torch, its cudart linked by name."""
+
+    if cpp_extension.CUDA_HOME is not None or not getattr(torch.version, "cuda", None):
+        return []
+    home = Path(torch.__file__).resolve().parents[1] / "nvidia" / f"cu{torch.version.cuda.split('.')[0]}"
+    if not (home / "bin" / "nvcc").is_file():
+        return []
+    cpp_extension.CUDA_HOME = os.environ["CUDA_HOME"] = str(home)    # torch reads its CUDA_HOME at every build
+    os.environ["PATH"] = f"{home / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+    _say(f"CUDA compiler: NVIDIA's pip toolkit for CUDA {torch.version.cuda} at {home}")
+    versioned = sorted((home / "lib").glob("libcudart.so.*"))
+    if (home / "lib" / "libcudart.so").exists() or not versioned:
+        return []
+    root = os.environ.get("TORCH_EXTENSIONS_DIR") or cpp_extension.get_default_build_root()
+    links = Path(root) / "tensorfold_cudart"                         # -lcudart wants the bare name
+    links.mkdir(parents=True, exist_ok=True)
+    bare = links / "libcudart.so"
+    if not bare.is_symlink() or bare.resolve() != versioned[0].resolve():
+        bare.unlink(missing_ok=True)
+        try:
+            bare.symlink_to(versioned[0])
+        except FileExistsError:                                      # another start made the same link first
+            pass
+    return [f"-L{links}"]
+
+
 def _say(text: str) -> None:
     """One ``[tensorfold]`` line, flushed like the CLI's."""
 
     print(f"[tensorfold] {text}", flush=True)
 
 
-__all__ = ["CLUSTERS", "MIN_CAPABILITY", "arch_flags", "load"]
+__all__ = ["CLUSTERS", "MIN_CAPABILITY", "arch_flags", "load", "pip_toolkit"]

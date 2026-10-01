@@ -53,10 +53,11 @@ class FlashNextEngine:
             raise ValueError("--ple-on-ssd reads the MLX checkpoint's n-gram tables; an EXL3 pack maps its own table "
                              "from its file, so drop --ple-on-ssd")
         from .decode import Engine
+        from .prompt_plan import choose as prompt_plan
         from .kvcache import BITS_OF, check as check_kv
         from .weights import draft_token_ids, load
-        from tensorfold.cuda.capacity import admit, gather_ints
-        from tensorfold.cuda.geometry import gdn_geometry, indexed_stream_geometry, indexed_weights
+        from tensorfold.cuda.capacity import admit, config, gather_ints
+        from tensorfold.cuda.geometry import PREFILL_ROWS, gdn_geometry, indexed_stream_geometry, indexed_weights
 
         if tp not in (1, 2) or rank not in range(tp):
             raise ValueError(f"rank {rank} of {tp}: Flash Next runs on one GPU or two")
@@ -97,6 +98,13 @@ class FlashNextEngine:
                                    vision_weights(indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd), vision, rank),
                                    rank=rank, world=tp,
                                    gather=gather, extra_files=extra_files(model_dir) if exl3 else ())
+        self.prefill_rows, prompt_workspace = (PREFILL_ROWS, 0) if exl3 else prompt_plan(
+            self.capacity_plan, config(model_dir), torch.cuda.get_device_capability(), world=tp, vision=vision,
+            fp8=prompt_precision.fp8())
+        if prompt_workspace:
+            peak = self.capacity_plan["total_bytes_estimate"] / 2**30
+            print(f"[tensorfold] {self.prefill_rows}-row idle prompt workspace {prompt_workspace / 2**30:.2f} GiB; "
+                  f"planned peak {peak:.2f} GiB at the admitted window", flush=True)
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
             self._same_settings(torch, ids)
@@ -146,11 +154,12 @@ class FlashNextEngine:
             self.e = None
             self.multi = MultiDecoder(w, slots=streams, capacity=self.max_len, depth=self.depth,
                                       confidence=self.confidence, keep=KEEP, points=self.points,
-                                      kv_dtype=self.kv_dtype, share=share, vision=self.vision)
+                                      kv_dtype=self.kv_dtype, share=share, vision=self.vision,
+                                      prefill_rows=self.prefill_rows, workspace_bytes=prompt_workspace)
             self.scheduler = Scheduler(self.multi, max_streams=streams)
         else:
             self.e = Engine(w, capacity=self.max_len, max_rows=max(8, self.depth + 1), graphs=graphs,
-                            kv_dtype=self.kv_dtype)
+                            kv_dtype=self.kv_dtype, prefill_rows=self.prefill_rows)
         started = time.perf_counter()
         locked = False
         if prefetch and not ple_on_ssd:               # the n-gram tables' pages, read now rather than by requests
@@ -195,7 +204,8 @@ class FlashNextEngine:
             how = f"{'locked in memory' if locked else 'read'} in {read_s:.1f}s"
         kv = "" if self.kv_dtype == "bf16" else f"; {self.kv_dtype} KV cache (fp16 scale per 32 values)"
         print(f"[tensorfold] Flash Next on CUDA: {rule}; {where}{kv}; n-gram tables {how}; {captured} "
-              f"decode graphs captured; prompt kernels warmed in {warm_s:.1f}s", flush=True)
+              f"decode graphs captured; idle prompt pieces {self.prefill_rows} rows; "
+              f"prompt kernels warmed in {warm_s:.1f}s", flush=True)
 
     def _same_settings(self, torch, ids) -> None:
         """Both ranks must decode with the same rule, context, draft vocabulary and KV cache, or they would fall out of step: refuse to start otherwise."""

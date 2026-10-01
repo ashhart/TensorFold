@@ -56,10 +56,7 @@ def save_conversations(store: "CheckpointStore", directory: Path, model_id: str,
 
     with store._lock:
         entries = [entry for entry in store._entries if not entry.pinned]   # most recently used first
-    # Save longest conversations first, with recency breaking ties, so short background requests cannot displace them.
-    # Prompt-side entries (a prefix of their own prompt) go before reply ends: a template that re-renders the reply
-    # as history (Qwen3.6 drops the empty think block) never matches a reply end, while a prompt-side entry does and
-    # leaves only the reply to prefill again (M4 Pro, Qwen3.6: an 18,419-token turn resumed in 1.2 s, not 27 s).
+    # prompt-side entries before reply ends (a re-rendered reply never matches one), then the longest first
     def reply_end(entry: CheckpointEntry) -> bool:
         return entry.tokens != entry.last_prompt[:len(entry.tokens)]
 
@@ -154,6 +151,7 @@ class CheckpointStore:
         # each evicted conversation no remaining entry extends, outside the lock on the thread that owns the arrays
         self.on_evict = on_evict
         self.spilled = 0
+        self.refused = 0                   # a prefix memory or the budget refused: counted, never silent (issue #155)
 
     def _evicted(self, gone: list[CheckpointEntry]) -> None:
         if self.on_evict is None:
@@ -216,6 +214,21 @@ class CheckpointStore:
             best = self._best(prompt, usable)
             return len(best.tokens) if best is not None else 0
 
+    def refuse(self, tokens: list[int], cache: list[Any], nbytes: int, reason: str) -> None:
+        """A refused prefix: spilled to disk where a later turn can re-read it, else counted and logged (#155)."""
+
+        entry = CheckpointEntry(list(tokens), cache, list(tokens), nbytes)
+        if self.on_evict is not None:
+            try:
+                if self.on_evict(entry) is not False:
+                    self.spilled += 1
+                    return
+            except Exception as exc:  # noqa: BLE001 - a bad file costs a refill, never the request
+                print(f"[tensorfold] refused snapshot spillover failed: {type(exc).__name__}: {exc}", flush=True)
+        self.refused += 1
+        print(f"[tensorfold] kept nothing at {len(tokens)} tokens ({reason}): a turn reusing this prefix "
+              "re-prefills it", flush=True)
+
     def insert(self, tokens: list[int], cache: list[Any], *, last_prompt: list[int],
                pinned: bool = False) -> None:
         if not tokens:
@@ -223,6 +236,7 @@ class CheckpointStore:
         nbytes = int(self.sizer(cache)) if self.sizer is not None else 0
         oversize = self.budget_bytes is not None and nbytes > self.budget_bytes
         if oversize and not self.admit_oversize:
+            self.refuse(tokens, cache, nbytes, f"its {nbytes} B copy passes the {self.budget_bytes} B budget")
             return
         with self._lock:
             replaced = [entry for entry in self._entries if entry.tokens == list(tokens)]

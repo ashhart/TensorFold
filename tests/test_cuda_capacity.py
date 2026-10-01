@@ -125,6 +125,7 @@ def fake_runtime(monkeypatch):
     monkeypatch.setattr(torch, "tensor", cpu(original_tensor))
     monkeypatch.setattr(torch, "empty", cpu(original_empty))
     monkeypatch.setattr(torch.cuda, "set_device", lambda *a: None)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a: (12, 1))
     monkeypatch.setattr(capacity, "available_bytes", lambda t: 16 * capacity.GIB)
     monkeypatch.setattr(capacity, "total_bytes", lambda t: 128 * capacity.GIB)       # a GB10: 4096-row prompt chunks
     calls = []

@@ -75,9 +75,10 @@ def test_stream_geometry_counts_every_stream_and_kept_prompt_end():
 
 @pytest.mark.torch
 @pytest.mark.parametrize("streams", [2, 5])
+@pytest.mark.parametrize("prefill_rows", [2048, 4096])
 @pytest.mark.parametrize("kv_dtype,bits", [("bf16", 16), ("int8", 8), ("int4", 4)])
 def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocations, streams, kv_dtype,
-                                                         bits):  # noqa: F811
+                                                         bits, prefill_rows):  # noqa: F811
     arrays, fake = allocations
     state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
     for mod in (state, state.gdn_mod, state.attn_mod, state.moe_mod, state.kvcache):
@@ -96,9 +97,11 @@ def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocation
                               mtp=SimpleNamespace(), meta={"world": 1}, head=SimpleNamespace(n=1024), comm=None,
                               draft_ids=None)
     slots, depth, keep = 65536, 3, 8
+    from tensorfold.cuda.geometry import indexed_prompt_bytes, indexed_stream_geometry, kv_bytes
+    workspace = indexed_prompt_bytes(text, prefill_rows)
     dec = multi.MultiDecoder(weights, slots=streams, capacity=slots, depth=depth, keep=keep,
-                             kv_dtype=kv_dtype)                                          # no late memory query
-    from tensorfold.cuda.geometry import indexed_stream_geometry, kv_bytes
+                             kv_dtype=kv_dtype, prefill_rows=prefill_rows, workspace_bytes=workspace)
+    assert dec.memory_gate.reserve >= workspace
     one = dec.free[0]
     snapshot = bytes_in([one.rec]) // 2 + bytes_in([one.conv, one.ple_tail])
     first = [t for t in arrays if t.shape[:2] == (multi.FIRST, cfg.kv_heads)]     # K and V: two layers and the MTP's
@@ -106,7 +109,9 @@ def test_flash_parallel_decoder_allocations_are_budgeted(monkeypatch, allocation
     assert bytes_in(first) == streams * 3 * 2 * multi.FIRST * cfg.kv_heads * kv_bytes(cfg.head_dim, bits)
     # one stream grown to the window beside the others' first rows
     used = bytes_in(arrays) - one.cache_bytes(multi.FIRST) + one.cache_bytes(slots) + (min(keep, streams) + 1) * snapshot
-    assert used <= indexed_stream_geometry(text, streams, depth + 1, keep, mtp=True, kv_bits=bits).bytes_at(slots)
+    estimated = indexed_stream_geometry(text, streams, depth + 1, keep, mtp=True, kv_bits=bits,
+                                        prefill_rows=prefill_rows).bytes_at(slots)
+    assert used <= estimated
 
 
 def handshake(monkeypatch, path, rank, **kw):

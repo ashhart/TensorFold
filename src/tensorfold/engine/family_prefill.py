@@ -181,6 +181,8 @@ class FamilyPrefill:
                 if self.prefill_guard is None or self.prefill_guard.allow_checkpoint(work):
                     stream.history_checkpoints.append((list(prompt[:boundary]),
                                                        drop_spares(self.copy_single_cache(work))))
+                else:
+                    self.prefill_guard.refuse(boundary, work)        # logged where it refuses (issue #155)
                 start = boundary
             if fed:
                 yield

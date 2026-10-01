@@ -16,9 +16,18 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_qmm_v3", sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"),
-                                                   str(here / "qmm_prefill.cu"), str(here / "qmm_prefill8.cu")],
+    return load(name="tensorfold_qmm_v4", sources=[str(here / "qmm.cpp"), str(here / "qmm.cu"),
+                                                   str(here / "qmm_group.cu"), str(here / "qmm_prefill.cu"),
+                                                   str(here / "qmm_prefill8.cu")],
                 extra_cuda_cflags=["-O3"], verbose=False)
+
+
+@lru_cache(maxsize=None)
+def grouped(device: int) -> bool:
+    """sm_12x runs groups of 64 through the grouped kernel: several projections of one input in a launch."""
+
+    return torch.cuda.get_device_capability(device)[0] == 12
+
 
 
 @dataclass
@@ -151,10 +160,33 @@ def matmul(x: torch.Tensor, q: Q4, xs: torch.Tensor | None = None, *, sk: int | 
     sk = sk or split_k(q.n, q.k, q.gs)
     if out is None:
         out = torch.empty((m, q.n), dtype=torch.float32 if f32 else torch.bfloat16, device=x.device)
+    if q.gs == 64 and reduce and grouped(x.device.index):
+        _ext().qmm_group(x, xs, [q.weight], [q.scales], [q.biases], [out], [q.n], [sk], f32, 0, -1)
+        return out
     if sk > 1 and not reduce and part is None:
         part = torch.empty((sk, m, q.n), dtype=torch.float32, device=x.device)
     _ext().qmm(x, xs, q.weight, q.scales, q.biases, out, part, q.n, sk, q.gs, bucket(m), f32, reduce)
     return out if sk == 1 or reduce else part.reshape(-1)[:sk * m * q.n].view(sk, m, q.n)
+
+
+def matmul_group(x: torch.Tensor, qs: list[Q4], xs: torch.Tensor | None = None, *, f32: bool = False,
+                 sks: list[int] | None = None, tile: int = 0, early: int = -1) -> list[torch.Tensor]:
+    """``[matmul(x, q) for q in qs]`` in one sm_12x launch, same bits; ``tile``, ``early`` (-1: by chip) for tests."""
+
+    if x.dtype != torch.bfloat16 or x.dim() != 2 or any(x.shape[1] != q.k for q in qs):
+        raise ValueError("matmul_group: x must be (M, K) bf16 with every weight's K")
+    sks = sks or [split_k(q.n, q.k, q.gs) for q in qs]
+    if not (1 <= len(qs) <= 4 and all(q.gs == 64 for q in qs) and grouped(x.device.index)):
+        return [matmul(x, q, xs, sk=s, f32=f32) for q, s in zip(qs, sks)]
+    if x.stride(1) != 1 or (x.shape[0] > 1 and x.stride(0) % 8) or x.data_ptr() % 16:
+        x = x.clone(memory_format=torch.contiguous_format)
+    if xs is None:
+        xs = group_sums(x, 64)
+    dtype = torch.float32 if f32 else torch.bfloat16
+    outs = [torch.empty((x.shape[0], q.n), dtype=dtype, device=x.device) for q in qs]
+    _ext().qmm_group(x, xs, [q.weight for q in qs], [q.scales for q in qs], [q.biases for q in qs], outs,
+                     [q.n for q in qs], sks, f32, tile, early)
+    return outs
 
 
 def prompt_tile(m: int, n: int) -> int:
