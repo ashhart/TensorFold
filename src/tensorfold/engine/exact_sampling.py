@@ -71,10 +71,18 @@ def uniform_rows(seed: int, positions: np.ndarray, ids: np.ndarray) -> np.ndarra
 def choose(values: np.ndarray, ids: np.ndarray, position: int, s: Sampling) -> int:
     """One row: candidate logits ``values`` for token ``ids`` -> the sampled token id."""
 
-    order = np.lexsort((ids, -values))
     k = max(1, min(int(s.top_k) if s.top_k else len(ids), len(ids)))
-    ids = ids[order][:k]
-    scaled = values[order][:k].astype(np.float64) / max(float(s.temperature), 1e-6)
+    if k < len(ids):
+        # Partition before sorting. Include every boundary tie so token-id
+        # ordering remains identical to the full-vocabulary lexsort.
+        boundary = np.partition(values, len(values)-k)[len(values)-k]
+        candidates = np.flatnonzero(values >= boundary)
+        selected_ids, selected_values = ids[candidates], values[candidates]
+    else:
+        selected_ids, selected_values = ids, values
+    order = np.lexsort((selected_ids, -selected_values))[:k]
+    ids = selected_ids[order]
+    scaled = selected_values[order].astype(np.float64) / max(float(s.temperature), 1e-6)
     probs = np.exp(scaled - scaled.max())
     probs /= probs.sum()
     if 0.0 < s.top_p < 1.0:
