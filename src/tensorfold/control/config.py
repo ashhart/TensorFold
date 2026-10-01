@@ -24,9 +24,16 @@ _ENV_NAMES = {"TOKENIZERS_PARALLELISM", "OMP_NUM_THREADS"}
 def name_of(name: str) -> str:
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise ControlError("profile name: 1–48 lowercase letters, digits or hyphens; start with a letter")
-    if name in _RESERVED_NAMES:
-        raise ControlError(f"profile name {name} is reserved")
     return name
+
+
+def install_name(name: str) -> str:
+    """A name a person may install. The launchd runner loads the reserved smoke profile."""
+
+    checked = name_of(name)
+    if checked in _RESERVED_NAMES:
+        raise ControlError(f"profile name {checked} is reserved")
+    return checked
 
 
 def string(value: Any, label: str, maximum: int = 4096) -> str:

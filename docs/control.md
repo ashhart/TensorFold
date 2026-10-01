@@ -8,6 +8,7 @@ A profile plus telemetry is the whole input. No model forward, kernel, sampler, 
 ## Install a service
 
 The model is already cached. `install` writes the profile and an enabled login job.
+The name `control-smoke` is reserved. `service install` and the new-service key refuse it.
 Pass `--start` when the server should come up immediately. Pull an uncached model with
 `tensorfold pull` first. `--allow-download` is the opt-in for a download at service start.
 A Hugging Face id works once its files are on disk.

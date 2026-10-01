@@ -7,6 +7,17 @@ import sys
 import pytest
 
 from tensorfold.control.cli import main, parser
+from tensorfold.control.config import Profile
+
+
+def test_smoke_name_loads_and_install_refuses_it(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    profile = Profile("control-smoke", "Org/Model")
+    assert profile.label == "dev.tensorfold.control-smoke"
+    assert Profile.decode(profile.encode()) == profile
+    assert main(["service", "install", "Org/Model", "--name", "control-smoke", "--dry-run"]) == 1
+    assert "reserved" in capsys.readouterr().err
+    assert not list(tmp_path.iterdir())
 
 
 def test_dry_run_is_side_effect_free(monkeypatch, tmp_path, capsys):

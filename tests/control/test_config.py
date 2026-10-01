@@ -16,11 +16,6 @@ def test_bad_name(name):
         Profile(name, "Org/Model")
 
 
-def test_smoke_name_is_reserved():
-    with pytest.raises(ControlError, match="reserved"):
-        Profile("control-smoke", "Org/Model")
-
-
 @pytest.mark.parametrize("port", [0, -1, 80, 65536, True, 8080.0, "8080"])
 def test_bad_port(port):
     with pytest.raises(ControlError):

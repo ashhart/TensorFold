@@ -12,7 +12,7 @@ import sys
 import time
 
 from . import __version__
-from .config import Profile, Store
+from .config import Profile, Store, install_name
 from .launchd import Manager, plist
 from .logs import Tail
 from .safety import ControlError, absolute, redact
@@ -87,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _profile(args) -> Profile:
+    install_name(args.name)
     model = str(absolute(args.model)) if Path(args.model).expanduser().is_dir() else args.model
     extra = ["--parallel", args.parallel]
     if args.context is not None:

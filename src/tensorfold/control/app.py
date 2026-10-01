@@ -17,7 +17,7 @@ from prompt_toolkit.layout import Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.output import ColorDepth
 
-from .config import Profile, Store
+from .config import Profile, Store, install_name
 from .demo import demo_view
 from .launchd import Manager
 from .logs import Tail
@@ -239,6 +239,7 @@ class ControlApp:
                     local = Path(model).expanduser()
                     if local.is_dir():
                         model = str(local.absolute())
+                    install_name(fields["name"])
                     profile = Profile(fields["name"], model, port=int(fields["port"]))
                     self.view.editor = None
                     self.view.busy = True

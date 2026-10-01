@@ -106,6 +106,25 @@ async def test_confirmation_is_required_and_target_is_stable(manager, profile, m
 
 
 @pytest.mark.asyncio
+async def test_new_service_key_refuses_the_smoke_name(manager, monkeypatch):
+    m, fake = manager
+    monkeypatch.setattr("tensorfold.control.app.Client.sample", lambda _: Sample(1))
+    with create_pipe_input() as pipe:
+        ui = ControlApp(manager=m, input=pipe, output=DummyOutput(), interval=0.5)
+        task = asyncio.create_task(ui.run_async())
+        await until(lambda: ui.application.is_running)
+        pipe.send_text("n")
+        await until(lambda: ui.view.editor is not None)
+        pipe.send_text("\x15control-smoke\tOrg/Model\r")
+        await until(lambda: "reserved" in ui.view.notice)
+        assert ui.view.editor is not None and m.store.list()[0] == [] and not fake.calls
+        pipe.send_text("\x1b")
+        await until(lambda: ui.view.editor is None)
+        pipe.send_text("q")
+        await asyncio.wait_for(task, 3)
+
+
+@pytest.mark.asyncio
 async def test_new_service_form_and_paste_are_real_key_events(manager, monkeypatch):
     m, fake = manager
     monkeypatch.setattr("tensorfold.control.app.Client.sample", lambda _: Sample(1))

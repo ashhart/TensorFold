@@ -18,17 +18,8 @@ SMOKE_NAME = "control-smoke"
 @pytest.mark.macos
 @pytest.mark.skipif(sys.platform != "darwin" or os.environ.get("TENSORFOLD_TEST_LAUNCHD") != "1",
                     reason="requires explicit TENSORFOLD_TEST_LAUNCHD=1 in a logged-in macOS session")
-def test_real_launchd_lifecycle_without_model_load(monkeypatch):
+def test_real_launchd_lifecycle_without_model_load():
     # Files stay in a temp home. The label is the one reserved name.
-    import tensorfold.control.config as config
-    original = config.name_of
-
-    def allow(name: str) -> str:
-        if name == SMOKE_NAME:
-            return name
-        return original(name)
-
-    monkeypatch.setattr(config, "name_of", allow)
     with tempfile.TemporaryDirectory(prefix=".tensorfold-control-smoke-", dir=Path.home()) as directory:
         manager = Manager(Paths(Path(directory)))
         name = SMOKE_NAME
