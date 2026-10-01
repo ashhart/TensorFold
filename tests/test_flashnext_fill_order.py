@@ -1,5 +1,4 @@
-"""Flash Next's concurrent decoder fills prompts as the Mac scheduler does: fewest rows left first, foreground before
-background, and a prompt passed over FILL_GUARD passes takes the next one (no starvation)."""
+"""Shortest-first CUDA prompt passes preserve foreground priority and bounded starvation."""
 
 from types import SimpleNamespace
 
@@ -67,3 +66,38 @@ def test_a_waiting_request_stops_a_lone_prompts_passes():
     m.arrived = lambda: False
     m._fill()
     assert len(passes) == 16
+
+
+def test_order_uses_remaining_rows_and_preserves_oldest_equal_prompt():
+    m = _decoder([(8_000, False), (2_000, False), (1_000, False)])
+    m.fills[0][2] = 7_000
+    assert [s.sid for s in m._order()] == [0, 2, 1]
+
+
+def test_pieces_keep_message_boundaries_and_live_row_limits():
+    m = _decoder([(9_000, False), (3_000, False)])
+    m.prefill_rows, m.share, m.round_s, m.row_s = 4_096, 0.0, None, None
+    m.streams = {7: SimpleNamespace(done=False)}
+    for fill in m.fills.values():
+        fill[0] = SimpleNamespace(stops=[])
+    m.fills[1][0].stops = [800]
+    pieces = m._pieces()
+    assert [(s.sid, a, n) for s, a, n in pieces] == [(1, 0, 800), (0, 0, 1_248)]
+    m.streams.clear()
+    assert sum(n for _, _, n in m._pieces()) == 4_096
+
+
+def test_scheduler_wires_the_foreground_check_before_starting(monkeypatch):
+    from tensorfold.cuda.scheduler import Scheduler
+    from tensorfold.cuda.streams import Stream
+    import tensorfold.cuda.scheduler as scheduler
+
+    m = SimpleNamespace(arrived=lambda: False)
+    started = []
+    monkeypatch.setattr(scheduler.threading, "Thread", lambda **kw: SimpleNamespace(start=lambda: started.append(1)))
+    sched = Scheduler(m)
+    assert started == [1] and not m.arrived()
+    sched.waiting.put((Stream([1], 1, background=True), None))
+    assert not m.arrived()
+    sched.waiting.put((Stream([2], 1), None))
+    assert m.arrived()
