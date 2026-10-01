@@ -128,7 +128,7 @@ def _matrix_project(x: mx.array, linear: Any) -> mx.array:
     hit = _matrix.get(id(linear))
     if hit is None or hit[0] is not weight:
         scales, biases, group = linear.scales, linear.biases, int(linear.group_size)
-        if group == 128:              # two groups of 64 with the group's scale and bias: the same weights
+        if group == 128 and int(linear.bits) == 4:  # 4-bit still reads a group of 128 as two of 64
             scales, biases, group = mx.repeat(scales, 2, axis=1), mx.repeat(biases, 2, axis=1), 64
         mx.eval(scales, biases)
         _MATRIX_BACKEND.prepare([(weight, scales, biases, group, int(linear.bits))])
