@@ -7,6 +7,7 @@ from typing import Any, Callable, Sequence
 
 import mlx.core as mx
 
+from tensorfold.engine.family_common import cache_contents
 from tensorfold.kernels.inputs import ints
 from tensorfold.kernels.qwen.dense.v1 import row_matmul
 from tensorfold.kernels.qwen.dense.v1.row_glue import _chain, add_norm, gated_delta, gdn_post, gdn_pre, mlp_act
@@ -375,11 +376,7 @@ def check_streams(core: Any, head: Any, make_cache: Callable[[], list[Any]], cop
     """Return equality and failures for batched versus standalone logits and partial-window cache commits across prompt lengths and window widths."""
 
     def arrays(cache: list[Any]) -> list[mx.array]:
-        out = []
-        for item in cache:
-            state = item.state
-            out.extend(a for a in (state if isinstance(state, (list, tuple)) else [state]) if a is not None)
-        return out
+        return [a for item in cache for a in cache_contents(item)]
 
     vocab = int(core.embed_tokens["weight"].shape[0])   # MLX's gather reads past the table for larger ids, unchecked
     bases = []

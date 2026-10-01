@@ -69,14 +69,13 @@ class AlternatingKVCache(KVCache):
         return n
 
     @property
-    def state(self) -> tuple[mx.array, mx.array]:
+    def state(self) -> tuple:
         return super().state
 
     @state.setter
-    def state(self, v: tuple[mx.array, mx.array]) -> None:
+    def state(self, v: tuple) -> None:
         self.drop_spare()
-        self.keys, self.values = v
-        self.offset = self.keys.shape[2]
+        KVCache.state.fset(self, v)      # (keys, values) under mlx-lm 0.31, (keys, values, offset) under 0.32
 
     def drop_spare(self) -> None:
         """Forget the spare (a retained or stored cache keeps one buffer)."""

@@ -6,6 +6,7 @@ import pytest
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
+from tensorfold.engine.family_common import cache_contents  # noqa: E402
 from tensorfold.engine.lane_engine import LaneEngine  # noqa: E402
 from tensorfold.kernels.qwen.dense.v1 import (  # noqa: E402
     exact_attention, lane_glue, lane_tree, row_forward, row_glue, row_matmul)
@@ -51,7 +52,7 @@ def _run(model, tokens, cache, start, keep=None):
     logits, record = row_forward.forward(core, head, tokens, parents, cache, start, pipeline_layers=2)
     keep = len(tokens) if keep is None else keep
     row_forward.commit(cache, record, list(range(keep)), len(tokens), start)
-    mx.eval(logits, *[a for c in cache for a in c.state if a is not None])
+    mx.eval(logits, *[a for c in cache for a in cache_contents(c)])
     return logits
 
 
@@ -132,7 +133,7 @@ def test_prefill_chunking_does_not_change_bits(tiny):
         _run(model, prompt[begin:begin + size], split, begin)
         begin += size
     for a, b in zip(whole, split):
-        for x, y in zip(a.state, b.state):
+        for x, y in zip(cache_contents(a), cache_contents(b)):
             if x is not None:
                 assert _same(x, y)
 
@@ -213,7 +214,7 @@ def test_aligned_prefill_resumes_exactly(tiny, monkeypatch):
     prompt = [int(t) for t in mx.random.randint(0, 512, (29,)).tolist()]
 
     def arrays(cache):
-        return [a for c in cache for a in c.state if a is not None]
+        return [a for c in cache for a in cache_contents(c)]
 
     fresh = engine.prefill_prefix(prompt)
     first = LaneStream("first", prompt[:19], max_new_tokens=1)
@@ -259,7 +260,7 @@ def test_tree_window_nodes_equal_serial_paths(tiny, monkeypatch):
     for i, r in enumerate(path):
         _run(model, [tokens[r]], serial_cache, start + i)
     for a, b in zip(cache, serial_cache):
-        for x, y in zip(a.state, b.state):
+        for x, y in zip(cache_contents(a), cache_contents(b)):
             if x is not None:
                 assert _same(x, y)
 
@@ -332,7 +333,7 @@ def test_hidden_rows_and_keep_rows(tiny):
     assert _same(ref, lg)
     for a, b in zip(caches, mine):
         for ia, ib in zip(a, b):
-            for u, v in zip(ia.state, ib.state):
+            for u, v in zip(cache_contents(ia), cache_contents(ib)):
                 if u is not None:
                     assert _same(u, v)
 
@@ -365,7 +366,7 @@ def test_streams_with_trees_equal_each_alone(tiny, monkeypatch):
     for (ref, own), cache, a, window in zip(alone, caches, offsets, windows):
         assert _same(lg[0, a:a + len(window)], ref[0])
         for ia, ib in zip(cache, own):
-            for u, v in zip(ia.state, ib.state):
+            for u, v in zip(cache_contents(ia), cache_contents(ib)):
                 if u is not None:
                     assert _same(u, v)
 
@@ -403,7 +404,7 @@ def test_one_kernel_signature_for_every_window(monkeypatch):
             parents = [-1, 0, 0, 1, 2, 2, 4, 3]
             logits, record = row_forward.forward(core, head, tokens[start:start + 8], parents, cache, start)
             row_forward.commit(cache, record, [0, 2, 4, 6], len(parents), start)
-            mx.eval(logits, *[a for c in cache for a in c.state if a is not None])
+            mx.eval(logits, *[a for c in cache for a in cache_contents(c)])
             assert bool(mx.all(mx.isfinite(logits)).item())
             monkeypatch.setattr(row_forward, "ROW_ATTENTION", False)
             streams = [_prefill(model, tokens[100 + 20 * s:100 + 20 * s + 9 + 4 * s]) for s in range(3)]
@@ -422,7 +423,7 @@ def test_one_kernel_signature_for_every_window(monkeypatch):
                     keep = max(1, w // 2)
                     row_forward.commit(streams[s], record, list(range(keep)), w, starts[s])
                     starts[s] += keep
-                mx.eval(logits, *[a for s in ids for c in streams[s] for a in c.state if a is not None])
+                mx.eval(logits, *[a for s in ids for c in streams[s] for a in cache_contents(c)])
                 assert bool(mx.all(mx.isfinite(logits)).item())
     finally:
         for c, old in zip(caches, saved):
