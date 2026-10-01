@@ -16,7 +16,7 @@ import struct
 
 import pytest
 
-from tensorfold.gguf import (GGUFError, GGUF_TYPE_BOOL, GGUF_TYPE_FLOAT16, GGUF_TYPE_FLOAT32,
+from tensorfold.gguf import (GGUFError, GGUF_TYPE_BOOL, GGUF_TYPE_FLOAT32,
                              GGUF_TYPE_FLOAT64, GGUF_TYPE_INT8, GGUF_TYPE_INT16, GGUF_TYPE_INT32,
                              GGUF_TYPE_INT64, GGUF_TYPE_STRING, GGUF_TYPE_UINT8, GGUF_TYPE_UINT16,
                              GGUF_TYPE_UINT32, GGUF_TYPE_UINT64, GGUF_MAGIC, GGUF_VERSION,
@@ -41,7 +41,7 @@ def _header(magic: int = GGUF_MAGIC_LE, version: int = GGUF_VERSION, n_tensors: 
 
 
 def _kv(key: str, type_: int, payload: bytes) -> bytes:
-    return _string(key.encode("utf-8")) + bytes([type_]) + payload
+    return _string(key.encode("utf-8")) + struct.pack("<I", type_) + payload
 
 
 def _scalar(type_: int, value) -> bytes:
@@ -69,20 +69,18 @@ def _scalar(type_: int, value) -> bytes:
         return struct.pack("<q", value)
     if type_ == GGUF_TYPE_FLOAT64:
         return struct.pack("<d", value)
-    if type_ == GGUF_TYPE_FLOAT16:
-        return struct.pack("<e", value)
     raise AssertionError(f"unknown scalar type {type_}")
 
 
 def _array(elem_type: int, items) -> bytes:
-    out = struct.pack("<Q", len(items))
+    out = struct.pack("<IQ", elem_type, len(items))
     for item in items:
         out += _scalar(elem_type, item)
     return out
 
 
 def _array_type(elem_type: int) -> int:
-    return 9 | (elem_type << 4)
+    return 9
 
 
 def _file(*, header: bytes = None, n_kv: int = 0, pairs: list[tuple[str, int, bytes]] = (),
@@ -150,7 +148,6 @@ def test_zero_kv_with_only_header_is_valid():
     (GGUF_TYPE_INT64, -9_000_000_000_000_000_000, -9_000_000_000_000_000_000),
     (GGUF_TYPE_FLOAT32, 1.25, 1.25),
     (GGUF_TYPE_FLOAT64, 1.0 / 3.0, 1.0 / 3.0),
-    (GGUF_TYPE_FLOAT16, 2.0, 2.0),
     (GGUF_TYPE_BOOL, True, True),
     (GGUF_TYPE_BOOL, False, False),
 ])
@@ -192,7 +189,6 @@ def test_multiple_kv_pairs_preserve_order_and_values():
     (GGUF_TYPE_INT64, [-9_000_000_000_000_000_000, 9_000_000_000_000_000_000]),
     (GGUF_TYPE_FLOAT32, [0.5, 1.25]),
     (GGUF_TYPE_FLOAT64, [1.0 / 3.0]),
-    (GGUF_TYPE_FLOAT16, [2.0, 0.5]),
     (GGUF_TYPE_BOOL, [True, False, True]),
 ])
 def test_array_types_roundtrip(elem_type, items):
@@ -203,7 +199,7 @@ def test_array_types_roundtrip(elem_type, items):
 
 def test_string_array_roundtrip():
     items = ["a", "bb", "ccc"]
-    payload = struct.pack("<Q", len(items)) + b"".join(_string(i) for i in items)
+    payload = struct.pack("<IQ", GGUF_TYPE_STRING, len(items)) + b"".join(_string(i) for i in items)
     type_ = _array_type(GGUF_TYPE_STRING)
     info = parse_gguf(_file(n_kv=1, pairs=[("strs", type_, payload)]))
     assert info.metadata["strs"] == items
@@ -211,7 +207,7 @@ def test_string_array_roundtrip():
 
 def test_empty_array_roundtrip():
     type_ = _array_type(GGUF_TYPE_UINT32)
-    info = parse_gguf(_file(n_kv=1, pairs=[("empty", type_, struct.pack("<Q", 0))]))
+    info = parse_gguf(_file(n_kv=1, pairs=[("empty", type_, struct.pack("<IQ", GGUF_TYPE_UINT32, 0))]))
     assert info.metadata["empty"] == []
 
 
@@ -222,7 +218,7 @@ def test_unknown_value_type_is_rejected():
 
 
 def test_nested_array_type_is_rejected():
-    data = _file(n_kv=1, pairs=[("k", 0x99, b"\x00\x00\x00\x00")])  # array of array
+    data = _file(n_kv=1, pairs=[("k", 9, struct.pack("<IQ", 9, 0))])  # array of array
     with pytest.raises(GGUFError, match="array"):
         parse_gguf(data)
 
@@ -262,7 +258,7 @@ def test_string_value_length_overruns_buffer():
     # a string value whose declared length exceeds the remaining file
     key = _string("k")
     payload = struct.pack("<Q", 1000)  # string length 1000, then nothing
-    data = _header(n_kv=1) + key + bytes([GGUF_TYPE_STRING]) + payload
+    data = _header(n_kv=1) + key + struct.pack("<I", GGUF_TYPE_STRING) + payload
     with pytest.raises(GGUFError, match="string length|length"):
         parse_gguf(data)
 
@@ -271,8 +267,8 @@ def test_array_count_overruns_buffer():
     # array declares 1000 items but the file ends immediately
     key = _string("k")
     type_ = _array_type(GGUF_TYPE_UINT8)
-    payload = struct.pack("<Q", 1000)
-    data = _header(n_kv=1) + key + bytes([type_]) + payload
+    payload = struct.pack("<IQ", GGUF_TYPE_UINT8, 1000)
+    data = _header(n_kv=1) + key + struct.pack("<I", type_) + payload
     with pytest.raises(GGUFError, match="array length|length"):
         parse_gguf(data)
 
@@ -280,7 +276,7 @@ def test_array_count_overruns_buffer():
 def test_truncated_value_is_rejected():
     # a uint64 value needs 8 bytes but only 3 remain
     key = _string("k")
-    data = _header(n_kv=1) + key + bytes([GGUF_TYPE_UINT64]) + b"\x01\x02\x03"
+    data = _header(n_kv=1) + key + struct.pack("<I", GGUF_TYPE_UINT64) + b"\x01\x02\x03"
     with pytest.raises(GGUFError, match="uint64|8 bytes|truncated"):
         parse_gguf(data)
 
@@ -320,9 +316,9 @@ def test_metadata_section_ends_exactly_at_n_kv():
 
 GGML_F32 = 0
 GGML_F16 = 1
-GGML_Q8_0 = 6
-GGML_Q2_K = 28
-GGML_IQ2_XXS = 34
+GGML_Q8_0 = 8
+GGML_Q2_K = 10
+GGML_IQ2_XXS = 16
 
 def _align(n: int) -> int:
     return (n + 31) // 32 * 32

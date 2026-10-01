@@ -239,7 +239,7 @@ from tensorfold.gguf import (GGUF_TYPE_UINT32, GGUF_TYPE_UINT64, GGUF_MAGIC,
 
 GGML_F32 = 0
 GGML_F16 = 1
-GGML_Q8_0 = 6
+GGML_Q8_0 = 8
 
 
 def _s(value: bytes | str) -> bytes:
@@ -270,16 +270,16 @@ def test_real_gguf_inventory_is_adapted_and_validated():
     # adapter. Layer tensors are absent, so they must be reported missing.
     header = struct.pack("<IIQQ", GGUF_MAGIC, 3, 2, 10)
     meta = b"".join([
-        _s("deepseek4.block_count") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 1),
-        _s("deepseek4.embedding_length") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 4096),
-        _s("deepseek4.attention.head_count") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 64),
-        _s("deepseek4.attention.head_count_kv") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 8),
-        _s("deepseek4.attention.key_length") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 512),
-        _s("deepseek4.attention.q_lora_rank") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 1536),
-        _s("deepseek4.attention.output_lora_rank") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 1024),
-        _s("deepseek4.expert_count") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 256),
-        _s("deepseek4.expert_used_count") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 6),
-        _s("deepseek4.expert_feed_forward_length") + bytes([GGUF_TYPE_UINT32]) + _scalar(GGUF_TYPE_UINT32, 2048),
+        _s("deepseek4.block_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 1),
+        _s("deepseek4.embedding_length") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 4096),
+        _s("deepseek4.attention.head_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 64),
+        _s("deepseek4.attention.head_count_kv") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 8),
+        _s("deepseek4.attention.key_length") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 512),
+        _s("deepseek4.attention.q_lora_rank") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 1536),
+        _s("deepseek4.attention.output_lora_rank") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 1024),
+        _s("deepseek4.expert_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 256),
+        _s("deepseek4.expert_used_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 6),
+        _s("deepseek4.expert_feed_forward_length") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 2048),
     ])
     descs = [
         _tensor_desc("token_embd.weight", [8, 4], GGML_F16, 0),

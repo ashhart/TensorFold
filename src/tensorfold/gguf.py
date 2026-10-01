@@ -22,10 +22,9 @@ Safety contract:
     spans, file-bounds, shape-product overflow, and quantized block
     divisibility.
 
-Value types follow the GGUF spec enum (see ggml ``gguf.h``): scalar types 0-8
-and 10-13, and arrays encoded as ``9 | (element_type << 4)``. Strings are
-declared with a little-endian uint64 length followed by that many bytes; a
-single trailing null byte (the GGUF convention) is stripped before decode.
+Value types are little-endian uint32 GGUF enum values. Arrays carry a separate
+uint32 element type followed by a uint64 count. Strings are uint64 length plus
+exactly that many bytes, without a terminator.
 Tensor types follow the ggml ``enum ggml_type`` values; block sizes and bytes
 per block are pinned from the ggml quant tables.
 """
@@ -37,7 +36,7 @@ from typing import Any
 
 GGUF_MAGIC = 0x46554747  # "GGUF" as a little-endian uint32
 GGUF_VERSION = 3         # current spec version
-SUPPORTED_VERSIONS = (1, 2, 3)  # header + typed metadata layout is identical
+SUPPORTED_VERSIONS = (2, 3)  # v1 uses a different count/string layout
 
 # GGUF value type enum (gguf.h)
 GGUF_TYPE_UINT8 = 0
@@ -49,18 +48,16 @@ GGUF_TYPE_INT32 = 5
 GGUF_TYPE_FLOAT32 = 6
 GGUF_TYPE_BOOL = 7
 GGUF_TYPE_STRING = 8
-GGUF_TYPE_ARRAY = 9      # arrays are 9 | (element_type << 4)
+GGUF_TYPE_ARRAY = 9
 GGUF_TYPE_UINT64 = 10
 GGUF_TYPE_INT64 = 11
 GGUF_TYPE_FLOAT64 = 12
-GGUF_TYPE_FLOAT16 = 13
 
 # scalar (non-array) value types the reader understands
 _SCALAR_TYPES = frozenset({
     GGUF_TYPE_UINT8, GGUF_TYPE_INT8, GGUF_TYPE_UINT16, GGUF_TYPE_INT16,
     GGUF_TYPE_UINT32, GGUF_TYPE_INT32, GGUF_TYPE_FLOAT32, GGUF_TYPE_BOOL,
     GGUF_TYPE_STRING, GGUF_TYPE_UINT64, GGUF_TYPE_INT64, GGUF_TYPE_FLOAT64,
-    GGUF_TYPE_FLOAT16,
 })
 
 _HEADER_SIZE = 24  # u32 magic + u32 version + u64 n_tensors + u64 n_kv
@@ -70,7 +67,6 @@ _TYPE_NAMES = {
     GGUF_TYPE_INT16: "int16", GGUF_TYPE_UINT32: "uint32", GGUF_TYPE_INT32: "int32",
     GGUF_TYPE_FLOAT32: "float32", GGUF_TYPE_BOOL: "bool", GGUF_TYPE_STRING: "string",
     GGUF_TYPE_UINT64: "uint64", GGUF_TYPE_INT64: "int64", GGUF_TYPE_FLOAT64: "float64",
-    GGUF_TYPE_FLOAT16: "float16",
 }
 
 
@@ -98,29 +94,20 @@ GGUF_ALIGNMENT = 32
 # ggml tensor type -> (type name, elements per block, bytes per block).
 # Block geometry pinned from the ggml quant tables (ggml-quants.h / gguf.h).
 _GGML_TYPE_INFO: dict[int, tuple[str, int, int]] = {
-    0:  ("F32", 1, 4),
-    1:  ("F16", 1, 2),
-    2:  ("Q4_0", 16, 18),
-    3:  ("Q4_1", 16, 22),
-    4:  ("Q5_0", 16, 22),
-    5:  ("Q5_1", 16, 22),
-    6:  ("Q8_0", 32, 34),
-    7:  ("Q8_1", 32, 34),
-    28: ("Q2_K", 256, 84),
-    29: ("Q3_K", 256, 108),
-    30: ("Q4_K", 256, 144),
-    31: ("Q5_K", 256, 176),
-    32: ("Q6_K", 256, 192),
-    33: ("Q8_K", 256, 292),
-    34: ("IQ2_XXS", 256, 66),
-    35: ("IQ2_S", 256, 50),
-    36: ("IQ3_XXS", 256, 104),
-    37: ("IQ3_S", 256, 132),
-    38: ("IQ4_NL", 256, 90),
-    39: ("IQ4_XS", 256, 72),
-    40: ("IQ1_S", 256, 50),
-    41: ("IQ1_M", 256, 66),
-    42: ("IQ2_XS", 256, 54),
+    0: ("F32", 1, 4), 1: ("F16", 1, 2),
+    2: ("Q4_0", 32, 18), 3: ("Q4_1", 32, 20),
+    6: ("Q5_0", 32, 22), 7: ("Q5_1", 32, 24),
+    8: ("Q8_0", 32, 34), 9: ("Q8_1", 32, 40),
+    10: ("Q2_K", 256, 84), 11: ("Q3_K", 256, 110),
+    12: ("Q4_K", 256, 144), 13: ("Q5_K", 256, 176),
+    14: ("Q6_K", 256, 210), 15: ("Q8_K", 256, 292),
+    16: ("IQ2_XXS", 256, 66), 17: ("IQ2_XS", 256, 74),
+    18: ("IQ3_XXS", 256, 98), 19: ("IQ1_S", 256, 110),
+    20: ("IQ4_NL", 256, 50), 21: ("IQ3_S", 256, 110),
+    22: ("IQ2_S", 256, 82), 23: ("IQ4_XS", 256, 136),
+    24: ("I8", 1, 1), 25: ("I16", 1, 2), 26: ("I32", 1, 4),
+    27: ("I64", 1, 8), 28: ("F64", 1, 8), 29: ("IQ1_M", 256, 56),
+    30: ("BF16", 1, 2),
 }
 
 
@@ -191,10 +178,6 @@ def _read_string(c: _Cursor) -> str:
         raise GGUFError(
             f"string length {n} exceeds remaining {c.remaining()} bytes (pos {c.pos})")
     raw = c.take(n, "string data")
-    # GGUF strings are null-terminated with the null included in the length;
-    # strip a single trailing null so older files that omit it still work.
-    if raw.endswith(b"\x00"):
-        raw = raw[:-1]
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -202,14 +185,8 @@ def _read_string(c: _Cursor) -> str:
 
 
 def _validate_type(type_: int) -> int:
-    """Return the element type for arrays, else the scalar type itself."""
-    if (type_ & 0x0F) == GGUF_TYPE_ARRAY:
-        elem = (type_ >> 4) & 0x0F
-        if elem == GGUF_TYPE_ARRAY or elem not in _SCALAR_TYPES:
-            raise GGUFError(f"unsupported or nested GGUF array element type 0x{type_:02x}")
-        return elem
-    if type_ not in _SCALAR_TYPES:
-        raise GGUFError(f"unsupported GGUF value type 0x{type_:02x}")
+    if type_ != GGUF_TYPE_ARRAY and type_ not in _SCALAR_TYPES:
+        raise GGUFError(f"unsupported GGUF value type {type_}")
     return type_
 
 
@@ -238,14 +215,14 @@ def _read_scalar(c: _Cursor, type_: int):
         return c.unpack("<q", 8, "int64 value")
     if type_ == GGUF_TYPE_FLOAT64:
         return c.unpack("<d", 8, "float64 value")
-    if type_ == GGUF_TYPE_FLOAT16:
-        return c.unpack("<e", 2, "float16 value")
     raise GGUFError(f"unsupported GGUF value type 0x{type_:02x}")
 
 
 def _read_value(c: _Cursor, type_: int) -> Any:
-    if (type_ & 0x0F) == GGUF_TYPE_ARRAY:
-        elem = (type_ >> 4) & 0x0F
+    if type_ == GGUF_TYPE_ARRAY:
+        elem = c.unpack("<I", 4, "array element type")
+        if elem not in _SCALAR_TYPES:
+            raise GGUFError(f"unsupported or nested GGUF array element type {elem}")
         n = _read_u64(c, "array length")
         if n > c.remaining():
             raise GGUFError(
@@ -281,12 +258,8 @@ def _parse_metadata(data: bytes) -> tuple[GGUFInfo, int]:
             raise GGUFError("empty GGUF metadata key")
         if key in metadata:
             raise GGUFError(f"duplicate GGUF metadata key {key!r}")
-        type_ = cursor.unpack("<B", 1, "value type byte")
-        elem = _validate_type(type_)
-        # validate array element type up front so a malformed type fails before
-        # reading any of its items
-        if (type_ & 0x0F) == GGUF_TYPE_ARRAY and elem not in _SCALAR_TYPES:
-            raise GGUFError(f"unsupported GGUF array element type 0x{type_:02x}")
+        type_ = cursor.unpack("<I", 4, "value type")
+        _validate_type(type_)
         metadata[key] = _read_value(cursor, type_)
 
     return GGUFInfo(GGUFHeader(magic, version, n_tensors, n_kv), metadata), cursor.pos
