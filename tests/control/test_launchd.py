@@ -40,6 +40,11 @@ def test_install_start_stop_start_restart_uninstall(manager, profile):
     assert not m.paths.profile(profile.name).exists()
     assert m.paths.log(profile.name).read_text() == "keep me"
     assert all("-k" not in a for a in fake.calls)
+    target = f"{m.domain}/{profile.label}"
+    assert target not in fake.disabled
+    bootout = max(i for i, call in enumerate(fake.calls) if call[1] == "bootout")
+    enable = max(i for i, call in enumerate(fake.calls) if call[1] == "enable")
+    assert enable > bootout and fake.calls[enable][2] == target
 
 
 def test_delayed_bootout_is_waited_for(manager, profile):
@@ -122,13 +127,17 @@ def test_start_failure_keeps_recoverable_configuration(manager, profile):
     assert m.paths.plist(profile.name).exists()
 
 
-def test_reinstall_enables_previous_uninstall_override(manager, profile):
+def test_uninstall_enables_the_label(manager, profile):
     m, fake = manager
     m.install(profile)
     m.uninstall(profile.name)
-    assert fake.disabled
+    target = f"{m.domain}/{profile.label}"
+    assert target not in fake.disabled
+    disable = max(i for i, call in enumerate(fake.calls) if call[1] == "disable")
+    enable = max(i for i, call in enumerate(fake.calls) if call[1] == "enable")
+    assert enable > disable and fake.calls[enable][2] == target
     m.install(profile)
-    assert not fake.disabled
+    assert target not in fake.disabled
 
 
 @pytest.mark.parametrize("platform,uid", [("linux", 501), ("win32", 501), ("darwin", 0), ("darwin", -1)])

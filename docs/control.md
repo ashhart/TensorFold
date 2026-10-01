@@ -38,6 +38,7 @@ tensorfold service uninstall default --yes
 `start` loads a job that is not currently registered.
 `restart` waits until launchd has removed the job, then starts it. A failed wait starts nothing else.
 `uninstall` removes the profile and the plist. Models, caches, and logs stay.
+It then enables the label, so the launchd override stays enabled.
 
 The profile is the source of truth for the plist. The manager refuses a plist that differs from its profile.
 Replace a profile only while it is stopped.

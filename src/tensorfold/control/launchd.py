@@ -232,6 +232,8 @@ class Manager:
         with file_lock(self.paths.root / "operation.lock"):
             profile = self.store.get(name)
             self._stop(profile)
+            # disable persists. enable leaves an enabled record, which is the default.
+            self._call("enable", f"{self.domain}/{profile.label}")
             for path in (self.paths.plist(name), self.paths.profile(name)):
                 no_symlinks(path)
                 path.unlink()

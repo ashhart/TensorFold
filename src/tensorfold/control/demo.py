@@ -21,6 +21,9 @@ def demo_view(tick: int = 0) -> View:
                  "12:04:26 [tensorfold] 3 requests sharing a decode round",
                  "12:04:27 [tensorfold] request finished · length",
                  "12:04:28 [control] DEMO: these values are synthetic"]
-    return View([node, Node("glm-studio", "GLM · demo fixture", "http://127.0.0.1:8081", True, "stopped"),
-                 Node("spark-remote", "Remote · demo fixture", "http://192.0.2.10:8080", False, "monitor-only")],
-                demo=True, notice="DEMO MODE · simulated telemetry · service controls disabled · no network requests")
+    return View(
+        [node, Node("glm-studio", "GLM · demo fixture", "http://127.0.0.1:8081", True, "stopped"),
+         Node("spark-remote", "Remote · demo fixture", "http://192.0.2.10:8080", False, "monitor-only")],
+        demo=True,
+        notice=("DEMO MODE · simulated telemetry · "
+                "service controls disabled · no network requests"))

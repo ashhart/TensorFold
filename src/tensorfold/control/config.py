@@ -13,6 +13,7 @@ from typing import Any
 from .safety import ControlError, absolute, atomic_write, private_read
 
 _NAME = re.compile(r"[a-z][a-z0-9-]{0,47}\Z")
+_RESERVED_NAMES = {"control-smoke"}
 _ENV = re.compile(r"[A-Z_][A-Z0-9_]{0,127}\Z")
 _RESERVED = {"--host", "--port", "--name", "--alias", "--backend", "--no-update-check"}
 _SENSITIVE = re.compile(r"(?i)(token|password|api[-_]key|secret)")
@@ -23,6 +24,8 @@ _ENV_NAMES = {"TOKENIZERS_PARALLELISM", "OMP_NUM_THREADS"}
 def name_of(name: str) -> str:
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise ControlError("profile name: 1–48 lowercase letters, digits or hyphens; start with a letter")
+    if name in _RESERVED_NAMES:
+        raise ControlError(f"profile name {name} is reserved")
     return name
 
 
