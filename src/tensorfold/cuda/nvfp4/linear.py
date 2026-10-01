@@ -244,6 +244,67 @@ class Fp8Linear:
 
 
 @dataclass
+class Fp8ChannelLinear:
+    """An FP8 projection with one scale per output channel (compressed-tensors ``channel`` FP8).
+
+    The stored bytes run on the per-tensor FP8 kernels with a unit scale; each output column is then multiplied by
+    its fp32 channel scale and rounded to bf16 again. Both steps act on one row at a time, so drafted, serial and
+    concurrent rows keep equal bits. The output takes two bf16 roundings where a fused scale would take one.
+    """
+
+    inner: Fp8Linear
+    cs: torch.Tensor              # fp32 [n]: the channel scales
+    layout: str = "fp8channel"
+
+    @classmethod
+    def from_checkpoint(cls, weight: torch.Tensor, scales: torch.Tensor) -> "Fp8ChannelLinear":
+        """``weight`` e4m3 [N, K] and ``scales`` with N values ([N] or [N, 1])."""
+
+        n = weight.shape[0]
+        cs = scales.float().reshape(-1).contiguous()
+        if cs.numel() != n:
+            raise ValueError(f"FP8 channel scales: {cs.numel()} values for {n} outputs")
+        return cls(Fp8Linear.from_checkpoint(weight, 1.0), cs)
+
+    @property
+    def n(self) -> int:
+        return self.inner.n
+
+    @property
+    def k(self) -> int:
+        return self.inner.k
+
+    @property
+    def npad(self) -> int:
+        return self.inner.npad
+
+    def nbytes(self) -> int:
+        return self.inner.nbytes() + self.cs.numel() * 4
+
+    def tiles(self, t0: int, t1: int) -> "Fp8ChannelLinear":
+        """Outputs [64 t0, 64 t1) as views, no copy (decode only)."""
+
+        inner = self.inner.tiles(t0, t1)
+        return Fp8ChannelLinear(inner, self.cs[64 * t0:64 * t0 + inner.n])
+
+    def _scaled(self, y: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
+        r = (y.float() * self.cs).to(torch.bfloat16)
+        if out is None:
+            return r
+        out.copy_(r)
+        return out
+
+    def __call__(self, x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
+        return self._scaled(self.inner(x), out)
+
+    def prefill(self, x: torch.Tensor) -> torch.Tensor:
+        return self._scaled(self.inner.prefill(x), None)
+
+    def prefill8(self, xq: tuple) -> torch.Tensor:
+        return self._scaled(self.inner.prefill8(xq), None)
+
+
+@dataclass
 class Mx8Linear:
     """An MXFP8 projection: e4m3 bytes in the FP8 GEMM's fragment order, an e8m0 scale per 32 inputs."""
 

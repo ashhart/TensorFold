@@ -100,7 +100,15 @@ def dequant(scheme_name: str, weight: np.ndarray, scale: np.ndarray | None = Non
         g = 1.0 / global_scale if reciprocal_global else global_scale
         return E2M1[codes] * np.repeat(e4m3(scale), 16, axis=1) * np.float32(g)
     if scheme_name == "fp8":
-        return e4m3(weight) * np.float32(np.asarray(scale, dtype=np.float32).reshape(-1)[0])
+        s = np.asarray(scale, dtype=np.float32)
+        if s.size == 1:
+            return e4m3(weight) * np.float32(s.reshape(-1)[0])
+        n, k = weight.shape
+        if s.size == n:                        # one scale per output channel
+            return e4m3(weight) * s.reshape(n, 1)
+        if s.ndim == 2 and s.shape[0] == n and k % s.shape[1] == 0:
+            return e4m3(weight) * np.repeat(s, k // s.shape[1], axis=1)   # one scale per (row, input group)
+        raise ValueError(f"FP8 scale {s.shape} does not fit weight {weight.shape}")
     if scheme_name == "mxfp8":
         return e4m3(weight) * np.repeat(e8m0(scale), 32, axis=1)
     if scheme_name == "fp8block":              # ``scale`` = weight_scale_inv [ceil(N/128), K/128]

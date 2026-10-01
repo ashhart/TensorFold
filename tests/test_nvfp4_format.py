@@ -94,3 +94,19 @@ def test_block_fp8_matches_torch_float8_and_its_block_scales():
 def test_block_fp8_scheme_from_tensor_storage():
     assert fmt.scheme({"weight": ("F8_E4M3", [200, 256]), "weight_scale_inv": ("F32", [2, 2])}) == "fp8block"
     assert fmt.scheme({"weight": ("F8_E4M3", [200, 256]), "weight_scale": ("F32", [])}) == "fp8"
+
+
+@pytest.mark.torch
+def test_channel_and_group_fp8_match_torch_float8():
+    torch = pytest.importorskip("torch")
+    rng = np.random.default_rng(3)
+    n, k = 6, 256
+    w = rng.integers(0, 0x7F, size=(n, k), dtype=np.uint8)
+    base = torch.from_numpy(w).view(torch.float8_e4m3fn).float().numpy()
+    ch = rng.uniform(0.01, 2.0, size=(n, 1)).astype(np.float32)
+    assert np.array_equal(fmt.dequant("fp8", w, ch), base * ch)
+    assert np.array_equal(fmt.dequant("fp8", w, ch.reshape(-1)), base * ch)
+    grp = rng.uniform(0.01, 2.0, size=(n, k // 128)).astype(np.float32)
+    assert np.array_equal(fmt.dequant("fp8", w, grp), base * np.repeat(grp, 128, axis=1))
+    with pytest.raises(ValueError):
+        fmt.dequant("fp8", w, np.ones((n + 1,), dtype=np.float32))

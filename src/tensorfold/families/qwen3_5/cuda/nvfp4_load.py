@@ -13,8 +13,8 @@ from tensorfold.cuda import prompt_precision
 
 from .weights import Plain
 
-SUFFIXES = ("weight", "weight_packed", "weight_scale", "weight_scale_2", "weight_global_scale", "input_scale",
-            "input_global_scale")
+SUFFIXES = ("weight", "weight_packed", "weight_scale", "weight_scale_inv", "weight_scale_2", "weight_global_scale",
+            "input_scale", "input_global_scale")
 
 
 def quantized(model_dir: Path) -> bool:
@@ -81,7 +81,7 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
 
     from tensorfold.cuda.capacity import headers
     from tensorfold.cuda.nvfp4 import format as fmt
-    from tensorfold.cuda.nvfp4.linear import Fp4Linear, Fp8Linear, Staging
+    from tensorfold.cuda.nvfp4.linear import Fp4Linear, Fp8BlockLinear, Fp8ChannelLinear, Fp8Linear, Staging
 
     from .weights import GDN, Attention, Config, Layer, Weights, _Tensors
 
@@ -110,10 +110,18 @@ def load_nvfp4(model_dir: str | Path, device: str = "cuda"):
             lin.staging = staging
             return lin
         if kind == "fp8":
-            s = got["weight_scale"].float().reshape(-1)
-            if s.numel() != 1:
-                raise ValueError(f"{name}: FP8 with {s.numel()} scales; the CUDA engine reads one scale a tensor")
-            return Fp8Linear.from_checkpoint(weight, float(s[0]))
+            s = got["weight_scale"].float()
+            n, k = weight.shape
+            if s.numel() == 1:
+                return Fp8Linear.from_checkpoint(weight, float(s.reshape(-1)[0]))
+            if s.numel() == n:                                # compressed-tensors channel FP8: a scale per output
+                return Fp8ChannelLinear.from_checkpoint(weight, s)
+            if s.dim() == 2 and s.shape[0] == n and k % s.shape[1] == 0 and (k // s.shape[1]) % 64 == 0:
+                return Fp8BlockLinear.from_rows(weight, s.repeat_interleave(k // s.shape[1] // 64, dim=1).contiguous())
+            raise ValueError(f"{name}: FP8 scales {tuple(s.shape)} for weight {tuple(weight.shape)}; the CUDA engine "
+                             "reads one scale a tensor, one a channel, or one a (row, group of a multiple of 64)")
+        if kind == "fp8block":
+            return Fp8BlockLinear.from_checkpoint(weight, got["weight_scale_inv"])
         if kind == "bf16":
             w = weight.to(torch.bfloat16).contiguous()
             return Plain8(w, rows8=Fp8Linear.from_bf16(w)) if prompt and prompt_precision.fp8() else Plain(w)
