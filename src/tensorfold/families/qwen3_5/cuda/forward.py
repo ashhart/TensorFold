@@ -455,14 +455,18 @@ def _commit(states: Sequence[State], record: Sequence[Record], paths: Sequence[S
             news = src.index_select(1, pick_t).unbind(0)
         else:                                       # many rows: gather a layer at a time, the record uncopied
             news = [torch.cat([old, t.qkv]).index_select(0, pick_t) for old, t in zip(olds, items)]
+        dst, src = [], []
         for j, ((i, _), new) in enumerate(zip(linear, news)):
             for s, st in enumerate(states):
                 if replayed is not None:
                     st.rec[i] = replayed[s, j]
                 if in_place:
-                    st.conv[i].copy_(new[s * keep:(s + 1) * keep])
+                    dst.append(st.conv[i])
+                    src.append(new[s * keep:(s + 1) * keep])
                 else:
                     st.conv[i] = new[s * keep:(s + 1) * keep]
+        if dst:
+            torch._foreach_copy_(dst, src)            # every layer's and stream's window in one launch
     if att:
         for st, path in zip(states, paths):
             need = st.pos + len(path)
