@@ -405,3 +405,28 @@ def test_grouping_lists_exactly_the_tiles_in_use():
     assert int(s.tile_count.item()) == len(want) <= tiles.numel()
     assert tiles[:len(want)].tolist() == want
     assert max(counts) == ROWS                                       # the shared expert: every row
+
+
+def test_one_scratch_through_shrinking_windows_and_invalid_picks():
+    """One Scratch through 1,024 -> 1 -> 17 rows (shared expert included), then picks no expert takes, then 17 rows
+    again: every output equals a fresh Scratch's, and no stale tile or member entry is read."""
+    from tensorfold.cuda.exl3 import experts
+
+    E, D, I, TOPK, MAXR = 24, 512, 256, 6, 1024
+    ex, _ = _layer(E + 1, D, I, [(6, 6, 6)] * (E + 1), 2, seed=7)  # expert E is the shared one
+    g = torch.Generator().manual_seed(13)
+    x = torch.randn((MAXR, D), generator=g).to(torch.bfloat16).cuda()
+    sel, w = _picks(E, MAXR, TOPK, g, shared=True)
+    s = experts.Scratch(ex, MAXR, TOPK + 1)
+
+    def run(scratch, R, pick):
+        return experts.routed(x[:R].contiguous(), pick[:R].contiguous(), w[:R].contiguous(), ex, scratch, None,
+                              R).clone()
+
+    first = {}
+    for R in (1024, 1, 17):
+        first[R] = run(s, R, sel)
+        assert torch.equal(first[R], run(experts.Scratch(ex, R, TOPK + 1), R, sel))
+    run(s, 17, torch.full_like(sel, ex.count))                      # every pick past the experts: nothing runs
+    assert int(s.count.item()) == 0 and int(s.tile_count.item()) == 0
+    assert torch.equal(run(s, 17, sel), first[17])

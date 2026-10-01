@@ -327,7 +327,10 @@ struct GroupedArgs {
 
 template <int CB>
 void grouped_launch(const GroupedArgs& a, cudaStream_t stream) {
-    dim3 grid((unsigned)a.tile_max, (unsigned)(a.N / (16 * a.nt)), (unsigned)(a.mats * a.SK));
+    // the tile list's capacity, or every expert's member tiles when that is fewer (short decode windows)
+    const int per_expert = a.nexp_max * ((a.maxm + 15) / 16);
+    const int tiles = a.tile_max < per_expert ? a.tile_max : per_expert;
+    dim3 grid((unsigned)tiles, (unsigned)(a.N / (16 * a.nt)), (unsigned)(a.mats * a.SK));
 #define TF_LAUNCH(NT_, W_, PF_, LO_, HI_)                                                                       \
     grouped_kernel<CB, NT_, W_, PF_, LO_, HI_><<<grid, W_ * 32, 0, stream>>>(                                   \
         a.x0, a.x1, a.tp0, a.tp1, a.k2_0, a.k2_1, a.uids, a.ucount, a.members, a.tiles, a.tcount, a.z, a.K, a.N, \
