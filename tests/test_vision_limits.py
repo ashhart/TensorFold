@@ -158,3 +158,24 @@ def test_cuda_cli_count_reaches_request_preparation(tmp_path, monkeypatch, flag,
     args = cli.build_parser().parse_args(["serve", str(folder), "--vision", "--no-drafts", *flag])
     assert cli._serve_cuda(args, family, folder, 32) == 0
     assert seen == [accepted]
+
+
+@pytest.mark.parametrize("limit", [None, 8])
+def test_glm_cuda_app_takes_the_same_image_count_option(limit, monkeypatch):
+    """GLM's CUDA app is the shared CUDA App: --vision-max-images reaches ``image_limits`` and prompt preparation."""
+    from tensorfold.cuda import server
+    from tensorfold.families.glm5_next.cuda.app import GlmApp, ThinkingOffTemplate
+
+    seen = {}
+    monkeypatch.setattr(server.App, "__init__", lambda self, *a, **kw: (seen.update(kw), setattr(self, "template", NS())))
+    GlmApp(NS(), "dir", "glm", vision_max_images=limit)
+    assert seen["vision_max_images"] == limit
+
+    app = cuda_app(Frontend())
+    app.__class__ = GlmApp
+    app.template = ThinkingOffTemplate(app.template)
+    app.image_limits = ImageLimits() if limit is None else ImageLimits(max_images=limit)
+    accepted = 4 if limit is None else 8
+    assert len(app.prepare({"messages": image_messages() * accepted, "max_tokens": 2}, True).vision.image_hashes) == accepted
+    with pytest.raises(RequestError, match=f"at most {accepted}"):
+        app.prepare({"messages": image_messages() * (accepted + 1), "max_tokens": 2}, True)
