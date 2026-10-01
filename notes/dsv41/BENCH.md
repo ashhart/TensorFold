@@ -180,3 +180,25 @@ Decode (same day): MQA chunk 128 x 16 heads for <= 16 rows, side-stream parallel
 compressor, 8 wo_a slices, the shared expert beside the routed ones): 4-row verify 52 -> 47 ms, serial
 31.5 -> 34-35 tok/s, DSpark reasoning 59 -> 63 tok/s. Experts at ~210 GB/s (at the DRAM limit). Graph replay of
 a k = 3 round is 37 ms but the measured round is ~49 ms: ~12 ms a round of host work is the next decode lever.
+
+## 2026-10-01 — final head-to-head vs vLLM (same document / prompts, both on the 2-node GB10 pair)
+
+Prefill, whole prompt, fresh request (vLLM: `tools/dsv41_vllm_prefill.py`, random first token defeats the prefix
+cache; TensorFold: `--prefill-bench`, dual link):
+
+| prompt | vLLM | TensorFold | ratio |
+|---:|---:|---:|---:|
+| 2,048 | 715 | 768 | 1.07× |
+| 8,192 | 711 | 1,376 | 1.94× |
+| 16,000 | 715 | 1,349 | 1.89× |
+| 32,000 | 707 | 1,160 | 1.64× |
+
+Decode, DSpark k = 3, greedy, same prompt ids (vLLM incl. ~0.1 s prefill; outputs differ, so acceptance differs):
+
+| prompt | vLLM | TensorFold | ratio |
+|---|---:|---:|---:|
+| story | 23.6 (0.79 acc) | 33.4–35 | ~1.45× |
+| reasoning | 42.2 (2.43) | 62.5–64 | ~1.5× |
+| code | 29.4 (1.25) | 48–52 | ~1.7× |
+| serial (no drafts) | 23 (earlier) | 34–35 | ~1.5× |
+| 40K context, DSpark | 19 (earlier) | 38 (earlier) | 2× |

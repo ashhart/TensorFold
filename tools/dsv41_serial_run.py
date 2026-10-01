@@ -33,6 +33,7 @@ def main() -> None:
     ap.add_argument("--profile-rows", type=int, default=1, help="rows a profiled step takes (a verify window)")
     ap.add_argument("--profile-prefill", type=int, default=0, help="profile one prompt chunk of N rows and exit")
     ap.add_argument("--no-parity", action="store_true")
+    ap.add_argument("--prefill-bench", default="", help="comma lengths: whole-prompt prefill time of each (fresh request)")
     ap.add_argument("--graph", action="store_true", help="capture the one-row decode step as a CUDA graph")
     ap.add_argument("--dspark", type=int, default=0, help="draft N tokens a round with the checkpoint's DSpark blocks")
     ap.add_argument("--cap", type=int, default=1024, help="context capacity (cache rows)")
@@ -76,6 +77,25 @@ def main() -> None:
 
     from tensorfold.engine.exact_sampling import Sampling
 
+    if args.prefill_bench:
+        doc = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+        with torch.no_grad():
+            eng.reset()
+            eng.prefill(doc[:2048], 2048)                         # warm kernels
+            torch.cuda.synchronize()
+            for n in (int(v) for v in args.prefill_bench.split(",")):
+                best = 0.0
+                for _ in range(2):
+                    eng.reset()
+                    nccl.barrier()
+                    t = time.perf_counter()
+                    eng.prefill(doc[:n], 2048)
+                    torch.cuda.synchronize()
+                    best = max(best, n / (time.perf_counter() - t))
+                if args.rank == 0:
+                    print(f"whole prompt {n} tokens: {best:.0f} tok/s", flush=True)
+        nccl.barrier()
+        return
     if args.profile_prefill:
         from torch.profiler import ProfilerActivity, profile
 
