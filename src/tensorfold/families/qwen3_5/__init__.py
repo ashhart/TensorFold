@@ -177,9 +177,10 @@ def lane_family(model: Any, *, lanes: bool, drafter: str, drafter_bits: int, tit
     """Install the lane kernels (M5) or the row decoder (M1-M4) on ``model`` and wrap it, drafter included."""
 
     from tensorfold.families.qwen3_5.family import Qwen35Family
-    from tensorfold.kernels.qwen.dense.v1 import lane_qmm
+    from tensorfold.kernels.qwen.dense.v1 import lane_qmm, prefill_gdn
 
     model._tensorfold_lanes = bool(lanes)
+    prefill_gdn.install()                       # prompt scans: mlx_lm's bits, faster
     if lanes:
         missed = lane_qmm.uncovered(model)
         if missed:
