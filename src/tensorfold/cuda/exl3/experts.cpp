@@ -5,6 +5,12 @@ void exl3x_grouped_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&,
                         const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&,
                         int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
                         int64_t, int64_t);
+void exl3x_prompt_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                       const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t,
+                       int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+void exl3x_prompt_down_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+                            const at::Tensor&, const at::Tensor&, const at::Tensor&, at::Tensor&, int64_t, int64_t,
+                            int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 void exl3x_dequant_cuda(const at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t, int64_t);
 void exl3x_group_cuda(const at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t);
 void exl3x_rot_in_cuda(const at::Tensor&, int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&,
@@ -42,6 +48,49 @@ void grouped(const at::Tensor& X0, const at::Tensor& X1, const at::Tensor& TP0, 
     c10::cuda::CUDAGuard guard(X0.device());
     exl3x_grouped_cuda(X0, X1, TP0, TP1, B0, B1, uids, ucount, members, Z, mats, K, N, P, SK, slots, cb, nt, warps,
                        pf, lo, hi);
+}
+
+void prompt(const at::Tensor& X0, const at::Tensor& X1, const at::Tensor& TP0, const at::Tensor& TP1,
+            const at::Tensor& B0, const at::Tensor& B1, const at::Tensor& items, const at::Tensor& counts,
+            const at::Tensor& members, at::Tensor Z, int64_t mats, int64_t K, int64_t N, int64_t P, int64_t E,
+            int64_t seg, int64_t wps, int64_t items_max, int64_t cb, int64_t nt, int64_t widths) {
+    check(X0, at::kHalf, "X0");
+    check(X1, at::kHalf, "X1");
+    check(TP0, at::kLong, "TP0");
+    check(TP1, at::kLong, "TP1");
+    check(B0, at::kInt, "B0");
+    check(B1, at::kInt, "B1");
+    check(items, at::kInt, "items");
+    check(counts, at::kInt, "counts");
+    check(members, at::kInt, "members");
+    check(Z, at::kFloat, "Z");
+    TORCH_CHECK(items.numel() >= 3 * items_max, "items too small");
+    TORCH_CHECK(Z.numel() >= mats * P * N, "Z too small");
+    TORCH_CHECK(X0.numel() >= P * K && X1.numel() >= P * K, "X too small");
+    TORCH_CHECK(items_max <= 65535, "too many items for one launch");
+    c10::cuda::CUDAGuard guard(X0.device());
+    exl3x_prompt_cuda(X0, X1, TP0, TP1, B0, B1, items, counts, members, Z, mats, K, N, P, E, seg, wps, items_max, cb,
+                      nt, widths);
+}
+
+void prompt_down(const at::Tensor& X, const at::Tensor& TP, const at::Tensor& B, const at::Tensor& svh,
+                 const at::Tensor& items, const at::Tensor& counts, const at::Tensor& members, at::Tensor Y, int64_t K,
+                 int64_t N, int64_t P, int64_t E, int64_t seg, int64_t wps, int64_t items_max, int64_t cb,
+                 int64_t widths) {
+    check(X, at::kHalf, "X");
+    check(TP, at::kLong, "TP");
+    check(B, at::kInt, "B");
+    check(svh, at::kHalf, "svh");
+    check(items, at::kInt, "items");
+    check(counts, at::kInt, "counts");
+    check(members, at::kInt, "members");
+    TORCH_CHECK(Y.is_cuda() && (Y.scalar_type() == at::kFloat || Y.scalar_type() == at::kBFloat16), "Y: fp32 or bf16");
+    TORCH_CHECK(Y.dim() == 2 && Y.size(1) == N && Y.stride(1) == 1 && Y.stride(0) == N && Y.size(0) >= P,
+                "Y: contiguous [>= P, N]");
+    TORCH_CHECK(items.numel() >= 3 * items_max && items_max <= 65535, "items");
+    TORCH_CHECK(X.numel() >= P * K, "X too small");
+    c10::cuda::CUDAGuard guard(X.device());
+    exl3x_prompt_down_cuda(X, TP, B, svh, items, counts, members, Y, K, N, P, E, seg, wps, items_max, cb, widths);
 }
 
 void dequant(const at::Tensor& T, at::Tensor out, int64_t k2, int64_t cb) {
@@ -131,6 +180,8 @@ void down_combine(const at::Tensor& Z, const at::Tensor& pick, const at::Tensor&
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("grouped", &grouped);
+    m.def("prompt", &prompt);
+    m.def("prompt_down", &prompt_down);
     m.def("dequant", &dequant);
     m.def("group", &group);
     m.def("rot_in", &rot_in);
