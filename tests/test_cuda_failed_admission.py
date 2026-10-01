@@ -76,6 +76,7 @@ def decoders(monkeypatch, allocations):  # noqa: F811
     monkeypatch.setattr(multi, "private", lambda st, rows: St(st.pos))
     monkeypatch.setattr(multi, "State", lambda w: St())
     monkeypatch.setattr(multi, "_share", lambda values, src, device: values)      # two ranks: no NCCL here
+    monkeypatch.setattr(multi.torch.cuda, "is_available", lambda: False)          # CPU stand-ins, as on a host box
 
     def make(world=1):
         w = SimpleNamespace(config=SimpleNamespace(eos=(0,), vocab=10), norm=SimpleNamespace(device="cpu"),
