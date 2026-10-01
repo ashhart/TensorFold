@@ -39,11 +39,11 @@ stop/disconnect and native closure. Affected existing prompt/admission/error/
 disconnect/health/discovery checks also passed (290 checks before the fourth
 cleanup test was added; that test and the three adapter tests passed afterward).
 
-No second real model was loaded. Mocked HTTP behavior is not proof of actual
-GGUF token-ID identity, model quality or Hunyuan coexistence. Capacity admission
-must be completed before native loading; device and real-model qualification
-remain board milestones. S07 must rebuild the final committed wheel to include
-this adapter rather than reuse the earlier S05 smoke wheel.
+The final committed wheel was rebuilt and installed independently. The original
+ds4 service was stopped with user authorization, and the real GGUF now runs
+through this adapter. Chat, code, thinking, SSE, tools/followup and actual
+Hunyuan/moderation coexistence passed. See [release evidence](deepseek-v4-release.md)
+for hashes, measurements and limits; a full 262K-token prompt is not claimed.
 
 For the final ml-infra recipe, use `make tensorfold-deepseek-3d`. ml-infra owns
 binding (`TF_DEEPSEEK_HOST`, default `0.0.0.0` for Tailscale access), while

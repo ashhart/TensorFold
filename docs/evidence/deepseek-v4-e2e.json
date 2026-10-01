@@ -1,0 +1,308 @@
+{
+  "started": 1790818520.035097,
+  "requested_context": 262144,
+  "full_context_prompt_tested": false,
+  "checks": {
+    "chat": {
+      "id": "chatcmpl-00611f5099cc487d87b86a88",
+      "object": "chat.completion",
+      "created": 1790818520,
+      "model": "deepseek-v4-flash",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "42"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 15,
+        "completion_tokens": 2,
+        "total_tokens": 17,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "tensorfold": {
+        "generated": 2,
+        "cached": 0,
+        "drafts": false,
+        "prefill_s": 0.7510346039198339,
+        "decode_s": 0.14800272602587938,
+        "rounds": 2,
+        "min_rows": 1,
+        "drafted": 0,
+        "accepted": 0,
+        "token_sha": "7fdf6c58b34c"
+      }
+    },
+    "code": {
+      "id": "chatcmpl-ca50236b27204a92b9a57306",
+      "object": "chat.completion",
+      "created": 1790818520,
+      "model": "deepseek-v4-flash",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "def add(a, b):\n    return a + b"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 21,
+        "completion_tokens": 12,
+        "total_tokens": 33,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "tensorfold": {
+        "generated": 12,
+        "cached": 0,
+        "drafts": false,
+        "prefill_s": 0.5761495069600642,
+        "decode_s": 0.8219812419265509,
+        "rounds": 12,
+        "min_rows": 1,
+        "drafted": 0,
+        "accepted": 0,
+        "token_sha": "f2f0fd7f5138"
+      }
+    },
+    "stream": {
+      "chunks": 3,
+      "done": true
+    },
+    "tools": {
+      "call": {
+        "id": "chatcmpl-0a8df3dff56d493299647e8b",
+        "object": "chat.completion",
+        "created": 1790818522,
+        "model": "deepseek-v4-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_1eaa1025e05748eba2ca9df5",
+                  "type": "function",
+                  "function": {
+                    "name": "add",
+                    "arguments": "{\"a\":17,\"b\":25}"
+                  }
+                }
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 291,
+          "completion_tokens": 59,
+          "total_tokens": 350,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "tensorfold": {
+          "generated": 59,
+          "cached": 0,
+          "drafts": false,
+          "prefill_s": 4.007526406086981,
+          "decode_s": 3.7233782280236483,
+          "rounds": 59,
+          "min_rows": 1,
+          "drafted": 0,
+          "accepted": 0,
+          "token_sha": "dcce6152c18f"
+        }
+      },
+      "followup": {
+        "id": "chatcmpl-871cac398ed64c53a83ad24b",
+        "object": "chat.completion",
+        "created": 1790818530,
+        "model": "deepseek-v4-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "17 + 25 = 42."
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 85,
+          "completion_tokens": 9,
+          "total_tokens": 94,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "tensorfold": {
+          "generated": 9,
+          "cached": 0,
+          "drafts": false,
+          "prefill_s": 1.4150637676939368,
+          "decode_s": 0.560684067197144,
+          "rounds": 9,
+          "min_rows": 1,
+          "drafted": 0,
+          "accepted": 0,
+          "token_sha": "554c25433650"
+        }
+      }
+    },
+    "thinking": {
+      "id": "chatcmpl-1e12f91effd140dbb2aa36a0",
+      "object": "chat.completion",
+      "created": 1790818532,
+      "model": "deepseek-v4-flash",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "6 times 7 is 42.",
+            "reasoning_content": "1.  **Identify the User's Request**: The user asks \"What is 6 times 7?\" This is a simple arithmetic multiplication problem.\n2.  **Perform the Calculation**: 6 * 7 = 42.\n3.  **Formulate the Response**: State the answer clearly and concisely."
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 12,
+        "completion_tokens": 75,
+        "total_tokens": 87,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 66
+        }
+      },
+      "tensorfold": {
+        "generated": 75,
+        "cached": 0,
+        "drafts": false,
+        "prefill_s": 0.28642192715778947,
+        "decode_s": 4.666048357728869,
+        "rounds": 75,
+        "min_rows": 1,
+        "drafted": 0,
+        "accepted": 0,
+        "token_sha": "82cec2fd8cb0"
+      }
+    },
+    "concurrent_chat": {
+      "id": "chatcmpl-17cd722c7ca845e1ac463916",
+      "object": "chat.completion",
+      "created": 1790818537,
+      "model": "deepseek-v4-flash",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "Here's a short Python function to multiply two numbers:\n\n```python\ndef multiply(a, b):\n    return a * b\n```\n\nThis function takes two arguments and returns their product. It works with integers, floats, and any numeric types in Python.\n\nExample usage:\n```python\nresult = multiply(5, 3)      # Returns 15\nresult = multiply(2.5, 4)    # Returns 10.0\nresult = multiply(-7, 6)     # Returns -42\n```\n\nIf you need to handle more than two numbers, you could use `*args`:\n\n```python\ndef multiply(*numbers):\n    result = 1\n    for num in numbers:\n        result *= num\n    return result\n```\n\nThis version accepts any number"
+          },
+          "finish_reason": "length"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 14,
+        "completion_tokens": 160,
+        "total_tokens": 174,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "tensorfold": {
+        "generated": 160,
+        "cached": 0,
+        "drafts": false,
+        "prefill_s": 0.6603171122260392,
+        "decode_s": 20.496736150234938,
+        "rounds": 160,
+        "min_rows": 1,
+        "drafted": 0,
+        "accepted": 0,
+        "token_sha": "cfdbe15b5174"
+      }
+    },
+    "hunyuan": {
+      "glb_bytes": 15375500,
+      "steps": 30,
+      "octree": 256
+    },
+    "moderation": {
+      "allowed": true,
+      "status": "checked",
+      "category": "none",
+      "score": 0.001086,
+      "threshold": 0.8,
+      "model": "Falconsai/nsfw_image_detection",
+      "revision": "ea798c4a93814025af5c7befb6cbf34757ecc7b4",
+      "device": "cuda"
+    }
+  },
+  "health": {
+    "ok": true,
+    "backend": "tensorfold",
+    "busy": false,
+    "requests_running": 0,
+    "requests_total": 1,
+    "prompt_tokens_total": 8,
+    "completion_tokens_total": 3,
+    "prefill_seconds_total": 1.21855,
+    "decode_seconds_total": 0.376562,
+    "cached_tokens_total": 0,
+    "rounds_total": 3,
+    "drafted_total": 0,
+    "accepted_total": 0,
+    "context_length": 262144
+  },
+  "health_8100": {
+    "status": "ok",
+    "pipeline_loaded": true,
+    "flashvdm_enabled": true,
+    "load_error": null,
+    "load_time_s": 51.066478967666626
+  },
+  "health_8101": {
+    "status": "ok",
+    "model_loaded": true,
+    "requested_device": "cuda",
+    "device": "cuda",
+    "device_fallback": null
+  },
+  "passed": true,
+  "minimum_available_bytes": 100297027584,
+  "swap_start_bytes": 9825873920,
+  "swap_peak_bytes": 9825873920,
+  "seconds": 56.80527210235596
+}
