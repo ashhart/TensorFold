@@ -398,7 +398,8 @@ def test_grouping_lists_exactly_the_tiles_in_use():
     sel, _ = _picks(E, ROWS, TOPK, g, shared=True)
     s = experts.Scratch(ex, ROWS, TOPK + 1)
     ids, members, tiles = s.window(ROWS)
-    experts._ext().group(sel, ids, s.count, members, tiles, s.tile_count, ROWS, TOPK + 1, ex.count)
+    experts._ext().group(sel, ids, s.count, members, tiles, s.tile_count, s.counts, s.place_of, ROWS, TOPK + 1,
+                         ex.count)
     used = int(s.count.item())
     counts = (members[:used] >= 0).sum(1).tolist()
     want = [(u << 16) | m for u, c in enumerate(counts) for m in range(-(-c // 16))]

@@ -1,4 +1,4 @@
-"""EXL3 grouping opts in to the device limit for large launches and preserves exact membership order."""
+"""EXL3 grouping at any window size (no picks in shared memory) preserves exact membership order and lists the tiles."""
 
 import pytest
 import torch
@@ -10,10 +10,12 @@ SLOTS = 9               # top_k + 1
 EXPERTS = 288           # a 288-expert MoE layer
 
 
-def _tiles(rows, slots, maxu, device="cuda"):
-    """The grouping's tile list and count, at the bound it checks: one entry a 16-row member tile in use."""
+def _tiles(rows, slots, maxu, device="cuda", experts=EXPERTS):
+    """The grouping's tile list and count (at the bound it checks), and its per-expert counts and places."""
     return (torch.zeros(((rows * slots + 15) // 16 + maxu,), dtype=torch.int32, device=device),
-            torch.zeros((1,), dtype=torch.int32, device=device))
+            torch.zeros((1,), dtype=torch.int32, device=device),
+            torch.zeros((experts,), dtype=torch.int32, device=device),
+            torch.zeros((experts,), dtype=torch.int32, device=device))
 
 
 @pytest.mark.parametrize("rows", [PREFILL_ROWS, 8, 512])
@@ -28,8 +30,8 @@ def test_group_succeeds_cold_at_prefill_scale(rows):
     ucount = torch.zeros((1,), dtype=torch.int32, device="cuda")
     members = torch.full((maxu * rows,), -1, dtype=torch.int32, device="cuda").view(maxu, rows)
 
-    tiles, tcount = _tiles(rows, SLOTS, maxu)
-    ext.group(pick, uids, ucount, members, tiles, tcount, rows, SLOTS, EXPERTS)
+    tiles, tcount, counts, place_of = _tiles(rows, SLOTS, maxu)
+    ext.group(pick, uids, ucount, members, tiles, tcount, counts, place_of, rows, SLOTS, EXPERTS)
     torch.cuda.synchronize()
     distinct = ucount[0].item()
     assert 0 < distinct <= min(rows * SLOTS, EXPERTS)
@@ -52,8 +54,8 @@ def test_group_output_is_consistent_across_call_order():
         ids = torch.zeros((maxu,), dtype=torch.int32, device="cuda")
         count = torch.zeros((1,), dtype=torch.int32, device="cuda")
         members = torch.full((maxu * R,), -1, dtype=torch.int32, device="cuda").view(maxu, R)
-        tiles, tcount = _tiles(R, slots, maxu)
-        ext.group(pick, ids, count, members, tiles, tcount, R, slots, E)
+        tiles, tcount, counts, place_of = _tiles(R, slots, maxu, experts=E)
+        ext.group(pick, ids, count, members, tiles, tcount, counts, place_of, R, slots, E)
         torch.cuda.synchronize()
         results.append((count[0].item(), members.clone()))
     assert results[0][0] == results[1][0] and torch.equal(results[0][1], results[1][1])
@@ -89,8 +91,8 @@ def _launch(rows, slots=SLOTS, device="cuda"):
     ids = torch.zeros(n, dtype=torch.int32, device=device)
     count = torch.zeros(1, dtype=torch.int32, device=device)
     members = torch.full((n, rows), -1, dtype=torch.int32, device=device)
-    tiles, tcount = _tiles(rows, slots, n, device)
-    experts._ext().group(pick, ids, count, members, tiles, tcount, rows, slots, EXPERTS)
+    tiles, tcount, counts, place_of = _tiles(rows, slots, n, device)
+    experts._ext().group(pick, ids, count, members, tiles, tcount, counts, place_of, rows, slots, EXPERTS)
     torch.cuda.synchronize(device)
     _assert_members(pick, ids, count, members, EXPERTS)
     _assert_tiles(count, members, tiles, tcount)
@@ -104,10 +106,9 @@ def test_device_limit_allows_more_than_a_hardcoded_96_kib_when_available():
     _launch(rows)
 
 
-def test_oversized_launch_refuses_before_launch_and_a_small_one_still_works():
+def test_a_window_past_the_shared_memory_ceiling_groups_exactly_and_a_small_one_still_works():
     limit = torch.cuda.get_device_properties(0).shared_memory_per_block_optin
-    with pytest.raises(RuntimeError, match="EXL3 grouping needs"):
-        _launch(limit // (SLOTS * 4) + 1)
+    _launch(limit // (SLOTS * 4) + 1)          # once refused: the picks no longer go through shared memory
     _launch(8)
 
 

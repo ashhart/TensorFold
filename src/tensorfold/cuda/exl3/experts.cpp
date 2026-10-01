@@ -7,8 +7,8 @@ void exl3x_grouped_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&,
                         int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
                         int64_t, int64_t);
 void exl3x_dequant_cuda(const at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t, int64_t);
-void exl3x_group_cuda(const at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, int64_t,
-                      int64_t, int64_t);
+void exl3x_group_cuda(const at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&, at::Tensor&,
+                      at::Tensor&, int64_t, int64_t, int64_t);
 void exl3x_rot_in_cuda(const at::Tensor&, int64_t, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                        at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t, int64_t);
 void exl3x_gateup_epilogue_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
@@ -62,7 +62,7 @@ void dequant(const at::Tensor& T, at::Tensor out, int64_t k2, int64_t cb) {
 }
 
 void group(const at::Tensor& pick, at::Tensor uids, at::Tensor ucount, at::Tensor members, at::Tensor tiles,
-           at::Tensor tcount, int64_t R, int64_t slots, int64_t E) {
+           at::Tensor tcount, at::Tensor counts, at::Tensor place_of, int64_t R, int64_t slots, int64_t E) {
     check(pick, at::kInt, "pick");
     check(uids, at::kInt, "uids");
     check(ucount, at::kInt, "ucount");
@@ -74,8 +74,11 @@ void group(const at::Tensor& pick, at::Tensor uids, at::Tensor ucount, at::Tenso
     check(tcount, at::kInt, "tcount");
     TORCH_CHECK(members.size(1) <= 16 * 65536, "at most 65,536 member tiles an expert");
     TORCH_CHECK(tiles.numel() >= (R * slots + 15) / 16 + uids.numel(), "tiles too small");
+    check(counts, at::kInt, "counts");
+    check(place_of, at::kInt, "place_of");
+    TORCH_CHECK(counts.numel() >= E && place_of.numel() >= E, "counts and place_of need an entry an expert");
     c10::cuda::CUDAGuard guard(pick.device());
-    exl3x_group_cuda(pick, uids, ucount, members, tiles, tcount, R, slots, E);
+    exl3x_group_cuda(pick, uids, ucount, members, tiles, tcount, counts, place_of, R, slots, E);
 }
 
 void rot_in(const at::Tensor& x, int64_t x_stride, const at::Tensor& pick, const at::Tensor& suh0,

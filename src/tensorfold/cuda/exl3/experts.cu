@@ -12,35 +12,39 @@ namespace {
 
 constexpr float HAD_SCALE = 0.08838834764831845f;   // 1 / sqrt(128)
 
-// Grouping in one block: distinct experts (< E) in id order, members row * 32 + slot in row order, -1 after the last,
-// and the tile list: (expert's place << 16) | 16-row tile for every non-empty tile, in place order, so the grouped
-// kernels launch one program a tile in use instead of one a tile of the window.
+// Grouping: distinct experts (< E) in id order, members row * 32 + slot in row order, -1 after the last, and the tile
+// list: (expert's place << 16) | 16-row tile for every non-empty tile, in place order, so the grouped kernels launch one
+// program a tile in use. Three launches, none holding the picks in shared memory: per-expert counts (integer atomics,
+// exact in any order), one block's scan over the experts for places and tiles, then a warp an expert that compacts its
+// picks in row order with ballots.
 constexpr int GROUP_THREADS = 1024;
 constexpr int GROUP_PER_THREAD = 4;
+constexpr int FILL_WARPS = 4;
 
-__global__ void __launch_bounds__(GROUP_THREADS) group_kernel(const int* __restrict__ pick, int* __restrict__ uids,
-                                                              int* __restrict__ ucount, int* __restrict__ members,
-                                                              int* __restrict__ tiles, int* __restrict__ tcount,
-                                                              int R, int slots, int E, int maxm) {
-    extern __shared__ int sh_pick[];
+__global__ void group_count_kernel(const int* __restrict__ pick, int n, int E, int* __restrict__ counts) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n; i += gridDim.x * blockDim.x) {
+        const int e = pick[i];
+        if (e >= 0 && e < E) atomicAdd(counts + e, 1);
+    }
+}
+
+__global__ void __launch_bounds__(GROUP_THREADS) group_scan_kernel(const int* __restrict__ counts,
+                                                                   int* __restrict__ uids, int* __restrict__ ucount,
+                                                                   int* __restrict__ tiles, int* __restrict__ tcount,
+                                                                   int* __restrict__ place_of, int E, int maxm) {
     __shared__ int warp_tot[GROUP_THREADS / 32];
     __shared__ int warp_tiles[GROUP_THREADS / 32];
-    const int n = R * slots;
-    for (int i = threadIdx.x; i < n; i += GROUP_THREADS) sh_pick[i] = pick[i];
-    __syncthreads();
     int cnt[GROUP_PER_THREAD];
     int used = 0, ntile = 0;
 #pragma unroll
     for (int q = 0; q < GROUP_PER_THREAD; ++q) {
         const int e = threadIdx.x * GROUP_PER_THREAD + q;
-        int c = 0;
-        if (e < E)
-            for (int i = 0; i < n; ++i) c += sh_pick[i] == e;
+        const int c = e < E ? counts[e] : 0;
         cnt[q] = c;
         used += c > 0;
         ntile += (min(c, maxm) + 15) / 16;
     }
-    // exclusive scan of `used` over threads
+    // exclusive scans of `used` and of the tiles over threads
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
     int inc = used, tinc = ntile;
 #pragma unroll
@@ -69,16 +73,38 @@ __global__ void __launch_bounds__(GROUP_THREADS) group_kernel(const int* __restr
     int tile = warp_tiles[warp] + tinc - ntile;
 #pragma unroll
     for (int q = 0; q < GROUP_PER_THREAD; ++q) {
-        if (cnt[q] == 0) continue;
         const int e = threadIdx.x * GROUP_PER_THREAD + q;
+        if (e >= E) continue;
+        if (cnt[q] == 0) {
+            place_of[e] = -1;
+            continue;
+        }
         uids[place] = e;
-        int j = 0;
-        for (int i = 0; i < n && j < maxm; ++i)
-            if (sh_pick[i] == e) members[place * maxm + j++] = (i / slots) * 32 + (i % slots);
-        for (; j < maxm; ++j) members[place * maxm + j] = -1;
+        place_of[e] = place;
         for (int m = 0; m < (min(cnt[q], maxm) + 15) / 16; ++m) tiles[tile++] = (place << 16) | m;
         ++place;
     }
+}
+
+// A warp an expert: its picks' positions in row order (a ballot a 32 picks), the first maxm, then -1 to maxm.
+__global__ void __launch_bounds__(FILL_WARPS * 32) group_fill_kernel(const int* __restrict__ pick, int n, int slots,
+                                                                     const int* __restrict__ place_of,
+                                                                     int* __restrict__ members, int E, int maxm) {
+    const int e = blockIdx.x * FILL_WARPS + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+    if (e >= E) return;
+    const int place = place_of[e];
+    if (place < 0) return;
+    int* row = members + (size_t)place * maxm;
+    int j = 0;
+    for (int base = 0; base < n && j < maxm; base += 32) {
+        const int i = base + lane;
+        const bool hit = i < n && pick[i] == e;
+        const unsigned m = __ballot_sync(0xffffffffu, hit);
+        const int k = j + __popc(m & ((1u << lane) - 1u));
+        if (hit && k < maxm) row[k] = (i / slots) * 32 + (i % slots);
+        j += __popc(m);
+    }
+    for (int k = min(j, maxm) + lane; k < maxm; k += 32) row[k] = -1;
 }
 
 // Walsh-Hadamard transform of 128 values, 4 a lane, fixed butterfly order (strides 1, 2 in registers, 4..64 across lanes).
@@ -302,24 +328,24 @@ void exl3x_dequant_cuda(const at::Tensor& T, at::Tensor& out, int64_t K, int64_t
 }
 
 void exl3x_group_cuda(const at::Tensor& pick, at::Tensor& uids, at::Tensor& ucount, at::Tensor& members,
-                      at::Tensor& tiles, at::Tensor& tcount, int64_t R, int64_t slots, int64_t E) {
+                      at::Tensor& tiles, at::Tensor& tcount, at::Tensor& counts, at::Tensor& place_of, int64_t R,
+                      int64_t slots, int64_t E) {
     TORCH_CHECK(E <= GROUP_THREADS * GROUP_PER_THREAD, "too many experts for the grouping kernel");
     TORCH_CHECK(slots <= 32, "at most 32 slots a row");
-    const size_t smem = (size_t)R * slots * sizeof(int);
-    constexpr size_t static_smem = 2 * (GROUP_THREADS / 32) * sizeof(int);       // warp_tot and warp_tiles
-    if (smem + static_smem > 48 * 1024) {
-        cudaFuncAttributes attributes;
-        C10_CUDA_CHECK(cudaFuncGetAttributes(&attributes, group_kernel));
-        const auto* device = at::cuda::getCurrentDeviceProperties();
-        const size_t limit = device->sharedMemPerBlockOptin - attributes.sharedSizeBytes;
-        TORCH_CHECK(smem <= limit, "EXL3 grouping needs ", smem, " dynamic shared-memory bytes; this GPU allows ",
-                    limit, " after the kernel's static storage");
-        if (smem > (size_t)attributes.maxDynamicSharedSizeBytes)
-            C10_CUDA_CHECK(cudaFuncSetAttribute(group_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)limit));
-    }
-    group_kernel<<<1, GROUP_THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
-        pick.data_ptr<int>(), uids.data_ptr<int>(), ucount.data_ptr<int>(), members.data_ptr<int>(),
-        tiles.data_ptr<int>(), tcount.data_ptr<int>(), (int)R, (int)slots, (int)E, (int)members.size(1));
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const int n = (int)(R * slots);
+    C10_CUDA_CHECK(cudaMemsetAsync(counts.data_ptr<int>(), 0, (size_t)E * sizeof(int), stream));
+    group_count_kernel<<<std::max(1, std::min((n + 255) / 256, 1024)), 256, 0, stream>>>(pick.data_ptr<int>(), n,
+                                                                                         (int)E, counts.data_ptr<int>());
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    group_scan_kernel<<<1, GROUP_THREADS, 0, stream>>>(counts.data_ptr<int>(), uids.data_ptr<int>(),
+                                                       ucount.data_ptr<int>(), tiles.data_ptr<int>(),
+                                                       tcount.data_ptr<int>(), place_of.data_ptr<int>(), (int)E,
+                                                       (int)members.size(1));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    group_fill_kernel<<<(unsigned)((E + FILL_WARPS - 1) / FILL_WARPS), FILL_WARPS * 32, 0, stream>>>(
+        pick.data_ptr<int>(), n, (int)slots, place_of.data_ptr<int>(), members.data_ptr<int>(), (int)E,
+        (int)members.size(1));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

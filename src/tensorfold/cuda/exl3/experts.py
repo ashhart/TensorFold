@@ -26,7 +26,7 @@ def _ext():
 
     here = Path(__file__).parent
     srcs = [str(here / f) for f in ("experts.cpp", "experts.cu", "experts_cb0.cu", "experts_cb1.cu", "experts_cb2.cu")]
-    return load(name="tensorfold_exl3_experts_v2", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
+    return load(name="tensorfold_exl3_experts_v3", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
                 verbose=False)
 
 
@@ -164,6 +164,8 @@ class Scratch:
         # every non-empty 16-row member tile, listed by the grouping: at most one partial tile an expert
         self.tiles_buf = torch.zeros(((P + 15) // 16 + maxu,), dtype=torch.int32, device=device)
         self.tile_count = torch.zeros((1,), dtype=torch.int32, device=device)
+        self.counts = torch.zeros((ex.count,), dtype=torch.int32, device=device)       # picks an expert
+        self.place_of = torch.zeros((ex.count,), dtype=torch.int32, device=device)     # its place, -1 when unused
         self.rows, self.slots, self.count_experts = rows, slots, ex.count
 
     def window(self, R: int):
@@ -187,7 +189,7 @@ def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Ex
         raise ValueError(f"{R} rows but the scratch holds {s.rows}")
     ids, members, tiles = s.window(R)
     if group:
-        ext.group(pick, ids, s.count, members, tiles, s.tile_count, R, slots, E)
+        ext.group(pick, ids, s.count, members, tiles, s.tile_count, s.counts, s.place_of, R, slots, E)
     ext.rot_in(x, x.stride(0), pick, ex.suh_g, ex.suh_u, s.xg, s.xu, R, D, slots, E)
     nt, w, sk, pf = s.cfg_gu
     ext.grouped(s.xg, s.xu, ex.gate_ptr, ex.up_ptr, ex.gate_k2, ex.up_k2, ids, s.count, members, tiles, s.tile_count,
