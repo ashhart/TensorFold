@@ -42,7 +42,7 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
       (found with vLLM activation dumps: private recipe copy `/home/docker/ai/vllm-serve/tf-dump`, eager mode,
       hook in `overlay/patch_memory_log.py`; `tools/dsv41_dump_diff.py`). vLLM itself is noisy on short
       prompts (eager vs CUDA graphs differ by up to 0.6 mean |Δlogprob|).
-- [ ] Chat template / tokenizer: DeepSeek V4.1 encoder (`deepseek_v41` template, DSML tool calls, reasoning_effort)
+- [x] Chat template: the checkpoint's `chat_template.jinja` (V4.1 encoder port; DSML tool calls, reasoning_effort)
 
 ## Spec findings that change the plan (ARCH.md)
 
@@ -55,17 +55,17 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 
 ## Phase 2 — serial TP=2 engine (go/no-go)
 
-- [ ] Embedding, hyper-connections (hc_mult 4, 20 Sinkhorn iters) on CUDA
-- [ ] Attention: q/kv low-rank, 64 heads × 512 shared KV, window 128 + sinks, RoPE/YaRN, grouped low-rank output
-- [ ] CSA2 compressors (ratios 2 / 1 per layer), compressed pools, cross-layer KV sharing (`kv_source_layer_ids`)
+- [x] Embedding, hyper-connections (hc_mult 4, 20 Sinkhorn iters) on CUDA
+- [x] Attention: q/kv low-rank, 64 heads × 512 shared KV, window 128 + sinks, RoPE/YaRN, grouped low-rank output
+- [x] CSA2 compressors (ratios 2 / 1 per layer), compressed pools, cross-layer KV sharing (`kv_source_layer_ids`)
 - [x] Indexer (32×128, top-512, bf16 keys) shared by `index_source_layer_ids`; rings for window/raw caches;
       long-context parity to 16K tokens (NLL equal to vLLM; BENCH.md)
 - [x] Candidate blocks (layer 20, 2048×8): parity to 40K tokens (NLL 1.614 vs 1.613)
 - [x] Position-keyed sampling (`tensorfold.cuda.sampling.sample_rows`), DSpark acceptance against keyed samples
-- [ ] MoE: sqrt-softplus router, noaux_tc top-6 of 384, shared expert; routed via `cuda/exl3/experts`
-- [ ] Engram layers 1/14: n-gram hashing, FP8 e4m3 rows (never uint8), file-backed row store (O_DIRECT/mmap),
-      mapped-table accounting in capacity
-- [ ] 2-rank split + NCCL rank-order reduction; lm_head (6-bit)
+- [x] MoE: sqrt-softplus router, noaux_tc top-6 of 384, shared expert; routed via `cuda/exl3/experts`
+- [x] Engram layers 1/14: n-gram hashing, FP8 e4m3 rows, pread row store (page cache / NVMe)
+- [ ] Mapped-table accounting in capacity
+- [x] 2-rank split + NCCL rank-order reduction; lm_head (6-bit)
 - [x] First serial TP=2 engine (`cuda/serial.py`, `tools/dsv41_serial_run.py`): eager PyTorch, 96.1 GiB/rank,
       365-token prefill 94.5% top-1 vs reference (NLL 1.420 vs 1.400), coherent greedy text; decode 7.3 tok/s,
       prefill 237 tok/s (2026-09-30)
@@ -77,8 +77,9 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [x] Native Engram reader (pthreads pread), 3 decode graphs with overlapped reads, argmax in graph,
       rank-order partial sums fused into HC post, fused router (fp16 mm → fp32, no TF32), attention chunk skip,
       Engram wkv split: **33.5 tok/s** serial (vLLM 23 serial / 31.6 DSpark)
-- [ ] Later: shared expert folded into the grouped expert call; batched small linears (wo_a ×4, wq_a+wkv)
-- [ ] **Go/no-go**: serial decode must clearly beat 23 tok/s (target ≥ 40) at matching quality
+- [x] Small linears in parallel on side streams (q / window KV / compressor, 8 wo_a slices, shared expert)
+- [ ] Shared expert folded into the grouped expert call
+- [x] **Go/no-go**: serial 34–35 tok/s vs vLLM 23 at matching quality (target ≥ 40 still open)
 
 ## Phase 3 — drafting, long context, prefill
 
@@ -88,18 +89,30 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
 - [x] Adaptive draft length (`DraftPolicy`, k = 0..N by expected tokens/ms): 1.39–1.49× vLLM on the 3 cases
 - [x] Rank-deterministic draft policy (rank 0 decides k each round; ranks chose different k from own clocks → deadlock)
 - [x] DSpark == serial tokens greedy and sampled (temperature 0.8) on all cases
-- [ ] Policy tuning: low-acceptance prompts still slightly below serial (k=0 rarely chosen)
+- [x] Round costs from real tokens (capture zeros understated multi-row verify); policy picks k by true costs
 - [ ] Verify cost: split Engram reads across ranks (skew shows up as NCCL wait); fold shared expert into grouped call
 - [ ] CUDA graphs per window width; eager == graph checks
 - [x] Prefill 330 → 486 tok/s: 1,024-row chunks, EXL3 prompt GEMM for dense linears, prompt grouped expert kernel
       (`cuda/experts_prompt.cu`), bf16 prompt partials
 - [x] Expert prompt kernel v2 (smem-staged activations, 2 member tiles/decode, 8 warps), 2,048-row chunks,
       last-row-only prompt logits: prefill **622 tok/s**
-- [ ] Prefill to ~1,000: attention over query blocks (0.36 s/chunk), NCCL overlap, Engram prefetch for prompts,
-      expert kernel toward its 12.6 ms/layer floor (now 26 ms)
+- [x] Prefill 1,252 tok/s steady (whole prompts 1,376 at 8K, 1,160 at 32K) vs vLLM ~710 (BENCH.md)
 - [ ] Long prompts to 600k (cap/memory: comp caches bf16 ~1.5 KB/token)
 - [ ] KV format ≤ ~3.4 KiB/token; carveout-backed pools
 - [ ] `--parallel N` shared rounds (optional; vLLM wins at width today)
+
+## Phase 4 — serving
+
+- [x] `cuda/engine.py` `Dsv41Engine`: `tensorfold serve --tp 2` on both nodes (rank 1 `follow()`s rank 0's
+      requests: header + prompt over NCCL, rank 0's stop on the per-round agreement), warm-up before serving
+- [x] OpenAI chat/completions through `cuda/server.App`: reasoning split, streaming, stop strings, seeded sampling,
+      `draft: false` == drafted output, client disconnect stops within a round
+- [x] DSML tool calls: V4.1 writes `<｜DSML｜ calls>` (space, no `tool_`); server + CUDA reply parsers read both forms
+- [x] Launcher `tools/dsv41_serve2.sh [--port P] [--context N]` (dual-link NCCL env, Engram dir)
+- [ ] Prompt reuse across turns (prefix snapshots; every request prefills from scratch today)
+- [ ] Capacity admission for `--context` (today: default 40,960, larger values trusted)
+- [ ] Grammar / `response_format` constraints (engine has no `constraint` hook yet)
+- [ ] systemd/compose unit to run it in place of the vLLM recipe
 
 ## Ops notes
 

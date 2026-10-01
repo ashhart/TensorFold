@@ -76,20 +76,28 @@ class StopStrings:
         return StopPolicy.visible(self, text, partial=partial)
 
 
+# (opener, closer) pairs a streamed answer hides: Qwen / GLM's, DeepSeek-V4's and V4.1's DSML blocks
+_CALL_PAIRS = ((_CALL_OPEN, _CALL_CLOSE), ("<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>"),
+               ("<｜DSML｜ calls>", "</｜DSML｜ calls>"))
+
+
 def hide_tool_calls(text: str, *, finished: bool) -> str:
     out: list[str] = []
     pos = 0
     while True:
-        start = text.find(_CALL_OPEN, pos)
-        if start < 0:
+        found = [(text.find(o, pos), o, c) for o, c in _CALL_PAIRS]
+        found = [f for f in found if f[0] >= 0]
+        if not found:
             tail = text[pos:]
-            out.append(tail[: len(tail) - (0 if finished else _partial_tag(tail, _CALL_OPEN))])
+            held = 0 if finished else max(_partial_tag(tail, o) for o, _ in _CALL_PAIRS)
+            out.append(tail[: len(tail) - held])
             return "".join(out)
+        start, opener, closer = min(found)
         out.append(text[pos:start])
-        end = text.find(_CALL_CLOSE, start)
+        end = text.find(closer, start)
         if end < 0:
             return "".join(out)
-        pos = end + len(_CALL_CLOSE)
+        pos = end + len(closer)
 
 
 def _tool_name(tool: dict[str, Any]) -> str:
@@ -102,6 +110,10 @@ def parse_tool_calls(text: str, tools: list[dict[str, Any]], *, max_calls: int |
 
     if not tools:
         return text, None
+    if "｜DSML｜" in text:                       # DeepSeek's DSML blocks: the shared server parser reads them
+        from tensorfold.server.tools import parse_tool_calls_from_content
+
+        return parse_tool_calls_from_content(text, tools, max_calls=max_calls)
     known = {_tool_name(t).lower(): _tool_name(t) for t in tools}
     schemas = parameter_schemas(tools)
     calls: list[dict[str, Any]] = []

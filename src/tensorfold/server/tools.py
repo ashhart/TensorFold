@@ -108,10 +108,12 @@ _GEMMA_TOOL_CALL_BLOCK_RE = re.compile(r"<\|tool_call>\s*(.*?)\s*<tool_call\|>",
 _GEMMA_CALL_RE = re.compile(r"^(?:call)?:([\w.-]+)\s*(\{.*\})$", re.DOTALL)
 _GEMMA_STRING_RE = re.compile(r'<\|"\|>(.*?)<\|"\|>', re.DOTALL)
 _GEMMA_KEY_RE = re.compile(r"(?<=[{,])\s*([A-Za-z_][\w-]*)\s*:")
-# DeepSeek-V4's DSML: one <｜DSML｜tool_calls> block holds invokes of named parameters, string="false" ones as JSON
-_DSML_BLOCK_RE = re.compile(r"<｜DSML｜tool_calls>(.*?)</｜DSML｜tool_calls>", re.DOTALL)
-_DSML_INVOKE_RE = re.compile(r'<｜DSML｜invoke name="([^"]*)">(.*?)</｜DSML｜invoke>', re.DOTALL)
-_DSML_PARAM_RE = re.compile(r'<｜DSML｜parameter name="([^"]*)" string="(true|false)">(.*?)</｜DSML｜parameter>', re.DOTALL)
+# DeepSeek-V4's DSML: one <｜DSML｜tool_calls> block holds invokes of named parameters, string="false" ones as JSON;
+# DeepSeek-V4.1's template writes the same markup as <｜DSML｜ calls>, <｜DSML｜ invoke ...>, <｜DSML｜ parameter ...>
+_DSML_BLOCK_RE = re.compile(r"<｜DSML｜(?:tool_| )calls>(.*?)</｜DSML｜(?:tool_| )calls>", re.DOTALL)
+_DSML_INVOKE_RE = re.compile(r'<｜DSML｜ ?invoke name="([^"]*)">(.*?)</｜DSML｜ ?invoke>', re.DOTALL)
+_DSML_PARAM_RE = re.compile(r'<｜DSML｜ ?parameter name="([^"]*)" string="(true|false)">(.*?)</｜DSML｜ ?parameter>',
+                            re.DOTALL)
 _JSON_FENCE_RE = re.compile(
     r"^\s*```(?:json)?\s*(.*?)\s*```\s*$",
     re.IGNORECASE | re.DOTALL,
@@ -366,7 +368,7 @@ def parse_tool_calls_from_content(
         if max_calls is not None and len(calls) >= max_calls:
             continue
         try:
-            if block.startswith("<｜DSML｜tool_calls>"):
+            if block.startswith(("<｜DSML｜tool_calls>", "<｜DSML｜ calls>")):
                 parsed = _parse_dsml_calls(_DSML_BLOCK_RE.fullmatch(block).group(1))
             else:
                 one = _parse_tool_call_payload(block, schemas, complete=max_calls is not None)

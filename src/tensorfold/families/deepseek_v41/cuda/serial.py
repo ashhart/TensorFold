@@ -837,14 +837,20 @@ class SerialEngine:
 
     @torch.no_grad()
     def generate(self, prompt: list[int], max_tokens: int, *, chunk: int = MAX_ROWS, on_token=None,
-                 sampling=None) -> dict:
-        """Decode after a chunked prefill (greedy, or position-keyed sampling); returns tokens and timings."""
+                 sampling=None, on_tokens=None, draft: bool = True, stop_eos: bool = True) -> dict:
+        """Decode after a chunked prefill (greedy, or position-keyed sampling); returns tokens and timings.
+
+        ``on_tokens(new) -> bool`` (rank 0) gets each round's tokens; True stops after that round. Both ranks must
+        call this together: rank 0's stop rides on the per-round agreement, every other stop (EOS, max_tokens, the
+        context limit) follows from the tokens, which are the same on both ranks. ``draft=False``: serial decoding,
+        the reference drafted replies equal."""
 
         self.reset()
         t0 = time.perf_counter()
         logits = None
         logits = self.prefill(prompt, chunk)
-        if self.drafter is not None and self.drafter.graph is not None and self.adaptive:
+        dsp = self.drafter if draft and self.drafter is not None and self.drafter.graph is not None else None
+        if dsp is not None and self.adaptive:
             self.round_costs()                                     # once an engine, at a real context (not timed)
         torch.cuda.synchronize()
         t1 = time.perf_counter()
@@ -853,19 +859,42 @@ class SerialEngine:
         rounds = accepted = 0
         t_draft = t_verify = 0.0
         eos = self.c.eos_token_id
-        dsp = self.drafter if self.drafter is not None and self.drafter.graph is not None else None
+        stop = False
         if dsp is not None:
             from .dspark import DraftPolicy
 
             n = max(r for r in self.graphs) - 1                        # verify windows captured: 1 .. n + 1 rows
             policy = DraftPolicy(n, self.round_costs()) if self.adaptive else _Fixed(n)
             ks = [0] * (n + 1)
-        while len(out) < max_tokens:
+
+        def emit(tokens: list[int]) -> bool:
+            """Append a round's tokens (cut at EOS / max_tokens); True when the reply is complete."""
+
+            nonlocal stop
+            done = False
+            room = max_tokens - len(out)
+            if len(tokens) >= room:
+                tokens, done = tokens[:room], True
+            if stop_eos and eos in tokens:
+                tokens, done = tokens[:tokens.index(eos) + 1], True
+            out.extend(tokens)
+            if on_token:
+                for tok in tokens:
+                    on_token(tok)
+            if on_tokens is not None and tokens and on_tokens(tokens):
+                stop = True
+            return done
+
+        while True:
+            rows_left = self.limit - len(self.state.ids)
+            if rows_left < 1:
+                break
             if dsp is None:
-                out.append(nxt)
-                if on_token:
-                    on_token(nxt)
-                if nxt == eos:
+                if self.agree(-1 if stop else 0) < 0:                  # rank 0's client stop, every step
+                    break
+                if emit([nxt]):
+                    break
+                if rows_left < 2:
                     break
                 if self.graph is not None:
                     nxt = self.step(nxt, sampling)
@@ -875,7 +904,9 @@ class SerialEngine:
             P = len(self.state.ids)
             rp = self._rp
             rp and rp.start()
-            k = self.agree(policy.choose())
+            k = self.agree(-1 if stop else min(policy.choose(), rows_left - 1))
+            if k < 0:
+                break
             rp and rp.mark("agree")
             ta = time.perf_counter()
             if k == 0:                                             # drafting does not pay here: one plain row
@@ -902,16 +933,9 @@ class SerialEngine:
             rp and rp.end(k)
             rounds += 1
             accepted += m
-            emitted = [nxt, *drafts[:m]]
-            nxt = target[m]
-            for tok in emitted:
-                out.append(tok)
-                if on_token:
-                    on_token(tok)
-                if tok == eos or len(out) >= max_tokens:
-                    break
-            if out[-1] == eos:
+            if emit([nxt, *drafts[:m]]):
                 break
+            nxt = target[m]
         torch.cuda.synchronize()
         t2 = time.perf_counter()
         if self._rp:

@@ -78,3 +78,40 @@ def test_part_kinds_keep_exl3_tiles_and_scales_together():
     assert part_kind("layers.3.attn.wo_a.slice.6.trellis") == "rep"
     assert part_kind("embed.weight") == "rep"
     assert part_kind("vision.norm.weight") == "drop"
+
+
+def test_v41_dsml_tool_calls_parse():
+    """V4.1's template writes DSML with a space after the marker (``<｜DSML｜ calls>``); V4's form still parses."""
+
+    from tensorfold.server.tools import parse_tool_calls_from_content
+
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {
+        "type": "object", "properties": {"city": {"type": "string"}, "days": {"type": "integer"}}}}}]
+    for sp, tag in ((" ", " calls"), ("", "tool_calls")):
+        text = (f"Let me check.<｜DSML｜{tag}>\n<｜DSML｜{sp}invoke name=\"get_weather\">\n"
+                f"<｜DSML｜{sp}parameter name=\"city\" string=\"true\">Warsaw</｜DSML｜{sp}parameter>\n"
+                f"<｜DSML｜{sp}parameter name=\"days\" string=\"false\">3</｜DSML｜{sp}parameter>\n"
+                f"</｜DSML｜{sp}invoke>\n</｜DSML｜{tag}>")
+        content, calls = parse_tool_calls_from_content(text, tools)
+        assert content.strip() == "Let me check." and calls is not None and len(calls) == 1
+        assert calls[0]["function"]["name"] == "get_weather"
+        import json
+
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Warsaw", "days": 3}
+
+
+def test_v41_dsml_through_the_cuda_server_parser():
+    """The CUDA server's reply parser and stream hider read V4.1's DSML blocks."""
+
+    import json
+
+    from tensorfold.cuda.reply_text import hide_tool_calls, parse_tool_calls
+
+    tools = [{"type": "function", "function": {"name": "get_weather", "parameters": {
+        "type": "object", "properties": {"city": {"type": "string"}}}}}]
+    text = ('<｜DSML｜ calls>\n<｜DSML｜ invoke name="get_weather">\n<｜DSML｜ parameter name="city" string="true">'
+            'Warsaw</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>')
+    content, calls = parse_tool_calls("Sure. " + text, tools)
+    assert content == "Sure." and json.loads(calls[0]["function"]["arguments"]) == {"city": "Warsaw"}
+    assert hide_tool_calls("Sure. " + text, finished=True) == "Sure. "
+    assert hide_tool_calls("Sure. <｜DSML｜ ca", finished=False) == "Sure. "      # a partial opener is held back
