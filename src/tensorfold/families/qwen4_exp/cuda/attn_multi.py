@@ -24,21 +24,33 @@ def _ptr(TABLE, s, T: tl.constexpr):
 
 
 @triton.jit
-def _prep_multi(P, POSR, SID, CP, QW, KW, IW, INV, Q, IQ, eps, N, PW: tl.constexpr, NQ: tl.constexpr,
+def _prep_multi(P, POSR, SID, CP, VP, QW, KW, IW, INV, Q, IQ, eps, N, PW: tl.constexpr, NQ: tl.constexpr,
                 NKV: tl.constexpr, HD: tl.constexpr, NI: tl.constexpr, IHD: tl.constexpr, HALF: tl.constexpr,
-                BITS: tl.constexpr, KT: tl.constexpr):
+                BITS: tl.constexpr, KT: tl.constexpr, VISION: tl.constexpr,
+                S1: tl.constexpr = 11, S2: tl.constexpr = 10):
     r = tl.program_id(0)
     s = tl.load(SID + r)
+    rope, delta, length = CP, CP, 0
+    if VISION:
+        rope, delta = _ptr(VP, s, tl.int32), _ptr(VP + N, s, tl.int32)
+        length = tl.load(VP + 2 * N + s).to(tl.int32)
     glue._prep_row(P, tl.load(POSR + r), r, tl.program_id(1), QW, KW, IW, INV, Q, _ptr(CP, s, KT),
                    _ptr(CP + N, s, KT), _ptr(CP + 2 * N, s, tl.float16), _ptr(CP + 3 * N, s, tl.float16), IQ,
-                   _ptr(CP + 4 * N, s, tl.bfloat16), eps, PW, NQ, NKV, HD, NI, IHD, HALF, BITS)
+                   _ptr(CP + 4 * N, s, tl.bfloat16), eps, PW, NQ, NKV, HD, NI, IHD, HALF, BITS,
+                   ROPE=rope, DELTA=delta, length=length, MODE=2 if VISION else 0, S1=S1, S2=S2)
 
 
 @triton.jit
-def _pool_multi(CP, P0, RS, W, INV, eps, N, DI: tl.constexpr, HALF: tl.constexpr, RATIO: tl.constexpr):
+def _pool_multi(CP, VP, P0, RS, W, INV, eps, N, DI: tl.constexpr, HALF: tl.constexpr, RATIO: tl.constexpr,
+                VISION: tl.constexpr, S1: tl.constexpr = 11, S2: tl.constexpr = 10):
     s = tl.program_id(0)
+    rope, delta, length = CP, CP, 0
+    if VISION:
+        rope, delta = _ptr(VP, s, tl.int32), _ptr(VP + N, s, tl.int32)
+        length = tl.load(VP + 2 * N + s).to(tl.int32)
     _pool_block(_ptr(CP + 4 * N, s, tl.bfloat16), _ptr(CP + 5 * N, s, tl.bfloat16), tl.load(P0 + s),
-                tl.program_id(1), W, INV, eps, tl.load(RS + s), DI, HALF, RATIO)
+                tl.program_id(1), W, INV, eps, tl.load(RS + s), DI, HALF, RATIO,
+                ROPE=rope, DELTA=delta, length=length, MODE=2 if VISION else 0, S1=S1, S2=S2)
 
 
 @triton.jit
@@ -99,6 +111,13 @@ class Step:
         self.n, self.rows, self.segs = n, rows, list(segs)
         self.ends = [p0 + c for p0, c in zip(first, counts)]
         self.most = max(counts)
+        self.vision = any(st.image_positions is not None for st, _, _ in segs)
+        self.vision_ptrs = self.ptrs[0]
+        if self.vision:
+            vp = [[st.image_positions.data_ptr() if st.image_positions is not None else st.pos_dev.data_ptr(),
+                   st.rope_delta_dev.data_ptr(), 0 if st.image_positions is None else st.image_positions.shape[0]]
+                  for st, _, _ in segs]
+            self.vision_ptrs = shared.to_device(np.asarray(vp, dtype=np.int64).T.ravel().tolist(), torch.int64, dev)
 
 
 def layer(layer, w, b, step: Step, mtp: bool, scale: float) -> torch.Tensor:
@@ -111,14 +130,19 @@ def layer(layer, w, b, step: Step, mtp: bool, scale: float) -> torch.Tensor:
     bits = 0 if not cache0.quantized else cache0.bits
     kt = {0: tl.bfloat16, 8: tl.int8, 4: tl.uint8}[bits]
     heads = c.heads + c.kv_heads + c.index_heads + 1
-    _prep_multi[(rows, heads)](b.pa[:rows], step.posr, step.sid, cp, a.q_scale, a.k_scale, a.iq_scale, w.inv_freq,
+    sections = w.cfg.mrope_section
+    _prep_multi[(rows, heads)](b.pa[:rows], step.posr, step.sid, cp, step.vision_ptrs,
+                               a.q_scale, a.k_scale, a.iq_scale, w.inv_freq,
                                b.q, b.iq, c.eps, n, PW=b.pa.shape[1], NQ=c.heads, NKV=c.kv_heads, HD=c.head_dim,
                                NI=c.index_heads, IHD=c.index_dim, HALF=w.inv_freq.numel(), BITS=bits, KT=kt,
+                               VISION=step.vision, S1=sections[1], S2=sections[2],
                                num_warps=2)
     top = sc.budget // sc.ratio
     if sc.qsa:
-        _pool_multi[(n, step.most // sc.ratio + 2)](cp, step.first, step.counts, a.ik_scale, w.inv_freq, c.eps, n,
+        _pool_multi[(n, step.most // sc.ratio + 2)](cp, step.vision_ptrs, step.first, step.counts,
+                                                    a.ik_scale, w.inv_freq, c.eps, n,
                                                     DI=c.index_dim, HALF=w.inv_freq.numel(), RATIO=sc.ratio,
+                                                    VISION=step.vision, S1=sections[1], S2=sections[2],
                                                     num_warps=1)
         for (st, a0, a1), end in zip(step.segs, step.ends):
             if end // sc.ratio > top:                # this stream has sparse rows: its own select

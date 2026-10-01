@@ -18,7 +18,7 @@ from tensorfold.engine.exact_sampling import MARGIN, choose_rows
 from tensorfold.engine.grammar import GrammarError
 
 from .decode import PREFILL_ROWS, WARM_TAIL, Engine, draft, entry_end, prefill_begin
-from . import attn_multi, gdn_multi
+from . import attn_multi, gdn_multi, image_rows
 from .forward import Cut, commit, compute, compute_mixed, converges, cut_snapshot, stage
 from .mtp import mtp_compute, mtp_stage
 from .state import ENDS, Buffers, State
@@ -210,7 +210,7 @@ class MultiDecoder:
         if any(x.waiting for x in self.streams.values()):
             raise NoRoom("streams already wait for memory; a new request waits until one finishes")
         t0 = time.perf_counter()
-        st, resume, s.cached = self._slot_for(list(s.prompt), s.draft)
+        st, resume, s.cached = self._slot_for(list(s.prompt), s.draft and s.vision is None)
         if not self._grow(st, len(s.prompt) + self.depth + 2, alone=not self.streams and not self.filling):
             if resume is None:
                 self.free.append(st)
@@ -221,12 +221,13 @@ class MultiDecoder:
         mtp = s.draft and self.depth > 0 and self.mbuf is not None
         try:
             begin = prefill_begin(e, s.prompt, mtp=mtp, resume=resume)
+            image_rows.begin(e, s, self.vision)
         except Exception:
             self._drop_kept(st)
             self.free.append(st)
             raise
         e.stops = sorted({p for p in self.points(s.prompt) if begin + MIN_GAP <= p < entry_end(s.prompt)}) \
-            if s.draft and self.points is not None else []
+            if s.draft and st.image_positions is None and self.points is not None else []
         s.sid, s.st = self.next_id, st
         self.next_id += 1
         s.prefill_s = time.perf_counter() - t0
@@ -300,12 +301,12 @@ class MultiDecoder:
     def _keep_at(s: Stream) -> int | None:
         """Where a drafting stream's prompt state is kept: one token before its end, which a next turn extends."""
 
-        return entry_end(s.prompt) if s.draft else None
+        return entry_end(s.prompt) if s.draft and s.st.image_positions is None else None
 
     def _point(self, s: Stream, start: int) -> int | None:
         """The next message-start or prompt-end snapshot this prompt piece can reach."""
 
-        if not s.draft:
+        if not s.draft or s.st.image_positions is not None:
             return None
         return next((p for p in self.fills[s.sid][0].stops if p > start), self._keep_at(s))
 
@@ -377,6 +378,7 @@ class MultiDecoder:
             if s.constraint is not None:
                 s.constraint.advance([first])
             head += 1
+            image_rows.finish(st)
             s.context = list(s.prompt)
             s.drafts = draft(e, last, [first], st.pos + 1, min(self.depth, s.count - 1), s.sampling,
                              self.confidence) if mtp and s.count > 1 else []

@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from .image_rows import rope_axis
+
 from .kvquant import dequant_group_4, dequant_group_8, h32
 
 CHUNK = 512
@@ -187,15 +189,17 @@ def attention(q: torch.Tensor, kc: torch.Tensor, vc: torch.Tensor, pos0: torch.T
 
 
 @triton.jit
-def _pool(IKC, POOLED, POS0, W, INV, ROPE, DELTA, eps, R, DI: tl.constexpr, HALF: tl.constexpr,
-          RATIO: tl.constexpr, MODE: tl.constexpr = 0, S1: tl.constexpr = 11, S2: tl.constexpr = 10):
+def _pool(IKC, POOLED, POS0, W, INV, eps, R, DI: tl.constexpr, HALF: tl.constexpr, RATIO: tl.constexpr,
+          ROPE=None, DELTA=None, length=0, MODE: tl.constexpr = 0, S1: tl.constexpr = 11, S2: tl.constexpr = 10):
     """Pool each complete RATIO-key block in fp32 order, then bf16 RMSNorm and rotate-half RoPE at its first position; recomputing a block preserves its bits."""
 
-    _pool_block(IKC, POOLED, tl.load(POS0), tl.program_id(0), W, INV, eps, R, DI, HALF, RATIO)
+    _pool_block(IKC, POOLED, tl.load(POS0), tl.program_id(0), W, INV, eps, R, DI, HALF, RATIO,
+                ROPE, DELTA, length, MODE, S1, S2)
 
 
 @triton.jit
-def _pool_block(IKC, POOLED, p0, i, W, INV, eps, R, DI: tl.constexpr, HALF: tl.constexpr, RATIO: tl.constexpr):
+def _pool_block(IKC, POOLED, p0, i, W, INV, eps, R, DI: tl.constexpr, HALF: tl.constexpr, RATIO: tl.constexpr,
+                ROPE=None, DELTA=None, length=0, MODE: tl.constexpr = 0, S1: tl.constexpr = 11, S2: tl.constexpr = 10):
     """Block i past p0 // RATIO, if rows [p0, p0 + R) complete it."""
 
     b = p0 // RATIO + i
@@ -214,17 +218,8 @@ def _pool_block(IKC, POOLED, p0, i, W, INV, eps, R, DI: tl.constexpr, HALF: tl.c
         xp = (xp / RATIO).to(tl.bfloat16).to(tl.float32)
         xpn = (xp * rinv * tl.load(W + partner)).to(tl.bfloat16).to(tl.float32)
         j = tl.where(d < HALF, d, tl.where(d < 2 * HALF, d - HALF, 0))
-        if MODE == 0:
-            ang = (RATIO * b).to(tl.float32) * tl.load(INV + j)
-        elif MODE == 1:                              # the block starts in text after images
-            ang = (RATIO * b + tl.load(DELTA)).to(tl.float32) * tl.load(INV + j)
-        else:                                        # the block's first token in an image prompt's chunk
-            row = RATIO * b - p0
-            pt = tl.load(ROPE + row * 3)
-            ph = tl.load(ROPE + row * 3 + 1)
-            pv = tl.load(ROPE + row * 3 + 2)
-            axis = tl.where((j % 3 == 1) & (j < 3 * S1), ph, tl.where((j % 3 == 2) & (j < 3 * S2), pv, pt))
-            ang = axis.to(tl.float32) * tl.load(INV + j)
+        axis = rope_axis(RATIO * b, ROPE, DELTA, length, j, MODE, S1, S2)
+        ang = axis.to(tl.float32) * tl.load(INV + j)
         cos, sin = tl.cos(ang), tl.sin(ang)
         rot = tl.where(d < HALF, xn * cos - xpn * sin, tl.where(d < 2 * HALF, xpn * sin + xn * cos, xn))
         tl.store(POOLED + b.to(tl.int64) * DI + d, rot.to(tl.bfloat16))
@@ -376,23 +371,23 @@ def _launch_select(scratch: AttnScratch, pos0: torch.Tensor, rows: int, blocks: 
 
 def qsa_select(iq: torch.Tensor, ikc: torch.Tensor, pooled: torch.Tensor, pos0: torch.Tensor, ik_scale: torch.Tensor,
                inv_freq: torch.Tensor, eps: float, scratch: AttnScratch, rows: int,
-               *, context: int | None = None, rope=None, delta=None, sections=(11, 11, 10)) -> None:
+               *, context: int | None = None, rope=None, delta=None, length=0, sections=(11, 11, 10)) -> None:
     """Pool the blocks the window completes, score and select each sparse row's blocks (scratch.ids/nk/sparse)."""
 
-    qsa_pool(ikc, pooled, pos0, ik_scale, inv_freq, eps, scratch, rows, rope=rope, delta=delta, sections=sections)
+    qsa_pool(ikc, pooled, pos0, ik_scale, inv_freq, eps, scratch, rows,
+             rope=rope, delta=delta, length=length, sections=sections)
     qsa_rows(iq, pooled, pos0, scratch, rows, context=context)
 
 
 def qsa_pool(ikc: torch.Tensor, pooled: torch.Tensor, pos0: torch.Tensor, ik_scale: torch.Tensor,
-             inv_freq: torch.Tensor, eps: float, scratch: AttnScratch, rows: int, *, rope=None, delta=None,
+             inv_freq: torch.Tensor, eps: float, scratch: AttnScratch, rows: int, *, rope=None, delta=None, length=0,
              sections=(11, 11, 10)) -> None:
-    """The pooled key of every block that rows [P0, P0 + rows) complete, rotated at its first token's position:
-    ``delta`` [1] for text after images, ``rope`` [rows, 3] for an image prompt's chunk (as ``glue.attn_prep``)."""
+    """Pool completed blocks with full prompt rotary positions, including a block spanning prompt pieces."""
 
     mode = 2 if rope is not None else 1 if delta is not None else 0
-    _pool[(rows // scratch.ratio + 2,)](ikc, pooled, pos0, ik_scale, inv_freq,
-                                        rope if rope is not None else pos0, delta if delta is not None else pos0,
-                                        eps, rows, DI=ikc.shape[1], HALF=inv_freq.numel(), RATIO=scratch.ratio,
+    _pool[(rows // scratch.ratio + 2,)](ikc, pooled, pos0, ik_scale, inv_freq, eps, rows,
+                                        DI=ikc.shape[1], HALF=inv_freq.numel(), RATIO=scratch.ratio,
+                                        ROPE=rope, DELTA=delta, length=length,
                                         MODE=mode, S1=sections[1], S2=sections[2], num_warps=1)
 
 

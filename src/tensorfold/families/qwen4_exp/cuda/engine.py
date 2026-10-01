@@ -91,9 +91,11 @@ class FlashNextEngine:
             geometry = admission(geometry)
         from tensorfold.vision.qwen_cuda import capacity_geometry, weight_transform as vision_weights
 
+        workspace = vision_workspace() if vision else 0
         self.capacity_plan = admit(model_dir, max_len, context_explicit, torch,
-                                   capacity_geometry(geometry, model_dir, vision, rank, vision_workspace()),
-                                   vision_weights(indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd), vision, rank), rank=rank, world=tp,
+                                   capacity_geometry(geometry, model_dir, vision, rank, workspace),
+                                   vision_weights(indexed_weights(tp, mtp, mapped_tables=not ple_on_ssd), vision, rank),
+                                   rank=rank, world=tp,
                                    gather=gather, extra_files=extra_files(model_dir) if exl3 else ())
         self.max_len = self.capacity_plan["cache_slots"]
         if tp == 2:
@@ -377,7 +379,8 @@ class FlashNextEngine:
         if self.scheduler is not None:
             grammar = {} if constraint is None else {"constraint": constraint}
             return self.scheduler.submit(list(prompt), max_tokens, sampling, draft, on_tokens, stop_eos=stop_eos,
-                                         **grammar, **({"background": True} if background else {}), probabilities=probabilities,
+                                         **grammar, **({"background": True} if background else {}),
+                                         probabilities=probabilities,
                                          **({"vision": vision} if vision is not None else {}))
         hit = self._resume(prompt) if draft else None
         points = None

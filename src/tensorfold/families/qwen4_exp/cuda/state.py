@@ -147,6 +147,7 @@ class State:
         self.pos = 0
         self.pos_dev = torch.zeros((1,), dtype=torch.int32, device=dev)
         # text after an image prompt rotates at its cache position plus this offset (0: no images, the plain path)
+        self.image_positions, self.image_rows, self.image_features = None, (), None
         self.rope_delta = 0
         self.rope_delta_dev = torch.zeros((1,), dtype=torch.int32, device=dev)
         lin = [l for l in w.layers if l.linear]
@@ -237,6 +238,7 @@ class State:
         self.ple_last = None
         self.set_pos(0)
         self.set_rope_delta(0)
+        self.image_positions, self.image_rows, self.image_features = None, (), None
         self.mtp_drafted = 0
         self.set_mtp_len(0)
 
@@ -290,5 +292,6 @@ class State:
         self.ple_last = None
         self.set_pos(snap["pos"])
         self.set_rope_delta(0)                       # kept prompts are text only
+        self.image_positions, self.image_rows, self.image_features = None, (), None
         self.mtp_drafted = 0
         self.set_mtp_len(snap["mtp_len"])

@@ -221,3 +221,111 @@ def test_a_live_request_is_running_and_the_next_one_is_waiting(tmp_path):
         assert int(sample(done, f"{metrics.PREFIX}prompt_tokens_total")) > 0
         assert sample(done, f"{metrics.PREFIX}request_latency_seconds_count") == "2"
         assert sample(done, f"{metrics.PREFIX}time_to_first_token_seconds_count") == "2"
+
+
+def test_the_vllm_mirror_names_carry_the_same_readings():
+    # A vLLM dashboard filled by swapping the "tensorfold:" prefix must read identical values.
+    idle = SimpleNamespace()
+    body = metrics.render(idle)
+    for native, mirror in (("requests_running", "num_requests_running"),
+                           ("requests_waiting", "num_requests_waiting"),
+                           ("kv_cache_usage_ratio", "kv_cache_usage_perc"),
+                           ("mtp_drafted_total", "spec_decode_num_draft_tokens_total"),
+                           ("mtp_accepted_total", "spec_decode_num_accepted_tokens_total")):
+        assert sample(body, f"{metrics.PREFIX}{native}") == sample(body, f"{metrics.PREFIX}{mirror}")
+    assert sample(body, f'{metrics.PREFIX}kv_cache_usage_perc{{stream="0"}}') == "0"
+    app = SimpleNamespace(scheduler=SimpleNamespace(active=1, waiting=2, filling=[object()]),
+                          context_window=80,
+                          engine=SimpleNamespace(_live=[(SimpleNamespace(cache_len=40, finished=False), None)],
+                                                 context_window=0))
+    metrics.note(app, prompt=4, generation=1, drafted=3, accepted=1, latency=0.2, ttft=0.02)
+    body = metrics.render(app)
+    assert (sample(body, f"{metrics.PREFIX}requests_running")
+            == sample(body, f"{metrics.PREFIX}num_requests_running") == "2")
+    assert (sample(body, f"{metrics.PREFIX}requests_waiting")
+            == sample(body, f"{metrics.PREFIX}num_requests_waiting") == "2")
+    assert sample(body, f'{metrics.PREFIX}kv_cache_usage_ratio{{pool="0"}}') == \
+        sample(body, f'{metrics.PREFIX}kv_cache_usage_perc{{stream="0"}}') == "0.5"
+    assert sample(body, f"{metrics.PREFIX}mtp_drafted_total") == \
+        sample(body, f"{metrics.PREFIX}spec_decode_num_draft_tokens_total") == "3"
+    assert sample(body, f"{metrics.PREFIX}mtp_accepted_total") == \
+        sample(body, f"{metrics.PREFIX}spec_decode_num_accepted_tokens_total") == "1"
+    assert bucket(body, "e2e_request_latency_seconds", "+Inf") == bucket(body, "request_latency_seconds", "+Inf") == "1"
+
+
+def test_the_event_counters_are_read_where_the_server_keeps_them():
+    mac = SimpleNamespace(scheduler=SimpleNamespace(active=0, waiting=1, filling=[],
+                                                    cancelled=2, preemptions=3, failed_rounds=1))
+    body = metrics.render(mac)
+    assert sample(body, f"{metrics.PREFIX}client_disconnections_total") == "2"
+    assert sample(body, f"{metrics.PREFIX}preemptions_total") == "3"
+    assert f"{metrics.PREFIX}request_failures_total" not in body
+
+    class Queue:
+        def qsize(self) -> int:
+            return 1
+
+    cuda = SimpleNamespace(engine=SimpleNamespace(
+        scheduler=SimpleNamespace(decoder=SimpleNamespace(live=lambda: 0, streams={}, filling=()),
+                                 waiting=Queue(), held=None, yields=4),
+        context_window=100))
+    assert sample(metrics.render(cuda), f"{metrics.PREFIX}preemptions_total") == "4"
+    assert f"{metrics.PREFIX}client_disconnections_total" not in metrics.render(cuda)
+
+
+def test_both_http_layers_serve_the_mirrored_and_event_families(tmp_path):
+    pytest.importorskip("jinja2")
+    from tests.test_cuda_server_disconnect import MESSAGES, PacedEngine, WAIT, app_for, post, serving, until
+
+    pairs = (("requests_running", "num_requests_running"), ("requests_waiting", "num_requests_waiting"),
+             ("kv_cache_usage_ratio", "kv_cache_usage_perc"),
+             ("mtp_drafted_total", "spec_decode_num_draft_tokens_total"),
+             ("mtp_accepted_total", "spec_decode_num_accepted_tokens_total"))
+    mac_app = SimpleNamespace(served_name="test", model_ids=["test"], max_batch_size=1,
+                              scheduler=SimpleNamespace(active=1, waiting=2, filling=[], cancelled=1,
+                                                        preemptions=2, failed_rounds=0),
+                              context_window=80)
+    httpd, thread = serve(mac_app)
+    try:
+        body = get(httpd.server_port, "/metrics")[2]
+        for native, mirror in pairs:
+            assert sample(body, f"{metrics.PREFIX}{native}") == sample(body, f"{metrics.PREFIX}{mirror}")
+        assert sample(body, f"{metrics.PREFIX}client_disconnections_total") == "1"
+        assert sample(body, f"{metrics.PREFIX}preemptions_total") == "2"
+        alias = get(httpd.server_port, "/v1/metrics")
+        assert alias[0] == 200 and alias[2] == body
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(5)
+
+    engine = PacedEngine(hold_at=0)
+    app = app_for(tmp_path, engine)
+    with serving(app) as port:
+        idle = get(port, "/metrics")[2]
+        for native, mirror in pairs:
+            assert sample(idle, f"{metrics.PREFIX}{native}") == sample(idle, f"{metrics.PREFIX}{mirror}")
+
+        box: dict = {}
+
+        def run(key: str, tokens: int) -> None:
+            box[key] = post(port, {"messages": MESSAGES, "max_tokens": tokens})
+
+        first = threading.Thread(target=run, args=("first", 4))
+        first.start()
+        assert engine.held.wait(WAIT)
+        during = get(port, "/metrics")[2]
+        for native, mirror in pairs:
+            assert sample(during, f"{metrics.PREFIX}{native}") == sample(during, f"{metrics.PREFIX}{mirror}")
+        assert sample(during, f"{metrics.PREFIX}num_requests_running") == "1"
+        second = threading.Thread(target=run, args=("second", 2))
+        second.start()
+        until(lambda: getattr(app, "turns", None) is not None and app.turns.parked == 1,
+              "the second request to wait")
+        waited = get(port, "/metrics")[2]
+        assert sample(waited, f"{metrics.PREFIX}num_requests_running") == "1"
+        assert sample(waited, f"{metrics.PREFIX}num_requests_waiting") == "1"
+        engine.release.set()
+        first.join(WAIT)
+        second.join(WAIT)
+        assert box["first"][0] == 200 and box["second"][0] == 200, box
