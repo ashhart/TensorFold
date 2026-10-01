@@ -15,7 +15,7 @@ def test_saved_truncation_and_padding_are_turned_off(tmp_path):
     tok = Tokenizer(models.WordLevel({"a": 0, "b": 1, "[UNK]": 2}, unk_token="[UNK]"))
     tok.pre_tokenizer = pre_tokenizers.Whitespace()
     tok.enable_truncation(max_length=4)
-    tok.enable_padding(length=8, pad_id=2)
+    tok.enable_padding(pad_id=2)
     tok.save(str(tmp_path / "tokenizer.json"))
     text = " ".join(["a", "b"] * 10)
     assert len(Tokenizer.from_file(str(tmp_path / "tokenizer.json")).encode(text).ids) == 4
