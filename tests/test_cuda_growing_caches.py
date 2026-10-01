@@ -159,3 +159,27 @@ def test_the_lone_streams_graph_slot_keeps_its_rows_until_memory_is_short(alloca
     assert big._grow(solo, 40000, alone=True) and solo.capacity == 65536      # and never past the window
     big._shrink(solo, release=True)                                     # memory is short: it gives them back
     assert solo.capacity == 256
+
+
+def test_the_graph_slot_keeps_its_rows_on_two_ranks_too(allocations):  # noqa: F811
+    """Rank 0 plans on Shadows of the slots: the graph slot is recognised through its Shadow, and keeping its rows
+    records no resize for rank 1 to replay."""
+    import torch
+
+    state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
+    multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    plan = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi_plan")
+    dec = decoder(multi, state, torch, room=1 << 40)
+    solo = state.State(weights(), 256, 4, "bf16", limit=65536)
+    other = state.State(weights(), 256, 4, "bf16", limit=65536)
+    dec._state_changed = lambda st: None
+    dec.solo = SimpleNamespace(st=solo)
+    assert dec._grow(solo, 300, alone=True) and solo.capacity == 8192
+    actions = []
+    shadow, other_shadow = plan.Shadow(solo, 0, actions), plan.Shadow(other, 1, actions)
+    dec.solo, dec.planning = SimpleNamespace(st=shadow), True
+    assert dec._is_solo(shadow) and dec._is_solo(solo) and not dec._is_solo(other_shadow)
+    dec._shrink(shadow)                                                 # a request ended on two ranks
+    assert actions == [["reset", 0]] and shadow.capacity == 8192
+    dec._shrink(shadow, release=True)                                   # memory is short: rank 1 shrinks it too
+    assert actions[-1] == ["resize", 0, 256]

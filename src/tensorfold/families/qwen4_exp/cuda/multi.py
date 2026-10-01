@@ -116,7 +116,10 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
         return True
 
     def _is_solo(self, st: State) -> bool:
-        return self.solo is not None and getattr(st, "source", st) is self.solo.st      # a plan's stand-in too
+        if self.solo is None:
+            return False
+        solo = self.solo.st                      # while planning both are Shadows of the real slots: compare those
+        return getattr(st, "source", st) is getattr(solo, "source", solo)
 
     def _shrink(self, st: State, *, release: bool = False) -> None:
         """An idle slot back to its first rows: its caches' memory returns to the gate. The lone stream's graph
@@ -138,7 +141,7 @@ class MultiDecoder(TwoRanks, Alone, PromptPasses):
                 if all(f is not st for f in self.free):
                     self.free.append(st)
                 return True
-        solo = None if self.solo is None or self.planning else self.solo.st     # an idle graph slot's rows
+        solo = None if self.solo is None else self.solo.st     # an idle graph slot's rows (a Shadow while planning)
         if solo is not None and solo is not keep and id(solo) not in busy and solo.capacity > FIRST:
             self._shrink(solo, release=True)
             return True
