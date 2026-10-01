@@ -80,6 +80,31 @@ int tf_ds4_encode(tf_ds4 *ctx, const char *text, int rendered, int **out) {
     return tokens.len;
 }
 void tf_ds4_free(void *ptr) { free(ptr); }
+/* Metadata-only estimator. CPU inspect binds tensor descriptors without touching
+ * payloads; the CUDA allocator's own estimate is then queried, not reimplemented. */
+int tf_ds4_estimate(const char *path, int context, uint64_t *out, int count,
+                    char *err, size_t cap) {
+#ifdef DS4_NO_GPU
+    snprintf(err, cap, "CUDA estimate requires the CUDA library"); return 1;
+#else
+    if (!path || context < 1 || !out || count != 5 || access(path, R_OK)) {
+        snprintf(err, cap, "invalid estimate inputs"); return 1;
+    }
+    ds4_engine *engine = NULL;
+    ds4_engine_options opt = {0};
+    opt.model_path = path; opt.backend = DS4_BACKEND_CPU;
+    opt.inspect_only = true; opt.defer_boot_prewarm = true;
+    if (ds4_engine_open(&engine, &opt)) {
+        snprintf(err, cap, "metadata inspection failed"); return 1;
+    }
+    ds4_context_memory m = ds4_context_memory_estimate(DS4_BACKEND_CUDA, context);
+    out[0] = ds4_engine_session_graph_bytes_estimate(engine, context);
+    out[1] = m.raw_bytes; out[2] = m.compressed_bytes;
+    out[3] = m.scratch_bytes; out[4] = m.prefill_cap;
+    ds4_engine_close(engine);
+    return out[0] ? 0 : 1;
+#endif
+}
 const char *tf_ds4_token_text(tf_ds4 *ctx, int token, size_t *len) {
     return ds4_token_text(ctx->engine, token, len);
 }

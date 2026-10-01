@@ -14,6 +14,15 @@ import threading
 
 from .build import PIN
 
+NATIVE_ENV = {'DS4_WEIGHT_RESIDENCY_BASE': 'mapped', 'DS4_NO_BOOT_PREWARM': '1',
+              'DS4_MEM_FLOOR_GB': '8', 'DS4_CUDA_BUILD_ARTIFACTS': '0'}
+
+
+def _policy():
+    os.environ.update(NATIVE_ENV)
+    for key in ('DS4_DSPARK_MODEL', 'DS4_CUDA_WEIGHT_IPC_MANIFEST'):
+        os.environ.pop(key, None)
+
 
 class NativeError(RuntimeError):
     pass
@@ -49,9 +58,7 @@ def _native_worker(pipe, library):
     api = None
     try:
         # Child-local policy: never mutate the HTTP process's or live ds4's environment.
-        os.environ['DS4_WEIGHT_RESIDENCY_BASE'] = 'mapped'
-        os.environ['DS4_NO_BOOT_PREWARM'] = '1'
-        os.environ['DS4_MEM_FLOOR_GB'] = '8'
+        _policy()
         api = NativeLibrary(library)
         pipe.send({'ok': True, 'backend': api.backend()})
         vocab = 0
@@ -237,3 +244,48 @@ class NativeSession:
 
     def __exit__(self, *_):
         self.close()
+
+
+def _estimate_worker(pipe, library, model_path, context):
+    try:
+        _policy()
+        api = NativeLibrary(library)
+        function = api.lib.tf_ds4_estimate
+        function.argtypes = [C.c_char_p, C.c_int, C.POINTER(C.c_uint64), C.c_int, C.c_char_p, C.c_size_t]
+        function.restype = C.c_int
+        values, error = (C.c_uint64 * 5)(), C.create_string_buffer(1024)
+        if function(os.fsencode(model_path), context, values, 5, error, len(error)):
+            raise NativeError(error.value.decode(errors='replace') or 'native estimate is unavailable')
+        pipe.send({'ok': True, 'value': dict(zip(
+            ('graph_bytes', 'raw_bytes', 'compressed_bytes', 'scratch_bytes', 'prefill_cap'), values))})
+    except BaseException as exc:
+        pipe.send({'ok': False, 'error': str(exc)})
+    finally:
+        pipe.close()
+
+
+def estimate(library, model_path, context, timeout=60):
+    """Isolate donor inspection/fatal errors; no session, weights or KV allocation."""
+    spawn = mp.get_context('spawn')
+    parent, child = spawn.Pipe()
+    process = spawn.Process(target=_estimate_worker, args=(child, str(library), str(model_path), context), daemon=True)
+    try:
+        process.start()
+        child.close()
+        if parent not in wait([parent, process.sentinel], timeout):
+            raise NativeError('native metadata estimator exited or timed out')
+        try:
+            result = parent.recv()
+        except EOFError as exc:
+            raise NativeError('native metadata estimator exited') from exc
+        if not result['ok']:
+            raise NativeError(result['error'])
+        return result['value']
+    finally:
+        child.close()
+        process.join(2)
+        if process.is_alive():
+            process.terminate(); process.join(2)
+        if process.is_alive():
+            process.kill(); process.join(2)
+        process.close(); parent.close()
