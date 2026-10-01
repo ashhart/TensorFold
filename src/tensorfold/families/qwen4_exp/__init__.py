@@ -16,7 +16,7 @@ QUANT_METHODS = {"cuda": ("mlx", "exl3", "modelopt")}  # MLX affine 4-bit, EXL3 
 EXL3_VARIANT = "any"                           # every EXL3 codebook and width (tensorfold.families.EXL3_VARIANT_ANY)
 KERNEL_PACKAGE = "tensorfold.kernels.qwen.flash_next.v1"
 KERNEL_VERSION = "v1"
-# The CLI sets these before MLX starts, respecting environment overrides, to keep expert bindings from ending each command buffer.
+# The CLI sets defaults before MLX starts so expert bindings do not end each command buffer.
 MLX_ENV = {"MLX_MAX_OPS_PER_BUFFER": "200", "MLX_MAX_MB_PER_BUFFER": "100000"}
 
 
@@ -56,7 +56,9 @@ def check(model_dir: Path) -> None:
             print("[tensorfold] this EXL3 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
         return
     if quant_method(config) == "modelopt":
-        # the CUDA engine's NVFP4 route: NVFP4 experts in blocks of 16, other linears bf16, MXFP8, block FP8 or NVFP4
+        from tensorfold.vision.qwen_checkpoint import vision_key
+
+        # NVFP4 experts and n-gram tables; other linears are bf16, MXFP8 or block FP8
         found = config.get("quantization") or config.get("quantization_config") or {}
         algo = str(found.get("quant_algo") or "NVFP4").upper()
         # FP8 is read in the MTP drafter's experts only (dequantized and re-quantized at load: they only draft)
@@ -67,14 +69,18 @@ def check(model_dir: Path) -> None:
         fp4 = {int(w.get("group_size", 16)) for w in weights if int(w.get("num_bits", 4)) == 4}
         if not algos <= {"NVFP4", "W4A16_NVFP4", "MXFP8", "FP8_PB_WO"} or fp4 - {16}:
             raise ValueError(f"TensorFold's Flash Next kernels read NVFP4 (ModelOpt FP4) weights in blocks of 16, the "
-                             f"other linears bf16, MXFP8 or 128x128-block FP8 ({', '.join(NVFP4_MODELS)}); this checkpoint has "
+                             f"other linears bf16, MXFP8 or 128x128-block FP8 ({', '.join(NVFP4_MODELS)}); "
+                             "this checkpoint has "
                              + describe_quantization(config) + f". {OWN_MODEL_HELP}")
-        # NVFP4 is read in the routed experts only: anywhere else its packed bytes would load as bf16 values
+        # N-gram tables have their own NVFP4 reader; other non-expert layers would cast packed bytes to bf16.
         outside = sorted(name for name, layer in (found.get("quantized_layers") or {}).items()
-                         if "NVFP4" in str(layer.get("quant_algo", "")).upper() and "experts" not in name.split("."))
+                         if "NVFP4" in str(layer.get("quant_algo", "")).upper() and "experts" not in name.split(".")
+                         and ".ple.ple_embedding.ngram_embedding." not in name + "."
+                         and vision_key(name) is None)
         if outside:
-            raise ValueError(f"TensorFold's Flash Next kernels read NVFP4 in the routed experts only; this checkpoint "
-                             f"has it on {len(outside)} other layer(s), e.g. {outside[0]}. {OWN_MODEL_HELP}")
+            raise ValueError("TensorFold's Flash Next kernels read NVFP4 in routed experts and n-gram tables only; "
+                             f"this checkpoint has it on {len(outside)} other layer(s), e.g. {outside[0]}. "
+                             f"{OWN_MODEL_HELP}")
         if (Path(model_dir) / "model.safetensors.index.json").is_file() and not has_mtp(model_dir):
             print("[tensorfold] this NVFP4 checkpoint has no MTP head: decoding without MTP drafts", flush=True)
         return
@@ -161,7 +167,7 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                 master_port: int = 29551, no_drafts: bool = False, mtp_drafts: int | None = None,
                 mtp_confidence: float | None = None, context: int | None = None, ple_on_ssd: bool = False,
                 kv_dtype: str = "bf16", decode_share: float | None = None, **options: Any):
-    """The CUDA engine: MTP chains verified exactly on one GPU or two (``tp=2``; start rank 1 first), keys and values bf16, int8 or int4."""
+    """Verify MTP on one or two CUDA GPUs; start rank 1 first for ``tp=2``, with bf16, int8 or int4 KV storage."""
 
     from tensorfold.cuda.exl3.format import is_exl3
 
