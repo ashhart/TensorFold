@@ -233,7 +233,7 @@ the audit harness remains outside the PR.
 
 Real GB10 inference passed chat/code, thinking, SSE termination, required tool calls and a tool followup.
 With chat decoding at the same time, Hunyuan generated a 15,375,500-byte GLB at 30 steps/octree 256;
-CUDA moderation also passed. Available memory stayed above 15.58 GiB with no additional swap usage.
+CUDA moderation also passed. Final deployed qualification reached a minimum of 15.17 GiB available, with no additional swap usage.
 The API reports context_length=262144. The qualification harness and
 machine-specific raw receipts remain in ml-infra and the operator's qualification directory, rather than
 shipping personal paths and old board plans in the TensorFold PR.
@@ -255,8 +255,11 @@ The matched cleanup runs were 20.85–20.99 tok/s; a single saved baseline canno
 significant improvement, but these runs show no decode regression.
 
 These are local serial measurements, not evidence of a general speedup over every backend.
-The old ds4 log recorded about 1,000 prefill tok/s and about 21 decode tok/s on other requests;
-those logs are not a controlled head-to-head comparison. The full 262,144-token prompt, long-duration
+Historical logs from the same GGUF on the original ml-infra ds4 deployment recorded a median
+21.06 decode tok/s below 4k live context and about 940 prefill tok/s on fresh 16k prompts.
+These unmatched workloads indicate short-context parity, not a demonstrated speedup over ds4.
+The continuation gains in the table compare resumed and fresh TensorFold prefill; the old server
+also reused prefixes. TensorFold's upstream MLX/DSpark speedups do not apply to this serial CUDA adapter. The full 262,144-token prompt, long-duration
 soak, independent exhaustive GPU oracle and draft/concurrent exactness are not claimed.
 The [public benchmark fixtures](README.md#measurements) were run on the final 0.6.0 installed artifact.
 Re-run them after changing hardware, kernels, model or serving settings before publishing comparisons.
