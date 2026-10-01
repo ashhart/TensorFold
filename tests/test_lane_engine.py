@@ -83,14 +83,14 @@ def test_copy_single_cache_detaches_kv_and_recurrent_arrays() -> None:
     keys = mx.ones((1, 1, 3, 2))
     kv.update_and_fetch(keys, keys)
     arrays = ArraysCache(size=2)
-    arrays.state = [mx.zeros((1, 2)), mx.ones((1, 2))]
+    arrays.cache = [mx.zeros((1, 2)), mx.ones((1, 2))]
     clone = LaneEngine.copy_single_cache([kv, arrays])
     assert clone[0] is not kv and clone[0].offset == 3
     clone[0].keys[..., 0, :] = 9.0
-    clone[1].state[0][0, 0] = 5.0
-    mx.eval(clone[0].keys, clone[1].state[0], kv.keys, arrays.state[0])
+    clone[1].cache[0][0, 0] = 5.0
+    mx.eval(clone[0].keys, clone[1].cache[0], kv.keys, arrays.cache[0])
     assert kv.keys[0, 0, 0, 0].item() == 1.0
-    assert arrays.state[0][0, 0].item() == 0.0
+    assert arrays.cache[0][0, 0].item() == 0.0
 
 
 def test_copy_single_cache_copies_a_view_out_of_its_base() -> None:
@@ -101,10 +101,10 @@ def test_copy_single_cache_copies_a_view_out_of_its_base() -> None:
     base = mx.random.normal((64, 256, 256))
     mx.eval(base)
     arrays = ArraysCache(size=1)
-    arrays.state = [base[5:6]]
+    arrays.cache = [base[5:6]]
     clone = LaneEngine.copy_single_cache([arrays])
-    mx.eval(clone[0].state[0])
-    assert mx.array_equal(clone[0].state[0], base[5:6]).item()
+    mx.eval(clone[0].cache[0])
+    assert mx.array_equal(clone[0].cache[0], base[5:6]).item()
     before = mx.get_active_memory()
     del arrays, base
     gc.collect()
