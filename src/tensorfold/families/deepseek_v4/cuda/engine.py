@@ -68,9 +68,10 @@ class DeepSeekEngine:
         self.vocab_size = self.session.vocab_size
         self.tp, self.rank, self.concurrent, self.max_rows = 1, 0, False, 1
         self._lock, self._closed = threading.Lock(), False
+        self._timeline = []
 
     def generate(self, prompt, max_tokens, sampling, on_tokens, draft=True, stop_eos=True):
-        """Fresh serial request; callbacks receive evaluated/committed tokens once."""
+        """Reuse an unchanged evaluated timeline; appended prompts rebuild fresh."""
         import numpy as np
 
         from tensorfold.engine.exact_sampling import choose
@@ -94,7 +95,11 @@ class DeepSeekEngine:
                 return {"generated": 0, "cached": 0, "drafts": False, "prefill_s": 0.0, "decode_s": 0.0}
             start = time.perf_counter()
             ids = [int(t) for t in ids]
-            self.session.reset()
+            cached = len(self._timeline) if self._timeline and ids == self._timeline else 0
+            # Native suffix extension can differ from fresh batched prefill.
+            # Reuse only an unchanged, fully evaluated timeline.
+            if not cached:
+                self.session.reset()
             self.session.sync(ids)
             prefill_s = time.perf_counter() - start
             decode_start, count = time.perf_counter(), 0
@@ -124,9 +129,10 @@ class DeepSeekEngine:
                     break
                 if step < max_tokens - 1:
                     logits = next_logits if next_logits is not None else self.session.logits()
+            self._timeline = ids
             return {
                 "generated": count,
-                "cached": 0,
+                "cached": cached,
                 "drafts": False,
                 "prefill_s": prefill_s,
                 "decode_s": time.perf_counter() - decode_start,

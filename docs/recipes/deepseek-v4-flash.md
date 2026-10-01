@@ -176,8 +176,13 @@ CUDA HTTP hooks. Token bytes are joined before UTF8 decoding; instance-local bou
 repeated tokenizer RPCs. Required/named tools reuse the existing call gate without assuming the DSML
 opener is one token. HTTP shutdown and bind failure close the native engine.
 
-Each request starts a fresh native timeline. Prompt-resume snapshots and prefix reuse are outside this
-serial release: the upstream resumed/fresh arithmetic contract needs separate qualification.
+An unchanged, fully evaluated timeline reuses the live native state. Appended, changed or shorter
+prompts reset and prefill fresh: native suffix reuse failed one real 3,609-token greedy resumed/fresh
+comparison. This prevents history-dependent output, but growing conversations lose that unqualified
+prefix speedup. Re-running that failing case with fresh prefill produced identical output; unchanged
+timeline reuse also passed the real comparison. The decode measurements below do not claim unchanged
+multi-turn prefill latency.
+Prompt-resume snapshots and reuse after process restart remain outside this serial release.
 Callbacks observe evaluated tokens once, EOS/stop/disconnect terminate generation, and prompt-plus-reply
 capacity is checked before streaming. Fatal native failures close the engine instead of silently serving
 from damaged state.
@@ -212,28 +217,36 @@ measurement fell from 8.44 to 0.70 ms per sampled token without changing the rec
 Focused CPU tests cover GGUF wire format and malformed input, real schema/provenance, stored Q2/Q8
 vectors, a pinned IQ2 primitive, option refusal before allocation, insufficient-memory sentinels,
 callback/EOS/cancellation/lifetime, shared HTTP streaming/tools, shutdown and build/preflight boundaries.
-Packaged-source hashes are checked without depending on another local donor checkout.
+Packaged-source hashes are checked without depending on another local donor checkout. The focused
+suite passes 156 tests; two MLX GPU tests are excluded on the CUDA host.
 
 Real GB10 inference passed chat/code, thinking, SSE termination, required tool calls and a tool followup.
 With chat decoding at the same time, Hunyuan generated a 15,375,500-byte GLB at 30 steps/octree 256;
-CUDA moderation also passed. The API reports context_length=262144. The qualification harness and
+CUDA moderation also passed. Available memory stayed above 15.58 GiB with no additional swap usage.
+The API reports context_length=262144. The qualification harness and
 machine-specific raw receipts remain in ml-infra and the operator's qualification directory, rather than
 shipping personal paths and old board plans in the TensorFold PR.
 
-Historical optimization measurements on that same Spark and GGUF:
+Local optimization and final cleanup measurements on that same Spark and GGUF:
 
 | Check | Before | After | Scope |
 | --- | --- | --- | --- |
 | Sampled decode, 256 tokens | 18.24 tok/s | 20.44 tok/s | Same prompt, seed and output token hash; sampler optimization |
-| 16,224-token prefill | — | 927.6 tok/s | Aligned kernels, 1,024-token batches; one cold prompt |
+| 16,224-token prefill | 927.6 tok/s | 1,037.0 tok/s | Same prompt; 1,024 then 2,048-token prefill batches |
+| Sampled decode across cleanup, 256 tokens | 20.44 tok/s | 20.93 tok/s | Same prompt/seed/token hash; final median of three runs |
 | Thinking decode | 16.07 tok/s | 21.11 tok/s | Same fixture; output lengths differ, before/after aligned kernels |
+
+The final upstream public 64-token fixtures measured median decode rates of 20.87–21.43 tok/s
+(two repetitions per raw/chat fixture at temperatures 1 and 0, excluding the first sampled token).
+The matched cleanup runs were 20.85–20.99 tok/s; a single saved baseline cannot establish a statistically
+significant improvement, but these runs show no decode regression.
 
 These are local serial measurements, not evidence of a general speedup over every backend.
 The old ds4 log recorded about 1,000 prefill tok/s and about 21 decode tok/s on other requests;
 those logs are not a controlled head-to-head comparison. The full 262,144-token prompt, long-duration
-soak, independent exhaustive GPU oracle and draft/concurrent exactness are not claimed. Re-run the
-[public benchmark fixtures](README.md#measurements) on the final installed artifact before publishing
-comparative performance results.
+soak, independent exhaustive GPU oracle and draft/concurrent exactness are not claimed.
+The [public benchmark fixtures](README.md#measurements) were run on the final 0.6.0 installed artifact.
+Re-run them after changing hardware, kernels, model or serving settings before publishing comparisons.
 
 ### Contributor / PR notes
 
