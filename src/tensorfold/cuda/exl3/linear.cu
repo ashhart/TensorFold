@@ -56,7 +56,10 @@ __device__ __forceinline__ void finish(float (&v)[4], int lane, const half* svh,
 #pragma unroll
     for (int j = 0; j < 4; ++j) {
         v[j] = v[j] * HAD_SCALE * __half2float(__ldg(svh + col + j));
-        if (bias) v[j] += __half2float(__ldg(bias + col + j));
+        // load from an address that is always valid (svh when there is no bias): the compiler may issue this load
+        // ahead of the branch, and a null bias then faults in the split-K reduction (seen on an RTX 4090, CUDA 13)
+        const half bv = __ldg((bias ? bias : svh) + col + j);
+        if (bias) v[j] += __half2float(bv);
     }
 }
 
