@@ -243,7 +243,8 @@ def test_a_lone_stream_replays_the_one_stream_graphs_with_serial_tokens(sampling
 
 @pytest.mark.parametrize("kv_dtype", ["bf16", "int8"])
 def test_a_lone_stream_retargets_the_graphs_without_discarding_kept_prefixes(kv_dtype):
-    """A lone stream rebinds its graphs to preserve both slots' prefix chains, with unchanged reply bits."""
+    """A different lone stream takes the graph slot without dropping its graphs (one GPU: the kept prefix moves to a
+    free slot), keeping both prefix chains and the replies' bits."""
 
     from test_flashnext_forward import _model
 
@@ -265,10 +266,12 @@ def test_a_lone_stream_retargets_the_graphs_without_discarding_kept_prefixes(kv_
 
     first, start = run(PROMPTS[0], 12)
     assert start is dec.solo.st and any(k[1] is dec.solo.st for k in dec.kept)     # its prompt end kept there
-    first_slot = start
-    second, start = run(PROMPTS[1], 16)
-    assert start is dec.solo.st and second.st is dec.solo.st and start is not first_slot
-    assert any(k[1] is first_slot and k[0] == PROMPTS[0][:-1] for k in dec.kept)
+    graph_slot, dropped, state_changed = dec.solo.st, [], dec._state_changed
+    dec._state_changed = lambda st: (dropped.append(st), state_changed(st))[1]
+    second, _ = run(PROMPTS[1], 16)                                               # admitted to a slot, then moved
+    assert second.st is graph_slot and dec.solo.st is graph_slot
+    assert graph_slot not in dropped                                              # its graphs were kept
+    assert any(k[1] is not graph_slot and k[0] == PROMPTS[0][:-1] for k in dec.kept)   # moved, not evicted
     assert first.out == fresh(PROMPTS[0], 12) and second.out == fresh(PROMPTS[1], 16)
     assert not any(k[1] is dec.solo.st and k[0] == PROMPTS[0] for k in dec.kept)
     again, _ = run(PROMPTS[1] + second.out[:-1] + [42], 8)                       # resumes from the old slot's kept end
