@@ -155,4 +155,7 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
     info = commands.add_parser("info", help="show which family serves a model (reads its config.json only)")
     info.add_argument("model", help="a Hugging Face repo id or a model directory")
     info.set_defaults(func=handlers["info"])
+    from tensorfold.control.cli import register
+
+    register(commands)
     return parser

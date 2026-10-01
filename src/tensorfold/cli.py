@@ -18,7 +18,7 @@ from tensorfold.server import stacks
 from tensorfold.server.memory_budget import MEMORY_FRACTION
 from tensorfold.serve_options import check as _check_serve_options, vision_options as _vision_options
 
-COMMANDS = ("serve", "pull", "models", "info", "update")
+COMMANDS = ("serve", "pull", "models", "info", "update", "service", "tui")
 
 
 def build_parser() -> argparse.ArgumentParser:
