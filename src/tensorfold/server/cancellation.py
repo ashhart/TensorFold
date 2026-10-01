@@ -27,13 +27,23 @@ class Cancellation:
             raise RequestCancelled("request cancelled")
 
 
+def _readable(connection: socket.socket) -> bool:
+    """Whether a read would not block; ``poll`` where available, since ``select`` refuses descriptors past 1023."""
+
+    if hasattr(select, "poll"):
+        p = select.poll()
+        p.register(connection, select.POLLIN | select.POLLPRI)
+        return bool(p.poll(0))
+    ready, _, _ = select.select([connection], [], [], 0)
+    return bool(ready)
+
+
 def socket_cancellation(connection: socket.socket) -> Cancellation:
     def disconnected() -> bool:
         try:
             if connection.fileno() < 0:
                 return True
-            ready, _, _ = select.select([connection], [], [], 0)
-            if not ready:
+            if not _readable(connection):
                 return False
             return connection.recv(1, socket.MSG_PEEK | getattr(socket, "MSG_DONTWAIT", 0)) == b""
         except BlockingIOError:
