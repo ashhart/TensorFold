@@ -59,9 +59,12 @@ class MultiDecoder:
         self.drafts = drafts if e.drafter is not None else 0
         import os
 
+        if os.environ.get("TF_MULTI_PROF"):
+            e._mprof = {}
         if os.environ.get("TF_MULTI_DRAFTS"):                    # tuning: drafts a stream in concurrent rounds
             self.drafts = min(self.drafts, int(os.environ["TF_MULTI_DRAFTS"]))
-        self.prof = {"rounds": 0, "draft": 0.0, "verify": 0.0, "rows": 0, "streams": 0} \
+        self.prof = {"rounds": 0, "draft": 0.0, "verify": 0.0, "post": 0.0, "fill": 0.0, "round": 0.0, "rows": 0,
+                     "streams": 0} \
             if os.environ.get("TF_MULTI_PROF") else None
         self.step_rows = step                      # prompt rows a fill step takes while other streams decode
         self.free = list(range(e.slots))
@@ -270,7 +273,10 @@ class MultiDecoder:
     @torch.no_grad()
     def round(self) -> list[Stream]:
         self._check()
+        tr = time.perf_counter()
         done = self._fill() if self.filling else []
+        if self.prof is not None and self.rank == 0:
+            self.prof["fill"] += time.perf_counter() - tr
         live = [s for s in self.streams.values() if not s.done]
         if not live:
             return done
@@ -282,6 +288,8 @@ class MultiDecoder:
                 s.take(new, self._ends(s))
             else:
                 s.done, s.finished = True, time.perf_counter()
+        if self.prof is not None and self.rank == 0:
+            self.prof["round"] += time.perf_counter() - tr
         return done + [s for s in live if s.done]
 
     def _verify(self, plan: list[tuple[int, int]]) -> list[list[int]]:
@@ -314,8 +322,15 @@ class MultiDecoder:
                 p["streams"] += len(plan)
                 if p["rounds"] % 50 == 0:
                     n = p["rounds"]
+                    mp = getattr(e, "_mprof", None) or {}
+                    if mp.get("n"):
+                        print("[multi] step_multi: " + ", ".join(f"{k} {1e3 * mp[k] / mp['n']:.1f} ms" for k in
+                                                                 ("hash", "gather0", "gather1", "wait")), flush=True)
                     print(f"[multi] {n} rounds: draft {1e3 * p['draft'] / n:.1f} ms, verify {1e3 * p['verify'] / n:.1f} ms, "
-                          f"{p['rows'] / n:.1f} rows, {p['streams'] / n:.1f} streams a round", flush=True)
+                          f"post {1e3 * p['post'] / n:.1f} ms, fill {1e3 * p['fill'] / n:.1f} ms, round "
+                          f"{1e3 * p['round'] / n:.1f} ms, {p['rows'] / n:.1f} rows, {p['streams'] / n:.1f} streams",
+                          flush=True)
+            t2 = time.perf_counter()
             news = []
             for (sid, k), (r0, nrows, p0) in zip(plan, spans):
                 s = self.streams[sid]
@@ -337,6 +352,8 @@ class MultiDecoder:
                     s.constraint.advance(drafts[:m])
                 s.counted(nrows)
                 news.append(drafts[:m] + [target[m]])
+            if self.prof is not None and self.rank == 0:
+                self.prof["post"] += time.perf_counter() - t2
             return news
         except Exception as exc:
             self.broken = exc

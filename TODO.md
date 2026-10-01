@@ -115,7 +115,11 @@ and DeepSeek's reference (MIT) freely; do not copy recipe overlay code into this
       deterministic) + V4.1 adapter (`save_prefix` / `load_prefix`: per-position caches + rings' last window); budget
       from free memory (7 GiB ~ 2.35M tokens at context 40,960); switching conversations resumes in < 1 s, retries too
 - [ ] Move GLM-5 / Nemotron-H snapshots onto `kv_pool`
-- [ ] Concurrent decoding (`--parallel N`): per-stream caches, batched verify rows, graphs per streams x rows
+- [x] Concurrent decoding (`--parallel N`): stream slots, stream-aware decode graphs, MultiDecoder + shared Scheduler,
+      cost-based draft allocation; 16 clients: 115.5 tok/s aggregate (vLLM recipe baseline 113.7 at x6); outputs ==
+      sequential
+- [ ] More than 16 rows a round (raise the row-invariant thresholds to 32: per-row HC / routed scratch / fp32 partials)
+- [ ] Batched DSpark drafting across streams (one drafter pass for every drafting stream)
 - [x] `--context` admission before any cache exists (both ranks' free memory; refuses with the largest that fits;
       default 40,960 shrinks to fit); expandable-segments allocator (prompt transients 3.6 -> 1.6 GiB at 38K)
 - [x] Structured output: `response_format` json_schema / json_object, guided_choice / regex / grammar (xgrammar),

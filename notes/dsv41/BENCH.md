@@ -232,3 +232,29 @@ RoPE 0.8, block maxima 0.3) instead of ~28.5; `--context 1048576` admitted with 
 
 Also: admission reads MemAvailable (CUDA's free figure on GB10 leaves out the reclaimable page cache full of weight
 files right after loading, and read 0 on one rank).
+
+## 2026-10-01 — concurrent decoding (`tensorfold serve --tp 2 --parallel N`)
+
+Streams live in cache slots (stacked caches; prompt chunks run in a slot through views); decode graphs take rows of
+any slots (each row's slot offsets its window ring, compressor ring, compressed entries, indexer keys and drafter
+ring), so one forward verifies every stream's rows and the expert / dense weights a round reads serve them all.
+Rows are row-invariant (<= 16 a round): every stream's tokens equal its sequential decoding (checked: 6 requests
+concurrent == sequential). `cuda/multi.py` MultiDecoder behind the shared `tensorfold.cuda.scheduler.Scheduler`;
+rank 0 sends admissions, prefill steps, per-stream draft counts and completions, rank 1 computes the same tokens.
+
+Verify ms by rows (distinct tokens over slots): 1: 29, 4: 50, 8: 70, 12: 89, 16: 102. Independent tokens rarely
+share experts (384, top-6), so a row costs ~6 ms whether it is a stream's token or a draft: drafts are allocated
+per round by expected tokens per ms (per-stream acceptance, calibrated curve) and mostly vanish under load.
+
+Sustained load (clients sending 256-token requests back to back, temperature 0.7, thinking off):
+
+| setup | aggregate | per request |
+|---|---:|---:|
+| 1 client | 41 tok/s | 42 tok/s |
+| `--parallel 4`, 4 clients (fixed 3 drafts) | 65 tok/s | 17 tok/s |
+| `--parallel 8`, 8 clients (cost-based drafts) | 82.5 tok/s | 10.5 tok/s |
+| `--parallel 16 --context 16384`, 16 clients | **115.5 tok/s** | 7.7 tok/s |
+
+The decode Engram reads had run with 4 threads in the server (16 only in the runner): 16-stream rounds waited 16 ms
+on the first table's rows; now 16 threads (4 a row for multi-row rounds, at most 64): 2.7 ms.
+Next: more than 16 rows a round (row-invariant thresholds at 32), batched drafting for low concurrency.

@@ -113,7 +113,7 @@ class Caches:
 
 
 SKIP_READS = os.environ.get("TF_SKIP_READS") == "1"   # timing experiments: stale Engram rows (wrong output)
-STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS", "4"))   # decode/verify Engram row reads (few rows)
+STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS") or "16")   # decode/verify Engram row reads (few rows)
 BLOCKED_SELECT = True        # prompt chunks: segmented indexer top-k (no [rows, keys] fp32 matrix)
 REUSE = os.environ.get("TF_DSV41_REUSE", "1") != "0"    # keep the live caches for a prompt that extends them
 REUSE_MIN = 64               # shorter common prefixes start fresh
@@ -670,6 +670,8 @@ class SerialEngine:
 
         c = self.c
         R = len(rows)
+        mp = getattr(self, "_mprof", None)
+        t0 = time.perf_counter()
         g = self.graphs[R]
         n = c.engram_max_ngram_size
         by_slot: dict[int, list[int]] = {}
@@ -695,18 +697,26 @@ class SerialEngine:
             sid.append(slot)
             h.append(hashes[slot][j])
         h = np.stack(h)                                                 # [R, 2, 24]
+        threads = min(64, max(STEP_READ_THREADS, 4 * R))               # many streams' rows: more reads in flight
+        t1 = time.perf_counter()
         g["tok"].copy_(torch.tensor([t for _, t in rows]), non_blocking=True)
         g["pos"].copy_(torch.tensor(pos), non_blocking=True)
         g["sid"].copy_(torch.tensor(sid), non_blocking=True)
         g["a0"].replay()
-        self.tables.gather(h[:, 0, :].reshape(1, -1), out=g["h_raw"][:1], layers=[0], threads=STEP_READ_THREADS)
+        self.tables.gather(h[:, 0, :].reshape(1, -1), out=g["h_raw"][:1], layers=[0], threads=threads)
+        t2 = time.perf_counter()
         g["raw"][0].copy_(g["h_raw"][0].view_as(g["raw"][0]), non_blocking=True)
         g["a1"].replay()
-        self.tables.gather(h[:, 1, :].reshape(1, -1), out=g["h_raw"][1:], layers=[1], threads=STEP_READ_THREADS)
+        self.tables.gather(h[:, 1, :].reshape(1, -1), out=g["h_raw"][1:], layers=[1], threads=threads)
+        t3 = time.perf_counter()
         g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
         g["b"].replay()
         g["h_next"].copy_(g["next"], non_blocking=True)
         torch.cuda.current_stream().synchronize()
+        if mp is not None:
+            for k, v in (("hash", t1 - t0), ("gather0", t2 - t1), ("gather1", t3 - t2), ("wait", time.perf_counter() - t3)):
+                mp[k] = mp.get(k, 0.0) + v
+            mp["n"] = mp.get("n", 0) + 1
         return g["logits"], g["h_next"][:R].tolist()
 
     def step(self, token: int, sampling=None) -> int:
