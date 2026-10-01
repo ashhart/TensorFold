@@ -114,7 +114,7 @@ MALFORMED = {
     "template raises on a kwarg": ({"messages": HI, "chat_template_kwargs": {"mode": "fancy"}},
                                    "the chat template rejected the request: Unexpected mode fancy."),
     "an unknown effort": ({"messages": HI, "chat_template_kwargs": {"reasoning_effort": "extreme"}},
-                          "reasoning_effort must be none, minimal, low, medium, high or xhigh"),
+                          "reasoning_effort must be none, minimal, low, medium, high, xhigh or max"),
     **{f"chat_template_kwargs {name}": ({"messages": HI, "chat_template_kwargs": value},
                                         "chat_template_kwargs must be a JSON object or null")
        for name, value in [("[]", []), ('""', ""), ("false", False), ("0", 0),              # falsy: not read as absent

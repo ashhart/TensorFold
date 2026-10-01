@@ -114,7 +114,7 @@ def test_no_server_default_leaves_the_template_its_own(tmp_path):
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("fields", [{"reasoning_effort": "extreme"}, {"reasoning_effort": 3},
-                                    {"chat_template_kwargs": {"reasoning_effort": "max"}},
+                                    {"chat_template_kwargs": {"reasoning_effort": "ultra"}},
                                     {"thinking_budget": "lots"}, {"thinking_budget": 2.5}])
 def test_a_bad_effort_or_budget_is_refused_before_the_stream(tmp_path, stream, fields):
     engine = ChainEngine()

@@ -38,15 +38,15 @@ def parse_numbers(fields: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
-EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
 
-_EFFORT_ORDER = ("xhigh", "high", "medium", "low", "minimal")   # highest first
+_EFFORT_ORDER = ("max", "xhigh", "high", "medium", "low", "minimal")   # highest first
 
 
 def nearest_named_effort(effort: str, levels: frozenset[str]) -> str:
     """The nearest named level, ties going higher; effort itself when none is named or it is off the ladder."""
-    # GLM-5.3 names low and high but no medium, so its template used to render medium as Max, its ceiling
+    # max sits above xhigh. A template that names it keeps max; any other template hears the nearest name
 
     if not levels or effort not in _EFFORT_ORDER:
         return effort
@@ -55,9 +55,9 @@ def nearest_named_effort(effort: str, levels: frozenset[str]) -> str:
 
 
 def effort_levels(template: str | None) -> frozenset[str]:
-    """The efforts a chat template names: Qwen3.8's low, medium and xhigh; GLM-5.3's low and high."""
+    """The efforts a chat template names: Qwen3.8's low, medium and xhigh; GLM-5.3's low, high and max."""
 
-    return frozenset(re.findall(r"""['"](minimal|low|medium|high|xhigh)['"]""", template or ""))
+    return frozenset(re.findall(r"""['"](minimal|low|medium|high|xhigh|max)['"]""", template or ""))
 
 
 def coerce_effort(effort: str | None, levels: frozenset[str] = frozenset()) -> str | None:
@@ -66,7 +66,7 @@ def coerce_effort(effort: str | None, levels: frozenset[str] = frozenset()) -> s
     if effort is None:
         return None
     if not levels:
-        if effort == "high":
+        if effort in ("high", "max"):
             return "xhigh"
         if effort == "minimal":
             return "low"
@@ -92,7 +92,7 @@ def thinking_fields(body: dict[str, Any], levels: frozenset[str] = frozenset()) 
         effort = kwargs.get("reasoning_effort")           # where vLLM's clients put it
     if effort is not None:
         if not isinstance(effort, str) or effort not in EFFORTS:
-            raise RequestError("reasoning_effort must be none, minimal, low, medium, high or xhigh")
+            raise RequestError("reasoning_effort must be none, minimal, low, medium, high, xhigh or max")
         fields["reasoning_effort"] = coerce_effort(effort, levels)
         fields["enable_thinking"] = effort != "none"
     if isinstance(kwargs, dict) and "enable_thinking" in kwargs:          # an explicit switch wins

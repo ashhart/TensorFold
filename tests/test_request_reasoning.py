@@ -25,6 +25,7 @@ class SamplingApp(FakeApp):
         ("medium", True, "medium"),
         ("high", True, "xhigh"),
         ("xhigh", True, "xhigh"),
+        ("max", True, "xhigh"),
     ],
 )
 def test_http_reasoning_controls(effort, thinking, normalized):
@@ -138,13 +139,17 @@ def test_explicit_thinking_overrides_none_and_preserves_default(default_effort, 
     ("{# 'xhigh' 'medium' 'low' #}", "low", "low"),
     ("{# 'xhigh' 'medium' 'low' #}", "medium", "medium"),
     ("{# 'xhigh' 'medium' 'low' #}", "xhigh", "xhigh"),
+    ("{# 'xhigh' 'medium' 'low' #}", "max", "xhigh"),        # no max: the nearest named level is xhigh
     ("{# 'low' 'high' #}", "high", "high"),                  # GLM-5.3 names high: it renders High, not Max
     ("{# 'low' 'high' #}", "minimal", "low"),
     ("{# 'low' 'high' #}", "low", "low"),
     ("{# 'low' 'high' #}", "medium", "high"),                # medium is not a GLM name; Max was the silent result
     ("{# 'low' 'high' #}", "xhigh", "xhigh"),               # GLM renders xhigh as its own Max; leave the name
     ("{# 'low' 'high' #}", "none", "none"),
+    ("{# 'low' 'high' 'max' #}", "max", "max"),              # the template names max, so the name stays
+    ("{# 'low' 'high' 'max' #}", "medium", "high"),
     ("", "high", "xhigh"),
+    ("", "max", "xhigh"),
 ])
 def test_a_template_that_names_an_effort_is_given_that_effort(names, effort, want):
     app = make_app(enable_thinking=True)
@@ -169,14 +174,14 @@ def test_glm_omitted_effort_stays_the_template_default_and_a_medium_default_is_h
     source = ("{%- set effective_reasoning_effort = reasoning_effort if reasoning_effort is defined "
               "and reasoning_effort in ['low', 'high'] else 'max' -%}{{ effective_reasoning_effort }}")
     levels = effort_levels(source)
-    assert levels == frozenset({"low", "high"})
+    assert levels == frozenset({"low", "high", "max"})
     template = jinja2.Environment().from_string(source)
     assert template.render() == "max"
     assert template.render(reasoning_effort="medium") == "max"
-    for effort in ("minimal", "low", "medium", "high", "xhigh"):
+    for effort in ("minimal", "low", "medium", "high", "xhigh", "max"):
         heard = coerce_effort(effort, levels)
         assert template.render(reasoning_effort=heard) == {"minimal": "low", "low": "low", "medium": "high",
-                                                           "high": "high", "xhigh": "max"}[effort]
+                                                           "high": "high", "xhigh": "max", "max": "max"}[effort]
 
     app = make_app(enable_thinking=True, reasoning_effort="medium")
     app.tokenizer.chat_template = "{# 'low' 'high' #}"
@@ -289,14 +294,16 @@ def test_glm_and_qwen_templates_hear_the_nearest_named_level():
             "{%- if resolved_reasoning_effort not in ('xhigh', 'medium', 'low') %}"
             "{{- raise_exception('Unexpected reasoning effort') }}{%- endif -%}{{ resolved_reasoning_effort }}")
     glm_levels, qwen_levels = effort_levels(glm), effort_levels(qwen)
-    assert glm_levels == frozenset({"low", "high"})
+    assert glm_levels == frozenset({"low", "high", "max"})
     assert qwen_levels == frozenset({"low", "medium", "xhigh"})
     glm_template = jinja2.Environment().from_string(glm)
     qwen_template = jinja2.Environment().from_string(qwen)
     assert glm_template.render(reasoning_effort=coerce_effort("medium", glm_levels)) == "high"
     assert glm_template.render(reasoning_effort=coerce_effort("minimal", glm_levels)) == "low"
     assert glm_template.render(reasoning_effort=coerce_effort("xhigh", glm_levels)) == "max"
+    assert glm_template.render(reasoning_effort=coerce_effort("max", glm_levels)) == "max"
     assert qwen_template.render(reasoning_effort=coerce_effort("high", qwen_levels)) == "xhigh"
+    assert qwen_template.render(reasoning_effort=coerce_effort("max", qwen_levels)) == "xhigh"
     assert qwen_template.render(reasoning_effort=coerce_effort("minimal", qwen_levels)) == "low"
     assert qwen_template.render(reasoning_effort=coerce_effort("medium", qwen_levels)) == "medium"
     assert heard_effort(None, "medium", glm_levels) == "high"
