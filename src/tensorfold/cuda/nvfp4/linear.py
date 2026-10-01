@@ -68,10 +68,20 @@ def _fragment_order(codes: torch.Tensor, npad: int) -> torch.Tensor:
     """e4m3 bytes [N, K] -> ``qmm_prefill8w``'s order [npad/64][K/64][8][32][2][8] (fragment lanes, k32 halves)."""
 
     n, k = codes.shape
-    padded = torch.zeros((npad, k), dtype=torch.uint8, device=codes.device)
-    padded[:n] = codes
-    kk, nn = fragment_index(k, npad, codes.device)
-    return padded.t()[kk, nn].contiguous().view(-1)
+    out = torch.empty(npad * k, dtype=torch.uint8, device=codes.device)
+    # 64-output tiles are independent: gather a band of them at a time so the int64 indices stay small
+    # (a whole 248k-row head at once would need two [npad, K] int64 index tensors, ~19 GiB).
+    rows = max(64, (1 << 24) // k // 64 * 64)
+    index = None
+    for r0 in range(0, npad, rows):
+        r1 = min(npad, r0 + rows)
+        band = torch.zeros((r1 - r0, k), dtype=torch.uint8, device=codes.device)
+        if r0 < n:
+            band[:min(n, r1) - r0] = codes[r0:min(n, r1)]
+        if index is None or index[0].shape[0] != (r1 - r0) // 64:
+            index = fragment_index(k, r1 - r0, codes.device)
+        out[r0 * k:r1 * k] = band.t()[index].reshape(-1)
+    return out
 
 
 _ONES: dict[str, torch.Tensor] = {}
