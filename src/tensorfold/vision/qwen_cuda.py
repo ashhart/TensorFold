@@ -79,17 +79,9 @@ def _vision_sources(model_dir):
 def checkpoint_vision(model_dir: str | Path) -> tuple[dict, int]:
     """Validate vision tensor headers before any model or accelerator allocation."""
     from tensorfold.cuda.capacity import SIZES
+
     config = vision_config(model_dir)
-    sources = _vision_sources(model_dir)
-    tensors = {k: value[1] for k, value in sources.items()}
-    for name, (path, info, begin) in sources.items():
-        shape, offsets = info.get("shape", ()), info.get("data_offsets", ())
-        if (info.get("dtype") not in {"BF16", "F16", "F32"} or not shape
-                or any(type(d) is not int or d <= 0 for d in shape) or len(offsets) != 2
-                or any(type(d) is not int for d in offsets) or offsets[0] < 0
-                or offsets[1] - offsets[0] != math.prod(shape) * SIZES[info["dtype"]]
-                or begin + offsets[1] > path.stat().st_size):
-            raise ValueError(f"invalid or unsupported vision tensor range: {name}")
+    tensors = float_headers(model_dir, _vision_sources(model_dir))
     h, mid, merged, out = (config["hidden_size"], config["intermediate_size"],
                            config["hidden_size"] * config["spatial_merge_size"]**2, config["out_hidden_size"])
     shapes = {"patch_embed.proj.bias": [h], "pos_embed.weight": [config["num_position_embeddings"], h],
@@ -112,6 +104,27 @@ def checkpoint_vision(model_dir: str | Path) -> tuple[dict, int]:
     if shape not in ([h, t, p, p, channels], [h, channels, t, p, p]):
         raise ValueError("unsupported vision patch convolution layout")
     return config, sum(math.prod(v["shape"]) * max(2, SIZES[v["dtype"]]) for v in tensors.values())
+
+
+def float_headers(model_dir: str | Path, sources: dict | None = None) -> dict[str, dict]:
+    """The tower's tensor headers, each a floating-point tensor whose bytes lie inside its file.
+
+    `sources` is the Qwen path's (possibly TENSORFOLD_VISION_WEIGHTS-overridden) tensor listing; without it the
+    checkpoint's own `vision_tensors` are read."""
+    from tensorfold.cuda.capacity import SIZES
+    from .qwen_checkpoint import vision_tensors
+
+    if sources is None:
+        sources = vision_tensors(Path(model_dir))
+    for name, (path, info, begin) in sources.items():
+        shape, offsets = info.get("shape", ()), info.get("data_offsets", ())
+        if (info.get("dtype") not in {"BF16", "F16", "F32"} or not shape
+                or any(type(d) is not int or d <= 0 for d in shape) or len(offsets) != 2
+                or any(type(d) is not int for d in offsets) or offsets[0] < 0
+                or offsets[1] - offsets[0] != math.prod(shape) * SIZES[info["dtype"]]
+                or begin + offsets[1] > path.stat().st_size):
+            raise ValueError(f"invalid or unsupported vision tensor range: {name}")
+    return {k: value[1] for k, value in sources.items()}
 
 
 def weight_transform(base, enabled: bool, rank: int, offload: bool = False):
