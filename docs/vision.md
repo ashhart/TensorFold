@@ -1,6 +1,6 @@
 # Image input
 
-The opt-in `--vision` flag accepts image and text content parts through the existing OpenAI-compatible chat API. It supports GLM-5.3-Flash on MLX and Qwen3.5/3.8 dense checkpoints on MLX and CUDA. Image features enter the existing model's prompt prefill; generated text still uses that family's normal decoder and speculative path.
+The opt-in `--vision` flag accepts image and text content parts through the existing OpenAI-compatible chat API. It supports GLM-5.3-Flash and Qwen3.5/3.8 dense checkpoints on MLX and CUDA. Image features enter the existing model's prompt prefill; generated text still uses that family's normal decoder and speculative path.
 The checkpoint must contain its vision tower, tokenizer, processor files and vision configuration; text-only conversions cannot recover image support from a flag. GLM-5.3-Flash uses its own GLM5-Next image processor and tower while sharing TensorFold's already-loaded language model and MTP head.
 Video, audio and image generation are not supported by this adapter.
 Qwen3.8 Flash Next supports images on one CUDA GPU with `--parallel` of at least two; see the
@@ -16,9 +16,10 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --vision
 tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --vision
 ```
 
-GLM-5.3-Flash image input is currently MLX-only. CUDA uses the same flag with `--backend cuda` for supported Qwen checkpoints; their vision tower must use floating-point weights.
+CUDA uses the same flag with `--backend cuda`: GLM-5.3-Flash on its two ranks (`--vision` on both), Qwen on one or two. The vision tower must use floating-point weights.
+Off MLX, GLM's images are prepared by Transformers' PIL image processor (the geometry MLX-VLM's processor matches) and encoded by its GLM5-Next tower, so CUDA needs Transformers 5.17 or newer.
 
-On a small CUDA card the resident tower and its 4 GiB workspace reserve take a large part of the startup budget. `--vision-offload` (with `--vision`, CUDA only) keeps the tower in host RAM, copies it to the GPU only while an image is encoded, and reserves 2.25 GiB instead. On one RTX 4090 with the Qwen3.8-27B EXL3 3.50bpw pack and DFlash2, the largest window with `--vision` went from 11,922 to 38,686 tokens; a 4,096-token image peaked about 1.3 GB above idle. Each image request pays the copy of the roughly 0.9 GiB tower to the GPU and back.
+On a small CUDA card the resident tower and its 4 GiB workspace reserve take a large part of the startup budget. `--vision-offload` (with `--vision`, CUDA only) keeps the tower in host RAM, copies it to the GPU only while an image is encoded, and reserves 2.25 GiB instead. On one RTX 4090 with the Qwen3.8-27B EXL3 3.50bpw pack and DFlash2, the largest window with `--vision` went from 11,922 to 38,686 tokens; a 4,096-token image peaked about 1.3 GB above idle. Each image request pays the copy of the roughly 0.9 GiB tower to the GPU and back. GLM-5.3-Flash's CUDA tower honours the flag too (rank 0 reserves its 1.05 GiB tower plus 2 GiB for a visit instead of the 4 GiB workspace on top of the resident tower; the 2 GiB is not yet measured on GLM).
 MLX also reads per-module quantized tower weights when the checkpoint declares their format.
 The tower shares the server process and the existing language model's embeddings; it does not load a second language model.
 Dense Qwen CUDA two-rank mode encodes images on rank zero and sends their features and positions to rank one.
@@ -69,6 +70,8 @@ Image output is not generated.
 
 ## Send a video
 
+Only Flash Next takes video; GLM-5.3-Flash refuses a `video_url` part (`content parts must be text or image_url; audio and video are unsupported`).
+
 Flash Next on CUDA (`--vision`, `--parallel` of at least two) also takes `video_url` parts in user messages, as
 MP4, WebM, MOV or MKV data URLs (or public HTTPS URLs with `--vision-urls`); decoding needs PyAV (`pip install av`,
 part of the `vision` extra on Linux):
@@ -103,7 +106,7 @@ the images. Remove older image content from the submitted history, start a new c
 the server with a larger count limit. The server does not discard images automatically.
 
 A request's images share 4,096 visual tokens, so a higher count makes each image smaller: eight images get about
-512 tokens each. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next), `--vision-image-tokens N` raises
+512 tokens each. On CUDA Qwen checkpoints (Qwen3.5/3.8 dense and Flash Next) and GLM-5.3-Flash, `--vision-image-tokens N` raises
 that shared budget, up to 65,536, while each image keeps at most 4,096, so one image is sized as before. The tower
 encodes runs of whole images of at most 16,384 patches, the scratch one full-size image already needs; a request
 that fits one run is encoded in one call, as before. The byte and pixel limits still apply, and the longer prompt
@@ -128,6 +131,7 @@ Image requests currently start with a fresh KV cache and do not write reusable p
 This prevents identical image-placeholder token IDs from reusing another image's state; ordinary text requests retain their prefix caching.
 Multi-turn image conversations work when the request includes the original image content parts, but image-prefix reuse and persisted image KV are not implemented.
 For Qwen, each image request carries its own multimodal rotary positions and continuation offset, including during concurrent lane rounds. GLM uses its native KDA/NoPE attention state.
+On CUDA, GLM's image features replace the placeholder rows in every hyper-connection stream and in the MTP head's next-token rows; rank one finds those rows in the prompt it already holds and receives only the features.
 
 ## Verification
 
