@@ -431,3 +431,21 @@ def test_one_scratch_through_shrinking_windows_and_invalid_picks():
     run(s, 17, torch.full_like(sel, ex.count))                      # every pick past the experts: nothing runs
     assert int(s.count.item()) == 0 and int(s.tile_count.item()) == 0
     assert torch.equal(run(s, 17, sel), first[17])
+
+
+def test_bf16_rows_out_equal_the_fp32_rows_rounded():
+    """A caller's bf16 rows (a prompt's per-slot outputs) get exactly the fp32 output rounded to nearest even, as a
+    bf16 copy of the fp32 rows would; the fp32 path is unchanged."""
+    from tensorfold.cuda.exl3 import experts
+
+    E, D, I, TOPK, R = 24, 512, 256, 6, 300
+    ex, _ = _layer(E + 1, D, I, [(6, 6, 6)] * (E + 1), 2, seed=23)
+    g = torch.Generator().manual_seed(29)
+    x = torch.randn((R, D), generator=g).to(torch.bfloat16).cuda()
+    sel, _ = _picks(E, R, TOPK, g, shared=True)
+    s = experts.Scratch(ex, R, TOPK + 1)
+    fp32 = experts.routed(x, sel, None, ex, s, None, R).clone()
+    out = torch.full((R * (TOPK + 1), D), float("nan"), dtype=torch.bfloat16, device="cuda")
+    got = experts.routed(x, sel, None, ex, s, None, R, y_out=out)
+    assert got.data_ptr() == out.data_ptr()
+    assert torch.equal(out, fp32.to(torch.bfloat16))

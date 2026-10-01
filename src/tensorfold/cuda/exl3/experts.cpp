@@ -114,7 +114,9 @@ void down_epilogue(const at::Tensor& Z, const at::Tensor& pick, const at::Tensor
     check(Z, at::kFloat, "Z");
     check(pick, at::kInt, "pick");
     check(svh_d, at::kHalf, "svh_d");
-    check(y, at::kFloat, "y");
+    TORCH_CHECK(y.is_cuda() && y.is_contiguous() && (y.scalar_type() == at::kFloat || y.scalar_type() == at::kBFloat16),
+                "y: a contiguous fp32 or bf16 CUDA tensor");
+    TORCH_CHECK(y.numel() >= P * D, "y too small");
     TORCH_CHECK(D % 128 == 0, "D must be a multiple of 128");
     c10::cuda::CUDAGuard guard(Z.device());
     exl3x_down_epilogue_cuda(Z, pick, svh_d, y, rows, P, D, SK, slots, E);

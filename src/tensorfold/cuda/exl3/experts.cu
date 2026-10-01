@@ -193,9 +193,15 @@ __global__ void gateup_epilogue_kernel(const float* __restrict__ Z, const int* _
     for (int j = 0; j < 4; ++j) o[j] = __float2half_rn(v[j] * HAD_SCALE);
 }
 
-// Program (member row, 128-block of the model width): Y = (splits summed in order) @ H * svh_d, fp32.
+// Program (member row, 128-block of the model width): Y = (splits summed in order) @ H * svh_d, fp32, stored as
+// TOUT (bf16 rounds the same fp32 value to nearest even, as a later bf16 copy of the fp32 output would).
+template <typename TOUT> __device__ __forceinline__ TOUT store_as(float v);
+template <> __device__ __forceinline__ float store_as<float>(float v) { return v; }
+template <> __device__ __forceinline__ __nv_bfloat16 store_as<__nv_bfloat16>(float v) { return __float2bfloat16_rn(v); }
+
+template <typename TOUT>
 __global__ void down_epilogue_kernel(const float* __restrict__ Z, const int* __restrict__ pick,
-                                     const half* __restrict__ svh_d, float* __restrict__ y, int P, int D, int SK,
+                                     const half* __restrict__ svh_d, TOUT* __restrict__ y, int P, int D, int SK,
                                      int E) {
     const int p = blockIdx.x, blk = blockIdx.y;
     const int e = pick[p];
@@ -210,9 +216,9 @@ __global__ void down_epilogue_kernel(const float* __restrict__ Z, const int* __r
         v[j] = s;
     }
     fwht128(v, lane);
-    float* o = y + (size_t)p * D + n;
+    TOUT* o = y + (size_t)p * D + n;
 #pragma unroll
-    for (int j = 0; j < 4; ++j) o[j] = v[j] * HAD_SCALE * __half2float(svh_d[(size_t)e * D + n + j]);
+    for (int j = 0; j < 4; ++j) o[j] = store_as<TOUT>(v[j] * HAD_SCALE * __half2float(svh_d[(size_t)e * D + n + j]));
 }
 
 // out[r][d] = sum over slots in order of wts[r][k] * y[r * slots + k][d] (fp32, fma chain from 0).
@@ -384,9 +390,14 @@ void exl3x_gateup_epilogue_cuda(const at::Tensor& Z, const at::Tensor& pick, con
 void exl3x_down_epilogue_cuda(const at::Tensor& Z, const at::Tensor& pick, const at::Tensor& svh_d, at::Tensor& y,
                               int64_t rows, int64_t P, int64_t D, int64_t SK, int64_t slots, int64_t E) {
     dim3 grid((unsigned)(rows * slots), (unsigned)(D / 128));
-    down_epilogue_kernel<<<grid, 32, 0, at::cuda::getCurrentCUDAStream()>>>(
-        Z.data_ptr<float>(), pick.data_ptr<int>(), reinterpret_cast<const half*>(svh_d.data_ptr()),
-        y.data_ptr<float>(), (int)P, (int)D, (int)SK, (int)E);
+    if (y.scalar_type() == at::kBFloat16)
+        down_epilogue_kernel<__nv_bfloat16><<<grid, 32, 0, at::cuda::getCurrentCUDAStream()>>>(
+            Z.data_ptr<float>(), pick.data_ptr<int>(), reinterpret_cast<const half*>(svh_d.data_ptr()),
+            reinterpret_cast<__nv_bfloat16*>(y.data_ptr()), (int)P, (int)D, (int)SK, (int)E);
+    else
+        down_epilogue_kernel<float><<<grid, 32, 0, at::cuda::getCurrentCUDAStream()>>>(
+            Z.data_ptr<float>(), pick.data_ptr<int>(), reinterpret_cast<const half*>(svh_d.data_ptr()),
+            y.data_ptr<float>(), (int)P, (int)D, (int)SK, (int)E);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

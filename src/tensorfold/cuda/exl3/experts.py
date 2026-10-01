@@ -26,7 +26,7 @@ def _ext():
 
     here = Path(__file__).parent
     srcs = [str(here / f) for f in ("experts.cpp", "experts.cu", "experts_cb0.cu", "experts_cb1.cu", "experts_cb2.cu")]
-    return load(name="tensorfold_exl3_experts_v3", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
+    return load(name="tensorfold_exl3_experts_v4", sources=srcs, extra_cuda_cflags=["-O3", "-lineinfo"],
                 verbose=False)
 
 
@@ -178,7 +178,7 @@ class Scratch:
 
 def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Exl3RoutedExperts, s: Scratch,
            out: torch.Tensor | None, R: int, limit: float = math.inf, act_mode: int = ACT_F32,
-           group: bool = True) -> torch.Tensor:
+           group: bool = True, y_out: torch.Tensor | None = None) -> torch.Tensor:
     """Routed experts of R rows (picks >= E skipped): Y per slot, or ``out`` = the wts-weighted sum when ``wts``; no host sync."""
 
     ext = _ext()
@@ -199,8 +199,10 @@ def routed(x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor | None, ex: Ex
     ext.grouped(s.xd, s.xd, ex.down_ptr, ex.down_ptr, ex.down_k2, ex.down_k2, ids, s.count, members, tiles,
                 s.tile_count, s.z, 1, I, D, P, sk, slots, ex.cb, nt, w, pf, ex.k2_d[0], ex.k2_d[1])
     if wts is None:
-        ext.down_epilogue(s.z, pick, ex.svh_d, s.y, R, P, D, sk, slots, E)
-        return s.y[:P]
+        # ``y_out``: a caller's bf16 [P, D] rows, the fp32 values rounded once on the way out (no fp32 rows or copy)
+        y = s.y if y_out is None else y_out
+        ext.down_epilogue(s.z, pick, ex.svh_d, y, R, P, D, sk, slots, E)
+        return y[:P]
     if out is None:
         out = torch.empty((R, D), dtype=torch.float32, device=x.device)
     # the down epilogue and the combine in one launch (the same arithmetic in the same order as the two)
