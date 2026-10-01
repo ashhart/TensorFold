@@ -9,12 +9,11 @@ import subprocess
 import numpy as np
 import pytest
 
-from tensorfold.families.deepseek_v4.cuda.build import PIN, VENDOR, verify_sources
+from tensorfold.families.deepseek_v4.cuda.build import PIN
 from tensorfold.families.deepseek_v4.cuda.native import NativeError, NativeLibrary, NativeSession
 
 
 def test_pinned_cpu_library_iq2_donor_primitive():
-    verify_sources(VENDOR)
     path = os.environ.get("TENSORFOLD_TEST_CPU_LIBRARY")
     if not path:
         pytest.skip("set TENSORFOLD_TEST_CPU_LIBRARY to the separately built CPU ABI library")

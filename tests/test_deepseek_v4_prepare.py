@@ -92,7 +92,7 @@ def _base_tensors() -> list[FakeTensor]:
         FakeTensor(f"blk.{L}.ffn_down_shexp.weight", type_name="Q8_0", shape=(2048, 4096)),
         FakeTensor(f"blk.{L}.ffn_gate_exps.weight", type_name="IQ2_XXS", shape=(4096, 2048, 256)),
         FakeTensor(f"blk.{L}.ffn_up_exps.weight", type_name="Q2_K", shape=(4096, 2048, 256)),
-        FakeTensor(f"blk.{L}.ffn_down_exps.weight", type_name="Q8_0", shape=(2048, 4096, 256)),
+        FakeTensor(f"blk.{L}.ffn_down_exps.weight", type_name="Q2_K", shape=(2048, 4096, 256)),
     ]
 
 
@@ -200,11 +200,16 @@ def test_unsupported_quant_is_reported():
     assert any("quant" in e.lower() and "attn_q_a" in e for e in report.errors)
 
 
-def test_expert_quant_allowlist_includes_donor_types():
+@pytest.mark.parametrize("quant", ["IQ2_XXS", "Q2_K", "Q4_K"])
+def test_expert_quant_allowlist_includes_donor_types(quant):
     schema = schema_v1()
-    inv = FakeInventory(_base_tensors())
+    tensors = _base_tensors()
+    for tensor in tensors:
+        if "_exps.weight" in tensor.name:
+            tensors = _replace(tensors, tensor.name, quant, tensor.shape)
+    inv = FakeInventory(tensors)
     report = _report(schema, inv, make_arch())
-    assert report.errors == []  # IQ2_XXS, Q2_K, Q8_0 are donor-allowed
+    assert report.errors == []
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +356,7 @@ def _candidate(**overrides) -> dict:
 
 def test_provenance_pins_audited_0731_facts():
     assert PINNED.version == "1"
-    assert PINNED.checkpoint == "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+    assert PINNED.checkpoint == "DeepSeek-V4-Flash-0731"
     assert PINNED.vocab_size == 129280
     assert PINNED.tokenizer_type == "joyai-llm"
     assert PINNED.eos_tokens == ("<｜end▁of▁sentence｜>",)

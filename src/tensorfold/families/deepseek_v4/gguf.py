@@ -57,9 +57,9 @@ REQUIRED_ARCH = (
     "expert_feed_forward_length",
 )
 
-# Donor quant types the 0731 layout stores. Validation only checks the tensor's
-# own type name is in the spec's allowlist; the payload is left untouched.
-DONOR_QUANTS = frozenset({"IQ2_XXS", "Q2_K", "Q8_0", "F16", "F32", "I32"})
+# Routed expert types accepted by the pinned backend's tensor_is_routed_expert_type.
+# Dense projection types have their own allowlists below; payloads stay untouched.
+DONOR_QUANTS = frozenset({"IQ2_XXS", "Q2_K", "Q4_K"})
 
 
 class DeepSeekV4SchemaError(ValueError):
@@ -297,7 +297,7 @@ def validate_deepseek_v4_gguf_or_raise(
 # "joyai-llm", the vocabulary is 129280 entries, and EOS is the donor's
 # end-of-sentence spelling (also stored at token ID 1 in the actual GGUF).
 
-CHECKPOINT_0731 = "DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf"
+CHECKPOINT_0731 = "DeepSeek-V4-Flash-0731"
 VOCAB_SIZE_0731 = 129280
 TOKENIZER_TYPE_0731 = "joyai-llm"
 EOS_TOKENS_0731 = ("<｜end▁of▁sentence｜>",)

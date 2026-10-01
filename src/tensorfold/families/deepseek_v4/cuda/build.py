@@ -11,9 +11,8 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-PIN = "d183482b413ecd2e3b540b290e6497437e9fbb73"
-PACKAGE = Path(__file__).parent
-VENDOR = PACKAGE / "vendor/ds4"
+from .sources import PACKAGE, PIN, resolve_sources, verify_sources
+
 CUDA_UNITS = (
     "ds4_cuda.cu",
     "cuda/mmq/ds4_ggml_stubs.cu",
@@ -26,21 +25,16 @@ CUDA_UNITS = (
 )
 
 
-def verify_sources(source):
-    manifest = json.loads((source / "tensorfold-source.json").read_text())
-    if manifest["revision"] != PIN:
-        raise ValueError("unsupported ds4 native source revision")
-    for name, expected in manifest["sha256"].items():
-        if hashlib.sha256((source / name).read_bytes()).hexdigest() != expected:
-            raise ValueError(f"pinned native source changed: {name}")
-    return manifest
-
-
-def build(build_dir: Path, *, backend="cuda", jobs=2, source=VENDOR):
+def build(build_dir: Path, *, backend="cuda", jobs=2, source=None, offline=False):
     if backend not in ("cpu", "cuda") or not 1 <= int(jobs) <= 4:
         raise ValueError("backend must be cpu/cuda and jobs must be between 1 and 4")
-    source = Path(source).resolve()
-    build_dir = Path(build_dir).resolve()
+    selected = source if source is not None else os.environ.get("TENSORFOLD_DS4_SOURCE")
+    build_dir = Path(build_dir).expanduser().resolve()
+    if selected:
+        local = Path(selected).expanduser().resolve()
+        if build_dir == local or local in build_dir.parents:
+            raise ValueError("native build directory must be outside the selected source tree")
+    source = resolve_sources(source, offline=offline)
     if build_dir == source or source in build_dir.parents:
         raise ValueError("native build directory must be outside the pinned source tree")
     manifest = verify_sources(source)
@@ -140,8 +134,10 @@ def main():
     parser.add_argument("--build-dir", type=Path, required=True)
     parser.add_argument("--backend", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--ds4-source", type=Path, help="existing ds4 source tree or Git checkout; never modified")
+    parser.add_argument("--offline", action="store_true", help="refuse to fetch missing native sources")
     args = parser.parse_args()
-    print(build(args.build_dir, backend=args.backend, jobs=args.jobs))
+    print(build(args.build_dir, backend=args.backend, jobs=args.jobs, source=args.ds4_source, offline=args.offline))
 
 
 if __name__ == "__main__":

@@ -140,12 +140,30 @@ tensorfold serve /models/tensorfold-deepseek \
 ```
 
 After installation the same helper is available as `tensorfold-deepseek-build`.
+
+`--gguf` selects the user's model file; no filename is required. Checkpoint identity describes
+DeepSeek V4 Flash 0731, independent of quantization. The pinned native backend supports routed
+experts in IQ2_XXS, Q2_K and Q4_K; dense/support tensors must satisfy the schema's own type rules.
+Only the named mixed quant above has been qualified end to end here. Other compatible GGUFs still
+must pass header/schema, tokenizer and memory admission; larger quants may not fit beside companions.
+The ds4 commit pin controls build code, not the model or its quantization.
+
+A matching native library/build receipt is reused without acquiring sources. Otherwise the builder
+first reuses its verified source cache at `~/.cache/tensorfold/ds4/<revision>`. To supply an existing
+source tree or Git checkout, pass `--ds4-source /path/to/ds4` or set `TENSORFOLD_DS4_SOURCE`.
+Only the 42 required, hash-verified files are copied into the cache. If the working tree differs,
+the pinned commit is read from its local Git objects without modifying or fetching that checkout.
+When neither a cache nor selected local source is available, Git fetches the exact pinned revision
+once from the public ds4 repository. `--offline` refuses that fetch. Later builds use the cache;
+a changed/corrupt cache is rejected. Source acquisition requires Git; wheel construction/install
+remains offline. No model weights or tokenizers are fetched.
 It validates the GGUF header/schema and embedded tokenizer, builds a pinned native library and platform
 wheel in isolated directories, installs that wheel only in its invoking venv, and prepares `config.json`,
 `descriptor.json` and `build-ready.json`. The GGUF stays read-only; no model or tokenizer is downloaded.
 A selected external tokenizer is optional and must match the vocabulary and EOS.
 The library cache checks source, shim and library hashes before reuse. First native compilation is required;
-subsequent matching builds reuse it. The wheel contains native sources, attribution and the built library.
+subsequent matching builds reuse it. The wheel contains the source hash manifest, TensorFold shim, attribution and built library;
+the ds4 source tree is kept outside the checkout and wheel.
 
 Add `--preflight-only` to the helper command for header-only validation. It does not compile, install,
 create directories, load weights or allocate KV. Artifact validity is separate from current memory fit.
@@ -159,8 +177,8 @@ candidate startup does not automatically restart that service.
 
 ### Native boundary and serving
 
-The adapter packages unchanged MIT-licensed ds4 sources pinned at
-`d183482b413ecd2e3b540b290e6497437e9fbb73`. `cuda/vendor/ds4/tensorfold-source.json` records each file's
+The adapter builds against unchanged MIT-licensed ds4 sources pinned at
+`d183482b413ecd2e3b540b290e6497437e9fbb73`. `cuda/ds4-source.json` records each required file's
 SHA-256; notices and license copies retain the ggml/ds4 attribution. CUDA arithmetic, routing,
 hyper-connections and packed-cache math are reused from that implementation.
 
@@ -224,8 +242,10 @@ measurement fell from 8.44 to 0.70 ms per sampled token without changing the rec
 Focused CPU tests cover GGUF wire format and malformed input, real schema/provenance, stored Q2/Q8
 vectors, a pinned IQ2 primitive, option refusal before allocation, insufficient-memory sentinels,
 callback/EOS/cancellation/lifetime, shared HTTP streaming/tools, shutdown and build/preflight boundaries.
-Packaged-source hashes are checked without depending on another local donor checkout. The focused
-suite passes 156 tests; two MLX GPU tests are excluded on the CUDA host. One opt-in GPU regression
+Native input hashes are checked against the packaged manifest. Cache/local-source reuse and
+first acquisition are covered with a local Git fixture, without network or model allocation. The original qualification
+covered 156 portable checks; the external-source/model-selection update passed all 41 affected checks.
+Two MLX GPU tests are excluded on the CUDA host. One opt-in GPU regression
 covers the original continuation failure, sampled output, an exact chunk boundary, changed history and
 a longer prefix. All four fresh/resumed comparisons passed with cache reuse. Local ASan/UBSan and leak
 checks found no issues in the tested null/bounds, allocation-failure, packed-input and cleanup paths;
@@ -267,7 +287,7 @@ Re-run them after changing hardware, kernels, model or serving settings before p
 ### Contributor / PR notes
 
 Family adapters remain under `families/deepseek_v4/cuda/`; shared HTTP and sampling changes are small
-hooks/optimizations. The pinned donor tree is excluded from formatting and must remain byte-identical.
+hooks/optimizations. The external native source cache must match every hash in the packaged manifest.
 Native ABI changes require matching shim/library receipts; Python-only changes reuse CUDA objects.
 TensorFold 0.6.0's Apache-2.0 license is retained, with the donor's MIT notices packaged separately.
 

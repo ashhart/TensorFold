@@ -81,3 +81,22 @@ def test_aligned_budget_adds_dense_q8_but_not_replaced_expert_weights():
     assert b.aligned_artifact_extra_bytes([dense, iq2, q2]) == dense.size
     dense.name = "token_embd.weight"
     assert b.aligned_artifact_extra_bytes([dense, iq2, q2]) == 0
+
+
+def test_verified_library_reused_without_source_acquisition(tmp_path):
+    import json
+
+    library = tmp_path / "libtensorfold_ds4.so"
+    library.write_bytes(b"verified library fixture")
+    receipt = {
+        "abi": 2,
+        "revision": b.PIN,
+        "backend": "cuda",
+        "cuda_arch": "sm_121a",
+        "source_sha256": b.source_manifest()["sha256"],
+        "shim_sha256": b.digest(b.PACKAGE / "native/shim.c"),
+        "library_sha256": b.digest(library),
+    }
+    (tmp_path / "native-build.json").write_text(json.dumps(receipt))
+    with patch.object(b, "build", side_effect=AssertionError("source acquisition reached")):
+        assert b.native_library(args(tmp_path, "--native-library", str(library), "--offline")) == library

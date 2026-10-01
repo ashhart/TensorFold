@@ -1,4 +1,4 @@
-"""Offline candidate build/install and header-only preflight for the existing GGUF."""
+"""Candidate build/install with cached native sources and header-only preflight."""
 
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ from tensorfold.families.deepseek_v4.gguf import (
 )
 from tensorfold.gguf import parse_gguf_tensors
 
-from .build import PACKAGE, PIN, VENDOR, build, verify_sources
+from .build import PACKAGE, PIN, build
+from .sources import source_manifest
 
 
 def digest(path):
@@ -153,7 +154,7 @@ def inspect_inputs(args):
 def native_library(args):
     directory = (args.native_library.parent if args.native_library else args.build_dir).expanduser().resolve()
     output = args.native_library.expanduser().resolve() if args.native_library else directory / "libtensorfold_ds4.so"
-    manifest = verify_sources(VENDOR)
+    manifest = source_manifest()
     receipt_path = directory / "native-build.json"
     if output.is_file() and receipt_path.is_file():
         receipt = json.loads(receipt_path.read_text())
@@ -169,7 +170,7 @@ def native_library(args):
             return output
     if args.native_library:
         raise ValueError("selected native library lacks a matching source/shim/library build receipt")
-    return build(directory, backend="cuda", jobs=args.jobs)
+    return build(directory, backend="cuda", jobs=args.jobs, source=args.ds4_source, offline=args.offline)
 
 
 def make_wheel(source, library, destination):
@@ -305,6 +306,8 @@ def parser():
     p.add_argument("--jobs", type=int, default=2)
     p.add_argument("--build-dir", type=Path, default=Path.home() / ".cache/tensorfold/deepseek-native-cuda")
     p.add_argument("--native-library", type=Path)
+    p.add_argument("--ds4-source", type=Path, help="reuse an existing ds4 tree or Git checkout; never modified")
+    p.add_argument("--offline", action="store_true", help="refuse to fetch missing native sources")
     p.add_argument("--preflight-only", action="store_true")
     return p
 
