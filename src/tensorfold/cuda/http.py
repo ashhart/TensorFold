@@ -201,10 +201,15 @@ def serve(app: App, host: str, port: int) -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _terminate)
-    server = Server((host, port), make_handler(app))
+    server = None
     try:
+        server = Server((host, port), make_handler(app))
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
+        if server is not None:
+            server.server_close()
+        close = getattr(app, "close", None)
+        if close is not None:
+            close()

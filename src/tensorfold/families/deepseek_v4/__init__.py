@@ -90,6 +90,13 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
                           mtp_drafts=mtp_drafts, **options)
 
 
+def __getattr__(name: str) -> Any:
+    if name == "CUDA_APP":
+        from .cuda.app import DeepSeekApp
+        return DeepSeekApp
+    raise AttributeError(name)
+
+
 def engine_settings(model: Any) -> dict[str, Any]:
     """Rows a round verifies at most: the widest window checked exact at load."""
 

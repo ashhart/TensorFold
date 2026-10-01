@@ -51,8 +51,9 @@ Candidate `config.json` must contain `model_type: deepseek_v4`,
 Existing preparation supplies the first three. S05 supplies the built absolute
 library path. Family checking also requires the prepared provenance descriptor.
 The engine's native session exposes `encode(text, rendered=...)` and
-`token_text(id)` for S04's embedded tokenizer and shared HTTP integration.
-These milestones remain required before serving the real model.
+`token_text(id)` to the implemented embedded-tokenizer/shared-HTTP adapter
+(see deepseek-v4-serving.md). Capacity admission remains required before loading
+the real model, followed by actual device/coexistence qualification.
 
 ## Verification performed
 

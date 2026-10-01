@@ -61,18 +61,16 @@ class App:
     """Serve one engine with sampling and reply-length defaults for requests that omit them."""
 
     reads_ignore_eos = False            # True where the engine reads ``ignore_eos`` itself; a ``stop_eos`` engine is given it
+    parse_tool_calls = staticmethod(parse_tool_calls)
 
     def __init__(self, engine, model_dir: Path, served: str, *, default_thinking: bool = False,
                  sampling: dict[str, Any] | None = None, max_tokens: int = 4096,
                  context_window: int | None = None, reasoning_effort: str | None = None, thinking_budget: int = 0):
-        from tokenizers import Tokenizer
-
         self.engine = engine
         self.vision = getattr(engine, "vision", None)
         self.served = served
         self.model_dir = Path(model_dir)
-        self.tok = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
-        self.template = ChatTemplate(model_dir)
+        self.tok, self.template = self._tokenizer_template(self.model_dir)
         self.default_thinking = default_thinking
         self.reasoning_effort, self.thinking_budget = reasoning_effort, int(thinking_budget)   # the Mac's defaults
         self.sampling = {"temperature": 1.0, "top_k": 20, "top_p": 0.95, **(sampling or {})}
@@ -82,6 +80,14 @@ class App:
         if self.context_window < 0:
             raise ValueError("context_window must be 0 or a positive token count")
         self.turns = Turns()                # one request at a time where the engine decodes one
+
+    def _tokenizer_template(self, model_dir):
+        from tokenizers import Tokenizer
+        return Tokenizer.from_file(str(model_dir / "tokenizer.json")), ChatTemplate(model_dir)
+
+    def _tool_content(self, policy, answer, *, finished):
+        return (policy.content(answer, finished=finished) if policy.single
+                else hide_tool_calls(answer, finished=finished))
 
     def _check_fields(self, body: dict[str, Any]) -> str | None:
         import inspect
@@ -283,8 +289,7 @@ class App:
             else:
                 reasoning, answer = "", raw
             if tools:
-                answer = (policy.content(answer, finished=finished) if policy.single
-                          else hide_tool_calls(answer, finished=finished))
+                answer = self._tool_content(policy, answer, finished=finished)
             return reasoning, answer
 
         def on_tokens(new: list[int]) -> bool:
@@ -385,7 +390,7 @@ class App:
             final["reasoning_content"] = reasoning[sent["reasoning"]:]
         text = stops.visible(self.tok.decode([t for t in out if t not in ends], skip_special_tokens=False))
         raw_answer = split_thinking(text, finished=True)[1] if chat and thinking else text
-        content, calls = parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
+        content, calls = self.parse_tool_calls(raw_answer, tools, max_calls=policy.max_calls) if tools else (answer, None)
         content = policy.content(content) if tools else content
         tail = content[sent["content"]:] if content.startswith(answer[:sent["content"]]) else ""
         if tail:

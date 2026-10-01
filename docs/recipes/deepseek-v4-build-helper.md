@@ -26,8 +26,9 @@ the source checkout or rebuilds the live donor.
 `--tokenizer-dir` is optional. When supplied, its local tokenizer JSON files
 must parse and match embedded vocabulary size/EOS ID; files are copied to the
 candidate with recorded hashes. Default `tokenizer_backend=ds4` uses the GGUF's
-embedded vocabulary through the native tokenizer. S04 supplies shared chat/tool
-serving integration; this helper does not claim that step is done.
+embedded vocabulary through the native tokenizer. The family serving adapter
+connects that tokenizer to shared chat/tool handling; real-model qualification
+remains separate (see deepseek-v4-serving.md).
 
 ## Read-only preflight
 
