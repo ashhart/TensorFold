@@ -33,6 +33,12 @@ class PromptBlocks:
                                         reasoning_effort=effort, add_generation_prompt=False,
                                         late_system=self.late_system)
         history_len = len(history) if 0 < len(history) < len(prompt) and prompt[: len(history)] == history else 0
+        if not history_len and len(prompt) > 1 and history == prompt:
+            # No generation suffix: the reply continues the model's own turn (Gemma 4 after a tool result).
+            # Without a boundary no checkpoint lands near the end of the prompt, and the next step re-reads the
+            # conversation from the last turn start; with thinking on, the reply's thought block also keeps the
+            # finished-reply cache from matching. One token short of the end, the prompt is still all history.
+            history_len = len(prompt) - 1
         return prompt, history_len
 
     def system_prefix_len(
