@@ -20,7 +20,8 @@ from tensorfold.cuda.streams import Stream, next_fill
 from .serial import MAX_ROWS, SerialEngine
 
 ADMIT, FILL, ROUND, DONE = 1, 2, 3, 4      # rank 0's messages
-ROWS = 16                                  # a round's rows at most (above it, kernels switch to the prompt path)
+from .serial import PROMPT_ROWS as ROWS
+
 SAMPLING_WORDS = 10
 
 

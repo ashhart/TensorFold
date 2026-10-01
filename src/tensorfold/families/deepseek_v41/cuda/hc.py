@@ -18,7 +18,8 @@ NB = 16          # K blocks of the 24-mix projection (20,480 / 16 = 1,280 column
 SUB = 128        # columns a partial step takes
 CHUNK = 1024     # hidden columns a finish/post step takes (5,120 = 5 chunks)
 FUSED_NB, FUSED_SUBK, FUSED_WARPS = 32, 128, 8   # post_pre's mix K blocks (prompt only), step, warps
-PROMPT_ROWS = 16 # above this a call is a prompt chunk (blocked mix partials); up to it, per-row arithmetic
+# decode/verify rows at most (TF_DSV41_DECODE_ROWS): above, a prompt chunk (blocked mix partials); up to it, per row
+PROMPT_ROWS = int(__import__("os").environ.get("TF_DSV41_DECODE_ROWS") or 32)
 
 
 @triton.jit

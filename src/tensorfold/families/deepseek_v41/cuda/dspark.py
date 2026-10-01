@@ -35,12 +35,15 @@ class DSpark:
             raise ValueError(f"DSpark drafts 1..{c.dspark_block_size} tokens a round, got {tokens}")
         self.N = tokens
         self.dev = eng.dev
-        from .serial import RING
+        from .serial import DRING, RING
 
-        self.ring = RING
-        # every stream slot's context rings side by side (the engine's slots); ``swa`` is the current slot's
+        self.ring = DRING
+        # every stream slot's decode context rings side by side (the engine's slots; ``swa`` is the current slot's),
+        # and the prompt chunks' staging rings (the engine copies a slot's window in and out around them)
         S = eng.slots
-        self.swa_big = [torch.zeros((S * RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.dw.layers]
+        self.swa_big = [torch.zeros((S * DRING, c.head_dim), dtype=BF, device=self.dev) for _ in self.dw.layers]
+        self.stage = [torch.zeros((RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.dw.layers]
+        self.stage_ring = RING
         self.slot = eng.slot
         self.g_base = torch.zeros((1,), dtype=torch.long, device=self.dev)   # the drafting stream's first ring row
         self.scratch = [ex3.Scratch(b.moe.experts, 8, c.dspark_num_experts_per_tok) for b in self.dw.layers]
@@ -60,7 +63,7 @@ class DSpark:
             t.zero_()
 
     # -- context ----------------------------------------------------------------------------------------------
-    def context(self, taps: list[torch.Tensor], pos: torch.Tensor, off=0) -> None:
+    def context(self, taps: list[torch.Tensor], pos: torch.Tensor, off=0, static: bool = True) -> None:
         """Store the draft blocks' context keys for target rows at ``pos`` (taps: stream means [R, D] each); ``off``:
         each row's stream's first ring row (a tensor for decode rows of several streams, else the slot's)."""
 
@@ -70,7 +73,10 @@ class DSpark:
         for j, block in enumerate(dw.layers):
             a = block.attn
             kv = K.rmsnorm(a.wkv(main_x), a.kv_norm, c.rms_norm_eps)
-            self.swa_big[j].index_copy_(0, off + pos % self.ring, K.rope(kv, pos, cos, sin))
+            if static:
+                self.swa_big[j].index_copy_(0, off + pos % self.ring, K.rope(kv, pos, cos, sin))
+            else:                                                   # a prompt chunk: the staging rings
+                self.stage[j].index_copy_(0, pos % self.stage_ring, K.rope(kv, pos, cos, sin))
 
     # -- one drafting pass ------------------------------------------------------------------------------------
     def draft(self, anchor: torch.Tensor, P: torch.Tensor) -> torch.Tensor:

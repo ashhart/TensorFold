@@ -50,7 +50,7 @@ def available_bytes() -> int:
     return torch.cuda.mem_get_info()[0]
 
 
-SLOT_BYTES = 40 * 4096 * 512 * 2 + 3 * 4096 * 1024 * 4 + 3 * 4096 * 512 * 2   # a stream slot's rings (~230 MB)
+SLOT_BYTES = 40 * 256 * 512 * 2 + 3 * 256 * 1024 * 4 + 3 * 256 * 512 * 2   # a stream slot's decode rings (~15 MB)
 CACHE_BYTES = _cache_bytes()     # a stream's per-token caches (compressed entries + indexer keys)
 
 
@@ -161,7 +161,9 @@ class Dsv41Engine:
                 self.e.enable_dspark(DRAFTS)
             self.e.capture(1)
             # verify windows of one stream (1 + drafts rows); with --parallel, any round of up to 16 rows
-            top = 16 if self.streams > 1 else (DRAFTS + 1 if drafts else 1)
+            from .serial import PROMPT_ROWS
+
+            top = PROMPT_ROWS if self.streams > 1 else (DRAFTS + 1 if drafts else 1)
             for rows in range(2, top + 1):
                 self.e.capture(rows)
             if drafts:
@@ -193,7 +195,8 @@ class Dsv41Engine:
             self.multi.calibrate(self._gather_ints)
             if rank == 0:
                 curve = " ".join(f"{v:.0f}" for v in self.multi.costs)
-                print(f"[tensorfold] verify ms by rows 1..16: {curve}; a draft {self.multi.draft_ms:.1f} ms", flush=True)
+                print(f"[tensorfold] verify ms by rows 1..{len(self.multi.costs)}: {curve}; a draft "
+                      f"{self.multi.draft_ms:.1f} ms", flush=True)
             if rank == 0:
                 self.scheduler = Scheduler(self.multi, max_streams=self.streams)
                 print(f"[tensorfold] {self.streams} concurrent streams of up to {cap} tokens each", flush=True)

@@ -31,7 +31,9 @@ BF, F32 = torch.bfloat16, torch.float32
 def triton_cdiv(a: int, b: int) -> int:
     return -(-a // b)
 MAX_ROWS = 2048              # rows of one call (prompt chunks); every expert's weights are read once a chunk
-RING = 4096                  # window and compressor-raw rings: a 2048-row chunk plus the 127-token window
+RING = 4096                  # prompt staging rings: a 2048-row chunk plus the 127-token window
+DRING = 256                  # a stream slot's decode rings: the 128-token window, a round's rows, margin
+WINDOW_ROWS = 130            # ring rows a stream carries between prefill and decode (window + compressor pair)
 
 
 class Comm:
@@ -134,7 +136,8 @@ PROMPT_MTP = [2, 2]          # 16-row member tiles sharing one weight decode
 _Z2 = None
 _ZB = None
 PROMPT_CFG = [1, 1]          # prompt expert kernel config for gate/up and down (experts_prompt.cu)
-PROMPT_ROWS = 16             # above this, expert calls size their member table to the busiest expert (host sync)
+# decode/verify rows at most (row-invariant kernels; a round of streams up to it); above: prompt chunks
+PROMPT_ROWS = int(os.environ.get("TF_DSV41_DECODE_ROWS") or 32)
 
 
 class RoundProfile:
@@ -381,8 +384,11 @@ class SerialEngine:
 
         if getattr(self, "state", None) is not None:
             st = self.state
-            for t in [*st.swa, *st.comp.values(), *st.raw.values(), *st.ik.values()]:
+            for t in [*st.comp.values(), *st.ik.values()]:
                 t.zero_()
+            a, b = self.slot * DRING, (self.slot + 1) * DRING
+            for t in [*self.big.swa, *self.big.raw.values()]:
+                t[a:b].zero_()
             st.ids.clear()
             if self.drafter is not None:
                 self.drafter.reset()
@@ -390,18 +396,22 @@ class SerialEngine:
         c, cap, S = self.c, self.cap, self.slots
         self.entries = {s_: cap // c.layer_ratios[s_] + 1 for s_ in c.kv_source_layer_ids}
         E = self.entries
+        # decode rings (DRING rows a slot) live per slot; prompt chunks run in one shared set of RING-row staging
+        # rings, the slot's window copied in before and out after (``_to_stage`` / ``_from_stage``)
         self.big = Caches(
             cap,
-            [torch.zeros((S * RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers],
+            [torch.zeros((S * DRING, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers],
             self._comp_pools(S, E),
-            {s_: torch.zeros((S * RING, 2 * c.head_dim), dtype=F32, device=self.dev)
+            {s_: torch.zeros((S * DRING, 2 * c.head_dim), dtype=F32, device=self.dev)
              for s_ in c.kv_source_layer_ids if c.layer_ratios[s_] == 2},
             {s_: self._entries(S * E[s_], c.index_head_dim, KV_FP8, keys=True) for s_ in c.kv_source_layer_ids},
         )
         big = self.big
-        self.views = [Caches(cap, [t[i * RING:(i + 1) * RING] for t in big.swa],
+        self.stage_swa = [torch.zeros((RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.w.layers]
+        self.stage_raw = {s_: torch.zeros((RING, 2 * c.head_dim), dtype=F32, device=self.dev) for s_ in big.raw}
+        self.views = [Caches(cap, self.stage_swa,
                              {k: t[i * E[k]:(i + 1) * E[k]] for k, t in big.comp.items()},
-                             {k: t[i * RING:(i + 1) * RING] for k, t in big.raw.items()},
+                             self.stage_raw,
                              {k: t[i * E[k]:(i + 1) * E[k]] for k, t in big.ik.items()}) for i in range(S)]
         self.state = self.views[self.slot]
 
@@ -464,8 +474,44 @@ class SerialEngine:
             self.step_rows(tokens)
             return self.graphs[R]["logits"]
         rows = self.engram_rows(tokens, raw)
-        return self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
-                         static=False, last_only=last_only)
+        self._to_stage(p0)
+        out = self.core(torch.tensor(tokens, device=self.dev), torch.arange(p0, p0 + R, device=self.dev), rows,
+                        static=False, last_only=last_only)
+        self._from_stage(p0 + R)
+        return out
+
+    def _ring_rows(self, p1: int):
+        """(positions, staging rows, slot decode rows) of the window ending before position ``p1``."""
+
+        n = min(p1, WINDOW_ROWS)
+        pos = torch.arange(p1 - n, p1, device=self.dev)
+        return pos % RING, self.slot * DRING + pos % DRING
+
+    def _to_stage(self, p0: int) -> None:
+        """The current slot's window (decode rings) into the staging rings, before a prompt chunk at ``p0``."""
+
+        if p0 == 0:
+            return
+        st_rows, dec_rows = self._ring_rows(p0)
+        for stage, dec in zip(self.stage_swa, self.big.swa):
+            stage.index_copy_(0, st_rows, dec[dec_rows])
+        for k, dec in self.big.raw.items():
+            self.stage_raw[k].index_copy_(0, st_rows, dec[dec_rows])
+        if self.drafter is not None:
+            for stage, dec in zip(self.drafter.stage, self.drafter.swa_big):
+                stage.index_copy_(0, st_rows, dec[dec_rows])
+
+    def _from_stage(self, p1: int) -> None:
+        """The staging rings' window back into the slot's decode rings, after a prompt chunk ending at ``p1``."""
+
+        st_rows, dec_rows = self._ring_rows(p1)
+        for stage, dec in zip(self.stage_swa, self.big.swa):
+            dec.index_copy_(0, dec_rows, stage[st_rows])
+        for k, dec in self.big.raw.items():
+            dec.index_copy_(0, dec_rows, self.stage_raw[k][st_rows])
+        if self.drafter is not None:
+            for stage, dec in zip(self.drafter.stage, self.drafter.swa_big):
+                dec.index_copy_(0, dec_rows, stage[st_rows])
 
     def read_rows(self, ids: list[int], p0: int, R: int, slot: int = 0) -> torch.Tensor:
         """Engram rows of positions p0 .. p0 + R - 1 of ``ids`` into pinned host buffer ``slot`` (uint8, host)."""
@@ -543,7 +589,7 @@ class SerialEngine:
                                             len(self.w.layers), static)
         X = hcf.post(f, X, post, comb)
         if self.drafter is not None:
-            self.drafter.context(self.taps, pos, self._sid * RING if static else self.slot * RING)
+            self.drafter.context(self.taps, pos, self._sid * DRING if static else 0, static=static)
         if last_only:
             X, pre = X[-1:].contiguous(), pre[-1:].contiguous()
         h = (pre[:, :, None] * X.float()).sum(1).to(BF)
@@ -679,7 +725,7 @@ class SerialEngine:
             dsp = self.drafter                                          # at this stream's position and ring
             dsp.g_anchor.fill_(ids[-1] if ids else 1000)
             dsp.g_P.fill_(P)
-            dsp.g_base.fill_(self.slot * RING)
+            dsp.g_base.fill_(self.slot * DRING)
             draft = replay_ms(dsp.graph.replay)
         mine = [replay_ms(verify(1))] + [draft + replay_ms(verify(k + 1)) for k in range(1, n + 1)]
         self._restore_rows(saved)
@@ -695,7 +741,7 @@ class SerialEngine:
 
         c = self.c
         pos = pos.to(self.dev).long()
-        ring = torch.unique(slot * RING + pos % RING)
+        ring = torch.unique(slot * DRING + pos % DRING)
         out = [(t, ring, t[ring].clone()) for t in self.big.swa]
         out += [(t, ring, t[ring].clone()) for t in self.big.raw.values()]
         for s_ in c.kv_source_layer_ids:
@@ -706,7 +752,7 @@ class SerialEngine:
                 out.append((t, ent, t.take(ent) if isinstance(t, K.Fp8Rows) else t[ent].clone()))
         if self.drafter is not None:
             dpos = pos if draft is None else torch.cat([pos, draft.to(self.dev).long()])
-            dring = torch.unique(slot * RING + dpos.clamp(min=0) % RING)
+            dring = torch.unique(slot * DRING + dpos.clamp(min=0) % DRING)
             out += [(t, dring, t[dring].clone()) for t in self.drafter.swa_big]
         return out
 
@@ -869,7 +915,7 @@ class SerialEngine:
         def kv_branch():
             kv = K.rmsnorm(a.wkv(x), a.kv_norm, eps)
             if static:                                                  # each row into its own stream's ring
-                self.big.swa[L].index_copy_(0, self._sid * RING + pos % RING, K.rope(kv, pos, cos, sin))
+                self.big.swa[L].index_copy_(0, self._sid * DRING + pos % DRING, K.rope(kv, pos, cos, sin))
             else:
                 st.swa[L].index_copy_(0, pos % RING, K.rope(kv, pos, cos, sin))
 
@@ -895,7 +941,7 @@ class SerialEngine:
                 idx = torch.where(idx >= 0, idx + (self._sid * self.entries[src]).int()[:, None], idx)
         if static:
             o = K.mqa(q, comp, idx, self.big.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin,
-                      sbase=self._sid * RING, ring=RING)
+                      sbase=self._sid * DRING, ring=DRING)
         else:
             o = K.mqa(q, comp, idx, st.swa[L], pos, a.sink, W, self.attnbuf, Dh ** -0.5, cos, sin)   # inverse-rotated
         groups = len(a.wo_a)
@@ -959,8 +1005,9 @@ class SerialEngine:
         else:
             gate = cw.wgate(x, out_dtype=F32)
             raw = self.big.raw[L] if static else st.raw[L]
-            roff = self._sid * RING if static else 0                    # the row's stream's ring
-            raw.index_copy_(0, roff + pos % RING, torch.cat([kv, gate], dim=1))
+            roff = self._sid * DRING if static else 0                   # the row's stream's ring
+            rs = DRING if static else RING
+            raw.index_copy_(0, roff + pos % rs, torch.cat([kv, gate], dim=1))
             if static:                                                  # write the group only when pos closes it
                 ends = pos
             else:
@@ -968,7 +1015,7 @@ class SerialEngine:
                 if not closing:
                     return
                 ends = torch.tensor(closing, device=self.dev)
-            pair = torch.stack([raw[roff + (ends - 1).clamp(min=0) % RING], raw[roff + ends % RING]], dim=1)
+            pair = torch.stack([raw[roff + (ends - 1).clamp(min=0) % rs], raw[roff + ends % rs]], dim=1)
             wts = torch.softmax(pair[..., c.head_dim:], dim=1)
             latent = K.rmsnorm((wts * pair[..., :c.head_dim]).sum(1), cw.norm, c.rms_norm_eps)
             start, slot = (ends // 2) * 2, ends // 2
@@ -1042,8 +1089,10 @@ class SerialEngine:
     @torch.no_grad()
     # -- kept prompt states (tensorfold.cuda.kv_pool) ----------------------------------------------------------
     def _window_slots(self, n: int) -> torch.Tensor:
-        win = min(n, self.c.sliding_window + 2)                 # the window rows and the compressor's open pair
-        return torch.arange(n - win, n, device=self.dev) % RING
+        """The current slot's decode-ring rows of the window ending before position ``n``."""
+
+        win = min(n, WINDOW_ROWS)                               # the window rows and the compressor's open pair
+        return self.slot * DRING + torch.arange(n - win, n, device=self.dev) % DRING
 
     def save_prefix(self, n: int) -> tuple[dict, int]:
         """The state after the first ``n`` committed tokens, copied out: per-position caches up to n, the rings' last
@@ -1054,9 +1103,9 @@ class SerialEngine:
         snap = {"n": n,
                 "comp": {s_: t[:n // c.layer_ratios[s_] + 1].clone() for s_, t in st.comp.items()},
                 "ik": {s_: t[:n // c.layer_ratios[s_] + 1].clone() for s_, t in st.ik.items()},
-                "swa": [t[slots] for t in st.swa],
-                "raw": {s_: t[slots] for s_, t in st.raw.items()},
-                "dswa": [t[slots] for t in self.drafter.swa] if self.drafter is not None else []}
+                "swa": [t[slots] for t in self.big.swa],
+                "raw": {s_: t[slots] for s_, t in self.big.raw.items()},
+                "dswa": [t[slots] for t in self.drafter.swa_big] if self.drafter is not None else []}
         tensors = [*snap["comp"].values(), *snap["ik"].values(), *snap["swa"], *snap["raw"].values(), *snap["dswa"]]
         return snap, sum(K.cache_nbytes(t) for t in tensors)
 
@@ -1067,7 +1116,7 @@ class SerialEngine:
         entries = sum((n // c.layer_ratios[s_] + 1) * (K.cache_nbytes(self.big.comp[s_][:1])
                                                          + K.cache_nbytes(self.big.ik[s_][:1]))
                       for s_ in c.kv_source_layer_ids)
-        win = min(n, c.sliding_window + 2)
+        win = min(n, WINDOW_ROWS)
         row = (sum(t.shape[1] * t.element_size() for t in self.big.swa)
                + sum(t.shape[1] * t.element_size() for t in self.big.raw.values())
                + (sum(t.shape[1] * t.element_size() for t in self.drafter.swa_big) if self.drafter else 0))
@@ -1091,12 +1140,12 @@ class SerialEngine:
             st.comp[s_][:t.shape[0]].copy_(t)
         for s_, t in snap["ik"].items():
             st.ik[s_][:t.shape[0]].copy_(t)
-        for live, saved in zip(st.swa, snap["swa"]):
+        for live, saved in zip(self.big.swa, snap["swa"]):
             live.index_copy_(0, slots, saved)
         for s_, t in snap["raw"].items():
-            st.raw[s_].index_copy_(0, slots, t)
+            self.big.raw[s_].index_copy_(0, slots, t)
         if self.drafter is not None:
-            for live, saved in zip(self.drafter.swa, snap["dswa"]):
+            for live, saved in zip(self.drafter.swa_big, snap["dswa"]):
                 live.index_copy_(0, slots, saved)
         st.ids[:] = list(ids[:n])
 
@@ -1112,7 +1161,7 @@ class SerialEngine:
         L = 0
         while L < n and ids[L] == prompt[L]:
             L += 1
-        if L < REUSE_MIN or len(ids) - L > RING - self.c.sliding_window - 2:
+        if L < REUSE_MIN or len(ids) - L > DRING - WINDOW_ROWS:     # decode went a ring past the window
             return 0
         return L
 
