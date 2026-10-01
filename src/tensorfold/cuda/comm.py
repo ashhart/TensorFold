@@ -9,7 +9,7 @@ import os
 
 import torch
 
-_DTYPES = {torch.float32: 7, torch.bfloat16: 9, torch.int32: 2, torch.int64: 4}
+_DTYPES = {torch.float32: 7, torch.bfloat16: 9, torch.int32: 2, torch.int64: 4, torch.uint8: 1}
 
 
 class _UniqueId(ctypes.Structure):

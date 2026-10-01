@@ -42,6 +42,7 @@ class Comm:
     def __init__(self, nccl=None) -> None:
         self.nccl = nccl
         self.world = nccl.world if nccl is not None else 1
+        self.rank = nccl.rank if nccl is not None else 0
         self.side = None
 
     def sum(self, partial: torch.Tensor) -> torch.Tensor:
@@ -115,7 +116,10 @@ class Caches:
 
 
 SKIP_READS = os.environ.get("TF_SKIP_READS") == "1"   # timing experiments: stale Engram rows (wrong output)
+SKIP_SHARED = os.environ.get("TF_SKIP_SHARED") == "1"  # timing experiments: no shared expert in decode (wrong output)
 STEP_READ_THREADS = int(os.environ.get("TF_STEP_THREADS") or "16")   # decode/verify Engram row reads (few rows)
+# decode/verify: each rank reads its share of a token's Engram rows and the graphs all-gather the bytes (same rows)
+SPLIT_READS = os.environ.get("TF_SPLIT_READS", "1") != "0"
 KV_FP8 = (os.environ.get("TF_DSV41_KV_FP8") or "1") == "1"   # compressed entries + indexer keys in fp8 (~1.8 KB a
 #   token instead of 3.2; long parity unchanged: NLL 1.676 / 1.631 / 1.613 at 8K / 24K / 40K vs bf16 1.674 / 1.630 / 1.612)
 BLOCKED_SELECT = True        # prompt chunks: segmented indexer top-k (no [rows, keys] fp32 matrix)
@@ -357,6 +361,11 @@ class SerialEngine:
         self.pool = None                                            # tensorfold.cuda.kv_pool.PrefixPool, when kept
         self.state = None
         self.split = c.engram_layer_ids[1]
+        n_cols, W = 3 * c.engram_n_heads, comm.world
+        W = W if SPLIT_READS and W > 1 and n_cols % W == 0 else 1
+        self.read_split = (W, n_cols // W)                  # (ranks sharing a row's reads, entries each)
+        r = comm.rank if W > 1 else 0
+        self.read_cols = slice(r * (n_cols // W), (r + 1) * (n_cols // W))
         self.tables_rope = {r: K.rope_tables(f, cap) for r, f in self.freqs.items()}
         self.attnbuf = K.AttnBuffers(K.FULL_ROWS, w.layers[0].attn.wq_b.n // c.head_dim, c.head_dim,   # prompt: _mqa_full
                                      c.index_topk + c.sliding_window, device=self.dev)
@@ -639,11 +648,13 @@ class SerialEngine:
         c = self.c
         n_rows = 3 * c.engram_n_heads
         row_bytes = c.engram_head_dim + c.engram_head_dim // 32
+        W, cols = self.read_split
         g = {"tok": torch.zeros((rows,), dtype=torch.long, device=self.dev),
              "pos": torch.zeros((rows,), dtype=torch.long, device=self.dev),
              "sid": torch.zeros((rows,), dtype=torch.long, device=self.dev),
-             "raw": [torch.zeros((rows, n_rows, row_bytes), dtype=torch.uint8, device=self.dev) for _ in range(2)],
-             "h_raw": torch.zeros((2, rows * n_rows, row_bytes), dtype=torch.uint8).pin_memory(),
+             # this rank's share of each row's table entries (all of them unless the reads are split)
+             "raw": [torch.zeros((rows * cols, row_bytes), dtype=torch.uint8, device=self.dev) for _ in range(2)],
+             "h_raw": torch.zeros((2, rows * cols, row_bytes), dtype=torch.uint8).pin_memory(),
              "h_next": torch.zeros((rows,), dtype=torch.long).pin_memory()}
         saved = self._save_rows(0, g["pos"])                            # capture replays write slot 0, position 0
         hd = c.engram_head_dim
@@ -651,6 +662,11 @@ class SerialEngine:
 
         def table(k):
             raw = g["raw"][k]
+            if W > 1:                                                   # every rank's share, in rank order
+                full = torch.empty((W, *raw.shape), dtype=torch.uint8, device=self.dev)
+                self.comm.nccl.all_gather(raw.view(-1), full.view(-1))
+                raw = full.view(W, rows, cols, row_bytes).transpose(0, 1)
+            raw = raw.reshape(rows, n_rows, row_bytes)
             return E.dequant(raw[..., :hd], raw[..., hd:])
 
         def run_a0():
@@ -824,11 +840,12 @@ class SerialEngine:
         g["pos"].copy_(torch.tensor(pos), non_blocking=True)
         g["sid"].copy_(torch.tensor(sid), non_blocking=True)
         g["a0"].replay()
-        self.tables.gather(h[:, 0, :].reshape(1, -1), out=g["h_raw"][:1], layers=[0], threads=threads)
+        mine = self.read_cols
+        self.tables.gather(h[:, 0, mine].reshape(1, -1), out=g["h_raw"][:1], layers=[0], threads=threads)
         t2 = time.perf_counter()
         g["raw"][0].copy_(g["h_raw"][0].view_as(g["raw"][0]), non_blocking=True)
         g["a1"].replay()
-        self.tables.gather(h[:, 1, :].reshape(1, -1), out=g["h_raw"][1:], layers=[1], threads=threads)
+        self.tables.gather(h[:, 1, mine].reshape(1, -1), out=g["h_raw"][1:], layers=[1], threads=threads)
         t3 = time.perf_counter()
         g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
         g["b"].replay()
@@ -866,14 +883,14 @@ class SerialEngine:
         h = E.hashes(np.array(st.ids[start:]), self.tmap, self.layout, c.engram_pad_token_id)[-R:]   # [R, 2, 24]
         rp and rp.mark("v.hash")
         if not SKIP_READS:                                              # (timing experiments only)
-            self.tables.gather(h[:, 0, :].reshape(1, -1), out=g["h_raw"][:1], layers=[0],     # overlaps layer 0
+            self.tables.gather(h[:, 0, self.read_cols].reshape(1, -1), out=g["h_raw"][:1], layers=[0],  # ~ layer 0
                                threads=STEP_READ_THREADS)
         rp and rp.mark("v.gather0")
         g["raw"][0].copy_(g["h_raw"][0].view_as(g["raw"][0]), non_blocking=True)
         g["a1"].replay()
         rp and rp.mark("v.a1")
         if not SKIP_READS:
-            self.tables.gather(h[:, 1, :].reshape(1, -1), out=g["h_raw"][1:], layers=[1],     # overlaps layers 1-13
+            self.tables.gather(h[:, 1, self.read_cols].reshape(1, -1), out=g["h_raw"][1:], layers=[1],  # ~ 1-13
                                threads=STEP_READ_THREADS)
         rp and rp.mark("v.gather1")
         g["raw"][1].copy_(g["h_raw"][1].view_as(g["raw"][1]), non_blocking=True)
@@ -1050,6 +1067,8 @@ class SerialEngine:
             return ex3.routed(x.contiguous(), pick, w, m.experts, scratch, None, R, limit=limit)
 
         if R <= PROMPT_ROWS:                                        # the whole shared expert beside the routed ones
+            if SKIP_SHARED:
+                return self.comm.partials(routed_rows())
             routed, shared = self.par(routed_rows, lambda: m.shared[2](shared_act(), out_dtype=F32))
             return self.comm.partials(routed + shared)
         pick, w = route()
