@@ -160,6 +160,10 @@ class Dsv41Engine:
 
             self.multi = MultiDecoder(self.e, self._share, rank=rank, drafts=DRAFTS if drafts else 0)
             self.multi.model_dir = self.model_dir
+            self.multi.calibrate(self._gather_ints)
+            if rank == 0:
+                curve = " ".join(f"{v:.0f}" for v in self.multi.costs)
+                print(f"[tensorfold] verify ms by rows 1..16: {curve}; a draft {self.multi.draft_ms:.1f} ms", flush=True)
             if rank == 0:
                 self.scheduler = Scheduler(self.multi, max_streams=self.streams)
                 print(f"[tensorfold] {self.streams} concurrent streams of up to {cap} tokens each", flush=True)

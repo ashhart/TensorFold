@@ -57,6 +57,12 @@ class MultiDecoder:
                  drafts: int = 3, step: int = MAX_ROWS) -> None:
         self.e, self.share, self.rank = e, share, rank
         self.drafts = drafts if e.drafter is not None else 0
+        import os
+
+        if os.environ.get("TF_MULTI_DRAFTS"):                    # tuning: drafts a stream in concurrent rounds
+            self.drafts = min(self.drafts, int(os.environ["TF_MULTI_DRAFTS"]))
+        self.prof = {"rounds": 0, "draft": 0.0, "verify": 0.0, "rows": 0, "streams": 0} \
+            if os.environ.get("TF_MULTI_PROF") else None
         self.step_rows = step                      # prompt rows a fill step takes while other streams decode
         self.free = list(range(e.slots))
         self.streams: dict[int, Stream] = {}       # decoding, by sid
@@ -65,6 +71,102 @@ class MultiDecoder:
         self.eos = (int(e.c.eos_token_id),)
         self.broken: Exception | None = None
         self.model_dir = None                      # rank 1 compiles a request's grammar from it
+        self.costs: list[float] | None = None      # verify ms by rows (calibrate)
+        self.draft_ms = 0.0
+        self.overhead = 2.0                        # a round's host ms besides the forward and drafts
+        self.prior = [0.6] * max(self.drafts, 1)   # acceptance by draft position, over every stream (new ones start here)
+
+    # -- costs and draft allocation -------------------------------------------------------------------------------
+    @torch.no_grad()
+    def calibrate(self, gather: Callable[[list[int]], list[list[int]]]) -> None:
+        """Verify ms for 1..ROWS rows of distinct tokens spread over the slots, and a draft's ms (the slower rank's,
+        both ranks call this together). Caches written here are reset before any stream uses its slot."""
+
+        import random
+
+        e = self.e
+        rng = random.Random(0)
+        ms = []
+        for R in range(1, ROWS + 1):
+            if R not in e.graphs:
+                ms.append(ms[-1] if ms else 30.0)
+                continue
+            g = e.graphs[R]
+            g["tok"].copy_(torch.tensor([rng.randrange(1000, 100000) for _ in range(R)]))
+            g["pos"].copy_(torch.arange(R) + 200)
+            g["sid"].copy_(torch.arange(R) % e.slots)
+            best = float("inf")
+            for _ in range(4):
+                torch.cuda.synchronize()
+                t = time.perf_counter()
+                g["a0"].replay(), g["a1"].replay(), g["b"].replay()
+                torch.cuda.synchronize()
+                best = min(best, time.perf_counter() - t)
+            ms.append(1e3 * best)
+        draft = 0.0
+        if self.drafts:
+            best = float("inf")
+            for _ in range(4):
+                torch.cuda.synchronize()
+                t = time.perf_counter()
+                e.drafter.propose(rng.randrange(1000, 100000), 300)
+                best = min(best, time.perf_counter() - t)
+            draft = 1e3 * best
+        both = gather([int(1e3 * v) for v in ms] + [int(1e3 * draft)])
+        worst = [max(a, b) / 1e3 for a, b in zip(*both)]
+        self.costs, self.draft_ms = worst[:ROWS], worst[ROWS]
+        for slot in range(e.slots):                          # the timing rows wrote every slot's caches
+            e.select_slot(slot)
+            e.reset()
+        e.select_slot(0)
+
+    def _expected(self, acc: list[float], k: int) -> float:
+        total, run = 1.0, 1.0
+        for j in range(k):
+            run *= acc[j]
+            total += run
+        return total
+
+    def _allocate(self, live: list[Stream]) -> list[int]:
+        """Drafts a stream this round: one at a time to the stream whose next draft raises the round's expected
+        tokens per ms the most, while any does (a draft is a verify row and, a stream's first, a drafting pass)."""
+
+        ks = [0] * len(live)
+        caps = []
+        for s in live:
+            room = self.e.limit - len(self.e.views[s.slot].ids) - 1
+            ok = s.draft and s.constraint is None and self.drafts
+            caps.append(max(0, min(self.drafts, room, s.count - len(s.out) - 1)) if ok else 0)
+        if not any(caps) or self.costs is None:
+            return ks
+        rows, drafting = len(live), 0
+        tokens = float(len(live))
+        rate = tokens / (self.costs[rows - 1] + self.overhead)
+        while rows < ROWS:
+            best = None
+            for i, s in enumerate(live):
+                if ks[i] >= caps[i]:
+                    continue
+                gain = self._expected(s.acc, ks[i] + 1) - self._expected(s.acc, ks[i])
+                cost = self.costs[rows] + self.overhead + (drafting + (ks[i] == 0)) * self.draft_ms
+                r = (tokens + gain) / cost
+                if r > rate and (best is None or r > best[0]):
+                    best = (r, i, gain)
+            if best is None:
+                break
+            rate, i, gain = best
+            drafting += ks[i] == 0
+            ks[i] += 1
+            tokens += gain
+            rows += 1
+        return ks
+
+    def _learn(self, s: Stream, k: int, m: int) -> None:
+        a = 0.15
+        for j in range(min(k, m + 1)):                     # positions after the first rejection are unobserved
+            hit = 1.0 if j < m else 0.0
+            s.acc[j] = (1 - a) * s.acc[j] + a * hit
+            self.prior[j] = (1 - a / 4) * self.prior[j] + a / 4 * hit
 
     # -- bookkeeping --------------------------------------------------------------------------------------------
     def live(self) -> int:
@@ -101,6 +203,7 @@ class MultiDecoder:
         self._queue(s)
 
     def _queue(self, s: Stream) -> None:
+        s.acc = list(self.prior)
         s.slot = self.free.pop(0)
         s.pos = -1                                 # prompt tokens prefilled so far (-1: not started)
         self.filling.append(s)
@@ -162,13 +265,7 @@ class MultiDecoder:
     def _plan(self, live: list[Stream]) -> list[tuple[int, int]]:
         """(sid, drafts) a stream: drafts while the round's rows fit (none for a grammar's stream yet)."""
 
-        each = max(0, min(self.drafts, ROWS // max(len(live), 1) - 1))
-        plan = []
-        for s in live:
-            room = self.e.limit - len(self.e.views[s.slot].ids) - 1
-            k = 0 if (not s.draft or s.constraint is not None) else max(0, min(each, room, s.count - len(s.out) - 1))
-            plan.append((s.sid, k))
-        return plan
+        return [(s.sid, k) for s, k in zip(live, self._allocate(live))]
 
     @torch.no_grad()
     def round(self) -> list[Stream]:
@@ -194,6 +291,7 @@ class MultiDecoder:
         e = self.e
         try:
             rows, spans = [], []
+            t0 = time.perf_counter()
             for sid, k in plan:
                 s = self.streams[sid]
                 pending = s.out[-1]
@@ -205,7 +303,19 @@ class MultiDecoder:
                     s.constraint.advance([pending])
                 spans.append((len(rows), len(drafts) + 1, len(e.views[s.slot].ids)))
                 rows += [(s.slot, t) for t in [pending, *drafts]]
+            t1 = time.perf_counter()
             logits, greedy = e.step_multi(rows)
+            if self.prof is not None and self.rank == 0:
+                p = self.prof
+                p["rounds"] += 1
+                p["draft"] += t1 - t0
+                p["verify"] += time.perf_counter() - t1
+                p["rows"] += len(rows)
+                p["streams"] += len(plan)
+                if p["rounds"] % 50 == 0:
+                    n = p["rounds"]
+                    print(f"[multi] {n} rounds: draft {1e3 * p['draft'] / n:.1f} ms, verify {1e3 * p['verify'] / n:.1f} ms, "
+                          f"{p['rows'] / n:.1f} rows, {p['streams'] / n:.1f} streams a round", flush=True)
             news = []
             for (sid, k), (r0, nrows, p0) in zip(plan, spans):
                 s = self.streams[sid]
@@ -221,6 +331,8 @@ class MultiDecoder:
                 while m < len(drafts) and drafts[m] == target[m]:
                     m += 1
                 del e.views[s.slot].ids[p0 + 1 + m:]           # rejected rows: overwritten later
+                if k:
+                    self._learn(s, k, m)
                 if s.constraint is not None and m:
                     s.constraint.advance(drafts[:m])
                 s.counted(nrows)
