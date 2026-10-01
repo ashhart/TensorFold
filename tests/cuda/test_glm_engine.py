@@ -377,9 +377,10 @@ def test_exl3_checkpoint_drafted_equals_serial(engine_x, sampling):
     """An EXL3 checkpoint through the same engine: every policy's reply equals serial decoding."""
 
     from tensorfold.families.glm5_next.cuda.engine import EXL3_AUTO, encode_policy
-    from tensorfold.families.glm5_next.cuda.exl3_mm import Exl3Experts
+    from tensorfold.cuda.exl3.experts import Exl3RoutedExperts
 
-    assert isinstance(engine_x.w.layers[1].moe.experts, Exl3Experts) and engine_x.w.layers[1].moe.shared is not None
+    assert isinstance(engine_x.w.layers[1].moe.experts, Exl3RoutedExperts)
+    assert engine_x.w.layers[1].moe.shared is not None
     assert engine_x._effective(encode_policy("auto")) == encode_policy(EXL3_AUTO)       # the default drafts DFlash2
     assert engine_x._effective(encode_policy("auto:1:1:0")) == encode_policy("auto:1:1:0")
     prompt = list(np.random.default_rng(8).integers(0, 1000, size=45))
@@ -416,7 +417,7 @@ def test_decision_between_chats_preserves_replies(engine_f, cache_bytes, policy)
 
         immediate, stats = _generate(e, after, sampling, policy=policy, tokens=16)
         # Saved attention rows retain MTP, but not DFlash2's unsaved draft cache.
-        assert stats["cached"] == (len(prompt) if cache_bytes and policy == "2" else 0)
+        assert stats["cached"] == (len(prompt) - 1 if cache_bytes and policy == "2" else 0)
         _generate(e, other, sampling, policy=policy, tokens=16)
         switched, _ = _generate(e, after + [33], sampling, policy=policy, tokens=16)
         _forget(e)

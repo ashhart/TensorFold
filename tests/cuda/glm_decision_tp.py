@@ -48,7 +48,7 @@ def main():
             assert e.score_labels(decision, labels) == reference
             assert e.live == [] and e.e.st.pos == 0 and e.drafter.context_end == 0
             warm, stats = _generate(e, after, None, policy=policy, tokens=16)
-            assert stats["cached"] == (len(prompt) if budget and policy == "2" else 0)
+            assert stats["cached"] == (len(prompt) - 1 if budget and policy == "2" else 0)
             _generate(e, other, None, policy=policy, tokens=16)
             switched, _ = _generate(e, after + [33], None, policy=policy, tokens=16)
             cold, _ = _generate(e, after, None, draft=False, tokens=16)

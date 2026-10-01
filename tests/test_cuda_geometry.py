@@ -24,6 +24,9 @@ class Allocation:
         return Allocation(self.shape + other.shape, self.dtype, self.device)
     def contiguous(self):
         return self
+    def view(self, *shape):
+        assert math.prod(shape) == self.numel()
+        return Allocation(shape, self.dtype, self.device)
 
 
 @pytest.fixture
@@ -239,7 +242,8 @@ def test_mla_exl3_scratch_and_buffers_are_budgeted(monkeypatch, allocations, mtp
     mod = importlib.import_module("tensorfold.families.glm5_next.cuda.forward")
     names = ("kda", "latent", "attention", "exl3_mm")
     mods = [mod] + [importlib.import_module(f"tensorfold.families.glm5_next.cuda.{n}") for n in names]
-    for m in mods + [importlib.import_module("tensorfold.cuda.experts")]:
+    for m in mods + [importlib.import_module("tensorfold.cuda.experts"),
+                     importlib.import_module("tensorfold.cuda.exl3.experts")]:
         monkeypatch.setattr(m, "torch", fake)
     monkeypatch.setattr(mods[2], "ENABLED", True)
     exl3_mm = mods[-1]

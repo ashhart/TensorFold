@@ -1,23 +1,4 @@
-"""GLM-shaped 3-bit (k2 = 6 half-bits) experts through the universal path.
-
-The universal grouped kernel (`tensorfold/cuda/exl3/experts.*`) reads a bit
-width per expert and was tested against a float64 reference at every width
-(`test_mixed_k_rows_are_independent_and_match_the_reference`). GLM's own
-family does not route through it: `families/glm5_next/cuda/exl3_mm.py` pins
-the 4-bit-mcg layout (`words()` requires `int16 [..., 64]`), so a 3-bit
-checkpoint refuses with `only 4-bit EXL3 trellises ... are supported` even
-though the universal kernel serves it. These tests pin the universal path at
-GLM's shapes and bit width, and the two properties an integrator relies on
-before committing to it: determinism across calls, and a row's output being
-the same alone and inside a window.
-
-The layer fixture mirrors a real 3-bit pack's on-disk layout: trellis int16
-`[K/16, N/16, 16 * k2]` words (48 at k2 = 6), fp16 `suh`/`svh` scales, 288
-routed experts at D = 4096, I = 1024 per rank (the pack is rank-split), with
-`GLM_GATEUP`/`GLM_DOWN` tile configs and `ACT_BF16` — the same arithmetic the
-dedicated path runs, verified bit-identical by `test_glm_shaped_bit_identical`
-at 4-bit.
-"""
+"""GLM-shaped 3-bit EXL3 experts: format bits, repeatability, independent rows and buffer ownership."""
 
 import pytest
 import torch
@@ -50,21 +31,17 @@ def _layer(cb="mcg", device="cuda"):
 
 
 def test_dequant_identity_against_format_unpack():
-    """The kernels' own decode of a 3-bit trellis equals the format's reference
-    decoder, bit for bit. If the pack reads wrong here, everything downstream is
-    built on a wrong W_q and the rest of the file proves nothing."""
+    """The kernel decodes the same fp16 bits as format.unpack for a 3-bit trellis."""
     from tensorfold.cuda.exl3 import experts
     from tensorfold.cuda.exl3.format import unpack as fmt_unpack
 
     t = torch.randint(-32768, 32768, (D // 16, I // 16, 8 * K2), dtype=torch.int16).cuda()
     ref = torch.from_numpy(fmt_unpack(t.cpu().numpy(), 3.0, "mcg")).cuda()
-    assert torch.equal(experts.dequant(t, "mcg"), ref)
+    assert torch.equal(experts.dequant(t, "mcg").view(torch.uint8), ref.view(torch.uint8))
 
 
 def test_prepared_layer_reports_k2_from_the_checkpoint():
-    """`prepare` derives k2 from each tensor's own last dim; a 3-bit pack must come
-    out as k2 = 6 half-bits, not the 4-bit assumption of the dedicated wrapper."""
-    from tensorfold.cuda.exl3 import experts
+    """Each checkpoint tensor supplies its own bit width."""
 
     ex = _layer()
     assert ex.k2_gu == (K2, K2)
@@ -79,14 +56,13 @@ def test_routed_is_deterministic_across_calls():
     x = torch.randn(4, D, dtype=torch.bfloat16, device="cuda")
     pick = torch.zeros((4, 4), dtype=torch.int32, device="cuda")
     s = experts.Scratch(ex, 4, 4, device="cuda")
-    y1 = experts.routed(x, pick, None, ex, s, None, 4, act_mode=experts.ACT_BF16)
+    y1 = experts.routed(x, pick, None, ex, s, None, 4, act_mode=experts.ACT_BF16).clone()
     y2 = experts.routed(x, pick, None, ex, s, None, 4, act_mode=experts.ACT_BF16)
     assert torch.equal(y1, y2), "repeated calls must be bit-identical"
 
 
 def test_rows_are_independent_of_batch_composition():
-    """A row alone must equal its output inside a window, whatever the other rows
-    hold: the grouped launch groups by expert and reads rows by index."""
+    """A row gives the same bits alone, duplicated or inside a window."""
     from tensorfold.cuda.exl3 import experts
 
     ex = _layer()
@@ -108,9 +84,7 @@ def test_rows_are_independent_of_batch_composition():
 
 
 def test_shared_expert_pairs_are_skipped():
-    """pick == E means the shared expert: the universal kernel leaves those pairs
-    unwritten, matching the dedicated path's `slot == slots - 1` guard. The caller
-    combines the slot from the BF16 shared MLP before reading it."""
+    """Shared-expert picks are left for the caller to supply."""
     from tensorfold.cuda.exl3 import experts
 
     ex = _layer()
@@ -120,3 +94,20 @@ def test_shared_expert_pairs_are_skipped():
     y = experts.routed(x, pick, None, ex, s, None, 2, act_mode=experts.ACT_BF16)
     torch.cuda.synchronize()
     assert torch.all(y == 0)
+
+
+def test_family_adapter_uses_live_rows_and_owned_buffers():
+    from tensorfold.cuda.exl3 import experts
+    from tensorfold.families.glm5_next.cuda import exl3_generic
+
+    ex = _layer()
+    x = torch.randn(4, D, dtype=torch.bfloat16, device="cuda")
+    pick = torch.arange(16, dtype=torch.int32, device="cuda").view(4, 4) % E
+    wide = experts.Scratch(ex, 16, 4, device="cuda")
+    narrow = experts.Scratch(ex, 4, 4, device="cuda")
+    wide.y.fill_(123)
+    got = exl3_generic.routed(x, pick, ex, wide, 4, 7.0).clone()
+    expected = experts.routed(x, pick, None, ex, narrow, None, 4, 7.0, act_mode=experts.ACT_BF16)
+    assert got.shape == (16, D) and torch.equal(got.view(torch.uint8), expected.view(torch.uint8))
+    assert torch.all(wide.y[16:] == 123)
+    assert wide.y.data_ptr() != narrow.y.data_ptr()

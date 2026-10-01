@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Sequence
+from types import SimpleNamespace
 
 import torch
 import triton
 import triton.language as tl
 
 from tensorfold.cuda import experts as grouped
+from tensorfold.cuda.exl3.experts import Scratch as Exl3Scratch
 from tensorfold.cuda.geometry import MLA_PROMPT_ATT_ROWS as PROMPT_ATT_ROWS   # a dense latent call's prompt rows
 from tensorfold.cuda.kernels import prefill_attention, qmm as shared
 
-from . import glue, kda as kda_mod, latent, prof, qmm, sparse
+from . import exl3_generic, glue, kda as kda_mod, latent, prof, qmm, sparse
 from .attention import AttnScratch, attention, kv_write
 from .weights import LayerW, Weights
 
@@ -97,15 +99,14 @@ class Buffers:
         self.wts = torch.empty((rows, slots), dtype=f32, device=dev)
         self.eact = torch.empty((rows * slots, ml), dtype=bf, device=dev)
         exl3 = c.quant == "exl3"
-        self.ey = torch.empty((rows, slots, D), dtype=bf if prefill and not exl3 else f32, device=dev)
-        self.plan = grouped.Plan(rows, slots, c.experts + 1, dev, prefill=prefill and not exl3)
+        self.ey = None if exl3 else torch.empty((rows, slots, D), dtype=bf if prefill else f32, device=dev)
+        self.plan = None if exl3 else grouped.Plan(rows, slots, c.experts + 1, dev, prefill=prefill)
         self.exl3 = None
         if c.quant == "exl3":            # EXL3 routed experts, and the shared expert as a BF16 MLP
-            from .exl3_mm import Scratch
-
             sl = c.shared_width // w.world
-            self.exl3 = Scratch(rows, slots, D, ml, dev)
-            self.exl3_rows = rows
+            shape = SimpleNamespace(dims=D, width=ml, count=c.experts)
+            self.exl3 = Exl3Scratch(shape, rows, slots, device=dev)
+            self.ey = self.exl3.y.view(rows, slots, D)
             self.sgu = torch.empty((rows, 2 * sl), dtype=bf, device=dev)
             self.sact = torch.empty((rows, sl), dtype=bf, device=dev)
             self.sxs = torch.empty((rows, sl // 64), dtype=f32, device=dev)
@@ -394,14 +395,11 @@ def moe_block(layer: LayerW, w: Weights, b: Buffers, R: int) -> torch.Tensor:
     with prof.timed("moe: route"):
         glue.router(b.normed[:R], m.router, b.mlog[:R])
         glue.select(b.mlog[:R], m.bias, b.pick[:R], b.wts[:R], c.top_k, c.experts, c.routed_scale, c.norm_topk)
-        grouped.route(b.pick[:R], b.plan)
+        if m.shared is None:
+            grouped.route(b.pick[:R], b.plan)
     if m.shared is not None:
         # EXL3: the routed slots through the trellis kernels, the shared expert (last slot) through BF16 matmuls
-        from . import exl3_mm
-
-        from . import exl3_generic
-        ey_flat = exl3_generic.routed(b.normed[:R], b.pick, m.experts, b.exl3.rows, c.limit)
-        b.ey.view(-1, c.hidden)[:ey_flat.shape[0]].copy_(ey_flat)
+        exl3_generic.routed(b.normed[:R], b.pick, m.experts, b.exl3, R, c.limit)
         s = m.shared
         mm(b, b.normed[:R], s.gu, b.xs[:R], b.sgu[:R])
         glue.swiglu(b.sgu[:R], b.sact[:R], b.sxs[:R], c.limit)

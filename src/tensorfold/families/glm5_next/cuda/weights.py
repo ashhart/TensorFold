@@ -11,7 +11,7 @@ import torch
 
 from tensorfold.cuda import experts as grouped
 
-from .exl3_mm import Exl3Experts, words as exl3_words
+from tensorfold.cuda.exl3.experts import Exl3RoutedExperts as Exl3Experts
 from . import latent
 from .qmm import B16, Q4, as_i32, make_b16, make_q4, quantize4, stack_b16, stack_q4
 
