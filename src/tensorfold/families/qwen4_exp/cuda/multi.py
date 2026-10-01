@@ -29,6 +29,7 @@ FIRST, STEP = 256, 8192          # rows an idle slot keeps; rows a stream's cach
 GIB = 1024**3
 SHARE = 0.0                      # --decode-share: a round alone takes this share of its pass's time (0: whole passes)
 PASS_MIN = 128                   # the fewest prompt rows a round's pass takes
+FILL_GUARD = 8                   # a prompt passed over this many passes takes the next one (no starvation), as on Macs
 
 
 def _slot(w, st: State, buf: Buffers, mbuf: Buffers, pbuf: Buffers, capacity: int, prefill_rows: int) -> Engine:
@@ -75,6 +76,8 @@ class MultiDecoder:
         self.streams: dict[int, Stream] = {}
         self.filling: list[Stream] = []                  # admitted, prompts still prefilling (oldest first)
         self.fills: dict[int, list] = {}                 # stream id -> [its engine, drafts?, next row, kept state]
+        self.passed: dict[int, int] = {}                 # stream id -> prompt passes since its last rows
+        self.arrived = lambda: False                     # a request waits to be admitted (the scheduler sets this)
         self.next_id = 0
         self.draft_host = w.draft_ids.cpu().numpy() if w.draft_ids is not None else None
         self.kept: list[tuple[list[int], State, dict, torch.Tensor | None]] = []   # (ids, slot, snapshot, tail)
@@ -217,12 +220,12 @@ class MultiDecoder:
         self.filling.append(s)
 
     def _fill(self) -> list[Stream]:
-        """Prompt passes over the filling prompts, oldest first, packed to the pass's rows."""
+        """Fill ordered prompt pieces until a stream decodes or a waiting request needs admission."""
 
         ended: list[Stream] = []
         while self.filling:
             ended += self._pass()
-            if any(not x.done and not x.waiting for x in self.streams.values()):
+            if any(not x.done and not x.waiting for x in self.streams.values()) or self.arrived():
                 break
         return ended
 
@@ -241,11 +244,21 @@ class MultiDecoder:
         else:
             self.round_s = seconds if self.round_s is None else 0.7 * self.round_s + 0.3 * seconds
 
+    def _order(self) -> list[Stream]:
+        """Order overdue prompts first, then foreground, fewest rows left and stable arrival order."""
+
+        def key(s: Stream):
+            passed = self.passed.get(s.sid, 0)
+            due = passed >= FILL_GUARD
+            return (not due, -passed if due else 0, s.background, len(s.prompt) - self.fills[s.sid][2])
+
+        return sorted(self.filling, key=key)                         # stable: ties keep arrival order
+
     def _pieces(self, rows: int | None = None) -> list[tuple[Stream, int, int]]:
-        """The next pass: rows from the filling prompts, oldest first, up to ``rows`` and ENDS ending prompts."""
+        """The next pass: rows from the filling prompts in ``_order``, up to ``rows`` and ENDS ending prompts."""
 
         pieces, room = [], self._pass_rows() if rows is None else rows
-        for s in sorted(self.filling, key=lambda x: x.background):     # foreground prompts first, each oldest first
+        for s in self._order():
             e, mtp, start, _ = self.fills[s.sid]
             n = min(next((p for p in e.stops if p > start), len(s.prompt)) - start, room)
             ends = sum(1 for x, a, k in pieces if a + k == len(x.prompt))
@@ -259,6 +272,7 @@ class MultiDecoder:
         """One prompt pass alone; prompts that end sample their first token, draft and join the rounds."""
 
         pieces = self._pieces()
+        self._note_passed(pieces)
         t0 = time.perf_counter()
         try:
             segs = stage(self.w, self.pbuf, [(s.st, s.prompt[a:a + n]) for s, a, n in pieces])
@@ -269,6 +283,15 @@ class MultiDecoder:
         except Exception as exc:                         # noqa: BLE001  (these requests fail, the others go on)
             return self._failed(pieces, exc)
         return self._joined(pieces, heads, lasts, (time.perf_counter() - t0) / len(pieces))
+
+    def _note_passed(self, pieces) -> None:
+        """Count a pass against every filling prompt it left out; one it took starts over."""
+
+        took = {s.sid for s, _, _ in pieces}
+        for s in self.filling:
+            self.passed[s.sid] = 0 if s.sid in took else self.passed.get(s.sid, 0) + 1
+        for sid in [k for k in self.passed if k not in {s.sid for s in self.filling}]:
+            del self.passed[sid]
 
     @staticmethod
     def _end_rows(pieces, segs) -> list[int]:
@@ -406,6 +429,7 @@ class MultiDecoder:
         pieces, psegs = (self._pieces(self._pass_rows()) if self.filling and self.converged else []), None
         cuts = []
         if pieces:
+            self._note_passed(pieces)
             try:
                 psegs = stage(self.w, self.pbuf, [(s.st, s.prompt[a:a + n]) for s, a, n in pieces])
                 cuts = self._cuts(pieces, psegs)
