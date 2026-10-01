@@ -183,3 +183,51 @@ def test_the_graph_slot_keeps_its_rows_on_two_ranks_too(allocations):  # noqa: F
     assert actions == [["reset", 0]] and shadow.capacity == 8192
     dec._shrink(shadow, release=True)                                   # memory is short: rank 1 shrinks it too
     assert actions[-1] == ["resize", 0, 256]
+
+
+def _mover(multi, state, torch, solo):
+    dec = decoder(multi, state, torch, room=1 << 40)
+    dec.solo = SimpleNamespace(st=solo)
+    dropped = []
+    dec._state_changed = lambda st: dropped.append(st) if st is solo else None       # the slot's graphs dropped
+    return dec, dropped
+
+
+def test_a_lone_stream_moves_into_a_graph_slot_with_more_rows(allocations):  # noqa: F811
+    """The graph slot keeps its rows, so a lone stream from a smaller slot lands in its first rows, unresized."""
+    import torch
+
+    state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
+    multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    solo = state.State(weights(), 8192, 4, "bf16", limit=65536)
+    old = filled(state, torch, "bf16")                                   # 256 rows, 200 committed
+    k, mtp = old.kc[0].k[:200].clone(), old.mtp_kc.v[:203].clone()
+    dec, dropped = _mover(multi, state, torch, solo)
+    s = SimpleNamespace(sid=0, st=old)
+    dec._move_to_solo(s)
+    assert s.st is solo and dec.solo.st is solo and solo.capacity == 8192 and not dropped
+    assert solo.pos == 200 and torch.equal(solo.kc[0].k[:200], k) and torch.equal(solo.mtp_kc.v[:203], mtp)
+    assert old in dec.free
+
+
+def test_a_different_lone_request_takes_the_graph_slot_and_the_kept_prefix_moves_out(allocations):  # noqa: F811
+    """A kept prompt end in the graph slot moves to a free slot of its size, so the next lone request with another
+    prompt takes the slot without dropping its graphs, and the kept end still resumes from the same rows."""
+    import torch
+
+    state = importlib.import_module("tensorfold.families.qwen4_exp.cuda.state")
+    multi = importlib.import_module("tensorfold.families.qwen4_exp.cuda.multi")
+    solo = filled(state, torch, "bf16", rows=8192)                     # holds a kept prompt end
+    kept_k = solo.kc[0].k[:200].clone()
+    spare = state.State(weights(), 256, 4, "bf16", limit=65536)
+    old = filled(state, torch, "bf16")
+    k = old.kc[0].k[:200].clone()
+    dec, dropped = _mover(multi, state, torch, solo)
+    snap = {"pos": 200}
+    dec.kept, dec.free = [([1, 2, 3], solo, snap, None)], [spare]
+    s = SimpleNamespace(sid=0, st=old)
+    dec._move_to_solo(s)
+    assert dec.solo.st is solo and s.st is solo and not dropped and solo.capacity == 8192
+    assert torch.equal(solo.kc[0].k[:200], k)
+    assert dec.kept == [([1, 2, 3], spare, snap, None)] and spare.capacity == 8192
+    assert torch.equal(spare.kc[0].k[:200], kept_k) and spare not in dec.free
