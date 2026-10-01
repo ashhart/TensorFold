@@ -38,19 +38,31 @@ class DSpark:
         from .serial import RING
 
         self.ring = RING
-        self.swa = [torch.zeros((RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.dw.layers]
+        # every stream slot's context rings side by side (the engine's slots); ``swa`` is the current slot's
+        S = eng.slots
+        self.swa_big = [torch.zeros((S * RING, c.head_dim), dtype=BF, device=self.dev) for _ in self.dw.layers]
+        self.slot = eng.slot
+        self.g_base = torch.zeros((1,), dtype=torch.long, device=self.dev)   # the drafting stream's first ring row
         self.scratch = [ex3.Scratch(b.moe.experts, 8, c.dspark_num_experts_per_tok) for b in self.dw.layers]
         self.noise = torch.full((tokens - 1,), c.dspark_noise_token_id, dtype=torch.long, device=self.dev)
         self.taps: list[torch.Tensor] = []
         self.graph = None
+
+    @property
+    def swa(self) -> list[torch.Tensor]:
+        """The current slot's context rings (views)."""
+
+        R = self.ring
+        return [t[self.slot * R:(self.slot + 1) * R] for t in self.swa_big]
 
     def reset(self) -> None:
         for t in self.swa:
             t.zero_()
 
     # -- context ----------------------------------------------------------------------------------------------
-    def context(self, taps: list[torch.Tensor], pos: torch.Tensor) -> None:
-        """Store the draft blocks' context keys for target rows at ``pos`` (taps: stream means [R, D] each)."""
+    def context(self, taps: list[torch.Tensor], pos: torch.Tensor, off=0) -> None:
+        """Store the draft blocks' context keys for target rows at ``pos`` (taps: stream means [R, D] each); ``off``:
+        each row's stream's first ring row (a tensor for decode rows of several streams, else the slot's)."""
 
         c, dw = self.c, self.dw
         cos, sin = self.eng.tables_rope[0]
@@ -58,7 +70,7 @@ class DSpark:
         for j, block in enumerate(dw.layers):
             a = block.attn
             kv = K.rmsnorm(a.wkv(main_x), a.kv_norm, c.rms_norm_eps)
-            self.swa[j].index_copy_(0, pos % self.ring, K.rope(kv, pos, cos, sin))
+            self.swa_big[j].index_copy_(0, off + pos % self.ring, K.rope(kv, pos, cos, sin))
 
     # -- one drafting pass ------------------------------------------------------------------------------------
     def draft(self, anchor: torch.Tensor, P: torch.Tensor) -> torch.Tensor:
@@ -101,9 +113,10 @@ class DSpark:
         kv = K.rmsnorm(a.wkv(x), a.kv_norm, c.rms_norm_eps)
         H = a.wq_b.n // Dh
         q = K.rope(a.wq_b(qr).view(R, H, Dh), pos, cos, sin).float()
-        self.swa[j].index_copy_(0, pos % self.ring, K.rope(kv, pos, cos, sin))
+        base = self.g_base                                                  # the drafting stream's ring
+        self.swa_big[j].index_copy_(0, base + pos % self.ring, K.rope(kv, pos, cos, sin))
         idx = P - (W - 1) + torch.arange(W - 1 + R, device=self.dev)           # P - 127 .. P + N - 1
-        keys = self.swa[j][idx.clamp(min=0) % self.ring].float()
+        keys = self.swa_big[j][base + idx.clamp(min=0) % self.ring].float()
         mask = (idx[None, :] >= (pos[:, None] - (W - 1))) & (idx[None, :] >= 0)
         if "causal" in VARIANT:
             mask = mask & (idx[None, :] <= pos[:, None])
@@ -124,7 +137,7 @@ class DSpark:
         self.g_anchor = torch.zeros((1,), dtype=torch.long, device=self.dev)
         self.g_P = torch.zeros((1,), dtype=torch.long, device=self.dev)
         self.h_drafts = torch.zeros((self.N,), dtype=torch.long).pin_memory()
-        saved = [t.clone() for t in self.swa]
+        saved = [t.clone() for t in self.swa_big]
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(side):
@@ -135,12 +148,13 @@ class DSpark:
         with torch.cuda.graph(self.graph):
             self.g_drafts = self.draft(self.g_anchor, self.g_P)
         torch.cuda.synchronize()
-        for dst, src in zip(self.swa, saved):
+        for dst, src in zip(self.swa_big, saved):
             dst.copy_(src)
 
     def propose(self, anchor: int, P: int) -> list[int]:
         self.g_anchor.fill_(anchor)
         self.g_P.fill_(P)
+        self.g_base.fill_(self.slot * self.ring)
         self.graph.replay()
         self.h_drafts.copy_(self.g_drafts, non_blocking=True)
         torch.cuda.current_stream().synchronize()

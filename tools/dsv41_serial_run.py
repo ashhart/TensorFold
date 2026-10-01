@@ -34,6 +34,8 @@ def main() -> None:
     ap.add_argument("--profile-rows", type=int, default=1, help="rows a profiled step takes (a verify window)")
     ap.add_argument("--profile-prefill", type=int, default=0, help="profile one prompt chunk of N rows and exit")
     ap.add_argument("--no-parity", action="store_true")
+    ap.add_argument("--slots", type=int, default=1, help="stream slots (concurrent decoding)")
+    ap.add_argument("--multi-test", type=int, default=0, help="N steps: two streams batched vs alone (needs --slots 2)")
     ap.add_argument("--prefill-bench", default="", help="comma lengths: whole-prompt prefill time of each (fresh request)")
     ap.add_argument("--graph", action="store_true", help="capture the one-row decode step as a CUDA graph")
     ap.add_argument("--dspark", type=int, default=0, help="draft N tokens a round with the checkpoint's DSpark blocks")
@@ -61,7 +63,8 @@ def main() -> None:
     torch.cuda.synchronize()
     print(f"[rank {args.rank}] weights loaded in {time.time() - t0:.0f} s, "
           f"{torch.cuda.memory_allocated() / 2**30:.1f} GiB", flush=True)
-    eng = SerialEngine(w, Comm(nccl), str(args.engram), str(args.model / "tokenizer.json"), cap=args.cap)
+    eng = SerialEngine(w, Comm(nccl), str(args.engram), str(args.model / "tokenizer.json"), cap=args.cap,
+                       slots=args.slots)
     nccl.barrier()
     if args.dspark:
         eng.enable_dspark(args.dspark)
@@ -78,6 +81,49 @@ def main() -> None:
 
     from tensorfold.engine.exact_sampling import Sampling
 
+    if args.multi_test:
+        doc = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
+        prompts = [doc[:900], doc[5000:6300]]
+        N = args.multi_test
+        with torch.no_grad():
+            for rows in range(2, 5):
+                if rows not in eng.graphs:
+                    eng.capture(rows)
+            alone = []
+            for slot, p in enumerate(prompts):                      # each stream decoded by itself
+                eng.select_slot(slot)
+                eng.reset()
+                nxt = int(eng.prefill(p)[-1].argmax())
+                toks = [nxt]
+                for _ in range(N - 1):
+                    nxt = eng.step(nxt)
+                    toks.append(nxt)
+                alone.append(toks)
+            pend = []
+            for slot, p in enumerate(prompts):                      # both again, then batched rows
+                eng.select_slot(slot)
+                eng.reset()
+                pend.append(int(eng.prefill(p)[-1].argmax()))
+            both = [[pend[0]], [pend[1]]]
+            for _ in range(N - 1):
+                _, nxt = eng.step_multi([(0, pend[0]), (1, pend[1])])
+                pend = nxt
+                both[0].append(nxt[0])
+                both[1].append(nxt[1])
+            # two rows of stream 0 (its pending token and the alone run's next one: a verify window) beside stream 1
+            eng.select_slot(0)
+            eng.reset()
+            a0 = int(eng.prefill(prompts[0])[-1].argmax())
+            eng.select_slot(1)
+            eng.reset()
+            b0 = int(eng.prefill(prompts[1])[-1].argmax())
+            _, win = eng.step_multi([(0, a0), (0, alone[0][1]), (1, b0)])
+        if args.rank == 0:
+            print(f"multi-test: stream 0 batched == alone {both[0] == alone[0]}, stream 1 {both[1] == alone[1]}; "
+                  f"window rows {win[:2]} vs alone {alone[0][1:3]}, stream 1 row {win[2]} vs {alone[1][1]}", flush=True)
+            print("  alone0", alone[0][:12], "\n  both0 ", both[0][:12], flush=True)
+        nccl.barrier()
+        return
     if args.prefill_bench:
         doc = json.loads(Path("notes/dsv41/golden_long2.json").read_text())["goldens"][-1]["ids"]
         with torch.no_grad():

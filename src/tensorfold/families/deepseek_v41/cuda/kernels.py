@@ -77,9 +77,9 @@ def rope_tables(freqs: torch.Tensor, max_pos: int) -> tuple[torch.Tensor, torch.
 
 
 @triton.jit
-def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, H: tl.constexpr, D: tl.constexpr,
+def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, SBASE, H: tl.constexpr, D: tl.constexpr,
                 W: tl.constexpr, RING: tl.constexpr, CH: tl.constexpr, SCALE: tl.constexpr, NCH: tl.constexpr,
-                HT: tl.constexpr, KT: tl.constexpr):
+                HT: tl.constexpr, KT: tl.constexpr, HAS_BASE: tl.constexpr = False):
     """Keys: the first ``n_idx`` slots are compressed entries named by IDX (-1: none), then the row's window
     positions p - W + 1 .. p read from the SWA ring at pos % RING."""
 
@@ -87,6 +87,7 @@ def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, H: tl.con
     hg = tl.program_id(1)
     c = tl.program_id(2)
     p = tl.load(POS + r)
+    sbase = tl.load(SBASE + r) if HAS_BASE else 0          # the row's stream: its window ring's first row
     hh = hg * HT + tl.arange(0, HT)
     d = tl.arange(0, D)
     m = tl.full((HT,), float("-inf"), tl.float32)
@@ -103,8 +104,8 @@ def _mqa_chunks(Q, COMP, IDX, SWA, POS, PO, PM, PL, n_idx, idx_stride, H: tl.con
         ok_c = is_comp & (kidx >= 0)
         ok_w = (k >= n_idx) & (k < total) & (slot >= 0)
         kc = tl.load(COMP + tl.maximum(kidx, 0)[:, None].to(tl.int64) * D + d[None, :], mask=ok_c[:, None], other=0.0)
-        kw = tl.load(SWA + (tl.maximum(slot, 0) % RING)[:, None].to(tl.int64) * D + d[None, :], mask=ok_w[:, None],
-                     other=0.0)
+        kw = tl.load(SWA + (sbase + tl.maximum(slot, 0) % RING)[:, None].to(tl.int64) * D + d[None, :],
+                     mask=ok_w[:, None], other=0.0)
         kk = tl.where(ok_c[:, None], kc.to(tl.bfloat16), kw.to(tl.bfloat16))
         ok = ok_c | ok_w
         scores = tl.dot(q, tl.trans(kk)).to(tl.float32) * SCALE
@@ -236,7 +237,7 @@ class AttnBuffers:
 
 def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, swa: torch.Tensor, pos: torch.Tensor,
         sink: torch.Tensor, window: int, buf: AttnBuffers, scale: float, cos: torch.Tensor | None = None,
-        sin: torch.Tensor | None = None) -> torch.Tensor:
+        sin: torch.Tensor | None = None, sbase: torch.Tensor | None = None, ring: int | None = None) -> torch.Tensor:
     """q [R, H, D] (RoPE'd) -> o [R, H, D] over the compressed entries ``idx`` [R, n] of ``comp`` and the window
     (``swa`` a ring of window rows addressed by position modulo its length): fp32, or with RoPE tables the
     inverse-rotated bf16 the output projection takes."""
@@ -250,6 +251,8 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, sw
     rope = cos is not None
     out = torch.empty((R, H, D), dtype=torch.bfloat16 if rope else torch.float32, device=q.device)
     idx_t = idx if idx is not None else pos
+    if sbase is not None and R > FULL_ROWS:
+        raise ValueError("stream window bases are for decode rows (the chunk path)")
     if rope and R > FULL_ROWS:
         _mqa_full[(R, H // FULL_HT)](q.contiguous(), comp if comp is not None else swa, idx_t, swa, pos, sink, out, cos,
                                      sin, n_idx, idx_t.stride(0) if idx is not None else 0, H=H, D=D, W=window,
@@ -257,16 +260,18 @@ def mqa(q: torch.Tensor, comp: torch.Tensor | None, idx: torch.Tensor | None, sw
                                      num_warps=FULL_WARPS, num_stages=FULL_STAGES)
         return out
     _mqa_chunks[(R, H // HEAD_TILE, nch)](q.contiguous(), comp if comp is not None else swa, idx_t, swa, pos, buf.po,
-                                          buf.pm, buf.pl, n_idx, idx_t.stride(0) if idx is not None else 0, H=H, D=D,
-                                          W=window, RING=swa.shape[0], CH=CHUNK, SCALE=scale, NCH=nch,
-                                          HT=HEAD_TILE, KT=32, num_warps=8, num_stages=1)
+                                          buf.pm, buf.pl, n_idx, idx_t.stride(0) if idx is not None else 0,
+                                          sbase if sbase is not None else pos, H=H, D=D, W=window,
+                                          RING=ring or swa.shape[0], CH=CHUNK, SCALE=scale, NCH=nch,
+                                          HT=HEAD_TILE, KT=32, HAS_BASE=sbase is not None, num_warps=8, num_stages=1)
     _mqa_merge[(R, H)](buf.po, buf.pm, buf.pl, sink, out, pos, cos if rope else sink, sin if rope else sink, H=H, D=D,
                        NCH=nch, HALF=cos.shape[1] if rope else 1, ROPE=rope, num_warps=4)
     return out
 
 
 @triton.jit
-def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, HI: tl.constexpr, DI: tl.constexpr, BS: tl.constexpr):
+def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, KBASE, HI: tl.constexpr, DI: tl.constexpr,
+                  BS: tl.constexpr, HAS_BASE: tl.constexpr = False):
     """I[r, s] = sum_h w[r, h] * relu(iq[r, h] . k[s]) for visible s < (p + 1) // ratio, -inf elsewhere."""
 
     r = tl.program_id(0)
@@ -276,8 +281,10 @@ def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, HI: tl.constexpr, DI: 
     h = tl.arange(0, HI)
     d = tl.arange(0, DI)
     sidx = sb * BS + tl.arange(0, BS)
+    kbase = tl.load(KBASE + r) if HAS_BASE else 0          # the row's stream: its first key
     q = tl.load(IQ + (r * HI + h[:, None]) * DI + d[None, :])
-    k = tl.load(KEYS + sidx[:, None].to(tl.int64) * DI + d[None, :], mask=(sidx < n_keys)[:, None], other=0.0)
+    k = tl.load(KEYS + (kbase + sidx)[:, None].to(tl.int64) * DI + d[None, :], mask=(sidx < n_keys)[:, None],
+                other=0.0)
     dots = tl.dot(q, tl.trans(k)).to(tl.float32)                     # [HI, BS]
     w = tl.load(WTS + r * HI + h)
     score = tl.sum(w[:, None] * tl.maximum(dots, 0.0), axis=0)
@@ -285,15 +292,18 @@ def _index_scores(IQ, WTS, KEYS, POS, OUT, n_keys, ratio, HI: tl.constexpr, DI: 
     tl.store(OUT + r * n_keys + sidx, score, mask=sidx < n_keys)
 
 
-def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: torch.Tensor, ratio: int) -> torch.Tensor:
-    """fp32 [R, S] indexer scores over every compressed entry, -inf where not yet visible."""
+def index_scores(iq: torch.Tensor, wts: torch.Tensor, keys: torch.Tensor, pos: torch.Tensor, ratio: int,
+                 kbase: torch.Tensor | None = None, n_keys: int | None = None) -> torch.Tensor:
+    """fp32 [R, S] indexer scores over every compressed entry, -inf where not yet visible. ``kbase`` (decode rows of
+    several streams): each row's first key in ``keys``, its stream's ``n_keys`` following."""
 
     R, HI, DI = iq.shape
-    S = keys.shape[0]
+    S = keys.shape[0] if n_keys is None else n_keys
     scores = torch.empty((R, S), dtype=torch.float32, device=iq.device)
     BS = 64
-    _index_scores[(R, triton.cdiv(S, BS))](iq.contiguous(), wts.contiguous(), keys, pos, scores, S, ratio, HI=HI,
-                                           DI=DI, BS=BS, num_warps=4)
+    _index_scores[(R, triton.cdiv(S, BS))](iq.contiguous(), wts.contiguous(), keys, pos, scores, S, ratio,
+                                           kbase if kbase is not None else pos, HI=HI, DI=DI, BS=BS,
+                                           HAS_BASE=kbase is not None, num_warps=4)
     return scores
 
 
