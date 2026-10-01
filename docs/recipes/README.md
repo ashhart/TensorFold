@@ -10,7 +10,7 @@ Each family page describes its supported checkpoint, kernels and operating limit
 | Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
-| DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
+| DeepSeek-V4-Flash | [MLX drafts and one-Spark CUDA GGUF](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [One-GPU CUDA](qwen3.6-moe.md) |
 
 Contributor guides cover [adding an MLX family](adding-a-family.md),

@@ -108,6 +108,142 @@ rings. `TENSORFOLD_MEMORY_LIMIT_GB` raises the budget on a machine with nothing 
 
 CUDA on two DGX Sparks and DeepSeek-V4-flash-vision-exp are not in this family yet.
 
-The [one-Spark GGUF CUDA proposal](deepseek-v4-cuda-plan.md) describes the work
-needed to serve a smaller mixed quant alongside Hunyuan3D. It does not add CUDA
-support to this family.
+## CUDA GGUF on one DGX Spark
+
+The CUDA adapter reads the existing DeepSeek-V4-Flash-0731 mixed GGUF without converting its weights.
+The qualified checkpoint is
+`DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf`:
+1,328 tensors, 129,280 tokens, 86,720,111,488 bytes (80.76 GiB), with IQ2_XXS routed gate/up,
+Q2_K routed down, Q8_0 dense/shared/output and the checkpoint's F16/F32/I32 tensors.
+The native window is 1,048,576; the tested allocation is 262,144.
+
+Support is serial: one GB10, `--tp 1 --parallel 1 --no-drafts`. MTP, DSpark, vision, additional GPUs,
+concurrent streams and structured output are not implemented by this CUDA adapter. The Mac support above
+uses its existing implementation and checkpoints.
+
+### Build and serve
+
+Use Linux aarch64, CUDA 13 and a qualified Python 3.11+ environment containing TensorFold's declared
+Python dependencies plus setuptools/wheel. The helper currently compiles for `sm_121a`, the GB10 target;
+other CUDA devices are not qualified by this recipe. Two compiler jobs are the default, four the maximum.
+Install into a dedicated venv; its invoking interpreter must be that venv's Python.
+
+```bash
+python tools/build_deepseek_v4_cuda.py \
+    --gguf /models/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf \
+    --model-dir /models/tensorfold-deepseek \
+    --companion-reserve-gib 3 --context 262144 --jobs 2
+
+tensorfold serve /models/tensorfold-deepseek \
+    --backend cuda --tp 1 --parallel 1 --no-drafts --context 262144 \
+    --name deepseek-v4-flash --host 127.0.0.1 --port 8000
+```
+
+After installation the same helper is available as `tensorfold-deepseek-build`.
+It validates the GGUF header/schema and embedded tokenizer, builds a pinned native library and platform
+wheel in isolated directories, installs that wheel only in its invoking venv, and prepares `config.json`,
+`descriptor.json` and `build-ready.json`. The GGUF stays read-only; no model or tokenizer is downloaded.
+A selected external tokenizer is optional and must match the vocabulary and EOS.
+The library cache checks source, shim and library hashes before reuse. First native compilation is required;
+subsequent matching builds reuse it. The wheel contains native sources, attribution and the built library.
+
+Add `--preflight-only` to the helper command for header-only validation. It does not compile, install,
+create directories, load weights or allocate KV. Artifact validity is separate from current memory fit.
+The receipt hashes the 5,333,824-byte GGUF header, not all 81 GiB of tensor payload; it also records file
+size, mtime, device and inode. The validated embedded EOS is ID 1, `<｜end▁of▁sentence｜>`.
+
+An independent ml-infra deployment uses `make tensorfold-deepseek-3d`; it owns service lifecycle,
+companion readiness and `0.0.0.0` binding for Tailscale. Those local settings do not change TensorFold's
+CLI defaults. Its original ds4 service stays down after the operator-authorized replacement; failed
+candidate startup does not automatically restart that service.
+
+### Native boundary and serving
+
+The adapter packages unchanged MIT-licensed ds4 sources pinned at
+`d183482b413ecd2e3b540b290e6497437e9fbb73`. `cuda/vendor/ds4/tensorfold-source.json` records each file's
+SHA-256; notices and license copies retain the ggml/ds4 attribution. CUDA arithmetic, routing,
+hyper-connections and packed-cache math are reused from that implementation.
+
+A small versioned C shim exposes engine/session lifecycle, prompt sync, eval, logits and embedded
+rendered-chat tokenization. An isolated child owns the native library and session, so a fatal C exit
+becomes a bounded parent-side error. Logits use binary float32 RPC; eval and the following logits transfer
+share one command during decode. TensorFold owns the HTTP server, request policy, keyed sampling and
+committed callbacks. No ds4 HTTP server is started or proxied.
+
+The family lazily exports `cuda_engine` and `CUDA_APP`; family discovery imports neither torch nor MLX.
+The app reuses the existing DeepSeek prompt encoder, thinking conventions and DSML parser through shared
+CUDA HTTP hooks. Token bytes are joined before UTF8 decoding; instance-local bounded caches avoid
+repeated tokenizer RPCs. Required/named tools reuse the existing call gate without assuming the DSML
+opener is one token. HTTP shutdown and bind failure close the native engine.
+
+Each request starts a fresh native timeline. Prompt-resume snapshots and prefix reuse are outside this
+serial release: the upstream resumed/fresh arithmetic contract needs separate qualification.
+Callbacks observe evaluated tokens once, EOS/stop/disconnect terminate generation, and prompt-plus-reply
+capacity is checked before streaming. Fatal native failures close the engine instead of silently serving
+from damaged state.
+
+### Memory admission and fast kernels
+
+Admission precedes native model loading. It validates prepared/source identity, preserves an explicit
+context without shrinking it, and budgets the complete packed file, aligned-artifact overhead, active
+cache/workspace geometry, 1 GiB runtime allowance, additional companion growth and an 8 GiB host floor.
+`MemAvailable` already includes resident companion occupancy; only their additional growth is reserved.
+The local 3 GiB allowance is rounded from an independently measured 2.91 GiB Hunyuan generation peak.
+Re-measure it for a different companion workload.
+
+Aligned artifacts replace the IQ2/Q2 expert residency; dense Q8 artifacts add 6,598,885,376 bytes.
+They are counted without budgeting another full copy of the experts. The native library builds the
+474 artifacts (78.71 GiB) at startup. Full-file host registration is skipped by the donor's complete
+replacement policy. Keeping this path enabled is necessary for the fast aligned IQ2/Q2/Q8 kernels.
+
+FP8 compressed KV and FP4 indexer primaries stay enabled. The donor's logical graph estimate includes
+inactive F32 primary shells; the shim subtracts only those uncommitted shells while retaining every
+packed row and all workspaces in its resident quote. Both logical and resident estimates are reported.
+At context 262,144 and prefill batches of 2,048, the quotes are 8,300,789,656 logical bytes and
+4,693,498,776 resident-budget bytes. The context remains 262K; the batch size controls temporary memory.
+The native allocator's own fit checks remain enabled.
+
+Shared top-k sampling partitions the vocabulary before sorting candidates, including all threshold ties.
+It preserves token-ID ordering, nucleus/min-p rules and seed/position-keyed draws. A 129,280-logit CPU
+measurement fell from 8.44 to 0.70 ms per sampled token without changing the recorded seeded picks.
+
+### Verification and measurements
+
+Focused CPU tests cover GGUF wire format and malformed input, real schema/provenance, stored Q2/Q8
+vectors, a pinned IQ2 primitive, option refusal before allocation, insufficient-memory sentinels,
+callback/EOS/cancellation/lifetime, shared HTTP streaming/tools, shutdown and build/preflight boundaries.
+Packaged-source hashes are checked without depending on another local donor checkout.
+
+Real GB10 inference passed chat/code, thinking, SSE termination, required tool calls and a tool followup.
+With chat decoding at the same time, Hunyuan generated a 15,375,500-byte GLB at 30 steps/octree 256;
+CUDA moderation also passed. The API reports context_length=262144. The qualification harness and
+machine-specific raw receipts remain in ml-infra and the operator's qualification directory, rather than
+shipping personal paths and old board plans in the TensorFold PR.
+
+Historical optimization measurements on that same Spark and GGUF:
+
+| Check | Before | After | Scope |
+| --- | --- | --- | --- |
+| Sampled decode, 256 tokens | 18.24 tok/s | 20.44 tok/s | Same prompt, seed and output token hash; sampler optimization |
+| 16,224-token prefill | — | 927.6 tok/s | Aligned kernels, 1,024-token batches; one cold prompt |
+| Thinking decode | 16.07 tok/s | 21.11 tok/s | Same fixture; output lengths differ, before/after aligned kernels |
+
+These are local serial measurements, not evidence of a general speedup over every backend.
+The old ds4 log recorded about 1,000 prefill tok/s and about 21 decode tok/s on other requests;
+those logs are not a controlled head-to-head comparison. The full 262,144-token prompt, long-duration
+soak, independent exhaustive GPU oracle and draft/concurrent exactness are not claimed. Re-run the
+[public benchmark fixtures](README.md#measurements) on the final installed artifact before publishing
+comparative performance results.
+
+### Contributor / PR notes
+
+Family adapters remain under `families/deepseek_v4/cuda/`; shared HTTP and sampling changes are small
+hooks/optimizations. The pinned donor tree is excluded from formatting and must remain byte-identical.
+Native ABI changes require matching shim/library receipts; Python-only changes reuse CUDA objects.
+TensorFold 0.6.0's Apache-2.0 license is retained, with the donor's MIT notices packaged separately.
+
+The feature branch is `feat/deepseek-v4-gguf-cuda`, based on upstream 0.6.0. The fork remote is `origin`
+(`crescit/TensorFold`); `upstream` is `ashhart/TensorFold`. Suggested PR title:
+`feat(deepseek_v4 cuda): serial mixed-GGUF inference on one Spark`.
+The PR describes the pinned native integration, early memory admission, embedded serving, isolated
+wheel builder and exact top-k sampling optimization, with the supported serial limits above.

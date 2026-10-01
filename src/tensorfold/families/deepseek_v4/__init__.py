@@ -28,7 +28,7 @@ def check(model_dir: str | Path) -> None:
 
     import sys
 
-    from tensorfold.families import OWN_MODEL_HELP, read_config, quant_method
+    from tensorfold.families import OWN_MODEL_HELP, quant_method, read_config
     config = read_config(model_dir)
     if quant_method(config) == "gguf":
         import json

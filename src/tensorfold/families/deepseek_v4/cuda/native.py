@@ -2,27 +2,34 @@
 
 TensorFold owns serving and sampling; this is not a proxy to ds4-server.
 """
+
 from __future__ import annotations
 
 import ctypes as C
-import multiprocessing as mp
 import math
-from multiprocessing.connection import wait
+import multiprocessing as mp
 import os
-from pathlib import Path
 import threading
+from multiprocessing.connection import wait
+from pathlib import Path
 
 from .build import PIN
 
-NATIVE_ENV = {'DS4_WEIGHT_RESIDENCY_BASE': 'mapped', 'DS4_NO_BOOT_PREWARM': '1',
-              'DS4_MEM_FLOOR_GB': '8', 'DS4_CUDA_BUILD_ARTIFACTS': '1',
-              'DS4_METAL_PREFILL_CHUNK': '2048',
-              'DS4_CUDA_FP8_KV': '1', 'DS4_CUDA_FP4_INDEX': '1', 'DS4_CUDA_PREBUILD_F16': '0'}
+NATIVE_ENV = {
+    "DS4_WEIGHT_RESIDENCY_BASE": "mapped",
+    "DS4_NO_BOOT_PREWARM": "1",
+    "DS4_MEM_FLOOR_GB": "8",
+    "DS4_CUDA_BUILD_ARTIFACTS": "1",
+    "DS4_METAL_PREFILL_CHUNK": "2048",
+    "DS4_CUDA_FP8_KV": "1",
+    "DS4_CUDA_FP4_INDEX": "1",
+    "DS4_CUDA_PREBUILD_F16": "0",
+}
 
 
 def _policy():
     os.environ.update(NATIVE_ENV)
-    for key in ('DS4_DSPARK_MODEL', 'DS4_CUDA_WEIGHT_IPC_MANIFEST'):
+    for key in ("DS4_DSPARK_MODEL", "DS4_CUDA_WEIGHT_IPC_MANIFEST"):
         os.environ.pop(key, None)
 
 
@@ -34,25 +41,29 @@ class NativeLibrary:
     def __init__(self, path):
         self.lib = C.CDLL(str(Path(path).resolve()))
         signatures = {
-            'abi': (C.c_int, []), 'revision': (C.c_char_p, []), 'backend': (C.c_int, []),
-            'open': (C.c_int, [C.c_char_p, C.c_int, C.c_int, C.POINTER(C.c_void_p), C.c_char_p, C.c_size_t]),
-            'close': (None, [C.c_void_p]), 'vocab': (C.c_int, [C.c_void_p]),
-            'eos': (C.c_int, [C.c_void_p]), 'context': (C.c_int, [C.c_void_p]),
-            'reset': (None, [C.c_void_p]),
-            'sync': (C.c_int, [C.c_void_p, C.POINTER(C.c_int), C.c_int, C.c_char_p, C.c_size_t]),
-            'eval': (C.c_int, [C.c_void_p, C.c_int, C.c_char_p, C.c_size_t]),
-            'logits': (C.c_int, [C.c_void_p, C.POINTER(C.c_float), C.c_int]),
-            'encode': (C.c_int, [C.c_void_p, C.c_char_p, C.c_int, C.POINTER(C.POINTER(C.c_int))]),
-            'free': (None, [C.c_void_p]),
-            'token_text': (C.c_void_p, [C.c_void_p, C.c_int, C.POINTER(C.c_size_t)]),
-            'iq2_dot': (C.c_int, [C.c_void_p, C.c_int, C.POINTER(C.c_int8), C.c_int, C.POINTER(C.c_float)]),
+            "abi": (C.c_int, []),
+            "revision": (C.c_char_p, []),
+            "backend": (C.c_int, []),
+            "open": (C.c_int, [C.c_char_p, C.c_int, C.c_int, C.POINTER(C.c_void_p), C.c_char_p, C.c_size_t]),
+            "close": (None, [C.c_void_p]),
+            "vocab": (C.c_int, [C.c_void_p]),
+            "eos": (C.c_int, [C.c_void_p]),
+            "context": (C.c_int, [C.c_void_p]),
+            "reset": (None, [C.c_void_p]),
+            "sync": (C.c_int, [C.c_void_p, C.POINTER(C.c_int), C.c_int, C.c_char_p, C.c_size_t]),
+            "eval": (C.c_int, [C.c_void_p, C.c_int, C.c_char_p, C.c_size_t]),
+            "logits": (C.c_int, [C.c_void_p, C.POINTER(C.c_float), C.c_int]),
+            "encode": (C.c_int, [C.c_void_p, C.c_char_p, C.c_int, C.POINTER(C.POINTER(C.c_int))]),
+            "free": (None, [C.c_void_p]),
+            "token_text": (C.c_void_p, [C.c_void_p, C.c_int, C.POINTER(C.c_size_t)]),
+            "iq2_dot": (C.c_int, [C.c_void_p, C.c_int, C.POINTER(C.c_int8), C.c_int, C.POINTER(C.c_float)]),
         }
         for name, (result, args) in signatures.items():
-            function = getattr(self.lib, 'tf_ds4_' + name)
+            function = getattr(self.lib, "tf_ds4_" + name)
             function.restype, function.argtypes = result, args
             setattr(self, name, function)
         if self.abi() != 1 or self.revision().decode() != PIN:
-            raise NativeError('native ABI/revision mismatch; rebuild the pinned TensorFold library')
+            raise NativeError("native ABI/revision mismatch; rebuild the pinned TensorFold library")
 
 
 def _native_worker(pipe, library):
@@ -62,84 +73,84 @@ def _native_worker(pipe, library):
         # Child-local policy: never mutate the HTTP process's or live ds4's environment.
         _policy()
         api = NativeLibrary(library)
-        pipe.send({'ok': True, 'backend': api.backend()})
+        pipe.send({"ok": True, "backend": api.backend()})
         vocab = 0
         while True:
             message = pipe.recv()
-            op, args = message['op'], message.get('args', [])
+            op, args = message["op"], message.get("args", [])
             error = C.create_string_buffer(1024)
-            if op == 'close':
+            if op == "close":
                 break
-            if op == 'open':
+            if op == "open":
                 path, context, threads = args
                 if ctx.value:
-                    raise NativeError('native engine already open')
+                    raise NativeError("native engine already open")
                 if api.open(os.fsencode(path), context, threads, C.byref(ctx), error, len(error)):
-                    raise NativeError(error.value.decode(errors='replace'))
+                    raise NativeError(error.value.decode(errors="replace"))
                 vocab, eos = api.vocab(ctx), api.eos(ctx)
                 if not 0 < vocab <= 1_000_000 or not 0 <= eos < vocab or api.context(ctx) != context:
-                    raise NativeError('native model vocabulary/EOS/context does not match the requested contract')
-                pipe.send({'ok': True, 'value': {'vocab_size': vocab, 'eos': eos}})
+                    raise NativeError("native model vocabulary/EOS/context does not match the requested contract")
+                pipe.send({"ok": True, "value": {"vocab_size": vocab, "eos": eos}})
                 continue
             if not ctx.value:
-                raise NativeError('native engine is not open')
+                raise NativeError("native engine is not open")
             value = None
-            if op == 'reset':
+            if op == "reset":
                 api.reset(ctx)
-            elif op == 'sync':
+            elif op == "sync":
                 tokens = args[0]
                 if not tokens or len(tokens) > api.context(ctx) or any(t < 0 or t >= vocab for t in tokens):
-                    raise NativeError('invalid native token prefix')
+                    raise NativeError("invalid native token prefix")
                 ids = (C.c_int * len(tokens))(*tokens)
                 if api.sync(ctx, ids, len(tokens), error, len(error)):
-                    raise NativeError(error.value.decode(errors='replace'))
-            elif op in ('eval', 'eval_logits'):
+                    raise NativeError(error.value.decode(errors="replace"))
+            elif op in ("eval", "eval_logits"):
                 if api.eval(ctx, args[0], error, len(error)):
-                    raise NativeError(error.value.decode(errors='replace'))
-                if op == 'eval_logits':
+                    raise NativeError(error.value.decode(errors="replace"))
+                if op == "eval_logits":
                     logits = (C.c_float * vocab)()
                     if api.logits(ctx, logits, vocab) != vocab:
-                        raise NativeError('native logits have the wrong vocabulary width')
-                    pipe.send({'ok': True, 'bytes': vocab * 4})
+                        raise NativeError("native logits have the wrong vocabulary width")
+                    pipe.send({"ok": True, "bytes": vocab * 4})
                     pipe.send_bytes(bytes(logits))
                     continue
-            elif op == 'logits':
+            elif op == "logits":
                 logits = (C.c_float * vocab)()
                 if api.logits(ctx, logits, vocab) != vocab:
-                    raise NativeError('native logits have the wrong vocabulary width')
-                pipe.send({'ok': True, 'bytes': vocab * 4})
+                    raise NativeError("native logits have the wrong vocabulary width")
+                pipe.send({"ok": True, "bytes": vocab * 4})
                 pipe.send_bytes(bytes(logits))
                 continue
-            elif op == 'encode':
+            elif op == "encode":
                 text, rendered = args
                 ids = C.POINTER(C.c_int)()
-                count = api.encode(ctx, text.encode('utf-8'), int(rendered), C.byref(ids))
+                count = api.encode(ctx, text.encode("utf-8"), int(rendered), C.byref(ids))
                 if count < 0:
-                    raise NativeError('native tokenization failed')
+                    raise NativeError("native tokenization failed")
                 try:
                     value = [ids[i] for i in range(count)]
                 finally:
                     api.free(ids)
-            elif op == 'token_text':
+            elif op == "token_text":
                 token = args[0]
                 if not 0 <= token < vocab:
-                    raise NativeError('invalid token ID')
+                    raise NativeError("invalid token ID")
                 size = C.c_size_t()
                 text = api.token_text(ctx, token, C.byref(size))
                 if not text and size.value:
-                    raise NativeError('native token text is null')
+                    raise NativeError("native token text is null")
                 try:
-                    value = C.string_at(text, size.value) if text else b''
+                    value = C.string_at(text, size.value) if text else b""
                 finally:
                     api.free(text)
             else:
-                raise NativeError(f'unknown native operation: {op}')
-            pipe.send({'ok': True, 'value': value})
+                raise NativeError(f"unknown native operation: {op}")
+            pipe.send({"ok": True, "value": value})
     except (EOFError, BrokenPipeError):
         pass
-    except BaseException as exc:
+    except BaseException as exc:  # noqa: BLE001 -- report worker failures across the process boundary.
         try:
-            pipe.send({'ok': False, 'error': f'{type(exc).__name__}: {exc}'})
+            pipe.send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
         except (EOFError, BrokenPipeError, OSError):
             pass
     finally:
@@ -150,23 +161,29 @@ def _native_worker(pipe, library):
 
 class NativeSession:
     def __init__(self, *, library, model_path, context, threads=4, timeout=600):
-        if (isinstance(context, bool) or not isinstance(context, int) or
-                isinstance(threads, bool) or not isinstance(threads, int) or
-                not 1 <= context < 2**31 or not 1 <= threads <= 64 or
-                not math.isfinite(float(timeout)) or float(timeout) <= 0):
-            raise ValueError('invalid native context/threads/timeout')
+        if (
+            isinstance(context, bool)
+            or not isinstance(context, int)
+            or isinstance(threads, bool)
+            or not isinstance(threads, int)
+            or not 1 <= context < 2**31
+            or not 1 <= threads <= 64
+            or not math.isfinite(float(timeout))
+            or float(timeout) <= 0
+        ):
+            raise ValueError("invalid native context/threads/timeout")
         self.timeout, self._lock, self._closed = float(timeout), threading.Lock(), False
-        spawn = mp.get_context('spawn')
+        spawn = mp.get_context("spawn")
         self._pipe, child = spawn.Pipe()
         self._process = spawn.Process(target=_native_worker, args=(child, str(library)), daemon=True)
         try:
             self._process.start()
             child.close()
             info = self._receive()
-            if info['backend'] != 1:
-                raise NativeError('production DeepSeek engine requires the CUDA native library, not CPU')
-            info = self._rpc('open', str(model_path), int(context), int(threads))
-            self.vocab_size, self.eos = info['vocab_size'], info['eos']
+            if info["backend"] != 1:
+                raise NativeError("production DeepSeek engine requires the CUDA native library, not CPU")
+            info = self._rpc("open", str(model_path), int(context), int(threads))
+            self.vocab_size, self.eos = info["vocab_size"], info["eos"]
         except BaseException:
             child.close()
             self.close()
@@ -176,59 +193,60 @@ class NativeSession:
         ready = wait([self._pipe, self._process.sentinel], self.timeout)
         if self._pipe not in ready:
             self.close()
-            raise NativeError('native engine exited or timed out; TensorFold HTTP process remains alive')
+            raise NativeError("native engine exited or timed out; TensorFold HTTP process remains alive")
         try:
             value = self._pipe.recv()
         except (EOFError, OSError) as exc:
             self.close()
-            raise NativeError('native engine exited; TensorFold HTTP process remains alive') from exc
-        if not value.get('ok'):
-            raise NativeError(value.get('error', 'native operation failed'))
+            raise NativeError("native engine exited; TensorFold HTTP process remains alive") from exc
+        if not value.get("ok"):
+            raise NativeError(value.get("error", "native operation failed"))
         return value
 
     def _rpc(self, op, *args):
         with self._lock:
             if self._closed:
-                raise NativeError('native engine is closed')
+                raise NativeError("native engine is closed")
             try:
-                self._pipe.send({'op': op, 'args': args})
+                self._pipe.send({"op": op, "args": args})
                 result = self._receive()
-                if 'bytes' in result:
+                if "bytes" in result:
                     import numpy as np
-                    if result['bytes'] != self.vocab_size * 4 or not self._pipe.poll(self.timeout):
+
+                    if result["bytes"] != self.vocab_size * 4 or not self._pipe.poll(self.timeout):
                         self.close()
-                        raise NativeError('native logits transfer timed out or has invalid width')
+                        raise NativeError("native logits transfer timed out or has invalid width")
                     data = self._pipe.recv_bytes(maxlength=self.vocab_size * 4)
                     if len(data) != self.vocab_size * 4:
-                        raise NativeError('truncated native logits')
+                        raise NativeError("truncated native logits")
                     return np.frombuffer(data, dtype=np.float32)
-                return result.get('value')
+                return result.get("value")
             except (EOFError, BrokenPipeError, OSError) as exc:
                 self.close()
-                raise NativeError('native engine connection failed') from exc
+                raise NativeError("native engine connection failed") from exc
 
     def reset(self):
-        self._rpc('reset')
+        self._rpc("reset")
 
     def sync(self, ids):
-        self._rpc('sync', list(ids))
+        self._rpc("sync", list(ids))
 
     def eval(self, token):
-        self._rpc('eval', int(token))
+        self._rpc("eval", int(token))
 
     def eval_logits(self, token):
-        return self._rpc('eval_logits', int(token))
+        return self._rpc("eval_logits", int(token))
 
     def logits(self):
-        return self._rpc('logits')
+        return self._rpc("logits")
 
     def encode(self, text, *, rendered=False):
-        if '\0' in text:
-            raise ValueError('native tokenizer does not accept NUL text')
-        return self._rpc('encode', str(text), bool(rendered))
+        if "\0" in text:
+            raise ValueError("native tokenizer does not accept NUL text")
+        return self._rpc("encode", str(text), bool(rendered))
 
     def token_text(self, token):
-        return self._rpc('token_text', int(token))
+        return self._rpc("token_text", int(token))
 
     def close(self):
         if self._closed:
@@ -238,7 +256,7 @@ class NativeSession:
         if process.pid is not None:
             if process.is_alive():
                 try:
-                    self._pipe.send({'op': 'close'})
+                    self._pipe.send({"op": "close"})
                 except (BrokenPipeError, OSError):
                     pass
                 process.join(2)
@@ -267,37 +285,56 @@ def _estimate_worker(pipe, library, model_path, context):
         function.restype = C.c_int
         values, error = (C.c_uint64 * 6)(), C.create_string_buffer(1024)
         if function(os.fsencode(model_path), context, values, 6, error, len(error)):
-            raise NativeError(error.value.decode(errors='replace') or 'native estimate is unavailable')
-        pipe.send({'ok': True, 'value': dict(zip(
-            ('graph_bytes', 'raw_bytes', 'compressed_bytes', 'scratch_bytes', 'prefill_cap', 'logical_graph_bytes'), values))})
-    except BaseException as exc:
-        pipe.send({'ok': False, 'error': str(exc)})
+            raise NativeError(error.value.decode(errors="replace") or "native estimate is unavailable")
+        pipe.send(
+            {
+                "ok": True,
+                "value": dict(
+                    zip(
+                        (
+                            "graph_bytes",
+                            "raw_bytes",
+                            "compressed_bytes",
+                            "scratch_bytes",
+                            "prefill_cap",
+                            "logical_graph_bytes",
+                        ),
+                        values,
+                    )
+                ),
+            }
+        )
+    except BaseException as exc:  # noqa: BLE001 -- report worker failures across the process boundary.
+        pipe.send({"ok": False, "error": str(exc)})
     finally:
         pipe.close()
 
 
 def estimate(library, model_path, context, timeout=60):
     """Isolate donor inspection/fatal errors; no session, weights or KV allocation."""
-    spawn = mp.get_context('spawn')
+    spawn = mp.get_context("spawn")
     parent, child = spawn.Pipe()
     process = spawn.Process(target=_estimate_worker, args=(child, str(library), str(model_path), context), daemon=True)
     try:
         process.start()
         child.close()
         if parent not in wait([parent, process.sentinel], timeout):
-            raise NativeError('native metadata estimator exited or timed out')
+            raise NativeError("native metadata estimator exited or timed out")
         try:
             result = parent.recv()
         except EOFError as exc:
-            raise NativeError('native metadata estimator exited') from exc
-        if not result['ok']:
-            raise NativeError(result['error'])
-        return result['value']
+            raise NativeError("native metadata estimator exited") from exc
+        if not result["ok"]:
+            raise NativeError(result["error"])
+        return result["value"]
     finally:
         child.close()
         process.join(2)
         if process.is_alive():
-            process.terminate(); process.join(2)
+            process.terminate()
+            process.join(2)
         if process.is_alive():
-            process.kill(); process.join(2)
-        process.close(); parent.close()
+            process.kill()
+            process.join(2)
+        process.close()
+        parent.close()

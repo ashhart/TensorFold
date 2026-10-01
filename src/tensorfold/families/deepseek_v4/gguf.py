@@ -16,6 +16,7 @@ Design notes
 * A schema is versioned so a later donor layout can be mapped to a new version
   instead of silently changing this one.
 """
+
 from __future__ import annotations
 
 import json
@@ -69,11 +70,11 @@ class DeepSeekV4SchemaError(ValueError):
 class TensorSpec:
     """Expected donor tensor, named with a ``{layer}`` placeholder when per-layer."""
 
-    name: str                       # donor gguf tensor name
-    canonical: str                  # TensorFold canonical alias
-    ndims: int                      # expected rank
-    quant: frozenset[str]           # allowed type_name values
-    shape: tuple[int, ...] | None = None   # exact shape if fully known
+    name: str  # donor gguf tensor name
+    canonical: str  # TensorFold canonical alias
+    ndims: int  # expected rank
+    quant: frozenset[str]  # allowed type_name values
+    shape: tuple[int, ...] | None = None  # exact shape if fully known
 
     def layer_name(self, layer: int) -> str:
         return self.name.format(layer=layer)
@@ -92,6 +93,7 @@ class DeepSeekV4GGUFSchema:
 # the v1 donor descriptor (0731)
 # ---------------------------------------------------------------------------
 
+
 def schema_v1() -> DeepSeekV4GGUFSchema:
     """The audited 0731 donor schema (version 1)."""
     G = TensorSpec
@@ -106,31 +108,19 @@ def schema_v1() -> DeepSeekV4GGUFSchema:
         ),
         layer_tensors=(
             G("blk.{layer}.attn_norm.weight", "attn_norm", 1, frozenset({"F32", "F16"})),
-            G("blk.{layer}.attn_q_a.weight", "attn_q_a", 2,
-              frozenset({"Q8_0", "F16", "F32"})),
-            G("blk.{layer}.attn_q_b.weight", "attn_q_b", 2,
-              frozenset({"Q8_0", "F16", "F32"})),
-            G("blk.{layer}.attn_kv.weight", "attn_kv", 2,
-              frozenset({"Q8_0", "F16", "F32"})),
-            G("blk.{layer}.attn_output_a.weight", "attn_output_a", 2,
-              frozenset({"Q8_0", "F16", "F32"})),
-            G("blk.{layer}.attn_output_b.weight", "attn_output_b", 2,
-              frozenset({"Q8_0", "F16", "F32"})),
+            G("blk.{layer}.attn_q_a.weight", "attn_q_a", 2, frozenset({"Q8_0", "F16", "F32"})),
+            G("blk.{layer}.attn_q_b.weight", "attn_q_b", 2, frozenset({"Q8_0", "F16", "F32"})),
+            G("blk.{layer}.attn_kv.weight", "attn_kv", 2, frozenset({"Q8_0", "F16", "F32"})),
+            G("blk.{layer}.attn_output_a.weight", "attn_output_a", 2, frozenset({"Q8_0", "F16", "F32"})),
+            G("blk.{layer}.attn_output_b.weight", "attn_output_b", 2, frozenset({"Q8_0", "F16", "F32"})),
             G("blk.{layer}.ffn_norm.weight", "ffn_norm", 1, frozenset({"F32", "F16"})),
-            G("blk.{layer}.ffn_gate_inp.weight", "router", 2,
-              frozenset({"F16", "F32", "Q8_0"})),
-            G("blk.{layer}.ffn_gate_shexp.weight", "ffn_gate", 2,
-              frozenset({"Q8_0", "F16", "F32"})),
-            G("blk.{layer}.ffn_up_shexp.weight", "ffn_up", 2,
-              frozenset({"Q8_0", "F16", "F32"})),
-            G("blk.{layer}.ffn_down_shexp.weight", "ffn_down", 2,
-              frozenset({"Q8_0", "F16", "F32"})),
-            G("blk.{layer}.ffn_gate_exps.weight", "exps_gate", 3,
-              frozenset(DONOR_QUANTS)),
-            G("blk.{layer}.ffn_up_exps.weight", "exps_up", 3,
-              frozenset(DONOR_QUANTS)),
-            G("blk.{layer}.ffn_down_exps.weight", "exps_down", 3,
-              frozenset(DONOR_QUANTS)),
+            G("blk.{layer}.ffn_gate_inp.weight", "router", 2, frozenset({"F16", "F32", "Q8_0"})),
+            G("blk.{layer}.ffn_gate_shexp.weight", "ffn_gate", 2, frozenset({"Q8_0", "F16", "F32"})),
+            G("blk.{layer}.ffn_up_shexp.weight", "ffn_up", 2, frozenset({"Q8_0", "F16", "F32"})),
+            G("blk.{layer}.ffn_down_shexp.weight", "ffn_down", 2, frozenset({"Q8_0", "F16", "F32"})),
+            G("blk.{layer}.ffn_gate_exps.weight", "exps_gate", 3, frozenset(DONOR_QUANTS)),
+            G("blk.{layer}.ffn_up_exps.weight", "exps_up", 3, frozenset(DONOR_QUANTS)),
+            G("blk.{layer}.ffn_down_exps.weight", "exps_down", 3, frozenset(DONOR_QUANTS)),
         ),
     )
 
@@ -139,11 +129,12 @@ def schema_v1() -> DeepSeekV4GGUFSchema:
 # validation
 # ---------------------------------------------------------------------------
 
+
 class TensorInventory(Protocol):
     """The subset of a parsed GGUF inventory the validator reads."""
 
-    def by_name(self, name: str) -> Any | None: ...      # tensor with .type_name/.shape
-    def count_prefix(self, prefix: str) -> int: ...      # layer tensors with prefix
+    def by_name(self, name: str) -> Any | None: ...  # tensor with .type_name/.shape
+    def count_prefix(self, prefix: str) -> int: ...  # layer tensors with prefix
 
 
 class _AdaptedInventory:
@@ -169,8 +160,7 @@ def adapt_inventory(inventory: TensorInventory | Any) -> TensorInventory:
         return inventory
     tensors = getattr(inventory, "tensors", None)
     if tensors is None:
-        raise TypeError(
-            "inventory must expose by_name/count_prefix or a .tensors collection")
+        raise TypeError("inventory must expose by_name/count_prefix or a .tensors collection")
     return _AdaptedInventory(tensors)
 
 
@@ -195,8 +185,7 @@ class SchemaReport:
             self.arch_errors = []
 
 
-def _read_arch(schema: DeepSeekV4GGUFSchema, arch: dict[str, Any],
-               report: SchemaReport) -> dict[str, int]:
+def _read_arch(schema: DeepSeekV4GGUFSchema, arch: dict[str, Any], report: SchemaReport) -> dict[str, int]:
     params: dict[str, int] = {}
     for canon in schema.required_arch:
         key = schema.arch[canon]
@@ -207,61 +196,55 @@ def _read_arch(schema: DeepSeekV4GGUFSchema, arch: dict[str, Any],
         try:
             params[canon] = int(value)
         except (TypeError, ValueError):
-            report.arch_errors.append(
-                f"non-integer architecture metadata {key!r}: {value!r}")
+            report.arch_errors.append(f"non-integer architecture metadata {key!r}: {value!r}")
     return params
 
 
-def _check_tensor(spec: TensorSpec, layer: int | None, tensor: Any, name: str,
-                  report: SchemaReport) -> None:
+def _check_tensor(spec: TensorSpec, layer: int | None, tensor: Any, name: str, report: SchemaReport) -> None:
     if tensor is None:
         report.missing.append(name)
         return
     rank = len(getattr(tensor, "shape", ()))
     if rank != spec.ndims:
-        report.wrong_dimension.append(
-            f"{name}: wrong dimension: expected rank {spec.ndims}, got {rank}")
+        report.wrong_dimension.append(f"{name}: wrong dimension: expected rank {spec.ndims}, got {rank}")
         return
     type_name = getattr(tensor, "type_name", None) or "?"
     if type_name not in spec.quant:
-        report.wrong_quant.append(
-            f"{name}: quant {type_name!r} not in allowed {sorted(spec.quant)!r}")
+        report.wrong_quant.append(f"{name}: quant {type_name!r} not in allowed {sorted(spec.quant)!r}")
 
 
-def _validate_layer(schema: DeepSeekV4GGUFSchema, inventory: TensorInventory,
-                    layer: int, report: SchemaReport) -> None:
+def _validate_layer(schema: DeepSeekV4GGUFSchema, inventory: TensorInventory, layer: int, report: SchemaReport) -> None:
     for spec in schema.layer_tensors:
         name = spec.layer_name(layer)
         _check_tensor(spec, layer, inventory.by_name(name), name, report)
 
 
-def _validate_arch_cross(schema: DeepSeekV4GGUFSchema, inventory: TensorInventory,
-                         params: dict[str, int], report: SchemaReport) -> None:
+def _validate_arch_cross(
+    schema: DeepSeekV4GGUFSchema, inventory: TensorInventory, params: dict[str, int], report: SchemaReport
+) -> None:
     emb = inventory.by_name("token_embd.weight")
     if emb is not None and "embedding_length" in params:
         shape = getattr(emb, "shape", ())
         if shape and shape[0] != params["embedding_length"]:
             report.arch_errors.append(
-                f"token_embd.weight dim0 {shape[0]} != "
-                f"deepseek4.embedding_length {params['embedding_length']}")
+                f"token_embd.weight dim0 {shape[0]} != deepseek4.embedding_length {params['embedding_length']}"
+            )
     if "block_count" in params:
         n = params["block_count"]
         # every required layer tensor should appear once per layer; the layer
         # loop below already reports missing per-layer names. Here we only
         # flag a contradictory *count* when the first layer tensor's occurrence
         # count disagrees with block_count.
-        first = schema.layer_tensors[0].name.format(layer=0)
-        prefix = f"blk."
+        prefix = "blk."
         seen = inventory.count_prefix(prefix)
         expected = len(schema.layer_tensors) * n
         if seen < expected:
-            report.arch_errors.append(
-                f"layer tensor count {seen} < expected {expected} "
-                f"(block_count={n})")
+            report.arch_errors.append(f"layer tensor count {seen} < expected {expected} (block_count={n})")
 
 
-def validate_tensor_schema(schema: DeepSeekV4GGUFSchema, inventory: TensorInventory,
-                           arch: dict[str, Any]) -> SchemaReport:
+def validate_tensor_schema(
+    schema: DeepSeekV4GGUFSchema, inventory: TensorInventory, arch: dict[str, Any]
+) -> SchemaReport:
     report = SchemaReport()
     params = _read_arch(schema, arch, report)
 
@@ -273,14 +256,17 @@ def validate_tensor_schema(schema: DeepSeekV4GGUFSchema, inventory: TensorInvent
             _validate_layer(schema, inventory, layer, report)
         _validate_arch_cross(schema, inventory, params, report)
 
-    report.errors = list(report.missing) + list(report.wrong_dimension) \
-        + list(report.wrong_quant) + list(report.arch_errors)
+    report.errors = (
+        list(report.missing) + list(report.wrong_dimension) + list(report.wrong_quant) + list(report.arch_errors)
+    )
     return report
 
 
-def validate_deepseek_v4_gguf(inventory: TensorInventory | Any, arch: dict[str, Any],
-                              schema: DeepSeekV4GGUFSchema | None = None,
-                              ) -> SchemaReport:
+def validate_deepseek_v4_gguf(
+    inventory: TensorInventory | Any,
+    arch: dict[str, Any],
+    schema: DeepSeekV4GGUFSchema | None = None,
+) -> SchemaReport:
     """Validate a parsed 0731 donor inventory against the versioned schema.
 
     Descriptor-only: reads names, ranks and quant type names; never mutates the
@@ -292,10 +278,11 @@ def validate_deepseek_v4_gguf(inventory: TensorInventory | Any, arch: dict[str, 
     return validate_tensor_schema(schema, adapt_inventory(inventory), dict(arch))
 
 
-def validate_deepseek_v4_gguf_or_raise(inventory: TensorInventory,
-                                       arch: dict[str, Any],
-                                       schema: DeepSeekV4GGUFSchema | None = None,
-                                       ) -> SchemaReport:
+def validate_deepseek_v4_gguf_or_raise(
+    inventory: TensorInventory,
+    arch: dict[str, Any],
+    schema: DeepSeekV4GGUFSchema | None = None,
+) -> SchemaReport:
     report = validate_deepseek_v4_gguf(inventory, arch, schema=schema)
     if report.errors:
         raise DeepSeekV4SchemaError("; ".join(report.errors))
@@ -350,9 +337,10 @@ class TokenizerReport:
             self.errors = []
 
 
-def validate_tokenizer_provenance(tokenizer: dict[str, Any],
-                                  prov: DeepSeekV4TokenizerProvenance | None = None,
-                                  ) -> TokenizerReport:
+def validate_tokenizer_provenance(
+    tokenizer: dict[str, Any],
+    prov: DeepSeekV4TokenizerProvenance | None = None,
+) -> TokenizerReport:
     """Reject a candidate tokenizer/config metadata dict that is incompatible.
 
     ``tokenizer`` carries the fields preparation records: checkpoint identity,
@@ -373,30 +361,27 @@ def validate_tokenizer_provenance(tokenizer: dict[str, Any],
 
     checkpoint = tokenizer.get("checkpoint")
     if checkpoint != prov.checkpoint:
-        report.errors.append(
-            f"changed checkpoint identity: {checkpoint!r} != {prov.checkpoint!r}")
+        report.errors.append(f"changed checkpoint identity: {checkpoint!r} != {prov.checkpoint!r}")
 
     vocab_size = tokenizer.get("vocab_size")
     if vocab_size != prov.vocab_size:
-        report.errors.append(
-            f"wrong vocabulary size: {vocab_size!r} != {prov.vocab_size!r}")
+        report.errors.append(f"wrong vocabulary size: {vocab_size!r} != {prov.vocab_size!r}")
 
     eos_tokens = tokenizer.get("eos_tokens")
     if tuple(eos_tokens or ()) != prov.eos_tokens:
-        report.errors.append(
-            f"wrong EOS tokens: {eos_tokens!r} != {prov.eos_tokens!r}")
+        report.errors.append(f"wrong EOS tokens: {eos_tokens!r} != {prov.eos_tokens!r}")
 
     tokenizer_type = tokenizer.get("tokenizer_type")
     if tokenizer_type != prov.tokenizer_type:
-        report.errors.append(
-            f"tokenizer mismatch: {tokenizer_type!r} != {prov.tokenizer_type!r}")
+        report.errors.append(f"tokenizer mismatch: {tokenizer_type!r} != {prov.tokenizer_type!r}")
 
     return report
 
 
-def validate_tokenizer_provenance_or_raise(tokenizer: dict[str, Any],
-                                           prov: DeepSeekV4TokenizerProvenance | None = None,
-                                           ) -> TokenizerReport:
+def validate_tokenizer_provenance_or_raise(
+    tokenizer: dict[str, Any],
+    prov: DeepSeekV4TokenizerProvenance | None = None,
+) -> TokenizerReport:
     report = validate_tokenizer_provenance(tokenizer, prov=prov)
     if report.errors:
         raise DeepSeekV4SchemaError("; ".join(report.errors))
@@ -438,7 +423,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.unlink(missing_ok=True)          # clean a temp from an interrupted write
+    tmp.unlink(missing_ok=True)  # clean a temp from an interrupted write
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
         try:
@@ -461,22 +446,25 @@ def _read_existing(path: Path) -> bytes | None:
 
 def _descriptor_digest(desc: dict[str, Any]) -> str:
     import hashlib
+
     # digest over the canonical descriptor without its own digest field
     body = {k: v for k, v in desc.items() if k != "descriptor_digest"}
     return hashlib.sha256(_canonical_json(body)).hexdigest()
 
 
-def prepare_candidate(model_dir: str | Path, *,
-                      arch: dict[str, Any],
-                      tokenizer: dict[str, Any],
-                      source: str | Path,
-                      source_size: int,
-                      source_sha256: str,
-                      reserve_gib: float,
-                      replace: bool = False,
-                      native_library: str | Path | None = None,
-                      source_identity: dict[str, Any] | None = None,
-                      ) -> PrepareReport:
+def prepare_candidate(
+    model_dir: str | Path,
+    *,
+    arch: dict[str, Any],
+    tokenizer: dict[str, Any],
+    source: str | Path,
+    source_size: int,
+    source_sha256: str,
+    reserve_gib: float,
+    replace: bool = False,
+    native_library: str | Path | None = None,
+    source_identity: dict[str, Any] | None = None,
+) -> PrepareReport:
     """Generate candidate ``config.json`` + ``descriptor.json`` atomically and idempotently.
 
     ``arch`` is the architecture settings reproduced from the checkpoint's GGUF
@@ -492,8 +480,12 @@ def prepare_candidate(model_dir: str | Path, *,
     if not math.isfinite(reserve_gib) or reserve_gib < 0:
         raise ValueError(f"companion reserve must be a finite non-negative Gib, got {reserve_gib!r}")
 
-    config = {"model_type": MODEL_TYPE, "text_config": dict(arch),
-              "quantization_config": {"quant_method": "gguf"}, "gguf_file": str(source)}
+    config = {
+        "model_type": MODEL_TYPE,
+        "text_config": dict(arch),
+        "quantization_config": {"quant_method": "gguf"},
+        "gguf_file": str(source),
+    }
     if native_library is not None:
         config.update(native_library=str(native_library), tokenizer_backend="ds4")
     config_path = model_dir / "config.json"
@@ -519,20 +511,17 @@ def prepare_candidate(model_dir: str | Path, *,
     cur_desc = _read_existing(descriptor_path)
 
     if cur_cfg == config_bytes and cur_desc == desc_bytes:
-        return PrepareReport(config_path, descriptor_path, changed=False, replaced=False,
-                             descriptor_digest=digest)
+        return PrepareReport(config_path, descriptor_path, changed=False, replaced=False, descriptor_digest=digest)
 
-    if (cur_cfg is not None and cur_cfg != config_bytes) or \
-       (cur_desc is not None and cur_desc != desc_bytes):
+    if (cur_cfg is not None and cur_cfg != config_bytes) or (cur_desc is not None and cur_desc != desc_bytes):
         if not replace:
             raise PrepareConflictError(
-                f"candidate sidecars in {model_dir} conflict with requested preparation; "
-                "pass replace=True to overwrite")
+                f"candidate sidecars in {model_dir} conflict with requested preparation; pass replace=True to overwrite"
+            )
         replaced = True
     else:
         replaced = False
 
     _atomic_write(config_path, config_bytes)
     _atomic_write(descriptor_path, desc_bytes)
-    return PrepareReport(config_path, descriptor_path, changed=True, replaced=replaced,
-                         descriptor_digest=digest)
+    return PrepareReport(config_path, descriptor_path, changed=True, replaced=replaced, descriptor_digest=digest)

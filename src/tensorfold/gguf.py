@@ -28,6 +28,7 @@ exactly that many bytes, without a terminator.
 Tensor types follow the ggml ``enum ggml_type`` values; block sizes and bytes
 per block are pinned from the ggml quant tables.
 """
+
 from __future__ import annotations
 
 import struct
@@ -35,7 +36,7 @@ from dataclasses import dataclass
 from typing import Any
 
 GGUF_MAGIC = 0x46554747  # "GGUF" as a little-endian uint32
-GGUF_VERSION = 3         # current spec version
+GGUF_VERSION = 3  # current spec version
 SUPPORTED_VERSIONS = (2, 3)  # v1 uses a different count/string layout
 
 # GGUF value type enum (gguf.h)
@@ -54,19 +55,38 @@ GGUF_TYPE_INT64 = 11
 GGUF_TYPE_FLOAT64 = 12
 
 # scalar (non-array) value types the reader understands
-_SCALAR_TYPES = frozenset({
-    GGUF_TYPE_UINT8, GGUF_TYPE_INT8, GGUF_TYPE_UINT16, GGUF_TYPE_INT16,
-    GGUF_TYPE_UINT32, GGUF_TYPE_INT32, GGUF_TYPE_FLOAT32, GGUF_TYPE_BOOL,
-    GGUF_TYPE_STRING, GGUF_TYPE_UINT64, GGUF_TYPE_INT64, GGUF_TYPE_FLOAT64,
-})
+_SCALAR_TYPES = frozenset(
+    {
+        GGUF_TYPE_UINT8,
+        GGUF_TYPE_INT8,
+        GGUF_TYPE_UINT16,
+        GGUF_TYPE_INT16,
+        GGUF_TYPE_UINT32,
+        GGUF_TYPE_INT32,
+        GGUF_TYPE_FLOAT32,
+        GGUF_TYPE_BOOL,
+        GGUF_TYPE_STRING,
+        GGUF_TYPE_UINT64,
+        GGUF_TYPE_INT64,
+        GGUF_TYPE_FLOAT64,
+    }
+)
 
 _HEADER_SIZE = 24  # u32 magic + u32 version + u64 n_tensors + u64 n_kv
 
 _TYPE_NAMES = {
-    GGUF_TYPE_UINT8: "uint8", GGUF_TYPE_INT8: "int8", GGUF_TYPE_UINT16: "uint16",
-    GGUF_TYPE_INT16: "int16", GGUF_TYPE_UINT32: "uint32", GGUF_TYPE_INT32: "int32",
-    GGUF_TYPE_FLOAT32: "float32", GGUF_TYPE_BOOL: "bool", GGUF_TYPE_STRING: "string",
-    GGUF_TYPE_UINT64: "uint64", GGUF_TYPE_INT64: "int64", GGUF_TYPE_FLOAT64: "float64",
+    GGUF_TYPE_UINT8: "uint8",
+    GGUF_TYPE_INT8: "int8",
+    GGUF_TYPE_UINT16: "uint16",
+    GGUF_TYPE_INT16: "int16",
+    GGUF_TYPE_UINT32: "uint32",
+    GGUF_TYPE_INT32: "int32",
+    GGUF_TYPE_FLOAT32: "float32",
+    GGUF_TYPE_BOOL: "bool",
+    GGUF_TYPE_STRING: "string",
+    GGUF_TYPE_UINT64: "uint64",
+    GGUF_TYPE_INT64: "int64",
+    GGUF_TYPE_FLOAT64: "float64",
 }
 
 
@@ -94,19 +114,34 @@ GGUF_ALIGNMENT = 32
 # ggml tensor type -> (type name, elements per block, bytes per block).
 # Block geometry pinned from the ggml quant tables (ggml-quants.h / gguf.h).
 _GGML_TYPE_INFO: dict[int, tuple[str, int, int]] = {
-    0: ("F32", 1, 4), 1: ("F16", 1, 2),
-    2: ("Q4_0", 32, 18), 3: ("Q4_1", 32, 20),
-    6: ("Q5_0", 32, 22), 7: ("Q5_1", 32, 24),
-    8: ("Q8_0", 32, 34), 9: ("Q8_1", 32, 40),
-    10: ("Q2_K", 256, 84), 11: ("Q3_K", 256, 110),
-    12: ("Q4_K", 256, 144), 13: ("Q5_K", 256, 176),
-    14: ("Q6_K", 256, 210), 15: ("Q8_K", 256, 292),
-    16: ("IQ2_XXS", 256, 66), 17: ("IQ2_XS", 256, 74),
-    18: ("IQ3_XXS", 256, 98), 19: ("IQ1_S", 256, 110),
-    20: ("IQ4_NL", 256, 50), 21: ("IQ3_S", 256, 110),
-    22: ("IQ2_S", 256, 82), 23: ("IQ4_XS", 256, 136),
-    24: ("I8", 1, 1), 25: ("I16", 1, 2), 26: ("I32", 1, 4),
-    27: ("I64", 1, 8), 28: ("F64", 1, 8), 29: ("IQ1_M", 256, 56),
+    0: ("F32", 1, 4),
+    1: ("F16", 1, 2),
+    2: ("Q4_0", 32, 18),
+    3: ("Q4_1", 32, 20),
+    6: ("Q5_0", 32, 22),
+    7: ("Q5_1", 32, 24),
+    8: ("Q8_0", 32, 34),
+    9: ("Q8_1", 32, 40),
+    10: ("Q2_K", 256, 84),
+    11: ("Q3_K", 256, 110),
+    12: ("Q4_K", 256, 144),
+    13: ("Q5_K", 256, 176),
+    14: ("Q6_K", 256, 210),
+    15: ("Q8_K", 256, 292),
+    16: ("IQ2_XXS", 256, 66),
+    17: ("IQ2_XS", 256, 74),
+    18: ("IQ3_XXS", 256, 98),
+    19: ("IQ1_S", 256, 110),
+    20: ("IQ4_NL", 256, 50),
+    21: ("IQ3_S", 256, 110),
+    22: ("IQ2_S", 256, 82),
+    23: ("IQ4_XS", 256, 136),
+    24: ("I8", 1, 1),
+    25: ("I16", 1, 2),
+    26: ("I32", 1, 4),
+    27: ("I64", 1, 8),
+    28: ("F64", 1, 8),
+    29: ("IQ1_M", 256, 56),
     30: ("BF16", 1, 2),
 }
 
@@ -118,16 +153,16 @@ class TensorInfo:
     type_name: str
     shape: tuple[int, ...]
     nelements: int
-    offset: int          # offset within the tensor data section
-    size: int            # byte span within the tensor data section
-    start: int           # absolute file offset of the tensor data
-    end: int             # absolute file offset just past the tensor data
+    offset: int  # offset within the tensor data section
+    size: int  # byte span within the tensor data section
+    start: int  # absolute file offset of the tensor data
+    end: int  # absolute file offset just past the tensor data
 
 
 @dataclass(frozen=True)
 class GGUFTensorInventory:
     info: GGUFInfo
-    data_offset: int     # absolute file offset where tensor data begins
+    data_offset: int  # absolute file offset where tensor data begins
     tensors: tuple[TensorInfo, ...]
 
 
@@ -149,7 +184,8 @@ class _Cursor:
         if n > self.remaining():
             raise GGUFError(
                 f"truncated {what}: need {n} bytes but only {self.remaining()} remain "
-                f"(file length {len(self._data)}, pos {self.pos})")
+                f"(file length {len(self._data)}, pos {self.pos})"
+            )
 
     def unpack(self, fmt: str, size: int, what: str):
         self.need(size, what)
@@ -159,7 +195,7 @@ class _Cursor:
 
     def take(self, n: int, what: str) -> bytes:
         self.need(n, what)
-        out = self._data[self.pos:self.pos + n]
+        out = self._data[self.pos : self.pos + n]
         self.pos += n
         return out
 
@@ -175,8 +211,7 @@ def _read_u64(c: _Cursor, what: str) -> int:
 def _read_string(c: _Cursor) -> str:
     n = _read_u64(c, "string length")
     if n > c.remaining():
-        raise GGUFError(
-            f"string length {n} exceeds remaining {c.remaining()} bytes (pos {c.pos})")
+        raise GGUFError(f"string length {n} exceeds remaining {c.remaining()} bytes (pos {c.pos})")
     raw = c.take(n, "string data")
     try:
         return raw.decode("utf-8")
@@ -225,8 +260,7 @@ def _read_value(c: _Cursor, type_: int) -> Any:
             raise GGUFError(f"unsupported or nested GGUF array element type {elem}")
         n = _read_u64(c, "array length")
         if n > c.remaining():
-            raise GGUFError(
-                f"array length {n} exceeds remaining {c.remaining()} bytes (pos {c.pos})")
+            raise GGUFError(f"array length {n} exceeds remaining {c.remaining()} bytes (pos {c.pos})")
         values = [_read_scalar(c, elem) for _ in range(n)]
         return values
     return _read_scalar(c, type_)
@@ -240,8 +274,7 @@ def _parse_metadata(data: bytes) -> tuple[GGUFInfo, int]:
     begin, if any).
     """
     if len(data) < _HEADER_SIZE:
-        raise GGUFError(
-            f"GGUF header truncated: need {_HEADER_SIZE} bytes but file has {len(data)}")
+        raise GGUFError(f"GGUF header truncated: need {_HEADER_SIZE} bytes but file has {len(data)}")
 
     magic, version, n_tensors, n_kv = struct.unpack_from("<IIQQ", data, 0)
     if magic != GGUF_MAGIC:
@@ -319,21 +352,19 @@ def parse_gguf_tensors(data: bytes) -> GGUFTensorInventory:
 
         offset = cursor.unpack("<Q", 8, "tensor offset")
         if offset % GGUF_ALIGNMENT != 0:
-            raise GGUFError(
-                f"tensor {name!r} offset {offset} not {GGUF_ALIGNMENT}-byte aligned")
+            raise GGUFError(f"tensor {name!r} offset {offset} not {GGUF_ALIGNMENT}-byte aligned")
 
         nelements = 1
         for d in dims:
             nelements *= d
             if nelements > (1 << 64) - 1:
-                raise GGUFError(
-                    f"tensor {name!r} shape overflow (element product exceeds 2^64)")
+                raise GGUFError(f"tensor {name!r} shape overflow (element product exceeds 2^64)")
 
         if block_qk > 1:
             if nelements % block_qk != 0:
                 raise GGUFError(
-                    f"tensor {name!r} element count {nelements} not divisible by "
-                    f"{type_name} block size {block_qk}")
+                    f"tensor {name!r} element count {nelements} not divisible by {type_name} block size {block_qk}"
+                )
             size = (nelements // block_qk) * block_bytes
         else:
             size = nelements * block_bytes
@@ -341,28 +372,32 @@ def parse_gguf_tensors(data: bytes) -> GGUFTensorInventory:
         if size > (1 << 64) - 1:
             raise GGUFError(f"tensor {name!r} byte span overflow")
 
-        tensors.append(TensorInfo(
-            name=name, type_id=type_id, type_name=type_name,
-            shape=tuple(dims), nelements=nelements, offset=offset,
-            size=size, start=0, end=0))
+        tensors.append(
+            TensorInfo(
+                name=name,
+                type_id=type_id,
+                type_name=type_name,
+                shape=tuple(dims),
+                nelements=nelements,
+                offset=offset,
+                size=size,
+                start=0,
+                end=0,
+            )
+        )
 
     # tensor weight data begins after the descriptor table, 32-byte aligned
     data_offset = _align_up(cursor.pos, GGUF_ALIGNMENT)
     if data_offset > len(data):
-        raise GGUFError(
-            f"GGUF tensor data offset {data_offset} exceeds file size {len(data)}")
+        raise GGUFError(f"GGUF tensor data offset {data_offset} exceeds file size {len(data)}")
 
     final: list[TensorInfo] = []
     for t in tensors:
         start = data_offset + t.offset
         end = start + t.size
         if end > len(data):
-            raise GGUFError(
-                f"tensor {t.name!r} span [{start}, {end}) out of bounds "
-                f"(file size {len(data)})")
-        final.append(TensorInfo(
-            t.name, t.type_id, t.type_name, t.shape, t.nelements,
-            t.offset, t.size, start, end))
+            raise GGUFError(f"tensor {t.name!r} span [{start}, {end}) out of bounds (file size {len(data)})")
+        final.append(TensorInfo(t.name, t.type_id, t.type_name, t.shape, t.nelements, t.offset, t.size, start, end))
 
     ordered = sorted(final, key=lambda t: t.start)
     for i in range(len(ordered) - 1):
@@ -370,6 +405,7 @@ def parse_gguf_tensors(data: bytes) -> GGUFTensorInventory:
             raise GGUFError(
                 f"GGUF tensor spans overlap: {ordered[i].name!r} ends at "
                 f"{ordered[i].end} before {ordered[i + 1].name!r} starts at "
-                f"{ordered[i + 1].start}")
+                f"{ordered[i + 1].start}"
+            )
 
     return GGUFTensorInventory(info, data_offset, tuple(final))

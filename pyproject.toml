@@ -72,7 +72,11 @@ pythonpath = ["src", "tests"]
 
 [tool.ruff]
 line-length = 120
-extend-exclude = ["src/tensorfold/families/deepseek_v4/vendor"]   # third-party code kept unmodified
+# Third-party code kept unmodified.
+extend-exclude = [
+    "src/tensorfold/families/deepseek_v4/vendor",
+    "src/tensorfold/families/deepseek_v4/cuda/vendor",
+]
 
 [tool.setuptools.dynamic]
 version = { attr = "tensorfold.__version__" }

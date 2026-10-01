@@ -1,4 +1,5 @@
 """CPU discovery, CUDA registration and rejection before loading."""
+
 from __future__ import annotations
 
 import sys
@@ -13,8 +14,7 @@ GGUF = {"quantization_config": {"quant_method": "gguf"}, "bits": 2.5625}
 
 
 def _heavy(modules):
-    return {m for m in modules
-            if m == "torch" or m.startswith(("torch.", "mlx", "transformers", "transformers."))}
+    return {m for m in modules if m == "torch" or m.startswith(("torch.", "mlx", "transformers", "transformers."))}
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +89,7 @@ def test_serial_engine_signature_pins_cuda_family_contract():
                         **options):
     """
     import inspect
+
     import tensorfold.families.deepseek_v4 as dsv4
 
     factory = getattr(dsv4, "cuda_engine", None)
@@ -106,7 +107,6 @@ def test_serial_engine_signature_pins_cuda_family_contract():
     assert p["no_drafts"].default is False
     assert p["mtp_drafts"].default is None
     # every param except model_dir is keyword-only (drafter/tp/rank/master/...)
-    assert all(v.kind == inspect.Parameter.KEYWORD_ONLY for k, v in p.items()
-               if k not in ("model_dir", "options"))
+    assert all(v.kind == inspect.Parameter.KEYWORD_ONLY for k, v in p.items() if k not in ("model_dir", "options"))
     # a catch-all **options must remain for parallel/format/... rejections
     assert any(v.kind == inspect.Parameter.VAR_KEYWORD for v in p.values())

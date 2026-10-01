@@ -12,6 +12,7 @@ and validates a parsed tensor inventory against it:
 The validator only inspects stored descriptors: it never expands or rewrites the
 actual IQ2_XXS/Q2_K/Q8_0/F16/F32 payloads, so the donor data is preserved.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from tensorfold.families.deepseek_v4.gguf import (
 # ---------------------------------------------------------------------------
 # oracle helpers: a tiny, independent inventory object the validator reads
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class FakeTensor:
@@ -94,8 +96,7 @@ def _base_tensors() -> list[FakeTensor]:
     ]
 
 
-def _replace(base: list[FakeTensor], name: str, type_name: str,
-             shape: tuple[int, ...]) -> list[FakeTensor]:
+def _replace(base: list[FakeTensor], name: str, type_name: str, shape: tuple[int, ...]) -> list[FakeTensor]:
     """Return a copy of *base* with the named tensor replaced."""
     out = []
     for t in base:
@@ -115,6 +116,7 @@ def _report(schema: DeepSeekV4GGUFSchema, inventory, arch: dict) -> SchemaReport
 # schema factory
 # ---------------------------------------------------------------------------
 
+
 def test_schema_v1_is_versioned_and_complete():
     schema = schema_v1()
     assert schema.version == "1"
@@ -131,6 +133,7 @@ def test_schema_v1_is_versioned_and_complete():
 # valid inventory -> no errors
 # ---------------------------------------------------------------------------
 
+
 def test_valid_inventory_reports_no_errors():
     schema = schema_v1()
     inv = FakeInventory(_base_tensors())
@@ -143,6 +146,7 @@ def test_valid_inventory_reports_no_errors():
 # ---------------------------------------------------------------------------
 # missing tensor
 # ---------------------------------------------------------------------------
+
 
 def test_missing_layer_tensor_is_reported():
     schema = schema_v1()
@@ -162,10 +166,10 @@ def test_missing_global_tensor_is_reported():
 # wrong dimension (rank / shape)
 # ---------------------------------------------------------------------------
 
+
 def test_wrong_rank_is_reported_as_dimension_error():
     schema = schema_v1()
-    inv = FakeInventory(_replace(_base_tensors(), "blk.0.attn_q_a.weight",
-                                 "Q8_0", shape=(4096, 1536, 1)))
+    inv = FakeInventory(_replace(_base_tensors(), "blk.0.attn_q_a.weight", "Q8_0", shape=(4096, 1536, 1)))
     report = _report(schema, inv, make_arch())
     assert any("dimension" in e.lower() and "attn_q_a" in e for e in report.errors)
 
@@ -173,10 +177,12 @@ def test_wrong_rank_is_reported_as_dimension_error():
 def test_wrong_embedding_dim_is_contradictory_architecture():
     schema = schema_v1()
     # token_embd first dim disagrees with deepseek4.embedding_length
-    inv = FakeInventory([
-        FakeTensor("token_embd.weight", type_name="F16", shape=(2048, 129280)),
-        *[t for t in _base_tensors() if t.name != "token_embd.weight"],
-    ])
+    inv = FakeInventory(
+        [
+            FakeTensor("token_embd.weight", type_name="F16", shape=(2048, 129280)),
+            *[t for t in _base_tensors() if t.name != "token_embd.weight"],
+        ]
+    )
     report = _report(schema, inv, make_arch(embedding_length=4096))
     assert any("embedding_length" in e or "embedding" in e for e in report.arch_errors)
 
@@ -185,11 +191,11 @@ def test_wrong_embedding_dim_is_contradictory_architecture():
 # unsupported quant
 # ---------------------------------------------------------------------------
 
+
 def test_unsupported_quant_is_reported():
     schema = schema_v1()
     # attn_q_a is expected Q8_0/F16/F32; store Q4_0
-    inv = FakeInventory(_replace(_base_tensors(), "blk.0.attn_q_a.weight",
-                                 "Q4_0", shape=(4096, 1536)))
+    inv = FakeInventory(_replace(_base_tensors(), "blk.0.attn_q_a.weight", "Q4_0", shape=(4096, 1536)))
     report = _report(schema, inv, make_arch())
     assert any("quant" in e.lower() and "attn_q_a" in e for e in report.errors)
 
@@ -198,12 +204,13 @@ def test_expert_quant_allowlist_includes_donor_types():
     schema = schema_v1()
     inv = FakeInventory(_base_tensors())
     report = _report(schema, inv, make_arch())
-    assert report.errors == []          # IQ2_XXS, Q2_K, Q8_0 are donor-allowed
+    assert report.errors == []  # IQ2_XXS, Q2_K, Q8_0 are donor-allowed
 
 
 # ---------------------------------------------------------------------------
 # contradictory architecture metadata
 # ---------------------------------------------------------------------------
+
 
 def test_block_count_mismatch_is_contradictory_architecture():
     schema = schema_v1()
@@ -223,8 +230,7 @@ def test_missing_required_arch_key_is_reported():
 
 def test_non_integer_arch_value_is_reported():
     schema = schema_v1()
-    report = _report(schema, FakeInventory(_base_tensors()),
-                     make_arch(**{"deepseek4.block_count": "two"}))
+    report = _report(schema, FakeInventory(_base_tensors()), make_arch(**{"deepseek4.block_count": "two"}))
     assert any("block_count" in e for e in report.arch_errors)
 
 
@@ -234,8 +240,7 @@ def test_non_integer_arch_value_is_reported():
 
 import struct
 
-from tensorfold.gguf import (GGUF_TYPE_UINT32, GGUF_TYPE_UINT64, GGUF_MAGIC,
-                             parse_gguf_tensors)
+from tensorfold.gguf import GGUF_MAGIC, GGUF_TYPE_UINT32, GGUF_TYPE_UINT64, parse_gguf_tensors
 
 GGML_F32 = 0
 GGML_F16 = 1
@@ -257,11 +262,13 @@ def _scalar(type_, value) -> bytes:
 
 
 def _tensor_desc(name: str, dims: list, type_id: int, offset: int) -> bytes:
-    return (_s(name)
-            + struct.pack("<I", len(dims))
-            + b"".join(struct.pack("<Q", d) for d in dims)
-            + struct.pack("<I", type_id)
-            + struct.pack("<Q", offset))
+    return (
+        _s(name)
+        + struct.pack("<I", len(dims))
+        + b"".join(struct.pack("<Q", d) for d in dims)
+        + struct.pack("<I", type_id)
+        + struct.pack("<Q", offset)
+    )
 
 
 def test_real_gguf_inventory_is_adapted_and_validated():
@@ -269,33 +276,47 @@ def test_real_gguf_inventory_is_adapted_and_validated():
     # deepseek4.* metadata, then validate the parsed inventory through the
     # adapter. Layer tensors are absent, so they must be reported missing.
     header = struct.pack("<IIQQ", GGUF_MAGIC, 3, 2, 10)
-    meta = b"".join([
-        _s("deepseek4.block_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 1),
-        _s("deepseek4.embedding_length") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 4096),
-        _s("deepseek4.attention.head_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 64),
-        _s("deepseek4.attention.head_count_kv") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 8),
-        _s("deepseek4.attention.key_length") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 512),
-        _s("deepseek4.attention.q_lora_rank") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 1536),
-        _s("deepseek4.attention.output_lora_rank") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 1024),
-        _s("deepseek4.expert_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 256),
-        _s("deepseek4.expert_used_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 6),
-        _s("deepseek4.expert_feed_forward_length") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 2048),
-    ])
+    meta = b"".join(
+        [
+            _s("deepseek4.block_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 1),
+            _s("deepseek4.embedding_length") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 4096),
+            _s("deepseek4.attention.head_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 64),
+            _s("deepseek4.attention.head_count_kv")
+            + struct.pack("<I", GGUF_TYPE_UINT32)
+            + _scalar(GGUF_TYPE_UINT32, 8),
+            _s("deepseek4.attention.key_length") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 512),
+            _s("deepseek4.attention.q_lora_rank")
+            + struct.pack("<I", GGUF_TYPE_UINT32)
+            + _scalar(GGUF_TYPE_UINT32, 1536),
+            _s("deepseek4.attention.output_lora_rank")
+            + struct.pack("<I", GGUF_TYPE_UINT32)
+            + _scalar(GGUF_TYPE_UINT32, 1024),
+            _s("deepseek4.expert_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 256),
+            _s("deepseek4.expert_used_count") + struct.pack("<I", GGUF_TYPE_UINT32) + _scalar(GGUF_TYPE_UINT32, 6),
+            _s("deepseek4.expert_feed_forward_length")
+            + struct.pack("<I", GGUF_TYPE_UINT32)
+            + _scalar(GGUF_TYPE_UINT32, 2048),
+        ]
+    )
     descs = [
         _tensor_desc("token_embd.weight", [8, 4], GGML_F16, 0),
         _tensor_desc("output_norm.weight", [8], GGML_F32, 64),
     ]
-    data = bytes(((-len(header + meta + b"".join(descs))) % 32)) + bytes(64 + 32)
+    data = bytes((-len(header + meta + b"".join(descs))) % 32) + bytes(64 + 32)
     inv = parse_gguf_tensors(header + meta + b"".join(descs) + data)
 
-    arch = {"deepseek4.block_count": 1, "deepseek4.embedding_length": 4096,
-            "deepseek4.attention.head_count": 64,
-            "deepseek4.attention.head_count_kv": 8,
-            "deepseek4.attention.key_length": 512,
-            "deepseek4.attention.q_lora_rank": 1536,
-            "deepseek4.attention.output_lora_rank": 1024,
-            "deepseek4.expert_count": 256, "deepseek4.expert_used_count": 6,
-            "deepseek4.expert_feed_forward_length": 2048}
+    arch = {
+        "deepseek4.block_count": 1,
+        "deepseek4.embedding_length": 4096,
+        "deepseek4.attention.head_count": 64,
+        "deepseek4.attention.head_count_kv": 8,
+        "deepseek4.attention.key_length": 512,
+        "deepseek4.attention.q_lora_rank": 1536,
+        "deepseek4.attention.output_lora_rank": 1024,
+        "deepseek4.expert_count": 256,
+        "deepseek4.expert_used_count": 6,
+        "deepseek4.expert_feed_forward_length": 2048,
+    }
     report = validate_deepseek_v4_gguf(inv, arch)
     assert "token_embd.weight" not in [e for e in report.errors]
     # token_embd and output_norm present; every layer tensor missing
@@ -307,14 +328,13 @@ def test_real_gguf_inventory_is_adapted_and_validated():
 # ---------------------------------------------------------------------------
 
 from tensorfold.families.deepseek_v4.gguf import (
-    DeepSeekV4TokenizerProvenance,
-    TokenizerReport,
     tokenizer_provenance_v1,
     validate_tokenizer_provenance,
     validate_tokenizer_provenance_or_raise,
 )
 
 PINNED = tokenizer_provenance_v1()
+
 
 def _candidate(**overrides) -> dict:
     """A candidate tokenizer/config metadata dict (the kind preparation generates)."""
@@ -323,7 +343,7 @@ def _candidate(**overrides) -> dict:
         "vocab_size": PINNED.vocab_size,
         "tokenizer_type": PINNED.tokenizer_type,
         "eos_tokens": list(PINNED.eos_tokens),
-        "provenance": {"source": "/home/josh/gguf/pinned-0731.gguf", "sha256": "a" * 64},
+        "provenance": {"source": "/models/pinned-0731.gguf", "sha256": "a" * 64},
     }
     base.update(overrides)
     return base
@@ -391,7 +411,7 @@ from tensorfold.families.deepseek_v4.gguf import (
     prepare_candidate,
 )
 
-SOURCE_0731 = "/home/josh/gguf/pinned-0731.gguf"
+SOURCE_0731 = "/models/pinned-0731.gguf"
 
 
 def _arch(block_count: int = 1) -> dict:
@@ -413,14 +433,14 @@ def _arch(block_count: int = 1) -> dict:
 
 def _prepare(model_dir, **overrides) -> PrepareReport:
     """Run candidate sidecar preparation with fixed measured facts."""
-    kw = dict(
-        arch=_arch(),
-        tokenizer=_candidate(),
-        source=SOURCE_0731,
-        source_size=123456,
-        source_sha256="a" * 64,
-        reserve_gib=2.0,
-    )
+    kw = {
+        "arch": _arch(),
+        "tokenizer": _candidate(),
+        "source": SOURCE_0731,
+        "source_size": 123456,
+        "source_sha256": "a" * 64,
+        "reserve_gib": 2.0,
+    }
     kw.update(overrides)
     return prepare_candidate(model_dir, **kw)
 
@@ -526,4 +546,5 @@ def test_discovery_without_torch(tmp_path):
 
 def gguf_mod_import():
     import tensorfold.families.deepseek_v4.gguf as gguf_mod
+
     return gguf_mod

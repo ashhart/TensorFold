@@ -8,19 +8,34 @@ Covers the bounded GGUF reader in tensorfold.gguf:
   * tensor payload is intentionally not parsed
 
 Only the header + typed metadata section is in scope; tensor descriptors and
-weights are out of scope by design (see docs/evidence/deepseek-v4-g0-testfirst.md).
+weights are intentionally not loaded by header-parser tests.
 """
+
 from __future__ import annotations
 
 import struct
 
 import pytest
 
-from tensorfold.gguf import (GGUFError, GGUF_TYPE_BOOL, GGUF_TYPE_FLOAT32,
-                             GGUF_TYPE_FLOAT64, GGUF_TYPE_INT8, GGUF_TYPE_INT16, GGUF_TYPE_INT32,
-                             GGUF_TYPE_INT64, GGUF_TYPE_STRING, GGUF_TYPE_UINT8, GGUF_TYPE_UINT16,
-                             GGUF_TYPE_UINT32, GGUF_TYPE_UINT64, GGUF_MAGIC, GGUF_VERSION,
-                             parse_gguf, parse_gguf_tensors)
+from tensorfold.gguf import (
+    GGUF_MAGIC,
+    GGUF_TYPE_BOOL,
+    GGUF_TYPE_FLOAT32,
+    GGUF_TYPE_FLOAT64,
+    GGUF_TYPE_INT8,
+    GGUF_TYPE_INT16,
+    GGUF_TYPE_INT32,
+    GGUF_TYPE_INT64,
+    GGUF_TYPE_STRING,
+    GGUF_TYPE_UINT8,
+    GGUF_TYPE_UINT16,
+    GGUF_TYPE_UINT32,
+    GGUF_TYPE_UINT64,
+    GGUF_VERSION,
+    GGUFError,
+    parse_gguf,
+    parse_gguf_tensors,
+)
 
 GGUF_MAGIC_LE = 0x46554747  # "GGUF"
 
@@ -29,14 +44,14 @@ GGUF_MAGIC_LE = 0x46554747  # "GGUF"
 # builders: turn values into raw GGUF header + metadata bytes
 # ---------------------------------------------------------------------------
 
+
 def _string(value: bytes | str) -> bytes:
     if isinstance(value, str):
         value = value.encode("utf-8")
     return struct.pack("<Q", len(value)) + value
 
 
-def _header(magic: int = GGUF_MAGIC_LE, version: int = GGUF_VERSION, n_tensors: int = 0,
-            n_kv: int = 0) -> bytes:
+def _header(magic: int = GGUF_MAGIC_LE, version: int = GGUF_VERSION, n_tensors: int = 0, n_kv: int = 0) -> bytes:
     return struct.pack("<IIQQ", magic, version, n_tensors, n_kv)
 
 
@@ -83,8 +98,13 @@ def _array_type(elem_type: int) -> int:
     return 9
 
 
-def _file(*, header: bytes = None, n_kv: int = 0, pairs: list[tuple[str, int, bytes]] = (),
-          header_kwargs: dict | None = None) -> bytes:
+def _file(
+    *,
+    header: bytes | None = None,
+    n_kv: int = 0,
+    pairs: list[tuple[str, int, bytes]] = (),
+    header_kwargs: dict | None = None,
+) -> bytes:
     if header is None:
         header = _header(n_kv=n_kv, **(header_kwargs or {}))
     out = bytearray(header)
@@ -96,6 +116,7 @@ def _file(*, header: bytes = None, n_kv: int = 0, pairs: list[tuple[str, int, by
 # ---------------------------------------------------------------------------
 # header: magic / version / truncated
 # ---------------------------------------------------------------------------
+
 
 def test_valid_header_parses():
     info = parse_gguf(_file(n_kv=0, header_kwargs={"n_tensors": 7}))
@@ -135,22 +156,26 @@ def test_zero_kv_with_only_header_is_valid():
 # metadata scalar value types
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("type_,value,expected", [
-    (GGUF_TYPE_UINT8, 0, 0),
-    (GGUF_TYPE_UINT8, 200, 200),
-    (GGUF_TYPE_INT8, -100, -100),
-    (GGUF_TYPE_UINT16, 0, 0),
-    (GGUF_TYPE_UINT16, 65535, 65535),
-    (GGUF_TYPE_INT16, -30000, -30000),
-    (GGUF_TYPE_UINT32, 2 ** 32 - 1, 2 ** 32 - 1),
-    (GGUF_TYPE_INT32, -2_000_000_000, -2_000_000_000),
-    (GGUF_TYPE_UINT64, 2 ** 64 - 1, 2 ** 64 - 1),
-    (GGUF_TYPE_INT64, -9_000_000_000_000_000_000, -9_000_000_000_000_000_000),
-    (GGUF_TYPE_FLOAT32, 1.25, 1.25),
-    (GGUF_TYPE_FLOAT64, 1.0 / 3.0, 1.0 / 3.0),
-    (GGUF_TYPE_BOOL, True, True),
-    (GGUF_TYPE_BOOL, False, False),
-])
+
+@pytest.mark.parametrize(
+    "type_,value,expected",
+    [
+        (GGUF_TYPE_UINT8, 0, 0),
+        (GGUF_TYPE_UINT8, 200, 200),
+        (GGUF_TYPE_INT8, -100, -100),
+        (GGUF_TYPE_UINT16, 0, 0),
+        (GGUF_TYPE_UINT16, 65535, 65535),
+        (GGUF_TYPE_INT16, -30000, -30000),
+        (GGUF_TYPE_UINT32, 2**32 - 1, 2**32 - 1),
+        (GGUF_TYPE_INT32, -2_000_000_000, -2_000_000_000),
+        (GGUF_TYPE_UINT64, 2**64 - 1, 2**64 - 1),
+        (GGUF_TYPE_INT64, -9_000_000_000_000_000_000, -9_000_000_000_000_000_000),
+        (GGUF_TYPE_FLOAT32, 1.25, 1.25),
+        (GGUF_TYPE_FLOAT64, 1.0 / 3.0, 1.0 / 3.0),
+        (GGUF_TYPE_BOOL, True, True),
+        (GGUF_TYPE_BOOL, False, False),
+    ],
+)
 def test_scalar_types_roundtrip(type_, value, expected):
     info = parse_gguf(_file(n_kv=1, pairs=[("test.key", type_, _scalar(type_, value))]))
     assert info.metadata["test.key"] == expected
@@ -178,19 +203,23 @@ def test_multiple_kv_pairs_preserve_order_and_values():
 # metadata array value types
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("elem_type,items", [
-    (GGUF_TYPE_UINT8, [1, 2, 3, 255]),
-    (GGUF_TYPE_INT8, [-5, 0, 5]),
-    (GGUF_TYPE_UINT16, [0, 123, 65535]),
-    (GGUF_TYPE_INT16, [-32000, 0, 32000]),
-    (GGUF_TYPE_UINT32, [0, 4_000_000_000]),
-    (GGUF_TYPE_INT32, [-2_000_000_000, 2_000_000_000]),
-    (GGUF_TYPE_UINT64, [0, 2 ** 64 - 1]),
-    (GGUF_TYPE_INT64, [-9_000_000_000_000_000_000, 9_000_000_000_000_000_000]),
-    (GGUF_TYPE_FLOAT32, [0.5, 1.25]),
-    (GGUF_TYPE_FLOAT64, [1.0 / 3.0]),
-    (GGUF_TYPE_BOOL, [True, False, True]),
-])
+
+@pytest.mark.parametrize(
+    "elem_type,items",
+    [
+        (GGUF_TYPE_UINT8, [1, 2, 3, 255]),
+        (GGUF_TYPE_INT8, [-5, 0, 5]),
+        (GGUF_TYPE_UINT16, [0, 123, 65535]),
+        (GGUF_TYPE_INT16, [-32000, 0, 32000]),
+        (GGUF_TYPE_UINT32, [0, 4_000_000_000]),
+        (GGUF_TYPE_INT32, [-2_000_000_000, 2_000_000_000]),
+        (GGUF_TYPE_UINT64, [0, 2**64 - 1]),
+        (GGUF_TYPE_INT64, [-9_000_000_000_000_000_000, 9_000_000_000_000_000_000]),
+        (GGUF_TYPE_FLOAT32, [0.5, 1.25]),
+        (GGUF_TYPE_FLOAT64, [1.0 / 3.0]),
+        (GGUF_TYPE_BOOL, [True, False, True]),
+    ],
+)
 def test_array_types_roundtrip(elem_type, items):
     type_ = _array_type(elem_type)
     info = parse_gguf(_file(n_kv=1, pairs=[("arr", type_, _array(elem_type, items))]))
@@ -227,6 +256,7 @@ def test_nested_array_type_is_rejected():
 # duplicate metadata keys
 # ---------------------------------------------------------------------------
 
+
 def test_duplicate_metadata_key_is_rejected():
     pairs = [
         ("dup", GGUF_TYPE_UINT32, _scalar(GGUF_TYPE_UINT32, 1)),
@@ -246,6 +276,7 @@ def test_empty_metadata_key_is_rejected():
 # ---------------------------------------------------------------------------
 # malformed lengths are rejected before reads
 # ---------------------------------------------------------------------------
+
 
 def test_string_key_length_overruns_buffer():
     # key length claims 100 bytes but only 3 remain
@@ -292,6 +323,7 @@ def test_missing_value_is_rejected():
 # tensor payload is out of scope: parse stops at end of metadata
 # ---------------------------------------------------------------------------
 
+
 def test_tensor_payload_is_not_touched():
     # header declares 2 tensors; after the metadata section there is garbage.
     # the reader must stop at metadata and not try to read tensor data.
@@ -320,20 +352,22 @@ GGML_Q8_0 = 8
 GGML_Q2_K = 10
 GGML_IQ2_XXS = 16
 
+
 def _align(n: int) -> int:
     return (n + 31) // 32 * 32
 
 
 def _tensor_desc(name: str, dims: list, type_id: int, offset: int) -> bytes:
-    return (_string(name.encode("utf-8"))
-            + struct.pack("<I", len(dims))
-            + b"".join(struct.pack("<Q", d) for d in dims)
-            + struct.pack("<I", type_id)
-            + struct.pack("<Q", offset))
+    return (
+        _string(name.encode("utf-8"))
+        + struct.pack("<I", len(dims))
+        + b"".join(struct.pack("<Q", d) for d in dims)
+        + struct.pack("<I", type_id)
+        + struct.pack("<Q", offset)
+    )
 
 
-def _tensor_file(*, n_tensors, descriptors=(), data_len=0, pairs=(), n_kv=0,
-                 header_kwargs=None):
+def _tensor_file(*, n_tensors, descriptors=(), data_len=0, pairs=(), n_kv=0, header_kwargs=None):
     """Header + metadata + tensor descriptors + 32-byte-aligned data section."""
     header = _header(n_tensors=n_tensors, n_kv=n_kv, **(header_kwargs or {}))
     out = bytearray(header)
@@ -360,9 +394,7 @@ def test_tensor_inventory_exact_spans_and_shapes():
     # independent oracle for the data section start
     data_offset = _align(len(header) + len(desc_bytes))
 
-    inv = parse_gguf_tensors(_tensor_file(
-        n_tensors=3, descriptors=descs,
-        data_len=data_offset + 416 + 16896))
+    inv = parse_gguf_tensors(_tensor_file(n_tensors=3, descriptors=descs, data_len=data_offset + 416 + 16896))
 
     assert inv.info.header.n_tensors == 3
     assert inv.data_offset == data_offset
@@ -395,16 +427,14 @@ def test_tensor_offset_not_aligned_is_rejected():
 
 
 def test_duplicate_tensor_name_is_rejected():
-    descs = [_tensor_desc("dup", [4], GGML_F32, 0),
-             _tensor_desc("dup", [4], GGML_F32, 32)]
+    descs = [_tensor_desc("dup", [4], GGML_F32, 0), _tensor_desc("dup", [4], GGML_F32, 32)]
     with pytest.raises(GGUFError, match="duplicate"):
         parse_gguf_tensors(_tensor_file(n_tensors=2, descriptors=descs, data_len=200))
 
 
 def test_overlapping_tensor_spans_are_rejected():
     # A spans [0, 64); B spans [32, 96) -> overlap
-    descs = [_tensor_desc("a", [16], GGML_F32, 0),
-             _tensor_desc("b", [16], GGML_F32, 32)]
+    descs = [_tensor_desc("a", [16], GGML_F32, 0), _tensor_desc("b", [16], GGML_F32, 32)]
     with pytest.raises(GGUFError, match="overlap"):
         parse_gguf_tensors(_tensor_file(n_tensors=2, descriptors=descs, data_len=200))
 
@@ -418,7 +448,7 @@ def test_tensor_span_out_of_bounds_is_rejected():
 
 def test_tensor_shape_overflow_is_rejected():
     # product of dims exceeds 2^64
-    desc = _tensor_desc("big", [2 ** 33, 2 ** 33], GGML_F32, 0)
+    desc = _tensor_desc("big", [2**33, 2**33], GGML_F32, 0)
     with pytest.raises(GGUFError, match="overflow"):
         parse_gguf_tensors(_tensor_file(n_tensors=1, descriptors=[desc]))
 
@@ -447,7 +477,6 @@ def test_f16_tensor_type_inventory():
     assert inv.tensors[0].size == 64
 
 
-
 def test_unknown_tensor_type_is_rejected():
     desc = _tensor_desc("weird", [4], 999, 0)
     with pytest.raises(GGUFError, match="type"):
@@ -458,4 +487,3 @@ def test_truncated_tensor_descriptor_is_rejected_before_read():
     # header claims one tensor but the descriptor table is missing
     with pytest.raises(GGUFError):
         parse_gguf_tensors(_tensor_file(n_tensors=1))
-
