@@ -182,3 +182,25 @@ def test_experts_cx_switch(layer, monkeypatch):
     ref = reference(x, sel, w, layer)
     assert ((out.float() - ref).norm() / ref.norm()).item() < 5e-3
 
+
+def test_f16_accumulation_mode(layer):
+    """f16_acc (the slots summed into fp16 with red.add.f16x2, then converted): error vs float64 reported, bounded."""
+
+    from tensorfold.cuda.exl3 import prompt_experts as pe
+
+    g = torch.Generator().manual_seed(4096)
+    R = 2048
+    x = torch.randn((R, D), generator=g).to(torch.bfloat16).cuda()
+    sel, w = picks(R, layer.count, g, skew=0.5)
+    ref = reference(x, sel, w, layer)
+    f32 = pe.prompt_routed(x, sel, w, layer, f16_acc=False)
+    f16 = pe.prompt_routed(x, sel, w, layer, f16_acc=True)
+    assert f16.dtype == torch.float32
+    rows = list(range(0, R, R // 16))
+    r64 = reference64(x, sel, w, layer, rows)
+    e32 = ((f32[rows].double() - r64).norm() / r64.norm()).item()
+    e16 = ((f16[rows].double() - r64).norm() / r64.norm()).item()
+    rel = ((f16 - ref).norm() / ref.norm()).item()
+    print(f"f16_acc: vs routed {rel:.3e}; vs float64 fp32-acc {e32:.3e}, f16-acc {e16:.3e}")
+    assert rel <= 2e-3 and e16 <= 2e-3
+
