@@ -3,6 +3,14 @@
 `tensorfold update` prints the sections below that are newer than the version you had. Each release's page on
 GitHub has the full notes and the measurements behind them.
 
+## Unreleased
+
+- **Qwen3.8-27B on Tesla V100 (sm_70).** The MLX 4-bit checkpoint and its DFlash2 drafter serve on Volta GPUs through
+  their own kernels (`mma.m8n8k4` decode matmuls and tree attention, a dense-fp16 cuBLASLt prompt path), with the
+  row-invariance contract kept, so drafted replies equal serial ones. One 32 GB V100 serves about 164,000 tokens with
+  the drafter and finds a needle at 158,000. On one V100, 175-190 tok/s on code and 55-80 on chat with drafts, 34-48
+  tok/s at 63,000 to 158,000 tokens of context.
+
 ## 0.6.5 (3 Oct 2026)
 
 - **Qwen3.6-35B-A3B drafts with its own MTP layer on Macs,** as on CUDA. Chains of up to four drafts are verified in

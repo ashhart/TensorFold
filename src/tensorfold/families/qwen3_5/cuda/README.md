@@ -26,6 +26,9 @@ produces on this machine. The bits differ from the Mac engine's; each engine is 
 | `b16.cu` | `b16_linear` | a plain fp16/bf16 projection (`x @ W.T + bias`) for the tensors an EXL3 pack stores at 16 bits, one warp per output | each output sums its own row in a fixed order, whatever the row count |
 | `exl3_load.py` | the shared module | `Exl3Linear` for the pack's EXL3 tensors: the rotation, the trellis GEMV of any codebook and width, and the split-K plan the weight's shape decides | the shared module's kernels are row-invariant by construction |
 | `dflash2.py` | `_dconv_kernel`, `_prep_kernel` | the DFlash2 draft model with 4-bit projections through the same lane matmul, fused dynamic convolution and norm plus rotary; on two GPUs each rank holds half the heads, MLP and draft vocabulary | drafts only propose; the target verifies every token |
+| `tensorfold/cuda/kernels/qmm_volta.cu` (sm_70) | `qmm884_kernel`, `reduce_kernel`; `dequant_kernel` and cuBLASLt | the decode matmul on Volta's `mma.m8n8k4`, weights repacked once at load (`qmm_volta.Tiled`), fp32 sums; prompt chunks through a dense fp16 copy of the weight and one cuBLASLt algorithm a shape | one thread holds one column and walks the row's inputs in group order; the K split depends only on the weight's shape and its slices add in order; the prompt algorithm is pinned with split-K off |
+| `tensorfold/cuda/kernels/attention_volta.cu` (sm_70) | `shared_kernel`, `tail_kernel` | `attention.py`'s chunk partials on `mma.m8n8k4` | every mma output depends on its own query row only; a key on a path and the same key committed give the same bits |
+| `draft_attention_volta.cu` (sm_70) | `split_kernel`, `fold_kernel` | DFlash2's block attention over the context split across blocks | drafts only propose |
 
 ## The rest of the package
 
