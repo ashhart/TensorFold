@@ -460,6 +460,9 @@ class Concat:
         return self._run(x, out, True)
 
 
+FUSED_ROWS = int(__import__("os").environ.get("TF_QMMF_FUSED_ROWS", "256"))   # rows from which slices meet in a block
+
+
 def _matmul(mode: int, w: torch.Tensor, bs: torch.Tensor | None, scale: float, n: int, k: int, npad: int,
             x: torch.Tensor, out: torch.Tensor | None) -> torch.Tensor:
     """x (M, K) bf16 -> (M, n) bf16; K slices from the shape alone, so a row's bits never depend on M."""
@@ -473,7 +476,9 @@ def _matmul(mode: int, w: torch.Tensor, bs: torch.Tensor | None, scale: float, n
         torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
     sk = qmm.split_k(n, k)
     part = torch.empty((sk, m, n), dtype=torch.float32, device=x.device) if sk > 8 else None
-    _ext().qmmf(x, w, bs, scale, y, part, mode, n, sk, npad, qmm.bucket(m), False)
+    # prompt rows: each block sums its tile's slices itself (bm 0), the cluster's order without the cluster
+    bm = 0 if sk > 1 and m >= FUSED_ROWS else qmm.bucket(m)
+    _ext().qmmf(x, w, bs, scale, y, part if bm else None, mode, n, sk, npad, bm, False)
     if out is not None and y is not out:
         out.copy_(y)
     return y
