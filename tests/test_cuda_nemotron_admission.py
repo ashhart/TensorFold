@@ -154,11 +154,8 @@ def test_nemotron_geometry_bounds_the_engine_twin_head_and_snapshots(monkeypatch
 @pytest.mark.parametrize("world", [1, 2])
 @pytest.mark.parametrize("drafts", [False, True])
 def test_long_window_budgets_serial_cache_and_snapshot_state(world: int, drafts: bool) -> None:
-    """Bound persistent cache allocations, including the lazy serial engine.
+    """Bound persistent cache allocations, including the lazy serial engine."""
 
-    :param world: Number of tensor-parallel ranks.
-    :param drafts: Whether the MTP head and its snapshots are allocated.
-    """
     from tensorfold.cuda.geometry import hybrid_geometry
 
     text = CONFIG | {"vocab_size": 1024}
