@@ -32,7 +32,7 @@ from .weights import Layer, MtpHead
 # attention tilings (tools/bench_attn_prefill.py on GB10), by window class - a function of the class alone, so every
 # decode window (serial or verify) shares one arithmetic: (keys a chunk program, keys a tile, warps, stages)
 ATTN_DECODE = (256, 32, 4, 2)
-ATTN_PROMPT = (1024, 64, 8, 2)
+ATTN_PROMPT = tuple(int(v) for v in os.environ.get("TF_GLM53_ATTN_PROMPT", "1024,64,8,2").split(","))  # chunk, keys/tile, warps, stages; chunk >= index_topk: one pass
 BT = 64                  # indexer: keys per scoring program
 MAX_ROWS = 128           # widest call of the row-invariant EXL3 linear; wider windows use the prompt GEMM
 PROMPT_ROWS = int(os.environ.get("TF_GLM53_PROMPT_ROWS", "4096"))   # prompt chunk: experts read once per chunk
@@ -149,7 +149,8 @@ def _qrope(Q, INV, QR, POS, H: tl.constexpr, QD: tl.constexpr, NOPE: tl.constexp
 
 @triton.jit
 def _attn_chunks(QA, QR, LC, TOK, POS, PO, PM, PL, R, H: tl.constexpr, LW: tl.constexpr, RD: tl.constexpr,
-                 K: tl.constexpr, CHK: tl.constexpr, KTT: tl.constexpr, SCALE: tl.constexpr):
+                 K: tl.constexpr, CHK: tl.constexpr, KTT: tl.constexpr, SCALE: tl.constexpr,
+                 DIRECT: tl.constexpr = False):
     """Program (row, chunk): all H heads of row r over entries [c CHK, (c + 1) CHK) of its key list - keys 0..p
     themselves while p < K, else TOK[r] (ascending). Scores are latent . latent + rope . rope; values are latents."""
     r = tl.program_id(0)
@@ -185,10 +186,13 @@ def _attn_chunks(QA, QR, LC, TOK, POS, PO, PM, PL, R, H: tl.constexpr, LW: tl.co
             o = o * alpha[:, None] + tl.dot(pr.to(tl.bfloat16), kv)
             l = l * alpha + tl.sum(pr, 1)
             m = next_m
-    base = (c * R + r) * H + hh
-    tl.store(PO + base[:, None] * LW + kl[None, :], o)
-    tl.store(PM + base, m)
-    tl.store(PL + base, l)
+    if DIRECT:          # one chunk covers the row's list: the normalized output itself (= _merge of one chunk) -> PO
+        tl.store(PO + (r * H + hh[:, None]) * LW + kl[None, :], (o / l[:, None]).to(tl.bfloat16))
+    else:
+        base = (c * R + r) * H + hh
+        tl.store(PO + base[:, None] * LW + kl[None, :], o)
+        tl.store(PM + base, m)
+        tl.store(PL + base, l)
 
 
 @triton.jit
@@ -682,6 +686,11 @@ def _attention_local(w: Weights, b: Buffers, R: int, cache, pos, nch, chk, kt, n
     c, H = w.cfg, w.heads
     lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
     n = nch * R * H
+    if nch == 1:                    # one pass: no partials, no merge (the same bits as one chunk + _merge)
+        _attn_chunks[(R, 1)](b.qlat, b.qrot, cache, b.tok, pos, b.ol, b.pm, b.pl, R, H=H, LW=lw, RD=rd,
+                             K=c.index_topk, CHK=chk, KTT=kt, SCALE=(nope + rd) ** -0.5, DIRECT=True, num_warps=nw,
+                             num_stages=ns)
+        return
     _attn_chunks[(R, nch)](b.qlat, b.qrot, cache, b.tok, pos, b.po[:n * lw], b.pm[:n], b.pl[:n], R, H=H, LW=lw,
                            RD=rd, K=c.index_topk, CHK=chk, KTT=kt, SCALE=(nope + rd) ** -0.5, num_warps=nw,
                            num_stages=ns)
@@ -763,7 +772,7 @@ def attention_part(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor
                                                     QD=nope + rd, NOPE=nope, NOPE_P=triton.next_power_of_2(nope),
                                                     RD=rd, LW=lw, BN=32, RBK=rbk, num_warps=4)
     chk, kt, nw, ns = ATTN_DECODE if R <= FAST_ROWS else ATTN_PROMPT
-    nch = c.index_topk // chk
+    nch = max(1, c.index_topk // chk)
     if dcp > 1:
         _attention_dcp(w, b, R, cache, pos, nch, chk, kt, nw, ns)
     else:
