@@ -76,6 +76,7 @@ class GlmDrafter(Drafter):
         if self.window + self.block + self.tap_in.shape[0] > RING:
             raise ValueError(f"drafter window {self.window} + block + tap batch exceeds the {RING}-slot ring")
         self.cap = capacity + self.block                 # the context bound add_taps checks (positions, not slots)
+        self.capacity = capacity                         # 0.6.1's add_taps checks .capacity (the base was built ring-sized)
         KV, hd = self.kvh, self.hd
         self.kc = [torch.zeros((KV, RING, hd), dtype=torch.bfloat16, device=self.dev) for _ in self.layers]
         self.vc = [torch.zeros((KV, RING, hd), dtype=torch.bfloat16, device=self.dev) for _ in self.layers]
