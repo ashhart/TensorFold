@@ -8,7 +8,7 @@ import os
 
 import torch
 
-MAX_BYTES = 1 << 20              # decode windows: 16 rows x 6144 fp32 = 384 KB; logits argmax rows: tiny
+MAX_BYTES = 1 << 20              # decode windows: up to 32 rows x 6144 fp32 = 768 KB; logits argmax rows: tiny
 
 
 class RoceReduce:
@@ -40,22 +40,26 @@ class RoceReduce:
         return self.rt.all_gather(x.reshape(-1), dim=0, out=out.view(-1))
 
     def _check(self, nccl) -> None:
-        """Every rank's sum must carry the same bits (compared through NCCL), else refuse to serve on RoCE."""
-        g = torch.Generator(device="cpu").manual_seed(1000 + self.rank)
-        x = (torch.randn(3, 6144, generator=g) * 10.0 ** (self.rank - 1)).cuda()
-        s = torch.empty_like(x)
-        self.all_reduce(x, s)
-        allv = torch.empty((self.world, 3, 6144), device="cuda")
-        nccl.all_gather(s, allv)
-        ref = allv.new_zeros(3, 6144)
-        parts = torch.empty((self.world, 3, 6144), device="cuda")
-        nccl.all_gather(x, parts)
-        ref = parts[0].clone()
-        for r in range(1, self.world):
-            ref += parts[r]
-        same = all(torch.equal(allv[r], allv[0]) for r in range(self.world))
-        order = torch.equal(allv[0], ref)
+        """Every rank's sum must carry the same bits (compared through NCCL), else refuse to serve on RoCE; checked
+        at a 3-row window and the widest decode window (fused.DECODE_ROWS: concurrent DFlash2 rounds)."""
+        from .fused import DECODE_ROWS
+
+        same = order = True
+        for rows in (3, DECODE_ROWS):
+            g = torch.Generator(device="cpu").manual_seed(1000 + self.rank + rows)
+            x = (torch.randn(rows, 6144, generator=g) * 10.0 ** (self.rank - 1)).cuda()
+            s = torch.empty_like(x)
+            self.all_reduce(x, s)
+            allv = torch.empty((self.world, rows, 6144), device="cuda")
+            nccl.all_gather(s, allv)
+            parts = torch.empty((self.world, rows, 6144), device="cuda")
+            nccl.all_gather(x, parts)
+            ref = parts[0].clone()
+            for r in range(1, self.world):
+                ref += parts[r]
+            same &= all(torch.equal(allv[r], allv[0]) for r in range(self.world))
+            order &= torch.equal(allv[0], ref)
         if not same:
             raise RuntimeError("RoCE all-reduce: ranks hold different bits")
         print(f"[tensorfold] RoCE one-shot reduce ready (ranks bit-equal: {same}; equals the NCCL rank-order sum: "
-              f"{order})", flush=True)
+              f"{order}; windows of 3 and {DECODE_ROWS} rows)", flush=True)
