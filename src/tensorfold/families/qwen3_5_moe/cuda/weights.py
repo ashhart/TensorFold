@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 
 from tensorfold.cuda import experts as grouped
 from tensorfold.cuda.moe import Routed
+from tensorfold.cuda.nvfp4 import experts as nvx
 from tensorfold.families.qwen3_5.cuda.weights import Attention, QLinear, Weights, load as load_dense
 
 MTP_FILE = "mtp-4bit.safetensors"      # the MTP layer beside a checkpoint whose conversion dropped it
@@ -51,11 +52,35 @@ def routed(prefix: str, get: Callable, top_k: int) -> Routed:
     return Routed(router.to(torch.bfloat16).contiguous(), experts, int(top_k))
 
 
+def routed4(prefix: str, t, cfg) -> dict[str, Routed]:
+    """A ModelOpt layer's router (bf16, the shared expert's gate row last) and its NVFP4 experts, the shared one last."""
+    # The experts are weight-only NVFP4 (W4A16): the grouped kernel reads bf16 rows, so input scales go unused.
+
+    def take(name: str) -> torch.Tensor:
+        return t.pop(name)
+
+    def proj(names: list[str]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        words, scales, glob = [], [], []
+        for n in names:
+            words.append(take(n + ".weight"))
+            scales.append(take(n + ".weight_scale").view(torch.uint8))
+            glob.append(take(n + ".weight_scale_2").float().reshape(()))
+            if n + ".input_scale" in t:
+                take(n + ".input_scale")
+        return torch.stack(words), torch.stack(scales), torch.stack(glob)
+
+    experts = [f"{prefix}experts.{e}." for e in range(cfg.experts)] + [prefix + "shared_expert."]
+    gate, up, down = (proj([e + f"{p}_proj" for e in experts]) for p in ("gate", "up", "down"))
+    router = torch.cat([take(prefix + "gate.weight"), take(prefix + "shared_expert_gate.weight")])
+    return {"moe": Routed(router.to(torch.bfloat16).contiguous(), nvx.make(gate, up, down), int(cfg.top_k))}
+
+
 def load(model_dir: str | Path) -> Weights:
     """The checkpoint on the GPU, projections packed for the shared matmul and experts for the grouped kernels."""
 
     return load_dense(model_dir, tiled=True,
-                      mlp=lambda prefix, get, qlinear, cfg: {"moe": routed(prefix, get, cfg.top_k)})
+                      mlp=lambda prefix, get, qlinear, cfg: {"moe": routed(prefix, get, cfg.top_k)},
+                      nvfp4_mlp=routed4)
 
 
 @dataclass
@@ -71,6 +96,7 @@ class MTP:
     attn: Attention
     moe: Routed
     norm: torch.Tensor
+    head: Any = None          # an NVFP4 checkpoint's draft head: lm_head's rows of the draft ids (else the model's)
 
 
 def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
@@ -93,7 +119,65 @@ def mtp_tensors(model_dir: str | Path) -> dict[str, torch.Tensor] | None:
     return out or None
 
 
-def load_mtp(model_dir: str | Path, w: Weights, device: str = "cuda") -> MTP | None:
+def fp4(w: torch.Tensor):
+    """A bf16 [N, K] weight as a W4A16 NVFP4 linear (ModelOpt's recipe): the MTP layer only drafts."""
+
+    from tensorfold.cuda.nvfp4.linear import Fp4Linear
+
+    words, scales, g = nvx.quantize(w[None].contiguous())
+    return Fp4Linear.from_checkpoint(words[0], scales[0], float(g[0]))
+
+
+def load_mtp_nvfp4(model_dir: Path, w: Weights, raw: dict[str, torch.Tensor], ids, device: str) -> MTP:
+    """A ModelOpt checkpoint's bf16 MTP layer (ModelOpt leaves ``mtp*`` unquantized) in W4A16 NVFP4, its norms recentred."""
+
+    from tensorfold.cuda.direct_read import SafeTensors
+    from tensorfold.cuda.nvfp4.linear import Fp4Linear
+
+    def get(name: str) -> torch.Tensor:
+        return raw.pop("mtp." + name).to(device)
+
+    def norm(name: str) -> torch.Tensor:
+        v = get(name)                                    # stored as gamma - 1, like the model's own norms
+        return (v.float() + 1.0).to(torch.bfloat16).contiguous()
+
+    d = w.config.hidden
+    fc = get("fc.weight")
+    p = "layers.0."
+    attn = Attention(q=fp4(get(p + "self_attn.q_proj.weight")), k=fp4(get(p + "self_attn.k_proj.weight")),
+                     v=fp4(get(p + "self_attn.v_proj.weight")), o=fp4(get(p + "self_attn.o_proj.weight")),
+                     q_norm=norm(p + "self_attn.q_norm.weight"), k_norm=norm(p + "self_attn.k_norm.weight"))
+    m = p + "mlp."
+    gate_up, down = get(m + "experts.gate_up_proj"), get(m + "experts.down_proj")      # [E, 2NI, D], [E, D, NI]
+    ni = gate_up.shape[1] // 2
+    shared = [get(m + f"shared_expert.{x}_proj.weight")[None] for x in ("gate", "up", "down")]
+    gate = nvx.quantize(torch.cat([gate_up[:, :ni], shared[0]]))
+    up = nvx.quantize(torch.cat([gate_up[:, ni:], shared[1]]))
+    dn = nvx.quantize(torch.cat([down, shared[2]]))
+    del gate_up, down, shared
+    router = torch.cat([get(m + "gate.weight"), get(m + "shared_expert_gate.weight")]).to(torch.bfloat16)
+    head = None
+    if ids is not None:                                  # lm_head's draft rows, read again as stored
+        index = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
+        f = SafeTensors(sorted({model_dir / index[n] for n in ("lm_head.weight", "lm_head.weight_scale",
+                                                                   "lm_head.weight_scale_2")}))
+        rows = torch.as_tensor(ids, dtype=torch.int64)
+        hw = f.get("lm_head.weight")[rows].to(device)
+        hs = f.get("lm_head.weight_scale").view(torch.uint8)[rows].to(device)
+        head = Fp4Linear.from_checkpoint(hw, hs, float(f.get("lm_head.weight_scale_2").float().reshape(-1)[0]))
+        f.close()
+    out = MTP(norm_e=norm("pre_fc_norm_embedding.weight"), norm_h=norm("pre_fc_norm_hidden.weight"),
+              fc_e=fp4(fc[:, :d]), fc_h=fp4(fc[:, d:]), input_norm=norm(p + "input_layernorm.weight"),
+              post_norm=norm(p + "post_attention_layernorm.weight"), attn=attn,
+              moe=Routed(router.contiguous(), nvx.make(gate, up, dn), w.config.top_k), norm=norm("norm.weight"),
+              head=head)
+    if raw:
+        raise ValueError(f"unused MTP tensors: {sorted(raw)[:5]}")
+    torch.cuda.empty_cache()
+    return out
+
+
+def load_mtp(model_dir: str | Path, w: Weights, device: str = "cuda", ids=None) -> MTP | None:
     """The MTP layer on the GPU, packed like the model's own layers, or None if the checkpoint has none."""
 
     from tensorfold.families.qwen3_5.cuda.qmm_fast import tile
@@ -101,6 +185,8 @@ def load_mtp(model_dir: str | Path, w: Weights, device: str = "cuda") -> MTP | N
     raw = mtp_tensors(model_dir)
     if raw is None:
         return None
+    if w.quant == "nvfp4":
+        return load_mtp_nvfp4(Path(model_dir), w, raw, ids, device)
 
     def get(name: str) -> torch.Tensor:
         return raw.pop("mtp." + name).to(device)

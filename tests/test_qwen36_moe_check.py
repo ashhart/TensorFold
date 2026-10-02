@@ -38,3 +38,23 @@ def test_cuda_keeps_its_four_bit_groups_of_64(tmp_path, monkeypatch):
     qwen3_5_moe.check(_dir(tmp_path, UNIFORM))
     with pytest.raises(ValueError, match="groups of 64"):
         qwen3_5_moe.check(_dir(tmp_path, MIXED))
+
+
+# nvidia/Qwen3.6-35B-A3B-NVFP4: FP8 projections, W4A16 NVFP4 experts and lm_head, a bf16 MTP layer
+MODELOPT = {"model_type": "qwen3_5_moe", "quantization_config": {
+    "quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "ignore": ["mtp*"],
+    "config_groups": {"group_0": {"weights": {"num_bits": 8, "type": "float"}},
+                      "group_1": {"weights": {"num_bits": 4, "type": "float", "group_size": 16}}},
+    "quantized_layers": {"model.language_model.layers.0.mlp.experts": {"quant_algo": "W4A16_NVFP4", "group_size": 16},
+                         "lm_head": {"quant_algo": "W4A16_NVFP4", "group_size": 16}}}}
+
+
+def test_cuda_reads_a_modelopt_checkpoint(tmp_path, monkeypatch):
+    from tensorfold import families
+
+    monkeypatch.setattr("sys.platform", "linux")
+    qwen3_5_moe.check(_dir(tmp_path, MODELOPT))
+    family = families.families()["qwen3_5_moe"]
+    families.require_readable(family, MODELOPT, "cuda")
+    with pytest.raises(ValueError, match="does not read"):
+        families.require_readable(family, MODELOPT, "mlx")
