@@ -110,8 +110,11 @@ class SharedExperts:
     def decode(self, x, pick, wts, scratch, out, R: int) -> None:
         self.tfx.routed(x, pick, wts, self.ex, scratch, out, R)
 
-    # prompt chunks: cuda-exl3's grouped GEMM, one width group after another accumulating into one output
+    # prompt chunks: TensorFold's own prompt kernel when TF_EXL3_PROMPT_EXPERTS=1 (off by default), else cuda-exl3's
+    # grouped GEMM, one width group after another accumulating into one output
     def prefill(self, x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor) -> torch.Tensor:
+        if _prompt_kernel_on() and self._prompt_ok():
+            return self._prefill_tf(x, pick, wts)
         ops, align, has_out = _ops()
         tokens, T = x.shape[0], pick.shape[1]
         out = None
@@ -137,3 +140,34 @@ class SharedExperts:
                 y = ops.exl3_moe_gemm(*args)
                 out = y if out is None else out.add_(y)
         return out
+
+    def _prompt_ok(self) -> bool:
+        ok = getattr(self, "_prompt_supported", None)
+        if ok is None:
+            from tensorfold.cuda.exl3 import prompt_experts as pe
+
+            ok = self._prompt_supported = pe.supported(self.ex)
+        return ok
+
+    def _prefill_tf(self, x: torch.Tensor, pick: torch.Tensor, wts: torch.Tensor) -> torch.Tensor:
+        """prompt_experts.prompt_routed: every width in 3 launches, no rotated inputs materialized; bf16 out."""
+
+        from tensorfold.cuda.exl3 import prompt_experts as pe
+
+        R, S = pick.shape
+        key = (x.device, S)
+        sc = _PROMPT_SCRATCH.get(key)
+        if sc is None or sc.rows < min(R, pe.CHUNK_ROWS):
+            sc = _PROMPT_SCRATCH[key] = pe.PromptScratch(self.ex, min(R, pe.CHUNK_ROWS), S, device=x.device)
+        out = torch.empty((R, self.dims), dtype=torch.bfloat16, device=x.device)
+        return pe.prompt_routed(x, pick.to(torch.int32), wts, self.ex, out=out, scratch=sc)
+
+
+_PROMPT_SCRATCH: dict = {}             # one scratch a (device, slots): layers run one after another
+
+
+def _prompt_kernel_on() -> bool:
+    import os
+
+    return os.environ.get("TF_EXL3_PROMPT_EXPERTS", "0") == "1"
+
