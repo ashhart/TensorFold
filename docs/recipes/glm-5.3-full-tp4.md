@@ -57,6 +57,12 @@ DFlash2 drafts: add `DOCKER_ENV="-e TF_GLM53_DFLASH=/models/GLM-5.3-DFlash2"` (e
 `"normed/normed"` (MTP, default), `"dflash"`, or `"auto"` (MTP or DFlash2 each round, whichever is emitting faster).
 `~/tf-glm53/DFLASH_CFG` on every node (`{"depth": 7, "confidence": 0.4}`) tunes DFlash2 at run time.
 
+Concurrent requests: `tools/tp4_run.sh serve --context 32768 --parallel 4` decodes up to four requests together
+(each in its own cache slot of `--context` tokens: 94 KiB a token a rank, so 4 x 32K = 11.8 GiB a rank), their
+[token + MTP drafts] windows sharing each round's forward; every reply is token-identical to the same request alone.
+Needs the replicated cache (`--context` <= 200K) and streams x (MTP drafts + 1) <= 16; DFlash2 is not used with
+`--parallel` > 1. Prompts fill one chunk (up to 4,096 tokens) between decode rounds.
+
 Node settings that matter on GB10:
 
 - `sysctl vm.compaction_proactiveness=0` on every node: proactive memory compaction migrates pages under the GPU and

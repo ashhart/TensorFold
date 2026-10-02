@@ -46,4 +46,4 @@ def cuda_engine(model_dir: str | Path, *, drafter: str = "", tp: int = 1, rank: 
     # eager engine: MTP drafts verified exactly, token-level DSA (docs/design/glm-moe-dsa-tp4.md)
     k = 0 if no_drafts else (2 if mtp_drafts is None else int(mtp_drafts))
     return Glm53Engine(Path(model_dir), rank=int(rank), master=master, port=int(master_port),
-                       context=options.get("context"), mtp_drafts=k)
+                       context=options.get("context"), mtp_drafts=k, parallel=int(options.get("parallel") or 1))

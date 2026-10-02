@@ -57,6 +57,7 @@ MTP_MODES = ("raw/raw", "raw/normed", "normed/raw", "normed/normed",
              "raw/raw:full", "raw/normed:full", "normed/raw:full", "normed/normed:full",   # ":full": full-vocab drafts
              "dflash", "auto")                    # DFlash2 drafter (dflash.py); auto: MTP or DFlash2 each round
 FAST_ROWS = 16           # windows up to this many rows reduce over RoCE (when available); prompt chunks use NCCL
+DECODE_ROWS = 32         # widest decode window (Buffers(decode=True)): concurrent DFlash2 rounds, 4 streams x 8 rows
 DRAFT_VOCAB = int(os.environ.get("TF_GLM53_DRAFT_VOCAB", "32768"))  # draft head: the lowest ids (BPE: most frequent)
 SPECIALS = 128           # ... plus the vocabulary's last ids (GLM's special tokens)
 TUNE = os.environ.get("TF_GLM53_TUNE", "1") != "0"
@@ -70,15 +71,20 @@ def _rope_pair(a, b, cos, sin):
 
 @triton.jit
 def _kv_write(KVA, kva_stride, NW, LC, POS, INV, eps, LW: tl.constexpr, RD: tl.constexpr, DCP: tl.constexpr = 1,
-              RANK: tl.constexpr = 0):
+              RANK: tl.constexpr = 0, BASE=None, ROWS: tl.constexpr = False):
     """Row r at position POS + r: cache[p, :LW] = RMSNorm(kva[:LW]), cache[p, LW:] = RoPE(kva[LW:LW + RD]) (GLM's
-    interleaved pairs written evens then odds). DCP > 1: only the owner of p (p % DCP) stores it, at slot p // DCP."""
+    interleaved pairs written evens then odds). DCP > 1: only the owner of p (p % DCP) stores it, at slot p // DCP.
+    ROWS (several streams in one window): row r at position POS[r], in its stream's cache rows from BASE[r]."""
     r = tl.program_id(0)
-    pg = (tl.load(POS) + r).to(tl.int64)
-    if DCP > 1:
-        if pg % DCP != RANK:
-            return
-    p = pg // DCP
+    if ROWS:
+        pg = tl.load(POS + r).to(tl.int64)
+        p = tl.load(BASE + r).to(tl.int64) + pg
+    else:
+        pg = (tl.load(POS) + r).to(tl.int64)
+        if DCP > 1:
+            if pg % DCP != RANK:
+                return
+        p = pg // DCP
     ang_p = pg
     k = tl.arange(0, LW)
     x = tl.load(KVA + r * kva_stride + k).to(tl.float32)
@@ -96,7 +102,8 @@ def _kv_write(KVA, kva_stride, NW, LC, POS, INV, eps, LW: tl.constexpr, RD: tl.c
 
 @triton.jit
 def _absorb(Q, WK, INV, QA, QR, POS, R, H: tl.constexpr, QD: tl.constexpr, NOPE: tl.constexpr,
-            NOPE_P: tl.constexpr, RD: tl.constexpr, LW: tl.constexpr, BN: tl.constexpr, RBK: tl.constexpr):
+            NOPE_P: tl.constexpr, RD: tl.constexpr, LW: tl.constexpr, BN: tl.constexpr, RBK: tl.constexpr,
+            ROWS: tl.constexpr = False):
     """Program (head, latent block, row block): QA[r, h, n] = q_nope[r, h] . WK[h, :, n] (one fp32 sum), and on
     latent block 0 the rotated q_rot[r, h] at position POS + r. Rows never meet, so a row's bits never depend on R."""
     h = tl.program_id(0)
@@ -118,7 +125,10 @@ def _absorb(Q, WK, INV, QA, QR, POS, R, H: tl.constexpr, QD: tl.constexpr, NOPE:
             if nb == 0:
                 a = tl.load(Q + (r * H + h) * QD + NOPE + 2 * i).to(tl.float32)
                 b = tl.load(Q + (r * H + h) * QD + NOPE + 2 * i + 1).to(tl.float32)
-                ang = (P + r).to(tl.float32) * inv
+                if ROWS:                                 # the row's own position (several streams)
+                    ang = tl.load(POS + r).to(tl.float32) * inv
+                else:
+                    ang = (P + r).to(tl.float32) * inv
                 ra, rb = _rope_pair(a, b, tl.cos(ang), tl.sin(ang))
                 tl.store(QR + (r * H + h) * RD + i, ra.to(tl.bfloat16))
                 tl.store(QR + (r * H + h) * RD + RD // 2 + i, rb.to(tl.bfloat16))
@@ -142,14 +152,18 @@ def _expand(OL, WV, OUT, R, H: tl.constexpr, DV: tl.constexpr, LW: tl.constexpr,
 
 
 @triton.jit
-def _qrope(Q, INV, QR, POS, H: tl.constexpr, QD: tl.constexpr, NOPE: tl.constexpr, RD: tl.constexpr):
+def _qrope(Q, INV, QR, POS, H: tl.constexpr, QD: tl.constexpr, NOPE: tl.constexpr, RD: tl.constexpr,
+           ROWS: tl.constexpr = False):
     """Program (row, head): q_rot at position POS + r (the wide-window companion of the batched absorb)."""
     r = tl.program_id(0)
     h = tl.program_id(1)
     i = tl.arange(0, RD // 2)
     a = tl.load(Q + (r * H + h) * QD + NOPE + 2 * i).to(tl.float32)
     b = tl.load(Q + (r * H + h) * QD + NOPE + 2 * i + 1).to(tl.float32)
-    ang = (tl.load(POS) + r).to(tl.float32) * tl.load(INV + i)
+    if ROWS:
+        ang = tl.load(POS + r).to(tl.float32) * tl.load(INV + i)
+    else:
+        ang = (tl.load(POS) + r).to(tl.float32) * tl.load(INV + i)
     ra, rb = _rope_pair(a, b, tl.cos(ang), tl.sin(ang))
     tl.store(QR + (r * H + h) * RD + i, ra.to(tl.bfloat16))
     tl.store(QR + (r * H + h) * RD + RD // 2 + i, rb.to(tl.bfloat16))
@@ -158,12 +172,16 @@ def _qrope(Q, INV, QR, POS, H: tl.constexpr, QD: tl.constexpr, NOPE: tl.constexp
 @triton.jit
 def _attn_chunks(QA, QR, LC, TOK, POS, PO, PM, PL, R, H: tl.constexpr, LW: tl.constexpr, RD: tl.constexpr,
                  K: tl.constexpr, CHK: tl.constexpr, KTT: tl.constexpr, SCALE: tl.constexpr,
-                 DIRECT: tl.constexpr = False):
+                 DIRECT: tl.constexpr = False, BASE=None, ROWS: tl.constexpr = False):
     """Program (row, chunk): all H heads of row r over entries [c CHK, (c + 1) CHK) of its key list - keys 0..p
     themselves while p < K, else TOK[r] (ascending). Scores are latent . latent + rope . rope; values are latents."""
     r = tl.program_id(0)
     c = tl.program_id(1)
-    p = tl.load(POS) + r
+    if ROWS:                                     # several streams: the row's position, its stream's cache rows
+        p = tl.load(POS + r)
+        LC = LC + tl.load(BASE + r).to(tl.int64) * (LW + RD)
+    else:
+        p = tl.load(POS) + r
     n = tl.minimum(p + 1, K)
     hh = tl.arange(0, H)
     kl = tl.arange(0, LW)
@@ -305,15 +323,19 @@ def _dcp_combine(ORECV, LRECV, OUT, R, SS, SSL, H: tl.constexpr, LW: tl.constexp
 
 @triton.jit
 def _ik_write(IK, NW, NB, INV, IC, POS, eps, D: tl.constexpr, RD: tl.constexpr, DCP: tl.constexpr = 1,
-              RANK: tl.constexpr = 0):
+              RANK: tl.constexpr = 0, BASE=None, ROWS: tl.constexpr = False):
     """Index key of row r: LayerNorm(ik) (fp32, with bias) to bf16, RoPE on its first RD dims, into IC[POS + r]
     (DCP > 1: the owner's slot p // DCP only)."""
     r = tl.program_id(0)
-    pg = (tl.load(POS) + r).to(tl.int64)
-    if DCP > 1:
-        if pg % DCP != RANK:
-            return
-    p = pg // DCP
+    if ROWS:
+        pg = tl.load(POS + r).to(tl.int64)
+        p = tl.load(BASE + r).to(tl.int64) + pg
+    else:
+        pg = (tl.load(POS) + r).to(tl.int64)
+        if DCP > 1:
+            if pg % DCP != RANK:
+                return
+        p = pg // DCP
     d = tl.arange(0, D)
     x = tl.load(IK + r * D + d)
     mu = tl.sum(x, axis=0) / D
@@ -334,7 +356,7 @@ def _ik_write(IK, NW, NB, INV, IC, POS, eps, D: tl.constexpr, RD: tl.constexpr, 
 
 
 @triton.jit
-def _iq_rope(Q, INV, POS, NH: tl.constexpr, D: tl.constexpr, RD: tl.constexpr):
+def _iq_rope(Q, INV, POS, NH: tl.constexpr, D: tl.constexpr, RD: tl.constexpr, ROWS: tl.constexpr = False):
     """Program (row, head): the index query's first RD dims rotated at position POS + r, in place (bf16)."""
     r = tl.program_id(0)
     h = tl.program_id(1)
@@ -342,7 +364,10 @@ def _iq_rope(Q, INV, POS, NH: tl.constexpr, D: tl.constexpr, RD: tl.constexpr):
     i = tl.arange(0, RD // 2)
     a = tl.load(base + 2 * i).to(tl.float32)
     b = tl.load(base + 2 * i + 1).to(tl.float32)
-    ang = (tl.load(POS) + r).to(tl.float32) * tl.load(INV + i)
+    if ROWS:
+        ang = tl.load(POS + r).to(tl.float32) * tl.load(INV + i)
+    else:
+        ang = (tl.load(POS) + r).to(tl.float32) * tl.load(INV + i)
     ra, rb = _rope_pair(a, b, tl.cos(ang), tl.sin(ang))
     tl.debug_barrier()
     tl.store(base + i, ra.to(tl.bfloat16))
@@ -352,12 +377,16 @@ def _iq_rope(Q, INV, POS, NH: tl.constexpr, D: tl.constexpr, RD: tl.constexpr):
 @triton.jit
 def _index_scores(Q, W, IC, POS, OUT, T, R0, NH: tl.constexpr, D: tl.constexpr, BTT: tl.constexpr,
                   WSCALE: tl.constexpr, QSCALE: tl.constexpr, DCP: tl.constexpr = 1, RANK: tl.constexpr = 0,
-                  PACK: tl.constexpr = True):
+                  PACK: tl.constexpr = True, BASE=None, ROWS: tl.constexpr = False):
     """Program (row, key block): score[t] = sum_h w[h] relu(q[h] . k[t] QSCALE) for keys t <= POS + r, packed with
     the key into one int64 that orders by score, then lower position first (so top-k is tie-free); later keys -> min."""
     r = tl.program_id(0)                     # row r of this block: window row R0 + r
     t0 = tl.program_id(1) * BTT
-    p = tl.load(POS) + R0 + r
+    if ROWS:                                 # several streams: the row's position, its stream's index-key rows
+        p = tl.load(POS + R0 + r)
+        IC = IC + tl.load(BASE + R0 + r).to(tl.int64) * D
+    else:
+        p = tl.load(POS) + R0 + r
     t = t0 + tl.arange(0, BTT)                        # this rank's cache slots; their global positions:
     g = t * DCP + RANK
     ok = (g <= p) & (t < T)
@@ -593,33 +622,79 @@ def tune_linears(lins: list, rows: int = 3, iters: int = 20) -> dict:
 
 class State:
     """The committed caches: a 576-wide latent row a token and layer, index keys on full-indexer layers, the same
-    for the MTP layer; positions live on the device (``pos``: the target window's first row, ``mpos``: the MTP's)."""
+    for the MTP layer; positions live on the device (``pos``: the target window's first row, ``mpos``: the MTP's).
+    ``slots`` > 1 (concurrent streams): each cache holds that many streams' rows back to back (``local`` rows each);
+    ``view(s)`` is stream s alone (the one-stream kernels on its rows), ``Rows`` a window over several."""
 
-    def __init__(self, w: Weights, capacity: int) -> None:
+    def __init__(self, w: Weights, capacity: int, slots: int = 1) -> None:
         c, dev = w.cfg, w.device
-        self.capacity = capacity
+        self.capacity, self.slots = capacity, slots
         lw = c.kv_lora_rank + c.qk_rope_head_dim
         n = len(w.layers)
         local = -(-capacity // w.dcp) + 1               # DCP: this rank's positions p % dcp == rank at p // dcp
-        self.kc = [torch.zeros((local, lw), dtype=torch.bfloat16, device=dev) for _ in range(n)]
-        self.ic = {L.index: torch.zeros((local, c.index_head_dim), dtype=torch.bfloat16, device=dev)
+        if slots > 1 and w.dcp > 1:
+            raise ValueError("concurrent streams need decode context parallelism off (DCP 1)")
+        self.local = local
+        rows = local * slots
+        self.kc = [torch.zeros((rows, lw), dtype=torch.bfloat16, device=dev) for _ in range(n)]
+        self.ic = {L.index: torch.zeros((rows, c.index_head_dim), dtype=torch.bfloat16, device=dev)
                    for L in w.layers if L.indexer is not None}
         self.pos = torch.zeros((1,), dtype=torch.int32, device=dev)
         self.mpos = torch.zeros((1,), dtype=torch.int32, device=dev)
+        self.mkc = self.mic = None
         if w.mtp is not None:
-            self.mkc = torch.zeros((local, lw), dtype=torch.bfloat16, device=dev)
-            self.mic = torch.zeros((local, c.index_head_dim), dtype=torch.bfloat16, device=dev)
+            self.mkc = torch.zeros((rows, lw), dtype=torch.bfloat16, device=dev)
+            self.mic = torch.zeros((rows, c.index_head_dim), dtype=torch.bfloat16, device=dev)
+
+    def nbytes(self) -> int:
+        ts = self.kc + list(self.ic.values()) + [t for t in (self.mkc, self.mic) if t is not None]
+        return sum(t.numel() * t.element_size() for t in ts)
+
+    def view(self, s: int) -> "SlotView":
+        return SlotView(self, s)
+
+
+class SlotView:
+    """Stream s of a State with slots: its cache rows as views (the one-stream kernels address them from 0), its own
+    device positions."""
+
+    def __init__(self, st: State, s: int) -> None:
+        a, e = s * st.local, (s + 1) * st.local
+        self.capacity, self.local = st.capacity, st.local
+        self.kc = [t[a:e] for t in st.kc]
+        self.ic = {i: t[a:e] for i, t in st.ic.items()}
+        self.mkc = None if st.mkc is None else st.mkc[a:e]
+        self.mic = None if st.mic is None else st.mic[a:e]
+        self.pos = torch.zeros((1,), dtype=torch.int32, device=st.pos.device)
+        self.mpos = torch.zeros((1,), dtype=torch.int32, device=st.pos.device)
+
+
+class Rows:
+    """A window over several streams of a State with slots: per-row positions and cache bases (int32 device tables
+    the caller fills before each call or graph replay); the target's (pos, base) and the MTP layer's (mpos, mbase)."""
+
+    def __init__(self, st: State, pos: torch.Tensor, base: torch.Tensor, mpos: torch.Tensor,
+                 mbase: torch.Tensor) -> None:
+        self.kc, self.ic, self.mkc, self.mic = st.kc, st.ic, st.mkc, st.mic
+        self.pos, self.base, self.mpos, self.mbase = pos, base, mpos, mbase
 
 
 class Buffers:
-    """Scratch for windows of up to ``rows`` rows (sliced [:R]); ``score_cols``: the indexer's widest key range."""
+    """Scratch for windows of up to ``rows`` rows (sliced [:R]); ``score_cols``: the indexer's widest key range.
+    ``decode``: every window these buffers serve is a decode / verify window, whatever its width (up to DECODE_ROWS):
+    the RoCE one-shot (or all-gather + rank-order sum) reductions, the decode attention tiling and the head buffers
+    of a lone request's windows, so a row keeps its bits however many rows share the window. Otherwise (prompt
+    chunks) only windows up to FAST_ROWS rows are decode windows."""
 
-    def __init__(self, w: Weights, rows: int, score_cols: int) -> None:
+    def __init__(self, w: Weights, rows: int, score_cols: int, decode: bool = False) -> None:
         c, dev = w.cfg, w.device
         bf, f32 = torch.bfloat16, torch.float32
         D, H = c.hidden_size, w.heads
         lw, rd, qd = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim + c.qk_rope_head_dim
         self.rows, self.score_cols = rows, score_cols
+        if decode and rows > DECODE_ROWS:
+            raise ValueError(f"decode windows of {rows} rows: at most {DECODE_ROWS}")
+        self.small = max(rows, FAST_ROWS) if decode else FAST_ROWS     # windows up to this many rows: decode class
         self.ws = x3prefill.Workspace(_UNPACK_CACHE)
         self.ids = torch.zeros((rows,), dtype=torch.long, device=dev)
         self.hin = torch.zeros((rows, D), dtype=bf, device=dev)          # MTP: the hidden rows it reads
@@ -631,7 +706,7 @@ class Buffers:
         self.q = torch.empty((rows, H * qd), dtype=bf, device=dev)
         self.qlat = torch.empty((rows, H, lw), dtype=bf, device=dev)
         self.qrot = torch.empty((rows, H, rd), dtype=bf, device=dev)
-        slots = max(c.index_topk // ATTN_DECODE[0] * min(rows, FAST_ROWS), c.index_topk // ATTN_PROMPT[0] * rows)
+        slots = max(c.index_topk // ATTN_DECODE[0] * min(rows, self.small), c.index_topk // ATTN_PROMPT[0] * rows)
         slots *= w.dcp                                   # DCP: partials for every rank's heads
         if w.dcp > 1:
             G = w.dcp
@@ -639,7 +714,7 @@ class Buffers:
             self.qall = torch.empty((G, rows, H, lw + rd), dtype=bf, device=dev)
             self.osend = torch.empty((G * rows * H * lw,), dtype=bf, device=dev)
             self.lsend = torch.empty((G * rows * H,), dtype=f32, device=dev)
-            fan = G if rows <= FAST_ROWS else 1          # decode windows exchange by all-gather (G x the bytes)
+            fan = G if rows <= self.small else 1          # decode windows exchange by all-gather (G x the bytes)
             self.orecv = torch.empty((fan * G * rows * H * lw,), dtype=bf, device=dev)
             self.lrecv = torch.empty((fan * G * rows * H,), dtype=f32, device=dev)
             self.cnt = torch.zeros((rows,), dtype=torch.int32, device=dev)
@@ -676,19 +751,19 @@ class Buffers:
         # partials
         self.part = torch.empty((rows, D), dtype=f32, device=dev)
         self.red = torch.empty((rows, D), dtype=f32, device=dev)
-        self.hpart = torch.empty((rows, D), dtype=bf, device=dev) if rows > FAST_ROWS else None   # prompt halves
-        self.hred = torch.empty((rows, D), dtype=bf, device=dev) if rows > FAST_ROWS else None
+        self.hpart = torch.empty((rows, D), dtype=bf, device=dev) if rows > self.small else None   # prompt halves
+        self.hred = torch.empty((rows, D), dtype=bf, device=dev) if rows > self.small else None
         self.xo = None                                   # sequence-parallel prompt chunks: own rows (on first use)
         self.spos = torch.zeros((1,), dtype=torch.int32, device=dev)
-        self.amax = torch.zeros((min(rows, FAST_ROWS), 4), dtype=f32, device=dev)
-        self.amax_all = torch.zeros((w.world * min(rows, FAST_ROWS) * 4,), dtype=f32, device=dev)
+        self.amax = torch.zeros((min(rows, self.small), 4), dtype=f32, device=dev)
+        self.amax_all = torch.zeros((w.world * min(rows, self.small) * 4,), dtype=f32, device=dev)
         self.gath = torch.empty((w.world * rows * D,), dtype=f32, device=dev)
         # heads
         self.hidden = torch.empty((rows, D), dtype=bf, device=dev)
         self.taps = (torch.zeros((rows, len(w.tap_slot) * D), dtype=bf, device=dev) if w.tap_slot else None)
         self.fnormed = torch.empty((rows, D), dtype=bf, device=dev)
         V = w.lm_head.shape[0]
-        hr = min(rows, FAST_ROWS)            # head rows: a window's, or a prompt chunk's last one
+        hr = min(rows, self.small)           # head rows: a window's, or a prompt chunk's last one
         self.lpart = torch.empty((hr, V), dtype=f32, device=dev)
         self.lgath = torch.empty((w.world * hr * V,), dtype=f32, device=dev)
         self.logits = torch.empty((hr, V * w.world), dtype=f32, device=dev)
@@ -724,10 +799,10 @@ def gather(w: Weights, b: Buffers, R: int) -> torch.Tensor:
     d = b.part.shape[1]
     if w.world == 1:
         return b.part[:R].view(1, R, d)
-    if w.fast is not None and R <= FAST_ROWS:
+    if w.fast is not None and R <= b.small:
         w.fast.all_reduce(b.part[:R], b.red[:R])
         return b.red[:R].view(1, R, d)
-    if R > FAST_ROWS and PREFILL_REDUCE == "ring" and hasattr(w.comm, "all_reduce"):
+    if R > b.small and PREFILL_REDUCE == "ring" and hasattr(w.comm, "all_reduce"):
         # prompt chunks: NCCL's ring all-reduce of bf16 partials (ranks alike; not row-invariant, prompts need not be)
         h = b.part[:R].to(torch.bfloat16)
         hs = torch.empty_like(h)
@@ -761,12 +836,15 @@ def dcp_gather(w: Weights, x: torch.Tensor, out: torch.Tensor, small: bool) -> N
         w.comm.all_gather(x.reshape(-1), out.reshape(-1))
 
 
-def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: int, T: int, row0: int = 0) -> None:
+def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: int, T: int, row0: int = 0,
+           base: torch.Tensor | None = None) -> None:
     """The indexer's choice for the window's rows past index_topk: b.tok[:R] (ascending). ``T``: keys scored (the
     host's bound on the window's last position + 1; a captured graph uses its bucket). DCP: each rank scores its own
     slots, keeps its top index_topk, the candidates are gathered and every rank takes the same global top index_topk
     (keys are tie-free); b.tok then holds this rank's share as local slots (ascending), b.cnt how many. ``row0``:
-    select window rows row0 .. row0 + R - 1 only (sequence-parallel prompt chunks: a rank's own rows)."""
+    select window rows row0 .. row0 + R - 1 only (sequence-parallel prompt chunks: a rank's own rows).
+    ``base``: several streams in the window (pos[r], base[r] per row - window rows, so row0 indexes them too; one
+    rank's keys, DCP 1 only)."""
     c = w.cfg
     nh, D, K = c.index_n_heads, c.index_head_dim, c.index_topk
     dcp, rank = w.dcp, w.rank if w.dcp > 1 else 0
@@ -780,7 +858,8 @@ def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: i
         sc = b.sc.view(torch.int32)[:n * Tl].view(n, Tl) if radix and dcp == 1 else b.sc[:n * Tl].view(n, Tl)
         _index_scores[(n, triton.cdiv(Tl, BT))](b.iq[r0:], b.iw[r0:], icache, pos, sc, Tl, R0=r0, NH=nh, D=D,
                                                 BTT=BT, WSCALE=nh ** -0.5, QSCALE=D ** -0.5, DCP=dcp, RANK=rank,
-                                                PACK=not (radix and dcp == 1), num_warps=2, num_stages=2)
+                                                PACK=not (radix and dcp == 1), BASE=base, ROWS=base is not None,
+                                                num_warps=2, num_stages=2)
         if dcp == 1:
             if radix:
                 topk.top_columns(sc, K, b.tok[r0:r0 + n])
@@ -793,7 +872,7 @@ def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: i
         mine = torch.full((n, K), -9223372036854775807, dtype=torch.int64, device=sc.device)
         mine[:, :kk] = topk.top_keys(sc, kk) if radix else torch.topk(sc, kk, dim=-1, sorted=False).values
         allc = b.cand[:dcp * n * K].view(dcp, n, K)
-        dcp_gather(w, mine, allc, n <= FAST_ROWS)
+        dcp_gather(w, mine, allc, n <= b.small)
         cand = allc.permute(1, 0, 2).reshape(n, dcp * K)
         top = topk.top_keys(cand, K) if radix else torch.topk(cand, K, dim=-1, sorted=False).values
         gpos = 0x7FFFFFFF - (top & 0xFFFFFFFF)                                  # global positions, int64
@@ -803,19 +882,19 @@ def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: i
         b.cnt[r0:r0 + n].copy_(own.sum(-1).to(torch.int32))
 
 
-def _attention_local(w: Weights, b: Buffers, R: int, cache, pos, nch, chk, kt, nw, ns) -> None:
+def _attention_local(w: Weights, b: Buffers, R: int, cache, pos, nch, chk, kt, nw, ns, base=None) -> None:
     """Every key on this rank: this rank's heads over the rows' key lists -> b.ol."""
     c, H = w.cfg, w.heads
     lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
     n = nch * R * H
     if nch == 1:                    # one pass: no partials, no merge (the same bits as one chunk + _merge)
         _attn_chunks[(R, 1)](b.qlat, b.qrot, cache, b.tok, pos, b.ol, b.pm, b.pl, R, H=H, LW=lw, RD=rd,
-                             K=c.index_topk, CHK=chk, KTT=kt, SCALE=(nope + rd) ** -0.5, DIRECT=True, num_warps=nw,
-                             num_stages=ns)
+                             K=c.index_topk, CHK=chk, KTT=kt, SCALE=(nope + rd) ** -0.5, DIRECT=True, BASE=base,
+                             ROWS=base is not None, num_warps=nw, num_stages=ns)
         return
     _attn_chunks[(R, nch)](b.qlat, b.qrot, cache, b.tok, pos, b.po[:n * lw], b.pm[:n], b.pl[:n], R, H=H, LW=lw,
-                           RD=rd, K=c.index_topk, CHK=chk, KTT=kt, SCALE=(nope + rd) ** -0.5, num_warps=nw,
-                           num_stages=ns)
+                           RD=rd, K=c.index_topk, CHK=chk, KTT=kt, SCALE=(nope + rd) ** -0.5, BASE=base,
+                           ROWS=base is not None, num_warps=nw, num_stages=ns)
     latent._merge[(R, H)](b.po, b.pm, b.pl, b.ol, b.dummy, R, H=H, LW=lw, NCH=nch, SPARSE=False, num_warps=4)
 
 
@@ -824,7 +903,7 @@ def _attention_dcp(w: Weights, b: Buffers, R: int, cache, pos, nch, chk, kt, nw,
     send each head's normalized partial and log-sum-exp to the rank that owns the head, merge in rank order -> b.ol."""
     c, H, G, rank = w.cfg, w.heads, w.dcp, w.rank
     lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
-    small = R <= FAST_ROWS
+    small = R <= b.small
     qp = b.qpack[:R]
     qp[:, :, :lw].copy_(b.qlat[:R])
     qp[:, :, lw:].copy_(b.qrot[:R])
@@ -853,46 +932,53 @@ def _attention_dcp(w: Weights, b: Buffers, R: int, cache, pos, nch, chk, kt, nw,
 
 
 def attention(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor, icache: torch.Tensor | None,
-              pos: torch.Tensor, T: int | None) -> torch.Tensor:
-    attention_part(w, L, b, R, cache, icache, pos, T)
+              pos: torch.Tensor, T: int | None, base: torch.Tensor | None = None) -> torch.Tensor:
+    attention_part(w, L, b, R, cache, icache, pos, T, base)
     return gather(w, b, R)
 
 
 def attention_part(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor, icache: torch.Tensor | None,
-                   pos: torch.Tensor, T: int | None) -> None:
+                   pos: torch.Tensor, T: int | None, base: torch.Tensor | None = None) -> None:
     """Attention of the window's rows (b.normed): writes this layer's latent (and index key), leaves this rank's
-    fp32 partial in b.part[:R]. ``T``: None while every row is below index_topk (no selection)."""
+    fp32 partial in b.part[:R]. ``T``: None while every row is below index_topk (no selection).
+    ``base`` (several streams in one window): row r sits at position pos[r] of the stream whose cache rows start at
+    base[r] (int32 tables); every row keeps the bits it has alone (the per-row kernels compute the same values)."""
     c = w.cfg
     lw, rd = c.kv_lora_rank, c.qk_rope_head_dim
     lins([L.q_a, L.kv_a], b, b.normed[:R], [b.qa[:R], b.kva[:R]])
     glue.rmsnorm(b.qa[:R], L.q_a_norm, c.rms_norm_eps, b.qn[:R])
     dcp, rank = w.dcp, (w.rank if w.dcp > 1 else 0)
+    rows = base is not None
+    if rows and dcp > 1:
+        raise ValueError("several streams in one window need decode context parallelism off (DCP 1)")
     _kv_write[(R,)](b.kva, b.kva.stride(0), L.kv_a_norm, cache, pos, w.inv, c.rms_norm_eps, LW=lw, RD=rd, DCP=dcp,
-                    RANK=rank, num_warps=4)
+                    RANK=rank, BASE=base, ROWS=rows, num_warps=4)
     q_done = False                                       # q_b run with wq_b
     if L.indexer is not None:
         ix = L.indexer
         glue.router(b.normed[:R], ix["wk"], b.ik[:R])
         _ik_write[(R,)](b.ik, L.extra["ik_w"], L.extra["ik_b"], w.inv, icache, pos, 1e-6, D=c.index_head_dim, RD=rd,
-                        DCP=dcp, RANK=rank, num_warps=4)
+                        DCP=dcp, RANK=rank, BASE=base, ROWS=rows, num_warps=4)
         if T is not None:
             glue.router(b.normed[:R], ix["weights_proj"], b.iw[:R])
             lins([ix["wq_b"], L.q_b], b, b.qn[:R], [b.iq[:R], b.q[:R]])   # q_b early: select leaves b.q alone
             q_done = True
             _iq_rope[(R, c.index_n_heads)](b.iq, w.inv, pos, NH=c.index_n_heads, D=c.index_head_dim, RD=rd,
-                                           num_warps=1)
-            select(w, b, icache, pos, R, T)
-    attention_core(w, L, b, R, cache, pos, q_done)
+                                           ROWS=rows, num_warps=1)
+            select(w, b, icache, pos, R, T, base=base)
+    attention_core(w, L, b, R, cache, pos, q_done, base)
 
 
 def attention_core(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor, pos: torch.Tensor,
-                   q_done: bool = False) -> None:
+                   q_done: bool = False, base: torch.Tensor | None = None) -> None:
     """The head-sharded rest of attention for rows b.qn[:R] (selection in b.tok): q_b (unless attention_part already
-    ran it grouped with wq_b), absorb, attention over the cache, expand, o_proj -> this rank's fp32 partial b.part[:R]."""
+    ran it grouped with wq_b), absorb, attention over the cache, expand, o_proj -> this rank's fp32 partial b.part[:R].
+    ``base``: per-row positions pos[r] and cache bases (several streams, see attention_part)."""
     c = w.cfg
     H = w.heads
     lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
     dcp = w.dcp
+    rows = base is not None
     if not q_done:
         lin(L.q_b, b, b.qn[:R], b.q[:R])
     rbk = RB if R > RB else R
@@ -900,17 +986,17 @@ def attention_core(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor
     if wide:
         qn = b.q[:R].view(R, H, nope + rd)[:, :, :nope].transpose(0, 1)                    # [H, R, nope]
         b.qlat[:R].transpose(0, 1).copy_(torch.bmm(qn, L.extra["wk"]))                     # [H, R, lw]
-        _qrope[(R, H)](b.q, w.inv, b.qrot, pos, H=H, QD=nope + rd, NOPE=nope, RD=rd, num_warps=1)
+        _qrope[(R, H)](b.q, w.inv, b.qrot, pos, H=H, QD=nope + rd, NOPE=nope, RD=rd, ROWS=rows, num_warps=1)
     else:
         _absorb[(H, lw // 32, triton.cdiv(R, rbk))](b.q, L.extra["wk"], w.inv, b.qlat, b.qrot, pos, R, H=H,
                                                     QD=nope + rd, NOPE=nope, NOPE_P=triton.next_power_of_2(nope),
-                                                    RD=rd, LW=lw, BN=32, RBK=rbk, num_warps=4)
-    chk, kt, nw, ns = ATTN_DECODE if R <= FAST_ROWS else ATTN_PROMPT
+                                                    RD=rd, LW=lw, BN=32, RBK=rbk, ROWS=rows, num_warps=4)
+    chk, kt, nw, ns = ATTN_DECODE if R <= b.small else ATTN_PROMPT
     nch = max(1, c.index_topk // chk)
     if dcp > 1:
         _attention_dcp(w, b, R, cache, pos, nch, chk, kt, nw, ns)
     else:
-        _attention_local(w, b, R, cache, pos, nch, chk, kt, nw, ns)
+        _attention_local(w, b, R, cache, pos, nch, chk, kt, nw, ns, base)
     if wide:
         o = torch.bmm(b.ol[:R].transpose(0, 1), L.extra["wv"].transpose(1, 2))           # [H, R, v]
         b.o[:R].view(R, H, c.v_head_dim).copy_(o.transpose(0, 1))
@@ -967,10 +1053,10 @@ def experts_part(w: Weights, L: Layer, b: Buffers, R: int) -> None:
     b.part[:R].add_(b.sy[:R])
 
 
-def layer(w: Weights, L: Layer, b: Buffers, x: torch.Tensor, R: int, cache, icache, pos, T) -> None:
+def layer(w: Weights, L: Layer, b: Buffers, x: torch.Tensor, R: int, cache, icache, pos, T, base=None) -> None:
     c = w.cfg
     glue.rmsnorm(x, L.input_norm, c.rms_norm_eps, b.normed[:R])
-    glue.residual_add(x, x, attention(w, L, b, R, cache, icache, pos, T))
+    glue.residual_add(x, x, attention(w, L, b, R, cache, icache, pos, T, base))
     glue.rmsnorm(x, L.post_attn_norm, c.rms_norm_eps, b.normed[:R])
     glue.residual_add(x, x, ffn(w, L, b, R))
 
@@ -1020,12 +1106,14 @@ def head(w: Weights, b: Buffers, x: torch.Tensor, norm: torch.Tensor, R: int, ro
 def compute(w: Weights, st: State, b: Buffers, R: int, T: int | None, *, logits: str = "all",
             pick: str = "full") -> None:
     """The target's GPU work for rows b.ids[:R] at st.pos .. st.pos + R - 1 (capturable): caches written, final
-    hidden in b.hidden[:R]; logits of all rows, the last row ("last") or none."""
+    hidden in b.hidden[:R]; logits of all rows, the last row ("last") or none. A ``Rows`` state (several streams):
+    row r at st.pos[r] in the cache rows from st.base[r]."""
     x = b.x[:R]
     torch.index_select(w.embed, 0, b.ids[:R], out=x)
     D = x.shape[1]
+    base = getattr(st, "base", None)
     for i, L in enumerate(w.layers):
-        layer(w, L, b, x, R, st.kc[i], st.ic.get(L.index), st.pos, T)
+        layer(w, L, b, x, R, st.kc[i], st.ic.get(L.index), st.pos, T, base)
         s = w.tap_slot.get(i)
         if s is not None:                                # DFlash2: this layer's output rows
             b.taps[:R, s * D:(s + 1) * D].copy_(x)
@@ -1310,9 +1398,12 @@ def sp_fits(w: Weights, b0: Buffers, b1: Buffers, R: int) -> bool:
 
 
 def mtp_compute(w: Weights, st: State, b: Buffers, n: int, T: int | None, *, logits: str = "last",
-                zero_first: bool = False, chain_normed: bool = False, draft_full: bool = False) -> None:
+                zero_first: bool = False, chain_normed: bool = False, draft_full: bool = False,
+                last: torch.Tensor | None = None) -> None:
     """The MTP layer for rows (b.hin[:n] = the previous position's hidden, b.ids[:n] = the token) at st.mpos ..;
-    its output hidden in b.hidden[:n] (raw, or shared_head-normed per MTP_CHAIN) and the last row's logits/argmax."""
+    its output hidden in b.hidden[:n] (raw, or shared_head-normed per MTP_CHAIN) and the last row's logits/argmax.
+    A ``Rows`` state (several streams): row r at st.mpos[r] in the MTP cache rows from st.mbase[r]; ``last`` (device
+    row indices, one a stream): the rows whose picks go to b.argmax[:len(last)]."""
     c = w.cfg
     m = w.mtp
     D = c.hidden_size
@@ -1325,13 +1416,18 @@ def mtp_compute(w: Weights, st: State, b: Buffers, n: int, T: int | None, *, log
     glue.router(b.mcat[:n], m.eh_proj, b.mx32[:n])
     x = b.x[:n]
     x.copy_(b.mx32[:n])
-    layer(w, m.layer, b, x, n, st.mkc, st.mic, st.mpos, T)
+    layer(w, m.layer, b, x, n, st.mkc, st.mic, st.mpos, T, getattr(st, "mbase", None))
     if chain_normed:
         glue.rmsnorm(x, m.head_norm, c.rms_norm_eps, b.hidden[:n])
     else:
         b.hidden[:n].copy_(x)
     mode = "argmax" if draft_full or w.draft_head is None else "draft"
-    if logits == "last":
+    if last is not None:                             # several streams: each stream's last row
+        S = last.shape[0]
+        sel = b.me[:S]                               # (the embeddings are spent by now)
+        torch.index_select(x, 0, last, out=sel)
+        head(w, b, sel, m.head_norm, S, mode=mode)
+    elif logits == "last":
         head(w, b, x, m.head_norm, n, slice(n - 1, n), mode=mode)
     elif logits == "all":
         head(w, b, x, m.head_norm, n, mode=mode)
