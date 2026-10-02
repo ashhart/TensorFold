@@ -43,3 +43,27 @@ def test_reads_ahead_keep_the_latest_two_and_other_ids_read_now():
         assert int(ahead.gather(np.array([i]))[0][0, 0]) == 3 * i
     ahead._pool.shutdown(wait=True)
     assert sorted(int(c[0]) for c in table.calls) == [0, 0, 1, 2, 5]
+
+
+def test_unlocked_table_gets_random_access(tmp_path, monkeypatch):
+    """jschmied's #252 review: an unlocked EXL3 n-gram table's maps are advised MADV_RANDOM (one page a fault)."""
+    import mmap
+
+    import numpy as np
+
+    from tensorfold.families.qwen4_exp.cuda import exl3_pack
+
+    f = tmp_path / "t.bin"
+    f.write_bytes(bytes(3 * mmap.PAGESIZE))
+    calls = []
+
+    class Libc:
+        def madvise(self, addr, length, advice):
+            calls.append((length, advice))
+            return 0
+
+    monkeypatch.setattr(exl3_pack, "_libc", lambda: Libc())
+    t = object.__new__(exl3_pack.NgramTable)
+    t.maps = [np.memmap(f, dtype=np.uint8, mode="r")]
+    assert t.random_access() == 1
+    assert calls == [(3 * mmap.PAGESIZE, mmap.MADV_RANDOM)]
