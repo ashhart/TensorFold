@@ -46,8 +46,9 @@ SP_SELECT = os.environ.get("TF_GLM53_SP_SELECT", "1") != "0"
 SEL_ROWS = 128           # indexer top-k in blocks of rows (bounded score buffer at long contexts)
 _UNPACK_MB = int(os.environ.get("TF_GLM53_UNPACK_CACHE_MB", "384"))   # decoded dense weights shared by a chunk's halves (0: off)
 _UNPACK_CACHE = x3prefill.UnpackCache(_UNPACK_MB << 20) if _UNPACK_MB > 0 else None
-RADIX = os.environ.get("TF_GLM53_RADIX", "1") == "1"
-RADIX_FEW_ROWS_MAX_KEYS = 65536    # windows of <= FAST_ROWS rows over more keys than this use torch.topk   # indexer top-k: one radix-select kernel (same picks as torch.topk + sort)
+RADIX = os.environ.get("TF_GLM53_RADIX", "1") == "1"   # indexer top-k: one radix-select kernel (same picks as torch.topk + sort)
+RADIX_MIN_ROWS = int(os.environ.get("TF_GLM53_RADIX_MIN_ROWS", "32"))   # radix only for blocks of this many rows (prompts);
+                                                                         # decode windows keep torch.topk (faster at few rows)
 RB = 16                  # rows a program in the absorb / expand kernels (wide windows)
 
 # MTP inputs (alignment A/B), "<hidden>/<chain>": the target hidden it reads (raw last-layer rows or final-normed)
@@ -851,9 +852,9 @@ def select(w: Weights, b: Buffers, icache: torch.Tensor, pos: torch.Tensor, R: i
     Tl = -(-T // dcp)
     for r0 in range(row0, row0 + R, SEL_ROWS):
         n = min(SEL_ROWS, row0 + R - r0)
-        # radix: one program a row - beats torch.topk except few rows over many keys (decode windows at long contexts:
-        # 1-16 rows x 128K keys: 0.64-0.77 vs 0.17-0.24 ms on GB10); both pick the same keys
-        radix = RADIX and (dcp > 1 or Tl >= K) and not (n <= FAST_ROWS and Tl > RADIX_FEW_ROWS_MAX_KEYS)
+        # radix: one program a row - beats torch.topk on prompt blocks, loses on decode windows at any context past K
+        # (1-16 rows x 128K keys: 0.64-0.77 vs 0.17-0.24 ms on GB10; 32K: +3-4 ms a round over 78 layers); same keys
+        radix = RADIX and n >= RADIX_MIN_ROWS and (dcp > 1 or Tl >= K)
         # radix, one rank: 4-byte order words (ties to the lower position in the select itself), else packed keys
         sc = b.sc.view(torch.int32)[:n * Tl].view(n, Tl) if radix and dcp == 1 else b.sc[:n * Tl].view(n, Tl)
         _index_scores[(n, triton.cdiv(Tl, BT))](b.iq[r0:], b.iw[r0:], icache, pos, sc, Tl, R0=r0, NH=nh, D=D,
