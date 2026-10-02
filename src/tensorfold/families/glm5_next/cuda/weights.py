@@ -18,6 +18,16 @@ from .qmm import B16, Q4, as_i32, make_b16, make_q4, quantize4, stack_b16, stack
 PREFIX = "model.language_model."
 
 
+def bits_of(quant: dict) -> int:
+    """The checkpoint's one bit width; a mixed-bit encode (bits such as "mixed_k34_per_tensor") is refused by name."""
+
+    bits = quant.get("bits", 4)
+    if isinstance(bits, int) or (isinstance(bits, str) and bits.isdigit()):
+        return int(bits)
+    raise ValueError(f"this checkpoint's quantization bits are {bits!r}: GLM-5.3 on CUDA reads one bit width a "
+                     "checkpoint, so mixed-bit EXL3 encodes are not supported yet")
+
+
 @dataclass
 class Config:
     hidden: int
@@ -92,7 +102,7 @@ class Config:
             index_topk=int(t.get("index_topk", 2048)), kpool=int(t.get("index_kpool", 4)),
             limit=float(t.get("swiglu_limit", 10.0)), kinds=kinds, mlp_kinds=mlp_kinds, eos=eos,
             mtp_layers=int(t.get("num_nextn_predict_layers", 0)), group_size=int(quant.get("group_size", 64)),
-            bits=int(quant.get("bits", 4)), quant=str(quant.get("quant_method") or "mlx").lower(),
+            bits=bits_of(quant), quant=str(quant.get("quant_method") or "mlx").lower(),
         )
 
     @property
