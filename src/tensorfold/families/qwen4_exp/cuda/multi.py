@@ -102,8 +102,7 @@ class MultiDecoder:
                 if alone:
                     limit = cuda_limit_bytes() if torch.cuda.is_available() else None
                     if limit is not None:
-                        # The gate's workspace reserve can be conservative for one stream. The absolute cap
-                        # still counts existing allocations and the old layer retained by the growth copy.
+                        # A lone stream may use its startup reserve without exceeding the copy peak cap.
                         peak = int(torch.cuda.memory_allocated()) + grow + st.layer_bytes(st.capacity)
                         if peak > limit:
                             if self.filling:
