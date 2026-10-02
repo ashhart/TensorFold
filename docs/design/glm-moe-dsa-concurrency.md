@@ -34,3 +34,15 @@ Deferred: step 3 (> 16 rows), step 5 (DFlash2 per stream; not loaded with --para
 paged / shared-prefix caches, admission by measured memory (slots are allocated up front).
 Tests: tests/cuda/test_glm_moe_dsa_multi.py (2, 3, 4 streams, staggered, greedy + seeded sampled, one prompt past
 index_topk: each reply equals its lone reply; graphs replay; engine + Scheduler; memory flat over admit/finish).
+
+## Fills between layers (branch conc-interleave, 2026-10-02)
+
+Head-of-line blocking: a fill ran a whole prompt chunk (up to 4096 rows, ~5 s on 78 layers) between decode rounds.
+While other streams decode, a chunk now goes TF_GLM53_FILL_LAYERS layers a step (default 8; 0: whole chunks) with a
+decode round between steps (`Runner.prefill_chunk(layers=(lo, hi))`, `fused.compute` / `compute_prompt(layers=...)`;
+FILL carries the layer range). Same chunk boundaries, rows, layers and kernels, only paused: the chunk's rows wait in
+the prompt buffers (`pb`, `pb1`, which decode rounds never use; decode has the decoder's `vb` / `mb`), the two
+micro-batches' reductions in flight are waited for by the main stream at the pause (decode collectives start after
+them), the fill writes only its slot. A prompt with no stream decoding takes whole chunks, exactly as alone.
+Tests: test_fill_between_layers_{four_ranks,graphs} (chunks of 512 rows, 1 or 2 layers a step, overlapped
+micro-batches on the 4-rank run): every reply equals its lone reply; decode rounds ran inside paused chunks.

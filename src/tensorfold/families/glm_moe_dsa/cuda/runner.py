@@ -139,6 +139,7 @@ class Runner:
             self.pb1 = fused.Buffers(w, self.prompt_rows - self.prompt_rows // 2, max(capacity, 1))
             self.pos1 = torch.zeros((1,), dtype=torch.int32, device=w.device)
             self.comm_stream = torch.cuda.Stream()
+            self.halves = None                           # a chunk paused between layers (prefill_chunk layers)
         self.carry = torch.zeros((c.hidden_size,), dtype=torch.bfloat16, device=w.device)
         self.G = GraphSet(graphs)
         self.profiler = RoundProfiler(w.rank)
@@ -254,20 +255,32 @@ class Runner:
                 logits = lg
         return logits
 
-    def prefill_chunk(self, st, toks: torch.Tensor, a: int, e: int, L0: int, taps: bool = False):
+    def prefill_chunk(self, st, toks: torch.Tensor, a: int, e: int, L0: int, taps: bool = False,
+                      layers: tuple[int, int] | None = None):
         """Prompt rows a..e-1 into ``st`` (the Runner's State, or a stream's slot view), then the MTP layer's rows;
-        the last chunk (e == L0) returns its logits [1, vocab], leaving the MTP carry in ``self.carry``."""
+        the last chunk (e == L0) returns its logits [1, vocab], leaving the MTP carry in ``self.carry``.
+        ``layers`` (lo, hi): that range of the chunk's layers only, the same work as the whole chunk in steps (the
+        chunk's rows wait in the prompt buffers between steps; nothing else writes them): lo == 0 starts the chunk,
+        hi == every layer ends it (the MTP rows, the logits); a step that does not end it returns None."""
         w, b = self.w, self.pb
         R = e - a
         T = e if e > self.topk else None
-        b.ids[:R].copy_(toks[a:e])
-        st.pos.fill_(a)
+        lo, hi = layers or (0, len(w.layers))
+        if lo == 0:
+            b.ids[:R].copy_(toks[a:e])
+            st.pos.fill_(a)
         if self.overlap and R >= 2 * fused.MAX_ROWS + 2:
-            self.pos1.fill_(a + R // 2)
-            fused.compute_prompt(w, st, b, self.pb1, R, T, self.pos1, self.comm_stream,
-                                 logits="last" if e == L0 else "none")
+            if lo == 0:
+                self.pos1.fill_(a + R // 2)
+                self.halves = None
+            self.halves = fused.compute_prompt(w, st, b, self.pb1, R, T, self.pos1, self.comm_stream,
+                                               logits="last" if e == L0 else "none", layers=layers,
+                                               halves=self.halves)
         else:
-            fused.compute(w, st, b, R, T, logits="last" if e == L0 else "none")
+            fused.compute(w, st, b, R, T, logits="last" if e == L0 else "none", layers=layers)
+        if hi < len(w.layers):
+            return None
+        self.halves = None
         if taps and self.drafter is not None:            # the drafter's context: this chunk's committed taps
             self.drafter.add_taps(b.taps[:R])
         if taps and self.cap is not None:
