@@ -22,6 +22,7 @@ import triton
 import triton.language as tl
 
 from tensorfold.cuda.exl3 import experts as x3experts
+from tensorfold.cuda.exl3 import linear as x3linear
 from tensorfold.cuda.exl3 import prefill as x3prefill
 from tensorfold.families.glm5_next.cuda import glue, latent
 from tensorfold.families.glm_moe_dsa.cuda import topk
@@ -431,8 +432,9 @@ class Weights:
         self.vocab_off = rank * self.lm_head.shape[0]
         self.draft_head = self.draft_ids = None
         if TUNE:
-            self.tuned = tune_linears([lin for L in layers + ([mtp.layer] if mtp is not None else [])
-                                       for lin in linears(L)])
+            every = layers + ([mtp.layer] if mtp is not None else [])
+            self.tuned = tune_linears([lin for L in every for lin in linears(L)])
+            self.tuned_groups = tune_groups([g for L in every for g in groups(L)])
 
     def set_draft_head(self, rows: torch.Tensor, ids: torch.Tensor) -> None:
         """This rank's share of the reduced draft vocabulary: lm_head rows (bf16) and their global ids."""
@@ -444,6 +446,104 @@ def linears(L: Layer) -> list:
     if L.indexer is not None:
         out.append(L.indexer["wq_b"])
     return out
+
+
+def groups(L: Layer) -> list:
+    """The layer's EXL3 linears of one input that ``lins`` runs as one launch."""
+    out = [[L.q_a, L.kv_a], [L.shared["gate"], L.shared["up"]]]
+    if L.indexer is not None:
+        out.append([L.indexer["wq_b"], L.q_b])
+    return out
+
+
+def _graph_us(fn, iters: int = 20) -> float:
+    """Microseconds a call of fn() replayed from a CUDA graph (the decode rounds run as graphs: no launch cost)."""
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        fn()
+        torch.cuda.synchronize()
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g, stream=s):
+            fn()
+    g.replay()
+    torch.cuda.synchronize()
+    best = None
+    for _ in range(2):                               # the faster of two timings: a stray stall counts once
+        e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        e0.record()
+        for _ in range(iters):
+            g.replay()
+        e1.record()
+        torch.cuda.synchronize()
+        t = e0.elapsed_time(e1) * 1e3 / iters
+        best = t if best is None else min(best, t)
+    del g
+    return best
+
+
+def tune_groups(gs: list, rows: int = 3) -> dict:
+    """Give each group of one-input linears (``groups``) one warps-a-block so ``lins`` runs it as one launch, when
+    that times faster than the layers one by one with their own tiles (``tune_linears`` first). Each layer's K splits
+    are then its fastest alone at that warps-a-block. Like any tiling, a function of the shapes alone: rows stay
+    independent. Timed as graphs over up to 8 groups of a kind, so the words come from DRAM."""
+    kinds: dict[tuple, list] = {}
+    for g in gs:
+        kinds.setdefault(tuple((lin.k, lin.n, lin.k2, lin.codebook, lin.layout) for lin in g), []).append(g)
+    chosen = {}
+    for key, members in kinds.items():
+        pool = members[:8]
+        a = pool[0][0]
+        x = torch.randn(rows, a.k, device=a.words.device, dtype=torch.bfloat16) * 0.1
+        outs = [[torch.empty((rows, lin.n), dtype=torch.bfloat16, device=x.device) for lin in g] for g in pool]
+        own = [lin.split for lin in pool[0]]
+
+        def apply(tiles):
+            for g in members:
+                for lin, t in zip(g, tiles):
+                    lin.split = t
+
+        def seq():
+            for g, o in zip(pool, outs):
+                for lin, y in zip(g, o):
+                    lin(x, out=y)
+
+        def grp():
+            for g, o in zip(pool, outs):
+                x3linear.group(g, x, o)
+
+        try:
+            best, best_t = None, _graph_us(seq)
+            kt = a.k // 16
+            for wk in (2, 4, 8):
+                tiles = []
+                for i in range(len(pool[0])):            # each layer's fastest K splits at this warps-a-block
+                    fastest, fastest_t = None, None
+                    for sk in (1, 2, 4, 8, 16, 32, 64):
+                        if kt % (sk * wk) or kt // (sk * wk) < 2:
+                            continue
+                        for g in pool:
+                            g[i].split = (sk, wk)
+
+                        def one(i=i):
+                            for g, o in zip(pool, outs):
+                                g[i](x, out=o[i])
+
+                        t = _graph_us(one)
+                        if fastest_t is None or t < fastest_t:
+                            fastest, fastest_t = (sk, wk), t
+                    tiles.append(fastest)
+                if None in tiles:
+                    continue
+                apply(tiles)
+                t = _graph_us(grp)
+                if t < best_t:
+                    best, best_t = tiles, t
+        except Exception:                            # noqa: BLE001  a tiling the kernel refuses: keep the layers' own
+            best = None
+        apply(best if best is not None else own)
+        chosen[tuple(k[:2] for k in key)] = (own, best)
+    return chosen
 
 
 def tune_linears(lins: list, rows: int = 3, iters: int = 20) -> dict:
@@ -602,6 +702,16 @@ def lin(layer, b: "Buffers", x: torch.Tensor, out: torch.Tensor) -> torch.Tensor
     return x3prefill.matmul(layer, x, out, b.ws)
 
 
+def lins(layers: list, b: "Buffers", x: torch.Tensor, outs: list) -> None:
+    """EXL3 linears of one input (q_a and kv_a, gate and up, wq_b and q_b): one launch when the tiles allow
+    (``x3linear.group``; each output the bits of its own call), else one ``lin`` each."""
+    if x.shape[0] <= MAX_ROWS and x3linear.groupable(layers):
+        x3linear.group(layers, x, outs)
+    else:
+        for layer, out in zip(layers, outs):
+            lin(layer, b, x, out)
+
+
 def gather(w: Weights, b: Buffers, R: int) -> torch.Tensor:
     """The window's fp32 partials of every rank, summed in rank order: [1, R, D] from the RoCE one-shot reduce
     (decode windows), else every rank's partial [world, R, D] for the consumer to add in rank order."""
@@ -748,12 +858,12 @@ def attention_part(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor
     c = w.cfg
     H = w.heads
     lw, rd, nope = c.kv_lora_rank, c.qk_rope_head_dim, c.qk_nope_head_dim
-    lin(L.q_a, b, b.normed[:R], b.qa[:R])
-    lin(L.kv_a, b, b.normed[:R], b.kva[:R])
+    lins([L.q_a, L.kv_a], b, b.normed[:R], [b.qa[:R], b.kva[:R]])
     glue.rmsnorm(b.qa[:R], L.q_a_norm, c.rms_norm_eps, b.qn[:R])
     dcp, rank = w.dcp, (w.rank if w.dcp > 1 else 0)
     _kv_write[(R,)](b.kva, b.kva.stride(0), L.kv_a_norm, cache, pos, w.inv, c.rms_norm_eps, LW=lw, RD=rd, DCP=dcp,
                     RANK=rank, num_warps=4)
+    q_done = False                                       # q_b run with wq_b
     if L.indexer is not None:
         ix = L.indexer
         glue.router(b.normed[:R], ix["wk"], b.ik[:R])
@@ -761,11 +871,13 @@ def attention_part(w: Weights, L: Layer, b: Buffers, R: int, cache: torch.Tensor
                         DCP=dcp, RANK=rank, num_warps=4)
         if T is not None:
             glue.router(b.normed[:R], ix["weights_proj"], b.iw[:R])
-            lin(ix["wq_b"], b, b.qn[:R], b.iq[:R])
+            lins([ix["wq_b"], L.q_b], b, b.qn[:R], [b.iq[:R], b.q[:R]])   # q_b early: select leaves b.q alone
+            q_done = True
             _iq_rope[(R, c.index_n_heads)](b.iq, w.inv, pos, NH=c.index_n_heads, D=c.index_head_dim, RD=rd,
                                            num_warps=1)
             select(w, b, icache, pos, R, T)
-    lin(L.q_b, b, b.qn[:R], b.q[:R])
+    if not q_done:
+        lin(L.q_b, b, b.qn[:R], b.q[:R])
     rbk = RB if R > RB else R
     wide = R > MAX_ROWS                                  # prompt chunks: tensor-core batched GEMMs (not row-exact)
     if wide:
@@ -796,8 +908,7 @@ def mlp(w: Weights, L: Layer, b: Buffers, R: int, out: torch.Tensor) -> None:
     s = L.shared
     width = s["gate"].n
     g, u, a = (t.view(-1)[:R * width].view(R, width) for t in (b.g, b.u, b.act))
-    lin(s["gate"], b, b.normed[:R], g)
-    lin(s["up"], b, b.normed[:R], u)
+    lins([s["gate"], s["up"]], b, b.normed[:R], [g, u])
     blk = math.gcd(512, width)
     _swiglu2[(R, width // blk)](g, u, a, W=width, BLOCK=blk, num_warps=4)
     lin(s["down"], b, a, out)

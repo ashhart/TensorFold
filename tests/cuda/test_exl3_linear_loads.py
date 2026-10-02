@@ -70,3 +70,46 @@ def test_long_windows_wide_range():
             for rows in (5, 8, 9, 16, 17, 40, 128):
                 y = lin(x[:rows])
                 assert torch.equal(y.view(torch.int16), alone[:rows].view(torch.int16)), (split, loads, rows)
+
+
+@pytest.mark.parametrize("loads", (0,) + PATHS)
+def test_group_same_bits(loads: int):
+    """q_a + kv_a, gate + up (+ a third) in one launch: each output the bits of the layer's own call."""
+
+    layers = [_layer(6144, 2048, 5, seed=3), _layer(6144, 640, 5, seed=4), _layer(6144, 512, 5, seed=5)]
+    for lin, sk in zip(layers, (8, 16, 2)):
+        lin.split, lin.loads = (sk, 4), loads
+    x = torch.randn(16, 6144, device="cuda", dtype=torch.bfloat16)
+    for n in (2, 3):
+        for rows in (1, 3, 8, 9, 16):
+            alone = [lin(x[:rows]) for lin in layers[:n]]
+            outs = [torch.empty_like(a) for a in alone]
+            assert linear.groupable(layers[:n])
+            linear.group(layers[:n], x[:rows], outs)
+            for a, o in zip(alone, outs):
+                assert torch.equal(a.view(torch.int16), o.view(torch.int16)), (n, rows)
+
+
+def test_glm_group_tuner_and_lins():
+    """GLM-5.3's start-up group tuner gives a group one warps-a-block (or leaves it), and the decode path's ``lins``
+    then gives every output the bits of the layer's own call."""
+
+    from tensorfold.families.glm_moe_dsa.cuda import fused
+
+    gs = [[_layer(6144, 2048, 5, seed=10 + i), _layer(6144, 640, 5, seed=20 + i)] for i in range(3)]
+    for g in gs:
+        g[0].split, g[1].split = (8, 4), (8, 8)          # tuned alone: different warps a block
+    chosen = fused.tune_groups(gs)
+    own, best = chosen[((6144, 2048), (6144, 640))]
+    for g in gs:
+        assert [lin.split for lin in g] == (best if best is not None else own)
+        if best is not None:
+            assert linear.groupable(g)
+    x = torch.randn(8, 6144, device="cuda", dtype=torch.bfloat16)
+    for rows in (1, 3, 8):
+        for g in gs:
+            alone = [lin(x[:rows]) for lin in g]
+            outs = [torch.empty_like(a) for a in alone]
+            fused.lins(g, None, x[:rows], outs)
+            for a, o in zip(alone, outs):
+                assert torch.equal(a.view(torch.int16), o.view(torch.int16))

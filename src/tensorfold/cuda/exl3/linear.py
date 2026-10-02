@@ -24,7 +24,7 @@ def _ext():
     from tensorfold.cuda.build import load
 
     here = Path(__file__).parent
-    return load(name="tensorfold_exl3_linear_v4", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
+    return load(name="tensorfold_exl3_linear_v5", sources=[str(here / "linear.cpp"), str(here / "linear.cu")],
                 extra_include_paths=[str(here)], extra_cuda_cflags=["-O3", "--expt-relaxed-constexpr"],
                 verbose=False)
 
@@ -184,13 +184,8 @@ class Exl3Linear:
             xh = torch.empty((m, self.k), dtype=torch.float16, device=x.device)
         if sk > 1 and z is None:
             z = torch.empty((sk * m * self.n,), dtype=torch.float32, device=x.device)
-        sk_stride, nb_stride = self.strides
-        ext = _ext()
         loads = LOADS if self.loads is None else self.loads
-        ext.rot_in(x, self.suh, xh, (loads >> 5) & 1)
-        ext.linear(xh, self.words, sk_stride, nb_stride, self.svh, self.bias, out, z if sk > 1 else None,
-                   self.counters, self.k2, CODEBOOK_IDS[self.codebook], sk, wk,
-                   loads)
+        _launch([self], x, [xh], [out], [z], loads)
         return out
 
     def unpack(self, out: torch.Tensor | None = None) -> torch.Tensor:
@@ -199,6 +194,57 @@ class Exl3Linear:
         w = out if out is not None else torch.empty((self.k, self.n), dtype=torch.float16, device=self.words.device)
         _ext().unpack(self.words, w, *self.strides, self.k2, CODEBOOK_IDS[self.codebook])
         return w
+
+
+_NONE: dict = {}
+
+
+def _none(device) -> torch.Tensor:
+    """An empty tensor: no bias, no Z."""
+    key = str(device)
+    if key not in _NONE:
+        _NONE[key] = torch.empty((0,), dtype=torch.float32, device=device)
+    return _NONE[key]
+
+
+def _launch(layers: list, x: torch.Tensor, xhs: list, outs: list, zs: list, loads: int) -> None:
+    """rot_in and the linear of 1 to 3 layers of input x (one launch each)."""
+
+    ext = _ext()
+    ext.rot_in(x, [lin.suh for lin in layers], xhs, (loads >> 5) & 1)
+    none = _none(x.device)
+    ext.linear(xhs, [lin.words for lin in layers], [lin.strides[0] for lin in layers],
+               [lin.strides[1] for lin in layers], [lin.svh for lin in layers],
+               [none if lin.bias is None else lin.bias for lin in layers], outs,
+               [z if lin.split[0] > 1 else none for lin, z in zip(layers, zs)], [lin.counters for lin in layers],
+               layers[0].k2, CODEBOOK_IDS[layers[0].codebook], [lin.split[0] for lin in layers], layers[0].split[1],
+               loads)
+
+
+def groupable(layers: list) -> bool:
+    """Whether layers of one input can run as one launch: 1 to 3 of them, the same K, width, codebook and warps a
+    block (their K splits may differ). The launch gives every layer the bits of its own call."""
+
+    a = layers[0]
+    return 1 <= len(layers) <= 3 and all(
+        lin.k == a.k and lin.k2 == a.k2 and lin.codebook == a.codebook and lin.split[1] == a.split[1]
+        and (LOADS if lin.loads is None else lin.loads) == (LOADS if a.loads is None else a.loads) for lin in layers)
+
+
+def group(layers: list, x: torch.Tensor, outs: list) -> list:
+    """outs[j] = layers[j](x, out=outs[j]) in one rot_in and one linear launch when ``groupable`` (else one by one):
+    the layers of one input (q_a and kv_a, gate and up, ...). Each output has the bits of the layer's own call."""
+
+    if not groupable(layers) or x.dim() != 2 or not 1 <= x.shape[0] <= 128:
+        return [lin(x, out=o) for lin, o in zip(layers, outs)]
+    x = x.contiguous()
+    m = x.shape[0]
+    xhs = [torch.empty((m, lin.k), dtype=torch.float16, device=x.device) for lin in layers]
+    zs = [torch.empty((lin.split[0] * m * lin.n,), dtype=torch.float32, device=x.device) if lin.split[0] > 1 else None
+          for lin in layers]
+    a = layers[0]
+    _launch(layers, x, xhs, outs, zs, LOADS if a.loads is None else a.loads)
+    return outs
 
 
 def unpack_cuda(trellis: torch.Tensor, codebook: str) -> torch.Tensor:
