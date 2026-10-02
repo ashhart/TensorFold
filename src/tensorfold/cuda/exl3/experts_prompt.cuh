@@ -10,7 +10,9 @@
 namespace tf_exl3x {
 
 constexpr int PROMPT_WARPS = 4;                        // member tiles an item holds (16 pairs a warp): 64-pair items
-constexpr int PREFETCH = 2;   // chunks of trellis words in flight a warp: one chunk ahead left 46 % of stalls on loads
+// chunks of trellis words in flight a warp: two for gate|up below 4 bits (3.05 bpw: one chunk ahead left 46 % of
+// stalls on loads), one at 4 bits and up and for down, where the second chunk's registers cost more than it hides
+template <int K2, bool TOT> __host__ __device__ constexpr int prefetch_chunks() { return TOT && K2 < 8 ? 2 : 1; }
 constexpr float HAD_SCALE_P = 0.08838834764831845f;   // 1 / sqrt(128), as experts.cu's HAD_SCALE
 
 struct PromptArgs {
@@ -81,6 +83,7 @@ __device__ __forceinline__ void prompt_body(const uint32_t* __restrict__ T, cons
 #pragma unroll
             for (int c = 0; c < 4; ++c) acc[i][h][c] = ts[i][h][c] = res[i][h][c] = 0.f;
 
+    constexpr int PREFETCH = prefetch_chunks<K2, TOT>();
     // the words of PREFETCH chunks in flight: wn[0] is the chunk decoded next, wn[d] the one d chunks later
     uint32_t wn[PREFETCH][CH][DPW][LW];
 #pragma unroll
