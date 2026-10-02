@@ -2,12 +2,12 @@
 #include <c10/cuda/CUDAGuard.h>
 
 int64_t exl3p_item_rows();
-void exl3p_route_cuda(const at::Tensor&, int64_t, int64_t, at::Tensor&, at::Tensor&, at::Tensor&, int64_t);
+void exl3p_route_cuda(const at::Tensor&, int64_t, int64_t, at::Tensor&, at::Tensor&, at::Tensor&, int64_t, int64_t);
 void exl3p_experts_cuda(const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                         const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                         const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
                         const at::Tensor&, at::Tensor&, at::Tensor&, int64_t, int64_t, int64_t, int64_t, int64_t,
-                        double, int64_t, int64_t, int64_t, int64_t);
+                        double, int64_t, int64_t, int64_t, int64_t, int64_t);
 
 static void check(const at::Tensor& x, at::ScalarType t, const char* name) {
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == t && x.is_contiguous(), name,
@@ -15,14 +15,14 @@ static void check(const at::Tensor& x, at::ScalarType t, const char* name) {
 }
 
 void route(const at::Tensor& pick, int64_t E, at::Tensor sorted, at::Tensor items, at::Tensor item_count,
-           int64_t max_items) {
+           int64_t max_items, int64_t by_count) {
     check(pick, at::kInt, "pick");
     check(sorted, at::kInt, "sorted");
     check(items, at::kInt, "items");
     check(item_count, at::kInt, "item_count");
     TORCH_CHECK(sorted.numel() >= pick.numel() && items.numel() >= 3 * max_items, "route: buffers too small");
     c10::cuda::CUDAGuard guard(pick.device());
-    exl3p_route_cuda(pick, pick.numel(), E, sorted, items, item_count, max_items);
+    exl3p_route_cuda(pick, pick.numel(), E, sorted, items, item_count, max_items, by_count);
 }
 
 void experts(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& items, const at::Tensor& item_count,
@@ -30,7 +30,7 @@ void experts(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& it
              const at::Tensor& d_k2, const at::Tensor& suh_g, const at::Tensor& suh_u, const at::Tensor& svh_g,
              const at::Tensor& svh_u, const at::Tensor& suh_d, const at::Tensor& svh_d, const at::Tensor& wts,
              at::Tensor xd, at::Tensor out, int64_t D, int64_t I, int64_t NS, int64_t slots, int64_t max_items,
-             double limit, int64_t act_mode, int64_t cb, int64_t ncb, int64_t which) {
+             double limit, int64_t act_mode, int64_t cb, int64_t ncb, int64_t which, int64_t f16) {
     TORCH_CHECK(x.is_cuda() && x.scalar_type() == at::kBFloat16 && x.stride(1) == 1 && x.stride(0) % 8 == 0 &&
                     x.size(1) == D,
                 "x: bf16 [R, D], unit column stride, row stride a multiple of 8");
@@ -45,13 +45,14 @@ void experts(const at::Tensor& x, const at::Tensor& sorted, const at::Tensor& it
     for (auto* t : {&suh_g, &suh_u, &svh_g, &svh_u, &suh_d, &svh_d}) check(*t, at::kHalf, "suh/svh");
     check(wts, at::kFloat, "wts");
     check(xd, at::kHalf, "xd");
-    check(out, at::kFloat, "out");
+    TORCH_CHECK(out.is_cuda() && out.is_contiguous() && out.scalar_type() == (f16 ? at::kHalf : at::kFloat),
+                "out: contiguous fp32 (fp16 with f16)");
     TORCH_CHECK(xd.numel() >= sorted.numel() * I, "xd too small");
     TORCH_CHECK(out.size(0) == x.size(0) && out.size(1) == D, "out: [R, D]");
     c10::cuda::CUDAGuard guard(x.device());
     exl3p_experts_cuda(x, sorted, items, item_count, gate_ptr, up_ptr, down_ptr, gu_k2, d_k2, suh_g, suh_u, svh_g,
                        svh_u, suh_d, svh_d, wts, xd, out, D, I, NS, slots, max_items, limit, act_mode, cb, ncb,
-                       which);
+                       which, f16);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
