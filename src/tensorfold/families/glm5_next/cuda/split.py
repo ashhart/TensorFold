@@ -136,13 +136,14 @@ def rank_files(model_dir: str | Path, rank: int) -> list[Path]:
 class RankReader:
     """Read stored-dtype CPU tensors for one rank from the full checkpoint or its pre-split folder."""
 
-    def __init__(self, model_dir: str | Path, rank: int) -> None:
+    def __init__(self, model_dir: str | Path, rank: int, world: int = 2) -> None:
         from tensorfold.cuda.direct_read import ReadAhead, Reader, SafeTensors
 
-        self.dir, self.rank = Path(model_dir), rank
+        self.dir, self.rank, self.world = Path(model_dir), rank, world
         self.io = Reader()                                # O_DIRECT reads where the file system allows them
         self.reads = ReadAhead(self.io, READERS, RUN, GAP)
-        mine, other = rank_files(self.dir, rank), rank_files(self.dir, 1 - rank)
+        # one GPU (a split stage) reads every tensor whole; two ranks read their halves or their own folders
+        mine, other = ([], []) if world == 1 else (rank_files(self.dir, rank), rank_files(self.dir, 1 - rank))
         if other and not mine:
             raise ValueError(f"{self.dir} holds rank {1 - rank}'s share: give rank {rank} its own folder or the "
                              "full checkpoint")
@@ -194,6 +195,8 @@ class RankReader:
         kind = rule(name)
         if kind == "drop":
             raise KeyError(f"{name} is not used by the engine")
+        if self.world == 1:
+            kind = "rep"
         a, b = info["data_offsets"]
         shape = list(info["shape"])
         if kind == "row" and shape and shape[0] % 2 == 0:   # the rank's rows are one run: read only those

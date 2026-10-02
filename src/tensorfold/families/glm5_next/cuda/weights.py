@@ -245,18 +245,28 @@ class Weights:
         return total
 
 
-def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = True) -> Weights:
-    """One of two ranks from a checkpoint or rank folder, MTP included unless ``mtp`` is False, with its head half."""
+def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = True, world: int = 2,
+         layers: tuple[int, int] | None = None) -> Weights:
+    """One of two ranks from a checkpoint or rank folder, MTP included unless ``mtp`` is False, with its head half.
+
+    ``world=1``: the whole model on one GPU. ``layers=(first, last)``: a split stage's checkpoint, holding only those
+    layers (and the final norm when ``last`` is the model's last): no embedding, head or MTP head (the Mac's).
+    """
 
     from .split import RankReader
 
-    world = 2
+    if world not in (1, 2) or not 0 <= rank < world:
+        raise ValueError(f"rank {rank} of {world}: GLM-5.3-Flash runs on one GPU or two")
     cfg = Config.read(model_dir)
+    first, last = layers if layers is not None else (0, cfg.layers)
+    partial = (first, last) != (0, cfg.layers)
+    if partial:
+        mtp = False
     if cfg.quant not in ("mlx", "exl3"):
         raise ValueError(f"GLM-5.3-Flash's CUDA engine reads MLX 4-bit or EXL3 checkpoints, not {cfg.quant}")
     exl3 = cfg.quant == "exl3"
     dev = torch.device(device)
-    rd = RankReader(model_dir, rank)
+    rd = RankReader(model_dir, rank, world)
     HL = cfg.heads // world
     LL = cfg.lin_heads // world
 
@@ -391,7 +401,8 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = 
             layer_events.pop(0).synchronize()
         up = None if exl3 else dev                       # MLX experts come uploaded (EXL3's are unpacked on the host)
         rd.prefetch(expert_names(i), up)                 # already queued, except for the first layer
-        rd.prefetch(expert_names(i + 1), up)             # two layers in flight: reads overlap copies and packing
+        if plain or i + 1 < last or not partial:         # a stage's checkpoint ends at its last layer
+            rd.prefetch(expert_names(i + 1), up)         # two layers in flight: reads overlap copies and packing
         lw = LayerW(i, kind, None if plain else hc(i, "attn"), None if plain else hc(i, "ffn"),
                     t(f"layers.{i}.input_layernorm.weight"), t(f"layers.{i}.post_attention_layernorm.weight"))
         if kind == "kda":
@@ -407,17 +418,21 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = 
         layer_events.append(torch.cuda.current_stream().record_event())
         return lw
 
-    if exl3:
+    if partial:
+        embed = None
+    elif exl3:
         embed = rd.get(PREFIX + "embed_tokens.weight").to(torch.bfloat16).contiguous().to(dev)
     else:
         embed = (as_i32(rd.get(PREFIX + "embed_tokens.weight")).to(dev), rd.get(PREFIX + "embed_tokens.scales").to(dev),
                  rd.get(PREFIX + "embed_tokens.biases").to(dev))
     try:                                          # a failed load still cancels the reads queued ahead
-        which = list(range(cfg.layers))
+        which = list(range(first, last))
         built = [layer(i) for i in which]
         vl = cfg.vocab // world
-        draft_head = None
-        if exl3:
+        draft_head = head = None
+        if partial:
+            pass
+        elif exl3:
             head = make_b16(rd.get("lm_head.weight")[rank * vl:(rank + 1) * vl].to(dev))
             # Draft steps use the quantized head; verification keeps the original head.
             draft_head = quantize4(head.weight)
@@ -430,7 +445,8 @@ def load(model_dir: str | Path, *, rank: int, device: str = "cuda", mtp: bool = 
             i = cfg.layers
             mtpw = MTPW(t(f"layers.{i}.enorm.weight"), t(f"layers.{i}.hnorm.weight"), q4(f"layers.{i}.eh_proj"),
                         t(f"layers.{i}.shared_head.norm.weight"), layer(i, plain=True))
-        w = Weights(cfg, embed, built, t("norm.weight"), head, mtpw, rank, world, dev, draft_head=draft_head)
+        norm = t("norm.weight") if last == cfg.layers else None
+        w = Weights(cfg, embed, built, norm, head, mtpw, rank, world, dev, draft_head=draft_head)
         w.meta.update(layers=which)
     finally:
         rd.close()

@@ -209,14 +209,15 @@ def load_backbone(model_dir: Path, *, layers: int | None = None, stream: bool = 
     return model
 
 
-def load(model_dir: Path, *, ssd_experts: float | None = None) -> tuple[GLM5, Any]:
-    """The backbone and tokenizer; ``ssd_experts``: stream routed experts into a GPU pool of that many GiB."""
+def load(model_dir: Path, *, ssd_experts: float | None = None, keep_layers: int | None = None) -> tuple[GLM5, Any]:
+    """The backbone and tokenizer; ``ssd_experts``: stream routed experts into a GPU pool of that many GiB;
+    ``keep_layers``: a split's Mac half, the first that many layers (the stage runs the rest)."""
 
     from tensorfold.families.tokenizer import load_tokenizer
 
     from tensorfold.families.glm5_next.prompts import GlmTokenizer
 
-    model = load_backbone(Path(model_dir), stream=bool(ssd_experts))
+    model = load_backbone(Path(model_dir), stream=bool(ssd_experts), layers=keep_layers)
     if ssd_experts:
         from tensorfold.families.glm5_next import stream
 

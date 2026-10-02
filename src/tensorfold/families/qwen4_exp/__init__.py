@@ -127,11 +127,14 @@ def weight_bytes(model_dir: Path, ple_on_ssd: bool = False) -> int:
 
 
 def load(model_dir: Path, *, mtp_drafts: int | None = None, ple_on_ssd: bool = False,
-         ssd_experts: float | None = None, **_: Any) -> tuple[Any, Any]:
+         ssd_experts: float | None = None, split_layers: int | None = None, **_: Any) -> tuple[Any, Any]:
+    """``split_layers``: the Mac keeps layers [0, split_layers) and a split stage runs the rest (``tensorfold.split``)."""
+
     from tensorfold.families.qwen4_exp.runtime import load as load_runtime
 
     drafts = mtp_drafts if has_mtp(Path(model_dir)) else 0
-    return load_runtime(Path(model_dir), drafts=drafts, ple_on_ssd=ple_on_ssd, ssd_experts=ssd_experts)
+    split = {} if split_layers is None else {"keep_layers": int(split_layers)}
+    return load_runtime(Path(model_dir), drafts=drafts, ple_on_ssd=ple_on_ssd, ssd_experts=ssd_experts, **split)
 
 
 def engine_settings(model: Any) -> dict[str, Any]:

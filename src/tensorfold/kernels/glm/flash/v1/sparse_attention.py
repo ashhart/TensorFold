@@ -7,11 +7,13 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels.glm.flash.v1.launch import widest
+
 _SOURCE = r"""
   const uint gid = threadgroup_position_in_grid.y;          // row * HEADS + head
   const uint simd_gid = simdgroup_index_in_threadgroup;
   const uint simd_lid = thread_index_in_simdgroup;
-  constexpr int SIMD_GROUPS = 32;
+  constexpr int SIMD_GROUPS = SG;                            // 32, or fewer where a GPU caps the group
   constexpr int SIMD_WIDTH = 32;
   constexpr int qk_per_thread = QK_DIM / SIMD_WIDTH;
   constexpr int v_per_thread = QK_DIM / SIMD_WIDTH;
@@ -25,7 +27,6 @@ _SOURCE = r"""
   const int key_length = int(meta[0]);
   const size_t stride = size_t(QK_DIM);
   const device bfloat* qptr = queries + size_t(gid) * QK_DIM + int(simd_lid) * qk_per_thread;
-  device bfloat* optr = out + size_t(gid) * QK_DIM + int(simd_gid) * v_per_thread;
   const U s = U(scale[0]);
   for (int i = 0; i < qk_per_thread; i++) q[i] = s * static_cast<U>(qptr[i]);
   for (int i = 0; i < v_per_thread; i++) o[i] = 0;
@@ -59,19 +60,23 @@ _SOURCE = r"""
     sum_exp_scores[simd_gid] = sum_exp_score;
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  max_score = max_scores[simd_lid];
+  // lane l reads simdgroup l's partials (lanes past SIMD_GROUPS add nothing)
+  const bool part = int(simd_lid) < SIMD_GROUPS;
+  max_score = part ? max_scores[simd_lid] : U(-3.4028234663852886e38f);
   const U new_max = simd_max(max_score);
-  const U factor = fast::exp(max_score - new_max);
-  const U total_sum = simd_sum(sum_exp_scores[simd_lid] * factor);
+  const U factor = part ? fast::exp(max_score - new_max) : U(0);
+  const U total_sum = simd_sum(part ? sum_exp_scores[simd_lid] * factor : U(0));
+  device bfloat* orow = out + size_t(gid) * QK_DIM;
   for (int i = 0; i < v_per_thread; i++) {
-    outputs[simd_lid * SIMD_WIDTH + simd_gid] = o[i];
+    outputs[simd_lid * SIMD_GROUPS + simd_gid] = o[i];
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    o[i] = simd_sum(outputs[simd_gid * SIMD_WIDTH + simd_lid] * factor);
-    o[i] = total_sum == 0 ? U(0) : (o[i] / total_sum);
+    // simdgroup g sums lanes g, g + SIMD_GROUPS, ... of every simdgroup's partial
+    for (int l = int(simd_gid); l < SIMD_WIDTH; l += SIMD_GROUPS) {
+      U v = simd_sum(part ? outputs[l * SIMD_GROUPS + int(simd_lid)] * factor : U(0));
+      v = total_sum == 0 ? U(0) : (v / total_sum);
+      if (simd_lid == 0) orow[l * v_per_thread + i] = static_cast<bfloat>(v);
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-  }
-  if (simd_lid == 0) {
-    for (int i = 0; i < v_per_thread; i++) optr[i] = static_cast<bfloat>(o[i]);
   }
 """
 
@@ -101,11 +106,17 @@ def indexed_attention(queries: mx.array, keys: mx.array, indices: mx.array, key_
     topk = int(indices.shape[-1])
     if not metal() or queries.dtype != mx.bfloat16 or keys.dtype != mx.bfloat16:     # the kernel is bf16-only
         return indexed_attention_ops(queries, keys, indices, key_length, scale)
-    return _kernel()(inputs=[mx.contiguous(queries), keys, mx.contiguous(indices.astype(mx.int32)),
-                             mx.array([scale], dtype=mx.float32), mx.array([int(key_length)], dtype=mx.int32)],
-                     template=[("QK_DIM", int(dim)), ("TOPK", topk), ("HEADS", int(heads))],
-                     grid=(1024, rows * heads, 1), threadgroup=(1024, 1, 1),
-                     output_shapes=[(rows, heads, dim)], output_dtypes=[mx.bfloat16])[0]
+    inputs = [mx.contiguous(queries), keys, mx.contiguous(indices.astype(mx.int32)),
+              mx.array([scale], dtype=mx.float32), mx.array([int(key_length)], dtype=mx.int32)]
+
+    def launch(sg: int) -> mx.array:
+        return _kernel()(inputs=inputs, template=[("QK_DIM", int(dim)), ("TOPK", topk), ("HEADS", int(heads)),
+                                                  ("SG", sg)],
+                         grid=(32 * sg, rows * heads, 1), threadgroup=(32 * sg, 1, 1),
+                         output_shapes=[(rows, heads, dim)], output_dtypes=[mx.bfloat16])[0]
+
+    sg, out = widest(("sparse_attention", int(dim), topk, int(heads)), (32, 16, 8), launch)
+    return out if sg else indexed_attention_ops(queries, keys, indices, key_length, scale)
 
 
 def indexed_attention_ops(queries: mx.array, keys: mx.array, indices: mx.array, key_length: int,

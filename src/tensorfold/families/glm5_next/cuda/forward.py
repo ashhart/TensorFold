@@ -119,7 +119,8 @@ class Buffers:
         self.hidden = torch.empty((rows, D), dtype=bf, device=dev)
         self.fnormed = torch.empty((rows, D), dtype=bf, device=dev)
         self.fxs = torch.empty((rows, D // 64), dtype=f32, device=dev)
-        self.logits = torch.empty((head_rows, w.head.n), dtype=bf, device=dev)
+        # a split stage has no head (the Mac's): no logits rows to hold
+        self.logits = torch.empty((head_rows, w.head.n if w.head is not None else 1), dtype=bf, device=dev)
         # MTP
         self.me = torch.empty((rows, D), dtype=bf, device=dev)
         self.mcat = torch.empty((rows, 2 * D), dtype=bf, device=dev)

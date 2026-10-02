@@ -30,8 +30,13 @@ def _plain(name: str, w: torch.Tensor) -> torch.Tensor:
 
 
 def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: tuple[int, int] | None = None,
-         draft_vocab: int | str | None = None, ple_on_ssd: bool = False, table_reads: list | None = None) -> Weights:
-    """Load rank ``tp``'s shares; ``draft_vocab`` selects default/file ids or ids below N, None scores all ids."""
+         draft_vocab: int | str | None = None, ple_on_ssd: bool = False, table_reads: list | None = None,
+         layers: tuple[int, int] | None = None) -> Weights:
+    """Load rank ``tp``'s shares; ``draft_vocab`` selects default/file ids or ids below N, None scores all ids.
+
+    ``layers=(first, last)``: a split stage's checkpoint, holding only those layers; the weights then have no
+    embedding, final mixer, head or MTP head (the Mac keeps them).
+    """
 
     import time
     from dataclasses import replace
@@ -47,10 +52,16 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
                                           nk=full.nk // world, nv=full.nv // world,
                                           moe_width=full.moe_width // world, shared_width=full.shared_width // world)
     rd = _Reader(model_dir, device)
-    prefix = "language_model." if rd.has("language_model.model.embed_tokens.weight") else ""
+    names = list(rd.where)                            # a stage's checkpoint has no embedding to tell them apart
+    prefix = "language_model." if any(n.startswith("language_model.") for n in names) else ""
     # NVFP4 names the language model ``model.language_model.*``; its lm_head and mtp sit at the top level
-    mbase = "model.language_model." if rd.has("model.language_model.embed_tokens.weight") else "model."
-    chosen = list(range(cfg.layers))
+    mbase = "model.language_model." if any(n.startswith("model.language_model.") for n in names) else "model."
+    partial = layers is not None and tuple(layers) != (0, cfg.layers)
+    chosen = list(range(*layers)) if layers is not None else list(range(cfg.layers))
+    if partial:
+        if tp is not None and tp[1] != 1:
+            raise ValueError("a split stage runs on one GPU")
+        mtp, draft_vocab = False, None
     around_one = norms_around_one(rd, prefix + mbase, chosen)
 
     def raw(name: str) -> torch.Tensor:
@@ -384,8 +395,11 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
         raise ValueError(f"Flash Next's CUDA engine reads MLX 4-bit (groups of 32) or NVFP4 (experts-only) "
                          f"checkpoints, not {cfg.quant}")
     try:                                              # a failed load cancels the reads queued ahead
-        embed = ((raw(mbase + "embed_tokens.weight").to(torch.bfloat16).contiguous(),) if cfg.quant == "modelopt"
-                 else triple("model.embed_tokens"))
+        if partial:
+            embed = None
+        else:
+            embed = ((raw(mbase + "embed_tokens.weight").to(torch.bfloat16).contiguous(),)
+                     if cfg.quant == "modelopt" else triple("model.embed_tokens"))
         loaded = []
         ahead = rd.layer_names(prefix, mbase, chosen, mtp)   # read ahead of the layer that takes them
         layer_events: list = []                           # each layer's event, recorded once its work is queued
@@ -400,9 +414,13 @@ def load(model_dir: str | Path, device: str = "cuda", *, mtp: bool = True, tp: t
             rd.release()
             if i % 8 == 7:                        # each release waits for the device; a layer leaves few temporaries
                 torch.cuda.empty_cache()
-        mixer = (hc_nvfp4 if cfg.quant == "modelopt" else hc)(mbase + "hyper_connection_mixer", False)
         vl = full.vocab // world
-        if cfg.quant == "modelopt" and rd.has(prefix + "lm_head.weight_scale_inv"):     # block FP8: its stored bytes
+        mixer = head = None                         # a split stage: the Mac mixes the streams and applies the head
+        if not partial:
+            mixer = (hc_nvfp4 if cfg.quant == "modelopt" else hc)(mbase + "hyper_connection_mixer", False)
+        if partial:
+            pass
+        elif cfg.quant == "modelopt" and rd.has(prefix + "lm_head.weight_scale_inv"):     # block FP8: its stored bytes
             from dataclasses import replace
 
             from tensorfold.cuda.nvfp4.linear import Fp8BlockLinear

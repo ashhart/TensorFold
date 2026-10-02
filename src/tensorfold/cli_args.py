@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -144,9 +145,23 @@ def build_parser(handlers: dict[str, Callable[[argparse.Namespace], int]]) -> ar
                             "embedding, the first --split-layers layers, the head and the drafter")
     split.add_argument("--split-layers", type=int, default=None, metavar="K",
                        help="with --split: layers this machine keeps (default: three quarters)")
-    split.add_argument("--split-transport", choices=("tcp", "mailbox"), default="tcp",
-                       help="with --split: the rows path, the stage's TCP connection or a `v41rpcd` RDMA mailbox")
+    split.add_argument("--split-prefill-layers", type=int, default=None, metavar="KP",
+                       help="with --split: layers this machine runs of a prompt (default: --split-layers). Lower "
+                            "sends prompts to the stage earlier, which also holds layers [KP, K) and hands their "
+                            "state over before decoding: faster prompts, the same decode, more stage memory")
+    split.add_argument("--split-transport", choices=("tcp", "rdma", "mailbox"), default="tcp",
+                       help="with --split: the rows path. tcp: the stage's control connection; rdma: a `v41rpcd` "
+                            "RDMA mailbox whose daemons the stage and this server start and stop themselves (the "
+                            "stage needs --rdma); mailbox: one of daemons started by hand")
     split.add_argument("--split-mailbox", default="tfsplit", help="with --split-transport mailbox: its name")
+    split.add_argument("--split-rdma-dir", default=os.environ.get("TF_SPLIT_RDMA_DIR", ""),
+                       help="with --split-transport rdma: directory with v41rpcd, v41rpc_mailbox.py and libv41rpc "
+                            "(TF_SPLIT_RDMA_DIR)")
+    split.add_argument("--split-rdma-ip", default=os.environ.get("MAC_ROCE_IP", ""),
+                       help="with --split-transport rdma: this machine's RoCE address (default: the other host of "
+                            "the stage's point-to-point subnet; MAC_ROCE_IP)")
+    split.add_argument("--split-rdma-mac", default=os.environ.get("MAC_ROCE_MAC", ""),
+                       help="with --split-transport rdma: this machine's RoCE MAC address (MAC_ROCE_MAC)")
     serve.set_defaults(func=handlers["serve"])
 
     from tensorfold.split import stage as split_stage

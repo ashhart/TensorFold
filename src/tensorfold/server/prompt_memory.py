@@ -369,8 +369,10 @@ class PromptMemory:
         from tensorfold.server.cancellation import Cancellation, PrefillGuard
 
         # real text: a mixture of experts routes it as it routes a prompt (synthetic ids reach fewer experts)
-        text = [int(t) for t in tokens or ()] or [1000 + i for i in range(self.chunk_rows + 64)]
-        probe = (text * (-(-(self.chunk_rows + 64) // len(text))))[:self.chunk_rows + 64]
+        # a model that runs a chunk as pieces (a split) may probe fewer rows: its workspace grows at most in proportion
+        rows = min(self.chunk_rows, int(getattr(getattr(engine, "model", None), "probe_rows", 0) or self.chunk_rows))
+        text = [int(t) for t in tokens or ()] or [1000 + i for i in range(rows + 64)]
+        probe = (text * (-(-(rows + 64) // len(text))))[:rows + 64]
         previous, engine.prefill_guard = engine.prefill_guard, PrefillGuard(Cancellation(), self)
         works = []
         try:
@@ -379,7 +381,7 @@ class PromptMemory:
                 self._probe_base, self.workspace_profiled = int(self.runtime.get_active_memory()), False
                 engine.prefill_prefix(probe, cache=None, cached_tokens=0)
                 works.append(self.observed_work)
-            self.observed_work = max(works)
+            self.observed_work = max(works) * self.chunk_rows // rows
         finally:
             engine.prefill_guard, self._probe_base = previous, None
             self.runtime.clear_cache()

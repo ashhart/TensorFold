@@ -9,29 +9,38 @@ import struct
 VERSION = 1
 PORT = 18640
 
-# a request: magic, version, op, flags, epoch, slot, rows, start, extra, n_commit; then by op
+# a request: magic, version, op, flags, layer, epoch, slot, rows, start, extra, n_commit; then by op
 #   PREFILL  commit path int32[n_commit], residual bf16[rows, H], pending bf16[rows, H]; extra 0 none, 1 last row, 2 all
 #   FORWARD  commit path, parents int32[rows], residual, pending (a decode window; committed by the next request)
 #   FLUSH    commit path only
+#   FETCH    the state of layer ``extra`` for the Mac: a recurrent layer's conv tail bf16 and state fp32, or an
+#            attention layer's keys and values bf16[rows, kv_heads, head_dim] for positions [start, start + rows)
+# ``layer``: the layer the rows enter at (a prompt may enter earlier than decode windows; 0: the stage's first)
 REQUEST = struct.Struct("<4sHHHHIIIIII")
 MAGIC = b"TFS1"
-PREFILL, FORWARD, FLUSH = 1, 2, 3
+#   PUSH     weights for the stage's cache: piece ``start`` of unit ``extra`` (its index in the stage's ``need``);
+#            flags LAST on a unit's last piece
+PREFILL, FORWARD, FLUSH, FETCH, PUSH = 1, 2, 3, 4, 5
 TAPS = 1                      # flags: also return this stage's DFlash2 tap layers, each bf16[rows, H]
+ALL = 2                       # FETCH flags: every layer the Mac fetches at once (``extra`` 0: recurrent, 1: attention)
+LAST = 4                      # PUSH flags: the unit's last piece
+ONE = 8                       # PREFILL/FORWARD flags: one block of rows (a family whose residual is its streams), no pending
+PIECE = 48 << 20              # a pushed piece's bytes (a mailbox's request half is 64 MiB)
 # a reply: status (0 ok), rows, tap layers; then normed bf16[rows, H] and taps x bf16[rows, H]; else an error string
 REPLY = struct.Struct("<III")
 
 
 def request(op: int, *, epoch: int, rows: int, start: int, extra: int, n_commit: int, flags: int = 0,
-            slot: int = 0) -> bytes:
-    return REQUEST.pack(MAGIC, VERSION, op, flags, 0, epoch, slot, rows, start, extra, n_commit)
+            slot: int = 0, layer: int = 0) -> bytes:
+    return REQUEST.pack(MAGIC, VERSION, op, flags, layer, epoch, slot, rows, start, extra, n_commit)
 
 
 def parse_request(buf) -> dict:
-    magic, version, op, flags, _, epoch, slot, rows, start, extra, n_commit = REQUEST.unpack_from(buf, 0)
+    magic, version, op, flags, layer, epoch, slot, rows, start, extra, n_commit = REQUEST.unpack_from(buf, 0)
     if magic != MAGIC or version != VERSION:
         raise ValueError(f"not a split request of version {VERSION} (magic {magic!r}, version {version})")
-    return {"op": op, "flags": flags, "epoch": epoch, "slot": slot, "rows": rows, "start": start, "extra": extra,
-            "n_commit": n_commit}
+    return {"op": op, "flags": flags, "layer": layer, "epoch": epoch, "slot": slot, "rows": rows, "start": start,
+            "extra": extra, "n_commit": n_commit}
 
 
 def error_reply(text: str) -> bytes:

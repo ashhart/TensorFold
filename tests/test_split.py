@@ -133,6 +133,9 @@ class FakeStage:
         pass
 
     def handle(self, head, body):
+        if head["op"] == wire.FETCH:             # a reply in parts, as a stage hands state over
+            return [wire.REPLY.pack(0, head["rows"], 0), np.full(head["rows"], head["extra"], dtype=np.uint16),
+                    np.arange(head["layer"], dtype=np.uint16)]
         rows = head["rows"]
         at = 4 * head["n_commit"] + (4 * head["extra"] if head["op"] == wire.FORWARD else 0)
         x = np.frombuffer(body, dtype=np.uint16, count=rows * H, offset=at)
@@ -197,3 +200,57 @@ def test_an_unknown_family_is_refused_before_weights_move(model, tmp_path):
     with pytest.raises((RuntimeError, ConnectionError)):
         client.open_session("127.0.0.1:%d" % srv.listener.getsockname()[1], model, 2, log=lambda m: None)
     assert not list((tmp_path / "c2" / "units").iterdir())
+
+
+def test_requests_carry_the_layer_their_rows_enter_at():
+    head = wire.parse_request(wire.request(wire.PREFILL, epoch=5, rows=3, start=7, extra=1, n_commit=0, layer=16))
+    assert (head["op"], head["layer"], head["epoch"], head["rows"], head["start"]) == (wire.PREFILL, 16, 5, 3, 7)
+    assert wire.parse_request(wire.request(wire.FORWARD, epoch=1, rows=1, start=0, extra=1, n_commit=0))["layer"] == 0
+
+
+def test_a_stage_reply_in_parts_arrives_whole(model, server):
+    s = client.open_session(server.address_str, model, 2, log=lambda m: None)
+    s.channel.submit([wire.request(wire.FETCH, epoch=s.epoch, rows=4, start=0, extra=9, n_commit=0, layer=3)])
+    reply = s.channel.result(timeout=10)
+    status, n, _ = wire.REPLY.unpack_from(reply, 0)
+    body = np.frombuffer(bytes(reply[wire.REPLY.size:]), dtype=np.uint16)
+    assert status == 0 and n == 4 and body.tolist() == [9, 9, 9, 9, 0, 1, 2]
+
+
+def fake_sysfs(tmp_path):
+    from tensorfold.split import rdma
+
+    port = tmp_path / "ib" / "rocep1s0f1" / "ports" / "1"
+    gids = {0: ("fe80:0000:0000:0000:4ebb:47ff:fe7d:a1a5", "IB/RoCE v1"),
+            1: ("fe80:0000:0000:0000:4ebb:47ff:fe7d:a1a5", "RoCE v2"),
+            2: ("0000:0000:0000:0000:0000:ffff:c0a8:c802", "IB/RoCE v1"),
+            4: ("0000:0000:0000:0000:0000:ffff:c0a8:c802", "RoCE v2")}       # a flap left index 3 empty
+    for d in ("gids", "gid_attrs/types", "gid_attrs/ndevs"):
+        (port / d).mkdir(parents=True)
+    for i in range(6):
+        gid, kind = gids.get(i, ("0000:0000:0000:0000:0000:0000:0000:0000", ""))
+        (port / "gids" / str(i)).write_text(gid + "\n")
+        (port / "gid_attrs/types" / str(i)).write_text(kind + "\n")
+        (port / "gid_attrs/ndevs" / str(i)).write_text("mac-rdma-bond\n")
+    (tmp_path / "net" / "mac-rdma-bond").mkdir(parents=True)
+    (tmp_path / "net" / "mac-rdma-bond" / "address").write_text("4c:bb:47:7d:a1:a5\n")
+    return rdma, tmp_path / "ib", tmp_path / "net"
+
+
+def test_the_stage_finds_its_roce_gid_by_address_not_index(tmp_path):
+    rdma, ib, net = fake_sysfs(tmp_path)
+    a = rdma.roce_address("rocep1s0f1", sysfs=ib, net=net)
+    assert (a.gid_index, a.ip, a.mac, a.netdev) == (4, "192.168.200.2", "4c:bb:47:7d:a1:a5", "mac-rdma-bond")
+    with pytest.raises(ValueError, match="no RoCE v2 IPv4 GID for 10.0.0.1"):
+        rdma.roce_address("rocep1s0f1", "10.0.0.1", sysfs=ib, net=net)
+    with pytest.raises(ValueError, match="no RDMA device"):
+        rdma.roce_address("mlx5_9", sysfs=ib, net=net)
+
+
+def test_the_mac_takes_the_other_end_of_a_point_to_point_subnet():
+    from tensorfold.split.rdma import peer_ip
+
+    assert peer_ip("192.168.200.2", 30) == "192.168.200.1"
+    assert peer_ip("10.0.0.0", 31) == "10.0.0.1"
+    with pytest.raises(ValueError, match="point-to-point"):
+        peer_ip("192.168.200.2", 24)

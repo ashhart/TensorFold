@@ -73,7 +73,8 @@ class Buffers:
         self.gxs = torch.empty((rows, c.nv * gdn_mod.DV // 32), dtype=f32, device=dev)
         self.attn_o = torch.empty((rows, c.heads, c.head_dim), dtype=bf, device=dev)
         self.streams = torch.empty((rows, wide), dtype=bf, device=dev)
-        self.logits = torch.empty((head_rows, w.head.n), dtype=bf, device=dev)
+        # a split stage has no head (the Mac's): no logits rows to hold
+        self.logits = torch.empty((head_rows, w.head.n if w.head is not None else 1), dtype=bf, device=dev)
         world = int(w.meta.get("world", 1))
         self.world = world
         if world > 1:                  # tensor parallel: fp32 partials and their rank-ordered gathers

@@ -412,24 +412,41 @@ def _split_layers(args: argparse.Namespace, model_dir: Path) -> int:
     return int(args.split_layers) if args.split_layers is not None else (layers * 3) // 4
 
 
+# model_type -> the module whose ``attach(family, link, keep)`` routes a family's forwards through a split stage
+_SPLIT_BRIDGES = {"qwen3_5": "tensorfold.split.qwen", "qwen4_exp": "tensorfold.split.flash_next",
+                  "glm5_next": "tensorfold.split.glm"}
+
+
 class _Split:
     """A split's stage session, opened on a thread while this machine loads its own layers."""
 
-    def __init__(self, args: argparse.Namespace, family: Any, model_dir: Path) -> None:
+    def __init__(self, args: argparse.Namespace, family: Any, model_dir: Path, context: int) -> None:
         import threading
 
         from tensorfold.split import client
 
-        if family.model_type != "qwen3_5":
-            raise ValueError(f"--split runs Qwen3.8 dense for now, not {family.title}")
+        if family.model_type not in _SPLIT_BRIDGES:
+            raise ValueError(f"--split runs {', '.join(sorted(_SPLIT_BRIDGES))} for now, not {family.title}")
+        self.bridge = _SPLIT_BRIDGES[family.model_type]
+        self.context = context
+        if args.split_transport == "rdma" and not os.path.isfile(os.path.join(args.split_rdma_dir, "v41rpcd")):
+            raise ValueError("--split-transport rdma: give --split-rdma-dir (or TF_SPLIT_RDMA_DIR), the directory "
+                             "holding v41rpcd")
         self.keep = _split_layers(args, model_dir)
+        self.early = self.keep if args.split_prefill_layers is None else int(args.split_prefill_layers)
+        if not 0 < self.early <= self.keep:
+            raise ValueError(f"--split-prefill-layers takes 1..{self.keep} (--split-layers), not {self.early}")
         self.result: Any = None
         self.error: BaseException | None = None
 
         def run() -> None:
             try:
-                self.result = client.open_session(args.split, model_dir, self.keep, transport=args.split_transport,
-                                                  mailbox=args.split_mailbox, log=lambda s: print(s, flush=True))
+                rdma = {"dir": args.split_rdma_dir, "ip": args.split_rdma_ip, "mac": args.split_rdma_mac,
+                        "socket": "/tmp/tf-split-v41.sock"}
+                self.result = client.open_session(args.split, model_dir, self.early, transport=args.split_transport,
+                                                  mailbox=args.split_mailbox, options={"decode_first": self.keep,
+                                                                                    "context": self.context},
+                                                  log=lambda s: print(s, flush=True), rdma=rdma)
             except BaseException as exc:   # noqa: BLE001 - raised on the main thread by attach()
                 self.error = exc
 
@@ -443,17 +460,19 @@ class _Split:
         if self.error is not None:
             raise RuntimeError(f"--split {self.error}") from self.error
         self.link = client.Link(self.result)
-        qwen.attach(model, self.link, self.keep)
+        import importlib
+
+        importlib.import_module(self.bridge).attach(model, self.link, self.keep)
 
 
-def _open_split(args: argparse.Namespace, family: Any, model_dir: Path) -> _Split:
+def _open_split(args: argparse.Namespace, family: Any, model_dir: Path, context: int) -> _Split:
     if str(args.parallel).strip().lower() != "auto" and _parallel(args.parallel) != 1:
         raise ValueError("--split serves one stream at a time: use --parallel 1")
     args.parallel = "1"
     if args.prompt_cache_gib not in (None, 0):
         raise ValueError("--split keeps no stored prompt prefixes yet: use --prompt-cache-gib 0")
     args.prompt_cache_gib = 0
-    return _Split(args, family, model_dir)
+    return _Split(args, family, model_dir, context)
 
 
 def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: int,
@@ -465,7 +484,7 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
 
     started = time.perf_counter()
     drafter = "" if args.no_drafts else _drafter(family, args.drafter)
-    split = _open_split(args, family, model_dir) if args.split else None
+    split = _open_split(args, family, model_dir, int(context or 131072)) if args.split else None
     parallel = _parallel(args.parallel)
     options: dict[str, Any] = {"lane_kernels": args.lane_kernels, "drafter": drafter,
                                "drafter_bits": args.drafter_bits, "parallel": parallel}
@@ -484,6 +503,12 @@ def _serve_mlx(args: argparse.Namespace, family: Any, model_dir: Path, context: 
     if split is not None:
         split.attach(model)
     engine_kwargs = dict(getattr(family.package, "engine_settings", lambda m: {})(model))
+    if split is not None:
+        from tensorfold.split.qwen import CHUNK_ROWS
+
+        # the split runs a chunk as pipelined pieces, so a chunk's size costs no memory; each chunk ends with the
+        # stage computing its last piece alone, so fewer, longer chunks keep both machines busy
+        engine_kwargs["prefill_steps"] = (CHUNK_ROWS,)
     if required_files:
         print(f"[tensorfold] Nemotron MTP head: "
               f"{'active' if not args.no_drafts and getattr(model, 'mtp', None) is not None else 'inactive'}",

@@ -7,6 +7,8 @@ from typing import Any
 
 import mlx.core as mx
 
+from tensorfold.kernels.glm.flash.v1.launch import widest
+
 # MLX's sigmoid, transcribed (#2105): instantiated on the type the eager op used, with the precise exp.
 _HEADER = r"""
 // f_b / g_b for one output: MLX 0.32.2's one-row qmv_quad at 4 or 8 bits (the caller does the quad_sum)
@@ -278,7 +280,7 @@ _SOURCE = r"""
 """
 
 _kernel_obj: dict[str, Any] = {}
-TY = 32
+_TYS = (32, 16, 8)         # rows of threads a group: an M2's pipeline can cap this kernel at 512 threads, not 1024
 
 
 def metal() -> bool:
@@ -315,14 +317,18 @@ def kda_rows(kda: Any, proj: mx.array, conv: mx.array, state: mx.array) -> tuple
         return kda_rows_ops(kda, proj, conv, state)
     h, d = kda.heads, kda.dim
     fb, gb = kda.f_b, kda.g_b
-    y, st, cs = _kernel()(
-        inputs=[proj, conv, kda.conv_w, fb.weight, fb.scales, fb.biases, gb.weight, gb.scales, gb.biases,
-                kda.A_flat, kda.dt_bias_flat, state, kda.o_norm, kda.lb_array, kda.eps_array],
-        template=[("H", h), ("D", d), ("TAPS", kda.taps), ("TY", TY), ("FB", fb.bits), ("GB", gb.bits)],
-        grid=(32, TY, h), threadgroup=(32, TY, 1),
-        output_shapes=[(rows, h * d), tuple(state.shape), tuple(conv.shape)],
-        output_dtypes=[mx.bfloat16, mx.float32, mx.bfloat16])
-    return y, st, cs
+
+    def launch(ty: int) -> tuple[mx.array, mx.array, mx.array]:
+        return tuple(_kernel()(
+            inputs=[proj, conv, kda.conv_w, fb.weight, fb.scales, fb.biases, gb.weight, gb.scales, gb.biases,
+                    kda.A_flat, kda.dt_bias_flat, state, kda.o_norm, kda.lb_array, kda.eps_array],
+            template=[("H", h), ("D", d), ("TAPS", kda.taps), ("TY", ty), ("FB", fb.bits), ("GB", gb.bits)],
+            grid=(32, ty, h), threadgroup=(32, ty, 1),
+            output_shapes=[(rows, h * d), tuple(state.shape), tuple(conv.shape)],
+            output_dtypes=[mx.bfloat16, mx.float32, mx.bfloat16]))
+
+    ty, out = widest(("kda", h, d, kda.taps, fb.bits, gb.bits), tuple(t for t in _TYS if d % t == 0), launch)
+    return out if ty else kda_rows_ops(kda, proj, conv, state)
 
 
 def kda_rows_ops(kda: Any, proj: mx.array, conv: mx.array, state: mx.array) -> tuple[mx.array, mx.array, mx.array]:

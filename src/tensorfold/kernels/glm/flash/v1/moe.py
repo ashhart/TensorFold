@@ -10,6 +10,7 @@ from tensorfold.kernels import inputs
 from tensorfold.kernels.glm.flash.v1 import kernels as K
 from tensorfold.kernels.glm.flash.v1 import widths as W
 from tensorfold.kernels.glm.flash.v1.fused import MAX_ROWS, _kernel
+from tensorfold.kernels.glm.flash.v1.launch import widest
 
 ROUTER_TG = 1024
 SPLIT_SHARED = 1         # the shared expert in kernels of its own, beside the router (moe_rows)
@@ -477,11 +478,18 @@ def router_rows(x: mx.array, moe: Any) -> mx.array:
     experts = int(moe.router.shape[1])
     if ROUTER_TG:
         kernel = _kernel("router_tg", _ROUTER_TG, ["X", "RP"], ["OUT"])
-        return kernel(inputs=[x, moe.router_packed],
-                      template=[("K", dims), ("NE", experts), ("RR", rows), ("C", 8 if rows <= 4 else 4),
-                                ("NT", ROUTER_TG)],
-                      grid=(ROUTER_TG * experts // 16, 1, 1), threadgroup=(ROUTER_TG, 1, 1),
-                      output_shapes=[(rows, experts)], output_dtypes=[mx.float32])[0]
+        chunk = 8 if rows <= 4 else 4
+
+        def launch(nt: int) -> mx.array:
+            return kernel(inputs=[x, moe.router_packed],
+                          template=[("K", dims), ("NE", experts), ("RR", rows), ("C", chunk), ("NT", nt)],
+                          grid=(nt * experts // 16, 1, 1), threadgroup=(nt, 1, 1),
+                          output_shapes=[(rows, experts)], output_dtypes=[mx.float32])[0]
+
+        nt, out = widest(("router_tg", dims, experts, rows, chunk),
+                         tuple(n for n in (ROUTER_TG, 512, 256) if n <= ROUTER_TG), launch)
+        if nt:
+            return out
     kernel = _kernel("router", _ROUTER, ["X", "RP"], ["OUT"])
     return kernel(inputs=[x, moe.router_packed], template=[("K", dims), ("NE", experts), ("RR", rows), ("U", 8)],
                   grid=(32 * experts // 16, 1, 1), threadgroup=(32, 1, 1),

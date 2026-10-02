@@ -369,12 +369,23 @@ def prefetch_ngrams(model: Qwen4Exp) -> None:
 
 
 def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False,
-         ssd_experts: float | None = None) -> tuple[Qwen4Exp, Any]:
+         ssd_experts: float | None = None, keep_layers: int | None = None) -> tuple[Qwen4Exp, Any]:
+    """``keep_layers``: a split's Mac half, the first ``keep_layers`` layers (their weights only are read)."""
+
     from tensorfold.families.tokenizer import load_tokenizer
 
     on_host = ngrams_on_host(model_dir, ple_on_ssd)
     config = json.loads((Path(model_dir) / "config.json").read_text())
     cfg = Config.from_dict(config)
+    if keep_layers is not None:
+        from dataclasses import replace
+
+        if not 0 < keep_layers < cfg.num_hidden_layers:
+            raise ValueError(f"--split-layers {keep_layers}: the Mac keeps 1..{cfg.num_hidden_layers - 1} layers")
+        if any(i > keep_layers for i in cfg.ple_layer_ids):           # one-indexed
+            raise ValueError(f"the n-gram (PLE) layers {cfg.ple_layer_ids} stay on the Mac: keep at least "
+                             f"{max(cfg.ple_layer_ids)} layers")
+        cfg = replace(cfg, num_hidden_layers=keep_layers, layer_types=cfg.layer_types[:keep_layers])
     model = Qwen4Exp(cfg)
     weights: dict[str, mx.array] = {}
     # Load on the CPU stream before GPU use so file reads cannot stall a GPU command buffer past its watchdog.
@@ -382,6 +393,13 @@ def load(model_dir: Path, *, lazy: bool = False, ple_on_ssd: bool = False,
         weights.update(mx.load(str(path), stream=mx.cpu))
     table_scales: dict[str, float] = {}
     weights, extras = sanitize(weights, table_scales)
+    if keep_layers is not None:                     # the stage's layers are never read here (mx.load maps lazily)
+        import re
+
+        layer = re.compile(r"(?:^|\.)layers\.(\d+)\.")
+        weights = {k: v for k, v in weights.items()
+                   if k.startswith("mtp") or not (m := layer.search(k)) or int(m.group(1)) < keep_layers}
+        extras = {k: v for k, v in extras.items() if int(k.split(".")[2]) < keep_layers}
     quantized_paths = {k[:-len(".scales")] for k in weights if k.endswith(".scales")}
     if ssd_experts:
         from tensorfold.families.qwen4_exp import stream

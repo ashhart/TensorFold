@@ -142,8 +142,9 @@ def expert_bytes(model_dir: Path) -> int:
 
 
 def load(model_dir: Path, *, mtp_drafts: int | None = None, ssd_experts: float | None = None,
-         vision: bool = False, vision_urls: bool = False, **_: Any) -> tuple[Any, Any]:
-    """The MLX engine; ``mtp_drafts`` caps the MTP drafts a round (0: none); ``ssd_experts``: the expert pool's GiB."""
+         vision: bool = False, vision_urls: bool = False, split_layers: int | None = None, **_: Any) -> tuple[Any, Any]:
+    """The MLX engine; ``mtp_drafts`` caps the MTP drafts a round (0: none); ``ssd_experts``: the expert pool's GiB;
+    ``split_layers``: the Mac keeps layers [0, split_layers) and a split stage runs the rest (``tensorfold.split``)."""
 
     import mlx.core as mx
 
@@ -155,7 +156,8 @@ def load(model_dir: Path, *, mtp_drafts: int | None = None, ssd_experts: float |
         limit = int(info.get("max_recommended_working_set_size", 0))
         if limit:
             mx.set_wired_limit(limit)
-    family, tokenizer = load_runtime(Path(model_dir), drafts=mtp_drafts, ssd_experts=ssd_experts)
+    split = {} if split_layers is None else {"keep_layers": int(split_layers)}
+    family, tokenizer = load_runtime(Path(model_dir), drafts=mtp_drafts, ssd_experts=ssd_experts, **split)
     if vision:
         from tensorfold.vision.glm_mlx import GLMVisionFrontend
 

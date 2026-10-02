@@ -192,6 +192,7 @@ def test_tensor_unit_chips_take_the_ops_prompt_path(gpu, tmp_path, monkeypatch):
         with monkeypatch.context() as m:
             m.setattr(HCK, "hc_step", lambda *a: ("fused", a[-1]))
             m.setattr(backbone, "hc_fused_ok", lambda: True)
+            m.setattr(backbone, "hc_prompt_fused_ok", lambda: True)
             layer = backbone.layers[1]
             x = mx.ones((3, 4, backbone.args.hidden_size), dtype=mx.bfloat16)
             out = backbone.boundary(x, None, layer.attn_hc, layer.in_norm, decode)

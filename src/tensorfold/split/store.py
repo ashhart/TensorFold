@@ -44,18 +44,17 @@ class Store:
     def receive(self, unit: dict, read) -> None:
         """Write a unit from ``read(n) -> bytes`` (its tensors' bytes in listed order), atomically."""
 
-        final = self.path(unit["key"])
-        tmp = final.with_name(final.name + f".{os.getpid()}.part")
-        left = int(unit["nbytes"])
-        with open(tmp, "wb") as f:
-            f.write(_header(unit["tensors"]))
-            while left:
-                chunk = read(min(left, 16 << 20))
-                if not chunk:
-                    raise ConnectionError(f"the stream ended {left} bytes before unit {unit['label']} did")
-                f.write(chunk)
-                left -= len(chunk)
-        tmp.replace(final)
+        w = self.writer(unit)
+        while w.left:
+            chunk = read(min(w.left, 16 << 20))
+            if not chunk:
+                w.abort()
+                raise ConnectionError(f"the stream ended {w.left} bytes before unit {unit['label']} did")
+            w.write(chunk)
+        w.finish()
+
+    def writer(self, unit: dict) -> "UnitWriter":
+        return UnitWriter(self.path(unit["key"]), unit)
 
     def stage(self, config: dict, units: list[dict]) -> Path:
         """A directory the family loader reads: config.json plus links to the units' files."""
@@ -79,3 +78,33 @@ class Store:
         shutil.rmtree(where, ignore_errors=True)
         tmp.replace(where)
         return where
+
+
+class UnitWriter:
+    """One unit's file, written in pieces as they arrive and renamed into place once whole."""
+
+    def __init__(self, final: Path, unit: dict) -> None:
+        self.final, self.label = final, unit["label"]
+        self.tmp = final.with_name(final.name + f".{os.getpid()}.part")
+        self.left = int(unit["nbytes"])
+        self.f = open(self.tmp, "wb")
+        self.f.write(_header(unit["tensors"]))
+
+    def write(self, chunk) -> None:
+        n = len(chunk)
+        if n > self.left:
+            self.abort()
+            raise ValueError(f"unit {self.label}: {n - self.left} bytes more than it holds")
+        self.f.write(chunk)
+        self.left -= n
+
+    def finish(self) -> None:
+        if self.left:
+            self.abort()
+            raise ValueError(f"unit {self.label}: {self.left} bytes missing")
+        self.f.close()
+        self.tmp.replace(self.final)
+
+    def abort(self) -> None:
+        self.f.close()
+        self.tmp.unlink(missing_ok=True)

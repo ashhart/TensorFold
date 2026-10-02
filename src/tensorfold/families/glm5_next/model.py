@@ -87,8 +87,35 @@ class GLM5:
             dims = int(self.args.hidden_size)
             ok = K.metal() and all(layer.attn_hc is not None and HCK.hc_fits(layer.attn_hc, dims)
                                    and HCK.hc_fits(layer.ffn_hc, dims) for layer in self.layers)
-            self._hc_ok = ok
+            prompt = ok
+            if ok and C.act() == mx.bfloat16:
+                ok = self._hc_kernels_launch(dims, False)
+                prompt = ok and self._hc_kernels_launch(dims, True)
+            self._hc_ok, self._hc_prompt_ok = ok, prompt
         return ok and K.metal() and C.act() == mx.bfloat16          # the fused HC step is bf16-only
+
+    def hc_prompt_fused_ok(self) -> bool:
+        """The fused boundary's prompt variant launches here too (``hc_fused_ok`` probes both)."""
+
+        return self.hc_fused_ok() and self.__dict__.get("_hc_prompt_ok", False)
+
+    def _hc_kernels_launch(self, dims: int, prompt: bool) -> bool:
+        """Whether this GPU runs the fused boundary's 1024-thread groups (an M2's pipelines can cap them at 896; the
+        prompt variant, with its scaled streams out, can fail where the decode one launches)."""
+
+        hc = self.layers[0].attn_hc
+        x = mx.zeros((1, int(self.args.hc_mult), dims), dtype=mx.bfloat16)
+        pending = (mx.zeros((1, dims), dtype=mx.bfloat16), mx.zeros((1, 4), mx.float32),
+                   mx.zeros((1, 4, 4), mx.float32))
+        try:
+            mx.eval(*[a for a in HCK.hc_step(x, pending, hc, self.layers[0].in_norm, self.args.rms_norm_eps, prompt)
+                      if a is not None])
+            return True
+        except (RuntimeError, ValueError) as exc:
+            kind = "prompt" if prompt else "decode"
+            print(f"[glm5] the fused hyper-connection boundary ({kind}) does not launch on this GPU ({exc}); "
+                  f"{kind} boundaries run through MLX ops", flush=True)
+            return False
 
     def embed_tokens(self, tokens: mx.array) -> mx.array:
         e = self.embed
@@ -137,7 +164,9 @@ class GLM5:
             pending = (layer.mlp(normed, decode), post, comb)
             if decode and C.EVAL_EVERY and (i + 1) % C.EVAL_EVERY == 0 and i + 1 < len(self.layers):
                 mx.async_eval(x, *pending)
-        self.last_normed = self.final_norm(self.boundary(x, pending, None, None, decode)[0])
+        # the streams after the last write-back (a split's Mac half sends these on), then the rows the heads read
+        self.last_streams = self.boundary(x, pending, None, None, decode)[0]
+        self.last_normed = self.final_norm(self.last_streams)
         return self.last_normed[None]
 
     def boundary(self, x: mx.array, pending: Any, hc: HC | None, norm: mx.array | None,
@@ -145,7 +174,7 @@ class GLM5:
         """The pending block's write-back, then the next block's split and RMSNorm (no ``hc``: the write-back only)."""
 
         prompt_ok = PK.proven() and (pending is None or pending[0].dtype == mx.bfloat16)
-        if "hc" in C.FUSED and self.hc_fused_ok() and (decode or prompt_ok):
+        if "hc" in C.FUSED and self.hc_fused_ok() and (decode or (prompt_ok and self.hc_prompt_fused_ok())):
             # the boundary in fused kernels, each with the row-by-row path's (or, on M1-M4, a bf16 prompt chunk's) bits
             return HCK.hc_step(x, pending, hc, norm, self.args.rms_norm_eps, not decode)
         if pending is not None:
@@ -195,8 +224,8 @@ class GLM5:
             together = getattr(layer.mlp, "pass_chunks", None)
             ys = together([m[0] for m in mixes], queue) if together else [layer.mlp(m[0], False) for m in mixes]
             pend = [(y, post, comb) for y, (_, post, comb) in zip(ys, mixes)]
-        self.last_normed = mx.concatenate([self.final_norm(self.boundary(x, p, None, None, False)[0])
-                                           for x, p in zip(xs, pend)])
+        self.last_streams = mx.concatenate([self.boundary(x, p, None, None, False)[0] for x, p in zip(xs, pend)])
+        self.last_normed = self.final_norm(self.last_streams)
         return self.last_normed[None]
 
     def head(self, hidden: mx.array) -> mx.array:

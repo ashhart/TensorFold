@@ -167,8 +167,6 @@ def stage_units(model_dir: Path, first: int, last: int, layers: int) -> list[Uni
     missing = [i for i in range(first, last) if f"layer.{i}" not in by_label]
     if missing:
         raise ValueError(f"the checkpoint has no tensors for layers {missing[:8]}")
-    if last == layers and "final" not in by_label:
-        raise ValueError("the checkpoint has no final norm (model.norm.weight)")
     order = [f"layer.{i}" for i in range(first, last)] + (["final"] if "final" in by_label else [])
     return [by_label[label] for label in order]
 

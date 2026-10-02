@@ -112,3 +112,10 @@ class MailboxService:
         close = getattr(self.box, "close", None)
         if close:
             close()
+        else:                                       # the module's ServiceBox has no close: its socket and map
+            for name in ("sock", "map"):
+                part = getattr(self.box, name, None)
+                try:
+                    part.close() if part is not None else None
+                except (OSError, BufferError):
+                    pass
